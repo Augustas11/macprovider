@@ -8,6 +8,8 @@
 //                    use --module-census / --census for dispatch counts)
 //   --oracle F.json  teacher-forced top-16 logit diffs vs a glm-parity oracle
 //                    for all-fused, hyper-connection op path and all-op configs
+//   --gpu-profile    GPU busy vs wall time per step; with MLX_MAX_OPS_PER_BUFFER=0,
+//                    GPU time, bound bytes and bandwidth per kernel and family
 //   --census         compute dispatches per decode step by kernel name
 //   --module-census  dispatches per module (MoE, dense FFN, KDA, DSA, head)
 //   --*-exact        fused vs op path exactness on the loaded weights
@@ -38,7 +40,7 @@ let profile = args.contains("--profile")
 let syncEach = args.contains("--sync")
 
 Memory.cacheLimit = 4096 << 20
-if CommandLine.arguments.contains("--census") || CommandLine.arguments.contains("--module-census") { DispatchCensus.install() }
+if ["--census", "--module-census", "--gpu-profile"].contains(where: CommandLine.arguments.contains) { DispatchCensus.install() }
 
 let configData = try Data(contentsOf: dir.appendingPathComponent("config.json"))
 let base = try JSONDecoder().decode(BaseConfiguration.self, from: configData)
@@ -423,6 +425,32 @@ if args.contains("--module-census") {
         print("== \(name)")
         DispatchCensus.report(steps: 1)
     }
+    exit(0)
+}
+if args.contains("--gpu-profile") {
+    // Per-kernel GPU time: run with MLX_MAX_OPS_PER_BUFFER=0 so each command
+    // buffer holds one kernel. Without it, the per-step GPU busy time and the
+    // command-buffer count still show how much of a step the GPU is idle.
+    var tok = token
+    for _ in 0 ..< 3 {
+        tok = argMax(model(tok.reshaped(1, 1), cache: cache)[0, -1, 0...], axis: -1)
+        eval(tok)
+    }
+    let steps = opt("--profile-steps", 20)
+    DispatchCensus.reset()
+    DispatchCensus.enabled = true
+    let t0 = Date()
+    for _ in 0 ..< steps {
+        tok = argMax(model(tok.reshaped(1, 1), cache: cache)[0, -1, 0...], axis: -1)
+        eval(tok)
+    }
+    let wall = Date().timeIntervalSince(t0) / Double(steps)
+    DispatchCensus.enabled = false
+    DispatchCensus.group.wait()
+    let busy = DispatchCensus.busyPerStep(steps: steps)
+    let ops = ProcessInfo.processInfo.environment["MLX_MAX_OPS_PER_BUFFER"] ?? "default"
+    print(String(format: "gpu-profile ops_per_buffer=%@ wall_ms=%.2f gpu_busy_ms=%.2f idle_ms=%.2f cmdbufs/step=%.1f dispatches/step=%.1f", ops, wall * 1e3, busy * 1e3, (wall - busy) * 1e3, Double(DispatchCensus.intervals.count) / Double(steps), Double(DispatchCensus.counts.values.reduce(0, +)) / Double(steps)))
+    if ops == "0" { DispatchCensus.gpuReport(steps: steps) }
     exit(0)
 }
 if args.contains("--census") {

@@ -7,6 +7,8 @@
 #
 # Env overrides: POC, BENCH, LM, MODEL, ORACLE, OUT.
 set -euo pipefail
+# swift test needs Xcode's XCTest/Testing frameworks, not CommandLineTools.
+export DEVELOPER_DIR=${DEVELOPER_DIR:-$HOME/Applications/Xcode.app/Contents/Developer}
 POC=${POC:-$HOME/lab-glm53/t3/poc}
 BENCH=${BENCH:-$POC/scripts/lab/cb-studio/glm53-bench/.build/release/GLMBench}
 LM=${LM:-$HOME/lab-glm53/t3/lm}
