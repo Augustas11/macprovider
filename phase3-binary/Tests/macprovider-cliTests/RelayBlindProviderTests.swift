@@ -6,6 +6,67 @@ import MacProviderCore
 @testable import macprovider_cli
 
 final class RelayBlindProviderTests: XCTestCase {
+    func testEncryptedMediaFailsWithoutDisclosingContent() throws {
+        let root = temporaryStateDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = "mlx-community/Qwen2-VL-2B-Instruct-4bit"
+        let session = "image-rejection-session"
+        let keys = try RelayBlindKeyManager(directory: root, models: [model])
+        let runtime = RelayBlindProviderRuntime(
+            keyManager: keys,
+            journal: try RelayBlindExecutionJournal(directory: root.appendingPathComponent("journal")),
+            assignedSession: session
+        )
+        let image: [String: Any] = ["type": "image_url", "image_url": ["url": "data:image/png;base64,cHJpdmF0ZQ=="]]
+        let contents: [[[String: Any]]] = [[image], [["type": "text", "text": "private-question"], image]]
+        for (index, content) in contents.enumerated() {
+            let message = try makeInferenceMessage(
+                keys: keys, model: model, session: session,
+                requestID: "image-rejection-\(index)", inputCap: 5, outputCap: 4,
+                extra: ["messages": [["role": "user", "content": content]]]
+            )
+            XCTAssertThrowsError(try open(runtime, message: message)) { error in
+                let rejection = error as? RelayBlindProviderRejection
+                XCTAssertEqual(rejection?.error, .providerUnsupported)
+                XCTAssertFalse(String(describing: error).contains("private-question"))
+                XCTAssertFalse(String(describing: error).contains("cHJpdmF0ZQ=="))
+            }
+        }
+    }
+
+    func testEncryptedNonAutoToolSelectionFailsBeforeGenerationWithoutDisclosure() throws {
+        let root = temporaryStateDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = ToolSelectionPolicy.supportedNativeModel
+        let session = "tool-selection-session"
+        let keys = try RelayBlindKeyManager(directory: root, models: [model])
+        let runtime = RelayBlindProviderRuntime(
+            keyManager: keys,
+            journal: try RelayBlindExecutionJournal(directory: root.appendingPathComponent("journal")),
+            assignedSession: session
+        )
+        let choices: [Any] = ["required", "none", ["type": "function", "function": ["name": "private_function"]]]
+        for (index, choice) in choices.enumerated() {
+            let message = try makeInferenceMessage(
+                keys: keys, model: model, session: session,
+                requestID: "tool-selection-\(index)", inputCap: 5, outputCap: 4,
+                extra: ["tool_choice": choice]
+            )
+            XCTAssertThrowsError(try open(runtime, message: message)) { error in
+                let rejection = error as? RelayBlindProviderRejection
+                XCTAssertEqual(rejection?.error, .providerUnsupported)
+                XCTAssertEqual(rejection?.error.code, "relay_blind_provider_unsupported")
+                XCTAssertFalse(String(describing: error).contains("private_function"))
+            }
+        }
+        let auto = try makeInferenceMessage(
+            keys: keys, model: model, session: session,
+            requestID: "tool-selection-auto", inputCap: 5, outputCap: 4,
+            extra: ["tool_choice": "auto"]
+        )
+        XCTAssertNoThrow(try open(runtime, message: auto))
+    }
+
     func testCatalogAndArtifactNamesDecryptWithoutRewritingTheBoundModel() throws {
         let root = temporaryStateDirectory()
         defer { try? FileManager.default.removeItem(at: root) }

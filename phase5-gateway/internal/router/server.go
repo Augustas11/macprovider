@@ -270,7 +270,7 @@ func (s *Server) Handler() http.Handler {
 	} else {
 		mux.Handle("/v1/messages", s.withCORS(http.MethodPost, http.HandlerFunc(s.handleRelayBlindMessagesDisabled)))
 	}
-	mux.Handle("/v1/sticky", s.withCORS(http.MethodDelete, http.HandlerFunc(s.handleStickyDelete)))
+	mux.Handle("/v1/sticky", s.withCORSMethods([]string{http.MethodGet, http.MethodDelete}, http.HandlerFunc(s.handleStickyDelete)))
 	mux.Handle("/v1/status", s.withCORS(http.MethodGet, http.HandlerFunc(s.handleStatus)))
 	mux.Handle("/v1/rate-card", s.withCORS(http.MethodGet, http.HandlerFunc(s.handlePublicRateCard)))
 	mux.Handle("/v1/rate-card.sig", s.withCORS(http.MethodGet, http.HandlerFunc(s.handlePublicRateCardSig)))
@@ -879,7 +879,7 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStickyDelete(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
+	if r.Method != http.MethodGet && r.Method != http.MethodDelete {
 		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method_not_allowed", "Method not allowed")
 		return
 	}
@@ -888,7 +888,7 @@ func (s *Server) handleStickyDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	accountID := authn.AccountID
-	upReq, err := http.NewRequestWithContext(r.Context(), http.MethodDelete, strings.TrimRight(s.cfg.Coordinator.OperatorURL, "/")+"/internal/sticky?account_id="+url.QueryEscape(accountID), nil)
+	upReq, err := http.NewRequestWithContext(r.Context(), r.Method, strings.TrimRight(s.cfg.Coordinator.OperatorURL, "/")+"/internal/sticky?account_id="+url.QueryEscape(accountID), nil)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "coordinator_unavailable", "Coordinator unavailable")
 		return
@@ -918,7 +918,7 @@ func (s *Server) handleStickyDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "api_error", "coordinator_sticky_error", "Coordinator sticky purge error")
 		return
 	}
-	writeJSON(w, http.StatusOK, body)
+	writeJSON(w, resp.StatusCode, body)
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -1031,7 +1031,8 @@ type statusResponse struct {
 	// ServingMaxContextTokens maps a model id to the largest context a
 	// serving provider grants (#1570): ready or busy, serving-eligible, full
 	// or not. The OpenRouter document advertises it. Not serialized.
-	ServingMaxContextTokens map[string]int `json:"-"`
+	ServingMaxContextTokens map[string]int      `json:"-"`
+	ServingToolChoiceModes  map[string][]string `json:"-"`
 }
 
 type coordinatorStatus struct {
@@ -1067,6 +1068,7 @@ type statusModel struct {
 	// which would leak provider count fingerprints). The field is
 	// OMITTED when the union is empty.
 	SupportedModels []string `json:"supported_models,omitempty"`
+	ToolChoiceModes []string `json:"tool_choice_modes,omitempty"`
 }
 
 // authStateBearerlessDuplicate is the wire value the coordinator emits for
@@ -1084,21 +1086,30 @@ const (
 	authStateMintFailed = "mint_failed"
 )
 
+type toolSelectionCapability struct {
+	ModelID    string   `json:"model_id"`
+	Runtime    string   `json:"runtime"`
+	Modes      []string `json:"modes"`
+	Validation string   `json:"validation"`
+}
+
 type poolzProviderRow struct {
-	ProviderID               string   `json:"provider_id"`
-	AssignedID               string   `json:"assigned_id"`
-	EndpointURL              string   `json:"endpoint_url"`
-	Hostname                 string   `json:"hostname"`
-	ModelID                  string   `json:"model_id"`
-	State                    string   `json:"state"`
-	SlotsFree                int      `json:"slots_free"`
-	SlotsTotal               int      `json:"slots_total"`
-	MaxContextTokens         int      `json:"max_context_tokens"`
-	MemoryBytes              int64    `json:"memory_bytes"`
-	CPUCount                 int      `json:"cpu_count"`
-	OperatorIdentity         string   `json:"operator_identity"`
-	SupportedModels          []string `json:"supported_models,omitempty"`
-	PublishesSupportedModels bool     `json:"publishes_supported_models,omitempty"`
+	RuntimeSource             string                    `json:"runtime_source,omitempty"`
+	ToolSelectionCapabilities []toolSelectionCapability `json:"tool_selection_capabilities,omitempty"`
+	ProviderID                string                    `json:"provider_id"`
+	AssignedID                string                    `json:"assigned_id"`
+	EndpointURL               string                    `json:"endpoint_url"`
+	Hostname                  string                    `json:"hostname"`
+	ModelID                   string                    `json:"model_id"`
+	State                     string                    `json:"state"`
+	SlotsFree                 int                       `json:"slots_free"`
+	SlotsTotal                int                       `json:"slots_total"`
+	MaxContextTokens          int                       `json:"max_context_tokens"`
+	MemoryBytes               int64                     `json:"memory_bytes"`
+	CPUCount                  int                       `json:"cpu_count"`
+	OperatorIdentity          string                    `json:"operator_identity"`
+	SupportedModels           []string                  `json:"supported_models,omitempty"`
+	PublishesSupportedModels  bool                      `json:"publishes_supported_models,omitempty"`
 	// routing_eligible is coordinator-computed from pool.Provider.RoutingEligible().
 	// Omitted on legacy coordinators — gateway falls back to auth_state exclusion.
 	RoutingEligible *bool `json:"routing_eligible,omitempty"`
@@ -1181,6 +1192,12 @@ func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) sta
 		Coordinator: coordinatorStatus{Status: "up", CheckedAt: now.Format(time.RFC3339)},
 	}
 	for _, p := range poolz.Pool {
+		if poolzProviderServesContext(p) && p.ModelID != "" {
+			if out.ServingToolChoiceModes == nil {
+				out.ServingToolChoiceModes = map[string][]string{}
+			}
+			out.ServingToolChoiceModes[p.ModelID] = mergeToolChoiceModes(out.ServingToolChoiceModes[p.ModelID], p)
+		}
 		// #1570: the OpenRouter document's context comes from serving
 		// providers, including one that is busy with no free slot (which
 		// routing_eligible excludes).
@@ -1274,6 +1291,7 @@ func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) sta
 		models[modelID] = m
 	}
 	for _, model := range models {
+		model.ToolChoiceModes = out.ServingToolChoiceModes[model.ID]
 		model.Degraded = computeDegraded(stats[model.ID])
 		model.Available, model.Availability = computeAvailability(stats[model.ID])
 		out.Models = append(out.Models, model)
@@ -1841,7 +1859,7 @@ func isStreamingModeResponseHeader(key string) bool {
 }
 
 // buyerVisibleStreamingModeHeader returns the value only if it is byte-exactly
-// one of AC-45's three canonical streaming-mode values, else "" (drop). The
+// one of AC-45's canonical streaming-mode values, else "" (drop). The
 // match is strict — no trimming or case-folding — because SPEC-006 §5.4
 // mandates dropping any value outside the closed enum rather than normalizing
 // it, and the coordinator emits the bare constants verbatim, so a value with
@@ -1851,7 +1869,7 @@ func isStreamingModeResponseHeader(key string) bool {
 // injection should the upstream ever be compromised.
 func buyerVisibleStreamingModeHeader(raw string) string {
 	switch raw {
-	case "incremental", "buffered_kill_switch", "buffered_provider_downgrade":
+	case "incremental", "buffered_kill_switch", "buffered_provider_downgrade", "buffered_tool_selection":
 		return raw
 	}
 	return ""

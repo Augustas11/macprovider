@@ -1,4 +1,5 @@
 import Foundation
+import MacProviderCore
 
 enum ToolCallParser {
     static let SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP = 1_048_576
@@ -55,6 +56,53 @@ enum ToolCallParser {
             }
             return (nilIfBlank(rawOutput), [])
         }
+    }
+
+    /// Guaranteed modes deliberately exclude the auto-mode recovery and XML
+    /// coercion paths. Every byte outside a closed JSON envelope must be blank.
+    static func parseGuaranteedToolCalls(_ rawOutput: String) throws -> [ToolCall] {
+        guard rawOutput.utf8.count <= SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else {
+            throw ToolSelectionPolicy.outputError("Tool output exceeded byte limit")
+        }
+        var remainder = rawOutput[...]
+        var calls: [ToolCall] = []
+        while !remainder.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            remainder = remainder.drop(while: { $0.isWhitespace })
+            guard remainder.hasPrefix("<tool_call>") else {
+                throw ToolSelectionPolicy.outputError("Tool output requires complete closed JSON envelopes")
+            }
+            let bodyAndRest = remainder.dropFirst("<tool_call>".count).drop(while: { $0.isWhitespace })
+            // Locate the complete JSON value before interpreting delimiters:
+            // marker text inside an argument string remains ordinary data.
+            guard let body = firstCompleteJSONObject(in: String(bodyAndRest)) else {
+                throw ToolSelectionPolicy.outputError("Tool output requires a complete JSON object")
+            }
+            let tail = bodyAndRest.dropFirst(body.count).drop(while: { $0.isWhitespace })
+            guard tail.hasPrefix("</tool_call>") else {
+                throw ToolSelectionPolicy.outputError("Tool output requires complete closed JSON envelopes")
+            }
+            do {
+                guard case .object(let object) = try StrictJSONParser.parse(body, maxDepth: JSONSchemaValidator.maxDepth + 1),
+                      Set(object.keys) == Set(["name", "arguments"]),
+                      case .string(let name)? = object["name"], !name.isEmpty,
+                      case .object(let arguments)? = object["arguments"],
+                      ToolSelectionPolicy.supportsNumericDomain(.object(arguments)) else {
+                    throw ToolSelectionPolicy.outputError("Malformed tool JSON envelope")
+                }
+                calls.append(ToolCall(
+                    id: "call_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(),
+                    functionName: name,
+                    arguments: try JSONValue.object(arguments).deterministicJSONString()
+                ))
+            } catch {
+                throw ToolSelectionPolicy.outputError("Malformed tool JSON envelope")
+            }
+            guard calls.count <= ToolSelectionPolicy.maxCalls else {
+                throw ToolSelectionPolicy.outputError("Too many tool calls")
+            }
+            remainder = tail.dropFirst("</tool_call>".count)
+        }
+        return calls
     }
 
     private static func recoverQwenUnclosedToolCall(

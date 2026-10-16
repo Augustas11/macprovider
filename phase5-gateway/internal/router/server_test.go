@@ -2540,9 +2540,9 @@ func TestStreamingReceiptHeaderStripped(t *testing.T) {
 // buyer-visible X-MacProvider-Streaming-Mode diagnostic — set by the
 // coordinator on streaming 200 responses — must survive the gateway's
 // blanket X-MacProvider-* strip and reach the buyer, while sibling
-// X-MacProvider-* headers stay stripped. Covers all three canonical values.
+// X-MacProvider-* headers stay stripped. Covers all canonical values.
 func TestStreamingModeHeaderForwarded(t *testing.T) {
-	for _, mode := range []string{"incremental", "buffered_kill_switch", "buffered_provider_downgrade"} {
+	for _, mode := range []string{"incremental", "buffered_kill_switch", "buffered_provider_downgrade", "buffered_tool_selection"} {
 		t.Run(mode, func(t *testing.T) {
 			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 				payload := `data: {"id":"chatcmpl","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"delta":{"content":"ok"}}]}`
@@ -4165,6 +4165,54 @@ func TestStickyDeleteRequiresBearerAndAuthorizesCoordinator(t *testing.T) {
 	}
 	if got := captured.Header.Get("Authorization"); got != "Bearer service-token" {
 		t.Fatalf("coordinator authorization = %q", got)
+	}
+}
+
+func TestStickyDeletePreservesPendingPurgeStatus(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return responseWithBody(http.StatusAccepted, http.Header{"Content-Type": []string{"application/json"}}, `{"purged":false,"pending":true,"pending_acknowledgements":1,"entries":0}`), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.OperatorURL = "http://operator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_sticky_pending")
+	req := httptest.NewRequest(http.MethodDelete, "/v1/sticky", nil)
+	req.Header.Set("Authorization", "Bearer "+fullKey)
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	if resp.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), `"pending":true`) || !strings.Contains(resp.Body.String(), `"purged":false`) {
+		t.Fatalf("pending status lost: %s", resp.Body.String())
+	}
+}
+
+func TestStickyGetReportsPendingWithoutStartingPurge(t *testing.T) {
+	var captured *http.Request
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		captured = r
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"purged":false,"pending":true,"pending_acknowledgements":1}`), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.OperatorURL = "http://operator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_sticky_status")
+	req := httptest.NewRequest(http.MethodGet, "/v1/sticky?account_id=acct_attacker", nil)
+	req.Header.Set("Authorization", "Bearer "+fullKey)
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if captured == nil || captured.Method != http.MethodGet {
+		t.Fatalf("coordinator request = %#v, want GET", captured)
+	}
+	if got := captured.URL.Query().Get("account_id"); got != "acct_sticky_status" {
+		t.Fatalf("account_id = %q, want authenticated account", got)
+	}
+	if !strings.Contains(resp.Body.String(), `"pending":true`) {
+		t.Fatalf("pending status lost: %s", resp.Body.String())
 	}
 }
 

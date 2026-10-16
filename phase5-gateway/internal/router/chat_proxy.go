@@ -685,7 +685,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		_ = s.store.ReleaseConcurrency(context.Background(), subject.AccountID, requestID(r), s.now())
 	}()
 
-	internalConversation, convIsAutoPrefix, invalidConvTag := s.chatConversationKey(upCtx, r, subject, authn.Demo, chat.Messages, chat.Tools)
+	var internalConversation string
+	var convIsAutoPrefix, invalidConvTag bool
+	// Relay-blind and privacy-class executions must never acquire reusable
+	// provider cache identity. Their ciphertext can share a plaintext prefix,
+	// and the provider-side privacy contract explicitly rejects cache grants.
+	if relayBlindExecutionFor(r) == nil {
+		internalConversation, convIsAutoPrefix, invalidConvTag = s.chatConversationKey(upCtx, r, subject, authn.Demo, chat.Messages, chat.Tools)
+	}
 	if invalidConvTag {
 		s.refundWalletAwareReservation(subject, requestID(r))
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_conversation_tag", "Invalid conversation tag")
@@ -2338,7 +2345,7 @@ func (s *Server) passThroughReceiptEligibleProviderError(w http.ResponseWriter, 
 
 func isNullUsageProviderError(body []byte) bool {
 	switch openAIErrorCode(body) {
-	case "error_model_not_loaded", "error_context_exceeded", "error_queue_full", "error_internal", "malformed_json_response", "json_schema_validation_failed":
+	case "error_model_not_loaded", "error_context_exceeded", "error_queue_full", "error_internal", "malformed_json_response", "json_schema_validation_failed", "tool_selection_validation_failed":
 		return true
 	default:
 		return false
@@ -3974,7 +3981,7 @@ func isPassThroughTerminalSSEErrorCode(code string) bool {
 	// Rewriting them to stream_malformed made Pi/openai-python treat a
 	// structured parse failure as a generic malformed stream.
 	switch code {
-	case "malformed_tool_call", "malformed_tool_call_final_json":
+	case "malformed_tool_call", "malformed_tool_call_final_json", "tool_selection_validation_failed":
 		return true
 	default:
 		return false
@@ -4572,7 +4579,60 @@ func estimatePromptTokens(body []byte) int64 {
 	if len(body) == 0 {
 		return 0
 	}
-	return int64(math.Ceil(float64(len(body)) / 4.0))
+	accounting, images := visionAccountingBody(body)
+	return int64(math.Ceil(float64(len(accounting))/4.0)) + int64(images*visionMediaTokenAllowance)
+}
+
+const visionMediaTokenAllowance = 1024
+
+// visionAccountingBody removes only validated-shape image payloads from
+// estimates; the original body is still forwarded and bound by receipts.
+func visionAccountingBody(body []byte) ([]byte, int) {
+	var request map[string]any
+	if json.Unmarshal(body, &request) != nil {
+		return body, 0
+	}
+	count := 0
+	messages, _ := request["messages"].([]any)
+	for _, message := range messages {
+		m, _ := message.(map[string]any)
+		parts, _ := m["content"].([]any)
+		for _, part := range parts {
+			p, _ := part.(map[string]any)
+			if p["type"] == "image_url" {
+				if len(p) != 2 {
+					continue
+				}
+				image, ok := p["image_url"].(map[string]any)
+				if !ok || len(image) < 1 || len(image) > 2 {
+					continue
+				}
+				if _, ok := image["url"].(string); !ok {
+					continue
+				}
+				validShape := true
+				for key := range image {
+					if key != "url" && key != "detail" {
+						validShape = false
+						break
+					}
+				}
+				if !validShape {
+					continue
+				}
+				count++
+				p["image_url"] = map[string]any{"url": "[inline-image]"}
+			}
+		}
+	}
+	if count == 0 {
+		return body, 0
+	}
+	accounting, err := json.Marshal(request)
+	if err != nil {
+		return body, 0
+	}
+	return accounting, count
 }
 
 // promptHeadroomTokens absorbs the chat-template overhead that the
@@ -4592,8 +4652,12 @@ const promptHeadroomTokens = 64
 // its pre-#1570 size.
 func promptCapTokens(body []byte) int64 {
 	reservation := estimatePromptTokens(body)
-	if upper, ok := promptTokenClassEstimate(body, promptTokenUpperWeights); ok && upper > reservation {
-		reservation = upper
+	accounting, images := visionAccountingBody(body)
+	if upper, ok := promptTokenClassEstimate(accounting, promptTokenUpperWeights); ok {
+		upper += int64(images * visionMediaTokenAllowance)
+		if upper > reservation {
+			reservation = upper
+		}
 	}
 	return reservation + promptHeadroomTokens
 }

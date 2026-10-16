@@ -181,7 +181,9 @@ func TestAttemptOrdinalSQLHasOneDefinitionUsedByEveryReader(t *testing.T) {
 			return true
 		})
 	}
-	for name, want := range map[string]int{"recovery.go": 2, "endpoints.go": 1, "wholesale_generation.go": 1} {
+	// wholesale_usage_fold.go holds the one D1a row query that both the
+	// statement and the request_log fold use (SPEC-005 §2.1b).
+	for name, want := range map[string]int{"recovery.go": 2, "endpoints.go": 1, "wholesale_usage_fold.go": 1} {
 		if users[name] != want {
 			t.Fatalf("%s uses requestLogAttemptOrdinalSQL %d times, want %d (all users: %v)", name, users[name], want, users)
 		}

@@ -22,6 +22,21 @@ func TestResponsesRouteFlagOffReturnsNotFound(t *testing.T) {
 	}
 }
 
+func TestResponsesContentSupportedRejectsHiddenMediaShapes(t *testing.T) {
+	for _, content := range []any{
+		map[string]any{"type": "input_image", "image_url": "data:image/png;base64,AA=="},
+		[]any{map[string]any{"type": "input_text", "text": "question", "image_url": map[string]any{"url": "data:image/png;base64,AA=="}}},
+		[]any{map[string]any{"text": "question"}},
+	} {
+		if responsesContentSupported(content) {
+			t.Fatalf("media or malformed Responses content unexpectedly accepted: %#v", content)
+		}
+	}
+	if !responsesContentSupported([]any{map[string]any{"type": "input_text", "text": "question"}}) {
+		t.Fatal("plain Responses text was rejected")
+	}
+}
+
 func TestResponsesNonStreamingTranslatesThroughChatPipeline(t *testing.T) {
 	var capturedPath string
 	var capturedBody map[string]any

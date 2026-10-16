@@ -15,20 +15,25 @@ const (
 	PerfMaxModelsPerProvider = 64
 	PerfMinPrefillTokens     = 64
 	// PerfPrefillInputOutputRatio: a prefill sample needs input at least this
-	// many times the delivered completion.
-	PerfPrefillInputOutputRatio = 4
+	// many times the generated output. Prefill runs roughly 20-50 times faster
+	// per token than decode, so below this the service time is decode time.
+	PerfPrefillInputOutputRatio = 32
 	PerfMinDecodeTokens         = 8
-	PerfMaxTTFTMs               = 600_000
-	PerfMaxPrefillTPS           = 50_000
-	PerfMaxDecodeTPS            = 2_000
-	PerfPriorWeightSamples      = 2
-	PerfPriorCapOverMeasure     = 1.25
+	// PerfServiceMaxInputRatio: a service-throughput sample needs the whole
+	// request estimate at most this many times the generated output, so a
+	// prompt-ingestion attempt does not pass for generation.
+	PerfServiceMaxInputRatio = 16
+	PerfMaxTTFTMs            = 600_000
+	PerfMaxPrefillTPS        = 50_000
+	PerfMaxDecodeTPS         = 2_000
+	PerfPriorWeightSamples   = 2
+	PerfPriorCapOverMeasure  = 1.25
 )
 
 // PerfObservation is one coordinator-timed served attempt. Durations come
 // from the coordinator's wall clock; PromptTokens is the coordinator's token
 // estimate of the request body (0 withholds a prefill sample) and
-// CompletionTokens its delivered-bytes estimate, never provider usage.
+// CompletionTokens its estimate of the generated output, never provider usage.
 type PerfObservation struct {
 	ProviderID         string
 	Model              string
@@ -37,26 +42,106 @@ type PerfObservation struct {
 	CompletionTokens   int64
 	TTFTMs             float64
 	DecodeMs           float64
-	// ServiceMs is dispatch done to done: the whole provider service time,
-	// which an early content token cannot shorten.
-	ServiceMs float64
-	At        time.Time
+	// ServiceMs is provider dispatch start to done, which neither an early
+	// content token nor late response headers can shorten. For a non-streamed
+	// attempt prefill divides by it, and service throughput is the generated
+	// output over it when RequestTokens (the whole request estimate, cached or
+	// not) is at most PerfServiceMaxInputRatio times the output.
+	ServiceMs     float64
+	RequestTokens int64
+	// Streamed attempts give no prefill or service-throughput sample: their
+	// done follows the buyer writes, while a non-streamed attempt is done when
+	// the whole response was received, so only non-streamed attempts share
+	// one window for rates that run to done.
+	Streamed bool
+	// EndToEnd marks an attempt without a first-token time (a non-streamed or
+	// buffered response): TTFTMs and DecodeMs are ignored and it yields no
+	// TTFT or decode sample.
+	EndToEnd bool
+	At       time.Time
 }
 
-// PerfEvidence is a read-only copy of one store record.
+// PerfEvidence is a read-only copy of one store record. Each signal keeps its
+// own sample count and last observation time.
 type PerfEvidence struct {
-	TTFTMs         float64
-	PrefillTPS     float64
-	DecodeTPS      float64
-	TTFTSamples    int
-	PrefillSamples int
-	DecodeSamples  int
-	LastObserved   time.Time
+	TTFTMs     float64
+	PrefillTPS float64
+	DecodeTPS  float64
+	// ServiceTPS is generated output over dispatch start to done of
+	// non-streamed attempts: the throughput phase's own request class.
+	ServiceTPS          float64
+	TTFTSamples         int
+	PrefillSamples      int
+	DecodeSamples       int
+	ServiceSamples      int
+	TTFTLastObserved    time.Time
+	PrefillLastObserved time.Time
+	DecodeLastObserved  time.Time
+	ServiceLastObserved time.Time
+	LastObserved        time.Time
 }
 
-// Fresh reports whether the record may drive phase-aware ordering.
+func signalFresh(samples int, last, now time.Time) bool {
+	return samples >= PerfFreshMinSamples && signalRecent(samples, last, now)
+}
+
+func signalRecent(samples int, last, now time.Time) bool {
+	return samples > 0 && !last.IsZero() && now.Sub(last) <= PerfFreshMaxAge
+}
+
+// TTFTFresh, PrefillFresh, DecodeFresh and ServiceFresh report whether one signal has at
+// least PerfFreshMinSamples samples, the latest within PerfFreshMaxAge.
+func (e PerfEvidence) TTFTFresh(now time.Time) bool {
+	return signalFresh(e.TTFTSamples, e.TTFTLastObserved, now)
+}
+
+func (e PerfEvidence) PrefillFresh(now time.Time) bool {
+	return signalFresh(e.PrefillSamples, e.PrefillLastObserved, now)
+}
+
+func (e PerfEvidence) DecodeFresh(now time.Time) bool {
+	return signalFresh(e.DecodeSamples, e.DecodeLastObserved, now)
+}
+
+func (e PerfEvidence) ServiceFresh(now time.Time) bool {
+	return signalFresh(e.ServiceSamples, e.ServiceLastObserved, now)
+}
+
+// Fresh reports whether any signal of the record is fresh.
 func (e PerfEvidence) Fresh(now time.Time) bool {
-	return e.TTFTSamples >= PerfFreshMinSamples && !e.LastObserved.IsZero() && now.Sub(e.LastObserved) <= PerfFreshMaxAge
+	return e.TTFTFresh(now) || e.PrefillFresh(now) || e.DecodeFresh(now) || e.ServiceFresh(now)
+}
+
+// FreshFor reports whether the record may rank a candidate for phase: the
+// signal the phase is judged on must be fresh. A record without TTFT samples
+// is never fresh for interactive, so a missing TTFT never reads as fast.
+func (e PerfEvidence) FreshFor(phase Phase, now time.Time) bool {
+	switch phase {
+	case PhaseThroughput:
+		return e.ServiceFresh(now)
+	case PhaseLongInput:
+		return e.PrefillFresh(now) || e.TTFTFresh(now)
+	default:
+		return e.TTFTFresh(now)
+	}
+}
+
+// prefillAt is the prefill average when it was observed within
+// PerfFreshMaxAge, else 0.
+func (e PerfEvidence) prefillAt(now time.Time) float64 {
+	if !signalRecent(e.PrefillSamples, e.PrefillLastObserved, now) {
+		return 0
+	}
+	return e.PrefillTPS
+}
+
+// decodeAt is DecodeWithPrior when decode was observed within
+// PerfFreshMaxAge, else 0.
+func (e PerfEvidence) decodeAt(now time.Time, selfReported float64) float64 {
+	if !signalRecent(e.DecodeSamples, e.DecodeLastObserved, now) {
+		return 0
+	}
+	return e.DecodeWithPrior(selfReported)
 }
 
 // DecodeWithPrior blends the self-reported throughput estimate into the
@@ -110,18 +195,39 @@ func ewma(prev float64, samples int, sample float64) float64 {
 	return prev + PerfEWMAWeight*(sample-prev)
 }
 
-// Observe records one served attempt. Invalid observations are ignored.
+// Observe records one served attempt. Invalid observations are ignored, and
+// an end-to-end attempt that yields no sample creates no record.
 func (s *PerfStore) Observe(o PerfObservation) {
 	if s == nil || o.ProviderID == "" || o.Model == "" || o.At.IsZero() {
 		return
 	}
-	if o.CompletionTokens < 0 || o.PromptTokens < 0 || math.IsNaN(o.TTFTMs) || math.IsInf(o.TTFTMs, 0) || o.TTFTMs < 0 {
+	if o.CompletionTokens < 0 || o.PromptTokens < 0 || o.RequestTokens < 0 {
 		return
 	}
-	ttft := clampFloat(o.TTFTMs, 1, PerfMaxTTFTMs)
+	if !o.EndToEnd && (math.IsNaN(o.TTFTMs) || math.IsInf(o.TTFTMs, 0) || o.TTFTMs < 0) {
+		return
+	}
 	uncached := o.PromptTokens - o.CachedPromptTokens
 	if o.CachedPromptTokens < 0 || uncached < 0 {
 		uncached = o.PromptTokens
+	}
+	// Prefill is measured on prefill-dominated attempts as input over the whole
+	// service time, so a provider cannot inflate it by emitting early content.
+	prefill := math.NaN()
+	if !o.Streamed && uncached >= PerfMinPrefillTokens && uncached >= PerfPrefillInputOutputRatio*o.CompletionTokens && positiveMs(o.ServiceMs) {
+		prefill = clampFloat(float64(uncached)/(o.ServiceMs/1000), 0, PerfMaxPrefillTPS)
+	}
+	// Decode needs a first token to split the window, so only timed attempts.
+	decode := math.NaN()
+	if !o.EndToEnd && o.CompletionTokens >= PerfMinDecodeTokens && positiveMs(o.DecodeMs) {
+		decode = clampFloat(float64(o.CompletionTokens-1)/(o.DecodeMs/1000), 0, PerfMaxDecodeTPS)
+	}
+	service := math.NaN()
+	if !o.Streamed && o.CompletionTokens >= PerfMinDecodeTokens && positiveMs(o.ServiceMs) && o.RequestTokens <= PerfServiceMaxInputRatio*o.CompletionTokens {
+		service = clampFloat(float64(o.CompletionTokens)/(o.ServiceMs/1000), 0, PerfMaxDecodeTPS)
+	}
+	if o.EndToEnd && math.IsNaN(prefill) && math.IsNaN(service) {
+		return
 	}
 	key := perfKey{providerID: o.ProviderID, model: o.Model}
 	s.mu.Lock()
@@ -140,23 +246,38 @@ func (s *PerfStore) Observe(o PerfObservation) {
 		s.entries[key] = e
 		s.perProvider[o.ProviderID]++
 	}
-	e.TTFTMs = ewma(e.TTFTMs, e.TTFTSamples, ttft)
-	e.TTFTSamples = saturatingInc(e.TTFTSamples)
-	// Prefill is measured on prefill-dominated attempts as input over the whole
-	// service time, so a provider cannot inflate it by emitting early content.
-	if uncached >= PerfMinPrefillTokens && uncached >= PerfPrefillInputOutputRatio*o.CompletionTokens && o.ServiceMs > 0 && !math.IsInf(o.ServiceMs, 0) {
-		rate := clampFloat(float64(uncached)/(o.ServiceMs/1000), 0, PerfMaxPrefillTPS)
-		e.PrefillTPS = ewma(e.PrefillTPS, e.PrefillSamples, rate)
+	if !o.EndToEnd {
+		e.TTFTMs = ewma(e.TTFTMs, e.TTFTSamples, clampFloat(o.TTFTMs, 1, PerfMaxTTFTMs))
+		e.TTFTSamples = saturatingInc(e.TTFTSamples)
+		e.TTFTLastObserved = latest(e.TTFTLastObserved, o.At)
+	}
+	if !math.IsNaN(prefill) {
+		e.PrefillTPS = ewma(e.PrefillTPS, e.PrefillSamples, prefill)
 		e.PrefillSamples = saturatingInc(e.PrefillSamples)
+		e.PrefillLastObserved = latest(e.PrefillLastObserved, o.At)
 	}
-	if o.CompletionTokens >= PerfMinDecodeTokens && o.DecodeMs > 0 && !math.IsInf(o.DecodeMs, 0) {
-		rate := clampFloat(float64(o.CompletionTokens-1)/(o.DecodeMs/1000), 0, PerfMaxDecodeTPS)
-		e.DecodeTPS = ewma(e.DecodeTPS, e.DecodeSamples, rate)
+	if !math.IsNaN(decode) {
+		e.DecodeTPS = ewma(e.DecodeTPS, e.DecodeSamples, decode)
 		e.DecodeSamples = saturatingInc(e.DecodeSamples)
+		e.DecodeLastObserved = latest(e.DecodeLastObserved, o.At)
 	}
-	if o.At.After(e.LastObserved) {
-		e.LastObserved = o.At
+	if !math.IsNaN(service) {
+		e.ServiceTPS = ewma(e.ServiceTPS, e.ServiceSamples, service)
+		e.ServiceSamples = saturatingInc(e.ServiceSamples)
+		e.ServiceLastObserved = latest(e.ServiceLastObserved, o.At)
 	}
+	e.LastObserved = latest(e.LastObserved, o.At)
+}
+
+func positiveMs(ms float64) bool {
+	return ms > 0 && !math.IsInf(ms, 0)
+}
+
+func latest(prev, at time.Time) time.Time {
+	if at.After(prev) {
+		return at
+	}
+	return prev
 }
 
 func saturatingInc(n int) int {

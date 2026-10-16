@@ -47,7 +47,7 @@ The probe validates:
   explicit saturation pass; account/quota/rate-limit 429s do not satisfy this
   check
 - `/privacy` retaining the plaintext/no-ZDR/no-training disclosure and the
-  default 90-day request-log retention statement
+  request-log retention statement in days (the configured period; 14 days by default)
 
 Do not submit the OpenRouter form on a failing soak.
 
@@ -62,7 +62,9 @@ Do not submit the OpenRouter form on a failing soak.
   are an operator kill-switch, never a live HTTP 402.
 - Model: `mlx-community/Qwen3.6-35B-A3B-4bit`, paid only, no free SKU
 - OpenRouter catalog slug: `qwen/qwen3.6-35b-a3b`
-- Features declared on the row: `tools`, `tool_choice` (`auto` only),
+- Features declared on the row: `tools`, `tool_choice` (`auto`, with `none`
+  and `required` only when backed by compatible eligible provider capabilities;
+  named function selection is an object, not a string enum value),
   `response_format` (object descriptor whose `type` is `text`, `json_object`
   or `json_schema`), `structured_outputs`. `json_schema` follows SPEC-019
   v0.3.0 §1a: `strict:true` is enforced and rejects a schema outside the strict

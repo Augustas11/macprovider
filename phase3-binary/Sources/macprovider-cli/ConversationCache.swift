@@ -80,6 +80,8 @@ final class ConversationCacheLease: @unchecked Sendable {
     /// Within-process purge-all counter sampled at `begin()`. A `commit()` after a
     /// purge-all reinserts nothing.
     let globalPurgeStamp: Int
+    let fleetGrant: FleetConversationCacheGrant?
+    let originalStoredAt: Date?
     /// True when this hit reuses cold-tier-promoted layers (FR-KVP9). Advisory,
     /// used only for telemetry attribution.
     let promotedFromCold: Bool
@@ -104,7 +106,9 @@ final class ConversationCacheLease: @unchecked Sendable {
         globalPurgeStamp: Int = 0,
         promotedFromCold: Bool = false,
         reusableCanonicalPromptTokens: [Int32]? = nil,
-        recurrentCheckpoint: RecurrentStateCheckpoint? = nil
+        recurrentCheckpoint: RecurrentStateCheckpoint? = nil,
+        fleetGrant: FleetConversationCacheGrant? = nil,
+        originalStoredAt: Date? = nil
     ) {
         self.key = key
         self.keyHash = keyHash
@@ -117,6 +121,8 @@ final class ConversationCacheLease: @unchecked Sendable {
         self.trimBy = trimBy
         self.sampledPurgeGeneration = sampledPurgeGeneration
         self.localPurgeStamp = localPurgeStamp
+        self.fleetGrant = fleetGrant
+        self.originalStoredAt = originalStoredAt
         self.globalPurgeStamp = globalPurgeStamp
         self.promotedFromCold = promotedFromCold
         self.reusableCanonicalPromptTokens = reusableCanonicalPromptTokens
@@ -189,16 +195,23 @@ actor ConversationCache {
         kvBits: Int?,
         now: Date = Date(),
         cold: ConversationColdContext? = nil,
-        allowRetainedPagedKVHandoff: Bool = false
+        allowRetainedPagedKVHandoff: Bool = false,
+        fleetGrant: FleetConversationCacheGrant? = nil
     ) async -> ConversationCacheLease? {
         guard let key = conversationKey?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty else {
             return nil
         }
+        func authorized() -> Bool {
+            fleetGrant.map { $0.isValid && $0.conversationKey == key } ?? true
+        }
+        guard authorized() else { return nil }
         await waitForTurn(key)
         busyKeys.insert(key)
+        guard authorized() else { releaseTurn(key); return nil }
 
         let keyHash = Self.keyHash(key)
         await sweepExpired(now: now)
+        guard authorized() else { releaseTurn(key); return nil }
 
         // SPEC-037 FR-KVP8 — sample the purge stamps at lease acquisition. The
         // store high-watermark is stamped into any disk write; the local counters
@@ -210,11 +223,13 @@ actor ConversationCache {
         if gated, let coldTier {
             sampledPurgeGeneration = await coldTier.sampledPurgeGeneration(conversationKey: key)
         }
+        guard authorized() else { releaseTurn(key); return nil }
         func stampedLease(
             reusableCache: ConversationCacheLayers?, cachedPromptTokens: Int, lcp: Int, trimBy: Int,
             promotedFromCold: Bool = false,
             reusableCanonicalPromptTokens: [Int32]? = nil,
-            recurrentCheckpoint: RecurrentStateCheckpoint? = nil
+            recurrentCheckpoint: RecurrentStateCheckpoint? = nil,
+            originalStoredAt: Date? = nil
         ) -> ConversationCacheLease {
             ConversationCacheLease(
                 key: key, keyHash: keyHash, incomingTokens: incomingTokens, modelID: modelID, kvBits: kvBits,
@@ -222,7 +237,8 @@ actor ConversationCache {
                 sampledPurgeGeneration: sampledPurgeGeneration, localPurgeStamp: localPurgeStamp,
                 globalPurgeStamp: globalPurgeStamp, promotedFromCold: promotedFromCold,
                 reusableCanonicalPromptTokens: reusableCanonicalPromptTokens,
-                recurrentCheckpoint: recurrentCheckpoint)
+                recurrentCheckpoint: recurrentCheckpoint, fleetGrant: fleetGrant,
+                originalStoredAt: originalStoredAt)
         }
 
         // Acquire a candidate entry from the hot tier, or — for a gated key that
@@ -242,18 +258,28 @@ actor ConversationCache {
             // invalidated (defense in depth alongside the store's own post-decode re-fence).
             let promoFencedLocal = (localPurgeGen[key] ?? 0) > localPurgeStamp
             let promoFencedGlobal = globalPurgeGen > globalPurgeStamp
-            if promoFencedLocal || promoFencedGlobal {
+            if promoFencedLocal || promoFencedGlobal || !authorized() {
                 await coldTier.finishPromotion(candidate, accepted: false, rejectionReason: "purged_during_promotion")
                 log("event=conv_cache action=miss key_hash=\(keyHash) reason=purged_during_promotion")
                 return stampedLease(reusableCache: nil, cachedPromptTokens: 0, lcp: 0, trimBy: 0)
             }
             promotionCandidate = candidate
+            // A restore changes residency, not the original reuse deadline.
+            let createdAt = candidate.createdAtMillis.map { Date(timeIntervalSince1970: Double($0) / 1000) } ?? now
+            let deadlineBound = candidate.eligibleUntilMillis.map {
+                Date(timeIntervalSince1970: Double($0) / 1000).addingTimeInterval(-config.ttlSeconds)
+            } ?? createdAt
+            let originalStoredAt = min(createdAt, deadlineBound)
+            guard now.timeIntervalSince(originalStoredAt) <= config.ttlSeconds else {
+                await coldTier.finishPromotion(candidate, accepted: false, rejectionReason: "expired_during_promotion")
+                return stampedLease(reusableCache: nil, cachedPromptTokens: 0, lcp: 0, trimBy: 0)
+            }
             entry = Entry(
                 canonicalPromptTokens: candidate.canonicalTokens,
                 kvCache: candidate.layers,
                 modelID: modelID,
                 kvBits: kvBits,
-                storedAt: now,
+                storedAt: originalStoredAt,
                 lastUsedAt: now,
                 tokenCount: candidate.canonicalTokens.count)
             log("event=conv_cache action=promote key_hash=\(keyHash) canonical_tokens=\(candidate.canonicalTokens.count)")
@@ -369,6 +395,13 @@ actor ConversationCache {
         if let promotionCandidate {
             await coldTier?.finishPromotion(promotionCandidate, accepted: true, rejectionReason: nil)
         }
+        guard authorized(),
+              (localPurgeGen[key] ?? 0) == localPurgeStamp,
+              globalPurgeGen == globalPurgeStamp else {
+            await entry.kvCache.discardRetainedPagedKV(conversationKey: key)
+            releaseTurn(key)
+            return nil
+        }
         let stats = currentStats()
         let checkpointField = (restoreCheckpoint ?? retainedCheckpoint).map { " recurrent_checkpoint=\($0.tokenCount)" } ?? ""
         log("event=conv_cache action=hit key_hash=\(keyHash) cached_prompt_tokens=\(reuseLength) prompt_tokens=\(incomingTokens.count) lcp=\(lcp) trim_by=\(trimBy)\(checkpointField) conv_cache_entries=\(stats.entries) conv_cache_tokens=\(stats.tokens)")
@@ -379,13 +412,13 @@ actor ConversationCache {
             trimBy: trimBy,
             promotedFromCold: promotionCandidate != nil,
             reusableCanonicalPromptTokens: Array(entry.canonicalPromptTokens.prefix(reuseLength)),
-            recurrentCheckpoint: retainedCheckpoint)
+            recurrentCheckpoint: retainedCheckpoint, originalStoredAt: entry.storedAt)
     }
 
     func commit(_ lease: ConversationCacheLease, cache: ConversationCacheLayers, fullTokens: [Int32], now: Date = Date(), cold: ConversationColdContext? = nil) async {
         // SPEC-037 FR-KVP8 — a `commit()` whose stamps predate a purge that landed
         // during the request reinserts nothing (neither RAM nor disk).
-        guard !isFenced(lease) else {
+        guard !Task.isCancelled, !isFenced(lease) else {
             log("event=conv_cache action=commit_fenced key_hash=\(lease.keyHash)")
             await cache.discardRetainedPagedKV(conversationKey: lease.key)
             releaseTurn(lease.key)
@@ -403,7 +436,7 @@ actor ConversationCache {
            old.kvCache.retainedPagedKVSequence?.handle != cache.retainedPagedKVSequence?.handle {
             await old.kvCache.discardRetainedPagedKV(conversationKey: lease.key)
         }
-        guard !isFenced(lease) else {
+        guard !Task.isCancelled, !isFenced(lease) else {
             log("event=conv_cache action=commit_fenced key_hash=\(lease.keyHash)")
             await cache.discardRetainedPagedKV(conversationKey: lease.key)
             releaseTurn(lease.key)
@@ -419,7 +452,7 @@ actor ConversationCache {
             tokenCount: fullTokens.count
         )
         await enforceLimits()
-        guard !isFenced(lease) else {
+        guard !Task.isCancelled, !isFenced(lease) else {
             log("event=conv_cache action=commit_fenced key_hash=\(lease.keyHash)")
             if let current = entries[lease.key], current.kvCache === cache {
                 entries.removeValue(forKey: lease.key)
@@ -520,7 +553,7 @@ actor ConversationCache {
             kvCache: reusableCache,
             modelID: lease.modelID,
             kvBits: lease.kvBits,
-            storedAt: now,
+            storedAt: lease.originalStoredAt ?? now,
             lastUsedAt: now,
             tokenCount: reusableCanonicalPromptTokens.count
         )
@@ -626,7 +659,8 @@ actor ConversationCache {
     }
 
     private func isFenced(_ lease: ConversationCacheLease) -> Bool {
-        (localPurgeGen[lease.key] ?? 0) > lease.localPurgeStamp || globalPurgeGen > lease.globalPurgeStamp
+        (lease.fleetGrant.map { !$0.isValid } ?? false) ||
+            (localPurgeGen[lease.key] ?? 0) > lease.localPurgeStamp || globalPurgeGen > lease.globalPurgeStamp
     }
 
     private static func keyHash(_ key: String) -> String {

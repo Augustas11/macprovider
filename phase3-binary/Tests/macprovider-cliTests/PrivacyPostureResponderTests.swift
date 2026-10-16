@@ -135,6 +135,7 @@ final class PrivacyPostureResponderTests: XCTestCase {
             attestationGenerator: ManagedDeviceAttestationGenerator(),
             privacyPostureProbeOverride: probe,
             privacySESignerOverride: signer,
+            privacyCodeBoundAttestorOverride: AbsentCodeBoundAttestor(),
             sleepAssertionFactory: { nil },
             installedCompatibilityManifest: { _, _ in nil },
             watchdogExitHook: { _ in }
@@ -188,6 +189,60 @@ final class PrivacyPostureResponderTests: XCTestCase {
         XCTAssertNil(withdrawn["relay_blind_key_records"])
         XCTAssertEqual(try XCTUnwrap(withdrawn["privacy_key_records"] as? [[String: Any]]).count, 0)
         XCTAssertNil(withdrawn["privacy_enrollment"], "a withdrawn advertisement must not ask to be enrolled")
+    }
+
+    /// SPEC-049-R035 item 4: with an attestor, the evidence goes out
+    /// immediately before the posture it vouches for.
+    func testPostureCarriesCodeBoundEvidenceFirst() async throws {
+        let root = try makeStateRoot()
+        let probe = MutablePrivacyPostureProbe(greenPrivacyObservation())
+        let signer = try SELivenessTestSigning.generate()
+        let recorder = PrivacyFrameRecorder()
+        var config = AppConfig.defaults(configPath: "/tmp/macprovider-privacy-posture-test.yaml")
+        config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
+        config.providerID = "provider-test"
+        config.model = "model-a"
+        config.relayBlindEnabled = true
+        config.privacyClassBeta = true
+        config.relayBlindStateDirectory = root.path
+        let client = try XCTUnwrap(CoordinatorClient(
+            config: config,
+            modelRuntime: IdlePrivacyRuntime(),
+            providerStatus: ProviderStatus(
+                modelID: "model-a",
+                modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: 1)
+            ),
+            sendOverride: { frame in
+                await recorder.append(frame)
+            },
+            attestationGenerator: ManagedDeviceAttestationGenerator(),
+            privacyPostureProbeOverride: probe,
+            privacySESignerOverride: signer,
+            privacyCodeBoundAttestorOverride: EchoingCodeBoundAttestor(),
+            sleepAssertionFactory: { nil },
+            installedCompatibilityManifest: { _, _ in nil },
+            watchdogExitHook: { _ in }
+        ))
+        await client.acceptAssignedSessionForTest(assignedID: "session-accepted")
+        let challengeData = try JSONSerialization.data(withJSONObject: postureChallenge())
+        try await client.handleForTest(.string(String(decoding: challengeData, as: UTF8.self)))
+        var sent: [[String: Any]] = []
+        for _ in 0..<200 {
+            sent = await recorder.frames()
+            if sent.contains(where: { $0["type"] as? String == "privacy_posture_response" }) { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let types = sent.compactMap { $0["type"] as? String }
+        let postureIndex = try XCTUnwrap(types.firstIndex(of: "privacy_posture_response"))
+        XCTAssertGreaterThan(postureIndex, 0)
+        XCTAssertEqual(types[postureIndex - 1], "privacy_code_bound_evidence")
+        let evidence = try PrivacyCodeBoundStatement(object: try XCTUnwrap(sent[postureIndex - 1]["statement"] as? [String: Any]))
+        let posture = try postureStatement(try XCTUnwrap(sent[postureIndex]["statement"] as? [String: Any]))
+        XCTAssertEqual(evidence.nonce, posture.nonce)
+        XCTAssertEqual(evidence.assignedSession, "session-accepted")
+        XCTAssertEqual(evidence.postureDigest, PrivacyCodeBoundBase64URL.encode(Data(SHA256.hash(data: try posture.framing()))))
+        XCTAssertEqual(evidence.sePublicKey, signer.publicKeyRaw.base64EncodedString())
     }
 
     func testEnrollmentClaimIsPublicAndStopsWhenLatched() throws {
@@ -420,6 +475,33 @@ final class PrivacyPostureResponderTests: XCTestCase {
         )
         let identitySignature = try RelayBlindBase64URL.decode(try XCTUnwrap(response["identity_signature"] as? String), exactCount: 64)
         XCTAssertTrue(identityKey.isValidSignature(identitySignature, for: framing))
+    }
+}
+
+/// No Malibu.app attestor: the posture goes out at once, device-bound.
+private struct AbsentCodeBoundAttestor: PrivacyCodeBoundAttesting {
+    var mayBeAvailable: Bool { false }
+    func assert(_ request: PrivacyCodeBoundRequest) async -> PrivacyCodeBoundReply? { nil }
+}
+
+/// An attestor that vouches for whatever it is asked, as Malibu.app would for
+/// a genuine runtime.
+private struct EchoingCodeBoundAttestor: PrivacyCodeBoundAttesting {
+    var mayBeAvailable: Bool { true }
+
+    func assert(_ request: PrivacyCodeBoundRequest) async -> PrivacyCodeBoundReply? {
+        .asserted(
+            statement: PrivacyCodeBoundStatement(
+                request: request,
+                appAttestKeyID: PrivacyCodeBoundBase64URL.encode(Data(repeating: 0x33, count: 32)),
+                runtimeTeamID: "AB12CD34EF",
+                runtimeSigningIdentifier: PrivacyCodeBoundConstants.runtimeSigningIdentifier,
+                runtimeCDHash: String(repeating: "ab", count: 20),
+                runtimeCSFlags: PrivacyCodeBoundConstants.requiredCSFlags,
+                checkedAtUnix: Int64(Date().timeIntervalSince1970)
+            ),
+            assertion: PrivacyCodeBoundBase64URL.encode(Data(repeating: 0xa5, count: 64))
+        )
     }
 }
 

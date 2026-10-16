@@ -1620,3 +1620,28 @@ func TestEarningsEndpointAcceptsOwnerSessionCookie(t *testing.T) {
 		t.Fatalf("rate-limited cookie status=%d want 429", got)
 	}
 }
+
+// SPEC-005 §2.1b: the admin reconcile refuses a range that starts before the
+// request_log window, whose buyer side has been pruned.
+func TestReconcileEndpointRefusesRangeBeforeRequestLogWindow(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	store.SetRequestLogRetention(14 * 24 * time.Hour)
+	from := time.Now().UTC().AddDate(0, 0, -20).Format("2006-01-02")
+	to := time.Now().UTC().AddDate(0, 0, -13).Format("2006-01-02")
+	req := httptest.NewRequest(http.MethodGet, "/admin/ledger/reconcile?from="+from+"&to="+to, nil)
+	req.Header.Set("Authorization", "Bearer operator")
+	w := httptest.NewRecorder()
+	store.Handlers("operator", fakeTokens{}, true, 60).ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "request_log window") {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	from = time.Now().UTC().AddDate(0, 0, -7).Format("2006-01-02")
+	to = time.Now().UTC().AddDate(0, 0, 1).Format("2006-01-02")
+	req = httptest.NewRequest(http.MethodGet, "/admin/ledger/reconcile?from="+from+"&to="+to, nil)
+	req.Header.Set("Authorization", "Bearer operator")
+	w = httptest.NewRecorder()
+	store.Handlers("operator", fakeTokens{}, true, 60).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("in-window range: status=%d body=%s", w.Code, w.Body.String())
+	}
+}

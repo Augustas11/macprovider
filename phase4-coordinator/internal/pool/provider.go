@@ -105,12 +105,39 @@ const (
 	AuthMintFailed AuthState = "mint_failed"
 )
 
+// ToolSelectionCapability binds guarantees to the session's exact loaded model
+// and adapter. It is a provider assertion; the buyer boundary also checks output.
+type ToolSelectionCapability struct {
+	ModelID    string   `json:"model_id"`
+	Runtime    string   `json:"runtime"`
+	Modes      []string `json:"modes"`
+	Validation string   `json:"validation"`
+}
+
+// VisionRuntimeCapability is a provider assertion for a loaded vision runtime.
+// Buyer routing additionally compares it with the operator qualification list;
+// a model name or parser alone never authorizes image dispatch.
+type VisionRuntimeCapability struct {
+	ModelID               string `json:"model_id"`
+	ModelHash             string `json:"model_hash"`
+	ModelHashAlgorithm    string `json:"model_hash_algorithm"`
+	WeightsManifestSHA256 string `json:"weights_manifest_sha256"`
+	ProcessorDigest       string `json:"processor_digest"`
+	Runtime               string `json:"runtime"`
+	RuntimeRevision       string `json:"runtime_revision"`
+	MediaProfile          string `json:"media_profile"`
+}
+
 type Provider struct {
+	ToolSelectionCapabilities []ToolSelectionCapability `json:"tool_selection_capabilities,omitempty"`
+	VisionRuntimeCapabilities []VisionRuntimeCapability `json:"vision_runtime_capabilities,omitempty"`
+
 	ProviderID              string  `json:"provider_id"`
 	AssignedID              string  `json:"assigned_id"`
 	Hostname                string  `json:"hostname"`
 	ModelID                 string  `json:"model_id"`
 	RuntimeSource           string  `json:"runtime_source,omitempty"` // SPEC-047 v0.1.6 hello adapter (mlx_cache/ollama_loopback); provider assertion, never dereferenced
+	FleetCacheProtocol      int     `json:"fleet_cache_protocol,omitempty"`
 	ModelParamsB            float64 `json:"model_params_b"`
 	RAMGB                   int     `json:"ram_gb"`
 	MaxContextTokens        int     `json:"max_context_tokens"`
@@ -2911,6 +2938,9 @@ type ReceiptRotationEvent struct {
 type ReceiptRotationEventEmitter func(event ReceiptRotationEvent)
 
 type HeartbeatUpdate struct {
+	ToolSelectionCapabilities []ToolSelectionCapability
+	VisionRuntimeCapabilities []VisionRuntimeCapability
+
 	Status                  State
 	ModelID                 string
 	ModelParamsB            float64
@@ -3018,6 +3048,9 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	priorLoadingState := p.LastLoadingState
 	priorLoadingStartedAt := p.LoadingStartedAt
 	p.LastHeartbeatAt = hb.At
+	// Absence withdraws guarantees, including after a runtime/model change.
+	p.ToolSelectionCapabilities = hb.ToolSelectionCapabilities
+	p.VisionRuntimeCapabilities = hb.VisionRuntimeCapabilities
 
 	modelIDChanged := !strings.EqualFold(priorModelID, hb.ModelID)
 	if modelIDChanged {

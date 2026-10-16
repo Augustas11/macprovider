@@ -6,6 +6,43 @@ import MLXLMCommon
 import XCTest
 
 final class ConversationCacheTests: XCTestCase {
+    func testRevokedFleetGrantCannotBeginOrPublishAfterPurge() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let authority = FleetConversationCacheAuthority(storageURL: root.appendingPathComponent("floors.json"))
+        let key = "conv:fleet-a"
+        let grant = try authority.authorize(conversationKey: key, generation: 1)
+        let cache = ConversationCache()
+        let tokens = int32Range(0..<64)
+        let lease = await cache.begin(conversationKey: key, incomingTokens: tokens,
+                                      modelID: "model-a", kvBits: nil, fleetGrant: grant)
+        let active = try XCTUnwrap(lease)
+        _ = try await authority.revokeAndPurge(conversationKey: key, through: 1) { key in
+            _ = await cache.purgeHot(conversationKey: key)
+            return true
+        }
+        await cache.commit(active, cache: ConversationCacheLayers([trimmableCache(offset: 64)]), fullTokens: tokens)
+        let stale = await cache.begin(conversationKey: key, incomingTokens: tokens + [99],
+                                      modelID: "model-a", kvBits: nil, fleetGrant: grant)
+        XCTAssertNil(stale)
+        let next = try authority.authorize(conversationKey: key, generation: 2)
+        let fresh = await cache.begin(conversationKey: key, incomingTokens: tokens + [99],
+                                      modelID: "model-a", kvBits: nil, fleetGrant: next)
+        XCTAssertEqual(fresh?.cachedPromptTokens, 0)
+        if let fresh { await cache.abort(fresh) }
+    }
+
+    func testFleetGrantCannotSelectDifferentConversation() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let authority = FleetConversationCacheAuthority(storageURL: root.appendingPathComponent("floors.json"))
+        let grant = try authority.authorize(conversationKey: "conv:account-a", generation: 1)
+        let cache = ConversationCache()
+        let lease = await cache.begin(conversationKey: "conv:account-b", incomingTokens: [1, 2],
+                                      modelID: "model-a", kvBits: nil, fleetGrant: grant)
+        XCTAssertNil(lease)
+    }
+
     func testQuantizedKVIsDisabledForReusableConversationKeys() {
         XCTAssertNil(ModelRuntime.effectiveKVBits(configured: 8, conversationKey: "conv:buyer-1"))
         XCTAssertNil(ModelRuntime.effectiveKVBits(configured: 4, conversationKey: "   "))

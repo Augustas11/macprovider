@@ -439,7 +439,7 @@ func Default() Config {
 			MaxFeedbackCommentBytes:      2000,
 			MaxFeedbackBodyBytes:         16 * 1024,
 			FeedbackRequestsPerIPPerHour: 10,
-			RequestBodyBytes:             1048576,
+			RequestBodyBytes:             4 << 20,
 		},
 		Capacity: CapacityConfig{
 			MonthlyBudgetUSD: 500, ReadyProviderDegradedThreshold: 1, ProjectedCostTier1Percent: 80, TierCooldownSeconds: 3600,

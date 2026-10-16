@@ -59,6 +59,12 @@ type PrivacyAuthority struct {
 	directory  *IdentityDirectoryService
 
 	metrics atomic.Pointer[privacyMetricsRef]
+	// codeBound is the SPEC-049-R033 verifier; nil means every posture is
+	// device-bound.
+	codeBound atomic.Pointer[codeBoundVerifier]
+	// afterEligibilitySnapshot is a test seam run between the eligibility
+	// snapshot and its store checks; nil in production.
+	afterEligibilitySnapshot func()
 
 	mu                sync.Mutex
 	pendingQuarantine map[string]pendingQuarantine
@@ -155,6 +161,7 @@ type privacySession struct {
 	signingID    string
 	binary       string
 	digests      map[string]struct{}
+	assurance    string // SPEC-049-R033 label of the verified posture
 	seq          uint64
 	hasSeq       bool
 	nonce        string
@@ -622,6 +629,23 @@ func (a *PrivacyAuthority) DropSession(providerID, session string) {
 }
 
 func (a *PrivacyAuthority) VerifyPosture(ctx context.Context, providerID, session, nonce string, raw []byte, sessionSEKey []byte, now time.Time) error {
+	_, err := a.VerifyPostureWithEvidence(ctx, providerID, session, nonce, raw, nil, sessionSEKey, now)
+	return err
+}
+
+// VerifyPostureWithEvidence is VerifyPosture with the SPEC-049-R033
+// code-bound evidence the session sent for this posture (nil when none). The
+// evidence only decides the label of a posture that verifies on its own; it
+// never makes a posture fail.
+func (a *PrivacyAuthority) VerifyPostureWithEvidence(ctx context.Context, providerID, session, nonce string, raw, evidence []byte, sessionSEKey []byte, now time.Time) (CodeBoundOutcome, error) {
+	var outcome CodeBoundOutcome
+	if err := a.verifyPosture(ctx, providerID, session, nonce, raw, evidence, sessionSEKey, now, &outcome); err != nil {
+		return CodeBoundOutcome{}, err
+	}
+	return outcome, nil
+}
+
+func (a *PrivacyAuthority) verifyPosture(ctx context.Context, providerID, session, nonce string, raw, evidence []byte, sessionSEKey []byte, now time.Time, outcome *CodeBoundOutcome) error {
 	if a == nil || a.store == nil {
 		return ErrStoreUnavailable
 	}
@@ -756,14 +780,16 @@ func (a *PrivacyAuthority) VerifyPosture(ctx context.Context, providerID, sessio
 			return err
 		}
 	}
-	if !a.commitPosture(id, snap, statement, now) {
+	// SPEC-049-R033: the label of a posture that passed every check above.
+	*outcome = a.evaluateCodeBound(ctx, providerID, session, statement, framing, sePin, idPub, evidence, now)
+	if !a.commitPosture(id, snap, statement, outcome.Assurance, now) {
 		return a.reject("posture_closed")
 	}
 	return nil
 }
 
 func (a *PrivacyAuthority) Eligible(providerID, session, keyDigest string, now time.Time) (time.Time, bool) {
-	verifiedAt, reason := a.eligibilityReason(providerID, session, keyDigest, now, false)
+	verifiedAt, reason := a.eligibilityReason(providerID, session, keyDigest, "", now, false)
 	return verifiedAt, reason == ""
 }
 
@@ -771,19 +797,28 @@ func (a *PrivacyAuthority) Eligible(providerID, session, keyDigest string, now t
 // SPEC-049-R030 reason. No provider identity, key, or request data is
 // included; callers must not expose the reason to the buyer.
 func (a *PrivacyAuthority) EligibilityReason(providerID, session, keyDigest string, now time.Time) (time.Time, string) {
-	return a.eligibilityReason(providerID, session, keyDigest, now, true)
+	return a.eligibilityReason(providerID, session, keyDigest, "", now, true)
+}
+
+// EligibilityReasonFor is EligibilityReason for a request that needs the
+// SPEC-049-R034 label assurance: the label, the listed key, and the code
+// identity all come from one posture, which must still be current when the
+// store checks finish. quick skips the not-enrolled split, as
+// QuickEligibilityReason does.
+func (a *PrivacyAuthority) EligibilityReasonFor(providerID, session, keyDigest, assurance string, now time.Time, quick bool) (time.Time, string) {
+	return a.eligibilityReason(providerID, session, keyDigest, assurance, now, !quick)
 }
 
 // QuickEligibilityReason is EligibilityReason without the store lookup that
 // splits an unverified session: it reports posture_unverified for both.
 // Selection uses it per candidate and explains once with UnverifiedReason.
 func (a *PrivacyAuthority) QuickEligibilityReason(providerID, session, keyDigest string, now time.Time) (time.Time, string) {
-	return a.eligibilityReason(providerID, session, keyDigest, now, false)
+	return a.eligibilityReason(providerID, session, keyDigest, "", now, false)
 }
 
 // eligibilityReason is the gate. explain adds the store lookup that splits an
 // unverified session into not enrolled and posture unverified.
-func (a *PrivacyAuthority) eligibilityReason(providerID, session, keyDigest string, now time.Time, explain bool) (time.Time, string) {
+func (a *PrivacyAuthority) eligibilityReason(providerID, session, keyDigest, assurance string, now time.Time, explain bool) (time.Time, string) {
 	if a == nil || a.store == nil {
 		return time.Time{}, PrivacyRejectClassNotConfigured
 	}
@@ -803,7 +838,11 @@ func (a *PrivacyAuthority) eligibilityReason(providerID, session, keyDigest stri
 	verifiedAt := entry.verifiedAt
 	teamID, signingID, cdhash, binary := entry.teamID, entry.signingID, entry.cdhash, entry.binary
 	_, listed := entry.digests[keyDigest]
+	label := entry.assurance
 	a.mu.Unlock()
+	if a.afterEligibilitySnapshot != nil {
+		a.afterEligibilitySnapshot()
+	}
 	if !listed {
 		return time.Time{}, PrivacyRejectKeyNotInPosture
 	}
@@ -834,6 +873,20 @@ func (a *PrivacyAuthority) eligibilityReason(providerID, session, keyDigest stri
 	}
 	if !fresh {
 		return time.Time{}, PrivacyRejectKeyStaleOrRevoked
+	}
+	if assurance == PrivacyAssuranceCodeBound {
+		// SPEC-049-R034: the label must belong to the same posture that
+		// listed the key, so that posture must still be the current one.
+		a.mu.Lock()
+		current := a.sessions[id]
+		same := current != nil && current.verified && current.verifiedAt.Equal(verifiedAt) && current.assurance == label
+		a.mu.Unlock()
+		if !same {
+			return time.Time{}, PrivacyRejectPostureUnverified
+		}
+		if label != PrivacyAssuranceCodeBound {
+			return time.Time{}, PrivacyRejectAssuranceUnavailable
+		}
 	}
 	return verifiedAt, ""
 }
@@ -1131,7 +1184,7 @@ func (a *PrivacyAuthority) postureStillCurrent(id privacySessionID, snap posture
 		entry.epoch == snap.epoch && a.epochs[id.providerID] == snap.epoch && a.closedGen[id] == snap.boundGen
 }
 
-func (a *PrivacyAuthority) commitPosture(id privacySessionID, snap postureSnapshot, statement PostureStatement, now time.Time) bool {
+func (a *PrivacyAuthority) commitPosture(id privacySessionID, snap postureSnapshot, statement PostureStatement, assurance string, now time.Time) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	entry := a.sessions[id]
@@ -1143,6 +1196,7 @@ func (a *PrivacyAuthority) commitPosture(id privacySessionID, snap postureSnapsh
 	}
 	entry.verified = true
 	entry.verifiedAt = now
+	entry.assurance = assurance
 	entry.cdhash = statement.CodeCDHash
 	entry.hasCDHash = true
 	entry.teamID = statement.TeamID

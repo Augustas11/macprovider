@@ -40,7 +40,8 @@
 # release train: convert the coordinator database files to
 # auto_vacuum=INCREMENTAL with a full VACUUM
 # (ops/runbooks/settlement-evidence-retention.md section 4):
-#   1 vacuum_mode       read-only: PRAGMA auto_vacuum of both files on Pearl
+#   1 vacuum_mode       read-only: PRAGMA auto_vacuum of the coordinator,
+#                       route-snapshot journal, and audit database files
 #   2 drain_gate        read-only: the last completed retention lap found no
 #                       eligible request (backlog_drained)
 #   3 convert           under the live-ops lock and the three Pearl locks:
@@ -70,7 +71,7 @@ usage() { sed -n '2,/^set -euo pipefail$/p' "${BASH_SOURCE[0]}" | sed -e '$d' -e
 
 ROLLOUT_DOC="docs/runbooks/pearl-coordinator-rollout.md"
 RETENTION_DOC="ops/runbooks/settlement-evidence-retention.md"
-VACUUM_DOWNTIME="coordinator stopped while SQLite rewrites the coordinator and route-snapshot journal database files (full VACUUM): about as long as the updater's pre-apply backup of the same files (ops/runbooks/pearl-release-updater.md), in proportion to their size; buyer and provider traffic through the coordinator is down for that time"
+VACUUM_DOWNTIME="coordinator stopped while SQLite rewrites the coordinator, route-snapshot journal, and audit (coordinator-audit.db) database files (full VACUUM): about as long as the updater's pre-apply backup of the same files (ops/runbooks/pearl-release-updater.md), in proportion to their size; buyer and provider traffic through the coordinator is down for that time"
 STATS_MIGRATE_DOWNTIME="none (embedded stats/rewards Postgres migrations apply while the coordinator keeps serving; no restart)"
 APPLY_DOWNTIME="15-20 minutes of network down (runtime apply), unless the short-quiesce updater hotfix is installed"
 
@@ -221,26 +222,33 @@ gather_retention_vacuum() {
     set_next vacuum_mode blocked "Read the coordinator database auto_vacuum mode" "" "PEARL_SSH is unset"
     return
   fi
-  local main_mode journal_mode="absent"
+  local main_mode journal_mode="absent" audit_mode="absent"
+  # The settlement receipt audit database sits next to the coordinator
+  # database (SPEC-002 R-7.10.2); its rotation frees pages the same way.
+  local audit_db="${db%/*}/coordinator-audit.db"
   main_mode="$(pearl_sqlite_read "$sqlite" "$db" 'PRAGMA auto_vacuum;' || true)"
   if ssh "$PEARL_SSH" "test -f '$db.route-snapshots'" 2>/dev/null; then
     journal_mode="$(pearl_sqlite_read "$sqlite" "$db.route-snapshots" 'PRAGMA auto_vacuum;' || true)"
   fi
+  if ssh "$PEARL_SSH" "test -f '$audit_db'" 2>/dev/null; then
+    audit_mode="$(pearl_sqlite_read "$sqlite" "$audit_db" 'PRAGMA auto_vacuum;' || true)"
+  fi
   fact coordinator_db_auto_vacuum "$main_mode"
   fact route_snapshot_journal_auto_vacuum "$journal_mode"
-  if ! [[ "$main_mode" =~ ^[0-2]$ ]] || ! [[ "$journal_mode" =~ ^([0-2]|absent)$ ]]; then
+  fact audit_db_auto_vacuum "$audit_mode"
+  if ! [[ "$main_mode" =~ ^[0-2]$ ]] || ! [[ "$journal_mode" =~ ^([0-2]|absent)$ ]] || ! [[ "$audit_mode" =~ ^([0-2]|absent)$ ]]; then
     step vacuum_mode blocked "cannot read PRAGMA auto_vacuum on Pearl"
     set_next vacuum_mode blocked "Read the coordinator database auto_vacuum mode" "" \
-      "PRAGMA auto_vacuum over ssh failed (coordinator=$main_mode journal=$journal_mode); check PEARL_COORDINATOR_DB and PEARL_SQLITE3"
+      "PRAGMA auto_vacuum over ssh failed (coordinator=$main_mode journal=$journal_mode audit=$audit_mode); check PEARL_COORDINATOR_DB and PEARL_SQLITE3"
     return
   fi
-  if [ "$main_mode" = 2 ] && [[ "$journal_mode" =~ ^(2|absent)$ ]]; then
+  if [ "$main_mode" = 2 ] && [[ "$journal_mode" =~ ^(2|absent)$ ]] && [[ "$audit_mode" =~ ^(2|absent)$ ]]; then
     local s
     for s in vacuum_mode drain_gate convert; do step "$s" "done" ""; done
-    set_next "done" "done" "both database files are auto_vacuum=INCREMENTAL" ""
+    set_next "done" "done" "every database file is auto_vacuum=INCREMENTAL" ""
     return
   fi
-  step vacuum_mode "done" "coordinator=$main_mode journal=$journal_mode (2 = INCREMENTAL)"
+  step vacuum_mode "done" "coordinator=$main_mode journal=$journal_mode audit=$audit_mode (2 = INCREMENTAL)"
 
   # The drain signal: the last completed retention lap found nothing eligible.
   local lap
@@ -273,6 +281,7 @@ exec 7>>\"\$4\"; flock -n 7 || { echo \"lock busy: \$4\" >&2; exit 1; }
 exec 8>>\"\$5\"; flock -n 8 || { echo \"lock busy: \$5\" >&2; exit 1; }
 exec 9>>\"\$6\"; flock -n 9 || { echo \"lock busy: \$6\" >&2; exit 1; }
 files=\"\$db\"; [ ! -e \"\$db.route-snapshots\" ] || files=\"\$files \$db.route-snapshots\"
+audit=\"\$(dirname \"\$db\")/coordinator-audit.db\"; [ ! -e \"\$audit\" ] || files=\"\$files \$audit\"
 need=0
 for f in \$files; do
   [ -f \"\$f\" ] && [ ! -L \"\$f\" ] || { echo \"refused: \$f is not a regular file\" >&2; exit 1; }

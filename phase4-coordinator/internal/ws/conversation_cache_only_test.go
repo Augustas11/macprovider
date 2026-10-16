@@ -95,3 +95,51 @@ func TestSealInferenceRequestCarriesConversationCacheOnly(t *testing.T) {
 		t.Fatalf("sealed key %q cacheOnly %v", decoded.ConversationKey, decoded.ConversationCacheOnly)
 	}
 }
+
+func TestSealInferenceRequestCarriesFleetGrantInsideAuthenticatedEnvelope(t *testing.T) {
+	provider := pool.Provider{ProviderID: "provider-a", AssignedID: "session-a"}
+	grant := &FleetCacheGrant{ConversationKey: "conv:opaque", Generation: 7}
+	clear := &providerSession{}
+	raw, err := clear.sealInferenceRequestWithFleetCache(provider, "req-clear", []byte(`{}`), false, nil, grant.ConversationKey, false, grant, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var clearMsg InferenceRequest
+	if err := json.Unmarshal(raw, &clearMsg); err != nil {
+		t.Fatal(err)
+	}
+	if clearMsg.FleetCache == nil || *clearMsg.FleetCache != *grant {
+		t.Fatalf("clear fleet grant = %+v", clearMsg.FleetCache)
+	}
+
+	key := bytes.Repeat([]byte{0x22}, 32)
+	nonce := []byte{4, 3, 2, 1}
+	sealed := &providerSession{tier2: &pool.Tier2Session{
+		C2PKey: key, P2CKey: key, C2PNonceBase: nonce, P2CNonceBase: nonce, KeyID: "kid-fleet",
+	}}
+	raw, err = sealed.sealInferenceRequestWithFleetCache(provider, "req-sealed", []byte(`{}`), false, nil, grant.ConversationKey, false, grant, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte(`fleet_cache`)) || bytes.Contains(raw, []byte(grant.ConversationKey)) {
+		t.Fatalf("fleet grant leaked outside Tier-2 plaintext: %s", raw)
+	}
+	var outer encryptedInferenceRequest
+	if err := json.Unmarshal(raw, &outer); err != nil {
+		t.Fatal(err)
+	}
+	plain, err := tier2.OpenPillarBFrame(key, nonce, "kid-fleet", 0, tier2.AEADFrameAAD{
+		Type: "inference_request", Direction: "c2p", RequestID: "req-sealed", Stream: false,
+		ProviderID: provider.ProviderID, AssignedID: provider.AssignedID, Seq: 0,
+	}, tier2.AEADEnvelope{Encrypted: true, Enc: outer.Enc})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded encryptedInferencePlaintext
+	if err := json.Unmarshal(plain, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.FleetCache == nil || *decoded.FleetCache != *grant {
+		t.Fatalf("sealed fleet grant = %+v", decoded.FleetCache)
+	}
+}

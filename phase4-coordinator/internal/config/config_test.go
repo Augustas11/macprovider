@@ -676,8 +676,8 @@ func TestSpec005BillingDefaultsAndValidation(t *testing.T) {
 	if cfg.Endpoints.ProviderEarnings.RateLimitPerMinute != 60 {
 		t.Fatalf("unexpected endpoints defaults: %+v", cfg.Endpoints)
 	}
-	if cfg.Storage.RequestLogRetentionDays != 90 {
-		t.Fatalf("request log retention default=%d want 90", cfg.Storage.RequestLogRetentionDays)
+	if cfg.Storage.RequestLogRetentionDays != 14 {
+		t.Fatalf("request log retention default=%d want 14", cfg.Storage.RequestLogRetentionDays)
 	}
 	if cfg.Storage.AuditLogRetentionDays != 90 {
 		t.Fatalf("audit log retention default=%d want 90", cfg.Storage.AuditLogRetentionDays)
@@ -2144,5 +2144,82 @@ func TestStorageRouteSnapshotJournalGraceDefaultAndValidation(t *testing.T) {
 	cfg.Storage.RouteSnapshotJournalMirroredGraceMinutes = 7*24*60 + 1
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "route_snapshot_journal_mirrored_grace_minutes") {
 		t.Fatalf("route snapshot journal grace above a week should fail; err=%v", err)
+	}
+}
+
+func TestStorageAuditLogHotDaysDefaultAndValidation(t *testing.T) {
+	if got := Default().Storage.AuditLogHotDays; got != 7 {
+		t.Fatalf("audit log hot days default=%d want 7", got)
+	}
+	cfg := validTestConfig()
+	cfg.Storage.AuditLogHotDays = 0
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "audit_log_hot_days") {
+		t.Fatalf("audit_log_hot_days=0 should fail; err=%v", err)
+	}
+	cfg = validTestConfig()
+	cfg.Storage.AuditLogHotDays = cfg.Storage.AuditLogRetentionDays + 1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "audit_log_hot_days") {
+		t.Fatalf("audit_log_hot_days past the retention window should fail; err=%v", err)
+	}
+	cfg = validTestConfig()
+	cfg.Storage.AuditLogArchiveDir = "relative/audit-archive"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "audit_log_archive_dir") {
+		t.Fatalf("relative audit_log_archive_dir should fail; err=%v", err)
+	}
+	cfg = validTestConfig()
+	cfg.Storage.AuditLogArchiveDir = "/var/lib/macprovider/audit-archive"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("absolute audit_log_archive_dir should pass: %v", err)
+	}
+}
+
+func TestBillingRetentionVerdictCloseGraceDefaultAndValidation(t *testing.T) {
+	if got := Default().Billing.Retention.VerdictCloseGraceHours; got != 48 {
+		t.Fatalf("verdict close grace default=%d want 48", got)
+	}
+	for _, bad := range []int{0, 23, 721} {
+		cfg := validTestConfig()
+		cfg.Billing.Retention.VerdictCloseGraceHours = bad
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "verdict_close_grace_hours") {
+			t.Fatalf("verdict_close_grace_hours=%d should fail; err=%v", bad, err)
+		}
+	}
+	cfg := validTestConfig()
+	cfg.Settlement.StartupReconcileWindowHours = 48
+	cfg.Billing.Retention.VerdictCloseGraceHours = 48
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "startup_reconcile_window_hours") {
+		t.Fatalf("grace not past the startup scan window should fail; err=%v", err)
+	}
+	cfg = validTestConfig()
+	cfg.Billing.Retention.VerdictCloseGraceHours = 720
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("verdict_close_grace_hours=720 should pass: %v", err)
+	}
+}
+
+func TestLedgerRollupAndRequestLogRetentionDefaultsAndValidation(t *testing.T) {
+	def := Default()
+	if !def.Billing.LedgerRollup.Enabled || def.Billing.LedgerRollup.MinSettlementCycles != 5 || def.Storage.RequestLogRetentionDays != 14 {
+		t.Fatalf("defaults: rollup=%+v request_log_retention_days=%d", def.Billing.LedgerRollup, def.Storage.RequestLogRetentionDays)
+	}
+	cfg := validTestConfig()
+	cfg.Billing.LedgerRollup.MinSettlementCycles = 1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "ledger_rollup.min_settlement_cycles") {
+		t.Fatalf("min_settlement_cycles=1 should fail; err=%v", err)
+	}
+	cfg = validTestConfig()
+	cfg.Billing.LedgerRollup.MinSettlementCycles = 4 // 28 days at the weekly cadence
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "31 days") {
+		t.Fatalf("a 28-day rollup span should fail; err=%v", err)
+	}
+	cfg = validTestConfig()
+	cfg.Storage.RequestLogRetentionDays = cfg.Settlement.NightlyReconcileWindowDays
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "request_log_retention_days") {
+		t.Fatalf("request_log retention equal to the nightly window should fail; err=%v", err)
+	}
+	cfg = validTestConfig()
+	cfg.Storage.RequestLogRetentionDays = 90
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("a longer request_log retention should still pass: %v", err)
 	}
 }

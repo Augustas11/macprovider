@@ -2,6 +2,7 @@ package billing
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -81,5 +82,57 @@ INSERT INTO ledger_request_credits (
 	}
 	if _, err := store.CreatorPoolEarnings(ctx, []string{"mac-a"}, []string{"pool-a"}, from, time.Time{}); err == nil {
 		t.Fatal("half-open range accepted")
+	}
+}
+
+// #1793: creator earnings keep counting a credit after retention archives
+// its route snapshot (the tombstone keeps the pool binding) and after the
+// ledger rollup replaces it (the rollup row keeps it).
+func TestCreatorPoolEarningsCountArchivedAndRolledUpCredits(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	ctx := context.Background()
+	day := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	if _, err := store.db.Exec(`
+INSERT INTO ledger_request_credits (
+    request_id, attempt_n, provider_id, provider_assigned_id, ts_utc, model,
+    status, stream, prompt_tokens, completion_tokens, estimated_completion_tokens,
+    usage_source, prompt_rate_per_mtok, completion_rate_per_mtok,
+    global_multiplier_ppm, gross_credits, provider_share_bps, provider_credits,
+    fault_flag, recovery_source, created_at_utc
+) VALUES ('req-archived', 0, 'mac-a', 'assigned', ?, 'model-a', 200, 0, 10, 10, NULL,
+          'provider_reported', 1, 1, 1000000, 22, 9000, 20, 'none', 'hot_path', ?)`,
+		day.Format(time.RFC3339Nano), day.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`
+INSERT INTO settlement_evidence_archives (file_name, sha256, size_bytes, request_count, row_counts_json, cutoff_window_end_utc, status, created_at_utc, updated_at_utc)
+VALUES ('a.jsonl.gz', ?, 1, 1, '{}', '', 'deleted', '', '')`, strings.Repeat("a", 64)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`
+INSERT INTO settlement_evidence_archived_credits (request_credit_id, request_id, archive_id, spec022_verified, archived_at_utc, pool_id)
+SELECT id, request_id, 1, 1, '', 'pool-a' FROM ledger_request_credits WHERE request_id = 'req-archived'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`
+INSERT INTO ledger_settled_rollups (settlement_id, provider_id, hour_utc, model, fault_flag, credit_count,
+    gross_credits, provider_credits, operator_credits, min_ts_utc, max_ts_utc, pool_id)
+VALUES (1, 'mac-a', '2026-09-01T10', 'model-a', 'none', 3, 33, 30, 3, '2026-09-01T10:00:00Z', '2026-09-01T10:30:00Z', 'pool-a'),
+       (1, 'mac-a', '2026-09-01T11', 'model-a', 'none', 4, 44, 40, 4, '2026-09-01T11:00:00Z', '2026-09-01T11:30:00Z', '')`); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := store.CreatorPoolEarnings(ctx, []string{"mac-a"}, []string{"pool-a"}, time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0] != (CreatorPoolEarnings{PoolID: "pool-a", PayableRequests: 4, ProviderCredits: 50}) {
+		t.Fatalf("earnings = %+v", rows)
+	}
+	ranged, err := store.CreatorPoolEarnings(ctx, []string{"mac-a"}, []string{"pool-a"}, time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC), time.Date(2026, 10, 8, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ranged) != 1 || ranged[0] != (CreatorPoolEarnings{PoolID: "pool-a", PayableRequests: 1, ProviderCredits: 20}) {
+		t.Fatalf("ranged earnings = %+v", ranged)
 	}
 }

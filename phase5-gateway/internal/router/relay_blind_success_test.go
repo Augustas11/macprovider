@@ -100,6 +100,9 @@ func TestRelayBlindSuccessfulChatUsesExistingSettlementAndNeverRetries(t *testin
 					json.NewEncoder(w).Encode(relayblind.ConsumeResponse{Version: relayblind.ConsumeVersion, ProviderBinding: res.ProviderBinding, BuyerBinding: res.BuyerBinding, EnvelopeDigest: digestText, ExecutionAuthorization: "internal-execution-authorization", ConsumedAtUnix: fixedNow().Unix(), ExpiresAtUnix: res.ExpiresAtUnix})
 				case "/v1/chat/completions":
 					dispatched.Add(1)
+					if r.Header.Get("X-MacProvider-Internal-Conv") != "" || r.Header.Get("X-MacProvider-Internal-Conv-Cache") != "" {
+						t.Error("relay-blind request received reusable conversation cache identity")
+					}
 					body, _ := io.ReadAll(r.Body)
 					if !bytes.Equal(body, raw) || bytes.Contains(body, []byte("PRIVATE_PILOT_CANARY")) {
 						t.Error("opaque body changed or plaintext forwarded")

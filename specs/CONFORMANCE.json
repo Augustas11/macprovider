@@ -9,7 +9,7 @@
     {
       "spec_id": "SPEC-001",
       "title": "Phase 3 Binary: Mac Provider Inference CLI",
-      "version": "1.9.34",
+      "version": "1.9.36",
       "path": "specs/SPEC-001-phase3-binary.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -35,7 +35,7 @@
     {
       "spec_id": "SPEC-002",
       "title": "Phase 4 Coordinator: Mac Provider Request Router",
-      "version": "1.6.18",
+      "version": "1.6.21",
       "path": "specs/SPEC-002-coordinator.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -120,7 +120,7 @@
     {
       "spec_id": "SPEC-005",
       "title": "Billing, Settlement, and Provider Rewards",
-      "version": "0.6.22",
+      "version": "0.6.24",
       "path": "specs/SPEC-005-billing.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -152,7 +152,7 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.56",
+      "version": "0.9.60",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -206,7 +206,7 @@
     {
       "spec_id": "SPEC-008",
       "title": "Tier-2 Trust Layer",
-      "version": "0.7.1",
+      "version": "0.7.2",
       "path": "specs/SPEC-008-tier2.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -395,7 +395,7 @@
     {
       "spec_id": "SPEC-015",
       "title": "Verifiable inference receipts",
-      "version": "0.4.15",
+      "version": "0.4.17",
       "path": "specs/SPEC-015-receipts.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -504,7 +504,7 @@
     {
       "spec_id": "SPEC-018",
       "title": "Agentic tool calling (provider-side response synthesis)",
-      "version": "0.2.11",
+      "version": "0.2.12",
       "path": "specs/SPEC-018-agentic-tool-calling.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -627,7 +627,7 @@
     {
       "spec_id": "SPEC-022",
       "title": "Verified model settlement",
-      "version": "v0.4.4",
+      "version": "v0.4.7",
       "path": "specs/SPEC-022-verified-model-settlement.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -694,7 +694,7 @@
     {
       "spec_id": "SPEC-024",
       "title": "Prefix-cache billing and provider-local cache isolation",
-      "version": "0.2.10",
+      "version": "0.2.11",
       "path": "specs/SPEC-024-prefix-cache-billing.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -955,7 +955,7 @@
     {
       "spec_id": "SPEC-033",
       "title": "Hardware-Evidence Verifier (`hardware-verifier.v2`)",
-      "version": "v0.8.0",
+      "version": "v0.9.0",
       "path": "specs/SPEC-033-hardware-verifier.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1040,7 +1040,7 @@
     {
       "spec_id": "SPEC-037",
       "title": "KV survival across provider restarts (encrypted provider-local disk tier)",
-      "version": "v0.1.5",
+      "version": "v0.2.0",
       "path": "specs/SPEC-037-kv-survival-restart.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1521,7 +1521,7 @@
     {
       "spec_id": "SPEC-049",
       "title": "Operator-Constrained Privacy Class",
-      "version": "0.4.0",
+      "version": "0.5.0",
       "path": "specs/SPEC-049-operator-constrained-privacy-class.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1537,6 +1537,7 @@
         "SPEC-015",
         "SPEC-022",
         "SPEC-025",
+        "SPEC-033",
         "SPEC-041",
         "SPEC-042"
       ],
@@ -1550,7 +1551,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "SPEC-049 v0.2.0 defines the Beta operator-constrained privacy class with automatic provider enrollment, release-derived code approval, and the operator-signed identity directory. The coordinator, gateway, and buyer client stay default-off; the provider enters the class only on an eligible signed host. It is implemented locally with unit and integration tests. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result for the v0.1 requirement set is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json), and the v0.1.4 one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249) and superseded for v0.2.0 code by §8.2. The CLI224 eligible-network activation is recorded in §8.3 and Entries 251 and 252: the class runs in production under §8.3 without expiry, and SPEC-049-R023 promotion is not required for operation. A full signed v0.2 journey and SPEC-049-R023 remain pending; every requirement stays pending. No conformance promotion is made."
+        "rationale": "SPEC-049 v0.2.0 defines the Beta operator-constrained privacy class with automatic provider enrollment, release-derived code approval, and the operator-signed identity directory. The coordinator, gateway, and buyer client stay default-off; the provider enters the class only on an eligible signed host. It is implemented locally with unit and integration tests. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result for the v0.1 requirement set is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json), and the v0.1.4 one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249) and superseded for v0.2.0 code by §8.2. The CLI224 eligible-network activation is recorded in §8.3 and Entries 251 and 252: the class runs in production under §8.3 without expiry, and SPEC-049-R023 promotion is not required for operation. v0.5.0 adds the code_bound_attested label (SPEC-049-R033..SPEC-049-R035), granted per posture only when the App Attest key SPEC-033 recorded for the provider asserts it; providers without App Attest keep the device-bound label. A full signed v0.2 journey, a real-hardware code-bound run, and SPEC-049-R023 remain pending; every requirement stays pending. No conformance promotion is made."
       }
     },
     {
@@ -2018,7 +2019,7 @@
     {
       "requirement_id": "SPEC-010-R003",
       "spec_id": "SPEC-010",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ModelArtifactIdentity.swift:static let safetensorsManifestV1",
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func modelWeightArtifactManifestHash",
@@ -2045,7 +2046,12 @@
           "expires_at": "2026-10-27"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2014",
+        "rationale": "The tool-selection capability field changes the mapped HeartbeatUpdate declaration; its existing signed weights-identity evidence binds the prior fragment. Existing weights behavior is not claimed broken, and historical evidence is preserved without redating. Reconciliation of the changed mapped heartbeat fragment remains pending."
+      }
     },
     {
       "requirement_id": "SPEC-010-R004",
@@ -2123,7 +2129,7 @@
     {
       "requirement_id": "SPEC-010-R006",
       "spec_id": "SPEC-010",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:beginSwap",
         "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:catalogRuntimeMatches"
@@ -2150,7 +2156,12 @@
           "expires_at": "2026-11-10"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2016",
+        "rationale": "Historical signed text-only warm-swap evidence is retained. Native vision adds VLM loading and atomic processor identity to the mapped beginSwap implementation; the old commit selector no longer covers the current implementation. New native-image replacement acceptance is a post-merge Studio gate, not inferred from existing text qualification."
+      }
     },
     {
       "requirement_id": "SPEC-010-R007",
@@ -2402,6 +2413,28 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "SPEC-018 v0.2.11 clarifies the §3.8 enforcement point: the coordinator rejects multi-turn tool history for catalogued non-family models on native-only routes before dispatch, resolving aliases with billing.ModelsEquivalent; SPEC-004 model-class aliases keep only profiled members and 400 when none has a profile. Native-only Trusted Pool routes (empty or withheld runtime allowlist, or explicit native selection) are gated the same way; explicit non-native engines and BYOM models are exempt. Unit and handler tests land in this change; conformance stays pending until the coordinator deploys on Pearl."
+      }
+    },
+    {
+      "requirement_id": "SPEC-018-R006",
+      "spec_id": "SPEC-018",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/MacProviderCore/ToolSelectionPolicy.swift:public enum ToolSelectionPolicy",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func parseGeneratedOutput",
+        "phase3-binary/Sources/macprovider-cli/OpenAICompatibleLoopbackRuntime.swift:actor OpenAICompatibleLoopbackRuntime",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:toolSelectionCapabilities"
+      ],
+      "tests": [
+        "phase3-binary/Tests/MacProviderCoreTests/ToolSelectionPolicyTests.swift:final class ToolSelectionPolicyTests"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2014",
+        "rationale": "Bounded native tool selection uses complete-generation schema holdback for the exact Qwen3.6-35B-A3B-4bit loaded identity, native none, explicit loopback rejection, and unchanged ordinary auto behavior. Implementation and unit coverage do not qualify hardware or a released provider. Studio qualification and approved released-provider buyer acceptance remain pending; no live activation or conformance claim is made."
       }
     },
     {
@@ -3801,7 +3834,9 @@
         "phase4-coordinator/internal/onboarding/appattest_submit.go:func (h *Handler) HandleAppAttestSubmit",
         "phase4-coordinator/internal/onboarding/store_pg.go:RecordAppAttestVerification",
         "phase3-binary/Sources/macprovider-cli/AppAttestCommand.swift:struct AppAttestClient",
-        "phase3-binary/app/Sources/Malibu/Agent/AppAttestEnrollment.swift:func run(providerID: String) async -> Outcome"
+        "phase3-binary/app/Sources/Malibu/Agent/AppAttestEnrollment.swift:func run(providerID: String) async -> Outcome",
+        "phase4-coordinator/internal/onboarding/store_pg.go:RecordedAppAttestKey",
+        "phase4-coordinator/internal/onboarding/appattest.go:func (v AppleAppAttestVerifier) AttestedKey"
       ],
       "tests": [
         "phase4-coordinator/internal/appattest/real_macos27_test.go::TestRealMacOS27Attestation",
@@ -3813,7 +3848,9 @@
         "phase4-coordinator/internal/stats/integration_test.go::TestHardwareTrustAppAttestAutoTrust",
         "phase3-binary/Tests/macprovider-cliTests/AppAttestCommandTests.swift::testSubmitBodyHasExactlyThreeKeysAndTrimsStdinWhitespace",
         "phase3-binary/Tests/macprovider-cliTests/AppAttestCommandTests.swift::testCommandsNeverAcceptATokenOnArgv",
-        "phase3-binary/app/Tests/MalibuTests/AppAttestEnrollmentTests.swift::testSuccessAttestsClientDataHashAndSubmitsExactArguments"
+        "phase3-binary/app/Tests/MalibuTests/AppAttestEnrollmentTests.swift::testSuccessAttestsClientDataHashAndSubmitsExactArguments",
+        "phase4-coordinator/internal/onboarding/appattest_submit_test.go::TestAppAttestAlreadyRecordedReturnsTheFirstKeyID",
+        "phase4-coordinator/internal/stats/migrations/migrations_test.go::TestAppAttestPublicKeyMigrationShape"
       ],
       "journeys": [],
       "evidence": [],
@@ -6805,7 +6842,7 @@
     {
       "requirement_id": "SPEC-022-R001",
       "spec_id": "SPEC-022",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/config/config.go:SettlementConfig",
         "phase4-coordinator/internal/buyer/server.go:settlementEnforceMode"
@@ -6817,21 +6854,13 @@
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:160d0e2ff62b0e40c65dd3741a35de4be322ea8e",
-          "source": null,
-          "captured_at": "2026-09-18",
-          "expires_at": "2026-10-18"
-        },
-        {
-          "artifact": "sha256:3ff2a7603caa0a3a28d71f5eba4852b60efb56d850b085a77f6e0e1742bda0a7",
-          "source": "journeys/evidence/buyer-paid-path-20260918T034532Z.spec-005-r001-spec-005-r002-spec-006-r001-spec-006-r002-spec-022-r001-spec-022-r002-spec-022-r003-spec-022-r010.journey-result.signed.json",
-          "captured_at": "2026-09-18",
-          "expires_at": "2026-10-18"
-        }
-      ],
-      "gap": null
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1793",
+        "rationale": "The commit evidence of this row pinned config_test.go TestSpec005BillingDefaultsAndValidation, which asserts the shipped storage defaults; #1793 lowers the request_log_retention_days default from 90 to 14 days (SPEC-005 v0.6.24 section 2.1b), so the pinned fragment no longer matches, and the signed JOURNEY-BUYER-PAID-PATH envelope of 2026-09-18 expires on 2026-10-18. Implementation, tests, and journey mappings stay as local coverage. Restore conformant only after a fresh signed JOURNEY-BUYER-PAID-PATH envelope is produced by the protected workflow on main and consumed here."
+      }
     },
     {
       "requirement_id": "SPEC-022-R002",
@@ -7146,13 +7175,16 @@
         "phase4-coordinator/internal/billing/settlement_receipts.go:DrainSettlementReceiptAuditOutbox",
         "phase4-coordinator/internal/billing/settlement_receipts.go:func (s *Store) SettlementReceiptAuditOutboxStats",
         "phase4-coordinator/internal/billing/settlement_receipts.go:PruneSettlementReceiptAuditOutbox",
-        "phase4-coordinator/cmd/coordinator/main.go:startSettlementReceiptAuditOutboxDrainer"
+        "phase4-coordinator/cmd/coordinator/main.go:startSettlementReceiptAuditOutboxDrainer",
+        "phase4-coordinator/internal/billing/settlement_receipts.go:func settlementReceiptAuditPayloadForAccountHash",
+        "phase4-coordinator/internal/audit/store.go:func legacySettlementReceiptPayloadMatches"
       ],
       "tests": [
         "phase4-coordinator/internal/billing/settlement_receipts_test.go:TestIngestSettlementReceiptPersistsVerifiedStateAndRedactedAudit",
         "phase4-coordinator/cmd/coordinator/main_test.go:TestSettlementReceiptAuditOutboxDrainerRunsDuringContinuousTraffic",
         "phase4-coordinator/internal/billing/store_test.go:TestBillingMigrationAddsSettlementReceiptAuditOutboxPoisonColumnsAfterLegacyTable",
-        "phase4-coordinator/cmd/coordinator/main_test.go:TestSettlementReceiptAuditOutboxShutdownFlushDrains"
+        "phase4-coordinator/cmd/coordinator/main_test.go:TestSettlementReceiptAuditOutboxShutdownFlushDrains",
+        "phase4-coordinator/internal/audit/rotate_test.go:TestInsertSettlementReceiptOutboxAcceptsLegacyFormRedelivery"
       ],
       "journeys": [
         "JOURNEY-BUYER-ENFORCE"
@@ -7388,7 +7420,17 @@
         "phase4-coordinator/internal/billing/route_snapshot_journal_prune.go:func RouteSnapshotCanonicalJSON",
         "phase4-coordinator/internal/billing/settlement_receipts.go:func (s *Store) PruneSettlementReceiptAuditOutbox",
         "phase4-coordinator/internal/billing/store.go:func (s *Store) dropRedundantEvidenceIndexes",
-        "phase4-coordinator/cmd/coordinator/main.go:func startRouteSnapshotJournalPrunerWithConfig"
+        "phase4-coordinator/cmd/coordinator/main.go:func startRouteSnapshotJournalPrunerWithConfig",
+        "phase4-coordinator/internal/audit/rotate.go:func (s *Store) RotateClosedPeriods",
+        "phase4-coordinator/internal/verifiedarchive/archive.go:func Verify",
+        "phase4-coordinator/cmd/coordinator/main.go:func startAuditLogRotation",
+        "phase4-coordinator/internal/billing/evidence_retention.go:func (s *Store) evidenceRetentionCutoffsAt",
+        "phase4-coordinator/internal/billing/settlement.go:func (s *Store) RunSettlement",
+        "phase4-coordinator/internal/billing/recovery.go:func reconcileExistingCreditTx",
+        "phase4-coordinator/internal/billing/ledger_rollup.go:func (s *Store) RunLedgerRollup",
+        "phase4-coordinator/internal/billing/ledger_rollup.go:func (s *Store) applyLedgerRollupBatch",
+        "phase4-coordinator/internal/billing/payout.go:func (s *Store) ClaimPayoutReady",
+        "phase4-coordinator/internal/billing/wholesale_usage_fold.go:func (s *Store) FoldWholesaleRequestLog"
       ],
       "tests": [
         "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionEligibilityNeverTouchClasses",
@@ -7423,7 +7465,26 @@
         "phase4-coordinator/internal/billing/route_snapshot_canonical_test.go:TestInsertRouteSnapshotStoresRecomputableCanonicalEmpty",
         "phase4-coordinator/internal/billing/settlement_verdict_diagnostics_test.go:TestSettlementVerdictStoresEmptyDiagnosticsAndKeepsFacts",
         "phase4-coordinator/internal/billing/evidence_index_plan_test.go:TestMigrateDropsRedundantEvidenceIndexes",
-        "phase4-coordinator/internal/billing/evidence_index_plan_test.go:TestEvidenceQueriesKeepIndexedPlansWithoutDroppedIndexes"
+        "phase4-coordinator/internal/billing/evidence_index_plan_test.go:TestEvidenceQueriesKeepIndexedPlansWithoutDroppedIndexes",
+        "phase4-coordinator/internal/audit/rotate_test.go:TestRotateClosedPeriodsArchivesVerifiesAndDeletesClosedDays",
+        "phase4-coordinator/internal/audit/rotate_test.go:TestRotateClosedPeriodsRefusesTamperedArchive",
+        "phase4-coordinator/internal/audit/rotate_test.go:TestRotateClosedPeriodsKeepsRowChangedAfterExportAndResumes",
+        "phase4-coordinator/internal/audit/rotate_test.go:TestRotateClosedPeriodsRemovesArchivesPastRetention",
+        "phase4-coordinator/internal/verifiedarchive/archive_test.go:TestWriterRoundTripVerifiesAndDetectsTampering",
+        "phase4-coordinator/internal/billing/evidence_early_archive_test.go:TestEarlyArchivedEvidenceSettlesIntoIdenticalPayouts",
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionFinalityPointFollowsGraceAndReconcile",
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionArchivesUnsettledButKeepsQuarantinedHot",
+        "phase4-coordinator/internal/billing/ledger_rollup_test.go:TestLedgerRollupKeepsEveryTotalAndPayout",
+        "phase4-coordinator/internal/billing/ledger_rollup_test.go:TestLedgerRollupKeepsRequestChangedAfterExport",
+        "phase4-coordinator/internal/billing/ledger_rollup_test.go:TestSettlementLifecycleAcrossEarlyArchiveAndRollupMatchesHotLedger",
+        "phase4-coordinator/internal/billing/wholesale_usage_fold_test.go:TestWholesaleFoldKeepsStatementsIdentical",
+        "phase4-coordinator/internal/explorer/store_test.go:TestStoreOverviewAddsLedgerRollups",
+        "phase4-coordinator/internal/billing/creator_earnings_test.go:TestCreatorPoolEarningsCountArchivedAndRolledUpCredits",
+        "phase4-coordinator/internal/billing/ledger_rollup_test.go:TestLedgerRollupRetriesHeldRequests",
+        "phase4-coordinator/internal/billing/evidence_early_archive_test.go:TestLateUndeliveredQuarantineLeavesArchivedCreditPayable",
+        "phase4-coordinator/internal/billing/endpoints_test.go:TestReconcileEndpointRefusesRangeBeforeRequestLogWindow",
+        "phase4-coordinator/internal/billing/ledger_rollup_test.go:TestLedgerRollupFindsCreditsSettledLaterIntoAReadyPayout",
+        "phase4-coordinator/internal/billing/ledger_rollup_test.go:TestLedgerRollupWaitsForTheBillingMirror"
       ],
       "journeys": [],
       "evidence": [],
@@ -7431,7 +7492,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1793",
-        "rationale": "SPEC-022 v0.4.0 R-15 settled-evidence retention. The coordinator implements the R-15.2 selection predicate, the gzip JSONL archive with a SHA-256 manifest, local re-verification (checksum, size, row counts, row-for-row equality with the hot rows), an optional off-host confirmation command, an archive free-space floor, bounded batch deletion of archived rows only, tombstones that keep archived credits payable and verified and feed the provider earnings rollup, a pool-proven rollup guard, and bounded incremental vacuum. Since v0.4.3 a run drains archive after archive within a wall-clock budget along scan laps that start at a persisted archived low watermark (requests that can still become eligible go to a holds table every lap re-checks; too-young credits keep the watermark below them), derives backlog_drained from the last completed lap, reports the lap state and each database's auto_vacuum mode, and skips incremental vacuum on an auto_vacuum=NONE database; the one-time INCREMENTAL conversion is an ops entry-point step gated on the drain. It is on by default with enabled=false as the kill switch. Pending: the first live runs on the production database and a bounded hot database across two weekly settlements."
+        "rationale": "SPEC-022 v0.4.0 R-15 settled-evidence retention. The coordinator implements the R-15.2 selection predicate, the gzip JSONL archive with a SHA-256 manifest, local re-verification (checksum, size, row counts, row-for-row equality with the hot rows), an optional off-host confirmation command, an archive free-space floor, bounded batch deletion of archived rows only, tombstones that keep archived credits payable and verified and feed the provider earnings rollup, a pool-proven rollup guard, and bounded incremental vacuum. Since v0.4.3 a run drains archive after archive within a wall-clock budget along scan laps that start at a persisted archived low watermark (requests that can still become eligible go to a holds table every lap re-checks; too-young credits keep the watermark below them), derives backlog_drained from the last completed lap, reports the lap state and each database's auto_vacuum mode, and skips incremental vacuum on an auto_vacuum=NONE database; the one-time INCREMENTAL conversion is an ops entry-point step gated on the drain. It is on by default with enabled=false as the kill switch. Pending: the first live runs on the production database and a bounded hot database across two weekly settlements. Since v0.4.4-v0.4.6 (#1793 slices 6-8) the audit database rotates into verified closed period archives, evidence leaves at verdict close plus a 48-hour grace after a completed nightly reconcile (an unsettled credit settles through its tombstone), and settled ledger detail rows roll up into per-payout aggregates that every payable, payout, and earnings reader adds; the coordinator runtime that carries them is pending deployment."
       }
     },
     {
@@ -10379,7 +10440,7 @@
     {
       "requirement_id": "SPEC-047-R003",
       "spec_id": "SPEC-047",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/ws/model_admission.go:ModelAdmissionDefaultPaidRoutingEligible",
         "phase4-coordinator/internal/ws/model_admission.go:ModelAdmissionSettlementBindingForRouteSnapshot",
@@ -10436,7 +10497,12 @@
           "expires_at": "2026-11-05"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2014",
+        "rationale": "The tool-selection capability recheck changes mapped recordRouteSnapshot before dispatch. Existing model-admission signed evidence binds the prior fragment; it is preserved without redating or claiming it proves the new route guard. Reconciliation of this changed route-time fragment remains pending."
+      }
     },
     {
       "requirement_id": "SPEC-047-R004",
@@ -11119,12 +11185,15 @@
         "phase5-gateway/cmd/relay-blind-client/main.go:privacyScope",
         "phase5-gateway/cmd/relay-blind-client/main.go:privacyResidualRisks",
         "phase5-gateway/internal/router/privacy_class.go:privacyScope",
-        "phase5-gateway/internal/router/privacy_class.go:privacyResidualRisks"
+        "phase5-gateway/internal/router/privacy_class.go:privacyResidualRisks",
+        "phase5-gateway/internal/router/privacy_class.go:privacyCodeBoundScope",
+        "phase5-gateway/cmd/relay-blind-client/main.go:privacyCodeBoundScope"
       ],
       "tests": [
         "phase5-gateway/internal/router/privacy_class_test.go:TestPrivacyUsageMetadataExactStrings",
         "phase5-gateway/cmd/relay-blind-client/main_test.go:TestPrivacyClientDecryptsStreamAndNonStream",
-        "phase3-binary/Tests/macprovider-cliTests/PrivacyRuntimeHardeningTests.swift:testIdentityDocumentIsPublicMaterialOnly"
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyRuntimeHardeningTests.swift:testIdentityDocumentIsPublicMaterialOnly",
+        "phase5-gateway/internal/router/privacy_code_bound_test.go:TestPrivacyCodeBoundStringsArePinned"
       ],
       "journeys": [
         "JOURNEY-PRIVACY-CLASS-BETA",
@@ -11584,11 +11653,15 @@
       "implementation": [
         "phase5-gateway/cmd/relay-blind-client/main.go:privacyDisclosureAgrees",
         "phase5-gateway/cmd/relay-blind-client/main.go:privacyResidualRisks",
-        "phase5-gateway/internal/router/privacy_class.go:privacyUsageObject"
+        "phase5-gateway/internal/router/privacy_class.go:privacyUsageObject",
+        "phase5-gateway/internal/router/privacy_class.go:privacyUsageMetadataFor",
+        "phase5-gateway/cmd/relay-blind-client/main.go:privacyLabelStrings"
       ],
       "tests": [
         "phase5-gateway/internal/router/privacy_class_test.go:TestPrivacyUsageMetadataExactStrings",
-        "phase5-gateway/cmd/relay-blind-client/main_test.go:TestPrivacyClientRejectsMissingR020Headers"
+        "phase5-gateway/cmd/relay-blind-client/main_test.go:TestPrivacyClientRejectsMissingR020Headers",
+        "phase5-gateway/internal/router/privacy_code_bound_test.go:TestPrivacyChatDisclosureFollowsTheEchoedLabel",
+        "phase5-gateway/cmd/relay-blind-client/main_test.go:TestPrivacyClientCodeBoundRequirement"
       ],
       "journeys": [
         "JOURNEY-PRIVACY-CLASS-BETA",
@@ -11862,7 +11935,8 @@
         "phase4-coordinator/internal/buyer/privacy_class.go:selectPrivacyProvider",
         "phase4-coordinator/internal/stats/metrics/metrics.go:IncPrivacyRouteRejection",
         "phase5-gateway/internal/relayblind/privacy_reject.go:NormalizePrivacyRejectReason",
-        "phase5-gateway/internal/router/privacy_reject.go:notePrivacyUpstreamRejection"
+        "phase5-gateway/internal/router/privacy_reject.go:notePrivacyUpstreamRejection",
+        "phase4-coordinator/internal/buyer/privacy_reject.go:closerPrivacyReject"
       ],
       "tests": [
         "phase4-coordinator/internal/relayblind/privacy_reject_test.go:TestPrivacyRejectReasonsAreClosed",
@@ -11875,7 +11949,8 @@
         "phase4-coordinator/internal/buyer/privacy_reject_test.go:TestPrivacyRejectReasonHeaderOnlyForGateway",
         "phase4-coordinator/internal/stats/metrics/metrics_test.go:TestPrivacyRouteRejectionMetrics",
         "phase5-gateway/internal/router/privacy_reject_test.go:TestPrivacyGatewayRecordsUpstreamRejectReason",
-        "phase5-gateway/internal/router/privacy_reject_test.go:TestPrivacyGatewayRecordsConsumePhase"
+        "phase5-gateway/internal/router/privacy_reject_test.go:TestPrivacyGatewayRecordsConsumePhase",
+        "phase4-coordinator/internal/buyer/privacy_code_bound_test.go:TestPrivacyCodeBoundRequirementReservesOnlyCodeBoundSessions"
       ],
       "journeys": [],
       "evidence": [],
@@ -11975,6 +12050,115 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1985",
         "rationale": "SPEC-049 v0.4.0 Trusted Pool composition (#1985) is implemented in the coordinator, gateway, and reference client with unit and integration tests. It needs no provider change. It ships in a later runtime train; the requirement stays pending until deployed and a live pool-scoped privacy-class request is observed through the gateway."
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R033",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/relayblind/privacy_code_bound.go:evaluateCodeBound",
+        "phase4-coordinator/internal/relayblind/privacy_code_bound.go:ParseCodeBoundEvidence",
+        "phase4-coordinator/internal/relayblind/privacy_code_bound.go:AdvanceAppAttestCounter",
+        "phase4-coordinator/internal/relayblind/privacy_code_bound.go:UseCodeBound",
+        "phase4-coordinator/internal/relayblind/privacy_authority.go:VerifyPostureWithEvidence",
+        "phase4-coordinator/internal/ws/privacy_posture.go:handlePrivacyCodeBoundEvidence",
+        "phase4-coordinator/internal/stats/metrics/metrics.go:IncPrivacyCodeBoundRejection",
+        "phase4-coordinator/cmd/coordinator/main.go:appAttestRecordLookup"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/relayblind/privacy_code_bound_test.go:TestCodeBoundPostureEarnsTheLabel",
+        "phase4-coordinator/internal/relayblind/privacy_code_bound_test.go:TestCodeBoundFailuresOnlyWithholdTheLabel",
+        "phase4-coordinator/internal/relayblind/privacy_code_bound_test.go:TestCodeBoundUnconfiguredIsDeviceBound",
+        "phase4-coordinator/internal/relayblind/privacy_code_bound_test.go:TestCodeBoundCounterIsDurableAndStrictlyIncreasing",
+        "phase4-coordinator/internal/relayblind/privacy_code_bound_test.go:TestCodeBoundEvidenceNeverChangesPostureVerdict",
+        "phase4-coordinator/internal/relayblind/privacy_code_bound_test.go:TestCodeBoundEvidenceIsClosed",
+        "phase4-coordinator/internal/relayblind/privacy_code_bound_test.go:TestPrivacyCodeBoundVector",
+        "phase4-coordinator/internal/ws/privacy_code_bound_test.go:TestPrivacyCodeBoundEvidenceRoundTrip",
+        "phase4-coordinator/internal/stats/metrics/metrics_test.go:TestPrivacyCodeBoundRejectionMetrics"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1911",
+        "rationale": "SPEC-049 v0.5.0 code-bound posture key (#1911) is implemented in the coordinator, gateway, reference client, provider CLI and Malibu.app with unit tests and the shared framing vector test/fixtures/relay-blind/privacy-code-bound-v1.json. It needs the SPEC-033 recorder and migration 033 deployed, a runtime train, a signed Malibu.app and CLI release, and a real macOS 27 provider serving a code_bound_attested request through the gateway. The requirement stays pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R034",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/buyer/privacy_class.go:privacyAssuranceRequested",
+        "phase4-coordinator/internal/buyer/privacy_class.go:privacyGateExplain",
+        "phase4-coordinator/internal/buyer/privacy_class.go:handlePrivacyClassReservation",
+        "phase4-coordinator/internal/relayblind/store.go:CreateReservation",
+        "phase4-coordinator/internal/relayblind/privacy.go:PrivacyAssuranceKnown",
+        "phase5-gateway/internal/router/privacy_class.go:privacyAssuranceRequested",
+        "phase5-gateway/internal/router/privacy_class.go:privacyAssuranceEcho",
+        "phase5-gateway/internal/router/privacy_class.go:privacyUsageMetadataFor",
+        "phase5-gateway/internal/router/relay_blind_success.go:relayBlindUpstream",
+        "phase5-gateway/cmd/relay-blind-client/main.go:requirePrivacyReservation",
+        "phase5-gateway/cmd/relay-blind-client/main.go:privacyLabelStrings"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/buyer/privacy_code_bound_test.go:TestPrivacyCodeBoundRequirementReservesOnlyCodeBoundSessions",
+        "phase4-coordinator/internal/buyer/privacy_code_bound_test.go:TestPrivacyCodeBoundReservationLapsesBeforeDispatch",
+        "phase4-coordinator/internal/buyer/privacy_code_bound_test.go:TestPrivacyAssuranceRequirementIsClosed",
+        "phase4-coordinator/internal/relayblind/privacy_test.go:TestPrivacyReservationVersionClosed",
+        "phase5-gateway/internal/router/privacy_code_bound_test.go:TestPrivacyCodeBoundStringsArePinned",
+        "phase5-gateway/internal/router/privacy_code_bound_test.go:TestPrivacyAssuranceRequirementForwardedOnReservationOnly",
+        "phase5-gateway/internal/router/privacy_code_bound_test.go:TestPrivacyChatDisclosureFollowsTheEchoedLabel",
+        "phase5-gateway/cmd/relay-blind-client/main_test.go:TestPrivacyClientCodeBoundRequirement",
+        "phase5-gateway/cmd/relay-blind-client/main_test.go:TestPrivacyClientRejectsAnotherLabelBeforeSend",
+        "phase5-gateway/cmd/relay-blind-client/main_test.go:TestPrivacyClientRejectsALabelSwapAfterSend",
+        "phase5-gateway/cmd/relay-blind-client/main_test.go:TestPrivacyClientAssuranceFlagIsClosed"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1911",
+        "rationale": "SPEC-049 v0.5.0 code-bound posture key (#1911) is implemented in the coordinator, gateway, reference client, provider CLI and Malibu.app with unit tests and the shared framing vector test/fixtures/relay-blind/privacy-code-bound-v1.json. It needs the SPEC-033 recorder and migration 033 deployed, a runtime train, a signed Malibu.app and CLI release, and a real macOS 27 provider serving a code_bound_attested request through the gateway. The requirement stays pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R035",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/app/Sources/Malibu/Agent/PrivacyCodeBoundAttestor.swift:final class PrivacyCodeBoundAttestorCore",
+        "phase3-binary/app/Sources/Malibu/Agent/PrivacyCodeBoundAttestor.swift:final class PrivacyCodeBoundAttestorServer",
+        "phase3-binary/app/Sources/Malibu/Agent/PrivacyCodeBoundAttestor.swift:struct KernelPrivacyCodeBoundPeerInspector",
+        "phase3-binary/app/Sources/Malibu/Agent/AppAttestEnrollment.swift:func run(providerID: String) async -> Outcome",
+        "phase3-binary/Sources/macprovider-cli/PrivacyCodeBoundShared.swift:struct PrivacyCodeBoundStatement",
+        "phase3-binary/Sources/macprovider-cli/PrivacyCodeBound.swift:struct PrivacyCodeBoundSocketAttestor",
+        "phase3-binary/Sources/macprovider-cli/PrivacyCodeBound.swift:enum PrivacyCodeBoundEvidence",
+        "phase3-binary/Sources/macprovider-cli/PrivacyPostureResponder.swift:respondWithCodeBound"
+      ],
+      "tests": [
+        "phase3-binary/app/Tests/MalibuTests/PrivacyCodeBoundAttestorTests.swift:testAssertsTheStatementItFramedWithTheRecordedKey",
+        "phase3-binary/app/Tests/MalibuTests/PrivacyCodeBoundAttestorTests.swift:testRefusesAnyOtherPeer",
+        "phase3-binary/app/Tests/MalibuTests/PrivacyCodeBoundAttestorTests.swift:testRefusesWithoutAKeyOrAfterTheKeyFailed",
+        "phase3-binary/app/Tests/MalibuTests/PrivacyCodeBoundAttestorTests.swift:testServerAnswersOverItsSocketAndReadsThePeerFromTheKernel",
+        "phase3-binary/app/Tests/MalibuTests/AppAttestEnrollmentTests.swift:testDoneWithoutKeyIDRecoversTheRecordedKeyID",
+        "phase3-binary/app/Tests/MalibuTests/AppAttestEnrollmentTests.swift:testSubmitAlreadyRecordedKeepsTheRecordedKeyID",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyCodeBoundTests.swift:testStatementFramingMatchesSharedVector",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyCodeBoundTests.swift:testEvidenceOnlyForAnEchoingAttestor",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyCodeBoundTests.swift:testSocketAttestorExchangesOneFrame",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyCodeBoundTests.swift:testSocketAttestorFailsFastWithoutTheApp",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyPostureResponderTests.swift:testPostureCarriesCodeBoundEvidenceFirst"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1911",
+        "rationale": "SPEC-049 v0.5.0 code-bound posture key (#1911) is implemented in the coordinator, gateway, reference client, provider CLI and Malibu.app with unit tests and the shared framing vector test/fixtures/relay-blind/privacy-code-bound-v1.json. It needs the SPEC-033 recorder and migration 033 deployed, a runtime train, a signed Malibu.app and CLI release, and a real macOS 27 provider serving a code_bound_attested request through the gateway. The requirement stays pending."
       }
     },
     {
@@ -12337,6 +12521,29 @@
       }
     },
     {
+      "requirement_id": "SPEC-001-R007",
+      "spec_id": "SPEC-001",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:static func toolSelectionCapabilities",
+        "phase3-binary/Sources/macprovider-cli/InferenceRelay.swift:static func errorEndFrame",
+        "phase4-coordinator/internal/ws/messages.go:type Heartbeat struct",
+        "phase4-coordinator/internal/pool/provider.go:type ToolSelectionCapability"
+      ],
+      "tests": [
+        "phase3-binary/Tests/MacProviderCoreTests/ToolSelectionPolicyTests.swift:final class ToolSelectionPolicyTests",
+        "phase4-coordinator/internal/buyer/tool_selection_test.go:TestToolSelectionCapabilityRouting"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2014",
+        "rationale": "Additive tool-selection wire capabilities and terminal failure transport are implemented. Studio qualification, released-provider acceptance and deployed protocol evidence remain pending; capability assertions alone confer no trust or acceptance."
+      }
+    },
+    {
       "requirement_id": "SPEC-002-R005",
       "spec_id": "SPEC-002",
       "state": "pending",
@@ -12351,7 +12558,13 @@
         "phase4-coordinator/internal/buyer/delivered_sse_accounting.go:notifyFirstContent",
         "phase4-coordinator/internal/routing/perf.go:evictProviderOldestLocked",
         "phase4-coordinator/internal/routing/perf.go:LookupMany",
-        "phase4-coordinator/internal/buyer/phase_timing.go:routingServiceMs"
+        "phase4-coordinator/internal/buyer/phase_timing.go:routingServiceMs",
+        "phase4-coordinator/internal/buyer/phase_routing.go:generatedOutputTokens",
+        "phase4-coordinator/internal/routing/perf.go:FreshFor",
+        "phase4-coordinator/internal/buyer/phase_routing.go:holdPerformance",
+        "phase4-coordinator/internal/buyer/phase_routing.go:releasePerformance",
+        "phase4-coordinator/internal/buyer/phase_routing.go:canonicalArgumentsLen",
+        "phase4-coordinator/internal/buyer/phase_routing.go:shortestNumbers"
       ],
       "tests": [
         "phase4-coordinator/internal/routing/perf_test.go:TestPerfStoreEWMAAndFreshness",
@@ -12362,7 +12575,13 @@
         "test/integration/phase_routing_integration_test.go:TestPhaseAwareRoutingPrefersMeasuredFastProvider",
         "phase4-coordinator/internal/buyer/phase_routing_test.go:TestFirstTokenMarkedOnFirstContent",
         "phase4-coordinator/internal/routing/perf_test.go:TestPerfStorePerProviderBudget",
-        "phase4-coordinator/internal/routing/perf_test.go:TestPerfPrefillUsesServiceTime"
+        "phase4-coordinator/internal/routing/perf_test.go:TestPerfPrefillUsesServiceTime",
+        "phase4-coordinator/internal/routing/perf_test.go:TestPerfStoreEndToEndObservation",
+        "phase4-coordinator/internal/routing/perf_test.go:TestPerfFreshnessIsPerSignal",
+        "phase4-coordinator/internal/buyer/phase_routing_test.go:TestGeneratedOutputTokensResistsArgumentPadding",
+        "phase4-coordinator/internal/buyer/phase_routing_delivery_test.go:TestWSStreamingJSONConversionHasNoFirstToken",
+        "phase4-coordinator/internal/buyer/phase_routing_delivery_test.go:TestHeldPerformanceNeedsDelivery",
+        "phase4-coordinator/internal/buyer/phase_routing_delivery_test.go:TestWSNonStreamingLegacyObservesOnlyDeliveredBody"
       ],
       "journeys": [],
       "evidence": [],
@@ -12396,7 +12615,9 @@
         "phase4-coordinator/internal/buyer/phase_routing_test.go:TestPhaseAwareSelectionFallsBackWithoutEvidence",
         "phase4-coordinator/internal/buyer/phase_routing_test.go:TestValidateChatRequestCapturesMaxTokens",
         "test/integration/phase_routing_integration_test.go:TestPhaseAwareRoutingPrefersMeasuredFastProvider",
-        "phase4-coordinator/internal/buyer/phase_routing_test.go:TestStickyHitSkipsPhaseReorder"
+        "phase4-coordinator/internal/buyer/phase_routing_test.go:TestStickyHitSkipsPhaseReorder",
+        "phase4-coordinator/internal/routing/phase_test.go:TestPhaseOrderUsesEndToEndEvidence",
+        "phase4-coordinator/internal/buyer/phase_routing_test.go:TestPhaseAwareSelectionUsesNonStreamEvidence"
       ],
       "journeys": [],
       "evidence": [],
@@ -12484,6 +12705,37 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1355",
         "rationale": "SPEC-006 v0.9.51 route trace forwarding (#1355). It ships in a later gateway runtime train. The requirement stays pending until production metrics show it serving real buyer traffic through the gateway."
+      }
+    },
+    {
+      "requirement_id": "SPEC-006-R021",
+      "spec_id": "SPEC-006",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/buyer/tool_selection.go:func providerSupportsToolSelection",
+        "phase4-coordinator/internal/buyer/tool_selection.go:func validateToolSelection(body",
+        "phase4-coordinator/internal/buyer/tool_selection.go:func validateToolSelectionOutput",
+        "phase5-gateway/internal/router/tool_selection_capabilities.go:func mergeToolChoiceModes",
+        "phase5-gateway/internal/router/openrouter_models.go:func openRouterSupportedParameters"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/buyer/tool_selection_test.go:TestToolSelectionForwardingUnchanged",
+        "phase4-coordinator/internal/buyer/tool_selection_test.go:TestToolSelectionRequestValidation",
+        "phase4-coordinator/internal/buyer/tool_selection_test.go:TestToolSelectionCapabilityRouting",
+        "phase4-coordinator/internal/buyer/tool_selection_test.go:TestToolSelectionOutputValidation",
+        "phase4-coordinator/internal/buyer/tool_selection_test.go:TestToolSelectionQueuedReconnectFailsClosed",
+        "phase5-gateway/internal/router/tool_selection_test.go:TestToolSelectionFacadeTranslations",
+        "phase5-gateway/internal/router/tool_selection_test.go:TestToolSelectionFacadeRejectsMissingToolsAndNames",
+        "phase5-gateway/internal/router/tool_selection_test.go:TestToolSelectionFacadeStreamingFailureNeverCompletes",
+        "phase5-gateway/internal/router/tool_selection_test.go:TestToolSelectionCapabilitiesRequireCurrentEnforcement"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2014",
+        "rationale": "Selection-preserving dispatch, model/runtime capability filtering, schema/output validation and buyer capability projection are implemented with unit coverage. Coordinator/gateway deployment, Studio qualification and an approved released-provider buyer acceptance remain pending. Capability advertisements and parser support are not live acceptance; this row is not promoted."
       }
     },
     {
@@ -12868,6 +13120,95 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1062",
         "rationale": "SPEC-050 v0.1.0 (#1062) MALIBU stake allowance. Implemented in the campaign PR with unit and integration tests; the requirement stays pending until one account stakes, receives an allowance, and spends it through the gateway live."
+      }
+    },
+    {
+      "requirement_id": "SPEC-001-R008",
+      "spec_id": "SPEC-001",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:static func appendNativeVisionCapability",
+        "phase4-coordinator/internal/pool/provider.go:type VisionRuntimeCapability"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/NativeVisionAdvertisementTests.swift:func testExactLoadedSnapshotAdvertisesImplementationWithoutQualificationClaim"
+      ],
+      "state": "pending",
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2016",
+        "rationale": "Bounded native image implementation and exact qualified-capacity routing. Hardware paired-image, resource lifecycle and approved released-provider buyer/settlement acceptance are post-merge gates; no image qualification is claimed by parser support, model name, CI fixtures or text-only evidence."
+      }
+    },
+    {
+      "requirement_id": "SPEC-006-R022",
+      "spec_id": "SPEC-006",
+      "implementation": [
+        "phase3-binary/Sources/MacProviderCore/InlineImageInput.swift:public func validatedNativeImageInput",
+        "phase3-binary/Sources/macprovider-cli/NativeVisionRuntime.swift:struct NativeVisionProfile",
+        "phase4-coordinator/internal/buyer/vision.go:func providerSupportsVision"
+      ],
+      "tests": [
+        "phase3-binary/Tests/MacProviderCoreTests/InlineImageInputTests.swift:final class InlineImageInputTests",
+        "phase3-binary/Tests/macprovider-cliTests/NativeVisionRuntimeTests.swift:final class NativeVisionRuntimeTests",
+        "phase4-coordinator/internal/buyer/vision_routing_regression_test.go:func TestVisionRegressionNormalizationAndReceiptPreserveImageMeaning",
+        "phase5-gateway/internal/router/vision_regression_test.go:func TestVisionRegressionGatewayAccountingExcludesImageBytes"
+      ],
+      "state": "pending",
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2016",
+        "rationale": "Bounded native image implementation and exact qualified-capacity routing. Hardware paired-image, resource lifecycle and approved released-provider buyer/settlement acceptance are post-merge gates; no image qualification is claimed by parser support, model name, CI fixtures or text-only evidence."
+      }
+    },
+    {
+      "requirement_id": "SPEC-037-R014",
+      "spec_id": "SPEC-037",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2015",
+        "rationale": "Authenticated fleet grants, durable purge delivery, acknowledgement and reconnect reconciliation; implementation and acceptance are in progress. Studio hardware acceptance is pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-037-R015",
+      "spec_id": "SPEC-037",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2015",
+        "rationale": "Versioned complete recurrent checkpoint representation and restore; implementation and acceptance are in progress. Studio hardware acceptance is pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-037-R016",
+      "spec_id": "SPEC-037",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2015",
+        "rationale": "Fleet/recurrent cold restore, privacy, revocation-race and designated hardware acceptance; implementation and acceptance are in progress. Studio hardware acceptance is pending."
       }
     }
   ]

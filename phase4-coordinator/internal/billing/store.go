@@ -108,6 +108,17 @@ type Store struct {
 	// evidenceRetentionRun makes runs single-flight.
 	evidenceRetention    evidenceRetentionRuntime
 	evidenceRetentionRun sync.Mutex
+	// requestLogRetention is storage.request_log_retention_days
+	// (SetRequestLogRetention); zero means unknown.
+	requestLogRetention atomic.Int64
+}
+
+// SetRequestLogRetention records the request_log window, which bounds how far
+// back the admin reconcile can compare buyer and provider totals.
+func (s *Store) SetRequestLogRetention(d time.Duration) {
+	if s != nil {
+		s.requestLogRetention.Store(int64(d))
+	}
 }
 
 type SQLiteMetrics interface {
@@ -683,6 +694,9 @@ CREATE INDEX IF NOT EXISTS idx_lqr_request_latest ON ledger_quarantine_resolutio
 		return err
 	}
 	if err := s.ensureSettlementEvidenceRetentionTables(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureLedgerRollupTables(ctx); err != nil {
 		return err
 	}
 	// SPEC-022 R-15.9: a database opened by a retention-capable coordinator

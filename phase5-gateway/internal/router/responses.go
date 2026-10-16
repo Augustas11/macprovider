@@ -445,16 +445,29 @@ func responsesInputItemToChatMessage(item map[string]any) (map[string]any, bool,
 }
 
 func responsesContentSupported(v any) bool {
+	if v == nil {
+		return true
+	}
+	if _, ok := v.(string); ok {
+		return true
+	}
 	parts, ok := v.([]any)
 	if !ok {
-		return true
+		return false
 	}
 	for _, part := range parts {
 		m, ok := part.(map[string]any)
 		if !ok {
-			continue
+			return false
 		}
-		if typ, _ := m["type"].(string); typ != "" && typ != "input_text" && typ != "output_text" && typ != "text" {
+		typ, ok := m["type"].(string)
+		if !ok || (typ != "input_text" && typ != "output_text" && typ != "text") {
+			return false
+		}
+		if _, ok := m["image_url"]; ok {
+			return false
+		}
+		if _, ok := m["input_image"]; ok {
 			return false
 		}
 	}
@@ -693,7 +706,7 @@ func responsesToolChoiceToChatToolChoice(choice any, tools []map[string]any) (an
 	}
 	m, ok := choice.(map[string]any)
 	if !ok {
-		return choice, nil
+		return nil, &responsesTranslationError{code: "unsupported_parameter", param: "tool_choice", message: "tool_choice must be a supported string or function selection"}
 	}
 	if typ, _ := m["type"].(string); typ == "function" {
 		if name, _ := m["name"].(string); name != "" {

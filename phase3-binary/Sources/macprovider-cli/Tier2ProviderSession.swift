@@ -23,6 +23,9 @@ final class Tier2ProviderSession: @unchecked Sendable {
         /// SPEC-004 FR-SR-2 / SPEC-048-R009: the key is a cache-only
         /// auto-prefix key. Anything but a JSON `true` reads as false.
         let conversationCacheOnly: Bool
+        /// SPEC-037-R014 coordinator grant from the authenticated plaintext
+        /// envelope. Kept raw so the relay applies strict field validation.
+        let fleetCache: Any?
         let bodyEncoding: String?
         let relayBlindContext: [String: Any]?
         /// SPEC-049 §4.7. The field lives inside the SPEC-008 plaintext envelope.
@@ -60,6 +63,18 @@ final class Tier2ProviderSession: @unchecked Sendable {
     private var responseChunkPlaintextEnvelope = false
     private var c2pCounter: UInt64 = 0
     private var p2cCounter: UInt64 = 0
+
+    #if MACPROVIDER_TEST_FIXTURES
+    private var responseEndTransformForTest: (@Sendable ([String: Any]) throws -> [String: Any])?
+
+    /// Malicious-provider fixtures alter the constructed receipt before it is
+    /// sealed, so the coordinator receives it through the normal authenticated leg.
+    func setResponseEndTransformForTest(_ transform: @escaping @Sendable ([String: Any]) throws -> [String: Any]) {
+        lock.lock()
+        defer { lock.unlock() }
+        responseEndTransformForTest = transform
+    }
+    #endif
 
     init(
         providerID: String,
@@ -260,6 +275,7 @@ final class Tier2ProviderSession: @unchecked Sendable {
             maxOutputTokens: maxOutputTokens,
             conversationKey: conversationKey?.isEmpty == false ? conversationKey : nil,
             conversationCacheOnly: Self.isJSONTrue(envelope["conversation_cache_only"]),
+            fleetCache: envelope["fleet_cache"],
             bodyEncoding: envelope["body_encoding"] as? String,
             relayBlindContext: envelope["relay_blind_context"] as? [String: Any],
             privacyClass: privacyClass,
@@ -378,6 +394,12 @@ final class Tier2ProviderSession: @unchecked Sendable {
     }
 
     func sealResponseEnd(requestID: String, stream: Bool, payload: [String: Any]) throws -> [String: Any] {
+        #if MACPROVIDER_TEST_FIXTURES
+        lock.lock()
+        let transform = responseEndTransformForTest
+        lock.unlock()
+        let payload = try transform?(payload) ?? payload
+        #endif
         let plaintext = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
         lock.lock()
         defer { lock.unlock() }
@@ -447,6 +469,7 @@ final class Tier2ProviderSession: @unchecked Sendable {
         maxOutputTokens: Int? = nil,
         conversationKey: String? = nil,
         conversationCacheOnly: Bool = false,
+        fleetCache: [String: Any]? = nil,
         bodyEncoding: String? = nil,
         relayBlindContext: [String: Any]? = nil,
         privacyClass: String? = nil,
@@ -467,6 +490,7 @@ final class Tier2ProviderSession: @unchecked Sendable {
             "body": plaintext,
         ]
         if let maxOutputTokens { plaintextEnvelope["max_output_tokens"] = maxOutputTokens }
+        if let fleetCache { plaintextEnvelope["fleet_cache"] = fleetCache }
         if let conversationKey = conversationKey?.trimmingCharacters(in: .whitespacesAndNewlines), !conversationKey.isEmpty {
             plaintextEnvelope["conversation_key"] = conversationKey
             if conversationCacheOnly { plaintextEnvelope["conversation_cache_only"] = true }

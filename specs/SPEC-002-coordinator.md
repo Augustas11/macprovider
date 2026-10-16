@@ -1,6 +1,52 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.18 (2026-10-15, public-repo cleanup)
+**Version:** 1.6.21 (2026-10-15, non-streamed performance evidence)
+
+**Change log v1.6.21 (2026-10-15, issue #1355):** SPEC-002-R005 now learns
+from non-streamed traffic. Every attempt's times run from provider dispatch
+start, so a provider that holds its response headers cannot shorten TTFT or
+the service time. A new signal, service throughput (the generated output over
+dispatch start to done of a non-streamed attempt), is what the `throughput`
+phase (non-streamed requests) ranks on. Rates that run to done (prefill and
+service throughput) come only from non-streamed attempts, whose done is the
+receipt of the whole response, so the response mode never decides which
+provider looks faster. An attempt
+without a coordinator first-token time (non-streamed, buffered, or a whole
+JSON response converted to SSE) is end-to-end and never yields a TTFT or
+decode sample. An attempt recorded before its body is written enters the
+store only once the whole body reached the buyer. The
+output count for every rate is the coordinator's estimate of the generated
+content and tool calls it delivered (bytes / 4), replacing the
+delivered-SSE-bytes estimate; the prefill gate moves from 4 to 32 times that
+output so it keeps excluding decode-dominated attempts. An attempt without a
+normally completed settlement output that delivered content or a tool call
+yields no observation. Freshness is per signal, and each SPEC-002-R006 phase
+ranks only on its own fresh signal: `throughput` on service throughput,
+`interactive` on TTFT, `long_input` on prefill or TTFT. A record without TTFT
+is never fresh for `interactive`, and its latency class is `unknown` unless
+fresh prefill gives one for `long_input`.
+SPEC-002-R007 adds `prefill_samples`, `decode_samples` and `service_samples`
+to the route_trace line. No eligibility, admission, pricing, settlement or
+buyer-visible grammar changes.
+
+**Change log v1.6.20 (2026-10-15, Related: #2016):**
+The user-content contract admits the bounded SPEC-006-R022 native inline-image
+exception. Image dispatch requires exact current SPEC-001-R008 capability and
+an operator-reviewed qualification bound to the provider, released binary,
+artifact/runtime and serving configuration. Missing qualification retains
+explicit rejection; no global text-only validation relaxation is authorized.
+
+**Change log v1.6.19 (2026-10-15, issue #1793):** R-7.10.2 now bounds the
+settlement receipt audit database (`coordinator-audit.db`) to its active
+period. Rows of whole UTC days older than `storage.audit_log_hot_days`
+(default 7) move to closed period archives: gzip JSON lines with a SHA-256,
+byte size and row counts in a sidecar manifest, re-read and verified before
+any row is deleted, and each row deleted only while it still equals its
+archived copy. The archives, not the hot file, hold the audit history for
+`storage.audit_log_retention_days` (90-day floor unchanged); an archive whose
+newest day is past that window is removed. AC-K.14 is restated accordingly.
+The money-database `audit_log` keeps the existing pruner. No event type or
+payload rule in this spec changes.
 
 **Change log v1.6.18 (2026-10-15, public-repo cleanup):** Editorial, no normative change: generic wording for the third-party marketplace seller integration; removes a historical host address.
 
@@ -3119,7 +3165,7 @@ inline so this spec is self-contained for build session use; if SPEC-001
 | `role` | Required content shape |
 |---|---|
 | `system` | `content` must be a non-empty string |
-| `user` | `content` must be a non-empty string (no multimodal content arrays in v1) |
+| `user` | `content` must be a non-empty string or a text array, except the bounded ordered native image profile in SPEC-006-R022; image-only input is valid only on that qualified path |
 | `assistant` | `content` may be a string OR `content: null` with `tool_calls` array. If both `content` and `tool_calls` are null/absent → 400. |
 | `tool` | `tool_call_id` (string, required) and `content` (string, required) |
 
@@ -3874,10 +3920,49 @@ reads them, and startup drops them where an earlier release created them
 table.
 
 R-7.10.2 `ts_utc` MUST be RFC3339 in UTC. `payload_json` MUST be a
-well-formed JSON object whose schema depends on `event_type`. The table
+well-formed JSON object whose schema depends on `event_type`. The
 retention policy follows §7.7 / §13 `storage.audit_log_retention_days`
-with default 90 days, mirroring `request_log_retention_days`, per
-SPEC-011 v0.5 §3.6 R-3.6.1 / R-3.6.2 and SPEC-002 v1.3.5 AC-K.14.
+with default 90 days (minimum 90), per SPEC-011 v0.5 §3.6 R-3.6.1 /
+R-3.6.2 and SPEC-002 v1.3.5 AC-K.14.
+
+R-7.10.2a (v1.6.19) The settlement receipt audit database
+(`coordinator-audit.db`, SPEC-022 R-11.1.1) keeps only its active period
+hot and satisfies the retention window from closed period archives:
+
+1. A daily rotation moves the rows of whole UTC days older than
+   `storage.audit_log_hot_days` (default 7, at least 1, at most
+   `audit_log_retention_days`) out of the hot file. It writes them to an
+   archive in `storage.audit_log_archive_dir` (default `audit-archive` next
+   to the audit database): gzip-compressed JSON lines holding every column
+   of every row, with a sidecar manifest of the file's SHA-256, byte size,
+   and row counts. The archive format and its verification are the ones
+   settled-evidence retention uses (SPEC-022 R-15.3, R-15.4).
+2. No row is deleted until the archive was re-read and verified: SHA-256
+   and byte size equal the manifest, every line parses, and the row counts
+   match. Deletion re-reads the verified file, requires each block of rows
+   to match its digest from the verified pass, and deletes a row only while
+   the live row equals its archived copy column for column. A row that
+   changed stays hot and is archived again as it now is. A run that stops
+   early resumes the same archive.
+3. The rotation refuses to write an archive while the archive filesystem is
+   below the settled-evidence retention free-space floor
+   (`billing.retention.archive_min_free_bytes` /
+   `archive_min_free_percent`), and re-checks it as the archive grows.
+4. Each archive is recorded in `audit_log_archives` in the audit database
+   (file, SHA-256, size, row count, first and last UTC day, status). An
+   archive whose last day is older than `audit_log_retention_days` is
+   removed together with its manifest.
+5. Rows leave this database only through a verified archive; the generic
+   pruner does not run on it. A row past `audit_log_retention_days` that a
+   rotation has not archived yet is archived by the next run (oldest first)
+   and its archive removed with the expired ones. The rotation shares the
+   settled-evidence retention run budget and pacing; its settings apply at
+   coordinator start. The money-database `audit_log` (operator swap,
+   receipt rotation, and billing admin events) keeps the existing pruner and
+   is not rotated.
+
+`coordinator-cli audit-log-archive verify --archive <file>` re-verifies an
+archive from the file alone.
 
 #### 7.10.2. `operator_model_swap` event type (NORMATIVE)
 
@@ -4817,8 +4902,10 @@ SPEC-002 v1.3.5 R-7.10.8 and SPEC-011 v0.5 AC-20.
 **AC-K.14 Audit-log retention.**
 Rows older than `storage.audit_log_retention_days` (default 90) MUST be
 pruned by the existing coordinator pruner, extended from the §7.7
-pruner pattern. Traces to SPEC-002 v1.3.5 §7.10.1 and SPEC-011 v0.5
-AC-20.
+pruner pattern. In the settlement receipt audit database, rows leave the
+hot file only into a verified closed period archive (R-7.10.2a), and an
+archive is removed once its last day is older than the retention window. Traces to SPEC-002 v1.3.5
+§7.10.1 and SPEC-011 v0.5 AC-20.
 
 **AC-K.15 SPEC-010 validation-order pass-through.**
 The coordinator's v2 `auth_request` initial-stage parser MUST apply
@@ -5315,48 +5402,83 @@ rather than replacing it with a protocol-shape error.
 The coordinator MUST keep an in-memory performance record per
 (`provider_id`, requested model) built only from requests it served and
 measured itself. An observation is recorded once per provider attempt, when
-the attempt was streamed (a non-streamed response's first byte follows the
-whole generation), completed with a 2xx status and no recorded error, error
-code or fault, names its provider, and has a coordinator first-token time for
-that same attempt. Relay-blind and privacy-class attempts MUST NOT be
-recorded.
+the attempt completed with a 2xx status and no recorded error, error code or
+fault, names its provider, has coordinator timing for that same attempt, and
+has a normally completed settlement output that delivered content or a tool
+call. Missing or unavailable output is not empty output: such an attempt has no
+output estimate and yields no observation. Relay-blind and privacy-class
+attempts MUST NOT be recorded.
 
 The first-token time is when the first delivered event carrying generated
 content or a tool call reaches the buyer side of the coordinator; an opening
 role-only event does not count. Only incrementally relayed streams carry a
-first-token time: a stream the coordinator buffers or renders from a whole
-JSON response delivers everything at once and yields no sample. Every quantity is the coordinator's own; no
-provider usage count enters a rate:
+first-token time. An attempt with a first-token time is **timed**; any other
+attempt (a non-streamed response, or a stream the coordinator buffers or
+renders from a whole JSON response, including a whole JSON completion it
+converts to SSE) is **end-to-end**: its first byte follows
+the whole generation, so it MUST NOT yield a TTFT or decode sample. Every
+quantity is the coordinator's own and every time starts at provider dispatch
+start, so a provider that holds its response headers until it is done cannot
+shorten it; no provider usage count enters a rate:
 
-- `ttft_ms`, provider dispatch done to first token, clamped to 1..600000;
-- a prefill rate, the coordinator's token estimate of the request body divided
-  by the whole service time (provider dispatch done to done), only on
-  prefill-dominated attempts: the estimate is at least 64 tokens and at least
-  4 times the delivered completion estimate, and the provider reported no
-  cached prompt prefix (a cache hit is not a prefill measurement); clamped to
-  at most 50000 tokens/s. Using the service time, not TTFT, means an early
-  content token cannot inflate it;
-- a decode rate, the coordinator's delivered-bytes completion estimate minus 1
-  divided by the first-token-to-done time, only when that estimate is at least
-  8 and the time is positive, clamped to at most 2000 tokens/s.
+- the output estimate is the byte length of the generated content and tool
+  calls the coordinator delivered, from its own settlement output, divided by
+  4 and rounded up. Tool-call arguments count at their length re-encoded as
+  compact JSON with every number in its shortest spelling, so whitespace,
+  escape spellings or numeric padding that leave the call unchanged cannot
+  inflate it. Reasoning that was not delivered as content is
+  not counted;
+- the service time is provider dispatch start to done;
+- `ttft_ms` (timed only), provider dispatch start to first token, clamped to
+  1..600000;
+- a prefill rate (non-streamed attempts only, for the same reason as service
+  throughput below), the coordinator's token estimate of the request body
+  divided by the service time, only on prefill-dominated attempts: the estimate is at
+  least 64 tokens and at least 32 times the output estimate (prefill runs
+  roughly 20 to 50 times faster per token than decode, so below that the
+  service time is mostly decode), and the provider reported no cached prompt
+  prefix (a cache hit is not a prefill measurement); clamped to at most 50000
+  tokens/s. Using the service time, not TTFT, means an early content token
+  cannot inflate it;
+- a decode rate (timed only), the output estimate minus 1 divided by the
+  first-token-to-done time, when the output estimate is at least 8 and the
+  time is positive, clamped to at most 2000 tokens/s;
+- a service throughput (non-streamed attempts only), the output estimate
+  divided by the service time, when the output estimate is at least 8, the
+  coordinator's estimate of the whole request (cached or not) is at most 16
+  times the output estimate (so prompt ingestion does not pass for
+  generation), and the time is positive; clamped to at most 2000 tokens/s. A
+  streamed attempt is done only after its buyer writes, a non-streamed one
+  when the whole response was received, so streamed attempts never feed a
+  rate that runs to done and the response mode never decides which provider
+  looks faster.
+
+Provider usage may only withhold a sample: a reported cached prefix withholds
+the prefill sample. An end-to-end attempt that yields no sample creates no
+record. A non-streamed attempt that is recorded before its body is written
+(a gateway without negotiated settlement trailers) is observed only after the
+whole body was written and flushed to the buyer; a failed write or flush drops
+it.
 
 Each metric is an exponentially weighted moving average with weight 0.2 for
-the new sample, with its own sample count and the time of the last
-observation. A record is **fresh** when it has at least 3 TTFT samples and its
-last observation is at most 15 minutes old; anything else is **unmeasured**.
+the new sample, with its own sample count and the time of its own last
+observation. A signal is **fresh** when it has at least 3 samples and its last
+observation is at most 15 minutes old; a record is fresh for a phase when the
+signal that phase is judged on (SPEC-002-R006) is fresh, and is otherwise
+**unmeasured** for it. Samples of one signal never refresh another, so a
+missing or stale TTFT is never read as zero or as fast.
 A provider can still shape its own TTFT, for example by emitting an early
 content token; that moves time from TTFT into decode, which the interactive
-score weighs equally, it cannot change the prefill rate, and the bounds in
-SPEC-002-R006 limit what any score can win.
+score weighs equally, it cannot change the prefill rate, and the bounds in SPEC-002-R006 limit what any score can win.
 
 The only self-reported input is the heartbeat `throughput_tps_estimate`, used
-as a decode prior worth 2 samples and capped at 1.25 times the measured decode
+as a decode prior (not a service-throughput prior) worth 2 samples and capped at 1.25 times the measured decode
 average, so a self-report never outranks measurements. The SPEC-001-R006
 engine profile MUST NOT be read as a measurement. The store holds at most
 65536 records and at most 64 per provider; a provider at its budget replaces
 its own least recently observed record, so it never displaces another
-provider's, and a full store evicts records that are not fresh first, then the
-least recently observed. It is not persisted: after a coordinator restart every
+provider's, and a full store evicts records with no fresh signal first, then
+the least recently observed. It is not persisted: after a coordinator restart every
 provider is unmeasured until traffic rebuilds it. The store never changes
 eligibility, admission, trust tier, pricing or settlement.
 
@@ -5377,16 +5499,23 @@ estimate is the coordinator's existing token estimate of the request body.
 - `interactive`: otherwise, when `stream` is true;
 - `throughput`: otherwise.
 
-**Score.** Only fresh candidates (SPEC-002-R005) are scored. With values
-normalized by the best value among fresh candidates (so each term is in 0..1),
-and `free_share` the provider's free slots over its total slots:
+**Score.** Only candidates fresh for the phase (SPEC-002-R005) are scored.
+A candidate is fresh for `interactive` when its TTFT is fresh, for
+`throughput` when its service throughput is fresh, and for `long_input` when
+its prefill or its TTFT is fresh. With values normalized by the best value among those
+candidates (so each term is in 0..1), and `free_share` the provider's free
+slots over its total slots:
 
 - `interactive`: 0.5 × (lowest TTFT / TTFT) + 0.5 × (decode / highest decode),
   times (0.5 + 0.5 × `free_share`);
 - `long_input`: 0.8 × (prefill / highest prefill) + 0.2 × (decode / highest
-  decode), times (0.5 + 0.5 × `free_share`); a candidate without a prefill
-  average contributes 0 to the prefill term;
-- `throughput`: (free slots × decode) / highest (free slots × decode).
+  decode), times (0.5 + 0.5 × `free_share`);
+- `throughput`: (free slots × service throughput) / highest (free slots ×
+  service throughput).
+
+A secondary term (decode for `interactive` and `long_input`, prefill for
+`long_input`) whose signal has no sample from the last 15 minutes contributes
+0, never a favourable value.
 
 **Order.** With two or more fresh candidates, the fresh candidates whose score
 is at least 0.85 of the best score form the band; one band member chosen by a
@@ -5419,7 +5548,9 @@ For every successful plaintext selection, the coordinator MUST write one
 operator log line `event=route_trace` with `request_id`, `provider_id`,
 `model`, `phase`, `basis` (`measured`, `explore`, `fallback` or `pinned`),
 `scope` (`ranked`, `sticky`, `pinned` or `slot_queue`), `candidates`, `fresh`, the
-chosen provider's `samples`, `evidence_age_s` (or `-1`), `score` (or `-1` when
+chosen provider's `samples` (TTFT samples), `prefill_samples`,
+`decode_samples`, `service_samples`, `evidence_age_s` (age of the newest
+sample of any signal) (or `-1`), `score` (or `-1` when
 not scored), `engine`, `latency` and `privacy_mode` (the gateway's
 SPEC-006-R019 effective mode, or `unset`), and increment
 `coordinator_route_selections_total{phase,basis}`. A pinned selection counts
@@ -5431,12 +5562,14 @@ and member order, and no provider identity:
 
 `v=1; phase=<interactive|long_input|throughput>; basis=<measured|explore|fallback|pinned>; evidence=<fresh|none>; engine=<general_mlx|continuous_batching|native_mtp|unknown>; latency=<low|medium|high|unknown>`
 
-`evidence` is `fresh` when the chosen provider's record is fresh. `engine` is
-the chosen provider's SPEC-001-R006 `engine_family`, or `unknown` without a
-valid profile. `latency` is the expected time to first token for the chosen
-provider: the coordinator's input estimate over the prefill average for
-`long_input` when one exists, else the TTFT average; `low` below 0.5 s, `medium` below 2 s, `high`
-otherwise, `unknown` when the record is not fresh. The header describes the
+`evidence` is `fresh` when the chosen provider's record is fresh for the
+request's phase. `engine` is the chosen provider's SPEC-001-R006
+`engine_family`, or `unknown` without a valid profile. `latency` is the
+expected time to first token for the chosen provider: the coordinator's input
+estimate over the prefill average for `long_input` when prefill is fresh, else
+the TTFT average when TTFT is fresh; `low` below 0.5 s, `medium` below 2 s,
+`high` otherwise, and `unknown` without either, including a record that holds
+only service-throughput evidence. The header describes the
 first selection of the request; a failover does not rewrite it. It rides every
 response the coordinator writes after that selection, including its error
 responses. Relay-blind

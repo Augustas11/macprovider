@@ -1894,69 +1894,103 @@ func settlementReceiptAuditPayload(state SettlementReceiptState, checks *Settlem
 	return settlementReceiptAuditPayloadForAccountHash(redactedAccountScopeHash(state.AccountScope), state, checks, verdict, attemptedReceivedAtUnixMS, 0)
 }
 
+// settlementReceiptAuditPayloadForAccountHash builds the audit-database
+// payload of one outbox event (SPEC-022 R-11.1, SPEC-015 §11). An ingested
+// event names the attempt and the receipt; the verdict event of the same
+// attempt carries every R-11.1 field. Fields that repeat another field, or
+// that the attempt identity already gives, are not written, and verifier
+// diagnostics are redacted to the names of the unmet checks.
 func settlementReceiptAuditPayloadForAccountHash(accountScopeHash string, state SettlementReceiptState, checks *SettlementVerificationChecks, verdict bool, attemptedReceivedAtUnixMS int64, outboxID int64) (string, error) {
 	payload := map[string]any{
 		"account_scope_hash":               accountScopeHash,
 		"request_id":                       state.RequestID,
-		"attempt_id":                       settlementReceiptAttemptID(state),
 		"attempt_n":                        state.AttemptN,
 		"provider_id":                      state.ProviderID,
 		"receipt_version":                  state.ReceiptVersion,
 		"receipt_profile":                  state.ReceiptProfile,
-		"terminal_state":                   state.TerminalState,
 		"route_snapshot_digest":            state.RouteSnapshotDigest,
-		"route_snapshot_policy_version":    state.RouteSnapshotPolicyVersion,
-		"route_snapshot_mode":              state.RouteSnapshotMode,
-		"paid_entrypoint":                  state.PaidEntrypoint,
-		"spec008_hash_status":              state.Spec008HashStatus,
-		"catalog_id":                       state.CatalogID,
-		"catalog_body_digest":              state.CatalogBodyDigest,
 		"provider_receipt_key_fingerprint": state.ProviderReceiptKeyFingerprint,
-		"model_id":                         state.ModelID,
-		"provider_reported_model_hash":     state.ProviderReportedModelHash,
-		"model_hash":                       state.ModelHash,
-		"expected_catalog_model_hash":      state.ExpectedCatalogModelHash,
-		"prompt_hash":                      state.PromptHash,
-		"output_hash":                      state.OutputHash,
-		"usage_digest":                     state.UsageDigest,
 		"received_at_unix_ms":              state.ReceivedAtUnixMS,
 	}
 	if outboxID > 0 {
 		payload["settlement_receipt_audit_outbox_id"] = outboxID
 	}
-	if state.ProviderSessionID != "" {
-		payload["provider_session_id"] = state.ProviderSessionID
-	}
-	if state.ProviderGenerationID != "" {
-		payload["provider_generation_id"] = state.ProviderGenerationID
-	}
 	if verdict {
 		if attemptedReceivedAtUnixMS == 0 {
 			attemptedReceivedAtUnixMS = state.ReceivedAtUnixMS
 		}
+		payload["terminal_state"] = state.TerminalState
+		payload["route_snapshot_policy_version"] = state.RouteSnapshotPolicyVersion
+		payload["route_snapshot_mode"] = state.RouteSnapshotMode
+		payload["paid_entrypoint"] = state.PaidEntrypoint
+		payload["spec008_hash_status"] = state.Spec008HashStatus
+		payload["catalog_id"] = state.CatalogID
+		payload["catalog_body_digest"] = state.CatalogBodyDigest
+		payload["model_id"] = state.ModelID
+		payload["provider_reported_model_hash"] = state.ProviderReportedModelHash
+		payload["model_hash"] = state.ModelHash
+		payload["expected_catalog_model_hash"] = state.ExpectedCatalogModelHash
+		payload["prompt_hash"] = state.PromptHash
+		payload["output_hash"] = state.OutputHash
+		payload["usage_digest"] = state.UsageDigest
+		if state.ProviderSessionID != "" {
+			payload["provider_session_id"] = state.ProviderSessionID
+		}
+		if state.ProviderGenerationID != "" {
+			payload["provider_generation_id"] = state.ProviderGenerationID
+		}
 		payload["receipt_result"] = state.ReceiptResult
-		payload["receipt_verification_outcome"] = state.SettlementOutcome
 		payload["settlement_outcome"] = state.SettlementOutcome
 		payload["reason"] = state.Reason
 		payload["deadline_unix_ms"] = state.PendingDeadlineUnixMS
-		payload["pending_deadline_unix_ms"] = state.PendingDeadlineUnixMS
 		payload["idempotency_status"] = state.IdempotencyStatus
 		payload["attempted_received_at_unix_ms"] = attemptedReceivedAtUnixMS
 		payload["buyer_debit_outcome"] = state.BuyerDebitOutcome
 		payload["provider_settlement_outcome"] = state.ProviderSettlementOutcome
 		payload["payout_exclusion_outcome"] = state.PayoutExclusionOutcome
-		if state.SettlementOutcome == SettlementOutcomeQuarantined || state.SettlementOutcome == SettlementOutcomeZeroSettled {
-			payload["quarantine_zero_settle_reason"] = state.Reason
+		if checks != nil {
+			if unmet := unmetSettlementChecks(*checks); len(unmet) > 0 {
+				payload["unmet_checks"] = unmet
+			}
+			if checks.ComputeIntegrityReason != "" {
+				payload["compute_integrity_reason"] = checks.ComputeIntegrityReason
+			}
 		}
-	}
-	if checks != nil {
-		payload["verifier_checks"] = *checks
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return "", err
 	}
 	return string(raw), nil
+}
+
+// unmetSettlementChecks names the verifier checks that did not pass, in a
+// fixed order: the audit form of the verifier diagnostics. The full checks
+// stay in the verdict row and its R-15 archive.
+func unmetSettlementChecks(c SettlementVerificationChecks) []string {
+	all := []struct {
+		name string
+		ok   bool
+	}{
+		{"signature_verified", c.SignatureVerified},
+		{"route_snapshot_matched", c.RouteSnapshotMatched},
+		{"prompt_hash_matched", c.PromptHashMatched},
+		{"output_hash_matched", c.OutputHashMatched},
+		{"usage_matched", c.UsageMatched},
+		{"usage_cross_checked", c.UsageCrossChecked},
+		{"no_overlap", c.NoOverlap},
+		{"terminal_state_matched", c.TerminalStateMatched},
+		{"timestamp_window_valid", c.TimestampWindowValid},
+		{"compute_integrity_gate", c.ComputeIntegrityGate},
+		{"compute_integrity_payable", c.ComputeIntegrityPayable},
+	}
+	var out []string
+	for _, check := range all {
+		if !check.ok {
+			out = append(out, check.name)
+		}
+	}
+	return out
 }
 
 func hydrateSettlementReceiptRouteAuditFieldsConn(ctx context.Context, conn *sql.Conn, state *SettlementReceiptState) error {
@@ -1977,10 +2011,6 @@ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?
 		state.ProviderGenerationID = providerGeneration.String
 	}
 	return nil
-}
-
-func settlementReceiptAttemptID(state SettlementReceiptState) string {
-	return fmt.Sprintf("%s:%d:%s", state.RequestID, state.AttemptN, state.ProviderID)
 }
 
 func derefString(value *string) string {

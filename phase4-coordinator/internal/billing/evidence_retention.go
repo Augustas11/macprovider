@@ -15,12 +15,14 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
+	"github.com/augstar/macprovider-coordinator/internal/verifiedarchive"
 )
 
 // SPEC-022 R-15 (#1793): settled-evidence retention. Per-attempt settlement
-// evidence of requests whose credits all settled at least
-// min_settlement_cycles completed settlement windows ago is exported to a
-// local archive, verified by re-reading it (checksum, size, row counts, and
+// evidence of requests whose verdicts all closed, and whose credits were all
+// created, before the R-15.2 finality point (verdict close plus a grace
+// period, after a completed nightly reconcile) is exported to a local
+// archive, verified by re-reading it (checksum, size, row counts, and
 // row-for-row equality with the hot rows), optionally confirmed off host,
 // and then deleted from the hot tables in short batches. The money record (ledger credits, operator credits,
 // payouts, settlement windows, quarantine resolutions) is never deleted.
@@ -117,6 +119,12 @@ const (
 	retentionSkipScopeUnresolved    = "settlement_scope_unresolved"
 	retentionSkipFinalityOpen       = "settlement_finality_open"
 	retentionSkipPoolProvenUnrolled = "pool_proven_rollup_pending"
+	// retentionSkipVerdictGrace: a verdict of the request closed at or after
+	// the finality point (SPEC-022 v0.4.5 R-15.2).
+	retentionSkipVerdictGrace = "verdict_inside_grace"
+	// retentionSkipSettlementLink: settled without a payout, or a payout id
+	// on an unsettled credit (the weekly settlement quarantines the latter).
+	retentionSkipSettlementLink = "credit_settlement_link_inconsistent"
 )
 
 var (
@@ -158,13 +166,19 @@ func CommandOffhostVerifier(argv []string, timeout time.Duration) EvidenceArchiv
 
 // EvidenceRetentionOptions are the effective SPEC-022 R-15 settings.
 type EvidenceRetentionOptions struct {
-	Enabled             bool
-	ArchiveDir          string
+	Enabled    bool
+	ArchiveDir string
+	// MinSettlementCycles is carried for configuration compatibility; it no
+	// longer gates eligibility (SPEC-022 v0.4.5).
 	MinSettlementCycles int
 	CadenceDays         int
-	ReconcileHorizon    time.Duration
-	BatchSize           int
-	BatchPause          time.Duration
+	// ReconcileHorizon is the nightly/startup reconcile reach: a credit
+	// older than it is outside every reconcile window.
+	ReconcileHorizon time.Duration
+	// VerdictCloseGrace is the R-15.2 grace after verdict close.
+	VerdictCloseGrace time.Duration
+	BatchSize         int
+	BatchPause        time.Duration
 	// MaxRequestsPerArchive bounds one archive. A run writes, verifies, and
 	// deletes archive after archive until nothing eligible remains, the scan
 	// bound is reached, or RunBudget is spent.
@@ -198,6 +212,7 @@ func EvidenceRetentionOptionsFromConfig(rc config.BillingRetentionConfig, sc con
 		MinSettlementCycles:       rc.MinSettlementCycles,
 		CadenceDays:               sc.CadenceDays,
 		ReconcileHorizon:          horizon,
+		VerdictCloseGrace:         time.Duration(rc.VerdictCloseGraceHours) * time.Hour,
 		BatchSize:                 rc.BatchSize,
 		BatchPause:                time.Duration(rc.BatchPauseMS) * time.Millisecond,
 		MaxRequestsPerArchive:     rc.MaxRequestsPerRun,
@@ -211,9 +226,12 @@ func EvidenceRetentionOptionsFromConfig(rc config.BillingRetentionConfig, sc con
 	}
 }
 
+// evidenceRetentionDefaultGrace is the R-15.2 grace when none is set.
+const evidenceRetentionDefaultGrace = 48 * time.Hour
+
 func (o EvidenceRetentionOptions) normalized() (EvidenceRetentionOptions, error) {
-	if o.MinSettlementCycles < 2 {
-		return o, fmt.Errorf("min_settlement_cycles must be >= 2")
+	if o.VerdictCloseGrace <= 0 {
+		o.VerdictCloseGrace = evidenceRetentionDefaultGrace
 	}
 	if o.CadenceDays <= 0 {
 		return o, fmt.Errorf("settlement cadence_days must be positive")
@@ -353,6 +371,31 @@ type evidenceRetentionRuntime struct {
 	mu         sync.Mutex
 	settings   *EvidenceRetentionOptions
 	lastReport *EvidenceRetentionReport
+	// rollup holds the SPEC-022 R-15.11 ledger rollup settings; the nightly
+	// job runs the rollup after retention.
+	rollup *LedgerRollupOptions
+	// mirrorWatermark gates the rollup on the stats billing mirror.
+	mirrorWatermark LedgerRollupMirrorWatermark
+}
+
+// SetLedgerRollupOptions installs the effective ledger rollup settings.
+func (s *Store) SetLedgerRollupOptions(opts LedgerRollupOptions) {
+	if s == nil {
+		return
+	}
+	s.evidenceRetention.mu.Lock()
+	defer s.evidenceRetention.mu.Unlock()
+	copied := opts
+	s.evidenceRetention.rollup = &copied
+}
+
+func (s *Store) ledgerRollupOptions() (LedgerRollupOptions, bool) {
+	s.evidenceRetention.mu.Lock()
+	defer s.evidenceRetention.mu.Unlock()
+	if s.evidenceRetention.rollup == nil {
+		return LedgerRollupOptions{}, false
+	}
+	return *s.evidenceRetention.rollup, true
 }
 
 // SetEvidenceRetentionOptions installs the effective retention settings for
@@ -474,6 +517,9 @@ CREATE TABLE IF NOT EXISTS settlement_evidence_retention_state (
 		{"settlement_evidence_retention_state", "last_lap_skipped_json", `ALTER TABLE settlement_evidence_retention_state ADD COLUMN last_lap_skipped_json TEXT NOT NULL DEFAULT '{}'`},
 		{"settlement_evidence_retention_state", "lap_holds_cursor", `ALTER TABLE settlement_evidence_retention_state ADD COLUMN lap_holds_cursor INTEGER NOT NULL DEFAULT 0`},
 		{"settlement_evidence_archives", "min_credit_id", `ALTER TABLE settlement_evidence_archives ADD COLUMN min_credit_id INTEGER NOT NULL DEFAULT 0 CHECK(min_credit_id >= 0)`},
+		// #1793: the pool binding of the credit's attempt, so SPEC-043-R010
+		// creator earnings keep counting it after its route snapshot leaves.
+		{"settlement_evidence_archived_credits", "pool_id", `ALTER TABLE settlement_evidence_archived_credits ADD COLUMN pool_id TEXT NULL`},
 	}
 	if _, err := s.db.ExecContext(ctx, `
 CREATE TABLE IF NOT EXISTS settlement_evidence_retention_holds (
@@ -482,7 +528,40 @@ CREATE TABLE IF NOT EXISTS settlement_evidence_retention_holds (
     reason TEXT NOT NULL,
     held_at_utc TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_serh_credit ON settlement_evidence_retention_holds(credit_id);`); err != nil {
+CREATE INDEX IF NOT EXISTS idx_serh_credit ON settlement_evidence_retention_holds(credit_id);
+-- SPEC-022 v0.4.5 R-15.6: a tombstoned credit's money columns are immutable
+-- whether or not it settled; the archived reference copy is its
+-- rederivation source.
+CREATE TRIGGER IF NOT EXISTS trg_lrc_archived_money_immutable
+BEFORE UPDATE OF prompt_tokens, completion_tokens, estimated_completion_tokens,
+                 charged_prompt_tokens, provider_reported_prompt_tokens,
+                 usage_source, prompt_rate_per_mtok, completion_rate_per_mtok,
+                 cached_prompt_tokens,
+                 global_multiplier_ppm, gross_credits, provider_share_bps,
+                 provider_credits, fault_flag ON ledger_request_credits
+WHEN EXISTS (
+      SELECT 1 FROM settlement_evidence_archived_credits archived
+       WHERE archived.request_credit_id = OLD.id
+  )
+  AND (
+      COALESCE(OLD.prompt_tokens, -1) != COALESCE(NEW.prompt_tokens, -1)
+      OR COALESCE(OLD.charged_prompt_tokens, -1) != COALESCE(NEW.charged_prompt_tokens, -1)
+      OR COALESCE(OLD.provider_reported_prompt_tokens, -1) != COALESCE(NEW.provider_reported_prompt_tokens, -1)
+      OR COALESCE(OLD.completion_tokens, -1) != COALESCE(NEW.completion_tokens, -1)
+      OR COALESCE(OLD.estimated_completion_tokens, -1) != COALESCE(NEW.estimated_completion_tokens, -1)
+      OR OLD.usage_source != NEW.usage_source
+      OR OLD.prompt_rate_per_mtok != NEW.prompt_rate_per_mtok
+      OR COALESCE(OLD.cached_prompt_tokens, -1) != COALESCE(NEW.cached_prompt_tokens, -1)
+      OR OLD.completion_rate_per_mtok != NEW.completion_rate_per_mtok
+      OR OLD.global_multiplier_ppm != NEW.global_multiplier_ppm
+      OR OLD.gross_credits != NEW.gross_credits
+      OR OLD.provider_share_bps != NEW.provider_share_bps
+      OR OLD.provider_credits != NEW.provider_credits
+      OR OLD.fault_flag != NEW.fault_flag
+  )
+BEGIN
+    SELECT RAISE(ABORT, 'archived ledger_request_credits money fields are immutable');
+END;`); err != nil {
 		return err
 	}
 	for _, col := range add {
@@ -790,7 +869,10 @@ SELECT * FROM settlement_route_snapshot_journal
 	return nil
 }
 
-// evidenceRetentionCutoffs are the R-15.2 finality points of one run.
+// evidenceRetentionCutoffs is the R-15.2 finality point T of one run: every
+// credit of an eligible request was created, and every verdict closed,
+// before it. windowEnd mirrors creditBefore for the report and the archive
+// manifest's cutoff field.
 type evidenceRetentionCutoffs struct {
 	windowEnd    time.Time
 	windowEndSet bool
@@ -809,8 +891,6 @@ func evaluateRetentionEligibility(b requestEvidenceBundle, cut evidenceRetention
 	}
 	for _, c := range b.credits {
 		switch {
-		case !c.settled || c.settlementID == nil:
-			return false, retentionSkipUnsettled
 		case c.quarantined:
 			return false, retentionSkipQuarantined
 		case c.resolutions > 0:
@@ -819,6 +899,14 @@ func evaluateRetentionEligibility(b requestEvidenceBundle, cut evidenceRetention
 			return false, retentionSkipNotPayable
 		case c.tsUTC.IsZero() || !c.tsUTC.Before(cut.creditBefore):
 			return false, retentionSkipInsideReconcile
+		case c.settled != (c.settlementID != nil):
+			return false, retentionSkipSettlementLink
+		}
+		// SPEC-022 v0.4.5: an unsettled credit leaves its evidence too; its
+		// tombstone keeps it payable and settles it (R-15.6). A settled one
+		// must point at a live payout.
+		if !c.settled {
+			continue
 		}
 		payout, ok := b.payouts[*c.settlementID]
 		if !ok {
@@ -827,11 +915,6 @@ func evaluateRetentionEligibility(b requestEvidenceBundle, cut evidenceRetention
 		status, _ := payout.str("status")
 		if status != "ready" && status != "consumed" {
 			return false, retentionSkipPayoutVoided
-		}
-		endText, _ := payout.str("window_end_utc")
-		end, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(endText))
-		if err != nil || end.After(cut.windowEnd) {
-			return false, retentionSkipWindowTooRecent
 		}
 	}
 	// The gateway's relay-blind recovery reads R-14 coverage from the route
@@ -873,6 +956,9 @@ func evaluateRetentionEligibility(b requestEvidenceBundle, cut evidenceRetention
 		}
 		if outcome == SettlementOutcomeQuarantined {
 			return false, retentionSkipVerdictQuarantined
+		}
+		if !verdictClosedBefore(v, cut.creditBefore) {
+			return false, retentionSkipVerdictGrace
 		}
 		id, _ := v.int64("id")
 		providerID, _ := v.str("provider_id")
@@ -952,28 +1038,57 @@ SELECT id FROM settlement_receipt_verdicts
 	return out, nil
 }
 
-// evidenceRetentionCutoffsAt computes the settlement-window cutoff: the end
-// of the window that has at least minCycles completed windows after it.
+// evidenceRetentionCutoffsAt computes the R-15.2 finality point T: the
+// earlier of now minus the verdict-close grace and the start of the newest
+// completed nightly reconcile, but never earlier than the reconcile horizon
+// before now (past it no reconcile reads the credit).
 func (s *Store) evidenceRetentionCutoffsAt(ctx context.Context, opts EvidenceRetentionOptions, now time.Time) (evidenceRetentionCutoffs, error) {
-	cut := evidenceRetentionCutoffs{creditBefore: now.Add(-opts.ReconcileHorizon)}
-	var endText string
-	err := s.reader().QueryRowContext(ctx, `
-SELECT window_end_utc FROM ledger_settlement_windows
- WHERE cadence_days = ?
- ORDER BY window_end_utc DESC
- LIMIT 1 OFFSET ?`, opts.CadenceDays, opts.MinSettlementCycles).Scan(&endText)
-	if errors.Is(err, sql.ErrNoRows) {
-		return cut, nil
+	grace := opts.VerdictCloseGrace
+	if grace <= 0 {
+		grace = evidenceRetentionDefaultGrace
 	}
-	if err != nil {
-		return cut, err
+	reconciled := now.Add(-opts.ReconcileHorizon)
+	var startedText sql.NullString
+	if err := s.reader().QueryRowContext(ctx, `
+SELECT MAX(started_at_utc) FROM ledger_reconciliation_runs
+ WHERE run_type = 'nightly_reconcile' AND status = 'complete'`).Scan(&startedText); err != nil {
+		return evidenceRetentionCutoffs{}, err
 	}
-	end, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(endText))
-	if err != nil {
-		return cut, fmt.Errorf("parse settlement window end: %w", err)
+	if startedText.Valid {
+		if started, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(startedText.String)); err == nil && started.After(reconciled) {
+			reconciled = started
+		}
 	}
-	cut.windowEnd, cut.windowEndSet = end.UTC(), true
-	return cut, nil
+	t := now.Add(-grace)
+	if reconciled.Before(t) {
+		t = reconciled
+	}
+	t = t.UTC()
+	return evidenceRetentionCutoffs{windowEnd: t, windowEndSet: true, creditBefore: t}, nil
+}
+
+// verdictClosedBefore reports whether a closed verdict's close time, the
+// later of its created_at_utc and updated_at_utc, is before t. An unreadable
+// stamp is never before t.
+func verdictClosedBefore(v archiveRow, t time.Time) bool {
+	closedAt := time.Time{}
+	for _, col := range []string{"created_at_utc", "updated_at_utc"} {
+		text, ok := v.str(col)
+		if !ok || strings.TrimSpace(text) == "" {
+			if col == "created_at_utc" {
+				return false
+			}
+			continue
+		}
+		parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(text))
+		if err != nil {
+			return false
+		}
+		if parsed.After(closedAt) {
+			closedAt = parsed
+		}
+	}
+	return !closedAt.IsZero() && closedAt.Before(t)
 }
 
 // retentionPermanentSkips are skip reasons that keep a request hot for good:
@@ -1322,16 +1437,15 @@ func (s *Store) selectRetentionCandidates(ctx context.Context, opts EvidenceRete
 		if remaining := int64(opts.MaxScanRowsPerRun) - report.ScannedCredits; remaining < int64(limit) {
 			limit = int(remaining)
 		}
-		// The payout window is read with the credit, so a settled credit
-		// whose window is too recent is pinned without reading its bundle;
-		// a request already held below the lap start is phase 1's.
+		// A credit created at or after the finality point is pinned without
+		// reading its bundle; a request already held below the lap start is
+		// phase 1's.
 		rows, err := s.reader().QueryContext(ctx, `
-SELECT lrc.id, lrc.request_id, lrc.settled, lrc.ts_utc, COALESCE(p.window_end_utc, ''),
+SELECT lrc.id, lrc.request_id, lrc.ts_utc,
        EXISTS (SELECT 1 FROM settlement_evidence_archived_credits a WHERE a.request_credit_id = lrc.id),
        COALESCE(h.credit_id <= ?, 0), COALESCE(h.reason, '')
   FROM ledger_request_credits lrc
   LEFT JOIN settlement_evidence_retention_holds h ON h.request_id = lrc.request_id
-  LEFT JOIN ledger_payout_ready p ON p.id = lrc.settlement_id
  WHERE lrc.id > ?
  ORDER BY lrc.id
  LIMIT ?`, lapStart, next, limit)
@@ -1346,10 +1460,10 @@ SELECT lrc.id, lrc.request_id, lrc.settled, lrc.ts_utc, COALESCE(p.window_end_ut
 		var candidates []candidate
 		n := 0
 		for rows.Next() {
-			var id, settled int64
-			var requestID, ts, windowEnd, holdReason string
+			var id int64
+			var requestID, ts, holdReason string
 			var archived, heldBelow bool
-			if err := rows.Scan(&id, &requestID, &settled, &ts, &windowEnd, &archived, &heldBelow, &holdReason); err != nil {
+			if err := rows.Scan(&id, &requestID, &ts, &archived, &heldBelow, &holdReason); err != nil {
 				rows.Close()
 				return retentionScanPass{}, err
 			}
@@ -1369,22 +1483,9 @@ SELECT lrc.id, lrc.request_id, lrc.settled, lrc.ts_utc, COALESCE(p.window_end_ut
 				upserts = append(upserts, retentionHold{requestID: requestID, creditID: id, reason: retentionSkipInsideReconcile})
 				continue
 			case !parsed.Before(cut.creditBefore):
-				// Inside the reconcile horizon: the frontier.
+				// Created at or after the finality point: the frontier.
 				pinAt(id)
 				continue
-			case settled != 1:
-				// Old and unsettled (quarantined, or a provider below the
-				// minimum payout): it may settle later, so it is held.
-				seen[requestID] = true
-				countSkip(retentionSkipUnsettled)
-				upserts = append(upserts, retentionHold{requestID: requestID, creditID: id, reason: retentionSkipUnsettled})
-				continue
-			case windowEnd != "":
-				if end, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(windowEnd)); err == nil && (!cut.windowEndSet || end.After(cut.windowEnd)) {
-					countSkip(retentionSkipWindowTooRecent)
-					pinAt(id)
-					continue
-				}
 			}
 			seen[requestID] = true
 			candidates = append(candidates, candidate{requestID: requestID, creditID: id, holdReason: holdReason})
@@ -1912,20 +2013,17 @@ func (s *Store) failEvidenceArchive(ctx context.Context, archive *evidenceArchiv
 }
 
 // countRetentionBacklogCredits counts the held requests at or below the
-// watermark and the settled, unarchived ledger credits above it that are past the credit-age cutoff and whose payout
-// is live with a window ending at or before the settlement-window cutoff:
-// an upper bound of the eligible backlog. It reads fixed id ranges, so no
-// statement walks far past its range, under its own timeout, and returns -1
-// when the count does not finish.
+// watermark and the unarchived ledger credits above it that were created
+// before the finality point and are either unsettled and unquarantined or
+// settled into a live payout: an upper bound of the eligible backlog. It
+// reads fixed id ranges, so no statement walks far past its range, under its
+// own timeout, and returns -1 when the count does not finish.
 func (s *Store) countRetentionBacklogCredits(ctx context.Context, opts EvidenceRetentionOptions, watermark int64) int64 {
 	ctx, cancel := context.WithTimeout(ctx, evidenceRetentionBacklogTimeout)
 	defer cancel()
 	cut, err := s.evidenceRetentionCutoffsAt(ctx, opts, s.nowUTC())
 	if err != nil {
 		return -1
-	}
-	if !cut.windowEndSet {
-		return 0
 	}
 	var maxID sql.NullInt64
 	if err := s.reader().QueryRowContext(ctx, `SELECT MAX(id) FROM ledger_request_credits`).Scan(&maxID); err != nil {
@@ -1939,29 +2037,26 @@ func (s *Store) countRetentionBacklogCredits(ctx context.Context, opts EvidenceR
 	}
 	for lo := watermark; maxID.Valid && lo < maxID.Int64; lo += evidenceRetentionScanChunk {
 		rows, err := s.reader().QueryContext(ctx, `
-SELECT lrc.ts_utc, p.window_end_utc
+SELECT lrc.ts_utc
   FROM ledger_request_credits lrc
-  JOIN ledger_payout_ready p ON p.id = lrc.settlement_id
+  LEFT JOIN ledger_payout_ready p ON p.id = lrc.settlement_id
  WHERE lrc.id > ? AND lrc.id <= ?
-   AND lrc.settled = 1
-   AND p.status IN ('ready','consumed')
+   AND lrc.quarantined = 0
+   AND ((lrc.settled = 0 AND lrc.settlement_id IS NULL)
+        OR (lrc.settled = 1 AND p.status IN ('ready','consumed')))
    AND NOT EXISTS (SELECT 1 FROM settlement_evidence_archived_credits a WHERE a.request_credit_id = lrc.id)`,
 			lo, lo+evidenceRetentionScanChunk)
 		if err != nil {
 			return -1
 		}
 		for rows.Next() {
-			var ts, windowEnd string
-			if err := rows.Scan(&ts, &windowEnd); err != nil {
+			var ts string
+			if err := rows.Scan(&ts); err != nil {
 				rows.Close()
 				return -1
 			}
 			credited, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(ts))
 			if err != nil || !credited.Before(cut.creditBefore) {
-				continue
-			}
-			end, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(windowEnd))
-			if err != nil || end.After(cut.windowEnd) {
 				continue
 			}
 			count++
@@ -2270,7 +2365,7 @@ func (s *Store) deleteArchivedBatch(ctx context.Context, archiveID int64, batch 
 	first := &providerFirstVerifiedVerdicts{q: conn, cache: map[string]int64{}}
 	var done, cleanup []archivedRequest
 	tableDeleted := map[string]int64{}
-	floorRecorded := false
+	floorRecorded, earlyFloorRecorded := false, false
 	// A request this batch keeps hot for a reason that can clear goes to the
 	// holds table, in the same transaction; a deleted one leaves it.
 	held := func(req archivedRequest, reason string) error {
@@ -2342,6 +2437,15 @@ func (s *Store) deleteArchivedBatch(ctx context.Context, archiveID int64, batch 
 			}
 			floorRecorded = true
 		}
+		if !earlyFloorRecorded && requestHasUnsettledCredit(b) {
+			// SPEC-022 v0.4.5 R-15.9: a credit tombstoned before it settled
+			// settles and reconciles only through its tombstone, which a
+			// contract-4 coordinator does not do; it commits with contract 5.
+			if err := recordBillingCompatFloorExec(ctx, conn, billingCompatContractEarlyArchive); err != nil {
+				return nil, nil, err
+			}
+			earlyFloorRecorded = true
+		}
 		for _, table := range evidenceRetentionTables {
 			for _, row := range b.evidence[table] {
 				id, _ := row.int64("id")
@@ -2375,8 +2479,8 @@ VALUES (?, ?, ?, ?, ?)`, f.scopeHash, req.RequestID, archiveID, f.json, stamp); 
 		for _, c := range b.credits {
 			verified := archivedCreditVerified(c, b.evidence["settlement_receipt_verdicts"])
 			if _, err := conn.ExecContext(ctx, `
-INSERT INTO settlement_evidence_archived_credits (request_credit_id, request_id, archive_id, spec022_verified, archived_at_utc)
-VALUES (?, ?, ?, ?, ?)`, c.id, req.RequestID, archiveID, boolInt(verified), stamp); err != nil {
+INSERT INTO settlement_evidence_archived_credits (request_credit_id, request_id, archive_id, spec022_verified, archived_at_utc, pool_id)
+VALUES (?, ?, ?, ?, ?, ?)`, c.id, req.RequestID, archiveID, boolInt(verified), stamp, archivedCreditPoolID(c, b.evidence["settlement_route_snapshots"])); err != nil {
 				return nil, nil, err
 			}
 		}
@@ -2468,6 +2572,36 @@ SELECT finality_json FROM settlement_evidence_archived_finality
 	return finality, true, nil
 }
 
+// archivedCreditPoolID is the pool binding creator earnings read for the
+// credit: the pool_id of the first route snapshot (by id) of its attempt
+// that carries one, or nil.
+func archivedCreditPoolID(c retentionCredit, snapshots []archiveRow) any {
+	var best int64 = -1
+	var pool any
+	for _, srs := range snapshots {
+		a, _ := srs.int64("attempt_n")
+		p, _ := srs.str("provider_id")
+		id, _ := srs.int64("id")
+		poolID, ok := srs.str("pool_id")
+		if a != c.attemptN || p != c.providerID || !ok {
+			continue
+		}
+		if best < 0 || id < best {
+			best, pool = id, poolID
+		}
+	}
+	return pool
+}
+
+func requestHasUnsettledCredit(b requestEvidenceBundle) bool {
+	for _, c := range b.credits {
+		if !c.settled {
+			return true
+		}
+	}
+	return false
+}
+
 // archivedCreditVerified mirrors the billing mirror's spec022_verified
 // predicate: a literal closed, valid, verified verdict for the credit.
 func archivedCreditVerified(c retentionCredit, verdicts []archiveRow) bool {
@@ -2526,48 +2660,10 @@ func rowsMatchArchive(live, archived []archiveRow) string {
 	return ""
 }
 
-// archiveRowsEqual compares two rows column by column. A REAL that holds an
-// integral value is written to JSON without a fraction and reads back as an
-// integer, so numbers compare by value.
+// archiveRowsEqual compares two rows column by column; numbers compare by
+// value (verifiedarchive.RowsEqual).
 func archiveRowsEqual(a, b archiveRow) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for col, av := range a {
-		bv, ok := b[col]
-		if !ok || !archiveValuesEqual(av, bv) {
-			return false
-		}
-	}
-	return true
-}
-
-func archiveValuesEqual(a, b any) bool {
-	switch x := a.(type) {
-	case nil:
-		return b == nil
-	case string:
-		y, ok := b.(string)
-		return ok && x == y
-	case archiveBlob:
-		y, ok := b.(archiveBlob)
-		return ok && x == y
-	case int64:
-		switch y := b.(type) {
-		case int64:
-			return x == y
-		case float64:
-			return float64(x) == y && int64(y) == x
-		}
-	case float64:
-		switch y := b.(type) {
-		case float64:
-			return x == y
-		case int64:
-			return float64(y) == x && int64(x) == y
-		}
-	}
-	return false
+	return verifiedarchive.RowsEqual(a, b)
 }
 
 func sameCredits(b requestEvidenceBundle, req archivedRequest) bool {
@@ -2718,9 +2814,10 @@ func evidenceRetentionLogLine(report EvidenceRetentionReport) string {
 }
 
 // StartEvidenceRetention runs retention daily at 03:00 UTC, away from the
-// 00:00 nightly reconcile and the Monday 00:00 weekly settlement. It reads
-// the installed options on each tick and does nothing while disabled.
-func (s *Store) StartEvidenceRetention(ctx context.Context, logf func(EvidenceRetentionReport, error)) {
+// 00:00 nightly reconcile and the Monday 00:00 weekly settlement, and then
+// the ledger rollup. It reads the installed options on each tick and skips
+// whichever is disabled.
+func (s *Store) StartEvidenceRetention(ctx context.Context, logf func(EvidenceRetentionReport, error), rollupLogf ...func(LedgerRollupReport, error)) {
 	go func() {
 		for {
 			now := time.Now().UTC()
@@ -2735,14 +2832,20 @@ func (s *Store) StartEvidenceRetention(ctx context.Context, logf func(EvidenceRe
 				return
 			case <-timer.C:
 			}
-			opts, ok := s.evidenceRetentionOptions()
-			if !ok || !opts.Enabled {
-				continue
+			if opts, ok := s.evidenceRetentionOptions(); ok && opts.Enabled {
+				report, err := s.RunEvidenceRetention(ctx, opts)
+				log.Print(evidenceRetentionLogLine(report))
+				if logf != nil {
+					logf(report, err)
+				}
 			}
-			report, err := s.RunEvidenceRetention(ctx, opts)
-			log.Print(evidenceRetentionLogLine(report))
-			if logf != nil {
-				logf(report, err)
+			if ropts, ok := s.ledgerRollupOptions(); ok && ropts.Enabled {
+				report, err := s.RunLedgerRollup(ctx, ropts)
+				for _, f := range rollupLogf {
+					if f != nil {
+						f(report, err)
+					}
+				}
 			}
 		}
 	}()

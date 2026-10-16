@@ -616,6 +616,10 @@ type privacyClientSpec struct {
 	directoryBytes  func([]byte) []byte
 	// pool runs the client with --pool (SPEC-049-R032).
 	pool string
+	// assurance runs the client with --privacy-assurance-required, and
+	// served is the label the stub gateway reports (SPEC-049-R034). Both
+	// default to the device-bound label.
+	assurance, served string
 }
 
 var cliDirectoryKey = ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x44}, ed25519.SeedSize))
@@ -690,6 +694,13 @@ func runPrivacyClient(t *testing.T, spec privacyClientSpec) (string, string, int
 		if got := r.Header.Get("X-MacProvider-Pool-Select"); got != spec.pool {
 			t.Errorf("pool select=%q want %q path=%s", got, spec.pool, r.URL.Path)
 		}
+		wantRequired := 0
+		if spec.assurance != "" && r.URL.Path == "/v1/relay-blind/route-reservations" {
+			wantRequired = 1
+		}
+		if got := r.Header.Values(relayblind.PrivacyAssuranceRequiredHeader); len(got) != wantRequired || (wantRequired == 1 && got[0] != spec.assurance) {
+			t.Errorf("assurance requirement=%v path=%s", got, r.URL.Path)
+		}
 		switch r.URL.Path {
 		case "/v1/relay-blind/route-reservations":
 			request, err := relayblind.ParseReservationRequest(body)
@@ -702,6 +713,7 @@ func runPrivacyClient(t *testing.T, spec privacyClientSpec) (string, string, int
 			if spec.pool != "" {
 				response.PoolID, response.PoolManifestVersion, response.PoolManifestCoreDigest = spec.pool, 3, strings.Repeat("c", 64)
 			}
+			response.PrivacyAssurance = spec.servedLabel()
 			if spec.reservation != nil {
 				response = spec.reservation(response)
 			}
@@ -717,6 +729,7 @@ func runPrivacyClient(t *testing.T, spec privacyClientSpec) (string, string, int
 		baseURL: server.URL, identityPin: pinPath, model: "model-a", input: "-",
 		maxOutputTokens: 32, inputTokenUpperBound: 96, stream: spec.stream, privacyClass: true,
 		apiKeyEnv: "TEST_API_KEY", walletSessionKeyEnv: "TEST_WALLET_KEY", timeout: time.Minute, pool: spec.pool,
+		privacyAssuranceRequired: spec.assurance,
 	}
 	if spec.wallet {
 		opts.walletSessionID = "wallet-session-fixture"
@@ -744,6 +757,7 @@ func runPrivacyClient(t *testing.T, spec privacyClientSpec) (string, string, int
 func writePrivacyChat(t *testing.T, w http.ResponseWriter, body, inner []byte, provider *ecdh.PrivateKey, spec privacyClientSpec) {
 	t.Helper()
 	setPrivacyBuyerHeaders(w.Header())
+	w.Header().Set(privacyAssuranceHeader, spec.servedLabel())
 	if spec.headerHook != nil {
 		spec.headerHook(w.Header())
 	}
@@ -789,6 +803,11 @@ func writePrivacyChat(t *testing.T, w http.ResponseWriter, body, inner []byte, p
 		return
 	}
 	usage := privacyClearUsage(spec.clearPrompt, spec.clearCompletion, spec.verifiedAt)
+	if label := spec.servedLabel(); label == relayblind.PrivacyAssuranceCodeBound {
+		scope, protects, doesNotProtect, residual := privacyLabelStrings(label, spec.pool)
+		object := privacyObject(usage)
+		object["assurance"], object["scope"], object["protects"], object["does_not_protect"], object["residual_risks"] = label, scope, protects, doesNotProtect, residual
+	}
 	if spec.totalOverride != nil {
 		usage["total_tokens"] = *spec.totalOverride
 	}
@@ -979,6 +998,16 @@ func privacyClearUsage(prompt, completion, verifiedAt int64) map[string]any {
 	}
 }
 
+func (s privacyClientSpec) servedLabel() string {
+	if s.served != "" {
+		return s.served
+	}
+	if s.assurance != "" {
+		return s.assurance
+	}
+	return relayblind.PrivacyAssurance
+}
+
 func privacyObject(usage map[string]any) map[string]any {
 	return usage["macprovider"].(map[string]any)["privacy"].(map[string]any)
 }
@@ -1138,4 +1167,62 @@ func TestPrivacyPoolClientVerifiesPoolBinding(t *testing.T) {
 			}
 		}
 	})
+}
+
+// SPEC-049-R034 / R016: the client asks for the code-bound label only on the
+// reservation, accepts exactly the label it required before encrypting, and
+// verifies that label's headers and disclosure after the response.
+func TestPrivacyClientCodeBoundRequirement(t *testing.T) {
+	if len(privacyCodeBoundProtects) != 12 || len(privacyCodeBoundDoesNotProtect) != 7 || len(privacyCodeBoundResidualRisks) != 16 {
+		t.Fatal("code-bound disclosure list length drifted")
+	}
+	for _, stream := range []bool{false, true} {
+		stdout, stderr, calls, err := runPrivacyClient(t, privacyClientSpec{
+			stream: stream, content: privacyContent(stream), assurance: relayblind.PrivacyAssuranceCodeBound,
+			finalPrompt: 4, finalCompletion: 2, clearPrompt: 4, clearCompletion: 2,
+		})
+		if err != nil || calls != 2 || stdout != string(privacyContent(stream)) {
+			t.Fatalf("stream=%v err=%v calls=%d stdout=%q", stream, err, calls, stdout)
+		}
+		for _, part := range append([]string{"assurance: " + relayblind.PrivacyAssuranceCodeBound, privacyCodeBoundScope}, privacyCodeBoundResidualRisks...) {
+			if !strings.Contains(stderr, part) {
+				t.Fatalf("stderr missing %q in %q", part, stderr)
+			}
+		}
+	}
+}
+
+func TestPrivacyClientRejectsAnotherLabelBeforeSend(t *testing.T) {
+	for name, spec := range map[string]privacyClientSpec{
+		"device-bound when code-bound was required": {assurance: relayblind.PrivacyAssuranceCodeBound, served: relayblind.PrivacyAssurance},
+		"code-bound when nothing was required":      {served: relayblind.PrivacyAssuranceCodeBound},
+	} {
+		t.Run(name, func(t *testing.T) {
+			spec.content = privacyContent(false)
+			_, stderr, calls, err := runPrivacyClient(t, spec)
+			if err == nil || !strings.Contains(err.Error(), "privacy assurance rejected") || calls != 1 || stderr != "" {
+				t.Fatalf("err=%v calls=%d stderr=%q", err, calls, stderr)
+			}
+		})
+	}
+}
+
+func TestPrivacyClientRejectsALabelSwapAfterSend(t *testing.T) {
+	_, stderr, calls, err := runPrivacyClient(t, privacyClientSpec{
+		content: privacyContent(false), assurance: relayblind.PrivacyAssuranceCodeBound,
+		headerHook: func(h http.Header) { h.Set(privacyAssuranceHeader, relayblind.PrivacyAssurance) },
+	})
+	assertPrivacyFailure(t, err, stderr, calls, 2)
+}
+
+func TestPrivacyClientAssuranceFlagIsClosed(t *testing.T) {
+	for _, opts := range []options{
+		{baseURL: "https://gateway.example", privacyClass: true, privacyAssuranceRequired: relayblind.PrivacyAssurance},
+		{baseURL: "https://gateway.example", privacyAssuranceRequired: relayblind.PrivacyAssuranceCodeBound, identityPin: "/pin.json"},
+	} {
+		err := run(context.Background(), opts, strings.NewReader(""), io.Discard, io.Discard, func(string) string { return "" })
+		if err == nil || !strings.Contains(err.Error(), "--privacy-assurance-required") {
+			t.Fatalf("opts=%+v err=%v", opts, err)
+		}
+	}
 }

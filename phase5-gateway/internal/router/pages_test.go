@@ -95,7 +95,7 @@ func TestPrivacyRouteRendersHonestRetention(t *testing.T) {
 		"compliance.zdr",
 		"train foundation models",
 		"us-east-1",
-		"90 days",
+		"14 days",
 		"storage.request_log_retention_days",
 		"opaque HMAC conversation identifier",
 	} {

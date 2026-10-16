@@ -210,6 +210,29 @@ func ConversationKeyFromContext(ctx context.Context) string {
 
 type conversationCacheOnlyContextKey struct{}
 
+type fleetCacheContextKey struct{}
+
+func ContextWithFleetCache(ctx context.Context, grant FleetCacheGrant, cacheOnly bool) context.Context {
+	grant.ConversationKey = strings.TrimSpace(grant.ConversationKey)
+	if grant.ConversationKey == "" || grant.Generation < 1 {
+		return ctx
+	}
+	ctx = context.WithValue(ctx, fleetCacheContextKey{}, grant)
+	if cacheOnly {
+		return ContextWithConversationCacheOnlyKey(ctx, grant.ConversationKey)
+	}
+	return ContextWithConversationKey(ctx, grant.ConversationKey)
+}
+
+func FleetCacheFromContext(ctx context.Context) *FleetCacheGrant {
+	grant, ok := ctx.Value(fleetCacheContextKey{}).(FleetCacheGrant)
+	if !ok || strings.TrimSpace(grant.ConversationKey) == "" || grant.Generation < 1 {
+		return nil
+	}
+	copy := grant
+	return &copy
+}
+
 // ContextWithConversationCacheOnlyKey carries a SPEC-006-R012 auto-prefix
 // key and marks it cache-only, so the provider can tell it from a sticky key
 // (SPEC-004 FR-SR-2, SPEC-048-R009). The marker is dropped with the key.
@@ -408,10 +431,11 @@ type encryptedInferenceRequest struct {
 }
 
 type encryptedInferencePlaintext struct {
-	Type            string `json:"type"`
-	Body            string `json:"body"`
-	MaxOutputTokens *int   `json:"max_output_tokens,omitempty"`
-	ConversationKey string `json:"conversation_key,omitempty"`
+	Type            string           `json:"type"`
+	Body            string           `json:"body"`
+	MaxOutputTokens *int             `json:"max_output_tokens,omitempty"`
+	ConversationKey string           `json:"conversation_key,omitempty"`
+	FleetCache      *FleetCacheGrant `json:"fleet_cache,omitempty"`
 	// ConversationCacheOnly marks ConversationKey as a cache-only auto-prefix
 	// key (SPEC-004 FR-SR-2, SPEC-048-R009). Never sent without a key.
 	ConversationCacheOnly bool                       `json:"conversation_cache_only,omitempty"`
@@ -886,6 +910,10 @@ func (ps *providerSession) sealInferenceRequestWithRelayBlind(provider pool.Prov
 }
 
 func (ps *providerSession) sealInferenceRequestWithConversationCache(provider pool.Provider, requestID string, body []byte, stream bool, settlement *SettlementReceiptMetadata, conversationKey string, conversationCacheOnly bool, maxOutputTokens *int, relayBlind *RelayBlindDispatchContext) ([]byte, error) {
+	return ps.sealInferenceRequestWithFleetCache(provider, requestID, body, stream, settlement, conversationKey, conversationCacheOnly, nil, maxOutputTokens, relayBlind)
+}
+
+func (ps *providerSession) sealInferenceRequestWithFleetCache(provider pool.Provider, requestID string, body []byte, stream bool, settlement *SettlementReceiptMetadata, conversationKey string, conversationCacheOnly bool, fleetCache *FleetCacheGrant, maxOutputTokens *int, relayBlind *RelayBlindDispatchContext) ([]byte, error) {
 	conversationKey = strings.TrimSpace(conversationKey)
 	conversationCacheOnly = conversationCacheOnly && conversationKey != ""
 	ps.tier2Mu.Lock()
@@ -900,6 +928,7 @@ func (ps *providerSession) sealInferenceRequestWithConversationCache(provider po
 			MaxOutputTokens:       maxOutputTokens,
 			Settlement:            settlement,
 			ConversationKey:       conversationKey,
+			FleetCache:            fleetCache,
 			ConversationCacheOnly: conversationCacheOnly,
 			BodyEncoding:          relayBlindBodyEncoding(relayBlind),
 			RelayBlindContext:     relayBlind,
@@ -927,6 +956,7 @@ func (ps *providerSession) sealInferenceRequestWithConversationCache(provider po
 		Body:                  string(body),
 		MaxOutputTokens:       maxOutputTokens,
 		ConversationKey:       conversationKey,
+		FleetCache:            fleetCache,
 		ConversationCacheOnly: conversationCacheOnly,
 		BodyEncoding:          relayBlindBodyEncoding(relayBlind),
 		RelayBlindContext:     relayBlind,
@@ -1721,7 +1751,7 @@ func (s *Server) dispatchInference(ctx context.Context, provider pool.Provider, 
 	if limit, ok := MaxOutputTokensFromContext(ctx); ok {
 		maxOutputTokens = &limit
 	}
-	payload, err := session.sealInferenceRequestWithConversationCache(provider, requestID, body, stream, settlementMetadata, ConversationKeyFromContext(ctx), ConversationCacheOnlyFromContext(ctx), maxOutputTokens, relayContext)
+	payload, err := session.sealInferenceRequestWithFleetCache(provider, requestID, body, stream, settlementMetadata, ConversationKeyFromContext(ctx), ConversationCacheOnlyFromContext(ctx), FleetCacheFromContext(ctx), maxOutputTokens, relayContext)
 	if err != nil {
 		if errors.Is(err, errTier2C2PCounterExhausted) {
 			s.closeProviderForTier2SessionFailure(session, provider.ProviderID, provider.AssignedID, requestID, "counter_exhausted", ErrRelayAEADFailed)

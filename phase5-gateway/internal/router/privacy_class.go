@@ -67,6 +67,56 @@ var privacyPoolOperatorDoesNotSee = []string{
 	"per_request_metadata_and_buyer_attribution_through_pool_surfaces",
 }
 
+// SPEC-049-R020 strings for code_bound_attested (v0.5.0), copied verbatim.
+const (
+	privacyAssuranceCodeBound = "code_bound_attested"
+	privacyCodeBoundScope     = "request_and_response_content_hidden_from_relays; provider_runtime_reads_plaintext; ordinary_operator_access_paths_constrained_on_approved_signed_runtime; posture_asserted_by_apple_attested_malibu_app_after_kernel_code_identity_check; label_verified_by_coordinator_not_by_buyer"
+)
+
+var privacyCodeBoundProtects = []string{
+	"request_content_from_gateway_and_coordinator",
+	"response_content_from_gateway_and_coordinator",
+	"debugger_attach_to_approved_signed_runtime",
+	"core_dumps_of_approved_signed_runtime",
+	"prompt_and_completion_in_provider_logs_traces_receipts_and_telemetry",
+	"prompt_and_completion_in_provider_disk_and_conversation_caches",
+	"plaintext_proxy_or_subprocess_runtime_hop",
+	"dev_debug_unsigned_or_unapproved_builds_refused_by_routing",
+	"sip_disabled_hosts_refused_by_routing",
+	"modified_or_resigned_runtime_binary_refused_by_attested_app_check",
+	"modified_or_resigned_malibu_app_cannot_assert_posture",
+	"posture_replay_refused_by_attested_counter",
+}
+
+var privacyCodeBoundDoesNotProtect = []string{
+	"provider_runtime_reads_plaintext_to_infer",
+	"request_metadata_visible_to_relays",
+	"confidential_compute_or_hardware_enclave_execution",
+	"end_to_end_encryption_excluding_the_provider",
+	"kernel_or_firmware_compromise_with_sip_on",
+	"compromised_team_signing_key",
+	"pool_scoped_requests",
+}
+
+var privacyCodeBoundResidualRisks = []string{
+	"kernel_or_firmware_compromise_with_sip_on",
+	"physical_or_hardware_attack",
+	"gpu_and_unified_memory_residue",
+	"encrypted_swap_and_hibernation_images",
+	"compromise_of_the_live_runtime_process",
+	"malicious_signed_release_or_supply_chain",
+	"compromised_team_signing_key",
+	"apple_is_root_of_trust_for_app_attest",
+	"sip_and_full_security_attested_when_app_attest_key_was_attested",
+	"label_verified_by_coordinator_not_by_buyer",
+	"crash_report_register_and_stack_residue",
+	"secure_boot_level_not_evaluated",
+	"immutable_prompt_strings_not_zeroized",
+	"relays_observe_sizes_timing_and_token_counts",
+	"provider_identity_enrolled_on_first_attested_session",
+	"coordinator_operator_signs_provider_identity_directory",
+}
+
 var privacyResidualRisks = []string{
 	"modified_binary_can_forge_posture_se_key_device_bound_not_code_bound",
 	"root_sip_bypass_kernel_or_firmware_compromise",
@@ -91,6 +141,9 @@ type privacyUsageContext struct {
 	Model                 string
 	// PoolID is the SPEC-049-R032 pool of a pool-scoped request; "" global.
 	PoolID string
+	// Assurance is the SPEC-049-R034 label the coordinator echoed for this
+	// chat; the disclosure strings follow it.
+	Assurance string
 }
 
 // privacyUsageObject is the closed SPEC-049-R020 usage.macprovider.privacy
@@ -155,6 +208,34 @@ func privacyRequested(r *http.Request) (present, valid bool) {
 		return true, false
 	}
 	return true, value == privacyClassV1
+}
+
+// privacyAssuranceRequested reads the buyer's SPEC-049-R034 requirement. It
+// is valid only as exactly one code_bound_attested value.
+func privacyAssuranceRequested(r *http.Request) (present, valid bool) {
+	if r == nil {
+		return false, false
+	}
+	values := r.Header.Values(relayblind.PrivacyAssuranceRequiredHeader)
+	if len(values) == 0 {
+		return false, false
+	}
+	return true, len(values) == 1 && strings.TrimSpace(values[0]) == privacyAssuranceCodeBound
+}
+
+// privacyAssuranceEcho reads the coordinator's SPEC-049-R034 label from a
+// successful privacy chat. An absent header is device-bound, the only label a
+// coordinator before v0.5.0 serves; a repeated or unknown value fails.
+func privacyAssuranceEcho(h http.Header) (string, bool) {
+	values := h.Values(privacyAssuranceHeader)
+	switch {
+	case len(values) == 0:
+		return privacyAssuranceV1, true
+	case len(values) == 1 && (values[0] == privacyAssuranceV1 || values[0] == privacyAssuranceCodeBound):
+		return values[0], true
+	default:
+		return "", false
+	}
 }
 
 func privacyErrorMessage(code string) string {
@@ -350,6 +431,11 @@ func privacyPostureVerifiedAt(h http.Header) (int64, bool) {
 }
 
 func privacyUsageMetadata(verifiedAt int64, poolID string) privacyUsageObject {
+	return privacyUsageMetadataFor(privacyAssuranceV1, verifiedAt, poolID)
+}
+
+// privacyUsageMetadataFor is the SPEC-049-R020 object of one label.
+func privacyUsageMetadataFor(assurance string, verifiedAt int64, poolID string) privacyUsageObject {
 	object := privacyUsageObject{
 		Class:                 privacyClassV1,
 		Assurance:             privacyAssuranceV1,
@@ -358,6 +444,13 @@ func privacyUsageMetadata(verifiedAt int64, poolID string) privacyUsageObject {
 		DoesNotProtect:        append([]string(nil), privacyDoesNotProtect...),
 		ResidualRisks:         append([]string(nil), privacyResidualRisks...),
 		PostureVerifiedAtUnix: verifiedAt,
+	}
+	if assurance == privacyAssuranceCodeBound {
+		object.Assurance = privacyAssuranceCodeBound
+		object.Scope = privacyCodeBoundScope
+		object.Protects = append([]string(nil), privacyCodeBoundProtects...)
+		object.DoesNotProtect = append([]string(nil), privacyCodeBoundDoesNotProtect...)
+		object.ResidualRisks = append([]string(nil), privacyCodeBoundResidualRisks...)
 	}
 	if poolID != "" {
 		// The pool-scoped list drops the trailing pool_scoped_requests item.
@@ -390,7 +483,11 @@ func maybeSetPrivacySuccessHeaders(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Del(privacyPostureVerifiedAtHeader)
 	w.Header().Set(privacyClassHeader, privacyClassV1)
-	w.Header().Set(privacyAssuranceHeader, privacyAssuranceV1)
+	assurance := privacyAssuranceV1
+	if execution.Privacy.Assurance == privacyAssuranceCodeBound {
+		assurance = privacyAssuranceCodeBound
+	}
+	w.Header().Set(privacyAssuranceHeader, assurance)
 	w.Header().Set(privacyResponseEncryptionHeader, privacyResponseEncryptionV1)
 }
 

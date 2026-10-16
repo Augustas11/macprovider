@@ -1,6 +1,6 @@
 # SPEC-024 - Prefix-cache billing and provider-local cache isolation
 
-**Version:** 0.2.10 (2026-10-06, native MTP on cache-only misses)
+**Version:** 0.2.11 (2026-10-16, authenticated fleet cache revocation)
 **Status:** **Billing arithmetic (§4 ledger / §5 rate card / §6 formula) MOVED to SPEC-005 v0.6** (canonical). SPEC-024 **retains** the `cached_prompt_tokens` **wire field** (§3, a SPEC-002 addendum), the **buyer-visible** mirror field (§8, a SPEC-006 addendum), the fraud model (§7), and the provider-local cache-**isolation** baseline (§11–§16) — none of which SPEC-005 **re-owns** (SPEC-005 §5.3.1 does fold in the §14 coordinator cross-check *gates* as billing-eligibility rules, but SPEC-024 remains their canonical home).
 **Depends on:** SPEC-002 v1.5.2 (coordinator-provider wire), SPEC-004 v0.3.2 (sticky affinity; FR-SR-2 provider-visibility carve-out), SPEC-005 v0.6.10 (billing — the canonical owner of prefix-cache billing arithmetic, formula, ledger columns, and rate-card keys), SPEC-006 v0.9.39 (buyer API; §1.3 conversation-key derivation + survivability (b) carve-out + OpenAI nested usage), SPEC-008 v0.4.1 (Tier-2 trust; §2.2 invariant (b) carve-out permitting the provider-visible derived conversation_key), SPEC-018 v0.2.4 (tool calling)
 
@@ -756,3 +756,15 @@ on a non-FR-CI5 topology; (7) FR-CI14 reuse-disable on buyer-chosen-key paths. C
 a v0.2 IMPL deliverable. (The earlier draft mislabeled TTL/LRU/token-cap and coordinator
 route/range normalization as untested; they exist — the accurate gap is *depth* of the LRU/trim
 assertions and the queued-provenance + cross-key cases above.)
+
+
+## Authenticated fleet cache amendment
+
+For provider sessions advertising `fleet_cache_protocol: 1`, SPEC-037 §10
+extends FR-CI10a with authenticated provider-local persistence and durable
+coordinator purge delivery/acknowledgements. Historical statements that the
+provider cache is not buyer-purgeable apply only to legacy hot-cache sessions.
+The authenticated grant binds the same account/conversation/provider scope;
+revocation fences delayed grants, hot leases, snapshots and promotions across
+restart. Privacy requests never enter reusable caches. The LCP accounting rule,
+canonical checkpoint boundary and billing semantics remain unchanged.
