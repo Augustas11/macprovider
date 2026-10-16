@@ -17,7 +17,7 @@ let package = Package(
         )
     ],
     dependencies: [
-        // Fork branch glm53/tuple-0324 (untagged campaign revision b177f9e):
+        // Fork branch glm53/tuple-0324 (untagged campaign revision bf6ed33):
         // upstream mlx-swift-lm 3.32.3 plus the 3.32.3-macprovider.9 stack (the
         // packed MTP verification, fused A3B MoE, GDN checkpoint and compiled
         // MTP verification step commits upstream does not carry, and upstream
@@ -33,7 +33,7 @@ let package = Package(
         // on one Metal queue.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "b177f9eaa4830791210a08eb5ee2910bb593acf7"
+            revision: "bf6ed3390c7dde6d7931cf19a03e31dfa62359e0"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

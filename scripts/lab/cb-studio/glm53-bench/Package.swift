@@ -13,7 +13,7 @@ let package = Package(
     dependencies: [
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "b177f9eaa4830791210a08eb5ee2910bb593acf7")
+            revision: "bf6ed3390c7dde6d7931cf19a03e31dfa62359e0")
     ],
     targets: [
         .executableTarget(

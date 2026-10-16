@@ -99,6 +99,14 @@ final class PagedMLALatentCache: GLM5NextLatentCache, CustomDebugStringConvertib
         return gathered.squeezed(axis: 1)
     }
 
+    /// The cached latent `[1, 1, offset, R]` in logical order, nil while
+    /// empty. Read by the native-MTP head, not by the target forward, so it
+    /// is never routed through the parity gather.
+    var validLatent: MLXArray? {
+        guard offset > 0, let latentBuffer else { return nil }
+        return latentBuffer[.ellipsis, ..<offset, 0...]
+    }
+
     func appendLatent(_ values: MLXArray) -> MLXArray {
         let length = values.dim(2)
         let previous = offset

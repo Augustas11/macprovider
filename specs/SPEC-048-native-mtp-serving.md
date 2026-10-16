@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.36
+**Version:** 0.1.37
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.36",
+  "version": "0.1.37",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -394,7 +394,7 @@ rejects the whole sidecar. R014 item 10 makes this a release gate.
 
 The observer MUST inspect every `.safetensors` file that the R003-authorized
 mlx-swift-lm loader can consume. At the R003 mlx-swift-lm revision
-(`b177f9ea…`; `safetensorWeightURLs` is unchanged from `3.32.3-macprovider.6`)
+(`bf6ed339…`; `safetensorWeightURLs` is unchanged from `3.32.3-macprovider.6`)
 the loader takes the files named by
 `model.safetensors.index.json`, which may sit in subdirectories, else the
 top-level conventional names, plus files the model declares as additional
@@ -464,7 +464,7 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | **PENDING — filled by the campaign release step** (candidate on branch `glm53/tuple-0324`) | `b177f9eaa4830791210a08eb5ee2910bb593acf7` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | **PENDING — filled by the campaign release step** (candidate on branch `glm53/tuple-0324`) | `bf6ed3390c7dde6d7931cf19a03e31dfa62359e0` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.9` | `29d3b93375cc56cd2649b40e4310a8bc445e9874` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.4` | `2f512e3997349c8648f5d7c5113eb2c825aa242d` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 
@@ -523,7 +523,8 @@ Authorized surface:
   cherry-picked), so no trace reads a model array as a tape constant.
 - mlx-swift fork: the core submodule moved to the MLX core fork, and the
   compiled-function erase documented for the per-thread cache. No API change.
-- mlx-swift-lm fork, GLM-5-Next (0.1.34, epic #2029; batched rows 0.1.36):
+- mlx-swift-lm fork, GLM-5-Next (0.1.34, epic #2029; batched rows 0.1.36;
+  MTP-1 target and drafter 0.1.37):
   the `glm5_next` / `glm5_next_text` model (`GLM5Next.swift`,
   `GLM5NextWeights` sanitizer), its `GLM5NextAttentionCache` (MLA latent plus
   pooled indexer keys, with exact `trim` of up to `maxTrim` tokens), the
@@ -536,10 +537,20 @@ Authorized surface:
   multi-qmv projections with explicit thread layout), the per-channel gated
   delta update, and the two-input `SwitchGLU` activation. The T3 parity
   evidence (`docs/evidence/glm53-flash-t3-parity-2026-10-16/`) covers the
-  ordinary path at this revision. The `glm5_next_mtp_v1` drafter surface
-  (stateful packed drafter advance, next-N state transactions over KDA and
-  `pagedMLA` state) is not yet in this tuple; it joins the authorized surface
-  only through a later revision of this row.
+  ordinary path. From 0.1.37 the fork also carries the MTP-1 target side and
+  drafter: a verification forward (`mtpCacheCheckpointIndexKey`) runs every
+  column as a one-token decode step, so each verified column's logits equal
+  the serial decode of that token; a rejected proposal rewinds in place (sparse
+  layers trim exactly, KDA restores the checkpoint the verify pass saved;
+  `SpeculativeCacheRewindModel` depth 1); the emit flag returns the
+  pre-final-norm hidden state and the last sparse layer's latent
+  (`GLM5NextLatentCache.validLatent`); and `GLM5NextMTPDraftModel`
+  (`GLM5NextMTP.swift`, parameterless, block size 2, greedy only, one
+  `GLM5NextAttentionCache` of `maxTrim` 1, packed advance over right-padded
+  rows) with `GLM5NextMTPRegistration`. The provider's `glm5_next_mtp_v1`
+  serving surface (next-N state transactions over KDA and `pagedMLA` state in
+  the paged backend, and the native-MTP capability gate) is not part of this
+  row; it joins only through a later revision.
 - MLX core fork: small-M quantized matmuls route batch-invariantly (`qmv`
   below the vector limit, `qmm` without split-K at or above it, no
   `qmv_wide`), so a continuously batched row matches its serial result; the
@@ -564,8 +575,9 @@ Review record for the #2028 tuple (2026-10-16; mlx-swift-lm
 `3.32.3-macprovider.9` / mlx-swift `0.32.3-macprovider.8` / MLX core
 `v0.32.2-macprovider.5`): the stream-propagation fix with a three-lane freeze
 audit at 0 Critical, 0 High, 0 Medium (`audits/2026-10-16-2028-gptoss-decode/`).
-The campaign mlx-swift-lm revision `b177f9ea…` descends from that tuple's
-`dbe8bcb3…` and adds only the GLM-5-Next files and model registration.
+The campaign mlx-swift-lm revision `bf6ed339…` descends from that tuple's
+`dbe8bcb3…` and adds only the GLM-5-Next files and model and drafter
+registration.
 
 Review record for the earlier tuple (2026-10-10, `@Augustas11`;
 mlx-swift-lm `3.32.3-macprovider.6` / mlx-swift `0.32.3-macprovider.2` / MLX
@@ -1608,6 +1620,14 @@ the text-only path without image inputs; that does not admit multimodal buyer
 requests.
 
 ## 9. Changelog and history
+
+- **0.1.37 (2026-10-17)** — MTP-3 campaign tuple moves to mlx-swift-lm
+  `bf6ed339…` (still untagged; the tag stays a PENDING row); mlx-swift and
+  the MLX core are unchanged. The two added commits are GLM-5-Next only: the
+  MTP-1 target side (verification columns as one-token decode steps, in-place
+  one-token rewind, hidden state and `validLatent` for the head) and the
+  `GLM5NextMTPDraftModel` drafter with its registration. The provider's
+  `glm5_next` native-MTP serving surface stays outside the row.
 
 - **0.1.36 (2026-10-17)** — MTP-3 campaign tuple moves to mlx-swift-lm
   `b177f9ea…` (still untagged; the tag stays a PENDING row), mlx-swift

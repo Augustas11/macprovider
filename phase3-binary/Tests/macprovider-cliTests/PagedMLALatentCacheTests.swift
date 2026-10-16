@@ -166,6 +166,11 @@ final class PagedMLALatentCacheTests: XCTestCase {
         case let (lhs?, rhs?): XCTAssertTrue(equal(lhs, rhs), "pooled \(label)")
         default: XCTFail("pooled presence differs \(label)")
         }
+        switch (paged.validLatent, oracle.validLatent) {
+        case (nil, nil): break
+        case let (lhs?, rhs?): XCTAssertTrue(equal(lhs, rhs), "validLatent \(label)")
+        default: XCTFail("validLatent presence differs \(label)")
+        }
         assertStatesEqual(paged.state, oracle.state, label)
     }
 

@@ -20,6 +20,19 @@
 //   --*-exact        fused vs op path exactness on the loaded weights
 //                    (kda, hc, router, moe, dsa, deferred)
 //   --random         real shapes from config.json with seeded random weights
+//   --batch 1,2,4,8  continuous-batching decode: rows of ragged prompts
+//                    (--prompt + 7 * row tokens) prefilled one by one, then
+//                    decoded together; median synchronous step time per batch
+//                    size (--batch-steps N, default 31), aggregate tok/s and
+//                    the gain over B = 1; --batch-exact N compares each row's
+//                    first N batched logits with its serial decode bitwise;
+//                    --batch-profile adds per-kernel GPU time per batch size
+//                    (run with MLX_MAX_OPS_PER_BUFFER=0)
+//   --mtp N          greedy decode of N tokens, plain then with the MTP-1
+//                    drafter (MTPSpeculativeTokenIterator), from the --oracle
+//                    prompt (or --prompt random tokens); tok/s of both,
+//                    acceptance, MTP == plain, and parity with the oracle's
+//                    greedy tokens
 // GPU runs only in an announced lab window; never beside a serving provider.
 import Foundation
 import MLX
@@ -45,7 +58,7 @@ let profile = args.contains("--profile")
 let syncEach = args.contains("--sync")
 
 Memory.cacheLimit = 4096 << 20
-if ["--census", "--module-census", "--gpu-profile"].contains(where: CommandLine.arguments.contains) { DispatchCensus.install() }
+if ["--census", "--module-census", "--gpu-profile", "--batch-profile"].contains(where: CommandLine.arguments.contains) { DispatchCensus.install() }
 
 if args.contains("--qmv-chain") {
     // 200 dependent one-token quantized matmuls in one eval (decode-like:
@@ -228,6 +241,146 @@ for _ in 0 ..< ballastGB {
     ballast.append(b)
 }
 if ballastGB > 0 { print("ballast_gb=\(ballastGB) active_gb=\(Double(Memory.activeMemory) / 1e9)") }
+if let mtpTokens = optString("--mtp").flatMap(Int.init) {
+    struct MTPOracle: Decodable { let prompt: [Int]; let greedy: [Int] }
+    let mtpOracle = try optString("--oracle").map {
+        try JSONDecoder().decode(MTPOracle.self, from: Data(contentsOf: URL(fileURLWithPath: $0)))
+    }
+    let prompt = mtpOracle.map { MLXArray($0.prompt.map(Int32.init)) }
+        ?? withRandomState(MLXRandom.RandomState(seed: 3)) {
+            MLXRandom.randInt(0 ..< 150000, [promptLen]).asType(.int32)
+        }
+    var parameters = GenerateParameters(maxTokens: mtpTokens, temperature: 0)
+    parameters.prefill.stepSize = Int.max
+    parameters.prefill.chunking = .unchunked
+    print("mtp has_weights=\(model.languageModel.hasMTPWeights) prompt=\(prompt.size) tokens=\(mtpTokens)")
+    func run(_ label: String, _ makeIterator: () throws -> any TokenIteratorProtocol) rethrows -> [Int] {
+        let p0 = Date()
+        var iterator = try makeIterator()
+        let d0 = Date()
+        var produced = [Int]()
+        while let token = iterator.next() { produced.append(token) }
+        let decode = Date().timeIntervalSince(d0)
+        var line = String(format: "mtp %@ prefill_s=%.2f decode_tok_s=%.2f", label, d0.timeIntervalSince(p0), Double(produced.count) / decode)
+        if let mtp = iterator as? MTPSpeculativeTokenIterator {
+            line += String(format: " proposed=%d accepted=%d acceptance=%.3f", mtp.proposedCount, mtp.acceptedCount, Double(mtp.acceptedCount) / Double(max(mtp.proposedCount, 1)))
+            if let reason = mtp.passthroughReason { line += " passthrough=\"\(reason)\"" }
+        }
+        if let greedy = mtpOracle?.greedy {
+            let n = min(greedy.count, produced.count)
+            let first = (0 ..< n).first { produced[$0] != greedy[$0] }
+            line += " oracle_match=\(first ?? n)/\(n)"
+        }
+        print(line)
+        return produced
+    }
+    let rounds = opt("--mtp-rounds", 1)
+    for round in 0 ..< rounds {
+        let plain = try run("plain") { try TokenIterator(prompt: prompt, model: model, parameters: parameters) }
+        let speculative = try run("mtp") {
+            try MTPSpeculativeTokenIterator(
+                input: LMInput(tokens: prompt), mainModel: model,
+                drafter: GLM5NextMTPDraftModel(config), parameters: parameters, blockSize: 2)
+        }
+        let first = (0 ..< min(plain.count, speculative.count)).first { plain[$0] != speculative[$0] }
+        print("mtp round=\(round) mtp_equals_plain=\(first == nil && plain.count == speculative.count) first_difference=\(first.map(String.init) ?? "none")")
+    }
+    exit(0)
+}
+if let batchList = optString("--batch") {
+    let sizes = batchList.split(separator: ",").compactMap { Int($0) }.filter { $0 >= 1 }
+    let maxRows = sizes.max() ?? 1
+    let timedSteps = opt("--batch-steps", 31)
+    let exactSteps = opt("--batch-exact", 0)
+    func rowPrompt(_ r: Int) -> MLXArray {
+        withRandomState(MLXRandom.RandomState(seed: UInt64(300 + r))) {
+            MLXRandom.randInt(0 ..< 150000, [1, promptLen + 7 * r]).asType(.int32)
+        }
+    }
+    // Recurrent states stacked on the batch axis; sparse layers keep one
+    // latent cache per row (GLM5NextLatentCacheBatch).
+    func batched(_ rows: [[KVCache]]) -> [KVCache] {
+        (0 ..< rows[0].count).map { layer -> KVCache in
+            if rows[0][layer] is MambaCache {
+                let batch = MambaCache()
+                batch[0] = concatenated(rows.map { ($0[layer] as! MambaCache)[0]! }, axis: 0)
+                batch[1] = concatenated(rows.map { ($0[layer] as! MambaCache)[1]! }, axis: 0)
+                return batch
+            }
+            return GLM5NextLatentCacheBatch(rowCaches: rows.map { $0[layer] as! any GLM5NextLatentCache })
+        }
+    }
+    let pf = Date()
+    var rowCaches = [[KVCache]]()
+    var firstTokens = [Int32]()
+    for r in 0 ..< maxRows {
+        let rowCache = try model.newCache(parameters: nil)
+        let p = rowPrompt(r)
+        var s = 0
+        var lastLogits = MLXArray(0)
+        while s < p.dim(1) {
+            let e = min(s + 2048, p.dim(1))
+            lastLogits = model(p[0..., s ..< e], cache: rowCache)[0, -1, 0...]
+            eval(lastLogits)
+            s = e
+        }
+        eval(rowCache)
+        firstTokens.append(Int32(argMax(lastLogits, axis: -1).item(Int.self)))
+        rowCaches.append(rowCache)
+    }
+    print(String(format: "batch prefill rows=%d prompt=%d+7r seconds=%.1f active_gb=%.1f", maxRows, promptLen, Date().timeIntervalSince(pf), Double(Memory.activeMemory) / 1e9))
+    var baseline: Double?
+    for B in sizes {
+        let caches = batched(rowCaches.prefix(B).map { $0.map { $0.copy() } })
+        var tok = MLXArray(Array(firstTokens.prefix(B))).reshaped(B, 1)
+        var times = [Double]()
+        var recorded = [(MLXArray, MLXArray)]()
+        for rep in 0 ..< (timedSteps + 3) {
+            let a = Date()
+            let logits = model(tok, cache: caches)
+            let next = argMax(logits[0..., -1, 0...], axis: -1).reshaped(B, 1).asType(.int32)
+            if rep < exactSteps { eval(next, logits) } else { eval(next) }
+            if rep >= 3 { times.append(Date().timeIntervalSince(a) * 1000) }
+            if rep < exactSteps { recorded.append((tok, logits)) }
+            tok = next
+        }
+        times.sort()
+        let median = times[times.count / 2]
+        let aggregate = Double(B) * 1000 / median
+        if B == 1 { baseline = aggregate }
+        let gain = baseline.map { String(format: "%.3f", aggregate / $0) } ?? "n/a"
+        print(String(format: "batch B=%d step_ms_median=%.2f min=%.2f max=%.2f aggregate_tok_s=%.2f per_row_tok_s=%.2f", B, median, times.first!, times.last!, aggregate, 1000 / median) + " gain_vs_B1=\(gain)")
+        if args.contains("--batch-profile") {
+            let steps = 10
+            DispatchCensus.reset()
+            DispatchCensus.enabled = true
+            for _ in 0 ..< steps {
+                tok = argMax(model(tok, cache: caches)[0..., -1, 0...], axis: -1).reshaped(B, 1).asType(.int32)
+                eval(tok)
+            }
+            DispatchCensus.enabled = false
+            DispatchCensus.group.wait()
+            print("batch B=\(B) gpu profile:")
+            DispatchCensus.gpuReport(steps: steps)
+        }
+        if exactSteps > 0 {
+            var exact = true
+            for r in 0 ..< B {
+                let serial = rowCaches[r].map { $0.copy() }
+                for (step, (input, logits)) in recorded.enumerated() {
+                    let one = model(input[r ..< (r + 1)], cache: serial)
+                    if !arrayEqual(one, logits[r ..< (r + 1)]).item(Bool.self) {
+                        exact = false
+                        let d = abs(one.asType(.float32) - logits[r ..< (r + 1)].asType(.float32)).max().item(Float.self)
+                        print("batch B=\(B) row \(r) step \(step) differs max_abs=\(d)")
+                    }
+                }
+            }
+            print("batch B=\(B) exact_vs_serial=\(exact) steps=\(exactSteps)")
+        }
+    }
+    exit(0)
+}
 let text = model.languageModel
 let cache = try model.newCache(parameters: nil)
 let prompt = withRandomState(MLXRandom.RandomState(seed: 3)) {
@@ -720,7 +873,7 @@ if profile {
             } else {
                 var t: [MLXArray?]
                 (attention, t) = (layer.selfAttn as! GLM5NextAttention)(
-                    normed, cache: cache[i] as? GLM5NextAttentionCache, previousTopk: topk)
+                    normed, cache: cache[i], previousTopk: topk)
                 topk = t
             }
             eval(attention)
