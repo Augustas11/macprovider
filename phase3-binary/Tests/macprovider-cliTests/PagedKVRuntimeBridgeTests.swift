@@ -1832,8 +1832,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         paddedRouteDifferences.forEach { print("  \($0)") }
     }
 
-    /// The vector-attention route port pins core `v0.32.2-macprovider.5`
-    /// (`scaled_dot_product_attention.cpp` lines 469-473, 486-523, 875): every
+    /// The vector-attention route port pins core `v0.32.4-macprovider.1`
+    /// (`scaled_dot_product_attention.cpp` lines 754-763, 772-812, 1577): every
     /// pass-count and partition-count boundary on both sides. A rebase that
     /// moves one must update the port and this table.
     func testVectorAttentionRouteMatchesTheCoreDispatchBoundaries() {
@@ -1862,6 +1862,11 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(route(8192, d: 128, mask: false), two(128, gqa: true))
         XCTAssertEqual(route(8192, d: 128, mask: true), two(128))
         XCTAssertEqual(route(8192, d: 256, mask: false), two(128))
+        // v0.32.4 adds `_gqa_12` and `_gqa_16` at head dim 128 only.
+        XCTAssertEqual(route(8192, q: 24, kv: 2, d: 128, mask: false), two(128, gqa: true))
+        XCTAssertEqual(route(8192, q: 32, kv: 2, d: 128, mask: false), two(128, gqa: true))
+        XCTAssertEqual(route(8192, q: 32, kv: 2, d: 64, mask: false), two(128))
+        XCTAssertEqual(route(8192, q: 8, kv: 2, d: 128, mask: false), two(128))
         // Max ('s').
         XCTAssertEqual(route(1023, arch: "applegpu_g15s"), one)
         XCTAssertEqual(route(1024, arch: "applegpu_g15s"), two(64))

@@ -34,9 +34,9 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.9.4` | `ce3bb5235317367c61c054311a830b1e81aaa6ea` | `3.32.3` (`3b339ad6…`) |
-| `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.8` | `745f5e4872054ae2c1c497d2351a61b6d89e8a05` | `0.32.3` (`19601207…`) |
-| `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.2-macprovider.5` | `49d94e9fece0849443fa414e2d47813f68a51eaa` | `v0.32.2` (`1f8e74e3…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | untagged (`glm53/tuple-0324`) | `91283d44750beeccd0c95a5d9c6b2a2c43d53960` | `3.32.3` (`3b339ad6…`) |
+| `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.3` | `0c9854fc147a6669b36c7e9d0f1c325ab0c6aa91` | `0.32.3` (`19601207…`) |
+| `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.1` | `1b194804592cd5c22bfd1d036f4b364516f01449` | `v0.32.4` (`36969c09…`) |
 
 Tags are immutable: a change is a new `<n>`, never a moved tag. Each link pins
 the next by full revision: `phase3-binary/Package.swift` pins mlx-swift-lm,

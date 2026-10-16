@@ -91,7 +91,7 @@ class SwiftPMPinParsingTests(unittest.TestCase):
         payload = json.loads(fixture.read_text())
         payload["pins"][1]["location"] = "https://github.com/Augustas11/mlx-swift-lm.git"
         payload["pins"][1]["state"] = {
-            "revision": "ce3bb5235317367c61c054311a830b1e81aaa6ea"
+            "revision": "91283d44750beeccd0c95a5d9c6b2a2c43d53960"
         }
         with tempfile.TemporaryDirectory() as temporary:
             resolved = Path(temporary) / "Package.resolved"
@@ -101,11 +101,11 @@ class SwiftPMPinParsingTests(unittest.TestCase):
 
         self.assertEqual(
             pins["mlx_swift_lm"],
-            "ce3bb5235317367c61c054311a830b1e81aaa6ea",
+            "91283d44750beeccd0c95a5d9c6b2a2c43d53960",
         )
         self.assertEqual(
             pins["mlx_swift_lm_revision"],
-            "ce3bb5235317367c61c054311a830b1e81aaa6ea",
+            "91283d44750beeccd0c95a5d9c6b2a2c43d53960",
         )
 
     def test_fails_closed_when_spec048_fork_uses_unreviewed_revision(self):
@@ -126,7 +126,7 @@ class SwiftPMPinParsingTests(unittest.TestCase):
         payload = json.loads(fixture.read_text())
         payload["pins"][1]["location"] = "https://github.com/Augustas11/mlx-swift-lm.git"
         payload["pins"][1]["state"] = {
-            "revision": "ca8c384c4fb6bc7d2fbb7c70a18c34b935701805"
+            "revision": "72c4ab082a08f291ba270a7303880e90036742e3"
         }
         with tempfile.TemporaryDirectory() as temporary:
             resolved = Path(temporary) / "Package.resolved"
@@ -139,7 +139,7 @@ class SwiftPMPinParsingTests(unittest.TestCase):
         payload = json.loads(fixture.read_text())
         payload["pins"][0]["location"] = "https://github.com/Augustas11/mlx-swift"
         payload["pins"][0]["state"] = {
-            "revision": "745f5e4872054ae2c1c497d2351a61b6d89e8a05"
+            "revision": "0c9854fc147a6669b36c7e9d0f1c325ab0c6aa91"
         }
         with tempfile.TemporaryDirectory() as temporary:
             resolved = Path(temporary) / "Package.resolved"
@@ -147,9 +147,9 @@ class SwiftPMPinParsingTests(unittest.TestCase):
 
             pins = read_pins(resolved)
 
-        self.assertEqual(pins["mlx_swift"], "745f5e4872054ae2c1c497d2351a61b6d89e8a05")
+        self.assertEqual(pins["mlx_swift"], "0c9854fc147a6669b36c7e9d0f1c325ab0c6aa91")
         self.assertEqual(
-            pins["mlx_swift_revision"], "745f5e4872054ae2c1c497d2351a61b6d89e8a05"
+            pins["mlx_swift_revision"], "0c9854fc147a6669b36c7e9d0f1c325ab0c6aa91"
         )
 
     def test_fails_closed_when_mlx_swift_fork_uses_unreviewed_revision(self):
@@ -170,7 +170,7 @@ class SwiftPMPinParsingTests(unittest.TestCase):
         payload = json.loads(fixture.read_text())
         payload["pins"][0]["location"] = "https://github.com/Augustas11/mlx-swift"
         payload["pins"][0]["state"] = {
-            "revision": "745f5e4872054ae2c1c497d2351a61b6d89e8a05",
+            "revision": "0c9854fc147a6669b36c7e9d0f1c325ab0c6aa91",
             "version": "0.32.3",
         }
         with tempfile.TemporaryDirectory() as temporary:
@@ -185,10 +185,10 @@ class SwiftPMPinParsingTests(unittest.TestCase):
         pins = read_pins(resolved)
 
         self.assertEqual(
-            pins["mlx_swift_lm_revision"], "ce3bb5235317367c61c054311a830b1e81aaa6ea"
+            pins["mlx_swift_lm_revision"], "91283d44750beeccd0c95a5d9c6b2a2c43d53960"
         )
         self.assertEqual(
-            pins["mlx_swift_revision"], "745f5e4872054ae2c1c497d2351a61b6d89e8a05"
+            pins["mlx_swift_revision"], "0c9854fc147a6669b36c7e9d0f1c325ab0c6aa91"
         )
 
     def test_fails_closed_when_upstream_mlx_swift_lm_is_revision_only(self):
@@ -255,7 +255,7 @@ class ProductionForkTupleTests(unittest.TestCase):
 
     def test_rejects_wrong_fork_revision(self):
         for lm, swift in (
-            ((self.LM_FORK[0], "ca8c384c4fb6bc7d2fbb7c70a18c34b935701805"), self.SWIFT_FORK),
+            ((self.LM_FORK[0], "72c4ab082a08f291ba270a7303880e90036742e3"), self.SWIFT_FORK),
             (self.LM_FORK, (self.SWIFT_FORK[0], "19601207e9a0de51e03ee6ec0c3c5f3784275075")),
         ):
             with self.subTest(lm=lm, swift=swift):

@@ -3906,10 +3906,11 @@ struct PagedKVRowAttentionExtent: Equatable {
 
 /// The vector attention route MLX core takes for a call (query length at
 /// most 8), ported from core fork `Augustas11/mlx` tag
-/// `v0.32.2-macprovider.5`, `mlx/backend/metal/scaled_dot_product_attention.cpp`:
-/// vector mode at line 812 (`q_pre.shape(2) <= 8`), one vs two passes at
-/// line 875, the `_gqa` first-pass kernel at lines 469-473, the partition
-/// count at lines 486-523 (with the `MLX_SDPA_BLOCKS` override at 519).
+/// `v0.32.4-macprovider.1`, `mlx/backend/metal/scaled_dot_product_attention.cpp`:
+/// vector mode at line 1508 (`q_pre.shape(2) <= 8`), one vs two passes at
+/// line 1577, the `_gqa_<factor>` first-pass kernel at lines 754-763 (8x GQA
+/// at head dim 64/128, 12x/16x GQA at head dim 128), the partition count at
+/// lines 772-812 (with the `MLX_SDPA_BLOCKS` override at 808).
 /// Within one route a row's result does not depend on padding: both kernels
 /// (`kernels/sdpa_vector.h`) deal key `i` to partition `i mod P`, skip
 /// masked keys, and reduce the `P` partials in a fixed order. A rebase that
@@ -3950,8 +3951,10 @@ enum PagedKVVectorAttentionRoute {
         let large = device == "d" || device == "s"
         let twoPass = (large && n >= 1024) || (kvHeads < queryHeads && n >= 4096)
         guard twoPass else { return Route(twoPass: false, partitions: 32, gqaKernel: false) }
-        let gqaKernel = !hasArrayMask && queryTokens == 1 && queryHeads == 8 * kvHeads
-            && headDim == valueDim && (headDim == 64 || headDim == 128) && n >= 8192
+        let gqaFactor = queryHeads / kvHeads
+        let gqaDims = (gqaFactor == 8 && (headDim == 64 || headDim == 128))
+            || ((gqaFactor == 12 || gqaFactor == 16) && headDim == 128)
+        let gqaKernel = !hasArrayMask && queryTokens == 1 && headDim == valueDim && gqaDims && n >= 8192
         let simdGroups = (queryHeads / kvHeads) * queryTokens
         var partitions: Int
         if device == "s" {

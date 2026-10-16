@@ -2950,7 +2950,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
     // configuration, a per-layer quantization exclusion, or no readable
     // configuration never groups.
     /// The decode row bound ports core `get_qmv_batch_limit`
-    /// (`v0.32.2-macprovider.5`): a decode forward of `M` rows stays on
+    /// (`v0.32.4-macprovider.1`): a decode forward of `M` rows stays on
     /// `qmv` for every quantized projection while `M` is below the device's
     /// smallest vector limit.
     func testDecodeRouteBoundFollowsTheCoreVectorLimitPerDevice() {
@@ -2961,7 +2961,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             ("applegpu_g14d", [32, 18, 12], 11), // M2 Ultra
             ("applegpu_g13d", [32, 18, 12], 11), // M1 Ultra
             ("applegpu_g13g", [14, 10, 6], 5), // M1
-            ("applegpu_g13s", [14, 10, 6], 5), // M1 Pro
+            ("applegpu_g13s", [14, 10, 7], 6), // M1 Pro
             ("applegpu_g14g", [14, 10, 6], 5), // M2
             ("applegpu_g14s", [14, 10, 6], 5), // M2 Pro
             ("applegpu_g15g", [13, 15, 13], 12), // M3

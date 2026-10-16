@@ -370,9 +370,9 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.9.4` | `ce3bb5235317367c61c054311a830b1e81aaa6ea` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
-| `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.8` | `745f5e4872054ae2c1c497d2351a61b6d89e8a05` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
-| `https://github.com/Augustas11/mlx` | `v0.32.2-macprovider.5` | `49d94e9fece0849443fa414e2d47813f68a51eaa` | `ml-explore/mlx` `v0.32.2` (`1f8e74e3f12f31365464a6867c6579f0e9b29d85`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | untagged (`glm53/tuple-0324`) | `91283d44750beeccd0c95a5d9c6b2a2c43d53960` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.3` | `0c9854fc147a6669b36c7e9d0f1c325ab0c6aa91` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
+| `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.1` | `1b194804592cd5c22bfd1d036f4b364516f01449` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 
 Each link pins the next by full revision: `phase3-binary/Package.swift` pins
 the mlx-swift-lm fork, that fork's manifest pins the mlx-swift fork, and the

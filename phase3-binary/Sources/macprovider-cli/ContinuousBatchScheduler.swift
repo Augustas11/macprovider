@@ -112,7 +112,7 @@ struct ContinuousBatchSchedulerSnapshot: Sendable, Equatable {
 /// alone; otherwise a row's numerics depend on its batch neighbours. A shared
 /// prefill feeds `[rows, chunk]` tokens, and every quantized projection
 /// flattens that to `M = rows x chunk` (`QuantizedMatmul::eval_gpu`,
-/// `mlx/backend/metal/quantized.cpp`, MLX core fork `v0.32.2-macprovider.5`):
+/// `mlx/backend/metal/quantized.cpp`, MLX core fork `v0.32.4-macprovider.1`):
 /// `M < vector_limit` takes `qmv` (or `qmv_quad` at K 64/128), else `qmm`,
 /// with `vector_limit = get_qmv_batch_limit(K, N, device)` for transposed
 /// weights and 4 otherwise. Within each route a row's result does not depend
@@ -238,10 +238,11 @@ struct ContinuousBatchPrefillGroupingRule: Sendable, Equatable {
 /// row decoded beside enough neighbours would switch kernels and reduction
 /// order. A decode forward carries at most `vector limit - 1` rows, where the
 /// limit is the smallest `get_qmv_batch_limit` of the device over every K and
-/// N (core `v0.32.2-macprovider.5`, `mlx/backend/metal/quantized.cpp`). The
+/// N (core `v0.32.4-macprovider.1`, `mlx/backend/metal/quantized.cpp`). The
 /// smallest value belongs to the K or N above 4096 branch, which every served
-/// model reaches through its output head. M3 Ultra: 12, so 11 rows; M1/M2
-/// non-Ultra: 6, so 5 rows; M3-M5 non-Ultra: 13, so 12 rows.
+/// model reaches through its output head. M3 Ultra: 12, so 11 rows; M1 Pro
+/// (`g13s`): 7, so 6 rows; other M1/M2 non-Ultra: 6, so 5 rows; M3-M5
+/// non-Ultra: 13, so 12 rows.
 enum ContinuousBatchDecodeRouteBound {
     /// Port of core `get_qmv_batch_limit` for transposed quantized weights.
     /// `architecture` is the Metal architecture name (`applegpu_g15d`), or
@@ -262,7 +263,8 @@ enum ContinuousBatchDecodeRouteBound {
         } else if generation >= 15 && !isUltra {
             return small ? 13 : (medium ? 15 : 13)
         } else if generation >= 13 {
-            return isUltra ? (small ? 32 : (medium ? 18 : 12)) : (small ? 14 : (medium ? 10 : 6))
+            let large = generation == 13 && bytes.last == UInt8(ascii: "s") ? 7 : 6
+            return isUltra ? (small ? 32 : (medium ? 18 : 12)) : (small ? 14 : (medium ? 10 : large))
         } else {
             return isUltra ? (small ? 32 : (medium ? 18 : 12)) : (small ? 18 : (medium ? 12 : 10))
         }

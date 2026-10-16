@@ -42,14 +42,15 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
-# Fork tag 3.32.3-macprovider.9.4 on upstream mlx-swift-lm 3.32.3 (.9 plus the
-# Qwen2-VL per-image vision attention fix, issue #2016).
-SPEC048_MLX_SWIFT_LM_REVISION = "ce3bb5235317367c61c054311a830b1e81aaa6ea"
+# Fork branch glm53/tuple-0324 (untagged campaign revision) on upstream
+# mlx-swift-lm 3.32.3.
+SPEC048_MLX_SWIFT_LM_REVISION = "91283d44750beeccd0c95a5d9c6b2a2c43d53960"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
-# Fork tag 0.32.3-macprovider.8: upstream mlx-swift 0.32.3 with the MLX core
-# submodule on the core fork below.
-SPEC048_MLX_SWIFT_REVISION = "745f5e4872054ae2c1c497d2351a61b6d89e8a05"
+# Fork tag 0.32.3-macprovider.3: upstream mlx-swift 0.32.3 with the MLX core
+# submodule on the batch-invariant small-M quantized matmul fork
+# (v0.32.4-macprovider.1).
+SPEC048_MLX_SWIFT_REVISION = "0c9854fc147a6669b36c7e9d0f1c325ab0c6aa91"
 SPEC048_MLX_SWIFT_UPSTREAM_BASE = "19601207e9a0de51e03ee6ec0c3c5f3784275075"
 # Fork tag v0.32.2-macprovider.5 on upstream MLX v0.32.2: the reviewed
 # Source/Cmlx/mlx gitlink of SPEC048_MLX_SWIFT_REVISION. Package.resolved does
