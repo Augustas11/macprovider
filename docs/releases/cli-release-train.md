@@ -62,6 +62,20 @@ Verified 2026-10-10 against public release metadata, the release train
 | Installer | `get.malibu.tech/install.sh` matches the v1.8.232 `dist/install.sh` (train step `install_sh_vs_release: parity`). |
 | Release mirror | `download.malibu.tech/releases/v1.8.232/` byte-identical to GitHub (33 assets verified); `latest.json` promoted from `v1.8.224` to `v1.8.232` on 2026-10-10 with `publish-release-mirror.sh --promote-latest`. |
 
+## Next CLI release — net changes vs 1.8.248 (tracked 2026-10-16)
+
+Live fleet target: **1.8.248**. Staged: `binaryVersion` **1.8.250** (v1.8.249 is the
+runtime release). Every PR below is merged and none is open, so the cut is authorized.
+
+| PR | Issue | Provider-side change | Status |
+|---|---|---|---|
+| #2030 | #2014 | Tool selection evaluated on the catalog identity of an alias-configured model (named/required modes for Qwen3.6) | merged |
+| #2032 | #2015 | Hybrid KV entries persist: complete recurrent state, size estimate, staging defaults that fit; Studio acceptance 14/14, cold-restore TTFT 750 vs 3523 ms | merged |
+| #2033 | #2028 | MLX core fork v0.32.2-macprovider.5 keeps internal ops on the caller's stream (mlx-swift 0.32.3-macprovider.8, mlx-swift-lm 3.32.3-macprovider.9); gpt-oss-20b decode 125.37 vs 125.77 tok/s on 1.8.232 (Studio T1-02) | merged |
+
+No catalog, CB-policy, native-MTP or Pearl change. The CB self-check re-runs on the new
+runtime-build key, as at every runtime version change.
+
 ## Next CLI release — net changes vs 1.8.242 (tracked 2026-10-16)
 
 Live fleet target: **1.8.242** (published 2026-10-15; Pearl recommends it).
