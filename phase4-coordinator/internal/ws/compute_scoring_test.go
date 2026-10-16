@@ -174,6 +174,7 @@ type scoringHarness struct {
 	logs       *lockedBuffer
 	db         *sql.DB
 	silent     sync.Map
+	short      sync.Map
 }
 
 type lockedBuffer struct {
@@ -292,6 +293,9 @@ func (h *scoringHarness) fakeScorer(providerID, assignedID string, conn net.Conn
 		if strings.Contains(req.OutputText, "CHEAP") {
 			result.Top1Matches = 55
 			result.SumLogprob = -160
+		}
+		if _, short := h.short.Load(providerID); short {
+			result.ScoredTokens, result.Top1Matches, result.SumLogprob = 4, 4, -1
 		}
 		payload, _ := json.Marshal(result)
 		h.server.handleComputeScoreResult(providerID, assignedID, payload)
@@ -738,8 +742,8 @@ func TestComputeScoringFirstRequestUsesJitteredCadence(t *testing.T) {
 	}
 }
 
-// FR-20: the hourly bound survives a restart, counted from the verification
-// requests already in the request log.
+// FR-20: the hourly bound is a rolling hour and survives a restart, rebuilt
+// from the verification requests already in the request log.
 func TestComputeScoringHourlyBoundSurvivesRestart(t *testing.T) {
 	h := newScoringHarness(t, map[string]string{"a": "github:1"}, nil)
 	if _, err := h.db.Exec(`CREATE TABLE request_log (ts_utc TEXT NOT NULL, account_id TEXT NULL)`); err != nil {
@@ -751,12 +755,150 @@ func TestComputeScoringHourlyBoundSurvivesRestart(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	e, err := h.server.newComputeScoringEngine(context.Background(), h.engine.deps)
+	deps := h.engine.deps
+	deps.Config.MaxPerHour = 5
+	e, err := h.server.newComputeScoringEngine(context.Background(), deps)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if e.hourCount != 5 {
-		t.Fatalf("restarted engine hour count=%d want 5", e.hourCount)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if len(e.recentStarts) != 5 {
+		t.Fatalf("restarted engine restored %d starts, want 5", len(e.recentStarts))
+	}
+	if e.hourlyBudgetLocked(h.now()) {
+		t.Fatal("budget must be exhausted by the restored starts")
+	}
+	// The bound is rolling: the restored starts free their slots exactly one
+	// hour after they were sent, not at a fixed reset.
+	if e.hourlyBudgetLocked(h.now().Add(49 * time.Minute)) {
+		t.Fatal("budget freed before the restored starts are an hour old")
+	}
+	if !e.hourlyBudgetLocked(h.now().Add(50*time.Minute + time.Second)) {
+		t.Fatal("budget not freed once the restored starts are an hour old")
+	}
+}
+
+// FR-20: a disconnect does not reset a key's verification cadence. A key
+// keeps its due time while its provider is away, so reconnecting cannot
+// postpone verification; it is dropped only after the retention period.
+func TestComputeScoringDueTimeSurvivesReconnect(t *testing.T) {
+	h := newScoringHarness(t, map[string]string{"a": "github:1", "b": "github:2"}, nil)
+	start := h.now()
+	h.engine.sweep(context.Background(), start)
+	key := computeScoringKey{"a", scoringModel}
+	h.engine.mu.Lock()
+	due, ok := h.engine.nextDue[key]
+	h.engine.mu.Unlock()
+	if !ok {
+		t.Fatal("setup: key a not scheduled")
+	}
+	onlyB := map[string]struct{}{"b": {}}
+	h.engine.prune(onlyB, start.Add(time.Minute))
+	h.engine.mu.Lock()
+	kept, ok := h.engine.nextDue[key]
+	h.engine.mu.Unlock()
+	if !ok || !kept.Equal(due) {
+		t.Fatalf("due time lost or reset across a disconnect: had %v, now %v (present=%v)", due, kept, ok)
+	}
+	h.engine.prune(onlyB, start.Add(computeScoreRetention+time.Hour))
+	h.engine.mu.Lock()
+	_, ok = h.engine.nextDue[key]
+	h.engine.mu.Unlock()
+	if ok {
+		t.Fatal("due time of a key absent past the retention period must be dropped")
+	}
+}
+
+// FR-24: an operator clear wins over an exclusion write decided before it.
+// A pending retry is dropped and a late write of a cleared scorer is skipped,
+// so the exclusion does not come back on the next sweep or after a restart.
+func TestComputeScoringClearScorerDropsPendingExclusion(t *testing.T) {
+	h := newScoringHarness(t, map[string]string{"a": "github:1", "b": "github:2"}, nil)
+	ctx := context.Background()
+	h.engine.scorers = computeintegrity.NewScorerTracker([]string{"a"})
+	h.engine.mu.Lock()
+	h.engine.pendingExclusions["a"] = h.now()
+	h.engine.mu.Unlock()
+	if err := h.engine.clearScorer(ctx, "a"); err != nil {
+		t.Fatal(err)
+	}
+	h.engine.retryExclusions(ctx, h.now())
+	h.engine.persistExclusion(ctx, "a", h.now())
+	excluded, err := h.engine.deps.Store.LoadScorerExclusions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(excluded) != 0 {
+		t.Fatalf("cleared scorer excluded again durably: %v", excluded)
+	}
+	h.engine.mu.Lock()
+	n := len(h.engine.pendingExclusions)
+	h.engine.mu.Unlock()
+	if n != 0 || h.engine.scorers.Excluded("a") {
+		t.Fatal("cleared scorer still pending or excluded in memory")
+	}
+}
+
+// FR-24: only a usable measurement resets a scorer's silence. A short answer
+// counts as no answer when another scorer scored the same output usably or
+// the output is long; a genuinely short output penalizes nobody.
+func TestComputeScoringShortAnswersCountTowardBackoff(t *testing.T) {
+	h := newScoringHarness(t, map[string]string{"v": "github:1", "a": "github:2", "b": "github:3"}, nil)
+	ctx := context.Background()
+	cand := func(id string) computeintegrity.ScorerCandidate {
+		return computeintegrity.ScorerCandidate{ProviderID: id, AssignedID: "as-" + id, ModelID: scoringModel, ManifestSHA256: scoringManifest}
+	}
+	verified := cand("v")
+	body := []byte(`{"model":"model-ci"}`)
+	h.short.Store("a", true)
+	h.short.Store("b", true)
+	for i := 0; i < 10; i++ {
+		if _, _, complete := h.engine.scoreAll(ctx, []computeintegrity.ScorerCandidate{cand("a"), cand("b")}, verified, body, "tiny", ""); complete {
+			t.Fatal("short measurements must not complete")
+		}
+	}
+	if !h.engine.scorers.Available("a", h.now()) || !h.engine.scorers.Available("b", h.now()) {
+		t.Fatal("a short output must not rest its scorers")
+	}
+	h.short.Delete("b")
+	for i := 0; i < 8; i++ {
+		h.engine.scoreAll(ctx, []computeintegrity.ScorerCandidate{cand("a"), cand("b")}, verified, body, "HONEST output", "")
+	}
+	if h.engine.scorers.Available("a", h.now()) {
+		t.Fatal("a scorer answering short where another scored usably must rest after the silence limit")
+	}
+	if !h.engine.scorers.Available("b", h.now()) {
+		t.Fatal("the usable scorer must stay available")
+	}
+	h.short.Store("b", true)
+	long := strings.Repeat("word ", computeScoreShortOutputBytes/5+1)
+	for i := 0; i < 8; i++ {
+		h.engine.scoreAll(ctx, []computeintegrity.ScorerCandidate{cand("b")}, verified, body, long, "")
+	}
+	if h.engine.scorers.Available("b", h.now()) {
+		t.Fatal("a scorer answering short on a long output must rest after the silence limit")
+	}
+}
+
+// FR-24: known-sequence checks take part in silence accounting like any
+// other job: a short answer counts toward the back-off and fails the check.
+func TestComputeScoringKnownChecksCountTowardBackoff(t *testing.T) {
+	h := newScoringHarness(t, map[string]string{"a": "github:1"}, nil)
+	ctx := context.Background()
+	tkey := computeintegrity.ToleranceKey{ModelID: scoringModel, ManifestSHA256: scoringManifest, Class: computeintegrity.SamplingGreedy}
+	good := computeintegrity.Measurement{ScoredTokens: 100, Top1Matches: 98, SumLogprob: -18}
+	h.engine.known.Offer(tkey, computeintegrity.KnownSequence{
+		Body: []byte(`{"model":"model-ci"}`), OutputText: "HONEST output",
+		SourceProvider: "x", SourceOperator: "github:9",
+		Scorers: []string{"y", "z"}, ScorerOperators: []string{"github:7", "github:8"},
+	}, good, good, h.now())
+	h.short.Store("a", true)
+	for i := 0; i < 8; i++ {
+		h.engine.knownSequenceCheck(ctx, computeintegrity.ToleranceKey{ModelID: scoringModel, ManifestSHA256: scoringManifest})
+	}
+	if h.engine.scorers.Available("a", h.now()) {
+		t.Fatal("short known-check answers must count toward the silence back-off")
 	}
 }
 

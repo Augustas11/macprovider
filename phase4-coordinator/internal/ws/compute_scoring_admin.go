@@ -90,11 +90,18 @@ func (e *computeScoringEngine) operatorClear(ctx context.Context, providerID, mo
 
 // clearScorer removes the durable exclusion first, so memory never runs
 // ahead of what a restart would load.
+// It holds exclusionMu and drops any pending retry, so an exclusion write
+// decided before the clear can never restore the exclusion afterwards.
 func (e *computeScoringEngine) clearScorer(ctx context.Context, providerID string) error {
+	e.exclusionMu.Lock()
+	defer e.exclusionMu.Unlock()
 	if err := e.deps.Store.ClearScorerExclusion(ctx, providerID); err != nil {
 		return err
 	}
 	e.scorers.Clear(providerID)
+	e.mu.Lock()
+	delete(e.pendingExclusions, providerID)
+	e.mu.Unlock()
 	return nil
 }
 

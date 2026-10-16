@@ -308,11 +308,19 @@ func (s *Store) computeIntegrityHold(ctx context.Context, holdID int64) (compute
 
 // ComputeIntegrityHolds lists a provider's holds, newest first, with the
 // provider credits each held hold currently withholds (SPEC-022 R-16.7).
+// Every held hold is listed; released history is capped at the newest 100,
+// so an old hold that still withholds credits never drops out of view.
 func (s *Store) ComputeIntegrityHolds(ctx context.Context, providerID string) ([]computeintegrity.EarningsHold, error) {
 	if s == nil {
 		return nil, errors.New("billing store is nil")
 	}
-	rows, err := s.db.QueryContext(ctx, computeIntegrityHoldColumns+` WHERE h.provider_id = ? ORDER BY h.id DESC LIMIT 100`, providerID)
+	rows, err := s.db.QueryContext(ctx, computeIntegrityHoldColumns+`
+ WHERE h.provider_id = ?
+   AND (h.status = 'held' OR h.id IN (
+        SELECT r.id FROM compute_integrity_earnings_holds r
+         WHERE r.provider_id = ? AND r.status = 'released'
+         ORDER BY r.id DESC LIMIT 100))
+ ORDER BY h.id DESC`, providerID, providerID)
 	if err != nil {
 		return nil, err
 	}

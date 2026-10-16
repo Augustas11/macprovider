@@ -2147,12 +2147,16 @@ Rate bounds:
   `compute_integrity.scoring.base_interval_seconds` (default 6 h) with ±50 %
   uniform jitter, including the first request after a key appears or the
   coordinator starts. A key in `suspect` or `recovering` (FR-23) is probed every
-  `escalation_interval_seconds` (default 10 min) with the same jitter.
+  `escalation_interval_seconds` (default 10 min) with the same jitter. A key
+  keeps its due time while its provider is disconnected, so a reconnect
+  resumes an overdue request instead of restarting the cadence; the due time
+  of a key whose provider has been absent for 7 days is dropped.
 - At most `max_in_flight` (default 4) verification requests are outstanding
   coordinator-wide, and at most one per verification key.
-- At most `max_per_hour` (default 240) verification requests start per hour
-  coordinator-wide. The count survives a restart: the coordinator counts the
-  `cip_` requests of the last hour in its request log at start.
+- At most `max_per_hour` (default 240) verification requests start in any
+  rolling hour coordinator-wide. The bound survives a restart: the
+  coordinator reloads the start times of the `cip_` requests of the last hour
+  from its request log at start.
 - A key whose operator identity cannot be resolved waits for its next cadence
   slot; a failed lookup is cached for one minute.
 - A verification request is sent only when an eligible scorer exists for the
@@ -2355,7 +2359,9 @@ state for the model.
   least 4 split answers and disagrees with its co-scorer in more than half of
   its last 8 double-scored measurements. It is never chosen as a scorer until
   an operator clears it; a failed exclusion write keeps the exclusion in
-  memory and is retried every sweep until durable. Exclusion does not affect
+  memory and is retried every sweep until durable. An operator clear removes
+  any pending retry, and an exclusion write decided before the clear is
+  skipped, so a cleared exclusion never comes back. Exclusion does not affect
   its own serving or verification.
 - Known-sequence checks: the coordinator keeps in memory, per tolerance key,
   up to 8 recent measurements that two scorers both scored in band with
@@ -2367,9 +2373,15 @@ state for the model.
   `mean_logprob`, or with `top1_rate` more than 0.1 below it, counts as a split
   answer for that scorer.
 - A scorer that does not answer within the deadline counts as
-  `scorer_timeout`. After 8 consecutive jobs without a valid answer it rests
-  for one hour (not chosen), so verification moves on to other scorers; any
-  valid answer resets the count. Silence is not otherwise penalised.
+  `scorer_timeout`. After 8 consecutive jobs without a usable answer it rests
+  for one hour (not chosen), so verification moves on to other scorers; only
+  a usable measurement resets the count. Known-sequence checks count like any
+  other job. A job without a usable answer is a timeout, a non-`ok` status,
+  or an `ok` measurement below the FR-21 scored-token floor when another
+  scorer scored the same output usably or the output is at least 1 KiB (a
+  short output that no scorer could score usably counts against no scorer).
+  On a known sequence such a short answer also fails the check. Silence is
+  not otherwise penalised.
 
 ### FR-25 Consequences, visibility and telemetry (SPEC-036-R025)
 

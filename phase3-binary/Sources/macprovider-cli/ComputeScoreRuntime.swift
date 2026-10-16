@@ -69,14 +69,53 @@ enum ComputeScoreRuntime {
         }
         return Scores(logprobs: logprobs, top1: top1)
     }
+
+    struct Outcome: Sendable {
+        let status: ComputeScoreProtocol.Status
+        let promptTokens: Int
+        let scores: Scores
+    }
+
+    /// The FR-21 scoring body on a loaded model: the prompt is built exactly
+    /// as the serving path builds it, the scored text is tokenized without
+    /// special tokens and capped at the FR-21 bound, and every output token
+    /// is teacher-forced. The provider scoring job and the lab command
+    /// `msb-compute-score` both run this.
+    static func score(
+        context: ModelContext,
+        parsed: ChatCompletionRequest,
+        scoredText: String,
+        templateSupportsThinkingToggle: Bool,
+        templateSupportsPreserveThinking: Bool
+    ) async throws -> Outcome {
+        let input = try ModelRuntime.userInput(
+            for: parsed,
+            templateSupportsThinkingToggle: templateSupportsThinkingToggle,
+            templateSupportsPreserveThinking: templateSupportsPreserveThinking
+        )
+        let lmInput = try await context.processor.prepare(input: input)
+        let promptTokens = lmInput.text.tokens.reshaped([-1]).asArray(Int32.self).map(Int.init)
+        let empty = Scores(logprobs: [], top1: [])
+        guard promptTokens.count <= ComputeScoreProtocol.maxPromptTokens else {
+            return Outcome(status: .tooLong, promptTokens: 0, scores: empty)
+        }
+        let outputTokens = Array(
+            context.tokenizer.encode(text: scoredText, addSpecialTokens: false)
+                .prefix(ComputeScoreProtocol.maxScoredTokens)
+        )
+        guard !promptTokens.isEmpty, !outputTokens.isEmpty else {
+            return Outcome(status: .invalid, promptTokens: 0, scores: empty)
+        }
+        let scores = try teacherForced(
+            model: context.model,
+            promptTokens: promptTokens,
+            outputTokens: outputTokens
+        )
+        return Outcome(status: .ok, promptTokens: promptTokens.count, scores: scores)
+    }
 }
 
 extension ModelRuntime {
-    private struct ComputeScoreOutcome: Sendable {
-        let status: ComputeScoreProtocol.Status
-        let promptTokens: Int
-        let scores: ComputeScoreRuntime.Scores
-    }
 
     /// Runs one FR-21 scoring job. Any failure to run is `unavailable`; a body
     /// the serving parser rejects is `invalid`; a prompt over the FR-21 bound
@@ -112,34 +151,17 @@ extension ModelRuntime {
         let scoredText = request.scoredText
         let drainCancelled = handle.drainCancelled
         do {
-            let outcome: ComputeScoreOutcome = try await serialInferenceGate.withPermit {
+            let outcome: ComputeScoreRuntime.Outcome = try await serialInferenceGate.withPermit {
                 try drainCancelled.check()
                 return try await container.perform { context in
                     try drainCancelled.check()
-                    let input = try Self.userInput(
-                        for: parsed,
+                    return try await ComputeScoreRuntime.score(
+                        context: context,
+                        parsed: parsed,
+                        scoredText: scoredText,
                         templateSupportsThinkingToggle: thinkingToggle,
                         templateSupportsPreserveThinking: preserveThinking
                     )
-                    let lmInput = try await context.processor.prepare(input: input)
-                    let promptTokens = lmInput.text.tokens.reshaped([-1]).asArray(Int32.self).map(Int.init)
-                    let empty = ComputeScoreRuntime.Scores(logprobs: [], top1: [])
-                    guard promptTokens.count <= ComputeScoreProtocol.maxPromptTokens else {
-                        return ComputeScoreOutcome(status: .tooLong, promptTokens: 0, scores: empty)
-                    }
-                    let outputTokens = Array(
-                        context.tokenizer.encode(text: scoredText, addSpecialTokens: false)
-                            .prefix(ComputeScoreProtocol.maxScoredTokens)
-                    )
-                    guard !promptTokens.isEmpty, !outputTokens.isEmpty else {
-                        return ComputeScoreOutcome(status: .invalid, promptTokens: 0, scores: empty)
-                    }
-                    let scores = try ComputeScoreRuntime.teacherForced(
-                        model: context.model,
-                        promptTokens: promptTokens,
-                        outputTokens: outputTokens
-                    )
-                    return ComputeScoreOutcome(status: .ok, promptTokens: promptTokens.count, scores: scores)
                 }
             }
             guard outcome.status == .ok else {
@@ -156,6 +178,29 @@ extension ModelRuntime {
             )
         } catch {
             return ComputeScoreProtocol.Result(request: request, status: .unavailable)
+        }
+    }
+
+    /// Lab entry point for `msb-compute-score`: the FR-21 scoring body under
+    /// the same serial inference permit as a provider scoring job, without
+    /// the wire request's identity, manifest and expiry checks.
+    func labComputeScore(_ parsed: ChatCompletionRequest, scoredText: String) async throws -> ComputeScoreRuntime.Outcome {
+        let snapshot = await currentSnapshot()
+        guard let container = snapshot.container else {
+            throw ModelRuntimeLoadError(target: "no model loaded")
+        }
+        let thinkingToggle = snapshot.templateSupportsThinkingToggle
+        let preserveThinking = snapshot.templateSupportsPreserveThinking
+        return try await serialInferenceGate.withPermit {
+            try await container.perform { context in
+                try await ComputeScoreRuntime.score(
+                    context: context,
+                    parsed: parsed,
+                    scoredText: scoredText,
+                    templateSupportsThinkingToggle: thinkingToggle,
+                    templateSupportsPreserveThinking: preserveThinking
+                )
+            }
         }
     }
 }

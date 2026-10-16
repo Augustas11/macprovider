@@ -55,6 +55,11 @@ const (
 	// computeScoreCommitTimeout bounds one transition commit, which runs
 	// under the engine lock.
 	computeScoreCommitTimeout = 5 * time.Second
+	// computeScoreShortOutputBytes is the output size above which a scorer
+	// reporting fewer than MinScoredTokens tokens is answering short rather
+	// than the output being short (64 bytes per token, far above any real
+	// tokenizer's average).
+	computeScoreShortOutputBytes = computeintegrity.MinScoredTokens * 64
 )
 
 // ComputeScoreRequest is the FR-21 coordinator-to-scorer frame.
@@ -238,9 +243,17 @@ type computeScoringEngine struct {
 	// lastSeen records when each provider was last in the pool, for pruning.
 	lastSeen map[string]time.Time
 	// pendingExclusions are FR-24 exclusions not yet persisted; every sweep
-	// retries them.
+	// retries them. exclusionMu serializes exclusion writes, retries and
+	// operator clears, so a retry never restores an exclusion an operator
+	// cleared.
 	pendingExclusions map[string]time.Time
+	exclusionMu       sync.Mutex
 	lastDurablePrune  time.Time
+
+	// pendingMu guards pending alone, so a scorer's result frame, handled on
+	// its receive loop, never waits for engine work that holds mu.
+	pendingMu sync.Mutex
+	pending   map[string]*pendingComputeScore
 
 	tolerance *computeintegrity.Tolerance
 	scorers   *computeintegrity.ScorerTracker
@@ -252,11 +265,11 @@ type computeScoringEngine struct {
 	nextDue       map[computeScoringKey]time.Time
 	inFlight      map[computeScoringKey]bool
 	inFlightCount int
-	hourStart     time.Time
-	hourCount     int
-	scoringJobs   int
-	pending       map[string]*pendingComputeScore
-	operatorKeys  map[string]cachedOperatorKey
+	// recentStarts holds the start times of the verification requests of
+	// the last rolling hour (FR-20 max_per_hour).
+	recentStarts []time.Time
+	scoringJobs  int
+	operatorKeys map[string]cachedOperatorKey
 }
 
 // Inconclusive reasons (FR-23).
@@ -315,12 +328,13 @@ func (s *Server) newComputeScoringEngine(ctx context.Context, deps ComputeScorin
 
 		pendingExclusions: map[string]time.Time{},
 	}
-	// The hourly bound survives a restart: count the verification requests
-	// already sent in the last hour.
+	// The rolling hourly bound survives a restart: reload the start times of
+	// the verification requests already sent in the last hour.
 	startedAt := s.now()
-	if n, err := deps.Store.RecentVerificationRequests(ctx, startedAt.Add(-time.Hour)); err == nil {
-		e.hourStart = startedAt
-		e.hourCount = n
+	if starts, err := deps.Store.RecentVerificationRequests(ctx, startedAt.Add(-time.Hour), deps.Config.MaxPerHour); err == nil {
+		for i := len(starts) - 1; i >= 0; i-- {
+			e.recentStarts = append(e.recentStarts, starts[i])
+		}
 	}
 	for _, st := range states {
 		st.RecoveryCooldown = e.recoveryCooldown()
@@ -473,8 +487,14 @@ func (e *computeScoringEngine) prune(present map[string]struct{}, now time.Time)
 	for id := range present {
 		e.lastSeen[id] = now
 	}
+	// A key keeps its due time across a disconnect, so a provider that
+	// reconnects resumes an overdue verification instead of drawing a fresh
+	// initial interval. Only keys absent past the retention period go.
 	for key := range e.nextDue {
-		if _, ok := present[key.providerID]; !ok && !e.inFlight[key] {
+		if _, ok := present[key.providerID]; ok || e.inFlight[key] {
+			continue
+		}
+		if seen, ok := e.lastSeen[key.providerID]; !ok || seen.Before(cutoff) {
 			delete(e.nextDue, key)
 		}
 	}
@@ -496,6 +516,23 @@ func (e *computeScoringEngine) prune(present map[string]struct{}, now time.Time)
 			delete(e.lastSeen, id)
 		}
 	}
+	e.scorers.Prune(func(id string) bool {
+		_, ok := e.lastSeen[id]
+		return ok
+	})
+}
+
+// hourlyBudgetLocked drops starts older than one hour and reports whether
+// another verification request fits the rolling max_per_hour bound. Caller
+// holds mu.
+func (e *computeScoringEngine) hourlyBudgetLocked(now time.Time) bool {
+	cutoff := now.Add(-time.Hour)
+	keep := 0
+	for keep < len(e.recentStarts) && !e.recentStarts[keep].After(cutoff) {
+		keep++
+	}
+	e.recentStarts = e.recentStarts[keep:]
+	return len(e.recentStarts) < e.deps.Config.MaxPerHour
 }
 
 func (e *computeScoringEngine) considerProvider(ctx context.Context, p pool.Provider, candidates []computeintegrity.ScorerCandidate, now time.Time) {
@@ -526,11 +563,7 @@ func (e *computeScoringEngine) considerProvider(ctx context.Context, p pool.Prov
 		e.mu.Unlock()
 		return
 	}
-	if now.Sub(e.hourStart) >= time.Hour {
-		e.hourStart = now
-		e.hourCount = 0
-	}
-	if e.inFlightCount >= e.deps.Config.MaxInFlight || e.hourCount >= e.deps.Config.MaxPerHour {
+	if e.inFlightCount >= e.deps.Config.MaxInFlight || !e.hourlyBudgetLocked(now) {
 		e.mu.Unlock()
 		return
 	}
@@ -576,7 +609,7 @@ func (e *computeScoringEngine) considerProvider(ctx context.Context, p pool.Prov
 	}
 	e.inFlight[key] = true
 	e.inFlightCount++
-	e.hourCount++
+	e.recentStarts = append(e.recentStarts, now)
 	e.mu.Unlock()
 	go e.runProbe(ctx, verified, scorers)
 }
@@ -690,32 +723,43 @@ func (e *computeScoringEngine) scoreAll(ctx context.Context, scorers []computein
 		}(sc)
 	}
 	var out []scoredMeasurement
+	var short []string
 	reason := ""
 	for range scorers {
 		a := <-answers
-		if a.ok && a.result.Status == "ok" {
-			e.scorers.RecordAnswer(a.scorer.ProviderID)
-		} else {
-			e.scorers.RecordNoAnswer(a.scorer.ProviderID, e.s.now())
-		}
 		switch {
 		case !a.ok:
+			e.scorers.RecordNoAnswer(a.scorer.ProviderID, e.s.now())
 			if reason == "" {
 				reason = ciInconclusiveScorerTimeout
 			}
 		case a.result.Status != "ok":
+			e.scorers.RecordNoAnswer(a.scorer.ProviderID, e.s.now())
 			if reason == "" {
 				reason = ciInconclusiveScorerInvalid
 			}
 		default:
 			m := computeintegrity.Measurement{ScoredTokens: a.result.ScoredTokens, Top1Matches: a.result.Top1Matches, SumLogprob: a.result.SumLogprob}
 			if !m.Valid() {
+				short = append(short, a.scorer.ProviderID)
 				if reason == "" {
 					reason = ciInconclusiveShortOutput
 				}
 				continue
 			}
+			// Only a usable measurement resets the FR-24 silence count.
+			e.scorers.RecordAnswer(a.scorer.ProviderID)
 			out = append(out, scoredMeasurement{scorer: a.scorer, measurement: m})
+		}
+	}
+	// A short measurement is the scorer's fault when another scorer scored
+	// the same output usably, or when the output is long enough that any
+	// honest tokenization reaches the FR-21 floor; then it counts as no
+	// answer. Otherwise the output itself was short and the count is left
+	// alone.
+	if len(short) > 0 && (len(out) > 0 || len(output)+len(reasoning) >= computeScoreShortOutputBytes) {
+		for _, id := range short {
+			e.scorers.RecordNoAnswer(id, e.s.now())
 		}
 	}
 	return out, reason, len(out) == len(scorers) && len(out) > 0
@@ -754,13 +798,13 @@ func (e *computeScoringEngine) score(ctx context.Context, scorer computeintegrit
 		scorerID: scorer.ProviderID, assignedID: scorer.AssignedID, modelID: scorer.ModelID,
 		manifest: manifest, deadline: now.Add(deadline), ch: make(chan ComputeScoreResult, 1),
 	}
-	e.mu.Lock()
+	e.pendingMu.Lock()
 	e.pending[scoreID] = pending
-	e.mu.Unlock()
+	e.pendingMu.Unlock()
 	defer func() {
-		e.mu.Lock()
+		e.pendingMu.Lock()
 		delete(e.pending, scoreID)
-		e.mu.Unlock()
+		e.pendingMu.Unlock()
 	}()
 	if err := session.send(raw); err != nil {
 		e.scoringJobMetric("timeout")
@@ -838,7 +882,7 @@ func (e *computeScoringEngine) decide(ctx context.Context, key computeScoringKey
 	committed := true
 	if tr := st.Apply(outcome); tr != nil {
 		committed = e.applyTransitionLocked(ctx, st, tr, now)
-	} else if err := e.deps.Store.UpsertKeyState(ctx, st, now); err != nil {
+	} else if err := e.persistKeyStateLocked(ctx, st, now); err != nil {
 		committed = false
 		e.s.log.Warn().Str("event", "compute_integrity_state_persist_failed").Str("provider_id", st.ProviderID).Msg("compute-integrity state not persisted; measurement dropped")
 	}
@@ -861,6 +905,15 @@ func (e *computeScoringEngine) decide(ctx context.Context, key computeScoringKey
 			e.deps.Metrics.IncComputeIntegrityVerification("split")
 		}
 	}
+}
+
+// persistKeyStateLocked writes a state without a transition under the same
+// bound as a transition commit, so a slow database cannot hold mu
+// indefinitely. Caller holds mu.
+func (e *computeScoringEngine) persistKeyStateLocked(ctx context.Context, st *computeintegrity.KeyState, now time.Time) error {
+	ctx, cancel := context.WithTimeout(ctx, computeScoreCommitTimeout)
+	defer cancel()
+	return e.deps.Store.UpsertKeyState(ctx, st, now)
 }
 
 // applyTransitionLocked commits the hold change and the new state in one
@@ -916,6 +969,12 @@ func (e *computeScoringEngine) applyTransitionLocked(ctx context.Context, st *co
 // meanwhile (the conservative side); a failed write is retried every sweep
 // until it is durable.
 func (e *computeScoringEngine) persistExclusion(ctx context.Context, providerID string, now time.Time) {
+	e.exclusionMu.Lock()
+	defer e.exclusionMu.Unlock()
+	if !e.scorers.Excluded(providerID) {
+		// An operator cleared the scorer after the exclusion was decided.
+		return
+	}
 	if err := e.deps.Store.ExcludeScorer(ctx, providerID, now); err != nil {
 		e.mu.Lock()
 		e.pendingExclusions[providerID] = now
@@ -927,6 +986,8 @@ func (e *computeScoringEngine) persistExclusion(ctx context.Context, providerID 
 }
 
 func (e *computeScoringEngine) retryExclusions(ctx context.Context, now time.Time) {
+	e.exclusionMu.Lock()
+	defer e.exclusionMu.Unlock()
 	e.mu.Lock()
 	pending := make([]string, 0, len(e.pendingExclusions))
 	for id := range e.pendingExclusions {
@@ -934,8 +995,10 @@ func (e *computeScoringEngine) retryExclusions(ctx context.Context, now time.Tim
 	}
 	e.mu.Unlock()
 	for _, id := range pending {
-		if err := e.deps.Store.ExcludeScorer(ctx, id, now); err != nil {
-			continue
+		if e.scorers.Excluded(id) {
+			if err := e.deps.Store.ExcludeScorer(ctx, id, now); err != nil {
+				continue
+			}
 		}
 		e.mu.Lock()
 		delete(e.pendingExclusions, id)
@@ -1000,10 +1063,19 @@ func (e *computeScoringEngine) knownSequenceCheck(ctx context.Context, tkey comp
 		return
 	}
 	result, answered := e.score(ctx, scorer, tkey.ManifestSHA256, seq.Body, seq.OutputText, seq.ReasoningText, false)
+	m := computeintegrity.Measurement{ScoredTokens: result.ScoredTokens, Top1Matches: result.Top1Matches, SumLogprob: result.SumLogprob}
+	// A known sequence was scored usably by two scorers before, so anything
+	// but a usable answer counts toward the FR-24 silence back-off, exactly
+	// as for an ordinary job; a short "ok" answer also fails the check.
 	if !answered || result.Status != "ok" {
+		e.scorers.RecordNoAnswer(scorer.ProviderID, e.s.now())
 		return
 	}
-	m := computeintegrity.Measurement{ScoredTokens: result.ScoredTokens, Top1Matches: result.Top1Matches, SumLogprob: result.SumLogprob}
+	if m.Valid() {
+		e.scorers.RecordAnswer(scorer.ProviderID)
+	} else {
+		e.scorers.RecordNoAnswer(scorer.ProviderID, e.s.now())
+	}
 	if e.scorers.RecordKnownCheck(scorer.ProviderID, computeintegrity.KnownCheckPassed(seq, m)) {
 		e.persistExclusion(ctx, scorer.ProviderID, e.s.now())
 	}
@@ -1042,19 +1114,19 @@ func (s *Server) handleComputeScoreResult(providerID, assignedID string, payload
 		return
 	}
 	now := s.now()
-	e.mu.Lock()
+	e.pendingMu.Lock()
 	pending := e.pending[result.ScoreID]
 	if pending == nil ||
 		pending.scorerID != providerID || pending.assignedID != assignedID ||
 		result.ProviderID != providerID || result.AssignedID != assignedID ||
 		result.ModelID != pending.modelID || result.WeightsManifestSHA256 != pending.manifest ||
 		now.After(pending.deadline) {
-		e.mu.Unlock()
+		e.pendingMu.Unlock()
 		s.log.Warn().Str("event", "compute_integrity_score_result_rejected").Str("provider_id", providerID).Msg("compute score result rejected: no matching live request")
 		return
 	}
 	delete(e.pending, result.ScoreID)
-	e.mu.Unlock()
+	e.pendingMu.Unlock()
 	select {
 	case pending.ch <- result:
 	default:

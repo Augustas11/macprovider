@@ -137,22 +137,42 @@ DELETE FROM compute_integrity_scoring_keys
 	return res.RowsAffected()
 }
 
-// RecentVerificationRequests counts FR-20 verification requests (reserved
-// cip_ accounts in the coordinator request log) since since, so the hourly
-// bound survives a restart. A database without the request log counts zero.
-func (s *ScoringStore) RecentVerificationRequests(ctx context.Context, since time.Time) (int, error) {
+// RecentVerificationRequests returns the start times of FR-20 verification
+// requests (reserved cip_ accounts in the coordinator request log) since
+// since, newest first and at most limit of them, so the rolling hourly bound
+// survives a restart. A database without the request log returns none.
+func (s *ScoringStore) RecentVerificationRequests(ctx context.Context, since time.Time, limit int) ([]time.Time, error) {
 	if s == nil || s.db == nil {
-		return 0, errScoringStoreClosed
+		return nil, errScoringStoreClosed
+	}
+	if limit <= 0 {
+		return nil, nil
 	}
 	var present int
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'request_log'`).Scan(&present); err != nil || present == 0 {
-		return 0, err
+		return nil, err
 	}
-	var n int
-	err := s.db.QueryRowContext(ctx, `
-SELECT COUNT(*) FROM request_log WHERE account_id LIKE 'cip\_%' ESCAPE '\' AND ts_utc >= ?`,
-		since.UTC().Format("2006-01-02T15:04:05.000000000Z")).Scan(&n)
-	return n, err
+	rows, err := s.db.QueryContext(ctx, `
+SELECT ts_utc FROM request_log WHERE account_id LIKE 'cip\_%' ESCAPE '\' AND ts_utc >= ?
+ ORDER BY ts_utc DESC LIMIT ?`,
+		since.UTC().Format("2006-01-02T15:04:05.000000000Z"), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []time.Time
+	for rows.Next() {
+		var ts string
+		if err := rows.Scan(&ts); err != nil {
+			return nil, err
+		}
+		t, err := time.Parse(time.RFC3339Nano, ts)
+		if err != nil {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
 }
 
 // LoadScorerExclusions returns every FR-24 scorer-excluded provider.

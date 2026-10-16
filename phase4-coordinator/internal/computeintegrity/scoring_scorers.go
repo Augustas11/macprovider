@@ -229,6 +229,19 @@ func (t *ScorerTracker) Excluded(providerID string) bool {
 	return r != nil && r.excluded
 }
 
+// Prune drops the history of scorers that are not excluded and for which
+// keep reports false, so the tracker stays bounded under fleet turnover.
+// Exclusions are kept until an operator clears them.
+func (t *ScorerTracker) Prune(keep func(providerID string) bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for id, r := range t.scorers {
+		if !r.excluded && !keep(id) {
+			delete(t.scorers, id)
+		}
+	}
+}
+
 // Clear removes a scorer exclusion and its history (operator action).
 func (t *ScorerTracker) Clear(providerID string) {
 	t.mu.Lock()

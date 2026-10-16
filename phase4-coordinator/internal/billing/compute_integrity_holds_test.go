@@ -172,3 +172,43 @@ func TestComputeIntegrityHoldLeavesSettledCreditsAndRaisesCompatFloor(t *testing
 		t.Fatalf("a hold over settled credits withholds nothing: %+v", holds)
 	}
 }
+
+// SPEC-022 R-16.7: a hold that still withholds credits stays listed however
+// much released history follows it; released history is capped.
+func TestComputeIntegrityHoldsListEveryHeldHold(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	ctx := context.Background()
+	t0 := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	end := t0.Add(time.Hour)
+	held, err := store.OpenComputeIntegrityHold(ctx, "p-a", "model-a", computeintegrity.HoldKindFailure, t0, &end, "confirmed_failure", end)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 105; i++ {
+		start := t0.Add(time.Duration(i+2) * time.Hour)
+		stop := start.Add(time.Minute)
+		id, err := store.OpenComputeIntegrityHold(ctx, "p-a", "model-a", computeintegrity.HoldKindFailure, start, &stop, "confirmed_failure", stop)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.ReleaseComputeIntegrityHold(ctx, id, "op-1", "reviewed", stop); err != nil {
+			t.Fatal(err)
+		}
+	}
+	holds, err := store.ComputeIntegrityHolds(ctx, "p-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(holds) != 101 {
+		t.Fatalf("listed %d holds, want the held one plus the newest 100 released", len(holds))
+	}
+	found := false
+	for _, h := range holds {
+		if h.ID == held && h.Status == computeintegrity.HoldHeld {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("the oldest hold is still held and must stay listed")
+	}
+}

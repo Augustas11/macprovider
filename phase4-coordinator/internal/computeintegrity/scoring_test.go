@@ -518,8 +518,8 @@ func TestScoringStorePruneAndRecentRequests(t *testing.T) {
 		t.Fatal(err)
 	}
 	t0 := time.Date(2026, 10, 13, 0, 0, 0, 0, time.UTC)
-	if n, err := store.RecentVerificationRequests(ctx, t0); err != nil || n != 0 {
-		t.Fatalf("no request log: n=%d err=%v", n, err)
+	if got, err := store.RecentVerificationRequests(ctx, t0, 10); err != nil || len(got) != 0 {
+		t.Fatalf("no request log: got=%v err=%v", got, err)
 	}
 	old := NewKeyState("idle", "m", t0)
 	failed := failKey(t, t0)
@@ -550,7 +550,29 @@ func TestScoringStorePruneAndRecentRequests(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if n, err := store.RecentVerificationRequests(ctx, t0); err != nil || n != 2 {
-		t.Fatalf("recent verification requests=%d err=%v, want 2", n, err)
+	got, err := store.RecentVerificationRequests(ctx, t0, 10)
+	if err != nil || len(got) != 2 || !got[0].Equal(t0.Add(40*time.Minute)) || !got[1].Equal(t0.Add(30*time.Minute)) {
+		t.Fatalf("recent verification requests=%v err=%v, want the two cip_ starts newest first", got, err)
+	}
+	if got, err := store.RecentVerificationRequests(ctx, t0, 1); err != nil || len(got) != 1 {
+		t.Fatalf("limit not applied: %v err=%v", got, err)
+	}
+}
+
+// FR-24 memory bound: history of departed, non-excluded scorers is pruned;
+// exclusions are kept until an operator clears them.
+func TestScorerTrackerPruneKeepsExclusions(t *testing.T) {
+	tr := NewScorerTracker([]string{"bad"})
+	now := time.Date(2026, 10, 13, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < scorerSilentLimit-1; i++ {
+		tr.RecordNoAnswer("gone", now)
+	}
+	tr.Prune(func(string) bool { return false })
+	if !tr.Excluded("bad") {
+		t.Fatal("pruning must keep an exclusion")
+	}
+	tr.RecordNoAnswer("gone", now)
+	if !tr.Available("gone", now) {
+		t.Fatal("pruned history must not carry silence over")
 	}
 }
