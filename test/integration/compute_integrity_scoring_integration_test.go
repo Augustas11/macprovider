@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -92,6 +94,7 @@ func TestComputeIntegrityScoringHonestPassesSubstitutedFails(t *testing.T) {
 				"recovery_cooldown_seconds":   3600,
 				"score_deadline_seconds":      10,
 				"sweep_interval_seconds":      1,
+				"corpus_path":                 ciPrivateCorpus(t),
 			}}
 		},
 		providerSetup: func(fp *fakeProvider) {
@@ -195,4 +198,19 @@ func TestComputeIntegrityScoringHonestPassesSubstitutedFails(t *testing.T) {
 	if cheatProv.Hits() != before {
 		t.Fatalf("suspended provider served %d buyer requests", cheatProv.Hits()-before)
 	}
+}
+
+// ciPrivateCorpus writes a private corpus for the coordinator: scheduling
+// requires one (SPEC-036 FR-20). The content is the checked-in generic corpus.
+func ciPrivateCorpus(t *testing.T) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "phase4-coordinator", "internal", "computeintegrity", "corpus", "generic_v1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "private-corpus.json")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }

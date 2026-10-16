@@ -677,7 +677,10 @@ func (e *computeScoringEngine) considerProvider(ctx context.Context, p pool.Prov
 	}
 	e.inFlight[key] = true
 	e.inFlightCount++
-	e.recentStarts = append(e.recentStarts, now)
+	// The request starts after its dispatch delay, at most one tick later;
+	// counting it from then keeps actual starts within max_per_hour in any
+	// rolling hour.
+	e.recentStarts = append(e.recentStarts, now.Add(e.tickInterval()))
 	e.mu.Unlock()
 	go e.runProbe(ctx, verified, scorers)
 }

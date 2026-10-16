@@ -2083,7 +2083,8 @@ mode, needs no FR-5 trusted reference and no FR-8 calibration record, and is
 not reached through the §6 migration ladder. It is on by default. The kill
 switch `compute_integrity.scoring.enabled=false` stops scheduling new
 verification requests; it does not clear existing states or holds. An
-unusable private corpus also stops scheduling (logged), never serving.
+unusable or missing private corpus also stops scheduling (logged), never
+serving.
 
 ### FR-19 Scope and keys (SPEC-036-R019)
 
@@ -2171,10 +2172,13 @@ Rate bounds:
 
 Prompt corpus: the coordinator reads prompts through a replaceable corpus
 interface. A deployment configures a private, coordinator-only corpus file
-with `compute_integrity.scoring.corpus_path` and rotates it out of band. The
-checked-in generic corpus (no buyer data) is a fallback only: the repository
-is public, so a provider can read it, and the coordinator logs
-`compute_integrity_public_corpus` at startup while it is in use. Each request
+with `compute_integrity.scoring.corpus_path` and rotates it out of band.
+Scheduling requires it: the repository is public, so a provider can read the
+checked-in generic corpus (no buyer data) and answer its prompts honestly
+while substituting for buyers. With no private corpus configured the
+coordinator schedules no verification requests and logs
+`compute_integrity_private_corpus_missing` at startup; states and holds still
+load. The checked-in corpus is a format example and a test fixture. Each request
 draws a prompt uniformly at random. A corpus entry is a system message plus a
 user message, each at most 2 KiB.
 

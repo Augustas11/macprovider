@@ -51,7 +51,12 @@ func startComputeScoring(
 			logger.Info().Str("event", "compute_integrity_corpus_loaded").Int("prompts", corpus.Len()).Str("version", corpus.Version()).Msg("compute-integrity private corpus loaded")
 		}
 	default:
-		logger.Warn().Str("event", "compute_integrity_public_corpus").Msg("compute-integrity scoring uses the public checked-in corpus; configure compute_integrity.scoring.corpus_path")
+		// The checked-in corpus is public, so a provider could recognize its
+		// prompts and answer them honestly while substituting for buyers.
+		// Without a private corpus nothing is scheduled; states and holds
+		// still load, so failed keys stay out of routing.
+		logger.Error().Str("event", "compute_integrity_private_corpus_missing").Msg("compute-integrity scoring needs compute_integrity.scoring.corpus_path; verification scheduling stays off")
+		cfg.Enabled = false
 	}
 	store, err := computeintegrity.NewScoringStore(ctx, db)
 	if err != nil {

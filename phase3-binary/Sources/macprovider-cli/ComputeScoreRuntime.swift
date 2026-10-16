@@ -151,8 +151,12 @@ extension ModelRuntime {
         let scoredText = request.scoredText
         let drainCancelled = handle.drainCancelled
         do {
-            let outcome: ComputeScoreRuntime.Outcome = try await serialInferenceGate.withPermit {
+            let outcome: ComputeScoreRuntime.Outcome? = try await serialInferenceGate.withPermit {
                 try drainCancelled.check()
+                // The permit may have been queued behind other work: a job
+                // whose deadline passed meanwhile is discarded by the
+                // coordinator, so it runs no inference.
+                guard request.expiresAt > Date() else { return nil }
                 return try await container.perform { context in
                     try drainCancelled.check()
                     return try await ComputeScoreRuntime.score(
@@ -163,6 +167,9 @@ extension ModelRuntime {
                         templateSupportsPreserveThinking: preserveThinking
                     )
                 }
+            }
+            guard let outcome else {
+                return ComputeScoreProtocol.Result(request: request, status: .unavailable)
             }
             guard outcome.status == .ok else {
                 return ComputeScoreProtocol.Result(request: request, status: outcome.status)
