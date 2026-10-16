@@ -174,6 +174,7 @@ type scoringHarness struct {
 	db         *sql.DB
 	silent     sync.Map
 	short      sync.Map
+	hotJobs    atomic.Int64
 }
 
 type lockedBuffer struct {
@@ -282,6 +283,10 @@ func (h *scoringHarness) fakeScorer(providerID, assignedID string, conn net.Conn
 		var req ComputeScoreRequest
 		if json.Unmarshal(raw, &req) != nil || req.Type != computeScoreRequestType {
 			continue
+		}
+		var body map[string]any
+		if json.Unmarshal([]byte(req.Body), &body) == nil && body["temperature"] == 1.0 {
+			h.hotJobs.Add(1)
 		}
 		if _, quiet := h.silent.Load(providerID); quiet {
 			continue
@@ -1151,4 +1156,33 @@ func TestComputeScoringLookupPastDeadlineReservesNothing(t *testing.T) {
 		t.Fatal("the key must stay due")
 	}
 	h.engine.deps.OperatorKey = inner
+}
+
+// FR-22: hot (temperature 1.0) verification requests are cover only. They
+// are dispatched like any other, but no scoring job is sent and the key's
+// state does not change, because honest hot outputs can degenerate below
+// any floor.
+func TestComputeScoringHotProbesAreCoverOnly(t *testing.T) {
+	h := newScoringHarness(t, map[string]string{"a": "github:1", "b": "github:2"}, nil)
+	inner := h.engine.deps.Dispatch
+	var hot atomic.Int64
+	h.engine.deps.Dispatch = func(ctx context.Context, d ComputeIntegrityProbeDispatch) (ComputeIntegrityProbeResponse, error) {
+		var body map[string]any
+		if json.Unmarshal(d.Body, &body) == nil && body["temperature"] == 1.0 {
+			hot.Add(1)
+		}
+		return inner(ctx, d)
+	}
+	for i := 0; i < 60; i++ {
+		h.round(2 * time.Hour)
+	}
+	if hot.Load() == 0 {
+		t.Fatal("setup: expected some hot verification requests")
+	}
+	if n := h.hotJobs.Load(); n != 0 {
+		t.Fatalf("%d scoring jobs sent for hot verification requests; hot requests are cover only", n)
+	}
+	if h.state("a") != computeintegrity.VerificationPassing {
+		t.Fatalf("honest key state = %s; non-hot measurements must still decide", h.state("a"))
+	}
 }

@@ -862,6 +862,12 @@ func (e *computeScoringEngine) runProbe(ctx context.Context, verified computeint
 		e.inconclusive(ciInconclusiveDispatch)
 		return
 	}
+	if probe.Class == computeintegrity.SamplingHot {
+		// Hot requests are cover only (FR-22): honest temperature 1.0 runs
+		// can degenerate below any floor (measured to -9.6 on real chips), so
+		// a hot output decides nothing and is not sent to scorers.
+		return
+	}
 	measurements, reason, complete := e.scoreAll(ctx, scorers, verified, probe.Body, resp.OutputText, resp.ReasoningText)
 	if !complete {
 		// FR-23: a measurement counts only when every selected scorer gave a

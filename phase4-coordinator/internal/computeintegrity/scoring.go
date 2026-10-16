@@ -21,10 +21,11 @@ const (
 	SamplingGreedy  SamplingClass = "greedy"
 	SamplingSampled SamplingClass = "sampled"
 	// SamplingHot is temperature above hotTemperature. Honest hot outputs
-	// have a heavy low tail (a run can degenerate into near-random tokens,
-	// measured down to about -5.2 mean log-probability on real chips), so a
-	// hot measurement is judged against the hard floor only and never warms
-	// a learned band.
+	// can degenerate into near-random tokens the claimed model scores below
+	// any floor (measured down to -9.6 mean log-probability on real chips),
+	// so hot requests are cover traffic only: the engine never scores them
+	// and they never warm a learned band. Its band below is the hard floor,
+	// kept only as the conservative answer if one is ever evaluated.
 	SamplingHot SamplingClass = "hot"
 )
 

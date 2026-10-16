@@ -646,10 +646,9 @@ func TestScoringStoreBackfillFailureRetries(t *testing.T) {
 	}
 }
 
-// FR-22: temperature 1.0 outputs form the hot class, judged against the hard
-// floor only: honest hot runs can degenerate (measured down to about -5.2 on
-// real chips), so no learned band or cold prior above the floor applies, and
-// escalation never draws a hot probe.
+// FR-22: temperature 1.0 outputs form the hot class: never a learned band,
+// and escalation never draws a hot probe. (The engine does not score hot
+// requests at all; see TestComputeScoringHotProbesAreCoverOnly.)
 func TestHotClassUsesHardFloorOnlyAndIsNotEscalated(t *testing.T) {
 	if SamplingClassFor(0) != SamplingGreedy || SamplingClassFor(0.7) != SamplingSampled || SamplingClassFor(1.0) != SamplingHot {
 		t.Fatal("profile classes: want greedy, sampled, hot")

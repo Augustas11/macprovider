@@ -20,7 +20,7 @@ Values come from `phase4-coordinator/internal/computeintegrity/scoring.go`.
 |---|---|---|
 | Cold prior, greedy | `top1_rate >= 0.85` and `mean_logprob >= -1.0` | honest outputs, same and cross chip |
 | Cold prior, sampled (`temperature: 0.7`) | `mean_logprob >= -4.0` | honest outputs, same and cross chip |
-| Hot (`temperature: 1.0`), cold and warm | `mean_logprob >= -6.0` (hard floor only) | every honest output |
+| Hot (`temperature: 1.0`) | cover only, never scored by the coordinator | none (measured for information) |
 | Hard floor, greedy | `top1_rate >= 0.50` and `mean_logprob >= -3.0` | every honest output |
 | Hard floor, sampled | `mean_logprob >= -6.0` | every honest output |
 | Minimum scored tokens | 16 | — |
@@ -114,7 +114,9 @@ Read `summary.greedy`, `summary.sampled` and `summary.hot` in each report
   Detection while a model is cold rests on greedy probes: escalation uses
   greedy until the sampled band warms, so 3 of 5 escalation measurements
   fall out of band. The cold sampled and hot bands are not detectors; they
-  only have to accept honest outputs.
+  only have to accept honest outputs. Hot outputs are reported for
+  information only: the coordinator never scores them, because honest
+  `temperature: 1.0` runs can degenerate below every floor.
 - **Under load, step 4:** in `under_load`:
   - `generations_ok_while_scoring > 0`;
   - `generations_failed == 0`;
@@ -123,7 +125,7 @@ Read `summary.greedy`, `summary.sampled` and `summary.hot` in each report
 - **Warm band, step 5:**
   - the held-out honest report is at least 99% in band in each class;
   - the substituted report is at most 20% in band for greedy and for
-    sampled. Hot uses the hard floor only.
+    sampled. Hot is not judged.
 
 If an honest class fails, set its cold prior below the observed minimum with
 the FR-22 margin (0.25 for log-probability, 0.05 for top-1). Keep the prior

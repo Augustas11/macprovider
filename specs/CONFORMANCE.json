@@ -4885,7 +4885,8 @@
         "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestPriorBandSeparatesHonestFromSubstituted",
         "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestToleranceWarmsWithOperatorDiversityAndLearnsBand",
         "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestToleranceHardFloorsBoundPoisoning",
-        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestHotClassUsesHardFloorOnlyAndIsNotEscalated"
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestHotClassUsesHardFloorOnlyAndIsNotEscalated",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringHotProbesAreCoverOnly"
       ],
       "journeys": [],
       "evidence": [],

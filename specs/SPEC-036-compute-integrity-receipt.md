@@ -2126,7 +2126,7 @@ traffic by headers, frame fields, sampling parameters, or timing class:
   `{96, 160, 256}`. An escalation request (FR-23 `suspect` or `recovering`)
   uses the greedy profile while the sampled tolerance key of its model is
   cold (FR-22), because the cold sampled prior is too loose to decide, and
-  never the hot profile, which is judged against the hard floor only.
+  never the hot profile, which is cover traffic only.
 - Each request uses a pseudonymous account drawn at random from a small set
   kept per verified provider: up to 4 accounts, each retired after a random
   lifetime of 3 to 10 days and replaced. Its SPEC-015 `account_scope`
@@ -2295,13 +2295,14 @@ is above 0.85 (the `temperature: 1.0` profile), otherwise `sampled`.
 Distributions are kept per **tolerance key**
 `(model_id, cohort hash, sampling class)` for `greedy` and `sampled`.
 
-A `hot` measurement is judged against the sampled hard floor only
-(`mean_logprob ≥ −6.0`), cold or warm, and is never accepted into a window.
-Real-chip validation (#1644) found that honest `temperature: 1.0` runs can
-degenerate into near-random tokens that the claimed model itself scores near
-−5.2, so no floor above the hard floor separates them reliably. Hot requests
-stay in the profile mix so verification traffic matches buyer traffic, but an
-escalation request (FR-23) never uses the hot profile.
+Hot requests are cover traffic only. They stay in the profile mix so
+verification traffic matches buyer traffic, and they are dispatched,
+credited and settled like any verification request, but the coordinator sends
+no scoring job for them and they never change a key's state or enter a
+window. Real-chip validation (#1644) found that honest `temperature: 1.0`
+runs can degenerate into near-random tokens that the claimed model itself
+scores as low as −9.6, below every floor, so a hot output cannot decide
+anything. An escalation request (FR-23) never uses the hot profile.
 
 Honest-pair distribution. Each tolerance key keeps a rolling window of the
 last 256 accepted measurements. A measurement is accepted into the window when
@@ -2319,14 +2320,13 @@ from at least 3 distinct verified operators. For a warm key:
 MAD is the median absolute deviation of the window. A measurement is in band
 when every applicable metric is at or above its floor. A learned floor never
 drops below a hard floor (greedy: `top1_rate` 0.50, `mean_logprob` −3.0;
-sampled and hot: `mean_logprob` −6.0), which bounds how far a window can be
-dragged down.
+sampled: `mean_logprob` −6.0), which bounds how far a window can be dragged
+down.
 
 Cold start. A cold key uses a fixed prior:
 
 - greedy: `top1_rate ≥ 0.85` and `mean_logprob ≥ −1.0`;
-- sampled: `mean_logprob ≥ −4.0`;
-- hot: the hard floor, `mean_logprob ≥ −6.0`.
+- sampled: `mean_logprob ≥ −4.0`.
 
 Rationale for the prior: teacher-forced scoring conditions every position on
 the same prefix, so cross-chip numerical differences change the arg-max only
