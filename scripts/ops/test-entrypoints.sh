@@ -14,7 +14,11 @@
 # runtime, a live policy that differs from the applied config)
 # against a fake Pearl (tests/fake_pearl_systemctl.py); catalog-activate's
 # provider-tied gateway proof and its 24 h expiry; the pearl-runtime one-time
-# auto_vacuum conversion (drain gate, downtime, lock, quick_check, restart).
+# auto_vacuum conversion (drain gate, downtime, lock, quick_check, restart);
+# the on-demand retention run (nightly window, busy/disabled refusals, the
+# report, its marker and the drain gate that reads the same lap); the
+# compute-integrity private corpus (the shared corpus rules, the generator,
+# the overlay edit, one restart, rollback when the coordinator rejects it).
 # Usage: bash scripts/ops/test-entrypoints.sh
 set -euo pipefail
 
@@ -368,6 +372,120 @@ sqlite3 "$VDB" "UPDATE settlement_evidence_retention_state SET laps_completed = 
 PEARL_RUNTIME_TASK=retention-vacuum-conversion run_rc 0 "vacuum task after a stale caught-up lap" scripts/ops/pearl-runtime.sh status
 expect_next drain_gate:blocked
 case "$(next_field reason)" in *"within 36 hours"*) ok ;; *) bad "stale drain gate reason: $(next_field reason)" ;; esac
+case "$(next_field reason)" in *"PEARL_RUNTIME_TASK=retention-run"*) ok ;; *) bad "drain gate reason does not name the on-demand run: $(next_field reason)" ;; esac
+
+# ==== pearl-runtime: one-time on-demand retention run (#1979) ===================
+# The fake coordinator's operator route updates the same lap state the drain
+# gate reads (tests/fake_services.py retention_db).
+RKEY="opkey-$(openssl rand -hex 16)"
+printf '%s' "$RKEY" > "$tmp/svc/operator_key"
+printf '%s' "$VDB" > "$tmp/svc/retention_db"
+printf 'auth:\n  operator_key: env:OPERATOR_KEY\n' > "$tmp/pearl/coordinator.yaml"
+printf 'relay_blind:\n  enabled: true\n' > "$tmp/pearl/overlay.yaml"
+printf 'OPS_FAKE_SECRET=x\0OPERATOR_KEY=%s\0' "$RKEY" > "$tmp/proc/$(cat "$tmp/svc/mainpid")/environ"
+export PEARL_COORDINATOR_ADMIN_URL="http://127.0.0.1:$PORT" RETENTION_RUN_POLL_S=0 RETENTION_RUN_WAIT_MAX_S=5
+RSCOPE="$tmp/state/retention-run"
+PEARL_SSH= PEARL_RUNTIME_TASK=retention-run run_rc 0 "retention run without ssh" scripts/ops/pearl-runtime.sh status
+expect_next window:blocked
+soon="$(python3 -c 'import datetime as d; print((d.datetime.now(d.timezone.utc)+d.timedelta(minutes=5)).strftime("%H:%M"))')"
+PEARL_RETENTION_NIGHTLY_UTC="$soon" PEARL_RUNTIME_TASK=retention-run run_rc 0 "retention run just before the nightly run" scripts/ops/pearl-runtime.sh status
+expect_next window:blocked
+PEARL_RETENTION_NIGHTLY_UTC="$soon" PEARL_RUNTIME_TASK=retention-run MACPROVIDER_OPS_OWNER=t run_rc 3 "retention run refused just before the nightly run" scripts/ops/pearl-runtime.sh next --run
+PEARL_COORDINATOR_ADMIN_URL="https://coordinator.example" PEARL_RUNTIME_TASK=retention-run run_rc 3 "non-loopback admin URL refused" scripts/ops/pearl-runtime.sh status
+PEARL_RUNTIME_TASK=retention-run run_rc 0 "retention run status" scripts/ops/pearl-runtime.sh status
+expect_next run:mutate
+case "$(next_field expected_downtime)" in "none (no restart)"*) ok ;; *) bad "retention run downtime: $(next_field expected_downtime)" ;; esac
+case "$(next_field command)" in "scripts/ops/pearl-runtime.sh _retention-run") ok ;; *) bad "retention run command: $(next_field command)" ;; esac
+run_rc 3 "_retention-run refuses outside next --run" scripts/ops/pearl-runtime.sh _retention-run
+PEARL_RUNTIME_TASK=retention-run run_rc 3 "retention run needs an owner" scripts/ops/pearl-runtime.sh next --run
+# A run in progress (nightly retention or ledger rollup) is refused; nothing starts.
+: > "$tmp/svc/retention_busy"
+PEARL_RUNTIME_TASK=retention-run MACPROVIDER_OPS_OWNER=t run_rc 3 "retention run refused while a run is in progress" scripts/ops/pearl-runtime.sh next --run
+expect_err "run is in progress"
+expect_lock_free
+if [ -e "$RSCOPE/run.json" ] || [ -e "$tmp/svc/retention_posts" ]; then bad "a refused run started or recorded something"; else ok; fi
+rm -f "$tmp/svc/retention_busy"
+: > "$tmp/svc/retention_disabled"
+PEARL_RUNTIME_TASK=retention-run MACPROVIDER_OPS_OWNER=t run_rc 3 "retention run refused while retention is disabled" scripts/ops/pearl-runtime.sh next --run
+expect_err "billing.retention.enabled is false"
+rm -f "$tmp/svc/retention_disabled"
+# A started run whose report never appears fails within the bound, unrecorded.
+: > "$tmp/svc/retention_no_report"
+RETENTION_RUN_WAIT_MAX_S=0 PEARL_RUNTIME_TASK=retention-run MACPROVIDER_OPS_OWNER=t run_rc 1 "retention run without a report" scripts/ops/pearl-runtime.sh next --run
+expect_err "no report for this run"
+expect_lock_free
+if [ -e "$RSCOPE/run.json" ]; then bad "a run without a report was recorded"; else ok; fi
+rm -f "$tmp/svc/retention_no_report" "$tmp/svc/retention_posts"
+# A lap with overdue requests: recorded, printed, and the gate stays shut.
+printf '7' > "$tmp/svc/retention_overdue"
+PEARL_RUNTIME_TASK=retention-run MACPROVIDER_OPS_OWNER=t run_rc 0 "on-demand retention run (still overdue)" scripts/ops/pearl-runtime.sh next --run
+expect_lock_free
+if grep -q "EXPECTED DOWNTIME for run: none (no restart)" "$tmp/out"; then ok; else bad "retention run downtime not printed first"; fi
+for want in "status: deleted" "deleted_requests: 42" "backlog_drained: false" "last_lap_overdue_requests: 7" "stop_reason: lap_complete"; do
+  if grep -qF "$want" "$tmp/out"; then ok; else bad "retention run output lacks '$want'"; fi
+done
+if grep -qF "$RKEY" "$tmp/out" "$tmp/err"; then bad "the operator key was printed"; else ok; fi
+if grep -q "archive_file\|retention-archive" "$tmp/out" "$tmp/err" "$RSCOPE/run.json"; then bad "report fields beyond the summary leaked"; else ok; fi
+if python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d["backlog_drained"] is False and d["last_lap_overdue_requests"] == 7 and d["status"] == "deleted" else 1)' "$RSCOPE/run.json"; then ok; else bad "retention run marker: $(cat "$RSCOPE/run.json")"; fi
+PEARL_RUNTIME_TASK=retention-run run_rc 0 "retention run status after an overdue lap" scripts/ops/pearl-runtime.sh status
+expect_next run:mutate
+PEARL_RUNTIME_TASK=retention-vacuum-conversion run_rc 0 "vacuum task after an overdue on-demand lap" scripts/ops/pearl-runtime.sh status
+expect_next drain_gate:blocked
+# A caught-up on-demand lap opens the gate exactly like a nightly lap.
+printf '0' > "$tmp/svc/retention_overdue"
+PEARL_RUNTIME_TASK=retention-run MACPROVIDER_OPS_OWNER=t run_rc 0 "on-demand retention run (caught up)" scripts/ops/pearl-runtime.sh next --run
+if grep -qF "backlog_drained: true" "$tmp/out"; then ok; else bad "caught-up run output: $(cat "$tmp/out")"; fi
+PEARL_RUNTIME_TASK=retention-run run_rc 0 "retention run status after a caught-up lap" scripts/ops/pearl-runtime.sh status
+expect_next done:done
+PEARL_RUNTIME_TASK=retention-vacuum-conversion run_rc 0 "vacuum task after a caught-up on-demand lap" scripts/ops/pearl-runtime.sh status
+expect_next convert:mutate
+if [ "$(fact_of retention_run_backlog_drained)" = True ]; then ok; else bad "gate fact retention_run_backlog_drained: $(fact_of retention_run_backlog_drained)"; fi
+# A database behind the live coordinator's own report is not the live one.
+sqlite3 "$VDB" "UPDATE settlement_evidence_retention_state SET last_lap_completed_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 hours')" >/dev/null
+PEARL_RUNTIME_TASK=retention-vacuum-conversion run_rc 0 "vacuum task on a database behind the recorded run" scripts/ops/pearl-runtime.sh status
+expect_next drain_gate:blocked
+case "$(next_field reason)" in *"must be the live coordinator's database"*) ok ;; *) bad "lagging database reason: $(next_field reason)" ;; esac
+# A database lap earlier within the same second as the recorded one is behind.
+python3 - "$RSCOPE/run.json" "$VDB" <<'PYFRAC'
+import json, subprocess, sys
+r = json.load(open(sys.argv[1]))
+r["last_lap_completed_at_utc"] = r["last_lap_completed_at_utc"][:19] + ".900000000Z"
+json.dump(r, open(sys.argv[1], "w"))
+subprocess.run(["sqlite3", sys.argv[2], "UPDATE settlement_evidence_retention_state SET last_lap_completed_at_utc = '%s'" % (r["last_lap_completed_at_utc"][:19] + ".100000000Z")], check=True)
+PYFRAC
+PEARL_RUNTIME_TASK=retention-vacuum-conversion run_rc 0 "vacuum task on a database behind by a fraction of a second" scripts/ops/pearl-runtime.sh status
+expect_next drain_gate:blocked
+# A recorded lap older than 36 hours is offered again.
+python3 -c 'import datetime as d,json,sys; r=json.load(open(sys.argv[1])); r["last_lap_completed_at_utc"]=(d.datetime.now(d.timezone.utc)-d.timedelta(hours=37)).strftime("%Y-%m-%dT%H:%M:%S.000000000Z"); json.dump(r,open(sys.argv[1],"w"))' "$RSCOPE/run.json"
+PEARL_RUNTIME_TASK=retention-run run_rc 0 "retention run status with a stale record" scripts/ops/pearl-runtime.sh status
+expect_next run:mutate
+# A refused run carries backlog_drained over from an older lap: recorded, the
+# step fails, and the task offers the run again.
+printf 'refused_archive_disk_low' > "$tmp/svc/retention_status"
+PEARL_RUNTIME_TASK=retention-run MACPROVIDER_OPS_OWNER=t run_rc 1 "refused on-demand run" scripts/ops/pearl-runtime.sh next --run
+expect_err "ended with status refused_archive_disk_low"
+expect_lock_free
+if python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))["status"] == "refused_archive_disk_low" else 1)' "$RSCOPE/run.json"; then ok; else bad "refused run not recorded"; fi
+PEARL_RUNTIME_TASK=retention-run run_rc 0 "retention run status after a refused run" scripts/ops/pearl-runtime.sh status
+expect_next run:mutate
+rm -f "$tmp/svc/retention_status"
+# An error report without stop_reason or lap fields is still printed and recorded.
+: > "$tmp/svc/retention_error"
+PEARL_RUNTIME_TASK=retention-run MACPROVIDER_OPS_OWNER=t run_rc 1 "on-demand run with an error report" scripts/ops/pearl-runtime.sh next --run
+if grep -qF "error: archive verify failed" "$tmp/out" && python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d["status"] == "exported" and d["error"] else 1)' "$RSCOPE/run.json"; then ok; else bad "error report not printed and recorded"; fi
+expect_err "ended with status exported"
+rm -f "$tmp/svc/retention_error"
+# An older report is never taken for this run's: with the report route
+# serving only a previous report, the run times out unrecorded.
+rm -f "$RSCOPE/run.json"
+: > "$tmp/svc/retention_no_report"
+RETENTION_RUN_WAIT_MAX_S=0 PEARL_RUNTIME_TASK=retention-run MACPROVIDER_OPS_OWNER=t run_rc 1 "an older report is not this run's" scripts/ops/pearl-runtime.sh next --run
+if [ -e "$RSCOPE/run.json" ]; then bad "an older report was recorded as this run"; else ok; fi
+rm -f "$tmp/svc/retention_no_report"
+rm -rf "$RSCOPE" "$tmp/svc/retention_report.json" "$tmp/svc/retention_overdue" "$tmp/svc/retention_db" "$tmp/svc/retention_posts"
+rm -f "$tmp/pearl/coordinator.yaml" "$tmp/pearl/overlay.yaml"
+unset PEARL_COORDINATOR_ADMIN_URL RETENTION_RUN_POLL_S RETENTION_RUN_WAIT_MAX_S
+
 sqlite3 "$VDB" "UPDATE settlement_evidence_retention_state SET last_lap_completed_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-2 hours')" >/dev/null
 PEARL_RUNTIME_TASK=retention-vacuum-conversion run_rc 0 "vacuum task after the drain" scripts/ops/pearl-runtime.sh status
 expect_next convert:mutate
@@ -399,6 +517,145 @@ expect_next done:done
 PEARL_RUNTIME_TASK=bogus run_rc 3 "unknown task refused" scripts/ops/pearl-runtime.sh status
 unset PEARL_COORDINATOR_DB PEARL_SQLITE3 PEARL_DEPLOY_LOCK PEARL_DEPLOY_OPERATION_LOCK
 rm -f "$tmp/bin/flock" "$tmp/bin/pearl-sqlite3" "$tmp/svc/unit-actions"
+
+# ==== compute-integrity private corpus (#1644) =================================
+# The corpus check is pinned to the coordinator's ParseCorpus by shared cases
+# (internal/computeintegrity/corpus_parse_cases_test.go runs the Go side).
+if python3 -I - "$OPS_SRC/lib/pearl-cli-config.py" "$SRC_REPO/phase4-coordinator/internal/computeintegrity/testdata/corpus_parse_cases.json" <<'PYCASES'
+import base64, importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("pcc", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+bad = []
+for c in json.load(open(sys.argv[2]))["cases"]:
+    try:
+        m.parse_corpus(base64.b64decode(c["doc_b64"]))
+        got = True
+    except m.Refused:
+        got = False
+    if got != c["python"] or (got and not c["go"]):
+        bad.append(c["name"])
+print(" ".join(bad))
+sys.exit(1 if bad else 0)
+PYCASES
+then ok; else bad "corpus check disagrees with the shared ParseCorpus cases"; fi
+# The generator: private topics in, a private corpus out, outside the repo.
+CI_SECRETS="$tmp/operator-secrets"
+mkdir -p "$CI_SECRETS"
+for i in $(seq 1 20); do printf 'private topic number %s about something\n' "$i"; done > "$CI_SECRETS/topics.txt"
+head -n 5 "$CI_SECRETS/topics.txt" > "$CI_SECRETS/few-topics.txt"
+gen() { python3 -I "$SRC_REPO/scripts/compute-integrity-corpus.py" "$@" >"$tmp/out" 2>"$tmp/err"; }
+if gen --topics "$CI_SECRETS/few-topics.txt" --out "$CI_SECRETS/x.json"; then bad "generator accepted too few topics"; else ok; fi
+if gen --topics "$CI_SECRETS/topics.txt" --out "$W/corpus.json"; then bad "generator wrote inside the repository"; else ok; fi
+if gen --topics "$CI_SECRETS/topics.txt" --count 300 --version private-test-1 --out "$CI_SECRETS/corpus1.json"; then ok; else bad "generator failed: $(cat "$tmp/err")"; fi
+CORPUS1="$CI_SECRETS/corpus1.json"
+if [ "$(ls -l "$CORPUS1" | cut -c1-10)" = "-rw-------" ]; then ok; else bad "generated corpus is not 0600: $(ls -l "$CORPUS1")"; fi
+if grep -q "private topic" "$tmp/out" "$tmp/err"; then bad "the generator printed corpus content"; else ok; fi
+if python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if len(d["prompts"]) == 300 and len({(p["system"], p["user"]) for p in d["prompts"]}) == 300 else 1)' "$CORPUS1"; then ok; else bad "generated corpus is not 300 distinct prompts"; fi
+if gen --topics "$CI_SECRETS/topics.txt" --version private-test-1 --out "$CORPUS1"; then bad "generator overwrote an existing corpus"; else ok; fi
+gen --topics "$CI_SECRETS/topics.txt" --count 50 --version private-test-2 --out "$CI_SECRETS/corpus2.json" || bad "second corpus: $(cat "$tmp/err")"
+CORPUS2="$CI_SECRETS/corpus2.json"
+
+restarts() { cat "$tmp/svc/restarts" 2>/dev/null || echo 0; }
+# Fake Pearl: base and overlay as on Pearl, scoring inert (no corpus_path).
+printf 'listen:\n  bind_address: 127.0.0.1\n' > "$tmp/pearl/coordinator.yaml"
+printf 'relay_blind:\n  enabled: true\n' > "$tmp/pearl/overlay.yaml"
+systemctl restart macprovider-coordinator
+export PEARL_COMPUTE_INTEGRITY_CORPUS_PATH="$tmp/pearl/etc/compute-integrity-corpus.json"
+CI_STAGED="$tmp/pearl/etc/.compute-integrity-corpus.staging"
+PEARL_RUNTIME_TASK=compute-integrity-enable run_rc 0 "compute-integrity status without a corpus" scripts/ops/pearl-runtime.sh status
+expect_next corpus:blocked
+if [ "$(fact_of pearl_ci_private_corpus_missing)" = True ]; then ok; else bad "inert scoring not reported: $(fact_of pearl_ci_private_corpus_missing)"; fi
+cp "$CORPUS1" "$W/in-repo-corpus.json"
+COMPUTE_INTEGRITY_CORPUS="$W/in-repo-corpus.json" PEARL_RUNTIME_TASK=compute-integrity-enable run_rc 0 "corpus inside the repo" scripts/ops/pearl-runtime.sh status
+expect_next corpus:blocked
+case "$(next_field reason)" in *"inside the repository"*) ok ;; *) bad "in-repo corpus reason: $(next_field reason)" ;; esac
+rm -f "$W/in-repo-corpus.json"
+printf '{"version": "v", "prompts": [{"system": "SECRET-PROMPT-TEXT", "user": " "}]}' > "$CI_SECRETS/bad.json"
+chmod 600 "$CI_SECRETS/bad.json"
+COMPUTE_INTEGRITY_CORPUS="$CI_SECRETS/bad.json" PEARL_RUNTIME_TASK=compute-integrity-enable run_rc 0 "invalid corpus" scripts/ops/pearl-runtime.sh status
+expect_next corpus:blocked
+case "$(next_field reason)" in *"corpus rules"*"empty message"*) ok ;; *) bad "invalid corpus reason: $(next_field reason)" ;; esac
+if grep -q SECRET-PROMPT-TEXT "$tmp/out" "$tmp/err"; then bad "corpus content echoed"; else ok; fi
+cp "$CORPUS1" "$CI_SECRETS/open.json"; chmod 644 "$CI_SECRETS/open.json"
+COMPUTE_INTEGRITY_CORPUS="$CI_SECRETS/open.json" PEARL_RUNTIME_TASK=compute-integrity-enable run_rc 0 "world-readable corpus" scripts/ops/pearl-runtime.sh status
+expect_next corpus:blocked
+chmod 400 "$CI_SECRETS/open.json"
+COMPUTE_INTEGRITY_CORPUS="$CI_SECRETS/open.json" PEARL_RUNTIME_TASK=compute-integrity-enable run_rc 0 "corpus not exactly 0600" scripts/ops/pearl-runtime.sh status
+expect_next corpus:blocked
+export COMPUTE_INTEGRITY_CORPUS="$CORPUS1"
+SHA1="$(shasum -a 256 "$CORPUS1" | awk '{print $1}')"
+# The kill switch is never overridden.
+printf 'compute_integrity:\n  scoring:\n    enabled: false\n' >> "$tmp/pearl/coordinator.yaml"
+PEARL_RUNTIME_TASK=compute-integrity-enable run_rc 0 "compute-integrity status with the kill switch" scripts/ops/pearl-runtime.sh status
+expect_next pearl_state:blocked
+printf 'listen:\n  bind_address: 127.0.0.1\n' > "$tmp/pearl/coordinator.yaml"
+systemctl restart macprovider-coordinator
+PEARL_RUNTIME_TASK=compute-integrity-enable run_rc 0 "compute-integrity status" scripts/ops/pearl-runtime.sh status
+expect_next enable:mutate
+case "$(next_field command)" in "scripts/ops/pearl-runtime.sh _compute-integrity-enable $SHA1") ok ;; *) bad "enable command: $(next_field command)" ;; esac
+case "$(next_field expected_downtime)" in "one coordinator restart"*) ok ;; *) bad "enable downtime: $(next_field expected_downtime)" ;; esac
+case "$(next_field runbook)" in docs/runbooks/compute-integrity-private-corpus.md) ok ;; *) bad "enable runbook: $(next_field runbook)" ;; esac
+if [ -f "$SRC_REPO/docs/runbooks/compute-integrity-private-corpus.md" ]; then ok; else bad "the enable runbook does not exist"; fi
+run_rc 3 "_compute-integrity-enable refuses outside next --run" scripts/ops/pearl-runtime.sh _compute-integrity-enable "$SHA1"
+PEARL_RUNTIME_TASK=compute-integrity-enable run_rc 3 "enable needs an owner" scripts/ops/pearl-runtime.sh next --run
+# The coordinator rejects the corpus after the restart: overlay and corpus are
+# restored and it restarts again.
+cp "$tmp/pearl/overlay.yaml" "$tmp/pearl/overlay.before"
+: > "$tmp/svc/ci_corpus_invalid"; rm -f "$tmp/svc/restarts"
+PEARL_RUNTIME_TASK=compute-integrity-enable MACPROVIDER_OPS_OWNER=t run_rc 3 "enable rolled back when the coordinator rejects the corpus" scripts/ops/pearl-runtime.sh next --run
+expect_err "compute_integrity_corpus_invalid"
+expect_lock_free
+if cmp -s "$tmp/pearl/overlay.yaml" "$tmp/pearl/overlay.before" && [ ! -e "$PEARL_COMPUTE_INTEGRITY_CORPUS_PATH" ] && [ "$(restarts)" = 2 ]; then ok; else bad "rejected corpus not rolled back (restarts=$(restarts))"; fi
+if [ -e "$CI_STAGED" ]; then bad "staged corpus left behind"; else ok; fi
+rm -f "$tmp/svc/ci_corpus_invalid" "$tmp/svc/restarts"
+PEARL_RUNTIME_TASK=compute-integrity-enable MACPROVIDER_OPS_OWNER=t run_rc 0 "enable runs" scripts/ops/pearl-runtime.sh next --run
+expect_lock_free
+if grep -q "EXPECTED DOWNTIME for enable: one coordinator restart" "$tmp/out"; then ok; else bad "enable downtime not printed first"; fi
+if [ "$(restarts)" = 1 ]; then ok; else bad "enable restarts: $(restarts)"; fi
+if [ "$(shasum -a 256 "$PEARL_COMPUTE_INTEGRITY_CORPUS_PATH" | awk '{print $1}')" = "$SHA1" ] &&
+  [ "$(ls -l "$PEARL_COMPUTE_INTEGRITY_CORPUS_PATH" | cut -c1-10)" = "-rw-r-----" ]; then ok; else bad "corpus not installed 0640: $(ls -l "$PEARL_COMPUTE_INTEGRITY_CORPUS_PATH" 2>&1)"; fi
+if python3 -c 'import sys,yaml; d=yaml.safe_load(open(sys.argv[1])); sys.exit(0 if d == {"relay_blind": {"enabled": True}, "compute_integrity": {"scoring": {"corpus_path": sys.argv[2]}}} else 1)' \
+  "$tmp/pearl/overlay.yaml" "$PEARL_COMPUTE_INTEGRITY_CORPUS_PATH"; then ok; else bad "overlay edit: $(cat "$tmp/pearl/overlay.yaml")"; fi
+if find "$PEARL_BACKUP_ROOT" -path '*compute-integrity*' -name overlay.yaml | grep -q .; then ok; else bad "no overlay backup"; fi
+if [ -e "$CI_STAGED" ]; then bad "staged corpus left behind"; else ok; fi
+if grep -q "private topic" "$tmp/out" "$tmp/err"; then bad "enable printed corpus content"; else ok; fi
+PEARL_RUNTIME_TASK=compute-integrity-enable run_rc 0 "compute-integrity status after enable" scripts/ops/pearl-runtime.sh status
+expect_next done:done
+if [ "$(state_of scheduled)" = done ]; then ok; else bad "scheduled state: $(state_of scheduled)"; fi
+if [ "$(fact_of pearl_ci_loaded_matches_installed)" = True ] && [ "$(fact_of pearl_ci_installed_mode_ok)" = True ]; then ok; else bad "loaded/mode facts after enable"; fi
+PEARL_COORDINATOR_HEALTHZ_URL="http://10.0.0.1:8444/healthz" PEARL_RUNTIME_TASK=compute-integrity-enable run_rc 3 "non-loopback healthz refused" scripts/ops/pearl-runtime.sh status
+# Without a local corpus the live state still reads as done.
+COMPUTE_INTEGRITY_CORPUS= PEARL_RUNTIME_TASK=compute-integrity-enable run_rc 0 "compute-integrity status on another machine" scripts/ops/pearl-runtime.sh status
+expect_next done:done
+# A local corpus that is set but invalid is never hidden behind done.
+COMPUTE_INTEGRITY_CORPUS="$CI_SECRETS/bad.json" PEARL_RUNTIME_TASK=compute-integrity-enable run_rc 0 "invalid local corpus after enable" scripts/ops/pearl-runtime.sh status
+expect_next corpus:blocked
+# A corpus replaced on Pearl after the coordinator started is not what it loaded.
+cp "$PEARL_COMPUTE_INTEGRITY_CORPUS_PATH" "$tmp/pearl/corpus.keep"
+cp "$CORPUS2" "$PEARL_COMPUTE_INTEGRITY_CORPUS_PATH"
+COMPUTE_INTEGRITY_CORPUS= PEARL_RUNTIME_TASK=compute-integrity-enable run_rc 0 "corpus replaced behind the running coordinator" scripts/ops/pearl-runtime.sh status
+case "$(next_field id)" in done) bad "a corpus the coordinator did not load reads as done" ;; *) ok ;; esac
+cp "$tmp/pearl/corpus.keep" "$PEARL_COMPUTE_INTEGRITY_CORPUS_PATH"; chmod 640 "$PEARL_COMPUTE_INTEGRITY_CORPUS_PATH"; rm -f "$tmp/pearl/corpus.keep"
+# A new local corpus replaces the installed one; a corpus changed after status is refused.
+COMPUTE_INTEGRITY_CORPUS="$CORPUS2" PEARL_RUNTIME_TASK=compute-integrity-enable run_rc 0 "compute-integrity status with a new corpus" scripts/ops/pearl-runtime.sh status
+expect_next enable:mutate
+COMPUTE_INTEGRITY_CORPUS="$CORPUS2" MACPROVIDER_OPS_ENTRYPOINT=1 run_rc 3 "corpus changed after status refused" scripts/ops/pearl-runtime.sh _compute-integrity-enable "$SHA1"
+expect_err "changed since status"
+rm -f "$tmp/svc/restarts"
+COMPUTE_INTEGRITY_CORPUS="$CORPUS2" PEARL_RUNTIME_TASK=compute-integrity-enable MACPROVIDER_OPS_OWNER=t run_rc 0 "corpus replacement runs" scripts/ops/pearl-runtime.sh next --run
+if [ "$(shasum -a 256 "$PEARL_COMPUTE_INTEGRITY_CORPUS_PATH" | awk '{print $1}')" = "$(shasum -a 256 "$CORPUS2" | awk '{print $1}')" ] && [ "$(restarts)" = 1 ]; then ok; else bad "corpus not replaced with one restart"; fi
+if [ "$(grep -c compute_integrity "$tmp/pearl/overlay.yaml")" = 1 ]; then ok; else bad "overlay edited twice: $(cat "$tmp/pearl/overlay.yaml")"; fi
+COMPUTE_INTEGRITY_CORPUS="$CORPUS2" PEARL_RUNTIME_TASK=compute-integrity-enable run_rc 0 "compute-integrity status after the replacement" scripts/ops/pearl-runtime.sh status
+expect_next done:done
+# Permission drift on the installed corpus is not done.
+chmod 644 "$PEARL_COMPUTE_INTEGRITY_CORPUS_PATH"
+COMPUTE_INTEGRITY_CORPUS="$CORPUS2" PEARL_RUNTIME_TASK=compute-integrity-enable run_rc 0 "installed corpus with drifted mode" scripts/ops/pearl-runtime.sh status
+case "$(next_field id)" in done) bad "a drifted corpus mode reads as done" ;; *) ok ;; esac
+if [ "$(fact_of pearl_ci_installed_mode_ok)" = False ]; then ok; else bad "mode drift not reported: $(fact_of pearl_ci_installed_mode_ok)"; fi
+chmod 640 "$PEARL_COMPUTE_INTEGRITY_CORPUS_PATH"
+unset COMPUTE_INTEGRITY_CORPUS PEARL_COMPUTE_INTEGRITY_CORPUS_PATH
+rm -f "$tmp/svc/restarts" "$tmp/pearl/coordinator.yaml" "$tmp/pearl/overlay.yaml" "$tmp/pearl/overlay.before" "$tmp/pearl/etc/compute-integrity-corpus.json"
 
 # ==== cli-release (structured evidence) =======================================
 health v9.0.0 $LIVE

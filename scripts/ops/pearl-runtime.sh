@@ -54,6 +54,58 @@
 #   Pearl, required), PEARL_SQLITE3, PEARL_COORDINATOR_UNIT,
 #   PEARL_UPDATER_LOCK, PEARL_DEPLOY_LOCK, PEARL_DEPLOY_OPERATION_LOCK,
 #   PEARL_COORDINATOR_HEALTHZ_URL.
+#   The drain gate reads the database itself. The marker of the last
+#   retention-run (below) is a cross-check: a database whose last lap is older
+#   than the lap that run reported is not the live coordinator's.
+#
+# One-time task (PEARL_RUNTIME_TASK=retention-run), outside the release train:
+# one on-demand settlement-evidence retention run
+# (ops/runbooks/settlement-evidence-retention.md section 3), no restart:
+#   1 window            read-only: not in the ten minutes before the nightly run
+#   2 run               under the live-ops lock: POST the operator route
+#                       /admin/ledger/settlement-evidence-retention/run on
+#                       Pearl's loopback with the operator key (read on Pearl
+#                       from the running coordinator, never printed), refuse
+#                       when it reports a run in progress (nightly retention or
+#                       ledger rollup), wait for this run's report, print
+#                       status, deleted_requests, backlog_drained,
+#                       last_lap_overdue_requests and stop_reason, and record
+#                       them (marker retention-run/run). The route runs
+#                       retention only; the ledger rollup stays nightly.
+#   Done while the recorded run is under 36 hours old and reports
+#   backlog_drained. A lap it completes updates the same database state the
+#   conversion's drain gate reads, exactly like a nightly lap.
+#   Env: PEARL_COORDINATOR_ADMIN_URL (default http://127.0.0.1:8444),
+#   PEARL_COORDINATOR_CONFIG, PEARL_COORDINATOR_OVERLAY, PEARL_COORDINATOR_UNIT,
+#   PEARL_PROC_ROOT, RETENTION_RUN_WAIT_MAX_S (default 15300: the 240-minute
+#   run budget ceiling plus slack), RETENTION_RUN_POLL_S (default 30).
+#
+# One-time task (PEARL_RUNTIME_TASK=compute-integrity-enable): give SPEC-036
+# cross-provider scoring its private prompt corpus
+# (docs/runbooks/compute-integrity-private-corpus.md):
+#   1 corpus            read-only, local: COMPUTE_INTEGRITY_CORPUS (a file
+#                       outside the repo, mode 0600) passes the coordinator's
+#                       corpus rules (scripts/compute-integrity-corpus.py
+#                       builds one)
+#   2 pearl_state       read-only: Pearl's overlay, installed corpus and what
+#                       the running coordinator logged about scoring
+#   3 enable            under the live-ops lock and both Pearl locks: stage the
+#                       corpus, install it at PEARL_COMPUTE_INTEGRITY_CORPUS_PATH
+#                       (root-owned, coordinator group, 0640), add
+#                       compute_integrity.scoring.corpus_path to the overlay
+#                       (backup first), validate, one coordinator restart
+#                       (downtime stated first), then require the new process
+#                       to log the corpus loaded and scheduling enabled;
+#                       otherwise restore both and restart again
+#   4 scheduled         read-only: the running coordinator logged
+#                       compute_integrity_scoring_started enabled=true with
+#                       this corpus
+#   Env: COMPUTE_INTEGRITY_CORPUS, PEARL_COMPUTE_INTEGRITY_CORPUS_PATH (default
+#   /etc/macprovider/compute-integrity-corpus.json), and the Pearl layout of
+#   cli-release.sh _pearl-config: PEARL_COORDINATOR_CONFIG,
+#   PEARL_COORDINATOR_OVERLAY, PEARL_COORDINATOR_UNIT, PEARL_INSTALL_ROOT,
+#   PEARL_CONFIG_GUARD, PEARL_UPDATER_LOCK, PEARL_BACKUP_ROOT,
+#   PEARL_COORDINATOR_HEALTHZ_URL, PEARL_PROC_ROOT.
 #
 # Env (or ~/.config/macprovider/ops.env): COORDINATOR_URL, GATEWAY_URL,
 # PEARL_SSH, PEARL_RUNTIME_VERSION, UPDATER_WAIT_MAX_S (default 2700),
@@ -75,6 +127,23 @@ RETENTION_DOC="ops/runbooks/settlement-evidence-retention.md"
 VACUUM_DOWNTIME="coordinator stopped while SQLite rewrites the coordinator, route-snapshot journal, and audit (coordinator-audit.db) database files (full VACUUM): about as long as the updater's pre-apply backup of the same files (ops/runbooks/pearl-release-updater.md), in proportion to their size; buyer and provider traffic through the coordinator is down for that time"
 STATS_MIGRATE_DOWNTIME="none (embedded stats/rewards Postgres migrations apply while the coordinator keeps serving; no restart)"
 APPLY_DOWNTIME="15-20 minutes of network down (runtime apply), unless the short-quiesce updater hotfix is installed"
+RETENTION_RUN_DOWNTIME="none (no restart): the coordinator keeps serving while the run archives and deletes settled evidence in short batches"
+CI_DOC="docs/runbooks/compute-integrity-private-corpus.md"
+# Pearl's journal: a plain coordinator restart stops (draining in-flight
+# requests) in about 1-31 s and starts within a second.
+CI_DOWNTIME="one coordinator restart, about 5-40 seconds (in-flight requests drain, then the coordinator starts); buyer and provider traffic through the coordinator is interrupted for that time. If the post-restart check fails, the overlay and corpus are restored and the coordinator restarts once more"
+
+# Pearl layout for the coordinator config helper (defaults: production; the
+# same as cli-release.sh _pearl-config).
+PEARL_COORDINATOR_CONFIG="${PEARL_COORDINATOR_CONFIG:-/opt/macprovider/coordinator.yaml}"
+PEARL_COORDINATOR_OVERLAY="${PEARL_COORDINATOR_OVERLAY:-/etc/macprovider/coordinator.pearl-overlays.yaml}"
+PEARL_INSTALL_ROOT="${PEARL_INSTALL_ROOT:-/opt/macprovider}"
+PEARL_CONFIG_GUARD="${PEARL_CONFIG_GUARD:-/usr/local/share/macprovider/scripts/coordinator_config_guard.py}"
+PEARL_BACKUP_ROOT="${PEARL_BACKUP_ROOT:-/root/macprovider-backups}"
+PEARL_PROC_ROOT="${PEARL_PROC_ROOT:-/proc}"
+PEARL_COMPUTE_INTEGRITY_CORPUS_PATH="${PEARL_COMPUTE_INTEGRITY_CORPUS_PATH:-/etc/macprovider/compute-integrity-corpus.json}"
+PEARL_COORDINATOR_ADMIN_URL="${PEARL_COORDINATOR_ADMIN_URL:-http://127.0.0.1:8444}"
+RETENTION_SCOPE="retention-run"
 
 
 max_remote_tag() {
@@ -271,12 +340,35 @@ if not v.endswith("Z"): sys.exit(1)
 t=d.datetime.strptime(v[:19],"%Y-%m-%dT%H:%M:%S").replace(tzinfo=d.timezone.utc)
 print(int((d.datetime.now(d.timezone.utc)-t).total_seconds()))' "$completed" 2>/dev/null || echo unknown)"
   fact retention_last_lap_age_seconds "$lap_age"
+  # An on-demand run (PEARL_RUNTIME_TASK=retention-run) recorded the lap the
+  # live coordinator reported. The database must not be behind it: if it is,
+  # PEARL_COORDINATOR_DB is not the file the live coordinator writes.
+  local run_lap="" run_rel=""
+  if marker_done "$RETENTION_SCOPE" run; then
+    run_lap="$(marker_field "$RETENTION_SCOPE" run 'd.get("last_lap_completed_at_utc")')"
+    fact retention_run_recorded_at "$(marker_field "$RETENTION_SCOPE" run 'd.get("recorded_at")')"
+    fact retention_run_backlog_drained "$(marker_field "$RETENTION_SCOPE" run 'd.get("backlog_drained")')"
+  fi
+  if [ -n "$run_lap" ]; then
+    run_rel="$(python3 -I -c 'import re,sys,datetime as d
+def p(v):
+    m=re.match(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?Z$",v.strip())
+    if not m: raise ValueError
+    return (d.datetime.strptime(m.group(1),"%Y-%m-%dT%H:%M:%S"), int((m.group(2) or "0").ljust(9,"0")))
+print("behind" if p(sys.argv[1]) < p(sys.argv[2]) else "ok")' "$completed" "$run_lap" 2>/dev/null || echo behind)"
+  fi
+  if [ "$run_rel" = behind ]; then
+    step drain_gate blocked "PEARL_COORDINATOR_DB lags the live coordinator's own retention report"
+    set_next drain_gate blocked "Check PEARL_COORDINATOR_DB" "" \
+      "the last on-demand retention run reported a lap completed at $run_lap, but $db reports last_lap_completed_at_utc=${completed:-?}; PEARL_COORDINATOR_DB must be the live coordinator's database"
+    return
+  fi
   if [[ "$laps" =~ ^[0-9]+$ ]] && [ "$laps" -gt 0 ] && [ "$overdue" = 0 ] && [[ "$lap_age" =~ ^[0-9]+$ ]] && [ "$lap_age" -le 129600 ]; then
     step drain_gate "done" "last lap completed ${rest#*|} caught up: 0 overdue of ${eligible} eligible requests"
   else
     step drain_gate blocked "retention has not caught up (laps_completed=${laps:-?} last_lap_overdue_requests=${overdue:-?} last_lap_age_seconds=${lap_age:-?})"
     set_next drain_gate blocked "Wait for settlement-evidence retention to catch up" "" \
-      "the conversion rewrites the whole file, so it waits until a retention lap completed within 36 hours selects no overdue request (backlog_drained=true in the nightly log); now laps_completed=${laps:-?} last_lap_overdue_requests=${overdue:-?} last_lap_eligible_requests=${eligible:-?} last_lap_age_seconds=${lap_age:-?}"
+      "the conversion rewrites the whole file, so it waits until a retention lap completed within 36 hours selects no overdue request (backlog_drained=true in the nightly log, or after an on-demand run: PEARL_RUNTIME_TASK=retention-run); now laps_completed=${laps:-?} last_lap_overdue_requests=${overdue:-?} last_lap_eligible_requests=${eligible:-?} last_lap_age_seconds=${lap_age:-?}"
     return
   fi
 
@@ -345,11 +437,280 @@ REMOTE"
   next_meta convert "$RETENTION_DOC" "$VACUUM_DOWNTIME" convert
 }
 
+# plain_args ARG...: refuse anything that is not a plain absolute path, URL
+# or unit name before it reaches a remote command line.
+plain_args() {
+  local a
+  for a in "$@"; do
+    [[ "$a" =~ ^[A-Za-z0-9_./:@+=-]+$ ]] || refuse "unsafe Pearl argument: $a"
+  done
+}
+
+retention_run_layout() {
+  RR_UNIT="${PEARL_COORDINATOR_UNIT:-macprovider-coordinator}"
+  RR_WAIT="${RETENTION_RUN_WAIT_MAX_S:-15300}"
+  RR_POLL="${RETENTION_RUN_POLL_S:-30}"
+  RR_NIGHTLY="${PEARL_RETENTION_NIGHTLY_UTC:-03:00}"
+  plain_args "$PEARL_COORDINATOR_CONFIG" "$PEARL_COORDINATOR_OVERLAY" "$RR_UNIT" "$PEARL_PROC_ROOT"
+  [[ "$PEARL_COORDINATOR_ADMIN_URL" =~ ^http://(127\.0\.0\.1|\[::1\]|localhost):[0-9]+$ ]] ||
+    refuse "PEARL_COORDINATOR_ADMIN_URL must be http://127.0.0.1:PORT (Pearl's loopback admin listener)"
+  [[ "$RR_WAIT" =~ ^[0-9]{1,6}$ ]] && [[ "$RR_POLL" =~ ^[0-9]{1,3}$ ]] && [ "$RR_POLL" -le 300 ] ||
+    refuse "RETENTION_RUN_WAIT_MAX_S must be whole seconds and RETENTION_RUN_POLL_S at most 300"
+  [[ "$RR_NIGHTLY" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || refuse "PEARL_RETENTION_NIGHTLY_UTC must be HH:MM"
+}
+
+gather_retention_run() {
+  OPS_SCOPE="$RETENTION_SCOPE"
+  NEXT_RUNBOOK="$RETENTION_DOC"
+  retention_run_layout
+  local in_window
+  # The coordinator's nightly job starts retention at 03:00 UTC (then the
+  # ledger rollup); an on-demand run in the ten minutes before it would take
+  # the shared lock from it.
+  in_window="$(python3 -I -c 'import sys,datetime as d
+n=d.datetime.now(d.timezone.utc); h,m=map(int,sys.argv[1].split(":"))
+s=n.replace(hour=h,minute=m,second=0,microsecond=0)
+s=s+d.timedelta(days=1) if s<n-d.timedelta(minutes=10) else s
+print("yes" if s-d.timedelta(minutes=10)<=n<s else "no")' "$RR_NIGHTLY")"
+  if marker_done "$RETENTION_SCOPE" run; then
+    local f
+    for f in recorded_at status deleted_requests backlog_drained last_lap_overdue_requests stop_reason last_lap_completed_at_utc; do
+      fact "retention_run_$f" "$(marker_field "$RETENTION_SCOPE" run "d.get(\"$f\")")"
+    done
+  fi
+  if [ -z "${PEARL_SSH:-}" ]; then
+    step window pending "PEARL_SSH is unset"
+    set_next window blocked "Start an on-demand retention run" "" "PEARL_SSH is unset"
+    return
+  fi
+  if [ "$in_window" = yes ]; then
+    step window blocked "within ten minutes of the nightly run ($RR_NIGHTLY UTC)"
+    set_next window blocked "Start an on-demand retention run" "" \
+      "the nightly retention run starts at $RR_NIGHTLY UTC; run this outside the ten minutes before it (a run in progress is refused by the coordinator itself)"
+    return
+  fi
+  step window "done" "outside the nightly start window"
+  # Done only for a run that completed without refusal or error and whose
+  # reported lap is caught up and under 36 hours old: backlog_drained alone
+  # is carried over from an older lap when a run stops before its own lap.
+  local fresh=false
+  if marker_done "$RETENTION_SCOPE" run &&
+    python3 -I - "$(marker_path "$RETENTION_SCOPE" run)" <<'PY'
+import datetime as d, json, sys
+r = json.load(open(sys.argv[1]))
+v = r.get("last_lap_completed_at_utc") or ""
+try:
+    t = d.datetime.strptime(v[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=d.timezone.utc)
+except ValueError:
+    sys.exit(1)
+age = (d.datetime.now(d.timezone.utc) - t).total_seconds()
+ok = (r.get("backlog_drained") is True and r.get("last_lap_overdue_requests") == 0 and not r.get("error")
+      and not str(r.get("status", "")).startswith("refused") and v.endswith("Z") and 0 <= age <= 129600)
+sys.exit(0 if ok else 1)
+PY
+  then
+    fresh=true
+  fi
+  if [ "$fresh" = true ]; then
+    step run "done" "the last on-demand run reports a caught-up lap under 36 hours old"
+    set_next "done" "done" "retention is caught up; next: PEARL_RUNTIME_TASK=retention-vacuum-conversion" ""
+    return
+  fi
+  step run pending ""
+  set_next run mutate "Start one on-demand settlement-evidence retention run on Pearl and wait for its report" \
+    "scripts/ops/pearl-runtime.sh _retention-run"
+  next_meta run "$RETENTION_DOC" "$RETENTION_RUN_DOWNTIME"
+}
+
+# _retention-run: runs lib/pearl-retention-run.py on Pearl (next --run only),
+# prints the report fields and records them in the retention-run/run marker.
+retention_run_internal() {
+  [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] ||
+    refuse "_retention-run runs only from 'PEARL_RUNTIME_TASK=retention-run $0 next --run' (live-ops lock)"
+  require_pearl_ssh
+  retention_run_layout
+  local out rc=0
+  out="$(pearl_ssh "python3 - run --config $PEARL_COORDINATOR_CONFIG --overlay $PEARL_COORDINATOR_OVERLAY \
+--unit $RR_UNIT --proc $PEARL_PROC_ROOT --admin-url $PEARL_COORDINATOR_ADMIN_URL \
+--wait-max-s $RR_WAIT --poll-s $RR_POLL --nightly-utc $RR_NIGHTLY" < "$OPS_LIB_DIR/pearl-retention-run.py")" || rc=$?
+  [ "$rc" = 0 ] || return "$rc"
+  local extra
+  extra="$(python3 -I -c 'import json,sys
+d=json.loads(sys.argv[1])
+# An error report may lack the lap fields and stop_reason; status is always set.
+bad=[] if isinstance(d.get("status"),str) and d["status"] else ["status"]
+if bad: sys.exit("report lacks "+",".join(bad))
+print(json.dumps(d,sort_keys=True))' "$out")" || die "the retention run report is malformed"
+  python3 -I -c 'import json,sys
+d=json.loads(sys.argv[1])
+for k in ("status","deleted_requests","backlog_drained","last_lap_overdue_requests","stop_reason","laps_completed","last_lap_completed_at_utc","error"):
+    if k in d: print("%s: %s" % (k, json.dumps(d[k]) if isinstance(d[k], bool) else d[k]))' "$extra"
+  mark_done "$RETENTION_SCOPE" run "on-demand retention run" "$extra"
+  log "recorded the run in $(marker_path "$RETENTION_SCOPE" run)"
+  # A refusal or error is recorded (its lap fields are still the live state)
+  # but the step failed; the task offers the run again.
+  python3 -I -c 'import json,sys; d=json.loads(sys.argv[1]); sys.exit(1 if d.get("error") or d["status"].startswith("refused") else 0)' "$extra" ||
+    die "the retention run ended with status $(json_field_str "$extra" 'd["status"]'); read its report above"
+}
+
+ci_layout() {
+  CI_UNIT="${PEARL_COORDINATOR_UNIT:-macprovider-coordinator}"
+  CI_HEALTHZ="${PEARL_COORDINATOR_HEALTHZ_URL:-http://127.0.0.1:8444/healthz}"
+  CI_UPDATER_LOCK="${PEARL_UPDATER_LOCK:-/run/lock/macprovider-pearl-updater.lock}"
+  plain_args "$PEARL_COORDINATOR_CONFIG" "$PEARL_COORDINATOR_OVERLAY" "$CI_UNIT" "$PEARL_INSTALL_ROOT" \
+    "$PEARL_CONFIG_GUARD" "$CI_UPDATER_LOCK" "$PEARL_BACKUP_ROOT" "$CI_HEALTHZ" "$PEARL_PROC_ROOT"
+  # The root helper polls it during the restart: Pearl's loopback only.
+  [[ "$CI_HEALTHZ" =~ ^http://(127\.0\.0\.1|\[::1\]|localhost):[0-9]+/[A-Za-z0-9._/-]*$ ]] ||
+    refuse "PEARL_COORDINATOR_HEALTHZ_URL must be an http://127.0.0.1:PORT/ URL (Pearl's loopback)"
+  [[ "$PEARL_COMPUTE_INTEGRITY_CORPUS_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]] ||
+    refuse "PEARL_COMPUTE_INTEGRITY_CORPUS_PATH must be an absolute plain path"
+  CI_LAYOUT="--config $PEARL_COORDINATOR_CONFIG --overlay $PEARL_COORDINATOR_OVERLAY --unit $CI_UNIT \
+--install-root $PEARL_INSTALL_ROOT --guard $PEARL_CONFIG_GUARD \
+--guard-sha256 $(shasum -a 256 "$REPO_ROOT/scripts/lib/coordinator_config_guard.py" | awk '{print $1}') \
+--updater-lock $CI_UPDATER_LOCK --backup-root $PEARL_BACKUP_ROOT --healthz $CI_HEALTHZ --proc $PEARL_PROC_ROOT \
+--ci-corpus $PEARL_COMPUTE_INTEGRITY_CORPUS_PATH"
+}
+
+# ci_local_corpus: validate COMPUTE_INTEGRITY_CORPUS into CI_SHA/CI_PROMPTS, or
+# leave CI_ERR set. The file must stay out of the repository and private.
+ci_local_corpus() {
+  CI_SHA=""; CI_PROMPTS=""; CI_ERR=""
+  local corpus="${COMPUTE_INTEGRITY_CORPUS:-}" real out
+  if [ -z "$corpus" ]; then
+    CI_ERR="COMPUTE_INTEGRITY_CORPUS is unset: set it to the private corpus file (build one with scripts/compute-integrity-corpus.py)"
+    return
+  fi
+  real="$(python3 -I -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$corpus")"
+  # Inside this repository or any git work tree: one `git add` from public.
+  if python3 -I -c 'import os,sys
+d=os.path.dirname(sys.argv[1])
+while True:
+    if os.path.lexists(os.path.join(d,".git")): sys.exit(0)
+    if os.path.dirname(d)==d: sys.exit(1)
+    d=os.path.dirname(d)' "$real"; then
+    CI_ERR="COMPUTE_INTEGRITY_CORPUS is inside the repository (or another git work tree); keep the private corpus outside it"
+    return
+  fi
+  if ! out="$(python3 -I "$OPS_LIB_DIR/pearl-cli-config.py" validate-corpus "$real" 2>&1)"; then
+    CI_ERR="the local corpus fails the coordinator's corpus rules: $(printf '%s' "$out" | tail -n 1 | cut -c1-200)"
+    return
+  fi
+  if [ "$(json_field_str "$out" 'd["private"]')" != true ]; then
+    CI_ERR="the local corpus is readable by group or others; chmod 600 it"
+    return
+  fi
+  CI_SHA="$(json_field_str "$out" 'd["sha256"]')"
+  CI_PROMPTS="$(json_field_str "$out" 'd["prompts"]')"
+  CI_CORPUS_REAL="$real"
+}
+
+json_field_str() { printf '%s' "$1" > "$OPS_TMP_DIR/field.json"; json_field "$OPS_TMP_DIR/field.json" "$2"; }
+
+gather_compute_integrity() {
+  OPS_SCOPE="compute-integrity-enable"
+  NEXT_RUNBOOK="$CI_DOC"
+  ci_layout
+  ci_local_corpus
+  if [ -n "$CI_ERR" ]; then
+    step corpus pending "$CI_ERR"
+  else
+    step corpus "done" "$CI_PROMPTS prompts, sha256 $CI_SHA"
+    fact local_corpus_sha256 "$CI_SHA"
+    fact local_corpus_prompts "$CI_PROMPTS"
+  fi
+  if [ -z "${PEARL_SSH:-}" ]; then
+    step pearl_state blocked "PEARL_SSH is unset"
+    set_next pearl_state blocked "Read compute-integrity state on Pearl" "" "PEARL_SSH is unset"
+    return
+  fi
+  local facts
+  if ! facts="$(pearl_ssh "python3 - ci-facts $CI_LAYOUT" < "$OPS_LIB_DIR/pearl-cli-config.py" 2>"$OPS_TMP_DIR/ci.err")" ||
+    [ -z "$(json_field_str "$facts" 'd["kill_switch"]')" ]; then
+    step pearl_state blocked "cannot read compute-integrity state on Pearl"
+    set_next pearl_state blocked "Read compute-integrity state on Pearl" "" \
+      "ci-facts over ssh failed: $(tail -n 1 "$OPS_TMP_DIR/ci.err" | safe_remote_output | cut -c1-200)"
+    return
+  fi
+  local k installed kill path enabled loaded invalid
+  for k in effective_corpus_path installed_sha256 installed_mode_ok loaded_matches_installed kill_switch scoring_enabled corpus_loaded_prompts corpus_invalid private_corpus_missing; do
+    fact "pearl_ci_$k" "$(json_field_str "$facts" "d[\"$k\"]")"
+  done
+  installed="$(json_field_str "$facts" 'd["installed_sha256"]')"
+  kill="$(json_field_str "$facts" 'd["kill_switch"]')"
+  path="$(json_field_str "$facts" 'd["effective_corpus_path"]')"
+  enabled="$(json_field_str "$facts" 'd["scoring_enabled"]')"
+  loaded="$(json_field_str "$facts" 'd["corpus_loaded_prompts"]')"
+  invalid="$(json_field_str "$facts" 'd["corpus_invalid"]')"
+  step pearl_state "done" "corpus_path=${path:-unset} scoring_enabled=${enabled:-unknown}"
+  if [ "$kill" = true ]; then
+    set_next pearl_state blocked "Enable compute-integrity scoring" "" \
+      "compute_integrity.scoring.enabled is false on Pearl (the kill switch); this task does not override it"
+    return
+  fi
+  local scheduled=false
+  # The overlay must own the setting: a base-only path is replaced by the
+  # next coordinator.yaml release.
+  if [ "$path" = "$PEARL_COMPUTE_INTEGRITY_CORPUS_PATH" ] &&
+    [ "$(json_field_str "$facts" 'd["overlay_corpus_path"]')" = "$PEARL_COMPUTE_INTEGRITY_CORPUS_PATH" ] && [ -n "$installed" ] && [ "$enabled" = true ] &&
+    [ "$invalid" = false ] && [[ "$loaded" =~ ^[0-9]+$ ]] && [ "$loaded" -gt 0 ] &&
+    [ "$(json_field_str "$facts" 'd["loaded_matches_installed"]')" = true ] &&
+    [ "$(json_field_str "$facts" 'd["installed_mode_ok"]')" = true ]; then
+    scheduled=true
+  fi
+  # A local corpus that is set must be valid and be the installed one; unset
+  # (another machine) reads Pearl's state alone.
+  if [ "$scheduled" = true ] && { [ -z "${COMPUTE_INTEGRITY_CORPUS:-}" ] || [ "$installed" = "$CI_SHA" ]; }; then
+    step enable "done" ""
+    step scheduled "done" "scheduling enabled with $loaded private prompts (sha256 $installed)"
+    set_next "done" "done" "compute-integrity scoring is scheduled with the private corpus" ""
+    return
+  fi
+  step enable pending ""
+  step scheduled pending "scoring_enabled=${enabled:-unknown} corpus_loaded_prompts=${loaded:-none}"
+  if [ -n "$CI_ERR" ]; then
+    set_next corpus blocked "Choose the private compute-integrity corpus" "" "$CI_ERR"
+    return
+  fi
+  set_next enable mutate "Install the private corpus on Pearl, set compute_integrity.scoring.corpus_path in the overlay, restart once" \
+    "scripts/ops/pearl-runtime.sh _compute-integrity-enable $CI_SHA"
+  next_meta enable "$CI_DOC" "$CI_DOWNTIME"
+}
+
+# _compute-integrity-enable SHA256: stage the validated local corpus on Pearl
+# (root-only, next to its target) and run lib/pearl-cli-config.py
+# apply-compute-integrity under both Pearl locks (next --run only).
+ci_enable_internal() {
+  [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] ||
+    refuse "_compute-integrity-enable runs only from 'PEARL_RUNTIME_TASK=compute-integrity-enable $0 next --run' (live-ops lock, downtime banner)"
+  require_pearl_ssh
+  ci_layout
+  ci_local_corpus
+  [ -z "$CI_ERR" ] || refuse "$CI_ERR"
+  [ "$CI_SHA" = "${1:-}" ] || refuse "the local corpus changed since status (sha256 $CI_SHA, expected ${1:-?}); run status again"
+  local staged
+  staged="$(dirname "$PEARL_COMPUTE_INTEGRITY_CORPUS_PATH")/.compute-integrity-corpus.staging"
+  # noclobber after rm: the staged copy is a new root-only file, never a link target.
+  local rc=0
+  pearl_ssh "set -eu; umask 077; s=$staged; rm -f -- \"\$s\"; set -o noclobber; cat > \"\$s\"" < "$CI_CORPUS_REAL" || rc=$?
+  if [ "$rc" = 0 ]; then
+    pearl_ssh "python3 - apply-compute-integrity $CI_LAYOUT --ci-staged $staged --ci-sha256 $CI_SHA" \
+      < "$OPS_LIB_DIR/pearl-cli-config.py" || rc=$?
+  fi
+  if [ "$rc" != 0 ]; then
+    # The helper removes the staged copy itself; this covers a failure before
+    # it ran (ssh, interpreter). Best effort: report the original failure.
+    pearl_ssh "rm -f -- $staged" </dev/null || log "could not remove $staged on Pearl; remove it by hand"
+    return "$rc"
+  fi
+}
+
 gather() {
   STATS_RECORDED=0
   if [ -n "${PEARL_RUNTIME_TASK:-}" ]; then
     case "$PEARL_RUNTIME_TASK" in
       retention-vacuum-conversion) gather_retention_vacuum; return ;;
+      retention-run) gather_retention_run; return ;;
+      compute-integrity-enable) gather_compute_integrity; return ;;
       *) refuse "unknown PEARL_RUNTIME_TASK: $PEARL_RUNTIME_TASK" ;;
     esac
   fi
@@ -641,6 +1002,12 @@ curl -sf \"\$COORDINATOR_URL/healthz\" | grep -q '\"version\":\"$T\"'
 curl -sf \"\$GATEWAY_URL/healthz\" | grep -q '\"version\":\"$T\"'"
 }
 
-internal() { usage >&2; exit 2; }
+internal() {
+  case "$1" in
+    _retention-run) retention_run_internal ;;
+    _compute-integrity-enable) shift; ci_enable_internal "$@" ;;
+    *) usage >&2; exit 2 ;;
+  esac
+}
 
 ops_main "$@"
