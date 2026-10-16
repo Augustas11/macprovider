@@ -11,8 +11,8 @@ Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011
 
 Issue #1644: compute-integrity earnings hold. Adds R-16
 (`SPEC-022-R016`). When SPEC-036 FR-23 confirms that a provider did not serve
-the model it claimed, the provider's unsettled credits for that model inside
-the affected window are held: excluded from the payable view, payout
+the model it claimed, the provider's unsettled credits inside the affected
+window are held, whatever model string the buyer requested: excluded from the payable view, payout
 readiness and earnings totals, but never quarantined, voided, or burned. A
 hold has no expiry. It is released by SPEC-036 FR-23 recovery (recovery holds
 only) or by an audited operator release, after which the credits are payable
@@ -2513,15 +2513,18 @@ reason, and a status (`held` or `released`). SPEC-036 FR-23 creates it: a
 `recovery` hold with an open end when a key enters `recovering`.
 
 R-16.2. While a hold is `held`, every unsettled (`settled = 0`)
-`ledger_request_credits` row with the same `provider_id`, `model` equal to the
-hold's `model_id`, and `ts_utc` inside the window (start inclusive, end
-inclusive when set), including one whose evidence R-15.6 already archived, is
-excluded from `spec022_payable_request_credits` and
+`ledger_request_credits` row with the same `provider_id` and `ts_utc` inside
+the window (start inclusive, end inclusive when set), including one whose
+evidence R-15.6 already archived, is excluded from `spec022_payable_request_credits` and
 from the weekly settlement selection, which applies the same predicate. It
 therefore stays out of `ledger_payout_ready`, the provider earnings endpoint
 and its rollup cache, and payable totals. The row itself is not modified: its
-outcome, quarantine flag and receipt verdict stay as they are. Because a
-held credit is not payable, R-15.2 does not archive its evidence while the
+outcome, quarantine flag and receipt verdict stay as they are. The predicate
+does not compare the credit's `model`: that column records the model the
+buyer requested, which may be an alias of the served model, so matching on it
+would let alias-routed credits escape the hold. The hold's `model_id` names
+the verified model the hold was opened for. Because a held credit is not
+payable, R-15.2 does not archive its evidence while the
 hold is `held`.
 
 R-16.3. Credits already settled into a payout (`settled = 1`) are never

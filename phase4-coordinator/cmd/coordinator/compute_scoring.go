@@ -61,7 +61,7 @@ func startComputeScoring(
 		Config: cfg,
 		Store:  store,
 		Dispatch: func(ctx context.Context, d providerws.ComputeIntegrityProbeDispatch) (providerws.ComputeIntegrityProbeResponse, error) {
-			got, err := buyerServer.DispatchComputeIntegrityProbe(ctx, d.AssignedID, d.Body, d.MaxTokens)
+			got, err := buyerServer.DispatchComputeIntegrityProbe(ctx, d.ProviderID, d.AssignedID, d.Body, d.MaxTokens)
 			if err != nil {
 				return providerws.ComputeIntegrityProbeResponse{}, err
 			}

@@ -21,8 +21,10 @@ func TestComputeIntegrityHoldWithholdsAndReleases(t *testing.T) {
 	insertCreditWithOperator(t, store.db, "inside-2", "p-a", windowStart.Add(4*time.Hour), 300)
 	insertCreditWithOperator(t, store.db, "after", "p-a", windowStart.Add(6*time.Hour), 400)
 	insertCreditWithOperator(t, store.db, "other-provider", "p-b", windowStart.Add(3*time.Hour), 500)
-	insertCreditWithOperator(t, store.db, "other-model", "p-a", windowStart.Add(3*time.Hour+time.Minute), 600)
-	if _, err := store.db.Exec(`UPDATE ledger_request_credits SET model = 'model-b' WHERE request_id = 'other-model'`); err != nil {
+	// A credit records the buyer-requested model, which may be an alias of
+	// the served one; the hold covers it all the same.
+	insertCreditWithOperator(t, store.db, "alias-model", "p-a", windowStart.Add(3*time.Hour+time.Minute), 600)
+	if _, err := store.db.Exec(`UPDATE ledger_request_credits SET model = 'model-b' WHERE request_id = 'alias-model'`); err != nil {
 		t.Fatal(err)
 	}
 	payable := func() int64 {
@@ -36,11 +38,11 @@ func TestComputeIntegrityHoldWithholdsAndReleases(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := payable(); got != 1600 {
-		t.Fatalf("held payable=%d want 1600 (inside-1 and inside-2 withheld)", got)
+	if got := payable(); got != 1000 {
+		t.Fatalf("held payable=%d want 1000 (inside-1, inside-2 and the alias-model credit withheld)", got)
 	}
 	holds, err := store.ComputeIntegrityHolds(ctx, "p-a")
-	if err != nil || len(holds) != 1 || holds[0].HeldCredits != 500 || holds[0].Status != computeintegrity.HoldHeld {
+	if err != nil || len(holds) != 1 || holds[0].HeldCredits != 1100 || holds[0].Status != computeintegrity.HoldHeld {
 		t.Fatalf("holds=%+v err=%v", holds, err)
 	}
 	if n, err := store.CountHeldComputeIntegrityHolds(ctx); err != nil || n != 1 {
@@ -51,8 +53,8 @@ func TestComputeIntegrityHoldWithholdsAndReleases(t *testing.T) {
 	if err := store.RunSettlement(ctx, SettlementConfig{CadenceDays: 7, MinPayoutCredits: 1}, windowStart, windowStart.AddDate(0, 0, 7)); err != nil {
 		t.Fatal(err)
 	}
-	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE settled = 0`); got != 2 {
-		t.Fatalf("unsettled=%d want 2 held credits", got)
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE settled = 0`); got != 3 {
+		t.Fatalf("unsettled=%d want 3 held credits", got)
 	}
 	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE quarantined = 1 OR provider_credits = 0`); got != 0 {
 		t.Fatal("a hold must never quarantine or zero a credit")
@@ -71,8 +73,8 @@ func TestComputeIntegrityHoldWithholdsAndReleases(t *testing.T) {
 	if _, err := store.ReleaseComputeIntegrityHold(ctx, 9999, "op-1", "x", windowStart.Add(11*time.Hour)); !errors.Is(err, ErrComputeIntegrityHoldNotFound) {
 		t.Fatalf("missing hold err=%v", err)
 	}
-	if got := scalar(t, store.db, `SELECT COALESCE(SUM(provider_credits), 0) FROM spec022_payable_request_credits WHERE settled = 0`); got != 500 {
-		t.Fatalf("released credits payable again=%d want 500", got)
+	if got := scalar(t, store.db, `SELECT COALESCE(SUM(provider_credits), 0) FROM spec022_payable_request_credits WHERE settled = 0`); got != 1100 {
+		t.Fatalf("released credits payable again=%d want 1100", got)
 	}
 	next := windowStart.AddDate(0, 0, 7)
 	if err := store.RunSettlement(ctx, SettlementConfig{CadenceDays: 7, MinPayoutCredits: 1}, windowStart, next); err != nil {
@@ -210,5 +212,31 @@ func TestComputeIntegrityHoldsListEveryHeldHold(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("the oldest hold is still held and must stay listed")
+	}
+}
+
+// SPEC-036 FR-23: a recovery transition whose hold action finds no open
+// recovery hold fails, so the state does not move without its hold change;
+// a recovery hold an operator already released is closed and the
+// transition proceeds.
+func TestComputeIntegrityRecoveryCloseNeedsAnOpenRecoveryHold(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	ctx := context.Background()
+	t0 := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	if err := store.CloseComputeIntegrityRecoveryHold(ctx, "p-a", "model-a", t0, true, t0); !errors.Is(err, ErrComputeIntegrityHoldNotFound) {
+		t.Fatalf("release with no recovery hold: err=%v, want ErrComputeIntegrityHoldNotFound", err)
+	}
+	id, err := store.OpenComputeIntegrityHold(ctx, "p-a", "model-a", computeintegrity.HoldKindRecovery, t0, nil, "cooldown_elapsed", t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReleaseComputeIntegrityHold(ctx, id, "op-1", "reviewed", t0.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CloseComputeIntegrityRecoveryHold(ctx, "p-a", "model-a", t0.Add(2*time.Hour), true, t0.Add(2*time.Hour)); err != nil {
+		t.Fatalf("operator-released recovery hold must let recovery close: %v", err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM compute_integrity_earnings_holds WHERE window_end_utc IS NULL`); got != 0 {
+		t.Fatalf("open recovery windows left=%d", got)
 	}
 }

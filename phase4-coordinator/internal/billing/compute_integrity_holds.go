@@ -2,8 +2,11 @@ package billing
 
 // SPEC-022 R-16 compute-integrity earnings holds (SPEC-036 FR-23/FR-25).
 //
-// A held hold removes a provider's credits for one model inside its window
-// from the payable view and from the weekly settlement selection. Nothing is
+// A held hold removes a provider's credits inside its window from the payable
+// view and from the weekly settlement selection, whatever model string the
+// buyer requested: a credit records the requested model, which may be an
+// alias of the served one, so matching on it would let alias-routed credits
+// escape. The hold names the verified model it was opened for. Nothing is
 // voided, quarantined or burned, and a hold never expires: it is released
 // only by SPEC-036 recovery (recovery holds) or by an audited operator
 // release. Every hold write bumps the earnings rollup buckets of the credits
@@ -46,7 +49,6 @@ CREATE TABLE IF NOT EXISTS compute_integrity_earnings_holds (
     CHECK((status = 'held') = (released_at_utc IS NULL))
 );
 CREATE INDEX IF NOT EXISTS idx_cieh_provider_model ON compute_integrity_earnings_holds(provider_id, model_id, status);
-CREATE INDEX IF NOT EXISTS idx_lrc_provider_model_ts ON ledger_request_credits(provider_id, model, ts_utc);
 `)
 	return err
 }
@@ -61,7 +63,6 @@ func computeIntegrityHoldExclusionSQL(alias string) string {
          FROM compute_integrity_earnings_holds cieh
         WHERE cieh.status = 'held'
           AND cieh.provider_id = ` + alias + `.provider_id
-          AND cieh.model_id = ` + alias + `.model
           AND ` + alias + `.ts_utc >= cieh.window_start_utc
           AND (cieh.window_end_utc IS NULL OR ` + alias + `.ts_utc <= cieh.window_end_utc)
    ))`
@@ -69,7 +70,6 @@ func computeIntegrityHoldExclusionSQL(alias string) string {
 
 func computeIntegrityHoldCreditMatchSQL(row string) string {
 	return `c.provider_id = ` + row + `.provider_id
-       AND c.model = ` + row + `.model_id
        AND c.ts_utc >= ` + row + `.window_start_utc
        AND (` + row + `.window_end_utc IS NULL OR c.ts_utc <= ` + row + `.window_end_utc)`
 }
@@ -106,7 +106,7 @@ END`},
 		{"trg_per_cieh_lrc_settled", `CREATE TRIGGER trg_per_cieh_lrc_settled AFTER UPDATE OF settled ON ledger_request_credits
 WHEN OLD.settled IS NOT NEW.settled AND EXISTS (
     SELECT 1 FROM compute_integrity_earnings_holds cieh
-     WHERE cieh.status = 'held' AND cieh.provider_id = NEW.provider_id AND cieh.model_id = NEW.model
+     WHERE cieh.status = 'held' AND cieh.provider_id = NEW.provider_id
        AND NEW.ts_utc >= cieh.window_start_utc
        AND (cieh.window_end_utc IS NULL OR NEW.ts_utc <= cieh.window_end_utc))
 BEGIN
@@ -203,21 +203,44 @@ func (s *Store) CloseComputeIntegrityRecoveryHold(ctx context.Context, providerI
 
 func closeComputeIntegrityRecoveryHoldExec(ctx context.Context, db holdExecutor, providerID, modelID string, end time.Time, release bool, now time.Time) error {
 	endText := sqliteTimeText(end)
+	var res sql.Result
+	var err error
 	if release {
-		_, err := db.ExecContext(ctx, `
+		res, err = db.ExecContext(ctx, `
 UPDATE compute_integrity_earnings_holds
    SET window_end_utc = MAX(?, window_start_utc), status = 'released', released_at_utc = ?,
        released_by = 'compute_integrity_recovery', release_reason = 'recovery_passed'
  WHERE provider_id = ? AND model_id = ? AND kind = 'recovery' AND window_end_utc IS NULL AND status = 'held'`,
 			endText, sqliteTimeText(now), providerID, modelID)
-		return err
-	}
-	_, err := db.ExecContext(ctx, `
+	} else {
+		res, err = db.ExecContext(ctx, `
 UPDATE compute_integrity_earnings_holds
    SET window_end_utc = MAX(?, window_start_utc)
  WHERE provider_id = ? AND model_id = ? AND kind = 'recovery' AND window_end_utc IS NULL AND status = 'held'`,
+			endText, providerID, modelID)
+	}
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil || n > 0 {
+		return err
+	}
+	// No held open recovery hold. An operator may already have released it:
+	// close its window so it no longer reads as open, and the transition
+	// proceeds. With no open recovery hold at all the transition's hold
+	// action cannot be applied, so it fails and the state does not move.
+	res, err = db.ExecContext(ctx, `
+UPDATE compute_integrity_earnings_holds
+   SET window_end_utc = MAX(?, window_start_utc)
+ WHERE provider_id = ? AND model_id = ? AND kind = 'recovery' AND window_end_utc IS NULL AND status = 'released'`,
 		endText, providerID, modelID)
-	return err
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil || n > 0 {
+		return err
+	}
+	return ErrComputeIntegrityHoldNotFound
 }
 
 // ReleaseComputeIntegrityHold is the audited operator release (SPEC-022
@@ -258,7 +281,7 @@ SELECT h.id, h.provider_id, h.model_id, h.kind, h.window_start_utc, h.window_end
        h.created_at_utc, h.released_at_utc, COALESCE(h.released_by, ''), COALESCE(h.release_reason, ''),
        COALESCE((SELECT SUM(c.provider_credits)
                    FROM ledger_request_credits c
-                  WHERE c.settled = 0 AND ` + "c.provider_id = h.provider_id AND c.model = h.model_id AND c.ts_utc >= h.window_start_utc AND (h.window_end_utc IS NULL OR c.ts_utc <= h.window_end_utc)" + `), 0)
+                  WHERE c.settled = 0 AND ` + "c.provider_id = h.provider_id AND c.ts_utc >= h.window_start_utc AND (h.window_end_utc IS NULL OR c.ts_utc <= h.window_end_utc)" + `), 0)
   FROM compute_integrity_earnings_holds h`
 
 func scanComputeIntegrityHold(scan func(...any) error) (computeintegrity.EarningsHold, error) {

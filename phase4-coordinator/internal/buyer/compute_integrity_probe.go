@@ -21,9 +21,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -32,6 +35,82 @@ import (
 const ComputeIntegrityAccountPrefix = "cip_"
 
 const maxComputeIntegrityProbeResponseBytes = 1 << 20
+
+// Verification accounts are reused per provider, so a verification request's
+// account scope recurs on that provider the way a returning buyer's does
+// instead of always being one never seen before. Each provider has up to
+// computeIntegrityProbeAccountsPerProvider accounts, each retired after a
+// random lifetime and replaced.
+const (
+	computeIntegrityProbeAccountsPerProvider = 4
+	computeIntegrityProbeAccountMinLife      = 3 * 24 * time.Hour
+	computeIntegrityProbeAccountMaxLife      = 10 * 24 * time.Hour
+)
+
+type computeIntegrityProbeAccount struct {
+	id      string
+	retires time.Time
+}
+
+type computeIntegrityProbeAccounts struct {
+	mu         sync.Mutex
+	byProvider map[string][]computeIntegrityProbeAccount
+}
+
+func cryptoIntn(n int64) (int64, error) {
+	v, err := rand.Int(rand.Reader, big.NewInt(n))
+	if err != nil {
+		return 0, err
+	}
+	return v.Int64(), nil
+}
+
+// account returns a verification account for providerID: one of its live
+// accounts at random, after topping the set up to the per-provider size.
+// Providers whose accounts all retired are forgotten, so the map is bounded
+// by the providers verified within the longest lifetime.
+func (a *computeIntegrityProbeAccounts) account(providerID string, now time.Time) (string, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.byProvider == nil {
+		a.byProvider = map[string][]computeIntegrityProbeAccount{}
+	}
+	for id, accounts := range a.byProvider {
+		live := accounts[:0]
+		for _, acc := range accounts {
+			if now.Before(acc.retires) {
+				live = append(live, acc)
+			}
+		}
+		if len(live) == 0 {
+			delete(a.byProvider, id)
+			continue
+		}
+		a.byProvider[id] = live
+	}
+	accounts := a.byProvider[providerID]
+	for len(accounts) < computeIntegrityProbeAccountsPerProvider {
+		suffix, err := randomToken(16)
+		if err != nil {
+			return "", err
+		}
+		span := int64(computeIntegrityProbeAccountMaxLife - computeIntegrityProbeAccountMinLife)
+		jitter, err := cryptoIntn(span)
+		if err != nil {
+			return "", err
+		}
+		accounts = append(accounts, computeIntegrityProbeAccount{
+			id:      ComputeIntegrityAccountPrefix + suffix,
+			retires: now.Add(computeIntegrityProbeAccountMinLife + time.Duration(jitter)),
+		})
+	}
+	a.byProvider[providerID] = accounts
+	i, err := cryptoIntn(int64(len(accounts)))
+	if err != nil {
+		return "", err
+	}
+	return accounts[i].id, nil
+}
 
 // ComputeIntegrityProbeResult is the verified provider's answer.
 type ComputeIntegrityProbeResult struct {
@@ -76,14 +155,14 @@ func randomToken(n int) (string, error) {
 
 // DispatchComputeIntegrityProbe sends one verification request to one
 // provider session through the ordinary chat-completions handler.
-func (s *Server) DispatchComputeIntegrityProbe(ctx context.Context, assignedID string, body []byte, maxTokens int) (ComputeIntegrityProbeResult, error) {
+func (s *Server) DispatchComputeIntegrityProbe(ctx context.Context, providerID, assignedID string, body []byte, maxTokens int) (ComputeIntegrityProbeResult, error) {
 	if strings.TrimSpace(s.gatewayServiceToken) == "" {
 		return ComputeIntegrityProbeResult{}, errors.New("compute-integrity probe: gateway service token is not configured")
 	}
-	if assignedID == "" || len(body) == 0 || maxTokens <= 0 {
+	if providerID == "" || assignedID == "" || len(body) == 0 || maxTokens <= 0 {
 		return ComputeIntegrityProbeResult{}, errors.New("compute-integrity probe: invalid request")
 	}
-	accountSuffix, err := randomToken(16)
+	account, err := s.ciProbeAccounts.account(providerID, time.Now())
 	if err != nil {
 		return ComputeIntegrityProbeResult{}, err
 	}
@@ -98,7 +177,7 @@ func (s *Server) DispatchComputeIntegrityProbe(ctx context.Context, assignedID s
 	req.RemoteAddr = "127.0.0.1:0"
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+s.gatewayServiceToken)
-	req.Header.Set("X-MacProvider-Account", ComputeIntegrityAccountPrefix+accountSuffix)
+	req.Header.Set("X-MacProvider-Account", account)
 	req.Header.Set("X-Request-ID", uuid.NewString())
 	req.Header.Set(settlementTrailersCapabilityHeader, "1")
 	req.Header.Set(routeSnapshotV2CapabilityHeader, "1")

@@ -60,6 +60,9 @@ const (
 	// than the output being short (64 bytes per token, far above any real
 	// tokenizer's average).
 	computeScoreShortOutputBytes = computeintegrity.MinScoredTokens * 64
+	// computeScoreLookupTimeout bounds one operator-identity lookup or one
+	// maintenance write, so a slow store delays a sweep, never stalls it.
+	computeScoreLookupTimeout = 2 * time.Second
 )
 
 // ComputeScoreRequest is the FR-21 coordinator-to-scorer frame.
@@ -221,9 +224,10 @@ type pendingComputeScore struct {
 	scorerID   string
 	assignedID string
 	modelID    string
-	manifest   string
-	deadline   time.Time
-	ch         chan ComputeScoreResult
+	// manifest is the wire manifest sent to the scorer, which it echoes.
+	manifest string
+	deadline time.Time
+	ch       chan ComputeScoreResult
 }
 
 type cachedOperatorKey struct {
@@ -231,9 +235,11 @@ type cachedOperatorKey struct {
 	fetched time.Time
 }
 
+// scorerPoolKey is a scorer cohort: one model at one coordinator-verified
+// catalog model hash.
 type scorerPoolKey struct {
-	modelID  string
-	manifest string
+	modelID   string
+	modelHash string
 }
 
 type computeScoringEngine struct {
@@ -270,6 +276,12 @@ type computeScoringEngine struct {
 	recentStarts []time.Time
 	scoringJobs  int
 	operatorKeys map[string]cachedOperatorKey
+	// scorerBusy reserves a scorer for one job at a time: the provider runs
+	// one scoring job at a time and rejects a second as unavailable.
+	scorerBusy map[string]bool
+	// dispatchDelay spreads a due request uniformly over one sweep interval,
+	// so request arrival carries no sweep-tick phase.
+	dispatchDelay func() time.Duration
 }
 
 // Inconclusive reasons (FR-23).
@@ -325,19 +337,38 @@ func (s *Server) newComputeScoringEngine(ctx context.Context, deps ComputeScorin
 		pending:      map[string]*pendingComputeScore{},
 		operatorKeys: map[string]cachedOperatorKey{},
 		lastSeen:     map[string]time.Time{},
+		scorerBusy:   map[string]bool{},
 
 		pendingExclusions: map[string]time.Time{},
 	}
 	// The rolling hourly bound survives a restart: reload the start times of
 	// the verification requests already sent in the last hour.
+	// If the history cannot be read, the bound fails closed: the whole
+	// budget counts as spent at start and frees after one hour.
 	startedAt := s.now()
-	if starts, err := deps.Store.RecentVerificationRequests(ctx, startedAt.Add(-time.Hour), deps.Config.MaxPerHour); err == nil {
-		for i := len(starts) - 1; i >= 0; i-- {
-			e.recentStarts = append(e.recentStarts, starts[i])
+	starts, err := deps.Store.RecentVerificationRequests(ctx, startedAt.Add(-time.Hour), deps.Config.MaxPerHour)
+	if err != nil {
+		s.log.Warn().Str("event", "compute_integrity_hourly_history_unavailable").Msg("verification history unreadable; hourly budget treated as spent for one hour")
+		starts = nil
+		for i := 0; i < deps.Config.MaxPerHour; i++ {
+			starts = append(starts, startedAt)
 		}
+	}
+	for i := len(starts) - 1; i >= 0; i-- {
+		e.recentStarts = append(e.recentStarts, starts[i])
+	}
+	sweep := e.tickInterval()
+	e.dispatchDelay = func() time.Duration {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		return time.Duration(e.rng.Int63n(int64(sweep)))
 	}
 	for _, st := range states {
 		st.RecoveryCooldown = e.recoveryCooldown()
+		// A restored key counts as seen at start, so it survives until its
+		// provider has been away for the retention period, as if the
+		// coordinator had not restarted.
+		e.lastSeen[st.ProviderID] = startedAt
 		e.states[computeScoringKey{st.ProviderID, st.ModelID}] = st
 		if st.State.RoutingSuspended() && s.pool != nil {
 			s.pool.SetComputeIntegritySuspended(st.ProviderID, st.ModelID, true)
@@ -363,12 +394,16 @@ func (e *computeScoringEngine) jitter(d time.Duration) time.Duration {
 	return time.Duration(float64(d) * (0.5 + e.rng.Float64()))
 }
 
-func (e *computeScoringEngine) run(ctx context.Context) {
+func (e *computeScoringEngine) tickInterval() time.Duration {
 	sweep := time.Duration(e.deps.Config.SweepIntervalSeconds) * time.Second
 	if sweep <= 0 {
 		sweep = 30 * time.Second
 	}
-	ticker := time.NewTicker(sweep)
+	return sweep
+}
+
+func (e *computeScoringEngine) run(ctx context.Context) {
+	ticker := time.NewTicker(e.tickInterval())
 	defer ticker.Stop()
 	for {
 		e.sweep(ctx, e.s.now())
@@ -390,7 +425,9 @@ func (e *computeScoringEngine) operatorKey(ctx context.Context, providerID strin
 	if ok && cached.key == "" && now.Sub(cached.fetched) < computeScoreNegativeTTL {
 		return ""
 	}
-	key, err := e.deps.OperatorKey(ctx, providerID)
+	lctx, cancel := context.WithTimeout(ctx, computeScoreLookupTimeout)
+	key, err := e.deps.OperatorKey(lctx, providerID)
+	cancel()
 	if err != nil || key == "" {
 		e.mu.Lock()
 		e.operatorKeys[providerID] = cachedOperatorKey{fetched: now}
@@ -409,7 +446,23 @@ func providerScoringReady(p pool.Provider) bool {
 
 // providerVerifiable is FR-19: a catalog-verified model with a manifest hash.
 func providerVerifiable(p pool.Provider) bool {
-	return p.ModelID != "" && isLowerHex64(p.WeightsManifestSHA256) && p.HashStatus == pool.HashStatusVerified && providerScoringReady(p)
+	return p.ModelID != "" && isLowerHex64(p.ModelHash) && isLowerHex64(p.WeightsManifestSHA256) &&
+		p.HashStatus == pool.HashStatusVerified && providerScoringReady(p)
+}
+
+// scoringCandidate is a session as scorer selection sees it: its cohort is
+// the coordinator-verified catalog model hash, and its reported manifest is
+// only what a scoring job to it carries.
+func scoringCandidate(p pool.Provider) computeintegrity.ScorerCandidate {
+	return computeintegrity.ScorerCandidate{
+		ProviderID:         p.ProviderID,
+		AssignedID:         p.AssignedID,
+		ModelID:            p.ModelID,
+		ManifestSHA256:     p.ModelHash,
+		WireManifestSHA256: p.WeightsManifestSHA256,
+		Capable:            p.ComputeScoreV1,
+		Ready:              true,
+	}
 }
 
 // stateLocked returns the key state, creating an unverified one. Caller
@@ -455,22 +508,30 @@ func (e *computeScoringEngine) sweep(ctx context.Context, now time.Time) {
 		if !providerVerifiable(p) {
 			continue
 		}
-		k := scorerPoolKey{p.ModelID, p.WeightsManifestSHA256}
-		e.tolerance.Touch(p.ModelID, p.WeightsManifestSHA256, now)
-		index[k] = append(index[k], computeintegrity.ScorerCandidate{
-			ProviderID:     p.ProviderID,
-			AssignedID:     p.AssignedID,
-			ModelID:        p.ModelID,
-			ManifestSHA256: p.WeightsManifestSHA256,
-			Capable:        p.ComputeScoreV1,
-			Ready:          true,
-		})
+		k := scorerPoolKey{p.ModelID, p.ModelHash}
+		e.tolerance.Touch(p.ModelID, p.ModelHash, now)
+		index[k] = append(index[k], scoringCandidate(p))
 	}
-	for _, p := range providers {
+	// Providers are considered in random order within a time budget of one
+	// sweep interval; whatever the budget leaves is considered next sweep,
+	// and the shuffle keeps any provider from always being last.
+	order := make([]int, len(providers))
+	for i := range order {
+		order[i] = i
+	}
+	e.mu.Lock()
+	e.rng.Shuffle(len(order), func(i, j int) { order[i], order[j] = order[j], order[i] })
+	e.mu.Unlock()
+	budget := time.Now().Add(e.tickInterval())
+	for _, i := range order {
+		p := providers[i]
 		if !providerVerifiable(p) {
 			continue
 		}
-		e.considerProvider(ctx, p, index[scorerPoolKey{p.ModelID, p.WeightsManifestSHA256}], now)
+		if time.Now().After(budget) {
+			break
+		}
+		e.considerProvider(ctx, p, index[scorerPoolKey{p.ModelID, p.ModelHash}], now)
 	}
 	e.publishGauges(ctx)
 }
@@ -570,13 +631,8 @@ func (e *computeScoringEngine) considerProvider(ctx context.Context, p pool.Prov
 	state := st.State
 	e.mu.Unlock()
 
-	verified := computeintegrity.ScorerCandidate{
-		ProviderID:     p.ProviderID,
-		AssignedID:     p.AssignedID,
-		ModelID:        p.ModelID,
-		ManifestSHA256: p.WeightsManifestSHA256,
-		OperatorKey:    e.operatorKey(ctx, p.ProviderID, now),
-	}
+	verified := scoringCandidate(p)
+	verified.OperatorKey = e.operatorKey(ctx, p.ProviderID, now)
 	if verified.OperatorKey == "" {
 		// Back off until the next cadence slot instead of retrying the
 		// identity lookup every sweep.
@@ -601,11 +657,23 @@ func (e *computeScoringEngine) considerProvider(ctx context.Context, p pool.Prov
 	scorers := computeintegrity.SelectScorers(e.rng, verified, scorerPool, n, func(c computeintegrity.ScorerCandidate) bool {
 		return e.scorerEligibleLocked(c, now)
 	})
+	if len(scorers) < n {
+		// A scorer busy with another job would complete the set: stay due
+		// and retry next sweep rather than measure with fewer scorers.
+		idle := selectableIgnoringBusyLocked(e, verified, scorerPool, n, now)
+		if idle > len(scorers) {
+			e.mu.Unlock()
+			return
+		}
+	}
 	if len(scorers) == 0 {
 		e.nextDue[key] = now.Add(e.jitter(e.interval(state)))
 		e.mu.Unlock()
 		e.inconclusive(ciInconclusiveNoScorer)
 		return
+	}
+	for _, sc := range scorers {
+		e.scorerBusy[sc.ProviderID] = true
 	}
 	e.inFlight[key] = true
 	e.inFlightCount++
@@ -617,6 +685,20 @@ func (e *computeScoringEngine) considerProvider(ctx context.Context, p pool.Prov
 // scorerEligibleLocked applies FR-21 rule 4 and the FR-24 availability
 // back-off. Caller holds mu.
 func (e *computeScoringEngine) scorerEligibleLocked(c computeintegrity.ScorerCandidate, now time.Time) bool {
+	return !e.scorerBusy[c.ProviderID] && e.scorerEligibleIgnoringBusyLocked(c, now)
+}
+
+// selectableIgnoringBusyLocked counts the scorers selection would find if no
+// scorer were busy. Caller holds mu.
+func selectableIgnoringBusyLocked(e *computeScoringEngine, verified computeintegrity.ScorerCandidate, pool []computeintegrity.ScorerCandidate, n int, now time.Time) int {
+	return len(computeintegrity.SelectScorers(e.rng, verified, pool, n, func(c computeintegrity.ScorerCandidate) bool {
+		return e.scorerEligibleIgnoringBusyLocked(c, now)
+	}))
+}
+
+// scorerEligibleIgnoringBusyLocked is scorer eligibility apart from the
+// one-job reservation. Caller holds mu.
+func (e *computeScoringEngine) scorerEligibleIgnoringBusyLocked(c computeintegrity.ScorerCandidate, now time.Time) bool {
 	if !e.scorers.Available(c.ProviderID, now) {
 		return false
 	}
@@ -658,12 +740,31 @@ type scoredMeasurement struct {
 // same model and manifest it was selected with (FR-20 output binding).
 func (e *computeScoringEngine) sessionUnchanged(verified computeintegrity.ScorerCandidate) bool {
 	p, ok := e.s.pool.Resolve(verified.ProviderID, verified.AssignedID)
-	return ok && p.ModelID == verified.ModelID && p.WeightsManifestSHA256 == verified.ManifestSHA256
+	return ok && p.ModelID == verified.ModelID && p.ModelHash == verified.ManifestSHA256 &&
+		p.WeightsManifestSHA256 == verified.WireManifestSHA256 && p.HashStatus == pool.HashStatusVerified
+}
+
+func (e *computeScoringEngine) releaseScorers(scorers []computeintegrity.ScorerCandidate) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, sc := range scorers {
+		delete(e.scorerBusy, sc.ProviderID)
+	}
 }
 
 func (e *computeScoringEngine) runProbe(ctx context.Context, verified computeintegrity.ScorerCandidate, scorers []computeintegrity.ScorerCandidate) {
 	key := computeScoringKey{verified.ProviderID, verified.ModelID}
 	defer e.finishProbe(key)
+	defer e.releaseScorers(scorers)
+	if d := e.dispatchDelay(); d > 0 {
+		timer := time.NewTimer(d)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		}
+	}
 	sampledKey := computeintegrity.ToleranceKey{ModelID: verified.ModelID, ManifestSHA256: verified.ManifestSHA256, Class: computeintegrity.SamplingSampled}
 	e.mu.Lock()
 	greedyOnly := false
@@ -718,7 +819,7 @@ func (e *computeScoringEngine) scoreAll(ctx context.Context, scorers []computein
 	answers := make(chan answer, len(scorers))
 	for _, sc := range scorers {
 		go func(sc computeintegrity.ScorerCandidate) {
-			result, ok := e.score(ctx, sc, verified.ManifestSHA256, body, output, reasoning, true)
+			result, ok := e.score(ctx, sc, body, output, reasoning, true)
 			answers <- answer{scorer: sc, result: result, ok: ok}
 		}(sc)
 	}
@@ -767,7 +868,8 @@ func (e *computeScoringEngine) scoreAll(ctx context.Context, scorers []computein
 
 // score runs one FR-21 job on one scorer. countJob marks an ordinary scoring
 // job, which advances the FR-24 known-sequence cadence.
-func (e *computeScoringEngine) score(ctx context.Context, scorer computeintegrity.ScorerCandidate, manifest string, body []byte, output, reasoning string, countJob bool) (ComputeScoreResult, bool) {
+func (e *computeScoringEngine) score(ctx context.Context, scorer computeintegrity.ScorerCandidate, body []byte, output, reasoning string, countJob bool) (ComputeScoreResult, bool) {
+	manifest := scorer.WireManifestSHA256
 	session, ok := e.s.storedSessionFor(scorer.ProviderID, scorer.AssignedID)
 	if !ok {
 		e.scoringJobMetric("timeout")
@@ -817,7 +919,7 @@ func (e *computeScoringEngine) score(ctx context.Context, scorer computeintegrit
 		checkKnown := e.scoringJobs%computeintegrity.KnownSequenceCheckEvery == 0
 		e.mu.Unlock()
 		if checkKnown {
-			go e.knownSequenceCheck(ctx, computeintegrity.ToleranceKey{ModelID: scorer.ModelID, ManifestSHA256: manifest})
+			go e.knownSequenceCheck(ctx, computeintegrity.ToleranceKey{ModelID: scorer.ModelID, ManifestSHA256: scorer.ManifestSHA256})
 		}
 	}
 	timer := time.NewTimer(deadline)
@@ -975,7 +1077,9 @@ func (e *computeScoringEngine) persistExclusion(ctx context.Context, providerID 
 		// An operator cleared the scorer after the exclusion was decided.
 		return
 	}
-	if err := e.deps.Store.ExcludeScorer(ctx, providerID, now); err != nil {
+	wctx, cancel := context.WithTimeout(ctx, computeScoreLookupTimeout)
+	defer cancel()
+	if err := e.deps.Store.ExcludeScorer(wctx, providerID, now); err != nil {
 		e.mu.Lock()
 		e.pendingExclusions[providerID] = now
 		e.mu.Unlock()
@@ -996,7 +1100,10 @@ func (e *computeScoringEngine) retryExclusions(ctx context.Context, now time.Tim
 	e.mu.Unlock()
 	for _, id := range pending {
 		if e.scorers.Excluded(id) {
-			if err := e.deps.Store.ExcludeScorer(ctx, id, now); err != nil {
+			wctx, cancel := context.WithTimeout(ctx, computeScoreLookupTimeout)
+			err := e.deps.Store.ExcludeScorer(wctx, id, now)
+			cancel()
+			if err != nil {
 				continue
 			}
 		}
@@ -1013,7 +1120,9 @@ func (e *computeScoringEngine) pruneDurable(ctx context.Context, now time.Time) 
 		return
 	}
 	e.lastDurablePrune = now
-	if _, err := e.deps.Store.PruneStaleKeyStates(ctx, now.Add(-computeScoreDurableRetention)); err != nil {
+	pctx, cancel := context.WithTimeout(ctx, computeScoreCommitTimeout)
+	defer cancel()
+	if _, err := e.deps.Store.PruneStaleKeyStates(pctx, now.Add(-computeScoreDurableRetention)); err != nil {
 		e.s.log.Warn().Str("event", "compute_integrity_state_prune_failed").Msg("compute-integrity state prune failed")
 	}
 }
@@ -1025,17 +1134,16 @@ func (e *computeScoringEngine) knownSequenceCheck(ctx context.Context, tkey comp
 	now := e.s.now()
 	var candidates []computeintegrity.ScorerCandidate
 	for _, p := range e.s.pool.Snapshot() {
-		if !p.ComputeScoreV1 || !providerVerifiable(p) || p.ModelID != tkey.ModelID || p.WeightsManifestSHA256 != tkey.ManifestSHA256 {
+		if !p.ComputeScoreV1 || !providerVerifiable(p) || p.ModelID != tkey.ModelID || p.ModelHash != tkey.ManifestSHA256 {
 			continue
 		}
 		op := e.operatorKey(ctx, p.ProviderID, now)
 		if op == "" {
 			continue
 		}
-		candidates = append(candidates, computeintegrity.ScorerCandidate{
-			ProviderID: p.ProviderID, AssignedID: p.AssignedID, ModelID: p.ModelID, ManifestSHA256: p.WeightsManifestSHA256,
-			OperatorKey: op, Capable: true, Ready: true,
-		})
+		c := scoringCandidate(p)
+		c.OperatorKey = op
+		candidates = append(candidates, c)
 	}
 	e.mu.Lock()
 	e.rng.Shuffle(len(candidates), func(i, j int) { candidates[i], candidates[j] = candidates[j], candidates[i] })
@@ -1058,11 +1166,15 @@ func (e *computeScoringEngine) knownSequenceCheck(ctx context.Context, tkey comp
 			break
 		}
 	}
+	if found {
+		e.scorerBusy[scorer.ProviderID] = true
+	}
 	e.mu.Unlock()
 	if !found {
 		return
 	}
-	result, answered := e.score(ctx, scorer, tkey.ManifestSHA256, seq.Body, seq.OutputText, seq.ReasoningText, false)
+	defer e.releaseScorers([]computeintegrity.ScorerCandidate{scorer})
+	result, answered := e.score(ctx, scorer, seq.Body, seq.OutputText, seq.ReasoningText, false)
 	m := computeintegrity.Measurement{ScoredTokens: result.ScoredTokens, Top1Matches: result.Top1Matches, SumLogprob: result.SumLogprob}
 	// A known sequence was scored usably by two scorers before, so anything
 	// but a usable answer counts toward the FR-24 silence back-off, exactly
@@ -1097,7 +1209,9 @@ func (e *computeScoringEngine) publishGauges(ctx context.Context) {
 	} {
 		e.deps.Metrics.SetComputeIntegrityKeys(string(state), counts[state])
 	}
-	if n, err := e.deps.Holds.CountHeldComputeIntegrityHolds(ctx); err == nil {
+	cctx, cancel := context.WithTimeout(ctx, computeScoreLookupTimeout)
+	defer cancel()
+	if n, err := e.deps.Holds.CountHeldComputeIntegrityHolds(cctx); err == nil {
 		e.deps.Metrics.SetComputeIntegrityHeldHolds(n)
 	}
 }

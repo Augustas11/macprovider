@@ -33,8 +33,9 @@ func TestComputeIntegrityProbeUsesOrdinaryPaidDispatch(t *testing.T) {
 		return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: make(chan error, 1)}
 	})
 	body := []byte(`{"model":"model-a","messages":[{"role":"system","content":"You are a helpful assistant."},{"role":"user","content":"Why is the sky blue?"}],"max_tokens":96,"temperature":0,"top_p":1,"stream":false}`)
-	for i := 0; i < 2; i++ {
-		got, err := h.server.DispatchComputeIntegrityProbe(h.ctx, "session-1", body, 96)
+	const probes = 12
+	for i := 0; i < probes; i++ {
+		got, err := h.server.DispatchComputeIntegrityProbe(h.ctx, "p1", "session-1", body, 96)
 		if err != nil {
 			t.Fatalf("probe %d: %v", i, err)
 		}
@@ -44,16 +45,22 @@ func TestComputeIntegrityProbeUsesOrdinaryPaidDispatch(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(scopes) != 2 {
-		t.Fatalf("expected two dispatches, got %d", len(scopes))
+	if len(scopes) != probes {
+		t.Fatalf("expected %d dispatches, got %d", probes, len(scopes))
 	}
 	for _, scope := range scopes {
 		if !strings.HasPrefix(scope, "acct_sha256:") {
 			t.Fatalf("account scope must look like any authenticated buyer's, got %q", scope)
 		}
 	}
-	if scopes[0] == scopes[1] {
-		t.Fatal("each verification request must use a fresh account scope")
+	// Verification accounts recur per provider like returning buyers', so
+	// a scope never seen before is not a verification signal.
+	distinct := map[string]bool{}
+	for _, scope := range scopes {
+		distinct[scope] = true
+	}
+	if len(distinct) > 4 || len(distinct) == probes {
+		t.Fatalf("verification scopes must recur from a small per-provider set, got %d distinct of %d", len(distinct), probes)
 	}
 
 	db, err := sql.Open("sqlite", h.dbPath)
@@ -65,14 +72,14 @@ func TestComputeIntegrityProbeUsesOrdinaryPaidDispatch(t *testing.T) {
 	if err := db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(provider_credits), 0) FROM ledger_request_credits WHERE provider_id = 'p1'`).Scan(&credits, &providerCredits); err != nil {
 		t.Fatal(err)
 	}
-	if credits != 2 || providerCredits <= 0 {
+	if credits != probes || providerCredits <= 0 {
 		t.Fatalf("provider must be credited for both requests: rows=%d provider_credits=%d", credits, providerCredits)
 	}
 	var cipAccounts int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM request_log WHERE account_id LIKE ?`, buyer.ComputeIntegrityAccountPrefix+"%").Scan(&cipAccounts); err != nil {
 		t.Fatal(err)
 	}
-	if cipAccounts != 2 {
+	if cipAccounts != probes {
 		t.Fatalf("verification requests must log under reserved accounts, got %d", cipAccounts)
 	}
 }
@@ -85,7 +92,7 @@ func TestComputeIntegrityProbeRejectsUnknownProvider(t *testing.T) {
 	ctx, cancel := context.WithTimeout(h.ctx, 5*time.Second)
 	defer cancel()
 	body := []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}],"max_tokens":96,"stream":false}`)
-	if _, err := h.server.DispatchComputeIntegrityProbe(ctx, "no-such-session", body, 96); err == nil {
+	if _, err := h.server.DispatchComputeIntegrityProbe(ctx, "p1", "no-such-session", body, 96); err == nil {
 		t.Fatal("a probe pinned to a session that is not connected must fail")
 	}
 }

@@ -4822,7 +4822,10 @@
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringFirstRequestUsesJitteredCadence",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringHourlyBoundSurvivesRestart",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringOperatorLookupFailureBacksOff",
-        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringDueTimeSurvivesReconnect"
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringDueTimeSurvivesReconnect",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringHourlyBoundFailsClosedWithoutHistory",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringDispatchDelaySpansSweep",
+        "phase4-coordinator/internal/buyer/compute_integrity_suspension_internal_test.go:TestComputeIntegrityProbeAccountsRecurAndRetire"
       ],
       "journeys": [],
       "evidence": [],
@@ -4850,7 +4853,9 @@
         "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testComputeScoreRequestRunsExecutorAndReturnsAggregate",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestParseComputeScoreResultIsStrict",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoreResultFromWrongSessionIsIgnored",
-        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestSelectScorersIsOperatorWeighted"
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestSelectScorersIsOperatorWeighted",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringBusyScorerIsNotDoubleBooked",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringCohortUsesVerifiedModelHash"
       ],
       "journeys": [],
       "evidence": [],
@@ -4901,7 +4906,9 @@
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringHonestProvidersPassAndCheaterFailsWithHold",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringPersistedFailureSuspendsOnStart",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringPartialEscalationIsInconclusive",
-        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringTransitionIsAtomic"
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringTransitionIsAtomic",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringRestoredStateSurvivesRestartBeforeReconnect",
+        "phase4-coordinator/internal/billing/compute_integrity_holds_test.go:TestComputeIntegrityRecoveryCloseNeedsAnOpenRecoveryHold"
       ],
       "journeys": [],
       "evidence": [],
@@ -12448,7 +12455,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1644",
-        "rationale": "SPEC-022 v0.4.4 R-16 compute-integrity earnings hold. Implemented in the #1644 campaign PR. Pending: provider-side hardware validation, the CLI release carrying compute_score_v1, the coordinator deploy, and live probes across the catalog."
+        "rationale": "SPEC-022 v0.4.8 R-16 compute-integrity earnings hold (billing contract 7, R-16.8). Implemented in the #1644 campaign PR. Pending: provider-side hardware validation, the CLI release carrying compute_score_v1, the coordinator deploy, and live probes across the catalog."
       }
     },
     {

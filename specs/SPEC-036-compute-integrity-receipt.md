@@ -2089,8 +2089,11 @@ unusable private corpus also stops scheduling (logged), never serving.
 
 A **verification key** is `(provider_id, model_id)`. A provider session serves
 one model at a time, so the key names exactly the traffic a decision affects.
-Each measurement also records the provider's reported
-`weights_manifest_sha256` (the catalog **manifest hash**).
+The **cohort hash** of a session is its coordinator-verified catalog model
+hash. A provider cannot choose it, so a provider-reported value never decides
+which scorers a provider is compared with. A session's reported
+`weights_manifest_sha256` is only what a scoring job to that session carries
+(FR-21).
 
 The **operator key** of a provider is `github:<github_user_id>` when the
 provider is claimed in `provider_ownership`, and `provider:<provider_id>`
@@ -2098,7 +2101,7 @@ otherwise. Two providers have different operators when their operator keys
 differ.
 
 A provider is **verifiable** for its served model when its model hash is
-catalog-verified, it reports a manifest hash, and it is routing-eligible for
+catalog-verified, it reports a weights manifest hash, and it is routing-eligible for
 that model. A
 provider is a **scorer candidate** when it advertised
 `tier2_capabilities.compute_score_v1: true` in its current session.
@@ -2122,12 +2125,15 @@ traffic by headers, frame fields, sampling parameters, or timing class:
   `{96, 160, 256}`. An escalation request (FR-23 `suspect` or `recovering`)
   uses the greedy profile while the sampled tolerance key of its model is
   cold (FR-22), because the cold sampled prior is too loose to decide.
-- Each request uses a fresh pseudonymous account id, so its SPEC-015
-  `account_scope` is unique to the request and never constant across
-  probes. It carries a random auto-prefix conversation-cache key in the shape
-  the gateway produces and the same effective `max_output_tokens` header the
-  gateway sets.
-- Dispatch is immediate, like buyer traffic. No sleep, delay class or
+- Each request uses a pseudonymous account drawn at random from a small set
+  kept per verified provider: up to 4 accounts, each retired after a random
+  lifetime of 3 to 10 days and replaced. Its SPEC-015 `account_scope`
+  therefore recurs on that provider the way a returning buyer's does, and is
+  neither unique to every request nor constant across probes. It carries a
+  random auto-prefix conversation-cache key in the shape the gateway produces
+  and the same effective `max_output_tokens` header the gateway sets.
+- A due request is dispatched after a delay drawn uniformly from one sweep
+  interval, so its arrival carries no scheduler tick phase. No delay class or
   distinct request-id prefix marks it.
 
 Money:
@@ -2156,7 +2162,8 @@ Rate bounds:
 - At most `max_per_hour` (default 240) verification requests start in any
   rolling hour coordinator-wide. The bound survives a restart: the
   coordinator reloads the start times of the `cip_` requests of the last hour
-  from its request log at start.
+  from its request log at start. If that history cannot be read, the bound
+  fails closed and the whole budget counts as spent for one hour.
 - A key whose operator identity cannot be resolved waits for its next cadence
   slot; a failed lookup is cached for one minute.
 - A verification request is sent only when an eligible scorer exists for the
@@ -2175,8 +2182,8 @@ Output capture: the coordinator keeps the response content (and any separate
 reasoning text) in memory only for scoring, then discards it. It MUST NOT
 persist or log prompts, outputs, or scorer token data. A response that is not
 a complete `stop` or `length` completion, exceeds the FR-21 32 KiB output
-bound, or arrives after the verified session changed model, manifest hash or
-session is `inconclusive:dispatch`.
+bound, or arrives after the verified session changed model, cohort hash,
+reported manifest or session is `inconclusive:dispatch`.
 
 ### FR-21 Teacher-forced scoring job (SPEC-036-R021)
 
@@ -2185,14 +2192,19 @@ operators uniformly at random, then one provider of each, among providers
 that
 
 1. are scorer candidates (FR-19),
-2. serve the same `model_id` and report the same manifest hash as the verified
-   provider,
+2. serve the same `model_id` with the same cohort hash (FR-19) as the
+   verified provider,
 3. have a different operator key from the verified provider,
 4. are not in `suspect`, `failed` or `recovering` for that model, and are not
    scorer-excluded (FR-24),
-5. are connected and in a ready or busy state.
+5. are connected and in a ready or busy state, and
+6. have no other scoring job outstanding: a provider runs one job at a time,
+   so the coordinator reserves a scorer for each job until it ends. A key
+   whose missing scorers are only reserved stays due and is retried next
+   sweep, rather than being measured with fewer scorers.
 
-Old providers never advertise the capability and are never chosen.
+Old providers never advertise the capability and are never chosen. A job to
+a scorer carries that scorer's own reported `weights_manifest_sha256`.
 
 Wire. The coordinator sends `compute_score_request_v1` over the scorer's
 WebSocket session:
@@ -2260,7 +2272,7 @@ Per measurement: `top1_rate = top1_matches / scored_tokens` and
 
 Sampling class: `greedy` when the request's temperature is 0, otherwise
 `sampled`. Distributions are kept per **tolerance key**
-`(model_id, manifest hash, sampling class)`.
+`(model_id, cohort hash, sampling class)`.
 
 Honest-pair distribution. Each tolerance key keeps a rolling window of the
 last 256 accepted measurements. A measurement is accepted into the window when
@@ -2345,7 +2357,9 @@ tick retries.
 States persist across coordinator restarts. A coordinator that cannot load
 them does not start, and it loads them even with the kill switch off, so a
 failed key stays out of routing. A reconnecting provider resumes its stored
-state for the model.
+state for the model. A state restored at start counts as seen at start, so
+it is kept in memory until its provider has been away for 7 days, exactly
+as without a restart.
 
 ### FR-24 Scorer integrity (SPEC-036-R024)
 
@@ -2393,8 +2407,9 @@ Consequences of `failed`:
   are unaffected. The provider stays connected, so it can recover; the
   pool-check `buyer_serving` session-liveness signal is unchanged, and the
   provider learns its state from the status surface below.
-- Its unsettled earnings for that model inside the affected window are held
-  under SPEC-022 R-16. Nothing is burned. A hold has no expiry and is released
+- Its unsettled earnings inside the affected window are held under SPEC-022
+  R-16, whatever model string the buyer requested, because a credit records
+  the requested model, which may be an alias of the served one. Nothing is burned. A hold has no expiry and is released
   only by FR-23 recovery (recovery hold) or by an operator (any hold).
 
 Visibility:
@@ -2705,7 +2720,7 @@ Before SPEC-036 can move toward LOCK:
 2. A scoring job round-trips `compute_score_request_v1` /
    `compute_score_result_v1`, enforces the FR-21 bounds, and never selects a
    scorer without the capability, of the same operator, or with a different
-   manifest hash.
+   cohort hash.
 3. The tolerance model rejects a substituted model and accepts honest
    cross-chip pairs, both cold (prior) and warm (learned band).
 4. The FR-23 machine reaches `failed` only with two scorer operators, suspends

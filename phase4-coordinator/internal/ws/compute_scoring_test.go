@@ -198,6 +198,8 @@ const scoringModel = "model-ci"
 
 var scoringManifest = strings.Repeat("d", 64)
 
+var scoringModelHash = strings.Repeat("e", 64)
+
 func (h *scoringHarness) now() time.Time { return time.Unix(0, h.clock.Load()).UTC() }
 
 func (h *scoringHarness) advance(d time.Duration) { h.clock.Add(int64(d)) }
@@ -212,7 +214,7 @@ func newScoringHarness(t *testing.T, providers map[string]string, cheaters map[s
 	for id := range providers {
 		p := &pool.Provider{
 			ProviderID: id, AssignedID: "as-" + id, ModelID: scoringModel,
-			WeightsManifestSHA256: scoringManifest, State: pool.StateReady,
+			ModelHash: scoringModelHash, WeightsManifestSHA256: scoringManifest, State: pool.StateReady,
 			SlotsFree: 4, SlotsTotal: 4, MaxContextTokens: 8192, ComputeScoreV1: true,
 			HashStatus: pool.HashStatusVerified,
 		}
@@ -266,6 +268,7 @@ func newScoringHarness(t *testing.T, providers map[string]string, cheaters map[s
 	if err != nil {
 		t.Fatal(err)
 	}
+	h.engine.dispatchDelay = func() time.Duration { return 0 }
 	return h
 }
 
@@ -847,7 +850,7 @@ func TestComputeScoringShortAnswersCountTowardBackoff(t *testing.T) {
 	h := newScoringHarness(t, map[string]string{"v": "github:1", "a": "github:2", "b": "github:3"}, nil)
 	ctx := context.Background()
 	cand := func(id string) computeintegrity.ScorerCandidate {
-		return computeintegrity.ScorerCandidate{ProviderID: id, AssignedID: "as-" + id, ModelID: scoringModel, ManifestSHA256: scoringManifest}
+		return computeintegrity.ScorerCandidate{ProviderID: id, AssignedID: "as-" + id, ModelID: scoringModel, ManifestSHA256: scoringModelHash, WireManifestSHA256: scoringManifest}
 	}
 	verified := cand("v")
 	body := []byte(`{"model":"model-ci"}`)
@@ -886,7 +889,7 @@ func TestComputeScoringShortAnswersCountTowardBackoff(t *testing.T) {
 func TestComputeScoringKnownChecksCountTowardBackoff(t *testing.T) {
 	h := newScoringHarness(t, map[string]string{"a": "github:1"}, nil)
 	ctx := context.Background()
-	tkey := computeintegrity.ToleranceKey{ModelID: scoringModel, ManifestSHA256: scoringManifest, Class: computeintegrity.SamplingGreedy}
+	tkey := computeintegrity.ToleranceKey{ModelID: scoringModel, ManifestSHA256: scoringModelHash, Class: computeintegrity.SamplingGreedy}
 	good := computeintegrity.Measurement{ScoredTokens: 100, Top1Matches: 98, SumLogprob: -18}
 	h.engine.known.Offer(tkey, computeintegrity.KnownSequence{
 		Body: []byte(`{"model":"model-ci"}`), OutputText: "HONEST output",
@@ -895,7 +898,7 @@ func TestComputeScoringKnownChecksCountTowardBackoff(t *testing.T) {
 	}, good, good, h.now())
 	h.short.Store("a", true)
 	for i := 0; i < 8; i++ {
-		h.engine.knownSequenceCheck(ctx, computeintegrity.ToleranceKey{ModelID: scoringModel, ManifestSHA256: scoringManifest})
+		h.engine.knownSequenceCheck(ctx, computeintegrity.ToleranceKey{ModelID: scoringModel, ManifestSHA256: scoringModelHash})
 	}
 	if h.engine.scorers.Available("a", h.now()) {
 		t.Fatal("short known-check answers must count toward the silence back-off")
@@ -923,5 +926,124 @@ func TestComputeScoringOperatorLookupFailureBacksOff(t *testing.T) {
 	}
 	if h.dispatched.Load() != 0 {
 		t.Fatal("no verification request without an operator identity")
+	}
+}
+
+// FR-21: a provider runs one scoring job at a time, so a scorer busy with
+// one job is not chosen for another. A key whose only scorers are busy stays
+// due and is retried once they are free, instead of measuring with fewer.
+func TestComputeScoringBusyScorerIsNotDoubleBooked(t *testing.T) {
+	h := newScoringHarness(t, map[string]string{"a": "github:1", "b": "github:2"}, nil)
+	h.round(2 * time.Hour) // schedules first requests
+	h.engine.mu.Lock()
+	h.engine.scorerBusy["a"] = true
+	h.engine.scorerBusy["b"] = true
+	h.engine.mu.Unlock()
+	h.round(2 * time.Hour) // both due, every scorer busy
+	if n := h.dispatched.Load(); n != 0 {
+		t.Fatalf("dispatched %d verification requests with every scorer busy", n)
+	}
+	h.engine.mu.Lock()
+	for key, due := range h.engine.nextDue {
+		if due.After(h.now()) {
+			t.Errorf("%v rescheduled to %v; it must stay due while its scorer is busy", key, due)
+		}
+	}
+	delete(h.engine.scorerBusy, "a")
+	delete(h.engine.scorerBusy, "b")
+	h.engine.mu.Unlock()
+	h.round(time.Second)
+	if h.dispatched.Load() == 0 {
+		t.Fatal("a due key must be verified once its scorer is free")
+	}
+	h.engine.mu.Lock()
+	busy := len(h.engine.scorerBusy)
+	h.engine.mu.Unlock()
+	if busy != 0 {
+		t.Fatalf("scorer reservations leaked: %d", busy)
+	}
+}
+
+// FR-21: scorer cohorts are keyed by the coordinator-verified catalog model
+// hash, not the provider-reported manifest, so reporting a different
+// manifest does not take a provider out of its cohort. The job to a scorer
+// carries that scorer's own manifest.
+func TestComputeScoringCohortUsesVerifiedModelHash(t *testing.T) {
+	liar := scoringCandidate(pool.Provider{ProviderID: "liar", AssignedID: "as-liar", ModelID: scoringModel, ModelHash: scoringModelHash, WeightsManifestSHA256: strings.Repeat("a", 64), ComputeScoreV1: true})
+	liar.OperatorKey = "github:1"
+	honest := scoringCandidate(pool.Provider{ProviderID: "honest", AssignedID: "as-honest", ModelID: scoringModel, ModelHash: scoringModelHash, WeightsManifestSHA256: scoringManifest, ComputeScoreV1: true})
+	honest.OperatorKey = "github:2"
+	got := computeintegrity.SelectScorers(rand.New(rand.NewSource(1)), liar, []computeintegrity.ScorerCandidate{honest}, 1, nil)
+	if len(got) != 1 || got[0].ProviderID != "honest" || got[0].WireManifestSHA256 != scoringManifest {
+		t.Fatalf("a different reported manifest must not leave the cohort: %+v", got)
+	}
+}
+
+// FR-20: if the verification history cannot be read at start, the hourly
+// bound fails closed for one hour.
+func TestComputeScoringHourlyBoundFailsClosedWithoutHistory(t *testing.T) {
+	h := newScoringHarness(t, map[string]string{"a": "github:1"}, nil)
+	if _, err := h.db.Exec(`CREATE TABLE request_log (unrelated TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	deps := h.engine.deps
+	deps.Config.MaxPerHour = 5
+	e, err := h.server.newComputeScoringEngine(context.Background(), deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.hourlyBudgetLocked(h.now().Add(59 * time.Minute)) {
+		t.Fatal("unreadable history must leave no hourly budget for one hour")
+	}
+	if !e.hourlyBudgetLocked(h.now().Add(time.Hour + time.Second)) {
+		t.Fatal("the budget must free one hour after start")
+	}
+}
+
+// FR-23: a key state restored at start survives until its provider has been
+// away for the retention period, so a provider that reconnects after a
+// coordinator restart resumes its state and affected window.
+func TestComputeScoringRestoredStateSurvivesRestartBeforeReconnect(t *testing.T) {
+	h := newScoringHarness(t, map[string]string{"a": "github:1", "b": "github:2"}, nil)
+	for i := 0; i < 20 && h.state("a") != computeintegrity.VerificationPassing; i++ {
+		h.round(2 * time.Hour)
+	}
+	if h.state("a") != computeintegrity.VerificationPassing {
+		t.Fatal("setup: expected passing")
+	}
+	e, err := h.server.newComputeScoringEngine(context.Background(), h.engine.deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.prune(map[string]struct{}{}, h.now().Add(time.Minute))
+	e.mu.Lock()
+	st := e.states[computeScoringKey{"a", scoringModel}]
+	e.mu.Unlock()
+	if st == nil || st.State != computeintegrity.VerificationPassing {
+		t.Fatalf("restored state pruned before its provider reconnected: %+v", st)
+	}
+}
+
+// FR-20: a due request is spread over one sweep interval, so its arrival
+// carries no sweep-tick phase.
+func TestComputeScoringDispatchDelaySpansSweep(t *testing.T) {
+	h := newScoringHarness(t, map[string]string{"a": "github:1"}, nil)
+	e, err := h.server.newComputeScoringEngine(context.Background(), h.engine.deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sweep := e.tickInterval()
+	var lo, hi time.Duration = sweep, 0
+	for i := 0; i < 2000; i++ {
+		d := e.dispatchDelay()
+		if d < 0 || d >= sweep {
+			t.Fatalf("delay %v outside [0, %v)", d, sweep)
+		}
+		lo, hi = min(lo, d), max(hi, d)
+	}
+	if lo > sweep/10 || hi < sweep*9/10 {
+		t.Fatalf("delays [%v, %v] do not span the sweep interval %v", lo, hi, sweep)
 	}
 }

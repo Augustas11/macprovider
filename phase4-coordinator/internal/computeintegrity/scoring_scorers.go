@@ -13,13 +13,20 @@ import (
 // ScorerCandidate is the subset of a connected provider session scorer
 // selection needs.
 type ScorerCandidate struct {
-	ProviderID     string
-	AssignedID     string
-	ModelID        string
+	ProviderID string
+	AssignedID string
+	ModelID    string
+	// ManifestSHA256 is the cohort identity: the coordinator-verified
+	// catalog model hash of the session, never a provider-reported value,
+	// so a provider cannot move itself out of its scorer cohort.
 	ManifestSHA256 string
-	OperatorKey    string
-	Capable        bool // advertised tier2_capabilities.compute_score_v1
-	Ready          bool // connected and ready or busy
+	// WireManifestSHA256 is the session's own reported weights manifest.
+	// A scoring job to this scorer carries it; the scorer checks it against
+	// the model it has loaded.
+	WireManifestSHA256 string
+	OperatorKey        string
+	Capable            bool // advertised tier2_capabilities.compute_score_v1
+	Ready              bool // connected and ready or busy
 }
 
 // SelectScorers picks up to n scorers for a verified provider: distinct

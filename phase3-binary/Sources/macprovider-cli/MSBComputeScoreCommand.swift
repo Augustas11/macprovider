@@ -121,35 +121,56 @@ struct MSBComputeScoreCommand: AsyncParsableCommand {
             let outcome = try await runtime.labComputeScore(parsed, scoredText: item.outputText)
             scored.append(MSBComputeScoreLab.ScoredItem(id: item.id, samplingClass: item.samplingClass, outcome: outcome))
         }
-        var maxDrift: Double?
+        var underLoad: MSBComputeScoreLab.UnderLoad?
         if concurrentLoad > 0, let first = outputs.items.first {
             // Background generations share the runtime while every item is
             // scored again; the drift is the largest |mean_logprob| change.
             let loadBody = try ChatCompletionRequest.parse(data: Data(first.body.utf8))
             let stop = MSBComputeScoreLab.StopFlag()
+            let tally = MSBComputeScoreLab.LoadTally()
             let load = Task {
                 await withTaskGroup(of: Void.self) { group in
                     for _ in 0..<concurrentLoad {
                         group.addTask {
                             while !stop.isSet {
-                                _ = try? await runtime.complete(loadBody)
+                                do {
+                                    _ = try await runtime.complete(loadBody)
+                                    tally.record(ok: true, whileScoring: !stop.isSet)
+                                } catch {
+                                    tally.record(ok: false, whileScoring: !stop.isSet)
+                                }
                             }
                         }
                     }
                 }
             }
-            var drift = 0.0
+            var drift: Double?
+            var statuses: [String: Int] = [:]
             for (index, item) in outputs.items.enumerated() {
                 let parsed = try ChatCompletionRequest.parse(data: Data(item.body.utf8))
-                let outcome = try await runtime.labComputeScore(parsed, scoredText: item.outputText)
-                let again = MSBComputeScoreLab.ScoredItem(id: item.id, samplingClass: item.samplingClass, outcome: outcome)
+                let again: MSBComputeScoreLab.ScoredItem
+                do {
+                    let outcome = try await runtime.labComputeScore(parsed, scoredText: item.outputText)
+                    again = MSBComputeScoreLab.ScoredItem(id: item.id, samplingClass: item.samplingClass, outcome: outcome)
+                } catch {
+                    statuses["error", default: 0] += 1
+                    continue
+                }
+                statuses[again.status, default: 0] += 1
                 if let a = again.meanLogprob, let b = scored[index].meanLogprob {
-                    drift = max(drift, abs(a - b))
+                    drift = max(drift ?? 0, abs(a - b))
                 }
             }
             stop.set()
             await load.value
-            maxDrift = drift
+            let counts = tally.counts
+            underLoad = MSBComputeScoreLab.UnderLoad(
+                generationsOK: counts.ok,
+                generationsFailed: counts.failed,
+                generationsOKWhileScoring: counts.okWhileScoring,
+                scoreStatuses: statuses,
+                maxMeanLogprobDrift: drift
+            )
         }
         return MSBComputeScoreLab.Report(
             schemaVersion: 1,
@@ -162,7 +183,7 @@ struct MSBComputeScoreCommand: AsyncParsableCommand {
             thresholds: MSBComputeScoreLab.Thresholds(),
             summary: MSBComputeScoreLab.summarize(scored),
             concurrentLoad: concurrentLoad,
-            maxMeanLogprobDriftUnderLoad: maxDrift,
+            underLoad: underLoad,
             items: scored,
             timestamp: ISO8601DateFormatter().string(from: Date())
         )
@@ -324,7 +345,10 @@ enum MSBComputeScoreLab {
         let thresholds: Thresholds
         let summary: [String: ClassSummary]
         let concurrentLoad: Int
-        let maxMeanLogprobDriftUnderLoad: Double?
+        /// Nil when `--concurrent-load` is 0. The second pass passes only
+        /// when generations succeeded while it ran, every item scored `ok`,
+        /// and the drift is set and small.
+        let underLoad: UnderLoad?
         let items: [ScoredItem]
         let timestamp: String
 
@@ -339,9 +363,47 @@ enum MSBComputeScoreLab {
             case thresholds
             case summary
             case concurrentLoad = "concurrent_load"
-            case maxMeanLogprobDriftUnderLoad = "max_mean_logprob_drift_under_load"
+            case underLoad = "under_load"
             case items
             case timestamp
+        }
+    }
+
+    struct UnderLoad: Codable, Sendable {
+        let generationsOK: Int
+        let generationsFailed: Int
+        let generationsOKWhileScoring: Int
+        let scoreStatuses: [String: Int]
+        let maxMeanLogprobDrift: Double?
+
+        enum CodingKeys: String, CodingKey {
+            case generationsOK = "generations_ok"
+            case generationsFailed = "generations_failed"
+            case generationsOKWhileScoring = "generations_ok_while_scoring"
+            case scoreStatuses = "score_statuses"
+            case maxMeanLogprobDrift = "max_mean_logprob_drift"
+        }
+    }
+
+    final class LoadTally: @unchecked Sendable {
+        private let lock = NSLock()
+        private var ok = 0
+        private var failed = 0
+        private var okWhileScoring = 0
+
+        func record(ok succeeded: Bool, whileScoring: Bool) {
+            lock.withLock {
+                if succeeded {
+                    ok += 1
+                    if whileScoring { okWhileScoring += 1 }
+                } else {
+                    failed += 1
+                }
+            }
+        }
+
+        var counts: (ok: Int, failed: Int, okWhileScoring: Int) {
+            lock.withLock { (ok, failed, okWhileScoring) }
         }
     }
 

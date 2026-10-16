@@ -140,7 +140,8 @@ DELETE FROM compute_integrity_scoring_keys
 // RecentVerificationRequests returns the start times of FR-20 verification
 // requests (reserved cip_ accounts in the coordinator request log) since
 // since, newest first and at most limit of them, so the rolling hourly bound
-// survives a restart. A database without the request log returns none.
+// survives a restart. A database without the request log returns none; an
+// unreadable start time is an error.
 func (s *ScoringStore) RecentVerificationRequests(ctx context.Context, since time.Time, limit int) ([]time.Time, error) {
 	if s == nil || s.db == nil {
 		return nil, errScoringStoreClosed
@@ -168,7 +169,9 @@ SELECT ts_utc FROM request_log WHERE account_id LIKE 'cip\_%' ESCAPE '\' AND ts_
 		}
 		t, err := time.Parse(time.RFC3339Nano, ts)
 		if err != nil {
-			continue
+			// An unreadable start cannot be placed in the window; the caller
+			// fails the hourly bound closed.
+			return nil, fmt.Errorf("verification request time %w", err)
 		}
 		out = append(out, t)
 	}
