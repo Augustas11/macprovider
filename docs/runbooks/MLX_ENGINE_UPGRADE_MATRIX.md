@@ -34,7 +34,7 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | untagged (`glm53/tuple-0324`) | `bf6ed3390c7dde6d7931cf19a03e31dfa62359e0` | `3.32.3` (`3b339ad6…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | untagged (`glm53/tuple-0324`) | `dcbf933369adc56d5152925f5a2d54e7f1f746be` | `3.32.3` (`3b339ad6…`) |
 | `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.9` | `29d3b93375cc56cd2649b40e4310a8bc445e9874` | `0.32.3` (`19601207…`) |
 | `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.4` | `2f512e3997349c8648f5d7c5113eb2c825aa242d` | `v0.32.4` (`36969c09…`) |
 
@@ -50,8 +50,10 @@ the mlx-swift-lm fork keeps upstream's tools version.
 Every rebase replays these stacks and drops any patch upstream now carries
 (record which, and why it is equivalent).
 
-mlx-swift-lm (`3.32.3..bf6ed339`, campaign branch `glm53/tuple-0324`: the
-`3.32.3-macprovider.9` stack plus GLM-5-Next; the release step tags it):
+mlx-swift-lm (`3.32.3..dcbf9333`, campaign branch `glm53/tuple-0324`: the
+`3.32.3-macprovider.10` stack (`b4077dcb`, `3.32.3-macprovider.9` plus the
+upstream #622 rotating-cache exact-rewind fix and `KVCache.maxTrimCount`) plus
+GLM-5-Next; the release step tags it):
 
 | Patch | Commits | What it carries |
 | --- | --- | --- |
@@ -65,8 +67,9 @@ mlx-swift-lm (`3.32.3..bf6ed339`, campaign branch `glm53/tuple-0324`: the
 | Compile-state ownership | `7be182c` (upstream #631, `-x`), `905170f` | The fused GDN projection and every array a verify trace reads are declared compile state. |
 | Core pin | `37f0d7c`, `5203b73`, `45ffd95`, `b07d662`, `dbe8bcb` | Resolves the mlx-swift fork. |
 | Tests | `8941054`, `72c4ab0` | Prepared fused-GDN compiled-verify fixture and in-place reload regression. |
-| GLM-5-Next (epic #2029) | `7e82ab2` .. `b177f9e` | `GLM5Next.swift`, `GLM5NextDecodeKernels.swift`, `GLM5NextAttentionCache.swift` (latent cache with exact `trim`, `GLM5NextLatentCache` / `GLM5NextBatchedLatentCache` / `GLM5NextLatentCacheBatch` for batched rows), the per-channel gated delta update, the two-input `SwitchGLU` activation, model registration, `00d8019` core pin. Batched rows equal serial bit for bit up to 8 flattened tokens per forward. |
-| GLM-5-Next MTP-1 (epic #2029) | `e93d6dd`, `bf6ed33` | In-place verification with a one-token rewind (`mtpCacheCheckpointIndexKey` runs every column as a one-token decode step; sparse layers trim exactly, KDA restores its checkpoint; `SpeculativeCacheRewindModel` depth 1), the pre-final-norm hidden state and shared latent for the head (`validLatent`), and the parameterless `GLM5NextMTPDraftModel` (`GLM5NextMTP.swift`, MTP-1 drafter, block size 2, packed advance) with its registration. |
+| Exact prefix rewinds (upstream #622) | `b4077dc` | `RotatingKVCache` exact prefix rewinds and `KVCache.maxTrimCount` (`canTrimPromptCache(_:numTokens:)` gates per layer). |
+| GLM-5-Next (epic #2029) | `414f315` .. `15d9c57` | `GLM5Next.swift`, `GLM5NextDecodeKernels.swift`, `GLM5NextAttentionCache.swift` (latent cache with exact `trim`, `GLM5NextLatentCache` / `GLM5NextBatchedLatentCache` / `GLM5NextLatentCacheBatch` for batched rows), the per-channel gated delta update, the two-input `SwitchGLU` activation, model registration, `00d8019` core pin. Batched rows equal serial bit for bit up to 8 flattened tokens per forward. |
+| GLM-5-Next MTP-1 (epic #2029) | `b9ecf9b`, `6c837df`, `dcbf933` | In-place verification with a one-token rewind (`mtpCacheCheckpointIndexKey` runs every column as a one-token decode step; sparse layers trim exactly, KDA restores its checkpoint; `SpeculativeCacheRewindModel` depth 1; `maxTrimCount` reports the latent cache's exact rewind depth for #622's per-layer gate), the pre-final-norm hidden state and shared latent for the head (`validLatent`), and the parameterless `GLM5NextMTPDraftModel` (`GLM5NextMTP.swift`, MTP-1 drafter, block size 2, packed advance) with its registration. |
 
 `784f021` (Swift 6.1 tools version) is reverted by `e81dd7c`; drop both on the
 next rebase.
@@ -370,7 +373,7 @@ Measure TTFT, decode tok/s, peak RSS, Metal memory, energy/thermal state, and co
 - **RED:** any correctness, ownership, rollback, accounting, tool parsing, cold-cache ABI, artifact-parity, or unexplained performance-budget failure. Revert the pin candidate.
 - **BLOCKED:** required upstream release/package/toolchain condition is absent. Keep production pins unchanged.
 
-Current campaign tuple (2026-10-17, epic #2029, pending its release tag): fork `mlx-swift-lm` `bf6ed339…` (untagged, upstream `3.32.3`), fork `mlx-swift 0.32.3-macprovider.9` (`29d3b933…`, upstream `0.32.3`), and fork MLX core `v0.32.4-macprovider.4` (`2f512e39…`, upstream `v0.32.4`). Protected baseline (2026-10-16, #2028): fork `mlx-swift-lm 3.32.3-macprovider.9` (`dbe8bcb3…`, upstream `3.32.3`), fork `mlx-swift 0.32.3-macprovider.8` (`745f5e48…`, upstream `0.32.3`), and fork MLX core `v0.32.2-macprovider.5` (`49d94e9f…`, upstream `v0.32.2`), built on Xcode 26.6 / Swift 6.3.3 / macOS SDK 26.5; `swift-transformers` and `swift-jinja` exactly as pinned in `phase3-binary/Package.resolved`. Previous baseline (2026-09-04): `mlx-swift-lm 3.31.4`, `mlx-swift 0.31.4`, `swift-transformers 1.3.4`, `swift-jinja 2.4.2` on Xcode 16.4 / Swift 6.1.
+Current campaign tuple (2026-10-17, epic #2029, pending its release tag): fork `mlx-swift-lm` `dcbf9333…` (untagged, on `3.32.3-macprovider.10`, upstream `3.32.3`), fork `mlx-swift 0.32.3-macprovider.9` (`29d3b933…`, upstream `0.32.3`), and fork MLX core `v0.32.4-macprovider.4` (`2f512e39…`, upstream `v0.32.4`). Protected baseline (2026-10-16, #2028): fork `mlx-swift-lm 3.32.3-macprovider.9` (`dbe8bcb3…`, upstream `3.32.3`), fork `mlx-swift 0.32.3-macprovider.8` (`745f5e48…`, upstream `0.32.3`), and fork MLX core `v0.32.2-macprovider.5` (`49d94e9f…`, upstream `v0.32.2`), built on Xcode 26.6 / Swift 6.3.3 / macOS SDK 26.5; `swift-transformers` and `swift-jinja` exactly as pinned in `phase3-binary/Package.resolved`. Previous baseline (2026-09-04): `mlx-swift-lm 3.31.4`, `mlx-swift 0.31.4`, `swift-transformers 1.3.4`, `swift-jinja 2.4.2` on Xcode 16.4 / Swift 6.1.
 
 `swift-transformers` was moved `1.0.0 → 1.3.3` by Dependabot #1336 without the
 #966 token-exact gate, then to `1.3.4` under that gate (2026-09-04). The gate is

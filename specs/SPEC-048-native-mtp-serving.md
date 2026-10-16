@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.37
+**Version:** 0.1.38
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.37",
+  "version": "0.1.38",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -394,7 +394,7 @@ rejects the whole sidecar. R014 item 10 makes this a release gate.
 
 The observer MUST inspect every `.safetensors` file that the R003-authorized
 mlx-swift-lm loader can consume. At the R003 mlx-swift-lm revision
-(`bf6ed339…`; `safetensorWeightURLs` is unchanged from `3.32.3-macprovider.6`)
+(`dcbf9333…`; `safetensorWeightURLs` is unchanged from `3.32.3-macprovider.6`)
 the loader takes the files named by
 `model.safetensors.index.json`, which may sit in subdirectories, else the
 top-level conventional names, plus files the model declares as additional
@@ -464,7 +464,7 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | **PENDING — filled by the campaign release step** (candidate on branch `glm53/tuple-0324`) | `bf6ed3390c7dde6d7931cf19a03e31dfa62359e0` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | **PENDING — filled by the campaign release step** (candidate on branch `glm53/tuple-0324`) | `dcbf933369adc56d5152925f5a2d54e7f1f746be` | fork `3.32.3-macprovider.10` (`b4077dcb28336b388f3d09be2a091c12f8e179aa`) on `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.9` | `29d3b93375cc56cd2649b40e4310a8bc445e9874` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.4` | `2f512e3997349c8648f5d7c5113eb2c825aa242d` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 
@@ -524,7 +524,7 @@ Authorized surface:
 - mlx-swift fork: the core submodule moved to the MLX core fork, and the
   compiled-function erase documented for the per-thread cache. No API change.
 - mlx-swift-lm fork, GLM-5-Next (0.1.34, epic #2029; batched rows 0.1.36;
-  MTP-1 target and drafter 0.1.37):
+  MTP-1 target and drafter 0.1.37; #622 trim gating 0.1.38):
   the `glm5_next` / `glm5_next_text` model (`GLM5Next.swift`,
   `GLM5NextWeights` sanitizer), its `GLM5NextAttentionCache` (MLA latent plus
   pooled indexer keys, with exact `trim` of up to `maxTrim` tokens), the
@@ -547,7 +547,10 @@ Authorized surface:
   (`GLM5NextLatentCache.validLatent`); and `GLM5NextMTPDraftModel`
   (`GLM5NextMTP.swift`, parameterless, block size 2, greedy only, one
   `GLM5NextAttentionCache` of `maxTrim` 1, packed advance over right-padded
-  rows) with `GLM5NextMTPRegistration`. The provider's `glm5_next_mtp_v1`
+  rows) with `GLM5NextMTPRegistration`. From 0.1.38 the latent cache reports
+  its exact rewind depth as `maxTrimCount`, so the upstream #622 per-layer
+  gate (`canTrimPromptCache(_:numTokens:)`) never asks it for an inexact
+  trim. The provider's `glm5_next_mtp_v1`
   serving surface (next-N state transactions over KDA and `pagedMLA` state in
   the paged backend, and the native-MTP capability gate) is not part of this
   row; it joins only through a later revision.
@@ -575,9 +578,11 @@ Review record for the #2028 tuple (2026-10-16; mlx-swift-lm
 `3.32.3-macprovider.9` / mlx-swift `0.32.3-macprovider.8` / MLX core
 `v0.32.2-macprovider.5`): the stream-propagation fix with a three-lane freeze
 audit at 0 Critical, 0 High, 0 Medium (`audits/2026-10-16-2028-gptoss-decode/`).
-The campaign mlx-swift-lm revision `bf6ed339…` descends from that tuple's
-`dbe8bcb3…` and adds only the GLM-5-Next files and model and drafter
-registration.
+The campaign mlx-swift-lm revision `dcbf9333…` sits on
+`3.32.3-macprovider.10` (`b4077dcb…`): that tuple's `dbe8bcb3…`, the MLX
+core v0.32.4 pin (`da234b2`), and the upstream #622 fix (exact prefix rewinds
+in `RotatingKVCache`, `KVCache.maxTrimCount` gating each layer's rewind). Above
+that it adds only the GLM-5-Next files and model and drafter registration.
 
 Review record for the earlier tuple (2026-10-10, `@Augustas11`;
 mlx-swift-lm `3.32.3-macprovider.6` / mlx-swift `0.32.3-macprovider.2` / MLX
@@ -1620,6 +1625,13 @@ the text-only path without image inputs; that does not admit multimodal buyer
 requests.
 
 ## 9. Changelog and history
+
+- **0.1.38 (2026-10-17)** — MTP-3 campaign tuple moves to mlx-swift-lm
+  `dcbf9333…` (untagged; the tag stays a PENDING row), rebased onto the fork's
+  `3.32.3-macprovider.10` line (`b4077dcb…`), which adds the upstream #622
+  rotating-cache exact-rewind fix and the per-layer `KVCache.maxTrimCount`
+  gate; the GLM-5-Next latent cache reports its exact rewind depth through
+  it. mlx-swift `29d3b933…` and MLX core `2f512e39…` are unchanged.
 
 - **0.1.37 (2026-10-17)** — MTP-3 campaign tuple moves to mlx-swift-lm
   `bf6ed339…` (still untagged; the tag stays a PENDING row); mlx-swift and

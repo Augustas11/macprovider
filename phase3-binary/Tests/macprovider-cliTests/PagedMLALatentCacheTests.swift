@@ -172,6 +172,7 @@ final class PagedMLALatentCacheTests: XCTestCase {
         default: XCTFail("validLatent presence differs \(label)")
         }
         assertStatesEqual(paged.state, oracle.state, label)
+        XCTAssertEqual(paged.maxTrimCount, oracle.maxTrimCount, "maxTrimCount \(label)")
     }
 
     @discardableResult

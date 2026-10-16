@@ -204,6 +204,19 @@ final class PagedMLALatentCache: GLM5NextLatentCache, CustomDebugStringConvertib
 
     var isTrimmable: Bool { true }
 
+    /// The largest `M` such that every trim of up to `M` tokens is exact, as
+    /// `GLM5NextAttentionCache` reports it (upstream #622 per-layer gate).
+    var maxTrimCount: Int {
+        guard indexed else { return offset }
+        var m = 0
+        while m < offset {
+            let partial = (offset - m - 1) % kpool
+            guard partial == 0 || rawCount - (m + 1) >= partial else { break }
+            m += 1
+        }
+        return m
+    }
+
     func isTrimmable(after positions: Int) -> Bool {
         !indexed || positions <= maxTrim
     }
