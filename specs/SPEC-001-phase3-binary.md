@@ -1,6 +1,14 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.36 (2026-10-15, native image capability extension)
+**Version:** 1.9.37 (2026-10-16, provider-local stateless APIs)
+
+**Change log v1.9.37 (2026-10-16, Related: #2018):**
+Adds SPEC-001-R009/R010 for the provider-local stateless Responses subset and
+bounded exact tokenizer/template utilities. These reuse the loaded runtime and
+capacity ownership. Local OS clients are trusted without bearer authentication;
+nonlocal browser-origin requests are rejected. SPEC-045 buyer-proxy authentication and
+public gateway authentication remain separate. Hardware and released-provider
+acceptance remain pending; contract fixtures do not establish live acceptance.
 
 **Change log v1.9.36 (2026-10-15, Related: #2016):**
 Adds `SPEC-001-R008`: exact loaded native-image implementation identity on
@@ -2128,6 +2136,77 @@ data: [DONE]
 
 ```
 Do not change the HTTP status code mid-stream.
+
+### 6.0.1. Provider-local stateless APIs
+
+**SPEC-001-R009 — Local Responses and client authorization.** The provider's
+loopback HTTP listener MUST support `POST /v1/responses` as a stateless adapter
+onto its existing Chat Completions inference path. It MUST remain bound to
+loopback. Its authorization policy is trust in local OS processes that can
+connect to the listener: it has no bearer authentication, does not validate or
+forward a supplied bearer token, and MUST NOT claim per-user isolation. This is
+not SPEC-045's authenticated local buyer proxy. Browser fetch metadata identifying cross-site access and nonlocal or malformed
+Origin values (including `null`) MUST be rejected before dispatch. The existing
+local-origin policy permits HTTP(S) origins with host `localhost`, `127.0.0.1`
+or `::1`, regardless of port; it is not per-origin authentication. The listener
+MUST NOT grant permissive CORS access.
+
+Requests MUST supply the full input. `store:false` (also the effective default)
+MUST never create retained response state. The supported text, function-tool,
+structured-output and streaming subset MUST translate using gateway-compatible
+Responses semantics. Unsupported parameters and media MUST fail explicitly
+before generation. Nonempty `previous_response_id`, retained responses,
+conversation state, background execution and automatic truncation are unsupported.
+Retrieval, deletion and cancellation by response ID are out of scope and MUST
+NOT create or consult a response store. Generated response IDs identify only the
+current reply. Function calls and results in full-input history MUST retain
+pairing; structured output MUST use the existing validator and model capability
+checks rather than claim support from parsing a request alone.
+
+Streaming MUST preserve ordered Responses event types, function-call argument
+deltas, output indices and monotonic sequence numbers. A late inference or
+transport failure MUST terminate as failure, never `response.completed`;
+length-limited output MUST be incomplete. Client disconnect MUST cancel the
+underlying runtime request through the existing request handle. Local Responses,
+local Chat Completions and network requests MUST share existing runtime admission,
+capacity, cancellation and cleanup ownership; no independent engine or weight
+copy is permitted. Model/status discovery MUST advertise the exact supported
+local endpoints and model-dependent utilities without implying remote endpoint
+or runtime capabilities. Shared Go/Swift contract fixtures MUST cover accepted
+inputs, unsupported controls, function tools, structured output, streaming and
+terminal errors.
+
+**SPEC-001-R010 — Exact loaded-model token utilities.** `POST /v1/tokenize`,
+`POST /v1/detokenize` and `POST /v1/apply-template` MUST use the tokenizer/template of the
+selected loaded model. Each operation MUST bind lookup, execution and result to
+one loaded-model generation across warm swaps; it MUST never resolve a tokenizer
+and later use a replacement generation's template or identity. These operations
+MUST use existing runtime ownership without loading another engine or weights.
+Runtimes lacking exact tokenizer or template access MUST reject the utility
+explicitly; byte estimates, guessed templates and remote completion probes MUST
+NOT substitute for exact access. Model discovery MUST indicate this distinction.
+
+Requests MUST require `model` plus exactly `text` (tokenize), `tokens`
+(detokenize), or `messages` (apply-template); duplicate or unsupported keys MUST
+fail. The body limit is 65,536 bytes, input/output token limit 16,384, output
+text limit 262,144 UTF-8 bytes, and template message limit 1–128. Bounds MUST
+be checked before unbounded work or response buffering. Tokenize adds no special
+tokens; detokenize preserves special tokens. Apply-template returns exact
+template token IDs and their decoded text. Successful results identify `model`
+and `generation` (and `model_hash` when available). `GET /v1/capabilities` MUST
+advertise these bounds, endpoints, local-client authorization policy, stateless
+Responses scope and utility availability for the current loaded model. Detokenize MUST reject malformed, negative and out-of-range
+token IDs. Apply-template MUST validate the supported message shape and reject
+unsupported media or controls. Errors MUST be explicit OpenAI-shaped errors, and
+utility work MUST remain bounded under simultaneous generation and warm swaps.
+Unsupported exact access is HTTP 501 `token_utilities_unsupported`; unsupported
+templates are HTTP 422 `chat_template_unsupported`; invalid utility requests are
+HTTP 400 `invalid_token_utility_request`; bound violations are HTTP 413
+`token_utility_limit_exceeded`.
+No utility result is billing, settlement, trust-tier or hardware acceptance
+evidence. Studio hardware acceptance and approved released-provider acceptance
+remain pending until independently recorded; fixtures alone MUST NOT promote
+these requirements to live conformance.
 
 ### 6.1. GET /v1/models
 

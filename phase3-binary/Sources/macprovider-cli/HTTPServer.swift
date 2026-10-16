@@ -406,6 +406,7 @@ struct HTTPServer: Sendable {
 final class ClientDisconnectState: @unchecked Sendable {
     private let lock = NSLock()
     private var disconnected = false
+    private var cancellation: (@Sendable () -> Void)?
 
     var isDisconnected: Bool {
         lock.lock()
@@ -413,10 +414,21 @@ final class ClientDisconnectState: @unchecked Sendable {
         return disconnected
     }
 
+    func onDisconnect(_ cancellation: @escaping @Sendable () -> Void) {
+        lock.lock()
+        let alreadyDisconnected = disconnected
+        if !alreadyDisconnected { self.cancellation = cancellation }
+        lock.unlock()
+        if alreadyDisconnected { cancellation() }
+    }
+
     func markDisconnected() {
         lock.lock()
         disconnected = true
+        let cancel = cancellation
+        cancellation = nil
         lock.unlock()
+        cancel?()
     }
 }
 
@@ -666,6 +678,18 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         }
 
         switch (requestHead.method, path(from: requestHead.uri)) {
+        case (.GET, "/v1/capabilities"):
+            handleLocalCapabilities(context: context)
+        case (_, "/v1/capabilities"):
+            writeError(context: context, status: .methodNotAllowed, message: "method not allowed", code: "invalid_request")
+        case (.POST, "/v1/tokenize"):
+            handleTokenUtility(context: context, operation: .tokenize)
+        case (.POST, "/v1/detokenize"):
+            handleTokenUtility(context: context, operation: .detokenize)
+        case (.POST, "/v1/apply-template"):
+            handleTokenUtility(context: context, operation: .applyTemplate)
+        case (_, "/v1/tokenize"), (_, "/v1/detokenize"), (_, "/v1/apply-template"):
+            writeError(context: context, status: .methodNotAllowed, message: "method not allowed", code: "invalid_request")
         case (.GET, "/v1/models"):
             handleModelList(context: context)
         case (_, "/v1/models"):
@@ -678,12 +702,90 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             handleStatus(context: context)
         case (_, "/v1/status"):
             writeError(context: context, status: .methodNotAllowed, message: "method not allowed", code: "invalid_request")
+        case (.POST, "/v1/responses"):
+            handleChatCompletions(context: context, responses: true)
+        case (_, "/v1/responses"):
+            writeError(context: context, status: .methodNotAllowed, message: "method not allowed", code: "invalid_request")
         case (.POST, "/v1/chat/completions"):
             handleChatCompletions(context: context)
         case (_, "/v1/chat/completions"):
             writeError(context: context, status: .methodNotAllowed, message: "method not allowed", code: "invalid_request")
         default:
             writeError(context: context, status: .notFound, message: "not found", code: "invalid_request")
+        }
+    }
+
+    private func handleLocalCapabilities(context: ChannelHandlerContext) {
+        let writer = ResponseWriter(context: context)
+        let runtime = modelRuntime
+        Task {
+            let snapshot = await runtime.currentSnapshot()
+            let utilities = await runtime.localTokenUtilityCapabilities()
+            writer.writeJSON(status: .ok, body: [
+                "object": "local_capabilities",
+                "model": snapshot.modelID as Any? ?? NSNull(),
+                "authorization": ["policy": "loopback_local_process", "bearer_auth": false],
+                "responses": [
+                    "endpoint": "/v1/responses", "stateless": true, "store": false,
+                    "stream": true, "retained_responses": false,
+                    "model_features": "validated_by_loaded_runtime",
+                ],
+                "token_utilities": [
+                    "supported": !utilities.operations.isEmpty,
+                    "model": utilities.model as Any? ?? NSNull(),
+                    "model_hash": utilities.modelHash as Any? ?? NSNull(),
+                    "generation": utilities.generation as Any? ?? NSNull(),
+                    "endpoints": utilities.operations.map { "/v1/" + $0 },
+                    "max_input_bytes": LocalTokenUtilityRequest.bodyByteLimit,
+                    "max_tokens": LocalTokenUtilityRequest.tokenLimit,
+                    "max_output_bytes": LocalTokenUtilityRequest.outputByteLimit, "max_messages": 128,
+                ],
+            ])
+        }
+    }
+
+    private func handleTokenUtility(context: ChannelHandlerContext, operation: LocalTokenUtilityOperation) {
+        do {
+            try Self.validateBrowserRequestHeaders(requestHead?.headers ?? HTTPHeaders())
+            try Self.validateJSONContentType(requestHead?.headers.first(name: "Content-Type"))
+            try Self.validateContentEncoding(requestHead?.headers["Content-Encoding"] ?? [])
+            if requestHead?.headers.first(name: "X-MacProvider-Privacy-Class") != nil {
+                throw APIError(status: 400, message: PrivacyClassConstants.downgradeRejected, code: PrivacyClassConstants.downgradeRejected)
+            }
+            var body = bodyBuffer ?? context.channel.allocator.buffer(capacity: 0)
+            let request = try LocalTokenUtilityRequest.parse(data: Data(body.readBytes(length: body.readableBytes) ?? []), operation: operation)
+            let writer = ResponseWriter(context: context, retryAfterSeconds: queueWaitRetryAfterSeconds)
+            let runtime = modelRuntime
+            let status = providerStatus
+            let prewarmer = idlePrewarmer
+            let disconnect = ClientDisconnectState()
+            inflightDisconnects.append(disconnect)
+            let task = Task {
+                guard let startedAt = await status.beginRequestIfAccepting() else {
+                    writer.writeAPIError(APIError(status: 503, message: "Provider is paused or draining", type: "server_error", code: "provider_paused"))
+                    return
+                }
+                do {
+                    await prewarmer?.cancelInflightPrewarm()
+                    let result = try await runtime.localTokenUtility(request, shouldCancel: { disconnect.isDisconnected })
+                    let encoded = try JSONEncoder().encode(result)
+                    let object = try JSONSerialization.jsonObject(with: encoded)
+                    await status.finishRequest(startedAt: startedAt, completion: nil, failed: false)
+                    if disconnect.isDisconnected { writer.close() } else { writer.writeJSON(status: .ok, body: object) }
+                } catch {
+                    await status.finishRequest(startedAt: startedAt, completion: nil, failed: !(error is CancellationError))
+                    if disconnect.isDisconnected {
+                        writer.close()
+                    } else {
+                        writer.writeAPIError(error as? APIError ?? APIError(status: 500, message: "Token utility failed", type: "server_error", code: "internal_error"))
+                    }
+                }
+            }
+            disconnect.onDisconnect { task.cancel() }
+        } catch let error as APIError {
+            writeAPIError(context: context, error)
+        } catch {
+            writeError(context: context, status: .badRequest, message: "Invalid token utility request", code: "invalid_request")
         }
     }
 
@@ -795,7 +897,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         }
     }
 
-    private func handleChatCompletions(context: ChannelHandlerContext) {
+    private func handleChatCompletions(context: ChannelHandlerContext, responses: Bool = false) {
         // SPEC-049-R009. Privacy-class work arrives only on the coordinator
         // WebSocket. Reject the header before the body is parsed, and do not
         // echo the header value.
@@ -825,8 +927,26 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         }
 
         var body = bodyBuffer ?? context.channel.allocator.buffer(capacity: 0)
-        let data = Data(body.readBytes(length: body.readableBytes) ?? [])
-        let writer = ResponseWriter(context: context, retryAfterSeconds: queueWaitRetryAfterSeconds)
+        var data = Data(body.readBytes(length: body.readableBytes) ?? [])
+        var responsesAdapter: LocalResponsesAdapter?
+        if responses {
+            do {
+                try Self.validateContentEncoding(requestHead?.headers["Content-Encoding"] ?? [])
+                let adapter = try LocalResponsesAdapter(body: data)
+                data = adapter.chatRequestBody
+                responsesAdapter = adapter
+            } catch let error as LocalResponsesError {
+                writeRawJSON(context: context, status: .badRequest, data: error.errorBody)
+                return
+            } catch let error as APIError {
+                writeAPIError(context: context, error)
+                return
+            } catch {
+                writeError(context: context, status: .badRequest, message: "Invalid Responses request", code: "invalid_request")
+                return
+            }
+        }
+        let writer = ResponseWriter(context: context, retryAfterSeconds: queueWaitRetryAfterSeconds, responsesAdapter: responsesAdapter)
         let modelRuntime = modelRuntime
         let warmSwapEnabled = warmSwapEnabled
         let receiptBuilder = receiptBuilder
@@ -2812,13 +2932,17 @@ private struct ResponseWriter: @unchecked Sendable {
     /// `writeAPIError` to the queue-pressure codes only, so every direct-HTTP
     /// JSON error path carries the bound without each call site remembering.
     let retryAfterSeconds: Int
+    // Mutable adapter state is confined to the channel event loop.
+    let responsesAdapter: LocalResponsesAdapter?
 
     init(
         context: ChannelHandlerContext,
-        retryAfterSeconds: Int = RouterHandler.queueWaitRetryAfterSeconds(nil)
+        retryAfterSeconds: Int = RouterHandler.queueWaitRetryAfterSeconds(nil),
+        responsesAdapter: LocalResponsesAdapter? = nil
     ) {
         self.context = context
         self.retryAfterSeconds = retryAfterSeconds
+        self.responsesAdapter = responsesAdapter
     }
 
     func writeJSON(
@@ -2830,7 +2954,18 @@ private struct ResponseWriter: @unchecked Sendable {
         do {
             let data = try encodeJSONObject(body)
             context.eventLoop.execute {
-                writeRawJSON(context: context, status: status, data: data, extraHeaders: extraHeaders, completion: completion)
+                do {
+                    let output = try status == .ok ? (responsesAdapter?.translateResponse(data) ?? data) : data
+                    writeRawJSON(context: context, status: status, data: output, extraHeaders: extraHeaders, completion: completion)
+                } catch {
+                    let failure = APIError(status: 500, message: "Invalid inference response", type: "server_error", code: "internal_error")
+                    if let encoded = try? encodeJSONObject(failure.envelope) {
+                        writeRawJSON(context: context, status: .internalServerError, data: encoded)
+                    } else {
+                        context.close(promise: nil)
+                    }
+                    completion?(false)
+                }
             }
         } catch {
             context.eventLoop.execute {
@@ -2859,6 +2994,9 @@ private struct ResponseWriter: @unchecked Sendable {
     func startSSE(extraHeaders: [(String, String)] = []) {
         context.eventLoop.execute {
             writeRawSSEHead(context: context, extraHeaders: extraHeaders)
+            for frame in responsesAdapter?.startStream() ?? [] {
+                writeRawSSEPayload(context: context, payload: frame)
+            }
         }
     }
 
@@ -2877,6 +3015,9 @@ private struct ResponseWriter: @unchecked Sendable {
     func writeSSEDone(trailers: [(String, String)] = [], completion: (@Sendable (Bool) -> Void)? = nil) {
         writeSSEData("[DONE]")
         context.eventLoop.execute {
+            for frame in responsesAdapter?.finishStream() ?? [] {
+                writeRawSSEPayload(context: context, payload: frame)
+            }
             var headers: HTTPHeaders?
             if !trailers.isEmpty {
                 var trailerHeaders = HTTPHeaders()
@@ -2904,7 +3045,13 @@ private struct ResponseWriter: @unchecked Sendable {
 
     private func writeSSEData(_ payload: String) {
         context.eventLoop.execute {
-            writeRawSSEData(context: context, payload: payload)
+            if let responsesAdapter {
+                for frame in responsesAdapter.consumeStream("data: \(payload)\n\n") {
+                    writeRawSSEPayload(context: context, payload: frame)
+                }
+            } else {
+                writeRawSSEData(context: context, payload: payload)
+            }
         }
     }
 
