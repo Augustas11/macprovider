@@ -44,6 +44,37 @@ def digest(path):
     return hashlib.sha256(open(path, "rb").read()).hexdigest()
 
 
+def compute_scoring_events():
+    """What cmd/coordinator/compute_scoring.go logs at start for the
+    compute_integrity.scoring of the files on disk (overlay over base).
+    svc/ci_corpus_invalid makes the corpus unusable."""
+    import yaml
+
+    def scoring(path):
+        try:
+            doc = yaml.safe_load(open(path)) if os.path.exists(path) else None
+            return ((doc or {}).get("compute_integrity") or {}).get("scoring") or {}
+        except (yaml.YAMLError, AttributeError):
+            return {}
+
+    s = dict(scoring(cfg), **scoring(ov))
+    if s.get("enabled", True) is False:
+        return [{"event": "compute_integrity_scoring_started", "enabled": False}]
+    if not s.get("corpus_path"):
+        return [{"event": "compute_integrity_private_corpus_missing"},
+                {"event": "compute_integrity_scoring_started", "enabled": False}]
+    try:
+        if os.path.exists(os.path.join(svc, "ci_corpus_invalid")):
+            raise ValueError
+        corpus = json.load(open(s["corpus_path"]))
+        loaded = {"event": "compute_integrity_corpus_loaded", "prompts": len(corpus["prompts"]),
+                  "version": corpus["version"]}
+    except (OSError, ValueError, KeyError):
+        return [{"event": "compute_integrity_corpus_invalid"},
+                {"event": "compute_integrity_scoring_started", "enabled": False}]
+    return [loaded, {"event": "compute_integrity_scoring_started", "enabled": True}]
+
+
 args = sys.argv[1:]
 if args == ["_init"]:
     mkproc(4242)
@@ -66,7 +97,7 @@ elif args[:1] == ["restart"]:
     open(n, "w").write(str(count))
     open(os.path.join(svc, "boot.txt"), "w").write(json.dumps({
         "config_sha256": digest(cfg), "overlay_sha256": digest(ov), "source": "boot",
-        "event": "coordinator_config_applied"}) + "\n")
+        "event": "coordinator_config_applied"}) + "\n" + "".join(json.dumps(e) + "\n" for e in compute_scoring_events()))
     open(os.path.join(svc, "running.yaml"), "w").write(open(cfg).read())
     m = re.search(r'^\s*latest_binary_version:\s*"?([0-9.]+)"?\s*$', open(cfg).read(), re.M)
     h = os.path.join(svc, "healthz.json")

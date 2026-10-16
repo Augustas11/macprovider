@@ -30,6 +30,19 @@ every one of them. --recommend PREV --revoke CURRENT_TARGET together is the
 revoked-build rollback (SPEC-020-R007): the target after the edit is never
 revoked.
 Nothing secret is printed.
+
+Also used by scripts/ops/pearl-runtime.sh PEARL_RUNTIME_TASK=compute-integrity-enable
+(SPEC-036 FR-20 private corpus):
+  python3 - ci-facts [layout flags] --ci-corpus PATH            read-only facts
+  python3 - apply-compute-integrity [layout flags] --ci-corpus PATH
+            --ci-staged STAGED --ci-sha256 SHA256
+Under the same locks it checks the staged corpus (sha256, the coordinator's
+corpus rules), installs it root-owned, coordinator group, mode 0640, adds
+compute_integrity.scoring.corpus_path to the overlay (backup first), validates
+with the running coordinator, restarts once and requires the new invocation to
+log the corpus loaded and scheduling enabled; on failure it restores the
+overlay and corpus and restarts again. Locally, `validate-corpus PATH` applies
+the corpus rules to a file and prints only its size, prompt count and sha256.
 """
 import argparse
 import copy
@@ -440,9 +453,341 @@ def apply(args):
         print(json.dumps(result, sort_keys=True))
 
 
+# --- compute-integrity private corpus (SPEC-036 FR-20) -----------------------
+#
+# Used by scripts/ops/pearl-runtime.sh PEARL_RUNTIME_TASK=compute-integrity-enable
+# and scripts/compute-integrity-corpus.py. Nothing here prints corpus content.
+
+# The coordinator's ParseCorpus (internal/computeintegrity/scoring_corpus.go):
+# a version and a non-empty prompt list, each prompt a non-blank system and
+# user message of at most 2 KiB of UTF-8. This copy is stricter (exact keys,
+# no duplicate keys, no lone surrogates), so what it accepts the coordinator
+# accepts; internal/computeintegrity/testdata/corpus_parse_cases.json pins both.
+CORPUS_MAX_MESSAGE_BYTES = 2 * 1024
+# Transport bound for the ops tooling, not a coordinator rule.
+CORPUS_MAX_BYTES = 4 * 1024 * 1024
+CI_EVENTS = ("compute_integrity_corpus_loaded", "compute_integrity_corpus_invalid",
+             "compute_integrity_private_corpus_missing", "compute_integrity_scoring_started")
+
+
+def parse_corpus(raw):
+    """(version, prompt count) of a valid corpus document; Refused otherwise.
+    Reasons never quote the document."""
+    if len(raw) > CORPUS_MAX_BYTES:
+        raise Refused("corpus is larger than %d bytes" % CORPUS_MAX_BYTES)
+
+    def pairs(items):
+        keys = [k for k, _ in items]
+        if len(set(keys)) != len(keys):
+            raise Refused("corpus has a duplicate JSON key")
+        return dict(items)
+
+    try:
+        doc = json.loads(raw.decode("utf-8", errors="strict"), object_pairs_hook=pairs)
+    except (UnicodeDecodeError, ValueError):
+        raise Refused("corpus is not UTF-8 JSON")
+    if not isinstance(doc, dict) or set(doc) != {"version", "prompts"}:
+        raise Refused("corpus must be an object with exactly the keys version and prompts")
+    version, prompts = doc["version"], doc["prompts"]
+    if not isinstance(version, str) or not version.strip() or not isinstance(prompts, list) or not prompts:
+        raise Refused("corpus version and prompts are required")
+    for i, p in enumerate(prompts):
+        if not isinstance(p, dict) or set(p) != {"system", "user"}:
+            raise Refused("corpus prompt %d must have exactly the keys system and user" % i)
+        for msg in (p["system"], p["user"]):
+            if not isinstance(msg, str) or not msg.strip():
+                raise Refused("corpus prompt %d has an empty message" % i)
+            try:
+                size = len(msg.encode("utf-8", errors="strict"))
+            except UnicodeEncodeError:
+                raise Refused("corpus prompt %d is not UTF-8" % i)
+            if size > CORPUS_MAX_MESSAGE_BYTES:
+                raise Refused("corpus prompt %d has a message over %d bytes" % (i, CORPUS_MAX_MESSAGE_BYTES))
+    return version, len(prompts)
+
+
+def validate_corpus_file(path):
+    st = os.lstat(path)
+    if not os.path.isfile(path) or os.path.islink(path):
+        raise Refused("corpus is not a regular file")
+    if st.st_size > CORPUS_MAX_BYTES:
+        raise Refused("corpus is larger than %d bytes" % CORPUS_MAX_BYTES)
+    with open(path, "rb") as f:
+        raw = f.read(CORPUS_MAX_BYTES + 1)
+    _, count = parse_corpus(raw)
+    return {"prompts": count, "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+            "private": st.st_mode & 0o077 == 0}
+
+
+def load_effective(args):
+    import yaml
+
+    with open(args.config) as f:
+        base = yaml.safe_load(f) or {}
+    with open(args.overlay) as f:
+        overlay = yaml.safe_load(f) or {}
+    if not isinstance(base, dict) or not isinstance(overlay, dict):
+        raise Refused("coordinator.yaml and the overlay must be YAML mappings")
+    return base, overlay
+
+
+def ci_scoring(doc):
+    ci = doc.get("compute_integrity")
+    if ci is None:
+        return {}
+    if not isinstance(ci, dict) or not isinstance(ci.get("scoring", {}) or {}, dict):
+        raise Refused("compute_integrity must be a mapping with a scoring mapping")
+    return ci.get("scoring") or {}
+
+
+def invocation_events(unit, names):
+    """Events named in names that the current coordinator invocation logged."""
+    inv = subprocess.run(["systemctl", "show", "-p", "InvocationID", "--value", unit],
+                         capture_output=True, text=True, timeout=15).stdout.strip()
+    if not re.match(r"^[0-9a-f]{32}$", inv):
+        return []
+    proc = subprocess.run(["journalctl", "_SYSTEMD_INVOCATION_ID=" + inv, "--no-pager", "-o", "cat"],
+                          capture_output=True, text=True, timeout=60)
+    found = []
+    for line in proc.stdout.splitlines() if proc.returncode == 0 else []:
+        if not any(n in line for n in names):
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict) and event.get("event") in names:
+            found.append(event)
+    return found
+
+
+def ci_journal(unit):
+    """What the running coordinator logged about compute-integrity scoring."""
+    out = {"scoring_started": None, "scoring_enabled": None, "corpus_loaded_prompts": None,
+           "corpus_loaded_version": None, "corpus_invalid": False, "private_corpus_missing": False}
+    for e in invocation_events(unit, CI_EVENTS):
+        name = e.get("event")
+        if name == "compute_integrity_scoring_started":
+            out["scoring_started"] = True
+            out["scoring_enabled"] = e.get("enabled") is True
+        elif name == "compute_integrity_corpus_loaded":
+            prompts = e.get("prompts")
+            out["corpus_loaded_prompts"] = prompts if isinstance(prompts, int) else None
+            out["corpus_loaded_version"] = e.get("version") if isinstance(e.get("version"), str) else None
+        elif name == "compute_integrity_corpus_invalid":
+            out["corpus_invalid"] = True
+        elif name == "compute_integrity_private_corpus_missing":
+            out["private_corpus_missing"] = True
+    return out
+
+
+def file_sha256(path):
+    if not os.path.isfile(path) or os.path.islink(path):
+        return None
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
+def ci_facts(args):
+    base, overlay = load_effective(args)
+    b, o = ci_scoring(base), ci_scoring(overlay)
+    enabled = o.get("enabled", b.get("enabled", True))
+    j = ci_journal(args.unit)
+    facts = {
+        "effective_corpus_path": str(o.get("corpus_path", b.get("corpus_path", "")) or ""),
+        "overlay_corpus_path": str(o.get("corpus_path", "") or ""),
+        "overlay_sets_compute_integrity": "compute_integrity" in overlay,
+        "kill_switch": enabled is False,
+        "installed_sha256": file_sha256(args.ci_corpus),
+        # Never the corpus version: the journal check below compares it on Pearl.
+        "scoring_enabled": j["scoring_enabled"],
+        "corpus_loaded_prompts": j["corpus_loaded_prompts"],
+        "corpus_invalid": j["corpus_invalid"],
+        "private_corpus_missing": j["private_corpus_missing"],
+    }
+    print(json.dumps(facts, sort_keys=True))
+
+
+def ci_overlay_plan(text, overlay, corpus_path):
+    """New overlay text adding compute_integrity.scoring.corpus_path, or the
+    same text when it is already set. Nothing else in the overlay changes."""
+    import yaml
+
+    if "compute_integrity" in overlay:
+        if ci_scoring(overlay).get("corpus_path") == corpus_path:
+            return text
+        raise Refused("the overlay already sets compute_integrity; reconcile it first")
+    if text.strip() and not isinstance(yaml.safe_load(text), (dict, type(None))):
+        raise Refused("the overlay is not a YAML mapping")
+    if text.strip().startswith("{"):
+        raise Refused("the overlay is a flow mapping; refusing to append to it")
+    sep = "" if not text or text.endswith("\n") else "\n"
+    new = text + sep + "compute_integrity:\n  scoring:\n    corpus_path: %s\n" % corpus_path
+    want = dict(overlay)
+    want["compute_integrity"] = {"scoring": {"corpus_path": corpus_path}}
+    if (yaml.safe_load(new) or {}) != want:
+        raise Refused("the overlay edit did not produce exactly the intended YAML change")
+    return new
+
+
+def ci_loaded(j, prompts, version):
+    return bool(j["scoring_enabled"]) and not j["corpus_invalid"] and \
+        j["corpus_loaded_prompts"] == prompts and j["corpus_loaded_version"] == version
+
+
+def ci_live(args, prompts, version):
+    """The restarted coordinator loaded this corpus and scheduling is on."""
+    deadline = time.monotonic() + 60
+    while True:
+        j = ci_journal(args.unit)
+        if j["corpus_invalid"]:
+            raise Refused("the coordinator logged compute_integrity_corpus_invalid; scheduling stays off")
+        if j["scoring_started"]:
+            if ci_loaded(j, prompts, version):
+                return
+            raise Refused("the coordinator started scoring without this corpus (enabled=%s prompts=%s)"
+                          % (j["scoring_enabled"], j["corpus_loaded_prompts"]))
+        if time.monotonic() > deadline:
+            raise Refused("the coordinator did not log compute_integrity_scoring_started within 60 s")
+        time.sleep(1)
+
+
+def write_corpus(path, data, gid):
+    """Install the corpus root-owned (this process), group = the coordinator's
+    group, mode 0640: the coordinator runs as its own user and must read it."""
+    fd, tmp = tempfile.mkstemp(prefix=".compute-integrity-corpus-", dir=os.path.dirname(path))
+    try:
+        os.fchown(fd, os.geteuid(), gid)
+        os.fchmod(fd, 0o640)
+        os.write(fd, data)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    try:
+        install(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def read_staged(args):
+    """The corpus the ops entry point staged root-only next to the target."""
+    st = os.lstat(args.ci_staged)
+    if not os.path.isfile(args.ci_staged) or os.path.islink(args.ci_staged) or st.st_uid != os.geteuid() \
+            or st.st_mode & 0o077 or st.st_size > CORPUS_MAX_BYTES:
+        raise Refused("the staged corpus must be a private regular file owned by this user")
+    with open(args.ci_staged, "rb") as f:
+        raw = f.read(CORPUS_MAX_BYTES + 1)
+    if hashlib.sha256(raw).hexdigest() != args.ci_sha256:
+        raise Refused("the staged corpus differs from the validated local corpus")
+    version, prompts = parse_corpus(raw)
+    return raw, version, prompts
+
+
+def apply_compute_integrity(args):
+    dest = args.ci_corpus
+    if not re.match(r"^/[A-Za-z0-9._/-]+$", dest) or os.path.dirname(args.ci_staged) != os.path.dirname(dest):
+        raise Refused("the corpus path must be absolute and the staged copy must sit next to it")
+    try:
+        with guard(args):
+            raw, version, prompts = read_staged(args)
+            pid, binary, env, uid, gid = running(args)
+            base, overlay = load_effective(args)
+            if ci_scoring(overlay).get("enabled", ci_scoring(base).get("enabled", True)) is False:
+                raise Refused("compute_integrity.scoring.enabled is false (the kill switch); reconcile it first")
+            if os.path.lexists(dest) and (os.path.islink(dest) or not os.path.isfile(dest)):
+                raise Refused("%s exists and is not a regular file" % dest)
+            with open(args.overlay, "rb") as f:
+                original_overlay = f.read()
+            new_overlay = ci_overlay_plan(original_overlay.decode(), overlay, dest).encode()
+            original_corpus = None
+            if os.path.exists(dest):
+                with open(dest, "rb") as f:
+                    original_corpus = f.read()
+            result = {"changed": new_overlay != original_overlay or original_corpus != raw,
+                      "prompts": prompts, "corpus_path": dest}
+            if not result["changed"] and applied(args) and ci_loaded(ci_journal(args.unit), prompts, version):
+                # Disk holds the requested state and the running coordinator
+                # loaded exactly it. Otherwise a validated restart loads it.
+                print(json.dumps(result, sort_keys=True))
+                return
+            stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            tmp = None
+            if new_overlay != original_overlay:
+                os.makedirs(args.backup_root, mode=0o700, exist_ok=True)
+                backup = tempfile.mkdtemp(prefix="%s-compute-integrity-" % stamp, dir=args.backup_root)
+                os.chmod(backup, 0o700)
+                shutil.copy2(args.overlay, os.path.join(backup, os.path.basename(args.overlay)))
+                result["backup"] = backup
+                tmp = write_like(args.overlay, new_overlay, args.overlay)
+            try:
+                check = as_service([binary, "--validate-config", "--config", args.config,
+                                    "--config-overlay", tmp or args.overlay], env, uid, gid, 120)
+                if check.returncode != 0:
+                    raise Refused("the running coordinator binary rejects the edited overlay (--validate-config)")
+                write_corpus(dest, raw, gid)
+                test = shutil.which("test") or "/usr/bin/test"
+                if as_service([test, "-r", dest], env, uid, gid, 15).returncode != 0:
+                    raise Refused("the coordinator user cannot read %s" % dest)
+                if tmp:
+                    install(tmp, args.overlay)
+            except Exception:
+                restore_corpus(dest, raw, original_corpus, gid)
+                raise
+            finally:
+                if tmp and os.path.exists(tmp):
+                    os.unlink(tmp)
+            try:
+                restart(args, pid)
+                ci_live(args, prompts, version)
+            except Exception:
+                with open(args.overlay, "rb") as f:
+                    ours = f.read() == new_overlay
+                if ours:
+                    if new_overlay != original_overlay:
+                        install(write_like(args.overlay, original_overlay, args.overlay), args.overlay)
+                    restore_corpus(dest, raw, original_corpus, gid)
+                    subprocess.run(["systemctl", "restart", args.unit], timeout=120, capture_output=True)
+                    healthz(args.healthz)
+                    result["restored"] = True
+                raise
+            result["restarted"] = True
+            print(json.dumps(result, sort_keys=True))
+    finally:
+        if os.path.lexists(args.ci_staged):
+            os.unlink(args.ci_staged)
+
+
+def restore_corpus(dest, ours, original, gid):
+    """Put back the corpus file this run replaced, if it still holds ours."""
+    if not os.path.isfile(dest) or os.path.islink(dest):
+        return
+    with open(dest, "rb") as f:
+        if f.read() != ours:
+            return
+    if original is None:
+        os.unlink(dest)
+    elif original != ours:
+        write_corpus(dest, original, gid)
+
+
 def main(argv):
+    if argv[:1] == ["validate-corpus"]:
+        # Local, read-only: used by the ops entry point and the corpus generator.
+        if len(argv) != 2:
+            sys.stderr.write("usage: pearl-cli-config.py validate-corpus PATH\n")
+            sys.exit(2)
+        try:
+            print(json.dumps(validate_corpus_file(argv[1]), sort_keys=True))
+        except Refused as exc:
+            sys.stderr.write("pearl-cli-config: REFUSED: %s\n" % exc)
+            sys.exit(3)
+        except OSError as exc:
+            sys.stderr.write("pearl-cli-config: REFUSED: corpus unreadable (%s)\n" % type(exc).__name__)
+            sys.exit(3)
+        return
     p = argparse.ArgumentParser()
-    p.add_argument("cmd", choices=["apply"])
+    p.add_argument("cmd", choices=["apply", "ci-facts", "apply-compute-integrity"])
     p.add_argument("--config", required=True)
     p.add_argument("--overlay", required=True)
     p.add_argument("--unit", required=True)
@@ -456,9 +801,21 @@ def main(argv):
     p.add_argument("--privacy-setup", nargs=3, metavar=("DIR", "KEY", "KEY_SHA256"))
     p.add_argument("--recommend", nargs=2, metavar=("VERSION", "TARGET_ID"))
     p.add_argument("--revoke", nargs="+", metavar="ID")
+    p.add_argument("--ci-corpus", metavar="PATH")
+    p.add_argument("--ci-staged", metavar="PATH")
+    p.add_argument("--ci-sha256", metavar="SHA256")
     args = p.parse_args(argv)
     try:
-        apply(args)
+        if args.cmd == "apply":
+            apply(args)
+        elif not args.ci_corpus:
+            raise Refused("--ci-corpus is required")
+        elif args.cmd == "ci-facts":
+            ci_facts(args)
+        elif not args.ci_staged or not re.match(r"^[0-9a-f]{64}$", args.ci_sha256 or ""):
+            raise Refused("--ci-staged and --ci-sha256 are required")
+        else:
+            apply_compute_integrity(args)
     except Refused as exc:
         sys.stderr.write("pearl-cli-config: REFUSED: %s\n" % exc)
         sys.exit(3)

@@ -22,10 +22,20 @@ Files in STATE_DIR steer it:
   request_log.db          sqlite request_log the fake coordinator writes (when the file exists)
   mirror-latest.json      /releases/latest.json body of the release mirror (404 when absent)
   served                  number of completions served (written here)
+  operator_key            bearer the fake coordinator's /admin routes accept
+  retention_busy, retention_disabled   POST .../retention/run answers 409 with that code
+  retention_db            sqlite file whose settlement_evidence_retention_state row a
+                          run updates (one more lap, overdue = retention_overdue, now)
+  retention_overdue       last_lap_overdue_requests of the next run (default 0)
+  retention_no_report     a started run never publishes its report
+  retention_report.json   the last run's report (written here; ?report=last)
+  retention_posts         number of run requests that started a run (written here)
 """
+import datetime
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -53,7 +63,46 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def admin_ok(self):
+        if self.headers.get("Authorization") == "Bearer " + (read("operator_key") or "unset-key"):
+            return True
+        self.send(403, '{"error": {"code": "forbidden"}}')
+        return False
+
+    def retention_run(self):
+        for code in ("retention_busy", "retention_disabled"):
+            if read(code) is not None:
+                return self.send(409, json.dumps({"error": {"code": code, "message": "x"}}))
+        posts = int(read("retention_posts", "0")) + 1
+        open(os.path.join(state, "retention_posts"), "w").write(str(posts))
+        if read("retention_no_report") is not None:
+            return self.send(202, '{"status": "started"}')
+        now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+        overdue = int(read("retention_overdue", "0"))
+        laps = 1
+        db = read("retention_db")
+        if db:
+            # The sqlite3 CLI, like the test's own writes: a WAL file Python's
+            # module removes on close would make the gate's -readonly read fail.
+            laps = int(subprocess.run(
+                ["sqlite3", db, "UPDATE settlement_evidence_retention_state SET laps_completed = laps_completed + 1, "
+                 "last_lap_overdue_requests = %d, last_lap_eligible_requests = 900, last_lap_completed_at_utc = '%s' WHERE id = 1; "
+                 "SELECT laps_completed FROM settlement_evidence_retention_state WHERE id = 1;" % (overdue, now)],
+                capture_output=True, text=True, check=True).stdout.strip())
+        report = {"status": "deleted", "dry_run": False, "started_at_utc": now, "finished_at_utc": now,
+                  "deleted_requests": 42, "archives": 1, "stop_reason": "lap_complete",
+                  "backlog_drained": overdue == 0, "laps_completed": laps, "last_lap_overdue_requests": overdue,
+                  "last_lap_eligible_requests": 900, "last_lap_completed_at_utc": now,
+                  "archive_file": "/var/lib/macprovider/retention-archive/a.json.gz"}
+        open(os.path.join(state, "retention_report.json"), "w").write(json.dumps(report))
+        return self.send(202, '{"status": "started"}')
+
     def do_GET(self):
+        if self.path == "/admin/ledger/settlement-evidence-retention?report=last":
+            if not self.admin_ok():
+                return None
+            body = read("retention_report.json")
+            return self.send(200, body) if body else self.send(404, '{"error": {"code": "not_found"}}')
         if self.path == "/buyer/healthz":
             # The buyer listener's /healthz: no compatibility policy fields.
             return self.send(200, '{"status": "ok"}')
@@ -110,6 +159,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0"))
         self.rfile.read(length)
+        if self.path == "/admin/ledger/settlement-evidence-retention/run":
+            return self.retention_run() if self.admin_ok() else None
         if self.path != "/v1/chat/completions":
             return self.send(404, "{}")
         if self.headers.get("Authorization") != "Bearer test-buyer-token":

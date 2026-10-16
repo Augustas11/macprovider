@@ -214,6 +214,27 @@ lap cursor and writes nothing.
      "https://<coordinator-host>/admin/ledger/settlement-evidence-retention?report=last"
    ```
 
+   On Pearl, start it through the ops entry point instead. Expected
+   downtime: none, no restart.
+
+   ```bash
+   PEARL_RUNTIME_TASK=retention-run scripts/ops/pearl-runtime.sh status
+   MACPROVIDER_OPS_OWNER=<session-label> PEARL_RUNTIME_TASK=retention-run \
+     scripts/ops/pearl-runtime.sh next --run
+   ```
+
+   It holds the live-ops lock and calls the run route on Pearl's loopback
+   admin listener. The operator key is read on Pearl from the running
+   coordinator and never printed. It refuses in the ten minutes before the
+   03:00 UTC nightly run, and when the route answers `retention_busy`: the
+   nightly retention or ledger rollup is running. It waits for this run's
+   report, then prints `status`, `deleted_requests`, `backlog_drained`,
+   `last_lap_overdue_requests` and `stop_reason`, and records them for the
+   section 4 drain gate. The route runs retention only; the ledger rollup
+   runs after the nightly retention. A lap the on-demand run completes
+   updates the same state as a nightly lap, so it opens the drain gate the
+   same way.
+
 4. The run is done when it reports `status: deleted`, with
    `deleted_requests`, `delete_batches`, `tables.<table>.deleted_rows`,
    `archive_file`, `archive_sha256`, and `archive_bytes` set;
