@@ -61,10 +61,53 @@ class CoreRootError(Exception):
 
 
 def strip_comments_and_strings(text: str) -> str:
-    """Blank comments and string literals, keeping offsets and line numbers."""
-    text = re.sub(r"/\*.*?\*/", lambda m: re.sub(r"[^\n]", " ", m.group(0)), text, flags=re.S)
-    text = re.sub(r"//[^\n]*", lambda m: " " * len(m.group(0)), text)
-    return re.sub(r'"(?:\\.|[^"\\\n])*"', lambda m: '"' + " " * (len(m.group(0)) - 2) + '"', text)
+    """Blank comments and string/char literals, keeping offsets and line numbers.
+
+    One left-to-right lexer, so a ``//`` or ``/*`` inside a string literal is
+    not a comment and a quote inside a comment is not a string (#2028 audit
+    carry: the earlier regex passes stripped comments before strings).
+    """
+    out = list(text)
+    i, n = 0, len(text)
+
+    def blank(start: int, end: int) -> None:
+        for k in range(start, end):
+            if out[k] != "\n":
+                out[k] = " "
+
+    while i < n:
+        c = text[i]
+        if c == "/" and i + 1 < n and text[i + 1] == "/":
+            end = text.find("\n", i)
+            end = n if end < 0 else end
+            blank(i, end)
+            i = end
+        elif c == "/" and i + 1 < n and text[i + 1] == "*":
+            end = text.find("*/", i + 2)
+            end = n if end < 0 else end + 2
+            blank(i, end)
+            i = end
+        elif c == "R" and text.startswith('R"', i) and (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_")):
+            open_paren = text.find("(", i + 2)
+            delimiter = text[i + 2:open_paren] if open_paren >= 0 else None
+            if delimiter is None or len(delimiter) > 16 or any(ch in delimiter for ch in ' \\)\n"'):
+                i += 1
+                continue
+            close = text.find(")" + delimiter + '"', open_paren + 1)
+            end = n if close < 0 else close + len(delimiter) + 2
+            blank(i + 2, end - 1)
+            i = end
+        elif c == "'" and i > 0 and text[i - 1].isalnum():
+            i += 1  # digit separator (1'000) or a suffix, not a char literal
+        elif c in "\"'":
+            j = i + 1
+            while j < n and text[j] != c and text[j] != "\n":
+                j += 2 if text[j] == "\\" else 1
+            blank(i + 1, min(j, n))
+            i = min(j + 1, n)
+        else:
+            i += 1
+    return "".join(out)
 
 
 def matching(text: str, open_index: int, opener: str, closer: str) -> int:

@@ -62,6 +62,53 @@ final class MLXCoreStreamPropagationTests: XCTestCase {
             return XCTFail("SPEC048_MLX_CORE_REVISION not found in read_swiftpm_pins.py")
         }
         let reviewed = String(pins[range])
+        let swiftPattern = try NSRegularExpression(pattern: #"SPEC048_MLX_SWIFT_REVISION = "([0-9a-f]{40})""#)
+        guard let swiftMatch = swiftPattern.firstMatch(in: pins, range: NSRange(pins.startIndex..., in: pins)),
+              let swiftRange = Range(swiftMatch.range(at: 1), in: pins)
+        else {
+            return XCTFail("SPEC048_MLX_SWIFT_REVISION not found in read_swiftpm_pins.py")
+        }
+        let reviewedSwift = String(pins[swiftRange])
+
+        // #2028 audit carry: the mlx-swift checkout itself must be the reviewed
+        // revision and unmodified, so its gitlink is the one that was reviewed.
+        let swiftHead = try run("/usr/bin/env", ["git", "-C", Self.mlxSwiftCheckout.path, "rev-parse", "HEAD"])
+        XCTAssertEqual(swiftHead.status, 0, swiftHead.output)
+        XCTAssertEqual(
+            swiftHead.output.trimmingCharacters(in: .whitespacesAndNewlines), reviewedSwift,
+            "the resolved mlx-swift checkout is not SPEC048_MLX_SWIFT_REVISION"
+        )
+        let swiftStatus = try run(
+            "/usr/bin/env",
+            ["git", "-C", Self.mlxSwiftCheckout.path, "status", "--porcelain", "--ignore-submodules=dirty"]
+        )
+        XCTAssertEqual(swiftStatus.status, 0, swiftStatus.output)
+        XCTAssertTrue(
+            swiftStatus.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            "the resolved mlx-swift checkout has local changes:\n\(swiftStatus.output)"
+        )
+        // #2028 audit carry (INFO): the core submodule must point at the core fork.
+        // `.gitmodules` names it by an arbitrary key, so find it by its path.
+        let submodules = try run(
+            "/usr/bin/env",
+            ["git", "-C", Self.mlxSwiftCheckout.path, "config", "-f", ".gitmodules", "--get-regexp", #"^submodule\..*\.(path|url)$"#]
+        )
+        XCTAssertEqual(submodules.status, 0, submodules.output)
+        var paths: [String: String] = [:]
+        var urls: [String: String] = [:]
+        for line in submodules.output.split(separator: "\n") {
+            let parts = line.split(separator: " ", maxSplits: 1).map(String.init)
+            guard parts.count == 2 else { continue }
+            if parts[0].hasSuffix(".path") { paths[String(parts[0].dropLast(5))] = parts[1] }
+            if parts[0].hasSuffix(".url") { urls[String(parts[0].dropLast(4))] = parts[1] }
+        }
+        let coreKeys = paths.filter { $0.value == "Source/Cmlx/mlx" }.map(\.key)
+        XCTAssertEqual(coreKeys.count, 1, "expected one .gitmodules entry for Source/Cmlx/mlx: \(submodules.output)")
+        let url = coreKeys.first.flatMap { urls[$0] } ?? ""
+        XCTAssertTrue(
+            ["https://github.com/Augustas11/mlx", "https://github.com/Augustas11/mlx.git"].contains(url),
+            "mlx-swift's Source/Cmlx/mlx submodule is not the Augustas11/mlx core fork: \(url)"
+        )
 
         let gitlink = try run("/usr/bin/env", ["git", "-C", Self.mlxSwiftCheckout.path, "ls-tree", "HEAD", "Source/Cmlx/mlx"])
         XCTAssertEqual(gitlink.status, 0, gitlink.output)

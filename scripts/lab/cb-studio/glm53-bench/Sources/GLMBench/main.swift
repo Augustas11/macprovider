@@ -531,7 +531,7 @@ if args.contains("--module-census") {
         ("moe_ffn", { moe(x) }),
         ("dense_ffn", { dense(x) }),
         ("kda_attn", { kda(x, cache: (cache[0] as! MambaCache).copy() as? MambaCache) }),
-        ("dsa_attn", { dsa(x, cache: (cache[3].copy() as! GLM5NextAttentionCache), previousTopk: nil).0 }),
+        ("dsa_attn", { dsa(x, cache: (cache[3].copy() as! GLM5NextAttentionCache), previousTopk: []).0 }),
         ("head", { text.lmHead!(text.model.norm(x)) }),
     ]
     for (name, f) in modules {
@@ -704,7 +704,7 @@ if profile {
             expandedDimensions(inner.embedTokens(token.reshaped(1, 1)), axis: 2),
             count: inner.hcMult, axis: 2)
         eval(h)
-        var topk: MLXArray?
+        var topk = [MLXArray?]()
         var line = "rep \(rep):"
         for (i, layer) in inner.layers.enumerated() {
             // attn half
@@ -718,7 +718,7 @@ if profile {
                 attention = (layer.selfAttn as! GLM5NextLinearAttention)(
                     normed, cache: cache[i] as? MambaCache)
             } else {
-                var t: MLXArray?
+                var t: [MLXArray?]
                 (attention, t) = (layer.selfAttn as! GLM5NextAttention)(
                     normed, cache: cache[i] as? GLM5NextAttentionCache, previousTopk: topk)
                 topk = t

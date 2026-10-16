@@ -61,6 +61,21 @@ SPEC048_MLX_CORE_FORK = "https://github.com/Augustas11/mlx"
 SPEC048_MLX_CORE_REVISION = "2f512e3997349c8648f5d7c5113eb2c825aa242d"
 SPEC048_MLX_CORE_UPSTREAM_BASE = "36969c094354086e15d2a327a9c50feb20b9cf11"
 
+# #2028 audit carry: every reviewed revision and upstream base is a full
+# lowercase 40-hex Git object id, checked at import so a truncated or
+# mistyped constant fails every consumer instead of matching nothing.
+_REVISION_CONSTANTS = {
+    "SPEC048_MLX_SWIFT_LM_REVISION": SPEC048_MLX_SWIFT_LM_REVISION,
+    "SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE": SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE,
+    "SPEC048_MLX_SWIFT_REVISION": SPEC048_MLX_SWIFT_REVISION,
+    "SPEC048_MLX_SWIFT_UPSTREAM_BASE": SPEC048_MLX_SWIFT_UPSTREAM_BASE,
+    "SPEC048_MLX_CORE_REVISION": SPEC048_MLX_CORE_REVISION,
+    "SPEC048_MLX_CORE_UPSTREAM_BASE": SPEC048_MLX_CORE_UPSTREAM_BASE,
+}
+for _name, _value in _REVISION_CONSTANTS.items():
+    if not (len(_value) == 40 and all(ch in "0123456789abcdef" for ch in _value)):
+        raise ValueError(f"{_name} must be a lowercase 40-hex Git object id")
+
 # Each reviewed fork is accepted only at its exact revision with no version.
 REVIEWED_FORK_PINS = {
     "mlx-swift-lm": (SPEC048_MLX_SWIFT_LM_FORK, SPEC048_MLX_SWIFT_LM_REVISION),

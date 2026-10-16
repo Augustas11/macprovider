@@ -320,6 +320,15 @@ class ReviewedForkTupleSourceTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertEqual(namespace[name], expected)
 
+    def test_reviewed_revisions_and_bases_are_full_object_ids(self):
+        for value in (
+            SPEC048_MLX_SWIFT_LM_REVISION, SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE,
+            SPEC048_MLX_SWIFT_REVISION, SPEC048_MLX_SWIFT_UPSTREAM_BASE,
+            SPEC048_MLX_CORE_REVISION, SPEC048_MLX_CORE_UPSTREAM_BASE,
+        ):
+            with self.subTest(value=value):
+                self.assertRegex(value, r"^[0-9a-f]{40}$")
+
     def test_reviewed_fork_tuple_matches_the_spec048_fork_table(self):
         spec = (self.ROOT / "specs" / "SPEC-048-native-mtp-serving.md").read_text()
         rows = {
