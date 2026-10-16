@@ -654,6 +654,26 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertEqual(gemma4.modelFamily, "gemma4")
         XCTAssertFalse(PagedKVAttachGate.recognizedModelFamilies.contains(gemma4.modelFamily))
 
+        // GLM-5.3-Flash: a labelled family that is not paged (identity
+        // fallback), MoE from the expert counts under `text_config`.
+        let glm5Next = ModelRuntime.pagedKVModelCapabilities(
+            modelID: "Jundot/GLM-5.3-Flash-oQ4e-mtp",
+            configJSONData: Data(#"""
+            {"model_type":"glm5_next","architectures":["Glm5NextForConditionalGeneration"],
+             "text_config":{"model_type":"glm5_next_text","n_routed_experts":288,"num_experts_per_tok":8}}
+            """#.utf8)
+        )
+        XCTAssertEqual(glm5Next.modelFamily, "glm5_next")
+        XCTAssertTrue(glm5Next.requiresMoEDispatch)
+        XCTAssertFalse(glm5Next.hybridDecoderArchitectureVerified)
+        XCTAssertFalse(PagedKVAttachGate.recognizedModelFamilies.contains(glm5Next.modelFamily))
+        let glm5NextText = ModelRuntime.pagedKVModelCapabilities(
+            modelID: nil,
+            configJSONData: Data(#"{"model_type":"glm5_next_text","n_routed_experts":288}"#.utf8)
+        )
+        XCTAssertEqual(glm5NextText.modelFamily, "glm5_next")
+        XCTAssertTrue(glm5NextText.requiresMoEDispatch)
+
         let invalidJSONDoesNotFallBackToModelID = ModelRuntime.pagedKVModelCapabilities(
             modelID: "mlx-community/Qwen3-8B-4bit",
             configJSONData: Data(#"{"model_type": Infinity}"#.utf8)

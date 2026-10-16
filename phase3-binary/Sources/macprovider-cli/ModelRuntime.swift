@@ -2491,6 +2491,10 @@ actor ModelRuntime: ModelRuntimeServing {
         if normalizedLabels.contains(where: { $0.contains("gemma4") }) { return "gemma4" }
         if normalizedLabels.contains(where: { $0.contains("glm4moe") }) { return "glm4_moe" }
         if normalizedLabels.contains(where: { $0.contains("nemotronh") }) { return "nemotron_h" }
+        // GLM-5-Next (`glm5_next`, text model `glm5_next_text`). Not a paged-KV
+        // family: the attach gate falls back on identity until SPEC-039 adds
+        // its hybrid KDA/DSA layout.
+        if normalizedLabels.contains(where: { $0.contains("glm5next") }) { return "glm5_next" }
         return nil
     }
 
@@ -2621,10 +2625,15 @@ actor ModelRuntime: ModelRuntimeServing {
             "num_experts_per_tok",
             "moe_intermediate_size",
         ]
-        return expertKeys.contains { key in
-            if let value = object[key] as? Int { return value > 1 }
-            if let value = object[key] as? NSNumber { return value.intValue > 1 }
-            return false
+        // Multimodal wrappers (e.g. `glm5_next`) keep the expert counts in
+        // `text_config`.
+        let scopes = [object] + ((object["text_config"] as? [String: Any]).map { [$0] } ?? [])
+        return scopes.contains { scope in
+            expertKeys.contains { key in
+                if let value = scope[key] as? Int { return value > 1 }
+                if let value = scope[key] as? NSNumber { return value.intValue > 1 }
+                return false
+            }
         }
     }
 
