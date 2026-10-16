@@ -123,6 +123,9 @@ TOP_KEYS = {
 STATE_CLASSES = {"stageable_rewindable", "hybrid_stageable_rewindable"}
 PROFILES = {"native_mtp_greedy_text_v1", "native_mtp_sampled_text_v1"}
 INT_MAX = (1 << 63) - 1
+# SPEC-023 v0.22.25: each quantization exceptions array holds at most 1024
+# entries (256 before); GLM-5.3-Flash carries 554 per-module overrides.
+MAX_QUANTIZATION_EXCEPTIONS = 1024
 MAX_PROPOSAL_DEPTH = 6
 
 
@@ -204,8 +207,8 @@ def validate_quantization(q: object, path: str) -> None:
     kind = q["kind"]
     if kind not in {"base", "mlx_affine", "mlx_mxfp8"}:
         fail(f"{path}.kind", "unsupported")
-    _sorted_unique(q["unquantized_exceptions"], f"{path}.unquantized_exceptions", 256, EXCEPTION)
-    _sorted_unique(q["per_layer_exceptions"], f"{path}.per_layer_exceptions", 256, EXCEPTION)
+    _sorted_unique(q["unquantized_exceptions"], f"{path}.unquantized_exceptions", MAX_QUANTIZATION_EXCEPTIONS, EXCEPTION)
+    _sorted_unique(q["per_layer_exceptions"], f"{path}.per_layer_exceptions", MAX_QUANTIZATION_EXCEPTIONS, EXCEPTION)
     _str(q["representation_manifest_sha256"], f"{path}.representation_manifest_sha256", SHA256)
     if kind == "mlx_affine":
         expected = {

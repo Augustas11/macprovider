@@ -30,7 +30,7 @@ GOLDEN_TUPLE_SHA256 = "eac0736b406e032013a6fd7893a306be1b57b6a8a374e655c3ce20977
 SINGLE_ENTRY_SIDECAR_SHA256 = "49881875ea6c053e99f5748d853b5e4d566b330f955cfdd58e1894ed8cbb5a2b"
 PROJECTION = ROOT / "phase3-binary/catalog/autotune/native-mtp-artifact-manifest.json"
 QWEN_KEY = "qwen/qwen3.6-35b-a3b"
-GLM_KEY = "test/glm-5.3-flash"
+GLM_KEY = "zai-org/glm-5.3-flash"
 
 
 def release_input():
@@ -282,6 +282,17 @@ class NativeMTPAdmissionMultiEntryTests(unittest.TestCase):
         owned["entry"]["source_commit"] = "b" * 40
         with self.assertRaisesRegex(SidecarError, r"\$tuple\[1\]\.entry: release-owned"):
             build([self.qwen, owned], release_input())
+
+    def test_exception_arrays_hold_up_to_1024_entries(self):
+        # SPEC-023 v0.22.25: GLM-5.3-Flash records 554 per-module overrides.
+        names = sorted(f"target/language_model.model.layers.{i}.mlp.switch_mlp.down_proj" for i in range(1024))
+        wide = copy.deepcopy(self.glm)
+        wide["entry"]["quantization"]["per_layer_exceptions"] = names
+        body = json.loads(build([self.qwen, wide], release_input()))
+        self.assertEqual(len(body["entries"][1]["quantization"]["per_layer_exceptions"]), 1024)
+        wide["entry"]["quantization"]["per_layer_exceptions"] = sorted(names + ["target/language_model.lm_head"])
+        with self.assertRaisesRegex(SidecarError, "at most 1024"):
+            build([self.qwen, wide], release_input())
 
     def test_cli_accepts_repeated_and_list_tuple_files(self):
         with tempfile.TemporaryDirectory() as tmp:
