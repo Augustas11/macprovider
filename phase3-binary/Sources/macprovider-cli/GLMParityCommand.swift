@@ -70,6 +70,10 @@ struct GLMParityCommand: AsyncParsableCommand {
         let configData = try? Data(contentsOf: directory.appendingPathComponent("config.json"))
         let capabilities = ModelRuntime.pagedKVModelCapabilities(modelID: modelDir, configJSONData: configData)
 
+        // Before any MLX device use: MLX reads the budget when it creates the device.
+        if let mb = ModelRuntime.applyMLXCommandBufferBudget(modelFamily: capabilities.modelFamily) {
+            Self.progress("mlx_max_mb_per_buffer=\(mb)")
+        }
         ModelRuntime.applyMLXCacheLimit(megabytes: mlxCacheLimitMB)
         Self.progress("load start dir=\(directory.path) oracles=\(references.count)")
         let loadStarted = Date()

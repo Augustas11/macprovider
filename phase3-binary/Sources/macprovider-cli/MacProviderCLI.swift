@@ -2906,6 +2906,12 @@ struct ServeCommand: AsyncParsableCommand {
                 }
             } else {
                 helloRuntimeSource = nil
+                // Before any MLX device use: MLX reads the budget when it creates the device.
+                if let target = startupPreflight.runtimeBinding?.loadPath ?? resolved.modelArtifactPath ?? resolved.model,
+                   let family = ModelRuntime.localModelFamily(target),
+                   let mb = ModelRuntime.applyMLXCommandBufferBudget(modelFamily: family) {
+                    FileHandle.standardError.write(Data("mlx_max_mb_per_buffer=\(mb) family=\(family)\n".utf8))
+                }
                 if let applied = ModelRuntime.applyMLXCacheLimit(megabytes: resolved.mlxCacheLimitMB) {
                     FileHandle.standardError.write(Data("mlx_cache_limit_bytes=\(applied)\n".utf8))
                 }

@@ -2752,6 +2752,18 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertNil(ModelRuntime.residentWeightsTicket(modelFamily: "glm5_next", recommendedWorkingSetBytes: 0))
     }
 
+    // glm5_next decode commits command buffers by MLX's op limit, not its
+    // byte budget; an operator-set MLX_MAX_MB_PER_BUFFER is kept, and other
+    // families keep MLX's default.
+    func testCommandBufferBudgetOnlyForGLM5NextAndNeverOverridesOperator() {
+        XCTAssertEqual(ModelRuntime.commandBufferBudgetMB(modelFamily: "glm5_next", configured: nil), 65536)
+        XCTAssertEqual(ModelRuntime.commandBufferBudgetMB(modelFamily: "glm5_next", configured: ""), 65536)
+        XCTAssertNil(ModelRuntime.commandBufferBudgetMB(modelFamily: "glm5_next", configured: "40"))
+        for family in ["qwen", "llama", "gpt_oss", "gemma4", "glm4_moe", "nemotron_h", "unknown"] {
+            XCTAssertNil(ModelRuntime.commandBufferBudgetMB(modelFamily: family, configured: nil), family)
+        }
+    }
+
     private static func request(
         model: String,
         stream: Bool = false,

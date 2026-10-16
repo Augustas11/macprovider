@@ -2411,6 +2411,45 @@ actor ModelRuntime: ModelRuntimeServing {
         return ticket
     }
 
+    /// Families served with a larger MLX per-command-buffer byte budget, in MB.
+    /// MLX commits a command buffer once its distinct input arrays pass
+    /// `MLX_MAX_MB_PER_BUFFER` (50 MB on Max/Ultra GPUs). glm5_next's fused MoE
+    /// kernels bind whole 288-expert tensors (~4 GB per layer), so every MoE
+    /// layer forced commits: 168 command buffers and ~1.2 ms of GPU idle per
+    /// decode step at 1k on the M3 Ultra. At 65536 MB MLX's per-buffer op limit
+    /// governs instead (19 command buffers, 0.26 ms idle, round-4 window). The
+    /// value only shapes command-buffer batching; buffers still commit every
+    /// MLX op limit.
+    nonisolated static let commandBufferBudgetMBByFamily: [String: Int] = ["glm5_next": 65536]
+
+    /// The per-buffer MB budget to set for a family, or `nil` when the family
+    /// keeps MLX's default or the operator already set `MLX_MAX_MB_PER_BUFFER`.
+    nonisolated static func commandBufferBudgetMB(modelFamily: String, configured: String?) -> Int? {
+        guard let configured, !configured.isEmpty else { return commandBufferBudgetMBByFamily[modelFamily] }
+        return nil
+    }
+
+    /// Sets the family's command-buffer budget for this process. MLX reads it
+    /// once, when it creates its Metal device, so this must run before any MLX
+    /// device use (the MLX cache limit, model load). Returns the MB applied.
+    @discardableResult
+    nonisolated static func applyMLXCommandBufferBudget(modelFamily: String) -> Int? {
+        let key = "MLX_MAX_MB_PER_BUFFER"
+        guard let mb = commandBufferBudgetMB(
+            modelFamily: modelFamily, configured: ProcessInfo.processInfo.environment[key])
+        else { return nil }
+        setenv(key, String(mb), 0)
+        return mb
+    }
+
+    /// The model family of a local model target, from its `config.json`.
+    nonisolated static func localModelFamily(_ target: String) -> String? {
+        guard let directory = try? localModelDirectory(for: target),
+              let data = try? Data(contentsOf: directory.appendingPathComponent("config.json"))
+        else { return nil }
+        return pagedKVModelCapabilities(modelID: target, configJSONData: data).modelFamily
+    }
+
     nonisolated static func clearMLXBufferCacheAfterPrefill(
         using clear: () -> Void = { Memory.clearCache() }
     ) {
