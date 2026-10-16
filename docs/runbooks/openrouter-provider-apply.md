@@ -47,7 +47,7 @@ The probe validates:
   explicit saturation pass; account/quota/rate-limit 429s do not satisfy this
   check
 - `/privacy` retaining the plaintext/no-ZDR/no-training disclosure and the
-  default 90-day request-log retention statement
+  request-log retention statement in days (the configured period; 14 days by default)
 
 Do not submit the OpenRouter form on a failing soak.
 
