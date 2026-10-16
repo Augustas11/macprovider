@@ -460,6 +460,325 @@ final class ContinuousBatchingSelfCheckTests: XCTestCase {
         XCTAssertEqual(store.record(for: record.key)?.ladderBound, 1)
     }
 
+    // MARK: - Exactness probe (#1971, SPEC-038 v0.3.19)
+
+    /// The Studio near-ties main's self-check accepted (k=8 and k=14, margin
+    /// 0.125) were real qmv-to-qmm divergences. The old 1.0-logit rule
+    /// excuses them; the v0.3.19 rule excuses only an exact tie.
+    func testNearTieToleranceExcusesOnlyAnExactTie() {
+        func reference(gap: Float) -> PagedKVRuntimeParityProbe.SerialReference {
+            var logits = [Float](repeating: 0, count: 16)
+            logits[3] = 24
+            logits[7] = 24 - gap
+            return .init(top1: 3, top2: 7, logits: logits)
+        }
+        let studio = reference(gap: 0.125)
+        let old = ContinuousBatchingSelfCheck.divergenceVerdict(
+            reference: studio, aloneToken: 3, batchedToken: 7, otherRowsAloneTokens: [],
+            tolerance: PagedKVRuntimeParityProbe.batchedArgmaxLogitTolerance
+        )
+        XCTAssertTrue(old.nearTie, "the old rule accepted the Studio flip")
+        let new = ContinuousBatchingSelfCheck.divergenceVerdict(
+            reference: studio, aloneToken: 3, batchedToken: 7, otherRowsAloneTokens: []
+        )
+        XCTAssertFalse(new.nearTie)
+        XCTAssertEqual(new.margin, 0.125)
+        XCTAssertEqual(new.reason, "batched_outside_serial_top2")
+        // Smallest bfloat16 step at a logit of 2-4 (1/64) is still a divergence.
+        XCTAssertFalse(ContinuousBatchingSelfCheck.divergenceVerdict(
+            reference: reference(gap: 1.0 / 64), aloneToken: 3, batchedToken: 7, otherRowsAloneTokens: []
+        ).nearTie)
+        let tie = ContinuousBatchingSelfCheck.divergenceVerdict(
+            reference: reference(gap: 0), aloneToken: 3, batchedToken: 7, otherRowsAloneTokens: []
+        )
+        XCTAssertTrue(tie.nearTie, "an exact tie may break either way")
+        XCTAssertEqual(tie.reason, "near_tie")
+        // An exact tie on another row's token is still a leak.
+        XCTAssertEqual(ContinuousBatchingSelfCheck.divergenceVerdict(
+            reference: reference(gap: 0), aloneToken: 3, batchedToken: 7, otherRowsAloneTokens: [7]
+        ).reason, "other_row_token")
+        XCTAssertLessThan(ContinuousBatchingSelfCheck.nearTieLogitTolerance, 1.0 / 512)
+    }
+
+    /// The route boundary the probe straddles comes from the FR-CB2 vector
+    /// attention route table for the device.
+    func testProbeStraddlesTheDevicesVectorAttentionRouteBoundary() {
+        XCTAssertEqual(ContinuousBatchingSelfCheck.routeKeyBoundary(architecture: "applegpu_g15d"), 1024) // M3 Ultra
+        XCTAssertEqual(ContinuousBatchingSelfCheck.routeKeyBoundary(architecture: "applegpu_g16s"), 1024) // M4 Pro/Max
+        XCTAssertEqual(ContinuousBatchingSelfCheck.routeKeyBoundary(architecture: "applegpu_g13g"), 4096) // M1
+        XCTAssertEqual(ContinuousBatchingSelfCheck.routeKeyBoundary(architecture: "applegpu_g15g"), 4096) // M3
+    }
+
+    /// Every width from 2 has rows on both sides of the route boundary, a
+    /// row that crosses it mid-completion from 3, unequal lengths, and at
+    /// least a serve window of decode tokens per row.
+    func testProbeShapeCrossesTheBoundaryWithUnequalRowsAtEveryWidth() {
+        for window in [1, 16, 32] {
+            let output = ContinuousBatchingSelfCheck.exactnessOutputTokens(decodeWindow: window)
+            let required = ContinuousBatchingSelfCheck.requiredCohortDecodeTokens(decodeWindow: window)
+            XCTAssertGreaterThanOrEqual(required, 16)
+            XCTAssertGreaterThanOrEqual(required, window)
+            XCTAssertGreaterThan(output, required, "the first token comes from prefill")
+            for boundary in [1024, 4096] {
+                for k in 2 ... 32 {
+                    let lengths = ContinuousBatchingSelfCheck.exactnessPromptLengths(
+                        count: k, keyBoundary: boundary, outputTokens: output
+                    )
+                    XCTAssertEqual(Set(lengths).count, k, "unequal rows: \(lengths)")
+                    XCTAssertTrue(lengths.contains { $0 + output < boundary }, "a row stays below \(boundary)")
+                    XCTAssertTrue(lengths.contains { $0 >= boundary }, "a row starts past \(boundary)")
+                    if k >= 3 {
+                        XCTAssertTrue(
+                            lengths.contains { $0 < boundary && $0 + output > boundary },
+                            "a row crosses \(boundary) while decoding: \(lengths)"
+                        )
+                    }
+                    XCTAssertTrue(lengths.allSatisfy { $0 < 16_384 })
+                }
+            }
+        }
+    }
+
+    /// Fail closed: the ladder never goes past the widest probe shape the
+    /// Mac's pool and per-request cap hold, so no wider width is verified.
+    func testProbeShapeBoundCapsTheLadderOnSmallPools() throws {
+        let key = ContinuousBatchingSelfCheckKey(
+            modelSHA256: "m", metallibSHA256: "x", kernelIdentifier: "k", hardwareClass: "h", osBuild: "o", decodeWindow: 16
+        )
+        var target = ContinuousBatchingSelfCheckTarget(key: key, maxRows: 16)
+        XCTAssertEqual(ContinuousBatchingSelfCheck.ladderUpperBound(target: target, ownerPinned: nil, crashedSlots: nil), 16)
+        // Studio class, 16k-token pool: all 16 rows fit.
+        target.poolTokens = 16_384
+        XCTAssertEqual(ContinuousBatchingSelfCheck.ladderUpperBound(target: target, ownerPinned: nil, crashedSlots: nil), 16)
+        // An 8 GB Mac with the 4096 boundary and a 16k pool stops below 16.
+        target.probeKeyBoundary = 4096
+        let small = ContinuousBatchingSelfCheck.ladderUpperBound(target: target, ownerPinned: nil, crashedSlots: nil)
+        XCTAssertGreaterThanOrEqual(small, 5, "an M1/M2 8 GB Mac still probes its 5-row bound")
+        XCTAssertLessThan(small, 16)
+        let output = ContinuousBatchingSelfCheck.exactnessOutputTokens(decodeWindow: 16)
+        let cost = ContinuousBatchingSelfCheck.exactnessPromptLengths(count: small + 1, keyBoundary: 4096, outputTokens: output)
+            .compactMap { ContinuousBatchingSelfCheck.exactnessRowCost(promptTokens: $0, outputTokens: output) }
+        XCTAssertLessThanOrEqual(cost.prefix(small).reduce(0, +), 16_384)
+        XCTAssertGreaterThan(cost.reduce(0, +), 16_384)
+        // Rows reserve whole blocks: a larger block size fits fewer rows.
+        var coarse = target
+        coarse.blockSizeTokens = 1024
+        XCTAssertLessThan(ContinuousBatchingSelfCheck.ladderUpperBound(target: coarse, ownerPinned: nil, crashedSlots: nil), small)
+        XCTAssertEqual(ContinuousBatchingSelfCheck.exactnessRowCost(promptTokens: 1000, outputTokens: 48, blockSizeTokens: 16), 1184)
+        XCTAssertEqual(ContinuousBatchingSelfCheck.exactnessRowCost(promptTokens: 1000, outputTokens: 48, blockSizeTokens: 1024), 2048)
+        XCTAssertNil(ContinuousBatchingSelfCheck.exactnessRowCost(promptTokens: .max, outputTokens: 48))
+        // A stored grant wider than the shape the Mac holds now is served only
+        // up to it, like one above the scheduler rows.
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cb-probe-shape-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = ContinuousBatchingSelfCheckStore(configPath: directory.appendingPathComponent("config.yaml").path)
+        try store.store(.init(
+            key: key, decision: .init(slots: 16, reason: "granted", verifiedSlots: 16), serialTPS: 1,
+            measurements: [], aloneOutputs: [], inProgressSlots: nil, decidedAt: "2026-10-13T00:00:00Z"
+        ))
+        XCTAssertEqual(target.grantableRows, small)
+        var queued = target
+        queued.queueLimit = 4
+        XCTAssertEqual(queued.grantableRows, 4, "a grant never serves above the queue limit either")
+        XCTAssertEqual(
+            ContinuousBatchingSelfCheckResolution.resolve(store: store, target: target, ownerPinned: nil, provisional: nil)?
+                .servedSlots,
+            small
+        )
+        XCTAssertEqual(
+            ContinuousBatchingSelfCheckResolution.resolve(
+                store: store, target: target, ownerPinned: nil,
+                provisional: .init(modelSHA256: "other", slots: 16)
+            )?.servedSlots,
+            small
+        )
+        // A served context too short for a row past the boundary verifies nothing.
+        target.maxRequestTokens = 4096
+        XCTAssertEqual(ContinuousBatchingSelfCheck.ladderUpperBound(target: target, ownerPinned: nil, crashedSlots: nil), 1)
+        XCTAssertEqual(target.grantableRows, 1)
+        // The configured bounds still apply below the shape bound.
+        target.maxRequestTokens = .max
+        target.poolTokens = .max
+        XCTAssertEqual(ContinuousBatchingSelfCheck.ladderUpperBound(target: target, ownerPinned: 8, crashedSlots: nil), 8)
+    }
+
+    /// A width whose probe rows never all decoded together is not verified:
+    /// the decision uses the widths below it, and a prior grant above them is
+    /// lowered to them.
+    func testUnmetProbeShapeGrantsNoWidthItDidNotVerify() {
+        let none = ContinuousBatchingSelfCheck.decide(serialTPS: 50, measurements: [], probeShapeUnmetAt: 2)
+        XCTAssertEqual(none, .init(slots: 1, reason: "probe_shape_unmet_at_2", verifiedSlots: 1))
+        let reconciledNone = ContinuousBatchingSelfCheck.reconcile(
+            fresh: none, priorGrant: 8, serialTPS: 50, measurements: [], previousStreak: 0
+        )
+        XCTAssertEqual(reconciledNone.decision.slots, 1, "a prior grant is not kept above what was verified")
+
+        let measurements = (2...11).map { m($0, tps: 40 * Double($0)) }
+        let partial = ContinuousBatchingSelfCheck.decide(serialTPS: 50, measurements: measurements, probeShapeUnmetAt: 12)
+        XCTAssertEqual(partial.reason, "granted")
+        XCTAssertEqual(partial.verifiedSlots, 11)
+        let reconciled = ContinuousBatchingSelfCheck.reconcile(
+            fresh: partial, priorGrant: 16, serialTPS: 50, measurements: measurements, previousStreak: 0
+        )
+        XCTAssertLessThanOrEqual(reconciled.decision.slots, 11)
+        XCTAssertEqual(
+            ContinuousBatchingSelfCheck.servedSlots(decision: reconciled.decision, ownerPinned: 16, maxRows: 16), 11
+        )
+    }
+
+    /// Probe prompts are cut to exact token lengths and keep the chat
+    /// template's closing tokens.
+    func testProbePromptsAreCutToExactLengthsKeepingTheTemplateClose() {
+        let close = [900, 901, 902]
+        let a = [1, 2] + Array(10 ..< 2_000) + close
+        let b = [1, 2] + Array(5_000 ..< 5_100) + close
+        let tail = ContinuousBatchingSelfCheck.commonSuffixLength(a, b)
+        XCTAssertEqual(tail, 3)
+        let fitted = ContinuousBatchingSelfCheck.fitPrompt(a, tail: tail, length: 1_030)
+        XCTAssertEqual(fitted?.count, 1_030)
+        XCTAssertEqual(Array(fitted?.suffix(3) ?? []), close)
+        XCTAssertEqual(Array(fitted?.prefix(4) ?? []), [1, 2, 10, 11])
+        XCTAssertNil(ContinuousBatchingSelfCheck.fitPrompt(b, tail: tail, length: 1_030), "too short to cut")
+        XCTAssertNil(ContinuousBatchingSelfCheck.fitPrompt(a, tail: 5, length: 5))
+        let lengths = ContinuousBatchingSelfCheck.exactnessPromptLengths(count: 8, keyBoundary: 4096, outputTokens: 48)
+        let texts = ContinuousBatchingSelfCheck.exactnessTexts(lengths: lengths)
+        XCTAssertEqual(texts.count, 8)
+        XCTAssertEqual(Set(texts).count, 8)
+        for (text, length) in zip(texts, lengths) {
+            XCTAssertTrue(text.hasPrefix("Answer this: "))
+            // Generous: each note paragraph is far more than 50 tokens' text.
+            XCTAssertGreaterThan(text.count, length * 3)
+        }
+    }
+
+    /// Changing the probe changes what a stored result means: the key moves,
+    /// a stored refusal re-runs, and a stored grant keeps the Mac serving
+    /// through the re-run.
+    func testProbeVersionBumpRerunsTheCheckAndKeepsAStoredGrantMeanwhile() throws {
+        let live = ModelRuntime.continuousBatchingSelfCheckRuntimeBuild(forwardBound: 11, routeKeyBoundary: 1024)
+        XCTAssertTrue(live.hasSuffix("+\(ContinuousBatchingSelfCheck.probeVersion)/route1024"), live)
+        XCTAssertNotEqual(live, ModelRuntime.continuousBatchingSelfCheckRuntimeBuild(forwardBound: 11, routeKeyBoundary: 4096))
+        XCTAssertEqual(ContinuousBatchingSelfCheck.probeVersion, "cb-probe-v2")
+        let v1 = "\(ContinuousBatchingSelfCheckKey.currentRuntimeBuild)+cb-isolation-v1/decode11/verify11"
+        XCTAssertNotEqual(live, v1)
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cb-probe-v2-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = ContinuousBatchingSelfCheckStore(configPath: directory.appendingPathComponent("config.yaml").path)
+        var before = ContinuousBatchingSelfCheckKey(
+            modelSHA256: "m", metallibSHA256: "x", kernelIdentifier: "k", hardwareClass: "h", osBuild: "o", decodeWindow: 16
+        )
+        before.runtimeBuild = v1
+        var after = before
+        after.runtimeBuild = live
+        let target = ContinuousBatchingSelfCheckTarget(key: after, maxRows: 16)
+        try store.store(.init(
+            key: before, decision: .init(slots: 1, reason: "row_divergence_at_12", verifiedSlots: 11), serialTPS: 1,
+            measurements: [], aloneOutputs: [], inProgressSlots: nil, decidedAt: "2026-10-12T00:00:00Z"
+        ))
+        XCTAssertNil(store.decision(for: after))
+        XCTAssertNil(ContinuousBatchingSelfCheckResolution.resolve(store: store, target: target, ownerPinned: nil, provisional: nil))
+        try store.store(.init(
+            key: before, decision: .init(slots: 16, reason: "granted", verifiedSlots: 16), serialTPS: 1,
+            measurements: [], aloneOutputs: [], inProgressSlots: nil, decidedAt: "2026-10-12T00:00:00Z"
+        ))
+        XCTAssertNil(store.decision(for: after))
+        let resolution = ContinuousBatchingSelfCheckResolution.resolve(store: store, target: target, ownerPinned: nil, provisional: nil)
+        XCTAssertEqual(resolution?.servedSlots, 16)
+        XCTAssertEqual(resolution?.report.decision, "prior_grant_pending_recheck")
+        // The probe's lone outputs persist with the record (a deferred ladder resumes).
+        var record = ContinuousBatchingSelfCheckStore.Record(
+            key: after, decision: nil, serialTPS: 0, measurements: [], aloneOutputs: [], inProgressSlots: 3, decidedAt: nil
+        )
+        record.probeAloneOutputs = [[1, 2], [3, 4]]
+        try store.store(record)
+        XCTAssertEqual(store.record(for: after)?.probeAloneOutputs, [[1, 2], [3, 4]])
+    }
+
+    /// A crash before any width or serial baseline exists (the first probe,
+    /// or a re-measure that reset the baseline) is a correctness result, so
+    /// it does not keep a prior grant as a throughput result would.
+    func testCrashBeforeAnySerialBaselineRevokesAPriorGrant() {
+        let crashed = ContinuousBatchingSelfCheck.decide(serialTPS: 0, measurements: [], crashedAt: 2)
+        XCTAssertEqual(crashed, .init(slots: 1, reason: "crashed_at_2", verifiedSlots: 1))
+        let reconciled = ContinuousBatchingSelfCheck.reconcile(
+            fresh: crashed, priorGrant: 16, serialTPS: 0, measurements: [], previousStreak: 0
+        )
+        XCTAssertEqual(reconciled.decision.slots, 1)
+        let unmet = ContinuousBatchingSelfCheck.decide(serialTPS: 0, measurements: [], probeShapeUnmetAt: 2)
+        XCTAssertEqual(unmet.reason, "probe_shape_unmet_at_2")
+        // A first-width probe divergence leaves no serial baseline either.
+        let diverged = ContinuousBatchingSelfCheck.decide(serialTPS: 0, measurements: [m(2, exact: false, tps: 0)])
+        XCTAssertEqual(diverged, .init(slots: 1, reason: "row_divergence_at_2", verifiedSlots: 1))
+        XCTAssertEqual(
+            ContinuousBatchingSelfCheck.reconcile(
+                fresh: diverged, priorGrant: 16, serialTPS: 0, measurements: [m(2, exact: false, tps: 0)], previousStreak: 0
+            ).decision.reason,
+            "row_divergence_at_2"
+        )
+    }
+
+    /// Stored lone outputs are reused only for the prompt they were generated
+    /// from, at the probe's completion length.
+    func testStoredProbeLoneOutputsAreReusedOnlyForTheirOwnPrompts() {
+        let prompts = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
+        let digests = prompts.map(ContinuousBatchingSelfCheck.promptSHA256)
+        XCTAssertEqual(Set(digests).count, 3)
+        let outputs = [[10, 11], [12, 13], [14, 15]]
+        XCTAssertEqual(
+            ContinuousBatchingSelfCheck.reusableLoneOutputs(outputs, digests: digests, prompts: prompts, outputTokens: 2),
+            outputs
+        )
+        var changed = prompts
+        changed[1] = [4, 5, 7]
+        XCTAssertEqual(
+            ContinuousBatchingSelfCheck.reusableLoneOutputs(outputs, digests: digests, prompts: changed, outputTokens: 2),
+            [[10, 11]]
+        )
+        XCTAssertEqual(
+            ContinuousBatchingSelfCheck.reusableLoneOutputs(outputs, digests: digests, prompts: prompts, outputTokens: 3), []
+        )
+        XCTAssertEqual(
+            ContinuousBatchingSelfCheck.reusableLoneOutputs(outputs, digests: [], prompts: prompts, outputTokens: 2), []
+        )
+        XCTAssertEqual(
+            ContinuousBatchingSelfCheck.reusableLoneOutputs([[10, -1]], digests: digests, prompts: prompts, outputTokens: 2), []
+        )
+    }
+
+    /// A Mac that could not hold two probe rows re-runs once its bound grows.
+    func testProbeShapeUnavailableRerunsWhenTheShapeFits() {
+        var record = ContinuousBatchingSelfCheckStore.Record(
+            key: .init(modelSHA256: "m", metallibSHA256: "x", kernelIdentifier: "k", hardwareClass: "h", osBuild: "o"),
+            decision: .init(slots: 1, reason: "probe_shape_unavailable", verifiedSlots: 1), serialTPS: 0,
+            measurements: [], aloneOutputs: [], inProgressSlots: nil, decidedAt: nil
+        )
+        record.ladderBound = 1
+        XCTAssertFalse(ContinuousBatchingSelfCheck.ladderBoundGrew(record: record, currentBound: 1))
+        XCTAssertTrue(ContinuousBatchingSelfCheck.ladderBoundGrew(record: record, currentBound: 2))
+    }
+
+    /// The store is owner-only: a file other users can read is ignored.
+    func testStoreIgnoresAFileReadableByOtherUsers() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cb-self-check-mode-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent(ContinuousBatchingSelfCheckStore.fileName)
+        let store = ContinuousBatchingSelfCheckStore(url: url)
+        let key = ContinuousBatchingSelfCheckKey(
+            modelSHA256: "m", metallibSHA256: "x", kernelIdentifier: "k", hardwareClass: "h", osBuild: "o"
+        )
+        try store.store(.init(
+            key: key, decision: .init(slots: 4, reason: "granted", verifiedSlots: 4), serialTPS: 1,
+            measurements: [], aloneOutputs: [], inProgressSlots: nil, decidedAt: nil
+        ))
+        XCTAssertNotNil(store.record(for: key))
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: url.path)
+        XCTAssertNil(store.record(for: key))
+    }
+
     // MARK: - Revocation
 
     func testRevokedTupleIsNeitherCoveredNorSelfChecked() {

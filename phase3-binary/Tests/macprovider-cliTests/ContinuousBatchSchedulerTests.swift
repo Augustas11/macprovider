@@ -3015,6 +3015,142 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         )
     }
 
+    /// #1971: a kernel-route model whose quantized projections switch from
+    /// `qmv` to `qmm` at 12 rows per forward (the M3 Ultra limit) flips a
+    /// row's greedy token wherever its top two are 0.125 apart, as on the
+    /// Studio. The FR-CB10 exactness probe runs all 12 rows of its cohort in
+    /// one decode for at least one serve window. The old 1.0-logit near-tie
+    /// rule excuses every flip; the v0.3.19 rule fails the width without the
+    /// FR-CB2 row bound and passes it with the bound (11 + 1 forwards).
+    func testExactnessProbeCatchesTheQmmFlipAboveTheVectorLimitOnlyWithoutTheRowBound() async throws {
+        let rows = 12
+        let required = ContinuousBatchingSelfCheck.requiredCohortDecodeTokens(decodeWindow: 16)
+        let outputTokens = ContinuousBatchingSelfCheck.exactnessOutputTokens(decodeWindow: 16)
+        for bound in [Int.max, 11] {
+            let backend = KernelRouteBackend(vectorLimit: 12)
+            let scheduler = try await makeScheduler(
+                descriptor: Self.descriptor(maxPhysicalBlocks: 1024),
+                maxActiveRows: rows,
+                maxDecodeLockstepWindow: 16,
+                maxDecodeRowsPerForward: bound,
+                maxPrefillRowsPerIteration: 4,
+                backend: backend,
+                allocator: PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 1024)
+            )
+            var alone: [[Int]] = []
+            for seed in 1 ... rows {
+                let result = try await scheduler.submit(.init(
+                    id: "alone-\(bound)-\(seed)", conversationKey: "", promptTokens: [seed],
+                    maxOutputTokens: outputTokens, temperature: 0, selfCheckProbe: true
+                ))
+                alone.append(result.generatedTokens)
+            }
+            let aloneForwards = await backend.decodeForwardRows().count
+            let batched = try await withThrowingTaskGroup(of: (Int, ContinuousBatchSchedulerResult).self) { group in
+                for seed in 1 ... rows {
+                    group.addTask {
+                        let result = try await scheduler.submit(.init(
+                            id: "probe-\(bound)-\(seed)", conversationKey: "", promptTokens: [seed],
+                            maxOutputTokens: outputTokens, temperature: 0, selfCheckProbe: true,
+                            selfCheckCohort: ContinuousBatchSelfCheckCohort(id: "probe-\(bound)", size: rows)
+                        ))
+                        return (seed, result)
+                    }
+                }
+                var results = Array(repeating: ContinuousBatchSchedulerResult?.none, count: rows)
+                for try await (seed, result) in group { results[seed - 1] = result }
+                return results.compactMap { $0 }
+            }
+            XCTAssertEqual(batched.count, rows)
+            XCTAssertTrue(
+                batched.allSatisfy { ($0.selfCheckCohortDecodeTokens ?? 0) >= required },
+                "every row decoded beside the whole cohort for a serve window: \(batched.map(\.selfCheckCohortDecodeTokens))"
+            )
+            let forwards = Array(await backend.decodeForwardRows().dropFirst(aloneForwards))
+            XCTAssertEqual(forwards.first, min(rows, bound), "the cohort's first forward carries every row the bound allows")
+
+            var oldRuleExcusesAll = true
+            var newRuleConformant = true
+            var flips = 0
+            for (index, result) in batched.enumerated() {
+                let seed = index + 1
+                guard let step = Array(zip(result.generatedTokens, alone[index])).firstIndex(where: { $0.0 != $0.1 }) else {
+                    XCTAssertEqual(result.generatedTokens, alone[index])
+                    continue
+                }
+                flips += 1
+                let reference = KernelRouteBackend.serialReference(seed: seed, step: step)
+                let others = alone.enumerated().compactMap { other, tokens -> Int? in
+                    other != index && tokens.indices.contains(step) ? tokens[step] : nil
+                }
+                let old = ContinuousBatchingSelfCheck.divergenceVerdict(
+                    reference: reference, aloneToken: alone[index][step], batchedToken: result.generatedTokens[step],
+                    otherRowsAloneTokens: others, tolerance: PagedKVRuntimeParityProbe.batchedArgmaxLogitTolerance
+                )
+                let new = ContinuousBatchingSelfCheck.divergenceVerdict(
+                    reference: reference, aloneToken: alone[index][step], batchedToken: result.generatedTokens[step],
+                    otherRowsAloneTokens: others
+                )
+                XCTAssertEqual(old.margin, 0.125)
+                oldRuleExcusesAll = oldRuleExcusesAll && old.nearTie
+                newRuleConformant = newRuleConformant && new.nearTie
+            }
+            if bound == Int.max {
+                XCTAssertTrue(forwards.contains { $0 >= 12 }, "\(forwards)")
+                XCTAssertGreaterThan(flips, 0, "12 rows in one forward take qmm and flip near-tied tokens")
+                XCTAssertTrue(oldRuleExcusesAll, "the 1.0-logit rule accepted every flip (verified_k 12 on main)")
+                XCTAssertFalse(newRuleConformant, "the exactness probe fails k=12 without the row bound")
+            } else {
+                XCTAssertTrue(forwards.allSatisfy { $0 <= 11 }, "\(forwards)")
+                XCTAssertEqual(flips, 0, "with the row bound every row matches its lone run")
+            }
+        }
+    }
+
+    /// An exactness-probe cohort is not admitted until every row of it is
+    /// queued. A cohort that never fills runs nothing, does not hold up a
+    /// buyer row queued behind it, and its rows end with the bounded queue
+    /// wait, so the self-check step fails instead of verifying a width whose
+    /// rows did not decode together (fail closed).
+    func testExactnessProbeCohortThatNeverFillsRunsNothingAndTimesOut() async throws {
+        let backend = KernelRouteBackend(vectorLimit: 12)
+        let scheduler = try await makeScheduler(
+            descriptor: Self.descriptor(maxPhysicalBlocks: 256),
+            maxActiveRows: 4,
+            queueWaitTimeoutNanoseconds: 500_000_000,
+            maxDecodeLockstepWindow: 16,
+            backend: backend,
+            allocator: PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 256)
+        )
+        let cohort = ContinuousBatchSelfCheckCohort(id: "short-cohort", size: 4)
+        let probes = Task {
+            await withTaskGroup(of: Bool.self) { group in
+                for seed in 1 ... 3 {
+                    group.addTask {
+                        let result = try? await scheduler.submit(.init(
+                            id: "short-cohort-\(seed)", conversationKey: "", promptTokens: [seed],
+                            maxOutputTokens: 17, temperature: 0, selfCheckProbe: true, selfCheckCohort: cohort
+                        ))
+                        return result?.terminalStatus == .stop || result?.terminalStatus == .length
+                    }
+                }
+                var completed: [Bool] = []
+                for await value in group { completed.append(value) }
+                return completed
+            }
+        }
+        try await eventually { await scheduler.metrics().waitingCount == 3 }
+        let buyer = try await scheduler.submit(.init(
+            id: "buyer", conversationKey: "", promptTokens: [9], maxOutputTokens: 2
+        ))
+        XCTAssertEqual(buyer.generatedTokens.count, 2, "a buyer behind an incomplete cohort is served")
+        XCTAssertNil(buyer.selfCheckCohortDecodeTokens, "rows outside a cohort carry no cohort count")
+        let outcomes = await probes.value
+        XCTAssertEqual(outcomes, [false, false, false])
+        let forwards = await backend.decodeForwardRows()
+        XCTAssertTrue(forwards.allSatisfy { $0 == 1 }, "no row of an incomplete cohort decodes: \(forwards)")
+    }
+
     /// More active rows than the decode row bound decode in consecutive
     /// forwards of at most that many rows, and every row still produces its
     /// own tokens.
@@ -8306,4 +8442,57 @@ private final class DeliveredTokenLog: @unchecked Sendable {
     }
 
     var isEmpty: Bool { tokens.isEmpty }
+}
+
+/// A kernel-route model for the FR-CB10 exactness probe (#1971). Row `seed`'s
+/// greedy token at step `s` is `seed * 100 + s`; its runner-up is that plus
+/// 5000, never another row's token. Where `(seed + s) % 4 == 0` the two are 0.125 apart, and a decode
+/// forward of `vectorLimit` or more rows (MLX `qmm` instead of `qmv`) picks
+/// the runner-up there. Smaller forwards are bit-exact.
+private actor KernelRouteBackend: ContinuousBatchSchedulerBackend {
+    private let vectorLimit: Int
+    private var forwardRows: [Int] = []
+
+    init(vectorLimit: Int) {
+        self.vectorLimit = vectorLimit
+    }
+
+    static func token(seed: Int, step: Int, qmm: Bool) -> Int {
+        let top = seed * 100 + step
+        return qmm && (seed + step) % 4 == 0 ? top + 5000 : top
+    }
+
+    static func serialReference(seed: Int, step: Int) -> PagedKVRuntimeParityProbe.SerialReference {
+        let top1 = token(seed: seed, step: step, qmm: false)
+        var logits = [Float](repeating: 0, count: 8192)
+        logits[top1] = 20
+        logits[top1 + 5000] = 19.875
+        return PagedKVRuntimeParityProbe.SerialReference(top1: top1, top2: top1 + 5000, logits: logits)
+    }
+
+    func prefill(rows: [ContinuousBatchPrefillInput]) async throws -> [ContinuousBatchPrefillOutput] {
+        rows.map { row in
+            ContinuousBatchPrefillOutput(
+                requestID: row.requestID,
+                sampledToken: row.sampleFirstToken
+                    ? Self.token(seed: row.promptTokens.first ?? 0, step: 0, qmm: false)
+                    : nil
+            )
+        }
+    }
+
+    func decode(rows: [ContinuousBatchDecodeInput]) async throws -> [ContinuousBatchDecodeOutcome] {
+        forwardRows.append(rows.count)
+        let qmm = rows.count >= vectorLimit
+        return rows.map { row in
+            .output(ContinuousBatchDecodeOutput(
+                requestID: row.requestID,
+                token: Self.token(seed: row.promptTokens.first ?? 0, step: row.generatedTokens.count, qmm: qmm)
+            ))
+        }
+    }
+
+    func cancelInFlight() async {}
+
+    func decodeForwardRows() -> [Int] { forwardRows }
 }
