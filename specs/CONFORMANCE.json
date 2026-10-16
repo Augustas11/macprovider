@@ -4830,7 +4830,8 @@
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringStartCountedAtDispatch",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringUnpersistedStartIsNotDispatched",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringLookupPastDeadlineReservesNothing",
-        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestScoringStoreBackfillsStartsOnce"
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestScoringStoreBackfillsStartsOnce",
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestScoringStoreBackfillFailureRetries"
       ],
       "journeys": [],
       "evidence": [],

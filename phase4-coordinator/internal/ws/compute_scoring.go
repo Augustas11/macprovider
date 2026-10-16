@@ -684,8 +684,9 @@ func (e *computeScoringEngine) considerProvider(ctx context.Context, p pool.Prov
 		return
 	}
 	e.mu.Lock()
-	// Lookups took time: reserve against the hourly bound as of now.
-	if !e.hourlyBudgetLocked(e.s.now()) {
+	// Acquiring the lock may have waited: the deadline and the hourly bound
+	// are checked again as of now, under the lock that reserves.
+	if time.Now().After(deadline) || !e.hourlyBudgetLocked(e.s.now()) {
 		e.mu.Unlock()
 		return
 	}
@@ -823,7 +824,15 @@ func (e *computeScoringEngine) runProbe(ctx context.Context, verified computeint
 		return
 	}
 	dispatched = true
-	if !e.beginDispatch(ctx) {
+	at, ok := e.beginDispatch(ctx)
+	if !ok {
+		e.inconclusive(ciInconclusiveDispatch)
+		return
+	}
+	if e.s.now().After(at) {
+		// Something held this request past its recorded start. Sending it
+		// now would start it after the time the hourly bound counts, so it
+		// is dropped; the recorded start still counts (the safe side).
 		e.inconclusive(ciInconclusiveDispatch)
 		return
 	}
@@ -1141,10 +1150,11 @@ func (e *computeScoringEngine) persistExclusion(ctx context.Context, providerID 
 
 // beginDispatch turns a reservation into a counted start immediately before
 // dispatch. The start is made durable first, so a restart always sees it;
-// it is stamped at the latest moment the dispatch can begin after the
-// bounded write. If the write fails, the request is not sent. Either way
-// the reservation's pending count is released.
-func (e *computeScoringEngine) beginDispatch(ctx context.Context) bool {
+// it is stamped at the latest moment the dispatch may begin, and the caller
+// sends nothing once that moment has passed. If the write fails, the
+// request is not sent. Either way the reservation's pending count is
+// released.
+func (e *computeScoringEngine) beginDispatch(ctx context.Context) (time.Time, bool) {
 	at := e.s.now().Add(computeScoreLookupTimeout)
 	wctx, cancel := context.WithTimeout(ctx, computeScoreLookupTimeout)
 	// Start writes are serialized and retried within the bound, so
@@ -1164,7 +1174,7 @@ func (e *computeScoringEngine) beginDispatch(ctx context.Context) bool {
 	e.pendingStarts--
 	if err != nil {
 		e.s.log.Warn().Str("event", "compute_integrity_start_persist_failed").Msg("verification start not persisted; request not sent")
-		return false
+		return at, false
 	}
 	i := len(e.recentStarts)
 	for i > 0 && e.recentStarts[i-1].After(at) {
@@ -1173,7 +1183,7 @@ func (e *computeScoringEngine) beginDispatch(ctx context.Context) bool {
 	e.recentStarts = append(e.recentStarts, time.Time{})
 	copy(e.recentStarts[i+1:], e.recentStarts[i:])
 	e.recentStarts[i] = at
-	return true
+	return at, true
 }
 
 func (e *computeScoringEngine) retryExclusions(ctx context.Context, now time.Time, deadline time.Time) {

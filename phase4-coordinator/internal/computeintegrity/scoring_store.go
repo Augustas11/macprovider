@@ -25,10 +25,6 @@ func NewScoringStore(ctx context.Context, db *sql.DB) (*ScoringStore, error) {
 	if db == nil {
 		return nil, errScoringStoreClosed
 	}
-	var startsTable int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'compute_integrity_verification_starts'`).Scan(&startsTable); err != nil {
-		return nil, err
-	}
 	_, err := db.ExecContext(ctx, `
 CREATE TABLE IF NOT EXISTS compute_integrity_scoring_keys (
     provider_id    TEXT NOT NULL,
@@ -42,26 +38,56 @@ CREATE TABLE IF NOT EXISTS compute_integrity_scorer_exclusions (
     provider_id     TEXT PRIMARY KEY,
     excluded_at_utc TEXT NOT NULL
 ) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS compute_integrity_verification_starts (
-    started_at_utc TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_civs_started ON compute_integrity_verification_starts(started_at_utc);
 `)
 	if err != nil {
 		return nil, err
 	}
-	if startsTable == 0 {
-		// One-time upgrade backfill: an earlier build counted starts from
-		// the reserved cip_ accounts in the request log. Carry the last two
-		// hours over so the first restart on this build counts them.
-		if err := backfillVerificationStarts(ctx, db); err != nil {
-			return nil, err
-		}
+	if err := ensureVerificationStarts(ctx, db); err != nil {
+		return nil, err
 	}
 	return &ScoringStore{db: db}, nil
 }
 
-func backfillVerificationStarts(ctx context.Context, db *sql.DB) error {
+// ensureVerificationStarts creates the start table and, when it is new,
+// backfills it in the same transaction: an earlier build counted starts from
+// the reserved cip_ accounts in the request log, so the last two hours carry
+// over once. If the backfill fails, the table creation rolls back with it
+// and the next start retries both.
+func ensureVerificationStarts(ctx context.Context, db *sql.DB) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var exists int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'compute_integrity_verification_starts'`).Scan(&exists); err != nil {
+		return err
+	}
+	if exists == 1 {
+		_, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_civs_started ON compute_integrity_verification_starts(started_at_utc)`)
+		if err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+	if _, err := tx.ExecContext(ctx, `
+CREATE TABLE compute_integrity_verification_starts (
+    started_at_utc TEXT NOT NULL
+);
+CREATE INDEX idx_civs_started ON compute_integrity_verification_starts(started_at_utc);
+`); err != nil {
+		return err
+	}
+	if err := backfillVerificationStarts(ctx, tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func backfillVerificationStarts(ctx context.Context, db interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}) error {
 	var present int
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'request_log'`).Scan(&present); err != nil || present == 0 {
 		return err

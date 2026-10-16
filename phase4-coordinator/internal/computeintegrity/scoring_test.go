@@ -609,3 +609,39 @@ func TestScoringStoreBackfillsStartsOnce(t *testing.T) {
 		t.Fatalf("backfill ran again: %d starts", len(got))
 	}
 }
+
+// FR-20 upgrade: a failed backfill rolls back the start table with it, so
+// the next open retries the carry-over instead of skipping it for good.
+func TestScoringStoreBackfillFailureRetries(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "bf2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	// A request log without the columns the backfill reads makes it fail.
+	if _, err := db.Exec(`CREATE TABLE request_log (unrelated TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewScoringStore(ctx, db); err == nil {
+		t.Fatal("a failed backfill must fail the open")
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name = 'compute_integrity_verification_starts'`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("start table left behind after a failed backfill (n=%d err=%v)", n, err)
+	}
+	if _, err := db.Exec(`DROP TABLE request_log; CREATE TABLE request_log (ts_utc TEXT NOT NULL, account_id TEXT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	recent := time.Now().Add(-5 * time.Minute).UTC().Format("2006-01-02T15:04:05.000000000Z")
+	if _, err := db.Exec(`INSERT INTO request_log VALUES (?, 'cip_x')`, recent); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewScoringStore(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := store.RecentVerificationRequests(ctx, time.Now().Add(-time.Hour), 10); err != nil || len(got) != 1 {
+		t.Fatalf("retried backfill carried %d starts err=%v, want 1", len(got), err)
+	}
+}

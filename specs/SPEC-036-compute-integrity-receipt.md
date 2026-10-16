@@ -2164,16 +2164,18 @@ Rate bounds:
   rolling hour coordinator-wide. A reservation holds budget until its
   request is dispatched. Immediately before dispatch the start is written to
   a dedicated table, pruned to the last hours, and stamped at the latest
-  moment the dispatch can begin after that bounded write. If the write fails
-  the request is not sent. The coordinator reads the table at start, so the
+  moment the dispatch may begin, and a request still unsent at that moment
+  is dropped while its start keeps counting. If the write fails the request
+  is not sent. The coordinator reads the table at start, so the
   bound survives a restart without scanning buyer traffic; on the first open
   of the table it carries over the last two hours of reserved `cip_` requests
-  from the request log once. If the history cannot be read, the bound fails
+  from the request log, in the transaction that creates the table, so a
+  failed carry-over is retried at the next start. If the history cannot be read, the bound fails
   closed and the whole budget counts as spent for one hour.
 - One deadline of one sweep interval bounds each sweep, including
   maintenance writes and the operator-identity lookups of a scorer pool:
   each lookup runs under it and it is checked again after every lookup and
-  before a reservation. A key the deadline cuts off reserves nothing and
+  under the lock that makes a reservation. A key the deadline cuts off reserves nothing and
   stays due for the next sweep; identities resolved so far stay cached, and
   a lookup cut off by the deadline is not cached as a failure.
 - A key whose operator identity cannot be resolved waits for its next cadence
