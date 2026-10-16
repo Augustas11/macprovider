@@ -11,6 +11,17 @@ renders it from two inputs and never signs anything:
   key ids, source commit, provider revision, reproducible build digest, live
   executable CDHash, challenge-bank and artifact-projection digests.
 
+The tuple file holds one tuple input object, or a JSON array of them (one per
+admitted model tuple, SPEC-048 0.1.33); `--tuple` may also be repeated. All
+entries share the release-owned fields and are emitted sorted by the SPEC-023
+entry key. A single tuple input produces the same bytes as before.
+
+The `projection` command renders the release's
+`native-mtp-artifact-manifest.json` from a JSON object keyed by `model_key`
+whose values are the closed `{target, mtp, tokenizer, manifest}` artifact
+objects: the v1 form for one model (byte-identical to the pre-0.1.33 file),
+the v2 form keyed by `model_key` for more than one.
+
 Output is canonical bytes (sorted keys, no insignificant whitespace, UTF-8),
 the form the static-feed signer signs. The command also prints the
 `sidecar_sha256` and the domain-separated `native_mtp_admission_tuple_sha256`
@@ -20,8 +31,11 @@ script refuses to read any key.
 
 Usage:
   python3 scripts/native_mtp_admission_sidecar.py build \\
-      --tuple <tuple.json> --release <release.json> --out <native-mtp-admission.json>
+      --tuple <tuple.json> [--tuple <tuple.json> ...] --release <release.json> \\
+      --out <native-mtp-admission.json>
   python3 scripts/native_mtp_admission_sidecar.py identity --sidecar <native-mtp-admission.json>
+  python3 scripts/native_mtp_admission_sidecar.py projection \\
+      --models <projection-models.json> --out <native-mtp-artifact-manifest.json>
 """
 
 from __future__ import annotations
@@ -39,6 +53,9 @@ TUPLE_IDENTITY_SCHEMA = "macprovider.native-mtp-admission-tuple.v1"
 TUPLE_IDENTITY_DOMAIN = "macprovider.native-mtp-admission-tuple.v1\n"
 TUPLE_INPUT_SCHEMA = "macprovider.native-mtp-admission-tuple-input.v1"
 RELEASE_INPUT_SCHEMA = "macprovider.native-mtp-admission-release-input.v1"
+PROJECTION_V1_SCHEMA = "macprovider.native-mtp-artifact-projection.v1"
+PROJECTION_V2_SCHEMA = "macprovider.native-mtp-artifact-projection.v2"
+PROJECTION_ARTIFACTS = {"target", "mtp", "tokenizer", "manifest"}
 HASH_ALGORITHM = "macprovider.snapshot-manifest.v1"
 
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -282,6 +299,15 @@ def validate_entry(entry: object, path: str) -> dict:
     return entry
 
 
+def entry_sort_key(entry: dict) -> list[str]:
+    """SPEC-023 §12.5 entry order: (model_key, artifact_id, hardware_class,
+    ram_bytes, qualified_slots, proposal_depth, quantization.kind), bytewise."""
+    return [
+        entry["model_key"], entry["artifact_id"], entry["hardware_class"], str(entry["ram_bytes"]),
+        str(entry["qualified_slots"]), str(entry["proposal_depth"]), entry["quantization"]["kind"],
+    ]
+
+
 def validate_sidecar(body: object) -> dict:
     body = _exact_keys(body, TOP_KEYS, "$")
     if body["schema_version"] != SCHEMA_VERSION:
@@ -299,10 +325,7 @@ def validate_sidecar(body: object) -> dict:
     keys = []
     for index, entry in enumerate(entries):
         validate_entry(entry, f"$.entries[{index}]")
-        keys.append([
-            entry["model_key"], entry["artifact_id"], entry["hardware_class"], str(entry["ram_bytes"]),
-            str(entry["qualified_slots"]), str(entry["proposal_depth"]), entry["quantization"]["kind"],
-        ])
+        keys.append(entry_sort_key(entry))
     if any(not a < b for a, b in zip(keys, keys[1:])):
         fail("$.entries", "must be unique and sorted by the SPEC-023 sort key")
     return body
@@ -318,16 +341,36 @@ def admission_tuple_sha256(release_id: str, sidecar_sha256: str, entry: dict) ->
     return hashlib.sha256(TUPLE_IDENTITY_DOMAIN.encode("utf-8") + canonical_bytes(identity)).hexdigest()
 
 
-def build(tuple_input: dict, release_input: dict) -> bytes:
-    tuple_input = _exact_keys(tuple_input, {"schema_version", "entry"}, "$tuple")
+def _tuple_entry(tuple_input: object, path: str) -> dict:
+    tuple_input = _exact_keys(tuple_input, {"schema_version", "entry"}, path)
     if tuple_input["schema_version"] != TUPLE_INPUT_SCHEMA:
-        fail("$tuple.schema_version", f"must be {TUPLE_INPUT_SCHEMA}")
+        fail(f"{path}.schema_version", f"must be {TUPLE_INPUT_SCHEMA}")
     fixed = tuple_input["entry"]
     if not isinstance(fixed, dict):
-        fail("$tuple.entry", "must be an object")
+        fail(f"{path}.entry", "must be an object")
     owned = set(RELEASE_ENTRY_KEYS) & fixed.keys()
     if owned:
-        fail("$tuple.entry", f"release-owned fields {sorted(owned)} must come from the release input")
+        fail(f"{path}.entry", f"release-owned fields {sorted(owned)} must come from the release input")
+    if "provider_revision" in (fixed.get("ordinary_baseline") or {}):
+        fail(f"{path}.entry.ordinary_baseline.provider_revision", "is release-owned; omit it")
+    return fixed
+
+
+def build(tuple_input: dict | list, release_input: dict) -> bytes:
+    """Render the sidecar from one tuple input object or a list of them.
+
+    Every tuple's entry takes the same release-owned fields (one release, one
+    projection manifest, one challenge bank) and the entries are sorted by the
+    SPEC-023 key; a duplicate key fails. One tuple input renders exactly the
+    bytes it rendered before multi-entry support."""
+    if isinstance(tuple_input, list):
+        if not tuple_input:
+            fail("$tuple", "must hold at least one tuple input")
+        if len(tuple_input) > 256:
+            fail("$tuple", "must hold at most 256 tuple inputs")
+        fixed_entries = [_tuple_entry(item, f"$tuple[{index}]") for index, item in enumerate(tuple_input)]
+    else:
+        fixed_entries = [_tuple_entry(tuple_input, "$tuple")]
     release_input = _exact_keys(
         release_input,
         {"schema_version", "release_id", "issued_at", "expires_at", "signer_key_id",
@@ -337,16 +380,71 @@ def build(tuple_input: dict, release_input: dict) -> bytes:
     if release_input["schema_version"] != RELEASE_INPUT_SCHEMA:
         fail("$release.schema_version", f"must be {RELEASE_INPUT_SCHEMA}")
     release_entry = _exact_keys(release_input["entry"], set(RELEASE_ENTRY_KEYS), "$release.entry")
-    entry = {**fixed, **release_entry}
-    baseline = dict(entry.get("ordinary_baseline") or {})
-    if "provider_revision" in baseline:
-        fail("$tuple.entry.ordinary_baseline.provider_revision", "is release-owned; omit it")
-    baseline["provider_revision"] = release_entry["provider_revision"]
-    entry["ordinary_baseline"] = baseline
+    entries = []
+    for fixed in fixed_entries:
+        entry = {**fixed, **release_entry}
+        baseline = dict(entry.get("ordinary_baseline") or {})
+        baseline["provider_revision"] = release_entry["provider_revision"]
+        entry["ordinary_baseline"] = baseline
+        entries.append(entry)
+    if len(entries) > 1:
+        # Validate before sorting so a malformed entry reports its input index.
+        for index, entry in enumerate(entries):
+            validate_entry(entry, f"$tuple[{index}].entry")
+        entries.sort(key=lambda entry: [part.encode("utf-8") for part in entry_sort_key(entry)])
     body = {key: release_input[key] for key in TOP_KEYS - {"entries"}}
     body["schema_version"] = SCHEMA_VERSION
-    body["entries"] = [entry]
+    body["entries"] = entries
     return canonical_bytes(validate_sidecar(body))
+
+
+def _projection_artifacts(value: object, path: str) -> dict:
+    artifacts = _exact_keys(value, PROJECTION_ARTIFACTS, path)
+    for name in sorted(PROJECTION_ARTIFACTS):
+        artifact = _exact_keys(artifacts[name], {"path", "sha256"}, f"{path}.{name}")
+        _str(artifact["path"], f"{path}.{name}.path", max_bytes=1024)
+        if artifact["path"].startswith("/") or ".." in artifact["path"].split("/"):
+            fail(f"{path}.{name}.path", "must be a relative path without '..'")
+        _str(artifact["sha256"], f"{path}.{name}.sha256", SHA256)
+    return artifacts
+
+
+def build_projection(models: object) -> bytes:
+    """SPEC-048 0.1.33 projection manifest: v1 for one model_key (the exact
+    pre-0.1.33 bytes), v2 keyed by model_key for more than one."""
+    if not isinstance(models, dict) or not 1 <= len(models) <= 256:
+        fail("$models", "must be an object of 1..256 model_key entries")
+    for model_key, artifacts in models.items():
+        _str(model_key, f"$models[{model_key!r}]")
+        _projection_artifacts(artifacts, f"$models[{model_key!r}]")
+    if len(models) == 1:
+        (artifacts,) = models.values()
+        return canonical_bytes({"schema_version": PROJECTION_V1_SCHEMA, "artifacts": artifacts})
+    return canonical_bytes({"schema_version": PROJECTION_V2_SCHEMA, "models": models})
+
+
+def read_projection(manifest_bytes: bytes, model_keys: list[str], model_key: str) -> dict:
+    """Select `model_key`'s artifacts from either projection form, as the
+    consumer does. `model_keys` are the sidecar's entry model keys: a v1 file
+    serves exactly one distinct model key, a v2 file exactly the set named."""
+    value = strict_json_loads(manifest_bytes.decode("utf-8"))
+    if not isinstance(value, dict):
+        fail("$projection", "must be an object")
+    distinct = set(model_keys)
+    if model_key not in distinct:
+        fail("$projection", f"model_key {model_key!r} is not an entry of the sidecar")
+    if value.get("schema_version") == PROJECTION_V1_SCHEMA:
+        value = _exact_keys(value, {"schema_version", "artifacts"}, "$projection")
+        if len(distinct) != 1:
+            fail("$projection", "a v1 projection serves exactly one model_key")
+        return _projection_artifacts(value["artifacts"], "$projection.artifacts")
+    if value.get("schema_version") == PROJECTION_V2_SCHEMA:
+        value = _exact_keys(value, {"schema_version", "models"}, "$projection")
+        models = value["models"]
+        if not isinstance(models, dict) or set(models) != distinct:
+            fail("$projection.models", "must name exactly the sidecar's model keys")
+        return _projection_artifacts(models[model_key], f"$projection.models[{model_key!r}]")
+    fail("$projection.schema_version", f"must be {PROJECTION_V1_SCHEMA} or {PROJECTION_V2_SCHEMA}")
 
 
 def identity(sidecar_bytes: bytes) -> dict:
@@ -364,17 +462,28 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
     build_parser = sub.add_parser("build")
-    build_parser.add_argument("--tuple", type=Path, required=True)
+    build_parser.add_argument("--tuple", type=Path, required=True, action="append")
     build_parser.add_argument("--release", type=Path, required=True)
     build_parser.add_argument("--out", type=Path, required=True)
     identity_parser = sub.add_parser("identity")
     identity_parser.add_argument("--sidecar", type=Path, required=True)
+    projection_parser = sub.add_parser("projection")
+    projection_parser.add_argument("--models", type=Path, required=True)
+    projection_parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == "build":
-            data = build(strict_json_loads(args.tuple.read_text("utf-8")), strict_json_loads(args.release.read_text("utf-8")))
+            loaded = [strict_json_loads(path.read_text("utf-8")) for path in args.tuple]
+            tuples: dict | list = loaded[0] if len(loaded) == 1 else [
+                item for value in loaded for item in (value if isinstance(value, list) else [value])
+            ]
+            data = build(tuples, strict_json_loads(args.release.read_text("utf-8")))
             args.out.write_bytes(data)
             print(json.dumps(identity(data), indent=2, sort_keys=True))
+        elif args.command == "projection":
+            data = build_projection(strict_json_loads(args.models.read_text("utf-8")))
+            args.out.write_bytes(data)
+            print(json.dumps({"artifact_manifest_sha256": hashlib.sha256(data).hexdigest()}, indent=2))
         else:
             print(json.dumps(identity(args.sidecar.read_bytes()), indent=2, sort_keys=True))
     except (SidecarError, json.JSONDecodeError, OSError) as exc:
