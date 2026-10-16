@@ -25,7 +25,7 @@ from pathlib import Path
 
 MODEL = "mlx-community/Qwen2-VL-2B-Instruct-4bit"
 REVISION = "01af461cdb9574acc09084a0ef94e216e142b085"
-RUNTIME_REVISION = "b07d6626ac0aa44b8cf8a7af9eefda10c99ed2ed"
+RUNTIME_REVISION = "dbe8bcb39a00e31b8ba9a0602c60d9388fca247d"
 PROFILE = "qwen2vl-inline-v1"
 MAX_RESPONSE = 256 * 1024
 
