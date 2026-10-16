@@ -289,6 +289,22 @@ final class PagedKVRuntimeMixedCacheTests: XCTestCase {
         XCTAssertEqual(attention.offset, 4, "trimmed to the covered token count")
         XCTAssertEqual(attention.state[0].asType(.float32).asArray(Float.self), [1, 2, 3, 4])
 
+        // #2015: with a checkpoint at exactly the covered count, the recurrent layer
+        // carries that state, so SPEC-037 codec-v2 capture sees complete state.
+        let atCheckpoint = try await backend.materializeSerialConversationCache(
+            requestID: "row-a",
+            binding: try await allocator.binding(for: handle),
+            tokenCount: 3,
+            recurrentCheckpoints: [checkpoint]
+        )
+        let seeded = try XCTUnwrap(atCheckpoint)
+        let seededRecurrent = try XCTUnwrap(seeded.layers[0] as? MambaCache)
+        let checkpointState = try XCTUnwrap(checkpoint.states[0])
+        XCTAssertEqual(seededRecurrent.state.count, checkpointState.count)
+        XCTAssertTrue(zip(seededRecurrent.state, checkpointState).allSatisfy { $0 === $1 })
+        XCTAssertEqual(seededRecurrent.offset, 0, "the captured offset stays the placeholder's")
+        XCTAssertEqual((seeded.layers[1] as? KVCacheSimple)?.offset, 3)
+
         let pagedOnly = PagedKVSharedForwardBackend(
             container: container,
             blockSizeTokens: 4,

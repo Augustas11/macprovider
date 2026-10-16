@@ -284,10 +284,16 @@ enum KVRecurrentCacheSerialization {
                     ndim: state[0].shape.count, dims: state[0].shape, dtype: dtype))
             } else if cache is MambaCache {
                 guard cache.metaState == ["2", "0,1"] else { return nil }
-                layerRecords.append(.init(layerIndex: index, classID: "MambaCache", layoutVersion: 2, ndim: 0, dims: [], dtype: .f16))
+                // `decodedLengthV2` charges the recurrent u64 captured_offset only
+                // when the record carries it; without it the estimate is nil (#2015).
+                layerRecords.append(.init(
+                    layerIndex: index, classID: "MambaCache", layoutVersion: 2, ndim: 0, dims: [], dtype: .f16,
+                    cacheOffset: cache.offset))
             } else if cache is ArraysCache {
                 guard cache.metaState == ["2", "0,1"] else { return nil }
-                layerRecords.append(.init(layerIndex: index, classID: "ArraysCache", layoutVersion: 2, ndim: 0, dims: [], dtype: .f16))
+                layerRecords.append(.init(
+                    layerIndex: index, classID: "ArraysCache", layoutVersion: 2, ndim: 0, dims: [], dtype: .f16,
+                    cacheOffset: cache.offset))
             } else { return nil }
         }
         let recurrent = recurrentIndices.map { index in

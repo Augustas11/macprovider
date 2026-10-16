@@ -436,7 +436,7 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
             return nil
         }
         guard estimatedDecoded <= maxEntryBytes else {
-            FileHandle.standardError.write(Data("event=kv_disk_cache action=capture_skipped reason=max_entry_bytes decoded=\(estimatedDecoded) cap=\(maxEntryBytes)\n".utf8))
+            FileHandle.standardError.write(Data("event=kv_disk_cache action=capture_skipped reason=max_entry_bytes decoded=\(estimatedDecoded) cap=\(maxEntryBytes) knob=max_entry_bytes\n".utf8))
             Task { [store] in await store.noteWriteBudgetSkipped(rawKey: conversationKey) }
             return nil
         }
@@ -445,13 +445,13 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         // KVS-01a drops were oversize prompts, not this ceiling on the 1600-token class.
         let (promotionEstimate, promotionOverflow) = estimatedDecoded.multipliedReportingOverflow(by: hasRecurrent ? 2 : 1)
         guard !promotionOverflow, promotionEstimate <= stagingMaxBytes else {
-            FileHandle.standardError.write(Data("event=kv_disk_cache action=capture_skipped reason=exceeds_promotion_ceiling decoded=\(estimatedDecoded) cap=\(stagingMaxBytes)\n".utf8))
+            FileHandle.standardError.write(Data("event=kv_disk_cache action=capture_skipped reason=exceeds_promotion_ceiling decoded=\(estimatedDecoded) required=\(promotionOverflow ? "overflow" : String(promotionEstimate)) cap=\(stagingMaxBytes) knob=staging_max_bytes\n".utf8))
             Task { [store] in await store.notePromotionCeilingSkipped(rawKey: conversationKey) }
             return nil
         }
         let writeFootprint = estimatedDecoded + activeSealFootprint(decoded: estimatedDecoded)
         guard writeFootprint <= writeStagingMaxBytes else {
-            FileHandle.standardError.write(Data("event=kv_disk_cache action=capture_skipped reason=write_staging decoded=\(estimatedDecoded) footprint=\(writeFootprint) cap=\(writeStagingMaxBytes)\n".utf8))
+            FileHandle.standardError.write(Data("event=kv_disk_cache action=capture_skipped reason=write_staging decoded=\(estimatedDecoded) footprint=\(writeFootprint) cap=\(writeStagingMaxBytes) knob=write_staging_max_bytes\n".utf8))
             Task { [store] in await store.noteWriteBudgetSkipped(rawKey: conversationKey) }
             return nil
         }

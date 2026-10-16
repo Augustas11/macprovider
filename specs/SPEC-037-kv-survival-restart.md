@@ -1,10 +1,10 @@
 # SPEC-037 — KV survival across provider restarts (encrypted provider-local disk tier)
 
-Version: v0.2.0
+Version: v0.2.1
 Status: draft (v0.2 fleet/recurrent implementation and acceptance in progress)
 Owner: provider runtime / prefix-cache persistence
 Decision source: `docs/research/RESEARCH_233_KV_SURVIVAL_RESTART_MEMO.md` (landed decision memo, commit `d6881b14`)
-Audit history: R1+R2+R3 five-lane audits (codex code/security/architect + adversarial verificator + product critic) reconciled in this text. R2 forced: positive synthetic-key sub-namespace (the shipped `conv:` validator makes prefix-exclusion gating unsatisfiable), per-entry Keychain DEKs as the rollback-proof revocation anchor, purge-generation stamping at lease acquisition, rotation-intent journal, byte-level format grammar, write-side staging caps, and `allow_buyer_keys` rejected in v0.1. R3 forced: non-circular AAD projection (blob hash out of AAD), single-key purge lease fencing, lock inode outside the deletable tree, incoming-vs-served model identity split, DEK lifecycle on eviction, and control-plane state bounds. v0.1.2: Keychain mode for the shipped naked Developer ID CLI is the process-default / login keychain (same store as provider credentials); Data Protection Keychain is used only when a named access group is set on a profiled bundle. v0.1.3: RESEARCH_233 Q6 on the live Qwen3-Coder-30B-A3B 4-bit tuple is unquantized `KVCacheSimple` (`kv_bits=null`, ~98 KiB/token; KVS-01a evidence). Q7 q4 KV is not the active representation. FR-KVP9 promotion hard ceiling rises to 1 GiB so the memo's 8k FP16 class is configurable; the default stays 256 MiB. Codec stays `kvsurv-codec-v1`. KVS-01b evidence is not claimed here. v0.1.4: hybrid entries (any recurrent `ArraysCache`/`MambaCache` layer, with SPEC-024 v0.2.5 recurrent-state checkpoints) are hot-tier only and never persisted or promoted. v0.1.5: decode-path exclusion is explicit for both `classic_draft_spec` and `native_mtp`; neither path may enter persistent or hot conversation-cache lifecycle.
+Audit history: R1+R2+R3 five-lane audits (codex code/security/architect + adversarial verificator + product critic) reconciled in this text. R2 forced: positive synthetic-key sub-namespace (the shipped `conv:` validator makes prefix-exclusion gating unsatisfiable), per-entry Keychain DEKs as the rollback-proof revocation anchor, purge-generation stamping at lease acquisition, rotation-intent journal, byte-level format grammar, write-side staging caps, and `allow_buyer_keys` rejected in v0.1. R3 forced: non-circular AAD projection (blob hash out of AAD), single-key purge lease fencing, lock inode outside the deletable tree, incoming-vs-served model identity split, DEK lifecycle on eviction, and control-plane state bounds. v0.1.2: Keychain mode for the shipped naked Developer ID CLI is the process-default / login keychain (same store as provider credentials); Data Protection Keychain is used only when a named access group is set on a profiled bundle. v0.1.3: RESEARCH_233 Q6 on the live Qwen3-Coder-30B-A3B 4-bit tuple is unquantized `KVCacheSimple` (`kv_bits=null`, ~98 KiB/token; KVS-01a evidence). Q7 q4 KV is not the active representation. FR-KVP9 promotion hard ceiling rises to 1 GiB so the memo's 8k FP16 class is configurable; the default stays 256 MiB. Codec stays `kvsurv-codec-v1`. KVS-01b evidence is not claimed here. v0.1.4: hybrid entries (any recurrent `ArraysCache`/`MambaCache` layer, with SPEC-024 v0.2.5 recurrent-state checkpoints) are hot-tier only and never persisted or promoted. v0.1.5: decode-path exclusion is explicit for both `classic_draft_spec` and `native_mtp`; neither path may enter persistent or hot conversation-cache lifecycle. v0.2.1 (#2015): a batched hybrid first turn's serial cache carries the terminal checkpoint state in its recurrent layers, so codec-v2 capture sees complete canonical state instead of an empty placeholder; both staging ceilings default to 1 GiB on hosts with at least 32 GiB of memory (256 MiB below), because a Qwen3.6-35B-A3B entry needs ~61 MiB per recurrent checkpoint plus 20 KiB/token and its promotion staging is twice its decoded size.
 
 ## 1. Purpose and scope
 
@@ -201,7 +201,7 @@ persistence-format test fixtures (§7).
   the snapshot records (fixture: AC-9).
 - **Write-side budget (RAM-DoS bound).** Before copying, the writer MUST
   estimate snapshot bytes from validated cache geometry; if the estimate
-  exceeds `write_staging_max_bytes` (default 256 MiB; hard max 1 GiB), the
+  exceeds `write_staging_max_bytes` (default per the FR-KVP11 table; hard max 1 GiB), the
   per-entry byte cap, **or the FR-KVP9 promotion staging ceiling** (an
   entry that could never be promoted MUST NOT be written — detail
   `exceeds_promotion_ceiling`), the write is skipped
@@ -602,7 +602,9 @@ block, fail, or corrupt the request being served.
   restoration at startup is forbidden.
 - Restore staging MUST stay within a **hard ceiling of 1 GiB** above the
   selected hot-cache state (v0.1.3 normative; configuration may lower it,
-  never raise it above the hard ceiling). The **default remains 256 MiB**.
+  never raise it above the hard ceiling). The **default is 1 GiB on hosts
+  with at least 32 GiB of physical memory and 256 MiB otherwise** (v0.2.1);
+  an explicit setting always wins.
   Reads are chunked per §5a, verified-then-materialized
   per layer, and MUST NOT hold a second full copy of the restored tensors
   once promoted. The `disk_miss_budget` trigger is the entry's
@@ -687,8 +689,8 @@ YAML file → environment → CLI overrides. Exact surface (AC-9 fixtures):
 | `max_entries` | `MACPROVIDER_KV_DISK_CACHE_MAX_ENTRIES` | `--kv-disk-cache-max-entries` | 64 | > 0; invalid ⇒ tier disabled |
 | `max_entry_bytes` | `MACPROVIDER_KV_DISK_CACHE_MAX_ENTRY_BYTES` | `--kv-disk-cache-max-entry-bytes` | 2 GiB | > 0; invalid ⇒ tier disabled |
 | `retention_minutes` | `MACPROVIDER_KV_DISK_CACHE_RETENTION_MINUTES` | `--kv-disk-cache-retention-minutes` | 60 | > 0; **cleanup deadline only — does NOT extend reuse eligibility, which is fixed at the hot-tier TTL (default 900 s) and is not tunable here**; invalid ⇒ tier disabled |
-| `staging_max_bytes` | `MACPROVIDER_KV_DISK_CACHE_STAGING_MAX_BYTES` | `--kv-disk-cache-staging-max-bytes` | 256 MiB | read/promotion side; ≤ 1 GiB hard (FR-KVP9); invalid ⇒ tier disabled |
-| `write_staging_max_bytes` | `MACPROVIDER_KV_DISK_CACHE_WRITE_STAGING_MAX_BYTES` | `--kv-disk-cache-write-staging-max-bytes` | 256 MiB | write/snapshot side; ≤ 1 GiB hard (FR-KVP3); invalid ⇒ tier disabled |
+| `staging_max_bytes` | `MACPROVIDER_KV_DISK_CACHE_STAGING_MAX_BYTES` | `--kv-disk-cache-staging-max-bytes` | 1 GiB on hosts with ≥ 32 GiB memory, else 256 MiB | read/promotion side; ≤ 1 GiB hard (FR-KVP9); invalid ⇒ tier disabled |
+| `write_staging_max_bytes` | `MACPROVIDER_KV_DISK_CACHE_WRITE_STAGING_MAX_BYTES` | `--kv-disk-cache-write-staging-max-bytes` | 1 GiB on hosts with ≥ 32 GiB memory, else 256 MiB | write/snapshot side; ≤ 1 GiB hard (FR-KVP3); invalid ⇒ tier disabled |
 | `min_free_bytes` | `MACPROVIDER_KV_DISK_CACHE_MIN_FREE_BYTES` | `--kv-disk-cache-min-free-bytes` | 8 GiB | ≥ 1 GiB; invalid ⇒ tier disabled |
 | `promotion_max_seconds` | `MACPROVIDER_KV_DISK_CACHE_PROMOTION_MAX_S` | `--kv-disk-cache-promotion-max-s` | 5 | > 0; invalid ⇒ tier disabled |
 | `shutdown_drain_seconds` | `MACPROVIDER_KV_DISK_CACHE_SHUTDOWN_DRAIN_S` | `--kv-disk-cache-shutdown-drain-s` | 5 | ≥ 0; invalid ⇒ tier disabled |
@@ -1198,7 +1200,10 @@ Cold restoration reconstructs the existing hot-cache candidate and its recurrent
 checkpoints; the existing token-prefix predicate chooses a compatible checkpoint
 and trims attention to exactly that boundary. A divergent prefix without such a
 checkpoint recomputes. Snapshot capture preserves immutable complete state while
-the lease is held. Purge, cancellation and model replacement must fence both
+the lease is held. A hot entry handed back from a batched (continuous-batching)
+row carries, in each recurrent layer, the state of its checkpoint at exactly the
+covered token count, so capture sees the same complete canonical layout as a
+serial-path entry; capture never fills a missing or empty recurrent layer itself. Purge, cancellation and model replacement must fence both
 capture and publication; restoration must recheck fences after suspension.
 
 All existing quota, retention, key destruction, clock rollback, staging and

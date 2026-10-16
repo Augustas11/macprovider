@@ -14,9 +14,10 @@ public struct KVDiskCacheConfig: Equatable, Sendable {
     public var maxEntries: Int
     public var maxEntryBytes: Int
     public var retentionMinutes: Int
-    /// Read/promotion staging ceiling (FR-KVP9): hard max 1 GiB; default 256 MiB.
+    /// Read/promotion staging ceiling (FR-KVP9): hard max 1 GiB; default by host
+    /// memory (`defaultStagingMaxBytes(physicalMemoryBytes:)`).
     public var stagingMaxBytes: Int
-    /// Write/snapshot staging ceiling (FR-KVP3): hard max 1 GiB.
+    /// Write/snapshot staging ceiling (FR-KVP3): hard max 1 GiB; same default.
     public var writeStagingMaxBytes: Int
     public var minFreeBytes: Int
     public var promotionMaxSeconds: Int
@@ -68,6 +69,19 @@ public struct KVDiskCacheConfig: Equatable, Sendable {
     public static let defaultRetentionMinutes = 60
     public static let defaultStagingMaxBytes = 256 * 1024 * 1024        // 256 MiB
     public static let defaultWriteStagingMaxBytes = 256 * 1024 * 1024   // 256 MiB
+    /// Hosts with at least this much unified memory default both staging
+    /// ceilings to the 1 GiB hard max (SPEC-037 FR-KVP9, v0.2.1). A hybrid
+    /// Qwen3.6-35B-A3B entry carries ~61 MiB per recurrent checkpoint plus
+    /// 20 KiB/token of attention KV, so at the 256 MiB default no first-turn
+    /// entry with three checkpoints is ever writable (#2015).
+    public static let largeHostPhysicalMemoryBytes: UInt64 = 32 * 1024 * 1024 * 1024
+    public static let largeHostStagingMaxBytes = 1024 * 1024 * 1024     // 1 GiB
+
+    /// Default for both `staging_max_bytes` and `write_staging_max_bytes`:
+    /// 1 GiB on hosts with ≥ 32 GiB memory, else 256 MiB. Explicit settings win.
+    public static func defaultStagingMaxBytes(physicalMemoryBytes: UInt64) -> Int {
+        physicalMemoryBytes >= largeHostPhysicalMemoryBytes ? largeHostStagingMaxBytes : defaultStagingMaxBytes
+    }
     public static let defaultMinFreeBytes = 8 * 1024 * 1024 * 1024      // 8 GiB
     public static let defaultPromotionMaxSeconds = 5
     public static let defaultShutdownDrainSeconds = 5
@@ -132,13 +146,18 @@ public enum KVDiskCacheConfigResolver {
     ///   - environment: process environment (env-var column).
     ///   - cli: typed CLI overrides.
     ///   - homeDirectory: home used for leading-`~` expansion (injectable for tests).
+    ///   - physicalMemoryBytes: host memory selecting the staging defaults (injectable for tests).
     public static func resolve(
         yaml: [String: Any]?,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         cli: KVDiskCacheCLIOverrides = KVDiskCacheCLIOverrides(),
-        homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
+        homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path,
+        physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory
     ) -> KVDiskCacheConfig {
         var config = KVDiskCacheConfig.defaults()
+        let stagingDefault = KVDiskCacheConfig.defaultStagingMaxBytes(physicalMemoryBytes: physicalMemoryBytes)
+        config.stagingMaxBytes = stagingDefault
+        config.writeStagingMaxBytes = stagingDefault
         var errors: [String] = []
 
         func fail(_ key: String, _ raw: String, _ expected: String) {
@@ -204,7 +223,7 @@ public enum KVDiskCacheConfigResolver {
         resolvePositive(&config.promotionMaxSeconds, cli.promotionMaxSeconds,
                         rawInt("promotion_max_seconds", "MACPROVIDER_KV_DISK_CACHE_PROMOTION_MAX_S"), "promotion_max_seconds", ">0", fail)
 
-        // staging_max_bytes: >0 and ≤ 1 GiB hard (default remains 256 MiB).
+        // staging_max_bytes: >0 and ≤ 1 GiB hard (default by host memory, above).
         resolveBounded(&config.stagingMaxBytes, cli.stagingMaxBytes,
                        rawInt("staging_max_bytes", "MACPROVIDER_KV_DISK_CACHE_STAGING_MAX_BYTES"),
                        "staging_max_bytes", min: 1, max: KVDiskCacheConfig.hardStagingMaxBytes,

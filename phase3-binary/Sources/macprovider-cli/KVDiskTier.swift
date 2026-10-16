@@ -208,6 +208,7 @@ final class KVDiskTier: @unchecked Sendable {
         log("event=kv_disk_cache action=enabled"
             + " directory=\(config.directory)"
             + " max_bytes=\(config.maxBytes) max_entries=\(config.maxEntries) max_entry_bytes=\(config.maxEntryBytes)"
+            + " staging_max_bytes=\(config.stagingMaxBytes) write_staging_max_bytes=\(config.writeStagingMaxBytes)"
             + " reuse_eligibility_ttl_seconds=\(eligibilityTTLSeconds)"
             + " retention_minutes=\(config.retentionMinutes)(cleanup_only)"
             + " synthetic_gate=conv:kvs-synth:+direct_http"
