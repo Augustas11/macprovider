@@ -46,6 +46,12 @@
 #   CLI=/path/to/.build-lab/release/macprovider-cli  # mlx.metallib beside it
 #   LAB_CONFIG_TEMPLATE=/path/to/lab/config.yaml     # live model, accepted tuples
 #   LAB_DIR=/path/to/lab-1980                        # results + per-leg configs
+#   LIVE_INSTALL_DIR=/path/to/live/install           # read only: its signed
+#                                                    # compatibility-set.json
+# Build the binaries with build-lab-binaries.sh: serve refuses to start when
+# the installed compatibility set's provider_cli version differs from the
+# binary's, so a lab build of a staged version must be pinned to the live
+# version. The preflight checks that for every binary before anything pauses.
 #   PAUSE_PROVIDER=1 PAUSE_PROVIDER_SOCKET=/path/to/ctl.sock \
 #   BUYER_RUNNER_STOP_CMD='...' BUYER_RUNNER_START_CMD='...' \
 #   bash studio-selfcheck-validation.sh
@@ -55,7 +61,7 @@
 set -euo pipefail
 export PATH=/usr/sbin:/opt/homebrew/bin:/usr/bin:/bin
 
-: "${CLI:?}" "${LAB_CONFIG_TEMPLATE:?}" "${LAB_DIR:?}"
+: "${CLI:?}" "${LAB_CONFIG_TEMPLATE:?}" "${LAB_DIR:?}" "${LIVE_INSTALL_DIR:?}"
 LIVE_PORT="${LIVE_PORT:-8080}"
 LAB_PORT="${LAB_PORT:-18095}"
 DRAIN_TIMEOUT_S="${DRAIN_TIMEOUT_S:-600}"
@@ -174,6 +180,30 @@ for bin in "$CLI" ${UNBOUNDED_CLI:-}; do
   grep -q "metallib_sha256: $metallib_sha" "$LAB_CONFIG_TEMPLATE" || {
     log "accepted tuples in $LAB_CONFIG_TEMPLATE do not name metallib $metallib_sha of $bin"; exit 2; }
   log "binary $bin sha256=$(shasum -a 256 "$bin" | cut -d' ' -f1) metallib=$metallib_sha"
+  # Mirror serve's compatibility-set load: the installed set first, then one
+  # beside the binary; the first whose provider_cli version equals the
+  # binary's wins, and a present but mismatched set is fatal at load.
+  bin_version="$("$bin" --version 2>/dev/null || true)"
+  compat_verdict="$(python3 - "$bin_version" "$LIVE_INSTALL_DIR/compatibility-set.json" "$(dirname "$bin")/compatibility-set.json" <<'PY'
+import json, os, sys
+version, *paths = sys.argv[1:]
+found = []
+for path in paths:
+    if os.path.isfile(path):
+        try:
+            found.append(json.load(open(path))["signed"]["components"]["provider_cli"]["version"])
+        except Exception:
+            found.append("unreadable")
+if not found or version in found:
+    print("ok " + (",".join(found) or "no-set"))
+else:
+    print("mismatch " + ",".join(found))
+PY
+)"
+  [[ "$compat_verdict" == ok* ]] || {
+    log "binary $bin version=$bin_version cannot load the compatibility set (${compat_verdict#mismatch }); build it with build-lab-binaries.sh. Nothing paused."
+    exit 2; }
+  log "binary $bin version=$bin_version compatibility-set ${compat_verdict#ok }"
 done
 
 live_body="$(status_json "$LIVE_PORT")" || { log "live status unreachable on $LIVE_PORT"; exit 3; }
