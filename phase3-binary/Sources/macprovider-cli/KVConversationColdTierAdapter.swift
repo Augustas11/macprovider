@@ -148,6 +148,12 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
     private let epochLock = NSLock()
     private var cachedEpoch = 1
 
+    /// FR-KVP9 single promotion: the store's slot ends when `read` returns, but MLX
+    /// restoration still holds the decoded bytes. This slot spans read + restore so a
+    /// concurrent candidate misses instead of overlapping that allocation.
+    private let restoreLock = NSLock()
+    private var restoreInFlight = false
+
     /// CRITICAL-2 — per-index (keyed by raw conversation key) monotonic commit
     /// sequence, allocated synchronously under the hot lease. Seeded from the store's
     /// last published sequence at `sampledPurgeGeneration` (begin-time) so
@@ -346,6 +352,12 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         let recurrentLayouts = recurrentGeometryTemplates[identity.servedModelID] ?? []
         templateLock.unlock()
         guard let template, !template.isEmpty else { return nil } // no live geometry to validate against
+        restoreLock.lock()
+        let claimed = !restoreInFlight
+        if claimed { restoreInFlight = true }
+        restoreLock.unlock()
+        guard claimed else { return nil }
+        defer { restoreLock.lock(); restoreInFlight = false; restoreLock.unlock() }
         let epoch = await store.currentEpoch
         let runtime = promotionRuntime(
             identity: identity, template: template, epoch: epoch,
@@ -435,8 +447,11 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
             FileHandle.standardError.write(Data("event=kv_disk_cache action=capture_skipped reason=estimate_unavailable token_count=\(fullTokens.count) layers=\(layers.layers.count)\n".utf8))
             return nil
         }
-        guard estimatedDecoded <= maxEntryBytes else {
-            FileHandle.standardError.write(Data("event=kv_disk_cache action=capture_skipped reason=max_entry_bytes decoded=\(estimatedDecoded) cap=\(maxEntryBytes)\n".utf8))
+        // The store caps the on-disk size (decoded + chunk framing + manifest), so check
+        // the same estimate here and never copy an entry the store will reject.
+        guard estimatedDecoded <= maxEntryBytes,
+              KVDiskCacheStore.estimateDiskBytes(decodedLength: estimatedDecoded) <= maxEntryBytes else {
+            FileHandle.standardError.write(Data("event=kv_disk_cache action=capture_skipped reason=max_entry_bytes decoded=\(estimatedDecoded) cap=\(maxEntryBytes) knob=max_entry_bytes\n".utf8))
             Task { [store] in await store.noteWriteBudgetSkipped(rawKey: conversationKey) }
             return nil
         }
@@ -445,13 +460,13 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         // KVS-01a drops were oversize prompts, not this ceiling on the 1600-token class.
         let (promotionEstimate, promotionOverflow) = estimatedDecoded.multipliedReportingOverflow(by: hasRecurrent ? 2 : 1)
         guard !promotionOverflow, promotionEstimate <= stagingMaxBytes else {
-            FileHandle.standardError.write(Data("event=kv_disk_cache action=capture_skipped reason=exceeds_promotion_ceiling decoded=\(estimatedDecoded) cap=\(stagingMaxBytes)\n".utf8))
+            FileHandle.standardError.write(Data("event=kv_disk_cache action=capture_skipped reason=exceeds_promotion_ceiling decoded=\(estimatedDecoded) required=\(promotionOverflow ? "overflow" : String(promotionEstimate)) cap=\(stagingMaxBytes) knob=staging_max_bytes\n".utf8))
             Task { [store] in await store.notePromotionCeilingSkipped(rawKey: conversationKey) }
             return nil
         }
         let writeFootprint = estimatedDecoded + activeSealFootprint(decoded: estimatedDecoded)
         guard writeFootprint <= writeStagingMaxBytes else {
-            FileHandle.standardError.write(Data("event=kv_disk_cache action=capture_skipped reason=write_staging decoded=\(estimatedDecoded) footprint=\(writeFootprint) cap=\(writeStagingMaxBytes)\n".utf8))
+            FileHandle.standardError.write(Data("event=kv_disk_cache action=capture_skipped reason=write_staging decoded=\(estimatedDecoded) footprint=\(writeFootprint) cap=\(writeStagingMaxBytes) knob=write_staging_max_bytes\n".utf8))
             Task { [store] in await store.noteWriteBudgetSkipped(rawKey: conversationKey) }
             return nil
         }

@@ -1040,7 +1040,7 @@
     {
       "spec_id": "SPEC-037",
       "title": "KV survival across provider restarts (encrypted provider-local disk tier)",
-      "version": "v0.2.0",
+      "version": "v0.2.1",
       "path": "specs/SPEC-037-kv-survival-restart.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -4370,7 +4370,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "FR-KVP9 (bounded streaming promotion): v0.1.3 raises the hard staging ceiling to 1 GiB after Q6 measured unquantized KVCacheSimple on the live Qwen tuple; default remains 256 MiB. KVS-01b 8k evidence remains pending."
+        "rationale": "FR-KVP9 (bounded streaming promotion): v0.1.3 raises the hard staging ceiling to 1 GiB after Q6 measured unquantized KVCacheSimple on the live Qwen tuple. v0.2.1 defaults both staging ceilings to 1 GiB on hosts with at least 64 GiB of memory (256 MiB below) and charges codec-v2 entries 2x their decoded length. KVS-01b 8k evidence remains pending."
       }
     },
     {

@@ -1737,8 +1737,13 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             var handoff = try bridge.materializeContiguousKVCache(handle: binding.handle, table: binding.currentTable)
             try handoff.trim(toLogicalTokens: tokenCount)
             var attention = handoff.caches.makeIterator()
+            // Recurrent layers hold the state at exactly `tokenCount`, matching the
+            // serial path's cache. An empty placeholder made the SPEC-037 codec-v2
+            // capture reject the entry (`estimate_unavailable`, #2015). Hot reuse
+            // overwrites these slots from the selected checkpoint either way.
+            let terminal = recurrentCheckpoints.last { $0.tokenCount == tokenCount }
             var layers: [KVCache] = []
-            for kind in self.cacheKinds {
+            for (index, kind) in self.cacheKinds.enumerated() {
                 switch kind {
                 case .pagedAttention, .slidingWindow:
                     guard let cache = attention.next() else {
@@ -1746,7 +1751,11 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     }
                     layers.append(cache)
                 case .recurrentMamba:
-                    layers.append(MambaCache())
+                    let cache = MambaCache()
+                    if let state = terminal?.states[index] {
+                        cache.state = state
+                    }
+                    layers.append(cache)
                 }
             }
             return ContinuousBatchSerialConversationCache(

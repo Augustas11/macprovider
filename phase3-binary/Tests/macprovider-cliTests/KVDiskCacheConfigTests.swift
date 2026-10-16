@@ -129,6 +129,39 @@ final class KVDiskCacheConfigTests: XCTestCase {
         XCTAssertTrue(c.errors.isEmpty)
     }
 
+    /// A non-finite or out-of-range YAML number disables the tier instead of trapping.
+    func testNonFiniteYAMLNumberFailsClosed() {
+        for bad in [Double.infinity, -Double.infinity, Double.nan, 1e300, 1.5] {
+            let c = resolve(yaml: ["enabled": true, "max_bytes": bad])
+            XCTAssertFalse(c.effectiveEnabled, "\(bad)")
+            XCTAssertTrue(c.errors.contains { $0.contains("max_bytes") }, "\(bad)")
+        }
+        XCTAssertEqual(resolve(yaml: ["max_bytes": 2048.0]).maxBytes, 2048)
+    }
+
+    /// #2015: hosts that can serve hybrid 35B models default both staging ceilings
+    /// to the 1 GiB hard max; smaller hosts keep 256 MiB; explicit values win.
+    func testStagingDefaultsScaleWithHostMemory() {
+        let gib: UInt64 = 1024 * 1024 * 1024
+        let large = KVDiskCacheConfigResolver.resolve(
+            yaml: nil, environment: [:], homeDirectory: "/Users/tester", physicalMemoryBytes: 64 * gib)
+        XCTAssertEqual(large.stagingMaxBytes, 1024 * 1024 * 1024)
+        XCTAssertEqual(large.writeStagingMaxBytes, 1024 * 1024 * 1024)
+        XCTAssertTrue(large.errors.isEmpty)
+
+        let small = KVDiskCacheConfigResolver.resolve(
+            yaml: nil, environment: [:], homeDirectory: "/Users/tester", physicalMemoryBytes: 64 * gib - 1)
+        XCTAssertEqual(small.stagingMaxBytes, 256 * 1024 * 1024)
+        XCTAssertEqual(small.writeStagingMaxBytes, 256 * 1024 * 1024)
+
+        let explicit = KVDiskCacheConfigResolver.resolve(
+            yaml: ["staging_max_bytes": 300_000_000],
+            environment: ["MACPROVIDER_KV_DISK_CACHE_WRITE_STAGING_MAX_BYTES": "200000000"],
+            homeDirectory: "/Users/tester", physicalMemoryBytes: 512 * gib)
+        XCTAssertEqual(explicit.stagingMaxBytes, 300_000_000)
+        XCTAssertEqual(explicit.writeStagingMaxBytes, 200_000_000)
+    }
+
     func testWriteStagingCeilingHardMax() {
         let over = 1024 * 1024 * 1024 + 1
         let c = resolve(cli: KVDiskCacheCLIOverrides(enabled: true, writeStagingMaxBytes: over))
