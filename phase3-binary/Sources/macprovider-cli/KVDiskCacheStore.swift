@@ -893,7 +893,7 @@ actor KVDiskCacheStore {
         guard decodedLength <= config.maxEntryBytes else { return skip(.perEntryCap, snapshot) }
 
         // Estimate on-disk size (ciphertext ≈ plaintext + per-chunk framing/tag).
-        let estimatedDiskBytes = estimateDiskBytes(decodedLength: decodedLength)
+        let estimatedDiskBytes = Self.estimateDiskBytes(decodedLength: decodedLength)
         guard estimatedDiskBytes <= config.maxEntryBytes else { return skip(.perEntryCap, snapshot) }
 
         // Free-space floor. Fail closed when free space is unreadable (M-19): a
@@ -1249,7 +1249,7 @@ actor KVDiskCacheStore {
     /// caller may thread a distinct value once layouts diverge (ABI-epoch bump).
     private func layoutVersion(for layer: KVLayerPayload) -> Int { 1 }
 
-    private func estimateDiskBytes(decodedLength: Int) -> Int {
+    static func estimateDiskBytes(decodedLength: Int) -> Int {
         // ciphertext == plaintext length; framing per chunk = 4+4+4+12+16 = 40.
         let chunks = max(1, (decodedLength + KVDiskCacheFormat.maxChunkCiphertextBytes - 1) / KVDiskCacheFormat.maxChunkCiphertextBytes)
         return decodedLength + chunks * 40 + KVDiskCacheFormat.manifestMaxBytes
@@ -1481,8 +1481,12 @@ actor KVDiskCacheStore {
             return .miss(.diskMissIO, .keychainUnavailable)
         }
 
-        // Promotion staging ceiling (declared decoded size).
-        guard manifest.decodedLength <= config.stagingMaxBytes else {
+        // Promotion staging ceiling (declared decoded size). codec-v2 restore holds the
+        // decoded bytes and the materialized MLX arrays at once, so it is charged twice,
+        // matching the write-side admission (FR-KVP3/FR-KVP9).
+        let promotionMultiplier = manifest.codecID == KVDiskCacheFormat.recurrentCodecID ? 2 : 1
+        let (promotionBytes, promotionOverflow) = manifest.decodedLength.multipliedReportingOverflow(by: promotionMultiplier)
+        guard !promotionOverflow, promotionBytes <= config.stagingMaxBytes else {
             emitMiss(.diskMissBudget, detail: .exceedsPromotionCeiling, prefix: prefix)
             return .miss(.diskMissBudget, .exceedsPromotionCeiling)
         }

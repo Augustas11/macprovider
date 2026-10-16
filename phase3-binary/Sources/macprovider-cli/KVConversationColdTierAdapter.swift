@@ -435,7 +435,10 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
             FileHandle.standardError.write(Data("event=kv_disk_cache action=capture_skipped reason=estimate_unavailable token_count=\(fullTokens.count) layers=\(layers.layers.count)\n".utf8))
             return nil
         }
-        guard estimatedDecoded <= maxEntryBytes else {
+        // The store caps the on-disk size (decoded + chunk framing + manifest), so check
+        // the same estimate here and never copy an entry the store will reject.
+        guard estimatedDecoded <= maxEntryBytes,
+              KVDiskCacheStore.estimateDiskBytes(decodedLength: estimatedDecoded) <= maxEntryBytes else {
             FileHandle.standardError.write(Data("event=kv_disk_cache action=capture_skipped reason=max_entry_bytes decoded=\(estimatedDecoded) cap=\(maxEntryBytes) knob=max_entry_bytes\n".utf8))
             Task { [store] in await store.noteWriteBudgetSkipped(rawKey: conversationKey) }
             return nil

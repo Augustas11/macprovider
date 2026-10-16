@@ -824,8 +824,10 @@ final class ContinuousBatchRetainedCache: @unchecked Sendable {
 
 /// SPEC-038 FR-CB4: a keyed hybrid row's cache in the serial conversation-cache
 /// format. Attention layers are contiguous `KVCacheSimple` covering the first
-/// `tokenCount` canonical tokens; recurrent layers are empty `MambaCache`s,
-/// because reuse always restores one of `recurrentCheckpoints` (SPEC-024 FR-CI2).
+/// `tokenCount` canonical tokens; recurrent layers are `MambaCache`s holding the
+/// state of the checkpoint at exactly `tokenCount` (empty when there is none, so
+/// SPEC-037 capture fails closed). Hot reuse always restores one of
+/// `recurrentCheckpoints` into them (SPEC-024 FR-CI2).
 final class ContinuousBatchSerialConversationCache: @unchecked Sendable {
     let layers: [KVCache]
     let recurrentCheckpoints: [RecurrentStateCheckpoint]

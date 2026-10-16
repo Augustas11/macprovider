@@ -74,11 +74,11 @@ public struct KVDiskCacheConfig: Equatable, Sendable {
     /// Qwen3.6-35B-A3B entry carries ~61 MiB per recurrent checkpoint plus
     /// 20 KiB/token of attention KV, so at the 256 MiB default no first-turn
     /// entry with three checkpoints is ever writable (#2015).
-    public static let largeHostPhysicalMemoryBytes: UInt64 = 32 * 1024 * 1024 * 1024
+    public static let largeHostPhysicalMemoryBytes: UInt64 = 64 * 1024 * 1024 * 1024
     public static let largeHostStagingMaxBytes = 1024 * 1024 * 1024     // 1 GiB
 
     /// Default for both `staging_max_bytes` and `write_staging_max_bytes`:
-    /// 1 GiB on hosts with ≥ 32 GiB memory, else 256 MiB. Explicit settings win.
+    /// 1 GiB on hosts with ≥ 64 GiB memory, else 256 MiB. Explicit settings win.
     public static func defaultStagingMaxBytes(physicalMemoryBytes: UInt64) -> Int {
         physicalMemoryBytes >= largeHostPhysicalMemoryBytes ? largeHostStagingMaxBytes : defaultStagingMaxBytes
     }
@@ -282,7 +282,9 @@ public enum KVDiskCacheConfigResolver {
     private static func intFromAny(_ any: Any) -> Int? {
         if let i = any as? Int { return i }
         if let s = any as? String { return Int(s.trimmingCharacters(in: .whitespaces)) }
-        if let d = any as? Double, d == d.rounded() { return Int(d) }
+        // Int(exactly:) is nil for fractional, infinite, NaN or out-of-range values,
+        // so a bad YAML number disables the tier instead of trapping.
+        if let d = any as? Double { return Int(exactly: d) }
         return nil
     }
 

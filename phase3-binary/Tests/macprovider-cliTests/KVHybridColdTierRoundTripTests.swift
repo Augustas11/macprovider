@@ -165,6 +165,101 @@ final class KVHybridColdTierRoundTripTests: XCTestCase {
         }
     }
 
+    /// The adapter applies the store's on-disk size (decoded + framing + manifest)
+    /// before copying, so an entry the store would reject is never copied.
+    func testCaptureSkipsEntryWhoseDiskSizeExceedsMaxEntryBytes() async throws {
+        try requireMLX()
+        let fixture = HybridFixture(tokenCount: 40, checkpointTokenCounts: [40])
+        let decoded = try XCTUnwrap(KVRecurrentCacheSerialization.estimatedDecodedLength(
+            layers: fixture.layers, checkpoints: fixture.checkpoints, tokenCount: 40))
+        let (store, adapter, root) = try await makeStoreAndAdapter(maxEntryBytes: decoded, stagingMaxBytes: 16 << 20)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let snapshot = adapter.captureSnapshot(
+            conversationKey: "conv:kvs-synth:hybrid-cap",
+            layers: ConversationCacheLayers(fixture.layers, recurrentCheckpoints: fixture.checkpoints),
+            fullTokens: fixture.tokens, sampledPurgeGeneration: 0, identity: hybridIdentity(),
+            nowMillis: Int(Date().timeIntervalSince1970 * 1000))
+        XCTAssertNil(snapshot, "decoded fits but decoded + framing + manifest does not")
+        await store.deactivate()
+    }
+
+    /// Promotion charges codec-v2 entries twice their decoded size on the read
+    /// side too, so lowering the ceiling after a write cannot overrun it.
+    func testPromotionChargesRecurrentEntryTwiceOnRead() async throws {
+        try requireMLX()
+        let fixture = HybridFixture(tokenCount: 40, checkpointTokenCounts: [40])
+        let decoded = try XCTUnwrap(KVRecurrentCacheSerialization.estimatedDecodedLength(
+            layers: fixture.layers, checkpoints: fixture.checkpoints, tokenCount: 40))
+        let keychain = KVInMemoryKeychain()
+        let (writer, writerAdapter, root) = try await makeStoreAndAdapter(
+            maxEntryBytes: 16 << 20, stagingMaxBytes: 16 << 20, keychain: keychain)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let key = "conv:kvs-synth:hybrid-read-ceiling"
+        let nowMillis = Int(Date().timeIntervalSince1970 * 1000)
+        let snapshot = try XCTUnwrap(writerAdapter.captureSnapshot(
+            conversationKey: key,
+            layers: ConversationCacheLayers(fixture.layers, recurrentCheckpoints: fixture.checkpoints),
+            fullTokens: fixture.tokens, sampledPurgeGeneration: 0, identity: hybridIdentity(), nowMillis: nowMillis))
+        let write = try await commit(snapshot, to: writer, nowMillis: nowMillis)
+        writerAdapter.releaseWriteLive(snapshot.reservedWriteBytes)
+        guard case .committed = write else { return XCTFail("fixture must commit, got \(write)") }
+        await writer.deactivate()
+
+        // Same namespace: a ceiling between 1x and 2x the decoded size misses;
+        // a ceiling with room for both copies promotes.
+        for (ceiling, promotes) in [(decoded + 1, false), (16 << 20, true)] {
+            let (reader, readerAdapter, _) = try await makeStoreAndAdapter(
+                maxEntryBytes: 16 << 20, stagingMaxBytes: ceiling, keychain: keychain, root: root)
+            XCTAssertTrue(readerAdapter.seedTemplate(servedModelID: "hybrid-served", layers: fixture.layers))
+            let candidate = await readerAdapter.promoteCandidate(conversationKey: key, identity: hybridIdentity())
+            XCTAssertEqual(candidate != nil, promotes, "ceiling \(ceiling) for decoded \(decoded)")
+            await reader.deactivate()
+        }
+    }
+
+    private func makeStoreAndAdapter(
+        maxEntryBytes: Int, stagingMaxBytes: Int, keychain: KVInMemoryKeychain = KVInMemoryKeychain(),
+        root existingRoot: URL? = nil
+    ) async throws -> (KVDiskCacheStore, KVConversationColdTierAdapter, URL) {
+        let root = existingRoot ?? FileManager.default.temporaryDirectory
+            .appendingPathComponent("kv-hybrid-\(UUID().uuidString)", isDirectory: true)
+        var config = KVDiskCacheStoreConfig(
+            root: root, namespaceID: "ns-hybrid",
+            maxBytes: 64 << 20, maxEntries: 8, maxEntryBytes: maxEntryBytes,
+            retentionSeconds: 3600, stagingMaxBytes: stagingMaxBytes,
+            writeStagingMaxBytes: 16 << 20, minFreeBytes: 1024,
+            promotionMaxSeconds: 5, eligibilityTTLSeconds: 900)
+        config.freeSpaceOverride = 1 << 30
+        let store = KVDiskCacheStore(config: config, keychain: keychain, sink: KVRecordingEventSink())
+        try await store.activate()
+        let adapter = KVConversationColdTierAdapter(
+            store: store, namespaceID: "ns-hybrid", eligibilityTTLSeconds: 900,
+            writeStagingMaxBytes: config.writeStagingMaxBytes, maxEntryBytes: maxEntryBytes,
+            stagingMaxBytes: stagingMaxBytes)
+        adapter.cacheEpoch(await store.currentEpoch)
+        return (store, adapter, root)
+    }
+
+    private func commit(
+        _ snapshot: ConversationColdSnapshot, to store: KVDiskCacheStore, nowMillis: Int
+    ) async throws -> KVWriteResult {
+        try await store.writeColdSnapshot(
+            rawKey: snapshot.rawKey, tokens: snapshot.tokens, layers: snapshot.layers,
+            layersV2: snapshot.layersV2, recurrentCheckpoints: snapshot.recurrentCheckpoints,
+            identity: snapshot.identity, sampledPurgeGeneration: snapshot.sampledPurgeGeneration,
+            commitSequence: snapshot.commitSequence, createdAtMillis: snapshot.createdAtMillis,
+            eligibleUntilMillis: snapshot.eligibleUntilMillis, incarnation: snapshot.incarnation,
+            nowMillis: nowMillis)
+    }
+
+    private func hybridIdentity() -> KVIdentityCore {
+        KVIdentityCore(
+            requestModel: "hybrid", servedModelID: "hybrid-served", modelSHA256: String(repeating: "b", count: 64),
+            catalogRevision: "r1", tokenizerID: "hybrid-served", tokenizerConfigSHA256: String(repeating: "c", count: 64),
+            chatTemplateSHA256: String(repeating: "d", count: 64), kvBits: nil, kvGroupSize: nil,
+            kvQuantMode: nil, kvQuantPolicy: nil)
+    }
+
     // MARK: - Fixture
 
     private enum RecurrentClass { case mamba, arrays }
