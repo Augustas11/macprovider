@@ -28,11 +28,14 @@ struct LocalResponsesCapabilities: Codable, Sendable {
         toolChoiceModes: [], textFormats: [], upstreamTextFormats: [],
         structuredOutputEnforcement: "unavailable")
 
-    static func loaded(model: String, modelHash: String?, generation: Int?, runtime: String) -> Self {
+    /// `toolSelectionModelID` is the runtime's exact tool-selection identity
+    /// when it differs from the served `model` name (a configured catalog id).
+    static func loaded(model: String, modelHash: String?, generation: Int?, runtime: String,
+                       toolSelectionModelID: String? = nil) -> Self {
         let native = runtime == "mlx_cache"
         return Self(
             available: true, model: model, modelHash: modelHash, generation: generation,
-            toolChoiceModes: ToolSelectionPolicy.modes(modelID: model, runtime: runtime),
+            toolChoiceModes: ToolSelectionPolicy.modes(modelID: toolSelectionModelID ?? model, runtime: runtime),
             textFormats: native ? ["text", "json_object", "json_schema"] : ["text"],
             upstreamTextFormats: native ? [] : ["json_object", "json_schema"],
             structuredOutputEnforcement: native

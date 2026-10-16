@@ -5814,6 +5814,20 @@ actor ModelRuntime: ModelRuntimeServing {
         signalContinuations.removeValue(forKey: id)
     }
 
+    /// The exact identity SPEC-018 §3.11 tool selection checks. An
+    /// alias-configured provider loads `model` under a local name and serves
+    /// its configured catalog id; that id is the loaded identity only while the
+    /// configured model is the one loaded (the request-alias guard below). A
+    /// warm-swapped model, and a pool alias (never the native allowlisted id),
+    /// keep the loaded id.
+    private func toolSelectionModelID(_ snapshot: RuntimeSnapshot) -> String? {
+        guard snapshot.modelID != nil, snapshot.modelID == modelID,
+              catalogModelIDAlias?.trimmingCharacters(in: .whitespacesAndNewlines)
+                == ToolSelectionPolicy.supportedNativeModel
+        else { return snapshot.modelID }
+        return ToolSelectionPolicy.supportedNativeModel
+    }
+
     func acquireRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle {
         let snapshot = requestStartSnapshot()
         try Self.validateReady(snapshot.state)
@@ -5826,7 +5840,7 @@ actor ModelRuntime: ModelRuntimeServing {
             ? modelIDAliasList(catalogModelIDAlias)
             : []
         try request.validateModelMatches(snapshot.modelID, aliases: aliases)
-        try ToolSelectionPolicy.validateRequest(request, loadedModelID: snapshot.modelID, runtime: "mlx_cache")
+        try ToolSelectionPolicy.validateRequest(request, loadedModelID: toolSelectionModelID(snapshot), runtime: "mlx_cache")
         try Self.validateNativeSamplingPenalties(request)
         let drainCancelled = DrainCancelToken()
         let registrationID = registerInFlight { drainCancelled.fire() }
@@ -5838,7 +5852,7 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     func preflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws {
-        try ToolSelectionPolicy.validateRequest(request, loadedModelID: handle.snapshot.modelID, runtime: "mlx_cache")
+        try ToolSelectionPolicy.validateRequest(request, loadedModelID: toolSelectionModelID(handle.snapshot), runtime: "mlx_cache")
         _ = try Self.validateNativeVisionRequest(request, profile: handle.snapshot.nativeVisionProfile)
         // SPEC-025 §5.2: the streaming path runs preflight (prompt prepare inside
         // container.perform — real model-thread work) before stream() brackets
@@ -5885,7 +5899,8 @@ actor ModelRuntime: ModelRuntimeServing {
             return .unavailable
         }
         return .loaded(model: model, modelHash: snapshot.modelHash,
-                       generation: selfCheckGeneration, runtime: "mlx_cache")
+                       generation: selfCheckGeneration, runtime: "mlx_cache",
+                       toolSelectionModelID: toolSelectionModelID(snapshot))
     }
 
     func localTokenUtilityCapabilities() async -> LocalTokenUtilityCapabilities {
@@ -7871,7 +7886,7 @@ actor ModelRuntime: ModelRuntimeServing {
         with handle: RequestHandle,
         shouldCancel: @escaping @Sendable () -> Bool = { false }
     ) async throws -> (CompletionResult, RuntimeSnapshot) {
-        try ToolSelectionPolicy.validateRequest(request, loadedModelID: handle.snapshot.modelID, runtime: "mlx_cache")
+        try ToolSelectionPolicy.validateRequest(request, loadedModelID: toolSelectionModelID(handle.snapshot), runtime: "mlx_cache")
         _ = try Self.validateNativeVisionRequest(request, profile: handle.snapshot.nativeVisionProfile)
         // SPEC-025 §5.2 model-liveness: mark active buyer inference so a stalled
         // progress token is interpretable as a wedge (observability only).
@@ -8578,7 +8593,7 @@ actor ModelRuntime: ModelRuntimeServing {
         shouldCancel: @escaping @Sendable () -> Bool = { false },
         onChunk: @escaping @Sendable (StreamChunk) -> Void
     ) async throws -> CompletionResult {
-        try ToolSelectionPolicy.validateRequest(request, loadedModelID: handle.snapshot.modelID, runtime: "mlx_cache")
+        try ToolSelectionPolicy.validateRequest(request, loadedModelID: toolSelectionModelID(handle.snapshot), runtime: "mlx_cache")
         _ = try Self.validateNativeVisionRequest(request, profile: handle.snapshot.nativeVisionProfile)
         if try ToolSelectionPolicy.selection(request.promptSource.toolChoice).holdsOutput {
             let (completion, _) = try await completeWithServedSnapshot(request, with: handle, shouldCancel: shouldCancel)

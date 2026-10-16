@@ -18,6 +18,19 @@ final class LocalResponsesCapabilitiesTests: XCTestCase {
         }
     }
 
+    /// #2014: an alias-served model reports the modes of its catalog identity.
+    func testAliasServedCatalogIdentityReportsGuaranteedModes() {
+        let alias = LocalResponsesCapabilities.loaded(
+            model: "qwen/qwen3.6-35b-a3b", modelHash: "hash", generation: 1, runtime: "mlx_cache",
+            toolSelectionModelID: ToolSelectionPolicy.supportedNativeModel)
+        XCTAssertEqual(alias.model, "qwen/qwen3.6-35b-a3b")
+        XCTAssertEqual(alias.toolChoiceModes, ["auto", "none", "required", "named"])
+        let other = LocalResponsesCapabilities.loaded(
+            model: "local/other", modelHash: "hash", generation: 1, runtime: "mlx_cache",
+            toolSelectionModelID: "mlx-community/Other-4bit")
+        XCTAssertEqual(other.toolChoiceModes, ["auto", "none"])
+    }
+
     func testExternalRuntimeDistinguishesForwardedFormatsFromLocalGuarantees() {
         for runtime in ["llamacpp_loopback", "ollama_loopback", "mlxlm_loopback", "lmstudio_loopback"] {
             let value = LocalResponsesCapabilities.loaded(model: ToolSelectionPolicy.supportedNativeModel,

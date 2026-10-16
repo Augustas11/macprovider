@@ -4,9 +4,9 @@ import XCTest
 @testable import macprovider_cli
 
 final class ModelRuntimeToolSelectionTests: XCTestCase {
-    private func request(choice: Any = "required", stream: Bool = false) throws -> ChatCompletionRequest {
+    private func request(choice: Any = "required", stream: Bool = false, model: String = ToolSelectionPolicy.supportedNativeModel) throws -> ChatCompletionRequest {
         try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: [
-            "model": ToolSelectionPolicy.supportedNativeModel,
+            "model": model,
             "messages": [["role": "user", "content": "Look up 3"]],
             "stream": stream, "tool_choice": choice, "max_tokens": 100,
             "tools": [["type": "function", "function": ["name": "lookup", "parameters": [
@@ -16,10 +16,15 @@ final class ModelRuntimeToolSelectionTests: XCTestCase {
         ]))
     }
 
-    private func runtime(content: String = "", name: String? = "lookup", arguments: String = #"{"id":3}"#, cancel: Bool = false) -> ModelRuntime {
+    private func runtime(
+        content: String = "", name: String? = "lookup", arguments: String = #"{"id":3}"#, cancel: Bool = false,
+        modelID: String = ToolSelectionPolicy.supportedNativeModel, catalogModelIDAlias: String? = nil,
+        warmSwapEnabled: Bool = false
+    ) -> ModelRuntime {
         ModelRuntime(
-            modelID: ToolSelectionPolicy.supportedNativeModel, warmSwapEnabled: false,
+            modelID: modelID, warmSwapEnabled: warmSwapEnabled, catalogModelIDAlias: catalogModelIDAlias,
             loader: { _ in throw CancellationError() },
+            testLoader: warmSwapEnabled ? { target in (target, "\(target)-hash") } : nil,
             testCompletion: { _, _ in
                 if cancel { throw CancellationError() }
                 return CompletionResult(
@@ -131,12 +136,85 @@ final class ModelRuntimeToolSelectionTests: XCTestCase {
     }
 
     func testCapabilitiesOnlyBindTheCurrentLoadedIdentity() {
-        let supported = CoordinatorClient.toolSelectionCapabilities(wireModelID: "catalog-alias", loadedModelID: ToolSelectionPolicy.supportedNativeModel, runtimeSource: nil)
-        XCTAssertEqual(supported.first?["model_id"] as? String, "catalog-alias")
+        let canonical = ToolSelectionPolicy.supportedNativeModel
+        // #2014: the runtime's wire identity of an alias-configured model is
+        // its catalog id, so the claim is evaluated on that id.
+        let supported = CoordinatorClient.toolSelectionCapabilities(wireModelID: canonical, runtimeWireModelID: canonical, runtimeSource: nil)
+        XCTAssertEqual(supported.first?["model_id"] as? String, canonical)
         XCTAssertEqual(supported.first?["runtime"] as? String, "mlx_cache")
         XCTAssertEqual(supported.first?["modes"] as? [String], ["auto", "none", "required", "named"])
-        XCTAssertEqual(CoordinatorClient.toolSelectionCapabilities(wireModelID: "other", loadedModelID: "other", runtimeSource: nil).first?["modes"] as? [String], ["auto", "none"])
-        XCTAssertEqual(CoordinatorClient.toolSelectionCapabilities(wireModelID: "other", loadedModelID: "other", runtimeSource: "ollama_loopback").first?["modes"] as? [String], ["auto"])
+        // A claim keyed by another id never inherits the allowlisted identity.
+        XCTAssertEqual(CoordinatorClient.toolSelectionCapabilities(wireModelID: "catalog-alias", runtimeWireModelID: canonical, runtimeSource: nil).first?["modes"] as? [String], ["auto", "none"])
+        // Swap in flight: the advertised id is not the runtime's current one.
+        XCTAssertEqual(CoordinatorClient.toolSelectionCapabilities(wireModelID: canonical, runtimeWireModelID: "other", runtimeSource: nil).first?["modes"] as? [String], ["auto", "none"])
+        XCTAssertEqual(CoordinatorClient.toolSelectionCapabilities(wireModelID: "other", runtimeWireModelID: "other", runtimeSource: nil).first?["modes"] as? [String], ["auto", "none"])
+        XCTAssertEqual(CoordinatorClient.toolSelectionCapabilities(wireModelID: "other", runtimeWireModelID: "other", runtimeSource: "ollama_loopback").first?["modes"] as? [String], ["auto"])
+        XCTAssertTrue(CoordinatorClient.toolSelectionCapabilities(wireModelID: canonical, runtimeWireModelID: nil, runtimeSource: nil).isEmpty)
+    }
+
+    /// #2014: `model` is a local alias and `model_catalog_model_id` is the
+    /// allowlisted catalog id. The loaded identity is the catalog id.
+    func testAliasConfiguredCatalogModelAcceptsNamedSelection() async throws {
+        let named: [String: Any] = ["type": "function", "function": ["name": "lookup"]]
+        for model in [ToolSelectionPolicy.supportedNativeModel, "qwen/qwen3.6-35b-a3b"] {
+            let runtime = runtime(modelID: "qwen/qwen3.6-35b-a3b", catalogModelIDAlias: ToolSelectionPolicy.supportedNativeModel)
+            let request = try request(choice: named, model: model)
+            let handle = try await runtime.acquireRequestHandle(request)
+            await runtime.unregisterInFlight(handle.registrationID)
+            let result = try await runtime.complete(request)
+            XCTAssertEqual(result.toolCalls?.first?.functionName, "lookup")
+            let required = try await runtime.complete(try self.request(model: model))
+            XCTAssertEqual(required.toolCalls?.count, 1)
+        }
+    }
+
+    func testAliasConfiguredNonAllowlistedModelKeepsAutoAndNoneOnly() async throws {
+        let runtime = runtime(modelID: "local/other", catalogModelIDAlias: "mlx-community/Other-4bit")
+        for model in ["mlx-community/Other-4bit", "local/other"] {
+            do {
+                _ = try await runtime.acquireRequestHandle(try request(model: model))
+                XCTFail("non-allowlisted model accepted required")
+            } catch let error as APIError {
+                XCTAssertEqual(error.code, "unsupported_tool_choice")
+            }
+        }
+        let none = try await runtime.acquireRequestHandle(try request(choice: "none", model: "mlx-community/Other-4bit"))
+        await runtime.unregisterInFlight(none.registrationID)
+    }
+
+    /// After a warm swap away from the configured model the catalog id no
+    /// longer names the loaded model, so guaranteed modes stay refused.
+    func testSwapAwayFromAliasConfiguredModelStaysConservative() async throws {
+        let runtime = runtime(modelID: "qwen/qwen3.6-35b-a3b", catalogModelIDAlias: ToolSelectionPolicy.supportedNativeModel, warmSwapEnabled: true)
+        try await runtime.beginSwap(targetModelID: "local/other").value
+        // The swapped-in model is refused by tool selection; the catalog id no
+        // longer names the loaded model at all.
+        for (model, code) in [("local/other", "unsupported_tool_choice"), (ToolSelectionPolicy.supportedNativeModel, "model_not_found")] {
+            do {
+                _ = try await runtime.acquireRequestHandle(try request(model: model))
+                XCTFail("swapped-in model accepted required")
+            } catch let error as APIError {
+                XCTAssertEqual(error.code, code, model)
+            }
+        }
+    }
+
+    /// A pool alias is never a catalog identity: it neither qualifies a local
+    /// model nor disqualifies a configured allowlisted one.
+    func testPoolAliasNeitherGrantsNorRemovesGuaranteedModes() async throws {
+        let pool = "pool/abcdefghijklmnopqrstuv/qwen"
+        let canonical = runtime(catalogModelIDAlias: pool)
+        let handle = try await canonical.acquireRequestHandle(try request())
+        await canonical.unregisterInFlight(handle.registrationID)
+        let local = runtime(modelID: "qwen/qwen3.6-35b-a3b", catalogModelIDAlias: pool)
+        for model in ["qwen/qwen3.6-35b-a3b", pool] {
+            do {
+                _ = try await local.acquireRequestHandle(try request(model: model))
+                XCTFail("pool alias qualified a local model")
+            } catch let error as APIError {
+                XCTAssertEqual(error.code, "unsupported_tool_choice")
+            }
+        }
     }
 }
 
