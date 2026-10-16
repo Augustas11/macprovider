@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 
@@ -9,10 +10,14 @@ import Foundation
 ///
 /// - isolation: every row of a k-row batch must produce the same greedy tokens
 ///   as that prompt run alone on the same paged engine, or first differ only
-///   at a numerical near-tie (both tokens the stock serial top two within the
-///   load-time probe's 1.0-logit tolerance), at every k up to the one granted
-///   (kernel shapes change with the row count, e.g. MLX quantized matmul
-///   switches kernels above 5 rows);
+///   at an exact tie (both tokens the stock serial top two within
+///   `nearTieLogitTolerance`), at every k up to the one granted (kernel
+///   shapes change with the row count, e.g. MLX quantized matmul switches
+///   from `qmv` to `qmm` at the device's vector limit). The exactness probe
+///   (v0.3.19) submits rows of unequal key lengths on both sides of the
+///   device's vector-attention route boundary, holds them until all of them
+///   decode together, and requires every row to have decoded at least
+///   `minimumCohortDecodeTokens` tokens beside the whole cohort;
 /// - throughput: the batch's aggregate tokens/s must beat stock serial decode
 ///   by `minimumAggregateGain`.
 ///
@@ -86,6 +91,24 @@ struct ContinuousBatchingSelfCheckTarget: Sendable, Equatable {
     /// The runtime's swap generation: a result measured before a swap never
     /// applies after it, even to the same model.
     var generation: Int = 0
+    /// Key length at which a decode row leaves the device's one-pass vector
+    /// attention kernel (`ContinuousBatchingSelfCheck.routeKeyBoundary`).
+    var probeKeyBoundary: Int = 1024
+    /// The scheduler's per-request token cap (the served context) and its
+    /// paged-KV pool: the exactness probe's rows must fit both, all at once.
+    var maxRequestTokens: Int = .max
+    var poolTokens: Int = .max
+    /// The pool's block size: each probe row reserves whole blocks.
+    var blockSizeTokens: Int = 16
+
+    /// The most slots any grant may serve on this target: the scheduler rows
+    /// and queue limit, capped by the widest exactness-probe shape they hold
+    /// (`ContinuousBatchingSelfCheck.exactnessProbeBound`). A stored, prior or
+    /// provisional grant above it is served only up to it.
+    var grantableRows: Int {
+        let configured = max(1, min(maxRows, queueLimit))
+        return min(configured, ContinuousBatchingSelfCheck.exactnessProbeBound(target: self, maxCount: configured))
+    }
 }
 
 struct ContinuousBatchingSelfCheckMeasurement: Sendable, Equatable, Codable {
@@ -118,7 +141,8 @@ struct ContinuousBatchingSelfCheckDecision: Sendable, Equatable, Codable {
     /// 1 means serve serially.
     let slots: Int
     /// `granted`, `row_divergence_at_<k>`, `no_net_gain`,
-    /// `serial_baseline_unavailable`, `crashed_at_<k>`, `single_row`.
+    /// `serial_baseline_unavailable`, `crashed_at_<k>`, `single_row`,
+    /// `probe_shape_unavailable`, `probe_shape_unmet_at_<k>`.
     let reason: String
     /// Highest slot count whose rows all passed the isolation check (1 when
     /// none did). No served count, owner pin included, may exceed it.
@@ -195,6 +219,211 @@ enum ContinuousBatchingSelfCheck {
     static let maxOutputTokens = 48
     static let serialBaselinePrompts = 4
 
+    /// SPEC-038 FR-CB10 (v0.3.19): the widest logit gap at which a batched
+    /// row may first differ from its lone run. Batched and lone rows of the
+    /// same paged engine are bit-identical under the FR-CB2 row bound (Studio,
+    /// 256/256 rows and steps), so a flip means their logits differ; the
+    /// pre-bound flips the old 1.0 rule accepted sat at 0.125, one bfloat16
+    /// step at logits of 16-32. 1/1024 is below one bfloat16 step at any
+    /// logit of magnitude 0.25 or more, so only an exact tie (in float32, a
+    /// rounding-level one) passes, and it is counted.
+    static let nearTieLogitTolerance: Float = 1.0 / 1024
+    /// Probe definition stamped into the stored key
+    /// (`ModelRuntime.continuousBatchingSelfCheckRuntimeBuild`): a result
+    /// measured by an older probe re-runs, and its grant carries the Mac
+    /// through the re-run.
+    static let probeVersion = "cb-probe-v2"
+    /// Decode tokens every exactness-probe row must generate while its whole
+    /// cohort decodes (at least one serve window).
+    static let minimumCohortDecodeTokens = 16
+
+    /// max(16, serve window), the window counted up to 4096.
+    static func requiredCohortDecodeTokens(decodeWindow: Int) -> Int {
+        max(minimumCohortDecodeTokens, min(decodeWindow, 4_096))
+    }
+
+    /// Exactness-probe completion length: the first token comes from
+    /// prefill, so one more than the required cohort decode tokens.
+    static func exactnessOutputTokens(decodeWindow: Int) -> Int {
+        max(maxOutputTokens, requiredCohortDecodeTokens(decodeWindow: decodeWindow) + 1)
+    }
+
+    /// The smallest key length at which a GQA decode row takes the two-pass
+    /// vector attention kernel on `architecture`, from the FR-CB2 route table
+    /// (1024 on Max/Ultra-class GPUs, 4096 on the others).
+    static func routeKeyBoundary(architecture: String) -> Int {
+        (1 ... 65_536).first { keys in
+            PagedKVVectorAttentionRoute.route(
+                keyTokens: keys, queryTokens: 1, queryHeads: 16, kvHeads: 2, headDim: 128, valueDim: 128,
+                hasArrayMask: false, architecture: architecture, partitionOverride: nil
+            )?.twoPass == true
+        } ?? 1024
+    }
+
+    static let deviceRouteKeyBoundary = routeKeyBoundary(architecture: PagedKVVectorAttentionRoute.deviceArchitecture)
+
+    /// Prompt length of exactness-probe row `index`, in tokens. Rows repeat
+    /// short, long (past the route boundary), crossing (starts below it and
+    /// crosses it mid-completion) and mid, each a little longer than the last
+    /// of its kind, so every k from 2 has rows on both sides of the boundary
+    /// and no two rows of a kind share a length. Above 1024, long and crossing
+    /// rows after the first of each become short or mid rows, so 8 GB Macs
+    /// stay within their pool. The 16384-key partition boundary is not
+    /// crossed: the qmv/qmm switch depends on the row count, not the key
+    /// length; per-row attention already gives every row its own route
+    /// (Studio: 256/256 bitwise at 300-16,380 keys with the row bound), and
+    /// a 16k prompt per row is more KV and prefill than an 8 GB Mac's pool
+    /// holds at its row count.
+    static func exactnessPromptLength(index: Int, keyBoundary: Int, outputTokens: Int) -> Int {
+        let round = index / 4
+        let firstRound = round == 0 || keyBoundary <= 1024
+        let half = max(1, outputTokens / 2)
+        switch index % 4 {
+        case 1 where firstRound:
+            return keyBoundary + keyBoundary / 8 + 8 * index
+        case 2 where firstRound:
+            return keyBoundary - half + round % half
+        case 0, 2:
+            return 160 + 8 * index
+        default:
+            return keyBoundary / 4 + 8 * index
+        }
+    }
+
+    static func exactnessPromptLengths(count: Int, keyBoundary: Int, outputTokens: Int) -> [Int] {
+        (0 ..< max(0, count)).map {
+            exactnessPromptLength(index: $0, keyBoundary: keyBoundary, outputTokens: outputTokens)
+        }
+    }
+
+    /// Pool tokens one probe row may take: its prompt, completion and the
+    /// scheduler's decode headroom, rounded up to whole blocks. Nil on
+    /// overflow.
+    static func exactnessRowCost(promptTokens: Int, outputTokens: Int, blockSizeTokens: Int = 16) -> Int? {
+        let block = max(1, blockSizeTokens)
+        let (withOutput, outputOverflow) = promptTokens.addingReportingOverflow(outputTokens)
+        let (tokens, headroomOverflow) = withOutput.addingReportingOverflow(
+            ContinuousBatchSchedulerConfiguration.defaultDecodeHeadroomTokens
+        )
+        guard !outputOverflow, !headroomOverflow, tokens >= 0 else { return nil }
+        let (blocks, blocksOverflow) = (tokens / block + (tokens % block == 0 ? 0 : 1)).multipliedReportingOverflow(by: block)
+        return blocksOverflow ? nil : blocks
+    }
+
+    /// The widest k (at most `maxCount`) whose full exactness-probe shape fits
+    /// the target: every row within the per-request cap and all rows at once
+    /// within the pool. 1 when not even two rows fit. Fail closed: no width
+    /// above it is probed, so none is verified or granted.
+    static func exactnessProbeBound(target: ContinuousBatchingSelfCheckTarget, maxCount: Int) -> Int {
+        let outputTokens = exactnessOutputTokens(decodeWindow: target.key.decodeWindow)
+        var total = 0
+        var bound = 0
+        for length in exactnessPromptLengths(
+            count: maxCount, keyBoundary: target.probeKeyBoundary, outputTokens: outputTokens
+        ) {
+            let (rowTokens, rowOverflow) = length.addingReportingOverflow(outputTokens)
+            guard !rowOverflow, rowTokens <= target.maxRequestTokens,
+                  let cost = exactnessRowCost(
+                      promptTokens: length, outputTokens: outputTokens, blockSizeTokens: target.blockSizeTokens
+                  )
+            else { break }
+            let (sum, sumOverflow) = total.addingReportingOverflow(cost)
+            guard !sumOverflow, sum <= target.poolTokens else { break }
+            total = sum
+            bound += 1
+        }
+        return max(1, bound)
+    }
+
+    /// Exactness-probe texts: the task first, then background notes long
+    /// enough to cut to `lengths` tokens (`fitPrompt`).
+    static func exactnessTexts(lengths: [Int]) -> [String] {
+        let tasks = promptTexts(count: lengths.count).map { text -> String in
+            guard let range = text.range(of: "answer this: ") else { return text }
+            return String(text[range.upperBound...])
+        }
+        return zip(tasks, lengths).enumerated().map { index, pair in
+            let paragraphs = pair.1 / 50 + 4
+            let notes = (0 ..< paragraphs).map { contextParagraph($0 + 7 * index) }.joined(separator: "\n\n")
+            return "Answer this: \(pair.0)\n\nBackground notes, to be ignored:\n\n\(notes)"
+        }
+    }
+
+    /// Tokens two chat-templated prompts share at their end (the template's
+    /// closing tokens), at most `limit`.
+    static func commonSuffixLength(_ lhs: [Int], _ rhs: [Int], limit: Int = 64) -> Int {
+        var count = 0
+        while count < min(limit, lhs.count, rhs.count), lhs[lhs.count - 1 - count] == rhs[rhs.count - 1 - count] {
+            count += 1
+        }
+        return count
+    }
+
+    /// `tokens` cut to exactly `length`: its head, then its last `tail`
+    /// tokens (the template's close), or nil when it is too short.
+    static func fitPrompt(_ tokens: [Int], tail: Int, length: Int) -> [Int]? {
+        guard tail >= 0, length > tail, tokens.count >= length else { return nil }
+        return Array(tokens.prefix(length - tail)) + Array(tokens.suffix(tail))
+    }
+
+    static func promptSHA256(_ tokens: [Int]) -> String {
+        let bytes = tokens.flatMap { token -> [UInt8] in
+            withUnsafeBytes(of: Int64(token).littleEndian) { Array($0) }
+        }
+        return SHA256.hash(data: Data(bytes)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// The prefix of stored lone outputs that still belongs to `prompts`:
+    /// each generated from the prompt with the same SHA-256, of exactly
+    /// `outputTokens` non-negative tokens.
+    static func reusableLoneOutputs(
+        _ outputs: [[Int]],
+        digests: [String],
+        prompts: [[Int]],
+        outputTokens: Int
+    ) -> [[Int]] {
+        var reusable: [[Int]] = []
+        for (index, output) in outputs.enumerated() {
+            guard index < digests.count, index < prompts.count,
+                  digests[index] == promptSHA256(prompts[index]),
+                  output.count == outputTokens, output.allSatisfy({ $0 >= 0 })
+            else { break }
+            reusable.append(output)
+        }
+        return reusable
+    }
+
+    /// SPEC-038 FR-CB10: whether a batched row's first divergence from its
+    /// lone run is excused, judged against the stock serial logits of the
+    /// shared prefix with the load-time isolation probe's rule
+    /// (`PagedKVRuntimeParityProbe.batchedTokenIsConformant`, other-row leak
+    /// guard) at `tolerance`: both tokens the serial top two and their gap at
+    /// most `tolerance`. Returns the gap for the evidence log.
+    static func divergenceVerdict(
+        reference: PagedKVRuntimeParityProbe.SerialReference,
+        aloneToken: Int,
+        batchedToken: Int,
+        otherRowsAloneTokens: [Int],
+        tolerance: Float = nearTieLogitTolerance
+    ) -> (nearTie: Bool, margin: Float?, reason: String) {
+        let logits = reference.logits
+        let margin: Float? = logits.indices.contains(aloneToken) && logits.indices.contains(batchedToken)
+            ? abs(logits[aloneToken] - logits[batchedToken])
+            : nil
+        let leaked = batchedToken != reference.top1 && otherRowsAloneTokens.contains(batchedToken)
+        let batchedConformant = !leaked && PagedKVRuntimeParityProbe.batchedTokenIsConformant(
+            decoded: batchedToken, own: reference, otherRowSerialTop1: nil, tolerance: tolerance
+        )
+        let aloneConformant = PagedKVRuntimeParityProbe.batchedTokenIsConformant(
+            decoded: aloneToken, own: reference, otherRowSerialTop1: nil, tolerance: tolerance
+        )
+        if leaked { return (false, margin, "other_row_token") }
+        if !batchedConformant { return (false, margin, "batched_outside_serial_top2") }
+        if !aloneConformant { return (false, margin, "alone_outside_serial_top2") }
+        guard let margin, margin <= tolerance else { return (false, margin, "margin_above_tolerance") }
+        return (true, margin, "near_tie")
+    }
+
     /// Slot counts to measure: the R009 ladder from 2 up to `maxRows`.
     static func ladder(maxRows: Int) -> [Int] {
         AutotuneConcurrencyCalibrator.sweepDepths(upperBound: maxRows).filter { $0 >= 2 }
@@ -205,6 +434,19 @@ enum ContinuousBatchingSelfCheck {
     /// queue limit (wider probes are refused with backpressure).
     static func ladderUpperBound(maxRows: Int, ownerPinned: Int?, crashedSlots: Int?, queueLimit: Int) -> Int {
         min(ownerPinned.map { min($0, maxRows) } ?? maxRows, crashedSlots.map { $0 - 1 } ?? .max, queueLimit)
+    }
+
+    /// The ladder bound for `target`, including the widest exactness-probe
+    /// shape it can hold (`exactnessProbeBound`).
+    static func ladderUpperBound(
+        target: ContinuousBatchingSelfCheckTarget,
+        ownerPinned: Int?,
+        crashedSlots: Int?
+    ) -> Int {
+        let configured = ladderUpperBound(
+            maxRows: target.maxRows, ownerPinned: ownerPinned, crashedSlots: crashedSlots, queueLimit: target.queueLimit
+        )
+        return min(configured, exactnessProbeBound(target: target, maxCount: configured))
     }
 
     enum BackpressureOutcome: Equatable {
@@ -258,20 +500,35 @@ enum ContinuousBatchingSelfCheck {
     /// `measurements` ascend by slots and stop after the first inexact one.
     /// `crashedAt` is a slot count whose step never finished (the process
     /// died, e.g. a Metal OOM); it is never measured again on this key.
+    /// `probeShapeUnmetAt` is a width whose exactness probe could not run its
+    /// full shape (its rows never all decoded together for the required
+    /// tokens); it and every wider count stay unverified.
     static func decide(
         serialTPS: Double,
         measurements: [ContinuousBatchingSelfCheckMeasurement],
-        crashedAt: Int? = nil
+        crashedAt: Int? = nil,
+        probeShapeUnmetAt: Int? = nil
     ) -> ContinuousBatchingSelfCheckDecision {
         let exactPrefix = Array(measurements.prefix { $0.conformant })
         let verified = exactPrefix.last?.slots ?? 1
+        // With nothing verified, a divergence, a crash or an unmet probe
+        // shape is the result even before a serial baseline exists, so it is
+        // never read as a throughput result that keeps a prior grant.
+        if exactPrefix.isEmpty {
+            if let first = measurements.first {
+                return .init(slots: 1, reason: "row_divergence_at_\(first.slots)", verifiedSlots: 1)
+            }
+            if let crashedAt {
+                return .init(slots: 1, reason: "crashed_at_\(crashedAt)", verifiedSlots: 1)
+            }
+            if let probeShapeUnmetAt {
+                return .init(slots: 1, reason: "probe_shape_unmet_at_\(probeShapeUnmetAt)", verifiedSlots: 1)
+            }
+        }
         guard serialTPS > 0, serialTPS.isFinite else {
             return .init(slots: 1, reason: "serial_baseline_unavailable", verifiedSlots: verified)
         }
         guard !exactPrefix.isEmpty else {
-            if let crashedAt, measurements.isEmpty {
-                return .init(slots: 1, reason: "crashed_at_\(crashedAt)", verifiedSlots: 1)
-            }
             let first = measurements.first?.slots ?? 2
             return .init(slots: 1, reason: "row_divergence_at_\(first)", verifiedSlots: 1)
         }
@@ -438,7 +695,7 @@ struct ContinuousBatchingSelfCheckResolution: Sendable, Equatable {
         let record = store.record(for: target.key)
         if let decision = record?.decision, record?.inProgressSlots == nil {
             let slots = ContinuousBatchingSelfCheck.servedSlots(
-                decision: decision, ownerPinned: ownerPinned, maxRows: target.maxRows
+                decision: decision, ownerPinned: ownerPinned, maxRows: target.grantableRows
             )
             return .init(
                 state: decision.state,
@@ -453,7 +710,7 @@ struct ContinuousBatchingSelfCheckResolution: Sendable, Equatable {
         guard let prior = [provisionalSlots, storedSlots].compactMap({ $0 }).filter({ $0 > 1 }).max() else {
             return nil
         }
-        let slots = min(prior, target.maxRows)
+        let slots = min(prior, target.grantableRows)
         return .init(
             state: .granted(slots: slots),
             servedSlots: slots,
@@ -501,6 +758,11 @@ struct ContinuousBatchingSelfCheckStore: Sendable {
         /// The ladder bound the decision was measured under
         /// (`ContinuousBatchingSelfCheck.ladderUpperBound`).
         var ladderBound: Int?
+        /// Each exactness-probe prompt's tokens when run alone (v0.3.19), and
+        /// the SHA-256 of the prompt each was generated from: a stored lone
+        /// output is reused only for the same prompt.
+        var probeAloneOutputs: [[Int]]?
+        var probePromptSHA256s: [String]?
 
         enum CodingKeys: String, CodingKey {
             case key
@@ -515,6 +777,8 @@ struct ContinuousBatchingSelfCheckStore: Sendable {
             case crashedSlots = "crashed_slots"
             case remeasureInProgress = "remeasure_in_progress"
             case ladderBound = "ladder_bound"
+            case probeAloneOutputs = "probe_alone_outputs"
+            case probePromptSHA256s = "probe_prompt_sha256s"
         }
     }
 
@@ -575,7 +839,7 @@ struct ContinuousBatchingSelfCheckStore: Sendable {
         guard fstat(fd, &st) == 0,
               (st.st_mode & S_IFMT) == S_IFREG,
               st.st_uid == getuid(),
-              (st.st_mode & 0o022) == 0,
+              (st.st_mode & 0o077) == 0,
               st.st_size <= Self.maxFileBytes,
               let data = try? handle.readToEnd(),
               let document = try? JSONDecoder().decode(Document.self, from: data),
@@ -697,8 +961,7 @@ actor ContinuousBatchingSelfCheckDriver {
             if let record, let decision = record.decision {
                 if pending { await apply(decision, target: target, source: "stored") }
                 let bound = ContinuousBatchingSelfCheck.ladderUpperBound(
-                    maxRows: target.maxRows, ownerPinned: ownerPinnedSlots,
-                    crashedSlots: record.crashedSlots, queueLimit: target.queueLimit
+                    target: target, ownerPinned: ownerPinnedSlots, crashedSlots: record.crashedSlots
                 )
                 let due = record.remeasureAfter.flatMap(Self.parseDate).map { Date() >= $0 } ?? false
                 if due || ContinuousBatchingSelfCheck.ladderBoundGrew(record: record, currentBound: bound),
@@ -729,7 +992,11 @@ actor ContinuousBatchingSelfCheckDriver {
         return await providerStatus.secondsSinceLastActivityOrPrewarm() >= idleSeconds
     }
 
-    private enum StepError: Error { case yielded }
+    private enum StepError: Error {
+        case yielded
+        /// The exactness probe at this width could not run its full shape.
+        case probeShapeUnmet(slots: Int)
+    }
 
     /// Runs `body` and cancels it as soon as a request is in flight.
     private func yieldingToRequests<T: Sendable>(
@@ -774,11 +1041,12 @@ actor ContinuousBatchingSelfCheckDriver {
         remeasureOf previous: ContinuousBatchingSelfCheckStore.Record?
     ) async {
         let runtime = runtime
+        let crashedSlots = (previous ?? store.record(for: target.key))?.crashedSlots
+        let configuredSlots = ContinuousBatchingSelfCheck.ladderUpperBound(
+            maxRows: target.maxRows, ownerPinned: ownerPinnedSlots, crashedSlots: crashedSlots, queueLimit: target.queueLimit
+        )
         let maxSlots = ContinuousBatchingSelfCheck.ladderUpperBound(
-            maxRows: target.maxRows,
-            ownerPinned: ownerPinnedSlots,
-            crashedSlots: (previous ?? store.record(for: target.key))?.crashedSlots,
-            queueLimit: target.queueLimit
+            target: target, ownerPinned: ownerPinnedSlots, crashedSlots: crashedSlots
         )
         let rungs = Set(ContinuousBatchingSelfCheck.ladder(maxRows: maxSlots))
         var record: ContinuousBatchingSelfCheckStore.Record
@@ -798,8 +1066,16 @@ actor ContinuousBatchingSelfCheckDriver {
             )
         }
         guard maxSlots >= 2 else {
-            record.decision = .init(slots: 1, reason: "single_row", verifiedSlots: 1)
+            // Fail closed: a Mac that cannot hold two exactness-probe rows
+            // verifies no width.
+            let reason = configuredSlots >= 2 ? "probe_shape_unavailable" : "single_row"
+            record.decision = .init(slots: 1, reason: reason, verifiedSlots: 1)
             record.ladderBound = maxSlots
+            // Decided: it re-runs when the bound grows, not on a timer.
+            record.inProgressSlots = nil
+            record.remeasureInProgress = nil
+            record.remeasureAfter = nil
+            record.decidedAt = ISO8601DateFormatter().string(from: Date())
             try? save(record)
             await apply(record.decision!, target: target, source: "measured")
             return
@@ -807,7 +1083,7 @@ actor ContinuousBatchingSelfCheckDriver {
         if previous == nil, await runtime.continuousBatchingSelfCheckState() == .pending {
             await report(decision: deferrals > 0 ? "deferred" : "pending", target: target)
         }
-        log("event=cb_self_check action=step max_slots=\(maxSlots) rows=\(target.maxRows) queue_limit=\(target.queueLimit) resumed_at=\(record.measurements.count) remeasure=\(previous != nil) model_sha256=\(target.key.modelSHA256)")
+        log("event=cb_self_check action=step max_slots=\(maxSlots) rows=\(target.maxRows) queue_limit=\(target.queueLimit) probe_key_boundary=\(target.probeKeyBoundary) resumed_at=\(record.measurements.count) remeasure=\(previous != nil) model_sha256=\(target.key.modelSHA256)")
         let stepStartedAt = Date()
         do {
             let tokens = ContinuousBatchingSelfCheck.maxOutputTokens
@@ -816,6 +1092,11 @@ actor ContinuousBatchingSelfCheckDriver {
             let prompts = try await runtime.continuousBatchingSelfCheckPrompts(
                 ContinuousBatchingSelfCheck.promptTexts(count: maxSlots)
             )
+            let probeTokens = ContinuousBatchingSelfCheck.exactnessOutputTokens(decodeWindow: target.key.decodeWindow)
+            let requiredCohortTokens = ContinuousBatchingSelfCheck.requiredCohortDecodeTokens(
+                decodeWindow: target.key.decodeWindow
+            )
+            let probePrompts = try await exactnessPrompts(count: maxSlots, target: target, outputTokens: probeTokens)
             // Warm the stock serial path once so its first run is not counted.
             // Journaled like any width, so a process-killing warm-up is not
             // repeated on every restart.
@@ -830,7 +1111,51 @@ actor ContinuousBatchingSelfCheckDriver {
                 // Journal before any inference for this width, alone runs included.
                 record.inProgressSlots = slots
                 try save(record)
-                while record.aloneOutputs.count < slots {
+                // Exactness probe: rows of unequal key lengths across the route
+                // boundary, all decoding together for the required tokens.
+                // Stored lone outputs are reused only for the same prompt and
+                // completion length.
+                var probeAlone = ContinuousBatchingSelfCheck.reusableLoneOutputs(
+                    record.probeAloneOutputs ?? [], digests: record.probePromptSHA256s ?? [],
+                    prompts: probePrompts, outputTokens: probeTokens
+                )
+                while probeAlone.count < slots {
+                    let index = probeAlone.count
+                    let row = try await yieldingToRequests {
+                        try await runtime.runContinuousBatchingSelfCheckBatch(
+                            prompts: [probePrompts[index]], maxOutputTokens: probeTokens,
+                            idPrefix: "cb-self-check-\(attempt)-probe-alone-\(index)"
+                        )
+                    }
+                    probeAlone.append(row.outputs[0])
+                    record.probeAloneOutputs = probeAlone
+                    record.probePromptSHA256s = probePrompts.prefix(probeAlone.count).map(ContinuousBatchingSelfCheck.promptSHA256)
+                }
+                let probe: (outputs: [[Int]], seconds: Double, cohortDecodeTokens: [Int])
+                do {
+                    probe = try await yieldingToRequests {
+                        try await runtime.runContinuousBatchingSelfCheckBatch(
+                            prompts: Array(probePrompts.prefix(slots)), maxOutputTokens: probeTokens,
+                            idPrefix: "cb-self-check-\(attempt)-probe-k\(slots)", cohort: true
+                        )
+                    }
+                } catch where (error as? ContinuousBatchSchedulerError) == .queueWaitTimedOut {
+                    // The cohort never all reached a row: its shape was not met.
+                    throw StepError.probeShapeUnmet(slots: slots)
+                }
+                let probeCheck = try await checkRows(
+                    passes: [probe.outputs], alone: Array(probeAlone.prefix(slots)), prompts: probePrompts, label: "probe"
+                )
+                var conformant = probeCheck.conformant
+                var nearTieRows = probeCheck.nearTieRows
+                var divergences = probeCheck.divergences
+                let cohortTokens = probe.cohortDecodeTokens.min() ?? 0
+                if conformant, cohortTokens < requiredCohortTokens {
+                    log("event=cb_self_check action=probe_shape_unmet slots=\(slots) cohort_decode_tokens=\(cohortTokens) required=\(requiredCohortTokens)")
+                    throw StepError.probeShapeUnmet(slots: slots)
+                }
+                if record.aloneOutputs.contains(where: { $0.count != tokens }) { record.aloneOutputs = [] }
+                while conformant, record.aloneOutputs.count < slots {
                     let index = record.aloneOutputs.count
                     let row = try await yieldingToRequests {
                         try await runtime.runContinuousBatchingSelfCheckBatch(
@@ -841,15 +1166,16 @@ actor ContinuousBatchingSelfCheckDriver {
                 }
                 // Rungs: repeats of stock serial then batched, back to back on
                 // the same prompts; the gain is the median ratio. Other widths:
-                // one batch for isolation only.
+                // one batch for isolation only. A width whose probe already
+                // diverged runs neither.
                 let isRung = rungs.contains(slots)
                 let batchPrompts = Array(prompts.prefix(slots))
                 let serialPrompts = Array(batchPrompts.prefix(ContinuousBatchingSelfCheck.serialBaselinePrompts))
-                var passes: [(outputs: [[Int]], seconds: Double)] = []
+                var passes: [[[Int]]] = []
                 var ratios: [Double] = []
                 var aggregates: [Double] = []
                 var serials: [Double] = []
-                for pass in 0..<(isRung ? Self.repeats : 1) {
+                for pass in 0..<(conformant ? (isRung ? Self.repeats : 1) : 0) {
                     let serial: Double
                     if isRung {
                         serial = try await yieldingToRequests {
@@ -863,7 +1189,7 @@ actor ContinuousBatchingSelfCheckDriver {
                             prompts: batchPrompts, maxOutputTokens: tokens, idPrefix: "cb-self-check-\(attempt)-k\(slots)-p\(pass)"
                         )
                     }
-                    passes.append(batch)
+                    passes.append(batch.outputs)
                     let generated = batch.outputs.reduce(0) { $0 + $1.count }
                     let aggregate = batch.seconds > 0 ? Double(generated) / batch.seconds : 0
                     aggregates.append(aggregate)
@@ -872,55 +1198,24 @@ actor ContinuousBatchingSelfCheckDriver {
                         ratios.append(aggregate / serial)
                     }
                 }
-                let alone = record.aloneOutputs
-                var conformant = true
-                var nearTieRows = 0
-                var divergences: [String] = []
-                var rowsToCheck: [(row: Int, pair: ([Int], [Int]))] = []
-                for pass in passes {
-                    for (row, pair) in zip(pass.outputs, alone).enumerated()
-                    where pair.0 != pair.1 && !rowsToCheck.contains(where: { $0.row == row && $0.pair.0 == pair.0 }) {
-                        rowsToCheck.append((row, pair))
-                    }
-                }
-                for (row, pair) in rowsToCheck {
-                    let index = Array(zip(pair.0, pair.1)).firstIndex { $0.0 != $0.1 }
-                    var verdictText = "length"
-                    var marginText = "na"
-                    var tokenText = "na"
-                    var nearTie = false
-                    if let index {
-                        let prompt = prompts[row]
-                        let prefix = Array(pair.1.prefix(index))
-                        let aloneToken = pair.1[index]
-                        let batchedToken = pair.0[index]
-                        let others = alone.prefix(slots).enumerated().compactMap { other, tokens -> Int? in
-                            other != row && tokens.indices.contains(index) ? tokens[index] : nil
-                        }
-                        let verdict = try await yieldingToRequests {
-                            try await runtime.continuousBatchingSelfCheckDivergence(
-                                prompt: prompt, sharedPrefix: prefix, aloneToken: aloneToken,
-                                batchedToken: batchedToken, otherRowsAloneTokens: others
-                            )
-                        }
-                        nearTie = verdict.nearTie
-                        verdictText = verdict.reason
-                        marginText = verdict.margin.map { String(format: "%.3f", $0) } ?? "na"
-                        tokenText = "\(aloneToken)->\(batchedToken)"
-                    }
-                    if nearTie { nearTieRows += 1 } else { conformant = false }
-                    divergences.append("\(row)@\(index.map(String.init) ?? "len")/\(pair.1.count):\(verdictText):tokens=\(tokenText):margin=\(marginText)")
+                if !passes.isEmpty {
+                    let passCheck = try await checkRows(
+                        passes: passes, alone: Array(record.aloneOutputs.prefix(slots)), prompts: prompts, label: "batch"
+                    )
+                    conformant = passCheck.conformant
+                    nearTieRows += passCheck.nearTieRows
+                    divergences += passCheck.divergences
                 }
                 let gain = Self.median(ratios)
                 let aggregate = Self.median(aggregates)
                 if isRung { record.serialTPS = max(record.serialTPS, Self.median(serials)) }
                 record.measurements.append(.init(
                     slots: slots, conformant: conformant, nearTieRows: nearTieRows, aggregateTPS: aggregate,
-                    gain: gain, throughputMeasured: isRung
+                    gain: gain, throughputMeasured: isRung && !passes.isEmpty
                 ))
                 record.inProgressSlots = nil
                 try save(record)
-                log("event=cb_self_check action=measured slots=\(slots) rung=\(isRung) conformant=\(conformant) divergent_rows=\(divergences.isEmpty ? "none" : divergences.joined(separator: ",")) aggregate_tps=\(String(format: "%.1f", aggregate)) serial_tps=\(String(format: "%.1f", Self.median(serials))) gain=\(String(format: "%.2f", gain))")
+                log("event=cb_self_check action=measured slots=\(slots) rung=\(isRung) conformant=\(conformant) cohort_decode_tokens=\(cohortTokens) divergent_rows=\(divergences.isEmpty ? "none" : divergences.joined(separator: ",")) aggregate_tps=\(String(format: "%.1f", aggregate)) serial_tps=\(String(format: "%.1f", Self.median(serials))) gain=\(String(format: "%.2f", gain))")
                 if !conformant { break }
             }
             deferrals = 0
@@ -938,6 +1233,21 @@ actor ContinuousBatchingSelfCheckDriver {
             try? save(record)
             let previousRefusal = backpressureRefusal.flatMap { $0.target == target ? $0.slots : nil }
             backpressureRefusal = nil
+            // A buyer request during the step can take rows from the cohort;
+            // that is a yield, not a probe result.
+            if case StepError.probeShapeUnmet(let slots) = error,
+               await providerStatus.snapshot().requestsInFlight == 0,
+               await providerStatus.secondsSinceLastRealActivity() >= Date().timeIntervalSince(stepStartedAt) {
+                // Fail closed: decide on the widths verified below it, and
+                // run the full ladder again later.
+                let resume = ContinuousBatchingSelfCheck.backpressureResumeSeconds
+                log("event=cb_self_check action=ladder_ended reason=probe_shape_unmet slots=\(slots) verified_k=\(record.measurements.last?.slots ?? 1) remeasure_in_s=\(Int(resume))")
+                deferrals = 0
+                nextAttemptAt = .distantPast
+                record.ladderBound = maxSlots
+                await finish(record, crashedAt: nil, target: target, incompleteRemeasureSeconds: resume, probeShapeUnmetAt: slots)
+                return
+            }
             // Backpressure with no buyer request during the step is the
             // scheduler refusing the probe itself (its queue or token budget,
             // or a native-MTP integrity probe holding it).
@@ -987,18 +1297,95 @@ actor ContinuousBatchingSelfCheckDriver {
         }
     }
 
+    /// The exactness-probe prompts for `count` rows, each cut to its
+    /// `exactnessPromptLength` in tokens. A prompt that cannot be cut to its
+    /// length ends the ladder below it (`probeShapeUnmet`).
+    private func exactnessPrompts(
+        count: Int,
+        target: ContinuousBatchingSelfCheckTarget,
+        outputTokens: Int
+    ) async throws -> [[Int]] {
+        let lengths = ContinuousBatchingSelfCheck.exactnessPromptLengths(
+            count: count, keyBoundary: target.probeKeyBoundary, outputTokens: outputTokens
+        )
+        let full = try await runtime.continuousBatchingSelfCheckPrompts(ContinuousBatchingSelfCheck.exactnessTexts(lengths: lengths))
+        guard full.count == lengths.count, full.count >= 2 else {
+            throw StepError.probeShapeUnmet(slots: max(2, min(full.count, lengths.count) + 1))
+        }
+        let tail = ContinuousBatchingSelfCheck.commonSuffixLength(full[0], full[1])
+        return try zip(full, lengths).enumerated().map { index, pair in
+            guard let prompt = ContinuousBatchingSelfCheck.fitPrompt(pair.0, tail: tail, length: pair.1) else {
+                throw StepError.probeShapeUnmet(slots: max(2, index + 1))
+            }
+            return prompt
+        }
+    }
+
+    /// Compares every batched row with its prompt run alone and judges each
+    /// first divergence (`ContinuousBatchingSelfCheck.divergenceVerdict`).
+    private func checkRows(
+        passes: [[[Int]]],
+        alone: [[Int]],
+        prompts: [[Int]],
+        label: String
+    ) async throws -> (conformant: Bool, nearTieRows: Int, divergences: [String]) {
+        let runtime = runtime
+        var conformant = true
+        var nearTieRows = 0
+        var divergences: [String] = []
+        var rowsToCheck: [(row: Int, pair: ([Int], [Int]))] = []
+        for pass in passes {
+            for (row, pair) in zip(pass, alone).enumerated()
+            where pair.0 != pair.1 && !rowsToCheck.contains(where: { $0.row == row && $0.pair.0 == pair.0 }) {
+                rowsToCheck.append((row, pair))
+            }
+            if pass.count != alone.count { conformant = false }
+        }
+        for (row, pair) in rowsToCheck {
+            let index = Array(zip(pair.0, pair.1)).firstIndex { $0.0 != $0.1 }
+            var verdictText = "length"
+            var marginText = "na"
+            var tokenText = "na"
+            var nearTie = false
+            if let index {
+                let prompt = prompts[row]
+                let prefix = Array(pair.1.prefix(index))
+                let aloneToken = pair.1[index]
+                let batchedToken = pair.0[index]
+                let others = alone.enumerated().compactMap { other, tokens -> Int? in
+                    other != row && tokens.indices.contains(index) ? tokens[index] : nil
+                }
+                let verdict = try await yieldingToRequests {
+                    try await runtime.continuousBatchingSelfCheckDivergence(
+                        prompt: prompt, sharedPrefix: prefix, aloneToken: aloneToken,
+                        batchedToken: batchedToken, otherRowsAloneTokens: others
+                    )
+                }
+                nearTie = verdict.nearTie
+                verdictText = verdict.reason
+                marginText = verdict.margin.map { String(format: "%.4f", $0) } ?? "na"
+                tokenText = "\(aloneToken)->\(batchedToken)"
+            }
+            if nearTie { nearTieRows += 1 } else { conformant = false }
+            divergences.append("\(label):\(row)@\(index.map(String.init) ?? "len")/\(pair.1.count):\(verdictText):tokens=\(tokenText):margin=\(marginText)")
+        }
+        return (conformant, nearTieRows, divergences)
+    }
+
     /// `incompleteRemeasureSeconds`: the ladder stopped below its bound for a
     /// reason other than correctness; re-measure it after this long.
     private func finish(
         _ record: ContinuousBatchingSelfCheckStore.Record,
         crashedAt: Int?,
         target: ContinuousBatchingSelfCheckTarget,
-        incompleteRemeasureSeconds: Double? = nil
+        incompleteRemeasureSeconds: Double? = nil,
+        probeShapeUnmetAt: Int? = nil
     ) async {
         // A swap during the measurement changes the target; drop the result.
         guard await runtime.continuousBatchingSelfCheckTarget(includeDecided: true) == target else { return }
         let fresh = ContinuousBatchingSelfCheck.decide(
-            serialTPS: record.serialTPS, measurements: record.measurements, crashedAt: crashedAt
+            serialTPS: record.serialTPS, measurements: record.measurements, crashedAt: crashedAt,
+            probeShapeUnmetAt: probeShapeUnmetAt
         )
         let priorGrant = [record.decision?.slots, priorGrant(for: target.key)]
             .compactMap { $0 }.filter { $0 > 1 }.max()
@@ -1045,7 +1432,7 @@ actor ContinuousBatchingSelfCheckDriver {
         source: String
     ) async {
         let slots = ContinuousBatchingSelfCheck.servedSlots(
-            decision: decision, ownerPinned: ownerPinnedSlots, maxRows: target.maxRows
+            decision: decision, ownerPinned: ownerPinnedSlots, maxRows: target.grantableRows
         )
         // Fenced on the swap generation: state, report, gates and advertised
         // capacity move together or not at all.
