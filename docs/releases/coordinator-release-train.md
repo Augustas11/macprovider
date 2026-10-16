@@ -57,9 +57,9 @@ v1.8.246; #2023 (#1355) in v1.8.246; #2024 (#1911/#2017) in v1.8.247.
 | PR | Issue | Coordinator/gateway change | Status |
 |---|---|---|---|
 | #2025 | #2015 | Authenticated fleet KV persistence (merged after v1.8.247) | merged |
-| (to open) | #1979, #1793 | Retention "drained" means caught up (reachable under steady intake); ledger-rollup completion logging | in progress |
-| #1986 | #1644 | Cross-provider scoring, coordinator side | in progress |
-| (not yet opened) | #2018 | Responses API parity, gateway side if any | in progress (another session) |
+| #2027 | #1979, #1793 | Retention "drained" means caught up (reachable under steady intake); ledger-rollup started log line | merged |
+| #1986 | #1644 | Cross-provider scoring, coordinator side (inert until a private corpus is installed on the coordinator host) | merged |
+| #2026 | #2018 | Responses API parity, gateway side if any | merged |
 
 ## How to track the next coordinator release
 

@@ -67,7 +67,7 @@ Verified 2026-10-10 against public release metadata, the release train
 Live fleet target: **1.8.242** (published 2026-10-15; Pearl recommends it).
 Staged on main: `binaryVersion` **1.8.248** (`b4e1f2f52`); v1.8.243–v1.8.247 are
 consumed by runtime releases. **Operator hold (2026-10-16): no candidate cut
-until every open PR below is merged**; then one cut carries all of them, with
+until every open PR below is merged** (all merged 2026-10-16; cut authorized); then one cut carries all of them, with
 the canary on a macOS 27 Mac (also the live `code_bound_attested` proof for
 #1911/#2017) and the Studio CB grant check.
 
@@ -77,9 +77,9 @@ the canary on a macOS 27 Mac (also the live `code_bound_attested` proof for
 | #2022 | #2016 | Native image input preserved through qualified Chat Completions | merged |
 | #2024 | #1911, #2017 | Code-bound posture key: CLI evidence + Malibu.app attestor (macOS 27+) | merged |
 | #2025 | #2015 | Authenticated fleet KV persistence with recurrent checkpoints | merged |
-| #1986 | #1644 | Cross-provider scoring (SPEC-036 v0.2) | in progress (audit + real-chip thresholds) |
-| #1980 | #1971 | Stricter CB self-check exactness probe | in progress (Studio grant validation) |
-| (not yet opened) | #2018 | Provider-local Responses API and tokenizer parity | in progress (another session) |
+| #1986 | #1644 | Cross-provider scoring (SPEC-036 v0.2); real-chip thresholds validated on M5, M1, M3 Ultra | merged |
+| #1980 | #1971 | Stricter CB self-check exactness probe; Studio validated (verified_k 16 bounded, divergence caught at 12 unbounded) | merged |
+| #2026 | #2018 | Provider-local stateless Responses API and tokenizer parity | merged |
 
 ## Next CLI release — net changes vs 1.8.240
 
