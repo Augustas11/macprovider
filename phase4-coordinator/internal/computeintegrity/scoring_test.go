@@ -536,23 +536,21 @@ func TestScoringStorePruneAndRecentRequests(t *testing.T) {
 	if len(left) != 1 || left[0].State != VerificationFailed {
 		t.Fatalf("adverse state must survive pruning: %+v", left)
 	}
-	if _, err := db.Exec(`CREATE TABLE request_log (ts_utc TEXT NOT NULL, account_id TEXT NULL)`); err != nil {
-		t.Fatal(err)
-	}
-	for _, row := range [][2]string{
-		{"2026-10-13T00:30:00.000000000Z", "cip_aa"},
-		{"2026-10-13T00:40:00.000000000Z", "cip_bb"},
-		{"2026-10-13T00:45:00.000000000Z", "acct_buyer"},
-		{"2026-10-12T22:00:00.000000000Z", "cip_old"},
-		{"2026-10-13T00:50:00.000000000Z", "cipXnotreserved"},
-	} {
-		if _, err := db.Exec(`INSERT INTO request_log VALUES (?, ?)`, row[0], row[1]); err != nil {
+	for _, at := range []time.Time{t0.Add(30 * time.Minute), t0.Add(40 * time.Minute), t0.Add(-2 * time.Hour)} {
+		if err := store.RecordVerificationStart(ctx, at); err != nil {
 			t.Fatal(err)
 		}
 	}
 	got, err := store.RecentVerificationRequests(ctx, t0, 10)
 	if err != nil || len(got) != 2 || !got[0].Equal(t0.Add(40*time.Minute)) || !got[1].Equal(t0.Add(30*time.Minute)) {
-		t.Fatalf("recent verification requests=%v err=%v, want the two cip_ starts newest first", got, err)
+		t.Fatalf("recent verification requests=%v err=%v, want the two starts since t0 newest first", got, err)
+	}
+	if err := store.PruneVerificationStarts(ctx, t0); err != nil {
+		t.Fatal(err)
+	}
+	var startsLeft int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM compute_integrity_verification_starts`).Scan(&startsLeft); err != nil || startsLeft != 2 {
+		t.Fatalf("prune kept %d starts, err=%v; want the two recent ones", startsLeft, err)
 	}
 	if got, err := store.RecentVerificationRequests(ctx, t0, 1); err != nil || len(got) != 1 {
 		t.Fatalf("limit not applied: %v err=%v", got, err)

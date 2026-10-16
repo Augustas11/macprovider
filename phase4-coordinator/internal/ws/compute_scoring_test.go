@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"math/rand"
 	"net"
 	"net/http"
@@ -746,15 +745,11 @@ func TestComputeScoringFirstRequestUsesJitteredCadence(t *testing.T) {
 }
 
 // FR-20: the hourly bound is a rolling hour and survives a restart, rebuilt
-// from the verification requests already in the request log.
+// from the recorded verification start times.
 func TestComputeScoringHourlyBoundSurvivesRestart(t *testing.T) {
 	h := newScoringHarness(t, map[string]string{"a": "github:1"}, nil)
-	if _, err := h.db.Exec(`CREATE TABLE request_log (ts_utc TEXT NOT NULL, account_id TEXT NULL)`); err != nil {
-		t.Fatal(err)
-	}
-	recent := h.now().Add(-10 * time.Minute).UTC().Format("2006-01-02T15:04:05.000000000Z")
 	for i := 0; i < 5; i++ {
-		if _, err := h.db.Exec(`INSERT INTO request_log VALUES (?, ?)`, recent, fmt.Sprintf("cip_%d", i)); err != nil {
+		if err := h.engine.deps.Store.RecordVerificationStart(context.Background(), h.now().Add(-10*time.Minute)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -826,7 +821,7 @@ func TestComputeScoringClearScorerDropsPendingExclusion(t *testing.T) {
 	if err := h.engine.clearScorer(ctx, "a"); err != nil {
 		t.Fatal(err)
 	}
-	h.engine.retryExclusions(ctx, h.now())
+	h.engine.retryExclusions(ctx, h.now(), time.Now().Add(time.Minute))
 	h.engine.persistExclusion(ctx, "a", h.now())
 	excluded, err := h.engine.deps.Store.LoadScorerExclusions(ctx)
 	if err != nil {
@@ -983,7 +978,7 @@ func TestComputeScoringCohortUsesVerifiedModelHash(t *testing.T) {
 // bound fails closed for one hour.
 func TestComputeScoringHourlyBoundFailsClosedWithoutHistory(t *testing.T) {
 	h := newScoringHarness(t, map[string]string{"a": "github:1"}, nil)
-	if _, err := h.db.Exec(`CREATE TABLE request_log (unrelated TEXT)`); err != nil {
+	if _, err := h.db.Exec(`INSERT INTO compute_integrity_verification_starts VALUES ('not-a-time')`); err != nil {
 		t.Fatal(err)
 	}
 	deps := h.engine.deps
@@ -1045,5 +1040,55 @@ func TestComputeScoringDispatchDelaySpansSweep(t *testing.T) {
 	}
 	if lo > sweep/10 || hi < sweep*9/10 {
 		t.Fatalf("delays [%v, %v] do not span the sweep interval %v", lo, hi, sweep)
+	}
+}
+
+// FR-20: the sweep deadline bounds identity lookups inside a provider's
+// scorer pool, not only between providers. Out of time, the key stays due
+// and no request is reserved.
+func TestComputeScoringSweepDeadlineBoundsLookups(t *testing.T) {
+	h := newScoringHarness(t, map[string]string{"a": "github:1", "b": "github:2", "c": "github:3"}, nil)
+	h.round(2 * time.Hour) // schedules first requests
+	h.advance(2 * time.Hour)
+	var p pool.Provider
+	var cands []computeintegrity.ScorerCandidate
+	for _, q := range h.registry.Snapshot() {
+		if q.ProviderID == "a" {
+			p = q
+		}
+		cands = append(cands, scoringCandidate(q))
+	}
+	h.engine.considerProvider(context.Background(), p, cands, h.now(), time.Now().Add(-time.Second))
+	h.engine.mu.Lock()
+	defer h.engine.mu.Unlock()
+	if h.engine.inFlightCount != 0 || len(h.engine.recentStarts) != 0 {
+		t.Fatalf("a request was reserved past the sweep deadline: in_flight=%d starts=%d", h.engine.inFlightCount, len(h.engine.recentStarts))
+	}
+	if due := h.engine.nextDue[computeScoringKey{"a", scoringModel}]; due.After(h.now()) {
+		t.Fatal("a key cut off by the deadline must stay due")
+	}
+}
+
+// FR-20: a reservation is counted from the time it is made plus one tick
+// (the latest dispatch), not from the sweep start, and is persisted for a
+// restart.
+func TestComputeScoringStartCountedFromReservation(t *testing.T) {
+	h := newScoringHarness(t, map[string]string{"a": "github:1", "b": "github:2"}, nil)
+	h.round(2 * time.Hour)
+	h.round(2 * time.Hour)
+	if h.dispatched.Load() == 0 {
+		t.Fatal("setup: expected a verification request")
+	}
+	h.engine.mu.Lock()
+	starts := append([]time.Time(nil), h.engine.recentStarts...)
+	h.engine.mu.Unlock()
+	for _, s := range starts {
+		if s.Before(h.now().Add(h.engine.tickInterval())) {
+			t.Fatalf("start %v counted before the latest dispatch %v", s, h.now().Add(h.engine.tickInterval()))
+		}
+	}
+	got, err := h.engine.deps.Store.RecentVerificationRequests(context.Background(), h.now().Add(-time.Hour), 100)
+	if err != nil || len(got) != len(starts) {
+		t.Fatalf("persisted %d starts err=%v, want %d", len(got), err, len(starts))
 	}
 }

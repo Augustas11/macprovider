@@ -38,6 +38,10 @@ CREATE TABLE IF NOT EXISTS compute_integrity_scorer_exclusions (
     provider_id     TEXT PRIMARY KEY,
     excluded_at_utc TEXT NOT NULL
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS compute_integrity_verification_starts (
+    started_at_utc TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_civs_started ON compute_integrity_verification_starts(started_at_utc);
 `)
 	if err != nil {
 		return nil, err
@@ -137,11 +141,35 @@ DELETE FROM compute_integrity_scoring_keys
 	return res.RowsAffected()
 }
 
-// RecentVerificationRequests returns the start times of FR-20 verification
-// requests (reserved cip_ accounts in the coordinator request log) since
-// since, newest first and at most limit of them, so the rolling hourly bound
-// survives a restart. A database without the request log returns none; an
-// unreadable start time is an error.
+// verificationStartFormat is fixed-width so text order is time order.
+const verificationStartFormat = "2006-01-02T15:04:05.000000000Z"
+
+// RecordVerificationStart persists the start time FR-20 counts one
+// verification request at, so the rolling hourly bound survives a restart.
+func (s *ScoringStore) RecordVerificationStart(ctx context.Context, at time.Time) error {
+	if s == nil || s.db == nil {
+		return errScoringStoreClosed
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO compute_integrity_verification_starts (started_at_utc) VALUES (?)`,
+		at.UTC().Format(verificationStartFormat))
+	return err
+}
+
+// PruneVerificationStarts deletes start times before cutoff; the table only
+// ever needs the last hour.
+func (s *ScoringStore) PruneVerificationStarts(ctx context.Context, cutoff time.Time) error {
+	if s == nil || s.db == nil {
+		return errScoringStoreClosed
+	}
+	_, err := s.db.ExecContext(ctx, `DELETE FROM compute_integrity_verification_starts WHERE started_at_utc < ?`,
+		cutoff.UTC().Format(verificationStartFormat))
+	return err
+}
+
+// RecentVerificationRequests returns the recorded FR-20 verification start
+// times since since, newest first and at most limit of them. It reads a
+// dedicated table pruned to the last hour, so a restart never scans buyer
+// traffic. An unreadable start time is an error.
 func (s *ScoringStore) RecentVerificationRequests(ctx context.Context, since time.Time, limit int) ([]time.Time, error) {
 	if s == nil || s.db == nil {
 		return nil, errScoringStoreClosed
@@ -149,14 +177,10 @@ func (s *ScoringStore) RecentVerificationRequests(ctx context.Context, since tim
 	if limit <= 0 {
 		return nil, nil
 	}
-	var present int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'request_log'`).Scan(&present); err != nil || present == 0 {
-		return nil, err
-	}
 	rows, err := s.db.QueryContext(ctx, `
-SELECT ts_utc FROM request_log WHERE account_id LIKE 'cip\_%' ESCAPE '\' AND ts_utc >= ?
- ORDER BY ts_utc DESC LIMIT ?`,
-		since.UTC().Format("2006-01-02T15:04:05.000000000Z"), limit)
+SELECT started_at_utc FROM compute_integrity_verification_starts
+ WHERE started_at_utc >= ? ORDER BY started_at_utc DESC LIMIT ?`,
+		since.UTC().Format(verificationStartFormat), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -171,7 +195,7 @@ SELECT ts_utc FROM request_log WHERE account_id LIKE 'cip\_%' ESCAPE '\' AND ts_
 		if err != nil {
 			// An unreadable start cannot be placed in the window; the caller
 			// fails the hourly bound closed.
-			return nil, fmt.Errorf("verification request time %w", err)
+			return nil, fmt.Errorf("verification start time %w", err)
 		}
 		out = append(out, t)
 	}

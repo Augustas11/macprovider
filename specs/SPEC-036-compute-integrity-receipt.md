@@ -2161,10 +2161,16 @@ Rate bounds:
 - At most `max_in_flight` (default 4) verification requests are outstanding
   coordinator-wide, and at most one per verification key.
 - At most `max_per_hour` (default 240) verification requests start in any
-  rolling hour coordinator-wide. The bound survives a restart: the
-  coordinator reloads the start times of the `cip_` requests of the last hour
-  from its request log at start. If that history cannot be read, the bound
+  rolling hour coordinator-wide. A request counts from the moment it is
+  reserved plus one sweep interval, the latest it can be dispatched. Each
+  counted start is also written to a dedicated table pruned to the last hours,
+  which the coordinator reads at start, so the bound survives a restart
+  without scanning buyer traffic. If that history cannot be read, the bound
   fails closed and the whole budget counts as spent for one hour.
+- One deadline of one sweep interval bounds each sweep, including
+  maintenance writes and the operator-identity lookups of a scorer pool. A
+  key the deadline cuts off reserves nothing and stays due for the next
+  sweep; identities resolved so far stay cached.
 - A key whose operator identity cannot be resolved waits for its next cadence
   slot; a failed lookup is cached for one minute.
 - A verification request is sent only when an eligible scorer exists for the

@@ -493,8 +493,11 @@ func (e *computeScoringEngine) sweep(ctx context.Context, now time.Time) {
 	for _, p := range providers {
 		present[p.ProviderID] = struct{}{}
 	}
+	// One deadline bounds the whole sweep, maintenance and identity lookups
+	// included; work it leaves stays due for the next sweep.
+	deadline := time.Now().Add(e.tickInterval())
 	e.prune(present, now)
-	e.retryExclusions(ctx, now)
+	e.retryExclusions(ctx, now, deadline)
 	e.pruneDurable(ctx, now)
 	if !e.deps.Config.Enabled {
 		e.publishGauges(ctx)
@@ -522,16 +525,15 @@ func (e *computeScoringEngine) sweep(ctx context.Context, now time.Time) {
 	e.mu.Lock()
 	e.rng.Shuffle(len(order), func(i, j int) { order[i], order[j] = order[j], order[i] })
 	e.mu.Unlock()
-	budget := time.Now().Add(e.tickInterval())
 	for _, i := range order {
 		p := providers[i]
 		if !providerVerifiable(p) {
 			continue
 		}
-		if time.Now().After(budget) {
+		if time.Now().After(deadline) {
 			break
 		}
-		e.considerProvider(ctx, p, index[scorerPoolKey{p.ModelID, p.ModelHash}], now)
+		e.considerProvider(ctx, p, index[scorerPoolKey{p.ModelID, p.ModelHash}], now, deadline)
 	}
 	e.publishGauges(ctx)
 }
@@ -596,7 +598,7 @@ func (e *computeScoringEngine) hourlyBudgetLocked(now time.Time) bool {
 	return len(e.recentStarts) < e.deps.Config.MaxPerHour
 }
 
-func (e *computeScoringEngine) considerProvider(ctx context.Context, p pool.Provider, candidates []computeintegrity.ScorerCandidate, now time.Time) {
+func (e *computeScoringEngine) considerProvider(ctx context.Context, p pool.Provider, candidates []computeintegrity.ScorerCandidate, now, deadline time.Time) {
 	key := computeScoringKey{p.ProviderID, p.ModelID}
 	e.mu.Lock()
 	st := e.stateLocked(key, now)
@@ -632,6 +634,9 @@ func (e *computeScoringEngine) considerProvider(ctx context.Context, p pool.Prov
 	e.mu.Unlock()
 
 	verified := scoringCandidate(p)
+	if time.Now().After(deadline) {
+		return
+	}
 	verified.OperatorKey = e.operatorKey(ctx, p.ProviderID, now)
 	if verified.OperatorKey == "" {
 		// Back off until the next cadence slot instead of retrying the
@@ -650,10 +655,21 @@ func (e *computeScoringEngine) considerProvider(ctx context.Context, p pool.Prov
 		if c.ProviderID == verified.ProviderID || !c.Capable {
 			continue
 		}
+		if time.Now().After(deadline) {
+			// Out of sweep time: the key stays due and resumes next sweep
+			// with the identities resolved so far cached.
+			return
+		}
 		c.OperatorKey = e.operatorKey(ctx, c.ProviderID, now)
 		scorerPool = append(scorerPool, c)
 	}
 	e.mu.Lock()
+	// Lookups took time: reserve against the hourly bound as of now.
+	reserveAt := e.s.now()
+	if !e.hourlyBudgetLocked(reserveAt) {
+		e.mu.Unlock()
+		return
+	}
 	scorers := computeintegrity.SelectScorers(e.rng, verified, scorerPool, n, func(c computeintegrity.ScorerCandidate) bool {
 		return e.scorerEligibleLocked(c, now)
 	})
@@ -677,11 +693,13 @@ func (e *computeScoringEngine) considerProvider(ctx context.Context, p pool.Prov
 	}
 	e.inFlight[key] = true
 	e.inFlightCount++
-	// The request starts after its dispatch delay, at most one tick later;
-	// counting it from then keeps actual starts within max_per_hour in any
-	// rolling hour.
-	e.recentStarts = append(e.recentStarts, now.Add(e.tickInterval()))
+	// The request starts after its dispatch delay, at most one tick after
+	// this reservation; counting it from then keeps actual starts within
+	// max_per_hour in any rolling hour.
+	startAt := reserveAt.Add(e.tickInterval())
+	e.recentStarts = append(e.recentStarts, startAt)
 	e.mu.Unlock()
+	e.recordStart(ctx, startAt)
 	go e.runProbe(ctx, verified, scorers)
 }
 
@@ -1092,7 +1110,17 @@ func (e *computeScoringEngine) persistExclusion(ctx context.Context, providerID 
 	e.s.log.Warn().Str("event", "compute_integrity_scorer_excluded").Str("provider_id", providerID).Msg("compute-integrity scorer excluded")
 }
 
-func (e *computeScoringEngine) retryExclusions(ctx context.Context, now time.Time) {
+// recordStart persists a counted start so a restart rebuilds the hourly
+// window. A failed write is logged; the in-memory window still holds it.
+func (e *computeScoringEngine) recordStart(ctx context.Context, at time.Time) {
+	wctx, cancel := context.WithTimeout(ctx, computeScoreLookupTimeout)
+	defer cancel()
+	if err := e.deps.Store.RecordVerificationStart(wctx, at); err != nil {
+		e.s.log.Warn().Str("event", "compute_integrity_start_persist_failed").Msg("verification start not persisted")
+	}
+}
+
+func (e *computeScoringEngine) retryExclusions(ctx context.Context, now time.Time, deadline time.Time) {
 	e.exclusionMu.Lock()
 	defer e.exclusionMu.Unlock()
 	e.mu.Lock()
@@ -1102,6 +1130,9 @@ func (e *computeScoringEngine) retryExclusions(ctx context.Context, now time.Tim
 	}
 	e.mu.Unlock()
 	for _, id := range pending {
+		if time.Now().After(deadline) {
+			return
+		}
 		if e.scorers.Excluded(id) {
 			wctx, cancel := context.WithTimeout(ctx, computeScoreLookupTimeout)
 			err := e.deps.Store.ExcludeScorer(wctx, id, now)
@@ -1125,6 +1156,9 @@ func (e *computeScoringEngine) pruneDurable(ctx context.Context, now time.Time) 
 	e.lastDurablePrune = now
 	pctx, cancel := context.WithTimeout(ctx, computeScoreCommitTimeout)
 	defer cancel()
+	if err := e.deps.Store.PruneVerificationStarts(pctx, now.Add(-2*time.Hour)); err != nil {
+		e.s.log.Warn().Str("event", "compute_integrity_start_prune_failed").Msg("verification start prune failed")
+	}
 	if _, err := e.deps.Store.PruneStaleKeyStates(pctx, now.Add(-computeScoreDurableRetention)); err != nil {
 		e.s.log.Warn().Str("event", "compute_integrity_state_prune_failed").Msg("compute-integrity state prune failed")
 	}

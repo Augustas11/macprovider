@@ -4825,7 +4825,9 @@
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringDueTimeSurvivesReconnect",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringHourlyBoundFailsClosedWithoutHistory",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringDispatchDelaySpansSweep",
-        "phase4-coordinator/internal/buyer/compute_integrity_suspension_internal_test.go:TestComputeIntegrityProbeAccountsRecurAndRetire"
+        "phase4-coordinator/internal/buyer/compute_integrity_suspension_internal_test.go:TestComputeIntegrityProbeAccountsRecurAndRetire",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringSweepDeadlineBoundsLookups",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringStartCountedFromReservation"
       ],
       "journeys": [],
       "evidence": [],
