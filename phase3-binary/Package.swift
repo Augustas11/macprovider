@@ -33,7 +33,7 @@ let package = Package(
         // on one Metal queue.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "861bf176c64c052104ba3497503c6a0f3c5a0069"
+            revision: "e2c8ed2a48c72e0b414e357513b789b12a42ebd1"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

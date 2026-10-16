@@ -44,7 +44,7 @@ EXPECTED_LOCATIONS = {
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
 # Fork branch glm53/tuple-0324 (untagged campaign revision) on upstream
 # mlx-swift-lm 3.32.3.
-SPEC048_MLX_SWIFT_LM_REVISION = "861bf176c64c052104ba3497503c6a0f3c5a0069"
+SPEC048_MLX_SWIFT_LM_REVISION = "e2c8ed2a48c72e0b414e357513b789b12a42ebd1"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
 # Fork tag 0.32.3-macprovider.3: upstream mlx-swift 0.32.3 with the MLX core
