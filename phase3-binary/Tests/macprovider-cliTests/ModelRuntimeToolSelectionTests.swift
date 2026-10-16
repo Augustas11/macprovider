@@ -187,12 +187,32 @@ final class ModelRuntimeToolSelectionTests: XCTestCase {
     func testSwapAwayFromAliasConfiguredModelStaysConservative() async throws {
         let runtime = runtime(modelID: "qwen/qwen3.6-35b-a3b", catalogModelIDAlias: ToolSelectionPolicy.supportedNativeModel, warmSwapEnabled: true)
         try await runtime.beginSwap(targetModelID: "local/other").value
-        for model in ["local/other", ToolSelectionPolicy.supportedNativeModel] {
+        // The swapped-in model is refused by tool selection; the catalog id no
+        // longer names the loaded model at all.
+        for (model, code) in [("local/other", "unsupported_tool_choice"), (ToolSelectionPolicy.supportedNativeModel, "model_not_found")] {
             do {
                 _ = try await runtime.acquireRequestHandle(try request(model: model))
                 XCTFail("swapped-in model accepted required")
             } catch let error as APIError {
-                XCTAssertTrue(["unsupported_tool_choice", "model_not_found"].contains(error.code), String(describing: error.code))
+                XCTAssertEqual(error.code, code, model)
+            }
+        }
+    }
+
+    /// A pool alias is never a catalog identity: it neither qualifies a local
+    /// model nor disqualifies a configured allowlisted one.
+    func testPoolAliasNeitherGrantsNorRemovesGuaranteedModes() async throws {
+        let pool = "pool/abcdefghijklmnopqrstuv/qwen"
+        let canonical = runtime(catalogModelIDAlias: pool)
+        let handle = try await canonical.acquireRequestHandle(try request())
+        await canonical.unregisterInFlight(handle.registrationID)
+        let local = runtime(modelID: "qwen/qwen3.6-35b-a3b", catalogModelIDAlias: pool)
+        for model in ["qwen/qwen3.6-35b-a3b", pool] {
+            do {
+                _ = try await local.acquireRequestHandle(try request(model: model))
+                XCTFail("pool alias qualified a local model")
+            } catch let error as APIError {
+                XCTAssertEqual(error.code, "unsupported_tool_choice")
             }
         }
     }

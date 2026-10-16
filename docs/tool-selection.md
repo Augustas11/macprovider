@@ -17,6 +17,9 @@ establish those gates.
 | Ollama, LM Studio, oMLX and other external/loopback adapters | Existing behavior | Rejected | Rejected |
 
 An alias works only when it resolves to the same serving model identity.
+A provider that loads its configured model under a local name and advertises
+a configured catalog id is checked against that catalog id while that model
+is loaded; a warm-swapped model is checked against its own id.
 Qwen family membership alone does not qualify another model or quantization.
 `GET /v1/status` projects `tool_choice_modes` per serving model from eligible
 provider claims. The coordinator checks compatibility again during routing;

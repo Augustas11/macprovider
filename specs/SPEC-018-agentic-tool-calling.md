@@ -504,10 +504,12 @@ explicit tool modes for relay-blind/encrypted envelopes.
 
 A buyer alias can use the first row only when routing resolves to that same
 loaded model identity. When a native provider loads its configured model under
-a local name and advertises a configured catalog id for it, the loaded
-identity is that catalog id while the configured model is the one loaded;
-after a warm swap to another model it is the swapped-in model's own id. A `qwen3` family substring, catalog entry, available
-parser, or claimed OpenAI compatibility alone MUST NOT enable guarantees.
+a local name and advertises a configured catalog id for it, the provider MUST
+evaluate this matrix against that catalog id while the configured model is the
+one loaded. Any other loaded model, including one warm-swapped in, MUST be
+evaluated against its own loaded id. A pool model id is never a catalog id.
+A `qwen3` family substring, catalog entry, available parser, or claimed OpenAI
+compatibility alone MUST NOT enable guarantees.
 `required`/named require an explicit effective completion budget of 1–16,384
 tokens (`max_tokens`, or its accepted `max_completion_tokens` alias). An absent
 or out-of-range budget fails before inference with HTTP 400
