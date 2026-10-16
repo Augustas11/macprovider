@@ -1,5 +1,0 @@
-You are the closure check for audit round 3 of PR #1980 (cwd is the macprovider worktree, branch fix/1971-selfcheck-probe). Round 3 found 1 HIGH and 4 MEDIUM, all reported fixed in commit e838fce56 and listed in `audits/2026-10-13-1971-selfcheck-probe/ROUND3_FIXES.md`. Read that file, `SCOPE.md`, and `git show e838fce56`, then `git diff origin/main...HEAD -- phase3-binary specs` for context.
-
-For each round-3 finding, decide CLOSED or OPEN with file:line evidence: is the fix correct and complete, and does a test exercise it? Then check whether e838fce56 introduced any new CRITICAL, HIGH or MEDIUM issue in correctness (self-check decisions, scheduler cohort admission and decode hold, grant caps, fail-closed paths, re-measure markers), security (a buyer request being delayed, starved, or batched with probe rows; cross-row isolation), or SPEC-038 FR-CB10 consistency with the code.
-
-Report only; do not edit files. End with `VERDICT: <n> CRITICAL / <n> HIGH / <n> MEDIUM / <n> LOW`, plus one line per round-3 finding: CLOSED or OPEN.
