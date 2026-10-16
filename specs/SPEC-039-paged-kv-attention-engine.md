@@ -1,7 +1,9 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1.18
-Status: draft (normative design). v0.1.18 names the `glm5_next` catalog key
+Version: v0.1.19
+Status: draft (normative design). v0.1.19 bounds every shared forward that
+carries a `glm5_next` row at 8 flattened tokens, gives `glm5_next` a 256-token
+default pool block, and states the `pagedMLA` gather count. v0.1.18 names the `glm5_next` catalog key
 (`zai-org/glm-5.3-flash`) and counts the native-MTP next-N layer's
 sparse-attention cache in the FR-PKV13 sizing input. v0.1.17 adds the `glm5_next` hybrid paged
 family (epic #2029): a `pagedMLA(kpool:)` cache kind that pages the MLA latent
@@ -64,6 +66,16 @@ is `RotatingKVCache` only because the serve path caps KV for memory attaches to
 paged mode (the block pool bounds memory), while a genuine sliding-window model
 stays fail-safe. IMPL lands with this revision.
 Owner: provider runtime / inference engine
+Change log v0.1.19 (2026-10-17): FR-PKV12 caps a shared forward over
+`pagedMLA` layers at 8 flattened tokens (rows x tokens per row): the GLM-5-Next
+batched decode kernels and quantized projections keep a batched row bitwise
+equal to its serial run only up to that size on the measured hardware. Decode
+steps split, packed verifications group, and a shared prefill that would
+exceed it runs per row. FR-PKV14 makes 256 the `glm5_next` default
+`block_size_tokens` when the operator sets none. FR-PKV4 states that the
+attach-time gather count for a `pagedMLA` layer is two per forward (latent and
+pooled keys) over every prefill chunk and decode forward, and that both
+buffers use the same physical block order. Refines SPEC-039-R004, R012, R014.
 Change log v0.1.18 (2026-10-17): the FR-PKV12 GLM-5.3-Flash entry keys on
 catalog model id `zai-org/glm-5.3-flash` plus `Glm5NextForConditionalGeneration`.
 The FR-PKV13 `glm5_next` sizing input is computed from the admitted config
@@ -498,7 +510,10 @@ above:
    a pooled key is appended to the paged buffer mid-decode.
 4. *Coverage proof.* The gather MUST be shown to run for the latent and the
    pooled-key buffer of every `deepseek_sparse_attention` layer on every
-   prefill chunk and decode step under test. `linear_attention` (KDA) layers
+   prefill chunk and decode step under test (v0.1.19: exactly
+   `2 × sparse layers × (prefill chunks + decode forwards)` gather calls once
+   the first pool window is complete, with the pooled-key buffer read through
+   the same physical block order as the latent). `linear_attention` (KDA) layers
    stay on `MambaCache` and are not paged; their state is compared exactly
    under FR-PKV12's recurrent-row rules.
 5. *Row-local window.* The incomplete pool window (pending indexer keys and
@@ -784,7 +799,18 @@ recognizes a `GLM5NextAttentionCache` as `pagedMLA` only when its pool width
 equals the config's `index_kpool`; any other count, order, or class fails
 closed. The native-MTP next-N layer is not part of this topology; its state
 belongs to SPEC-048. The KDA layers ride the existing recurrent
-(`.recurrentMamba`) path unchanged. The engine MUST preserve each row's recurrent state
+(`.recurrentMamba`) path unchanged. **Forward size bound (v0.1.19).** Every
+shared forward over a `pagedMLA` topology MUST carry at most 8 flattened
+tokens (rows × tokens per row). The GLM-5-Next batched decode kernels and the
+model's quantized projections keep each batched row bitwise equal to its
+serial run only up to that size on the measured hardware (past the core's
+per-device `qmv` limit the projections switch to `qmm` and rows diverge). A
+decode step with more rows MUST split into forwards of at most 8 rows, packed
+native-MTP verification MUST group rows so each group carries at most 8 target
+tokens, and a shared prompt prefill whose rows × chunk length exceeds 8 MUST
+prefill each row in its own forward. The bound is a property of the code path,
+not an operator setting; the SPEC-038 FR-CB10 self-check still decides the
+served slot count. The engine MUST preserve each row's recurrent state
 where present, page only attention KV, and pass token-parity and multi-step
 batched row-isolation gates, including row leave and join, before advertising
 the exact tuple. Adding a further mixed identity to this allowlist is a
@@ -937,7 +963,7 @@ least:
 | YAML `paged_kv:` key | Env var | CLI flag | Default | Rule |
 |---|---|---|---|---|
 | `enabled` | `MACPROVIDER_PAGED_KV_ENABLED` | `--paged-kv-enabled` | `false` | bool; invalid ⇒ paged disabled, error logged |
-| `block_size_tokens` | `MACPROVIDER_PAGED_KV_BLOCK_SIZE_TOKENS` | `--paged-kv-block-size-tokens` | IMPL-set | positive integer, fixed per pool (FR-PKV2); invalid ⇒ disabled |
+| `block_size_tokens` | `MACPROVIDER_PAGED_KV_BLOCK_SIZE_TOKENS` | `--paged-kv-block-size-tokens` | IMPL-set (v0.1.19: 256 for `glm5_next`) | positive integer, fixed per pool (FR-PKV2); invalid ⇒ disabled |
 | `max_physical_blocks` | `MACPROVIDER_PAGED_KV_MAX_PHYSICAL_BLOCKS` | `--paged-kv-max-physical-blocks` | unset ⇒ covers advertised `max_context_tokens` (min 1024) | pool capacity bound (FR-PKV2), or an equivalent `max_pool_bytes`; > 0; invalid ⇒ disabled |
 | `fallback_policy` | `MACPROVIDER_PAGED_KV_FALLBACK_POLICY` | `--paged-kv-fallback-policy` | `permissive` | `permissive` (stock-route) or `strict` (fail preflight) (FR-PKV7); invalid ⇒ disabled |
 
