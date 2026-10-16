@@ -81,19 +81,24 @@ MLX core (`v0.32.2..v0.32.2-macprovider.5`):
 | --- | --- | --- |
 | Batch-invariant small-M quantized matmul | `ff1b94832` | No `qmv_wide` (every small-M product stays on `qmv`) and no `qmm_splitk` (`qmm` reduces K in one order for every M), so a continuously batched row matches its serial result. |
 | Every-thread compiled-function erase | `c9196eb71` | Freeing a compiled function erases it from every thread's compile cache, so a later function at the same address never replays a dead trace. |
-| Internal ops on the caller's stream | `91a45ed47`, `b3397bfc9`, `49d94e9fe` | Every internal call inside a stream-taking op passes the caller's stream: the `quantized_matmul` casts of `x`/`scales`/`biases`, `indices_or_default`, `gather`, `scatter`, `affine_quantize`, the bool-mask SDPA fallback, the implicit random key split (`KeySequence::next`, reached by temperature sampling), `categorical`, `layer_norm` and its VJP, `linalg` `l2_norm`/`cross`, the `fft` zero-pad, `number_of_elements`, `imag`, and nine transformation rules (vjp/jvp) that now use the primitive's `stream()`. mlx-swift runs every op on its own pooled stream, so a stream-less internal op ran on the thread's default stream: a second Metal queue, a cross-queue event wait and a separate submit per op. gpt-oss-20b decode (8-bit affine projections over float32 activations) paid 140 per token, 30% slower than 3.31.4 (#2028). Upstream v0.32.4 already passes the stream in `indices_or_default` and the SDPA fallback; the v0.32.4 rebase carries the rest (`8a9975f82` and its follow-up). |
+| Internal ops on the caller's stream | `91a45ed47`, `b3397bfc9`, `49d94e9fe` | Every internal call inside a stream-taking op passes the caller's stream: the `quantized_matmul` casts of `x`/`scales`/`biases`, `indices_or_default`, `gather`, `scatter`, `affine_quantize`, the bool-mask SDPA fallback, the implicit random key split (`KeySequence::next`, reached by temperature sampling), `categorical`, `layer_norm` and its VJP, `linalg` `l2_norm`/`cross`, the `fft` zero-pad, `number_of_elements`, `imag`, and nine transformation rules (vjp/jvp) that now use the primitive's `stream()`. mlx-swift runs every op on its own pooled stream, so a stream-less internal op ran on the thread's default stream: a second Metal queue, a cross-queue event wait and a separate submit per op. gpt-oss-20b decode (8-bit affine projections over float32 activations) paid 140 per token, 30% slower than 3.31.4 (#2028). Upstream v0.32.4 already passes the stream in `indices_or_default` and the SDPA fallback; the v0.32.4 rebase carries the rest (`8a9975f82`, `77cd76b31`, `2f512e399`). |
 
 `MLXCoreStreamPropagationTests` (CI, `swift test`) enforces this on the
 resolved core by running `scripts/check_mlx_core_streams.py`. The script reads
 every top-level core header and source (`mlx/*.h`, `mlx/*.cpp`), takes the op
 names declared with a `StreamOrDevice` parameter and the array operator
 overloads the headers declare, and inspects every body with a caller stream: a
-`StreamOrDevice` parameter, or a primitive rule (`Class::vjp`/`jvp`/`vmap`, or
-any body using `stream()`). It fails on a call to one of those ops (plain or
-`mlx::core::`-qualified) whose last argument is not the caller's stream or an
-alias of it (a device such as `Device::gpu` is not), and on any operator
-overload applied to an array value. It fails closed on missing files or an
-empty scan. The test also checks the resolved mlx-swift's `Source/Cmlx/mlx`
+`StreamOrDevice` or `Stream` parameter (by value or reference), or a primitive
+rule (`Class::vjp`/`jvp`/`vmap`, or any body using `stream()`). In those bodies
+it fails on a call to one of those ops (plain or `mlx::core::`-qualified; a
+local lambda that shadows an op name is not the op) whose last argument is not
+the caller's stream or an alias of it (a device such as `Device::gpu` is not),
+and on any operator overload applied to an array value, read per statement so
+an expression split across lines is still one expression. It fails closed on
+missing files or an empty scan. It is a lexical check, not a C++ parser: code
+that hides an op behind a macro or a template the scan does not expand is out
+of its reach, which the Studio per-stream accounting above still covers.
+The test also checks the resolved mlx-swift's `Source/Cmlx/mlx`
 gitlink and the checked-out core HEAD equal `SPEC048_MLX_CORE_REVISION`
 (`scripts/read_swiftpm_pins.py`). A rebase that introduces a stream-less
 internal op fails CI until that op passes the stream; run the script against

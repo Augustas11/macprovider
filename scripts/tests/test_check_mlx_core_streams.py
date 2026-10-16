@@ -176,6 +176,58 @@ array h(const array& x, StreamOrDevice s) {
         findings = scan(root)
         self.assertEqual(len(findings), 2, findings)
 
+    def test_every_stream_parameter_spelling_is_inspected(self):
+        root = ops_cpp("""
+array f(const array& x, const StreamOrDevice& s) {
+  return add(x, x);
+}
+
+array g(const array& x, const Stream& stream) {
+  return multiply(x, x);
+}
+
+array h(const array& x, Stream s) {
+  return add(x, x, s);
+}
+""")
+        findings = scan(root)
+        self.assertEqual(len(findings), 2, findings)
+        self.assertTrue(any("[f]" in f for f in findings) and any("[g]" in f for f in findings))
+
+    def test_operator_split_across_lines_is_reported(self):
+        root = ops_cpp("""
+array f(const array& a, StreamOrDevice s) {
+  auto y = add(a, a, s);
+  return y
+      * a;
+}
+""")
+        findings = scan(root)
+        self.assertEqual(len(findings), 1, findings)
+        self.assertIn("operator on array", findings[0])
+
+    def test_call_result_as_left_operand_is_reported(self):
+        root = ops_cpp("""
+array f(const array& a, StreamOrDevice s) {
+  if (std::isnan(1.0) || std::max(1, 2) > 0) {
+    return add(a, a, s);
+  }
+  return add(a, a, s) << multiply(a, a, s);
+}
+""")
+        findings = scan(root)
+        self.assertEqual(len(findings), 1, findings)
+        self.assertIn("add(a, a, s) << multiply(a, a, s)", findings[0])
+
+    def test_local_lambda_shadowing_an_op_is_not_the_op(self):
+        root = ops_cpp("""
+array f(const array& a, const Stream& stream) {
+  auto add = [stream](auto in) { return multiply(in, in, stream); };
+  return add(a);
+}
+""")
+        self.assertEqual(scan(root), [])
+
     def test_missing_required_file_fails_closed(self):
         root = core()
         (root / "mlx" / "primitives.cpp").unlink()

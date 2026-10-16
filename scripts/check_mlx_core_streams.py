@@ -12,7 +12,8 @@ The check reads every top-level core header and source (``mlx/*.h``,
 ``mlx/*.cpp``; the backends are out of scope). It collects the names of
 functions declared with a ``StreamOrDevice`` parameter and the array operator
 overloads the headers declare. It then inspects every function body that has
-a caller stream, meaning a ``StreamOrDevice`` parameter or, for primitive
+a caller stream, meaning a ``StreamOrDevice`` or ``Stream`` parameter (by value
+or reference) or, for primitive
 rules (``Class::vjp``/``jvp``/``vmap``, or any body using ``stream()``), the
 primitive's ``stream()``, and reports:
 
@@ -163,7 +164,7 @@ def scan_text(source: str, text: str, ops: set[str], operators: set[str]) -> tup
     op_alt = operator_regex(operators)
     shift_ops = {o for o in operators if o in ("<<", ">>")}
     for name, params, body_start, body, is_rule in function_bodies(text):
-        parameter = re.search(r"StreamOrDevice\s+(\w+)", params)
+        parameter = re.search(r"\b(?:StreamOrDevice|Stream)\s*(?:const\s*)?&?\s*(\w+)\s*(?:=|,|$|/\*)", params.strip())
         if parameter:
             callers = {parameter.group(1)}
         elif is_rule or re.search(r"(?<![\w.>])stream\s*\(\s*\)", body):
@@ -180,8 +181,14 @@ def scan_text(source: str, text: str, ops: set[str], operators: set[str]) -> tup
         stream_argument = re.compile(r"^(?:" + caller_names + r"|to_stream\(\s*(?:" + caller_names + r")\s*\)|stream\(\))$")
         first_line = text[:body_start].count("\n")
 
+        # A local lambda that shadows an op name (auto expand_dims = [stream](...))
+        # is not the op; its own body is checked where it calls the real ops.
+        shadowed = set(re.findall(r"\bauto\s+(\w+)\s*=\s*\[", body))
+        shadowed |= set(re.findall(r"\bstd::function<[^;]*?>\s+(\w+)\s*=", body))
         for call in call_pattern.finditer(body):
             qualifier = call.group(1) or ""
+            if not qualifier and call.group(2) in shadowed:
+                continue
             if qualifier and not set(filter(None, qualifier.split("::"))) <= CORE_QUALIFIERS:
                 continue
             preceding = body[: call.start()].rstrip()
@@ -208,14 +215,25 @@ def scan_text(source: str, text: str, ops: set[str], operators: set[str]) -> tup
         if vectors:
             operand.append(r"\b(?:" + "|".join(sorted(vectors, key=len, reverse=True)) + r")\s*\[[^\]]*\](?!\s*\.)")
         result = r"" + CORE_PREFIX + r"(?:" + stream_call_names + r")\s*\([^;]*?\)"
-        patterns = [re.compile(r"\)\s*" + op_alt + r"\s*" + CORE_PREFIX + r"(?:" + stream_call_names + r")\s*\(")]
+        call_open = CORE_PREFIX + r"(?:" + stream_call_names + r")\s*\("
+        # A stream-call result as the right operand of any op.
+        patterns = [re.compile(r"\)\s*" + op_alt + r"\s*" + call_open)]
+        # ...and as the left operand (checked with balanced parentheses below).
+        left_call = re.compile(r"(?<![\w.>:])" + call_open)
+        followed_by_op = re.compile(r"\s*" + op_alt + r"\s*[\w(~!-]")
         if operand:
             value = "(?:" + "|".join(operand) + ")"
             patterns.append(re.compile(r"(?<![\w.])" + value + r"\s*" + op_alt))
             non_shift = operator_regex(operators - shift_ops)
             patterns.append(re.compile(r"(?<![-+*/%=!<>&|^~])" + non_shift + r"\s*" + value))
             patterns.append(re.compile(r"(?:^|[(,=\s])[~!-]\s*" + value))
-        for offset, line_text in enumerate(body.split("\n")):
+        # Scan statements, not physical lines, so an operator split across lines
+        # is still one expression.
+        for statement in re.finditer(r"[^;{}]+", body):
+            line_text = " ".join(statement.group(0).split())
+            if not line_text:
+                continue
+            offset = body[: statement.start() + len(statement.group(0)) - len(statement.group(0).lstrip())].count("\n")
             # Member calls on arrays (a.ndim(), x.shape(0), (*w).size(), s.shape()[i])
             # return integers, dtypes or shapes, not arrays.
             probe = re.sub(r"(?:\(\*\w+\)|\w+(?:\[[^\]]*\])?)(?:\.\w+\([^()]*\)(?:\[[^\]]*\])*)+", "0", line_text)
@@ -224,8 +242,14 @@ def scan_text(source: str, text: str, ops: set[str], operators: set[str]) -> tup
             # `auto& in = ...`, `[&a](...)`, `[&shape, &axes]`.
             probe = re.sub(r"\b(?:const\s+)?(?:array|auto|Stream|StreamOrDevice)\s*&", " ", probe)
             probe = re.sub(r"\[[^\]]*\]\s*(?=\()", " ", probe)
-            if any(pattern.search(probe) for pattern in patterns):
-                findings.append(f"{source}:{first_line + offset}: [{name}] operator on array: {line_text.strip()[:100]}")
+            left_operand = False
+            for call in left_call.finditer(probe):
+                close_index = matching(probe, call.end() - 1, "(", ")")
+                if close_index > 0 and followed_by_op.match(probe, close_index + 1):
+                    left_operand = True
+                    break
+            if left_operand or any(pattern.search(probe) for pattern in patterns):
+                findings.append(f"{source}:{first_line + offset}: [{name}] operator on array: {line_text[:100]}")
     return findings, inspected
 
 
