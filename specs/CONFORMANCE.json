@@ -627,7 +627,7 @@
     {
       "spec_id": "SPEC-022",
       "title": "Verified model settlement",
-      "version": "v0.4.7",
+      "version": "v0.4.8",
       "path": "specs/SPEC-022-verified-model-settlement.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -7459,7 +7459,10 @@
         "phase4-coordinator/internal/billing/evidence_early_archive_test.go:TestLateUndeliveredQuarantineLeavesArchivedCreditPayable",
         "phase4-coordinator/internal/billing/endpoints_test.go:TestReconcileEndpointRefusesRangeBeforeRequestLogWindow",
         "phase4-coordinator/internal/billing/ledger_rollup_test.go:TestLedgerRollupFindsCreditsSettledLaterIntoAReadyPayout",
-        "phase4-coordinator/internal/billing/ledger_rollup_test.go:TestLedgerRollupWaitsForTheBillingMirror"
+        "phase4-coordinator/internal/billing/ledger_rollup_test.go:TestLedgerRollupWaitsForTheBillingMirror",
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionDrainedMeansCaughtUp",
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionDrainedIgnoresClearedHolds",
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionOverdueCountMigration"
       ],
       "journeys": [],
       "evidence": [],
@@ -7467,7 +7470,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1793",
-        "rationale": "SPEC-022 v0.4.0 R-15 settled-evidence retention. The coordinator implements the R-15.2 selection predicate, the gzip JSONL archive with a SHA-256 manifest, local re-verification (checksum, size, row counts, row-for-row equality with the hot rows), an optional off-host confirmation command, an archive free-space floor, bounded batch deletion of archived rows only, tombstones that keep archived credits payable and verified and feed the provider earnings rollup, a pool-proven rollup guard, and bounded incremental vacuum. Since v0.4.3 a run drains archive after archive within a wall-clock budget along scan laps that start at a persisted archived low watermark (requests that can still become eligible go to a holds table every lap re-checks; too-young credits keep the watermark below them), derives backlog_drained from the last completed lap, reports the lap state and each database's auto_vacuum mode, and skips incremental vacuum on an auto_vacuum=NONE database; the one-time INCREMENTAL conversion is an ops entry-point step gated on the drain. It is on by default with enabled=false as the kill switch. Pending: the first live runs on the production database and a bounded hot database across two weekly settlements. Since v0.4.4-v0.4.6 (#1793 slices 6-8) the audit database rotates into verified closed period archives, evidence leaves at verdict close plus a 48-hour grace after a completed nightly reconcile (an unsettled credit settles through its tombstone), and settled ledger detail rows roll up into per-payout aggregates that every payable, payout, and earnings reader adds; the coordinator runtime that carries them is pending deployment."
+        "rationale": "SPEC-022 v0.4.0 R-15 settled-evidence retention. The coordinator implements the R-15.2 selection predicate, the gzip JSONL archive with a SHA-256 manifest, local re-verification (checksum, size, row counts, row-for-row equality with the hot rows), an optional off-host confirmation command, an archive free-space floor, bounded batch deletion of archived rows only, tombstones that keep archived credits payable and verified and feed the provider earnings rollup, a pool-proven rollup guard, and bounded incremental vacuum. Since v0.4.3 a run drains archive after archive within a wall-clock budget along scan laps that start at a persisted archived low watermark (requests that can still become eligible go to a holds table every lap re-checks; too-young credits keep the watermark below them), derives backlog_drained from the last completed lap, reports the lap state and each database's auto_vacuum mode, and skips incremental vacuum on an auto_vacuum=NONE database; the one-time INCREMENTAL conversion is an ops entry-point step gated on the drain. It is on by default with enabled=false as the kill switch. Pending: the first live runs on the production database and a bounded hot database across two weekly settlements. Since v0.4.4-v0.4.6 (#1793 slices 6-8) the audit database rotates into verified closed period archives, evidence leaves at verdict close plus a 48-hour grace after a completed nightly reconcile (an unsettled credit settles through its tombstone), and settled ledger detail rows roll up into per-payout aggregates that every payable, payout, and earnings reader adds; the coordinator runtime that carries them is pending deployment. Since v0.4.8 backlog_drained means caught up: the last completed lap selected no overdue request (one the ledger walk selected that was already eligible 24 hours plus the run budget before the finality point), reported as last_lap_overdue_requests and read by the conversion gate."
       }
     },
     {
