@@ -150,6 +150,7 @@ type openRouterPoolSnapshot struct {
 	ReadySlotsTotal    int
 	ReadySlotsFree     int
 	MaxContextTokens   int
+	ToolChoiceModes    []string
 }
 
 func (s *Server) handleOpenRouterModels(w http.ResponseWriter, r *http.Request) {
@@ -174,8 +175,24 @@ func (s *Server) handleOpenRouterModels(w http.ResponseWriter, r *http.Request) 
 			ReadyProviderCount: model.ReadyProviderCount,
 			ReadySlotsTotal:    model.ReadySlotsTotal,
 			ReadySlotsFree:     model.ReadySlotsFree,
-			MaxContextTokens:   model.MaxContextTokens,
+			// #1570: only a serving provider's granted context is servable.
+			MaxContextTokens: status.ServingMaxContextTokens[model.ID],
+			ToolChoiceModes:  status.ServingToolChoiceModes[model.ID],
 		})
+	}
+	// A model whose only serving providers are busy with no free slot has no
+	// routable status row but still has a servable context.
+	for id, contextTokens := range status.ServingMaxContextTokens {
+		found := false
+		for _, model := range status.Models {
+			if model.ID == id {
+				found = true
+				break
+			}
+		}
+		if !found {
+			pool = append(pool, openRouterPoolSnapshot{ID: id, MaxContextTokens: contextTokens, ToolChoiceModes: status.ServingToolChoiceModes[id]})
+		}
 	}
 	doc, err := projectOpenRouterModels(pool, rateCard, s.cfg.Limits.MaxTokensPerRequest, s.now())
 	if err != nil {
@@ -289,7 +306,7 @@ func openRouterModelRow(listing openRouterListingSpec, id string, isFree, ready 
 			Type:                "text",
 			MaxLength:           openRouterIntegerLimit{Value: maxOutput, Unit: "token"},
 			Streaming:           true,
-			SupportedParameters: openRouterSupportedParameters(listing.PoolID, maxOutput),
+			SupportedParameters: openRouterSupportedParameters(listing.PoolID, maxOutput, live.ToolChoiceModes...),
 			Pricing:             []openRouterPricingEntry{{Type: "completion", Unit: "token", CostUSD: cost.Completion}},
 			Capacity:            []openRouterCapacityEntry{{Type: "completion", Unit: "token", Per: "minute", Value: capacity.TokensPerMinute}},
 		}},
@@ -350,7 +367,7 @@ func openRouterSlug(listing openRouterListingSpec, isFree bool) string {
 	return listing.OpenRouterSlug + ":free"
 }
 
-func openRouterSupportedParameters(modelID string, maxTokens int) map[string]openRouterParameterDescriptor {
+func openRouterSupportedParameters(modelID string, maxTokens int, toolChoiceModes ...string) map[string]openRouterParameterDescriptor {
 	params := map[string]openRouterParameterDescriptor{
 		"max_tokens":  openRouterIntegerParameter(1, maxTokens, "token"),
 		"temperature": openRouterRangeParameter(0, 2),
@@ -360,10 +377,19 @@ func openRouterSupportedParameters(modelID string, maxTokens int) map[string]ope
 		"seed":        openRouterIntegerParameter(0, 9007199254740991, ""),
 	}
 	if openRouterToolFamilyModel(modelID) {
-		// tool_choice "required" is rewritten to "auto" by the coordinator
-		// and "none" is rejected by providers, so only "auto" is declared.
 		params["tools"] = openRouterParameterDescriptor{Type: "boolean"}
-		params["tool_choice"] = openRouterParameterDescriptor{Type: "enum", Values: []string{"auto"}}
+		values := []string{"auto"}
+		// String modes are projected only from live enforcement capabilities.
+		// Named selection is an object; /v1/status and SPEC-018 document it.
+		for _, mode := range []string{"none", "required"} {
+			for _, supported := range toolChoiceModes {
+				if mode == supported {
+					values = append(values, mode)
+					break
+				}
+			}
+		}
+		params["tool_choice"] = openRouterParameterDescriptor{Type: "enum", Values: values}
 	}
 	if openRouterStructuredOutputModel(modelID) {
 		// response_format is an object on the wire, so it is an OpenRouter

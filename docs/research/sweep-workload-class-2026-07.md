@@ -8,7 +8,7 @@
 
 MacProvider already measures buyer-harness behavior by workload name, but the autotune and static-candidate surfaces are still class-blind. The right v0.1 shape is to keep the existing context/concurrency/kv sweep shape and run it as parallel workload-class partitions, producing per-class winners as data. Runtime request classification and class-routed serving should stay out of scope until a later SPEC defines the trust, latency, and API boundary.
 
-The current beta workload library exposes six workload names and maps them to five corpus classes: `short_chat -> short`, `medium_with_system -> medium`, `long_context -> long`, `code_completion -> code`, `agent_style -> agent`, and `streaming_check -> short` (`beta/workloads.py:26`). The report path already groups rows by workload and publishes per-workload medians (`beta/report.py:59`, `beta/report.py:118`). Decision criteria also ask for per-workload median throughput, streaming TTFT, and stop-token leak checks (`beta/DECISION_CRITERIA.md:57`, `beta/DECISION_CRITERIA.md:89`).
+The current beta workload library exposes six workload names and maps them to five corpus classes: `short_chat -> short`, `medium_with_system -> medium`, `long_context -> long`, `code_completion -> code`, `agent_style -> agent`, and `streaming_check -> short` (`beta/workloads.py:26`). The report path already groups rows by workload and publishes per-workload medians (`beta/report.py:59`, `beta/report.py:118`). Decision criteria also ask for per-workload median throughput, streaming TTFT, and stop-token leak checks (`docs/decision-log.md:57`, `docs/decision-log.md:89`).
 
 Two prompt references were unavailable in the current repository state: `.omc/logs/context-throughput-sweep-impl-notes.md` does not exist, and `origin/spike/context-throughput-sweep` is not a valid ref. Those absences should be treated as research constraints, not inferred evidence.
 
@@ -124,7 +124,7 @@ Gates should become class-parameterized where the metric is shape-sensitive:
 - `long_context` should have explicit prefill/TTFT tolerance, because long prompt length changes the expected latency envelope.
 - `streaming_check` should own streaming TTFT gates and should not choose a separate non-stream serve config in v0.1.
 - `code_completion` and `agent_style` should track speculative acceptance rate and output correctness/leak checks more closely, because draft-token benefit depends on structured continuation shape.
-- Stop-token leak gates should remain per workload because decision criteria already ask for stop-token leak rate per workload (`beta/DECISION_CRITERIA.md:89`).
+- Stop-token leak gates should remain per workload because decision criteria already ask for stop-token leak rate per workload (`docs/decision-log.md:89`).
 
 SPEC-023 made static-catalog TPS and TTFT fields advisory rather than hard eligibility gates (`specs/SPEC-023-installer-autotune-recommend.md:35`). The class profile should preserve that posture for measured throughput and SPEC-023 top-level `bench_gate` fields, while SPEC-029 should separately serialize the workload-specific hard TTFT/leak gate policy used to choose a sweep winner.
 

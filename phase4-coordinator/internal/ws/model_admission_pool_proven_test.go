@@ -242,7 +242,7 @@ func TestModelAdmissionPoolProvenEndpoint(t *testing.T) {
 	}
 	// A snapshot older than two cadences is unavailable.
 	later := f.now.Add(modelAdmissionIntakeStaleAfter + time.Second)
-	s.now = func() time.Time { return later }
+	f.clock.Set(later)
 	if code, body := c.do(http.MethodGet, path, "alice-secret", nil); code != http.StatusServiceUnavailable || errorCode(body) != "pool_proven_unavailable" {
 		t.Fatalf("stale: code=%d body=%v", code, body)
 	}

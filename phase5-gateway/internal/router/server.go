@@ -47,12 +47,14 @@ type Server struct {
 	// invoked via readStore() is a COMPILE error, not a runtime mode=ro
 	// driver error. The DSN-level mode=ro+query_only(1) guard in
 	// internal/storage/sqlite stays as defense in depth.
-	readOnlyStore    ReadStore
-	keyMgr           auth.KeyManager
-	demoMgr          auth.DemoManager
-	oauth            auth.OAuthProvider
-	now              func() time.Time
-	client           *http.Client
+	readOnlyStore ReadStore
+	keyMgr        auth.KeyManager
+	demoMgr       auth.DemoManager
+	oauth         auth.OAuthProvider
+	now           func() time.Time
+	client        *http.Client
+	// allowance caches SPEC-050 admission answers (SPEC-050-R014).
+	allowance        allowanceCache
 	trustedProxyNets []*net.IPNet
 	version          string
 	mu               sync.RWMutex
@@ -253,6 +255,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/v1/chat/completions", s.withCORS(http.MethodPost, http.HandlerFunc(s.handleChatCompletions)))
 	mux.Handle("/v1/receipts/", s.withCORS(http.MethodGet, http.HandlerFunc(s.handleBuyerReceipt)))
 	mux.HandleFunc("/v1/creator/", s.handleCreatorProxy)
+	// SPEC-050-R011 MALIBU stake allowance account surface.
+	mux.HandleFunc("/v1/stake", s.handleStakeProxy)
+	mux.HandleFunc("/v1/stake/", s.handleStakeProxy)
 	mux.Handle("/v1/relay-blind/route-reservations", s.withCORS(http.MethodPost, http.HandlerFunc(s.handleRelayBlindRouteReservations)))
 	mux.Handle(privacyDirectoryRoute, s.withCORS(http.MethodGet, http.HandlerFunc(s.handlePrivacyDirectory)))
 	if s.cfg.Features.ResponsesAPIEnabled {
@@ -265,7 +270,7 @@ func (s *Server) Handler() http.Handler {
 	} else {
 		mux.Handle("/v1/messages", s.withCORS(http.MethodPost, http.HandlerFunc(s.handleRelayBlindMessagesDisabled)))
 	}
-	mux.Handle("/v1/sticky", s.withCORS(http.MethodDelete, http.HandlerFunc(s.handleStickyDelete)))
+	mux.Handle("/v1/sticky", s.withCORSMethods([]string{http.MethodGet, http.MethodDelete}, http.HandlerFunc(s.handleStickyDelete)))
 	mux.Handle("/v1/status", s.withCORS(http.MethodGet, http.HandlerFunc(s.handleStatus)))
 	mux.Handle("/v1/rate-card", s.withCORS(http.MethodGet, http.HandlerFunc(s.handlePublicRateCard)))
 	mux.Handle("/v1/rate-card.sig", s.withCORS(http.MethodGet, http.HandlerFunc(s.handlePublicRateCardSig)))
@@ -312,6 +317,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w = &scrubProviderIdentityWriter{ResponseWriter: w}
 		requestID := r.Header.Get("X-Request-ID")
 		requestIDClass := retry503RequestIDClassClientSupplied
 		if !isUUIDLike(requestID) {
@@ -873,7 +879,7 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStickyDelete(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
+	if r.Method != http.MethodGet && r.Method != http.MethodDelete {
 		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method_not_allowed", "Method not allowed")
 		return
 	}
@@ -882,7 +888,7 @@ func (s *Server) handleStickyDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	accountID := authn.AccountID
-	upReq, err := http.NewRequestWithContext(r.Context(), http.MethodDelete, strings.TrimRight(s.cfg.Coordinator.OperatorURL, "/")+"/internal/sticky?account_id="+url.QueryEscape(accountID), nil)
+	upReq, err := http.NewRequestWithContext(r.Context(), r.Method, strings.TrimRight(s.cfg.Coordinator.OperatorURL, "/")+"/internal/sticky?account_id="+url.QueryEscape(accountID), nil)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "coordinator_unavailable", "Coordinator unavailable")
 		return
@@ -912,7 +918,7 @@ func (s *Server) handleStickyDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "api_error", "coordinator_sticky_error", "Coordinator sticky purge error")
 		return
 	}
-	writeJSON(w, http.StatusOK, body)
+	writeJSON(w, resp.StatusCode, body)
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -1022,6 +1028,11 @@ type statusResponse struct {
 	Coordinator coordinatorStatus `json:"coordinator"`
 	Pool        statusPool        `json:"pool"`
 	Models      []statusModel     `json:"models"`
+	// ServingMaxContextTokens maps a model id to the largest context a
+	// serving provider grants (#1570): ready or busy, serving-eligible, full
+	// or not. The OpenRouter document advertises it. Not serialized.
+	ServingMaxContextTokens map[string]int      `json:"-"`
+	ServingToolChoiceModes  map[string][]string `json:"-"`
 }
 
 type coordinatorStatus struct {
@@ -1057,6 +1068,7 @@ type statusModel struct {
 	// which would leak provider count fingerprints). The field is
 	// OMITTED when the union is empty.
 	SupportedModels []string `json:"supported_models,omitempty"`
+	ToolChoiceModes []string `json:"tool_choice_modes,omitempty"`
 }
 
 // authStateBearerlessDuplicate is the wire value the coordinator emits for
@@ -1074,24 +1086,36 @@ const (
 	authStateMintFailed = "mint_failed"
 )
 
+type toolSelectionCapability struct {
+	ModelID    string   `json:"model_id"`
+	Runtime    string   `json:"runtime"`
+	Modes      []string `json:"modes"`
+	Validation string   `json:"validation"`
+}
+
 type poolzProviderRow struct {
-	ProviderID               string   `json:"provider_id"`
-	AssignedID               string   `json:"assigned_id"`
-	EndpointURL              string   `json:"endpoint_url"`
-	Hostname                 string   `json:"hostname"`
-	ModelID                  string   `json:"model_id"`
-	State                    string   `json:"state"`
-	SlotsFree                int      `json:"slots_free"`
-	SlotsTotal               int      `json:"slots_total"`
-	MaxContextTokens         int      `json:"max_context_tokens"`
-	MemoryBytes              int64    `json:"memory_bytes"`
-	CPUCount                 int      `json:"cpu_count"`
-	OperatorIdentity         string   `json:"operator_identity"`
-	SupportedModels          []string `json:"supported_models,omitempty"`
-	PublishesSupportedModels bool     `json:"publishes_supported_models,omitempty"`
+	RuntimeSource             string                    `json:"runtime_source,omitempty"`
+	ToolSelectionCapabilities []toolSelectionCapability `json:"tool_selection_capabilities,omitempty"`
+	ProviderID                string                    `json:"provider_id"`
+	AssignedID                string                    `json:"assigned_id"`
+	EndpointURL               string                    `json:"endpoint_url"`
+	Hostname                  string                    `json:"hostname"`
+	ModelID                   string                    `json:"model_id"`
+	State                     string                    `json:"state"`
+	SlotsFree                 int                       `json:"slots_free"`
+	SlotsTotal                int                       `json:"slots_total"`
+	MaxContextTokens          int                       `json:"max_context_tokens"`
+	MemoryBytes               int64                     `json:"memory_bytes"`
+	CPUCount                  int                       `json:"cpu_count"`
+	OperatorIdentity          string                    `json:"operator_identity"`
+	SupportedModels           []string                  `json:"supported_models,omitempty"`
+	PublishesSupportedModels  bool                      `json:"publishes_supported_models,omitempty"`
 	// routing_eligible is coordinator-computed from pool.Provider.RoutingEligible().
 	// Omitted on legacy coordinators — gateway falls back to auth_state exclusion.
-	RoutingEligible *bool  `json:"routing_eligible,omitempty"`
+	RoutingEligible *bool `json:"routing_eligible,omitempty"`
+	// serving_eligible is routing_eligible apart from the free-slot term
+	// (#1570). Omitted on older coordinators.
+	ServingEligible *bool  `json:"serving_eligible,omitempty"`
 	AuthState       string `json:"auth_state,omitempty"`
 }
 
@@ -1168,6 +1192,21 @@ func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) sta
 		Coordinator: coordinatorStatus{Status: "up", CheckedAt: now.Format(time.RFC3339)},
 	}
 	for _, p := range poolz.Pool {
+		if poolzProviderServesContext(p) && p.ModelID != "" {
+			if out.ServingToolChoiceModes == nil {
+				out.ServingToolChoiceModes = map[string][]string{}
+			}
+			out.ServingToolChoiceModes[p.ModelID] = mergeToolChoiceModes(out.ServingToolChoiceModes[p.ModelID], p)
+		}
+		// #1570: the OpenRouter document's context comes from serving
+		// providers, including one that is busy with no free slot (which
+		// routing_eligible excludes).
+		if poolzProviderServesContext(p) && p.ModelID != "" && p.MaxContextTokens > out.ServingMaxContextTokens[p.ModelID] {
+			if out.ServingMaxContextTokens == nil {
+				out.ServingMaxContextTokens = map[string]int{}
+			}
+			out.ServingMaxContextTokens[p.ModelID] = p.MaxContextTokens
+		}
 		// SPEC-003 v0.8.3 FR-C9.4 + pool.Provider.RoutingEligible() — sessions
 		// admitted to /poolz for operator visibility but excluded from buyer
 		// routing (self_minted, bearerless_duplicate, pending receipt rotation,
@@ -1252,6 +1291,7 @@ func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) sta
 		models[modelID] = m
 	}
 	for _, model := range models {
+		model.ToolChoiceModes = out.ServingToolChoiceModes[model.ID]
 		model.Degraded = computeDegraded(stats[model.ID])
 		model.Available, model.Availability = computeAvailability(stats[model.ID])
 		out.Models = append(out.Models, model)
@@ -1262,6 +1302,20 @@ func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) sta
 
 // poolzProviderCountsTowardBuyerCapacity mirrors pool.Provider.RoutingEligible()
 // for buyer-facing /v1/status aggregation.
+// poolzProviderServesContext reports whether a /poolz row's context is
+// servable: a ready or busy provider the coordinator marks serving-eligible
+// (routing-eligible apart from free slots). Older coordinators omit
+// serving_eligible, so the row falls back to the routing predicate.
+func poolzProviderServesContext(p poolzProviderRow) bool {
+	if p.State != "ready" && p.State != "busy" {
+		return false
+	}
+	if p.ServingEligible != nil {
+		return *p.ServingEligible
+	}
+	return poolzProviderCountsTowardBuyerCapacity(p)
+}
+
 func poolzProviderCountsTowardBuyerCapacity(p poolzProviderRow) bool {
 	if p.RoutingEligible != nil {
 		return *p.RoutingEligible
@@ -1455,6 +1509,7 @@ var gatewayPermanentCodes = map[string]bool{
 	"comment_too_long": true, "invalid_request_id": true, "invalid_feedback_scope": true,
 	"invalid_limit": true, "invalid_cursor": true, "invalid_settlement_target": true, "invalid_settlement_release_holds_request": true, "api_key_lookup_failed": true,
 	"ambiguous_credentials":                    true,
+	"json_schema_non_strict_unsupported":       true,
 	"request_content_encoding_unsupported":     true,
 	"unsupported_content_shape":                true,
 	"wallet_account_auth_required":             true,
@@ -1566,9 +1621,15 @@ var gatewayPermanentCodes = map[string]bool{
 	// SPEC-006 §5.11 creator self-serve proxy.
 	"creator_upstream_error": true, "creator_identity_lookup_failed": true,
 	"demo_creator_forbidden": true, "wallet_session_creator_forbidden": true,
+	// SPEC-050-R011 /v1/stake proxy.
+	"stake_upstream_error": true, "stake_identity_lookup_failed": true,
+	"demo_stake_forbidden": true, "wallet_session_stake_forbidden": true,
 	// SPEC-006-R016 buyer engine selection: the named engine cannot serve the
 	// same request on this route later, and a bad selector is a client error.
 	"engine_unavailable": true, "invalid_engine_selection": true,
+	// SPEC-006-R019 buyer privacy mode: the request as sent can never satisfy
+	// the stated boundary, so retrying it unchanged cannot succeed.
+	"invalid_privacy_mode": true, "privacy_mode_unsatisfied": true,
 }
 
 func gatewayRetryable(code string) bool {
@@ -1709,6 +1770,17 @@ func copyCleanHeadersFiltered(dst, src http.Header, allowReceipt bool, allowPool
 		}
 		// SPEC-006-R016 / §8.3: the served runtime class survives the strip,
 		// but only as one exact value of the closed vocabulary.
+		// SPEC-006-R020: the coordinator route trace survives the strip only
+		// as an exact SPEC-002-R007 value.
+		if strings.EqualFold(key, routeTraceResponseHeader) {
+			for _, value := range values {
+				if trace := buyerVisibleRouteTraceHeader(value); trace != "" {
+					dst.Set(routeTraceResponseHeader, trace)
+					break
+				}
+			}
+			continue
+		}
 		if isEngineResponseHeader(key) {
 			for _, value := range values {
 				if class := buyerVisibleEngineHeader(value); class != "" {
@@ -1729,7 +1801,7 @@ func copyCleanHeadersFiltered(dst, src http.Header, allowReceipt bool, allowPool
 			}
 			continue
 		}
-		if isMacProviderHeader(key) {
+		if isMacProviderHeader(key) || isProviderIdentityHeader(key) {
 			continue
 		}
 		// Issue #190: the gateway is authoritative for rate-limit
@@ -1787,7 +1859,7 @@ func isStreamingModeResponseHeader(key string) bool {
 }
 
 // buyerVisibleStreamingModeHeader returns the value only if it is byte-exactly
-// one of AC-45's three canonical streaming-mode values, else "" (drop). The
+// one of AC-45's canonical streaming-mode values, else "" (drop). The
 // match is strict — no trimming or case-folding — because SPEC-006 §5.4
 // mandates dropping any value outside the closed enum rather than normalizing
 // it, and the coordinator emits the bare constants verbatim, so a value with
@@ -1797,7 +1869,7 @@ func isStreamingModeResponseHeader(key string) bool {
 // injection should the upstream ever be compromised.
 func buyerVisibleStreamingModeHeader(raw string) string {
 	switch raw {
-	case "incremental", "buffered_kill_switch", "buffered_provider_downgrade":
+	case "incremental", "buffered_kill_switch", "buffered_provider_downgrade", "buffered_tool_selection":
 		return raw
 	}
 	return ""
@@ -1848,6 +1920,67 @@ func stripInternalMacProviderHeaders(header http.Header) []string {
 	sort.Strings(stripped)
 	return stripped
 }
+
+// isProviderIdentityHeader reports a header that names or fingerprints the
+// serving provider or its routing session. Buyers never receive provider
+// identity (SPEC-006, SPEC-049 disclosure); the coordinator may emit these on
+// the internal hop, the gateway never forwards them.
+func isProviderIdentityHeader(key string) bool {
+	lower := strings.ToLower(key)
+	switch lower {
+	case "x-macprovider-provider", "x-macprovider-route", "x-macprovider-session":
+		return true
+	}
+	return strings.HasPrefix(lower, "x-provider-") || lower == "x-route-provider"
+}
+
+// scrubProviderIdentityWriter deletes provider-identifying headers at the
+// buyer boundary immediately before the status line is written, so no
+// handler path (success, stream, error, relay-blind, replay) can leak one.
+type scrubProviderIdentityWriter struct {
+	http.ResponseWriter
+	wroteHeader bool
+}
+
+func (w *scrubProviderIdentityWriter) scrub() {
+	if w.wroteHeader {
+		return
+	}
+	w.wroteHeader = true
+	w.deleteIdentity()
+}
+
+func (w *scrubProviderIdentityWriter) deleteIdentity() {
+	h := w.Header()
+	for key := range h {
+		if isProviderIdentityHeader(key) {
+			delete(h, key)
+		}
+	}
+}
+
+func (w *scrubProviderIdentityWriter) WriteHeader(status int) {
+	if status >= 200 {
+		w.scrub()
+	} else {
+		w.deleteIdentity()
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *scrubProviderIdentityWriter) Write(p []byte) (int, error) {
+	w.scrub()
+	return w.ResponseWriter.Write(p)
+}
+
+func (w *scrubProviderIdentityWriter) Flush() {
+	w.scrub()
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (w *scrubProviderIdentityWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 func isMacProviderHeader(key string) bool {
 	return strings.HasPrefix(strings.ToLower(key), "x-macprovider-")

@@ -297,6 +297,20 @@ func TestPrivacyReservationVersionClosed(t *testing.T) {
 	if _, err := ParseReservationResponse(mustJSON(t, stripped)); err == nil {
 		t.Fatal("privacy version without extension accepted")
 	}
+	// SPEC-049-R034: both assurance labels parse; any other value does not.
+	codeBound := privacy
+	codeBound.PrivacyAssurance = PrivacyAssuranceCodeBound
+	if _, err := ParseReservationResponse(mustJSON(t, codeBound)); err != nil {
+		t.Fatalf("code-bound reservation rejected: %v", err)
+	}
+	unknownLabel := privacy
+	unknownLabel.PrivacyAssurance = "code_bound"
+	if _, err := ParseReservationResponse(mustJSON(t, unknownLabel)); err == nil {
+		t.Fatal("unknown assurance label accepted")
+	}
+	if !PrivacyAssuranceKnown(PrivacyAssurance) || !PrivacyAssuranceKnown(PrivacyAssuranceCodeBound) || PrivacyAssuranceKnown("") {
+		t.Fatal("PrivacyAssuranceKnown is not the two-label set")
+	}
 	badDigest := privacy
 	clone := *privacy.PrivacyKeyAttestation
 	clone.KeyRecordDigest = encodeBase64URL(bytes.Repeat([]byte{0xab}, 32))
@@ -1006,5 +1020,41 @@ func TestPrivacyStreamGateBindsUsageModel(t *testing.T) {
 				t.Fatalf("usage model %q against %q: kind=%d err=%v", tc.chunkModel, tc.gateModel, kind, err)
 			}
 		})
+	}
+}
+
+// SPEC-049 §4.6 / R032 item 4: a pool-scoped privacy reservation carries all
+// three pool fields; a global one carries none, not even zero-valued ones.
+func TestPrivacyReservationPoolFieldsClosed(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	privacy, _, _ := testPrivacyReservation(t, now)
+	pooled := privacy
+	pooled.PoolID, pooled.PoolManifestVersion, pooled.PoolManifestCoreDigest = "pool-a", 3, "digest-a"
+	parsed, err := ParseReservationResponse(mustJSON(t, pooled))
+	if err != nil || !reflect.DeepEqual(parsed, pooled) {
+		t.Fatalf("pooled round trip: %+v err=%v", parsed, err)
+	}
+	base := string(mustJSON(t, privacy))
+	for name, extra := range map[string]string{
+		"zero_valued":         `,"pool_id":"","pool_manifest_version":0,"pool_manifest_core_digest":""`,
+		"missing_version":     `,"pool_id":"pool-a","pool_manifest_core_digest":"digest-a"`,
+		"zero_version":        `,"pool_id":"pool-a","pool_manifest_version":0,"pool_manifest_core_digest":"digest-a"`,
+		"version_without_id":  `,"pool_manifest_version":3`,
+		"empty_digest":        `,"pool_id":"pool-a","pool_manifest_version":3,"pool_manifest_core_digest":""`,
+		"null_pool_id":        `,"pool_id":null,"pool_manifest_version":3,"pool_manifest_core_digest":"digest-a"`,
+		"space_in_pool_id":    `,"pool_id":"pool a","pool_manifest_version":3,"pool_manifest_core_digest":"digest-a"`,
+		"duplicate_pool_id":   `,"pool_id":"pool-a","pool_id":"pool-b","pool_manifest_version":3,"pool_manifest_core_digest":"digest-a"`,
+		"unknown_pool_member": `,"pool_id":"pool-a","pool_manifest_version":3,"pool_manifest_core_digest":"digest-a","pool_generation":7`,
+	} {
+		raw := base[:len(base)-1] + extra + "}"
+		if _, err := ParseReservationResponse([]byte(raw)); err == nil {
+			t.Fatalf("%s accepted", name)
+		}
+	}
+	relay := pooled
+	relay.Version = ReservationVersion
+	relay.PrivacyClass, relay.PrivacyAssurance, relay.PrivacyKeyAttestation, relay.PrivacyKeyAttestationSignature, relay.PrivacyPostureVerifiedAtUnix = "", "", nil, "", 0
+	if _, err := ParseReservationResponse(mustJSON(t, relay)); err == nil {
+		t.Fatal("relay-blind reservation accepted pool fields")
 	}
 }

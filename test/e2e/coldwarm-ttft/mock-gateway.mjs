@@ -30,7 +30,7 @@ const server = http.createServer(async (req, res) => {
     const delay = coldDelay();
     await new Promise((r) => setTimeout(r, delay));
     if (stream) {
-      res.writeHead(200, { 'content-type': 'text/event-stream', 'x-request-id': 'mock-req', 'x-provider-id': 'mock' });
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'x-request-id': 'mock-req' });
       for (const tok of ['re', 'ad', 'y']) {
         res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: tok } }] })}\n\n`);
         await new Promise((r) => setTimeout(r, 20));
@@ -39,7 +39,7 @@ const server = http.createServer(async (req, res) => {
       res.write('data: [DONE]\n\n');
       res.end();
     } else {
-      res.writeHead(200, { 'content-type': 'application/json', 'x-request-id': 'mock-req', 'x-provider-id': 'mock' });
+      res.writeHead(200, { 'content-type': 'application/json', 'x-request-id': 'mock-req' });
       res.end(JSON.stringify({ choices: [{ message: { content: 'READY' } }], usage: { completion_tokens: 3, prompt_tokens: 10 } }));
     }
     return;

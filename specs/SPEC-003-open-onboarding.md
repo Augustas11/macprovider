@@ -1,6 +1,8 @@
 # SPEC-003 — Open Onboarding: Distribution, Lifecycle & Onboarding UX
 
-**Version:** 0.12.0 (2026-09-25, issue #1737 release mirror for GitHub-blocked Macs)
+**Version:** 0.12.1 (2026-10-14, public-repo cleanup)
+
+**Change log v0.12.1 (2026-10-14, public-repo cleanup):** Editorial, no normative change: generic wording for the third-party marketplace seller integration; drops references to the removed phase5-onboarding scaffold.
 
 **Change log v0.12.0:** Adds §6.5 for provider Macs that cannot reach
 github.com, api.github.com, or *.githubusercontent.com (mainland China).
@@ -146,7 +148,7 @@ is in SPEC-001 v1.2.1 § 6.6 and the dynamic admission is in SPEC-002
 v1.1.1. This spec covers distribution, lifecycle, and onboarding UX.
 
 As you work, maintain a running
-phase5-onboarding/implementation-notes.html that captures anything I
+implementation-notes document that captures anything I
 should know about how the implementation diverges from or interprets
 the spec:
 
@@ -252,7 +254,7 @@ still requires source builds.
 
 ### Out of scope
 
-- **Antseed seller integration** — deferred to SPEC-007.
+- **Third-party marketplace seller integration** — deferred to SPEC-007.
 - **Smart router** — deferred to SPEC-004.
 - **Rewards / billing** — deferred to SPEC-005.
 - **Tier 2 attestation** — no privacy/attestation features.
@@ -1343,7 +1345,7 @@ coordinator connection success) remains the build-complete gate.
 4. If launchd plist installed: service restarted with new binary.
 5. `malibu-cli --version` shows `1.2.1`.
 
-**How to verify:** `phase5-onboarding/scripts/test-update.sh`
+**How to verify:** the updater tests in `phase3-binary/` (`swift test`).
 
 ---
 

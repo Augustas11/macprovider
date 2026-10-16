@@ -48,7 +48,7 @@ var quarantineUndeliveredErrForTest error
 
 // billingRecorder is the typed extraction of the previously-inline
 // logRowWithBilling closure from handleChatCompletions. M3-10
-// (audits/2026-06-10/REPO_AUDIT.md ARCH-6) hoisted the closure into
+// (2026-06-10 repo audit, ARCH-6) hoisted the closure into
 // this struct so the per-request orchestration of request_log +
 // billing-ledger writes is no longer hidden inside a handler closure.
 //
@@ -212,6 +212,11 @@ type billingRecorder struct {
 	// set only for the ledger write. A loopback attempt is credited only
 	// behind a receipt bound to it whose billable usage is the recorded usage.
 	pendingReceipt pendingSettlementReceipt
+	// allowanceFunding is the SPEC-050 funding this request was admitted
+	// under ("allowance" or "paid" for an account with an allowance today,
+	// "" otherwise). An allowance funding runs the SPEC-050-R010
+	// self-dealing check before the ledger insert.
+	allowanceFunding string
 }
 
 type pendingSettlementReceipt struct {
@@ -419,6 +424,7 @@ func (b *billingRecorder) recordRow(
 	// failed-over attempt's latch must not skip the ingest of, or refund, the
 	// attempt that later succeeds.
 	b.settlementOutputMissingAfterCredit = false
+	b.observeServedPerformance(providerAssignedID, providerID, status, cachedPromptTok, settlementOutput, errMsg, errCode, faultFlag)
 	if s.reqLog == nil {
 		return nil
 	}
@@ -531,6 +537,13 @@ func (b *billingRecorder) recordRow(
 			faultFlag = billing.FaultNone
 		}
 		b.dispatchedThisAttemptFaultFlag = faultFlag
+		// SPEC-050-R010: an allowance-funded attempt served by a provider
+		// that is self-dealing for the staking account earns no MALIBU. The
+		// flag is insert-only, so it is decided before the ledger write.
+		if b.allowanceFunding == billing.AllowanceFundingAllowance && !row.RewardsExcluded &&
+			billingStore.AllowanceSelfDealing(ctx, b.accountID, b.externalRequestID, stableProviderID) {
+			row.RewardsExcluded = true
+		}
 		accountScope := accountScopeForSettlement(b.accountID)
 		settlementMode, settlementVersion := b.settlementPolicyForLedger()
 		poolAttested, poolFence := b.poolOperatorAttestation(ctx, billingStore, stableProviderID, providerRuntimeSource, promptTok, cachedPromptTok, completionTok)
@@ -573,6 +586,7 @@ func (b *billingRecorder) recordRow(
 			StickyResult:                 b.state.stickyResult,
 			StickyMissReason:             b.state.stickyMissReason,
 			ConversationCacheOnly:        b.state.conversationCacheOnly,
+			ConversationKeyWithheld:      b.state.conversationKeyWithheld,
 			ConfigSnapshotID:             economics.snapshotID,
 			RateEntry:                    economics.rateEntry,
 			MultiplierPPM:                economics.multiplierPPM,

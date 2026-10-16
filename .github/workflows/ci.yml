@@ -68,7 +68,7 @@ jobs:
   coordinator:
     name: phase4-coordinator (go vet + test)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     # `make test-dist` runs ONLY in the dedicated `dist-tooling` job, which
     # also owns the sealed Tier-2 verifier toolchain and full-history checkout
     # that suite needs; duplicating it here doubled a 5+ minute suite (and its
@@ -93,6 +93,52 @@ jobs:
 
       - name: make test-coordinator
         run: make test-coordinator
+
+  coordinator-race:
+    name: phase4-coordinator (go test -race, advisory)
+    runs-on: ubuntu-latest
+    # Advisory: not in ci-required. Race-detector timing makes some suites
+    # flaky; failures here are triaged and fixed in batches (#1996).
+    continue-on-error: true
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: phase4-coordinator/go.mod
+          cache-dependency-path: phase4-coordinator/go.sum
+
+      - name: make test-coordinator-race
+        run: make test-coordinator-race
+
+  coordinator-billing-race:
+    name: phase4-coordinator billing (go test -race, advisory)
+    runs-on: ubuntu-latest
+    # Advisory: not in ci-required (#1996).
+    continue-on-error: true
+    timeout-minutes: 26
+    steps:
+      - name: Checkout
+        # Pinned to actions/checkout v6 (df4cb1c0). Re-resolve deliberately
+        # when upgrading the action rather than trusting a mutable tag.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        # Pinned to actions/setup-go v7.0.0. Re-resolve deliberately.
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: phase4-coordinator/go.mod
+          cache-dependency-path: phase4-coordinator/go.sum
+
+      - name: make test-coordinator-billing-race
+        run: make test-coordinator-billing-race
 
   gateway:
     name: phase5-gateway (go vet + test)
@@ -284,7 +330,7 @@ jobs:
     name: integration (cross-service)
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # Closes TEST-6 / M2-9 / M3-11 (audits/2026-06-10/REPO_AUDIT.md:117).
+    # Closes TEST-6 / M2-9 / M3-11 (2026-06-10 repo audit).
     # Builds REAL coordinator + gateway binaries and exercises the
     # gateway↔coordinator HTTP boundary that
     # phase5-gateway/internal/router/integration_test.go currently
@@ -527,6 +573,47 @@ jobs:
         # during an operator signing session.
         run: make test-byom-discovery-journey
 
+  swift-settlement:
+    name: settlement (Swift tampered receipt)
+    runs-on: macos-26
+    timeout-minutes: 35
+    needs: changes
+    # Go verifier/gateway and integration-only changes need this gate too.
+    if: ${{ needs.changes.outputs.code == 'true' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode
+        id: xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
+          echo "hash=$(xcodebuild -version | shasum -a 256 | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore SwiftPM cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: phase3-binary/.build
+          key: spm-${{ runner.os }}-xcode-${{ steps.xcode.outputs.hash }}-${{ hashFiles('phase3-binary/Package.resolved', 'phase3-binary/Package.swift') }}
+          restore-keys: |
+            spm-${{ runner.os }}-xcode-${{ steps.xcode.outputs.hash }}-
+
+      - name: Set up Go for Swift settlement integration
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: test/integration/go.mod
+          cache-dependency-path: test/integration/go.sum
+
+      - name: Verify present tampered Swift settlement receipts are quarantined
+        # The Linux integration job skips the real Swift relay fixture.
+        # This deterministic local stack does not load model weights.
+        working-directory: test/integration
+        run: go test -race -count=1 -timeout 10m -run '^TestRelayBlindEnforceSettlesSwiftReceipts$' .
+
   malibu-app-tests:
     # Malibu app tests plus the installer recovery checks; neither needs the
     # SwiftPM build, and pairing them balances this job with swift-journeys.
@@ -662,7 +749,7 @@ jobs:
   spec-index:
     name: spec-index
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 25
     # Folded in from the standalone spec-index workflow so ci-required gates
     # it (#1920). Fails a PR when specs/README.md no longer matches the
     # canonical spec headers, when AUTHORITY/CONFORMANCE drift, or when a PR
@@ -723,6 +810,7 @@ jobs:
       - dist-tooling
       - swift-tests
       - swift-package-lock
+      - swift-settlement
       - spec-015-acceptance
       - spec-index
     if: always()
@@ -745,6 +833,7 @@ jobs:
           DIST_TOOLING_RESULT: ${{ needs.dist-tooling.result }}
           SWIFT_TESTS_RESULT: ${{ needs.swift-tests.result }}
           SWIFT_PACKAGE_LOCK_RESULT: ${{ needs.swift-package-lock.result }}
+          SWIFT_SETTLEMENT_RESULT: ${{ needs.swift-settlement.result }}
           SPEC_015_RESULT: ${{ needs.spec-015-acceptance.result }}
           SPEC_INDEX_RESULT: ${{ needs.spec-index.result }}
         run: |
@@ -799,6 +888,7 @@ jobs:
           require_success "spec-index" "$SPEC_INDEX_RESULT"
           allow_skip "phase3-binary (swift test)" "$SWIFT_TESTS_RESULT" "$SWIFT_GATE"
           allow_skip "phase3-binary (locked SwiftPM resolve)" "$SWIFT_PACKAGE_LOCK_RESULT" "$SWIFT_GATE"
+          allow_skip "settlement (Swift tampered receipt)" "$SWIFT_SETTLEMENT_RESULT" "$CODE_GATE"
           allow_skip "spec-015-acceptance" "$SPEC_015_RESULT" "$CODE_GATE"
 
           exit "$failed"

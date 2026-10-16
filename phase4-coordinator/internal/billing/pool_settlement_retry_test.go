@@ -61,14 +61,15 @@ func TestIngestPoolSettlementReceiptTransientAuthorityErrorIsRetryable(t *testin
 }
 
 // A database recorded under a newer billing contract is refused at open, and
-// a fresh open records the open floor (contract 4; contract 5 is recorded
-// with the first SPEC-022 R-16 hold).
+// a fresh open records the open floor (contract 4).
 func TestBillingCompatFloorRefusesNewerDatabase(t *testing.T) {
 	_, store := newRequestAndBillingStores(t)
 	var floor int64
 	if err := store.db.QueryRow(`SELECT contract FROM billing_compat_floor WHERE id = 1`).Scan(&floor); err != nil {
 		t.Fatal(err)
 	}
+	// Open records the retention floor; contracts 5 and 6 are recorded by
+	// retention and rollup writes, contract 7 by the first SPEC-022 R-16 hold.
 	if floor != billingCompatContractEvidenceRetention {
 		t.Fatalf("recorded floor=%d, want %d", floor, billingCompatContractEvidenceRetention)
 	}

@@ -8,6 +8,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
+	"github.com/augstar/macprovider-coordinator/internal/routing"
 )
 
 // forwardState collects the per-request state that the three transport
@@ -69,6 +70,12 @@ type forwardState struct {
 	// tool-history gate against the fresh provider session.
 	requestedModel       string
 	multiTurnToolHistory bool
+	// nonStrictJSONSchema records a SPEC-019 §1a non-strict json_schema
+	// request so a queued same-ID reconnect is re-checked against the CLI
+	// capability gate.
+	nonStrictJSONSchema bool
+	toolSelection       *toolSelectionPolicy
+	hasVision           bool
 	// poolRequiresSettlementEnforce is captured from the selected pool
 	// snapshot. It is re-checked at the dispatch boundary so a coordinator
 	// settlement-mode hot reload cannot downgrade an enforce-required pool
@@ -232,16 +239,34 @@ type forwardState struct {
 	// have returned an error before afterAdvance fired); when
 	// preflight was skipped (low estimate OR no preflight func), the
 	// label is "not_applicable". Issue #266 T1 R1 audit MEDIUM fix.
+	// #1570: this is the billed fallback estimate (bytes/4); routing,
+	// preflight labels and route evidence use routingEstimatedTokens.
 	estimatedTokens int
+	// routingEstimatedTokens is the SPEC-006 §7.2.1 context-fit estimate
+	// selectProviderExcluding routes and preflights on.
+	routingEstimatedTokens int
+	// perfHold defers the SPEC-002-R005 observation of an attempt recorded
+	// before its body is written (the pre-#1690 non-streaming order) until
+	// the write succeeds; pendingPerf holds it meanwhile.
+	perfHold    bool
+	pendingPerf *routing.PerfObservation
 
 	stickyResult     string
 	stickyMissReason string
+
+	// routeDecision is the SPEC-002-R006 phase decision of the latest ranked
+	// selection; nil for pinned and slot-queue selections.
+	routeDecision *routeDecision
 
 	// conversationCacheOnly is true when the request carried
 	// X-MacProvider-Internal-Conv-Cache and no sticky
 	// X-MacProvider-Internal-Conv key. ConversationCache hits on that
 	// authenticated path are creditable without activating sticky affinity.
 	conversationCacheOnly bool
+	// conversationKeyWithheld is true when forwardWS dispatched without the
+	// request's conversation_key (providerAcceptsConversationKey, #1998). The
+	// provider had no key, so it cannot hold a creditable prefix-cache hit.
+	conversationKeyWithheld bool
 
 	// declaredFunctionNames is the buyer-declared tools[] function.name set.
 	// Used to recover Qwen function-XML that leaked into message.content when
@@ -267,6 +292,13 @@ func newForwardState(startedAt time.Time) *forwardState {
 	}
 	state.phaseTiming.init(startedAt)
 	return state
+}
+
+// cacheCreditEligible reports whether provider-reported cached prompt tokens
+// may be credited: a sticky hit or a cache-only key that reached the provider.
+func (state *forwardState) cacheCreditEligible() bool {
+	return state != nil && !state.conversationKeyWithheld &&
+		(state.stickyResult == "hit" || state.conversationCacheOnly)
 }
 
 func (state *forwardState) markConversationCacheOnly(headers http.Header) {

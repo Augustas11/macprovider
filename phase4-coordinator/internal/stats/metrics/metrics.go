@@ -74,6 +74,10 @@
 //     closed SPEC-049-R030 phase and reason sets in relayblind; a value
 //     outside them is "other".
 //
+//   - `relayblind_privacy_code_bound_rejections_total{reason}` uses the
+//     closed SPEC-049-R033 code-bound reason set in relayblind; anything
+//     else is "other".
+//
 //   - `relayblind_privacy_release_identity_loaded{binary_version}` carries
 //     only X.Y.Z versions from signature-verified release metadata files,
 //     bounded by the 256-file load limit.
@@ -142,6 +146,12 @@ type Metrics struct {
 	// PrivacyRouteRejectionsTotal counts SPEC-049-R030 privacy-class
 	// requests refused at reservation, consume, or dispatch, by reason.
 	PrivacyRouteRejectionsTotal *prometheus.CounterVec
+	// PrivacyCodeBoundRejectionsTotal counts SPEC-049-R033 postures that
+	// carried code-bound evidence but stayed device-bound, by reason.
+	PrivacyCodeBoundRejectionsTotal *prometheus.CounterVec
+	// RouteSelectionsTotal counts SPEC-002-R007 plaintext selections by
+	// request phase and selection basis.
+	RouteSelectionsTotal *prometheus.CounterVec
 	// PrivacyReleaseIdentityLoaded is 1 per binary version approved from
 	// signed release metadata (SPEC-049-R027) in the last load.
 	PrivacyReleaseIdentityLoaded *prometheus.GaugeVec
@@ -248,12 +258,26 @@ func New(reg prometheus.Registerer) *Metrics {
 			},
 			[]string{"reason"},
 		),
+		RouteSelectionsTotal: f.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "coordinator_route_selections_total",
+				Help: "Count of plaintext provider selections, by SPEC-002-R006 request phase and selection basis.",
+			},
+			[]string{"phase", "basis"},
+		),
 		PrivacyRouteRejectionsTotal: f.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "relayblind_privacy_route_rejections_total",
 				Help: "Count of privacy-class requests refused at reservation, consume, or dispatch, by SPEC-049-R030 phase and reason.",
 			},
 			[]string{"phase", "reason"},
+		),
+		PrivacyCodeBoundRejectionsTotal: f.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "relayblind_privacy_code_bound_rejections_total",
+				Help: "Count of privacy postures verified without the code-bound label although they carried code-bound evidence, by SPEC-049-R033 reason.",
+			},
+			[]string{"reason"},
 		),
 		PrivacyReleaseIdentityLoaded: f.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -518,6 +542,44 @@ func (m *Metrics) IncPrivacyRouteRejection(phase, reason string) {
 		phase = "other"
 	}
 	m.PrivacyRouteRejectionsTotal.WithLabelValues(phase, relayblind.NormalizePrivacyRejectReason(reason)).Inc()
+}
+
+// IncPrivacyCodeBoundRejection records one SPEC-049-R033 posture that
+// stayed device-bound. A reason outside the closed set is "other".
+func (m *Metrics) IncPrivacyCodeBoundRejection(reason string) {
+	if m == nil || m.PrivacyCodeBoundRejectionsTotal == nil {
+		return
+	}
+	known := false
+	for _, candidate := range relayblind.CodeBoundRejectReasons() {
+		if reason == candidate {
+			known = true
+			break
+		}
+	}
+	if !known {
+		reason = "other"
+	}
+	m.PrivacyCodeBoundRejectionsTotal.WithLabelValues(reason).Inc()
+}
+
+// IncRouteSelection records one SPEC-002-R007 selection. Values outside the
+// closed sets are folded into "other".
+func (m *Metrics) IncRouteSelection(phase, basis string) {
+	if m == nil || m.RouteSelectionsTotal == nil {
+		return
+	}
+	switch phase {
+	case "interactive", "long_input", "throughput":
+	default:
+		phase = "other"
+	}
+	switch basis {
+	case "measured", "explore", "fallback", "pinned":
+	default:
+		basis = "other"
+	}
+	m.RouteSelectionsTotal.WithLabelValues(phase, basis).Inc()
 }
 
 // SetPrivacyReleaseIdentityVersions replaces the loaded release-identity

@@ -16,9 +16,9 @@ None.
 None.
 
 ### Positive Observations
-- r3 finding `[code:r3-3.1]` is closed: `pollCancelOnce` fetches both RPC transaction bodies and verifies both before confirmation. Evidence: [runner.go](/Users/augstar/macprovider-poc/phase4-coordinator/internal/payout/runner.go:506), [runner.go](/Users/augstar/macprovider-poc/phase4-coordinator/internal/payout/runner.go:514), [runner.go](/Users/augstar/macprovider-poc/phase4-coordinator/internal/payout/runner.go:525).
+- r3 finding `[code:r3-3.1]` is closed: `pollCancelOnce` fetches both RPC transaction bodies and verifies both before confirmation. Evidence: [runner.go](/phase4-coordinator/internal/payout/runner.go:506), [runner.go](/phase4-coordinator/internal/payout/runner.go:514), [runner.go](/phase4-coordinator/internal/payout/runner.go:525).
 - Ordering is correct: receipt agreement/depth/status checks happen first, then receipt log checks, then tx-body checks, then `MarkConfirmedAtTx`.
-- `verifyCancelTxView` enforces `to`, `from`, empty input, and one-wei value as required. The normalization accepts `"0x000001"` and rejects `"0x10"`, `"0x"`, and `""`. Evidence: [runner.go](/Users/augstar/macprovider-poc/phase4-coordinator/internal/payout/runner.go:1031).
+- `verifyCancelTxView` enforces `to`, `from`, empty input, and one-wei value as required. The normalization accepts `"0x000001"` and rejects `"0x10"`, `"0x"`, and `""`. Evidence: [runner.go](/phase4-coordinator/internal/payout/runner.go:1031).
 - Missing `tx.ChainID` validation in the helper is not load-bearing here: startup asserts both RPCs are Base mainnet, and the confirmed receipt + tx lookup are tied to those clients.
 - Independent `TransactionByHash` deadlines are not required for this fix-pass; production RPC calls are bounded by the HTTP client timeout and inherit caller cancellation.
 

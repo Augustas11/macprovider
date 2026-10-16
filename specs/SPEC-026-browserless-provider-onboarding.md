@@ -1,6 +1,8 @@
 # SPEC-026 — Browserless Provider Onboarding (one-click Launch Provider)
 
-Status: DRAFT v0.30 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.30.1 · Owner: @Augustas11 · Target: 2026 Q3
+
+**Change log v0.30.1 (2026-10-14, public-repo cleanup):** Editorial, no normative change: owner is the GitHub handle; landing-page path no longer names a local checkout.
 
 **Change log v0.30 (2026-10-11, App Attest for hardware trust — #1911).**
 §5.3 now points at the shipped App Attest path: Malibu.app (macOS 27+,
@@ -376,7 +378,7 @@ designer 0/0/3). v0.11 closes:
   visually adjacent to the number. Both dashboard and menu-bar
   count elements.
 - **Entry 102 launch-readiness note for landing-page (designer
-  MEDIUM-1).** The `/Users/augstar/projects/malibu/host/index.html`
+  MEDIUM-1).** The Malibu site's `host/index.html`
   landing page still sells the CLI flow (curl|bash, "Sign in
   with GitHub", "You're a node") — vocabulary AC-026-02
   explicitly forbids inside the App. Not SPEC-026's normative
@@ -1158,7 +1160,7 @@ and without entering a wallet address unless they want to.
   launchd `KeepAlive` owns exit-restart (the earlier "force-restarts during rollback
   recovery" wording is superseded) — both installed by `install.sh` — and the app
   monitors it over HTTP (SPEC-025 §5).
-- Landing page marketing copy at `/Users/augstar/projects/malibu/host/index.html`
+- Landing page marketing copy in the Malibu site's `host/index.html`
   promises "One line in your terminal. … Your Mac picks up jobs
   whenever it's idle and online." This spec makes the App track
   deliver on that promise without the terminal step.

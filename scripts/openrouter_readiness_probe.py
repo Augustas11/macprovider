@@ -720,13 +720,17 @@ def check_privacy(base_url: str) -> dict:
         "no zero-data-retention",
         "compliance.zdr",
         "false",
-        "90 days",
         "does not train foundation models on buyer prompts",
         "not stored as a training corpus",
     )
     for text in required:
         if text not in lower:
             raise ProbeError(f"/privacy missing disclosure: {text}")
+    # The retention period follows coordinator config; require that the page
+    # states one and record it, rather than pinning a value here.
+    retention = re.search(r"retained\b[^.]{0,160}?\bfor (\d+) days", lower)
+    if retention is None:
+        raise ProbeError("/privacy missing disclosure: request-log retention period in days")
     forbidden = (
         "private inference guaranteed",
         "zdr guarantee",
@@ -817,7 +821,7 @@ def check_privacy(base_url: str) -> dict:
     for pattern in zdr_offer_patterns:
         if re.search(pattern, lower):
             raise ProbeError(f"/privacy contains forbidden zero-data-retention offer matching {pattern}")
-    return {"http_status": 200, "mentions_90_days": True, "zdr_false": True, "training_corpus_denied": True}
+    return {"http_status": 200, "retention_days": int(retention.group(1)), "zdr_false": True, "training_corpus_denied": True}
 
 
 def check_healthz(base_url: str, expected_version: str = "") -> dict:

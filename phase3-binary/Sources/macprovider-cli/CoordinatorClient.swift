@@ -432,7 +432,7 @@ actor CoordinatorClient {
     typealias InstalledCompatibilityManifest = @Sendable (URL, String) -> CompatibilitySetManifest?
     typealias ReloadHelperFence = @Sendable () throws -> Void
 
-    static let binaryVersion = "1.8.240"
+    static let binaryVersion = "1.8.248"
     private static let keepaliveDebugEnabled = ProcessInfo.processInfo.environment["MACPROVIDER_KEEPALIVE_DEBUG"] == "1"
     private static let admissionCanaryHeartbeatOverridePathEnv = "MACPROVIDER_CANARY_HEARTBEAT_OVERRIDE_PATH"
     private static let admissionCanaryCoordinatorHostEnv = "MACPROVIDER_CANARY_COORDINATOR_HOST"
@@ -530,9 +530,12 @@ actor CoordinatorClient {
     }
 
     private var inferenceRelay: InferenceRelay?
+    private static let fleetConversationCacheAuthority = FleetConversationCacheAuthority()
     private let relayBlindRuntime: RelayBlindProviderRuntime?
     private let privacyPostureProbe: (any PrivacyPostureProbe)?
     private let privacyPostureResponder: PrivacyPostureResponder?
+    /// SPEC-049-R035: Malibu.app's local attestor for code-bound postures.
+    private let privacyCodeBoundAttestor: any PrivacyCodeBoundAttesting
     private var tier2Session: Tier2ProviderSession?
     private var pendingAEADRekey: PendingAEADRekey?
     private var preparingAEADRekeyID: String?
@@ -758,6 +761,7 @@ actor CoordinatorClient {
         seLivenessSignerOverride: (any SELivenessSigning)? = nil,
         privacyPostureProbeOverride: (any PrivacyPostureProbe)? = nil,
         privacySESignerOverride: (any SEBlobSigner)? = nil,
+        privacyCodeBoundAttestorOverride: (any PrivacyCodeBoundAttesting)? = nil,
         webSocketFactory: @escaping @Sendable (URLRequest) -> ProviderWebSocketTask = { providerWebSocketSession.webSocketTask(with: $0) },
         sleepAssertionFactory: @escaping @Sendable () -> ProviderSleepAssertion? = { CaffeinateSleepAssertion.start() },
         pairingController: PairingController? = nil,
@@ -819,6 +823,7 @@ actor CoordinatorClient {
             Darwin.exit(1)
         }
     ) {
+        self.privacyCodeBoundAttestor = privacyCodeBoundAttestorOverride ?? PrivacyCodeBoundSocketAttestor()
         guard let rawURL = config.coordinatorURL, let url = URL(string: rawURL) else {
             return nil
         }
@@ -2311,6 +2316,11 @@ actor CoordinatorClient {
             },
             privacyClassBeta: appConfig.privacyClassBeta,
             postureProbe: privacyPostureProbe,
+            fleetCacheAuthority: Self.fleetConversationCacheAuthority,
+            purgeFleetConversation: { [modelRuntime] conversationKey in
+                guard let runtime = modelRuntime as? ModelRuntime else { return false }
+                return await runtime.purgeFleetConversation(conversationKey: conversationKey)
+            },
             sendFrame: sendFrame
         )
     }
@@ -2696,6 +2706,16 @@ actor CoordinatorClient {
                 return
             }
             try await inferenceRelay.handleCancelRequest(dict)
+        case "conversation_cache_purge":
+            guard wsTunneledMode, let inferenceRelay else {
+                try await sendNAK(
+                    inReplyTo: type,
+                    code: "unknown_message_type",
+                    message: "Unrecognized message type: '\(type)'"
+                )
+                return
+            }
+            try await inferenceRelay.handleConversationCachePurge(dict)
         case "drain":
             // SPEC-001 v1.1.3: coordinator drain stops registration only.
             // The local buyer HTTP server keeps serving. Throwing
@@ -7244,6 +7264,48 @@ actor CoordinatorClient {
         return catalogModelIDForCoordinator
     }
 
+    static func toolSelectionCapabilities(wireModelID: String, loadedModelID: String?, runtimeSource: String?) -> [[String: Any]] {
+        guard !wireModelID.isEmpty, loadedModelID != nil else { return [] }
+        let runtime = runtimeSource ?? "mlx_cache"
+        return [[
+            "model_id": wireModelID,
+            "runtime": runtime,
+            "modes": ToolSelectionPolicy.modes(modelID: loadedModelID, runtime: runtime),
+            "validation": "schema-holdback-v1",
+        ]]
+    }
+
+    /// Implementation identity only. The coordinator separately requires a
+    /// qualification for the exact provider/configuration before image routing.
+    static func appendNativeVisionCapability(
+        to message: inout [String: Any], snapshot: RuntimeSnapshot,
+        wireModelID: String, runtimeSource: String?
+    ) {
+        message.removeValue(forKey: "vision_runtime_capabilities")
+        guard runtimeSource == nil || runtimeSource == NativeVisionProfile.runtime,
+              snapshot.state == .ready,
+              let profile = snapshot.nativeVisionProfile,
+              NativeVisionProfile.supports(modelID: snapshot.modelID),
+              let hash = snapshot.modelHash, hash == profile.artifactSHA256,
+              snapshot.modelHashAlgorithm == ModelArtifactIdentity.snapshotManifestV1,
+              let weights = snapshot.weightsManifestSHA256,
+              !wireModelID.isEmpty,
+              message["model_id"] as? String == wireModelID,
+              message["model_hash"] as? String == hash,
+              message["model_hash_algorithm"] as? String == snapshot.modelHashAlgorithm,
+              message["weights_manifest_sha256"] as? String == weights else { return }
+        message["vision_runtime_capabilities"] = [[
+            "model_id": wireModelID,
+            "model_hash": hash,
+            "model_hash_algorithm": ModelArtifactIdentity.snapshotManifestV1,
+            "weights_manifest_sha256": weights,
+            "processor_digest": profile.processorConfigSHA256,
+            "runtime": NativeVisionProfile.runtime,
+            "runtime_revision": KVBuildIdentity.mlxSwiftLMRevision,
+            "media_profile": NativeVisionProfile.identifier,
+        ]]
+    }
+
     private func sendHeartbeat(resetWindow: Bool = true) async throws {
         let snapshot = await providerStatus.snapshot(resetWindow: resetWindow)
         let snapshotWireModelID = coordinatorWireModelID(for: snapshot.modelID)
@@ -7267,8 +7329,23 @@ actor CoordinatorClient {
         }
         // SPEC-038 v0.3.15: the on-device CB self-check state, for the release
         // canary and operators. Absent until a self-check exists.
-        if let selfCheck = await modelRuntime.currentSnapshot().continuousBatching?.selfCheck {
+        let engineRuntimeSnapshot = await modelRuntime.currentSnapshot()
+        payload["tool_selection_capabilities"] = Self.toolSelectionCapabilities(
+            wireModelID: coordinatorWireModelID(for: engineRuntimeSnapshot.modelID),
+            loadedModelID: engineRuntimeSnapshot.modelID, runtimeSource: runtimeSource
+        )
+        if let selfCheck = engineRuntimeSnapshot.continuousBatching?.selfCheck {
             payload["cb_self_check"] = selfCheck.jsonObject
+        }
+        // SPEC-001-R006: the MLX engine profile, a routing prior only. An
+        // external loopback runtime already reports its class at auth.
+        if !CoordinatorClient.isBYOMLoopbackRuntimeSource(runtimeSource) {
+            payload["engine_profile"] = EngineProfile(
+                snapshot: engineRuntimeSnapshot,
+                chip: hardwareSummary?["chip"] as? String,
+                ramGB: snapshot.capacity.ramGB,
+                maxContextTokens: snapshot.capacity.maxContextTokens
+            ).wireObject
         }
         appendRelayBlindKeyRecords(to: &payload)
         appendPrivacyKeyRecords(to: &payload)
@@ -7310,6 +7387,11 @@ actor CoordinatorClient {
                 payload["weights_manifest_algorithm"] = ModelArtifactIdentity.safetensorsManifestV1
             }
         }
+        Self.appendNativeVisionCapability(
+            to: &payload, snapshot: engineRuntimeSnapshot,
+            wireModelID: coordinatorWireModelID(for: engineRuntimeSnapshot.modelID),
+            runtimeSource: runtimeSource
+        )
         if appConfig.publishesSpecDecodeTelemetry {
             if specDecodeTelemetryMatchesRuntime && specDecodeTelemetryRuntimeEligible {
                 payload["spec_decode_enabled"] = snapshot.specDecodeEnabled
@@ -7889,6 +7971,9 @@ actor CoordinatorClient {
                 ComputeScoreProtocol.capability: computeScoreExecutor != nil,
             ],
         ]
+        if await advertisesFleetCacheProtocol() {
+            message["fleet_cache_protocol"] = 1
+        }
         let resolvedCatalog: [String]
         do {
             resolvedCatalog = try SupportedModels.validate(
@@ -7923,6 +8008,10 @@ actor CoordinatorClient {
         if let compatibilitySetID {
             message["compatibility_set_id"] = compatibilitySetID
         }
+        message["tool_selection_capabilities"] = Self.toolSelectionCapabilities(
+            wireModelID: wireModelID, loadedModelID: (await modelRuntime.currentSnapshot()).modelID,
+            runtimeSource: runtimeSource
+        )
         // SPEC-047 v0.1.6 auth `runtime_source` (#1690 M6): the WS-tunneled
         // session must declare its SPEC-046 loopback adapter exactly as the
         // legacy hello does, or the coordinator records it as a native session
@@ -7949,6 +8038,12 @@ actor CoordinatorClient {
                 message["referral_code"] = bootstrapReferralCode
             }
         }
+        let visionSnapshot = await modelRuntime.currentSnapshot()
+        Self.appendNativeVisionCapability(
+            to: &message, snapshot: visionSnapshot,
+            wireModelID: coordinatorWireModelID(for: visionSnapshot.modelID),
+            runtimeSource: runtimeSource
+        )
         return message
     }
 
@@ -7971,6 +8066,13 @@ actor CoordinatorClient {
         if let catalogRowIdentity { message["catalog_row_identity"] = catalogRowIdentity }
     }
 
+    private func advertisesFleetCacheProtocol() async -> Bool {
+        guard Self.fleetConversationCacheAuthority.isAvailable,
+              let runtime = modelRuntime as? ModelRuntime
+        else { return false }
+        return await runtime.isFleetCachePurgeReady()
+    }
+
     func helloMessage() async -> [String: Any] {
         let snapshot = await providerStatus.snapshot()
         var message: [String: Any] = [
@@ -7988,6 +8090,9 @@ actor CoordinatorClient {
             "binary_version": Self.binaryVersion,
             "attestation": NSNull(),
         ]
+        if await advertisesFleetCacheProtocol() {
+            message["fleet_cache_protocol"] = 1
+        }
         if let endpointURL {
             message["endpoint_url"] = endpointURL
         }
@@ -8023,6 +8128,10 @@ actor CoordinatorClient {
             message["weights_manifest_sha256"] = weightsManifestForHello
             message["weights_manifest_algorithm"] = ModelArtifactIdentity.safetensorsManifestV1
         }
+        message["tool_selection_capabilities"] = Self.toolSelectionCapabilities(
+            wireModelID: wireModelIDForHello, loadedModelID: (await modelRuntime.currentSnapshot()).modelID,
+            runtimeSource: runtimeSource
+        )
         appendCatalogAdmissionMetadata(to: &message, wireModelID: wireModelIDForHello)
         if let compatibilitySetID {
             message["compatibility_set_id"] = compatibilitySetID
@@ -8034,6 +8143,12 @@ actor CoordinatorClient {
             message["runtime_source"] = runtimeSource
         }
         appendPrivacyKeyRecords(to: &message)
+        let visionSnapshot = await modelRuntime.currentSnapshot()
+        Self.appendNativeVisionCapability(
+            to: &message, snapshot: visionSnapshot,
+            wireModelID: coordinatorWireModelID(for: visionSnapshot.modelID),
+            runtimeSource: runtimeSource
+        )
         return message
     }
 
@@ -8114,15 +8229,52 @@ actor CoordinatorClient {
               !assigned.isEmpty else {
             return
         }
-        let response: [String: Any]?
+        let reply: PrivacyPostureReply?
         do {
-            response = try privacyPostureResponder.respond(to: dict, assignedSession: assigned)
+            reply = try privacyPostureResponder.respondWithCodeBound(to: dict, assignedSession: assigned)
         } catch {
             return
         }
-        guard let response else { return }
-        try await send(response)
-        try await sendPrivacyKeyRotationRequestIfDue()
+        guard let reply else { return }
+        // Without a Malibu.app attestor the posture goes out at once, alone,
+        // and stays device-bound (the CLI-only install).
+        let attestor = privacyCodeBoundAttestor
+        guard attestor.mayBeAvailable else {
+            try await send(reply.response)
+            try await sendPrivacyKeyRotationRequestIfDue()
+            return
+        }
+        // SPEC-049-R035 item 4: ask the attestor off the receive loop (it may
+        // take up to 3 s), then send its evidence immediately before the
+        // posture. Without evidence the posture goes alone.
+        guard let response = try? JSONSerialization.data(withJSONObject: reply.response, options: [.withoutEscapingSlashes]) else {
+            return
+        }
+        let request = reply.codeBoundRequest
+        let socket = webSocket
+        Task { [weak self] in
+            let evidence = await PrivacyCodeBoundEvidence.fetch(request: request, attestor: attestor)
+            await self?.sendPrivacyPosture(response, evidence: evidence, assignedSession: assigned, socket: socket)
+        }
+    }
+
+    /// Sends the evidence and the posture back to back on the connection
+    /// and session that were challenged. Both are re-checked before each
+    /// frame, because a reconnect can happen while a send is suspended; a
+    /// connection that changed gets nothing.
+    private func sendPrivacyPosture(_ response: Data, evidence: Data?, assignedSession: String, socket: ProviderWebSocketTask?) async {
+        func stillChallenged() -> Bool {
+            coordinatorSessionAccepted && acceptedAssignedProviderID == assignedSession && webSocket === socket
+        }
+        guard stillChallenged(), let posture = (try? JSONSerialization.jsonObject(with: response)) as? [String: Any] else {
+            return
+        }
+        if let evidence, let message = (try? JSONSerialization.jsonObject(with: evidence)) as? [String: Any] {
+            try? await send(message)
+            guard stillChallenged() else { return }
+        }
+        try? await send(posture)
+        try? await sendPrivacyKeyRotationRequestIfDue()
     }
 
     /// SPEC-049-R031: offers a staged identity key after session accept, a

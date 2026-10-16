@@ -11,7 +11,7 @@ export WT="${WT:-$(cd "$HERE/../../.." && pwd)}"
 BASE_RIG="$WT/scripts/lab/1690-m6/rig.sh"
 
 export LAB="${LAB:-/Users/a1/lab-build1-private-staging}"
-export PATH="${GO_BIN:-/Users/a1/sdk/go1.26.6/bin}:$PATH"
+export PATH="${GO_BIN:-/Users/a1/sdk/go1.26.9/bin}:$PATH"
 export ENGINE=native
 export LAB_ROW_KEY=orcarouter/qwen3.8-27b-uncensored
 export LAB_MLX_ID=orcarouter/Qwen3.8-27B-Uncensored-MLX
@@ -86,7 +86,7 @@ require_discovery_cache() {
 
 build_static_feed() {
   local output="${BUILD1_STATIC_FEED_OUT:?set BUILD1_STATIC_FEED_OUT to an absolute output directory}"
-  local signing_key="${BUILD1_STATIC_SIGNING_KEY_FILE:-/Users/augstar/.config/macprovider/keys/autotune-static-v4.private.base64}"
+  local signing_key="${BUILD1_STATIC_SIGNING_KEY_FILE:-$HOME/.config/macprovider/keys/autotune-static-v4.private.base64}"
   case "$output" in /*) ;; *) printf 'refusing: BUILD1_STATIC_FEED_OUT must be absolute\n' >&2; exit 2 ;; esac
   [[ -f "$signing_key" ]] || { printf 'refusing: stable v4 signing key is unavailable\n' >&2; exit 2; }
   mkdir -p "$output"

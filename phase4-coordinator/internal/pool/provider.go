@@ -105,12 +105,39 @@ const (
 	AuthMintFailed AuthState = "mint_failed"
 )
 
+// ToolSelectionCapability binds guarantees to the session's exact loaded model
+// and adapter. It is a provider assertion; the buyer boundary also checks output.
+type ToolSelectionCapability struct {
+	ModelID    string   `json:"model_id"`
+	Runtime    string   `json:"runtime"`
+	Modes      []string `json:"modes"`
+	Validation string   `json:"validation"`
+}
+
+// VisionRuntimeCapability is a provider assertion for a loaded vision runtime.
+// Buyer routing additionally compares it with the operator qualification list;
+// a model name or parser alone never authorizes image dispatch.
+type VisionRuntimeCapability struct {
+	ModelID               string `json:"model_id"`
+	ModelHash             string `json:"model_hash"`
+	ModelHashAlgorithm    string `json:"model_hash_algorithm"`
+	WeightsManifestSHA256 string `json:"weights_manifest_sha256"`
+	ProcessorDigest       string `json:"processor_digest"`
+	Runtime               string `json:"runtime"`
+	RuntimeRevision       string `json:"runtime_revision"`
+	MediaProfile          string `json:"media_profile"`
+}
+
 type Provider struct {
+	ToolSelectionCapabilities []ToolSelectionCapability `json:"tool_selection_capabilities,omitempty"`
+	VisionRuntimeCapabilities []VisionRuntimeCapability `json:"vision_runtime_capabilities,omitempty"`
+
 	ProviderID              string  `json:"provider_id"`
 	AssignedID              string  `json:"assigned_id"`
 	Hostname                string  `json:"hostname"`
 	ModelID                 string  `json:"model_id"`
 	RuntimeSource           string  `json:"runtime_source,omitempty"` // SPEC-047 v0.1.6 hello adapter (mlx_cache/ollama_loopback); provider assertion, never dereferenced
+	FleetCacheProtocol      int     `json:"fleet_cache_protocol,omitempty"`
 	ModelParamsB            float64 `json:"model_params_b"`
 	RAMGB                   int     `json:"ram_gb"`
 	MaxContextTokens        int     `json:"max_context_tokens"`
@@ -311,6 +338,11 @@ type Provider struct {
 	// observability for operators and release canaries; routing still uses
 	// the advertised slots and the pool concurrency ceiling.
 	CBSelfCheck *ProviderCBSelfCheck `json:"cb_self_check,omitempty"`
+	// EngineProfile is the provider's latest SPEC-001-R006 self-reported
+	// engine profile; nil when absent or malformed. A routing prior only:
+	// it never feeds admission, trust tier or settlement.
+	// Not serialized with the provider; the admin provider listing exposes it.
+	EngineProfile *EngineProfile `json:"-"`
 	// Proof of Weights W2 — coordinator-side autotune admission cap derived
 	// from latest verified hardware-evidence benchmarks. Empty/zero when
 	// evidence observation is not wired or provider admitted before W2 rollout.
@@ -517,6 +549,36 @@ func (r *Registry) SetCBSelfCheck(providerID string, selfCheck *ProviderCBSelfCh
 	if p, ok := r.providers[providerID]; ok {
 		p.CBSelfCheck = cloneProviderCBSelfCheck(selfCheck)
 	}
+}
+
+// EngineProfile mirrors the closed SPEC-001-R006 `engine_profile` heartbeat
+// object (engine-profile-v1).
+type EngineProfile struct {
+	Version                string `json:"version"`
+	EngineFamily           string `json:"engine_family"`
+	CBGrantedSlots         int    `json:"cb_granted_slots"`
+	NativeMTPActive        bool   `json:"native_mtp_active"`
+	ChipClass              string `json:"chip_class"`
+	RAMClassGB             int    `json:"ram_class_gb"`
+	MaxStableContextTokens int    `json:"max_stable_context_tokens"`
+}
+
+// SetEngineProfile records the engine profile carried on the heartbeat just
+// applied for this provider session. Nil clears it.
+func (r *Registry) SetEngineProfile(providerID string, profile *EngineProfile) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if p, ok := r.providers[providerID]; ok {
+		p.EngineProfile = cloneEngineProfile(profile)
+	}
+}
+
+func cloneEngineProfile(in *EngineProfile) *EngineProfile {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
 }
 
 func cloneProviderCBSelfCheck(in *ProviderCBSelfCheck) *ProviderCBSelfCheck {
@@ -2937,6 +2999,9 @@ type ReceiptRotationEvent struct {
 type ReceiptRotationEventEmitter func(event ReceiptRotationEvent)
 
 type HeartbeatUpdate struct {
+	ToolSelectionCapabilities []ToolSelectionCapability
+	VisionRuntimeCapabilities []VisionRuntimeCapability
+
 	Status                  State
 	ModelID                 string
 	ModelParamsB            float64
@@ -3044,6 +3109,9 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	priorLoadingState := p.LastLoadingState
 	priorLoadingStartedAt := p.LoadingStartedAt
 	p.LastHeartbeatAt = hb.At
+	// Absence withdraws guarantees, including after a runtime/model change.
+	p.ToolSelectionCapabilities = hb.ToolSelectionCapabilities
+	p.VisionRuntimeCapabilities = hb.VisionRuntimeCapabilities
 
 	modelIDChanged := !strings.EqualFold(priorModelID, hb.ModelID)
 	if modelIDChanged {
@@ -3532,6 +3600,7 @@ func (r *Registry) Snapshot() []Provider {
 		cp.HardwareCapacity = cloneProviderHardwareCapacity(p.HardwareCapacity)
 		cp.SafetyTelemetry = cloneProviderSafetyTelemetry(p.SafetyTelemetry)
 		cp.CBSelfCheck = cloneProviderCBSelfCheck(p.CBSelfCheck)
+		cp.EngineProfile = cloneEngineProfile(p.EngineProfile)
 		cp.NativeMTPCanary = cloneNativeMTPCanaryDiagnostics(p.NativeMTPCanary)
 		out = append(out, cp)
 	}

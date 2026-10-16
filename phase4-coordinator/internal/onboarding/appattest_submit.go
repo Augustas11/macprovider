@@ -45,11 +45,28 @@ const (
 	AppAttestKeyReused
 )
 
+// RecordedAppAttestKey is a provider's recorded App Attest key: the 32-byte
+// key id and, for rows recorded from SPEC-033 v0.9.0 on, the attested 65-byte
+// uncompressed P-256 public key (nil for an older row). Both are public.
+type RecordedAppAttestKey struct {
+	KeyID     []byte
+	PublicKey []byte
+}
+
 // AppAttestRecorder is the app_attest_recorder surface (SPEC-033 §5.7).
 type AppAttestRecorder interface {
 	AppAttestRecorderConfigured() bool
-	AppAttestVerificationRecorded(ctx context.Context, providerID string) (bool, error)
-	RecordAppAttestVerification(ctx context.Context, providerID string, keyID []byte) (AppAttestRecordOutcome, error)
+	// RecordedAppAttestKey returns the provider's recorded key, ok=false
+	// when the provider has none.
+	RecordedAppAttestKey(ctx context.Context, providerID string) (RecordedAppAttestKey, bool, error)
+	RecordAppAttestVerification(ctx context.Context, providerID string, keyID, publicKey []byte) (AppAttestRecordOutcome, error)
+}
+
+// AppAttestKeyVerifier is implemented by a verifier that returns the
+// attested public key (AppleAppAttestVerifier). The submit path needs it to
+// record the key with its id.
+type AppAttestKeyVerifier interface {
+	AttestedKey(ctx context.Context, evidence AppAttestEvidence) ([]byte, bool, error)
 }
 
 type appAttestChallenge struct {
@@ -133,6 +150,10 @@ type appAttestChallengeResponse struct {
 	Challenge  string `json:"challenge,omitempty"`
 	ClientData string `json:"client_data,omitempty"`
 	ExpiresAt  string `json:"expires_at,omitempty"`
+	// KeyID is the recorded key id (standard base64) on recorded and
+	// already_recorded, so Malibu.app can keep reusing its key (SPEC-033
+	// §5.7.1, SPEC-049-R035).
+	KeyID string `json:"key_id,omitempty"`
 }
 
 type appAttestSubmitRequest struct {
@@ -163,7 +184,8 @@ func (h *Handler) appAttestDeps(w http.ResponseWriter, r *http.Request) (string,
 		return "", nil, false
 	}
 	recorder, isRecorder := h.StatsDB.(AppAttestRecorder)
-	if !isRecorder || !recorder.AppAttestRecorderConfigured() || h.AppAttestChallenges == nil || h.AppAttestVerifier == nil ||
+	_, keyVerifier := h.AppAttestVerifier.(AppAttestKeyVerifier)
+	if !isRecorder || !recorder.AppAttestRecorderConfigured() || h.AppAttestChallenges == nil || h.AppAttestVerifier == nil || !keyVerifier ||
 		strings.TrimSpace(h.AppAttestConfig.TeamID) == "" || strings.TrimSpace(h.AppAttestConfig.BundleID) == "" ||
 		strings.TrimSpace(h.AppAttestConfig.CoordinatorDomain) == "" {
 		writeJSONError(w, http.StatusServiceUnavailable, "app_attest_unavailable", "app attest recording is not configured")
@@ -191,14 +213,14 @@ func (h *Handler) HandleAppAttestChallenge(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), appAttestStoreTimeout)
-	recorded, err := recorder.AppAttestVerificationRecorded(ctx, providerID)
+	existing, recorded, err := recorder.RecordedAppAttestKey(ctx, providerID)
 	cancel()
 	if err != nil {
 		writeJSONError(w, http.StatusServiceUnavailable, "app_attest_unavailable", "app attest record lookup failed")
 		return
 	}
 	if recorded {
-		writeJSON(w, http.StatusOK, appAttestChallengeResponse{Status: "already_recorded", ProviderID: providerID})
+		writeJSON(w, http.StatusOK, appAttestChallengeResponse{Status: "already_recorded", ProviderID: providerID, KeyID: base64.StdEncoding.EncodeToString(existing.KeyID)})
 		return
 	}
 	value, expiresAt, err := h.AppAttestChallenges.Issue(providerID, h.appAttestNow())
@@ -266,8 +288,9 @@ func (h *Handler) HandleAppAttestSubmit(w http.ResponseWriter, r *http.Request) 
 		writeJSONError(w, http.StatusInternalServerError, "internal_error", "app attest client data failed")
 		return
 	}
+	verifier, _ := h.AppAttestVerifier.(AppAttestKeyVerifier)
 	verifyCtx, cancelVerify := context.WithTimeout(r.Context(), appAttestStoreTimeout)
-	attested, err := h.AppAttestVerifier.Verify(verifyCtx, AppAttestEvidence{
+	publicKey, attested, err := verifier.AttestedKey(verifyCtx, AppAttestEvidence{
 		Object:         attestation,
 		KeyID:          keyID,
 		ClientDataHash: sha256.Sum256(clientData),
@@ -283,7 +306,7 @@ func (h *Handler) HandleAppAttestSubmit(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	recordCtx, cancelRecord := context.WithTimeout(context.Background(), appAttestStoreTimeout)
-	outcome, err := recorder.RecordAppAttestVerification(recordCtx, providerID, keyID)
+	outcome, err := recorder.RecordAppAttestVerification(recordCtx, providerID, keyID, publicKey)
 	cancelRecord()
 	if err != nil {
 		// Fail-safe (the Mac stays on operator approval) but never silent: a
@@ -294,9 +317,18 @@ func (h *Handler) HandleAppAttestSubmit(w http.ResponseWriter, r *http.Request) 
 	}
 	switch outcome {
 	case AppAttestRecorded:
-		writeJSON(w, http.StatusOK, appAttestChallengeResponse{Status: "recorded", ProviderID: providerID})
+		writeJSON(w, http.StatusOK, appAttestChallengeResponse{Status: "recorded", ProviderID: providerID, KeyID: base64.StdEncoding.EncodeToString(keyID)})
 	case AppAttestAlreadyRecorded:
-		writeJSON(w, http.StatusOK, appAttestChallengeResponse{Status: "already_recorded", ProviderID: providerID})
+		// First key wins: answer with the key that is recorded, which is
+		// not the one just submitted.
+		lookupCtx, cancelLookup := context.WithTimeout(context.Background(), appAttestStoreTimeout)
+		existing, recorded, err := recorder.RecordedAppAttestKey(lookupCtx, providerID)
+		cancelLookup()
+		if err != nil || !recorded {
+			writeJSONError(w, http.StatusServiceUnavailable, "app_attest_unavailable", "app attest record lookup failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, appAttestChallengeResponse{Status: "already_recorded", ProviderID: providerID, KeyID: base64.StdEncoding.EncodeToString(existing.KeyID)})
 	default:
 		writeJSONError(w, http.StatusConflict, "app_attest_key_reused", "app attest key is recorded for another provider")
 	}

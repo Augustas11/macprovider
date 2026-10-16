@@ -1,7 +1,7 @@
 # SPEC-037 — KV survival across provider restarts (encrypted provider-local disk tier)
 
-Version: v0.1.5
-Status: draft (normative design; IMPL landed behind a disabled-by-default flag)
+Version: v0.2.0
+Status: draft (v0.2 fleet/recurrent implementation and acceptance in progress)
 Owner: provider runtime / prefix-cache persistence
 Decision source: `docs/research/RESEARCH_233_KV_SURVIVAL_RESTART_MEMO.md` (landed decision memo, commit `d6881b14`)
 Audit history: R1+R2+R3 five-lane audits (codex code/security/architect + adversarial verificator + product critic) reconciled in this text. R2 forced: positive synthetic-key sub-namespace (the shipped `conv:` validator makes prefix-exclusion gating unsatisfiable), per-entry Keychain DEKs as the rollback-proof revocation anchor, purge-generation stamping at lease acquisition, rotation-intent journal, byte-level format grammar, write-side staging caps, and `allow_buyer_keys` rejected in v0.1. R3 forced: non-circular AAD projection (blob hash out of AAD), single-key purge lease fencing, lock inode outside the deletable tree, incoming-vs-served model identity split, DEK lifecycle on eviction, and control-plane state bounds. v0.1.2: Keychain mode for the shipped naked Developer ID CLI is the process-default / login keychain (same store as provider credentials); Data Protection Keychain is used only when a named access group is set on a profiled bundle. v0.1.3: RESEARCH_233 Q6 on the live Qwen3-Coder-30B-A3B 4-bit tuple is unquantized `KVCacheSimple` (`kv_bits=null`, ~98 KiB/token; KVS-01a evidence). Q7 q4 KV is not the active representation. FR-KVP9 promotion hard ceiling rises to 1 GiB so the memo's 8k FP16 class is configurable; the default stays 256 MiB. Codec stays `kvsurv-codec-v1`. KVS-01b evidence is not claimed here. v0.1.4: hybrid entries (any recurrent `ArraysCache`/`MambaCache` layer, with SPEC-024 v0.2.5 recurrent-state checkpoints) are hot-tier only and never persisted or promoted. v0.1.5: decode-path exclusion is explicit for both `classic_draft_spec` and `native_mtp`; neither path may enter persistent or hot conversation-cache lifecycle.
@@ -673,7 +673,7 @@ block, fail, or corrupt the request being served.
   (backup-exclusion attribute). Snapshot/backup copies that evade this are
   covered by the DEK revocation anchor (FR-KVP8), not by retention.
 
-### FR-KVP11 — configuration, default-off rollout, synthetic-key gate (SPEC-037-R011)
+### FR-KVP11 — configuration, default-off rollout, authenticated fleet gate (SPEC-037-R011)
 
 Config follows the `idle_prewarm` triple-source pattern with precedence
 YAML file → environment → CLI overrides. Exact surface (AC-9 fixtures):
@@ -681,7 +681,7 @@ YAML file → environment → CLI overrides. Exact surface (AC-9 fixtures):
 | YAML `kv_disk_cache:` key | Env var | CLI flag | Default | Rule |
 |---|---|---|---|---|
 | `enabled` | `MACPROVIDER_KV_DISK_CACHE_ENABLED` | `--kv-disk-cache-enabled` | `false` | bool; invalid ⇒ tier disabled, error logged |
-| `allow_buyer_keys` | `MACPROVIDER_KV_DISK_CACHE_ALLOW_BUYER_KEYS` | `--kv-disk-cache-allow-buyer-keys` | `false` | **v0.1: `true` is rejected** — config error, tier disabled, error names the preconditions. Reserved for a future revision gated on machine-verifiable coordinator purge propagation + published FR-CI10a disclosure |
+| `allow_buyer_keys` | `MACPROVIDER_KV_DISK_CACHE_ALLOW_BUYER_KEYS` | `--kv-disk-cache-allow-buyer-keys` | `true` | Allows authenticated fleet grants under FR-KVP14; config alone never grants persistence authority. `false` disables buyer persistence without disabling purge |
 | `directory` | `MACPROVIDER_KV_DISK_CACHE_DIR` | `--kv-disk-cache-dir` | `~/Library/Caches/macprovider/kv-cache` | leading `~` expanded to the user home, then MUST be absolute; created `0700` |
 | `max_bytes` | `MACPROVIDER_KV_DISK_CACHE_MAX_BYTES` | `--kv-disk-cache-max-bytes` | 16 GiB | > 0; invalid ⇒ tier disabled |
 | `max_entries` | `MACPROVIDER_KV_DISK_CACHE_MAX_ENTRIES` | `--kv-disk-cache-max-entries` | 64 | > 0; invalid ⇒ tier disabled |
@@ -697,7 +697,7 @@ Rollout gates:
 
 - **Default off.** Enabling with a missing/non-functional purge primitive
   MUST fail closed (tier stays off, error logged).
-- **Synthetic-key gate (v0.1 normative).** The tier persists and promotes
+- **Synthetic-key gate (legacy v0.1; extended by FR-KVP14).** Without an authenticated fleet grant, the tier persists and promotes
   **only** keys in the reserved synthetic sub-namespace: canonical key
   bytes with prefix `conv:kvs-synth:` **and** ingested via the direct-HTTP
   operator path. Both conditions are required: coordinator-derived buyer
@@ -1071,11 +1071,12 @@ All are required tests in `phase3-binary/Tests/macprovider-cliTests/`:
   speculative-decode-routed request on each endpoint acquires no lease,
   triggers no promotion, commits nothing, and leaves no busy key.
 - **AC-9 config and rollout gates:** default-off; enable without purge
-  primitive fails closed; `allow_buyer_keys=true` rejected (tier
-  disabled, error names preconditions); synthetic gate admits
+  primitive fails closed; `allow_buyer_keys` defaults true but requires a
+  valid matching fleet grant on relay/Tier-2, and false disables buyer
+  persistence; the ungranted synthetic gate admits
   `conv:kvs-synth:` keys on direct ingest and refuses (a) non-synthetic
   `conv:` keys on any path and (b) synthetic-shaped keys arriving via
-  relay/Tier-2; triple-source precedence including CLI flags; tilde
+  relay/Tier-2 without an authenticated matching fleet grant; triple-source precedence including CLI flags; tilde
   expansion; each invalid-value rule; enable-time notice (with
   eligibility TTL) and headroom check; snapshot-at-commit identity
   (mutating the hot entry or warm-swapping after commit does not alter
@@ -1133,3 +1134,157 @@ copy-on-write snapshot handles to shrink the synchronous copy cost
 (FR-KVP3 bounds it by budget in v0.1); buyer-facing provenance (deferred
 to a future SPEC-015 v0.5 question). Tracked in RESEARCH_233 §11; none may
 weaken a MUST above.
+
+
+## 10. Authenticated fleet persistence and recurrent format (v0.2)
+
+This section extends FR-KVP2/4/11 and supersedes the v0.1-only exclusions of
+fleet provenance and complete recurrent checkpoints. It does not relax any
+identity, privacy, retention, cryptographic, publication or memory bound.
+Implementation alone is not hardware or released-provider acceptance.
+
+### Fleet authority and purge (SPEC-037-R014)
+
+Eligibility is an authenticated coordinator decision, never a caller-supplied
+conversation string, body field, synthetic prefix or provider configuration.
+The coordinator must bind each grant to the authenticated account, opaque
+conversation identifier, selected provider, and durable revocation generation.
+Only ordinary inference in that same account/conversation/provider scope may
+reuse it. Cross-conversation/provider reuse and global deduplication remain
+excluded. Direct-HTTP synthetic eligibility remains separate; relay, Tier-2,
+unknown and privacy provenance cannot acquire synthetic eligibility by key shape.
+
+Before issuing a grant the coordinator must durably register its provider and
+scope. Account purge must durably revoke all registered scopes, including
+cache-only auto-prefix conversations and providers no longer in sticky routing.
+It must deliver authenticated purge commands, track provider acknowledgements,
+and retry unacknowledged commands after coordinator/provider restart or
+reconnection. Routing TTL eviction must not erase revocation obligations.
+Provider acknowledgements mean hot state, pending snapshots, persistent entries
+and pre-purge leases are fenced and revoked, not merely that a message arrived.
+A disconnected provider cannot receive new eligibility before reconciliation.
+A delayed pre-purge grant must remain revoked even if it reaches the provider
+after purge acknowledgement. Storage or reconciliation failure denies reuse and
+persistence, while ordinary fresh inference may continue.
+
+Purge status must distinguish complete from pending provider acknowledgement;
+an affinity-only deletion is not proof of persistent-cache purge. Purging one
+account cannot affect another account's entries or disclose their counters.
+No raw prompt, token sequence, caller key or account identifier is cache telemetry.
+The published buyer retention disclosure must describe provider-local encrypted
+persistence, its retention and reuse bounds, and pending/disconnected purge
+semantics before ordinary buyer persistence is admitted.
+
+### Complete recurrent representation (SPEC-037-R015)
+
+The new `kvsurv-codec-v2` uses serialization ABI epoch 2. Existing
+`kvsurv-codec-v1` entries retain their original ABI and byte grammar; a reader
+must never reinterpret v1 bytes as recurrent state. Format selection is part of
+the expected runtime identity and authenticated manifest. Supported v2 state is
+ordered unquantized attention KV plus complete supported ArraysCache/MambaCache
+state. Quantized reusable state remains excluded.
+
+Each recurrent checkpoint binds an exact canonical token count and the complete
+ordered state slots of every recurrent layer, including tensor dtype, rank,
+dimensions, layout and bytes. The authenticated envelope binds model artifact,
+request and served identities, tokenizer/config, chat template, pinned runtime
+revisions, codec/ABI, layer layout and precision. Missing, duplicate, unknown or
+incompatible layers/slots fail closed before MLX materialization. Checkpoint
+positions must be strictly ordered, within the canonical token sequence and
+consistent with attention offsets. Stop tokens and cancelled output must not
+advance the canonical boundary without corresponding state.
+
+Cold restoration reconstructs the existing hot-cache candidate and its recurrent
+checkpoints; the existing token-prefix predicate chooses a compatible checkpoint
+and trims attention to exactly that boundary. A divergent prefix without such a
+checkpoint recomputes. Snapshot capture preserves immutable complete state while
+the lease is held. Purge, cancellation and model replacement must fence both
+capture and publication; restoration must recheck fences after suspension.
+
+All existing quota, retention, key destruction, clock rollback, staging and
+single-writer bounds apply to the sum of attention tensors, recurrent slots and
+checkpoint metadata. Bounds and overflow checks precede allocation/copy. Cleanup
+must not refresh the original reuse deadline. Corruption or incompatibility is a
+safe miss, never a partial restore or a request failure.
+
+### Acceptance (SPEC-037-R016)
+
+Required evidence includes cold-versus-fresh continuation and canonical offsets
+for every supported format; cross-account identical-key isolation; spoofed
+synthetic keys over relay, Tier-2, unknown and privacy paths; complete absence of
+privacy cache lookup, entry, persistence and KV telemetry; stale identity and
+incomplete-state rejection; purge races at capture/write/promotion; disconnected
+and restarted participants; cancellation, stop-token and model replacement
+boundaries; retention and key rotation. Privacy uses only request-local transient
+inference state. Representative repeat-prefix latency and bounded storage cost
+must be demonstrated on the designated Studio, using existing evidence wherever
+the decode path is unchanged. Unrun hardware/released-provider gates remain
+explicitly pending and must not be described as passed.
+
+
+### Fleet protocol and codec-v2 grammar
+
+Provider hello/auth advertises `fleet_cache_protocol: 1` only when the local
+revocation authority and purge integration are available. Protocol support is
+independent of disk enablement: a disabled/dormant tier must still accept purge
+commands for data left by an earlier run. Eligibility requires a successful
+coordinator durable registration and no pending purge for that account/provider;
+disk use additionally requires an active configured tier. Existing providers
+without this capability remain hot-only.
+
+The inference envelope carries optional `fleet_cache`, exactly
+`{conversation_key, generation}`. The key equals the envelope conversation key;
+the generation is positive. Tier-2 carries it only inside AEAD plaintext.
+Caller chat JSON cannot create it. Coordinator purge is exactly
+`{type: "conversation_cache_purge", purge_id, conversation_key, generation}`;
+ACK is the same tuple with `type: "conversation_cache_purge_ack"` and `purged`.
+Purge generation N revokes grants ≤ N; subsequent eligible grants use N+1.
+A matching positive ACK from the current provider session removes the durable
+pending obligation. Negative ACKs, missing providers and send failures remain
+pending and are retried. GET `/v1/sticky` reports account-scoped pending status
+without starting another purge; DELETE initiates revocation and returns 202
+while acknowledgements remain pending.
+
+The v2 manifest uses the v1 closed field list plus required
+`recurrent_checkpoints`; `codec_id` is `kvsurv-codec-v2`, `abi_epoch` is 2,
+`cache_class` is `KVCacheMixedRecurrent`, and the quantization tuple is null.
+Ordered `layers` add required `cache_offset` (null for attention and the exact
+captured offset for recurrent layers). Recurrent layer records use
+`layout_version=2`, `ndim=0`, `dims=[]`, and dtype f16 as a metadata sentinel;
+actual slot precision appears in each checkpoint. `recurrent_checkpoints` is an
+ascending array of at most eight closed `{token_count, layers}` records. Each
+checkpoint covers every recurrent layer exactly once in order, as
+`{layer_index, slots}`. Slots are exactly two ordered closed records
+`{slot_index, ndim, dims, dtype, byte_count}`, rank at least two, batch dimension
+one, floating precision, and byte count equal to shape product × element size.
+Every checkpoint layout must match the actual seeded model layout. Only the
+pinned canonical ArraysCache metadata `["2", "0,1"]` is supported; padded,
+length-masked, incomplete or unknown metadata fails closed.
+
+Payload integer encoding is little-endian. The grammar is:
+
+```text
+"KVC2" | u32 token_count | i32[token_count] tokens | u32 layer_count
+for each ordered layer:
+  u32 layer_index | u8 kind | u16 class_length | bytes class
+  attention: u8 ndim | u64[ndim] dims | u8 dtype | u64 offset |
+             u64 key_length | bytes key | u64 value_length | bytes value
+  recurrent: u64 captured_offset
+u32 checkpoint_count
+for each checkpoint:
+  u32 token_count | u32 recurrent_layer_count
+  for each recurrent layer:
+    u32 layer_index | u16 slot_count
+    for each slot:
+      u16 slot_index | u8 ndim | u64[ndim] dims | u8 dtype |
+      u64 byte_length | bytes tensor
+```
+
+The canonical checkpoint token count is the recurrent boundary authority;
+the cache object's offset is preserved, not substituted for that boundary.
+The existing AAD projection (manifest minus blob SHA-256, then big-endian chunk
+ordinal) authenticates all added metadata. Original eligibility timestamps
+survive promotion and serial fallback. Write admission additionally caps decoded
+plaintext snapshots at 1 GiB per fixed 60-second process-local window, charged
+before copying and not refunded after displacement/failure. Existing aggregate
+staging, quota and promotion ceilings remain independently enforced.

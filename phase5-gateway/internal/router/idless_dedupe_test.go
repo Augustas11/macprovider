@@ -264,7 +264,7 @@ func TestIdlessDedupe_StreamingRetryReplays(t *testing.T) {
 }
 
 // A replay must not echo attempt 1's per-attempt headers. Only the whitelist
-// (Content-Type, X-Provider-Id, X-Request-ID, the dedupe marker) plus freshly
+// (Content-Type, X-Request-ID, the dedupe marker) plus freshly
 // recomputed rate-limit headers may cross.
 func TestIdlessDedupe_ReplayEmitsNoSettlementHeaders(t *testing.T) {
 	var hits atomic.Int32
@@ -314,8 +314,8 @@ func TestIdlessDedupe_ReplayEmitsNoSettlementHeaders(t *testing.T) {
 	if got := second.Header().Get("X-Request-ID"); got != attemptOneID {
 		t.Fatalf("replay X-Request-ID=%q want attempt 1's %q", got, attemptOneID)
 	}
-	if got := second.Header().Get("X-Provider-Id"); got != "peer-a" {
-		t.Fatalf("replay X-Provider-Id=%q want peer-a", got)
+	if got := second.Header().Get("X-Provider-Id"); got != "" {
+		t.Fatalf("replay carries X-Provider-Id=%q; buyers never receive provider identity", got)
 	}
 	for _, name := range []string{"X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset"} {
 		if second.Header().Get(name) == "" {
@@ -839,7 +839,7 @@ func TestIdlessDedupeIndex_OnlyClaimWinnerPublishesOrDrops(t *testing.T) {
 	}
 
 	// A non-owner cannot publish...
-	index.publish("fp", "req-second", http.StatusOK, "application/json", "peer", []byte("intruder"), now)
+	index.publish("fp", "req-second", http.StatusOK, "application/json", []byte("intruder"), now)
 	if _, ok := index.replaySnapshot(entry, now, window); ok {
 		t.Fatal("a non-owner published a response")
 	}
@@ -849,7 +849,7 @@ func TestIdlessDedupeIndex_OnlyClaimWinnerPublishesOrDrops(t *testing.T) {
 		t.Fatal("a non-owner dropped the owner's entry")
 	}
 
-	index.publish("fp", "req-owner", http.StatusOK, "application/json", "peer", []byte("answer"), now)
+	index.publish("fp", "req-owner", http.StatusOK, "application/json", []byte("answer"), now)
 	snapshot, ok := index.replaySnapshot(entry, now, window)
 	if !ok {
 		t.Fatal("owner publish did not make the entry replayable")
@@ -865,7 +865,7 @@ func TestIdlessDedupeIndex_OnlyClaimWinnerPublishesOrDrops(t *testing.T) {
 
 	// Publishing twice must not double-count bytes or reopen the entry.
 	before := index.totalBytes
-	index.publish("fp", "req-owner", http.StatusOK, "application/json", "peer", []byte("second answer"), now)
+	index.publish("fp", "req-owner", http.StatusOK, "application/json", []byte("second answer"), now)
 	if index.totalBytes != before {
 		t.Fatalf("republish changed totalBytes %d -> %d", before, index.totalBytes)
 	}
@@ -903,7 +903,7 @@ func TestIdlessDedupeIndex_EvictedBodyKeepsMapping(t *testing.T) {
 	now := fixedNow()
 	window := time.Minute
 	entry, _ := index.claim("fp", "req-owner", now, window)
-	index.publish("fp", "req-owner", http.StatusOK, "application/json", "peer", []byte("answer"), now)
+	index.publish("fp", "req-owner", http.StatusOK, "application/json", []byte("answer"), now)
 
 	index.mu.Lock()
 	index.totalBytes = idlessDedupeMaxTotalBytes + 1
@@ -927,7 +927,7 @@ func TestIdlessDedupeIndex_ExpiredEntryIsReclaimedFresh(t *testing.T) {
 	now := fixedNow()
 	window := time.Minute
 	index.claim("fp", "req-owner", now, window)
-	index.publish("fp", "req-owner", http.StatusOK, "application/json", "peer", []byte("answer"), now)
+	index.publish("fp", "req-owner", http.StatusOK, "application/json", []byte("answer"), now)
 
 	entry, adopted := index.claim("fp", "req-retry", now.Add(2*time.Minute), window)
 	if adopted {
@@ -953,14 +953,14 @@ func TestIdlessDedupeIndex_BodyPressureKeepsWindowValidMappings(t *testing.T) {
 	// The oldest entry: published first, never touched again, so it is the
 	// LRU victim for every body eviction that follows.
 	index.claim("victim", "req-victim", base, window)
-	index.publish("victim", "req-victim", http.StatusOK, "application/json", "", []byte("answer"), base)
+	index.publish("victim", "req-victim", http.StatusOK, "application/json", []byte("answer"), base)
 
 	// Churn well past the body cap with unique fingerprints.
 	for i := 0; i < idlessDedupeMaxBodies+64; i++ {
 		fp := "churn-" + strconv.Itoa(i)
 		at := base.Add(time.Duration(i+1) * time.Millisecond)
 		index.claim(fp, "req-"+strconv.Itoa(i), at, window)
-		index.publish(fp, "req-"+strconv.Itoa(i), http.StatusOK, "application/json", "", []byte("a"), at)
+		index.publish(fp, "req-"+strconv.Itoa(i), http.StatusOK, "application/json", []byte("a"), at)
 	}
 
 	if got := index.bodyCount; got > idlessDedupeMaxBodies {
@@ -994,7 +994,7 @@ func TestIdlessDedupeIndex_MappingPressureEvictsOldestAndCounts(t *testing.T) {
 		at := base.Add(time.Duration(i) * time.Millisecond)
 		index.claim(fp, "req-"+strconv.Itoa(i), at, window)
 		// No body: this is purely mapping-table pressure.
-		index.publish(fp, "req-"+strconv.Itoa(i), http.StatusOK, "application/json", "", nil, at)
+		index.publish(fp, "req-"+strconv.Itoa(i), http.StatusOK, "application/json", nil, at)
 	}
 	if got := len(index.entries); got != idlessDedupeMaxMappings {
 		t.Fatalf("entries=%d want %d", got, idlessDedupeMaxMappings)
@@ -1035,7 +1035,7 @@ func TestIdlessDedupeIndex_InFlightNeverEvictedAndCapped(t *testing.T) {
 		t.Fatalf("inflight_cap_skip_total=%d want 1", got)
 	}
 	// A terminal frees a slot.
-	index.publish("inflight-0", "req-0", http.StatusOK, "application/json", "", []byte("a"), base)
+	index.publish("inflight-0", "req-0", http.StatusOK, "application/json", []byte("a"), base)
 	if index.inFlight != idlessDedupeMaxInFlight-1 {
 		t.Fatalf("inFlight=%d want %d after one terminal", index.inFlight, idlessDedupeMaxInFlight-1)
 	}
@@ -1083,7 +1083,7 @@ func TestIdlessDedupeIndex_WaiterCapAndContextExpiry(t *testing.T) {
 		t.Fatal("awaitTerminal must report failure when the request context is done")
 	}
 
-	index.publish("fp", "req-owner", http.StatusOK, "application/json", "", []byte("a"), now)
+	index.publish("fp", "req-owner", http.StatusOK, "application/json", []byte("a"), now)
 	for i := 0; i < idlessDedupeMaxWaiters; i++ {
 		if !<-parked {
 			t.Fatal("a parked waiter did not observe the owner's terminal")

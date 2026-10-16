@@ -1,6 +1,6 @@
 # Privacy class beta operations
 
-SPEC-049 `operator_constrained_beta_v1`, v0.2.0. The coordinator, gateway, and buyer client keep the class off until you enable it. A provider enters the class on its own when it runs an eligible signed release, and the coordinator enrolls its keys without a per-provider step. A request that asks for the class either completes inside the class or fails with a typed error. It does not fall back to ordinary relay-blind or plaintext.
+SPEC-049 `operator_constrained_beta_v1`, v0.5.0. The coordinator, gateway, and buyer client keep the class off until you enable it. A provider enters the class on its own when it runs an eligible signed release, and the coordinator enrolls its keys without a per-provider step. A request that asks for the class either completes inside the class or fails with a typed error. It does not fall back to ordinary relay-blind or plaintext.
 
 These commands print public material only. Do not print, log, or copy private key bytes.
 
@@ -154,6 +154,35 @@ relay-blind-client --privacy-class --base-url https://gateway.example --model <m
 
 `--identity-pin /absolute/pin.json` overrides the directory and is required with a wallet session.
 
+## Trusted Pool scope (SPEC-049-R032)
+
+A buyer whose API key is authorized for a Trusted Pool adds `--pool <pool_id>`. The client sends `X-MacProvider-Pool-Select`; the gateway authorizes it as for plaintext and forwards the pool to the coordinator. The request is served only by a provider that is a current member of that pool and is enrolled in the privacy class, and never falls back to another provider. Wallet sessions and demo accounts cannot select a pool. It works wherever the privacy class and `trusted_pools` are both enabled; there is no separate switch, and the provider needs no change.
+
+- A refused pool (not authorized, unknown, paused, stale policy, model not allowed, enforce required) answers the usual SPEC-042 code, with reason `pool_scoped_request` in the coordinator log.
+- No member that passes the pool's member checks serves the model: buyer `privacy_class_unavailable`, reason `pool_no_eligible_member`. Members that serve it but are not privacy-eligible report the ordinary privacy reason (for example `model_not_private_capable` or `provider_not_enrolled`). The buyer code is the same in both cases, so a buyer cannot tell membership from enrollment.
+- Membership, generation, or manifest changed between reservation and dispatch: buyer `privacy_class_posture_stale` (new reservation), reason `pool_state_stale`. A `revoke_immediate` of the serving member cancels an in-flight request, which ends `do_not_resubmit`.
+
+Settlement is unchanged: under `enforce` the request settles `relay_blind_settled`, and the verdict row carries the pool label (`pool_label_status = verified` counts toward pool accounting). The pool operator sees the pool's policy, members, buyer grants, and aggregate payable request counts and credits of its own members. It does not see request or response content, or per-request metadata, through any pool surface. A pool operator that runs a member Mac is that Mac's provider operator, with the provider-operator limits and residual risks below.
+
+## Code-bound label (SPEC-049-R033..R035)
+
+A provider whose Malibu.app holds an App Attest key gets a second label, `code_bound_attested`, on each posture the coordinator can verify end to end. There is no switch in any component. Everything else keeps `device_bound_self_attested_beta` exactly as before, including the CLI-only install, which cannot use App Attest.
+
+How it works. Malibu.app attests one App Attest key per provider ID through SPEC-033 (`/v1/providers/app-attest`), and the coordinator records it, first key wins. Malibu.app keeps that key id and runs a local attestor on `~/Library/Application Support/Malibu/privacy/attestor.sock`. On each posture challenge the runtime asks it for an assertion. Malibu.app asserts only after the kernel identifies the caller as the team-signed `live.malibu.provider.cli` with valid, hardened, non-debugged code. The runtime sends the assertion as `privacy_code_bound_evidence` just before its posture. The coordinator checks the assertion against the recorded public key, a strictly increasing counter, and the posture's approved code identity.
+
+Prerequisites:
+
+- Coordinator: the `app_attest_recorder` connection is up (SPEC-033 §2.7; startup logs `app_attest_recorder_unavailable` otherwise) and `onboarding.apple_team_id` and `onboarding.bundle_id` are set. The stats database has migration 033.
+- Provider: a release Malibu.app on macOS 27 or later that has recorded its App Attest key, running while the CLI serves. If the app is quit, the provider keeps serving and its postures are device-bound until the app is back.
+
+Buyers ask for the label with `relay-blind-client --privacy-class --privacy-assurance-required code_bound_attested`. The client sends `X-MacProvider-Privacy-Assurance-Required`; the reservation then goes only to a provider whose latest posture is code-bound, and the run prints the code-bound scope and residual risks. Without the flag every reservation is device-bound, whatever the provider supports.
+
+What the operator sees:
+
+- A refused code-bound request answers `privacy_class_unavailable` (or `privacy_class_posture_stale` after consume) with reason `assurance_unavailable` in `privacy_route_rejected`.
+- A posture whose evidence fails stays device-bound and logs `privacy_code_bound_rejected reason=<code>`, counted by `relayblind_privacy_code_bound_rejections_total{reason}`. It never quarantines, revokes keys, or changes the enrollment. Common reasons: `record_missing` (no App Attest record, or a row from before migration 033), `key_mismatch` (the app used another key), `counter_not_increasing`, `assertion_invalid`, `runtime_identity_mismatch`, `store_unavailable`.
+- A provider whose recorded App Attest key is lost (`DCError.invalidKey`, for example after the app's keychain is reset) stays device-bound: SPEC-033 never replaces a recorded key.
+
 ## Incident and revocation
 
 The control plane is the relay-blind SQLite file named by `relay_blind.sqlite_path`. `coordinator-cli` opens that file directly. Do not restart the coordinator for these commands. The next reservation, consume, or dispatch reads the new row.
@@ -188,7 +217,7 @@ Key change. A provider whose claim or posture uses a different identity or Secur
 
 In-band identity key rotation (SPEC-049-R031). An enrolled provider can replace its relay-blind identity key without `reenroll`. On the provider, run `macprovider-cli privacy-class rotate-identity` (add `--state-dir` or `--config` when the state directory is not the default). It stages a new key beside the enrolled one and prints both public keys, never private bytes. The running provider offers the staged key after its next posture: the enrolled identity key, the Secure Enclave key, and the new key sign one rotation over a coordinator nonce. When the coordinator accepts, it swaps the enrollment, revokes the old privacy key records, and rejects held predispatch reservations (buyers retry with a new reservation); the provider then switches keys and advertises new records. The old identity is published as revoked for 30 days. A provider whose identity key is pinned in configuration cannot rotate in band. The Secure Enclave key never rotates in band; a Secure Enclave key change still quarantines and needs `reenroll`. A rotation that the enrolled keys did not sign quarantines like a key change. `status` shows the rotated enrollment as revoked with reason `rotated`. A coordinator without rotation support ignores the request and the provider keeps its key. A provider rotates at most once per 24 hours; an earlier request is refused with `rotation_unavailable` and changes nothing. If the provider never receives the result (a dropped connection or a restart), it reconnects with its old key: that key is refused without quarantine (`privacy_key_rotation_pending` in the coordinator log), the provider asks again within 600 seconds, and the coordinator acknowledges the retry without changing the enrollment. No operator step is needed. If the coordinator answers `rotation_key_in_use` or `rotation_identity_pinned`, the provider deletes the staged key and logs `identity_rotation_not_accepted`; run `rotate-identity` again to stage a fresh key, or for a pinned identity change the configuration pin instead. The gateway's `gateway_privacy_route_rejections_total` counters are served on `/metrics` only to a direct loopback scraper or the operator bearer.
 
-Reject reasons (SPEC-049-R030). Every refused private request writes one `privacy_route_rejected` line with `phase`, `code`, and `reason`, on the coordinator and on the gateway, and counts `relayblind_privacy_route_rejections_total{phase,reason}` and `gateway_privacy_route_rejections_total{phase,reason}`. The reason is the real cause (for example `provider_not_enrolled`, `code_identity_unapproved`, `posture_expired`, `provider_quarantined`, `slot_unavailable`) and never reaches the buyer, whose error code is unchanged.
+Reject reasons (SPEC-049-R030). Every refused private request writes one `privacy_route_rejected` line with `phase`, `code`, and `reason`, on the coordinator and on the gateway, and counts `relayblind_privacy_route_rejections_total{phase,reason}` and `gateway_privacy_route_rejections_total{phase,reason}`. The reason is the real cause (for example `provider_not_enrolled`, `code_identity_unapproved`, `posture_expired`, `provider_quarantined`, `slot_unavailable`, and for a Trusted Pool request `pool_scoped_request`, `pool_no_eligible_member`, or `pool_state_stale`) and never reaches the buyer, whose error code is unchanged.
 
 Rotation by restart. The privacy X25519 agreement key lives in process memory for at most 3600 seconds. Restart the provider process to mint a new one. The Secure Enclave key and the Ed25519 relay-blind identity persist across restarts and upgrades, so enrollment is unaffected. Do not copy private key files to rotate.
 
@@ -204,7 +233,7 @@ X-MacProvider-Privacy-Assurance: device_bound_self_attested_beta
 X-MacProvider-Response-Encryption: buyer_provider_aead_v1
 ```
 
-`usage.macprovider.privacy` uses the same class and assurance. The rest of that object is fixed below, in this order. These strings change only when SPEC-049 bumps its version.
+`usage.macprovider.privacy` uses the same class and assurance. The rest of that object is fixed below, in this order. These strings change only when SPEC-049 bumps its version. A `code_bound_attested` response carries `X-MacProvider-Privacy-Assurance: code_bound_attested` and that label's own scope and lists, fixed in SPEC-049-R020.
 
 `scope`:
 
@@ -231,7 +260,9 @@ request_and_response_content_hidden_from_relays; provider_runtime_reads_plaintex
 3. `request_metadata_visible_to_relays`
 4. `confidential_compute_or_hardware_enclave_execution`
 5. `end_to_end_encryption_excluding_the_provider`
-6. `pool_scoped_requests`
+6. `pool_scoped_requests` (global responses only; it says this disclosure does not describe pool-scoped requests)
+
+A pool-scoped response lists items 1 to 5 and adds a `pool` object: `pool_id`, the pool scope, what the pool operator sees (`pool_policy_membership_and_buyer_grants`, `aggregate_payable_request_counts_and_provider_credits`), and what it does not see (`request_and_response_content_through_pool_surfaces`, `per_request_metadata_and_buyer_attribution_through_pool_surfaces`). The client prints them on stderr.
 
 `residual_risks`:
 

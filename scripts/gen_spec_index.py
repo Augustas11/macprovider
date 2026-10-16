@@ -175,7 +175,7 @@ def lint_root() -> int:
            and parse_spec(os.path.join(repo, rel)) is None]
     if bad:
         print("error: non-canonical files tracked in specs/ root — relocate them "
-              "(audits/ or docs/) or give them a canonical spec header:",
+              "(docs/) or give them a canonical spec header:",
               file=sys.stderr)
         for rel in bad:
             print(f"  {rel}", file=sys.stderr)

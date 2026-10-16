@@ -7,7 +7,7 @@ No buyer keys, no conversation-key values beyond lab prefixes, no live
 ## Header
 
 - **Date:** 2026-09-21
-- **Operator:** augstar
+- **Operator:** @Augustas11
 - **Hardware:** Mac Studio M3 Ultra, 256 GB, macOS 26.4.1
 - **Topology:** isolated `127.0.0.1:18084`, `--no-join`,
   `credential_store: protected_file`, `continuous_batching: canary`,

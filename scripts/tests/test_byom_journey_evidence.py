@@ -1840,6 +1840,41 @@ class BYOMJourneyConformanceMappingTests(unittest.TestCase):
                 digest = hashlib.sha256(signed_path.read_bytes()).hexdigest()
                 row = rows[requirement_id]
                 self.assertIn(journey_id, row["journeys"], requirement_id)
+                if (
+                    requirement_id == "SPEC-047-R003"
+                    and row["state"] == "pending"
+                    and row["gap"]["issue"] == "https://github.com/Augustas11/macprovider/issues/2014"
+                ):
+                    # #2014 adds a capability recheck to the mapped route-time
+                    # function. Keep the historical signed proof unchanged while
+                    # its changed fragment awaits evidence reconciliation.
+                    self.assertEqual("UNKNOWN", row["gap"]["verdict"])
+                    self.assertEqual("@Augustas11", row["gap"]["owner"])
+                    self.assertIn("recordRouteSnapshot", row["gap"]["rationale"])
+                    self.assertIn("pending", row["gap"]["rationale"])
+                    self.assertIn(
+                        "phase4-coordinator/internal/buyer/route_snapshot.go:func (b *billingRecorder) recordRouteSnapshot",
+                        row["implementation"],
+                    )
+                    signed = json.loads(signed_path.read_text(encoding="utf-8"))["signed"]
+                    self.assertEqual(
+                        [
+                            {
+                                "artifact": f"commit:{signed['repository']['commit']}",
+                                "source": None,
+                                "captured_at": signed["captured_at"][:10],
+                                "expires_at": signed["expires_at"][:10],
+                            },
+                            {
+                                "artifact": f"sha256:{digest}",
+                                "source": source,
+                                "captured_at": signed["captured_at"][:10],
+                                "expires_at": signed["expires_at"][:10],
+                            },
+                        ],
+                        row["evidence"],
+                    )
+                    continue
                 if row["state"] == "pending" and requirement_id != "SPEC-047-R005":
                     # #1880 changed the mapped discovery/offer code; the row
                     # waits for a fresh signed capture against the released CLI.

@@ -197,6 +197,12 @@ pearl_ssh() {
 
 studio_ssh() {
   require_studio_ssh
+  # STUDIO_SSH=local: the canary provider runs on the operator Mac itself, so
+  # run the command here instead of over ssh (no loopback sshd needed).
+  if [ "$STUDIO_SSH" = local ]; then
+    bash -c "$*"
+    return
+  fi
   ssh_opts_for "${STUDIO_SSH_KEY:-}" ""
   # shellcheck disable=SC2029
   ssh "${SSH_OPTS[@]}" "$STUDIO_SSH" "$@"

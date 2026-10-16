@@ -74,7 +74,7 @@ private final class KVCacheUpdatableAdapter: Updatable {
 /// reads stale KV state, producing wrong tokens). The initializer
 /// asserts this when `enabled == true`. The runtime wire-in must
 /// construct the step AFTER prefill, not before. See
-/// `audits/2026-06-30/perf-mlx-compile-bf16-audit.md` ADV-1.
+/// the 2026-06-30 MLX compile bf16 audit (ADV-1).
 final class CompiledDecodeStep {
     /// The original (uncompiled) per-token forward. Used (a) for
     /// correctness comparison in tests, and (b) as the no-op fallback
@@ -117,7 +117,7 @@ final class CompiledDecodeStep {
             // calls, risking silent recompile or stale-state reads.
             precondition(
                 cache.allSatisfy { !$0.innerState().isEmpty },
-                "CompiledDecodeStep requires a populated KV cache — construct AFTER prefill, not before. See `audits/2026-06-30/perf-mlx-compile-bf16-audit.md` ADV-1."
+                "CompiledDecodeStep requires a populated KV cache — construct AFTER prefill, not before. See the 2026-06-30 MLX compile bf16 audit (ADV-1)."
             )
             let updatables: [any Updatable] = cache.map { KVCacheUpdatableAdapter($0) }
             // Same KV-cache arrays are read from AND written to by

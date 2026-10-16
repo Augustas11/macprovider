@@ -178,7 +178,9 @@ configuration and active catalog pointer were published.
 
 Each numbered cycle issues one fresh authenticated buyer request for the
 physical provider's exact catalog model. Success requires a content token, a
-terminal stream marker, exact `X-Provider-Id` attribution, exact response
+terminal stream marker, exact attribution to the canary's coordinator session
+from the coordinator `request_log` row for the echoed request ID (buyers receive
+no provider identity header, #1991), exact response
 model, and a request ID not used by either other cycle. The same cycle then
 proves the physical Mac files/text vnode/listener and the matching
 `buyer_serving=true` admission row for the active release, policy, digest,

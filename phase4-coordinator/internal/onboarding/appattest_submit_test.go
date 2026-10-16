@@ -23,19 +23,23 @@ type fakeAppAttestRecorder struct {
 	mu         sync.Mutex
 	configured bool
 	byProvider map[string][]byte
+	publicKeys map[string][]byte
 	recordErr  error
 }
 
 func (f *fakeAppAttestRecorder) AppAttestRecorderConfigured() bool { return f.configured }
 
-func (f *fakeAppAttestRecorder) AppAttestVerificationRecorded(_ context.Context, providerID string) (bool, error) {
+func (f *fakeAppAttestRecorder) RecordedAppAttestKey(_ context.Context, providerID string) (RecordedAppAttestKey, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	_, ok := f.byProvider[providerID]
-	return ok, nil
+	keyID, ok := f.byProvider[providerID]
+	if !ok {
+		return RecordedAppAttestKey{}, false, nil
+	}
+	return RecordedAppAttestKey{KeyID: append([]byte(nil), keyID...), PublicKey: append([]byte(nil), f.publicKeys[providerID]...)}, true, nil
 }
 
-func (f *fakeAppAttestRecorder) RecordAppAttestVerification(_ context.Context, providerID string, keyID []byte) (AppAttestRecordOutcome, error) {
+func (f *fakeAppAttestRecorder) RecordAppAttestVerification(_ context.Context, providerID string, keyID, publicKey []byte) (AppAttestRecordOutcome, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.recordErr != nil {
@@ -50,6 +54,10 @@ func (f *fakeAppAttestRecorder) RecordAppAttestVerification(_ context.Context, p
 		}
 	}
 	f.byProvider[providerID] = append([]byte(nil), keyID...)
+	if f.publicKeys == nil {
+		f.publicKeys = map[string][]byte{}
+	}
+	f.publicKeys[providerID] = append([]byte(nil), publicKey...)
 	return AppAttestRecorded, nil
 }
 
@@ -180,12 +188,18 @@ func TestAppAttestSubmitRecordsTokenBoundProvider(t *testing.T) {
 
 	ch = h.challenge("tok-a")
 	att = h.attest(ch.ClientData, appattesttest.AttestOptions{})
-	wantStatus(t, h.post("/v1/providers/app-attest", "tok-a", submitBody(ch.Challenge, att)), http.StatusOK, `"status":"recorded"`)
+	keyIDB64 := base64.StdEncoding.EncodeToString(att.KeyID)
+	wantStatus(t, h.post("/v1/providers/app-attest", "tok-a", submitBody(ch.Challenge, att)), http.StatusOK, `"key_id":"`+keyIDB64+`"`)
 	if got := h.recorder.byProvider["mp-aaaa"]; !bytes.Equal(got, att.KeyID) || len(h.recorder.byProvider) != 1 {
 		t.Fatalf("recorded %v", h.recorder.byProvider)
 	}
-	// Once recorded, the challenge endpoint issues nothing.
-	if again := h.challenge("tok-a"); again.Status != "already_recorded" || again.Challenge != "" {
+	// The attested public key is recorded with its id (SPEC-033-R004).
+	if pub := h.recorder.publicKeys["mp-aaaa"]; len(pub) != 65 || sha256.Sum256(pub) != [32]byte(att.KeyID) {
+		t.Fatalf("recorded public key %x does not hash to the key id", pub)
+	}
+	// Once recorded, the challenge endpoint issues nothing and returns the
+	// recorded key id, so Malibu.app can recover it (SPEC-049-R035).
+	if again := h.challenge("tok-a"); again.Status != "already_recorded" || again.Challenge != "" || again.KeyID != keyIDB64 {
 		t.Fatalf("after record: %+v", again)
 	}
 
@@ -323,5 +337,29 @@ func TestAppAttestChallengeExpiryIsJudgedAfterTheBody(t *testing.T) {
 	wantStatus(t, h.post("/v1/providers/app-attest", "tok-a", submitBody(ch.Challenge, att)), http.StatusConflict, "challenge_invalid")
 	if len(h.recorder.byProvider) != 0 {
 		t.Fatal("recorded after expiry")
+	}
+}
+
+// TestAppAttestAlreadyRecordedReturnsTheFirstKeyID: a second attestation for a
+// recorded provider is not recorded, and the answer names the first key.
+func TestAppAttestAlreadyRecordedReturnsTheFirstKeyID(t *testing.T) {
+	h := newAppAttestHarness(t)
+	ch := h.challenge("tok-a")
+	first := h.attest(ch.ClientData, appattesttest.AttestOptions{})
+	wantStatus(t, h.post("/v1/providers/app-attest", "tok-a", submitBody(ch.Challenge, first)), http.StatusOK, `"status":"recorded"`)
+	// A challenge issued before the record, spent after it.
+	h.recorder.mu.Lock()
+	recorded := h.recorder.byProvider["mp-aaaa"]
+	delete(h.recorder.byProvider, "mp-aaaa")
+	h.recorder.mu.Unlock()
+	ch = h.challenge("tok-a")
+	h.recorder.mu.Lock()
+	h.recorder.byProvider["mp-aaaa"] = recorded
+	h.recorder.mu.Unlock()
+	second := h.attest(ch.ClientData, appattesttest.AttestOptions{})
+	wantStatus(t, h.post("/v1/providers/app-attest", "tok-a", submitBody(ch.Challenge, second)), http.StatusOK,
+		`"key_id":"`+base64.StdEncoding.EncodeToString(first.KeyID)+`"`)
+	if !bytes.Equal(h.recorder.byProvider["mp-aaaa"], first.KeyID) {
+		t.Fatal("the first key was replaced")
 	}
 }

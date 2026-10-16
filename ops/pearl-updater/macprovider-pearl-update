@@ -193,8 +193,8 @@ MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
 MAX_CANDIDATE_OUTPUT_BYTES = 64 * 1024
 MAX_BUYER_PROOF_STREAM_BYTES = 1024 * 1024
 MAX_BUYER_PROOF_STREAM_LINE_BYTES = 64 * 1024
-CANARY_AUTHORITY_VERSION = "malibu-domain-migration-r1"
-CANARY_AUTHORITY_COMMIT = "9c78c9880a615725eb1da5b42b1193f1372da7f7"
+CANARY_AUTHORITY_VERSION = "no-buyer-provider-id-r1"
+CANARY_AUTHORITY_COMMIT = "9bfc1bc422e474f7f7040a20bfc9d42ef896d02e"
 CANARY_UNIT_BUDGET_S = 180
 JOURNAL_SCHEMA_VERSION = 1
 CURRENT_RELEASE_SCHEMA_VERSION = 1
@@ -221,8 +221,8 @@ ROLLBACK_STEPS = (
     "canary_timer",
 )
 CANARY_AUTHORITY_FILES = {
-    Path("/opt/macprovider-canary-buyer/probe.mjs"): "2edaa6bf1b0030360f6992c2ca9f94545e7e077fbe84dc0e43af61af6c33c641",
-    Path("/opt/macprovider-canary-buyer/safety.mjs"): "75f814d5d9582528ce5218b4e7c0aead78d5b1cc04ef798427d9bf4e172bb800",
+    Path("/opt/macprovider-canary-buyer/probe.mjs"): "7fd56b8b5994d9f01a551d0c662f445d986f7c81eabd718e39fc5edea728c356",
+    Path("/opt/macprovider-canary-buyer/safety.mjs"): "60deebafa925139f957049590b03f7d5123d6c55262ccee13f2d2759af85b9bb",
     Path("/opt/macprovider-canary-buyer/run-canary.sh"): "6bb54915e805a240614ec414648dcb01fbff25a348e4fed517828ddcd9c6e340",
     Path("/opt/macprovider-canary-buyer/emergency-disable.sh"): "3506731e8b68ea40a03a94815f2138239b1950019bdd6637dc7e39a79acbbcbe",
     Path("/etc/systemd/system/canary-buyer.service"): "3c8298aa53a7ffa57d93738d8173894c8e7ae2736a1b594da23ee97b78d92e6f",
@@ -5124,7 +5124,7 @@ class Updater:
         return self.install_root / STATS_INVENTORY_PARITY_MARKER_NAME
 
     def release_stats_inventory_parity_hold(self) -> None:
-        # beta/DECISION_CRITERIA.md Entry 187 holds the pre-migration-019
+        # docs/decision-log.md Entry 187 holds the pre-migration-019
         # inventory binary until a signed matching-binary promotion; this
         # install is that promotion. The timer stays held here, so the full
         # deploy's parity-absent path migrates, runs the new binary once, and
@@ -6326,10 +6326,7 @@ class Updater:
                 with opener.open(request, timeout=self.config.request_timeout_s) as response:
                     if response.status != 200 or response.geturl() != url:
                         raise UpdateError("gateway buyer proof request did not return an exact HTTP 200")
-                    provider_header = response.headers.get("X-Provider-Id", "")
                     response_request_id = response.headers.get("X-Request-Id", "")
-                    if provider_header != provider_id:
-                        raise UpdateError("gateway buyer proof response X-Provider-Id mismatches canary provider")
                     if not response_request_id:
                         raise UpdateError("gateway buyer proof response omitted X-Request-Id")
                     if response_request_id != request_id:
@@ -6392,6 +6389,45 @@ class Updater:
             "model": model_id,
         }
 
+    def verify_buyer_proof_served_by_canary(
+        self,
+        response_request_id: str,
+        assigned_id: str,
+    ) -> None:
+        # Buyers never receive provider identity (SPEC-006 §5.4), so the
+        # operator proves who served the buyer proof from the coordinator's own
+        # request_log, keyed by the gateway-echoed request id.
+        try:
+            request_uuid = str(uuid.UUID(response_request_id))
+        except ValueError as exc:
+            raise UpdateError("gateway buyer proof response request id is not a UUID") from exc
+        if not self.databases or len(self.databases) < 2:
+            raise UpdateError("effective coordinator database path was not captured")
+        coordinator_db = self.databases[1]
+        deadline = time.monotonic() + 30
+        while True:
+            result = self.run_command(
+                [
+                    self.sqlite_binary(),
+                    "-bail",
+                    f"file:{coordinator_db}?mode=ro",
+                    "SELECT provider_assigned_id FROM request_log "
+                    f"WHERE external_request_id = '{request_uuid}' ORDER BY id DESC LIMIT 1;",
+                ],
+                check=False,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                raise UpdateError("could not read the coordinator request_log for the buyer proof")
+            served_by = result.stdout.strip()
+            if served_by:
+                if served_by != assigned_id:
+                    raise UpdateError("gateway buyer proof was not served by the canary provider session")
+                return
+            if time.monotonic() >= deadline:
+                raise UpdateError("coordinator request_log has no row for the gateway buyer proof")
+            self.sleep(1)
+
     def _prove_release_buyer_journey(
         self,
         release: Release,
@@ -6409,6 +6445,10 @@ class Updater:
                 cycle=cycle,
                 provider_id=provider_id,
                 model_id=model_id,
+            )
+            self.verify_buyer_proof_served_by_canary(
+                buyer_proof["response_request_id"],
+                provider_evidence.assigned_id,
             )
             if self.verify_exact_provider_canary(release) != provider_evidence:
                 raise UpdateError("catalog canary identity changed during the buyer journey proof")

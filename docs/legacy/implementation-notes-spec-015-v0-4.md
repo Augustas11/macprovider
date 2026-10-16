@@ -6,7 +6,7 @@ Date: 2026-06-30
 
 Worktree:
 
-- Path: `/Users/augstar/macprovider-impl-spec-015-v0-4`
+- Path: `~/macprovider-impl-spec-015-v0-4`
 - Branch: `impl/spec-015-v0-4-settlement-receipts`
 - Base: SPEC branch commit `d70eb16` (`Lock settlement receipt trust floor`)
 - Dirty state before product edits: clean (`git status -sb` showed only the

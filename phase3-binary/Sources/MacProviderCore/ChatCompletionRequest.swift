@@ -38,6 +38,9 @@ public struct ChatCompletionRequest: Sendable {
     /// `conversationKey` as a cache-only SPEC-006-R012 auto-prefix key, not a
     /// sticky one. False whenever the key is absent.
     public let conversationCacheOnly: Bool
+    /// SPEC-037-R014 fleet eligibility minted only from an authenticated
+    /// coordinator relay envelope. Raw chat-completions JSON cannot populate it.
+    public let fleetCacheGrant: FleetConversationCacheGrant?
     public let requestID: String?
     public let topLevelKeys: Set<String>
     public let streamOptionKeys: Set<String>
@@ -64,6 +67,16 @@ public struct ChatCompletionRequest: Sendable {
     public static func parse(data: Data) throws -> ChatCompletionRequest {
         guard data.count <= RequestValidation.rawBodyByteCap else {
             throw APIError(status: 413, message: "Request body exceeds 4 MiB", code: "request_body_too_large")
+        }
+
+        // Explicit selection must not inherit Foundation's last-key-wins
+        // interpretation of malformed tool schemas or selection objects.
+        // Apply this to every body: duplicate content/type/url keys can hide
+        // media before its capability check or ambiguously bind a receipt.
+        do {
+            _ = try StrictJSONParser.parse(String(decoding: data, as: UTF8.self), maxDepth: 128)
+        } catch {
+            throw APIError(status: 400, message: "Request requires bounded JSON without duplicate keys", code: "invalid_json")
         }
 
         let json: Any
@@ -171,6 +184,7 @@ public struct ChatCompletionRequest: Sendable {
             promptSource: promptSource,
             conversationKey: nil,
             conversationCacheOnly: false,
+            fleetCacheGrant: nil,
             requestID: nil,
             topLevelKeys: Set(dict.keys),
             streamOptionKeys: streamOptionKeys,
@@ -199,6 +213,38 @@ public struct ChatCompletionRequest: Sendable {
             promptSource: promptSource,
             conversationKey: validKey,
             conversationCacheOnly: validKey != nil && cacheOnly,
+            fleetCacheGrant: nil,
+            requestID: requestID,
+            topLevelKeys: topLevelKeys,
+            streamOptionKeys: streamOptionKeys,
+            containsNonTextMessageContentPart: containsNonTextMessageContentPart,
+            ingestProvenance: ingestProvenance
+        )
+    }
+
+    /// Installs trusted fleet eligibility after the relay transport has
+    /// authenticated and authorized the coordinator grant. A revoked token is
+    /// refused without retaining a conversation key, preventing hot-only
+    /// downgrade of a rejected fleet request.
+    public func withFleetCacheGrant(_ grant: FleetConversationCacheGrant?) -> ChatCompletionRequest {
+        let accepted = grant?.isValid == true ? grant : nil
+        return ChatCompletionRequest(
+            model: model,
+            messages: messages,
+            maxTokens: maxTokens,
+            temperature: temperature,
+            topP: topP,
+            stream: stream,
+            parallelToolCalls: parallelToolCalls,
+            stop: stop,
+            presencePenalty: presencePenalty,
+            frequencyPenalty: frequencyPenalty,
+            seed: seed,
+            responseFormat: responseFormat,
+            promptSource: promptSource,
+            conversationKey: accepted?.conversationKey,
+            conversationCacheOnly: false,
+            fleetCacheGrant: accepted,
             requestID: requestID,
             topLevelKeys: topLevelKeys,
             streamOptionKeys: streamOptionKeys,
@@ -224,6 +270,7 @@ public struct ChatCompletionRequest: Sendable {
             promptSource: promptSource,
             conversationKey: conversationKey,
             conversationCacheOnly: conversationCacheOnly,
+            fleetCacheGrant: fleetCacheGrant,
             requestID: Self.validRequestID(id),
             topLevelKeys: topLevelKeys,
             streamOptionKeys: streamOptionKeys,
@@ -252,6 +299,7 @@ public struct ChatCompletionRequest: Sendable {
             promptSource: promptSource,
             conversationKey: conversationKey,
             conversationCacheOnly: conversationCacheOnly,
+            fleetCacheGrant: fleetCacheGrant,
             requestID: requestID,
             topLevelKeys: topLevelKeys,
             streamOptionKeys: streamOptionKeys,
@@ -279,6 +327,7 @@ public struct ChatCompletionRequest: Sendable {
             promptSource: promptSource,
             conversationKey: conversationKey,
             conversationCacheOnly: conversationCacheOnly,
+            fleetCacheGrant: fleetCacheGrant,
             requestID: requestID,
             topLevelKeys: topLevelKeys,
             streamOptionKeys: streamOptionKeys,
@@ -358,6 +407,7 @@ public struct ChatCompletionRequest: Sendable {
         promptSource: ChatCompletionPromptSource,
         conversationKey: String?,
         conversationCacheOnly: Bool = false,
+        fleetCacheGrant: FleetConversationCacheGrant?,
         requestID: String?,
         topLevelKeys: Set<String>,
         streamOptionKeys: Set<String>,
@@ -379,6 +429,7 @@ public struct ChatCompletionRequest: Sendable {
         self.promptSource = promptSource
         self.conversationKey = conversationKey
         self.conversationCacheOnly = conversationKey != nil && conversationCacheOnly
+        self.fleetCacheGrant = fleetCacheGrant
         self.requestID = requestID
         self.topLevelKeys = topLevelKeys
         self.streamOptionKeys = streamOptionKeys
@@ -555,7 +606,12 @@ public struct ChatMessage: Sendable {
         switch role {
         case .system, .user:
             let content = try textProjection(from: dict["content"], messageIndex: index, allowNull: false)
-            guard let content, !content.isEmpty else {
+            // The text projection is not the native execution input for media.
+            // Preserve image-only user turns for the qualified vision path (and
+            // loopback forwarding); native admission must validate raw parts.
+            let hasUserImage = role == .user && (dict["content"] as? [[String: Any]])?
+                .contains(where: { $0["type"] as? String == "image_url" }) == true
+            guard let content, !content.isEmpty || hasUserImage else {
                 throw APIError(status: 400, message: "messages[\(index)].content must be non-empty", code: "invalid_request")
             }
             return ChatMessage(role: role, content: content, toolCallID: nil, toolCalls: nil)
@@ -818,15 +874,9 @@ private func parseResponseFormat(_ raw: Any?, rawSchemaByteCount: Int?) throws -
             throw APIError(status: 400, message: "response_format.json_schema.name must match ^[A-Za-z0-9_-]{1,64}$", code: "json_schema_invalid_name", param: "response_format.json_schema.name")
         }
         let description = rawSpec["description"] as? String
-        let strict = try optionalBool(rawSpec["strict"], key: "response_format.json_schema.strict") ?? true
-        guard strict else {
-            throw APIError(
-                status: 400,
-                message: "Non-strict structured output is unsupported in SPEC-019 v0.1.0",
-                code: "json_schema_non_strict_unsupported",
-                param: "response_format.json_schema.strict"
-            )
-        }
+        // SPEC-019 v0.3.0 §1a: explicit true is strict, explicit false is
+        // non-strict, absent is strict only when the schema fits the subset.
+        let explicitStrict = try optionalBool(rawSpec["strict"], key: "response_format.json_schema.strict")
         guard let rawSchema = rawSpec["schema"], !(rawSchema is NSNull) else {
             throw APIError(status: 400, message: "response_format.json_schema.schema is required", code: "json_schema_missing_schema", param: "response_format.json_schema.schema")
         }
@@ -837,7 +887,18 @@ private func parseResponseFormat(_ raw: Any?, rawSchemaByteCount: Int?) throws -
         guard try schema.deterministicJSONString().utf8.count <= JSONSchemaValidator.maxSchemaBytes else {
             throw APIError(status: 413, message: "response_format.json_schema.schema exceeds 16384 bytes", code: "json_schema_too_large", param: "response_format.json_schema.schema")
         }
-        try JSONSchemaValidator.validateSchemaShape(schema: schema)
+        var strict = false
+        if explicitStrict != false {
+            do {
+                try JSONSchemaValidator.validateSchemaShape(schema: schema)
+                strict = true
+            } catch where explicitStrict == nil {
+                strict = false
+            }
+        }
+        if !strict {
+            try JSONSchemaValidator.validateNonStrictSchemaShape(schema: schema)
+        }
         return .jsonSchema(JSONSchemaSpec(name: name, description: description, strict: strict, schema: schema))
     default:
         throw APIError(status: 400, message: "response_format.type must be text, json_object, or json_schema", code: "invalid_request")
@@ -1193,21 +1254,36 @@ private func textProjection(from raw: Any?, messageIndex: Int, allowNull: Bool) 
         }
         switch type {
         case "text":
+            guard Set(part.keys) == ["type", "text"] else {
+                throw APIError(status: 400, message: "Text parts may contain only type and text", code: "unsupported_content_shape")
+            }
             guard let text = part["text"] as? String else {
                 throw APIError(status: 400, message: "messages[\(messageIndex)].content[\(partIndex)].text is invalid", code: "invalid_request")
             }
             textParts.append(text)
         case "image_url":
+            guard Set(part.keys) == ["type", "image_url"] else {
+                throw APIError(status: 400, message: "Image parts may contain only type and image_url", code: "unsupported_content_shape")
+            }
             guard let imageURL = part["image_url"] as? [String: Any],
                   imageURL["url"] is String,
                   imageURL["detail"] == nil || imageURL["detail"] is NSNull || imageURL["detail"] is String else {
                 throw APIError(status: 400, message: "messages[\(messageIndex)].content[\(partIndex)].image_url is invalid", code: "invalid_request")
             }
+            guard Set(imageURL.keys).isSubset(of: ["url", "detail"]) else {
+                throw APIError(status: 400, message: "image_url may contain only url and detail", code: "unsupported_content_shape")
+            }
         case "input_audio":
+            guard Set(part.keys) == ["type", "input_audio"] else {
+                throw APIError(status: 400, message: "Audio parts may contain only type and input_audio", code: "unsupported_content_shape")
+            }
             guard let inputAudio = part["input_audio"] as? [String: Any],
                   inputAudio["data"] is String,
                   inputAudio["format"] is String else {
                 throw APIError(status: 400, message: "messages[\(messageIndex)].content[\(partIndex)].input_audio is invalid", code: "invalid_request")
+            }
+            guard Set(inputAudio.keys) == ["data", "format"] else {
+                throw APIError(status: 400, message: "input_audio may contain only data and format", code: "unsupported_content_shape")
             }
         default:
             throw APIError(status: 400, message: "messages[\(messageIndex)].content[\(partIndex)].type is invalid", code: "invalid_request")

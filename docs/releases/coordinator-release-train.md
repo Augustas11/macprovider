@@ -316,6 +316,59 @@ renewal has since been retired (#1938); a restamp is on demand
 - After the apply: `/v1/providers/app-attest/challenge` answers 401 without a provider token; three `hash_required_provider_excluded` lines at reconnect (pre-existing, none after 08:33Z).
 - Pending live checks: the first nightly retention run on the drain code (03:00 UTC), then the one-time `retention-vacuum-conversion` task once a run reports `backlog_drained=true`; >1 enrolled provider serving private traffic (#1967).
 
+## Tool selection — merged, awaiting runtime rollout (2026-10-15)
+
+| Payload | State |
+|---|---|
+| [PR #2020](https://github.com/Augustas11/macprovider/pull/2020), related issue #2014 | Merged as `33b6a3238c31b934ba2cef10e62814091092efbd`; coordinator and gateway changes await a signed runtime release |
+| Live runtime observed by `scripts/ops/pearl-runtime.sh status` on 2026-10-15 | Coordinator and gateway `v1.8.245`; source differs from this merged payload |
+| Release identity | Unassigned; refresh both trains and remote tags before selecting the next unused shared version |
+| Acceptance | Required implementation CI and three audit lanes passed; hardware and signed-candidate buyer acceptance deferred at operator request |
+
+The coordinator no longer rewrites required/named selections to `auto`. It
+validates requests and preserves supported selections through dispatch, using
+current loaded-model/runtime capability records to filter providers during
+routing, queue resume, reconnect, failover and final dispatch. Missing/legacy
+capabilities support existing `auto` behavior only. Incompatible explicit modes
+are rejected before generation where possible, with provider-side validation
+retained as a second boundary.
+
+Returned provider data is checked before success: declared/selected function,
+strict arguments and supported schema, complete envelopes, bounded output,
+serial/parallel cardinality and `none`'s zero-call rule. Guaranteed streaming
+output is withheld until validation; raw fragments are validated without the
+ordinary auto-mode overlap repair. Unsupported requests fail with HTTP 400;
+invalid generated output fails with HTTP 502 or a terminal stream error, never
+a successful prose fallback. Existing cancellation, resource accounting and
+settlement handling remain in place.
+
+Gateway Chat Completions, Responses and enabled Messages preserve the same
+contract in streaming and non-streaming translations, including named tools,
+serial/parallel policy and terminal failure handling. Public capability
+metadata reflects eligible provider enforcement claims rather than parser
+acceptance. Exact native `mlx-community/Qwen3.6-35B-A3B-4bit` / `mlx_cache`
+supports required/named; other native models support none/auto; loopback and
+legacy providers retain auto only. Relay-blind/encrypted requests are excluded.
+See the [full contract](../tool-selection.md) and
+[matching CLI release entry](cli-release-train.md#tool-selection--merged-awaiting-a-later-candidate-2026-10-15).
+
+Rollout uses `scripts/ops/pearl-runtime.sh status`, then `next`, then one
+documented `next --run` step at a time from reviewed `origin/main`. Before a
+Pearl mutation, follow the [rollout runbook](../runbooks/pearl-coordinator-rollout.md)
+and state its expected downtime. The runtime and a signed provider candidate
+containing this merge must both be present before live acceptance can establish
+the guarantee; existing CLI candidate 1.8.242 at `27ae5dc84` predates it.
+
+Deferred acceptance must prove required/named/none/auto across the buyer
+endpoints, compatible-provider selection and explicit rejection when no
+compatible provider exists, invalid-output streaming/non-streaming failures,
+and cancellation/disconnect settlement behavior. Confirm the live capability
+projection against the serving model/runtime. Retain existing signed evidence;
+SPEC-010-R003 and SPEC-047-R003's changed mapped paths remain pending their
+applicable acceptance. No runtime release, Pearl apply, catalog activation or
+provider recommendation change was performed for this entry. Issue #2014 stays
+open until hardware and authorized signed-candidate live acceptance pass.
+
 ## Next coordinator release — tag unassigned, net changes vs v1.8.241
 
 Merged, waiting for this train:

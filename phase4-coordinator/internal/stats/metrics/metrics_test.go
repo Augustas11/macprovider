@@ -494,3 +494,41 @@ func TestPrivacyRouteRejectionMetrics(t *testing.T) {
 		}
 	}
 }
+
+// SPEC-049-R033: code-bound rejection labels come only from the closed set.
+func TestPrivacyCodeBoundRejectionMetrics(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := New(reg)
+	m.IncPrivacyCodeBoundRejection("counter_not_increasing")
+	m.IncPrivacyCodeBoundRejection("counter_not_increasing")
+	m.IncPrivacyCodeBoundRejection("mp-provider-1")
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertMetricValue(t, families, "relayblind_privacy_code_bound_rejections_total", map[string]string{"reason": "counter_not_increasing"}, 2)
+	assertMetricValue(t, families, "relayblind_privacy_code_bound_rejections_total", map[string]string{"reason": "other"}, 1)
+	if metricExists(families, "relayblind_privacy_code_bound_rejections_total", map[string]string{"reason": "mp-provider-1"}) {
+		t.Fatal("unvetted label became a value")
+	}
+}
+
+func TestRouteSelectionMetrics(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := New(reg)
+	m.IncRouteSelection("interactive", "measured")
+	m.IncRouteSelection("interactive", "measured")
+	m.IncRouteSelection("long_input", "explore")
+	m.IncRouteSelection("provider-123", "fallback")
+	m.IncRouteSelection("throughput", "attacker")
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertMetricValue(t, families, "coordinator_route_selections_total", map[string]string{"phase": "interactive", "basis": "measured"}, 2)
+	assertMetricValue(t, families, "coordinator_route_selections_total", map[string]string{"phase": "long_input", "basis": "explore"}, 1)
+	assertMetricValue(t, families, "coordinator_route_selections_total", map[string]string{"phase": "other", "basis": "fallback"}, 1)
+	assertMetricValue(t, families, "coordinator_route_selections_total", map[string]string{"phase": "throughput", "basis": "other"}, 1)
+	var nilMetrics *Metrics
+	nilMetrics.IncRouteSelection("interactive", "measured")
+}

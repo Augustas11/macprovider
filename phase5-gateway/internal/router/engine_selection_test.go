@@ -16,6 +16,10 @@ type engineCoordCapture struct {
 	sawEngine    bool
 	sawSelect    bool
 	poolHeader   string
+	// SPEC-006-R019: the internal effective mode and whether the buyer's
+	// own privacy header leaked upstream.
+	privacyMode         string
+	sawBuyerPrivacyMode bool
 }
 
 // newEngineHarness is newPoolHarness with the engine headers captured and a
@@ -35,6 +39,8 @@ func newEngineHarness(t *testing.T, respEngine string) (http.Handler, *engineCoo
 			}
 			cap.sawSelect = r.Header.Get(engineSelectHeader) != ""
 			cap.poolHeader = r.Header.Get(poolEmitHeader)
+			cap.privacyMode = r.Header.Get(internalPrivacyModeEmitHeader)
+			cap.sawBuyerPrivacyMode = r.Header.Get(privacyModeHeader) != ""
 			h := http.Header{"Content-Type": []string{"application/json"}}
 			if respEngine != "" {
 				h.Set(engineResponseHeader, respEngine)

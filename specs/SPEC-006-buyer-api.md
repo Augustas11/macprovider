@@ -1,7 +1,90 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.50 (2026-10-11, pinned slot-queue lane)
-**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+**Version:** 0.9.60 (2026-10-16, authenticated fleet cache purge)
+**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.17, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.59 (2026-10-15, Related: #2016):**
+Registers `SPEC-006-R022` (§5.4.5): bounded inline images for native Qwen2-VL
+Chat Completions, ordered content preservation, exact qualified-capacity
+routing, and media accounting. Responses, Messages, encrypted requests and
+unsupported combinations retain explicit rejection. Implementation support
+is not hardware qualification or live buyer acceptance.
+
+**Change log v0.9.58 (2026-10-15, capability-bound tool selection, Related: #2014):**
+- §5.4 tool selection (`SPEC-006-R021`) preserves `none`, `required` and named
+  requests through translation and dispatch, filters by loaded model/runtime
+  capability, and fails unsupported requests explicitly. It no longer rewrites
+  `required` or a named selection to `auto`.
+- §5.6 status exposes per-model `tool_choice_modes` from eligible provider
+  capability claims; §5.3.2's OpenRouter string enum adds `none`/`required`
+  only when backed by that compatible capability. A named function remains an
+  object selection, not an enum string. Legacy providers preserve only the
+  pre-existing `auto` behavior. These fields do not establish hardware
+  qualification, deployment or released-provider acceptance.
+
+**Change log v0.9.57 (2026-10-15, issue #1793 — request metadata retention):**
+- §5.10 `/privacy` now names the shipped 14-day default of the coordinator
+  `storage.request_log_retention_days` (SPEC-005 §2.1b) and states that an
+  account's successful requests are kept as per-day, per-model totals for
+  wholesale partner statements, with no request ids, prompts, or outputs.
+- §5.5.1 receipt retrieval keeps following the `request_log` lifetime, now 14
+  days by default; an older request id answers 404, as an unknown one does.
+
+**Change log v0.9.56 (2026-10-15, issue #1985 — pool-scoped privacy class):**
+- §5.4.4 (`SPEC-006-R019`): a SPEC-049 privacy-class envelope with an authorized Trusted Pool selection satisfies both `relay_blind_required` and `owned_provider` (SPEC-049-R032). `relay_blind_required` with a pool selection stays refused for a plain SPEC-041 envelope. The effective mode is `relay_blind_required`, and a pool-scoped privacy-class response carries a fourth fixed disclosure string. The other three strings are unchanged.
+
+**Change log v0.9.55 (2026-10-15, public-repo cleanup):** Editorial, no normative change: generic wording for the third-party marketplace seller integration.
+
+**Change log v0.9.54 (2026-10-14, issue #1570 — OpenRouter readiness):**
+- Prompt-token estimates (§7.2.1). `ceil(bytes/4)` under-counted token-dense
+  prompts (digits, code, JSON, emoji), so honest provider counts above the
+  reservation were clamped and the buyer was charged less than the provider's
+  count. It over-counted Cyrillic, CJK and indented code, so the coordinator
+  context check rejected prompts a provider could serve.
+- The prompt reservation (gateway) and the provider `prompt_tokens` bound
+  (coordinator) are now the larger of `ceil(bytes/4)` and a class-weighted
+  upper estimate, plus 64. No hold shrinks. Prompt holds grow to about 1.8x
+  the tokenizer count on prose and code and about 4.5-5x on Chinese and
+  Russian prose, in exchange for a bound that covers every calibration corpus.
+- Coordinator routing and provider preflight use a class-weighted central
+  estimate that stays at or below the tokenizer count on realistic text.
+- The billed fallback estimates (`ceil(bytes/4)` with no provider usage) are
+  unchanged.
+- OpenRouter document (§5.3.2): `max_context_length` is the largest context a
+  serving provider grants, including one that is full. Unavailable, draining
+  and otherwise ineligible providers no longer raise it.
+- Streaming terminal errors (§17.7.1 named mappings). A coordinator
+  post-commit terminal frame with code `provider_error` reaches the buyer as
+  `upstream_provider_error` (`api_error`), and `provider_disconnected` keeps
+  its code (`server_error`), with gateway-owned messages, instead of being
+  rewritten to `stream_malformed`. Settlement is unchanged
+  (`stream_malformed`). Unknown codes stay `stream_malformed`.
+- Streaming deadlines. The gateway decode-idle deadline (`streaming_idle_ms`)
+  MUST be armed by the first content-bearing frame, not when the coordinator
+  commits headers. Before that frame the provider is in admission and prefill,
+  which the first-token deadline (`first_token_seconds`) and the stream ceiling
+  bound. Arming decode-idle at commit made a long prefill expire as
+  `decode_idle`, so a prefill-sized `streaming_idle_ms` was needed and
+  decode-idle protection was lost. Operators size `first_token_seconds` for the
+  longest prompt served and keep `streaming_idle_ms` at its bounded default.
+
+**Change log v0.9.54 (2026-10-14, public-repo cleanup):** Editorial, no normative change: generic wording for the third-party marketplace seller integration; drops the removed phase5-onboarding directory from a naming note.
+
+**Change log v0.9.53 (2026-10-13, issue #1062 — SPEC-050 stake allowance):**
+- §5.12 adds the `/v1/stake` account surface, a service-token proxy to the
+  coordinator owned by SPEC-050-R011.
+- §7.4 runs SPEC-050 allowance admission before quota availability for API-key
+  plaintext and relay-blind requests. An allowance-funded request does not
+  count against the daily token quota (SPEC-050-R007).
+- §7.7 adds `429 allowance_exhausted` and `503 allowance_unavailable`
+  (SPEC-050-R007, SPEC-050-R014). Wallet-session and demo traffic are unchanged.
+
+**Change log v0.9.52 (2026-10-13, issue #1991 — buyers never receive provider identity):**
+- §5.4: no buyer-facing response on any path (success, stream, error, relay-blind, id-less retry replay) carries `X-Provider-Id`, `X-Provider-Assigned-Id`, `X-Provider-Fingerprint`, `X-Route-Provider`, `X-MacProvider-Provider`, `X-MacProvider-Route`, `X-MacProvider-Session`, or any equivalent provider or assigned-session identifier in a response header. The gateway deletes them at the buyer boundary, which supersedes the earlier gateway-emitted `X-Provider-Id` attribution header. Operators attribute a request to a provider from the coordinator `request_log` (keyed by the echoed `X-Request-ID`) and logs, never from the buyer response. No wire field is added.
+
+**Change log v0.9.51 (2026-10-13, issue #1355 — buyer privacy mode and route trace):**
+- §5.4.4: registers `SPEC-006-R019`. `X-MacProvider-Privacy-Mode` takes `pool` (default), `relay_blind_required` (the SPEC-041 envelope, fail closed: plaintext or a pool selection is 400 `privacy_mode_unsatisfied`) or `owned_provider` (an authorized Trusted Pool selection is required). Invalid values are 400 `invalid_privacy_mode`. Responses carry the effective mode and a fixed disclosure string that never overclaims. Pool-scoped privacy stays undefined (#1985) and fails closed.
+- §5.4.4: registers `SPEC-006-R020`. The gateway forwards `X-MacProvider-Route-Trace` (SPEC-002-R007) only as an exact match of its closed grammar.
 
 **Change log v0.9.50 (2026-10-11, issue #1911 — pinned slot-queue lane):**
 - §7.8: the per-provider slot queue is FIFO within each of two lanes. Plaintext requests use one lane with the existing cap. Relay-blind and privacy-class chats waiting on their reserved session use a pinned lane governed by SPEC-049-R029, capped at half the plaintext cap. While both lanes wait, queue grants alternate. Plaintext deadlines, admission, direct dispatch and the capacity shed are unchanged.
@@ -56,7 +139,7 @@ not enforce it, so the money-path gate is not complete until all three are live.
 
 **Change log v0.9.40 (2026-09-30, OpenRouter Qwen3.6-only listing):**
 - `GET /v1/openrouter/models` publishes the operator-chosen OpenRouter listing set, not every recommendable catalog row. The set is exactly `mlx-community/Qwen3.6-35B-A3B-4bit` (slug `qwen/qwen3.6-35b-a3b`), paid only, with no free alias. This supersedes the v0.9.29 "every live recommendable catalog model" rule. Reason: the operator lists only Qwen3.6-35B-A3B on OpenRouter. Llama 3.2 3B has low demand at its price, and a listed row that cannot serve tool traffic hurts OpenRouter tool routing. Every catalog row stays routable on `POST /v1/chat/completions`.
-- Tool descriptors: a text output modality MUST declare `tools` (`boolean`) and `tool_choice` (`enum` `["auto"]`) only for a row whose modelID matches a SPEC-018 §3.1 family that also has a §3.8 multi-turn profile (`qwen2.5`, `qwen3`, `llama-3.3`). Other rows MUST omit both. `tool_choice` omits `"required"` because the coordinator rewrites it to `"auto"`, and omits `"none"` because providers reject it.
+- Historical tool descriptors were `tools` (`boolean`) and `tool_choice` (`enum` `["auto"]`) for SPEC-018 §3.8 families only. v0.9.58 supersedes that auto-only description: §5.3.2 keeps the family predicate and derives additional string modes from compatible live provider claims; §5.4 forbids weakening `required` or named selections to `auto`.
 - Structured-output descriptors: a text output modality MUST declare `structured_outputs` (`boolean`) and `response_format` only for a row whose modelID matches the SPEC-019 §4 family-rendering predicate (today the same `qwen2.5` / `qwen3` / `llama-3.3` substrings; the two predicates are kept separate because SPEC-018 and SPEC-019 govern them independently). Other rows MUST omit both. `response_format` is an object on the wire, so it uses the OpenRouter schema-2.4 `object` descriptor: `{"type":"object","properties":{"type":{"type":"enum","values":["text","json_object","json_schema"]},"json_schema":{"type":"unknown"}}}`. The OpenRouter provider guide defines `object` as "Nested object with per-key descriptors" and `unknown` as accepted but not machine-described. The guide's own example declares `tools` and `structured_outputs` as `boolean`.
 - `response_format.json_schema` stays SPEC-019 strict-only. This change does not relax that.
 - The dual paid/free projection rule stays for a listing that declares a free alias. The current set declares none. `SPEC-006-R010` stays pending.
@@ -359,7 +442,7 @@ not enforce it, so the money-path gate is not complete until all three are live.
 
 ## Preliminary conformance unit IDs
 
-SPEC-006 v0.9.43 registers `SPEC-006-R001`..`SPEC-006-R018` in
+SPEC-006 v0.9.59 registers `SPEC-006-R001`..`SPEC-006-R022` in
 `specs/CONFORMANCE.json`. R001–R003 remain the paid-path chat, error, and
 quota units. R004–R009 group additional existing obligation areas without
 changing them:
@@ -407,8 +490,18 @@ changing them:
   `/v1/models` view, creator-signed price disclosure, and response disclosure
   headers for SPEC-042-R015 entries (§5.4.3, v0.9.43; SPEC-005-R015,
   SPEC-043-R014).
+- `SPEC-006-R019` — Buyer privacy mode: `X-MacProvider-Privacy-Mode` closed
+  vocabulary mapped onto existing relay-blind and Trusted Pool paths, fail-closed
+  codes, and the effective-mode disclosure headers (§5.4.4, v0.9.51).
+- `SPEC-006-R020` — Route trace forwarding: the gateway forwards only an exact
+  SPEC-002-R007 `X-MacProvider-Route-Trace` value (§5.4.4, v0.9.51).
+- `SPEC-006-R021` — Selection-preserving tool dispatch and model/runtime
+  capability projection (§5.4, §5.3.2, §5.6; SPEC-018-R006).
 
-`requirement_id_migration` is `complete`. R004–R018 are not promoted from
+- `SPEC-006-R022` — Native inline-image Chat Completions, exact qualified
+  capacity, immutable media binding and accounting (§5.4.5).
+
+`requirement_id_migration` is `complete`. R004–R022 are not promoted from
 this close. Signed journey-result evidence is still required before any of
 those rows can become conformant.
 
@@ -519,6 +612,18 @@ SPEC-006 v1 explicitly does not specify:
 
 These items belong to v0.2, SPEC-005, SPEC-007, or later specs.
 
+**v0.9.60 fleet persistence amendment (SPEC-037-R014).** The historical
+non-buyer-purgeable limitation below applies to legacy hot-cache providers.
+A provider advertising `fleet_cache_protocol: 1` may receive durable reuse
+eligibility only through authenticated coordinator grants. `DELETE /v1/sticky`
+must durably revoke every registered account scope, including cache-only scopes,
+and report pending until the serving providers acknowledge local hot/disk purge.
+Disconnected providers reconcile before further eligible grants. Fresh inference
+may continue while cache eligibility is denied. The published disclosure in §1.6
+must distinguish this protocol from legacy independent-TTL hot caches. Privacy
+requests receive neither grants nor reusable cache state. SPEC-037 §10 owns
+revocation, retention and format details; no billing computation changes.
+
 **Provider-side caching remains guarded.** Prompt-result cache, arbitrary provider-side request state retention, or any cache not explicitly covered by this section remains OUT OF SCOPE. SPEC-006 permits SPEC-004 coordinator-internal sticky affinity, using a gateway-derived `routing_internal.conversation_key` in the reserved `conv:` namespace. **(Narrowed, v0.9.8 — SPEC-024 prefix-cache carve-out:)** provider-*local* prefix caching **keyed on that derived `conv:` value** is now additionally permitted (SPEC-024 v0.2 §11–§12; SPEC-004 v0.3.2 FR-SR-2 / SPEC-008 v0.4.1 §2.2). The guard below still applies to it: the derived key remains account-scoped and unforgeable, the provider never learns the raw tag/`account_id`, and the provider cache carries no account dimension of its own (SPEC-024 v0.2 §11). Sticky affinity is disabled by default (`routing.sticky_enabled: false`) and MUST NOT change buyer-visible behavior unless an operator explicitly enables it.
 
 The § 1.3 guard is satisfied for SPEC-004 v0.2 Pillar A only if all of the following remain true:
@@ -600,7 +705,7 @@ SPEC-006 is a Tier 1 cooperative inference product. The following properties hol
 9. **Buyer receipt and status surfaces expose pending, verified, quarantined, zero_settled, and relay_blind_settled labels without raw prompts or raw outputs.**
 10. **The product makes NO private-inference, hardware-attestation, runtime-binary-attestation, provider-private-prompt, untrusted-provider, malicious-output-prevention, or provider-falsified-model-measurement detection claims.** Any buyer-facing language, including front-door copy, docs, error messages, API responses, marketing material, and this spec, MUST be consistent with these limitations.
 11. **When sticky affinity is enabled for an account, related requests are preferentially routed to one provider for up to `routing.sticky_ttl_s`.** That provider can observe and correlate more of the buyer's traffic than under default round-robin routing. This disclosure is required only when `routing.sticky_enabled: true`; with the default `routing.sticky_enabled: false`, there is no sticky routing and no new sticky-specific privacy posture beyond properties 1-10 and 12.
-12. **Authenticated non-demo chat completions send the serving Mac an opaque HMAC conversation identifier derived from the prompt prefix through the first user message. That identifier lets the Mac reuse KV cache across tool turns. It does not pin routing to one provider. The provider cannot recover your account id from it. DELETE /v1/sticky does not clear that Mac-local cache; it expires on the provider's own TTL.**
+12. **Authenticated non-demo chat completions may let the serving Mac reuse an encrypted provider-local KV cache under an opaque HMAC conversation identifier. Reuse remains bounded by the conversation-cache TTL (15 minutes by default); encrypted files are cleanup-bounded by the configured retention (60 minutes by default) and cleanup does not extend reuse. The identifier does not pin routing or reveal your account id to the provider. DELETE /v1/sticky durably revokes registered cache scopes; its response remains pending while a disconnected provider or coordinator restart delays provider acknowledgement. GET /v1/sticky reports whether acknowledgements remain pending without starting another revocation.**
 
 These limitations are deliberate. Tier 2, a future SPEC-008 milestone and not in current Tier 1 scope, would add hardware attestation, provider-leg encryption, model catalog enforcement, and untrusted-provider safety. Until Tier 2 ships, properties 1-10 and 12 are always normative. Property 11 is conditional on `routing.sticky_enabled: true`.
 
@@ -627,7 +732,7 @@ SPEC-004 v0.2 defines the routing-side contract for smart routing and sticky aff
 
 SPEC-005 rewards, payouts, provider contribution economics, and any payment-adjacent flows remain out of scope.
 
-SPEC-007 marketplace or Antseed integration remains out of scope.
+SPEC-007 marketplace or third-party marketplace seller integration remains out of scope.
 
 SPEC-006 MAY record data that later specs use, such as provider contribution counters and user feedback ratings.
 
@@ -697,7 +802,7 @@ This section is read-only design input and MUST NOT be treated as a place to pro
 
 ### 2.1 Architecture
 
-- **Separate Go gateway service** at `phase5-gateway/` (consistent with the existing `phase3-binary/`, `phase4-coordinator/`, `phase5-onboarding/` naming). Binds its own port; separate systemd unit; its own deployment artifact.
+- **Separate Go gateway service** at `phase5-gateway/` (consistent with the existing `phase3-binary/` and `phase4-coordinator/` naming). Binds its own port; separate systemd unit; its own deployment artifact.
 - **Coordinator stays router-only.** SPEC-002 v1.1.3's "coordinator is a router" charter is preserved. Coordinator's buyer port (currently bound `0.0.0.0:8443`) MUST be rebound to `127.0.0.1:8443` as part of this migration. All public `/v1/*` traffic goes through gateway.
 - **Designed for 10K-Mac scale.** Specifically:
   - Stateless request handlers. No in-process rate-limit counters, no in-process session caches, no in-process quota state.
@@ -1222,10 +1327,9 @@ Known v1 divergences include:
 - No tool execution.
 - Tool fields may be syntactically accepted but are not executed.
 - Strict schema-enforced structured outputs are not guaranteed.
-- Multimodal `messages[].content` parts are not supported in v1. For `system`
-  and `user` messages, text-only structured content arrays are accepted and
-  normalized to a single string; non-text parts such as `image_url` return
-  `unsupported_content_shape`.
+- Image-bearing Chat Completions are limited to the exact native profile and
+  qualified capacity in §5.4.5. Other media and endpoints reject explicitly.
+  Text-only structured content arrays retain their existing normalization.
 - Provider availability can yield 503 immediately.
 - Model lineup is live-pool dependent.
 - Usage accounting may be gateway-estimated when provider token fields are absent.
@@ -1352,6 +1456,7 @@ The gateway MUST install panic recovery middleware that converts unexpected pani
 - Operator-controlled capacity pauses — the pause condition itself resolves with time, not with a different request: `public_api_paused`, `demo_paused`, `capacity_signup_closed`.
 - Preflight/idempotency infrastructure availability: `preflight_rejected`, `idempotency_unavailable`.
 - Route-snapshot durable-store availability: `route_snapshot_failed` — a pre-dispatch store write failure; a retry can succeed once storage recovers.
+- Conversation-cache purge authority availability: `fleet_cache_purge_unavailable` — the coordinator could not durably read or write account-scoped purge state; a retry can succeed once storage recovers.
 - Provider response-shape glitches where a re-attempt (possibly against a different provider) may not repeat the same defect: `malformed_tool_call_final_json`, `provider_stream_downgraded`, `malformed_json_response`, `json_schema_validation_failed`.
 
 **Permanent (`false`) — retrying the identical request cannot succeed:** validation errors (e.g. `invalid_request`, `invalid_json`, `invalid_tools`), `model_not_found`, `context_exceeds_capacity`, `unsupported_content_shape`, byte/schema-cap and stream-cap violations (e.g. `byte_cap_exceeded`, `request_body_too_large`, `stream_output_exceeded`, the `json_schema_*` cap/shape codes), Tier-2/config lookup failures (e.g. `autotune_feed_not_found`), and auth/admin/oauth-signup client errors. Any code not explicitly classified — on either service — defaults to `retryable: false`.
@@ -1566,7 +1671,7 @@ compatibility requirements MUST carry their own schema/version fields.
   },
   "prefix_cache": {
     "enabled": true,
-    "description": "Authenticated non-demo chat completions send the serving Mac an opaque HMAC conversation identifier derived from the prompt prefix through the first user message. That identifier lets the Mac reuse KV cache across tool turns. It does not pin routing to one provider. The provider cannot recover your account id from it. DELETE /v1/sticky does not clear that Mac-local cache; it expires on the provider's own TTL."
+    "description": "Authenticated non-demo chat completions may let the serving Mac reuse an encrypted provider-local KV cache under an opaque HMAC conversation identifier. Reuse remains bounded by the conversation-cache TTL (15 minutes by default); encrypted files are cleanup-bounded by the configured retention (60 minutes by default) and cleanup does not extend reuse. The identifier does not pin routing or reveal your account id to the provider. DELETE /v1/sticky durably revokes registered cache scopes; its response remains pending while a disconnected provider or coordinator restart delays provider acknowledgement. GET /v1/sticky reports whether acknowledgements remain pending without starting another revocation."
   }
 }
 ```
@@ -1680,8 +1785,9 @@ Normative rules:
 
 - The document publishes exactly the gateway's OpenRouter listing set (v0.9.40: `mlx-community/Qwen3.6-35B-A3B-4bit` only, paid, no free alias). Catalog rows outside the set MUST NOT appear, even when served.
 - A listing that declares a free alias emits dual rows when that pool id has enough ready-slot capacity to split without double-counting: paid id equals the pool `ModelID`; free id is that string plus `-free` with `is_free: true` and `$0` cost. OpenRouter's catalog `:free` suffix is **their** display form, not the wire id.
-- `supported_parameters` MUST declare `tools` and `tool_choice` only for a row whose modelID matches a SPEC-018 §3.1 family with a §3.8 multi-turn profile (`qwen2.5`, `qwen3`, `llama-3.3`). It MUST declare `response_format` and `structured_outputs` only for a row matching the SPEC-019 §4 family-rendering predicate. The shapes are exactly those in the example above; other rows MUST omit them.
+- `supported_parameters` MUST declare `tools` and `tool_choice` only for a row whose modelID matches a SPEC-018 §3.1 family with a §3.8 multi-turn profile (`qwen2.5`, `qwen3`, `llama-3.3`). It MUST declare `response_format` and `structured_outputs` only for a row matching the SPEC-019 §4 family-rendering predicate. The descriptor shapes are those in the example above; the `tool_choice.values` strings are `auto` plus `none` and/or `required` only when the eligible live capability projection in §5.6 supports them for that model. `named` MUST NOT be added to this string enum: named selection uses the function object defined by SPEC-018 §3.11. Other rows MUST omit these descriptors.
 - `is_ready` MUST be true only when that pool id currently has at least one free slot on a provider in `ready` state.
+- `supported_inputs.max_context_length` (v0.9.54) MUST be the largest `max_context_tokens` granted by a serving provider of that pool id: one in `ready` or `busy` state that the coordinator reports `serving_eligible` on `/poolz` (routing-eligible apart from free slots, SPEC-002 v1.6.17), so a provider that is full still counts. Unavailable and draining providers, providers failing any other routing gate, catalog maxima and RAM-tier defaults of providers not serving MUST NOT raise it. Against a coordinator without `serving_eligible` the gateway uses `routing_eligible`. With no serving provider the row keeps the 8192 placeholder and `is_ready: false`.
 - Modality-owned `pricing[].cost_usd` MUST be decimal per-token strings from the live rate card (`credits_per_mtok × usd_per_million_credits / 1e12`). Missing paid catalog keys, non-positive paid rates, and non-positive/non-finite USD conversion inputs MUST fail the document projection instead of emitting a paid `$0` row. Free rows MUST be `"0"`.
 - Root capacity MUST declare conservative request/minute and concurrency limits from live ready slots, and text modalities MUST declare prompt/completion token-per-minute capacity using a conservative generated-token filing cap rather than the maximum output length. Until the gateway carries coordinator per-provider throughput estimates into this projection, that filing cap is 10 generated tokens/second per ready slot. If multiple rows route to the same backing pool, their advertised per-row capacity MUST be split so the rows do not imply independent full-pool capacity.
 - `deployment_region` MUST be an honest volunteer-fleet descriptor. `datacenters` MUST be omitted unless the gateway has operator-verified country/region provenance for the live fleet. Neither field may invent a cloud datacenter region such as `us-east-1` or an unsupported country claim.
@@ -1722,8 +1828,49 @@ Supported request fields:
 - `user`
 - `response_format`
 - `logprobs`
-- `tools` syntactically only
-- `tool_choice` syntactically only
+- `tools` (SPEC-018)
+- `tool_choice` (selection-preserving behavior below)
+
+**SPEC-006-R021 — Selection-preserving dispatch and capability projection.**
+The gateway and coordinator MUST preserve the selected mode after translating
+its endpoint-specific representation. `required` and a named function MUST
+NOT be rewritten to `auto`, nor retried on an incompatible provider or runtime.
+Chat Completions uses the SPEC-018 §3.11 shapes; Responses function selection
+is translated to that same named function object. Messages maps
+`tool_choice.type:"auto"` to `auto`, `"none"` to `none`, `"any"` to
+`required`, and `{"type":"tool","name":"NAME"}` to the named function.
+The existing Messages feature flag is unchanged. Cleartext requests across
+all three endpoints use the same routing and provider guarantees, including
+when `stream:true`. Relay-blind/encrypted envelopes do not negotiate these
+explicit modes; SPEC-018 §3.11 excludes them from the capability claim, and
+the coordinator cannot infer hidden selections in legacy ciphertext.
+
+SPEC-018-R006 owns the support matrix, strict tool-schema subset, complete
+output validation, serial/parallel cardinality and full generated-output
+holdback, including the explicit 1–16,384-token completion budget and finite
+`2^53 - 1` numeric-magnitude domain for required/named modes. The coordinator
+MUST enforce the same request bounds before dispatch and dispatch non-auto
+requests only to a provider
+whose capability matches the resolved model identity, runtime and mode.
+A capability for another model, a family match, a legacy provider without a
+claim, or an external runtime's OpenAI-compatible API MUST NOT establish
+support. The provider MUST recheck against its actual loaded model/runtime
+before inference. Unsupported requests fail explicitly before generation
+with HTTP 400
+`unsupported_tool_choice`. Malformed selection syntax or an unavailable named
+function at the coordinator boundary is HTTP 400 `invalid_tool_choice`;
+unsupported/malformed guaranteed parameter schemas are HTTP 400
+`unsupported_tool_schema`. The provider-local boundary uses
+`unsupported_tool_choice` for unavailable names and unsupported selection
+syntax. Invalid generated output is a distinct
+`tool_selection_validation_failed` failure, never a successful prose fallback or repaired call. Provider-local
+native serving applies the same provider checks; external loopback adapters
+reject non-auto selections until an enforcement implementation exists.
+
+Buyer status and OpenRouter capability fields are discovery hints; routing
+rechecks support for every request. They MUST NOT promise a successful model
+generation, released-provider acceptance or live qualification. Missing claims
+preserve legacy `auto` behavior, without adding any non-auto guarantee.
 
 `n` is accepted for OpenAI SDK compatibility and MUST be 1 in v1. Values greater than 1 MUST be rejected with HTTP 400, `type: "invalid_request_error"`, and `code: "n_must_be_1"`.
 
@@ -1748,9 +1895,10 @@ Inbound tool-call identifiers that OpenAI-compatible clients actually send (shor
 For `system` and `user` messages, `content` MAY be a non-empty JSON string
 or a text-only structured content array such as
 `[{"type":"text","text":"hello"}]`. The buyer boundary MUST normalize
-text-only arrays into a single string before provider dispatch. Multimodal or
-otherwise non-text content parts MUST be rejected with HTTP 400,
-`type: "invalid_request_error"`, and `code: "unsupported_content_shape"`.
+text-only arrays into a single string before provider dispatch. Image-bearing
+Chat Completions follow §5.4.5; every other non-text content shape MUST be
+rejected explicitly before inference. Text-only validation MUST NOT be relaxed
+for unsupported models, roles or endpoints.
 
 Gateway request caps:
 
@@ -1759,6 +1907,93 @@ Gateway request caps:
 - Requests exceeding configured caps MUST receive `400` or be clamped only if the clamping behavior is documented. v1 SHOULD reject rather than silently clamp authenticated API requests.
 
 The gateway MUST match model IDs ASCII case-insensitively when interpreting coordinator availability.
+
+### 5.4.5 Native inline-image Chat Completions
+
+**SPEC-006-R022.** The first native image profile is `qwen2vl-inline-v1`, using
+`mlx-community/Qwen2-VL-2B-Instruct-4bit` at revision
+`01af461cdb9574acc09084a0ef94e216e142b085` with the existing pinned MLX runtime
+and `Qwen2VLProcessor`. Its local artifact identity includes weights, model
+configuration, image processor, tokenizer and chat template. The loader MUST
+verify those bytes before creating a VLM container and keep the processor,
+weights and template in the same immutable request-handle generation through
+replacement. A model label, parser support or text-only qualification MUST
+NOT establish image qualification.
+
+1. **Endpoints and content.** Provider-local and plaintext buyer
+   `POST /v1/chat/completions` support streaming and non-streaming images.
+   User messages may contain ordered `text` and `image_url` parts; image-only
+   user input is valid. Text/image interleaving, message order and image order
+   MUST reach the native vision processor without a text projection. System
+   and assistant messages remain text-only. Audio, video, image tool results,
+   remote URLs, Responses and Messages media, encrypted media, and combinations
+   with tool calls or structured output are unsupported and MUST fail before
+   generation. Existing text-only tool selection is unchanged.
+2. **Immutable bounded media.** Only `data:image/png;base64,` and
+   `data:image/jpeg;base64,` with strict canonical base64 are accepted. The raw
+   JSON body remains at most 4 MiB.
+   Every native request body MUST reject duplicate JSON members and nesting
+   deeper than 128 before ordinary JSON decoding, including bodies whose
+   duplicate members would conceal an image as text-only content.
+   At most two images are accepted per request;
+   compressed decoded bytes are at most 1 MiB per image and 2 MiB aggregate;
+   each axis is at most 2048 pixels and aggregate decoded pixels at most
+   4,194,304. Headers and dimensions MUST be validated before pixel allocation;
+   malformed/truncated images, MIME/format mismatches and animation/multiple
+   frames are rejected. PNG `iCCP`, `zTXt` and `iTXt` ancillary chunks are
+   unsupported to prevent metadata decompression before pixel bounds apply;
+   PNG IHDR dimensions MUST be checked before ImageIO metadata parsing.
+   Native decode MUST remain within these bounds. Before processor input, axes
+   smaller than 28 pixels are deterministically expanded to 28 within the
+   existing pixel budget. No
+   network fetch occurs. `detail` is absent, null or `auto`; other values are
+   unsupported. Errors and logs MUST NOT include image bytes or request text.
+3. **Routing and qualification.** SPEC-001 image capability is an implementation
+   assertion bound to the current artifact and runtime, not qualification.
+   The coordinator MUST additionally match an operator-reviewed qualification
+   tuple for that exact profile, artifact, processor and runtime, and exact
+   provider ID, binary version, hardware chip, RAM, context limit and concurrency. Qualification
+   records identify acceptance evidence; they MUST NOT be invented from a name
+   or provider count. Missing qualification/capability fails closed. Filtering
+   applies to initial selection, pinned routes, queued/reconnected sessions,
+   retry and immediately before dispatch. A text-only provider MUST never be
+   selected for images. Model replacement or omitted/mismatched capability
+   withdraws eligibility. No new trust tier, catalog admission or settlement
+   authority is granted. Qualification is deployment state, with no calendar
+   expiry. Hardware qualification and approved released-provider buyer
+   acceptance remain separate post-merge gates. Buyer
+   `vision_capacity_unavailable` is a retryable 503. Unsupported content/media
+   (`unsupported_content_shape`, `unsupported_media`), malformed inline input
+   and per-image encoded-byte overflow (`invalid_image_input`) are non-retryable
+   400 errors. Image count, dimension and aggregate-limit failures
+   (`image_input_too_large`) are non-retryable 413 errors.
+4. **Execution and resources.** Native generation MUST pass the processor's
+   complete `LMInput`, including visual tensors, to the model. Image requests
+   MUST NOT enter text-only prefix/conversation/disk caches, continuous batching,
+   paged KV, speculative decoding or MTP. Existing scheduling, cancellation,
+   disconnect handling and request-handle ownership MUST bound work and release
+   resources. This profile uses unquantized KV, a fixed 512-token prefill step
+   and the standard rotating KV policy, independent of text-serving overrides.
+   Actual processor-expanded prompt positions count as prompt tokens;
+   cached prompt tokens are zero. Image base64 bytes are never text tokens.
+5. **Accounting and receipts.** Gateway reservations and coordinator routing
+   bounds use 1024 positions per image (the processor is capped at 512 visual
+   positions per image, plus template delimiters) plus the existing text
+   estimates over a media-free accounting projection. This projection MUST NOT
+   replace the forwarded request, receipt input or idempotency body. Reported
+   native usage is the processor-expanded input count plus generated tokens,
+   under the existing SPEC-005 caps and SPEC-022 settlement rules. SPEC-015
+   §4.3.1 binds the exact ordered content and immutable data URLs; neither
+   decoding/re-encoding nor URL refetch may change what inference consumes.
+   Existing receipt schema, route identity, billing rates and privacy contracts
+   remain unchanged. Input images MUST NOT enter diagnostics or durable caches.
+6. **Acceptance.** Paired fixtures with identical questions and different
+   images MUST produce image-dependent answers through the real native
+   processor, locally and through the gateway. Acceptance also covers image-only
+   and interleaved multiple-image input, stream/non-stream, cancellation,
+   disconnect, repetition, replacement, hostile image bounds, exact capability
+   selection, receipt binding and unchanged text/tool behavior. CI mocks do not
+   substitute for Studio or approved released-provider live acceptance.
 
 ### 5.4a `POST /v1/messages` experimental facade
 
@@ -1852,7 +2087,13 @@ The gateway MUST strip these upstream coordinator response headers before return
 
 - `X-MacProvider-Provider`
 - `X-MacProvider-Route`
+- `X-MacProvider-Session`
+- `X-Provider-Id`, `X-Provider-Assigned-Id`, `X-Provider-Fingerprint`, `X-Route-Provider`, and any other response header starting with `X-Provider-`
 - any response header starting with `X-MacProvider-` that is not on a documented response-pass-through allowlist
+
+Buyers never receive provider identity. The gateway MUST NOT emit any of these under a different name, MUST delete them from every buyer response (including error, relay-blind, and id-less retry replay responses) immediately before the response head is written, and MUST NOT replay a stored provider identifier. The buyer-facing nginx vhost SHOULD also hide them (`proxy_hide_header`) as defense in depth. Provider identity remains available to operators in coordinator logs and `request_log`.
+
+Exception: verification and encryption material that another SPEC requires the buyer to hold stays buyer-visible: the SPEC-015 receipt tuple's `provider_pubkey`, the `/v1/receipts` `provider_receipt_key_fingerprint`, and the SPEC-041/SPEC-049 reservation `kid`, `key_record` and `provider_binding`. The receipt key is the stable pseudonymous signing key that SPEC-015 verification requires; it is not a provider identifier. Nothing else identifies a provider or session to a buyer.
 
 The documented response-pass-through allowlist is:
 
@@ -1861,9 +2102,9 @@ The documented response-pass-through allowlist is:
 - `X-MacProvider-Streaming-Mode`, the SPEC-018 AC-45 buyer-visible
   streaming-mode diagnostic set by the coordinator on streaming `200`
   responses. The gateway MUST forward it only when its value is one of
-  the three canonical AC-45 values — `incremental`, `buffered_kill_switch`,
-  or `buffered_provider_downgrade` — and MUST drop any other value rather
-  than forward it verbatim (defense-in-depth: the value is coordinator-set,
+  the four canonical AC-45 values — `incremental`, `buffered_kill_switch`,
+  `buffered_provider_downgrade`, or `buffered_tool_selection` — and MUST drop
+  any other value rather than forward it verbatim (defense-in-depth: the value is coordinator-set,
   but the allowlist prevents a compromised or misconfigured upstream from
   smuggling arbitrary header content past the `X-MacProvider-*` strip). The
   header is observation-only (SPEC-018 §10d.4); buyers MUST NOT use it for
@@ -2115,6 +2356,75 @@ separate source obligations. No protected acceptance integration or conformance
 promotion follows from a producer signature alone; SPEC-006-R018 stays pending
 until the complete joined, released and signed journey passes.
 
+#### 5.4.4 Buyer privacy mode (v0.9.51, SPEC-006-R019, #1355)
+
+**SPEC-006-R019 — Buyer privacy mode.** A buyer MAY state the privacy boundary
+a chat request requires with the request header `X-MacProvider-Privacy-Mode`.
+It applies to `POST /v1/chat/completions` and to the `/v1/responses` and
+`/v1/messages` facades that share its dispatch path. Like the engine and pool
+selectors it is a control-plane header, never a body field. The mode maps
+onto existing paths only; it adds no new privacy mechanism.
+
+The vocabulary is closed. After trimming surrounding ASCII whitespace, the
+value MUST byte-exactly equal one of the modes below. An unknown value, another
+case, an empty value, or more than one value MUST be rejected before quota
+reservation and dispatch with HTTP 400, `type: "invalid_request_error"`,
+`code: "invalid_privacy_mode"`.
+
+| Mode | Maps onto | Unsatisfied request |
+|---|---|---|
+| `pool` (default when absent) | Today's routing, unchanged. | Never. |
+| `relay_blind_required` | The SPEC-041 relay-blind envelope in `required` mode, and through it the SPEC-049 privacy class when that class is also requested. Every SPEC-041/SPEC-049 rule and failure still applies; no-provider outcomes stay fail closed. A SPEC-049 privacy-class envelope MAY carry an authorized Trusted Pool selection (SPEC-049-R032). | A plaintext body, or a Trusted Pool selection on a request without the SPEC-049 privacy-class marker: 400 `privacy_mode_unsatisfied`. The request is never served as plaintext. |
+| `owned_provider` | The authorized Trusted Pool selection of SPEC-042-R002/R010 (`X-MacProvider-Pool-Select`), routed only to that pool's members with no spill to the network. A SPEC-049 privacy-class envelope with that selection satisfies it too (SPEC-049-R032). | No pool selection: 400 `privacy_mode_unsatisfied`. An unauthorized or unknown pool keeps the existing generic `pool_unavailable`. |
+
+Both new codes are `retryable: false`. The mode is resolved before the
+relay-blind gate, and the pool selection is still resolved before any pool
+error, so `privacy_mode_unsatisfied` reveals nothing about any pool.
+Pool-scoped relay-blind privacy is defined only for the SPEC-049 privacy
+class (SPEC-049-R032, v0.9.56); a plain SPEC-041 envelope with a pool
+selection still fails closed.
+
+**Disclosure.** A response the gateway writes after the mode is resolved
+carries `X-MacProvider-Privacy-Mode` set to the effective mode and
+`X-MacProvider-Privacy-Mode-Disclosure` set to that mode's fixed string. The
+effective mode is `relay_blind_required` for a relay-blind envelope,
+including a pool-scoped privacy-class envelope, `owned_provider` for a
+resolved Trusted Pool selection on a plaintext request, and `pool` otherwise,
+whatever the buyer requested. The strings MUST be exactly:
+
+| Effective mode | `X-MacProvider-Privacy-Mode-Disclosure` |
+|---|---|
+| `pool` | `content_visible_to_serving_provider_and_network_relays; no_confidentiality_claim` |
+| `relay_blind_required` | `content_hidden_from_network_relays; serving_provider_runtime_reads_plaintext; metadata_visible_to_relays` |
+| `owned_provider` | `served_only_by_selected_trusted_pool_members; content_visible_to_serving_member_and_network_relays` |
+| `relay_blind_required`, pool-scoped privacy class (SPEC-049-R032) | `content_hidden_from_network_relays_and_pool_surfaces; served_only_by_selected_trusted_pool_members; serving_member_runtime_reads_plaintext; metadata_visible_to_relays` |
+
+They never claim hardware isolation, attestation, end-to-end encryption that
+excludes the provider, or that the buyer owns the serving Mac. The SPEC-049
+`usage.macprovider.privacy` disclosure remains the authoritative statement for
+privacy-class responses. Upstream values of either header are dropped. The
+`invalid_privacy_mode` and `privacy_mode_unsatisfied` refusals carry neither
+header, because no mode was served.
+
+**Operator visibility.** For a plaintext route the gateway sends the effective
+mode upstream as `X-MacProvider-Internal-Privacy-Mode` under the gateway
+service-token bearer (existing internal-header rule). The coordinator accepts
+only the three values, ignores any other, and records it as `privacy_mode` on
+the SPEC-002-R007 `route_trace` line. It never changes coordinator routing.
+
+**SPEC-006-R020 — Route trace forwarding.** The gateway MUST forward the
+coordinator's `X-MacProvider-Route-Trace` header (SPEC-002-R007) to the buyer
+only when its value byte-exactly matches the SPEC-002-R007 grammar, and drop
+any other value. It applies to responses the gateway relays from the
+coordinator; an error response the gateway writes itself (for example a
+transformed provider error) may omit it. The header carries classes only
+(phase, basis, evidence freshness, engine family, latency class); it never
+names a provider, session, host or measured number. Browser CORS responses
+allow the `X-MacProvider-Privacy-Mode` request header and expose
+`X-MacProvider-Privacy-Mode`, `X-MacProvider-Privacy-Mode-Disclosure` and
+`X-MacProvider-Route-Trace`. Buyer docs MUST describe it as an explanation of the
+routing choice, not a performance guarantee.
+
 ### 5.5 `GET /v1/usage`
 
 `GET /v1/usage` returns account usage and quota state.
@@ -2345,6 +2655,21 @@ Per-model rows MUST include:
 
 A model with `availability: "no_awake_provider"` is known to the coordinator but currently has no awake ready provider. A model with `availability: "no_free_slots"` has at least one ready provider but no immediate free slot. Front doors MUST use these fields rather than deriving availability from top-level status alone.
 
+Per-model `tool_choice_modes` (v0.9.58, SPEC-006-R021) projects the union
+of compatible modes from eligible providers currently serving that model.
+Modes use the closed vocabulary `auto`, `none`, `required`, `named`;
+`named` describes support for the function object rather than the string
+`"named"` as a request value. The internal source is
+`tool_selection_capabilities` entries with `model_id`, `runtime`, `modes`,
+and `validation:"schema-holdback-v1"`. Only entries matching the serving
+model and runtime may add non-auto modes. Unavailable/ineligible providers,
+foreign model entries and missing/unknown validation methods MUST NOT raise
+the advertised guarantees. A legacy provider contributes only legacy `auto`.
+The gateway MUST expose only the per-model aggregate, never these internal
+per-provider entries. The projection follows the existing `/poolz` cache
+bounds and is not a reservation; support and free capacity may change before
+a request is dispatched.
+
 The endpoint MUST NOT expose:
 
 - individual provider hostnames.
@@ -2488,7 +2813,7 @@ Unauthenticated HTML page. MUST state honestly:
 - Prompts and completions are processed as plaintext on volunteer Apple Silicon Macs.
 - There is no zero-data-retention (ZDR) guarantee. `compliance.zdr` on the OpenRouter document is `false`.
 - MacProvider does not train foundation models on buyer prompts.
-- Request metadata needed for routing, quota, settlement, and D1a wholesale statements is retained for 90 days by default, matching the shipped coordinator `storage.request_log_retention_days` value. If an operator changes that configuration, the public page MUST be updated in the same change.
+- Request metadata needed for routing, quota, settlement, and D1a wholesale statements is retained for 14 days by default, matching the shipped coordinator `storage.request_log_retention_days` value (SPEC-005 §2.1b). Before an account's rows leave, its successful requests are kept as per-day, per-model request and token totals that D1a statements read; they hold no request id, prompt, or output. If an operator changes that configuration, the public page MUST be updated in the same change.
 
 MUST NOT claim private inference, hardware attestation, or a US datacenter region.
 
@@ -2501,6 +2826,14 @@ MUST NOT claim private inference, hardware attestation, or a US datacenter regio
 2. **Principal.** The gateway MUST drop every client-supplied header whose name starts with `X-MacProvider-Creator-` and MUST build a new upstream request that carries only `Content-Type`, `Idempotency-Key`, `X-Request-ID`, the gateway service token (§15 `coordinator.service_token`), and the verified principal: `X-MacProvider-Creator-Account-ID` (the key's account id), `X-MacProvider-Creator-Credential-ID` (the key id), and `X-MacProvider-Creator-GitHub-User-ID` when the account has a linked GitHub identity. No other client header is forwarded.
 3. **Mapping.** `/v1/creator/<rest>` maps to the coordinator's `/internal/creator/trust-pools/<rest>` with the same method and query string. Only `GET` and `POST` are proxied. The request body is capped at 64 KiB and the upstream response at 1 MiB. The coordinator's status and JSON body are returned unchanged with `Cache-Control: no-store`. An unreachable coordinator, an oversized response, or an upstream `401` (the coordinator refusing the gateway service token after the caller's key already passed) returns `502 api_error` / `creator_upstream_error`.
 4. **Scope.** The surface never selects a pool for chat, never changes quota or billing state, and is not listed in `/v1/models`. Its operations are Agreement acceptance, pool creation and signed-event submission, root-registration nonces, member admission and revocation, buyer grants, restrictive lifecycle, self-serve promotion, pool reads and exports, the owned-provider list, and the earnings read.
+
+### 5.12 `/v1/stake` MALIBU stake allowance (v0.9.51, SPEC-050, #1062)
+
+`GET /v1/stake` and `POST /v1/stake/lock`, `/v1/stake/unlock`,
+`/v1/stake/overage` let an account stake MALIBU from providers it owns and see
+its daily allowance. SPEC-050-R011 owns the authentication, the forwarded
+principal, and the response fields; SPEC-050-R012 owns the disclosure text. The
+gateway holds no stake or allowance state.
 
 ---
 
@@ -2726,6 +3059,61 @@ before inference as specified by SPEC-001 v1.9.27 and SPEC-002 v1.6.4.
 
 On SSE completion after a provider `[DONE]` chunk, settlement MUST adjust the reservation to actual usage as reported by the provider, subject to the symmetric streaming clamp policy below.
 
+#### 7.2.1 Prompt-token estimates (v0.9.54)
+
+The gateway and coordinator have no tokenizer. Three prompt-token estimates
+exist, and they MUST NOT be conflated.
+
+Both class-weighted estimates walk the decoded JSON text of the request body
+(every string, object key and scalar literal; no quotes, separators or escape
+sequences) and price each character in milli-tokens. A run of ASCII letters and
+digits is priced as one unit: a letters-only run costs `ceil(n * 1000 /
+letter_divisor)` for its first `long_run` letters plus `ceil(rest * 1000 /
+long_divisor)`; a digits-only run costs the digit weight per digit; a run with
+both letters and digits (identifiers, hex, base64) costs the mixed weight per
+character. Every other character costs its class weight. The sum is rounded up
+to whole tokens.
+
+| Class | Upper weight | Central weight |
+|---|---:|---:|
+| Letters-only run divisor | 2.5 letters per token | 4.5 letters per token |
+| Letters beyond the first 12 of a run (upper only) | 1.5 letters per token | n/a |
+| Mixed letter-digit run, per character | 1.0 | 0.5 |
+| Digit in a digits-only run | 1.2 | 0.9 |
+| Space | 0.25 | 0.1 |
+| `\n`, `\r`, `\t` | 1.0 | 0.5 |
+| Other ASCII (punctuation, controls) | 1.0 | 0.5 |
+| 2-byte UTF-8 character | 1.1 | 0.22 |
+| 3-byte UTF-8 character | 2.2 | 0.45 |
+| 4-byte UTF-8 character | 3.0 | 2.0 |
+
+The weights were calibrated against the Qwen3.6 tokenizer (the OpenRouter
+listing model) on 23 corpora: prose, Go, Swift and Python code, JSON, digits,
+CSV, hex, base64, random letters, common and rare Chinese, Russian, emoji,
+indented code, punctuation, and random Cyrillic, Greek, Arabic, Hangul,
+hiragana, Latin-1 and letter-punctuation strings. The upper estimate, taken as
+`max(ceil(bytes/4), upper)`, is at or above the tokenizer count on every
+corpus: about 1.7-2x on prose, code and JSON, 1.0-1.5x on digits, hex, base64
+and random strings, and about 4.5-5x on Chinese and Russian prose, whose holds
+grow accordingly. The central estimate is at or below the tokenizer count on
+every corpus, and 0.9-1.0x on prose, code, JSON, Chinese and Russian. The
+gateway and the coordinator MUST use identical weights; a test fails when the
+two copies of the estimator or its golden table differ.
+
+1. **Prompt reservation** (gateway quota hold and usage validation cap;
+   coordinator independent bound on a provider's reported `prompt_tokens`):
+   `max(ceil(bytes/4), upper estimate) + 64`, the same formula at the gateway
+   and the coordinator. A provider-reported count above it is charged at it,
+   as before. The reservation is never smaller than the pre-v0.9.54
+   `ceil(bytes/4) + 64`.
+2. **Context-fit estimate** (coordinator routing and provider preflight): the
+   central estimate, minimum 1, or `floor(bytes/4)` when the body is not valid
+   JSON. It decides whether a provider's advertised context can hold the
+   prompt. The provider's tokenized `context_length_exceeded` check remains
+   authoritative.
+3. **Billed fallback estimate**: `ceil(bytes/4)` when the provider reports no
+   usage (gateway) or the coordinator's byte estimate, unchanged.
+
 #### Streaming completion-token symmetric clamp (#255 downward, #278 upward)
 
 The gateway runs two checks on every successful streaming settlement, sharing the SAME pure-absolute clamp window:
@@ -2802,7 +3190,7 @@ The gateway SHOULD enforce in this order:
 6. request-start rate bucket for chat completions.
 7. signup closed state for signup paths.
 8. per-request caps.
-9. quota availability.
+9. quota availability, after SPEC-050 allowance admission for API-key plaintext and relay-blind requests (SPEC-050-R007).
 10. concurrency reservation.
 11. coordinator availability.
 
@@ -2841,6 +3229,13 @@ quota_exhausted
 ```
 
 The response MUST include `X-RateLimit-Reset`.
+
+When an account's SPEC-050 allowance cannot cover a request and its overage
+setting is off, the gateway returns `429 rate_limit_exceeded` with code
+`allowance_exhausted` and `X-RateLimit-Reset` at the next 00:00 UTC. When the
+coordinator cannot answer and the account's last known overage setting is off,
+it returns `503 api_error` with code `allowance_unavailable`. SPEC-050-R007 and
+SPEC-050-R014 own both.
 
 ### 7.8 Bounded slot queueing
 
@@ -2938,9 +3333,9 @@ The documented response-pass-through allowlist is:
 - `X-MacProvider-Streaming-Mode`, the SPEC-018 AC-45 buyer-visible
   streaming-mode diagnostic set by the coordinator on streaming `200`
   responses. The gateway MUST forward it only when its value is one of
-  the three canonical AC-45 values — `incremental`, `buffered_kill_switch`,
-  or `buffered_provider_downgrade` — and MUST drop any other value rather
-  than forward it verbatim (defense-in-depth: the value is coordinator-set,
+  the four canonical AC-45 values — `incremental`, `buffered_kill_switch`,
+  `buffered_provider_downgrade`, or `buffered_tool_selection` — and MUST drop
+  any other value rather than forward it verbatim (defense-in-depth: the value is coordinator-set,
   but the allowlist prevents a compromised or misconfigured upstream from
   smuggling arbitrary header content past the `X-MacProvider-*` strip). The
   header is observation-only (SPEC-018 §10d.4); buyers MUST NOT use it for
@@ -3844,6 +4239,7 @@ Constraints on the envelope:
    - PASS-THROUGH EXCLUSION: terminal envelopes the gateway FORWARDS verbatim without writing its own `usage_events` row (the SPEC-019 v0.2 pass-through allow-list, e.g. `response_byte_cap_exceeded`, `malformed_json_response`, `json_schema_validation_failed`, and the provider-emitted `provider_timeout` variant) have no settlement row to match — this mapping clause does not apply to them. Their shape/position rules still apply (per §17.7.1 clauses 1, 3, 4).
    - NAMED MAPPING EXCEPTIONS — each entry below is a named gateway divergence (gateway writes a `usage_events` row AND the buyer-visible `error.code` is different) that this clause permits explicitly:
      - `error.code = "provider_disconnected"` ↔ `usage_events.outcome = "stream_truncated"`. Reference: `writeProviderDisconnectedSSE` in `phase5-gateway/internal/router/chat_proxy.go`, which calls `writeSSEError(..., "server_error", "provider_disconnected")` for the SPEC-002 FR-B6 envelope while the gateway settles as `stream_truncated`.
+     - (v0.9.54, #1570) `error.code = "upstream_provider_error"` ↔ `usage_events.outcome = "stream_malformed"` and `error.code = "provider_disconnected"` ↔ `usage_events.outcome = "stream_malformed"`. Reference: `coordinatorStreamTerminalError` in `phase5-gateway/internal/router/chat_proxy.go`. A coordinator post-commit terminal frame with code `provider_error` (normalized per §17 to `upstream_provider_error`) or `provider_disconnected` is emitted with that code, while the gateway settles the stream exactly as before, as `stream_malformed`.
    - Any future divergence MUST be added to this list as a named mapping (with reference implementation citation) BEFORE the divergent code path ships. Unlisted divergences MUST be treated by the harness as uncorroborated overbill candidates.
 3. The envelope MUST be the LAST data frame on the stream before `[DONE]` or EOF. Content frames MUST NOT follow the envelope. Additional data frames sent AFTER `[DONE]` are invisible to OpenAI-style clients; the harness MUST stop reading at the first `[DONE]` and MUST NOT count post-`[DONE]` content (envelope or otherwise) as part of buyer-side corroboration evidence. (#232 R3 SEC HIGH.)
 4. Reference implementations: `writeSSEError`, `writeStructuredOutputTimeoutSSE`, `writeProviderDisconnectedSSE` in `phase5-gateway/internal/router/chat_proxy.go`.

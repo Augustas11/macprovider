@@ -321,7 +321,9 @@ WHERE request_id = ? AND attempt_n = ? AND provider_id = ?
   AND status = 200
   AND provider_credits > 0
   AND quarantined = 0
-  AND (quarantine_reason IS NULL OR quarantine_reason = '')`,
+  AND (quarantine_reason IS NULL OR quarantine_reason = '')
+  -- SPEC-022 R-15.6: a credit whose evidence retention archived is final.
+  AND NOT EXISTS (SELECT 1 FROM settlement_evidence_archived_credits a WHERE a.request_credit_id = ledger_request_credits.id)`,
 		requestID, attemptN, providerID)
 	if err != nil {
 		return false, err
@@ -386,6 +388,12 @@ UPDATE ledger_request_credits
  WHERE request_id = ? AND attempt_n = ? AND provider_id = ?
    AND quarantined = 0
    AND settled = 0
+   -- SPEC-022 R-15.6 (v0.4.5): a credit whose evidence retention archived
+   -- closed with a payable verdict and is final; the missing verdict row is
+   -- the archive's, not a failed settlement.
+   AND NOT EXISTS (
+       SELECT 1 FROM settlement_evidence_archived_credits a
+        WHERE a.request_credit_id = ledger_request_credits.id)
    AND NOT EXISTS (
        SELECT 1 FROM settlement_receipt_verdicts srv
          JOIN settlement_route_snapshots srs
@@ -406,6 +414,20 @@ UPDATE ledger_request_credits
 		return UndeliveredQuarantineNoCredit, err
 	} else if n > 0 {
 		return UndeliveredQuarantineQuarantined, nil
+	}
+	// An archived credit settled from a closed verified verdict that left with
+	// the evidence; its tombstone records that verdict.
+	var archivedVerified int
+	err = s.db.QueryRowContext(ctx, `
+SELECT COALESCE(MAX(a.spec022_verified), 0)
+  FROM ledger_request_credits lrc
+  JOIN settlement_evidence_archived_credits a ON a.request_credit_id = lrc.id
+ WHERE lrc.request_id = ? AND lrc.attempt_n = ? AND lrc.provider_id = ?`, requestID, attemptN, providerID).Scan(&archivedVerified)
+	if err != nil {
+		return UndeliveredQuarantineNoCredit, err
+	}
+	if archivedVerified == 1 {
+		return UndeliveredQuarantineVerified, nil
 	}
 	_, verified, err := s.SettlementAttemptEvidence(ctx, accountScope, requestID, providerID)
 	if err != nil {

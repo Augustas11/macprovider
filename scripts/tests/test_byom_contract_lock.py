@@ -321,11 +321,11 @@ class BYOMContractLockTests(unittest.TestCase):
         readme = read_text("specs/README.md")
         conformance = json.loads(read_text("specs/CONFORMANCE.json"))
 
-        self.assertIn("**Version:** 1.9.32", spec001)
+        self.assertIn("**Version:** 1.9.36", spec001)
         self.assertIn("**Version:** 0.2.10", spec044)
         self.assertIn('"version": "0.2.10"', spec044)
         self.assertIn("SPEC-044 v0.2.10", spec001)
-        self.assertIn("| SPEC-001 | Phase 3 Binary: Mac Provider Inference CLI | 1.9.32 |", readme)
+        self.assertIn("| SPEC-001 | Phase 3 Binary: Mac Provider Inference CLI | 1.9.36 |", readme)
         self.assertIn("| SPEC-044 | Malibu Model Catalog Economics | 0.2.10 |", readme)
         current_spec044 = spec044.split("## 8. Changelog and history", 1)[0]
         self.assertNotIn("v0.2.7", current_spec044)
@@ -335,7 +335,7 @@ class BYOMContractLockTests(unittest.TestCase):
         spec001_record = next(
             record for record in conformance["specs"] if record["spec_id"] == "SPEC-001"
         )
-        self.assertEqual(spec001_record["version"], "1.9.32")
+        self.assertEqual(spec001_record["version"], "1.9.36")
         spec_record = next(
             record for record in conformance["specs"] if record["spec_id"] == "SPEC-044"
         )
@@ -349,7 +349,7 @@ class BYOMContractLockTests(unittest.TestCase):
     def test_closed_admission_inventory_and_local_only_copy_are_truthful(self):
         spec001 = read_text("specs/SPEC-001-phase3-binary.md")
         spec046 = read_text("specs/SPEC-046-provider-byom-discovery.md")
-        handoff = read_text("audits/2026-09-11-byom-v02-handoffs/SLICE6_STATE_SURFACE_AND_COPY.md")
+        handoff = read_text("docs/evidence/2026-09-11-byom-v02-handoffs/SLICE6_STATE_SURFACE_AND_COPY.md")
 
         exact_enum = (
             "`local_only`, `not_offered`, `offerable`, `offer_submitted`, "
@@ -410,7 +410,7 @@ class BYOMContractLockTests(unittest.TestCase):
         spec046 = read_text("specs/SPEC-046-provider-byom-discovery.md")
         spec047 = read_text("specs/SPEC-047-network-model-admission.md")
         handoff = read_text(
-            "audits/2026-09-11-byom-v02-handoffs/SLICE6_STATE_SURFACE_AND_COPY.md"
+            "docs/evidence/2026-09-11-byom-v02-handoffs/SLICE6_STATE_SURFACE_AND_COPY.md"
         )
         local_default = "Coordinator offer state is unavailable or has not been queried."
         coordinator = "Coordinator reports no active network offer for this model."

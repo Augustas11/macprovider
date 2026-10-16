@@ -614,6 +614,12 @@ type privacyClientSpec struct {
 	directorySigner ed25519.PrivateKey
 	directoryEdit   func(*relayblind.IdentityDirectory)
 	directoryBytes  func([]byte) []byte
+	// pool runs the client with --pool (SPEC-049-R032).
+	pool string
+	// assurance runs the client with --privacy-assurance-required, and
+	// served is the label the stub gateway reports (SPEC-049-R034). Both
+	// default to the device-bound label.
+	assurance, served string
 }
 
 var cliDirectoryKey = ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x44}, ed25519.SeedSize))
@@ -685,6 +691,16 @@ func runPrivacyClient(t *testing.T, spec privacyClientSpec) (string, string, int
 		if got := r.Header.Values("X-MacProvider-Privacy-Class"); len(got) != 1 || got[0] != relayblind.PrivacyClassV1 {
 			t.Errorf("privacy header=%v path=%s", got, r.URL.Path)
 		}
+		if got := r.Header.Get("X-MacProvider-Pool-Select"); got != spec.pool {
+			t.Errorf("pool select=%q want %q path=%s", got, spec.pool, r.URL.Path)
+		}
+		wantRequired := 0
+		if spec.assurance != "" && r.URL.Path == "/v1/relay-blind/route-reservations" {
+			wantRequired = 1
+		}
+		if got := r.Header.Values(relayblind.PrivacyAssuranceRequiredHeader); len(got) != wantRequired || (wantRequired == 1 && got[0] != spec.assurance) {
+			t.Errorf("assurance requirement=%v path=%s", got, r.URL.Path)
+		}
 		switch r.URL.Path {
 		case "/v1/relay-blind/route-reservations":
 			request, err := relayblind.ParseReservationRequest(body)
@@ -694,6 +710,10 @@ func runPrivacyClient(t *testing.T, spec privacyClientSpec) (string, string, int
 				return
 			}
 			response := privacyReservationResponse(t, record, identity, request, now)
+			if spec.pool != "" {
+				response.PoolID, response.PoolManifestVersion, response.PoolManifestCoreDigest = spec.pool, 3, strings.Repeat("c", 64)
+			}
+			response.PrivacyAssurance = spec.servedLabel()
 			if spec.reservation != nil {
 				response = spec.reservation(response)
 			}
@@ -708,7 +728,8 @@ func runPrivacyClient(t *testing.T, spec privacyClientSpec) (string, string, int
 	opts := options{
 		baseURL: server.URL, identityPin: pinPath, model: "model-a", input: "-",
 		maxOutputTokens: 32, inputTokenUpperBound: 96, stream: spec.stream, privacyClass: true,
-		apiKeyEnv: "TEST_API_KEY", walletSessionKeyEnv: "TEST_WALLET_KEY", timeout: time.Minute,
+		apiKeyEnv: "TEST_API_KEY", walletSessionKeyEnv: "TEST_WALLET_KEY", timeout: time.Minute, pool: spec.pool,
+		privacyAssuranceRequired: spec.assurance,
 	}
 	if spec.wallet {
 		opts.walletSessionID = "wallet-session-fixture"
@@ -736,6 +757,7 @@ func runPrivacyClient(t *testing.T, spec privacyClientSpec) (string, string, int
 func writePrivacyChat(t *testing.T, w http.ResponseWriter, body, inner []byte, provider *ecdh.PrivateKey, spec privacyClientSpec) {
 	t.Helper()
 	setPrivacyBuyerHeaders(w.Header())
+	w.Header().Set(privacyAssuranceHeader, spec.servedLabel())
 	if spec.headerHook != nil {
 		spec.headerHook(w.Header())
 	}
@@ -781,6 +803,11 @@ func writePrivacyChat(t *testing.T, w http.ResponseWriter, body, inner []byte, p
 		return
 	}
 	usage := privacyClearUsage(spec.clearPrompt, spec.clearCompletion, spec.verifiedAt)
+	if label := spec.servedLabel(); label == relayblind.PrivacyAssuranceCodeBound {
+		scope, protects, doesNotProtect, residual := privacyLabelStrings(label, spec.pool)
+		object := privacyObject(usage)
+		object["assurance"], object["scope"], object["protects"], object["does_not_protect"], object["residual_risks"] = label, scope, protects, doesNotProtect, residual
+	}
 	if spec.totalOverride != nil {
 		usage["total_tokens"] = *spec.totalOverride
 	}
@@ -971,6 +998,16 @@ func privacyClearUsage(prompt, completion, verifiedAt int64) map[string]any {
 	}
 }
 
+func (s privacyClientSpec) servedLabel() string {
+	if s.served != "" {
+		return s.served
+	}
+	if s.assurance != "" {
+		return s.assurance
+	}
+	return relayblind.PrivacyAssurance
+}
+
 func privacyObject(usage map[string]any) map[string]any {
 	return usage["macprovider"].(map[string]any)["privacy"].(map[string]any)
 }
@@ -1038,3 +1075,154 @@ func assertPrivacyFailure(t *testing.T, err error, stderr string, calls, wantCal
 }
 
 func int64Ptr(v int64) *int64 { return &v }
+
+// poolScopedUsage turns the clear usage into the SPEC-049-R020 pool-scoped
+// disclosure for pool.
+func poolScopedUsage(pool string) func(map[string]any) map[string]any {
+	return func(usage map[string]any) map[string]any {
+		object := privacyObject(usage)
+		object["does_not_protect"] = privacyDoesNotProtect[:5]
+		object["pool"] = map[string]any{
+			"pool_id": pool, "scope": privacyPoolScope,
+			"pool_operator_sees": privacyPoolOperatorSees, "pool_operator_does_not_see": privacyPoolOperatorDoesNotSee,
+		}
+		return usage
+	}
+}
+
+func poolModeHeaders(h http.Header) {
+	h.Set("X-MacProvider-Privacy-Mode", "relay_blind_required")
+	h.Set("X-MacProvider-Privacy-Mode-Disclosure", privacyModePoolScopedDisclosure)
+}
+
+func TestPrivacyPoolClientVerifiesPoolBinding(t *testing.T) {
+	t.Run("served", func(t *testing.T) {
+		for _, stream := range []bool{false, true} {
+			stdout, stderr, calls, err := runPrivacyClient(t, privacyClientSpec{stream: stream, pool: "pool-a", content: privacyContent(stream), alterUsage: poolScopedUsage("pool-a"), headerHook: poolModeHeaders})
+			if err != nil || calls != 2 || stdout != string(privacyContent(stream)) {
+				t.Fatalf("stream=%v err=%v calls=%d", stream, err, calls)
+			}
+			for _, want := range []string{"pool_id: pool-a", "pool_manifest_version: 3", "pool_scope: " + privacyPoolScope, "pool_operator_sees: aggregate_payable_request_counts_and_provider_credits", "pool_operator_does_not_see: per_request_metadata_and_buyer_attribution_through_pool_surfaces"} {
+				if !strings.Contains(stderr, want) {
+					t.Fatalf("stderr lacks %q", want)
+				}
+			}
+		}
+	})
+	t.Run("reservation_without_pool", func(t *testing.T) {
+		_, _, calls, err := runPrivacyClient(t, privacyClientSpec{pool: "pool-a", content: privacyContent(false), reservation: func(r relayblind.ReservationResponse) relayblind.ReservationResponse {
+			r.PoolID, r.PoolManifestVersion, r.PoolManifestCoreDigest = "", 0, ""
+			return r
+		}})
+		if err == nil || !strings.Contains(err.Error(), "reservation pool rejected") || calls != 1 {
+			t.Fatalf("err=%v calls=%d", err, calls)
+		}
+	})
+	t.Run("reservation_for_another_pool", func(t *testing.T) {
+		_, _, calls, err := runPrivacyClient(t, privacyClientSpec{pool: "pool-a", content: privacyContent(false), reservation: func(r relayblind.ReservationResponse) relayblind.ReservationResponse {
+			r.PoolID = "pool-b"
+			return r
+		}})
+		if err == nil || !strings.Contains(err.Error(), "reservation pool rejected") || calls != 1 {
+			t.Fatalf("err=%v calls=%d", err, calls)
+		}
+	})
+	t.Run("global_reservation_with_pool_fields", func(t *testing.T) {
+		_, _, calls, err := runPrivacyClient(t, privacyClientSpec{content: privacyContent(false), reservation: func(r relayblind.ReservationResponse) relayblind.ReservationResponse {
+			r.PoolID, r.PoolManifestVersion, r.PoolManifestCoreDigest = "pool-a", 3, strings.Repeat("c", 64)
+			return r
+		}})
+		if err == nil || !strings.Contains(err.Error(), "reservation pool rejected") || calls != 1 {
+			t.Fatalf("err=%v calls=%d", err, calls)
+		}
+	})
+	t.Run("global_disclosure_on_pool_response", func(t *testing.T) {
+		_, stderr, calls, err := runPrivacyClient(t, privacyClientSpec{pool: "pool-a", content: privacyContent(false), headerHook: poolModeHeaders})
+		assertPrivacyFailure(t, err, stderr, calls, 2)
+	})
+	t.Run("missing_pool_mode_disclosure_header", func(t *testing.T) {
+		_, stderr, calls, err := runPrivacyClient(t, privacyClientSpec{pool: "pool-a", content: privacyContent(false), alterUsage: poolScopedUsage("pool-a")})
+		assertPrivacyFailure(t, err, stderr, calls, 2)
+		if err == nil || !strings.Contains(err.Error(), "privacy mode disclosure rejected") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+	t.Run("pool_disclosure_names_another_pool", func(t *testing.T) {
+		_, stderr, calls, err := runPrivacyClient(t, privacyClientSpec{pool: "pool-a", content: privacyContent(false), alterUsage: poolScopedUsage("pool-b"), headerHook: poolModeHeaders})
+		assertPrivacyFailure(t, err, stderr, calls, 2)
+	})
+	t.Run("pool_disclosure_on_global_response", func(t *testing.T) {
+		_, stderr, calls, err := runPrivacyClient(t, privacyClientSpec{content: privacyContent(false), alterUsage: poolScopedUsage("pool-a")})
+		assertPrivacyFailure(t, err, stderr, calls, 2)
+	})
+	t.Run("pool_needs_privacy_class_and_api_key", func(t *testing.T) {
+		for _, opts := range []options{
+			{baseURL: "http://127.0.0.1:1", identityPin: "/tmp/pin.json", model: "model-a", pool: "pool-a"},
+			{baseURL: "http://127.0.0.1:1", model: "model-a", pool: "pool-a", privacyClass: true, walletSessionID: "wallet"},
+			{baseURL: "http://127.0.0.1:1", model: "model-a", pool: "pool a", privacyClass: true},
+		} {
+			err := run(context.Background(), opts, strings.NewReader("{}"), io.Discard, io.Discard, func(string) string { return "" })
+			if err == nil || !strings.Contains(err.Error(), "--pool requires") {
+				t.Fatalf("opts=%+v err=%v", opts, err)
+			}
+		}
+	})
+}
+
+// SPEC-049-R034 / R016: the client asks for the code-bound label only on the
+// reservation, accepts exactly the label it required before encrypting, and
+// verifies that label's headers and disclosure after the response.
+func TestPrivacyClientCodeBoundRequirement(t *testing.T) {
+	if len(privacyCodeBoundProtects) != 12 || len(privacyCodeBoundDoesNotProtect) != 7 || len(privacyCodeBoundResidualRisks) != 16 {
+		t.Fatal("code-bound disclosure list length drifted")
+	}
+	for _, stream := range []bool{false, true} {
+		stdout, stderr, calls, err := runPrivacyClient(t, privacyClientSpec{
+			stream: stream, content: privacyContent(stream), assurance: relayblind.PrivacyAssuranceCodeBound,
+			finalPrompt: 4, finalCompletion: 2, clearPrompt: 4, clearCompletion: 2,
+		})
+		if err != nil || calls != 2 || stdout != string(privacyContent(stream)) {
+			t.Fatalf("stream=%v err=%v calls=%d stdout=%q", stream, err, calls, stdout)
+		}
+		for _, part := range append([]string{"assurance: " + relayblind.PrivacyAssuranceCodeBound, privacyCodeBoundScope}, privacyCodeBoundResidualRisks...) {
+			if !strings.Contains(stderr, part) {
+				t.Fatalf("stderr missing %q in %q", part, stderr)
+			}
+		}
+	}
+}
+
+func TestPrivacyClientRejectsAnotherLabelBeforeSend(t *testing.T) {
+	for name, spec := range map[string]privacyClientSpec{
+		"device-bound when code-bound was required": {assurance: relayblind.PrivacyAssuranceCodeBound, served: relayblind.PrivacyAssurance},
+		"code-bound when nothing was required":      {served: relayblind.PrivacyAssuranceCodeBound},
+	} {
+		t.Run(name, func(t *testing.T) {
+			spec.content = privacyContent(false)
+			_, stderr, calls, err := runPrivacyClient(t, spec)
+			if err == nil || !strings.Contains(err.Error(), "privacy assurance rejected") || calls != 1 || stderr != "" {
+				t.Fatalf("err=%v calls=%d stderr=%q", err, calls, stderr)
+			}
+		})
+	}
+}
+
+func TestPrivacyClientRejectsALabelSwapAfterSend(t *testing.T) {
+	_, stderr, calls, err := runPrivacyClient(t, privacyClientSpec{
+		content: privacyContent(false), assurance: relayblind.PrivacyAssuranceCodeBound,
+		headerHook: func(h http.Header) { h.Set(privacyAssuranceHeader, relayblind.PrivacyAssurance) },
+	})
+	assertPrivacyFailure(t, err, stderr, calls, 2)
+}
+
+func TestPrivacyClientAssuranceFlagIsClosed(t *testing.T) {
+	for _, opts := range []options{
+		{baseURL: "https://gateway.example", privacyClass: true, privacyAssuranceRequired: relayblind.PrivacyAssurance},
+		{baseURL: "https://gateway.example", privacyAssuranceRequired: relayblind.PrivacyAssuranceCodeBound, identityPin: "/pin.json"},
+	} {
+		err := run(context.Background(), opts, strings.NewReader(""), io.Discard, io.Discard, func(string) string { return "" })
+		if err == nil || !strings.Contains(err.Error(), "--privacy-assurance-required") {
+			t.Fatalf("opts=%+v err=%v", opts, err)
+		}
+	}
+}

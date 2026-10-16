@@ -21,7 +21,7 @@ SPEC-014 v0.9 commit SHA       : <fill: 40-char SHA>
 SPEC-014 v0.9 portal deploy date: <fill: YYYY-MM-DD>
 Provider-creation disclosure live: <fill: YES/NO + date>
 Existing-provider disclosure live: <fill: YES/NO + date>
-Operator name + role            : <fill: e.g. "augstar — sole operator">
+Operator name + role            : <fill: e.g. "<name> — sole operator">
 Signed off at                   : <fill: ISO 8601 UTC>
 ```
 

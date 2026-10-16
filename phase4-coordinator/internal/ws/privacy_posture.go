@@ -103,6 +103,10 @@ func (s *Server) runPrivacyPostureProbe(provider pool.Provider) {
 	pendingKey := sessionKey(provider.ProviderID, provider.AssignedID)
 	s.privacyPostureChans.Store(pendingKey, ch)
 	defer s.privacyPostureChans.Delete(pendingKey)
+	// SPEC-049-R033: evidence is held only while this challenge is
+	// outstanding, and never outlives it.
+	s.privacyCodeBoundEvidence.Delete(pendingKey)
+	defer s.privacyCodeBoundEvidence.Delete(pendingKey)
 	if err != nil {
 		s.privacyAuthority.NoteChallengeTimeout(provider.ProviderID, provider.AssignedID)
 		s.log.Warn().Err(err).Str("provider_id", provider.ProviderID).Msg("privacy posture: challenge marshal failed")
@@ -123,17 +127,27 @@ func (s *Server) runPrivacyPostureProbe(provider pool.Provider) {
 		// Session replacement holds the provider section, so verifying (and
 		// possibly enrolling) inside it with a current-session check means a
 		// replaced session can never write an enrollment (SPEC-049-R025).
-		var err error
+		// The provider sends its evidence immediately before the posture on
+		// the same ordered connection, so it is already held here.
+		evidence := s.takePrivacyCodeBoundEvidence(pendingKey)
+		var (
+			err     error
+			outcome relayblind.CodeBoundOutcome
+		)
 		s.withProviderSection(provider.ProviderID, func(*providerSection) {
 			if _, ok := s.pool.Resolve(provider.ProviderID, provider.AssignedID); !ok {
 				s.privacyAuthority.NoteChallengeTimeout(provider.ProviderID, provider.AssignedID)
 				err = errPrivacySessionReplaced
 				return
 			}
-			err = s.privacyAuthority.VerifyPosture(context.Background(), provider.ProviderID, provider.AssignedID, nonce, payload, provider.SEPublicKey, s.now())
+			outcome, err = s.privacyAuthority.VerifyPostureWithEvidence(context.Background(), provider.ProviderID, provider.AssignedID, nonce, payload, evidence, provider.SEPublicKey, s.now())
 		})
 		if err != nil {
 			s.log.Warn().Err(err).Str("provider_id", provider.ProviderID).Msg("privacy posture: response rejected")
+		} else if outcome.Reason != "" {
+			// A refused code-bound proof only withholds the label: the
+			// posture stays verified as device-bound (SPEC-049-R033).
+			s.log.Info().Str("event", "privacy_code_bound_rejected").Str("reason", outcome.Reason).Msg("privacy posture verified without the code-bound label")
 		}
 	case <-timer.C:
 		s.privacyAuthority.NoteChallengeTimeout(provider.ProviderID, provider.AssignedID)
@@ -147,6 +161,41 @@ func (s *Server) handlePrivacyPostureResponse(providerID, assignedID string, pay
 		return
 	}
 	s.deliverPrivacyPostureResponse(providerID, assignedID, append([]byte(nil), payload...))
+}
+
+// handlePrivacyCodeBoundEvidence holds the SPEC-049 §4.13 evidence a session
+// sends right before its posture response: at most one per session, and only
+// while a posture challenge is outstanding for it. The posture check decides
+// whether it fits that posture and records why when it does not.
+func (s *Server) handlePrivacyCodeBoundEvidence(providerID, assignedID string, payload []byte) {
+	if s == nil || s.privacyAuthority == nil {
+		return
+	}
+	if len(payload) == 0 || len(payload) > relayblind.MaxPrivacyCodeBoundEvidenceBytes {
+		s.log.Debug().Str("provider_id", providerID).Msg("privacy code-bound evidence: size rejected")
+		return
+	}
+	key := sessionKey(providerID, assignedID)
+	if _, outstanding := s.privacyPostureChans.Load(key); !outstanding {
+		return
+	}
+	s.privacyCodeBoundEvidence.Store(key, append([]byte(nil), payload...))
+	// The challenge may have ended between the check and the store; its
+	// cleanup already ran, so drop what was just stored.
+	if _, outstanding := s.privacyPostureChans.Load(key); !outstanding {
+		s.privacyCodeBoundEvidence.Delete(key)
+	}
+}
+
+// takePrivacyCodeBoundEvidence removes and returns the held evidence of a
+// session, or nil.
+func (s *Server) takePrivacyCodeBoundEvidence(key string) []byte {
+	v, ok := s.privacyCodeBoundEvidence.LoadAndDelete(key)
+	if !ok {
+		return nil
+	}
+	payload, _ := v.([]byte)
+	return payload
 }
 
 func (s *Server) deliverPrivacyPostureResponse(providerID, assignedID string, payload []byte) {

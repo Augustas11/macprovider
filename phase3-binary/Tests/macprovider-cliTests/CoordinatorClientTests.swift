@@ -4801,6 +4801,16 @@ final class CoordinatorClientTests: XCTestCase {
         )
         var heartbeatWithoutHardware = heartbeat
         heartbeatWithoutHardware.removeValue(forKey: "hardware_summary")
+        // SPEC-001-R006: the engine profile rides every MLX heartbeat; its
+        // chip and RAM classes depend on the host, so they are checked here.
+        let engineProfile = try XCTUnwrap(heartbeatWithoutHardware.removeValue(forKey: "engine_profile") as? [String: Any])
+        XCTAssertEqual(engineProfile["version"] as? String, "engine-profile-v1")
+        XCTAssertEqual(engineProfile["engine_family"] as? String, "general_mlx")
+        XCTAssertEqual(engineProfile["cb_granted_slots"] as? Int, 0)
+        XCTAssertEqual(engineProfile["native_mtp_active"] as? Bool, false)
+        XCTAssertEqual(engineProfile["max_stable_context_tokens"] as? Int, 20_000)
+        XCTAssertEqual(engineProfile["ram_class_gb"] as? Int, EngineProfile.ramClass(capacity.ramGB))
+        XCTAssertEqual(Set(engineProfile.keys), ["version", "engine_family", "cb_granted_slots", "native_mtp_active", "chip_class", "ram_class_gb", "max_stable_context_tokens"])
         let safetyTelemetry = try XCTUnwrap(heartbeatWithoutHardware.removeValue(forKey: "safety_telemetry") as? [String: Any])
         XCTAssertEqual(safetyTelemetry["schema_version"] as? Int, 1)
         XCTAssertEqual(safetyTelemetry["provider_id"] as? String, "provider-test")
@@ -4820,8 +4830,19 @@ final class CoordinatorClientTests: XCTestCase {
         )
         XCTAssertNotNil(UUID(uuidString: serviceInstanceID), "service_instance_id must be a UUID: \(serviceInstanceID)")
         XCTAssertNil(heartbeatWithoutHardware["last_supervisor_event"], "no beacon → last_supervisor_event omitted")
+        // SPEC-001-R007: status metadata alone cannot claim a loaded runtime's
+        // tool-selection support. This fixture's runtime has no loaded model.
+        let heartbeatCapabilities = try XCTUnwrap(
+            heartbeatWithoutHardware.removeValue(forKey: "tool_selection_capabilities") as? [[String: Any]]
+        )
+        XCTAssertTrue(heartbeatCapabilities.isEmpty)
+        var helloWithoutCapabilities = await client.helloMessage()
+        let helloCapabilities = try XCTUnwrap(
+            helloWithoutCapabilities.removeValue(forKey: "tool_selection_capabilities") as? [[String: Any]]
+        )
+        XCTAssertTrue(helloCapabilities.isEmpty)
         let heartbeatJSON = Self.jsonString(heartbeatWithoutHardware)
-        let helloJSON = Self.jsonString(await client.helloMessage())
+        let helloJSON = Self.jsonString(helloWithoutCapabilities)
         let expectedHeartbeat = """
         {"avg_latency_ms_since_last":null,"max_concurrency":1,"max_context_tokens":20000,"model_id":"model-a","model_params_b":0,"ram_gb":\(capacity.ramGB),"requests_served_since_last":0,"slots_free":1,"slots_total":1,"status":"ready","throughput_tps_estimate":0,"throughput_tps_since_last":null,"type":"heartbeat"}
         """

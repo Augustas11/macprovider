@@ -145,6 +145,8 @@ type privacyStackOpts struct {
 	waitPosture    bool
 	// autoEnroll runs SPEC-049 v0.2 automatic enrollment: no operator pins.
 	autoEnroll bool
+	// binaryVersion is the provider CLI version the fixture registers with.
+	binaryVersion string
 }
 
 func newPrivacyStack(t *testing.T, opts privacyStackOpts) *privacyStack {
@@ -161,11 +163,12 @@ func newPrivacyStack(t *testing.T, opts privacyStackOpts) *privacyStack {
 	stateDir = resolved
 	providerID := "prov-swift-privacy-" + randHex(t, 4)
 	fixture := startSwiftPrivacyFixture(t, stateDir, defaultFakeModelID, swiftPrivacyFixtureOpts{
-		ProviderID: providerID,
-		CDHash:     opts.fixtureCDHash,
-		Traced:     opts.traced,
-		Completion: opts.completion,
-		OmitKeys:   opts.omitKeys,
+		ProviderID:    providerID,
+		CDHash:        opts.fixtureCDHash,
+		Traced:        opts.traced,
+		Completion:    opts.completion,
+		OmitKeys:      opts.omitKeys,
+		BinaryVersion: opts.binaryVersion,
 	})
 	approved := opts.approvedCDHash
 	if approved == "" {
@@ -234,6 +237,13 @@ func runPrivacyClient(t *testing.T, apiKey, baseURL, pinPath, prompt string, str
 // directoryKey (SPEC-049-R028).
 func runPrivacyClientWithDirectory(t *testing.T, apiKey, baseURL, pinPath, directoryKey, prompt string, stream, privacy bool) (string, string, error) {
 	t.Helper()
+	input := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":%q}],"stream":%t,"max_tokens":32}`, defaultFakeModelID, prompt, stream)
+	return runPrivacyClientInput(t, apiKey, baseURL, pinPath, directoryKey, input, stream, privacy)
+}
+
+// runPrivacyClientInput runs the reference client on an exact inner chat body.
+func runPrivacyClientInput(t *testing.T, apiKey, baseURL, pinPath, directoryKey, input string, stream, privacy bool) (string, string, error) {
+	t.Helper()
 	args := []string{
 		"--base-url", baseURL,
 		"--model", defaultFakeModelID,
@@ -255,7 +265,7 @@ func runPrivacyClientWithDirectory(t *testing.T, apiKey, baseURL, pinPath, direc
 	if directoryKey != "" {
 		cmd.Env = append(cmd.Env, "MACPROVIDER_PRIVACY_DIRECTORY_PUBLIC_KEY="+directoryKey)
 	}
-	cmd.Stdin = strings.NewReader(fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":%q}],"stream":%t,"max_tokens":32}`, defaultFakeModelID, prompt, stream))
+	cmd.Stdin = strings.NewReader(input)
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

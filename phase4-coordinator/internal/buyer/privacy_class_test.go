@@ -27,6 +27,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/relayblind"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
+	"github.com/augstar/macprovider-coordinator/internal/trustpool"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 	"github.com/rs/zerolog"
 )
@@ -60,7 +61,7 @@ func TestPrivacyGateLogsBoundedReasonsWithoutIdentifiers(t *testing.T) {
 			var logs bytes.Buffer
 			h.server.log = zerolog.New(&logs)
 			tc.mutate(t, h)
-			_, code, _ := h.server.privacyGate(context.Background(), h.provider, h.privacyKey.KeyRecordDigest)
+			_, code, _ := h.server.privacyGate(context.Background(), h.provider, h.privacyKey.KeyRecordDigest, relayblind.PrivacyAssurance)
 			if code != tc.code {
 				t.Fatalf("code=%q want=%q", code, tc.code)
 			}
@@ -110,6 +111,8 @@ type privacyHarness struct {
 	admission      *providerws.AdmissionManager
 	requestLog     *requestlog.Store
 	identity       ed25519.PrivateKey
+	seKey          *ecdsa.PrivateKey
+	seRaw          []byte
 }
 
 type privacyHarnessConfig struct {
@@ -121,6 +124,9 @@ type privacyHarnessConfig struct {
 	quota          int
 	relay          RelayBlindRelayFunc
 	requestLog     bool
+	// trustPools wires a SPEC-042 registry and marks the provider as
+	// advertising trusted_pool_v1 (SPEC-049-R032 tests).
+	trustPools *trustpool.Registry
 }
 
 func newPrivacyHarness(t *testing.T, cfg privacyHarnessConfig) *privacyHarness {
@@ -149,7 +155,7 @@ func newPrivacyHarness(t *testing.T, cfg privacyHarnessConfig) *privacyHarness {
 	seRaw := make([]byte, 64)
 	seKey.X.FillBytes(seRaw[:32])
 	seKey.Y.FillBytes(seRaw[32:])
-	h := &privacyHarness{store: store, clock: clock, identity: identityPrivate}
+	h := &privacyHarness{store: store, clock: clock, identity: identityPrivate, seKey: seKey, seRaw: seRaw}
 	if cfg.privacyKey || cfg.privacyEnabled {
 		if cfg.privacyKey {
 			h.privacyPrivate, h.privacyKey = privacyTestKey(t, identityPrivate, now)
@@ -207,6 +213,7 @@ func newPrivacyHarness(t *testing.T, cfg privacyHarnessConfig) *privacyHarness {
 	if cfg.quota > 0 {
 		h.provider.Tier = pool.TierProvisional
 	}
+	h.provider.TrustedPoolV1 = cfg.trustPools != nil
 	if _, registered := registry.RegisterAt(&h.provider, nil, now); !registered {
 		t.Fatal("provider registration rejected")
 	}
@@ -224,6 +231,9 @@ func newPrivacyHarness(t *testing.T, cfg privacyHarnessConfig) *privacyHarness {
 	opts := []Option{WithGatewayServiceToken("gateway-token"), WithRequireGatewayContext(true), WithRelayBlind(relayCfg, store, cfg.relay)}
 	if h.authority != nil {
 		opts = append(opts, WithPrivacyAuthority(h.authority))
+	}
+	if cfg.trustPools != nil {
+		opts = append(opts, WithPoolMembership(cfg.trustPools), WithTrustPoolStatusStore(poolIsolationTrustPoolStore(t)))
 	}
 	if cfg.quota > 0 {
 		h.admission = providerws.NewAdmissionManager(config.AdmissionConfig{ProvisionalQuotaPerHour: cfg.quota}, clock.Now)

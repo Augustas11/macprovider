@@ -20,7 +20,7 @@
 #
 # Env:
 #   MALIBU_DOWNLOAD_SSH_KEY   path to the Pearl root deploy key (required to publish)
-#   MALIBU_DOWNLOAD_VPS_HOST  Pearl host (default 159.223.165.194)
+#   MALIBU_DOWNLOAD_VPS_HOST  Pearl host (required)
 #   MALIBU_DOWNLOAD_VPS_USER  SSH user (default root; must be root)
 #
 # Exit codes: 0 = published or already in sync; 1 = drift (--check-only) or
@@ -123,7 +123,7 @@ fi
 : "${MALIBU_DOWNLOAD_SSH_KEY:?required to publish: set to the Pearl root deploy key path}"
 SSH_KEY="$MALIBU_DOWNLOAD_SSH_KEY"
 VPS_USER="${MALIBU_DOWNLOAD_VPS_USER:-root}"
-VPS_HOST="${MALIBU_DOWNLOAD_VPS_HOST:-159.223.165.194}"
+VPS_HOST="${MALIBU_DOWNLOAD_VPS_HOST:?set MALIBU_DOWNLOAD_VPS_HOST to the Pearl VPS address; see scripts/ops/README.md}"
 export SSH_KEY VPS_USER VPS_HOST SCRIPT_DIR
 [[ "$VPS_USER" == "root" ]] || die "Pearl publication requires the root SSH account"
 [[ -f "$SSH_KEY" && ! -L "$SSH_KEY" ]] || die "SSH key missing or symlinked: $SSH_KEY"

@@ -76,6 +76,51 @@ final class RelayBlindSettlementReceiptTests: XCTestCase {
         }
     }
 
+    func testTamperFixtureResignsOnlyModelHashAfterNormalConstruction() throws {
+        let fixture = try Self.fixture()
+        let key = try Self.signingKey(fixture)
+        for vector in try XCTUnwrap(fixture["positive"] as? [[String: Any]]) {
+            let input = try Self.receiptInput(vector, fixture: fixture)
+            let store = InMemoryReceiptKeyStore()
+            try store.storeNew(providerId: input.metadata.providerID, privateKey: key)
+            let original = try ReceiptBuilder(keyStore: store)
+                .buildRelayBlindSettlement(providerId: input.metadata.providerID, input: input)
+            let tamper = RelayBlindFixtureReceiptTamper(key: key, modelHash: input.modelHash)
+            let session = try Tier2ProviderSession(
+                providerID: input.metadata.providerID, assignedID: "tamper-test-session",
+                selectedAEAD: Tier2ProviderSession.aeadSuite, keyID: "tamper-test-key",
+                c2pKey: Data(repeating: 0x31, count: 32), p2cKey: Data(repeating: 0x42, count: 32),
+                c2pNonceBase: Data([1, 2, 3, 4]), p2cNonceBase: Data([5, 6, 7, 8])
+            )
+            session.setResponseEndTransformForTest { try tamper.transform($0) }
+            let stream = try XCTUnwrap(vector["stream"] as? Bool)
+            let frame = try session.sealResponseEnd(
+                requestID: input.metadata.requestID, stream: stream,
+                payload: ["relay_blind_settlement_receipt": original]
+            )
+            XCTAssertEqual(frame["encrypted"] as? Bool, true)
+            XCTAssertNil(frame["relay_blind_settlement_receipt"])
+            let opened = try Tier2ProviderSession.openResponseEndForTest(
+                session: session, frame: frame, requestID: input.metadata.requestID, stream: stream
+            )
+            let envelope = try XCTUnwrap(opened["relay_blind_settlement_receipt"] as? String)
+            // verify checks signature, canonical JSON and the full tuple shape.
+            // Route-time model equality belongs to the coordinator integration test.
+            var actual = try Self.verify(envelope, publicKey: key.publicKey)
+            let expected = try Self.verify(original, publicKey: key.publicKey)
+            XCTAssertNotEqual(actual["model_hash"] as? String, input.modelHash)
+            XCTAssertEqual(actual["expected_catalog_model_hash"] as? String, input.modelHash)
+            actual["model_hash"] = expected["model_hash"]
+            XCTAssertEqual(try Self.jcsValue(actual), try Self.jcsValue(expected))
+            XCTAssertThrowsError(try tamper.resign(""))
+            XCTAssertThrowsError(try tamper.transform([:]), "missing receipts must not be fabricated")
+            XCTAssertThrowsError(try tamper.resign(envelope), "an already tampered hash must not match the pin")
+            XCTAssertThrowsError(try RelayBlindFixtureReceiptTamper(
+                key: Curve25519.Signing.PrivateKey(), modelHash: input.modelHash
+            ).resign(original), "the original receipt must verify under the fixture key")
+        }
+    }
+
     func testBuilderRefusesInputsTheVerifierWouldReject() throws {
         let fixture = try Self.fixture()
         let key = try Self.signingKey(fixture)

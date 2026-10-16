@@ -9,7 +9,7 @@ Buyer `continuous_batching` stays **off**. Live v1.8.170 slots stay at 4. Do not
 ## Header
 
 - **Date:** 2026-09-20
-- **Operator:** augstar
+- **Operator:** @Augustas11
 - **Provider id:** non-production test drive; no coordinator join, no buyer traffic, no receipts
 - **Measurement seam:** `macprovider-cli msb-throughput --engine scheduler --compile`
 - **Binary:** `feat/spec038-scheduler-lockstep-window` built on-box (Swift release), run from `run/` co-located with candidate v1.8.170 `mlx.metallib`

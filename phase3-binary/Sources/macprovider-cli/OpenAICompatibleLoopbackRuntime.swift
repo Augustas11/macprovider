@@ -1270,6 +1270,7 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
         }
         try request.validateModelMatches(servedModelRef, aliases: modelIDAliasList(catalogModelIDAlias))
+        try ToolSelectionPolicy.validateRequest(request, loadedModelID: servedModelRef, runtime: runtimeSource)
         registrationCounter += 1
         return RequestHandle(
             snapshot: snapshot(),
@@ -1288,6 +1289,7 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
     /// serves a different file than the one bound at startup.
     func preflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws {
         try handle.drainCancelled.check()
+        try ToolSelectionPolicy.validateRequest(request, loadedModelID: servedModelRef, runtime: runtimeSource)
         _ = try await upstreamContextGate(request)
     }
 
@@ -1299,6 +1301,7 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
         }
         try request.validateModelMatches(servedModelRef, aliases: modelIDAliasList(catalogModelIDAlias))
+        try ToolSelectionPolicy.validateRequest(request, loadedModelID: servedModelRef, runtime: runtimeSource)
         let contextWindow = try await upstreamContextGate(request)
         return try await proxy(request, contextWindow: contextWindow, shouldCancel: shouldCancel, onChunk: nil)
     }
@@ -1661,6 +1664,7 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         shouldCancel: @escaping @Sendable () -> Bool,
         onChunk: (@Sendable (StreamChunk) -> Void)?
     ) async throws -> CompletionResult {
+        try ToolSelectionPolicy.validateRequest(request, loadedModelID: servedModelRef, runtime: runtimeSource)
         if shouldCancel() { throw CancellationError() }
         // The last check before any byte goes upstream, for streaming and
         // non-streaming alike: the bound artifact identity is unchanged and,

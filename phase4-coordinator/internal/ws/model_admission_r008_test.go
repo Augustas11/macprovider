@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,12 +28,17 @@ func TestModelAdmissionDecisionCompletesWithQueuedPublisher(t *testing.T) {
 	s.cfg.Auth.OperatorKeys = map[string]string{"alice": "alice-secret", "bob": "bob-secret"}
 	s.newUUID = uuid.NewString
 	c := operatorClient{t: t, s: s}
-	f.registerSession(t, "p1", "s1", "model-a", true)
-	offer := f.offer(t, "p1", "a", "mlx_cache", map[string]string{modelidentity.SnapshotManifestV1: bindingRowHash})
 
+	// Install the hook before any binding-refresh retry goroutine exists and
+	// never write the field again: those goroutines read it unlocked, so a
+	// later write raced them under -race (#1996). armed gates it instead.
 	published := make(chan struct{})
 	var once sync.Once
+	var armed atomic.Bool
 	s.artifactIdentitySets.onReadLocked = func() {
+		if !armed.Load() {
+			return
+		}
 		once.Do(func() {
 			// The reader holds the release lock; a publisher queues behind it.
 			go func() {
@@ -42,6 +48,9 @@ func TestModelAdmissionDecisionCompletesWithQueuedPublisher(t *testing.T) {
 			time.Sleep(100 * time.Millisecond)
 		})
 	}
+	f.registerSession(t, "p1", "s1", "model-a", true)
+	offer := f.offer(t, "p1", "a", "mlx_cache", map[string]string{modelidentity.SnapshotManifestV1: bindingRowHash})
+	armed.Store(true)
 	done := make(chan struct{})
 	var code int
 	var body map[string]any
@@ -62,7 +71,6 @@ func TestModelAdmissionDecisionCompletesWithQueuedPublisher(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("publisher never landed after the reader finished")
 	}
-	s.artifactIdentitySets.onReadLocked = nil
 	// The decision evaluated under the OLD generation; the sweep that ran on
 	// publication re-validated the surviving candidate under the new one.
 	stored := f.latest(t, "p1", offer.CandidateID)

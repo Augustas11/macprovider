@@ -5,7 +5,7 @@
 > **SPEC-029** number now belongs to the unrelated sweep-workload-class spec. This
 > file, its `spec029/` fixtures, and the `losslessness_probe_v1` wire constant keep
 > the `029`/`spec029` labels deliberately — renaming a shipped wire identifier is
-> out of scope. See `beta/DECISION_CRITERIA.md` Entry 127.
+> out of scope. See `docs/decision-log.md` Entry 127.
 
 Status: prototype implementation from `v0.1-draft`.
 

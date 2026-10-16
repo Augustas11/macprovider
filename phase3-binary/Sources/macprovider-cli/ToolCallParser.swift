@@ -1,4 +1,5 @@
 import Foundation
+import MacProviderCore
 
 enum ToolCallParser {
     static let SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP = 1_048_576
@@ -55,6 +56,53 @@ enum ToolCallParser {
             }
             return (nilIfBlank(rawOutput), [])
         }
+    }
+
+    /// Guaranteed modes deliberately exclude the auto-mode recovery and XML
+    /// coercion paths. Every byte outside a closed JSON envelope must be blank.
+    static func parseGuaranteedToolCalls(_ rawOutput: String) throws -> [ToolCall] {
+        guard rawOutput.utf8.count <= SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else {
+            throw ToolSelectionPolicy.outputError("Tool output exceeded byte limit")
+        }
+        var remainder = rawOutput[...]
+        var calls: [ToolCall] = []
+        while !remainder.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            remainder = remainder.drop(while: { $0.isWhitespace })
+            guard remainder.hasPrefix("<tool_call>") else {
+                throw ToolSelectionPolicy.outputError("Tool output requires complete closed JSON envelopes")
+            }
+            let bodyAndRest = remainder.dropFirst("<tool_call>".count).drop(while: { $0.isWhitespace })
+            // Locate the complete JSON value before interpreting delimiters:
+            // marker text inside an argument string remains ordinary data.
+            guard let body = firstCompleteJSONObject(in: String(bodyAndRest)) else {
+                throw ToolSelectionPolicy.outputError("Tool output requires a complete JSON object")
+            }
+            let tail = bodyAndRest.dropFirst(body.count).drop(while: { $0.isWhitespace })
+            guard tail.hasPrefix("</tool_call>") else {
+                throw ToolSelectionPolicy.outputError("Tool output requires complete closed JSON envelopes")
+            }
+            do {
+                guard case .object(let object) = try StrictJSONParser.parse(body, maxDepth: JSONSchemaValidator.maxDepth + 1),
+                      Set(object.keys) == Set(["name", "arguments"]),
+                      case .string(let name)? = object["name"], !name.isEmpty,
+                      case .object(let arguments)? = object["arguments"],
+                      ToolSelectionPolicy.supportsNumericDomain(.object(arguments)) else {
+                    throw ToolSelectionPolicy.outputError("Malformed tool JSON envelope")
+                }
+                calls.append(ToolCall(
+                    id: "call_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(),
+                    functionName: name,
+                    arguments: try JSONValue.object(arguments).deterministicJSONString()
+                ))
+            } catch {
+                throw ToolSelectionPolicy.outputError("Malformed tool JSON envelope")
+            }
+            guard calls.count <= ToolSelectionPolicy.maxCalls else {
+                throw ToolSelectionPolicy.outputError("Too many tool calls")
+            }
+            remainder = tail.dropFirst("</tool_call>".count)
+        }
+        return calls
     }
 
     private static func recoverQwenUnclosedToolCall(
@@ -741,7 +789,7 @@ enum ToolCallParser {
         guard rawJSON.utf8.count <= SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else {
             throw ParseError.invalidArguments
         }
-        var validator = JSONDuplicateKeyValidator(rawJSON)
+        var validator = ToolArgumentJSONValidator(rawJSON, syntax: .legacyToolCall)
         try validator.validate()
     }
 
@@ -757,179 +805,6 @@ enum ToolCallParser {
         case invalidArguments
         case byteCapExceeded
         case responseByteCapExceeded
-    }
-
-    private struct JSONDuplicateKeyValidator {
-        let rawJSON: String
-        var index: String.Index
-
-        init(_ rawJSON: String) {
-            self.rawJSON = rawJSON
-            self.index = rawJSON.startIndex
-        }
-
-        mutating func validate() throws {
-            skipWhitespace()
-            try parseValue(depth: 0)
-            skipWhitespace()
-            guard index == rawJSON.endIndex else {
-                throw ParseError.invalidArguments
-            }
-        }
-
-        private mutating func parseValue(depth: Int) throws {
-            skipWhitespace()
-            guard index < rawJSON.endIndex else {
-                throw ParseError.invalidArguments
-            }
-
-            switch rawJSON[index] {
-            case "{":
-                try parseObject(depth: depth + 1)
-            case "[":
-                try parseArray(depth: depth + 1)
-            case "\"":
-                _ = try parseString()
-            case "t":
-                try consumeLiteral("true")
-            case "f":
-                try consumeLiteral("false")
-            case "n":
-                try consumeLiteral("null")
-            case "-", "0"..."9":
-                parseNumber()
-            default:
-                throw ParseError.invalidArguments
-            }
-        }
-
-        private mutating func parseObject(depth: Int) throws {
-            guard depth <= SPEC018_ARGUMENTS_MAX_JSON_DEPTH else {
-                throw ParseError.invalidArguments
-            }
-            advance()
-            skipWhitespace()
-            var keys = Set<String>()
-
-            if consume("}") {
-                return
-            }
-
-            while true {
-                skipWhitespace()
-                guard index < rawJSON.endIndex, rawJSON[index] == "\"" else {
-                    throw ParseError.invalidArguments
-                }
-                let key = try parseString()
-                guard keys.insert(key).inserted else {
-                    throw ParseError.invalidArguments
-                }
-                skipWhitespace()
-                guard consume(":") else {
-                    throw ParseError.invalidArguments
-                }
-                try parseValue(depth: depth)
-                skipWhitespace()
-                if consume("}") {
-                    return
-                }
-                guard consume(",") else {
-                    throw ParseError.invalidArguments
-                }
-            }
-        }
-
-        private mutating func parseArray(depth: Int) throws {
-            guard depth <= SPEC018_ARGUMENTS_MAX_JSON_DEPTH else {
-                throw ParseError.invalidArguments
-            }
-            advance()
-            skipWhitespace()
-
-            if consume("]") {
-                return
-            }
-
-            while true {
-                try parseValue(depth: depth)
-                skipWhitespace()
-                if consume("]") {
-                    return
-                }
-                guard consume(",") else {
-                    throw ParseError.invalidArguments
-                }
-            }
-        }
-
-        private mutating func parseString() throws -> String {
-            guard index < rawJSON.endIndex, rawJSON[index] == "\"" else {
-                throw ParseError.invalidArguments
-            }
-
-            var rawString = "\""
-            advance()
-            var escaped = false
-
-            while index < rawJSON.endIndex {
-                let ch = rawJSON[index]
-                rawString.append(ch)
-                advance()
-
-                if escaped {
-                    escaped = false
-                } else if ch == "\\" {
-                    escaped = true
-                } else if ch == "\"" {
-                    guard let data = rawString.data(using: .utf8),
-                          let decoded = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) as? String
-                    else {
-                        throw ParseError.invalidArguments
-                    }
-                    return decoded
-                }
-            }
-
-            throw ParseError.invalidArguments
-        }
-
-        private mutating func consumeLiteral(_ literal: String) throws {
-            guard rawJSON[index...].hasPrefix(literal) else {
-                throw ParseError.invalidArguments
-            }
-            for _ in literal {
-                advance()
-            }
-        }
-
-        private mutating func parseNumber() {
-            while index < rawJSON.endIndex {
-                switch rawJSON[index] {
-                case "-", "+", ".", "e", "E", "0"..."9":
-                    advance()
-                default:
-                    return
-                }
-            }
-        }
-
-        private mutating func skipWhitespace() {
-            while index < rawJSON.endIndex, rawJSON[index].isWhitespace {
-                advance()
-            }
-        }
-
-        private mutating func consume(_ expected: Character) -> Bool {
-            guard index < rawJSON.endIndex, rawJSON[index] == expected else {
-                return false
-            }
-            advance()
-            return true
-        }
-
-        private mutating func advance() {
-            index = rawJSON.index(after: index)
-        }
     }
 }
 

@@ -72,11 +72,16 @@ var tier1DisclosureText = []disclosureItem{
 }
 
 type accountPageData struct {
-	APIKey      string
-	HasAPIKey   bool
-	Disclosures []disclosureItem
-	ScriptNonce string
+	APIKey          string
+	HasAPIKey       bool
+	Disclosures     []disclosureItem
+	ScriptNonce     string
+	StakeDisclosure string
 }
+
+// stakeAllowanceDisclosure is the SPEC-050-R012 text, shown unchanged on the
+// account page's stake panel.
+const stakeAllowanceDisclosure = "Staked MALIBU stays locked while staked and during the unlock cooldown. The daily allowance is inference credit on this network only. It cannot be withdrawn, transferred, or sold, and unused allowance expires at 00:00 UTC. Its size depends on the operator's daily network budget and can change."
 
 func (s *Server) handleAccount(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -98,10 +103,11 @@ func (s *Server) handleAccount(w http.ResponseWriter, r *http.Request) {
 	setBrowserSecurityHeaders(w.Header(), scriptNonce)
 	w.WriteHeader(http.StatusOK)
 	_ = accountTemplate.Execute(w, accountPageData{
-		APIKey:      apiKey,
-		HasAPIKey:   apiKey != "",
-		Disclosures: tier1DisclosureText,
-		ScriptNonce: scriptNonce,
+		APIKey:          apiKey,
+		HasAPIKey:       apiKey != "",
+		Disclosures:     tier1DisclosureText,
+		ScriptNonce:     scriptNonce,
+		StakeDisclosure: stakeAllowanceDisclosure,
 	})
 }
 

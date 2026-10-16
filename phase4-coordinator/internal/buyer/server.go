@@ -30,6 +30,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/computeintegrity"
 	"github.com/augstar/macprovider-coordinator/internal/config"
+	"github.com/augstar/macprovider-coordinator/internal/fleetcache"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
@@ -73,19 +74,27 @@ const (
 // permanent/client (validation, capacity, shape) codes are retryable=false.
 var spec018RetryableByCode = map[string]bool{
 	// Transient availability/timeout — the buyer should retry (SPEC-006 §5.2).
-	"no_provider_available":      true,
-	"provider_error":             true,
-	"provider_timeout":           true,
-	"provider_disconnected":      true,
-	"provider_failed":            true,
-	"provisional_quota_exceeded": true, // 429, ships Retry-After: 3600 (writeErrorTypedParam)
-	"preflight_rejected":         true, // 503, all providers rejected/timed out during preflight
-	"idempotency_unavailable":    true, // 503, durable request logging unavailable
+	"no_provider_available":         true,
+	"provider_error":                true,
+	"provider_timeout":              true,
+	"provider_disconnected":         true,
+	"provider_failed":               true,
+	"provisional_quota_exceeded":    true, // 429, ships Retry-After: 3600 (writeErrorTypedParam)
+	"preflight_rejected":            true, // 503, all providers rejected/timed out during preflight
+	"idempotency_unavailable":       true, // 503, durable request logging unavailable
+	"fleet_cache_purge_unavailable": true, // 503, durable purge authority/status storage unavailable
 	// 503, #768: every candidate for the model is below its minimum binary
 	// version. Retryable — the fleet self-updates, so the same request can
 	// succeed once a provider upgrades and reconnects.
-	"model_version_floor_unmet": true,
-	"rate_limited":              true, // 429, Tier-2 disclosure endpoints already ship Retry-After: 1
+	"model_version_floor_unmet":   true,
+	"vision_capacity_unavailable": true,
+	"rate_limited":                true, // 429, Tier-2 disclosure endpoints already ship Retry-After: 1
+	// SPEC-050-R007/R014 allowance admission. Exhaustion lasts until the
+	// next 00:00 UTC refresh (X-RateLimit-Reset); an unavailable admission
+	// store is transient.
+	"allowance_exhausted":   false,
+	"quota_exhausted":       false,
+	"allowance_unavailable": true,
 	// BYOM admission states below settlement_capable are intentionally
 	// terminal for the current request: retrying the same paid route must not
 	// imply earning or catalog-priced settlement.
@@ -109,6 +118,9 @@ var spec018RetryableByCode = map[string]bool{
 	"request_canceled":                                        false,
 	"context_exceeds_capacity":                                false,
 	"unsupported_content_shape":                               false,
+	"unsupported_media":                                       false,
+	"invalid_image_input":                                     false,
+	"image_input_too_large":                                   false,
 	"invalid_request":                                         false,
 	"invalid_internal_max_output_tokens":                      false,
 	"invalid_json":                                            false,
@@ -188,12 +200,16 @@ var spec018RetryableByCode = map[string]bool{
 	// three emitted but present in neither this map nor the round-2
 	// completeness test's inventory (autotune_feeds.go:120's sibling
 	// rate_limited entry above was already covered; :124 was not).
-	"autotune_feed_not_found": false, // Tier-2 feed disabled/unconfigured, permanent
-	"invalid_tools":           false, // client request-shape validation, permanent
-	"pool_status_not_found":   false, // pool status lookup is non-enumerating for unknown/unauthorized pools
-	"pool_status_unavailable": true,  // transient durable status reconstruction/read fault
-	"pool_policy_not_found":   false, // pool policy lookup is non-enumerating for unknown/unauthorized pools
-	"pool_policy_unavailable": true,  // transient durable policy reconstruction/read fault
+	"autotune_feed_not_found":          false, // Tier-2 feed disabled/unconfigured, permanent
+	"invalid_tools":                    false,
+	"invalid_tool_choice":              false,
+	"unsupported_tool_choice":          false,
+	"unsupported_tool_schema":          false,
+	"tool_selection_validation_failed": false, // client request-shape validation, permanent
+	"pool_status_not_found":            false, // pool status lookup is non-enumerating for unknown/unauthorized pools
+	"pool_status_unavailable":          true,  // transient durable status reconstruction/read fault
+	"pool_policy_not_found":            false, // pool policy lookup is non-enumerating for unknown/unauthorized pools
+	"pool_policy_unavailable":          true,  // transient durable policy reconstruction/read fault
 	// route_snapshot_failed is a pre-dispatch durable-store write failure
 	// (route_snapshot.go:149) — a retry can succeed once storage recovers,
 	// unlike the other internal-fault codes above which are left false.
@@ -244,6 +260,10 @@ type Server struct {
 	defaultObjective  string
 	tiebreakRandomize bool
 	tiebreakEpsilon   float64
+	// perf is the SPEC-002-R005 measured-performance store; routeMetrics
+	// counts SPEC-002-R007 selections (nil = not wired).
+	perf         *routing.PerfStore
+	routeMetrics RouteSelectionMetrics
 	// routingMu guards defaultObjective, modelClasses, and
 	// minProviderThroughput, which are hot-swapped on SIGHUP when routing
 	// config changes (issue #266 T1 + min_provider_throughput_tps).
@@ -254,6 +274,7 @@ type Server struct {
 	// critical section.
 	routingMu              sync.RWMutex
 	modelClasses           map[string]config.ModelClassConfig
+	visionQualifications   []config.VisionQualificationConfig
 	maxRetries             int
 	retryPerAttemptTimeout time.Duration
 	maxFaultedPerRequest   int
@@ -273,30 +294,32 @@ type Server struct {
 	// modelVersionFloors is the #768 per-model minimum-binary-version map
 	// (model_id -> minimum version). Read-only after construction; nil/empty
 	// means no floors, which is byte-identical to pre-#768 routing.
-	modelVersionFloors    map[string]string
-	reqLog                requestLogInserter
-	reqLogStore           *requestlog.Store
-	sourceEvidence        *sourceevidence.Store
-	provisionalWeight     float64
-	maxChatBodyBytes      int64
-	recovering            sync.Map
-	poolCheckMu           sync.Mutex
-	poolCheckLast         map[string]time.Time
-	poolReadinessSources  map[string]receiptKeysBucket
-	poolReadinessLimiters map[string]receiptKeysBucket
-	poolCheckMaxEntries   int
-	poolCheckTTL          time.Duration
-	receiptKeysMu         sync.Mutex
-	receiptKeysLimiters   map[string]receiptKeysBucket
-	receiptKeysMaxEntries int
-	receiptKeysTTL        time.Duration
-	publicTrustPoolWork   chan struct{}
-	streamingDowngrade    *streamingDowngradeStore
-	streamingTiming       *streamingTimingCollector
-	slotQueue             *slotQueue
-	slotQueueDeadline     time.Duration
-	slotQueuePollInterval time.Duration
-	minProviderThroughput float64
+	modelVersionFloors      map[string]string
+	reqLog                  requestLogInserter
+	reqLogStore             *requestlog.Store
+	fleetCache              *fleetcache.Store
+	dispatchFleetCachePurge func(fleetcache.Purge)
+	sourceEvidence          *sourceevidence.Store
+	provisionalWeight       float64
+	maxChatBodyBytes        int64
+	recovering              sync.Map
+	poolCheckMu             sync.Mutex
+	poolCheckLast           map[string]time.Time
+	poolReadinessSources    map[string]receiptKeysBucket
+	poolReadinessLimiters   map[string]receiptKeysBucket
+	poolCheckMaxEntries     int
+	poolCheckTTL            time.Duration
+	receiptKeysMu           sync.Mutex
+	receiptKeysLimiters     map[string]receiptKeysBucket
+	receiptKeysMaxEntries   int
+	receiptKeysTTL          time.Duration
+	publicTrustPoolWork     chan struct{}
+	streamingDowngrade      *streamingDowngradeStore
+	streamingTiming         *streamingTimingCollector
+	slotQueue               *slotQueue
+	slotQueueDeadline       time.Duration
+	slotQueuePollInterval   time.Duration
+	minProviderThroughput   float64
 	// trustedProxies is the parsed CIDR set whose X-Forwarded-For /
 	// X-Real-IP headers the rate-limit keying honors. Pre-parsed at
 	// construction (config.go TrustedProxyPrefixes) so the hot path
@@ -510,6 +533,7 @@ func WithRoutingConfig(cfg config.RoutingConfig) Option {
 			s.defaultObjective = cfg.DefaultObjective
 		}
 		s.modelClasses = cloneModelClasses(cfg.ModelClasses)
+		s.visionQualifications = append([]config.VisionQualificationConfig(nil), cfg.VisionQualifications...)
 		s.routingMu.Unlock()
 		s.maxRetries = cfg.MaxRetries
 		if cfg.RetryPerAttemptTimeoutS > 0 {
@@ -767,6 +791,13 @@ func WithRequestLog(store requestLogInserter) Option {
 	}
 }
 
+func WithFleetCache(store *fleetcache.Store, dispatch func(fleetcache.Purge)) Option {
+	return func(s *Server) {
+		s.fleetCache = store
+		s.dispatchFleetCachePurge = dispatch
+	}
+}
+
 func WithSourceEvidence(store *sourceevidence.Store) Option {
 	return func(s *Server) {
 		s.sourceEvidence = store
@@ -873,6 +904,7 @@ func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Ti
 		failoverEnabled:          true,
 		failoverTimeout:          5 * time.Second,
 		defaultObjective:         "default",
+		perf:                     routing.NewPerfStore(),
 		retryPerAttemptTimeout:   60 * time.Second,
 		stickyTTL:                30 * time.Minute,
 		stickyMaxEntries:         10000,
@@ -1237,11 +1269,39 @@ func (s *Server) handleStreamingMetrics(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) InternalHandler() http.Handler {
 	r := chi.NewRouter()
+	r.Get("/internal/sticky", s.handleInternalStickyStatus)
 	r.Delete("/internal/sticky", s.handleInternalStickyDelete)
 	r.Get("/internal/routing", s.handleInternalRouting)
 	r.Get("/internal/settlement/finality", s.handleInternalSettlementFinality)
 	r.Get("/internal/settlement/receipts", s.handleInternalSettlementReceipts)
 	return r
+}
+
+func (s *Server) handleInternalStickyStatus(w http.ResponseWriter, r *http.Request) {
+	if !s.internalBearerAuthorizedFull(r.Header, r.RemoteAddr, r.URL.Path) {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Internal sticky status requires coordinator authorization")
+		return
+	}
+	accountID := strings.TrimSpace(r.URL.Query().Get("account_id"))
+	if accountID == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "Missing account_id")
+		return
+	}
+	if s.fleetCache == nil {
+		writeError(w, http.StatusServiceUnavailable, "fleet_cache_purge_unavailable", "Conversation cache purge storage unavailable")
+		return
+	}
+	pending, err := s.fleetCache.PendingForAccount(r.Context(), accountID)
+	if err != nil {
+		s.log.Error().Err(err).Str("account_id", accountID).Msg("conversation cache purge status lookup failed")
+		writeError(w, http.StatusServiceUnavailable, "fleet_cache_purge_unavailable", "Conversation cache purge storage unavailable")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"purged": len(pending) == 0, "pending": len(pending) != 0,
+		"pending_acknowledgements": len(pending),
+	})
 }
 
 func (s *Server) handleInternalRouting(w http.ResponseWriter, r *http.Request) {
@@ -1590,18 +1650,43 @@ func (s *Server) handleInternalStickyDelete(w http.ResponseWriter, r *http.Reque
 	if s.stickyEnabled {
 		entries = s.purgeStickyAccount(accountID)
 	}
+	if s.fleetCache == nil {
+		// Legacy/test embeddings without the fleet authority retain the
+		// pre-v0.2 affinity-only contract. Production main always wires the
+		// authority and fails startup if its migration cannot open.
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"purged": true, "entries": entries})
+		return
+	}
+	purge, err := s.fleetCache.PurgeAccount(r.Context(), accountID)
+	if err != nil {
+		s.log.Error().Err(err).Str("account_id", accountID).Msg("conversation cache purge persistence failed")
+		writeError(w, http.StatusServiceUnavailable, "fleet_cache_purge_unavailable", "Conversation cache purge storage unavailable")
+		return
+	}
+	for _, pending := range purge.Pending {
+		if s.dispatchFleetCachePurge != nil {
+			s.dispatchFleetCachePurge(pending)
+		}
+	}
+	if len(purge.Pending) != 0 {
+		if current, err := s.fleetCache.PendingForAccount(r.Context(), accountID); err != nil {
+			s.log.Error().Err(err).Str("account_id", accountID).Msg("conversation cache purge status lookup failed")
+			writeError(w, http.StatusServiceUnavailable, "fleet_cache_purge_unavailable", "Conversation cache purge storage unavailable")
+			return
+		} else {
+			purge.Pending = current
+		}
+	}
 	s.log.Info().Str("event", "sticky_purged_account").Str("account_id", accountID).Int("entries", entries).Msg("sticky affinity purged")
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"purged": true, "entries": entries})
-}
-
-func isLoopbackRequest(r *http.Request) bool {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
+	if len(purge.Pending) != 0 {
+		w.WriteHeader(http.StatusAccepted)
 	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"purged": len(purge.Pending) == 0, "pending": len(purge.Pending) != 0,
+		"pending_acknowledgements": len(purge.Pending), "entries": entries,
+	})
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -2161,18 +2246,6 @@ func (s *Server) poolCheckClientKey(r *http.Request) string {
 	return host
 }
 
-// isLoopbackHost is retained for legacy callers that may still consult
-// it directly. Issue #125 routes the rate-limit key derivation through
-// the configured trusted-proxy CIDR set instead, but the helper stays
-// for any non-rate-limit callsite that wants a quick loopback check.
-func isLoopbackHost(host string) bool {
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return false
-	}
-	return ip.IsLoopback()
-}
-
 // isTrustedProxy reports whether addr falls inside any of the
 // configured trusted-proxy prefixes. Pure function — both
 // poolCheckClientKey and rightmostUntrustedXFF call it so the
@@ -2426,10 +2499,12 @@ func (s *Server) applyHashVerification(entry *modelEntry, providers []pool.Provi
 }
 
 type chatRequest struct {
-	Model    string        `json:"model"`
-	Messages []chatMessage `json:"messages"`
-	Stream   bool          `json:"stream"`
-	raw      json.RawMessage
+	toolSelection *toolSelectionPolicy
+	Model         string        `json:"model"`
+	Messages      []chatMessage `json:"messages"`
+	Stream        bool          `json:"stream"`
+	hasVision     bool
+	raw           json.RawMessage
 	// poolID is the SPEC-042 Trusted Pool selected for this request (from
 	// the authorized X-MacProvider-Pool header). "" means global (poolless)
 	// routing — the default — which keeps selection byte-identical.
@@ -2440,10 +2515,18 @@ type chatRequest struct {
 	// class (from the gateway's X-MacProvider-Internal-Engine). "" means no
 	// selection, which keeps selection byte-identical.
 	engineClass string
+	// maxTokens is the body's validated max_tokens (0 = absent), read by the
+	// SPEC-002-R006 phase classifier.
+	maxTokens int
 	// multiTurnToolHistory records SPEC-018 §3.8 tool history (role:"tool"
 	// or non-empty assistant tool_calls) so class selection can drop
 	// members without a multi-turn prompt profile.
 	multiTurnToolHistory bool
+	// nonStrictSchemaLegacyRejection is set when response_format runs in
+	// SPEC-019 §1a non-strict mode. It holds the pre-inference 400 a coordinator
+	// and provider CLI before v0.3.0 returned for the same body, which selection
+	// returns when no provider that supports non-strict mode remains.
+	nonStrictSchemaLegacyRejection *schemaValidationError
 }
 
 type chatMessage struct {
@@ -2454,8 +2537,9 @@ type chatMessage struct {
 }
 
 type chatContentPart struct {
-	Type string          `json:"type"`
-	Text json.RawMessage `json:"text"`
+	Type     string          `json:"type"`
+	Text     json.RawMessage `json:"text"`
+	ImageURL json.RawMessage `json:"image_url"`
 }
 
 type requestToolCall struct {
@@ -2517,6 +2601,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// recorder so mark() reads the live billing state at write time; outermost
 	// so it covers every downstream write path.
 	w = &noPriorDispatchResponseWriter{ResponseWriter: w, rec: rec}
+	// SPEC-050: admit the request against the account's allowance before any
+	// attempt is dispatched (a refusal carries the no-prior-dispatch marker,
+	// so the gateway refunds), and close the hold after the last attempt.
+	if !s.admitAllowance(w, r, rec, accountID, externalRequestID, hasAuthenticatedAccount) {
+		return
+	}
+	defer s.closeAllowance(rec, accountID, externalRequestID)
 	if strings.TrimSpace(r.Header.Get(relayBlindExecutionAuthorizationHeader)) != "" {
 		s.handleRelayBlindChat(w, r, rec, originalRequestID)
 		return
@@ -2688,6 +2779,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// the intake aggregator — whether or not a provider serves it. The
 	// aggregator retains neither the string nor the account.
 	s.observeUnmatchedModel(req.Model, accountID, hasAuthenticatedAccount)
+	if req.hasVision && req.Model != visionModelID {
+		rec.setModel("")
+		rec.logBuyerFailure(http.StatusBadRequest, "Image input is supported only by the qualified vision model")
+		writeError(w, http.StatusBadRequest, "unsupported_media", "Image input is supported only by the qualified vision model")
+		return
+	}
 	// SPEC-006-R018 / SPEC-042-R015: a pool/ model id exists only on its own
 	// authorized pool route; anywhere else it answers as an unknown model.
 	poolModelRequested := false
@@ -2701,6 +2798,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		poolModelRequested = true
 	}
 	if !poolModelRequested && !s.pool.ModelKnown(req.Model) && s.resolveModelClass(req.Model) == nil {
+		if req.hasVision {
+			writeError(w, http.StatusBadRequest, "unsupported_media", "Image input is supported only by the qualified vision model")
+			return
+		}
 		// The buyer-supplied string of an unserved model is never persisted:
 		// the request-log row carries a blank model and a constant message.
 		rec.setModel("")
@@ -2735,7 +2836,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			status = fallbackStatus
 		}
 		if attempt.PromptTokens == nil && attempt.ErrorCode == "" && (attempt.EstimatedCompTokens != nil || status == http.StatusBadGateway || status == http.StatusGatewayTimeout) {
-			estimatedPrompt := int64(estimateTokens(req.raw))
+			estimatedPrompt := int64(estimateRequestTokens(req.raw, req.hasVision))
 			attempt.PromptTokens = &estimatedPrompt
 		}
 		if attempt.SettlementOutput == nil {
@@ -2759,8 +2860,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// can derive PreflightResult ("accepted" vs "not_applicable") without
 	// re-tokenising req.raw on each advance. Issue #266 T1 R1 audit
 	// MEDIUM fix.
-	state.estimatedTokens = estimateTokens(req.raw)
-	rec.setPromptTokenUpperBound(promptTokenUpperBound(req.raw))
+	state.estimatedTokens = estimateRequestTokens(req.raw, req.hasVision)
+	state.routingEstimatedTokens = routingRequestPromptTokenEstimate(req.raw, req.hasVision)
+	rec.setPromptTokenUpperBound(requestPromptTokenUpperBound(req.raw, req.hasVision))
 	provider, routeErr := s.selectProvider(r.Context(), routingRequestID, req, r.Header, state.dailyKey, state)
 	if routeErr != nil {
 		state.routingDone = s.now()
@@ -2776,6 +2878,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	state.routingDone = s.now()
 	state.phaseTiming.markCoordRoutingDone(state.routingDone)
 	state.provider = provider
+	// SPEC-002-R007: trace the first selection for operators and the buyer.
+	w.Header().Set(routeTraceHeader, s.noteRouteTrace(routingRequestID, req, r.Header, provider, state.routeDecision, state.routingEstimatedTokens))
 	// SPEC-042 R005 generation fence is enforced centrally at the top of the
 	// forwardWithFailover dispatch loop (covering initial, retry, and failover
 	// dispatches) — see forward_with_failover.go.
@@ -2860,8 +2964,13 @@ func (s *Server) forwardStreamSequence(
 	//     audit-explainability gap closed in this PR.
 	cbs := transportCallbacks{
 		dispatch: func(w http.ResponseWriter, r *http.Request, req chatRequest, requestID, _ string, _ time.Time, state *forwardState, rec *billingRecorder) (dispatchedAttempt, bool) {
-			dispatchBody, err := dispatchBodyForProvider(req, state.provider)
+			dispatchBody, err := s.dispatchBodyForProviderChecked(req, state.provider)
 			if err != nil {
+				if errors.Is(err, errVisionCapacityUnavailable) {
+					rec.logRow(state.provider.AssignedID, http.StatusServiceUnavailable, nil, nil, "No qualified provider currently serves image input for the requested model", "", state.explicitRetries)
+					writeError(w, http.StatusServiceUnavailable, "vision_capacity_unavailable", "No qualified provider currently serves image input for the requested model")
+					return dispatchedAttempt{}, false
+				}
 				rec.logRow(state.provider.AssignedID, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", state.explicitRetries)
 				writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
 				return dispatchedAttempt{}, false
@@ -2910,6 +3019,10 @@ func (s *Server) forwardStreamSequence(
 				result, status, attempt := s.forwardStreaming(w, r, requestID, dispatchBody, state.provider, req.Model, s.attemptTimeout(r), settlementMetadata, state, rec.attemptN)
 				tr = classifyStreamResult(result, status, attempt)
 				nativeResult = result
+			}
+			if tr.attempt.ErrorCode == "tool_selection_validation_failed" {
+				tr.retryable = false
+				tr.failoverEligible = false
 			}
 			// Pre-refactor streaming gated the failoverCandidate
 			// same-attempt re-route on `tr.failoverEligible && wsTunneled`
@@ -3014,6 +3127,10 @@ func (s *Server) forwardStreamSequence(
 				writeRouteError(w, buyerRouteError(capacityShedRouteErrorWithLegacy(state.requestedModel, "Selected provider is not reachable"), state))
 				return
 			}
+			if dispatched.tr.attempt.ErrorCode == "tool_selection_validation_failed" {
+				writeToolSelectionError(w)
+				return
+			}
 			writeStreamForwardError(w, dispatched.nativeResult)
 		},
 		logRetryAttempt: func(dispatched dispatchedAttempt, state *forwardState) {
@@ -3036,7 +3153,7 @@ func (s *Server) forwardStreamSequence(
 					RetryCount:      state.explicitRetries,
 					Retried:         state.explicitRetries,
 					RetryReason:     "streaming_advance",
-					PreflightResult: s.preflightLabel(state.estimatedTokens),
+					PreflightResult: s.preflightLabel(state.routingEstimatedTokens),
 				},
 			)
 			return false
@@ -3091,8 +3208,13 @@ func (s *Server) forwardWSNonStreamSequence(
 	//     on state.provider.
 	cbs := transportCallbacks{
 		dispatch: func(w http.ResponseWriter, r *http.Request, req chatRequest, requestID, _ string, _ time.Time, state *forwardState, rec *billingRecorder) (dispatchedAttempt, bool) {
-			dispatchBody, err := dispatchBodyForProvider(req, state.provider)
+			dispatchBody, err := s.dispatchBodyForProviderChecked(req, state.provider)
 			if err != nil {
+				if errors.Is(err, errVisionCapacityUnavailable) {
+					rec.logRow(state.provider.AssignedID, http.StatusServiceUnavailable, nil, nil, "No qualified provider currently serves image input for the requested model", "", state.explicitRetries)
+					writeError(w, http.StatusServiceUnavailable, "vision_capacity_unavailable", "No qualified provider currently serves image input for the requested model")
+					return dispatchedAttempt{}, false
+				}
 				rec.logRow(state.provider.AssignedID, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", state.explicitRetries)
 				writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
 				return dispatchedAttempt{}, false
@@ -3246,7 +3368,7 @@ func (s *Server) forwardWSNonStreamSequence(
 					RetryCount:      state.explicitRetries,
 					Retried:         state.explicitRetries,
 					RetryReason:     "ws_advance",
-					PreflightResult: s.preflightLabel(state.estimatedTokens),
+					PreflightResult: s.preflightLabel(state.routingEstimatedTokens),
 				},
 			)
 			return !state.provider.IsWSTunneled()
@@ -3318,8 +3440,13 @@ func (s *Server) forwardHTTPSequence(
 	//     reads status/retryRequested from httpDispatchExtra.
 	cbs := transportCallbacks{
 		dispatch: func(w http.ResponseWriter, r *http.Request, req chatRequest, _, originalRequestID string, startedAt time.Time, state *forwardState, rec *billingRecorder) (dispatchedAttempt, bool) {
-			dispatchBody, err := dispatchBodyForProvider(req, state.provider)
+			dispatchBody, err := s.dispatchBodyForProviderChecked(req, state.provider)
 			if err != nil {
+				if errors.Is(err, errVisionCapacityUnavailable) {
+					rec.logProviderRow(state.provider, http.StatusServiceUnavailable, nil, nil, "No qualified provider currently serves image input for the requested model", "", state.explicitRetries)
+					writeError(w, http.StatusServiceUnavailable, "vision_capacity_unavailable", "No qualified provider currently serves image input for the requested model")
+					return dispatchedAttempt{}, false
+				}
 				rec.logProviderRow(state.provider, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", state.explicitRetries)
 				writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
 				return dispatchedAttempt{}, false
@@ -3412,6 +3539,16 @@ func (s *Server) forwardHTTPSequence(
 					writeError(w, http.StatusBadGateway, blockReason, "Provider returned invalid Tier2 output encoding")
 					return dispatchedAttempt{}, false
 				}
+				if validateToolSelectionOutput(state.toolSelection, respBody, false) != nil || validateToolSelectionOutput(state.toolSelection, checkedBody, false) != nil {
+					cancelAttempt()
+					attempt := toolSelectionFailureAttempt()
+					if err := rec.recordRow(state.provider.AssignedID, state.provider.ProviderID, state.provider.RuntimeSource, attempt.Status, nil, nil, nil, attempt.Error, attempt.ErrorCode, state.explicitRetries, nil, attempt.FaultFlag, attempt.SettlementOutput); err != nil {
+						writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log request")
+						return dispatchedAttempt{}, false
+					}
+					writeToolSelectionError(w)
+					return dispatchedAttempt{}, false
+				}
 				bodyMutatedByGuard := !bytes.Equal(checkedBody, respBody)
 				respBody = checkedBody
 				estimatedCompletion := s.observedCompletionTokensFromBytes(len(respBody))
@@ -3452,6 +3589,8 @@ func (s *Server) forwardHTTPSequence(
 					// A gateway that did not advertise trailer finality
 					// reads it from headers only: keep the pre-#1690 order,
 					// record before the write (settlement_trailers.go).
+					// Its routing observation waits for the write.
+					holdPerformance(state)
 					if err := rec.withPendingReceipt(state.provider, receiptValue, func() error {
 						return rec.logProviderRowWithCacheEstimateAndOutput(state.provider, http.StatusOK, promptTok, cachedPromptTok, completionTok, "", "", state.explicitRetries, completionCeiling, output)
 					}); err != nil {
@@ -3485,7 +3624,7 @@ func (s *Server) forwardHTTPSequence(
 				if !rec.settlementTrailersNegotiated {
 					w.WriteHeader(http.StatusOK)
 					s.stickyStore(r.Header, state.provider, req.Model)
-					_, _ = w.Write(respBody)
+					s.releasePerformance(state, writeDelivered(w, respBody))
 					cancelAttempt()
 					return dispatchedAttempt{}, false
 				}
@@ -3757,7 +3896,7 @@ func (s *Server) forwardHTTPSequence(
 					RetryCount:      state.explicitRetries,
 					Retried:         state.explicitRetries,
 					RetryReason:     "http_advance",
-					PreflightResult: s.preflightLabel(state.estimatedTokens),
+					PreflightResult: s.preflightLabel(state.routingEstimatedTokens),
 				},
 			)
 			return false
@@ -3861,15 +4000,50 @@ func (s *Server) forwardWS(w http.ResponseWriter, r *http.Request, requestID str
 	//     provider ConversationCache keying WITHOUT activating SPEC-004 sticky
 	//     affinity. applySticky / stickyStore MUST NOT read this header.
 	// Demo traffic never receives either key (unauthenticated IPs cannot poison
-	// a bucket).
-	if key := strings.TrimSpace(r.Header.Get("X-MacProvider-Internal-Conv")); strings.HasPrefix(key, "conv:") {
-		ctx = providerws.ContextWithConversationKey(ctx, key)
-	} else if key := strings.TrimSpace(r.Header.Get("X-MacProvider-Internal-Conv-Cache")); strings.HasPrefix(key, "conv:") {
+	// a bucket). Providers whose binary cannot serve a keyed request get no key
+	// (FR-SR-2 forwarding is a MAY; see providerAcceptsConversationKey).
+	privacyExecution := strings.TrimSpace(r.Header.Get(relayBlindExecutionAuthorizationHeader)) != ""
+	if present, _ := privacyRequested(r); present {
+		privacyExecution = true
+	}
+	acceptsKey := !privacyExecution && (state == nil || !state.hasVision) && providerAcceptsConversationKey(provider.BinaryVersion)
+	if !acceptsKey && state != nil && hasForwardableConversationKey(r.Header) {
+		state.conversationKeyWithheld = true
+		state.conversationCacheOnly = false
+	}
+	stickyKey := strings.TrimSpace(r.Header.Get("X-MacProvider-Internal-Conv"))
+	cacheOnlyKey := strings.TrimSpace(r.Header.Get("X-MacProvider-Internal-Conv-Cache"))
+	key, cacheOnly := stickyKey, false
+	if key == "" {
+		key, cacheOnly = cacheOnlyKey, true
+	}
+	if acceptsKey && strings.HasPrefix(key, "conv:") && provider.FleetCacheProtocol >= 1 {
+		account, authenticated := authenticatedAccountFromContext(r.Context())
+		if authenticated && s.fleetCache != nil {
+			grant, err := s.fleetCache.Grant(r.Context(), account.ID(), key, provider.ProviderID)
+			if err == nil {
+				ctx = providerws.ContextWithFleetCache(ctx, providerws.FleetCacheGrant{ConversationKey: grant.ConversationKey, Generation: grant.Generation}, cacheOnly)
+			} else {
+				s.log.Warn().Err(err).Str("provider_id", provider.ProviderID).Msg("fleet cache grant withheld")
+				if state != nil {
+					state.conversationKeyWithheld = true
+					state.conversationCacheOnly = false
+				}
+			}
+		} else if state != nil {
+			state.conversationKeyWithheld = true
+			state.conversationCacheOnly = false
+		}
+	} else if strings.HasPrefix(stickyKey, "conv:") && acceptsKey {
+		// Legacy providers retain their existing hot-cache behavior but never
+		// receive durable fleet eligibility without the purge ACK protocol.
+		ctx = providerws.ContextWithConversationKey(ctx, stickyKey)
+	} else if strings.HasPrefix(cacheOnlyKey, "conv:") && acceptsKey {
 		// Auto-prefix cache key: set provider context but do NOT activate sticky.
 		// applySticky / stickyStore only read X-MacProvider-Internal-Conv; this
 		// header is intentionally invisible to them (SPEC-006-R012, SPEC-004).
 		// The provider learns it is cache-only (SPEC-048-R009).
-		ctx = providerws.ContextWithConversationCacheOnlyKey(ctx, key)
+		ctx = providerws.ContextWithConversationCacheOnlyKey(ctx, cacheOnlyKey)
 		if state != nil {
 			state.conversationCacheOnly = true
 		}
@@ -4053,6 +4227,11 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 				writeError(w, http.StatusBadGateway, blockReason, "Provider returned invalid Tier2 output encoding")
 				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider returned invalid Tier2 output encoding", ErrorCode: blockReason, FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
 			}
+			if state != nil && (validateToolSelectionOutput(state.toolSelection, originalBody, false) != nil || validateToolSelectionOutput(state.toolSelection, checkedBody, false) != nil) {
+				attempt := toolSelectionFailureAttempt()
+				writeToolSelectionError(w)
+				return wsForwardFailed, attempt
+			}
 			// Round-2 audit HIGH: PillarD enforceOutputCap may truncate the
 			// completion. The provider signed end.Receipt over the original
 			// bytes; if we forward the truncated body alongside the receipt,
@@ -4098,6 +4277,8 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 			// before the write with finality in headers.
 			recordBeforeWrite := declareOutcomeTrailers == nil
 			if recordBeforeWrite && logSuccess != nil {
+				// Its routing observation waits for the write.
+				holdPerformance(state)
 				if err := logSuccess(attempt); err != nil {
 					writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log request")
 					return wsForwardFailed, requestLogAttempt{Logged: true}
@@ -4115,8 +4296,16 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 			}
 			if recordBeforeWrite {
 				w.WriteHeader(http.StatusOK)
-				checkedBody = maybeRecoverQwenXMLToolCalls(checkedBody, state)
-				_, _ = w.Write(checkedBody)
+				if state == nil || state.toolSelection == nil {
+					checkedBody = maybeRecoverQwenXMLToolCalls(checkedBody, state)
+				}
+				delivered := writeDelivered(w, checkedBody)
+				s.releasePerformance(state, delivered)
+				if !delivered {
+					// A caller that logs this attempt after return must not
+					// observe an undelivered body.
+					holdPerformance(state)
+				}
 				return wsForwardComplete, attempt
 			}
 			// Delivered-only (SPEC-022 R-5.6): success is recorded only
@@ -4124,7 +4313,9 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 			// travels as MAC'd trailers.
 			declareOutcomeTrailers(w.Header())
 			w.WriteHeader(http.StatusOK)
-			checkedBody = maybeRecoverQwenXMLToolCalls(checkedBody, state)
+			if state == nil || state.toolSelection == nil {
+				checkedBody = maybeRecoverQwenXMLToolCalls(checkedBody, state)
+			}
 			if !writeDelivered(w, checkedBody) {
 				// A non-streaming body is usable only whole: the buyer
 				// received nothing and nothing bills.
@@ -4202,6 +4393,7 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 	// acct is the attempt's single source of delivered bytes, usage, and
 	// settlement evidence (deliveredSSEAccounting).
 	acct := newDeliveredSSEAccounting()
+	s.markFirstTokenOnContent(acct, state)
 	streamingMode := s.streamingMode(r, provider)
 	streamingBuyer := s.streamingBuyerKey(r)
 	progressAttempt := func(message string, faultFlag string) requestLogAttempt {
@@ -4235,6 +4427,9 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 	setStreamFailureAttempt := func(status int, message string, code string) {
 		streamFailureAttempt = requestLogAttempt{Status: status, Error: message, ErrorCode: code, EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(acct.deliveredBytes()), FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
 		hasStreamFailureAttempt = true
+	}
+	if state != nil && state.toolSelection != nil {
+		streamingMode = streamingModeToolSelectionHoldback
 	}
 	if streamingMode != streamingModeIncremental {
 		return s.forwardWSStreamingBuffered(w, r, requestID, provider, relay, streamingMode, streamingBuyer, state, billingAttemptN)
@@ -4366,6 +4561,9 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 	writeChunk := func(data string) (bool, wsForwardResult) {
 		if sse, ok := buyerSSEFromProviderJSONCompletion([]byte(data), state); ok {
 			data = string(sse)
+			// A whole JSON response arrives at once: it has no first-token
+			// time (SPEC-002-R005).
+			acct.onFirstContent = nil
 		}
 		acct.provider([]byte(data))
 		data = string(sanitizeQwenLeakedToolMarkupBlock([]byte(data), state))
@@ -4647,15 +4845,25 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 				markProviderDone()
 				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider returned invalid Tier2 output encoding", ErrorCode: "tier2_output_encoding_invalid", FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
 			}
-			if raw.Len() > int(maxUpstreamResponseBodyBytes)-len(checked) {
+			if state != nil && state.toolSelection != nil && checked != chunk.Data {
+				relay.Cancel("tool_selection_output_transformed")
+				markProviderDone()
+				return wsForwardFailed, toolSelectionFailureAttempt()
+			}
+			if raw.Len() > int(maxUpstreamResponseBodyBytes)-len(checked) || (state != nil && state.toolSelection != nil && raw.Len() > int(maxUpstreamResponseBodyBytes)-len(chunk.Data)) {
 				relay.Cancel("buffered_stream_too_large")
 				markProviderDone()
 				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider buffered stream exceeded cap", ErrorCode: "provider_stream_too_large", FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
 			}
-			if sanitized, p, cached, c := sseBlockWithCachedPromptTokens([]byte(checked), state, billingAttemptN); p != nil || cached != nil || c != nil {
-				checked = string(sanitized)
+			if state == nil || state.toolSelection == nil {
+				if sanitized, p, cached, c := sseBlockWithCachedPromptTokens([]byte(checked), state, billingAttemptN); p != nil || cached != nil || c != nil {
+					checked = string(sanitized)
+				}
 			}
-			rewritten, err := toolFinal.rewriteAndObserve(checked)
+			rewritten := checked
+			if state == nil || state.toolSelection == nil {
+				rewritten, err = toolFinal.rewriteAndObserve(checked)
+			}
 			if err != nil {
 				relay.Cancel("malformed_tool_call_stream")
 				if s.streamingDowngrade != nil {
@@ -4664,14 +4872,43 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 				markProviderDone()
 				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider emitted malformed buffered tool-call stream", ErrorCode: "provider_stream_downgraded", FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
 			}
-			raw.WriteString(rewritten)
+			if state != nil && state.toolSelection != nil {
+				raw.WriteString(chunk.Data)
+			} else {
+				raw.WriteString(rewritten)
+			}
 			if stop {
 				relay.Cancel("tier2_output_truncated")
 				markProviderDone()
 				// Nothing of the truncated buffered stream was written.
+				if state != nil && state.toolSelection != nil {
+					return wsForwardFailed, toolSelectionFailureAttempt()
+				}
 				return wsForwardComplete, requestLogAttempt{Status: http.StatusOK, EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(acct.deliveredBytes())}
 			}
 		case end := <-relay.Done:
+			// The relay can queue its end while response chunks are still buffered.
+			// Drain the already-published tail before deciding a guaranteed outcome.
+			if state != nil && state.toolSelection != nil {
+			drainGuaranteedTail:
+				for {
+					select {
+					case tail, ok := <-relay.Chunks:
+						if !ok {
+							break drainGuaranteedTail
+						}
+						acct.provider([]byte(tail.Data))
+						checked, stop, err := guard.CheckStreamingChunk(tail.Data)
+						if err != nil || stop || checked != tail.Data || raw.Len() > int(maxUpstreamResponseBodyBytes)-len(checked) || raw.Len() > int(maxUpstreamResponseBodyBytes)-len(tail.Data) {
+							markProviderDone()
+							return wsForwardFailed, toolSelectionFailureAttempt()
+						}
+						raw.WriteString(tail.Data)
+					default:
+						break drainGuaranteedTail
+					}
+				}
+			}
 			if end.Status == "error_context_exceeded" {
 				// Nothing of a buffered stream reached the buyer; the
 				// request exceeded the provider's context.
@@ -4690,20 +4927,29 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 				}
 				return wsForwardFailed, attempt
 			}
-			if !toolFinal.finalCloseOK() {
+			if (state == nil || state.toolSelection == nil) && !toolFinal.finalCloseOK() {
 				if s.streamingDowngrade != nil {
 					s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
 				}
 				markProviderDone()
 				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider closed before tool-call stream completed", ErrorCode: "tool_call_final_close_failed", FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
 			}
-			out, err := consolidatedToolCallSSE(raw.Bytes())
+			if state != nil && validateToolSelectionOutput(state.toolSelection, raw.Bytes(), true) != nil {
+				markProviderDone()
+				return wsForwardFailed, toolSelectionFailureAttempt()
+			}
+			out, err := consolidatedToolCallSSEForSelection(raw.Bytes(), state != nil && state.toolSelection != nil)
 			if err != nil {
 				if s.streamingDowngrade != nil {
 					s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
 				}
 				markProviderDone()
 				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider emitted malformed buffered tool-call stream", ErrorCode: "provider_stream_downgraded", FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
+			}
+			if state != nil && state.toolSelection != nil {
+				if sanitized, p, cached, c := sseBlockWithCachedPromptTokens(out, state, billingAttemptN); p != nil || cached != nil || c != nil {
+					out = sanitized
+				}
 			}
 			if err := acct.validate(out); err != nil {
 				if s.streamingDowngrade != nil {
@@ -4725,7 +4971,7 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 			w.Header().Set(engineResponseHeader, providerEngineClass(provider))
 			w.Header().Set("X-MacProvider-Route", provider.AssignedID)
 			w.Header().Set(streamingModeHeader, streamingMode)
-			if s.poolAttemptCancelledBeforeCommit(r, state, provider.ProviderID) {
+			if r.Context().Err() != nil || s.poolAttemptCancelledBeforeCommit(r, state, provider.ProviderID) {
 				return wsForwardCancelled, requestLogAttempt{}
 			}
 			w.WriteHeader(http.StatusOK)
@@ -4803,8 +5049,14 @@ func (s *Server) forwardStreamingJSONAsBuyerSSE(
 		markProviderDone()
 		return wsForwardFailed, http.StatusBadGateway, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider response exceeded coordinator limit"}
 	}
+	if state != nil && validateToolSelectionOutput(state.toolSelection, raw, false) != nil {
+		markProviderDone()
+		return wsForwardFailed, http.StatusBadGateway, toolSelectionFailureAttempt()
+	}
 	providerRaw := raw
-	raw = maybeRecoverQwenXMLToolCalls(raw, state)
+	if state == nil || state.toolSelection == nil {
+		raw = maybeRecoverQwenXMLToolCalls(raw, state)
+	}
 	// The rendered SSE is both the provider side of the accounting (the
 	// provider's JSON, event by event) and the buyer-facing bytes.
 	acct := newDeliveredSSEAccounting()
@@ -4828,7 +5080,7 @@ func (s *Server) forwardStreamingJSONAsBuyerSSE(
 	}
 	_ = billingAttemptN
 	markProviderDone()
-	if s.poolAttemptCancelledBeforeCommit(r, state, provider.ProviderID) {
+	if r.Context().Err() != nil || s.poolAttemptCancelledBeforeCommit(r, state, provider.ProviderID) {
 		return wsForwardCancelled, 0, requestLogAttempt{}
 	}
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
@@ -4957,6 +5209,9 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 	if chatRequestDeclaresTools(body) && !strings.Contains(ct, "text/event-stream") {
 		return s.forwardStreamingJSONAsBuyerSSE(w, r, resp, provider, state, billingAttemptN, started, markProviderDone)
 	}
+	if state != nil && state.toolSelection != nil {
+		streamingMode = streamingModeToolSelectionHoldback
+	}
 	if streamingMode != streamingModeIncremental {
 		return s.forwardStreamingBuffered(w, r, requestID, resp, provider, modelScope, streamingMode, streamingBuyer, state, billingAttemptN)
 	}
@@ -4986,6 +5241,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 	// settlement evidence (deliveredSSEAccounting). streamProbe sees every
 	// block first, only to validate it.
 	acct := newDeliveredSSEAccounting()
+	s.markFirstTokenOnContent(acct, state)
 	streamProbe := newSettlementStreamOutputTracker()
 	coalescer := newConcatSafeToolStream()
 	var preCommit bytes.Buffer
@@ -5451,16 +5707,22 @@ func (s *Server) forwardStreamingBuffered(w http.ResponseWriter, r *http.Request
 	acct := newDeliveredSSEAccounting()
 	acct.provider(raw)
 	receiptValue := normalizeReceiptHeaderValue(resp.Trailer.Get("X-MacProvider-Receipt"))
+	if state != nil && validateToolSelectionOutput(state.toolSelection, raw, true) != nil {
+		return wsForwardFailed, http.StatusBadGateway, toolSelectionFailureAttempt()
+	}
 	validator := newStreamToolCallFinalValidator()
-	rewrittenRaw, err := validator.rewriteAndObserve(string(raw))
-	if err != nil || !validator.finalCloseOK() {
+	rewrittenRaw := string(raw)
+	if state == nil || state.toolSelection == nil {
+		rewrittenRaw, err = validator.rewriteAndObserve(string(raw))
+	}
+	if err != nil || ((state == nil || state.toolSelection == nil) && !validator.finalCloseOK()) {
 		if s.streamingDowngrade != nil {
 			s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
 		}
 		return wsForwardProviderDisconnected, http.StatusBadGateway, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider emitted malformed buffered tool-call stream", ErrorCode: "provider_stream_downgraded", FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
 	}
 	raw = []byte(rewrittenRaw)
-	out, err := consolidatedToolCallSSE(raw)
+	out, err := consolidatedToolCallSSEForSelection(raw, state != nil && state.toolSelection != nil)
 	if err != nil {
 		if s.streamingDowngrade != nil {
 			s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
@@ -5483,6 +5745,9 @@ func (s *Server) forwardStreamingBuffered(w http.ResponseWriter, r *http.Request
 	w.Header().Set(engineResponseHeader, providerEngineClass(provider))
 	w.Header().Set("X-MacProvider-Route", provider.AssignedID)
 	w.Header().Set(streamingModeHeader, streamingMode)
+	if r.Context().Err() != nil || s.poolAttemptCancelledBeforeCommit(r, state, provider.ProviderID) {
+		return wsForwardCancelled, 0, requestLogAttempt{Status: http.StatusOK, Error: "Buyer disconnected during buffered streaming", SettlementOutput: settlementOutputForContent("", nil, nil, billing.TerminalStateBuyerCancel)}
+	}
 	w.WriteHeader(http.StatusOK)
 	acct.render(out)
 	if n, err := w.Write(out); err != nil {
@@ -5517,7 +5782,17 @@ type bufferedToolCall struct {
 }
 
 func consolidatedToolCallSSE(raw []byte) ([]byte, error) {
-	calls, err := collectStreamingToolCalls(raw)
+	return consolidatedToolCallSSEForSelection(raw, false)
+}
+
+func consolidatedToolCallSSEForSelection(raw []byte, guaranteed bool) ([]byte, error) {
+	var calls []bufferedToolCall
+	var err error
+	if guaranteed {
+		calls, err = strictToolSelectionCalls(raw)
+	} else {
+		calls, err = collectStreamingToolCalls(raw)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -6486,10 +6761,42 @@ func validateChatRequestDetailed(body []byte) (chatRequest, int, string, string,
 			return req, http.StatusBadRequest, "invalid_request", "Invalid stream", ""
 		}
 	}
+	policy, selectionErr := validateToolSelection(body, raw)
+	if selectionErr != nil {
+		return req, http.StatusBadRequest, selectionErr.code, selectionErr.message, "tool_choice"
+	}
+	// Tool-selection duplicates keep their established precise error above;
+	// all other duplicate members are rejected before any content projection.
+	if duplicateJSONMember(body) {
+		return req, http.StatusBadRequest, "invalid_request", "Duplicate JSON fields are not supported", ""
+	}
+	req.toolSelection = policy
 	if status, code, msg, param := validateOptionalFields(raw, req.Stream); status != 0 {
 		return req, status, code, msg, param
 	}
-	if normalized, status, code, msg := validateMessages(req.Messages, rawMessages); status != 0 {
+	if v, ok := raw["response_format"]; ok {
+		legacy, status, code, msg := validateResponseFormatSchema(v, req.Stream)
+		if status != 0 {
+			return req, status, code, msg, ""
+		}
+		req.nonStrictSchemaLegacyRejection = legacy
+	}
+	if v, ok := raw["max_tokens"]; ok && !bytes.Equal(bytes.TrimSpace(v), []byte("null")) {
+		_ = json.Unmarshal(v, &req.maxTokens)
+	} else if v, ok := raw["max_completion_tokens"]; ok {
+		_ = json.Unmarshal(v, &req.maxTokens)
+	}
+	// Validate media before text-array projection. A media request binds its
+	// original ordered content to provider inference and receipt hashing.
+	if hasVision, status, code, msg := validateVisionContent(req.Messages); status != 0 {
+		return req, status, code, msg, "messages"
+	} else {
+		req.hasVision = hasVision
+	}
+	if req.hasVision && chatRequestDeclaresTools(req.raw) {
+		return req, http.StatusBadRequest, "unsupported_media", "Image input does not support tool execution", "tools"
+	}
+	if normalized, status, code, msg := validateMessages(req.Messages, rawMessages, req.hasVision); status != 0 {
 		return req, status, code, msg, ""
 	} else if normalized {
 		normalizedMessages, err := json.Marshal(rawMessages)
@@ -6545,6 +6852,76 @@ func countTopLevelField(body []byte, field string) (int, bool, error) {
 	return count, nonCanonical, nil
 }
 
+// Provider CLIs 1.8.238 through 1.8.240 embed mlx-swift-lm 3.32.3 but still
+// hand a keyed serial request's KVCacheSimple to a TokenIterator whose
+// parameters carry maxKVSize, which that library rejects with
+// incompatibleCapacity before prefill (#1998). Any request carrying a
+// conversation_key (sticky or SPEC-006-R012 auto-prefix) failed on them.
+const (
+	conversationKeyUnsafeFirstBinary = "1.8.238"
+	conversationKeyUnsafeLastBinary  = "1.8.240"
+)
+
+// hasForwardableConversationKey reports whether forwardWS would forward a
+// sticky or cache-only conversation_key for these headers.
+func hasForwardableConversationKey(h http.Header) bool {
+	return strings.HasPrefix(strings.TrimSpace(h.Get("X-MacProvider-Internal-Conv")), "conv:") ||
+		strings.HasPrefix(strings.TrimSpace(h.Get("X-MacProvider-Internal-Conv-Cache")), "conv:")
+}
+
+// providerAcceptsConversationKey reports whether a provider binary can serve
+// a request that carries a conversation_key. Unparseable versions keep the
+// previous behavior (forward).
+func providerAcceptsConversationKey(binaryVersion string) bool {
+	afterFirst, ok := versionfloor.Compare(binaryVersion, conversationKeyUnsafeFirstBinary)
+	if !ok {
+		return true
+	}
+	beforeLast, _ := versionfloor.Compare(binaryVersion, conversationKeyUnsafeLastBinary)
+	return afterFirst < 0 || beforeLast > 0
+}
+
+// The first provider CLI that implements SPEC-019 v0.3.0 §1a non-strict
+// json_schema. Older CLIs reject the same body before inference.
+const nonStrictJSONSchemaFirstBinary = "1.8.242"
+
+// providerAcceptsNonStrictJSONSchema reports whether a provider binary can
+// serve a SPEC-019 §1a non-strict json_schema request. Unparseable versions
+// cannot.
+func providerAcceptsNonStrictJSONSchema(binaryVersion string) bool {
+	cmp, ok := versionfloor.Compare(binaryVersion, nonStrictJSONSchemaFirstBinary)
+	return ok && cmp >= 0
+}
+
+// filterNonStrictJSONSchemaCandidates drops providers that cannot serve the
+// request's non-strict json_schema. rejected is true when a provider serving
+// the requested model was dropped and no capable one serves it. Any other
+// request is returned unchanged.
+func (s *Server) filterNonStrictJSONSchemaCandidates(req chatRequest, providers []pool.Provider, class *config.ModelClassConfig) (out []pool.Provider, rejected bool) {
+	if req.nonStrictSchemaLegacyRejection == nil {
+		return providers, false
+	}
+	out = make([]pool.Provider, 0, len(providers))
+	droppedServes, capableServes := false, false
+	for _, provider := range providers {
+		serves := s.providerMatchesRequest(provider, req.Model, class)
+		if providerAcceptsNonStrictJSONSchema(provider.BinaryVersion) {
+			out = append(out, provider)
+			capableServes = capableServes || serves
+			continue
+		}
+		droppedServes = droppedServes || serves
+	}
+	return out, droppedServes && !capableServes
+}
+
+// nonStrictJSONSchemaRouteError is the pre-v0.3.0 400 for a non-strict
+// json_schema request that no capable provider can serve.
+func nonStrictJSONSchemaRouteError(req chatRequest) *routeError {
+	legacy := req.nonStrictSchemaLegacyRejection
+	return &routeError{status: legacy.status, code: legacy.code, message: legacy.message}
+}
+
 // dispatchBodyForProvider delegates to routing.RewriteModel. The
 // pre-PR JSON-surgical model-field rewrite moved into the routing
 // package as part of issue #266 T2; this wrapper preserves the
@@ -6555,7 +6932,24 @@ func dispatchBodyForProvider(req chatRequest, provider pool.Provider) ([]byte, e
 	if err != nil {
 		return nil, err
 	}
-	return neutralizeUnsupportedToolChoice(body), nil
+	if !providerSupportsToolSelection(provider, req.toolSelection) {
+		return nil, errors.New("unsupported_tool_choice")
+	}
+	return body, nil
+}
+
+func (s *Server) dispatchBodyForProviderChecked(req chatRequest, provider pool.Provider) ([]byte, error) {
+	if !req.hasVision {
+		return dispatchBodyForProvider(req, provider)
+	}
+	live, ok := s.pool.Resolve(provider.ProviderID, provider.AssignedID)
+	if !ok {
+		return nil, errors.New("provider_session_ended")
+	}
+	if req.hasVision && (!sameVisionProviderIdentity(provider, live) || !s.providerSupportsVision(live)) {
+		return nil, errVisionCapacityUnavailable
+	}
+	return dispatchBodyForProvider(req, live)
 }
 
 func chatRequestDeclaresTools(raw json.RawMessage) bool {
@@ -6635,31 +7029,6 @@ func rewriteJSONRawField(rawBody []byte, field string, replacement []byte) ([]by
 	return out, nil
 }
 
-func neutralizeUnsupportedToolChoice(body []byte) []byte {
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(body, &obj); err != nil {
-		return body
-	}
-	raw, ok := obj["tool_choice"]
-	if !ok || len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return body
-	}
-	var choice string
-	if err := json.Unmarshal(raw, &choice); err == nil {
-		if choice == "auto" {
-			return body
-		}
-		if choice != "required" {
-			return body
-		}
-	}
-	rewritten, err := rewriteJSONRawField(body, "tool_choice", []byte(`"auto"`))
-	if err != nil {
-		return body
-	}
-	return rewritten
-}
-
 func jsonValueStartForRewrite(raw []byte, keyEnd int) (int, error) {
 	i := keyEnd
 	for i < len(raw) && (raw[i] == ' ' || raw[i] == '\n' || raw[i] == '\r' || raw[i] == '\t') {
@@ -6714,62 +7083,120 @@ func validateOptionalFields(raw map[string]json.RawMessage, stream bool) (int, s
 			return http.StatusBadRequest, "invalid_request", "n must be 1", ""
 		}
 	}
-	if v, ok := raw["response_format"]; ok {
-		if status, code, msg := validateResponseFormatSchema(v, stream); status != 0 {
-			return status, code, msg, ""
-		}
-	}
 	return 0, "", "", ""
 }
 
-func validateResponseFormatSchema(raw json.RawMessage, stream bool) (int, string, string) {
+// validateResponseFormatSchema returns the request-validation verdict and, for
+// a body that runs in SPEC-019 §1a non-strict mode, the 400 that the pre-v0.3.0
+// coordinator returned for it (nil in strict mode).
+func validateResponseFormatSchema(raw json.RawMessage, stream bool) (*schemaValidationError, int, string, string) {
 	var rf struct {
 		Type       string          `json:"type"`
 		JSONSchema json.RawMessage `json:"json_schema"`
 	}
 	if err := json.Unmarshal(raw, &rf); err != nil {
-		return http.StatusBadRequest, "invalid_request", "Invalid response_format"
+		return nil, http.StatusBadRequest, "invalid_request", "Invalid response_format"
 	}
 	switch rf.Type {
 	case "", "text":
-		return 0, "", ""
+		return nil, 0, "", ""
 	case "json_object":
-		return 0, "", ""
+		return nil, 0, "", ""
 	case "json_schema":
 	default:
-		return http.StatusBadRequest, "invalid_request", "Invalid response_format"
+		return nil, http.StatusBadRequest, "invalid_request", "Invalid response_format"
 	}
 	var spec map[string]json.RawMessage
 	if len(rf.JSONSchema) == 0 || json.Unmarshal(rf.JSONSchema, &spec) != nil {
-		return http.StatusBadRequest, "json_schema_missing_schema", "response_format.json_schema must be an object"
+		return nil, http.StatusBadRequest, "json_schema_missing_schema", "response_format.json_schema must be an object"
 	}
 	var name string
 	if rawName, ok := spec["name"]; !ok || json.Unmarshal(rawName, &name) != nil {
-		return http.StatusBadRequest, "json_schema_missing_name", "response_format.json_schema.name is required"
+		return nil, http.StatusBadRequest, "json_schema_missing_name", "response_format.json_schema.name is required"
 	}
 	if !validJSONSchemaName(name) {
-		return http.StatusBadRequest, "json_schema_invalid_name", "response_format.json_schema.name must match ^[A-Za-z0-9_-]{1,64}$"
+		return nil, http.StatusBadRequest, "json_schema_invalid_name", "response_format.json_schema.name must match ^[A-Za-z0-9_-]{1,64}$"
 	}
-	if rawStrict, ok := spec["strict"]; ok {
+	// SPEC-019 v0.3.0 §1a: strict is tri-state. Explicit true enforces the
+	// strict subset; explicit false is non-strict; absent is strict when the
+	// schema fits the subset and non-strict otherwise.
+	strictMode := 0 // 0 absent, 1 true, -1 false
+	// An explicit null is absent, matching the provider parser.
+	if rawStrict, ok := spec["strict"]; ok && !bytes.Equal(bytes.TrimSpace(rawStrict), []byte("null")) {
 		var strict bool
 		if err := json.Unmarshal(rawStrict, &strict); err != nil {
-			return http.StatusBadRequest, "invalid_request", "response_format.json_schema.strict must be boolean"
+			return nil, http.StatusBadRequest, "invalid_request", "response_format.json_schema.strict must be boolean"
 		}
-		if !strict {
-			return http.StatusBadRequest, "json_schema_non_strict_unsupported", "Non-strict structured output is unsupported in SPEC-019 v0.1.0"
+		strictMode = -1
+		if strict {
+			strictMode = 1
 		}
 	}
 	rawSchema, ok := spec["schema"]
 	if !ok || len(bytes.TrimSpace(rawSchema)) == 0 || bytes.Equal(bytes.TrimSpace(rawSchema), []byte("null")) {
-		return http.StatusBadRequest, "json_schema_missing_schema", "response_format.json_schema.schema is required"
+		return nil, http.StatusBadRequest, "json_schema_missing_schema", "response_format.json_schema.schema is required"
 	}
 	if len(rawSchema) > maxJSONSchemaBytes {
-		return http.StatusRequestEntityTooLarge, "json_schema_too_large", "response_format.json_schema.schema exceeds 16384 bytes"
+		return nil, http.StatusRequestEntityTooLarge, "json_schema_too_large", "response_format.json_schema.schema exceeds 16384 bytes"
 	}
-	if err := validateJSONSchemaRaw(rawSchema, "", 1); err != nil {
-		return err.status, err.code, err.message
+	legacy := &schemaValidationError{http.StatusBadRequest, "json_schema_non_strict_unsupported", "Non-strict structured output is unsupported in SPEC-019 v0.1.0"}
+	if strictMode >= 0 {
+		err := validateJSONSchemaRaw(rawSchema, "", 1)
+		if err == nil {
+			return nil, 0, "", ""
+		}
+		if strictMode == 1 {
+			return nil, err.status, err.code, err.message
+		}
+		legacy = err
 	}
-	return 0, "", ""
+	if err := validateNonStrictJSONSchemaRaw(rawSchema); err != nil {
+		return nil, err.status, err.code, err.message
+	}
+	return legacy, 0, "", ""
+}
+
+// validateNonStrictJSONSchemaRaw is the SPEC-019 v0.3.0 §1a non-strict shape
+// check: the schema is an object no deeper than 2*maxJSONSchemaDepth nested
+// object/array values (each strict schema level is a schema object plus a
+// properties object). Keywords are not restricted because non-strict output
+// is never validated against the schema.
+func validateNonStrictJSONSchemaRaw(raw json.RawMessage) *schemaValidationError {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	depth, maxDepth := 0, 0
+	first := true
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return &schemaValidationError{http.StatusBadRequest, "json_schema_missing_schema", "response_format.json_schema.schema must be a JSON object"}
+		}
+		delim, isDelim := tok.(json.Delim)
+		if first {
+			first = false
+			if !isDelim || delim != '{' {
+				return &schemaValidationError{http.StatusBadRequest, "json_schema_missing_schema", "response_format.json_schema.schema must be a JSON object"}
+			}
+		}
+		if !isDelim {
+			continue
+		}
+		switch delim {
+		case '{', '[':
+			depth++
+			if depth > maxDepth {
+				maxDepth = depth
+			}
+			if maxDepth > 2*maxJSONSchemaDepth {
+				return &schemaValidationError{http.StatusBadRequest, "json_schema_too_deep", "response_format.json_schema.schema exceeds maximum depth"}
+			}
+		case '}', ']':
+			depth--
+		}
+	}
+	return nil
 }
 
 type schemaValidationError struct {
@@ -6997,7 +7424,7 @@ func jsonSchemaNumberOperand(node map[string]json.RawMessage, keyword string) (f
 	return number, true, ""
 }
 
-func validateMessages(messages []chatMessage, rawMessages []map[string]json.RawMessage) (bool, int, string, string) {
+func validateMessages(messages []chatMessage, rawMessages []map[string]json.RawMessage, preserveContentArrays bool) (bool, int, string, string) {
 	allIDs := map[string]int{}
 	var parsedByMessage = make([][]requestToolCall, len(messages))
 	totalToolCalls := 0
@@ -7008,11 +7435,11 @@ func validateMessages(messages []chatMessage, rawMessages []map[string]json.RawM
 	for i, m := range messages {
 		switch m.Role {
 		case "system", "user":
-			normalized, changed, status, code, msg := normalizeSystemUserContent(m.Content)
+			normalized, changed, status, code, msg := normalizeSystemUserContent(m.Content, m.Role == "user")
 			if status != 0 {
 				return false, status, code, msg
 			}
-			if changed {
+			if changed && !preserveContentArrays {
 				messages[i].Content = normalized
 				rawMessages[i]["content"] = normalized
 				normalizedContent = true
@@ -7265,7 +7692,7 @@ func hasMultiTurnToolData(messages []chatMessage) bool {
 	return false
 }
 
-func normalizeSystemUserContent(raw json.RawMessage) (json.RawMessage, bool, int, string, string) {
+func normalizeSystemUserContent(raw json.RawMessage, allowImages bool) (json.RawMessage, bool, int, string, string) {
 	if rawStringNonEmpty(raw) {
 		return raw, false, 0, "", ""
 	}
@@ -7282,20 +7709,40 @@ func normalizeSystemUserContent(raw json.RawMessage) (json.RawMessage, bool, int
 	if err := json.Unmarshal(raw, &parts); err != nil {
 		return nil, false, http.StatusBadRequest, "unsupported_content_shape", "structured content arrays must contain text parts in v1"
 	}
+	if !validChatContentPartShapes(raw) {
+		return nil, false, http.StatusBadRequest, "unsupported_content_shape", "structured content parts contain unsupported fields"
+	}
 	if len(parts) == 0 {
 		return nil, false, http.StatusBadRequest, "invalid_request", "content must contain non-empty text"
 	}
 
 	var b strings.Builder
+	hasImage := false
 	for _, part := range parts {
-		if part.Type != "text" {
+		switch part.Type {
+		case "text":
+			var text string
+			if err := json.Unmarshal(part.Text, &text); err != nil {
+				return nil, false, http.StatusBadRequest, "unsupported_content_shape", "structured content text parts must contain string text"
+			}
+			b.WriteString(text)
+		case "image_url":
+			if !allowImages {
+				return nil, false, http.StatusBadRequest, "unsupported_content_shape", "image input is supported only in user messages"
+			}
+			// The media validator runs after message-shape validation. Preserve
+			// the ordered raw parts for dispatch and receipt binding instead of
+			// projecting them into text.
+			if len(bytes.TrimSpace(part.ImageURL)) == 0 || bytes.Equal(bytes.TrimSpace(part.ImageURL), []byte("null")) {
+				return nil, false, http.StatusBadRequest, "invalid_image_input", "image_url must be an object"
+			}
+			hasImage = true
+		default:
 			return nil, false, http.StatusBadRequest, "unsupported_content_shape", "multimodal content arrays are not supported in v1; use text parts only"
 		}
-		var text string
-		if err := json.Unmarshal(part.Text, &text); err != nil {
-			return nil, false, http.StatusBadRequest, "unsupported_content_shape", "structured content text parts must contain string text"
-		}
-		b.WriteString(text)
+	}
+	if hasImage {
+		return raw, false, 0, "", ""
 	}
 	if b.Len() == 0 {
 		return nil, false, http.StatusBadRequest, "invalid_request", "content must contain non-empty text"
@@ -7305,6 +7752,45 @@ func normalizeSystemUserContent(raw json.RawMessage) (json.RawMessage, bool, int
 		return nil, false, http.StatusBadRequest, "invalid_request", "Invalid message content"
 	}
 	return json.RawMessage(normalized), true, 0, "", ""
+}
+
+func validChatContentPartShapes(raw json.RawMessage) bool {
+	var parts []map[string]json.RawMessage
+	if json.Unmarshal(raw, &parts) != nil || len(parts) == 0 {
+		return false
+	}
+	for _, part := range parts {
+		var typ string
+		if json.Unmarshal(part["type"], &typ) != nil {
+			return false
+		}
+		switch typ {
+		case "text":
+			if len(part) != 2 || part["text"] == nil {
+				return false
+			}
+			var text string
+			if json.Unmarshal(part["text"], &text) != nil {
+				return false
+			}
+		case "image_url":
+			if len(part) != 2 || part["image_url"] == nil {
+				return false
+			}
+			var imageURL map[string]json.RawMessage
+			if json.Unmarshal(part["image_url"], &imageURL) != nil || imageURL["url"] == nil || len(imageURL) > 2 {
+				return false
+			}
+			for key := range imageURL {
+				if key != "url" && key != "detail" {
+					return false
+				}
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func validateTools(raw map[string]json.RawMessage, messages []chatMessage) (int, string, string) {
@@ -7557,8 +8043,13 @@ func (s *Server) recordBreakerFault(provider pool.Provider, fault breakerFault, 
 }
 
 func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, req chatRequest, headers http.Header, excluded map[string]struct{}, dailyKey string, state *forwardState) (pool.Provider, *routeError) {
+	if req.hasVision {
+		headers = headers.Clone()
+		headers.Del("X-MacProvider-Internal-Conv")
+		headers.Del("X-MacProvider-Internal-Conv-Cache")
+	}
 	providers := s.pool.Snapshot()
-	estimatedTokens := estimateTokens(req.raw)
+	estimatedTokens := routingRequestPromptTokenEstimate(req.raw, req.hasVision)
 	admissionCtx, admissionCancel := newRouteSnapshotDispatchContext(ctx)
 	defer admissionCancel()
 	classResolution := s.classForRequestWithBYOMContext(req.Model, providers, admissionCtx)
@@ -7697,6 +8188,9 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		state.engineClass = engineClass
 		state.requestedModel = req.Model
 		state.multiTurnToolHistory = req.multiTurnToolHistory
+		state.nonStrictJSONSchema = req.nonStrictSchemaLegacyRejection != nil
+		state.toolSelection = req.toolSelection
+		state.hasVision = req.hasVision
 	}
 	trustedInternalRouting := false
 	if hasInternalRoutingHeader(headers) {
@@ -7732,6 +8226,15 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 				if engineClass != "" && providerEngineClass(p) != engineClass {
 					return pool.Provider{}, engineUnavailableRouteError("Pinned session provider does not serve the selected engine")
 				}
+				if !providerSupportsToolSelection(p, req.toolSelection) {
+					return pool.Provider{}, unsupportedToolChoiceRouteError()
+				}
+				if req.hasVision && !s.providerSupportsVision(p) {
+					return pool.Provider{}, visionCapacityUnavailableRouteError()
+				}
+				if req.nonStrictSchemaLegacyRejection != nil && s.providerMatchesRequest(p, req.Model, class) && !providerAcceptsNonStrictJSONSchema(p.BinaryVersion) {
+					return pool.Provider{}, nonStrictJSONSchemaRouteError(req)
+				}
 				provider, routeErr := s.validatePinnedProviderForRequestWithState(p, req.Model, estimatedTokens, "Pinned session not available", class, poolRequiresSettlementEnforce, admissionCtx, state)
 				if routeErr != nil {
 					return provider, routeErr
@@ -7766,6 +8269,15 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 				if engineClass != "" && providerEngineClass(p) != engineClass {
 					return pool.Provider{}, engineUnavailableRouteError("Pinned provider does not serve the selected engine")
 				}
+				if !providerSupportsToolSelection(p, req.toolSelection) {
+					return pool.Provider{}, unsupportedToolChoiceRouteError()
+				}
+				if req.hasVision && !s.providerSupportsVision(p) {
+					return pool.Provider{}, visionCapacityUnavailableRouteError()
+				}
+				if req.nonStrictSchemaLegacyRejection != nil && s.providerMatchesRequest(p, req.Model, class) && !providerAcceptsNonStrictJSONSchema(p.BinaryVersion) {
+					return pool.Provider{}, nonStrictJSONSchemaRouteError(req)
+				}
 				provider, routeErr := s.validatePinnedProviderForRequestWithState(p, req.Model, estimatedTokens, "Pinned provider not available", class, poolRequiresSettlementEnforce, admissionCtx, state)
 				if routeErr != nil {
 					return provider, routeErr
@@ -7797,6 +8309,38 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		if unsupportedNativeDropped > 0 && !anyProviderModelCandidate(providers, req.Model, poolModelClass) {
 			return pool.Provider{}, &routeError{status: http.StatusBadRequest, code: "unsupported_modelID_for_multi_turn", message: "Model does not support multi-turn tool history rendering"}
 		}
+	}
+	// SPEC-019 v0.3.0 §1a: a non-strict json_schema request reaches only
+	// providers whose CLI implements non-strict mode. With none left for the
+	// model it gets the pre-v0.3.0 400, so the coordinator and the provider CLI
+	// can deploy in either order.
+	if req.toolSelection != nil {
+		compatible := make([]pool.Provider, 0, len(providers))
+		for _, p := range providers {
+			if providerSupportsToolSelection(p, req.toolSelection) {
+				compatible = append(compatible, p)
+			}
+		}
+		if len(compatible) == 0 {
+			return pool.Provider{}, unsupportedToolChoiceRouteError()
+		}
+		providers = compatible
+	}
+	if req.hasVision {
+		compatible := make([]pool.Provider, 0, len(providers))
+		for _, p := range providers {
+			if s.providerSupportsVision(p) {
+				compatible = append(compatible, p)
+			}
+		}
+		if len(compatible) == 0 {
+			return pool.Provider{}, visionCapacityUnavailableRouteError()
+		}
+		providers = compatible
+	}
+	var nonStrictRejected bool
+	if providers, nonStrictRejected = s.filterNonStrictJSONSchemaCandidates(req, providers, class); nonStrictRejected {
+		return pool.Provider{}, nonStrictJSONSchemaRouteError(req)
 	}
 	exSet := routing.NewExcluded(len(excluded))
 	for k := range excluded {
@@ -7967,10 +8511,23 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 	// logRoutingDecisionFullWithCache) finds the same value the
 	// sort built. T3 R1 ARCHITECT-L2 audit clarification.
 	balancedCache := s.sortCandidates(candidates, objective)
+	// SPEC-004 sticky affinity is judged against the objective order. A
+	// sticky hit keeps its provider first and skips the SPEC-002-R006 phase
+	// reorder; otherwise the phase step reorders (only the order changes).
 	candidates, stickyResult, stickyMissReason := s.applySticky(requestID, headers, req.Model, class, candidates, balancedCache)
+	var phaseDecision routeDecision
+	if stickyResult == "hit" {
+		phaseDecision = s.stickyRouteDecision(req, estimatedTokens, candidates)
+	} else {
+		phaseDecision = s.applyPhaseOrder(requestID, req, estimatedTokens, candidates, dailyKey)
+	}
 	seed, draw, reason := int64(0), float64(0), "sticky_hit"
 	if stickyResult != "hit" {
-		candidates, seed, draw, reason = s.applyRandomTiebreak(requestID, candidates, objective, dailyKey, balancedCache)
+		if phaseDecision.basis == routing.BasisFallback {
+			candidates, seed, draw, reason = s.applyRandomTiebreak(requestID, candidates, objective, dailyKey, balancedCache)
+		} else {
+			reason = "phase_" + string(phaseDecision.basis)
+		}
 	}
 	// Thread real pre-filter pool size + per-reason rejection counts
 	// into the SPEC-004 §7 routing-decision log per the FULL-IMPL
@@ -7986,6 +8543,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		provider, routeErr := s.selectReservedProvider(candidate, req.Model, requestID, estimatedTokens, state)
 		if routeErr == nil {
 			if state != nil {
+				state.routeDecision = &phaseDecision
 				checker.rememberSelectedProvider(provider)
 				state.stickyResult = stickyResult
 				state.stickyMissReason = stickyMissReason
@@ -8229,12 +8787,6 @@ func stringSliceEqual(a, b []string) bool {
 		}
 	}
 	return true
-}
-
-func (s *Server) classForRequest(model string, providers []pool.Provider) *config.ModelClassConfig {
-	ctx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
-	defer cancel()
-	return s.classForRequestWithBYOMContext(model, providers, ctx).class
 }
 
 type modelClassResolution struct {
@@ -8947,14 +9499,6 @@ func (s *Server) preflightCandidate(provider pool.Provider, requestID string, es
 	return provider, nil
 }
 
-func (s *Server) selectQueuedProvider(ctx context.Context, requestID, model string, candidates []pool.Provider, headers http.Header, class *config.ModelClassConfig, dailyKey string, estimatedTokens int, state *forwardState) (pool.Provider, *routeError) {
-	provider, routeErr, queued := s.trySelectQueuedProvider(ctx, requestID, model, candidates, headers, class, dailyKey, estimatedTokens, state, slotWaiterStandard)
-	if queued {
-		return provider, routeErr
-	}
-	return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "No provider available for model " + model}
-}
-
 func (s *Server) trySelectQueuedProvider(ctx context.Context, requestID, model string, candidates []pool.Provider, headers http.Header, class *config.ModelClassConfig, dailyKey string, estimatedTokens int, state *forwardState, waiterKind slotWaiterKind) (pool.Provider, *routeError, bool) {
 	if s.slotQueue == nil || state == nil || len(candidates) == 0 {
 		return pool.Provider{}, nil, false
@@ -9015,6 +9559,8 @@ func (s *Server) trySelectQueuedProvider(ctx context.Context, requestID, model s
 				state.queuedSlotProviderID = provider.ProviderID
 				state.stickyResult = stickyResult
 				state.stickyMissReason = stickyMissReason
+				// SPEC-002-R007: the slot queue keeps its own order.
+				state.routeDecision = &routeDecision{basis: routing.BasisFallback, scope: "slot_queue", inputTokens: estimatedTokens, candidates: len(candidates)}
 				s.logRoutingDecisionFullWithCache(requestID, len(candidates), map[string]int{"busy": len(candidates)}, []pool.Provider{provider}, objective, seed, draw, "slot_queue_"+reason, provider.ProviderID, nil)
 				return selected, nil, true
 			case queuedProviderTerminal:
@@ -9128,6 +9674,17 @@ func (s *Server) pollQueuedProviderWithContext(ctx context.Context, waiter *slot
 		}
 		// SPEC-042-R014 (c): a same-ID reconnect of another class is terminal.
 		if state != nil && state.engineClass != "" && providerEngineClass(provider) != state.engineClass {
+			return pool.Provider{}, queuedProviderTerminal
+		}
+		// SPEC-019 §1a: a same-ID reconnect on a CLI without non-strict
+		// json_schema support is terminal.
+		if state != nil && !providerSupportsToolSelection(provider, state.toolSelection) {
+			return pool.Provider{}, queuedProviderTerminal
+		}
+		if state != nil && state.hasVision && !s.providerSupportsVision(provider) {
+			return pool.Provider{}, queuedProviderTerminal
+		}
+		if state != nil && state.nonStrictJSONSchema && !providerAcceptsNonStrictJSONSchema(provider.BinaryVersion) {
 			return pool.Provider{}, queuedProviderTerminal
 		}
 		if s.poolSettlementModeUnsatisfied(state) {
@@ -10263,7 +10820,7 @@ func effectiveCachedPromptTokensForBuyer(cachedPromptTokens, promptTokens *int64
 		return 0
 	}
 	cached := *cachedPromptTokens
-	if cached < 0 || cached > *promptTokens || attemptN > 0 || state == nil || (state.stickyResult != "hit" && !state.conversationCacheOnly) {
+	if cached < 0 || cached > *promptTokens || attemptN > 0 || !state.cacheCreditEligible() {
 		return 0
 	}
 	return cached
@@ -10277,7 +10834,7 @@ func observedCachedPromptTokensForBuyer(cachedPromptTokens, promptTokens *int64,
 	if cached < 0 || cached > *promptTokens || attemptN > 0 {
 		return 0
 	}
-	if state != nil && (state.stickyResult == "hit" || state.conversationCacheOnly) {
+	if state.cacheCreditEligible() {
 		return cached
 	}
 	return 0
@@ -10299,7 +10856,7 @@ func requestLogCacheRecoveryFields(cachedPromptTokens, promptTokens *int64, stat
 	if attemptN > 0 {
 		return nil, ""
 	}
-	if state == nil || (state.stickyResult != "hit" && !state.conversationCacheOnly) {
+	if !state.cacheCreditEligible() {
 		if cached == 0 {
 			return nil, ""
 		}
@@ -10525,7 +11082,7 @@ func spec001StatusFromBody(body []byte) string {
 
 func spec001EndStatus(status string) string {
 	switch status {
-	case "error_model_not_loaded", "error_context_exceeded", "error_queue_full", "error_internal", "malformed_json_response", "json_schema_validation_failed", "response_byte_cap_exceeded", "provider_timeout":
+	case "error_model_not_loaded", "error_context_exceeded", "error_queue_full", "error_internal", "malformed_json_response", "json_schema_validation_failed", "response_byte_cap_exceeded", "provider_timeout", "tool_selection_validation_failed":
 		return status
 	default:
 		return ""
@@ -10538,7 +11095,7 @@ func isSpec019ProviderDetailCode(code string) bool {
 	// Asymmetry across provider WS, coordinator SSE, and gateway SSE
 	// allow-lists is a money-path violation.
 	switch code {
-	case "malformed_json_response", "json_schema_validation_failed", "response_byte_cap_exceeded", "provider_timeout":
+	case "malformed_json_response", "json_schema_validation_failed", "response_byte_cap_exceeded", "provider_timeout", "tool_selection_validation_failed":
 		return true
 	default:
 		return false
@@ -10547,7 +11104,7 @@ func isSpec019ProviderDetailCode(code string) bool {
 
 func isSpec019TerminalSSEErrorCode(code string) bool {
 	switch code {
-	case "malformed_json_response", "json_schema_validation_failed", "response_byte_cap_exceeded", "provider_timeout":
+	case "malformed_json_response", "json_schema_validation_failed", "response_byte_cap_exceeded", "provider_timeout", "tool_selection_validation_failed":
 		return true
 	default:
 		return false
@@ -10776,6 +11333,9 @@ func writeWSEndError(w http.ResponseWriter, end providerws.InferenceResponseEnd)
 		writeError(w, wsEndHTTPStatus(end.Status), "context_exceeds_capacity", "Request exceeds provider context capacity")
 	case "error_model_not_loaded", "error_queue_full":
 		writeError(w, wsEndHTTPStatus(end.Status), "no_provider_available", "Selected provider is not reachable")
+	case "tool_selection_validation_failed":
+		retry := false
+		writeProviderStructuredOutputError(w, http.StatusBadGateway, end.Status, end.Error, &retry)
 	case "malformed_json_response", "json_schema_validation_failed":
 		writeProviderStructuredOutputError(w, wsEndHTTPStatus(end.Status), end.Status, end.Error, end.Retryable)
 	case "cancelled":
@@ -10879,7 +11439,7 @@ func spec018ErrorType(code, fallback string) string {
 		return "invalid_request_error"
 	case "byte_cap_exceeded", "response_byte_cap_exceeded", "malformed_tool_call_final_json":
 		return "upstream_provider_error"
-	case "malformed_json_response", "json_schema_validation_failed":
+	case "malformed_json_response", "json_schema_validation_failed", "tool_selection_validation_failed":
 		return "upstream_provider_error"
 	case "provider_timeout":
 		return "api_error"
@@ -10957,8 +11517,38 @@ func (s *Server) startRecoveryProbe(provider pool.Provider) {
 // a tokenizer count or a quantity to bill automatically.
 const promptHeadroomTokens = 64
 
+// promptTokenUpperBound is the SPEC-006 §7.2.1 independent bound on a
+// provider's reported prompt_tokens, the same formula as the gateway's prompt
+// reservation: the larger of the bytes/4 estimate and the class-weighted upper
+// estimate, plus headroom. #1570: bytes/4 alone charged token-dense prompts
+// less than the provider's honest count.
 func promptTokenUpperBound(raw json.RawMessage) int64 {
-	return int64(estimateTokens(raw)) + promptHeadroomTokens
+	// ceil(bytes/4), matching the gateway reservation; estimateTokens floors
+	// and stays the billed fallback.
+	bound := int64((len(raw) + 3) / 4)
+	if upper, ok := promptTokenClassEstimate(raw, promptTokenUpperWeights); ok && upper > bound {
+		bound = upper
+	}
+	return bound + promptHeadroomTokens
+}
+
+// routingPromptTokenEstimate is the SPEC-006 §7.2.1 context-fit estimate used
+// for routing and provider preflight: the class-weighted central estimate,
+// which stays at or below the tokenizer count on realistic text. Raw bytes/4
+// over-counted Cyrillic, CJK and indented code and rejected prompts a
+// provider could serve. The provider's tokenized check stays authoritative.
+func routingPromptTokenEstimate(raw json.RawMessage) int {
+	central, ok := promptTokenClassEstimate(raw, promptTokenCentralWeights)
+	if !ok {
+		return estimateTokens(raw)
+	}
+	if central < 1 {
+		return 1
+	}
+	if central > math.MaxInt32 {
+		return math.MaxInt32
+	}
+	return int(central)
 }
 
 func estimateTokens(raw json.RawMessage) int {
@@ -10967,6 +11557,30 @@ func estimateTokens(raw json.RawMessage) int {
 		return 1
 	}
 	return n
+}
+
+func estimateRequestTokens(raw json.RawMessage, hasVision bool) int {
+	if !hasVision {
+		return estimateTokens(raw)
+	}
+	accounting, images := visionAccountingBody(raw)
+	return estimateTokens(accounting) + images*visionMediaTokenAllowance
+}
+
+func routingRequestPromptTokenEstimate(raw json.RawMessage, hasVision bool) int {
+	if !hasVision {
+		return routingPromptTokenEstimate(raw)
+	}
+	accounting, images := visionAccountingBody(raw)
+	return routingPromptTokenEstimate(accounting) + images*visionMediaTokenAllowance
+}
+
+func requestPromptTokenUpperBound(raw json.RawMessage, hasVision bool) int64 {
+	if !hasVision {
+		return promptTokenUpperBound(raw)
+	}
+	accounting, images := visionAccountingBody(raw)
+	return promptTokenUpperBound(accounting) + int64(images*visionMediaTokenAllowance)
 }
 
 func copyReceiptHeaderForProvider(dst, src http.Header, provider pool.Provider) {

@@ -42,11 +42,18 @@ type relayBlindSettlementStack struct {
 	// provider received the inference_request.
 	snapshotsMu         sync.Mutex
 	snapshotsAtDispatch []int
+	// pool is the Trusted Pool the client selects with --pool; "" global.
+	pool string
 }
 
 type relayBlindSettlementOpts struct {
 	privacy        bool
 	omitCapability bool
+	// pool, when set, scopes the buyer to a SPEC-049-R032 Trusted Pool.
+	pool *privacyPoolOpts
+	// omitPrivacyKeys runs a privacy-enabled stack whose provider advertises
+	// no privacy key records, so it is never enrolled in the class.
+	omitPrivacyKeys bool
 }
 
 func newRelayBlindSettlementStack(t *testing.T, opts relayBlindSettlementOpts) *relayBlindSettlementStack {
@@ -78,6 +85,7 @@ func newRelayBlindSettlementStack(t *testing.T, opts relayBlindSettlementOpts) *
 		fixture.privacyProviderID = providerID
 		fixture.privacyCompletion = privacyCanaryCompletion
 		fixture.postureReady = make(chan struct{})
+		fixture.omitPrivacyKeys = opts.omitPrivacyKeys
 	}
 	fixture.start("")
 	t.Cleanup(fixture.stop)
@@ -108,20 +116,24 @@ func newRelayBlindSettlementStack(t *testing.T, opts relayBlindSettlementOpts) *
 		}
 		scenarioOptions.gatewayPrivacyClass = true
 	}
+	poolID := ""
+	if opts.pool != nil {
+		poolID = opts.pool.configure(t, &scenarioOptions, providerID)
+	}
 	s := newScenario(t, scenarioOptions)
 	if s.modelHash != fixture.settlementModelHash {
 		t.Fatalf("catalog model hash %s differs from the fixture pin %s", s.modelHash, fixture.settlementModelHash)
 	}
-	stack := &relayBlindSettlementStack{s: s, fixture: fixture, stateDir: stateDir, providerID: providerID}
+	stack := &relayBlindSettlementStack{s: s, fixture: fixture, stateDir: stateDir, providerID: providerID, pool: poolID}
 	fixture.onDispatch = func([]byte) {
 		count := stack.relayBlindSnapshotCount()
 		stack.snapshotsMu.Lock()
 		stack.snapshotsAtDispatch = append(stack.snapshotsAtDispatch, count)
 		stack.snapshotsMu.Unlock()
 	}
-	connectSwiftSettlementProvider(t, s.rootCtx, s, fixture, opts.omitCapability)
+	connectSwiftSettlementProvider(t, s.rootCtx, s, fixture, opts.omitCapability, opts.pool != nil)
 	s.waitForProviderReady(providerID)
-	if opts.privacy {
+	if opts.privacy && !opts.omitPrivacyKeys {
 		fixture.waitPosture(25 * time.Second)
 	}
 	return stack
@@ -196,6 +208,9 @@ func (st *relayBlindSettlementStack) tryClient(t *testing.T, prompt string, stre
 	}
 	if privacy {
 		args = append(args, "--privacy-class")
+	}
+	if st.pool != "" {
+		args = append(args, "--pool", st.pool)
 	}
 	cmd := exec.Command(relayBlindClientBin, args...)
 	cmd.Env = append(os.Environ(), "MACPROVIDER_API_KEY="+st.s.apiKey)
@@ -351,8 +366,8 @@ func TestRelayBlindEnforceSettlesSwiftReceipts(t *testing.T) {
 	st.assertRelayBlindSettled(t, 1, false, false)
 	st.assertRelayBlindSettled(t, 2, true, false)
 
-	// A validly signed receipt whose tuple was tampered (the handle pins a
-	// model hash other than the snapshot's catalog hash) is a trust failure:
+	// A normally constructed receipt is tampered and re-signed after the
+	// builder's checks, with a model hash different from the catalog pin:
 	// quarantined, buyer refunded, no provider credit.
 	st.fixture.tamperReceipts(t)
 	// The buyer response may fail closed once the receipt is quarantined;
@@ -360,8 +375,10 @@ func TestRelayBlindEnforceSettlesSwiftReceipts(t *testing.T) {
 	_, _, _ = st.tryClient(t, "relay-blind settlement tampered", false, false)
 	requestID := st.latestGatewayReservation(t, 3)
 	verdict := waitForNthClosedVerdict(t, st.s, 3)
-	if verdict.SettlementOutcome != "quarantined" || verdict.ReceiptResult == "valid" {
-		t.Fatalf("tampered receipt verdict=%+v, want quarantined", verdict)
+	if verdict.SettlementOutcome != "quarantined" || verdict.ReceiptResult != "invalid" ||
+		verdict.ReceiptPresent != 1 || !verdict.ReceiptVersion.Valid ||
+		verdict.ReceiptVersion.String != "relay-blind-settlement-v1" || verdict.Reason != "model_hash_mismatch" {
+		t.Fatalf("tampered receipt verdict=%+v, want a present relay-blind-settlement-v1 receipt rejected for model_hash_mismatch", verdict)
 	}
 	refund, ok := waitForQuotaStatus(t, st.s, requestID, "refunded")
 	if !ok || refund.SettledTokens != 0 {
@@ -476,7 +493,7 @@ func (f *swiftRelayFixture) tamperReceipts(t *testing.T) {
 // pinned catalog hash, and relay-blind or privacy key records. The fixture
 // completes the key agreement, so every dispatch is SPEC-008 sealed end to
 // end and this bridge relays ciphertext only.
-func connectSwiftSettlementProvider(t *testing.T, ctx context.Context, s *scenario, fixture *swiftRelayFixture, omitCapability bool) {
+func connectSwiftSettlementProvider(t *testing.T, ctx context.Context, s *scenario, fixture *swiftRelayFixture, omitCapability, trustedPool bool) {
 	t.Helper()
 	u, err := url.Parse(s.coordProvURL)
 	if err != nil {
@@ -515,6 +532,13 @@ func connectSwiftSettlementProvider(t *testing.T, ctx context.Context, s *scenar
 	if !omitCapability {
 		capabilities["relay_blind_settlement_receipt_v1"] = true
 	}
+	binaryVersion := "relay-blind-local-fixture"
+	if trustedPool {
+		// The released CLI always advertises trusted_pool_v1, and a pool
+		// binary floor needs a comparable version.
+		capabilities["trusted_pool_v1"] = true
+		binaryVersion = privacyPoolFixtureBinaryVersion
+	}
 	initial := map[string]any{
 		"type":                        "auth_request",
 		"version":                     2,
@@ -527,7 +551,7 @@ func connectSwiftSettlementProvider(t *testing.T, ctx context.Context, s *scenar
 		"max_context_tokens":          8192,
 		"max_concurrency":             1,
 		"throughput_tps_estimate":     20.0,
-		"binary_version":              "relay-blind-local-fixture",
+		"binary_version":              binaryVersion,
 		"provider_ecdh_public_key":    fixture.descriptor.ProviderECDHPublicKey,
 		"provider_receipt_public_key": fixture.descriptor.ReceiptPublicKey,
 		"supported_models":            []string{settlementFixtureModelID},

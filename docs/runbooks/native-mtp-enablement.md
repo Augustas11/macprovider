@@ -7,8 +7,9 @@ for one provider. Read `docs/runbooks/pearl-coordinator-rollout.md` before any
 Pearl step, and state the expected downtime to the operator before you start it.
 
 Scope: SPEC-048 (R014 release gate), SPEC-023 §12.5 (admission sidecar and
-revocations), SPEC-031-R033 (native canary). Plan and evidence:
-`docs/research/spec048-r014/enablement-plan.md`.
+revocations), SPEC-031-R033 (native canary). The R014 enablement plan is in
+the private engineering archive; the evidence code reads stays under
+`docs/research/spec048-r014/` and `docs/research/spec048-r015/`.
 
 ## Preconditions
 

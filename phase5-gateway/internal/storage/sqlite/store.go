@@ -132,6 +132,9 @@ func (s *Store) Ping(ctx context.Context) error {
 //	     settlement dispatch hint and coordinator internal request id; an
 //	     older gateway would settle a relay-blind hold without coordinator
 //	     finality, so it must refuse this database.
+//	v19 — SPEC-050 (#1062): quota_reservations.funding_source and
+//	     allowance_active_days; an older gateway would count allowance-funded
+//	     usage against the paid daily quota, so it must refuse this database.
 //
 // At Open time the store reads the current applied version; if it
 // exceeds this constant the binary is older than the DB and refuses
@@ -142,7 +145,7 @@ func (s *Store) Ping(ctx context.Context) error {
 // Operators rolling back the gateway binary on a DB at a higher
 // version must restore /var/lib/macprovider/gateway.db from the
 // pre-deploy snapshot (deploy-pearl-vps.sh step 5b writes one).
-const maxKnownSchemaVersion = 18
+const maxKnownSchemaVersion = 19
 
 func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.checkSchemaVersionGate(ctx); err != nil {
@@ -231,6 +234,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.ensureRelayBlindAccountingColumns(ctx); err != nil {
 		return err
 	}
+	if err := s.ensureQuotaReservationFundingSource(ctx); err != nil {
+		return err
+	}
 	if err := s.ensureRelayBlindSettlementDispatchColumns(ctx); err != nil {
 		return err
 	}
@@ -300,6 +306,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(18, ?)", now); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(19, ?)", now); err != nil {
 		return err
 	}
 	return nil
@@ -1692,6 +1701,10 @@ func (s *Store) ReserveQuota(ctx context.Context, req storage.ReservationRequest
 	if err := validateRelayBlind(req.RelayBlind); err != nil {
 		return storage.QuotaDecision{}, err
 	}
+	fundingSource, err := normalizeFundingSource(req.FundingSource)
+	if err != nil {
+		return storage.QuotaDecision{}, err
+	}
 	tx, err := s.beginImmediate(ctx)
 	if err != nil {
 		return storage.QuotaDecision{}, err
@@ -1723,7 +1736,10 @@ func (s *Store) ReserveQuota(ctx context.Context, req storage.ReservationRequest
 		Admitted: false, LimitTokens: req.DailyQuota, UsedTokens: used, ReservedTokens: reserved,
 		RemainingTokens: max64(0, remaining), ResetUnix: resetUnix(req.WindowDate),
 	}
-	if req.RequestedTokens > remaining {
+	allowanceFunded := fundingSource == storage.FundingSourceAllowance
+	// SPEC-050-R007: an allowance-funded request does not draw on the paid
+	// daily quota, so it is admitted whatever the quota's remainder.
+	if !allowanceFunded && !req.AllowanceOnly && req.RequestedTokens > remaining {
 		tx.Rollback() // read-only path; rollback is equivalent to commit here
 		return decision, storage.ErrQuotaExceeded
 	}
@@ -1732,11 +1748,12 @@ func (s *Store) ReserveQuota(ctx context.Context, req storage.ReservationRequest
 	}
 	args := []any{req.AccountID, req.RequestID, req.WindowDate, req.RequestedTokens, encodeTime(req.ExpiresAt), encodeTime(req.CreatedAt)}
 	args = append(args, relayBlindArgs(req.RelayBlind)...)
+	args = append(args, fundingSource)
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO quota_reservations(account_id, request_id, window_date, reserved_tokens, status, expires_at, created_at,
 			requested_privacy_mode, effective_privacy_outcome, relay_blind_envelope_digest, relay_blind_key_record_digest,
-			relay_blind_kid, relay_blind_provider_binding_digest, input_token_upper_bound, max_output_tokens)
-		VALUES(?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, args...)
+			relay_blind_kid, relay_blind_provider_binding_digest, input_token_upper_bound, max_output_tokens, funding_source)
+		VALUES(?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, args...)
 	if err != nil {
 		if isUniqueConstraintError(err) {
 			return storage.QuotaDecision{}, storage.ErrReservationExists
@@ -1744,8 +1761,10 @@ func (s *Store) ReserveQuota(ctx context.Context, req storage.ReservationRequest
 		return storage.QuotaDecision{}, err
 	}
 	decision.Admitted = true
-	decision.ReservedTokens += req.RequestedTokens
-	decision.RemainingTokens = max64(0, remaining-req.RequestedTokens)
+	if !allowanceFunded {
+		decision.ReservedTokens += req.RequestedTokens
+		decision.RemainingTokens = max64(0, remaining-req.RequestedTokens)
+	}
 	return decision, tx.Commit()
 }
 
@@ -1804,11 +1823,18 @@ func (s *Store) settleReservation(ctx context.Context, settlement storage.Reserv
 		return err
 	}
 	metadataArgs := relayBlindArgs(resolved)
+	fundingSource := ""
+	if settlement.FundingSource != "" {
+		if fundingSource, err = normalizeFundingSource(settlement.FundingSource); err != nil {
+			return err
+		}
+	}
 	_, err = tx.ExecContext(ctx, `
 		UPDATE quota_reservations
-		SET status = 'settled', settled_tokens = ?, settled_at = ?, effective_privacy_outcome = ?, settlement_hold = 0
+		SET status = 'settled', settled_tokens = ?, settled_at = ?, effective_privacy_outcome = ?, settlement_hold = 0,
+		    funding_source = COALESCE(NULLIF(?, ''), funding_source)
 		WHERE account_id = ? AND request_id = ?`,
-		settlement.TotalTokens, encodeTime(settlement.SettledAt), metadataArgs[1], settlement.AccountID, settlement.RequestID)
+		settlement.TotalTokens, encodeTime(settlement.SettledAt), metadataArgs[1], fundingSource, settlement.AccountID, settlement.RequestID)
 	if err != nil {
 		return err
 	}
@@ -4389,19 +4415,26 @@ func reapExpiredReservationsTx(ctx context.Context, q execer, now time.Time) (in
 	return res.RowsAffected()
 }
 
+// dailyUsageTx is the paid daily quota's use and holds. Usage and holds of
+// SPEC-050 allowance-funded requests are excluded (SPEC-050-R007).
 func dailyUsageTx(ctx context.Context, q queryer, accountID, windowDate string) (int64, int64, error) {
 	var used sql.NullInt64
 	if err := q.QueryRowContext(ctx, `
 		SELECT COALESCE(SUM(total_tokens), 0)
 		FROM usage_events
-		WHERE account_id = ? AND window_date = ?`, accountID, windowDate).Scan(&used); err != nil {
+		WHERE account_id = ? AND window_date = ?
+		  AND NOT EXISTS (
+		      SELECT 1 FROM quota_reservations qr
+		       WHERE qr.account_id = usage_events.account_id
+		         AND qr.request_id = usage_events.request_id
+		         AND qr.funding_source = 'allowance')`, accountID, windowDate).Scan(&used); err != nil {
 		return 0, 0, err
 	}
 	var reserved sql.NullInt64
 	if err := q.QueryRowContext(ctx, `
 		SELECT COALESCE(SUM(reserved_tokens), 0)
 		FROM quota_reservations
-		WHERE account_id = ? AND window_date = ? AND status = 'active'`, accountID, windowDate).Scan(&reserved); err != nil {
+		WHERE account_id = ? AND window_date = ? AND status = 'active' AND funding_source = 'quota'`, accountID, windowDate).Scan(&reserved); err != nil {
 		return 0, 0, err
 	}
 	return used.Int64, reserved.Int64, nil

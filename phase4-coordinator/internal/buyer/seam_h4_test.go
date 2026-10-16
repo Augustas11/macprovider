@@ -3,7 +3,7 @@ package buyer
 // Seam-hardening e2e harness — coordinator-side scenario H4
 // (single-terminal-wins / paid-while-buyer-told-failed, INV-6). Companion to
 // the H3 scenarios in seam_h3_test.go and the risk register in
-// audits/seam-hardening/.
+// the seam-hardening risk register.
 //
 // These replace the documented H4 skip. The skip's premise ("a cross-path race
 // observable only end-to-end") was WRONG in one important way and right in

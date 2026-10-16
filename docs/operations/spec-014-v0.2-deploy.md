@@ -179,7 +179,7 @@ Declare the gate passed only after:
 - Phase 2E implementation audit has zero critical, high, or medium findings.
 - The smoke test in Step 6 passes against a real Mac install.
 
-Append the decision entry to `beta/DECISION_CRITERIA.md` after the gate passes. The entry should reference this runbook and all five phase audit artifacts.
+Append the decision entry to `docs/decision-log.md` after the gate passes. The entry should reference this runbook and all five phase audit artifacts.
 
 ## Rollback Plan
 
@@ -243,7 +243,7 @@ Emergency operator sequence:
 
 ## Decision Entry Template
 
-Do not commit this template in the Phase 2E branch commit. The operator appends the final numbered entry to `beta/DECISION_CRITERIA.md` after the gate passes.
+Do not commit this template in the Phase 2E branch commit. The operator appends the final numbered entry to `docs/decision-log.md` after the gate passes.
 
 ```markdown
 <next>. SPEC-014 v0.2 GitHub auth and terminal-to-browser pairing gate passed on <date>.

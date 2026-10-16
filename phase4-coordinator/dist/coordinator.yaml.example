@@ -161,7 +161,8 @@ auth:
 storage:
   db_path: "/var/lib/macprovider/coordinator.db"
   snapshot_interval_s: 300
-  request_log_retention_days: 90
+  # SPEC-005 §2.1b: 14 days; must exceed settlement.nightly_reconcile_window_days.
+  request_log_retention_days: 14
   # Defaults are true for backward compatibility. Set false to defer DELETE
   # retention work to the scheduled pruner tick during buyer traffic relief.
   request_log_prune_on_startup: true
@@ -476,8 +477,24 @@ malibu_emission:
 # enough for the engine this model needs". Unset = no floors = byte-identical
 # routing. Keys match model_id case-insensitively; values must be bare
 # numeric versions or the coordinator refuses to start.
+# SPEC-050 MALIBU stake allowance (#1062). Always on; the budget sets its size.
+# An account locks MALIBU its providers hold and gets a daily inference
+# allowance: min(stake * credits_per_malibu, per_account_daily_cap_credits),
+# scaled down pro rata when the sum exceeds daily_budget_credits. Credits are
+# SPEC-005 credits (1 credit = 1 micro-USD). daily_budget_credits: 0 grants
+# nothing. These are conservative example values (USD 5/day network-wide,
+# USD 0.25/day per account); the operator sets production values. Changes
+# apply at coordinator start.
+stake_allowance:
+  daily_budget_credits: 5000000
+  credits_per_malibu: 1000
+  per_account_daily_cap_credits: 250000
+  min_stake_age_hours: 24
+  unlock_cooldown_hours: 168
+  refresh_check_interval_seconds: 60
+
 coordinator_advertised_version:
-  latest_binary_version: "1.8.238"
+  latest_binary_version: "1.8.242"
   # required_binary_version: "1.7.0"
   # per_model_required_binary_version:
   #   "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit": "1.8.60"

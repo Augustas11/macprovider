@@ -126,7 +126,8 @@ timeouts:
   # whole 503/502 retry loop. This is the one real behavior change of #760: a
   # pre-header hang now fails at 120s instead of 300s.
   coordinator_admission_seconds: 120
-  # Response headers -> first content-bearing SSE delta. 0 (or unset) derives
+  # Response headers -> first content-bearing SSE delta. This is the prefill
+  # budget: size it for the longest prompt you serve. 0 (or unset) derives
   # min(120, coordinator_header_timeout_seconds); an explicit value must be
   # <= coordinator_header_timeout_seconds (the transport gives up first).
   first_token_seconds: 0
@@ -152,7 +153,9 @@ timeouts:
   # own shorter request deadlines. #760 made this a CONTENT-progress budget:
   # it is re-based only by a frame carrying generated text, so a provider that
   # keeps the socket warm with role-only, keepalive, or usage-only frames no
-  # longer holds the stream open indefinitely.
+  # longer holds the stream open indefinitely. #1570: it is armed by the first
+  # content-bearing frame, so prefill is bounded by first_token_seconds and
+  # never by this value. Do not raise it to cover long prompts.
   streaming_idle_ms: 10000
 
 retry_503:

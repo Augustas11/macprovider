@@ -91,6 +91,9 @@ type Envelope struct {
 	Algorithm               string `json:"algorithm"`
 	Ciphertext              string `json:"ciphertext"`
 	Tag                     string `json:"tag"`
+	// Requires is the optional SPEC-041-R003 capability declaration. nil
+	// means absent; a present value is never empty.
+	Requires []string `json:"requires,omitempty"`
 }
 
 type ReservationRequest struct {
@@ -100,6 +103,8 @@ type ReservationRequest struct {
 	MaxOutputTokens       int64  `json:"max_output_tokens"`
 	InputTokenUpperBound  int64  `json:"input_token_upper_bound"`
 	EncryptedRequestBytes int64  `json:"encrypted_request_bytes"`
+	// Requires is the optional SPEC-041-R004 capability declaration.
+	Requires []string `json:"requires,omitempty"`
 }
 
 type ReservationResponse struct {
@@ -125,6 +130,11 @@ type ReservationResponse struct {
 	PrivacyKeyAttestation          *PrivacyKeyAttestation `json:"privacy_key_attestation,omitempty"`
 	PrivacyKeyAttestationSignature string                 `json:"privacy_key_attestation_signature,omitempty"`
 	PrivacyPostureVerifiedAtUnix   int64                  `json:"privacy_posture_verified_at_unix,omitempty"`
+	// SPEC-049-R032: present, all three, only on a pool-scoped privacy-class
+	// reservation; a global reservation never carries them.
+	PoolID                 string `json:"pool_id,omitempty"`
+	PoolManifestVersion    uint64 `json:"pool_manifest_version,omitempty"`
+	PoolManifestCoreDigest string `json:"pool_manifest_core_digest,omitempty"`
 }
 
 type ConsumeResponse struct {
@@ -177,7 +187,7 @@ func ParseIdentityPin(raw []byte) (IdentityPin, error) {
 
 func ParseEnvelope(raw []byte) (Envelope, error) {
 	var value Envelope
-	if err := decodeClosed(raw, &value, []string{"version", "mode", "endpoint_family", "model", "provider_model", "stream", "request_id", "max_output_tokens", "input_token_upper_bound", "reservation_token_cap", "provider_binding", "buyer_binding", "key_record_digest", "kid", "buyer_ephemeral_public_key", "request_replay_nonce", "issued_at_unix", "algorithm", "ciphertext", "tag"}); err != nil {
+	if err := decodeClosedOptional(raw, &value, []string{"version", "mode", "endpoint_family", "model", "provider_model", "stream", "request_id", "max_output_tokens", "input_token_upper_bound", "reservation_token_cap", "provider_binding", "buyer_binding", "key_record_digest", "kid", "buyer_ephemeral_public_key", "request_replay_nonce", "issued_at_unix", "algorithm", "ciphertext", "tag"}, requiresField); err != nil {
 		return value, fmt.Errorf("%w: %v", ErrInvalidEnvelope, err)
 	}
 	if err := value.validateStructure(true); err != nil {
@@ -188,7 +198,7 @@ func ParseEnvelope(raw []byte) (Envelope, error) {
 
 func ParseReservationRequest(raw []byte) (ReservationRequest, error) {
 	var value ReservationRequest
-	if err := decodeClosed(raw, &value, []string{"endpoint_family", "model", "stream", "max_output_tokens", "input_token_upper_bound", "encrypted_request_bytes"}); err != nil {
+	if err := decodeClosedOptional(raw, &value, []string{"endpoint_family", "model", "stream", "max_output_tokens", "input_token_upper_bound", "encrypted_request_bytes"}, requiresField); err != nil {
 		return value, fmt.Errorf("%w: %v", ErrInvalidReservation, err)
 	}
 	if err := value.Validate(); err != nil {
@@ -203,10 +213,15 @@ func ParseReservationResponse(raw []byte) (ReservationResponse, error) {
 		return ReservationResponse{}, fmt.Errorf("%w: %v", ErrInvalidReservation, err)
 	}
 	fields := []string{"version", "provider_binding", "buyer_binding", "key_record_digest", "key_record", "kid", "endpoint_family", "model", "provider_model", "stream", "max_encrypted_request_bytes", "max_output_tokens", "input_token_upper_bound", "reservation_token_cap", "expires_at_unix", "cache_policy", "failover_policy"}
+	pooled := false
 	switch version {
 	case ReservationVersion:
 	case PrivacyReservationVersion:
 		fields = append(append([]string{}, fields...), "privacy_class", "privacy_assurance", "privacy_key_attestation", "privacy_key_attestation_signature", "privacy_posture_verified_at_unix")
+		if closedObjectHasField(raw, "pool_id") {
+			pooled = true
+			fields = append(fields, "pool_id", "pool_manifest_version", "pool_manifest_core_digest")
+		}
 	default:
 		return ReservationResponse{}, ErrInvalidReservation
 	}
@@ -214,10 +229,26 @@ func ParseReservationResponse(raw []byte) (ReservationResponse, error) {
 	if err := decodeClosed(raw, &value, fields); err != nil {
 		return value, fmt.Errorf("%w: %v", ErrInvalidReservation, err)
 	}
+	// SPEC-049 §4.6: a global response never carries the pool fields, not
+	// even zero-valued ones.
+	if pooled && !value.poolExtensionPresent() {
+		return value, ErrInvalidReservation
+	}
 	if err := value.Validate(); err != nil {
 		return value, err
 	}
 	return value, nil
+}
+
+// closedObjectHasField reports a top-level member of a JSON object. It only
+// chooses the closed field set; decodeClosed still rejects everything else.
+func closedObjectHasField(raw []byte, name string) bool {
+	var members map[string]json.RawMessage
+	if json.Unmarshal(raw, &members) != nil {
+		return false
+	}
+	_, ok := members[name]
+	return ok
 }
 
 func closedObjectVersion(raw []byte) (string, error) {
@@ -307,7 +338,7 @@ func ParseStatusResponse(raw []byte) (StatusResponse, error) {
 }
 
 func (r ReservationRequest) Validate() error {
-	if r.EndpointFamily != EndpointChatCompletions || !validModelID(r.Model) || r.MaxOutputTokens <= 0 || r.InputTokenUpperBound <= 0 || r.EncryptedRequestBytes <= 0 || r.EncryptedRequestBytes > MaxEncryptedRequestBytes {
+	if r.EndpointFamily != EndpointChatCompletions || !validModelID(r.Model) || r.MaxOutputTokens <= 0 || r.InputTokenUpperBound <= 0 || r.EncryptedRequestBytes <= 0 || r.EncryptedRequestBytes > MaxEncryptedRequestBytes || !ValidRequires(r.Requires) {
 		return ErrInvalidReservation
 	}
 	_, err := checkedTokenCap(r.InputTokenUpperBound, r.MaxOutputTokens)
@@ -317,12 +348,15 @@ func (r ReservationRequest) Validate() error {
 func (r ReservationResponse) Validate() error {
 	switch r.Version {
 	case ReservationVersion:
-		if r.privacyExtensionPresent() {
+		if r.privacyExtensionPresent() || r.poolExtensionPresent() {
 			return ErrInvalidReservation
 		}
 	case PrivacyReservationVersion:
 		if err := r.validatePrivacyExtension(); err != nil {
 			return err
+		}
+		if r.poolExtensionPresent() && (!visibleASCII(r.PoolID, 128) || r.PoolManifestVersion == 0 || !visibleASCII(r.PoolManifestCoreDigest, 128)) {
+			return ErrInvalidReservation
 		}
 	default:
 		return ErrInvalidReservation
@@ -350,6 +384,10 @@ func (r ReservationResponse) Validate() error {
 		return ErrInvalidReservation
 	}
 	return nil
+}
+
+func (r ReservationResponse) poolExtensionPresent() bool {
+	return r.PoolID != "" || r.PoolManifestVersion != 0 || r.PoolManifestCoreDigest != ""
 }
 
 func (r ConsumeResponse) Validate() error {
@@ -473,6 +511,16 @@ func decodeClosed(raw []byte, dst any, fields []string) error {
 }
 
 func decodeClosedAllowNull(raw []byte, dst any, fields []string, nullable map[string]bool) error {
+	return decodeClosedFields(raw, dst, fields, nullable, "")
+}
+
+// decodeClosedOptional is decodeClosed with one optional member that may be
+// absent but, when present, is not null.
+func decodeClosedOptional(raw []byte, dst any, fields []string, optional string) error {
+	return decodeClosedFields(raw, dst, append(append([]string{}, fields...), optional), nil, optional)
+}
+
+func decodeClosedFields(raw []byte, dst any, fields []string, nullable map[string]bool, optional string) error {
 	if len(raw) == 0 {
 		return ErrInvalidJSON
 	}
@@ -514,7 +562,7 @@ func decodeClosedAllowNull(raw []byte, dst any, fields []string, nullable map[st
 	if _, err := dec.Token(); err != nil {
 		return ErrInvalidJSON
 	}
-	if len(seen) != len(want) {
+	if _, sawOptional := seen[optional]; len(seen) != len(want) && !(optional != "" && !sawOptional && len(seen) == len(want)-1) {
 		return ErrInvalidJSON
 	}
 	if tok, err := dec.Token(); err != io.EOF || tok != nil {

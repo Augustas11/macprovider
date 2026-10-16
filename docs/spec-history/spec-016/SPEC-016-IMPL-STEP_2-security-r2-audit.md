@@ -15,9 +15,9 @@
 
 ## r1 Closures Verified
 
-- `[sec:2.1]` 24h gas cap reservation: PASS. `ServeAbandon` performs the cap check inside `BEGIN IMMEDIATE`, inserts `gas_reserved_native_wei`, and `sumCancelGasLast24h` sums `COALESCE(gas_used_native_wei, gas_reserved_native_wei)` for non-abandoned cancels. Evidence: [abandon.go](/Users/augstar/macprovider-poc/phase4-coordinator/internal/payout/abandon.go:153), [abandon.go](/Users/augstar/macprovider-poc/phase4-coordinator/internal/payout/abandon.go:177), [abandon.go](/Users/augstar/macprovider-poc/phase4-coordinator/internal/payout/abandon.go:284), [abandon.go](/Users/augstar/macprovider-poc/phase4-coordinator/internal/payout/abandon.go:483).
-- `[sec:2.2]` both-RPC chain verification: PASS. Both receipts must target USDC, both tx inputs must match expected calldata, both `from` values must equal the hot wallet and agree, and both log arrays must contain exactly one matching `Transfer`. Evidence: [runner.go](/Users/augstar/macprovider-poc/phase4-coordinator/internal/payout/runner.go:911), [runner.go](/Users/augstar/macprovider-poc/phase4-coordinator/internal/payout/runner.go:933), [runner.go](/Users/augstar/macprovider-poc/phase4-coordinator/internal/payout/runner.go:940), [runner.go](/Users/augstar/macprovider-poc/phase4-coordinator/internal/payout/runner.go:961).
-- `[sec:2.3]` production signer wiring: PASS with one medium hardening finding below. Production requires encrypted wallet path plus KEK; dev plaintext key path requires explicit `dev_mode=true`; config rejects production enabled with missing encrypted wallet path. Evidence: [main.go](/Users/augstar/macprovider-poc/phase4-coordinator/cmd/coordinator/main.go:816), [config.go](/Users/augstar/macprovider-poc/phase4-coordinator/internal/config/config.go:994).
+- `[sec:2.1]` 24h gas cap reservation: PASS. `ServeAbandon` performs the cap check inside `BEGIN IMMEDIATE`, inserts `gas_reserved_native_wei`, and `sumCancelGasLast24h` sums `COALESCE(gas_used_native_wei, gas_reserved_native_wei)` for non-abandoned cancels. Evidence: [abandon.go](/phase4-coordinator/internal/payout/abandon.go:153), [abandon.go](/phase4-coordinator/internal/payout/abandon.go:177), [abandon.go](/phase4-coordinator/internal/payout/abandon.go:284), [abandon.go](/phase4-coordinator/internal/payout/abandon.go:483).
+- `[sec:2.2]` both-RPC chain verification: PASS. Both receipts must target USDC, both tx inputs must match expected calldata, both `from` values must equal the hot wallet and agree, and both log arrays must contain exactly one matching `Transfer`. Evidence: [runner.go](/phase4-coordinator/internal/payout/runner.go:911), [runner.go](/phase4-coordinator/internal/payout/runner.go:933), [runner.go](/phase4-coordinator/internal/payout/runner.go:940), [runner.go](/phase4-coordinator/internal/payout/runner.go:961).
+- `[sec:2.3]` production signer wiring: PASS with one medium hardening finding below. Production requires encrypted wallet path plus KEK; dev plaintext key path requires explicit `dev_mode=true`; config rejects production enabled with missing encrypted wallet path. Evidence: [main.go](/phase4-coordinator/cmd/coordinator/main.go:816), [config.go](/phase4-coordinator/internal/config/config.go:994).
 
 ## Medium Issues
 
@@ -25,7 +25,7 @@
 
 **Severity:** MEDIUM  
 **Category:** OWASP A02 Cryptographic Failures / Secrets Management  
-**Location:** [main.go](/Users/augstar/macprovider-poc/phase4-coordinator/cmd/coordinator/main.go:822)  
+**Location:** [main.go](/phase4-coordinator/cmd/coordinator/main.go:822)  
 **Exploitability:** Local memory disclosure after startup failure  
 **Blast Radius:** KEK material may remain in process heap longer than necessary if wallet loading fails after KEK resolution.  
 **Issue:** `loadPayoutSigner` zeroizes `kek` only after `LoadLocalFileSigner` succeeds. If wallet read/decrypt/parse fails, the function returns before wiping the resolved KEK. Same pattern exists for dev key bytes after `NewLocalFileSignerFromKey` errors.
@@ -67,7 +67,7 @@ if err != nil {
 
 **Severity:** LOW  
 **Category:** OWASP A07 Identification and Authentication Failures  
-**Location:** [mux.go](/Users/augstar/macprovider-poc/phase4-coordinator/internal/payout/mux.go:164)  
+**Location:** [mux.go](/phase4-coordinator/internal/payout/mux.go:164)  
 **Exploitability:** Remote but noisy timing side channel  
 **Blast Radius:** If practically exploitable, an attacker could recover the operator bearer and reach `/admin/payout/*`; gas and runner controls are still capped/gated.  
 **Issue:** `raw != operatorKey` uses normal string comparison. For bearer secrets on admin endpoints, use constant-time comparison after length normalization.

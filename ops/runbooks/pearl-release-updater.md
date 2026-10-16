@@ -359,7 +359,7 @@ closed. Stats freshness alarms (for example the billing mirror) can fire while
 the sidecars are held. Installing a changed `stats-inventory-sync` is the
 signed matching-binary promotion that releases a pre-existing
 `/opt/macprovider/.coordinator-deploy-sidecar-parity-required` hold (Entry 247
-in `beta/DECISION_CRITERIA.md`); the timer stays held, and a rollback restores
+in `docs/decision-log.md`); the timer stays held, and a rollback restores
 the marker. If a later full deploy leaves the marker behind (a failed initial
 inventory run or an armed abort on the onboarding path), re-run
 `macprovider-pearl-update --apply --tag vX.Y.Z` for the same runtime release.

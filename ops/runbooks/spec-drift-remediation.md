@@ -22,7 +22,7 @@ This runbook tracks everything the audit surfaced that PR #543 did **not** fix.
   review; antfleet-ops approves → Augustas11 squash-merges.
 - **Verify before claiming.** Money-path fixes verify against production ledger
   / live endpoints before the fix is called done.
-- **Decision-log.** Append a `beta/DECISION_CRITERIA.md` entry when a number,
+- **Decision-log.** Append a `docs/decision-log.md` entry when a number,
   gate, or money-path behavior changes.
 
 ---

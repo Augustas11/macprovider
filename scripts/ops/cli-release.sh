@@ -862,6 +862,9 @@ gh workflow run verify-live-coordinator-release-rollout.yml -R $(gh_repo) --ref 
       elif [ -z "${MALIBU_DOWNLOAD_SSH_KEY:-}" ]; then
         set_next mirror_latest blocked "Promote the release mirror pointer to v$V" "" \
           "MALIBU_DOWNLOAD_SSH_KEY is unset; set it in the ops env (see scripts/ops/README.md)"
+      elif [ -z "${MALIBU_DOWNLOAD_VPS_HOST:-}" ]; then
+        set_next mirror_latest blocked "Promote the release mirror pointer to v$V" "" \
+          "MALIBU_DOWNLOAD_VPS_HOST is unset; set it in the ops env (see scripts/ops/README.md)"
       else
         set_next mirror_latest mutate "Point the release mirror latest.json at v$V" \
 "GH_TOKEN=\"\${GH_TOKEN:-\$(gh auth token -u Augustas11)}\" \\
@@ -923,11 +926,18 @@ marker_canary_probe_matches() {
   marker_done "$OPS_SCOPE" canary_smoke || return 1
   [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("candidate_sha")')" = "$sha" ] || return 1
   [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("kind")')" = "status_probe_gateway_proof" ] || return 1
-  [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("continuous_batching_active")')" = "true" ] || return 1
+  local decision
+  decision="$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("self_check_decision")')"
+  [ "$decision" = single_row ] ||
+    [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("continuous_batching_active")')" = "true" ] || return 1
   [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("paged_kv_decision")')" = "attached" ] || return 1
   # CB authorization: either the legacy signed positive policy entry, or the
   # #1947 on-device self-check grant (the signed policy is revocation-only).
-  if [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("self_check_decision")')" = "granted" ]; then
+  if [ "$decision" = single_row ]; then
+    [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("policy_load_status")')" = "live_verified" ] || return 1
+    [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("policy_local_proof_result")')" = "passed" ] || return 1
+    [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("emergency_off_override")')" = "false" ] || return 1
+  elif [ "$decision" = "granted" ]; then
     [ "$(marker_field "$OPS_SCOPE" canary_smoke 'int(d.get("probe", {}).get("self_check_served_slots") or 0) >= 1')" = "true" ] || return 1
     [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("emergency_off_override")')" = "false" ] || return 1
   else
@@ -1011,12 +1021,21 @@ bad = []
 if got["binary_version"] != v: bad.append("binary_version %r != %r" % (got["binary_version"], v))
 if got["coordinator_connected"] is not True: bad.append("coordinator.connected is not true")
 if compat and got["compatibility_set_id"] != compat: bad.append("compatibility_set_id %r != %r" % (got["compatibility_set_id"], compat))
-if got["continuous_batching_active"] is not True: bad.append("continuous_batching.active is not true")
+# A canary whose own self-check measured one row, a Mac with no CB headroom,
+# still proves the candidate identity, join and serving; CB concurrency is
+# qualified by the Studio evidence of the PRs that changed it.
+single_row = got["self_check_decision"] == "single_row"
+if got["continuous_batching_active"] is not True and not single_row: bad.append("continuous_batching.active is not true")
 if got["paged_kv_decision"] != "attached": bad.append("continuous_batching.paged_kv_decision %r != 'attached'" % (got["paged_kv_decision"],))
 if got["self_check_decision"] == "granted":
     # #1947: CB is authorized by the on-device self-check; the signed policy only revokes.
     if not isinstance(got["self_check_served_slots"], int) or got["self_check_served_slots"] < 1:
         bad.append("continuous_batching.self_check.served_slots %r < 1" % (got["self_check_served_slots"],))
+    if got["emergency_off_override"] is not False:
+        bad.append("continuous_batching.policy.emergency_off_override is not false")
+elif single_row:
+    if got["policy_load_status"] != "live_verified": bad.append("continuous_batching.policy.load_status %r != 'live_verified'" % (got["policy_load_status"],))
+    if got["policy_local_proof_result"] != "passed": bad.append("continuous_batching.policy.local_proof_result %r != 'passed'" % (got["policy_local_proof_result"],))
     if got["emergency_off_override"] is not False:
         bad.append("continuous_batching.policy.emergency_off_override is not false")
 else:

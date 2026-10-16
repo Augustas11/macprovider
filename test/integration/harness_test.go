@@ -300,7 +300,11 @@ type scenarioOpts struct {
 	// fake provider connects (control-plane setup); providerSetup adjusts
 	// each fake provider before it starts.
 	beforeProviders func(*scenario)
-	providerSetup   func(*fakeProvider)
+	// beforeCoordinator runs after the coordinator database exists (provider
+	// tokens issued) and before the coordinator process starts, so seeded
+	// rows are visible to its startup jobs.
+	beforeCoordinator func(*scenario)
+	providerSetup     func(*fakeProvider)
 	// gatewayServiceToken, when non-nil, overrides the gateway's
 	// coordinator.service_token config field. nil = use
 	// scenario.serviceToken. A pointer to the empty string is the only
@@ -562,6 +566,9 @@ func newScenario(t *testing.T, opts scenarioOpts) *scenario {
 	// proxies to it on first hit, so order matters for fast startup.
 	if opts.captureCoordLogs {
 		s.coordLogBuf = newLogBuffer()
+	}
+	if opts.beforeCoordinator != nil {
+		opts.beforeCoordinator(s)
 	}
 	s.startCoordinator(ctx)
 	s.waitForHealth(s.coordBuyerURL + "/healthz")
@@ -1593,21 +1600,41 @@ func (s *scenario) waitForHealth(url string) {
 // waitForProviderReady polls the coordinator's /poolz endpoint until
 // the named provider appears in a routable state. /poolz needs operator
 // auth; we send the operator key.
+//
+// A fake provider that authenticates with a receipt key (v2 auth) reads
+// "state":"ready" with free slots as soon as auth is accepted, but its key
+// stays pending, and the session unroutable, until its state_update lands.
+// A buyer request in that window got 503 no_provider_available, so for such
+// a provider the published receipt_pubkey is part of ready.
 func (s *scenario) waitForProviderReady(providerID string) {
 	s.t.Helper()
+	needsReceiptKey := false
+	for _, fp := range s.fakeProvs {
+		if fp.providerID == providerID && (fp.receiptEnabled || fp.settlementEnabled) {
+			needsReceiptKey = true
+		}
+	}
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		req, _ := http.NewRequest(http.MethodGet, s.coordProvURL+"/poolz", nil)
 		req.Header.Set("Authorization", "Bearer "+s.operatorKey)
 		resp, err := http.DefaultClient.Do(req)
 		if err == nil {
-			body, _ := io.ReadAll(resp.Body)
+			var poolz struct {
+				Pool []struct {
+					ProviderID    string  `json:"provider_id"`
+					State         string  `json:"state"`
+					SlotsFree     int     `json:"slots_free"`
+					ReceiptPubkey *string `json:"receipt_pubkey"`
+				} `json:"pool"`
+			}
+			decodeErr := json.NewDecoder(resp.Body).Decode(&poolz)
 			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK && strings.Contains(string(body), providerID) {
-				// Also need provider in ready state — the response
-				// includes `"state":"ready"` once heartbeat lands.
-				if strings.Contains(string(body), `"state":"ready"`) {
-					return
+			if resp.StatusCode == http.StatusOK && decodeErr == nil {
+				for _, p := range poolz.Pool {
+					if p.ProviderID == providerID && p.State == "ready" && p.SlotsFree > 0 && (!needsReceiptKey || p.ReceiptPubkey != nil) {
+						return
+					}
 				}
 			}
 		}
@@ -1683,7 +1710,7 @@ type fakeProvider struct {
 	admissionPriv      ed25519.PrivateKey
 	trustedPoolV1      bool
 	omitCatalogRelease bool
-	binaryVersion      string // "" = "1.6.0-fake"
+	binaryVersion      string // "" = "1.6.0-fake" (receipt hello) or "1.0.0-fake" (legacy hello)
 	// reconnectRequests makes runWS close its session and hello again on
 	// the same receipt key, as a restarted provider CLI does.
 	reconnectRequests chan struct{}
@@ -1695,6 +1722,17 @@ type fakeProvider struct {
 	weightsManifest string
 	computeScore    func(outputText string) (scored, top1 int, sumLogprob float64)
 	wsWriteMu       sync.Mutex
+	// streamFirstByteDelay holds a streamed response between its headers and
+	// its first chunk, so the coordinator measures it as time to first token
+	// (SPEC-002-R005 phase-aware routing journey).
+	streamFirstByteDelay time.Duration
+	// streamDecodeDelay holds a streamed response between its first content
+	// chunk and the rest. The coordinator records decode time in whole
+	// milliseconds and skips a 0ms sample, so without it a burst-written
+	// stream yields a decode sample only when the runner happens to stall.
+	streamDecodeDelay time.Duration
+	// maxContextTokens is the advertised max_context_tokens (0 = 8192).
+	maxContextTokens int
 }
 
 func (p *fakeProvider) completionText() string {
@@ -1745,6 +1783,13 @@ func (p *fakeProvider) answerComputeScore(conn net.Conn, raw []byte) {
 		"model_id": req["model_id"], "weights_manifest_sha256": req["weights_manifest_sha256"],
 		"status": "ok", "prompt_tokens": 40, "scored_tokens": scored, "top1_matches": top1, "sum_logprob": sum,
 	})
+}
+
+func (p *fakeProvider) maxContextTokensOrDefault() int {
+	if p.maxContextTokens > 0 {
+		return p.maxContextTokens
+	}
+	return 8192
 }
 
 func (p *fakeProvider) binaryVersionOrDefault() string {
@@ -2405,7 +2450,19 @@ func (p *fakeProvider) start(ctx context.Context) {
 				w.Header().Add("Trailer", "X-MacProvider-Receipt-Terminal-State-TS-Unix-MS")
 			}
 			w.WriteHeader(http.StatusOK)
+			if p.streamFirstByteDelay > 0 {
+				if flusher, ok := w.(http.Flusher); ok {
+					flusher.Flush()
+				}
+				time.Sleep(p.streamFirstByteDelay)
+			}
 			_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-fake-integration\",\"object\":\"chat.completion.chunk\",\"created\":1780000000,\"model\":\"llama-3.2-3b-instruct\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello \"},\"finish_reason\":null}]}\n\n"))
+			if p.streamDecodeDelay > 0 {
+				if flusher, ok := w.(http.Flusher); ok {
+					flusher.Flush()
+				}
+				time.Sleep(p.streamDecodeDelay)
+			}
 			_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-fake-integration\",\"object\":\"chat.completion.chunk\",\"created\":1780000000,\"model\":\"llama-3.2-3b-instruct\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"from fake provider\"},\"finish_reason\":null}]}\n\n"))
 			_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-fake-integration\",\"object\":\"chat.completion.chunk\",\"created\":1780000000,\"model\":\"llama-3.2-3b-instruct\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"))
 			_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-fake-integration\",\"object\":\"chat.completion.chunk\",\"created\":1780000000,\"model\":\"llama-3.2-3b-instruct\",\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":12,\"total_tokens\":20},\"choices\":[]}\n\n"))
@@ -2533,7 +2590,7 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 			"model_id":                    p.modelID,
 			"model_params_b":              3.0,
 			"ram_gb":                      16,
-			"max_context_tokens":          8192,
+			"max_context_tokens":          p.maxContextTokensOrDefault(),
 			"max_concurrency":             2,
 			"throughput_tps_estimate":     20.0,
 			"binary_version":              p.binaryVersionOrDefault(),
@@ -2646,6 +2703,7 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 			return
 		}
 		ready := readyStateUpdate(p.modelID, p.modelHash)
+		ready["metrics_snapshot"].(map[string]any)["max_context_tokens"] = p.maxContextTokensOrDefault()
 		p.canonicalIdentity(ready["metrics_snapshot"].(map[string]any))
 		p.addWeightsManifest(ready["metrics_snapshot"].(map[string]any))
 		if err := p.writeFrame(conn, ready); err != nil {
@@ -2653,6 +2711,10 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 			return
 		}
 	} else {
+		binaryVersion := "1.0.0-fake"
+		if p.binaryVersion != "" {
+			binaryVersion = p.binaryVersion
+		}
 		hello := map[string]any{
 			"type":                    "hello",
 			"version":                 1,
@@ -2662,10 +2724,10 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 			"model_id":                p.modelID,
 			"model_params_b":          3.0,
 			"ram_gb":                  16,
-			"max_context_tokens":      8192,
+			"max_context_tokens":      p.maxContextTokensOrDefault(),
 			"max_concurrency":         2,
 			"throughput_tps_estimate": 20.0,
-			"binary_version":          "1.0.0-fake",
+			"binary_version":          binaryVersion,
 			"attestation":             nil,
 			"endpoint_url":            endpointURL,
 		}
@@ -2726,7 +2788,7 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 				"model_id":                   p.modelID,
 				"model_params_b":             3.0,
 				"ram_gb":                     16,
-				"max_context_tokens":         8192,
+				"max_context_tokens":         p.maxContextTokensOrDefault(),
 				"max_concurrency":            2,
 				"slots_free":                 2,
 				"slots_total":                2,

@@ -72,6 +72,12 @@ type usageSubject struct {
 	DemoTokenHash        string
 	WalletSessionID      string
 	ReservationCreatedAt time.Time
+	// AllowanceFunded marks a request the coordinator admitted against the
+	// account's SPEC-050 allowance; its quota reservation does not draw on
+	// the paid daily quota. AllowanceRequired marks one whose paid quota was
+	// exhausted, so only the allowance may fund it.
+	AllowanceFunded   bool
+	AllowanceRequired bool
 }
 
 const (
@@ -291,6 +297,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		)
 		return
 	}
+	// SPEC-006-R019: the privacy mode is resolved before the relay-blind gate.
+	requestedPrivacy, privacyOK := gatePrivacyModeBeforeRelayBlind(w, r, body)
+	if !privacyOK {
+		return
+	}
 	if s.rejectRelayBlindEnvelopeIfRequired(w, r, body, subject.AccountID, authn.WalletSession) {
 		return
 	}
@@ -359,6 +370,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	// SPEC-006-R016: resolve a buyer engine selection after the pool, before
 	// quota reservation. A non-native engine without a pool is refused here.
+	effectivePrivacy, privacyOK := effectivePrivacyModeForPlaintext(w, requestedPrivacy, poolID)
+	if !privacyOK {
+		demand.markGatewayFailure(http.StatusBadRequest, privacyModeUnsatisfied)
+		return
+	}
 	engineClass, engineErr := resolveEngineSelection(r.Header, poolID)
 	if engineErr != nil {
 		demand.markGatewayFailure(engineErr.status, engineErr.code)
@@ -484,13 +500,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 					capture := adapter.dedupeCapture()
 					if capture != nil {
 						s.idlessDedupe.publish(dedupeFingerprint, requestID(r), sw.statusCode,
-							w.Header().Get("Content-Type"), w.Header().Get("X-Provider-Id"),
+							w.Header().Get("Content-Type"),
 							capture, s.now())
 						return
 					}
 					if adapter.dedupeDeliveredButUncacheable() {
 						s.idlessDedupe.publish(dedupeFingerprint, requestID(r), sw.statusCode,
-							w.Header().Get("Content-Type"), w.Header().Get("X-Provider-Id"),
+							w.Header().Get("Content-Type"),
 							nil, s.now())
 						return
 					}
@@ -499,7 +515,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				}
 				if adapter == nil && sw.dedupePublishable() && r.Context().Err() == nil {
 					s.idlessDedupe.publish(dedupeFingerprint, requestID(r), sw.statusCode,
-						w.Header().Get("Content-Type"), w.Header().Get("X-Provider-Id"),
+						w.Header().Get("Content-Type"),
 						sw.dedupeCapture(), s.now())
 					return
 				}
@@ -513,7 +529,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				// drop, because those retries MUST re-dispatch.
 				if sw.dedupeDeliveredButUncacheable() && r.Context().Err() == nil {
 					s.idlessDedupe.publish(dedupeFingerprint, requestID(r), sw.statusCode,
-						w.Header().Get("Content-Type"), w.Header().Get("X-Provider-Id"),
+						w.Header().Get("Content-Type"),
 						nil, s.now())
 					return
 				}
@@ -541,11 +557,19 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		sessionDecision, err = s.admitWalletSessionInference(r, authn.WalletSession, originalBody, model, reservationTokens, dailyQuota, window, subject.ReservationCreatedAt, s.now().Add(reservationMaxAge))
 		decision = sessionDecision.AccountQuota
 	} else {
-		decision, err = s.store.ReserveQuota(r.Context(), storage.ReservationRequest{
+		quotaReq := storage.ReservationRequest{
 			AccountID: subject.AccountID, RequestID: requestID(r), WindowDate: window,
 			RequestedTokens: reservationTokens, DailyQuota: dailyQuota,
 			CreatedAt: subject.ReservationCreatedAt, ExpiresAt: s.now().Add(reservationMaxAge),
-		})
+		}
+		decision, err = s.store.ReserveQuota(r.Context(), quotaReq)
+		if errors.Is(err, storage.ErrQuotaExceeded) && !authn.Demo {
+			// SPEC-050-R007: the paid quota is spent, but an account with an
+			// allowance today may still be funded from the allowance alone.
+			if allowanceDecision, allowanceErr, tried := s.reserveAllowanceOnly(r.Context(), &subject, quotaReq); tried {
+				decision, err = allowanceDecision, allowanceErr
+			}
+		}
 	}
 	if errors.Is(err, storage.ErrQuotaExceeded) {
 		setRateLimitHeaders(w, decision.LimitTokens, decision.RemainingTokens, decision.ResetUnix)
@@ -661,7 +685,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		_ = s.store.ReleaseConcurrency(context.Background(), subject.AccountID, requestID(r), s.now())
 	}()
 
-	internalConversation, convIsAutoPrefix, invalidConvTag := s.chatConversationKey(upCtx, r, subject, authn.Demo, chat.Messages, chat.Tools)
+	var internalConversation string
+	var convIsAutoPrefix, invalidConvTag bool
+	// Relay-blind and privacy-class executions must never acquire reusable
+	// provider cache identity. Their ciphertext can share a plaintext prefix,
+	// and the provider-side privacy contract explicitly rejects cache grants.
+	if relayBlindExecutionFor(r) == nil {
+		internalConversation, convIsAutoPrefix, invalidConvTag = s.chatConversationKey(upCtx, r, subject, authn.Demo, chat.Messages, chat.Tools)
+	}
 	if invalidConvTag {
 		s.refundWalletAwareReservation(subject, requestID(r))
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_conversation_tag", "Invalid conversation tag")
@@ -715,6 +746,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			// signed-finality capability, set together.
 			s.setCoordinatorChatContext(upReq.Header, r, subject.AccountID)
 			advertiseCapacityShed429(upReq.Header)
+			// SPEC-050-R007: API-key requests are admitted against the
+			// account's allowance on the coordinator before dispatch.
+			if !authn.Demo && authn.WalletSession == nil {
+				setAllowanceRequestHeaders(upReq.Header, model, window, promptReservation, maxTokens, subject.AllowanceRequired)
+			}
 			// The request body remains buyer-authored because max_tokens is part
 			// of the receipt prompt hash. Carry the gateway's reserved output
 			// budget as authenticated dispatch metadata instead, so an omitted
@@ -737,6 +773,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			if engineClass != "" {
 				upReq.Header.Set(engineEmitHeader, engineClass)
 			}
+			// SPEC-006-R019: the effective mode labels the coordinator's
+			// route_trace line; it never changes coordinator routing.
+			upReq.Header.Set(internalPrivacyModeEmitHeader, effectivePrivacy)
 		}
 		if internalConversation != "" {
 			// Authorization + X-MacProvider-Account are set
@@ -824,6 +863,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 	timing.observeCoordinatorResponse(resp.Header, s.now())
+	s.noteAllowanceResponse(r, &subject, resp.Header)
 	if priorProviderDispatch {
 		if resp.Header == nil {
 			resp.Header = http.Header{}
@@ -1204,7 +1244,6 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 	if !settleWithFinality(usage.PromptTokens, usage.CompletionTokens, tokenSource, "ok") {
 		return
 	}
-	emitProviderAttribution(w.Header(), resp.Header)
 	if poolModelDisclosureAllowed(poolID, model, resp.Header) {
 		copyReceiptEligibleHeaders(w.Header(), resp.Header)
 	} else {
@@ -1214,32 +1253,6 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 	maybeSetPrivacySuccessHeaders(w, r)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
-}
-
-// emitProviderAttribution surfaces the provider peer id under a public
-// buyer-facing header name (X-Provider-Id) on the gateway response.
-//
-// Required by harness B5/B6 verdicts (slot utilization, per-provider
-// earnings) and any downstream buyer that wants per-request provider
-// attribution. The internal `X-MacProvider-Provider` header carrying
-// the peer id is stripped by copyCleanHeaders /
-// copyReceiptEligibleHeaders via isMacProviderHeader, so this MUST
-// run BEFORE the copy/strip — and emit under a different prefix so it
-// survives the strip.
-//
-// Only the peer id is surfaced. The companion `X-MacProvider-Route`
-// header on coord responses carries a session-assigned routing token
-// (auth-shaped, not a pure identifier) and is deliberately NOT
-// emitted to buyers.
-//
-// Empty source values produce no output header (avoids leaking
-// "X-Provider-Id: " sentinels on coord paths that don't carry
-// provider attribution — coordinator policy errors, cold-start 503s
-// without a peer selected, etc.).
-func emitProviderAttribution(dst, src http.Header) {
-	if v := src.Get("X-MacProvider-Provider"); v != "" {
-		dst.Set("X-Provider-Id", v)
-	}
 }
 
 func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens, maxTokens int64, model, poolID string, retryExhausted, priorProviderDispatch bool, deadlines *requestDeadlines, structuredStreaming bool, reservationWindow string, timing *gatewayPhaseTiming) {
@@ -1315,7 +1328,6 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	if timing != nil {
 		defer timing.observeCoordinatorTrailers(resp.Trailer)
 	}
-	emitProviderAttribution(w.Header(), resp.Header)
 	if poolModelDisclosureAllowed(poolID, model, resp.Header) {
 		copyCleanHeaders(w.Header(), resp.Header)
 	} else {
@@ -1366,8 +1378,15 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	// keeps the socket warm with role-only or usage-only frames no longer
 	// holds the stream open forever. A zero deadline preserves the legacy
 	// "no idle timeout" sentinel (streaming_idle_ms <= 0).
+	//
+	// #1570: the decode-idle deadline is armed by the first content-bearing
+	// frame, not at stream open. Before that frame the provider is in
+	// admission/prefill, which the first-token phase (and the ceiling) bound.
+	// Arming decode-idle at open made a long prefill expire as decode_idle,
+	// so production had to raise streaming_idle_ms to the prefill budget and
+	// lost decode-idle protection.
 	idleTimeout := adaptiveDecodeIdleTimeout(model, s.cfg)
-	progressDeadline := streamingProgressDeadline(idleTimeout)
+	var progressDeadline time.Time
 	var emitted int64
 	var serializedEmitted int64
 	var reported *tokenUsage
@@ -1732,8 +1751,15 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 						line = nil
 					}
 				} else if !hasChoices && !anthropicTerminalFrame && !cleanLengthTerminalFrame {
-					slog.Warn("streaming gateway estimate saw data chunk without choices or usage; truncating stream", "request_id", requestID(r))
-					writeSSEError(w, "Upstream stream returned malformed data", "api_error", "stream_malformed")
+					slog.Warn("streaming gateway estimate saw data chunk without choices or usage; truncating stream", "request_id", requestID(r), "upstream_error_code", terminalCode)
+					// #1570: a coordinator terminal error frame keeps its
+					// code. Rewriting provider_error to stream_malformed hid
+					// the real failure. Settlement is unchanged.
+					if code, errType, message, ok := coordinatorStreamTerminalError(terminalCode); ok {
+						writeSSEError(w, message, errType, code)
+					} else {
+						writeSSEError(w, "Upstream stream returned malformed data", "api_error", "stream_malformed")
+					}
 					if flusher != nil {
 						flusher.Flush()
 					}
@@ -2306,15 +2332,6 @@ func (s *Server) passThroughReceiptEligibleProviderError(w http.ResponseWriter, 
 	if demand := demandTelemetryFromContext(r.Context()); demand != nil {
 		demand.markProviderFailure(promptEstimate, 0, resp.StatusCode, openAIErrorCode(body))
 	}
-	// PR #250 R1 code MEDIUM: this path serves provider-SELECTED
-	// errors (null-usage 5xx, etc.) where the coord did pick a
-	// provider before the failure (server.go:1886, :1909 set
-	// X-MacProvider-Provider on selected-provider non-200 responses).
-	// Without emitting attribution here, B5/B6 benchmark verdicts
-	// would still mis-attribute provider-side failures as anonymous.
-	// passThroughNoProviderCoordinatorError stays unchanged because
-	// no provider was selected on its callers' paths.
-	emitProviderAttribution(w.Header(), resp.Header)
 	copyReceiptEligibleHeadersWithoutPoolModelDisclosure(w.Header(), resp.Header)
 	w.Header().Set("X-Request-ID", requestID(r))
 	w.Header().Set("Content-Type", contentTypeOrJSON(resp.Header))
@@ -2328,7 +2345,7 @@ func (s *Server) passThroughReceiptEligibleProviderError(w http.ResponseWriter, 
 
 func isNullUsageProviderError(body []byte) bool {
 	switch openAIErrorCode(body) {
-	case "error_model_not_loaded", "error_context_exceeded", "error_queue_full", "error_internal", "malformed_json_response", "json_schema_validation_failed":
+	case "error_model_not_loaded", "error_context_exceeded", "error_queue_full", "error_internal", "malformed_json_response", "json_schema_validation_failed", "tool_selection_validation_failed":
 		return true
 	default:
 		return false
@@ -2627,11 +2644,6 @@ func coordinatorErrorRetryable(status int, body []byte) bool {
 		return gatewayRetryable("no_provider_available")
 	}
 	return gatewayRetryable(openAIErrorCode(body))
-}
-
-func (s *Server) settleCancelledStream(r *http.Request, subject usageSubject, promptEstimate, emitted, maxUsageTokens, maxTokens int64, cancelCoordinator func(), reservationWindow string) {
-	cancelCoordinator()
-	s.settleAfterCommit(r, subject, promptEstimate, estimateStreamingCompletionTokens(emitted, maxTokens), maxUsageTokens, "gateway_estimated", "client_disconnect", reservationWindow)
 }
 
 func (s *Server) settleBeforeResponse(w http.ResponseWriter, r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome string) bool {
@@ -3288,6 +3300,7 @@ func (s *Server) settleAfterCommit(r *http.Request, subject usageSubject, prompt
 		Outcome:          outcome,
 		DemoIdentity:     subject.DemoIdentity,
 		DemoTokenHash:    subject.DemoTokenHash,
+		FundingSource:    settlementFundingSource(subject),
 		WalletSessionID:  subject.WalletSessionID,
 	}); journalErr != nil {
 		// FAIL-OPEN, deliberately. The buyer already has the bytes; refusing
@@ -3342,6 +3355,17 @@ func (s *Server) settleAfterCommit(r *http.Request, subject usageSubject, prompt
 			TokenSource:      source,
 			Outcome:          outcome,
 			CreatedAt:        s.now(),
+		}
+		// SPEC-050-R008: keep the confirmed funding on the reservation even
+		// though the settlement transaction that normally writes it failed.
+		// If that cannot be made durable and the journal holds the effect,
+		// leave the reservation and the effect for the journal recovery,
+		// which settles with the funding atomically, rather than bill the
+		// usage against the wrong quota now.
+		if fundingErr := s.persistFundingSource(subject.AccountID, requestID(r), settlementFundingSource(subject)); fundingErr != nil && armed {
+			slog.Error("gateway SPEC-006 § 17.7 fallback deferred to the settlement journal: allowance funding not durable",
+				"request_id", requestID(r), "account_id", subject.AccountID, "error", fundingErr)
+			return
 		}
 		if fallbackErr := s.store.EnsureUsageEvent(context.Background(), ev); fallbackErr != nil {
 			// Both the normal settle path and the idempotent fallback
@@ -3622,6 +3646,7 @@ func (s *Server) settleRequest(r *http.Request, subject usageSubject, prompt, co
 		RelayBlind: relayBlindMetadataFor(r),
 		AccountID:  subject.AccountID, RequestID: requestID(r), PromptTokens: prompt, CompletionTokens: completion,
 		MaxTotalTokens: maxTotal, TokenSource: source, Outcome: outcome, SettledAt: s.now(),
+		FundingSource: settlementFundingSource(subject),
 	}
 	var err error
 	if subject.DemoIdentity != "" {
@@ -3956,10 +3981,29 @@ func isPassThroughTerminalSSEErrorCode(code string) bool {
 	// Rewriting them to stream_malformed made Pi/openai-python treat a
 	// structured parse failure as a generic malformed stream.
 	switch code {
-	case "malformed_tool_call", "malformed_tool_call_final_json":
+	case "malformed_tool_call", "malformed_tool_call_final_json", "tool_selection_validation_failed":
 		return true
 	default:
 		return false
+	}
+}
+
+// coordinatorStreamTerminalError maps a coordinator post-commit terminal SSE
+// error code to the buyer-visible envelope the gateway emits instead of
+// stream_malformed (#1570). Codes, types and messages are the gateway's own,
+// never the upstream text: coordinator provider_error is normalized to
+// upstream_provider_error (SPEC-006 §17), provider_disconnected keeps the
+// SPEC-002 FR-B6 server_error envelope. Both settle as stream_malformed, a
+// SPEC-006 §17.7.1 named mapping. provider_timeout already passes through as
+// a SPEC-019 terminal code.
+func coordinatorStreamTerminalError(code string) (string, string, string, bool) {
+	switch code {
+	case "provider_error":
+		return "upstream_provider_error", "api_error", "Upstream provider error", true
+	case "provider_disconnected":
+		return "provider_disconnected", "server_error", "Provider disconnected during streaming", true
+	default:
+		return "", "", "", false
 	}
 }
 
@@ -4535,39 +4579,87 @@ func estimatePromptTokens(body []byte) int64 {
 	if len(body) == 0 {
 		return 0
 	}
-	return int64(math.Ceil(float64(len(body)) / 4.0))
+	accounting, images := visionAccountingBody(body)
+	return int64(math.Ceil(float64(len(accounting))/4.0)) + int64(images*visionMediaTokenAllowance)
+}
+
+const visionMediaTokenAllowance = 1024
+
+// visionAccountingBody removes only validated-shape image payloads from
+// estimates; the original body is still forwarded and bound by receipts.
+func visionAccountingBody(body []byte) ([]byte, int) {
+	var request map[string]any
+	if json.Unmarshal(body, &request) != nil {
+		return body, 0
+	}
+	count := 0
+	messages, _ := request["messages"].([]any)
+	for _, message := range messages {
+		m, _ := message.(map[string]any)
+		parts, _ := m["content"].([]any)
+		for _, part := range parts {
+			p, _ := part.(map[string]any)
+			if p["type"] == "image_url" {
+				if len(p) != 2 {
+					continue
+				}
+				image, ok := p["image_url"].(map[string]any)
+				if !ok || len(image) < 1 || len(image) > 2 {
+					continue
+				}
+				if _, ok := image["url"].(string); !ok {
+					continue
+				}
+				validShape := true
+				for key := range image {
+					if key != "url" && key != "detail" {
+						validShape = false
+						break
+					}
+				}
+				if !validShape {
+					continue
+				}
+				count++
+				p["image_url"] = map[string]any{"url": "[inline-image]"}
+			}
+		}
+	}
+	if count == 0 {
+		return body, 0
+	}
+	accounting, err := json.Marshal(request)
+	if err != nil {
+		return body, 0
+	}
+	return accounting, count
 }
 
 // promptHeadroomTokens absorbs the chat-template overhead that the
-// byte-heuristic cannot see (im_start/role/content/im_end markers,
-// BOS token, etc.) — fixed-cost per request, independent of body
-// length. 64 covers the largest chat templates observed in the
-// operator fleet with margin.
+// estimate cannot see (im_start/role/content/im_end markers, BOS token,
+// a default system preamble) — fixed-cost per request, independent of
+// body length.
 const promptHeadroomTokens = 64
 
-// promptCapTokens — generous upper bound used ONLY in the usage-
-// validation cap (maxUsageTokens). Equal to the billable estimate
-// plus fixed chat-template headroom. Never used as a billed
-// quantity.
+// promptCapTokens is the SPEC-006 §7.2.1 prompt reservation: the prompt part
+// of the quota hold and of the usage validation cap (maxUsageTokens). Never a
+// billed quantity.
 //
-// Background. estimatePromptTokens returns ceil(bytes/4), which is
-// fine for English prose but consistently 5-50 tokens below the
-// provider's actual tokenizer output. The provider's tokenizer
-// applies the chat template AFTER body parse, adding fixed-cost
-// overhead the byte-heuristic cannot see. Empirically reproducible
-// on mlx-community/Qwen2.5-Coder-7B-Instruct-4bit during the
-// 2026-06-28 phase-A re-run: a 115-byte body + max_tokens=4 → bare
-// cap=33; provider tokenized to prompt=30+completion=4=34 → falsely
-// rejected as invalid_provider_usage. Adding +64 to the cap (only)
-// fixes the false reject without inflating any billed quantity.
-//
-// NOTE: this cap equals the reservation hold (chat_proxy §"Validation
-// cap matches the reservation exposure"), so it cannot be widened
-// without widening every request's quota hold. Token-dense prompts
-// that still exceed it are handled by the clamp in usageFromJSON
-// (bounded provider_reported billing) rather than a wider cap.
+// #1570: it is the larger of ceil(bytes/4) and the class-weighted upper
+// estimate, plus headroom. ceil(bytes/4) alone under-counted token-dense
+// prompts (digits, code, JSON, emoji), so the clamp in usageFromJSON charged
+// less than the provider's honest count. The max keeps every hold at or above
+// its pre-#1570 size.
 func promptCapTokens(body []byte) int64 {
-	return estimatePromptTokens(body) + promptHeadroomTokens
+	reservation := estimatePromptTokens(body)
+	accounting, images := visionAccountingBody(body)
+	if upper, ok := promptTokenClassEstimate(accounting, promptTokenUpperWeights); ok {
+		upper += int64(images * visionMediaTokenAllowance)
+		if upper > reservation {
+			reservation = upper
+		}
+	}
+	return reservation + promptHeadroomTokens
 }
 
 func copyForwardHeaders(dst, src http.Header) {

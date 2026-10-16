@@ -11,6 +11,10 @@ final class InferenceRelayStructuredOutputTests: XCTestCase {
         try assertStructuredOutputStatusPreserved("json_schema_validation_failed", retryable: true)
     }
 
+    func testInferenceRelayPreservesToolSelectionValidationFailedStatusOverWS() throws {
+        try assertStructuredOutputStatusPreserved("tool_selection_validation_failed", retryable: false)
+    }
+
     func testInferenceRelayPreservesResponseByteCapExceededStatusOverWS() throws {
         try assertStructuredOutputStatusPreserved("response_byte_cap_exceeded", retryable: false)
     }

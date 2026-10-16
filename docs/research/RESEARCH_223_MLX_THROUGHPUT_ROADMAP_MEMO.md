@@ -517,8 +517,8 @@ I completed the research pass and found enough evidence to make the roadmap deci
 
 | Area | Finding |
 |---|---|
-| Current provider runtime | The repo no longer looks like a Python-sidecar hot path. [ModelRuntime.swift](/Users/augstar/macprovider-poc/phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:215) uses Swift MLX APIs with semaphore concurrency, not true continuous batching. |
-| Baseline 14 tok/s | Treat the M4 Air Qwen3-32B 14-17 tok/s result in [BENCHMARK_BASELINE_2026-06-29.md](/Users/augstar/macprovider-poc/specs/BENCHMARK_BASELINE_2026-06-29.md:1) as suspicious until remeasured with provider/model attribution. The benchmark pool also had a 7B provider, so the figure may not be isolated dense-32B throughput. |
+| Current provider runtime | The repo no longer looks like a Python-sidecar hot path. [ModelRuntime.swift](/phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:215) uses Swift MLX APIs with semaphore concurrency, not true continuous batching. |
+| Baseline 14 tok/s | Treat the M4 Air Qwen3-32B 14-17 tok/s result in [BENCHMARK_BASELINE_2026-06-29.md](/specs/BENCHMARK_BASELINE_2026-06-29.md:1) as suspicious until remeasured with provider/model attribution. The benchmark pool also had a 7B provider, so the figure may not be isolated dense-32B throughput. |
 | MLX-LM | Active and mature for local inference, but its server docs still say it is not recommended for production. Latest release: `mlx-lm` v0.31.3, 2026-04-22; main commit `2ed2231`, 2026-06-24. |
 | MLX batching | MLX-LM has batch cache primitives, prompt cache, KV quantization, and speculative decoding flags, but not vLLM-grade production PagedAttention serving. |
 | llama.cpp | Most production-ready Apple-compatible continuous batching option today. Release `b9843`, 2026-06-30, commit `86b9470`; server supports `--parallel`, continuous batching, speculative decoding, KV quantization, Metal. |

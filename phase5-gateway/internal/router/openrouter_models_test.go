@@ -498,3 +498,88 @@ func TestOpenRouterModelsHandlerFailsClosedOnMissingRateCardRow(t *testing.T) {
 		t.Fatalf("body=%s", resp.Body.String())
 	}
 }
+
+// #1570: the advertised context is the largest context a serving provider
+// grants, including a busy provider with no free slot (routing_eligible false,
+// serving_eligible true). An unavailable or draining provider's larger context
+// is not servable and must not be advertised.
+func TestOpenRouterModelsHandlerAdvertisesReadyProviderContextOnly(t *testing.T) {
+	poolz := `{"pool":[` +
+		`{"model_id":"mlx-community/Qwen3.6-35B-A3B-4bit","state":"ready","slots_free":2,"slots_total":2,"max_context_tokens":32768,"auth_state":"bearer_validated"},` +
+		`{"model_id":"mlx-community/Qwen3.6-35B-A3B-4bit","state":"busy","slots_free":0,"slots_total":4,"max_context_tokens":65536,"auth_state":"bearer_validated","routing_eligible":false,"serving_eligible":true},` +
+		`{"model_id":"mlx-community/Qwen3.6-35B-A3B-4bit","state":"unavailable","slots_free":0,"slots_total":8,"max_context_tokens":200000,"auth_state":"bearer_validated"},` +
+		`{"model_id":"mlx-community/Qwen3.6-35B-A3B-4bit","state":"draining","slots_free":0,"slots_total":8,"max_context_tokens":150000,"auth_state":"bearer_validated"}]}`
+	rateCard := listingRateCardJSON(t)
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/poolz"):
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, poolz), nil
+		case strings.HasSuffix(r.URL.Path, "/v1/rate-card"):
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, rateCard), nil
+		default:
+			return responseWithBody(http.StatusNotFound, nil, `{}`), nil
+		}
+	})}
+	h, _, _, _ := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Coordinator.OperatorURL = "http://operator.test"
+	}, WithHTTPClient(client))
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, openRouterModelsPath, nil))
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	var doc openRouterModelsDocument
+	if err := json.Unmarshal(resp.Body.Bytes(), &doc); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	row := rowByID(t, doc, openRouterQwen36A3BID)
+	if got := row.InputModalities[0].SupportedInputs.MaxContextLength.Value; got != 65536 {
+		t.Fatalf("max_context_length=%d, want the busy provider's 65536", got)
+	}
+}
+
+// #1570: a model whose only serving provider is busy with no free slot keeps
+// its servable context (not the 8192 placeholder) while is_ready stays false.
+func TestOpenRouterModelsHandlerKeepsContextWhenOnlyProviderIsFull(t *testing.T) {
+	poolz := `{"pool":[` +
+		`{"model_id":"mlx-community/Qwen3.6-35B-A3B-4bit","state":"busy","slots_free":0,"slots_total":8,"max_context_tokens":200000,"auth_state":"bearer_validated","routing_eligible":false,"serving_eligible":true},` +
+		`{"model_id":"mlx-community/Qwen3.6-35B-A3B-4bit","state":"busy","slots_free":0,"slots_total":8,"max_context_tokens":250000,"auth_state":"bearer_validated","routing_eligible":false,"serving_eligible":false}]}`
+	rateCard := listingRateCardJSON(t)
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/poolz"):
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, poolz), nil
+		case strings.HasSuffix(r.URL.Path, "/v1/rate-card"):
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, rateCard), nil
+		default:
+			return responseWithBody(http.StatusNotFound, nil, `{}`), nil
+		}
+	})}
+	h, _, _, _ := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Coordinator.OperatorURL = "http://operator.test"
+	}, WithHTTPClient(client))
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, openRouterModelsPath, nil))
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	var doc openRouterModelsDocument
+	if err := json.Unmarshal(resp.Body.Bytes(), &doc); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	row := rowByID(t, doc, openRouterQwen36A3BID)
+	if got := row.InputModalities[0].SupportedInputs.MaxContextLength.Value; got != 200000 {
+		t.Fatalf("max_context_length=%d, want the serving-eligible full provider's 200000", got)
+	}
+	if row.IsReady {
+		t.Fatalf("is_ready must stay false with no free ready slot")
+	}
+	// /v1/status keeps excluding the non-routable providers.
+	statusResp := httptest.NewRecorder()
+	h.ServeHTTP(statusResp, httptest.NewRequest(http.MethodGet, "/v1/status", nil))
+	if strings.Contains(statusResp.Body.String(), "Qwen3.6") {
+		t.Fatalf("/v1/status gained a non-routable model row: %s", statusResp.Body.String())
+	}
+}

@@ -21,6 +21,9 @@ import (
 )
 
 type Hello struct {
+	ToolSelectionCapabilities []pool.ToolSelectionCapability `json:"tool_selection_capabilities,omitempty"`
+	VisionRuntimeCapabilities []pool.VisionRuntimeCapability `json:"vision_runtime_capabilities,omitempty"`
+
 	Type                   string                             `json:"type"`
 	Version                int                                `json:"version"`
 	Tier                   int                                `json:"tier"`
@@ -28,6 +31,7 @@ type Hello struct {
 	Hostname               string                             `json:"hostname"`
 	ModelID                string                             `json:"model_id"`
 	RuntimeSource          string                             `json:"runtime_source,omitempty"`
+	FleetCacheProtocol     int                                `json:"fleet_cache_protocol,omitempty"`
 	ModelHash              string                             `json:"model_hash,omitempty"`
 	ModelHashAlgorithm     string                             `json:"model_hash_algorithm,omitempty"`
 	WeightsManifestSHA256  string                             `json:"weights_manifest_sha256,omitempty"`
@@ -105,6 +109,9 @@ type HelloAck struct {
 }
 
 type AuthRequest struct {
+	ToolSelectionCapabilities []pool.ToolSelectionCapability `json:"tool_selection_capabilities,omitempty"`
+	VisionRuntimeCapabilities []pool.VisionRuntimeCapability `json:"vision_runtime_capabilities,omitempty"`
+
 	Type                           string                             `json:"type"`
 	Version                        int                                `json:"version"`
 	Stage                          string                             `json:"stage"`
@@ -113,6 +120,7 @@ type AuthRequest struct {
 	Hostname                       string                             `json:"hostname,omitempty"`
 	ModelID                        string                             `json:"model_id,omitempty"`
 	RuntimeSource                  string                             `json:"runtime_source,omitempty"`
+	FleetCacheProtocol             int                                `json:"fleet_cache_protocol,omitempty"`
 	ModelHash                      string                             `json:"model_hash,omitempty"`
 	ModelHashAlgorithm             string                             `json:"model_hash_algorithm,omitempty"`
 	WeightsManifestSHA256          string                             `json:"weights_manifest_sha256,omitempty"`
@@ -322,6 +330,9 @@ type AuthModelHashSession struct {
 }
 
 type Heartbeat struct {
+	ToolSelectionCapabilities []pool.ToolSelectionCapability `json:"tool_selection_capabilities,omitempty"`
+	VisionRuntimeCapabilities []pool.VisionRuntimeCapability `json:"vision_runtime_capabilities,omitempty"`
+
 	Type                    string                             `json:"type"`
 	Status                  string                             `json:"status"`
 	ModelID                 string                             `json:"model_id"`
@@ -346,6 +357,7 @@ type Heartbeat struct {
 	HardwareSummary         *HardwareSummary                   `json:"hardware_summary,omitempty"`
 	SafetyTelemetry         *pool.ProviderSafetyTelemetry      `json:"safety_telemetry,omitempty"`
 	CBSelfCheck             *pool.ProviderCBSelfCheck          `json:"cb_self_check,omitempty"`
+	EngineProfile           *pool.EngineProfile                `json:"engine_profile,omitempty"`
 	RelayBlindKeyRecords    []relayblind.KeyRecord             `json:"relay_blind_key_records,omitempty"`
 	PrivacyKeyRecords       []relayblind.PrivacyKeyRecord      `json:"privacy_key_records,omitempty"`
 	PrivacyEnrollment       *relayblind.PrivacyEnrollmentClaim `json:"privacy_enrollment,omitempty"`
@@ -433,6 +445,7 @@ type InferenceRequest struct {
 	MaxOutputTokens *int                       `json:"max_output_tokens,omitempty"`
 	Settlement      *SettlementReceiptMetadata `json:"settlement,omitempty"`
 	ConversationKey string                     `json:"conversation_key,omitempty"`
+	FleetCache      *FleetCacheGrant           `json:"fleet_cache,omitempty"`
 	// ConversationCacheOnly marks ConversationKey as a cache-only SPEC-006-R012
 	// auto-prefix key (SPEC-004 FR-SR-2, SPEC-048-R009). Never sent without a key.
 	ConversationCacheOnly bool                       `json:"conversation_cache_only,omitempty"`
@@ -443,6 +456,11 @@ type InferenceRequest struct {
 	// rides only on a relay-blind dispatch that has a SPEC-022 R-14 route
 	// snapshot; under SPEC-008 it is inside the encrypted plaintext instead.
 	RelayBlindSettlement *RelayBlindSettlementMetadata `json:"relay_blind_settlement,omitempty"`
+}
+
+type FleetCacheGrant struct {
+	ConversationKey string `json:"conversation_key"`
+	Generation      int64  `json:"generation"`
 }
 
 // RelayBlindSettlementMetadata is the SPEC-001-R005 relay_blind_settlement
@@ -788,6 +806,16 @@ func ParseHello(payload []byte) (Hello, string, error) {
 	}
 
 	var h Hello
+	if v, ok := raw["tool_selection_capabilities"]; ok {
+		if err := json.Unmarshal(v, &h.ToolSelectionCapabilities); err != nil {
+			return Hello{}, "tool_selection_capabilities", err
+		}
+	}
+	if v, ok := raw["vision_runtime_capabilities"]; ok {
+		if err := json.Unmarshal(v, &h.VisionRuntimeCapabilities); err != nil {
+			return Hello{}, "vision_runtime_capabilities", err
+		}
+	}
 	if err := requireString(raw, "type", &h.Type); err != nil {
 		return Hello{}, err.Field, err
 	}
@@ -822,6 +850,9 @@ func ParseHello(payload []byte) (Hello, string, error) {
 		return Hello{}, "model_id", fmt.Errorf("model_id exceeds %d bytes", maxHandshakeModelIDBytes)
 	}
 	if field, err := parseOptionalRuntimeSource(raw, &h.RuntimeSource); err != nil {
+		return Hello{}, field, err
+	}
+	if field, err := parseFleetCacheProtocol(raw, &h.FleetCacheProtocol); err != nil {
 		return Hello{}, field, err
 	}
 	if v, ok := raw["model_hash"]; ok && string(v) != "null" {
@@ -937,6 +968,16 @@ func ParseAuthRequest(payload []byte) (AuthRequest, Spec010Presence, string, err
 		return AuthRequest{}, Spec010Presence{}, "json", err
 	}
 	var req AuthRequest
+	if v, ok := raw["tool_selection_capabilities"]; ok {
+		if err := json.Unmarshal(v, &req.ToolSelectionCapabilities); err != nil {
+			return AuthRequest{}, Spec010Presence{}, "tool_selection_capabilities", err
+		}
+	}
+	if v, ok := raw["vision_runtime_capabilities"]; ok {
+		if err := json.Unmarshal(v, &req.VisionRuntimeCapabilities); err != nil {
+			return AuthRequest{}, Spec010Presence{}, "vision_runtime_capabilities", err
+		}
+	}
 	if err := requireString(raw, "type", &req.Type); err != nil {
 		return AuthRequest{}, Spec010Presence{}, err.Field, err
 	}
@@ -983,6 +1024,9 @@ func parseAuthInitial(raw map[string]json.RawMessage, req AuthRequest) (AuthRequ
 		return AuthRequest{}, Spec010Presence{}, "model_id", fmt.Errorf("model_id exceeds %d bytes", maxHandshakeModelIDBytes)
 	}
 	if field, err := parseOptionalRuntimeSource(raw, &req.RuntimeSource); err != nil {
+		return AuthRequest{}, Spec010Presence{}, field, err
+	}
+	if field, err := parseFleetCacheProtocol(raw, &req.FleetCacheProtocol); err != nil {
 		return AuthRequest{}, Spec010Presence{}, field, err
 	}
 	if v, ok := raw["model_hash"]; ok && string(v) != "null" {
@@ -1251,13 +1295,18 @@ func parseAuthProof(raw map[string]json.RawMessage, req AuthRequest) (AuthReques
 
 func (r AuthRequest) Hello() Hello {
 	return Hello{
-		Type:                   "hello",
-		Version:                1,
-		Tier:                   1,
-		ProviderID:             r.ProviderID,
-		Hostname:               r.Hostname,
-		ModelID:                r.ModelID,
-		RuntimeSource:          r.RuntimeSource,
+		Type:               "hello",
+		Version:            1,
+		Tier:               1,
+		ProviderID:         r.ProviderID,
+		Hostname:           r.Hostname,
+		ModelID:            r.ModelID,
+		RuntimeSource:      r.RuntimeSource,
+		FleetCacheProtocol: r.FleetCacheProtocol,
+
+		ToolSelectionCapabilities: r.ToolSelectionCapabilities,
+		VisionRuntimeCapabilities: r.VisionRuntimeCapabilities,
+
 		ModelHash:              r.ModelHash,
 		ModelHashAlgorithm:     r.ModelHashAlgorithm,
 		WeightsManifestSHA256:  r.WeightsManifestSHA256,
@@ -1282,6 +1331,17 @@ func (r AuthRequest) Hello() Hello {
 		PrivacyKeyRecords:      append([]relayblind.PrivacyKeyRecord(nil), r.PrivacyKeyRecords...),
 		PrivacyEnrollment:      r.PrivacyEnrollment,
 	}
+}
+
+func parseFleetCacheProtocol(raw map[string]json.RawMessage, out *int) (string, error) {
+	v, ok := raw["fleet_cache_protocol"]
+	if !ok || string(v) == "null" {
+		return "", nil
+	}
+	if err := json.Unmarshal(v, out); err != nil || *out != 1 {
+		return "fleet_cache_protocol", fmt.Errorf("fleet_cache_protocol must be 1 when present")
+	}
+	return "", nil
 }
 
 // parseOptionalRuntimeSource parses the SPEC-047 v0.1.6 hello/auth `runtime_source`
@@ -1617,6 +1677,96 @@ func parseCBSelfCheck(v json.RawMessage) (*pool.ProviderCBSelfCheck, error) {
 	return &selfCheck, nil
 }
 
+// parseEngineProfile validates the optional SPEC-001-R006 heartbeat object.
+// Any violation drops the profile (nil) and never rejects the heartbeat; the
+// profile is a routing prior only.
+func parseEngineProfile(v json.RawMessage) *pool.EngineProfile {
+	if len(v) == 0 || len(v) > 512 || string(v) == "null" {
+		return nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(v))
+	dec.DisallowUnknownFields()
+	var wire struct {
+		Version                *string `json:"version"`
+		EngineFamily           *string `json:"engine_family"`
+		CBGrantedSlots         *int    `json:"cb_granted_slots"`
+		NativeMTPActive        *bool   `json:"native_mtp_active"`
+		ChipClass              *string `json:"chip_class"`
+		RAMClassGB             *int    `json:"ram_class_gb"`
+		MaxStableContextTokens *int    `json:"max_stable_context_tokens"`
+	}
+	if err := dec.Decode(&wire); err != nil || dec.More() {
+		return nil
+	}
+	if wire.Version == nil || wire.EngineFamily == nil || wire.CBGrantedSlots == nil || wire.NativeMTPActive == nil ||
+		wire.ChipClass == nil || wire.RAMClassGB == nil || wire.MaxStableContextTokens == nil {
+		return nil
+	}
+	if *wire.Version != "engine-profile-v1" {
+		return nil
+	}
+	switch *wire.EngineFamily {
+	case "general_mlx", "continuous_batching", "native_mtp":
+	default:
+		return nil
+	}
+	// Cross-field invariants: the family is native_mtp exactly when native
+	// MTP is active, and plain MLX grants no continuous-batching slots.
+	if (*wire.EngineFamily == "native_mtp") != *wire.NativeMTPActive || (*wire.EngineFamily == "general_mlx" && *wire.CBGrantedSlots != 0) {
+		return nil
+	}
+	if *wire.CBGrantedSlots < 0 || *wire.CBGrantedSlots > 256 || *wire.MaxStableContextTokens < 0 || *wire.MaxStableContextTokens > 10_000_000 {
+		return nil
+	}
+	if !engineProfileChipClass(*wire.ChipClass) || !engineProfileRAMClass(*wire.RAMClassGB) {
+		return nil
+	}
+	return &pool.EngineProfile{
+		Version:                *wire.Version,
+		EngineFamily:           *wire.EngineFamily,
+		CBGrantedSlots:         *wire.CBGrantedSlots,
+		NativeMTPActive:        *wire.NativeMTPActive,
+		ChipClass:              *wire.ChipClass,
+		RAMClassGB:             *wire.RAMClassGB,
+		MaxStableContextTokens: *wire.MaxStableContextTokens,
+	}
+}
+
+func engineProfileChipClass(s string) bool {
+	if s == "unknown" {
+		return true
+	}
+	if len(s) < 2 || s[0] != 'm' || s[1] < '1' || s[1] > '9' {
+		return false
+	}
+	switch s[2:] {
+	case "", "_pro", "_max", "_ultra":
+		return true
+	default:
+		return false
+	}
+}
+
+// engineProfileRAMClassFor is the SPEC-001-R006 class for a reported ram_gb.
+func engineProfileRAMClassFor(ramGB int) int {
+	class := 8
+	for _, c := range []int{8, 16, 24, 32, 48, 64, 96, 128, 192, 256, 512} {
+		if c <= ramGB {
+			class = c
+		}
+	}
+	return class
+}
+
+func engineProfileRAMClass(gb int) bool {
+	switch gb {
+	case 8, 16, 24, 32, 48, 64, 96, 128, 192, 256, 512:
+		return true
+	default:
+		return false
+	}
+}
+
 func isPrintableASCII(s string) bool {
 	for i := 0; i < len(s); i++ {
 		if s[i] < 0x20 || s[i] > 0x7e {
@@ -1632,6 +1782,16 @@ func ParseHeartbeat(payload []byte) (Heartbeat, HeartbeatPresence, string, error
 		return Heartbeat{}, HeartbeatPresence{}, "json", err
 	}
 	var hb Heartbeat
+	if v, ok := raw["tool_selection_capabilities"]; ok {
+		if err := json.Unmarshal(v, &hb.ToolSelectionCapabilities); err != nil {
+			return Heartbeat{}, HeartbeatPresence{}, "tool_selection_capabilities", err
+		}
+	}
+	if v, ok := raw["vision_runtime_capabilities"]; ok {
+		if err := json.Unmarshal(v, &hb.VisionRuntimeCapabilities); err != nil {
+			return Heartbeat{}, HeartbeatPresence{}, "vision_runtime_capabilities", err
+		}
+	}
 	if err := requireString(raw, "type", &hb.Type); err != nil {
 		return Heartbeat{}, HeartbeatPresence{}, err.Field, err
 	}
@@ -1892,6 +2052,13 @@ func ParseHeartbeat(payload []byte) (Heartbeat, HeartbeatPresence, string, error
 			return Heartbeat{}, presence, "cb_self_check", err
 		}
 		hb.CBSelfCheck = selfCheck
+	}
+	if v, ok := raw["engine_profile"]; ok {
+		hb.EngineProfile = parseEngineProfile(v)
+		// The profile must agree with the heartbeat it rides on.
+		if p := hb.EngineProfile; p != nil && (p.MaxStableContextTokens != hb.MaxContextTokens || p.RAMClassGB != engineProfileRAMClassFor(hb.RAMGB)) {
+			hb.EngineProfile = nil
+		}
 	}
 	if field, err := parseRelayBlindKeyRecords(raw, &hb.RelayBlindKeyRecords); err != nil {
 		return Heartbeat{}, presence, field, err

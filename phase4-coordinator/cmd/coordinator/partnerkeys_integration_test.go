@@ -604,7 +604,7 @@ func TestProductionSignoffPathGate(t *testing.T) {
 		if code == 0 {
 			t.Fatalf("missing signoff file MUST fail closed")
 		}
-		if !strings.Contains(stderr, "OPS.md") {
+		if !strings.Contains(stderr, "operator runbook") {
 			t.Errorf("error should point at the runbook; got %q", stderr)
 		}
 	})

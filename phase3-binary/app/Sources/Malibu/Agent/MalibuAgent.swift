@@ -96,6 +96,10 @@ final class MalibuAgent: ObservableObject {
     private let latestReleaseTTL: TimeInterval = 3600
     private let appAttestEnrollment: AppAttestEnrollment
     private var appAttestEnrollmentTask: Task<Void, Never>?
+    /// SPEC-049-R035 attestor; nil until the provider serves, and on Macs
+    /// and builds without App Attest.
+    private let privacyCodeBoundAttestorFactory: @MainActor () -> PrivacyCodeBoundAttestorServer?
+    private var privacyCodeBoundAttestor: PrivacyCodeBoundAttestorServer?
 
     init(
         initialSnapshot: AgentSnapshot = .empty,
@@ -136,9 +140,11 @@ final class MalibuAgent: ObservableObject {
                 appVersion: appVersion
             )
         },
-        appAttestEnrollment: AppAttestEnrollment = .live
+        appAttestEnrollment: AppAttestEnrollment = .live,
+        privacyCodeBoundAttestorFactory: @escaping @MainActor () -> PrivacyCodeBoundAttestorServer? = { PrivacyCodeBoundAttestorServer.live() }
     ) {
         self.appAttestEnrollment = appAttestEnrollment
+        self.privacyCodeBoundAttestorFactory = privacyCodeBoundAttestorFactory
         snapshot = initialSnapshot
         providerProjectionEligible = projectionEligibleForMetrics
         self.cliUpdateRunner = cliUpdateRunner
@@ -676,6 +682,8 @@ final class MalibuAgent: ObservableObject {
         await repairTask?.value
         monitorsLaunchdProvider = false
         lastRequestsRateSample = nil
+        privacyCodeBoundAttestor?.stop()
+        privacyCodeBoundAttestor = nil
         await control?.close()
         await rewardActivityControl?.close()
         metricsPoller?.cancel(); metricsPoller = nil
@@ -2086,6 +2094,7 @@ final class MalibuAgent: ObservableObject {
     private func scheduleAppAttestEnrollment() {
         guard appAttestEnrollmentTask == nil, !isShuttingDown,
               let providerID = ProviderConfig.readProviderID() else { return }
+        startPrivacyCodeBoundAttestor()
         let enrollment = appAttestEnrollment
         appAttestEnrollmentTask = Task.detached(priority: .utility) { [weak self] in
             _ = await enrollment.run(providerID: providerID)
@@ -2095,6 +2104,18 @@ final class MalibuAgent: ObservableObject {
 
     private func finishAppAttestEnrollment() {
         appAttestEnrollmentTask = nil
+    }
+
+    /// Starts the SPEC-049-R035 attestor once. A failure only leaves the
+    /// provider's privacy postures device-bound; it never affects serving.
+    private func startPrivacyCodeBoundAttestor() {
+        guard privacyCodeBoundAttestor == nil, !isShuttingDown, let attestor = privacyCodeBoundAttestorFactory() else { return }
+        do {
+            try attestor.start()
+            privacyCodeBoundAttestor = attestor
+        } catch {
+            NSLog("[malibu] privacy_code_bound_attestor unavailable reason=socket")
+        }
     }
 
     private func scheduleReconnect() async {

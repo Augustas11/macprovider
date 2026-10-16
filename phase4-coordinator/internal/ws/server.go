@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
+	"github.com/augstar/macprovider-coordinator/internal/fleetcache"
 	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/providerevents"
@@ -80,6 +81,14 @@ type Server struct {
 	cfg                       config.Config
 	minProviderThroughputBits atomic.Uint64
 
+	// bindingRetries counts in-flight model-admission binding refresh retry
+	// goroutines, and bindingRetryWake (nil in production, so a retry always
+	// sleeps its full backoff) lets a test cut a sleeping retry short.
+	// Production never uses either; they exist so tests can quiesce retries
+	// before mutating Server fields the retries read (#2005).
+	bindingRetries   sync.WaitGroup
+	bindingRetryWake chan struct{}
+
 	// catalogMaterialRoutingGate is the buyer router's SPEC-022 R-2.7 verdict
 	// (true = excluded), injected at wiring time because ws cannot import buyer.
 	catalogMaterialRoutingGate atomic.Pointer[func(pool.Provider) bool]
@@ -109,6 +118,7 @@ type Server struct {
 	modelHashLegacyTimer      *time.Timer
 	modelHashLegacyGeneration uint64
 	pool                      *pool.Registry
+	fleetCache                *fleetcache.Store
 	log                       zerolog.Logger
 	now                       func() time.Time
 	newUUID                   func() string
@@ -276,6 +286,9 @@ type Server struct {
 	privacyAuthority       *relayblind.PrivacyAuthority
 	privacyPostureChans    sync.Map
 	privacyPostureInFlight sync.Map
+	// privacyCodeBoundEvidence holds at most one SPEC-049 §4.13 evidence
+	// message per session while its posture challenge is outstanding.
+	privacyCodeBoundEvidence sync.Map
 	// SPEC-049-R031 identity key rotation exchanges, one per session.
 	privacyRotationChans    sync.Map
 	privacyRotationInFlight sync.Map
@@ -559,6 +572,10 @@ type idlePrewarmRecord struct {
 }
 
 type Option func(*Server)
+
+func WithFleetCache(store *fleetcache.Store) Option {
+	return func(s *Server) { s.fleetCache = store }
+}
 
 type RelayBlindKeySink interface {
 	AcceptProviderKeys(context.Context, string, string, []relayblind.KeyRecord, time.Time) error
@@ -1330,6 +1347,9 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 	if registry != nil {
 		go s.runSELivenessLoop()
 	}
+	if s.fleetCache != nil && registry != nil {
+		go s.runFleetCachePurgeLoop()
+	}
 	if s.privacyAuthority != nil && registry != nil {
 		go s.runPrivacyPostureLoop()
 	}
@@ -1595,6 +1615,18 @@ func (s *Server) publicRoutingEligible(p pool.Provider) bool {
 		return false
 	}
 	return true
+}
+
+// publicServingEligible is the /poolz.serving_eligible predicate (#1570):
+// publicRoutingEligible apart from the free-slot term, so a provider that is
+// serving but momentarily full still counts. The gateway uses it for the
+// context the OpenRouter document advertises; buyer routing keeps
+// routing_eligible.
+func (s *Server) publicServingEligible(p pool.Provider) bool {
+	if p.SlotsTotal > 0 && p.SlotsFree < 1 {
+		p.SlotsFree = p.SlotsTotal
+	}
+	return s.publicRoutingEligible(p)
 }
 
 // SetCatalogMaterialRoutingGate injects the buyer router's request-independent
@@ -2628,6 +2660,7 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	if !s.releaseAckedSessionIfCompatibilityAllowed(session, entry) {
 		return entry.ProviderID, entry.AssignedID
 	}
+	s.replayConversationCachePurges(entry.ProviderID, entry.AssignedID)
 	// Privacy key acceptance schedules a posture challenge on this session's
 	// FIFO writer. The provider requires hello_ack as the next frame, so the
 	// challenge may only be enqueued after the ack (SPEC-049).
@@ -3273,6 +3306,7 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	if !s.releaseAckedSessionIfCompatibilityAllowed(session, entry) {
 		return entry.ProviderID, entry.AssignedID
 	}
+	s.replayConversationCachePurges(entry.ProviderID, entry.AssignedID)
 	// See handleV1Conn: the posture challenge must follow auth_response v2.
 	s.acceptPrivacyKeyRecords(entry.ProviderID, entry.AssignedID, initial.PrivacyKeyRecords, initial.PrivacyEnrollment)
 	if s.cfg.Pool.WarmupGateEnabled {
@@ -3608,11 +3642,16 @@ func (s *Server) prepareProviderAdmissionWithQuotaCheck(conn net.Conn, auth prov
 			Msg("provider capacity claim exceeds the operator ceiling; clamped")
 	}
 	entry := &pool.Provider{
-		ProviderID:             hello.ProviderID,
-		AssignedID:             assignedID,
-		Hostname:               hello.Hostname,
-		ModelID:                hello.ModelID,
-		RuntimeSource:          hello.RuntimeSource,
+		ProviderID:         hello.ProviderID,
+		AssignedID:         assignedID,
+		Hostname:           hello.Hostname,
+		ModelID:            hello.ModelID,
+		RuntimeSource:      hello.RuntimeSource,
+		FleetCacheProtocol: hello.FleetCacheProtocol,
+
+		ToolSelectionCapabilities: hello.ToolSelectionCapabilities,
+		VisionRuntimeCapabilities: hello.VisionRuntimeCapabilities,
+
 		ModelParamsB:           hello.ModelParamsB,
 		RAMGB:                  hello.RAMGB,
 		MaxContextTokens:       hello.MaxContextTokens,
@@ -4934,10 +4973,14 @@ func (s *Server) handleMessage(conn net.Conn, providerID, assignedID string, pay
 		s.handleSELivenessResponse(providerID, assignedID, payload)
 	case "privacy_posture_response":
 		s.handlePrivacyPostureResponse(providerID, assignedID, payload)
+	case "privacy_code_bound_evidence":
+		s.handlePrivacyCodeBoundEvidence(providerID, assignedID, payload)
 	case "privacy_key_rotation_request":
 		s.handlePrivacyKeyRotationRequest(providerID, assignedID, payload)
 	case "privacy_key_rotation":
 		s.handlePrivacyKeyRotation(providerID, assignedID, payload)
+	case "conversation_cache_purge_ack":
+		s.handleConversationCachePurgeAck(providerID, assignedID, payload)
 	case "native_mtp_tuple_offer_v1":
 		s.handleNativeMTPTupleOffer(providerID, assignedID, payload)
 	case "native_mtp_canary_result_v1":
@@ -6481,7 +6524,11 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 			priorBinding, hadPriorBinding = before.ModelAdmissionBinding()
 		}
 		heartbeatResult = s.pool.ApplyHeartbeatDetailed(providerID, assignedID, pool.HeartbeatUpdate{
-			Status:                    state,
+			Status: state,
+
+			ToolSelectionCapabilities: hb.ToolSelectionCapabilities,
+			VisionRuntimeCapabilities: hb.VisionRuntimeCapabilities,
+
 			ModelID:                   hb.ModelID,
 			ModelParamsB:              hb.ModelParamsB,
 			RAMGB:                     hb.RAMGB,
@@ -6508,6 +6555,7 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 		})
 		if heartbeatResult.OK {
 			s.pool.SetCBSelfCheck(providerID, hb.CBSelfCheck)
+			s.pool.SetEngineProfile(providerID, hb.EngineProfile)
 			s.heartbeatSessionEvaluationLocked(*heartbeatResult.Provider, priorBinding, hadPriorBinding, section)
 		}
 	})
@@ -7502,6 +7550,7 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 	type poolzProvider struct {
 		pool.Provider
 		RoutingEligible   bool                    `json:"routing_eligible"`
+		ServingEligible   bool                    `json:"serving_eligible"`
 		CanaryFailCount   int                     `json:"canary_fail_count"`
 		ReceiptPubkey     *string                 `json:"receipt_pubkey"`
 		ReceiptPubkeyPrev *poolzReceiptPubkeyPrev `json:"receipt_pubkey_prev"`
@@ -7525,6 +7574,7 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 		poolz = append(poolz, poolzProvider{
 			Provider:          provider,
 			RoutingEligible:   s.publicRoutingEligible(provider),
+			ServingEligible:   s.publicServingEligible(provider),
 			CanaryFailCount:   provider.CanaryFailCount,
 			ReceiptPubkey:     receiptPubkey,
 			ReceiptPubkeyPrev: receiptPubkeyPrev,

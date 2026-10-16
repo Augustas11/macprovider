@@ -141,7 +141,7 @@ func TestComputeIntegrityHoldRejectsBadWindows(t *testing.T) {
 
 // SPEC-022 R-16.3: a credit already settled into a payout is never withheld,
 // so a hold cannot invalidate or strand a ready payout; the first hold raises
-// the billing compatibility floor to contract 5 so an older coordinator that
+// the billing compatibility floor to contract 7 so an older coordinator that
 // would pay held credits cannot open the database.
 func TestComputeIntegrityHoldLeavesSettledCreditsAndRaisesCompatFloor(t *testing.T) {
 	_, store := newRequestAndBillingStores(t)

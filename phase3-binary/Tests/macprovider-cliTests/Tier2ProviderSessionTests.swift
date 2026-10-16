@@ -31,6 +31,36 @@ final class Tier2ProviderSessionTests: XCTestCase {
         XCTAssertEqual(payload.maxOutputTokens, 4096)
     }
 
+    func testEncryptedRequestCarriesFleetGrantInsideAuthenticatedPlaintext() throws {
+        let session = try Tier2ProviderSession(
+            providerID: "provider-test",
+            assignedID: "assigned-test",
+            selectedAEAD: Tier2ProviderSession.aeadSuite,
+            keyID: "kid-test",
+            c2pKey: Data(repeating: 0x31, count: 32),
+            p2cKey: Data(repeating: 0x42, count: 32),
+            c2pNonceBase: Data([0x01, 0x02, 0x03, 0x04]),
+            p2cNonceBase: Data([0x05, 0x06, 0x07, 0x08])
+        )
+        let request = try Tier2ProviderSession.sealRequestForTest(
+            session: session,
+            requestID: "req-fleet-cache",
+            stream: false,
+            plaintext: "request-body",
+            fleetCache: ["conversation_key": "conv:opaque", "generation": 5]
+        )
+
+        XCTAssertNil(request["fleet_cache"])
+        let payload = try session.openRequestPayload(
+            message: request,
+            requestID: "req-fleet-cache",
+            stream: false
+        )
+        let grant = try XCTUnwrap(payload.fleetCache as? [String: Any])
+        XCTAssertEqual(grant["conversation_key"] as? String, "conv:opaque")
+        XCTAssertEqual(grant["generation"] as? Int, 5)
+    }
+
     func testAEADRoundTripTracksDirectionsAndRejectsReplaySequence() throws {
         let session = try Tier2ProviderSession(
             providerID: "provider-test",

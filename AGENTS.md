@@ -41,7 +41,8 @@ while sessions regenerated evidence instead of deploying. Each is binding.
    evidence.
 6. **Two sessions without a live change means stop.** Write a one-paragraph
    blocker diagnosis to the operator instead of starting a third session.
-7. **Handoffs are committed and point at paths that exist.** One session at a
+7. **Handoffs are committed to the private `macprovider-internal` repo and
+   point at paths that exist.** One session at a
    time mutates Pearl or a Studio provider. Handback is written, naming what
    changed live.
 8. **Releases and live changes go through `scripts/ops/` only.** CLI release,
@@ -96,7 +97,9 @@ governed by `specs/AUTHORITY.json`, `specs/CONFORMANCE.json`, and the matching
 - `specs/` - normative specs and generated governance indexes.
 - `docs/` and `ops/` - documentation, runbooks, operations notes, and
   deployment helpers.
-- `audits/` - durable audit evidence and historical review artifacts.
+- `docs/evidence/` - evidence files that `specs/CONFORMANCE.json` or tests
+  read. Audit prompts and findings live in the private `macprovider-internal`
+  repo.
 
 ## Setup And Build
 
@@ -110,7 +113,7 @@ cd phase4-coordinator && go build ./...
 cd phase5-gateway && go build ./...
 ```
 
-Go modules currently target Go `1.26.6`; the Swift package targets macOS 14+
+Go modules currently target Go `1.26.9`; the Swift package targets macOS 14+
 with Swift tools 5.9.
 
 ## Testing And Checks
@@ -155,8 +158,8 @@ command and result.
 
 ## Git Workflow
 
-Never do write-heavy work in canonical `/Users/augstar/macprovider-poc` unless
-the user explicitly says to use that checkout. Start from a fresh sibling
+Never do write-heavy work in the canonical checkout (the primary clone of this
+repo on the operator Mac) unless the user explicitly says to use that checkout. Start from a fresh sibling
 worktree:
 
 ```bash
@@ -174,8 +177,7 @@ A **hardware campaign** (Studio / real-Mac e2e) is one task: one draft PR,
 local `swift build -c release` on the box, isolated loopback, iterate by
 commit, audit once at freeze, merge once, then one signed CLI cut. Do not
 open a new PR per e2e finding. Runbook:
-`docs/runbooks/lab-campaign-loop.md`. Cursor rule:
-`.cursor/rules/lab-campaign-loop.mdc`. The Pearl serial-ship rule does
+`docs/runbooks/lab-campaign-loop.md`. The Pearl serial-ship rule does
 **not** apply to these campaigns. Auto-merge-when-CI-green does **not**
 apply until the campaign PR is ready and the lab e2e listed in its body
 PASSed.
@@ -193,8 +195,6 @@ Docs-only means markdown and agent-instruction files:
 
 - `docs/` (runbooks, research, release-train narrative)
 - `AGENTS.md`, `CLAUDE.md`
-- `.cursor/rules/`
-- `audits/` markdown (prompts, evidence writeups)
 - `beta/` narrative markdown that does not flip a runtime default
 
 The tree must be clean, local `main` must match `origin/main`, then commit
@@ -209,9 +209,9 @@ bytes. A mixed change is a PR. Do not smuggle code into a docs push.
 After any PR squash-merge or direct docs push, sync canonical main:
 
 ```bash
-git -C /Users/augstar/macprovider-poc fetch origin
-git -C /Users/augstar/macprovider-poc checkout main
-git -C /Users/augstar/macprovider-poc reset --hard origin/main
+git -C <canonical-checkout> fetch origin
+git -C <canonical-checkout> checkout main
+git -C <canonical-checkout> reset --hard origin/main
 ```
 
 Do not force-push `main`, admin-merge, bypass branch protection, or merge with
@@ -274,6 +274,11 @@ INFO findings may be carried explicitly.
 Review the full combined fix, not only a follow-up slice. When needed, find the
 base commit before the first fix commit and diff that base to the working tree,
 scoped to the fix files.
+
+Audit prompts, findings, dispositions, and evidence write-ups live in the
+private `macprovider-internal` repo under `audits/<date>-<topic>/`. Do not
+commit them to this public repo. Evidence that code or `specs/CONFORMANCE.json`
+reads goes in `docs/evidence/`.
 
 ## Release Verification
 

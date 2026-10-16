@@ -1,4 +1,5 @@
 import Foundation
+import CoreImage
 import CryptoKit
 import Darwin
 import Jinja
@@ -6,6 +7,7 @@ import MLX
 import MLXLLM
 import MLXHuggingFace
 import MLXLMCommon
+import MLXVLM
 import MacProviderCore
 import Security
 import Tokenizers
@@ -338,6 +340,7 @@ public struct RuntimeSnapshot: @unchecked Sendable {
     let nativeMTPCapability: NativeMTPCapability?
     let schedulerSupportsNativeMTP: Bool
     let nativeMTPTupleOffer: NativeMTPPublishedTupleOffer?
+    let nativeVisionProfile: NativeVisionProfile?
 
     init(
         state: SwapState,
@@ -358,7 +361,8 @@ public struct RuntimeSnapshot: @unchecked Sendable {
         nativeMTPStatus: NativeMTPStatusSnapshot = NativeMTPStatusSink.disabled().snapshot(),
         nativeMTPCapability: NativeMTPCapability? = nil,
         schedulerSupportsNativeMTP: Bool = false,
-        nativeMTPTupleOffer: NativeMTPPublishedTupleOffer? = nil
+        nativeMTPTupleOffer: NativeMTPPublishedTupleOffer? = nil,
+        nativeVisionProfile: NativeVisionProfile? = nil
     ) {
         self.state = state
         self.container = container
@@ -381,6 +385,7 @@ public struct RuntimeSnapshot: @unchecked Sendable {
         self.nativeMTPCapability = nativeMTPCapability
         self.schedulerSupportsNativeMTP = schedulerSupportsNativeMTP
         self.nativeMTPTupleOffer = nativeMTPTupleOffer
+        self.nativeVisionProfile = nativeVisionProfile
     }
 
     var hasTargetCompatibleDraft: Bool {
@@ -1260,6 +1265,7 @@ actor ModelRuntime: ModelRuntimeServing {
         numDraftTokens: Int?
     ) -> SpeculativeRoute {
         guard !HarmonyResponseParser.isHarmonyModelID(request.model),
+              !request.containsNonTextMessageContentPart,
               request.allowsSpeculativeDecoding,
               draftLoaded,
               numDraftTokens != nil else {
@@ -1450,8 +1456,12 @@ actor ModelRuntime: ModelRuntimeServing {
     /// dynamic KV quantization begins, leaving a caller-owned reusable cache
     /// without generated-token state. Quantization remains available for
     /// one-shot requests, but reusable conversation keys fail closed to fp16.
-    static func effectiveKVBits(configured: Int?, conversationKey: String?) -> Int? {
-        conversationKey == nil ? configured : nil
+    static func effectiveKVBits(configured: Int?, conversationKey: String?, containsImage: Bool = false) -> Int? {
+        !containsImage && conversationKey == nil ? configured : nil
+    }
+
+    static func effectivePrefillStepSize(configured: Int, containsImage: Bool) -> Int {
+        containsImage ? NativeVisionProfile.prefillStepSize : configured
     }
 
     struct HarmonyTerminalPreservingTokenizer: MLXLMCommon.Tokenizer {
@@ -1517,6 +1527,7 @@ actor ModelRuntime: ModelRuntimeServing {
     private var currentNativeMTPStatusSink = NativeMTPStatusSink.disabled()
     private var currentNativeMTPTupleOffer: NativeMTPPublishedTupleOffer?
     private var currentNativeMTPSelfTestInput: NativeMTPSelfTestInput?
+    private var currentNativeVisionProfile: NativeVisionProfile?
     private var nativeMTPRevocationRefreshTask: Task<Void, Never>?
     private var nativeMTPStatusResetGeneration: UInt64 = 0
     private let configuredDraftModelID: String?
@@ -1619,6 +1630,7 @@ actor ModelRuntime: ModelRuntimeServing {
     /// cold tier (FR-KVP7). Gates all per-request cold-tier context construction;
     /// false ⇒ the hot path is byte-identical to today (FR-KVP1).
     private var coldTierAttached = false
+    private var attachedKVDiskTier: KVDiskTier?
     private var inferenceGate: AsyncSemaphore
     /// SPEC-036 FR-21: scoring jobs run under the same serial permit as
     /// serial buyer requests.
@@ -1730,14 +1742,28 @@ actor ModelRuntime: ModelRuntimeServing {
     /// can serialize `KVCacheSimple`, and (2) conversation-keyed serial requests, so
     /// FR-CI2 trim can succeed. mlx-swift-lm's `RotatingKVCache` is trimmable only while
     /// `offset < maxSize`; a keyed hit after the serve cap fills otherwise misses with
-    /// `cache_not_trimmable` and re-prefills. This affects ONLY the explicitly allocated
-    /// `newCache`; the `maxKVSize` on `parameters` passed to `TokenIterator` is ignored
-    /// once the cache is explicit. Keyless traffic keeps the rotating cap.
+    /// `cache_not_trimmable` and re-prefills. The `TokenIterator` that consumes such a
+    /// cache must get the same uncapped parameters (`serveIteratorParameters`), because
+    /// mlx-swift-lm 3.32.3 validates an explicit cache against `maxKVSize`. Keyless
+    /// traffic keeps the rotating cap.
     nonisolated static func cacheParameters(_ base: GenerateParameters, forceSimpleKV: Bool) -> GenerateParameters {
         guard forceSimpleKV else { return base }
         var p = base
         p.maxKVSize = nil
         return p
+    }
+
+    /// Parameters for a `TokenIterator` that receives an explicit serve cache.
+    /// Since mlx-swift-lm 3.32.3 the iterator validates the explicit cache against
+    /// the legacy `maxKVSize` capacity and throws `incompatibleCapacity` when a
+    /// `KVCacheSimple` (forced simple, or a reused ConversationCache lease) meets a
+    /// capped `maxKVSize`. The iterator must therefore see the same uncapped
+    /// parameters the cache was built with (#1998). Prompt length is still bounded
+    /// by `validatePromptTokenCount` before allocation.
+    nonisolated static func serveIteratorParameters(
+        _ base: GenerateParameters, forceSimpleKV: Bool, reusedCache: Bool
+    ) -> GenerateParameters {
+        cacheParameters(base, forceSimpleKV: forceSimpleKV || reusedCache)
     }
 
     /// True when ConversationCache will attempt reuse (trimmed non-empty key).
@@ -1751,8 +1777,9 @@ actor ModelRuntime: ModelRuntimeServing {
     /// SPEC-024-R001 — keyed serial serve and SPEC-037 eligible persist both need
     /// `KVCacheSimple` on full-attention models. Sliding-window models that still
     /// return `RotatingKVCache` with `maxKVSize = nil` stay non-simple and miss.
-    nonisolated static func forceSimpleKVCache(eligible: Bool, conversationKey: String?) -> Bool {
-        eligible || hasReusableConversationKey(conversationKey)
+    nonisolated static func forceSimpleKVCache(eligible: Bool, conversationKey: String?, containsImage: Bool = false) -> Bool {
+        if containsImage { return false }
+        return eligible || hasReusableConversationKey(conversationKey)
     }
 
     /// The single serve cache-allocation used at BOTH serve sites (non-streaming +
@@ -2632,6 +2659,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.currentNativeMTPAdmissionCapability = nil
         self.currentNativeMTPTupleOffer = nil
         self.currentNativeMTPSelfTestInput = nil
+        self.currentNativeVisionProfile = nil
         self.configuredDraftModelID = normalizedDraftModelID
         self.configuredDraftModelLoadPath = normalizedDraftModelLoadPath
         self.configuredNativeMTPAdmissionSidecarPath = Self.nonEmpty(nativeMTPAdmissionSidecarPath)
@@ -2731,7 +2759,8 @@ actor ModelRuntime: ModelRuntimeServing {
         self.switchContextProvenanceModelIDs = Set(switchContextProvenanceModelIDs.map { $0.lowercased() })
         self.configuredMaxContextTokens = maxContextTokensOverride
         self.loader = { targetModelID in
-            let (container, directory) = try await Self.loadLocalContainer(from: targetModelID)
+            let (container, directory) = try await Self.loadLocalContainer(
+                from: targetModelID, nativeVision: NativeVisionProfile.supports(modelID: targetModelID))
             let modelHash = try? ModelArtifactVerifier.canonicalArtifactHash(directory: directory)
             return (container, targetModelID, modelHash)
         }
@@ -2749,6 +2778,7 @@ actor ModelRuntime: ModelRuntimeServing {
             self.currentWeightsManifestSHA256 = nil
             self.currentTokenizerConfigSHA256 = nil
             self.currentChatTemplateSHA256 = nil
+            self.currentNativeVisionProfile = nil
             if normalizedDraftModelID != nil {
                 throw SpecDecodeStartupError.targetRequired
             }
@@ -2759,6 +2789,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let candidateNativeMTPLoad: NativeMTPRuntimeLoadResult?
         let candidateNativeMTPDisabledReason: NativeMTPStatusReason
         if normalizedDraftModelID == nil,
+           !NativeVisionProfile.supports(modelID: modelID),
            let verifiedModelArtifactSHA256,
            self.nativeMTPMode == .auto {
             if let targetDirectory = try? Self.localModelDirectory(for: targetLoadPath) {
@@ -2806,7 +2837,10 @@ actor ModelRuntime: ModelRuntimeServing {
             runtimeCacheClass = candidateNativeMTPLoad.runtimeCacheClass
             modelCapabilities = candidateNativeMTPLoad.modelCapabilities
         } else {
-            let loaded = try await Self.loadLocalContainer(from: targetLoadPath)
+            let loaded = try await Self.loadLocalContainer(
+                from: targetLoadPath,
+                nativeVision: NativeVisionProfile.supports(modelID: modelID)
+            )
             container = loaded.0
             directory = loaded.1
             runtimeCacheClass = self.pagedKVConfig.effectiveEnabled
@@ -2838,6 +2872,11 @@ actor ModelRuntime: ModelRuntimeServing {
         let tokenizerHashes = Self.tokenizerIdentityHashes(in: directory)
         self.currentTokenizerConfigSHA256 = tokenizerHashes.config
         self.currentChatTemplateSHA256 = tokenizerHashes.template
+        self.currentNativeVisionProfile = try NativeVisionProfile.load(
+            modelID: modelID,
+            directory: directory,
+            artifactSHA256: self.currentModelHash
+        )
         self.configuredTemplateSupportsThinkingToggle = Self.chatTemplateSupportsThinkingToggle(in: directory)
         self.currentTemplateSupportsThinkingToggle = self.configuredTemplateSupportsThinkingToggle
         self.configuredTemplateSupportsPreserveThinking = self.configuredTemplateSupportsThinkingToggle
@@ -3124,6 +3163,7 @@ actor ModelRuntime: ModelRuntimeServing {
         testLoader: (@Sendable (String) async throws -> (String, String?))? = nil,
         testCompletion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)? = nil,
         testStreamChunks: [StreamChunk] = [],
+        testNativeVisionProfile: NativeVisionProfile? = nil,
         testSpeculativeCompletion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)? = nil,
         testSpeculativeStream: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)? = nil
     ) {
@@ -3301,6 +3341,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.testLoader = testLoader
         self.testCompletion = testCompletion
         self.testStreamChunks = testStreamChunks
+        self.currentNativeVisionProfile = testNativeVisionProfile
         self.testSpeculativeCompletion = testSpeculativeCompletion
         self.testSpeculativeStream = testSpeculativeStream
         let continuousBatchScheduler = Self.makeContinuousBatchScheduler(
@@ -3390,7 +3431,8 @@ actor ModelRuntime: ModelRuntimeServing {
             nativeMTPStatus: currentNativeMTPStatusSink.snapshot(),
             nativeMTPCapability: currentNativeMTPCapability,
             schedulerSupportsNativeMTP: currentServedSchedulerSupportsNativeMTP(),
-            nativeMTPTupleOffer: currentNativeMTPTupleOffer
+            nativeMTPTupleOffer: currentNativeMTPTupleOffer,
+            nativeVisionProfile: currentNativeVisionProfile
         )
     }
 
@@ -3500,7 +3542,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 nativeMTPStatus: currentNativeMTPStatusSink.snapshot(),
                 nativeMTPCapability: currentNativeMTPCapability,
                 schedulerSupportsNativeMTP: schedulerSupportsNativeMTP,
-                nativeMTPTupleOffer: currentNativeMTPTupleOffer
+                nativeMTPTupleOffer: currentNativeMTPTupleOffer,
+                nativeVisionProfile: currentNativeVisionProfile
             )
         }
         return RuntimeSnapshot(
@@ -3520,7 +3563,8 @@ actor ModelRuntime: ModelRuntimeServing {
             nativeMTPStatus: currentNativeMTPStatusSink.snapshot(),
             nativeMTPCapability: currentNativeMTPCapability,
             schedulerSupportsNativeMTP: schedulerSupportsNativeMTP,
-            nativeMTPTupleOffer: currentNativeMTPTupleOffer
+            nativeMTPTupleOffer: currentNativeMTPTupleOffer,
+            nativeVisionProfile: currentNativeVisionProfile
         )
     }
 
@@ -3994,6 +4038,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 let weightsManifestSHA256: String?
                 let tokenizerConfigSHA256: String?
                 let chatTemplateSHA256: String?
+                let nativeVisionProfile: NativeVisionProfile?
                 let modelCapabilities: PagedKVRuntimeModelCapabilities
                 let draftModelID: String?
                 let draftContainer: ModelContainer?
@@ -4007,6 +4052,7 @@ actor ModelRuntime: ModelRuntimeServing {
                     weightsManifestSHA256 = nil
                     tokenizerConfigSHA256 = nil
                     chatTemplateSHA256 = nil
+                    nativeVisionProfile = nil
                     modelCapabilities = Self.pagedKVModelCapabilities(modelID: modelID, configJSONData: nil)
                     if let configuredDraftModelID {
                         do {
@@ -4028,7 +4074,10 @@ actor ModelRuntime: ModelRuntimeServing {
                     guard let targetAuthority else {
                         throw ModelRuntimeLoadError(target: "signed catalog identity unavailable for \(targetModelID)")
                     }
-                    let loaded = try await Self.loadLocalContainer(from: targetAuthority.modelArgument)
+                    let loaded = try await Self.loadLocalContainer(
+                        from: targetAuthority.modelArgument,
+                        nativeVision: NativeVisionProfile.supports(modelID: targetModelID)
+                    )
                     container = loaded.0
                     modelID = targetModelID
                     guard (try? ModelArtifactVerifier.canonicalArtifactHash(directory: loaded.1)) == targetAuthority.artifactSHA256
@@ -4041,6 +4090,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     let swapTokenizerHashes = Self.tokenizerIdentityHashes(in: loaded.1)
                     tokenizerConfigSHA256 = swapTokenizerHashes.config
                     chatTemplateSHA256 = swapTokenizerHashes.template
+                    nativeVisionProfile = try NativeVisionProfile.load(
+                        modelID: modelID, directory: loaded.1, artifactSHA256: modelHash)
                     modelCapabilities = Self.pagedKVModelCapabilities(modelID: modelID, directory: loaded.1)
                     if let configuredDraftModelID {
                         do {
@@ -4101,6 +4152,7 @@ actor ModelRuntime: ModelRuntimeServing {
                     weightsManifestSHA256: weightsManifestSHA256,
                     tokenizerConfigSHA256: tokenizerConfigSHA256,
                     chatTemplateSHA256: chatTemplateSHA256,
+                    nativeVisionProfile: nativeVisionProfile,
                     draftModelID: draftModelID,
                     draftContainer: draftContainer,
                     draftFailureReason: draftFailureReason,
@@ -5275,11 +5327,12 @@ actor ModelRuntime: ModelRuntimeServing {
     /// stops on Harmony also require that parser: raw scheduler token stops
     /// would terminate on hidden analysis or headers.
     static func requestStateRepresentable(_ request: ChatCompletionRequest) -> Bool {
+        if request.containsNonTextMessageContentPart { return false }
         // hasEnabledTools treats an absent, explicit-null, or empty tools array as
         // no-tools, so a bare or explicit-null `tool_choice` does not false-positive
         // here (the meaningful signal is whether tools are actually enabled).
         if HarmonyResponseParser.isHarmonyModelID(request.model),
-           requiresStructuredValidation(request.responseFormat)
+           isStructuredResponseFormat(request.responseFormat)
             || hasEnabledTools(request.promptSource.tools)
             || request.stop.contains(where: { !$0.isEmpty }) {
             return false
@@ -5438,6 +5491,7 @@ actor ModelRuntime: ModelRuntimeServing {
             weightsManifestSHA256: nil,
             tokenizerConfigSHA256: nil,
             chatTemplateSHA256: nil,
+            nativeVisionProfile: nil,
             draftModelID: nil,
             draftContainer: nil,
             draftFailureReason: nil,
@@ -5454,6 +5508,7 @@ actor ModelRuntime: ModelRuntimeServing {
         weightsManifestSHA256: String?,
         tokenizerConfigSHA256: String?,
         chatTemplateSHA256: String?,
+        nativeVisionProfile: NativeVisionProfile?,
         draftModelID: String?,
         draftContainer: ModelContainer?,
         draftFailureReason: String?,
@@ -5480,6 +5535,7 @@ actor ModelRuntime: ModelRuntimeServing {
             servedSlotLimit = swapServedSlots
             await inferenceGate.resize(to: swapServedSlots, stamp: swapGeneration)
         }
+        await conversationCache.purgeAllHot()
         currentContainer = container
         currentModelID = modelID
         currentModelHash = modelHash
@@ -5499,6 +5555,7 @@ actor ModelRuntime: ModelRuntimeServing {
         currentWeightsManifestSHA256 = weightsManifestSHA256
         currentTokenizerConfigSHA256 = tokenizerConfigSHA256
         currentChatTemplateSHA256 = chatTemplateSHA256
+        currentNativeVisionProfile = nativeVisionProfile
         let runtimeCacheClass = pagedKVConfig.effectiveEnabled
             ? await Self.pagedKVRuntimeCacheClass(
                 container: container,
@@ -5739,6 +5796,7 @@ actor ModelRuntime: ModelRuntimeServing {
     func acquireRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle {
         let snapshot = requestStartSnapshot()
         try Self.validateReady(snapshot.state)
+        _ = try Self.validateNativeVisionRequest(request, profile: snapshot.nativeVisionProfile)
         // Accept the coordinator-advertised catalog id as an alias only while the
         // configured model is the one currently loaded (mirrors
         // coordinatorWireModelID's servedModelID == loadedModelID guard). After a
@@ -5747,7 +5805,7 @@ actor ModelRuntime: ModelRuntimeServing {
             ? modelIDAliasList(catalogModelIDAlias)
             : []
         try request.validateModelMatches(snapshot.modelID, aliases: aliases)
-        try Self.validateToolChoiceScope(request)
+        try ToolSelectionPolicy.validateRequest(request, loadedModelID: snapshot.modelID, runtime: "mlx_cache")
         try Self.validateNativeSamplingPenalties(request)
         let drainCancelled = DrainCancelToken()
         let registrationID = registerInFlight { drainCancelled.fire() }
@@ -5759,6 +5817,8 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     func preflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws {
+        try ToolSelectionPolicy.validateRequest(request, loadedModelID: handle.snapshot.modelID, runtime: "mlx_cache")
+        _ = try Self.validateNativeVisionRequest(request, profile: handle.snapshot.nativeVisionProfile)
         // SPEC-025 §5.2: the streaming path runs preflight (prompt prepare inside
         // container.perform — real model-thread work) before stream() brackets
         // active inference. Bracket it here too so a pre-first-token wedge during
@@ -5766,7 +5826,9 @@ actor ModelRuntime: ModelRuntimeServing {
         ModelLivenessTracker.shared.beginInference()
         defer { ModelLivenessTracker.shared.endInference() }
         _ = try applyContinuousBatchingPolicy(request: request, snapshot: handle.snapshot)
-        try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
+        if !request.containsNonTextMessageContentPart {
+            try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
+        }
         try handle.drainCancelled.check()
         guard let container = handle.snapshot.container else {
             if testCompletion != nil {
@@ -5785,7 +5847,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 let input = try Self.userInput(
                     for: request,
                     templateSupportsThinkingToggle: templateSupportsThinkingToggle,
-                    templateSupportsPreserveThinking: templateSupportsPreserveThinking
+                    templateSupportsPreserveThinking: templateSupportsPreserveThinking,
+                    nativeVisionProfile: handle.snapshot.nativeVisionProfile
                 )
                 let lmInput = try await context.processor.prepare(input: input)
                 try handle.drainCancelled.check()
@@ -5798,7 +5861,9 @@ actor ModelRuntime: ModelRuntimeServing {
         let handle = try acquireRequestHandle(request)
         do {
             _ = try applyContinuousBatchingPolicy(request: request, snapshot: handle.snapshot)
-            try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
+            if !request.containsNonTextMessageContentPart {
+                try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
+            }
             try handle.drainCancelled.check()
             guard let container = handle.snapshot.container else {
                 throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
@@ -5813,7 +5878,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     let input = try Self.userInput(
                         for: request,
                         templateSupportsThinkingToggle: templateSupportsThinkingToggle,
-                        templateSupportsPreserveThinking: templateSupportsPreserveThinking
+                        templateSupportsPreserveThinking: templateSupportsPreserveThinking,
+                        nativeVisionProfile: handle.snapshot.nativeVisionProfile
                     )
                     let prepared = try await context.processor.prepare(input: input)
                     let count = prepared.text.tokens.size
@@ -5830,7 +5896,9 @@ actor ModelRuntime: ModelRuntimeServing {
 
     func pagedKVPreflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws {
         _ = try applyContinuousBatchingPolicy(request: request, snapshot: handle.snapshot)
-        try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
+        if !request.containsNonTextMessageContentPart {
+            try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
+        }
         try handle.drainCancelled.check()
     }
 
@@ -6270,10 +6338,12 @@ actor ModelRuntime: ModelRuntimeServing {
         private let lock = NSLock()
         private var tokenIDs: [Int] = []
         private var observer: NativeToolCallStreamEmitter
+        private let guaranteedSelection: Bool
         private var stopTokenCountValue: Int?
         private let incrementalDecoder: IncrementalTextDecoder
 
         init(request: ChatCompletionRequest, incrementalDecoder: IncrementalTextDecoder) {
+            guaranteedSelection = (try? ToolSelectionPolicy.selection(request.promptSource.toolChoice).requiresCall) == true
             observer = NativeToolCallStreamEmitter(
                 modelID: request.model,
                 allowedFunctionNames: ModelRuntime.toolFunctionNames(from: request.promptSource.tools)
@@ -6296,7 +6366,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     &observer,
                     decoded: incrementalDecoder.append(token),
                     stopTokenFilter: stopTokenFilter,
-                    requestStops: requestStops
+                    requestStops: requestStops,
+                    guaranteedSelection: guaranteedSelection
                 ) {
                     stopTokenCountValue = tokenIDs.count
                     return true
@@ -6736,7 +6807,8 @@ actor ModelRuntime: ModelRuntimeServing {
         }
 
         let maxContextTokens = maxContextTokens
-        let stopTokenFilter = stopTokenFilter
+        let stopTokenFilter = snapshot.nativeVisionProfile == nil
+            ? stopTokenFilter : NativeVisionProfile.stopTokenFilter
         let templateSupportsThinkingToggle = snapshot.templateSupportsThinkingToggle
         let templateSupportsPreserveThinking = snapshot.templateSupportsPreserveThinking
         CBTrace.log(schedulerRequestID, "rt_cb_prepare")
@@ -6796,6 +6868,7 @@ actor ModelRuntime: ModelRuntimeServing {
             resolved: tokenBoundedNativeMTPAdmission
         )
         let preparedPromptTokenIDs = prepared.promptTokens.map(Int32.init)
+        let coldContext = coldContext(for: request, snapshot: snapshot)
         let batchKVBits = Self.effectiveKVBits(
             configured: kvBitsOverride,
             conversationKey: request.conversationKey
@@ -6812,7 +6885,9 @@ actor ModelRuntime: ModelRuntimeServing {
                 incomingTokens: preparedPromptTokenIDs,
                 modelID: request.model,
                 kvBits: batchKVBits,
-                allowRetainedPagedKVHandoff: true
+                cold: coldContext,
+                allowRetainedPagedKVHandoff: true,
+                fleetGrant: request.fleetCacheGrant
             )
             : nil
         #if DEBUG || MACPROVIDER_LAB_HARNESS
@@ -6942,7 +7017,8 @@ actor ModelRuntime: ModelRuntimeServing {
                         serialCache.layers,
                         recurrentCheckpoints: serialCache.recurrentCheckpoints
                     ),
-                    fullTokens: fullTokens
+                    fullTokens: fullTokens,
+                    cold: coldContext
                 )
             } else if let retainedCache = result.retainedCache {
                 await scheduler.cancelRetainedCacheDelivery(
@@ -7096,6 +7172,7 @@ actor ModelRuntime: ModelRuntimeServing {
             weightsManifestSHA256: currentWeightsManifestSHA256,
             tokenizerConfigSHA256: currentTokenizerConfigSHA256,
             chatTemplateSHA256: currentChatTemplateSHA256,
+            nativeVisionProfile: nil,
             draftModelID: nil,
             draftContainer: nil,
             draftFailureReason: nil,
@@ -7168,6 +7245,7 @@ actor ModelRuntime: ModelRuntimeServing {
         idleCancellation: DrainCancelToken,
         onChunk: @escaping @Sendable (StreamChunk) -> Void
     ) async throws -> CompletionResult? {
+        guard !request.containsNonTextMessageContentPart else { return nil }
         guard capability.isRequested,
               capability.unsupportedReason == nil,
               !capability.shouldUseSerialPath,
@@ -7188,7 +7266,8 @@ actor ModelRuntime: ModelRuntimeServing {
         }
 
         let maxContextTokens = maxContextTokens
-        let stopTokenFilter = stopTokenFilter
+        let stopTokenFilter = snapshot.nativeVisionProfile == nil
+            ? stopTokenFilter : NativeVisionProfile.stopTokenFilter
         let templateSupportsThinkingToggle = snapshot.templateSupportsThinkingToggle
         let templateSupportsPreserveThinking = snapshot.templateSupportsPreserveThinking
         let requestStops = request.stop
@@ -7257,6 +7336,7 @@ actor ModelRuntime: ModelRuntimeServing {
             resolved: tokenBoundedNativeMTPAdmission
         )
         let preparedPromptTokenIDs = prepared.promptTokens.map(Int32.init)
+        let coldContext = coldContext(for: request, snapshot: snapshot)
         let batchKVBits = Self.effectiveKVBits(
             configured: kvBitsOverride,
             conversationKey: request.conversationKey
@@ -7273,7 +7353,9 @@ actor ModelRuntime: ModelRuntimeServing {
                 incomingTokens: preparedPromptTokenIDs,
                 modelID: request.model,
                 kvBits: batchKVBits,
-                allowRetainedPagedKVHandoff: true
+                cold: coldContext,
+                allowRetainedPagedKVHandoff: true,
+                fleetGrant: request.fleetCacheGrant
             )
             : nil
         #if DEBUG || MACPROVIDER_LAB_HARNESS
@@ -7454,7 +7536,8 @@ actor ModelRuntime: ModelRuntimeServing {
                         serialCache.layers,
                         recurrentCheckpoints: serialCache.recurrentCheckpoints
                     ),
-                    fullTokens: fullTokens
+                    fullTokens: fullTokens,
+                    cold: coldContext
                 )
             } else if let retainedCache = result.retainedCache {
                 await scheduler.cancelRetainedCacheDelivery(
@@ -7671,6 +7754,8 @@ actor ModelRuntime: ModelRuntimeServing {
         with handle: RequestHandle,
         shouldCancel: @escaping @Sendable () -> Bool = { false }
     ) async throws -> (CompletionResult, RuntimeSnapshot) {
+        try ToolSelectionPolicy.validateRequest(request, loadedModelID: handle.snapshot.modelID, runtime: "mlx_cache")
+        _ = try Self.validateNativeVisionRequest(request, profile: handle.snapshot.nativeVisionProfile)
         // SPEC-025 §5.2 model-liveness: mark active buyer inference so a stalled
         // progress token is interpretable as a wedge (observability only).
         ModelLivenessTracker.shared.beginInference()
@@ -7688,10 +7773,13 @@ actor ModelRuntime: ModelRuntimeServing {
             emitTelemetry: true
         )
         let nativeMTPAdmission = nativeMTPRuntimeAdmission(for: request, snapshot: snapshot)
-        try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
+        if !request.containsNonTextMessageContentPart {
+            try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
+        }
         try drainCancelled.check()
         CBTrace.log(request.requestID, "rt_complete_enter")
-        if let completion = try await attachedContinuousBatchCompletion(
+        if !request.containsNonTextMessageContentPart,
+           let completion = try await attachedContinuousBatchCompletion(
             request: request,
             snapshot: snapshot,
             capability: continuousBatchingCapability,
@@ -7781,17 +7869,20 @@ actor ModelRuntime: ModelRuntimeServing {
         let maxContextTokens = maxContextTokens
         let kvBitsOverride = Self.effectiveKVBits(
             configured: kvBitsOverride,
-            conversationKey: request.conversationKey
+            conversationKey: request.conversationKey,
+            containsImage: request.containsNonTextMessageContentPart
         )
         let speculativeCacheWrapValidated = speculativeCacheWrapValidated
-        let prefillStepSize = prefillStepSize
+        let prefillStepSize = Self.effectivePrefillStepSize(
+            configured: prefillStepSize, containsImage: request.containsNonTextMessageContentPart)
         let conversationCache = conversationCache
         // SPEC-037 stage 5 — per-request cold-tier context, captured before the
         // nonisolated inference closure (nil unless the disk tier is attached).
         let coldContext = coldContext(for: request, snapshot: snapshot)
         let inferenceGate = inferenceGate
         let blockingInferenceExecutor = blockingInferenceExecutor
-        let stopTokenFilter = stopTokenFilter
+        let stopTokenFilter = snapshot.nativeVisionProfile == nil
+            ? stopTokenFilter : NativeVisionProfile.stopTokenFilter
         let templateSupportsThinkingToggle = snapshot.templateSupportsThinkingToggle
         let templateSupportsPreserveThinking = snapshot.templateSupportsPreserveThinking
         let completion = try await Self.withDrainCancellation(drainCancelled) {
@@ -7804,7 +7895,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     let input = try Self.userInput(
                         for: request,
                         templateSupportsThinkingToggle: templateSupportsThinkingToggle,
-                        templateSupportsPreserveThinking: templateSupportsPreserveThinking
+                        templateSupportsPreserveThinking: templateSupportsPreserveThinking,
+                        nativeVisionProfile: snapshot.nativeVisionProfile
                     )
                     let lmInput = try await context.processor.prepare(input: input)
                     try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
@@ -7865,7 +7957,7 @@ actor ModelRuntime: ModelRuntimeServing {
                             Self.logSpeculativeFallback(error)
                         }
                     }
-                    let conversationCacheAllowed = Self.allowsConversationCacheLease(
+                    let conversationCacheAllowed = !request.containsNonTextMessageContentPart && Self.allowsConversationCacheLease(
                         provenance: request.ingestProvenance,
                         nativeAllows: nativeMTPAdmission.allowsConversationCacheLease
                     )
@@ -7875,7 +7967,8 @@ actor ModelRuntime: ModelRuntimeServing {
                             incomingTokens: promptTokenIds,
                             modelID: request.model,
                             kvBits: kvBitsOverride,
-                            cold: coldContext
+                            cold: coldContext,
+                            fleetGrant: request.fleetCacheGrant
                         )
                         : nil
                     #if DEBUG || MACPROVIDER_LAB_HARNESS
@@ -7895,20 +7988,20 @@ actor ModelRuntime: ModelRuntimeServing {
                             let generationContext = Self.harmonyTerminalPreservingContext(from: context, modelID: request.model)
                             let kvCache: [KVCache]
                             var iteratorInput: LMInput
+                            let forceSimpleKV = Self.forceSimpleKVCache(
+                                eligible: coldContext?.eligible == true,
+                                conversationKey: request.conversationKey,
+                                containsImage: request.containsNonTextMessageContentPart)
                             if let reusableCache = lease?.reusableCache, let lcp = lease?.lcp {
                                 kvCache = reusableCache.layers
                                 iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[lcp...])))
                             } else {
                                 // SPEC-037 FR-KVP1 / SPEC-024-R001: eligible persist and
                                 // keyed serial reuse allocate KVCacheSimple; keyless traffic
-                                // keeps the rotating cap. TokenIterator still gets the
-                                // original `parameters` (its maxKVSize is ignored once the
-                                // cache is passed explicitly).
+                                // keeps the rotating cap.
                                 kvCache = try Self.serveCache(
                                     model: generationContext.model, baseParameters: parameters,
-                                    forceSimpleKV: Self.forceSimpleKVCache(
-                                        eligible: coldContext?.eligible == true,
-                                        conversationKey: request.conversationKey))
+                                    forceSimpleKV: forceSimpleKV)
                                 iteratorInput = lmInput
                             }
                             let recurrent = Self.prefillRecurrentCheckpoints(
@@ -7918,7 +8011,10 @@ actor ModelRuntime: ModelRuntimeServing {
                                 iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
                             }
 
-                            let iterator = try TokenIterator(input: iteratorInput, model: generationContext.model, cache: kvCache, parameters: parameters)
+                            let iterator = try TokenIterator(
+                                input: iteratorInput, model: generationContext.model, cache: kvCache,
+                                parameters: Self.serveIteratorParameters(
+                                    parameters, forceSimpleKV: forceSimpleKV, reusedCache: lease?.reusableCache != nil))
                             Self.clearMLXBufferCacheAfterPrefill()
                             var serialToolObserver = NativeToolCallStreamEmitter(
                                 modelID: request.model,
@@ -8001,7 +8097,8 @@ actor ModelRuntime: ModelRuntimeServing {
                                            &serialToolObserver,
                                            decoded: generationContext.tokenizer.decode(tokenIds: tokens),
                                            stopTokenFilter: stopTokenFilter,
-                                           requestStops: request.stop
+                                           requestStops: request.stop,
+                                           guaranteedSelection: (try? ToolSelectionPolicy.selection(request.promptSource.toolChoice).requiresCall) == true
                                        )
                                     {
                                         return GenerateDisposition.stop
@@ -8190,7 +8287,7 @@ actor ModelRuntime: ModelRuntimeServing {
             stopTokenFilter: stopTokenFilter,
             requestStops: request.stop
         )
-        let parsed = parseToolCallsIfRequested(filtered.text, request: request)
+        let parsed = try parseToolCallsIfRequested(filtered.text, request: request)
         let finishReason: String
         if !parsed.toolCalls.isEmpty {
             finishReason = "tool_calls"
@@ -8364,6 +8461,25 @@ actor ModelRuntime: ModelRuntimeServing {
         shouldCancel: @escaping @Sendable () -> Bool = { false },
         onChunk: @escaping @Sendable (StreamChunk) -> Void
     ) async throws -> CompletionResult {
+        try ToolSelectionPolicy.validateRequest(request, loadedModelID: handle.snapshot.modelID, runtime: "mlx_cache")
+        _ = try Self.validateNativeVisionRequest(request, profile: handle.snapshot.nativeVisionProfile)
+        if try ToolSelectionPolicy.selection(request.promptSource.toolChoice).holdsOutput {
+            let (completion, _) = try await completeWithServedSnapshot(request, with: handle, shouldCancel: shouldCancel)
+            try handle.drainCancelled.check()
+            try Task.checkCancellation()
+            if shouldCancel() { throw CancellationError() }
+            let validated = try Self.validateStructuredCompletion(completion, request: request)
+            if let calls = validated.toolCalls, !calls.isEmpty {
+                for (index, call) in calls.enumerated() {
+                    try handle.drainCancelled.check()
+                    if shouldCancel() { throw CancellationError() }
+                    onChunk(.toolCallDelta(StreamToolCallDelta(index: index, id: call.id, type: "function", functionName: call.functionName, arguments: call.arguments)))
+                }
+            } else if !validated.content.isEmpty {
+                onChunk(.content(validated.content))
+            }
+            return validated
+        }
         // SPEC-025 §5.2 model-liveness: mark active buyer inference so a stalled
         // progress token is interpretable as a wedge (observability only).
         ModelLivenessTracker.shared.beginInference()
@@ -8376,7 +8492,9 @@ actor ModelRuntime: ModelRuntimeServing {
             emitTelemetry: false
         )
         let nativeMTPAdmission = nativeMTPRuntimeAdmission(for: request, snapshot: snapshot)
-        try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
+        if !request.containsNonTextMessageContentPart {
+            try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
+        }
         let structuredAccumulator = StructuredStreamingContentAccumulator(enabled: Self.requiresStructuredValidation(request.responseFormat))
         let idleState = StructuredStreamingIdleState(enabled: Self.requiresStructuredValidation(request.responseFormat))
         // SPEC-038 AC-6c: a batched structured-output stream runs under the
@@ -8521,16 +8639,19 @@ actor ModelRuntime: ModelRuntimeServing {
         let maxContextTokens = maxContextTokens
         let kvBitsOverride = Self.effectiveKVBits(
             configured: kvBitsOverride,
-            conversationKey: request.conversationKey
+            conversationKey: request.conversationKey,
+            containsImage: request.containsNonTextMessageContentPart
         )
         let speculativeCacheWrapValidated = speculativeCacheWrapValidated
-        let prefillStepSize = prefillStepSize
+        let prefillStepSize = Self.effectivePrefillStepSize(
+            configured: prefillStepSize, containsImage: request.containsNonTextMessageContentPart)
         let conversationCache = conversationCache
         // SPEC-037 stage 5 — per-request cold-tier context (streaming endpoint).
         let coldContext = coldContext(for: request, snapshot: snapshot)
         let inferenceGate = inferenceGate
         let blockingInferenceExecutor = blockingInferenceExecutor
-        let stopTokenFilter = stopTokenFilter
+        let stopTokenFilter = snapshot.nativeVisionProfile == nil
+            ? stopTokenFilter : NativeVisionProfile.stopTokenFilter
         let templateSupportsThinkingToggle = snapshot.templateSupportsThinkingToggle
         let templateSupportsPreserveThinking = snapshot.templateSupportsPreserveThinking
         return try await Self.withDrainCancellation(drainCancelled) {
@@ -8553,7 +8674,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     let input = try Self.userInput(
                         for: request,
                         templateSupportsThinkingToggle: templateSupportsThinkingToggle,
-                        templateSupportsPreserveThinking: templateSupportsPreserveThinking
+                        templateSupportsPreserveThinking: templateSupportsPreserveThinking,
+                        nativeVisionProfile: snapshot.nativeVisionProfile
                     )
                     let lmInput = try await context.processor.prepare(input: input)
                     try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
@@ -8632,7 +8754,7 @@ actor ModelRuntime: ModelRuntimeServing {
                             requestStops: request.stop
                         )
                         let finalDelta = Self.delta(from: emittedText, to: final.text)
-                        let parsed = Self.parseToolCallsIfRequested(final.text, request: request)
+                        let parsed = try Self.parseToolCallsIfRequested(final.text, request: request)
                         if !finalDelta.isEmpty {
                             if let error = structuredAccumulator.append(finalDelta) {
                                 throw error
@@ -8682,7 +8804,7 @@ actor ModelRuntime: ModelRuntimeServing {
                         )
                     }
 
-                    let conversationCacheAllowed = Self.allowsConversationCacheLease(
+                    let conversationCacheAllowed = !request.containsNonTextMessageContentPart && Self.allowsConversationCacheLease(
                         provenance: request.ingestProvenance,
                         nativeAllows: nativeMTPAdmission.allowsConversationCacheLease
                     )
@@ -8692,7 +8814,8 @@ actor ModelRuntime: ModelRuntimeServing {
                             incomingTokens: promptTokenIds,
                             modelID: request.model,
                             kvBits: kvBitsOverride,
-                            cold: coldContext
+                            cold: coldContext,
+                            fleetGrant: request.fleetCacheGrant
                         )
                         : nil
                     #if DEBUG || MACPROVIDER_LAB_HARNESS
@@ -8710,6 +8833,10 @@ actor ModelRuntime: ModelRuntimeServing {
                     #endif
                     let kvCache: [KVCache]
                     var iteratorInput: LMInput
+                    let forceSimpleKV = Self.forceSimpleKVCache(
+                        eligible: coldContext?.eligible == true,
+                        conversationKey: request.conversationKey,
+                        containsImage: request.containsNonTextMessageContentPart)
                     if let reusableCache = lease?.reusableCache, let lcp = lease?.lcp {
                         kvCache = reusableCache.layers
                         iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[lcp...])))
@@ -8718,9 +8845,7 @@ actor ModelRuntime: ModelRuntimeServing {
                         // the non-streaming path (eligible persist or keyed serial reuse).
                         kvCache = try Self.serveCache(
                             model: generationContext.model, baseParameters: parameters,
-                            forceSimpleKV: Self.forceSimpleKVCache(
-                                eligible: coldContext?.eligible == true,
-                                conversationKey: request.conversationKey))
+                            forceSimpleKV: forceSimpleKV)
                         iteratorInput = lmInput
                     }
                     let recurrent = Self.prefillRecurrentCheckpoints(
@@ -8764,7 +8889,10 @@ actor ModelRuntime: ModelRuntimeServing {
                         allowedFunctionNames: Self.toolFunctionNames(from: request.promptSource.tools),
                         stopCandidates: stopTokenFilter.tokens
                     )
-                    let iterator = try TokenIterator(input: iteratorInput, model: generationContext.model, cache: kvCache, parameters: parameters)
+                    let iterator = try TokenIterator(
+                        input: iteratorInput, model: generationContext.model, cache: kvCache,
+                        parameters: Self.serveIteratorParameters(
+                            parameters, forceSimpleKV: forceSimpleKV, reusedCache: lease?.reusableCache != nil))
                     Self.clearMLXBufferCacheAfterPrefill()
                     do {
                         let result: BlockingGenerateResult = try await blockingInferenceExecutor.run { inferenceCancellation in
@@ -9023,6 +9151,14 @@ actor ModelRuntime: ModelRuntimeServing {
     /// SPEC-037 stage 5 (FR-KVP7) — attach the activated disk cold tier. Called by
     /// the serve lifecycle after the store acquires its namespace lock, so the hot
     /// tier only reaches disk once single-writer ownership is established.
+    func isFleetCachePurgeReady() -> Bool {
+        attachedKVDiskTier != nil
+    }
+
+    func registerKVDiskTierForPurge(_ tier: KVDiskTier) {
+        attachedKVDiskTier = tier
+    }
+
     func attachKVDiskTier(_ tier: KVDiskTier) async {
         let adapter = KVConversationColdTierAdapter(
             store: tier.store, namespaceID: tier.namespaceID,
@@ -9048,6 +9184,7 @@ actor ModelRuntime: ModelRuntimeServing {
         // first post-restart request can promote a persisted entry rather than
         // falling back to a fresh prefill until some other conversation commits.
         await seedColdGeometry(into: adapter)
+        attachedKVDiskTier = tier
         coldTierAttached = true
     }
 
@@ -9083,8 +9220,9 @@ actor ModelRuntime: ModelRuntimeServing {
                 // SPEC-037 FR-KVP1: the seed always models the tier-ELIGIBLE path, so it
                 // must build a KVCacheSimple (maxKVSize=nil) — otherwise the
                 // `as? [KVCacheSimple]` guard below never succeeds and no geometry is seeded.
-                let kvCache = try context.model.newCache(parameters: Self.cacheParameters(parameters, forceSimpleKV: true))
-                let iterator = try TokenIterator(input: lmInput, model: context.model, cache: kvCache, parameters: parameters)
+                let seedParameters = Self.cacheParameters(parameters, forceSimpleKV: true)
+                let kvCache = try context.model.newCache(parameters: seedParameters)
+                let iterator = try TokenIterator(input: lmInput, model: context.model, cache: kvCache, parameters: seedParameters)
                 // A single-token warmup populates the per-layer cache tensors; that is
                 // all the seed needs (only the geometry is read, never the values).
                 _ = try await blockingInferenceExecutor.run { _ in
@@ -9101,6 +9239,9 @@ actor ModelRuntime: ModelRuntimeServing {
                 // rather than leaving every eligible request to skip observably but
                 // silently at attach time. Log-only: the per-request observable skip in
                 // captureSnapshot still covers correctness.
+                if adapter.seedTemplate(servedModelID: servedModelID, layers: kvCache) {
+                    return nil
+                }
                 guard let caches = kvCache as? [KVCacheSimple] else {
                     // Report the FIRST layer that is NOT KVCacheSimple (heterogeneous
                     // arrays whose layer 0 is simple but a later layer is not would
@@ -9140,6 +9281,16 @@ actor ModelRuntime: ModelRuntimeServing {
     /// tier is enabled — a running serve owns its ConversationCache and must be able
     /// to remove hot-tier residency so it never keeps serving a purged prefix from
     /// RAM (FR-KVP8). Returns whether the hot tier held live state for the key.
+    /// A fleet acknowledgement requires both hot lease fencing and durable
+    /// key destruction. Failure leaves coordinator reconciliation pending.
+    func purgeFleetConversation(conversationKey: String) async -> Bool {
+        _ = await conversationCache.purgeHot(conversationKey: conversationKey)
+        guard let tier = attachedKVDiskTier else { return false }
+        let result = await tier.purge(rawKey: conversationKey)
+        if case .failed = result { return false }
+        return true
+    }
+
     func purgeHotConversation(conversationKey: String) async -> Bool {
         await conversationCache.purgeHot(conversationKey: conversationKey)
     }
@@ -9181,14 +9332,15 @@ actor ModelRuntime: ModelRuntimeServing {
     /// The FR-KVP11 gate decision requires BOTH the synthetic key prefix and
     /// direct-HTTP provenance; the identity core carries the live model identity.
     private func coldContext(for request: ChatCompletionRequest, snapshot: RuntimeSnapshot) -> ConversationColdContext? {
-        guard coldTierAttached else { return nil }
+        guard coldTierAttached, !request.containsNonTextMessageContentPart else { return nil }
         // Evaluate the FR-KVP11 gate FIRST (key sub-namespace + direct-HTTP provenance),
         // independent of identity availability, so a gated request whose live identity is
         // unavailable still reaches the telemetry sink (FR-KVP12) instead of the cold
         // tier silently doing nothing. The pure resolution lives in
         // `ConversationColdContext.resolve` (unit-tested per missing input).
         let gated = KVDiskCacheGate.persists(
-            conversationKey: request.conversationKey, provenance: request.ingestProvenance)
+            conversationKey: request.conversationKey, provenance: request.ingestProvenance,
+            fleetGrant: attachedKVDiskTier?.config.allowBuyerKeys == true ? request.fleetCacheGrant : nil)
         return ConversationColdContext.resolve(
             gated: gated,
             requestModel: request.model,
@@ -9516,22 +9668,37 @@ actor ModelRuntime: ModelRuntimeServing {
         throw SpecDecodeStartupError.fixtureMissing
     }
 
-    private static func loadLocalContainer(from target: String) async throws -> (ModelContainer, URL) {
-        try await loadLocalContainer(from: target, tokenizerLoader: #huggingFaceTokenizerLoader())
+    private static func loadLocalContainer(
+        from target: String,
+        nativeVision: Bool = false
+    ) async throws -> (ModelContainer, URL) {
+        try await loadLocalContainer(
+            from: target,
+            tokenizerLoader: #huggingFaceTokenizerLoader(),
+            nativeVision: nativeVision
+        )
     }
 
     private static func loadLocalContainer(
         from target: String,
-        tokenizerLoader: any TokenizerLoader
+        tokenizerLoader: any TokenizerLoader,
+        nativeVision: Bool = false
     ) async throws -> (ModelContainer, URL) {
         let directory = try localModelDirectory(for: target)
         // mlx-swift-lm 3.x requires an explicit tokenizer loader. The provider
         // preflight has already verified model_artifact_path/model_artifact_sha256,
         // so load directly from the resolved local snapshot instead of downloading.
-        let container = try await LLMModelFactory.shared.loadContainer(
-            from: directory,
-            using: tokenizerLoader
-        )
+        let container: ModelContainer
+        if nativeVision {
+            let before = try NativeVisionProfile.load(
+                modelID: NativeVisionProfile.modelID, directory: directory, artifactSHA256: nil)
+            container = try await VLMModelFactory.shared.loadContainer(from: directory, using: tokenizerLoader)
+            let after = try NativeVisionProfile.load(
+                modelID: NativeVisionProfile.modelID, directory: directory, artifactSHA256: before?.artifactSHA256)
+            guard before == after else { throw NativeVisionProfile.identityError() }
+        } else {
+            container = try await LLMModelFactory.shared.loadContainer(from: directory, using: tokenizerLoader)
+        }
         return (container, directory)
     }
 
@@ -11362,7 +11529,11 @@ actor ModelRuntime: ModelRuntimeServing {
         globalHitStop: Bool = false
     ) throws -> ParsedGeneratedOutput {
         guard HarmonyResponseParser.isHarmonyModelID(request.model) else {
-            let parsed = parseToolCallsIfRequested(filteredText, request: request)
+            if try ToolSelectionPolicy.selection(request.promptSource.toolChoice).requiresCall,
+               case .complete(let finishReason) = mode, finishReason == "length" {
+                throw ToolSelectionPolicy.outputError("Tool generation exhausted its token budget")
+            }
+            let parsed = try parseToolCallsIfRequested(filteredText, request: request)
             return ParsedGeneratedOutput(
                 content: parsed.content,
                 toolCalls: parsed.toolCalls,
@@ -11499,9 +11670,11 @@ actor ModelRuntime: ModelRuntimeServing {
 
     /// SPEC-018 serial tool turn (`parallel_tool_calls` omitted/false) on a
     /// non-Harmony model with tools: generation stops once the first tool
-    /// call is complete and valid.
+    /// call is complete and valid. Guaranteed selection runs to the normal
+    /// terminal so cardinality validation can inspect the entire output.
     static func serialToolStopApplies(_ request: ChatCompletionRequest) -> Bool {
         request.stopsAfterFirstCompleteToolCall
+            && (try? ToolSelectionPolicy.selection(request.promptSource.toolChoice).requiresCall) != true
             && !HarmonyResponseParser.isHarmonyModelID(request.model)
             && hasEnabledTools(request.promptSource.tools)
     }
@@ -11518,8 +11691,10 @@ actor ModelRuntime: ModelRuntimeServing {
         _ observer: inout NativeToolCallStreamEmitter,
         decoded: String,
         stopTokenFilter: StopTokenFilter,
-        requestStops: [String]
+        requestStops: [String],
+        guaranteedSelection: Bool = false
     ) -> Bool {
+        guard !guaranteedSelection else { return false }
         let candidate = streamingSafePrefix(
             decoded,
             stopTokenFilter: stopTokenFilter,
@@ -11529,7 +11704,11 @@ actor ModelRuntime: ModelRuntimeServing {
         return observer.hasCompletedValidToolCall
     }
 
-    private static func parseToolCallsIfRequested(_ text: String, request: ChatCompletionRequest) -> (content: String, toolCalls: [ToolCall]) {
+    private static func parseToolCallsIfRequested(_ text: String, request: ChatCompletionRequest) throws -> (content: String, toolCalls: [ToolCall]) {
+        if try ToolSelectionPolicy.selection(request.promptSource.toolChoice).requiresCall {
+            let calls = try ToolCallParser.parseGuaranteedToolCalls(text)
+            return (calls.isEmpty ? text : "", calls)
+        }
         guard let allowedFunctionNames = toolFunctionNames(from: request.promptSource.tools) else {
             return (text, [])
         }
@@ -11547,12 +11726,26 @@ actor ModelRuntime: ModelRuntimeServing {
         return ("", parsed.toolCalls)
     }
 
+    /// Any json_object or json_schema request, strict or not (SPEC-019 §1a).
+    /// Routing gates that depend on the rendered structured-output prompt use
+    /// this; post-inference validation and holdback use
+    /// `requiresStructuredValidation`.
+    static func isStructuredResponseFormat(_ responseFormat: ResponseFormat) -> Bool {
+        if case .text = responseFormat {
+            return false
+        }
+        return true
+    }
+
     static func requiresStructuredValidation(_ responseFormat: ResponseFormat) -> Bool {
         switch responseFormat {
         case .text:
             return false
-        case .jsonObject, .jsonSchema:
+        case .jsonObject:
             return true
+        case .jsonSchema(let spec):
+            // SPEC-019 v0.3.0 §1a: non-strict output is not validated.
+            return spec.strict
         }
     }
 
@@ -11568,23 +11761,89 @@ actor ModelRuntime: ModelRuntimeServing {
         return context
     }
 
+    /// Validate media before processor work, test generation seams or dispatch.
+    /// Parsing alone is never an assertion that the loaded model sees images.
+    static func validateNativeVisionRequest(
+        _ request: ChatCompletionRequest, profile: NativeVisionProfile?
+    ) throws -> NativeImageInput? {
+        if profile != nil {
+            for message in request.messages {
+                if let text = message.content { try NativeVisionProfile.validateText(text) }
+            }
+        }
+        guard request.containsNonTextMessageContentPart else { return nil }
+        guard profile != nil else {
+            throw APIError(status: 400, message: "Images are not supported by this model",
+                           code: "unsupported_content_shape", param: "messages")
+        }
+        let choice = try ToolSelectionPolicy.selection(request.promptSource.toolChoice)
+        guard case .text = request.responseFormat,
+              !hasEnabledTools(request.promptSource.tools),
+              choice == .auto,
+              !request.conversationCacheOnly else {
+            throw APIError(status: 400, message: "Images cannot be combined with tools, structured output or cache-only requests",
+                           code: "unsupported_content_shape", param: "messages")
+        }
+        guard let input = try request.validatedNativeImageInput() else {
+            throw APIError(status: 400, message: "Unsupported media content",
+                           code: "unsupported_content_shape", param: "messages")
+        }
+        for message in input.messages {
+            // The pinned template concatenates adjacent text parts verbatim.
+            // Check the concatenation too: split visual tokens must not create
+            // extra processor placeholders that no admitted image owns.
+            let text = message.parts.compactMap { part -> String? in
+                if case .text(let text) = part { return text }
+                return nil
+            }.joined()
+            try NativeVisionProfile.validateText(text)
+        }
+        return input
+    }
+
     static func userInput(
         for request: ChatCompletionRequest,
         templateSupportsThinkingToggle: Bool = false,
-        templateSupportsPreserveThinking: Bool = false
+        templateSupportsPreserveThinking: Bool = false,
+        nativeVisionProfile: NativeVisionProfile? = nil
     ) throws -> UserInput {
+        if let input = try validateNativeVisionRequest(request, profile: nativeVisionProfile) {
+            return try NativeVisionProfile.userInput(from: input)
+        }
         let structuredMessages = try StructuredOutputRenderer.prependResponseFormatInstruction(
             to: request.messages,
             responseFormat: request.responseFormat,
             modelID: request.model
         )
+        let selection = try ToolSelectionPolicy.selection(request.promptSource.toolChoice)
+        var messages = structuredMessages
+        let callCountInstruction = request.parallelToolCalls == true
+            ? "Return between 1 and 128 calls."
+            : "Return exactly one call."
+        switch selection {
+        case .required:
+            messages.insert(ChatMessage(role: .system, content: "Call a declared function using complete JSON <tool_call> envelopes. \(callCountInstruction) Return only tool calls; arguments must match the declared schemas."), at: 0)
+        case .named(let name):
+            messages.insert(ChatMessage(role: .system, content: "Call the declared function \(name) using a complete JSON <tool_call> envelope. \(callCountInstruction) Return only calls to that function; arguments must match its schema."), at: 0)
+        case .none:
+            messages.insert(ChatMessage(role: .system, content: "Do not call any function or tool. Respond with assistant text."), at: 0)
+        case .auto: break
+        }
+        let chat = try ToolPromptRenderer.renderMessages(messages, modelID: request.model)
+        let tools: [[String: Any]]?
+        if selection == .none {
+            tools = nil
+        } else {
+            tools = Self.mlxToolsForTemplate(from: request.promptSource.tools)
+        }
+        let additionalContext = Self.templateAdditionalContext(
+            supportsThinkingToggle: templateSupportsThinkingToggle,
+            supportsPreserveThinking: templateSupportsPreserveThinking
+        )
         return UserInput(
-            chat: try ToolPromptRenderer.renderMessages(structuredMessages, modelID: request.model),
-            tools: Self.mlxToolsForTemplate(from: request.promptSource.tools),
-            additionalContext: Self.templateAdditionalContext(
-                supportsThinkingToggle: templateSupportsThinkingToggle,
-                supportsPreserveThinking: templateSupportsPreserveThinking
-            )
+            chat: chat,
+            tools: tools,
+            additionalContext: additionalContext
         )
     }
 
@@ -11605,6 +11864,13 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     static func validateStructuredCompletion(_ completion: CompletionResult, request: ChatCompletionRequest) throws -> CompletionResult {
+        let validationCalls = (completion.toolCalls ?? []).map {
+            MacProviderCore.ToolCall(id: $0.id, functionName: $0.functionName, arguments: $0.arguments)
+        }
+        try ToolSelectionPolicy.validateOutput(
+            calls: validationCalls, finishReason: completion.finishReason,
+            generatedTokens: completion.generatedCompletionTokens, request: request
+        )
         if completion.toolCalls?.isEmpty == false {
             return completion
         }
@@ -11615,6 +11881,9 @@ actor ModelRuntime: ModelRuntimeServing {
             _ = try parseStructuredJSONContent(completion.content, requireObjectOrArray: true)
             return completion
         case .jsonSchema(let spec):
+            guard spec.strict else {
+                return completion
+            }
             let parsed = try parseStructuredJSONContent(completion.content, requireObjectOrArray: false)
             do {
                 try JSONSchemaValidator.validateInstance(parsed, against: spec.schema)
@@ -11953,30 +12222,7 @@ actor ModelRuntime: ModelRuntimeServing {
         }
     }
 
-    private static func validateToolChoiceScope(_ request: ChatCompletionRequest) throws {
-        if let toolChoice = request.promptSource.toolChoice,
-           !isSupportedToolChoice(toolChoice)
-        {
-            throw APIError(
-                status: 400,
-                message: "tool_choice values other than auto are not supported by this provider",
-                code: "unsupported_tool_choice"
-            )
-        }
-    }
 
-    private static func isSupportedToolChoice(_ value: MacProviderCore.JSONValue) -> Bool {
-        switch value {
-        case .string(let choice):
-            // OpenAI/Pi send "required". We do not force a call, but rejecting it
-            // with 400/502 is worse than treating it as auto.
-            return choice == "auto" || choice == "required"
-        case .null:
-            return true
-        default:
-            return false
-        }
-    }
 }
 
 /// The serial streaming path's buyer-visible text step for non-Harmony output:

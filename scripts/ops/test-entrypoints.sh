@@ -110,6 +110,36 @@ printf '#!/usr/bin/env bash\ncat %q %q 2>/dev/null || true\n' "$tmp/svc/boot.txt
 # shellcheck disable=SC2016  # the fake's own "$@" must stay literal
 printf '#!/usr/bin/env bash\nfor a in "$@"; do [ "$a" = --validate-config ] && v=1; done\n[ -n "${v:-}" ] || exit 2\nwhile [ $# -gt 0 ]; do [ "$1" = --config ] && c="$2"; shift; done\n! grep -q INVALID "$c"\n' > "$tmp/bin/fake-coordinator"
 chmod +x "$tmp/bin/gh" "$tmp/bin/ssh" "$tmp/bin/systemctl" "$tmp/bin/journalctl" "$tmp/bin/fake-coordinator"
+# Pearl's sudo (the ssh stub already runs as the test user) and the installed
+# coordinator binary for stats-migrate: state in $tmp/pearl/stats-state
+# ("<migration> pending|applied" lines); apply marks all applied.
+printf '#!/usr/bin/env bash\nexec "$@"\n' > "$tmp/bin/sudo"
+chmod +x "$tmp/bin/sudo"
+mkdir -p "$tmp/pearl/etc"
+printf '000_base applied\n031_attested_hardware applied\n' > "$tmp/pearl/stats-state"
+export PEARL_COORDINATOR_BIN="$tmp/pearl/coordinator"
+cat > "$PEARL_COORDINATOR_BIN" <<'FAKECOORD'
+#!/usr/bin/env bash
+state="$FAKE_PEARL/pearl/stats-state"
+echo "$* | dsn=${COORDINATOR_PARTNER_KEYS_ADMIN_DSN:-unset}" >> "$FAKE_PEARL/pearl/stats-calls"
+[ "${1:-}" = stats-migrate ] || exit 2
+shift
+if [ "${1:-}" = --check ]; then
+  [ -z "${FAKE_STATS_CHECK_FAIL:-}" ] || { echo "stats-migrate: dial ${COORDINATOR_PARTNER_KEYS_ADMIN_DSN:-?}: refused" >&2; exit 1; }
+  echo "stats-migrate check (env): 2 embedded, $(grep -c applied "$state") applied"
+  sed 's/^/  /' "$state"
+  exit 0
+fi
+echo "applying with ${COORDINATOR_PARTNER_KEYS_ADMIN_DSN:-unset}"
+[ -z "${FAKE_STATS_NOISE:-}" ] || printf 'POSTGRESQL://u:leakpw1@h/db host=h password='"'"'sec ret'"'"' PWD=leakpw2 \033[31mred\033[0m\n'
+[ -z "${FAKE_STATS_APPLY_FAIL:-}" ] || { echo "stats-migrate: apply failed" >&2; exit 1; }
+sed -i.bak 's/ pending$/ applied/' "$state"
+echo "stats-migrate ok"
+FAKECOORD
+chmod +x "$PEARL_COORDINATOR_BIN"
+export PEARL_COORDINATOR_ENV="$tmp/pearl/etc/coordinator.env"
+printf 'COORDINATOR_PARTNER_KEYS_ADMIN_DSN=postgres://admin:adminpw@127.0.0.1:5432/stats\n' > "$PEARL_COORDINATOR_ENV"
+chmod 600 "$PEARL_COORDINATOR_ENV"
 python3 "$OPS_SRC/tests/fake_services.py" "$tmp/svc" &
 server_pid=$!
 for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$tmp/svc/port" ] && break; sleep 0.3; done
@@ -135,7 +165,7 @@ mkdir -p "$tmp/pearl/root" "$tmp/proc"
 systemctl _init
 PEARL_RELEASE_IDENTITY_OWNER="$(id -un)" PEARL_RELEASE_IDENTITY_GROUP="$(id -gn)"
 export PEARL_RELEASE_IDENTITY_OWNER PEARL_RELEASE_IDENTITY_GROUP PEARL_COORDINATOR_METRICS_URL="http://127.0.0.1:$PORT/metrics"
-unset MACPROVIDER_OPS_OWNER PEARL_RUNTIME_VERSION MACPROVIDER_OPS_ENTRYPOINT GH_TOKEN MALIBU_DOWNLOAD_SSH_KEY
+unset MACPROVIDER_OPS_OWNER PEARL_RUNTIME_VERSION MACPROVIDER_OPS_ENTRYPOINT GH_TOKEN MALIBU_DOWNLOAD_SSH_KEY MALIBU_DOWNLOAD_VPS_HOST
 
 fixture() { printf '%s' "$1" > "$tmp/gh/fixture.json"; rm -f "$tmp/gh"/count-*; }
 # health: a repository-admission runtime (its /healthz reports the running
@@ -238,7 +268,62 @@ FAKE_PSQL_VERIFY=f PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with a failing 
 expect_next app_attest_recorder:mutate
 case "$(next_field command)" in *"--sql \$d/app-attest-recorder-bootstrap.sql --rotate"*) ok ;; *) bad "repair command lacks --rotate: $(next_field command)" ;; esac
 rm -f "$tmp/bin/psql"
-unset PEARL_COORDINATOR_ENV
+
+# stats_migrate (#1984): the signed updater never applies stats migrations, so a
+# pending one under the installed binary is applied before app_attest_recorder,
+# and one of the new binary is applied before health is reported done.
+pending_state() { printf '000_base applied\n031_attested_hardware pending\n' > "$tmp/pearl/stats-state"; }
+applied_state() { printf '000_base applied\n031_attested_hardware applied\n' > "$tmp/pearl/stats-state"; }
+: > "$tmp/pearl/stats-calls"
+pending_state
+PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with a pending stats migration" scripts/ops/pearl-runtime.sh status
+expect_next stats_migrate:mutate
+if [ "$(state_of stats_migrate)" = pending ]; then ok; else bad "stats_migrate state: $(state_of stats_migrate)"; fi
+if [ "$(fact_of stats_migrations_pending)" = 031_attested_hardware ]; then ok; else bad "pending fact: $(fact_of stats_migrations_pending)"; fi
+case "$(next_field expected_downtime)" in none*) ok ;; *) bad "stats downtime: $(next_field expected_downtime)" ;; esac
+case "$(next_field runbook)" in *pearl-coordinator-rollout.md#stats-migrations) ok ;; *) bad "stats runbook: $(next_field runbook)" ;; esac
+case "$(next_field command)" in *adminpw*|*postgres://admin*) bad "stats command carries a DSN" ;; *) ok ;; esac
+if grep -q 'admin-dsn' "$tmp/pearl/stats-calls"; then bad "the DSN was passed in argv"; else ok; fi
+# A read failure blocks and never echoes the DSN.
+FAKE_STATS_CHECK_FAIL=1 PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with an unreadable stats state" scripts/ops/pearl-runtime.sh status
+expect_next stats_migrate:blocked
+case "$(next_field reason)" in *adminpw*) bad "check failure leaked the DSN" ;; *REDACTED*) ok ;; *) bad "check failure reason: $(next_field reason)" ;; esac
+# A failed apply leaves the step pending and hands the lock back.
+FAKE_STATS_APPLY_FAIL=1 PEARL_RUNTIME_VERSION=v9.0.1 MACPROVIDER_OPS_OWNER=t run_rc 1 "failed stats apply" scripts/ops/pearl-runtime.sh next --run
+expect_lock_free
+PEARL_RUNTIME_VERSION=v9.0.1 MACPROVIDER_OPS_OWNER=t run_rc 0 "stats migrations apply" scripts/ops/pearl-runtime.sh next --run
+expect_lock_free
+if grep -q ' pending$' "$tmp/pearl/stats-state"; then bad "a migration is still pending"; else ok; fi
+if grep -qF adminpw "$tmp/out" "$tmp/err"; then bad "the stats apply printed the DSN"; else ok; fi
+if grep -q 'applying with REDACTED' "$tmp/out"; then ok; else bad "the DSN was not redacted in the apply output"; fi
+# Uppercase-scheme and key=value DSNs are redacted, control bytes stripped.
+pending_state
+FAKE_STATS_NOISE=1 PEARL_RUNTIME_VERSION=v9.0.1 MACPROVIDER_OPS_OWNER=t run_rc 0 "stats apply with noisy output" scripts/ops/pearl-runtime.sh next --run
+if grep -Eq 'leakpw|sec ret' "$tmp/out" "$tmp/err"; then bad "noisy DSN leaked"; else ok; fi
+if grep -q 'password=REDACTED' "$tmp/out" && ! grep -q "$(printf '\033')" "$tmp/out"; then ok; else bad "noisy output not cleaned"; fi
+PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status after the stats apply" scripts/ops/pearl-runtime.sh status
+if [ "$(state_of stats_migrate)" = done ]; then ok; else bad "stats_migrate state after apply: $(state_of stats_migrate)"; fi
+expect_next app_attest_recorder:mutate
+# Between the apply and the end of the updater unit the check is skipped (the
+# binary is being swapped).
+pending_state
+mkdir -p "$MACPROVIDER_OPS_STATE_DIR/pearl-runtime-v9.0.1"
+printf '{"step":"apply","recorded_at":"2026-10-09T00:00:00Z"}\n' > "$MACPROVIDER_OPS_STATE_DIR/pearl-runtime-v9.0.1/apply.json"
+PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status while the updater runs" scripts/ops/pearl-runtime.sh status
+if [ "$(state_of stats_migrate)" = pending ]; then ok; else bad "stats_migrate while the updater runs: $(state_of stats_migrate)"; fi
+case "$(next_field id)" in stats_migrate) bad "stats migrate offered during the apply window" ;; *) ok ;; esac
+# New binary live (v9.0.1) with a pending migration: not done until applied.
+health v9.0.1 $LIVE
+PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with the new binary live and a pending migration" scripts/ops/pearl-runtime.sh status
+expect_next stats_migrate:mutate
+applied_state
+PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with the new binary live" scripts/ops/pearl-runtime.sh status
+expect_next done:done
+# Unknown is not "nothing pending": without ssh the live release is not done.
+PEARL_SSH= PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with the new binary live and no ssh" scripts/ops/pearl-runtime.sh status
+expect_next stats_migrate:blocked
+rm -rf "$MACPROVIDER_OPS_STATE_DIR/pearl-runtime-v9.0.1"
+health v9.0.0 $LIVE
 
 # ==== pearl-runtime: one-time auto_vacuum conversion (#1979) ==================
 # Real SQLite files stand in for Pearl's; flock is a stub (not on every host).
@@ -248,6 +333,8 @@ chmod +x "$tmp/bin/flock"
 VDB="$tmp/vacuum/coordinator.db"
 sqlite3 "$VDB" "PRAGMA journal_mode=WAL; CREATE TABLE settlement_evidence_retention_state (id INTEGER PRIMARY KEY, laps_completed INTEGER, last_lap_eligible_requests INTEGER, last_lap_completed_at_utc TEXT); INSERT INTO settlement_evidence_retention_state VALUES (1, 3, 12, '2026-10-10T03:20:00Z'); CREATE TABLE t (v BLOB); INSERT INTO t VALUES (randomblob(50000));" >/dev/null
 sqlite3 "$VDB.route-snapshots" "CREATE TABLE j (v BLOB); INSERT INTO j VALUES (randomblob(20000));" >/dev/null
+VAUDIT="$tmp/vacuum/coordinator-audit.db"
+sqlite3 "$VAUDIT" "CREATE TABLE audit_log (v BLOB); INSERT INTO audit_log VALUES (randomblob(20000));" >/dev/null
 # sqlite3 wrapper: FAKE_QUICK_CHECK_FAIL makes quick_check report damage.
 cat > "$tmp/bin/pearl-sqlite3" <<FAKESQLITE
 #!/usr/bin/env bash
@@ -284,9 +371,9 @@ if grep -q "EXPECTED DOWNTIME for convert" "$tmp/out"; then ok; else bad "downti
 for l in "$PEARL_UPDATER_LOCK" "$PEARL_DEPLOY_LOCK" "$PEARL_DEPLOY_OPERATION_LOCK"; do
   if [ "$(ls -l "$l" | cut -c1-10)" = "-rw-------" ]; then ok; else bad "lock $l is not a 0600 file: $(ls -l "$l")"; fi
 done
-if [ "$(sqlite3 "$VDB" 'PRAGMA auto_vacuum;')" = 2 ] && [ "$(sqlite3 "$VDB.route-snapshots" 'PRAGMA auto_vacuum;')" = 2 ]; then ok; else bad "files not converted"; fi
+if [ "$(sqlite3 "$VDB" 'PRAGMA auto_vacuum;')" = 2 ] && [ "$(sqlite3 "$VDB.route-snapshots" 'PRAGMA auto_vacuum;')" = 2 ] && [ "$(sqlite3 "$VAUDIT" 'PRAGMA auto_vacuum;')" = 2 ]; then ok; else bad "files not converted"; fi
 if [ "$(tr '\n' ' ' < "$tmp/svc/unit-actions")" = "stop start " ]; then ok; else bad "unit actions: $(cat "$tmp/svc/unit-actions" 2>/dev/null)"; fi
-for f in "$VDB" "$VDB.route-snapshots"; do
+for f in "$VDB" "$VDB.route-snapshots" "$VAUDIT"; do
   b="$(find "$tmp/vacuum" -name "$(basename "$f").pre-incremental-*" | head -n 1)"
   if [ -n "$b" ] && [ "$(sqlite3 "$b" 'PRAGMA quick_check;')" = ok ]; then ok; else bad "no fresh backup of $f"; fi
 done
@@ -404,7 +491,7 @@ case " $(step_ids) " in
 esac
 status_doc() {
   local version="$1" connected="$2" cb_active="${3:-true}" cb_authorized="${4:-true}" cb_load="${5:-live_verified}" cb_proof="${6:-passed}" cb_paged="${7:-attached}" cb_self_check="${8:-null}"
-  printf '{"binary_version":"%s","provider_id":"canary-test-id","compatibility_set_id":"test/repo:v'"$CAND"'@%s","coordinator":{"connected":%s},"native_mtp":{"mtp_forwards":5},"requests_total":7,"continuous_batching":{"active":%s,"paged_kv_decision":"%s","self_check":%s,"policy":{"load_status":"%s","authorized":%s,"local_proof_result":"%s","emergency_off_override":false},"scheduler":{"shared_forward_calls":11}}}'     "$version" "$B" "$connected" "$cb_active" "$cb_paged" "$cb_self_check" "$cb_load" "$cb_authorized" "$cb_proof" > "$tmp/svc/status.json"
+  printf '{"binary_version":"%s","provider_id":"canary-test-id","safety_telemetry":{"coordinator_session_id":"canary-test-session"},"compatibility_set_id":"test/repo:v'"$CAND"'@%s","coordinator":{"connected":%s},"native_mtp":{"mtp_forwards":5},"requests_total":7,"continuous_batching":{"active":%s,"paged_kv_decision":"%s","self_check":%s,"policy":{"load_status":"%s","authorized":%s,"local_proof_result":"%s","emergency_off_override":false},"scheduler":{"shared_forward_calls":11}}}'     "$version" "$B" "$connected" "$cb_active" "$cb_paged" "$cb_self_check" "$cb_load" "$cb_authorized" "$cb_proof" > "$tmp/svc/status.json"
 }
 
 run_rc 0 "cli status" scripts/ops/cli-release.sh status
@@ -424,6 +511,9 @@ expect_err "continuous_batching.policy.authorized is not true"
 status_doc $CAND true true false absent_fallback none attached '{"decision":"granted","served_slots":0}'
 run_rc 3 "canary probe with a self-check grant of 0 slots" scripts/ops/cli-release.sh next --done canary_smoke --probe
 expect_err "self_check.served_slots 0 < 1"
+status_doc $CAND true false false live_verified failed attached '{"decision":"single_row","served_slots":1}'
+run_rc 3 "single-row canary with a failed local proof" scripts/ops/cli-release.sh next --done canary_smoke --probe
+expect_err "local_proof_result 'failed' != 'passed'"
 run_rc 3 "canary run id refused" scripts/ops/cli-release.sh next --done canary_smoke --run-id 555
 expect_err "requires --probe"
 printf '{"step":"canary_smoke","candidate_sha":"%s","kind":"status_probe","evidence":"old status-only marker"}
@@ -434,6 +524,9 @@ rm -f "$SCOPE/canary_smoke.json"
 printf 'test-buyer-token\n' > "$tmp/token"
 export BUYER_TOKEN_FILE="$tmp/token" PROBE_MODEL=test/model
 printf 'canary-test-id' > "$tmp/svc/provider_id"
+printf 'canary-test-session' > "$tmp/svc/assigned_id"
+sqlite3 "$tmp/svc/request_log.db" "CREATE TABLE request_log (id INTEGER PRIMARY KEY, external_request_id TEXT, provider_assigned_id TEXT);"
+export PEARL_COORDINATOR_DB="$tmp/svc/request_log.db" PEARL_SQLITE3="$(command -v sqlite3)"
 printf 'move' > "$tmp/svc/mode"
 rm -f "$tmp/svc/served"
 # #1947: CB is authorized by the on-device self-check; the signed policy is revocation-only.
@@ -802,7 +895,11 @@ expect_err_or_reason "MALIBU_DOWNLOAD_SSH_KEY is unset"
 MACPROVIDER_OPS_OWNER=t run_rc 3 "mirror_latest refuses without the mirror key" scripts/ops/cli-release.sh next --run
 expect_lock_free
 export MALIBU_DOWNLOAD_SSH_KEY="$tmp/mirror-key"
-run_rc 0 "mirror latest.json lags, key set" scripts/ops/cli-release.sh status
+run_rc 0 "mirror latest.json lags, key set, host unset" scripts/ops/cli-release.sh status
+expect_next mirror_latest:blocked
+expect_err_or_reason "MALIBU_DOWNLOAD_VPS_HOST is unset"
+export MALIBU_DOWNLOAD_VPS_HOST="mirror.invalid"
+run_rc 0 "mirror latest.json lags, key and host set" scripts/ops/cli-release.sh status
 expect_next mirror_latest:mutate
 case "$(next_field command)" in
   *"scripts/publish-release-mirror.sh --tag v$CAND --promote-latest"*) ok ;; *) bad "mirror command: $(next_field command)" ;;
@@ -817,7 +914,7 @@ if [ "$(cat "$tmp/svc/mirror-env")" = "token=stub-gh-token key=$tmp/mirror-key" 
 run_rc 0 "mirror latest.json matches" scripts/ops/cli-release.sh status
 if [ "$(state_of mirror_latest)" = "done" ]; then ok; else bad "mirror_latest not done once latest.json matches"; fi
 if [ "$(next_field id)" != "mirror_latest" ]; then ok; else bad "mirror_latest still next after it matches"; fi
-unset MALIBU_DOWNLOAD_SSH_KEY
+unset MALIBU_DOWNLOAD_SSH_KEY MALIBU_DOWNLOAD_VPS_HOST
 
 # ==== cli-release revoked-build rollback (SPEC-020-R007) ======================
 # The candidate is live (target + recommendation). The rollback recommends the
@@ -953,7 +1050,6 @@ printf 'test-buyer-token\n' > "$tmp/token"
 export BUYER_TOKEN_FILE="$tmp/token" PROBE_MODEL=test/model
 R="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_id"])' "$W/phase3-binary/catalog/autotune/release.json")"
 status_doc $CAND true
-printf 'canary-test-id' > "$tmp/svc/provider_id"
 mkdir -p "$tmp/state/catalog-$R"
 printf '{"step":"gateway_proof","evidence":"legacy generic proof","request_id":"ops-proof-old","mtp_forwards_delta":1,"requests_total_delta":1,"served_by_canary":true}
 ' > "$tmp/state/catalog-$R/gateway_proof.json"
@@ -966,16 +1062,15 @@ expect_err "did not move the target provider"
 printf 'no-request-id' > "$tmp/svc/mode"
 run_rc 1 "proof refused without a response request id" scripts/ops/catalog-activate.sh _gateway-proof
 expect_err "carries no X-Request-ID"
-printf 'canary-test-id' > "$tmp/svc/provider_id"
-printf 'no-provider-id' > "$tmp/svc/mode"
-run_rc 1 "proof refused without X-Provider-Id" scripts/ops/catalog-activate.sh _gateway-proof
-expect_err "carries no X-Provider-Id"
+printf 'no-log-row' > "$tmp/svc/mode"
+run_rc 1 "proof refused without a coordinator request_log row" scripts/ops/catalog-activate.sh _gateway-proof
+expect_err "has no row for request"
 printf 'other-provider' > "$tmp/svc/mode"
 run_rc 1 "proof refused when another provider served it (counters still moved)" scripts/ops/catalog-activate.sh _gateway-proof
 expect_err "served by another provider"
-python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d.pop("provider_id"); json.dump(d, open(p, "w"))' "$tmp/svc/status.json"
+python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d.pop("safety_telemetry"); json.dump(d, open(p, "w"))' "$tmp/svc/status.json"
 printf 'move' > "$tmp/svc/mode"
-run_rc 3 "proof refused when the canary reports no provider_id" scripts/ops/catalog-activate.sh _gateway-proof
+run_rc 3 "proof refused when the canary reports no coordinator session" scripts/ops/catalog-activate.sh _gateway-proof
 status_doc $CAND true
 printf 'stuck' > "$tmp/svc/mode"
 run_rc 1 "right provider but counters stuck is still refused" scripts/ops/catalog-activate.sh _gateway-proof

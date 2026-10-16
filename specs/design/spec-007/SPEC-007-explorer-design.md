@@ -38,7 +38,7 @@ Before SPEC-005, the coordinator had provider pool state and request logs.
 After SPEC-005, the coordinator also has provider-credit ledger rows, operator-credit rows, settlement-ready rows,
 reconciliation runs, quarantine reasons, and provider earnings endpoints.
 
-Decision log Entry 39 in `beta/DECISION_CRITERIA.md` records that the SPEC-005 billing implementation shipped with
+Decision log Entry 39 in `docs/decision-log.md` records that the SPEC-005 billing implementation shipped with
 ledger tables, settlement, reconciliation, payout claim hardening, and all SPEC-005 endpoints.
 
 That makes visibility operational, not cosmetic.

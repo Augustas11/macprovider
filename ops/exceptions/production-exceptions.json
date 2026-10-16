@@ -58,7 +58,7 @@
         "https://github.com/Augustas11/macprovider/issues/615",
         "https://github.com/Augustas11/macprovider/issues/582",
         "https://github.com/Augustas11/macprovider/issues/585",
-        "beta/DECISION_CRITERIA.md Entry 142",
+        "docs/decision-log.md Entry 142",
         "phase4-coordinator/internal/ws/identity_signature.go",
         "phase4-coordinator/internal/stats/migrations/006_spec_026_identity.up.sql",
         "ops/runbooks/pearl-exception-clearance-20260722.md#cli-identity-signature-exemption"
@@ -91,7 +91,7 @@
         "https://github.com/Augustas11/macprovider/issues/615",
         "https://github.com/Augustas11/macprovider/issues/582",
         "https://github.com/Augustas11/macprovider/issues/585",
-        "beta/DECISION_CRITERIA.md Entry 142",
+        "docs/decision-log.md Entry 142",
         "ops/runbooks/pearl-exception-clearance-20260722.md#tokenless-recovery"
       ],
       "partial_progress": [
@@ -126,9 +126,9 @@
         "https://github.com/Augustas11/macprovider/issues/608#issuecomment-5064599896",
         "https://github.com/Augustas11/macprovider/pull/732",
         "https://github.com/Augustas11/macprovider/pull/733",
-        "beta/DECISION_CRITERIA.md Entry 170",
-        "beta/DECISION_CRITERIA.md Entry 191",
-        "beta/DECISION_CRITERIA.md Entry 192",
+        "docs/decision-log.md Entry 170",
+        "docs/decision-log.md Entry 191",
+        "docs/decision-log.md Entry 192",
         "phase4-coordinator/dist/coordinator.yaml",
         "phase4-coordinator/internal/ws/server.go",
         "scripts/enforce-tier2-hash.sh",
@@ -158,14 +158,14 @@
       "evidence": [
         "https://github.com/Augustas11/macprovider/issues/615",
         "https://github.com/Augustas11/macprovider/issues/584",
-        "beta/DECISION_CRITERIA.md Entry 145",
+        "docs/decision-log.md Entry 145",
         "test/e2e/canary-buyer/README.md",
         "test/e2e/canary-buyer/canary-buyer.timer",
         "ops/runbooks/pearl-exception-clearance-20260722.md#canary-disabled-enable-gate",
         "phase4-coordinator/internal/canarycorr/epoch.go",
         "ops/runbooks/584-emergency-disable-drill.md",
         "ops/runbooks/584-physical-baseline-matrix.md",
-        "audits/2026-07-23/FR-CAN23-CORRELATION-EPOCH-DESIGN.md",
+        "docs/design/fr-can23-correlation-epoch.md",
         "phase4-coordinator/internal/ws/canary_correlation.go"
       ],
       "partial_progress": [
@@ -207,7 +207,7 @@
         "https://github.com/Augustas11/macprovider/pull/727",
         "https://github.com/Augustas11/macprovider/pull/730",
         "ops/runbooks/catalog-release-provider-upgrade.md",
-        "beta/DECISION_CRITERIA.md Entry 170",
+        "docs/decision-log.md Entry 170",
         "specs/CONFORMANCE.json",
         "phase4-coordinator/internal/catalogbind/",
         "phase3-binary/catalog/autotune/tier2-identity-binding.json",
@@ -235,9 +235,9 @@
       "evidence": [
         "https://github.com/Augustas11/macprovider/issues/615",
         "https://github.com/Augustas11/macprovider/issues/585",
-        "beta/DECISION_CRITERIA.md Entry 147",
-        "beta/DECISION_CRITERIA.md Entry 160",
-        "beta/DECISION_CRITERIA.md Entry 162",
+        "docs/decision-log.md Entry 147",
+        "docs/decision-log.md Entry 160",
+        "docs/decision-log.md Entry 162",
         "phase4-coordinator/internal/ws/server.go",
         "phase3-binary/Sources/macprovider-cli/CompatibilitySetManifest.swift",
         "ops/runbooks/pearl-exception-clearance-20260722.md#v1840-coordinator-admission-bridge"
@@ -268,7 +268,7 @@
       "evidence": [
         "https://github.com/Augustas11/macprovider/issues/610",
         "ops/runbooks/entry-610-first-hop-recovery.md",
-        "beta/DECISION_CRITERIA.md Entry 176",
+        "docs/decision-log.md Entry 176",
         "phase4-coordinator/internal/config/config.go",
         "phase4-coordinator/internal/ws/server.go"
       ]
@@ -285,14 +285,14 @@
       "issue": "https://github.com/Augustas11/macprovider/issues/615",
       "created_at": "2026-07-19T00:00:00Z",
       "expires_at": "2026-07-26T23:59:59Z",
-      "scope": "Historical Entry 172 private-prebeta referral activation only; Air5 fresh referred journey PASS for `mp-90542c0bcf7c4d303795cd10bda3830d` closed invite-earn under campaign `prebeta_20260719` with issuer `tn6skbiu4cfeiffs`. Ongoing prebeta campaign exposure is governed by Decision Entry 224 and #960, not by this exception. No broad stable release and no claim of complete #613 two-Mac conformance.",
+      "scope": "Historical Entry 172 private-prebeta referral activation only; Air5 fresh referred journey PASS for `mp-<provider-a>` closed invite-earn under campaign `prebeta_20260719` with issuer `tn6skbiu4cfeiffs`. Ongoing prebeta campaign exposure is governed by Decision Entry 224 and #960, not by this exception. No broad stable release and no claim of complete #613 two-Mac conformance.",
       "removal_condition": "Superseded by Decision Entry 224 as the reviewed ongoing prebeta referral/X campaign posture. Keep this removed entry only as historical evidence; do not recreate it as active or expired to authorize live flags.",
       "rollback_command": "Use the Entry 224 / SPEC-034 rollback path for the active campaign: disable `enable_public_validation`, `enable_join_links`, and `enable_social_invite_bonus` without deleting committed referral state or disabling the B6 `require_for_registration` gate while fresh mint surfaces remain enabled. Do not print HMAC secrets or referral codes.",
       "post_removal_validation": "Exception authority is removed. #960 must record current live referral flag values, Vercel `/j` fragment-only/static behavior, coordinator alternate-origin rejection, immutable release/download identities, rollback evidence, and absence of invite/challenge material in server logs before SPEC-034-R001 promotion.",
       "blocks_stable_promotion": false,
       "evidence": [
-        "beta/DECISION_CRITERIA.md Entry 172",
-        "beta/DECISION_CRITERIA.md Entry 224",
+        "docs/decision-log.md Entry 172",
+        "docs/decision-log.md Entry 224",
         "specs/SPEC-034-referral-gated-prebeta.md#8-activation-rollback-and-acceptance",
         "ops/runbooks/entry-172-referral-activation.md",
         "ops/runbooks/entry-172-activation-evidence-20260721.md",

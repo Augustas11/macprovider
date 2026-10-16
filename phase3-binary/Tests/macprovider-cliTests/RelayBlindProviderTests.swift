@@ -6,6 +6,67 @@ import MacProviderCore
 @testable import macprovider_cli
 
 final class RelayBlindProviderTests: XCTestCase {
+    func testEncryptedMediaFailsWithoutDisclosingContent() throws {
+        let root = temporaryStateDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = "mlx-community/Qwen2-VL-2B-Instruct-4bit"
+        let session = "image-rejection-session"
+        let keys = try RelayBlindKeyManager(directory: root, models: [model])
+        let runtime = RelayBlindProviderRuntime(
+            keyManager: keys,
+            journal: try RelayBlindExecutionJournal(directory: root.appendingPathComponent("journal")),
+            assignedSession: session
+        )
+        let image: [String: Any] = ["type": "image_url", "image_url": ["url": "data:image/png;base64,cHJpdmF0ZQ=="]]
+        let contents: [[[String: Any]]] = [[image], [["type": "text", "text": "private-question"], image]]
+        for (index, content) in contents.enumerated() {
+            let message = try makeInferenceMessage(
+                keys: keys, model: model, session: session,
+                requestID: "image-rejection-\(index)", inputCap: 5, outputCap: 4,
+                extra: ["messages": [["role": "user", "content": content]]]
+            )
+            XCTAssertThrowsError(try open(runtime, message: message)) { error in
+                let rejection = error as? RelayBlindProviderRejection
+                XCTAssertEqual(rejection?.error, .providerUnsupported)
+                XCTAssertFalse(String(describing: error).contains("private-question"))
+                XCTAssertFalse(String(describing: error).contains("cHJpdmF0ZQ=="))
+            }
+        }
+    }
+
+    func testEncryptedNonAutoToolSelectionFailsBeforeGenerationWithoutDisclosure() throws {
+        let root = temporaryStateDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = ToolSelectionPolicy.supportedNativeModel
+        let session = "tool-selection-session"
+        let keys = try RelayBlindKeyManager(directory: root, models: [model])
+        let runtime = RelayBlindProviderRuntime(
+            keyManager: keys,
+            journal: try RelayBlindExecutionJournal(directory: root.appendingPathComponent("journal")),
+            assignedSession: session
+        )
+        let choices: [Any] = ["required", "none", ["type": "function", "function": ["name": "private_function"]]]
+        for (index, choice) in choices.enumerated() {
+            let message = try makeInferenceMessage(
+                keys: keys, model: model, session: session,
+                requestID: "tool-selection-\(index)", inputCap: 5, outputCap: 4,
+                extra: ["tool_choice": choice]
+            )
+            XCTAssertThrowsError(try open(runtime, message: message)) { error in
+                let rejection = error as? RelayBlindProviderRejection
+                XCTAssertEqual(rejection?.error, .providerUnsupported)
+                XCTAssertEqual(rejection?.error.code, "relay_blind_provider_unsupported")
+                XCTAssertFalse(String(describing: error).contains("private_function"))
+            }
+        }
+        let auto = try makeInferenceMessage(
+            keys: keys, model: model, session: session,
+            requestID: "tool-selection-auto", inputCap: 5, outputCap: 4,
+            extra: ["tool_choice": "auto"]
+        )
+        XCTAssertNoThrow(try open(runtime, message: auto))
+    }
+
     func testCatalogAndArtifactNamesDecryptWithoutRewritingTheBoundModel() throws {
         let root = temporaryStateDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -543,6 +604,95 @@ final class RelayBlindProviderTests: XCTestCase {
         XCTAssertEqual(replayCompletionCount, 1)
     }
 
+    // SPEC-041-R003/R005: a decrypted request that needs SPEC-019 §1a
+    // non-strict mode opens only when the envelope declared it; the
+    // declaration is AEAD-bound and closed.
+    func testNonStrictJSONSchemaMustBeDeclaredInAuthenticatedRequires() throws {
+        let root = temporaryStateDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = "mlx-community/relay-blind-test"
+        let session = "assigned-test-session"
+        let keys = try RelayBlindKeyManager(directory: root, models: [model])
+        let journal = try RelayBlindExecutionJournal(directory: root.appendingPathComponent("journal"))
+        let runtime = RelayBlindProviderRuntime(keyManager: keys, journal: journal, assignedSession: session)
+        let strictSchema: [String: Any] = [
+            "type": "object", "properties": ["name": ["type": "string"]],
+            "required": ["name"], "additionalProperties": false,
+        ]
+        let looseSchema: [String: Any] = ["type": "object", "properties": ["name": ["type": "string"]]]
+        func format(strict: Bool?, schema: [String: Any]) -> [String: Any] {
+            var spec: [String: Any] = ["name": "person", "schema": schema]
+            if let strict { spec["strict"] = strict }
+            return ["response_format": ["type": "json_schema", "json_schema": spec]]
+        }
+        let declared = [RelayBlindEnvelope.capabilityJSONSchemaNonStrict]
+        func message(_ id: String, _ extra: [String: Any], requires: [String] = []) throws -> [String: Any] {
+            try makeInferenceMessage(keys: keys, model: model, session: session, requestID: id, inputCap: 5, outputCap: 4, extra: extra, requires: requires)
+        }
+        func assertRejected(_ message: [String: Any], _ expected: RelayBlindProviderError, file: StaticString = #filePath, line: UInt = #line) {
+            XCTAssertThrowsError(try open(runtime, message: message), file: file, line: line) { error in
+                let code = (error as? RelayBlindProviderRejection)?.error ?? (error as? RelayBlindProviderError)
+                XCTAssertEqual(code, expected, file: file, line: line)
+            }
+        }
+
+        assertRejected(try message("undeclared-false", format(strict: false, schema: strictSchema)), .ciphertextInvalid)
+        assertRejected(try message("undeclared-absent", format(strict: nil, schema: looseSchema)), .ciphertextInvalid)
+        let opened = try open(runtime, message: message("declared-false", format(strict: false, schema: looseSchema), requires: declared))
+        XCTAssertEqual(opened.envelope.requires, declared)
+        guard case .jsonSchema(let spec) = opened.request.responseFormat else { return XCTFail("response_format not parsed") }
+        XCTAssertFalse(spec.strict)
+        XCTAssertNoThrow(try open(runtime, message: message("declared-absent", format(strict: nil, schema: looseSchema), requires: declared)))
+        XCTAssertNoThrow(try open(runtime, message: message("strict-undeclared", format(strict: true, schema: strictSchema))))
+        XCTAssertNoThrow(try open(runtime, message: message("over-declared", format(strict: nil, schema: strictSchema), requires: declared)))
+        XCTAssertNoThrow(try open(runtime, message: message("plain-undeclared", [:])))
+
+        let stripped = try mutateEnvelopeMessage(
+            message("stripped", format(strict: false, schema: looseSchema), requires: declared),
+            updates: [:], removing: [RelayBlindEnvelope.requiresKey]
+        )
+        assertRejected(stripped, .ciphertextInvalid)
+        let forged = try mutateEnvelopeMessage(message("forged", [:]), updates: [RelayBlindEnvelope.requiresKey: declared])
+        assertRejected(forged, .ciphertextInvalid)
+        let invalidValues: [Any] = [[String](), ["other"], declared + declared, NSNull()]
+        for (index, value) in invalidValues.enumerated() {
+            let invalid = try mutateEnvelopeMessage(message("invalid-requires-\(index)", [:], requires: declared), updates: [RelayBlindEnvelope.requiresKey: value])
+            assertRejected(invalid, .invalidEnvelope)
+        }
+    }
+
+    func testRequiresGoldenVectorMatchesGo() throws {
+        let root = try goldenFixture()
+        let tests = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let url = tests.appendingPathComponent("../../../test/fixtures/relay-blind/golden-v1-requires.json").standardizedFileURL
+        let vector = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        let envelopeObject = try XCTUnwrap(vector["envelope"] as? [String: Any])
+        let envelopeText = try XCTUnwrap(String(data: JSONSerialization.data(withJSONObject: envelopeObject), encoding: .utf8))
+        let issuedAt = try XCTUnwrap((envelopeObject["issued_at_unix"] as? NSNumber)?.int64Value)
+        let envelope = try RelayBlindEnvelope.parse(envelopeText, nowUnix: issuedAt)
+        XCTAssertEqual(envelope.requires, vector["requires"] as? [String])
+        XCTAssertEqual(envelope.aad.hex, vector["aad_hex"] as? String)
+        XCTAssertTrue(try XCTUnwrap(vector["aad_hex"] as? String).hasPrefix(try XCTUnwrap(root["aad_hex"] as? String)))
+        let providerKey = try Curve25519.KeyAgreement.PrivateKey(
+            rawRepresentation: RelayBlindBase64URL.decode(try XCTUnwrap(root["provider_x25519_private_key"] as? String), exactCount: 32)
+        )
+        let secret = try providerKey.sharedSecretFromKeyAgreement(
+            with: Curve25519.KeyAgreement.PublicKey(rawRepresentation: envelope.buyerEphemeralPublicKey)
+        )
+        let transcript = Data(SHA256.hash(data: Data("macprovider/spec041/relay-blind/transcript/v1".utf8) + envelope.aad))
+        let requestKey = secret.hkdfDerivedSymmetricKey(
+            using: SHA256.self, salt: transcript, sharedInfo: Data("macprovider/spec041/request/aead/v1".utf8), outputByteCount: 32
+        )
+        let nonceKey = secret.hkdfDerivedSymmetricKey(
+            using: SHA256.self, salt: transcript, sharedInfo: Data("macprovider/spec041/request/aead-nonce/v1".utf8), outputByteCount: 12
+        )
+        let box = try AES.GCM.SealedBox(
+            nonce: AES.GCM.Nonce(data: nonceKey.withUnsafeBytes { Data($0) }), ciphertext: envelope.ciphertext, tag: envelope.tag
+        )
+        let plaintext = try AES.GCM.open(box, using: requestKey, authenticating: envelope.aad)
+        XCTAssertEqual(String(data: plaintext, encoding: .utf8), root["plaintext_utf8"] as? String)
+    }
+
     func testEnvelopeRejectsUnknownVersionLowOrderKeyAndAEADTamper() throws {
         let root = temporaryStateDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -693,7 +843,8 @@ final class RelayBlindProviderTests: XCTestCase {
         requestID: String,
         inputCap: UInt64,
         outputCap: UInt64,
-        extra: [String: Any] = [:]
+        extra: [String: Any] = [:],
+        requires: [String] = []
     ) throws -> [String: Any] {
         let record = try XCTUnwrap(keys.currentRecords().first { $0.models.contains(model) })
         let buyer = Curve25519.KeyAgreement.PrivateKey()
@@ -701,7 +852,7 @@ final class RelayBlindProviderTests: XCTestCase {
         let buyerBinding = RelayBlindBase64URL.encode(Data(SHA256.hash(data: Data(requestID.utf8))))
         let replay = Data(SHA256.hash(data: Data("replay-\(requestID)".utf8)))
         let now = Int64(Date().timeIntervalSince1970)
-        let empty = RelayBlindEnvelope(
+        var empty = RelayBlindEnvelope(
             model: model,
             providerModel: model,
             stream: false,
@@ -719,6 +870,7 @@ final class RelayBlindProviderTests: XCTestCase {
             ciphertext: Data([0]),
             tag: Data(repeating: 0, count: 16)
         )
+        empty.requires = requires
         let shared = try buyer.sharedSecretFromKeyAgreement(
             with: Curve25519.KeyAgreement.PublicKey(rawRepresentation: record.publicKey)
         )
@@ -751,7 +903,7 @@ final class RelayBlindProviderTests: XCTestCase {
             nonce: AES.GCM.Nonce(data: nonceKey.withUnsafeBytes { Data($0) }),
             authenticating: empty.aad
         )
-        let envelopeObject: [String: Any] = [
+        var envelopeObject: [String: Any] = [
             "version": RelayBlindEnvelope.version,
             "mode": RelayBlindEnvelope.mode,
             "endpoint_family": RelayBlindEnvelope.endpointFamily,
@@ -773,6 +925,9 @@ final class RelayBlindProviderTests: XCTestCase {
             "ciphertext": RelayBlindBase64URL.encode(sealed.ciphertext),
             "tag": RelayBlindBase64URL.encode(sealed.tag),
         ]
+        if !requires.isEmpty {
+            envelopeObject[RelayBlindEnvelope.requiresKey] = requires
+        }
         let envelopeData = try JSONSerialization.data(withJSONObject: envelopeObject, options: [.sortedKeys])
         let body = try XCTUnwrap(String(data: envelopeData, encoding: .utf8))
         let digest: (String) -> String = { value in
@@ -798,11 +953,12 @@ final class RelayBlindProviderTests: XCTestCase {
         ]
     }
 
-    private func mutateEnvelopeMessage(_ message: [String: Any], updates: [String: Any]) throws -> [String: Any] {
+    private func mutateEnvelopeMessage(_ message: [String: Any], updates: [String: Any], removing: [String] = []) throws -> [String: Any] {
         var result = message
         let body = try XCTUnwrap(message["body"] as? String)
         var envelope = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(body.utf8)) as? [String: Any])
         for (key, value) in updates { envelope[key] = value }
+        for key in removing { envelope.removeValue(forKey: key) }
         let data = try JSONSerialization.data(withJSONObject: envelope, options: [.sortedKeys])
         let mutatedBody = try XCTUnwrap(String(data: data, encoding: .utf8))
         result["body"] = mutatedBody

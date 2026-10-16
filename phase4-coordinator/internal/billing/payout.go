@@ -83,6 +83,21 @@ SELECT COUNT(*),
    AND lrc.ts_utc < ?`, payoutID, providerID, windowEnd).Scan(&payableCount, &payableGross, &payableProvider, &payableOperator); err != nil {
 				return err
 			}
+			// SPEC-022 R-15.11: credits rolled up out of this payout were
+			// payable, settled into it, and inside its window when they were
+			// rolled up; their aggregates count as those credits.
+			var rolledCount, rolledGross, rolledProvider int64
+			if err := conn.QueryRowContext(ctx, `
+SELECT COALESCE(SUM(credit_count), 0), COALESCE(SUM(gross_credits), 0), COALESCE(SUM(provider_credits), 0)
+  FROM ledger_settled_rollups
+ WHERE settlement_id = ? AND provider_id = ?`, payoutID, providerID).Scan(&rolledCount, &rolledGross, &rolledProvider); err != nil {
+				return err
+			}
+			sourceCount += rolledCount
+			payableCount += rolledCount
+			payableGross += rolledGross
+			payableProvider += rolledProvider
+			payableOperator += rolledGross - rolledProvider
 			sourceSetValid := sourceCount > 0 && sourceCount == payableCount
 			payoutMatchesSources := sourceCreditCount == payableCount &&
 				grossCredits == payableGross &&

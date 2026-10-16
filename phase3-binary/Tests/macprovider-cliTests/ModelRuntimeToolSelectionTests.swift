@@ -1,0 +1,148 @@
+import Foundation
+import MacProviderCore
+import XCTest
+@testable import macprovider_cli
+
+final class ModelRuntimeToolSelectionTests: XCTestCase {
+    private func request(choice: Any = "required", stream: Bool = false) throws -> ChatCompletionRequest {
+        try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: [
+            "model": ToolSelectionPolicy.supportedNativeModel,
+            "messages": [["role": "user", "content": "Look up 3"]],
+            "stream": stream, "tool_choice": choice, "max_tokens": 100,
+            "tools": [["type": "function", "function": ["name": "lookup", "parameters": [
+                "type": "object", "properties": ["id": ["type": "integer"]],
+                "required": ["id"], "additionalProperties": false,
+            ]]]],
+        ]))
+    }
+
+    private func runtime(content: String = "", name: String? = "lookup", arguments: String = #"{"id":3}"#, cancel: Bool = false) -> ModelRuntime {
+        ModelRuntime(
+            modelID: ToolSelectionPolicy.supportedNativeModel, warmSwapEnabled: false,
+            loader: { _ in throw CancellationError() },
+            testCompletion: { _, _ in
+                if cancel { throw CancellationError() }
+                return CompletionResult(
+                    content: content, finishReason: name == nil ? "stop" : "tool_calls",
+                    promptTokens: 1, completionTokens: 9,
+                    toolCalls: name.map { [ToolCall(id: "call_0123456789abcdef", functionName: $0, arguments: arguments)] },
+                    settlementDisposition: .eligibleOwner
+                )
+            }
+        )
+    }
+
+    func testNativeNonstreamRequiredRejectsProseAndNamedRejectsOtherFunction() async throws {
+        for (runtime, request) in [
+            (runtime(content: "ordinary prose", name: nil), try request()),
+            (runtime(name: "other"), try request(choice: ["type": "function", "function": ["name": "lookup"]])),
+            (runtime(arguments: #"{"id":"wrong"}"#), try request()),
+        ] {
+            do {
+                _ = try await runtime.complete(request)
+                XCTFail("invalid tool output succeeded")
+            } catch let error as APIError {
+                XCTAssertEqual(error.code, "tool_selection_validation_failed")
+                XCTAssertTrue(error.inferenceRan)
+            }
+        }
+    }
+
+    func testNativeStreamingWithholdsInvalidOutputAndCancellation() async throws {
+        for runtime in [runtime(content: "must stay private", name: nil), runtime(arguments: #"{"id":"wrong"}"#), runtime(cancel: true)] {
+            let request = try request(stream: true)
+            let handle = try await runtime.acquireRequestHandle(request)
+            let chunks = ToolSelectionChunkLog()
+            do {
+                _ = try await runtime.stream(request, with: handle, onChunk: { chunks.append($0) })
+                XCTFail("invalid or cancelled output succeeded")
+            } catch is CancellationError {
+                // A cancelled held response has delivered no billable output.
+            } catch let error as APIError {
+                XCTAssertEqual(error.code, "tool_selection_validation_failed")
+            }
+            XCTAssertEqual(chunks.count, 0)
+            await runtime.unregisterInFlight(handle.registrationID)
+        }
+    }
+
+    func testNativeStreamingReleasesOnlyValidatedFinalCallAndHonorsDisconnect() async throws {
+        let runtime = runtime()
+        let request = try request(stream: true)
+        let handle = try await runtime.acquireRequestHandle(request)
+        let chunks = ToolSelectionChunkLog()
+        let result = try await runtime.stream(request, with: handle, onChunk: { chunks.append($0) })
+        XCTAssertEqual(chunks.count, 1)
+        XCTAssertEqual(result.toolCalls?.first?.arguments, #"{"id":3}"#)
+        let disconnected = ToolSelectionChunkLog()
+        do {
+            _ = try await runtime.stream(request, with: handle, shouldCancel: { true }, onChunk: { disconnected.append($0) })
+            XCTFail("disconnected request succeeded")
+        } catch is CancellationError {}
+        XCTAssertEqual(disconnected.count, 0)
+        await runtime.unregisterInFlight(handle.registrationID)
+    }
+
+    func testNoneStripsToolDescriptorsAndRejectsCalls() async throws {
+        let request = try request(choice: "none")
+        let input = try ModelRuntime.userInput(for: request)
+        XCTAssertNil(input.tools)
+        do {
+            _ = try await runtime().complete(request)
+            XCTFail("none returned calls")
+        } catch let error as APIError {
+            XCTAssertEqual(error.code, "tool_selection_validation_failed")
+        }
+        let text = try await runtime(content: "text", name: nil).complete(request)
+        XCTAssertEqual(text.content, "text")
+    }
+
+    func testGuaranteedSelectionRunsPastFirstCallAndRejectsLaterOutput() throws {
+        let request = try request()
+        let call = #"<tool_call>{"name":"lookup","arguments":{"id":3}}</tool_call>"#
+        XCTAssertFalse(ModelRuntime.serialToolStopApplies(request))
+        XCTAssertFalse(ModelRuntime.serialNativeToolStopApplies(request))
+        var observer = NativeToolCallStreamEmitter(modelID: request.model, allowedFunctionNames: ["lookup"])
+        for prefix in [call, call + #"<tool_call>{"name":"lookup","arguments":{"id":"#] {
+            XCTAssertFalse(ModelRuntime.observeSerialToolStop(
+                &observer, decoded: prefix, stopTokenFilter: StopTokenFilter(tokens: []),
+                requestStops: [], guaranteedSelection: true
+            ))
+        }
+        XCTAssertThrowsError(try ModelRuntime.parseGeneratedOutput(
+            filteredText: call + #"<tool_call>{"name":"lookup","arguments":{"id":"#,
+            generatedTokenIDs: [], decode: { _ in "" }, request: request,
+            mode: .complete(), defaultCompletionTokens: 9
+        ))
+        let parsed = try ModelRuntime.parseGeneratedOutput(
+            filteredText: call + call, generatedTokenIDs: [], decode: { _ in "" },
+            request: request, mode: .complete(), defaultCompletionTokens: 9
+        )
+        XCTAssertEqual(parsed.toolCalls.count, 2, "No call may be silently dropped before cardinality validation")
+        XCTAssertThrowsError(try ModelRuntime.validateStructuredCompletion(CompletionResult(
+            content: "", finishReason: "tool_calls", promptTokens: 1, completionTokens: 9,
+            toolCalls: parsed.toolCalls, settlementDisposition: .eligibleOwner
+        ), request: request))
+        let auto = try self.request(choice: "auto")
+        XCTAssertTrue(ModelRuntime.serialToolStopApplies(auto))
+        XCTAssertTrue(ModelRuntime.observeSerialToolStop(
+            &observer, decoded: call, stopTokenFilter: StopTokenFilter(tokens: []), requestStops: []
+        ))
+    }
+
+    func testCapabilitiesOnlyBindTheCurrentLoadedIdentity() {
+        let supported = CoordinatorClient.toolSelectionCapabilities(wireModelID: "catalog-alias", loadedModelID: ToolSelectionPolicy.supportedNativeModel, runtimeSource: nil)
+        XCTAssertEqual(supported.first?["model_id"] as? String, "catalog-alias")
+        XCTAssertEqual(supported.first?["runtime"] as? String, "mlx_cache")
+        XCTAssertEqual(supported.first?["modes"] as? [String], ["auto", "none", "required", "named"])
+        XCTAssertEqual(CoordinatorClient.toolSelectionCapabilities(wireModelID: "other", loadedModelID: "other", runtimeSource: nil).first?["modes"] as? [String], ["auto", "none"])
+        XCTAssertEqual(CoordinatorClient.toolSelectionCapabilities(wireModelID: "other", loadedModelID: "other", runtimeSource: "ollama_loopback").first?["modes"] as? [String], ["auto"])
+    }
+}
+
+private final class ToolSelectionChunkLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var chunks: [StreamChunk] = []
+    var count: Int { lock.lock(); defer { lock.unlock() }; return chunks.count }
+    func append(_ chunk: StreamChunk) { lock.lock(); defer { lock.unlock() }; chunks.append(chunk) }
+}

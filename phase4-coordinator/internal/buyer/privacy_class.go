@@ -12,11 +12,15 @@ import (
 
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/relayblind"
+	"github.com/augstar/macprovider-coordinator/internal/trustpool"
 )
 
 const (
 	privacyClassHeader             = "X-MacProvider-Privacy-Class"
 	privacyPostureVerifiedAtHeader = "X-MacProvider-Privacy-Posture-Verified-At"
+	// privacyAssuranceHeader carries the reservation's SPEC-049-R034 label
+	// to the gateway on a successful privacy-class chat response.
+	privacyAssuranceHeader = "X-MacProvider-Privacy-Assurance"
 
 	privacyClassDisabled    = "privacy_class_disabled"
 	privacyClassUnavailable = "privacy_class_unavailable"
@@ -47,6 +51,32 @@ func privacyRequested(r *http.Request) (present, valid bool) {
 		return true, false
 	}
 	return true, value == relayblind.PrivacyClassV1
+}
+
+// privacyAssuranceRequested reads the SPEC-049-R034 requirement header. A
+// missing header asks for nothing; one exact code_bound_attested value is the
+// only valid request; anything else is present and invalid.
+func privacyAssuranceRequested(r *http.Request) (present bool, label string, valid bool) {
+	if r == nil {
+		return false, "", false
+	}
+	values := r.Header.Values(relayblind.PrivacyAssuranceRequiredHeader)
+	if len(values) == 0 {
+		return false, relayblind.PrivacyAssurance, true
+	}
+	if len(values) != 1 || strings.TrimSpace(values[0]) != relayblind.PrivacyAssuranceCodeBound {
+		return true, "", false
+	}
+	return true, relayblind.PrivacyAssuranceCodeBound, true
+}
+
+// reservationAssurance is the label a privacy-class row was reserved under;
+// a row written before SPEC-049 v0.5.0 is device-bound.
+func reservationAssurance(reservation relayblind.Reservation) string {
+	if reservation.PrivacyAssurance == "" {
+		return relayblind.PrivacyAssurance
+	}
+	return reservation.PrivacyAssurance
 }
 
 func privacyErrorMessage(code string) string {
@@ -136,14 +166,18 @@ func privacyObservedCode(code string, beforeConsume bool) string {
 // privacyGate re-checks the SPEC-049 conditions for one live session. It
 // does not select a different provider. It returns the verification time, the
 // §4.9 code, and the SPEC-049-R030 reason of a failure.
-func (s *Server) privacyGate(ctx context.Context, provider pool.Provider, keyDigest string) (time.Time, string, string) {
-	return s.privacyGateExplain(ctx, provider, keyDigest, true)
+//
+// assurance is the label the request needs (SPEC-049-R034): a
+// code_bound_attested request also needs the session's latest verified
+// posture to be code-bound.
+func (s *Server) privacyGate(ctx context.Context, provider pool.Provider, keyDigest, assurance string) (time.Time, string, string) {
+	return s.privacyGateExplain(ctx, provider, keyDigest, assurance, true)
 }
 
 // privacyGateExplain is privacyGate; explain false skips the store lookup
 // that splits an unverified posture into not enrolled, for per-candidate
 // selection, which explains once after it fails.
-func (s *Server) privacyGateExplain(ctx context.Context, provider pool.Provider, keyDigest string, explain bool) (time.Time, string, string) {
+func (s *Server) privacyGateExplain(ctx context.Context, provider pool.Provider, keyDigest, assurance string, explain bool) (time.Time, string, string) {
 	reject := func(reason, code string) (time.Time, string, string) {
 		s.logPrivacyGateRejection(reason)
 		return time.Time{}, code, reason
@@ -170,11 +204,7 @@ func (s *Server) privacyGateExplain(ctx context.Context, provider pool.Provider,
 	if quarantined {
 		return reject(relayblind.PrivacyRejectProviderQuarantined, privacyClassUnavailable)
 	}
-	eligibility := s.privacyAuthority.QuickEligibilityReason
-	if explain {
-		eligibility = s.privacyAuthority.EligibilityReason
-	}
-	verifiedAt, reason := eligibility(current.ProviderID, current.AssignedID, keyDigest, s.now())
+	verifiedAt, reason := s.privacyAuthority.EligibilityReasonFor(current.ProviderID, current.AssignedID, keyDigest, assurance, s.now(), !explain)
 	if reason != "" {
 		return reject(reason, privacyClassUnavailable)
 	}
@@ -196,7 +226,13 @@ type privacySelection struct {
 // key whose posture gate and stored attestation both pass. It never returns a
 // relay-blind key. On failure it returns the §4.9 code and the SPEC-049-R030
 // reason of the candidate that came closest to serving the request.
-func (s *Server) selectPrivacyProvider(ctx context.Context, accountID, model string, encryptedBytes int64) (privacySelection, string, string) {
+//
+// scope, when set, is the SPEC-049-R032 pool snapshot: only members that pass
+// its pool predicates are walked, so the result is the intersection.
+//
+// assurance is the requested SPEC-049-R034 label; a code-bound request ranks
+// only sessions whose latest verified posture is code-bound.
+func (s *Server) selectPrivacyProvider(ctx context.Context, accountID, model string, encryptedBytes int64, requires []string, scope *trustpool.Snapshot, assurance string) (privacySelection, string, string) {
 	if reason := s.privacyDisabledReason(ctx); reason != "" {
 		s.logPrivacyGateRejection(reason)
 		return privacySelection{}, privacyClassDisabled, reason
@@ -210,8 +246,17 @@ func (s *Server) selectPrivacyProvider(ctx context.Context, accountID, model str
 	var unverified []string
 	unverifiedSeen := make(map[string]bool)
 	closest := relayblind.PrivacyRejectModelNotServed
+	incapable := false
+	if scope != nil {
+		closest = relayblind.PrivacyRejectPoolNoEligibleMember
+	}
 	for _, provider := range s.pool.Snapshot() {
 		if !relayBlindBindable(provider) || !provider.IsWSTunneled() || !modelIDEqual(provider.ModelID, model) {
+			continue
+		}
+		// SPEC-022 R-14.1: a session bound to a pool model entry serves only
+		// that pool's pool-model route, never privacy-class work.
+		if provider.ModelAdmissionPoolModelID != "" || (scope != nil && !privacyPoolMemberEligible(*scope, provider)) {
 			continue
 		}
 		records, err := s.relayBlind.store.FreshKeyRecords(ctx, provider.ProviderID, provider.AssignedID, model, encryptedBytes, s.now(), relayblind.KeyClassPrivacy)
@@ -227,7 +272,7 @@ func (s *Server) selectPrivacyProvider(ctx context.Context, accountID, model str
 			continue
 		}
 		for _, record := range records {
-			verifiedAt, code, reason := s.privacyGateExplain(ctx, provider, record.KeyRecordDigest, false)
+			verifiedAt, code, reason := s.privacyGateExplain(ctx, provider, record.KeyRecordDigest, assurance, false)
 			if code != "" {
 				if reason == relayblind.PrivacyRejectPostureUnverified && !unverifiedSeen[provider.ProviderID] {
 					unverifiedSeen[provider.ProviderID] = true
@@ -242,6 +287,12 @@ func (s *Server) selectPrivacyProvider(ctx context.Context, accountID, model str
 				closest = closerPrivacyReject(closest, relayblind.PrivacyRejectKeyAttestationMismatch)
 				continue
 			}
+			// SPEC-041-R004 capability gate, applied to a fully eligible
+			// candidate: it came closest to serving the request.
+			if !relayBlindProviderMeetsRequires(provider, requires) {
+				incapable = true
+				break
+			}
 			providers = append(providers, provider)
 			selections = append(selections, privacySelection{provider: provider, key: record, attestation: attestation, signature: signature, verifiedAt: verifiedAt})
 			break
@@ -249,6 +300,9 @@ func (s *Server) selectPrivacyProvider(ctx context.Context, accountID, model str
 	}
 	if order := s.orderRelayBlindCandidates(accountID, providers); len(order) > 0 {
 		return selections[order[0]], "", ""
+	}
+	if incapable {
+		return privacySelection{}, relayBlindCapabilityRefusalCode, relayblind.PrivacyRejectCapabilityUnsupported
 	}
 	switch closest {
 	case relayblind.PrivacyRejectModelNotPrivateCapable:
@@ -293,8 +347,10 @@ func (s *Server) keylessPrivacyReason(ctx context.Context, keyless []pool.Provid
 	return closest
 }
 
-func (s *Server) handlePrivacyClassReservation(w http.ResponseWriter, r *http.Request, accountID, walletSession string) {
+func (s *Server) handlePrivacyClassReservation(w http.ResponseWriter, r *http.Request, accountID, walletSession, poolID, assurance string) {
 	const phase = relayblind.PrivacyRejectPhaseReservation
+	// Wall time: writePoolUnavailable measures the timing floor with time.Since.
+	startedAt := time.Now()
 	if reason := s.privacyDisabledReason(r.Context()); reason != "" {
 		s.writePrivacyRouteError(w, r, phase, privacyClassDisabled, reason)
 		return
@@ -317,16 +373,31 @@ func (s *Server) handlePrivacyClassReservation(w http.ResponseWriter, r *http.Re
 		writeRelayBlindError(w, "relay_blind_route_reservation_invalid", "Invalid route reservation")
 		return
 	}
+	// SPEC-049-R032 item 2: the pool is gated, and its snapshot captured,
+	// before any privacy candidate is evaluated.
+	var scope *trustpool.Snapshot
+	if poolID != "" {
+		snap, code := s.privacyPoolGate(r.Context(), poolID, accountID, request.Model)
+		if code != "" {
+			s.writePrivacyPoolRefusal(w, r, phase, code, startedAt)
+			return
+		}
+		scope = &snap
+	}
 	unlockSelection := s.relayBlind.lockAccountSelection(accountID)
 	defer func() { unlockSelection() }()
-	selected, code, reason := s.selectPrivacyProvider(r.Context(), accountID, request.Model, request.EncryptedRequestBytes)
+	selected, code, reason := s.selectPrivacyProvider(r.Context(), accountID, request.Model, request.EncryptedRequestBytes, request.Requires, scope, assurance)
+	if code == relayBlindCapabilityRefusalCode {
+		s.writeRelayBlindCapabilityRefusal(w, r, phase, true)
+		return
+	}
 	if code != "" {
 		s.writePrivacyRouteError(w, r, phase, privacyObservedCode(code, true), reason)
 		return
 	}
 	// One more gate immediately before the row is written. A failure here
 	// does not try another provider.
-	verifiedAt, code, reason := s.privacyGate(r.Context(), selected.provider, selected.key.KeyRecordDigest)
+	verifiedAt, code, reason := s.privacyGate(r.Context(), selected.provider, selected.key.KeyRecordDigest, assurance)
 	if code != "" {
 		s.writePrivacyRouteError(w, r, phase, privacyObservedCode(code, true), reason)
 		return
@@ -344,13 +415,20 @@ func (s *Server) handlePrivacyClassReservation(w http.ResponseWriter, r *http.Re
 	if selected.key.ExpiresAtUnix < expires {
 		expires = selected.key.ExpiresAtUnix
 	}
-	reservation, err := s.relayBlind.store.CreateReservation(r.Context(), relayblind.ReservationCreate{
+	create := relayblind.ReservationCreate{
 		AccountID: accountID, WalletSession: walletSession, ProviderID: selected.provider.ProviderID, AssignedSession: selected.provider.AssignedID,
 		KeyRecord: selected.key, Model: request.Model, ProviderModel: selected.provider.ModelID, Stream: request.Stream,
 		MaxEncryptedRequestBytes: request.EncryptedRequestBytes, MaxOutputTokens: request.MaxOutputTokens,
 		InputTokenUpperBound: request.InputTokenUpperBound, ExpiresAtUnix: expires, MaxActive: s.relayBlind.cfg.MaxActiveReservations,
 		ReplayRetention: time.Duration(s.relayBlind.cfg.ReplayRetentionSeconds) * time.Second, PrivacyClass: true,
-	}, s.now())
+		Requires: request.Requires, PrivacyAssurance: assurance,
+	}
+	if scope != nil {
+		// SPEC-049-R032 item 4: the reservation row binds the captured pool
+		// snapshot; the AAD binds this row through provider_binding.
+		create.PoolID, create.PoolManifestVersion, create.PoolManifestCoreDigest, create.PoolGeneration = scope.PoolID, scope.ManifestVersion, scope.ManifestCoreDigest, scope.Generation
+	}
+	reservation, err := s.relayBlind.store.CreateReservation(r.Context(), create, s.now())
 	if err != nil {
 		if errors.Is(err, relayblind.ErrCapacity) {
 			writeRelayBlindError(w, "relay_blind_metadata_rate_limited", "Could not create relay-blind reservation")
@@ -369,8 +447,9 @@ func (s *Server) handlePrivacyClassReservation(w http.ResponseWriter, r *http.Re
 		MaxOutputTokens: request.MaxOutputTokens, InputTokenUpperBound: request.InputTokenUpperBound,
 		ReservationTokenCap: request.InputTokenUpperBound + request.MaxOutputTokens, ExpiresAtUnix: expires,
 		CachePolicy: relayblind.CachePolicyNoStore, FailoverPolicy: relayblind.FailoverPolicyDisabled,
-		PrivacyClass: relayblind.PrivacyClassV1, PrivacyAssurance: relayblind.PrivacyAssurance,
+		PrivacyClass: relayblind.PrivacyClassV1, PrivacyAssurance: assurance,
 		PrivacyKeyAttestation: &attestation, PrivacyKeyAttestationSignature: signature, PrivacyPostureVerifiedAtUnix: verifiedAt.Unix(),
+		PoolID: reservation.PoolID, PoolManifestVersion: reservation.PoolManifestVersion, PoolManifestCoreDigest: reservation.PoolManifestCoreDigest,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(response)

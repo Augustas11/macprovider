@@ -9,7 +9,7 @@ Sanitized: token counts and tokens/sec only.
 ## Header
 
 - **Date:** 2026-09-20
-- **Operator:** augstar
+- **Operator:** @Augustas11
 - **Provider id:** non-production test drive; no coordinator join, no buyer traffic, no receipts
 - **Measurement seam:** `macprovider-cli msb-throughput --engine contiguous --compile`
 - **Binary:** worktree `perf/spec038-msb-throughput-harness` built on-box (Swift 6.3.3), run from `run/` co-located with candidate v1.8.170 `mlx.metallib` + `mlx-swift_Cmlx.bundle`

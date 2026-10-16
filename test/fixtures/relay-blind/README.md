@@ -32,3 +32,14 @@ randomized and are not part of the vector. The coordinator Go tests and the
 Swift provider tests consume it. Regenerate with
 `MACPROVIDER_REGEN_FIXTURES=1 go test ./internal/relayblind -run '^TestPrivacyRotationVectorGenerate$'`
 from the coordinator module.
+
+`privacy-code-bound-v1.json` is the SPEC-049 §4.13 code-bound evidence
+vector. It locks the `privacy-code-bound-v1` statement framing and its
+SHA-256, which is the App Attest `clientDataHash` the attestor asserts over.
+The posture is the rotation vector's posture, the Secure Enclave key is the
+P-256 generator point, the identity key comes from a fixed byte-pattern seed,
+and the App Attest key id is a fixed byte pattern; none is a real key.
+Assertions are ECDSA and randomized, so the vector carries none. The
+coordinator Go tests and the Swift provider tests consume it. Regenerate with
+`MACPROVIDER_REGEN_FIXTURES=1 go test ./internal/relayblind -run '^TestPrivacyCodeBoundVectorGenerate$'`
+from the coordinator module.

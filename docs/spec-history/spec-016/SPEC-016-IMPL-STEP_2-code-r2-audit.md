@@ -12,13 +12,13 @@
 ### Issues
 
 [MEDIUM] Cancel confirmation checks only primary receipt logs  
-File: [runner.go](/Users/augstar/macprovider-poc/phase4-coordinator/internal/payout/runner.go:471)  
+File: [runner.go](/phase4-coordinator/internal/payout/runner.go:471)  
 Confidence: HIGH  
 Issue: `pollCancelOnce` enforces “NO Transfer log” only on `recA.Logs`. `ReceiptsAgree` does not compare logs, only tx hash/block/status/to, so a secondary receipt with an unexpected USDC `Transfer` log is ignored.  
 Fix: Check both `recA.Logs` and `recB.Logs`, ideally through a small `hasUSDCTransferLog` helper, and emit `payout_rpc_disagreement` or chain mismatch on disagreement.
 
 [LOW] Requested regression probes were not added for new runner recovery branches  
-File: [runner.go](/Users/augstar/macprovider-poc/phase4-coordinator/internal/payout/runner.go:322)  
+File: [runner.go](/phase4-coordinator/internal/payout/runner.go:322)  
 Confidence: HIGH  
 Issue: The fix-pass adds persisted-bytes rebroadcast and cancel-state-machine branches, but `runner_test.go` still has no dedicated tests for persisted `raw_signed_tx` rebroadcast without re-signing or cancel unbroadcast/broadcast-confirmed transitions.  
 Fix: Add focused runner tests covering `rebroadcastAndPoll` without `Signer.SignTx`, and cancel rows for unbroadcast, broadcast-unconfirmed confirmed-this-cycle, and already-confirmed states.

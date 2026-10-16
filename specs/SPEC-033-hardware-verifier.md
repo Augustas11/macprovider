@@ -1,7 +1,7 @@
 # SPEC-033 — Hardware-Evidence Verifier (`hardware-verifier.v2`)
 
-**Status:** v0.8.0-draft
-**Date:** 2026-10-11
+**Status:** v0.9.0-draft
+**Date:** 2026-10-15
 **Depends on:** SPEC-023 (autotune — produces the benchmark/recommendation inputs the evidence document carries). **Consumed by:** SPEC-032 (autotune hardware-evidence admission "hello-gate") reads this spec's verdict via an **exact-`hardware-verifier.v2`** lookup and cross-references it as "the item-10 hardware-verifier verdict spec". This spec owns the `hardware-verifier.v2` decision semantics and the job/profile lifecycle; SPEC-032 owns how a `verified` profile gates admission.
 
 **Producer / enqueue boundary (see §3.1):** the provider **binary** builds the evidence envelope (`phase3-binary/Sources/macprovider-cli/AutotuneHardwareEvidence.swift`) and submits it over an **authenticated HTTP `POST /v1/providers/hardware-evidence`** (`phase4-coordinator/internal/onboarding/hardware_evidence.go` `HandleHardwareEvidence`), which enqueues a `hardware_verification_jobs` row. SPEC-023 owns the *content* (benchmarks, recommended model); the HTTP envelope + enqueue + replay state machine are owned here.
@@ -14,7 +14,7 @@ production-live coordinator trust signal that ships **unspecced**.
 **Source-of-truth discipline.** This is documentation of shipped behavior. The **code and
 migrations are authoritative**; this spec MUST byte-match them and any disagreement is a spec
 bug. The contract spans: the verifier (`phase4-coordinator/internal/stats/hardwareverify/verify.go`),
-migrations **007, 008, 013, 015, 016, 017, 019, 031** (`phase4-coordinator/internal/stats/migrations/`), the
+migrations **007, 008, 013, 015, 016, 017, 019, 031, 033** (`phase4-coordinator/internal/stats/migrations/`), the
 deployment/role SQL (`phase4-coordinator/dist/stats-inventory-writer.sql`,
 `dist/stats-hardware-verifier-bootstrap.sql`), the HTTP enqueue path
 (`internal/onboarding/hardware_evidence.go`) and its producer
@@ -448,7 +448,9 @@ without a verified attestation.
 
 **What "verified attestation" means here — exactly one signal.** A provider has a verified
 attestation iff it has a row in `provider_app_attest_verifications` (migration 031:
-`provider_id` primary key, `app_attest_key_id` 32 bytes and unique, `verified_at`). Only the
+`provider_id` primary key, `app_attest_key_id` 32 bytes and unique, `verified_at`; migration 033
+adds `app_attest_public_key`, the attested 65-byte uncompressed P-256 point, nullable only for rows
+recorded before it, with a `CHECK` that a present key is 65 bytes and hashes to the key id). Only the
 `app_attest_recorder` role may write that table (`SELECT, INSERT`; no `UPDATE`/`DELETE`), and
 `provider_onboarding` has no privilege on it. The coordinator connects as `app_attest_recorder`
 through the separate `onboarding.app_attest_record_dsn` and writes the row **only** from the
@@ -487,7 +489,8 @@ virtual machines, and Macs whose attestation fails keep the dual-control path (�
 1. **Challenge.** `POST /v1/providers/app-attest/challenge` with `Authorization: Bearer <provider
    token>`. The coordinator validates the token and takes `provider_id` **from the token**
    (`ValidateToken`); any body is ignored. If the provider already has a verification row it
-   answers `200 {"status":"already_recorded","provider_id":…}` and issues nothing. Otherwise it
+   answers `200 {"status":"already_recorded","provider_id":…,"key_id":…}` (the recorded key id in
+   standard base64) and issues nothing. Otherwise it
    issues 32 random bytes `challenge`, held in coordinator memory for **5 minutes**, bound to that
    `provider_id`, at most one outstanding per provider (a new challenge replaces the old one) and a
    bounded total; and answers `200 {"status":"challenge","provider_id","challenge","client_data",
@@ -507,10 +510,11 @@ virtual machines, and Macs whose attestation fails keep the dual-control path (�
    stored challenge and its own configuration — never from anything the client sends — and verifies
    the attestation (§5.7.2) with `clientDataHash = SHA-256(client_data)`, so the Apple nonce binds
    the attestation to this provider id and this one-time challenge.
-4. **Record.** On success it inserts `(provider_id, app_attest_key_id)` through
-   `app_attest_recorder` (`ON CONFLICT DO NOTHING`) and answers `200 {"status":"recorded"}`; if the
-   provider already has a row it answers `200 {"status":"already_recorded"}` (first key wins, the
-   new key is not recorded); if the key id is already recorded for another provider it answers
+4. **Record.** On success it inserts `(provider_id, app_attest_key_id, app_attest_public_key)`, the
+   public key being the attestation's verified leaf key, through `app_attest_recorder`
+   (`ON CONFLICT DO NOTHING`) and answers `200 {"status":"recorded","key_id":…}`; if the provider
+   already has a row it answers `200 {"status":"already_recorded","key_id":…}` with the key id of
+   that row (first key wins, the new key is not recorded); if the key id is already recorded for another provider it answers
    `409 app_attest_key_reused` and records nothing. A verification failure answers
    `422 app_attest_rejected` and records nothing. A recorder failure answers `503` and records
    nothing; the Mac stays on dual control and may retry with a fresh challenge.
@@ -537,6 +541,14 @@ not match is a valid Apple key on a Mac that does not meet policy: it is answere
 validity is checked only at submission; a recorded verification never expires (no calendar
 re-check after enrollment).
 
+**Reading the record (SPEC-049).** SPEC-049-R033 reads the key id and attested public key of the
+provider's row through the same `app_attest_recorder` connection (`SELECT` only) to verify
+code-bound privacy postures. The record is not an admission credential; SPEC-049 never writes it,
+and nothing in this spec depends on SPEC-049. The key id returned on `recorded` and
+`already_recorded` lets Malibu.app keep the key it attested and reuse it for those assertions
+(SPEC-049-R035); the key id is a hash of a public key and is returned only to the bearer of that
+provider's credential.
+
 **What App Attest proves, and what it does not.** A recorded verification proves that a genuine
 Apple device with SIP and Full Security, running Malibu.app signed by the configured team, generated
 the key and held the provider's bearer credential at submission. It does **not** prove the
@@ -559,7 +571,9 @@ or client data from the request body. It MUST refuse an attestation that does no
 pinned Apple App Attestation Root CA (fingerprint above), whose nonce extension does not match, whose
 AAGUID is not production, or whose ACL is not SIP and Full Security. A challenge MUST be usable at
 most once and MUST expire after 5 minutes. A key id already recorded for another provider MUST NOT be
-recorded again, and a provider's first recorded key MUST NOT be replaced. Any failure MUST leave the
+recorded again, and a provider's first recorded key MUST NOT be replaced. The row MUST carry the
+attestation's verified leaf public key, and the `recorded` and `already_recorded` responses MUST
+carry the recorded key id. Any failure MUST leave the
 provider on the dual-control path and MUST NOT reject or block registration, hardware evidence or
 serving; a recorder that cannot log in or fails the least-privilege policy at coordinator startup
 disables recording only (the endpoints answer 503) and never stops the coordinator.
@@ -913,8 +927,9 @@ issues; closing them is code follow-up, not a spec change:
   names another provider id MUST be rejected as malformed; a reused, expired, or other-provider
   challenge MUST answer `409 challenge_invalid` without recording; a key recorded for another
   provider MUST answer `409 app_attest_key_reused`; a development-AAGUID or non-SIP attestation MUST
-  answer `422` without recording; and a recorded provider's evidence job MUST promote through
-  AC-HV-13.
+  answer `422` without recording; a recorded row MUST carry the attested public key, and `recorded`
+  and `already_recorded` MUST return the recorded key id; and a recorded provider's evidence job MUST
+  promote through AC-HV-13.
 - **AC-HV-12 (revocation calibration documented).** The spec MUST disclose the R1 `app_register`
   source-flip escape (a genuine revocation gap) and the R2 empty-trust *ergonomics* limitation
   (zero *active* trust is reachable via an expired placeholder and does demote — §10.4) as known
@@ -924,6 +939,16 @@ issues; closing them is code follow-up, not a spec change:
 ---
 
 ## Change log
+
+**v0.9.0-draft (2026-10-15) — the recorded key is reusable for code-bound privacy (#1911).**
+- **§5.7 / §5.7.1 / R004**: migration 033 adds `app_attest_public_key` to
+  `provider_app_attest_verifications`; the submit records the verified leaf public key with the key
+  id, and `recorded` and `already_recorded` return the recorded key id. SPEC-049-R033 reads the row
+  through the recorder connection to verify code-bound privacy postures, and Malibu.app persists the
+  key id to reuse the key (SPEC-049-R035; closes the key id LOW carried from #1968). The recorder
+  role keeps exactly `SELECT, INSERT`. Rows recorded before migration 033 keep a null public key and
+  cannot serve code-bound postures; no production row predates it because the recorder is
+  provisioned with this change.
 
 **v0.8.0-draft (2026-10-11) — providers prove App Attest; the recorder is provisioned (#1911).**
 - **§5.7.1 / §5.7.2 added (SPEC-033-R004)**: a provider-token-authenticated, single-use, 5-minute

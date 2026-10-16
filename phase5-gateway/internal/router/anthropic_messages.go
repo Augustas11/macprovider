@@ -27,8 +27,9 @@ type anthropicMessagesAdapter struct {
 	requestID string
 	now       func() time.Time
 
-	model  string
-	stream bool
+	model                   string
+	stream                  bool
+	guaranteedToolSelection bool
 
 	status      int
 	wroteHeader bool
@@ -58,8 +59,7 @@ type anthropicMessagesAdapter struct {
 	replayBody         bool
 	writeErr           error
 	dedupeCapture      []byte
-	thinkPending       string
-	thinkInBlock       bool
+	streamThinkFilter
 }
 
 type anthropicStreamToolCall struct {
@@ -378,18 +378,31 @@ func (a *anthropicMessagesAdapter) translateRequest(header http.Header, body []b
 	if len(req.StopSequences) > 0 {
 		chat["stop"] = req.StopSequences
 	}
+	var chatTools []map[string]any
 	if len(req.Tools) > 0 {
 		tools, err := anthropicToolsToChatTools(req.Tools)
 		if err != nil {
 			return nil, &anthropicMessagesTranslationError{typ: "invalid_request_error", code: "unsupported_content_shape", message: err.Error()}
 		}
 		chat["tools"] = tools
+		chatTools = tools
 	}
 	if req.ToolChoice != nil {
 		toolChoice, parallelToolCalls, err := anthropicToolChoiceToChatToolChoice(req.ToolChoice)
 		if err != nil {
 			return nil, &anthropicMessagesTranslationError{typ: "invalid_request_error", code: "unsupported_content_shape", message: err.Error()}
 		}
+		// Validate against the translated function set before entering billing.
+		if toolChoice == "required" && len(chatTools) == 0 {
+			return nil, &anthropicMessagesTranslationError{typ: "invalid_request_error", code: "invalid_tools", message: "tool_choice requires at least one function tool"}
+		}
+		if named, ok := toolChoice.(map[string]any); ok {
+			function := named["function"].(map[string]any)
+			if !responsesChatToolsContainName(chatTools, function["name"].(string)) {
+				return nil, &anthropicMessagesTranslationError{typ: "invalid_request_error", code: "invalid_tools", message: "tool_choice references an unavailable function"}
+			}
+		}
+		a.guaranteedToolSelection = toolChoice != "auto"
 		chat["tool_choice"] = toolChoice
 		if parallelToolCalls != nil {
 			chat["parallel_tool_calls"] = *parallelToolCalls
@@ -925,8 +938,8 @@ func anthropicToolChoiceToChatToolChoice(choice any) (any, *bool, error) {
 		return nil, nil, fmt.Errorf("tool_choice must be an object")
 	}
 	var parallelToolCalls *bool
-	if disableParallel, _ := m["disable_parallel_tool_use"].(bool); disableParallel {
-		v := false
+	if disableParallel, ok := m["disable_parallel_tool_use"].(bool); ok {
+		v := !disableParallel
 		parallelToolCalls = &v
 	}
 	typ, _ := m["type"].(string)
@@ -1098,6 +1111,13 @@ func (a *anthropicMessagesAdapter) handleChatStreamLine(line string) {
 		return
 	}
 	if typ, code, msg, retryable, ok := anthropicStandaloneStreamErrorFromOpenAIData(data); ok {
+		if a.guaranteedToolSelection {
+			a.emitSSE("error", map[string]any{"type": "error", "error": map[string]any{"type": typ, "message": msg, "code": code, "retryable": retryable}})
+			a.streamOutcome = "invalid_provider_response"
+			a.streamDone = true
+			a.flush()
+			return
+		}
 		if anthropicTerminalErrorCodeIsLengthTruncation(code) {
 			a.finishReason = anthropicFinishReasonFromTerminalErrorCode(code)
 			a.streamOutcome = anthropicStreamOutcomeFromTerminalErrorCode(code)
@@ -1483,6 +1503,11 @@ func (a *anthropicMessagesAdapter) emitInvalidProviderResponse(message string) {
 		"code":      "invalid_provider_response",
 		"retryable": true,
 	}})
+	if a.guaranteedToolSelection {
+		a.streamDone = true
+		a.flush()
+		return
+	}
 	a.emitTerminalMessageStop()
 }
 
@@ -1672,43 +1697,6 @@ func anthropicStripThinkBlocks(s string) string {
 		s = s[:start]
 	}
 	return s
-}
-
-func (a *anthropicMessagesAdapter) filterThinkContent(s string) string {
-	input := a.thinkPending + s
-	a.thinkPending = ""
-	var out strings.Builder
-	for input != "" {
-		if a.thinkInBlock {
-			if end := strings.Index(input, "</think>"); end >= 0 {
-				input = input[end+len("</think>"):]
-				a.thinkInBlock = false
-				continue
-			}
-			a.thinkPending = longestSuffixThatPrefixes(input, "</think>")
-			return out.String()
-		}
-		if start := strings.Index(input, "<think>"); start >= 0 {
-			out.WriteString(input[:start])
-			input = input[start+len("<think>"):]
-			a.thinkInBlock = true
-			continue
-		}
-		a.thinkPending = longestSuffixThatPrefixes(input, "<think>")
-		out.WriteString(input[:len(input)-len(a.thinkPending)])
-		return out.String()
-	}
-	return out.String()
-}
-
-func (a *anthropicMessagesAdapter) flushThinkRemainder() string {
-	if a.thinkInBlock {
-		a.thinkPending = ""
-		return ""
-	}
-	remainder := a.thinkPending
-	a.thinkPending = ""
-	return remainder
 }
 
 func anthropicResponseContentToText(v any) (string, error) {

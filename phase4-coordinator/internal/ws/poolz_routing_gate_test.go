@@ -77,3 +77,34 @@ func TestPublicRoutingEligibleAppliesCatalogMaterialGate(t *testing.T) {
 		})
 	}
 }
+
+// #1570: /poolz.serving_eligible is routing_eligible apart from the free-slot
+// term, so a provider that is full keeps its servable context in the
+// OpenRouter document, while every other routing gate still applies.
+func TestPublicServingEligibleIgnoresOnlyFreeSlots(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	s := NewServer(config.Default(), registry, zerolog.Nop())
+	p := routingGateProvider(t, registry)
+	if !s.publicServingEligible(p) || !s.publicRoutingEligible(p) {
+		t.Fatal("a free provider must be routing- and serving-eligible")
+	}
+	full := p
+	full.State = pool.StateBusy
+	full.SlotsFree = 0
+	if s.publicRoutingEligible(full) {
+		t.Fatal("a full provider must not be routing-eligible")
+	}
+	if !s.publicServingEligible(full) {
+		t.Fatal("a full provider must stay serving-eligible")
+	}
+	s.SetCatalogMaterialRoutingGate(func(pool.Provider) bool { return true })
+	if s.publicServingEligible(full) {
+		t.Fatal("serving_eligible must keep the other routing gates")
+	}
+	s.SetCatalogMaterialRoutingGate(nil)
+	gone := full
+	gone.State = pool.StateUnavailable
+	if s.publicServingEligible(gone) {
+		t.Fatal("an unavailable provider must not be serving-eligible")
+	}
+}

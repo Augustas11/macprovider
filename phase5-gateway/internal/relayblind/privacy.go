@@ -16,8 +16,14 @@ import (
 )
 
 const (
-	PrivacyClassV1                  = "operator_constrained_beta_v1"
-	PrivacyAssurance                = "device_bound_self_attested_beta"
+	PrivacyClassV1   = "operator_constrained_beta_v1"
+	PrivacyAssurance = "device_bound_self_attested_beta"
+	// PrivacyAssuranceCodeBound is the SPEC-049 v0.5.0 code-bound label
+	// (SPEC-049-R033, SPEC-049-R034).
+	PrivacyAssuranceCodeBound = "code_bound_attested"
+	// PrivacyAssuranceRequiredHeader is the buyer's optional request for the
+	// code-bound label on a reservation (SPEC-049 §4.2, SPEC-049-R034).
+	PrivacyAssuranceRequiredHeader  = "X-MacProvider-Privacy-Assurance-Required"
 	PrivacyResponseEncryption       = "buyer_provider_aead_v1"
 	PrivacyReservationVersion       = "privacy-class-reservation-v1"
 	PrivacyResponseVersion          = "privacy-response-v1"
@@ -801,8 +807,13 @@ func (r ReservationResponse) privacyExtensionPresent() bool {
 	return r.PrivacyClass != "" || r.PrivacyAssurance != "" || r.PrivacyKeyAttestation != nil || r.PrivacyKeyAttestationSignature != "" || r.PrivacyPostureVerifiedAtUnix != 0
 }
 
+// PrivacyAssuranceKnown reports one of the two SPEC-049 assurance labels.
+func PrivacyAssuranceKnown(label string) bool {
+	return label == PrivacyAssurance || label == PrivacyAssuranceCodeBound
+}
+
 func (r ReservationResponse) validatePrivacyExtension() error {
-	if r.PrivacyClass != PrivacyClassV1 || r.PrivacyAssurance != PrivacyAssurance || r.PrivacyKeyAttestation == nil || r.PrivacyPostureVerifiedAtUnix <= 0 {
+	if r.PrivacyClass != PrivacyClassV1 || !PrivacyAssuranceKnown(r.PrivacyAssurance) || r.PrivacyKeyAttestation == nil || r.PrivacyPostureVerifiedAtUnix <= 0 {
 		return ErrInvalidReservation
 	}
 	if _, err := decodeBase64URLFixed(r.PrivacyKeyAttestationSignature, ed25519.SignatureSize); err != nil {

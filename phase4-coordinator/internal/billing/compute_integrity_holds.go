@@ -163,7 +163,7 @@ func (s *Store) OpenComputeIntegrityHold(ctx context.Context, providerID, modelI
 }
 
 // openComputeIntegrityHoldExec writes a held hold and raises the billing
-// compatibility floor to contract 5 in the same transaction, so no binary
+// compatibility floor to contract 7 in the same transaction, so no binary
 // that would pay held credits can open the database afterwards.
 func openComputeIntegrityHoldExec(ctx context.Context, db holdExecutor, providerID, modelID string, kind computeintegrity.HoldKind, start time.Time, end *time.Time, reason string, now time.Time) (int64, error) {
 	if providerID == "" || modelID == "" || start.IsZero() {

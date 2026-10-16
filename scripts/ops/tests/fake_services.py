@@ -15,13 +15,17 @@ Files in STATE_DIR steer it:
   rejections              unapproved rejection counter base; with rejections_bump it
                           grows by that much on every /metrics read
   mode                    gateway behaviour: move | stuck | serial-request |
-                          no-request-id | no-provider-id | other-provider
-  provider_id             X-Provider-Id the gateway reports (unless the mode drops it)
+                          no-request-id | no-log-row | other-provider
+  assigned_id             coordinator session recorded in request_log.provider_assigned_id for a
+                          served completion (other-provider records a different one; no-log-row
+                          records nothing); the gateway never reports provider identity to buyers
+  request_log.db          sqlite request_log the fake coordinator writes (when the file exists)
   mirror-latest.json      /releases/latest.json body of the release mirror (404 when absent)
   served                  number of completions served (written here)
 """
 import json
 import os
+import sqlite3
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -116,10 +120,14 @@ class Handler(BaseHTTPRequestHandler):
         mode = read("mode", "move")
         if mode != "no-request-id":
             headers["X-Request-ID"] = self.headers.get("X-Request-ID") or "gw-generated"
-        if mode == "other-provider":
-            headers["X-Provider-Id"] = "some-other-provider"
-        elif mode != "no-provider-id":
-            headers["X-Provider-Id"] = read("provider_id", "")
+        db_path = os.path.join(state, "request_log.db")
+        if mode != "no-log-row" and os.path.exists(db_path) and "X-Request-ID" in headers:
+            assigned = "some-other-session" if mode == "other-provider" else read("assigned_id", "")
+            con = sqlite3.connect(db_path)
+            con.execute("INSERT INTO request_log (external_request_id, provider_assigned_id) VALUES (?, ?)",
+                        (headers["X-Request-ID"], assigned))
+            con.commit()
+            con.close()
         body = {"id": "chatcmpl-test", "choices": [{"message": {"role": "assistant", "content": "ok"}}]}
         return self.send(200, json.dumps(body), headers)
 

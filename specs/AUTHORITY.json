@@ -108,7 +108,8 @@
         "SPEC-044",
         "SPEC-045",
         "SPEC-047",
-        "SPEC-048"
+        "SPEC-048",
+        "SPEC-050"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -130,7 +131,8 @@
         "SPEC-043",
         "SPEC-045",
         "SPEC-047",
-        "SPEC-049"
+        "SPEC-049",
+        "SPEC-050"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -306,7 +308,8 @@
         "SPEC-021",
         "SPEC-022",
         "SPEC-042",
-        "SPEC-043"
+        "SPEC-043",
+        "SPEC-050"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -379,7 +382,8 @@
       "owner_spec": "SPEC-021",
       "consumers": [
         "SPEC-016",
-        "SPEC-026"
+        "SPEC-026",
+        "SPEC-050"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": false,
@@ -400,7 +404,8 @@
         "SPEC-043",
         "SPEC-047",
         "SPEC-048",
-        "SPEC-049"
+        "SPEC-049",
+        "SPEC-050"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -569,7 +574,8 @@
         "SPEC-044",
         "SPEC-046",
         "SPEC-047",
-        "SPEC-048"
+        "SPEC-048",
+        "SPEC-049"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -584,7 +590,8 @@
         "SPEC-003",
         "SPEC-021",
         "SPEC-025",
-        "SPEC-026"
+        "SPEC-026",
+        "SPEC-050"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": false,
@@ -804,6 +811,19 @@
       "requires_signed_journey_result": true,
       "owner": "@Augustas11",
       "issue": "https://github.com/Augustas11/macprovider/issues/1749"
+    },
+    {
+      "id": "malibu-stake-allowance",
+      "owner_spec": "SPEC-050",
+      "consumers": [
+        "SPEC-005",
+        "SPEC-006",
+        "SPEC-021"
+      ],
+      "status": "declared",
+      "requires_signed_journey_result": true,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/1062"
     }
   ]
 }

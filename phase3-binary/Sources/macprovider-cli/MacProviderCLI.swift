@@ -434,12 +434,12 @@ struct ServeCommand: AsyncParsableCommand {
     // SPEC-037 FR-KVP11 — encrypted KV survival disk-tier CLI flags (MEDIUM-5). Each is
     // an Optional so absence defers to the environment / YAML / default; the resolver
     // (KVDiskCacheConfigResolver) applies CLI-wins precedence and fails closed on any
-    // invalid value. --kv-disk-cache-allow-buyer-keys reaching the resolver as true is
-    // rejected (precondition error) and forces the tier off.
+    // invalid value. Buyer persistence also requires an authenticated fleet grant;
+    // enabling policy alone never grants a request eligibility.
     @Flag(name: .customLong("kv-disk-cache-enabled"), inversion: .prefixedNo, help: "Enable the encrypted KV-cache survival disk tier. Overrides MACPROVIDER_KV_DISK_CACHE_ENABLED and config key kv_disk_cache.enabled. Default off.")
     var kvDiskCacheEnabled: Bool?
 
-    @Flag(name: .customLong("kv-disk-cache-allow-buyer-keys"), inversion: .prefixedNo, help: "Permit buyer-supplied conversation keys in the KV disk tier. Rejected in v0.1 (fails closed, tier disabled). Overrides MACPROVIDER_KV_DISK_CACHE_ALLOW_BUYER_KEYS and config key kv_disk_cache.allow_buyer_keys.")
+    @Flag(name: .customLong("kv-disk-cache-allow-buyer-keys"), inversion: .prefixedNo, help: "Permit authenticated fleet conversation keys in the KV disk tier. Default on; each request still requires a valid coordinator grant and the disk tier must be enabled. Overrides MACPROVIDER_KV_DISK_CACHE_ALLOW_BUYER_KEYS and config key kv_disk_cache.allow_buyer_keys.")
     var kvDiskCacheAllowBuyerKeys: Bool?
 
     @Option(name: .customLong("kv-disk-cache-dir"), help: "KV disk-tier directory (absolute; leading ~ expanded). Overrides MACPROVIDER_KV_DISK_CACHE_DIR and config key kv_disk_cache.directory.")
@@ -486,7 +486,7 @@ struct ServeCommand: AsyncParsableCommand {
 
     /// SPEC-037 FR-KVP11 (MEDIUM-5): the KV disk-tier CLI overrides assembled from the
     /// parsed `--kv-disk-cache-*` flags. Exposed so tests can assert the flag → override
-    /// wiring (and CLI-wins precedence / allow_buyer_keys rejection) without running serve.
+    /// wiring and CLI-wins precedence without running serve.
     var kvDiskCacheCLIOverrides: KVDiskCacheCLIOverrides {
         KVDiskCacheCLIOverrides(
             enabled: kvDiskCacheEnabled,
@@ -3035,12 +3035,8 @@ struct ServeCommand: AsyncParsableCommand {
         // never blocks the serve loop. A disabled tier is not activated here, so a
         // standalone `malibu-cli kv-cache` invocation can acquire the free
         // namespace lock itself.
-        // LOW (FR-KVP11): surface resolver errors that force the tier off BEFORE the
-        // effectiveEnabled guard. When effectiveEnabled is false because errors were
-        // recorded (e.g. allow_buyer_keys=true, or an out-of-bound knob), activation is
-        // skipped entirely — so the only logging site (inside activateForServeDetailed)
-        // never runs and the operator gets no signal. Emit each error here so a
-        // fail-closed disable (incl. the allow_buyer_keys precondition text) is visible.
+        // FR-KVP11: report invalid configuration even when it prevents activation,
+        // so an out-of-bounds setting cannot silently disable persistence.
         if !resolved.kvDiskCache.errors.isEmpty {
             for error in resolved.kvDiskCache.errors {
                 FileHandle.standardError.write(Data(("kv_disk_cache config error: \(error)\n").utf8))
@@ -3051,11 +3047,11 @@ struct ServeCommand: AsyncParsableCommand {
         // loopback serving runtime holds no local KV cache, so the tier is only
         // activated when an MLX `ModelRuntime` is serving.
         if let mlxRuntime = modelRuntime as? ModelRuntime,
-           resolved.kvDiskCache.effectiveEnabled,
            let kvProviderID = resolved.providerID?.trimmingCharacters(in: .whitespacesAndNewlines),
            !kvProviderID.isEmpty {
             let kvTTL = Int(ConversationCache.Config.fromEnvironment().ttlSeconds)
             let tier = KVDiskTier(config: resolved.kvDiskCache, namespaceID: kvProviderID, eligibilityTTLSeconds: kvTTL)
+            await mlxRuntime.registerKVDiskTierForPurge(tier)
             switch await tier.activateForServeDetailed() {
             case .activated:
                 await mlxRuntime.attachKVDiskTier(tier)

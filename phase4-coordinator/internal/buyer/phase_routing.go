@@ -1,0 +1,320 @@
+package buyer
+
+import (
+	"bytes"
+	"encoding/json"
+	"math"
+	mrand "math/rand"
+	"net/http"
+	"strconv"
+	"strings"
+
+	"github.com/augstar/macprovider-coordinator/internal/billing"
+	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/routing"
+)
+
+const (
+	// routeTraceHeader is the SPEC-002-R007 buyer-visible route trace.
+	routeTraceHeader = "X-MacProvider-Route-Trace"
+	// internalPrivacyModeHeader carries the SPEC-006-R019 effective privacy
+	// mode from the gateway; it only labels the route_trace line.
+	internalPrivacyModeHeader = "X-MacProvider-Internal-Privacy-Mode"
+)
+
+// RouteSelectionMetrics counts SPEC-002-R007 selections by phase and basis.
+type RouteSelectionMetrics interface {
+	IncRouteSelection(phase, basis string)
+}
+
+// WithRouteSelectionMetrics wires the route_trace counter.
+func WithRouteSelectionMetrics(m RouteSelectionMetrics) Option {
+	return func(s *Server) {
+		s.routeMetrics = m
+	}
+}
+
+// routeDecision is the SPEC-002-R006 outcome of one plaintext selection.
+type routeDecision struct {
+	phase routing.Phase
+	basis routing.Basis
+	// scope is where the provider came from for the operator line:
+	// ranked, sticky, pinned or slot_queue.
+	scope       string
+	inputTokens int
+	candidates  int
+	fresh       int
+	scores      map[string]float64
+	evidence    map[string]routing.PerfEvidence
+}
+
+// applyPhaseOrder runs the SPEC-002-R006 reorder on the objective-sorted
+// candidates. Draws come from the request seed so a decision is reproducible
+// within the day.
+func (s *Server) applyPhaseOrder(requestID string, req chatRequest, estimatedTokens int, candidates []pool.Provider, dailyKey string) routeDecision {
+	phase := routing.ClassifyPhase(estimatedTokens, req.maxTokens, req.Stream)
+	if dailyKey == "" {
+		dailyKey = defaultDailyKey()
+	}
+	// A distinct stream from the tiebreak draw: the tiebreak uses the first
+	// value of this seed, the phase step the next two.
+	rng := mrand.New(mrand.NewSource(seedForRequestWithKey(requestID, dailyKey)))
+	_ = rng.Float64()
+	exploreDraw, bandDraw := rng.Float64(), rng.Float64()
+	d := routing.PhaseOrder(candidates, req.Model, phase, s.perf, s.now(), exploreDraw, bandDraw)
+	return routeDecision{phase: d.Phase, basis: d.Basis, scope: "ranked", inputTokens: estimatedTokens, candidates: d.Candidates, fresh: d.Fresh, scores: d.Scores, evidence: d.Evidence}
+}
+
+// stickyRouteDecision describes a SPEC-004 sticky hit: the objective order
+// with the sticky provider first, no phase reorder.
+func (s *Server) stickyRouteDecision(req chatRequest, estimatedTokens int, candidates []pool.Provider) routeDecision {
+	return routeDecision{
+		phase:       routing.ClassifyPhase(estimatedTokens, req.maxTokens, req.Stream),
+		basis:       routing.BasisFallback,
+		scope:       "sticky",
+		inputTokens: estimatedTokens,
+		candidates:  len(candidates),
+	}
+}
+
+// noteRouteTrace records the SPEC-002-R007 operator line and counter for the
+// first selection of a plaintext request and returns the buyer header value.
+func (s *Server) noteRouteTrace(requestID string, req chatRequest, headers http.Header, provider pool.Provider, decision *routeDecision, estimatedTokens int) string {
+	d := routeDecision{basis: routing.BasisFallback, scope: "ranked", inputTokens: estimatedTokens}
+	if decision != nil {
+		d = *decision
+	}
+	if d.phase == "" {
+		d.phase = routing.ClassifyPhase(estimatedTokens, req.maxTokens, req.Stream)
+	}
+	if hasPinnedRoute(headers) {
+		d.basis, d.scope, d.candidates = routing.BasisPinned, "pinned", 1
+	}
+	evidence, ok := d.evidence[provider.SortKey()]
+	if !ok {
+		evidence, ok = s.perf.Lookup(provider.ProviderID, req.Model)
+	}
+	now := s.now()
+	fresh := ok && evidence.FreshFor(d.phase, now)
+	if d.scope != "ranked" && fresh {
+		d.fresh = 1
+	}
+	ageS := int64(-1)
+	if ok && !evidence.LastObserved.IsZero() {
+		ageS = int64(now.Sub(evidence.LastObserved).Seconds())
+	}
+	engine := routing.EngineClass(provider)
+	latency := routing.LatencyClass(d.phase, d.inputTokens, evidence, now)
+	score, scored := d.scores[provider.SortKey()]
+	event := s.log.Info().
+		Str("event", "route_trace").
+		Str("request_id", requestID).
+		Str("provider_id", provider.ProviderID).
+		Str("model", sanitizeRequestLogText(req.Model)).
+		Str("phase", string(d.phase)).
+		Str("basis", string(d.basis)).
+		Str("scope", d.scope).
+		Int("candidates", d.candidates).
+		Int("fresh", d.fresh).
+		Int("samples", evidence.TTFTSamples).
+		Int("prefill_samples", evidence.PrefillSamples).
+		Int("decode_samples", evidence.DecodeSamples).
+		Int("service_samples", evidence.ServiceSamples).
+		Int64("evidence_age_s", ageS).
+		Str("engine", engine).
+		Str("latency", latency).
+		Str("privacy_mode", internalPrivacyMode(headers))
+	if scored {
+		event = event.Float64("score", score)
+	} else {
+		event = event.Float64("score", -1)
+	}
+	event.Send()
+	if s.routeMetrics != nil {
+		s.routeMetrics.IncRouteSelection(string(d.phase), string(d.basis))
+	}
+	return routing.RouteTraceHeader(d.phase, d.basis, fresh, engine, latency)
+}
+
+// internalPrivacyMode returns the gateway's SPEC-006-R019 effective mode, or
+// "unset" for any other value. It never changes routing.
+func internalPrivacyMode(headers http.Header) string {
+	values := headers.Values(internalPrivacyModeHeader)
+	if len(values) != 1 {
+		return "unset"
+	}
+	switch v := strings.TrimSpace(values[0]); v {
+	case "pool", "relay_blind_required", "owned_provider":
+		return v
+	default:
+		return "unset"
+	}
+}
+
+// markFirstTokenOnContent marks the SPEC-002-R005 first-token time when the
+// first delivered event carries generated content or a tool call.
+func (s *Server) markFirstTokenOnContent(acct *deliveredSSEAccounting, state *forwardState) {
+	if acct == nil || state == nil {
+		return
+	}
+	acct.onFirstContent = func() {
+		state.phaseTiming.markProviderFirstToken(phaseTimingNow(s))
+	}
+}
+
+// observeServedPerformance feeds one cleanly completed plaintext attempt into
+// the SPEC-002-R005 store. Every rate is the coordinator's own: its clock from
+// provider dispatch start, its token estimate of the request body, and its
+// estimate of the generated output it delivered. An attempt with a
+// coordinator first-token time also gives TTFT and decode; any other
+// (non-streamed or buffered) is end-to-end and gives no TTFT or decode. Only
+// a non-streamed attempt, done when its whole response was received, gives
+// the rates that run to done: prefill and service throughput. Provider usage
+// only withholds a prefill sample, when it reports a cached prefix.
+func (b *billingRecorder) observeServedPerformance(providerAssignedID, providerID string, status int, cachedPromptTok *int64, output *billing.SettlementOutput, errMsg, errCode, faultFlag string) {
+	s := b.server
+	if s == nil || s.perf == nil || b.relayBlind != nil || status < 200 || status >= 300 {
+		return
+	}
+	if errMsg != "" || errCode != "" || (faultFlag != "" && faultFlag != billing.FaultNone) {
+		return
+	}
+	if providerAssignedID == "" || b.model == "" || b.state == nil {
+		return
+	}
+	// Without a normally completed settlement output that delivered content
+	// or a tool call there is no output estimate, and a zero estimate would
+	// pass the prefill gate. Paths that log no output get an empty one.
+	generated, ok := generatedOutputTokens(output)
+	if !ok || generated == 0 {
+		return
+	}
+	timing := b.state.phaseTiming.snapshot()
+	if !timing.matchesProviderAssignedID(providerAssignedID) {
+		return
+	}
+	service := timing.routingServiceMs()
+	if service == nil {
+		return
+	}
+	if providerID == "" && s.pool != nil {
+		for _, p := range s.pool.Snapshot() {
+			if p.AssignedID == providerAssignedID {
+				providerID = p.ProviderID
+				break
+			}
+		}
+	}
+	prompt := int64(b.state.routingEstimatedTokens)
+	if cachedPromptTok != nil && *cachedPromptTok > 0 {
+		prompt = 0
+	}
+	obs := routing.PerfObservation{
+		ProviderID:       providerID,
+		Model:            b.model,
+		PromptTokens:     prompt,
+		RequestTokens:    int64(b.state.routingEstimatedTokens),
+		CompletionTokens: generated,
+		ServiceMs:        *service,
+		EndToEnd:         true,
+		Streamed:         b.stream,
+		At:               s.now(),
+	}
+	if ttft := timing.routingTTFTMs(); ttft != nil {
+		obs.EndToEnd = false
+		obs.TTFTMs = *ttft
+		if decode := timing.routingDecodeMs(); decode != nil {
+			obs.DecodeMs = *decode
+		}
+	}
+	if b.state.perfHold {
+		b.state.pendingPerf = &obs
+		return
+	}
+	s.perf.Observe(obs)
+}
+
+// holdPerformance defers the next SPEC-002-R005 observation of this attempt:
+// it is recorded before its body is written. A hold that is never released
+// (the attempt failed before its write) only drops observations.
+func holdPerformance(state *forwardState) {
+	if state != nil {
+		state.perfHold, state.pendingPerf = true, nil
+	}
+}
+
+// releasePerformance ends a hold. The held observation enters the store only
+// when the whole body reached the buyer.
+func (s *Server) releasePerformance(state *forwardState, delivered bool) {
+	if state == nil {
+		return
+	}
+	pending := state.pendingPerf
+	state.perfHold, state.pendingPerf = false, nil
+	if delivered && pending != nil && s.perf != nil {
+		s.perf.Observe(*pending)
+	}
+}
+
+// perfOutputBytesPerToken converts generated bytes into the SPEC-002-R005
+// output token estimate.
+const perfOutputBytesPerToken = 4
+
+// generatedOutputTokens estimates the tokens of the content and tool calls the
+// coordinator delivered for an attempt, from its own settlement output: the
+// same quantity for streamed and non-streamed responses. It reports false
+// when the output is missing, unavailable or not a normal completion, which
+// is not empty output.
+func generatedOutputTokens(output *billing.SettlementOutput) (int64, bool) {
+	if output == nil || !output.Available || output.RelayBlindResponseSHA256 != "" || output.TerminalState != billing.TerminalStateNormalDone {
+		return 0, false
+	}
+	n := int64(len(output.Content))
+	for _, call := range output.ToolCalls {
+		n += int64(len(call.Name)) + canonicalArgumentsLen(call.Arguments)
+	}
+	return (n + perfOutputBytesPerToken - 1) / perfOutputBytesPerToken, true
+}
+
+// canonicalArgumentsLen is the byte length of tool-call arguments re-encoded
+// as compact JSON with every number in its shortest spelling, so
+// insignificant whitespace, escape spellings or numeric padding that leave
+// the call unchanged cannot inflate the output estimate. Arguments that are
+// not one JSON value count at their raw length.
+func canonicalArgumentsLen(arguments string) int64 {
+	dec := json.NewDecoder(strings.NewReader(arguments))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil || dec.More() {
+		return int64(len(arguments))
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(shortestNumbers(v)); err != nil {
+		return int64(len(arguments))
+	}
+	return int64(len(bytes.TrimRight(buf.Bytes(), "\n")))
+}
+
+// shortestNumbers replaces every JSON number with its shortest float64
+// spelling; a number out of float64 range counts as 0.
+func shortestNumbers(v any) any {
+	switch t := v.(type) {
+	case json.Number:
+		f, err := strconv.ParseFloat(string(t), 64)
+		if err != nil || math.IsInf(f, 0) || math.IsNaN(f) {
+			return json.Number("0")
+		}
+		return json.Number(strconv.FormatFloat(f, 'g', -1, 64))
+	case map[string]any:
+		for k, e := range t {
+			t[k] = shortestNumbers(e)
+		}
+	case []any:
+		for i, e := range t {
+			t[i] = shortestNumbers(e)
+		}
+	}
+	return v
+}

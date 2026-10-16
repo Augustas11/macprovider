@@ -183,6 +183,9 @@ struct ColdPromotionCandidate: Sendable {
     var modelSHA256: String = ""
     var catalogRevision: String = ""
     var kvBits: Int? = nil
+    var codecID: String = KVDiskCacheFormat.codecID
+    var createdAtMillis: Int? = nil
+    var eligibleUntilMillis: Int? = nil
 }
 
 /// An immutable, `Sendable` hand-off from a synchronous hot-tier commit to the
@@ -195,6 +198,8 @@ struct ConversationColdSnapshot: Sendable {
     let rawKey: String
     let tokens: [Int32]
     let layers: [KVLayerPayload]
+    let layersV2: [KVCacheLayerPayload]
+    let recurrentCheckpoints: [KVRecurrentCheckpointPayload]
     let identity: KVWriteIdentity
     let sampledPurgeGeneration: Int
     /// Monotonic per-index commit sequence, allocated synchronously under the hot
@@ -211,12 +216,17 @@ struct ConversationColdSnapshot: Sendable {
     /// that carries no reservation (e.g. a test double).
     let reservedWriteBytes: Int
 
-    init(rawKey: String, tokens: [Int32], layers: [KVLayerPayload], identity: KVWriteIdentity,
+    init(rawKey: String, tokens: [Int32], layers: [KVLayerPayload],
+         layersV2: [KVCacheLayerPayload] = [],
+         recurrentCheckpoints: [KVRecurrentCheckpointPayload] = [],
+         identity: KVWriteIdentity,
          sampledPurgeGeneration: Int, commitSequence: Int, createdAtMillis: Int,
          eligibleUntilMillis: Int, incarnation: String, reservedWriteBytes: Int = 0) {
         self.rawKey = rawKey
         self.tokens = tokens
         self.layers = layers
+        self.layersV2 = layersV2
+        self.recurrentCheckpoints = recurrentCheckpoints
         self.identity = identity
         self.sampledPurgeGeneration = sampledPurgeGeneration
         self.commitSequence = commitSequence

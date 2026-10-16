@@ -837,7 +837,7 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
             "Prompts are plaintext. There is no zero-data-retention guarantee. "
             "## Zero data retention. This heading documents the absence of ZDR. "
             "The OpenRouter ingest document sets compliance.zdr to false. "
-            "Request metadata is retained for 90 days. "
+            "Request metadata is retained for 14 days. "
             "Mac Provider does not train foundation models on buyer prompts. "
             "Prompt and completion bodies are not stored as a training corpus."
         )

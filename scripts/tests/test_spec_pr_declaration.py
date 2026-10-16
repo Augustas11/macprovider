@@ -40,8 +40,9 @@ class SpecPRDeclarationTests(unittest.TestCase):
         expected = [
             ".github/CODEOWNERS",
             "AGENTS.md",
-            "beta/DECISION_CRITERIA.md",
             "CLAUDE.md",
+            "docs/decision-log.md",
+            "docs/evidence/**",
             "docs/spec-governance-foundation.md",
             "docs/spec-history/**",
             "schemas/spec-*",
@@ -63,14 +64,14 @@ class SpecPRDeclarationTests(unittest.TestCase):
             ),
         )
 
-    def test_behavior_change_none_accepts_audit_prompt_relocations(self) -> None:
+    def test_behavior_change_none_accepts_evidence_relocations(self) -> None:
         self.assertEqual(
             [],
             validate_body(
                 declaration(contract_change="yes"),
                 changed_paths=[
                     "specs/CONFORMANCE.json",
-                    "audits/_prompts/AUDIT_RFC001_WATCHDOG_PROMPT.md",
+                    "docs/evidence/2026-10-01-1780-gpt-oss-120b-evidence.md",
                 ],
             ),
         )

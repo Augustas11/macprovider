@@ -227,4 +227,4 @@ Non-gating audit export for Proof-of-Model research. **Do not gate routing on Ma
 - [x] W4 drift alerts emit on Pearl (observe-only)
 - [ ] W5 PoM audit endpoint
 - [x] Optional `model_hash_mismatch_total` metric (#497)
-- [ ] `beta/DECISION_CRITERIA.md` Session B closure entry
+- [ ] `docs/decision-log.md` Session B closure entry

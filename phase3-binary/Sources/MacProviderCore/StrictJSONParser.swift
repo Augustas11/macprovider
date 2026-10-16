@@ -24,8 +24,9 @@ import Foundation
 // - Number canonicalization beyond what JSONValue already provides.
 // - Streaming. v0.1.0 is non-streaming only.
 public enum StrictJSONParser {
-    public static func parse(_ text: String) throws -> JSONValue {
-        var parser = Parser(scalars: Array(text.unicodeScalars))
+    public static func parse(_ text: String, maxDepth: Int = JSONSchemaValidator.maxDepth) throws -> JSONValue {
+        guard (1...128).contains(maxDepth) else { throw ParseError.invalidDepthLimit }
+        var parser = Parser(scalars: Array(text.unicodeScalars), maxDepth: maxDepth)
         let value = try parser.parseValue(depth: 1)
         parser.skipWhitespace()
         guard parser.isAtEnd else {
@@ -41,19 +42,21 @@ public enum StrictJSONParser {
         case invalidNumber
         case duplicateKey(String)
         case trailingData
+        case invalidDepthLimit
     }
 
     private struct Parser {
         var scalars: [UnicodeScalar]
+        let maxDepth: Int
         var index = 0
 
         var isAtEnd: Bool { index >= scalars.count }
 
         mutating func parseValue(depth: Int) throws -> JSONValue {
-            if depth > JSONSchemaValidator.maxDepth {
+            if depth > maxDepth {
                 throw APIError(
                     status: 502,
-                    message: "Structured-output JSON exceeds depth cap of \(JSONSchemaValidator.maxDepth) levels",
+                    message: "Structured-output JSON exceeds depth cap of \(maxDepth) levels",
                     type: "upstream_provider_error",
                     code: "json_schema_validation_failed",
                     param: "",

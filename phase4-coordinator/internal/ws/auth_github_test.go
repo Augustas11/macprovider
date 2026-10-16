@@ -793,6 +793,7 @@ func newSpec014AuthTestServerWithClient(t *testing.T, enabled bool, logger zerol
 		WithGitHubAuthStore(store),
 		WithGitHubOAuthClient(client),
 	)
+	awaitStartupSnapshots(t, s)
 	return s, store
 }
 

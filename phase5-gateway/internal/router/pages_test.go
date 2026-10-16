@@ -95,7 +95,7 @@ func TestPrivacyRouteRendersHonestRetention(t *testing.T) {
 		"compliance.zdr",
 		"train foundation models",
 		"us-east-1",
-		"90 days",
+		"14 days",
 		"storage.request_log_retention_days",
 		"opaque HMAC conversation identifier",
 	} {
@@ -209,7 +209,7 @@ func TestProviderPartnerDocsIncludeLateReceiptDeadlineDisclosure(t *testing.T) {
 	for _, path := range []string{
 		filepath.Join("..", "..", "..", "phase3-binary", "README.md"),
 		filepath.Join("..", "..", "..", "phase3-binary", "dist", "README-partner.md"),
-		filepath.Join("..", "..", "..", "docs", "legacy", "phase1", "provider-economics.md"),
+		filepath.Join("..", "..", "..", "docs", "provider-economics.md"),
 	} {
 		raw, err := os.ReadFile(path)
 		if err != nil {

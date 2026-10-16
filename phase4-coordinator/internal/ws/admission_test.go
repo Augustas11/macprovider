@@ -350,9 +350,9 @@ func TestAdmissionManagerTrustedTierHonorsConfiguredQuota(t *testing.T) {
 
 func TestRoutingAdmissionTierRequiresAuthenticatedRewardsTrust(t *testing.T) {
 	cfg := config.Default()
-	s := NewServer(cfg, pool.NewRegistry(nil), zerolog.Nop(), WithProviderRewardsTrustTierStore(fakeRewardsTrustStore{
+	s := wireRewardsTrust(NewServer(cfg, pool.NewRegistry(nil), zerolog.Nop()), fakeRewardsTrustStore{
 		tiers: map[string]string{"provider-a": string(pool.TierTrusted)},
-	}))
+	})
 
 	if tier := s.routingAdmissionTier(context.Background(), providerAuth{validated: true, providerID: "provider-a"}, "provider-a", false); tier != pool.TierProvisional {
 		t.Fatalf("authenticated trusted tier without durable proof = %s, want provisional", tier)
@@ -386,12 +386,11 @@ func TestRoutingAdmissionTierRejectsTrustedQuotaAfterLegacyTokenRevocation(t *te
 		t.Fatal(err)
 	}
 
-	s := NewServer(config.Default(), pool.NewRegistry(nil), zerolog.Nop(),
+	s := wireRewardsTrust(NewServer(config.Default(), pool.NewRegistry(nil), zerolog.Nop(),
 		WithTokenValidator(store),
-		WithProviderRewardsTrustTierStore(fakeRewardsTrustStore{
-			tiers: map[string]string{"provider-a": string(pool.TierTrusted)},
-		}),
-	)
+	), fakeRewardsTrustStore{
+		tiers: map[string]string{"provider-a": string(pool.TierTrusted)},
+	})
 
 	tier := s.routingAdmissionTier(ctx, providerAuth{validated: true, providerID: "provider-a"}, "provider-a", false)
 	if tier != pool.TierProvisional {
@@ -413,12 +412,11 @@ func TestRoutingAdmissionTierRejectsTrustedQuotaWithoutDurableIdentityProofEvenW
 		t.Fatal(err)
 	}
 
-	s := NewServer(config.Default(), pool.NewRegistry(nil), zerolog.Nop(),
+	s := wireRewardsTrust(NewServer(config.Default(), pool.NewRegistry(nil), zerolog.Nop(),
 		WithTokenValidator(store),
-		WithProviderRewardsTrustTierStore(fakeRewardsTrustStore{
-			tiers: map[string]string{"provider-a": string(pool.TierTrusted)},
-		}),
-	)
+	), fakeRewardsTrustStore{
+		tiers: map[string]string{"provider-a": string(pool.TierTrusted)},
+	})
 
 	tier := s.routingAdmissionTierWithCustody(ctx, providerAuth{validated: true, providerID: "provider-a"}, "provider-a", false, false)
 	if tier != pool.TierProvisional {
@@ -457,13 +455,12 @@ func TestRoutingAdmissionTierRequiresVerifiedDurableIdentityAfterRevocation(t *t
 		t.Fatal(err)
 	}
 
-	s := NewServer(config.Default(), pool.NewRegistry(nil), zerolog.Nop(),
+	s := wireRewardsTrust(NewServer(config.Default(), pool.NewRegistry(nil), zerolog.Nop(),
 		WithTokenValidator(store),
 		WithBootstrapTokenStore(store),
-		WithProviderRewardsTrustTierStore(fakeRewardsTrustStore{
-			tiers: map[string]string{"provider-a": string(pool.TierTrusted)},
-		}),
-	)
+	), fakeRewardsTrustStore{
+		tiers: map[string]string{"provider-a": string(pool.TierTrusted)},
+	})
 
 	tier := s.routingAdmissionTierWithCustody(ctx, providerAuth{validated: true, providerID: "provider-a"}, "provider-a", false, false)
 	if tier != pool.TierProvisional {
@@ -570,13 +567,12 @@ func TestV2DeferredAdmissionAllowsVerifiedTrustedQuotaWhenProvisionalPoolFull(t 
 
 	cfg := config.Default()
 	cfg.Admission.ProvisionalPoolMax = 0
-	s := NewServer(cfg, pool.NewRegistry(nil), zerolog.Nop(),
+	s := wireRewardsTrust(NewServer(cfg, pool.NewRegistry(nil), zerolog.Nop(),
 		WithTokenValidator(store),
 		WithBootstrapTokenStore(store),
-		WithProviderRewardsTrustTierStore(fakeRewardsTrustStore{
-			tiers: map[string]string{"provider-a": string(pool.TierTrusted)},
-		}),
-	)
+	), fakeRewardsTrustStore{
+		tiers: map[string]string{"provider-a": string(pool.TierTrusted)},
+	})
 	hello := capacityTestHello(2)
 
 	entry, ok := s.prepareProviderAdmissionDeferredQuota(nil, providerAuth{validated: true, providerID: "provider-a"}, hello)
@@ -613,9 +609,9 @@ func TestRewardsTrustReconciliationDemotesLiveTrustedProvider(t *testing.T) {
 		State:      pool.StateReady,
 		AuthState:  pool.AuthBearerValidated,
 	}, nil)
-	s := NewServer(config.Default(), registry, zerolog.Nop(), WithProviderRewardsTrustTierStore(fakeRewardsTrustStore{
+	s := wireRewardsTrust(NewServer(config.Default(), registry, zerolog.Nop()), fakeRewardsTrustStore{
 		tiers: map[string]string{"provider-a": string(pool.TierProvisional)},
-	}))
+	})
 	s.sessions.Store(sessionKey("provider-a", "session-a"), &providerSession{})
 
 	s.runRewardsTrustTierReconciliationSweep()
@@ -655,12 +651,11 @@ func TestRewardsTrustReconciliationDemotesTrustedProviderWithRevokedLegacyTokenH
 		State:      pool.StateReady,
 		AuthState:  pool.AuthBearerValidated,
 	}, nil)
-	s := NewServer(config.Default(), registry, zerolog.Nop(),
+	s := wireRewardsTrust(NewServer(config.Default(), registry, zerolog.Nop(),
 		WithTokenValidator(store),
-		WithProviderRewardsTrustTierStore(fakeRewardsTrustStore{
-			tiers: map[string]string{"provider-a": string(pool.TierTrusted)},
-		}),
-	)
+	), fakeRewardsTrustStore{
+		tiers: map[string]string{"provider-a": string(pool.TierTrusted)},
+	})
 	s.sessions.Store(sessionKey("provider-a", "session-a"), &providerSession{})
 
 	s.runRewardsTrustTierReconciliationSweep()
@@ -693,12 +688,11 @@ func TestRewardsTrustReconciliationDemotesTrustedProviderWithoutDurableIdentityP
 		State:      pool.StateReady,
 		AuthState:  pool.AuthBearerValidated,
 	}, nil)
-	s := NewServer(config.Default(), registry, zerolog.Nop(),
+	s := wireRewardsTrust(NewServer(config.Default(), registry, zerolog.Nop(),
 		WithTokenValidator(store),
-		WithProviderRewardsTrustTierStore(fakeRewardsTrustStore{
-			tiers: map[string]string{"provider-a": string(pool.TierTrusted)},
-		}),
-	)
+	), fakeRewardsTrustStore{
+		tiers: map[string]string{"provider-a": string(pool.TierTrusted)},
+	})
 	s.sessions.Store(sessionKey("provider-a", "session-a"), &providerSession{})
 
 	s.runRewardsTrustTierReconciliationSweep()
@@ -739,12 +733,11 @@ func TestRewardsTrustReconciliationKeepsVerifiedDurableIdentityAfterRevokedHisto
 		AuthState:                        pool.AuthBearerValidated,
 		DurableAdmissionIdentityVerified: true,
 	}, nil)
-	s := NewServer(config.Default(), registry, zerolog.Nop(),
+	s := wireRewardsTrust(NewServer(config.Default(), registry, zerolog.Nop(),
 		WithTokenValidator(store),
-		WithProviderRewardsTrustTierStore(fakeRewardsTrustStore{
-			tiers: map[string]string{"provider-a": string(pool.TierTrusted)},
-		}),
-	)
+	), fakeRewardsTrustStore{
+		tiers: map[string]string{"provider-a": string(pool.TierTrusted)},
+	})
 	s.sessions.Store(sessionKey("provider-a", "session-a"), &providerSession{})
 
 	s.runRewardsTrustTierReconciliationSweep()
@@ -767,9 +760,9 @@ func TestRewardsTrustReconciliationDoesNotPromoteNonBearerSession(t *testing.T) 
 		State:      pool.StateReady,
 		AuthState:  pool.AuthSelfMinted,
 	}, nil)
-	s := NewServer(config.Default(), registry, zerolog.Nop(), WithProviderRewardsTrustTierStore(fakeRewardsTrustStore{
+	s := wireRewardsTrust(NewServer(config.Default(), registry, zerolog.Nop()), fakeRewardsTrustStore{
 		tiers: map[string]string{"provider-a": string(pool.TierTrusted)},
-	}))
+	})
 	s.sessions.Store(sessionKey("provider-a", "session-a"), &providerSession{})
 
 	s.runRewardsTrustTierReconciliationSweep()
@@ -795,10 +788,10 @@ func TestRewardsTrustReconciliationDemotesProviderAfterRepeatedLookupFailuresWit
 			DurableAdmissionIdentityVerified: true,
 		}, nil)
 	}
-	s := NewServer(config.Default(), registry, zerolog.Nop(), WithProviderRewardsTrustTierStore(fakeRewardsTrustStore{
+	s := wireRewardsTrust(NewServer(config.Default(), registry, zerolog.Nop()), fakeRewardsTrustStore{
 		tiers:  map[string]string{"provider-b": string(pool.TierTrusted)},
 		errors: map[string]error{"provider-a": errors.New("lookup failed")},
-	}))
+	})
 	for _, id := range []string{"provider-a", "provider-b"} {
 		s.sessions.Store(sessionKey(id, "session-"+id), &providerSession{})
 	}
@@ -845,7 +838,7 @@ func TestRewardsTrustReconciliationSweepDeadlineDemotesUnresolvedTrustedProvider
 			DurableAdmissionIdentityVerified: true,
 		}, nil)
 	}
-	s := NewServer(config.Default(), registry, zerolog.Nop(), WithProviderRewardsTrustTierStore(blockingRewardsTrustStore{}))
+	s := wireRewardsTrust(NewServer(config.Default(), registry, zerolog.Nop()), blockingRewardsTrustStore{})
 	for i := 0; i < 8; i++ {
 		id := "provider-" + string(rune('a'+i))
 		s.sessions.Store(sessionKey(id, "session-"+id), &providerSession{})

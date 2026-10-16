@@ -14,7 +14,7 @@ Buyer `continuous_batching` stayed **off**. Live `v1.8.170` `live.malibu.provide
 ## Header
 
 - **Date:** 2026-09-20
-- **Operator:** augstar
+- **Operator:** @Augustas11
 - **Binary:** packaged `macprovider-cli` SHA-256 `3b803245aad3c73338c7fed27071dbe044981e9b5448f96dbeb841a9a3cc3f81`
 - **Hardware tuple:** Mac Studio M3 Ultra, 256 GB unified memory, macOS 26.4.1, AC power
 - **Model:** `mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit`

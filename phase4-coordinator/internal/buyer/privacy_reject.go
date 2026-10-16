@@ -13,6 +13,7 @@ import (
 // that came closest to serving it.
 var privacyRejectRank = map[string]int{
 	relayblind.PrivacyRejectModelNotServed:         0,
+	relayblind.PrivacyRejectPoolNoEligibleMember:   0,
 	relayblind.PrivacyRejectModelNotPrivateCapable: 1,
 	relayblind.PrivacyRejectLiveSessionUnavailable: 2,
 	relayblind.PrivacyRejectSettlementPrerequisite: 3,
@@ -25,8 +26,9 @@ var privacyRejectRank = map[string]int{
 	relayblind.PrivacyRejectKillSwitch:             10,
 	relayblind.PrivacyRejectKeyStaleOrRevoked:      11,
 	relayblind.PrivacyRejectKeyAttestationMismatch: 12,
-	relayblind.PrivacyRejectRelayBlindUnavailable:  13,
-	relayblind.PrivacyRejectStoreUnavailable:       14,
+	relayblind.PrivacyRejectAssuranceUnavailable:   13,
+	relayblind.PrivacyRejectRelayBlindUnavailable:  14,
+	relayblind.PrivacyRejectStoreUnavailable:       15,
 }
 
 // closerPrivacyReject returns the reason that ranks closer to serving.

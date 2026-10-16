@@ -2,7 +2,7 @@
 
 **Status:** Phase 3 IN PROGRESS  
 **Branch:** `feat/attestation-phase3`  
-**Worktree:** `/Users/augstar/macprovider-attest-phase3`  
+**Worktree:** `~/macprovider-attest-phase3`  
 **Base:** `origin/main`  
 **Confirmed scope:** macprovider-native attestation only (not Darkbloom integration).
 
@@ -337,11 +337,11 @@ Script auto-restores config backup on verification failure. Manual: set `require
 | 2026-07-08 | Runbook created; Phase 1 agents spawned (P1-A, P1-B, P1-C) |
 | 2026-07-08 | All three tracks landed in worktree; focused tests pass (Go SE+Liveness, Swift SEAttestation 12/12). Swift liveness unit tests still TODO. Entitlements blocker documented. |
 | 2026-07-09 | **Phase 1 merged** — PR #477 squash-merged to main (`001fb405`). Augustas11 approved (PR author was antfleet-ops). |
-| 2026-07-09 | **Phase 2 started** — worktree `/Users/augstar/macprovider-attest-phase2`, branch `fix/attestation-phase2`. Operator registering Apple MDM push cert in parallel. |
+| 2026-07-09 | **Phase 2 started** — worktree `~/macprovider-attest-phase2`, branch `fix/attestation-phase2`. Operator registering Apple MDM push cert in parallel. |
 | 2026-08-07 | Partner ABM + identity.apple.com instructions added: `docs/runbooks/apple-mdm-partner-registration.md`. P2-A/P2-C already on main via PR #509. |
 | 2026-08-17 | APNs push cert issued (topic `com.apple.mgmt.External.b3ba8c97-…`). P2-B: nginx `/v1/enroll`+`/mdm/`+`/scep`, MicroMDM Pearl install — see `docs/runbooks/pearl-micromdm-install.md`. |
 | 2026-08-17 | **Phase 2 enroll E2E done** — coordinator `/v1/enroll` tested, MicroMDM on Pearl, APNs cert live. Phase 2 exit criteria met. |
-| 2026-08-17 | **Phase 3 started** — worktree `/Users/augstar/macprovider-attest-phase3`, branch `feat/attestation-phase3`. Dual-mode MDA freshness, MicroMDM API client, LiveMDAService, pool MDA cache, WS observe wiring. |
+| 2026-08-17 | **Phase 3 started** — worktree `~/macprovider-attest-phase3`, branch `feat/attestation-phase3`. Dual-mode MDA freshness, MicroMDM API client, LiveMDAService, pool MDA cache, WS observe wiring. |
 | 2026-08-17 | **Phase 3 R2 remediation** — exclusive device binding (blocks SE-serial borrow), raw plist `DeviceAttestationNonce`, `acknowledge_event` webhook parse, migrate proof without early hardware tier. |
 | 2026-08-17 | **Phase 3 R3 remediation** — no pending pre-enrollment squat; hardware tier only via live MDA; durable SQLite MDA proofs; DeviceInformation enqueue rate-limit ledger. |
 

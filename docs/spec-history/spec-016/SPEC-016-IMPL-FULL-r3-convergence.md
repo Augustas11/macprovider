@@ -104,7 +104,7 @@ The repeated pattern (per `[[audit-cycles-are-design-discovery]]`):
 ## Branch + commit at convergence
 
 - Branch: `impl/spec-016`
-- Worktree: `/Users/augstar/macprovider-poc-spec016-audit/`
+- Worktree: `<repo>-spec016-audit/`
 - HEAD at r3 convergence: `<this commit>` (LOW gofmt + this
   convergence summary)
 - Diff base: `main`

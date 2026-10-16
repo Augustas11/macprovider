@@ -1,6 +1,6 @@
 module e2e-1690/fakeprov
 
-go 1.26.6
+go 1.26.9
 
 require (
 	github.com/gobwas/ws v1.4.0

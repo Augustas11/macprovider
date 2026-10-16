@@ -62,6 +62,12 @@ func (s *Server) CatalogMaterialMissingUnderEnforce(p pool.Provider) bool {
 }
 
 func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool.Provider) (*providerws.SettlementReceiptMetadata, error) {
+	if b.state != nil && b.state.toolSelection != nil {
+		current, ok := b.server.pool.Resolve(provider.ProviderID, provider.AssignedID)
+		if !ok || !providerSupportsToolSelection(current, b.state.toolSelection) || current.ModelID != provider.ModelID {
+			return nil, errUnsupportedToolSelectionSession
+		}
+	}
 	attemptN := b.beginRouteSnapshotAttempt()
 	expectedHash := strings.TrimSpace(provider.ExpectedModelHash)
 	// #608 Partial: fail closed on active Tier-2 vs admission-hash conflict
@@ -458,6 +464,11 @@ func stringPtrOrNil(value string) *string {
 }
 
 func writeRouteSnapshotError(w http.ResponseWriter, rec *billingRecorder, err error) {
+	if errors.Is(err, errUnsupportedToolSelectionSession) {
+		rec.logBuyerFailure(http.StatusBadRequest, "Provider capability changed before dispatch")
+		writeRouteError(w, unsupportedToolChoiceRouteError())
+		return
+	}
 	rec.server.log.Warn().Err(err).Str("request_id", rec.requestID).Msg("route snapshot insert failed before provider dispatch")
 	if errors.Is(err, context.Canceled) {
 		rec.logBuyerFailure(statusClientClosedRequest, "Buyer canceled before route snapshot dispatch")

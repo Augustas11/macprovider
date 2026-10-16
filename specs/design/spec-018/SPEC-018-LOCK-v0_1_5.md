@@ -3,7 +3,7 @@
 **Lock date:** 2026-06-27
 **Lock commit:** `eb5bdde`
 **Branch:** `spec/018-agentic-tool-calling`
-**Worktree:** `/Users/augstar/macprovider-spec-018-tool-calling`
+**Worktree:** `~/macprovider-spec-018-tool-calling`
 
 ## Convergence trajectory
 

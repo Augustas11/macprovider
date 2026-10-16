@@ -578,7 +578,7 @@ These are analysis, not commitments. Each names what its own SPEC must resolve; 
 
 **#744** (open) provenance audit + floor-vs-fit; **#745** (closed) incumbent-benchmark bug; **#742** (closed) swap disqualifier, live prod data at `pool_size: 1`; **#687** (open) oMLX provisional gates + trust invariant; **#584** lab-Mac blocker + canary-induced collapse on the M1 8 GB provider; **#582** stranger-onboarding proof; **PR #772** (#744 partial), **PR #751** (#745 fix), **PR #748** (#742 fix), **PR #387** (SPEC-029), **`d53e8650`** (SPEC-037 IMPL — the effort-calibration reference).
 
-`beta/DECISION_CRITERIA.md` [E-spec]: Entries 109, 134, 191, 195, 196, 198, 199 (Entry 199's blind + real-hardware verification is the methodology precedent this roadmap's IMPL items must follow).
+`docs/decision-log.md` [E-spec]: Entries 109, 134, 191, 195, 196, 198, 199 (Entry 199's blind + real-hardware verification is the methodology precedent this roadmap's IMPL items must follow).
 
 `ops/exceptions/production-exceptions.json` + `ops/runbooks/pearl-exception-clearance-20260722.md` [E-spec] — live overlay truth; `exc-onboarding-autotune-hello-gate` removal condition and `expiry_unknown_reason`; `exc-canary-disabled-enable-gate`.
 

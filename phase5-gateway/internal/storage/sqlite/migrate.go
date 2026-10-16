@@ -69,6 +69,7 @@ const quotaReservationsTableDDL = `CREATE TABLE IF NOT EXISTS quota_reservations
 	relay_blind_provider_binding_digest TEXT NOT NULL DEFAULT '',
 	input_token_upper_bound INTEGER NOT NULL DEFAULT 0 CHECK (input_token_upper_bound >= 0),
 	max_output_tokens INTEGER NOT NULL DEFAULT 0 CHECK (max_output_tokens >= 0),
+	funding_source TEXT NOT NULL DEFAULT 'quota' CHECK (funding_source IN ('quota', 'allowance')),
 	PRIMARY KEY (account_id, request_id)
 )`
 

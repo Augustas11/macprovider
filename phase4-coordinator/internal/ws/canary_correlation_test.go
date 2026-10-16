@@ -123,6 +123,7 @@ func TestExpireCanaryCorrelationWindowsAppliesIncomplete(t *testing.T) {
 	cfg.Pool.CanaryFailureThreshold = 1
 	cfg.Pool.CanaryChallenges = []config.CanaryChallengeConfig{testCanaryChallenge()}
 	s := NewServer(cfg, registry, zerolog.Nop())
+	awaitStartupSnapshots(t, s)
 	// Freeze now for deterministic deadline.
 	base := time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC)
 	s.now = func() time.Time { return base }
@@ -200,6 +201,7 @@ func TestNoteBuyerSuccessObservedServing(t *testing.T) {
 		t.Fatalf("stamp = %v want %v", registry.LastBuyerSuccessAt("obs"), at)
 	}
 	s := NewServer(config.Default(), registry, zerolog.Nop())
+	awaitStartupSnapshots(t, s)
 	s.now = func() time.Time { return at.Add(30 * time.Second) }
 	got, _ := registry.Resolve("obs", "s")
 	if !s.observedServingFor(got) {

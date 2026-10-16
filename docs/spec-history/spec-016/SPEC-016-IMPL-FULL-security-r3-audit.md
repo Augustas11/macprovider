@@ -89,7 +89,7 @@ The regression test `TestRunner_PollAndConfirm_RejectsShallowSecondary` at `runn
 
 ## Validation Evidence
 
-Commands run from `/Users/augstar/macprovider-poc-spec016-audit/phase4-coordinator`:
+Commands run from `<repo>-spec016-audit/phase4-coordinator`:
 
 ```bash
 govulncheck ./...

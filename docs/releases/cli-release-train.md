@@ -74,7 +74,9 @@ loopback coordinator, gateway and CLI; 1.8.240 vs final main; output-heavy at
 announced pause windows of at most 25 minutes). Cut only after it passes; any
 merge in between changes the SHA and re-runs it.
 
-**Version and timing (2026-10-13):** the cut is **1.8.242** (staging PR #1978; runtime v1.8.241 took the 241 tag first). It runs on or after 2026-10-18, when the Studio is reachable again for the pre-cut isolated e2e and the canary.
+**Version and timing (2026-10-13, operator):** one cut, **1.8.242** (staging PR #1978; runtime v1.8.241 took the 241 tag), carrying **every CLI-side implementation** merged by freeze time. The only hold is Studio reachability (not on the tailnet; operator off the home LAN until 2026-10-18): the CB session's pre-cut isolated e2e and the Studio canary both need it. If the Studio is put on the tailnet earlier, the cut moves up.
+
+Order on the cut day: (1) Studio validation + one verification audit for #1986 (provider scoring job), then merge; (2) freeze main and merge #1978; (3) CB-session isolated e2e of that exact SHA; (4) `scripts/ops/cli-release.sh` step by step with the Studio canary.
 
 | PR | Change | Status |
 |---|---|---|
@@ -87,6 +89,58 @@ merge in between changes the SHA and re-runs it.
 | #1961 | Watchdog grace window after an operator-pause resume | merged (#1965) |
 | #1968 | Malibu.app App Attest signing + CLI challenge/submit subcommands (coordinator side live in v1.8.241) | merged (`f387e3841`) |
 | #1983 | Privacy in-band identity key rotation, provider side (`privacy-class rotate-identity`, SPEC-049-R031) | merged (`723ea9c5f`) |
+| #1987 | Per-Mac engine profile in the heartbeat (SPEC-001-R006) for capability-aware routing (#1355) | merged (`79abef361`) |
+| #1986 | Compute-integrity teacher-forced scoring job (SPEC-036 FR-21, #1644) | draft: Studio validation + one verification audit, then merge before freeze |
+| #2020 (issue #2014) | Enforced native tool selection, schema/cardinality validation, streaming holdback and loaded-model capability advertisement; details below | merged (`33b6a3238`); not in candidate 1.8.242; hardware and signed-candidate live acceptance deferred |
+
+### Tool selection — merged, awaiting a later candidate (2026-10-15)
+
+[PR #2020](https://github.com/Augustas11/macprovider/pull/2020), merge
+`33b6a3238c31b934ba2cef10e62814091092efbd`, changes the provider CLI as well as
+the coordinator and gateway. Candidate **1.8.242**, acceptance run
+[38702366766](https://github.com/Augustas11/macprovider/actions/runs/38702366766)
+at `27ae5dc84`, predates this change. Its signed bytes and CF-242-E2E record
+cannot establish tool-selection acceptance. Include this payload in a later
+reviewed candidate; this entry reserves no version and does not change the
+existing candidate's promotion scope.
+
+Provider changes carried by that later candidate:
+
+- Exact `mlx-community/Qwen3.6-35B-A3B-4bit` on native `mlx_cache` implements
+  `required` and named selection through full generation, strict tool-envelope
+  parsing, declared-function and argument-schema validation, and call-count
+  checks. Omitted/false parallel policy permits exactly one call; true permits
+  1–128. Malformed, wrong-name, zero-call, truncated or token-exhausted output
+  fails; calls are not fabricated, repaired or retried as `auto`.
+- Native `none` withholds output until no tool calls are present. Other native
+  model identities reject required/named; loopback adapters reject explicit
+  none/required/named. Existing supported `auto` behavior is preserved.
+- Guaranteed streams withhold all output until validation. Invalid generation
+  returns `tool_selection_validation_failed`, never ordinary successful prose.
+  Cancellation and disconnect paths retain their existing accounting behavior.
+- Auth/hello/heartbeat publish `schema-holdback-v1` capabilities bound to the
+  currently loaded model/runtime; unloaded runtimes advertise no explicit
+  capability. Relay-blind requests remain outside this contract, with explicit
+  non-auto modes defensively rejected after decryption.
+
+The [tool-selection contract](../tool-selection.md) records the exact schema,
+argument and completion-budget bounds and endpoint matrix. SPEC-001-R007,
+SPEC-006-R021 and SPEC-018-R006 define the reconciled wire/error/selection
+contract. The [coordinator release entry](coordinator-release-train.md#tool-selection--merged-awaiting-runtime-rollout-2026-10-15)
+records the matching routing and gateway payload; a provider-only upgrade does
+not establish end-to-end support.
+
+Required [implementation CI](https://github.com/Augustas11/macprovider/actions/runs/38712318356)
+and all three audit lanes passed. Hardware and signed-candidate live acceptance
+are **deferred at operator request**, not waived or complete. Before reporting
+issue #2014 complete, verify real required/named/none/auto turns, streaming and
+non-streaming, schema/cardinality/exhaustion failures and cancellation on the
+supported native model, then prove the same contract through the released
+gateway and compatible signed provider. Preserve release asset byte identity
+and previous-stable updater verification. Use `scripts/ops/cli-release.sh`
+(`status`, `next`, then one documented `next --run` step at a time). No CLI cut,
+provider restart, fleet recommendation change or live acceptance was performed
+for this entry; issue #2014 remains open.
 
 ## Earlier: net changes vs 1.8.232 (shipped in 1.8.238 / 1.8.240)
 
@@ -848,6 +902,7 @@ mainland-provider installer handoff.
 - **Carry-forward CF-232-E2E (1.8.232, candidate `36758c05c`, run 37957112917):** carry forward the 1.8.230 in-scope decode e2e (no decode-path change for native MLX). 1.8.232 adds the #1923 BYOM polish (claim credential store, creator revoke/lifecycle, `--from-proposal`, `restart`, pool selection in offers, mlx_lm.server and LM Studio resolution). In-scope e2e for those changes ran live on the exact signed candidate on the designated Studio, 2026-10-09 22:25-22:51Z: payload-only swap of the live provider; `canary_smoke --probe` recorded binary 1.8.232, exact compatibility set, coordinator connected, CB active and `live_verified`, paged KV attached. Three fresh provider identities on 1.8.232 (Ollama, LM Studio GGUF, mlx_lm.server MLX snapshot) were bootstrapped with referral codes, claimed through the portal, proposed with `models propose --yes` (signed `requested_pool_model_id`), added to a self-serve pool by a v2 manifest signed with `creator manifest sign --from-proposal` and admitted; one paid buyer request per engine through the public gateway returned 200 with `X-MacProvider-Engine` `ollama_loopback`, `lmstudio_loopback`, `mlxlm_loopback`, each credited (`provider_reported`, not quarantined).
 - **In-scope e2e record CF-238-E2E (1.8.238, candidate `6f7290f45`, run 38045791437):** 1.8.238 changes the decode path (#1927 MLX 3.32.3 / MLX 0.32 forks; #1947 CB on by default with the per-Mac self-check; model-keyed native MTP), so this is fresh evidence, not a carry-forward of 1.8.232. (1) #1927 Studio evidence on the final stack: startup isolation probes `proven=true`, `crossRowDivergences=0` for A3B (fused MoE on/off) and 27B; grouped-prefill probe 0/108 divergences; native-MTP R015 PASS (`docs/research/mlx-swift-lm-3.32.3/`). (2) #1947 Studio e2e on the 3.32.3 runtime: Qwen3.6-35B-A3B self-check exact at k=2..23 (near-ties only), granted; Llama 3.1 8B identical at every width, granted; 16 concurrent tagged requests all batched (`audits/2026-10-10-auto-cb-slots/`). (3) Exact signed candidate, live, 2026-10-10: payload-only swap of the designated Studio provider at 11:58Z; `canary_smoke --probe` recorded binary 1.8.238, exact compatibility set, coordinator connected, CB active, paged KV attached, self-check `granted` 8 slots (verified k=12), plus a gateway proof. (4) Exact signed candidate on an M1 8GB house provider (Llama 3.2 3B), swapped 12:21Z: ready and buyer-serving, self-check pending at 1 slot by design; over 9 minutes of runner traffic it served 214.6k tokens/hour at 2.77 s median request time vs 209k/hour and 2.85 s on 1.8.232 in the prior hour (no regression; the 2.3 tok/s startup probe was first-run kernel compilation). (5) Privacy code identity admitted from the signed release metadata (`registrations: approved by release_metadata`), no hand-added cdhash. Native MTP: the re-baselined challenge bank (PR #1954, digest `7d624766…`) is released right after promotion; its first live coordinator canary on the signed 1.8.238 is the remaining MTP gate.
 - **Carry-forward CF-240-E2E (1.8.240, candidate `7c3485159`, run 38064120168):** carry forward CF-238-E2E. 1.8.240 changes no decode-path line: #1956 only gives the native-MTP self-check's ordinary-reference request IDs a per-run nonce, so durable replay claims no longer reject native-MTP admission on every restart after the first (the 1.8.238 `selftest_execution_failed` regression from #1947). Live on the exact signed candidate, 2026-10-10: payload-only swap of the designated Studio provider at 16:07Z, which is a restart; afterwards native MTP is `enabled`, mode `eligible`, reason `active` (it admitted after the restart, which 1.8.238 could not do), CB self-check `granted` 8 slots, startup probe 80.5 tok/s; `canary_smoke --probe` recorded binary 1.8.240, exact compatibility set, coordinator connected, CB active, paged KV attached, self-check grant, plus a gateway proof.
+- **Carry-forward CF-242-E2E (1.8.242, candidate `27ae5dc84`, run 38702366766):** carry forward the pre-merge Studio e2e of the decode-path changes this cut ships, plus CF-240-E2E for everything else. Decode-path lines changed since 1.8.240 and their evidence: #1974 (CB decode and verify rows bounded below the device vector limit; Studio M3 Ultra throughput and isolation evidence in the PR), #1953 (hybrid decode lockstep window 16; Studio M3 Ultra window-1 vs window-16 proof in `docs/research/hybrid-decode-window/`), #1960 (self-check ladder bounded by the queue limit; unit tests), #1966 and #1964 (serial decode stops before hidden post-stop tokens; buyer stop strings stay outside hidden Harmony channels; unit tests). Live on the exact signed candidate, 2026-10-15: signed-tarball swap of an M5 32GB house provider (Llama 3.2 3B), which rejoined buyer-serving; `canary_smoke --probe` recorded binary 1.8.242, exact compatibility set, coordinator connected, paged KV attached, CB policy `live_verified` with local proof passed and no emergency-off, self-check measured `single_row` (the same result this Mac measured on 1.8.240), plus a gateway proof attributed to the canary through the coordinator request log on the serial path. The Studio was unreachable for this cut, so its CB grant on 1.8.242 is read from the fleet after promotion. Privacy code identity admitted from the signed release metadata.
 
 ## Promotion gate (checklist)
 

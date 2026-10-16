@@ -44,8 +44,14 @@ const (
 	PrivacyRejectDispatchUnavailable      = "dispatch_unavailable"
 	PrivacyRejectMarkerMismatch           = "marker_mismatch"
 	PrivacyRejectPoolScopedRequest        = "pool_scoped_request"
+	PrivacyRejectPoolNoEligibleMember     = "pool_no_eligible_member"
+	PrivacyRejectPoolStateStale           = "pool_state_stale"
 	PrivacyRejectProviderRejected         = "provider_rejected"
-	PrivacyRejectOther                    = "other"
+	PrivacyRejectCapabilityUnsupported    = "capability_unsupported"
+	// PrivacyRejectAssuranceUnavailable: the request required
+	// code_bound_attested and the posture is not code-bound (SPEC-049-R034).
+	PrivacyRejectAssuranceUnavailable = "assurance_unavailable"
+	PrivacyRejectOther                = "other"
 )
 
 var privacyRejectReasons = map[string]struct{}{
@@ -58,7 +64,8 @@ var privacyRejectReasons = map[string]struct{}{
 	PrivacyRejectSessionLost: {}, PrivacyRejectSlotUnavailable: {}, PrivacyRejectProviderQuotaUnavailable: {},
 	PrivacyRejectBuyerCancelled: {}, PrivacyRejectSettlementSnapshotFailed: {}, PrivacyRejectDispatchUnavailable: {},
 	PrivacyRejectMarkerMismatch: {}, PrivacyRejectPoolScopedRequest: {}, PrivacyRejectProviderRejected: {},
-	PrivacyRejectOther: {},
+	PrivacyRejectCapabilityUnsupported: {}, PrivacyRejectPoolNoEligibleMember: {}, PrivacyRejectPoolStateStale: {},
+	PrivacyRejectAssuranceUnavailable: {}, PrivacyRejectOther: {},
 }
 
 // PrivacyRejectReasons returns the closed reason set.

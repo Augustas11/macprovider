@@ -1,6 +1,8 @@
 # SPEC-027 — Provider Proof of Ownership for App-Track Wallet Changes
 
-Status: SKELETON v0.1 · Owner: augstar · Target: follow-up to SPEC-026 Wave 2
+Status: SKELETON v0.1.1 · Owner: @Augustas11 · Target: follow-up to SPEC-026 Wave 2
+
+**Change log v0.1.1 (2026-10-14, public-repo cleanup):** Editorial, no normative change: owner is the GitHub handle.
 
 ## 1. Purpose
 

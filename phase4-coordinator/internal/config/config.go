@@ -133,6 +133,7 @@ type Config struct {
 	Stats                        StatsConfig                  `yaml:"stats"`
 	Onboarding                   OnboardingConfig             `yaml:"onboarding"`
 	MalibuEmission               MalibuEmissionConfig         `yaml:"malibu_emission"`
+	StakeAllowance               StakeAllowanceConfig         `yaml:"stake_allowance"`
 	AutotuneFeeds                AutotuneFeedsConfig          `yaml:"autotune"`
 	ProofOfWeights               ProofOfWeightsConfig         `yaml:"proof_of_weights"`
 	AdmissionCanaryHarness       AdmissionCanaryHarnessConfig `yaml:"admission_canary_harness"`
@@ -653,7 +654,7 @@ type StatsPartnerKeysConfig struct {
 	// on a deployed coordinator config, `partner-keys issue`
 	// reads the file at this path AND requires its content
 	// to match the SPEC-014 SHA + YYYY-MM-DD sign-off
-	// template (see OPS.md §10.5). Issuance fails closed if
+	// template (see the operator runbook §10.5). Issuance fails closed if
 	// the file is missing, empty, or malformed.
 	//
 	// When this field is UNSET (empty), the coordinator is
@@ -841,7 +842,7 @@ type StatsRollupConfig struct {
 	// `earnings_work_usd = provider_credits * UsdPerMillionCredits
 	// / 1_000_000`. Default 1.0 (1 USD per million credits).
 	// Operator MAY override per ramp; the formula is documented
-	// in OPS.md.
+	// in the operator runbook.
 	UsdPerMillionCredits float64 `yaml:"usd_per_million_credits"`
 	// DriftThresholdRatio — fractional divergence (>0.005 = >0.5%
 	// per SPEC §9.4) at which the nightly rebuild emits
@@ -1093,6 +1094,31 @@ type RoutingConfig struct {
 	StickyTTLS                    int                         `yaml:"sticky_ttl_s"`
 	StickyMaxEntries              int                         `yaml:"sticky_max_entries"`
 	ModelClasses                  map[string]ModelClassConfig `yaml:"model_classes"`
+	// VisionQualifications is the operator-reviewed allowlist for native image
+	// inference. It is deliberately empty by default: provider self-report and a
+	// model name never establish qualified buyer capacity.
+	VisionQualifications []VisionQualificationConfig `yaml:"vision_qualifications"`
+}
+
+// VisionQualificationConfig pins every identity component that affects image
+// interpretation. Values are matched exactly against the active provider
+// session and its vision runtime capability.
+type VisionQualificationConfig struct {
+	ProviderID            string `yaml:"provider_id"`
+	BinaryVersion         string `yaml:"binary_version"`
+	HardwareChip          string `yaml:"hardware_chip"`
+	RAMGB                 int    `yaml:"ram_gb"`
+	MaxContextTokens      int    `yaml:"max_context_tokens"`
+	MaxConcurrency        int    `yaml:"max_concurrency"`
+	ModelID               string `yaml:"model_id"`
+	ModelHash             string `yaml:"model_hash"`
+	ModelHashAlgorithm    string `yaml:"model_hash_algorithm"`
+	WeightsManifestSHA256 string `yaml:"weights_manifest_sha256"`
+	ProcessorDigest       string `yaml:"processor_digest"`
+	Runtime               string `yaml:"runtime"`
+	RuntimeRevision       string `yaml:"runtime_revision"`
+	MediaProfile          string `yaml:"media_profile"`
+	QualificationDigest   string `yaml:"qualification_digest"`
 }
 
 type ModelClassConfig struct {
@@ -1429,14 +1455,18 @@ type GitHubOAuthConfig struct {
 }
 
 type StorageConfig struct {
-	DBPath                   string `yaml:"db_path"`
-	SnapshotIntervalS        int    `yaml:"snapshot_interval_s"`
-	RequestLogRetentionDays  int    `yaml:"request_log_retention_days"`
-	RequestLogPruneOnStartup bool   `yaml:"request_log_prune_on_startup"`
-	AuditLogPruneOnStartup   bool   `yaml:"audit_log_prune_on_startup"`
-	// SPEC-002 v1.3.5 §7.10.1 R-7.10.2 — retention for the
-	// operator_model_swap audit_log table (and any future audit event
-	// types). Default 90 days mirrors request_log_retention_days.
+	DBPath            string `yaml:"db_path"`
+	SnapshotIntervalS int    `yaml:"snapshot_interval_s"`
+	// RequestLogRetentionDays bounds request_log (default 14, SPEC-005
+	// §2.1b); it must exceed the nightly reconcile window. Rows a D1a
+	// wholesale statement reads are folded into per-day usage aggregates
+	// before they leave.
+	RequestLogRetentionDays  int  `yaml:"request_log_retention_days"`
+	RequestLogPruneOnStartup bool `yaml:"request_log_prune_on_startup"`
+	AuditLogPruneOnStartup   bool `yaml:"audit_log_prune_on_startup"`
+	// SPEC-002 v1.3.5 §7.10.1 R-7.10.2 — retention for the audit_log
+	// tables: a 90-day compliance floor, independent of
+	// request_log_retention_days.
 	AuditLogRetentionDays int `yaml:"audit_log_retention_days"`
 	// SPEC-022 R-15.10: a drained settlement_receipt_audit_outbox row is
 	// already copied into the audit database, so it leaves the money
@@ -1448,6 +1478,14 @@ type StorageConfig struct {
 	// minutes after it was mirrored, once its primary row is verified to
 	// hold the same digest and JSON. Unmirrored and mismatched rows stay.
 	RouteSnapshotJournalMirroredGraceMinutes int `yaml:"route_snapshot_journal_mirrored_grace_minutes"`
+	// SPEC-002 R-7.10.2 (#1793): the settlement receipt audit database keeps
+	// this many whole UTC days hot. Older days move to verified closed period
+	// archives in AuditLogArchiveDir, which hold the audit history for
+	// audit_log_retention_days.
+	AuditLogHotDays int `yaml:"audit_log_hot_days"`
+	// AuditLogArchiveDir is the absolute directory of the closed period
+	// archives; empty means audit-archive next to the audit database.
+	AuditLogArchiveDir string `yaml:"audit_log_archive_dir"`
 }
 
 // SourceEvidenceConfig gates the coordinator-owned source export endpoint. The
@@ -1766,6 +1804,28 @@ type BillingConfig struct {
 	// Retention is the SPEC-022 R-15 settled-evidence retention job
 	// (#1793). On by default; `enabled: false` is the kill switch.
 	Retention BillingRetentionConfig `yaml:"retention"`
+	// LedgerRollup rolls settled ledger detail rows up into per-payout
+	// aggregates (SPEC-022 R-15.11, SPEC-005 §7.8).
+	LedgerRollup LedgerRollupConfig `yaml:"ledger_rollup"`
+}
+
+// LedgerRollupConfig bounds the hot ledger: once a request's evidence is
+// archived and every credit settled into a live payout whose window is at
+// least MinSettlementCycles completed windows old, its detail rows move to a
+// verified archive and per-payout, per-hour aggregates replace them. The
+// archive directory, free-space floor, batch size, pause, and run budget are
+// billing.retention's.
+type LedgerRollupConfig struct {
+	// Enabled runs the rollup after each nightly retention run. Default
+	// true; false (SIGHUP-reloadable) is the kill switch.
+	Enabled bool `yaml:"enabled"`
+	// MinSettlementCycles is how many completed settlement windows must
+	// follow a payout's window before its credits roll up. Default 5; the
+	// span (cycles x cadence days) must be at least 31 days, past the
+	// pool-proven window and the admin reconcile range. A credit also never
+	// rolls up while storage.request_log_retention_days still holds its
+	// request_log row.
+	MinSettlementCycles int `yaml:"min_settlement_cycles"`
 }
 
 // BillingRetentionConfig moves settled SPEC-022 evidence rows out of the hot
@@ -1779,9 +1839,16 @@ type BillingRetentionConfig struct {
 	// means "retention-archive" in the directory of the coordinator database
 	// file (storage.db_path); an explicit value must be absolute.
 	ArchiveDir string `yaml:"archive_dir"`
-	// MinSettlementCycles is how many completed settlement windows must
-	// follow the window a credit settled in. Floor 2.
+	// MinSettlementCycles still loads and is validated (floor 2) so existing
+	// configurations keep working; since SPEC-022 v0.4.5 it no longer gates
+	// evidence retention (VerdictCloseGraceHours does).
 	MinSettlementCycles int `yaml:"min_settlement_cycles"`
+	// VerdictCloseGraceHours is the SPEC-022 R-15.2 grace: a request's
+	// evidence may leave the hot store once every verdict closed and every
+	// credit was created at least this long ago (and before the start of
+	// the newest completed nightly reconcile). Default 48, in [24, 720], and
+	// at least settlement.startup_reconcile_window_hours + 1.
+	VerdictCloseGraceHours int `yaml:"verdict_close_grace_hours"`
 	// BatchSize is the number of requests deleted per short transaction.
 	BatchSize int `yaml:"batch_size"`
 	// BatchPauseMS is the pause between delete batches that yields the
@@ -1924,7 +1991,7 @@ func Default() Config {
 			TimeoutS: 900,
 		},
 		Limits: LimitsConfig{
-			MaxChatRequestBodyBytes: 1 << 20,
+			MaxChatRequestBodyBytes: 4 << 20,
 		},
 		WS: WSConfig{
 			WriteBufferSize:             64,
@@ -2015,12 +2082,13 @@ func Default() Config {
 		Storage: StorageConfig{
 			DBPath:                   "coordinator.db",
 			SnapshotIntervalS:        300,
-			RequestLogRetentionDays:  90,
+			RequestLogRetentionDays:  14,
 			RequestLogPruneOnStartup: true,
 			AuditLogPruneOnStartup:   true,
 			AuditLogRetentionDays:    90,
 			SettlementReceiptAuditOutboxDrainedRetentionHours: 24,
 			RouteSnapshotJournalMirroredGraceMinutes:          60,
+			AuditLogHotDays:                                   7,
 		},
 		SourceEvidence: SourceEvidenceConfig{
 			Enabled:      false,
@@ -2058,10 +2126,12 @@ func Default() Config {
 				},
 			},
 		},
+		StakeAllowance: DefaultStakeAllowanceConfig(),
 		Billing: BillingConfig{
 			Retention: BillingRetentionConfig{
 				Enabled:                     true,
 				MinSettlementCycles:         2,
+				VerdictCloseGraceHours:      48,
 				BatchSize:                   50,
 				BatchPauseMS:                200,
 				MaxRequestsPerRun:           20000,
@@ -2072,6 +2142,10 @@ func Default() Config {
 				ArchiveMinFreeBytes:         20 << 30,
 				ArchiveMinFreePercent:       10,
 				OffhostVerifyTimeoutSeconds: 300,
+			},
+			LedgerRollup: LedgerRollupConfig{
+				Enabled:             true,
+				MinSettlementCycles: 5,
 			},
 		},
 		Settlement: SettlementConfig{
@@ -3098,6 +3172,20 @@ func (c Config) Validate() error {
 			return fmt.Errorf("routing.model_classes.%s must not set both members and models", name)
 		}
 	}
+	for i, q := range c.Routing.VisionQualifications {
+		if q.ProviderID == "" || q.BinaryVersion == "" || q.HardwareChip == "" || q.RAMGB <= 0 || q.MaxContextTokens <= 0 || q.MaxConcurrency <= 0 ||
+			q.ModelID == "" || q.ModelHash == "" || q.ModelHashAlgorithm == "" ||
+			q.WeightsManifestSHA256 == "" || q.ProcessorDigest == "" || q.Runtime == "" ||
+			q.RuntimeRevision == "" || q.MediaProfile == "" || q.QualificationDigest == "" {
+			return fmt.Errorf("routing.vision_qualifications[%d] must bind provider, binary, hardware, capacity, model, weights, processor, runtime, media profile, and qualification evidence", i)
+		}
+		if !lowerHex64Pattern.MatchString(q.QualificationDigest) {
+			return fmt.Errorf("routing.vision_qualifications[%d].qualification_digest must be a lowercase sha256 hex digest", i)
+		}
+		if q.ModelID != "mlx-community/Qwen2-VL-2B-Instruct-4bit" || q.Runtime != "mlx_cache" || q.MediaProfile != "qwen2vl-inline-v1" {
+			return fmt.Errorf("routing.vision_qualifications[%d] must use the qualified qwen2vl-inline-v1 runtime tuple", i)
+		}
+	}
 	if c.Pool.DegradedBackoffS <= 0 || c.Pool.DegradedMaxRetries <= 0 {
 		return fmt.Errorf("pool degraded recovery settings must be > 0")
 	}
@@ -3280,11 +3368,21 @@ func (c Config) Validate() error {
 	if h := c.Storage.SettlementReceiptAuditOutboxDrainedRetentionHours; h < 1 || h > 24*c.Storage.AuditLogRetentionDays {
 		return fmt.Errorf("storage.settlement_receipt_audit_outbox_drained_retention_hours must be between 1 and 24*audit_log_retention_days")
 	}
+	if d := c.Storage.AuditLogHotDays; d < 1 || d > c.Storage.AuditLogRetentionDays {
+		return fmt.Errorf("storage.audit_log_hot_days must be between 1 and audit_log_retention_days")
+	}
+	if dir := c.Storage.AuditLogArchiveDir; dir != "" && !filepath.IsAbs(dir) {
+		return fmt.Errorf("storage.audit_log_archive_dir must be an absolute path")
+	}
 	if m := c.Storage.RouteSnapshotJournalMirroredGraceMinutes; m < 1 || m > maxRouteSnapshotJournalMirroredGraceMinutes {
 		return fmt.Errorf("storage.route_snapshot_journal_mirrored_grace_minutes must be between 1 and %d", maxRouteSnapshotJournalMirroredGraceMinutes)
 	}
-	if c.Storage.RequestLogRetentionDays < c.Settlement.NightlyReconcileWindowDays {
-		return fmt.Errorf("storage.request_log_retention_days must be >= settlement.nightly_reconcile_window_days")
+	// SPEC-005 §2.1b (#1793): request_log never leaves before every
+	// reconcile that reads it: the nightly window plus its recovery grace,
+	// and the startup scan window.
+	if c.Storage.RequestLogRetentionDays <= c.Settlement.NightlyReconcileWindowDays ||
+		c.Storage.RequestLogRetentionDays*24 <= c.Settlement.StartupReconcileWindowHours {
+		return fmt.Errorf("storage.request_log_retention_days must exceed settlement.nightly_reconcile_window_days and the startup reconcile window")
 	}
 	if c.Endpoints.ProviderEarnings.RateLimitPerMinute <= 0 {
 		return fmt.Errorf("endpoints.provider_earnings.rate_limit_per_minute must be > 0")
@@ -3296,6 +3394,9 @@ func (c Config) Validate() error {
 		return err
 	}
 	if err := c.validateBillingRetention(); err != nil {
+		return err
+	}
+	if err := c.validateStakeAllowance(); err != nil {
 		return err
 	}
 	if err := c.validateStats(); err != nil {
@@ -4716,6 +4817,12 @@ func (c Config) validateBillingRetention() error {
 	if r.MinSettlementCycles < 2 {
 		return fmt.Errorf("billing.retention.min_settlement_cycles must be >= 2")
 	}
+	if g := r.VerdictCloseGraceHours; g < 24 || g > 720 {
+		return fmt.Errorf("billing.retention.verdict_close_grace_hours must be in [24, 720]")
+	}
+	if r.VerdictCloseGraceHours <= c.Settlement.StartupReconcileWindowHours {
+		return fmt.Errorf("billing.retention.verdict_close_grace_hours must exceed settlement.startup_reconcile_window_hours")
+	}
 	if r.BatchSize < 1 || r.BatchSize > 1000 {
 		return fmt.Errorf("billing.retention.batch_size must be in [1, 1000]")
 	}
@@ -4755,6 +4862,14 @@ func (c Config) validateBillingRetention() error {
 	}
 	if strings.TrimSpace(r.ArchiveDir) != "" && !filepath.IsAbs(r.ArchiveDir) {
 		return fmt.Errorf("billing.retention.archive_dir must be an absolute path")
+	}
+	lr := c.Billing.LedgerRollup
+	if lr.MinSettlementCycles < 2 {
+		return fmt.Errorf("billing.ledger_rollup.min_settlement_cycles must be >= 2")
+	}
+	span := lr.MinSettlementCycles * c.Settlement.CadenceDays
+	if span < 31 {
+		return fmt.Errorf("billing.ledger_rollup.min_settlement_cycles x settlement.cadence_days must be >= 31 days")
 	}
 	return nil
 }

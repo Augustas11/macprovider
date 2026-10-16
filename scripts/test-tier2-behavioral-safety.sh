@@ -136,6 +136,7 @@ run_apply() {
     FAKE_CURL_LOG="$TMP_ROOT/curl.log" \
     VERIFY_SCRIPT="$TMP_ROOT/verify" \
     SSH_BIN="$TMP_ROOT/ssh" \
+    VPS_HOST=fake-pearl.invalid \
     SSH_KEY="$TMP_ROOT/key" \
     REMOTE_CONFIG=/remote/coordinator.yaml \
     DEMO_TOKEN=demo \

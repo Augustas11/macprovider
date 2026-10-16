@@ -1,10 +1,15 @@
 # SPEC-019 - Structured output (`response_format: json_schema`)
 
-**Version:** 0.2.6 (2026-09-28, streaming cleanup-prefix holdback clarified)
+**Version:** 0.3.1 (2026-10-15, relay-blind non-strict capability gate)
 **Depends on:** SPEC-001, SPEC-006, SPEC-015, SPEC-018 v0.2.10 LOCKED
-**Status:** LOCKED. v0.2.6 clarifies cleanup-prefix holdback and exact streaming byte parity; v0.2.5 clarified the existing §8 "preserve retryability" requirement.
+**Status:** LOCKED. v0.3.1 extends the §1a rollout gate to relay-blind requests; v0.3.0 adds the non-enforcing `strict:false` mode (§1a) and supersedes AC-4; v0.2.6 clarifies cleanup-prefix holdback and exact streaming byte parity; v0.2.5 clarified the existing §8 "preserve retryability" requirement.
 
 ## Quick orientation
+
+> Historical (v0.1.0). The "Quick orientation" and "Current code state"
+> sections describe the v0.1.0 starting point. The active contract is the
+> version header plus §1 (including §1a, v0.3.0), the v0.2 streaming
+> amendment and §2 onward.
 
 SPEC-019 v0.1 is the provider-side structured-output contract for OpenAI-wire
 `response_format`. Buyers can send `response_format:
@@ -123,11 +128,83 @@ For `json_schema`, the object shape is:
 ```
 
 `json_schema.name` is required. `json_schema.description` is optional prompt
-data. `json_schema.strict` is optional and defaults to `true`. v0.1.0 only
-defines strict behavior; explicit `strict:false` MUST fail before inference with
-HTTP 400 `json_schema_non_strict_unsupported`. The error message MUST say
-non-strict structured output is unsupported in SPEC-019 v0.1.0.
-`json_schema.schema` is required and MUST fit the §3 subset.
+data. `json_schema.strict` is optional. v0.1.0 only defined strict behavior and
+rejected explicit `strict:false` with HTTP 400
+`json_schema_non_strict_unsupported`; v0.3.0 supersedes that rejection with the
+non-enforcing mode in §1a. Under strict mode `json_schema.schema` is required
+and MUST fit the §3 subset.
+
+### 1a. Strict and non-strict modes (v0.3.0)
+
+The effective mode is a pure function of the raw request body, so the
+coordinator and the provider derive the same mode without negotiation:
+
+| `json_schema.strict` | Schema inside the §3 strict subset | Effective mode |
+|---|---|---|
+| `true` | yes | strict |
+| `true` | no | HTTP 400 with the §3 code (unchanged) |
+| absent | yes | strict |
+| absent | no | non-strict |
+| `false` | either | non-strict |
+| not a boolean | either | HTTP 400 `invalid_request` |
+
+Strict mode is unchanged from v0.2.6: the §3 shape checks run before inference
+and §5 validates the assistant content after inference.
+
+Non-strict mode is OpenAI's non-strict `json_schema` behavior: the schema
+guides generation but is not enforced. In non-strict mode:
+
+1. `json_schema.name` (AC-2, AC-8a) and `json_schema.schema` (AC-3) are still
+   required. The schema MUST be a JSON object, MUST fit the 16,384-byte cap
+   (`json_schema_too_large`, 413) and MUST NOT nest too deeply
+   (`json_schema_too_deep`, 400). Depth counts every nested object or array
+   value: the root object is depth 1, and the cap is 64. That is twice the
+   strict node-depth cap, because each strict schema level adds a schema object
+   and a `properties` object. The §3 keyword subset and the strict shape rules (AC-5 through AC-8)
+   do not apply.
+2. The §4 family renderer prepends the same schema instruction as strict mode.
+3. The provider does not parse or validate the assistant content after
+   inference. It never emits `json_schema_validation_failed` or
+   `malformed_json_response` for a non-strict request, and streaming does not
+   hold content back for validation.
+4. Billing, settlement and receipts are the same as for an unconstrained
+   `text` request. The receipt prompt hash still binds the raw
+   `response_format` (§9), so `strict:false`, `strict:true` and an absent
+   `strict` hash differently.
+
+An absent `strict` with a schema outside the strict subset was a 400 before
+v0.3.0. It now runs in non-strict mode, which matches the OpenAI default.
+Buyers who need enforcement MUST send `strict:true`; that request still fails
+closed on any schema outside the subset.
+
+Rollout: a provider CLI built before v0.3.0 still rejects explicit
+`strict:false` with `json_schema_non_strict_unsupported`, and an absent
+`strict` with a non-subset schema with the §3 code, before inference. Through
+the coordinator relay a provider-side 4xx surfaces as a retryable 502
+(`provider_error`), because the SPEC-001 end-frame statuses carry no
+request-validation class. The coordinator therefore routes a non-strict request
+only to providers whose `binary_version` is 1.8.242 or later, the first
+provider CLI that implements this section. A provider whose version does not
+parse as a dotted numeric version is treated as not supporting it. The gate
+applies to every selection attempt, failover, pinned routes and slot-queue
+waiters included. When no supporting provider serves the requested model, the
+coordinator returns the pre-v0.3.0 coordinator response before dispatch: HTTP 400
+`json_schema_non_strict_unsupported` for explicit `strict:false`, and the §3
+code and message for an absent `strict` with a non-subset schema. Strict-mode
+requests are not gated. The coordinator and the provider CLI can therefore
+deploy in either order.
+
+Relay-blind and privacy-class requests (SPEC-041, SPEC-049) carry the request
+body encrypted, so the coordinator cannot derive the mode from it. For them
+the buyer declares the mode instead: the reference client sets the SPEC-041-R003
+`requires: ["json_schema_non_strict"]` envelope and reservation member exactly
+when the body's effective mode by the table above is non-strict. The
+coordinator applies the same 1.8.242 gate to that declaration at reservation
+and at consume, and when no supporting provider serves the model it returns
+HTTP 400 `json_schema_non_strict_unsupported` (it cannot reproduce the §3 code
+for an absent `strict`, because it never sees the schema). A provider CLI that
+implements SPEC-041 v0.6.0 rejects a decrypted relay-blind body whose effective
+mode is non-strict when the envelope did not declare it (SPEC-041-R005).
 
 Buyer-side validation obligation: the provider validates syntax and schema
 conformance for the returned assistant `content`; it does not validate whether
@@ -211,9 +288,12 @@ AC-3. Missing `response_format.json_schema.schema` returns HTTP 400
 `json_schema_missing_schema`, `param:"response_format.json_schema.schema"`, and
 `inference_ran:false`.
 
-AC-4. `strict:false` returns HTTP 400
-`json_schema_non_strict_unsupported`; it is not silently treated as
-`strict:true` and not accepted as observability-only mode.
+AC-4. (v0.3.0, supersedes the v0.1.0 rejection) `strict:false` runs in the
+§1a non-strict mode. It is not silently treated as `strict:true`: a schema
+outside the §3 subset is accepted, and assistant content that does not match the
+schema returns HTTP 200 with the content unchanged. An absent `strict` with a
+schema outside the §3 subset also runs in non-strict mode. An absent `strict`
+with a subset schema runs in strict mode.
 
 ### Request validation
 
@@ -1087,7 +1167,7 @@ not the normative structured-output validation-timeout authority.
 |---|---:|---|---|---|
 | `json_schema_missing_name` | 400 | pre-inference request validation | false | Missing `response_format.json_schema.name`. |
 | `json_schema_missing_schema` | 400 | pre-inference request validation | false | Missing `response_format.json_schema.schema`. |
-| `json_schema_non_strict_unsupported` | 400 | pre-inference request validation | false | `strict:false` unsupported in SPEC-019 v0.1.0. |
+| `json_schema_non_strict_unsupported` | 400 | pre-inference request validation | false | Retired in v0.3.0 for supporting providers. Emitted by provider CLIs built before v0.3.0, and by the coordinator when no provider that supports non-strict mode serves the model (§1a rollout). |
 | `streaming_json_schema_unsupported` | 400 | pre-inference request validation | false | v0.1.x-only migration code for `json_schema` with `stream:true`; deleted from active v0.2. |
 | `streaming_json_object_unsupported` | 400 | pre-inference request validation | false | v0.1.x-only migration code for `json_object` with `stream:true`; deleted from active v0.2. |
 | `json_schema_unsupported_keyword` | 400 | pre-inference request validation | false | Unsupported schema keyword. |
@@ -1096,7 +1176,7 @@ not the normative structured-output validation-timeout authority.
 | `json_schema_invalid_const_or_enum_type` | 400 | pre-inference request validation | false | `const` or `enum` value conflicts with `type`. |
 | `json_schema_invalid_name` | 400 | pre-inference request validation | false | `json_schema.name` outside machine-name constraint. |
 | `json_schema_too_large` | 413 | pre-inference request validation | false | Schema JSON value over `16_384` raw UTF-8 bytes. |
-| `json_schema_too_deep` | 400 | pre-inference request validation | false | Schema nesting exceeds 32 levels. |
+| `json_schema_too_deep` | 400 | pre-inference request validation | false | Strict: schema nesting exceeds 32 levels. Non-strict (§1a): object/array nesting exceeds 64. |
 | `request_content_encoding_unsupported` | 415 | gateway + coordinator pre-validation | false | v0.1.0 rejects compressed request bodies. |
 | `malformed_json_response` | 502 | post-inference output validation | true* | Output not valid JSON text, duplicate keys, empty content, or invalid `json_object` root. |
 | `json_schema_validation_failed` | 502 | post-inference output validation | true | Parsed JSON does not satisfy schema or output depth. |
@@ -1420,8 +1500,8 @@ The `json_schema` request shape MAY add optional fields inside
 `response_format.json_schema.*`. Future versions MUST NOT require new fields
 without a major version bump.
 
-`strict:true` semantics in v0.1.0 are the conformant baseline. `strict:false`
-semantics, if added later, MUST be additive and MUST NOT weaken the validation
+`strict:true` semantics in v0.1.0 are the conformant baseline. The v0.3.0
+`strict:false` mode (§1a) is additive and does not weaken the validation
 performed for `strict:true`.
 
 The receipt canonical prompt object MUST continue to bind `response_format`.
@@ -1431,7 +1511,7 @@ change (`specs/SPEC-015-receipts.md:1191-1204`, canonical prompt object fields).
 
 **Receipt canonical scope for `response_format`**: the receipt prompt hash is
 computed over the raw `response_format` JSON value as received in the request
-body. Defaulted-but-absent fields, notably `strict` defaulting to `true`, are NOT
+body. Defaulted-but-absent fields, notably an absent `strict` (§1a), are NOT
 folded into the hash. Buyers seeking byte-stable receipts MUST send defaulted
 fields explicitly. This is the JCS-canonicalization contract of
 `phase3-binary/Sources/macprovider-cli/PromptCanonicalizer.swift:5-16` applied
@@ -1486,8 +1566,7 @@ Deferred to v0.3 or later:
   because nested Pydantic models emit `$defs` / `$ref`, which §3 rejects per
   the v0.1.0 reject-list; fixtures with nested classes are deferred to v0.3
   when `$ref` / `$defs` schema reuse is in scope.
-- v0.3 or later: non-strict mode (`strict:false`) as observability without
-  enforcement.
+- Done in v0.3.0: non-strict mode (`strict:false`) without enforcement (§1a).
 - v0.3 or later: auto-retry with tightened prompt on validation failure.
 - v0.3 or later: model-hash-bound structured-output family renderer registry.
 
@@ -1568,9 +1647,9 @@ Audit lanes should probe:
    strings inside schema text.
 3. Whether the `json_object` top-level object-or-array rule is sufficient for
    OpenAI compatibility or should narrow to object-only before lock.
-4. Whether `strict:false` should be rejected as specified or accepted as a
-   synonym for `strict:true`; v0.1.0 currently rejects to avoid silent semantic
-   drift.
+4. (Resolved in v0.3.0 §1a.) Whether `strict:false` should be rejected as
+   specified or accepted as a synonym for `strict:true`; v0.1.0 rejected it.
+   v0.3.0 accepts it as a distinct non-enforcing mode, never as `strict:true`.
 5. Whether scalar root schemas should remain allowed in v0.1.0 or be deferred
    until SDK compatibility evidence exists.
 6. Model-quality regression: structured-output system prompt injection MUST NOT
@@ -1620,9 +1699,9 @@ v0.2 audit lanes should additionally probe:
 
 ## 12. Document metadata
 
-**Version:** 0.2.6 (2026-09-28, streaming cleanup-prefix holdback clarified)
+**Version:** 0.3.1 (2026-10-15, relay-blind non-strict capability gate)
 
-**Status:** LOCKED. v0.2.6 clarifies cleanup-prefix holdback and exact streaming byte parity; v0.2.5 added the §8 retryable-override clarification.
+**Status:** LOCKED. v0.3.1 extends the §1a rollout gate to relay-blind requests; v0.3.0 adds the §1a non-strict mode; v0.2.6 clarifies cleanup-prefix holdback and exact streaming byte parity; v0.2.5 added the §8 retryable-override clarification.
 
 Audit trajectory:
 - r1: 1C + 9H + 9M → absorbed in v0.2.1.
@@ -1646,6 +1725,21 @@ matching SPEC-018 v0.2.10 clarification; it makes no SPEC-015 schema change and
 adds no HTTP endpoint.
 
 ### Change log
+
+- **v0.3.1 (2026-10-15, relay-blind gate):** §1a rollout: relay-blind and
+  privacy-class requests declare non-strict mode in the SPEC-041-R003
+  `requires` member, and the coordinator gates that declaration exactly as it
+  gates a plaintext non-strict body, with HTTP 400
+  `json_schema_non_strict_unsupported` when no supporting provider serves the
+  model. No change to the mode table, validation or receipts. Related: #2006.
+
+- **v0.3.0 (2026-10-14, non-strict mode):** Adds §1a. Explicit `strict:false`
+  and an absent `strict` with a schema outside the §3 subset run in a
+  non-enforcing mode: the schema is rendered into the prompt, only name,
+  object-ness, size and depth are checked, and the assistant content is not
+  validated. AC-4 is superseded. `json_schema_non_strict_unsupported` is
+  retired except from pre-v0.3.0 provider CLIs. Strict mode and receipt binding
+  are unchanged. Related: #1570.
 
 - **v0.2.6 (2026-09-28, cleanup-prefix holdback clarification):** AC-V2-7
   and the v0.2 streaming-validation contract require cleanup-pattern proper

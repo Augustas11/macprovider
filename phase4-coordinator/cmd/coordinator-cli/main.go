@@ -61,6 +61,10 @@ func main() {
 		err = privacyClassCommand(os.Args[2:], os.Stdout)
 	case "settlement-evidence-archive":
 		err = settlementEvidenceArchive(os.Args[2:], os.Stdout)
+	case "audit-log-archive":
+		err = auditLogArchive(os.Args[2:], os.Stdout)
+	case "ledger-rollup-archive":
+		err = ledgerRollupArchive(os.Args[2:], os.Stdout)
 	default:
 		usage()
 		os.Exit(2)
@@ -633,5 +637,5 @@ func preFlipAuditRun(args []string, stdout io.Writer) (stale bool, err error) {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: coordinator-cli <issue-token|revoke-token|revoke-bootstrap-identity|list-bootstrap-identities|list-onboarding|list-tokens|revoke-and-kick|prune-tokens|list-pair-ot-mints|pre-flip-audit|create-seed-referral|adjust-seed-referral|replace-seed-referral|revoke-referral|trust-pool-admin|trust-pool-oncall|trust-pool-artifact-lifecycle|privacy-class|settlement-evidence-archive> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: coordinator-cli <issue-token|revoke-token|revoke-bootstrap-identity|list-bootstrap-identities|list-onboarding|list-tokens|revoke-and-kick|prune-tokens|list-pair-ot-mints|pre-flip-audit|create-seed-referral|adjust-seed-referral|replace-seed-referral|revoke-referral|trust-pool-admin|trust-pool-oncall|trust-pool-artifact-lifecycle|privacy-class|settlement-evidence-archive|audit-log-archive|ledger-rollup-archive> [flags]")
 }

@@ -5,14 +5,14 @@
 # keep CI and local on the same targets. CI jobs use the per-service
 # targets below to preserve parallel jobs and failure isolation.
 
-.PHONY: test test-coordinator test-coordinator-integration test-gateway test-integration test-dist test-relay-blind-parity \
+.PHONY: test test-coordinator test-coordinator-billing-race test-coordinator test-coordinator-race-integration test-gateway test-integration test-dist test-relay-blind-parity \
         test-dist-catalog test-dist-python test-dist-release test-dist-deploy \
         test-byom-e2e test-byom-discovery-journey test-openai-wire \
         vet vet-coordinator vet-gateway \
         lint-coordinator \
         build-linux check check-exceptions fmt fmt-check verify-autotune-catalog
 
-test: test-coordinator test-gateway test-integration test-dist
+test: test-coordinator test-coordinator-billing-race test-gateway test-integration test-dist
 
 # BYOM CLI onboarding process E2E. This is MANUAL macOS release evidence, not
 # part of `make test` / required PR coverage: it builds the Swift macprovider-cli
@@ -37,8 +37,23 @@ test-byom-discovery-journey:
 verify-autotune-catalog:
 	python3 scripts/catalog-release.py verify
 
+# Required gate: native speed, no race detector. Race-detector runs are
+# advisory (test-coordinator-race, test-coordinator-billing-race): their
+# timing-sensitive failures are reported and fixed in batches, never block a
+# merge (#1996).
 test-coordinator:
-	cd phase4-coordinator && go test ./...
+	cd phase4-coordinator && go test -timeout 30m ./...
+
+# Advisory: every package except billing under the race detector.
+test-coordinator-race:
+	cd phase4-coordinator && go test -race -timeout 30m $$(go list ./... | grep -v '/internal/billing$$')
+
+# -race turns on checkptr everywhere; in the transpiled modernc SQLite C
+# code it was over half of billing's runtime (query planning). The race
+# detector itself still instruments every package, modernc included.
+# -timeout stays below the CI job's 26 minutes so a hang still dumps stacks.
+test-coordinator-billing-race:
+	cd phase4-coordinator && go test -race -gcflags='modernc.org/...=-d=checkptr=0' -timeout 24m ./internal/billing
 
 # SPEC-017 Step 1 and provider-onboarding Postgres integration tests.
 # Tagged with `integration` so

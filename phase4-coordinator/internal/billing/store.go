@@ -21,10 +21,14 @@ type RewardsConfig = config.RewardsConfig
 type SettlementConfig = config.SettlementConfig
 
 type Store struct {
-	db           *sql.DB
-	readDB       atomic.Pointer[sql.DB]
-	now          func() time.Time
-	sqliteMetric SQLiteMetrics
+	// selfDealMemo briefly caches SPEC-050-R010 self-dealing answers.
+	selfDealMemo selfDealMemo
+	// allowanceProcess is this process's SPEC-050 allowance-hold epoch.
+	allowanceProcess allowanceProcessState
+	db               *sql.DB
+	readDB           atomic.Pointer[sql.DB]
+	now              func() time.Time
+	sqliteMetric     SQLiteMetrics
 	// routeSnapshotDB is an optional same-file SQLite handle reserved for
 	// durable pre-dispatch route snapshots. It avoids queueing those writes
 	// behind request_log pool users while SQLite still serializes the writer
@@ -104,6 +108,17 @@ type Store struct {
 	// evidenceRetentionRun makes runs single-flight.
 	evidenceRetention    evidenceRetentionRuntime
 	evidenceRetentionRun sync.Mutex
+	// requestLogRetention is storage.request_log_retention_days
+	// (SetRequestLogRetention); zero means unknown.
+	requestLogRetention atomic.Int64
+}
+
+// SetRequestLogRetention records the request_log window, which bounds how far
+// back the admin reconcile can compare buyer and provider totals.
+func (s *Store) SetRequestLogRetention(d time.Duration) {
+	if s != nil {
+		s.requestLogRetention.Store(int64(d))
+	}
 }
 
 type SQLiteMetrics interface {
@@ -681,6 +696,9 @@ CREATE INDEX IF NOT EXISTS idx_lqr_request_latest ON ledger_quarantine_resolutio
 	if err := s.ensureSettlementEvidenceRetentionTables(ctx); err != nil {
 		return err
 	}
+	if err := s.ensureLedgerRollupTables(ctx); err != nil {
+		return err
+	}
 	// SPEC-022 R-15.9: a database opened by a retention-capable coordinator
 	// may lose evidence to retention at any time after, and a pre-retention
 	// coordinator would drop archived credits from the payable view. Contract
@@ -700,6 +718,9 @@ CREATE INDEX IF NOT EXISTS idx_lqr_request_latest ON ledger_quarantine_resolutio
 		return err
 	}
 	if err := s.ensureWholesaleStatementTables(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureAllowanceTables(ctx); err != nil {
 		return err
 	}
 	if err := s.ensureCeilingRestatementTablesAndMarker(ctx); err != nil {

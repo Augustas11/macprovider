@@ -225,7 +225,7 @@ const piShapedStreamingToolsBody = `{
   "stream":true,
   "stream_options":{"include_usage":true},
   "enable_thinking":false,
-  "tool_choice":"required",
+  "tool_choice":"auto",
   "messages":[{"role":"user","content":"Run bash with command echo hello. Do not explain."}],
   "tools":[{
     "type":"function",
@@ -237,17 +237,6 @@ const piShapedStreamingToolsBody = `{
     }
   }]
 }`
-
-func TestToolChoiceRequiredRewrittenToAuto(t *testing.T) {
-	got := neutralizeUnsupportedToolChoice([]byte(`{"model":"m","tool_choice":"required","messages":[]}`))
-	if string(got) != `{"model":"m","tool_choice":"auto","messages":[]}` {
-		t.Fatalf("rewritten = %s", got)
-	}
-	unchanged := neutralizeUnsupportedToolChoice([]byte(`{"model":"m","tool_choice":"auto","messages":[]}`))
-	if string(unchanged) != `{"model":"m","tool_choice":"auto","messages":[]}` {
-		t.Fatalf("auto rewritten unexpectedly: %s", unchanged)
-	}
-}
 
 func TestEmptyObjectIsCompleteJSONForPiClient(t *testing.T) {
 	// Pi openai-completions concatenates function.arguments and calls
@@ -286,7 +275,7 @@ func TestPiShapedStreamingToolRequestIsAdmittedAndCoalescesArgs(t *testing.T) {
 				t.Fatalf("provider body stream=%v want true", req["stream"])
 			}
 			if req["tool_choice"] != "auto" {
-				t.Fatalf("provider tool_choice=%v want auto (required is rewritten)", req["tool_choice"])
+				t.Fatalf("provider tool_choice=%v want unchanged auto", req["tool_choice"])
 			}
 			if _, ok := req["stream_options"]; !ok {
 				t.Fatal("stream_options must be forwarded")

@@ -60,7 +60,7 @@ Write the `SPEC-NNN` first: this API will become partner-facing, cacheable, priv
 
 OpenAI Codex v0.142.2
 --------
-workdir: /Users/augstar/macprovider-poc
+workdir: <repo>
 model: gpt-5.5
 provider: openai
 approval: never
@@ -85,7 +85,7 @@ Q3 — Earnings sensitivity. Leaderboard shows $ per pseudonym (e.g. beamy-puppy
 Q4 — Hosting. (a) embed in existing coordinator Go binary at coordinator.malibu.tech/v1/stats/*, (b) split out separate stats-api Go service at stats.malibu.tech behind nginx, (c) static JSON snapshot every 30s via cron, served from CF/Vercel with no live backend. Lean fewer services unless load/security forces split.
 
 For each: pick ONE, 2-3 sentence justification grounded in constraints, flag what I'm missing. End with one sentence on SPEC-NNN doc first vs straight IMPL prompt.
-warning: failed to parse hooks config /Users/augstar/.codex/hooks.json: unknown field `state`, expected `hooks` at line 2 column 9
+warning: failed to parse hooks config ~/.codex/hooks.json: unknown field `state`, expected `hooks` at line 2 column 9
 codex
 **Q1 — Pick B: rollup job writes `stats_*` tables.**  
 Do not refresh materialized views every 30s directly over hot coordinator billing/session tables if you care about OLTP stability; and do not compute all-time/leaderboard stats on demand over ~1.6M request windows. Use an incremental, idempotent rollup pipeline into narrow `stats_overview_*`, `stats_leaderboard_*`, and `stats_timeseries_*` tables the API can read cheaply. Missing: late-event correction/backfill rules, exact freshness SLA, and whether “all-time” is recomputed or incrementally accumulated.

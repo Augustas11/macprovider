@@ -24,6 +24,13 @@
 #                       (SPEC-033 §2.7). No restart and no downtime of its own: the
 #                       apply's coordinator restart loads it; a full deploy refuses
 #                       without it.
+#   stats_migrate       pending stats/rewards Postgres migrations of the coordinator
+#                       binary installed on Pearl (`stats-migrate --check` lists
+#                       them; no downtime). The signed updater never applies
+#                       them. Checked at two points: before 4a while no apply has
+#                       run (migrations shipped by an earlier release that were
+#                       never applied) and after 7 once the new binary is live
+#                       (the new release's own migrations).
 #   5 plan              Pearl preflight + macprovider-pearl-update --plan (read-only)
 #   6 apply             systemd-run updater --apply (15-20 min network down)
 #   7 wait_updater      bounded wait for the updater unit to exit
@@ -33,7 +40,8 @@
 # release train: convert the coordinator database files to
 # auto_vacuum=INCREMENTAL with a full VACUUM
 # (ops/runbooks/settlement-evidence-retention.md section 4):
-#   1 vacuum_mode       read-only: PRAGMA auto_vacuum of both files on Pearl
+#   1 vacuum_mode       read-only: PRAGMA auto_vacuum of the coordinator,
+#                       route-snapshot journal, and audit database files
 #   2 drain_gate        read-only: the last completed retention lap found no
 #                       eligible request (backlog_drained)
 #   3 convert           under the live-ops lock and the three Pearl locks:
@@ -49,7 +57,7 @@
 # Env (or ~/.config/macprovider/ops.env): COORDINATOR_URL, GATEWAY_URL,
 # PEARL_SSH, PEARL_RUNTIME_VERSION, UPDATER_WAIT_MAX_S (default 2700),
 # PEARL_COORDINATOR_ENV (default /etc/macprovider/coordinator.env),
-# MACPROVIDER_OPS_OWNER (for --run).
+# PEARL_COORDINATOR_BIN (default /opt/macprovider/coordinator), MACPROVIDER_OPS_OWNER (for --run).
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR disable=SC2034  # OPS_NAME/NEXT_* are read by lib/common.sh
 
@@ -63,7 +71,8 @@ usage() { sed -n '2,/^set -euo pipefail$/p' "${BASH_SOURCE[0]}" | sed -e '$d' -e
 
 ROLLOUT_DOC="docs/runbooks/pearl-coordinator-rollout.md"
 RETENTION_DOC="ops/runbooks/settlement-evidence-retention.md"
-VACUUM_DOWNTIME="coordinator stopped while SQLite rewrites the coordinator and route-snapshot journal database files (full VACUUM): about as long as the updater's pre-apply backup of the same files (ops/runbooks/pearl-release-updater.md), in proportion to their size; buyer and provider traffic through the coordinator is down for that time"
+VACUUM_DOWNTIME="coordinator stopped while SQLite rewrites the coordinator, route-snapshot journal, and audit (coordinator-audit.db) database files (full VACUUM): about as long as the updater's pre-apply backup of the same files (ops/runbooks/pearl-release-updater.md), in proportion to their size; buyer and provider traffic through the coordinator is down for that time"
+STATS_MIGRATE_DOWNTIME="none (embedded stats/rewards Postgres migrations apply while the coordinator keeps serving; no restart)"
 APPLY_DOWNTIME="15-20 minutes of network down (runtime apply), unless the short-quiesce updater hotfix is installed"
 
 
@@ -77,6 +86,114 @@ max_remote_tag() {
 # statement must not contain single quotes; columns come back |-separated.
 pearl_sqlite_read() {
   ssh "$PEARL_SSH" "'$1' -readonly '$2' '$3'" 2>/dev/null
+}
+
+# stats_migrate: pending stats migrations. The signed updater never runs stats-migrate
+# (ops/runbooks/pearl-release-updater.md), and a migration is only known to the
+# binary that embeds it. One probe, two call sites in gather:
+#   - before app_attest_recorder, while no apply has run for this tag: the
+#     installed binary may carry migrations an earlier release shipped and
+#     nobody applied;
+#   - after wait_updater, once the new binary is live: its own migrations.
+# Calling it between the apply and the end of the updater unit would race the
+# binary swap, so that window is skipped. The probe reads live state, so it is
+# idempotent and needs no completion marker.
+STATS_RECORDED=0
+# Case-insensitive postgres(ql):// URLs and libpq password=... pairs.
+read -r -d '' REDACT_SED <<'SED' || true
+s#[Pp][Oo][Ss][Tt][Gg][Rr][Ee][Ss]([Qq][Ll])?://[^[:space:]]*#postgres://REDACTED#g;s#([Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Pp][Ww][Dd])[[:space:]]*=[[:space:]]*("[^"]*"|'[^']*'|[^[:space:]]+)#\1=REDACTED#g
+SED
+# Redacted, printable-only copy of remote output (no terminal control bytes).
+safe_remote_output() { sed -E "$REDACT_SED" | LC_ALL=C tr -cd '\11\12\40-\176'; }
+
+# The script run as root on Pearl (`bash -s -- ENV_FILE BIN check|apply`). It
+# reads COORDINATOR_PARTNER_KEYS_ADMIN_DSN from the env file as data (never
+# sourced, like deploy-pearl-vps.sh read_env_value), exports it for the
+# coordinator to resolve (never argv), and redacts and strips control bytes
+# from everything it prints.
+stats_migrate_remote_script() {
+  local head tail
+  read -r -d '' head <<'REMOTE_HEAD' || true
+set -euo pipefail
+env="$1"; bin="$2"; mode="$3"
+read -r -d '' py <<'PYCODE' || true
+import os, shlex, sys
+found = None
+try:
+    for raw in open(os.environ["ENV_FILE"], encoding="utf-8"):
+        line = raw.rstrip("\n").strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key.strip() != "COORDINATOR_PARTNER_KEYS_ADMIN_DSN":
+            continue
+        parts = shlex.split(value.strip(), comments=False, posix=True)
+        if len(parts) != 1 or any(c in parts[0] for c in "\r\n\0"):
+            sys.exit(2)
+        found = parts[0]
+except (OSError, ValueError):
+    sys.exit(2)
+if not found:
+    sys.exit(1)
+print(found, end="")
+PYCODE
+dsn="$(ENV_FILE="$env" python3 -I -c "$py")" || { echo "cannot read COORDINATOR_PARTNER_KEYS_ADMIN_DSN from the env file" >&2; exit 1; }
+export COORDINATOR_PARTNER_KEYS_ADMIN_DSN="$dsn"
+REMOTE_HEAD
+  read -r -d '' tail <<'REMOTE_TAIL' || true
+clean() { local t; t="$(cat)"; t="${t//"$dsn"/REDACTED}"; printf '%s\n' "$t" | sed -E "$sedx" | LC_ALL=C tr -cd '\11\12\40-\176'; }
+case "$mode" in
+  check) "$bin" stats-migrate --check 2>&1 </dev/null | clean ;;
+  apply)
+    "$bin" stats-migrate 2>&1 </dev/null | clean
+    chk="$("$bin" stats-migrate --check 2>&1 </dev/null)" || { printf '%s\n' "$chk" | clean >&2; exit 1; }
+    printf '%s\n' "$chk" | clean
+    if printf '%s\n' "$chk" | grep -Eq '[[:space:]]pending$'; then
+      echo "stats migrations still pending after the apply" >&2
+      exit 1
+    fi ;;
+  *) echo "bad mode" >&2; exit 2 ;;
+esac
+REMOTE_TAIL
+  printf '%s\nread -r -d %s sedx <<%s || true\n%s\nSED\n%s\n' "$head" "''" "'SED'" "$REDACT_SED" "$tail"
+}
+
+stats_migrate_step() {
+  [ "$STATS_RECORDED" = 0 ] || return 0
+  STATS_RECORDED=1
+  local env="${PEARL_COORDINATOR_ENV:-/etc/macprovider/coordinator.env}" bin="${PEARL_COORDINATOR_BIN:-/opt/macprovider/coordinator}"
+  [[ "$env" =~ ^/[A-Za-z0-9._/-]+$ ]] || refuse "PEARL_COORDINATOR_ENV must be an absolute path"
+  [[ "$bin" =~ ^/[A-Za-z0-9._/-]+$ ]] || refuse "PEARL_COORDINATOR_BIN must be an absolute path"
+  if [ -z "${PEARL_SSH:-}" ]; then
+    # Unknown is not "nothing pending": never let the train go on or finish.
+    step stats_migrate blocked "PEARL_SSH is unset"
+    set_next stats_migrate blocked "Check pending stats migrations on Pearl" "" "PEARL_SSH is unset"
+    return
+  fi
+  local body out rc=0 pending
+  body="$(stats_migrate_remote_script)"
+  out="$(printf '%s\n' "$body" | ssh "$PEARL_SSH" "sudo bash -s -- $env $bin check" 2>&1)" || rc=$?
+  out="$(printf '%s\n' "$out" | safe_remote_output)"
+  if [ "$rc" != 0 ] || ! printf '%s\n' "$out" | grep -q '^stats-migrate check'; then
+    step stats_migrate blocked "cannot read the stats migration state on Pearl (rc=$rc)"
+    set_next stats_migrate blocked "Check pending stats migrations on Pearl" "" \
+      "stats-migrate --check over ssh failed (rc=$rc): $(printf '%s' "$out" | tail -n 1 | cut -c1-200)"
+    return
+  fi
+  pending="$(printf '%s\n' "$out" | sed -nE 's/^[[:space:]]*([^[:space:]]+)[[:space:]]+pending$/\1/p' | tr -cd 'A-Za-z0-9_\n' | tr '\n' ' ')"
+  pending="${pending% }"
+  fact stats_migrations_pending "$pending"
+  if [ -z "$pending" ]; then
+    step stats_migrate "done" "no pending stats migrations"
+    return
+  fi
+  step stats_migrate pending "pending: $pending"
+  [ -z "$NEXT_ID" ] || return 0
+  set_next stats_migrate mutate "Apply pending stats migrations on Pearl: $pending (no downtime)" \
+"ssh \"\$PEARL_SSH\" 'sudo bash -s -- $env $bin apply' <<'REMOTE'
+$body
+REMOTE" "the installed coordinator binary reports pending stats migrations; the signed updater does not apply them"
+  next_meta stats_migrate "$ROLLOUT_DOC#stats-migrations" "$STATS_MIGRATE_DOWNTIME"
 }
 
 gather_retention_vacuum() {
@@ -105,26 +222,33 @@ gather_retention_vacuum() {
     set_next vacuum_mode blocked "Read the coordinator database auto_vacuum mode" "" "PEARL_SSH is unset"
     return
   fi
-  local main_mode journal_mode="absent"
+  local main_mode journal_mode="absent" audit_mode="absent"
+  # The settlement receipt audit database sits next to the coordinator
+  # database (SPEC-002 R-7.10.2); its rotation frees pages the same way.
+  local audit_db="${db%/*}/coordinator-audit.db"
   main_mode="$(pearl_sqlite_read "$sqlite" "$db" 'PRAGMA auto_vacuum;' || true)"
   if ssh "$PEARL_SSH" "test -f '$db.route-snapshots'" 2>/dev/null; then
     journal_mode="$(pearl_sqlite_read "$sqlite" "$db.route-snapshots" 'PRAGMA auto_vacuum;' || true)"
   fi
+  if ssh "$PEARL_SSH" "test -f '$audit_db'" 2>/dev/null; then
+    audit_mode="$(pearl_sqlite_read "$sqlite" "$audit_db" 'PRAGMA auto_vacuum;' || true)"
+  fi
   fact coordinator_db_auto_vacuum "$main_mode"
   fact route_snapshot_journal_auto_vacuum "$journal_mode"
-  if ! [[ "$main_mode" =~ ^[0-2]$ ]] || ! [[ "$journal_mode" =~ ^([0-2]|absent)$ ]]; then
+  fact audit_db_auto_vacuum "$audit_mode"
+  if ! [[ "$main_mode" =~ ^[0-2]$ ]] || ! [[ "$journal_mode" =~ ^([0-2]|absent)$ ]] || ! [[ "$audit_mode" =~ ^([0-2]|absent)$ ]]; then
     step vacuum_mode blocked "cannot read PRAGMA auto_vacuum on Pearl"
     set_next vacuum_mode blocked "Read the coordinator database auto_vacuum mode" "" \
-      "PRAGMA auto_vacuum over ssh failed (coordinator=$main_mode journal=$journal_mode); check PEARL_COORDINATOR_DB and PEARL_SQLITE3"
+      "PRAGMA auto_vacuum over ssh failed (coordinator=$main_mode journal=$journal_mode audit=$audit_mode); check PEARL_COORDINATOR_DB and PEARL_SQLITE3"
     return
   fi
-  if [ "$main_mode" = 2 ] && [[ "$journal_mode" =~ ^(2|absent)$ ]]; then
+  if [ "$main_mode" = 2 ] && [[ "$journal_mode" =~ ^(2|absent)$ ]] && [[ "$audit_mode" =~ ^(2|absent)$ ]]; then
     local s
     for s in vacuum_mode drain_gate convert; do step "$s" "done" ""; done
-    set_next "done" "done" "both database files are auto_vacuum=INCREMENTAL" ""
+    set_next "done" "done" "every database file is auto_vacuum=INCREMENTAL" ""
     return
   fi
-  step vacuum_mode "done" "coordinator=$main_mode journal=$journal_mode (2 = INCREMENTAL)"
+  step vacuum_mode "done" "coordinator=$main_mode journal=$journal_mode audit=$audit_mode (2 = INCREMENTAL)"
 
   # The drain signal: the last completed retention lap found nothing eligible.
   local lap
@@ -157,6 +281,7 @@ exec 7>>\"\$4\"; flock -n 7 || { echo \"lock busy: \$4\" >&2; exit 1; }
 exec 8>>\"\$5\"; flock -n 8 || { echo \"lock busy: \$5\" >&2; exit 1; }
 exec 9>>\"\$6\"; flock -n 9 || { echo \"lock busy: \$6\" >&2; exit 1; }
 files=\"\$db\"; [ ! -e \"\$db.route-snapshots\" ] || files=\"\$files \$db.route-snapshots\"
+audit=\"\$(dirname \"\$db\")/coordinator-audit.db\"; [ ! -e \"\$audit\" ] || files=\"\$files \$audit\"
 need=0
 for f in \$files; do
   [ -f \"\$f\" ] && [ ! -L \"\$f\" ] || { echo \"refused: \$f is not a regular file\" >&2; exit 1; }
@@ -206,6 +331,7 @@ REMOTE"
 }
 
 gather() {
+  STATS_RECORDED=0
   if [ -n "${PEARL_RUNTIME_TASK:-}" ]; then
     case "$PEARL_RUNTIME_TASK" in
       retention-vacuum-conversion) gather_retention_vacuum; return ;;
@@ -290,6 +416,8 @@ EOF
     local s
     for s in code_changed signed_tag dispatch env_approval plan apply wait_updater; do step "$s" "done" ""; done
     step health "done" "coordinator and gateway report $T"
+    # Live is not done while the live binary's own migrations are pending.
+    stats_migrate_step
     set_next "done" "done" "$T is live" ""
     return
   fi
@@ -339,6 +467,17 @@ git push origin refs/tags/$T"
     fi
   fi
 
+  # A recorded apply whose updater unit failed while the live version stayed
+  # behind was rolled back by the updater: forget the marker so the apply is
+  # offered again (step 6 resets the failed transient unit, which blocks
+  # systemd-run). Done first so every later step sees the true apply state.
+  local apply_rolled_back=false
+  if [ "$live" != "$T" ] && [ -n "${PEARL_SSH:-}" ] &&
+    ssh "$PEARL_SSH" "systemctl is-failed --quiet mp-update-${T#v}" 2>/dev/null; then
+    apply_rolled_back=true
+    rm -f "$(marker_path "$OPS_SCOPE" apply)"
+  fi
+
   # 3-4. dispatch and approval.
   local rel_assets
   rel_assets="$(gh release view "$T" -R "$(gh_repo)" --json assets --jq '[.assets[].name] | join(" ")' 2>/dev/null || true)"
@@ -373,6 +512,11 @@ git push origin refs/tags/$T"
         fi
       fi ;;
   esac
+
+  # stats_migrate, pre-apply. Migrations already pending under the installed binary.
+  if [ "$live" != "$T" ] && ! marker_done "$OPS_SCOPE" apply; then
+    stats_migrate_step
+  fi
 
   # 4a. one-time recorder provisioning (SPEC-033 §2.7). Read-only check on
   # Pearl: the provisioner's --check logs in with the DSN and applies the
@@ -431,15 +575,7 @@ ssh \"\$PEARL_SSH\" '/usr/local/sbin/macprovider-pearl-update --plan --tag $T'"
     fi
   fi
 
-  # 6. apply. A recorded apply whose updater unit failed while the live
-  # version stayed behind was rolled back by the updater: offer it again
-  # (after resetting the failed transient unit, which blocks systemd-run).
-  local apply_rolled_back=false
-  if [ "$live" != "$T" ] && [ -n "${PEARL_SSH:-}" ] &&
-    ssh "$PEARL_SSH" "systemctl is-failed --quiet mp-update-${T#v}" 2>/dev/null; then
-    apply_rolled_back=true
-    rm -f "$(marker_path "$OPS_SCOPE" apply)"
-  fi
+  # 6. apply (a rolled-back apply was detected above, before the pre-apply stats check).
   if marker_done "$OPS_SCOPE" apply; then
     step apply "done" "$(marker_field "$OPS_SCOPE" apply 'd.get("recorded_at")')"
   else
@@ -472,6 +608,13 @@ while ssh \"\$PEARL_SSH\" 'systemctl is-active --quiet mp-update-${T#v}'; do
   sleep 30
 done
 ssh \"\$PEARL_SSH\" 'systemctl show mp-update-${T#v} -p Result -p ExecMainStatus --no-pager || true; journalctl -u mp-update-${T#v} -n 40 --no-pager || true'"
+  fi
+
+  # stats_migrate, post-apply. Migrations of the binary that is now live (before health is reported).
+  if [ "$live" = "$T" ]; then
+    stats_migrate_step
+  elif [ "$STATS_RECORDED" = 0 ]; then
+    step stats_migrate pending "checked once the new binary is live"
   fi
 
   # 8. health.

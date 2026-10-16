@@ -109,6 +109,14 @@ SELECT lrc.id, lrc.provider_id
    )
    AND (
        COALESCE(lrc.settlement_policy_mode, 'legacy') IN ('legacy', 'observe')
+       -- SPEC-022 v0.4.5 R-15.6: a credit whose evidence retention archived
+       -- before it settled is selected through its tombstone, as the payable
+       -- view selects it.
+       OR EXISTS (
+           SELECT 1
+             FROM settlement_evidence_archived_credits archived
+            WHERE archived.request_credit_id = lrc.id
+       )
        OR (
            lrc.settlement_policy_mode = 'enforce'
            AND lrc.settlement_account_scope_hash IS NOT NULL

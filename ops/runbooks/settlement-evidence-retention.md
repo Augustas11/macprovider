@@ -24,14 +24,21 @@ tell the operator the expected downtime. Live changes go through
 The job works on whole requests. A request leaves hot storage only when every
 one of these is true:
 
-- Every ledger credit for the request is settled and not quarantined.
+- No ledger credit for the request is quarantined.
 - Every credit is payable (`spec022_payable_request_credits`).
 - No credit has a force-credit hold or any other quarantine resolution.
-- Every credit settled into a `ready` or `consumed` (never `voided`) payout
-  whose window is at least `min_settlement_cycles` (minimum 2) completed weekly
-  windows old.
-- Every credit is older than the nightly-reconcile and startup-scan horizons
-  plus one day.
+- Every credit is either unsettled with no payout id, or settled into a
+  `ready` or `consumed` (never `voided`) payout. Since SPEC-022 v0.4.5 a
+  credit does not have to be settled: its tombstone keeps it payable, and the
+  weekly settlement settles it through the tombstone into the same payout
+  with the same sums.
+- Every credit was created, and every verdict closed, before the finality
+  point T (`cutoff_window_end_utc` / `credit_age_cutoff_utc` in the report).
+  T is the earlier of now minus `verdict_close_grace_hours` (default 48) and
+  the start of the newest completed nightly reconcile, but never earlier than
+  the reconcile horizon (nightly and startup windows plus the recovery grace
+  and a day). With the nightly reconcile running, evidence leaves about two
+  days after its verdict closed instead of after two settlement windows.
 - Every verdict is closed, and none is pending or quarantined.
 - Every audit-outbox row is drained, and none is poisoned.
 - Every attempt-output journal row is materialized.
@@ -60,7 +67,8 @@ one of these is true:
 | `archive_dir` | empty | Absolute directory for `settlement-evidence-*.jsonl.gz` archives and their `.manifest.json` files. Empty means `retention-archive/` in the directory of the coordinator database file (for a database at `/var/lib/macprovider/coordinator.db`: `/var/lib/macprovider/retention-archive/`). Created with mode `0700` on first use. |
 | `archive_min_free_bytes` | `21474836480` (20 GiB) | A run that would write a new archive is refused (`refused_archive_disk_low`) while the archive filesystem has less free space. `0` disables this bound. |
 | `archive_min_free_percent` | `10` | Same, as a percentage of the archive filesystem. `0` disables this bound. |
-| `min_settlement_cycles` | `2` | Completed settlement windows that must follow the credit's window. Floor: 2. |
+| `verdict_close_grace_hours` | `48` | Grace after verdict close before evidence may leave (SPEC-022 R-15.2), in `[24, 720]` and above `settlement.startup_reconcile_window_hours`. |
+| `min_settlement_cycles` | `2` | Still loads and is validated (floor 2); no longer gates evidence retention since SPEC-022 v0.4.5. |
 | `batch_size` | `50` | Requests deleted per short `BEGIN IMMEDIATE` transaction. |
 | `batch_pause_ms` | `200` | Pause between delete batches and between vacuum steps. |
 | `max_requests_per_run` | `20000` | Requests per archive (the key keeps its old name so existing configs load). A run drains: it writes, verifies, and deletes archive after archive along a scan lap (below) until the lap completes, `max_scan_rows_per_run` is reached, or `run_budget_minutes` is spent. Memory does not grow with it: requests are streamed into the archive one at a time, and deletion re-reads the archive one batch at a time (at most `batch_size` requests; a batch is also flushed once it reaches 16 MiB of archived payload, so it can exceed 16 MiB by at most one request). |
@@ -251,15 +259,16 @@ growing even without the conversion.
 
 The one-time conversion rewrites the whole file and needs the coordinator
 stopped, so it waits for the drain (`backlog_drained=true`). It runs through
-the ops entry point, never by hand. The entry point reads both files'
+the ops entry point, never by hand. The entry point reads the three files'
 `auto_vacuum` mode and the last retention lap read-only. It refuses until
 the drain signal holds, states the downtime first, and takes the live-ops
 lock and the three Pearl locks (updater, deploy, deploy-operation). It
 checks free space on the database filesystem for three times the files'
 size (a backup copy, VACUUM's temporary copy, which it keeps there with
 `SQLITE_TMPDIR`, and the WAL), then stops the coordinator. It runs `PRAGMA quick_check` on the
-coordinator database and its `.route-snapshots` journal and refuses, starting
-the coordinator again, if either fails. It then takes a fresh
+coordinator database, its `.route-snapshots` journal, and the audit database
+(`coordinator-audit.db` in the same directory) and refuses, starting the
+coordinator again, if any fails. It then takes a fresh
 `VACUUM INTO` backup next to each file (`<file>.pre-incremental-<UTC stamp>`,
 named in the output). It runs `PRAGMA auto_vacuum = INCREMENTAL; VACUUM;` on
 each file with the SQLite 3.53.2 CLI from `ops/pearl-updater`, runs
@@ -343,8 +352,15 @@ restore into a scratch copy of the database, never into the live one.
   ```
 
   Never lower it by hand.
+- Since SPEC-022 v0.4.5 the first deletion that tombstones an unsettled
+  credit records contract 5 in the same transaction. A contract-4 release
+  would neither settle such a credit through its tombstone nor skip it in the
+  nightly reconcile, so it refuses the database from that commit on. Until
+  the first such deletion (the first nightly run after the deploy), the
+  previous release can still open the database.
 - Tombstones (`settlement_evidence_archived_credits`) are permanent: a trigger
-  refuses updates and deletes.
+  refuses updates and deletes. A tombstoned credit's money columns are
+  immutable (`trg_lrc_archived_money_immutable`), settled or not.
 
 ## 7. Hot footprint (SPEC-022 R-15.10)
 
@@ -372,6 +388,72 @@ These run without the nightly job and need no operator step:
   pages to the freelist and does not rebuild anything. A later rollback to a
   release from before this change recreates the indexes at its startup, which
   takes longer on a large database.
+
+- The audit database (`coordinator-audit.db`) keeps
+  `storage.audit_log_hot_days` (default 7) whole UTC days hot. A daily run at
+  02:30 UTC writes older rows to `storage.audit_log_archive_dir` (default
+  `audit-archive` next to the audit database) as
+  `audit-log-<UTC stamp>-<nonce>.jsonl.gz` with a manifest, re-reads and
+  verifies it, then deletes the rows in short batches (SPEC-002 R-7.10.2a).
+  It refuses below the same free-space floor as this job. The log line is
+  `audit log rotation finished` with `status`, `archived_rows`,
+  `deleted_rows`, `kept_rows`, and `removed_archives`; `kept_rows` are rows
+  that changed after export and are archived again by a later run. Archives
+  whose last day is older than `storage.audit_log_retention_days` are
+  removed. Rows leave the audit database only through a verified archive;
+  the generic 90-day pruner no longer runs on it. The first runs after the
+  deploy move the existing backlog in
+  bounded archives (200,000 rows each, 15 minutes per run). Verify an archive
+  from the file alone with
+  `coordinator-cli audit-log-archive verify --archive <file>`. The audit file
+  stops growing at once; it shrinks only after the one-time conversion in
+  section 4, which includes it.
+- Audit payloads written by this release name each field once
+  (SPEC-022 R-11.1.2): the ingested event carries the attempt and receipt
+  identity only, and verifier checks are reduced to `unmet_checks`.
+
+## 8. Ledger rollup and the request_log window (SPEC-022 R-15.11, SPEC-005 §2.1b, §7.8)
+
+These run without an operator step once the release is deployed.
+
+- **Ledger rollup.** After each nightly retention run, the rollup walks
+  payouts from a persisted cursor. A request rolls up when its evidence is
+  archived and every credit settled into a `ready` or `consumed` payout whose
+  window is `billing.ledger_rollup.min_settlement_cycles` (default 5)
+  completed windows old and older than the `request_log` window. Its credits,
+  operator credits, provider identity snapshots, and tombstones go to a
+  verified `ledger-rollup-*.jsonl.gz` archive in the retention archive
+  directory. They are then replaced in short transactions by per-payout,
+  per-hour, per-model rows in `ledger_settled_rollups`. Payout rows,
+  settlement windows, quarantine resolutions, and frozen finality stay hot.
+  A request skipped for a reason that can clear (evidence not archived yet,
+  `request_log` rows still present, rows changed after export) is kept in
+  `ledger_rollup_holds` and re-checked by every run, so the cursor never
+  strands it. With the stats Postgres configured, a credit rolls up only
+  after the stats billing mirror copied it (`billing_mirror_behind` holds;
+  the coordinator reads `MAX(sqlite_lrc_id)` of the mirrored table through
+  the stats rollup pool), and a watermark it cannot read stops the run with
+  an error in the log line; check it after the first nightly run. The log line is
+  `nightly ledger rollup finished`, with
+  `rolled_requests`, `rolled_credits`, `kept_requests` (the run's skips), and
+  `rollup_cursor`. The kill switch is
+  `billing.ledger_rollup.enabled: false` plus SIGHUP. Verify a rollup archive
+  from the file alone with
+  `coordinator-cli ledger-rollup-archive verify --archive <file>`.
+- **Rollback.** The first rollup transaction records billing contract 6. A
+  release from before it refuses the database from then on: it would not add
+  the rollup rows to payable totals and would void a ready payout whose
+  credits rolled up.
+- **`request_log` window.** `storage.request_log_retention_days` defaults to
+  14 (it must exceed `settlement.nightly_reconcile_window_days`). Check the
+  live `coordinator.yaml`: a value pinned to 90 there keeps the old window
+  until it is changed. Rows with an account leave only through the wholesale
+  fold into `wholesale_usage_daily`, a whole request at a time, so D1a
+  statements keep their totals. Pruning runs off the startup path in hourly
+  passes of at most five minutes. The first passes after lowering the window
+  drain the backlog over several hours, which is why a large backlog does
+  not delay startup. The admin reconcile refuses a range that starts before
+  the window, because its buyer side is gone.
 
 ## Done criteria
 

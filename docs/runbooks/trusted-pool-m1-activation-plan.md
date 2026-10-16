@@ -42,7 +42,7 @@ the earlier one passes.
 The plan ran on Pearl v1.8.218 with CLI 1.8.217 (`71f22d36c`) on the member.
 Pool `G2Nr74KPQN_FxLrrrAhtXQ` (manifest v1, core digest `c9e7b76a…`, v2 core,
 `enforce`, `runtime_allowlist: [llamacpp_loopback]`) is `active` and routeable,
-with member `mp-efd40f26117ac30554a00c6432e6e65e` and one first-party buyer.
+with member `mp-<provider-c>` and one first-party buyer.
 These steps differed from the text below. Each one was verified in code or on
 Pearl:
 
@@ -804,7 +804,9 @@ Each prompt carries a fresh uuid (the gateway dedupe cache answers repeats
 without routing).
 
 Expected headers on both 200s: `X-MacProvider-Engine: llamacpp_loopback`,
-`X-Request-ID: <rid>`, `X-Provider-Id: <M1_PROVIDER_ID>`. Stream ends with a
+`X-Request-ID: <rid>`; the response carries no provider identity header
+(buyers never receive one), so confirm the serving provider in the coordinator
+`request_log` row for `<rid>`. Stream ends with a
 `finish_reason` chunk and `[DONE]`.
 
 Negative controls in the same session (each must be 503, 0 route snapshots,

@@ -454,17 +454,6 @@ func (h *Handler) proxyGateway(w http.ResponseWriter, r *http.Request, path stri
 	_, _ = w.Write(body)
 }
 
-func (h *Handler) fetchGatewayJSON(r *http.Request, path string) (map[string]any, error) {
-	out, status, err := h.fetchGatewayJSONStatus(r, path)
-	if err != nil {
-		return nil, err
-	}
-	if status < 200 || status >= 300 {
-		return nil, errors.New("gateway status")
-	}
-	return out, nil
-}
-
 func (h *Handler) fetchGatewayJSONStatus(r *http.Request, path string) (map[string]any, int, error) {
 	return h.fetchGatewayJSONStatusRawQuery(r, path, r.URL.RawQuery)
 }

@@ -278,6 +278,12 @@ SELECT lrc.request_id, lrc.attempt_n, lrc.provider_id, lrc.estimated_completion_
        SELECT 1 FROM ledger_ceiling_restatements lcr
         WHERE lcr.request_credit_id = lrc.id
    )
+   -- SPEC-022 v0.4.5 R-15.6: a tombstoned credit's money is immutable; the
+   -- archive is its rederivation source.
+   AND NOT EXISTS (
+       SELECT 1 FROM settlement_evidence_archived_credits archived
+        WHERE archived.request_credit_id = lrc.id
+   )
  ORDER BY lrc.id
  LIMIT ?`, from, to, limit)
 	if err != nil {
