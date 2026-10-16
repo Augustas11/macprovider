@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.32
+**Version:** 0.1.33
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.32",
+  "version": "0.1.33",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -300,7 +300,7 @@ For standalone drafter artifacts, the accepted tensor namespace is exactly
 `mlx-community/Qwen3.6-*-MTP-4bit` drafter artifacts.
 
 The observer MUST inspect every `.safetensors` file that the R003-authorized
-mlx-swift-lm loader can consume. At `3.32.3-macprovider.6` the loader
+mlx-swift-lm loader can consume. At `3.32.3-macprovider.7` the loader
 (`safetensorWeightURLs`) takes the files named by
 `model.safetensors.index.json`, which may sit in subdirectories, else the
 top-level conventional names, plus files the model declares as additional
@@ -370,9 +370,9 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.6` | `72c4ab082a08f291ba270a7303880e90036742e3` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
-| `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.2` | `ca2f61d22c5e8afe87170525ebc1769f72da5b41` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
-| `https://github.com/Augustas11/mlx` | `v0.32.2-macprovider.2` | `c9196eb7161358f1e4a7f0605182186f8686e5f8` | `ml-explore/mlx` `v0.32.2` (`1f8e74e3f12f31365464a6867c6579f0e9b29d85`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.7` | `45ffd959588d8854adb117475f1f80b18ce68919` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.4` | `c4af173883e763547d2bd07a9ccd2963b5411ae9` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
+| `https://github.com/Augustas11/mlx` | `v0.32.2-macprovider.3` | `91a45ed4778b574eeef9769230e61aa4688c9587` | `ml-explore/mlx` `v0.32.2` (`1f8e74e3f12f31365464a6867c6579f0e9b29d85`) |
 
 Each link pins the next by full revision: `phase3-binary/Package.swift` pins
 the mlx-swift-lm fork, that fork's manifest pins the mlx-swift fork, and the
@@ -1424,6 +1424,18 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.33 (2026-10-16)** — MTP-3 (R003) authorizes the tuple
+  `3.32.3-macprovider.7` (`45ffd959…`) / `0.32.3-macprovider.4`
+  (`c4af1738…`) / `v0.32.2-macprovider.3` (`91a45ed4…`), upstream bases
+  unchanged. The MLX core fork adds one patch: `quantized_matmul`,
+  `indices_or_default`, `gather`, `scatter`, `affine_quantize` and the
+  bool-mask attention fallback pass the caller's stream to the casts and
+  broadcasts they create. Before it, those ops ran on the thread's default
+  stream while mlx-swift runs every op on its own pooled stream, so each one
+  was a cross-queue dependency. gpt-oss-20b decode paid 140 per token and
+  ran 30% below the 3.31.4 runtime (#2028). The same kernels run on the same
+  inputs, on the caller's stream; no kernel, routing or numerics change.
+  The mlx-swift and mlx-swift-lm forks change only their pins.
 - **0.1.32 (2026-10-10)** — Model-keyed admission, revocation-only policy,
   on-device qualification (follows SPEC-038 v0.3.15). MTP-13: admission keys
   on the model and its target artifact; the upstream MLX runtime revision,
