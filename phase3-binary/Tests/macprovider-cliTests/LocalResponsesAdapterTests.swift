@@ -16,6 +16,27 @@ final class LocalResponsesAdapterTests: XCTestCase {
             try JSONSerialization.jsonObject(with: Data($0.dropFirst(6).utf8)) as! [String: Any]
         }
     }
+    /// Generated IDs/timestamps are deliberately absent from fixture subsets.
+    /// Arrays still compare exact length/order so extra or reordered output fails.
+    private func assertSubset(_ expected: Any, actual: Any?, path: String) throws {
+        if let expected = expected as? [String: Any] {
+            XCTAssertEqual(actual is [String: Any], true, path)
+            guard let actual = actual as? [String: Any] else { return }
+            for (key, value) in expected {
+                XCTAssertEqual(actual.keys.contains(key), true, "\(path).\(key) missing")
+                try assertSubset(value, actual: actual[key], path: "\(path).\(key)")
+            }
+        } else if let expected = expected as? [Any] {
+            XCTAssertEqual(actual is [Any], true, path)
+            guard let actual = actual as? [Any] else { return }
+            XCTAssertEqual(actual.count, expected.count, path)
+            for (index, pair) in zip(expected, actual).enumerated() {
+                try assertSubset(pair.0, actual: pair.1, path: "\(path)[\(index)]")
+            }
+        } else {
+            XCTAssertEqual(try data(["value": actual ?? NSNull()]), try data(["value": expected]), path)
+        }
+    }
     func testSharedRequestContracts() throws {
         for fixture in try fixtures()["requests"] as! [[String: Any]] {
             let name = fixture["name"] as! String
@@ -47,9 +68,18 @@ final class LocalResponsesAdapterTests: XCTestCase {
             let terminals = events.filter { ["response.completed", "response.failed", "response.incomplete"].contains($0["type"] as? String ?? "") }
             XCTAssertEqual(terminals.count, 1, fixture["name"] as! String)
             XCTAssertEqual(terminals.first?["type"] as? String, fixture["terminal"] as? String)
+            XCTAssertEqual(events.compactMap { $0["type"] as? String }, fixture["event_types"] as? [String], fixture["name"] as! String)
+            try assertSubset(fixture["response"]!, actual: terminals.first?["response"], path: fixture["name"] as! String)
             XCTAssertEqual(events.filter { $0["type"] as? String == fixture["delta_type"] as? String }.compactMap { $0["delta"] as? String }.joined(), fixture["delta"] as? String)
-            XCTAssertEqual(events.compactMap { $0["sequence_number"] as? Int }, Array(0..<events.count))
+            XCTAssertEqual(events.compactMap { $0["sequence_number"] as? Int }, Array(1...events.count))
             XCTAssertEqual(frames.filter { $0 == "data: [DONE]\n\n" }.count, 1)
+        }
+    }
+    func testSharedNonStreamingContracts() throws {
+        for fixture in try fixtures()["nonstream"] as! [[String: Any]] {
+            let adapter = try LocalResponsesAdapter(body: data(fixture["request"]!))
+            let result = try JSONSerialization.jsonObject(with: adapter.translateResponse(data(fixture["chat_response"]!)))
+            try assertSubset(fixture["response"]!, actual: result, path: fixture["name"] as! String)
         }
     }
     func testRejectsMalformedUnsupportedAndAmbiguousRequests() throws {
@@ -65,6 +95,16 @@ final class LocalResponsesAdapterTests: XCTestCase {
         XCTAssertThrowsError(try adapter(["tool_choice": "required"]))
         XCTAssertThrowsError(try adapter(["tools": [["type": "function", "name": "weather"]], "tool_choice": ["type": "function", "name": "weather", "namespace": "other"]]))
         XCTAssertThrowsError(try adapter(["reasoning": ["effort": "high"]]))
+        for metadata in [42, "string", ["array"]] as [Any] {
+            XCTAssertThrowsError(try adapter(["metadata": metadata]))
+        }
+        for field in ["type", "role"] {
+            for value in [42, true, NSNull(), ["array"]] as [Any] {
+                XCTAssertThrowsError(try adapter(["input": [[field: value, "content": "hello"]]]))
+            }
+        }
+        _ = try adapter(["metadata": ["trace": "test"]])
+        _ = try adapter(["metadata": NSNull()])
     }
     func testEOFAndMalformedStreamFailExactlyOnce() throws {
         for tail in ["", "data: [DONE]\n\n", "data: broken\n\n"] {

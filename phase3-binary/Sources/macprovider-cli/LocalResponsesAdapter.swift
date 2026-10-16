@@ -21,7 +21,7 @@ final class LocalResponsesAdapter {
     private let format: [String: Any]
     private let id = "resp_" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
     private let created = Int(Date().timeIntervalSince1970)
-    private var sequence = 0
+    private var sequence = 1
     private var started = false
     private var terminal = false
     private var lineBuffer = ""
@@ -51,6 +51,9 @@ final class LocalResponsesAdapter {
         guard let model = req["model"] as? String, !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw invalid("model", "model is required")
         }
+        if let metadata = req["metadata"], !(metadata is NSNull), !(metadata is [String: Any]) {
+            throw invalid("metadata", "metadata must be an object or null")
+        }
         for field in ["stream", "store", "background", "parallel_tool_calls"] {
             if let value = req[field], !(value is NSNull), !Self.isBoolean(value) { throw invalid(field, "\(field) must be a boolean") }
         }
@@ -76,6 +79,9 @@ final class LocalResponsesAdapter {
             messages.append(["role": "user", "content": input])
         } else if let items = req["input"] as? [[String: Any]], !items.isEmpty {
             for item in items {
+                for field in ["type", "role"] {
+                    if let value = item[field], !(value is String) { throw invalid("input", "Input item \(field) must be a string") }
+                }
                 let type = item["type"] as? String ?? "message"
                 let itemFields: Set<String> = type == "message" ? ["type", "id", "status", "role", "content"] : type == "function_call" ? ["type", "id", "status", "call_id", "name", "arguments"] : ["type", "id", "status", "call_id", "output"]
                 guard Set(item.keys).isSubset(of: itemFields) else { throw invalid("input", "Unsupported input item field", "unsupported_parameter") }

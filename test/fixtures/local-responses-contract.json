@@ -291,7 +291,40 @@
       ],
       "terminal": "response.completed",
       "delta_type": "response.output_text.delta",
-      "delta": "hello"
+      "delta": "hello",
+      "event_types": [
+        "response.created",
+        "response.output_item.added",
+        "response.content_part.added",
+        "response.output_text.delta",
+        "response.output_text.done",
+        "response.content_part.done",
+        "response.output_item.done",
+        "response.completed"
+      ],
+      "response": {
+        "object": "response",
+        "model": "test-model",
+        "store": false,
+        "status": "completed",
+        "output": [
+          {
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [
+              {
+                "type": "output_text",
+                "text": "hello",
+                "annotations": []
+              }
+            ]
+          }
+        ],
+        "previous_response_id": null,
+        "error": null,
+        "incomplete_details": null
+      }
     },
     {
       "name": "length_incomplete",
@@ -310,7 +343,42 @@
       ],
       "terminal": "response.incomplete",
       "delta_type": "response.output_text.delta",
-      "delta": "partial"
+      "delta": "partial",
+      "event_types": [
+        "response.created",
+        "response.output_item.added",
+        "response.content_part.added",
+        "response.output_text.delta",
+        "response.output_text.done",
+        "response.content_part.done",
+        "response.output_item.done",
+        "response.incomplete"
+      ],
+      "response": {
+        "object": "response",
+        "model": "test-model",
+        "store": false,
+        "status": "incomplete",
+        "output": [
+          {
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [
+              {
+                "type": "output_text",
+                "text": "partial",
+                "annotations": []
+              }
+            ]
+          }
+        ],
+        "previous_response_id": null,
+        "error": null,
+        "incomplete_details": {
+          "reason": "max_output_tokens"
+        }
+      }
     },
     {
       "name": "late_failure",
@@ -336,7 +404,28 @@
       ],
       "terminal": "response.failed",
       "delta_type": "response.output_text.delta",
-      "delta": "partial"
+      "delta": "partial",
+      "event_types": [
+        "response.created",
+        "response.output_item.added",
+        "response.content_part.added",
+        "response.output_text.delta",
+        "response.failed"
+      ],
+      "response": {
+        "object": "response",
+        "model": "test-model",
+        "store": false,
+        "status": "failed",
+        "output": [],
+        "previous_response_id": null,
+        "error": {
+          "code": "internal_error",
+          "type": "server_error",
+          "message": "Inference failed"
+        },
+        "incomplete_details": null
+      }
     },
     {
       "name": "function_arguments",
@@ -383,7 +472,198 @@
       ],
       "terminal": "response.completed",
       "delta_type": "response.function_call_arguments.delta",
-      "delta": "{\"city\":\"Rome\"}"
+      "delta": "{\"city\":\"Rome\"}",
+      "event_types": [
+        "response.created",
+        "response.output_item.added",
+        "response.function_call_arguments.delta",
+        "response.function_call_arguments.delta",
+        "response.function_call_arguments.done",
+        "response.output_item.done",
+        "response.completed"
+      ],
+      "response": {
+        "object": "response",
+        "model": "test-model",
+        "store": false,
+        "status": "completed",
+        "output": [
+          {
+            "type": "function_call",
+            "call_id": "call_abcdefghijklmnop",
+            "name": "weather",
+            "arguments": "{\"city\":\"Rome\"}",
+            "status": "completed"
+          }
+        ],
+        "previous_response_id": null,
+        "error": null,
+        "incomplete_details": null
+      }
+    }
+  ],
+  "nonstream": [
+    {
+      "name": "text_tools_usage_incomplete",
+      "request": {
+        "model": "test-model",
+        "input": "hello",
+        "store": false
+      },
+      "chat_response": {
+        "model": "test-model",
+        "choices": [
+          {
+            "message": {
+              "role": "assistant",
+              "content": "<think>private</think>hello",
+              "tool_calls": [
+                {
+                  "id": "call_abcdefghijklmnop",
+                  "type": "function",
+                  "function": {
+                    "name": "weather",
+                    "arguments": "{}"
+                  }
+                }
+              ]
+            },
+            "finish_reason": "length"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 4,
+          "completion_tokens": 2,
+          "total_tokens": 6,
+          "prompt_tokens_details": {
+            "cached_tokens": 1
+          }
+        }
+      },
+      "response": {
+        "object": "response",
+        "model": "test-model",
+        "store": false,
+        "status": "incomplete",
+        "output": [
+          {
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [
+              {
+                "type": "output_text",
+                "text": "hello",
+                "annotations": []
+              }
+            ]
+          },
+          {
+            "type": "function_call",
+            "call_id": "call_abcdefghijklmnop",
+            "name": "weather",
+            "arguments": "{}",
+            "status": "completed"
+          }
+        ],
+        "previous_response_id": null,
+        "error": null,
+        "incomplete_details": {
+          "reason": "max_output_tokens"
+        },
+        "usage": {
+          "input_tokens": 4,
+          "output_tokens": 2,
+          "total_tokens": 6,
+          "input_tokens_details": {
+            "cached_tokens": 1,
+            "cache_write_tokens": 0
+          },
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "name": "structured_output",
+      "request": {
+        "model": "test-model",
+        "store": false,
+        "input": "json",
+        "text": {
+          "format": {
+            "type": "json_schema",
+            "name": "result",
+            "strict": true,
+            "schema": {
+              "type": "object",
+              "properties": {
+                "ok": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "ok"
+              ],
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      "chat_response": {
+        "choices": [
+          {
+            "message": {
+              "role": "assistant",
+              "content": "{\"ok\":true}"
+            },
+            "finish_reason": "stop"
+          }
+        ]
+      },
+      "response": {
+        "object": "response",
+        "model": "test-model",
+        "store": false,
+        "status": "completed",
+        "output": [
+          {
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [
+              {
+                "type": "output_text",
+                "text": "{\"ok\":true}",
+                "annotations": []
+              }
+            ]
+          }
+        ],
+        "previous_response_id": null,
+        "error": null,
+        "incomplete_details": null,
+        "text": {
+          "format": {
+            "type": "json_schema",
+            "name": "result",
+            "strict": true,
+            "schema": {
+              "type": "object",
+              "properties": {
+                "ok": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "ok"
+              ],
+              "additionalProperties": false
+            }
+          }
+        }
+      }
     }
   ]
 }

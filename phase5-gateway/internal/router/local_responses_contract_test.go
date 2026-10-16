@@ -3,6 +3,7 @@ package router
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"reflect"
@@ -25,17 +26,25 @@ func TestLocalResponsesSharedContract(t *testing.T) {
 			ErrorCode string `json:"error_code"`
 		}
 		Streams []struct {
-			Name      string
-			Chunks    []json.RawMessage
-			Terminal  string
-			DeltaType string `json:"delta_type"`
-			Delta     string
+			Name       string
+			Chunks     []json.RawMessage
+			Terminal   string
+			DeltaType  string `json:"delta_type"`
+			Delta      string
+			EventTypes []string `json:"event_types"`
+			Response   map[string]any
+		}
+		Nonstream []struct {
+			Name         string
+			Request      json.RawMessage
+			ChatResponse json.RawMessage `json:"chat_response"`
+			Response     map[string]any
 		}
 	}
 	if err := json.Unmarshal(data, &fixture); err != nil {
 		t.Fatal(err)
 	}
-	if len(fixture.Requests) == 0 || len(fixture.Streams) == 0 {
+	if len(fixture.Requests) == 0 || len(fixture.Streams) == 0 || len(fixture.Nonstream) == 0 {
 		t.Fatal("empty shared contract")
 	}
 	for _, tc := range fixture.Requests {
@@ -84,7 +93,8 @@ func TestLocalResponsesSharedContract(t *testing.T) {
 			a.finish()
 			var delta strings.Builder
 			terminal := ""
-			sequence := float64(-1)
+			sequence := float64(0)
+			var eventTypes []string
 			for _, line := range strings.Split(recorder.Body.String(), "\n") {
 				if !strings.HasPrefix(line, "data: {") {
 					continue
@@ -94,11 +104,12 @@ func TestLocalResponsesSharedContract(t *testing.T) {
 					t.Fatal(err)
 				}
 				seq, ok := event["sequence_number"].(float64)
-				if !ok || seq <= sequence {
+				if !ok || seq != sequence+1 {
 					t.Fatalf("non-monotonic sequence: %#v", event)
 				}
 				sequence = seq
 				typ, _ := event["type"].(string)
+				eventTypes = append(eventTypes, typ)
 				if typ == tc.DeltaType {
 					text, _ := event["delta"].(string)
 					delta.WriteString(text)
@@ -108,7 +119,11 @@ func TestLocalResponsesSharedContract(t *testing.T) {
 						t.Fatalf("multiple terminal events: %s then %s", terminal, typ)
 					}
 					terminal = typ
+					assertLocalResponsesSubset(t, event["response"], tc.Response, "response")
 				}
+			}
+			if !reflect.DeepEqual(eventTypes, tc.EventTypes) {
+				t.Errorf("events=%v want %v", eventTypes, tc.EventTypes)
 			}
 			if terminal != tc.Terminal {
 				t.Errorf("terminal=%s want %s", terminal, tc.Terminal)
@@ -117,5 +132,56 @@ func TestLocalResponsesSharedContract(t *testing.T) {
 				t.Errorf("delta=%q want %q", delta.String(), tc.Delta)
 			}
 		})
+	}
+	for _, tc := range fixture.Nonstream {
+		t.Run("nonstream/"+tc.Name, func(t *testing.T) {
+			a := newResponsesAdapter(httptest.NewRecorder(), "contract", nil)
+			if _, failure := a.translateRequest(tc.Request); failure != nil {
+				t.Fatal(failure)
+			}
+			raw, err := a.translateNonStreamingResponse(tc.ChatResponse)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got any
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Fatal(err)
+			}
+			assertLocalResponsesSubset(t, got, tc.Response, "response")
+		})
+	}
+
+}
+
+// Dictionaries are subsets so generated IDs/timestamps stay implementation-owned;
+// arrays are exact in length and order, preserving tool and text item semantics.
+func assertLocalResponsesSubset(t *testing.T, got, want any, path string) {
+	t.Helper()
+	switch expected := want.(type) {
+	case map[string]any:
+		actual, ok := got.(map[string]any)
+		if !ok {
+			t.Fatalf("%s: expected object, got %#v", path, got)
+		}
+		for key, value := range expected {
+			item, exists := actual[key]
+			if !exists {
+				t.Errorf("%s.%s absent", path, key)
+				continue
+			}
+			assertLocalResponsesSubset(t, item, value, path+"."+key)
+		}
+	case []any:
+		actual, ok := got.([]any)
+		if !ok || len(actual) != len(expected) {
+			t.Fatalf("%s: array=%#v want %#v", path, got, want)
+		}
+		for i, value := range expected {
+			assertLocalResponsesSubset(t, actual[i], value, fmt.Sprintf("%s[%d]", path, i))
+		}
+	default:
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s=%#v want %#v", path, got, want)
+		}
 	}
 }
