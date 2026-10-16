@@ -307,7 +307,8 @@ run_leg() {
         if body="$(status_json "$LAB_PORT")"; then
           grant="$(printf '%s' "$body" | grant_of)"
           case "$grant" in
-            None*|"") grant="none none none none" ;;
+            # "pending" (and a carried prior grant) is not a decision yet.
+            None*|pending*|prior_grant*|"") grant="none none none none" ;;
             *cb-probe-v2*) printf '%s' "$body" > "$OUT/$leg-status.json"; break ;;
           esac
         fi
