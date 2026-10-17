@@ -2865,6 +2865,17 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             ),
             "event=batching_rejected code=context_length_exceeded prompt_tokens=40 max_output_tokens=199960 cap=131072\n"
         )
+        // SPEC-049-R010: the on-disk provider log keeps only the bounded
+        // code for a privacy-class request.
+        XCTAssertEqual(
+            ContinuousBatchScheduler.contextRejectedTelemetryLine(
+                promptTokens: 40,
+                maxOutputTokens: 199_960,
+                cap: 131_072,
+                provenance: .privacy
+            ),
+            "event=batching_rejected code=context_length_exceeded\n"
+        )
     }
 
     // Live 2026-09-30: a 200k-context provider with no buyer max_tokens asked
@@ -3686,6 +3697,154 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         }
         let prefills = await backend.prefillCallCount()
         XCTAssertEqual(prefills, 1, "`late` must never reach prefill")
+    }
+
+    // SPEC-049-R010: a privacy-class request through continuous batching
+    // writes nothing under the replay-claim store, while its replay claim
+    // still guards re-execution in this process. Ordinary requests keep the
+    // durable claim.
+    func testPrivacyRequestReplayClaimStaysInMemoryAndStillGuardsReplay() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("macprovider-privacy-replay-\(UUID().uuidString)", isDirectory: true)
+        let storeURL = root.appendingPathComponent("replay-claims-v1", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let authority = ContinuousBatchRuntimeReplayAuthority(storeURL: storeURL)
+        XCTAssertTrue(authority.durableAvailable)
+        let private1 = ContinuousBatchSchedulerRequest(
+            id: "privacy-1", conversationKey: "", promptTokens: [5, 6], maxOutputTokens: 1,
+            ingestProvenance: .privacy
+        )
+
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            backend: ScriptedBackend(scripts: ["privacy-1": [9]]),
+            replayAuthority: authority
+        )
+        let first = try await scheduler.submit(private1)
+        XCTAssertEqual(first.outputTokens, [9])
+        XCTAssertEqual(first.settlementDisposition, .eligibleOwner)
+        XCTAssertEqual(Self.storeFiles(root), [], "a privacy-class claim must not reach the disk")
+        let replay = try await scheduler.submit(private1)
+        XCTAssertEqual(replay.settlementDisposition, .nonSettlingReplay)
+
+        // A rebuilt scheduler in the same process (warm swap) has no local
+        // result cache; the in-memory claim still refuses re-execution.
+        let rebuiltBackend = ScriptedBackend(scripts: ["privacy-1": [9]])
+        let rebuilt = try await makeScheduler(
+            maxActiveRows: 1,
+            backend: rebuiltBackend,
+            replayAuthority: authority
+        )
+        do {
+            _ = try await rebuilt.submit(private1)
+            XCTFail("a same-process replay of a privacy request must not re-execute")
+        } catch ContinuousBatchSchedulerError.idempotencyWindowExpired {
+            // expected
+        }
+        do {
+            _ = try await rebuilt.submit(ContinuousBatchSchedulerRequest(
+                id: "privacy-1", conversationKey: "", promptTokens: [5, 7], maxOutputTokens: 1,
+                ingestProvenance: .privacy
+            ))
+            XCTFail("a same-ID privacy request with another body must be refused")
+        } catch ContinuousBatchSchedulerError.duplicateRequestMismatch {
+            // expected
+        }
+        let rebuiltPrefills = await rebuiltBackend.prefillCallCount()
+        XCTAssertEqual(rebuiltPrefills, 0)
+
+        // An ordinary request on the same scheduler still takes a durable claim.
+        let ordinary = try await rebuilt.submit(ContinuousBatchSchedulerRequest(
+            id: "ordinary-1", conversationKey: "", promptTokens: [1, 2], maxOutputTokens: 1,
+            ingestProvenance: .relay
+        ))
+        XCTAssertEqual(ordinary.settlementDisposition, .eligibleOwner)
+        XCTAssertEqual(Self.claimFiles(root).count, 1, "exactly the ordinary claim is on disk")
+        let restarted = ContinuousBatchRuntimeReplayAuthority(storeURL: storeURL)
+        XCTAssertEqual(try restarted.claim(ContinuousBatchSchedulerReplayKey(
+            requestID: "ordinary-1",
+            fingerprintSHA256: try XCTUnwrap(Self.storedFingerprint(root))
+        )), .duplicateSameRequest, "the ordinary claim survives a restart unchanged")
+    }
+
+    func testRuntimeReplayAuthorityKeepsPrivacyClaimsOffDisk() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("macprovider-privacy-authority-\(UUID().uuidString)", isDirectory: true)
+        let storeURL = root.appendingPathComponent("replay-claims-v1", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        XCTAssertFalse(ContinuousBatchRuntimeReplayAuthority.persistsClaim(for: .privacy))
+        for provenance in KVIngestProvenance.allCases {
+            XCTAssertEqual(
+                ContinuousBatchRuntimeReplayAuthority.persistsClaim(for: provenance),
+                provenance != .privacy,
+                "\(provenance)"
+            )
+        }
+        func key(_ id: String, _ byte: UInt8, _ provenance: KVIngestProvenance) -> ContinuousBatchSchedulerReplayKey {
+            ContinuousBatchSchedulerReplayKey(
+                requestID: id,
+                fingerprintSHA256: Data(repeating: byte, count: 32),
+                ingestProvenance: provenance
+            )
+        }
+        let authority = ContinuousBatchRuntimeReplayAuthority(storeURL: storeURL)
+        XCTAssertEqual(try authority.claim(key("p", 1, .privacy)), .claimed)
+        XCTAssertEqual(try authority.claim(key("p", 1, .privacy)), .duplicateSameRequest)
+        XCTAssertEqual(try authority.claim(key("p", 2, .privacy)), .duplicateMismatchedRequest)
+        XCTAssertEqual(Self.storeFiles(root), [], "privacy claims take no store lock and write no claim")
+        // Cross-class same ID in one process is a duplicate either way, and
+        // the ordinary attempt on a privacy-held ID writes nothing.
+        XCTAssertEqual(try authority.claim(key("p", 1, .relay)), .duplicateSameRequest)
+        XCTAssertEqual(try authority.claim(key("o", 3, .relay)), .claimed)
+        XCTAssertEqual(try authority.claim(key("o", 3, .privacy)), .duplicateSameRequest)
+        XCTAssertEqual(Self.claimFiles(root).count, 1, "only the ordinary claim is on disk")
+
+        // Release is fingerprint-guarded and memory-only for the privacy class.
+        authority.release(key("p", 2, .privacy))
+        XCTAssertEqual(try authority.claim(key("p", 1, .privacy)), .duplicateSameRequest)
+        authority.release(key("p", 1, .privacy))
+        XCTAssertEqual(try authority.claim(key("p", 1, .privacy)), .claimed)
+
+        // Nothing privacy-derived survives a restart; the ordinary claim does.
+        let restarted = ContinuousBatchRuntimeReplayAuthority(storeURL: storeURL)
+        XCTAssertEqual(try restarted.claim(key("p", 1, .privacy)), .claimed)
+        XCTAssertEqual(try restarted.claim(key("o", 3, .relay)), .duplicateSameRequest)
+        XCTAssertEqual(Self.claimFiles(root).count, 1)
+    }
+
+    private static func claimFiles(_ root: URL) -> [String] {
+        storeFiles(root).filter { $0.hasSuffix(".json") }
+    }
+
+    /// Absolute path of every regular file under `root` (claims and the
+    /// store lock), sorted.
+    private static func storeFiles(_ root: URL) -> [String] {
+        guard let enumerator = FileManager.default.enumerator(
+            at: root, includingPropertiesForKeys: [.isRegularFileKey]
+        ) else { return [] }
+        return enumerator.compactMap { item -> String? in
+            guard let url = item as? URL,
+                  (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
+            else { return nil }
+            return url.path
+        }.sorted()
+    }
+
+    private static func storedFingerprint(_ root: URL) -> Data? {
+        guard let path = claimFiles(root).first,
+              let data = FileManager.default.contents(atPath: path),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let hex = object["fingerprint_sha256"] as? String
+        else { return nil }
+        var bytes = Data()
+        var index = hex.startIndex
+        while index < hex.endIndex {
+            let next = hex.index(index, offsetBy: 2)
+            guard let byte = UInt8(hex[index..<next], radix: 16) else { return nil }
+            bytes.append(byte)
+            index = next
+        }
+        return bytes
     }
 
     func testAC25QueueWaitTimeoutReleasesTheReplayClaimSoTheSameIDCanRetry() async throws {

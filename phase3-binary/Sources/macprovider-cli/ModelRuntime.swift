@@ -720,6 +720,10 @@ final class ContinuousBatchRuntimeReplayAuthority: ContinuousBatchSchedulerRepla
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private var fingerprintsByRequestIDHash: [String: Data]
+    /// SPEC-049-R010: claims for requests that may not persist request-derived
+    /// state (the privacy class). Process lifetime only; never read from or
+    /// written to `storeURL`.
+    private var processOnlyFingerprintsByRequestIDHash: [String: Data] = [:]
     private var durableAvailableValue: Bool
 
     init(
@@ -768,10 +772,30 @@ final class ContinuousBatchRuntimeReplayAuthority: ContinuousBatchSchedulerRepla
         return durableAvailableValue
     }
 
+    /// SPEC-049-R010: the single decision for whether a claim reaches the
+    /// durable store. The privacy posture probe asserts it for `.privacy`.
+    static func persistsClaim(for provenance: KVIngestProvenance) -> Bool {
+        provenance.mayPersistRequestDerivedState
+    }
+
     func claim(_ key: ContinuousBatchSchedulerReplayKey) throws -> ContinuousBatchSchedulerReplayClaim {
         let requestIDHash = Self.requestIDHash(key.requestID)
         lock.lock()
         defer { lock.unlock() }
+        // In-process replay protection for a request that may not touch the
+        // disk: no store lock, read or write. A same-ID claim already taken
+        // in this process by either class is still a duplicate.
+        guard Self.persistsClaim(for: key.ingestProvenance) else {
+            if let existing = processOnlyFingerprintsByRequestIDHash[requestIDHash]
+                ?? fingerprintsByRequestIDHash[requestIDHash] {
+                return existing == key.fingerprintSHA256 ? .duplicateSameRequest : .duplicateMismatchedRequest
+            }
+            processOnlyFingerprintsByRequestIDHash[requestIDHash] = key.fingerprintSHA256
+            return .claimed
+        }
+        if let existing = processOnlyFingerprintsByRequestIDHash[requestIDHash] {
+            return existing == key.fingerprintSHA256 ? .duplicateSameRequest : .duplicateMismatchedRequest
+        }
         if let storeURL {
             return try Self.withStoreLock(for: storeURL) {
                 let claimURL = try Self.claimURL(for: requestIDHash, in: storeURL)
@@ -810,6 +834,11 @@ final class ContinuousBatchRuntimeReplayAuthority: ContinuousBatchSchedulerRepla
         let requestIDHash = Self.requestIDHash(key.requestID)
         lock.lock()
         defer { lock.unlock() }
+        guard Self.persistsClaim(for: key.ingestProvenance) else {
+            guard processOnlyFingerprintsByRequestIDHash[requestIDHash] == key.fingerprintSHA256 else { return }
+            processOnlyFingerprintsByRequestIDHash.removeValue(forKey: requestIDHash)
+            return
+        }
         if let storeURL {
             try? Self.withStoreLock(for: storeURL) {
                 let claimURL = try Self.claimURL(for: requestIDHash, in: storeURL)
@@ -6591,14 +6620,16 @@ actor ModelRuntime: ModelRuntimeServing {
     static func continuousBatchMaxOutputTokens(
         requested: Int?,
         promptTokens: Int,
-        maxContextTokens: Int
+        maxContextTokens: Int,
+        provenance: KVIngestProvenance = .unknown
     ) throws -> Int {
         let remaining = maxContextTokens - promptTokens
         guard remaining >= 1 else {
             try? FileHandle.standardError.write(contentsOf: Data(ContinuousBatchScheduler.contextRejectedTelemetryLine(
                 promptTokens: promptTokens,
                 maxOutputTokens: 1,
-                cap: maxContextTokens
+                cap: maxContextTokens,
+                provenance: provenance
             ).utf8))
             throw ContinuousBatchSchedulerError.contextLengthExceeded(
                 promptTokens: promptTokens,
@@ -6657,7 +6688,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 nativeMTPMaximumProposalDepth: nativeMTPAdmission?.initialProposalDepth ?? 0,
                 nativeMTPCompleteWindowBytesByDepth: nativeMTPAdmission?.completeWindowBytesByDepth ?? [],
                 nativeMTPMaximumActiveRows: nativeMTPAdmission?.maximumNativeActiveRows ?? 0,
-                nativeMTPTupleFence: nativeMTPAdmission?.tupleFence
+                nativeMTPTupleFence: nativeMTPAdmission?.tupleFence,
+                ingestProvenance: request.ingestProvenance
             )
         )
     }
@@ -7033,7 +7065,8 @@ actor ModelRuntime: ModelRuntimeServing {
         let maxOutputTokens = try Self.continuousBatchMaxOutputTokens(
             requested: request.maxTokens,
             promptTokens: prepared.promptTokens.count,
-            maxContextTokens: maxContextTokens
+            maxContextTokens: maxContextTokens,
+            provenance: request.ingestProvenance
         )
         let tokenBoundedNativeMTPAdmission = nativeMTPAdmission.resolvingTokenBounds(
             promptTokenCount: prepared.promptTokens.count,
@@ -7503,7 +7536,8 @@ actor ModelRuntime: ModelRuntimeServing {
         let maxOutputTokens = try Self.continuousBatchMaxOutputTokens(
             requested: request.maxTokens,
             promptTokens: prepared.promptTokens.count,
-            maxContextTokens: maxContextTokens
+            maxContextTokens: maxContextTokens,
+            provenance: request.ingestProvenance
         )
         let tokenBoundedNativeMTPAdmission = nativeMTPAdmission.resolvingTokenBounds(
             promptTokenCount: prepared.promptTokens.count,

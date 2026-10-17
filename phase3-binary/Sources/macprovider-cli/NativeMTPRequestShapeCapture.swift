@@ -125,6 +125,9 @@ final class NativeMTPRequestShapeCapture: @unchecked Sendable {
         resolvedMaxCompletionTokens: Int? = nil,
         now: Date = Date()
     ) {
+        // SPEC-049-R010: a privacy-class request leaves no record, and no
+        // counter change, in the capture or status files.
+        guard request.ingestProvenance.mayPersistRequestDerivedState else { return }
         lock.lock()
         defer { lock.unlock() }
         attempts += 1

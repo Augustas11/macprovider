@@ -666,6 +666,21 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(try reloaded.claim(mismatch), .duplicateMismatchedRequest)
     }
 
+    // SPEC-049-R010: the live relay-to-row mapping carries the ingest
+    // provenance, so the replay authority can keep privacy claims in memory.
+    func testProductionSchedulerSubmissionCarriesIngestProvenance() throws {
+        let base = try Self.chatRequest(modelID: "mlx-community/Qwen-Test", maxTokens: 1)
+            .withRequestID("relay-request-2015")
+        for provenance in KVIngestProvenance.allCases {
+            let submission = try ModelRuntime.continuousBatchSubmission(
+                for: base.withIngestProvenance(provenance),
+                promptTokens: [1, 2],
+                maxOutputTokens: 1
+            )
+            XCTAssertEqual(submission.schedulerRequest.ingestProvenance, provenance)
+        }
+    }
+
     func testProductionSchedulerRequestIDUsesIngressIdentityWhenPresent() throws {
         let request = try Self.chatRequest(modelID: "mlx-community/Qwen-Test", maxTokens: 1)
             .withRequestID("relay-request-1500")

@@ -16,7 +16,10 @@ final class PrivacyKVDiskBypassTests: XCTestCase {
         XCTAssertFalse(ModelRuntime.coldTierAdmits(provenance: .privacy))
         XCTAssertFalse(ModelRuntime.allowsConversationCacheLease(provenance: .privacy, nativeAllows: true))
         XCTAssertFalse(KVDiskCacheGate.persists(conversationKey: key, provenance: .privacy))
-        XCTAssertTrue(PrivacyRuntimeHardening.privacyPathBypassesKVDiskTier())
+        XCTAssertFalse(KVIngestProvenance.privacy.mayPersistRequestDerivedState)
+        XCTAssertFalse(ContinuousBatchRuntimeReplayAuthority.persistsClaim(for: .privacy))
+        XCTAssertTrue(PrivacyRuntimeHardening.privacyReplayClaimStaysInMemory())
+        XCTAssertTrue(PrivacyRuntimeHardening.privacyPathBypassesDiskSinks())
         // Every reusable-cache sink follows the one provenance policy.
         for provenance in KVIngestProvenance.allCases {
             let allowed = provenance.mayUseReusableKVCache
