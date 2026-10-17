@@ -731,6 +731,10 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
     /// Exactness-probe rows only (`selfCheckCohort` set): decode tokens this
     /// row generated while its whole cohort, and nothing else, was decoding.
     var selfCheckCohortDecodeTokens: Int? = nil
+    /// Cohort rows only: wall seconds of the decode steps counted in
+    /// `selfCheckCohortDecodeTokens` (SPEC-038 FR-CB10 v0.3.21 decode-only
+    /// gain). Timing, not identity: not compared by `==`.
+    var selfCheckCohortDecodeSeconds: Double? = nil
 
     func withSettlementDisposition(
         _ disposition: ContinuousBatchSettlementDisposition
@@ -753,7 +757,8 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
             serialToolStopTokenCount: serialToolStopTokenCount,
             serialConversationCache: disposition == .eligibleOwner ? serialConversationCache : nil,
             nativeMTPCounters: nativeMTPCounters,
-            selfCheckCohortDecodeTokens: selfCheckCohortDecodeTokens
+            selfCheckCohortDecodeTokens: selfCheckCohortDecodeTokens,
+            selfCheckCohortDecodeSeconds: selfCheckCohortDecodeSeconds
         )
     }
 
@@ -776,7 +781,8 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
             serialToolStopTokenCount: serialToolStopTokenCount,
             serialConversationCache: serialConversationCache,
             nativeMTPCounters: nativeMTPCounters,
-            selfCheckCohortDecodeTokens: selfCheckCohortDecodeTokens
+            selfCheckCohortDecodeTokens: selfCheckCohortDecodeTokens,
+            selfCheckCohortDecodeSeconds: selfCheckCohortDecodeSeconds
         )
     }
 
@@ -2100,6 +2106,10 @@ actor ContinuousBatchScheduler {
         /// count when the current full-width run began.
         var selfCheckCohortDecodeTokens = 0
         var selfCheckCohortRunStart: Int?
+        /// Uptime nanoseconds spent in closed full-width runs, and when the
+        /// open one began.
+        var selfCheckCohortDecodeNanoseconds: UInt64 = 0
+        var selfCheckCohortRunStartedAt: UInt64?
 
         var retainedLogicalTokenCount: Int {
             request.promptTokens.count + generatedTokens.count
@@ -3118,6 +3128,7 @@ actor ContinuousBatchScheduler {
     /// them serially too).
     private func noteSelfCheckCohortDecodeStep(rows: [Row]) {
         guard rows.contains(where: { $0.request.selfCheckCohort != nil }) else { return }
+        let now = DispatchTime.now().uptimeNanoseconds
         for row in rows {
             guard let cohort = row.request.selfCheckCohort, var active = activeDecode[row.request.id] else { continue }
             let fullWidth = rows.count >= cohort.size
@@ -3125,10 +3136,15 @@ actor ContinuousBatchScheduler {
             if fullWidth {
                 if active.selfCheckCohortRunStart == nil {
                     active.selfCheckCohortRunStart = active.generatedTokens.count
+                    active.selfCheckCohortRunStartedAt = now
                 }
             } else if let start = active.selfCheckCohortRunStart {
                 active.selfCheckCohortDecodeTokens += max(0, active.generatedTokens.count - start)
                 active.selfCheckCohortRunStart = nil
+                if let startedAt = active.selfCheckCohortRunStartedAt, now > startedAt {
+                    active.selfCheckCohortDecodeNanoseconds += now - startedAt
+                }
+                active.selfCheckCohortRunStartedAt = nil
             }
             activeDecode[row.request.id] = active
         }
@@ -3138,6 +3154,15 @@ actor ContinuousBatchScheduler {
         guard row.request.selfCheckCohort != nil else { return nil }
         let open = row.selfCheckCohortRunStart.map { max(0, row.generatedTokens.count - $0) } ?? 0
         return row.selfCheckCohortDecodeTokens + open
+    }
+
+    /// Wall seconds of the steps `selfCheckCohortDecodeTokens(of:)` counts:
+    /// closed runs plus an open run up to now (the row's finish).
+    private static func selfCheckCohortDecodeSeconds(of row: Row) -> Double? {
+        guard row.request.selfCheckCohort != nil else { return nil }
+        let now = DispatchTime.now().uptimeNanoseconds
+        let open = row.selfCheckCohortRunStartedAt.map { now > $0 ? now - $0 : 0 } ?? 0
+        return Double(row.selfCheckCohortDecodeNanoseconds + open) / 1_000_000_000
     }
 
     private func startBackendCancellation() {
@@ -5679,7 +5704,8 @@ actor ContinuousBatchScheduler {
                 : nil,
             serialConversationCache: isSuccessful ? serialConversationCache : nil,
             nativeMTPCounters: row.nativeMTPCounters,
-            selfCheckCohortDecodeTokens: Self.selfCheckCohortDecodeTokens(of: row)
+            selfCheckCohortDecodeTokens: Self.selfCheckCohortDecodeTokens(of: row),
+            selfCheckCohortDecodeSeconds: Self.selfCheckCohortDecodeSeconds(of: row)
         )
         complete(requestID: row.request.id, result: result)
     }
@@ -5713,7 +5739,8 @@ actor ContinuousBatchScheduler {
                 ? row.request.serialToolStopObserver?.stopTokenCount
                 : nil,
             nativeMTPCounters: row.nativeMTPCounters,
-            selfCheckCohortDecodeTokens: Self.selfCheckCohortDecodeTokens(of: row)
+            selfCheckCohortDecodeTokens: Self.selfCheckCohortDecodeTokens(of: row),
+            selfCheckCohortDecodeSeconds: Self.selfCheckCohortDecodeSeconds(of: row)
         )
         complete(requestID: row.request.id, result: result)
     }

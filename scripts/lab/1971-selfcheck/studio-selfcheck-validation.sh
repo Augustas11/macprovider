@@ -309,7 +309,7 @@ run_leg() {
           case "$grant" in
             # "pending" (and a carried prior grant) is not a decision yet.
             None*|pending*|prior_grant*|"") grant="none none none none" ;;
-            *cb-probe-v2*) printf '%s' "$body" > "$OUT/$leg-status.json"; break ;;
+            *cb-probe-v3*) printf '%s' "$body" > "$OUT/$leg-status.json"; break ;;
           esac
         fi
         if (( now - last_progress > STEP_TIMEOUT_S )); then
@@ -324,7 +324,7 @@ run_leg() {
     "$serve_log" > "$OUT/$leg-selfcheck-events.log" || true
   stop_lab_server
   printf '%s\n' "$grant" > "$OUT/$leg.grant"
-  [[ "$grant" == *cb-probe-v2* ]]
+  [[ "$grant" == *cb-probe-v3* ]]
 }
 
 # --- Pause window ----------------------------------------------------------

@@ -111,6 +111,24 @@ struct ContinuousBatchingSelfCheckTarget: Sendable, Equatable {
     }
 }
 
+/// One self-check batch through the scheduler: each row's tokens, the wall
+/// time from submission to the last row's end, and for a cohort run each
+/// row's decode tokens beside the whole cohort and those steps' seconds.
+struct ContinuousBatchingSelfCheckBatchRun: Sendable, Equatable {
+    let outputs: [[Int]]
+    let seconds: Double
+    let cohortDecodeTokens: [Int]
+    var cohortDecodeSeconds: [Double] = []
+}
+
+/// The stock serial baseline over the self-check prompts: decode-only
+/// tokens/s (the FR-CB10 v0.3.21 gain denominator) and end-to-end tokens/s
+/// (evidence log only).
+struct ContinuousBatchingSelfCheckSerialRate: Sendable, Equatable {
+    let decodeTPS: Double
+    let endToEndTPS: Double
+}
+
 struct ContinuousBatchingSelfCheckMeasurement: Sendable, Equatable, Codable {
     let slots: Int
     /// Every row equals its prompt run alone, or first differs only at a
@@ -118,10 +136,12 @@ struct ContinuousBatchingSelfCheckMeasurement: Sendable, Equatable, Codable {
     let conformant: Bool
     /// Rows that differed only at a near-tie.
     var nearTieRows: Int = 0
+    /// Batched aggregate decode tokens/s (v0.3.21: the cohort's decode tokens
+    /// over the common span in which every row decoded together).
     let aggregateTPS: Double
-    /// Median over repeats of batched aggregate / stock serial tokens/s,
-    /// each repeat measured back to back on the same prompts. 0 means "use
-    /// aggregateTPS over the record's serial baseline".
+    /// Median over repeats of batched aggregate / stock serial decode
+    /// tokens/s, each repeat measured back to back on the same prompts. 0
+    /// means "use aggregateTPS over the record's serial baseline".
     var gain: Double = 0
     /// False for a slot count checked for isolation only (between ladder
     /// rungs); such a count is verified but never picked by throughput.
@@ -232,12 +252,28 @@ enum ContinuousBatchingSelfCheck {
     /// (`ModelRuntime.continuousBatchingSelfCheckRuntimeBuild`): a result
     /// measured by an older probe re-runs, and its grant carries the Mac
     /// through the re-run.
-    static let probeVersion = "cb-probe-v2"
+    ///
+    /// v3 (SPEC-038 v0.3.21): the gain compares decode only, so every stored
+    /// result re-measures once.
+    static let probeVersion = "cb-probe-v3"
     /// Decode tokens every exactness-probe row must generate while its whole
     /// cohort decodes (at least one serve window).
     static let minimumCohortDecodeTokens = 16
 
     /// max(16, serve window), the window counted up to 4096.
+    /// SPEC-038 FR-CB10 (v0.3.21) batched aggregate decode tokens/s: every
+    /// row's decode tokens beside the whole cohort over the common wall-clock
+    /// span those steps took (rows of one cohort share it; the longest row's
+    /// span is taken), so prefill and admission are not in the timed span,
+    /// as in the stock serial denominator. 0 when no row decoded beside the
+    /// whole cohort.
+    static func cohortDecodeTPS(tokens: [Int], seconds: [Double]) -> Double {
+        let total = tokens.reduce(0) { $0 + max(0, $1) }
+        let span = seconds.filter(\.isFinite).max() ?? 0
+        guard total > 0, span > 0 else { return 0 }
+        return Double(total) / span
+    }
+
     static func requiredCohortDecodeTokens(decodeWindow: Int) -> Int {
         max(minimumCohortDecodeTokens, min(decodeWindow, 4_096))
     }
@@ -1131,7 +1167,7 @@ actor ContinuousBatchingSelfCheckDriver {
                     record.probeAloneOutputs = probeAlone
                     record.probePromptSHA256s = probePrompts.prefix(probeAlone.count).map(ContinuousBatchingSelfCheck.promptSHA256)
                 }
-                let probe: (outputs: [[Int]], seconds: Double, cohortDecodeTokens: [Int])
+                let probe: ContinuousBatchingSelfCheckBatchRun
                 do {
                     probe = try await yieldingToRequests {
                         try await runtime.runContinuousBatchingSelfCheckBatch(
@@ -1165,9 +1201,13 @@ actor ContinuousBatchingSelfCheckDriver {
                     record.aloneOutputs.append(row.outputs[0])
                 }
                 // Rungs: repeats of stock serial then batched, back to back on
-                // the same prompts; the gain is the median ratio. Other widths:
-                // one batch for isolation only. A width whose probe already
-                // diverged runs neither.
+                // the same prompts; the gain is the median ratio of decode
+                // rates (v0.3.21): serial tokens after each first token over
+                // their time, batched cohort decode tokens over the span all
+                // rows decoded together. The batch runs as a cohort, so no row
+                // decodes while another prefills. Other widths: one batch for
+                // isolation only. A width whose probe already diverged runs
+                // neither.
                 let isRung = rungs.contains(slots)
                 let batchPrompts = Array(prompts.prefix(slots))
                 let serialPrompts = Array(batchPrompts.prefix(ContinuousBatchingSelfCheck.serialBaselinePrompts))
@@ -1176,27 +1216,30 @@ actor ContinuousBatchingSelfCheckDriver {
                 var aggregates: [Double] = []
                 var serials: [Double] = []
                 for pass in 0..<(conformant ? (isRung ? Self.repeats : 1) : 0) {
-                    let serial: Double
+                    var serialRate = ContinuousBatchingSelfCheckSerialRate(decodeTPS: 0, endToEndTPS: 0)
                     if isRung {
-                        serial = try await yieldingToRequests {
+                        serialRate = try await yieldingToRequests {
                             try await runtime.continuousBatchingSelfCheckSerialTPS(prompts: serialPrompts, maxTokens: tokens)
                         }
-                    } else {
-                        serial = 0
                     }
+                    let serial = serialRate.decodeTPS
                     let batch = try await yieldingToRequests {
                         try await runtime.runContinuousBatchingSelfCheckBatch(
-                            prompts: batchPrompts, maxOutputTokens: tokens, idPrefix: "cb-self-check-\(attempt)-k\(slots)-p\(pass)"
+                            prompts: batchPrompts, maxOutputTokens: tokens, idPrefix: "cb-self-check-\(attempt)-k\(slots)-p\(pass)",
+                            cohort: true
                         )
                     }
                     passes.append(batch.outputs)
                     let generated = batch.outputs.reduce(0) { $0 + $1.count }
-                    let aggregate = batch.seconds > 0 ? Double(generated) / batch.seconds : 0
+                    let aggregate = ContinuousBatchingSelfCheck.cohortDecodeTPS(
+                        tokens: batch.cohortDecodeTokens, seconds: batch.cohortDecodeSeconds
+                    )
                     aggregates.append(aggregate)
-                    if serial > 0 {
+                    if serial > 0, aggregate > 0 {
                         serials.append(serial)
                         ratios.append(aggregate / serial)
                     }
+                    log("event=cb_self_check action=pass slots=\(slots) pass=\(pass) serial_decode_tps=\(String(format: "%.1f", serial)) serial_e2e_tps=\(String(format: "%.1f", serialRate.endToEndTPS)) batch_decode_tps=\(String(format: "%.1f", aggregate)) batch_e2e_tps=\(String(format: "%.1f", batch.seconds > 0 ? Double(generated) / batch.seconds : 0)) batch_wall_s=\(String(format: "%.3f", batch.seconds)) cohort_decode_s=\(String(format: "%.3f", batch.cohortDecodeSeconds.max() ?? 0)) cohort_decode_tokens=\(batch.cohortDecodeTokens.reduce(0, +))")
                 }
                 if !passes.isEmpty {
                     let passCheck = try await checkRows(

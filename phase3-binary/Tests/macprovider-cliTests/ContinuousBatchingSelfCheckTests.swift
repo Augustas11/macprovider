@@ -652,6 +652,35 @@ final class ContinuousBatchingSelfCheckTests: XCTestCase {
         }
     }
 
+    /// SPEC-038 FR-CB10 v0.3.21: the batched rate is the cohort's decode
+    /// tokens over the common span (the longest row's), never a sum of
+    /// per-row spans; no decode beside the whole cohort is no rate.
+    func testCohortDecodeRateIsTotalTokensOverTheCommonSpan() {
+        XCTAssertEqual(
+            ContinuousBatchingSelfCheck.cohortDecodeTPS(tokens: [47, 47, 47, 47], seconds: [1.0, 1.0, 0.98, 0.99]),
+            188, accuracy: 1e-9
+        )
+        XCTAssertEqual(ContinuousBatchingSelfCheck.cohortDecodeTPS(tokens: [0, 0], seconds: [0, 0]), 0)
+        XCTAssertEqual(ContinuousBatchingSelfCheck.cohortDecodeTPS(tokens: [16, 16], seconds: [0, 0]), 0)
+        XCTAssertEqual(ContinuousBatchingSelfCheck.cohortDecodeTPS(tokens: [16, 16], seconds: []), 0)
+        XCTAssertEqual(ContinuousBatchingSelfCheck.cohortDecodeTPS(tokens: [16, 16], seconds: [.nan, 0.5]), 64, accuracy: 1e-9)
+    }
+
+    /// The throughput passes time decode only on both sides (v0.3.21): the
+    /// batch runs as a cohort and its rate comes from the cohort span, the
+    /// serial side from the stock decode rate.
+    func testThroughputPassesCompareDecodeRatesOnly() throws {
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+                .appendingPathComponent("Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(source.contains("idPrefix: \"cb-self-check-\\(attempt)-k\\(slots)-p\\(pass)\",\n                            cohort: true"))
+        XCTAssertTrue(source.contains("let serial = serialRate.decodeTPS"))
+        XCTAssertTrue(source.contains("let aggregate = ContinuousBatchingSelfCheck.cohortDecodeTPS("))
+    }
+
     /// Changing the probe changes what a stored result means: the key moves,
     /// a stored refusal re-runs, and a stored grant keeps the Mac serving
     /// through the re-run.
@@ -659,7 +688,7 @@ final class ContinuousBatchingSelfCheckTests: XCTestCase {
         let live = ModelRuntime.continuousBatchingSelfCheckRuntimeBuild(forwardBound: 11, routeKeyBoundary: 1024)
         XCTAssertTrue(live.hasSuffix("+\(ContinuousBatchingSelfCheck.probeVersion)/route1024"), live)
         XCTAssertNotEqual(live, ModelRuntime.continuousBatchingSelfCheckRuntimeBuild(forwardBound: 11, routeKeyBoundary: 4096))
-        XCTAssertEqual(ContinuousBatchingSelfCheck.probeVersion, "cb-probe-v2")
+        XCTAssertEqual(ContinuousBatchingSelfCheck.probeVersion, "cb-probe-v3")
         let v1 = "\(ContinuousBatchingSelfCheckKey.currentRuntimeBuild)+cb-isolation-v1/decode11/verify11"
         XCTAssertNotEqual(live, v1)
         let directory = FileManager.default.temporaryDirectory

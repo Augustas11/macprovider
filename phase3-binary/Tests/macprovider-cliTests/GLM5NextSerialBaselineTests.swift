@@ -43,10 +43,11 @@ final class GLM5NextSerialBaselineTests: XCTestCase {
             container: container,
             loader: { _ in throw CancellationError() }
         )
-        let tokensPerSecond = try await runtime.continuousBatchingSelfCheckSerialTPS(
+        let rate = try await runtime.continuousBatchingSelfCheckSerialTPS(
             prompts: [[1, 2, 3, 4, 5, 6, 7, 8]], maxTokens: 4
         )
-        XCTAssertGreaterThan(tokensPerSecond, 0)
+        XCTAssertGreaterThan(rate.decodeTPS, 0)
+        XCTAssertGreaterThan(rate.endToEndTPS, 0)
     }
 
     /// Six layers (three KDA, then DSA + MoE, KDA + MoE, DSA with a shared

@@ -1,11 +1,31 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.20
+Version: v0.3.21
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.21 (2026-10-17, FR-CB10 gain compares decode):**
+FR-CB10: the self-check's throughput gain now compares decode rates, as the
+FR-CB14 aggregate-TG contract and the MSB harness do. Before, both sides of
+the ratio were end-to-end: each stock serial prompt was timed from its call
+to its last token, and the batch from submission to its last row's end, so
+every row's prefill and first-token latency sat in both spans. On a model
+whose prefill and per-request overhead are large next to a 48-token decode,
+that pulls the ratio toward 1 whatever batched decode gains: on the Studio
+the served GLM-5.3-Flash artifact measured 1.04-1.06x at k = 2..4 on the
+self-check while its steady batched decode measured 1.18x at 2 rows and
+1.40x at 4 against production serial. The serial rate is now each prompt's
+tokens after its first over the time from that first token to its last,
+summed over the prompts; the batch runs as a cohort (as the exactness probe
+does), so no row decodes while another prefills, and its rate is the
+cohort's decode tokens over the common wall-clock span in which every row
+decoded together. The 1.2x bar, the rung choice and the rule that throughput
+never lowers a grant are unchanged. The probe version moves to
+`cb-probe-v3`, so every stored result re-measures once, and a stored grant
+keeps serving through the re-run.
+
 **Change log v0.3.20 (2026-10-15, FR-CB10 exactness probe):**
 FR-CB10: the self-check's isolation probe now exercises the failure it
 missed. On the Studio, main's self-check granted 16 rows while 16 rows in one
@@ -1213,7 +1233,13 @@ above are superseded where they conflict:
    decode. On the SPEC-023-R009 ladder rungs each k runs three repeats of
    stock serial decode then the batch, back to back on the same prompts; the
    gain is the median batch/serial ratio (widths between rungs are verified
-   for isolation but not picked). It grants the rung with the highest gain, preferring the lowest k
+   for isolation but not picked). (v0.3.21) Both rates are decode rates:
+   the serial rate is each prompt's tokens after its first over the time
+   from that first token to its last, summed over the prompts; the batch
+   runs as a cohort, held until every row has prefilled, and its rate is the
+   cohort's decode tokens over the common wall-clock span in which every row
+   decoded together. Prefill, admission and first-token latency are in
+   neither span. It grants the rung with the highest gain, preferring the lowest k
    within 15% of it, only when that gain is at least 1.2x; otherwise a fresh
    Mac serves serially. The highest k whose rows all passed is recorded as
    `verified_k`.

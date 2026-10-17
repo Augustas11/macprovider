@@ -1206,6 +1206,9 @@ struct InternalWarmupResult: Sendable {
 private struct BlockingGenerateResult: Sendable {
     let tokenIds: [Int]
     let output: String
+    /// Seconds from the first generated token to the last (mlx-swift-lm
+    /// `GenerateResult.generateTime`; prefill excluded).
+    var generateTime: TimeInterval = 0
 
     var generationTokenCount: Int {
         tokenIds.count
@@ -1214,6 +1217,7 @@ private struct BlockingGenerateResult: Sendable {
     init(_ result: GenerateResult) {
         self.tokenIds = result.tokenIds
         self.output = result.output
+        self.generateTime = result.generateTime
     }
 }
 
@@ -5006,20 +5010,21 @@ maxTokens: 1,
     /// task cancels every row. With `cohort`, the rows decode only once all
     /// of them are in decode (`ContinuousBatchSchedulerRequest
     /// .selfCheckCohort`), and each row's decode tokens generated beside the
-    /// whole cohort are returned (0 otherwise).
+    /// whole cohort, and the wall seconds of those decode steps, are returned
+    /// (0 otherwise).
     func runContinuousBatchingSelfCheckBatch(
         prompts: [[Int]],
         maxOutputTokens: Int,
         idPrefix: String,
         cohort: Bool = false
-    ) async throws -> (outputs: [[Int]], seconds: Double, cohortDecodeTokens: [Int]) {
+    ) async throws -> ContinuousBatchingSelfCheckBatchRun {
         guard let scheduler = continuousBatchScheduler else {
             throw ContinuousBatchSchedulerError.requestFailed("self_check_scheduler_unavailable")
         }
         let ids = prompts.indices.map { "\(idPrefix)-\($0)" }
         let start = Date()
         let outputs = try await withTaskCancellationHandler {
-            try await withThrowingTaskGroup(of: (Int, [Int], Int).self) { group in
+            try await withThrowingTaskGroup(of: (Int, [Int], Int, Double).self) { group in
                 for (index, prompt) in prompts.enumerated() {
                     let id = ids[index]
                     group.addTask {
@@ -5034,21 +5039,29 @@ maxTokens: 1,
                             selfCheckProbe: true,
                             selfCheckCohort: cohort ? ContinuousBatchSelfCheckCohort(id: idPrefix, size: prompts.count) : nil
                         ))
-                        return (index, result.generatedTokens, result.selfCheckCohortDecodeTokens ?? 0)
+                        return (
+                            index, result.generatedTokens, result.selfCheckCohortDecodeTokens ?? 0,
+                            result.selfCheckCohortDecodeSeconds ?? 0
+                        )
                     }
                 }
                 var rows = Array(repeating: [Int](), count: prompts.count)
                 var cohortTokens = Array(repeating: 0, count: prompts.count)
-                for try await (index, tokens, decodeTokens) in group {
+                var cohortSeconds = Array(repeating: 0.0, count: prompts.count)
+                for try await (index, tokens, decodeTokens, decodeSeconds) in group {
                     rows[index] = tokens
                     cohortTokens[index] = decodeTokens
+                    cohortSeconds[index] = decodeSeconds
                 }
-                return (rows, cohortTokens)
+                return (rows, cohortTokens, cohortSeconds)
             }
         } onCancel: {
             Task { for id in ids { await scheduler.cancel(requestID: id) } }
         }
-        return (outputs.0, Date().timeIntervalSince(start), outputs.1)
+        return ContinuousBatchingSelfCheckBatchRun(
+            outputs: outputs.0, seconds: Date().timeIntervalSince(start),
+            cohortDecodeTokens: outputs.1, cohortDecodeSeconds: outputs.2
+        )
     }
 
     func continuousBatchingCapabilityForTest() -> ContinuousBatchingCapability {
@@ -9932,9 +9945,14 @@ maxTokens: 1,
 
     /// SPEC-038 FR-CB10 serial baseline: the self-check prompts run one at a
     /// time through stock serial decode (the path a one-slot provider
-    /// serves), as total generated tokens over total wall time, so the
-    /// batched aggregate is compared on the same work.
-    func continuousBatchingSelfCheckSerialTPS(prompts: [[Int]], maxTokens: Int) async throws -> Double {
+    /// serves). v0.3.21: the gain compares decode, so `decodeTPS` is the
+    /// tokens after each prompt's first over the time from that first token
+    /// to the last (prefill and first-token latency excluded), summed over
+    /// the prompts; `endToEndTPS` (all tokens over whole-call wall time) is
+    /// kept for the evidence log only.
+    func continuousBatchingSelfCheckSerialTPS(
+        prompts: [[Int]], maxTokens: Int
+    ) async throws -> ContinuousBatchingSelfCheckSerialRate {
         guard let container = currentContainer else {
             throw ContinuousBatchSchedulerError.requestFailed("self_check_model_unavailable")
         }
@@ -9944,6 +9962,8 @@ maxTokens: 1,
         let blockingInferenceExecutor = blockingInferenceExecutor
         var tokens = 0
         var seconds = 0.0
+        var decodeTokens = 0
+        var decodeSeconds = 0.0
         for prompt in prompts {
             try Task.checkCancellation()
             let start = Date()
@@ -9951,8 +9971,8 @@ maxTokens: 1,
                 try await container.perform { context in
                     let lmInput = LMInput(text: LMInput.Text(tokens: MLXArray(prompt.map(Int32.init))))
                     let parameters = Self.makeServeGenerateParameters(
-                                                model: context.model,
-maxTokens: maxTokens,
+                        model: context.model,
+                        maxTokens: maxTokens,
                         maxContextTokens: maxContextTokens,
                         kvBitsOverride: kvBitsOverride,
                         prefillStepSize: prefillStepSize,
@@ -9971,8 +9991,15 @@ maxTokens: maxTokens,
             try Task.checkCancellation()
             seconds += Date().timeIntervalSince(start)
             tokens += result.generationTokenCount
+            if result.generationTokenCount > 1, result.generateTime > 0 {
+                decodeTokens += result.generationTokenCount - 1
+                decodeSeconds += result.generateTime
+            }
         }
-        return seconds > 0 ? Double(tokens) / seconds : 0
+        return ContinuousBatchingSelfCheckSerialRate(
+            decodeTPS: decodeSeconds > 0 ? Double(decodeTokens) / decodeSeconds : 0,
+            endToEndTPS: seconds > 0 ? Double(tokens) / seconds : 0
+        )
     }
 
     func measureStartupThroughput(maxTokens: Int = ModelRuntime.startupThroughputProbeMaxTokens) async -> Double {

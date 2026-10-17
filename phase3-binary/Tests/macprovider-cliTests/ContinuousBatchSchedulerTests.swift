@@ -3162,6 +3162,52 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertTrue(forwards.allSatisfy { $0 == 1 }, "no row of an incomplete cohort decodes: \(forwards)")
     }
 
+    /// SPEC-038 FR-CB10 v0.3.21: a cohort row reports the wall seconds of
+    /// the decode steps it took beside the whole cohort, and only those, so
+    /// the self-check's batched rate leaves prefill out of the timed span as
+    /// the stock serial denominator does. Prefill here costs 4 x 150 ms;
+    /// the cohort's decode about 16 x 5 ms.
+    func testCohortDecodeSecondsCoverTheCohortDecodeAndNotPrefill() async throws {
+        let backend = TimedCohortBackend(prefillNanoseconds: 150_000_000, decodeNanoseconds: 5_000_000)
+        let scheduler = try await makeScheduler(
+            descriptor: Self.descriptor(maxPhysicalBlocks: 256),
+            maxActiveRows: 4,
+            maxDecodeLockstepWindow: 16,
+            backend: backend,
+            allocator: PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 256)
+        )
+        let cohort = ContinuousBatchSelfCheckCohort(id: "timed-cohort", size: 4)
+        let started = Date()
+        let results = try await withThrowingTaskGroup(of: ContinuousBatchSchedulerResult.self) { group in
+            for seed in 1 ... 4 {
+                group.addTask {
+                    try await scheduler.submit(.init(
+                        id: "timed-cohort-\(seed)", conversationKey: "", promptTokens: [seed],
+                        maxOutputTokens: 17, temperature: 0, selfCheckProbe: true, selfCheckCohort: cohort
+                    ))
+                }
+            }
+            var results: [ContinuousBatchSchedulerResult] = []
+            for try await result in group { results.append(result) }
+            return results
+        }
+        let wall = Date().timeIntervalSince(started)
+        XCTAssertGreaterThanOrEqual(wall, 0.6, "four prefills of 150 ms each")
+        XCTAssertTrue(results.allSatisfy { $0.selfCheckCohortDecodeTokens == 16 }, "\(results.map(\.selfCheckCohortDecodeTokens))")
+        let seconds = results.compactMap(\.selfCheckCohortDecodeSeconds)
+        XCTAssertEqual(seconds.count, 4)
+        let span = try XCTUnwrap(seconds.max())
+        XCTAssertGreaterThanOrEqual(span, 16 * 0.005, "every counted decode step is in the span")
+        XCTAssertLessThan(span, 0.15, "no prefill is in the span: \(seconds)")
+        let rate = ContinuousBatchingSelfCheck.cohortDecodeTPS(
+            tokens: results.compactMap(\.selfCheckCohortDecodeTokens), seconds: seconds
+        )
+        XCTAssertGreaterThan(rate, Double(4 * 17) / wall, "decode-only rate is above the end-to-end rate")
+
+        let buyer = try await scheduler.submit(.init(id: "buyer", conversationKey: "", promptTokens: [9], maxOutputTokens: 2))
+        XCTAssertNil(buyer.selfCheckCohortDecodeSeconds, "rows outside a cohort carry no cohort time")
+    }
+
     /// More active rows than the decode row bound decode in consecutive
     /// forwards of at most that many rows, and every row still produces its
     /// own tokens.
@@ -8698,6 +8744,39 @@ private final class DeliveredTokenLog: @unchecked Sendable {
 /// 5000, never another row's token. Where `(seed + s) % 4 == 0` the two are 0.125 apart, and a decode
 /// forward of `vectorLimit` or more rows (MLX `qmm` instead of `qmv`) picks
 /// the runner-up there. Smaller forwards are bit-exact.
+/// Fixed per-call cost for prefill and decode, for cohort timing tests.
+private actor TimedCohortBackend: ContinuousBatchSchedulerBackend {
+    private let prefillNanoseconds: UInt64
+    private let decodeNanoseconds: UInt64
+
+    init(prefillNanoseconds: UInt64, decodeNanoseconds: UInt64) {
+        self.prefillNanoseconds = prefillNanoseconds
+        self.decodeNanoseconds = decodeNanoseconds
+    }
+
+    func prefill(rows: [ContinuousBatchPrefillInput]) async throws -> [ContinuousBatchPrefillOutput] {
+        try await Task.sleep(nanoseconds: prefillNanoseconds * UInt64(rows.count))
+        return rows.map { row in
+            ContinuousBatchPrefillOutput(
+                requestID: row.requestID,
+                sampledToken: row.sampleFirstToken ? 100 * (row.promptTokens.first ?? 0) : nil
+            )
+        }
+    }
+
+    func decode(rows: [ContinuousBatchDecodeInput]) async throws -> [ContinuousBatchDecodeOutcome] {
+        try await Task.sleep(nanoseconds: decodeNanoseconds)
+        return rows.map { row in
+            .output(ContinuousBatchDecodeOutput(
+                requestID: row.requestID,
+                token: 100 * (row.promptTokens.first ?? 0) + row.generatedTokens.count
+            ))
+        }
+    }
+
+    func cancelInFlight() async {}
+}
+
 private actor KernelRouteBackend: ContinuousBatchSchedulerBackend {
     private let vectorLimit: Int
     private var forwardRows: [Int] = []
