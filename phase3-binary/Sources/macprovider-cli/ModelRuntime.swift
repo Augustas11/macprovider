@@ -1864,19 +1864,28 @@ actor ModelRuntime: ModelRuntimeServing {
     /// `generate`/`TokenIterator` the provider runs takes its parameters from
     /// here. `model` decides the KV cap: a model that sizes its own cache
     /// (`modelSizesItsOwnKVCache`) gets no `maxKVSize`, because mlx-swift-lm's
-    /// explicit-cache check would reject its cache against any cap.
+    /// explicit-cache check would reject its cache against any cap. Without
+    /// that cap nothing else bounds its cache, so its completion budget is
+    /// clamped to the context the prompt leaves (`serialMaxOutputTokens`).
     nonisolated static func makeServeGenerateParameters(
         model: any LanguageModel,
         maxTokens: Int?,
+        promptTokens: Int,
         maxContextTokens: Int,
         kvBitsOverride: Int?,
         prefillStepSize: Int,
         temperature: Float,
         topP: Float
-    ) -> GenerateParameters {
-        GenerateParameters(
-            maxTokens: maxTokens,
-            maxKVSize: modelSizesItsOwnKVCache(model) ? nil : maxContextTokens,
+    ) throws -> GenerateParameters {
+        let ownsCache = modelSizesItsOwnKVCache(model)
+        return GenerateParameters(
+            maxTokens: try serialMaxOutputTokens(
+                requested: maxTokens,
+                promptTokens: promptTokens,
+                maxContextTokens: maxContextTokens,
+                modelSizesItsOwnKVCache: ownsCache
+            ),
+            maxKVSize: ownsCache ? nil : maxContextTokens,
             kvBits: kvBitsOverride,
             temperature: temperature,
             topP: topP,
@@ -1915,6 +1924,47 @@ actor ModelRuntime: ModelRuntimeServing {
         explicitCacheIteratorParameters(
             cacheParameters(base, forceSimpleKV: forceSimpleKV || reusedCache),
             cache: cache
+        )
+    }
+
+    /// Serial completion budget. A capped serve cache (`maxKVSize`, a
+    /// `RotatingKVCache`) already bounds memory at `maxContextTokens`, so
+    /// `requested` passes through unchanged. A model that sizes its own cache
+    /// has no such cap and gets the continuous-batching row's bound
+    /// (`continuousBatchMaxOutputTokens`): the context left after the prompt,
+    /// never more than an explicit `max_tokens` (reaching it reports
+    /// `length`), and the 413 `context_length_exceeded` when no output token
+    /// fits.
+    nonisolated static func serialMaxOutputTokens(
+        requested: Int?,
+        promptTokens: Int,
+        maxContextTokens: Int,
+        modelSizesItsOwnKVCache: Bool
+    ) throws -> Int? {
+        guard modelSizesItsOwnKVCache else { return requested }
+        let remaining = maxContextTokens - promptTokens
+        guard remaining >= 1 else {
+            throw ContinuousBatchSchedulerError.contextLengthExceeded(
+                promptTokens: promptTokens,
+                maxOutputTokens: 1,
+                contextTokens: maxContextTokens
+            ).asAPIError()!
+        }
+        guard let requested else { return remaining }
+        return min(requested, remaining)
+    }
+
+    nonisolated static func serialMaxOutputTokens(
+        model: any LanguageModel,
+        requested: Int?,
+        promptTokens: Int,
+        maxContextTokens: Int
+    ) throws -> Int? {
+        try serialMaxOutputTokens(
+            requested: requested,
+            promptTokens: promptTokens,
+            maxContextTokens: maxContextTokens,
+            modelSizesItsOwnKVCache: modelSizesItsOwnKVCache(model)
         )
     }
 
@@ -2613,15 +2663,17 @@ actor ModelRuntime: ModelRuntimeServing {
     ) async -> String {
         guard let container else { return Self.pagedKVUnavailableCacheClass }
         return await container.perform { context in
-            let parameters = Self.makeServeGenerateParameters(
+            // A cache-class probe: no prompt and one output token always fit.
+            guard let parameters = try? Self.makeServeGenerateParameters(
                                 model: context.model,
 maxTokens: 1,
+                promptTokens: 0,
                 maxContextTokens: maxContextTokens,
                 kvBitsOverride: kvBitsOverride,
                 prefillStepSize: prefillStepSize,
                 temperature: 0.0,
                 topP: 1.0
-            )
+            ) else { return Self.pagedKVUnavailableCacheClass }
             // The paged / continuous-batching path never uses the memory-capped serve
             // cache: batched rows are stored in the SPEC-039 paged block pool (which
             // bounds memory the way `maxKVSize` bounds the non-batched serve cache).
@@ -8252,9 +8304,10 @@ maxTokens: 1,
                 let input = UserInput(chat: [.user(prompt)])
                 let lmInput = try await context.processor.prepare(input: input)
                 try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
-                let parameters = Self.makeServeGenerateParameters(
+                let parameters = try Self.makeServeGenerateParameters(
                                         model: context.model,
 maxTokens: boundedMaxTokens,
+                    promptTokens: lmInput.text.tokens.size,
                     maxContextTokens: maxContextTokens,
                     kvBitsOverride: kvBitsOverride,
                     prefillStepSize: prefillStepSize,
@@ -8457,12 +8510,22 @@ maxTokens: boundedMaxTokens,
                     )
                     let lmInput = try await context.processor.prepare(input: input)
                     try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
-                    let parameters = Self.makeServeGenerateParameters(
+                    // The request's completion budget as served: unchanged for
+                    // a capped serve cache, clamped to the remaining context
+                    // for a model that sizes its own cache.
+                    let servedRequestMaxTokens = try Self.serialMaxOutputTokens(
+                        model: context.model,
+                        requested: request.maxTokens,
+                        promptTokens: lmInput.text.tokens.size,
+                        maxContextTokens: maxContextTokens
+                    )
+                    let parameters = try Self.makeServeGenerateParameters(
                                                 model: context.model,
 maxTokens: Self.labSerialEffectiveMaxTokens(
-                            requestMaxTokens: request.maxTokens,
+                            requestMaxTokens: servedRequestMaxTokens,
                             labOutputCap: labSerialHooks?.outputCap
                         ),
+                        promptTokens: lmInput.text.tokens.size,
                         maxContextTokens: maxContextTokens,
                         kvBitsOverride: kvBitsOverride,
                         prefillStepSize: prefillStepSize,
@@ -8697,7 +8760,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
 
                         let rawLengthFinish = Self.labSerialLengthFinish(
                             generatedCompletionTokens: result.generationTokenCount,
-                            requestMaxTokens: request.maxTokens,
+                            requestMaxTokens: servedRequestMaxTokens,
                             labOutputCap: labSerialHooks?.outputCap
                         )
                         let harmonyTerminalFinish = Self.isHarmonyTerminalFinish(
@@ -9238,12 +9301,22 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                     )
                     let lmInput = try await context.processor.prepare(input: input)
                     try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
-                    let parameters = Self.makeServeGenerateParameters(
+                    // The request's completion budget as served: unchanged for
+                    // a capped serve cache, clamped to the remaining context
+                    // for a model that sizes its own cache.
+                    let servedRequestMaxTokens = try Self.serialMaxOutputTokens(
+                        model: context.model,
+                        requested: request.maxTokens,
+                        promptTokens: lmInput.text.tokens.size,
+                        maxContextTokens: maxContextTokens
+                    )
+                    let parameters = try Self.makeServeGenerateParameters(
                                                 model: context.model,
 maxTokens: Self.labSerialEffectiveMaxTokens(
-                            requestMaxTokens: request.maxTokens,
+                            requestMaxTokens: servedRequestMaxTokens,
                             labOutputCap: labSerialHooks?.outputCap
                         ),
+                        promptTokens: lmInput.text.tokens.size,
                         maxContextTokens: maxContextTokens,
                         kvBitsOverride: kvBitsOverride,
                         prefillStepSize: prefillStepSize,
@@ -9585,7 +9658,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         )
                         let rawLengthFinish = Self.labSerialLengthFinish(
                             generatedCompletionTokens: result.generationTokenCount,
-                            requestMaxTokens: request.maxTokens,
+                            requestMaxTokens: servedRequestMaxTokens,
                             labOutputCap: labSerialHooks?.outputCap
                         )
                         let harmonyTerminalFinish = Self.isHarmonyTerminalFinish(
@@ -9617,7 +9690,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         let finishReason: String
                         if !parsed.toolCalls.isEmpty {
                             finishReason = "tool_calls"
-                        } else if let maxTokens = request.maxTokens,
+                        } else if let maxTokens = servedRequestMaxTokens,
                            result.generationTokenCount >= maxTokens,
                            !stoppedByRequestStop,
                            !final.hitStop,
@@ -9770,9 +9843,10 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
             try await container.perform { context -> [KVLayerGeometry]? in
                 let input = UserInput(chat: [.user("warmup")])
                 let lmInput = try await context.processor.prepare(input: input)
-                let parameters = Self.makeServeGenerateParameters(
+                let parameters = try Self.makeServeGenerateParameters(
                                         model: context.model,
 maxTokens: 1,
+                    promptTokens: lmInput.text.tokens.size,
                     maxContextTokens: maxContextTokens,
                     kvBitsOverride: kvBitsOverride,
                     prefillStepSize: prefillStepSize,
@@ -9991,9 +10065,10 @@ maxTokens: 1,
             let result: BlockingGenerateResult = try await inferenceGate.withPermit {
                 try await container.perform { context in
                     let lmInput = LMInput(text: LMInput.Text(tokens: MLXArray(prompt.map(Int32.init))))
-                    let parameters = Self.makeServeGenerateParameters(
+                    let parameters = try Self.makeServeGenerateParameters(
                         model: context.model,
                         maxTokens: maxTokens,
+                        promptTokens: prompt.count,
                         maxContextTokens: maxContextTokens,
                         kvBitsOverride: kvBitsOverride,
                         prefillStepSize: prefillStepSize,
@@ -10038,9 +10113,10 @@ maxTokens: 1,
                 try await container.perform { context in
                     let input = UserInput(chat: [.user(Self.startupThroughputProbePrompt)])
                     let lmInput = try await context.processor.prepare(input: input)
-                    let parameters = Self.makeServeGenerateParameters(
+                    let parameters = try Self.makeServeGenerateParameters(
                                                 model: context.model,
 maxTokens: maxTokens,
+                        promptTokens: lmInput.text.tokens.size,
                         maxContextTokens: maxContextTokens,
                         kvBitsOverride: kvBitsOverride,
                         prefillStepSize: prefillStepSize,

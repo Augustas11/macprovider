@@ -24,11 +24,25 @@ final class GLM5NextSerialBaselineTests: XCTestCase {
         XCTAssertTrue(cache.contains { $0 is any GLM5NextLatentCache })
         // The serve cap the window used, through the one serve-parameter
         // constructor: no maxKVSize for a model that sizes its own cache.
-        let parameters = ModelRuntime.makeServeGenerateParameters(
-            model: model, maxTokens: 4, maxContextTokens: 65_536, kvBitsOverride: nil,
+        let parameters = try ModelRuntime.makeServeGenerateParameters(
+            model: model, maxTokens: 4, promptTokens: 8, maxContextTokens: 65_536, kvBitsOverride: nil,
             prefillStepSize: 512, temperature: 0, topP: 1
         )
         XCTAssertNil(parameters.maxKVSize)
+        XCTAssertEqual(parameters.maxTokens, 4)
+        // No maxKVSize bounds this model's cache, so the serve constructor
+        // clamps the completion budget to the context the prompt leaves.
+        let nearLimit = try ModelRuntime.makeServeGenerateParameters(
+            model: model, maxTokens: 1_000_000, promptTokens: 65_000, maxContextTokens: 65_536,
+            kvBitsOverride: nil, prefillStepSize: 512, temperature: 0, topP: 1
+        )
+        XCTAssertEqual(nearLimit.maxTokens, 536)
+        XCTAssertThrowsError(try ModelRuntime.makeServeGenerateParameters(
+            model: model, maxTokens: 4, promptTokens: 65_536, maxContextTokens: 65_536,
+            kvBitsOverride: nil, prefillStepSize: 512, temperature: 0, topP: 1
+        )) { error in
+            XCTAssertEqual((error as? APIError)?.code, "context_length_exceeded")
+        }
 
         let container = ModelContainer(context: ModelContext(
             configuration: ModelConfiguration(id: "zai-org/glm-5.3-flash"),
@@ -48,6 +62,50 @@ final class GLM5NextSerialBaselineTests: XCTestCase {
         )
         XCTAssertGreaterThan(rate.decodeTPS, 0)
         XCTAssertGreaterThan(rate.endToEndTPS, 0)
+    }
+
+    /// Security r1: a model that sizes its own KV cache gets no `maxKVSize`,
+    /// so the serial path clamps its completion budget exactly as a batched
+    /// row does (`continuousBatchMaxOutputTokens`).
+    func testSerialBudgetForASelfSizedCacheMatchesTheBatchedRowBound() throws {
+        for (requested, prompt) in [(Int?.none, 40), (512, 40), (250_000, 40), (1_000_000, 199_999), (Int?.none, 199_999)] {
+            XCTAssertEqual(
+                try ModelRuntime.serialMaxOutputTokens(
+                    requested: requested, promptTokens: prompt, maxContextTokens: 200_000,
+                    modelSizesItsOwnKVCache: true
+                ),
+                try ModelRuntime.continuousBatchMaxOutputTokens(
+                    requested: requested, promptTokens: prompt, maxContextTokens: 200_000
+                )
+            )
+        }
+        for prompt in [200_000, 200_001] {
+            XCTAssertThrowsError(try ModelRuntime.serialMaxOutputTokens(
+                requested: 16, promptTokens: prompt, maxContextTokens: 200_000,
+                modelSizesItsOwnKVCache: true
+            )) { error in
+                let apiError = error as? APIError
+                XCTAssertEqual(apiError?.status, 413)
+                XCTAssertEqual(apiError?.code, "context_length_exceeded")
+                XCTAssertEqual(apiError?.inferenceRan, false)
+                XCTAssertEqual(apiError?.settlementRan, false)
+            }
+        }
+    }
+
+    /// A capped serve cache (`maxKVSize`, a rotating cache) already bounds
+    /// memory, so every other model keeps the requested budget unchanged,
+    /// including at and past the context edge.
+    func testSerialBudgetForACappedServeCacheIsUnchanged() throws {
+        for (requested, prompt) in [(Int?.none, 40), (512, 40), (1_000_000, 199_999), (16, 200_000), (Int?.none, 200_000)] {
+            XCTAssertEqual(
+                try ModelRuntime.serialMaxOutputTokens(
+                    requested: requested, promptTokens: prompt, maxContextTokens: 200_000,
+                    modelSizesItsOwnKVCache: false
+                ),
+                requested
+            )
+        }
     }
 
     /// Six layers (three KDA, then DSA + MoE, KDA + MoE, DSA with a shared
