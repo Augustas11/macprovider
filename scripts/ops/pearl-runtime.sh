@@ -939,10 +939,8 @@ ub_source() {
   fi
   # origin/main exactly as origin serves it now: a stale tracking ref after a
   # failed fetch could approve a tag that is no longer current.
-  main_sha="$(git -C "$REPO_ROOT" ls-remote origin refs/heads/main 2>/dev/null | awk '$2 == "refs/heads/main" {print $1}')"
-  if ! is_sha40 "$main_sha" ||
-    ! git -C "$REPO_ROOT" fetch -q origin "+refs/heads/main:refs/remotes/origin/main" 2>/dev/null ||
-    [ "$(git -C "$REPO_ROOT" rev-parse -q --verify refs/remotes/origin/main 2>/dev/null)" != "$main_sha" ]; then
+  main_sha="$(remote_main_sha)"
+  if ! is_sha40 "$main_sha"; then
     UB_ERR="cannot resolve origin/main exactly as origin serves it"
     return
   fi

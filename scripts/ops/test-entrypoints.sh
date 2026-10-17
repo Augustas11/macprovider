@@ -1593,7 +1593,7 @@ if failed:
     checks.append({"name": "coordinator_dry_load", "ok": False, "detail": "not run: an earlier check failed"})
 json.dump({"go": go == "true", "checks": checks,
            "pricing": {"pricing_diff_sha256": digest} if digest else None,
-           "buyer_serving_e2e_owed": [{"model_id": owed, "sha256": "ab" * 32}] if owed else []},
+           "buyer_serving_e2e_owed": [{"model_id": owed, "sha256": "abab"}] if owed else []},
           open(path, "w"), sort_keys=True)
 PY
 }
@@ -1620,6 +1620,11 @@ run_rc 0 "catalog status with a GO verdict while paused" scripts/ops/catalog-act
 if [ "$(state_of catalog_activation)" = pending ]; then ok; else bad "activation state while paused: $(state_of catalog_activation)"; fi
 if [ "$(next_field id)" = catalog_activation ]; then
   case "$(next_field kind):$(next_field reason)" in blocked:*operator-paused*) ok ;; *) bad "paused activation: $(next_field kind) $(next_field reason)" ;; esac
+fi
+printf '{}' > "$tmp/svc/status.json"
+run_rc 0 "catalog status with the canary status unreadable" scripts/ops/catalog-activate.sh status
+if [ "$(next_field id)" = catalog_activation ]; then
+  case "$(next_field kind):$(next_field reason)" in blocked:*"status is unreadable"*) ok ;; *) bad "unreadable status activation: $(next_field kind) $(next_field reason)" ;; esac
 fi
 status_doc $CAND true
 DIGEST="$(printf 'cd%.0s' $(seq 1 32))"
@@ -1661,7 +1666,10 @@ OWED_DIR="$tmp/state/catalog-owed-e2e"
 owed_count() { find "$OWED_DIR" -name '*.json' 2>/dev/null | wc -l | tr -d ' '; }
 printf '#!/usr/bin/env bash\necho "{\\"buyer_serving_e2e_owed\\": [{\\"model_id\\": \\"x\\", \\"sha256\\": \\"y\\"}]}"\nexit 4\n' > "$tmp/fakedeploy/scripts/catalog-content-release.sh"
 if (cd "$tmp/fakedeploy" && bash -euo pipefail -c "$cmd") >/dev/null 2>&1; then bad "a failed deploy passed the activation step"; else ok; fi
-if [ "$(owed_count)" = 0 ]; then ok; else bad "a failed deploy recorded owed (e)"; fi
+# Written before the deploy: a deploy that may have gone live and then failed
+# locally still leaves the owed model open.
+if [ "$(owed_count)" = 1 ]; then ok; else bad "the owed (e) was not written before the deploy: $(owed_count)"; fi
+rm -rf "$OWED_DIR"
 cat > "$tmp/fakedeploy/scripts/catalog-content-release.sh" <<'FAKEDEPLOY'
 #!/usr/bin/env bash
 echo "[catalog-content] deploy: preflight"
@@ -1674,7 +1682,7 @@ if (cd "$tmp/fakedeploy" && bash -euo pipefail -c "$cmd") >/dev/null 2>&1 && [ "
 printf '{"release_id":"%s","status":"live_verified","feeds":{"x":{"verified_at":"2026-01-01T00:00:00Z"}}}' "$R" > "$tmp/svc/autotune-release.json"
 run_rc 0 "catalog status with (e) owed after activation" scripts/ops/catalog-activate.sh status
 if [ "$(state_of buyer_serving_e2e)" = owed ]; then ok; else bad "owed (e) state: $(state_of buyer_serving_e2e)"; fi
-case "$(fact_of buyer_serving_e2e_owed)" in "mlx-community/Test-VL-2B (owed since $R)") ok ;; *) bad "owed (e) fact: $(fact_of buyer_serving_e2e_owed)" ;; esac
+case "$(fact_of buyer_serving_e2e_owed)" in "mlx-community/Test-VL-2B@abab (owed since $R)") ok ;; *) bad "owed (e) fact: $(fact_of buyer_serving_e2e_owed)" ;; esac
 printf '{"release_id":"newer-release","status":"live_verified","feeds":{"x":{"verified_at":"2026-01-01T00:00:00Z"}}}' > "$tmp/svc/autotune-release.json"
 run_rc 0 "catalog status with (e) owed by an older release" scripts/ops/catalog-activate.sh status
 if [ "$(state_of buyer_serving_e2e)" = owed ]; then ok; else bad "an older release's owed (e) vanished: $(state_of buyer_serving_e2e)"; fi
@@ -1683,7 +1691,11 @@ run_rc 0 "catalog status with a malformed owed record" scripts/ops/catalog-activ
 if [ "$(state_of buyer_serving_e2e)" = blocked ]; then ok; else bad "malformed owed record not blocked: $(state_of buyer_serving_e2e)"; fi
 rm -f "$OWED_DIR/broken.json"
 mkdir -p "$tmp/state/catalog-other"
-printf '{"step":"buyer_serving_e2e","evidence":"mlx-community/Test-VL-2B: request ops-e2e-1 served by the canary session, settlement row at 13500/27000"}\n' > "$tmp/state/catalog-other/buyer_serving_e2e.json"
+# Free text or a longer model id never closes it: only the exact token.
+printf '{"step":"buyer_serving_e2e","evidence":"mlx-community/Test-VL-2B-Pro: model=mlx-community/Test-VL-2B-Pro@abab request ops-e2e-0"}\n' > "$tmp/state/catalog-other/buyer_serving_e2e.json"
+run_rc 0 "catalog status with evidence for another model" scripts/ops/catalog-activate.sh status
+if [ "$(state_of buyer_serving_e2e)" = owed ]; then ok; else bad "a substring closed the owed (e): $(state_of buyer_serving_e2e)"; fi
+printf '{"step":"buyer_serving_e2e","evidence":"model=mlx-community/Test-VL-2B@abab request ops-e2e-1 served by the canary session, settlement row at 13500/27000"}\n' > "$tmp/state/catalog-other/buyer_serving_e2e.json"
 run_rc 0 "catalog status after the owed (e) is recorded" scripts/ops/catalog-activate.sh status
 if [ "$(state_of buyer_serving_e2e)" != owed ] && [ "$(fact_of buyer_serving_e2e_owed)" = None ]; then ok; else bad "recorded owed (e) still open: $(state_of buyer_serving_e2e) $(fact_of buyer_serving_e2e_owed)"; fi
 rm -rf "$tmp/svc/autotune-release.json" "$OWED_DIR" "$tmp/state/catalog-other" "$CSCOPE"/preflight-*.json

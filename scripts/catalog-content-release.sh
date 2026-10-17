@@ -901,7 +901,7 @@ json.dump({"models": models}, open(sys.argv[2], "w"), sort_keys=True)' "$WORK/bu
 # for a re-hash, live), by model id, or by candidate key (the model id field
 # or the coordinator's model-admission catalog key). Fails on a malformed body
 # or row (model_id missing or not a string, an identity field of another
-# type): unknown is never "none".
+# type, or no nonempty identity at all): unknown is never "none".
 e2e_serving_providers() {
   python3 - "$WORK/buyer-serving.json" "$REL/autotune-candidates.json" "$1" <<'PY'
 import json, sys
@@ -923,6 +923,8 @@ for p in pool:
         raise SystemExit(1)
     mhash = (optional[0] or "").lower().strip()
     names = {p["model_id"].lower().strip(), (optional[1] or "").lower().strip()} - {""}
+    if not names and not mhash:
+        raise SystemExit(1)  # a row with no serving identity is unknown, not "none"
     if names & ids or (mhash and mhash in shas):
         n += 1
 print(n)

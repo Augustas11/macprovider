@@ -40,9 +40,12 @@
 #                             model, so the provider release that first serves it owes a
 #                             canary restart onto the live release, one buyer request through
 #                             the gateway attributed to that canary, and its settlement row.
-#                             One ledger entry per model (ops-state catalog-owed-e2e/), open
-#                             until a buyer_serving_e2e record names the model; it outlives
-#                             later releases, and a malformed entry blocks
+#                             One ledger entry per model and hash (ops-state
+#                             catalog-owed-e2e/), written before the deploy and again from its
+#                             output, open until a buyer_serving_e2e record carries the exact
+#                             token model=<model_id>@<sha256>; it outlives later releases, and
+#                             a malformed entry blocks. Unreadable canary status blocks the
+#                             preflight and the activation like an operator pause
 #
 # Env (or ~/.config/macprovider/ops.env): COORDINATOR_URL, GATEWAY_URL,
 # PEARL_SSH (+ PEARL_SSH_IDENTITY/PEARL_SSH_KNOWN_HOSTS for the repo scripts),
@@ -184,13 +187,17 @@ PY
   # canary out of buyer_serving: the custody proof (canary_reachable) and
   # activation evidence (c) cannot pass until it is resumed.
   [ "$p_lifecycle" = paused_by_operator ] && p_paused=true
+  # Unreadable status is unknown, never "not paused".
+  local p_status_ok=false
+  [ -n "$(json_field "$OPS_TMP_DIR/pstatus.json" 'd["provider_id"] if isinstance(d.get("provider_id"), str) and d["provider_id"] else None')" ] && p_status_ok=true
   fact provider_catalog_release_id "$p_rid"
   fact provider_native_mtp_enabled "$p_mtp_enabled"
   fact provider_native_mtp_mode "$p_mtp_mode"
   fact provider_continuous_batching_active "$p_cb_active"
   fact provider_coordinator_connected "$p_connected"
   fact provider_lifecycle_state "$p_lifecycle"
-  local paused_why="the canary provider is operator-paused (lifecycle paused_by_operator, e.g. a Studio bench window): its custody proof needs it buyer_serving and the activation restarts it onto the release, which a pause outlives; run this after the pause window ends and the provider is resumed"
+  local paused_why="the canary provider status is unreadable (set STUDIO_SSH and STUDIO_STATUS_PORT): whether it is operator-paused is unknown, and its custody proof and the activation's canary restart need it buyer_serving"
+  [ "$p_status_ok" = false ] || paused_why="the canary provider is operator-paused (lifecycle paused_by_operator, e.g. a Studio bench window): its custody proof needs it buyer_serving and the activation restarts it onto the release, which a pause outlives; run this after the pause window ends and the provider is resumed"
 
   # ---- decide, in runbook order ----
   NEXT_RUNBOOK="$MTP_DOC"
@@ -276,7 +283,7 @@ $RB_NATIVE_POOL_CANARY"
       if [ "$head_sha" != "$main_sha" ]; then
         set_next catalog_preflight blocked "Preflight the content release" "" \
           "run from a clean worktree whose HEAD is origin/main ($main_sha); tooling must match the commit"
-      elif [ "$p_paused" = true ]; then
+      elif [ "$p_paused" = true ] || [ "$p_status_ok" = false ]; then
         set_next catalog_preflight blocked "Preflight content release $R" "" "$paused_why"
       else
         set_next catalog_preflight read "Preflight content release $R at $main_sha (no mutation)" \
@@ -292,19 +299,35 @@ python3 -m json.tool '$verdict'"
     restore_cmd="$(render_runbook "$RB_CATALOG_RESTORE")"
     # The deploy's own verdict line (sorted keys: buyer_serving_e2e_owed first)
     # records which (e) the activation left owed; only a successful deploy writes it.
-    deploy_cmd="mkdir -p '$OPS_STATE_DIR/$OPS_SCOPE' '$owed_dir'
-scripts/catalog-content-release.sh --deploy --commit $main_sha ${pricing:+--pricing-diff-sha256 $pricing }--preflight-verdict '$verdict' | tee '$deploy_log'
-python3 -I -c 'import datetime, hashlib, json, os, sys
-v = [json.loads(l) for l in open(sys.argv[1]) if l.startswith(\"{\\\"buyer_serving_e2e_owed\\\"\")]
+    # Owed (e) is written to the ledger BEFORE the deploy from the preflight
+    # verdict (fsynced), and again from the deploy's own verdict line (sorted
+    # keys: buyer_serving_e2e_owed first): a deploy that goes live and then
+    # loses its local output still leaves every owed model open.
+    local owed_writer
+    owed_writer="python3 -I -c 'import datetime, hashlib, json, os, sys
+src, out, rel = sys.argv[1:4]
+lines = [l for l in open(src) if l.startswith(\"{\")]
+docs = [json.loads(l) for l in lines if l.startswith(\"{\\\"buyer_serving_e2e_owed\\\"\")]
 now = datetime.datetime.now(datetime.timezone.utc).strftime(\"%Y-%m-%dT%H:%M:%SZ\")
-for m in (v[-1] if v else {}).get(\"buyer_serving_e2e_owed\") or []:
-    rec = {\"model_id\": m[\"model_id\"], \"sha256\": m[\"sha256\"], \"release_id\": sys.argv[3], \"recorded_at\": now}
+for m in (docs[-1] if docs else {}).get(\"buyer_serving_e2e_owed\") or []:
+    rec = {\"model_id\": m[\"model_id\"], \"sha256\": m[\"sha256\"], \"release_id\": rel, \"recorded_at\": now}
     name = hashlib.sha256((m[\"model_id\"] + \" \" + m[\"sha256\"]).encode()).hexdigest()
-    tmp = os.path.join(sys.argv[2], name + \".tmp\")
-    json.dump(rec, open(tmp, \"w\"), sort_keys=True)
-    os.replace(tmp, os.path.join(sys.argv[2], name + \".json\"))' '$deploy_log' '$owed_dir' '$R'"
+    final = os.path.join(out, name + \".json\")
+    if os.path.exists(final):
+        continue
+    tmp = final + \".tmp\"
+    with open(tmp, \"w\") as f:
+        json.dump(rec, f, sort_keys=True)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, final)'"
+    deploy_cmd="mkdir -p '$OPS_STATE_DIR/$OPS_SCOPE' '$owed_dir'
+$owed_writer '$verdict' '$owed_dir' '$R'
+scripts/catalog-content-release.sh --deploy --commit $main_sha ${pricing:+--pricing-diff-sha256 $pricing }--preflight-verdict '$verdict' | tee '$deploy_log'
+$owed_writer '$deploy_log' '$owed_dir' '$R'"
     content_downtime="no coordinator restart: one SIGHUP reloads the release${pricing:+ and the rate card}; the canary provider is drained and restarted onto the release, so the requests it would serve go to other providers of its model or wait for its restart and model load; a failed activation rolls back and can strand adopters for 3-11 min"
-    if [ "$fresh" = true ] && [ "$go" = true ] && [ "$p_paused" = true ]; then
+    if [ "$fresh" = true ] && { [ "$p_paused" = true ] || [ "$p_status_ok" = false ]; } &&
+      { [ "$go" = true ] || printf '%s' "$lane_detail" | grep -q 'lane='; }; then
       set_next catalog_activation blocked "Activate content release $R" "" "$paused_why"
     elif [ "$fresh" = true ] && [ "$go" = true ] && [ -z "$pricing" ]; then
       set_next catalog_activation mutate "Activate content release $R${owed_pf:+ (evidence (e) owed: $owed_pf)}" "$deploy_cmd"
@@ -402,26 +425,28 @@ for i in \$(seq 1 24); do curl -sf -m 5 \"\$COORDINATOR_URL/healthz\" && exit 0;
   # buyer_serving_e2e record names yet. A malformed entry is unknown, not done.
   local owed_scan owed_models="" owed_bad=""
   owed_scan="$(python3 -I - "$owed_dir" "$OPS_STATE_DIR" <<'PY'
-import glob, json, os, sys
+import glob, json, os, re, sys
 owed_dir, state = sys.argv[1:3]
-evidence = ""
+# A buyer_serving_e2e record proves exactly the model@sha256 pairs it names.
+proved = set()
 for path in glob.glob(os.path.join(state, "catalog-*", "buyer_serving_e2e.json")):
     try:
-        evidence += " " + str(json.load(open(path)).get("evidence", ""))
+        text = str(json.load(open(path)).get("evidence", ""))
     except Exception:
-        pass
+        continue
+    proved |= set(re.findall(r"(?:^|\s)model=(\S+)@([0-9A-Za-z]+)(?=\s|$|[,;])", text))
 open_models, bad = [], []
 for path in sorted(glob.glob(os.path.join(owed_dir, "*.json"))):
     try:
         rec = json.load(open(path))
-        model = rec["model_id"]
-        if not isinstance(model, str) or not model or not isinstance(rec["release_id"], str):
+        model, sha, rel = rec["model_id"], rec["sha256"], rec["release_id"]
+        if not all(isinstance(v, str) and v and not any(c.isspace() for c in v) for v in (model, sha, rel)):
             raise ValueError
     except Exception:
         bad.append(os.path.basename(path))
         continue
-    if model not in evidence:
-        open_models.append("%s (owed since %s)" % (model, rec["release_id"]))
+    if (model, sha) not in proved:
+        open_models.append("%s@%s (owed since %s)" % (model, sha, rel))
 print("BAD " + " ".join(bad))
 print("OPEN " + ", ".join(open_models))
 PY
@@ -450,8 +475,8 @@ ssh \"\$STUDIO_SSH\" 'launchctl kickstart -k gui/\$(id -u)/live.malibu.provider'
 #      \"\$GATEWAY_URL/v1/chat/completions\"   -> HTTP 200 and an X-Request-ID
 # 3. On Pearl, read-only: its request_log row names the canary's coordinator session
 #    (provider_assigned_id), and its settlement row carries the rate-card row's rates.
-# Then: scripts/ops/catalog-activate.sh next --done buyer_serving_e2e --evidence '<model id>: <request id, session match, rates, settlement row>'
-# (the evidence must name each model id it proves)" \
+# Then: scripts/ops/catalog-activate.sh next --done buyer_serving_e2e --evidence 'model=<model_id>@<sha256> <request id, session match, rates, settlement row>'
+# (one model=<model_id>@<sha256> token, exactly as listed above, per model it proves)" \
       "a release was activated with (e) owed because no connected provider served the model"
     next_meta buyer_serving_e2e "$TREE_DOC#evidence-after-activation" "the canary restart only: requests it would serve go to other providers of its model or wait for its restart and model load"
   elif [ "$live_rid" != "$R" ]; then

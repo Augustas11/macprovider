@@ -1268,6 +1268,8 @@ expect_no_go "new buyer-serving model bound by its candidate key (e)" buyer_serv
 printf '[{"provider_id":"p9","model_hash":"%s"}]\n' "$(printf 'dd%.0s' $(seq 1 32))" >"$CCR_TEST_CTL/poolz-extra.json"
 expect_no_go "malformed /poolz row without model_id (e)" buyer_serving_e2e
 grep -q '/poolz is malformed' "$T/out" || fail "a malformed /poolz row must fail closed: $(cat "$T/out")"
+printf '[{"provider_id":"p9","model_id":""}]\n' >"$CCR_TEST_CTL/poolz-extra.json"
+expect_no_go "/poolz row with no serving identity (e)" buyer_serving_e2e
 # A serving model other than the canary's row (the canary row's hash changes).
 read -r SERVING_KEY SERVING_MODEL <<EOF_SERVING
 $(python3 - "$R/phase3-binary/dist/static/autotune-candidates.json" "$R/phase3-binary/catalog/autotune/tier2-catalog.json" "$CANARY_KEY" <<'PY'
