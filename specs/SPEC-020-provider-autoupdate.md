@@ -1125,16 +1125,21 @@ wall and monotonic clocks, and a maximum duration of 60 seconds before granting
 grace, including while the listener is absent. After either clock expires,
 normal wedge-restart eligibility resumes. The operator-pause and lease vetoes
 MUST hold on every restart-recommending path, including a lost or unprovable
-listener, and MUST be re-evaluated after the restart-worthy verdict and before
-the kickstart: a resume that publishes grace after the watchdog's first lease
-check MUST still suppress the restart. The pause veto MUST read the durable
-pause fence from the persisted lifecycle record (`operator_paused` or state
-`paused_by_operator` in `state-v1.json` beside the leases, owned by the lease
-owner UID, a regular non-symlink file), not only from `/v1/status`; a missing or
-unreadable record is not a pause. Listener ownership is tri-state: a probe that
-fails, times out, or prints anything other than PIDs is indeterminate and MUST
-NOT recommend a restart; a clean not-owned answer MUST repeat on one retry
-before it may. An already-unpaused resume command
+listener, and MUST be re-evaluated after the restart-worthy verdict as the last
+step before the kickstart, pause record first and leases second: because resume
+publishes grace before it clears the persisted pause, a resume that lands after
+the watchdog's first lease check MUST still suppress the restart. The pause
+veto MUST read the durable pause fence from the persisted lifecycle record
+(`operator_paused` true or state `paused_by_operator` in `state-v1.json` beside
+the leases), not only from `/v1/status`, and MUST accept the record only when it
+meets the lifecycle store's own invariants: a regular non-symlink file with one
+link, owned by the lease owner UID, mode 0600, 1 byte to 64 KiB, schema version
+1 and authority `macprovider_cli`. A missing or invalid record is not a pause.
+A pause persisted after that final read is ordered after the restart decision;
+the restarted process honors it from the durable record. Listener ownership is
+tri-state: a probe that fails, exceeds its bounded timeout, or prints anything
+other than PIDs is indeterminate and MUST NOT recommend a restart; a clean
+not-owned answer MUST repeat on one retry before it may. An already-unpaused resume command
 MUST NOT renew grace; a new pause/resume cycle may create a fresh window. A
 failure to publish grace MUST leave the provider paused and reject resume.
 Consuming the SPEC-025 §5.2
@@ -1748,8 +1753,9 @@ Deferred to v0.3.0 or later:
   to every restart-recommending path, including a lost or unprovable listener,
   and re-checks them after the restart verdict, closing the window where a
   resume landing mid-evaluation was kickstarted. The pause veto reads the
-  persisted lifecycle record. A failed or timed-out listener probe is
-  indeterminate, and a not-owned answer must repeat once before it counts.
+  persisted lifecycle record under the store's file and schema invariants. A
+  failed or timed-out listener probe is indeterminate, and a not-owned answer
+  must repeat once before it counts.
 - v0.1.27 (2026-10-17): SPEC-020-R006 streams every release download and
   release-discovery response under a hard byte cap, cancels an oversized
   transfer without keeping a file, and follows redirects only to release

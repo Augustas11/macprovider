@@ -363,6 +363,7 @@ case "$*" in
       foreign) echo 9999 ;;
       none) exit 1 ;;
       noise) echo "lsof: WARNING: can't stat() file system" >&2; exit 1 ;;
+      pid_noise) echo 4242; echo "lsof: status error on /dev/fd" >&2 ;;
       fail) exit 2 ;;
       hang) exec sleep 30 ;;
       flap)
@@ -383,7 +384,13 @@ MACPROVIDER_WATCHDOG_LISTENER_PROBE_TIMEOUT_SECONDS=1
 export WATCHDOG_TEST_LISTENER_CALLS MACPROVIDER_WATCHDOG_LISTENER_RETRY_DELAY_SECONDS MACPROVIDER_WATCHDOG_LISTENER_PROBE_TIMEOUT_SECONDS
 unpaused_unavailable='{"status":"unavailable","lifecycle":{"operator_paused":false,"state":"serving_buyers"}}'
 
-# Usage: listener_case <listener-mode> <record: paused|paused_state|unpaused|symlink|none> <expect: kick|no-kick> [status-exit]
+record_json() {
+  printf '{"version":1,"authority":"macprovider_cli","state":"%s","operator_paused":%s}\n' "$1" "$2"
+}
+
+# Usage: listener_case <listener-mode> <record> <expect: kick|no-kick> [status-exit]
+# record: paused | paused_state | unpaused | symlink | mode644 | hardlink |
+#         no_authority | bad_version | bad_paused_type | oversized | none
 listener_case() {
   mode="$1"; record="$2"; expect="$3"; status_exit="${4:-0}"
   : > "$TMP/logs/watchdog.log"
@@ -391,16 +398,30 @@ listener_case() {
   : > "$WATCHDOG_TEST_LISTENER_CALLS"
   rm -f "$TMP/home/.local/share/macprovider-watchdog/state/last_kick" "$state_record" "$TMP/state-target.json"
   case "$record" in
-    paused) printf '%s\n' '{"state":"paused_by_operator","operator_paused":true}' > "$state_record" ;;
-    paused_state) printf '%s\n' '{"state":"paused_by_operator","operator_paused":false}' > "$state_record" ;;
-    unpaused) printf '%s\n' '{"state":"serving_buyers","operator_paused":false}' > "$state_record" ;;
+    paused) record_json paused_by_operator true > "$state_record" ;;
+    paused_state) record_json paused_by_operator false > "$state_record" ;;
+    unpaused) record_json serving_buyers false > "$state_record" ;;
     symlink)
-      printf '%s\n' '{"state":"paused_by_operator","operator_paused":true}' > "$TMP/state-target.json"
+      record_json paused_by_operator true > "$TMP/state-target.json"
+      chmod 600 "$TMP/state-target.json"
       ln -s "$TMP/state-target.json" "$state_record"
+      ;;
+    mode644) record_json paused_by_operator true > "$state_record" ;;
+    hardlink)
+      record_json paused_by_operator true > "$state_record"
+      ln "$state_record" "$TMP/state-target.json"
+      ;;
+    no_authority) printf '%s\n' '{"version":1,"state":"paused_by_operator","operator_paused":true}' > "$state_record" ;;
+    bad_version) printf '%s\n' '{"version":2,"authority":"macprovider_cli","state":"paused_by_operator","operator_paused":true}' > "$state_record" ;;
+    bad_paused_type) printf '%s\n' '{"version":1,"authority":"macprovider_cli","state":"paused_by_operator","operator_paused":"yes"}' > "$state_record" ;;
+    oversized)
+      /usr/bin/python3 -c 'import json,sys; print(json.dumps({"version":1,"authority":"macprovider_cli","state":"paused_by_operator","operator_paused":True,"pad":"x"*70000}))' > "$state_record"
       ;;
     none) : ;;
   esac
-  [ -f "$state_record" ] && [ ! -L "$state_record" ] && chmod 600 "$state_record"
+  if [ -f "$state_record" ] && [ ! -L "$state_record" ]; then
+    if [ "$record" = mode644 ]; then chmod 644 "$state_record"; else chmod 600 "$state_record"; fi
+  fi
   WATCHDOG_TEST_LISTENER_MODE="$mode"
   WATCHDOG_TEST_STATUS_BODY="$unpaused_unavailable"
   WATCHDOG_TEST_STATUS_EXIT="$status_exit"
@@ -422,8 +443,11 @@ for mode in foreign none noise owned; do
   grep -F 'operator-paused per the persisted lifecycle record; watchdog never restarts a paused provider' "$TMP/logs/watchdog.log" >/dev/null
 done
 listener_case foreign paused_state no-kick
-listener_case foreign symlink kick
-for mode in noise fail hang; do
+# A record that fails the Swift store's file or schema invariants is not a pause.
+for record in symlink mode644 hardlink no_authority bad_version bad_paused_type oversized; do
+  listener_case foreign "$record" kick
+done
+for mode in noise pid_noise fail hang; do
   listener_case "$mode" unpaused no-kick
   grep -F 'is indeterminate (probe failed or timed out); not treating it as lost' "$TMP/logs/watchdog.log" >/dev/null
 done
@@ -607,8 +631,19 @@ cat > "$TMP/bin/curl" <<'EOF'
 case "$*" in
   */v1/health*) exit 22 ;;
   */v1/status*)
-    cp "$WATCHDOG_TEST_STAGED_RESUME_LEASE" "$WATCHDOG_TEST_RESUME_LEASE_PATH"
-    chmod 600 "$WATCHDOG_TEST_RESUME_LEASE_PATH"
+    echo call >> "$WATCHDOG_TEST_STATUS_CALLS"
+    if [ "$(wc -l < "$WATCHDOG_TEST_STATUS_CALLS")" -eq "$WATCHDOG_TEST_ACT_ON_STATUS_CALL" ]; then
+      case "$WATCHDOG_TEST_ACTION" in
+        resume)
+          cp "$WATCHDOG_TEST_STAGED_RESUME_LEASE" "$WATCHDOG_TEST_RESUME_LEASE_PATH"
+          chmod 600 "$WATCHDOG_TEST_RESUME_LEASE_PATH"
+          ;;
+        pause)
+          printf '%s\n' '{"version":1,"authority":"macprovider_cli","state":"paused_by_operator","operator_paused":true}' > "$WATCHDOG_TEST_STATE_RECORD"
+          chmod 600 "$WATCHDOG_TEST_STATE_RECORD"
+          ;;
+      esac
+    fi
     printf '%s\n' '{"status":"unavailable","lifecycle":{"operator_paused":false,"state":"locally_ready_connecting"}}'
     ;;
   *) exit 7 ;;
@@ -617,18 +652,30 @@ EOF
 chmod +x "$TMP/bin/lsof" "$TMP/bin/curl"
 WATCHDOG_TEST_STAGED_RESUME_LEASE="$staged_resume_lease"
 WATCHDOG_TEST_RESUME_LEASE_PATH="$resume_lease_path"
-export WATCHDOG_TEST_STAGED_RESUME_LEASE WATCHDOG_TEST_RESUME_LEASE_PATH
-: > "$TMP/logs/watchdog.log"
-: > "$TMP/launchctl.log"
-rm -f "$resume_lease_path" "$TMP/home/.local/share/macprovider-watchdog/state/last_kick"
-run_watchdog
-if grep -F 'kickstart -k' "$TMP/launchctl.log" >/dev/null; then
-  echo "a resume that lands during restart evaluation must not be kicked" >&2
-  exit 1
-fi
-grep -F 'gained a validated operator-resume lease during restart evaluation; watchdog grants bounded grace' "$TMP/logs/watchdog.log" >/dev/null
-rm -f "$resume_lease_path" "$staged_resume_lease"
-unset WATCHDOG_TEST_STAGED_RESUME_LEASE WATCHDOG_TEST_RESUME_LEASE_PATH
+WATCHDOG_TEST_STATE_RECORD="$TMP/home/Library/Application Support/macprovider/lifecycle/state-v1.json"
+WATCHDOG_TEST_STATUS_CALLS="$TMP/status-calls"
+export WATCHDOG_TEST_STAGED_RESUME_LEASE WATCHDOG_TEST_RESUME_LEASE_PATH WATCHDOG_TEST_STATE_RECORD WATCHDOG_TEST_STATUS_CALLS
+# Status call 1 is the restart verdict; call 2 is the pre-kick telemetry capture.
+for race in resume:1 resume:2 pause:2; do
+  WATCHDOG_TEST_ACTION="${race%%:*}"
+  WATCHDOG_TEST_ACT_ON_STATUS_CALL="${race##*:}"
+  export WATCHDOG_TEST_ACTION WATCHDOG_TEST_ACT_ON_STATUS_CALL
+  : > "$TMP/logs/watchdog.log"
+  : > "$TMP/launchctl.log"
+  : > "$WATCHDOG_TEST_STATUS_CALLS"
+  rm -f "$resume_lease_path" "$WATCHDOG_TEST_STATE_RECORD" "$TMP/home/.local/share/macprovider-watchdog/state/last_kick"
+  run_watchdog
+  if grep -F 'kickstart -k' "$TMP/launchctl.log" >/dev/null; then
+    echo "a $WATCHDOG_TEST_ACTION landing at status call $WATCHDOG_TEST_ACT_ON_STATUS_CALL must not be kicked" >&2
+    exit 1
+  fi
+  case "$WATCHDOG_TEST_ACTION" in
+    resume) grep -F 'gained a validated operator-resume lease during restart evaluation; watchdog grants bounded grace' "$TMP/logs/watchdog.log" >/dev/null ;;
+    pause) grep -F 'operator-paused per the persisted lifecycle record' "$TMP/logs/watchdog.log" >/dev/null ;;
+  esac
+done
+rm -f "$resume_lease_path" "$staged_resume_lease" "$WATCHDOG_TEST_STATE_RECORD" "$WATCHDOG_TEST_STATUS_CALLS"
+unset WATCHDOG_TEST_STAGED_RESUME_LEASE WATCHDOG_TEST_RESUME_LEASE_PATH WATCHDOG_TEST_STATE_RECORD WATCHDOG_TEST_STATUS_CALLS WATCHDOG_TEST_ACTION WATCHDOG_TEST_ACT_ON_STATUS_CALL
 echo "operator resume during restart evaluation ok"
 
 kill "$provider_owner_pid"

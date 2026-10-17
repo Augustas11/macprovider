@@ -12186,11 +12186,13 @@ esac
 # after the retry delay before it can recommend a restart.
 LISTENER_PROBE_TIMEOUT_SECONDS="${MACPROVIDER_WATCHDOG_LISTENER_PROBE_TIMEOUT_SECONDS:-10}"
 case "$LISTENER_PROBE_TIMEOUT_SECONDS" in
-  ''|*[!0-9]*|0) LISTENER_PROBE_TIMEOUT_SECONDS=10 ;;
+  [1-9]|[1-5][0-9]|60) : ;;
+  *) LISTENER_PROBE_TIMEOUT_SECONDS=10 ;;
 esac
 LISTENER_RETRY_DELAY_SECONDS="${MACPROVIDER_WATCHDOG_LISTENER_RETRY_DELAY_SECONDS:-2}"
 case "$LISTENER_RETRY_DELAY_SECONDS" in
-  ''|*[!0-9]*) LISTENER_RETRY_DELAY_SECONDS=2 ;;
+  [0-9]|10) : ;;
+  *) LISTENER_RETRY_DELAY_SECONDS=2 ;;
 esac
 if [ "$KICK_GRACE_SECONDS" -lt 60 ] || [ "$KICK_GRACE_SECONDS" -gt 3600 ]; then
   KICK_GRACE_SECONDS=300
@@ -12334,14 +12336,18 @@ local_health_listener_probe() {
   probe_pid="$1"
   probe_port="$2"
   command -v lsof >/dev/null 2>&1 || return 2
-  if command -v perl >/dev/null 2>&1; then
-    set -- perl -e 'alarm shift @ARGV; exec @ARGV or exit 127' "$LISTENER_PROBE_TIMEOUT_SECONDS" \
-      lsof -nP -iTCP:"$probe_port" -sTCP:LISTEN -t
-  else
-    set -- lsof -nP -iTCP:"$probe_port" -sTCP:LISTEN -t
-  fi
   probe_rc=0
-  probe_out="$("$@" 2>&1)" || probe_rc=$?
+  probe_out="$("${MACPROVIDER_PYTHON3:-python3}" -c '
+import subprocess, sys
+try:
+    done = subprocess.run(sys.argv[2:], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=int(sys.argv[1]))
+except subprocess.TimeoutExpired:
+    sys.exit(124)
+except OSError:
+    sys.exit(127)
+sys.stdout.buffer.write(done.stdout[:65536])
+sys.exit(done.returncode if 0 <= done.returncode <= 1 else 125)
+' "$LISTENER_PROBE_TIMEOUT_SECONDS" lsof -nP -iTCP:"$probe_port" -sTCP:LISTEN -t)" || probe_rc=$?
   case "$probe_rc" in
     0|1) : ;;
     *) return 2 ;;
@@ -12350,7 +12356,7 @@ local_health_listener_probe() {
     NF == 0 { next }
     $0 !~ /^[0-9]+$/ { noise = 1; next }
     $1 == pid { found = 1 }
-    END { if (found) exit 0; if (noise) exit 2; exit 1 }
+    END { if (noise) exit 2; if (found) exit 0; exit 1 }
   '
 }
 
@@ -12358,9 +12364,11 @@ local_health_listener_owned_by_provider() {
   local_health_listener_probe "$1" "$2"
 }
 
-# Exit 0 only when the persisted lifecycle record (owned by the lease owner
-# UID, regular file, not a symlink) carries the operator-pause fence. Missing
-# or unreadable records are "not paused" so unpaused wedge recovery remains.
+# Exit 0 only when the persisted lifecycle record carries the operator-pause
+# fence. The record must pass the same file and schema invariants the Swift
+# store enforces (regular, not a symlink, one link, owner UID, 0600, 1..64 KiB,
+# version 1, authority macprovider_cli). Missing or invalid records are "not
+# paused" so unpaused wedge recovery remains.
 operator_pause_recorded() {
   "${MACPROVIDER_PYTHON3:-python3}" - "$LIFECYCLE_STATE_PATH" "$LIFECYCLE_LEASE_OWNER_UID" <<'PY' 2>/dev/null
 import json
@@ -12375,24 +12383,40 @@ try:
 except (OSError, ValueError):
     sys.exit(1)
 try:
+    limit = 64 * 1024
     info = os.fstat(fd)
-    if not stat.S_ISREG(info.st_mode) or info.st_uid != owner_uid or info.st_size > 1048576:
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != owner_uid
+        or info.st_nlink != 1
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or not 1 <= info.st_size <= limit
+    ):
         sys.exit(1)
-    chunks = []
-    while True:
-        chunk = os.read(fd, 65536)
+    data = b""
+    while len(data) <= limit:
+        chunk = os.read(fd, limit + 1 - len(data))
         if not chunk:
             break
-        chunks.append(chunk)
+        data += chunk
 finally:
     os.close(fd)
+if len(data) > limit:
+    sys.exit(1)
 try:
-    record = json.loads(b"".join(chunks))
+    record = json.loads(data)
 except Exception:
     sys.exit(1)
-if not isinstance(record, dict):
+if (
+    not isinstance(record, dict)
+    or record.get("version") != 1
+    or isinstance(record.get("version"), bool)
+    or record.get("authority") != "macprovider_cli"
+    or not isinstance(record.get("state"), str)
+    or record.get("operator_paused") not in (None, True, False)
+):
     sys.exit(1)
-paused = record.get("operator_paused") is True or record.get("state") == "paused_by_operator"
+paused = record.get("operator_paused") is True or record["state"] == "paused_by_operator"
 sys.exit(0 if paused else 1)
 PY
 }
@@ -13029,11 +13053,21 @@ run_tick() {
       log "provider process $provider_pid failed local /v1/health after arming, but /v1/status does not recommend watchdog restart; leaving process untouched"
       return 0
     fi
-    # Re-check every veto after the restart verdict. An operator resume
-    # publishes its grace lease before clearing the pause, so a status read
-    # that already sees "unpaused, unavailable" is always preceded by a
-    # lease this check can see; checking leases only before /v1/status
-    # left that window open (SPEC-020 R-4.14).
+    # Capture the OLD instance's /v1/status (service_instance + model_liveness)
+    # BEFORE the kick so the coordinator can correlate the restart with the new
+    # post-restart instance (SPEC-025 §5.4). Observability-only. It runs before
+    # the final vetoes so nothing sits between them and the kickstart.
+    capture_supervisor_status_fields "$provider_pid" || true
+    # Re-check every veto after the restart verdict, pause record first, then
+    # leases (SPEC-020 R-4.14). An operator resume publishes its grace lease
+    # before it clears the persisted pause, so a record read as unpaused here
+    # was either never paused or was resumed after a lease the lease checks
+    # below can see. Checking leases only before /v1/status left that window
+    # open (2026-10-17).
+    if operator_pause_recorded; then
+      log "provider process $provider_pid is operator-paused per the persisted lifecycle record; watchdog never restarts a paused provider"
+      return 0
+    fi
     if valid_lifecycle_lease_record startup "$provider_pid" "$OPERATOR_RESUME_LEASE_PATH" 60000; then
       log "provider process $provider_pid gained a validated operator-resume lease during restart evaluation; watchdog grants bounded grace"
       return 0
@@ -13042,15 +13076,7 @@ run_tick() {
       log "provider process $provider_pid gained a validated startup/maintenance lease during restart evaluation; watchdog grants bounded grace"
       return 0
     fi
-    if operator_pause_recorded; then
-      log "provider process $provider_pid is operator-paused per the persisted lifecycle record; watchdog never restarts a paused provider"
-      return 0
-    fi
     log "provider process $provider_pid failed local /v1/health after arming; requesting launchd restart for $LABEL"
-    # Capture the OLD instance's /v1/status (service_instance + model_liveness)
-    # BEFORE the kick so the coordinator can correlate the restart with the new
-    # post-restart instance (SPEC-025 §5.4). Observability-only.
-    capture_supervisor_status_fields "$provider_pid" || true
     if kickstart_provider "local_health_failed_after_arming"; then
       TICK_RESTART=1
       # The kick starts the restart cooldown, so the watchdog is now rate-limited.
