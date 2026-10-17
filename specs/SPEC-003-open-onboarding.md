@@ -1,6 +1,8 @@
 # SPEC-003 — Open Onboarding: Distribution, Lifecycle & Onboarding UX
 
-**Version:** 0.12.1 (2026-10-14, public-repo cleanup)
+**Version:** 0.12.2 (2026-10-17, issue #2036 release discovery without the anonymous GitHub API)
+
+**Change log v0.12.2 (2026-10-17, issue #2036):** SPEC-003-R003 makes the coordinator-advertised release the first unpinned discovery source and the anonymous GitHub Releases API (60 requests per hour per source IP, shared by every Mac behind one NAT) only its fallback, never retried; a spent budget is reported as deferred until its reset. Display-only release clients and the install.sh consumer-health gate use the same order, and the gate verifies `checksums.txt.sig`. `releases/latest.json` stays unsigned and unread.
 
 **Change log v0.12.1 (2026-10-14, public-repo cleanup):** Editorial, no normative change: generic wording for the third-party marketplace seller integration; drops references to the removed phase5-onboarding scaffold.
 
@@ -9,8 +11,9 @@ github.com, api.github.com, or *.githubusercontent.com (mainland China).
 SPEC-003-R003: `install.sh` falls back to the byte-identical release mirror at
 `https://download.malibu.tech/releases/` for release discovery and every
 release asset, with the embedded-key `checksums.txt.sig` chain unchanged as the
-only authority; without GitHub, discovery installs exactly the coordinator's
-advertised release, never older than the installed binary. SPEC-003-R004: the mirror layout (`<tag>/<asset>`,
+only authority; unpinned discovery installs exactly the coordinator's
+advertised release, never older than the installed binary, and uses the
+anonymous GitHub Releases API only as its fallback (v0.12.2). SPEC-003-R004: the mirror layout (`<tag>/<asset>`,
 `index/<tag>.json`) and its publication rules (byte identity against GitHub's
 asset digests, immutable tags, the Pearl updater never advertising an unmirrored
 release, `required_binary_version` never above `latest_binary_version`, and
@@ -1186,13 +1189,27 @@ package, the tarball) from GitHub Releases first and, on any failure, the same
 asset name from `https://download.malibu.tech/releases/<tag>/`; after one GitHub
 failure later assets MAY go mirror-first, and `MACPROVIDER_RELEASE_MIRROR=1`
 (only `0` or `1` is valid) MUST go mirror-first with GitHub as the fallback.
-Unpinned discovery MUST fall back, when the GitHub Releases API fails, to
-exactly the coordinator `/healthz` `recommended_binary_version` (the fleet's
-`latest_binary_version`, read over the coordinator's own TLS endpoint), used
-only if it is a canonical `vMAJOR.MINOR.PATCH` at or above the supported
-rollback floor and not older than an installed provider binary (only a pinned
-emergency rollback may go backwards); with no such advertisement the install
-MUST fail. The mirror's
+Unpinned discovery MUST first take exactly the coordinator `/healthz`
+`recommended_binary_version` (the fleet's `latest_binary_version`, read over
+the coordinator's own TLS endpoint), used only if it is a canonical
+`vMAJOR.MINOR.PATCH` at or above the supported rollback floor and not older
+than an installed provider binary (only a pinned emergency rollback may go
+backwards). Only when no such advertisement is usable MAY it query the GitHub
+Releases API, and with neither the install MUST fail (v0.12.2, #2036: the
+anonymous API allows 60 requests per hour per source IP, shared by every Mac
+behind one NAT, so it cannot be the primary source at fleet scale). The
+GitHub Releases API request MUST NOT be retried, and a 403 or 429 carrying
+`x-ratelimit-remaining: 0` MUST be reported as release discovery deferred
+until the response's `x-ratelimit-reset` rather than as a missing release. A
+client that only displays the newest release (the Malibu.app update badge,
+`malibu-cli status`) MUST use the same order, MUST NOT re-request the GitHub
+API before its reset (at most one hour away) or a bounded backoff after any
+other failure, and when it polls MUST back off after any failure. The install.sh consumer-health
+gate (`scripts/check-install-sh-consumer-health.sh`) MUST run the served
+installer's own discovery in this order and MUST verify the resolved release's
+`checksums.txt.sig` under the served installer's embedded key, reading assets
+from GitHub Releases or the mirror; a signature that does not verify is an
+alarm, never a fallback. The mirror's
 `latest.json` MUST NOT choose the tag: it is unsigned and mirror-controlled, and
 every public release, old or canary, carries a valid `checksums.txt.sig`. The
 embedded-key `checksums.txt.sig` verification, per-asset SHA-256, Gatekeeper,
@@ -1244,7 +1261,7 @@ skipped, never installed.
 
 | Dependency | Purpose | License | Notes |
 |---|---|---|---|
-| GitHub API | Release discovery, download | N/A (public API) | No API key needed for public repos. Rate limit: 60 req/hr unauthenticated. `install.sh` makes 2 API calls; `update` makes 1-2. |
+| GitHub API | Release discovery fallback | N/A (public API) | No API key needed for public repos. Rate limit: 60 req/hr unauthenticated per source IP. Unpinned `install.sh` makes none while the coordinator advertises a release (SPEC-003-R003); `update` makes 1-2 for signed discovery (SPEC-020). |
 | Cloudflare Pages / static nginx | Hosting `get.malibu.tech` | Free tier / Pearl static host | Static site serving `install.sh`, `uninstall.sh`, the landing page, and agent onboarding artifacts. |
 | `huggingface-cli` | Model download | Apache-2.0 | NOT a hard dependency. `install.sh` prints manual download instructions if not installed. |
 | `shasum` / `sha256sum` | Checksum verification | OS-provided | macOS ships `shasum` (BSD). Fallback to `openssl dgst -sha256` if neither found. |

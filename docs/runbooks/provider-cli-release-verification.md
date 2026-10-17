@@ -358,10 +358,16 @@ latest tag and still be unable to resolve an installable release (observed
 prereleases hid the stable tag, the resolver died 3, and `checksums.txt`
 404'd while parity stayed green). The scheduled
 `.github/workflows/install-sh-consumer-health-alarm.yml` fetches the served
-`install.sh`, runs that copy's `latest_release_tag()` against the live
-unauthenticated GitHub API (the view a fresh host gets — do not use `gh` /
-`GITHUB_TOKEN`), and asserts `checksums.txt` plus a `darwin-arm64` platform
-asset return HTTP 200. Run it locally with
+`install.sh` and runs that copy's own unauthenticated release discovery (the
+view a fresh host gets — do not use `gh` / `GITHUB_TOKEN`):
+`discover_latest_release_tag()` when the served copy has it, which takes the
+coordinator-advertised release and uses the anonymous GitHub API only as its
+fallback (#2036), otherwise `latest_release_tag()`. It then verifies the
+release's `checksums.txt.sig` under the served installer's embedded release key
+and asserts a `darwin-arm64` platform asset returns HTTP 200, reading each file
+from GitHub Releases or the byte-identical `download.malibu.tech` mirror. A
+spent anonymous GitHub budget on the runner's IP therefore no longer turns the
+gate red while the coordinator advertises a release. Run it locally with
 `bash scripts/check-install-sh-consumer-health.sh`. A red health alarm with
 green parity means the curl channel is serving a broken resolver; fix the
 installer, cut the next stable CLI, and republish.

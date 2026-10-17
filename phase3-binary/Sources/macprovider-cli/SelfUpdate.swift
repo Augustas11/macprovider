@@ -30,6 +30,63 @@ private final class LaunchctlOutputAccumulator: @unchecked Sendable {
     }
 }
 
+/// The anonymous api.github.com budget (60 requests per hour per source IP,
+/// shared by every Mac behind one NAT) as last reported by GitHub (#2036).
+/// Once a response says it is spent, this process sends no further GitHub API
+/// request until the advertised reset, so periodic discovery never loops on it.
+final class GitHubAPIRateLimit: @unchecked Sendable {
+    static let shared = GitHubAPIRateLimit()
+    /// Used when a spent budget carries no parsable reset time.
+    static let defaultDeferral: TimeInterval = 3_600
+    private let lock = NSLock()
+    private var deferredUntil: Date?
+
+    /// The reset time while the budget is known to be spent, else nil.
+    func deferral(now: Date = Date()) -> Date? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let deferredUntil, deferredUntil > now else { return nil }
+        return deferredUntil
+    }
+
+    func record(resetAt reset: Date) {
+        lock.lock()
+        deferredUntil = max(deferredUntil ?? reset, reset)
+        lock.unlock()
+    }
+
+    func reset() {
+        lock.lock()
+        deferredUntil = nil
+        lock.unlock()
+    }
+
+    /// `UpdateError.gitHubRateLimited` for a 403/429 whose
+    /// `x-ratelimit-remaining` is 0; nil for any other response. GitHub's
+    /// window is one hour, so the reset is clamped into (now, now + 1h]: a
+    /// response header can never suppress discovery for longer.
+    static func error(for response: HTTPURLResponse, now: Date = Date()) -> UpdateError? {
+        guard response.statusCode == 403 || response.statusCode == 429,
+              response.value(forHTTPHeaderField: "x-ratelimit-remaining")?
+                  .trimmingCharacters(in: .whitespaces) == "0"
+        else {
+            return nil
+        }
+        let resetAt = response.value(forHTTPHeaderField: "x-ratelimit-reset")
+            .flatMap { TimeInterval($0.trimmingCharacters(in: .whitespaces)) }
+            .map { Date(timeIntervalSince1970: $0) }
+        return .gitHubRateLimited(resetAt: boundedReset(resetAt, now: now))
+    }
+
+    /// A reset inside (now, now + 1h]; a missing or past reset defers for
+    /// the full window, a later one is cut to it.
+    static func boundedReset(_ reset: Date?, now: Date = Date()) -> Date {
+        let ceiling = now.addingTimeInterval(defaultDeferral)
+        guard let reset, reset > now else { return ceiling }
+        return min(reset, ceiling)
+    }
+}
+
 struct LaunchctlCommandResult {
     let terminationStatus: Int32
     let output: String
@@ -139,6 +196,8 @@ struct SelfUpdate {
     private let malibuBundleStager: ((URL, URL, CompatibilitySetManifest, URL) throws -> URL)?
     private let stagedCLIValidator: ((URL) throws -> Void)?
     private let currentBinaryURL: (() -> URL?)?
+    private let gitHubRateLimit: GitHubAPIRateLimit
+    private let releaseSigningPublicKeyPEM: String
 
     init(
         currentVersion: String,
@@ -157,8 +216,15 @@ struct SelfUpdate {
         lifecycleLeaseStore: ProviderLifecycleLeaseStore = ProviderLifecycleLeaseStore(),
         malibuBundleStager: ((URL, URL, CompatibilitySetManifest, URL) throws -> URL)? = nil,
         stagedCLIValidator: ((URL) throws -> Void)? = nil,
-        currentBinaryURL: (() -> URL?)? = nil
+        currentBinaryURL: (() -> URL?)? = nil,
+        gitHubRateLimit: GitHubAPIRateLimit? = nil,
+        releaseSigningPublicKeyPEM: String = SelfUpdate.checksumPublicKeyPEM
     ) {
+        self.releaseSigningPublicKeyPEM = releaseSigningPublicKeyPEM
+        // The process-wide deferral belongs to the process-wide transport; an
+        // injected session (tests, custom transports) gets its own.
+        self.gitHubRateLimit = gitHubRateLimit
+            ?? (session === URLSession.shared ? .shared : GitHubAPIRateLimit())
         self.currentVersion = currentVersion
         self.releasesAPIURL = releasesAPIURL ?? Self.defaultReleasesAPIURL
         // The mirror only carries the default repository's releases; a fork
@@ -195,7 +261,8 @@ struct SelfUpdate {
                   releaseMirrorEnabled,
                   coordinatorHealthzURL != nil
             else {
-                throw discoveryError
+                try Self.reportDeferredCheckOrThrow(discoveryError, checkOnly: checkOnly)
+                return
             }
             let target: String
             do {
@@ -206,10 +273,11 @@ struct SelfUpdate {
                 FileHandle.standardError.write(Data(
                     "The coordinator-advertised release is also unavailable: \(error)\n".utf8
                 ))
-                throw discoveryError
+                try Self.reportDeferredCheckOrThrow(discoveryError, checkOnly: checkOnly)
+                return
             }
             FileHandle.standardError.write(Data(
-                "GitHub release discovery is unreachable; using the coordinator-advertised release v\(target) from the release mirror.\n".utf8
+                "GitHub release discovery is unreachable (\(discoveryError)); using the coordinator-advertised release v\(target) from the release mirror.\n".utf8
             ))
             try await runCoordinatorAdvertised(target: target, checkOnly: checkOnly)
             return
@@ -221,6 +289,9 @@ struct SelfUpdate {
     /// replayed, equivocating, expired, or invalid discovery head is a
     /// security signal and is never bypassed.
     static func discoveryFailureAllowsCoordinatorFallback(_ error: Error) -> Bool {
+        if case UpdateError.gitHubRateLimited = error {
+            return true
+        }
         if let urlError = error as? URLError {
             return urlError.code != .cancelled
         }
@@ -228,6 +299,16 @@ struct SelfUpdate {
             return status != 404
         }
         return false
+    }
+
+    /// A spent anonymous GitHub budget is not a failed check (#2036): `--check`
+    /// reports when it can run again and succeeds. A mutating update still
+    /// fails, with the same deferral in its error. Any other error rethrows.
+    static func reportDeferredCheckOrThrow(_ error: Error, checkOnly: Bool) throws {
+        guard checkOnly, case UpdateError.gitHubRateLimited = error else {
+            throw error
+        }
+        print(String(describing: error))
     }
 
     /// The coordinator's advertised `recommended_binary_version`, read from its own
@@ -263,6 +344,9 @@ struct SelfUpdate {
         }
         try Self.requireTargetAllowedBySignedPolicy(target, policy: markerStore.effectivePolicy())
         if checkOnly {
+            // The advertisement only names the tag: report it only once that
+            // release's checksums.txt verifies under the pinned release key.
+            try await verifyMirroredChecksumSignature(tag: "v\(target)", publicKeyPEM: releaseSigningPublicKeyPEM)
             print("Update available: v\(installedReleaseVersion) -> v\(target)")
             return
         }
@@ -783,32 +867,74 @@ struct SelfUpdate {
         checksumPublicKeyPEM
     }
 
-    func latestVersionCached() async throws -> String {
-        let cacheURL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".cache/macprovider/latest-release.json")
-        if let cached = try? Data(contentsOf: cacheURL),
-           let object = try? JSONSerialization.jsonObject(with: cached) as? [String: Any],
+    /// The newest release for `status` display. A configured coordinator's
+    /// advertisement is asked first on every call (it is not rate limited),
+    /// so a cached GitHub value or deferral never masks it. Only GitHub's
+    /// latest release is cached: for an hour, or a spent anonymous budget
+    /// until its (bounded) reset, so repeated `status` calls never re-spend
+    /// it (#2036).
+    func latestVersionCached(
+        cacheURL: URL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".cache/macprovider/latest-release.json"),
+        now: Date = Date()
+    ) async throws -> String {
+        if coordinatorHealthzURL != nil, let advertised = try? await coordinatorAdvertisedReleaseVersion() {
+            return advertised
+        }
+        let cachedObject = (try? Data(contentsOf: cacheURL))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        if let object = cachedObject,
            let fetchedAt = object["fetched_at"] as? TimeInterval,
-           Date().timeIntervalSince1970 - fetchedAt < 3600,
+           now.timeIntervalSince1970 - fetchedAt < 3600,
            let version = object["version"] as? String
         {
             return version
         }
+        if let object = cachedObject,
+           let deferredUntil = object["deferred_until"] as? TimeInterval,
+           deferredUntil > now.timeIntervalSince1970
+        {
+            throw UpdateError.gitHubRateLimited(
+                resetAt: GitHubAPIRateLimit.boundedReset(Date(timeIntervalSince1970: deferredUntil), now: now)
+            )
+        }
+        if let object = cachedObject,
+           let failedAt = object["failed_at"] as? TimeInterval,
+           (0 ..< Self.latestReleaseFailureBackoff).contains(now.timeIntervalSince1970 - failedAt)
+        {
+            throw UpdateError.httpStatus(503)
+        }
 
-        let release = try await latestRelease()
-        let version = try Self.validateReleaseTag(release.tagName)
+        let version: String
+        do {
+            version = try Self.validateReleaseTag(try await latestRelease().tagName)
+        } catch UpdateError.gitHubRateLimited(let resetAt) {
+            let bounded = GitHubAPIRateLimit.boundedReset(resetAt, now: now)
+            Self.writeLatestReleaseCache(["deferred_until": bounded.timeIntervalSince1970], to: cacheURL)
+            throw UpdateError.gitHubRateLimited(resetAt: bounded)
+        } catch {
+            // Any other failure backs off too, so repeated `status` calls
+            // never hammer an unreachable GitHub.
+            Self.writeLatestReleaseCache(["failed_at": now.timeIntervalSince1970], to: cacheURL)
+            throw error
+        }
+        Self.writeLatestReleaseCache([
+            "fetched_at": now.timeIntervalSince1970,
+            "version": version,
+        ], to: cacheURL)
+        return version
+    }
+
+    static let latestReleaseFailureBackoff: TimeInterval = 600
+
+    private static func writeLatestReleaseCache(_ payload: [String: Any], to cacheURL: URL) {
         try? FileManager.default.createDirectory(
             at: cacheURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        let payload: [String: Any] = [
-            "fetched_at": Date().timeIntervalSince1970,
-            "version": version,
-        ]
         if let data = try? JSONSerialization.data(withJSONObject: payload) {
             try? data.write(to: cacheURL, options: .atomic)
         }
-        return version
     }
 
     private func latestRelease() async throws -> GitHubRelease {
@@ -819,11 +945,103 @@ struct SelfUpdate {
         var request = URLRequest(url: url)
         request.addValue("application/vnd.github+json", forHTTPHeaderField: "accept")
         request.addValue("macprovider-cli/\(currentVersion)", forHTTPHeaderField: "user-agent")
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await gitHubAPIData(for: request)
         if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
             throw UpdateError.httpStatus(http.statusCode)
         }
+        guard data.count <= Self.maxReleaseMirrorMetadataBytes else {
+            throw UpdateError.untrustedReleaseAPIURL(url.absoluteString)
+        }
         return try JSONDecoder().decode(GitHubRelease.self, from: data)
+    }
+
+    /// Every api.github.com request goes through here (#2036). While the
+    /// anonymous budget is known to be spent it fails fast without a request;
+    /// a 403/429 with `x-ratelimit-remaining: 0` records the reset and throws
+    /// `gitHubRateLimited`. There is no retry: callers fall back instead.
+    private func gitHubAPIData(for request: URLRequest) async throws -> (Data, URLResponse) {
+        if let deferredUntil = gitHubRateLimit.deferral() {
+            throw UpdateError.gitHubRateLimited(resetAt: deferredUntil)
+        }
+        let (data, response) = try await session.data(for: request)
+        if let http = response as? HTTPURLResponse, let limited = GitHubAPIRateLimit.error(for: http) {
+            if case .gitHubRateLimited(let resetAt?) = limited {
+                gitHubRateLimit.record(resetAt: resetAt)
+            }
+            throw limited
+        }
+        return (data, response)
+    }
+
+    /// Verify `<tag>/checksums.txt` against `checksums.txt.sig` under the
+    /// pinned release key, read from the release mirror and, when the mirror
+    /// cannot serve them, from GitHub Releases downloads (not the API). A
+    /// signature that does not verify fails closed and is never retried
+    /// against the other host.
+    func verifyMirroredChecksumSignature(
+        tag: String,
+        publicKeyPEM: String = SelfUpdate.checksumPublicKeyPEM
+    ) async throws {
+        // Only the default repository is mirrored (SPEC-003-R003).
+        guard releaseMirrorEnabled else {
+            throw UpdateError.untrustedReleaseAPIURL(releasesAPIURL)
+        }
+        let gitHubDownload = "https://github.com/Augustas11/macprovider/releases/download/\(tag)/"
+        guard let gitHubChecksums = URL(string: gitHubDownload + "checksums.txt"),
+              let gitHubSignature = URL(string: gitHubDownload + "checksums.txt.sig")
+        else {
+            throw UpdateError.invalidReleaseVersion(tag)
+        }
+        let sources = [
+            (try Self.releaseMirrorURL(tag: tag, file: "checksums.txt"),
+             try Self.releaseMirrorURL(tag: tag, file: "checksums.txt.sig")),
+            (gitHubChecksums, gitHubSignature),
+        ]
+        var lastError: Error = UpdateError.missingAsset
+        for (checksumsURL, signatureURL) in sources {
+            let checksums: Data
+            let signature: Data
+            do {
+                checksums = try await boundedReleaseFile(checksumsURL)
+                signature = try await boundedReleaseFile(signatureURL)
+            } catch {
+                if error is CancellationError || (error as? URLError)?.code == .cancelled {
+                    throw error
+                }
+                lastError = error
+                continue
+            }
+            guard let publicKey = try? P256.Signing.PublicKey(pemRepresentation: publicKeyPEM),
+                  let parsed = try? P256.Signing.ECDSASignature(derRepresentation: signature),
+                  publicKey.isValidSignature(parsed, for: SHA256.hash(data: checksums))
+            else {
+                throw UpdateError.checksumSignatureInvalid
+            }
+            return
+        }
+        throw lastError
+    }
+
+    private func boundedReleaseFile(_ url: URL) async throws -> Data {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 30
+        request.addValue("macprovider-cli/\(currentVersion)", forHTTPHeaderField: "user-agent")
+        // Streamed so an oversized body is refused at the cap, never buffered.
+        let (bytes, response) = try await session.bytes(for: request)
+        if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
+            throw UpdateError.httpStatus(http.statusCode)
+        }
+        var data = Data()
+        for try await byte in bytes {
+            guard data.count < Self.maxReleaseMirrorMetadataBytes else {
+                throw UpdateError.untrustedDownloadURL(url.absoluteString)
+            }
+            data.append(byte)
+        }
+        guard !data.isEmpty else {
+            throw UpdateError.untrustedDownloadURL(url.absoluteString)
+        }
+        return data
     }
 
     func discoverSignedReleaseHead(now: Date = Date()) async throws -> SignedReleaseDiscoveryHead {
@@ -918,7 +1136,7 @@ struct SelfUpdate {
             var request = URLRequest(url: url)
             request.addValue("application/vnd.github+json", forHTTPHeaderField: "accept")
             request.addValue("macprovider-cli/\(currentVersion)", forHTTPHeaderField: "user-agent")
-            let (data, response) = try await session.data(for: request)
+            let (data, response) = try await gitHubAPIData(for: request)
             if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
                 throw UpdateError.httpStatus(http.statusCode)
             }
@@ -967,7 +1185,7 @@ struct SelfUpdate {
         var request = URLRequest(url: url)
         request.addValue("application/vnd.github+json", forHTTPHeaderField: "accept")
         request.addValue("macprovider-cli/\(currentVersion)", forHTTPHeaderField: "user-agent")
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await gitHubAPIData(for: request)
         if let http = response as? HTTPURLResponse {
             if http.statusCode == 404 {
                 throw UpdateError.releaseNotFound
@@ -3127,6 +3345,7 @@ enum UpdateError: Error, CustomStringConvertible {
     case discoveryHeadReplay
     case discoveryHeadEquivocation
     case discoveryHeadExpired
+    case gitHubRateLimited(resetAt: Date?)
     case targetRevokedOrBelowMinimum
     case unsafeAcceptanceDirectory(String)
     case acceptanceCandidateNotNewer(current: String, target: String)
@@ -3198,6 +3417,9 @@ enum UpdateError: Error, CustomStringConvertible {
             return "Signed release discovery head changed digest at the accepted sequence"
         case .discoveryHeadExpired:
             return "Signed release discovery head is expired or not yet valid"
+        case .gitHubRateLimited(let resetAt):
+            let until = resetAt.map { ISO8601DateFormatter().string(from: $0) } ?? "the GitHub API rate-limit reset"
+            return "Update check deferred until \(until): the anonymous GitHub API rate limit (60 requests per hour per IP, shared by every Mac on this network) is spent"
         case .targetRevokedOrBelowMinimum:
             return "Target release is revoked or below the signed minimum"
         case .unsafeAcceptanceDirectory(let reason):

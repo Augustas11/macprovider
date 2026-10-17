@@ -133,73 +133,101 @@ rm -f "$extracted"
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/install-sh-consumer-health-test.XXXXXX")"
 trap 'rm -rf "$WORKDIR"' EXIT
 MOCK_BIN="$WORKDIR/bin"
-mkdir -p "$MOCK_BIN"
+FIXTURES="$WORKDIR/fixtures"
+mkdir -p "$MOCK_BIN" "$FIXTURES"
 
+# A throwaway P-256 release key: fixtures embed its public half the way
+# install.sh embeds the production key, so the checker's signature check runs.
+openssl ecparam -name prime256v1 -genkey -noout -out "$FIXTURES/test-release.key" 2>/dev/null
+openssl ec -in "$FIXTURES/test-release.key" -pubout -out "$FIXTURES/test-release.pub" 2>/dev/null
+printf '%s  %s\n' \
+  "1111111111111111111111111111111111111111111111111111111111111111" "macprovider-cli-v1.8.123-darwin-arm64.pkg" \
+  "2222222222222222222222222222222222222222222222222222222222222222" "macprovider-cli-v1.8.123-darwin-arm64.tar.gz" \
+  > "$FIXTURES/checksums.txt"
+openssl dgst -sha256 -sign "$FIXTURES/test-release.key" -out "$FIXTURES/checksums.txt.sig" "$FIXTURES/checksums.txt"
+printf 'tampered\n' >> "$FIXTURES/checksums-tampered.txt"
+cat "$FIXTURES/checksums.txt" >> "$FIXTURES/checksums-tampered.txt"
+TEST_KEY_FUNCTION="write_checksum_public_key() {
+  cat <<'KEY'
+$(cat "$FIXTURES/test-release.pub")
+KEY
+}"
+
+# write_curl_mock "<flag> ...": flags select per-host failures.
+#   checksums-404 assets-404 pkg-404-tar-200 github-downloads-404 bad-sig
+#   coordinator-down api-rate-limited
 write_curl_mock() {
-  local mode="$1"
+  local mode=" $* "
   cat > "$MOCK_BIN/curl" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
+mode="$mode"
+fixtures="$FIXTURES"
 out="/dev/null"
+headers=""
 write_fmt=""
 url=""
 while [ "\$#" -gt 0 ]; do
   case "\$1" in
     -o) out="\$2"; shift 2 ;;
+    -D) headers="\$2"; shift 2 ;;
     -w) write_fmt="\$2"; shift 2 ;;
     http*) url="\$1"; shift ;;
     *) shift ;;
   esac
 done
 echo "\$url" >> "$WORKDIR/curl-urls.log"
+has() { case "\$mode" in *" \$1 "*) return 0 ;; esac; return 1; }
+miss() { [ -n "\$write_fmt" ] && printf '404'; exit 22; }
+hit() {
+  if [ -n "\${1:-}" ] && [ "\$out" != "/dev/null" ]; then cp "\$1" "\$out"; fi
+  [ -n "\$write_fmt" ] && printf '200'
+  exit 0
+}
 case "\$url" in
-  */checksums.txt.sig)
-    if [ "$mode" = "checksums-404" ]; then
-      [ -n "\$write_fmt" ] && printf '404'
-      exit 22
-    fi
-    if [ "\$out" != "/dev/null" ]; then
-      printf 'sig' > "\$out"
-    fi
-    [ -n "\$write_fmt" ] && printf '200'
+  https://coordinator.malibu.tech/healthz)
+    has coordinator-down && exit 7
+    printf '%s' '{"status":"ok","recommended_binary_version":"1.8.123"}'
     exit 0
     ;;
-  */checksums.txt)
-    if [ "$mode" = "checksums-404" ]; then
-      [ -n "\$write_fmt" ] && printf '404'
+  https://api.github.com/*)
+    if has api-rate-limited; then
+      [ -n "\$headers" ] && printf 'HTTP/2 403\r\nx-ratelimit-remaining: 0\r\nx-ratelimit-reset: 1790000000\r\n\r\n' > "\$headers"
       exit 22
     fi
-    if [ "\$out" != "/dev/null" ]; then
-      printf 'deadbeef  macprovider-cli-v1.8.123-darwin-arm64.pkg\\n' > "\$out"
-    fi
-    [ -n "\$write_fmt" ] && printf '200'
+    printf '%s' '[{"tag_name":"v1.8.122","prerelease":false}]'
     exit 0
     ;;
-  *.pkg)
-    if [ "$mode" = "pkg-404-tar-200" ]; then
-      [ -n "\$write_fmt" ] && printf '404'
-      exit 22
-    fi
-    if [ "$mode" = "assets-404" ]; then
-      [ -n "\$write_fmt" ] && printf '404'
-      exit 22
-    fi
-    [ -n "\$write_fmt" ] && printf '200'
-    exit 0
+  https://github.com/*)
+    has github-downloads-404 && miss
     ;;
-  *.tar.gz)
-    if [ "$mode" = "pkg-404-tar-200" ] || [ "$mode" = "ok" ]; then
-      [ -n "\$write_fmt" ] && printf '200'
-      exit 0
-    fi
-    [ -n "\$write_fmt" ] && printf '404'
-    exit 22
-    ;;
+  https://download.malibu.tech/releases/*) ;;
   *)
     printf 'unexpected curl URL: %s\\n' "\$url" >&2
     exit 2
     ;;
 esac
+case "\$url" in
+  */checksums.txt.sig)
+    has checksums-404 && miss
+    if has bad-sig; then hit "\$fixtures/checksums-tampered.txt"; fi
+    hit "\$fixtures/checksums.txt.sig"
+    ;;
+  */checksums.txt)
+    has checksums-404 && miss
+    hit "\$fixtures/checksums.txt"
+    ;;
+  *.pkg)
+    { has pkg-404-tar-200 || has assets-404; } && miss
+    hit
+    ;;
+  *.tar.gz)
+    has assets-404 && miss
+    hit
+    ;;
+esac
+printf 'unexpected curl URL: %s\\n' "\$url" >&2
+exit 2
 EOF
   chmod +x "$MOCK_BIN/curl"
 }
@@ -207,7 +235,7 @@ EOF
 write_fixture() {
   local path="$1"
   local body="$2"
-  printf '%s\n' "$body" > "$path"
+  printf '%s\n%s\n' "$body" "$TEST_KEY_FUNCTION" > "$path"
 }
 
 run_checker() {
@@ -216,11 +244,13 @@ run_checker() {
   shift 2
   local log="$WORKDIR/${name}.out"
   local rc=0
-  local python_dir
+  local python_dir openssl_dir
   python_dir="$(dirname "$(command -v python3)")"
+  openssl_dir="$(dirname "$(command -v openssl)")"
+  : > "$WORKDIR/curl-urls.log"
   # Token values below are fake probe credentials for the unauth-isolation test.
   env -u INSTALL_SH_URL \
-    PATH="$MOCK_BIN:$python_dir:/usr/bin:/bin" \
+    PATH="$MOCK_BIN:$python_dir:$openssl_dir:/usr/bin:/bin" \
     HOME="$WORKDIR/home-$name" \
     GH_TOKEN="fake-gh-token-unauth-probe" \
     GITHUB_TOKEN="fake-github-token-unauth-probe" \
@@ -235,6 +265,24 @@ run_checker() {
     exit 1
   fi
   printf '[test-install-sh-consumer-health-alarm] PASS %s (exit %s)\n' "$name" "$rc"
+}
+
+expect_output() {
+  local name="$1" pattern="$2"
+  grep -q -- "$pattern" "$WORKDIR/${name}.out" || {
+    printf '[test-install-sh-consumer-health-alarm] FAIL %s: output lacks %s\n' "$name" "$pattern" >&2
+    cat "$WORKDIR/${name}.out" >&2
+    exit 1
+  }
+}
+
+expect_no_fetch() {
+  local name="$1" pattern="$2"
+  if grep -q -- "$pattern" "$WORKDIR/curl-urls.log"; then
+    printf '[test-install-sh-consumer-health-alarm] FAIL %s: fetched %s\n' "$name" "$pattern" >&2
+    cat "$WORKDIR/curl-urls.log" >&2
+    exit 1
+  fi
 }
 
 # Happy path: fixture resolver prints a stable tag; mock curl 200s assets.
@@ -252,7 +300,6 @@ latest_release_tag() {
 download_release() { echo leaked; }
 EOF
 )"
-: > "$WORKDIR/curl-urls.log"
 run_checker happy-path 0 INSTALL_SH_FILE="$WORKDIR/ok.sh"
 if grep -q SOURCED_MAIN "$WORKDIR/happy-path.out"; then
   printf '[test-install-sh-consumer-health-alarm] FAIL happy-path sourced install.sh main\n' >&2
@@ -347,6 +394,79 @@ version_at_least() { return 0; }
 EOF
 )"
 run_checker braces-extract 0 INSTALL_SH_FILE="$WORKDIR/braces.sh"
+
+# #2036: the served full resolver runs unauthenticated with the production
+# coordinator, and never needs the anonymous GitHub API when it advertises.
+write_curl_mock ok
+write_fixture "$WORKDIR/discover.sh" "$(cat <<'EOF'
+MACPROVIDER_MIN_SUPPORTED_VERSION="v1.7.11"
+latest_release_tag() { printf '%s' 'v1.8.122'; }
+release_mirror_enabled() { [ "$GITHUB_REPO" = "$RELEASE_MIRROR_REPO" ]; }
+discovered_release_tag_acceptable() { return 0; }
+version_at_least() { return 0; }
+mirror_latest_release_tag() {
+  [ "$coordinator_base" = "https://coordinator.malibu.tech" ] || return 1
+  printf '%s' 'v1.8.123'
+}
+discover_latest_release_tag() {
+  if release_mirror_enabled && mirror_latest_release_tag; then return 0; fi
+  latest_release_tag
+}
+EOF
+)"
+run_checker discover-mode 0 INSTALL_SH_FILE="$WORKDIR/discover.sh"
+expect_output discover-mode 'discover_latest_release_tag resolved v1.8.123'
+expect_output discover-mode 'signature verified'
+
+# GitHub release downloads unavailable: the byte-identical mirror serves them.
+write_curl_mock github-downloads-404
+run_checker mirror-assets 0 INSTALL_SH_FILE="$WORKDIR/discover.sh"
+expect_output mirror-assets 'checksums.txt HTTP 200 from https://download.malibu.tech'
+expect_output mirror-assets 'darwin-arm64.pkg HTTP 200 from https://download.malibu.tech'
+
+# A bad checksums.txt.sig is an alarm, never a fallback to another host.
+write_curl_mock bad-sig
+run_checker bad-signature 1 INSTALL_SH_FILE="$WORKDIR/discover.sh"
+expect_output bad-signature 'does not verify'
+
+# A served installer without the release key cannot prove installability.
+write_curl_mock ok
+printf '%s
+' "latest_release_tag() { printf '%s' 'v1.8.123'; }" > "$WORKDIR/nokey.sh"
+run_checker no-release-key 1 INSTALL_SH_FILE="$WORKDIR/nokey.sh"
+expect_output no-release-key 'write_checksum_public_key'
+
+# The checkout installer itself: its resolver takes the coordinator-advertised
+# release without one api.github.com request. The fixture signature is not the
+# production key's, so the probe then alarms on the signature (fail closed).
+write_curl_mock ok
+run_checker head-installer 1 INSTALL_SH_FILE="$install_sh"
+expect_output head-installer 'discover_latest_release_tag resolved v1.8.123'
+expect_output head-installer 'does not verify'
+expect_no_fetch head-installer 'api.github.com'
+
+# Coordinator down: the checkout installer falls back to the GitHub API once.
+write_curl_mock coordinator-down
+run_checker head-installer-github-fallback 1 INSTALL_SH_FILE="$install_sh"
+expect_output head-installer-github-fallback 'discover_latest_release_tag resolved v1.8.122'
+[ "$(grep -c 'api.github.com' "$WORKDIR/curl-urls.log")" = "1" ] || {
+  printf '[test-install-sh-consumer-health-alarm] FAIL head-installer-github-fallback: want one GitHub API request
+' >&2
+  cat "$WORKDIR/curl-urls.log" >&2
+  exit 1
+}
+
+# Coordinator down and the anonymous budget spent: an alarm that says when
+# discovery resumes, after exactly one API request.
+write_curl_mock coordinator-down api-rate-limited
+run_checker head-installer-rate-limited 1 INSTALL_SH_FILE="$install_sh"
+expect_output head-installer-rate-limited 'deferred until'
+[ "$(grep -c 'api.github.com' "$WORKDIR/curl-urls.log")" = "1" ] || {
+  printf '[test-install-sh-consumer-health-alarm] FAIL head-installer-rate-limited: want one GitHub API request
+' >&2
+  cat "$WORKDIR/curl-urls.log" >&2
+  exit 1
+}
 
 # Fetch error against a non-https URL is a probe error (exit 2), not an ALARM.
 run_checker bad-url 2 INSTALL_SH_FILE="" INSTALL_SH_URL="http://example.invalid/install.sh"

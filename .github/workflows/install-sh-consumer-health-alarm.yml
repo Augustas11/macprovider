@@ -5,11 +5,15 @@ name: Install.sh consumer-surface health alarm
 # stable tag's dist/install.sh. That stayed green during #1574 because the
 # served copy was v1.8.123, and v1.8.123's latest_release_tag() used
 # ?per_page=30 — leading prereleases hid the stable tag, the resolver died 3,
-# and checksums.txt 404'd. This alarm fetches the SERVED installer, runs its
-# latest_release_tag() against the live unauthenticated GitHub API (the view a
-# fresh host gets), and asserts checksums.txt plus a darwin-arm64 asset are
-# HTTP 200. No secrets, no writes, no deploy, and no GH_TOKEN. An authenticated
-# probe is not faithful (drafts become visible; #1588).
+# and checksums.txt 404'd. This alarm fetches the SERVED installer and runs its
+# own unauthenticated release discovery (the view a fresh host gets):
+# discover_latest_release_tag() when present, which takes the
+# coordinator-advertised release with the anonymous GitHub API only as its
+# fallback (#2036), else latest_release_tag(). It verifies checksums.txt.sig
+# under the served installer's release key and asserts a darwin-arm64 asset is
+# HTTP 200 from GitHub Releases or the release mirror. No secrets, no writes,
+# no deploy, and no GH_TOKEN. An authenticated probe is not faithful (drafts
+# become visible; #1588).
 #
 # A red run with a green parity alarm means "served bytes match a broken
 # release". That is a true alarm, not a flake. It stays red until the next
