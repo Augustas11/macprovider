@@ -588,6 +588,13 @@ Omitted/false `parallel_tool_calls` requires exactly one complete call;
 `true` allows 1–128 complete calls in generated order. Argument caps remain
 1 MiB per call and 2 MiB total, with depth 32.
 
+**AMENDED v0.2.14 (Amendment 6):** The v0.2.12 text required the path to
+"parse only complete `<tool_call>` envelopes containing strict JSON objects"
+and listed "Function-XML" without qualification among the forms that MUST NOT
+be recovered into a successful call. One complete function-XML call per
+envelope, in the grammar above, is now accepted; all other function-XML remains
+excluded.
+
 The guarantee is output validation after ordinary model generation, not a
 claim of constrained token sampling. Token exhaustion/`length`, invalid
 arguments, incomplete output, or another generated-output validation failure
