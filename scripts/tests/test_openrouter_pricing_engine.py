@@ -287,7 +287,12 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
             if row.get("runtime_status") == "recommendable"
         }
         mapped = {model["canonical_model_id"] for model in policy_document["models"]}
-        self.assertEqual(recommendable, mapped)
+        class_priced = {entry["catalog_key"] for entry in policy_document["class_priced_models"]}
+        # SPEC-023 v0.22.25: market-mapped plus class-priced keys cover the
+        # recommendable catalog exactly and disjointly.
+        self.assertFalse(mapped & class_priced)
+        self.assertEqual(recommendable, mapped | class_priced)
+        self.assertIn("mlx-community/qwen2-vl-2b-instruct-4bit", class_priced)
 
     def test_v6_market_peg_prices_every_mapped_recommendable_key_from_real_policy(self):
         policy_document = production_policy()
@@ -300,8 +305,11 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
             for row in proposal[bucket]
         }
         blocked = {row["model_id"] for row in proposal["blocked"]}
-        self.assertEqual(recommendable, priced & recommendable)
+        class_priced = {entry["catalog_key"]: entry["canonical_model_id"] for entry in policy_document["class_priced_models"]}
+        self.assertEqual(recommendable - set(class_priced), priced & recommendable)
         self.assertFalse(blocked & recommendable)
+        # Class-priced keys and their rate rows are neither proposed nor blocked.
+        self.assertFalse((set(class_priced) | set(class_priced.values())) & (priced | blocked))
         self.assertIn("openai/gpt-oss-120b", priced)
         self.assertIn("qwen3-32b", priced)
         qwen_coder = next(row for row in proposal["changed"] if row["model_id"] == "qwen3-coder-30b-a3b-instruct")
@@ -1535,6 +1543,111 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         finally:
             fixture_path.write_text(original_catalog)
 
+    # SPEC-023 v0.22.25 class-priced recommendable keys.
+    CLASS_PRICED_KEY = "mlx-community/qwen2-vl-2b-instruct-4bit"
+    CLASS_PRICED_ROW = "qwen2-vl-2b-instruct"
+
+    def class_priced_policy(self, **overrides):
+        policy_document = policy()
+        entry = {
+            "canonical_model_id": self.CLASS_PRICED_ROW,
+            "catalog_key": self.CLASS_PRICED_KEY,
+            "rate_class": "class-3b",
+            "reason": "unit-test: no OpenRouter market",
+        }
+        entry.update(overrides)
+        policy_document["class_priced_models"] = [entry]
+        return policy_document
+
+    def class_priced_catalog(self):
+        catalog = json.loads((FIXTURES / "recommendable-catalog.json").read_text(encoding="utf-8"))
+        catalog["rows"][self.CLASS_PRICED_KEY] = {"runtime_status": "recommendable"}
+        return catalog
+
+    def test_class_priced_key_is_accepted_and_excluded_from_peg_and_demand(self):
+        policy_document = self.class_priced_policy()
+        engine.validate_policy(policy_document)
+        card = reference_rate_card()
+        card["rows"][self.CLASS_PRICED_ROW] = dict(card["rows"]["openai/gpt-oss-20b"])
+        snapshot = self.snapshot(policy_document)
+        rate_proposal = engine.build_proposal(snapshot, policy_document, card, now=NOW)
+        touched = {row["model_id"] for bucket in ("added", "changed", "unchanged", "blocked", "dropped") for row in rate_proposal[bucket]}
+        self.assertFalse({self.CLASS_PRICED_KEY, self.CLASS_PRICED_ROW} & touched)
+        targets = {model["canonical_model_id"]: 15 for model in policy_document["models"]}
+        targets[self.CLASS_PRICED_KEY] = 1
+        demand_proposal = engine.build_demand_proposal(
+            snapshot,
+            policy_document,
+            min_provider_targets=targets,
+            recommendable_catalog=self.class_priced_catalog(),
+            now=NOW,
+        )
+        self.assertNotIn(self.CLASS_PRICED_KEY, demand_proposal["rows"])
+        self.assertEqual(set(demand_proposal["rows"]), {model["canonical_model_id"] for model in policy_document["models"]})
+
+    def test_class_priced_key_must_resolve_to_its_rate_row(self):
+        policy_document = self.class_priced_policy()
+        with self.assertRaisesRegex(engine.SchemaError, "does not resolve to its rate-card row"):
+            engine.build_proposal(self.snapshot(policy_document), policy_document, reference_rate_card(), now=NOW)
+
+    def test_key_both_mapped_and_class_priced_is_rejected(self):
+        for overrides in (
+            {"catalog_key": "openai/gpt-oss-20b", "canonical_model_id": "openai/gpt-oss-20b"},
+            {"catalog_key": "qwen2.5-coder-32b-instruct", "canonical_model_id": "qwen2.5-coder-32b-instruct"},
+        ):
+            with self.subTest(overrides=overrides), self.assertRaisesRegex(engine.SchemaError, "not both"):
+                engine.validate_policy(self.class_priced_policy(**overrides))
+
+    def test_recommendable_key_in_neither_set_is_rejected(self):
+        catalog = self.class_priced_catalog()
+        targets = {model["canonical_model_id"]: 15 for model in policy()["models"]}
+        with self.assertRaisesRegex(engine.SchemaError, "exactly cover the recommendable candidate catalog"):
+            engine.build_demand_proposal(
+                self.snapshot(), policy(), min_provider_targets=targets, recommendable_catalog=catalog, now=NOW,
+            )
+        policy_document = self.class_priced_policy()
+        catalog["rows"]["example/unpriced"] = {"runtime_status": "recommendable"}
+        with self.assertRaisesRegex(engine.SchemaError, "exactly cover the recommendable candidate catalog"):
+            engine.build_demand_proposal(
+                self.snapshot(policy_document), policy_document, min_provider_targets=targets,
+                recommendable_catalog=catalog, now=NOW,
+            )
+
+    def test_class_priced_entry_rejects_unknown_and_missing_fields(self):
+        policy_document = self.class_priced_policy()
+        policy_document["class_priced_models"][0]["openrouter_listed"] = {}
+        with self.assertRaisesRegex(engine.SchemaError, "must have exactly"):
+            engine.validate_policy(policy_document)
+        policy_document = self.class_priced_policy()
+        del policy_document["class_priced_models"][0]["reason"]
+        with self.assertRaisesRegex(engine.SchemaError, "must have exactly"):
+            engine.validate_policy(policy_document)
+        for bad in ({}, "x"):
+            policy_document = self.class_priced_policy()
+            policy_document["class_priced_models"] = bad
+            with self.assertRaises(engine.SchemaError):
+                engine.validate_policy(policy_document)
+
+    def test_class_priced_entry_rejects_wrong_rate_class_and_row(self):
+        for overrides, message in (
+            ({"rate_class": "class-2b"}, "rate_class"),
+            ({"rate_class": None}, "rate_class"),
+            ({"canonical_model_id": "qwen2-vl-7b-instruct"}, "NormalizeModelKey"),
+            ({"canonical_model_id": "default"}, "canonical_model_id is invalid"),
+            ({"reason": " "}, "reason"),
+        ):
+            with self.subTest(overrides=overrides), self.assertRaisesRegex(engine.SchemaError, message):
+                engine.validate_policy(self.class_priced_policy(**overrides))
+
+    def test_legacy_policy_rejects_class_priced_models(self):
+        legacy = {
+            "policy_version": "legacy", "demand_top_n": 50, "broad_fleet_undercut_fraction": "0.20",
+            "coding_minimum_undercut_fraction": "0.10", "coding_premium_fraction": "0.20",
+            "models": [], "class_priced_models": [],
+        }
+        with self.assertRaisesRegex(engine.SchemaError, "missing or unexpected fields"):
+            engine.validate_policy(legacy)
+
     def test_normalize_min_provider_targets_skips_listed_demand_rank_rows(self):
         targets = production_min_provider_targets()
         self.assertEqual(set(targets), production_recommendable_keys())
@@ -1559,7 +1672,9 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
             min_provider_targets=min_targets,
             now=NOW,
         )
-        self.assertEqual(set(proposal["rows"]), set(min_targets))
+        class_priced = {entry["catalog_key"] for entry in production_policy["class_priced_models"]}
+        self.assertTrue(class_priced <= set(min_targets))
+        self.assertEqual(set(proposal["rows"]), set(min_targets) - class_priced)
         self.assertNotIn("example/new-model", proposal["rows"])
         self.assertTrue(engine.PRODUCTION_CATALOG_PATH.exists())
 

@@ -156,15 +156,26 @@ class ReceiptTests(unittest.TestCase):
                 "policy_version": "receipt-current-test",
                 "generated_at": "2026-08-04T12:00:00Z",
                 "usd_per_million_credits": 1.0,
-                "rows": {"default": dict(rate_row), **{item["canonical_model_id"]: dict(rate_row) for item in policy_document["models"]}},
+                "rows": {
+                    "default": dict(rate_row),
+                    **{item["canonical_model_id"]: dict(rate_row) for item in policy_document["models"]},
+                    **{item["canonical_model_id"]: dict(rate_row) for item in policy_document.get("class_priced_models", [])},
+                },
             }
             min_targets = receipt.engine.normalize_min_provider_targets(
                 json.loads(DEMAND_RANK.read_text(encoding="utf-8"))
             )
             candidate_catalog = {
                 "rows": {
-                    item["canonical_model_id"]: {"runtime_status": "recommendable"}
-                    for item in policy_document["models"]
+                    **{
+                        item["canonical_model_id"]: {"runtime_status": "recommendable"}
+                        for item in policy_document["models"]
+                    },
+                    # SPEC-023 v0.22.25: class-priced keys complete the coverage.
+                    **{
+                        item["catalog_key"]: {"runtime_status": "recommendable"}
+                        for item in policy_document.get("class_priced_models", [])
+                    },
                 }
             }
             now = receipt.datetime(2026, 8, 4, 12, 0, 0, tzinfo=receipt.timezone.utc)

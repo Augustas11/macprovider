@@ -1847,10 +1847,18 @@ def market_replay_inputs(
     published_rate_key: str | None = None,
     target_total_tokens: int = 10_000_000,
     target_endpoint_tokens: tuple[int, ...] = (1_000_000,),
+    class_priced: dict | None = None,
 ) -> dict:
     generated_at = datetime.fromisoformat(ranking_date + "T12:00:00+00:00")
     policy = market_policy_fixture(model_id)
     rate_card = market_rate_card_fixture(model_id, published_model_id=published_rate_key)
+    if class_priced is not None:
+        # SPEC-023 v0.22.25: a recommendable key with no OpenRouter market,
+        # priced by its rate class and published under its normalized row.
+        policy["class_priced_models"] = [class_priced["entry"]]
+        rate_card["rows"][class_priced["entry"]["canonical_model_id"]] = {
+            **class_priced["published"], "provider_share_bps": 9000, "global_multiplier_ppm": 1000000,
+        }
     rankings = {
         "data": [{
             "date": ranking_date,
@@ -1899,6 +1907,10 @@ def market_replay_inputs(
             "pricing": {"prompt": "0.00000010", "completion": "0.00000020"},
         }]}}
     candidate_obj = {"rows": {target_model_id: {"runtime_status": "recommendable"}}}
+    min_targets = {target_model_id: 1}
+    if class_priced is not None:
+        candidate_obj["rows"][class_priced["entry"]["catalog_key"]] = {"runtime_status": "recommendable"}
+        min_targets[class_priced["entry"]["catalog_key"]] = 1
     candidate_path = directory / "autotune-candidates.json"
     candidate_path.write_text(json.dumps(candidate_obj), encoding="utf-8")
     snapshot = openrouter_pricing_engine.build_snapshot(rankings, catalog, endpoints, policy, now=generated_at, top_n=50)
@@ -1906,7 +1918,7 @@ def market_replay_inputs(
     demand_proposal = openrouter_pricing_engine.build_demand_proposal(
         snapshot,
         policy,
-        min_provider_targets={target_model_id: 1},
+        min_provider_targets=min_targets,
         recommendable_catalog=candidate_obj,
         now=generated_at,
     )
@@ -2014,6 +2026,74 @@ class MarketPegReplayTest(unittest.TestCase):
             )
             self.assertNotIn("nvidia/nemotron-3-nano-30b-a3b", inputs["rate_card_obj"]["rows"])
             validate_market_fixture(inputs)
+
+    CLASS_3B = {"prompt_rate_per_mtok": 13500, "prompt_cache_hit_rate_per_mtok": 3375, "completion_rate_per_mtok": 27000}
+
+    def class_priced_market_inputs(self, directory: pathlib.Path, *, published=None, entry_overrides=None) -> dict:
+        entry = {
+            "canonical_model_id": "qwen2-vl-2b-instruct",
+            "catalog_key": "mlx-community/qwen2-vl-2b-instruct-4bit",
+            "rate_class": "class-3b",
+            "reason": "unit-test: no OpenRouter market",
+        }
+        entry.update(entry_overrides or {})
+        today = datetime.now(timezone.utc).date().isoformat()
+        inputs = market_replay_inputs(
+            directory, today,
+            class_priced={"entry": entry, "published": dict(published or self.CLASS_3B)},
+        )
+        source = directory / "rate-card-source.json"
+        source.write_bytes(canonical({
+            "schema_version": catalog_release.RATE_CARD_SOURCE_SCHEMA,
+            "generated_at": "2026-09-14T00:00:00Z",
+            "policy_version": "market-unit-v1",
+            "usd_per_million_credits": 1.0,
+            "provider_share_bps": 9000,
+            "global_multiplier_ppm": 1000000,
+            "rows": {},
+            "classes": {"class-3b": dict(self.CLASS_3B), "class-8b": dict(self.CLASS_3B)},
+        }))
+        inputs["rate_card_source"] = source
+        return inputs
+
+    def validate_class_priced(self, inputs: dict, rate_classes=None) -> None:
+        paths = inputs["paths"]
+        with patch.object(catalog_release, "MARKET_PEG_BIND_PATH", paths["bind"]), \
+                patch.object(catalog_release, "RATE_CARD_SOURCE_PATH", inputs["rate_card_source"]):
+            catalog_release.validate_market_peg(
+                paths["rate_proposal"], paths["demand_proposal"], paths["snapshot"], paths["policy"],
+                inputs["candidate_obj"], inputs["demand_obj"], inputs["rate_card_obj"],
+                rate_classes=rate_classes,
+            )
+
+    def test_market_peg_accepts_class_priced_key_at_its_class_rates(self):
+        with tempfile.TemporaryDirectory() as raw:
+            inputs = self.class_priced_market_inputs(pathlib.Path(raw))
+            self.assertNotIn("mlx-community/qwen2-vl-2b-instruct-4bit", inputs["demand_obj"]["rows"])
+            self.validate_class_priced(inputs, rate_classes={
+                "example/new-model": "class-8b",
+                "mlx-community/qwen2-vl-2b-instruct-4bit": "class-3b",
+            })
+
+    def test_market_peg_rejects_class_priced_row_off_its_class_rates(self):
+        with tempfile.TemporaryDirectory() as raw:
+            inputs = self.class_priced_market_inputs(
+                pathlib.Path(raw), published={**self.CLASS_3B, "completion_rate_per_mtok": 30000},
+            )
+            with self.assertRaisesRegex(catalog_release.CatalogError, "does not equal 'class-3b' rates"):
+                self.validate_class_priced(inputs)
+
+    def test_market_peg_rejects_class_priced_rate_class_not_matching_artifact_feed(self):
+        with tempfile.TemporaryDirectory() as raw:
+            inputs = self.class_priced_market_inputs(pathlib.Path(raw), entry_overrides={"rate_class": "class-8b"})
+            with self.assertRaisesRegex(catalog_release.CatalogError, "does not match its artifact-feed rate_class"):
+                self.validate_class_priced(inputs, rate_classes={"mlx-community/qwen2-vl-2b-instruct-4bit": "class-3b"})
+
+    def test_market_peg_rejects_class_priced_class_without_source_rates(self):
+        with tempfile.TemporaryDirectory() as raw:
+            inputs = self.class_priced_market_inputs(pathlib.Path(raw), entry_overrides={"rate_class": "class-32b"})
+            with self.assertRaisesRegex(catalog_release.CatalogError, "has no rates for it"):
+                self.validate_class_priced(inputs)
 
     def test_market_peg_rejects_tampered_snapshot_median(self):
         with tempfile.TemporaryDirectory() as raw:

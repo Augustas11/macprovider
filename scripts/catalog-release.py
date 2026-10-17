@@ -880,6 +880,7 @@ def validate_market_peg(
     rate_card_obj: dict,
     *,
     enforce_wall_clock_freshness: bool = True,
+    rate_classes: dict[str, str] | None = None,
 ) -> None:
     snapshot_bytes = snapshot_path.read_bytes()
     policy_bytes = policy_path.read_bytes()
@@ -935,7 +936,9 @@ def validate_market_peg(
         for row in replayed_rate[bucket]
     }
     recommendable = {key for key, row in candidate_obj["rows"].items() if row.get("runtime_status") == "recommendable"}
-    for key in recommendable:
+    class_priced = openrouter_pricing_engine.class_priced_index(policy)
+    validate_market_peg_class_priced(class_priced, rate_card_obj, rate_classes)
+    for key in sorted(recommendable - set(class_priced)):
         proposal_rates = rates_by_model.get(key)
         if proposal_rates is None:
             fail(f"market-peg: recommendable row {key!r} has no replayed proposal rate")
@@ -960,6 +963,29 @@ def validate_market_peg(
     for field in ("prompt_rate_per_mtok", "prompt_cache_hit_rate_per_mtok", "completion_rate_per_mtok"):
         if rate_card_obj["rows"]["default"][field] != minimum_rates[field]:
             fail(f"market-peg: rate-card default.{field} does not match the minimum-completion mapped row")
+
+
+def validate_market_peg_class_priced(class_priced: dict, rate_card_obj: dict, rate_classes: dict[str, str] | None) -> None:
+    """SPEC-023 §3.3.2 rule 3: a class-priced key is priced only by its declared
+    §3.3.1 rate class, so a market-pegged release cannot reprice it: its
+    published row must resolve and equal that class's rate-card-source rates."""
+    if not class_priced:
+        return
+    if not RATE_CARD_SOURCE_PATH.exists():
+        fail(f"market-peg: class_priced_models needs {RATE_CARD_SOURCE_PATH.name} class rates")
+    classes = validate_rate_card_source(RATE_CARD_SOURCE_PATH.read_bytes())["classes"]
+    for key, entry in sorted(class_priced.items()):
+        if rate_classes is not None and rate_classes.get(key) != entry["rate_class"]:
+            fail(f"market-peg: class-priced key {key!r} rate_class {entry['rate_class']!r} does not match its artifact-feed rate_class {rate_classes.get(key)!r}")
+        class_rates = classes.get(entry["rate_class"])
+        if class_rates is None:
+            fail(f"market-peg: class-priced key {key!r} declares {entry['rate_class']!r} but the rate-card source has no rates for it")
+        if openrouter_pricing_engine.rate_row_key(rate_card_obj["rows"], key) != entry["canonical_model_id"]:
+            fail(f"market-peg: class-priced key {key!r} does not resolve to its rate row {entry['canonical_model_id']!r}")
+        published = rate_card_obj["rows"][entry["canonical_model_id"]]
+        for field in RATE_CREDIT_FIELDS:
+            if published[field] != class_rates[field]:
+                fail(f"market-peg: class-priced row {entry['canonical_model_id']!r}.{field} does not equal {entry['rate_class']!r} rates")
 
 
 def rate_card_projection_hash(value: dict) -> str:
@@ -5261,7 +5287,7 @@ def generate(
     if market_peg is None and market_pegged:
         fail("generate: market-pegged releases require all four named --market-* paths")
     if market_peg is not None:
-        validate_market_peg(*market_peg, candidate_obj, demand_obj, rate_card_obj)
+        validate_market_peg(*market_peg, candidate_obj, demand_obj, rate_card_obj, rate_classes=rate_classes if artifact_obj is not None else None)
     if state == "activation":
         require_rate_card_unchanged_at_activation(rate_card_obj, release_history(ledger_before, candidate_obj["version"]))
     validate_release_inputs(candidate_obj, demand_obj, rate_card_obj)

@@ -342,5 +342,13 @@
     "excluded_provider_names": [
       "Malibu"
     ]
-  }
+  },
+  "class_priced_models": [
+    {
+      "canonical_model_id": "qwen2-vl-2b-instruct",
+      "catalog_key": "mlx-community/qwen2-vl-2b-instruct-4bit",
+      "rate_class": "class-3b",
+      "reason": "#2016 native image input (qwen2vl-inline-v1); OpenRouter lists no Qwen2-VL-2B market, so it is priced by its SPEC-023 section 3.3.1 rate class."
+    }
+  ]
 }

@@ -234,6 +234,12 @@ Apple-Silicon serving paths, license evidence, active parameter count, 4-bit
 residency, and projected TPS. Unknown snapshot models remain visible as
 `blocked`; they are never inferred into a Macprovider identity.
 
+A recommendable key with no OpenRouter market goes in `class_priced_models`
+(`{canonical_model_id, catalog_key, rate_class, reason}`) instead of `models`
+(SPEC-023 §3.3.2 rule 3). Compute skips it; `catalog-release` requires its rate
+row to equal its class rates. `models` plus `class_priced_models` must cover the
+recommendable catalog exactly, with no key in both.
+
 Candidates must be in a complete snapshot covering the mandatory documented
 daily top-50 demand cohort (aggregated total tokens over the fetch window), have a
 verified MLX/MLX-Swift/production GGUF-Metal path, and have a commercially
