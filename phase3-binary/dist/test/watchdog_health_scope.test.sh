@@ -175,6 +175,11 @@ with open(path, "w", encoding="utf-8") as handle:
     handle.write("\n")
 PY
   chmod 600 "$lease_path"
+  lease_lock="$(dirname "$lease_path")/.$(basename "$lease_path").lock"
+  if [ ! -e "$lease_lock" ]; then
+    : > "$lease_lock"
+    chmod 600 "$lease_lock"
+  fi
 }
 
 # F1 (RFC-001 #1382, SPEC-020 R-4.14): with no validated launchd PID the
@@ -378,6 +383,10 @@ lifecycle_dir="$TMP/home/Library/Application Support/macprovider/lifecycle"
 state_record="$lifecycle_dir/state-v1.json"
 mkdir -p "$lifecycle_dir"
 chmod 700 "$lifecycle_dir"
+for lock_name in .state-v1.json.lock .lease.json.lock .operator-resume-lease.json.lock; do
+  : > "$lifecycle_dir/$lock_name"
+  chmod 600 "$lifecycle_dir/$lock_name"
+done
 WATCHDOG_TEST_LISTENER_CALLS="$TMP/listener-calls"
 MACPROVIDER_WATCHDOG_LISTENER_RETRY_DELAY_SECONDS=0
 MACPROVIDER_WATCHDOG_LISTENER_PROBE_TIMEOUT_SECONDS=1
@@ -385,13 +394,13 @@ export WATCHDOG_TEST_LISTENER_CALLS MACPROVIDER_WATCHDOG_LISTENER_RETRY_DELAY_SE
 unpaused_unavailable='{"status":"unavailable","lifecycle":{"operator_paused":false,"state":"serving_buyers"}}'
 
 record_json() {
-  printf '{"version":1,"authority":"macprovider_cli","state":"%s","operator_paused":%s}\n' "$1" "$2"
+  printf '{"version":1,"sequence":7,"transition_id":"t","transition_at":"x","reason_code":"r","writer":"serve","authority":"macprovider_cli","state":"%s","operator_paused":%s}\n' "$1" "$2"
 }
 
 # Usage: listener_case <listener-mode> <record> <expect: kick|no-kick> [status-exit]
 # record: paused | paused_state | unpaused | symlink | mode644 | hardlink |
 #         no_authority | bad_version | float_version | int_paused |
-#         bad_paused_type | oversized | none
+#         null_paused | no_sequence | bad_paused_type | oversized | none
 listener_case() {
   mode="$1"; record="$2"; expect="$3"; status_exit="${4:-0}"
   : > "$TMP/logs/watchdog.log"
@@ -412,13 +421,15 @@ listener_case() {
       record_json paused_by_operator true > "$state_record"
       ln "$state_record" "$TMP/state-target.json"
       ;;
-    no_authority) printf '%s\n' '{"version":1,"state":"paused_by_operator","operator_paused":true}' > "$state_record" ;;
-    bad_version) printf '%s\n' '{"version":2,"authority":"macprovider_cli","state":"paused_by_operator","operator_paused":true}' > "$state_record" ;;
-    float_version) printf '%s\n' '{"version":1.0,"authority":"macprovider_cli","state":"paused_by_operator","operator_paused":true}' > "$state_record" ;;
-    int_paused) printf '%s\n' '{"version":1,"authority":"macprovider_cli","state":"paused_by_operator","operator_paused":1}' > "$state_record" ;;
-    bad_paused_type) printf '%s\n' '{"version":1,"authority":"macprovider_cli","state":"paused_by_operator","operator_paused":"yes"}' > "$state_record" ;;
+    no_authority) printf '%s\n' '{"sequence":7,"transition_id":"t","transition_at":"x","reason_code":"r","writer":"serve","version":1,"state":"paused_by_operator","operator_paused":true}' > "$state_record" ;;
+    bad_version) printf '%s\n' '{"sequence":7,"transition_id":"t","transition_at":"x","reason_code":"r","writer":"serve","version":2,"authority":"macprovider_cli","state":"paused_by_operator","operator_paused":true}' > "$state_record" ;;
+    float_version) printf '%s\n' '{"sequence":7,"transition_id":"t","transition_at":"x","reason_code":"r","writer":"serve","version":1.0,"authority":"macprovider_cli","state":"paused_by_operator","operator_paused":true}' > "$state_record" ;;
+    null_paused) printf '%s\n' '{"version":1,"sequence":7,"transition_id":"t","transition_at":"x","reason_code":"r","writer":"serve","authority":"macprovider_cli","state":"paused_by_operator","operator_paused":null}' > "$state_record" ;;
+    no_sequence) printf '%s\n' '{"version":1,"transition_id":"t","transition_at":"x","reason_code":"r","writer":"serve","authority":"macprovider_cli","state":"paused_by_operator","operator_paused":true}' > "$state_record" ;;
+    int_paused) printf '%s\n' '{"sequence":7,"transition_id":"t","transition_at":"x","reason_code":"r","writer":"serve","version":1,"authority":"macprovider_cli","state":"paused_by_operator","operator_paused":1}' > "$state_record" ;;
+    bad_paused_type) printf '%s\n' '{"sequence":7,"transition_id":"t","transition_at":"x","reason_code":"r","writer":"serve","version":1,"authority":"macprovider_cli","state":"paused_by_operator","operator_paused":"yes"}' > "$state_record" ;;
     oversized)
-      /usr/bin/python3 -c 'import json,sys; print(json.dumps({"version":1,"authority":"macprovider_cli","state":"paused_by_operator","operator_paused":True,"pad":"x"*70000}))' > "$state_record"
+      /usr/bin/python3 -c 'import json,sys; print(json.dumps({"version":1,"sequence":7,"transition_id":"t","transition_at":"x","reason_code":"r","writer":"serve","authority":"macprovider_cli","state":"paused_by_operator","operator_paused":True,"pad":"x"*70000}))' > "$state_record"
       ;;
     none) : ;;
   esac
@@ -449,7 +460,7 @@ done
 # startup; a paused_by_operator state without it is not a pause.
 listener_case foreign paused_state kick
 # A record that fails the Swift store's file or schema invariants is not a pause.
-for record in symlink mode644 hardlink no_authority bad_version float_version int_paused bad_paused_type oversized; do
+for record in symlink mode644 hardlink no_authority bad_version float_version int_paused null_paused no_sequence bad_paused_type oversized; do
   listener_case foreign "$record" kick
 done
 for mode in noise pid_noise fail hang; do
@@ -472,10 +483,6 @@ listener_case foreign none kick
 
 # Restart gate: the final vetoes and the kickstart request run while the
 # watchdog holds the lifecycle stores' own flocks; a busy store defers.
-for lock_name in .state-v1.json.lock .lease.json.lock .operator-resume-lease.json.lock; do
-  : > "$lifecycle_dir/$lock_name"
-  chmod 600 "$lifecycle_dir/$lock_name"
-done
 cat > "$TMP/bin/launchctl" <<'EOF'
 #!/usr/bin/env bash
 echo "$*" >> "$WATCHDOG_TEST_LAUNCHCTL_LOG"
@@ -491,6 +498,9 @@ try:
 except BlockingIOError:
     print("gate=held")
 ' "$WATCHDOG_TEST_GATE_LOCK" >> "$WATCHDOG_TEST_GATE_LOG"
+    if [ -n "${WATCHDOG_TEST_KICKSTART_HANG:-}" ]; then
+      exec sleep 30
+    fi
     ;;
 esac
 EOF
@@ -518,6 +528,32 @@ listener_case foreign unpaused no-kick
 grep -F 'restart deferred: lifecycle store busy' "$TMP/logs/watchdog.log" >/dev/null
 kill "$gate_holder_pid" >/dev/null 2>&1 || true
 wait "$gate_holder_pid" >/dev/null 2>&1 || true
+
+# A launchctl that does not return is aborted while the gate is still held,
+# and the tick finishes instead of waiting on it.
+: > "$WATCHDOG_TEST_GATE_LOG"
+WATCHDOG_TEST_KICKSTART_HANG=1
+export WATCHDOG_TEST_KICKSTART_HANG
+gate_started="$(date +%s)"
+listener_case foreign unpaused kick
+if [ "$(( $(date +%s) - gate_started ))" -ge 20 ]; then
+  echo "a hung kickstart must not hold the watchdog tick" >&2
+  exit 1
+fi
+grep -F 'did not complete within 1s; aborted under the restart gate' "$TMP/logs/watchdog.log" >/dev/null
+[ "$(cat "$WATCHDOG_TEST_GATE_LOG")" = "gate=held" ]
+if [ -e "$TMP/home/.local/share/macprovider-watchdog/state/last_kick" ]; then
+  echo "an aborted kickstart must not start the restart cooldown" >&2
+  exit 1
+fi
+unset WATCHDOG_TEST_KICKSTART_HANG
+
+# A store whose lock is missing cannot be synchronized with: defer.
+rm -f "$lifecycle_dir/.state-v1.json.lock"
+listener_case foreign unpaused no-kick
+grep -F 'restart deferred: lifecycle store busy' "$TMP/logs/watchdog.log" >/dev/null
+: > "$lifecycle_dir/.state-v1.json.lock"
+chmod 600 "$lifecycle_dir/.state-v1.json.lock"
 unset MACPROVIDER_WATCHDOG_RESTART_GATE_SECONDS WATCHDOG_TEST_GATE_LOCK WATCHDOG_TEST_GATE_LOG
 rm -f "$lifecycle_dir/.state-v1.json.lock" "$lifecycle_dir/.lease.json.lock" "$lifecycle_dir/.operator-resume-lease.json.lock"
 rm -f "$state_record" "$TMP/state-target.json" "$WATCHDOG_TEST_LISTENER_CALLS"
@@ -695,7 +731,7 @@ case "$*" in
           chmod 600 "$WATCHDOG_TEST_RESUME_LEASE_PATH"
           ;;
         pause)
-          printf '%s\n' '{"version":1,"authority":"macprovider_cli","state":"paused_by_operator","operator_paused":true}' > "$WATCHDOG_TEST_STATE_RECORD"
+          printf '%s\n' '{"version":1,"sequence":7,"transition_id":"t","transition_at":"x","reason_code":"r","writer":"operator_command","authority":"macprovider_cli","state":"paused_by_operator","operator_paused":true}' > "$WATCHDOG_TEST_STATE_RECORD"
           chmod 600 "$WATCHDOG_TEST_STATE_RECORD"
           ;;
       esac
@@ -710,6 +746,10 @@ WATCHDOG_TEST_STAGED_RESUME_LEASE="$staged_resume_lease"
 WATCHDOG_TEST_RESUME_LEASE_PATH="$resume_lease_path"
 WATCHDOG_TEST_STATE_RECORD="$TMP/home/Library/Application Support/macprovider/lifecycle/state-v1.json"
 WATCHDOG_TEST_STATUS_CALLS="$TMP/status-calls"
+for lock_name in .state-v1.json.lock .operator-resume-lease.json.lock; do
+  : > "$TMP/home/Library/Application Support/macprovider/lifecycle/$lock_name"
+  chmod 600 "$TMP/home/Library/Application Support/macprovider/lifecycle/$lock_name"
+done
 export WATCHDOG_TEST_STAGED_RESUME_LEASE WATCHDOG_TEST_RESUME_LEASE_PATH WATCHDOG_TEST_STATE_RECORD WATCHDOG_TEST_STATUS_CALLS
 # Status call 1 is the restart verdict; call 2 is the pre-kick telemetry capture.
 for race in resume:1 resume:2 pause:2; do

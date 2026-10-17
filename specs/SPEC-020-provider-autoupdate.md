@@ -1130,18 +1130,21 @@ step before the kickstart, so a resume that lands after the watchdog's first
 lease check still suppresses the restart. That final evaluation and the
 kickstart request MUST run while the watchdog holds the lifecycle stores' own
 exclusive locks (the existing lock files of `state-v1.json`, `lease.json` and
-`operator-resume-lease.json`, opened read-only and never created), acquired
-all-or-nothing within a bounded wait; a store that stays busy defers the restart
-to a later tick. The watchdog MUST release those locks within 2 seconds of
-requesting the kickstart and MUST NOT hold them for the whole kickstart. The
+`operator-resume-lease.json`, opened read-only, never created, and verified to
+be the regular owner-UID file at that path), acquired all-or-nothing within a
+bounded wait. A store that stays busy, or whose data file exists while its lock
+is missing or invalid, defers the restart to a later tick. The watchdog MUST
+hold the locks until the kickstart request returns; if it has not returned
+within the same bound, the watchdog MUST abort the request while still holding
+the locks, record no restart cooldown, and then release them. The
 pause veto MUST read the durable pause fence from the persisted lifecycle record
 (`operator_paused` true in `state-v1.json` beside the leases, the field the
 serve process itself honors at startup), not only from `/v1/status`, and MUST
 accept the record only when it meets the lifecycle store's own invariants: a
 regular non-symlink file with one link, owned by the lease owner UID, mode 0600,
-1 byte to 64 KiB, integer schema version 1, authority `macprovider_cli`, and
-`operator_paused` a JSON boolean or absent. A missing or invalid record is not a
-pause. Listener ownership is
+1 byte to 64 KiB, integer schema version 1, authority `macprovider_cli`, the
+record's mandatory fields present with their JSON types, and `operator_paused` a
+JSON boolean or absent. A missing or invalid record is not a pause. Listener ownership is
 tri-state: a probe that fails, exceeds its bounded timeout or output size, or
 prints anything other than PIDs is indeterminate and MUST NOT recommend a
 restart; a clean not-owned answer MUST repeat on one retry before it may. An already-unpaused resume command

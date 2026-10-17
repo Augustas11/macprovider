@@ -230,7 +230,10 @@ while True:
     ready = select.select([child.stdout], [], [], max(remaining, 0))[0] if remaining > 0 else []
     if not ready:
         child.kill()
-        child.wait()
+        try:
+            child.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
         sys.exit(124)
     chunk = os.read(child.stdout.fileno(), limit + 1 - len(data))
     if not chunk:
@@ -238,13 +241,19 @@ while True:
     data += chunk
     if len(data) > limit:
         child.kill()
-        child.wait()
+        try:
+            child.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
         sys.exit(125)
 try:
     code = child.wait(timeout=max(deadline - time.monotonic(), 0.1))
 except subprocess.TimeoutExpired:
     child.kill()
-    child.wait()
+    try:
+        child.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        pass
     sys.exit(124)
 sys.stdout.buffer.write(data)
 sys.exit(code if 0 <= code <= 1 else 125)
@@ -315,7 +324,13 @@ if (
     or record["version"] != 1
     or record.get("authority") != "macprovider_cli"
     or type(record.get("state")) is not str
-    or not (record.get("operator_paused") is None or type(record["operator_paused"]) is bool)
+    or type(record.get("writer")) is not str
+    or type(record.get("reason_code")) is not str
+    or type(record.get("transition_id")) is not str
+    or type(record.get("transition_at")) is not str
+    or type(record.get("sequence")) is not int
+    or record["sequence"] <= 0
+    or not ("operator_paused" not in record or type(record["operator_paused"]) is bool)
 ):
     sys.exit(1)
 # operator_paused is the durable fence the serve process itself honors at
@@ -332,6 +347,7 @@ PY
 restart_gate_acquire() {
   RESTART_GATE_FDS=""
   gate_fd=7
+  set --
   for gate_store in "$LIFECYCLE_STATE_PATH" "$LIFECYCLE_LEASE_PATH" "$OPERATOR_RESUME_LEASE_PATH"; do
     gate_lock="$(dirname "$gate_store")/.$(basename "$gate_store").lock"
     if [ -f "$gate_lock" ] && [ ! -L "$gate_lock" ] && [ -r "$gate_lock" ]; then
@@ -340,18 +356,41 @@ restart_gate_acquire() {
         return 1
       fi
       RESTART_GATE_FDS="$RESTART_GATE_FDS $gate_fd"
+      set -- "$@" "$gate_fd" "$gate_lock"
+    elif [ -e "$gate_store" ] || [ -L "$gate_store" ] || [ -e "$gate_lock" ] || [ -L "$gate_lock" ]; then
+      # The store exists, so Swift created its lock first; a missing,
+      # unreadable or non-regular lock cannot be synchronized with.
+      restart_gate_release
+      return 1
     fi
     gate_fd=$((gate_fd + 1))
   done
   [ -n "$RESTART_GATE_FDS" ] || return 0
-  # shellcheck disable=SC2086 # fd numbers are digits from the loop above
-  if ! "${MACPROVIDER_PYTHON3:-python3}" - "$RESTART_GATE_SECONDS" $RESTART_GATE_FDS <<'PY'; then
+  if ! "${MACPROVIDER_PYTHON3:-python3}" - "$RESTART_GATE_SECONDS" "$LIFECYCLE_LEASE_OWNER_UID" "$@" <<'PY'; then
 import fcntl
+import os
+import stat
 import sys
 import time
 
 deadline = time.monotonic() + int(sys.argv[1])
-fds = [int(value) for value in sys.argv[2:]]
+owner_uid = int(sys.argv[2])
+pairs = sys.argv[3:]
+fds = []
+for index in range(0, len(pairs), 2):
+    fd, path = int(pairs[index]), pairs[index + 1]
+    opened = os.fstat(fd)
+    try:
+        named = os.lstat(path)
+    except OSError:
+        sys.exit(1)
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or opened.st_uid != owner_uid
+        or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
+    ):
+        sys.exit(1)
+    fds.append(fd)
 while True:
     held = []
     try:
@@ -1043,19 +1082,32 @@ run_tick() {
       return 0
     fi
     log "provider process $provider_pid failed local /v1/health after arming; requesting launchd restart for $LABEL"
-    # Hold the gate while launchd takes the request, at most 2s, so a pause
-    # cannot persist between the vetoes and the kill; never across the whole
-    # kickstart, which would couple watchdog liveness to provider shutdown.
+    # Hold the gate until launchctl returns, so the request is dispatched
+    # with the vetoes still true. If it has not returned within the bound,
+    # abort it while the gate is still held, then release: any kick still
+    # happened under the gate, and the gate is never held across an
+    # unbounded kickstart.
     kickstart_provider "local_health_failed_after_arming" 7<&- 8<&- 9<&- &
     kick_pid=$!
     kick_wait=0
-    while [ "$kick_wait" -lt 20 ] && kill -0 "$kick_pid" 2>/dev/null; do
+    kick_limit=$((RESTART_GATE_SECONDS * 10))
+    while [ "$kick_wait" -lt "$kick_limit" ] && kill -0 "$kick_pid" 2>/dev/null; do
       sleep 0.1
       kick_wait=$((kick_wait + 1))
     done
-    restart_gate_release
     kick_status=0
-    wait "$kick_pid" || kick_status=$?
+    if kill -0 "$kick_pid" 2>/dev/null; then
+      pkill -KILL -P "$kick_pid" >/dev/null 2>&1 || true
+      kill -KILL "$kick_pid" >/dev/null 2>&1 || true
+      log "provider restart request for $LABEL did not complete within ${RESTART_GATE_SECONDS}s; aborted under the restart gate"
+      kick_status=1
+    fi
+    if [ "$kick_status" -eq 0 ]; then
+      wait "$kick_pid" || kick_status=$?
+    else
+      wait "$kick_pid" 2>/dev/null || true
+    fi
+    restart_gate_release
     if [ "$kick_status" -eq 0 ]; then
       TICK_RESTART=1
       # The kick starts the restart cooldown, so the watchdog is now rate-limited.
