@@ -17,7 +17,7 @@ let package = Package(
         )
     ],
     dependencies: [
-        // Fork tag 3.32.3-macprovider.9.3: 3.32.3-macprovider.9 plus the Qwen2-VL
+        // Fork tag 3.32.3-macprovider.9.4: 3.32.3-macprovider.9 plus the Qwen2-VL
         // per-image vision attention fix (issue #2016); every other model's
         // decode path is byte-identical to .9. Tag .9 is upstream
         // mlx-swift-lm 3.32.3 plus the
@@ -34,7 +34,7 @@ let package = Package(
         // on one Metal queue.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "c453f72e793e9ebfd4db830bcfff23fc01ca91a0"
+            revision: "ce3bb5235317367c61c054311a830b1e81aaa6ea"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

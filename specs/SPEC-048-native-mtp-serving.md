@@ -300,7 +300,7 @@ For standalone drafter artifacts, the accepted tensor namespace is exactly
 `mlx-community/Qwen3.6-*-MTP-4bit` drafter artifacts.
 
 The observer MUST inspect every `.safetensors` file that the R003-authorized
-mlx-swift-lm loader can consume. At `3.32.3-macprovider.9.3` the loader
+mlx-swift-lm loader can consume. At `3.32.3-macprovider.9.4` the loader
 (`safetensorWeightURLs`) takes the files named by
 `model.safetensors.index.json`, which may sit in subdirectories, else the
 top-level conventional names, plus files the model declares as additional
@@ -370,7 +370,7 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.9.3` | `c453f72e793e9ebfd4db830bcfff23fc01ca91a0` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.9.4` | `ce3bb5235317367c61c054311a830b1e81aaa6ea` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.8` | `745f5e4872054ae2c1c497d2351a61b6d89e8a05` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.2-macprovider.5` | `49d94e9fece0849443fa414e2d47813f68a51eaa` | `ml-explore/mlx` `v0.32.2` (`1f8e74e3f12f31365464a6867c6579f0e9b29d85`) |
 
@@ -1426,16 +1426,18 @@ requests.
 
 - **0.1.34 (2026-10-17)** — MTP-3 (R003) authorizes the operator-approved
   move of the mlx-swift-lm fork pin from `3.32.3-macprovider.9`
-  (`dbe8bcb3…`) to `3.32.3-macprovider.9.3` (`c453f72e…`); the mlx-swift
+  (`dbe8bcb3…`) to `3.32.3-macprovider.9.4` (`ce3bb523…`); the mlx-swift
   (`0.32.3-macprovider.8`, `745f5e48…`) and MLX core
   (`v0.32.2-macprovider.5`, `49d94e9f…`) pins and every upstream base are
-  unchanged. `.9.3` is three commits on `.9`: they change only
+  unchanged. `.9.4` is four commits on `.9`: the first three change only
   `Libraries/MLXVLM/Models/Qwen2VL.swift` (vision attention segmented per
   image, issue #2016, with the multimodal rotary embedding's leading batch
   axis dropped, and equal-length blocks batched into one attention call)
-  and add `Qwen2VLVisionSegmentationTests`. Tags `3.32.3-macprovider.9.1`
-  (`24856d07…`, traps at runtime) and `3.32.3-macprovider.9.2`
-  (`983fef9a…`) are superseded; they MUST NOT be pinned. Every other
+  and add `Qwen2VLVisionSegmentationTests`; the fourth is test-only
+  (the Qwen2-VL append-only media split now matches the full prefill).
+  Tags `3.32.3-macprovider.9.1` (`24856d07…`, traps at runtime),
+  `3.32.3-macprovider.9.2` (`983fef9a…`) and `3.32.3-macprovider.9.3`
+  (`c453f72e…`) are superseded; they MUST NOT be pinned. Every other
   model's decode path, including the Qwen3.5/Qwen3.6 MTP, packed
   verification, fused MoE and GDN surfaces, is byte-identical to `.9`, so
   the Qwen3.6 continuous-batching and native-MTP qualifications stand and
