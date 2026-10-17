@@ -77,28 +77,104 @@ enum ProviderCLIVersion {
     }
 }
 
-enum GitHubLatestReleaseClient {
-    static let defaultURL = URL(string: "https://api.github.com/repos/Augustas11/macprovider/releases/latest")!
+/// Newest provider CLI release for the update badge (#2036). The production
+/// coordinator's unauthenticated `/healthz` `recommended_binary_version` (the
+/// SPEC-003-R004 release-mirror contract, the release every Mac without GitHub
+/// installs) comes first. The anonymous GitHub API (60 requests per hour per
+/// IP, shared by every Mac behind one NAT) is only the fallback, and a spent
+/// budget is reported as a deferral until its reset. Display only:
+/// `malibu-cli update` verifies every release byte under the release key.
+enum LatestReleaseClient {
+    enum Outcome: Equatable {
+        case version(String)
+        /// The anonymous GitHub API budget is spent until this time.
+        case deferred(until: Date)
+        case unavailable
+    }
 
-    static func fetchTag(
-        url: URL = defaultURL,
-        session: URLSession = .shared
-    ) async -> String? {
+    static let coordinatorHealthzURL = URL(string: "https://coordinator.malibu.tech/healthz")!
+    static let gitHubLatestURL = URL(string: "https://api.github.com/repos/Augustas11/macprovider/releases/latest")!
+    /// Fallback deferral when a spent budget names no reset time.
+    static let rateLimitDeferral: TimeInterval = 3600
+    /// Retry spacing after any other failure, so a failing source is never
+    /// polled on the two-second status cadence.
+    static let failureBackoff: TimeInterval = 600
+    static let maxResponseBytes = 256 * 1024
+
+    static func fetch(
+        coordinatorHealthzURL: URL = coordinatorHealthzURL,
+        gitHubLatestURL: URL = gitHubLatestURL,
+        session: URLSession = .shared,
+        now: Date = Date()
+    ) async -> Outcome {
+        if let advertised = await coordinatorAdvertisedVersion(url: coordinatorHealthzURL, session: session) {
+            return .version(advertised)
+        }
+        return await gitHubLatestVersion(url: gitHubLatestURL, session: session, now: now)
+    }
+
+    static func coordinatorAdvertisedVersion(url: URL, session: URLSession) async -> String? {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 15
+        guard let (data, response) = try? await session.data(for: request),
+              let http = response as? HTTPURLResponse,
+              (200..<300).contains(http.statusCode),
+              data.count <= maxResponseBytes,
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let advertised = object["recommended_binary_version"] as? String
+        else {
+            return nil
+        }
+        return ProviderCLIVersion.strictNormalize(advertised)
+    }
+
+    static func gitHubLatestVersion(url: URL, session: URLSession, now: Date) async -> Outcome {
         var request = URLRequest(url: url)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.timeoutInterval = 15
-        do {
-            let (data, response) = try await session.data(for: request)
-            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-                return nil
-            }
-            guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let tag = object["tag_name"] as? String else {
-                return nil
-            }
-            return ProviderCLIVersion.normalize(tag)
-        } catch {
+        guard let (data, response) = try? await session.data(for: request),
+              let http = response as? HTTPURLResponse
+        else {
+            return .unavailable
+        }
+        if let reset = rateLimitReset(http, now: now) {
+            return .deferred(until: reset)
+        }
+        guard (200..<300).contains(http.statusCode),
+              data.count <= maxResponseBytes,
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let tag = object["tag_name"] as? String,
+              let version = ProviderCLIVersion.strictNormalize(tag)
+        else {
+            return .unavailable
+        }
+        return .version(version)
+    }
+
+    /// The reset time of a 403/429 whose `x-ratelimit-remaining` is 0.
+    static func rateLimitReset(_ response: HTTPURLResponse, now: Date) -> Date? {
+        guard response.statusCode == 403 || response.statusCode == 429,
+              response.value(forHTTPHeaderField: "x-ratelimit-remaining")?
+                  .trimmingCharacters(in: .whitespaces) == "0"
+        else {
             return nil
+        }
+        return response.value(forHTTPHeaderField: "x-ratelimit-reset")
+            .flatMap { TimeInterval($0.trimmingCharacters(in: .whitespaces)) }
+            .map { Date(timeIntervalSince1970: $0) }
+            ?? now.addingTimeInterval(rateLimitDeferral)
+    }
+
+    /// When the next fetch may run after `outcome`; nil after a version,
+    /// whose freshness is governed by the caller's TTL instead.
+    static func retryAfter(_ outcome: Outcome, now: Date) -> Date? {
+        switch outcome {
+        case .version:
+            return nil
+        case .deferred(let until):
+            return max(until, now.addingTimeInterval(60))
+        case .unavailable:
+            return now.addingTimeInterval(failureBackoff)
         }
     }
 }

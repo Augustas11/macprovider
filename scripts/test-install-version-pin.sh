@@ -148,13 +148,17 @@ shasum() {
   printf '%s  %s\n' "${MOCK_SHA:-goodhash}" "$2"
 }
 curl() {
-  local out="" url="" arg
+  local out="" url="" arg headers_out=""
   while [ "$#" -gt 0 ]; do
     arg="$1"
     shift
     case "$arg" in
       -o)
         out="$1"
+        shift
+        ;;
+      -D)
+        headers_out="$1"
         shift
         ;;
       http*)
@@ -172,6 +176,22 @@ curl() {
       ;;
     https://download.malibu.tech/*)
       [ "${MOCK_MIRROR_DOWN:-0}" = "1" ] && return 7
+      ;;
+    https://coordinator.malibu.tech/*)
+      [ "${MOCK_COORDINATOR_DOWN:-0}" = "1" ] && return 7
+      ;;
+  esac
+  # Issue #2036: the anonymous api.github.com budget is spent. curl -f exits 22
+  # and -D still records the response headers.
+  case "$url" in
+    https://api.github.com/*)
+      if [ -n "${MOCK_GITHUB_API_STATUS:-}" ]; then
+        if [ -n "$headers_out" ]; then
+          printf 'HTTP/2 %s\r\nx-ratelimit-limit: 60\r\nx-ratelimit-remaining: %s\r\nx-ratelimit-reset: 1790000000\r\n\r\n' \
+            "$MOCK_GITHUB_API_STATUS" "${MOCK_GITHUB_API_REMAINING:-0}" > "$headers_out"
+        fi
+        return 22
+      fi
       ;;
   esac
 
@@ -248,6 +268,9 @@ reset_mocks() {
   : > "$FETCH_LOG"
   MOCK_GITHUB_DOWN=0
   MOCK_MIRROR_DOWN=0
+  MOCK_COORDINATOR_DOWN=0
+  MOCK_GITHUB_API_STATUS=""
+  MOCK_GITHUB_API_REMAINING=0
   MOCK_MIRROR_LATEST_JSON=""
   RELEASE_MIRROR_FIRST=0
   RELEASE_GITHUB_UNREACHABLE=0
@@ -1274,7 +1297,8 @@ for bad in '{"recommended_binary_version":"1.7.10"}' '{"recommended_binary_versi
   report "m12-rejects-${bad//[^A-Za-z0-9]/_}" 3 "$rc"
 done
 
-# M13 — GitHub reachable: discovery stays on GitHub and ignores the mirror.
+# M13 — no coordinator configured: discovery uses GitHub and never contacts
+# the mirror.
 reset_mocks
 MOCK_MIRROR_LATEST_JSON='{"tag_name":"v1.8.999"}'
 tag="$(resolve_release_tag 2>/dev/null)"
@@ -1334,6 +1358,96 @@ GITHUB_REPO="someone/fork"
 rc=0
 ( validate_release_mirror_mode ) >/dev/null 2>&1 || rc=$?
 report "m15-fork-mirror-first-refused" 7 "$rc"
+
+################################################################
+# Issue #2036 — unpinned discovery resolves the coordinator-advertised release
+# without api.github.com (60 anonymous requests per hour per source IP, shared
+# by every Mac behind one NAT). The GitHub Releases API is only the fallback,
+# is never retried, and a spent budget is reported as deferred until reset.
+################################################################
+
+# R1 — default discovery with GitHub reachable takes the coordinator-advertised
+# release and never touches the GitHub API; the whole signed chain still runs.
+reset_mocks
+coordinator_base="https://coordinator.malibu.tech"
+MOCK_HEALTH_JSON='{"recommended_binary_version":"1.8.123"}'
+MOCK_CHECKSUMS="goodhash macprovider-cli-v1.8.123-darwin-arm64.pkg"
+run_release_chain
+report "r1-advertised-release-installed" \
+  "https://github.com/Augustas11/macprovider/releases/download/v1.8.123/macprovider-cli-v1.8.123-darwin-arm64.pkg" \
+  "$(cat "$DOWNLOAD_LOG")"
+report "r1-no-github-api" 0 "$(grep -c 'api.github.com' "$FETCH_LOG" | tr -d ' ')"
+report "r1-signature-checked" 1 "$(grep -c 'signature checked' "$LOG_FILE" | tr -d ' ')"
+report "r1-validation-chain-called" 1 "$VALIDATE_CALLED"
+
+# R2 — a bad checksums.txt.sig on the advertised release fails closed: no
+# GitHub fallback picks another tag and no release asset is downloaded.
+reset_mocks
+coordinator_base="https://coordinator.malibu.tech"
+MOCK_HEALTH_JSON='{"recommended_binary_version":"1.8.123"}'
+MOCK_CHECKSUMS="goodhash macprovider-cli-v1.8.123-darwin-arm64.pkg"
+MOCK_SIGNATURE_FAIL=1
+rc=0
+( run_release_chain ) >/dev/null 2>&1 || rc=$?
+report "r2-bad-signature-fails-closed" 4 "$rc"
+report "r2-no-asset-after-bad-signature" "" "$(cat "$DOWNLOAD_LOG")"
+report "r2-no-github-api" 0 "$(grep -c 'api.github.com' "$FETCH_LOG" | tr -d ' ')"
+
+# R3 — coordinator unreachable: discovery falls back to the GitHub Releases API.
+reset_mocks
+coordinator_base="https://coordinator.malibu.tech"
+MOCK_COORDINATOR_DOWN=1
+tag="$(resolve_release_tag 2>/dev/null)"
+report "r3-coordinator-down-github-fallback" "v1.7.11" "$tag"
+report "r3-github-api-used-once" 1 "$(grep -c 'api.github.com' "$FETCH_LOG" | tr -d ' ')"
+
+# R4 — coordinator advertises nothing: same GitHub fallback.
+reset_mocks
+coordinator_base="https://coordinator.malibu.tech"
+MOCK_HEALTH_JSON='{"status":"ok"}'
+tag="$(resolve_release_tag 2>/dev/null)"
+report "r4-no-advertisement-github-fallback" "v1.7.11" "$tag"
+
+# R5 — GitHub fallback rate-limited (403, x-ratelimit-remaining: 0): one API
+# request, no retry, and the failure says when discovery can resume.
+reset_mocks
+coordinator_base="https://coordinator.malibu.tech"
+MOCK_COORDINATOR_DOWN=1
+MOCK_GITHUB_API_STATUS=403
+rc=0
+( resolve_release_tag ) >/dev/null 2>&1 || rc=$?
+report "r5-rate-limited-fails" 3 "$rc"
+report "r5-single-api-request" 1 "$(grep -c 'api.github.com' "$FETCH_LOG" | tr -d ' ')"
+report "r5-deferred-until-reset" 1 \
+  "$(grep -c 'release discovery deferred until 2026-09-21T14:13:20Z' "$LOG_FILE" | tr -d ' ')"
+
+# R6 — 429 with the budget spent is the same rate limit.
+reset_mocks
+MOCK_GITHUB_API_STATUS=429
+rc=0
+( latest_release_tag ) >/dev/null 2>&1 || rc=$?
+report "r6-429-rate-limited-fails" 3 "$rc"
+report "r6-429-deferred" 1 "$(grep -c 'deferred until' "$LOG_FILE" | tr -d ' ')"
+
+# R7 — a 403 that is not the rate limit (budget left) keeps the plain error.
+reset_mocks
+MOCK_GITHUB_API_STATUS=403
+MOCK_GITHUB_API_REMAINING=59
+rc=0
+( latest_release_tag ) >/dev/null 2>&1 || rc=$?
+report "r7-plain-403-fails" 3 "$rc"
+report "r7-plain-403-not-deferred" 0 "$(grep -c 'deferred until' "$LOG_FILE" | tr -d ' ')"
+report "r7-plain-403-message" 1 "$(grep -c 'failed to query GitHub Releases API' "$LOG_FILE" | tr -d ' ')"
+
+# R8 — a fork never uses the coordinator advertisement or the mirror.
+reset_mocks
+GITHUB_REPO="someone/fork"
+coordinator_base="https://coordinator.malibu.tech"
+MOCK_HEALTH_JSON='{"recommended_binary_version":"1.8.123"}'
+tag="$(resolve_release_tag 2>/dev/null)"
+report "r8-fork-github-only" "v1.7.11" "$tag"
+report "r8-fork-no-coordinator-or-mirror" 0 \
+  "$(grep -cE 'coordinator.malibu.tech|download.malibu.tech' "$FETCH_LOG" | tr -d ' ')"
 
 if [ "$fail" -ne 0 ]; then
   printf '[install-version-pin-test] %d failed, %d passed\n' "$fail" "$pass" >&2

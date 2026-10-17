@@ -9812,13 +9812,37 @@ latest_release_tag() {
   while [ "$page" -le "$max_pages" ]; do
     api_url="https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=100&page=${page}"
     # Bound network stalls: --connect-timeout guards a captive portal / black-holed
-    # socket, --speed-limit/--speed-time abort a mid-transfer stall, and --retry
-    # rides out transient failures. Without these the installer hangs indefinitely
-    # on a stalled GitHub API socket and the Malibu UI is stuck at "Starting
-    # installer…" (its progress monitor only tracks macprovider-cli processes).
-    # The budget stays short because discover_latest_release_tag falls back to
-    # the Malibu release mirror when GitHub is unreachable (#1737).
-    json="$(curl -fsSL --connect-timeout 10 --speed-limit 1024 --speed-time 120 --retry 2 --retry-connrefused --retry-max-time 60 "$api_url")" || die 3 "failed to query GitHub Releases API: $api_url"
+    # socket and --speed-limit/--speed-time abort a mid-transfer stall. Without
+    # these the installer hangs indefinitely on a stalled GitHub API socket and
+    # the Malibu UI is stuck at "Starting installer…" (its progress monitor only
+    # tracks macprovider-cli processes). There is deliberately no --retry: the
+    # anonymous API allows 60 requests per hour per source IP, shared by every
+    # Mac behind one NAT, so a retry only spends that budget again (#2036).
+    api_headers="$(mktemp "${TMPDIR:-/tmp}/macprovider-github-api-headers.XXXXXX")" \
+      || die 3 "failed to create a temporary file for the GitHub Releases API response headers"
+    if ! json="$(curl -fsSL --connect-timeout 10 --speed-limit 1024 --speed-time 120 -D "$api_headers" "$api_url")"; then
+      # A 403/429 with x-ratelimit-remaining: 0 is the anonymous budget, not a
+      # missing release: say when it resets instead of a bare HTTP error.
+      rate_limit_reset="$(awk '
+        { sub(/\r$/, "") }
+        /^HTTP\// { status = $2; remaining = ""; reset = "" }
+        tolower($0) ~ /^x-ratelimit-remaining:/ { remaining = $0; sub(/^[^:]*:[ \t]*/, "", remaining) }
+        tolower($0) ~ /^x-ratelimit-reset:/ { reset = $0; sub(/^[^:]*:[ \t]*/, "", reset) }
+        END { if ((status == "403" || status == "429") && remaining == "0") print (reset ~ /^[0-9]+$/ ? reset : "unknown") }
+      ' "$api_headers" 2>/dev/null || true)"
+      rm -f "$api_headers"
+      if [ -n "$rate_limit_reset" ]; then
+        rate_limit_until="$rate_limit_reset"
+        if [ "$rate_limit_reset" != "unknown" ]; then
+          rate_limit_until="$(date -u -r "$rate_limit_reset" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+            || date -u -d "@$rate_limit_reset" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+            || printf 'epoch %s' "$rate_limit_reset")"
+        fi
+        die 3 "GitHub Releases API rate limit reached for this network (anonymous api.github.com allows 60 requests per hour per IP); release discovery deferred until $rate_limit_until. Rerun after that time or pin MACPROVIDER_VERSION."
+      fi
+      die 3 "failed to query GitHub Releases API: $api_url"
+    fi
+    rm -f "$api_headers"
     # End of the release list: an empty array (or whitespace) means no more
     # pages exist, so stop rather than spending the full page budget.
     case "$(printf "%s" "$json" | tr -d '[:space:]')" in
@@ -9951,7 +9975,8 @@ discovered_release_tag_acceptable() {
   version_at_least "$candidate" "$MACPROVIDER_MIN_SUPPORTED_VERSION"
 }
 
-# Mirror-side discovery for Macs that cannot reach api.github.com. The tag is
+# Primary unpinned discovery for the default repository (#1737, #2036): it
+# needs no api.github.com request. The tag is
 # exactly the coordinator's advertised latest_binary_version (/healthz
 # recommended_binary_version over the coordinator's own TLS endpoint), the
 # release the fleet is told to run. The mirror's latest.json is unsigned and
@@ -10004,29 +10029,31 @@ sys.stdout.write(version if version.startswith("v") else "v" + version)
   printf '%s' "$advertised"
 }
 
-# Release discovery with the #1737 mirror fallback. GitHub stays first unless
-# MACPROVIDER_RELEASE_MIRROR=1. log goes to stderr: callers capture stdout.
+# Release discovery (#1737, #2036). For the default repository the tag is the
+# coordinator-advertised release, installed from the Malibu release mirror or
+# GitHub Releases (mirror_latest_release_tag), so an unpinned install never
+# spends the anonymous api.github.com budget (60 requests per hour per source
+# IP, shared by every Mac behind one NAT). The GitHub Releases API is only the
+# fallback when the coordinator advertises no installable release, and a fork
+# uses GitHub alone. log goes to stderr: callers capture stdout.
 discover_latest_release_tag() {
   local discovered=""
-  if release_mirror_enabled && [ "${RELEASE_MIRROR_FIRST:-0}" = "1" ]; then
+  if release_mirror_enabled; then
     if discovered="$(mirror_latest_release_tag)"; then
       log "Latest release (coordinator-advertised, served by the Malibu release mirror): $discovered" >&2
       printf '%s' "$discovered"
       return 0
     fi
-    log "Malibu release mirror discovery failed; trying GitHub Releases." >&2
+    log "The coordinator-advertised release is unavailable; trying the GitHub Releases API." >&2
   fi
   if discovered="$(latest_release_tag)"; then
     printf '%s' "$discovered"
     return 0
   fi
-  release_mirror_enabled \
-    || die 3 "failed to resolve the latest release from GitHub Releases for $GITHUB_REPO"
-  log "GitHub Releases is unreachable; resolving the latest release through the Malibu release mirror." >&2
-  discovered="$(mirror_latest_release_tag)" \
-    || die 3 "could not resolve the latest release from GitHub Releases or the coordinator-advertised release"
-  log "Latest release (coordinator-advertised, served by the Malibu release mirror): $discovered" >&2
-  printf '%s' "$discovered"
+  if release_mirror_enabled; then
+    die 3 "could not resolve the latest release from the coordinator advertisement or GitHub Releases"
+  fi
+  die 3 "failed to resolve the latest release from GitHub Releases for $GITHUB_REPO"
 }
 
 # fetch_release_asset <asset-name> <destination>: download one asset of release
