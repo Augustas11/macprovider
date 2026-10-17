@@ -618,7 +618,7 @@ while the binary is dated 2026-09-23.
    `/run/macprovider/coordinator-applied-config.json`: the record is missing
    today, so the catalog-content lane's `config_applied` preflight is **NO_GO**.
    The next full `deploy-pearl-vps.sh` run from a tag ≥ `2b352720` installs it.
-2. **Reinstall the Pearl updater** (`ops/pearl-updater/install-pearl-updater.sh`)
+2. **Reinstall the Pearl updater** (`PEARL_RUNTIME_TASK=updater-bundle scripts/ops/pearl-runtime.sh`)
    so it ships the full verifier bundle and `autotune_window.py`. Its installed
    scripts are still `catalog-release.py` and `sign-catalog.go` only. The updater
    timer is disabled, so this is not urgent on its own — but it becomes a

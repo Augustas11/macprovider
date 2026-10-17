@@ -140,8 +140,10 @@
 # (once)" step 1; ops/runbooks/pearl-release-updater.md) from the RUNNING tag,
 # so the guard-bearing writers the pricing preflight hashes
 # (scripts/pricing-lane-installed-writers.txt) are that tag's bytes:
-#   1 bundle_source     read-only, local: the tag /healthz reports is an
-#                       annotated tag here, and its macprovider-pearl-update,
+#   1 bundle_source     read-only, local: the tag /healthz reports is origin's
+#                       annotated tag (fetched exactly), signed by an approved
+#                       release signer (as cli-release.sh release_tag), its
+#                       commit is on origin/main, and its macprovider-pearl-update,
 #                       macprovider-tier2-enforcement-watchdog and
 #                       coordinator_config_guard.py equal origin/main's (the
 #                       commit the pricing preflight hashes against)
@@ -899,11 +901,13 @@ ub_writers() {
 }
 
 # ub_source: the running tag and the expected bytes of the writers the bundle
-# installs (UB_EXPECT lines "installed sha256 repo-path"), or UB_ERR. The
-# pricing preflight hashes origin/main's copies, so the tag's must equal them.
+# installs (UB_EXPECT lines "installed sha256 repo-path"), or UB_ERR. Root
+# runs the whole archived tree, so the tag must be exactly origin's signed
+# annotated tag, signed by an approved release signer, on origin/main; and its
+# writers must equal origin/main's, which the pricing preflight hashes.
 ub_source() {
   UB_TAG=""; UB_COMMIT=""; UB_ERR=""; UB_EXPECT=""
-  local live="" main_sha inst repo a b
+  local live="" main_sha inst repo a b rows obj peeled
   if fetch_coordinator_health; then
     live="$(json_field "$OPS_TMP_DIR/healthz.json" 'd["version"]')"
   fi
@@ -911,18 +915,32 @@ ub_source() {
     UB_ERR="cannot read the running coordinator tag from /healthz (COORDINATOR_URL)"
     return
   fi
-  git -C "$REPO_ROOT" fetch -q origin "refs/tags/$live:refs/tags/$live" 2>/dev/null || true
-  if ! UB_COMMIT="$(git -C "$REPO_ROOT" rev-parse -q --verify "$live^{commit}")"; then
-    UB_COMMIT=""
-    UB_ERR="the running tag $live is not available locally (fetch failed or tag missing)"
+  if ! rows="$(git -C "$REPO_ROOT" ls-remote origin "refs/tags/$live" "refs/tags/$live^{}" 2>/dev/null)"; then
+    UB_ERR="cannot read the running tag $live from origin"
     return
   fi
-  if [ "$(git -C "$REPO_ROOT" cat-file -t "$live" 2>/dev/null)" != tag ]; then
-    UB_ERR="the running tag $live is not an annotated tag"
+  obj="$(printf '%s\n' "$rows" | awk -v r="refs/tags/$live" '$2 == r {print $1}')"
+  peeled="$(printf '%s\n' "$rows" | awk -v r="refs/tags/$live^{}" '$2 == r {print $1}')"
+  if ! is_sha40 "$obj" || ! is_sha40 "$peeled"; then
+    UB_ERR="the running tag $live is not an annotated tag on origin"
+    return
+  fi
+  if ! git -C "$REPO_ROOT" fetch -q --no-tags origin "+refs/tags/$live:refs/tags/$live" 2>/dev/null ||
+    [ "$(git -C "$REPO_ROOT" rev-parse -q --verify "refs/tags/$live" 2>/dev/null)" != "$obj" ]; then
+    UB_ERR="cannot fetch the running tag $live exactly as origin serves it"
+    return
+  fi
+  UB_COMMIT="$peeled"
+  if ! verify_tag_signer "$obj"; then
+    UB_ERR="the running tag $live is not signed by an approved release signer (MACPROVIDER_RELEASE_TAG_ALLOWED_SIGNERS or MACPROVIDER_RELEASE_TAG_GPG_FINGERPRINTS)"
     return
   fi
   main_sha="$(origin_main_sha)"
   is_sha40 "$main_sha" || { UB_ERR="cannot resolve origin/main"; return; }
+  if ! git -C "$REPO_ROOT" merge-base --is-ancestor "$UB_COMMIT" "$main_sha" 2>/dev/null; then
+    UB_ERR="the running tag $live ($UB_COMMIT) is not on origin/main"
+    return
+  fi
   while read -r inst repo; do
     if ! git -C "$REPO_ROOT" cat-file -e "$UB_COMMIT:$repo" 2>/dev/null; then
       UB_ERR="the running tag $live lacks $repo"
@@ -960,10 +978,7 @@ gather_updater_bundle() {
     set_next bundle_source blocked "Choose the updater bundle source" "" "$UB_ERR"
     return
   fi
-  local signed=false
-  git -C "$REPO_ROOT" verify-tag "$UB_TAG" >/dev/null 2>&1 && signed=true
-  fact tag_signature_verified_locally "$signed"
-  step bundle_source "done" "running tag $UB_TAG ($UB_COMMIT); its updater writers equal origin/main's"
+  step bundle_source "done" "running tag $UB_TAG ($UB_COMMIT): origin's tag, approved signer, on origin/main, updater writers equal origin/main's"
   if [ -z "${PEARL_SSH:-}" ]; then
     step pearl_state blocked "PEARL_SSH is unset"
     set_next pearl_state blocked "Read the installed updater writers on Pearl" "" "PEARL_SSH is unset"

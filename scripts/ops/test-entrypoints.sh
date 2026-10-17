@@ -1640,6 +1640,13 @@ if [ "$(next_field id)" = catalog_activation ]; then
 else
   bad "pricing activation not offered: next is $(next_field id) ($(next_field reason))"
 fi
+verdict true '$(touch /tmp/pwn)' "" ""
+run_rc 0 "catalog status with a non-sha256 pricing digest" scripts/ops/catalog-activate.sh status
+if [ "$(next_field id)" = catalog_activation ]; then
+  case "$(next_field kind):$(next_field reason)" in blocked:*"pricing_diff_sha256 is not a sha256"*) ok ;; *) bad "bad digest: $(next_field kind) $(next_field reason)" ;; esac
+  case "$(next_field command)" in *pwn*) bad "bad digest reached the command" ;; *) ok ;; esac
+fi
+verdict true "$DIGEST" "" "mlx-community/Test-VL-2B"
 # The activation command records the owed (e) from the deploy's own verdict line.
 cmd="$(CATALOG_PRICING_ACK="$DIGEST" bash -c 'cd "$1" && scripts/ops/catalog-activate.sh status' _ "$W" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["next"]["command"])')"
 mkdir -p "$tmp/fakedeploy/scripts"
@@ -1683,13 +1690,29 @@ ub() { # run_rc args with the updater-bundle layout and the test-mode installer
     MACPROVIDER_UPDATER_INSTALL_OWNER="$(id -un)" MACPROVIDER_UPDATER_INSTALL_ROOT_GROUP="$(id -gn)" \
     MACPROVIDER_UPDATER_INSTALL_GROUP="$(id -gn)" run_rc "$@"
 }
+# Root runs the archived tree: only origin's annotated tag, signed by an
+# approved signer, on origin/main. v9.0.0 is annotated but unsigned.
 health v9.0.0 $LIVE
+ub 0 "updater-bundle status with an unsigned running tag" scripts/ops/pearl-runtime.sh status
+expect_next bundle_source:blocked
+case "$(next_field reason)" in *"not signed by an approved release signer"*) ok ;; *) bad "unsigned tag reason: $(next_field reason)" ;; esac
+UBC="$(git -C "$W" rev-parse 'v9.0.0^{commit}')"
+git -C "$W" tag -s -a v9.0.9 -m "signed live runtime" "$UBC"
+ub 0 "updater-bundle status with a tag absent from origin" scripts/ops/pearl-runtime.sh status
+expect_next bundle_source:blocked
+git -C "$W" push -q origin refs/tags/v9.0.9
+git -C "$W" -c user.signingkey="$tmp/keys/untrusted" tag -s -a v9.0.10 -m "untrusted signer" "$UBC"
+git -C "$W" push -q origin refs/tags/v9.0.10
+health v9.0.10 $LIVE
+ub 0 "updater-bundle status with an untrusted signer" scripts/ops/pearl-runtime.sh status
+expect_next bundle_source:blocked
+health v9.0.9 $LIVE
 ub 0 "updater-bundle status with nothing installed" scripts/ops/pearl-runtime.sh status
 expect_next updater_bundle:mutate
-if [ "$(fact_of updater_bundle_tag)" = v9.0.0 ]; then ok; else bad "bundle tag: $(fact_of updater_bundle_tag)"; fi
+if [ "$(fact_of updater_bundle_tag)" = v9.0.9 ]; then ok; else bad "bundle tag: $(fact_of updater_bundle_tag)"; fi
 case "$(fact_of updater_bundle_mismatched)" in *macprovider-pearl-update=MISSING*) ok ;; *) bad "mismatch fact: $(fact_of updater_bundle_mismatched)" ;; esac
 case "$(next_field expected_downtime)" in none:*) ok ;; *) bad "bundle downtime: $(next_field expected_downtime)" ;; esac
-ub 3 "_updater-bundle refuses outside next --run" scripts/ops/pearl-runtime.sh _updater-bundle v9.0.0 "$(git -C "$W" rev-parse 'v9.0.0^{commit}')"
+ub 3 "_updater-bundle refuses outside next --run" scripts/ops/pearl-runtime.sh _updater-bundle v9.0.9 "$UBC"
 expect_err "runs only from"
 staging_dirs() { find /var/tmp -maxdepth 1 -name 'macprovider-updater-bundle.*' 2>/dev/null | wc -l | tr -d ' '; }
 before_dirs="$(staging_dirs)"
@@ -1700,29 +1723,39 @@ if [ "$(staging_dirs)" = "$before_dirs" ]; then ok; else bad "staging dir left b
 if [ -e "$UBROOT/usr/local/sbin/macprovider-pearl-update" ]; then bad "installed while the lock was busy"; else ok; fi
 ub 0 "updater-bundle installs from the running tag" env MACPROVIDER_OPS_OWNER=t scripts/ops/pearl-runtime.sh next --run
 expect_lock_free
-if cmp -s "$UBROOT/usr/local/sbin/macprovider-pearl-update" <(git -C "$W" show v9.0.0:ops/pearl-updater/macprovider-pearl-update); then ok; else bad "installed updater is not the tag's bytes"; fi
+if cmp -s "$UBROOT/usr/local/sbin/macprovider-pearl-update" <(git -C "$W" show v9.0.9:ops/pearl-updater/macprovider-pearl-update); then ok; else bad "installed updater is not the tag's bytes"; fi
 ub 0 "updater-bundle status after the install" scripts/ops/pearl-runtime.sh status
 expect_next done:done
 printf '# drift\n' >> "$UBROOT/usr/local/sbin/macprovider-tier2-enforcement-watchdog"
 ub 0 "updater-bundle status with a drifted watchdog" scripts/ops/pearl-runtime.sh status
 expect_next updater_bundle:mutate
 case "$(fact_of updater_bundle_mismatched)" in *tier2-enforcement-watchdog=*) ok ;; *) bad "drift fact: $(fact_of updater_bundle_mismatched)" ;; esac
-# A running tag whose guard differs from origin/main's cannot satisfy the
-# pricing preflight: blocked, nothing offered.
-git -C "$W" checkout -q --detach v9.0.0
-printf '\n# tag-only change\n' >> "$W/scripts/lib/coordinator_config_guard.py"
-git -C "$W" -c user.name=t -c user.email=t@example.invalid commit -q -am "test: guard differs at the tag"
-git -C "$W" -c user.name=t -c user.email=t@example.invalid tag -a v9.0.7 -m "drifted runtime"
+# A signed tag off origin/main is refused, whatever its writers hold.
+git -C "$W" checkout -q --detach "$UBC"
+printf '\n# side-branch change\n' >> "$W/ops/pearl-updater/install-pearl-updater.sh"
+git -C "$W" commit -q -am "test: side branch"
+git -C "$W" tag -s -a v9.0.7 -m "side-branch runtime"
+git -C "$W" push -q origin refs/tags/v9.0.7
 git -C "$W" checkout -q main
 health v9.0.7 $LIVE
-ub 0 "updater-bundle status with a tag whose guard differs from origin/main" scripts/ops/pearl-runtime.sh status
+ub 0 "updater-bundle status with a signed tag off origin/main" scripts/ops/pearl-runtime.sh status
 expect_next bundle_source:blocked
-case "$(next_field reason)" in *"origin/main changes scripts/lib/coordinator_config_guard.py"*) ok ;; *) bad "drift reason: $(next_field reason)" ;; esac
-git -C "$W" tag v9.0.8 "v9.0.0^{commit}"
+case "$(next_field reason)" in *"is not on origin/main"*) ok ;; *) bad "off-main reason: $(next_field reason)" ;; esac
+git -C "$W" tag v9.0.8 "$UBC"
+git -C "$W" push -q origin refs/tags/v9.0.8
 health v9.0.8 $LIVE
 ub 0 "updater-bundle status with a lightweight running tag" scripts/ops/pearl-runtime.sh status
 expect_next bundle_source:blocked
-health v9.0.0 $LIVE
+# origin/main changing a writer after the running tag: the preflight hashes
+# origin/main, so the tag's bundle could never satisfy it.
+printf '\n# main-only change\n' >> "$W/scripts/lib/coordinator_config_guard.py"
+git -C "$W" commit -q -am "test: guard changes on main"
+git -C "$W" push -q origin HEAD:refs/heads/main
+git -C "$W" fetch -q origin
+health v9.0.9 $LIVE
+ub 0 "updater-bundle status with a writer changed on origin/main" scripts/ops/pearl-runtime.sh status
+expect_next bundle_source:blocked
+case "$(next_field reason)" in *"origin/main changes scripts/lib/coordinator_config_guard.py"*) ok ;; *) bad "drift reason: $(next_field reason)" ;; esac
 rm -f "$tmp/bin/flock"
 
 printf 'entry points: %d passed, %d failed\n' "$pass" "$fail"

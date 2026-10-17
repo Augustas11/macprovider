@@ -898,8 +898,10 @@ json.dump({"models": models}, open(sys.argv[2], "w"), sort_keys=True)' "$WORK/bu
 
 # e2e_serving_providers <poolz.json>: how many /poolz providers serve a model
 # that this release makes newly buyer-serving, matched by served hash (new or,
-# for a re-hash, live) or by model id / candidate key. Fails on a malformed
-# body: unknown is never "none".
+# for a re-hash, live), by model id, or by candidate key (the model id field
+# or the coordinator's model-admission catalog key). Fails on a malformed body
+# or row (model_id missing or not a string, an identity field of another
+# type): unknown is never "none".
 e2e_serving_providers() {
   python3 - "$WORK/buyer-serving.json" "$REL/autotune-candidates.json" "$1" <<'PY'
 import json, sys
@@ -914,11 +916,14 @@ if not isinstance(pool, list):
     raise SystemExit(1)
 n = 0
 for p in pool:
-    if not isinstance(p, dict):
+    if not isinstance(p, dict) or not isinstance(p.get("model_id"), str):
         raise SystemExit(1)
-    mid = str(p.get("model_id") or "").lower().strip()
-    mhash = str(p.get("model_hash") or "").lower()
-    if mid in ids or (mhash and mhash in shas):
+    optional = [p.get(k) for k in ("model_hash", "model_admission_catalog_model_key")]
+    if any(v is not None and not isinstance(v, str) for v in optional):
+        raise SystemExit(1)
+    mhash = (optional[0] or "").lower().strip()
+    names = {p["model_id"].lower().strip(), (optional[1] or "").lower().strip()} - {""}
+    if names & ids or (mhash and mhash in shas):
         n += 1
 print(n)
 PY

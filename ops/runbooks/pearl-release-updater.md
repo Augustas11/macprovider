@@ -245,18 +245,22 @@ installation, LaunchAgent, local status port, and `lsof`. It does
 not receive the coordinator bearer token. `--plan` fails closed when either
 identity or secret file is missing, unsafe, or malformed.
 
-Reinstalling the bundle on a host that already runs it (a later tag changes
-an installed writer, or the pricing preflight reports `pricing_host_state`
-for `macprovider-pearl-update`) goes through
-`PEARL_RUNTIME_TASK=updater-bundle scripts/ops/pearl-runtime.sh`: it installs
-the running tag's bundle under the updater and deploy locks, with no restart.
-
-From a reviewed repository checkout on Pearl, install the updater, set
-`PEARL_UPDATER_DEADMAN_HEARTBEAT_ID` to the Better Stack API resource ID, then
-plan:
+Install the updater (first install and every reinstall, for example when a
+later tag changes an installed writer or the pricing preflight reports
+`pricing_host_state` for `macprovider-pearl-update`) through the ops entry
+point, from a clean worktree at `origin/main`. It installs the running tag's
+bundle (origin's signed tag, on `origin/main`) as root under the updater and
+deploy locks, with no restart:
 
 ```bash
-sudo ops/pearl-updater/install-pearl-updater.sh
+PEARL_RUNTIME_TASK=updater-bundle scripts/ops/pearl-runtime.sh status
+MACPROVIDER_OPS_OWNER=<session-label> PEARL_RUNTIME_TASK=updater-bundle scripts/ops/pearl-runtime.sh next --run
+```
+
+Then set `PEARL_UPDATER_DEADMAN_HEARTBEAT_ID` to the Better Stack API resource
+ID and plan:
+
+```bash
 sudo /usr/local/sbin/macprovider-pearl-update --plan
 ```
 

@@ -465,7 +465,8 @@ def canary():
 def pool():
     cs = canary()
     entries = [{"provider_id": os.environ["CCR_CANARY_ID"], "catalog_release_id": cs["release_id"],
-                "catalog_candidate_sha256": cs["digest"], "hash_status": "hash_verified", "routing_eligible": True}]
+                "catalog_candidate_sha256": cs["digest"], "hash_status": "hash_verified", "routing_eligible": True,
+                "model_id": os.environ["CCR_CANARY_KEY"], "model_hash": "cc" * 32}]
     if c("poolz-extra.json"):
         entries += json.load(open(os.path.join(ctl, "poolz-extra.json")))
     # A provider that connects after the preflight's two /poolz reads (the (e)
@@ -1256,6 +1257,17 @@ PY
 cp "$E2E_SERVING_POOL" "$CCR_TEST_CTL/poolz-extra.json"
 expect_no_go "new buyer-serving Tier-2 pin served by a connected provider (e)" buyer_serving_e2e
 grep -q 'already serve them' "$T/out" || fail "(e) due must say a provider serves it: $(cat "$T/out")"
+python3 - "$E2E_SERVING_POOL" "$R/phase3-binary/dist/static/autotune-candidates.json" >"$CCR_TEST_CTL/poolz-extra.json" <<'PY'
+import json, sys
+sha = json.load(open(sys.argv[1]))[0]["model_hash"]
+rows = json.load(open(sys.argv[2]))["rows"]
+key = next(k for k, r in rows.items() if str(r.get("model_sha256", "")).lower() == sha.lower())
+print(json.dumps([{"provider_id": "p8", "model_id": "", "model_admission_catalog_model_key": key}]))
+PY
+expect_no_go "new buyer-serving model bound by its candidate key (e)" buyer_serving_e2e
+printf '[{"provider_id":"p9","model_hash":"%s"}]\n' "$(printf 'dd%.0s' $(seq 1 32))" >"$CCR_TEST_CTL/poolz-extra.json"
+expect_no_go "malformed /poolz row without model_id (e)" buyer_serving_e2e
+grep -q '/poolz is malformed' "$T/out" || fail "a malformed /poolz row must fail closed: $(cat "$T/out")"
 # A serving model other than the canary's row (the canary row's hash changes).
 read -r SERVING_KEY SERVING_MODEL <<EOF_SERVING
 $(python3 - "$R/phase3-binary/dist/static/autotune-candidates.json" "$R/phase3-binary/catalog/autotune/tier2-catalog.json" "$CANARY_KEY" <<'PY'

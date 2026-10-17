@@ -252,6 +252,12 @@ $RB_NATIVE_POOL_CANARY"
     lane_detail="$(json_field "$verdict" 'next((c["detail"] for c in d["checks"] if c["name"] == "content_gate" and not c["ok"]), "")')"
     failed="$(json_field "$verdict" '"; ".join("%s: %s" % (c["name"], c["detail"][:200]) for c in d["checks"] if not c["ok"] and not c["detail"].startswith("not run:"))')"
     owed_pf="$(json_field "$verdict" '", ".join(m["model_id"] for m in d.get("buyer_serving_e2e_owed") or [])')"
+    # The digest reaches a step command: anything but a sha256 is refused.
+    if [ -n "$pricing" ] && ! [[ "$pricing" =~ ^[0-9a-f]{64}$ ]]; then
+      go=false
+      failed="pricing: the verdict's pricing_diff_sha256 is not a sha256${failed:+; $failed}"
+      pricing=""
+    fi
   fi
   fact preflight_failed_checks "$failed"
   if [ "$live_rid" = "$R" ]; then
