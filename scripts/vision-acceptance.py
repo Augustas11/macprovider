@@ -25,7 +25,7 @@ from pathlib import Path
 
 MODEL = "mlx-community/Qwen2-VL-2B-Instruct-4bit"
 REVISION = "01af461cdb9574acc09084a0ef94e216e142b085"
-RUNTIME_REVISION = "7d8dbf56e0e25b50f90d80edb9e0d8d721406679"
+RUNTIME_REVISION = "18ca526706dbffb9b1ce825046fe46a691d875b6"
 PROFILE = "qwen2vl-inline-v1"
 # A model name no provider loads: the provider-local endpoint must refuse it by
 # name (404 model_not_found). That proves model lookup only, never media

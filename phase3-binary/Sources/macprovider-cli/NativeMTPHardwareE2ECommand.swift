@@ -104,6 +104,12 @@ struct NativeMTPHardwareE2ECommand: AsyncParsableCommand {
     @Option(name: .customLong("sizing-output-tokens"), help: "Output-token budget used to size paged-KV blocks. Default 8.")
     var sizingOutputTokens: Int = 8
 
+    @Option(
+        name: .customLong("throughput-tokens"),
+        help: "Greedy completion tokens per row for the lab throughput phase (rows 1 and --max-batch, ordinary vs native, parity required). 0 skips it. Default 0."
+    )
+    var throughputTokens: Int = 0
+
     func run() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["MACPROVIDER_NATIVE_MTP_E2E"] == "1" else {
@@ -124,6 +130,9 @@ struct NativeMTPHardwareE2ECommand: AsyncParsableCommand {
         guard maxBatch >= 1, sizingPromptTokens >= 1, sizingOutputTokens >= 1 else {
             throw ValidationError("--max-batch, --sizing-prompt-tokens, and --sizing-output-tokens must be >=1")
         }
+        guard (0...4096).contains(throughputTokens) else {
+            throw ValidationError("--throughput-tokens must be 0...4096")
+        }
         let maxPhysicalBlocks = NativeMTPHardwareE2ERunner.sizedMaxPhysicalBlocks(
             slots: maxBatch,
             promptTokens: sizingPromptTokens,
@@ -134,7 +143,8 @@ struct NativeMTPHardwareE2ECommand: AsyncParsableCommand {
             modelID: modelID,
             maxBatch: maxBatch,
             maxPhysicalBlocks: maxPhysicalBlocks,
-            verifyServePath: environment["MACPROVIDER_NATIVE_MTP_E2E_SERVE_PATH"] == "1"
+            verifyServePath: environment["MACPROVIDER_NATIVE_MTP_E2E_SERVE_PATH"] == "1",
+            throughputTokens: throughputTokens
         ).run()
         FileHandle.standardOutput.write(Data(report.jsonLine.utf8))
         FileHandle.standardOutput.write(Data("\n".utf8))
@@ -193,6 +203,8 @@ final class NativeMTPHardwareE2ERunner {
     private let maxPromptTokens: Int
     private let maxPhysicalBlocks: Int
     private let verifyServePath: Bool
+    /// Lab throughput phase completion tokens per row; 0 skips it.
+    private let throughputTokens: Int
     /// Detected from `target/config.json`; Qwen3.5 when unreadable, so an
     /// unrecognized target fails the family check in the fixture load.
     let family: NativeMTPHardwareE2EFamily
@@ -213,7 +225,8 @@ final class NativeMTPHardwareE2ERunner {
         maxNativeActiveRows: Int? = nil,
         maxPromptTokens: Int = 1_048_576,
         maxPhysicalBlocks: Int = 512,
-        verifyServePath: Bool = false
+        verifyServePath: Bool = false,
+        throughputTokens: Int = 0
     ) {
         root = URL(fileURLWithPath: (rootPath as NSString).expandingTildeInPath, isDirectory: true)
             .standardizedFileURL
@@ -223,6 +236,7 @@ final class NativeMTPHardwareE2ERunner {
         self.maxPromptTokens = maxPromptTokens
         self.maxPhysicalBlocks = maxPhysicalBlocks
         self.verifyServePath = verifyServePath
+        self.throughputTokens = throughputTokens
         family = NativeMTPHardwareE2EFamily.detect(configJSONData: try? Data(
             contentsOf: root.appendingPathComponent("target/config.json")
         )) ?? .qwen35
@@ -283,7 +297,11 @@ final class NativeMTPHardwareE2ERunner {
                 "ordinary decode not reproducible for \(id): first=\(String(reflecting: ordinary[id]?.content)) repeat=\(String(reflecting: ordinaryRepeat[id]?.content))"
             )
         }
+        let countersBefore = await nativeRuntime.currentSnapshot().nativeMTPStatus
         let native = try await completeConcurrently(requests, with: nativeRuntime)
+        let parityCounters = NativeMTPStatusDelta(
+            before: countersBefore, after: await nativeRuntime.currentSnapshot().nativeMTPStatus
+        )
         try require(native.keys.sorted() == ordinary.keys.sorted(), "ordinary/native key mismatch")
         for id in ordinary.keys.sorted() {
             guard let expected = ordinary[id], let actual = native[id] else {
@@ -331,8 +349,16 @@ final class NativeMTPHardwareE2ERunner {
         let maxDepth = snapshot.continuousBatching?.scheduler?.maxObservedBatchDepth ?? 0
         try require(maxDepth >= 2, "batch depth below 2: \(maxDepth)")
         let totalAdmissions = admissionRecorder.snapshot().count
+        let labThroughput = throughputTokens > 0
+            ? try await measureLabThroughput(
+                ordinary: ordinaryRuntime, native: nativeRuntime, recorder: admissionRecorder
+            )
+            : nil
+        let labThroughputJSON = try labThroughput.map {
+            String(decoding: try JSONSerialization.data(withJSONObject: $0, options: [.sortedKeys]), as: UTF8.self)
+        } ?? "null"
         let json = """
-        {"schema":"macprovider.native-mtp-hardware-e2e-result.v1","status":"pass","evidence_class":"correctness_only","model_id":"\(modelID)","target_sha256":"\(targetIdentity.digest)","mtp_sha256":"\(mtpIdentity.digest)","admissions":\(totalAdmissions),"max_observed_batch_depth":\(maxDepth),"serve_path_verified":\(verifyServePath)}
+        {"schema":"macprovider.native-mtp-hardware-e2e-result.v1","status":"pass","evidence_class":"correctness_only","model_id":"\(modelID)","model_family":"\(family.modelFamily)","family_adapter":"\(family.familyAdapter)","target_sha256":"\(targetIdentity.digest)","mtp_sha256":"\(mtpIdentity.digest)","admissions":\(totalAdmissions),"max_observed_batch_depth":\(maxDepth),"serve_path_verified":\(verifyServePath),"parity_proposed":\(parityCounters.proposedTokens),"parity_accepted":\(parityCounters.acceptedTokens),"parity_rejected":\(parityCounters.rejectedTokens),"lab_throughput":\(labThroughputJSON)}
         """
         return NativeMTPHardwareE2EReport(
             targetSHA256: targetIdentity.digest,
@@ -707,16 +733,108 @@ final class NativeMTPHardwareE2ERunner {
         }
     }
 
+    /// Lab throughput phase (`--throughput-tokens`): greedy rows at 1 and
+    /// `maxBatch` concurrent requests, ordinary then native on the same
+    /// prompts, three passes each. Every native row must equal its ordinary
+    /// row and be admitted native. Rates are end to end (all completion
+    /// tokens over the batch wall time, prefill included); this is lab
+    /// evidence, not the SPEC-048 R015 matrix (`native-mtp-bench`).
+    private func measureLabThroughput(
+        ordinary: ModelRuntime,
+        native: ModelRuntime,
+        recorder: NativeMTPHardwareAdmissionRecorder
+    ) async throws -> [String: Any] {
+        let prompts = [
+            "Explain in three sentences why the sky appears blue.",
+            "Write a short Python function that reverses a linked list, then explain it.",
+            "Describe a quiet harbor town at dawn in one paragraph.",
+            "List five prime numbers greater than one hundred and say why each is prime.",
+            "Summarize the rules of chess for a beginner.",
+            "Give three tips for learning a new language, with an example for each.",
+            "Write a haiku about winter rain, then explain its imagery.",
+            "Compare TCP and UDP in a short table.",
+        ]
+        let passes = 3
+        var cells: [[String: Any]] = []
+        for rows in Array(Set([1, max(1, min(maxBatch, prompts.count))])).sorted() {
+            var ratios: [Double] = []
+            var ordinaryRates: [Double] = []
+            var nativeRates: [Double] = []
+            var proposed: UInt64 = 0
+            var accepted: UInt64 = 0
+            var rejected: UInt64 = 0
+            for pass in 0..<passes {
+                let requests = try (0..<rows).map {
+                    try makeRequest(
+                        id: "native-mtp-tput-r\(rows)-p\(pass)-\($0)", prompt: prompts[$0], maxTokens: throughputTokens
+                    )
+                }
+                let ordinaryStart = Date()
+                let expected = try await completeConcurrently(requests, with: ordinary)
+                let ordinarySeconds = Date().timeIntervalSince(ordinaryStart)
+                let admissionsBefore = recorder.snapshot().count
+                let before = await native.currentSnapshot().nativeMTPStatus
+                let nativeStart = Date()
+                let actual = try await completeConcurrently(requests, with: native)
+                let nativeSeconds = Date().timeIntervalSince(nativeStart)
+                let delta = NativeMTPStatusDelta(before: before, after: await native.currentSnapshot().nativeMTPStatus)
+                let admissions = recorder.snapshot().dropFirst(admissionsBefore)
+                try require(
+                    admissions.count == rows && admissions.allSatisfy { $0.effectivePath == .nativeMTP },
+                    "throughput rows=\(rows) pass=\(pass): not every row admitted native"
+                )
+                for id in expected.keys.sorted() {
+                    try require(
+                        actual[id]?.content == expected[id]?.content
+                            && actual[id]?.completionTokens == expected[id]?.completionTokens,
+                        "throughput greedy mismatch for \(id)"
+                    )
+                }
+                let tokens = Double(expected.values.reduce(0) { $0 + $1.completionTokens })
+                let ordinaryRate = ordinarySeconds > 0 ? tokens / ordinarySeconds : 0
+                let nativeRate = nativeSeconds > 0 ? tokens / nativeSeconds : 0
+                ordinaryRates.append(ordinaryRate)
+                nativeRates.append(nativeRate)
+                if ordinaryRate > 0 { ratios.append(nativeRate / ordinaryRate) }
+                proposed += delta.proposedTokens
+                accepted += delta.acceptedTokens
+                rejected += delta.rejectedTokens
+            }
+            func median(_ values: [Double]) -> Double {
+                let sorted = values.sorted()
+                guard !sorted.isEmpty else { return 0 }
+                return sorted.count % 2 == 1
+                    ? sorted[sorted.count / 2]
+                    : (sorted[sorted.count / 2 - 1] + sorted[sorted.count / 2]) / 2
+            }
+            cells.append([
+                "rows": rows,
+                "passes": passes,
+                "completion_tokens_per_row": throughputTokens,
+                "ordinary_e2e_tps_median": median(ordinaryRates),
+                "native_e2e_tps_median": median(nativeRates),
+                "native_over_ordinary_median": median(ratios),
+                "proposed": proposed,
+                "accepted": accepted,
+                "rejected": rejected,
+                "acceptance": proposed > 0 ? Double(accepted) / Double(proposed) : 0,
+                "greedy_equal": true,
+            ])
+        }
+        return ["r015_formal": false, "rate_basis": "end_to_end_batch_wall", "cells": cells]
+    }
+
     private func makeRequest(
         id: String,
         prompt: String,
         stream: Bool = false,
-        stop: [String]? = nil
+        stop: [String]? = nil,
+        maxTokens: Int = 8
     ) throws -> ChatCompletionRequest {
         var object: [String: Any] = [
             "model": modelID,
             "messages": [["role": "user", "content": prompt]],
-            "max_tokens": 8,
+            "max_tokens": maxTokens,
             "temperature": 0,
             "top_p": 1.0,
             "stream": stream,

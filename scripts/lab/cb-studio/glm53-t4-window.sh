@@ -32,6 +32,15 @@
 #        `--engine scheduler --scenario leftovers --rows 4 --prompt-tokens 1024
 #        --parity-tokens 48`, the harness the gpt-oss-120b entry used. PASS:
 #        isolation, replay, drain and parity all `pass=true`.
+#     5. (`run-mtp-e2e`, not in the default legs) SPEC-048 native MTP through
+#        the provider's real path: `native-mtp-hardware-e2e` (lab-signed
+#        sidecar; serve-path admission loader unless MTP_E2E_SERVE_PATH=0)
+#        on a fixture root whose `target/` is an APFS clone of MODEL,
+#        4 slots, depth 1, packed verify in continuous batching. Greedy
+#        native rows must equal ordinary rows, every row admitted native,
+#        paged KV attached, batch depth >= 2; then the lab throughput phase
+#        (`--throughput-tokens`, default 256) at 1 and 4 rows reports native
+#        over ordinary end-to-end tok/s and acceptance. Not the R015 matrix.
 #   It never binds or signals the live port; pausing the live provider is the
 #   window owner's job, and `run` refuses to start while it serves.
 #
@@ -284,6 +293,50 @@ print("leg3 rows=" + sys.argv[2] + " " + " ".join(f"{k}={d[k]}" for k in keys))'
   shasum -a 256 $OUT/leftovers.json $OUT/leftovers.log | tee -a $OUT/summary.txt
   fi
 
+  if [[ " $LEGS " == *" 5 "* ]]; then
+  # --- Leg 5: native-MTP hardware e2e (glm5_next, depth 1, 4 slots) ---------
+  echo "leg5 mtp-e2e start $(date -u +%T)" | tee -a $OUT/summary.txt
+  local fixture=$OUT/mtp-fixture
+  mkdir -p $fixture
+  # APFS clone: the snapshot's exact files, no copy of the bytes.
+  cp -cR $MODEL $fixture/target
+  local e2e_rc=0
+  MACPROVIDER_NATIVE_MTP_E2E=1 MACPROVIDER_NATIVE_MTP_E2E_SERVE_PATH=${MTP_E2E_SERVE_PATH:-1} \
+    $HARNESS/macprovider-cli native-mtp-hardware-e2e --root $fixture --model-id zai-org/glm-5.3-flash \
+    --max-batch 4 --sizing-prompt-tokens 1024 --sizing-output-tokens ${MTP_E2E_TOKENS:-256} \
+    --throughput-tokens ${MTP_E2E_TOKENS:-256} > $OUT/mtp-e2e.json 2> $OUT/mtp-e2e.log || e2e_rc=$?
+  echo "leg5 native-mtp-hardware-e2e rc=$e2e_rc" | tee -a $OUT/summary.txt
+  local mtp_eval_rc=1
+  if (( e2e_rc == 0 )); then
+    mtp_eval_rc=0
+    python3 - $OUT/mtp-e2e.json > $OUT/mtp-e2e-eval.txt 2>&1 <<'PY' || mtp_eval_rc=$?
+import json, sys
+line = next(l for l in open(sys.argv[1]) if l.startswith("{"))
+r = json.loads(line)
+ok = r.get("status") == "pass" and r.get("model_family") == "glm5_next" \
+    and r.get("family_adapter") == "glm5_next_mtp_v1" and int(r.get("max_observed_batch_depth", 0)) >= 2
+print(f"leg5 status={r.get('status')} family={r.get('model_family')} serve_path_verified={r.get('serve_path_verified')} "
+      f"admissions={r.get('admissions')} max_batch_depth={r.get('max_observed_batch_depth')} "
+      f"parity_proposed={r.get('parity_proposed')} parity_accepted={r.get('parity_accepted')}")
+cells = (r.get("lab_throughput") or {}).get("cells") or []
+ok = ok and len(cells) == 2
+for c in cells:
+    print(f"leg5 rows={c['rows']} native_over_ordinary={c['native_over_ordinary_median']:.3f} "
+          f"ordinary_e2e_tps={c['ordinary_e2e_tps_median']:.1f} native_e2e_tps={c['native_e2e_tps_median']:.1f} "
+          f"acceptance={c['acceptance']:.3f} greedy_equal={c['greedy_equal']}")
+    ok = ok and c["greedy_equal"] is True and c["proposed"] > 0
+print("leg5 mtp-e2e " + ("PASS" if ok else "FAIL"))
+sys.exit(0 if ok else 1)
+PY
+    tee -a $OUT/summary.txt < $OUT/mtp-e2e-eval.txt
+  fi
+  (( mtp_eval_rc == 0 )) || { result=FAIL; echo "leg5 mtp-e2e FAIL (see mtp-e2e.json / mtp-e2e.log)" | tee -a $OUT/summary.txt; }
+  shasum -a 256 $OUT/mtp-e2e.json $OUT/mtp-e2e.log | tee -a $OUT/summary.txt
+  # The lab-signed sidecar, bank and projection stay with the evidence; the
+  # clone of the weights does not.
+  rm -rf $fixture/target
+  fi
+
   echo "RESULT=$result evidence=$OUT" | tee -a $OUT/summary.txt
   [[ $result == PASS ]]
 }
@@ -293,5 +346,6 @@ case ${1:-} in
   run) run ;;
   run-selfcheck) LEGS=2 run ;;
   run-leftovers) LEGS=4 run ;;
-  *) echo "usage: $0 prepare|run|run-selfcheck|run-leftovers" >&2; exit 2 ;;
+  run-mtp-e2e) LEGS=5 run ;;
+  *) echo "usage: $0 prepare|run|run-selfcheck|run-leftovers|run-mtp-e2e" >&2; exit 2 ;;
 esac
