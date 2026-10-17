@@ -52,6 +52,9 @@ LIVE_PORT=${LIVE_PORT:-8080}
 LAB_PORT=${LAB_PORT:-18096}
 HARNESS=$PKG/.build-lab-harness/release
 LEGS=${LEGS:-1 2 3}
+# The catalog snapshot-manifest hash of Jundot/GLM-5.3-Flash-oQ4e-mtp @
+# 36defc50 (46 files); serve verifies it against the bytes at startup.
+MODEL_ARTIFACT_SHA256=${MODEL_ARTIFACT_SHA256:-7299b6a71a38490e378e9eb6524c426392aa96e3fd561007e0540134bbef48f9}
 TEST_BUNDLE=$PKG/.build/debug/phase3-binaryPackageTests.xctest
 
 prepare() {
@@ -122,17 +125,19 @@ sys.exit(0 if paused and d.get("requests_in_flight", 1) == 0 else 1)' || {
   # --- Leg 2: FR-CB10 self-check, k = 2..4 -----------------------------------
   echo "leg2 self-check start $(date -u +%T)" | tee -a $OUT/summary.txt
   local dir=$OUT/selfcheck; mkdir -p $dir; chmod 700 $dir
-  python3 - $LAB_CONFIG_TEMPLATE $dir/config.yaml $LAB_PORT $MODEL <<'PY'
+  python3 - $LAB_CONFIG_TEMPLATE $dir/config.yaml $LAB_PORT $MODEL $MODEL_ARTIFACT_SHA256 <<'PY'
 import sys
-src, dst, port, model = sys.argv[1:]
+src, dst, port, model, artifact_sha = sys.argv[1:]
 # Every top-level key below is dropped with its indented block and then set
 # (or left out) here, so nothing of the template's own model, catalog
 # binding, accepted tuples or paged/native settings reaches the GLM serve.
-# model_artifact_* (the template's Qwen model_artifact_sha256) is dropped too:
-# the lab artifact directory also holds Hugging Face download metadata
-# (.cache/huggingface), which the canonical artifact hash covers, so the
-# catalog hash of the clean 46-file snapshot would not match it anyway.
+# model_artifact_* (the template's Qwen model_artifact_sha256) is replaced:
+# serve requires a hash with model_artifact_path and checks it against the
+# bytes at startup, so the GLM catalog snapshot-manifest hash is written and
+# that startup check is the on-disk proof of it. The directory must hold
+# exactly the 46 snapshot files (no .cache/huggingface).
 want = {"port": port, "model": "zai-org/glm-5.3-flash", "model_artifact_path": f'"{model}"',
+        "model_artifact_sha256": artifact_sha,
         "max_context_override": "65536", "max_concurrency_override": "4",
         "continuous_batch_queue_limit": "4", "continuous_batching": "canary",
         "native_mtp_mode": "off"}
@@ -159,9 +164,9 @@ PY
   while kill -0 $pid 2>/dev/null && (( $(date +%s) - t0 < ${SELFCHECK_TIMEOUT_S:-3600} )); do
     sleep 10
     # Fail fast when the driver never starts (load plus first step).
-    if (( $(date +%s) - t0 > ${SELFCHECK_START_TIMEOUT_S:-1200} )) \
+    if (( $(date +%s) - t0 > ${SELFCHECK_START_TIMEOUT_S:-1800} )) \
        && ! grep -q 'event=cb_self_check action=step' $dir/serve.log; then
-      echo "leg2: no self-check step within ${SELFCHECK_START_TIMEOUT_S:-1200}s" | tee -a $OUT/summary.txt
+      echo "leg2: no self-check step within ${SELFCHECK_START_TIMEOUT_S:-1800}s" | tee -a $OUT/summary.txt
       break
     fi
     if body=$(status_json $LAB_PORT) && print -r -- $body | python3 -c 'import json,sys
@@ -175,6 +180,14 @@ sys.exit(0 if d not in ("None", "pending") and not d.startswith("prior_grant") a
   trap - EXIT INT TERM HUP
   grep -E "event=(paged_kv|served_slots|cb_self_check|continuous_batching_policy|batching_unsupported|continuous_batch_decode_row_bound)|paged-kv|measure (nil|OK)" \
     $dir/serve.log > $dir/events.log || true
+  # Did serve's startup check accept the artifact hash? (It hashes every
+  # file of the directory before loading, at disk speed.)
+  local hash_verdict=unknown
+  if grep -q "model artifact hash mismatch" $dir/serve.log; then hash_verdict=rejected
+  elif grep -q "requires model_artifact_sha256\|provider startup preflight failed" $dir/serve.log; then hash_verdict=preflight_failed
+  elif grep -qE "event=served_slots|event=cb_self_check|paged-kv|model_loaded" $dir/serve.log; then hash_verdict=accepted
+  fi
+  echo "leg2 startup artifact hash ${hash_verdict} expected=$MODEL_ARTIFACT_SHA256 dir=$MODEL" | tee -a $OUT/summary.txt
   # Every ladder step and the applied decision, whatever the verdict below.
   grep -E "event=cb_self_check action=(step|measured|applied|ladder_ended|probe_shape_unmet)|batching_unsupported|model artifact hash" \
     $dir/serve.log | tee -a $OUT/summary.txt || true
