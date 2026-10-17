@@ -230,6 +230,8 @@ final class GLM5NextPagedKVWiringTests: XCTestCase {
         XCTAssertNotEqual(plain, glm)
         XCTAssertTrue(glm.contains("/decode8/verify8"))
         XCTAssertTrue(glm.hasSuffix("+flat8"))
+        XCTAssertTrue(glm.contains("+\(ContinuousBatchingSelfCheck.glm5NextProbeVersion)/route1024"))
+        XCTAssertTrue(plain.contains("+\(ContinuousBatchingSelfCheck.probeVersion)/route1024"))
         XCTAssertNotEqual(glm, ModelRuntime.continuousBatchingSelfCheckRuntimeBuild(
             forwardBound: 11, routeKeyBoundary: 1024, forwardTokenCap: 6
         ))

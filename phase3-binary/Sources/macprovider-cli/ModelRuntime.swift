@@ -4917,7 +4917,9 @@ maxTokens: 1,
             probeKeyBoundary: ContinuousBatchingSelfCheck.deviceRouteKeyBoundary,
             maxRequestTokens: scheduler.maxRequestTokens,
             poolTokens: scheduler.poolTokens,
-            blockSizeTokens: scheduler.blockSizeTokens
+            blockSizeTokens: scheduler.blockSizeTokens,
+            // Only a pagedMLA (`glm5_next`) backend has a flattened-token cap.
+            decodeOnlyGain: scheduler.forwardTokenCap != nil
         )
     }
 
@@ -5559,8 +5561,14 @@ maxTokens: 1,
     ) -> String {
         let bound = min(deviceBound, forwardTokenCap ?? Int.max)
         let cap = forwardTokenCap.map { "+flat\($0)" } ?? ""
+        // glm5_next (the only capped backend) measures a decode-only gain
+        // (SPEC-038 v0.3.21) under its own probe version; every other key is
+        // unchanged.
+        let probe = forwardTokenCap == nil
+            ? ContinuousBatchingSelfCheck.probeVersion
+            : ContinuousBatchingSelfCheck.glm5NextProbeVersion
         return "\(ContinuousBatchingSelfCheckKey.currentRuntimeBuild)+cb-isolation-v1/decode\(bound)/verify\(bound)"
-            + "+\(ContinuousBatchingSelfCheck.probeVersion)/route\(routeKeyBoundary)" + cap
+            + "+\(probe)/route\(routeKeyBoundary)" + cap
     }
 
     /// Metal architecture name as MLX core reads it (`MLX_METAL_GPU_ARCH`
@@ -9945,11 +9953,10 @@ maxTokens: 1,
 
     /// SPEC-038 FR-CB10 serial baseline: the self-check prompts run one at a
     /// time through stock serial decode (the path a one-slot provider
-    /// serves). v0.3.21: the gain compares decode, so `decodeTPS` is the
-    /// tokens after each prompt's first over the time from that first token
-    /// to the last (prefill and first-token latency excluded), summed over
-    /// the prompts; `endToEndTPS` (all tokens over whole-call wall time) is
-    /// kept for the evidence log only.
+    /// serves). `endToEndTPS` is all tokens over whole-call wall time, the
+    /// baseline every family is measured against; `decodeTPS` (v0.3.21,
+    /// glm5_next only) is the tokens after each prompt's first over the time
+    /// from that first token to the last, summed over the prompts.
     func continuousBatchingSelfCheckSerialTPS(
         prompts: [[Int]], maxTokens: Int
     ) async throws -> ContinuousBatchingSelfCheckSerialRate {
