@@ -232,10 +232,12 @@ mutating anything.
   the models in `buyer_serving_e2e_owed`, the deploy re-checks `/poolz` under
   the lease (a provider that started serving one stops the deploy before any
   mutation) and logs `(e) OWED: ...`, and `scripts/ops/catalog-activate.sh`
-  keeps a post-activation `buyer_serving_e2e` step open: the provider release
-  that first serves the model restarts its canary onto the release, sends one
-  strict-pin buyer request through the gateway, and checks its settlement row;
-  the operator records it with `next --done buyer_serving_e2e`. A deploy with
+  keeps a post-activation `buyer_serving_e2e` step open, across later releases,
+  until it is recorded: the provider release that first serves the model
+  restarts its canary onto the live release, sends one buyer request for the
+  model through the gateway (attributed to the canary by its `request_log`
+  session), and checks its settlement row; the operator records it with
+  `next --done buyer_serving_e2e`, naming the model. A deploy with
   nothing newly buyer-serving logs "(e) not required". The runtime lane
   (`deploy-pearl-vps.sh` with `CONFIG_MODE=preserve-live`) cannot carry a
   release that also adds rate-card rows: the live `rewards.rate_card` lacks

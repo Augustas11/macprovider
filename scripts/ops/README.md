@@ -53,8 +53,12 @@ scripts/ops/live-lock.sh acquire <label> --steal                 # only past the
   after the operator reviewed the price table. A release whose newly
   buyer-serving model no connected provider serves activates with evidence
   (e) owed (SPEC-023-R017 5(e)); the activation records it and the train
-  keeps a post-activation `buyer_serving_e2e` step until the operator records
-  the strict-pin buyer request and settlement row.
+  keeps a post-activation `buyer_serving_e2e` step (a ledger entry per model
+  that outlives later releases) until the operator records a buyer request
+  attributed to the serving canary and its settlement row, naming the model.
+  `PEARL_RUNTIME_TASK=updater-bundle` installs only origin's signed running
+  tag that is on `origin/main`, verifies every installer-managed file, and is
+  done once that install is recorded.
 - Runbook commands are never read from the Markdown at run time. They are
   constants in `lib/runbook-commands.sh`; `test-runbook-commands.sh` fails when
   one drifts from its fenced block on `origin/main`.

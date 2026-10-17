@@ -66,6 +66,10 @@ Expected result is exactly `CONFLICT=0`, `AGREE=9`; abort on any conflict.
 
 ## 1. Install the merged Step D updater
 
+This section is the historical Step D record. Install or reinstall the
+updater today only through `PEARL_RUNTIME_TASK=updater-bundle
+scripts/ops/pearl-runtime.sh` (status, then `next --run`).
+
 Install only from the exact squash-merged `origin/main` revision whose PR has
 green required CI, 0 CRITICAL/HIGH/MEDIUM findings in all three audit lanes,
 and an exact-head `antfleet-ops` approval. Record the squash commit as
@@ -90,6 +94,9 @@ git archive "$STEP_D_MERGED_SHA" \
   ssh pearl "sudo tar -xf - -C '$STEP_D_BUNDLE_DIR'"
 ssh pearl \
   "sudo '$STEP_D_BUNDLE_DIR/ops/pearl-updater/install-pearl-updater.sh'"
+# Historical record of step D. Install or reinstall the updater today only
+# through `PEARL_RUNTIME_TASK=updater-bundle scripts/ops/pearl-runtime.sh`
+# (origin's signed running tag, live-ops lock, updater and deploy locks).
 
 manifest_line() {
   source_path="$1"

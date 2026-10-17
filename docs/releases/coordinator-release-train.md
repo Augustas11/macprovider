@@ -10,8 +10,12 @@ release `published-2026-10-17-qwen2vl-listed-v1`. Promotion release:
 `published-2026-10-17-qwen2vl-recommendable-v1`, rate row `qwen2-vl-2b-instruct`
 (class-3b small-dense parity: 13500 / 3375 / 27000 credits per Mtok), Tier-2
 catalog `macprovider-tier2-model-catalog-2026-10-17-qwen2vl-v1`. Newly
-buyer-serving, so it ships through the runtime lane with a live buyer E2E, after
-the provider CLI that selects the vision profile by catalog identity is released.
+buyer-serving, and no connected provider can serve it until the provider CLI that
+selects the vision profile by catalog identity is released, so it ships through
+the catalog-content lane with evidence (e) owed (SPEC-023 v0.22.26): the CLI
+train's canary and the #2016 live acceptance owe its buyer request and settlement
+row. The runtime lane cannot carry it: it adds a rate-card row the live
+`rewards.rate_card` lacks.
 
 ## CLI 1.8.223 compatibility target — 2026-10-08 00:42 UTC
 

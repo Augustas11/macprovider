@@ -1633,7 +1633,7 @@ if [ "$(next_field id)" = catalog_activation ]; then
   case "$(next_field kind):$(next_field reason)" in blocked:*"CATALOG_PRICING_ACK=$DIGEST"*) ok ;; *) bad "unacknowledged pricing: $(next_field kind) $(next_field reason)" ;; esac
   CATALOG_PRICING_ACK="$DIGEST" run_rc 0 "catalog status with the price table acknowledged" scripts/ops/catalog-activate.sh status
   expect_next catalog_activation:mutate
-  case "$(next_field command)" in *"--pricing-diff-sha256 $DIGEST --preflight-verdict"*"| tee "*buyer_serving_e2e_owed.json*) ok ;; *) bad "pricing activation command: $(next_field command)" ;; esac
+  case "$(next_field command)" in *"--pricing-diff-sha256 $DIGEST --preflight-verdict"*"| tee "*catalog-owed-e2e*) ok ;; *) bad "pricing activation command: $(next_field command)" ;; esac
   case "$(next_field expected_downtime)" in "no coordinator restart"*) ok ;; *) bad "activation downtime: $(next_field expected_downtime)" ;; esac
   CATALOG_PRICING_ACK="$(printf 'ef%.0s' $(seq 1 32))" run_rc 0 "catalog status with a stale acknowledgement" scripts/ops/catalog-activate.sh status
   expect_next catalog_activation:blocked
@@ -1657,22 +1657,36 @@ echo '{"buyer_serving_e2e_owed": [{"model_id": "mlx-community/Test-VL-2B", "sha2
 echo "[catalog-content] DONE"
 FAKEDEPLOY
 chmod +x "$tmp/fakedeploy/scripts/catalog-content-release.sh"
-if (cd "$tmp/fakedeploy" && bash -euo pipefail -c "$cmd") >/dev/null 2>&1 &&
-  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d["release_id"] == sys.argv[2] and d["models"][0]["model_id"] == "mlx-community/Test-VL-2B" else 1)' "$CSCOPE/buyer_serving_e2e_owed.json" "$R"; then ok; else bad "activation command did not record the owed (e)"; fi
-printf '#!/usr/bin/env bash\necho "{\\"buyer_serving_e2e_owed\\": [{\\"model_id\\": \\"x\\"}]}"\nexit 4\n' > "$tmp/fakedeploy/scripts/catalog-content-release.sh"
-rm -f "$CSCOPE/buyer_serving_e2e_owed.json"
+OWED_DIR="$tmp/state/catalog-owed-e2e"
+owed_count() { find "$OWED_DIR" -name '*.json' 2>/dev/null | wc -l | tr -d ' '; }
+printf '#!/usr/bin/env bash\necho "{\\"buyer_serving_e2e_owed\\": [{\\"model_id\\": \\"x\\", \\"sha256\\": \\"y\\"}]}"\nexit 4\n' > "$tmp/fakedeploy/scripts/catalog-content-release.sh"
 if (cd "$tmp/fakedeploy" && bash -euo pipefail -c "$cmd") >/dev/null 2>&1; then bad "a failed deploy passed the activation step"; else ok; fi
-if [ -e "$CSCOPE/buyer_serving_e2e_owed.json" ]; then bad "a failed deploy recorded owed (e)"; else ok; fi
-# After activation: the owed (e) is a post-activation, operator-recorded step.
+if [ "$(owed_count)" = 0 ]; then ok; else bad "a failed deploy recorded owed (e)"; fi
+cat > "$tmp/fakedeploy/scripts/catalog-content-release.sh" <<'FAKEDEPLOY'
+#!/usr/bin/env bash
+echo "[catalog-content] deploy: preflight"
+echo '{"buyer_serving_e2e_owed": [{"model_id": "mlx-community/Test-VL-2B", "sha256": "abab"}], "checks": [], "go": true, "pricing": null}'
+echo "[catalog-content] DONE"
+FAKEDEPLOY
+if (cd "$tmp/fakedeploy" && bash -euo pipefail -c "$cmd") >/dev/null 2>&1 && [ "$(owed_count)" = 1 ] &&
+  python3 -c 'import glob,json,sys; d=json.load(open(glob.glob(sys.argv[1] + "/*.json")[0])); sys.exit(0 if d["release_id"] == sys.argv[2] and d["model_id"] == "mlx-community/Test-VL-2B" else 1)' "$OWED_DIR" "$R"; then ok; else bad "activation command did not record the owed (e)"; fi
+# The owed (e) is a post-activation, operator-recorded step that outlives its release.
 printf '{"release_id":"%s","status":"live_verified","feeds":{"x":{"verified_at":"2026-01-01T00:00:00Z"}}}' "$R" > "$tmp/svc/autotune-release.json"
-printf '{"release_id":"%s","models":[{"model_id":"mlx-community/Test-VL-2B","sha256":"abab"}]}' "$R" > "$CSCOPE/buyer_serving_e2e_owed.json"
 run_rc 0 "catalog status with (e) owed after activation" scripts/ops/catalog-activate.sh status
 if [ "$(state_of buyer_serving_e2e)" = owed ]; then ok; else bad "owed (e) state: $(state_of buyer_serving_e2e)"; fi
-if [ "$(fact_of buyer_serving_e2e_owed)" = mlx-community/Test-VL-2B ]; then ok; else bad "owed (e) fact: $(fact_of buyer_serving_e2e_owed)"; fi
-printf '{"release_id":"older-release","models":[{"model_id":"m","sha256":"abab"}]}' > "$CSCOPE/buyer_serving_e2e_owed.json"
-run_rc 0 "catalog status with an owed (e) of another release" scripts/ops/catalog-activate.sh status
-if [ "$(state_of buyer_serving_e2e)" = "done" ]; then ok; else bad "another release's owed (e) counted: $(state_of buyer_serving_e2e)"; fi
-rm -f "$tmp/svc/autotune-release.json" "$CSCOPE/buyer_serving_e2e_owed.json" "$CSCOPE"/preflight-*.json
+case "$(fact_of buyer_serving_e2e_owed)" in "mlx-community/Test-VL-2B (owed since $R)") ok ;; *) bad "owed (e) fact: $(fact_of buyer_serving_e2e_owed)" ;; esac
+printf '{"release_id":"newer-release","status":"live_verified","feeds":{"x":{"verified_at":"2026-01-01T00:00:00Z"}}}' > "$tmp/svc/autotune-release.json"
+run_rc 0 "catalog status with (e) owed by an older release" scripts/ops/catalog-activate.sh status
+if [ "$(state_of buyer_serving_e2e)" = owed ]; then ok; else bad "an older release's owed (e) vanished: $(state_of buyer_serving_e2e)"; fi
+printf '{not json' > "$OWED_DIR/broken.json"
+run_rc 0 "catalog status with a malformed owed record" scripts/ops/catalog-activate.sh status
+if [ "$(state_of buyer_serving_e2e)" = blocked ]; then ok; else bad "malformed owed record not blocked: $(state_of buyer_serving_e2e)"; fi
+rm -f "$OWED_DIR/broken.json"
+mkdir -p "$tmp/state/catalog-other"
+printf '{"step":"buyer_serving_e2e","evidence":"mlx-community/Test-VL-2B: request ops-e2e-1 served by the canary session, settlement row at 13500/27000"}\n' > "$tmp/state/catalog-other/buyer_serving_e2e.json"
+run_rc 0 "catalog status after the owed (e) is recorded" scripts/ops/catalog-activate.sh status
+if [ "$(state_of buyer_serving_e2e)" != owed ] && [ "$(fact_of buyer_serving_e2e_owed)" = None ]; then ok; else bad "recorded owed (e) still open: $(state_of buyer_serving_e2e) $(fact_of buyer_serving_e2e_owed)"; fi
+rm -rf "$tmp/svc/autotune-release.json" "$OWED_DIR" "$tmp/state/catalog-other" "$CSCOPE"/preflight-*.json
 
 # ==== pearl-runtime updater-bundle ==============================================
 UBROOT="$tmp/ubroot"
@@ -1721,8 +1735,10 @@ expect_err "lock busy"
 expect_lock_free
 if [ "$(staging_dirs)" = "$before_dirs" ]; then ok; else bad "staging dir left behind"; fi
 if [ -e "$UBROOT/usr/local/sbin/macprovider-pearl-update" ]; then bad "installed while the lock was busy"; else ok; fi
+rm -f "$tmp/pearl/deploy.lock"
 ub 0 "updater-bundle installs from the running tag" env MACPROVIDER_OPS_OWNER=t scripts/ops/pearl-runtime.sh next --run
 expect_lock_free
+if [ -f "$tmp/pearl/deploy.lock" ] && [ ! -L "$tmp/pearl/deploy.lock" ]; then ok; else bad "first install did not create the missing deploy lock"; fi
 if cmp -s "$UBROOT/usr/local/sbin/macprovider-pearl-update" <(git -C "$W" show v9.0.9:ops/pearl-updater/macprovider-pearl-update); then ok; else bad "installed updater is not the tag's bytes"; fi
 ub 0 "updater-bundle status after the install" scripts/ops/pearl-runtime.sh status
 expect_next done:done

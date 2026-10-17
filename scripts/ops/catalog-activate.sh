@@ -35,11 +35,14 @@
 #                             target provider's active serving-path counter
 #                             (CB shared_forward_calls when CB is active);
 #                             expires after 24 h
-#  11 buyer_serving_e2e       evidence (e) the activation recorded as owed (SPEC-023-R017
+#  11 buyer_serving_e2e       evidence (e) an activation recorded as owed (SPEC-023-R017
 #                             5(e)): no connected provider served the newly buyer-serving
 #                             model, so the provider release that first serves it owes a
-#                             provider restart onto the release, one strict-pin buyer request
-#                             through the gateway and its settlement row (operator-recorded)
+#                             canary restart onto the live release, one buyer request through
+#                             the gateway attributed to that canary, and its settlement row.
+#                             One ledger entry per model (ops-state catalog-owed-e2e/), open
+#                             until a buyer_serving_e2e record names the model; it outlives
+#                             later releases, and a malformed entry blocks
 #
 # Env (or ~/.config/macprovider/ops.env): COORDINATOR_URL, GATEWAY_URL,
 # PEARL_SSH (+ PEARL_SSH_IDENTITY/PEARL_SSH_KNOWN_HOSTS for the repo scripts),
@@ -244,7 +247,9 @@ $RB_NATIVE_POOL_CANARY"
   fi
 
   local verdict="$OPS_STATE_DIR/$OPS_SCOPE/preflight-$main_sha.json" fresh=false go="" pricing="" lane_detail="" failed="" owed_pf=""
-  local owed_file="$OPS_STATE_DIR/$OPS_SCOPE/buyer_serving_e2e_owed.json" deploy_log="$OPS_STATE_DIR/$OPS_SCOPE/deploy-$main_sha.log"
+  # Owed evidence (e) outlives the release that deferred it: one ledger entry
+  # per owed model, open until a buyer_serving_e2e record names that model.
+  local owed_dir="$OPS_STATE_DIR/catalog-owed-e2e" deploy_log="$OPS_STATE_DIR/$OPS_SCOPE/deploy-$main_sha.log"
   if [ -f "$verdict" ] && [ -n "$(find "$verdict" -mmin -60 2>/dev/null)" ]; then
     fresh=true
     go="$(json_field "$verdict" 'd["go"]')"
@@ -287,13 +292,17 @@ python3 -m json.tool '$verdict'"
     restore_cmd="$(render_runbook "$RB_CATALOG_RESTORE")"
     # The deploy's own verdict line (sorted keys: buyer_serving_e2e_owed first)
     # records which (e) the activation left owed; only a successful deploy writes it.
-    deploy_cmd="mkdir -p '$OPS_STATE_DIR/$OPS_SCOPE'
+    deploy_cmd="mkdir -p '$OPS_STATE_DIR/$OPS_SCOPE' '$owed_dir'
 scripts/catalog-content-release.sh --deploy --commit $main_sha ${pricing:+--pricing-diff-sha256 $pricing }--preflight-verdict '$verdict' | tee '$deploy_log'
-python3 -I -c 'import json, sys
+python3 -I -c 'import datetime, hashlib, json, os, sys
 v = [json.loads(l) for l in open(sys.argv[1]) if l.startswith(\"{\\\"buyer_serving_e2e_owed\\\"\")]
-owed = (v[-1] if v else {}).get(\"buyer_serving_e2e_owed\") or []
-if owed:
-    json.dump({\"release_id\": sys.argv[3], \"models\": owed}, open(sys.argv[2], \"w\"), sort_keys=True)' '$deploy_log' '$owed_file' '$R'"
+now = datetime.datetime.now(datetime.timezone.utc).strftime(\"%Y-%m-%dT%H:%M:%SZ\")
+for m in (v[-1] if v else {}).get(\"buyer_serving_e2e_owed\") or []:
+    rec = {\"model_id\": m[\"model_id\"], \"sha256\": m[\"sha256\"], \"release_id\": sys.argv[3], \"recorded_at\": now}
+    name = hashlib.sha256((m[\"model_id\"] + \" \" + m[\"sha256\"]).encode()).hexdigest()
+    tmp = os.path.join(sys.argv[2], name + \".tmp\")
+    json.dump(rec, open(tmp, \"w\"), sort_keys=True)
+    os.replace(tmp, os.path.join(sys.argv[2], name + \".json\"))' '$deploy_log' '$owed_dir' '$R'"
     content_downtime="no coordinator restart: one SIGHUP reloads the release${pricing:+ and the rate card}; the canary provider is drained and restarted onto the release, so the requests it would serve go to other providers of its model or wait for its restart and model load; a failed activation rolls back and can strand adopters for 3-11 min"
     if [ "$fresh" = true ] && [ "$go" = true ] && [ "$p_paused" = true ]; then
       set_next catalog_activation blocked "Activate content release $R" "" "$paused_why"
@@ -389,36 +398,66 @@ for i in \$(seq 1 24); do curl -sf -m 5 \"\$COORDINATOR_URL/healthz\" && exit 0;
     next_meta gateway_proof "AGENTS.md#hard-rules--activation-evidence-and-campaign-discipline"
   fi
 
-  # Evidence (e) the activation recorded as owed (SPEC-023-R017 5(e)).
-  local owed_models=""
-  if [ "$(json_field "$owed_file" 'd["release_id"]')" = "$R" ]; then
-    owed_models="$(json_field "$owed_file" '", ".join(m["model_id"] for m in d["models"])')"
-  fi
+  # Evidence (e) owed (SPEC-023-R017 5(e)): every ledger entry whose model no
+  # buyer_serving_e2e record names yet. A malformed entry is unknown, not done.
+  local owed_scan owed_models="" owed_bad=""
+  owed_scan="$(python3 -I - "$owed_dir" "$OPS_STATE_DIR" <<'PY'
+import glob, json, os, sys
+owed_dir, state = sys.argv[1:3]
+evidence = ""
+for path in glob.glob(os.path.join(state, "catalog-*", "buyer_serving_e2e.json")):
+    try:
+        evidence += " " + str(json.load(open(path)).get("evidence", ""))
+    except Exception:
+        pass
+open_models, bad = [], []
+for path in sorted(glob.glob(os.path.join(owed_dir, "*.json"))):
+    try:
+        rec = json.load(open(path))
+        model = rec["model_id"]
+        if not isinstance(model, str) or not model or not isinstance(rec["release_id"], str):
+            raise ValueError
+    except Exception:
+        bad.append(os.path.basename(path))
+        continue
+    if model not in evidence:
+        open_models.append("%s (owed since %s)" % (model, rec["release_id"]))
+print("BAD " + " ".join(bad))
+print("OPEN " + ", ".join(open_models))
+PY
+)"
+  owed_bad="$(printf '%s\n' "$owed_scan" | sed -n 's/^BAD //p')"
+  owed_models="$(printf '%s\n' "$owed_scan" | sed -n 's/^OPEN //p')"
   fact buyer_serving_e2e_owed "$owed_models"
-  if [ "$live_rid" != "$R" ]; then
-    step buyer_serving_e2e pending "${owed_pf:+owed after activation: $owed_pf}"
-  elif [ -z "$owed_models" ]; then
-    step buyer_serving_e2e "done" "the activation recorded no owed evidence (e)"
-  elif marker_done "$OPS_SCOPE" buyer_serving_e2e; then
-    step buyer_serving_e2e "done" "$(marker_field "$OPS_SCOPE" buyer_serving_e2e 'd.get("evidence")')"
-  else
+  if [ -n "$owed_bad" ]; then
+    step buyer_serving_e2e blocked "unreadable owed-evidence record(s): $owed_bad"
+    set_next buyer_serving_e2e blocked "Read the owed evidence (e) records" "ls -l '$owed_dir'" \
+      "owed evidence (e) record(s) in $owed_dir are malformed ($owed_bad); an owed proof is never assumed done"
+  elif [ -n "$owed_models" ]; then
     step buyer_serving_e2e owed "$owed_models: owed by the provider release that first serves it (CLI train canary; #2016 live acceptance)"
-    set_next buyer_serving_e2e manual "Owed evidence (e) for $owed_models: provider restart onto $R, one strict-pin buyer request through the gateway, its settlement row" \
-"# Owed by the provider release that first serves $owed_models (the CLI train canary and the
-# #2016 live acceptance); no provider served it when $R was activated. On that canary:
-# 1. Provider restart onto the release:
+    set_next buyer_serving_e2e manual "Owed evidence (e) for $owed_models: canary restart onto the live release, one buyer request through the gateway served by it, its settlement row" \
+"# Owed by the provider release that first serves the model (the CLI train canary and the
+# #2016 live acceptance): no connected provider served it when its release was activated.
+# On that canary, while it is the only provider serving the model:
+# 1. Provider restart onto the live release:
 ssh \"\$STUDIO_SSH\" 'launchctl kickstart -k gui/\$(id -u)/live.malibu.provider'
-#    then its /v1/status: catalog.release_id == $R, network_state buyer_serving, the model loaded.
-# 2. One strict-pin buyer request through the gateway (the bearer rides curl --config on stdin):
+#    then its /v1/status: catalog.release_id == the live release, network_state buyer_serving,
+#    the model loaded; note safety_telemetry.coordinator_session_id.
+# 2. One buyer request for the model through the gateway (the bearer rides curl --config on stdin):
 #    printf 'header = \"Authorization: Bearer %s\"\\n' \"\$(cat \"\$BUYER_TOKEN_FILE\")\" | curl -sS --config - -D - \\
-#      -H 'X-MacProvider-Pin-Provider: <canary provider id>' -H 'Content-Type: application/json' \\
+#      -H 'Content-Type: application/json' -H 'X-Request-ID: ops-e2e-<nonce>' \\
 #      -d '{\"model\":\"<model>\",\"max_tokens\":16,\"messages\":[{\"role\":\"user\",\"content\":\"Reply with ok.\"}]}' \\
 #      \"\$GATEWAY_URL/v1/chat/completions\"   -> HTTP 200 and an X-Request-ID
-# 3. Its settlement row on Pearl (read-only), at the rate-card row's rates:
-#    ssh \"\$PEARL_SSH\" \"sqlite3 -readonly \$PEARL_COORDINATOR_DB \\\"SELECT model, prompt_rate_per_mtok, completion_rate_per_mtok, gross_credits FROM ledger_request_credits WHERE request_id = (SELECT request_id FROM request_log WHERE external_request_id = '<X-Request-ID>' ORDER BY id DESC LIMIT 1);\\\"\"
-# Then: scripts/ops/catalog-activate.sh next --done buyer_serving_e2e --evidence '<request id, rates, settlement row>'" \
-      "the activation found no connected provider serving $owed_models, so (e) was deferred to the provider release that serves it"
+# 3. On Pearl, read-only: its request_log row names the canary's coordinator session
+#    (provider_assigned_id), and its settlement row carries the rate-card row's rates.
+# Then: scripts/ops/catalog-activate.sh next --done buyer_serving_e2e --evidence '<model id>: <request id, session match, rates, settlement row>'
+# (the evidence must name each model id it proves)" \
+      "a release was activated with (e) owed because no connected provider served the model"
     next_meta buyer_serving_e2e "$TREE_DOC#evidence-after-activation" "the canary restart only: requests it would serve go to other providers of its model or wait for its restart and model load"
+  elif [ "$live_rid" != "$R" ]; then
+    step buyer_serving_e2e pending "${owed_pf:+owed after activation: $owed_pf}"
+  else
+    step buyer_serving_e2e "done" "no owed evidence (e) is open"
   fi
 
   set_next "done" "done" "$R active and proven through the gateway" ""

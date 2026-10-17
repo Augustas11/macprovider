@@ -158,7 +158,9 @@
 #                       staged tree, check the installed writers, remove the
 #                       staging dir. No restart: the installer only runs
 #                       systemctl daemon-reload and enables the reconcile units
-#   Done when the three installed files are the tag's bytes.
+#   Done when the three installed files are the tag's bytes and this
+#   checkout recorded a completed install of the tag (every installer-managed
+#   file verified against the staged bytes).
 #   Env: PEARL_UPDATER_BIN, PEARL_TIER2_WATCHDOG_BIN, PEARL_CONFIG_GUARD,
 #   PEARL_UPDATER_LOCK, PEARL_DEPLOY_LOCK (installed paths on Pearl).
 #
@@ -935,8 +937,15 @@ ub_source() {
     UB_ERR="the running tag $live is not signed by an approved release signer (MACPROVIDER_RELEASE_TAG_ALLOWED_SIGNERS or MACPROVIDER_RELEASE_TAG_GPG_FINGERPRINTS)"
     return
   fi
-  main_sha="$(origin_main_sha)"
-  is_sha40 "$main_sha" || { UB_ERR="cannot resolve origin/main"; return; }
+  # origin/main exactly as origin serves it now: a stale tracking ref after a
+  # failed fetch could approve a tag that is no longer current.
+  main_sha="$(git -C "$REPO_ROOT" ls-remote origin refs/heads/main 2>/dev/null | awk '$2 == "refs/heads/main" {print $1}')"
+  if ! is_sha40 "$main_sha" ||
+    ! git -C "$REPO_ROOT" fetch -q origin "+refs/heads/main:refs/remotes/origin/main" 2>/dev/null ||
+    [ "$(git -C "$REPO_ROOT" rev-parse -q --verify refs/remotes/origin/main 2>/dev/null)" != "$main_sha" ]; then
+    UB_ERR="cannot resolve origin/main exactly as origin serves it"
+    return
+  fi
   if ! git -C "$REPO_ROOT" merge-base --is-ancestor "$UB_COMMIT" "$main_sha" 2>/dev/null; then
     UB_ERR="the running tag $live ($UB_COMMIT) is not on origin/main"
     return
@@ -999,6 +1008,12 @@ gather_updater_bundle() {
   done <<<"$UB_EXPECT"
   mismatched="${mismatched# }"
   fact updater_bundle_mismatched "$mismatched"
+  # Done needs this tag's completed, fully verified install too: matching
+  # writers alone can be a half-finished install.
+  local installed_commit=""
+  marker_done "$OPS_SCOPE" install && installed_commit="$(marker_field "$OPS_SCOPE" install 'd.get("commit")')"
+  fact updater_bundle_installed_commit "$installed_commit"
+  [ -n "$mismatched" ] || [ "$installed_commit" = "$UB_COMMIT" ] || mismatched="no verified install of $UB_TAG recorded"
   if [ -z "$mismatched" ]; then
     step pearl_state "done" "installed updater writers are $UB_TAG's bytes"
     step updater_bundle "done" ""
@@ -1029,12 +1044,36 @@ while [ $# -ge 3 ]; do
   shift 3
 done
 [ -n "$expect" ] || { echo "refused: no expected writer digests" >&2; exit 1; }
+# A first install may find no lock file yet: create it root-only (0600).
 for l in "$ulock" "$dlock"; do
-  if [ -L "$l" ] || [ ! -f "$l" ]; then echo "refused: lock $l is not a regular file" >&2; exit 1; fi
+  if [ -L "$l" ]; then echo "refused: lock $l is a symlink" >&2; exit 1; fi
+  [ -e "$l" ] || ( umask 077; : >> "$l" )
+  if [ ! -f "$l" ]; then echo "refused: lock $l is not a regular file" >&2; exit 1; fi
 done
 exec 7>>"$ulock"; flock -n 7 || { echo "lock busy: $ulock (an updater run holds it)" >&2; exit 1; }
 exec 8>>"$dlock"; flock -n 8 || { echo "lock busy: $dlock (a deploy holds it)" >&2; exit 1; }
 bash "$d/ops/pearl-updater/install-pearl-updater.sh"
+# Every file the installer copies must now be the staged bytes, not only the
+# three guard-bearing writers (an installer that failed half way exits above).
+root="${MACPROVIDER_UPDATER_INSTALL_ROOT:-}"
+u="$d/ops/pearl-updater"
+{
+  for f in macprovider-pearl-update macprovider-tier2-enforcement-watchdog macprovider-pearl-update-gate macprovider-pearl-updater-alert; do
+    echo "$u/$f $root/usr/local/sbin/$f"
+  done
+  echo "$u/release-signing-public.pem $root/usr/local/share/macprovider/release-signing-public.pem"
+  echo "$u/catalog-canary-proof.py $root/usr/local/share/macprovider/catalog-canary-proof.py"
+  echo "$d/scripts/lib/coordinator_config_guard.py $root/usr/local/share/macprovider/scripts/coordinator_config_guard.py"
+  grep -v '^#' "$d/scripts/catalog-verifier-bundle.txt" | grep -v '^$' | while read -r b; do echo "$d/$b $root/usr/local/share/macprovider/$b"; done
+  for f in macprovider-pearl-updater.service macprovider-pearl-updater.timer macprovider-pearl-updater-alert@.service macprovider-pearl-updater-reconcile.service macprovider-tier2-enforcement-reconcile.service; do
+    echo "$u/$f $root/etc/systemd/system/$f"
+  done
+  for g in macprovider-coordinator.service macprovider-gateway.service canary-buyer.service macprovider-archive-rotate.service stats-billing-mirror.service; do
+    echo "$u/macprovider-pearl-updater-transaction-gate.conf $root/etc/systemd/system/$g.d/50-pearl-updater-transaction-gate.conf"
+  done
+} | while read -r src dst; do
+  cmp -s "$src" "$dst" || { echo "installed $dst is not the staged bytes after the install" >&2; exit 1; }
+done
 printf '%s' "$expect" | while read -r inst want; do
   [ -n "$inst" ] || continue
   got="$(sha256sum "$inst" | cut -d' ' -f1)"
@@ -1050,6 +1089,7 @@ ub_internal() {
   [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] ||
     refuse "_updater-bundle runs only from 'PEARL_RUNTIME_TASK=updater-bundle $0 next --run' (live-ops lock, downtime banner)"
   require_pearl_ssh
+  OPS_SCOPE="updater-bundle"
   ub_layout
   ub_source
   [ -z "$UB_ERR" ] || refuse "$UB_ERR"
@@ -1063,7 +1103,7 @@ ub_internal() {
     paths+=("$e")
   done
   staged="$(git -C "$REPO_ROOT" archive --format=tar "$UB_COMMIT" "${paths[@]}" |
-    pearl_ssh "sudo sh -c 'umask 077; d=\$(mktemp -d /var/tmp/macprovider-updater-bundle.XXXXXXXX) && tar -xf - -C \"\$d\" && printf %s \"\$d\"'")" ||
+    pearl_ssh "sudo sh -c 'umask 077; d=\$(mktemp -d /var/tmp/macprovider-updater-bundle.XXXXXXXX) || exit 1; tar -xf - -C \"\$d\" || { rm -rf -- \"\$d\"; exit 1; }; printf %s \"\$d\"'")" ||
     die "cannot stage the $UB_TAG updater bundle on Pearl"
   [[ "$staged" =~ ^/var/tmp/macprovider-updater-bundle\.[A-Za-z0-9]+$ ]] || die "unexpected staging dir from Pearl: $staged"
   args="$(printf '%s' "$UB_EXPECT" | tr '\n' ' ')"
@@ -1076,6 +1116,8 @@ ub_internal() {
     pearl_ssh "sudo rm -rf -- $staged" </dev/null || log "could not remove $staged on Pearl; remove it by hand"
     return "$rc"
   fi
+  mark_done "$OPS_SCOPE" install "installed the $UB_TAG updater bundle" \
+    "$(python3 -I -c 'import json,sys; print(json.dumps({"tag": sys.argv[1], "commit": sys.argv[2]}))' "$UB_TAG" "$UB_COMMIT")"
 }
 
 gather() {
