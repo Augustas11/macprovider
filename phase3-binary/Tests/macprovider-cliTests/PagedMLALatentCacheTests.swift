@@ -89,6 +89,8 @@ final class PagedMLALatentCacheTests: XCTestCase {
             ([3, 1, 2], [3, 1, 2]), ([2, 3, 3], [1, 3, 2]), ([3, 3, 3], [2, 2, 2]),
             ([1, 1, 1], [1, 1, 1]), ([2, 2, 2], [2, 1, 2]), ([3, 2, 1], [2, 2, 1]),
         ]
+        // Odd rounds feed the columns one at a time, as the model's
+        // per-column verification does; even rounds feed the padded width at once.
         for (round, (inputs, retained)) in rounds.enumerated() {
             let maps = rows.indices.map { index in
                 MTPPackedVerificationRowMap(
@@ -105,9 +107,20 @@ final class PagedMLALatentCacheTests: XCTestCase {
             XCTAssertEqual(batch.packedVerificationRowLengths, inputs)
             for index in rows.indices {
                 let columns = randomInputs(length: width, rng: &rng)
-                // The pinned model writes every padded column into the paged
-                // copy; the fork's batch writes only the valid ones.
-                apply(batch.rowCaches[index], columns)
+                // The pinned model runs every padded column on the paged copy,
+                // which takes only the valid ones; the fork's batch is given
+                // only the valid ones.
+                if round % 2 == 1 {
+                    for c in 0 ..< width {
+                        apply(batch.rowCaches[index], (
+                            columns.0[.ellipsis, c ..< (c + 1), 0...],
+                            columns.1[0..., c ..< (c + 1), 0...],
+                            columns.2[0..., c ..< (c + 1), 0...]
+                        ))
+                    }
+                } else {
+                    apply(batch.rowCaches[index], columns)
+                }
                 let valid = inputs[index]
                 apply(reference.rowCaches[index], (
                     columns.0[.ellipsis, ..<valid, 0...],
@@ -116,6 +129,11 @@ final class PagedMLALatentCacheTests: XCTestCase {
                 ))
             }
             XCTAssertEqual(rows.map(\.offset), references.map(\.offset), "verification mutated a live row")
+            // The strict facade's post-forward check: query offset + valid width.
+            XCTAssertEqual(
+                batch.mtpPackedHostBatchOffsets, zip(rows, inputs).map { $0.offset + $1 },
+                "round \(round) post-forward offsets"
+            )
             batch.finalize()
             reference.finalize()
             let resolutions = try batch.pendingMTPResolutions()
@@ -131,19 +149,37 @@ final class PagedMLALatentCacheTests: XCTestCase {
         }
     }
 
-    func testStagedExtraFoldedKeysIsTheFoldedDifferenceOfThePadding() {
-        // offset 17, kpool 4: valid 1 -> pending 2, width 3 -> pending 0.
-        XCTAssertEqual(PagedMLALatentCache.stagedExtraFoldedKeys(offset: 17, validWidth: 1, width: 3, kpool: 4), 4)
-        XCTAssertEqual(PagedMLALatentCache.stagedExtraFoldedKeys(offset: 16, validWidth: 1, width: 3, kpool: 4), 0)
-        XCTAssertEqual(PagedMLALatentCache.stagedExtraFoldedKeys(offset: 16, validWidth: 3, width: 3, kpool: 4), 0)
-        for offset in 0 ..< 12 {
-            for width in 1 ... 3 {
-                for valid in 1 ... width {
-                    let extra = PagedMLALatentCache.stagedExtraFoldedKeys(offset: offset, validWidth: valid, width: width, kpool: 4)
-                    XCTAssertGreaterThanOrEqual(extra, 0)
-                    XCTAssertEqual(extra % 4, 0)
-                }
+    /// Window A2: a right-padded packed verify (widths 2, 1, 2, 2) failed the
+    /// strict facade with postForwardCacheOffsetMismatch on the shared-KV
+    /// source layer (expected 283, actual 284) because the padding column was
+    /// written into the short row's staged copy. Each staged copy now takes
+    /// only its valid columns; checked on the CPU device (no metallib needed).
+    func testPaddedVerifyColumnsWriteNothingIntoTheStagedCopy() throws {
+        try Device.withDefaultDevice(.cpu) {
+            var rng = SplitMix(seed: 9)
+            let rows = [makeCache(), makeCache(), makeCache(), makeCache()]
+            for (row, length) in zip(rows, [13, 6, 22, 9]) {
+                apply(row, randomInputs(length: length, rng: &rng))
             }
+            let inputs = [2, 1, 2, 2]
+            let maps = rows.indices.map {
+                MTPPackedVerificationRowMap(
+                    rowIndex: $0, queryOffset: rows[$0].offset,
+                    inputCount: inputs[$0], proposalCount: inputs[$0] - 1
+                )
+            }
+            let batch = PagedMLABatchLayerCache(rowCaches: rows)
+            try batch.prepareMTPPackedVerification(rowMaps: maps)
+            for index in rows.indices {
+                for _ in 0 ..< 2 { apply(batch.rowCaches[index], randomInputs(length: 1, rng: &rng)) }
+            }
+            XCTAssertEqual(batch.mtpPackedHostBatchOffsets, zip(rows, inputs).map { $0.offset + $1 })
+            batch.finalize()
+            let resolutions = try batch.pendingMTPResolutions()
+            XCTAssertEqual(resolutions.map(\.appendedTokenCount), inputs)
+            let before = rows[1].offset
+            _ = try resolutions[1].stageCommit(inputCount: 1)
+            XCTAssertEqual(rows[1].offset, before + 1)
         }
     }
 

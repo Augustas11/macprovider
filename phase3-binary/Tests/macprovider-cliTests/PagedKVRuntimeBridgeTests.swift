@@ -3960,6 +3960,28 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertNotEqual(paddedDigest, changedDigest)
     }
 
+    /// Window A2 journey steps 05 and 09: with the lab state-digest observer
+    /// installed, every glm5_next native prefill failed because the drafter
+    /// digest cut each state array as a [.., T, D] KV slab at the drafter
+    /// position; a GLM5NextAttentionCache state is already logical (empty
+    /// slots are [0]). It now hashes those arrays whole, and the digest still
+    /// tells different states apart.
+    func testDrafterDigestHashesAGLMLatentCacheStateWhole() throws {
+        try Device.withDefaultDevice(.cpu) {
+            func cache(_ latent: [Float]) -> GLM5NextAttentionCache {
+                let cache = GLM5NextAttentionCache(kpool: 4)
+                _ = cache.appendLatent(MLXArray(latent, [1, 1, latent.count, 1]))
+                return cache
+            }
+            let state = MTPDrafterState(cache: [cache([1, 2, 3])], nextPosition: 5, seedToken: nil, seedHidden: nil)
+            let same = MTPDrafterState(cache: [cache([1, 2, 3])], nextPosition: 5, seedToken: nil, seedHidden: nil)
+            let changed = MTPDrafterState(cache: [cache([1, 2, 4])], nextPosition: 5, seedToken: nil, seedHidden: nil)
+            let digest = try PagedKVSharedForwardBackend.nativeMTPDrafterDigestForTest(state: state, seed: 7)
+            XCTAssertEqual(digest, try PagedKVSharedForwardBackend.nativeMTPDrafterDigestForTest(state: same, seed: 7))
+            XCTAssertNotEqual(digest, try PagedKVSharedForwardBackend.nativeMTPDrafterDigestForTest(state: changed, seed: 7))
+        }
+    }
+
     func testLabStateDigestObserverFailsClosedForPagedSlidingWindowCache() async throws {
         guard PagedKVMetallibGate.defaultMetallibExists() else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")

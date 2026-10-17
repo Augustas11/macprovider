@@ -920,6 +920,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                                 } catch {
                                     // The shared target forward stays committed
                                     // for every peer; only this row fails.
+                                    ContinuousBatchingPolicy.logPrefillFailed(error)
                                     self.removeRowState(for: input.requestID)
                                     drafterFailures.insert(index)
                                 }
@@ -1022,6 +1023,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                         sampledToken: input.sampleFirstToken ? sampledToken : nil
                     ))
                 } catch {
+                    ContinuousBatchingPolicy.logPrefillFailed(error)
                     self.removeRowState(for: input.requestID)
                     outputs.append(ContinuousBatchPrefillOutput(
                         requestID: input.requestID,
@@ -3221,12 +3223,17 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
         for (layerIndex, cache) in state.cache.enumerated() {
             update(&hasher, label: "layer", value: String(layerIndex))
+            // A glm5_next drafter cache's state is already exactly its logical
+            // contents (latent to `offset`, pooled, pending and folded keys,
+            // empty slots as [0]), not [.., T, D] KV slabs to cut at the
+            // drafter position.
+            let logicalTokens: Int? = cache is any GLM5NextLatentCache ? nil : state.nextPosition
             for (slotIndex, array) in cache.state.enumerated() {
                 try updateArrayDigest(
                     &hasher,
                     label: "slot_\(slotIndex)",
                     array: array,
-                    logicalTokens: state.nextPosition
+                    logicalTokens: logicalTokens
                 )
             }
         }

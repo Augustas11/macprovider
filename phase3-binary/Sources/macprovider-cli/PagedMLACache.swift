@@ -108,6 +108,18 @@ final class PagedMLALatentCache: GLM5NextLatentCache, CustomDebugStringConvertib
     }
 
     func appendLatent(_ values: MLXArray) -> MLXArray {
+        var values = values
+        if let budget = stagedValidTokenBudget.latent {
+            let accept = min(values.dim(2), max(0, budget))
+            stagedValidTokenBudget.latent = budget - accept
+            if accept == 0, let latentBuffer, offset > 0 {
+                // A right-padding column: write nothing, attend the row's keys.
+                let logical = latentBuffer[.ellipsis, ..<offset, 0...]
+                guard reconstructViaGather else { return logical }
+                return PagedKVCache.reversedBlockGather(logical, blockSizeTokens: blockSizeTokens, kernel: &registeredKernel)
+            }
+            if accept > 0, accept < values.dim(2) { values = values[.ellipsis, ..<accept, 0...] }
+        }
         let length = values.dim(2)
         let previous = offset
         let needed = previous + length
@@ -136,6 +148,18 @@ final class PagedMLALatentCache: GLM5NextLatentCache, CustomDebugStringConvertib
     }
 
     func takeCompleteWindows(keys: MLXArray, gates: MLXArray) -> (MLXArray, MLXArray)? {
+        var keys = keys
+        var gates = gates
+        if let budget = stagedValidTokenBudget.indexer {
+            let accept = min(keys.dim(1), max(0, budget))
+            stagedValidTokenBudget.indexer = budget - accept
+            // Right-padding indexer keys: no pending, folded or pooled write.
+            if accept == 0 { return nil }
+            if accept < keys.dim(1) {
+                keys = keys[0..., ..<accept]
+                gates = gates[0..., ..<accept]
+            }
+        }
         let allKeys = pendingKeys.map { concatenated([$0, keys], axis: 1) } ?? keys
         let allGates = pendingGates.map { concatenated([$0, gates], axis: 1) } ?? gates
         let total = allKeys.dim(1)
@@ -177,29 +201,18 @@ final class PagedMLALatentCache: GLM5NextLatentCache, CustomDebugStringConvertib
         pooledCount = needed
     }
 
-    /// Extra folded raw keys a staged packed-verification copy keeps
-    /// (`PagedMLABatchLayerCache`). The model writes a row's right-padding
-    /// columns into the copy, where the fork's `GLM5NextLatentCacheBatch`
-    /// writes nothing; without this the padding would push history out of
-    /// the capped tail, and the commit's trim would leave a shorter raw tail
-    /// (and `maxTrimCount`) than `GLM5NextLatentRowTransaction` leaves.
-    var stagedExtraFoldedKeys = 0
+    /// A staged packed-verification copy (`PagedMLABatchLayerCache`) takes
+    /// only its row's valid columns: latent tokens and indexer keys it may
+    /// still accept (nil: unlimited). The pinned model reads per-row lengths
+    /// only from the fork's `GLM5NextLatentCacheBatch`, so it still runs a
+    /// shorter row's right-padding columns; this copy writes nothing for
+    /// them, as that batch does, so its offset after the forward is the
+    /// row's query offset plus its valid width (the strict facade's
+    /// post-forward check on the shared-KV source layer) and its pending,
+    /// folded and pooled keys equal the fork's working copy.
+    var stagedValidTokenBudget: (latent: Int?, indexer: Int?) = (nil, nil)
 
-    private var foldedCapacity: Int { kpool - 1 + maxTrim + stagedExtraFoldedKeys }
-
-    /// The extra capacity that makes a copy written with `width` columns and
-    /// then trimmed back to `retaining <= validWidth` columns hold exactly the
-    /// raw tail of a copy written with `validWidth` columns and trimmed the
-    /// same way. The capped part is the folded keys only (the pending window
-    /// is never capped), and both sequences end in the same retained tokens,
-    /// so equal tail lengths mean equal tails:
-    /// `pad + pending(offset + validWidth) - pending(offset + width)`, a
-    /// non-negative multiple of `kpool`.
-    static func stagedExtraFoldedKeys(offset: Int, validWidth: Int, width: Int, kpool: Int) -> Int {
-        let pad = width - validWidth
-        let pool = max(1, kpool)
-        return pad + (offset + validWidth) % pool - (offset + width) % pool
-    }
+    private var foldedCapacity: Int { kpool - 1 + maxTrim }
 
     private func keepTail(_ kept: MLXArray?, _ added: MLXArray) -> MLXArray? {
         guard foldedCapacity > 0 else { return nil }
@@ -387,10 +400,10 @@ final class PagedMLALatentCache: GLM5NextLatentCache, CustomDebugStringConvertib
 /// the staged copy and adopts it into the row, as
 /// `GLM5NextLatentRowTransaction.stageCommit(retaining:)` does (SPEC-039
 /// FR-PKV15). An aborted round leaves the row untouched. The pinned model
-/// reads per-row lengths only from `GLM5NextLatentCacheBatch`, so here it also
-/// runs a shorter row's right-padding columns, after that row's valid columns
-/// and only on its staged copy; the resolution trims them with the rejected
-/// proposals (at most `maxTrim` tokens), so the committed row is the same.
+/// reads per-row lengths only from `GLM5NextLatentCacheBatch`, so it also
+/// runs a shorter row's right-padding columns; each staged copy accepts only
+/// its row's valid columns (`stagedValidTokenBudget`) and writes nothing for
+/// the padding, as the fork's batch does.
 final class PagedMLABatchLayerCache: GLM5NextBatchedLatentCache, MTPPackedVerificationCache, @unchecked Sendable {
     struct PendingMTPResolution {
         let rowCache: PagedMLALatentCache
@@ -498,8 +511,8 @@ final class PagedMLABatchLayerCache: GLM5NextBatchedLatentCache, MTPPackedVerifi
         guard zip(rows, rowMaps).allSatisfy({ $0.offset == $1.queryOffset }) else {
             throw ContinuousBatchSchedulerError.unsupported("native_mtp_packed_cache_offset_mismatch")
         }
-        // The staged copy takes the whole padded width; its later trim of
-        // padding plus rejected proposals must stay exact.
+        // A staged copy takes its row's valid columns; the commit's trim of
+        // the rejected proposals (up to width - 1) must stay exact.
         let width = rowMaps.map(\.inputCount).max() ?? 0
         guard rows.allSatisfy({ $0.maxTrim >= width - 1 }) else {
             throw ContinuousBatchSchedulerError.unsupported("native_mtp_packed_cache_width_exceeds_exact_trim")
@@ -507,9 +520,7 @@ final class PagedMLABatchLayerCache: GLM5NextBatchedLatentCache, MTPPackedVerifi
         preparedMTPPackedRowMaps = rowMaps
         stagedRows = zip(rows, rowMaps).map { row, map in
             let staged = row.concreteCopy()
-            staged.stagedExtraFoldedKeys = PagedMLALatentCache.stagedExtraFoldedKeys(
-                offset: row.offset, validWidth: map.inputCount, width: width, kpool: row.kpool
-            )
+            staged.stagedValidTokenBudget = (map.inputCount, map.inputCount)
             return staged
         }
         pendingMTPResolutionsByRow = nil
