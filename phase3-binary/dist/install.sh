@@ -7776,7 +7776,8 @@ _bootstrap_python_die() {
 
 # release_redirect_allowed <original-url> <redirect-url>: a redirect may only
 # stay on HTTPS and go to the original host or a release download host
-# (GitHub, its asset CDN, the Malibu mirror), never to another endpoint (#2036).
+# (GitHub, its asset CDN, and the Malibu mirror when this repository uses it),
+# never to another endpoint (#2036).
 release_redirect_allowed() {
   local original_host target_host
   case "$2" in https://*) ;; *) return 1 ;; esac
@@ -7787,7 +7788,8 @@ release_redirect_allowed() {
   case "$target_host" in *@*) return 1 ;; esac
   target_host="$(printf '%s' "$target_host" | tr '[:upper:]' '[:lower:]')"
   case "$target_host" in
-    "$original_host"|github.com|*.github.com|*.githubusercontent.com|download.malibu.tech) return 0 ;;
+    "$original_host"|github.com|*.github.com|*.githubusercontent.com) return 0 ;;
+    download.malibu.tech) [ "${GITHUB_REPO:-}" = "${RELEASE_MIRROR_REPO:-}" ] && return 0 ;;
   esac
   return 1
 }

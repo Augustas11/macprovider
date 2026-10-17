@@ -226,10 +226,26 @@ case "\$url" in
     ;;
   https://coordinator.malibu.tech/healthz)
     has coordinator-down && exit 7
+    if has healthz-redirect && [ -n "\$write_fmt" ]; then
+      printf '%s' "https://coordinator.malibu.tech/healthz/v2"
+      exit 0
+    fi
+    body '{"status":"ok","recommended_binary_version":"1.8.123"}'
+    exit 0
+    ;;
+  https://coordinator.malibu.tech/healthz/v2)
     body '{"status":"ok","recommended_binary_version":"1.8.123"}'
     exit 0
     ;;
   https://api.github.com/*)
+    if has api-redirect-elsewhere && [ -n "\$write_fmt" ]; then
+      printf '%s' "https://internal.example/releases"
+      exit 0
+    fi
+    if has api-redirect-same-host && [ -n "\$write_fmt" ] && [ "\${url#*page=}" = "1" ]; then
+      printf '%s' "https://api.github.com/repositories/1/releases?page=2"
+      exit 0
+    fi
     if has api-rate-limited; then
       [ -n "\$headers" ] && printf 'HTTP/2 403\r\nx-ratelimit-remaining: 0\r\nx-ratelimit-reset: 1790000000\r\n\r\n' > "\$headers"
       exit 22
@@ -613,6 +629,31 @@ EOF
 )"
 run_checker uncapped-old-installer 1 INSTALL_SH_FILE="$WORKDIR/uncapped.sh" INSTALL_SH_REFERENCE_FILE="$WORKDIR/uncapped.sh"
 expect_output uncapped-old-installer 'failed to query GitHub Releases API'
+
+# The gate follows an allowed redirect with the repository copy's own helper.
+write_curl_mock healthz-redirect
+run_checker head-installer-healthz-redirect 1 INSTALL_SH_FILE="$install_sh"
+expect_output head-installer-healthz-redirect 'discover_latest_release_tag resolved v1.8.123'
+expect_no_fetch head-installer-healthz-redirect 'api.github.com'
+
+# An older release copy that passes curl -L: the gate drops -L, follows a
+# same-host redirect itself, and never follows one to another endpoint.
+write_fixture "$WORKDIR/legacy-l.sh" "$(cat <<'EOF'
+latest_release_tag() {
+  json="$(curl -fsSL "https://api.github.com/repos/Augustas11/macprovider/releases?per_page=100&page=1")" \
+    || die 3 "failed to query GitHub Releases API"
+  printf '%s' "$json" | grep -q 'v1.8.122' || die 3 "unexpected body"
+  printf '%s' 'v1.8.123'
+}
+EOF
+)"
+write_curl_mock api-redirect-same-host
+run_checker legacy-redirect-same-host 0 INSTALL_SH_FILE="$WORKDIR/legacy-l.sh" INSTALL_SH_REFERENCE_FILE="$WORKDIR/legacy-l.sh"
+expect_output legacy-redirect-same-host 'latest_release_tag resolved v1.8.123'
+write_curl_mock api-redirect-elsewhere
+run_checker legacy-redirect-elsewhere 1 INSTALL_SH_FILE="$WORKDIR/legacy-l.sh" INSTALL_SH_REFERENCE_FILE="$WORKDIR/legacy-l.sh"
+expect_output legacy-redirect-elsewhere 'failed to query GitHub Releases API'
+expect_no_fetch legacy-redirect-elsewhere 'internal.example'
 
 # A valid INSTALL_SH_RELEASE_TAG selects that tag's dist/install.sh as the
 # repository copy (a throwaway repository holding the checker and a tag).

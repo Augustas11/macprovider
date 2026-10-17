@@ -477,7 +477,7 @@ stream under a hard byte cap: the release-metadata cap for `checksums.txt`,
 cap well above the largest current asset for the tarball and the Malibu DMG.
 Every release-discovery response (GitHub API pages, the signed discovery head
 and its signature, the mirror index, the coordinator advertisement) MUST be
-read under its own cap the same way and never buffered whole. A transfer whose
+read under its own cap the same way, and never read past that cap. A transfer whose
 declared or received size passes its cap MUST be cancelled, MUST fail that
 step, and MUST leave no file. A redirect of an HTTPS request MUST be followed
 only over HTTPS to the original host or a release download host (GitHub, its

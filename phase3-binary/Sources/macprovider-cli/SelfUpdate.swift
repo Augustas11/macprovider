@@ -583,6 +583,13 @@ struct SelfUpdate {
                actualArtifactIndexSHA.lowercased() != expectedArtifactIndexSHA256.lowercased() {
                 throw UpdateError.compatibilityArtifactIndexInvalid("discovery_head_digest_mismatch")
             }
+            // Both assets may reach their cap before checksums.txt vouches for
+            // them, so the space for both is required up front (#2036).
+            try validateFreeSpace(
+                for: tempDir,
+                requiredForKnownTarballAt: nil,
+                minimum: 2 * Self.maxReleaseAssetBytes + 512 * 1_024 * 1_024
+            )
             try await download(from: tarball.browserDownloadURL, to: tarballURL, maximumBytes: Self.maxReleaseAssetBytes)
             try await download(from: malibuDMG.browserDownloadURL, to: malibuDMGURL, maximumBytes: Self.maxReleaseAssetBytes)
             return try prepareValidatedUpdateAssets(
@@ -1306,6 +1313,10 @@ struct SelfUpdate {
         return components.url
     }
 
+    private var redirectPolicy: ReleaseRedirectPolicy {
+        releaseMirrorEnabled ? .withMirror : .withoutMirror
+    }
+
     /// Reads one untrusted response body under a hard byte cap (#2036). A
     /// declared length over `maximumBytes` is refused before the body, and the
     /// task is cancelled the moment the streamed bytes pass it, so an oversized
@@ -1316,8 +1327,10 @@ struct SelfUpdate {
         maximumBytes: Int,
         oversized: UpdateError
     ) async throws -> (Data, URLResponse) {
-        let (bytes, response) = try await session.bytes(for: request, delegate: ReleaseRedirectPolicy.shared)
-        guard let requested = request.url, ReleaseRedirectPolicy.allows(from: requested, to: response.url) else {
+        let (bytes, response) = try await session.bytes(for: request, delegate: redirectPolicy)
+        guard let requested = request.url,
+              ReleaseRedirectPolicy.allows(from: requested, to: response.url, mirrorAllowed: releaseMirrorEnabled)
+        else {
             bytes.task.cancel()
             throw UpdateError.untrustedDownloadURL(response.url?.absoluteString ?? "")
         }
@@ -1351,9 +1364,9 @@ struct SelfUpdate {
         do {
             let (bytes, response) = try await session.bytes(
                 for: URLRequest(url: url),
-                delegate: ReleaseRedirectPolicy.shared
+                delegate: redirectPolicy
             )
-            guard ReleaseRedirectPolicy.allows(from: url, to: response.url) else {
+            guard ReleaseRedirectPolicy.allows(from: url, to: response.url, mirrorAllowed: releaseMirrorEnabled) else {
                 bytes.task.cancel()
                 throw UpdateError.untrustedDownloadURL(response.url?.absoluteString ?? url.absoluteString)
             }
@@ -2978,11 +2991,15 @@ struct SelfUpdate {
         }
     }
 
-    private func validateFreeSpace(for directory: URL, requiredForKnownTarballAt tarball: URL?) throws {
+    private func validateFreeSpace(
+        for directory: URL,
+        requiredForKnownTarballAt tarball: URL?,
+        minimum: Int64 = 512 * 1024 * 1024
+    ) throws {
         let attrs = try FileManager.default.attributesOfFileSystem(forPath: directory.path)
         let free = (attrs[.systemFreeSize] as? NSNumber)?.int64Value ?? 0
         let tarballSize = tarball.flatMap { (try? FileManager.default.attributesOfItem(atPath: $0.path)[.size] as? NSNumber)?.int64Value } ?? 0
-        let required = max(512 * 1024 * 1024, tarballSize * 3)
+        let required = max(minimum, tarballSize * 3)
         guard free >= required else {
             throw UpdateError.insufficientDiskSpace(required: required, available: free)
         }
@@ -3415,23 +3432,34 @@ struct GitHubAsset: Decodable {
 }
 
 /// Redirect policy for every untrusted release read (#2036): a request that
-/// started on HTTPS may only be redirected over HTTPS, to its own host or to a
-/// release download host (GitHub, its asset CDN, the Malibu mirror). Release
-/// hosts are untrusted transport; a redirect must not turn them into a probe
-/// of other endpoints.
+/// started on HTTPS may only be redirected over HTTPS on the default port, to
+/// its own host or to a release download host (GitHub, its asset CDN, and the
+/// Malibu mirror when the mirror is in use). Release hosts are untrusted
+/// transport; a redirect must not turn them into a probe of other endpoints.
 final class ReleaseRedirectPolicy: NSObject, URLSessionTaskDelegate, Sendable {
-    static let shared = ReleaseRedirectPolicy()
+    static let withMirror = ReleaseRedirectPolicy(mirrorAllowed: true)
+    static let withoutMirror = ReleaseRedirectPolicy(mirrorAllowed: false)
 
-    static func allows(from original: URL, to target: URL?) -> Bool {
+    let mirrorAllowed: Bool
+
+    init(mirrorAllowed: Bool) {
+        self.mirrorAllowed = mirrorAllowed
+    }
+
+    static func allows(from original: URL, to target: URL?, mirrorAllowed: Bool) -> Bool {
         guard original.scheme?.lowercased() == "https" else { return true }
-        guard let target, target.scheme?.lowercased() == "https", let host = target.host?.lowercased() else {
+        guard let target,
+              target.scheme?.lowercased() == "https",
+              target.port == nil || target.port == 443,
+              let host = target.host?.lowercased()
+        else {
             return false
         }
         return host == original.host?.lowercased()
             || host == "github.com"
             || host.hasSuffix(".github.com")
             || host.hasSuffix(".githubusercontent.com")
-            || host == SelfUpdate.releaseMirrorHost
+            || (mirrorAllowed && host == SelfUpdate.releaseMirrorHost)
     }
 
     func urlSession(
@@ -3442,7 +3470,7 @@ final class ReleaseRedirectPolicy: NSObject, URLSessionTaskDelegate, Sendable {
         completionHandler: @escaping (URLRequest?) -> Void
     ) {
         guard let original = task.originalRequest?.url,
-              Self.allows(from: original, to: request.url)
+              Self.allows(from: original, to: request.url, mirrorAllowed: mirrorAllowed)
         else {
             completionHandler(nil)
             return

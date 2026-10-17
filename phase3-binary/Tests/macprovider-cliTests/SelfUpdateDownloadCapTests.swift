@@ -149,12 +149,17 @@ final class SelfUpdateDownloadCapTests: XCTestCase {
 
     func testRedirectPolicy() {
         let github = URL(string: "https://github.com/Augustas11/macprovider/releases/download/v1/x")!
-        XCTAssertTrue(ReleaseRedirectPolicy.allows(from: github, to: URL(string: "https://objects.githubusercontent.com/x")))
-        XCTAssertTrue(ReleaseRedirectPolicy.allows(from: github, to: URL(string: "https://download.malibu.tech/releases/v1/x")))
-        XCTAssertFalse(ReleaseRedirectPolicy.allows(from: github, to: URL(string: "http://objects.githubusercontent.com/x")))
-        XCTAssertFalse(ReleaseRedirectPolicy.allows(from: github, to: URL(string: "https://169.254.169.254/latest")))
-        XCTAssertFalse(ReleaseRedirectPolicy.allows(from: github, to: URL(string: "https://githubusercontent.com.evil.example/x")))
-        XCTAssertFalse(ReleaseRedirectPolicy.allows(from: github, to: nil))
+        func allows(_ target: String?, mirror: Bool = true) -> Bool {
+            ReleaseRedirectPolicy.allows(from: github, to: target.flatMap(URL.init(string:)), mirrorAllowed: mirror)
+        }
+        XCTAssertTrue(allows("https://objects.githubusercontent.com/x"))
+        XCTAssertTrue(allows("https://download.malibu.tech/releases/v1/x"))
+        XCTAssertFalse(allows("https://download.malibu.tech/releases/v1/x", mirror: false), "a fork never reaches the mirror")
+        XCTAssertFalse(allows("http://objects.githubusercontent.com/x"))
+        XCTAssertFalse(allows("https://objects.githubusercontent.com:8443/x"))
+        XCTAssertFalse(allows("https://169.254.169.254/latest"))
+        XCTAssertFalse(allows("https://githubusercontent.com.evil.example/x"))
+        XCTAssertFalse(allows(nil))
     }
 
     func testOversizedCoordinatorAdvertisementIsCancelledMidStream() async throws {

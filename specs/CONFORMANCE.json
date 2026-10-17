@@ -8427,7 +8427,10 @@
         "scripts/test-install-version-pin.sh:s11-redirect-refused-",
         "scripts/test-install-sh-consumer-health-alarm.sh:redirect-elsewhere",
         "scripts/test-install-sh-consumer-health-alarm.sh:uncapped-old-installer",
-        "scripts/test-install-sh-consumer-health-alarm.sh:release-tag-reference"
+        "scripts/test-install-sh-consumer-health-alarm.sh:release-tag-reference",
+        "scripts/test-install-version-pin.sh:s13-fork-no-mirror-redirect",
+        "scripts/test-install-sh-consumer-health-alarm.sh:legacy-redirect-elsewhere",
+        "scripts/test-install-sh-consumer-health-alarm.sh:head-installer-healthz-redirect"
       ],
       "journeys": [],
       "evidence": [],

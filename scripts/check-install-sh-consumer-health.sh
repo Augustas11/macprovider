@@ -213,6 +213,9 @@ if grep -q '^discover_latest_release_tag()' "$INSTALLER"; then
   done
   # The copy's streamed download helper and its caps, when it has them.
   if grep -q '^capped_download()' "$INSTALLER"; then
+    if grep -q '^release_redirect_allowed()' "$INSTALLER"; then
+      extract_function release_redirect_allowed >> "$LIB"
+    fi
     extract_function capped_download >> "$LIB"
     grep -E '^RELEASE_(ASSET|METADATA|DISCOVERY)_MAX_BYTES=[0-9]+$' "$INSTALLER" >> "$LIB" || true
   fi
@@ -259,15 +262,61 @@ log() { printf '[macprovider-install] %s\n' "$*" >&2; }
 # Every curl the repository copy runs, including an older release copy that
 # predates its own streamed caps, is bounded here (#2036): the response is
 # written to a scratch file under the kernel file-size limit, then replayed.
+# A caller that handles redirects itself passes -w with --max-redirs 0. For an
+# older caller the wrapper drops -L and follows each redirect itself, only over
+# HTTPS to the original host or a release download host.
 CURL_SCRATCH_DIR="$6"
 CURL_MAX_KIB="$7"
-curl() {
-  local scratch rc=0
-  scratch="$(mktemp "$CURL_SCRATCH_DIR/curl-response.XXXXXX")" || return 23
+gate_redirect_allowed() {
+  local original_host target_host
+  case "$2" in https://*) ;; *) return 1 ;; esac
+  original_host="${1#*://}"
+  original_host="$(printf '%s' "${original_host%%/*}" | tr '[:upper:]' '[:lower:]')"
+  target_host="${2#https://}"
+  target_host="${target_host%%/*}"
+  case "$target_host" in *@*) return 1 ;; esac
+  target_host="$(printf '%s' "$target_host" | tr '[:upper:]' '[:lower:]')"
+  case "$target_host" in
+    "$original_host"|github.com|*.github.com|*.githubusercontent.com|download.malibu.tech) return 0 ;;
+  esac
+  return 1
+}
+bounded_curl() {
   (
     ulimit -f "$CURL_MAX_KIB" 2>/dev/null || { current="$(ulimit -f)"; [ "$current" != "unlimited" ] && [ "$current" -le "$CURL_MAX_KIB" ] || exit 125; }
-    command curl --max-filesize "$((CURL_MAX_KIB * 1024))" "$@" > "$scratch"
-  ) || rc=$?
+    command curl --max-filesize "$((CURL_MAX_KIB * 1024))" "$@"
+  )
+}
+curl() {
+  local scratch rc=0 arg url original redirect hops=0 self_redirects=0
+  local -a args=()
+  for arg in "$@"; do
+    case "$arg" in
+      -w|--write-out) self_redirects=1; args+=("$arg") ;;
+      -L|--location) ;;
+      --*) args+=("$arg") ;;
+      -*L*) args+=("${arg//L/}") ;;
+      *) args+=("$arg") ;;
+    esac
+  done
+  scratch="$(mktemp "$CURL_SCRATCH_DIR/curl-response.XXXXXX")" || return 23
+  if [ "$self_redirects" -eq 1 ]; then
+    bounded_curl "$@" > "$scratch" || rc=$?
+  else
+    url="${args[${#args[@]}-1]}"
+    original="$url"
+    unset 'args[${#args[@]}-1]'
+    while :; do
+      redirect="$(bounded_curl --max-redirs 0 -w '%{redirect_url}' -o "$scratch" "${args[@]}" "$url")" || { rc=$?; break; }
+      [ -n "$redirect" ] || break
+      hops=$((hops + 1))
+      if [ "$hops" -gt 5 ] || ! gate_redirect_allowed "$original" "$redirect"; then
+        rc=47
+        break
+      fi
+      url="$redirect"
+    done
+  fi
   [ "$rc" -eq 0 ] && cat "$scratch"
   rm -f "$scratch"
   return "$rc"

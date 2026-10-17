@@ -1656,6 +1656,14 @@ for case in \
   report "s12-policy-$3" "$1" "$got"
 done
 
+# S13 — a fork never follows a redirect into the Malibu mirror.
+reset_mocks
+GITHUB_REPO="someone/fork"
+got=0
+release_redirect_allowed https://github.com/someone/fork/a https://download.malibu.tech/releases/b && got=1
+report "s13-fork-no-mirror-redirect" 0 "$got"
+GITHUB_REPO="Augustas11/macprovider"
+
 if [ "$fail" -ne 0 ]; then
   printf '[install-version-pin-test] %d failed, %d passed\n' "$fail" "$pass" >&2
   exit 1
