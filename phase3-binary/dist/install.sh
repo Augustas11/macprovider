@@ -12136,6 +12136,10 @@ BINARY_PATH="${MACPROVIDER_BINARY_PATH:-$HOME/macprovider/macprovider-cli}"
 LIFECYCLE_LEASE_PATH="${MACPROVIDER_LIFECYCLE_LEASE_PATH:-$HOME/Library/Application Support/macprovider/lifecycle/lease.json}"
 LIFECYCLE_LEASE_OWNER_UID="${MACPROVIDER_LIFECYCLE_LEASE_OWNER_UID:-$(id -u)}"
 OPERATOR_RESUME_LEASE_PATH="${MACPROVIDER_OPERATOR_RESUME_LEASE_PATH:-$(dirname "$LIFECYCLE_LEASE_PATH")/operator-resume-lease.json}"
+# SPEC-020 R-4.14: the durable operator-pause fence the serve process persists
+# beside its leases. Read without the HTTP surface so a lost or unprovable
+# listener can never turn a paused provider into a wedge restart.
+LIFECYCLE_STATE_PATH="${MACPROVIDER_LIFECYCLE_STATE_PATH:-$(dirname "$LIFECYCLE_LEASE_PATH")/state-v1.json}"
 COORDINATOR_HOST="${MACPROVIDER_COORDINATOR_HOST:-coordinator.malibu.tech}"
 COORDINATOR_PORT="${MACPROVIDER_COORDINATOR_PORT:-443}"
 LOG_DIR="${MACPROVIDER_LOG_DIR:-$HOME/Library/Logs/macprovider}"
@@ -12177,6 +12181,29 @@ KICK_GRACE_SECONDS="${MACPROVIDER_WATCHDOG_KICK_GRACE_SECONDS:-300}"
 case "$KICK_GRACE_SECONDS" in
   ''|*[!0-9]*) KICK_GRACE_SECONDS=300 ;;
 esac
+# Listener probe bounds (SPEC-020 R-4.14): a hung or failing lsof is
+# indeterminate, never "listener lost"; a clean not-owned answer must repeat
+# after the retry delay before it can recommend a restart.
+LISTENER_PROBE_TIMEOUT_SECONDS="${MACPROVIDER_WATCHDOG_LISTENER_PROBE_TIMEOUT_SECONDS:-10}"
+case "$LISTENER_PROBE_TIMEOUT_SECONDS" in
+  [1-9]|[1-5][0-9]|60) : ;;
+  *) LISTENER_PROBE_TIMEOUT_SECONDS=10 ;;
+esac
+LISTENER_RETRY_DELAY_SECONDS="${MACPROVIDER_WATCHDOG_LISTENER_RETRY_DELAY_SECONDS:-2}"
+case "$LISTENER_RETRY_DELAY_SECONDS" in
+  [0-9]|10) : ;;
+  *) LISTENER_RETRY_DELAY_SECONDS=2 ;;
+esac
+# Restart gate (SPEC-020 R-4.14): the final pause/lease vetoes and the
+# kickstart request run while the watchdog holds the lifecycle stores' own
+# flocks, so no pause, resume or lease transition can interleave. Acquiring
+# is bounded and all-or-nothing; a busy store defers the restart a tick.
+RESTART_GATE_SECONDS="${MACPROVIDER_WATCHDOG_RESTART_GATE_SECONDS:-5}"
+case "$RESTART_GATE_SECONDS" in
+  [1-9]|[12][0-9]|30) : ;;
+  *) RESTART_GATE_SECONDS=5 ;;
+esac
+RESTART_GATE_FDS=""
 if [ "$KICK_GRACE_SECONDS" -lt 60 ] || [ "$KICK_GRACE_SECONDS" -gt 3600 ]; then
   KICK_GRACE_SECONDS=300
 fi
@@ -12312,13 +12339,214 @@ EOF
   printf "%s" "$candidate"
 }
 
+# Returns 0 when the provider PID owns the listener, 1 when lsof answered
+# cleanly that it does not (no listener, or only other PIDs), and 2 when the
+# probe is indeterminate (lsof missing, failed, timed out, or printed noise).
+local_health_listener_probe() {
+  probe_pid="$1"
+  probe_port="$2"
+  command -v lsof >/dev/null 2>&1 || return 2
+  probe_rc=0
+  probe_out="$("${MACPROVIDER_PYTHON3:-python3}" -c '
+import os, select, subprocess, sys, time
+limit = 65536
+deadline = time.monotonic() + int(sys.argv[1])
+try:
+    child = subprocess.Popen(sys.argv[2:], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+except OSError:
+    sys.exit(127)
+data = b""
+while True:
+    remaining = deadline - time.monotonic()
+    ready = select.select([child.stdout], [], [], max(remaining, 0))[0] if remaining > 0 else []
+    if not ready:
+        child.kill()
+        try:
+            child.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+        sys.exit(124)
+    chunk = os.read(child.stdout.fileno(), limit + 1 - len(data))
+    if not chunk:
+        break
+    data += chunk
+    if len(data) > limit:
+        child.kill()
+        try:
+            child.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+        sys.exit(125)
+try:
+    code = child.wait(timeout=max(deadline - time.monotonic(), 0.1))
+except subprocess.TimeoutExpired:
+    child.kill()
+    try:
+        child.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        pass
+    sys.exit(124)
+sys.stdout.buffer.write(data)
+sys.exit(code if 0 <= code <= 1 else 125)
+' "$LISTENER_PROBE_TIMEOUT_SECONDS" lsof -nP -iTCP:"$probe_port" -sTCP:LISTEN -t)" || probe_rc=$?
+  case "$probe_rc" in
+    0|1) : ;;
+    *) return 2 ;;
+  esac
+  printf "%s\n" "$probe_out" | awk -v pid="$probe_pid" '
+    NF == 0 { next }
+    $0 !~ /^[0-9]+$/ { noise = 1; next }
+    $1 == pid { found = 1 }
+    END { if (noise) exit 2; if (found) exit 0; exit 1 }
+  '
+}
+
 local_health_listener_owned_by_provider() {
-  provider_pid="$1"
-  port="$2"
-  if ! command -v lsof >/dev/null 2>&1; then
+  local_health_listener_probe "$1" "$2"
+}
+
+# Exit 0 only when the persisted lifecycle record carries the operator-pause
+# fence (operator_paused true). The record must pass the file and schema
+# invariants the Swift
+# store enforces (regular, not a symlink, one link, owner UID, 0600, 1..64 KiB,
+# version 1, authority macprovider_cli). Missing or invalid records are "not
+# paused" so unpaused wedge recovery remains.
+operator_pause_recorded() {
+  "${MACPROVIDER_PYTHON3:-python3}" - "$LIFECYCLE_STATE_PATH" "$LIFECYCLE_LEASE_OWNER_UID" <<'PY' 2>/dev/null
+import json
+import os
+import stat
+import sys
+
+path, owner_uid = sys.argv[1], sys.argv[2]
+try:
+    owner_uid = int(owner_uid)
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+except (OSError, ValueError):
+    sys.exit(1)
+try:
+    limit = 64 * 1024
+    info = os.fstat(fd)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != owner_uid
+        or info.st_nlink != 1
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or not 1 <= info.st_size <= limit
+    ):
+        sys.exit(1)
+    data = b""
+    while len(data) <= limit:
+        chunk = os.read(fd, limit + 1 - len(data))
+        if not chunk:
+            break
+        data += chunk
+finally:
+    os.close(fd)
+if len(data) > limit:
+    sys.exit(1)
+try:
+    record = json.loads(data)
+except Exception:
+    sys.exit(1)
+if (
+    type(record) is not dict
+    or type(record.get("version")) is not int
+    or record["version"] != 1
+    or record.get("authority") != "macprovider_cli"
+    or type(record.get("state")) is not str
+    or type(record.get("writer")) is not str
+    or type(record.get("reason_code")) is not str
+    or type(record.get("transition_id")) is not str
+    or type(record.get("transition_at")) is not str
+    or type(record.get("sequence")) is not int
+    or record["sequence"] <= 0
+    or not ("operator_paused" not in record or type(record["operator_paused"]) is bool)
+):
+    sys.exit(1)
+# operator_paused is the durable fence the serve process itself honors at
+# startup (ProviderLifecycleStateRecord.operatorPauseRequested).
+sys.exit(0 if record.get("operator_paused") is True else 1)
+PY
+}
+
+# Open the existing lock files of the lifecycle state, startup/maintenance
+# lease and operator-resume lease stores read-only on fds 7-9 (never
+# creating them) and flock all of them, bounded by RESTART_GATE_SECONDS. A
+# flock lives on the open file description, so it stays held by this shell
+# after the python helper exits, until restart_gate_release closes the fds.
+restart_gate_acquire() {
+  RESTART_GATE_FDS=""
+  gate_fd=7
+  set --
+  for gate_store in "$LIFECYCLE_STATE_PATH" "$LIFECYCLE_LEASE_PATH" "$OPERATOR_RESUME_LEASE_PATH"; do
+    gate_lock="$(dirname "$gate_store")/.$(basename "$gate_store").lock"
+    if [ -f "$gate_lock" ] && [ ! -L "$gate_lock" ] && [ -r "$gate_lock" ]; then
+      if ! eval "exec ${gate_fd}<\"\$gate_lock\""; then
+        restart_gate_release
+        return 1
+      fi
+      RESTART_GATE_FDS="$RESTART_GATE_FDS $gate_fd"
+      set -- "$@" "$gate_fd" "$gate_lock"
+    elif [ -e "$gate_store" ] || [ -L "$gate_store" ] || [ -e "$gate_lock" ] || [ -L "$gate_lock" ]; then
+      # The store exists, so Swift created its lock first; a missing,
+      # unreadable or non-regular lock cannot be synchronized with.
+      restart_gate_release
+      return 1
+    fi
+    gate_fd=$((gate_fd + 1))
+  done
+  [ -n "$RESTART_GATE_FDS" ] || return 0
+  if ! "${MACPROVIDER_PYTHON3:-python3}" - "$RESTART_GATE_SECONDS" "$LIFECYCLE_LEASE_OWNER_UID" "$@" <<'PY'; then
+import fcntl
+import os
+import stat
+import sys
+import time
+
+deadline = time.monotonic() + int(sys.argv[1])
+owner_uid = int(sys.argv[2])
+pairs = sys.argv[3:]
+fds = []
+for index in range(0, len(pairs), 2):
+    fd, path = int(pairs[index]), pairs[index + 1]
+    opened = os.fstat(fd)
+    try:
+        named = os.lstat(path)
+    except OSError:
+        sys.exit(1)
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or opened.st_uid != owner_uid
+        or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
+    ):
+        sys.exit(1)
+    fds.append(fd)
+while True:
+    held = []
+    try:
+        for fd in fds:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            held.append(fd)
+        sys.exit(0)
+    except OSError as error:
+        for fd in held:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        if not isinstance(error, BlockingIOError) or time.monotonic() >= deadline:
+            sys.exit(1)
+        time.sleep(0.05)
+PY
+    restart_gate_release
     return 1
   fi
-  lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | awk -v pid="$provider_pid" '$1 == pid { found = 1 } END { exit found ? 0 : 1 }'
+  return 0
+}
+
+restart_gate_release() {
+  for gate_fd in $RESTART_GATE_FDS; do
+    eval "exec ${gate_fd}<&-"
+  done
+  RESTART_GATE_FDS=""
 }
 
 local_provider_health_ok() {
@@ -12338,9 +12566,25 @@ local_status_restart_recommended() {
   case "$port" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  if ! local_health_listener_owned_by_provider "$provider_pid" "$port"; then
-    return 0
+  if operator_pause_recorded; then
+    log "provider process $provider_pid is operator-paused per the persisted lifecycle record; watchdog never restarts a paused provider"
+    return 1
   fi
+  listener_rc=0
+  local_health_listener_probe "$provider_pid" "$port" || listener_rc=$?
+  if [ "$listener_rc" -eq 1 ]; then
+    sleep "$LISTENER_RETRY_DELAY_SECONDS"
+    listener_rc=0
+    local_health_listener_probe "$provider_pid" "$port" || listener_rc=$?
+  fi
+  case "$listener_rc" in
+    0) : ;;
+    1) return 0 ;;
+    *)
+      log "provider process $provider_pid listener ownership on port $port is indeterminate (probe failed or timed out); not treating it as lost"
+      return 1
+      ;;
+  esac
   curl_bin="${MACPROVIDER_CURL:-/usr/bin/curl}"
   status_body="$("$curl_bin" -fsS --max-time 2 "http://127.0.0.1:${port}/v1/status" 2>/dev/null)" || return 1
   STATUS_BODY="$status_body" "${MACPROVIDER_PYTHON3:-python3}" <<'PY'
@@ -12938,12 +13182,63 @@ run_tick() {
       log "provider process $provider_pid failed local /v1/health after arming, but /v1/status does not recommend watchdog restart; leaving process untouched"
       return 0
     fi
-    log "provider process $provider_pid failed local /v1/health after arming; requesting launchd restart for $LABEL"
     # Capture the OLD instance's /v1/status (service_instance + model_liveness)
     # BEFORE the kick so the coordinator can correlate the restart with the new
-    # post-restart instance (SPEC-025 §5.4). Observability-only.
+    # post-restart instance (SPEC-025 §5.4). Observability-only. It runs before
+    # the final vetoes so nothing sits between them and the kickstart.
     capture_supervisor_status_fields "$provider_pid" || true
-    if kickstart_provider "local_health_failed_after_arming"; then
+    # Re-check every veto after the restart verdict, under the restart gate,
+    # as the last step before the kickstart (SPEC-020 R-4.14). Checking leases
+    # only before /v1/status let a resume land in between and be kicked
+    # (2026-10-17). While the gate is held no pause, resume or lease
+    # transition can complete, so the vetoes and the kick are one decision.
+    if ! restart_gate_acquire; then
+      log "provider process $provider_pid restart deferred: lifecycle store busy (pause, resume or lease transition in progress)"
+      return 0
+    fi
+    if operator_pause_recorded; then
+      restart_gate_release
+      log "provider process $provider_pid is operator-paused per the persisted lifecycle record; watchdog never restarts a paused provider"
+      return 0
+    fi
+    if valid_lifecycle_lease_record startup "$provider_pid" "$OPERATOR_RESUME_LEASE_PATH" 60000; then
+      restart_gate_release
+      log "provider process $provider_pid gained a validated operator-resume lease during restart evaluation; watchdog grants bounded grace"
+      return 0
+    fi
+    if valid_lifecycle_lease "$provider_pid"; then
+      restart_gate_release
+      log "provider process $provider_pid gained a validated startup/maintenance lease during restart evaluation; watchdog grants bounded grace"
+      return 0
+    fi
+    log "provider process $provider_pid failed local /v1/health after arming; requesting launchd restart for $LABEL"
+    # Hold the gate until launchctl returns, so the request is dispatched
+    # with the vetoes still true. If it has not returned within the bound,
+    # abort it while the gate is still held, then release: any kick still
+    # happened under the gate, and the gate is never held across an
+    # unbounded kickstart.
+    kickstart_provider "local_health_failed_after_arming" 7<&- 8<&- 9<&- &
+    kick_pid=$!
+    kick_wait=0
+    kick_limit=$((RESTART_GATE_SECONDS * 10))
+    while [ "$kick_wait" -lt "$kick_limit" ] && kill -0 "$kick_pid" 2>/dev/null; do
+      sleep 0.1
+      kick_wait=$((kick_wait + 1))
+    done
+    kick_status=0
+    if kill -0 "$kick_pid" 2>/dev/null; then
+      pkill -KILL -P "$kick_pid" >/dev/null 2>&1 || true
+      kill -KILL "$kick_pid" >/dev/null 2>&1 || true
+      log "provider restart request for $LABEL did not complete within ${RESTART_GATE_SECONDS}s; aborted under the restart gate"
+      kick_status=1
+    fi
+    if [ "$kick_status" -eq 0 ]; then
+      wait "$kick_pid" || kick_status=$?
+    else
+      wait "$kick_pid" 2>/dev/null || true
+    fi
+    restart_gate_release
+    if [ "$kick_status" -eq 0 ]; then
       TICK_RESTART=1
       # The kick starts the restart cooldown, so the watchdog is now rate-limited.
       TICK_COOLDOWN=cooldown_active
