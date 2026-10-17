@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.46
+**Version:** 0.1.47
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.46",
+  "version": "0.1.47",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -829,12 +829,15 @@ folded keys than one-token decode keeps (15 of 19 at `kpool` 4 after a reject
 that undoes a pool window), no forward reads them, and the next completed pool
 window refills them. Recurrent (KDA/GDN) and KV state compare whole. The lab
 oracle compares this digest at the ordinary decode-window ends that a native
-round lands on, and every such comparison MUST match. A row's native rounds are
-taken in commit order and MUST be consecutive with strictly increasing token
-counts. At least one compared round MUST immediately follow a rejected round
-of the same row, that is, its predecessor (round - 1) committed no proposal,
-so its own verification ran on rolled-back state; a rejected round's own
-record does not count. Depth-zero rows retain only committed target state; when depth
+round lands on, and every such comparison MUST match. The bridge numbers each
+row's committing finalize rounds 0, 1, 2, ... and every after-finalize record
+carries its round number; the records MUST carry exactly that sequence, with
+strictly increasing token counts, or the comparison fails (a missing,
+duplicated, reordered or unnumbered record). At least one compared round MUST
+immediately follow a rejected round of the same row: round `n - 1` proposed at
+least one token and committed fewer than it proposed, so round `n`'s
+verification ran on rolled-back state. A rejected round's own record does not
+count. Depth-zero rows retain only committed target state; when depth
 increases, proposal state is recomputed from the current committed target
 hidden state rather than reused from a stale speculative tail.
 
@@ -1710,6 +1713,12 @@ the text-only path without image inputs; that does not admit multimodal buyer
 requests.
 
 ## 9. Changelog and history
+
+- **0.1.47 (2026-10-17)** — MTP-6: the lab oracle's round order is the
+  bridge's per-row committed-round number carried by each after-finalize
+  record, not the record's position, so a missing record fails the
+  comparison instead of renumbering its successor; a rejected round is one
+  that proposed at least one token and committed fewer.
 
 - **0.1.46 (2026-10-17)** — MTP-6: the lab oracle's "comparison after a
   rejection" is a compared round whose immediately preceding round of the

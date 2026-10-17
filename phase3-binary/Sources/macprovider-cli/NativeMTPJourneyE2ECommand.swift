@@ -124,14 +124,47 @@ final class NativeMTPJourneyRunner {
         }
     }
 
+    /// One committed native round of a row, as step 05 compares it.
+    struct NativeRoundRecord {
+        /// The bridge's per-row committed-round sequence number (nil when the
+        /// record carries none, which fails the comparison).
+        var round: Int?
+        var tokens: Int
+        var digest: String
+        var proposedTokens: Int
+        var committedProposals: Int?
+
+        /// The round proposed at least one token and committed fewer than it
+        /// proposed (at depth 1: its proposal was rejected).
+        var rejectedAProposal: Bool {
+            guard let committedProposals else { return false }
+            return proposedTokens > 0 && committedProposals < proposedTokens
+        }
+    }
+
+    /// The production record path: one row's after-finalize observer records,
+    /// in the order the observer received them.
+    static func nativeRoundRecords(_ records: [NativeMTPStateDigestRecord], requestID: String) -> [NativeRoundRecord] {
+        records.filter { $0.requestID == requestID && $0.phase == .afterFinalize }.map {
+            NativeRoundRecord(
+                round: $0.nativeRound,
+                tokens: $0.committedKVTokenCount,
+                digest: $0.cacheDigestSHA256,
+                proposedTokens: $0.proposedTokens,
+                committedProposals: $0.committedProposalTokens
+            )
+        }
+    }
+
     /// step-05 target-state oracle (SPEC-048 MTP-6). Ordinary decode records
     /// its row state once per lockstep window, so the comparable token counts
-    /// are the ordinary records inside the native row's range. `native` is
-    /// one row's after-finalize records with their round index (0, 1, 2, ...
-    /// in commit order). A compared record follows a rejection when the
-    /// immediately preceding round of the same row (round - 1) committed no
-    /// proposal: its own verify ran on the rolled-back state. Holds when the
-    /// rounds are consecutive with strictly increasing token counts, every
+    /// are the ordinary records inside the native row's range. `native` is one
+    /// row's after-finalize records; each carries the bridge's committed-round
+    /// sequence number. The sequence must be exactly 0, 1, 2, ... in record
+    /// order with strictly increasing token counts: a missing, duplicated or
+    /// reordered record fails closed. A compared record follows a rejection
+    /// when the round numbered one less rejected a proposal, so its own verify
+    /// ran on rolled-back state. Holds when the sequence is intact, every
     /// native record at a comparable count has the ordinary digest, at least
     /// a quarter of those counts (and one) are compared, and at least one
     /// compared record follows a rejection.
@@ -153,7 +186,7 @@ final class NativeMTPJourneyRunner {
     }
 
     static func alignedCacheComparison(
-        native: [(round: Int, tokens: Int, digest: String, committedProposals: Int?)],
+        native: [NativeRoundRecord],
         ordinary: [(tokens: Int, digest: String)]
     ) -> AlignedCacheComparison {
         let roundsOrdered = native.indices.allSatisfy { index in
@@ -170,9 +203,10 @@ final class NativeMTPJourneyRunner {
             return tokens >= lowest && tokens <= highest
         }
         let mismatches = pairs.filter { native[$0.index].digest != $0.ordinary }.map { native[$0.index].tokens }
-        let followingRejection = pairs.filter { pair in
-            pair.index > 0 && native[pair.index - 1].committedProposals == 0
-        }
+        // Only meaningful on an intact sequence, where index - 1 is round - 1.
+        let followingRejection = roundsOrdered ? pairs.filter { pair in
+            pair.index > 0 && native[pair.index - 1].rejectedAProposal
+        } : []
         return AlignedCacheComparison(
             roundsOrdered: roundsOrdered,
             pairs: pairs.count,
@@ -510,10 +544,7 @@ final class NativeMTPJourneyRunner {
                 // ends (one record per window), so only those token counts can
                 // be compared; every native round that lands on one must match.
                 let alignment = Self.alignedCacheComparison(
-                    native: afterFinalize.enumerated().map { round, record in
-                        (round: round, tokens: record.committedKVTokenCount, digest: record.cacheDigestSHA256,
-                         committedProposals: record.committedProposalTokens)
-                    },
+                    native: Self.nativeRoundRecords(stateRecords, requestID: id),
                     ordinary: ordinaryAfterDecode.map { (tokens: $0.committedKVTokenCount, digest: $0.cacheDigestSHA256) }
                 )
                 step.check("\(id).ordinary_state_observer_after_decode", !ordinaryAfterDecode.isEmpty)

@@ -34,6 +34,12 @@ struct NativeMTPStateDigestRecord: Equatable, Sendable {
     let committedKVTokenCount: Int
     let proposedTokens: Int
     let committedProposalTokens: Int?
+    /// The row's committed native-round sequence number (0, 1, 2, ...),
+    /// assigned by the bridge when a committing finalize begins and carried by
+    /// that round's before- and after-finalize records; nil on other phases.
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    var nativeRound: Int? = nil
+    #endif
 }
 
 final class NativeMTPStateDigestObserver: @unchecked Sendable {
@@ -806,6 +812,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     private var labNativeMTPCommittedPrefixTargetBonus: [String: Int] = [:]
     private var labNativeMTPPrefixPositionDeltasUnsupported: Set<String> = []
     private var labNativeMTPLastFinalizeRecomputePrefixTokens: [String: Int] = [:]
+    private var labNativeMTPNextRound: [String: Int] = [:]
     #endif
 
     init(
@@ -1581,10 +1588,14 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             let transactions = try self.consumeNativeMTPPendingTransactions(for: inputs)
             try self.validateNativeMTPFinalizeInputs(inputs, transactions: transactions)
             #if DEBUG || MACPROVIDER_LAB_HARNESS
+            let labRounds = self.labBeginNativeMTPCommittedRound(
+                requestIDs: inputs.filter(\.shouldCommit).map(\.requestID)
+            )
             try self.recordNativeMTPStateDigest(
                 phase: .beforeFinalize,
                 inputs: inputs,
-                transactions: transactions
+                transactions: transactions,
+                rounds: labRounds
             )
             #endif
             let committing = inputs.filter(\.shouldCommit).compactMap { input in
@@ -1652,7 +1663,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             try self.recordNativeMTPStateDigest(
                 phase: .afterFinalize,
                 inputs: inputs,
-                transactions: transactions
+                transactions: transactions,
+                rounds: labRounds
             )
             #endif
         }
@@ -1894,6 +1906,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             labNativeMTPCommittedPrefixTargetBonus.removeAll()
             labNativeMTPPrefixPositionDeltasUnsupported.removeAll()
             labNativeMTPLastFinalizeRecomputePrefixTokens.removeAll()
+            labNativeMTPNextRound.removeAll()
             #endif
             if activeOperations == 0 {
                 lock.unlock()
@@ -3045,6 +3058,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         labNativeMTPCommittedPrefixTargetBonus.removeValue(forKey: requestID)
         labNativeMTPPrefixPositionDeltasUnsupported.remove(requestID)
         labNativeMTPLastFinalizeRecomputePrefixTokens.removeValue(forKey: requestID)
+        labNativeMTPNextRound.removeValue(forKey: requestID)
         #endif
         lock.unlock()
     }
@@ -3117,10 +3131,38 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
     }
 
+    /// Assigns each committing row its next native-round sequence number.
+    /// Every committing finalize takes one, observer or not, so a round whose
+    /// records go missing leaves a gap the journey detects.
+    private func labBeginNativeMTPCommittedRound(requestIDs: [String]) -> [String: Int] {
+        lock.lock()
+        defer { lock.unlock() }
+        var rounds: [String: Int] = [:]
+        for requestID in requestIDs {
+            let round = labNativeMTPNextRound[requestID, default: 0]
+            rounds[requestID] = round
+            labNativeMTPNextRound[requestID] = round + 1
+        }
+        return rounds
+    }
+
+    #if DEBUG
+    /// The finalize path's lab bookkeeping without a forward: assigns the
+    /// committing rows' round numbers and records their before- and
+    /// after-finalize digests, as `finalizeNativeMTPPackedRound` does.
+    func labRecordCommittedFinalizeForTest(inputs: [ContinuousBatchNativeMTPFinalizeInput]) throws {
+        enterTargetLock(); defer { exitTargetLock() }
+        let rounds = labBeginNativeMTPCommittedRound(requestIDs: inputs.filter(\.shouldCommit).map(\.requestID))
+        try recordNativeMTPStateDigest(phase: .beforeFinalize, inputs: inputs, transactions: [:], rounds: rounds)
+        try recordNativeMTPStateDigest(phase: .afterFinalize, inputs: inputs, transactions: [:], rounds: rounds)
+    }
+    #endif
+
     private func recordNativeMTPStateDigest(
         phase: NativeMTPStateDigestPhase,
         inputs: [ContinuousBatchNativeMTPFinalizeInput],
-        transactions: [String: NativeMTPPendingTransaction]
+        transactions: [String: NativeMTPPendingTransaction],
+        rounds: [String: Int] = [:]
     ) throws {
         lock.lock()
         let observer = labNativeMTPStateDigestObserver
@@ -3142,7 +3184,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 drafterRecomputeDigestSHA256: digest.drafterRecompute,
                 committedKVTokenCount: rowStateTokenCount(for: input.requestID),
                 proposedTokens: transaction?.proposalTokenCount ?? input.proposalTokenCount,
-                committedProposalTokens: input.committedProposalTokenCount
+                committedProposalTokens: input.committedProposalTokenCount,
+                nativeRound: rounds[input.requestID]
             ))
         }
     }

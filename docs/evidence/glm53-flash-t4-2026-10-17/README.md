@@ -49,15 +49,19 @@ no-join on its own port, 1 native row, greedy request profile, depth 1.
 | Serve-path native-MTP hardware e2e (leg 5) | `final-mtp/e2e-20261017T103928Z/` | lab harness `1718e7ba…` at fork `18ca526` | PASS, family `glm5_next`, serve path verified, 3 admissions, greedy equal. Rows 1: native 48.4 vs ordinary 38.2 tok/s (1.27×), acceptance 0.889. Rows 4: 51.5 vs 65.6 (0.79×), which is why `max_native_active_rows` is 1 |
 | `native-mtp-journey-e2e` (leg 6) | `final-mtp/journey-20261017T135947Z/` | lab harness `0ec22520…` at `07301b6bf`, fork tag `3.32.3-macprovider.10.1` (`87dc515`) | Executed steps 04, 05, 06, 07-08, 09 and 10 pass; step 12 partial (coordinator-issued SPEC-031-R033 canary is not available in the lab) |
 
-Step 05 compares the target-oracle cache state (SPEC-048 0.1.45 MTP-6) at
+Step 05 compares the target-oracle cache state (SPEC-048 0.1.47 MTP-6) at
 every ordinary-decode window end: boundary-0 33/33, boundary-1 41/41 and
 reject-all 16/16 aligned pairs are equal, with no mismatched token counts. Of
 those, 8, 11 and 16 (35) are rounds whose immediately preceding round was
-rejected (SPEC-048 0.1.46). That count is re-derived offline from this run's
-`mtp-journey.log.gz` (round order and per-round token advance from the
-cbtrace `native_round`/`sch_active` lines, which reproduce the recorded 33/41/16
-pairs). The run's own `aligned_prefix_cache_pairs_after_rejection` (13, 13, 16)
-counted rejected rounds' own records under the 0.1.45 evaluator. Steps 01-03, 11, the coordinator half
+rejected. That count is re-derived offline from this run's
+`mtp-journey.log.gz` by `scripts/lab/cb-studio/step05_following_rejection.py`,
+from the complete `native_round phase=finalize rows=<id>:true` trace sequence
+(the scheduler logs one line for every committing finalize, before it runs)
+and each round's `sch_active` token advance, not from the observer records'
+order or indices, so it does not depend on the record-renumbering flaw fixed in
+0.1.47. It reproduces the recorded 33/41/16 pairs. The run's own
+`aligned_prefix_cache_pairs_after_rejection` (13, 13, 16) counted rejected
+rounds' own records under the 0.1.45 evaluator. Steps 01-03, 11, the coordinator half
 of 12, 14 and 15 bind the signed release candidate and run at go-live
 (`docs/runbooks/native-mtp-enablement.md`).
 
