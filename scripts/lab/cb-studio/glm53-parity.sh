@@ -14,7 +14,7 @@ OUT=${OUT:-$HOME/lab-glm53/t3-parity-$(date -u +%Y%m%dT%H%M%SZ)}
 PY=${PY:-$HOME/lab-glm53/venv-omlx/bin/python}
 
 [[ -x $BIN ]] || { echo "missing $BIN" >&2; exit 1; }
-[[ -f ${BIN:h}/mlx.metallib ]] || { echo "missing ${BIN:h}/mlx.metallib (core v0.32.4-macprovider.1)" >&2; exit 1; }
+[[ -f ${BIN:h}/mlx.metallib ]] || { echo "missing ${BIN:h}/mlx.metallib (core v0.32.4-macprovider.4)" >&2; exit 1; }
 mkdir -p $OUT
 shasum -a 256 $BIN ${BIN:h}/mlx.metallib | tee $OUT/identity.sha256
 oracles=()

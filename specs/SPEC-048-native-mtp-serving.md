@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.34
+**Version:** 0.1.36
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.34",
+  "version": "0.1.36",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -269,7 +269,7 @@ not apply (for example a bare drafter `fc` override, which the loader ignores
 in favour of the global width) fails closed as unmatched, as does a `false`
 entry that names no consumed floating module or names a module that has
 packed weights. Overrides are admitted only for `4`, `5`, `6`, or `8` bits
-(SPEC-023 v0.22.25; `4` or `8` before 0.1.34), group sizes `32`, `64`, or
+(SPEC-023 v0.22.25; `4` or `8` before 0.1.35), group sizes `32`, `64`, or
 `128`, and an absent or exactly `affine` mode. A packed override tensor's
 last dimension times 32 MUST divide exactly by its width, and the quotient is
 the module's logical input width. The observed
@@ -302,12 +302,12 @@ For standalone drafter artifacts, the accepted tensor namespace is exactly
 `separate_artifact` layout with the matching
 `mlx-community/Qwen3.6-*-MTP-4bit` drafter artifacts.
 
-**GLM-5-Next embedded layout (0.1.33).** A target whose `config.json` has
+**GLM-5-Next embedded layout (0.1.34).** A target whose `config.json` has
 top-level `model_type` `glm5_next`, `architectures` exactly
 `["Glm5NextForConditionalGeneration"]`, `text_config.model_type`
 `glm5_next_text`, and `text_config.num_nextn_predict_layers` exactly `1` uses
 the `glm5_next_mtp_v1` adapter with `source_layout` `checkpoint_mtp`
-(0.1.34: the catalog key is `zai-org/glm-5.3-flash`). The entry's adapter
+(0.1.35: the catalog key is `zai-org/glm-5.3-flash`). The entry's adapter
 string determines the layout: `glm5_next_mtp_v1` is `checkpoint_mtp` and every
 other adapter keeps `separate_artifact`. Any other
 `num_nextn_predict_layers`, or a `glm5_next` config naming another
@@ -337,7 +337,7 @@ do not apply to this adapter; these do:
   `vision_model.`, `vision_tower.`, `visual.`, or `model.visual.`. The
   observer drops exactly those dotted namespaces and no others. The text-only
   boundary of §8 applies: no image-input buyer path is admitted.
-- *Post-sanitize layout only (0.1.34).* The pinned `GLM5NextWeights.sanitize`
+- *Post-sanitize layout only (0.1.35).* The pinned `GLM5NextWeights.sanitize`
   rewrites raw Hugging Face names (`.hc_attn_` / `.hc_ffn_` renames, the
   forget-gate move under `forget_gate.`, per-projection `q_conv1d` /
   `k_conv1d` / `v_conv1d` concatenation, `.mlp.experts.<e>.` stacking into
@@ -374,7 +374,7 @@ do not apply to this adapter; these do:
   and is admitted only with `request_feature_profile =
   "native_mtp_greedy_text_v1"`. R004, R012, R014, and R015 apply unchanged.
 
-**Multi-model projection manifest (0.1.33).** When one admission sidecar
+**Multi-model projection manifest (0.1.34).** When one admission sidecar
 carries entries for more than one `model_key`, the release's single
 `native-mtp-artifact-manifest.json` is
 `{"schema_version":"macprovider.native-mtp-artifact-projection.v2","models":{"<model_key>":{"target":…,"mtp":…,"tokenizer":…,"manifest":…}}}`:
@@ -385,16 +385,16 @@ selects the object under the selected entry's `model_key`; a missing or extra
 model key fails closed. A sidecar whose entries all share one `model_key` keeps
 the v1 form (`macprovider.native-mtp-artifact-projection.v1`, one
 `artifacts` object), so a single-model release is byte-identical to the
-pre-0.1.33 output. Consumers MUST read both forms. A v1-only consumer rejects
+pre-0.1.34 output. Consumers MUST read both forms. A v1-only consumer rejects
 the v2 form and stays ordinary for every model, so a release MUST NOT publish
 the v2 form before the provider CLI that reads it is the released CLI.
 The same ordering applies to a sidecar that carries a 5- or 6-bit override or
-more than 256 exceptions (SPEC-023 v0.22.25): a CLI that predates 0.1.34
+more than 256 exceptions (SPEC-023 v0.22.25): a CLI that predates 0.1.35
 rejects the whole sidecar. R014 item 10 makes this a release gate.
 
 The observer MUST inspect every `.safetensors` file that the R003-authorized
 mlx-swift-lm loader can consume. At the R003 mlx-swift-lm revision
-(`378aaf76…`; `safetensorWeightURLs` is unchanged from `3.32.3-macprovider.6`)
+(`b177f9ea…`; `safetensorWeightURLs` is unchanged from `3.32.3-macprovider.6`)
 the loader takes the files named by
 `model.safetensors.index.json`, which may sit in subdirectories, else the
 top-level conventional names, plus files the model declares as additional
@@ -464,9 +464,9 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | **PENDING — filled by the campaign release step** (candidate on branch `glm53/tuple-0324`) | `378aaf7618891e6903d207af7fb9906f6119070f` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
-| `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.3` | `0c9854fc147a6669b36c7e9d0f1c325ab0c6aa91` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
-| `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.1` | `1b194804592cd5c22bfd1d036f4b364516f01449` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | **PENDING — filled by the campaign release step** (candidate on branch `glm53/tuple-0324`) | `b177f9eaa4830791210a08eb5ee2910bb593acf7` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.9` | `29d3b93375cc56cd2649b40e4310a8bc445e9874` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
+| `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.4` | `2f512e3997349c8648f5d7c5113eb2c825aa242d` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 
 The mlx-swift-lm row is a pending row of the epic #2029 campaign. Its
 revision is the one `phase3-binary/Package.resolved` resolves today; the
@@ -523,10 +523,15 @@ Authorized surface:
   cherry-picked), so no trace reads a model array as a tape constant.
 - mlx-swift fork: the core submodule moved to the MLX core fork, and the
   compiled-function erase documented for the per-thread cache. No API change.
-- mlx-swift-lm fork, GLM-5-Next (0.1.33, epic #2029): the `glm5_next` /
-  `glm5_next_text` model (`GLM5Next.swift`, `GLM5NextWeights` sanitizer), its
-  `GLM5NextAttentionCache` (MLA latent plus pooled indexer keys), the fused
-  one-token decode kernels (`GLM5NextDecodeKernels.swift`: KDA step,
+- mlx-swift-lm fork, GLM-5-Next (0.1.34, epic #2029; batched rows 0.1.36):
+  the `glm5_next` / `glm5_next_text` model (`GLM5Next.swift`,
+  `GLM5NextWeights` sanitizer), its `GLM5NextAttentionCache` (MLA latent plus
+  pooled indexer keys, with exact `trim` of up to `maxTrim` tokens), the
+  `GLM5NextLatentCache` / `GLM5NextBatchedLatentCache` protocols and
+  `GLM5NextLatentCacheBatch` (batched rows: projections run on every row
+  together and each row attends against its own latent cache, bitwise equal
+  to its serial decode while a forward carries at most 8 flattened tokens),
+  the fused decode kernels for rows of up to 8 tokens (`GLM5NextDecodeKernels.swift`: KDA step,
   hyper-connection decode, MoE routing and expert kernels, DSA token selection,
   multi-qmv projections with explicit thread layout), the per-channel gated
   delta update, and the two-input `SwitchGLU` activation. The T3 parity
@@ -540,7 +545,10 @@ Authorized surface:
   `qmv_wide`), so a continuously batched row matches its serial result; the
   routing exceptions that remain are bounded in the runbook. A freed compiled
   function is erased from every thread's compile cache, so a later function
-  allocated at the same address never replays a dead trace.
+  allocated at the same address never replays a dead trace. Every internal
+  call inside a stream-taking op passes the caller's stream, and primitive
+  vjp/jvp rules use the primitive's stream (#2028, carried onto v0.32.4 in
+  `v0.32.4-macprovider.4`; `scripts/check_mlx_core_streams.py` enforces it).
 
 Review gate for a tuple: the fork tests for every touched surface; the
 per-rebase acceptance gate in `docs/runbooks/MLX_ENGINE_UPGRADE_MATRIX.md`
@@ -552,7 +560,14 @@ last R015 evidence; and a three-lane freeze audit with zero Critical, High,
 or Medium findings. Native-MTP R015 gates signing and activation of a native
 tuple (R007, R015), never the ordinary path.
 
-Review record for the previous tuple (2026-10-10, `@Augustas11`;
+Review record for the #2028 tuple (2026-10-16; mlx-swift-lm
+`3.32.3-macprovider.9` / mlx-swift `0.32.3-macprovider.8` / MLX core
+`v0.32.2-macprovider.5`): the stream-propagation fix with a three-lane freeze
+audit at 0 Critical, 0 High, 0 Medium (`audits/2026-10-16-2028-gptoss-decode/`).
+The campaign mlx-swift-lm revision `b177f9ea…` descends from that tuple's
+`dbe8bcb3…` and adds only the GLM-5-Next files and model registration.
+
+Review record for the earlier tuple (2026-10-10, `@Augustas11`;
 mlx-swift-lm `3.32.3-macprovider.6` / mlx-swift `0.32.3-macprovider.2` / MLX
 core `v0.32.2-macprovider.2`): Mac Studio startup batched-isolation probes
 pass with the fused MoE path on and off, continuous batching attaches, and
@@ -1060,7 +1075,7 @@ admission still requires the exact observed target/MTP representation manifest,
 per-layer override arrays, and unquantized exception arrays to match the signed
 SPEC-023 sidecar before any native-MTP tuple can advertise capability.
 
-For `glm5_next_mtp_v1` (0.1.33) `mlx_affine_4bit` names the global width only.
+For `glm5_next_mtp_v1` (0.1.34) `mlx_affine_4bit` names the global width only.
 The artifact's per-module 5-, 6-, and 8-bit overrides (R002), including those
 on `language_model.mtp.0.*` and on `embed_q` / `unembed_out`, are part of the
 observed representation: each appears
@@ -1069,10 +1084,10 @@ in `per_layer_exceptions` and in the representation manifest with its exact
 widths. A mismatch in any override width or group size, a missing or extra
 override, or an override the loader would not apply fails admission closed.
 The admitted artifact carries 554 overrides (467 at 8 bits, 70 at 5, 17 at
-6, all group 64). SPEC-023 v0.22.25 (lockstep with 0.1.34) admits widths 5
+6, all group 64). SPEC-023 v0.22.25 (lockstep with 0.1.35) admits widths 5
 and 6 and raises the exception bound to 1024 entries.
 
-**GLM fit headroom (0.1.34).** The fit model and the R015 10% free-memory
+**GLM fit headroom (0.1.35).** The fit model and the R015 10% free-memory
 headroom count the next-N layer's own sparse-attention cache as resident
 per-row state, not only as round workspace. Computed from the admitted
 config (bf16 cache values; `kv_lora_rank` 512, `index_head_dim` 128,
@@ -1110,7 +1125,7 @@ malformed. The provider revision, source commit, reproducible-build digest, and
 live executable CDHash are recorded provenance of the qualifying build
 (SPEC-023 v0.22.13): a consumer MUST NOT require them to equal the running
 provider CLI, so a signed admission keeps serving across signed CLI releases.
-**(0.1.34)** One CLI release serves every entry of a sidecar, so the
+**(0.1.35)** One CLI release serves every entry of a sidecar, so the
 release-owned provenance (`provider_revision`, `source_commit`,
 `reproducible_build_sha256`, `live_executable_cdhash`) is shared by all
 entries of one release; per-entry provenance is not required.
@@ -1179,7 +1194,7 @@ For each qualified tuple, production enablement requires all of the following:
    `JOURNEY-NATIVE-MTP-RELEASE` result covers R014 and is the evidence that may
    promote it to conformant.
 9. No unreleased local binary is connected to the live coordinator.
-10. (0.1.34) A sidecar or projection manifest that a released CLI cannot
+10. (0.1.35) A sidecar or projection manifest that a released CLI cannot
     parse is not published while that CLI is the released one: the v2
     multi-model projection, a second model's entry, a 5- or 6-bit override,
     or more than 256 exceptions ship only after the CLI cut that reads them
@@ -1594,7 +1609,17 @@ requests.
 
 ## 9. Changelog and history
 
-- **0.1.34 (2026-10-17)** — GLM-5.3-Flash admission details (epic #2029,
+- **0.1.36 (2026-10-17)** — MTP-3 campaign tuple moves to mlx-swift-lm
+  `b177f9ea…` (still untagged; the tag stays a PENDING row), mlx-swift
+  `0.32.3-macprovider.9` (`29d3b933…`) and MLX core `v0.32.4-macprovider.4`
+  (`2f512e39…`). The core carries the #2028 caller-stream fix onto v0.32.4
+  (three commits; `quantized.cpp` and `scaled_dot_product_attention.cpp` are
+  unchanged from `v0.32.4-macprovider.1`). The mlx-swift-lm revision adds
+  batched GLM-5-Next rows (`GLM5NextBatchedLatentCache`): batched rows are
+  bitwise equal to serial up to 8 flattened tokens per forward. The #2028
+  review record is kept beside the earlier one.
+
+- **0.1.35 (2026-10-17)** — GLM-5.3-Flash admission details (epic #2029,
   lockstep with SPEC-023 v0.22.25). MTP-2: override widths `4`, `5`, `6`, or
   `8` for every adapter; the source layout is derived from the adapter
   string; the GLM observer admits only a post-sanitize checkpoint and names
@@ -1606,7 +1631,7 @@ requests.
   sidecar or projection that a released CLI cannot parse ships only after the
   CLI that reads it is released.
 
-- **0.1.33 (2026-10-17)** — GLM-5.3-Flash native MTP and the campaign fork
+- **0.1.34 (2026-10-17)** — GLM-5.3-Flash native MTP and the campaign fork
   tuple (epic #2029). MTP-2 adds the `glm5_next_mtp_v1` adapter with the
   embedded `checkpoint_mtp` layout: the `mtp` artifact is the target
   directory and the MTP manifest is the target's `config.json`, so the ~4 GB

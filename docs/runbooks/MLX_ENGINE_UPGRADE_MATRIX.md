@@ -34,9 +34,9 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | untagged (`glm53/tuple-0324`) | `378aaf7618891e6903d207af7fb9906f6119070f` | `3.32.3` (`3b339ad6…`) |
-| `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.3` | `0c9854fc147a6669b36c7e9d0f1c325ab0c6aa91` | `0.32.3` (`19601207…`) |
-| `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.1` | `1b194804592cd5c22bfd1d036f4b364516f01449` | `v0.32.4` (`36969c09…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | untagged (`glm53/tuple-0324`) | `b177f9eaa4830791210a08eb5ee2910bb593acf7` | `3.32.3` (`3b339ad6…`) |
+| `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.9` | `29d3b93375cc56cd2649b40e4310a8bc445e9874` | `0.32.3` (`19601207…`) |
+| `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.4` | `2f512e3997349c8648f5d7c5113eb2c825aa242d` | `v0.32.4` (`36969c09…`) |
 
 Tags are immutable: a change is a new `<n>`, never a moved tag. Each link pins
 the next by full revision: `phase3-binary/Package.swift` pins mlx-swift-lm,
@@ -50,7 +50,8 @@ the mlx-swift-lm fork keeps upstream's tools version.
 Every rebase replays these stacks and drops any patch upstream now carries
 (record which, and why it is equivalent).
 
-mlx-swift-lm (`3.32.3..3.32.3-macprovider.9.4`):
+mlx-swift-lm (`3.32.3..b177f9ea`, campaign branch `glm53/tuple-0324`: the
+`3.32.3-macprovider.9` stack plus GLM-5-Next; the release step tags it):
 
 | Patch | Commits | What it carries |
 | --- | --- | --- |
@@ -64,25 +65,27 @@ mlx-swift-lm (`3.32.3..3.32.3-macprovider.9.4`):
 | Compile-state ownership | `7be182c` (upstream #631, `-x`), `905170f` | The fused GDN projection and every array a verify trace reads are declared compile state. |
 | Core pin | `37f0d7c`, `5203b73`, `45ffd95`, `b07d662`, `dbe8bcb` | Resolves the mlx-swift fork. |
 | Tests | `8941054`, `72c4ab0` | Prepared fused-GDN compiled-verify fixture and in-place reload regression. |
-| Qwen2-VL per-image vision attention (`.9.4`) | `24856d0`, `983fef9`, `c453f72`, `ce3bb52` | `Qwen2VL.swift` vision attention segmented per image (issue #2016) plus `Qwen2VLVisionSegmentationTests`; `983fef9` drops the leading batch axis the multimodal rotary embedding leaves before the segmented attention; `c453f72` batches equal-length blocks into one attention call and adds video/dtype tests; `ce3bb52` (test-only) expects the Qwen2-VL append-only media split to match the full prefill. The only change from `.9` (`dbe8bcb`); every other model's decode path is byte-identical. Tags `3.32.3-macprovider.9.1` (`24856d07…`, traps at runtime on the `cu_seqlens` precondition) `3.32.3-macprovider.9.2` (`983fef9a…`) and `3.32.3-macprovider.9.3` (`c453f72e…`) are superseded and must not be pinned. |
+| GLM-5-Next (epic #2029) | `7e82ab2` .. `b177f9e` | `GLM5Next.swift`, `GLM5NextDecodeKernels.swift`, `GLM5NextAttentionCache.swift` (latent cache with exact `trim`, `GLM5NextLatentCache` / `GLM5NextBatchedLatentCache` / `GLM5NextLatentCacheBatch` for batched rows), the per-channel gated delta update, the two-input `SwitchGLU` activation, model registration, `00d8019` core pin. Batched rows equal serial bit for bit up to 8 flattened tokens per forward. |
 
 `784f021` (Swift 6.1 tools version) is reverted by `e81dd7c`; drop both on the
 next rebase.
 
-mlx-swift (`0.32.3..0.32.3-macprovider.8`, branch
-`macprovider/0.32.3-core0.32.2`): `d073a644`, `ca2f61d2`, `c4af1738`, `da7953ba`,
-`745f5e48` move the `Source/Cmlx/mlx` submodule to the core fork and update the
-compiled-function erase documentation. No API change. Tags `.3`, `.5`, `.7`
-and `.9` on branch `macprovider/0.32.3` belong to the v0.32.4 core rebase, not
-this tuple.
+mlx-swift (`0.32.3..0.32.3-macprovider.9`, branch `macprovider/0.32.3`):
+`d073a644`, `ca2f61d2`, `cb3559bc`, `1931b6f9`, `647bdffa`, `29d3b933` move the
+`Source/Cmlx/mlx` submodule to the core fork; `0c9854fc` expects NaN for
+E4M3FN `0x7F`/`0xFF` in the fp8 decode test (core v0.32.4 behavior). No API
+change. The #2028 tuple used `0.32.3-macprovider.8` (`745f5e48`, branch
+`macprovider/0.32.3-core0.32.2`).
 
-MLX core (`v0.32.2..v0.32.2-macprovider.5`):
+MLX core (`v0.32.4..v0.32.4-macprovider.4`; the #2028 tuple carried the same
+patches on `v0.32.2..v0.32.2-macprovider.5`):
 
 | Patch | Commit | What it carries |
 | --- | --- | --- |
-| Batch-invariant small-M quantized matmul | `ff1b94832` | No `qmv_wide` (every small-M product stays on `qmv`) and no `qmm_splitk` (`qmm` reduces K in one order for every M), so a continuously batched row matches its serial result. |
-| Every-thread compiled-function erase | `c9196eb71` | Freeing a compiled function erases it from every thread's compile cache, so a later function at the same address never replays a dead trace. |
-| Internal ops on the caller's stream | `91a45ed47`, `b3397bfc9`, `49d94e9fe` | Every internal call inside a stream-taking op passes the caller's stream: the `quantized_matmul` casts of `x`/`scales`/`biases`, `indices_or_default`, `gather`, `scatter`, `affine_quantize`, the bool-mask SDPA fallback, the implicit random key split (`KeySequence::next`, reached by temperature sampling), `categorical`, `layer_norm` and its VJP, `linalg` `l2_norm`/`cross`, the `fft` zero-pad, `number_of_elements`, `imag`, and nine transformation rules (vjp/jvp) that now use the primitive's `stream()`. mlx-swift runs every op on its own pooled stream, so a stream-less internal op ran on the thread's default stream: a second Metal queue, a cross-queue event wait and a separate submit per op. gpt-oss-20b decode (8-bit affine projections over float32 activations) paid 140 per token, 30% slower than 3.31.4 (#2028). Upstream v0.32.4 already passes the stream in `indices_or_default` and the SDPA fallback; the v0.32.4 rebase carries the rest (`8a9975f82`, `77cd76b31`, `2f512e399`). |
+| Batch-invariant small-M quantized matmul | `4f2d384ce` (`ff1b94832` on v0.32.2) | No `qmv_wide` (every small-M product stays on `qmv`) and no `qmm_splitk` (`qmm` reduces K in one order for every M), so a continuously batched row matches its serial result. |
+| Every-thread compiled-function erase | `1e6dc0f6d` (`c9196eb71` on v0.32.2) | Freeing a compiled function erases it from every thread's compile cache, so a later function at the same address never replays a dead trace. |
+| `gather_qmm` signature for mlx-c | `1b1948045` | Keeps the pre-0.32.3 `gather_qmm` signature mlx-c 0.32.3 binds. |
+| Internal ops on the caller's stream | `8a9975f82`, `77cd76b31`, `2f512e399` (`91a45ed47`, `b3397bfc9`, `49d94e9fe` on v0.32.2) | Every internal call inside a stream-taking op passes the caller's stream: the `quantized_matmul` casts of `x`/`scales`/`biases`, `indices_or_default`, `gather`, `scatter`, `affine_quantize`, the bool-mask SDPA fallback, the implicit random key split (`KeySequence::next`, reached by temperature sampling), `categorical`, `layer_norm` and its VJP, `linalg` `l2_norm`/`cross`, the `fft` zero-pad, `number_of_elements`, `imag`, and nine transformation rules (vjp/jvp) that now use the primitive's `stream()`. mlx-swift runs every op on its own pooled stream, so a stream-less internal op ran on the thread's default stream: a second Metal queue, a cross-queue event wait and a separate submit per op. gpt-oss-20b decode (8-bit affine projections over float32 activations) paid 140 per token, 30% slower than 3.31.4 (#2028). Upstream v0.32.4 already passes the stream in `indices_or_default` and the SDPA fallback; the v0.32.4 rebase carries the rest (`8a9975f82`, `77cd76b31`, `2f512e399`). |
 
 `MLXCoreStreamPropagationTests` (CI, `swift test`) enforces this on the
 resolved core by running `scripts/check_mlx_core_streams.py`. The script reads
@@ -210,7 +213,7 @@ the call's shape:
   decode, its slice of the packed mask for verification); an unknown route
   always splits. `PagedKVVectorAttentionRoute` ports the dispatch (core
   `scaled_dot_product_attention.cpp` lines 754-763, 772-812, 1508, 1577 at
-  `v0.32.4-macprovider.1`); `testVectorAttentionRouteMatchesTheCoreDispatchBoundaries`
+  `v0.32.4-macprovider.4`; the file is unchanged since `.1`); `testVectorAttentionRouteMatchesTheCoreDispatchBoundaries`
   pins every boundary, and `testSharedDecodeAndVerifyAttentionMatchLoneBitsAtServedHeadDims`,
   `testSharedDecodeWindowAttentionMatchesLoneBitsEveryStep` and
   `testRaggedPrefillAttentionMatchesLoneCausalAttentionBitwise` check every
@@ -366,7 +369,7 @@ Measure TTFT, decode tok/s, peak RSS, Metal memory, energy/thermal state, and co
 - **RED:** any correctness, ownership, rollback, accounting, tool parsing, cold-cache ABI, artifact-parity, or unexplained performance-budget failure. Revert the pin candidate.
 - **BLOCKED:** required upstream release/package/toolchain condition is absent. Keep production pins unchanged.
 
-Current protected baseline (2026-10-17): fork `mlx-swift-lm 3.32.3-macprovider.9.4` (`ce3bb523…`, upstream `3.32.3`; `.9` (`dbe8bcb3…`) plus the Qwen2-VL per-image vision attention fix only), fork `mlx-swift 0.32.3-macprovider.8` (`745f5e48…`, upstream `0.32.3`), and fork MLX core `v0.32.2-macprovider.5` (`49d94e9f…`, upstream `v0.32.2`), built on Xcode 26.6 / Swift 6.3.3 / macOS SDK 26.5; `swift-transformers` and `swift-jinja` exactly as pinned in `phase3-binary/Package.resolved`. Previous baseline (2026-09-04): `mlx-swift-lm 3.31.4`, `mlx-swift 0.31.4`, `swift-transformers 1.3.4`, `swift-jinja 2.4.2` on Xcode 16.4 / Swift 6.1.
+Current campaign tuple (2026-10-17, epic #2029, pending its release tag): fork `mlx-swift-lm` `b177f9ea…` (untagged, upstream `3.32.3`), fork `mlx-swift 0.32.3-macprovider.9` (`29d3b933…`, upstream `0.32.3`), and fork MLX core `v0.32.4-macprovider.4` (`2f512e39…`, upstream `v0.32.4`). Protected baseline (2026-10-16, #2028): fork `mlx-swift-lm 3.32.3-macprovider.9` (`dbe8bcb3…`, upstream `3.32.3`), fork `mlx-swift 0.32.3-macprovider.8` (`745f5e48…`, upstream `0.32.3`), and fork MLX core `v0.32.2-macprovider.5` (`49d94e9f…`, upstream `v0.32.2`), built on Xcode 26.6 / Swift 6.3.3 / macOS SDK 26.5; `swift-transformers` and `swift-jinja` exactly as pinned in `phase3-binary/Package.resolved`. Previous baseline (2026-09-04): `mlx-swift-lm 3.31.4`, `mlx-swift 0.31.4`, `swift-transformers 1.3.4`, `swift-jinja 2.4.2` on Xcode 16.4 / Swift 6.1.
 
 `swift-transformers` was moved `1.0.0 → 1.3.3` by Dependabot #1336 without the
 #966 token-exact gate, then to `1.3.4` under that gate (2026-09-04). The gate is

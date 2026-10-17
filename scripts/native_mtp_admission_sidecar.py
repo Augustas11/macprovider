@@ -12,14 +12,14 @@ renders it from two inputs and never signs anything:
   executable CDHash, challenge-bank and artifact-projection digests.
 
 The tuple file holds one tuple input object, or a JSON array of them (one per
-admitted model tuple, SPEC-048 0.1.33); `--tuple` may also be repeated. All
+admitted model tuple, SPEC-048 0.1.34); `--tuple` may also be repeated. All
 entries share the release-owned fields and are emitted sorted by the SPEC-023
 entry key. A single tuple input produces the same bytes as before.
 
 The `projection` command renders the release's
 `native-mtp-artifact-manifest.json` from a JSON object keyed by `model_key`
 whose values are the closed `{target, mtp, tokenizer, manifest}` artifact
-objects: the v1 form for one model (byte-identical to the pre-0.1.33 file),
+objects: the v1 form for one model (byte-identical to the pre-0.1.34 file),
 the v2 form keyed by `model_key` for more than one.
 
 Output is canonical bytes (sorted keys, no insignificant whitespace, UTF-8),
@@ -413,8 +413,8 @@ def _projection_artifacts(value: object, path: str) -> dict:
 
 
 def build_projection(models: object) -> bytes:
-    """SPEC-048 0.1.33 projection manifest: v1 for one model_key (the exact
-    pre-0.1.33 bytes), v2 keyed by model_key for more than one."""
+    """SPEC-048 0.1.34 projection manifest: v1 for one model_key (the exact
+    pre-0.1.34 bytes), v2 keyed by model_key for more than one."""
     if not isinstance(models, dict) or not 1 <= len(models) <= 256:
         fail("$models", "must be an object of 1..256 model_key entries")
     for model_key, artifacts in models.items():

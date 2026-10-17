@@ -12,8 +12,8 @@ Two entry points:
   stacks fail closed, because either half alone silently drops fork patches.
 
 Package.resolved does not list the MLX core (``mlx``) submodule. The reviewed
-mlx-swift fork revision pins it: at 745f5e48 the ``Source/Cmlx/mlx`` gitlink is
-https://github.com/Augustas11/mlx at 49d94e9f (``SPEC048_MLX_CORE_REVISION``),
+mlx-swift fork revision pins it: at 29d3b933 the ``Source/Cmlx/mlx`` gitlink is
+https://github.com/Augustas11/mlx at 2f512e39 (``SPEC048_MLX_CORE_REVISION``),
 so requiring that exact mlx-swift revision transitively pins the core fork.
 
 The CLI runs the production gate; ``--historical`` selects ``read_pins``.
@@ -42,25 +42,24 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
-# Fork branch glm53/tuple-0324 (untagged campaign revision) on upstream
-# mlx-swift-lm 3.32.3.
-SPEC048_MLX_SWIFT_LM_REVISION = "378aaf7618891e6903d207af7fb9906f6119070f"
+# Fork branch glm53/tuple-0324 (untagged campaign revision; the release step
+# cuts its tag) on upstream mlx-swift-lm 3.32.3.
+SPEC048_MLX_SWIFT_LM_REVISION = "b177f9eaa4830791210a08eb5ee2910bb593acf7"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
-# Fork tag 0.32.3-macprovider.3: upstream mlx-swift 0.32.3 with the MLX core
-# submodule on the batch-invariant small-M quantized matmul fork
-# (v0.32.4-macprovider.1).
-SPEC048_MLX_SWIFT_REVISION = "0c9854fc147a6669b36c7e9d0f1c325ab0c6aa91"
+# Fork tag 0.32.3-macprovider.9: upstream mlx-swift 0.32.3 with the MLX core
+# submodule on the core fork below.
+SPEC048_MLX_SWIFT_REVISION = "29d3b93375cc56cd2649b40e4310a8bc445e9874"
 SPEC048_MLX_SWIFT_UPSTREAM_BASE = "19601207e9a0de51e03ee6ec0c3c5f3784275075"
-# Fork tag v0.32.2-macprovider.5 on upstream MLX v0.32.2: the reviewed
+# Fork tag v0.32.4-macprovider.4 on upstream MLX v0.32.4: the reviewed
 # Source/Cmlx/mlx gitlink of SPEC048_MLX_SWIFT_REVISION. Package.resolved does
 # not carry it, so read_production_pins cannot check it; the production gate
 # for the core revision is MLXCoreStreamPropagationTests
 # (testResolvedCoreIsTheReviewedForkRevision), which compares the resolved
 # mlx-swift gitlink and core HEAD with this value in CI.
 SPEC048_MLX_CORE_FORK = "https://github.com/Augustas11/mlx"
-SPEC048_MLX_CORE_REVISION = "49d94e9fece0849443fa414e2d47813f68a51eaa"
-SPEC048_MLX_CORE_UPSTREAM_BASE = "1f8e74e3f12f31365464a6867c6579f0e9b29d85"
+SPEC048_MLX_CORE_REVISION = "2f512e3997349c8648f5d7c5113eb2c825aa242d"
+SPEC048_MLX_CORE_UPSTREAM_BASE = "36969c094354086e15d2a327a9c50feb20b9cf11"
 
 # Each reviewed fork is accepted only at its exact revision with no version.
 REVIEWED_FORK_PINS = {

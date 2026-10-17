@@ -9,7 +9,7 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
 ## Change log
 
 - **v0.22.25 (2026-10-17)** — Native-MTP admission for multi-width affine
-  artifacts (epic #2029, lockstep with SPEC-048 0.1.34). R024 per-module
+  artifacts (epic #2029, lockstep with SPEC-048 0.1.35). R024 per-module
   override widths are `4`, `5`, `6`, or `8` bits (MLX affine packs 5- and
   6-bit values exactly into `uint32` words; widths 2 and 3 and every other
   value still fail closed), and each exceptions array holds at most 1024
@@ -21,7 +21,7 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
   bound. The global width stays 4 (`mlx_affine_4bit`). §12.5 also states that
   an embedded (`checkpoint_mtp`) projection names the target directory as
   `mtp`, so no drafter is fetched, and that a multi-model admission set uses
-  the SPEC-048 0.1.33 v2 projection form. A CLI that predates this revision
+  the SPEC-048 0.1.34 v2 projection form. A CLI that predates this revision
   rejects a whole sidecar carrying a 5- or 6-bit override or more than 256
   exceptions, so every native-MTP tuple on that CLI falls back to ordinary
   decode; SPEC-048 R014 therefore publishes such a sidecar only after the CLI
@@ -3678,7 +3678,7 @@ provider ordinary. This is the content-addressed SPEC-023 member route of
 SPEC-048's separately stored MTP artifact. **[v0.22.25]** For an embedded
 (`checkpoint_mtp`) adapter the projected `mtp` member is the target directory
 itself (same path and digest) and no drafter is fetched. A set whose entries
-name more than one `model_key` carries the SPEC-048 0.1.33 v2 projection
+name more than one `model_key` carries the SPEC-048 0.1.34 v2 projection
 manifest keyed by `model_key`; a single-model set keeps the v1 form. Every projected byte is still
 verified and loaded only from the private capture; the unmanifested-file
 sweep applies to the bundle layout only, since the store root holds other

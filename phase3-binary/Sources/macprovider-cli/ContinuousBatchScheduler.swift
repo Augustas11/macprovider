@@ -112,7 +112,7 @@ struct ContinuousBatchSchedulerSnapshot: Sendable, Equatable {
 /// alone; otherwise a row's numerics depend on its batch neighbours. A shared
 /// prefill feeds `[rows, chunk]` tokens, and every quantized projection
 /// flattens that to `M = rows x chunk` (`QuantizedMatmul::eval_gpu`,
-/// `mlx/backend/metal/quantized.cpp`, MLX core fork `v0.32.4-macprovider.1`):
+/// `mlx/backend/metal/quantized.cpp`, MLX core fork `v0.32.4-macprovider.4`):
 /// `M < vector_limit` takes `qmv` (or `qmv_quad` at K 64/128), else `qmm`,
 /// with `vector_limit = get_qmv_batch_limit(K, N, device)` for transposed
 /// weights and 4 otherwise. Within each route a row's result does not depend
@@ -238,7 +238,7 @@ struct ContinuousBatchPrefillGroupingRule: Sendable, Equatable {
 /// row decoded beside enough neighbours would switch kernels and reduction
 /// order. A decode forward carries at most `vector limit - 1` rows, where the
 /// limit is the smallest `get_qmv_batch_limit` of the device over every K and
-/// N (core `v0.32.4-macprovider.1`, `mlx/backend/metal/quantized.cpp`). The
+/// N (core `v0.32.4-macprovider.4`, `mlx/backend/metal/quantized.cpp`). The
 /// smallest value belongs to the K or N above 4096 branch, which every served
 /// model reaches through its output head. M3 Ultra: 12, so 11 rows; M1 Pro
 /// (`g13s`): 7, so 6 rows; other M1/M2 non-Ultra: 6, so 5 rows; M3-M5

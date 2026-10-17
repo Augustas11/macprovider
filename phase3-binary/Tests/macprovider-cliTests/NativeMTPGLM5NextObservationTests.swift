@@ -2,7 +2,7 @@ import Foundation
 import XCTest
 @testable import macprovider_cli
 
-/// SPEC-048-R002 (0.1.33/0.1.34) `glm5_next_mtp_v1` embedded checkpoint and
+/// SPEC-048-R002 (0.1.34/0.1.35) `glm5_next_mtp_v1` embedded checkpoint and
 /// SPEC-023-R024 (v0.22.25) override widths and exception bound.
 final class NativeMTPGLM5NextObservationTests: XCTestCase {
     private struct TensorFixture {

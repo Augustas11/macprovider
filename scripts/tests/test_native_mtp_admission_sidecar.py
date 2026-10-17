@@ -72,7 +72,7 @@ def resolved_tuple():
 
 
 def glm_tuple():
-    """A stand-in GLM-5.3-Flash tuple (SPEC-048 0.1.33 glm5_next_mtp_v1):
+    """A stand-in GLM-5.3-Flash tuple (SPEC-048 0.1.34 glm5_next_mtp_v1):
     embedded MTP, depth 1, greedy only. Digests are placeholders."""
     value = resolved_tuple()
     entry = value["entry"]
@@ -235,7 +235,7 @@ class NativeMTPAdmissionSidecarTests(unittest.TestCase):
 
 
 class NativeMTPAdmissionMultiEntryTests(unittest.TestCase):
-    """SPEC-048 0.1.33: one sidecar carries every admitted model tuple."""
+    """SPEC-048 0.1.34: one sidecar carries every admitted model tuple."""
 
     def setUp(self):
         self.qwen = resolved_tuple()
@@ -310,7 +310,7 @@ class NativeMTPAdmissionMultiEntryTests(unittest.TestCase):
 
 
 class NativeMTPProjectionManifestTests(unittest.TestCase):
-    """SPEC-048 0.1.33 projection manifest: v1 for one model, v2 keyed by model_key."""
+    """SPEC-048 0.1.34 projection manifest: v1 for one model, v2 keyed by model_key."""
 
     def test_single_model_projection_is_the_committed_v1_bytes(self):
         committed = PROJECTION.read_bytes()

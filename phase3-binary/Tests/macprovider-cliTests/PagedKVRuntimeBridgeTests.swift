@@ -1832,7 +1832,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         paddedRouteDifferences.forEach { print("  \($0)") }
     }
 
-    /// The vector-attention route port pins core `v0.32.4-macprovider.1`
+    /// The vector-attention route port pins core `v0.32.4-macprovider.4`
     /// (`scaled_dot_product_attention.cpp` lines 754-763, 772-812, 1577): every
     /// pass-count and partition-count boundary on both sides. A rebase that
     /// moves one must update the port and this table.

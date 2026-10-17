@@ -1511,7 +1511,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         ))
     }
 
-    /// SPEC-048-R002 (0.1.33): a sidecar naming two models carries the v2
+    /// SPEC-048-R002 (0.1.34): a sidecar naming two models carries the v2
     /// projection keyed by model_key; the v1 form serves only one model.
     func testMultiModelSidecarReadsTheV2ProjectionByModelKey() throws {
         let fixture = try makeReleaseEnvelopeFixture()

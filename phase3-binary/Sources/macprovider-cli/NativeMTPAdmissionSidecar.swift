@@ -513,7 +513,7 @@ enum NativeMTPAdmissionSidecar {
     static let maxQuantizationExceptions = 1024
     static let embeddedMTPFamilyAdapter = "glm5_next_mtp_v1"
 
-    /// SPEC-048-R002 (0.1.33/0.1.34): the release entry carries no layout, so
+    /// SPEC-048-R002 (0.1.34/0.1.35): the release entry carries no layout, so
     /// the adapter decides it. Only the GLM-5-Next adapter is embedded; every
     /// other adapter keeps the separate-artifact layout.
     static func sourceLayout(forFamilyAdapter familyAdapter: String) -> String {
@@ -1734,7 +1734,7 @@ enum NativeMTPAdmissionSidecar {
         return artifacts
     }
 
-    /// SPEC-048-R002 (0.1.33): v1 is one `artifacts` object for a sidecar
+    /// SPEC-048-R002 (0.1.34): v1 is one `artifacts` object for a sidecar
     /// whose entries all name one model; v2 keys one artifacts object per
     /// `model_key` and must name exactly the sidecar's model keys.
     private static func selectProjectedArtifacts(
