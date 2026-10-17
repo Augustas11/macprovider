@@ -1856,7 +1856,13 @@ actor ModelRuntime: ModelRuntimeServing {
     nonisolated var isSettlementReceiptEligible: Bool { true }
     nonisolated var settlementRuntimeSource: String? { nil }
 
-    private nonisolated static func makeServeGenerateParameters(
+    /// The one constructor of serve generation parameters; every serial
+    /// `generate`/`TokenIterator` the provider runs takes its parameters from
+    /// here. `model` decides the KV cap: a model that sizes its own cache
+    /// (`modelSizesItsOwnKVCache`) gets no `maxKVSize`, because mlx-swift-lm's
+    /// explicit-cache check would reject its cache against any cap.
+    nonisolated static func makeServeGenerateParameters(
+        model: any LanguageModel,
         maxTokens: Int?,
         maxContextTokens: Int,
         kvBitsOverride: Int?,
@@ -1866,7 +1872,7 @@ actor ModelRuntime: ModelRuntimeServing {
     ) -> GenerateParameters {
         GenerateParameters(
             maxTokens: maxTokens,
-            maxKVSize: maxContextTokens,
+            maxKVSize: modelSizesItsOwnKVCache(model) ? nil : maxContextTokens,
             kvBits: kvBitsOverride,
             temperature: temperature,
             topP: topP,
@@ -1906,6 +1912,15 @@ actor ModelRuntime: ModelRuntimeServing {
             cacheParameters(base, forceSimpleKV: forceSimpleKV || reusedCache),
             cache: cache
         )
+    }
+
+    /// GLM-5-Next's sparse layers always build their own `GLM5NextLatentCache`
+    /// and ignore `maxKVSize`; mlx-swift-lm's explicit-cache check counts each
+    /// such layer as not realizing a requested cap
+    /// (`incompatibleCapacity(expected: maxKVSize, count: 11)`). Prompt length
+    /// is still bounded by `validatePromptTokenCount` before allocation.
+    nonisolated static func modelSizesItsOwnKVCache(_ model: any LanguageModel) -> Bool {
+        model is GLM5NextModel || model is GLM5NextTextModel
     }
 
     /// Parameters for a `TokenIterator` over an explicit cache the model sized
@@ -2599,7 +2614,8 @@ actor ModelRuntime: ModelRuntimeServing {
         guard let container else { return Self.pagedKVUnavailableCacheClass }
         return await container.perform { context in
             let parameters = Self.makeServeGenerateParameters(
-                maxTokens: 1,
+                                model: context.model,
+maxTokens: 1,
                 maxContextTokens: maxContextTokens,
                 kvBitsOverride: kvBitsOverride,
                 prefillStepSize: prefillStepSize,
@@ -8202,7 +8218,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 let lmInput = try await context.processor.prepare(input: input)
                 try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
                 let parameters = Self.makeServeGenerateParameters(
-                    maxTokens: boundedMaxTokens,
+                                        model: context.model,
+maxTokens: boundedMaxTokens,
                     maxContextTokens: maxContextTokens,
                     kvBitsOverride: kvBitsOverride,
                     prefillStepSize: prefillStepSize,
@@ -8406,7 +8423,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     let lmInput = try await context.processor.prepare(input: input)
                     try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
                     let parameters = Self.makeServeGenerateParameters(
-                        maxTokens: Self.labSerialEffectiveMaxTokens(
+                                                model: context.model,
+maxTokens: Self.labSerialEffectiveMaxTokens(
                             requestMaxTokens: request.maxTokens,
                             labOutputCap: labSerialHooks?.outputCap
                         ),
@@ -9186,7 +9204,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     let lmInput = try await context.processor.prepare(input: input)
                     try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
                     let parameters = Self.makeServeGenerateParameters(
-                        maxTokens: Self.labSerialEffectiveMaxTokens(
+                                                model: context.model,
+maxTokens: Self.labSerialEffectiveMaxTokens(
                             requestMaxTokens: request.maxTokens,
                             labOutputCap: labSerialHooks?.outputCap
                         ),
@@ -9717,7 +9736,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 let input = UserInput(chat: [.user("warmup")])
                 let lmInput = try await context.processor.prepare(input: input)
                 let parameters = Self.makeServeGenerateParameters(
-                    maxTokens: 1,
+                                        model: context.model,
+maxTokens: 1,
                     maxContextTokens: maxContextTokens,
                     kvBitsOverride: kvBitsOverride,
                     prefillStepSize: prefillStepSize,
@@ -9931,7 +9951,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 try await container.perform { context in
                     let lmInput = LMInput(text: LMInput.Text(tokens: MLXArray(prompt.map(Int32.init))))
                     let parameters = Self.makeServeGenerateParameters(
-                        maxTokens: maxTokens,
+                                                model: context.model,
+maxTokens: maxTokens,
                         maxContextTokens: maxContextTokens,
                         kvBitsOverride: kvBitsOverride,
                         prefillStepSize: prefillStepSize,
@@ -9970,7 +9991,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     let input = UserInput(chat: [.user(Self.startupThroughputProbePrompt)])
                     let lmInput = try await context.processor.prepare(input: input)
                     let parameters = Self.makeServeGenerateParameters(
-                        maxTokens: maxTokens,
+                                                model: context.model,
+maxTokens: maxTokens,
                         maxContextTokens: maxContextTokens,
                         kvBitsOverride: kvBitsOverride,
                         prefillStepSize: prefillStepSize,
@@ -10054,7 +10076,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 try validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
                 let parameters = GenerateParameters(
                     maxTokens: 1,
-                    maxKVSize: maxContextTokens,
+                    maxKVSize: modelSizesItsOwnKVCache(targetContext.model) ? nil : maxContextTokens,
                     kvBits: kvBitsOverride,
                     temperature: 0.0,
                     topP: 1.0,
@@ -10093,7 +10115,7 @@ actor ModelRuntime: ModelRuntimeServing {
             try validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
             let parameters = GenerateParameters(
                 maxTokens: request.maxTokens,
-                maxKVSize: maxContextTokens,
+                maxKVSize: modelSizesItsOwnKVCache(targetContext.model) ? nil : maxContextTokens,
                 kvBits: kvBitsOverride,
                 temperature: 0.0,
                 topP: 1.0,

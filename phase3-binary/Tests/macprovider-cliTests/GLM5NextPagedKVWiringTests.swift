@@ -281,4 +281,20 @@ final class GLM5NextPagedKVWiringTests: XCTestCase {
             base, forceSimpleKV: false, reusedCache: false, cache: [MambaCache()]
         ).maxKVSize, 65_536)
     }
+
+    /// Every serve-cap `maxKVSize` the provider sets goes through
+    /// `modelSizesItsOwnKVCache`, so no serial `generate`/`TokenIterator`
+    /// path can hand a GLM-5-Next cache a cap (the self-check baseline was the
+    /// missed one).
+    func testEveryServeKVCapGoesThroughTheChokePoint() throws {
+        let path = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/macprovider-cli/ModelRuntime.swift")
+        let source = try String(contentsOf: path, encoding: .utf8)
+        let assignments = source.components(separatedBy: "\n").filter { $0.contains("maxKVSize:") }
+        XCTAssertEqual(assignments.count, 3, assignments.joined(separator: "\n"))
+        for line in assignments {
+            XCTAssertTrue(line.contains("modelSizesItsOwnKVCache("), line)
+        }
+    }
 }
