@@ -117,11 +117,11 @@ final class ModelRuntimeToolSelectionTests: XCTestCase {
         XCTAssertThrowsError(try ModelRuntime.parseGeneratedOutput(
             filteredText: call + #"<tool_call>{"name":"lookup","arguments":{"id":"#,
             generatedTokenIDs: [], decode: { _ in "" }, request: request,
-            mode: .complete(), defaultCompletionTokens: 9
+            mode: .complete(), defaultCompletionTokens: 9, toolCallPrefill: nil
         ))
         let parsed = try ModelRuntime.parseGeneratedOutput(
             filteredText: call + call, generatedTokenIDs: [], decode: { _ in "" },
-            request: request, mode: .complete(), defaultCompletionTokens: 9
+            request: request, mode: .complete(), defaultCompletionTokens: 9, toolCallPrefill: nil
         )
         XCTAssertEqual(parsed.toolCalls.count, 2, "No call may be silently dropped before cardinality validation")
         XCTAssertThrowsError(try ModelRuntime.validateStructuredCompletion(CompletionResult(
@@ -143,7 +143,7 @@ final class ModelRuntimeToolSelectionTests: XCTestCase {
             let request = try request(choice: choice)
             let parsed = try ModelRuntime.parseGeneratedOutput(
                 filteredText: raw, generatedTokenIDs: [], decode: { _ in "" },
-                request: request, mode: .complete(), defaultCompletionTokens: 9
+                request: request, mode: .complete(), defaultCompletionTokens: 9, toolCallPrefill: nil
             )
             XCTAssertEqual(parsed.content, "")
             XCTAssertEqual(parsed.toolCalls.map(\.functionName), ["lookup"])

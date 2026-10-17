@@ -721,12 +721,15 @@ final class NativeMTPRequestShapeReplayRunner {
         thinkingToggle: Bool,
         preserveThinking: Bool
     ) async throws -> [Int32] {
-        let input = try ModelRuntime.userInput(
+        // Same preparation as serving, so replay geometry includes any
+        // SPEC-018 §3.11 call prefill. The replay loads the canonical model id.
+        try await ModelRuntime.preparedRequestInput(
             for: request,
+            context: context,
             templateSupportsThinkingToggle: thinkingToggle,
-            templateSupportsPreserveThinking: preserveThinking
-        )
-        return try await context.processor.prepare(input: input).text.tokens.asArray(Int32.self)
+            templateSupportsPreserveThinking: preserveThinking,
+            toolSelectionModelID: request.model
+        ).input.text.tokens.asArray(Int32.self)
     }
 
     static func makeRequest(
