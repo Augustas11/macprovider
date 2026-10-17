@@ -654,6 +654,47 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     /// contiguous KV. Tests keep the default off so fake models are not traced.
     let compiledDecode: Bool
     private let lock = NSLock()
+    /// Holders of this backend's target `container.perform` (exclusive, so
+    /// at most one). Every MLX evaluation of the native-MTP round runs
+    /// inside one: forwards, sampling, drafter state, lab digests.
+    private var targetLockHolders = 0
+
+    fileprivate func enterTargetLock() {
+        lock.lock()
+        targetLockHolders += 1
+        lock.unlock()
+    }
+
+    fileprivate func exitTargetLock() {
+        lock.lock()
+        targetLockHolders -= 1
+        lock.unlock()
+    }
+
+    /// Fails closed when a native-MTP helper that evaluates MLX arrays runs
+    /// outside the target container's lock, where it could evaluate
+    /// concurrently with a forward on the shared container.
+    func requireTargetLockHeld(_ site: String) throws {
+        lock.lock()
+        let held = targetLockHolders > 0
+        lock.unlock()
+        guard held else {
+            try? FileHandle.standardError.write(contentsOf: Data(
+                "event=native_mtp_target_lock_not_held site=\(site)\n".utf8
+            ))
+            throw ContinuousBatchSchedulerError.unsupported("native_mtp_target_lock_not_held")
+        }
+    }
+
+    #if DEBUG
+    /// Runs `body` holding this backend's target lock, for tests.
+    func withTargetLockForTest<R: Sendable>(_ body: @Sendable () throws -> R) async throws -> R {
+        try await container.perform { _ in
+            self.enterTargetLock(); defer { self.exitTargetLock() }
+            return try body()
+        }
+    }
+    #endif
     private var rows: [String: RowState] = [:]
     private var decodeSession: DecodeSession?
     private var nativeMTPPendingTransactions: [String: NativeMTPPendingTransaction] = [:]
@@ -836,6 +877,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
         defer { endOperation() }
         return try await container.perform(nonSendable: inputs) { context, inputs in
+            self.enterTargetLock(); defer { self.exitTargetLock() }
             let raggedOffsets = Self.hasRaggedPromptOffsets(inputs)
             if Self.canSharePrefillForward(inputs),
                self.sharedForwardFits(rows: inputs.count, tokensPerRow: inputs[0].promptTokens.count),
@@ -1069,6 +1111,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         positionDeltas: MLXArray?,
         sampledToken: Int?
     ) async throws {
+        try requireTargetLockHeld("seed_drafter_from_prefill")
         let tailToken: Int
         if input.isFinalChunk {
             guard let sampledToken else {
@@ -1207,6 +1250,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
 
         let decoded: [ContinuousBatchDecodeOutcome] = try await container.perform(nonSendable: supportedInputs) { context, supportedInputs in
+            self.enterTargetLock(); defer { self.exitTargetLock() }
             let (decodable, capFailures) = await self.catchingUpNativeMTPDrafterColumnsAtCap(
                 targetModel: context.model,
                 inputs: supportedInputs,
@@ -1257,6 +1301,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             return inputs.map { .rowFailure(requestID: $0.requestID) }
         }
         let decoded: [ContinuousBatchDecodeOutcome] = try await container.perform(nonSendable: supportedInputs) { context, supportedInputs in
+            self.enterTargetLock(); defer { self.exitTargetLock() }
             let (decodable, capFailures) = await self.catchingUpNativeMTPDrafterColumnsAtCap(
                 targetModel: context.model,
                 inputs: supportedInputs,
@@ -1312,6 +1357,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         let pendingIDs = inputs.map(\.requestID).filter { hasPendingNativeMTPDrafterColumns(for: $0) }
         if !pendingIDs.isEmpty {
             try await container.perform { context in
+                self.enterTargetLock(); defer { self.exitTargetLock() }
                 try await self.flushNativeMTPDrafterColumns(
                     targetModel: context.model,
                     requestIDs: pendingIDs,
@@ -1404,6 +1450,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         rows inputs: [ContinuousBatchNativeMTPVerifyInput]
     ) async throws -> [NativeMTPVerifiedRow] {
         let verified: [NativeMTPVerifiedRow] = try await container.perform(nonSendable: inputs) { context, inputs in
+            self.enterTargetLock(); defer { self.exitTargetLock() }
             // A cancellation between groups of a split round stops before
             // this group touches row state.
             try self.throwIfCancelRequested()
@@ -1498,6 +1545,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
         defer { endOperation() }
         try await container.perform(nonSendable: inputs) { context, inputs in
+            self.enterTargetLock(); defer { self.exitTargetLock() }
             if inputs.allSatisfy({ !$0.shouldCommit }) {
                 // Proposal never mutates drafter state, so an aborted round
                 // only drops its staged target transactions.
@@ -1626,9 +1674,13 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         lock.lock()
         let observer = labNativeMTPStateDigestObserver
         lock.unlock()
-        guard let observer else { return }
-        if phase == .afterAbort, !requestIDs.isEmpty {
-            try await container.perform(nonSendable: requestIDs) { context, requestIDs in
+        guard let observer, !requestIDs.isEmpty else { return }
+        // The digests evaluate the row and drafter state, so they run under
+        // the target lock like every forward (window A2: they ran outside it,
+        // beside a decode window on the same container).
+        try await container.perform(nonSendable: requestIDs) { context, requestIDs in
+            self.enterTargetLock(); defer { self.exitTargetLock() }
+            if phase == .afterAbort {
                 for requestID in requestIDs {
                     self.labClearNativeMTPDrafterRecomputeDigest(requestID: requestID)
                     try await self.labRecomputeNativeMTPDrafterDigest(
@@ -1637,21 +1689,21 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     )
                 }
             }
-        }
-        for requestID in requestIDs {
-            let digest = try nativeMTPStateDigest(requestID: requestID, transaction: nil)
-            observer.record(NativeMTPStateDigestRecord(
-                requestID: requestID,
-                phase: phase,
-                digestSHA256: digest.combined,
-                cacheDigestSHA256: digest.cache,
-                drafterDigestSHA256: digest.drafter,
-                pendingTargetDigestSHA256: nil,
-                drafterRecomputeDigestSHA256: digest.drafterRecompute,
-                committedKVTokenCount: rowStateTokenCount(for: requestID),
-                proposedTokens: 0,
-                committedProposalTokens: nil
-            ))
+            for requestID in requestIDs {
+                let digest = try self.nativeMTPStateDigest(requestID: requestID, transaction: nil)
+                observer.record(NativeMTPStateDigestRecord(
+                    requestID: requestID,
+                    phase: phase,
+                    digestSHA256: digest.combined,
+                    cacheDigestSHA256: digest.cache,
+                    drafterDigestSHA256: digest.drafter,
+                    pendingTargetDigestSHA256: nil,
+                    drafterRecomputeDigestSHA256: digest.drafterRecompute,
+                    committedKVTokenCount: self.rowStateTokenCount(for: requestID),
+                    proposedTokens: 0,
+                    committedProposalTokens: nil
+                ))
+            }
         }
     }
     #endif
@@ -2391,6 +2443,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         positionDeltas: MLXArray?,
         targetBonusToken: Int
     ) throws {
+        try requireTargetLockHeld("lab_record_committed_prefix")
         guard labNativeMTPObserverInstalled(), !tokens.isEmpty else { return }
         guard tokens.count == hidden.count else {
             throw ContinuousBatchSchedulerError.unsupported("native_mtp_drafter_recompute_shape_mismatch")
@@ -2445,6 +2498,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         targetModel: any LanguageModel,
         requestID: String
     ) async throws {
+        try requireTargetLockHeld("lab_recompute_drafter_digest")
         guard labNativeMTPObserverInstalled(), let drafterContainer else { return }
         lock.lock()
         let tokens = labNativeMTPCommittedPrefixTokens[requestID] ?? []
@@ -2532,6 +2586,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         firstBonusToken: Int,
         requestID: String
     ) async throws {
+        try requireTargetLockHeld("prepare_drafter_state")
         guard let drafterContainer else { return }
         guard targetHidden.ndim == 3,
               targetHidden.dim(0) == 1,
@@ -2588,6 +2643,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         positionDeltas: MLXArray?,
         tailToken: Int
     ) async throws {
+        try requireTargetLockHeld("advance_drafter_prompt_chunk")
         guard let drafterContainer else { return }
         let chunkCount = input.promptTokens.count
         guard targetHidden.ndim == 3,
@@ -2724,6 +2780,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         requestIDs: [String],
         minimumColumns: Int
     ) async throws {
+        try requireTargetLockHeld("flush_drafter_columns")
         guard let drafterContainer, !requestIDs.isEmpty else { return }
         let (flushIDs, advanceRows) = try pendingNativeMTPDrafterAdvanceRows(
             requestIDs: requestIDs,
@@ -2826,6 +2883,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         targetModel: any LanguageModel,
         rows: [(ContinuousBatchNativeMTPFinalizeInput, NativeMTPPendingTransaction)]
     ) async throws -> MTPPackedDrafterAdvanceResult? {
+        try requireTargetLockHeld("advance_drafters")
         guard let drafterContainer, !rows.isEmpty else { return nil }
         let advanceRows = try rows.map { input, transaction -> MTPPackedDrafterAdvanceRow in
             guard let state = nativeMTPDrafterState(for: input.requestID),
@@ -3095,6 +3153,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     }
 
     private func rowTargetCacheDigest(requestID: String) throws -> String {
+        try requireTargetLockHeld("row_target_cache_digest")
         lock.lock()
         let row = rows[requestID]
         lock.unlock()
@@ -3257,6 +3316,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     #endif
 
     private func nativeMTPDrafterDigest(requestID: String) throws -> String? {
+        try requireTargetLockHeld("drafter_digest")
         lock.lock()
         let state = nativeMTPDrafterStates[requestID]
         let seed = nativeMTPDrafterSeedTokens[requestID]

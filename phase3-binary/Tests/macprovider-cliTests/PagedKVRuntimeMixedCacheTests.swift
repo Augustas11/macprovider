@@ -7,6 +7,52 @@ import MLXNN
 import XCTest
 
 final class PagedKVRuntimeMixedCacheTests: XCTestCase {
+    /// Every MLX evaluation of the native-MTP round runs under the backend's
+    /// target container lock, the lock every forward takes. A helper that
+    /// evaluates (drafter state, lab digests) fails closed outside it.
+    func testNativeMTPHelpersRequireTheTargetLock() async throws {
+        let container = ModelContainer(context: ModelContext(
+            configuration: ModelConfiguration(id: "zai-org/glm-5.3-flash"),
+            model: MixedCacheFakeModel(recorder: MixedCacheRecorder(), nextTokenByInput: [:], attentionDType: .float16),
+            processor: MixedCacheUserInputProcessor(),
+            tokenizer: MixedCacheTokenizer()
+        ))
+        let backend = PagedKVSharedForwardBackend(
+            container: container,
+            blockSizeTokens: 256,
+            maxPhysicalBlocks: 16,
+            poolEpoch: 1,
+            layerCount: 2,
+            cacheKinds: [.recurrentMamba, .pagedMLA(kpool: 4)]
+        )
+        XCTAssertThrowsError(try backend.requireTargetLockHeld("test")) { error in
+            XCTAssertEqual(error as? ContinuousBatchSchedulerError, .unsupported("native_mtp_target_lock_not_held"))
+        }
+        let held: Bool = try await backend.withTargetLockForTest {
+            (try? backend.requireTargetLockHeld("test")) != nil
+        }
+        XCTAssertTrue(held)
+        XCTAssertThrowsError(try backend.requireTargetLockHeld("test"), "released after the perform")
+
+        // Every MLX-evaluating native-MTP helper checks it, and the lab digest
+        // loop runs inside the target perform.
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+                .appendingPathComponent("Sources/macprovider-cli/PagedKVRuntimeBridge.swift"),
+            encoding: .utf8
+        )
+        for site in [
+            "seed_drafter_from_prefill", "prepare_drafter_state", "advance_drafter_prompt_chunk",
+            "flush_drafter_columns", "advance_drafters", "lab_recompute_drafter_digest",
+            "row_target_cache_digest", "drafter_digest", "lab_record_committed_prefix",
+        ] {
+            XCTAssertTrue(source.contains("try requireTargetLockHeld(\"\(site)\")"), site)
+        }
+        XCTAssertTrue(source.contains("let digest = try self.nativeMTPStateDigest(requestID: requestID, transaction: nil)"))
+        XCTAssertFalse(source.contains("            let digest = try nativeMTPStateDigest(requestID: requestID, transaction: nil)"))
+    }
+
     /// Every scheduler is built with the backend's flattened-token bound:
     /// an injected glm5_next (pagedMLA) backend, as the native-MTP harnesses
     /// build, decodes at most 8 rows per forward whatever the device bound;
