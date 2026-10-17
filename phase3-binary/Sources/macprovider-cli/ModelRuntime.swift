@@ -9531,7 +9531,11 @@ actor ModelRuntime: ModelRuntimeServing {
     /// whatever key or grant it carries. This is checked before the SPEC-037
     /// gate; the gate and the conversation-cache lease refuse privacy as well.
     static func coldTierAdmits(provenance: KVIngestProvenance) -> Bool {
-        provenance != .privacy
+        // Exhaustive so a new provenance must choose explicitly.
+        switch provenance {
+        case .privacy: return false
+        case .directHTTP, .relay, .tier2, .unknown: return true
+        }
     }
 
     static func coldContext(

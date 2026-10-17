@@ -36,7 +36,13 @@ helper. The v1 journey still requires a different SIP-disabled lab Mac.
 Step 04 also drops the enabled-KV-disk-tier refusal case: since SPEC-049
 v0.6.0 an enabled tier is bypassed per request (SPEC-049-R010), not refused,
 so the v2 step-04 assertion omits it. The v1 journey keeps the case for its
-1.8.215 baseline.
+1.8.215 baseline. Instead, v2 step 04 MUST include
+`step-04-core-dump-and-env-refused/kv-disk-tier-bypass/`: the privacy-mode
+provider's `stderr.txt` showing `event=kv_disk_cache action=activated` and no
+hardening or eligibility refusal, plus `status-before.json` and
+`status-after.json` from `kv-cache status` taken before step 07 and after
+step 08. Both report `status: ok` and `enabled: true`, and `entry_count`,
+`bytes_used` and `counters` are unchanged by the privacy canaries.
 
 17. `step-17-auto-mode-eligibility` proves automatic eligible, automatic
     ineligible, automatic hardening fallback, explicit opt-out, and explicit

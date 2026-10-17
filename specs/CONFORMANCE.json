@@ -4407,15 +4407,23 @@
       "requirement_id": "SPEC-037-R011",
       "spec_id": "SPEC-037",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/MacProviderCore/KVDiskCacheConfig.swift:KVDiskCacheConfigResolver",
+        "phase3-binary/Sources/macprovider-cli/KVDiskTier.swift:persists",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:coldTierAdmits"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/KVDiskCacheConfigTests.swift:testDefaultOn",
+        "phase3-binary/Tests/macprovider-cliTests/KVDiskCacheConfigTests.swift:testOperatorOptOutViaEachSource",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyKVDiskBypassTests.swift:testNonPrivateFleetRequestStillPersistsAndRestoresFromDisk"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "FR-KVP11 (configuration and default-off rollout): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+        "rationale": "FR-KVP11 (configuration, default-on rollout from v0.2.2 with operator opt-out, authenticated fleet gate, privacy-class bypass): implemented and unit-tested; live acceptance on a released provider is pending."
       }
     },
     {
@@ -11568,7 +11576,8 @@
         "phase3-binary/Tests/macprovider-cliTests/PrivacyRuntimeHardeningTests.swift:testFakeProbeAllGreenPasses",
         "phase3-binary/Tests/macprovider-cliTests/PrivacyRuntimeHardeningTests.swift:testTraceEnvRefused",
         "phase3-binary/Tests/macprovider-cliTests/PrivacyRuntimeHardeningTests.swift:testLoopbackRefusedAndDiskTierBypassed",
-        "phase3-binary/Tests/macprovider-cliTests/PrivacyKVDiskBypassTests.swift:testPrivacyPathBypassInvariantHolds"
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyKVDiskBypassTests.swift:testPrivacyPathBypassInvariantHolds",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyPostureResponderTests.swift:testLostKVDiskBypassStopsPostureAndKeyAdvertisement"
       ],
       "journeys": [
         "JOURNEY-PRIVACY-CLASS-BETA",
@@ -11646,7 +11655,8 @@
         "test/integration/privacy_class_integration_test.go:TestPrivacyClassRedactionNoCanaryInAnyArtifact",
         "phase3-binary/Tests/macprovider-cliTests/PrivacyKVDiskBypassTests.swift:testPrivacyRequestGetsNoColdContextWhateverKeyOrGrant",
         "phase3-binary/Tests/macprovider-cliTests/PrivacyKVDiskBypassTests.swift:testPrivacyRequestNeverLooksUpWritesOrRestoresDiskTier",
-        "phase3-binary/Tests/macprovider-cliTests/PrivacyKVDiskBypassTests.swift:testNonPrivateFleetRequestStillPersistsAndRestoresFromDisk"
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyKVDiskBypassTests.swift:testNonPrivateFleetRequestStillPersistsAndRestoresFromDisk",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyKVDiskBypassTests.swift:testPrivacyRequestLeavesRealPersistedEntryUntouched"
       ],
       "journeys": [
         "JOURNEY-PRIVACY-CLASS-BETA",

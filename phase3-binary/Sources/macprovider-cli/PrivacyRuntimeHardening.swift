@@ -237,7 +237,7 @@ struct SystemPrivacyPostureProbe: PrivacyPostureProbe {
             coreDumpsDisabled: coreDumpsDisabled,
             sipEnabled: PrivacySIP.unrestrictedFilesystemProtected(sipResult),
             diagnosticEnvClear: envCodes.isEmpty,
-            kvDiskTierDisabled: true,
+            kvDiskTierDisabled: PrivacyRuntimeHardening.privacyPathBypassesKVDiskTier(),
             runtimeSource: PrivacyClassConstants.runtimeSource,
             codeCDHash: identity.cdhashHex,
             teamID: identity.teamID,

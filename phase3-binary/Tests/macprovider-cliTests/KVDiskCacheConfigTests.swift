@@ -3,7 +3,7 @@ import MacProviderCore
 import XCTest
 
 /// SPEC-037 FR-KVP11 / AC-9 — fail-closed config resolution for the KV disk
-/// tier: default-off, triple-source precedence (YAML → env → CLI), each
+/// tier: default-on (v0.2.2) with operator opt-out, triple-source precedence (YAML → env → CLI), each
 /// invalid-value rule disables the tier (never aborts), buyer policy, and tilde expansion.
 final class KVDiskCacheConfigTests: XCTestCase {
 

@@ -109,6 +109,10 @@ final class PrivacyRuntimeHardeningTests: XCTestCase {
         }
         XCTAssertTrue(diskPosture.kvDiskTierDisabled)
 
+        // The production probe derives the field from the bypass check itself.
+        XCTAssertEqual(systemProbe().observe().kvDiskTierDisabled, PrivacyRuntimeHardening.privacyPathBypassesKVDiskTier())
+        XCTAssertTrue(systemProbe().observe().kvDiskTierDisabled)
+
         var relayOff = greenConfig()
         relayOff.relayBlindEnabled = false
         XCTAssertEqual(

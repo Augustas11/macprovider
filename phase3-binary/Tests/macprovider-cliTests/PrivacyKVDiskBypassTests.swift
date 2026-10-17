@@ -70,6 +70,48 @@ final class PrivacyKVDiskBypassTests: XCTestCase {
         XCTAssertEqual(tier.calls, [], "the privacy path made no disk-tier call")
     }
 
+    /// Same worst case against the real encrypted store and adapter: a persisted
+    /// entry under the privacy request's own key stays untouched, and the store
+    /// records no read, write, promotion or telemetry event, across a restart.
+    func testPrivacyRequestLeavesRealPersistedEntryUntouched() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("privacy-kv-store-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sink = KVRecordingEventSink()
+        let store = try await seededStore(root: root, sink: sink)
+        let before = await store.inspect()
+        XCTAssertEqual(before.entryCount, 1)
+        sink.reset()
+
+        let (authority, authorityRoot) = makeAuthority()
+        defer { try? FileManager.default.removeItem(at: authorityRoot) }
+        let grant = try authority.authorize(conversationKey: key, generation: 1)
+        let privacy = try request().withConversationKey(key).withFleetCacheGrant(grant).withIngestProvenance(.privacy)
+        let cold = coldContext(privacy)
+        XCTAssertNil(cold)
+
+        for _ in 0 ..< 2 {  // first process, then a restart over the same store
+            let adapter = KVConversationColdTierAdapter(store: store, namespaceID: "ns-privacy", eligibilityTTLSeconds: 900)
+            adapter.seedTemplate(servedModelID: "served-a", template: KVConversationColdTierAdapter.seedGeometryTemplate(
+                fromPayloads: [KVLayerPayload(
+                    layerIndex: 0, classID: "KVCacheSimple", ndim: 4, dims: [1, 2, 1, 4], dtype: .f32,
+                    cacheOffset: 1, keyBytes: Data(), valueBytes: Data())]))
+            let cache = ConversationCache(config: Self.cacheConfig, coldTier: adapter)
+            let lease = try await XCTUnwrapAsync(await cache.begin(
+                conversationKey: key, incomingTokens: tokens(0 ..< 48), modelID: "model-a", kvBits: nil, cold: cold))
+            XCTAssertEqual(lease.cachedPromptTokens, 0)
+            await cache.commit(lease, cache: layers(offset: 56), fullTokens: tokens(0 ..< 56), cold: cold)
+            await cache.drainColdWrites(timeoutSeconds: 1)
+        }
+
+        XCTAssertEqual(sink.events.map(\.code), [], "no disk-tier event for privacy work")
+        let after = await store.inspect()
+        XCTAssertEqual(after.entryCount, before.entryCount)
+        XCTAssertEqual(after.bytesUsed, before.bytesUsed)
+        XCTAssertEqual(after.counters, before.counters)
+        await store.deactivate()
+    }
+
     /// The disk tier stays useful for ordinary traffic in the same process:
     /// a fleet-granted relay turn persists, and after a restart its next turn
     /// restores from disk.
@@ -117,6 +159,44 @@ final class PrivacyKVDiskBypassTests: XCTestCase {
             catalogRevision: "r1",
             tokenizerConfigSHA256: String(repeating: "c", count: 64),
             chatTemplateSHA256: String(repeating: "d", count: 64))
+    }
+
+    /// One committed `KVCacheSimple` entry for `key`, written through the real store.
+    private func seededStore(root: URL, sink: KVRecordingEventSink) async throws -> KVDiskCacheStore {
+        var config = KVDiskCacheStoreConfig(
+            root: root, namespaceID: "ns-privacy",
+            maxBytes: 1 << 30, maxEntries: 16, maxEntryBytes: 1 << 28,
+            retentionSeconds: 3600, stagingMaxBytes: 1 << 28, writeStagingMaxBytes: 1 << 28,
+            minFreeBytes: 1 << 20, promotionMaxSeconds: 5, eligibilityTTLSeconds: 900)
+        config.freeSpaceOverride = 1 << 34
+        let store = KVDiskCacheStore(config: config, keychain: KVInMemoryKeychain(), sink: sink)
+        try await store.activate()
+        let seq = 40
+        let byteCount = 2 * seq * 4 * KVCodecDType.f32.byteSize
+        let identity = KVWriteIdentity(
+            requestModel: "model-a", servedModelID: "served-a", modelSHA256: String(repeating: "b", count: 64),
+            catalogRevision: "r1", tokenizerID: "served-a", tokenizerConfigSHA256: String(repeating: "c", count: 64),
+            chatTemplateSHA256: String(repeating: "d", count: 64), abiEpoch: KVBuildIdentity.abiEpoch,
+            mlxSwiftLMRevision: KVBuildIdentity.mlxSwiftLMRevision, mlxVersion: KVBuildIdentity.mlxVersion,
+            cacheClass: "KVCacheSimple", layerCount: 1, kvBits: nil, kvGroupSize: nil,
+            kvQuantMode: nil, kvQuantPolicy: nil, decodePath: KVBuildIdentity.decodePathOrdinary, keyEpoch: 1)
+        let nowMillis = Int(Date().timeIntervalSince1970 * 1000)
+        let index = try await store.currentIndex(rawKey: key)
+        let sampled = try await store.highWatermark(rawKey: key)
+        let snapshot = KVWriteSnapshot(
+            rawKey: key, indexHMAC: try XCTUnwrap(index),
+            tokens: Array(0 ..< Int32(seq)),
+            layers: [KVLayerPayload(
+                layerIndex: 0, classID: "KVCacheSimple", ndim: 4, dims: [1, 2, seq, 4], dtype: .f32,
+                cacheOffset: seq, keyBytes: Data(count: byteCount), valueBytes: Data(count: byteCount))],
+            identity: identity, sampledPurgeGeneration: sampled,
+            commitSequence: 1, createdAtMillis: nowMillis, eligibleUntilMillis: nowMillis + 3_600_000,
+            incarnation: "inc-seed")
+        guard case .committed = try await store.write(snapshot, nowMillis: nowMillis) else {
+            XCTFail("seed entry must commit")
+            throw CancellationError()
+        }
+        return store
     }
 
     private func request() throws -> ChatCompletionRequest {

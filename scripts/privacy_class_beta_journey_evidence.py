@@ -1701,6 +1701,20 @@ class Checks:
             errors.extend(refusal["errors"])
             expect(refusal["fatal"] and {"diagnostic_env", f"env_{variable.lower()}"} <= refusal["reasons"], errors, f"{variable} must be refused with its bounded reason")
 
+    def kv_disk_bypass(self, base: str, errors: list[str]) -> None:
+        """SPEC-049 v0.6.0: privacy mode started with the KV disk tier active,
+        and the step-07/08 privacy canaries left the tier untouched."""
+        stderr = self.b.text(f"{base}/stderr.txt")
+        expect("event=kv_disk_cache action=activated" in stderr, errors, "KV disk tier must be active in privacy mode")
+        for refusal in ("privacy_class_hardening_failed", "auto_hardening_failed", "auto_ineligible"):
+            expect(refusal not in stderr, errors, f"privacy mode with the KV disk tier on must not log {refusal}")
+        before = self.b.json_object(f"{base}/status-before.json")
+        after = self.b.json_object(f"{base}/status-after.json")
+        for status in (before, after):
+            expect(status.get("status") == "ok" and status.get("enabled") is True, errors, "kv-cache status must be ok and enabled")
+        for field in ("entry_count", "bytes_used", "counters"):
+            expect(field in before and before.get(field) == after.get(field), errors, f"privacy canaries must not change kv-cache {field}")
+
     def p_config_refusals(self, errors: list[str]) -> None:
         base = "step-04-core-dump-and-env-refused"
         # SPEC-049 v0.6.0: an enabled KV disk tier is bypassed per request, not
@@ -1708,6 +1722,8 @@ class Checks:
         cases = [("loopback-runtime", "loopback_runtime")]
         if self.profile is PROFILE_V1:
             cases.insert(0, ("kv-disk-tier", "kv_disk_tier_enabled"))
+        else:
+            self.kv_disk_bypass(f"{base}/kv-disk-tier-bypass", errors)
         for case, reason in cases:
             refusal = self.hardening_refusal(f"{base}/{case}")
             errors.extend(refusal["errors"])
