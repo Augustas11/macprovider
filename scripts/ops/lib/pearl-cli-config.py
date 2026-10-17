@@ -43,6 +43,20 @@ with the running coordinator, restarts once and requires the new invocation to
 log the corpus loaded and scheduling enabled; on failure it restores the
 overlay and corpus and restarts again. Locally, `validate-corpus PATH` applies
 the corpus rules to a file and prints only its size, prompt count and sha256.
+
+Also used by scripts/ops/pearl-runtime.sh PEARL_RUNTIME_TASK=vision-qualification
+(#2016 operator-reviewed native-vision qualification):
+  python3 - vq-facts [layout flags]                             read-only facts
+  python3 - apply-vision-qualification [layout flags] --vq-staged STAGED
+            --vq-sha256 SHA256
+Under the same locks it checks the staged canonical record (sha256, the
+coordinator's VisionQualificationConfig rules), sets
+routing.vision_qualifications to exactly [record] in the overlay (backup
+first; refuses a different existing list), validates with the running
+coordinator, restarts once and requires the new invocation to log the
+on-disk files as its boot config; on failure it restores the overlay and
+restarts again. Locally, `validate-vision-qualification PATH [OUT]` applies
+the rules and prints only the field count and the entry sha256.
 """
 import argparse
 import copy
@@ -857,7 +871,283 @@ def restore_corpus(dest, ours, original, gid):
         write_corpus(dest, data, ogid, uid=uid, mode=mode)
 
 
+# --- native-vision qualification (#2016) -------------------------------------
+#
+# Used by scripts/ops/pearl-runtime.sh PEARL_RUNTIME_TASK=vision-qualification.
+# The record names a provider, so it never enters this public repository and
+# nothing here prints its values: only field names and the entry's sha256.
+
+# routing.vision_qualifications[] (internal/config/config.go
+# VisionQualificationConfig and its Validate rules). This copy is stricter
+# (exact keys, types, lowercase sha256 hex for every digest the provider
+# reports as one, the snapshot-manifest hash algorithm, printable ASCII), so
+# what it accepts the coordinator accepts.
+VQ_INT_FIELDS = ("ram_gb", "max_context_tokens", "max_concurrency")
+VQ_HEX_FIELDS = ("model_hash", "weights_manifest_sha256", "processor_digest", "qualification_digest")
+VQ_FIELDS = frozenset(("provider_id", "binary_version", "hardware_chip", "model_id", "model_hash_algorithm",
+                       "runtime", "runtime_revision", "media_profile") + VQ_INT_FIELDS + VQ_HEX_FIELDS)
+VQ_FIXED = {"model_id": "mlx-community/Qwen2-VL-2B-Instruct-4bit", "runtime": "mlx_cache",
+            "media_profile": "qwen2vl-inline-v1", "model_hash_algorithm": "macprovider.snapshot-manifest.v1"}
+VQ_MAX_BYTES = 64 * 1024
+LOWER_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+PRINTABLE = re.compile(r"^[\x21-\x7e](?:[\x20-\x7e]*[\x21-\x7e])?$")
+
+
+def vq_validate(entry):
+    """The entry as a plain dict; Refused naming only the field otherwise."""
+    if not isinstance(entry, dict) or set(entry) != VQ_FIELDS:
+        names = set(entry) if isinstance(entry, dict) else set()
+        raise Refused("the record must be a mapping with exactly the %d routing.vision_qualifications fields "
+                      "(missing: %s; unknown: %d)" % (len(VQ_FIELDS), ", ".join(sorted(VQ_FIELDS - names)) or "none",
+                                                      len(names - VQ_FIELDS)))
+    for key in sorted(entry):
+        value = entry[key]
+        if key in VQ_INT_FIELDS:
+            # Go int on Pearl's amd64 coordinator: int64.
+            if type(value) is not int or not 0 < value <= INT64_MAX:
+                raise Refused("%s must be a positive integer" % key)
+        elif not isinstance(value, str) or not PRINTABLE.match(value) or len(value) > 256:
+            raise Refused("%s must be a non-blank printable ASCII string of at most 256 bytes" % key)
+        elif key in VQ_HEX_FIELDS and not LOWER_HEX64.match(value):
+            raise Refused("%s must be a lowercase sha256 hex digest" % key)
+        elif key in VQ_FIXED and value != VQ_FIXED[key]:
+            raise Refused("%s must be %s (the qualified qwen2vl-inline-v1 runtime tuple)" % (key, VQ_FIXED[key]))
+    return dict(entry)
+
+
+def vq_canonical(entry):
+    return json.dumps(entry, sort_keys=True, separators=(",", ":")).encode()
+
+
+def vq_digest(entry):
+    return hashlib.sha256(vq_canonical(entry)).hexdigest()
+
+
+def vq_parse(raw):
+    """A validated entry from JSON (or YAML) bytes."""
+    if len(raw) > VQ_MAX_BYTES:
+        raise Refused("the record is larger than %d bytes" % VQ_MAX_BYTES)
+
+    def pairs(items):
+        keys = [k for k, _ in items]
+        if len(set(keys)) != len(keys):
+            raise Refused("the record has a duplicate key")
+        return dict(items)
+
+    try:
+        text = raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        raise Refused("the record is not UTF-8")
+    try:
+        doc = json.loads(text, object_pairs_hook=pairs)
+    except ValueError:
+        import yaml
+
+        class Strict(yaml.SafeLoader):
+            pass
+
+        def mapping(loader, node):
+            keys = [loader.construct_object(k) for k, _ in node.value]
+            if len(set(map(str, keys))) != len(keys):
+                raise Refused("the record has a duplicate key")
+            return loader.construct_mapping(node)
+
+        Strict.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, mapping)
+        try:
+            doc = yaml.load(text, Loader=Strict)
+        except yaml.YAMLError:
+            raise Refused("the record is neither JSON nor YAML")
+    return vq_validate(doc)
+
+
+def validate_vq_file(path, out=None):
+    st = os.lstat(path)
+    if not os.path.isfile(path) or os.path.islink(path):
+        raise Refused("the record is not a regular file")
+    with open(path, "rb") as f:
+        entry = vq_parse(f.read(VQ_MAX_BYTES + 1))
+    if out:
+        fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(vq_canonical(entry))
+    return {"fields": len(entry), "entry_sha256": vq_digest(entry), "private": st.st_mode & 0o7777 == 0o600}
+
+
+def vq_entries(doc):
+    """routing.vision_qualifications of one YAML document: None when absent."""
+    routing = doc.get("routing")
+    if routing is None:
+        return None
+    if not isinstance(routing, dict):
+        raise Refused("routing must be a mapping")
+    if "vision_qualifications" not in routing:
+        return None
+    if not isinstance(routing["vision_qualifications"], (list, type(None))):
+        raise Refused("routing.vision_qualifications must be a list")
+    return routing["vision_qualifications"] or []
+
+
+def vq_overlay_plan(text, overlay, entry):
+    """New overlay text setting routing.vision_qualifications to [entry], or
+    the same text when it already is exactly that. Nothing else changes; an
+    existing routing mapping keeps its keys (the coordinator merges nested
+    overlay mappings and replaces lists)."""
+    import yaml
+
+    if text.strip() and not isinstance(yaml.safe_load(text), (dict, type(None))):
+        raise Refused("the overlay is not a YAML mapping")
+    if text.strip().startswith("{"):
+        raise Refused("the overlay is a flow mapping; refusing to edit it")
+    routing = overlay.get("routing", None)
+    if "routing" in overlay and not isinstance(routing, dict):
+        raise Refused("the overlay's routing is not a block mapping; reconcile it first")
+    existing = vq_entries(overlay)
+    if existing is not None:
+        if existing == [entry]:
+            return text
+        raise Refused("the overlay already sets a different routing.vision_qualifications (%d entries); reconcile it first"
+                      % len(existing))
+    items = ["%s: %s" % (k, entry[k] if k in VQ_INT_FIELDS else json.dumps(entry[k])) for k in sorted(entry)]
+    if routing is None:
+        sep = "" if not text or text.endswith("\n") else "\n"
+        new = text + sep + "routing:\n  vision_qualifications:\n" + \
+            "".join(("  - " if i == 0 else "    ") + s + "\n" for i, s in enumerate(items))
+    else:
+        # Insert as the first key of the one top-level block-style routing
+        # mapping, at the indentation of its existing keys.
+        start, end = block(text, r"^routing:[ \t]*(#.*)?$")
+        first = next((line for line in text[start:end].splitlines()
+                      if line.strip() and not line.strip().startswith("#")), None)
+        if first is None:
+            raise Refused("the overlay's routing block is empty")
+        ind = " " * (len(first) - len(first.lstrip(" ")))
+        new = text[:start] + "%svision_qualifications:\n" % ind + \
+            "".join("%s%s%s\n" % (ind, "- " if i == 0 else "  ", s) for i, s in enumerate(items)) + text[start:]
+    want = copy.deepcopy(overlay)
+    want.setdefault("routing", {})["vision_qualifications"] = [entry]
+    if (yaml.safe_load(new) or {}) != want:
+        raise Refused("the overlay edit did not produce exactly the intended YAML change")
+    return new
+
+
+def vq_facts(args):
+    # The files read must be the ones the running coordinator was started with.
+    running(args)
+    base, overlay = load_effective(args)
+    entries = vq_entries(overlay)
+    facts = {
+        "overlay_sets_routing": "routing" in overlay,
+        "overlay_entries_sha256": None if entries is None else
+        [vq_digest(e) if isinstance(e, dict) else "invalid" for e in entries],
+        "base_entries": len(vq_entries(base) or []),
+        # The running coordinator booted with exactly the files on disk.
+        "applied": applied(args),
+    }
+    print(json.dumps(facts, sort_keys=True))
+
+
+def read_vq_staged(args):
+    """The canonical record the ops entry point staged root-only."""
+    st = os.lstat(args.vq_staged)
+    if not os.path.isfile(args.vq_staged) or os.path.islink(args.vq_staged) or st.st_uid != os.geteuid() \
+            or st.st_mode & 0o077 or st.st_size > VQ_MAX_BYTES:
+        raise Refused("the staged record must be a private regular file owned by this user")
+    with open(args.vq_staged, "rb") as f:
+        raw = f.read(VQ_MAX_BYTES + 1)
+    entry = vq_parse(raw)
+    if vq_digest(entry) != args.vq_sha256 or raw != vq_canonical(entry):
+        raise Refused("the staged record differs from the validated local record")
+    return entry
+
+
+def apply_vision_qualification(args):
+    if os.path.dirname(args.vq_staged) != os.path.dirname(args.overlay):
+        raise Refused("the staged record must sit next to the overlay")
+    try:
+        with guard(args):
+            entry = read_vq_staged(args)
+            pid, binary, env, uid, gid = running(args)
+            _, overlay = load_effective(args)
+            with open(args.overlay, "rb") as f:
+                original = f.read()
+            new = vq_overlay_plan(original.decode(), overlay, entry).encode()
+            result = {"changed": new != original, "entry_sha256": args.vq_sha256}
+            if new == original:
+                # The overlay already holds the entry. Done only when the
+                # running coordinator booted with these bytes; otherwise a
+                # validated restart loads them.
+                if applied(args):
+                    print(json.dumps(result, sort_keys=True))
+                    return
+                check = as_service([binary, "--validate-config", "--config", args.config,
+                                    "--config-overlay", args.overlay], env, uid, gid, 120)
+                if check.returncode != 0:
+                    raise Refused("the running coordinator binary rejects the on-disk overlay (--validate-config)")
+                restart(args, pid)
+                result["restarted"] = True
+                result["recovered_unapplied_config"] = True
+                print(json.dumps(result, sort_keys=True))
+                return
+            stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            os.makedirs(args.backup_root, mode=0o700, exist_ok=True)
+            backup = tempfile.mkdtemp(prefix="%s-vision-qualification-" % stamp, dir=args.backup_root)
+            os.chmod(backup, 0o700)
+            shutil.copy2(args.overlay, os.path.join(backup, os.path.basename(args.overlay)))
+            result["backup"] = backup
+            tmp = write_like(args.overlay, new, args.overlay)
+            try:
+                check = as_service([binary, "--validate-config", "--config", args.config,
+                                    "--config-overlay", tmp], env, uid, gid, 120)
+                if check.returncode != 0:
+                    raise Refused("the running coordinator binary rejects the edited overlay (--validate-config)")
+                install(tmp, args.overlay)
+            finally:
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
+            try:
+                restart(args, pid)
+            except Exception:
+                with open(args.overlay, "rb") as f:
+                    ours = f.read() == new
+                if ours:
+                    install(write_like(args.overlay, original, args.overlay), args.overlay)
+                    back = subprocess.run(["systemctl", "restart", args.unit], timeout=120, capture_output=True)
+                    if back.returncode != 0:
+                        raise Refused("the rollback restart failed; the overlay is restored on disk "
+                                      "but not proven live: check the coordinator now")
+                    healthz(args.healthz)
+                    deadline = time.monotonic() + 30
+                    while not applied(args):
+                        if time.monotonic() > deadline:
+                            raise Refused("after the rollback restart the coordinator did not log the restored "
+                                          "config as its boot config: check the coordinator now")
+                        time.sleep(1)
+                    result["restored"] = True
+                raise
+            result["restarted"] = True
+            print(json.dumps(result, sort_keys=True))
+    finally:
+        if os.path.lexists(args.vq_staged):
+            os.unlink(args.vq_staged)
+
+
 def main(argv):
+    if argv[:1] == ["validate-vision-qualification"]:
+        # Local, read-only (OUT, when given, is a new 0600 file holding the
+        # canonical record for staging): prints only the field count, the
+        # entry sha256 and whether the file is private.
+        if len(argv) not in (2, 3):
+            sys.stderr.write("usage: pearl-cli-config.py validate-vision-qualification PATH [OUT]\n")
+            sys.exit(2)
+        try:
+            print(json.dumps(validate_vq_file(argv[1], argv[2] if len(argv) == 3 else None), sort_keys=True))
+        except Refused as exc:
+            sys.stderr.write("pearl-cli-config: REFUSED: %s\n" % exc)
+            sys.exit(3)
+        except OSError as exc:
+            sys.stderr.write("pearl-cli-config: REFUSED: record unreadable (%s)\n" % type(exc).__name__)
+            sys.exit(3)
+        return
     if argv[:1] == ["validate-corpus"]:
         # Local, read-only: used by the ops entry point and the corpus generator.
         if len(argv) != 2:
@@ -873,7 +1163,8 @@ def main(argv):
             sys.exit(3)
         return
     p = argparse.ArgumentParser()
-    p.add_argument("cmd", choices=["apply", "ci-facts", "apply-compute-integrity"])
+    p.add_argument("cmd", choices=["apply", "ci-facts", "apply-compute-integrity", "vq-facts",
+                                   "apply-vision-qualification"])
     p.add_argument("--config", required=True)
     p.add_argument("--overlay", required=True)
     p.add_argument("--unit", required=True)
@@ -890,10 +1181,18 @@ def main(argv):
     p.add_argument("--ci-corpus", metavar="PATH")
     p.add_argument("--ci-staged", metavar="PATH")
     p.add_argument("--ci-sha256", metavar="SHA256")
+    p.add_argument("--vq-staged", metavar="PATH")
+    p.add_argument("--vq-sha256", metavar="SHA256")
     args = p.parse_args(argv)
     try:
         if args.cmd == "apply":
             apply(args)
+        elif args.cmd == "vq-facts":
+            vq_facts(args)
+        elif args.cmd == "apply-vision-qualification":
+            if not args.vq_staged or not LOWER_HEX64.match(args.vq_sha256 or ""):
+                raise Refused("--vq-staged and --vq-sha256 are required")
+            apply_vision_qualification(args)
         elif not args.ci_corpus:
             raise Refused("--ci-corpus is required")
         elif args.cmd == "ci-facts":

@@ -31,6 +31,17 @@ class VisionAcceptanceTests(unittest.TestCase):
         for status in (400, 413, 415, 422):
             vision.check_rejection("/v1/chat/completions", status, error)
 
+    def test_unknown_model_accepts_only_structured_model_not_found(self):
+        missing = {"error": {"code": "model_not_found", "message": "Model not found"}}
+        vision.check_rejection("/v1/chat/completions", 404, missing, unknown_model=True)
+        vision.check_rejection("/v1/chat/completions", 400, {"error": {"code": "unsupported_media"}}, unknown_model=True)
+        with self.assertRaises(vision.AcceptanceError):
+            vision.check_rejection("/v1/chat/completions", 404, {"error": {"code": "invalid_request"}}, unknown_model=True)
+        with self.assertRaises(vision.AcceptanceError):
+            vision.check_rejection("/v1/chat/completions", 404, missing)
+        with self.assertRaises(vision.AcceptanceError):
+            vision.check_rejection("/v1/chat/completions", 200, missing, unknown_model=True)
+
     def test_endpoint_guard_refuses_live_redirectable_and_operator_targets(self):
         for value in ("https://api.malibu.tech", "http://localhost:18016",
                       "http://127.0.0.1:8080", "http://127.0.0.1",

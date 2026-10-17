@@ -107,6 +107,28 @@
 #   PEARL_CONFIG_GUARD, PEARL_UPDATER_LOCK, PEARL_BACKUP_ROOT,
 #   PEARL_COORDINATOR_HEALTHZ_URL, PEARL_PROC_ROOT.
 #
+# One-time task (PEARL_RUNTIME_TASK=vision-qualification): install the
+# operator-reviewed native-vision qualification record (#2016;
+# docs/runbooks/native-vision-acceptance.md "Qualification deployment record"):
+#   1 record            read-only, local: VISION_QUALIFICATION_FILE (JSON or
+#                       YAML outside the repo, mode 0600: exactly the 15
+#                       routing.vision_qualifications fields) passes the
+#                       coordinator's rules; only its entry sha256 is printed
+#   2 pearl_state       read-only: the overlay's routing.vision_qualifications
+#                       (digests only) and whether the running coordinator
+#                       booted with the files on disk
+#   3 vision_qualification  under the live-ops lock and both Pearl locks: stage
+#                       the canonical record, set routing.vision_qualifications
+#                       to exactly [record] in the overlay (backup first;
+#                       refuses a different existing list; keeps other routing
+#                       keys), validate, one coordinator restart (downtime
+#                       stated first; the list is read at boot only), then
+#                       require the new process to log the on-disk files as its
+#                       boot config; otherwise restore the overlay and restart
+#                       again. Done when the overlay holds exactly this entry
+#                       and the coordinator booted with it.
+#   Env: VISION_QUALIFICATION_FILE and the Pearl layout above.
+#
 # Env (or ~/.config/macprovider/ops.env): COORDINATOR_URL, GATEWAY_URL,
 # PEARL_SSH, PEARL_RUNTIME_VERSION, UPDATER_WAIT_MAX_S (default 2700),
 # PEARL_COORDINATOR_ENV (default /etc/macprovider/coordinator.env),
@@ -132,6 +154,8 @@ CI_DOC="docs/runbooks/compute-integrity-private-corpus.md"
 # Pearl's journal: a plain coordinator restart stops (draining in-flight
 # requests) in about 1-31 s and starts within a second.
 CI_DOWNTIME="one coordinator restart, about 5-40 seconds (in-flight requests drain, then the coordinator starts); buyer and provider traffic through the coordinator is interrupted for that time. If the post-restart check fails, the overlay and corpus are restored and the coordinator restarts once more"
+VQ_DOC="docs/runbooks/native-vision-acceptance.md"
+VQ_DOWNTIME="one coordinator restart, about 5-40 seconds (in-flight requests drain, then the coordinator starts); buyer and provider traffic through the coordinator is interrupted for that time. If the post-restart check fails, the overlay is restored and the coordinator restarts once more"
 
 # Pearl layout for the coordinator config helper (defaults: production; the
 # same as cli-release.sh _pearl-config).
@@ -553,7 +577,9 @@ for k in ("status","deleted_requests","backlog_drained","last_lap_overdue_reques
     die "the retention run ended with status $(json_field_str "$extra" 'd["status"]'); read its report above"
 }
 
-ci_layout() {
+# pearl_config_layout: the Pearl layout flags of lib/pearl-cli-config.py
+# (PEARL_LAYOUT), shared by the compute-integrity and vision-qualification tasks.
+pearl_config_layout() {
   CI_UNIT="${PEARL_COORDINATOR_UNIT:-macprovider-coordinator}"
   CI_HEALTHZ="${PEARL_COORDINATOR_HEALTHZ_URL:-http://127.0.0.1:8444/healthz}"
   CI_UPDATER_LOCK="${PEARL_UPDATER_LOCK:-/run/lock/macprovider-pearl-updater.lock}"
@@ -562,13 +588,17 @@ ci_layout() {
   # The root helper polls it during the restart: Pearl's loopback only.
   [[ "$CI_HEALTHZ" =~ ^http://(127\.0\.0\.1|\[::1\]|localhost):[0-9]+/[A-Za-z0-9._/-]*$ ]] ||
     refuse "PEARL_COORDINATOR_HEALTHZ_URL must be an http://127.0.0.1:PORT/ URL (Pearl's loopback)"
-  [[ "$PEARL_COMPUTE_INTEGRITY_CORPUS_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]] ||
-    refuse "PEARL_COMPUTE_INTEGRITY_CORPUS_PATH must be an absolute plain path"
-  CI_LAYOUT="--config $PEARL_COORDINATOR_CONFIG --overlay $PEARL_COORDINATOR_OVERLAY --unit $CI_UNIT \
+  PEARL_LAYOUT="--config $PEARL_COORDINATOR_CONFIG --overlay $PEARL_COORDINATOR_OVERLAY --unit $CI_UNIT \
 --install-root $PEARL_INSTALL_ROOT --guard $PEARL_CONFIG_GUARD \
 --guard-sha256 $(shasum -a 256 "$REPO_ROOT/scripts/lib/coordinator_config_guard.py" | awk '{print $1}') \
---updater-lock $CI_UPDATER_LOCK --backup-root $PEARL_BACKUP_ROOT --healthz $CI_HEALTHZ --proc $PEARL_PROC_ROOT \
---ci-corpus $PEARL_COMPUTE_INTEGRITY_CORPUS_PATH"
+--updater-lock $CI_UPDATER_LOCK --backup-root $PEARL_BACKUP_ROOT --healthz $CI_HEALTHZ --proc $PEARL_PROC_ROOT"
+}
+
+ci_layout() {
+  pearl_config_layout
+  [[ "$PEARL_COMPUTE_INTEGRITY_CORPUS_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]] ||
+    refuse "PEARL_COMPUTE_INTEGRITY_CORPUS_PATH must be an absolute plain path"
+  CI_LAYOUT="$PEARL_LAYOUT --ci-corpus $PEARL_COMPUTE_INTEGRITY_CORPUS_PATH"
 }
 
 # ci_local_corpus: validate COMPUTE_INTEGRITY_CORPUS into CI_SHA/CI_PROMPTS, or
@@ -704,6 +734,119 @@ ci_enable_internal() {
   fi
 }
 
+# vq_local_record: validate VISION_QUALIFICATION_FILE into VQ_SHA and the
+# canonical copy VQ_CANON, or leave VQ_ERR set. The record names a provider:
+# it stays out of the repository (public) and private.
+vq_local_record() {
+  VQ_SHA=""; VQ_ERR=""; VQ_CANON="$OPS_TMP_DIR/vision-qualification.json"
+  local file="${VISION_QUALIFICATION_FILE:-}" real out
+  if [ -z "$file" ]; then
+    VQ_ERR="VISION_QUALIFICATION_FILE is unset: set it to the private, operator-reviewed qualification record (JSON or YAML, the 15 routing.vision_qualifications fields)"
+    return
+  fi
+  real="$(python3 -I -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$file")"
+  if python3 -I -c 'import os,sys
+d=os.path.dirname(sys.argv[1])
+while True:
+    if os.path.lexists(os.path.join(d,".git")): sys.exit(0)
+    if os.path.dirname(d)==d: sys.exit(1)
+    d=os.path.dirname(d)' "$real"; then
+    VQ_ERR="VISION_QUALIFICATION_FILE is inside the repository (or another git work tree); keep the private record outside it"
+    return
+  fi
+  rm -f "$VQ_CANON"
+  if ! out="$(python3 -I "$OPS_LIB_DIR/pearl-cli-config.py" validate-vision-qualification "$real" "$VQ_CANON" 2>&1)"; then
+    VQ_ERR="the qualification record fails the coordinator's routing.vision_qualifications rules: $(printf '%s' "$out" | tail -n 1 | cut -c1-300)"
+    return
+  fi
+  if [ "$(json_field_str "$out" 'd["private"]')" != true ]; then
+    VQ_ERR="the qualification record is readable by group or others; chmod 600 it"
+    return
+  fi
+  VQ_SHA="$(json_field_str "$out" 'd["entry_sha256"]')"
+}
+
+gather_vision_qualification() {
+  OPS_SCOPE="vision-qualification"
+  NEXT_RUNBOOK="$VQ_DOC"
+  pearl_config_layout
+  vq_local_record
+  if [ -n "$VQ_ERR" ]; then
+    step record pending "$VQ_ERR"
+  else
+    step record "done" "15 fields, entry sha256 ${VQ_SHA:0:12}"
+    fact local_entry_sha256 "$VQ_SHA"
+  fi
+  if [ -z "${PEARL_SSH:-}" ]; then
+    step pearl_state blocked "PEARL_SSH is unset"
+    set_next pearl_state blocked "Read the vision qualification state on Pearl" "" "PEARL_SSH is unset"
+    return
+  fi
+  local facts
+  if ! facts="$(pearl_ssh "python3 - vq-facts $PEARL_LAYOUT" < "$OPS_LIB_DIR/pearl-cli-config.py" 2>"$OPS_TMP_DIR/vq.err")" ||
+    [ -z "$(json_field_str "$facts" 'd["applied"]')" ]; then
+    step pearl_state blocked "cannot read the vision qualification state on Pearl"
+    set_next pearl_state blocked "Read the vision qualification state on Pearl" "" \
+      "vq-facts over ssh failed: $(tail -n 1 "$OPS_TMP_DIR/vq.err" | safe_remote_output | cut -c1-200)"
+    return
+  fi
+  local entries applied
+  entries="$(json_field_str "$facts" '" ".join(d["overlay_entries_sha256"]) if d["overlay_entries_sha256"] is not None else "absent"')"
+  applied="$(json_field_str "$facts" 'd["applied"]')"
+  fact pearl_vq_overlay_entries_sha256 "$entries"
+  fact pearl_vq_overlay_sets_routing "$(json_field_str "$facts" 'd["overlay_sets_routing"]')"
+  fact pearl_vq_base_entries "$(json_field_str "$facts" 'd["base_entries"]')"
+  fact pearl_vq_config_applied "$applied"
+  step pearl_state "done" "overlay entries: ${entries:-none} applied=$applied"
+  # Done: the overlay holds exactly this one entry and the running coordinator
+  # booted with the files on disk (the qualification list is read at boot
+  # only). A local record that is set must be valid and be the installed one;
+  # unset (another machine) reads Pearl's state alone.
+  if [ "$applied" = true ] && [[ "$entries" =~ ^[0-9a-f]{64}$ ]] &&
+    { [ -z "${VISION_QUALIFICATION_FILE:-}" ] || [ "$entries" = "$VQ_SHA" ]; }; then
+    step vision_qualification "done" "entry sha256 ${entries:0:12} is live"
+    set_next "done" "done" "the operator-reviewed vision qualification is in the overlay and loaded" ""
+    return
+  fi
+  step vision_qualification pending ""
+  if [ -n "$VQ_ERR" ]; then
+    set_next record blocked "Choose the private vision qualification record" "" "$VQ_ERR"
+    return
+  fi
+  if [ "$entries" != absent ] && [ "$entries" != "$VQ_SHA" ]; then
+    set_next vision_qualification blocked "Install the vision qualification on Pearl" "" \
+      "the Pearl overlay already sets a different routing.vision_qualifications (entries: ${entries:-none}); reconcile it first"
+    return
+  fi
+  set_next vision_qualification mutate "Set routing.vision_qualifications in the Pearl overlay to the reviewed record (entry sha256 ${VQ_SHA:0:12}), restart once" \
+    "scripts/ops/pearl-runtime.sh _vision-qualification $VQ_SHA"
+  next_meta vision_qualification "$VQ_DOC" "$VQ_DOWNTIME"
+}
+
+# _vision-qualification SHA256: stage the validated canonical record on Pearl
+# (root-only, next to the overlay) and run lib/pearl-cli-config.py
+# apply-vision-qualification under both Pearl locks (next --run only).
+vq_internal() {
+  [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] ||
+    refuse "_vision-qualification runs only from 'PEARL_RUNTIME_TASK=vision-qualification $0 next --run' (live-ops lock, downtime banner)"
+  require_pearl_ssh
+  pearl_config_layout
+  vq_local_record
+  [ -z "$VQ_ERR" ] || refuse "$VQ_ERR"
+  [ "$VQ_SHA" = "${1:-}" ] || refuse "the local record changed since status (entry sha256 ${VQ_SHA:0:12}, expected ${1:-?}); run status again"
+  local staged rc=0
+  staged="$(dirname "$PEARL_COORDINATOR_OVERLAY")/.vision-qualification.staging"
+  pearl_ssh "set -eu; umask 077; s=$staged; rm -f -- \"\$s\"; set -o noclobber; cat > \"\$s\"" < "$VQ_CANON" || rc=$?
+  if [ "$rc" = 0 ]; then
+    pearl_ssh "python3 - apply-vision-qualification $PEARL_LAYOUT --vq-staged $staged --vq-sha256 $VQ_SHA" \
+      < "$OPS_LIB_DIR/pearl-cli-config.py" || rc=$?
+  fi
+  if [ "$rc" != 0 ]; then
+    pearl_ssh "rm -f -- $staged" </dev/null || log "could not remove $staged on Pearl; remove it by hand"
+    return "$rc"
+  fi
+}
+
 gather() {
   STATS_RECORDED=0
   if [ -n "${PEARL_RUNTIME_TASK:-}" ]; then
@@ -711,6 +854,7 @@ gather() {
       retention-vacuum-conversion) gather_retention_vacuum; return ;;
       retention-run) gather_retention_run; return ;;
       compute-integrity-enable) gather_compute_integrity; return ;;
+      vision-qualification) gather_vision_qualification; return ;;
       *) refuse "unknown PEARL_RUNTIME_TASK: $PEARL_RUNTIME_TASK" ;;
     esac
   fi
@@ -1006,6 +1150,7 @@ internal() {
   case "$1" in
     _retention-run) retention_run_internal ;;
     _compute-integrity-enable) shift; ci_enable_internal "$@" ;;
+    _vision-qualification) shift; vq_internal "$@" ;;
     *) usage >&2; exit 2 ;;
   esac
 }

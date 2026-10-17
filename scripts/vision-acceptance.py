@@ -232,15 +232,22 @@ def check_labels(content, expected):
     require(labels == expected, "image-dependent color labels or ordering did not match")
 
 
-def check_rejection(path, status, data):
+def check_rejection(path, status, data, unknown_model=False):
     # The native provider does not mount either facade. An absent facade is an
     # explicit rejection, while a missing Chat Completions route is a failure.
+    # A provider-local endpoint serves one loaded model and refuses any other
+    # model name with a structured 404 model_not_found before media handling or
+    # inference; the coordinator answers 400 unsupported_media instead.
     allowed = (400, 413, 415, 422)
     if path in ("/v1/responses", "/v1/messages"):
         allowed += (404,)
-    require(status in allowed, "invalid media was not explicitly rejected before serving")
     require(isinstance(data, dict) and isinstance(data.get("error"), dict),
             "rejection did not contain a structured error")
+    if unknown_model and status == 404:
+        require(data["error"].get("code") == "model_not_found",
+                "unknown-model 404 was not an explicit model_not_found rejection")
+        return
+    require(status in allowed, "invalid media was not explicitly rejected before serving")
 
 
 def run_suite(origin, token, unsupported_model):
@@ -256,9 +263,9 @@ def run_suite(origin, token, unsupported_model):
             check_labels(content, labels)
         results.append({"case": name, "passed": True, "elapsed_seconds": round(time.monotonic() - started, 3)})
 
-    def rejection(name, payload, path="/v1/chat/completions"):
+    def rejection(name, payload, path="/v1/chat/completions", unknown_model=False):
         status, data = post(origin, path, payload, token)
-        check_rejection(path, status, data)
+        check_rejection(path, status, data, unknown_model)
         results.append({"case": name, "passed": True, "status": status})
 
     for streaming in (False, True):
@@ -273,7 +280,7 @@ def run_suite(origin, token, unsupported_model):
         success("multiple_red_blue_" + suffix, [order, red, text("Next image:"), blue], ["red", "blue"], streaming)
         success("multiple_blue_red_" + suffix, [order, blue, text("Next image:"), red], ["blue", "red"], streaming)
     success("text_only", "Reply with hello.")
-    rejection("unsupported_model_mixed", request([question, red], model=unsupported_model))
+    rejection("unsupported_model_mixed", request([question, red], model=unsupported_model), unknown_model=True)
     rejection("remote_url", request([question, image(url="https://example.invalid/image.png")]))
     rejection("malformed_base64", request([image(url="data:image/png;base64,!!!")]))
     rejection("unsupported_format", request([image(url="data:image/gif;base64,R0lGODlh")]))

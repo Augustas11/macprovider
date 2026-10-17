@@ -121,9 +121,8 @@ because unsupported media rejects or because this harness passes in isolation.
 
 ## Qualification deployment record
 
-After Studio acceptance, use the normal reviewed release/catalog/runtime ops
-train to add an operator-reviewed `routing.vision_qualifications` entry. It
-contains exact `provider_id`, `binary_version`, `hardware_chip`, `ram_gb`, `max_context_tokens`,
+After Studio acceptance, install one operator-reviewed
+`routing.vision_qualifications` entry on Pearl. It contains exact `provider_id`, `binary_version`, `hardware_chip`, `ram_gb`, `max_context_tokens`,
 `max_concurrency`, `model_id`, `model_hash`, `model_hash_algorithm`,
 `weights_manifest_sha256`, `processor_digest`, `runtime`, `runtime_revision`,
 `media_profile`, and `qualification_digest` (SHA-256 of the reviewed acceptance
@@ -134,6 +133,48 @@ An absent/mismatched entry leaves buyer media explicitly unavailable. A new
 binary or provider configuration needs a matching reviewed record; reuse
 unchanged qualification observations and rebind release identity under the
 existing release rules rather than rerunning unchanged text benchmarks.
+
+The record names a provider, and this repository is public: keep it in a
+private file outside the repository, mode 0600, as a JSON (or YAML) mapping
+with exactly those 15 fields. Install it only through the ops entry point:
+
+```bash
+export VISION_QUALIFICATION_FILE=<private file>
+PEARL_RUNTIME_TASK=vision-qualification scripts/ops/pearl-runtime.sh status
+PEARL_RUNTIME_TASK=vision-qualification scripts/ops/pearl-runtime.sh next
+MACPROVIDER_OPS_OWNER=<session-label> PEARL_RUNTIME_TASK=vision-qualification \
+  VISION_QUALIFICATION_FILE=<private file> scripts/ops/pearl-runtime.sh next --run
+```
+
+Expected downtime: one coordinator restart, about 5–40 seconds. The
+coordinator reads the qualification list at boot only; SIGHUP validates it
+but does not apply it. If the post-restart check fails, the tooling restores
+the overlay and restarts the coordinator once more.
+
+`status` checks the record locally with the coordinator's rules (exact fields,
+positive integers, lowercase SHA-256 hex for `model_hash`,
+`weights_manifest_sha256`, `processor_digest` and `qualification_digest`, the
+`mlx-community/Qwen2-VL-2B-Instruct-4bit` / `mlx_cache` / `qwen2vl-inline-v1`
+tuple and the `macprovider.snapshot-manifest.v1` hash algorithm). It prints
+field names and the entry's SHA-256 only, never the values. `next --run`
+prints the downtime, takes the live-ops lock, stages the canonical record
+root-only next to the overlay and runs
+`scripts/ops/lib/pearl-cli-config.py apply-vision-qualification` under both
+Pearl locks. That helper sets `routing.vision_qualifications` to exactly
+`[record]` in `/etc/macprovider/coordinator.pearl-overlays.yaml` (never the
+base `coordinator.yaml`), after a backup under `/root/macprovider-backups`. An
+existing `routing:` mapping in the overlay keeps its keys; the entry is
+inserted into it. The helper refuses a different existing list, a flow-style
+or non-mapping `routing`, and any edit that changes more than that key. It
+validates with the running coordinator binary (`--validate-config`),
+replaces the overlay atomically, restarts once and requires the new process
+to log the on-disk files as its boot config.
+
+The task is done when the overlay holds exactly this entry and the running
+coordinator booted with it. Run again with the same record, it does nothing.
+If the overlay already holds the entry but the coordinator has not booted with
+it, it validates and restarts once. To replace a recorded entry, reconcile the
+overlay first; the task never overwrites a different list.
 
 Provider-local support is enabled when the exact artifact loads. The wire
 capability asserts implementation identity only. No source catalog or public

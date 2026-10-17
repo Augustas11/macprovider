@@ -92,5 +92,105 @@ class RevokeTest(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stderr)
 
 
+VQ = {
+    "provider_id": "prov-test-0001", "binary_version": "1.8.250", "hardware_chip": "Apple M2 Ultra",
+    "ram_gb": 192, "max_context_tokens": 8192, "max_concurrency": 1,
+    "model_id": "mlx-community/Qwen2-VL-2B-Instruct-4bit", "model_hash": "a" * 64,
+    "model_hash_algorithm": "macprovider.snapshot-manifest.v1", "weights_manifest_sha256": "b" * 64,
+    "processor_digest": "c" * 64, "runtime": "mlx_cache", "runtime_revision": "d" * 40,
+    "media_profile": "qwen2vl-inline-v1", "qualification_digest": "e" * 64,
+}
+
+
+def vq(**kw):
+    entry = dict(VQ)
+    entry.update(kw)
+    return entry
+
+
+def vq_plan(text, entry=None):
+    import yaml
+    return pcc.vq_overlay_plan(text, yaml.safe_load(text) or {}, entry or dict(VQ))
+
+
+class VisionQualificationRecordTest(unittest.TestCase):
+    def test_valid_record_round_trips_canonically(self):
+        self.assertEqual(pcc.vq_parse(pcc.vq_canonical(VQ)), VQ)
+        self.assertEqual(pcc.vq_digest(VQ), pcc.vq_digest(dict(reversed(list(VQ.items())))))
+
+    def test_yaml_record_is_accepted(self):
+        text = "".join("%s: %s\n" % (k, v if isinstance(v, int) else '"%s"' % v) for k, v in VQ.items())
+        self.assertEqual(pcc.vq_parse(text.encode()), VQ)
+
+    def test_missing_and_unknown_fields_refused_without_values(self):
+        entry = dict(VQ)
+        del entry["processor_digest"]
+        with self.assertRaisesRegex(pcc.Refused, "missing: processor_digest") as ctx:
+            pcc.vq_validate(entry)
+        self.assertNotIn("prov-test-0001", str(ctx.exception))
+        with self.assertRaisesRegex(pcc.Refused, "unknown: 1"):
+            pcc.vq_validate(vq(extra="x"))
+
+    def test_bad_digests_types_and_tuple_refused(self):
+        for entry, why in ((vq(qualification_digest="E" * 64), "qualification_digest must be a lowercase sha256"),
+                           (vq(model_hash="a" * 63), "model_hash must be a lowercase sha256"),
+                           (vq(processor_digest="sha256:" + "c" * 64), "processor_digest must be"),
+                           (vq(ram_gb=0), "ram_gb must be a positive integer"),
+                           (vq(max_concurrency=True), "max_concurrency must be a positive integer"),
+                           (vq(max_context_tokens="8192"), "max_context_tokens must be a positive integer"),
+                           (vq(provider_id=" "), "provider_id must be a non-blank"),
+                           (vq(hardware_chip="M2\nx"), "hardware_chip must be a non-blank"),
+                           (vq(model_id="mlx-community/Qwen2-VL-7B-Instruct-4bit"), "model_id must be"),
+                           (vq(runtime="mlx"), "runtime must be mlx_cache"),
+                           (vq(media_profile="other"), "media_profile must be"),
+                           (vq(model_hash_algorithm="sha256"), "model_hash_algorithm must be")):
+            with self.assertRaisesRegex(pcc.Refused, why):
+                pcc.vq_validate(entry)
+
+    def test_duplicate_keys_refused(self):
+        raw = pcc.vq_canonical(VQ)[:-1] + b',"ram_gb":1}'
+        with self.assertRaisesRegex(pcc.Refused, "duplicate"):
+            pcc.vq_parse(raw)
+        with self.assertRaisesRegex(pcc.Refused, "duplicate"):
+            pcc.vq_parse(b"ram_gb: 1\nram_gb: 2\n")
+
+
+class VisionQualificationOverlayTest(unittest.TestCase):
+    def test_appends_routing_to_an_overlay_without_one(self):
+        import yaml
+        new = vq_plan("relay_blind:\n  enabled: true\n")
+        self.assertEqual(yaml.safe_load(new), {"relay_blind": {"enabled": True},
+                                               "routing": {"vision_qualifications": [VQ]}})
+        self.assertTrue(new.startswith("relay_blind:\n  enabled: true\nrouting:\n"))
+        self.assertEqual(yaml.safe_load(vq_plan("")), {"routing": {"vision_qualifications": [VQ]}})
+
+    def test_inserts_into_an_existing_routing_mapping(self):
+        import yaml
+        text = "routing:  # operator\n    # keep\n    sticky_enabled: true\n    max_retries: 3\nother:\n  x: 1\n"
+        new = vq_plan(text)
+        self.assertEqual(yaml.safe_load(new), {"routing": {"sticky_enabled": True, "max_retries": 3,
+                                                           "vision_qualifications": [VQ]}, "other": {"x": 1}})
+        self.assertIn("    sticky_enabled: true\n    max_retries: 3\nother:\n  x: 1\n", new)
+
+    def test_identical_entry_is_idempotent(self):
+        once = vq_plan("routing:\n  sticky_enabled: true\n")
+        self.assertEqual(vq_plan(once), once)
+
+    def test_different_existing_list_refused(self):
+        for text in (vq_plan("", vq(provider_id="other")),
+                     "routing:\n  vision_qualifications: []\n",
+                     vq_plan("") + "    extra: 1\n"):
+            with self.assertRaisesRegex(pcc.Refused, "different routing.vision_qualifications"):
+                vq_plan(text)
+
+    def test_unsafe_overlay_shapes_refused(self):
+        for text, why in (("routing: {sticky_enabled: true}\n", "anchor"),
+                          ("routing: 3\n", "not a block mapping"),
+                          ("{relay_blind: {enabled: true}}\n", "flow mapping"),
+                          ("- a\n", "not a YAML mapping")):
+            with self.assertRaisesRegex(pcc.Refused, why):
+                vq_plan(text) if not text.startswith("- ") else pcc.vq_overlay_plan(text, {}, dict(VQ))
+
+
 if __name__ == "__main__":
     unittest.main()
