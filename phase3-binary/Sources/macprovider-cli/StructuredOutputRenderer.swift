@@ -105,9 +105,7 @@ enum StructuredOutputRenderer {
         ].joined(separator: "\n")
     }
 
-    /// Merges into the first system message: chat templates such as
-    /// Qwen3.6's reject a system message that is not the first message.
-    static func prependInstruction(_ instruction: String, to messages: [ChatMessage]) -> [ChatMessage] {
+    private static func prependInstruction(_ instruction: String, to messages: [ChatMessage]) -> [ChatMessage] {
         guard let systemIndex = messages.firstIndex(where: { $0.role == .system }) else {
             return [ChatMessage(role: .system, content: instruction)] + messages
         }

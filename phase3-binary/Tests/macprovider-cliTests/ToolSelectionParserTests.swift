@@ -93,6 +93,14 @@ final class ToolSelectionParserTests: XCTestCase {
         let multiline = "<tool_call>\n<function=get_time>\n<parameter=city>\nNew\nYork\n</parameter>\n</function>\n</tool_call>"
         XCTAssertEqual(try ToolCallParser.parseGuaranteedToolCalls(multiline, schemas: qwen36Schemas).first?.arguments, #"{"city":"New\nYork"}"#)
         XCTAssertEqual(try ToolCallParser.parseGuaranteedToolCalls(raw + "\n" + raw, schemas: qwen36Schemas).count, 2)
+
+        let crlf = "<tool_call>\r\n<function=get_time>\r\n<parameter=city>\r\nVilnius\r\n</parameter>\r\n</function>\r\n</tool_call>"
+        XCTAssertEqual(try ToolCallParser.parseGuaranteedToolCalls(crlf, schemas: qwen36Schemas).first?.arguments, #"{"city":"Vilnius"}"#)
+        let compact = "<tool_call><function=get_time><parameter=city>Vilnius</parameter></function></tool_call>"
+        XCTAssertEqual(try ToolCallParser.parseGuaranteedToolCalls(compact, schemas: qwen36Schemas).first?.arguments, #"{"city":"Vilnius"}"#)
+        let padded = "<tool_call>\n<function=get_time>\n<parameter=city>\n\n Vilnius \n\n</parameter>\n</function>\n</tool_call>"
+        XCTAssertEqual(try ToolCallParser.parseGuaranteedToolCalls(padded, schemas: qwen36Schemas).first?.arguments, #"{"city":"\n Vilnius \n"}"#,
+                       "only one newline on each side belongs to the markup")
     }
 
     func testQwen36FunctionXMLIsNotRepairedOrCoerced() throws {

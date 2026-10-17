@@ -176,6 +176,11 @@ final class ModelRuntimeToolSelectionTests: XCTestCase {
             XCTAssertTrue(messages[0].content.hasPrefix("Be brief."))
             XCTAssertFalse(messages[0].content.contains("JSON <tool_call>"))
         }
+        let lateSystem = ModelRuntime.withLeadingSystemInstruction("rule", to: [
+            ChatMessage(role: .user, content: "hi"), ChatMessage(role: .system, content: "late"),
+        ])
+        XCTAssertEqual(lateSystem.map(\.role), [.system, .user, .system], "a buyer system message is never moved or merged out of place")
+        XCTAssertEqual(lateSystem[0].content, "rule")
     }
 
     func testCapabilitiesOnlyBindTheCurrentLoadedIdentity() {

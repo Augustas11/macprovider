@@ -161,8 +161,9 @@ enum ToolCallParser {
             cursor = cursor[cursor.index(after: keyEnd)...]
             guard let close = cursor.range(of: "</parameter>") else { throw malformed }
             var raw = cursor[..<close.lowerBound]
-            if raw.hasPrefix("\n") { raw = raw.dropFirst() }
-            if raw.hasSuffix("\n") { raw = raw.dropLast() }
+            // "\r\n" is one Character, so each drop removes a whole LF or CRLF.
+            if raw.hasPrefix("\n") || raw.hasPrefix("\r\n") { raw = raw.dropFirst() }
+            if raw.hasSuffix("\n") || raw.hasSuffix("\r\n") { raw = raw.dropLast() }
             for marker in ["<parameter=", "<function=", "</function>", "<tool_call>", "</tool_call>"] where raw.contains(marker) {
                 throw malformed
             }

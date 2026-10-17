@@ -11958,11 +11958,11 @@ actor ModelRuntime: ModelRuntimeServing {
             : "Return exactly one call."
         switch selection {
         case .required:
-            messages = StructuredOutputRenderer.prependInstruction("Call a declared function using complete <tool_call> envelopes in the tool-call format described above. \(callCountInstruction) Return only tool calls; arguments must match the declared schemas.", to: messages)
+            messages = Self.withLeadingSystemInstruction("Call a declared function using complete <tool_call> envelopes in the tool-call format described above. \(callCountInstruction) Return only tool calls; arguments must match the declared schemas.", to: messages)
         case .named(let name):
-            messages = StructuredOutputRenderer.prependInstruction("Call the declared function \(name) using a complete <tool_call> envelope in the tool-call format described above. \(callCountInstruction) Return only calls to that function; arguments must match its schema.", to: messages)
+            messages = Self.withLeadingSystemInstruction("Call the declared function \(name) using a complete <tool_call> envelope in the tool-call format described above. \(callCountInstruction) Return only calls to that function; arguments must match its schema.", to: messages)
         case .none:
-            messages = StructuredOutputRenderer.prependInstruction("Do not call any function or tool. Respond with assistant text.", to: messages)
+            messages = Self.withLeadingSystemInstruction("Do not call any function or tool. Respond with assistant text.", to: messages)
         case .auto: break
         }
         let chat = try ToolPromptRenderer.renderMessages(messages, modelID: request.model)
@@ -11981,6 +11981,24 @@ actor ModelRuntime: ModelRuntimeServing {
             tools: tools,
             additionalContext: additionalContext
         )
+    }
+
+    /// Tool-selection instructions join a leading system message, or become
+    /// one. Qwen3.6's chat template rejects a system message after index 0, so
+    /// a second leading system message would break a buyer's system prompt.
+    static func withLeadingSystemInstruction(_ instruction: String, to messages: [ChatMessage]) -> [ChatMessage] {
+        guard let first = messages.first, first.role == .system else {
+            return [ChatMessage(role: .system, content: instruction)] + messages
+        }
+        let existing = first.content ?? ""
+        var adjusted = messages
+        adjusted[0] = ChatMessage(
+            role: .system,
+            content: existing.isEmpty ? instruction : existing + "\n\n" + instruction,
+            toolCallID: first.toolCallID,
+            toolCalls: first.toolCalls
+        )
+        return adjusted
     }
 
     private static func internalWarmupRequest(modelID: String?, prompt: String, maxTokens: Int) throws -> ChatCompletionRequest {

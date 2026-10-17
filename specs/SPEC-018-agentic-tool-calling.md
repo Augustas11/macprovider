@@ -31,8 +31,10 @@ SPEC-018 is the **provider-side response synthesis contract** for OpenAI-wire to
   declared exactly once. This is decoding the template's own grammar, not
   recovery: partial, unclosed, undeclared, duplicated or untyped markup,
   values holding call markup and text outside envelopes still fail. The
-  selection instruction now joins the leading system message, because the
-  template rejects a system message that is not first.
+  selection instruction now joins a leading system message (or becomes
+  one), because the template rejects a system message that is not first.
+  This is a §10c.1 lock-amendment (**Amendment 6**) of the v0.2.12 §3.11
+  rule that excluded all function-XML from guaranteed success.
 
 - **v0.2.13 (2026-10-16, §3.11 loaded identity clarified, Related: #2014):**
   A native model configured under a local name with a configured catalog id
@@ -565,7 +567,8 @@ envelope body is either a strict JSON object or one complete function-XML
 call in the supported model's chat-template grammar,
 `<function=NAME>(<parameter=KEY>VALUE</parameter>)*</function>`, where a
 single newline directly after `<parameter=KEY>` and directly before
-`</parameter>`, when present, belongs to the markup. NAME MUST be a declared
+`</parameter>`, when present, belongs to the markup; that newline is LF or
+CRLF. Whitespace between tags is ignored. NAME MUST be a declared
 function and each KEY a property declared in its schema, at most once. The
 VALUE of a `string`-typed property is its literal text; the VALUE of any other
 property MUST be one strict JSON value. A VALUE containing `<tool_call>`,
@@ -1029,6 +1032,7 @@ Amendment log:
 - Amendment 3 (v0.2.8): AC-53 / §10d.1 v0.2.0-locked maximum `messages[]` length 256 → DELETED as an independent cap. Rationale: the count cap is not a model constraint and blocks legitimate coding-agent sessions (Pi/Cline 300+ messages); OpenRouter and OrcaRouter impose no message-count limit. Residual risk: large-but-under-body-cap arrays still cost validation CPU. Mitigation: AC-50 4 MiB raw-body cap (public gateway SPEC-006 default `request_body_bytes` may be stricter), AC-51/AC-52 aggregate byte caps, AC-54 tool-call count, AC-55 linear validation, and the served context window.
 - Amendment 4 (v0.2.9): §2.2 v0.1-locked “preserve all N recognized tool calls” → scoped to `parallel_tool_calls: true`. Omitted/`false` is serial: stop after the first complete valid tool. Rationale: agent loops (Pi) omit the field and execute one tool per turn; leftover decode after a valid tool hangs or kills the stream. Residual risk: a client wanting two tools in one assistant message must send `parallel_tool_calls: true`. Mitigation: explicit request boolean; default matches Pi.
 
+- Amendment 6 (v0.2.14): §3.11 "Function-XML MUST NOT be recovered into a successful call" → only function-XML outside one complete template-grammar call per envelope is excluded. Rationale: the only qualified model's chat template instructs function-XML, so the v0.2.12 rule made every guaranteed turn fail. Mitigation: exact grammar, declared names and parameters only, schema-directed typing with strict JSON for non-string values, markup inside values rejected, and the unchanged complete-output validation. Residual risk: a string value that legitimately contains call markup fails validation instead of succeeding.
 - Amendment 5 (v0.2.12): §5/AC-13 v0.1 auto-only rejection → §3.11 explicit model/runtime matrix; v0.2.9 §2.2 serial early-stop and §10d.4 incremental tool emission → ordinary `auto` only, with complete-generation holdback for `required`/named; AC-45 adds `buffered_tool_selection` to its diagnostic enum. Rationale: selected modes must be preserved and successful calls must satisfy the selected name, schema and cardinality. Mitigation: strict bounds, capability routing, full holdback and explicit failures. Residual risk: generation may fail validation; no fabricated or repaired call is substituted.
 
 Note: §10c.1 covers both locked-content amendments (e.g., Amendment 1 amended §10c which was v0.1.3-locked) AND in-flight draft-content revisions (e.g., Amendment 2 deleted §3.9 which was v0.2.1-introduced and not yet locked). v0.3 governance MAY refine this distinction; v0.2.4 treats both classes under the same (a)-(d) discipline.
