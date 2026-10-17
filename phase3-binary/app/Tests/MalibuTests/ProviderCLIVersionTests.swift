@@ -142,11 +142,37 @@ final class LatestReleaseClientTests: XCTestCase {
         LatestReleaseMockURLProtocol.responses = [
             gitHub: (403, Data("{}".utf8), ["x-ratelimit-remaining": "0", "x-ratelimit-reset": "1790000000"]),
         ]
-        let outcome = await fetch()
+        let now = Date(timeIntervalSince1970: 1_790_000_000 - 600)
+        let outcome = await fetch(now: now)
         XCTAssertEqual(outcome, .deferred(until: Date(timeIntervalSince1970: 1_790_000_000)))
         XCTAssertEqual(
-            LatestReleaseClient.retryAfter(outcome, now: Date(timeIntervalSince1970: 1_000)),
+            LatestReleaseClient.retryAfter(outcome, now: now),
             Date(timeIntervalSince1970: 1_790_000_000)
+        )
+    }
+
+    func testRateLimitResetIsBoundedToTheHourWindow() async {
+        LatestReleaseMockURLProtocol.responses = [
+            gitHub: (429, Data("{}".utf8), ["x-ratelimit-remaining": "0", "x-ratelimit-reset": "4102444800"]),
+        ]
+        let now = Date(timeIntervalSince1970: 1_000)
+        let outcome = await fetch(now: now)
+        XCTAssertEqual(outcome, .deferred(until: now.addingTimeInterval(LatestReleaseClient.rateLimitDeferral)))
+    }
+
+    func testBadgeUsesTheConfiguredCoordinator() {
+        XCTAssertEqual(
+            LatestReleaseClient.healthzURL(coordinatorURL: "wss://staging.example/ws/provider").absoluteString,
+            "https://staging.example/healthz"
+        )
+        XCTAssertEqual(LatestReleaseClient.healthzURL(coordinatorURL: nil), LatestReleaseClient.coordinatorHealthzURL)
+        XCTAssertEqual(
+            LatestReleaseClient.healthzURL(coordinatorURL: "ws://evil.example/ws"),
+            LatestReleaseClient.coordinatorHealthzURL
+        )
+        XCTAssertEqual(
+            LatestReleaseClient.healthzURL(coordinatorURL: "wss://user:pw@evil.example/ws"),
+            LatestReleaseClient.coordinatorHealthzURL
         )
     }
 

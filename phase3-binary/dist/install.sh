@@ -9826,8 +9826,8 @@ latest_release_tag() {
       rate_limit_reset="$(awk '
         { sub(/\r$/, "") }
         /^HTTP\// { status = $2; remaining = ""; reset = "" }
-        tolower($0) ~ /^x-ratelimit-remaining:/ { remaining = $0; sub(/^[^:]*:[ \t]*/, "", remaining) }
-        tolower($0) ~ /^x-ratelimit-reset:/ { reset = $0; sub(/^[^:]*:[ \t]*/, "", reset) }
+        tolower($0) ~ /^x-ratelimit-remaining:/ { remaining = $0; sub(/^[^:]*:[ \t]*/, "", remaining); sub(/[ \t]+$/, "", remaining) }
+        tolower($0) ~ /^x-ratelimit-reset:/ { reset = $0; sub(/^[^:]*:[ \t]*/, "", reset); sub(/[ \t]+$/, "", reset) }
         END { if ((status == "403" || status == "429") && remaining == "0") print (reset ~ /^[0-9]+$/ ? reset : "unknown") }
       ' "$api_headers" 2>/dev/null || true)"
       rm -f "$api_headers"

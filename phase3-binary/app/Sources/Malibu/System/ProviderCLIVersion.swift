@@ -101,6 +101,25 @@ enum LatestReleaseClient {
     static let failureBackoff: TimeInterval = 600
     static let maxResponseBytes = 256 * 1024
 
+    /// `/healthz` of the coordinator the provider config names (wss/https,
+    /// no credentials), else the production coordinator.
+    static func healthzURL(coordinatorURL: String?) -> URL {
+        guard let coordinatorURL,
+              var components = URLComponents(string: coordinatorURL),
+              components.user == nil,
+              components.password == nil,
+              components.host?.isEmpty == false,
+              ["wss", "https"].contains(components.scheme?.lowercased() ?? "")
+        else {
+            return coordinatorHealthzURL
+        }
+        components.scheme = "https"
+        components.path = "/healthz"
+        components.query = nil
+        components.fragment = nil
+        return components.url ?? coordinatorHealthzURL
+    }
+
     static func fetch(
         coordinatorHealthzURL: URL = coordinatorHealthzURL,
         gitHubLatestURL: URL = gitHubLatestURL,
@@ -151,7 +170,9 @@ enum LatestReleaseClient {
         return .version(version)
     }
 
-    /// The reset time of a 403/429 whose `x-ratelimit-remaining` is 0.
+    /// The reset time of a 403/429 whose `x-ratelimit-remaining` is 0,
+    /// clamped into (now, now + 1h] (GitHub's window) so a header can never
+    /// suppress the fetch for longer. Mirrors the CLI's GitHubAPIRateLimit.
     static func rateLimitReset(_ response: HTTPURLResponse, now: Date) -> Date? {
         guard response.statusCode == 403 || response.statusCode == 429,
               response.value(forHTTPHeaderField: "x-ratelimit-remaining")?
@@ -159,10 +180,15 @@ enum LatestReleaseClient {
         else {
             return nil
         }
-        return response.value(forHTTPHeaderField: "x-ratelimit-reset")
-            .flatMap { TimeInterval($0.trimmingCharacters(in: .whitespaces)) }
-            .map { Date(timeIntervalSince1970: $0) }
-            ?? now.addingTimeInterval(rateLimitDeferral)
+        let ceiling = now.addingTimeInterval(rateLimitDeferral)
+        guard let reset = response.value(forHTTPHeaderField: "x-ratelimit-reset")
+            .flatMap({ TimeInterval($0.trimmingCharacters(in: .whitespaces)) })
+            .map({ Date(timeIntervalSince1970: $0) }),
+            reset > now
+        else {
+            return ceiling
+        }
+        return min(reset, ceiling)
     }
 
     /// When the next fetch may run after `outcome`; nil after a version,

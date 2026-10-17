@@ -45,7 +45,8 @@ final class SelfUpdateRateLimitTests: XCTestCase {
     private func update(
         coordinator: Bool,
         gate: GitHubAPIRateLimit = GitHubAPIRateLimit(),
-        currentVersion: String = "1.8.0"
+        currentVersion: String = "1.8.0",
+        releaseKey: P256.Signing.PublicKey? = nil
     ) -> SelfUpdate {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [RateLimitMockURLProtocol.self]
@@ -56,7 +57,8 @@ final class SelfUpdateRateLimitTests: XCTestCase {
             coordinatorURL: coordinator ? "wss://coordinator.example/ws/provider" : nil,
             session: URLSession(configuration: configuration),
             markerStore: AutoUpdateMarkerStore(homeDirectory: home),
-            gitHubRateLimit: gate
+            gitHubRateLimit: gate,
+            releaseSigningPublicKeyPEM: releaseKey?.pemRepresentation ?? SelfUpdate.checksumPublicKeyPEM
         )
     }
 
@@ -72,7 +74,7 @@ final class SelfUpdateRateLimitTests: XCTestCase {
         func response(_ status: Int, _ headers: [String: String]) -> HTTPURLResponse {
             HTTPURLResponse(url: listing, statusCode: status, httpVersion: "HTTP/1.1", headerFields: headers)!
         }
-        let now = Date(timeIntervalSince1970: 1_000)
+        let now = Date(timeIntervalSince1970: resetEpoch - 600)
         guard case .gitHubRateLimited(let reset)? = GitHubAPIRateLimit.error(
             for: response(403, ["x-ratelimit-remaining": "0", "x-ratelimit-reset": "1790000000"]),
             now: now
@@ -80,6 +82,19 @@ final class SelfUpdateRateLimitTests: XCTestCase {
             return XCTFail("403 with remaining 0 is the rate limit")
         }
         XCTAssertEqual(reset, Date(timeIntervalSince1970: resetEpoch))
+        // A header can never defer longer than GitHub's one-hour window, and a
+        // past reset defers for that window.
+        guard case .gitHubRateLimited(let farReset)? = GitHubAPIRateLimit.error(
+            for: response(403, ["x-ratelimit-remaining": "0", "x-ratelimit-reset": "4102444800"]),
+            now: now
+        ), case .gitHubRateLimited(let pastReset)? = GitHubAPIRateLimit.error(
+            for: response(403, ["x-ratelimit-remaining": "0", "x-ratelimit-reset": "1"]),
+            now: now
+        ) else {
+            return XCTFail("rate limit not classified")
+        }
+        XCTAssertEqual(farReset, now.addingTimeInterval(GitHubAPIRateLimit.defaultDeferral))
+        XCTAssertEqual(pastReset, now.addingTimeInterval(GitHubAPIRateLimit.defaultDeferral))
         guard case .gitHubRateLimited(let fallbackReset)? = GitHubAPIRateLimit.error(
             for: response(429, ["x-ratelimit-remaining": "0"]),
             now: now
@@ -133,11 +148,26 @@ final class SelfUpdateRateLimitTests: XCTestCase {
             try await update(coordinator: false).run(checkOnly: false)
             XCTFail("a mutating update proceeded without a release")
         } catch UpdateError.gitHubRateLimited(let reset) {
-            XCTAssertEqual(reset, Date(timeIntervalSince1970: resetEpoch))
+            XCTAssertNotNil(reset)
         }
     }
 
-    func testRateLimitedCheckUsesTheCoordinatorAdvertisedRelease() async throws {
+    func testRateLimitedCheckReportsTheVerifiedCoordinatorAdvertisedRelease() async throws {
+        let key = P256.Signing.PrivateKey()
+        let (checksums, signature) = try signedChecksums(signWith: key)
+        RateLimitMockURLProtocol.responses = [
+            listing: rateLimited,
+            healthz: (200, Data(#"{"status":"ok","recommended_binary_version":"1.9.0"}"#.utf8), [:]),
+            mirrorChecksums: (200, checksums, [:]),
+            mirrorSignature: (200, signature, [:]),
+        ]
+
+        try await update(coordinator: true, releaseKey: key.publicKey).run(checkOnly: true)
+
+        XCTAssertEqual(RateLimitMockURLProtocol.requested, [listing, healthz, mirrorChecksums, mirrorSignature])
+    }
+
+    func testRateLimitedCheckWithAnUpToDateAdvertisementNeedsNoMirror() async throws {
         RateLimitMockURLProtocol.responses = [
             listing: rateLimited,
             healthz: (200, Data(#"{"status":"ok","recommended_binary_version":"1.8.0"}"#.utf8), [:]),
@@ -235,21 +265,41 @@ final class SelfUpdateRateLimitTests: XCTestCase {
     }
 
     func testStatusLatestVersionCachesTheDeferral() async throws {
-        RateLimitMockURLProtocol.responses = [latest: rateLimited]
+        let futureReset = (Date().timeIntervalSince1970 + 1_800).rounded(.down)
+        RateLimitMockURLProtocol.responses = [latest: rateLimited(resetEpoch: futureReset)]
         let cache = home.appendingPathComponent("latest-release.json")
-        let now = Date(timeIntervalSince1970: resetEpoch - 600)
         let first = update(coordinator: false)
         let second = update(coordinator: false)
 
         for update in [first, second] {
             do {
-                _ = try await update.latestVersionCached(cacheURL: cache, now: now)
+                _ = try await update.latestVersionCached(cacheURL: cache)
                 XCTFail("a spent budget produced a version")
             } catch UpdateError.gitHubRateLimited(let reset) {
-                XCTAssertEqual(reset, Date(timeIntervalSince1970: resetEpoch))
+                XCTAssertEqual(reset, Date(timeIntervalSince1970: futureReset))
             }
         }
         XCTAssertEqual(RateLimitMockURLProtocol.requested, [latest], "a second status call does not spend the budget")
+    }
+
+    func testStatusAsksTheCoordinatorBeforeAnyCachedGitHubResult() async throws {
+        let cache = home.appendingPathComponent("latest-release.json")
+        let now = Date()
+        for cached: [String: Any] in [
+            ["deferred_until": now.timeIntervalSince1970 + 1_800],
+            ["fetched_at": now.timeIntervalSince1970, "version": "1.7.0"],
+        ] {
+            RateLimitMockURLProtocol.reset()
+            RateLimitMockURLProtocol.responses = [
+                healthz: (200, Data(#"{"recommended_binary_version":"1.9.0"}"#.utf8), [:]),
+            ]
+            try JSONSerialization.data(withJSONObject: cached).write(to: cache)
+
+            let version = try await update(coordinator: true).latestVersionCached(cacheURL: cache, now: now)
+
+            XCTAssertEqual(version, "1.9.0")
+            XCTAssertEqual(RateLimitMockURLProtocol.requested, [healthz])
+        }
     }
 
     func testStatusLatestVersionPrefersTheCoordinatorAdvertisement() async throws {

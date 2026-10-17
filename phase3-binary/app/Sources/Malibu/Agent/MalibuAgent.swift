@@ -1147,8 +1147,9 @@ final class MalibuAgent: ObservableObject {
         }
         guard !latestReleaseRefreshInFlight else { return }
         latestReleaseRefreshInFlight = true
+        let healthz = LatestReleaseClient.healthzURL(coordinatorURL: ProviderConfig.readCoordinatorURL())
         Task { [weak self] in
-            let outcome = await LatestReleaseClient.fetch()
+            let outcome = await LatestReleaseClient.fetch(coordinatorHealthzURL: healthz)
             guard let self else { return }
             let finishedAt = Date()
             self.latestReleaseRefreshInFlight = false

@@ -187,7 +187,7 @@ curl() {
     https://api.github.com/*)
       if [ -n "${MOCK_GITHUB_API_STATUS:-}" ]; then
         if [ -n "$headers_out" ]; then
-          printf 'HTTP/2 %s\r\nx-ratelimit-limit: 60\r\nx-ratelimit-remaining: %s\r\nx-ratelimit-reset: 1790000000\r\n\r\n' \
+          printf 'HTTP/2 %s\r\nx-ratelimit-limit: 60\r\nX-RateLimit-Remaining: %s \r\nx-ratelimit-reset: 1790000000\t\r\n\r\n' \
             "$MOCK_GITHUB_API_STATUS" "${MOCK_GITHUB_API_REMAINING:-0}" > "$headers_out"
         fi
         return 22
