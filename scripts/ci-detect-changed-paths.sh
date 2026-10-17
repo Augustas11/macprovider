@@ -70,6 +70,7 @@ classify() {
       test/e2e/byom/*|test/fixtures/*|\
       phase7-verify/testdata/*|phase4-coordinator/test/jcs_fixtures/*|testdata/*|\
       docs/research/spec048-r015/policy-template.json|\
+      docs/evidence/glm53-flash-t4-2026-10-17/README.md|\
       scripts/*.swift|scripts/fixtures/*|scripts/tests/fixtures/*|\
       scripts/lab/1690-m6/testdata/*|scripts/lab/privacy-class-beta/extract-primary-evidence.py|\
       scripts/ci-detect-changed-paths.sh|scripts/ci-swift-test-shard.py|\
