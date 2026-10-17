@@ -64,11 +64,19 @@ Verified 2026-10-10 against public release metadata, the release train
 
 ## Next CLI release — net changes vs 1.8.250 (tracked 2026-10-17)
 
-Live fleet target: **1.8.250**. Nothing is staged yet; the cut waits until every open PR is merged.
+Live fleet target: **1.8.250** (train complete 2026-10-17). Nothing is staged yet; the cut waits until every row below is merged.
 
 | PR | Issue | Provider-side change | Status |
 |---|---|---|---|
 | #2034 | #2029 | Artifact hashing, verification, import and GGUF digest loops release each 1 MiB chunk (per-iteration autorelease pool); serve-load peak drops from ~2.1x to ~1.01x of tensor bytes | merged |
+| #2037 | #2036 | Release discovery resolves the coordinator-advertised release first (signature-verified via `checksums.txt.sig`); anonymous GitHub API is a single fallback with "deferred until reset" on a spent budget; Malibu.app stops re-polling GitHub every status tick | merged |
+| #2038 | #2014 | Guaranteed tool selection (`required`/named) accepts the Qwen3.6 template's function-XML envelope, schema-typed; instruction merges into the leading system message (SPEC-018 v0.2.14) | merged |
+| #2039 | #2036 | Release-train health gate never executes the served installer; streaming size cap on every release download | open |
+| #2035 | #2016 | Native image input for Qwen2-VL-2B: vision profile selected by catalog identity, vision models skip paged KV, catalog promotion, SPEC-023 30-day listing rule removed | open |
+| follow-up | #2016 | mlx-swift-lm fork patch tag (Qwen2-VL per-image vision attention, two-image ordering) + pin bump; Qwen2-VL-only diff, other models byte-identical | in progress |
+| follow-up | #2015 | KV disk tier coexists with privacy class (private requests bypass the disk tier); tier default on | in progress |
+
+Live proofs owed after the cut: #2014 (`required` and named tool calls through the gateway, with and without a buyer system message), #2015 (live cold restore), #2016 (two-image buyer request with receipt), #2036 (update check and install with the anonymous budget at 0). The fork pin bump changes the runtime-build key, so the CB self-check re-measures once (identity re-bind, as at 1.8.250).
 
 ## Next CLI release — net changes vs 1.8.248 (tracked 2026-10-16)
 
