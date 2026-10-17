@@ -9508,8 +9508,8 @@ actor ModelRuntime: ModelRuntimeServing {
     #endif
 
     /// Build the per-request cold-tier context (nil when the tier is not attached).
-    /// The FR-KVP11 gate decision requires BOTH the synthetic key prefix and
-    /// direct-HTTP provenance; the identity core carries the live model identity.
+    /// The FR-KVP11/R014 gate admits a synthetic key on direct HTTP or a valid
+    /// fleet grant on relay/Tier-2; the identity core carries the live model identity.
     private func coldContext(for request: ChatCompletionRequest, snapshot: RuntimeSnapshot) -> ConversationColdContext? {
         Self.coldContext(
             for: request,

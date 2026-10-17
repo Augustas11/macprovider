@@ -1,11 +1,10 @@
 import Foundation
 
-/// SPEC-037 FR-KVP11 — the ingest boundary a request arrived on. Threaded
-/// parallel to `conversationKey`; the KV disk-tier synthetic-key gate persists
-/// and promotes ONLY `.directHTTP` traffic (in addition to the key-prefix
-/// requirement). Every other provenance — including the `.unknown` default —
-/// never persists, so a buyer cannot reach the disk tier by crafting a key
-/// shape on a non-gateway path.
+/// SPEC-037 FR-KVP11/R014 — the ingest boundary a request arrived on. Threaded
+/// parallel to `conversationKey`. The KV disk tier admits a reserved synthetic
+/// key only on `.directHTTP`, and relay/Tier-2 traffic only with a valid
+/// coordinator fleet grant; key shape alone never grants persistence.
+/// `.privacy` never touches a reusable cache (`mayUseReusableKVCache`).
 public enum KVIngestProvenance: String, Sendable, Equatable, CaseIterable {
     case directHTTP
     case relay

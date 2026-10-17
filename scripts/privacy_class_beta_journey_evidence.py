@@ -1719,6 +1719,8 @@ class Checks:
         capture = self.b.fields(f"{base}/capture.txt")
         namespace = capture.get("namespace_id", "")
         expect(bool(namespace) and before.get("namespace_id") == namespace == after.get("namespace_id"), errors, "kv-cache snapshots must name the provider's namespace")
+        # The tier namespace is the provider ID, so it must be the privacy provider's.
+        expect(namespace == self.provider_id("privacy"), errors, "kv-cache namespace must be the privacy provider's ID")
         canaries_start, _ = self.window("step-07-canary-stream")
         _, canaries_end = self.window("step-08-canary-nonstream")
         expect(int(capture["before_unix"]) <= canaries_start and int(capture["after_unix"]) >= canaries_end, errors, "kv-cache snapshots must bracket the step-07 and step-08 canaries")

@@ -1,6 +1,6 @@
 # Privacy class beta operations
 
-SPEC-049 `operator_constrained_beta_v1`, v0.5.0. The coordinator, gateway, and buyer client keep the class off until you enable it. A provider enters the class on its own when it runs an eligible signed release, and the coordinator enrolls its keys without a per-provider step. A request that asks for the class either completes inside the class or fails with a typed error. It does not fall back to ordinary relay-blind or plaintext.
+SPEC-049 `operator_constrained_beta_v1`, v0.6.0. The coordinator, gateway, and buyer client keep the class off until you enable it. A provider enters the class on its own when it runs an eligible signed release, and the coordinator enrolls its keys without a per-provider step. A request that asks for the class either completes inside the class or fails with a typed error. It does not fall back to ordinary relay-blind or plaintext.
 
 These commands print public material only. Do not print, log, or copy private key bytes.
 
