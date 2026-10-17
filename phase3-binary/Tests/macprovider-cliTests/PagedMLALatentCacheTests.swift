@@ -66,41 +66,83 @@ final class PagedMLALatentCacheTests: XCTestCase {
         assertStatesEqual(cache.state, before, "original changed by its copy")
     }
 
-    func testPackedVerificationKeepsExactlyTheAcceptedPrefixPerRow() throws {
+    /// The reference is the fork's own packed path over stock caches:
+    /// `GLM5NextLatentCacheBatch` working copies written with each row's valid
+    /// columns only, then `GLM5NextLatentRowTransaction.stageCommit(retaining:)`.
+    /// The paged batch must leave every row byte-equal to it (latent, pooled
+    /// keys, pending window, folded raw tail) with the same `maxTrimCount`,
+    /// across many rounds so the folded tail fills past its cap, with equal
+    /// and with right-padded widths.
+    func testPackedVerificationMatchesTheForkRowTransactions() throws {
         try requireMetal()
         var rng = SplitMix(seed: 21)
-        // Two rows at different offsets; width 3 (2 proposals) each.
-        let rows = [makeCache(), makeCache()]
-        let oracles = [stock(), stock()]
-        step(rows[0], oracles[0], length: 13, rng: &rng)
-        step(rows[1], oracles[1], length: 6, rng: &rng)
+        let rows = [makeCache(), makeCache(), makeCache()]
+        let references = [stock(), stock(), stock()]
+        step(rows[0], references[0], length: 13, rng: &rng)
+        step(rows[1], references[1], length: 6, rng: &rng)
+        step(rows[2], references[2], length: 22, rng: &rng)
 
-        for accepted in [[3, 1], [1, 2], [2, 3]] {
-            let batch = PagedMLABatchLayerCache(rowCaches: rows)
-            try batch.prepareMTPPackedVerification(rowMaps: rows.enumerated().map {
-                MTPPackedVerificationRowMap(rowIndex: $0.offset, queryOffset: $0.element.offset, inputCount: 3, proposalCount: 2)
-            })
-            XCTAssertEqual(batch.mtpPackedHostBatchOffsets, rows.map(\.offset))
-            // The model appends every column to each staged row.
-            var columns: [(MLXArray, MLXArray, MLXArray)] = []
-            for staged in batch.rowCaches {
-                let input = randomInputs(length: 3, rng: &rng)
-                columns.append(input)
-                apply(staged, input)
+        // (valid input columns per row, retained columns per row) per round.
+        let rounds: [([Int], [Int])] = [
+            ([3, 3, 3], [3, 1, 2]), ([3, 3, 3], [1, 2, 3]), ([3, 3, 3], [2, 3, 1]),
+            ([2, 1, 3], [2, 1, 1]), ([1, 2, 2], [1, 1, 2]), ([2, 2, 1], [1, 2, 1]),
+            ([3, 1, 2], [3, 1, 2]), ([2, 3, 3], [1, 3, 2]), ([3, 3, 3], [2, 2, 2]),
+            ([1, 1, 1], [1, 1, 1]), ([2, 2, 2], [2, 1, 2]), ([3, 2, 1], [2, 2, 1]),
+        ]
+        for (round, (inputs, retained)) in rounds.enumerated() {
+            let maps = rows.indices.map { index in
+                MTPPackedVerificationRowMap(
+                    rowIndex: index, queryOffset: rows[index].offset,
+                    inputCount: inputs[index], proposalCount: inputs[index] - 1
+                )
             }
-            XCTAssertEqual(rows.map(\.offset), oracles.map(\.offset), "verification mutated a live row")
-            batch.finalize()
-            let resolutions = try batch.pendingMTPResolutions()
-            for (index, resolution) in resolutions.enumerated() {
-                _ = try resolution.stageCommit(inputCount: accepted[index])
-                let (latent, keys, gates) = columns[index]
-                apply(oracles[index], (
-                    latent[.ellipsis, ..<accepted[index], 0...],
-                    keys[0..., ..<accepted[index], 0...],
-                    gates[0..., ..<accepted[index], 0...]
+            let width = inputs.max()!
+            let batch = PagedMLABatchLayerCache(rowCaches: rows)
+            try batch.prepareMTPPackedVerification(rowMaps: maps)
+            let reference = GLM5NextLatentCacheBatch(rowCaches: references)
+            try reference.prepareMTPPackedVerification(rowMaps: maps)
+            XCTAssertEqual(batch.mtpPackedHostBatchOffsets, rows.map(\.offset))
+            XCTAssertEqual(batch.packedVerificationRowLengths, inputs)
+            for index in rows.indices {
+                let columns = randomInputs(length: width, rng: &rng)
+                // The pinned model writes every padded column into the paged
+                // copy; the fork's batch writes only the valid ones.
+                apply(batch.rowCaches[index], columns)
+                let valid = inputs[index]
+                apply(reference.rowCaches[index], (
+                    columns.0[.ellipsis, ..<valid, 0...],
+                    columns.1[0..., ..<valid, 0...],
+                    columns.2[0..., ..<valid, 0...]
                 ))
-                XCTAssertEqual(rows[index].offset, oracles[index].offset)
-                assertStatesEqual(rows[index].state, oracles[index].state, "row \(index) accepted \(accepted[index])")
+            }
+            XCTAssertEqual(rows.map(\.offset), references.map(\.offset), "verification mutated a live row")
+            batch.finalize()
+            reference.finalize()
+            let resolutions = try batch.pendingMTPResolutions()
+            let transactions = try reference.rowTransactions()
+            for index in rows.indices {
+                _ = try resolutions[index].stageCommit(inputCount: retained[index])
+                _ = try transactions[index].stageCommit(retaining: retained[index])
+                let label = "round \(round) row \(index) inputs \(inputs[index]) retained \(retained[index])"
+                XCTAssertEqual(rows[index].offset, references[index].offset, label)
+                XCTAssertEqual(rows[index].maxTrimCount, references[index].maxTrimCount, label)
+                assertStatesEqual(rows[index].state, references[index].state, label)
+            }
+        }
+    }
+
+    func testStagedExtraFoldedKeysIsTheFoldedDifferenceOfThePadding() {
+        // offset 17, kpool 4: valid 1 -> pending 2, width 3 -> pending 0.
+        XCTAssertEqual(PagedMLALatentCache.stagedExtraFoldedKeys(offset: 17, validWidth: 1, width: 3, kpool: 4), 4)
+        XCTAssertEqual(PagedMLALatentCache.stagedExtraFoldedKeys(offset: 16, validWidth: 1, width: 3, kpool: 4), 0)
+        XCTAssertEqual(PagedMLALatentCache.stagedExtraFoldedKeys(offset: 16, validWidth: 3, width: 3, kpool: 4), 0)
+        for offset in 0 ..< 12 {
+            for width in 1 ... 3 {
+                for valid in 1 ... width {
+                    let extra = PagedMLALatentCache.stagedExtraFoldedKeys(offset: offset, validWidth: valid, width: width, kpool: 4)
+                    XCTAssertGreaterThanOrEqual(extra, 0)
+                    XCTAssertEqual(extra % 4, 0)
+                }
             }
         }
     }

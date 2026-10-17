@@ -177,7 +177,29 @@ final class PagedMLALatentCache: GLM5NextLatentCache, CustomDebugStringConvertib
         pooledCount = needed
     }
 
-    private var foldedCapacity: Int { kpool - 1 + maxTrim }
+    /// Extra folded raw keys a staged packed-verification copy keeps
+    /// (`PagedMLABatchLayerCache`). The model writes a row's right-padding
+    /// columns into the copy, where the fork's `GLM5NextLatentCacheBatch`
+    /// writes nothing; without this the padding would push history out of
+    /// the capped tail, and the commit's trim would leave a shorter raw tail
+    /// (and `maxTrimCount`) than `GLM5NextLatentRowTransaction` leaves.
+    var stagedExtraFoldedKeys = 0
+
+    private var foldedCapacity: Int { kpool - 1 + maxTrim + stagedExtraFoldedKeys }
+
+    /// The extra capacity that makes a copy written with `width` columns and
+    /// then trimmed back to `retaining <= validWidth` columns hold exactly the
+    /// raw tail of a copy written with `validWidth` columns and trimmed the
+    /// same way. The capped part is the folded keys only (the pending window
+    /// is never capped), and both sequences end in the same retained tokens,
+    /// so equal tail lengths mean equal tails:
+    /// `pad + pending(offset + validWidth) - pending(offset + width)`, a
+    /// non-negative multiple of `kpool`.
+    static func stagedExtraFoldedKeys(offset: Int, validWidth: Int, width: Int, kpool: Int) -> Int {
+        let pad = width - validWidth
+        let pool = max(1, kpool)
+        return pad + (offset + validWidth) % pool - (offset + width) % pool
+    }
 
     private func keepTail(_ kept: MLXArray?, _ added: MLXArray) -> MLXArray? {
         guard foldedCapacity > 0 else { return nil }
@@ -483,7 +505,13 @@ final class PagedMLABatchLayerCache: GLM5NextBatchedLatentCache, MTPPackedVerifi
             throw ContinuousBatchSchedulerError.unsupported("native_mtp_packed_cache_width_exceeds_exact_trim")
         }
         preparedMTPPackedRowMaps = rowMaps
-        stagedRows = rows.map { $0.concreteCopy() }
+        stagedRows = zip(rows, rowMaps).map { row, map in
+            let staged = row.concreteCopy()
+            staged.stagedExtraFoldedKeys = PagedMLALatentCache.stagedExtraFoldedKeys(
+                offset: row.offset, validWidth: map.inputCount, width: width, kpool: row.kpool
+            )
+            return staged
+        }
         pendingMTPResolutionsByRow = nil
     }
 
