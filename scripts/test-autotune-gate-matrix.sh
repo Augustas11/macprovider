@@ -35,7 +35,8 @@ for policy_field in ("draft_candidates", "workload_profiles"):
         raise AssertionError("policy-bearing row identity must fail closed")
 
 providers = []
-for index, (chip, memory_gb, tier) in enumerate((("Apple M5 Ultra", 128, "S"), ("Apple M5 Max", 128, "A"), ("Apple M5 Max", 128, "A"))):
+# Two hardware classes that every signed row fits (the largest row needs 234 GB).
+for index, (chip, memory_gb, tier) in enumerate((("Apple M5 Ultra", 256, "S"), ("Apple M3 Ultra", 256, "S"), ("Apple M3 Ultra", 256, "S"))):
     provider_id = f"provider-{index + 1}"
     hardware_hash = f"{index + 1:064x}"
     benchmarks = []
@@ -195,12 +196,14 @@ relative_path = copy.deepcopy(matrix)
 relative_path["providers"][0]["evidence"]["benchmarks"][0]["model_artifact_path"] = "models/current"
 pathlib.Path(sys.argv[7]).write_text(json.dumps(relative_path, separators=(",", ":")))
 equivalent_chips = copy.deepcopy(matrix)
-equivalent_chips["providers"][0]["evidence"]["hardware"]["chip"] = "  APPLE   M5 MAX  "
-equivalent_chips["providers"][0]["evidence"]["hardware"]["bandwidth_tier"] = "A"
-equivalent_chips["providers"][1]["evidence"]["hardware"]["chip"] = "m5 max"
-equivalent_chips["providers"][2]["evidence"]["hardware"]["chip"] = "Apple M5 Max"
+for index, chip in enumerate(("  APPLE   M5 MAX  ", "m5 max", "Apple M5 Max")):
+    equivalent_chips["providers"][index]["evidence"]["hardware"]["chip"] = chip
+    equivalent_chips["providers"][index]["evidence"]["hardware"]["memory_gb"] = 128
+    equivalent_chips["providers"][index]["evidence"]["hardware"]["bandwidth_tier"] = "A"
 pathlib.Path(sys.argv[8]).write_text(json.dumps(equivalent_chips, separators=(",", ":")))
 inflated_tier = copy.deepcopy(matrix)
+inflated_tier["providers"][2]["evidence"]["hardware"]["chip"] = "Apple M5 Max"
+inflated_tier["providers"][2]["evidence"]["hardware"]["memory_gb"] = 128
 inflated_tier["providers"][2]["evidence"]["hardware"]["bandwidth_tier"] = "S"
 pathlib.Path(sys.argv[9]).write_text(json.dumps(inflated_tier, separators=(",", ":")))
 PY
