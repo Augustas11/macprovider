@@ -115,10 +115,12 @@ arguments fail as `tool_selection_validation_failed`. Custom stop strings and
 non-text `response_format` cannot be combined with guaranteed modes.
 
 The native path uses ordinary model generation followed by complete-output
-validation. It does not constrain sampling logits. It accepts complete strict
-JSON `<tool_call>` envelopes only, validates the entire generation and every
-argument object, and does not repair JSON, fabricate calls or silently retry
-as `auto`. The model can fail to produce acceptable output; only successful
+validation. It does not constrain sampling logits. It accepts complete
+`<tool_call>` envelopes only, each holding a strict JSON call or one complete
+function-XML call in the model's own chat-template format (a `string`
+parameter is literal text, any other parameter is strict JSON). It validates
+the entire generation and every argument object, and does not repair output,
+fabricate calls or silently retry as `auto`. The model can fail to produce acceptable output; only successful
 responses carry the selection guarantee.
 
 ## Streaming and failures
