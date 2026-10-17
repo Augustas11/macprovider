@@ -36,7 +36,7 @@ final class Build1PrivateAuthorityTests: XCTestCase {
     private static func historicalCandidateCatalogJSON() -> String {
         var json = AutotuneStaticInputs.bakedCandidateCatalogJSON
             .replacingOccurrences(of: "published-2026-10-17-qwen2vl-listed-v1", with: "published-2026-10-01-artifact-feed-activation-v1")
-            .replacingOccurrences(of: "2026-10-17T00:30:00Z", with: "2026-10-01T04:20:42Z")
+            .replacingOccurrences(of: "2026-10-17T01:10:00Z", with: "2026-10-01T04:20:42Z")
         if let start = json.range(of: "\"mlx-community/qwen2-vl-2b-instruct-4bit\":"),
            let next = json.range(of: "\"nvidia/nemotron-3-nano-30b-a3b\":", range: start.upperBound..<json.endIndex) {
             json.removeSubrange(start.lowerBound..<next.lowerBound)

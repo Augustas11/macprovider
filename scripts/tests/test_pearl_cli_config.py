@@ -2,9 +2,12 @@
 import argparse
 import datetime
 import importlib.util
+import json
+import os
 import pathlib
 import subprocess
 import sys
+import tempfile
 import unittest
 
 SCRIPT = pathlib.Path(__file__).resolve().parents[1] / "ops" / "lib" / "pearl-cli-config.py"
@@ -190,6 +193,100 @@ class VisionQualificationOverlayTest(unittest.TestCase):
                           ("- a\n", "not a YAML mapping")):
             with self.assertRaisesRegex(pcc.Refused, why):
                 vq_plan(text) if not text.startswith("- ") else pcc.vq_overlay_plan(text, {}, dict(VQ))
+
+
+class VisionQualificationFileTest(unittest.TestCase):
+    """The record and the staged copy are checked on the descriptor read."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(subprocess.run, ["rm", "-rf", self.dir])
+
+    def write(self, name, data=None, mode=0o600, directory=None):
+        path = os.path.join(directory or self.dir, name)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+        os.write(fd, pcc.vq_canonical(VQ) if data is None else data)
+        os.close(fd)
+        os.chmod(path, mode)
+        return path
+
+    def test_private_record_is_read_and_validated(self):
+        out = os.path.join(self.dir, "canonical.json")
+        facts = pcc.validate_vq_file(self.write("r.json"), out)
+        self.assertEqual(facts, {"fields": 15, "entry_sha256": pcc.vq_digest(VQ)})
+        with open(out, "rb") as f:
+            self.assertEqual(f.read(), pcc.vq_canonical(VQ))
+
+    def test_unsafe_files_refused(self):
+        target = self.write("target.json")
+        link = os.path.join(self.dir, "link.json")
+        os.symlink(target, link)
+        hard = os.path.join(self.dir, "hard.json")
+        os.link(target, hard)
+        shared = os.path.join(self.dir, "shared")
+        os.mkdir(shared)
+        os.chmod(shared, 0o775)
+        for path, why in ((link, "is a symlink"),
+                          (hard, "regular file with one link"),
+                          (self.write("open.json", mode=0o644), "must be mode 0600"),
+                          (self.write("group.json", mode=0o640), "must be mode 0600"),
+                          (self.write("big.json", b"x" * (pcc.VQ_MAX_BYTES + 1)), "larger than"),
+                          (self.write("r.json", directory=shared), "not writable by group or others"),
+                          (self.dir, "regular file")):
+            with self.subTest(why=why), self.assertRaisesRegex(pcc.Refused, why):
+                pcc.read_private_record(path, pcc.VQ_MAX_BYTES, "qualification record")
+
+    def test_staged_record_must_match_and_be_private(self):
+        staged = self.write("staged", pcc.vq_canonical(VQ))
+        a = argparse.Namespace(vq_staged=staged, vq_sha256=pcc.vq_digest(VQ))
+        self.assertEqual(pcc.read_vq_staged(a), VQ)
+        os.chmod(staged, 0o644)
+        with self.assertRaisesRegex(pcc.Refused, "must be mode 0600"):
+            pcc.read_vq_staged(a)
+        os.chmod(staged, 0o600)
+        with self.assertRaisesRegex(pcc.Refused, "differs from the validated"):
+            pcc.read_vq_staged(argparse.Namespace(vq_staged=staged, vq_sha256="0" * 64))
+        link = os.path.join(self.dir, "staged-link")
+        os.symlink(staged, link)
+        with self.assertRaisesRegex(pcc.Refused, "is a symlink"):
+            pcc.read_vq_staged(argparse.Namespace(vq_staged=link, vq_sha256=pcc.vq_digest(VQ)))
+
+
+class VisionQualificationOverlayStateTest(unittest.TestCase):
+    def test_valid_absent_and_invalid_live_entries(self):
+        self.assertEqual(pcc.vq_overlay_state(None), {"overlay_entries_sha256": None, "overlay_entries_valid": None,
+                                                      "overlay_invalid_reason": None})
+        self.assertEqual(pcc.vq_overlay_state([dict(VQ)]),
+                         {"overlay_entries_sha256": [pcc.vq_digest(VQ)], "overlay_entries_valid": True,
+                          "overlay_invalid_reason": None})
+        # The coordinator accepts a non-hex model_hash; the ops rules do not.
+        state = pcc.vq_overlay_state([dict(VQ), vq(model_hash="z" * 64, provider_id="VQ-SECRET")])
+        self.assertEqual(state["overlay_entries_sha256"], [pcc.vq_digest(VQ), "invalid"])
+        self.assertIs(state["overlay_entries_valid"], False)
+        self.assertIn("model_hash must be a lowercase sha256", state["overlay_invalid_reason"])
+        self.assertNotIn("VQ-SECRET", json.dumps(state))
+        self.assertEqual(pcc.vq_overlay_state(["x"])["overlay_entries_sha256"], ["invalid"])
+
+
+class VisionQualificationParityTest(unittest.TestCase):
+    """scripts/ops/testdata/vision-qualification-corpus.json is shared with
+    phase4-coordinator/internal/config/vision_qualification_parity_test.go."""
+
+    def test_ops_validator_matches_corpus_and_is_never_looser(self):
+        corpus = json.loads((SCRIPT.parents[1] / "testdata" / "vision-qualification-corpus.json").read_text())
+        names = [c["name"] for c in corpus["cases"]]
+        self.assertEqual(len(names), len(set(names)))
+        self.assertIn("non_hex_model_hash", names)
+        for case in corpus["cases"]:
+            with self.subTest(case=case["name"]):
+                if case["ops_valid"]:
+                    self.assertTrue(case["go_valid"], "the ops validator must never accept what the coordinator rejects")
+                try:
+                    pcc.vq_validate(case["record"])
+                    ok = True
+                except pcc.Refused:
+                    ok = False
+                self.assertEqual(ok, case["ops_valid"])
 
 
 if __name__ == "__main__":

@@ -223,6 +223,9 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
                 self.assertNotIn(f'"{model_id}"', gateway, msg=f"{model_id} is not in the OpenRouter listing set")
         self.assertTrue(set(probe.OPENROUTER_LISTED_MODEL_IDS) <= recommendable)
         for catalog_key, row in catalog["rows"].items():
+            # Listed rows carry no price and are never offered for OpenRouter.
+            if row.get("runtime_status") != "recommendable":
+                continue
             self.assertEqual(probe.CATALOG_KEY_TO_MODEL_ID[catalog_key], row["model_id"])
             self.assertIn(row["model_id"], probe.EXPECTED_OPENROUTER_SLUGS)
             slug = probe.EXPECTED_OPENROUTER_SLUGS[row["model_id"]]

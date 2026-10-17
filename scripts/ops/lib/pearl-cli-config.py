@@ -54,19 +54,24 @@ coordinator's VisionQualificationConfig rules), sets
 routing.vision_qualifications to exactly [record] in the overlay (backup
 first; refuses a different existing list), validates with the running
 coordinator, restarts once and requires the new invocation to log the
-on-disk files as its boot config; on failure it restores the overlay and
-restarts again. Locally, `validate-vision-qualification PATH [OUT]` applies
+on-disk files as its boot config; on failure it restores the overlay (when it
+changed it) and makes one recovery restart with the same checks. The record
+and the staged copy are read through one descriptor each (no symlink, one
+link, owned by this user, mode 0600, in a directory no one else can write).
+Locally, `validate-vision-qualification PATH [OUT]` applies
 the rules and prints only the field count and the entry sha256.
 """
 import argparse
 import copy
 import datetime
+import errno
 import hashlib
 import importlib.util
 import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -960,17 +965,56 @@ def vq_parse(raw):
     return vq_validate(doc)
 
 
+def read_private_record(path, max_bytes, what):
+    """PATH's bytes, checked on the descriptors actually read (no check-then-
+    reopen): its directory is owned by this user or root and not writable by
+    group or others; the file is opened without following a symlink and must
+    be a regular single-link file owned by this user, mode exactly 0600, at
+    most max_bytes."""
+    parent, name = os.path.split(os.path.abspath(path))
+    dfd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        dst = os.fstat(dfd)
+        if dst.st_uid not in (0, os.geteuid()) or dst.st_mode & 0o022:
+            raise Refused("the %s's directory must be owned by this user or root and not writable by group or others"
+                          % what)
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=dfd)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise Refused("the %s is a symlink" % what)
+            raise
+    finally:
+        os.close(dfd)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            raise Refused("the %s must be a regular file with one link" % what)
+        if st.st_uid != os.geteuid():
+            raise Refused("the %s must be owned by this user" % what)
+        if stat.S_IMODE(st.st_mode) != 0o600:
+            raise Refused("the %s must be mode 0600 (chmod 600 it)" % what)
+        if st.st_size > max_bytes:
+            raise Refused("the %s is larger than %d bytes" % (what, max_bytes))
+        chunks, total = [], 0
+        while total <= max_bytes:
+            chunk = os.read(fd, max_bytes + 1 - total)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
 def validate_vq_file(path, out=None):
-    st = os.lstat(path)
-    if not os.path.isfile(path) or os.path.islink(path):
-        raise Refused("the record is not a regular file")
-    with open(path, "rb") as f:
-        entry = vq_parse(f.read(VQ_MAX_BYTES + 1))
+    entry = vq_parse(read_private_record(path, VQ_MAX_BYTES, "qualification record"))
     if out:
         fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "wb") as f:
             f.write(vq_canonical(entry))
-    return {"fields": len(entry), "entry_sha256": vq_digest(entry), "private": st.st_mode & 0o7777 == 0o600}
+    return {"fields": len(entry), "entry_sha256": vq_digest(entry)}
 
 
 def vq_entries(doc):
@@ -1030,34 +1074,69 @@ def vq_overlay_plan(text, overlay, entry):
     return new
 
 
+def vq_overlay_state(entries):
+    """Digests of the overlay's entries ("invalid" for one the record rules
+    reject) and whether every entry passes them (None when the key is absent).
+    The first rejection names a field only, never a value."""
+    if entries is None:
+        return {"overlay_entries_sha256": None, "overlay_entries_valid": None, "overlay_invalid_reason": None}
+    digests, reason = [], None
+    for e in entries:
+        try:
+            digests.append(vq_digest(vq_validate(e)))
+        except Refused as exc:
+            digests.append("invalid")
+            reason = reason or str(exc)
+    return {"overlay_entries_sha256": digests, "overlay_entries_valid": reason is None,
+            "overlay_invalid_reason": reason}
+
+
 def vq_facts(args):
     # The files read must be the ones the running coordinator was started with.
     running(args)
     base, overlay = load_effective(args)
-    entries = vq_entries(overlay)
     facts = {
         "overlay_sets_routing": "routing" in overlay,
-        "overlay_entries_sha256": None if entries is None else
-        [vq_digest(e) if isinstance(e, dict) else "invalid" for e in entries],
         "base_entries": len(vq_entries(base) or []),
         # The running coordinator booted with exactly the files on disk.
         "applied": applied(args),
     }
+    facts.update(vq_overlay_state(vq_entries(overlay)))
     print(json.dumps(facts, sort_keys=True))
 
 
 def read_vq_staged(args):
     """The canonical record the ops entry point staged root-only."""
-    st = os.lstat(args.vq_staged)
-    if not os.path.isfile(args.vq_staged) or os.path.islink(args.vq_staged) or st.st_uid != os.geteuid() \
-            or st.st_mode & 0o077 or st.st_size > VQ_MAX_BYTES:
-        raise Refused("the staged record must be a private regular file owned by this user")
-    with open(args.vq_staged, "rb") as f:
-        raw = f.read(VQ_MAX_BYTES + 1)
+    raw = read_private_record(args.vq_staged, VQ_MAX_BYTES, "staged record")
     entry = vq_parse(raw)
     if vq_digest(entry) != args.vq_sha256 or raw != vq_canonical(entry):
         raise Refused("the staged record differs from the validated local record")
     return entry
+
+
+def recovery_restart(args, on_disk):
+    """After a failed restart: one more bounded restart of the files now on
+    disk (ON_DISK says what they hold), then /healthz and the new invocation
+    must log those files as its boot config."""
+    try:
+        back = subprocess.run(["systemctl", "restart", args.unit], timeout=120, capture_output=True).returncode
+    except subprocess.TimeoutExpired:
+        back = None
+    if back != 0:
+        raise Refused("the recovery restart failed; %s but not proven live: check the coordinator now" % on_disk)
+    healthz(args.healthz)
+    deadline = time.monotonic() + 30
+    while not applied(args):
+        if time.monotonic() > deadline:
+            raise Refused("after the recovery restart the coordinator did not log the on-disk config as its boot "
+                          "config (%s): check the coordinator now" % on_disk)
+        time.sleep(1)
+
+
+def failure(exc):
+    """A restart failure for an operator message: Refused text names no
+    secret; anything else is reported by type only."""
+    return str(exc) if isinstance(exc, Refused) else type(exc).__name__
 
 
 def apply_vision_qualification(args):
@@ -1083,7 +1162,15 @@ def apply_vision_qualification(args):
                                     "--config-overlay", args.overlay], env, uid, gid, 120)
                 if check.returncode != 0:
                     raise Refused("the running coordinator binary rejects the on-disk overlay (--validate-config)")
-                restart(args, pid)
+                try:
+                    restart(args, pid)
+                except Exception as exc:
+                    # Nothing to restore: the overlay is unchanged. Bring the
+                    # coordinator back on it and prove that, then report.
+                    recovery_restart(args, "the overlay is unchanged on disk")
+                    raise Refused("the restart failed (%s); a recovery restart brought the coordinator back on the "
+                                  "unchanged overlay (/healthz answered, boot config verified): run status"
+                                  % failure(exc))
                 result["restarted"] = True
                 result["recovered_unapplied_config"] = True
                 print(json.dumps(result, sort_keys=True))
@@ -1106,24 +1193,15 @@ def apply_vision_qualification(args):
                     os.unlink(tmp)
             try:
                 restart(args, pid)
-            except Exception:
+            except Exception as exc:
                 with open(args.overlay, "rb") as f:
                     ours = f.read() == new
-                if ours:
-                    install(write_like(args.overlay, original, args.overlay), args.overlay)
-                    back = subprocess.run(["systemctl", "restart", args.unit], timeout=120, capture_output=True)
-                    if back.returncode != 0:
-                        raise Refused("the rollback restart failed; the overlay is restored on disk "
-                                      "but not proven live: check the coordinator now")
-                    healthz(args.healthz)
-                    deadline = time.monotonic() + 30
-                    while not applied(args):
-                        if time.monotonic() > deadline:
-                            raise Refused("after the rollback restart the coordinator did not log the restored "
-                                          "config as its boot config: check the coordinator now")
-                        time.sleep(1)
-                    result["restored"] = True
-                raise
+                if not ours:
+                    raise
+                install(write_like(args.overlay, original, args.overlay), args.overlay)
+                recovery_restart(args, "the overlay is restored on disk")
+                raise Refused("the restart failed (%s); the overlay is restored and a recovery restart brought the "
+                              "coordinator back on it (/healthz answered, boot config verified)" % failure(exc))
             result["restarted"] = True
             print(json.dumps(result, sort_keys=True))
     finally:
@@ -1134,8 +1212,9 @@ def apply_vision_qualification(args):
 def main(argv):
     if argv[:1] == ["validate-vision-qualification"]:
         # Local, read-only (OUT, when given, is a new 0600 file holding the
-        # canonical record for staging): prints only the field count, the
-        # entry sha256 and whether the file is private.
+        # canonical record for staging): prints only the field count and the
+        # entry sha256. A record that is not private (read_private_record) is
+        # refused here, the one authoritative check.
         if len(argv) not in (2, 3):
             sys.stderr.write("usage: pearl-cli-config.py validate-vision-qualification PATH [OUT]\n")
             sys.exit(2)

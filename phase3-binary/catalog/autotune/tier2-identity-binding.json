@@ -1,6 +1,6 @@
 {
-  "autotune_candidates_sha256": "8f12d1d69d60c09383c12a50140611600ca977bbe2a920eb38b454ba09497b7c",
-  "generated_at": "2026-10-17T00:30:00Z",
+  "autotune_candidates_sha256": "217cc6fdffa152bc6865698183644a0d630dbe1eef3166584efd20402cd5c216",
+  "generated_at": "2026-10-17T01:10:00Z",
   "models": [
     {
       "catalog_key": "google-gemma-4-26b-a4b-it",

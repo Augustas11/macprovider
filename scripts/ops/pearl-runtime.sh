@@ -125,8 +125,11 @@
 #                       stated first; the list is read at boot only), then
 #                       require the new process to log the on-disk files as its
 #                       boot config; otherwise restore the overlay and restart
-#                       again. Done when the overlay holds exactly this entry
-#                       and the coordinator booted with it.
+#                       again (one bounded recovery restart, the same checks,
+#                       also when the overlay was already right). Done when
+#                       the overlay holds exactly this entry, valid under the
+#                       record rules, and the coordinator booted with it; an
+#                       overlay entry the rules reject is blocked.
 #   Env: VISION_QUALIFICATION_FILE and the Pearl layout above.
 #
 # Env (or ~/.config/macprovider/ops.env): COORDINATOR_URL, GATEWAY_URL,
@@ -755,12 +758,10 @@ while True:
     return
   fi
   rm -f "$VQ_CANON"
+  # The helper owns every file check (one descriptor: no symlink, one link,
+  # this user's, mode 0600, private directory) and the record rules.
   if ! out="$(python3 -I "$OPS_LIB_DIR/pearl-cli-config.py" validate-vision-qualification "$real" "$VQ_CANON" 2>&1)"; then
-    VQ_ERR="the qualification record fails the coordinator's routing.vision_qualifications rules: $(printf '%s' "$out" | tail -n 1 | cut -c1-300)"
-    return
-  fi
-  if [ "$(json_field_str "$out" 'd["private"]')" != true ]; then
-    VQ_ERR="the qualification record is readable by group or others; chmod 600 it"
+    VQ_ERR="the qualification record is refused (private file and routing.vision_qualifications rules): $(printf '%s' "$out" | tail -n 1 | cut -c1-300)"
     return
   fi
   VQ_SHA="$(json_field_str "$out" 'd["entry_sha256"]')"
@@ -790,14 +791,23 @@ gather_vision_qualification() {
       "vq-facts over ssh failed: $(tail -n 1 "$OPS_TMP_DIR/vq.err" | safe_remote_output | cut -c1-200)"
     return
   fi
-  local entries applied
+  local entries applied valid
   entries="$(json_field_str "$facts" '" ".join(d["overlay_entries_sha256"]) if d["overlay_entries_sha256"] is not None else "absent"')"
   applied="$(json_field_str "$facts" 'd["applied"]')"
+  valid="$(json_field_str "$facts" '"absent" if d["overlay_entries_valid"] is None else str(d["overlay_entries_valid"])')"
   fact pearl_vq_overlay_entries_sha256 "$entries"
+  fact pearl_vq_overlay_entries_valid "$valid"
   fact pearl_vq_overlay_sets_routing "$(json_field_str "$facts" 'd["overlay_sets_routing"]')"
   fact pearl_vq_base_entries "$(json_field_str "$facts" 'd["base_entries"]')"
   fact pearl_vq_config_applied "$applied"
   step pearl_state "done" "overlay entries: ${entries:-none} applied=$applied"
+  # A live entry the record rules reject is never done, whatever booted.
+  if [ "$valid" != True ] && [ "$valid" != absent ]; then
+    step vision_qualification blocked "the overlay's routing.vision_qualifications fails the record rules"
+    set_next vision_qualification blocked "Reconcile the Pearl overlay's vision qualification" "" \
+      "the Pearl overlay's routing.vision_qualifications entry fails the record rules ($(json_field_str "$facts" 'd["overlay_invalid_reason"]' | cut -c1-200)); reconcile it first"
+    return
+  fi
   # Done: the overlay holds exactly this one entry and the running coordinator
   # booted with the files on disk (the qualification list is read at boot
   # only). A local record that is set must be valid and be the installed one;

@@ -1769,7 +1769,7 @@ def promotion_manifest_bytes(harness, key: str, release_id: str, as_of: str) -> 
             "INTAKE_UNKNOWN_KEY_BUCKETS": 64, "INTAKE_UNKNOWN_PRINCIPALS_PER_BUCKET": 64,
             "INTAKE_UNKNOWN_KEY_DISTINCT_CAP": 10000, "INTAKE_UNKNOWN_KEY_PRINCIPAL_CAP_PCT": 10,
             "INTAKE_K_ANONYMITY_MIN": 3, "INTAKE_FLEET_FIT_MIN_PCT": 25, "INTAKE_COLDSTART_SLOTS": 1,
-            "INTAKE_MIN_LISTED_DAYS": 30, "tier_target": "<= 16 GB",
+            "tier_target": "<= 16 GB",
         },
         "decisions": [{
             "model_key": key,
@@ -1783,7 +1783,6 @@ def promotion_manifest_bytes(harness, key: str, release_id: str, as_of: str) -> 
             "coldstart_slot_used": False,
             "listed_since": "2026-08-01T00:00:00Z",
             "promotion": {
-                "listed_days_elapsed": 45,
                 "rate_class": "class-8b",
                 "rate_row_resolved": True,
                 "rate_card_source_sha256": catalog_release.sha256((harness.catalog / "rate-card-source.json").read_bytes()),
@@ -3649,7 +3648,6 @@ class IntakeDecisionManifestTest(unittest.TestCase):
             "INTAKE_K_ANONYMITY_MIN": 3,
             "INTAKE_FLEET_FIT_MIN_PCT": 25,
             "INTAKE_COLDSTART_SLOTS": 1,
-            "INTAKE_MIN_LISTED_DAYS": 30,
             "tier_target": "<= 16 GB",
         }
         self.stats_bytes = self.write("stats-intake.json", self.stats_source())
@@ -3766,7 +3764,6 @@ class IntakeDecisionManifestTest(unittest.TestCase):
             "coldstart_slot_used": False,
             "listed_since": "2026-08-15T00:00:00Z",
             "promotion": {
-                "listed_days_elapsed": 45,
                 "rate_class": "class-8b",
                 "rate_row_resolved": True,
                 "rate_card_source_sha256": catalog_release.sha256(RATE_CARD_SOURCE_BYTES),
@@ -4129,9 +4126,24 @@ class IntakeDecisionManifestTest(unittest.TestCase):
         entry = self.promote_entry()
         entry["promotion"] = None
         self.rejects(self.manifest([entry]), "promotion: must be an object")
+        # SPEC-023 v0.22.25: the listed-dwell knob is removed. A promotion
+        # with no listed_days_elapsed is accepted at any dwell; the removed
+        # field and the removed threshold both fail the closed schema.
         entry = self.promote_entry()
-        entry["promotion"]["listed_days_elapsed"] = 10
-        self.rejects(self.manifest([entry]), "listed_days_elapsed must be >= INTAKE_MIN_LISTED_DAYS")
+        entry["listed_since"] = "2026-09-30T00:00:00Z"
+        self.validate(self.manifest([entry]))
+        entry = self.promote_entry()
+        entry["promotion"]["listed_days_elapsed"] = 45
+        self.rejects(self.manifest([entry]), "promotion: unknown key(s) ['listed_days_elapsed']")
+        manifest = self.manifest([self.promote_entry()])
+        manifest["thresholds"]["INTAKE_MIN_LISTED_DAYS"] = 30
+        self.rejects(manifest, "thresholds: unknown key(s) ['INTAKE_MIN_LISTED_DAYS']")
+        entry = self.promote_entry()
+        entry["listed_since"] = "2026-10-02T00:00:00Z"
+        self.rejects(self.manifest([entry]), "listed_since must not be after as_of")
+        entry = self.promote_entry()
+        entry["listed_since"] = None
+        self.rejects(self.manifest([entry]), "listed_since")
         entry = self.promote_entry()
         entry["promotion"]["bench_provenance_source"] = "omlx_seeded"
         self.rejects(self.manifest([entry]), "bench_provenance_source must equal the row's provenance and not be omlx_seeded")
@@ -4147,7 +4159,7 @@ class IntakeDecisionManifestTest(unittest.TestCase):
         self.rejects(self.manifest([]), "no entry for admitted/promoted key(s) ['qwen3-8b']", previous_tiers=previous)
         self.rejects(self.manifest([self.admit_entry()]), "action must be promote_recommendable", previous_tiers=previous)
         previous[self.KEY] = 0  # absent → recommendable directly is refused
-        self.rejects(self.manifest([self.promote_entry()]), "reaches recommendable without a listed observation period", previous_tiers=previous)
+        self.rejects(self.manifest([self.promote_entry()]), "reaches recommendable without being listed in a prior release", previous_tiers=previous)
         other = catalog_release.candidate_admission_tiers(CANDIDATE_OBJ)
         self.rejects(self.manifest([self.admit_entry()]), "is not admitted or promoted by this release", previous_tiers=other)
 

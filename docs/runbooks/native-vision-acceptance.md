@@ -48,8 +48,14 @@ or join an unreleased candidate to the live coordinator.
    before sending inference requests. Supply the expected hostname from
    established operator records, not by accepting an arbitrary current host.
    Keep credentials in environment variables; never put them on the command
-   line or in evidence. `VISION_PROVIDER_TOKEN` and `VISION_BUYER_TOKEN` are
-   optional authenticated-path tokens.
+   line or in evidence. `VISION_PROVIDER_TOKEN`, `VISION_TEXT_ONLY_PROVIDER_TOKEN`
+   (defaults to the provider token) and `VISION_BUYER_TOKEN` are optional
+   authenticated-path tokens.
+
+   Also start a second process of the same candidate binary, with the same
+   isolation flags, serving only the text-only model on its own free loopback
+   port (not 8080, not the candidate's port). The harness verifies it like the
+   candidate (binary digest, executable, isolation flags, sole listener).
 
    ```bash
    python3 scripts/vision-acceptance.py \
@@ -60,14 +66,24 @@ or join an unreleased candidate to the live coordinator.
      --candidate-sha256 "$CANDIDATE_SHA256" \
      --source-commit "$CANDIDATE_SOURCE_COMMIT" \
      --unsupported-model "$LOADED_TEXT_ONLY_MODEL" \
+     --text-only-provider-url http://127.0.0.1:18019 \
+     --text-only-pid "$TEXT_ONLY_PID" \
      --output "$PRIVATE_EVIDENCE_DIRECTORY/native-vision-http.json"
    ```
 
    The harness generates tiny red/blue PNGs in memory, uses the same question
    for both, and checks color-dependent answers in streaming and non-streaming
    modes. It also checks image-only input, reversed multiple-image ordering,
-   mixed content, malformed/excessive media, endpoint/model rejection,
-   disconnect and repeated-request recovery. Results contain no images,
+   mixed content, malformed/excessive media, endpoint rejection, disconnect
+   and repeated-request recovery. On the candidate it sends an explicitly
+   unknown model name (`unloaded_model_name`), which passes only on a
+   structured 404 `model_not_found`; that proves model lookup, not media
+   rejection. On the text-only provider it sends mixed text+image and
+   image-only requests for `--unsupported-model` and requires a structured
+   4xx refusal that is not 404 or `model_not_found` (media rejected before
+   inference), then a text-only request that succeeds (suite
+   `text_only_provider`). Through the gateway (step 4),
+   `unsupported_model_mixed` must be a 400-class media rejection, never 404. Results contain no images,
    prompts, answers, tokens or host identifiers. Source commit is explicitly
    an operator assertion; the binary digest and process checks are measured.
    A failure returns nonzero and never becomes a qualification.
@@ -104,7 +120,8 @@ the pending items without claiming qualification or live acceptance.
 - [ ] Provider-local and isolated buyer streaming/non-streaming HTTP checks pass.
 - [ ] Resource, replacement, negative capacity-routing and receipt gates pass.
 - [ ] A separately loaded text-only model rejects mixed/image-only requests
-  before inference; the harness model-name mismatch check alone is insufficient.
+  before inference (harness suite `text_only_provider`); the unknown-model
+  name check alone is insufficient.
 - [ ] Existing tool-selection and text-only regressions remain green in CI.
 - [ ] Independent code, security and architecture audits satisfy repository gates.
 - [ ] Reviewed candidate release and any catalog/runtime changes use only
@@ -135,8 +152,9 @@ unchanged qualification observations and rebind release identity under the
 existing release rules rather than rerunning unchanged text benchmarks.
 
 The record names a provider, and this repository is public: keep it in a
-private file outside the repository, mode 0600, as a JSON (or YAML) mapping
-with exactly those 15 fields. Install it only through the ops entry point:
+private file outside the repository, owned by you, mode 0600, one link, not
+a symlink, in a directory only you or root can write, as a JSON (or YAML)
+mapping with exactly those 15 fields. Install it only through the ops entry point:
 
 ```bash
 export VISION_QUALIFICATION_FILE=<private file>
@@ -173,7 +191,11 @@ to log the on-disk files as its boot config.
 The task is done when the overlay holds exactly this entry and the running
 coordinator booted with it. Run again with the same record, it does nothing.
 If the overlay already holds the entry but the coordinator has not booted with
-it, it validates and restarts once. To replace a recorded entry, reconcile the
+it, it validates and restarts once. If any restart fails, it restores the
+overlay when it changed it, then makes one recovery restart that must answer
+`/healthz` and log the on-disk files as its boot config, and reports the
+outcome. An overlay entry that fails the record rules (for example a non-hex
+`model_hash` the coordinator itself would accept) is blocked, never done. To replace a recorded entry, reconcile the
 overlay first; the task never overwrites a different list.
 
 Provider-local support is enabled when the exact artifact loads. The wire

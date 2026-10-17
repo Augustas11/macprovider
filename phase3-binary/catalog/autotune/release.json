@@ -2,37 +2,37 @@
   "feeds": {
     "autotune-artifacts.json": {
       "bytes": 13113,
-      "sha256": "b6fb947d403e815c7074035a3cfb75b02b5d79cde2d395b3e9179b30323cffeb",
+      "sha256": "0731a791c95cf574657af60a82d7ccbf28600c951f276309e7e1244404b478b0",
       "signer_key_id": "streamvc-autotune-static-v4",
       "version": "published-2026-10-17-qwen2vl-listed-v1"
     },
     "autotune-candidates.json": {
-      "bytes": 16442,
-      "sha256": "8f12d1d69d60c09383c12a50140611600ca977bbe2a920eb38b454ba09497b7c",
+      "bytes": 16459,
+      "sha256": "217cc6fdffa152bc6865698183644a0d630dbe1eef3166584efd20402cd5c216",
       "signer_key_id": "streamvc-autotune-static-v4",
       "version": "published-2026-10-17-qwen2vl-listed-v1"
     },
     "continuous-batching-policy.json": {
       "bytes": 1524,
-      "sha256": "3bf82681a86731fabec076ecdf00611366a1b8817ff304b82a2df9d197f8fb03",
+      "sha256": "bd25c8777b7b3a84d3ed5db7d9ba40bea2c1016329232d6357ed78ee1f2d0464",
       "signer_key_id": "streamvc-autotune-static-v4",
       "version": "published-2026-10-17-qwen2vl-listed-v1"
     },
     "demand-rank.json": {
       "bytes": 1985,
-      "sha256": "9257ab7b580ed63c92cc23fea5ec02ba9b0b3269112c3bb3960f0baa7a804e93",
+      "sha256": "351725dac503c21609e920163213658f6f47bd5e8df9be92ad81174b8fadbf4e",
       "signer_key_id": "streamvc-autotune-static-v4",
       "version": "published-2026-10-17-qwen2vl-listed-v1"
     },
     "native-mtp-admission.json": {
       "bytes": 7843,
-      "sha256": "d56a6aa76a658b411c90daab813d9833c0bdbbdb6e73567644e5b8ff4a4f87ca",
+      "sha256": "5b1b5f6c071054f276dbae0b890fc3d12c6457f0edbbe98de5c8bf56387c002c",
       "signer_key_id": "streamvc-autotune-static-v4",
       "version": "published-2026-10-17-qwen2vl-listed-v1"
     },
     "rate-card.json": {
       "bytes": 3690,
-      "sha256": "22f040cbc2231637a8532cf3547060f74a6e651d856db6a66428e27a263a3d75",
+      "sha256": "49e8f1eb58bba6984490671b9e6993a3150fb8710c3d60de9275df683d4455bc",
       "signer_key_id": "streamvc-autotune-static-v4",
       "version": "bab7acfb9d1b40b7bbfc3da90bb40689ab8e7c7f6c53065c07143c1e5ed32bd4"
     },
@@ -43,7 +43,7 @@
       "version": "macprovider-tier2-model-catalog-2026-09-25-artifact-hash-correction-v1"
     }
   },
-  "generated_at": "2026-10-17T00:30:00Z",
+  "generated_at": "2026-10-17T01:10:00Z",
   "policy_version": "autotune-policy-v1",
   "release_id": "published-2026-10-17-qwen2vl-listed-v1",
   "schema_version": "macprovider.autotune-release.v1"

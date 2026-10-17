@@ -665,7 +665,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.22.24",
+      "version": "v0.22.25",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -2944,7 +2944,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1453",
-        "rationale": "SPEC-023 v0.10.4 sources the three intake signals (SPEC-017 v0.2.1 /v1/stats/intake, SPEC-047 v0.1.6 /admin/model-admission/intake, the signed demand-rank feed) and the generator validates the closed §16.8 intake-decision manifest, re-derives every recorded signal from the operator's privately retained sources, and re-evaluates §16.3 for every entry (BYOM v0.2 slice 5, #1453). Remains pending until the first listed-tier release is cut on the monthly cadence with a committed manifest and the signed JOURNEY-PROVIDER-PREBETA-ADMISSION evidence is promoted."
+        "rationale": "SPEC-023 v0.10.4 sources the three intake signals (SPEC-017 v0.2.1 /v1/stats/intake, SPEC-047 v0.1.6 /admin/model-admission/intake, the signed demand-rank feed) and the generator validates the closed §16.8 intake-decision manifest, re-derives every recorded signal from the operator's privately retained sources, and re-evaluates §16.3 for every entry (BYOM v0.2 slice 5, #1453). SPEC-023 v0.22.25 removes INTAKE_MIN_LISTED_DAYS and promotion.listed_days_elapsed from the closed manifest; promotion still requires the key to be listed in a prior release, a resolving rate row, demand-rank recommendable, non-omlx_seeded provenance and operator admission. Remains pending until the first listed-tier release is cut on the monthly cadence with a committed manifest and the signed JOURNEY-PROVIDER-PREBETA-ADMISSION evidence is promoted."
       }
     },
     {
