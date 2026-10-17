@@ -77,28 +77,168 @@ enum ProviderCLIVersion {
     }
 }
 
-enum GitHubLatestReleaseClient {
-    static let defaultURL = URL(string: "https://api.github.com/repos/Augustas11/macprovider/releases/latest")!
+/// Newest provider CLI release for the update badge (#2036). The production
+/// coordinator's unauthenticated `/healthz` `recommended_binary_version` (the
+/// SPEC-003-R004 release-mirror contract, the release every Mac without GitHub
+/// installs) comes first. The anonymous GitHub API (60 requests per hour per
+/// IP, shared by every Mac behind one NAT) is only the fallback, and a spent
+/// budget is reported as a deferral until its reset. Display only:
+/// `malibu-cli update` verifies every release byte under the release key.
+enum LatestReleaseClient {
+    enum Outcome: Equatable {
+        case version(String)
+        /// The anonymous GitHub API budget is spent until this time.
+        case deferred(until: Date)
+        case unavailable
+    }
 
-    static func fetchTag(
-        url: URL = defaultURL,
-        session: URLSession = .shared
-    ) async -> String? {
+    static let coordinatorHealthzURL = URL(string: "https://coordinator.malibu.tech/healthz")!
+    static let gitHubLatestURL = URL(string: "https://api.github.com/repos/Augustas11/macprovider/releases/latest")!
+    /// Fallback deferral when a spent budget names no reset time.
+    static let rateLimitDeferral: TimeInterval = 3600
+    /// Retry spacing after any other failure, so a failing source is never
+    /// polled on the two-second status cadence.
+    static let failureBackoff: TimeInterval = 600
+    static let maxResponseBytes = 256 * 1024
+
+    /// `/healthz` of the coordinator the provider config names (wss/https,
+    /// or ws/http to loopback, no credentials), else the production coordinator.
+    static func healthzURL(coordinatorURL: String?) -> URL {
+        guard let coordinatorURL,
+              var components = URLComponents(string: coordinatorURL),
+              components.user == nil,
+              components.password == nil,
+              let host = components.host?.lowercased(), !host.isEmpty
+        else {
+            return coordinatorHealthzURL
+        }
+        // Same rule as the CLI: TLS, or plaintext only to a loopback lab.
+        switch components.scheme?.lowercased() {
+        case "wss", "https":
+            components.scheme = "https"
+        case "ws", "http":
+            // A `where` clause binds only its last pattern, so test here.
+            guard ["localhost", "127.0.0.1", "::1"].contains(host) else { return coordinatorHealthzURL }
+            components.scheme = "http"
+        default:
+            return coordinatorHealthzURL
+        }
+        components.path = "/healthz"
+        components.query = nil
+        components.fragment = nil
+        return components.url ?? coordinatorHealthzURL
+    }
+
+    static func fetch(
+        coordinatorHealthzURL: URL = coordinatorHealthzURL,
+        gitHubLatestURL: URL = gitHubLatestURL,
+        session: URLSession = .shared,
+        now: Date = Date()
+    ) async -> Outcome {
+        if let advertised = await coordinatorAdvertisedVersion(url: coordinatorHealthzURL, session: session) {
+            return .version(advertised)
+        }
+        return await gitHubLatestVersion(url: gitHubLatestURL, session: session, now: now)
+    }
+
+    /// The body read up to `maxResponseBytes`; a larger body is refused at
+    /// the cap without being buffered.
+    static func boundedData(for request: URLRequest, session: URLSession) async throws -> (Data, URLResponse) {
+        let (bytes, response) = try await session.bytes(for: request)
+        var data = Data()
+        for try await byte in bytes {
+            guard data.count < maxResponseBytes else { throw URLError(.dataLengthExceedsMaximum) }
+            data.append(byte)
+        }
+        return (data, response)
+    }
+
+    static func coordinatorAdvertisedVersion(url: URL, session: URLSession) async -> String? {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 15
+        guard let (data, response) = try? await boundedData(for: request, session: session),
+              let http = response as? HTTPURLResponse,
+              (200..<300).contains(http.statusCode),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let advertised = object["recommended_binary_version"] as? String
+        else {
+            return nil
+        }
+        return ProviderCLIVersion.strictNormalize(advertised)
+    }
+
+    static func gitHubLatestVersion(url: URL, session: URLSession, now: Date) async -> Outcome {
         var request = URLRequest(url: url)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.timeoutInterval = 15
-        do {
-            let (data, response) = try await session.data(for: request)
-            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-                return nil
-            }
-            guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let tag = object["tag_name"] as? String else {
-                return nil
-            }
-            return ProviderCLIVersion.normalize(tag)
-        } catch {
+        guard let (data, response) = try? await boundedData(for: request, session: session),
+              let http = response as? HTTPURLResponse
+        else {
+            return .unavailable
+        }
+        if let reset = rateLimitReset(http, now: now) {
+            return .deferred(until: reset)
+        }
+        guard (200..<300).contains(http.statusCode),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let tag = object["tag_name"] as? String,
+              let version = ProviderCLIVersion.strictNormalize(tag)
+        else {
+            return .unavailable
+        }
+        return .version(version)
+    }
+
+    /// The reset time of a 403/429 whose `x-ratelimit-remaining` is 0,
+    /// clamped into (now, now + 1h] (GitHub's window) so a header can never
+    /// suppress the fetch for longer. Mirrors the CLI's GitHubAPIRateLimit.
+    static func rateLimitReset(_ response: HTTPURLResponse, now: Date) -> Date? {
+        guard response.statusCode == 403 || response.statusCode == 429,
+              response.value(forHTTPHeaderField: "x-ratelimit-remaining")?
+                  .trimmingCharacters(in: .whitespaces) == "0"
+        else {
             return nil
+        }
+        let ceiling = now.addingTimeInterval(rateLimitDeferral)
+        guard let reset = response.value(forHTTPHeaderField: "x-ratelimit-reset")
+            .flatMap({ TimeInterval($0.trimmingCharacters(in: .whitespaces)) })
+            .map({ Date(timeIntervalSince1970: $0) }),
+            reset > now
+        else {
+            return ceiling
+        }
+        return min(reset, ceiling)
+    }
+
+    static let retryAfterDefaultsKey = "LatestReleaseRetryAfter"
+
+    /// A retry time persisted by an earlier app process, clamped to the
+    /// longest deferral so a stored value can never block the badge longer.
+    static func persistedRetryAfter(now: Date, defaults: UserDefaults = .standard) -> Date? {
+        guard let stored = defaults.object(forKey: retryAfterDefaultsKey) as? Date, stored > now else {
+            return nil
+        }
+        return min(stored, now.addingTimeInterval(max(rateLimitDeferral, failureBackoff)))
+    }
+
+    static func persistRetryAfter(_ retryAfter: Date?, defaults: UserDefaults = .standard) {
+        if let retryAfter {
+            defaults.set(retryAfter, forKey: retryAfterDefaultsKey)
+        } else {
+            defaults.removeObject(forKey: retryAfterDefaultsKey)
+        }
+    }
+
+    /// When the next fetch may run after `outcome`; nil after a version,
+    /// whose freshness is governed by the caller's TTL instead.
+    static func retryAfter(_ outcome: Outcome, now: Date) -> Date? {
+        switch outcome {
+        case .version:
+            return nil
+        case .deferred(let until):
+            return max(until, now.addingTimeInterval(60))
+        case .unavailable:
+            return now.addingTimeInterval(failureBackoff)
         }
     }
 }

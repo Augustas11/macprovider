@@ -61,6 +61,11 @@ final class MalibuAgent: ObservableObject {
     private var localStatusMissStartedAt: Date?
     private var dashboardObservationFileURLForTest: URL?
     private var latestReleaseFetchedAt: Date?
+    /// No latest-release fetch before this time (#2036): set after a failure
+    /// or a spent GitHub API budget so the two-second status poll never
+    /// re-requests a failing source.
+    private var latestReleaseRetryAfter: Date?
+    private var latestReleaseRefreshInFlight = false
     private var cliUpdateTask: Task<Void, Never>?
     private var providerSoftwareRepairTask: Task<Void, Never>?
     private var suppressedProviderSoftwareRepairEvidenceLine: String?
@@ -916,7 +921,7 @@ final class MalibuAgent: ObservableObject {
             hardFailClosed: hardFailClosed,
             identityMismatch: hardFailClosed && identityMismatch
         )
-        await refreshLatestReleaseIfNeeded()
+        refreshLatestReleaseIfNeeded()
         refreshDiagnosticFindings()
     }
 
@@ -1129,15 +1134,36 @@ final class MalibuAgent: ObservableObject {
         }
     }
 
-    private func refreshLatestReleaseIfNeeded() async {
+    /// Off the status poll path: a slow or failing release source must never
+    /// delay the local status refresh that drives the provider state.
+    private func refreshLatestReleaseIfNeeded(now: Date = Date()) {
         if let fetchedAt = latestReleaseFetchedAt,
-           Date().timeIntervalSince(fetchedAt) < latestReleaseTTL,
+           now.timeIntervalSince(fetchedAt) < latestReleaseTTL,
            snapshot.latestReleaseVersion != nil {
             return
         }
-        if let tag = await GitHubLatestReleaseClient.fetchTag() {
-            latestReleaseFetchedAt = Date()
-            snapshot.latestReleaseVersion = tag
+        if latestReleaseRetryAfter == nil {
+            // A relaunch keeps honoring a deferral recorded before it.
+            latestReleaseRetryAfter = LatestReleaseClient.persistedRetryAfter(now: now)
+        }
+        if let retryAfter = latestReleaseRetryAfter, now < retryAfter {
+            return
+        }
+        guard !latestReleaseRefreshInFlight, !isShuttingDown else { return }
+        latestReleaseRefreshInFlight = true
+        let healthz = LatestReleaseClient.healthzURL(coordinatorURL: ProviderConfig.readCoordinatorURL())
+        Task { [weak self] in
+            let outcome = await LatestReleaseClient.fetch(coordinatorHealthzURL: healthz)
+            guard let self else { return }
+            let finishedAt = Date()
+            self.latestReleaseRefreshInFlight = false
+            guard !self.isShuttingDown else { return }
+            self.latestReleaseRetryAfter = LatestReleaseClient.retryAfter(outcome, now: finishedAt)
+            LatestReleaseClient.persistRetryAfter(self.latestReleaseRetryAfter)
+            if case .version(let version) = outcome {
+                self.latestReleaseFetchedAt = finishedAt
+                self.snapshot.latestReleaseVersion = version
+            }
         }
     }
 

@@ -2983,6 +2983,68 @@ final class AutoUpdateTests: XCTestCase {
         )
     }
 
+    func testRateLimitedDiscoveryIsASkippedDeferralWithoutCooldown() async throws {
+        // #2036: a spent anonymous GitHub budget defers the periodic signed
+        // discovery; it is neither a failure nor a cooldown.
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        try store.ensureTrustedRoot()
+
+        RateLimitedGitHubMockURLProtocol.requestCount = 0
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RateLimitedGitHubMockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+
+        await AutoUpdateEventStore.shared.clear()
+        SessionAutoupdateGate.shared.resetForTest()
+        defer { SessionAutoupdateGate.shared.resetForTest() }
+
+        let status = ProviderStatus(
+            modelID: "mlx-community/Test-Model",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+        )
+        let updater = AutoUpdater(
+            config: .defaults(configPath: fixture.url.appendingPathComponent("config.yaml").path),
+            currentVersion: "1.6.0",
+            providerStatus: status,
+            releasesAPIURL: "https://api.github.com/repos/Augustas11/macprovider/releases/latest",
+            markerStore: store,
+            session: session,
+            trustProvider: {
+                AutoUpdateTrustState(
+                    v2Accepted: true,
+                    tier: "pinned",
+                    encryptedLegValid: true,
+                    attestationRequired: false,
+                    attestationSatisfied: true,
+                    tokenConfigured: true,
+                    tokenValidated: true,
+                    bearerlessDuplicate: false,
+                    connected: true
+                )
+            },
+            drain: { _ in true },
+            sendReady: {},
+            restartLaunchd: {},
+            fenceReloadJobs: {},
+            currentBinaryURL: { nil },
+            rollbackObserverAvailable: { true },
+            launchdProviderAvailable: { true },
+            headlessOperatorManagedTopology: { false },
+            localStatusProbe: { _ in Self.inactiveContinuousBatchingLocalStatus() }
+        )
+
+        await updater.handleSignedReleaseDiscovery()
+
+        XCTAssertEqual(RateLimitedGitHubMockURLProtocol.requestCount, 1)
+        let event = await AutoUpdateEventStore.shared.lastWireObject()
+        XCTAssertEqual(event?["outcome"] as? String, AutoUpdateOutcome.skipped.rawValue)
+        XCTAssertEqual(event?["target_version"] as? String, "<discovery>")
+        XCTAssertTrue((event?["reason"] as? String)?.hasPrefix("github_rate_limited_deferred_until_") ?? false)
+        XCTAssertNil(store.activeCooldown(target: "<discovery>"))
+    }
+
     func testTrustLossRollbackAndCleanupRemainUnderMutationLock() throws {
         let fixture = try TempHome()
         let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
@@ -5262,6 +5324,32 @@ private final class AutoUpdateLiveFlag: @unchecked Sendable {
 
 /// Fails every request but records that one was attempted, so tests can
 /// assert a cooldown-skip path never reaches the network.
+private final class RateLimitedGitHubMockURLProtocol: URLProtocol {
+    nonisolated(unsafe) static var requestCount = 0
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        Self.requestCount += 1
+        guard let url = request.url else { return }
+        client?.urlProtocol(
+            self,
+            didReceive: HTTPURLResponse(
+                url: url,
+                statusCode: 403,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["x-ratelimit-remaining": "0"]
+            )!,
+            cacheStoragePolicy: .notAllowed
+        )
+        client?.urlProtocol(self, didLoad: Data("{}".utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
 private final class DiscoveryCooldownGuardMockURLProtocol: URLProtocol {
     nonisolated(unsafe) static var requestCount = 0
 

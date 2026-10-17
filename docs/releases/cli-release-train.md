@@ -62,6 +62,14 @@ Verified 2026-10-10 against public release metadata, the release train
 | Installer | `get.malibu.tech/install.sh` matches the v1.8.232 `dist/install.sh` (train step `install_sh_vs_release: parity`). |
 | Release mirror | `download.malibu.tech/releases/v1.8.232/` byte-identical to GitHub (33 assets verified); `latest.json` promoted from `v1.8.224` to `v1.8.232` on 2026-10-10 with `publish-release-mirror.sh --promote-latest`. |
 
+## Next CLI release — net changes vs 1.8.250 (tracked 2026-10-17)
+
+Live fleet target: **1.8.250**. Nothing is staged yet; the cut waits until every open PR is merged.
+
+| PR | Issue | Provider-side change | Status |
+|---|---|---|---|
+| #2034 | #2029 | Artifact hashing, verification, import and GGUF digest loops release each 1 MiB chunk (per-iteration autorelease pool); serve-load peak drops from ~2.1x to ~1.01x of tensor bytes | merged |
+
 ## Next CLI release — net changes vs 1.8.248 (tracked 2026-10-16)
 
 Live fleet target: **1.8.248**. Staged: `binaryVersion` **1.8.250** (v1.8.249 is the

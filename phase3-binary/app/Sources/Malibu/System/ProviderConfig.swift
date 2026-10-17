@@ -102,6 +102,11 @@ enum ProviderConfig {
         return parseTopLevelValue(named: "provider_token", from: contents) != nil
     }
 
+    static func readCoordinatorURL(paths: ProviderPaths = .current) -> String? {
+        guard let contents = readTrustedConfigContents(paths: paths) else { return nil }
+        return parseTopLevelValue(named: "coordinator_url", from: contents)
+    }
+
     static func readModel(paths: ProviderPaths = .current) -> String? {
         guard let contents = readTrustedConfigContents(paths: paths) else { return nil }
         return parseTopLevelValue(named: "model", from: contents)

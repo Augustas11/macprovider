@@ -4296,7 +4296,11 @@ struct StatusCommand: AsyncParsableCommand {
             try Self.writeJSON(status)
             return
         }
-        let latest = try? await SelfUpdate(currentVersion: CoordinatorClient.binaryVersion, releasesAPIURL: nil).latestVersionCached()
+        let latest = try? await SelfUpdate(
+            currentVersion: CoordinatorClient.binaryVersion,
+            releasesAPIURL: nil,
+            coordinatorURL: resolved.coordinatorURL
+        ).latestVersionCached()
         let staleSince = await Self.staleRecommendationSince(providerID: resolved.providerID)
         print(LocalStatusFormatter.format(
             status,

@@ -1,6 +1,6 @@
 # SPEC-020 - Provider autoupdate
 
-Version: v0.1.25
+Version: v0.1.26
 Status: Normative; coordinator-independent recovery is reconciled and
 implementation remains nonconformant under issue #610. The production path ran
 the 2026-07-10 incident-recovery
@@ -453,6 +453,24 @@ coordinator's `/healthz` `recommended_binary_version` (the SPEC-003-R004
 contract) over the coordinator's own TLS endpoint, install it only when it is
 newer than the installed release, apply the persisted signed policy floor and revocations,
 and install that tag through the path above.
+A 403 or 429 from api.github.com carrying `x-ratelimit-remaining: 0` (the
+anonymous budget of 60 requests per hour per source IP, shared by every Mac
+behind one NAT; v0.1.26, #2036) is such a transport failure. The provider MUST
+NOT send another api.github.com request from that process before the
+response's `x-ratelimit-reset` (one hour when absent). `update --check` that
+takes the coordinator-advertised target MUST report it as available only after
+that tag's `checksums.txt` verifies under the pinned release key, read from the
+release mirror and otherwise from the GitHub release download; a signature that
+does not verify fails closed and is not retried on the other host. When no
+coordinator advertisement is available either, `update --check` MUST report
+"update check deferred until <reset>" and succeed, and a mutating update MUST
+fail with that deferral. The periodic signed discovery of SPEC-020-R001 MUST
+record such a deferral as a skipped `github_rate_limited_deferred_until_<reset>`
+event, not a failure or cooldown. `malibu-cli status` MUST read the configured
+coordinator's advertisement before GitHub's latest release and cache a spent
+budget until its reset. Signed discovery stays first for manual and periodic
+update: the signed monotonic head, not the mirror's unsigned
+`releases/latest.json`, is the only signed statement of the newest release.
 
 R-1.5. The provider MUST attempt at most one autoupdate per coordinator session
 per target version. A reconnect that repeats the same target version MUST honor
@@ -1704,6 +1722,11 @@ Deferred to v0.3.0 or later:
 
 ## Change log
 
+- v0.1.26 (2026-10-17): SPEC-020-R006 treats a spent anonymous GitHub API
+  budget (403/429 with `x-ratelimit-remaining: 0`) as a transport failure that
+  is never re-requested before its reset, verifies the coordinator-advertised
+  check target's `checksums.txt.sig`, reports a check with no other source as
+  deferred until the reset, and orders `status` coordinator-first (#2036).
 - v0.1.25 (2026-10-11): R-4.14 adds a process-bound, 60-second operator-resume
   grace sidecar published before clearing pause. It uses the existing lease
   format independently of updater leases; expiry restores wedge recovery.
