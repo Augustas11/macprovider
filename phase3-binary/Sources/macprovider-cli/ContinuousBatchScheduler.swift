@@ -3050,6 +3050,12 @@ actor ContinuousBatchScheduler {
                 try? FileHandle.standardError.write(contentsOf: Data(
                     "event=continuous_batch_pump_idle_with_rows active_prompt=\(activePrompt.count) active_decode=\(activeDecode.count) waiting=\(waiting.count) native_rows=\(nativeRows) backend_cancellation_pending=\(backendCancellationPending)\n".utf8
                 ))
+            } else if nativeMTPReservedRoundBytes > 0 || !nativeMTPRoundByteReservations.isEmpty {
+                // No row is active, so no native round can hold bytes: a
+                // reservation leaked and would refuse later rounds.
+                try? FileHandle.standardError.write(contentsOf: Data(
+                    "event=native_mtp_round_bytes_outstanding_when_idle reserved_bytes=\(nativeMTPReservedRoundBytes) reservations=\(nativeMTPRoundByteReservations.count)\n".utf8
+                ))
             }
         }
         // An exactness-probe cohort decodes only once every row of it is in
@@ -3352,9 +3358,20 @@ actor ContinuousBatchScheduler {
             throw ContinuousBatchSchedulerError.requestFailed("continuous_batching_native_mtp_window_bytes_unavailable")
         }
         let (nextReserved, overflow) = nativeMTPReservedRoundBytes.addingReportingOverflow(bytes)
+        let sample = configuration.nativeMTPRoundSystemMemoryProbe.sample()
         guard !overflow,
               nextReserved <= configuration.nativeMTPRoundByteCapacity,
-              nativeMTPSystemMemoryHeadroomAdmits(reservedAfter: nextReserved) else {
+              Self.nativeMTPSystemMemoryHeadroomAdmits(reservedAfter: nextReserved, sample: sample) else {
+            // SPEC-048 R012: say which bound refused, with every number.
+            let floor = sample.map { max(1, $0.physicalBytes / 10) }
+            try? FileHandle.standardError.write(contentsOf: Data(
+                ("event=native_mtp_round_reservation_refused requested_bytes=\(bytes) reserved_before_bytes=\(nativeMTPReservedRoundBytes) "
+                    + "outstanding_reservations=\(nativeMTPRoundByteReservations.count) capacity_bytes=\(configuration.nativeMTPRoundByteCapacity) "
+                    + "available_bytes=\(sample.map { String($0.availableBytes) } ?? "unavailable") "
+                    + "physical_bytes=\(sample.map { String($0.physicalBytes) } ?? "unavailable") "
+                    + "floor_bytes=\(floor.map(String.init) ?? "unavailable") "
+                    + "reason=\(overflow ? "overflow" : nextReserved > configuration.nativeMTPRoundByteCapacity ? "capacity" : "system_headroom")\n").utf8
+            ))
             throw ContinuousBatchSchedulerError.requestFailed("continuous_batching_native_mtp_round_memory_exhausted")
         }
         let id = UUID()
@@ -3363,9 +3380,14 @@ actor ContinuousBatchScheduler {
         return NativeMTPRoundByteReservation(id: id, bytes: bytes)
     }
 
-    private func nativeMTPSystemMemoryHeadroomAdmits(reservedAfter: Int) -> Bool {
+    /// SPEC-048 R012: the round's reservation fits above the 10% physical
+    /// free-memory floor.
+    static func nativeMTPSystemMemoryHeadroomAdmits(
+        reservedAfter: Int,
+        sample: NativeMTPRoundSystemMemorySample?
+    ) -> Bool {
         guard reservedAfter > 0,
-              let sample = configuration.nativeMTPRoundSystemMemoryProbe.sample(),
+              let sample,
               sample.availableBytes > 0,
               sample.physicalBytes > 0 else {
             return false

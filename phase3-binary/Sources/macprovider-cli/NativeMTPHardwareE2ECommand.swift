@@ -57,6 +57,29 @@ struct NativeMTPHardwareE2EFamily: Equatable, Sendable {
             : NativeMTPAdmissionSidecar.greedyRequestFeatureProfile
     }
 
+    /// The lab tuple's `complete_window_bytes_by_depth` (SPEC-048 R012): the
+    /// bytes one row's native round stages, so the scheduler's round
+    /// reservation and its 10% free-memory floor check run on honest
+    /// numbers. glm5_next, as the provider stages it: a copy of every sparse
+    /// layer's latent and pooled keys (11 target layers plus the next-N
+    /// layer, 1,088 bytes per context token each, SPEC-048 MTP-12 sizing)
+    /// and one KDA recurrent plus convolution state set (34 layers x
+    /// 4,341,760 bytes) per kept prefix of a depth-d verify (d + 1 sets).
+    /// Qwen3.5 keeps the placeholder its harness always signed.
+    func completeWindowBytesByDepth(maxContextTokens: Int, maxDepth: Int = 1) -> [Int] {
+        guard self == .glm5Next else { return [1_048_576, 2_097_152] }
+        let context = max(1, maxContextTokens)
+        let latent = Self.glm5NextStagedLatentLayers * Self.glm5NextLatentBytesPerToken * context
+        return (0 ... max(0, maxDepth)).map { depth in
+            latent + (depth + 1) * Self.glm5NextKDALayers * Self.glm5NextKDAStateBytes
+        }
+    }
+
+    static let glm5NextStagedLatentLayers = 12
+    static let glm5NextLatentBytesPerToken = 1_088
+    static let glm5NextKDALayers = 34
+    static let glm5NextKDAStateBytes = 64 * 128 * 128 * 4 + 3 * 24_576 * 2
+
     /// Whether the tuple admits sampled rows to native MTP.
     var admitsSampledRows: Bool { requestFeatureProfile == NativeMTPAdmissionSidecar.sampledRequestFeatureProfile }
 
@@ -283,14 +306,21 @@ final class NativeMTPHardwareE2ERunner {
     /// Applies the family's MLX command-buffer budget for this process, as
     /// `serve` does. Must run before any MLX device use; returns the MB set.
     @discardableResult
-    static func applyServeProcessSetup(rootPath: String) -> Int? {
+    static func applyServeProcessSetup(rootPath: String, mlxCacheLimitMB: Int? = 2048) -> Int? {
         let root = URL(fileURLWithPath: (rootPath as NSString).expandingTildeInPath, isDirectory: true)
-        guard let family = NativeMTPHardwareE2EFamily.detect(configJSONData: try? Data(
+        let family = NativeMTPHardwareE2EFamily.detect(configJSONData: try? Data(
             contentsOf: root.appendingPathComponent("target/config.json")
-        )) else { return nil }
-        let mb = ModelRuntime.applyMLXCommandBufferBudget(modelFamily: family.modelFamily)
-        if let mb {
+        ))
+        // The budget first: MLX reads it when it creates its device.
+        let mb = family.flatMap { ModelRuntime.applyMLXCommandBufferBudget(modelFamily: $0.modelFamily) }
+        if let mb, let family {
             FileHandle.standardError.write(Data("native-mtp-e2e: mlx_max_mb_per_buffer=\(mb) family=\(family.modelFamily)\n".utf8))
+        }
+        // The lab and live serve configs bound MLX's buffer cache
+        // (`mlx_cache_limit_mb: 2048`); unbounded, freed round buffers stay
+        // cached and take the memory the native round's free-memory floor reads.
+        if let applied = ModelRuntime.applyMLXCacheLimit(megabytes: mlxCacheLimitMB) {
+            FileHandle.standardError.write(Data("native-mtp-e2e: mlx_cache_limit_bytes=\(applied)\n".utf8))
         }
         return mb
     }
@@ -373,12 +403,20 @@ final class NativeMTPHardwareE2ERunner {
             stop: ["STOP"]
         )
         let handle = try await nativeRuntime.acquireRequestHandle(streamingStopRequest)
-        defer { Task { await nativeRuntime.unregisterInFlight(handle.registrationID) } }
         let streamRecorder = NativeMTPHardwareStreamRecorder()
         let admissionsBeforeStreaming = admissionRecorder.snapshot().count
-        _ = try await nativeRuntime.stream(streamingStopRequest, with: handle) { chunk in
-            streamRecorder.append(chunk)
+        // Unregistered as soon as the stream ends: a registration held to the
+        // end of `run()` counts as an active row and pushed the throughput
+        // phase's last row over the native active-row bound (window A2).
+        do {
+            _ = try await nativeRuntime.stream(streamingStopRequest, with: handle) { chunk in
+                streamRecorder.append(chunk)
+            }
+        } catch {
+            await nativeRuntime.unregisterInFlight(handle.registrationID)
+            throw error
         }
+        await nativeRuntime.unregisterInFlight(handle.registrationID)
         try require(!streamRecorder.snapshot().isEmpty, "stream produced no chunks")
         let admissionsAfterStreaming = admissionRecorder.snapshot()
         try require(
@@ -431,7 +469,8 @@ final class NativeMTPHardwareE2ERunner {
         let signedAdmission = try makeAndValidateAdmission(
             targetIdentity: targetIdentity,
             mtpIdentity: mtpIdentity,
-            machine: machine
+            machine: machine,
+            maxContextTokens: maxContextTokens
         )
         let admission = signedAdmission.capability
         try require(admission.targetArtifactSHA256 == targetIdentity.digest, "target digest admission mismatch")
@@ -902,7 +941,8 @@ final class NativeMTPHardwareE2ERunner {
     private func makeAndValidateAdmission(
         targetIdentity: MLXSnapshotIdentity,
         mtpIdentity: MLXSnapshotIdentity,
-        machine: MachineFingerprint
+        machine: MachineFingerprint,
+        maxContextTokens: Int
     ) throws -> NativeMTPHardwareSignedAdmission {
         let artifactObservation = try observeArtifacts(
             targetDirectory: root.appendingPathComponent("target", isDirectory: true)
@@ -941,6 +981,7 @@ final class NativeMTPHardwareE2ERunner {
             options: [.atomic]
         )
         let sidecarData = try releaseEnvelopeData(
+            maxContextTokens: maxContextTokens,
             machine: machine,
             targetSHA: targetIdentity.digest,
             tokenizerSHA: tokenizerSHA,
@@ -1053,6 +1094,7 @@ final class NativeMTPHardwareE2ERunner {
     }
 
     private func releaseEnvelopeData(
+        maxContextTokens: Int,
         machine: MachineFingerprint,
         targetSHA: String,
         tokenizerSHA: String,
@@ -1075,7 +1117,7 @@ final class NativeMTPHardwareE2ERunner {
             "mtp_state_class": "hybrid_stageable_rewindable",
             "mtp_head_count": 1,
             "proposal_depth": 1,
-            "complete_window_bytes_by_depth": [1_048_576, 2_097_152],
+            "complete_window_bytes_by_depth": family.completeWindowBytesByDepth(maxContextTokens: maxContextTokens),
             "runtime_revision": Self.upstreamRevision,
             "provider_revision": Self.providerRevision,
             "source_commit": Self.providerRevision,

@@ -59,6 +59,32 @@ final class NativeMTPHardwareE2EGLMTests: XCTestCase {
         ))
     }
 
+    /// SPEC-048 R012 round reservation for glm5_next at the 4-slot design
+    /// point: 4 rows x 2 verify columns (depth 1) at 64k context. Each row
+    /// stages its 12 sparse latents (1,088 bytes per token) and two KDA state
+    /// sets; the scheduler admits the four rounds only when available memory
+    /// covers them above the 10% physical floor, never below it.
+    func testGLMRoundReservationAtFourRowsTwoColumns64k() {
+        let window = NativeMTPHardwareE2EFamily.glm5Next.completeWindowBytesByDepth(maxContextTokens: 65_536)
+        XCTAssertEqual(window, [1_003_257_856, 1_150_877_696])
+        XCTAssertEqual(window[1] - window[0], 147_619_840, "one KDA state set: 34 x 4,341,760")
+        let reserved = 4 * window[1]
+        XCTAssertEqual(reserved, 4_603_510_784)
+        let physical = 274_877_906_944 // 256 GiB
+        let floor = physical / 10
+        func admits(_ available: Int) -> Bool {
+            ContinuousBatchScheduler.nativeMTPSystemMemoryHeadroomAdmits(
+                reservedAfter: reserved,
+                sample: NativeMTPRoundSystemMemorySample(availableBytes: available, physicalBytes: physical)
+            )
+        }
+        XCTAssertTrue(admits(reserved + floor))
+        XCTAssertFalse(admits(reserved + floor - 1))
+        XCTAssertFalse(ContinuousBatchScheduler.nativeMTPSystemMemoryHeadroomAdmits(reservedAfter: reserved, sample: nil))
+        // Qwen3.5's harness keeps its placeholder window.
+        XCTAssertEqual(NativeMTPHardwareE2EFamily.qwen35.completeWindowBytesByDepth(maxContextTokens: 65_536), [1_048_576, 2_097_152])
+    }
+
     func testThroughputPhaseIsOptInAndBounded() throws {
         XCTAssertEqual(try NativeMTPHardwareE2ECommand.parse([]).throughputTokens, 0)
         XCTAssertEqual(
