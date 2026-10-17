@@ -17,6 +17,10 @@ BINARY_PATH="${MACPROVIDER_BINARY_PATH:-$HOME/macprovider/macprovider-cli}"
 LIFECYCLE_LEASE_PATH="${MACPROVIDER_LIFECYCLE_LEASE_PATH:-$HOME/Library/Application Support/macprovider/lifecycle/lease.json}"
 LIFECYCLE_LEASE_OWNER_UID="${MACPROVIDER_LIFECYCLE_LEASE_OWNER_UID:-$(id -u)}"
 OPERATOR_RESUME_LEASE_PATH="${MACPROVIDER_OPERATOR_RESUME_LEASE_PATH:-$(dirname "$LIFECYCLE_LEASE_PATH")/operator-resume-lease.json}"
+# SPEC-020 R-4.14: the durable operator-pause fence the serve process persists
+# beside its leases. Read without the HTTP surface so a lost or unprovable
+# listener can never turn a paused provider into a wedge restart.
+LIFECYCLE_STATE_PATH="${MACPROVIDER_LIFECYCLE_STATE_PATH:-$(dirname "$LIFECYCLE_LEASE_PATH")/state-v1.json}"
 COORDINATOR_HOST="${MACPROVIDER_COORDINATOR_HOST:-coordinator.malibu.tech}"
 COORDINATOR_PORT="${MACPROVIDER_COORDINATOR_PORT:-443}"
 LOG_DIR="${MACPROVIDER_LOG_DIR:-$HOME/Library/Logs/macprovider}"
@@ -57,6 +61,17 @@ BEACON_LAST_DEFERRAL_FILE="$STATE_DIR/beacon_last_deferral"
 KICK_GRACE_SECONDS="${MACPROVIDER_WATCHDOG_KICK_GRACE_SECONDS:-300}"
 case "$KICK_GRACE_SECONDS" in
   ''|*[!0-9]*) KICK_GRACE_SECONDS=300 ;;
+esac
+# Listener probe bounds (SPEC-020 R-4.14): a hung or failing lsof is
+# indeterminate, never "listener lost"; a clean not-owned answer must repeat
+# after the retry delay before it can recommend a restart.
+LISTENER_PROBE_TIMEOUT_SECONDS="${MACPROVIDER_WATCHDOG_LISTENER_PROBE_TIMEOUT_SECONDS:-10}"
+case "$LISTENER_PROBE_TIMEOUT_SECONDS" in
+  ''|*[!0-9]*|0) LISTENER_PROBE_TIMEOUT_SECONDS=10 ;;
+esac
+LISTENER_RETRY_DELAY_SECONDS="${MACPROVIDER_WATCHDOG_LISTENER_RETRY_DELAY_SECONDS:-2}"
+case "$LISTENER_RETRY_DELAY_SECONDS" in
+  ''|*[!0-9]*) LISTENER_RETRY_DELAY_SECONDS=2 ;;
 esac
 if [ "$KICK_GRACE_SECONDS" -lt 60 ] || [ "$KICK_GRACE_SECONDS" -gt 3600 ]; then
   KICK_GRACE_SECONDS=300
@@ -181,13 +196,74 @@ EOF
   printf "%s" "$candidate"
 }
 
-local_health_listener_owned_by_provider() {
-  provider_pid="$1"
-  port="$2"
-  if ! command -v lsof >/dev/null 2>&1; then
-    return 1
+# Returns 0 when the provider PID owns the listener, 1 when lsof answered
+# cleanly that it does not (no listener, or only other PIDs), and 2 when the
+# probe is indeterminate (lsof missing, failed, timed out, or printed noise).
+local_health_listener_probe() {
+  probe_pid="$1"
+  probe_port="$2"
+  command -v lsof >/dev/null 2>&1 || return 2
+  if command -v perl >/dev/null 2>&1; then
+    set -- perl -e 'alarm shift @ARGV; exec @ARGV or exit 127' "$LISTENER_PROBE_TIMEOUT_SECONDS" \
+      lsof -nP -iTCP:"$probe_port" -sTCP:LISTEN -t
+  else
+    set -- lsof -nP -iTCP:"$probe_port" -sTCP:LISTEN -t
   fi
-  lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | awk -v pid="$provider_pid" '$1 == pid { found = 1 } END { exit found ? 0 : 1 }'
+  probe_rc=0
+  probe_out="$("$@" 2>&1)" || probe_rc=$?
+  case "$probe_rc" in
+    0|1) : ;;
+    *) return 2 ;;
+  esac
+  printf "%s\n" "$probe_out" | awk -v pid="$probe_pid" '
+    NF == 0 { next }
+    $0 !~ /^[0-9]+$/ { noise = 1; next }
+    $1 == pid { found = 1 }
+    END { if (found) exit 0; if (noise) exit 2; exit 1 }
+  '
+}
+
+local_health_listener_owned_by_provider() {
+  local_health_listener_probe "$1" "$2"
+}
+
+# Exit 0 only when the persisted lifecycle record (owned by the lease owner
+# UID, regular file, not a symlink) carries the operator-pause fence. Missing
+# or unreadable records are "not paused" so unpaused wedge recovery remains.
+operator_pause_recorded() {
+  "${MACPROVIDER_PYTHON3:-python3}" - "$LIFECYCLE_STATE_PATH" "$LIFECYCLE_LEASE_OWNER_UID" <<'PY' 2>/dev/null
+import json
+import os
+import stat
+import sys
+
+path, owner_uid = sys.argv[1], sys.argv[2]
+try:
+    owner_uid = int(owner_uid)
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+except (OSError, ValueError):
+    sys.exit(1)
+try:
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != owner_uid or info.st_size > 1048576:
+        sys.exit(1)
+    chunks = []
+    while True:
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            break
+        chunks.append(chunk)
+finally:
+    os.close(fd)
+try:
+    record = json.loads(b"".join(chunks))
+except Exception:
+    sys.exit(1)
+if not isinstance(record, dict):
+    sys.exit(1)
+paused = record.get("operator_paused") is True or record.get("state") == "paused_by_operator"
+sys.exit(0 if paused else 1)
+PY
 }
 
 local_provider_health_ok() {
@@ -207,9 +283,24 @@ local_status_restart_recommended() {
   case "$port" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  if ! local_health_listener_owned_by_provider "$provider_pid" "$port"; then
-    return 0
+  if operator_pause_recorded; then
+    log "provider process $provider_pid is operator-paused per the persisted lifecycle record; watchdog never restarts a paused provider"
+    return 1
   fi
+  listener_rc=0
+  local_health_listener_probe "$provider_pid" "$port" || listener_rc=$?
+  if [ "$listener_rc" -eq 1 ]; then
+    sleep "$LISTENER_RETRY_DELAY_SECONDS"
+    listener_rc=0
+    local_health_listener_probe "$provider_pid" "$port" || listener_rc=$?
+  fi
+  case "$listener_rc" in
+    1) return 0 ;;
+    2)
+      log "provider process $provider_pid listener ownership on port $port is indeterminate (probe failed or timed out); not treating it as lost"
+      return 1
+      ;;
+  esac
   curl_bin="${MACPROVIDER_CURL:-/usr/bin/curl}"
   status_body="$("$curl_bin" -fsS --max-time 2 "http://127.0.0.1:${port}/v1/status" 2>/dev/null)" || return 1
   STATUS_BODY="$status_body" "${MACPROVIDER_PYTHON3:-python3}" <<'PY'
@@ -806,6 +897,23 @@ run_tick() {
     fi
     if ! local_status_restart_recommended "$provider_pid"; then
       log "provider process $provider_pid failed local /v1/health after arming, but /v1/status does not recommend watchdog restart; leaving process untouched"
+      return 0
+    fi
+    # Re-check every veto after the restart verdict. An operator resume
+    # publishes its grace lease before clearing the pause, so a status read
+    # that already sees "unpaused, unavailable" is always preceded by a
+    # lease this check can see; checking leases only before /v1/status
+    # left that window open (SPEC-020 R-4.14).
+    if valid_lifecycle_lease_record startup "$provider_pid" "$OPERATOR_RESUME_LEASE_PATH" 60000; then
+      log "provider process $provider_pid gained a validated operator-resume lease during restart evaluation; watchdog grants bounded grace"
+      return 0
+    fi
+    if valid_lifecycle_lease "$provider_pid"; then
+      log "provider process $provider_pid gained a validated startup/maintenance lease during restart evaluation; watchdog grants bounded grace"
+      return 0
+    fi
+    if operator_pause_recorded; then
+      log "provider process $provider_pid is operator-paused per the persisted lifecycle record; watchdog never restarts a paused provider"
       return 0
     fi
     log "provider process $provider_pid failed local /v1/health after arming; requesting launchd restart for $LABEL"

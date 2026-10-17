@@ -1,6 +1,6 @@
 # SPEC-020 - Provider autoupdate
 
-Version: v0.1.27
+Version: v0.1.28
 Status: Normative; coordinator-independent recovery is reconciled and
 implementation remains nonconformant under issue #610. The production path ran
 the 2026-07-10 incident-recovery
@@ -1123,7 +1123,18 @@ MUST NOT replace an updater/startup/maintenance lease. The watchdog MUST validat
 its owner UID, exact supervised PID, process start, executable, boot session,
 wall and monotonic clocks, and a maximum duration of 60 seconds before granting
 grace, including while the listener is absent. After either clock expires,
-normal wedge-restart eligibility resumes. An already-unpaused resume command
+normal wedge-restart eligibility resumes. The operator-pause and lease vetoes
+MUST hold on every restart-recommending path, including a lost or unprovable
+listener, and MUST be re-evaluated after the restart-worthy verdict and before
+the kickstart: a resume that publishes grace after the watchdog's first lease
+check MUST still suppress the restart. The pause veto MUST read the durable
+pause fence from the persisted lifecycle record (`operator_paused` or state
+`paused_by_operator` in `state-v1.json` beside the leases, owned by the lease
+owner UID, a regular non-symlink file), not only from `/v1/status`; a missing or
+unreadable record is not a pause. Listener ownership is tri-state: a probe that
+fails, times out, or prints anything other than PIDs is indeterminate and MUST
+NOT recommend a restart; a clean not-owned answer MUST repeat on one retry
+before it may. An already-unpaused resume command
 MUST NOT renew grace; a new pause/resume cycle may create a fresh window. A
 failure to publish grace MUST leave the provider paused and reject resume.
 Consuming the SPEC-025 §5.2
@@ -1733,6 +1744,12 @@ Deferred to v0.3.0 or later:
 
 ## Change log
 
+- v0.1.28 (2026-10-17): R-4.14 applies the operator-pause and lease vetoes
+  to every restart-recommending path, including a lost or unprovable listener,
+  and re-checks them after the restart verdict, closing the window where a
+  resume landing mid-evaluation was kickstarted. The pause veto reads the
+  persisted lifecycle record. A failed or timed-out listener probe is
+  indeterminate, and a not-owned answer must repeat once before it counts.
 - v0.1.27 (2026-10-17): SPEC-020-R006 streams every release download and
   release-discovery response under a hard byte cap, cancels an oversized
   transfer without keeping a file, and follows redirects only to release
