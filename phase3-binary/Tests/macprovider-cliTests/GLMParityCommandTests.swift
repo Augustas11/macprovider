@@ -1,7 +1,36 @@
 import XCTest
 @testable import macprovider_cli
 
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+
 final class GLMParityCommandTests: XCTestCase {
+    /// Security r1: `glm-parity` is a lab harness. It is registered only
+    /// through `labSubcommands()` and its source compiles only under
+    /// DEBUG / MACPROVIDER_LAB_HARNESS, so a plain release binary has neither
+    /// the command nor its registration.
+    func testParityCommandIsLabOnly() throws {
+        let names = MacProviderCLI.configuration.subcommands.map { $0.configuration.commandName }
+        XCTAssertEqual(names.filter { $0 == "glm-parity" }.count, 1)
+        XCTAssertFalse(GLMParityCommand.configuration.shouldDisplay)
+
+        let sources = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/macprovider-cli")
+        let cli = try String(contentsOf: sources.appendingPathComponent("MacProviderCLI.swift"), encoding: .utf8)
+        let labGate = try XCTUnwrap(cli.range(of: "private static func labSubcommands()"))
+        let labBody = cli[labGate.lowerBound...]
+        let labEnd = try XCTUnwrap(labBody.range(of: "#else"))
+        XCTAssertEqual(cli.components(separatedBy: "GLMParityCommand.self").count - 1, 1)
+        XCTAssertTrue(labBody[..<labEnd.lowerBound].contains("#if DEBUG || MACPROVIDER_LAB_HARNESS"))
+        XCTAssertTrue(labBody[..<labEnd.lowerBound].contains("GLMParityCommand.self"))
+
+        let command = try String(contentsOf: sources.appendingPathComponent("GLMParityCommand.swift"), encoding: .utf8)
+        let gate = try XCTUnwrap(command.range(of: "#if DEBUG || MACPROVIDER_LAB_HARNESS"))
+        let declaration = try XCTUnwrap(command.range(of: "struct GLMParityCommand"))
+        XCTAssertLessThan(gate.lowerBound, declaration.lowerBound)
+        XCTAssertTrue(command.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("#endif"))
+    }
+
     func testComparisonReportsFirstDivergenceTop1AndLogitError() {
         let comparison = GLMParityComparison(
             oracleGreedy: [5, 6, 7, 8],
@@ -58,3 +87,4 @@ final class GLMParityCommandTests: XCTestCase {
         }
     }
 }
+#endif

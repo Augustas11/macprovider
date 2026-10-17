@@ -40,7 +40,7 @@ struct MacProviderCLI: AsyncParsableCommand {
         commandName: "malibu-cli",
         abstract: "OpenAI-compatible Malibu (Mac Provider) inference CLI.",
         version: CoordinatorClient.binaryVersion,
-        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ProviderCommand.self, ClaimCommand.self, CreatorCommand.self, RestartCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, CredentialsCommand.self, LifecycleStateCommand.self, RecoverUpdateCommand.self, LifecycleLeaseCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, LegacySpec028CanaryCommand.self, LegacySpec028BenchmarkCommand.self, DecodeBenchCommand.self] + labSubcommands() + [MSBThroughputCommand.self, MSBLoopbackCommand.self, MSBOllamaLoopbackCommand.self, MSBPerplexityCommand.self, GLMParityCommand.self, MSBComputeScoreCommand.self, EnrollCommand.self, ReleasePayloadPreflightCommand.self, KVCacheCommand.self, DoctorCommand.self, PayoutAddressCommand.self, ConsumeCommand.self, RelayBlindKeyCommand.self] + fixtureSubcommands() + [PrivacyClassCommand.self, AppAttestCommand.self],
+        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ProviderCommand.self, ClaimCommand.self, CreatorCommand.self, RestartCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, CredentialsCommand.self, LifecycleStateCommand.self, RecoverUpdateCommand.self, LifecycleLeaseCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, LegacySpec028CanaryCommand.self, LegacySpec028BenchmarkCommand.self, DecodeBenchCommand.self] + labSubcommands() + [MSBThroughputCommand.self, MSBLoopbackCommand.self, MSBOllamaLoopbackCommand.self, MSBPerplexityCommand.self, MSBComputeScoreCommand.self, EnrollCommand.self, ReleasePayloadPreflightCommand.self, KVCacheCommand.self, DoctorCommand.self, PayoutAddressCommand.self, ConsumeCommand.self, RelayBlindKeyCommand.self] + fixtureSubcommands() + [PrivacyClassCommand.self, AppAttestCommand.self],
         defaultSubcommand: ServeCommand.self
     )
 
@@ -54,11 +54,11 @@ struct MacProviderCLI: AsyncParsableCommand {
         #endif
     }
 
-    /// Lab-only native-MTP harnesses exist only in DEBUG or explicit
+    /// Lab-only native-MTP and GLM parity harnesses exist only in DEBUG or explicit
     /// MACPROVIDER_LAB_HARNESS builds; a plain release binary registers none.
     private static func labSubcommands() -> [ParsableCommand.Type] {
         #if DEBUG || MACPROVIDER_LAB_HARNESS
-        return [NativeMTPHardwareE2ECommand.self, NativeMTPBenchCommand.self, NativeMTPJourneyE2ECommand.self, NativeMTPRequestShapeReplayCommand.self]
+        return [NativeMTPHardwareE2ECommand.self, NativeMTPBenchCommand.self, NativeMTPJourneyE2ECommand.self, NativeMTPRequestShapeReplayCommand.self, GLMParityCommand.self]
         #else
         return []
         #endif

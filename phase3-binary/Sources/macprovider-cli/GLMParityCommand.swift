@@ -5,6 +5,9 @@ import MLX
 import MLXLMCommon
 import MacProviderCore
 
+// Lab-only: compiled out of plain release builds, command type and
+// registration included.
+#if DEBUG || MACPROVIDER_LAB_HARNESS
 /// `glm-parity` — lab-only greedy parity against a reference oracle (epic #2029, T3).
 ///
 /// Loads the artifact through `ModelRuntime` (the serve load path), prefills
@@ -411,3 +414,4 @@ private extension Array where Element == Int {
         return data
     }
 }
+#endif
