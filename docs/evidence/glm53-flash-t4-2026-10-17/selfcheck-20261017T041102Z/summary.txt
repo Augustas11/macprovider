@@ -1,0 +1,15 @@
+legs=2
+leg2 self-check start 04:11:03
+leg2 startup artifact hash accepted expected=7299b6a71a38490e378e9eb6524c426392aa96e3fd561007e0540134bbef48f9 dir=<models>/GLM-5.3-Flash-oQ4e-mtp
+event=batching_unsupported action=serial_routed reason=local_batching_capability_unavailable
+event=cb_self_check action=step max_slots=4 rows=8 queue_limit=4 probe_key_boundary=1024 resumed_at=0 remeasure=false model_sha256=7299b6a71a38490e378e9eb6524c426392aa96e3fd561007e0540134bbef48f9
+event=cb_self_check action=measured slots=2 rung=true conformant=true cohort_decode_tokens=47 divergent_rows=none aggregate_tps=47.9 serial_tps=43.2 gain=1.11
+event=cb_self_check action=measured slots=3 rung=true conformant=true cohort_decode_tokens=47 divergent_rows=none aggregate_tps=53.0 serial_tps=43.1 gain=1.23
+event=cb_self_check action=measured slots=4 rung=true conformant=true cohort_decode_tokens=47 divergent_rows=none aggregate_tps=56.6 serial_tps=42.8 gain=1.32
+event=cb_self_check action=applied source=measured reason=granted slots=3 verified_k=4 model_sha256=7299b6a71a38490e378e9eb6524c426392aa96e3fd561007e0540134bbef48f9
+leg2 k=2 conformant=True median_gain=1.11 at_least_1.2x=False divergent_rows=none
+leg2 k=3 conformant=True median_gain=1.23 at_least_1.2x=True divergent_rows=none
+leg2 k=4 conformant=True median_gain=1.32 at_least_1.2x=True divergent_rows=none
+leg2 decision=granted verified_k=4 served_slots=3 best_median_gain=1.32
+leg2 self-check PASS
+RESULT=PASS evidence=<lab>/t4-window-20261017T041102Z

@@ -1,0 +1,61 @@
+event=chat_template_compat rewrite=numeric_attribute_access count=4
+{
+  "aggregateCVPct" : 0.13074565397308413,
+  "aggregateTPSRuns" : [
+    46.90330958169508,
+    46.94988073546351,
+    46.82835714012826
+  ],
+  "aggregateTPSp50" : 46.90330958169508,
+  "aggregateUpliftVsPagedSingleRow" : 1.3285216031955038,
+  "aggregateVsProductionSerial" : 1.1787787586911294,
+  "blockSizeTokens" : 256,
+  "compiled" : false,
+  "decodeTokensPerRow" : 128,
+  "engine" : "paged",
+  "layerCount" : 11,
+  "maxPhysicalBlocks" : 1024,
+  "mlxSwiftLMPin" : "mlxlm-7d8dbf56e0e2",
+  "modelID" : "<models>\/GLM-5.3-Flash-oQ4e-mtp",
+  "modelTag" : "GLM-5.3-Flash-oQ4e-mtp",
+  "pagedSingleRowCVPct" : 0.05103915824235869,
+  "pagedSingleRowTPSRuns" : [
+    35.31815789479744,
+    35.304890390098414,
+    35.282508630931304
+  ],
+  "pagedSingleRowTPSp50" : 35.304890390098414,
+  "peakPhysFootprintMB" : 181802,
+  "peakRSSMB" : 136679,
+  "perRowFractionOfPagedSingleRow" : 0.6642608015977519,
+  "perRowTPSp50" : 23.45165479084754,
+  "productionSerialCVPct" : 0.06063985747980056,
+  "productionSerialPromptTokens" : 1024,
+  "productionSerialTPSRuns" : [
+    39.789747852069134,
+    39.79250681842153,
+    39.74941717378178
+  ],
+  "productionSerialTPSp50" : 39.789747852069134,
+  "productionSerialTTFTSecondsRuns" : [
+    3.1152549982070923,
+    3.115090012550354,
+    3.116500973701477
+  ],
+  "promptTokenLengths" : [
+    1024,
+    1024
+  ],
+  "promptTokenSHA256" : [
+    "c2d6e0a41c032e905401737f80cfeaf532576de3aef86f3382067663f683b3dd",
+    "bb27f683b1bd122f66d900e82379da023fe1014bda15ede6d18f4741f834c1ac"
+  ],
+  "promptTokensPerRow" : 1024,
+  "rows" : 2,
+  "runs" : 3,
+  "scenario" : "throughput",
+  "schemaVersion" : 4,
+  "timestamp" : "2026-10-17T02:44:10Z"
+}
+msb-throughput: model=GLM-5.3-Flash-oQ4e-mtp engine=paged compile=false rows=2 block=256 serial_tps_p50=39.8 engine_1row_tps_p50=35.3 aggregate_tps_p50=46.9 uplift_vs_1row=1.33x aggregate_vs_serial=1.18x peak_rss_mb=136679
+msb-throughput: wrote <lab>/t4-window-20261017T022259Z/msb-rows2.json

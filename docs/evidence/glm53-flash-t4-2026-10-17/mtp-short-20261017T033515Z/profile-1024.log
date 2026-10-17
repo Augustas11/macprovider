@@ -1,0 +1,9 @@
+hc_deferred_exact=true
+load_s=29.1 active_gb=184.799015808
+wired_limit_applied=239143780352 cap=239143780352
+mtp-profile plain_step deferred=true ms_median=28.16 min=27.74
+mtp-profile plain_step deferred=false ms_median=28.52 min=28.26
+mtp-profile verify_2col ms_median=41.74 min=41.07
+mtp-profile forward_2col_no_checkpoint ms_median=37.95 min=37.37
+mtp-profile drafter_commit accepted=0 ms_median=1.99 min=1.95
+mtp-profile drafter_commit accepted=1 ms_median=2.27 min=2.24
