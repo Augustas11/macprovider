@@ -82,6 +82,40 @@ final class NativeMTPRequestShapeCaptureTests: XCTestCase {
         XCTAssertEqual(status["exports_recoverable_cache_groups"] as? Bool, false)
     }
 
+    // SPEC-049-R010: a privacy-class request leaves no shape record and no
+    // counter change on disk; an ordinary request beside it still records.
+    func testPrivacyRequestLeavesNoShapeRecordOrCounter() throws {
+        let root = try privateTempDirectory()
+        let captureDir = root.appendingPathComponent("capture", isDirectory: true)
+        var capture: NativeMTPRequestShapeCapture? = try NativeMTPRequestShapeCapture(
+            config: NativeMTPRequestShapeCaptureConfig(directory: captureDir, maxRecords: 10, maxBytes: 64 * 1024),
+            nativeMTPMode: .off,
+            runningBuildIdentity: nil,
+            now: Date(timeIntervalSince1970: 1_800_000_000)
+        )
+        let base = try makeRequest(maxTokens: 64, includeSensitiveValues: true)
+        for provenance in [KVIngestProvenance.privacy, .relay] {
+            capture?.record(
+                request: base.withIngestProvenance(provenance),
+                snapshot: snapshot(),
+                admission: ordinaryModeOffAdmission(),
+                lease: nil,
+                leaseAllowed: false,
+                completion: completion(promptTokens: 37, completionTokens: 5),
+                stream: false,
+                now: Date(timeIntervalSince1970: 1_800_000_001)
+            )
+        }
+        capture = nil
+
+        let lines = try captureRecords(in: captureDir)
+        XCTAssertEqual(lines.count, 2, "header plus the ordinary record only")
+        XCTAssertEqual(lines.last?["record_type"] as? String, "request_shape")
+        let status = try statusRecord(in: captureDir)
+        XCTAssertEqual(status["attempts"] as? Int, 1)
+        XCTAssertEqual(status["successful_records"] as? Int, 1)
+    }
+
     func testOmittedEffectiveBudgetDropsWithoutInferringFromCompletionLength() throws {
         let root = try privateTempDirectory()
         let captureDir = root.appendingPathComponent("capture", isDirectory: true)

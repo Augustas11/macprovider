@@ -562,6 +562,11 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
     /// exactly as served). Each result counts the decode tokens the row
     /// generated while its whole cohort, and nothing else, was decoding.
     let selfCheckCohort: ContinuousBatchSelfCheckCohort?
+    /// Runtime-only ingest boundary. It selects where the replay claim lives
+    /// (SPEC-049-R010: a privacy-class claim stays in process memory) and is
+    /// excluded from the idempotency fingerprint, so ordinary fingerprints
+    /// are unchanged.
+    let ingestProvenance: KVIngestProvenance
 
     init(
         id: String,
@@ -590,7 +595,8 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         nativeMTPProposalTokens: [Int] = [],
         nativeMTPAdaptationDirective: NativeMTPAdaptationDirective? = nil,
         selfCheckProbe: Bool = false,
-        selfCheckCohort: ContinuousBatchSelfCheckCohort? = nil
+        selfCheckCohort: ContinuousBatchSelfCheckCohort? = nil,
+        ingestProvenance: KVIngestProvenance = .unknown
     ) {
         self.id = id
         self.conversationKey = conversationKey
@@ -619,6 +625,7 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         self.nativeMTPAdaptationDirective = nativeMTPAdaptationDirective
         self.selfCheckProbe = selfCheckProbe
         self.selfCheckCohort = selfCheckProbe ? selfCheckCohort : nil
+        self.ingestProvenance = ingestProvenance
     }
 
     enum CodingKeys: String, CodingKey {
@@ -1525,12 +1532,18 @@ enum ContinuousBatchSchedulerReplayClaim: Sendable, Equatable {
 struct ContinuousBatchSchedulerReplayKey: Sendable, Equatable {
     let requestID: String
     let fingerprintSHA256: Data
+    /// SPEC-049-R010: a key whose provenance may not persist request-derived
+    /// state is claimed in process memory only and never reaches the disk.
+    var ingestProvenance: KVIngestProvenance = .unknown
 }
 
 /// Durable request-log boundary for scheduler admission. Implementations must
 /// atomically remember a non-secret canonical request fingerprint for at least
 /// the settlement replay horizon; the scheduler's bounded local result caches
-/// are an optimization, never the authority that permits re-execution.
+/// are an optimization, never the authority that permits re-execution. A key
+/// whose provenance may not persist request-derived state (SPEC-049-R010, the
+/// privacy class) is remembered for the process lifetime only and never
+/// written to disk.
 protocol ContinuousBatchSchedulerReplayAuthority: Sendable {
     func claim(_ key: ContinuousBatchSchedulerReplayKey) throws -> ContinuousBatchSchedulerReplayClaim
     /// Drops a claim taken for a request that never reached admission, so the
@@ -2024,8 +2037,18 @@ extension ContinuousBatchSchedulerError {
 actor ContinuousBatchScheduler {
     /// Operator log line for a submit-time context rejection; the relay
     /// collapses it into `error_context_exceeded`, so the numbers live here.
-    static func contextRejectedTelemetryLine(promptTokens: Int, maxOutputTokens: Int, cap: Int) -> String {
-        "event=batching_rejected code=context_length_exceeded prompt_tokens=\(promptTokens) max_output_tokens=\(maxOutputTokens) cap=\(cap)\n"
+    /// The provider log is a file on disk, so a privacy-class request
+    /// (SPEC-049-R010) logs the bounded code only.
+    static func contextRejectedTelemetryLine(
+        promptTokens: Int,
+        maxOutputTokens: Int,
+        cap: Int,
+        provenance: KVIngestProvenance = .unknown
+    ) -> String {
+        guard provenance.mayPersistRequestDerivedState else {
+            return "event=batching_rejected code=context_length_exceeded\n"
+        }
+        return "event=batching_rejected code=context_length_exceeded prompt_tokens=\(promptTokens) max_output_tokens=\(maxOutputTokens) cap=\(cap)\n"
     }
 
     private struct Waiter {
@@ -2036,12 +2059,17 @@ actor ContinuousBatchScheduler {
 
     private struct RequestFingerprint: Sendable, Equatable {
         let sha256: Data
+        /// Kept beside the digest, not hashed into it, so ordinary digests and
+        /// their stored claims are unchanged while a same-ID request from the
+        /// other persistence class is still a mismatch, never an attach.
+        let mayPersistRequestDerivedState: Bool
 
         init?(_ request: ContinuousBatchSchedulerRequest) {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys]
             guard let encoded = try? encoder.encode(request) else { return nil }
             sha256 = Data(SHA256.hash(data: encoded))
+            mayPersistRequestDerivedState = request.ingestProvenance.mayPersistRequestDerivedState
         }
     }
 
@@ -2294,7 +2322,8 @@ actor ContinuousBatchScheduler {
             try? FileHandle.standardError.write(contentsOf: Data(Self.contextRejectedTelemetryLine(
                 promptTokens: request.promptTokens.count,
                 maxOutputTokens: request.maxOutputTokens,
-                cap: configuration.maxRequestTokens
+                cap: configuration.maxRequestTokens,
+                provenance: request.ingestProvenance
             ).utf8))
             await discardUnacceptedRetainedCache(for: request)
             throw ContinuousBatchSchedulerError.contextLengthExceeded(
@@ -2745,7 +2774,8 @@ actor ContinuousBatchScheduler {
         do {
             switch try replayAuthority.claim(ContinuousBatchSchedulerReplayKey(
                 requestID: request.id,
-                fingerprintSHA256: requestFingerprint.sha256
+                fingerprintSHA256: requestFingerprint.sha256,
+                ingestProvenance: request.ingestProvenance
             )) {
             case .claimed:
                 break
@@ -2855,7 +2885,8 @@ actor ContinuousBatchScheduler {
         if let fingerprint = knownRequests[requestID], !request.nativeMTPIntegrityProbe {
             replayAuthority.release(ContinuousBatchSchedulerReplayKey(
                 requestID: requestID,
-                fingerprintSHA256: fingerprint.sha256
+                fingerprintSHA256: fingerprint.sha256,
+                ingestProvenance: request.ingestProvenance
             ))
         }
         knownRequests.removeValue(forKey: requestID)
@@ -5201,9 +5232,12 @@ actor ContinuousBatchScheduler {
                 } else if activeDecode.isEmpty && activePrompt.isEmpty && admittingRequests.isEmpty {
                     record(.poolCapacityRejected)
                     let poolTokens = configuration.descriptor.blockSizeTokens * configuration.descriptor.maxPhysicalBlocks
-                    try? FileHandle.standardError.write(contentsOf: Data(
-                        "event=batching_pool_capacity_rejected request_id=\(request.id) prompt_tokens=\(request.promptTokens.count) max_output_tokens=\(request.maxOutputTokens) pool_tokens=\(poolTokens)\n".utf8
-                    ))
+                    // SPEC-049-R010: no request ID or token counts for a
+                    // privacy-class request in the on-disk provider log.
+                    let line = request.ingestProvenance.mayPersistRequestDerivedState
+                        ? "event=batching_pool_capacity_rejected request_id=\(request.id) prompt_tokens=\(request.promptTokens.count) max_output_tokens=\(request.maxOutputTokens) pool_tokens=\(poolTokens)\n"
+                        : "event=batching_pool_capacity_rejected pool_tokens=\(poolTokens)\n"
+                    try? FileHandle.standardError.write(contentsOf: Data(line.utf8))
                     await finishQueued(
                         request,
                         status: .rejected,

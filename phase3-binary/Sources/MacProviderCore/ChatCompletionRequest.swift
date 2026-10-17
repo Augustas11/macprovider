@@ -4,7 +4,8 @@ import Foundation
 /// parallel to `conversationKey`. The KV disk tier admits a reserved synthetic
 /// key only on `.directHTTP`, and relay/Tier-2 traffic only with a valid
 /// coordinator fleet grant; key shape alone never grants persistence.
-/// `.privacy` never touches a reusable cache (`mayUseReusableKVCache`).
+/// `.privacy` never touches a reusable cache (`mayUseReusableKVCache`) and
+/// never persists request-derived state (`mayPersistRequestDerivedState`).
 public enum KVIngestProvenance: String, Sendable, Equatable, CaseIterable {
     case directHTTP
     case relay
@@ -18,6 +19,17 @@ public enum KVIngestProvenance: String, Sendable, Equatable, CaseIterable {
     /// conversation cache, KV disk tier) consults, and the privacy posture
     /// attests. Exhaustive so a new provenance must choose explicitly.
     public var mayUseReusableKVCache: Bool {
+        switch self {
+        case .privacy: return false
+        case .directHTTP, .relay, .tier2, .unknown: return true
+        }
+    }
+
+    /// SPEC-049-R010: whether state derived from this request (such as a
+    /// continuous-batching replay claim) may be written to disk. A
+    /// privacy-class request keeps such state in process memory only.
+    /// Exhaustive so a new provenance must choose explicitly.
+    public var mayPersistRequestDerivedState: Bool {
         switch self {
         case .privacy: return false
         case .directHTTP, .relay, .tier2, .unknown: return true

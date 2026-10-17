@@ -202,7 +202,7 @@ extension PrivacyRuntimeHardening {
             add(code)
         }
         if LoopbackServeSelection.select(config.model) != nil { add(PrivacyHardeningCode.loopbackRuntime) }
-        if !PrivacyRuntimeHardening.privacyPathBypassesKVDiskTier() {
+        if !PrivacyRuntimeHardening.privacyPathBypassesDiskSinks() {
             add(PrivacyHardeningCode.kvDiskTierPrivacyBypass)
         }
         if !hasConfiguredStateDirectory(config) { add(PrivacyHardeningCode.stateDirectoryMissing) }
