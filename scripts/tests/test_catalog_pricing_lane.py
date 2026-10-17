@@ -120,7 +120,7 @@ class SpliceBoundaryTests(unittest.TestCase):
         self.assertEqual(cr.splice_coordinator_rate_card(text, MINI_BLOCK), text[:start] + MINI_BLOCK)
 
     def test_column0_sequence_under_top_key_is_not_a_top_key(self) -> None:
-        seq = b"providers:\n- provider_id: a\n  endpoint_url: x\n- provider_id: b\n  endpoint_url: y\n"
+        seq = b"providers:\n- provider_id: a\n  endpoint_url: x\n-\n  provider_id: b\n  endpoint_url: y\n"
         for text in (seq + MINI, MINI + seq):
             with self.subTest(first=text[:9]):
                 start, end = cr.coordinator_rate_card_block_span(text, "t")
@@ -155,6 +155,8 @@ class SpliceBoundaryTests(unittest.TestCase):
             "duplicate rewards key": MINI.replace(b"  after: 2", b"  provider_share: 0.5"),
             "duplicate top key": MINI + b"top: 4\n",
             "top-level sequence document": b"- a: 1\n" + MINI,
+            "comment-first sequence document": b"# c\n- a\n" + MINI,
+            "sequence after a scalar top key": b"scalar: 1\n- x\n" + MINI,
             "duplicate key after a sequence": MINI + b"providers:\n- provider_id: a\ntop: 4\n",
             "duplicate row": MINI.replace(b"\n  after: 2", b"    default:\n      prompt_credits_per_mtok: 1\n  after: 2"),
             "non-credit field": MINI.replace(b"      prompt_credits_per_mtok: 500000", b"      provider_share_bps: 9000"),
