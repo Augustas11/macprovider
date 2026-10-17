@@ -292,6 +292,8 @@ expected_history = {
     "published-2026-10-08-native-mtp-v224-v1",
     # Superseded by the re-baselined self-test bank for signed CLI 1.8.238.
     "published-2026-10-09-native-mtp-v224-v2",
+    # Superseded by the listed qwen2-vl-2b-instruct-4bit intake row.
+    "published-2026-10-10-native-mtp-v238",
     current_release_id,
 }
 if set(ledger["releases"]) != expected_history:

@@ -460,7 +460,8 @@ class BuyerServingSetTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         models = json.loads(proc.stdout)["models"]
         candidates = json.loads((self.release / "autotune-candidates.json").read_bytes())["rows"]
-        self.assertEqual(len(models), len(candidates))
+        recommendable = [row for row in candidates.values() if row["runtime_status"] == "recommendable"]
+        self.assertEqual(len(models), len(recommendable))
         self.assertIn({"model_id": model_id(self.release), "sha256": candidates[MODEL_KEY]["model_sha256"]}, models)
 
     def test_identical_releases_have_empty_diff(self) -> None:

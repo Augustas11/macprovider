@@ -1,0 +1,58 @@
+{
+  "decisions": [
+    {
+      "action": "admit_listed",
+      "admission_clause": "coldstart_slot",
+      "as_of": "2026-10-17T00:30:00Z",
+      "coldstart_slot_used": true,
+      "fit_clause": "tier_target",
+      "listed_since": null,
+      "model_key": "mlx-community/qwen2-vl-2b-instruct-4bit",
+      "observation_window_end": null,
+      "observation_window_start": null,
+      "operator_decision": "admitted",
+      "operator_role": "catalog-operator",
+      "promotion": null,
+      "signals": {
+        "demand_rank_absent_reason": "unranked",
+        "demand_rank_source_sha256": "9257ab7b580ed63c92cc23fea5ec02ba9b0b3269112c3bb3960f0baa7a804e93",
+        "distinct_provider_offer_absent_reason": "source_unavailable",
+        "distinct_provider_offer_count": null,
+        "distinct_provider_offer_source_sha256": null,
+        "distinct_provider_offer_suppressed": false,
+        "distinct_provider_offer_window_end": null,
+        "distinct_provider_offer_window_start": null,
+        "fleet_fit_absent_reason": "source_unavailable",
+        "fleet_fit_fraction_ppm": null,
+        "fleet_fit_source_sha256": null,
+        "fleet_fit_window_end": null,
+        "fleet_fit_window_start": null,
+        "openrouter_demand_rank": null,
+        "unmatched_model_request_absent_reason": "source_unavailable",
+        "unmatched_model_request_count": null,
+        "unmatched_model_request_source_sha256": null,
+        "unmatched_model_request_suppressed": false,
+        "unmatched_model_request_window_end": null,
+        "unmatched_model_request_window_id": null,
+        "unmatched_model_request_window_start": null
+      }
+    }
+  ],
+  "generated_at": "2026-10-17T00:30:00Z",
+  "release_id": "published-2026-10-17-qwen2vl-listed-v1",
+  "schema_version": "macprovider.intake-decision.v1",
+  "thresholds": {
+    "INTAKE_BUYER_REQUEST_FLOOR": 250,
+    "INTAKE_COLDSTART_SLOTS": 1,
+    "INTAKE_DEMAND_RANK_MAX": 100,
+    "INTAKE_FLEET_FIT_MIN_PCT": 25,
+    "INTAKE_K_ANONYMITY_MIN": 3,
+    "INTAKE_MIN_LISTED_DAYS": 30,
+    "INTAKE_OFFER_FLOOR": 3,
+    "INTAKE_UNKNOWN_KEY_BUCKETS": 64,
+    "INTAKE_UNKNOWN_KEY_DISTINCT_CAP": 10000,
+    "INTAKE_UNKNOWN_KEY_PRINCIPAL_CAP_PCT": 10,
+    "INTAKE_UNKNOWN_PRINCIPALS_PER_BUCKET": 64,
+    "tier_target": "<= 16 GB"
+  }
+}

@@ -1,6 +1,6 @@
 {
-  "autotune_candidates_sha256": "ac82af17ecc8cbb3ace66e6447c867f3cb25715508b591119efb735f740049bd",
-  "generated_at": "2026-10-10T12:50:49Z",
+  "autotune_candidates_sha256": "8f12d1d69d60c09383c12a50140611600ca977bbe2a920eb38b454ba09497b7c",
+  "generated_at": "2026-10-17T00:30:00Z",
   "models": [
     {
       "catalog_key": "google-gemma-4-26b-a4b-it",
@@ -50,6 +50,13 @@
       "model_id": "mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit",
       "model_revision": "832f602eba5d22436c258c1462bdedc5afddb42b",
       "sha256": "1bc78f214f9a042eaeb290b1fa4cb29915df1028f79d8479266349166c40a71f"
+    },
+    {
+      "catalog_key": "mlx-community/qwen2-vl-2b-instruct-4bit",
+      "min_ram_gb": 8,
+      "model_id": "mlx-community/Qwen2-VL-2B-Instruct-4bit",
+      "model_revision": "01af461cdb9574acc09084a0ef94e216e142b085",
+      "sha256": "5c65f865d25fa86c34bab436334c13307496e0e905cd0a6c8bef33312cc12773"
     },
     {
       "catalog_key": "qwen2.5-coder-32b-instruct",
@@ -123,6 +130,6 @@
     }
   ],
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-10-10-native-mtp-v238",
+  "release_id": "published-2026-10-17-qwen2vl-listed-v1",
   "schema_version": "macprovider.tier2-identity-binding.v1"
 }

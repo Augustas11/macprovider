@@ -2327,6 +2327,27 @@ class HermeticRelease:
                 obj = json.loads(path.read_text())
                 obj["entries"] = []
                 path.write_bytes(catalog_release.canonical_bytes(obj))
+        # Rows admitted through the intake lane after activation did not exist
+        # in the pre-activation release: drop them, with their artifact-source
+        # and tier2-binding entries, and the intake decision that admitted them.
+        intake_path = self.catalog / "intake-decision.json"
+        if intake_path.exists():
+            admitted = {d["model_key"] for d in json.loads(intake_path.read_text())["decisions"]}
+            intake_path.unlink()
+            candidates_path = self.catalog / "autotune-candidates.json"
+            candidates = json.loads(candidates_path.read_text())
+            for key in admitted:
+                candidates["rows"].pop(key, None)
+            candidates_path.write_bytes(catalog_release.canonical_bytes(candidates))
+            source_path = self.catalog / "autotune-artifacts-source.json"
+            source = json.loads(source_path.read_text())
+            for key in admitted:
+                source["models"].pop(key, None)
+            source_path.write_text(json.dumps(source, indent=2, sort_keys=True) + "\n")
+            binding_path = self.catalog / "tier2-identity-binding.json"
+            binding = json.loads(binding_path.read_text())
+            binding["models"] = [m for m in binding["models"] if m["catalog_key"] not in admitted]
+            binding_path.write_text(json.dumps(binding, indent=2, sort_keys=True) + "\n")
         self.bump(release_id, generated_at)
 
         def restamp(name: str, **fields) -> bytes:
