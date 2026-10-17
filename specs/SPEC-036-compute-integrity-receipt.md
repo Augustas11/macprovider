@@ -1,9 +1,18 @@
 # SPEC-036 — Compute-Integrity Receipt Companion
 
-**Status:** v0.2.0-draft
-**Date:** 2026-10-13
+**Status:** v0.2.1-draft
+**Date:** 2026-10-17
 **Depends on:** SPEC-015 v0.4.4, SPEC-022 v0.4.9, SPEC-026 v0.26, SPEC-030 v0.1-draft (Losslessness Probe — shared distribution-snapshot / support-selection / TV-interval / probe-transport primitive)
 **Companion research:** `docs/research/compute-integrity-receipt-2026-07.md`
+
+**Change log v0.2.1 (2026-10-17, issue #1644 — durable verification schedule):**
+FR-20 due times persist across coordinator restarts. v0.2.0 drew a fresh
+first interval for every key at every start, so a coordinator that restarted
+more often than every 3 hours never verified anyone, and a provider learned
+that no verification could arrive in the first 3 hours after a restart. A key
+overdue at start is now probed within a bounded window of at most 15 minutes,
+a key not yet due keeps its due time, and only a key never seen before draws
+the jittered first interval.
 
 **Change log v0.2.0 (2026-10-13, issue #1644 — cross-provider scoring):**
 Adds §5A (FR-19 through FR-25), the compute-integrity verification path that
@@ -2153,12 +2162,23 @@ Rate bounds:
 
 - Base cadence per verification key: one request per
   `compute_integrity.scoring.base_interval_seconds` (default 6 h) with ±50 %
-  uniform jitter, including the first request after a key appears or the
-  coordinator starts. A key in `suspect` or `recovering` (FR-23) is probed every
+  uniform jitter, including the first request after a key first appears. A
+  key in `suspect` or `recovering` (FR-23) is probed every
   `escalation_interval_seconds` (default 10 min) with the same jitter. A key
   keeps its due time while its provider is disconnected, so a reconnect
   resumes an overdue request instead of restarting the cadence; the due time
   of a key whose provider has been absent for 7 days is dropped.
+- Due times are stored coordinator-side and survive a coordinator restart;
+  they never appear on any provider-facing frame, header, status field or
+  API. At start, a key whose stored due time has passed is redrawn uniformly
+  within the next 15 minutes (or its interval, if shorter), so overdue keys
+  are probed promptly but not all at once; a key not yet due keeps its due
+  time; a stored due time further away than 1.5 intervals is redrawn as a
+  fresh jittered interval. A key with no stored due time draws the first
+  interval above. Changes are written once per sweep, so a crash loses at
+  most one sweep of them; a lost change leaves an earlier due time or no due
+  time, never a later one. If the stored schedule cannot be read, every key
+  draws the first interval.
 - At most `max_in_flight` (default 4) verification requests are outstanding
   coordinator-wide, and at most one per verification key.
 - At most `max_per_hour` (default 240) verification requests start in any

@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/rand"
 	"net"
 	"net/http"
@@ -1184,5 +1185,129 @@ func TestComputeScoringHotProbesAreCoverOnly(t *testing.T) {
 	}
 	if h.state("a") != computeintegrity.VerificationPassing {
 		t.Fatalf("honest key state = %s; non-hot measurements must still decide", h.state("a"))
+	}
+}
+
+// restartScoring builds a fresh engine on the same store, as a coordinator
+// restart at the harness clock would, and makes it the harness engine.
+func (h *scoringHarness) restartScoring() *computeScoringEngine {
+	h.t.Helper()
+	e, err := h.server.newComputeScoringEngine(context.Background(), h.engine.deps)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	e.dispatchDelay = func() time.Duration { return 0 }
+	h.engine = e
+	return e
+}
+
+func (h *scoringHarness) persistedDue(key computeScoringKey) (time.Time, bool) {
+	h.t.Helper()
+	schedule, err := h.engine.deps.Store.LoadProbeSchedule(context.Background())
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	for _, d := range schedule {
+		if d.ProviderID == key.providerID && d.ModelID == key.modelID {
+			return d.Due, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// FR-20: due times survive a restart. A key whose due time passed while the
+// coordinator was down is probed within the bounded overdue window, even
+// before its provider reconnects.
+func TestComputeScoringOverdueKeyProbedPromptlyAfterRestart(t *testing.T) {
+	h := newScoringHarness(t, map[string]string{"a": "github:1", "b": "github:2"}, nil)
+	h.engine.sweep(context.Background(), h.now())
+	key := computeScoringKey{"a", scoringModel}
+	h.engine.mu.Lock()
+	due := h.engine.nextDue[key]
+	h.engine.mu.Unlock()
+	if stored, ok := h.persistedDue(key); !ok || !stored.Equal(due) {
+		t.Fatalf("due time not persisted by the sweep: stored %v (%v), want %v", stored, ok, due)
+	}
+	h.advance(2 * h.engine.interval(computeintegrity.VerificationUnverified))
+	restart := h.now()
+	e := h.restartScoring()
+	e.prune(map[string]struct{}{}, restart.Add(time.Minute))
+	e.mu.Lock()
+	redrawn, ok := e.nextDue[key]
+	e.mu.Unlock()
+	if !ok || redrawn.Before(restart) || !redrawn.Before(restart.Add(computeScoreOverdueSpread)) {
+		t.Fatalf("overdue key due at %v (present=%v), want within %v of restart %v", redrawn, ok, computeScoreOverdueSpread, restart)
+	}
+	before := h.dispatched.Load()
+	h.round(computeScoreOverdueSpread)
+	if h.dispatched.Load() == before {
+		t.Fatal("overdue keys were not probed within the overdue window after a restart")
+	}
+}
+
+// FR-20: a restart before a key is due keeps its due time, and a key first
+// seen after the restart still draws the full jittered first interval.
+func TestComputeScoringRestartKeepsDueTimeAndFirstSightWindow(t *testing.T) {
+	h := newScoringHarness(t, map[string]string{"a": "github:1", "b": "github:2"}, nil)
+	h.engine.sweep(context.Background(), h.now())
+	keyA, keyB := computeScoringKey{"a", scoringModel}, computeScoringKey{"b", scoringModel}
+	h.engine.mu.Lock()
+	dueA := h.engine.nextDue[keyA]
+	h.engine.dropDueLocked(keyB)
+	h.engine.mu.Unlock()
+	h.engine.flushSchedule(context.Background(), h.now())
+	if _, ok := h.persistedDue(keyB); ok {
+		t.Fatal("a dropped due time must be deleted from the store")
+	}
+	h.advance(10 * time.Minute)
+	restart := h.now()
+	e := h.restartScoring()
+	e.sweep(context.Background(), restart)
+	interval := e.interval(computeintegrity.VerificationUnverified)
+	e.mu.Lock()
+	gotA, gotB := e.nextDue[keyA], e.nextDue[keyB]
+	e.mu.Unlock()
+	if !gotA.Equal(dueA) {
+		t.Fatalf("restart before the due time moved it: %v, want %v", gotA, dueA)
+	}
+	if d := gotB.Sub(restart); d < interval/2 || d >= interval*3/2 {
+		t.Fatalf("first-seen key due after %v, want within [0.5, 1.5) x %v", d, interval)
+	}
+}
+
+// FR-20: many keys overdue at a restart are spread over the bounded overdue
+// window instead of firing together, and a persisted due time beyond the
+// longest jittered interval is redrawn as a fresh interval.
+func TestComputeScoringOverdueKeysSpreadAfterRestart(t *testing.T) {
+	h := newScoringHarness(t, map[string]string{"a": "github:1"}, nil)
+	restart := h.now()
+	var batch []computeintegrity.ProbeDue
+	for i := 0; i < 200; i++ {
+		batch = append(batch, computeintegrity.ProbeDue{ProviderID: fmt.Sprintf("p%03d", i), ModelID: scoringModel, Due: restart.Add(-time.Duration(i) * time.Minute)})
+	}
+	batch = append(batch, computeintegrity.ProbeDue{ProviderID: "far", ModelID: scoringModel, Due: restart.Add(365 * 24 * time.Hour)})
+	if err := h.engine.deps.Store.SaveProbeSchedule(context.Background(), batch, restart); err != nil {
+		t.Fatal(err)
+	}
+	e := h.restartScoring()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	interval := e.interval(computeintegrity.VerificationUnverified)
+	if d := e.nextDue[computeScoringKey{"far", scoringModel}].Sub(restart); d < interval/2 || d >= interval*3/2 {
+		t.Fatalf("far-future due time kept at +%v, want redrawn within [0.5, 1.5) x %v", d, interval)
+	}
+	var earliest, latest time.Duration = computeScoreOverdueSpread, 0
+	distinct := map[time.Time]struct{}{}
+	for i := 0; i < 200; i++ {
+		due, ok := e.nextDue[computeScoringKey{fmt.Sprintf("p%03d", i), scoringModel}]
+		d := due.Sub(restart)
+		if !ok || d < 0 || d >= computeScoreOverdueSpread {
+			t.Fatalf("overdue key %d due at +%v (present=%v), want within [0, %v)", i, d, ok, computeScoreOverdueSpread)
+		}
+		earliest, latest = min(earliest, d), max(latest, d)
+		distinct[due] = struct{}{}
+	}
+	if len(distinct) < 190 || earliest > computeScoreOverdueSpread/10 || latest < computeScoreOverdueSpread*9/10 {
+		t.Fatalf("overdue keys not spread: %d distinct, earliest +%v, latest +%v", len(distinct), earliest, latest)
 	}
 }
