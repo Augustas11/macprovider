@@ -7,6 +7,45 @@ paused and drained (0 in flight) and the lab serve no-join on its own port,
 config directory and self-check store. Paths are written as `<lab>` and
 `<models>`; per-instance lab configs are not committed.
 
+## Final T4 evidence set at fork `18ca526` (`final-18ca526/`)
+
+The pre-freeze evidence (HARD RULE 2: the pin moved from `7d8dbf5` to
+`18ca526`, which changes decode-path lines). Lab-harness `macprovider-cli`
+`0cbdf0f3726d56bd9c190bdd8e6343f76eded6c95913e673eb0a6b69f5864a2c` built at
+`dbd401947`, `mlx.metallib` `589e56e0…`, mlx-swift-lm
+`18ca526706dbffb9b1ce825046fe46a691d875b6`. Two windows (B1, B2) with the
+live provider paused and resumed between them.
+
+| Record | Directory | Result |
+| --- | --- | --- |
+| Metal `PagedMLALatentCacheTests` (xctest host, before B1) | not captured in a directory; reported by the window owner | 7 of 7 pass, including the fork-equivalence test with column-by-column rounds and post-forward offsets |
+| AC-20 fixture | `final-18ca526/b1-20261017T091600Z-ac20-selfcheck/leg1-fixture.log` | PASS: 48 exact greedy tokens at 2,800 prompt tokens, 11 sparse layers, 1,166 gather calls, `stateMismatches=0`, pending windows `[3 x 11]`; attach probe established (11 layers, 36 forwards, 792 gather calls) |
+| FR-CB10 self-check | `final-18ca526/b1-…/selfcheck/` | PASS: all k = 2..4 exact, decode-only gains 1.35 / 1.51 / 1.66, decision `granted`, served slots 3 (lowest k within 15% of the best gain), `verified_k` 4; key `…/decode8/verify8+cb-probe-v3/route1024+flat8` |
+| msb-throughput, paged, block 256, 1,024 / 128 tokens per row, 3 runs | `final-18ca526/b2-20261017T094515Z-msb-leftovers/msb-rows{1,2,4}.*` | see table below |
+| SPEC-039 FR-PKV12 leftovers (isolation, replay, drain, parity) | `final-18ca526/b2-…/leftovers.*`, `leftovers-eval.txt` | harness rc 0, 4 documents, all `pass=true`; peak RSS 133.5 GB |
+
+| Rows | Aggregate tok/s p50 | Paged single row | Production serial | Aggregate / serial | Peak footprint |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 40.39 | 40.30 | 41.85 | 0.97 | 181.2 GB |
+| 2 | 58.83 | 40.41 | 41.93 | 1.40 | 181.8 GB |
+| 4 | 71.22 | 40.39 | 41.98 | 1.70 | 182.7 GB |
+
+Self-check passes (decode-only, `serve.log` `action=pass`): serial decode
+43.2-43.5 tok/s; batched cohort decode 58.7-58.8 (k=2), 65.0-65.6 (k=3),
+70.1-72.3 (k=4).
+
+Against the `7d8dbf5` set below, `18ca526` raises batched decode (msb rows 4:
+55.92 to 71.22 tok/s; self-check gain at k = 4: 1.32 to 1.66) and paged
+single-row decode (35.3 to 40.4 tok/s), consistent with its read-once
+weights for 2...8 vectors and staged eval.
+
+## Superseded: the `7d8dbf5` set
+
+Everything below this line was measured at mlx-swift-lm `7d8dbf5` and is kept
+for the record; the final set above supersedes its AC-20, self-check, msb and
+leftovers results. The native-MTP GLMBench runs below remain the MTP record
+until the native-MTP e2e at `18ca526` is recorded.
+
 ## Identity
 
 | Item | Value |
@@ -102,10 +141,10 @@ the same parity at the superseded `fa72942` pin.
 
 | Requirement | Record |
 | --- | --- |
-| AC-20 fixture | `window-20261017T022259Z-ac20-msb/leg1-fixture.log` |
-| Attach proof (parity, gather coverage) | `selfcheck-20261017T041102Z/serve.log`: `parity … established=true nLayers=11 nForwards=36 gatherKernelCalls=792` |
-| Row isolation | same log: MoE expert-dispatch isolation on first decode and on rejoin, `batched-isolation … proven=true crossRowDivergences=0`; FR-CB10 rows exact at k = 2..4 |
-| Replay and drain | `leftovers/` (window 2026-10-17 05:23Z, lab-harness `791a3cdc…` at `648fb655a`, `msb-throughput --engine scheduler --scenario leftovers --rows 4 --prompt-tokens 1024 --parity-tokens 48`): isolation (cancelled row ends `cancelled`, healthy row `length`, 32 tokens), replay (`eligible_owner` then `non_settling_replay`, tokens match), drain (queued rejected, both active rows complete `length`, permit valid, post-drain rejected) and parity (48 tokens, standalone and batched `[true, true]`, serial and batched token SHA-256 equal) all `pass=true`; peak RSS 122.8 GB |
+| AC-20 fixture | `final-18ca526/b1-20261017T091600Z-ac20-selfcheck/leg1-fixture.log` (first recorded at `7d8dbf5`: `window-20261017T022259Z-ac20-msb/leg1-fixture.log`) |
+| Attach proof (parity, gather coverage) | `final-18ca526/b1-…/selfcheck/serve.log` (and `selfcheck-20261017T041102Z/serve.log` at `7d8dbf5`): `parity … established=true nLayers=11 nForwards=36 gatherKernelCalls=792` |
+| Row isolation | same logs: MoE expert-dispatch isolation on first decode and on rejoin, `batched-isolation … proven=true crossRowDivergences=0`; FR-CB10 rows exact at k = 2..4 |
+| Replay and drain | `final-18ca526/b2-20261017T094515Z-msb-leftovers/leftovers.*` (all four `pass=true`, evaluated by the fixed evaluator in-window); first recorded at `7d8dbf5` in `leftovers/` (window 2026-10-17 05:23Z, lab-harness `791a3cdc…` at `648fb655a`, `msb-throughput --engine scheduler --scenario leftovers --rows 4 --prompt-tokens 1024 --parity-tokens 48`): isolation (cancelled row ends `cancelled`, healthy row `length`, 32 tokens), replay (`eligible_owner` then `non_settling_replay`, tokens match), drain (queued rejected, both active rows complete `length`, permit valid, post-drain rejected) and parity (48 tokens, standalone and batched `[true, true]`, serial and batched token SHA-256 equal) all `pass=true`; peak RSS 122.8 GB |
 
 The window's own verdict was `FAIL` from an evaluator bug, not from the
 harness: `--scenario leftovers` prints one JSON document per scenario and the

@@ -234,7 +234,11 @@ final class GLM5NextPagedKVWiringTests: XCTestCase {
             contentsOf: repo.appendingPathComponent("docs/evidence/glm53-flash-t4-2026-10-17/README.md"),
             encoding: .utf8
         )
-        for record in ["window-20261017T022259Z-ac20-msb/", "selfcheck-20261017T041102Z/", "leftovers/"] {
+        for record in [
+            "final-18ca526/b1-20261017T091600Z-ac20-selfcheck/leg1-fixture.log",
+            "final-18ca526/b2-20261017T094515Z-msb-leftovers/leftovers.*",
+            "window-20261017T022259Z-ac20-msb/", "selfcheck-20261017T041102Z/", "leftovers/",
+        ] {
             XCTAssertTrue(readme.contains(record), "evidence README names \(record)")
         }
         let runtime = try String(

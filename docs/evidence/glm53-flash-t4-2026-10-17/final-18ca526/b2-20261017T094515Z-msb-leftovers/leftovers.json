@@ -1,0 +1,332 @@
+{
+  "aggregateCVPct" : 0,
+  "aggregateTPSRuns" : [
+
+  ],
+  "aggregateTPSp50" : 0,
+  "aggregateUpliftVsPagedSingleRow" : 0,
+  "aggregateVsProductionSerial" : 0,
+  "blockSizeTokens" : 16,
+  "compiled" : false,
+  "decodeTokensPerRow" : 256,
+  "engine" : "scheduler",
+  "layerCount" : 11,
+  "leftovers" : {
+    "isolation" : {
+      "cancelledCompletionTokens" : 0,
+      "cancelledRequestID" : "msb-cancel",
+      "cancelledStatus" : "cancelled",
+      "healthyCompletionTokens" : 32,
+      "healthyRequestID" : "msb-healthy",
+      "healthyStatus" : "length",
+      "pass" : true
+    },
+    "usagePass" : true,
+    "usageRows" : [
+      {
+        "cachedPromptTokens" : 0,
+        "completionTokens" : 0,
+        "emittedTokens" : 1,
+        "promptTokens" : 1024,
+        "requestID" : "msb-cancel",
+        "settlementDisposition" : "not_eligible",
+        "terminalStatus" : "cancelled"
+      },
+      {
+        "cachedPromptTokens" : 0,
+        "completionTokens" : 32,
+        "emittedTokens" : 32,
+        "promptTokens" : 1024,
+        "requestID" : "msb-healthy",
+        "settlementDisposition" : "eligible_owner",
+        "terminalStatus" : "length"
+      }
+    ]
+  },
+  "maxPhysicalBlocks" : 1024,
+  "mlxSwiftLMPin" : "mlxlm-18ca526706db",
+  "modelID" : "<models>\/GLM-5.3-Flash-oQ4e-mtp",
+  "modelTag" : "GLM-5.3-Flash-oQ4e-mtp",
+  "pagedSingleRowCVPct" : 0,
+  "pagedSingleRowTPSRuns" : [
+
+  ],
+  "pagedSingleRowTPSp50" : 0,
+  "peakRSSMB" : 133498,
+  "perRowFractionOfPagedSingleRow" : 0,
+  "perRowTPSp50" : 0,
+  "productionSerialCVPct" : 0,
+  "productionSerialPromptTokens" : 1024,
+  "productionSerialTPSRuns" : [
+
+  ],
+  "productionSerialTPSp50" : 0,
+  "promptTokenLengths" : [
+    1024,
+    1024
+  ],
+  "promptTokenSHA256" : [
+    "c2d6e0a41c032e905401737f80cfeaf532576de3aef86f3382067663f683b3dd",
+    "bb27f683b1bd122f66d900e82379da023fe1014bda15ede6d18f4741f834c1ac"
+  ],
+  "promptTokensPerRow" : 1024,
+  "rows" : 2,
+  "runs" : 1,
+  "scenario" : "isolation",
+  "schemaVersion" : 4,
+  "timestamp" : "2026-10-17T09:57:27Z"
+}
+{
+  "aggregateCVPct" : 0,
+  "aggregateTPSRuns" : [
+
+  ],
+  "aggregateTPSp50" : 0,
+  "aggregateUpliftVsPagedSingleRow" : 0,
+  "aggregateVsProductionSerial" : 0,
+  "blockSizeTokens" : 16,
+  "compiled" : false,
+  "decodeTokensPerRow" : 256,
+  "engine" : "scheduler",
+  "layerCount" : 11,
+  "leftovers" : {
+    "replay" : {
+      "firstDisposition" : "eligible_owner",
+      "pass" : true,
+      "replayDisposition" : "non_settling_replay",
+      "requestID" : "msb-replay-owner",
+      "tokensMatch" : true
+    },
+    "usagePass" : true,
+    "usageRows" : [
+      {
+        "cachedPromptTokens" : 0,
+        "completionTokens" : 32,
+        "emittedTokens" : 32,
+        "promptTokens" : 1024,
+        "requestID" : "msb-replay-owner",
+        "settlementDisposition" : "eligible_owner",
+        "terminalStatus" : "length"
+      },
+      {
+        "cachedPromptTokens" : 0,
+        "completionTokens" : 32,
+        "emittedTokens" : 32,
+        "promptTokens" : 1024,
+        "requestID" : "msb-replay-owner",
+        "settlementDisposition" : "non_settling_replay",
+        "terminalStatus" : "length"
+      }
+    ]
+  },
+  "maxPhysicalBlocks" : 1024,
+  "mlxSwiftLMPin" : "mlxlm-18ca526706db",
+  "modelID" : "<models>\/GLM-5.3-Flash-oQ4e-mtp",
+  "modelTag" : "GLM-5.3-Flash-oQ4e-mtp",
+  "pagedSingleRowCVPct" : 0,
+  "pagedSingleRowTPSRuns" : [
+
+  ],
+  "pagedSingleRowTPSp50" : 0,
+  "peakRSSMB" : 133500,
+  "perRowFractionOfPagedSingleRow" : 0,
+  "perRowTPSp50" : 0,
+  "productionSerialCVPct" : 0,
+  "productionSerialPromptTokens" : 1024,
+  "productionSerialTPSRuns" : [
+
+  ],
+  "productionSerialTPSp50" : 0,
+  "promptTokenLengths" : [
+    1024
+  ],
+  "promptTokenSHA256" : [
+    "c2d6e0a41c032e905401737f80cfeaf532576de3aef86f3382067663f683b3dd"
+  ],
+  "promptTokensPerRow" : 1024,
+  "rows" : 1,
+  "runs" : 1,
+  "scenario" : "replay",
+  "schemaVersion" : 4,
+  "timestamp" : "2026-10-17T09:57:31Z"
+}
+{
+  "aggregateCVPct" : 0,
+  "aggregateTPSRuns" : [
+
+  ],
+  "aggregateTPSp50" : 0,
+  "aggregateUpliftVsPagedSingleRow" : 0,
+  "aggregateVsProductionSerial" : 0,
+  "blockSizeTokens" : 16,
+  "compiled" : false,
+  "decodeTokensPerRow" : 256,
+  "engine" : "scheduler",
+  "layerCount" : 11,
+  "leftovers" : {
+    "drain" : {
+      "activeRowsCompleted" : true,
+      "activeSettlements" : [
+        "eligible_owner",
+        "eligible_owner"
+      ],
+      "activeStatuses" : [
+        "length",
+        "length"
+      ],
+      "pass" : true,
+      "permitIssued" : true,
+      "permitValid" : true,
+      "postDrainRejected" : true,
+      "queuedRejected" : true
+    },
+    "usagePass" : true,
+    "usageRows" : [
+      {
+        "cachedPromptTokens" : 0,
+        "completionTokens" : 0,
+        "emittedTokens" : 0,
+        "promptTokens" : 0,
+        "requestID" : "msb-drain-queued",
+        "settlementDisposition" : "not_eligible",
+        "terminalStatus" : "rejected"
+      },
+      {
+        "cachedPromptTokens" : 0,
+        "completionTokens" : 32,
+        "emittedTokens" : 32,
+        "promptTokens" : 1024,
+        "requestID" : "msb-drain-a",
+        "settlementDisposition" : "eligible_owner",
+        "terminalStatus" : "length"
+      },
+      {
+        "cachedPromptTokens" : 0,
+        "completionTokens" : 32,
+        "emittedTokens" : 32,
+        "promptTokens" : 1024,
+        "requestID" : "msb-drain-b",
+        "settlementDisposition" : "eligible_owner",
+        "terminalStatus" : "length"
+      }
+    ]
+  },
+  "maxPhysicalBlocks" : 1024,
+  "mlxSwiftLMPin" : "mlxlm-18ca526706db",
+  "modelID" : "<models>\/GLM-5.3-Flash-oQ4e-mtp",
+  "modelTag" : "GLM-5.3-Flash-oQ4e-mtp",
+  "pagedSingleRowCVPct" : 0,
+  "pagedSingleRowTPSRuns" : [
+
+  ],
+  "pagedSingleRowTPSp50" : 0,
+  "peakRSSMB" : 133517,
+  "perRowFractionOfPagedSingleRow" : 0,
+  "perRowTPSp50" : 0,
+  "productionSerialCVPct" : 0,
+  "productionSerialPromptTokens" : 1024,
+  "productionSerialTPSRuns" : [
+
+  ],
+  "productionSerialTPSp50" : 0,
+  "promptTokenLengths" : [
+    1024,
+    1024,
+    1024
+  ],
+  "promptTokenSHA256" : [
+    "c2d6e0a41c032e905401737f80cfeaf532576de3aef86f3382067663f683b3dd",
+    "bb27f683b1bd122f66d900e82379da023fe1014bda15ede6d18f4741f834c1ac",
+    "3923e437beaf0f76bb205078aa2ff48ff22f47f09b7c84d8d0d9a2fd9d820620"
+  ],
+  "promptTokensPerRow" : 1024,
+  "rows" : 3,
+  "runs" : 1,
+  "scenario" : "drain",
+  "schemaVersion" : 4,
+  "timestamp" : "2026-10-17T09:57:37Z"
+}
+{
+  "aggregateCVPct" : 0,
+  "aggregateTPSRuns" : [
+    58.57654467917695
+  ],
+  "aggregateTPSp50" : 58.57654467917695,
+  "aggregateUpliftVsPagedSingleRow" : 1.440590239569582,
+  "aggregateVsProductionSerial" : 1.3921460801928938,
+  "blockSizeTokens" : 16,
+  "compiled" : false,
+  "decodeTokensPerRow" : 256,
+  "engine" : "scheduler",
+  "layerCount" : 11,
+  "leftovers" : {
+    "parity" : {
+      "batchedRowMatches" : [
+        true,
+        true
+      ],
+      "batchedTokenSHA256" : "dd044281acdd05f18fff1bc443350c84ab461795c77cc8d4ed6afe9264cd87f2",
+      "comparedTokens" : 48,
+      "oneRowMatch" : true,
+      "pass" : true,
+      "serialTokenSHA256" : "dd044281acdd05f18fff1bc443350c84ab461795c77cc8d4ed6afe9264cd87f2",
+      "standaloneRowMatches" : [
+        true,
+        true
+      ]
+    },
+    "usagePass" : true,
+    "usageRows" : [
+      {
+        "cachedPromptTokens" : 0,
+        "completionTokens" : 48,
+        "emittedTokens" : 48,
+        "promptTokens" : 1024,
+        "requestID" : "msb-sched-0-8A04FB0A-7958-4528-9794-A98D59591F6F",
+        "settlementDisposition" : "eligible_owner",
+        "terminalStatus" : "length"
+      },
+      {
+        "cachedPromptTokens" : 0,
+        "completionTokens" : 48,
+        "emittedTokens" : 48,
+        "promptTokens" : 1024,
+        "requestID" : "msb-sched-1-E83CDF8C-4650-4D20-885F-CBA8B8C425F9",
+        "settlementDisposition" : "eligible_owner",
+        "terminalStatus" : "length"
+      }
+    ]
+  },
+  "maxPhysicalBlocks" : 1024,
+  "mlxSwiftLMPin" : "mlxlm-18ca526706db",
+  "modelID" : "<models>\/GLM-5.3-Flash-oQ4e-mtp",
+  "modelTag" : "GLM-5.3-Flash-oQ4e-mtp",
+  "pagedSingleRowCVPct" : 0,
+  "pagedSingleRowTPSRuns" : [
+    40.66148934667112
+  ],
+  "pagedSingleRowTPSp50" : 40.66148934667112,
+  "peakRSSMB" : 133517,
+  "perRowFractionOfPagedSingleRow" : 0.720295119784791,
+  "perRowTPSp50" : 29.288272339588474,
+  "productionSerialCVPct" : 0,
+  "productionSerialPromptTokens" : 1024,
+  "productionSerialTPSRuns" : [
+    42.07643544926023
+  ],
+  "productionSerialTPSp50" : 42.07643544926023,
+  "promptTokenLengths" : [
+    1024,
+    1024
+  ],
+  "promptTokenSHA256" : [
+    "c2d6e0a41c032e905401737f80cfeaf532576de3aef86f3382067663f683b3dd",
+    "bb27f683b1bd122f66d900e82379da023fe1014bda15ede6d18f4741f834c1ac"
+  ],
+  "promptTokensPerRow" : 1024,
+  "rows" : 2,
+  "runs" : 1,
+  "scenario" : "parity",
+  "schemaVersion" : 4,
+  "timestamp" : "2026-10-17T09:58:19Z"
+}

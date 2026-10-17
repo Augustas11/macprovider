@@ -70,16 +70,18 @@ Owner: provider runtime / inference engine
 Change log v0.1.20 (2026-10-17): the FR-PKV12 GLM-5.3-Flash entry's
 evidence is recorded under `docs/evidence/glm53-flash-t4-2026-10-17/`, on the
 exact identity (snapshot-manifest `7299b6a7…`, M3 Ultra, Metal library
-`589e56e0…`): the AC-20 fixture
-(`window-20261017T022259Z-ac20-msb/`: 48 exact greedy tokens at 2,800 prompt
-tokens, 1,166 gather calls, byte-equal pending windows, attach probe
-established); the attach proof and row isolation from a lab serve
-(`selfcheck-20261017T041102Z/serve.log`: parity established over 11 sparse
-layers in 36 forwards, MoE expert-dispatch isolation on first decode and on
-rejoin, batched isolation with 0 cross-row divergences; the SPEC-038 FR-CB10
-self-check's rows exact at k = 2..4); and isolation, replay, drain and
-48-token parity from the scheduler leftovers harness (`leftovers/`, all
-`pass=true`), the record the `openai/gpt-oss-120b` entry used. The entry now advertises the tuple; load-time probes, the per-Mac
+`589e56e0…`), at the pinned mlx-swift-lm `18ca526` in `final-18ca526/`:
+the AC-20 fixture (`b1-20261017T091600Z-ac20-selfcheck/leg1-fixture.log`:
+48 exact greedy tokens at 2,800 prompt tokens, 1,166 gather calls,
+byte-equal pending windows, attach probe established); the attach proof and
+row isolation from a lab serve (`b1-…/selfcheck/serve.log`: parity
+established over 11 sparse layers in 36 forwards, MoE expert-dispatch
+isolation on first decode and on rejoin, batched isolation with 0 cross-row
+divergences; the SPEC-038 FR-CB10 self-check's rows exact at k = 2..4); and
+isolation, replay, drain and 48-token parity from the scheduler leftovers
+harness (`b2-20261017T094515Z-msb-leftovers/leftovers.*`, all `pass=true`),
+the record the `openai/gpt-oss-120b` entry used. The same records at the
+earlier `7d8dbf5` pin are kept there as superseded. The entry now advertises the tuple; load-time probes, the per-Mac
 FR-CB10 self-check and the signed SPEC-023 policy still gate serving.
 Refines SPEC-039-R012.
 Change log v0.1.19 (2026-10-17): FR-PKV12 caps a shared forward over

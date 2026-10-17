@@ -1,0 +1,13 @@
+Test Suite 'Selected tests' started at 2026-10-17 02:16:01.687.
+Test Suite 'phase3-binaryPackageTests.xctest' started at 2026-10-17 02:16:01.688.
+Test Suite 'GLM5NextPagedMLAParityTests' started at 2026-10-17 02:16:01.688.
+Test Case '-[macprovider_cliTests.GLM5NextPagedMLAParityTests testAC20_GLM5NextPagedMLAExactParityOnTheAdmittedArtifact]' started.
+Test Case '-[macprovider_cliTests.GLM5NextPagedMLAParityTests testAC20_GLM5NextPagedMLAExactParityOnTheAdmittedArtifact]' passed (426.586 seconds).
+Test Suite 'GLM5NextPagedMLAParityTests' passed at 2026-10-17 02:23:08.274.
+	 Executed 1 test, with 0 failures (0 unexpected) in 426.586 (426.586) seconds
+Test Suite 'phase3-binaryPackageTests.xctest' passed at 2026-10-17 02:23:08.274.
+	 Executed 1 test, with 0 failures (0 unexpected) in 426.586 (426.586) seconds
+Test Suite 'Selected tests' passed at 2026-10-17 02:23:08.274.
+	 Executed 1 test, with 0 failures (0 unexpected) in 426.586 (426.587) seconds
+  [AC-20 glm5_next] prompt=2800 tokens=48 sparseLayers=11 gatherCalls=1166 maxLogicalBlocks=12 nonIdentity=true pending=[3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3] stateMismatches=0
+  [AC-20 glm5_next attach probe] established=true nLayers=11 nForwards=36 gatherCalls=792
