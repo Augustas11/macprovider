@@ -5477,7 +5477,7 @@ actor ModelRuntime: ModelRuntimeServing {
             nativeMTPRoundByteCapacity: nativeMTPRoundByteCapacity,
             nativeMTPStatusSink: nativeMTPStatusSink,
             prefillGrouping: prefillGrouping,
-            maxDecodeRowsPerForward: continuousBatchDecodeRowBound(),
+            maxDecodeRowsPerForward: continuousBatchDecodeRowBound(cacheKinds: cacheKinds),
             replayAuthority: replayAuthority,
             contiguousCacheBridge: contiguousCacheBridge
         )
@@ -5520,6 +5520,27 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     /// The decode row bound for this device (`ContinuousBatchDecodeRouteBound`).
+    /// The decode row bound for this device, further capped by the backend's
+    /// flattened-token bound for `cacheKinds` (`glm5_next`: 8, SPEC-039
+    /// v0.1.19), so the logged bound is the one the scheduler splits by.
+    private static func continuousBatchDecodeRowBound(cacheKinds: [PagedKVSharedForwardBackend.CacheKind]?) -> Int {
+        let deviceBound = continuousBatchDecodeRowBound()
+        let bound = effectiveDecodeRowBound(deviceBound: deviceBound, cacheKinds: cacheKinds)
+        if bound != deviceBound {
+            FileHandle.standardError.write(Data(
+                "event=continuous_batch_decode_row_bound max_decode_rows_per_forward=\(bound) device_bound=\(deviceBound) reason=flattened_token_cap\n".utf8
+            ))
+        }
+        return bound
+    }
+
+    static func effectiveDecodeRowBound(deviceBound: Int, cacheKinds: [PagedKVSharedForwardBackend.CacheKind]?) -> Int {
+        guard let cacheKinds, let cap = PagedKVSharedForwardBackend.maxFlattenedTokensPerForward(cacheKinds: cacheKinds) else {
+            return deviceBound
+        }
+        return min(deviceBound, cap)
+    }
+
     private static func continuousBatchDecodeRowBound() -> Int {
         let architecture = metalArchitectureForQuantizedRoutes()
         let deviceBound = ContinuousBatchDecodeRouteBound.maxDecodeRowsPerForward(architecture: architecture)
@@ -10165,7 +10186,7 @@ actor ModelRuntime: ModelRuntimeServing {
     ) async throws -> (ModelContainer, URL) {
         try await loadLocalContainer(
             from: target,
-            tokenizerLoader: #huggingFaceTokenizerLoader(),
+            tokenizerLoader: ChatTemplateCompatTokenizerLoader(),
             nativeVision: nativeVision
         )
     }
@@ -10931,7 +10952,7 @@ actor ModelRuntime: ModelRuntimeServing {
         }
         return NativeMTPCapturedTokenizerLoader(
             tokenizerDirectory: targetURL,
-            base: #huggingFaceTokenizerLoader()
+            base: ChatTemplateCompatTokenizerLoader()
         )
     }
 

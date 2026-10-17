@@ -240,4 +240,17 @@ final class GLM5NextPagedKVWiringTests: XCTestCase {
         )
         XCTAssertEqual(plain, ModelRuntime.continuousBatchingSelfCheckRuntimeBuild(forwardBound: 11, routeKeyBoundary: 1024))
     }
+
+    /// The serve scheduler's decode row bound is the device bound capped by
+    /// the glm5_next flattened-token bound, so the logged and enforced bound
+    /// is 8 on an 11-row device (window: `max_decode_rows_per_forward=11`).
+    func testServeDecodeRowBoundCarriesTheGLM5NextCap() {
+        let glm: [CacheKind] = Self.layerTypes.map {
+            $0 == "deepseek_sparse_attention" ? .pagedMLA(kpool: 4) : .recurrentMamba
+        }
+        XCTAssertEqual(ModelRuntime.effectiveDecodeRowBound(deviceBound: 11, cacheKinds: glm), 8)
+        XCTAssertEqual(ModelRuntime.effectiveDecodeRowBound(deviceBound: 5, cacheKinds: glm), 5)
+        XCTAssertEqual(ModelRuntime.effectiveDecodeRowBound(deviceBound: 11, cacheKinds: [.recurrentMamba, .pagedAttention]), 11)
+        XCTAssertEqual(ModelRuntime.effectiveDecodeRowBound(deviceBound: 11, cacheKinds: nil), 11)
+    }
 }

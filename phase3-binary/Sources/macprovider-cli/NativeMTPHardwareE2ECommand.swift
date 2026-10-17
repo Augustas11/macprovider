@@ -513,7 +513,7 @@ final class NativeMTPHardwareE2ERunner {
         } else {
             targetContainer = try await LLMModelFactory.shared.loadContainer(
                 from: targetDirectory,
-                using: #huggingFaceTokenizerLoader()
+                using: ChatTemplateCompatTokenizerLoader()
             )
             let drafterPresent = await ModelRuntime.nativeMTPDrafterPresent(
                 familyAdapter: family.familyAdapter,
@@ -524,7 +524,7 @@ final class NativeMTPHardwareE2ERunner {
                 familyAdapter: family.familyAdapter,
                 targetDirectory: targetDirectory,
                 drafterDirectory: mtpDirectory,
-                tokenizerLoader: #huggingFaceTokenizerLoader()
+                tokenizerLoader: ChatTemplateCompatTokenizerLoader()
             )
         }
         let maximumBlockSize = await drafterContainer.perform { context in
