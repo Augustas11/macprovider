@@ -35,8 +35,10 @@ for requirement in (
     "contents: read",
     CHECKOUT,
     "persist-credentials: false",
-    "fetch-depth: 1",
+    "fetch-depth: 0",
     CHECKER,
+    "INSTALL_SH_RELEASE_TAG: ${{ steps.pin.outputs.tag }}",
+    "select(.isDraft==false and .isPrerelease==false)",
     "unset GITHUB_TOKEN GH_TOKEN GH_ENTERPRISE_TOKEN",
     'INSTALL_SH_URL="https://get.malibu.tech/install.sh"',
     "timeout-minutes: 10",
@@ -52,15 +54,26 @@ for requirement in (
 
 if alarm.count(CHECKER) != 1:
     raise SystemExit("alarm must invoke the checker exactly once")
-if "GH_TOKEN: ${{" in alarm or "GITHUB_TOKEN: ${{" in alarm or "github.token" in alarm:
-    raise SystemExit("alarm must not map GH_TOKEN/GITHUB_TOKEN (authenticated probe is unfaithful)")
+# Only the tag-pin step may read the Actions token; the probe step that runs
+# the checker must carry none (an authenticated probe is unfaithful, #1588).
+steps = alarm.split("\n      - name: ")
+probe_steps = [step for step in steps if CHECKER in step]
+pin_steps = [step for step in steps if "gh release list" in step]
+if len(probe_steps) != 1 or len(pin_steps) != 1 or probe_steps[0] is pin_steps[0]:
+    raise SystemExit("alarm must pin the release tag and run the checker in separate steps")
+for step in probe_steps:
+    if "GH_TOKEN: ${{" in step or "GITHUB_TOKEN: ${{" in step or "github.token" in step or "gh release" in step:
+        raise SystemExit("the probe step must not map GH_TOKEN/GITHUB_TOKEN (authenticated probe is unfaithful)")
+for step in steps:
+    if "github.token" in step and step is not pin_steps[0]:
+        raise SystemExit("only the tag-pin step may read github.token")
 for forbidden in (
     "secrets.",
     "environment: production-release",
     "contents: write",
-    "gh release",
     "PEARL_SSH",
     "INSTALL_SH_FILE",
+    "INSTALL_SH_REFERENCE_FILE",
 ):
     if forbidden in alarm:
         raise SystemExit(f"alarm workflow must not contain {forbidden!r}")
@@ -81,9 +94,17 @@ for requirement in (
     "--proto-redir '=https'",
     "--tlsv1.2",
     "--netrc-file /dev/null",
+    "never executes its bytes",
+    "cmp -s \"$SERVED\" \"$REFERENCE\"",
+    "install_sh_vs_release",
+    "ulimit -f",
 ):
     if requirement not in checker:
         raise SystemExit(f"checker omits: {requirement}")
+# #2036: every function the checker runs comes from the repository copy.
+probe = checker[checker.index('INSTALLER="$REFERENCE"'):]
+if '"$SERVED"' in probe:
+    raise SystemExit("checker must not read the served bytes after the parity check")
 if "gh release" in checker:
     raise SystemExit("checker must not use gh (authenticated, different resolver)")
 if "/releases/latest" in checker:
@@ -185,6 +206,15 @@ hit() {
   exit 0
 }
 case "\$url" in
+  https://get.malibu.tech/install.sh)
+    if has oversize-install; then
+      # Like curl, the writer dies at the caller's file-size limit.
+      rc=0
+      head -c 4194304 /dev/zero > "\$out" || rc=\$?
+      exit "\$rc"
+    fi
+    hit "\$fixtures/served-install.sh"
+    ;;
   https://coordinator.malibu.tech/healthz)
     has coordinator-down && exit 7
     printf '%s' '{"status":"ok","recommended_binary_version":"1.8.123"}'
@@ -215,6 +245,12 @@ case "\$url" in
     ;;
   */checksums.txt)
     has checksums-404 && miss
+    if has oversize-checksums; then
+      rc=0
+      head -c 4194304 /dev/zero > "\$out" || rc=\$?
+      echo "\$url \$(wc -c < "\$out" | tr -d ' ')" >> "$WORKDIR/stream.log"
+      exit "\$rc"
+    fi
     hit "\$fixtures/checksums.txt"
     ;;
   *.pkg)
@@ -300,7 +336,7 @@ latest_release_tag() {
 download_release() { echo leaked; }
 EOF
 )"
-run_checker happy-path 0 INSTALL_SH_FILE="$WORKDIR/ok.sh"
+run_checker happy-path 0 INSTALL_SH_FILE="$WORKDIR/ok.sh" INSTALL_SH_REFERENCE_FILE="$WORKDIR/ok.sh"
 if grep -q SOURCED_MAIN "$WORKDIR/happy-path.out"; then
   printf '[test-install-sh-consumer-health-alarm] FAIL happy-path sourced install.sh main\n' >&2
   exit 1
@@ -323,7 +359,7 @@ latest_release_tag() {
 }
 EOF
 )"
-run_checker die3 1 INSTALL_SH_FILE="$WORKDIR/die3.sh"
+run_checker die3 1 INSTALL_SH_FILE="$WORKDIR/die3.sh" INSTALL_SH_REFERENCE_FILE="$WORKDIR/die3.sh"
 grep -q 'ALARM:' "$WORKDIR/die3.out" || {
   printf '[test-install-sh-consumer-health-alarm] FAIL die3 did not alarm\n' >&2
   cat "$WORKDIR/die3.out" >&2
@@ -335,11 +371,11 @@ write_fixture "$WORKDIR/badtag.sh" "$(cat <<'EOF'
 latest_release_tag() { printf '%s' 'verify-v1.0.0'; }
 EOF
 )"
-run_checker bad-tag 1 INSTALL_SH_FILE="$WORKDIR/badtag.sh"
+run_checker bad-tag 1 INSTALL_SH_FILE="$WORKDIR/badtag.sh" INSTALL_SH_REFERENCE_FILE="$WORKDIR/badtag.sh"
 
 # Missing function.
 write_fixture "$WORKDIR/missing.sh" $'#!/usr/bin/env bash\necho hi\n'
-run_checker missing-fn 1 INSTALL_SH_FILE="$WORKDIR/missing.sh"
+run_checker missing-fn 1 INSTALL_SH_FILE="$WORKDIR/missing.sh" INSTALL_SH_REFERENCE_FILE="$WORKDIR/missing.sh"
 
 # checksums.txt 404.
 write_curl_mock checksums-404
@@ -349,7 +385,7 @@ latest_release_tag() {
 }
 EOF
 )"
-run_checker checksums-404 1 INSTALL_SH_FILE="$WORKDIR/ok2.sh"
+run_checker checksums-404 1 INSTALL_SH_FILE="$WORKDIR/ok2.sh" INSTALL_SH_REFERENCE_FILE="$WORKDIR/ok2.sh"
 grep -q 'checksums.txt' "$WORKDIR/checksums-404.out" || {
   printf '[test-install-sh-consumer-health-alarm] FAIL checksums-404 did not mention checksums.txt\n' >&2
   cat "$WORKDIR/checksums-404.out" >&2
@@ -358,7 +394,7 @@ grep -q 'checksums.txt' "$WORKDIR/checksums-404.out" || {
 
 # Both platform assets 404.
 write_curl_mock assets-404
-run_checker assets-404 1 INSTALL_SH_FILE="$WORKDIR/ok2.sh"
+run_checker assets-404 1 INSTALL_SH_FILE="$WORKDIR/ok2.sh" INSTALL_SH_REFERENCE_FILE="$WORKDIR/ok2.sh"
 grep -q 'platform asset' "$WORKDIR/assets-404.out" || {
   printf '[test-install-sh-consumer-health-alarm] FAIL assets-404 did not mention platform asset\n' >&2
   cat "$WORKDIR/assets-404.out" >&2
@@ -367,7 +403,7 @@ grep -q 'platform asset' "$WORKDIR/assets-404.out" || {
 
 # pkg 404, tarball 200 still counts as installable.
 write_curl_mock pkg-404-tar-200
-run_checker pkg-fallback 0 INSTALL_SH_FILE="$WORKDIR/ok2.sh"
+run_checker pkg-fallback 0 INSTALL_SH_FILE="$WORKDIR/ok2.sh" INSTALL_SH_REFERENCE_FILE="$WORKDIR/ok2.sh"
 grep -q 'tar.gz' "$WORKDIR/pkg-fallback.out" || {
   printf '[test-install-sh-consumer-health-alarm] FAIL pkg-fallback did not accept tarball\n' >&2
   cat "$WORKDIR/pkg-fallback.out" >&2
@@ -393,7 +429,7 @@ latest_release_tag() {
 version_at_least() { return 0; }
 EOF
 )"
-run_checker braces-extract 0 INSTALL_SH_FILE="$WORKDIR/braces.sh"
+run_checker braces-extract 0 INSTALL_SH_FILE="$WORKDIR/braces.sh" INSTALL_SH_REFERENCE_FILE="$WORKDIR/braces.sh"
 
 # #2036: the served full resolver runs unauthenticated with the production
 # coordinator, and never needs the anonymous GitHub API when it advertises.
@@ -414,26 +450,26 @@ discover_latest_release_tag() {
 }
 EOF
 )"
-run_checker discover-mode 0 INSTALL_SH_FILE="$WORKDIR/discover.sh"
+run_checker discover-mode 0 INSTALL_SH_FILE="$WORKDIR/discover.sh" INSTALL_SH_REFERENCE_FILE="$WORKDIR/discover.sh"
 expect_output discover-mode 'discover_latest_release_tag resolved v1.8.123'
 expect_output discover-mode 'signature verified'
 
 # GitHub release downloads unavailable: the byte-identical mirror serves them.
 write_curl_mock github-downloads-404
-run_checker mirror-assets 0 INSTALL_SH_FILE="$WORKDIR/discover.sh"
+run_checker mirror-assets 0 INSTALL_SH_FILE="$WORKDIR/discover.sh" INSTALL_SH_REFERENCE_FILE="$WORKDIR/discover.sh"
 expect_output mirror-assets 'checksums.txt HTTP 200 from https://download.malibu.tech'
 expect_output mirror-assets 'darwin-arm64.pkg HTTP 200 from https://download.malibu.tech'
 
 # A bad checksums.txt.sig is an alarm, never a fallback to another host.
 write_curl_mock bad-sig
-run_checker bad-signature 1 INSTALL_SH_FILE="$WORKDIR/discover.sh"
+run_checker bad-signature 1 INSTALL_SH_FILE="$WORKDIR/discover.sh" INSTALL_SH_REFERENCE_FILE="$WORKDIR/discover.sh"
 expect_output bad-signature 'does not verify'
 
 # A served installer without the release key cannot prove installability.
 write_curl_mock ok
 printf '%s
 ' "latest_release_tag() { printf '%s' 'v1.8.123'; }" > "$WORKDIR/nokey.sh"
-run_checker no-release-key 1 INSTALL_SH_FILE="$WORKDIR/nokey.sh"
+run_checker no-release-key 1 INSTALL_SH_FILE="$WORKDIR/nokey.sh" INSTALL_SH_REFERENCE_FILE="$WORKDIR/nokey.sh"
 expect_output no-release-key 'write_checksum_public_key'
 
 # The checkout installer itself: its resolver takes the coordinator-advertised
@@ -467,6 +503,74 @@ expect_output head-installer-rate-limited 'deferred until'
   cat "$WORKDIR/curl-urls.log" >&2
   exit 1
 }
+
+# #2036: served bytes are never executed. A served copy carrying a malicious
+# function and top-level code differs from the repository copy: parity fails
+# and nothing from it runs.
+write_curl_mock ok
+pwned="$WORKDIR/PWNED"
+cat "$WORKDIR/ok2.sh" > "$WORKDIR/malicious.sh"
+cat >> "$WORKDIR/malicious.sh" <<EOF
+touch "$pwned.top"
+latest_release_tag() { touch "$pwned.resolver"; printf '%s' 'v1.8.123'; }
+write_checksum_public_key() { touch "$pwned.key"; cat "$FIXTURES/test-release.pub"; }
+EOF
+run_checker served-malicious 1 INSTALL_SH_FILE="$WORKDIR/malicious.sh" INSTALL_SH_REFERENCE_FILE="$WORKDIR/ok2.sh"
+expect_output served-malicious 'differs from the repository'
+expect_output served-malicious 'were not executed'
+if ls "$pwned".* >/dev/null 2>&1; then
+  printf '[test-install-sh-consumer-health-alarm] FAIL served-malicious: served bytes were executed\n' >&2
+  exit 1
+fi
+expect_no_fetch served-malicious 'coordinator.malibu.tech'
+
+# Parity is exact: one trailing byte of drift is an alarm.
+cp "$WORKDIR/ok2.sh" "$WORKDIR/ok2-twin.sh"
+printf ' ' >> "$WORKDIR/ok2-twin.sh"
+run_checker served-one-byte-drift 1 INSTALL_SH_FILE="$WORKDIR/ok2-twin.sh" INSTALL_SH_REFERENCE_FILE="$WORKDIR/ok2.sh"
+expect_output served-one-byte-drift 'differs from the repository'
+
+# The production path: the served copy is fetched over https and, matching the
+# checkout's dist/install.sh (the default repository copy), passes parity.
+cp "$WORKDIR/discover.sh" "$FIXTURES/served-install.sh"
+run_checker served-url-parity 0 INSTALL_SH_FILE="" INSTALL_SH_URL="https://get.malibu.tech/install.sh" \
+  INSTALL_SH_REFERENCE_FILE="$WORKDIR/discover.sh"
+expect_output served-url-parity 'byte-identical'
+expect_output served-url-parity 'discover_latest_release_tag resolved v1.8.123'
+
+# The checkout copy is the default repository copy.
+cp "$install_sh" "$FIXTURES/served-install.sh"
+run_checker served-url-default-reference 1 INSTALL_SH_FILE="" INSTALL_SH_URL="https://get.malibu.tech/install.sh"
+expect_output served-url-default-reference 'byte-identical to the repository checkout dist/install.sh'
+expect_output served-url-default-reference 'does not verify'
+
+# A served copy that drifts from the checkout copy alarms before any probe.
+cp "$WORKDIR/discover.sh" "$FIXTURES/served-install.sh"
+run_checker served-url-drift 1 INSTALL_SH_FILE="" INSTALL_SH_URL="https://get.malibu.tech/install.sh"
+expect_output served-url-drift 'differs from the repository checkout dist/install.sh'
+expect_no_fetch served-url-drift 'coordinator.malibu.tech'
+
+# An oversized served installer is cut off while it streams (probe error).
+write_curl_mock oversize-install
+run_checker served-oversize 2 INSTALL_SH_FILE="" INSTALL_SH_URL="https://get.malibu.tech/install.sh" \
+  INSTALL_SH_MAX_BYTES=65536
+expect_output served-oversize 'within 65536 bytes'
+
+# An oversized checksums.txt is cut at the 1 MiB metadata cap on each host.
+write_curl_mock oversize-checksums
+: > "$WORKDIR/stream.log"
+run_checker checksums-oversize 1 INSTALL_SH_FILE="$WORKDIR/discover.sh" INSTALL_SH_REFERENCE_FILE="$WORKDIR/discover.sh"
+expect_output checksums-oversize 'checksums.txt is not HTTP 200'
+[ "$(awk '$2 == 1048576' "$WORKDIR/stream.log" | wc -l | tr -d ' ')" = "2" ] || {
+  printf '[test-install-sh-consumer-health-alarm] FAIL checksums-oversize: want both hosts cut at 1048576 bytes\n' >&2
+  cat "$WORKDIR/stream.log" >&2
+  exit 1
+}
+
+# A release tag must be vMAJOR.MINOR.PATCH and must exist locally.
+run_checker bad-release-tag 2 INSTALL_SH_FILE="$WORKDIR/ok2.sh" INSTALL_SH_RELEASE_TAG='v1.8.1;id'
+run_checker missing-release-tag 2 INSTALL_SH_FILE="$WORKDIR/ok2.sh" INSTALL_SH_RELEASE_TAG='v0.0.0'
+expect_output missing-release-tag 'cannot read phase3-binary/dist/install.sh at tag v0.0.0'
 
 # Fetch error against a non-https URL is a probe error (exit 2), not an ALARM.
 run_checker bad-url 2 INSTALL_SH_FILE="" INSTALL_SH_URL="http://example.invalid/install.sh"

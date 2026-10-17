@@ -1295,6 +1295,8 @@ struct AutoUpdater: Sendable {
             return "rename_failed"
         case UpdateError.untrustedDownloadURL:
             return "untrusted_download_url"
+        case UpdateError.downloadTooLarge:
+            return "download_too_large"
         case UpdateError.untrustedReleaseAPIURL:
             return "untrusted_release_api_url"
         case UpdateError.unsafeArchiveEntry:

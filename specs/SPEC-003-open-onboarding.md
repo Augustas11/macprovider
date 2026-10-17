@@ -1,6 +1,8 @@
 # SPEC-003 — Open Onboarding: Distribution, Lifecycle & Onboarding UX
 
-**Version:** 0.12.2 (2026-10-17, issue #2036 release discovery without the anonymous GitHub API)
+**Version:** 0.12.3 (2026-10-17, issue #2036 installer hardening: the health gate never executes served bytes; streamed download caps)
+
+**Change log v0.12.3 (2026-10-17, issue #2036):** SPEC-003-R003: the install.sh consumer-health gate never executes the served installer. It requires the served bytes to equal the release's repository `dist/install.sh` and runs that copy's discovery. `install.sh` and the gate stream every release-host download under a hard byte cap and keep no partial file.
 
 **Change log v0.12.2 (2026-10-17, issue #2036):** SPEC-003-R003 makes the coordinator-advertised release the first unpinned discovery source and the anonymous GitHub Releases API (60 requests per hour per source IP, shared by every Mac behind one NAT) only its fallback, never retried; a spent budget is reported as deferred until its reset. Display-only release clients and the install.sh consumer-health gate use the same order, and the gate verifies `checksums.txt.sig`. `releases/latest.json` stays unsigned and unread.
 
@@ -1205,11 +1207,19 @@ client that only displays the newest release (the Malibu.app update badge,
 `malibu-cli status`) MUST use the same order, MUST NOT re-request the GitHub
 API before its reset (at most one hour away) or a bounded backoff after any
 other failure, and when it polls MUST back off after any failure. The install.sh consumer-health
-gate (`scripts/check-install-sh-consumer-health.sh`) MUST run the served
-installer's own discovery in this order and MUST verify the resolved release's
-`checksums.txt.sig` under the served installer's embedded key, reading assets
+gate (`scripts/check-install-sh-consumer-health.sh`) MUST NOT execute any byte
+of the served installer (v0.12.3, #2036: a compromised installer host must not
+mean code execution on the machine running the gate). It MUST first require
+the served bytes to be identical to the repository `phase3-binary/dist/install.sh`
+of the release, and a served copy that differs is an alarm. It MUST then run
+that repository copy's discovery in this order and MUST verify the resolved
+release's `checksums.txt.sig` under that copy's embedded key, reading assets
 from GitHub Releases or the mirror; a signature that does not verify is an
-alarm, never a fallback. The mirror's
+alarm, never a fallback. `install.sh` and the gate MUST stream every download
+from GitHub or the mirror under a hard byte cap defined once per surface (the
+signed metadata files a few KB, each release asset well above the largest
+current asset), MUST abort a transfer as soon as it passes the cap, and MUST
+leave no partial file (v0.12.3, #2036). The mirror's
 `latest.json` MUST NOT choose the tag: it is unsigned and mirror-controlled, and
 every public release, old or canary, carries a valid `checksums.txt.sig`. The
 embedded-key `checksums.txt.sig` verification, per-asset SHA-256, Gatekeeper,

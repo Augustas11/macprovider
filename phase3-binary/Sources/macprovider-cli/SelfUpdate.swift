@@ -106,6 +106,10 @@ struct SelfUpdate {
     static let releaseMirrorHost = "download.malibu.tech"
     static let releaseMirrorPathPrefix = "/releases/"
     static let maxReleaseMirrorMetadataBytes = 256 * 1_024
+    /// Hard cap on one release asset (tarball, Malibu DMG) streamed from
+    /// GitHub or the mirror before `checksums.txt.sig` can vouch for it
+    /// (#2036). The largest asset is under 50 MB today.
+    static let maxReleaseAssetBytes: Int64 = 256 * 1_024 * 1_024
     static let launchdLabel = "live.malibu.provider"
     static let watchdogLaunchdLabel = "live.malibu.provider-watchdog"
     static let providerReloadLaunchdLabel = "\(launchdLabel)-compatibility-reload"
@@ -552,14 +556,19 @@ struct SelfUpdate {
             let artifactIndexURL = tempDir.appendingPathComponent(artifactIndex.name)
             let checksumsURL = tempDir.appendingPathComponent(checksums.name)
             let checksumsSignatureURL = tempDir.appendingPathComponent(checksumsSignature.name)
-            try await download(from: checksums.browserDownloadURL, to: checksumsURL)
-            try await download(from: checksumsSignature.browserDownloadURL, to: checksumsSignatureURL)
+            let metadataCap = Int64(Self.maxReleaseMirrorMetadataBytes)
+            try await download(from: checksums.browserDownloadURL, to: checksumsURL, maximumBytes: metadataCap)
+            try await download(
+                from: checksumsSignature.browserDownloadURL,
+                to: checksumsSignatureURL,
+                maximumBytes: metadataCap
+            )
             try verifyChecksumSignature(checksumsURL: checksumsURL, signatureURL: checksumsSignatureURL, tempDir: tempDir)
             let checksumsText = try String(contentsOf: checksumsURL, encoding: .utf8)
             let expectedSHA = try Self.expectedSHA256(for: tarball.name, in: checksumsText)
             let expectedMalibuSHA = try Self.expectedSHA256(for: malibuDMG.name, in: checksumsText)
             let expectedArtifactIndexSHA = try Self.expectedSHA256(for: artifactIndex.name, in: checksumsText)
-            try await download(from: artifactIndex.browserDownloadURL, to: artifactIndexURL)
+            try await download(from: artifactIndex.browserDownloadURL, to: artifactIndexURL, maximumBytes: metadataCap)
             let actualArtifactIndexSHA = try Self.sha256(file: artifactIndexURL)
             guard actualArtifactIndexSHA.lowercased() == expectedArtifactIndexSHA.lowercased() else {
                 throw UpdateError.checksumMismatch(
@@ -571,8 +580,8 @@ struct SelfUpdate {
                actualArtifactIndexSHA.lowercased() != expectedArtifactIndexSHA256.lowercased() {
                 throw UpdateError.compatibilityArtifactIndexInvalid("discovery_head_digest_mismatch")
             }
-            try await download(from: tarball.browserDownloadURL, to: tarballURL)
-            try await download(from: malibuDMG.browserDownloadURL, to: malibuDMGURL)
+            try await download(from: tarball.browserDownloadURL, to: tarballURL, maximumBytes: Self.maxReleaseAssetBytes)
+            try await download(from: malibuDMG.browserDownloadURL, to: malibuDMGURL, maximumBytes: Self.maxReleaseAssetBytes)
             return try prepareValidatedUpdateAssets(
                 assetNames: release.assets.map(\.name),
                 tempDir: tempDir,
@@ -807,6 +816,10 @@ struct SelfUpdate {
             compatibilityManifest: compatibilityManifest,
             artifactIndexSHA256: actualArtifactIndexSHA256
         )
+    }
+
+    func downloadReleaseFileForTest(from url: URL, to destination: URL, maximumBytes: Int64) async throws {
+        try await download(from: url, to: destination, maximumBytes: maximumBytes)
     }
 
     func applyValidatedUpdateForTest(newBinary: URL) async throws {
@@ -1289,12 +1302,53 @@ struct SelfUpdate {
         return String(decoding: data, as: UTF8.self)
     }
 
-    private func download(from url: URL, to destination: URL) async throws {
-        let (downloaded, response) = try await session.download(from: url)
-        if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
-            throw UpdateError.httpStatus(http.statusCode)
+    /// Streams one release file to `destination` under a hard byte cap
+    /// (#2036). A declared length over `maximumBytes` is refused before the
+    /// body, and the transfer is cancelled the moment the streamed bytes pass
+    /// it. A failed or oversized download leaves no file behind.
+    private func download(from url: URL, to destination: URL, maximumBytes: Int64) async throws {
+        let partial = destination.deletingLastPathComponent()
+            .appendingPathComponent(".\(destination.lastPathComponent).partial")
+        try? FileManager.default.removeItem(at: partial)
+        do {
+            let (bytes, response) = try await session.bytes(for: URLRequest(url: url))
+            if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
+                bytes.task.cancel()
+                throw UpdateError.httpStatus(http.statusCode)
+            }
+            guard response.expectedContentLength <= maximumBytes else {
+                bytes.task.cancel()
+                throw UpdateError.downloadTooLarge(url.lastPathComponent, limit: maximumBytes)
+            }
+            guard FileManager.default.createFile(atPath: partial.path, contents: nil) else {
+                bytes.task.cancel()
+                throw CocoaError(.fileWriteUnknown)
+            }
+            let handle = try FileHandle(forWritingTo: partial)
+            defer { try? handle.close() }
+            let chunkSize = 64 * 1_024
+            var chunk = Data()
+            chunk.reserveCapacity(chunkSize)
+            var received: Int64 = 0
+            for try await byte in bytes {
+                received += 1
+                guard received <= maximumBytes else {
+                    bytes.task.cancel()
+                    throw UpdateError.downloadTooLarge(url.lastPathComponent, limit: maximumBytes)
+                }
+                chunk.append(byte)
+                if chunk.count == chunkSize {
+                    try handle.write(contentsOf: chunk)
+                    chunk.removeAll(keepingCapacity: true)
+                }
+            }
+            try handle.write(contentsOf: chunk)
+            try handle.close()
+            try FileManager.default.moveItem(at: partial, to: destination)
+        } catch {
+            try? FileManager.default.removeItem(at: partial)
+            throw error
         }
-        try FileManager.default.moveItem(at: downloaded, to: destination)
     }
 
     private func applyValidatedUpdate(
@@ -3333,6 +3387,7 @@ enum UpdateError: Error, CustomStringConvertible {
     case processTimedOut(String, TimeInterval)
     case renameFailed(Int32)
     case untrustedDownloadURL(String)
+    case downloadTooLarge(String, limit: Int64)
     case untrustedReleaseAPIURL(String)
     case unsafeArchiveEntry(String)
     case insufficientDiskSpace(required: Int64, available: Int64)
@@ -3393,6 +3448,8 @@ enum UpdateError: Error, CustomStringConvertible {
             return "Atomic binary replacement failed with errno \(errnoValue)"
         case .untrustedDownloadURL(let url):
             return "Untrusted release asset URL: \(url)"
+        case let .downloadTooLarge(name, limit):
+            return "Release download \(name) exceeds the \(limit)-byte cap"
         case .untrustedReleaseAPIURL(let url):
             return "Untrusted release API URL: \(url)"
         case .unsafeArchiveEntry(let entry):

@@ -907,7 +907,7 @@ ssh \"\$PEARL_SSH\" \"install -o root -g root -m 0755 /tmp/install.sh.new \$INST
   else
     step install_sh_consumer_health pending ""
     set_next install_sh_consumer_health read "Check that the served installer resolves an installable release" \
-      "bash scripts/check-install-sh-consumer-health.sh"
+      "INSTALL_SH_RELEASE_TAG=v$V bash scripts/check-install-sh-consumer-health.sh"
     next_meta install_sh_consumer_health "$VERIFY_DOC" "" install_sh_consumer_health
   fi
 

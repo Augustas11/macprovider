@@ -5,15 +5,18 @@ name: Install.sh consumer-surface health alarm
 # stable tag's dist/install.sh. That stayed green during #1574 because the
 # served copy was v1.8.123, and v1.8.123's latest_release_tag() used
 # ?per_page=30 — leading prereleases hid the stable tag, the resolver died 3,
-# and checksums.txt 404'd. This alarm fetches the SERVED installer and runs its
+# and checksums.txt 404'd. This alarm fetches the SERVED installer, requires it
+# to be byte-identical to the latest stable release's dist/install.sh, and
+# never executes the served bytes (#2036). It then runs that release copy's
 # own unauthenticated release discovery (the view a fresh host gets):
 # discover_latest_release_tag() when present, which takes the
 # coordinator-advertised release with the anonymous GitHub API only as its
 # fallback (#2036), else latest_release_tag(). It verifies checksums.txt.sig
-# under the served installer's release key and asserts a darwin-arm64 asset is
-# HTTP 200 from GitHub Releases or the release mirror. No secrets, no writes,
-# no deploy, and no GH_TOKEN. An authenticated probe is not faithful (drafts
-# become visible; #1588).
+# under the installer's release key and asserts a darwin-arm64 asset is HTTP
+# 200 from GitHub Releases or the release mirror. No secrets, no writes, no
+# deploy. Only the step that picks the latest release tag reads the Actions
+# token; the probe step runs with none. An authenticated probe is not faithful
+# (drafts become visible; #1588).
 #
 # A red run with a green parity alarm means "served bytes match a broken
 # release". That is a true alarm, not a flake. It stays red until the next
@@ -47,13 +50,34 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          fetch-depth: 1
+          fetch-depth: 0
           persist-credentials: false
+
+      - name: Pick the latest stable release as the trusted installer copy
+        id: pin
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Same selection as install-sh-parity-alarm.yml: the served file must
+          # be the latest published stable release's dist/install.sh.
+          latest_tag="$(
+            gh release list --repo "$GITHUB_REPOSITORY" --limit 50 \
+              --json tagName,isDraft,isPrerelease \
+              --jq '.[] | select(.isDraft==false and .isPrerelease==false) | .tagName' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1
+          )"
+          [ -n "$latest_tag" ] || { echo "::error::no published vX.Y.Z release tag found"; exit 1; }
+          echo "Latest release tag: $latest_tag"
+          echo "tag=$latest_tag" >> "$GITHUB_OUTPUT"
 
       - name: Probe served install.sh resolver unauthenticated
         shell: bash
         # Deliberately no GH_TOKEN / GITHUB_TOKEN mapping. Do not inject the
-        # Actions token into this job's environment.
+        # Actions token into this step's environment.
+        env:
+          INSTALL_SH_RELEASE_TAG: ${{ steps.pin.outputs.tag }}
         run: |
           set -euo pipefail
           unset GITHUB_TOKEN GH_TOKEN GH_ENTERPRISE_TOKEN || true

@@ -42,6 +42,12 @@ GITHUB_REPO="${MACPROVIDER_GITHUB_REPO:-Augustas11/macprovider}"
 # stays the only authority for every byte, whichever host served it.
 RELEASE_MIRROR_BASE="https://download.malibu.tech/releases"
 RELEASE_MIRROR_REPO="Augustas11/macprovider"
+# Hard caps on the bytes streamed from any download host (GitHub or the
+# mirror), enforced while the body streams by capped_download (#2036). The
+# largest release asset is under 50 MB today, so the asset cap leaves ample
+# margin; checksums.txt and its signature are a few KB.
+RELEASE_ASSET_MAX_BYTES=268435456
+RELEASE_METADATA_MAX_BYTES=1048576
 # MACPROVIDER_RELEASE_MIRROR=1 tries the mirror before GitHub (skips GitHub
 # timeouts on networks where it is known to be blocked). 0 (default) tries
 # GitHub first and falls back to the mirror on any failure.
@@ -7766,6 +7772,37 @@ _bootstrap_python_die() {
   die 8 "This Mac has no usable python3 (Apple's Command Line Tools stub or missing interpreter), and the installer could not bootstrap a pinned standalone interpreter: $*. Put a working python3 on PATH or install Apple's Command Line Developer Tools (xcode-select --install), then retry."
 }
 
+# capped_download <max-bytes> <dest> <curl args...>: curl into dest under a
+# kernel file-size limit (RLIMIT_FSIZE), so an oversized body is cut off as it
+# streams, whatever the curl version and whether or not the host sends a
+# Content-Length (#2036). curl's --max-filesize refuses a declared oversize
+# before any byte is written. A transfer that fails or exceeds the cap leaves
+# no file behind.
+capped_download() {
+  local max_bytes="$1" dest="$2" rc=0 size=0
+  shift 2
+  rm -f "$dest"
+  # Rounded up to whole KiB (bash counts ulimit -f in 1024-byte units); the
+  # exact byte cap is checked below. If the hard limit is already lower, that
+  # stricter limit applies.
+  (
+    ulimit -f $(((max_bytes + 1023) / 1024)) 2>/dev/null || true
+    curl --max-filesize "$max_bytes" -o "$dest" "$@"
+  ) || rc=$?
+  [ -f "$dest" ] && size="$(wc -c < "$dest" | tr -d ' ')"
+  # curl exits 63 when it refuses a declared (or, on curl 8.4+, streamed)
+  # oversize; the kernel limit kills curl with exactly the rounded cap on disk.
+  if [ "$rc" -eq 63 ] || { [ "$size" -ge "$max_bytes" ] && { [ "$rc" -ne 0 ] || [ "$size" -gt "$max_bytes" ]; }; }; then
+    log "Download exceeded the ${max_bytes}-byte cap; discarded it." >&2
+    rc=1
+  fi
+  if [ "$rc" -ne 0 ]; then
+    rm -f "$dest"
+    return "$rc"
+  fi
+  return 0
+}
+
 # Install or reuse the pinned standalone CPython. Sets INSTALL_PYTHON3.
 # MACPROVIDER_PYTHON_BOOTSTRAP_DISABLE=1: fail closed (tests of the missing
 # interpreter path). URL/SHA256/dir/interpreter overrides are ignored unless
@@ -7819,8 +7856,9 @@ bootstrap_standalone_python3() {
   fi
   for source in $sources; do
     rm -f "$tarball"
-    if ! curl -fL --connect-timeout 10 --speed-limit 1024 --speed-time 120 --retry 2 --retry-connrefused --retry-max-time 120 \
-      "$source" -o "$tarball"; then
+    if ! capped_download "$RELEASE_ASSET_MAX_BYTES" "$tarball" \
+      -fL --connect-timeout 10 --speed-limit 1024 --speed-time 120 --retry 2 --retry-connrefused --retry-max-time 120 \
+      "$source"; then
       log "Could not download pinned python3 from $source; trying the next source."
       continue
     fi
@@ -10071,13 +10109,13 @@ fetch_release_asset() {
     sources="github mirror"
   fi
   # With no mirror to fall back to (a fork), GitHub keeps its original retry
-  # budget. The mirror is untrusted transport, so its bytes are size-capped
-  # before checksums.txt.sig can vouch for them.
+  # budget. Every host is untrusted transport, so its bytes are size-capped
+  # while they stream, before checksums.txt.sig can vouch for them (#2036).
   local github_budget="--connect-timeout 15 --retry 3 --retry-max-time 300"
   release_mirror_enabled && github_budget="--connect-timeout 10 --retry 2 --retry-max-time 120"
-  local mirror_cap=2147483648
+  local max_bytes="$RELEASE_ASSET_MAX_BYTES"
   case "$name" in
-    checksums.txt|checksums.txt.sig) mirror_cap=1048576 ;;
+    checksums.txt|checksums.txt.sig) max_bytes="$RELEASE_METADATA_MAX_BYTES" ;;
   esac
   for source in $sources; do
     rm -f "$dest"
@@ -10085,14 +10123,14 @@ fetch_release_asset() {
       url="https://github.com/${GITHUB_REPO}/releases/download/${tag}/${name}"
       log "Downloading $name from GitHub Releases."
       # shellcheck disable=SC2086 # github_budget is a fixed list of flags
-      if curl -fL $github_budget --speed-limit 1024 --speed-time 120 --retry-connrefused "$url" -o "$dest"; then
+      if capped_download "$max_bytes" "$dest" -fL $github_budget --speed-limit 1024 --speed-time 120 --retry-connrefused "$url"; then
         return 0
       fi
       RELEASE_GITHUB_UNREACHABLE=1
     else
       url="${RELEASE_MIRROR_BASE}/${tag}/${name}"
       log "Downloading $name from the Malibu release mirror."
-      if curl -fL --proto '=https' --max-filesize "$mirror_cap" --connect-timeout 15 --speed-limit 1024 --speed-time 120 --retry 3 --retry-connrefused --retry-max-time 300 "$url" -o "$dest"; then
+      if capped_download "$max_bytes" "$dest" -fL --proto '=https' --connect-timeout 15 --speed-limit 1024 --speed-time 120 --retry 3 --retry-connrefused --retry-max-time 300 "$url"; then
         return 0
       fi
     fi

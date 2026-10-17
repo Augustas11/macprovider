@@ -1,6 +1,6 @@
 # SPEC-020 - Provider autoupdate
 
-Version: v0.1.26
+Version: v0.1.27
 Status: Normative; coordinator-independent recovery is reconciled and
 implementation remains nonconformant under issue #610. The production path ran
 the 2026-07-10 incident-recovery
@@ -471,6 +471,12 @@ coordinator's advertisement before GitHub's latest release and cache a spent
 budget until its reset. Signed discovery stays first for manual and periodic
 update: the signed monotonic head, not the mirror's unsigned
 `releases/latest.json`, is the only signed statement of the newest release.
+Every release file the provider downloads from GitHub or the mirror MUST
+stream under a hard byte cap: the release-metadata cap for `checksums.txt`,
+`checksums.txt.sig` and the compatibility artifact index, and one release-asset
+cap well above the largest current asset for the tarball and the Malibu DMG.
+A transfer whose declared or written size passes its cap MUST be cancelled,
+MUST fail the update, and MUST leave no file (v0.1.27, #2036).
 
 R-1.5. The provider MUST attempt at most one autoupdate per coordinator session
 per target version. A reconnect that repeats the same target version MUST honor
@@ -1722,6 +1728,9 @@ Deferred to v0.3.0 or later:
 
 ## Change log
 
+- v0.1.27 (2026-10-17): SPEC-020-R006 streams every release download under a
+  hard byte cap and cancels an oversized transfer without keeping a file
+  (#2036).
 - v0.1.26 (2026-10-17): SPEC-020-R006 treats a spent anonymous GitHub API
   budget (403/429 with `x-ratelimit-remaining: 0`) as a transport failure that
   is never re-requested before its reset, verifies the coordinator-advertised

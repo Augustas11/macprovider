@@ -20,6 +20,8 @@ grep -q '^bootstrap_standalone_python3()' "$TMP/guard.sh" || { echo "could not e
 grep -q '^_python3_runs_quickly()' "$TMP/guard.sh" || { echo "could not extract _python3_runs_quickly" >&2; exit 1; }
 grep -q '^ensure_python3_usable()' "$TMP/guard.sh" || { echo "could not extract ensure_python3_usable" >&2; exit 1; }
 printf 'die() { echo "DIE:$1"; exit "$1"; }\nlog() { :; }\n' >> "$TMP/guard.sh"
+grep -E '^RELEASE_ASSET_MAX_BYTES=[0-9]+$' "$INSTALL_SH" >> "$TMP/guard.sh" || { echo "could not read RELEASE_ASSET_MAX_BYTES" >&2; exit 1; }
+grep -q '^capped_download()' "$TMP/guard.sh" || { echo "could not extract capped_download" >&2; exit 1; }
 
 # Real executable python3 shims the probe can actually run.
 GOOD="$TMP/good-python3"; printf '#!/bin/sh\nexit 0\n' > "$GOOD"; chmod +x "$GOOD"
