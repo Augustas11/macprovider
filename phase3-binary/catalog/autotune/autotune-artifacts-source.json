@@ -95,6 +95,31 @@
       "primary_artifact_id": "mlx-4bit",
       "rate_class": "class-3b"
     },
+    "mlx-community/qwen2-vl-2b-instruct-4bit": {
+      "artifacts": {
+        "mlx-4bit": {
+          "allowed_runtime_sources": [
+            "mlx_cache"
+          ],
+          "hash": "5c65f865d25fa86c34bab436334c13307496e0e905cd0a6c8bef33312cc12773",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "min_ram_gb": 8,
+          "notes": "Primary MLX artifact for the qwen2vl-inline-v1 native image profile (#2016); per-file digests match the profile pins in NativeVisionRuntime.swift.",
+          "quantization": "4bit",
+          "runtime_format": "mlx_safetensors",
+          "size_bytes": 1261855962,
+          "source_ref": {
+            "kind": "huggingface_revision",
+            "repo_id": "mlx-community/Qwen2-VL-2B-Instruct-4bit",
+            "revision": "01af461cdb9574acc09084a0ef94e216e142b085"
+          },
+          "verification_status": "verified",
+          "verified_at": "2026-10-17"
+        }
+      },
+      "primary_artifact_id": "mlx-4bit",
+      "rate_class": "class-3b"
+    },
     "nvidia/nemotron-3-nano-30b-a3b": {
       "artifacts": {
         "mlx-4bit": {

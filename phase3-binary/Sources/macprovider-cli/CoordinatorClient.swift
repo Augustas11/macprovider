@@ -7286,13 +7286,18 @@ actor CoordinatorClient {
     /// qualification for the exact provider/configuration before image routing.
     static func appendNativeVisionCapability(
         to message: inout [String: Any], snapshot: RuntimeSnapshot,
-        wireModelID: String, runtimeSource: String?
+        wireModelID: String, runtimeSource: String?, configuredModelID: String? = nil
     ) {
         message.removeValue(forKey: "vision_runtime_capabilities")
+        // #2016: a catalog-bound provider loads under its rate-card key and
+        // advertises the catalog HF id; that mapping holds only while the
+        // configured model is the loaded one (coordinatorWireModelID).
         guard runtimeSource == nil || runtimeSource == NativeVisionProfile.runtime,
               snapshot.state == .ready,
               let profile = snapshot.nativeVisionProfile,
-              NativeVisionProfile.supports(modelID: snapshot.modelID),
+              let snapshotModelID = snapshot.modelID,
+              snapshotModelID == wireModelID || snapshotModelID == configuredModelID,
+              NativeVisionProfile.supports(modelID: wireModelID),
               let hash = snapshot.modelHash, hash == profile.artifactSHA256,
               snapshot.modelHashAlgorithm == ModelArtifactIdentity.snapshotManifestV1,
               let weights = snapshot.weightsManifestSHA256,
@@ -7398,7 +7403,8 @@ actor CoordinatorClient {
         Self.appendNativeVisionCapability(
             to: &payload, snapshot: engineRuntimeSnapshot,
             wireModelID: coordinatorWireModelID(for: engineRuntimeSnapshot.modelID),
-            runtimeSource: runtimeSource
+            runtimeSource: runtimeSource,
+            configuredModelID: loadedModelID
         )
         if appConfig.publishesSpecDecodeTelemetry {
             if specDecodeTelemetryMatchesRuntime && specDecodeTelemetryRuntimeEligible {
@@ -8050,7 +8056,8 @@ actor CoordinatorClient {
         Self.appendNativeVisionCapability(
             to: &message, snapshot: visionSnapshot,
             wireModelID: coordinatorWireModelID(for: visionSnapshot.modelID),
-            runtimeSource: runtimeSource
+            runtimeSource: runtimeSource,
+            configuredModelID: loadedModelID
         )
         return message
     }
@@ -8155,7 +8162,8 @@ actor CoordinatorClient {
         Self.appendNativeVisionCapability(
             to: &message, snapshot: visionSnapshot,
             wireModelID: coordinatorWireModelID(for: visionSnapshot.modelID),
-            runtimeSource: runtimeSource
+            runtimeSource: runtimeSource,
+            configuredModelID: loadedModelID
         )
         return message
     }

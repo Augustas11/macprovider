@@ -2771,29 +2771,29 @@ final class AutotuneRecommendTests: XCTestCase {
             try Self.jsonReplacingTopLevelString(
                 AutotuneStaticInputs.bakedDemandRankJSON,
                 key: "version",
-                with: "published-2026-10-11-fetched-v1"
+                with: "published-2026-10-18-fetched-v1"
             ),
             key: "generated_at",
-            with: "2026-10-11T00:00:00Z"
+            with: "2026-10-18T00:00:00Z"
         ).utf8)
         let signature = Data(repeating: 0, count: 64).base64EncodedString()
         let sidecar = Data("{\"key_id\":\"streamvc-autotune-static-v4\",\"alg\":\"ed25519\",\"signature\":\"\(signature)\"}".utf8)
         let staleInputs = AutotuneStaticInputs(
             fetch: { url in url.path.hasSuffix(".sig") ? sidecar : validFetched },
             verifySignature: { _, _ in true },
-            now: { Self.date("2026-10-26T00:00:00Z") }
+            now: { Self.date("2026-11-02T00:00:00Z") }
         )
 
         let stale = await staleInputs.loadDemandRank()
 
         XCTAssertFalse(stale.usedFallback)
-        XCTAssertEqual(stale.value.version, "published-2026-10-11-fetched-v1")
+        XCTAssertEqual(stale.value.version, "published-2026-10-18-fetched-v1")
         XCTAssertTrue(stale.warnings.contains(.demandRankStale))
 
         let fallbackInputs = AutotuneStaticInputs(
             fetch: { _ in validFetched },
             verifySignature: { _, _ in false },
-            now: { Self.date("2026-10-12T00:00:00Z") }
+            now: { Self.date("2026-10-19T00:00:00Z") }
         )
         let fallback = await fallbackInputs.loadDemandRank()
         XCTAssertTrue(fallback.usedFallback)
@@ -2804,7 +2804,7 @@ final class AutotuneRecommendTests: XCTestCase {
         let payload = Data(try Self.jsonReplacingTopLevelString(
             AutotuneStaticInputs.bakedRateCardJSON,
             key: "generated_at",
-            with: "2026-10-11T03:00:00Z"
+            with: "2026-10-18T03:00:00Z"
         ).utf8)
         let privateKey = Curve25519.Signing.PrivateKey()
         let keyID = "streamvc-autotune-static-v4"
@@ -2815,7 +2815,7 @@ final class AutotuneRecommendTests: XCTestCase {
         let inputs = AutotuneStaticInputs(
             fetch: { url in url.path.hasSuffix(".sig") ? sidecar : payload },
             trustedPublicKeys: keyring,
-            now: { Self.date("2026-10-11T04:00:00Z") }
+            now: { Self.date("2026-10-18T04:00:00Z") }
         )
 
         let selection = await inputs.loadRateCard()
@@ -2823,7 +2823,7 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertFalse(selection.usedFallback)
         XCTAssertEqual(selection.signerKeyID, keyID)
         XCTAssertFalse(selection.warnings.contains(.rateCardIntegrityFailure))
-        XCTAssertEqual(selection.value.generatedAt, Self.date("2026-10-11T03:00:00Z"))
+        XCTAssertEqual(selection.value.generatedAt, Self.date("2026-10-18T03:00:00Z"))
     }
 
     func testSignedRateCardMissingSidecarFallsBackWithIntegrityWarning() async throws {
@@ -2874,7 +2874,7 @@ final class AutotuneRecommendTests: XCTestCase {
         let rateCardPayload = Data(try Self.jsonReplacingTopLevelString(
             AutotuneStaticInputs.bakedRateCardJSON,
             key: "generated_at",
-            with: "2026-10-11T03:00:00Z"
+            with: "2026-10-18T03:00:00Z"
         ).utf8)
         let sidecar = Data("{\"key_id\":\"streamvc-autotune-static-v4\",\"alg\":\"ed25519\",\"signature\":\"\(Data(repeating: 0, count: 64).base64EncodedString())\"}".utf8)
         let inputs = AutotuneStaticInputs(
@@ -2892,7 +2892,7 @@ final class AutotuneRecommendTests: XCTestCase {
                 }
             },
             verifySignature: { _, _ in true },
-            now: { Self.date("2026-10-11T04:00:00Z") }
+            now: { Self.date("2026-10-18T04:00:00Z") }
         )
 
         let loaded = await inputs.loadRecommendationInputs()
@@ -3166,7 +3166,7 @@ final class AutotuneRecommendTests: XCTestCase {
         let inputs = AutotuneStaticInputs(
             fetch: { url in url.path.hasSuffix(".sig") ? sidecar : payload },
             trustedPublicKeys: keyring,
-            now: { Self.date("2026-10-11T04:00:00Z") }
+            now: { Self.date("2026-10-18T04:00:00Z") }
         )
 
         let selection = await inputs.loadDemandRank()
@@ -6376,6 +6376,10 @@ final class AutotuneRecommendTests: XCTestCase {
         "meta-llama/llama-3.2-3b-instruct": (
             revision: "7f0dc925e0d0afb0322d96f9255cfddf2ba5636e",
             json: #"{"max_position_embeddings":131072,"num_hidden_layers":28,"hidden_size":3072,"num_attention_heads":24,"num_key_value_heads":8,"head_dim":128}"#
+        ),
+        "mlx-community/qwen2-vl-2b-instruct-4bit": (
+            revision: "01af461cdb9574acc09084a0ef94e216e142b085",
+            json: #"{"max_position_embeddings":32768,"num_hidden_layers":28,"hidden_size":1536,"num_attention_heads":12,"num_key_value_heads":2}"#
         ),
         "nvidia/nemotron-3-nano-30b-a3b": (
             revision: "832f602eba5d22436c258c1462bdedc5afddb42b",

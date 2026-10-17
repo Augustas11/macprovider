@@ -148,8 +148,10 @@ For each key you consider admitting to `listed`:
    - `tier_target`: the key's best-fitting verified artifact satisfies
      `min_ram_gb + 4 <= <tier GB>`.
 
-For a promotion (`listed` → `recommendable`): `listed_since` at least
-`INTAKE_MIN_LISTED_DAYS` (30) before `as_of`; the key's `rate_class` exactly
+For a promotion (`listed` → `recommendable`): the key was `listed` in a
+prior release, with `listed_since` (when it entered `listed`, not after
+`as_of`) recorded; there is no minimum listed duration (SPEC-023 v0.22.25).
+The key's `rate_class` exactly
 as declared on its artifact-feed model entry, resolving to a published
 rate row; `recommendable: true` in `demand-rank.json`;
 bench provenance other than `omlx_seeded`; and your explicit admission
@@ -204,7 +206,8 @@ SPEC-023-R019).
   more than 31 days before `as_of`; an absent signal without its reason, or
   a reason on a present signal.
 - More `coldstart_slot_used` entries than `INTAKE_COLDSTART_SLOTS`; a
-  promotion under `INTAKE_MIN_LISTED_DAYS`, without a resolving rate row,
-  or from an `omlx_seeded` row.
+  promotion of a key that was not `listed` in a prior release, without a
+  resolving rate row, or from an `omlx_seeded` row; a manifest still
+  carrying the removed `INTAKE_MIN_LISTED_DAYS` or `listed_days_elapsed`.
 - Any provider id, pseudonym, hardware fingerprint, buyer account, API key,
   IP, raw principal identifier, or principal token in any field.

@@ -32,6 +32,7 @@ Files in STATE_DIR steer it:
   retention_error         the next report is an error report (no stop_reason, no lap fields)
   retention_report.json   the last run's report (written here; ?report=last)
   retention_posts         number of run requests that started a run (written here)
+  healthz_hits            one line per coordinator /healthz request (written here)
 """
 import datetime
 import json
@@ -113,6 +114,8 @@ class Handler(BaseHTTPRequestHandler):
             # The buyer listener's /healthz: no compatibility policy fields.
             return self.send(200, '{"status": "ok"}')
         if self.path == "/healthz":
+            with open(os.path.join(state, "healthz_hits"), "a") as hits:
+                hits.write("1\n")
             d = json.loads(read("healthz.json", "{}"))
             if d.pop("_policy", None) == "running":
                 # A repository-admission runtime reports the compatibility

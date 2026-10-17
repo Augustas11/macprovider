@@ -2,9 +2,12 @@
 import argparse
 import datetime
 import importlib.util
+import json
+import os
 import pathlib
 import subprocess
 import sys
+import tempfile
 import unittest
 
 SCRIPT = pathlib.Path(__file__).resolve().parents[1] / "ops" / "lib" / "pearl-cli-config.py"
@@ -90,6 +93,331 @@ class RevokeTest(unittest.TestCase):
         script = pathlib.Path(__file__).resolve().parents[1] / "legacy-compatibility-revocations.py"
         out = subprocess.run([sys.executable, str(script), "check"], capture_output=True, text=True)
         self.assertEqual(out.returncode, 0, out.stderr)
+
+
+VQ = {
+    "provider_id": "prov-test-0001", "binary_version": "1.8.250", "hardware_chip": "Apple M2 Ultra",
+    "ram_gb": 192, "max_context_tokens": 8192, "max_concurrency": 1,
+    "model_id": "mlx-community/Qwen2-VL-2B-Instruct-4bit", "model_hash": "a" * 64,
+    "model_hash_algorithm": "macprovider.snapshot-manifest.v1", "weights_manifest_sha256": "b" * 64,
+    "processor_digest": "c" * 64, "runtime": "mlx_cache", "runtime_revision": "d" * 40,
+    "media_profile": "qwen2vl-inline-v1", "qualification_digest": "e" * 64,
+}
+
+
+def vq(**kw):
+    entry = dict(VQ)
+    entry.update(kw)
+    return entry
+
+
+def vq_plan(text, entry=None):
+    import yaml
+    return pcc.vq_overlay_plan(text, yaml.safe_load(text) or {}, entry or dict(VQ))
+
+
+class VisionQualificationRecordTest(unittest.TestCase):
+    def test_valid_record_round_trips_canonically(self):
+        self.assertEqual(pcc.vq_parse(pcc.vq_canonical(VQ)), VQ)
+        self.assertEqual(pcc.vq_digest(VQ), pcc.vq_digest(dict(reversed(list(VQ.items())))))
+
+    def test_yaml_record_is_accepted(self):
+        text = "".join("%s: %s\n" % (k, v if isinstance(v, int) else '"%s"' % v) for k, v in VQ.items())
+        self.assertEqual(pcc.vq_parse(text.encode()), VQ)
+
+    def test_missing_and_unknown_fields_refused_without_values(self):
+        entry = dict(VQ)
+        del entry["processor_digest"]
+        with self.assertRaisesRegex(pcc.Refused, "missing: processor_digest") as ctx:
+            pcc.vq_validate(entry)
+        self.assertNotIn("prov-test-0001", str(ctx.exception))
+        with self.assertRaisesRegex(pcc.Refused, "unknown: 1"):
+            pcc.vq_validate(vq(extra="x"))
+
+    def test_bad_digests_types_and_tuple_refused(self):
+        for entry, why in ((vq(qualification_digest="E" * 64), "qualification_digest must be a lowercase sha256"),
+                           (vq(model_hash="a" * 63), "model_hash must be a lowercase sha256"),
+                           (vq(processor_digest="sha256:" + "c" * 64), "processor_digest must be"),
+                           (vq(ram_gb=0), "ram_gb must be a positive integer"),
+                           (vq(max_concurrency=True), "max_concurrency must be a positive integer"),
+                           (vq(max_context_tokens="8192"), "max_context_tokens must be a positive integer"),
+                           (vq(provider_id=" "), "provider_id must be a non-blank"),
+                           (vq(hardware_chip="M2\nx"), "hardware_chip must be a non-blank"),
+                           (vq(model_id="mlx-community/Qwen2-VL-7B-Instruct-4bit"), "model_id must be"),
+                           (vq(runtime="mlx"), "runtime must be mlx_cache"),
+                           (vq(media_profile="other"), "media_profile must be"),
+                           (vq(model_hash_algorithm="sha256"), "model_hash_algorithm must be")):
+            with self.assertRaisesRegex(pcc.Refused, why):
+                pcc.vq_validate(entry)
+
+    def test_duplicate_keys_refused(self):
+        raw = pcc.vq_canonical(VQ)[:-1] + b',"ram_gb":1}'
+        with self.assertRaisesRegex(pcc.Refused, "duplicate"):
+            pcc.vq_parse(raw)
+        with self.assertRaisesRegex(pcc.Refused, "duplicate"):
+            pcc.vq_parse(b"ram_gb: 1\nram_gb: 2\n")
+
+
+class VisionQualificationOverlayTest(unittest.TestCase):
+    def test_appends_routing_to_an_overlay_without_one(self):
+        import yaml
+        new = vq_plan("relay_blind:\n  enabled: true\n")
+        self.assertEqual(yaml.safe_load(new), {"relay_blind": {"enabled": True},
+                                               "routing": {"vision_qualifications": [VQ]}})
+        self.assertTrue(new.startswith("relay_blind:\n  enabled: true\nrouting:\n"))
+        self.assertEqual(yaml.safe_load(vq_plan("")), {"routing": {"vision_qualifications": [VQ]}})
+
+    def test_inserts_into_an_existing_routing_mapping(self):
+        import yaml
+        text = "routing:  # operator\n    # keep\n    sticky_enabled: true\n    max_retries: 3\nother:\n  x: 1\n"
+        new = vq_plan(text)
+        self.assertEqual(yaml.safe_load(new), {"routing": {"sticky_enabled": True, "max_retries": 3,
+                                                           "vision_qualifications": [VQ]}, "other": {"x": 1}})
+        self.assertIn("    sticky_enabled: true\n    max_retries: 3\nother:\n  x: 1\n", new)
+
+    def test_identical_entry_is_idempotent(self):
+        once = vq_plan("routing:\n  sticky_enabled: true\n")
+        self.assertEqual(vq_plan(once), once)
+
+    def test_different_existing_list_refused(self):
+        for text in (vq_plan("", vq(provider_id="other")),
+                     "routing:\n  vision_qualifications: []\n",
+                     vq_plan("") + "    extra: 1\n"):
+            with self.assertRaisesRegex(pcc.Refused, "different routing.vision_qualifications"):
+                vq_plan(text)
+
+    def test_unsafe_overlay_shapes_refused(self):
+        for text, why in (("routing: {sticky_enabled: true}\n", "anchor"),
+                          ("routing: 3\n", "not a block mapping"),
+                          ("{relay_blind: {enabled: true}}\n", "flow mapping"),
+                          ("- a\n", "not a YAML mapping")):
+            with self.assertRaisesRegex(pcc.Refused, why):
+                vq_plan(text) if not text.startswith("- ") else pcc.vq_overlay_plan(text, {}, dict(VQ))
+
+
+class VisionQualificationFileTest(unittest.TestCase):
+    """The record and the staged copy are checked on the descriptor read."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(subprocess.run, ["rm", "-rf", self.dir])
+
+    def write(self, name, data=None, mode=0o600, directory=None):
+        path = os.path.join(directory or self.dir, name)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+        os.write(fd, pcc.vq_canonical(VQ) if data is None else data)
+        os.close(fd)
+        os.chmod(path, mode)
+        return path
+
+    def test_private_record_is_read_and_validated(self):
+        out = os.path.join(self.dir, "canonical.json")
+        facts = pcc.validate_vq_file(self.write("r.json"), out)
+        self.assertEqual(facts, {"fields": 15, "entry_sha256": pcc.vq_digest(VQ)})
+        with open(out, "rb") as f:
+            self.assertEqual(f.read(), pcc.vq_canonical(VQ))
+
+    def test_unsafe_files_refused(self):
+        target = self.write("target.json")
+        link = os.path.join(self.dir, "link.json")
+        os.symlink(target, link)
+        hard = os.path.join(self.dir, "hard.json")
+        os.link(target, hard)
+        shared = os.path.join(self.dir, "shared")
+        os.mkdir(shared)
+        os.chmod(shared, 0o775)
+        # A directory inside the private test dir: its parent passes the
+        # parent-directory check on every platform (Linux /tmp is 1777).
+        adir = os.path.join(self.dir, "adir")
+        os.mkdir(adir, 0o700)
+        for path, why in ((link, "is a symlink"),
+                          (hard, "regular file with one link"),
+                          (self.write("open.json", mode=0o644), "must be mode 0600"),
+                          (self.write("group.json", mode=0o640), "must be mode 0600"),
+                          (self.write("big.json", b"x" * (pcc.VQ_MAX_BYTES + 1)), "larger than"),
+                          (self.write("r.json", directory=shared), "not writable by group or others"),
+                          (adir, "regular file")):
+            with self.subTest(why=why), self.assertRaisesRegex(pcc.Refused, why):
+                pcc.read_private_record(path, pcc.VQ_MAX_BYTES, "qualification record")
+
+    def test_staged_record_must_match_and_be_private(self):
+        staged = self.write("staged", pcc.vq_canonical(VQ))
+        a = argparse.Namespace(vq_staged=staged, vq_sha256=pcc.vq_digest(VQ))
+        self.assertEqual(pcc.read_vq_staged(a), VQ)
+        os.chmod(staged, 0o644)
+        with self.assertRaisesRegex(pcc.Refused, "must be mode 0600"):
+            pcc.read_vq_staged(a)
+        os.chmod(staged, 0o600)
+        with self.assertRaisesRegex(pcc.Refused, "differs from the validated"):
+            pcc.read_vq_staged(argparse.Namespace(vq_staged=staged, vq_sha256="0" * 64))
+        link = os.path.join(self.dir, "staged-link")
+        os.symlink(staged, link)
+        with self.assertRaisesRegex(pcc.Refused, "is a symlink"):
+            pcc.read_vq_staged(argparse.Namespace(vq_staged=link, vq_sha256=pcc.vq_digest(VQ)))
+
+
+class VisionQualificationOverlayStateTest(unittest.TestCase):
+    def test_valid_absent_and_invalid_live_entries(self):
+        self.assertEqual(pcc.vq_overlay_state(None), {"overlay_entries_sha256": None, "overlay_entries_valid": None,
+                                                      "overlay_invalid_reason": None})
+        self.assertEqual(pcc.vq_overlay_state([dict(VQ)]),
+                         {"overlay_entries_sha256": [pcc.vq_digest(VQ)], "overlay_entries_valid": True,
+                          "overlay_invalid_reason": None})
+        # The coordinator accepts a non-hex model_hash; the ops rules do not.
+        state = pcc.vq_overlay_state([dict(VQ), vq(model_hash="z" * 64, provider_id="VQ-SECRET")])
+        self.assertEqual(state["overlay_entries_sha256"], [pcc.vq_digest(VQ), "invalid"])
+        self.assertIs(state["overlay_entries_valid"], False)
+        self.assertIn("model_hash must be a lowercase sha256", state["overlay_invalid_reason"])
+        self.assertNotIn("VQ-SECRET", json.dumps(state))
+        self.assertEqual(pcc.vq_overlay_state(["x"])["overlay_entries_sha256"], ["invalid"])
+
+
+class VisionQualificationParityTest(unittest.TestCase):
+    """scripts/ops/testdata/vision-qualification-corpus.json is shared with
+    phase4-coordinator/internal/config/vision_qualification_parity_test.go."""
+
+    def test_ops_validator_matches_corpus_and_is_never_looser(self):
+        corpus = json.loads((SCRIPT.parents[1] / "testdata" / "vision-qualification-corpus.json").read_text())
+        names = [c["name"] for c in corpus["cases"]]
+        self.assertEqual(len(names), len(set(names)))
+        self.assertIn("non_hex_model_hash", names)
+        for case in corpus["cases"]:
+            with self.subTest(case=case["name"]):
+                if case["ops_valid"]:
+                    self.assertTrue(case["go_valid"], "the ops validator must never accept what the coordinator rejects")
+                try:
+                    pcc.vq_validate(case["record"])
+                    ok = True
+                except pcc.Refused:
+                    ok = False
+                self.assertEqual(ok, case["ops_valid"])
+
+
+class VisionQualificationApplyRollbackTest(unittest.TestCase):
+    """Any failure once the edited overlay may be on disk restores the
+    original bytes, proves them, and proves a recovery restart; a rollback
+    that cannot be proven is refused as unproven state."""
+
+    ORIGINAL = b"relay_blind:\n  enabled: true\n"
+
+    def setUp(self):
+        import contextlib
+        import yaml
+        from unittest import mock
+        self.mock = mock
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(subprocess.run, ["rm", "-rf", self.dir])
+        self.overlay = os.path.join(self.dir, "overlay.yaml")
+        with open(self.overlay, "wb") as f:
+            f.write(self.ORIGINAL)
+        staged = os.path.join(self.dir, "vq.staged")
+        with open(staged, "wb") as f:
+            f.write(pcc.vq_canonical(VQ))
+        self.args = argparse.Namespace(
+            vq_staged=staged, vq_sha256=pcc.vq_digest(VQ), overlay=self.overlay,
+            config=os.path.join(self.dir, "config.yaml"), backup_root=os.path.join(self.dir, "backups"),
+            unit="coordinator.service", healthz="http://127.0.0.1:1/healthz")
+        self.new = vq_plan(self.ORIGINAL.decode()).encode()
+        self.real_install = pcc.install
+        self.installs = 0
+        self.recovery = mock.Mock(return_value=subprocess.CompletedProcess([], 0))
+        for name, value in (("guard", lambda a: contextlib.nullcontext()),
+                            ("read_vq_staged", lambda a: dict(VQ)),
+                            ("running", lambda a: (1, "/bin/coordinator", {}, os.getuid(), os.getgid())),
+                            ("load_effective", lambda a: ({}, yaml.safe_load(self.ORIGINAL))),
+                            ("as_service", lambda *a: subprocess.CompletedProcess([], 0)),
+                            ("healthz", lambda url: {}),
+                            ("applied", lambda a: True)):
+            patcher = mock.patch.object(pcc, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(pcc.subprocess, "run", self.recovery)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def install(self, fail_on):
+        """install(): the real os.replace, then the FAIL_ON-th call raises
+        (after the replace when it is the edit, before it otherwise)."""
+        def fake(tmp, path):
+            self.installs += 1
+            if self.installs == fail_on == 1:
+                os.replace(tmp, path)
+                raise OSError("directory fsync failed")
+            if self.installs == fail_on:
+                raise OSError("rollback write failed")
+            self.real_install(tmp, path)
+        patcher = self.mock.patch.object(pcc, "install", fake)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def overlay_bytes(self):
+        with open(self.overlay, "rb") as f:
+            return f.read()
+
+    def leftovers(self):
+        return sorted(n for n in os.listdir(self.dir) if n.startswith(".cli-release-"))
+
+    def test_fsync_failure_after_replace_restores_and_recovers(self):
+        self.install(fail_on=1)
+        restart = self.mock.Mock()
+        with self.mock.patch.object(pcc, "restart", restart):
+            with self.assertRaisesRegex(pcc.Refused, "original overlay is restored \\(bytes verified\\) and a "
+                                                     "recovery restart brought the coordinator back"):
+                pcc.apply_vision_qualification(self.args)
+        restart.assert_not_called()
+        self.assertEqual(self.overlay_bytes(), self.ORIGINAL)
+        self.assertEqual(self.recovery.call_args[0][0], ["systemctl", "restart", "coordinator.service"])
+        self.assertEqual(self.leftovers(), [])
+        self.assertFalse(os.path.lexists(self.args.vq_staged))
+
+    def test_concurrent_overlay_change_is_preserved_not_overwritten(self):
+        foreign = b"relay_blind:\n  enabled: false\n"
+        def restart(args, pid):
+            with open(self.overlay, "wb") as f:
+                f.write(foreign)
+            raise pcc.Refused("restart boom")
+        with self.mock.patch.object(pcc, "restart", restart):
+            with self.assertRaisesRegex(pcc.Refused, "overlay changed under the task") as cm:
+                pcc.apply_vision_qualification(self.args)
+        self.assertIn("UNPROVEN", str(cm.exception))
+        self.assertEqual(self.overlay_bytes(), foreign)
+        self.recovery.assert_not_called()
+
+    def test_restart_and_rollback_write_failure_is_unproven(self):
+        self.install(fail_on=2)
+        with self.mock.patch.object(pcc, "restart", self.mock.Mock(side_effect=pcc.Refused("restart boom"))):
+            with self.assertRaisesRegex(pcc.Refused, "restart boom.*restoring the original overlay failed "
+                                                     "\\(OSError\\)") as cm:
+                pcc.apply_vision_qualification(self.args)
+        self.assertIn("UNPROVEN", str(cm.exception))
+        self.assertIn(self.overlay, str(cm.exception))
+        self.recovery.assert_not_called()
+        self.assertEqual(self.overlay_bytes(), self.new)
+        self.assertEqual(self.leftovers(), [])
+
+    def test_recovery_restart_failure_is_unproven(self):
+        self.install(fail_on=0)
+        for setup in (lambda: setattr(self.recovery, "return_value", subprocess.CompletedProcess([], 1)),
+                      lambda: setattr(self.recovery, "side_effect", FileNotFoundError("systemctl")),
+                      self.failing_healthz):
+            with self.subTest(setup=setup):
+                with open(self.overlay, "wb") as f:
+                    f.write(self.ORIGINAL)
+                with open(self.args.vq_staged, "wb") as f:
+                    f.write(pcc.vq_canonical(VQ))
+                setup()
+                with self.mock.patch.object(pcc, "restart", self.mock.Mock(side_effect=OSError("boom"))):
+                    with self.assertRaisesRegex(pcc.Refused, "original overlay is restored on disk \\(bytes "
+                                                             "verified\\) but the coordinator is not proven live"):
+                        pcc.apply_vision_qualification(self.args)
+                self.assertEqual(self.overlay_bytes(), self.ORIGINAL)
+
+    def failing_healthz(self):
+        self.recovery.side_effect = None
+        self.recovery.return_value = subprocess.CompletedProcess([], 0)
+        patcher = self.mock.patch.object(pcc, "healthz", side_effect=pcc.Refused("/healthz did not recover"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
 
 if __name__ == "__main__":

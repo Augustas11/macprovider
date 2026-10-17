@@ -1,7 +1,7 @@
 {
-  "catalog_id": "macprovider-tier2-model-catalog-2026-09-25-artifact-hash-correction-v1",
+  "catalog_id": "macprovider-tier2-model-catalog-2026-10-17-qwen2vl-v1",
   "expires_at": "2026-12-25T00:00:00Z",
-  "issued_at": "2026-09-25T00:00:00Z",
+  "issued_at": "2026-10-17T00:00:00Z",
   "models": [
     {
       "artifact_kind": "mlx_weight_file",
@@ -64,6 +64,15 @@
       "min_ram_gb": 32,
       "notes": "nvidia/nemotron-3-nano-30b-a3b",
       "sha256": "1bc78f214f9a042eaeb290b1fa4cb29915df1028f79d8479266349166c40a71f",
+      "source": "operator-curated"
+    },
+    {
+      "artifact_kind": "mlx_weight_file",
+      "hash_scope": "macprovider.snapshot-manifest.v1",
+      "model_id": "mlx-community/Qwen2-VL-2B-Instruct-4bit",
+      "min_ram_gb": 8,
+      "notes": "Buyer-serving candidate mlx-community/qwen2-vl-2b-instruct-4bit (#2016 native image input); identity from signed SPEC-023 row.",
+      "sha256": "5c65f865d25fa86c34bab436334c13307496e0e905cd0a6c8bef33312cc12773",
       "source": "operator-curated"
     },
     {
@@ -160,7 +169,7 @@
   "signature": {
     "alg": "Ed25519",
     "key_id": "catalog-key-2026q2",
-    "sig": "oCbCHpwXwatLoWx826AvHQnk1NQ5KPuW0EzcBZ3e6UZc6n-3RJQGGLfhzRG6MQfPFKGLTv35NHfxl3DCoZ79DQ"
+    "sig": "AGDlkPWylhxjSkPvV2hpP1L7s-6A2_koV9XE3xeGq7TpJxgN0UquYLhMp0w_Em9swn_ZDFV-PMw3Lnz9p-9XCA"
   },
   "version": 1
 }

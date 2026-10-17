@@ -18,7 +18,12 @@
 # the on-demand retention run (nightly window, busy/disabled refusals, the
 # report, its marker and the drain gate that reads the same lap); the
 # compute-integrity private corpus (the shared corpus rules, the generator,
-# the overlay edit, one restart, rollback when the coordinator rejects it).
+# the overlay edit, one restart, rollback when the coordinator rejects it);
+# the native-vision qualification record (local rules, an existing routing
+# mapping, validation and restart-failure rollback with a verified recovery
+# restart (also when the overlay was already right), idempotence, a different
+# entry refused, an invalid live entry blocked, the record read through one
+# private descriptor, the provider id never printed).
 # Usage: bash scripts/ops/test-entrypoints.sh
 set -euo pipefail
 
@@ -656,6 +661,208 @@ if [ "$(fact_of pearl_ci_installed_mode_ok)" = False ]; then ok; else bad "mode 
 chmod 640 "$PEARL_COMPUTE_INTEGRITY_CORPUS_PATH"
 unset COMPUTE_INTEGRITY_CORPUS PEARL_COMPUTE_INTEGRITY_CORPUS_PATH
 rm -f "$tmp/svc/restarts" "$tmp/pearl/coordinator.yaml" "$tmp/pearl/overlay.yaml" "$tmp/pearl/overlay.before" "$tmp/pearl/etc/compute-integrity-corpus.json"
+
+# ==== native-vision qualification (#2016) ====================================
+# The record names a provider: it stays outside the repo, private, and only
+# its entry digest is ever printed.
+VQ_SECRETS="$tmp/operator-secrets/vision"
+mkdir -p "$VQ_SECRETS"
+vq_record() { # OUT [field=json-value ...]
+  python3 -I - "$@" <<'PYVQ'
+import json, os, sys
+d = {"provider_id": "VQ-SECRET-PROVIDER", "binary_version": "1.8.250", "hardware_chip": "Apple M2 Ultra",
+     "ram_gb": 192, "max_context_tokens": 8192, "max_concurrency": 1,
+     "model_id": "mlx-community/Qwen2-VL-2B-Instruct-4bit", "model_hash": "a" * 64,
+     "model_hash_algorithm": "macprovider.snapshot-manifest.v1", "weights_manifest_sha256": "b" * 64,
+     "processor_digest": "c" * 64, "runtime": "mlx_cache", "runtime_revision": "d" * 40,
+     "media_profile": "qwen2vl-inline-v1", "qualification_digest": "e" * 64}
+for kv in sys.argv[2:]:
+    k, v = kv.split("=", 1)
+    if v == "DELETE":
+        del d[k]
+    else:
+        d[k] = json.loads(v)
+fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+os.write(fd, json.dumps(d, indent=1).encode())
+os.close(fd)
+PYVQ
+}
+expect_no_secret() { if grep -q VQ-SECRET-PROVIDER "$tmp/out" "$tmp/err"; then bad "$1 printed the provider id"; else ok; fi; }
+# boot_matches_disk: the fake coordinator's last boot logged the files on disk.
+boot_matches_disk() {
+  python3 -I - "$tmp/svc/boot.txt" "$tmp/pearl/coordinator.yaml" "$tmp/pearl/overlay.yaml" <<'PYB'
+import hashlib, json, sys
+boot = json.loads(open(sys.argv[1]).readline())
+sha = lambda p: hashlib.sha256(open(p, "rb").read()).hexdigest()
+sys.exit(0 if (boot["config_sha256"], boot["overlay_sha256"]) == (sha(sys.argv[2]), sha(sys.argv[3])) else 1)
+PYB
+}
+healthz_hits() { wc -l < "$tmp/svc/healthz_hits" 2>/dev/null | tr -d ' ' || echo 0; }
+printf 'listen:\n  bind_address: 127.0.0.1\n' > "$tmp/pearl/coordinator.yaml"
+# The overlay already carries a routing mapping; its keys must survive.
+printf 'relay_blind:\n  enabled: true\nrouting:\n  sticky_enabled: true\n' > "$tmp/pearl/overlay.yaml"
+systemctl restart macprovider-coordinator
+rm -f "$tmp/svc/restarts"
+VQ_STAGED="$tmp/pearl/.vision-qualification.staging"
+PEARL_RUNTIME_TASK=vision-qualification run_rc 0 "vision status without a record" scripts/ops/pearl-runtime.sh status
+expect_next record:blocked
+if [ "$(state_of vision_qualification)" = pending ]; then ok; else bad "vision_qualification state: $(state_of vision_qualification)"; fi
+if [ "$(fact_of pearl_vq_overlay_entries_sha256)" = absent ] && [ "$(fact_of pearl_vq_overlay_sets_routing)" = True ]; then ok; else bad "overlay facts: $(fact_of pearl_vq_overlay_entries_sha256) $(fact_of pearl_vq_overlay_sets_routing)"; fi
+vq_record "$W/in-repo-vq.json"
+VISION_QUALIFICATION_FILE="$W/in-repo-vq.json" PEARL_RUNTIME_TASK=vision-qualification run_rc 0 "vision record inside the repo" scripts/ops/pearl-runtime.sh status
+expect_next record:blocked
+case "$(next_field reason)" in *"inside the repository"*) ok ;; *) bad "in-repo record reason: $(next_field reason)" ;; esac
+rm -f "$W/in-repo-vq.json"
+for c in "processor_digest=DELETE|missing: processor_digest" "qualification_digest=\"$(printf 'E%.0s' $(seq 64))\"|qualification_digest must be a lowercase sha256" \
+  'model_id="mlx-community/Qwen2-VL-7B-Instruct-4bit"|model_id must be' 'ram_gb=0|ram_gb must be a positive integer'; do
+  vq_record "$VQ_SECRETS/bad.json" "${c%%|*}"
+  VISION_QUALIFICATION_FILE="$VQ_SECRETS/bad.json" PEARL_RUNTIME_TASK=vision-qualification run_rc 0 "vision record ${c%%=*}" scripts/ops/pearl-runtime.sh status
+  expect_next record:blocked
+  case "$(next_field reason)" in *"${c#*|}"*) ok ;; *) bad "bad record reason: $(next_field reason)" ;; esac
+  expect_no_secret "a refused record"
+done
+vq_record "$VQ_SECRETS/open.json"; chmod 644 "$VQ_SECRETS/open.json"
+VISION_QUALIFICATION_FILE="$VQ_SECRETS/open.json" PEARL_RUNTIME_TASK=vision-qualification run_rc 0 "world-readable vision record" scripts/ops/pearl-runtime.sh status
+expect_next record:blocked
+case "$(next_field reason)" in *"must be mode 0600"*) ok ;; *) bad "world-readable record reason: $(next_field reason)" ;; esac
+# The record is checked on the descriptor it is read from: no symlink, one
+# link, a directory nobody else can write.
+vq_record "$VQ_SECRETS/target.json"
+ln -s "$VQ_SECRETS/target.json" "$VQ_SECRETS/link.json"
+ln "$VQ_SECRETS/target.json" "$VQ_SECRETS/hard.json"
+mkdir -p "$tmp/operator-secrets/shared"; chmod 775 "$tmp/operator-secrets/shared"; vq_record "$tmp/operator-secrets/shared/r.json"
+# The symlink is passed to the helper as given: only the repository check
+# sees the resolved path.
+for c in "$VQ_SECRETS/link.json|is a symlink" "$VQ_SECRETS/hard.json|regular file with one link" \
+  "$tmp/operator-secrets/shared/r.json|not writable by group or others"; do
+  VISION_QUALIFICATION_FILE="${c%%|*}" PEARL_RUNTIME_TASK=vision-qualification run_rc 0 "vision record ${c#*|}" scripts/ops/pearl-runtime.sh status
+  expect_next record:blocked
+  case "$(next_field reason)" in *"${c#*|}"*) ok ;; *) bad "record file reason: $(next_field reason)" ;; esac
+done
+if python3 -I "$OPS_SRC/lib/pearl-cli-config.py" validate-vision-qualification "$VQ_SECRETS/link.json" >/dev/null 2>"$tmp/err"; then
+  bad "a symlinked vision record was accepted"
+else
+  expect_err "is a symlink"
+fi
+rm -rf "$VQ_SECRETS/target.json" "$VQ_SECRETS/link.json" "$VQ_SECRETS/hard.json" "$tmp/operator-secrets/shared"
+vq_record "$VQ_SECRETS/record.json"
+export VISION_QUALIFICATION_FILE="$VQ_SECRETS/record.json"
+VQSHA="$(python3 -I "$OPS_SRC/lib/pearl-cli-config.py" validate-vision-qualification "$VISION_QUALIFICATION_FILE" | python3 -c 'import json,sys; print(json.load(sys.stdin)["entry_sha256"])')"
+PEARL_RUNTIME_TASK=vision-qualification run_rc 0 "vision status" scripts/ops/pearl-runtime.sh status
+expect_next vision_qualification:mutate
+case "$(next_field command)" in "scripts/ops/pearl-runtime.sh _vision-qualification $VQSHA") ok ;; *) bad "vision command: $(next_field command)" ;; esac
+case "$(next_field expected_downtime)" in "one coordinator restart"*) ok ;; *) bad "vision downtime: $(next_field expected_downtime)" ;; esac
+case "$(next_field runbook)" in docs/runbooks/native-vision-acceptance.md) ok ;; *) bad "vision runbook: $(next_field runbook)" ;; esac
+if [ "$(fact_of local_entry_sha256)" = "$VQSHA" ]; then ok; else bad "local entry digest: $(fact_of local_entry_sha256)"; fi
+expect_no_secret "vision status"
+PEARL_RUNTIME_TASK=vision-qualification run_rc 0 "vision next" scripts/ops/pearl-runtime.sh next
+if grep -q "EXPECTED DOWNTIME: one coordinator restart" "$tmp/out"; then ok; else bad "vision next lacks the downtime"; fi
+run_rc 3 "_vision-qualification refuses outside next --run" scripts/ops/pearl-runtime.sh _vision-qualification "$VQSHA"
+PEARL_RUNTIME_TASK=vision-qualification run_rc 3 "vision install needs an owner" scripts/ops/pearl-runtime.sh next --run
+cp "$tmp/pearl/overlay.yaml" "$tmp/pearl/overlay.before"
+# The running coordinator binary rejects the result: nothing changes, no restart.
+printf '# INVALID\n' >> "$tmp/pearl/coordinator.yaml"
+PEARL_RUNTIME_TASK=vision-qualification MACPROVIDER_OPS_OWNER=t run_rc 3 "vision install refused by --validate-config" scripts/ops/pearl-runtime.sh next --run
+expect_err "rejects the edited overlay"
+expect_lock_free
+if cmp -s "$tmp/pearl/overlay.yaml" "$tmp/pearl/overlay.before" && [ "$(restarts)" = 0 ] && [ ! -e "$VQ_STAGED" ]; then ok; else bad "rejected vision overlay not left alone (restarts=$(restarts))"; fi
+printf 'listen:\n  bind_address: 127.0.0.1\n' > "$tmp/pearl/coordinator.yaml"
+# A failed restart puts the overlay back, then one recovery restart must
+# answer /healthz and boot with the restored files.
+systemctl restart macprovider-coordinator
+rm -f "$tmp/svc/restarts"
+hits="$(healthz_hits)"
+: > "$tmp/svc/restart_fail_once"
+PEARL_RUNTIME_TASK=vision-qualification MACPROVIDER_OPS_OWNER=t run_rc 3 "vision install rolled back when the restart fails" scripts/ops/pearl-runtime.sh next --run
+expect_err "the original overlay is restored (bytes verified) and a recovery restart brought the coordinator back on it"
+expect_lock_free
+if cmp -s "$tmp/pearl/overlay.yaml" "$tmp/pearl/overlay.before" && [ ! -e "$VQ_STAGED" ]; then ok; else bad "vision overlay not restored: $(cat "$tmp/pearl/overlay.yaml")"; fi
+if [ "$(restarts)" = 1 ] && [ ! -e "$tmp/svc/restart_fail_once" ]; then ok; else bad "vision rollback recovery restarts: $(restarts)"; fi
+if [ "$(healthz_hits)" -gt "$hits" ]; then ok; else bad "vision rollback recovery did not check /healthz"; fi
+if boot_matches_disk; then ok; else bad "vision rollback recovery did not boot the restored overlay"; fi
+# The recovery restart fails too: the restored overlay is reported unproven.
+: > "$tmp/svc/restart_fail"
+PEARL_RUNTIME_TASK=vision-qualification MACPROVIDER_OPS_OWNER=t run_rc 3 "vision install when both restarts fail" scripts/ops/pearl-runtime.sh next --run
+expect_err "the recovery restart failed; the original overlay is restored on disk (bytes verified) but the coordinator is not proven live"
+if cmp -s "$tmp/pearl/overlay.yaml" "$tmp/pearl/overlay.before" && [ ! -e "$VQ_STAGED" ]; then ok; else bad "vision overlay not restored: $(cat "$tmp/pearl/overlay.yaml")"; fi
+rm -f "$tmp/svc/restart_fail"
+systemctl restart macprovider-coordinator
+rm -f "$tmp/svc/restarts"
+PEARL_RUNTIME_TASK=vision-qualification MACPROVIDER_OPS_OWNER=t run_rc 0 "vision install runs" scripts/ops/pearl-runtime.sh next --run
+expect_lock_free
+if grep -q "EXPECTED DOWNTIME for vision_qualification: one coordinator restart" "$tmp/out"; then ok; else bad "vision downtime not printed first"; fi
+if [ "$(restarts)" = 1 ]; then ok; else bad "vision restarts: $(restarts)"; fi
+if python3 -c 'import json,sys,yaml
+d=yaml.safe_load(open(sys.argv[1])); e=json.load(open(sys.argv[2]))
+sys.exit(0 if d == {"relay_blind": {"enabled": True}, "routing": {"sticky_enabled": True, "vision_qualifications": [e]}} else 1)' \
+  "$tmp/pearl/overlay.yaml" "$VISION_QUALIFICATION_FILE"; then ok; else bad "vision overlay edit: $(cat "$tmp/pearl/overlay.yaml")"; fi
+if find "$PEARL_BACKUP_ROOT" -path '*vision-qualification*' -name overlay.yaml | grep -q .; then ok; else bad "no vision overlay backup"; fi
+if [ -e "$VQ_STAGED" ]; then bad "staged vision record left behind"; else ok; fi
+expect_no_secret "vision install"
+PEARL_RUNTIME_TASK=vision-qualification run_rc 0 "vision status after install" scripts/ops/pearl-runtime.sh status
+expect_next done:done
+if [ "$(state_of vision_qualification)" = "done" ] && [ "$(fact_of pearl_vq_overlay_entries_sha256)" = "$VQSHA" ]; then ok; else bad "vision done state: $(state_of vision_qualification)"; fi
+VISION_QUALIFICATION_FILE='' PEARL_RUNTIME_TASK=vision-qualification run_rc 0 "vision status on another machine" scripts/ops/pearl-runtime.sh status
+expect_next done:done
+rm -f "$tmp/svc/restarts"
+PEARL_RUNTIME_TASK=vision-qualification MACPROVIDER_OPS_OWNER=t run_rc 0 "vision install is a no-op once live" scripts/ops/pearl-runtime.sh next --run
+if [ "$(restarts)" = 0 ]; then ok; else bad "a live vision qualification restarted again"; fi
+# The overlay holds the entry but the coordinator did not boot with it: one
+# validated restart, no second edit.
+printf '# edited after boot\n' >> "$tmp/pearl/coordinator.yaml"
+PEARL_RUNTIME_TASK=vision-qualification run_rc 0 "vision entry present, not booted" scripts/ops/pearl-runtime.sh status
+expect_next vision_qualification:mutate
+PEARL_RUNTIME_TASK=vision-qualification MACPROVIDER_OPS_OWNER=t run_rc 0 "vision restart for an unapplied overlay" scripts/ops/pearl-runtime.sh next --run
+if [ "$(restarts)" = 1 ] && [ "$(grep -c vision_qualifications "$tmp/pearl/overlay.yaml")" = 1 ]; then ok; else bad "unapplied vision overlay: restarts=$(restarts)"; fi
+PEARL_RUNTIME_TASK=vision-qualification run_rc 0 "vision status after the recovery restart" scripts/ops/pearl-runtime.sh status
+expect_next done:done
+# Same, but that restart fails: nothing to restore, one recovery restart that
+# must answer /healthz and boot with the unchanged files.
+printf '# edited after boot again\n' >> "$tmp/pearl/coordinator.yaml"
+cp "$tmp/pearl/overlay.yaml" "$tmp/pearl/overlay.before"
+rm -f "$tmp/svc/restarts"
+hits="$(healthz_hits)"
+: > "$tmp/svc/restart_fail_once"
+PEARL_RUNTIME_TASK=vision-qualification MACPROVIDER_OPS_OWNER=t run_rc 3 "vision unapplied-overlay restart fails" scripts/ops/pearl-runtime.sh next --run
+expect_err "a recovery restart brought the coordinator back on the unchanged overlay"
+expect_lock_free
+if cmp -s "$tmp/pearl/overlay.yaml" "$tmp/pearl/overlay.before" && [ ! -e "$VQ_STAGED" ]; then ok; else bad "unapplied vision overlay changed"; fi
+if [ "$(restarts)" = 1 ]; then ok; else bad "unapplied vision recovery restarts: $(restarts)"; fi
+if [ "$(healthz_hits)" -gt "$hits" ]; then ok; else bad "unapplied vision recovery did not check /healthz"; fi
+if boot_matches_disk; then ok; else bad "unapplied vision recovery did not boot the on-disk files"; fi
+PEARL_RUNTIME_TASK=vision-qualification run_rc 0 "vision status after a recovered restart failure" scripts/ops/pearl-runtime.sh status
+expect_next done:done
+printf '# edited after boot a third time\n' >> "$tmp/pearl/coordinator.yaml"
+: > "$tmp/svc/restart_fail"
+PEARL_RUNTIME_TASK=vision-qualification MACPROVIDER_OPS_OWNER=t run_rc 3 "vision unapplied-overlay restarts both fail" scripts/ops/pearl-runtime.sh next --run
+expect_err "the recovery restart failed; the overlay is unchanged on disk but the coordinator is not proven live"
+rm -f "$tmp/svc/restart_fail"
+systemctl restart macprovider-coordinator
+# A different record never replaces the installed one.
+vq_record "$VQ_SECRETS/other.json" 'provider_id="VQ-SECRET-OTHER"'
+VISION_QUALIFICATION_FILE="$VQ_SECRETS/other.json" PEARL_RUNTIME_TASK=vision-qualification run_rc 0 "different vision record" scripts/ops/pearl-runtime.sh status
+expect_next vision_qualification:blocked
+case "$(next_field reason)" in *"different routing.vision_qualifications"*) ok ;; *) bad "different record reason: $(next_field reason)" ;; esac
+# A live overlay entry the record rules reject (the coordinator would accept
+# a non-hex model_hash) is blocked, never done, with or without a local record.
+python3 -I - "$VISION_QUALIFICATION_FILE" "$tmp/pearl/overlay.yaml" <<'PYM'
+import json, sys, yaml
+e = json.load(open(sys.argv[1]))
+e["model_hash"] = "z" * 64
+yaml.safe_dump({"routing": {"vision_qualifications": [e]}}, open(sys.argv[2], "w"))
+PYM
+systemctl restart macprovider-coordinator
+for f in "$VISION_QUALIFICATION_FILE" ''; do
+  VISION_QUALIFICATION_FILE="$f" PEARL_RUNTIME_TASK=vision-qualification run_rc 0 "invalid live vision entry (record: ${f:+set}${f:-unset})" scripts/ops/pearl-runtime.sh status
+  expect_next vision_qualification:blocked
+  case "$(next_field reason)" in *"model_hash must be a lowercase sha256"*) ok ;; *) bad "invalid live entry reason: $(next_field reason)" ;; esac
+  if [ "$(state_of vision_qualification)" = blocked ] && [ "$(fact_of pearl_vq_overlay_entries_valid)" = False ] &&
+    [ "$(fact_of pearl_vq_overlay_entries_sha256)" = invalid ]; then ok; else
+    bad "invalid live entry state: $(state_of vision_qualification) $(fact_of pearl_vq_overlay_entries_valid) $(fact_of pearl_vq_overlay_entries_sha256)"; fi
+  expect_no_secret "an invalid live entry"
+done
+unset VISION_QUALIFICATION_FILE
+rm -f "$tmp/svc/restarts" "$tmp/pearl/coordinator.yaml" "$tmp/pearl/overlay.yaml" "$tmp/pearl/overlay.before"
 
 # ==== cli-release (structured evidence) =======================================
 health v9.0.0 $LIVE

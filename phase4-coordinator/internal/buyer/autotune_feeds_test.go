@@ -24,7 +24,7 @@ import (
 
 const autotuneV4PublicKeyBase64 = "zTKDIdMmKKkO1Cgf5OdTzMOytVqW7U8SGsJ9XrzAltU="
 const autotuneV5PublicKeyBase64 = "vpTgWfvvrnbc1QhdTAxULFisoDU7jQ4mB1yZIHIGjBA="
-const currentAutotuneReleaseID = "published-2026-10-10-native-mtp-v238"
+const currentAutotuneReleaseID = "published-2026-10-17-qwen2vl-recommendable-v1"
 
 func TestAutotuneFeedsServeLiteralSignedBytes(t *testing.T) {
 	t.Parallel()
@@ -91,7 +91,7 @@ func TestAutotuneFeedsServeLiteralSignedBytes(t *testing.T) {
 		if name != "rate_card" && verification.Version != currentAutotuneReleaseID {
 			t.Fatalf("%s version=%q", name, verification.Version)
 		}
-		if name == "rate_card" && verification.Version != "bab7acfb9d1b40b7bbfc3da90bb40689ab8e7c7f6c53065c07143c1e5ed32bd4" {
+		if name == "rate_card" && verification.Version != "763a7b4224c7bb9a145a928cb40c9f418525cf662dcb9086e8807653a60f5623" {
 			t.Fatalf("%s version=%q", name, verification.Version)
 		}
 		if verification.PolicyVersion != "autotune-policy-v1" {

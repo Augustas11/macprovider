@@ -369,7 +369,14 @@ class EffectiveDiffTests(unittest.TestCase):
 
     def test_ack_file_schema(self) -> None:
         committed = (CANONICAL / "acknowledged-pricing-moves.json").read_bytes()
-        self.assertEqual(cr.load_pricing_move_acks(committed, "committed"), set())
+        # #2016: the Qwen2-VL promotion moved both served spellings off default.
+        self.assertEqual(
+            cr.load_pricing_move_acks(committed, "committed"),
+            {
+                ("mlx-community/Qwen2-VL-2B-Instruct-4bit", "default", "qwen2-vl-2b-instruct"),
+                ("mlx-community/qwen2-vl-2b-instruct-4bit", "default", "qwen2-vl-2b-instruct"),
+            },
+        )
         for bad in (
             b"[]",
             json.dumps({"schema_version": "x", "moves": []}).encode(),

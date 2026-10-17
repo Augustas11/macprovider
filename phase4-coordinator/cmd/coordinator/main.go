@@ -4923,6 +4923,14 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 			Str("default_objective", cfg.Routing.DefaultObjective).
 			Msg("routing.default_objective reload: objective changed")
 	}
+	// routing.vision_qualifications applies on SIGHUP like the routing
+	// fields above, so the applied-config record below never names an
+	// overlay whose qualification list is not the one live.
+	if buyerServer.SetVisionQualifications(cfg.Routing.VisionQualifications) {
+		logger.Info().
+			Int("vision_qualifications", len(cfg.Routing.VisionQualifications)).
+			Msg("routing.vision_qualifications reload: qualification list changed")
+	}
 	if buyerChanged, wsChanged := buyerServer.SetMinProviderThroughputTPS(cfg.Routing.MinProviderThroughputTPS), wsServer.SetMinProviderThroughputTPS(cfg.Routing.MinProviderThroughputTPS); buyerChanged || wsChanged {
 		logger.Info().
 			Float64("min_provider_throughput_tps", cfg.Routing.MinProviderThroughputTPS).

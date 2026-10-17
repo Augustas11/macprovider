@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -264,8 +265,8 @@ type Server struct {
 	// counts SPEC-002-R007 selections (nil = not wired).
 	perf         *routing.PerfStore
 	routeMetrics RouteSelectionMetrics
-	// routingMu guards defaultObjective, modelClasses, and
-	// minProviderThroughput, which are hot-swapped on SIGHUP when routing
+	// routingMu guards defaultObjective, modelClasses, visionQualifications,
+	// and minProviderThroughput, which are hot-swapped on SIGHUP when routing
 	// config changes (issue #266 T1 + min_provider_throughput_tps).
 	// Pre-SIGHUP readers (handleModels iteration at modelEntry build;
 	// resolveModelClass/objectiveForRequest per-request hot paths;
@@ -8878,6 +8879,18 @@ func (s *Server) SetMinProviderThroughputTPS(floor float64) (changed bool) {
 		return false
 	}
 	s.minProviderThroughput = floor
+	return true
+}
+
+// SetVisionQualifications hot-swaps routing.vision_qualifications on SIGHUP.
+// The slice is copied; providerSupportsVision reads it under routingMu.
+func (s *Server) SetVisionQualifications(next []config.VisionQualificationConfig) (changed bool) {
+	s.routingMu.Lock()
+	defer s.routingMu.Unlock()
+	if slices.Equal(s.visionQualifications, next) {
+		return false
+	}
+	s.visionQualifications = append([]config.VisionQualificationConfig(nil), next...)
 	return true
 }
 

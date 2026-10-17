@@ -1769,7 +1769,7 @@ def promotion_manifest_bytes(harness, key: str, release_id: str, as_of: str) -> 
             "INTAKE_UNKNOWN_KEY_BUCKETS": 64, "INTAKE_UNKNOWN_PRINCIPALS_PER_BUCKET": 64,
             "INTAKE_UNKNOWN_KEY_DISTINCT_CAP": 10000, "INTAKE_UNKNOWN_KEY_PRINCIPAL_CAP_PCT": 10,
             "INTAKE_K_ANONYMITY_MIN": 3, "INTAKE_FLEET_FIT_MIN_PCT": 25, "INTAKE_COLDSTART_SLOTS": 1,
-            "INTAKE_MIN_LISTED_DAYS": 30, "tier_target": "<= 16 GB",
+            "tier_target": "<= 16 GB",
         },
         "decisions": [{
             "model_key": key,
@@ -1783,7 +1783,6 @@ def promotion_manifest_bytes(harness, key: str, release_id: str, as_of: str) -> 
             "coldstart_slot_used": False,
             "listed_since": "2026-08-01T00:00:00Z",
             "promotion": {
-                "listed_days_elapsed": 45,
                 "rate_class": "class-8b",
                 "rate_row_resolved": True,
                 "rate_card_source_sha256": catalog_release.sha256((harness.catalog / "rate-card-source.json").read_bytes()),
@@ -1848,10 +1847,18 @@ def market_replay_inputs(
     published_rate_key: str | None = None,
     target_total_tokens: int = 10_000_000,
     target_endpoint_tokens: tuple[int, ...] = (1_000_000,),
+    class_priced: dict | None = None,
 ) -> dict:
     generated_at = datetime.fromisoformat(ranking_date + "T12:00:00+00:00")
     policy = market_policy_fixture(model_id)
     rate_card = market_rate_card_fixture(model_id, published_model_id=published_rate_key)
+    if class_priced is not None:
+        # SPEC-023 v0.22.25: a recommendable key with no OpenRouter market,
+        # priced by its rate class and published under its normalized row.
+        policy["class_priced_models"] = [class_priced["entry"]]
+        rate_card["rows"][class_priced["entry"]["canonical_model_id"]] = {
+            **class_priced["published"], "provider_share_bps": 9000, "global_multiplier_ppm": 1000000,
+        }
     rankings = {
         "data": [{
             "date": ranking_date,
@@ -1900,6 +1907,10 @@ def market_replay_inputs(
             "pricing": {"prompt": "0.00000010", "completion": "0.00000020"},
         }]}}
     candidate_obj = {"rows": {target_model_id: {"runtime_status": "recommendable"}}}
+    min_targets = {target_model_id: 1}
+    if class_priced is not None:
+        candidate_obj["rows"][class_priced["entry"]["catalog_key"]] = {"runtime_status": "recommendable"}
+        min_targets[class_priced["entry"]["catalog_key"]] = 1
     candidate_path = directory / "autotune-candidates.json"
     candidate_path.write_text(json.dumps(candidate_obj), encoding="utf-8")
     snapshot = openrouter_pricing_engine.build_snapshot(rankings, catalog, endpoints, policy, now=generated_at, top_n=50)
@@ -1907,7 +1918,7 @@ def market_replay_inputs(
     demand_proposal = openrouter_pricing_engine.build_demand_proposal(
         snapshot,
         policy,
-        min_provider_targets={target_model_id: 1},
+        min_provider_targets=min_targets,
         recommendable_catalog=candidate_obj,
         now=generated_at,
     )
@@ -2015,6 +2026,74 @@ class MarketPegReplayTest(unittest.TestCase):
             )
             self.assertNotIn("nvidia/nemotron-3-nano-30b-a3b", inputs["rate_card_obj"]["rows"])
             validate_market_fixture(inputs)
+
+    CLASS_3B = {"prompt_rate_per_mtok": 13500, "prompt_cache_hit_rate_per_mtok": 3375, "completion_rate_per_mtok": 27000}
+
+    def class_priced_market_inputs(self, directory: pathlib.Path, *, published=None, entry_overrides=None) -> dict:
+        entry = {
+            "canonical_model_id": "qwen2-vl-2b-instruct",
+            "catalog_key": "mlx-community/qwen2-vl-2b-instruct-4bit",
+            "rate_class": "class-3b",
+            "reason": "unit-test: no OpenRouter market",
+        }
+        entry.update(entry_overrides or {})
+        today = datetime.now(timezone.utc).date().isoformat()
+        inputs = market_replay_inputs(
+            directory, today,
+            class_priced={"entry": entry, "published": dict(published or self.CLASS_3B)},
+        )
+        source = directory / "rate-card-source.json"
+        source.write_bytes(canonical({
+            "schema_version": catalog_release.RATE_CARD_SOURCE_SCHEMA,
+            "generated_at": "2026-09-14T00:00:00Z",
+            "policy_version": "market-unit-v1",
+            "usd_per_million_credits": 1.0,
+            "provider_share_bps": 9000,
+            "global_multiplier_ppm": 1000000,
+            "rows": {},
+            "classes": {"class-3b": dict(self.CLASS_3B), "class-8b": dict(self.CLASS_3B)},
+        }))
+        inputs["rate_card_source"] = source
+        return inputs
+
+    def validate_class_priced(self, inputs: dict, rate_classes=None) -> None:
+        paths = inputs["paths"]
+        with patch.object(catalog_release, "MARKET_PEG_BIND_PATH", paths["bind"]), \
+                patch.object(catalog_release, "RATE_CARD_SOURCE_PATH", inputs["rate_card_source"]):
+            catalog_release.validate_market_peg(
+                paths["rate_proposal"], paths["demand_proposal"], paths["snapshot"], paths["policy"],
+                inputs["candidate_obj"], inputs["demand_obj"], inputs["rate_card_obj"],
+                rate_classes=rate_classes,
+            )
+
+    def test_market_peg_accepts_class_priced_key_at_its_class_rates(self):
+        with tempfile.TemporaryDirectory() as raw:
+            inputs = self.class_priced_market_inputs(pathlib.Path(raw))
+            self.assertNotIn("mlx-community/qwen2-vl-2b-instruct-4bit", inputs["demand_obj"]["rows"])
+            self.validate_class_priced(inputs, rate_classes={
+                "example/new-model": "class-8b",
+                "mlx-community/qwen2-vl-2b-instruct-4bit": "class-3b",
+            })
+
+    def test_market_peg_rejects_class_priced_row_off_its_class_rates(self):
+        with tempfile.TemporaryDirectory() as raw:
+            inputs = self.class_priced_market_inputs(
+                pathlib.Path(raw), published={**self.CLASS_3B, "completion_rate_per_mtok": 30000},
+            )
+            with self.assertRaisesRegex(catalog_release.CatalogError, "does not equal 'class-3b' rates"):
+                self.validate_class_priced(inputs)
+
+    def test_market_peg_rejects_class_priced_rate_class_not_matching_artifact_feed(self):
+        with tempfile.TemporaryDirectory() as raw:
+            inputs = self.class_priced_market_inputs(pathlib.Path(raw), entry_overrides={"rate_class": "class-8b"})
+            with self.assertRaisesRegex(catalog_release.CatalogError, "does not match its artifact-feed rate_class"):
+                self.validate_class_priced(inputs, rate_classes={"mlx-community/qwen2-vl-2b-instruct-4bit": "class-3b"})
+
+    def test_market_peg_rejects_class_priced_class_without_source_rates(self):
+        with tempfile.TemporaryDirectory() as raw:
+            inputs = self.class_priced_market_inputs(pathlib.Path(raw), entry_overrides={"rate_class": "class-32b"})
+            with self.assertRaisesRegex(catalog_release.CatalogError, "has no rates for it"):
+                self.validate_class_priced(inputs)
 
     def test_market_peg_rejects_tampered_snapshot_median(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -2327,6 +2406,38 @@ class HermeticRelease:
                 obj = json.loads(path.read_text())
                 obj["entries"] = []
                 path.write_bytes(catalog_release.canonical_bytes(obj))
+        # Rows admitted through the intake lane after activation did not exist
+        # in the pre-activation release: drop them, with their artifact-source
+        # and tier2-binding entries, and the intake decision that admitted them.
+        intake_path = self.catalog / "intake-decision.json"
+        if intake_path.exists():
+            admitted = {d["model_key"] for d in json.loads(intake_path.read_text())["decisions"]}
+            intake_path.unlink()
+            candidates_path = self.catalog / "autotune-candidates.json"
+            candidates = json.loads(candidates_path.read_text())
+            for key in admitted:
+                candidates["rows"].pop(key, None)
+            candidates_path.write_bytes(catalog_release.canonical_bytes(candidates))
+            source_path = self.catalog / "autotune-artifacts-source.json"
+            source = json.loads(source_path.read_text())
+            for key in admitted:
+                source["models"].pop(key, None)
+            source_path.write_text(json.dumps(source, indent=2, sort_keys=True) + "\n")
+            binding_path = self.catalog / "tier2-identity-binding.json"
+            binding = json.loads(binding_path.read_text())
+            admitted_model_ids = {m["model_id"] for m in binding["models"] if m["catalog_key"] in admitted}
+            binding["models"] = [m for m in binding["models"] if m["catalog_key"] not in admitted]
+            binding_path.write_text(json.dumps(binding, indent=2, sort_keys=True) + "\n")
+            # A promotion to recommendable also carried a demand row, a Tier-2
+            # catalog entry, a rate row (rate-card source, published rate card,
+            # coordinator rewards row) and the acknowledged move onto that row.
+            demand_path = self.catalog / "demand-rank.json"
+            demand = json.loads(demand_path.read_text())
+            for key in admitted:
+                demand["rows"].pop(key, None)
+            demand_path.write_bytes(catalog_release.canonical_bytes(demand))
+            self.strip_tier2_models(admitted_model_ids)
+            self.strip_promoted_rate_rows(admitted)
         self.bump(release_id, generated_at)
 
         def restamp(name: str, **fields) -> bytes:
@@ -2369,6 +2480,51 @@ class HermeticRelease:
             "release_id": release_id,
             "schema_version": "macprovider.autotune-release.v1",
         }, indent=2, sort_keys=True) + "\n")
+
+    def strip_tier2_models(self, model_ids: set[str]) -> None:
+        """Drop Tier-2 entries added by an intake promotion. The envelope
+        signature is not re-derived: `verify_tier2_signature` is stubbed here."""
+        path = self.catalog / "tier2-catalog.json"
+        tier2 = json.loads(path.read_text())
+        tier2["models"] = [m for m in tier2["models"] if m["model_id"] not in model_ids]
+        path.write_text(json.dumps(tier2, indent=2) + "\n")
+
+    def strip_promoted_rate_rows(self, admitted: set[str]) -> None:
+        """Drop the rate rows a promotion introduced, found through the
+        acknowledged pricing move that let the promoted model resolve onto them."""
+        acks_path = self.catalog / "acknowledged-pricing-moves.json"
+        if not acks_path.exists():
+            return
+        acks = json.loads(acks_path.read_text())
+        promoted = {key.lower() for key in admitted}
+        rows = {m["to_row"] for m in acks["moves"] if m["model"].lower() in promoted}
+        if not rows:
+            return
+        acks["moves"] = [m for m in acks["moves"] if m["to_row"] not in rows]
+        acks_path.write_text(json.dumps(acks, indent=2) + "\n")
+        source_path = self.catalog / "rate-card-source.json"
+        source = json.loads(source_path.read_text())
+        for row in rows:
+            source["rows"].pop(row, None)
+        source_path.write_text(json.dumps(source, indent=2, sort_keys=True) + "\n")
+        card_path = self.catalog / "rate-card.json"
+        card = json.loads(card_path.read_text())
+        for row in rows:
+            card["rows"].pop(row, None)
+        card["version"] = catalog_release.rate_card_projection_hash(card)
+        card_path.write_bytes(catalog_release.canonical_bytes(card))
+        yaml_path = self.root / "coordinator.yaml"
+        kept, skipping = [], False
+        for line in yaml_path.read_text().splitlines(keepends=True):
+            name = line.strip().split(":", 1)[0]
+            if line.startswith("    ") and not line.startswith("     ") and name in rows:
+                skipping = True
+                continue
+            if skipping and line.startswith("      "):
+                continue
+            skipping = False
+            kept.append(line)
+        yaml_path.write_text("".join(kept))
 
     # --- module patching -----------------------------------------------------
 
@@ -3628,7 +3784,6 @@ class IntakeDecisionManifestTest(unittest.TestCase):
             "INTAKE_K_ANONYMITY_MIN": 3,
             "INTAKE_FLEET_FIT_MIN_PCT": 25,
             "INTAKE_COLDSTART_SLOTS": 1,
-            "INTAKE_MIN_LISTED_DAYS": 30,
             "tier_target": "<= 16 GB",
         }
         self.stats_bytes = self.write("stats-intake.json", self.stats_source())
@@ -3745,7 +3900,6 @@ class IntakeDecisionManifestTest(unittest.TestCase):
             "coldstart_slot_used": False,
             "listed_since": "2026-08-15T00:00:00Z",
             "promotion": {
-                "listed_days_elapsed": 45,
                 "rate_class": "class-8b",
                 "rate_row_resolved": True,
                 "rate_card_source_sha256": catalog_release.sha256(RATE_CARD_SOURCE_BYTES),
@@ -4108,9 +4262,24 @@ class IntakeDecisionManifestTest(unittest.TestCase):
         entry = self.promote_entry()
         entry["promotion"] = None
         self.rejects(self.manifest([entry]), "promotion: must be an object")
+        # SPEC-023 v0.22.25: the listed-dwell knob is removed. A promotion
+        # with no listed_days_elapsed is accepted at any dwell; the removed
+        # field and the removed threshold both fail the closed schema.
         entry = self.promote_entry()
-        entry["promotion"]["listed_days_elapsed"] = 10
-        self.rejects(self.manifest([entry]), "listed_days_elapsed must be >= INTAKE_MIN_LISTED_DAYS")
+        entry["listed_since"] = "2026-09-30T00:00:00Z"
+        self.validate(self.manifest([entry]))
+        entry = self.promote_entry()
+        entry["promotion"]["listed_days_elapsed"] = 45
+        self.rejects(self.manifest([entry]), "promotion: unknown key(s) ['listed_days_elapsed']")
+        manifest = self.manifest([self.promote_entry()])
+        manifest["thresholds"]["INTAKE_MIN_LISTED_DAYS"] = 30
+        self.rejects(manifest, "thresholds: unknown key(s) ['INTAKE_MIN_LISTED_DAYS']")
+        entry = self.promote_entry()
+        entry["listed_since"] = "2026-10-02T00:00:00Z"
+        self.rejects(self.manifest([entry]), "listed_since must not be after as_of")
+        entry = self.promote_entry()
+        entry["listed_since"] = None
+        self.rejects(self.manifest([entry]), "listed_since")
         entry = self.promote_entry()
         entry["promotion"]["bench_provenance_source"] = "omlx_seeded"
         self.rejects(self.manifest([entry]), "bench_provenance_source must equal the row's provenance and not be omlx_seeded")
@@ -4126,7 +4295,7 @@ class IntakeDecisionManifestTest(unittest.TestCase):
         self.rejects(self.manifest([]), "no entry for admitted/promoted key(s) ['qwen3-8b']", previous_tiers=previous)
         self.rejects(self.manifest([self.admit_entry()]), "action must be promote_recommendable", previous_tiers=previous)
         previous[self.KEY] = 0  # absent → recommendable directly is refused
-        self.rejects(self.manifest([self.promote_entry()]), "reaches recommendable without a listed observation period", previous_tiers=previous)
+        self.rejects(self.manifest([self.promote_entry()]), "reaches recommendable without being listed in a prior release", previous_tiers=previous)
         other = catalog_release.candidate_admission_tiers(CANDIDATE_OBJ)
         self.rejects(self.manifest([self.admit_entry()]), "is not admitted or promoted by this release", previous_tiers=other)
 

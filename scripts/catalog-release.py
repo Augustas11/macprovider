@@ -880,6 +880,7 @@ def validate_market_peg(
     rate_card_obj: dict,
     *,
     enforce_wall_clock_freshness: bool = True,
+    rate_classes: dict[str, str] | None = None,
 ) -> None:
     snapshot_bytes = snapshot_path.read_bytes()
     policy_bytes = policy_path.read_bytes()
@@ -935,7 +936,9 @@ def validate_market_peg(
         for row in replayed_rate[bucket]
     }
     recommendable = {key for key, row in candidate_obj["rows"].items() if row.get("runtime_status") == "recommendable"}
-    for key in recommendable:
+    class_priced = openrouter_pricing_engine.class_priced_index(policy)
+    validate_market_peg_class_priced(class_priced, rate_card_obj, rate_classes)
+    for key in sorted(recommendable - set(class_priced)):
         proposal_rates = rates_by_model.get(key)
         if proposal_rates is None:
             fail(f"market-peg: recommendable row {key!r} has no replayed proposal rate")
@@ -960,6 +963,29 @@ def validate_market_peg(
     for field in ("prompt_rate_per_mtok", "prompt_cache_hit_rate_per_mtok", "completion_rate_per_mtok"):
         if rate_card_obj["rows"]["default"][field] != minimum_rates[field]:
             fail(f"market-peg: rate-card default.{field} does not match the minimum-completion mapped row")
+
+
+def validate_market_peg_class_priced(class_priced: dict, rate_card_obj: dict, rate_classes: dict[str, str] | None) -> None:
+    """SPEC-023 §3.3.2 rule 3: a class-priced key is priced only by its declared
+    §3.3.1 rate class, so a market-pegged release cannot reprice it: its
+    published row must resolve and equal that class's rate-card-source rates."""
+    if not class_priced:
+        return
+    if not RATE_CARD_SOURCE_PATH.exists():
+        fail(f"market-peg: class_priced_models needs {RATE_CARD_SOURCE_PATH.name} class rates")
+    classes = validate_rate_card_source(RATE_CARD_SOURCE_PATH.read_bytes())["classes"]
+    for key, entry in sorted(class_priced.items()):
+        if rate_classes is not None and rate_classes.get(key) != entry["rate_class"]:
+            fail(f"market-peg: class-priced key {key!r} rate_class {entry['rate_class']!r} does not match its artifact-feed rate_class {rate_classes.get(key)!r}")
+        class_rates = classes.get(entry["rate_class"])
+        if class_rates is None:
+            fail(f"market-peg: class-priced key {key!r} declares {entry['rate_class']!r} but the rate-card source has no rates for it")
+        if openrouter_pricing_engine.rate_row_key(rate_card_obj["rows"], key) != entry["canonical_model_id"]:
+            fail(f"market-peg: class-priced key {key!r} does not resolve to its rate row {entry['canonical_model_id']!r}")
+        published = rate_card_obj["rows"][entry["canonical_model_id"]]
+        for field in RATE_CREDIT_FIELDS:
+            if published[field] != class_rates[field]:
+                fail(f"market-peg: class-priced row {entry['canonical_model_id']!r}.{field} does not equal {entry['rate_class']!r} rates")
 
 
 def rate_card_projection_hash(value: dict) -> str:
@@ -4352,7 +4378,6 @@ INTAKE_THRESHOLD_INT_KEYS = (
     "INTAKE_K_ANONYMITY_MIN",
     "INTAKE_FLEET_FIT_MIN_PCT",
     "INTAKE_COLDSTART_SLOTS",
-    "INTAKE_MIN_LISTED_DAYS",
 )
 INTAKE_THRESHOLD_KEYS = frozenset(INTAKE_THRESHOLD_INT_KEYS) | {"tier_target"}
 INTAKE_THRESHOLD_KEYS_V2 = INTAKE_THRESHOLD_KEYS | {"intake_pool_paid_request_floor"}
@@ -4375,7 +4400,7 @@ INTAKE_SIGNAL_KEYS = frozenset({
 })
 INTAKE_DECISION_KEYS_V2 = INTAKE_DECISION_KEYS | {"pool_proven_evidence"}
 INTAKE_PROMOTION_KEYS = frozenset({
-    "listed_days_elapsed", "rate_class", "rate_row_resolved", "rate_card_source_sha256",
+    "rate_class", "rate_row_resolved", "rate_card_source_sha256",
     "demand_rank_recommendable", "demand_rank_source_sha256", "bench_provenance_source",
     "operator_admission_reference",
 })
@@ -5040,7 +5065,7 @@ def validate_intake_admit_entry(entry: dict, thresholds: dict, candidate_obj: di
             fail(f"{label}: tier_target clause is not satisfied (best verified artifact needs {min(verified_ram) + INTAKE_SAFETY_MARGIN_GB} GB > {target} GB)")
 
 
-def validate_intake_promote_entry(entry: dict, thresholds: dict, candidate_obj: dict, artifact_obj: dict | None, demand_obj: dict, demand_digest: str, label: str) -> None:
+def validate_intake_promote_entry(entry: dict, candidate_obj: dict, artifact_obj: dict | None, demand_obj: dict, demand_digest: str, label: str) -> None:
     key = entry["model_key"]
     as_of = _intake_rfc3339(entry["as_of"], f"{label}.as_of")
     for field in ("signals", "admission_clause", "fit_clause", "pool_proven_evidence"):
@@ -5054,11 +5079,8 @@ def validate_intake_promote_entry(entry: dict, thresholds: dict, candidate_obj: 
         fail(f"{label}.observation_window_* must be null for promote_recommendable")
     listed_since = _intake_rfc3339(entry["listed_since"], f"{label}.listed_since")
     promotion = _intake_closed(entry["promotion"], INTAKE_PROMOTION_KEYS, f"{label}.promotion")
-    elapsed = _intake_int(promotion["listed_days_elapsed"], f"{label}.promotion.listed_days_elapsed")
-    if elapsed < thresholds["INTAKE_MIN_LISTED_DAYS"]:
-        fail(f"{label}.promotion.listed_days_elapsed must be >= INTAKE_MIN_LISTED_DAYS")
-    if (as_of - listed_since).days < elapsed:
-        fail(f"{label}.promotion.listed_days_elapsed exceeds as_of - listed_since")
+    if listed_since > as_of:
+        fail(f"{label}.listed_since must not be after as_of")
     if promotion["rate_class"] not in RATE_CLASSES:
         fail(f"{label}.promotion.rate_class must be a §3.3.1 rate class")
     # §3.7 / v0.10.1 rule 2: the key's rate_class lives on its artifact-feed
@@ -5119,7 +5141,7 @@ def validate_intake_decision(
             previous = previous_tiers.get(key, 0)
             tier = current_tiers[key]
             if tier == 2 and previous != 1:
-                fail(f"intake-decision: {key!r} reaches recommendable without a listed observation period (SPEC-023 §16.3)")
+                fail(f"intake-decision: {key!r} reaches recommendable without being listed in a prior release (SPEC-023 §16.3)")
             expected_actions[key] = "promote_recommendable" if tier == 2 else "admit_listed"
     demand_digest = sha256(demand_bytes)
     sources = IntakeSources(audit_dir, release_id)
@@ -5152,7 +5174,7 @@ def validate_intake_decision(
             if e["coldstart_slot_used"]:
                 coldstart += 1
         else:
-            validate_intake_promote_entry(e, thresholds, candidate_obj, artifact_obj, demand_obj, demand_digest, label)
+            validate_intake_promote_entry(e, candidate_obj, artifact_obj, demand_obj, demand_digest, label)
     if previous_tiers is not None:
         missing = sorted(set(expected_actions) - seen)
         if missing:
@@ -5265,7 +5287,7 @@ def generate(
     if market_peg is None and market_pegged:
         fail("generate: market-pegged releases require all four named --market-* paths")
     if market_peg is not None:
-        validate_market_peg(*market_peg, candidate_obj, demand_obj, rate_card_obj)
+        validate_market_peg(*market_peg, candidate_obj, demand_obj, rate_card_obj, rate_classes=rate_classes if artifact_obj is not None else None)
     if state == "activation":
         require_rate_card_unchanged_at_activation(rate_card_obj, release_history(ledger_before, candidate_obj["version"]))
     validate_release_inputs(candidate_obj, demand_obj, rate_card_obj)

@@ -141,7 +141,10 @@ extension ModelRuntime {
             return ComputeScoreProtocol.Result(request: request, status: .unavailable)
         }
         defer { unregisterInFlight(handle.registrationID) }
+        // #2016: teacher-forced scoring uses the text-only `model(MLXArray, cache:)`
+        // forward, which a native-vision (VLM) container does not implement.
         guard let container = handle.snapshot.container,
+              handle.snapshot.nativeVisionProfile == nil,
               handle.snapshot.weightsManifestSHA256 == request.weightsManifestSHA256
         else {
             return ComputeScoreProtocol.Result(request: request, status: .unavailable)

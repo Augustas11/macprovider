@@ -60,6 +60,17 @@ LISTING_PIN_KEYS = frozenset({"prompt_rate_per_mtok", "completion_rate_per_mtok"
 LISTING_EVIDENCE_BASIS = "openrouter_active_paid_endpoints_all_providers"
 LISTING_EVIDENCE_KEYS = frozenset({"basis", "excluded_provider_names", "listings"})
 LISTING_ENTRY_KEYS = frozenset({"provider_name", "endpoint_model_id", "prompt_usd_per_mtok", "completion_usd_per_mtok", "request_count_last_30m"})
+# SPEC-023 v0.22.25: a recommendable key with no OpenRouter market is priced
+# only by its declared §3.3.1 rate class. It is outside the market peg, the
+# demand proposal and the OpenRouter listing; mapped market keys plus these
+# keys cover the recommendable catalog exactly, disjointly.
+CLASS_PRICED_POLICY_KEY = "class_priced_models"
+CLASS_PRICED_ENTRY_KEYS = frozenset({"canonical_model_id", "catalog_key", "rate_class", "reason"})
+# Mirror of catalog-release.py RATE_CLASSES (SPEC-023 §3.3.1 rule 1).
+RATE_CLASSES = frozenset({
+    "class-3b", "class-8b", "class-20b-moe", "class-30b-moe",
+    "class-32b", "class-70b", "class-120b-moe",
+})
 # Bounds applied before any Decimal arithmetic or formatting on upstream or
 # snapshot money strings (an exponent like 1e-1000000 expands on format).
 DECIMAL_MAX_CHARS = 64
@@ -69,7 +80,7 @@ DECIMAL_MAX_ADJUSTED = 12
 
 
 def is_current_policy_keys(keys: set[str] | frozenset[str]) -> bool:
-    return CURRENT_POLICY_KEYS <= keys <= CURRENT_POLICY_KEYS | {LISTING_POLICY_KEY}
+    return CURRENT_POLICY_KEYS <= keys <= CURRENT_POLICY_KEYS | {LISTING_POLICY_KEY, CLASS_PRICED_POLICY_KEY}
 
 
 def listing_excluded_provider_names(policy: Mapping[str, Any]) -> list[str]:
@@ -1395,6 +1406,40 @@ def policy_model_index(policy: Mapping[str, Any]) -> dict[str, Mapping[str, Any]
     return result
 
 
+def class_priced_index(policy: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    """Validate `class_priced_models` and index it by catalog key."""
+    entries = policy.get(CLASS_PRICED_POLICY_KEY, [])
+    if not isinstance(entries, list):
+        raise SchemaError("policy.class_priced_models must be a list")
+    mapped = {model["canonical_model_id"] for model in policy_model_index(policy).values()}
+    result: dict[str, Mapping[str, Any]] = {}
+    rate_rows: set[str] = set()
+    for index, entry in enumerate(entries):
+        label = f"policy.class_priced_models[{index}]"
+        if not isinstance(entry, dict) or set(entry) != CLASS_PRICED_ENTRY_KEYS:
+            raise SchemaError(f"{label} must have exactly {sorted(CLASS_PRICED_ENTRY_KEYS)}")
+        catalog_key = entry["catalog_key"]
+        canonical_id = entry["canonical_model_id"]
+        for field, value in (("catalog_key", catalog_key), ("canonical_model_id", canonical_id)):
+            if not isinstance(value, str) or not CANONICAL_ID_RE.fullmatch(value) or value == "default":
+                raise SchemaError(f"{label}.{field} is invalid")
+        # canonical_model_id names the rate-card row that prices the key, and
+        # that row must be the one §3.3 lookup reaches: exact key or NormalizeModelKey.
+        if canonical_id not in {catalog_key, normalize_model_key(catalog_key)}:
+            raise SchemaError(f"{label}.canonical_model_id must be catalog_key or its NormalizeModelKey")
+        if entry["rate_class"] not in RATE_CLASSES:
+            raise SchemaError(f"{label}.rate_class is not a SPEC-023 §3.3.1 rate class")
+        if not isinstance(entry["reason"], str) or not entry["reason"].strip():
+            raise SchemaError(f"{label}.reason must be non-empty")
+        if catalog_key in result or canonical_id in rate_rows:
+            raise SchemaError(f"{label} duplicates a class-priced key")
+        if catalog_key in mapped or canonical_id in mapped:
+            raise SchemaError(f"{label} is also mapped to an OpenRouter market; a key is market-pegged or class-priced, not both")
+        result[catalog_key] = entry
+        rate_rows.add(canonical_id)
+    return result
+
+
 def validate_policy(policy: Mapping[str, Any]) -> None:
     if set(policy) != LEGACY_POLICY_KEYS and not is_current_policy_keys(set(policy)):
         raise SchemaError("policy has missing or unexpected fields")
@@ -1442,6 +1487,7 @@ def validate_policy(policy: Mapping[str, Any]) -> None:
     if isinstance(min_providers, bool) or not isinstance(min_providers, int) or min_providers < 1:
         raise SchemaError("policy min_distinct_providers must be an integer of at least 1")
     models = policy_model_index(policy)
+    class_priced_index(policy)
     listing = policy.get(LISTING_POLICY_KEY)
     if listing is not None:
         if not isinstance(listing, dict) or set(listing) != LISTING_POLICY_KEYS:
@@ -1905,6 +1951,12 @@ def build_proposal(
         buckets = (*buckets[:3], "retained", *buckets[3:])
     result: dict[str, list[dict[str, Any]]] = {key: [] for key in buckets}
     assessed_current_ids: set[str] = set()
+    # Class-priced rows are priced by their rate class, not by this proposal:
+    # they are neither proposed nor reported as unmapped, but must resolve.
+    for catalog_key, entry in sorted(class_priced_index(policy).items()):
+        if rate_row_key(rate_rows, catalog_key) != entry["canonical_model_id"]:
+            raise SchemaError(f"class-priced key {catalog_key!r} does not resolve to its rate-card row {entry['canonical_model_id']!r}")
+        assessed_current_ids.add(entry["canonical_model_id"])
 
     def market_unavailable() -> dict[str, None]:
         return {"demand_rank": None, "total_token_volume": None, "benchmark_provider": None, "completion_per_mtok": None}
@@ -2168,9 +2220,14 @@ def build_demand_proposal(
         catalog = recommendable_catalog
     recommendable_keys = {key for key, row in catalog["rows"].items() if row.get("runtime_status") == "recommendable"}
     expected_target_keys = set(models_by_canonical)
-    if expected_target_keys != recommendable_keys:
-        raise SchemaError("policy mappings must exactly cover the recommendable candidate catalog")
-    if not isinstance(min_provider_targets, dict) or set(min_provider_targets) != expected_target_keys or any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in min_provider_targets.values()):
+    class_priced_keys = set(class_priced_index(policy))
+    if expected_target_keys | class_priced_keys != recommendable_keys:
+        raise SchemaError("policy mappings must exactly cover the recommendable candidate catalog (mapped market keys plus class_priced_models)")
+    if not isinstance(min_provider_targets, dict) or any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in min_provider_targets.values()):
+        raise SchemaError("minimum provider targets must exactly cover mapped canonical model IDs with non-negative integers")
+    # A class-priced key keeps its operator-set demand row; it gets no proposal.
+    min_provider_targets = {key: value for key, value in min_provider_targets.items() if key not in class_priced_keys}
+    if set(min_provider_targets) != expected_target_keys:
         raise SchemaError("minimum provider targets must exactly cover mapped canonical model IDs with non-negative integers")
     models_by_source = {model["source_model_id"]: model for model in policy["models"]}
     rows_by_source = {row["source_model_id"]: row for row in snapshot["rows"]}

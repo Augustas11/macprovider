@@ -12,7 +12,8 @@ pearl/coordinator.yaml and pearl/overlay.yaml, bin/fake-coordinator.
                                    config becomes svc/running.yaml
   stop U / start U                 append the action to svc/unit-actions
   _init                            create the first /proc entry
-Anything else exits 1. A file svc/restart_fail makes restart fail.
+Anything else exits 1. A file svc/restart_fail makes restart fail;
+svc/restart_fail_once makes the next restart fail (and is removed).
 """
 import hashlib
 import json
@@ -95,6 +96,9 @@ elif args[:1] == ["show"] and "MainPID" in args:
     print(pid())
 elif args[:1] == ["restart"]:
     if os.path.exists(os.path.join(svc, "restart_fail")):
+        sys.exit(1)
+    if os.path.exists(os.path.join(svc, "restart_fail_once")):
+        os.unlink(os.path.join(svc, "restart_fail_once"))
         sys.exit(1)
     mkproc(pid() + 1)
     n = os.path.join(svc, "restarts")

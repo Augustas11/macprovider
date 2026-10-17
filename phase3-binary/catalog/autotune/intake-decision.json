@@ -1,0 +1,43 @@
+{
+  "decisions": [
+    {
+      "action": "promote_recommendable",
+      "admission_clause": null,
+      "as_of": "2026-10-17T02:24:00Z",
+      "coldstart_slot_used": false,
+      "fit_clause": null,
+      "listed_since": "2026-10-17T01:10:00Z",
+      "model_key": "mlx-community/qwen2-vl-2b-instruct-4bit",
+      "observation_window_end": null,
+      "observation_window_start": null,
+      "operator_decision": "promoted",
+      "operator_role": "catalog-operator",
+      "promotion": {
+        "bench_provenance_source": "no_throughput_bench",
+        "demand_rank_recommendable": true,
+        "demand_rank_source_sha256": "ed67164f964fcf848d668d4e4e850afcf4c54d3c15ba31416926e0d6d00fd5dc",
+        "operator_admission_reference": "docs/releases/coordinator-release-train.md#qwen2-vl-2b-promotion-2016",
+        "rate_card_source_sha256": "b61a7aa3b34ad3d6581d76a839b5efb68930860b8315d125f438e9d4632ce67b",
+        "rate_class": "class-3b",
+        "rate_row_resolved": true
+      },
+      "signals": null
+    }
+  ],
+  "generated_at": "2026-10-17T02:24:00Z",
+  "release_id": "published-2026-10-17-qwen2vl-recommendable-v1",
+  "schema_version": "macprovider.intake-decision.v1",
+  "thresholds": {
+    "INTAKE_BUYER_REQUEST_FLOOR": 250,
+    "INTAKE_COLDSTART_SLOTS": 1,
+    "INTAKE_DEMAND_RANK_MAX": 100,
+    "INTAKE_FLEET_FIT_MIN_PCT": 25,
+    "INTAKE_K_ANONYMITY_MIN": 3,
+    "INTAKE_OFFER_FLOOR": 3,
+    "INTAKE_UNKNOWN_KEY_BUCKETS": 64,
+    "INTAKE_UNKNOWN_KEY_DISTINCT_CAP": 10000,
+    "INTAKE_UNKNOWN_KEY_PRINCIPAL_CAP_PCT": 10,
+    "INTAKE_UNKNOWN_PRINCIPALS_PER_BUCKET": 64,
+    "tier_target": "<= 16 GB"
+  }
+}

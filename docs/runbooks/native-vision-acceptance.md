@@ -48,8 +48,14 @@ or join an unreleased candidate to the live coordinator.
    before sending inference requests. Supply the expected hostname from
    established operator records, not by accepting an arbitrary current host.
    Keep credentials in environment variables; never put them on the command
-   line or in evidence. `VISION_PROVIDER_TOKEN` and `VISION_BUYER_TOKEN` are
-   optional authenticated-path tokens.
+   line or in evidence. `VISION_PROVIDER_TOKEN`, `VISION_TEXT_ONLY_PROVIDER_TOKEN`
+   (defaults to the provider token) and `VISION_BUYER_TOKEN` are optional
+   authenticated-path tokens.
+
+   Also start a second process of the same candidate binary, with the same
+   isolation flags, serving only the text-only model on its own free loopback
+   port (not 8080, not the candidate's port). The harness verifies it like the
+   candidate (binary digest, executable, isolation flags, sole listener).
 
    ```bash
    python3 scripts/vision-acceptance.py \
@@ -60,14 +66,25 @@ or join an unreleased candidate to the live coordinator.
      --candidate-sha256 "$CANDIDATE_SHA256" \
      --source-commit "$CANDIDATE_SOURCE_COMMIT" \
      --unsupported-model "$LOADED_TEXT_ONLY_MODEL" \
+     --text-only-provider-url http://127.0.0.1:18019 \
+     --text-only-pid "$TEXT_ONLY_PID" \
      --output "$PRIVATE_EVIDENCE_DIRECTORY/native-vision-http.json"
    ```
 
-   The harness generates tiny red/blue PNGs in memory, uses the same question
-   for both, and checks color-dependent answers in streaming and non-streaming
-   modes. It also checks image-only input, reversed multiple-image ordering,
-   mixed content, malformed/excessive media, endpoint/model rejection,
-   disconnect and repeated-request recovery. Results contain no images,
+   The harness generates 224x224 PNGs in memory (a filled red or blue circle on a
+   white background; small VLMs do not read uniform solid-colour images
+   reliably), uses the same question for both, and checks color-dependent answers in streaming and non-streaming
+   modes. It also checks image-only user turns (a system turn carries the instruction), reversed two-image ordering (`Image 1:`/`Image 2:` labels, exact ordered colour names),
+   mixed content, malformed/excessive media, endpoint rejection, disconnect
+   and repeated-request recovery. On the candidate it sends an explicitly
+   unknown model name (`unloaded_model_name`), which passes only on a
+   structured 404 `model_not_found`; that proves model lookup, not media
+   rejection. On the text-only provider it sends mixed text+image and
+   image-only requests for `--unsupported-model` and requires a structured
+   4xx refusal that is not 404 or `model_not_found` (media rejected before
+   inference), then a text-only request that succeeds (suite
+   `text_only_provider`). Through the gateway (step 4),
+   `unsupported_model_mixed` must be a 400-class media rejection, never 404. Results contain no images,
    prompts, answers, tokens or host identifiers. Source commit is explicitly
    an operator assertion; the binary digest and process checks are measured.
    A failure returns nonzero and never becomes a qualification.
@@ -104,7 +121,8 @@ the pending items without claiming qualification or live acceptance.
 - [ ] Provider-local and isolated buyer streaming/non-streaming HTTP checks pass.
 - [ ] Resource, replacement, negative capacity-routing and receipt gates pass.
 - [ ] A separately loaded text-only model rejects mixed/image-only requests
-  before inference; the harness model-name mismatch check alone is insufficient.
+  before inference (harness suite `text_only_provider`); the unknown-model
+  name check alone is insufficient.
 - [ ] Existing tool-selection and text-only regressions remain green in CI.
 - [ ] Independent code, security and architecture audits satisfy repository gates.
 - [ ] Reviewed candidate release and any catalog/runtime changes use only
@@ -121,9 +139,8 @@ because unsupported media rejects or because this harness passes in isolation.
 
 ## Qualification deployment record
 
-After Studio acceptance, use the normal reviewed release/catalog/runtime ops
-train to add an operator-reviewed `routing.vision_qualifications` entry. It
-contains exact `provider_id`, `binary_version`, `hardware_chip`, `ram_gb`, `max_context_tokens`,
+After Studio acceptance, install one operator-reviewed
+`routing.vision_qualifications` entry on Pearl. It contains exact `provider_id`, `binary_version`, `hardware_chip`, `ram_gb`, `max_context_tokens`,
 `max_concurrency`, `model_id`, `model_hash`, `model_hash_algorithm`,
 `weights_manifest_sha256`, `processor_digest`, `runtime`, `runtime_revision`,
 `media_profile`, and `qualification_digest` (SHA-256 of the reviewed acceptance
@@ -134,6 +151,58 @@ An absent/mismatched entry leaves buyer media explicitly unavailable. A new
 binary or provider configuration needs a matching reviewed record; reuse
 unchanged qualification observations and rebind release identity under the
 existing release rules rather than rerunning unchanged text benchmarks.
+
+The record names a provider, and this repository is public: keep it in a
+private file outside the repository, owned by you, mode 0600, one link, not
+a symlink, in a directory only you or root can write, as a JSON (or YAML)
+mapping with exactly those 15 fields. Install it only through the ops entry point:
+
+```bash
+export VISION_QUALIFICATION_FILE=<private file>
+PEARL_RUNTIME_TASK=vision-qualification scripts/ops/pearl-runtime.sh status
+PEARL_RUNTIME_TASK=vision-qualification scripts/ops/pearl-runtime.sh next
+MACPROVIDER_OPS_OWNER=<session-label> PEARL_RUNTIME_TASK=vision-qualification \
+  VISION_QUALIFICATION_FILE=<private file> scripts/ops/pearl-runtime.sh next --run
+```
+
+Expected downtime: one coordinator restart, about 5–40 seconds. The
+coordinator applies the qualification list at boot and on SIGHUP; the task
+still restarts once, because the new process logging the on-disk files as its
+boot config is the proof that the list is live. If the post-restart check
+fails, the tooling restores the overlay and restarts the coordinator once
+more.
+
+`status` checks the record locally with the coordinator's rules (exact fields,
+positive integers, lowercase SHA-256 hex for `model_hash`,
+`weights_manifest_sha256`, `processor_digest` and `qualification_digest`, the
+`mlx-community/Qwen2-VL-2B-Instruct-4bit` / `mlx_cache` / `qwen2vl-inline-v1`
+tuple and the `macprovider.snapshot-manifest.v1` hash algorithm). It prints
+field names and the entry's SHA-256 only, never the values. `next --run`
+prints the downtime, takes the live-ops lock, stages the canonical record
+root-only next to the overlay and runs
+`scripts/ops/lib/pearl-cli-config.py apply-vision-qualification` under both
+Pearl locks. That helper sets `routing.vision_qualifications` to exactly
+`[record]` in `/etc/macprovider/coordinator.pearl-overlays.yaml` (never the
+base `coordinator.yaml`), after a backup under `/root/macprovider-backups`. An
+existing `routing:` mapping in the overlay keeps its keys; the entry is
+inserted into it. The helper refuses a different existing list, a flow-style
+or non-mapping `routing`, and any edit that changes more than that key. It
+validates with the running coordinator binary (`--validate-config`),
+replaces the overlay atomically, restarts once and requires the new process
+to log the on-disk files as its boot config.
+
+The task is done when the overlay holds exactly this entry and the running
+coordinator booted with it. Run again with the same record, it does nothing.
+If the overlay already holds the entry but the coordinator has not booted with
+it, it validates and restarts once. If installing the edited overlay or the
+restart fails, it puts the original overlay bytes back and checks them on
+disk, then makes one recovery restart that must answer `/healthz` and log the
+on-disk files as its boot config, and reports the outcome. If the restore or
+the recovery restart cannot be proven, it stops with a message that the
+overlay or coordinator state is unproven: compare the overlay with the backup,
+check the coordinator and run `status`. An overlay entry that fails the record rules (for example a non-hex
+`model_hash` the coordinator itself would accept) is blocked, never done. To replace a recorded entry, reconcile the
+overlay first; the task never overwrites a different list.
 
 Provider-local support is enabled when the exact artifact loads. The wire
 capability asserts implementation identity only. No source catalog or public

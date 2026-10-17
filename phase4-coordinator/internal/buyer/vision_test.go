@@ -56,6 +56,37 @@ func TestProviderSupportsVisionRequiresEntireQualifiedTuple(t *testing.T) {
 	}
 }
 
+func TestSetVisionQualificationsReplacesLiveList(t *testing.T) {
+	p, q := visionRegressionProvider()
+	s := &Server{}
+	if s.providerSupportsVision(p) {
+		t.Fatal("provider qualified before any qualification was set")
+	}
+	next := []config.VisionQualificationConfig{q}
+	if !s.SetVisionQualifications(next) {
+		t.Fatal("setting a new list reported no change")
+	}
+	next[0].ProviderID = "mutated-after-set"
+	if !s.providerSupportsVision(p) {
+		t.Fatal("the set list is not the one providerSupportsVision reads (or it aliases the caller's slice)")
+	}
+	if s.SetVisionQualifications([]config.VisionQualificationConfig{q}) {
+		t.Fatal("an identical list reported a change")
+	}
+	other := q
+	other.QualificationDigest = "other-evidence"
+	if !s.SetVisionQualifications([]config.VisionQualificationConfig{other}) || !s.providerSupportsVision(p) {
+		t.Fatal("a changed qualification digest was not applied")
+	}
+	other.ProviderID = "another-provider"
+	if !s.SetVisionQualifications([]config.VisionQualificationConfig{other}) || s.providerSupportsVision(p) {
+		t.Fatal("replacing the list left the old provider qualified")
+	}
+	if !s.SetVisionQualifications(nil) || s.providerSupportsVision(p) {
+		t.Fatal("clearing the list left a provider qualified")
+	}
+}
+
 func TestDispatchBodyForProviderCheckedKeepsTextSelectionSnapshot(t *testing.T) {
 	var server *Server // Text dispatch must not consult live pool state.
 	req := chatRequest{Model: "buyer-model", raw: []byte(`{"model":"buyer-model","messages":[{"role":"user","content":"hello"}]}`)}

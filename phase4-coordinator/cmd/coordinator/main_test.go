@@ -2917,6 +2917,68 @@ func TestReloadCoordinatorConfigReloadsMinProviderThroughput(t *testing.T) {
 	}
 }
 
+func TestReloadCoordinatorConfigAppliesVisionQualifications(t *testing.T) {
+	startup, registry, wsServer, buyerServer := reloadTestServers(config.Default())
+	var served atomic.Bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		served.Store(true)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"ok","choices":[{"message":{"content":"red"}}],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}`))
+	}))
+	t.Cleanup(upstream.Close)
+	q := config.VisionQualificationConfig{
+		ProviderID: "VQ-SECRET-PROVIDER", BinaryVersion: "999.0.0", HardwareChip: "Apple M2 Ultra", RAMGB: 64, MaxContextTokens: 20000, MaxConcurrency: 1,
+		ModelID: "mlx-community/Qwen2-VL-2B-Instruct-4bit", ModelHash: strings.Repeat("a", 64), ModelHashAlgorithm: "macprovider.snapshot-manifest.v1",
+		WeightsManifestSHA256: strings.Repeat("b", 64), ProcessorDigest: strings.Repeat("c", 64), Runtime: "mlx_cache",
+		RuntimeRevision: strings.Repeat("d", 40), MediaProfile: "qwen2vl-inline-v1", QualificationDigest: strings.Repeat("e", 64),
+	}
+	now := time.Now().UTC()
+	if _, ok := registry.Register(&pool.Provider{
+		ProviderID: q.ProviderID, AssignedID: "v1", Hostname: "vision.local", BinaryVersion: q.BinaryVersion, RAMGB: q.RAMGB,
+		ModelID: q.ModelID, ModelHash: q.ModelHash, ModelHashAlgorithm: q.ModelHashAlgorithm, WeightsManifestSHA256: q.WeightsManifestSHA256,
+		RuntimeSource: q.Runtime, HardwareCapacity: &pool.ProviderHardwareCapacity{Chip: q.HardwareChip},
+		VisionRuntimeCapabilities: []pool.VisionRuntimeCapability{{ModelID: q.ModelID, ModelHash: q.ModelHash, ModelHashAlgorithm: q.ModelHashAlgorithm,
+			WeightsManifestSHA256: q.WeightsManifestSHA256, ProcessorDigest: q.ProcessorDigest, Runtime: q.Runtime, RuntimeRevision: q.RuntimeRevision, MediaProfile: q.MediaProfile}},
+		MaxContextTokens: q.MaxContextTokens, MaxConcurrency: q.MaxConcurrency, SlotsFree: 1, SlotsTotal: 1, ThroughputTPSEstimate: 10,
+		EndpointURL: upstream.URL, Tier: pool.TierPinned, InferencePath: pool.InferencePathHTTPForwarding, State: pool.StateReady,
+		LastHeartbeatAt: now, LastActivityAt: now, ConnectedAt: now, CatalogAdmissionMode: "current",
+	}, nil); !ok {
+		t.Fatal("register provider failed")
+	}
+	const onePixelPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLtiAAAAABJRU5ErkJggg=="
+	postImage := func(requestID string) *httptest.ResponseRecorder {
+		t.Helper()
+		body := `{"model":"` + q.ModelID + `","max_tokens":8,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,` + onePixelPNG + `"}}]}]}`
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+		req.Header.Set("X-Request-ID", requestID)
+		rr := httptest.NewRecorder()
+		buyerServer.Handler().ServeHTTP(rr, req)
+		return rr
+	}
+
+	if rr := postImage("vision-sighup-before"); rr.Code == http.StatusOK || served.Load() {
+		t.Fatalf("unqualified provider served image input: status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	next := startup
+	next.Routing.VisionQualifications = []config.VisionQualificationConfig{q}
+	var logs bytes.Buffer
+	reloadCoordinatorConfig(writeReloadConfig(t, next), "", startup.Tier2, zerolog.New(&logs), wsServer, buyerServer, nil, nil, nil)
+	if !strings.Contains(logs.String(), "routing.vision_qualifications reload") || strings.Contains(logs.String(), q.ProviderID) {
+		t.Fatalf("reload log missing the qualification change (or names the provider): %s", logs.String())
+	}
+	if rr := postImage("vision-sighup-qualified"); rr.Code != http.StatusOK || !served.Load() {
+		t.Fatalf("SIGHUP-qualified provider did not serve image input: status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	next.Routing.VisionQualifications = nil
+	reloadCoordinatorConfig(writeReloadConfig(t, next), "", startup.Tier2, zerolog.Nop(), wsServer, buyerServer, nil, nil, nil)
+	served.Store(false)
+	if rr := postImage("vision-sighup-withdrawn"); rr.Code == http.StatusOK || served.Load() {
+		t.Fatalf("SIGHUP-withdrawn qualification still served image input: status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 type reloadTrustPoolCreatorAdminConfigRecorder struct {
 	credentials          []trustpool.CreatorAdminCredential
 	providerIDs          map[string][]string
