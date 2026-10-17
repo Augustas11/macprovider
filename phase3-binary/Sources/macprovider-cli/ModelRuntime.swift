@@ -721,16 +721,27 @@ final class ContinuousBatchRuntimeReplayAuthority: ContinuousBatchSchedulerRepla
     private let decoder = JSONDecoder()
     private var fingerprintsByRequestIDHash: [String: Data]
     /// SPEC-049-R010: claims for requests that may not persist request-derived
-    /// state (the privacy class). Process lifetime only; never read from or
-    /// written to `storeURL`.
-    private var processOnlyFingerprintsByRequestIDHash: [String: Data] = [:]
+    /// state (the privacy class). Process memory only; never read from or
+    /// written to `storeURL`. Bounded: past `processOnlyClaimLimit` the oldest
+    /// claim is dropped. That is safe because every privacy request is first
+    /// refused on replay by its SPEC-041-R005 execution claim, taken before
+    /// decryption, and an active row is still deduplicated by the scheduler;
+    /// this map is the in-process CB layer on top of both.
+    private var processOnlyFingerprintsByRequestIDHash: [String: (fingerprint: Data, sequence: UInt64)] = [:]
+    private var processOnlyClaimOrder: [(requestIDHash: String, sequence: UInt64)] = []
+    private var processOnlyClaimOrderHead = 0
+    private var processOnlyClaimSequence: UInt64 = 0
+    private let processOnlyClaimLimit: Int
+    static let defaultProcessOnlyClaimLimit = 65_536
     private var durableAvailableValue: Bool
 
     init(
         storeURL: URL? = ContinuousBatchRuntimeReplayAuthority.defaultStoreURL(),
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        processOnlyClaimLimit: Int = ContinuousBatchRuntimeReplayAuthority.defaultProcessOnlyClaimLimit
     ) {
         self.storeURL = storeURL
+        self.processOnlyClaimLimit = max(1, processOnlyClaimLimit)
         if let storeURL {
             do {
                 var isDirectory = ObjCBool(false)
@@ -786,14 +797,14 @@ final class ContinuousBatchRuntimeReplayAuthority: ContinuousBatchSchedulerRepla
         // disk: no store lock, read or write. A same-ID claim already taken
         // in this process by either class is still a duplicate.
         guard Self.persistsClaim(for: key.ingestProvenance) else {
-            if let existing = processOnlyFingerprintsByRequestIDHash[requestIDHash]
+            if let existing = processOnlyFingerprintsByRequestIDHash[requestIDHash]?.fingerprint
                 ?? fingerprintsByRequestIDHash[requestIDHash] {
                 return existing == key.fingerprintSHA256 ? .duplicateSameRequest : .duplicateMismatchedRequest
             }
-            processOnlyFingerprintsByRequestIDHash[requestIDHash] = key.fingerprintSHA256
+            insertProcessOnlyClaim(requestIDHash: requestIDHash, fingerprint: key.fingerprintSHA256)
             return .claimed
         }
-        if let existing = processOnlyFingerprintsByRequestIDHash[requestIDHash] {
+        if let existing = processOnlyFingerprintsByRequestIDHash[requestIDHash]?.fingerprint {
             return existing == key.fingerprintSHA256 ? .duplicateSameRequest : .duplicateMismatchedRequest
         }
         if let storeURL {
@@ -835,7 +846,7 @@ final class ContinuousBatchRuntimeReplayAuthority: ContinuousBatchSchedulerRepla
         lock.lock()
         defer { lock.unlock() }
         guard Self.persistsClaim(for: key.ingestProvenance) else {
-            guard processOnlyFingerprintsByRequestIDHash[requestIDHash] == key.fingerprintSHA256 else { return }
+            guard processOnlyFingerprintsByRequestIDHash[requestIDHash]?.fingerprint == key.fingerprintSHA256 else { return }
             processOnlyFingerprintsByRequestIDHash.removeValue(forKey: requestIDHash)
             return
         }
@@ -852,6 +863,28 @@ final class ContinuousBatchRuntimeReplayAuthority: ContinuousBatchSchedulerRepla
         }
         guard fingerprintsByRequestIDHash[requestIDHash] == key.fingerprintSHA256 else { return }
         fingerprintsByRequestIDHash.removeValue(forKey: requestIDHash)
+    }
+
+    /// Caller holds `lock`. Order entries whose claim was released or
+    /// re-claimed are skipped by sequence, so only the oldest live claim is
+    /// dropped and the order queue stays bounded.
+    private func insertProcessOnlyClaim(requestIDHash: String, fingerprint: Data) {
+        processOnlyClaimSequence &+= 1
+        let sequence = processOnlyClaimSequence
+        processOnlyFingerprintsByRequestIDHash[requestIDHash] = (fingerprint, sequence)
+        processOnlyClaimOrder.append((requestIDHash, sequence))
+        while processOnlyFingerprintsByRequestIDHash.count > processOnlyClaimLimit
+            || processOnlyClaimOrder.count - processOnlyClaimOrderHead > 2 * processOnlyClaimLimit {
+            let oldest = processOnlyClaimOrder[processOnlyClaimOrderHead]
+            processOnlyClaimOrderHead += 1
+            if processOnlyFingerprintsByRequestIDHash[oldest.requestIDHash]?.sequence == oldest.sequence {
+                processOnlyFingerprintsByRequestIDHash.removeValue(forKey: oldest.requestIDHash)
+            }
+        }
+        if processOnlyClaimOrderHead > processOnlyClaimLimit {
+            processOnlyClaimOrder.removeFirst(processOnlyClaimOrderHead)
+            processOnlyClaimOrderHead = 0
+        }
     }
 
     private static func defaultStoreURL(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> URL {

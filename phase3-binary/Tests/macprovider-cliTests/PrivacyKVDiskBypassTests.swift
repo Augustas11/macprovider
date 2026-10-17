@@ -9,6 +9,8 @@ import XCTest
 /// request never looks up, writes or restores a disk-tier entry, whatever key
 /// or fleet grant it carries; ordinary fleet traffic still persists and
 /// restores. Headless: a recording cold tier stands in for the encrypted store.
+/// v0.7.0: the invariant also covers the CB replay-claim store; its behavior
+/// tests live in ContinuousBatchSchedulerTests.
 final class PrivacyKVDiskBypassTests: XCTestCase {
     private let key = "conv:kvs-synth:shared"
 

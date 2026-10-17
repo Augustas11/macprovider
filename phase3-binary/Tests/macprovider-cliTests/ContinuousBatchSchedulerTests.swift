@@ -3812,6 +3812,96 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(Self.claimFiles(root).count, 1)
     }
 
+    // The in-memory privacy claims are bounded: the oldest live claim is
+    // dropped first, a released claim's stale order entry never evicts a
+    // newer claim, and ordinary claims are unaffected.
+    func testRuntimeReplayAuthorityBoundsPrivacyClaims() throws {
+        func key(_ id: String, _ provenance: KVIngestProvenance = .privacy) -> ContinuousBatchSchedulerReplayKey {
+            ContinuousBatchSchedulerReplayKey(
+                requestID: id, fingerprintSHA256: Data(repeating: 7, count: 32), ingestProvenance: provenance)
+        }
+        let authority = ContinuousBatchRuntimeReplayAuthority(storeURL: nil, processOnlyClaimLimit: 2)
+        XCTAssertEqual(try authority.claim(key("a")), .claimed)
+        XCTAssertEqual(try authority.claim(key("b")), .claimed)
+        authority.release(key("a"))
+        XCTAssertEqual(try authority.claim(key("a")), .claimed)
+        XCTAssertEqual(try authority.claim(key("c")), .claimed)
+        // "b" was the oldest live claim; "a" (re-claimed) and "c" remain.
+        XCTAssertEqual(try authority.claim(key("a")), .duplicateSameRequest)
+        XCTAssertEqual(try authority.claim(key("c")), .duplicateSameRequest)
+        XCTAssertEqual(try authority.claim(key("b")), .claimed)
+        for index in 0 ..< 50 {
+            XCTAssertEqual(try authority.claim(key("bulk-\(index)")), .claimed)
+            authority.release(key("bulk-\(index)"))
+        }
+        XCTAssertEqual(try authority.claim(key("o", .relay)), .claimed)
+        XCTAssertEqual(try authority.claim(key("o", .relay)), .duplicateSameRequest)
+    }
+
+    // A same-ID request of the other persistence class never attaches to the
+    // canonical row: it is a mismatch, and the row runs once.
+    func testSameIDOtherClassIsMismatchNotAttach() async throws {
+        let backend = ScriptedBackend(scripts: ["shared-id": [4]])
+        let scheduler = try await makeScheduler(maxActiveRows: 1, backend: backend)
+        let ordinary = try await scheduler.submit(ContinuousBatchSchedulerRequest(
+            id: "shared-id", conversationKey: "", promptTokens: [3, 4], maxOutputTokens: 1,
+            ingestProvenance: .relay
+        ))
+        XCTAssertEqual(ordinary.outputTokens, [4])
+        do {
+            _ = try await scheduler.submit(ContinuousBatchSchedulerRequest(
+                id: "shared-id", conversationKey: "", promptTokens: [3, 4], maxOutputTokens: 1,
+                ingestProvenance: .privacy
+            ))
+            XCTFail("a privacy request must not attach to an ordinary row")
+        } catch ContinuousBatchSchedulerError.duplicateRequestMismatch {
+            // expected
+        }
+        let prefills = await backend.prefillCallCount()
+        XCTAssertEqual(prefills, 1)
+    }
+
+    // SPEC-038 AC-25 for the privacy class: the queue-wait release reaches the
+    // in-memory claim, so a same-ID retry is admitted, and nothing is on disk.
+    func testPrivacyQueueWaitTimeoutReleasesInMemoryClaim() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("macprovider-privacy-ac25-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let authority = ContinuousBatchRuntimeReplayAuthority(
+            storeURL: root.appendingPathComponent("replay-claims-v1", isDirectory: true))
+        let gate = AsyncGate()
+        let backend = ScriptedBackend(scripts: ["held": [1], "late": [2]], prefillGate: gate)
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            queueLimit: 4,
+            queueWaitTimeoutNanoseconds: 150_000_000,
+            backend: backend,
+            replayAuthority: authority
+        )
+        let held = Task {
+            try await scheduler.submit(.init(
+                id: "held", conversationKey: "", promptTokens: [1, 11], maxOutputTokens: 1,
+                ingestProvenance: .privacy
+            ))
+        }
+        try await eventually { await backend.prefillCallCount() == 1 }
+        let late = ContinuousBatchSchedulerRequest(
+            id: "late", conversationKey: "", promptTokens: [2, 22], maxOutputTokens: 1,
+            ingestProvenance: .privacy
+        )
+        do {
+            _ = try await scheduler.submit(late)
+            XCTFail("expected queue-wait timeout")
+        } catch ContinuousBatchSchedulerError.queueWaitTimedOut {
+            // expected
+        }
+        await gate.open()
+        _ = try await held.value
+        let retry = try await scheduler.submit(late)
+        XCTAssertEqual(retry.outputTokens, [2])
+        XCTAssertEqual(Self.storeFiles(root), [])
+    }
+
     private static func claimFiles(_ root: URL) -> [String] {
         storeFiles(root).filter { $0.hasSuffix(".json") }
     }

@@ -68,8 +68,9 @@ enum PrivacyHardeningCode {
     static let envAllowTestFixtures = "env_macprovider_allow_test_fixtures"
     static let diagnosticEnv = "diagnostic_env"
     static let loopbackRuntime = "loopback_runtime"
-    /// SPEC-049-R007 item 8 (v0.6.0): the privacy path could reach the KV disk
-    /// tier. An enabled tier alone is not a refusal.
+    /// SPEC-049-R007 item 8 (v0.7.0): the privacy path could reach the KV disk
+    /// tier or the continuous-batching replay-claim store. An enabled tier
+    /// alone is not a refusal. The code name is kept for compatibility.
     static let kvDiskTierPrivacyBypass = "kv_disk_tier_privacy_bypass_failed"
     static let relayBlindDisabled = "relay_blind_disabled"
     static let stateDirectoryMissing = "state_directory_missing"
@@ -119,7 +120,8 @@ struct PrivacyPostureObservation: Equatable, Sendable {
     var sipEnabled: Bool
     var diagnosticEnvClear: Bool
     /// Wire field `kv_disk_tier_disabled`. Since SPEC-049 v0.6.0 it means the
-    /// privacy path cannot reach the KV disk tier, not that the tier is off.
+    /// privacy path cannot reach the KV disk tier, not that the tier is off;
+    /// since v0.7.0 it also covers the continuous-batching replay-claim store.
     var kvDiskTierDisabled: Bool
     var runtimeSource: String
     var codeCDHash: String
