@@ -2,6 +2,7 @@ import ArgumentParser
 import CryptoKit
 import Foundation
 import MacProviderCore
+import MLX
 import MLXHuggingFace
 import MLXLMCommon
 import MLXLLM
@@ -58,6 +59,16 @@ struct NativeMTPHardwareE2EFamily: Equatable, Sendable {
 
     /// Whether the tuple admits sampled rows to native MTP.
     var admitsSampledRows: Bool { requestFeatureProfile == NativeMTPAdmissionSidecar.sampledRequestFeatureProfile }
+
+    /// The serve path's process setup for this family, which the harness
+    /// must match or it measures another runtime: the MLX per-command-buffer
+    /// budget (`ModelRuntime.commandBufferBudgetMBByFamily`, set before any
+    /// MLX device use) and the model-lifetime resident-weights ticket
+    /// (`ModelRuntime.residentWeightsFamilies`). Without the ticket a
+    /// GLM-5.3-Flash target pays a residency cost on every forward (about
+    /// 2.2 s per decode step in window A2).
+    var commandBufferBudgetMB: Int? { ModelRuntime.commandBufferBudgetMBByFamily[modelFamily] }
+    var holdsResidentWeights: Bool { ModelRuntime.residentWeightsFamilies.contains(modelFamily) }
 
     /// The fixture directory the drafter artifact lives in.
     var mtpDirectoryName: String { embeddedMTP ? "target" : "mtp" }
@@ -130,8 +141,6 @@ struct NativeMTPHardwareE2ECommand: AsyncParsableCommand {
             ))
             throw ExitCode(2)
         }
-        // Unconditional: a pass line from any other host is not lab evidence.
-        try NativeMTPHardwareE2ERunner.requireStudioHost()
         let rootPath = root ?? environment["MACPROVIDER_NATIVE_MTP_E2E_ROOT"]
         guard let rootPath, !rootPath.isEmpty else {
             FileHandle.standardError.write(Data(
@@ -139,6 +148,10 @@ struct NativeMTPHardwareE2ECommand: AsyncParsableCommand {
             ))
             throw ExitCode(2)
         }
+        // Before any MLX device use (the host check samples the GPU).
+        NativeMTPHardwareE2ERunner.applyServeProcessSetup(rootPath: rootPath)
+        // Unconditional: a pass line from any other host is not lab evidence.
+        try NativeMTPHardwareE2ERunner.requireStudioHost()
         guard maxBatch >= 1, sizingPromptTokens >= 1, sizingOutputTokens >= 1 else {
             throw ValidationError("--max-batch, --sizing-prompt-tokens, and --sizing-output-tokens must be >=1")
         }
@@ -184,6 +197,9 @@ struct NativeMTPHardwareRuntimePair: @unchecked Sendable {
     let ordinary: ModelRuntime
     let native: ModelRuntime
     let targetContainer: ModelContainer
+    /// The serve path's resident-weights ticket for the one loaded target,
+    /// held for the run (nil for families served without one).
+    var residentWeights: WiredMemoryTicket? = nil
 }
 
 struct NativeMTPHardwareRuntimeFixture: @unchecked Sendable {
@@ -262,6 +278,21 @@ final class NativeMTPHardwareE2ERunner {
         family.embeddedMTP
             ? try NativeMTPArtifactObserver.observeEmbedded(targetDirectory: targetDirectory)
             : try NativeMTPArtifactObserver.observePair(targetDirectory: targetDirectory, mtpDirectory: mtpDirectory)
+    }
+
+    /// Applies the family's MLX command-buffer budget for this process, as
+    /// `serve` does. Must run before any MLX device use; returns the MB set.
+    @discardableResult
+    static func applyServeProcessSetup(rootPath: String) -> Int? {
+        let root = URL(fileURLWithPath: (rootPath as NSString).expandingTildeInPath, isDirectory: true)
+        guard let family = NativeMTPHardwareE2EFamily.detect(configJSONData: try? Data(
+            contentsOf: root.appendingPathComponent("target/config.json")
+        )) else { return nil }
+        let mb = ModelRuntime.applyMLXCommandBufferBudget(modelFamily: family.modelFamily)
+        if let mb {
+            FileHandle.standardError.write(Data("native-mtp-e2e: mlx_max_mb_per_buffer=\(mb) family=\(family.modelFamily)\n".utf8))
+        }
+        return mb
     }
 
     static func requireStudioHost() throws {
@@ -565,6 +596,15 @@ final class NativeMTPHardwareE2ERunner {
                 tokenizerLoader: ChatTemplateCompatTokenizerLoader()
             )
         }
+        // One target is loaded and shared by the ordinary and native
+        // runtimes (the embedded drafter is parameterless); keep it resident
+        // as serve does.
+        let residentWeights = family.holdsResidentWeights
+            ? await ModelRuntime.startResidentWeightsTicket(modelFamily: family.modelFamily)
+            : nil
+        if family.holdsResidentWeights {
+            try require(residentWeights != nil, "\(family.modelFamily) target could not start its resident-weights ticket")
+        }
         let maximumBlockSize = await drafterContainer.perform { context in
             context.model.maximumBlockSize
         }
@@ -672,7 +712,8 @@ final class NativeMTPHardwareE2ERunner {
         return NativeMTPHardwareRuntimePair(
             ordinary: ordinary,
             native: native,
-            targetContainer: targetContainer
+            targetContainer: targetContainer,
+            residentWeights: residentWeights
         )
     }
 

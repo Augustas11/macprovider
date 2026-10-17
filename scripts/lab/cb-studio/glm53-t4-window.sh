@@ -388,6 +388,9 @@ PY
   python3 - $OUT/mtp-journey.json <<'PY' 2>&1 | tee -a $OUT/summary.txt || true
 import json, sys
 text = open(sys.argv[1]).read()
+if "{" not in text:
+    print("leg6 no result document (see mtp-journey.log)")
+    sys.exit(1)
 r = json.loads(text[text.index("{"):])
 print(f"leg6 executed_steps_status={r.get('executed_steps_status')} journey_complete={r.get('journey_complete')}")
 for step in r.get("steps", []):

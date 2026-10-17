@@ -36,6 +36,29 @@ final class NativeMTPHardwareE2EGLMTests: XCTestCase {
         XCTAssertEqual(NativeMTPJourneyRunner.boundaryMode(family: .glm5Next), .blockBoundary(blockTokens: 256, includeBlockStart: true))
     }
 
+    /// Window A2: without the serve path's resident-weights ticket and MLX
+    /// command-buffer budget the harness decoded GLM-5.3-Flash at ~2.2 s per
+    /// step. Both harnesses take that setup from the fixture family; Qwen3.5
+    /// keeps none of it, as serve does.
+    func testHarnessUsesTheServeProcessSetupOfTheFamily() {
+        XCTAssertEqual(NativeMTPHardwareE2EFamily.glm5Next.commandBufferBudgetMB, 65536)
+        XCTAssertTrue(NativeMTPHardwareE2EFamily.glm5Next.holdsResidentWeights)
+        XCTAssertNil(NativeMTPHardwareE2EFamily.qwen35.commandBufferBudgetMB)
+        XCTAssertFalse(NativeMTPHardwareE2EFamily.qwen35.holdsResidentWeights)
+        XCTAssertEqual(
+            ModelRuntime.commandBufferBudgetMB(modelFamily: NativeMTPHardwareE2EFamily.glm5Next.modelFamily, configured: nil),
+            65536
+        )
+        XCTAssertNotNil(ModelRuntime.residentWeightsTicket(
+            modelFamily: NativeMTPHardwareE2EFamily.glm5Next.modelFamily,
+            recommendedWorkingSetBytes: 239 * 1_073_741_824
+        ))
+        XCTAssertNil(ModelRuntime.residentWeightsTicket(
+            modelFamily: NativeMTPHardwareE2EFamily.qwen35.modelFamily,
+            recommendedWorkingSetBytes: 239 * 1_073_741_824
+        ))
+    }
+
     func testThroughputPhaseIsOptInAndBounded() throws {
         XCTAssertEqual(try NativeMTPHardwareE2ECommand.parse([]).throughputTokens, 0)
         XCTAssertEqual(

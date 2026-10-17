@@ -38,6 +38,8 @@ struct NativeMTPJourneyE2ECommand: AsyncParsableCommand {
             FileHandle.standardError.write(Data("native-mtp-journey-e2e: set MACPROVIDER_NATIVE_MTP_E2E=1 on the Mac Studio\n".utf8))
             throw ExitCode(2)
         }
+        // Before any MLX device use (the host check samples the GPU).
+        NativeMTPHardwareE2ERunner.applyServeProcessSetup(rootPath: root)
         try NativeMTPHardwareE2ERunner.requireStudioHost()
         guard (2...8).contains(qualifiedSlots),
               (1...qualifiedSlots).contains(maxNativeActiveRows),
