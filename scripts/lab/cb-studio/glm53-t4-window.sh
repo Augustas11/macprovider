@@ -37,6 +37,7 @@
 # Env: POC (lab copy), MODEL (artifact dir), OUT, LAB_CONFIG_TEMPLATE (an
 # isolated no-join lab config: credential_store: protected_file, no
 # draft_model; CB-accepted for the GLM artifact's tuple), LIVE_PORT (8080),
+# LEGS (default "1 2 3"; `run-selfcheck` runs leg 2 only),
 # LAB_PORT (18096), METALLIB (core v0.32.4-macprovider.4 kernels), XCTEST_HOST,
 # LIVE_INSTALL_DIR (prepare: pin the lab serve binary to the live version).
 set -euo pipefail
@@ -50,6 +51,7 @@ XCTEST_HOST=${XCTEST_HOST:-$HOME/lab-glm53/t3/xctest-host/run.sh}
 LIVE_PORT=${LIVE_PORT:-8080}
 LAB_PORT=${LAB_PORT:-18096}
 HARNESS=$PKG/.build-lab-harness/release
+LEGS=${LEGS:-1 2 3}
 TEST_BUNDLE=$PKG/.build/debug/phase3-binaryPackageTests.xctest
 
 prepare() {
@@ -100,7 +102,9 @@ sys.exit(0 if paused and d.get("requests_in_flight", 1) == 0 else 1)' || {
   mkdir -p $OUT
   shasum -a 256 $HARNESS/macprovider-cli $HARNESS/mlx.metallib | tee $OUT/identity.sha256
   local result=PASS
+  echo "legs=$LEGS" | tee -a $OUT/summary.txt
 
+  if [[ " $LEGS " == *" 1 "* ]]; then
   # --- Leg 1: AC-20 fixture -------------------------------------------------
   echo "leg1 fixture start $(date -u +%T)" | tee -a $OUT/summary.txt
   if MACPROVIDER_GLM53_ARTIFACT_DIR=$MODEL zsh $XCTEST_HOST \
@@ -112,7 +116,9 @@ sys.exit(0 if paused and d.get("requests_in_flight", 1) == 0 else 1)' || {
     result=FAIL; echo "leg1 fixture FAIL (see leg1-fixture.log)" | tee -a $OUT/summary.txt
   fi
   grep -E "\[AC-20" $OUT/leg1-fixture.log | tee -a $OUT/summary.txt || true
+  fi
 
+  if [[ " $LEGS " == *" 2 "* ]]; then
   # --- Leg 2: FR-CB10 self-check, k = 2..4 -----------------------------------
   echo "leg2 self-check start $(date -u +%T)" | tee -a $OUT/summary.txt
   local dir=$OUT/selfcheck; mkdir -p $dir; chmod 700 $dir
@@ -122,6 +128,10 @@ src, dst, port, model = sys.argv[1:]
 # Every top-level key below is dropped with its indented block and then set
 # (or left out) here, so nothing of the template's own model, catalog
 # binding, accepted tuples or paged/native settings reaches the GLM serve.
+# model_artifact_* (the template's Qwen model_artifact_sha256) is dropped too:
+# the lab artifact directory also holds Hugging Face download metadata
+# (.cache/huggingface), which the canonical artifact hash covers, so the
+# catalog hash of the clean 46-file snapshot would not match it anyway.
 want = {"port": port, "model": "zai-org/glm-5.3-flash", "model_artifact_path": f'"{model}"',
         "max_context_override": "65536", "max_concurrency_override": "4",
         "continuous_batch_queue_limit": "4", "continuous_batching": "canary",
@@ -132,7 +142,7 @@ out, skipping = [], False
 for line in open(src).read().splitlines():
     if line and not line[0].isspace() and ":" in line:
         key = line.split(":", 1)[0]
-        skipping = key in drop or key.startswith("model_catalog_")
+        skipping = key in drop or key.startswith("model_catalog_") or key.startswith("model_artifact_")
     elif not line.strip():
         skipping = False
     if not skipping:
@@ -165,6 +175,9 @@ sys.exit(0 if d not in ("None", "pending") and not d.startswith("prior_grant") a
   trap - EXIT INT TERM HUP
   grep -E "event=(paged_kv|served_slots|cb_self_check|continuous_batching_policy|batching_unsupported|continuous_batch_decode_row_bound)|paged-kv|measure (nil|OK)" \
     $dir/serve.log > $dir/events.log || true
+  # Every ladder step and the applied decision, whatever the verdict below.
+  grep -E "event=cb_self_check action=(step|measured|applied|ladder_ended|probe_shape_unmet)|batching_unsupported|model artifact hash" \
+    $dir/serve.log | tee -a $OUT/summary.txt || true
   if (( decided )) && python3 - $dir/events.log $dir/status.json <<'PY' | tee -a $OUT/summary.txt
 import json, re, sys
 events, status = sys.argv[1:]
@@ -191,7 +204,9 @@ print("leg2 self-check " + ("PASS" if ok else "FAIL"))
 sys.exit(0 if ok else 1)
 PY
   then :; else result=FAIL; echo "leg2 self-check FAIL (see selfcheck/)" | tee -a $OUT/summary.txt; fi
+  fi
 
+  if [[ " $LEGS " == *" 3 "* ]]; then
   # --- Leg 3: msb-throughput at rows 1, 2, 4 ----------------------------------
   for rows in 1 2 4; do
     echo "leg3 msb rows=$rows start $(date -u +%T)" | tee -a $OUT/summary.txt
@@ -206,6 +221,7 @@ print("leg3 rows=" + sys.argv[2] + " " + " ".join(f"{k}={d[k]}" for k in keys))'
       result=FAIL; echo "leg3 msb rows=$rows FAIL (see msb-rows$rows.log)" | tee -a $OUT/summary.txt
     fi
   done
+  fi
 
   echo "RESULT=$result evidence=$OUT" | tee -a $OUT/summary.txt
   [[ $result == PASS ]]
@@ -214,5 +230,6 @@ print("leg3 rows=" + sys.argv[2] + " " + " ".join(f"{k}={d[k]}" for k in keys))'
 case ${1:-} in
   prepare) prepare ;;
   run) run ;;
-  *) echo "usage: $0 prepare|run" >&2; exit 2 ;;
+  run-selfcheck) LEGS=2 run ;;
+  *) echo "usage: $0 prepare|run|run-selfcheck" >&2; exit 2 ;;
 esac
