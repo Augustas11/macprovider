@@ -42,11 +42,13 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
-# Fork branch glm53/tuple-0324 (untagged campaign revision; the release step
-# cuts its tag) on upstream mlx-swift-lm 3.32.3.
-SPEC048_MLX_SWIFT_LM_REVISION = "18ca526706dbffb9b1ce825046fe46a691d875b6"
+# Fork tag 3.32.3-macprovider.10.1 (branch glm53/tuple-0324) on upstream
+# mlx-swift-lm 3.32.3.
+SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.10.1"
+SPEC048_MLX_SWIFT_LM_REVISION = "87dc5159c87d73f4d7abd524fbdd17760cf56285"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
+SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.9"
 # Fork tag 0.32.3-macprovider.9: upstream mlx-swift 0.32.3 with the MLX core
 # submodule on the core fork below.
 SPEC048_MLX_SWIFT_REVISION = "29d3b93375cc56cd2649b40e4310a8bc445e9874"
@@ -58,6 +60,7 @@ SPEC048_MLX_SWIFT_UPSTREAM_BASE = "19601207e9a0de51e03ee6ec0c3c5f3784275075"
 # (testResolvedCoreIsTheReviewedForkRevision), which compares the resolved
 # mlx-swift gitlink and core HEAD with this value in CI.
 SPEC048_MLX_CORE_FORK = "https://github.com/Augustas11/mlx"
+SPEC048_MLX_CORE_TAG = "v0.32.4-macprovider.4"
 SPEC048_MLX_CORE_REVISION = "2f512e3997349c8648f5d7c5113eb2c825aa242d"
 SPEC048_MLX_CORE_UPSTREAM_BASE = "36969c094354086e15d2a327a9c50feb20b9cf11"
 

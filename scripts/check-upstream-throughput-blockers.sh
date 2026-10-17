@@ -51,6 +51,7 @@ from read_swiftpm_pins import (  # single source of the reviewed fork tuple
     SPEC048_MLX_SWIFT_FORK,
     SPEC048_MLX_SWIFT_LM_FORK,
     SPEC048_MLX_SWIFT_LM_REVISION,
+    SPEC048_MLX_SWIFT_LM_TAG,
     SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE,
     SPEC048_MLX_SWIFT_REVISION,
     SPEC048_MLX_SWIFT_UPSTREAM_BASE,
@@ -83,6 +84,9 @@ def release_contains_commit(repo, tag, commit):
 def commit_is_descendant(repo, base, commit):
     comparison = gh_json(["api", f"repos/{repo}/compare/{base}...{commit}"])
     return comparison.get("behind_by") == 0 and comparison.get("ahead_by", 0) >= 1
+
+def tag_resolves_to(repo, tag, commit):
+    return gh_json(["api", f"repos/{repo}/commits/{tag}"]).get("sha") == commit
 
 def pr_status(row, merged, open_status, closed_status=None):
     if row.get("mergedAt"):
@@ -162,13 +166,19 @@ native_mtp_required_merges_in_latest_release = all(
 # The reviewed fork tuple comes from read_swiftpm_pins.py (the mlx-swift fork
 # revision also pins the MLX core fork through its submodule gitlink).
 native_mtp_exception_revision = SPEC048_MLX_SWIFT_LM_REVISION
+native_mtp_exception_tag = SPEC048_MLX_SWIFT_LM_TAG
 native_mtp_exception_base = SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE
 native_mtp_exception_repo = SPEC048_MLX_SWIFT_LM_FORK.removeprefix("https://github.com/")
 native_mtp_exception_mlx_swift_revision = SPEC048_MLX_SWIFT_REVISION
 native_mtp_exception_mlx_swift_base = SPEC048_MLX_SWIFT_UPSTREAM_BASE
 native_mtp_exception_mlx_swift_repo = SPEC048_MLX_SWIFT_FORK.removeprefix("https://github.com/")
 native_mtp_exception_review_approved = False
-native_mtp_exception_remote_verified = commit_is_descendant(
+# The reviewed revision must be the immutable fork tag's commit (SPEC-048 R003).
+native_mtp_exception_remote_verified = tag_resolves_to(
+    native_mtp_exception_repo,
+    native_mtp_exception_tag,
+    native_mtp_exception_revision,
+) and commit_is_descendant(
     native_mtp_exception_repo,
     native_mtp_exception_base,
     native_mtp_exception_revision,

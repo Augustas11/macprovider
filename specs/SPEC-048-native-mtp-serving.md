@@ -1,6 +1,6 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.43
+**Version:** 0.1.44
 
 ```json
 {
@@ -423,7 +423,7 @@ rejects the whole sidecar. R014 item 10 makes this a release gate.
 
 The observer MUST inspect every `.safetensors` file that the R003-authorized
 mlx-swift-lm loader can consume. At the R003 mlx-swift-lm revision
-(`18ca5267…`; `safetensorWeightURLs` is unchanged from `3.32.3-macprovider.6`)
+(`87dc5159…`; `safetensorWeightURLs` is unchanged from `3.32.3-macprovider.6`)
 the loader takes the files named by
 `model.safetensors.index.json`, which may sit in subdirectories, else the
 top-level conventional names, plus files the model declares as additional
@@ -493,17 +493,17 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | **PENDING — filled by the campaign release step** (candidate on branch `glm53/tuple-0324`) | `18ca526706dbffb9b1ce825046fe46a691d875b6` | fork `3.32.3-macprovider.10` (`b4077dcb28336b388f3d09be2a091c12f8e179aa`) on `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.10.1` | `87dc5159c87d73f4d7abd524fbdd17760cf56285` | fork `3.32.3-macprovider.10` (`b4077dcb28336b388f3d09be2a091c12f8e179aa`) on `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.9` | `29d3b93375cc56cd2649b40e4310a8bc445e9874` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.4` | `2f512e3997349c8648f5d7c5113eb2c825aa242d` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 
-The mlx-swift-lm row is a pending row of the epic #2029 campaign. Its
-revision is the one `phase3-binary/Package.resolved` resolves today; the
-campaign release step cuts the immutable fork tag on the final revision and
-writes that tag and revision into this row and into `specs/CONFORMANCE.json`
-SPEC-048-R003 in the same change. Until then the row authorizes no release:
-a production build MUST NOT resolve an untagged mlx-swift-lm revision, and a
-revision differing from this row is outside the authorized tuple.
+The mlx-swift-lm row is the epic #2029 campaign's immutable fork tag
+`3.32.3-macprovider.10.1` (annotated tag object `6a9ba2b9…`, commit
+`87dc5159…`, branch `glm53/tuple-0324`), and `phase3-binary/Package.resolved`
+resolves exactly that revision. A production build MUST NOT resolve an
+untagged mlx-swift-lm revision, and a revision differing from this row is
+outside the authorized tuple; `scripts/check-upstream-throughput-blockers.sh`
+verifies that the row's tag resolves to the row's revision on the fork.
 
 Each link pins the next by full revision: `phase3-binary/Package.swift` pins
 the mlx-swift-lm fork, that fork's manifest pins the mlx-swift fork, and the
@@ -634,7 +634,7 @@ Review record for the #2028 tuple (2026-10-16; mlx-swift-lm
 `3.32.3-macprovider.9` / mlx-swift `0.32.3-macprovider.8` / MLX core
 `v0.32.2-macprovider.5`): the stream-propagation fix with a three-lane freeze
 audit at 0 Critical, 0 High, 0 Medium (`audits/2026-10-16-2028-gptoss-decode/`).
-The campaign mlx-swift-lm revision `18ca5267…` sits on
+The campaign mlx-swift-lm tag `3.32.3-macprovider.10.1` (`87dc5159…`) sits on
 `3.32.3-macprovider.10` (`b4077dcb…`): that tuple's `dbe8bcb3…`, the MLX
 core v0.32.4 pin (`da234b2`), and the upstream #622 fix (exact prefix rewinds
 in `RotatingKVCache`, `KVCache.maxTrimCount` gating each layer's rewind). Above
@@ -645,7 +645,10 @@ per-column path), and from 0.1.42 depth-D rollback in `MambaCache` (a
 depth-1 rewind still restores the single checkpoint), the optional
 `MTPAdaptiveDepth` controller in that iterator, and the Qwen2-VL per-image
 vision attention fix (#2035). The provider's native-MTP path uses neither
-that iterator nor the controller.
+that iterator nor the controller. The tag's last commit over the revision
+the T4 evidence in `docs/evidence/glm53-flash-t4-2026-10-17/` ran on only
+validates the GLM-5-Next configuration at load (indexer sizes,
+per-layer types, routed-expert counts) and changes no decode-path line.
 
 Review record for the earlier tuple (2026-10-10, `@Augustas11`;
 mlx-swift-lm `3.32.3-macprovider.6` / mlx-swift `0.32.3-macprovider.2` / MLX
@@ -658,12 +661,13 @@ eligibility restricted to exact stock types, tests, and the manifest tools
 version), so R015 was not rerun. The freeze audit and its fixes are in
 `audits/2026-10-10-mlx-swift-lm-332/`.
 
-Review record for this tuple: **PENDING — filled by the campaign release
-step** (epic #2029). The record names the final mlx-swift-lm tag, the
-per-rebase acceptance gate results on the MLX core `v0.32.4` rebase (startup
-batched-isolation probes with fused MoE on and off, continuous-batching
-attach, cross-thread reload, fused-layout eligibility, compile-state
-ownership), and the campaign freeze audit. It also records whether the MLX
+Review record for this tuple (mlx-swift-lm `3.32.3-macprovider.10.1`):
+**PENDING** (epic #2029). Two items remain: the
+`JOURNEY-NATIVE-MTP-SERVING` run on the final tagged tuple and the GLM R015
+record. The record then names the per-rebase acceptance gate results on the
+MLX core `v0.32.4` rebase (startup batched-isolation probes with fused MoE on
+and off, continuous-batching attach, cross-thread reload, fused-layout
+eligibility, compile-state ownership) and the campaign freeze audit. It also records whether the MLX
 core `v0.32.4` rebase changed a Qwen decode-path line, and so whether the
 existing Qwen native-MTP R015 reruns under the rule above. The mlx-swift-lm
 GLM-5-Next delta is new files, pure additions to `GatedDelta.swift` and
@@ -1584,10 +1588,14 @@ contains:
    verification, serialized drafter-state, and hybrid recurrent-cache
    qualification surface;
 2. provider signed-admission sidecar parsing and artifact observation for the
-   Qwen 3.5 separate-artifact tuple (the GLM-5-Next `checkpoint_mtp` observer,
-   the v2 projection-manifest reader, and adapter-derived source layout are
-   in the epic #2029 campaign branch; the `glm5_next_mtp_v1` drafter and its
-   runtime load path are not yet);
+   Qwen 3.5 separate-artifact tuple and, in the epic #2029 campaign branch,
+   for GLM-5.3-Flash: implemented are the `checkpoint_mtp` observer, the v2
+   projection-manifest reader, adapter-derived source layout, the
+   `glm5_next_mtp_v1` drafter (fork `GLM5NextMTPDraftModel`, built inside the
+   loaded target), the provider load path and admission gate, and paged
+   packed verification; pending are the evidence and promotion steps only
+   (the final tagged-tuple `JOURNEY-NATIVE-MTP-SERVING` run and the GLM R015
+   record, MTP-3);
 3. default-off native-MTP selection, revocation gating, and ordinary fallback
    before sticky native state;
 4. serial and mixed continuous-batching native-MTP runtime plumbing with
@@ -1649,7 +1657,7 @@ the journey must include its independent and combined evidence.
 | `native-mtp-serving` | `DECISION_REQUIRED` | `@Augustas11` | `#1770` | Authority acceptance, release-candidate review, and signed real-hardware journey evidence for the first production tuple. |
 | First Qwen-family MTP artifact | `UNKNOWN` | `@Augustas11` | `#1770` | Legally/provenance-clean immutable model, tokenizer, MTP manifest, and exact hashes. |
 | MLX dependency tuple | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1906` | The operator's permanent fork model (MTP-3) replaces the upstream-release requirement. MTP-3 names the exact three-fork tuple; each rebase passes the runbook's per-rebase acceptance gate and a SPEC revision. |
-| GLM-5.3-Flash `glm5_next_mtp_v1` tuple | `DECISION_REQUIRED` | `@Augustas11` | `#2029` | Hardware evidence for the packed GLM verification path; final mlx-swift-lm fork tag and R003 review record (pending rows); GLM R015 and journey. The observer, sidecar parsing, v2 projection reader, SPEC-023 v0.22.27 widths, the fork's MTP-1 drafter and packed verification, and the provider drafter load path, admission gate and paged packed verification are in the campaign branch. |
+| GLM-5.3-Flash `glm5_next_mtp_v1` tuple | `DECISION_REQUIRED` | `@Augustas11` | `#2029` | Pending: the `JOURNEY-NATIVE-MTP-SERVING` run on the final tagged tuple (mlx-swift-lm `3.32.3-macprovider.10.1`) and the GLM R015 record, which complete the R003 review record. Implemented in the campaign branch: the observer, sidecar parsing, v2 projection reader, SPEC-023 v0.22.27 widths, the fork's MTP-1 drafter and packed verification, and the provider drafter load path, admission gate and paged packed verification. |
 | First MLX-native MXFP8 artifact | `UNKNOWN` | `@Augustas11` | `#1770` | SPEC-023/SPEC-010 format, fit, quality, license, provenance, and hardware evidence. |
 | Batched-verify numerical parity | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1770` | The qmv-to-qmm switch at 12 packed verify tokens cannot occur for the first tuple: `max_native_active_rows` is 1 and depth is 1, so a packed verify is at most 2 tokens, and rows above the bound ride the ordinary forward at depth zero. A tuple whose bound times `proposal_depth + 1` reaches 12 must decide between a bounded drift allowance and kernel-matched verification before it can be signed. |
 | Depth-1 throughput value | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1770` | The 2026-10-06 quiet R015 (policy `e24cb7bc…`, amended 0.1.25 gates) passed every cell for the A3B Studio tuple: one-slot decode ratio 1.19-1.28 with corrected lower bounds +18% to +26%, gated s2/s8 cells non-inferior. The value is one-slot only; the R007 bound of 1 keeps native off above it. |
@@ -1688,6 +1696,14 @@ the text-only path without image inputs; that does not admit multimodal buyer
 requests.
 
 ## 9. Changelog and history
+
+- **0.1.44 (2026-10-17)** — MTP-3: the campaign mlx-swift-lm row is the
+  immutable fork tag `3.32.3-macprovider.10.1` (`87dc5159…`); its one commit
+  over `18ca5267…` validates the GLM-5-Next configuration at load and changes
+  no decode-path line. The upstream watch checks that the tag resolves to the
+  row's revision. §5 and §6 separate the implemented GLM-5.3-Flash surface
+  from the two pending evidence items (the final tagged-tuple journey and the
+  GLM R015 record); the release state stays `DECISION_REQUIRED`.
 
 - **0.1.43 (2026-10-17)** — MTP-2: a `glm5_next_mtp_v1` tuple signs
   `max_native_active_rows` 1 (measured 1.27x ordinary at one native row,
