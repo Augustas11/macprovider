@@ -544,5 +544,5 @@ providers:
 # reconnecting and tells its operator to upgrade, and one without it
 # reconnect-loops.
 coordinator_advertised_version:
-  latest_binary_version: "1.8.248"
+  latest_binary_version: "1.8.250"
   required_binary_version: "1.8.33"

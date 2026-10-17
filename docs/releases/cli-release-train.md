@@ -64,19 +64,32 @@ Verified 2026-10-10 against public release metadata, the release train
 
 ## Next CLI release — net changes vs 1.8.250 (tracked 2026-10-17)
 
-Live fleet target: **1.8.250** (train complete 2026-10-17). Nothing is staged yet; the cut waits until every row below is merged.
+Live fleet target: **1.8.250**. Staged: `binaryVersion` **1.8.251**. Every PR below is
+merged and none is open, so the cut is authorized.
 
 | PR | Issue | Provider-side change | Status |
 |---|---|---|---|
 | #2034 | #2029 | Artifact hashing, verification, import and GGUF digest loops release each 1 MiB chunk (per-iteration autorelease pool); serve-load peak drops from ~2.1x to ~1.01x of tensor bytes | merged |
 | #2037 | #2036 | Release discovery resolves the coordinator-advertised release first (signature-verified via `checksums.txt.sig`); anonymous GitHub API is a single fallback with "deferred until reset" on a spent budget; Malibu.app stops re-polling GitHub every status tick | merged |
 | #2038 | #2014 | Guaranteed tool selection (`required`/named) accepts the Qwen3.6 template's function-XML envelope, schema-typed; instruction merges into the leading system message (SPEC-018 v0.2.14) | merged |
-| #2039 | #2036 | Release-train health gate never executes the served installer; streaming size cap on every release download | open |
-| #2035 | #2016 | Native image input for Qwen2-VL-2B: vision profile selected by catalog identity, vision models skip paged KV, catalog promotion, SPEC-023 30-day listing rule removed | open |
-| follow-up | #2016 | mlx-swift-lm fork patch tag (Qwen2-VL per-image vision attention, two-image ordering) + pin bump; Qwen2-VL-only diff, other models byte-identical | in progress |
-| follow-up | #2015 | KV disk tier coexists with privacy class (private requests bypass the disk tier); tier default on | in progress |
+| #2039 | #2036 | Release-train health gate never executes the served installer; streaming size cap on every release download; HTTPS-only same-host redirects | merged |
+| #2035 | #2016 | Native image input for Qwen2-VL-2B: vision profile selected by catalog identity, vision models skip paged KV, catalog promotion (class-priced), SPEC-023 30-day listing rule removed | merged |
+| #2041 | #2016 | mlx-swift-lm pin `3.32.3-macprovider.9.4` (`ce3bb523`): Qwen2-VL per-image vision attention; other models byte-identical (Qwen3.6 greedy output identical to 1.8.250) | merged |
+| #2040 | #2015 | KV disk tier coexists with the privacy class (private requests bypass the tier, SPEC-049 v0.6.0); tier default on (SPEC-037 v0.2.2) | merged |
+| #2043 | #2015 | Privacy-class CB replay claims stay in memory; no private-request-derived state on disk (SPEC-049 v0.7.0) | merged |
 
-Live proofs owed after the cut: #2014 (`required` and named tool calls through the gateway, with and without a buyer system message), #2015 (live cold restore), #2016 (two-image buyer request with receipt), #2036 (update check and install with the anonymous budget at 0). The fork pin bump changes the runtime-build key, so the CB self-check re-measures once (identity re-bind, as at 1.8.250).
+Re-binds at this cut: the mlx-swift-lm pin changes the runtime-build key, so the CB
+self-check re-measures once on each Mac; CB policy and native-MTP admission get an
+identity-only signed republish through `scripts/ops/catalog-activate.sh`; the Qwen2-VL
+vision qualification is recorded on the released build and installed with
+`PEARL_RUNTIME_TASK=vision-qualification`. Coordinator-side changes (#2035 SIGHUP
+qualification apply, #2042 persisted compute-integrity schedule) ship in the next Pearl
+runtime release.
+
+Live proofs owed after the cut: #2014 (`required` and named tool calls through the
+gateway, with and without a buyer system message), #2015 (disk tier activated, cold
+restore, privacy hardening passing), #2016 (two-image buyer request with receipt), #2036
+(update check and install with the anonymous budget at 0).
 
 ## Next CLI release — net changes vs 1.8.248 (tracked 2026-10-16)
 
