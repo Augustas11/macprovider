@@ -166,9 +166,18 @@ def text(value):
     return {"type": "text", "text": value}
 
 
-def request(parts, stream=False, model=MODEL, max_tokens=64):
-    return {"model": model, "messages": [{"role": "user", "content": parts}],
+def request(parts, stream=False, model=MODEL, max_tokens=64, system=None):
+    messages = [{"role": "user", "content": parts}]
+    if system is not None:
+        messages.insert(0, {"role": "system", "content": system})
+    return {"model": model, "messages": messages,
             "temperature": 0, "max_tokens": max_tokens, "stream": stream}
+
+
+# Image-only user turns carry no question, and a small VLM asked nothing
+# answers with a clarification request. The instruction lives in a system
+# turn so the user turn stays image-only while the answer is checkable.
+IMAGE_ONLY_SYSTEM = "When the user sends an image, reply with only the name of its dominant color."
 
 
 def response_chunks(response, deadline):
@@ -295,10 +304,12 @@ def run_suite(origin, token, unsupported_model, gateway=False):
         suffix = "stream" if streaming else "nonstream"
         success("paired_red_" + suffix, [question, red], ["red"], streaming)
         success("paired_blue_" + suffix, [question, blue], ["blue"], streaming)
-        # Image-only input: assert grounding without requiring a particular caption.
-        content = answer(post(origin, "/v1/chat/completions", request([red], streaming), token, stream=streaming))
-        require("red" in re.findall(r"\b\w+\b", content), "image-only answer was not grounded")
-        results.append({"case": "image_only_" + suffix, "passed": True})
+        # Image-only user turns, one per color, so the answer must come from the image.
+        for label, image_part in (("red", red), ("blue", blue)):
+            content = answer(post(origin, "/v1/chat/completions",
+                                  request([image_part], streaming, system=IMAGE_ONLY_SYSTEM), token, stream=streaming))
+            check_labels(content, [label])
+            results.append({"case": "image_only_" + label + "_" + suffix, "passed": True})
         order = text("Name the dominant color of each image in order. Output only two color names.")
         success("multiple_red_blue_" + suffix, [order, red, text("Next image:"), blue], ["red", "blue"], streaming)
         success("multiple_blue_red_" + suffix, [order, blue, text("Next image:"), red], ["blue", "red"], streaming)

@@ -68,7 +68,8 @@ class VisionAcceptanceTests(unittest.TestCase):
                 return 404, {"error": {"code": "model_not_found"}}
             if model == "text-only":
                 return 400, {"error": {"code": "unsupported_media"}}
-            content = payload["messages"][0]["content"] if path == "/v1/chat/completions" else None
+            content = (next(m for m in payload["messages"] if m["role"] == "user")["content"]
+                       if path == "/v1/chat/completions" else None)
             if isinstance(content, str):
                 return 200, {"choices": [{"message": {"content": "hello"}}]}
             urls = [p["image_url"]["url"] for p in content or [] if p.get("type") == "image_url"]

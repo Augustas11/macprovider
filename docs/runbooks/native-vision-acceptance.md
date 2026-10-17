@@ -73,7 +73,7 @@ or join an unreleased candidate to the live coordinator.
 
    The harness generates tiny red/blue PNGs in memory, uses the same question
    for both, and checks color-dependent answers in streaming and non-streaming
-   modes. It also checks image-only input, reversed multiple-image ordering,
+   modes. It also checks image-only user turns (a system turn carries the instruction), reversed multiple-image ordering,
    mixed content, malformed/excessive media, endpoint rejection, disconnect
    and repeated-request recovery. On the candidate it sends an explicitly
    unknown model name (`unloaded_model_name`), which passes only on a
