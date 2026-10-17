@@ -58,6 +58,11 @@ expect block 'scripts/publish-native-mtp-revocations.sh --deploy'
 expect allow 'scripts/publish-native-mtp-revocations.sh'
 expect block "ssh \"\$PEARL_SSH\" '/usr/local/sbin/macprovider-pearl-update --apply --tag v1.8.230'"
 expect allow "ssh \"\$PEARL_SSH\" '/usr/local/sbin/macprovider-pearl-update --plan --tag v1.8.230'"
+expect block 'sudo ops/pearl-updater/install-pearl-updater.sh'
+expect block "ssh pearl 'cd /root/macprovider-updater && sudo bash ops/pearl-updater/install-pearl-updater.sh'"
+expect allow 'bash -n ops/pearl-updater/install-pearl-updater.sh'
+expect allow 'cat ops/pearl-updater/install-pearl-updater.sh'
+expect allow 'PEARL_RUNTIME_TASK=updater-bundle scripts/ops/pearl-runtime.sh status'
 expect block "ssh host 'sudo systemctl restart macprovider-coordinator'"
 expect block 'systemctl --no-block restart macprovider-coordinator.service'
 expect allow 'systemctl status macprovider-coordinator'

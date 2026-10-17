@@ -16,9 +16,10 @@
 # coverage loss (and GO with a logged override), config content drift (bytes,
 # mtime-preserved bytes, missing applied-config record), working tree vs commit
 # mismatch, evidence (e) buyer-serving set (new Tier-2 pin, listed ->
-# recommendable, serving hash changed; a dropped exclusion of a pinned model is
-# GO; live release with no
-# reviewed commit), missing canary evidence; deploy happy path (row hash changed
+# recommendable, serving hash changed, each NO_GO while a connected provider
+# serves the model and owed (GO, deploy logs it, re-checked under the lease)
+# while none does; a dropped exclusion of a pinned model is GO; live release
+# with no reviewed commit), missing canary evidence; deploy happy path (row hash changed
 # -> autotune --apply first); refusal under the lease when the live-binary
 # dry-load flips to failure or the staged bytes differ from the commit;
 # rollback on evidence (a), (b) (+ no applied-config record from this HUP), (c)
@@ -464,9 +465,15 @@ def canary():
 def pool():
     cs = canary()
     entries = [{"provider_id": os.environ["CCR_CANARY_ID"], "catalog_release_id": cs["release_id"],
-                "catalog_candidate_sha256": cs["digest"], "hash_status": "hash_verified", "routing_eligible": True}]
+                "catalog_candidate_sha256": cs["digest"], "hash_status": "hash_verified", "routing_eligible": True,
+                "model_id": os.environ["CCR_CANARY_KEY"], "model_hash": "cc" * 32}]
     if c("poolz-extra.json"):
         entries += json.load(open(os.path.join(ctl, "poolz-extra.json")))
+    # A provider that connects after the preflight's two /poolz reads (the (e)
+    # owed check and coverage): seen first by the deploy's reads under the lease.
+    state["poolz_reads"] = state.get("poolz_reads", 0) + 1
+    if c("poolz-late.json") and state["poolz_reads"] >= 3:
+        entries += json.load(open(os.path.join(ctl, "poolz-late.json")))
     if c("poolz-unavailable-after-hup") and state["hups"] >= 1:
         entries.append({"provider_id": "p2", "catalog_release_id": state["version"], "catalog_candidate_sha256": state["cand"],
                         "hash_status": "catalog_unavailable"})
@@ -1194,8 +1201,75 @@ serving = {(r["model_id"].lower(), str(r.get("model_sha256", "")).lower()) for r
 drop = next(m for m in t2["models"] if (m["model_id"].lower(), m["sha256"].lower()) in serving)
 t2["models"].remove(drop)
 json.dump(t2, open(sys.argv[1], "w"), indent=2)
+print(json.dumps([{"provider_id": "p7", "model_id": "other/model", "model_hash": drop["sha256"]}]),
+      file=open(sys.argv[1] + ".serving.json", "w"))
 PY
-expect_no_go "new buyer-serving Tier-2 pin (e)" buyer_serving_e2e
+E2E_SERVING_POOL="$A_ROOT/releases/test-live-v1-0000000000000000/tier2-catalog.json.serving.json"
+# SPEC-023-R017 5(e) v0.22.26: no connected provider serves the new model, so
+# (e) is owed after activation, not a preflight NO_GO.
+run preflight
+[ "$RC" -eq 0 ] && [ "$(verdict_check buyer_serving_e2e)" = true ] ||
+  fail "(e) with no provider serving the new model must be owed, not NO_GO (rc=$RC): $(cat "$T/out")"
+python3 - "$T/out" <<'PY' || fail "(e) owed must be listed in the verdict: $(cat "$T/out")"
+import json, sys
+v = json.loads(open(sys.argv[1]).readline())
+owed = v["buyer_serving_e2e_owed"]
+assert len(owed) == 1 and set(owed[0]) == {"model_id", "sha256"}, owed
+assert "OWED (e)" in next(c["detail"] for c in v["checks"] if c["name"] == "buyer_serving_e2e")
+PY
+note "ok: GO with (e) owed when no connected provider serves the new model"
+run deploy
+[ "$RC" -eq 0 ] || fail "deploy with (e) owed must activate (rc=$RC): $(tail -n 20 "$T/out") $(tail -n 20 "$T/err")"
+grep -q '(e) OWED: ' "$T/out" || fail "deploy with (e) owed must log the owed models: $(tail -n 5 "$T/out")"
+grep -q 'evidence (e) under the lease: still owed' "$T/out" "$T/err" || fail "deploy must re-check (e) under the lease"
+note "ok: deploy activates and logs (e) OWED"
+setup_env
+python3 - "$A_ROOT/releases/test-live-v1-0000000000000000/tier2-catalog.json" "$R/phase3-binary/dist/static/autotune-candidates.json" <<'PY'
+import json, sys
+t2 = json.load(open(sys.argv[1]))
+rows = json.load(open(sys.argv[2]))["rows"]
+serving = {(r["model_id"].lower(), str(r.get("model_sha256", "")).lower()) for r in rows.values() if r["runtime_status"] == "recommendable"}
+drop = next(m for m in t2["models"] if (m["model_id"].lower(), m["sha256"].lower()) in serving)
+t2["models"].remove(drop)
+json.dump(t2, open(sys.argv[1], "w"), indent=2)
+print(json.dumps([{"provider_id": "p7", "model_id": "other/model", "model_hash": drop["sha256"]}]),
+      file=open(sys.argv[1] + ".serving.json", "w"))
+PY
+cp "$E2E_SERVING_POOL" "$CCR_TEST_CTL/poolz-late.json"
+run deploy
+[ "$RC" -ne 0 ] && [ "$RC" -ne 3 ] || fail "a provider serving the owed model by the lease must stop the deploy (rc=$RC)"
+grep -q 'connected provider(s) now serve a newly buyer-serving model' "$T/out" "$T/err" ||
+  fail "the lease re-check must name the serving provider count: $(tail -n 5 "$T/err")"
+live_unchanged "(e) due under the lease"
+note "ok: deploy refuses when a provider serves the owed model by the lease"
+setup_env
+python3 - "$A_ROOT/releases/test-live-v1-0000000000000000/tier2-catalog.json" "$R/phase3-binary/dist/static/autotune-candidates.json" <<'PY'
+import json, sys
+t2 = json.load(open(sys.argv[1]))
+rows = json.load(open(sys.argv[2]))["rows"]
+serving = {(r["model_id"].lower(), str(r.get("model_sha256", "")).lower()) for r in rows.values() if r["runtime_status"] == "recommendable"}
+drop = next(m for m in t2["models"] if (m["model_id"].lower(), m["sha256"].lower()) in serving)
+t2["models"].remove(drop)
+json.dump(t2, open(sys.argv[1], "w"), indent=2)
+print(json.dumps([{"provider_id": "p7", "model_id": "other/model", "model_hash": drop["sha256"]}]),
+      file=open(sys.argv[1] + ".serving.json", "w"))
+PY
+cp "$E2E_SERVING_POOL" "$CCR_TEST_CTL/poolz-extra.json"
+expect_no_go "new buyer-serving Tier-2 pin served by a connected provider (e)" buyer_serving_e2e
+grep -q 'already serve them' "$T/out" || fail "(e) due must say a provider serves it: $(cat "$T/out")"
+python3 - "$E2E_SERVING_POOL" "$R/phase3-binary/dist/static/autotune-candidates.json" >"$CCR_TEST_CTL/poolz-extra.json" <<'PY'
+import json, sys
+sha = json.load(open(sys.argv[1]))[0]["model_hash"]
+rows = json.load(open(sys.argv[2]))["rows"]
+key = next(k for k, r in rows.items() if str(r.get("model_sha256", "")).lower() == sha.lower())
+print(json.dumps([{"provider_id": "p8", "model_id": "", "model_admission_catalog_model_key": key}]))
+PY
+expect_no_go "new buyer-serving model bound by its candidate key (e)" buyer_serving_e2e
+printf '[{"provider_id":"p9","model_hash":"%s"}]\n' "$(printf 'dd%.0s' $(seq 1 32))" >"$CCR_TEST_CTL/poolz-extra.json"
+expect_no_go "malformed /poolz row without model_id (e)" buyer_serving_e2e
+grep -q '/poolz is malformed' "$T/out" || fail "a malformed /poolz row must fail closed: $(cat "$T/out")"
+printf '[{"provider_id":"p9","model_id":""}]\n' >"$CCR_TEST_CTL/poolz-extra.json"
+expect_no_go "/poolz row with no serving identity (e)" buyer_serving_e2e
 # A serving model other than the canary's row (the canary row's hash changes).
 read -r SERVING_KEY SERVING_MODEL <<EOF_SERVING
 $(python3 - "$R/phase3-binary/dist/static/autotune-candidates.json" "$R/phase3-binary/catalog/autotune/tier2-catalog.json" "$CANARY_KEY" <<'PY'
@@ -1215,6 +1289,7 @@ import json, sys
 c = json.load(open(sys.argv[1])); c["rows"][sys.argv[2]]["runtime_status"] = "listed"
 open(sys.argv[1], "w").write(json.dumps(c, indent=2, sort_keys=True) + "\n")
 PY
+printf '[{"provider_id":"p7","model_id":"%s"}]\n' "$SERVING_MODEL" >"$CCR_TEST_CTL/poolz-extra.json"
 expect_no_go "listed -> recommendable (e)" buyer_serving_e2e
 grep -q "$SERVING_MODEL (added)" "$T/out" || fail "listed -> recommendable must name the added model: $(cat "$T/out")"
 setup_env
@@ -1229,6 +1304,7 @@ for m in t2["models"]:
         m["sha256"] = "aa" * 32
 json.dump(t2, open(d + "/tier2-catalog.json", "w"), indent=2)
 PY
+printf '[{"provider_id":"p7","model_id":"x/y","model_hash":"%s"}]\n' "$(printf 'aa%.0s' $(seq 1 32))" >"$CCR_TEST_CTL/poolz-extra.json"
 expect_no_go "serving model hash changed (e)" buyer_serving_e2e
 grep -q "$SERVING_MODEL (sha changed)" "$T/out" || fail "a re-hashed serving model must be named: $(cat "$T/out")"
 setup_env

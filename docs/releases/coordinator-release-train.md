@@ -10,8 +10,12 @@ release `published-2026-10-17-qwen2vl-listed-v1`. Promotion release:
 `published-2026-10-17-qwen2vl-recommendable-v1`, rate row `qwen2-vl-2b-instruct`
 (class-3b small-dense parity: 13500 / 3375 / 27000 credits per Mtok), Tier-2
 catalog `macprovider-tier2-model-catalog-2026-10-17-qwen2vl-v1`. Newly
-buyer-serving, so it ships through the runtime lane with a live buyer E2E, after
-the provider CLI that selects the vision profile by catalog identity is released.
+buyer-serving, and no connected provider can serve it until the provider CLI that
+selects the vision profile by catalog identity is released, so it ships through
+the catalog-content lane with evidence (e) owed (SPEC-023 v0.22.26): the CLI
+train's canary and the #2016 live acceptance owe its buyer request and settlement
+row. The runtime lane cannot carry it: it adds a rate-card row the live
+`rewards.rate_card` lacks.
 
 ## CLI 1.8.223 compatibility target — 2026-10-08 00:42 UTC
 
@@ -133,7 +137,7 @@ Full decision tree: `docs/runbooks/catalog-release-decision-tree.md`.
 |---|---|
 | Coordinator/gateway code, config template, units, nginx, deploy scripts | **This train** (coordinator release) |
 | Catalog content only: model hash/row/Tier-2 correction, same policy/keys/signers | Catalog-content lane (`scripts/catalog-content-release.sh`), no coordinator release |
-| Re-hash of a buyer-serving row (`model_sha256` of a recommendable, rate-carded, Tier-2-pinned row changes) | **This train**: content-lane evidence (e) needs a strict-pin buyer request + settlement row, which has no noninteractive harness, so the content preflight is `buyer_serving_e2e` NO_GO |
+| Re-hash of a buyer-serving row, or a newly buyer-serving model | Catalog-content lane when no connected provider serves the model: evidence (e) (strict-pin buyer request + settlement row) is owed by the provider release that first serves it (SPEC-023 v0.22.26). While a connected provider serves it, the content preflight is `buyer_serving_e2e` NO_GO and the release ships on **this train** |
 | Rate-card rows (pricing) | This train, until #1693 lands (in progress: after its enabling coordinator release, rows-only corrections move to the catalog-content lane; `usd_per_million_credits` / share / multiplier stay on this train) |
 | Weekly feed freshness | Automatic renewal (Wednesday); never a coordinator release |
 | `policy_version`, keyring, CLI payload | Full provider-app release (CLI train) |
@@ -618,7 +622,7 @@ while the binary is dated 2026-09-23.
    `/run/macprovider/coordinator-applied-config.json`: the record is missing
    today, so the catalog-content lane's `config_applied` preflight is **NO_GO**.
    The next full `deploy-pearl-vps.sh` run from a tag ≥ `2b352720` installs it.
-2. **Reinstall the Pearl updater** (`ops/pearl-updater/install-pearl-updater.sh`)
+2. **Reinstall the Pearl updater** (`PEARL_RUNTIME_TASK=updater-bundle scripts/ops/pearl-runtime.sh`)
    so it ships the full verifier bundle and `autotune_window.py`. Its installed
    scripts are still `catalog-release.py` and `sign-catalog.go` only. The updater
    timer is disabled, so this is not urgent on its own — but it becomes a

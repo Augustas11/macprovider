@@ -155,6 +155,18 @@ origin_main_sha() {
   git -C "$REPO_ROOT" rev-parse origin/main 2>/dev/null || true
 }
 
+# remote_main_sha: origin's main exactly as origin serves it now (ls-remote),
+# fetched into origin/main and checked; prints nothing on any failure. Gates
+# that authorize a live mutation use it, never the best-effort tracking ref.
+remote_main_sha() {
+  local sha
+  sha="$(git -C "$REPO_ROOT" ls-remote origin refs/heads/main 2>/dev/null | awk '$2 == "refs/heads/main" {print $1}')"
+  is_sha40 "$sha" || return 0
+  git -C "$REPO_ROOT" fetch -q origin "+refs/heads/main:refs/remotes/origin/main" 2>/dev/null || return 0
+  [ "$(git -C "$REPO_ROOT" rev-parse -q --verify refs/remotes/origin/main 2>/dev/null)" = "$sha" ] || return 0
+  printf '%s\n' "$sha"
+}
+
 # binary_version_at REV -> CLI binaryVersion in that commit ("" if unreadable)
 binary_version_at() {
   git -C "$REPO_ROOT" show "$1:phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift" 2>/dev/null |
@@ -163,6 +175,32 @@ binary_version_at() {
 
 remote_tag_exists() {
   [ -n "$(git -C "$REPO_ROOT" ls-remote --tags origin "refs/tags/$1" 2>/dev/null)" ]
+}
+
+# verify_tag_signer OBJECT: the tag object is signed by an explicitly approved
+# signer. SSH signatures verify only against MACPROVIDER_RELEASE_TAG_ALLOWED_SIGNERS
+# (default ~/.config/macprovider/release-tag-allowed-signers), never the user's
+# git config; OpenPGP signatures need a VALIDSIG fingerprint listed in
+# MACPROVIDER_RELEASE_TAG_GPG_FINGERPRINTS. Anything else is untrusted.
+verify_tag_signer() {
+  local obj="$1" body raw f
+  local allowed="${MACPROVIDER_RELEASE_TAG_ALLOWED_SIGNERS:-$HOME/.config/macprovider/release-tag-allowed-signers}"
+  body="$(git -C "$REPO_ROOT" cat-file tag "$obj" 2>/dev/null)" || return 1
+  case "$body" in
+    *"-----BEGIN SSH SIGNATURE-----"*)
+      [ -s "$allowed" ] || return 1
+      git -C "$REPO_ROOT" -c gpg.format=ssh -c "gpg.ssh.allowedSignersFile=$allowed" \
+        verify-tag "$obj" >/dev/null 2>&1 ;;
+    *"-----BEGIN PGP SIGNATURE-----"*)
+      [ -n "${MACPROVIDER_RELEASE_TAG_GPG_FINGERPRINTS:-}" ] || return 1
+      raw="$(git -C "$REPO_ROOT" verify-tag --raw "$obj" 2>&1)" || return 1
+      for f in $MACPROVIDER_RELEASE_TAG_GPG_FINGERPRINTS; do
+        [[ "$f" =~ ^[0-9A-Fa-f]{40}$ ]] || continue
+        printf '%s\n' "$raw" | grep -E '^\[GNUPG:\] VALIDSIG ' | tr ' ' '\n' | grep -qix "$f" && return 0
+      done
+      return 1 ;;
+    *) return 1 ;;
+  esac
 }
 
 # --- ssh -----------------------------------------------------------------
@@ -380,10 +418,10 @@ reset_state() {
 # so the commands and runbook constants are the reviewed ones.
 require_clean_origin_main() {
   local head main dirty
-  main="$(origin_main_sha)"
+  main="$(remote_main_sha)"
   head="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)"
   [ -n "$main" ] && [ "$head" = "$main" ] ||
-    refuse "checkout HEAD ${head:-?} is not origin/main ${main:-?}; run from a fresh worktree at origin/main"
+    refuse "checkout HEAD ${head:-?} is not origin/main ${main:-?} (as origin serves it now); run from a fresh worktree at origin/main"
   dirty="$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null | head -n 5)"
   [ -z "$dirty" ] || refuse "working tree is not clean: $(printf '%s' "$dirty" | tr '\n' ' ')"
 }

@@ -233,6 +233,9 @@ REL="$WORK/release"
 LIVE="$WORK/live"
 CHECKS="$WORK/checks.tsv"
 : >"$CHECKS"
+# Evidence (e) owed (SPEC-023-R017 5(e)): the newly buyer-serving models no
+# connected provider serves yet; written by pf_buyer_serving_e2e.
+E2E_OWED="$WORK/e2e-owed.json"
 REMOTE_SCRATCH=""
 # 0 = nothing sent; maybe = the publish was (possibly) sent; 1 = activated.
 CCR_ACTIVATED=0
@@ -331,7 +334,7 @@ failed_checks() { awk -F '\t' '$2 != 1 {print $1}' "$CHECKS"; }
 check_ok() { awk -F '\t' -v n="$1" '$1 == n && $2 == 1 {found=1} END {exit found ? 0 : 1}' "$CHECKS"; }
 
 emit_verdict() {
-  python3 - "$CHECKS" "${PRICING_DIR:-}" <<'PY'
+  python3 - "$CHECKS" "${PRICING_DIR:-}" "$E2E_OWED" <<'PY'
 import json, os, sys
 checks = []
 for line in open(sys.argv[1], encoding="utf-8"):
@@ -340,7 +343,10 @@ for line in open(sys.argv[1], encoding="utf-8"):
 pricing = None
 if sys.argv[2] and os.path.exists(os.path.join(sys.argv[2], "verdict-pricing.json")):
     pricing = json.load(open(os.path.join(sys.argv[2], "verdict-pricing.json")))
-print(json.dumps({"go": bool(checks) and all(c["ok"] for c in checks), "checks": checks, "pricing": pricing},
+# Evidence (e) owed after activation: model ids and served hashes only.
+owed = json.load(open(sys.argv[3]))["models"] if os.path.exists(sys.argv[3]) else []
+print(json.dumps({"go": bool(checks) and all(c["ok"] for c in checks), "checks": checks, "pricing": pricing,
+                  "buyer_serving_e2e_owed": owed},
                  sort_keys=True, ensure_ascii=True))
 PY
 }
@@ -793,7 +799,10 @@ VALS
 # (e) A model that is newly buyer-serving vs live (added) or served at a new
 # hash (changed) needs a strict-pin buyer request + settlement row. No
 # reusable noninteractive production harness exists, so such releases are
-# NO_GO here. The live side is judged with the not-buyer-serving.json that was
+# NO_GO here while any connected provider serves one of those models. When
+# none does (the provider release that serves it is not live yet), (e) is
+# owed by that provider release and recorded in the verdict
+# (buyer_serving_e2e_owed), re-checked under the lease. The live side is judged with the not-buyer-serving.json that was
 # in force for it: the one committed with the reviewed release the live
 # release is (compare-live) or descends from, found on origin/main history.
 live_exclusions() { # <out>: that exclusion list, or fail
@@ -860,11 +869,78 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 new = ["%s (added)" % m["model_id"] for m in d["added"]] + ["%s (sha changed)" % m["model_id"] for m in d["changed"]]
 print(", ".join(new))
-raise SystemExit(1 if new else 0)' "$WORK/buyer-serving.json")" || {
-    record buyer_serving_e2e 0 "new buyer-serving model(s) vs live: $verdict; a strict-pin buyer request + settlement row is required and no noninteractive harness exists (ship via the runtime lane with its E2E)"
-    return 1
+raise SystemExit(1 if new else 0)' "$WORK/buyer-serving.json")" && {
+    record buyer_serving_e2e 1 "buyer-serving set adds or re-hashes nothing vs live (live exclusions from ${commit:0:12})"
+    return 0
   }
-  record buyer_serving_e2e 1 "buyer-serving set adds or re-hashes nothing vs live (live exclusions from ${commit:0:12})"
+  # SPEC-023-R017 5(e) v0.22.26: owed, not due, while no connected provider
+  # serves any of these models. Reading /poolz needs the canary bearer.
+  local served
+  if ! check_ok canary_config || ! fetch_poolz "$WORK/poolz-e2e.json"; then
+    record buyer_serving_e2e 0 "new buyer-serving model(s) vs live: $verdict; cannot read /poolz to show that no connected provider serves them (canary bearer unset or /poolz refused)"
+    return 1
+  fi
+  if ! served="$(e2e_serving_providers "$WORK/poolz-e2e.json")"; then
+    record buyer_serving_e2e 0 "new buyer-serving model(s) vs live: $verdict; /poolz is malformed, so serving providers are unknown"
+    return 1
+  fi
+  if [ "$served" != 0 ]; then
+    rm -f "$E2E_OWED"
+    record buyer_serving_e2e 0 "new buyer-serving model(s) vs live: $verdict; $served connected provider(s) already serve them, so the strict-pin buyer request + settlement row is due at activation and no noninteractive harness exists"
+    return 1
+  fi
+  python3 -c 'import json, sys
+d = json.load(open(sys.argv[1]))
+models = [{"model_id": m["model_id"], "sha256": m["sha256"]} for m in d["added"] + d["changed"]]
+json.dump({"models": models}, open(sys.argv[2], "w"), sort_keys=True)' "$WORK/buyer-serving.json" "$E2E_OWED"
+  record buyer_serving_e2e 1 "OWED (e): $verdict; no connected provider serves them, so the strict-pin buyer request + settlement row is owed by the first provider release that serves them (live exclusions from ${commit:0:12})"
+}
+
+# e2e_serving_providers <poolz.json>: how many /poolz providers serve a model
+# that this release makes newly buyer-serving, matched by served hash (new or,
+# for a re-hash, live), by model id, or by candidate key (the model id field
+# or the coordinator's model-admission catalog key). Fails on a malformed body
+# or row (model_id missing or not a string, an identity field of another
+# type, or no nonempty identity at all): unknown is never "none".
+e2e_serving_providers() {
+  python3 - "$WORK/buyer-serving.json" "$REL/autotune-candidates.json" "$1" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+rows = json.load(open(sys.argv[2]))["rows"]
+new = d["added"] + d["changed"]
+ids = {m["model_id"].lower().strip() for m in new}
+ids |= {key.lower().strip() for key, row in rows.items() if str(row.get("model_id", "")).lower().strip() in ids}
+shas = {str(m.get(k, "")).lower() for m in new for k in ("sha256", "live_sha256") if m.get(k)}
+pool = json.load(open(sys.argv[3])).get("pool")
+if not isinstance(pool, list):
+    raise SystemExit(1)
+n = 0
+for p in pool:
+    if not isinstance(p, dict) or not isinstance(p.get("model_id"), str):
+        raise SystemExit(1)
+    optional = [p.get(k) for k in ("model_hash", "model_admission_catalog_model_key")]
+    if any(v is not None and not isinstance(v, str) for v in optional):
+        raise SystemExit(1)
+    mhash = (optional[0] or "").lower().strip()
+    names = {p["model_id"].lower().strip(), (optional[1] or "").lower().strip()} - {""}
+    if not names and not mhash:
+        raise SystemExit(1)  # a row with no serving identity is unknown, not "none"
+    if names & ids or (mhash and mhash in shas):
+        n += 1
+print(n)
+PY
+}
+
+# Under the lease: an owed (e) stays owed only while still no connected
+# provider serves the new models.
+e2e_owed_recheck() {
+  [ -f "$E2E_OWED" ] || return 0
+  local served
+  fetch_poolz "$WORK/poolz-e2e-lease.json" || fatal "evidence (e) under the lease: /poolz unreadable"
+  served="$(e2e_serving_providers "$WORK/poolz-e2e-lease.json")" || fatal "evidence (e) under the lease: /poolz is malformed"
+  [ "$served" = 0 ] ||
+    fatal "evidence (e) under the lease: $served connected provider(s) now serve a newly buyer-serving model; (e) is due at activation and has no noninteractive harness"
+  log "evidence (e) under the lease: still owed, no connected provider serves $(python3 -c 'import json,sys; print(", ".join(m["model_id"] for m in json.load(open(sys.argv[1]))["models"]))' "$E2E_OWED")"
 }
 
 # Stage the candidate in a private scratch mirror of the live root on Pearl
@@ -2054,6 +2130,7 @@ if [ "$PRICING" = 1 ]; then
 fi
 pf_dry_load || fatal "coordinator dry-load under the lease refused: $(cut -f3 "$CHECKS" | tail -n 1)"
 pf_coverage || fatal "window coverage under the lease: $(cut -f3 "$CHECKS" | tail -n 1)"
+e2e_owed_recheck
 if [ "$PRICING" = 1 ]; then
   pf_pricing_gate || fatal "pricing gate under the lease: $(cut -f3 "$CHECKS" | tail -n 1)"
   [ "$CAND_CONFIG_SHA $PRICING_DIFF_SHA $EXPECTED_RATE_SHA $EXPECTED_SIGNED_SHA $PRIOR_RATE_SHA $PRIOR_SIGNED_SHA $PRIOR_SNAPSHOT_ID $CONFIG_DISK_SHA ${OVERLAY_DISK_SHA:--}" = "$PF_PRICING_DIGESTS" ] ||
@@ -2266,7 +2343,11 @@ if [ "$PRICING" = 1 ] && ! pricing_finalize; then
   fatal "pricing journal not marked verified; journal kept in phase verifying"
 fi
 CCR_DONE=1
-log "DONE: $REL_ID live via the catalog-content lane; evidence (a)-(d) passed; (e) not required (buyer-serving set adds or re-hashes nothing)"
+if [ -f "$E2E_OWED" ]; then
+  log "DONE: $REL_ID live via the catalog-content lane; evidence (a)-(d) passed; (e) OWED: $(python3 -c 'import json,sys; print(", ".join(m["model_id"] for m in json.load(open(sys.argv[1]))["models"]))' "$E2E_OWED") (no connected provider served them at activation; the first provider release that serves them owes a strict-pin buyer request + settlement row)"
+else
+  log "DONE: $REL_ID live via the catalog-content lane; evidence (a)-(d) passed; (e) not required (buyer-serving set adds or re-hashes nothing)"
+fi
 if [ "$PRICING" = 1 ]; then
   log "pricing: rate table $EXPECTED_RATE_SHA and signed card $EXPECTED_SIGNED_SHA live (diff $PRICING_DIFF_SHA)"
   aa_lease_release

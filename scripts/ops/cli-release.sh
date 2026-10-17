@@ -1208,32 +1208,6 @@ check_registrations() {
   log "v$V registrations are live in the running coordinator"
 }
 
-# verify_tag_signer OBJECT: the tag object is signed by an explicitly approved
-# signer. SSH signatures verify only against MACPROVIDER_RELEASE_TAG_ALLOWED_SIGNERS
-# (default ~/.config/macprovider/release-tag-allowed-signers), never the user's
-# git config; OpenPGP signatures need a VALIDSIG fingerprint listed in
-# MACPROVIDER_RELEASE_TAG_GPG_FINGERPRINTS. Anything else is untrusted.
-verify_tag_signer() {
-  local obj="$1" body raw f
-  local allowed="${MACPROVIDER_RELEASE_TAG_ALLOWED_SIGNERS:-$HOME/.config/macprovider/release-tag-allowed-signers}"
-  body="$(git -C "$REPO_ROOT" cat-file tag "$obj" 2>/dev/null)" || return 1
-  case "$body" in
-    *"-----BEGIN SSH SIGNATURE-----"*)
-      [ -s "$allowed" ] || return 1
-      git -C "$REPO_ROOT" -c gpg.format=ssh -c "gpg.ssh.allowedSignersFile=$allowed" \
-        verify-tag "$obj" >/dev/null 2>&1 ;;
-    *"-----BEGIN PGP SIGNATURE-----"*)
-      [ -n "${MACPROVIDER_RELEASE_TAG_GPG_FINGERPRINTS:-}" ] || return 1
-      raw="$(git -C "$REPO_ROOT" verify-tag --raw "$obj" 2>&1)" || return 1
-      for f in $MACPROVIDER_RELEASE_TAG_GPG_FINGERPRINTS; do
-        [[ "$f" =~ ^[0-9A-Fa-f]{40}$ ]] || continue
-        printf '%s\n' "$raw" | grep -E '^\[GNUPG:\] VALIDSIG ' | tr ' ' '\n' | grep -qix "$f" && return 0
-      done
-      return 1 ;;
-    *) return 1 ;;
-  esac
-}
-
 # release_tag_state TAG SHA -> absent | on_candidate | on <commit> | lightweight on <commit>
 # | unverified on <commit> | ambiguous | unreadable, from origin's refs (the promotion
 # workflow reads the same). on_candidate also requires the exact remote tag object to

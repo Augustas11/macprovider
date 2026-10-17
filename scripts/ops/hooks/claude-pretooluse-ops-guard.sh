@@ -11,6 +11,7 @@
 #     or any numeric workflow id; or gh run rerun
 #   - deploy-pearl-vps.sh; catalog-content-release.sh --deploy;
 #     publish-native-mtp-revocations.sh --deploy; macprovider-pearl-update --apply;
+#     install-pearl-updater.sh;
 #     systemctl restart / service ... restart of macprovider-coordinator
 #   - gh pr create|edit|merge or git commit (any git global options) whose
 #     message, inline, heredoc or --body-file/-F file, has a GitHub closing

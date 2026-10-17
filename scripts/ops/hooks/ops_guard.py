@@ -405,6 +405,8 @@ def classify(word, raw, args, names, ctx):
         raise Blocked("direct publish-native-mtp-revocations.sh --deploy", route(CAT))
     elif word == "macprovider-pearl-update" and "--apply" in args:
         raise Blocked("direct macprovider-pearl-update --apply", route(RT))
+    elif word == "install-pearl-updater.sh":
+        raise Blocked("direct install-pearl-updater.sh", route("PEARL_RUNTIME_TASK=updater-bundle " + RT))
     elif word == "systemctl" and RESTART_VERBS & set(args) and any(
             a.startswith("macprovider-coordinator") for a in args):
         raise Blocked("direct coordinator restart", route(CAT + " or " + RT))

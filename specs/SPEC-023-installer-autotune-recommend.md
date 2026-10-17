@@ -1,6 +1,6 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.25
+version: v0.22.26
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-02
@@ -8,6 +8,19 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
 
 ## Change log
 
+- **v0.22.26 (2026-10-17)** — Catalog-content evidence (e) may be owed
+  instead of due (`SPEC-023-R017` rule 5(e)). When a release makes a model
+  newly buyer-serving but no connected provider serves that model (by served
+  model hash, model id, or candidate key, read from the coordinator's
+  `/poolz` at preflight and again under the lease), no buyer request can
+  reach it at activation, so the strict-pinned buyer request and its
+  settlement row are owed by the provider release that first serves the model
+  (its canary acceptance), not collected at activation. The preflight verdict
+  lists the owed models (`buyer_serving_e2e_owed`), the deploy logs them, and
+  the activation tooling keeps them open as an operator-recorded
+  post-activation step. While any connected provider serves the model, (e) is
+  due at activation as before. An unreadable or malformed `/poolz` fails
+  closed. AC-CAT-27 follows.
 - **v0.22.25 (2026-10-17)** — The operator removed the listed-dwell knob.
   `INTAKE_MIN_LISTED_DAYS` is gone from §16.3, the §16.4 table and the
   §16.8 `thresholds` object (rule 5), and `promotion.listed_days_elapsed` is
@@ -2000,6 +2013,15 @@ app release, through the operator-local catalog-content lane
      remains connected;
    - (e) when the release makes a model newly buyer-serving, a strict-pinned
      buyer request to that model succeeds and produces its settlement row.
+     **[v0.22.26]** When no connected provider serves that model, matched by
+     served model hash (the new one, or the live one for a re-hash), model id,
+     or candidate key in the coordinator's `/poolz` at preflight and again
+     under the lease, (e) is owed rather than due: the preflight verdict and
+     the deploy record the owed models, and the provider release that first
+     serves the model owes the strict-pinned buyer request and settlement row
+     (its canary acceptance). A provider that serves the model by the lease
+     makes (e) due at activation; an unreadable or malformed `/poolz` fails
+     closed.
 6. **Rollback.** Rollback restores `current` and the exact prior window with
    compare-and-swap, still under the lease; restarts the canary onto the prior
    release; and re-sends SIGHUP. If that reload is rejected the lane alerts and
@@ -3123,6 +3145,12 @@ running binary's validator rejects, including an unloadable retained entry, is
 NO_GO. A renewal or deploy attempted while the lane holds the lease is refused.
 Each evidence failure (a)–(e) and a rejected post-rollback SIGHUP drive the
 rollback path, and a failed release is retained only under rule 6.
+**[v0.22.26]** A newly buyer-serving model that no connected provider serves
+at preflight and under the lease yields a GO verdict listing it in
+`buyer_serving_e2e_owed`; the same release with a connected provider serving
+that model (by hash, model id, or candidate key) is NO_GO on (e), and one that
+starts serving it between preflight and the lease stops the deploy before any
+mutation.
 
 AC-CAT-28 (`SPEC-023-R019`, pricing through the content lane): A committed
 release changing only row credits, adding a row, or removing a non-`default`
