@@ -104,7 +104,7 @@ sys.exit(0 if paused and d.get("requests_in_flight", 1) == 0 else 1)' || {
   # --- Leg 1: AC-20 fixture -------------------------------------------------
   echo "leg1 fixture start $(date -u +%T)" | tee -a $OUT/summary.txt
   if MACPROVIDER_GLM53_ARTIFACT_DIR=$MODEL zsh $XCTEST_HOST \
-      macprovider-cliTests.GLM5NextPagedMLAParityTests $TEST_BUNDLE > $OUT/leg1-fixture.log 2>&1 \
+      macprovider_cliTests.GLM5NextPagedMLAParityTests $TEST_BUNDLE > $OUT/leg1-fixture.log 2>&1 \
      && grep -q "Executed 1 test, with 0 failures" $OUT/leg1-fixture.log \
      && ! grep -q "skipped" $OUT/leg1-fixture.log; then
     echo "leg1 fixture PASS" | tee -a $OUT/summary.txt
@@ -119,19 +119,25 @@ sys.exit(0 if paused and d.get("requests_in_flight", 1) == 0 else 1)' || {
   python3 - $LAB_CONFIG_TEMPLATE $dir/config.yaml $LAB_PORT $MODEL <<'PY'
 import sys
 src, dst, port, model = sys.argv[1:]
-want = {"port": port, "model": "zai-org/glm-5.3-flash", "model_artifact_path": model,
-        "max_concurrency_override": "4", "continuous_batch_queue_limit": "4",
-        "continuous_batching": "canary"}
-seen, out = set(), []
+# Every top-level key below is dropped with its indented block and then set
+# (or left out) here, so nothing of the template's own model, catalog
+# binding, accepted tuples or paged/native settings reaches the GLM serve.
+want = {"port": port, "model": "zai-org/glm-5.3-flash", "model_artifact_path": f'"{model}"',
+        "max_context_override": "65536", "max_concurrency_override": "4",
+        "continuous_batch_queue_limit": "4", "continuous_batching": "canary",
+        "native_mtp_mode": "off"}
+drop = set(want) | {"draft_model", "max_context_override_provenance", "continuous_batching_accepted_tuples",
+                    "paged_kv", "native_mtp_admission"}
+out, skipping = [], False
 for line in open(src).read().splitlines():
-    key = line.split(":", 1)[0]
-    if line and not line[0].isspace() and ":" in line and key in want:
-        out.append(f"{key}: {want[key]}"); seen.add(key)
-    elif line.startswith("draft_model:"):
-        continue
-    else:
+    if line and not line[0].isspace() and ":" in line:
+        key = line.split(":", 1)[0]
+        skipping = key in drop or key.startswith("model_catalog_")
+    elif not line.strip():
+        skipping = False
+    if not skipping:
         out.append(line)
-out += [f"{k}: {v}" for k, v in want.items() if k not in seen]
+out += [f"{k}: {v}" for k, v in want.items()]
 open(dst, "w").write("\n".join(out) + "\n")
 PY
   chmod 600 $dir/config.yaml
