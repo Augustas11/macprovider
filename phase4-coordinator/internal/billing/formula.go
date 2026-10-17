@@ -74,6 +74,25 @@ func NormalizeModelKey(model string) string {
 	for _, suffix := range []string{"-free", "-mxfp4-q8", "-4bit", "-8bit"} {
 		key = strings.TrimSuffix(key, suffix)
 	}
+	normalized := normalizeServedAlias(namespace, key)
+	if catalogKey, ok := exactModelKeyAliases[normalized]; ok {
+		return catalogKey
+	}
+	return normalized
+}
+
+// exactModelKeyAliases maps one exact normalized identity onto the catalog
+// rate-row key it is served and billed as. Each entry is a whole normalized
+// key, never a prefix or family: GLM-5.3-Flash's catalog key is
+// zai-org/glm-5.3-flash, while its OpenRouter slug (and the bare name the
+// z-ai/glm- rule rewrites) is z-ai/glm-5.3-flash and its served artifact is
+// Jundot/GLM-5.3-Flash-oQ4e-mtp (epic #2029).
+var exactModelKeyAliases = map[string]string{
+	"z-ai/glm-5.3-flash":            "zai-org/glm-5.3-flash",
+	"jundot/glm-5.3-flash-oq4e-mtp": "zai-org/glm-5.3-flash",
+}
+
+func normalizeServedAlias(namespace, key string) string {
 	switch {
 	case servedAliasNamespace(namespace, "meta-llama") && strings.HasPrefix(key, "llama-"):
 		return "meta-llama/" + key
