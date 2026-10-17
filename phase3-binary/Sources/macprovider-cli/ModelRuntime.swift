@@ -2140,6 +2140,7 @@ actor ModelRuntime: ModelRuntimeServing {
         // anyway: disabled paged KV, unrecognized family, quantized KV, or a cache class
         // outside the allowlist. This avoids spending Metal work that cannot open attach.
         guard pagedKVConfig.effectiveEnabled,
+              Self.pagedKVSkipReason(config: pagedKVConfig, nativeVision: currentNativeVisionProfile != nil) == nil,
               kvBitsOverride == nil,
               PagedKVAttachGate.recognizedModelFamilies.contains(modelCapabilities.modelFamily),
               PagedKVAttachGate.supportsCacheClass(
@@ -2320,6 +2321,21 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     private static let pagedKVUnavailableCacheClass = "unavailable"
+
+    /// #2016: a native-vision (VLM) container has no text-only
+    /// `callAsFunction(_: MLXArray, cache:)` — Qwen2VL traps in MLXLMCommon — and
+    /// the paged probes, cache-class probe and batched engine all forward that
+    /// way. A vision runtime therefore always serves on the non-paged cache;
+    /// paged KV stays unattached for it with no operator config needed.
+    nonisolated static func pagedKVSkipReason(config: PagedKVConfig, nativeVision: Bool) -> String? {
+        guard config.effectiveEnabled, nativeVision else { return nil }
+        return "native_vision_profile"
+    }
+
+    private nonisolated static func logPagedKVSkip(_ reason: String?) {
+        guard let reason else { return }
+        FileHandle.standardError.write(Data("event=paged_kv action=skipped reason=\(reason)\n".utf8))
+    }
 
     private static func pagedKVRuntimeCacheClass(
         container: ModelContainer?,
@@ -2773,9 +2789,20 @@ actor ModelRuntime: ModelRuntimeServing {
         self.switchMaxBatchByTarget = switchMaxBatchByTarget
         self.switchContextProvenanceModelIDs = Set(switchContextProvenanceModelIDs.map { $0.lowercased() })
         self.configuredMaxContextTokens = maxContextTokensOverride
+        // #2016: a catalog-bound provider serves the vision model under its
+        // rate-card key; the catalog model id selects the profile only with the
+        // verified catalog artifact binding.
+        let verifiedCatalogModelID = verifiedModelArtifactSHA256 == nil ? nil : catalogModelIDAlias
+        let nativeVisionSelected = NativeVisionProfile.selectionModelID(
+            servedModelID: modelID, configuredModelID: modelID, verifiedCatalogModelID: verifiedCatalogModelID
+        ) != nil
         self.loader = { targetModelID in
             let (container, directory) = try await Self.loadLocalContainer(
-                from: targetModelID, nativeVision: NativeVisionProfile.supports(modelID: targetModelID))
+                from: targetModelID,
+                nativeVision: NativeVisionProfile.selectionModelID(
+                    servedModelID: targetModelID, configuredModelID: modelID,
+                    verifiedCatalogModelID: verifiedCatalogModelID
+                ) != nil)
             let modelHash = try? ModelArtifactVerifier.canonicalArtifactHash(directory: directory)
             return (container, targetModelID, modelHash)
         }
@@ -2804,7 +2831,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let candidateNativeMTPLoad: NativeMTPRuntimeLoadResult?
         let candidateNativeMTPDisabledReason: NativeMTPStatusReason
         if normalizedDraftModelID == nil,
-           !NativeVisionProfile.supports(modelID: modelID),
+           !nativeVisionSelected,
            let verifiedModelArtifactSHA256,
            self.nativeMTPMode == .auto {
             if let targetDirectory = try? Self.localModelDirectory(for: targetLoadPath) {
@@ -2854,11 +2881,14 @@ actor ModelRuntime: ModelRuntimeServing {
         } else {
             let loaded = try await Self.loadLocalContainer(
                 from: targetLoadPath,
-                nativeVision: NativeVisionProfile.supports(modelID: modelID)
+                nativeVision: nativeVisionSelected
             )
             container = loaded.0
             directory = loaded.1
-            runtimeCacheClass = self.pagedKVConfig.effectiveEnabled
+            let pagedKVSkipReason = Self.pagedKVSkipReason(
+                config: self.pagedKVConfig, nativeVision: nativeVisionSelected)
+            Self.logPagedKVSkip(pagedKVSkipReason)
+            runtimeCacheClass = self.pagedKVConfig.effectiveEnabled && pagedKVSkipReason == nil
                 ? await Self.pagedKVRuntimeCacheClass(
                     container: container,
                     maxContextTokens: self.maxContextTokens,
@@ -2888,7 +2918,9 @@ actor ModelRuntime: ModelRuntimeServing {
         self.currentTokenizerConfigSHA256 = tokenizerHashes.config
         self.currentChatTemplateSHA256 = tokenizerHashes.template
         self.currentNativeVisionProfile = try NativeVisionProfile.load(
-            modelID: modelID,
+            modelID: NativeVisionProfile.selectionModelID(
+                servedModelID: modelID, configuredModelID: modelID, verifiedCatalogModelID: verifiedCatalogModelID
+            ),
             directory: directory,
             artifactSHA256: self.currentModelHash
         )
@@ -4089,9 +4121,10 @@ actor ModelRuntime: ModelRuntimeServing {
                     guard let targetAuthority else {
                         throw ModelRuntimeLoadError(target: "signed catalog identity unavailable for \(targetModelID)")
                     }
+                    let visionModelID = self.nativeVisionSelectionModelID(for: targetModelID)
                     let loaded = try await Self.loadLocalContainer(
                         from: targetAuthority.modelArgument,
-                        nativeVision: NativeVisionProfile.supports(modelID: targetModelID)
+                        nativeVision: visionModelID != nil
                     )
                     container = loaded.0
                     modelID = targetModelID
@@ -4106,7 +4139,7 @@ actor ModelRuntime: ModelRuntimeServing {
                     tokenizerConfigSHA256 = swapTokenizerHashes.config
                     chatTemplateSHA256 = swapTokenizerHashes.template
                     nativeVisionProfile = try NativeVisionProfile.load(
-                        modelID: modelID, directory: loaded.1, artifactSHA256: modelHash)
+                        modelID: visionModelID, directory: loaded.1, artifactSHA256: modelHash)
                     modelCapabilities = Self.pagedKVModelCapabilities(modelID: modelID, directory: loaded.1)
                     if let configuredDraftModelID {
                         do {
@@ -5577,7 +5610,10 @@ actor ModelRuntime: ModelRuntimeServing {
         currentTokenizerConfigSHA256 = tokenizerConfigSHA256
         currentChatTemplateSHA256 = chatTemplateSHA256
         currentNativeVisionProfile = nativeVisionProfile
-        let runtimeCacheClass = pagedKVConfig.effectiveEnabled
+        let pagedKVSkipReason = Self.pagedKVSkipReason(
+            config: pagedKVConfig, nativeVision: nativeVisionProfile != nil)
+        Self.logPagedKVSkip(pagedKVSkipReason)
+        let runtimeCacheClass = pagedKVConfig.effectiveEnabled && pagedKVSkipReason == nil
             ? await Self.pagedKVRuntimeCacheClass(
                 container: container,
                 maxContextTokens: maxContextTokens,
@@ -5709,6 +5745,15 @@ actor ModelRuntime: ModelRuntimeServing {
         signal(SwapSignal(targetModelID: target, outcome: .failed(reason: reason)))
         state = .ready
         targetModelID = nil
+    }
+
+    /// #2016: `NativeVisionProfile.selectionModelID` for a load target. The
+    /// catalog id counts only with the verified catalog artifact binding.
+    private nonisolated func nativeVisionSelectionModelID(for targetModelID: String?) -> String? {
+        NativeVisionProfile.selectionModelID(
+            servedModelID: targetModelID, configuredModelID: modelID,
+            verifiedCatalogModelID: verifiedCatalogArtifactSHA256 == nil ? nil : catalogModelIDAlias
+        )
     }
 
     private func isConfiguredCatalogModel(_ targetModelID: String) -> Bool {
@@ -7304,7 +7349,9 @@ actor ModelRuntime: ModelRuntimeServing {
             weightsManifestSHA256: currentWeightsManifestSHA256,
             tokenizerConfigSHA256: currentTokenizerConfigSHA256,
             chatTemplateSHA256: currentChatTemplateSHA256,
-            nativeVisionProfile: nil,
+            // Same container and artifact bytes: a VLM keeps its profile so the
+            // paged-KV skip (#2016) still applies to it.
+            nativeVisionProfile: currentNativeVisionProfile,
             draftModelID: nil,
             draftContainer: nil,
             draftFailureReason: nil,

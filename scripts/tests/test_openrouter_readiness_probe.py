@@ -199,9 +199,9 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
         got = probe.check_models_document(valid_doc(), "mlx-community/Llama-3.2-3B-Instruct-4bit")
         self.assertEqual(got["rows"], 1)
         self.assertEqual(got["ids"], ["mlx-community/Llama-3.2-3B-Instruct-4bit"])
-        self.assertEqual(got["catalog_paid_rows"], 17)
+        self.assertEqual(got["catalog_paid_rows"], 18)
         self.assertEqual(got["catalog_listed_ids"], ["mlx-community/Llama-3.2-3B-Instruct-4bit"])
-        self.assertEqual(len(got["catalog_unlisted_ids"]), 16)
+        self.assertEqual(len(got["catalog_unlisted_ids"]), 17)
 
     def test_expected_openrouter_slugs_cover_current_catalog(self):
         catalog = json.loads(probe.DEFAULT_CATALOG_PATH.read_text())
@@ -213,7 +213,7 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
             for row in catalog["rows"].values()
             if row.get("runtime_status") == "recommendable"
         }
-        self.assertEqual(len(recommendable), 17)
+        self.assertEqual(len(recommendable), 18)
         self.assertEqual(set(probe.catalog_paid_model_ids()), recommendable)
         gateway = (ROOT / "phase5-gateway/internal/router/openrouter_models.go").read_text()
         for model_id in probe.catalog_paid_model_ids():
@@ -223,9 +223,6 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
                 self.assertNotIn(f'"{model_id}"', gateway, msg=f"{model_id} is not in the OpenRouter listing set")
         self.assertTrue(set(probe.OPENROUTER_LISTED_MODEL_IDS) <= recommendable)
         for catalog_key, row in catalog["rows"].items():
-            # Listed rows carry no price and are never offered for OpenRouter.
-            if row.get("runtime_status") != "recommendable":
-                continue
             self.assertEqual(probe.CATALOG_KEY_TO_MODEL_ID[catalog_key], row["model_id"])
             self.assertIn(row["model_id"], probe.EXPECTED_OPENROUTER_SLUGS)
             slug = probe.EXPECTED_OPENROUTER_SLUGS[row["model_id"]]
@@ -266,9 +263,9 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
         with mock.patch.object(probe, "chat_once", side_effect=fake_chat):
             got = probe.check_catalog_chat("https://api.example.test", "token", 16)
         self.assertTrue(got["ok"])
-        self.assertEqual(got["catalog_paid_rows"], 17)
+        self.assertEqual(got["catalog_paid_rows"], 18)
         self.assertEqual(got["passed"], ["mlx-community/Llama-3.2-3B-Instruct-4bit"])
-        self.assertEqual(len(got["not_served"]), 16)
+        self.assertEqual(len(got["not_served"]), 17)
         self.assertEqual(got["failed"], [])
 
     def test_catalog_chat_fails_closed_on_non_capacity_errors(self):

@@ -1,6 +1,6 @@
 {
-  "autotune_candidates_sha256": "217cc6fdffa152bc6865698183644a0d630dbe1eef3166584efd20402cd5c216",
-  "generated_at": "2026-10-17T01:10:00Z",
+  "autotune_candidates_sha256": "1c2690021a88f0c0f97e8d3ca859c5afd397c2ee4c07dc30b389e876334d7f1d",
+  "generated_at": "2026-10-17T02:24:00Z",
   "models": [
     {
       "catalog_key": "google-gemma-4-26b-a4b-it",
@@ -130,6 +130,6 @@
     }
   ],
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-10-17-qwen2vl-listed-v1",
+  "release_id": "published-2026-10-17-qwen2vl-recommendable-v1",
   "schema_version": "macprovider.tier2-identity-binding.v1"
 }

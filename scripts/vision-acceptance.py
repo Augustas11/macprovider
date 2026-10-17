@@ -148,13 +148,26 @@ def verify_candidate(args):
             "text_only_process_and_isolation_verified": True}
 
 
-def png(rgb, width=96, height=96, declared_size=None):
+def png(rgb, width=96, height=96, declared_size=None, scanlines=None):
     def chunk(kind, data):
         return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
     w, h = declared_size or (width, height)
-    scanlines = (b"\0" + bytes(rgb) * width) * height
+    if scanlines is None:
+        scanlines = (b"\0" + bytes(rgb) * width) * height
     return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
-            + chunk(b"IDAT", zlib.compress(scanlines)) + chunk(b"IEND", b""))
+            + chunk(b"IDAT", zlib.compress(scanlines, 9)) + chunk(b"IEND", b""))
+
+
+def circle_png(rgb, size=224, radius=80):
+    """Filled circle of rgb on white. Small VLMs read this reliably; they do not
+    read uniform solid-colour images."""
+    centre = (size - 1) / 2
+    white, fill = b"\xff\xff\xff", bytes(rgb)
+    rows = []
+    for y in range(size):
+        rows.append(b"\0" + b"".join(
+            fill if (x - centre) ** 2 + (y - centre) ** 2 <= radius ** 2 else white for x in range(size)))
+    return png(rgb, size, size, scanlines=b"".join(rows))
 
 
 def image(data=None, url=None):
@@ -284,7 +297,7 @@ def check_rejection(path, status, data, kind="media"):
 
 def run_suite(origin, token, unsupported_model, gateway=False):
     results = []
-    red, blue = image(png((255, 0, 0))), image(png((0, 0, 255)))
+    red, blue = image(circle_png((255, 0, 0))), image(circle_png((0, 0, 255)))
     question = text("What is the dominant color of this image? Answer with only the color name.")
 
     def success(name, parts, labels=None, streaming=False):
@@ -310,9 +323,11 @@ def run_suite(origin, token, unsupported_model, gateway=False):
                                   request([image_part], streaming, system=IMAGE_ONLY_SYSTEM), token, stream=streaming))
             check_labels(content, [label])
             results.append({"case": "image_only_" + label + "_" + suffix, "passed": True})
-        order = text("Name the dominant color of each image in order. Output only two color names.")
-        success("multiple_red_blue_" + suffix, [order, red, text("Next image:"), blue], ["red", "blue"], streaming)
-        success("multiple_blue_red_" + suffix, [order, blue, text("Next image:"), red], ["blue", "red"], streaming)
+        order = text("Name the color of image 1, then image 2. Output two color names.")
+        success("multiple_red_blue_" + suffix,
+                [text("Image 1:"), red, text("Image 2:"), blue, order], ["red", "blue"], streaming)
+        success("multiple_blue_red_" + suffix,
+                [text("Image 1:"), blue, text("Image 2:"), red, order], ["blue", "red"], streaming)
     success("text_only", "Reply with hello.")
     if gateway:
         # The coordinator knows the text-only model and must refuse its media
@@ -348,7 +363,7 @@ def run_suite(origin, token, unsupported_model, gateway=False):
 def run_text_only_suite(origin, token, model):
     """A provider with only the text-only model loaded refuses mixed and
     image-only input before inference, then still serves text."""
-    red = image(png((255, 0, 0)))
+    red = image(circle_png((255, 0, 0)))
     question = text("What is the dominant color of this image? Answer with only the color name.")
     results = []
     for name, parts in (("text_only_provider_mixed", [question, red]), ("text_only_provider_image_only", [red])):

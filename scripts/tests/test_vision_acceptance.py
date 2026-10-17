@@ -55,8 +55,8 @@ class VisionAcceptanceTests(unittest.TestCase):
             vision.check_rejection("/v1/chat/completions", 404, {"error": {"code": "model_not_found"}})
 
     def test_suites_send_the_right_model_names(self):
-        red = vision.image(vision.png((255, 0, 0)))["image_url"]["url"]
-        blue = vision.image(vision.png((0, 0, 255)))["image_url"]["url"]
+        red = vision.image(vision.circle_png((255, 0, 0)))["image_url"]["url"]
+        blue = vision.image(vision.circle_png((0, 0, 255)))["image_url"]["url"]
         sent = []
 
         def fake_post(origin, path, payload, token, stream=False, disconnect=False):
@@ -166,6 +166,21 @@ class VisionAcceptanceTests(unittest.TestCase):
                     pixels = zlib.decompress(body)
                 offset += length + 12
             self.assertEqual(pixels, (b"\0" + bytes(color) * 2) * 2)
+
+    def test_circle_fixture_is_in_limits_and_small(self):
+        red, blue = (vision.circle_png(c) for c in ((255, 0, 0), (0, 0, 255)))
+        for data, color in ((red, (255, 0, 0)), (blue, (0, 0, 255))):
+            self.assertEqual(struct.unpack(">II", data[16:24]), (224, 224))
+            self.assertLess(len(data), 1024 * 1024)
+            pixels = zlib.decompress(data[data.index(b"IDAT") + 4:data.index(b"IEND") - 8])
+            row = 1 + 224 * 3
+            at = lambda x, y: pixels[y * row + 1 + x * 3:y * row + 4 + x * 3]
+            self.assertEqual(at(112, 112), bytes(color))
+            self.assertEqual(at(0, 0), b"\xff\xff\xff")
+            self.assertEqual(at(112, 112 + 81), b"\xff\xff\xff")
+        self.assertLessEqual(2 * 224 * 224, 4194304)
+        body = json.dumps(vision.request([vision.image(red), vision.image(blue)]))
+        self.assertLess(len(body), 1024 * 1024 // 4)
 
     def test_joined_candidate_requires_exact_literal_loopback_and_isolated_credentials(self):
         argv = ["candidate", "serve", "--isolate-lifecycle", "--credential-store", "protected_file",

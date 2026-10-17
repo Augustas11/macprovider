@@ -71,9 +71,10 @@ or join an unreleased candidate to the live coordinator.
      --output "$PRIVATE_EVIDENCE_DIRECTORY/native-vision-http.json"
    ```
 
-   The harness generates tiny red/blue PNGs in memory, uses the same question
-   for both, and checks color-dependent answers in streaming and non-streaming
-   modes. It also checks image-only user turns (a system turn carries the instruction), reversed multiple-image ordering,
+   The harness generates 224x224 PNGs in memory (a filled red or blue circle on a
+   white background; small VLMs do not read uniform solid-colour images
+   reliably), uses the same question for both, and checks color-dependent answers in streaming and non-streaming
+   modes. It also checks image-only user turns (a system turn carries the instruction), reversed two-image ordering (`Image 1:`/`Image 2:` labels, exact ordered colour names),
    mixed content, malformed/excessive media, endpoint rejection, disconnect
    and repeated-request recovery. On the candidate it sends an explicitly
    unknown model name (`unloaded_model_name`), which passes only on a

@@ -2345,8 +2345,19 @@ class HermeticRelease:
             source_path.write_text(json.dumps(source, indent=2, sort_keys=True) + "\n")
             binding_path = self.catalog / "tier2-identity-binding.json"
             binding = json.loads(binding_path.read_text())
+            admitted_model_ids = {m["model_id"] for m in binding["models"] if m["catalog_key"] in admitted}
             binding["models"] = [m for m in binding["models"] if m["catalog_key"] not in admitted]
             binding_path.write_text(json.dumps(binding, indent=2, sort_keys=True) + "\n")
+            # A promotion to recommendable also carried a demand row, a Tier-2
+            # catalog entry, a rate row (rate-card source, published rate card,
+            # coordinator rewards row) and the acknowledged move onto that row.
+            demand_path = self.catalog / "demand-rank.json"
+            demand = json.loads(demand_path.read_text())
+            for key in admitted:
+                demand["rows"].pop(key, None)
+            demand_path.write_bytes(catalog_release.canonical_bytes(demand))
+            self.strip_tier2_models(admitted_model_ids)
+            self.strip_promoted_rate_rows(admitted)
         self.bump(release_id, generated_at)
 
         def restamp(name: str, **fields) -> bytes:
@@ -2389,6 +2400,51 @@ class HermeticRelease:
             "release_id": release_id,
             "schema_version": "macprovider.autotune-release.v1",
         }, indent=2, sort_keys=True) + "\n")
+
+    def strip_tier2_models(self, model_ids: set[str]) -> None:
+        """Drop Tier-2 entries added by an intake promotion. The envelope
+        signature is not re-derived: `verify_tier2_signature` is stubbed here."""
+        path = self.catalog / "tier2-catalog.json"
+        tier2 = json.loads(path.read_text())
+        tier2["models"] = [m for m in tier2["models"] if m["model_id"] not in model_ids]
+        path.write_text(json.dumps(tier2, indent=2) + "\n")
+
+    def strip_promoted_rate_rows(self, admitted: set[str]) -> None:
+        """Drop the rate rows a promotion introduced, found through the
+        acknowledged pricing move that let the promoted model resolve onto them."""
+        acks_path = self.catalog / "acknowledged-pricing-moves.json"
+        if not acks_path.exists():
+            return
+        acks = json.loads(acks_path.read_text())
+        promoted = {key.lower() for key in admitted}
+        rows = {m["to_row"] for m in acks["moves"] if m["model"].lower() in promoted}
+        if not rows:
+            return
+        acks["moves"] = [m for m in acks["moves"] if m["to_row"] not in rows]
+        acks_path.write_text(json.dumps(acks, indent=2) + "\n")
+        source_path = self.catalog / "rate-card-source.json"
+        source = json.loads(source_path.read_text())
+        for row in rows:
+            source["rows"].pop(row, None)
+        source_path.write_text(json.dumps(source, indent=2, sort_keys=True) + "\n")
+        card_path = self.catalog / "rate-card.json"
+        card = json.loads(card_path.read_text())
+        for row in rows:
+            card["rows"].pop(row, None)
+        card["version"] = catalog_release.rate_card_projection_hash(card)
+        card_path.write_bytes(catalog_release.canonical_bytes(card))
+        yaml_path = self.root / "coordinator.yaml"
+        kept, skipping = [], False
+        for line in yaml_path.read_text().splitlines(keepends=True):
+            name = line.strip().split(":", 1)[0]
+            if line.startswith("    ") and not line.startswith("     ") and name in rows:
+                skipping = True
+                continue
+            if skipping and line.startswith("      "):
+                continue
+            skipping = False
+            kept.append(line)
+        yaml_path.write_text("".join(kept))
 
     # --- module patching -----------------------------------------------------
 

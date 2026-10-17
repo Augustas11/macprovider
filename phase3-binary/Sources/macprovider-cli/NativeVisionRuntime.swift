@@ -36,6 +36,21 @@ struct NativeVisionProfile: Equatable, Sendable {
         modelID?.caseInsensitiveCompare(Self.modelID) == .orderedSame
     }
 
+    /// The identity that selects this profile for `servedModelID`: the served id
+    /// itself when it is the profile's HF id, or — only for the configured served
+    /// model (a catalog-bound provider serves under its rate-card key) — the
+    /// catalog model id that the verified catalog binding carries. Selection only
+    /// chooses the VLM loader; `load`'s per-file pins remain the gate, so a
+    /// lookalike id can never enable vision on unpinned bytes.
+    static func selectionModelID(
+        servedModelID: String?, configuredModelID: String?, verifiedCatalogModelID: String?
+    ) -> String? {
+        if supports(modelID: servedModelID) { return servedModelID }
+        guard let servedModelID, servedModelID == configuredModelID,
+              supports(modelID: verifiedCatalogModelID) else { return nil }
+        return verifiedCatalogModelID
+    }
+
     static func load(modelID: String?, directory: URL, artifactSHA256: String?) throws -> Self? {
         guard supports(modelID: modelID) else { return nil }
         // Pin every processor/tokenizer/weight input, including fallback tokenizer

@@ -86,6 +86,8 @@ CATALOG_OPENROUTER_ROWS = (
     ("qwen/qwen3.6-35b-a3b", "mlx-community/Qwen3.6-35B-A3B-4bit", "qwen/qwen3.6-35b-a3b", False),
     ("qwen/qwen3.8-27b", "mlx-community/Qwen3.8-27B-4bit", "qwen/qwen3.8-27b", False),
     ("z-ai/glm-4.5-air", "mlx-community/GLM-4.5-Air-4bit", "z-ai/glm-4.5-air", False),
+    # #2016 native image input; priced but not in OPENROUTER_LISTED_MODEL_IDS.
+    ("mlx-community/qwen2-vl-2b-instruct-4bit", "mlx-community/Qwen2-VL-2B-Instruct-4bit", "qwen/qwen2-vl-2b-instruct", False),
 )
 # Rows the gateway publishes on /v1/openrouter/models (mirrors
 # openRouterListings in phase5-gateway/internal/router/openrouter_models.go,

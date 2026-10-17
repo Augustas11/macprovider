@@ -294,6 +294,8 @@ expected_history = {
     "published-2026-10-09-native-mtp-v224-v2",
     # Superseded by the listed qwen2-vl-2b-instruct-4bit intake row.
     "published-2026-10-10-native-mtp-v238",
+    # Superseded by the qwen2-vl-2b-instruct-4bit promotion to recommendable.
+    "published-2026-10-17-qwen2vl-listed-v1",
     current_release_id,
 }
 if set(ledger["releases"]) != expected_history:

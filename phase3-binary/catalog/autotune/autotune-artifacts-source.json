@@ -117,7 +117,8 @@
           "verified_at": "2026-10-17"
         }
       },
-      "primary_artifact_id": "mlx-4bit"
+      "primary_artifact_id": "mlx-4bit",
+      "rate_class": "class-3b"
     },
     "nvidia/nemotron-3-nano-30b-a3b": {
       "artifacts": {
