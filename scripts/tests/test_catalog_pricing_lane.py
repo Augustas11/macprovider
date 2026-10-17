@@ -129,6 +129,22 @@ class SpliceBoundaryTests(unittest.TestCase):
                 self.assertEqual(out, text[:start] + MINI_BLOCK + text[end:])
                 self.assertIn(seq, out)
 
+    def test_production_shaped_column0_providers_round_trip(self) -> None:
+        # Live-config shape: rewards mid-file, a column-0 providers: sequence
+        # after it, then another top-level key.
+        text = (
+            b"admission:\n  provisional_pool_max: 4\n"
+            + MINI
+            + b"providers:\n- provider_id: a\n  endpoint_url: x\n- provider_id: b\n  endpoint_url: y\n"
+            + b"coordinator_advertised_version: v1\n"
+        )
+        block = cr.extract_coordinator_rate_card_block(text, "prod-shaped")
+        self.assertEqual(cr.splice_coordinator_rate_card(text, block), text)
+        out = cr.splice_coordinator_rate_card(text, MINI_BLOCK)
+        _, _, rows = cr.parse_coordinator_rewards(out.decode())
+        self.assertEqual(rows["default"]["completion_credits_per_mtok"], 2)
+        self.assertTrue(out.endswith(b"- provider_id: b\n  endpoint_url: y\ncoordinator_advertised_version: v1\n"))
+
     def test_refusal_matrix(self) -> None:
         cases = {
             "tab": MINI.replace(b"top: 1", b"top:\t1"),
