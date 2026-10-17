@@ -17,8 +17,16 @@ final class PrivacyKVDiskBypassTests: XCTestCase {
         XCTAssertFalse(ModelRuntime.allowsConversationCacheLease(provenance: .privacy, nativeAllows: true))
         XCTAssertFalse(KVDiskCacheGate.persists(conversationKey: key, provenance: .privacy))
         XCTAssertTrue(PrivacyRuntimeHardening.privacyPathBypassesKVDiskTier())
-        for provenance in [KVIngestProvenance.directHTTP, .relay, .tier2, .unknown] {
-            XCTAssertTrue(ModelRuntime.coldTierAdmits(provenance: provenance), "\(provenance)")
+        // Every reusable-cache sink follows the one provenance policy.
+        for provenance in KVIngestProvenance.allCases {
+            let allowed = provenance.mayUseReusableKVCache
+            XCTAssertEqual(allowed, provenance != .privacy, "\(provenance)")
+            XCTAssertEqual(ModelRuntime.coldTierAdmits(provenance: provenance), allowed, "\(provenance)")
+            XCTAssertEqual(
+                ModelRuntime.allowsConversationCacheLease(provenance: provenance, nativeAllows: true), allowed, "\(provenance)")
+            if !allowed {
+                XCTAssertFalse(KVDiskCacheGate.persists(conversationKey: key, provenance: provenance), "\(provenance)")
+            }
         }
     }
 
@@ -78,8 +86,10 @@ final class PrivacyKVDiskBypassTests: XCTestCase {
             .appendingPathComponent("privacy-kv-store-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let sink = KVRecordingEventSink()
-        let store = try await seededStore(root: root, sink: sink)
+        let keychain = KVInMemoryKeychain()
+        var store = try await seededStore(root: root, keychain: keychain, sink: sink)
         let before = await store.inspect()
+        var counterBaseline = before.counters
         XCTAssertEqual(before.entryCount, 1)
         sink.reset()
 
@@ -90,7 +100,15 @@ final class PrivacyKVDiskBypassTests: XCTestCase {
         let cold = coldContext(privacy)
         XCTAssertNil(cold)
 
-        for _ in 0 ..< 2 {  // first process, then a restart over the same store
+        for run in 0 ..< 2 {  // first process, then a restart: a new store over the same root and keychain
+            if run == 1 {
+                XCTAssertEqual(sink.events.map(\.code), [], "no disk-tier event before the restart")
+                await store.deactivate()
+                store = KVDiskCacheStore(config: Self.storeConfig(root: root), keychain: keychain, sink: sink)
+                try await store.activate()
+                sink.reset()
+                counterBaseline = await store.inspect().counters  // counters are per process
+            }
             let adapter = KVConversationColdTierAdapter(store: store, namespaceID: "ns-privacy", eligibilityTTLSeconds: 900)
             adapter.seedTemplate(servedModelID: "served-a", template: KVConversationColdTierAdapter.seedGeometryTemplate(
                 fromPayloads: [KVLayerPayload(
@@ -104,11 +122,11 @@ final class PrivacyKVDiskBypassTests: XCTestCase {
             await cache.drainColdWrites(timeoutSeconds: 1)
         }
 
-        XCTAssertEqual(sink.events.map(\.code), [], "no disk-tier event for privacy work")
+        XCTAssertEqual(sink.events.map(\.code), [], "no disk-tier event after the restart")
         let after = await store.inspect()
         XCTAssertEqual(after.entryCount, before.entryCount)
         XCTAssertEqual(after.bytesUsed, before.bytesUsed)
-        XCTAssertEqual(after.counters, before.counters)
+        XCTAssertEqual(after.counters, counterBaseline)
         await store.deactivate()
     }
 
@@ -162,14 +180,20 @@ final class PrivacyKVDiskBypassTests: XCTestCase {
     }
 
     /// One committed `KVCacheSimple` entry for `key`, written through the real store.
-    private func seededStore(root: URL, sink: KVRecordingEventSink) async throws -> KVDiskCacheStore {
+    private static func storeConfig(root: URL) -> KVDiskCacheStoreConfig {
         var config = KVDiskCacheStoreConfig(
             root: root, namespaceID: "ns-privacy",
             maxBytes: 1 << 30, maxEntries: 16, maxEntryBytes: 1 << 28,
             retentionSeconds: 3600, stagingMaxBytes: 1 << 28, writeStagingMaxBytes: 1 << 28,
             minFreeBytes: 1 << 20, promotionMaxSeconds: 5, eligibilityTTLSeconds: 900)
         config.freeSpaceOverride = 1 << 34
-        let store = KVDiskCacheStore(config: config, keychain: KVInMemoryKeychain(), sink: sink)
+        return config
+    }
+
+    private func seededStore(
+        root: URL, keychain: KVInMemoryKeychain, sink: KVRecordingEventSink
+    ) async throws -> KVDiskCacheStore {
+        let store = KVDiskCacheStore(config: Self.storeConfig(root: root), keychain: keychain, sink: sink)
         try await store.activate()
         let seq = 40
         let byteCount = 2 * seq * 4 * KVCodecDType.f32.byteSize

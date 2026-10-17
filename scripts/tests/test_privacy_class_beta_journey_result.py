@@ -92,6 +92,11 @@ def v2_bundle(manifest_name: str, summary: dict, sources: dict[str, bytes | dict
     return contract.Bundle("fixture", files, b"")
 
 
+def kv_bypass_capture() -> str:
+    """Snapshots bracketing the committed bundle's step-07/08 canary rows."""
+    return "before_unix=1791260000\nafter_unix=1791270000\nnamespace_id=ns\n"
+
+
 class PrivacyClassBetaSignatureRedactionTests(unittest.TestCase):
     def test_bounded_public_signatures_allow_hostname_shaped_random_bytes(self) -> None:
         for path in (
@@ -443,7 +448,8 @@ class PrivacyClassBetaEvidenceTests(unittest.TestCase):
         bypass = self.bundle_file("step-04-core-dump-and-env-refused/kv-disk-tier-bypass")
         bypass.mkdir()
         (bypass / "stderr.txt").write_text("event=kv_disk_cache action=activated\n", encoding="utf-8")
-        status = {"status": "ok", "enabled": True, "entry_count": 2, "bytes_used": 4096, "counters": {"disk_hit": 1}}
+        (bypass / "capture.txt").write_text(kv_bypass_capture(), encoding="utf-8")
+        status = {"status": "ok", "enabled": True, "namespace_id": "ns", "entry_count": 2, "bytes_used": 4096, "counters": {"disk_hit": 1}}
         (bypass / "status-before.json").write_bytes(json_bytes(status))
         (bypass / "status-after.json").write_bytes(json_bytes(status))
         remanifest(self.root / BUNDLE)
@@ -454,6 +460,11 @@ class PrivacyClassBetaEvidenceTests(unittest.TestCase):
         changed = contract.Checks(contract.load_bundle(self.root, BUNDLE), contract.PROFILE_V2).run("config_refusals")
         self.assertTrue(any("must not change kv-cache counters" in error for error in changed), changed)
         (bypass / "status-after.json").write_bytes(json_bytes(status))
+        (bypass / "capture.txt").write_text("before_unix=1791270000\nafter_unix=1791270001\nnamespace_id=ns\n", encoding="utf-8")
+        remanifest(self.root / BUNDLE)
+        late = contract.Checks(contract.load_bundle(self.root, BUNDLE), contract.PROFILE_V2).run("config_refusals")
+        self.assertTrue(any("must bracket" in error for error in late), late)
+        (bypass / "capture.txt").write_text(kv_bypass_capture(), encoding="utf-8")
         (bypass / "stderr.txt").write_text("FATAL privacy_class_hardening_failed reasons=x\n", encoding="utf-8")
         remanifest(self.root / BUNDLE)
         refused = contract.Checks(contract.load_bundle(self.root, BUNDLE), contract.PROFILE_V2).run("config_refusals")
@@ -463,7 +474,8 @@ class PrivacyClassBetaEvidenceTests(unittest.TestCase):
         bundle = contract.load_bundle(self.root, BUNDLE)
         v1_errors = contract.Checks(bundle, contract.PROFILE_V1).run("config_refusals")
         self.assertTrue(any("kv-disk-tier" in error or "bundle file is missing" in error for error in v1_errors), v1_errors)
-        self.assertNotIn("KV disk tier", contract.step_assertion(contract.PROFILE_V2, "step-04-core-dump-and-env-refused"))
+        self.assertIn("enabled KV disk tier untouched by the privacy canaries", contract.step_assertion(contract.PROFILE_V2, "step-04-core-dump-and-env-refused"))
+        self.assertNotIn("KV disk tier, loopback", contract.step_assertion(contract.PROFILE_V2, "step-04-core-dump-and-env-refused"))
         self.assertEqual(
             contract.STEP_ASSERTIONS["step-04-core-dump-and-env-refused"],
             contract.step_assertion(contract.PROFILE_V1, "step-04-core-dump-and-env-refused"),
@@ -601,9 +613,10 @@ class PrivacyClassBetaV2RawEvidenceTests(unittest.TestCase):
 
     def kv_disk_bypass_fixture(self) -> contract.Bundle:
         base = "step-04-core-dump-and-env-refused/kv-disk-tier-bypass"
-        status = {"status": "ok", "enabled": True, "entry_count": 0, "bytes_used": 0, "counters": {}}
+        status = {"status": "ok", "enabled": True, "namespace_id": "ns", "entry_count": 1, "bytes_used": 64, "counters": {}}
         return contract.Bundle("fixture", {
             f"{base}/stderr.txt": b"event=kv_disk_cache action=activated\n",
+            f"{base}/capture.txt": kv_bypass_capture().encode(),
             f"{base}/status-before.json": json_bytes(status),
             f"{base}/status-after.json": json_bytes(status),
         }, b"")

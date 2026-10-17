@@ -42,7 +42,11 @@ provider's `stderr.txt` showing `event=kv_disk_cache action=activated` and no
 hardening or eligibility refusal, plus `status-before.json` and
 `status-after.json` from `kv-cache status` taken before step 07 and after
 step 08. Both report `status: ok` and `enabled: true`, and `entry_count`,
-`bytes_used` and `counters` are unchanged by the privacy canaries.
+`bytes_used` and `counters` are unchanged by the privacy canaries. Before the
+first snapshot an ordinary request MUST persist one positive-control entry, so
+`entry_count` is at least 1. `capture.txt` records `before_unix`,
+`after_unix` and `namespace_id`: the two times bracket the step-07 and step-08
+results rows, and the namespace matches both snapshots.
 
 17. `step-17-auto-mode-eligibility` proves automatic eligible, automatic
     ineligible, automatic hardening fallback, explicit opt-out, and explicit

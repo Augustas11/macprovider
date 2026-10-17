@@ -296,7 +296,7 @@ PROFILES_BY_SCHEMA = {profile.schema: profile for profile in (PROFILE_V1, PROFIL
 
 # SPEC-049 v0.6.0: v2 releases bypass an enabled KV disk tier per request.
 STEP_ASSERTIONS_V2 = {
-    "step-04-core-dump-and-env-refused": "core dumps off, diagnostic env, loopback runtime, and relay-blind off refused before network, DYLD_* inert",
+    "step-04-core-dump-and-env-refused": "core dumps off, diagnostic env, loopback runtime, and relay-blind off refused before network, DYLD_* inert; enabled KV disk tier untouched by the privacy canaries",
 }
 
 
@@ -1714,6 +1714,15 @@ class Checks:
             expect(status.get("status") == "ok" and status.get("enabled") is True, errors, "kv-cache status must be ok and enabled")
         for field in ("entry_count", "bytes_used", "counters"):
             expect(field in before and before.get(field) == after.get(field), errors, f"privacy canaries must not change kv-cache {field}")
+        # Bind the snapshots to this provider's tier and to the canary window,
+        # and prove the tier was live with an ordinary positive-control entry.
+        capture = self.b.fields(f"{base}/capture.txt")
+        namespace = capture.get("namespace_id", "")
+        expect(bool(namespace) and before.get("namespace_id") == namespace == after.get("namespace_id"), errors, "kv-cache snapshots must name the provider's namespace")
+        canaries_start, _ = self.window("step-07-canary-stream")
+        _, canaries_end = self.window("step-08-canary-nonstream")
+        expect(int(capture["before_unix"]) <= canaries_start and int(capture["after_unix"]) >= canaries_end, errors, "kv-cache snapshots must bracket the step-07 and step-08 canaries")
+        expect(isinstance(before.get("entry_count"), int) and before["entry_count"] >= 1, errors, "an ordinary positive-control entry must be persisted before the canaries")
 
     def p_config_refusals(self, errors: list[str]) -> None:
         base = "step-04-core-dump-and-env-refused"

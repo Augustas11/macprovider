@@ -16,7 +16,7 @@ Audit history: v0.1.0 is the initial default-off Beta contract. v0.2.0 replaces 
   "owner": "@Augustas11",
   "authority_domains": ["operator-constrained-privacy-class"],
   "supersedes": [],
-  "depends_on": ["SPEC-001", "SPEC-002", "SPEC-006", "SPEC-008", "SPEC-015", "SPEC-022", "SPEC-025", "SPEC-033", "SPEC-041", "SPEC-042"],
+  "depends_on": ["SPEC-001", "SPEC-002", "SPEC-006", "SPEC-008", "SPEC-015", "SPEC-022", "SPEC-025", "SPEC-033", "SPEC-037", "SPEC-041", "SPEC-042"],
   "implementation_status": "pending-reconciliation",
   "production_status": "not-deployed",
   "last_reconciled_commit": null,
@@ -27,7 +27,7 @@ Audit history: v0.1.0 is the initial default-off Beta contract. v0.2.0 replaces 
     "verdict": "DECISION_REQUIRED",
     "owner": "@Augustas11",
     "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-    "rationale": "SPEC-049 defines the Beta operator-constrained privacy class. v0.2.0 adds automatic provider enrollment, release-derived code approval, and the operator-signed identity directory; the coordinator, gateway, and buyer client stay default-off and the provider enters the class only on an eligible signed host. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result for the v0.1 requirement set is committed (#1839, #1864), and the v0.1.4 one-time staged-canary exception is recorded (§8.1, Entry 249) and superseded for v0.2.0 code by §8.2. The CLI224 eligible-network activation is recorded in §8.3 and Entries 251 and 252: the class runs in production under §8.3 without expiry, and SPEC-049-R023 promotion is not required for operation. v0.5.0 adds the `code_bound_attested` label (SPEC-049-R033..SPEC-049-R035), granted only to a posture asserted by the App Attest key that SPEC-033 recorded for the provider; providers without App Attest keep `device_bound_self_attested_beta` unchanged. A full signed v0.2 journey, a real-hardware code-bound run, and SPEC-049-R023 remain pending, and every requirement stays pending. No conformance promotion is made by this draft."
+    "rationale": "SPEC-049 defines the Beta operator-constrained privacy class. v0.2.0 adds automatic provider enrollment, release-derived code approval, and the operator-signed identity directory; the coordinator, gateway, and buyer client stay default-off and the provider enters the class only on an eligible signed host. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result for the v0.1 requirement set is committed (#1839, #1864), and the v0.1.4 one-time staged-canary exception is recorded (§8.1, Entry 249) and superseded for v0.2.0 code by §8.2. The CLI224 eligible-network activation is recorded in §8.3 and Entries 251 and 252: the class runs in production under §8.3 without expiry, and SPEC-049-R023 promotion is not required for operation. v0.5.0 adds the `code_bound_attested` label (SPEC-049-R033..SPEC-049-R035), granted only to a posture asserted by the App Attest key that SPEC-033 recorded for the provider; providers without App Attest keep `device_bound_self_attested_beta` unchanged. v0.6.0 makes the SPEC-037 KV disk-tier exclusion per request: the tier may be on for ordinary traffic and privacy-class requests bypass it (SPEC-049-R010). A full signed v0.2 journey, a real-hardware code-bound run, and SPEC-049-R023 remain pending, and every requirement stays pending. No conformance promotion is made by this draft."
   }
 }
 ```

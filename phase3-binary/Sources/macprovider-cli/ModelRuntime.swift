@@ -6831,7 +6831,7 @@ actor ModelRuntime: ModelRuntimeServing {
     /// SPEC-049-R010. Privacy-class requests never begin a conversation-cache
     /// lease or lookup. A nil lease does not take the serial-route fence.
     static func allowsConversationCacheLease(provenance: KVIngestProvenance, nativeAllows: Bool) -> Bool {
-        nativeAllows && provenance != .privacy
+        nativeAllows && provenance.mayUseReusableKVCache
     }
 
     private static func nativeMTPCaptureEffectiveMaxOutputTokens(
@@ -9531,11 +9531,7 @@ actor ModelRuntime: ModelRuntimeServing {
     /// whatever key or grant it carries. This is checked before the SPEC-037
     /// gate; the gate and the conversation-cache lease refuse privacy as well.
     static func coldTierAdmits(provenance: KVIngestProvenance) -> Bool {
-        // Exhaustive so a new provenance must choose explicitly.
-        switch provenance {
-        case .privacy: return false
-        case .directHTTP, .relay, .tier2, .unknown: return true
-        }
+        provenance.mayUseReusableKVCache
     }
 
     static func coldContext(

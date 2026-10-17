@@ -313,11 +313,13 @@ enum PrivacyRuntimeHardening {
     /// on for ordinary traffic. Posture field `kv_disk_tier_disabled` reports
     /// this result, so a build that lost any barrier cannot attest it.
     static func privacyPathBypassesKVDiskTier() -> Bool {
-        !ModelRuntime.coldTierAdmits(provenance: .privacy)
-            && !ModelRuntime.allowsConversationCacheLease(provenance: .privacy, nativeAllows: true)
+        let privacy = KVIngestProvenance.privacy
+        return !privacy.mayUseReusableKVCache
+            && !ModelRuntime.coldTierAdmits(provenance: privacy)
+            && !ModelRuntime.allowsConversationCacheLease(provenance: privacy, nativeAllows: true)
             && !KVDiskCacheGate.persists(
                 conversationKey: KVDiskCacheGate.syntheticPrefix + "privacy-bypass-check",
-                provenance: .privacy)
+                provenance: privacy)
     }
 
     /// True only when P_TRACED and CS_DEBUGGED are both clear and readable.
