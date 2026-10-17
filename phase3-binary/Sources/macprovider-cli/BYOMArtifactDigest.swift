@@ -22,12 +22,14 @@ enum GGUFArtifactDigest {
     static func compute(handle: FileHandle, deadline: Date? = nil) throws -> String {
         var hasher = SHA256()
         var first = true
-        while true {
+        // One autorelease pool per chunk keeps a GGUF-sized digest from
+        // holding every read buffer until it returns.
+        while try autoreleasepool(invoking: {
             if Task.isCancelled || (deadline.map { Date() >= $0 } ?? false) {
                 throw BYOMArtifactDigestError.hashingBudgetExceeded
             }
             let chunk = try handle.read(upToCount: chunkBytes) ?? Data()
-            if chunk.isEmpty { break }
+            if chunk.isEmpty { return false }
             if first {
                 guard chunk.count >= magic.count, chunk.prefix(magic.count) == magic else {
                     throw BYOMArtifactDigestError.notGGUF
@@ -35,7 +37,8 @@ enum GGUFArtifactDigest {
                 first = false
             }
             hasher.update(data: chunk)
-        }
+            return true
+        }) {}
         guard !first else { throw BYOMArtifactDigestError.notGGUF }
         return Data(hasher.finalize()).map { String(format: "%02x", $0) }.joined()
     }

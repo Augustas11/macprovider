@@ -262,8 +262,12 @@ enum ModelArtifactImporter {
         defer { try? input.close() }
         let output = try FileHandle(forWritingTo: destination)
         defer { try? output.close() }
-        while let chunk = try input.read(upToCount: 4 * 1024 * 1024), !chunk.isEmpty {
+        // One autorelease pool per chunk so a model-sized copy does not keep
+        // every read buffer resident until the copy returns.
+        while try autoreleasepool(invoking: {
+            guard let chunk = try input.read(upToCount: 4 * 1024 * 1024), !chunk.isEmpty else { return false }
             try output.write(contentsOf: chunk)
-        }
+            return true
+        }) {}
     }
 }

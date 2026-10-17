@@ -11175,11 +11175,15 @@ actor ModelRuntime: ModelRuntimeServing {
         defer { try? handle.close() }
 
         var hasher = SHA256()
-        while true {
+        // Each chunk is an autoreleased NSData; without a pool per chunk a
+        // whole artifact's bytes stay resident until the caller's pool drains
+        // (a 186 GB model doubled its load peak and was killed).
+        while try autoreleasepool(invoking: {
             let chunk = try handle.read(upToCount: 1024 * 1024) ?? Data()
-            guard !chunk.isEmpty else { break }
+            guard !chunk.isEmpty else { return false }
             hasher.update(data: chunk)
-        }
+            return true
+        }) {}
         return hexString(hasher.finalize())
     }
 
