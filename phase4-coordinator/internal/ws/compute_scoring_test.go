@@ -1221,12 +1221,13 @@ func (h *scoringHarness) persistedDue(key computeScoringKey) (time.Time, bool) {
 func TestComputeScoringOverdueKeyProbedPromptlyAfterRestart(t *testing.T) {
 	h := newScoringHarness(t, map[string]string{"a": "github:1", "b": "github:2"}, nil)
 	h.engine.sweep(context.Background(), h.now())
+	h.engine.sweep(context.Background(), h.now())
 	key := computeScoringKey{"a", scoringModel}
 	h.engine.mu.Lock()
 	due := h.engine.nextDue[key]
 	h.engine.mu.Unlock()
 	if stored, ok := h.persistedDue(key); !ok || !stored.Equal(due) {
-		t.Fatalf("due time not persisted by the sweep: stored %v (%v), want %v", stored, ok, due)
+		t.Fatalf("due time not persisted by the next sweep: stored %v (%v), want %v", stored, ok, due)
 	}
 	h.advance(2 * h.engine.interval(computeintegrity.VerificationUnverified))
 	restart := h.now()
@@ -1239,7 +1240,10 @@ func TestComputeScoringOverdueKeyProbedPromptlyAfterRestart(t *testing.T) {
 		t.Fatalf("overdue key due at %v (present=%v), want within %v of restart %v", redrawn, ok, computeScoreOverdueSpread, restart)
 	}
 	before := h.dispatched.Load()
+	// The first sweep that sees the provider stores the redrawn due time;
+	// the key is dispatched by the next one.
 	h.round(computeScoreOverdueSpread)
+	h.round(e.tickInterval())
 	if h.dispatched.Load() == before {
 		t.Fatal("overdue keys were not probed within the overdue window after a restart")
 	}
@@ -1255,7 +1259,7 @@ func TestComputeScoringRestartKeepsDueTimeAndFirstSightWindow(t *testing.T) {
 	dueA := h.engine.nextDue[keyA]
 	h.engine.dropDueLocked(keyB)
 	h.engine.mu.Unlock()
-	h.engine.flushSchedule(context.Background(), h.now())
+	h.engine.flushSchedule(context.Background(), h.now(), time.Now().Add(time.Minute))
 	if _, ok := h.persistedDue(keyB); ok {
 		t.Fatal("a dropped due time must be deleted from the store")
 	}
@@ -1325,7 +1329,7 @@ func TestComputeScoringScheduleWriteFailureRetries(t *testing.T) {
 	h.engine.setDueLocked(keyA, now.Add(time.Hour))
 	h.engine.setDueLocked(keyB, now.Add(2*time.Hour))
 	h.engine.mu.Unlock()
-	h.engine.flushSchedule(context.Background(), now)
+	h.engine.flushSchedule(context.Background(), now, time.Now().Add(time.Minute))
 	newer := now.Add(3 * time.Hour)
 	h.engine.mu.Lock()
 	h.engine.setDueLocked(keyA, newer)
@@ -1333,7 +1337,7 @@ func TestComputeScoringScheduleWriteFailureRetries(t *testing.T) {
 	if _, err := computeintegrity.NewScoringStore(context.Background(), h.db); err != nil {
 		t.Fatal(err)
 	}
-	h.engine.flushSchedule(context.Background(), now)
+	h.engine.flushSchedule(context.Background(), now, time.Now().Add(time.Minute))
 	if got, ok := h.persistedDue(keyA); !ok || !got.Equal(newer) {
 		t.Fatalf("key a persisted %v (%v), want the newer %v", got, ok, newer)
 	}
@@ -1450,5 +1454,46 @@ func TestComputeScoringUnsavedDueTimeIsNotDispatched(t *testing.T) {
 	h.round(0)
 	if h.dispatched.Load() == 0 {
 		t.Fatal("due keys not dispatched once their due times were stored")
+	}
+}
+
+// FR-20: a due time redrawn at start is stored once its provider is seen, so
+// repeated restarts cannot keep redrawing a connected key; an absent
+// provider's row is left as it was.
+func TestComputeScoringRestartRedrawStoredOncePresent(t *testing.T) {
+	h := newScoringHarness(t, map[string]string{"a": "github:1", "b": "github:2"}, nil)
+	now := h.now()
+	key := computeScoringKey{"a", scoringModel}
+	if err := h.engine.deps.Store.SaveProbeSchedule(context.Background(), []computeintegrity.ProbeDue{
+		{ProviderID: key.providerID, ModelID: key.modelID, Due: now.Add(-time.Hour)},
+	}, now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	e := h.restartScoring()
+	e.mu.Lock()
+	redrawn := e.nextDue[key]
+	e.mu.Unlock()
+	e.sweep(context.Background(), now)
+	e.sweep(context.Background(), now)
+	if stored, ok := h.persistedDue(key); !ok || !stored.Equal(redrawn) {
+		t.Fatalf("redrawn due time of a connected key not stored: %v (%v), want %v", stored, ok, redrawn)
+	}
+}
+
+// FR-20: a key overdue for longer than the retention period is dropped from
+// memory as the store prunes it, even while its provider is connected.
+func TestComputeScoringLongOverdueKeyDroppedLikeStore(t *testing.T) {
+	h := newScoringHarness(t, map[string]string{"a": "github:1"}, nil)
+	now := h.now()
+	key := computeScoringKey{"a", "old-model"}
+	h.engine.mu.Lock()
+	h.engine.setDueLocked(key, now.Add(-computeScoreRetention-time.Hour))
+	h.engine.mu.Unlock()
+	h.engine.prune(map[string]struct{}{"a": {}}, now)
+	h.engine.mu.Lock()
+	_, kept := h.engine.nextDue[key]
+	h.engine.mu.Unlock()
+	if kept {
+		t.Fatal("a key overdue past the retention period must be dropped")
 	}
 }

@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS compute_integrity_probe_schedule (
     updated_at_utc  TEXT NOT NULL,
     PRIMARY KEY(provider_id, model_id)
 ) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_cips_updated ON compute_integrity_probe_schedule(updated_at_utc);
 `)
 	if err != nil {
 		return nil, err

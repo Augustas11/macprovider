@@ -4866,7 +4866,9 @@
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringRestoreIgnoresStaleRowsAndFailsTowardProbing",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringRestartsDoNotRefreshAbsentRows",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringEscalationRedrawsLongDueTime",
-        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringUnsavedDueTimeIsNotDispatched"
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringUnsavedDueTimeIsNotDispatched",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringRestartRedrawStoredOncePresent",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringLongOverdueKeyDroppedLikeStore"
       ],
       "journeys": [],
       "evidence": [],

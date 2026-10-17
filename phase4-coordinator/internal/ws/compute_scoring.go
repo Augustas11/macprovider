@@ -283,7 +283,11 @@ type computeScoringEngine struct {
 	// scheduleLost is set when the persisted schedule could not be read at
 	// start: every key is then treated as overdue at first sight, so an
 	// unreadable schedule never delays verification.
-	scheduleLost  bool
+	scheduleLost bool
+	// redrawn holds keys whose due time was redrawn at start and not yet
+	// stored; the redraw is stored once the key's provider is seen, so
+	// repeated restarts cannot keep redrawing a connected key's due time.
+	redrawn       map[computeScoringKey]struct{}
 	inFlight      map[computeScoringKey]bool
 	inFlightCount int
 	// recentStarts holds the start times of the verification requests of
@@ -354,6 +358,7 @@ func (s *Server) newComputeScoringEngine(ctx context.Context, deps ComputeScorin
 		states:       map[computeScoringKey]*computeintegrity.KeyState{},
 		nextDue:      map[computeScoringKey]time.Time{},
 		dirtyDue:     map[computeScoringKey]time.Time{},
+		redrawn:      map[computeScoringKey]struct{}{},
 		inFlight:     map[computeScoringKey]bool{},
 		pending:      map[string]*pendingComputeScore{},
 		operatorKeys: map[string]cachedOperatorKey{},
@@ -404,9 +409,8 @@ func (s *Server) newComputeScoringEngine(ctx context.Context, deps ComputeScorin
 // not reset the cadence. A key whose due time has passed is redrawn within a
 // short bounded window; a due time beyond the longest jittered interval (a
 // shortened interval or a clock step) is redrawn as a fresh interval. These
-// redraws stay in memory: the stored row changes only when the engine
-// schedules the key for a present provider, so restarts never refresh an
-// absent provider's row. A row neither written nor due within the retention
+// redraws are stored only once the key's provider is seen (considerProvider),
+// so restarts never refresh an absent provider's row. A row neither written nor due within the retention
 // period is ignored. An unreadable schedule makes every key overdue at first
 // sight.
 func (e *computeScoringEngine) restoreSchedule(ctx context.Context, startedAt time.Time) {
@@ -435,6 +439,9 @@ func (e *computeScoringEngine) restoreSchedule(ctx context.Context, startedAt ti
 			due = startedAt.Add(e.jitter(interval))
 		}
 		e.nextDue[key] = due
+		if !due.Equal(d.Due) {
+			e.redrawn[key] = struct{}{}
+		}
 		// Like a restored state, a restored due time counts as seen at start.
 		if _, ok := e.lastSeen[d.ProviderID]; !ok {
 			e.lastSeen[d.ProviderID] = startedAt
@@ -463,17 +470,20 @@ func (e *computeScoringEngine) setDueLocked(key computeScoringKey, due time.Time
 // Caller holds mu.
 func (e *computeScoringEngine) dropDueLocked(key computeScoringKey) {
 	delete(e.nextDue, key)
+	delete(e.redrawn, key)
 	e.dirtyDue[key] = time.Time{}
 }
 
-// flushSchedule persists queued due-time changes, at most one batch. Only the
-// sweep goroutine flushes, so writes of one key stay in order. A failed
-// batch is retried unless the key changed again meanwhile. A key with an
-// unwritten change is not dispatched (considerProvider), so the store never
-// lags a probe. A crash loses the changes not yet written: the restart then
-// uses the older stored due time. The write outlives ctx cancellation, so a
-// shutdown still persists the last changes.
-func (e *computeScoringEngine) flushSchedule(ctx context.Context, now time.Time) {
+// flushSchedule persists queued due-time changes, at most one batch, by
+// deadline. Only the sweep goroutine flushes, so writes of one key stay in
+// order. A failed due time is retried unless the key changed again
+// meanwhile; a failed deletion is not, because a row left behind ages out
+// (restoreSchedule, PruneProbeSchedule). A key with an unwritten change is not
+// dispatched (considerProvider), so the store never lags a probe. A crash
+// loses the changes not yet written; the restart then uses the older,
+// earlier stored due time. The write outlives ctx cancellation, so the final
+// flush at shutdown (run) still persists.
+func (e *computeScoringEngine) flushSchedule(ctx context.Context, now, deadline time.Time) {
 	e.mu.Lock()
 	if len(e.dirtyDue) == 0 {
 		e.mu.Unlock()
@@ -492,7 +502,7 @@ func (e *computeScoringEngine) flushSchedule(ctx context.Context, now time.Time)
 	for key, due := range pending {
 		batch = append(batch, computeintegrity.ProbeDue{ProviderID: key.providerID, ModelID: key.modelID, Due: due})
 	}
-	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), computeScoreCommitTimeout)
+	wctx, cancel := context.WithDeadline(context.WithoutCancel(ctx), deadline)
 	err := e.deps.Store.SaveProbeSchedule(wctx, batch, now)
 	cancel()
 	if err == nil {
@@ -501,7 +511,7 @@ func (e *computeScoringEngine) flushSchedule(ctx context.Context, now time.Time)
 	e.s.log.Warn().Str("event", "compute_integrity_schedule_write_failed").Msg("verification schedule write failed; retrying next sweep")
 	e.mu.Lock()
 	for key, due := range pending {
-		if _, newer := e.dirtyDue[key]; !newer {
+		if _, newer := e.dirtyDue[key]; !newer && !due.IsZero() {
 			e.dirtyDue[key] = due
 		}
 	}
@@ -539,6 +549,9 @@ func (e *computeScoringEngine) run(ctx context.Context) {
 		e.sweep(ctx, e.s.now())
 		select {
 		case <-ctx.Done():
+			// Probes still finishing may change due times after this; a lost
+			// change leaves the older, earlier stored due time.
+			e.flushSchedule(ctx, e.s.now(), time.Now().Add(computeScoreCommitTimeout))
 			return
 		case <-ticker.C:
 		}
@@ -623,18 +636,18 @@ func (e *computeScoringEngine) sweep(ctx context.Context, now time.Time) {
 	if e.s.pool == nil {
 		return
 	}
-	// Flush before considering keys, so changes since the last sweep are
-	// durable before any of them is dispatched, and after, for this sweep's.
-	e.flushSchedule(ctx, now)
-	defer e.flushSchedule(ctx, now)
+	// One deadline bounds the whole sweep, maintenance and identity lookups
+	// included; work it leaves stays due for the next sweep.
+	deadline := time.Now().Add(e.tickInterval())
+	// Flush before considering keys, so a change is stored before its key
+	// can be dispatched; changes made during this sweep are not due before
+	// the next one.
+	e.flushSchedule(ctx, now, deadline)
 	providers := e.s.pool.Snapshot()
 	present := make(map[string]struct{}, len(providers))
 	for _, p := range providers {
 		present[p.ProviderID] = struct{}{}
 	}
-	// One deadline bounds the whole sweep, maintenance and identity lookups
-	// included; work it leaves stays due for the next sweep.
-	deadline := time.Now().Add(e.tickInterval())
 	e.prune(present, now)
 	e.retryExclusions(ctx, now, deadline)
 	e.pruneDurable(ctx, now)
@@ -691,9 +704,18 @@ func (e *computeScoringEngine) prune(present map[string]struct{}, now time.Time)
 	}
 	// A key keeps its due time across a disconnect, so a provider that
 	// reconnects resumes an overdue verification instead of drawing a fresh
-	// initial interval. Only keys absent past the retention period go.
-	for key := range e.nextDue {
-		if _, ok := present[key.providerID]; ok || e.inFlight[key] {
+	// initial interval. Only keys absent past the retention period go, and
+	// keys overdue for longer than it (a model the provider no longer serves,
+	// or one not routing-eligible), as the store prunes them.
+	for key, due := range e.nextDue {
+		if e.inFlight[key] {
+			continue
+		}
+		if due.Before(cutoff) {
+			e.dropDueLocked(key)
+			continue
+		}
+		if _, ok := present[key.providerID]; ok {
 			continue
 		}
 		if seen, ok := e.lastSeen[key.providerID]; !ok || seen.Before(cutoff) {
@@ -754,6 +776,11 @@ func (e *computeScoringEngine) considerProvider(ctx context.Context, p pool.Prov
 		return
 	}
 	due, scheduled := e.nextDue[key]
+	if _, ok := e.redrawn[key]; ok && scheduled {
+		// The provider is seen: store the due time redrawn at start.
+		delete(e.redrawn, key)
+		e.dirtyDue[key] = due
+	}
 	if !scheduled {
 		// The first request of a key follows the same jittered cadence, so a
 		// new key is never probed at once. A known key's due time is restored
@@ -828,7 +855,8 @@ func (e *computeScoringEngine) considerProvider(ctx context.Context, p pool.Prov
 	e.mu.Lock()
 	// Acquiring the lock may have waited: the deadline and the hourly bound
 	// are checked again as of now, under the lock that reserves.
-	if time.Now().After(deadline) || !e.hourlyBudgetLocked(e.s.now()) {
+	// An operator clear during the lookups unschedules the key.
+	if _, scheduled := e.nextDue[key]; !scheduled || time.Now().After(deadline) || !e.hourlyBudgetLocked(e.s.now()) {
 		e.mu.Unlock()
 		return
 	}

@@ -2173,22 +2173,22 @@ Rate bounds:
   API. At start, a key whose stored due time has passed becomes due at a
   time drawn uniformly within the next 15 minutes (or its interval, if
   shorter), so overdue keys are probed promptly but not all at once; like
-  any due key it is then dispatched by the next sweep after the dispatch
+  any due key it is then dispatched by a following sweep after the dispatch
   delay above, within the `max_in_flight` and `max_per_hour` bounds. A key
   not yet due keeps its due time. A due time further away than 1.5 intervals
   of the key's current cadence (after a restart, a shortened interval, or a
   key entering `recovering`) is redrawn as a fresh jittered interval. A key
-  with no stored due time draws the first interval above. The redraws at
-  start are not written back: the stored due time changes only when the
-  coordinator schedules the key while its provider is connected, so
-  restarts never keep an absent provider's due time alive. A stored due
-  time neither written nor due within the last 7 days is ignored at start
-  and deleted. Changes are written at the start and end of every sweep, at
-  most 512 keys per write, and a failed write is retried. A key whose latest
-  due-time change is not yet stored is not dispatched, so the stored
-  schedule never lags a probe. A crash loses only the unwritten changes, and
-  the restarted coordinator uses the older stored due time under the same
-  rules. If the stored schedule cannot be read, every key counts as overdue
+  with no stored due time draws the first interval above. A redraw at start
+  is stored once the key's provider is seen, so restarts never keep an
+  absent provider's due time alive and never keep redrawing a connected
+  key's. A due time neither written nor due within the last 7 days is
+  ignored at start and deleted, and dropped from memory too. Changes are
+  written at the start of every sweep, within its deadline, at most 512
+  keys per write; a failed write is retried, and a failed deletion is left
+  to age out. A key whose latest due-time change is not yet stored is not
+  dispatched, so the stored schedule never lags a probe. A crash or a probe
+  finishing after shutdown loses only unwritten changes, and the restarted
+  coordinator uses the older stored due time under the same rules. If the stored schedule cannot be read, every key counts as overdue
   at first sight, so an unreadable schedule never postpones verification.
 - At most `max_in_flight` (default 4) verification requests are outstanding
   coordinator-wide, and at most one per verification key.
