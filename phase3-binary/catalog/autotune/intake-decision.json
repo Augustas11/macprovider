@@ -3,7 +3,7 @@
     {
       "action": "admit_listed",
       "admission_clause": "coldstart_slot",
-      "as_of": "2026-10-17T00:00:00Z",
+      "as_of": "2026-10-17T22:00:00Z",
       "coldstart_slot_used": true,
       "fit_clause": "tier_target",
       "listed_since": null,
@@ -15,7 +15,7 @@
       "promotion": null,
       "signals": {
         "demand_rank_absent_reason": "unranked",
-        "demand_rank_source_sha256": "2aad25656b3a7136fa85d7f81f7f57e500710227c63b0aec9ed64ad0819ef948",
+        "demand_rank_source_sha256": "20a1eac66a32f47a2d1ca844be11b0302eef3c925a43e0eddb2c46a008a9d8aa",
         "distinct_provider_offer_absent_reason": "source_unavailable",
         "distinct_provider_offer_count": null,
         "distinct_provider_offer_source_sha256": null,
@@ -38,8 +38,8 @@
       }
     }
   ],
-  "generated_at": "2026-10-17T00:00:00Z",
-  "release_id": "published-2026-10-17-glm53-flash-intake-v1",
+  "generated_at": "2026-10-17T22:00:00Z",
+  "release_id": "published-2026-10-17-glm53-flash-listed-v1",
   "schema_version": "macprovider.intake-decision.v1",
   "thresholds": {
     "INTAKE_BUYER_REQUEST_FLOOR": 250,

@@ -24,7 +24,7 @@ import (
 
 const autotuneV4PublicKeyBase64 = "zTKDIdMmKKkO1Cgf5OdTzMOytVqW7U8SGsJ9XrzAltU="
 const autotuneV5PublicKeyBase64 = "vpTgWfvvrnbc1QhdTAxULFisoDU7jQ4mB1yZIHIGjBA="
-const currentAutotuneReleaseID = "published-2026-10-17-qwen2vl-recommendable-v1"
+const currentAutotuneReleaseID = "published-2026-10-17-glm53-flash-listed-v1"
 
 func TestAutotuneFeedsServeLiteralSignedBytes(t *testing.T) {
 	t.Parallel()

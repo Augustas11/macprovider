@@ -1,7 +1,14 @@
 {
-  "autotune_candidates_sha256": "1c2690021a88f0c0f97e8d3ca859c5afd397c2ee4c07dc30b389e876334d7f1d",
-  "generated_at": "2026-10-17T02:24:00Z",
+  "autotune_candidates_sha256": "404a9f5b78065439f085302c43c33cb0fda88eeaa2932ff1e6ed25ca17c4ea40",
+  "generated_at": "2026-10-17T22:00:00Z",
   "models": [
+    {
+      "catalog_key": "zai-org/glm-5.3-flash",
+      "min_ram_gb": 234,
+      "model_id": "Jundot/GLM-5.3-Flash-oQ4e-mtp",
+      "model_revision": "36defc5042d92a992a7948e83d6f110b8df69329",
+      "sha256": "7299b6a71a38490e378e9eb6524c426392aa96e3fd561007e0540134bbef48f9"
+    },
     {
       "catalog_key": "google-gemma-4-26b-a4b-it",
       "min_ram_gb": 28,
@@ -130,6 +137,6 @@
     }
   ],
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-10-17-qwen2vl-recommendable-v1",
+  "release_id": "published-2026-10-17-glm53-flash-listed-v1",
   "schema_version": "macprovider.tier2-identity-binding.v1"
 }

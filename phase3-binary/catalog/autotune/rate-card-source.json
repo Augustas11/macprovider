@@ -21,7 +21,7 @@
       "prompt_rate_per_mtok": 13500
     }
   },
-  "generated_at": "2026-10-17T02:24:00Z",
+  "generated_at": "2026-10-17T22:00:00Z",
   "global_multiplier_ppm": 1000000,
   "policy_version": "autotune-policy-v1",
   "provider_share_bps": 9000,
@@ -125,11 +125,6 @@
       "completion_rate_per_mtok": 688000,
       "prompt_cache_hit_rate_per_mtok": 28000,
       "prompt_rate_per_mtok": 112000
-    },
-    "zai-org/glm-5.3-flash": {
-      "completion_rate_per_mtok": 403840,
-      "prompt_cache_hit_rate_per_mtok": 7920,
-      "prompt_rate_per_mtok": 31680
     }
   },
   "schema_version": "macprovider.rate-card-source.v1",
