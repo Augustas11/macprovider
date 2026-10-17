@@ -253,4 +253,32 @@ final class GLM5NextPagedKVWiringTests: XCTestCase {
         XCTAssertEqual(ModelRuntime.effectiveDecodeRowBound(deviceBound: 11, cacheKinds: [.recurrentMamba, .pagedAttention]), 11)
         XCTAssertEqual(ModelRuntime.effectiveDecodeRowBound(deviceBound: 11, cacheKinds: nil), 11)
     }
+
+    /// The self-check's serial baseline (window at 7d8dbf5) failed with
+    /// `incompatibleCapacity(expected: 65536, count: 11)`: a serial request's
+    /// explicit GLM cache (KDA `MambaCache` + 11 `GLM5NextAttentionCache`)
+    /// against the serve cap. Reproduced here on CPU through mlx-swift-lm's
+    /// own check, and the iterator parameters lift the cap for exactly
+    /// these caches.
+    func testSerialGLMCacheIteratorParametersPassTheCapacityCheck() throws {
+        let cache: [KVCache] = Self.layerTypes.map {
+            $0 == "deepseek_sparse_attention" ? GLM5NextAttentionCache(kpool: 4) : MambaCache()
+        }
+        let capped = KVCacheConfiguration(capacity: try KVCacheConfiguration.Capacity(maxTokens: 65_536))
+        XCTAssertThrowsError(try validateKVCacheCompatibility(cache, configuration: capped)) { error in
+            XCTAssertEqual(error as? KVCacheConfigurationError, .incompatibleCapacity(expected: 65_536, count: 11))
+        }
+        XCTAssertNoThrow(try validateKVCacheCompatibility(cache, configuration: KVCacheConfiguration()))
+
+        let base = GenerateParameters(maxTokens: 8, maxKVSize: 65_536)
+        XCTAssertNil(ModelRuntime.explicitCacheIteratorParameters(base, cache: cache).maxKVSize)
+        XCTAssertNil(ModelRuntime.serveIteratorParameters(
+            base, forceSimpleKV: false, reusedCache: false, cache: cache
+        ).maxKVSize)
+        // Every other explicit cache keeps the serve cap.
+        XCTAssertEqual(ModelRuntime.explicitCacheIteratorParameters(base, cache: [MambaCache()]).maxKVSize, 65_536)
+        XCTAssertEqual(ModelRuntime.serveIteratorParameters(
+            base, forceSimpleKV: false, reusedCache: false, cache: [MambaCache()]
+        ).maxKVSize, 65_536)
+    }
 }

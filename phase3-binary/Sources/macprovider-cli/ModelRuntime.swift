@@ -1900,9 +1900,33 @@ actor ModelRuntime: ModelRuntimeServing {
     /// parameters the cache was built with (#1998). Prompt length is still bounded
     /// by `validatePromptTokenCount` before allocation.
     nonisolated static func serveIteratorParameters(
-        _ base: GenerateParameters, forceSimpleKV: Bool, reusedCache: Bool
+        _ base: GenerateParameters, forceSimpleKV: Bool, reusedCache: Bool, cache: [KVCache] = []
     ) -> GenerateParameters {
-        cacheParameters(base, forceSimpleKV: forceSimpleKV || reusedCache)
+        explicitCacheIteratorParameters(
+            cacheParameters(base, forceSimpleKV: forceSimpleKV || reusedCache),
+            cache: cache
+        )
+    }
+
+    /// Parameters for a `TokenIterator` over an explicit cache the model sized
+    /// itself. GLM-5-Next's sparse layers always return their own
+    /// `GLM5NextLatentCache`, whatever `maxKVSize` says, and mlx-swift-lm's
+    /// explicit-cache check counts every such non-rotating attention layer as
+    /// not realizing the requested capacity (`incompatibleCapacity(expected:
+    /// maxKVSize, count: 11)` on GLM-5.3-Flash), so any serial request with the
+    /// serve cap failed. The iterator gets the uncapped parameters, as for
+    /// `KVCacheSimple` (#1998); prompt length is still bounded by
+    /// `validatePromptTokenCount` before allocation. Exactly the caches that
+    /// carry a `GLM5NextLatentCache` are affected.
+    nonisolated static func explicitCacheIteratorParameters(
+        _ parameters: GenerateParameters, cache: [KVCache]
+    ) -> GenerateParameters {
+        guard parameters.maxKVSize != nil, cache.contains(where: { $0 is any GLM5NextLatentCache }) else {
+            return parameters
+        }
+        var uncapped = parameters
+        uncapped.maxKVSize = nil
+        return uncapped
     }
 
     /// True when ConversationCache will attempt reuse (trimmed non-empty key).
@@ -8186,7 +8210,9 @@ actor ModelRuntime: ModelRuntimeServing {
                     topP: 1.0
                 )
                 let kvCache = try context.model.newCache(parameters: parameters)
-                let iterator = try TokenIterator(input: lmInput, model: context.model, cache: kvCache, parameters: parameters)
+                let iterator = try TokenIterator(
+                    input: lmInput, model: context.model, cache: kvCache,
+                    parameters: Self.explicitCacheIteratorParameters(parameters, cache: kvCache))
                 return try await blockingInferenceExecutor.run { inferenceCancellation in
                     BlockingGenerateResult(generate(input: lmInput, context: context, iterator: iterator) { tokens in
                         if !tokens.isEmpty {
@@ -8493,7 +8519,8 @@ actor ModelRuntime: ModelRuntimeServing {
                             let iterator = try TokenIterator(
                                 input: iteratorInput, model: generationContext.model, cache: kvCache,
                                 parameters: Self.serveIteratorParameters(
-                                    parameters, forceSimpleKV: forceSimpleKV, reusedCache: lease?.reusableCache != nil))
+                                    parameters, forceSimpleKV: forceSimpleKV, reusedCache: lease?.reusableCache != nil,
+                                    cache: kvCache))
                             Self.clearMLXBufferCacheAfterPrefill()
                             var serialToolObserver = NativeToolCallStreamEmitter(
                                 modelID: request.model,
@@ -9371,7 +9398,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     let iterator = try TokenIterator(
                         input: iteratorInput, model: generationContext.model, cache: kvCache,
                         parameters: Self.serveIteratorParameters(
-                            parameters, forceSimpleKV: forceSimpleKV, reusedCache: lease?.reusableCache != nil))
+                            parameters, forceSimpleKV: forceSimpleKV, reusedCache: lease?.reusableCache != nil,
+                            cache: kvCache))
                     Self.clearMLXBufferCacheAfterPrefill()
                     do {
                         let result: BlockingGenerateResult = try await blockingInferenceExecutor.run { inferenceCancellation in
