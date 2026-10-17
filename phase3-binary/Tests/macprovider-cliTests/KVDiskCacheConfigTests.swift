@@ -3,7 +3,7 @@ import MacProviderCore
 import XCTest
 
 /// SPEC-037 FR-KVP11 / AC-9 — fail-closed config resolution for the KV disk
-/// tier: default-off, triple-source precedence (YAML → env → CLI), each
+/// tier: default-on (v0.2.2) with operator opt-out, triple-source precedence (YAML → env → CLI), each
 /// invalid-value rule disables the tier (never aborts), buyer policy, and tilde expansion.
 final class KVDiskCacheConfigTests: XCTestCase {
 
@@ -16,12 +16,12 @@ final class KVDiskCacheConfigTests: XCTestCase {
         KVDiskCacheConfigResolver.resolve(yaml: yaml, environment: env, cli: cli, homeDirectory: home)
     }
 
-    // MARK: - Default off
+    // MARK: - Default on (SPEC-037 v0.2.2)
 
-    func testDefaultOff() {
+    func testDefaultOn() {
         let c = resolve()
-        XCTAssertFalse(c.enabled)
-        XCTAssertFalse(c.effectiveEnabled)
+        XCTAssertTrue(c.enabled)
+        XCTAssertTrue(c.effectiveEnabled)
         XCTAssertTrue(c.errors.isEmpty)
         XCTAssertEqual(c.directory, "/Users/tester/Library/Caches/macprovider/kv-cache")
         XCTAssertEqual(c.maxBytes, 16 * 1024 * 1024 * 1024)
@@ -44,6 +44,12 @@ final class KVDiskCacheConfigTests: XCTestCase {
     func testEnableViaYAML() {
         let c = resolve(yaml: ["enabled": true])
         XCTAssertTrue(c.effectiveEnabled)
+    }
+
+    func testOperatorOptOutViaEachSource() {
+        XCTAssertFalse(resolve(yaml: ["enabled": false]).effectiveEnabled)
+        XCTAssertFalse(resolve(env: ["MACPROVIDER_KV_DISK_CACHE_ENABLED": "false"]).effectiveEnabled)
+        XCTAssertFalse(resolve(cli: KVDiskCacheCLIOverrides(enabled: false)).effectiveEnabled)
     }
 
     // MARK: - Precedence (YAML < env < CLI)
@@ -246,13 +252,13 @@ final class KVDiskCacheConfigTests: XCTestCase {
         XCTAssertTrue(cfg.kvDiskCache.enabled)
     }
 
-    func testConfigLoaderNoFileDefaultsOff() throws {
+    func testConfigLoaderNoFileDefaultsOn() throws {
         let cfg = try ConfigLoader.load(
             cli: CLIOverrides(),
             environment: [:],
             fileExists: { _ in false },
             readFile: { _ in "" })
-        XCTAssertFalse(cfg.kvDiskCache.enabled)
+        XCTAssertTrue(cfg.kvDiskCache.enabled)
         XCTAssertTrue(cfg.kvDiskCache.errors.isEmpty)
     }
 }

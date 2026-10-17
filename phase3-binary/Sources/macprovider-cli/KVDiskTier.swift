@@ -13,6 +13,7 @@ enum KVDiskCacheGate {
         conversationKey: String?, provenance: KVIngestProvenance,
         fleetGrant: FleetConversationCacheGrant? = nil
     ) -> Bool {
+        guard provenance.mayUseReusableKVCache else { return false }
         if provenance == .relay || provenance == .tier2,
            let grant = fleetGrant,
            grant.isValid,

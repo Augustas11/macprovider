@@ -25,8 +25,10 @@ public struct KVDiskCacheConfig: Equatable, Sendable {
     /// Non-empty ⇒ resolution failed and the tier is forced off (FR-KVP11).
     public var errors: [String]
 
+    /// `enabled` defaults on (SPEC-037 v0.2.2): the Studio acceptance passed
+    /// and the privacy path bypasses the tier (SPEC-049 v0.6.0).
     public init(
-        enabled: Bool = false,
+        enabled: Bool = true,
         allowBuyerKeys: Bool = true,
         directory: String = KVDiskCacheConfig.defaultDirectory,
         maxBytes: Int = KVDiskCacheConfig.defaultMaxBytes,
