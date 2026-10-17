@@ -370,6 +370,19 @@ class VisionQualificationApplyRollbackTest(unittest.TestCase):
         self.assertEqual(self.leftovers(), [])
         self.assertFalse(os.path.lexists(self.args.vq_staged))
 
+    def test_concurrent_overlay_change_is_preserved_not_overwritten(self):
+        foreign = b"relay_blind:\n  enabled: false\n"
+        def restart(args, pid):
+            with open(self.overlay, "wb") as f:
+                f.write(foreign)
+            raise pcc.Refused("restart boom")
+        with self.mock.patch.object(pcc, "restart", restart):
+            with self.assertRaisesRegex(pcc.Refused, "overlay changed under the task") as cm:
+                pcc.apply_vision_qualification(self.args)
+        self.assertIn("UNPROVEN", str(cm.exception))
+        self.assertEqual(self.overlay_bytes(), foreign)
+        self.recovery.assert_not_called()
+
     def test_restart_and_rollback_write_failure_is_unproven(self):
         self.install(fail_on=2)
         with self.mock.patch.object(pcc, "restart", self.mock.Mock(side_effect=pcc.Refused("restart boom"))):

@@ -1145,13 +1145,19 @@ def failure(exc):
     return str(exc) if isinstance(exc, Refused) else type(exc).__name__
 
 
-def vq_rollback(args, original, backup, exc):
+def vq_rollback(args, original, new, backup, exc):
     """The overlay install or the restart failed after the edited bytes may
     have landed. Put the original bytes back, prove they are on disk, then
-    restart onto them and prove the boot config. Always raises Refused."""
+    restart onto them and prove the boot config. Always raises Refused.
+
+    Compare-and-swap: only bytes this task wrote (or the original) are
+    replaced; any other content is a concurrent change and is preserved."""
     try:
         with open(args.overlay, "rb") as f:
             current = f.read()
+        if current not in (original, new):
+            raise Refused("the overlay changed under the task (neither the original nor the installed bytes); "
+                          "it was left as found and needs manual reconciliation")
         if current != original:
             tmp = write_like(args.overlay, original, args.overlay)
             try:
@@ -1227,7 +1233,7 @@ def apply_vision_qualification(args):
                     install(tmp, args.overlay)
                     restart(args, pid)
                 except Exception as exc:
-                    vq_rollback(args, original, backup, exc)
+                    vq_rollback(args, original, new, backup, exc)
             finally:
                 if os.path.lexists(tmp):
                     os.unlink(tmp)
