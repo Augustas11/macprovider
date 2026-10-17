@@ -68,7 +68,9 @@ enum PrivacyHardeningCode {
     static let envAllowTestFixtures = "env_macprovider_allow_test_fixtures"
     static let diagnosticEnv = "diagnostic_env"
     static let loopbackRuntime = "loopback_runtime"
-    static let kvDiskTierEnabled = "kv_disk_tier_enabled"
+    /// SPEC-049-R007 item 8 (v0.6.0): the privacy path could reach the KV disk
+    /// tier. An enabled tier alone is not a refusal.
+    static let kvDiskTierPrivacyBypass = "kv_disk_tier_privacy_bypass_failed"
     static let relayBlindDisabled = "relay_blind_disabled"
     static let stateDirectoryMissing = "state_directory_missing"
     static let runtimeSource = "runtime_source"
@@ -116,6 +118,8 @@ struct PrivacyPostureObservation: Equatable, Sendable {
     var coreDumpsDisabled: Bool
     var sipEnabled: Bool
     var diagnosticEnvClear: Bool
+    /// Wire field `kv_disk_tier_disabled`. Since SPEC-049 v0.6.0 it means the
+    /// privacy path cannot reach the KV disk tier, not that the tier is off.
     var kvDiskTierDisabled: Bool
     var runtimeSource: String
     var codeCDHash: String
@@ -293,7 +297,7 @@ enum PrivacyRuntimeHardening {
         if let loopback = LoopbackServeSelection.select(config.model) {
             observation.runtimeSource = loopback.runtimeSource
         }
-        if config.kvDiskCache.enabled {
+        if !privacyPathBypassesKVDiskTier() {
             observation.kvDiskTierDisabled = false
         }
         let reasons = failureReasons(observation: observation, config: config, probeReasons: probeReasons)
@@ -302,6 +306,18 @@ enum PrivacyRuntimeHardening {
             return .success(observation)
         }
         return .failure(reasons)
+    }
+
+    /// SPEC-049-R010 and R007 item 8 (v0.6.0): every barrier between a
+    /// privacy-class request and the KV disk tier holds. The tier itself may be
+    /// on for ordinary traffic. Posture field `kv_disk_tier_disabled` reports
+    /// this result, so a build that lost any barrier cannot attest it.
+    static func privacyPathBypassesKVDiskTier() -> Bool {
+        !ModelRuntime.coldTierAdmits(provenance: .privacy)
+            && !ModelRuntime.allowsConversationCacheLease(provenance: .privacy, nativeAllows: true)
+            && !KVDiskCacheGate.persists(
+                conversationKey: KVDiskCacheGate.syntheticPrefix + "privacy-bypass-check",
+                provenance: .privacy)
     }
 
     /// True only when P_TRACED and CS_DEBUGGED are both clear and readable.
@@ -351,8 +367,8 @@ enum PrivacyRuntimeHardening {
         if observation.csDebugged { add(PrivacyHardeningCode.csDebugged) }
         if !observation.sipEnabled { add(PrivacyHardeningCode.sipDisabled) }
         if !observation.diagnosticEnvClear { add(PrivacyHardeningCode.diagnosticEnv) }
-        if !observation.kvDiskTierDisabled || config.kvDiskCache.enabled {
-            add(PrivacyHardeningCode.kvDiskTierEnabled)
+        if !observation.kvDiskTierDisabled {
+            add(PrivacyHardeningCode.kvDiskTierPrivacyBypass)
         }
         if observation.runtimeSource != PrivacyClassConstants.runtimeSource {
             add(PrivacyHardeningCode.runtimeSource)

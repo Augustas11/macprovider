@@ -28,7 +28,7 @@ final class PrivacyRuntimeHardeningTests: XCTestCase {
             ("coreDumpsDisabled", { $0.coreDumpsDisabled = false }, PrivacyHardeningCode.coreDumps),
             ("sipEnabled", { $0.sipEnabled = false }, PrivacyHardeningCode.sipDisabled),
             ("diagnosticEnvClear", { $0.diagnosticEnvClear = false }, PrivacyHardeningCode.diagnosticEnv),
-            ("kvDiskTierDisabled", { $0.kvDiskTierDisabled = false }, PrivacyHardeningCode.kvDiskTierEnabled),
+            ("kvDiskTierDisabled", { $0.kvDiskTierDisabled = false }, PrivacyHardeningCode.kvDiskTierPrivacyBypass),
         ]
         for (name, mutate, code) in cases {
             var observation = greenObservation()
@@ -86,7 +86,7 @@ final class PrivacyRuntimeHardeningTests: XCTestCase {
         )
     }
 
-    func testLoopbackAndDiskTierRefused() {
+    func testLoopbackRefusedAndDiskTierBypassed() {
         var loopback = greenConfig()
         loopback.model = "ollama:llama3"
         XCTAssertEqual(
@@ -97,12 +97,17 @@ final class PrivacyRuntimeHardeningTests: XCTestCase {
         mlxlm.model = "mlxlm:demo"
         XCTAssertTrue(reasons(probe: scripted(greenObservation()), config: mlxlm).contains(PrivacyHardeningCode.loopbackRuntime))
 
+        // SPEC-049 v0.6.0: an enabled KV disk tier is not a refusal; the
+        // privacy path bypasses it and the posture attests that.
         var disk = greenConfig()
         disk.kvDiskCache.enabled = true
-        XCTAssertEqual(
-            reasons(probe: scripted(greenObservation()), config: disk),
-            [PrivacyHardeningCode.kvDiskTierEnabled]
-        )
+        XCTAssertEqual(reasons(probe: scripted(greenObservation()), config: disk), [])
+        guard case let .success(diskPosture) = PrivacyRuntimeHardening.apply(
+            probe: scripted(greenObservation()), config: disk
+        ) else {
+            return XCTFail("an enabled disk tier must not fail privacy hardening")
+        }
+        XCTAssertTrue(diskPosture.kvDiskTierDisabled)
 
         var relayOff = greenConfig()
         relayOff.relayBlindEnabled = false
