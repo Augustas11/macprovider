@@ -32,7 +32,11 @@
 //                    drafter (MTPSpeculativeTokenIterator), from the --oracle
 //                    prompt (or --prompt random tokens); tok/s of both,
 //                    acceptance, MTP == plain, and parity with the oracle's
-//                    greedy tokens
+//                    greedy tokens when it has them (a prompt-only JSON, e.g.
+//                    the varied code+prose corpus, measures acceptance only)
+//   --mtp-profile    plain step, 2-column verify and drafter commit times;
+//                    --mtp-census (MLX_MAX_OPS_PER_BUFFER=0): kernel families
+//                    for 1 and 2 tokens
 // GPU runs only in an announced lab window; never beside a serving provider.
 import Foundation
 import MLX
@@ -58,8 +62,36 @@ let profile = args.contains("--profile")
 let syncEach = args.contains("--sync")
 
 Memory.cacheLimit = 4096 << 20
-if ["--census", "--module-census", "--gpu-profile", "--batch-profile"].contains(where: CommandLine.arguments.contains) { DispatchCensus.install() }
+if ["--census", "--module-census", "--gpu-profile", "--batch-profile", "--mtp-census"].contains(where: CommandLine.arguments.contains) { DispatchCensus.install() }
 
+if args.contains("--qmv-batch-sweep") {
+    // MLX qmv at M = 1 and M = V vs glm5NextQMVBatch(V), 20 independent calls per eval.
+    func packedW(_ n: Int, _ k: Int, _ bits: Int) -> GLM5NextAffine {
+        let w = (0.02 * MLXRandom.normal([n, k])).asType(.bfloat16)
+        let (q, sc, bi) = MLX.quantized(w, groupSize: 64, bits: bits)
+        eval(q, sc, bi)
+        return GLM5NextAffine(weight: q, scales: sc, biases: bi!, bits: bits, groupSize: 64)
+    }
+    func t(_ label: String, _ f: () -> MLXArray) {
+        var best = Double.infinity
+        for _ in 0 ..< 7 {
+            let a = Date()
+            eval((0 ..< 20).map { _ in f() })
+            best = min(best, Date().timeIntervalSince(a) / 20)
+        }
+        print(String(format: "qmv-batch %@ us=%.1f", label, best * 1e6))
+    }
+    for (n, k, bits) in [(4096, 4096, 8), (16384, 4096, 4), (8192, 4096, 5), (154880, 4096, 8), (2048, 4096, 8)] {
+        let p = packedW(n, k, bits)
+        for V in [1, 2, 4] {
+            let x = (0.5 * MLXRandom.normal([V, k])).asType(.bfloat16)
+            eval(x)
+            t("n=\(n) k=\(k) b=\(bits) V=\(V) mlx") { quantizedMatmul(x, p.weight, scales: p.scales, biases: p.biases, transpose: true, groupSize: 64, bits: bits) }
+            if V > 1 { t("n=\(n) k=\(k) b=\(bits) V=\(V) glm") { glm5NextQMVBatch(x, p)! } }
+        }
+    }
+    exit(0)
+}
 if args.contains("--qmv-chain") {
     // 200 dependent one-token quantized matmuls in one eval (decode-like:
     // back-to-back in a command buffer), x_{i+1} = y_i, per bit width. Same
@@ -241,8 +273,80 @@ for _ in 0 ..< ballastGB {
     ballast.append(b)
 }
 if ballastGB > 0 { print("ballast_gb=\(ballastGB) active_gb=\(Double(Memory.activeMemory) / 1e9)") }
+if args.contains("--mtp-profile") {
+    // Synchronous GPU+host time of one plain decode step, one MTP verify
+    // forward (2 columns, checkpoint 1) and one drafter commit forward, each
+    // on fresh copies of the same prefilled cache (median of N).
+    let n = opt("--mtp-profile-steps", 21)
+    let prompt = withRandomState(MLXRandom.RandomState(seed: 3)) {
+        MLXRandom.randInt(0 ..< 150000, [1, promptLen]).asType(.int32)
+    }
+    let base = try model.newCache(parameters: nil)
+    var emit = LMOutput.State()
+    emit[mtpEmitFlagKey] = true
+    let pre = model(LMInput.Text(tokens: prompt), cache: base, state: emit)
+    eval(pre.logits, base)
+    let hidden = pre.state![mtpLastHiddenStatesKey]!
+    let drafter = GLM5NextMTPDraftModel(config)
+    var dstate = drafter.makeState(parameters: nil)
+    let sampler = GenerateParameters(temperature: 0).sampler()
+    drafter.prepareDrafterState(target: model, promptTokens: prompt, targetHidden: hidden, firstBonus: MLXArray([Int32(7)]), positionDeltas: nil, state: &dstate, sampler: sampler)
+    eval(dstate.cache)
+    func median(_ label: String, _ body: () -> Void) {
+        var times = [Double]()
+        for rep in 0 ..< (n + 3) {
+            let a = Date()
+            body()
+            if rep >= 3 { times.append(Date().timeIntervalSince(a) * 1000) }
+        }
+        times.sort()
+        print(String(format: "mtp-profile %@ ms_median=%.2f min=%.2f", label, times[times.count / 2], times[0]))
+    }
+    for deferred in [true, false] {
+        model.languageModel.model.deferredDecode = deferred
+        median("plain_step deferred=\(deferred)") {
+            let c = base.map { $0.copy() }
+            eval(model(MLXArray([Int32(5)]).reshaped(1, 1), cache: c))
+        }
+    }
+    model.languageModel.model.deferredDecode = true
+    if args.contains("--mtp-census") {
+        for (label, tokens) in [("1tok", [Int32(5)]), ("2tok", [Int32(5), Int32(9)])] {
+            DispatchCensus.reset()
+            DispatchCensus.enabled = true
+            for _ in 0 ..< 10 {
+                let c = base.map { $0.copy() }
+                eval(model(MLXArray(tokens).reshaped(1, tokens.count), cache: c))
+            }
+            DispatchCensus.enabled = false
+            DispatchCensus.group.wait()
+            print("mtp-census \(label):")
+            DispatchCensus.gpuReport(steps: 10)
+        }
+        exit(0)
+    }
+    var verifyState = emit
+    verifyState[mtpCacheCheckpointIndexKey] = 1
+    median("verify_2col") {
+        let c = base.map { $0.copy() }
+        let out = model(LMInput.Text(tokens: MLXArray([Int32(5), Int32(9)]).reshaped(1, 2)), cache: c, state: verifyState)
+        eval(out.logits, out.state![mtpLastHiddenStatesKey]!)
+    }
+    median("forward_2col_no_checkpoint") {
+        let c = base.map { $0.copy() }
+        eval(model(MLXArray([Int32(5), Int32(9)]).reshaped(1, 2), cache: c))
+    }
+    for accepted in [0, 1] {
+        median("drafter_commit accepted=\(accepted)") {
+            var st = MTPDrafterState(cache: dstate.cache.map { $0.copy() }, nextPosition: dstate.nextPosition)
+            drafter.commitDrafterState(target: model, targetHidden: hidden[0..., ..<2], draftTokens: MLXArray([Int32(9)]).reshaped(1, 1), acceptedCount: accepted, finalToken: MLXArray([Int32(4)]), positionDeltas: nil, state: &st, sampler: sampler)
+            eval(st.seedToken!)
+        }
+    }
+    exit(0)
+}
 if let mtpTokens = optString("--mtp").flatMap(Int.init) {
-    struct MTPOracle: Decodable { let prompt: [Int]; let greedy: [Int] }
+    struct MTPOracle: Decodable { let prompt: [Int]; let greedy: [Int]? }
     let mtpOracle = try optString("--oracle").map {
         try JSONDecoder().decode(MTPOracle.self, from: Data(contentsOf: URL(fileURLWithPath: $0)))
     }
@@ -266,7 +370,7 @@ if let mtpTokens = optString("--mtp").flatMap(Int.init) {
             line += String(format: " proposed=%d accepted=%d acceptance=%.3f", mtp.proposedCount, mtp.acceptedCount, Double(mtp.acceptedCount) / Double(max(mtp.proposedCount, 1)))
             if let reason = mtp.passthroughReason { line += " passthrough=\"\(reason)\"" }
         }
-        if let greedy = mtpOracle?.greedy {
+        if let greedy = mtpOracle?.greedy, !greedy.isEmpty {
             let n = min(greedy.count, produced.count)
             let first = (0 ..< n).first { produced[$0] != greedy[$0] }
             line += " oracle_match=\(first ?? n)/\(n)"
