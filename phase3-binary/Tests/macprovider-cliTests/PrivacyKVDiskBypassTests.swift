@@ -9,6 +9,8 @@ import XCTest
 /// request never looks up, writes or restores a disk-tier entry, whatever key
 /// or fleet grant it carries; ordinary fleet traffic still persists and
 /// restores. Headless: a recording cold tier stands in for the encrypted store.
+/// v0.7.0: the invariant also covers the CB replay-claim store; its behavior
+/// tests live in ContinuousBatchSchedulerTests.
 final class PrivacyKVDiskBypassTests: XCTestCase {
     private let key = "conv:kvs-synth:shared"
 
@@ -16,7 +18,10 @@ final class PrivacyKVDiskBypassTests: XCTestCase {
         XCTAssertFalse(ModelRuntime.coldTierAdmits(provenance: .privacy))
         XCTAssertFalse(ModelRuntime.allowsConversationCacheLease(provenance: .privacy, nativeAllows: true))
         XCTAssertFalse(KVDiskCacheGate.persists(conversationKey: key, provenance: .privacy))
-        XCTAssertTrue(PrivacyRuntimeHardening.privacyPathBypassesKVDiskTier())
+        XCTAssertFalse(KVIngestProvenance.privacy.mayPersistRequestDerivedState)
+        XCTAssertFalse(ContinuousBatchRuntimeReplayAuthority.persistsClaim(for: .privacy))
+        XCTAssertTrue(PrivacyRuntimeHardening.privacyReplayClaimStaysInMemory())
+        XCTAssertTrue(PrivacyRuntimeHardening.privacyPathBypassesDiskSinks())
         // Every reusable-cache sink follows the one provenance policy.
         for provenance in KVIngestProvenance.allCases {
             let allowed = provenance.mayUseReusableKVCache

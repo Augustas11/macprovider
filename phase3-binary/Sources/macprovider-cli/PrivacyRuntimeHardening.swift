@@ -68,8 +68,9 @@ enum PrivacyHardeningCode {
     static let envAllowTestFixtures = "env_macprovider_allow_test_fixtures"
     static let diagnosticEnv = "diagnostic_env"
     static let loopbackRuntime = "loopback_runtime"
-    /// SPEC-049-R007 item 8 (v0.6.0): the privacy path could reach the KV disk
-    /// tier. An enabled tier alone is not a refusal.
+    /// SPEC-049-R007 item 8 (v0.7.0): the privacy path could reach the KV disk
+    /// tier or the continuous-batching replay-claim store. An enabled tier
+    /// alone is not a refusal. The code name is kept for compatibility.
     static let kvDiskTierPrivacyBypass = "kv_disk_tier_privacy_bypass_failed"
     static let relayBlindDisabled = "relay_blind_disabled"
     static let stateDirectoryMissing = "state_directory_missing"
@@ -119,7 +120,8 @@ struct PrivacyPostureObservation: Equatable, Sendable {
     var sipEnabled: Bool
     var diagnosticEnvClear: Bool
     /// Wire field `kv_disk_tier_disabled`. Since SPEC-049 v0.6.0 it means the
-    /// privacy path cannot reach the KV disk tier, not that the tier is off.
+    /// privacy path cannot reach the KV disk tier, not that the tier is off;
+    /// since v0.7.0 it also covers the continuous-batching replay-claim store.
     var kvDiskTierDisabled: Bool
     var runtimeSource: String
     var codeCDHash: String
@@ -237,7 +239,7 @@ struct SystemPrivacyPostureProbe: PrivacyPostureProbe {
             coreDumpsDisabled: coreDumpsDisabled,
             sipEnabled: PrivacySIP.unrestrictedFilesystemProtected(sipResult),
             diagnosticEnvClear: envCodes.isEmpty,
-            kvDiskTierDisabled: PrivacyRuntimeHardening.privacyPathBypassesKVDiskTier(),
+            kvDiskTierDisabled: PrivacyRuntimeHardening.privacyPathBypassesDiskSinks(),
             runtimeSource: PrivacyClassConstants.runtimeSource,
             codeCDHash: identity.cdhashHex,
             teamID: identity.teamID,
@@ -297,7 +299,7 @@ enum PrivacyRuntimeHardening {
         if let loopback = LoopbackServeSelection.select(config.model) {
             observation.runtimeSource = loopback.runtimeSource
         }
-        if !privacyPathBypassesKVDiskTier() {
+        if !privacyPathBypassesDiskSinks() {
             observation.kvDiskTierDisabled = false
         }
         let reasons = failureReasons(observation: observation, config: config, probeReasons: probeReasons)
@@ -308,18 +310,53 @@ enum PrivacyRuntimeHardening {
         return .failure(reasons)
     }
 
-    /// SPEC-049-R010 and R007 item 8 (v0.6.0): every barrier between a
-    /// privacy-class request and the KV disk tier holds. The tier itself may be
-    /// on for ordinary traffic. Posture field `kv_disk_tier_disabled` reports
-    /// this result, so a build that lost any barrier cannot attest it.
-    static func privacyPathBypassesKVDiskTier() -> Bool {
+    /// SPEC-049-R010 and R007 item 8 (v0.7.0): every barrier between a
+    /// privacy-class request and the disk holds: the KV disk tier and the
+    /// continuous-batching replay-claim store. The tier itself may be on for
+    /// ordinary traffic. Posture field `kv_disk_tier_disabled` reports this
+    /// result, so a build that lost any barrier cannot attest it.
+    static func privacyPathBypassesDiskSinks() -> Bool {
         let privacy = KVIngestProvenance.privacy
         return !privacy.mayUseReusableKVCache
+            && !privacy.mayPersistRequestDerivedState
             && !ModelRuntime.coldTierAdmits(provenance: privacy)
             && !ModelRuntime.allowsConversationCacheLease(provenance: privacy, nativeAllows: true)
             && !KVDiskCacheGate.persists(
                 conversationKey: KVDiskCacheGate.syntheticPrefix + "privacy-bypass-check",
                 provenance: privacy)
+            && !ContinuousBatchRuntimeReplayAuthority.persistsClaim(for: privacy)
+            && privacyReplayClaimStaysInMemory()
+    }
+
+    /// Runs the path a privacy request takes into continuous batching: the
+    /// live relay-to-row mapping must keep `.privacy`, and the production
+    /// replay authority must claim it, and refuse its replay, without its
+    /// store. The probe's store sits under a character device, so it cannot
+    /// be created and any claim that reached it throws, as the ordinary
+    /// control does; nothing is created, read, or written.
+    static func privacyReplayClaimStaysInMemory() -> Bool {
+        let body = #"{"model":"privacy-bypass-check","messages":[{"role":"user","content":"x"}]}"#
+        guard let request = try? ChatCompletionRequest.parse(data: Data(body.utf8))
+            .withRequestID("privacy-bypass-check-\(UUID().uuidString)")
+            .withIngestProvenance(.privacy),
+            let submission = try? ModelRuntime.continuousBatchSubmission(
+                for: request, promptTokens: [1], maxOutputTokens: 1),
+            submission.schedulerRequest.ingestProvenance == .privacy
+        else { return false }
+        let authority = ContinuousBatchRuntimeReplayAuthority(
+            storeURL: URL(fileURLWithPath: "/dev/null/macprovider-privacy-bypass-check", isDirectory: true))
+        let key = ContinuousBatchSchedulerReplayKey(
+            requestID: submission.requestID,
+            fingerprintSHA256: Data(repeating: 0, count: 32),
+            ingestProvenance: submission.schedulerRequest.ingestProvenance)
+        // Positive control: an ordinary claim does go to the store, and fails.
+        let ordinary = ContinuousBatchSchedulerReplayKey(
+            requestID: submission.requestID + "-ordinary",
+            fingerprintSHA256: Data(repeating: 0, count: 32),
+            ingestProvenance: .relay)
+        return (try? authority.claim(key)) == .claimed
+            && (try? authority.claim(key)) == .duplicateSameRequest
+            && (try? authority.claim(ordinary)) == nil
     }
 
     /// True only when P_TRACED and CS_DEBUGGED are both clear and readable.
