@@ -119,6 +119,32 @@ class SpliceBoundaryTests(unittest.TestCase):
         self.assertEqual(end, len(text))
         self.assertEqual(cr.splice_coordinator_rate_card(text, MINI_BLOCK), text[:start] + MINI_BLOCK)
 
+    def test_column0_sequence_under_top_key_is_not_a_top_key(self) -> None:
+        seq = b"providers:\n- provider_id: a\n  endpoint_url: x\n-\n  provider_id: b\n  endpoint_url: y\n"
+        for text in (seq + MINI, MINI + seq):
+            with self.subTest(first=text[:9]):
+                start, end = cr.coordinator_rate_card_block_span(text, "t")
+                self.assertTrue(text[start:].startswith(b"  rate_card:\n"))
+                out = cr.splice_coordinator_rate_card(text, MINI_BLOCK)
+                self.assertEqual(out, text[:start] + MINI_BLOCK + text[end:])
+                self.assertIn(seq, out)
+
+    def test_production_shaped_column0_providers_round_trip(self) -> None:
+        # Live-config shape: rewards mid-file, a column-0 providers: sequence
+        # after it, then another top-level key.
+        text = (
+            b"admission:\n  provisional_pool_max: 4\n"
+            + MINI
+            + b"providers:\n- provider_id: a\n  endpoint_url: x\n- provider_id: b\n  endpoint_url: y\n"
+            + b"coordinator_advertised_version: v1\n"
+        )
+        block = cr.extract_coordinator_rate_card_block(text, "prod-shaped")
+        self.assertEqual(cr.splice_coordinator_rate_card(text, block), text)
+        out = cr.splice_coordinator_rate_card(text, MINI_BLOCK)
+        _, _, rows = cr.parse_coordinator_rewards(out.decode())
+        self.assertEqual(rows["default"]["completion_credits_per_mtok"], 2)
+        self.assertTrue(out.endswith(b"- provider_id: b\n  endpoint_url: y\ncoordinator_advertised_version: v1\n"))
+
     def test_refusal_matrix(self) -> None:
         cases = {
             "tab": MINI.replace(b"top: 1", b"top:\t1"),
@@ -144,6 +170,10 @@ class SpliceBoundaryTests(unittest.TestCase):
             "inline rate_card": MINI.replace(b"  rate_card:\n", b"  rate_card: 1\n  x:\n"),
             "duplicate rewards key": MINI.replace(b"  after: 2", b"  provider_share: 0.5"),
             "duplicate top key": MINI + b"top: 4\n",
+            "top-level sequence document": b"- a: 1\n" + MINI,
+            "comment-first sequence document": b"# c\n- a\n" + MINI,
+            "sequence after a scalar top key": b"scalar: 1\n- x\n" + MINI,
+            "duplicate key after a sequence": MINI + b"providers:\n- provider_id: a\ntop: 4\n",
             "duplicate row": MINI.replace(b"\n  after: 2", b"    default:\n      prompt_credits_per_mtok: 1\n  after: 2"),
             "non-credit field": MINI.replace(b"      prompt_credits_per_mtok: 500000", b"      provider_share_bps: 9000"),
             "inconsistent indent": MINI.replace(b"  after: 2", b" after: 2"),

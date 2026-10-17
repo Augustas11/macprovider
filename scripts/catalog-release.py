@@ -1780,6 +1780,7 @@ def coordinator_rate_card_block_span(data: bytes, label: str) -> tuple[int, int]
         return len(line) - len(line.lstrip(" "))
 
     top_keys: set[str] = set()
+    last_top_bare = False
     rewards_at: list[int] = []
     for index, line in enumerate(lines):
         code = _yaml_code(line)
@@ -1787,6 +1788,16 @@ def coordinator_rate_card_block_span(data: bytes, label: str) -> tuple[int, int]
             continue
         if code in ("---", "...") or code.startswith(("--- ", "... ", "%")):
             fail(f"{label}: line {index + 1}: multi-document markers and directives are refused")
+        if code == "-" or code.startswith("- "):
+            # A column-0 block-sequence entry is the value of the preceding
+            # top-level key (`providers:` then `- provider_id: ...`), not a key.
+            # It is only accepted under a bare `key:` (no inline value).
+            if not top_keys:
+                fail(f"{label}: line {index + 1}: a top-level sequence document is refused")
+            if not last_top_bare:
+                fail(f"{label}: line {index + 1}: a column-0 sequence entry must follow a bare top-level key")
+            continue
+        last_top_bare = code.endswith(":")
         key = _yaml_key(code)
         if key in top_keys:
             fail(f"{label}: line {index + 1}: duplicate top-level key {key!r}")
