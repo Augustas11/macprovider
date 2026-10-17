@@ -12,14 +12,14 @@ renders it from two inputs and never signs anything:
   executable CDHash, challenge-bank and artifact-projection digests.
 
 The tuple file holds one tuple input object, or a JSON array of them (one per
-admitted model tuple, SPEC-048 0.1.34); `--tuple` may also be repeated. All
+admitted model tuple, SPEC-048 0.1.35); `--tuple` may also be repeated. All
 entries share the release-owned fields and are emitted sorted by the SPEC-023
 entry key. A single tuple input produces the same bytes as before.
 
 The `projection` command renders the release's
 `native-mtp-artifact-manifest.json` from a JSON object keyed by `model_key`
 whose values are the closed `{target, mtp, tokenizer, manifest}` artifact
-objects: the v1 form for one model (byte-identical to the pre-0.1.34 file),
+objects: the v1 form for one model (byte-identical to the pre-0.1.35 file),
 the v2 form keyed by `model_key` for more than one.
 
 Output is canonical bytes (sorted keys, no insignificant whitespace, UTF-8),
@@ -123,7 +123,7 @@ TOP_KEYS = {
 STATE_CLASSES = {"stageable_rewindable", "hybrid_stageable_rewindable"}
 PROFILES = {"native_mtp_greedy_text_v1", "native_mtp_sampled_text_v1"}
 INT_MAX = (1 << 63) - 1
-# SPEC-023 v0.22.25: each quantization exceptions array holds at most 1024
+# SPEC-023 v0.22.27: each quantization exceptions array holds at most 1024
 # entries (256 before); GLM-5.3-Flash carries 554 per-module overrides.
 MAX_QUANTIZATION_EXCEPTIONS = 1024
 MAX_PROPOSAL_DEPTH = 6
@@ -276,7 +276,7 @@ def validate_entry(entry: object, path: str) -> dict:
     _str(entry["hardware_class"], f"{path}.hardware_class", HARDWARE_CLASS)
     _int(entry["ram_bytes"], f"{path}.ram_bytes", 1, INT_MAX)
     bound = _int(entry["max_native_active_rows"], f"{path}.max_native_active_rows", 1, 8)
-    # SPEC-048 MTP-2 (0.1.42): glm5_next serves native MTP on one active row.
+    # SPEC-048 MTP-2 (0.1.43): glm5_next serves native MTP on one active row.
     if entry["mtp_family_adapter"] == "glm5_next_mtp_v1" and bound > 1:
         fail(f"{path}.max_native_active_rows", "glm5_next_mtp_v1 signs at most 1 native active row")
     if bound > slots:
@@ -419,8 +419,8 @@ def _projection_artifacts(value: object, path: str) -> dict:
 
 
 def build_projection(models: object) -> bytes:
-    """SPEC-048 0.1.34 projection manifest: v1 for one model_key (the exact
-    pre-0.1.34 bytes), v2 keyed by model_key for more than one."""
+    """SPEC-048 0.1.35 projection manifest: v1 for one model_key (the exact
+    pre-0.1.35 bytes), v2 keyed by model_key for more than one."""
     if not isinstance(models, dict) or not 1 <= len(models) <= 256:
         fail("$models", "must be an object of 1..256 model_key entries")
     for model_key, artifacts in models.items():

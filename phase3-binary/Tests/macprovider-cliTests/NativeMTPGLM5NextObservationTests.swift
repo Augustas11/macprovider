@@ -2,8 +2,8 @@ import Foundation
 import XCTest
 @testable import macprovider_cli
 
-/// SPEC-048-R002 (0.1.34/0.1.35) `glm5_next_mtp_v1` embedded checkpoint and
-/// SPEC-023-R024 (v0.22.25) override widths and exception bound.
+/// SPEC-048-R002 (0.1.35/0.1.36) `glm5_next_mtp_v1` embedded checkpoint and
+/// SPEC-023-R024 (v0.22.27) override widths and exception bound.
 final class NativeMTPGLM5NextObservationTests: XCTestCase {
     private struct TensorFixture {
         let name: String
@@ -175,7 +175,7 @@ final class NativeMTPGLM5NextObservationTests: XCTestCase {
     }
 
     /// A separate-artifact pair records target and MTP overrides under their
-    /// own prefixes; up to 1024 entries are admitted (SPEC-023 v0.22.25).
+    /// own prefixes; up to 1024 entries are admitted (SPEC-023 v0.22.27).
     func testAffineRepresentationAdmitsUpTo1024Exceptions() throws {
         func pair(count: Int) -> NativeMTPArtifactPairObservation {
             var overrides: [String: NativeMTPAffineModuleOverride] = [:]

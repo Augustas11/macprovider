@@ -131,10 +131,10 @@ enum NativeMTPArtifactObserver {
     static let maxSafetensorsTensorNameUTF8Bytes = 4 * 1024
     static let maxSafetensorsTensorRank = 8
     static let maxSafetensorsTensorDimension = 1 << 30
-    /// SPEC-023-R024 (v0.22.25): each quantization exceptions array holds at
+    /// SPEC-023-R024 (v0.22.27): each quantization exceptions array holds at
     /// most 1024 entries.
     static let maxQuantizationExceptions = 1024
-    /// SPEC-023-R024 (v0.22.25): admitted per-module affine override widths.
+    /// SPEC-023-R024 (v0.22.27): admitted per-module affine override widths.
     /// MLX packs each into whole `uint32` words.
     static let admittedAffineOverrideBits: Set<Int> = [4, 5, 6, 8]
 
@@ -193,7 +193,7 @@ enum NativeMTPArtifactObserver {
         return NativeMTPArtifactPairObservation(target: target, mtp: mtp)
     }
 
-    /// SPEC-048-R002 (0.1.34) `glm5_next_mtp_v1` / `checkpoint_mtp`: the
+    /// SPEC-048-R002 (0.1.35) `glm5_next_mtp_v1` / `checkpoint_mtp`: the
     /// next-N layer is part of the target artifact, so one directory and one
     /// config are observed once and serve as both target and MTP.
     static func observeEmbedded(
@@ -844,7 +844,7 @@ enum NativeMTPArtifactObserver {
     private static let glm5NextVisionPrefixes = ["vision_model.", "vision_tower.", "visual.", "model.visual."]
 
     /// Names `GLM5NextWeights.sanitize` would rewrite. The observer admits only
-    /// a checkpoint already in the post-sanitize layout (SPEC-048-R002 0.1.35).
+    /// a checkpoint already in the post-sanitize layout (SPEC-048-R002 0.1.36).
     private static let glm5NextSanitizerRewriteMarkers = [
         ".hc_attn_", ".hc_ffn_", ".mlp.experts.", ".kv_b_proj.", ".q_conv1d.", ".k_conv1d.",
         ".v_conv1d.", ".mlp.gate.scales", ".mlp.gate.biases", ".self_attn.A_log",
@@ -852,7 +852,7 @@ enum NativeMTPArtifactObserver {
     ]
 
     /// Unpaired floating parameters the GLM5Next model holds as plain
-    /// parameters or unquantized layers (SPEC-048-R002 0.1.35).
+    /// parameters or unquantized layers (SPEC-048-R002 0.1.36).
     private static let glm5NextFloatingParameterSuffixes = [
         ".attn_hc.fn", ".ffn_hc.fn", ".mlp.gate.weight",
         ".indexer.index_kpool_compress_ape", ".indexer.index_kpool_compress_gate",

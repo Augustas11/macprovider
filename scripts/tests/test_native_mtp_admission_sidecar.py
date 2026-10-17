@@ -72,7 +72,7 @@ def resolved_tuple():
 
 
 def glm_tuple():
-    """A stand-in GLM-5.3-Flash tuple (SPEC-048 0.1.34 glm5_next_mtp_v1):
+    """A stand-in GLM-5.3-Flash tuple (SPEC-048 0.1.35 glm5_next_mtp_v1):
     embedded MTP, depth 1, greedy only. Digests are placeholders."""
     value = resolved_tuple()
     entry = value["entry"]
@@ -235,7 +235,7 @@ class NativeMTPAdmissionSidecarTests(unittest.TestCase):
 
 
 class NativeMTPAdmissionMultiEntryTests(unittest.TestCase):
-    """SPEC-048 0.1.34: one sidecar carries every admitted model tuple."""
+    """SPEC-048 0.1.35: one sidecar carries every admitted model tuple."""
 
     def setUp(self):
         self.qwen = resolved_tuple()
@@ -281,7 +281,7 @@ class NativeMTPAdmissionMultiEntryTests(unittest.TestCase):
         self.assertEqual(body["entries"][0]["request_feature_profile"], self.qwen["entry"]["request_feature_profile"])
 
     def test_glm_tuple_signs_at_most_one_native_active_row(self):
-        # SPEC-048 MTP-2 (0.1.42): 4 rows decoded at 0.79x ordinary.
+        # SPEC-048 MTP-2 (0.1.43): 4 rows decoded at 0.79x ordinary.
         body = json.loads(build([self.qwen, self.glm], release_input()))
         self.assertEqual(body["entries"][1]["max_native_active_rows"], 1)
         wide = copy.deepcopy(self.glm)
@@ -304,7 +304,7 @@ class NativeMTPAdmissionMultiEntryTests(unittest.TestCase):
             build([self.qwen, owned], release_input())
 
     def test_exception_arrays_hold_up_to_1024_entries(self):
-        # SPEC-023 v0.22.25: GLM-5.3-Flash records 554 per-module overrides.
+        # SPEC-023 v0.22.27: GLM-5.3-Flash records 554 per-module overrides.
         names = sorted(f"target/language_model.model.layers.{i}.mlp.switch_mlp.down_proj" for i in range(1024))
         wide = copy.deepcopy(self.glm)
         wide["entry"]["quantization"]["per_layer_exceptions"] = names
@@ -330,7 +330,7 @@ class NativeMTPAdmissionMultiEntryTests(unittest.TestCase):
 
 
 class NativeMTPProjectionManifestTests(unittest.TestCase):
-    """SPEC-048 0.1.34 projection manifest: v1 for one model, v2 keyed by model_key."""
+    """SPEC-048 0.1.35 projection manifest: v1 for one model, v2 keyed by model_key."""
 
     def test_single_model_projection_is_the_committed_v1_bytes(self):
         committed = PROJECTION.read_bytes()

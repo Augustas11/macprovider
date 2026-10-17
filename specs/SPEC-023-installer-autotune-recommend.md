@@ -1,6 +1,6 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.25
+version: v0.22.27
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-02
@@ -8,8 +8,8 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
 
 ## Change log
 
-- **v0.22.25 (2026-10-17)** — Native-MTP admission for multi-width affine
-  artifacts (epic #2029, lockstep with SPEC-048 0.1.35). R024 per-module
+- **v0.22.27 (2026-10-17)** — Native-MTP admission for multi-width affine
+  artifacts (epic #2029, lockstep with SPEC-048 0.1.36). R024 per-module
   override widths are `4`, `5`, `6`, or `8` bits (MLX affine packs 5- and
   6-bit values exactly into `uint32` words; widths 2 and 3 and every other
   value still fail closed), and each exceptions array holds at most 1024
@@ -21,7 +21,7 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
   bound. The global width stays 4 (`mlx_affine_4bit`). §12.5 also states that
   an embedded (`checkpoint_mtp`) projection names the target directory as
   `mtp`, so no drafter is fetched, and that a multi-model admission set uses
-  the SPEC-048 0.1.34 v2 projection form. A CLI that predates this revision
+  the SPEC-048 0.1.35 v2 projection form. A CLI that predates this revision
   rejects a whole sidecar carrying a 5- or 6-bit override or more than 256
   exceptions, so every native-MTP tuple on that CLI falls back to ordinary
   decode; SPEC-048 R014 therefore publishes such a sidecar only after the CLI
@@ -3519,7 +3519,7 @@ or a power of two `1..4096`; `padding_rule` is
 `none|zero_pad_to_alignment`; and the manifest is a lowercase `sha256`.
 
 Each exceptions field is sorted bytewise, unique, and contains at most 1024
-entries (v0.22.25; 256 before). Every entry is exactly `target/<module>` or `mtp/<module>` and the
+entries (v0.22.27; 256 before). Every entry is exactly `target/<module>` or `mtp/<module>` and the
 full prefixed entry is 1..128 printable ASCII bytes; `<module>` is the exact
 config module key, which SPEC-048-R002 requires to be the pinned loader's
 post-sanitize module path (a standalone drafter key therefore carries its
@@ -3527,7 +3527,7 @@ post-sanitize module path (a standalone drafter key therefore carries its
 quantization kind. The
 `per_layer_exceptions` array names every per-module quantization override in
 the target and MTP configs; override widths are `4`, `5`, `6`, or `8` bits
-(v0.22.25; `4` or `8` before) and group sizes are `32`, `64`, or `128`. Any
+(v0.22.27; `4` or `8` before) and group sizes are `32`, `64`, or `128`. Any
 other width fails closed. The `unquantized_exceptions` array names every
 config entry whose value is exactly `false`. Consumers MUST fail closed above
 the array bound, on unsorted or duplicate arrays, on an invalid prefix, or when
@@ -3675,10 +3675,10 @@ artifact the provider serves. The provider fetches the drafter from that
 pinned revision when the store holds no copy with that digest, and adopts it
 only after its snapshot-manifest digest matches; any failure leaves the
 provider ordinary. This is the content-addressed SPEC-023 member route of
-SPEC-048's separately stored MTP artifact. **[v0.22.25]** For an embedded
+SPEC-048's separately stored MTP artifact. **[v0.22.27]** For an embedded
 (`checkpoint_mtp`) adapter the projected `mtp` member is the target directory
 itself (same path and digest) and no drafter is fetched. A set whose entries
-name more than one `model_key` carries the SPEC-048 0.1.34 v2 projection
+name more than one `model_key` carries the SPEC-048 0.1.35 v2 projection
 manifest keyed by `model_key`; a single-model set keeps the v1 form. Every projected byte is still
 verified and loaded only from the private capture; the unmanifested-file
 sweep applies to the bundle layout only, since the store root holds other
@@ -3794,7 +3794,7 @@ v4 exact-row/feed/digest and downgrade rules; signature/signer equality;
 release.json/ledger/candidate/artifact binding; every field mismatch; expiry;
 duplicate/order/length/bound failure, including a 1024-entry exceptions
 array that validates and a 1025-entry one that fails, and 5- and 6-bit
-overrides that validate while 2-, 3-, and 7-bit overrides fail (v0.22.25);
+overrides that validate while 2-, 3-, and 7-bit overrides fail (v0.22.27);
 missing evidence; unknown field; wrong type; cross-release replay; an MXFP8 lookalike; accelerated gate seeding; Stage
 A previous-stable update with unchanged payload map; premature Stage B failure;
 bridge-qualified Stage B success for the exact final map; both canonical tuple

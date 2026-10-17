@@ -133,7 +133,7 @@ no production config load may make the tuple selectable before that promotion.
 A sidecar with two or more model entries uses the v2 projection manifest
 (`macprovider.native-mtp-artifact-projection.v2`, keyed by `model_key`). A
 GLM-5.3-Flash entry also carries 5- and 6-bit overrides and more than 256
-exceptions (SPEC-023 v0.22.25). A CLI older than the one that reads these
+exceptions (SPEC-023 v0.22.27). A CLI older than the one that reads these
 rejects the whole admission set, and every native-MTP tuple on it falls back to
 ordinary decode, Qwen included. SPEC-048-R014 item 10 therefore fixes the order:
 

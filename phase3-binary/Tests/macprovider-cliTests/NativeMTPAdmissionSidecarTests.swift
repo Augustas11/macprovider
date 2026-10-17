@@ -1348,7 +1348,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         let cases: [([String: Any], NativeMTPAdmissionSidecarError)] = [
             (affine { $0["per_layer_exceptions"] = ["target/z", "mtp/a"] }, .invalidValue("$.entries[0].quantization.per_layer_exceptions")),
             (affine { $0["per_layer_exceptions"] = ["target/a", "target/a"] }, .invalidValue("$.entries[0].quantization.per_layer_exceptions")),
-            // SPEC-023 v0.22.25: at most 1024 entries.
+            // SPEC-023 v0.22.27: at most 1024 entries.
             (affine { $0["per_layer_exceptions"] = (0...1024).map { String(format: "target/module.%04d", $0) } }, .invalidValue("$.entries[0].quantization.per_layer_exceptions")),
             (affine { $0["unquantized_exceptions"] = ["model.layers.0.mlp.down_proj"] }, .invalidValue("$.entries[0].quantization.unquantized_exceptions")),
             (affine { $0["packed_data_dtype"] = "uint8" }, .invalidValue("$.entries[0].quantization")),
@@ -1423,7 +1423,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         }
     }
 
-    /// SPEC-023 v0.22.25: an exceptions array of up to 1024 entries parses
+    /// SPEC-023 v0.22.27: an exceptions array of up to 1024 entries parses
     /// (the GLM-5.3-Flash artifact records 554 per-module overrides).
     func testReleaseEnvelopeAcceptsUpTo1024QuantizationExceptions() throws {
         let names = (0..<1024).map { String(format: "target/language_model.model.layers.%04d.mlp.down_proj", $0) }
@@ -1530,7 +1530,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         )
     }
 
-    /// SPEC-048 MTP-2 (0.1.42): a glm5_next tuple signs at most one native
+    /// SPEC-048 MTP-2 (0.1.43): a glm5_next tuple signs at most one native
     /// active row (window A2: 1.27x at one row, 0.79x at four); Qwen keeps
     /// the generic 1...8 range.
     func testEmbeddedGLMAdapterSignsAtMostOneNativeActiveRow() throws {
@@ -1570,7 +1570,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         ))
     }
 
-    /// SPEC-048-R002 (0.1.34): a sidecar naming two models carries the v2
+    /// SPEC-048-R002 (0.1.35): a sidecar naming two models carries the v2
     /// projection keyed by model_key; the v1 form serves only one model.
     func testMultiModelSidecarReadsTheV2ProjectionByModelKey() throws {
         let fixture = try makeReleaseEnvelopeFixture()

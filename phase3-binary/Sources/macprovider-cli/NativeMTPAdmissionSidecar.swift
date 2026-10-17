@@ -508,7 +508,7 @@ enum NativeMTPAdmissionSidecar {
     static let artifactProjectionSchemaV2 = "macprovider.native-mtp-artifact-projection.v2"
     /// A v2 projection names up to 256 models (one per sidecar entry).
     static let maxArtifactProjectionManifestBytes = 256 * 1024
-    /// SPEC-023-R024 (v0.22.25): each quantization exceptions array holds at
+    /// SPEC-023-R024 (v0.22.27): each quantization exceptions array holds at
     /// most 1024 entries.
     static let maxQuantizationExceptions = 1024
     static let embeddedMTPFamilyAdapter = "glm5_next_mtp_v1"
@@ -526,7 +526,7 @@ enum NativeMTPAdmissionSidecar {
         familyAdapter == embeddedMTPFamilyAdapter ? [greedyRequestFeatureProfile] : requestFeatureProfiles
     }
 
-    /// SPEC-048-R002 (0.1.34/0.1.35): the release entry carries no layout, so
+    /// SPEC-048-R002 (0.1.35/0.1.36): the release entry carries no layout, so
     /// the adapter decides it. Only the GLM-5-Next adapter is embedded; every
     /// other adapter keeps the separate-artifact layout.
     static func sourceLayout(forFamilyAdapter familyAdapter: String) -> String {
@@ -1492,7 +1492,7 @@ enum NativeMTPAdmissionSidecar {
         }
         let qualifiedSlots = try requireInt(object, "qualified_slots", path: path, range: 2...8)
         let maxNativeActiveRows = try requireInt(object, "max_native_active_rows", path: path, range: 1...8)
-        // SPEC-048 MTP-2 (0.1.42): a glm5_next tuple serves native MTP on one
+        // SPEC-048 MTP-2 (0.1.43): a glm5_next tuple serves native MTP on one
         // active row; at four rows it decoded slower than ordinary batching.
         if case .string(let adapter)? = object["mtp_family_adapter"],
            let bound = maxNativeActiveRowsBound(familyAdapter: adapter),
@@ -1761,7 +1761,7 @@ enum NativeMTPAdmissionSidecar {
         return artifacts
     }
 
-    /// SPEC-048-R002 (0.1.34): v1 is one `artifacts` object for a sidecar
+    /// SPEC-048-R002 (0.1.35): v1 is one `artifacts` object for a sidecar
     /// whose entries all name one model; v2 keys one artifacts object per
     /// `model_key` and must name exactly the sidecar's model keys.
     private static func selectProjectedArtifacts(
