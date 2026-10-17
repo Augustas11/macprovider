@@ -805,6 +805,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     private var labNativeMTPCommittedPrefixHidden: [String: [MLXArray]] = [:]
     private var labNativeMTPCommittedPrefixTargetBonus: [String: Int] = [:]
     private var labNativeMTPPrefixPositionDeltasUnsupported: Set<String> = []
+    private var labNativeMTPLastFinalizeRecomputePrefixTokens: [String: Int] = [:]
     #endif
 
     init(
@@ -1638,7 +1639,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     )
                     try await self.labRecomputeNativeMTPDrafterDigest(
                         targetModel: context.model,
-                        requestID: input.requestID
+                        requestID: input.requestID,
+                        sampledAtFinalize: true
                     )
                 }
                 #endif
@@ -1891,6 +1893,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             labNativeMTPCommittedPrefixHidden.removeAll()
             labNativeMTPCommittedPrefixTargetBonus.removeAll()
             labNativeMTPPrefixPositionDeltasUnsupported.removeAll()
+            labNativeMTPLastFinalizeRecomputePrefixTokens.removeAll()
             #endif
             if activeOperations == 0 {
                 lock.unlock()
@@ -2494,9 +2497,29 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         lock.unlock()
     }
 
+    /// The independent recompute re-prepares a drafter over the row's whole
+    /// committed prefix, so it costs O(context) per call; run on every
+    /// finalize it grew window J's finalize phase from 117 to 168 ms over
+    /// ~450 tokens. At finalize (`sampledAtFinalize`) it runs on a row's
+    /// first committed round and then once each time the prefix crosses
+    /// another multiple of this many tokens (the glm5_next paged-KV block).
+    /// Prefill, prompt-chunk, flush and abort sites still recompute on every
+    /// call; they run once per request or rarely.
+    static let labDrafterRecomputeIntervalTokens = 256
+
+    static func labDrafterRecomputeDue(
+        lastRecomputedPrefixTokens: Int?,
+        prefixTokens: Int,
+        intervalTokens: Int = labDrafterRecomputeIntervalTokens
+    ) -> Bool {
+        guard let lastRecomputedPrefixTokens else { return true }
+        return prefixTokens / intervalTokens > lastRecomputedPrefixTokens / intervalTokens
+    }
+
     private func labRecomputeNativeMTPDrafterDigest(
         targetModel: any LanguageModel,
-        requestID: String
+        requestID: String,
+        sampledAtFinalize: Bool = false
     ) async throws {
         try requireTargetLockHeld("lab_recompute_drafter_digest")
         guard labNativeMTPObserverInstalled(), let drafterContainer else { return }
@@ -2506,8 +2529,13 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         let unsupportedPositionDeltas = labNativeMTPPrefixPositionDeltasUnsupported.contains(requestID)
         let targetBonus = labNativeMTPCommittedPrefixTargetBonus[requestID]
         let actualSeed = nativeMTPDrafterSeedTokens[requestID]
+        let lastRecomputedPrefixTokens = labNativeMTPLastFinalizeRecomputePrefixTokens[requestID]
         lock.unlock()
         guard actualSeed != nil, let targetBonus, !tokens.isEmpty else { return }
+        guard !sampledAtFinalize || Self.labDrafterRecomputeDue(
+            lastRecomputedPrefixTokens: lastRecomputedPrefixTokens,
+            prefixTokens: tokens.count
+        ) else { return }
         guard tokens.count == hidden.count else {
             throw ContinuousBatchSchedulerError.unsupported("native_mtp_drafter_recompute_shape_mismatch")
         }
@@ -2549,6 +2577,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         // retain its recomputed digest as evidence without rejecting finalize.
         lock.lock()
         nativeMTPDrafterRecomputeDigests[requestID] = recomputedDigest
+        if sampledAtFinalize {
+            labNativeMTPLastFinalizeRecomputePrefixTokens[requestID] = tokens.count
+        }
         lock.unlock()
     }
     #endif
@@ -3013,6 +3044,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         labNativeMTPCommittedPrefixHidden.removeValue(forKey: requestID)
         labNativeMTPCommittedPrefixTargetBonus.removeValue(forKey: requestID)
         labNativeMTPPrefixPositionDeltasUnsupported.remove(requestID)
+        labNativeMTPLastFinalizeRecomputePrefixTokens.removeValue(forKey: requestID)
         #endif
         lock.unlock()
     }
@@ -3160,29 +3192,35 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         guard let row else {
             throw ContinuousBatchSchedulerError.unsupported("native_mtp_observer_missing_row_state")
         }
+        // Every layer's state is canonicalized and evaluated together, then
+        // hashed in one concurrent pass (one GPU wait, all cores), and fed to
+        // the hasher in the same layer/slot order as before.
+        let layers = try row.caches.map { cache in
+            (cache: cache, shape: try rowTargetCacheDigestShape(for: cache), state: cache.state)
+        }
+        let records = try Self.arrayDigestRecords(layers.flatMap { layer in
+            layer.state.map { (array: $0, logicalTokens: layer.shape.logicalTokens) }
+        })
+        var nextRecord = records.makeIterator()
         var hasher = SHA256()
         Self.update(&hasher, label: "kind", value: "row-cache")
-        for (layerIndex, cache) in row.caches.enumerated() {
+        for (layerIndex, layer) in layers.enumerated() {
             Self.update(&hasher, label: "layer", value: String(layerIndex))
-            Self.update(&hasher, label: "type", value: String(describing: type(of: cache)))
-            Self.update(&hasher, label: "offset", value: String(cache.offset))
-            let digestShape = try rowTargetCacheDigestShape(for: cache)
-            switch digestShape {
+            Self.update(&hasher, label: "type", value: String(describing: type(of: layer.cache)))
+            Self.update(&hasher, label: "offset", value: String(layer.cache.offset))
+            switch layer.shape {
             case .paged(let storedTokens, let blockSizeTokens):
                 Self.update(&hasher, label: "paged_stored_tokens", value: String(storedTokens))
                 Self.update(&hasher, label: "paged_block_size_tokens", value: String(blockSizeTokens))
             case .standard:
                 break
             }
-            let state = cache.state
-            Self.update(&hasher, label: "slot_count", value: String(state.count))
-            for (slotIndex, array) in state.enumerated() {
-                try Self.updateArrayDigest(
-                    &hasher,
-                    label: "slot_\(slotIndex)",
-                    array: array,
-                    logicalTokens: digestShape.logicalTokens
-                )
+            Self.update(&hasher, label: "slot_count", value: String(layer.state.count))
+            for slotIndex in layer.state.indices {
+                guard let record = nextRecord.next() else {
+                    throw ContinuousBatchSchedulerError.unsupported("native_mtp_observer_digest_record_mismatch")
+                }
+                Self.update(&hasher, label: "slot_\(slotIndex)", record: record)
             }
         }
         return Self.hexString(hasher.finalize())
@@ -3375,18 +3413,108 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         array: MLXArray,
         logicalTokens: Int?
     ) throws {
-        switch array.dtype {
-        case .float16, .bfloat16, .float32, .int32, .int64, .uint32, .uint64, .bool:
-            break
-        default:
-            throw ContinuousBatchSchedulerError.unsupported("native_mtp_observer_unsupported_dtype")
+        let records = try arrayDigestRecords([(array: array, logicalTokens: logicalTokens)])
+        update(&hasher, label: label, record: records[0])
+    }
+
+    /// One state array's digest input: its layout and the SHA-256 of each
+    /// fixed-size chunk of its logical bytes, in order.
+    struct ArrayDigestRecord: Equatable {
+        let dType: String
+        let dTypeBits: Int
+        let shape: [Int]
+        let byteCount: Int
+        let chunkDigests: Data
+    }
+
+    /// A glm5_next row holds ~140 MB of KDA recurrent state (34 layers of
+    /// 64x128x128 fp32) besides its MLA latent cache. One serial SHA-256
+    /// pass over it took ~50 ms per digest, and the observer takes four per
+    /// native round (window J: 52/83/117 ms propose/verify/finalize phases at
+    /// 30 tokens of context, against 0/33/3 ms without the observer). The
+    /// bytes are now hashed as 1 MiB chunks on every core; equal bytes still
+    /// give equal digests and any changed byte changes its chunk digest.
+    static let labDigestChunkBytes = 1 << 20
+
+    static func arrayDigestRecords(
+        _ arrays: [(array: MLXArray, logicalTokens: Int?)],
+        chunkBytes: Int = labDigestChunkBytes
+    ) throws -> [ArrayDigestRecord] {
+        for entry in arrays {
+            switch entry.array.dtype {
+            case .float16, .bfloat16, .float32, .int32, .int64, .uint32, .uint64, .bool:
+                break
+            default:
+                throw ContinuousBatchSchedulerError.unsupported("native_mtp_observer_unsupported_dtype")
+            }
         }
-        let canonical = try canonicalLogicalArray(array, logicalTokens: logicalTokens)
-        let data = canonical.asData(access: .copy)
-        update(&hasher, label: "\(label).dtype", value: String(describing: data.dType))
-        update(&hasher, label: "\(label).dtype_bits", value: String(canonical.itemSize * 8))
-        update(&hasher, label: "\(label).shape", value: data.shape.map(String.init).joined(separator: "x"))
-        update(&hasher, label: "\(label).bytes", data: data.data)
+        let canonical = try arrays.map { try canonicalLogicalArray($0.array, logicalTokens: $0.logicalTokens) }
+        // One evaluation for every array instead of one GPU wait per slot.
+        eval(canonical)
+        return withExtendedLifetime(canonical) {
+            // A contiguous array is read in place (the no-copy Data is valid
+            // while `canonical` is alive); a strided slice is copied once. An
+            // empty array (a GLM latent cache's unused slot) has no backing
+            // pointer for the no-copy path.
+            let data = canonical.map { $0.size == 0 ? $0.asData(access: .copy) : $0.asData(access: .noCopyIfContiguous) }
+            let chunkDigests = concurrentChunkDigests(data.map(\.data), chunkBytes: chunkBytes)
+            return canonical.indices.map { index in
+                ArrayDigestRecord(
+                    dType: String(describing: data[index].dType),
+                    dTypeBits: canonical[index].itemSize * 8,
+                    shape: data[index].shape,
+                    byteCount: data[index].data.count,
+                    chunkDigests: chunkDigests[index]
+                )
+            }
+        }
+    }
+
+    /// The concatenated SHA-256 digests of each buffer's `chunkBytes`
+    /// chunks (empty for an empty buffer), computed concurrently.
+    static func concurrentChunkDigests(_ buffers: [Data], chunkBytes: Int) -> [Data] {
+        precondition(chunkBytes > 0)
+        var work: [(buffer: Int, range: Range<Int>)] = []
+        for (index, buffer) in buffers.enumerated() {
+            var start = 0
+            while start < buffer.count {
+                let end = min(start + chunkBytes, buffer.count)
+                work.append((index, start ..< end))
+                start = end
+            }
+        }
+        let chunks = work
+        let digestBytes = SHA256.byteCount
+        var flat = [UInt8](repeating: 0, count: chunks.count * digestBytes)
+        flat.withUnsafeMutableBytes { output in
+            let output = output
+            DispatchQueue.concurrentPerform(iterations: chunks.count) { item in
+                let (buffer, range) = chunks[item]
+                let digest = buffers[buffer].withUnsafeBytes { bytes in
+                    var hasher = SHA256()
+                    hasher.update(bufferPointer: UnsafeRawBufferPointer(rebasing: bytes[range]))
+                    return hasher.finalize()
+                }
+                digest.withUnsafeBytes { digestBytesPointer in
+                    UnsafeMutableRawBufferPointer(
+                        rebasing: output[(item * digestBytes) ..< ((item + 1) * digestBytes)]
+                    ).copyMemory(from: digestBytesPointer)
+                }
+            }
+        }
+        var result = Array(repeating: Data(), count: buffers.count)
+        for (item, entry) in chunks.enumerated() {
+            result[entry.buffer].append(contentsOf: flat[(item * digestBytes) ..< ((item + 1) * digestBytes)])
+        }
+        return result
+    }
+
+    private static func update(_ hasher: inout SHA256, label: String, record: ArrayDigestRecord) {
+        update(&hasher, label: "\(label).dtype", value: record.dType)
+        update(&hasher, label: "\(label).dtype_bits", value: String(record.dTypeBits))
+        update(&hasher, label: "\(label).shape", value: record.shape.map(String.init).joined(separator: "x"))
+        update(&hasher, label: "\(label).byte_count", value: String(record.byteCount))
+        update(&hasher, label: "\(label).chunk_sha256", data: record.chunkDigests)
     }
 
     private static func canonicalLogicalArray(

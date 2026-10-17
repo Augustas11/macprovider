@@ -104,6 +104,26 @@ final class NativeMTPJourneyRunner {
 
     /// step-05 boundary row length: at least four blocks, so a large block
     /// still has several boundaries (Qwen3.5 keeps 256).
+    /// step-05: the backend recomputes a native row's drafter independently
+    /// on its first committed round and then each time its prefix crosses
+    /// another recompute interval. Holds when the first after-finalize record
+    /// carries a recompute and every later one is within one interval (plus
+    /// one round's commit) of the latest recompute at or before it.
+    static func drafterRecomputeCoverageHolds(
+        finalizeTokenCounts: [Int],
+        recomputedTokenCounts: [Int],
+        intervalTokens: Int = PagedKVSharedForwardBackend.labDrafterRecomputeIntervalTokens,
+        roundSlackTokens: Int = 8
+    ) -> Bool {
+        guard let first = finalizeTokenCounts.first,
+              recomputedTokenCounts.first == first
+        else { return false }
+        return finalizeTokenCounts.allSatisfy { tokens in
+            guard let latest = recomputedTokenCounts.filter({ $0 <= tokens }).max() else { return false }
+            return tokens - latest <= intervalTokens + roundSlackTokens
+        }
+    }
+
     static func boundaryRowTokens(blockTokens: Int) -> Int {
         max(256, 4 * blockTokens)
     }
@@ -161,6 +181,7 @@ final class NativeMTPJourneyRunner {
         // continues so one failure does not hide the others.
         var steps: [NativeMTPJourneyStep] = []
         func run(_ id: String, _ body: () async throws -> NativeMTPJourneyStep) async {
+            let started = Date()
             do {
                 steps.append(try await body())
             } catch {
@@ -168,6 +189,15 @@ final class NativeMTPJourneyRunner {
                 failed.check("completed_without_error", false)
                 failed.details["error"] = String(describing: error)
                 steps.append(failed)
+            }
+            // The result document prints only at the end; a run killed at its
+            // time limit still shows which steps finished, how, and how long.
+            if let step = steps.last {
+                let status = step.document["status"] as? String ?? "fail"
+                let failing = step.checks.filter { !$0.1 }.map(\.0).prefix(8).joined(separator: ",")
+                FileHandle.standardError.write(Data(
+                    "native-mtp-journey-e2e: step=\(step.id) status=\(status) elapsed_s=\(Int(Date().timeIntervalSince(started))) failing=\(failing.isEmpty ? "-" : failing)\n".utf8
+                ))
             }
         }
         await run("step-04-serial-token-oracle") {
@@ -445,7 +475,12 @@ final class NativeMTPJourneyRunner {
                 let recomputedDrafterRecords = stateRecords.filter {
                     $0.phase == .afterFinalize && $0.drafterRecomputeDigestSHA256 != nil
                 }
-                step.check("\(id).independent_drafter_recomputation_observed", !afterFinalize.isEmpty && recomputedDrafterRecords.count == afterFinalize.count)
+                // The O(context) recompute runs on the first committed round
+                // and once per crossed recompute interval, not every round.
+                step.check("\(id).independent_drafter_recomputation_observed", Self.drafterRecomputeCoverageHolds(
+                    finalizeTokenCounts: afterFinalize.map(\.committedKVTokenCount),
+                    recomputedTokenCounts: recomputedDrafterRecords.map(\.committedKVTokenCount)
+                ))
                 // Drafter byte parity is diagnostic: packed/full-prefix kernels
                 // may accumulate differently. Target-cache and token parity
                 // remain mandatory checks above (SPEC-048 MTP-5/MTP-6).

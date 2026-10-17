@@ -3982,6 +3982,95 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         }
     }
 
+    /// Window J: the lab digests hash each state array as concurrently
+    /// computed 1 MiB chunk digests. Every chunk is the plain SHA-256 of its
+    /// bytes, in order, and a change in any chunk changes the result.
+    func testConcurrentChunkDigestsAreOrderedPerChunkSHA256() {
+        let a = Data((0 ..< 10_000).map { UInt8($0 % 251) })
+        let b = Data((0 ..< 300).map { UInt8($0 % 7) })
+        let digests = PagedKVSharedForwardBackend.concurrentChunkDigests([a, Data(), b], chunkBytes: 4096)
+        func expected(_ data: Data) -> Data {
+            stride(from: 0, to: data.count, by: 4096).reduce(into: Data()) { result, start in
+                result.append(contentsOf: SHA256.hash(data: data[start ..< min(start + 4096, data.count)]))
+            }
+        }
+        XCTAssertEqual(digests.count, 3)
+        XCTAssertEqual(digests[0], expected(a))
+        XCTAssertEqual(digests[0].count, 3 * SHA256.byteCount)
+        XCTAssertEqual(digests[1], Data())
+        XCTAssertEqual(digests[2], expected(b))
+        var changed = a
+        changed[9_999] ^= 1
+        let changedDigests = PagedKVSharedForwardBackend.concurrentChunkDigests([changed], chunkBytes: 4096)
+        XCTAssertEqual(changedDigests[0].prefix(2 * SHA256.byteCount), digests[0].prefix(2 * SHA256.byteCount))
+        XCTAssertNotEqual(changedDigests[0], digests[0])
+    }
+
+    /// The row digest's array records see only the logical bytes: a strided
+    /// logical slice and the same values stored contiguously agree, and one
+    /// changed value in a later chunk does not.
+    func testArrayDigestRecordsHashLogicalBytesAcrossChunks() throws {
+        try Device.withDefaultDevice(.cpu) {
+            let values = (0 ..< 2 * 6 * 4).map { Float($0) }
+            let stored = MLXArray(values, [1, 2, 6, 4])
+            let logical = stored[0 ..< 4, axis: 2]
+            let compact = MLXArray((0 ..< 2).flatMap { head in
+                (0 ..< 4 * 4).map { Float(head * 24 + $0) }
+            }, [1, 2, 4, 4])
+            var changedValues = values
+            changedValues[24 + 15] += 1
+            let changed = MLXArray(changedValues, [1, 2, 6, 4])
+            let records = try PagedKVSharedForwardBackend.arrayDigestRecords([
+                (array: stored, logicalTokens: 4),
+                (array: compact, logicalTokens: nil),
+                (array: logical, logicalTokens: nil),
+                (array: changed, logicalTokens: 4),
+            ], chunkBytes: 16)
+            XCTAssertEqual(records[0], records[1])
+            XCTAssertEqual(records[0], records[2])
+            XCTAssertEqual(records[0].shape, [1, 2, 4, 4])
+            XCTAssertEqual(records[0].byteCount, 2 * 4 * 4 * 4)
+            XCTAssertEqual(records[0].chunkDigests.count, 8 * SHA256.byteCount)
+            XCTAssertNotEqual(records[0], records[3])
+            XCTAssertEqual(records[0].chunkDigests.prefix(7 * SHA256.byteCount), records[3].chunkDigests.prefix(7 * SHA256.byteCount))
+        }
+    }
+
+    /// The finalize-site drafter recompute runs on a row's first committed
+    /// round and once per crossed 256-token interval after it.
+    func testLabDrafterRecomputeIsDueOnFirstRoundAndEachCrossedInterval() {
+        typealias Backend = PagedKVSharedForwardBackend
+        XCTAssertEqual(Backend.labDrafterRecomputeIntervalTokens, 256)
+        XCTAssertTrue(Backend.labDrafterRecomputeDue(lastRecomputedPrefixTokens: nil, prefixTokens: 31))
+        XCTAssertFalse(Backend.labDrafterRecomputeDue(lastRecomputedPrefixTokens: 31, prefixTokens: 33))
+        XCTAssertFalse(Backend.labDrafterRecomputeDue(lastRecomputedPrefixTokens: 31, prefixTokens: 255))
+        XCTAssertTrue(Backend.labDrafterRecomputeDue(lastRecomputedPrefixTokens: 255, prefixTokens: 256))
+        XCTAssertTrue(Backend.labDrafterRecomputeDue(lastRecomputedPrefixTokens: 254, prefixTokens: 257))
+        XCTAssertFalse(Backend.labDrafterRecomputeDue(lastRecomputedPrefixTokens: 257, prefixTokens: 511))
+        XCTAssertTrue(Backend.labDrafterRecomputeDue(lastRecomputedPrefixTokens: 511, prefixTokens: 513))
+    }
+
+    func testJourneyDrafterRecomputeCoverageMatchesTheFinalizeSampling() {
+        let finalize = Array(stride(from: 31, through: 1_053, by: 2))
+        var last: Int?
+        var recomputed: [Int] = []
+        for tokens in finalize where PagedKVSharedForwardBackend.labDrafterRecomputeDue(
+            lastRecomputedPrefixTokens: last, prefixTokens: tokens
+        ) {
+            recomputed.append(tokens)
+            last = tokens
+        }
+        XCTAssertEqual(recomputed, [31, 257, 513, 769, 1_025])
+        XCTAssertTrue(NativeMTPJourneyRunner.drafterRecomputeCoverageHolds(
+            finalizeTokenCounts: finalize, recomputedTokenCounts: recomputed))
+        XCTAssertFalse(NativeMTPJourneyRunner.drafterRecomputeCoverageHolds(
+            finalizeTokenCounts: finalize, recomputedTokenCounts: Array(recomputed.dropFirst())))
+        XCTAssertFalse(NativeMTPJourneyRunner.drafterRecomputeCoverageHolds(
+            finalizeTokenCounts: finalize, recomputedTokenCounts: [31, 257, 769, 1_025]))
+        XCTAssertFalse(NativeMTPJourneyRunner.drafterRecomputeCoverageHolds(
+            finalizeTokenCounts: [], recomputedTokenCounts: []))
+    }
+
     func testLabStateDigestObserverFailsClosedForPagedSlidingWindowCache() async throws {
         guard PagedKVMetallibGate.defaultMetallibExists() else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")

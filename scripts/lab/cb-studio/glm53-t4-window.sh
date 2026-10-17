@@ -42,7 +42,8 @@
 #        (`--throughput-tokens`, default 256) at 1 and 4 rows reports native
 #        over ordinary end-to-end tok/s and acceptance. Not the R015 matrix.
 #        Legs 5 and 6 run with MACPROVIDER_CB_TRACE=1 and their own time
-#        limits (MTP_E2E_TIMEOUT_S 900, MTP_JOURNEY_TIMEOUT_S 1200); on a
+#        limits (MTP_E2E_TIMEOUT_S 900, MTP_JOURNEY_TIMEOUT_S 1800: startup
+#        (GLM loads, paged-KV measurement) takes ~7 min of it); on a
 #        timeout the process's stacks are sampled to <leg>-sample.txt before
 #        it is killed, so a hang cannot take the window and leaves evidence.
 #     6. (`run-mtp-journey`, not in the default legs) the hidden
@@ -379,7 +380,7 @@ PY
   mkdir -p $jfixture
   cp -cR $MODEL $jfixture/target
   local journey_rc=0
-  run_bounded ${MTP_JOURNEY_TIMEOUT_S:-1200} leg6 $OUT/mtp-journey.json $OUT/mtp-journey.log \
+  run_bounded ${MTP_JOURNEY_TIMEOUT_S:-1800} leg6 $OUT/mtp-journey.json $OUT/mtp-journey.log \
     env MACPROVIDER_NATIVE_MTP_E2E=1 MACPROVIDER_CB_TRACE=1 \
     $HARNESS/macprovider-cli native-mtp-journey-e2e --root $jfixture --model-id zai-org/glm-5.3-flash \
     --qualified-slots ${JOURNEY_SLOTS:-4} --max-native-active-rows ${JOURNEY_NATIVE_ROWS:-1} \
