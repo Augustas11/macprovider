@@ -513,6 +513,12 @@ enum NativeMTPAdmissionSidecar {
     static let maxQuantizationExceptions = 1024
     static let embeddedMTPFamilyAdapter = "glm5_next_mtp_v1"
 
+    /// The only `request_feature_profile` values a family adapter may sign
+    /// (SPEC-048 MTP-2): `glm5_next_mtp_v1` is greedy only.
+    static func allowedRequestFeatureProfiles(familyAdapter: String) -> Set<String> {
+        familyAdapter == embeddedMTPFamilyAdapter ? [greedyRequestFeatureProfile] : requestFeatureProfiles
+    }
+
     /// SPEC-048-R002 (0.1.34/0.1.35): the release entry carries no layout, so
     /// the adapter decides it. Only the GLM-5-Next adapter is embedded; every
     /// other adapter keeps the separate-artifact layout.
@@ -1448,6 +1454,13 @@ enum NativeMTPAdmissionSidecar {
         let decodePath = try requireString(object, "decode_path", path: path, allowed: ["native_mtp"])
         let requestFeatureProfile = try requireNonEmptyString(object, "request_feature_profile", path: path)
         guard requestFeatureProfiles.contains(requestFeatureProfile) else {
+            throw NativeMTPAdmissionSidecarError.invalidValue("\(path).request_feature_profile")
+        }
+        // SPEC-048 MTP-2: the glm5_next drafter proposes greedily only, so its
+        // tuple is admitted only with the greedy profile; sampled rows select
+        // ordinary with reason `sampling`.
+        if case .string(let adapter)? = object["mtp_family_adapter"],
+           !allowedRequestFeatureProfiles(familyAdapter: adapter).contains(requestFeatureProfile) {
             throw NativeMTPAdmissionSidecarError.invalidValue("\(path).request_feature_profile")
         }
         let proposalDepth = try requireInt(

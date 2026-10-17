@@ -47,6 +47,18 @@ struct NativeMTPHardwareE2EFamily: Equatable, Sendable {
         pagedKind: .pagedMLA(kpool: 4)
     )
 
+    /// The lab tuple's `request_feature_profile`: sampled where the family
+    /// may sign it (Qwen3.5), greedy only for `glm5_next` (SPEC-048 MTP-2).
+    var requestFeatureProfile: String {
+        NativeMTPAdmissionSidecar.allowedRequestFeatureProfiles(familyAdapter: familyAdapter)
+            .contains(NativeMTPAdmissionSidecar.sampledRequestFeatureProfile)
+            ? NativeMTPAdmissionSidecar.sampledRequestFeatureProfile
+            : NativeMTPAdmissionSidecar.greedyRequestFeatureProfile
+    }
+
+    /// Whether the tuple admits sampled rows to native MTP.
+    var admitsSampledRows: Bool { requestFeatureProfile == NativeMTPAdmissionSidecar.sampledRequestFeatureProfile }
+
     /// The fixture directory the drafter artifact lives in.
     var mtpDirectoryName: String { embeddedMTP ? "target" : "mtp" }
 
@@ -1033,9 +1045,10 @@ final class NativeMTPHardwareE2ERunner {
             "ram_bytes": machine.ramGB * 1_073_741_824,
             "qualified_slots": maxBatch,
             "max_native_active_rows": maxNativeActiveRows,
-            // The lab tuple qualifies sampled rows too (target-sample exact
-            // match), so temperature cells measure the native path.
-            "request_feature_profile": NativeMTPAdmissionSidecar.sampledRequestFeatureProfile,
+            // A Qwen3.5 lab tuple qualifies sampled rows too (target-sample
+            // exact match), so temperature cells measure the native path; a
+            // glm5_next tuple is greedy only.
+            "request_feature_profile": family.requestFeatureProfile,
             "max_prompt_tokens": maxPromptTokens,
             "decrease_threshold_ppm": 1,
             "increase_threshold_ppm": 2,

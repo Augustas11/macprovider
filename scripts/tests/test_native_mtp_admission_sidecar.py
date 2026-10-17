@@ -269,6 +269,17 @@ class NativeMTPAdmissionMultiEntryTests(unittest.TestCase):
             identity(build(self.qwen, release_input()))["native_mtp_admission_tuple_sha256"][0],
         )
 
+    def test_glm_tuple_signs_only_the_greedy_profile(self):
+        # SPEC-048 MTP-2: the glm5_next drafter proposes greedily only.
+        body = json.loads(build([self.qwen, self.glm], release_input()))
+        self.assertEqual(body["entries"][1]["request_feature_profile"], "native_mtp_greedy_text_v1")
+        sampled = copy.deepcopy(self.glm)
+        sampled["entry"]["request_feature_profile"] = "native_mtp_sampled_text_v1"
+        with self.assertRaisesRegex(SidecarError, "greedy only"):
+            build([self.qwen, sampled], release_input())
+        # Qwen may still sign the sampled profile.
+        self.assertEqual(body["entries"][0]["request_feature_profile"], self.qwen["entry"]["request_feature_profile"])
+
     def test_duplicate_or_empty_tuple_lists_fail_closed(self):
         with self.assertRaisesRegex(SidecarError, "sorted by the SPEC-023 sort key"):
             build([self.qwen, copy.deepcopy(self.qwen)], release_input())

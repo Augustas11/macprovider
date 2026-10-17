@@ -90,6 +90,10 @@ final class NativeMTPJourneyRunner {
     private let qualifiedSlots: Int
     private let maxNativeActiveRows: Int
     private let maxPromptTokens: Int
+    /// The tuple's request profile admits sampled rows (Qwen3.5). A
+    /// greedy-only tuple (glm5_next) must route them to ordinary decode with
+    /// reason `sampling` (SPEC-048 R004).
+    private var admitsSampledRows = true
     /// step-05 forces rejections at the fixture's real paged-KV block
     /// boundaries: the family block (Qwen3.5 32, glm5_next 256).
     static func boundaryBlockTokens(family: NativeMTPHardwareE2EFamily) -> Int {
@@ -119,6 +123,7 @@ final class NativeMTPJourneyRunner {
 
     func run() async throws -> (document: [String: Any], passed: Bool) {
         let family = NativeMTPHardwareE2ERunner(rootPath: root).family
+        admitsSampledRows = family.admitsSampledRows
         let boundaryTokens = Self.boundaryRowTokens(blockTokens: Self.boundaryBlockTokens(family: family))
         let outputBudget = max(512, boundaryTokens)
         let runner = NativeMTPHardwareE2ERunner(
@@ -231,7 +236,7 @@ final class NativeMTPJourneyRunner {
             "qualified_slots": qualifiedSlots,
             "max_native_active_rows": maxNativeActiveRows,
             "max_prompt_tokens": maxPromptTokens,
-            "request_feature_profile": NativeMTPAdmissionSidecar.sampledRequestFeatureProfile,
+            "request_feature_profile": family.requestFeatureProfile,
             "machine": [
                 "chip": fixture.machine.chip,
                 "ram_gb": fixture.machine.ramGB,
@@ -278,6 +283,14 @@ final class NativeMTPJourneyRunner {
             let actual = try await native.complete(request)
             let delta = NativeMTPStatusDelta(before: before, after: await native.currentSnapshot().nativeMTPStatus)
             step.check("\(id).parity", same(expected, actual))
+            if temperature != 0 || topP != 1, !admitsSampledRows {
+                // Greedy-only tuple: the sampled row is served by ordinary
+                // decode, refused at admission with reason `sampling`.
+                step.check("\(id).routed_ordinary_sampling", routedOrdinaryForSampling(recorder, id))
+                step.check("\(id).no_native_proposals", delta.proposedTokens == 0)
+                compared += 1
+                continue
+            }
             step.check("\(id).native_admitted", lastPath(recorder, id) == .nativeMTP)
             step.check("\(id).proposed", delta.proposedTokens > 0)
             accepted += delta.acceptedTokens
@@ -513,7 +526,14 @@ final class NativeMTPJourneyRunner {
                 if temperature == 0 {
                     step.check("\(id).streaming_equals_non_streaming", same(expected, streamingResult))
                 }
-                step.check("\(id).native_admitted", lastPath(recorder, plainID) == .nativeMTP && lastPath(recorder, streamID) == .nativeMTP)
+                if temperature != 0, !admitsSampledRows {
+                    step.check(
+                        "\(id).routed_ordinary_sampling",
+                        routedOrdinaryForSampling(recorder, plainID) && routedOrdinaryForSampling(recorder, streamID)
+                    )
+                } else {
+                    step.check("\(id).native_admitted", lastPath(recorder, plainID) == .nativeMTP && lastPath(recorder, streamID) == .nativeMTP)
+                }
                 terminals[id] = expected.finishReason
                 streamResults[id] = streamingResult
             }
@@ -1087,6 +1107,13 @@ final class NativeMTPJourneyRunner {
 
     private func lastPath(_ recorder: NativeMTPHardwareAdmissionRecorder, _ id: String) -> DecodePath? {
         recorder.requestSnapshot().last { $0.requestID == id }?.admission.effectivePath
+    }
+
+    /// The row was admitted to ordinary decode because the tuple does not
+    /// sign sampled rows.
+    private func routedOrdinaryForSampling(_ recorder: NativeMTPHardwareAdmissionRecorder, _ id: String) -> Bool {
+        guard let admission = recorder.requestSnapshot().last(where: { $0.requestID == id })?.admission else { return false }
+        return admission.effectivePath == .ordinary && admission.selection.nativeMTPReason == .sampling
     }
 
     private func complete(
