@@ -2175,16 +2175,21 @@ Rate bounds:
   shorter), so overdue keys are probed promptly but not all at once; like
   any due key it is then dispatched by the next sweep after the dispatch
   delay above, within the `max_in_flight` and `max_per_hour` bounds. A key
-  not yet due keeps its due time; a stored due time further away than 1.5
-  intervals is redrawn as a fresh jittered interval. A key with no stored
-  due time draws the first interval above. A stored due time not written for
-  7 days is ignored at start and deleted, so restarts never keep an absent
-  provider's due time alive. Changes are written once per sweep, at most 512
-  keys per write, and a failed write is retried; a crash loses at most the
-  unwritten changes, and the restarted coordinator then uses the older
-  stored due time, subject to the same rules. If the stored schedule cannot
-  be read, every key counts as overdue at first sight, so an unreadable
-  schedule never postpones verification.
+  not yet due keeps its due time. A due time further away than 1.5 intervals
+  of the key's current cadence (after a restart, a shortened interval, or a
+  key entering `recovering`) is redrawn as a fresh jittered interval. A key
+  with no stored due time draws the first interval above. The redraws at
+  start are not written back: the stored due time changes only when the
+  coordinator schedules the key while its provider is connected, so
+  restarts never keep an absent provider's due time alive. A stored due
+  time neither written nor due within the last 7 days is ignored at start
+  and deleted. Changes are written at the start and end of every sweep, at
+  most 512 keys per write, and a failed write is retried. A key whose latest
+  due-time change is not yet stored is not dispatched, so the stored
+  schedule never lags a probe. A crash loses only the unwritten changes, and
+  the restarted coordinator uses the older stored due time under the same
+  rules. If the stored schedule cannot be read, every key counts as overdue
+  at first sight, so an unreadable schedule never postpones verification.
 - At most `max_in_flight` (default 4) verification requests are outstanding
   coordinator-wide, and at most one per verification key.
 - At most `max_per_hour` (default 240) verification requests start in any

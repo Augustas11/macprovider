@@ -1342,15 +1342,15 @@ func TestComputeScoringScheduleWriteFailureRetries(t *testing.T) {
 	}
 }
 
-// FR-20: a stored due time not written for the retention period is ignored
-// at start, and an unreadable schedule makes every key overdue at first
+// FR-20: a stored due time neither written nor due within the retention
+// period is ignored at start, and an unreadable schedule makes every key overdue at first
 // sight instead of restarting the first-interval wait.
 func TestComputeScoringRestoreIgnoresStaleRowsAndFailsTowardProbing(t *testing.T) {
 	h := newScoringHarness(t, map[string]string{"a": "github:1", "b": "github:2"}, nil)
 	now := h.now()
 	stale := computeScoringKey{"gone", scoringModel}
 	if err := h.engine.deps.Store.SaveProbeSchedule(context.Background(), []computeintegrity.ProbeDue{
-		{ProviderID: stale.providerID, ModelID: stale.modelID, Due: now.Add(-time.Hour)},
+		{ProviderID: stale.providerID, ModelID: stale.modelID, Due: now.Add(-computeScoreRetention - time.Hour)},
 	}, now.Add(-computeScoreRetention-time.Hour)); err != nil {
 		t.Fatal(err)
 	}
@@ -1373,5 +1373,82 @@ func TestComputeScoringRestoreIgnoresStaleRowsAndFailsTowardProbing(t *testing.T
 		if !ok || due.Before(now) || !due.Before(now.Add(computeScoreOverdueSpread)) {
 			t.Fatalf("key %s due at %v (present=%v) with an unreadable schedule, want within %v", id, due, ok, computeScoreOverdueSpread)
 		}
+	}
+}
+
+// FR-20: restarts never refresh the stored row of an absent provider, so its
+// due time ages out instead of being kept alive by restart redraws.
+func TestComputeScoringRestartsDoNotRefreshAbsentRows(t *testing.T) {
+	h := newScoringHarness(t, map[string]string{"a": "github:1", "b": "github:2"}, nil)
+	gone := computeScoringKey{"gone", scoringModel}
+	written := h.now().Add(-time.Hour)
+	if err := h.engine.deps.Store.SaveProbeSchedule(context.Background(), []computeintegrity.ProbeDue{
+		{ProviderID: gone.providerID, ModelID: gone.modelID, Due: written},
+	}, written); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		e := h.restartScoring()
+		h.round(computeScoreOverdueSpread)
+		e.mu.Lock()
+		_, scheduled := e.nextDue[gone]
+		e.mu.Unlock()
+		if !scheduled {
+			t.Fatal("the absent provider's overdue key must stay scheduled for its reconnect")
+		}
+	}
+	schedule, err := h.engine.deps.Store.LoadProbeSchedule(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range schedule {
+		if d.ProviderID == gone.providerID && (!d.UpdatedAt.Equal(written) || !d.Due.Equal(written)) {
+			t.Fatalf("restarts rewrote an absent provider's row: due %v updated %v", d.Due, d.UpdatedAt)
+		}
+	}
+}
+
+// FR-20: a due time longer than any draw of the key's current cadence (it
+// entered escalation or recovery) is redrawn at that cadence.
+func TestComputeScoringEscalationRedrawsLongDueTime(t *testing.T) {
+	h := newScoringHarness(t, map[string]string{"a": "github:1", "b": "github:2"}, nil)
+	key := computeScoringKey{"a", scoringModel}
+	now := h.now()
+	h.engine.mu.Lock()
+	h.engine.stateLocked(key, now).State = computeintegrity.VerificationRecovering
+	h.engine.setDueLocked(key, now.Add(time.Hour))
+	h.engine.mu.Unlock()
+	h.engine.sweep(context.Background(), now)
+	escalation := h.engine.interval(computeintegrity.VerificationRecovering)
+	h.engine.mu.Lock()
+	due := h.engine.nextDue[key]
+	h.engine.mu.Unlock()
+	if d := due.Sub(now); d < escalation/2 || d >= escalation*3/2 {
+		t.Fatalf("recovering key due after %v, want within [0.5, 1.5) x %v", d, escalation)
+	}
+}
+
+// FR-20: a key whose due-time change is not yet stored is not dispatched, so
+// the stored schedule never lags a probe.
+func TestComputeScoringUnsavedDueTimeIsNotDispatched(t *testing.T) {
+	h := newScoringHarness(t, map[string]string{"a": "github:1", "b": "github:2"}, nil)
+	if _, err := h.db.Exec(`DROP TABLE compute_integrity_probe_schedule`); err != nil {
+		t.Fatal(err)
+	}
+	now := h.now()
+	h.engine.mu.Lock()
+	h.engine.setDueLocked(computeScoringKey{"a", scoringModel}, now)
+	h.engine.setDueLocked(computeScoringKey{"b", scoringModel}, now)
+	h.engine.mu.Unlock()
+	h.round(0)
+	if n := h.dispatched.Load(); n != 0 {
+		t.Fatalf("%d probes dispatched with their due times unsaved", n)
+	}
+	if _, err := computeintegrity.NewScoringStore(context.Background(), h.db); err != nil {
+		t.Fatal(err)
+	}
+	h.round(0)
+	if h.dispatched.Load() == 0 {
+		t.Fatal("due keys not dispatched once their due times were stored")
 	}
 }

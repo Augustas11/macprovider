@@ -403,10 +403,12 @@ func (s *Server) newComputeScoringEngine(ctx context.Context, deps ComputeScorin
 // restoreSchedule reloads the persisted due times (FR-20), so a restart does
 // not reset the cadence. A key whose due time has passed is redrawn within a
 // short bounded window; a due time beyond the longest jittered interval (a
-// shortened interval or a clock step) is redrawn as a fresh interval. A row
-// not written for the retention period is ignored, so restarts never keep an
-// absent provider's due time alive. An unreadable schedule makes every key
-// overdue at first sight.
+// shortened interval or a clock step) is redrawn as a fresh interval. These
+// redraws stay in memory: the stored row changes only when the engine
+// schedules the key for a present provider, so restarts never refresh an
+// absent provider's row. A row neither written nor due within the retention
+// period is ignored. An unreadable schedule makes every key overdue at first
+// sight.
 func (e *computeScoringEngine) restoreSchedule(ctx context.Context, startedAt time.Time) {
 	schedule, err := e.deps.Store.LoadProbeSchedule(ctx)
 	if err != nil {
@@ -416,7 +418,7 @@ func (e *computeScoringEngine) restoreSchedule(ctx context.Context, startedAt ti
 	}
 	stale := startedAt.Add(-computeScoreRetention)
 	for _, d := range schedule {
-		if d.UpdatedAt.Before(stale) {
+		if d.UpdatedAt.Before(stale) && d.Due.Before(stale) {
 			continue
 		}
 		key := computeScoringKey{d.ProviderID, d.ModelID}
@@ -433,9 +435,6 @@ func (e *computeScoringEngine) restoreSchedule(ctx context.Context, startedAt ti
 			due = startedAt.Add(e.jitter(interval))
 		}
 		e.nextDue[key] = due
-		if !due.Equal(d.Due) {
-			e.dirtyDue[key] = due
-		}
 		// Like a restored state, a restored due time counts as seen at start.
 		if _, ok := e.lastSeen[d.ProviderID]; !ok {
 			e.lastSeen[d.ProviderID] = startedAt
@@ -467,11 +466,13 @@ func (e *computeScoringEngine) dropDueLocked(key computeScoringKey) {
 	e.dirtyDue[key] = time.Time{}
 }
 
-// flushSchedule persists the due-time changes since the last flush. Only the
+// flushSchedule persists queued due-time changes, at most one batch. Only the
 // sweep goroutine flushes, so writes of one key stay in order. A failed
-// batch is retried next sweep unless the key changed again meanwhile. A crash
-// loses at most one sweep of changes: a lost update leaves an older,
-// earlier due time, and a lost first draw is drawn again.
+// batch is retried unless the key changed again meanwhile. A key with an
+// unwritten change is not dispatched (considerProvider), so the store never
+// lags a probe. A crash loses the changes not yet written: the restart then
+// uses the older stored due time. The write outlives ctx cancellation, so a
+// shutdown still persists the last changes.
 func (e *computeScoringEngine) flushSchedule(ctx context.Context, now time.Time) {
 	e.mu.Lock()
 	if len(e.dirtyDue) == 0 {
@@ -491,7 +492,7 @@ func (e *computeScoringEngine) flushSchedule(ctx context.Context, now time.Time)
 	for key, due := range pending {
 		batch = append(batch, computeintegrity.ProbeDue{ProviderID: key.providerID, ModelID: key.modelID, Due: due})
 	}
-	wctx, cancel := context.WithTimeout(ctx, computeScoreCommitTimeout)
+	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), computeScoreCommitTimeout)
 	err := e.deps.Store.SaveProbeSchedule(wctx, batch, now)
 	cancel()
 	if err == nil {
@@ -622,6 +623,9 @@ func (e *computeScoringEngine) sweep(ctx context.Context, now time.Time) {
 	if e.s.pool == nil {
 		return
 	}
+	// Flush before considering keys, so changes since the last sweep are
+	// durable before any of them is dispatched, and after, for this sweep's.
+	e.flushSchedule(ctx, now)
 	defer e.flushSchedule(ctx, now)
 	providers := e.s.pool.Snapshot()
 	present := make(map[string]struct{}, len(providers))
@@ -763,7 +767,14 @@ func (e *computeScoringEngine) considerProvider(ctx context.Context, p pool.Prov
 		e.mu.Unlock()
 		return
 	}
-	if now.Before(due) || !p.RoutingEligible() {
+	if interval := e.interval(st.State); due.Sub(now) > interval*3/2 {
+		// Longer than any draw of the key's current cadence (it entered
+		// escalation, or the interval was shortened): redraw.
+		e.setDueLocked(key, now.Add(e.jitter(interval)))
+		e.mu.Unlock()
+		return
+	}
+	if _, unsaved := e.dirtyDue[key]; unsaved || now.Before(due) || !p.RoutingEligible() {
 		e.mu.Unlock()
 		return
 	}

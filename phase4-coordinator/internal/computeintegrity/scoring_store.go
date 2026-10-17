@@ -317,7 +317,7 @@ INSERT INTO compute_integrity_probe_schedule (provider_id, model_id, next_due_at
 VALUES (?, ?, ?, ?)
 ON CONFLICT(provider_id, model_id) DO UPDATE SET
     next_due_at_utc = excluded.next_due_at_utc, updated_at_utc = excluded.updated_at_utc`,
-				d.ProviderID, d.ModelID, d.Due.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano))
+				d.ProviderID, d.ModelID, d.Due.UTC().Format(verificationStartFormat), now.UTC().Format(verificationStartFormat))
 		}
 		if err != nil {
 			return err
@@ -326,13 +326,15 @@ ON CONFLICT(provider_id, model_id) DO UPDATE SET
 	return tx.Commit()
 }
 
-// PruneProbeSchedule deletes due times not written since cutoff.
+// PruneProbeSchedule deletes due times neither written nor due since cutoff.
+// Both columns use the fixed-width verificationStartFormat, so text order
+// is time order.
 func (s *ScoringStore) PruneProbeSchedule(ctx context.Context, cutoff time.Time) error {
 	if s == nil || s.db == nil {
 		return errScoringStoreClosed
 	}
-	_, err := s.db.ExecContext(ctx, `DELETE FROM compute_integrity_probe_schedule WHERE updated_at_utc < ?`,
-		cutoff.UTC().Format(time.RFC3339Nano))
+	c := cutoff.UTC().Format(verificationStartFormat)
+	_, err := s.db.ExecContext(ctx, `DELETE FROM compute_integrity_probe_schedule WHERE updated_at_utc < ? AND next_due_at_utc < ?`, c, c)
 	return err
 }
 
