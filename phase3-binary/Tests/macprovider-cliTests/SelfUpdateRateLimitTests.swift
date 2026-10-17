@@ -250,6 +250,20 @@ final class SelfUpdateRateLimitTests: XCTestCase {
         XCTAssertEqual(RateLimitMockURLProtocol.requested, [mirrorChecksums, mirrorSignature])
     }
 
+    func testOversizedMirroredChecksumsAreRefused() async throws {
+        RateLimitMockURLProtocol.responses = [
+            mirrorChecksums: (200, Data(repeating: 0x61, count: SelfUpdate.maxReleaseMirrorMetadataBytes + 1), [:]),
+            gitHubChecksums: (200, Data(repeating: 0x61, count: SelfUpdate.maxReleaseMirrorMetadataBytes + 1), [:]),
+        ]
+
+        do {
+            try await update(coordinator: true).verifyMirroredChecksumSignature(tag: "v1.9.0")
+            XCTFail("an oversized checksums.txt was accepted")
+        } catch UpdateError.untrustedDownloadURL(_) {
+        }
+        XCTAssertFalse(RateLimitMockURLProtocol.requested.contains(mirrorSignature))
+    }
+
     // MARK: - tag resolution and status
 
     func testRateLimitedTagLookupReadsTheMirror() async throws {

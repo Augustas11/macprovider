@@ -102,18 +102,27 @@ enum LatestReleaseClient {
     static let maxResponseBytes = 256 * 1024
 
     /// `/healthz` of the coordinator the provider config names (wss/https,
-    /// no credentials), else the production coordinator.
+    /// or ws/http to loopback, no credentials), else the production coordinator.
     static func healthzURL(coordinatorURL: String?) -> URL {
         guard let coordinatorURL,
               var components = URLComponents(string: coordinatorURL),
               components.user == nil,
               components.password == nil,
-              components.host?.isEmpty == false,
-              ["wss", "https"].contains(components.scheme?.lowercased() ?? "")
+              let host = components.host?.lowercased(), !host.isEmpty
         else {
             return coordinatorHealthzURL
         }
-        components.scheme = "https"
+        // Same rule as the CLI: TLS, or plaintext only to a loopback lab.
+        switch components.scheme?.lowercased() {
+        case "wss", "https":
+            components.scheme = "https"
+        case "ws", "http":
+            // A `where` clause binds only its last pattern, so test here.
+            guard ["localhost", "127.0.0.1", "::1"].contains(host) else { return coordinatorHealthzURL }
+            components.scheme = "http"
+        default:
+            return coordinatorHealthzURL
+        }
         components.path = "/healthz"
         components.query = nil
         components.fragment = nil
@@ -132,13 +141,24 @@ enum LatestReleaseClient {
         return await gitHubLatestVersion(url: gitHubLatestURL, session: session, now: now)
     }
 
+    /// The body read up to `maxResponseBytes`; a larger body is refused at
+    /// the cap without being buffered.
+    static func boundedData(for request: URLRequest, session: URLSession) async throws -> (Data, URLResponse) {
+        let (bytes, response) = try await session.bytes(for: request)
+        var data = Data()
+        for try await byte in bytes {
+            guard data.count < maxResponseBytes else { throw URLError(.dataLengthExceedsMaximum) }
+            data.append(byte)
+        }
+        return (data, response)
+    }
+
     static func coordinatorAdvertisedVersion(url: URL, session: URLSession) async -> String? {
         var request = URLRequest(url: url)
         request.timeoutInterval = 15
-        guard let (data, response) = try? await session.data(for: request),
+        guard let (data, response) = try? await boundedData(for: request, session: session),
               let http = response as? HTTPURLResponse,
               (200..<300).contains(http.statusCode),
-              data.count <= maxResponseBytes,
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let advertised = object["recommended_binary_version"] as? String
         else {
@@ -151,7 +171,7 @@ enum LatestReleaseClient {
         var request = URLRequest(url: url)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.timeoutInterval = 15
-        guard let (data, response) = try? await session.data(for: request),
+        guard let (data, response) = try? await boundedData(for: request, session: session),
               let http = response as? HTTPURLResponse
         else {
             return .unavailable
@@ -160,7 +180,6 @@ enum LatestReleaseClient {
             return .deferred(until: reset)
         }
         guard (200..<300).contains(http.statusCode),
-              data.count <= maxResponseBytes,
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let tag = object["tag_name"] as? String,
               let version = ProviderCLIVersion.strictNormalize(tag)

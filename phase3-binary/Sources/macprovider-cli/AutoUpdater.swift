@@ -642,12 +642,6 @@ struct AutoUpdater: Sendable {
             } catch UpdateError.discoveryHeadExpired {
                 await failR005(target: "<discovery>", phase: .eligibility, failure: .discoveryHeadExpired, reason: "discovery_head_expired")
                 return
-            } catch UpdateError.gitHubRateLimited(let resetAt) {
-                // #2036: a spent anonymous GitHub budget is a deferral, not a
-                // failure or cooldown; no GitHub request is sent before reset.
-                let until = resetAt.map { ISO8601DateFormatter.autoupdate.string(from: $0) } ?? "unknown"
-                await recordR005(target: "<discovery>", phase: .eligibility, outcome: .skipped, reason: "github_rate_limited_deferred_until_\(until)")
-                return
             }
             let target = head.targetVersion
             await recordR005(target: target, phase: .detection, outcome: .inProgress, reason: "signed_release_discovery_detected")
@@ -767,6 +761,12 @@ struct AutoUpdater: Sendable {
             await failR005(target: "<unknown>", phase: .eligibility, failure: .autoupdateAlreadyPending, reason: "provider_mutation_in_progress")
         } catch AutoUpdateMarkerError.transactionPending {
             await failR005(target: "<unknown>", phase: .eligibility, failure: .autoupdateAlreadyPending, reason: "autoupdate_already_pending")
+        } catch UpdateError.gitHubRateLimited(let resetAt) {
+            // #2036: a spent anonymous GitHub budget, at discovery or at tag
+            // lookup with the mirror also unavailable, is a deferral, not a
+            // failure or cooldown; no GitHub request is sent before reset.
+            let until = resetAt.map { ISO8601DateFormatter.autoupdate.string(from: $0) } ?? "unknown"
+            await recordR005(target: "<discovery>", phase: .eligibility, outcome: .skipped, reason: "github_rate_limited_deferred_until_\(until)")
         } catch {
             let failure = Self.failureClass(for: error)
             await failR005(target: "<unknown>", phase: Self.phase(for: error), failure: failure, reason: Self.redactedReason(for: error))

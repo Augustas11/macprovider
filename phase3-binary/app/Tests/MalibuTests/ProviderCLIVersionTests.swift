@@ -191,6 +191,10 @@ final class LatestReleaseClientTests: XCTestCase {
             LatestReleaseClient.coordinatorHealthzURL
         )
         XCTAssertEqual(
+            LatestReleaseClient.healthzURL(coordinatorURL: "ws://127.0.0.1:8090/ws/provider").absoluteString,
+            "http://127.0.0.1:8090/healthz"
+        )
+        XCTAssertEqual(
             LatestReleaseClient.healthzURL(coordinatorURL: "wss://user:pw@evil.example/ws"),
             LatestReleaseClient.coordinatorHealthzURL
         )
@@ -208,6 +212,15 @@ final class LatestReleaseClientTests: XCTestCase {
             now.addingTimeInterval(LatestReleaseClient.failureBackoff)
         )
         XCTAssertNil(LatestReleaseClient.retryAfter(.version("1.8.250"), now: now))
+    }
+
+    func testOversizedResponseIsRefusedAtTheCap() async {
+        LatestReleaseMockURLProtocol.responses = [
+            healthz: (200, Data(repeating: 0x20, count: LatestReleaseClient.maxResponseBytes + 1), [:]),
+            gitHub: (200, Data(#"{"tag_name":"v1.8.251"}"#.utf8), [:]),
+        ]
+        let outcome = await fetch()
+        XCTAssertEqual(outcome, .version("1.8.251"), "an oversized coordinator body is not parsed")
     }
 
     func testForbiddenWithBudgetLeftIsNotARateLimit() async {

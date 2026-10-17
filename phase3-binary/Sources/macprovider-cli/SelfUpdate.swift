@@ -1026,11 +1026,19 @@ struct SelfUpdate {
         var request = URLRequest(url: url)
         request.timeoutInterval = 30
         request.addValue("macprovider-cli/\(currentVersion)", forHTTPHeaderField: "user-agent")
-        let (data, response) = try await session.data(for: request)
+        // Streamed so an oversized body is refused at the cap, never buffered.
+        let (bytes, response) = try await session.bytes(for: request)
         if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
             throw UpdateError.httpStatus(http.statusCode)
         }
-        guard !data.isEmpty, data.count <= Self.maxReleaseMirrorMetadataBytes else {
+        var data = Data()
+        for try await byte in bytes {
+            guard data.count < Self.maxReleaseMirrorMetadataBytes else {
+                throw UpdateError.untrustedDownloadURL(url.absoluteString)
+            }
+            data.append(byte)
+        }
+        guard !data.isEmpty else {
             throw UpdateError.untrustedDownloadURL(url.absoluteString)
         }
         return data

@@ -2728,7 +2728,9 @@
         "phase3-binary/Tests/macprovider-cliTests/SelfUpdateRateLimitTests.swift:testStatusLatestVersionCachesTheDeferral",
         "phase3-binary/Tests/macprovider-cliTests/SelfUpdateRateLimitTests.swift:testRateLimitedCheckReportsTheVerifiedCoordinatorAdvertisedRelease",
         "phase3-binary/Tests/macprovider-cliTests/SelfUpdateRateLimitTests.swift:testStatusAsksTheCoordinatorBeforeAnyCachedGitHubResult",
-        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateRateLimitTests.swift:testOnlyASpentBudgetIsClassifiedAsRateLimited"
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateRateLimitTests.swift:testOnlyASpentBudgetIsClassifiedAsRateLimited",
+        "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift:testRateLimitedDiscoveryIsASkippedDeferralWithoutCooldown",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateRateLimitTests.swift:testOversizedMirroredChecksumsAreRefused"
       ],
       "journeys": [
         "JOURNEY-PROVIDER-AUTOUPDATE-PHYSICAL"
