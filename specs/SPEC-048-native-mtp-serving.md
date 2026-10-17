@@ -387,11 +387,13 @@ do not apply to this adapter; these do:
   `linear_attention` layer, `pagedMLA(kpool: index_kpool)` on every
   `deepseek_sparse_attention` layer); the SPEC-039 v0.1.19 8-token forward
   bound is in force; one row's verification (`max_proposal_depth + 1`
-  tokens) fits inside it; and the provider's packed-verification path runs
-  GLM-5-Next layers over padded packed rows with per-row commit. That last
-  condition is not yet met: the fork's padded-verify and row-commit hooks for
-  the GLM caches are not wired, so no `glm5_next_mtp_v1` tuple is admitted by
-  this revision.
+  tokens) fits inside it. Packed verification runs KDA rows through
+  `MTPPackedMambaBatchCache` and `pagedMLA` rows through a paged equivalent of
+  `GLM5NextLatentCacheBatch` that stages each row on a copy and commits
+  exactly the first `1 + accepted` columns per row by exact trim (SPEC-039
+  FR-PKV15); a dropped row keeps its pre-round state. Admission remains
+  bound to the signed sidecar, R015, and the qualification evidence like
+  every native tuple.
 
 **Multi-model projection manifest (0.1.34).** When one admission sidecar
 carries entries for more than one `model_key`, the release's single
@@ -413,7 +415,7 @@ rejects the whole sidecar. R014 item 10 makes this a release gate.
 
 The observer MUST inspect every `.safetensors` file that the R003-authorized
 mlx-swift-lm loader can consume. At the R003 mlx-swift-lm revision
-(`dcbf9333…`; `safetensorWeightURLs` is unchanged from `3.32.3-macprovider.6`)
+(`fa729424…`; `safetensorWeightURLs` is unchanged from `3.32.3-macprovider.6`)
 the loader takes the files named by
 `model.safetensors.index.json`, which may sit in subdirectories, else the
 top-level conventional names, plus files the model declares as additional
@@ -483,7 +485,7 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | **PENDING — filled by the campaign release step** (candidate on branch `glm53/tuple-0324`) | `dcbf933369adc56d5152925f5a2d54e7f1f746be` | fork `3.32.3-macprovider.10` (`b4077dcb28336b388f3d09be2a091c12f8e179aa`) on `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | **PENDING — filled by the campaign release step** (candidate on branch `glm53/tuple-0324`) | `fa729424982a1fb05a48860bba50cc469d6c270f` | fork `3.32.3-macprovider.10` (`b4077dcb28336b388f3d09be2a091c12f8e179aa`) on `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.9` | `29d3b93375cc56cd2649b40e4310a8bc445e9874` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.4` | `2f512e3997349c8648f5d7c5113eb2c825aa242d` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 
@@ -569,7 +571,13 @@ Authorized surface:
   rows) with `GLM5NextMTPRegistration`. From 0.1.38 the latent cache reports
   its exact rewind depth as `maxTrimCount`, so the upstream #622 per-layer
   gate (`canTrimPromptCache(_:numTokens:)`) never asks it for an inexact
-  trim. The provider's `glm5_next_mtp_v1`
+  trim. From 0.1.39 it verifies packed GLM-5-Next rows inside continuous
+  batching: `GLM5NextLatentCacheBatch` is an `MTPPackedVerificationCache`
+  that writes only working copies of its rows and returns one
+  `GLM5NextLatentRowTransaction` per row (`commit(retaining:)` keeps the
+  first `retaining` columns by exact trim; an uncommitted row is unchanged);
+  a right-padded column attends nothing and writes no latent, and a KDA layer
+  keeps a padded column's recurrent and convolution state. The provider's `glm5_next_mtp_v1`
   serving surface (next-N state transactions over KDA and `pagedMLA` state in
   the paged backend, and the native-MTP capability gate) is not part of this
   row; it joins only through a later revision.
@@ -597,7 +605,7 @@ Review record for the #2028 tuple (2026-10-16; mlx-swift-lm
 `3.32.3-macprovider.9` / mlx-swift `0.32.3-macprovider.8` / MLX core
 `v0.32.2-macprovider.5`): the stream-propagation fix with a three-lane freeze
 audit at 0 Critical, 0 High, 0 Medium (`audits/2026-10-16-2028-gptoss-decode/`).
-The campaign mlx-swift-lm revision `dcbf9333…` sits on
+The campaign mlx-swift-lm revision `fa729424…` sits on
 `3.32.3-macprovider.10` (`b4077dcb…`): that tuple's `dbe8bcb3…`, the MLX
 core v0.32.4 pin (`da234b2`), and the upstream #622 fix (exact prefix rewinds
 in `RotatingKVCache`, `KVCache.maxTrimCount` gating each layer's rewind). Above
@@ -1605,7 +1613,7 @@ the journey must include its independent and combined evidence.
 | `native-mtp-serving` | `DECISION_REQUIRED` | `@Augustas11` | `#1770` | Authority acceptance, release-candidate review, and signed real-hardware journey evidence for the first production tuple. |
 | First Qwen-family MTP artifact | `UNKNOWN` | `@Augustas11` | `#1770` | Legally/provenance-clean immutable model, tokenizer, MTP manifest, and exact hashes. |
 | MLX dependency tuple | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1906` | The operator's permanent fork model (MTP-3) replaces the upstream-release requirement. MTP-3 names the exact three-fork tuple; each rebase passes the runbook's per-rebase acceptance gate and a SPEC revision. |
-| GLM-5.3-Flash `glm5_next_mtp_v1` tuple | `DECISION_REQUIRED` | `@Augustas11` | `#2029` | The fork's padded-verify and per-row commit hooks for the GLM caches and their provider wiring (0.1.39 admission condition); final mlx-swift-lm fork tag and R003 review record (pending rows); GLM R015 and journey. The observer, sidecar parsing, v2 projection reader, SPEC-023 v0.22.25 widths, the fork's MTP-1 drafter, and the provider drafter load path and admission gate are in the campaign branch. |
+| GLM-5.3-Flash `glm5_next_mtp_v1` tuple | `DECISION_REQUIRED` | `@Augustas11` | `#2029` | Hardware evidence for the packed GLM verification path; final mlx-swift-lm fork tag and R003 review record (pending rows); GLM R015 and journey. The observer, sidecar parsing, v2 projection reader, SPEC-023 v0.22.25 widths, the fork's MTP-1 drafter and packed verification, and the provider drafter load path, admission gate and paged packed verification are in the campaign branch. |
 | First MLX-native MXFP8 artifact | `UNKNOWN` | `@Augustas11` | `#1770` | SPEC-023/SPEC-010 format, fit, quality, license, provenance, and hardware evidence. |
 | Batched-verify numerical parity | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1770` | The qmv-to-qmm switch at 12 packed verify tokens cannot occur for the first tuple: `max_native_active_rows` is 1 and depth is 1, so a packed verify is at most 2 tokens, and rows above the bound ride the ordinary forward at depth zero. A tuple whose bound times `proposal_depth + 1` reaches 12 must decide between a bounded drift allowance and kernel-matched verification before it can be signed. |
 | Depth-1 throughput value | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1770` | The 2026-10-06 quiet R015 (policy `e24cb7bc…`, amended 0.1.25 gates) passed every cell for the A3B Studio tuple: one-slot decode ratio 1.19-1.28 with corrected lower bounds +18% to +26%, gated s2/s8 cells non-inferior. The value is one-slot only; the R007 bound of 1 keeps native off above it. |
@@ -1650,8 +1658,10 @@ requests.
   second weight load); the allowed (adapter, layout) pairs are listed; a
   `glm5_next_mtp_v1` capability requires the next-N weights, the exact
   KDA + `pagedMLA` topology, the 8-token forward bound with one row's
-  verification inside it, and packed verification over padded GLM rows with
-  per-row commit. The last is not yet wired, so the adapter stays closed.
+  verification inside it. The R003 lm row moves to `fa729424…`, which adds
+  packed GLM-5-Next verification inside continuous batching (per-row
+  transactions, padded columns that write nothing); the provider verifies
+  `pagedMLA` rows through a paged equivalent with the same commit rule.
 
 - **0.1.38 (2026-10-17)** — MTP-3 campaign tuple moves to mlx-swift-lm
   `dcbf9333…` (untagged; the tag stays a PENDING row), rebased onto the fork's

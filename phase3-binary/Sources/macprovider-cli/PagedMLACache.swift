@@ -353,33 +353,22 @@ final class PagedMLALatentCache: GLM5NextLatentCache, CustomDebugStringConvertib
     }
 }
 
-/// T5.3 integration point for the fork's GLM-5-Next packed-verification
-/// hooks (padded verification and per-row commit on the GLM caches).
-///
-/// The provider side already follows the fork's `MTPPackedVerificationCache`
-/// contract: `PagedMLABatchLayerCache` stages every row on a copy, reports
-/// each row's valid width (`packedVerificationRowLengths`), and its pending
-/// resolutions keep exactly the accepted prefix by exact trim, whether or not
-/// the model also appends right-padding columns. What the pinned fork does not
-/// yet do is run GLM-5-Next layers over a padded packed batch (per-row
-/// lengths into the sparse attention and the KDA checkpoint, per-row commit).
-/// Until the fork's hooks are wired here, `glm5_next_mtp_v1` admission fails
-/// closed (`admission_capability_unsupported`) and the target serves ordinary
-/// decode; set this true in the change that wires them.
-enum PagedMLANativeMTPIntegration {
-    static let packedVerificationSupported = false
-}
-
 /// One `pagedMLA` layer of a continuous batch: the model projects every row
 /// together and each row attends against its own `PagedMLALatentCache`
 /// (`GLM5NextBatchedLatentCache`), exactly as a serial decode of that row.
 ///
-/// For a packed native-MTP verification (`MTPPackedVerificationCache`) the
-/// model appends every padded column to a staged copy of each row; the
-/// caller's row transaction later keeps exactly the accepted prefix by exact
-/// `trim` of the staged copy (at most the verification width, inside
-/// `maxTrim`) and adopts it into the row (SPEC-039 FR-PKV15). An aborted
-/// round leaves the row untouched.
+/// For a packed native-MTP verification (`MTPPackedVerificationCache`) it is
+/// the paged equivalent of the fork's `GLM5NextLatentCacheBatch` (whose rows
+/// must be `GLM5NextAttentionCache`): the forward writes only staged copies of
+/// the rows, and each row's resolution keeps exactly its first `retaining`
+/// columns (the base column plus the accepted proposals) by exact `trim` of
+/// the staged copy and adopts it into the row, as
+/// `GLM5NextLatentRowTransaction.stageCommit(retaining:)` does (SPEC-039
+/// FR-PKV15). An aborted round leaves the row untouched. The pinned model
+/// reads per-row lengths only from `GLM5NextLatentCacheBatch`, so here it also
+/// runs a shorter row's right-padding columns, after that row's valid columns
+/// and only on its staged copy; the resolution trims them with the rejected
+/// proposals (at most `maxTrim` tokens), so the committed row is the same.
 final class PagedMLABatchLayerCache: GLM5NextBatchedLatentCache, MTPPackedVerificationCache, @unchecked Sendable {
     struct PendingMTPResolution {
         let rowCache: PagedMLALatentCache
@@ -427,8 +416,7 @@ final class PagedMLABatchLayerCache: GLM5NextBatchedLatentCache, MTPPackedVerifi
 
     /// Each row's valid verification width (`[lastCommitted, proposals...]`,
     /// excluding right padding) while a packed verification is prepared;
-    /// nil otherwise. The fork's padded-verify hook for GLM-5-Next layers
-    /// reads per-row lengths from here (`PagedMLANativeMTPIntegration`).
+    /// nil otherwise (diagnostics; see the type comment on padding).
     var packedVerificationRowLengths: [Int]? {
         // Row maps are positional: map `i` belongs to `rows[i]`.
         preparedMTPPackedRowMaps?.map(\.inputCount)
@@ -487,6 +475,12 @@ final class PagedMLABatchLayerCache: GLM5NextBatchedLatentCache, MTPPackedVerifi
         }
         guard zip(rows, rowMaps).allSatisfy({ $0.offset == $1.queryOffset }) else {
             throw ContinuousBatchSchedulerError.unsupported("native_mtp_packed_cache_offset_mismatch")
+        }
+        // The staged copy takes the whole padded width; its later trim of
+        // padding plus rejected proposals must stay exact.
+        let width = rowMaps.map(\.inputCount).max() ?? 0
+        guard rows.allSatisfy({ $0.maxTrim >= width - 1 }) else {
+            throw ContinuousBatchSchedulerError.unsupported("native_mtp_packed_cache_width_exceeds_exact_trim")
         }
         preparedMTPPackedRowMaps = rowMaps
         stagedRows = rows.map { $0.concreteCopy() }

@@ -122,8 +122,7 @@ final class ModelRuntimeSwapTests: XCTestCase {
     /// SPEC-048 MTP-2 / T5.3: `glm5_next_mtp_v1` pairs only with
     /// `checkpoint_mtp`, and admits only with its drafter present, the exact
     /// KDA + pagedMLA topology, and the 8-token forward bound in force with a
-    /// row's verification inside it. Admission stays closed until the fork's
-    /// packed-verification hooks are wired (`PagedMLANativeMTPIntegration`).
+    /// row's verification inside it.
     func testGLM5NextNativeMTPAdmissionGate() throws {
         let glm = ModelRuntime.pagedKVModelCapabilities(
             modelID: "zai-org/glm-5.3-flash",
@@ -149,12 +148,7 @@ final class ModelRuntimeSwapTests: XCTestCase {
             familyAdapter: "glm5_next_mtp_v1",
             sourceLayout: "checkpoint_mtp"
         )
-        XCTAssertEqual(
-            supported(embedded),
-            PagedMLANativeMTPIntegration.packedVerificationSupported,
-            "a complete glm5_next tuple admits exactly when the packed-verify hooks are wired"
-        )
-        // Every condition below fails closed regardless of the hooks.
+        XCTAssertTrue(supported(embedded))
         XCTAssertFalse(supported(makeNativeMTPAdmissionCapability(
             familyAdapter: "glm5_next_mtp_v1", sourceLayout: "separate_artifact"
         )))

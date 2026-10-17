@@ -11199,9 +11199,10 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     /// `glm5_next_mtp_v1` (SPEC-048 MTP-2, SPEC-039 FR-PKV12/FR-PKV15): the
-    /// exact verified KDA + `pagedMLA` topology, the 8-token forward bound in
-    /// force with one row's verification inside it, and the fork's
-    /// packed-verification support for the GLM caches.
+    /// exact verified KDA + `pagedMLA` topology and the 8-token forward bound
+    /// in force with one row's verification inside it. Packed verification
+    /// runs KDA rows through `MTPPackedMambaBatchCache` and `pagedMLA` rows
+    /// through `PagedMLABatchLayerCache`.
     private static func glm5NextNativeMTPTopologySupported(
         maxProposalDepth: Int,
         modelCapabilities: PagedKVRuntimeModelCapabilities,
@@ -11217,7 +11218,7 @@ actor ModelRuntime: ModelRuntimeServing {
               maxProposalDepth >= 1,
               maxProposalDepth + 1 <= cap
         else { return false }
-        return PagedMLANativeMTPIntegration.packedVerificationSupported
+        return true
     }
 
     static func nativeMTPAdmissionCapabilitySupportedForTest(
