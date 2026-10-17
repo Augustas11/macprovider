@@ -2170,15 +2170,21 @@ Rate bounds:
   of a key whose provider has been absent for 7 days is dropped.
 - Due times are stored coordinator-side and survive a coordinator restart;
   they never appear on any provider-facing frame, header, status field or
-  API. At start, a key whose stored due time has passed is redrawn uniformly
-  within the next 15 minutes (or its interval, if shorter), so overdue keys
-  are probed promptly but not all at once; a key not yet due keeps its due
-  time; a stored due time further away than 1.5 intervals is redrawn as a
-  fresh jittered interval. A key with no stored due time draws the first
-  interval above. Changes are written once per sweep, so a crash loses at
-  most one sweep of them; a lost change leaves an earlier due time or no due
-  time, never a later one. If the stored schedule cannot be read, every key
-  draws the first interval.
+  API. At start, a key whose stored due time has passed becomes due at a
+  time drawn uniformly within the next 15 minutes (or its interval, if
+  shorter), so overdue keys are probed promptly but not all at once; like
+  any due key it is then dispatched by the next sweep after the dispatch
+  delay above, within the `max_in_flight` and `max_per_hour` bounds. A key
+  not yet due keeps its due time; a stored due time further away than 1.5
+  intervals is redrawn as a fresh jittered interval. A key with no stored
+  due time draws the first interval above. A stored due time not written for
+  7 days is ignored at start and deleted, so restarts never keep an absent
+  provider's due time alive. Changes are written once per sweep, at most 512
+  keys per write, and a failed write is retried; a crash loses at most the
+  unwritten changes, and the restarted coordinator then uses the older
+  stored due time, subject to the same rules. If the stored schedule cannot
+  be read, every key counts as overdue at first sight, so an unreadable
+  schedule never postpones verification.
 - At most `max_in_flight` (default 4) verification requests are outstanding
   coordinator-wide, and at most one per verification key.
 - At most `max_per_hour` (default 240) verification requests start in any

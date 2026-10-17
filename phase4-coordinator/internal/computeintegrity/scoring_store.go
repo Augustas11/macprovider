@@ -260,11 +260,13 @@ SELECT started_at_utc FROM compute_integrity_verification_starts
 }
 
 // ProbeDue is the FR-20 next due time of one verification key. A zero Due
-// in a SaveProbeSchedule batch deletes the key's row.
+// in a SaveProbeSchedule batch deletes the key's row. UpdatedAt is set by
+// LoadProbeSchedule only.
 type ProbeDue struct {
 	ProviderID string
 	ModelID    string
 	Due        time.Time
+	UpdatedAt  time.Time
 }
 
 // LoadProbeSchedule returns every persisted due time. An unreadable row
@@ -273,7 +275,7 @@ func (s *ScoringStore) LoadProbeSchedule(ctx context.Context) ([]ProbeDue, error
 	if s == nil || s.db == nil {
 		return nil, errScoringStoreClosed
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT provider_id, model_id, next_due_at_utc FROM compute_integrity_probe_schedule`)
+	rows, err := s.db.QueryContext(ctx, `SELECT provider_id, model_id, next_due_at_utc, updated_at_utc FROM compute_integrity_probe_schedule`)
 	if err != nil {
 		return nil, err
 	}
@@ -281,12 +283,15 @@ func (s *ScoringStore) LoadProbeSchedule(ctx context.Context) ([]ProbeDue, error
 	var out []ProbeDue
 	for rows.Next() {
 		var d ProbeDue
-		var ts string
-		if err := rows.Scan(&d.ProviderID, &d.ModelID, &ts); err != nil {
+		var due, updated string
+		if err := rows.Scan(&d.ProviderID, &d.ModelID, &due, &updated); err != nil {
 			return nil, err
 		}
-		if d.Due, err = time.Parse(time.RFC3339Nano, ts); err != nil {
+		if d.Due, err = time.Parse(time.RFC3339Nano, due); err != nil {
 			return nil, fmt.Errorf("compute-integrity due time %w", err)
+		}
+		if d.UpdatedAt, err = time.Parse(time.RFC3339Nano, updated); err != nil {
+			return nil, fmt.Errorf("compute-integrity due update time %w", err)
 		}
 		out = append(out, d)
 	}
@@ -319,6 +324,16 @@ ON CONFLICT(provider_id, model_id) DO UPDATE SET
 		}
 	}
 	return tx.Commit()
+}
+
+// PruneProbeSchedule deletes due times not written since cutoff.
+func (s *ScoringStore) PruneProbeSchedule(ctx context.Context, cutoff time.Time) error {
+	if s == nil || s.db == nil {
+		return errScoringStoreClosed
+	}
+	_, err := s.db.ExecContext(ctx, `DELETE FROM compute_integrity_probe_schedule WHERE updated_at_utc < ?`,
+		cutoff.UTC().Format(time.RFC3339Nano))
+	return err
 }
 
 // LoadScorerExclusions returns every FR-24 scorer-excluded provider.

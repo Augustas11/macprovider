@@ -4861,7 +4861,9 @@
         "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestScoringStoreBackfillFailureRetries",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringOverdueKeyProbedPromptlyAfterRestart",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringRestartKeepsDueTimeAndFirstSightWindow",
-        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringOverdueKeysSpreadAfterRestart"
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringOverdueKeysSpreadAfterRestart",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringScheduleWriteFailureRetries",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringRestoreIgnoresStaleRowsAndFailsTowardProbing"
       ],
       "journeys": [],
       "evidence": [],

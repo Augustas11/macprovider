@@ -68,6 +68,9 @@ const (
 	// this window (or its interval, if shorter), so many overdue keys do not
 	// all fire at once.
 	computeScoreOverdueSpread = 15 * time.Minute
+	// computeScoreScheduleBatch bounds one schedule flush; the rest stays
+	// queued for the next sweep.
+	computeScoreScheduleBatch = 512
 )
 
 // ComputeScoreRequest is the FR-21 coordinator-to-scorer frame.
@@ -276,7 +279,11 @@ type computeScoringEngine struct {
 	nextDue map[computeScoringKey]time.Time
 	// dirtyDue holds due-time changes not yet persisted; a zero time deletes
 	// the key's row. Each sweep flushes it.
-	dirtyDue      map[computeScoringKey]time.Time
+	dirtyDue map[computeScoringKey]time.Time
+	// scheduleLost is set when the persisted schedule could not be read at
+	// start: every key is then treated as overdue at first sight, so an
+	// unreadable schedule never delays verification.
+	scheduleLost  bool
 	inFlight      map[computeScoringKey]bool
 	inFlightCount int
 	// recentStarts holds the start times of the verification requests of
@@ -396,15 +403,22 @@ func (s *Server) newComputeScoringEngine(ctx context.Context, deps ComputeScorin
 // restoreSchedule reloads the persisted due times (FR-20), so a restart does
 // not reset the cadence. A key whose due time has passed is redrawn within a
 // short bounded window; a due time beyond the longest jittered interval (a
-// shortened interval or a clock step) is redrawn as a fresh interval. An
-// unreadable schedule falls back to fresh draws, as on first sight.
+// shortened interval or a clock step) is redrawn as a fresh interval. A row
+// not written for the retention period is ignored, so restarts never keep an
+// absent provider's due time alive. An unreadable schedule makes every key
+// overdue at first sight.
 func (e *computeScoringEngine) restoreSchedule(ctx context.Context, startedAt time.Time) {
 	schedule, err := e.deps.Store.LoadProbeSchedule(ctx)
 	if err != nil {
-		e.s.log.Warn().Str("event", "compute_integrity_schedule_unavailable").Msg("verification schedule unreadable; keys draw a fresh first interval")
+		e.s.log.Warn().Str("event", "compute_integrity_schedule_unavailable").Msg("verification schedule unreadable; keys are treated as overdue")
+		e.scheduleLost = true
 		return
 	}
+	stale := startedAt.Add(-computeScoreRetention)
 	for _, d := range schedule {
+		if d.UpdatedAt.Before(stale) {
+			continue
+		}
 		key := computeScoringKey{d.ProviderID, d.ModelID}
 		state := computeintegrity.VerificationUnverified
 		if st := e.states[key]; st != nil {
@@ -414,12 +428,7 @@ func (e *computeScoringEngine) restoreSchedule(ctx context.Context, startedAt ti
 		due := d.Due
 		switch {
 		case !due.After(startedAt):
-			spread := min(computeScoreOverdueSpread, interval)
-			if spread > 0 {
-				due = startedAt.Add(time.Duration(e.rng.Int63n(int64(spread))))
-			} else {
-				due = startedAt
-			}
+			due = e.overdueDue(startedAt, interval)
 		case due.Sub(startedAt) > interval*3/2:
 			due = startedAt.Add(e.jitter(interval))
 		}
@@ -432,6 +441,16 @@ func (e *computeScoringEngine) restoreSchedule(ctx context.Context, startedAt ti
 			e.lastSeen[d.ProviderID] = startedAt
 		}
 	}
+}
+
+// overdueDue draws the due time of an overdue key uniformly within the
+// overdue window. Caller holds mu (or owns the engine before it starts).
+func (e *computeScoringEngine) overdueDue(now time.Time, interval time.Duration) time.Time {
+	spread := min(computeScoreOverdueSpread, interval)
+	if spread <= 0 {
+		return now
+	}
+	return now.Add(time.Duration(e.rng.Int63n(int64(spread))))
 }
 
 // setDueLocked schedules key and marks the change for persistence. Caller
@@ -459,8 +478,14 @@ func (e *computeScoringEngine) flushSchedule(ctx context.Context, now time.Time)
 		e.mu.Unlock()
 		return
 	}
-	pending := e.dirtyDue
-	e.dirtyDue = map[computeScoringKey]time.Time{}
+	pending := make(map[computeScoringKey]time.Time, min(len(e.dirtyDue), computeScoreScheduleBatch))
+	for key, due := range e.dirtyDue {
+		if len(pending) == computeScoreScheduleBatch {
+			break
+		}
+		pending[key] = due
+		delete(e.dirtyDue, key)
+	}
 	e.mu.Unlock()
 	batch := make([]computeintegrity.ProbeDue, 0, len(pending))
 	for key, due := range pending {
@@ -728,8 +753,13 @@ func (e *computeScoringEngine) considerProvider(ctx context.Context, p pool.Prov
 	if !scheduled {
 		// The first request of a key follows the same jittered cadence, so a
 		// new key is never probed at once. A known key's due time is restored
-		// at start (restoreSchedule) and never reaches here.
-		e.setDueLocked(key, now.Add(e.jitter(e.interval(st.State))))
+		// at start (restoreSchedule) and never reaches here; if the schedule
+		// was unreadable, every key counts as overdue.
+		if e.scheduleLost {
+			e.setDueLocked(key, e.overdueDue(now, e.interval(st.State)))
+		} else {
+			e.setDueLocked(key, now.Add(e.jitter(e.interval(st.State))))
+		}
 		e.mu.Unlock()
 		return
 	}
@@ -1349,6 +1379,9 @@ func (e *computeScoringEngine) pruneDurable(ctx context.Context, now time.Time) 
 	}
 	if _, err := e.deps.Store.PruneStaleKeyStates(pctx, now.Add(-computeScoreDurableRetention)); err != nil {
 		e.s.log.Warn().Str("event", "compute_integrity_state_prune_failed").Msg("compute-integrity state prune failed")
+	}
+	if err := e.deps.Store.PruneProbeSchedule(pctx, now.Add(-computeScoreRetention)); err != nil {
+		e.s.log.Warn().Str("event", "compute_integrity_schedule_prune_failed").Msg("verification schedule prune failed")
 	}
 }
 

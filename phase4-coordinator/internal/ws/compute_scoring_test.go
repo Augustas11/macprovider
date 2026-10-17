@@ -1311,3 +1311,67 @@ func TestComputeScoringOverdueKeysSpreadAfterRestart(t *testing.T) {
 		t.Fatalf("overdue keys not spread: %d distinct, earliest +%v, latest +%v", len(distinct), earliest, latest)
 	}
 }
+
+// FR-20: a failed schedule write is retried on the next flush, and a change
+// made after the failure wins over the failed one.
+func TestComputeScoringScheduleWriteFailureRetries(t *testing.T) {
+	h := newScoringHarness(t, map[string]string{"a": "github:1"}, nil)
+	keyA, keyB := computeScoringKey{"a", scoringModel}, computeScoringKey{"b", scoringModel}
+	now := h.now()
+	if _, err := h.db.Exec(`DROP TABLE compute_integrity_probe_schedule`); err != nil {
+		t.Fatal(err)
+	}
+	h.engine.mu.Lock()
+	h.engine.setDueLocked(keyA, now.Add(time.Hour))
+	h.engine.setDueLocked(keyB, now.Add(2*time.Hour))
+	h.engine.mu.Unlock()
+	h.engine.flushSchedule(context.Background(), now)
+	newer := now.Add(3 * time.Hour)
+	h.engine.mu.Lock()
+	h.engine.setDueLocked(keyA, newer)
+	h.engine.mu.Unlock()
+	if _, err := computeintegrity.NewScoringStore(context.Background(), h.db); err != nil {
+		t.Fatal(err)
+	}
+	h.engine.flushSchedule(context.Background(), now)
+	if got, ok := h.persistedDue(keyA); !ok || !got.Equal(newer) {
+		t.Fatalf("key a persisted %v (%v), want the newer %v", got, ok, newer)
+	}
+	if got, ok := h.persistedDue(keyB); !ok || !got.Equal(now.Add(2*time.Hour)) {
+		t.Fatalf("failed write of key b not retried: %v (%v)", got, ok)
+	}
+}
+
+// FR-20: a stored due time not written for the retention period is ignored
+// at start, and an unreadable schedule makes every key overdue at first
+// sight instead of restarting the first-interval wait.
+func TestComputeScoringRestoreIgnoresStaleRowsAndFailsTowardProbing(t *testing.T) {
+	h := newScoringHarness(t, map[string]string{"a": "github:1", "b": "github:2"}, nil)
+	now := h.now()
+	stale := computeScoringKey{"gone", scoringModel}
+	if err := h.engine.deps.Store.SaveProbeSchedule(context.Background(), []computeintegrity.ProbeDue{
+		{ProviderID: stale.providerID, ModelID: stale.modelID, Due: now.Add(-time.Hour)},
+	}, now.Add(-computeScoreRetention-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	e := h.restartScoring()
+	e.mu.Lock()
+	_, restored := e.nextDue[stale]
+	e.mu.Unlock()
+	if restored {
+		t.Fatal("a due time not written for the retention period must not be restored")
+	}
+	if _, err := h.db.Exec(`UPDATE compute_integrity_probe_schedule SET next_due_at_utc = 'unreadable'`); err != nil {
+		t.Fatal(err)
+	}
+	e = h.restartScoring()
+	e.sweep(context.Background(), now)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, id := range []string{"a", "b"} {
+		due, ok := e.nextDue[computeScoringKey{id, scoringModel}]
+		if !ok || due.Before(now) || !due.Before(now.Add(computeScoreOverdueSpread)) {
+			t.Fatalf("key %s due at %v (present=%v) with an unreadable schedule, want within %v", id, due, ok, computeScoreOverdueSpread)
+		}
+	}
+}
