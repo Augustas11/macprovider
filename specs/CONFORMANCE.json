@@ -1072,7 +1072,7 @@
     {
       "spec_id": "SPEC-036",
       "title": "Compute-Integrity Receipt Companion",
-      "version": "v0.2.0",
+      "version": "v0.2.1",
       "path": "specs/SPEC-036-compute-integrity-receipt.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -4836,6 +4836,9 @@
         "phase4-coordinator/internal/computeintegrity/scoring_corpus.go:func DrawProbe",
         "phase4-coordinator/internal/computeintegrity/scoring_corpus.go:func ParseCorpus",
         "phase4-coordinator/internal/ws/compute_scoring.go:func (e *computeScoringEngine) considerProvider",
+        "phase4-coordinator/internal/ws/compute_scoring.go:func (e *computeScoringEngine) restoreSchedule",
+        "phase4-coordinator/internal/ws/compute_scoring.go:func (e *computeScoringEngine) flushSchedule",
+        "phase4-coordinator/internal/computeintegrity/scoring_store.go:func (s *ScoringStore) SaveProbeSchedule",
         "phase4-coordinator/internal/config/compute_integrity.go:func DefaultComputeIntegrityConfig"
       ],
       "tests": [
@@ -4855,7 +4858,17 @@
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringUnpersistedStartIsNotDispatched",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringLookupPastDeadlineReservesNothing",
         "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestScoringStoreBackfillsStartsOnce",
-        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestScoringStoreBackfillFailureRetries"
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestScoringStoreBackfillFailureRetries",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringOverdueKeyProbedPromptlyAfterRestart",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringRestartKeepsDueTimeAndFirstSightWindow",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringOverdueKeysSpreadAfterRestart",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringScheduleWriteFailureRetries",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringRestoreIgnoresStaleRowsAndFailsTowardProbing",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringRestartsDoNotRefreshAbsentRows",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringEscalationRedrawsLongDueTime",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringUnsavedDueTimeIsNotDispatched",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringRestartRedrawStoredOncePresent",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringLongOverdueKeyDroppedLikeStore"
       ],
       "journeys": [],
       "evidence": [],
@@ -4863,7 +4876,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1644",
-        "rationale": "SPEC-036 v0.2.0 FR-20. Covert verification requests through the ordinary paid dispatch path. Implemented in the #1644 campaign PR. Pending: provider-side hardware validation, the CLI release carrying compute_score_v1, the coordinator deploy, and live probes across the catalog."
+        "rationale": "SPEC-036 v0.2.1 FR-20. Covert verification requests through the ordinary paid dispatch path; due times survive a coordinator restart. Implemented in the #1644 campaign PR. Pending: provider-side hardware validation, the CLI release carrying compute_score_v1, the coordinator deploy, and live probes across the catalog."
       }
     },
     {
