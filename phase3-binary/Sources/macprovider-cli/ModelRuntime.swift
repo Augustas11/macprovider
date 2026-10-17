@@ -1877,15 +1877,14 @@ actor ModelRuntime: ModelRuntimeServing {
         temperature: Float,
         topP: Float
     ) throws -> GenerateParameters {
-        let ownsCache = modelSizesItsOwnKVCache(model)
-        return GenerateParameters(
+        GenerateParameters(
             maxTokens: try serialMaxOutputTokens(
+                model: model,
                 requested: maxTokens,
                 promptTokens: promptTokens,
-                maxContextTokens: maxContextTokens,
-                modelSizesItsOwnKVCache: ownsCache
+                maxContextTokens: maxContextTokens
             ),
-            maxKVSize: ownsCache ? nil : maxContextTokens,
+            maxKVSize: modelSizesItsOwnKVCache(model) ? nil : maxContextTokens,
             kvBits: kvBitsOverride,
             temperature: temperature,
             topP: topP,
