@@ -390,7 +390,8 @@ record_json() {
 
 # Usage: listener_case <listener-mode> <record> <expect: kick|no-kick> [status-exit]
 # record: paused | paused_state | unpaused | symlink | mode644 | hardlink |
-#         no_authority | bad_version | bad_paused_type | oversized | none
+#         no_authority | bad_version | float_version | int_paused |
+#         bad_paused_type | oversized | none
 listener_case() {
   mode="$1"; record="$2"; expect="$3"; status_exit="${4:-0}"
   : > "$TMP/logs/watchdog.log"
@@ -413,6 +414,8 @@ listener_case() {
       ;;
     no_authority) printf '%s\n' '{"version":1,"state":"paused_by_operator","operator_paused":true}' > "$state_record" ;;
     bad_version) printf '%s\n' '{"version":2,"authority":"macprovider_cli","state":"paused_by_operator","operator_paused":true}' > "$state_record" ;;
+    float_version) printf '%s\n' '{"version":1.0,"authority":"macprovider_cli","state":"paused_by_operator","operator_paused":true}' > "$state_record" ;;
+    int_paused) printf '%s\n' '{"version":1,"authority":"macprovider_cli","state":"paused_by_operator","operator_paused":1}' > "$state_record" ;;
     bad_paused_type) printf '%s\n' '{"version":1,"authority":"macprovider_cli","state":"paused_by_operator","operator_paused":"yes"}' > "$state_record" ;;
     oversized)
       /usr/bin/python3 -c 'import json,sys; print(json.dumps({"version":1,"authority":"macprovider_cli","state":"paused_by_operator","operator_paused":True,"pad":"x"*70000}))' > "$state_record"
@@ -442,9 +445,11 @@ for mode in foreign none noise owned; do
   listener_case "$mode" paused no-kick
   grep -F 'operator-paused per the persisted lifecycle record; watchdog never restarts a paused provider' "$TMP/logs/watchdog.log" >/dev/null
 done
-listener_case foreign paused_state no-kick
+# The pause is the operator_paused boolean the serve process honors at
+# startup; a paused_by_operator state without it is not a pause.
+listener_case foreign paused_state kick
 # A record that fails the Swift store's file or schema invariants is not a pause.
-for record in symlink mode644 hardlink no_authority bad_version bad_paused_type oversized; do
+for record in symlink mode644 hardlink no_authority bad_version float_version int_paused bad_paused_type oversized; do
   listener_case foreign "$record" kick
 done
 for mode in noise pid_noise fail hang; do
@@ -464,6 +469,57 @@ for mode in foreign none; do
   fi
 done
 listener_case foreign none kick
+
+# Restart gate: the final vetoes and the kickstart request run while the
+# watchdog holds the lifecycle stores' own flocks; a busy store defers.
+for lock_name in .state-v1.json.lock .lease.json.lock .operator-resume-lease.json.lock; do
+  : > "$lifecycle_dir/$lock_name"
+  chmod 600 "$lifecycle_dir/$lock_name"
+done
+cat > "$TMP/bin/launchctl" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >> "$WATCHDOG_TEST_LAUNCHCTL_LOG"
+case "$*" in
+  print*) printf 'pid = %s\n' "$WATCHDOG_TEST_SERVICE_PID" ;;
+  kickstart*)
+    /usr/bin/python3 -c '
+import fcntl, sys
+handle = open(sys.argv[1], "rb")
+try:
+    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    print("gate=free")
+except BlockingIOError:
+    print("gate=held")
+' "$WATCHDOG_TEST_GATE_LOCK" >> "$WATCHDOG_TEST_GATE_LOG"
+    ;;
+esac
+EOF
+chmod +x "$TMP/bin/launchctl"
+WATCHDOG_TEST_GATE_LOCK="$lifecycle_dir/.state-v1.json.lock"
+WATCHDOG_TEST_GATE_LOG="$TMP/gate.log"
+export WATCHDOG_TEST_GATE_LOCK WATCHDOG_TEST_GATE_LOG
+: > "$WATCHDOG_TEST_GATE_LOG"
+listener_case foreign unpaused kick
+if [ "$(cat "$WATCHDOG_TEST_GATE_LOG")" != "gate=held" ]; then
+  echo "kickstart must be requested while the restart gate holds the lifecycle lock" >&2
+  exit 1
+fi
+/usr/bin/python3 -c '
+import fcntl, sys, time
+handle = open(sys.argv[1], "rb")
+fcntl.flock(handle, fcntl.LOCK_EX)
+time.sleep(6)
+' "$lifecycle_dir/.lease.json.lock" </dev/null >/dev/null 2>&1 &
+gate_holder_pid=$!
+sleep 0.5
+MACPROVIDER_WATCHDOG_RESTART_GATE_SECONDS=1
+export MACPROVIDER_WATCHDOG_RESTART_GATE_SECONDS
+listener_case foreign unpaused no-kick
+grep -F 'restart deferred: lifecycle store busy' "$TMP/logs/watchdog.log" >/dev/null
+kill "$gate_holder_pid" >/dev/null 2>&1 || true
+wait "$gate_holder_pid" >/dev/null 2>&1 || true
+unset MACPROVIDER_WATCHDOG_RESTART_GATE_SECONDS WATCHDOG_TEST_GATE_LOCK WATCHDOG_TEST_GATE_LOG
+rm -f "$lifecycle_dir/.state-v1.json.lock" "$lifecycle_dir/.lease.json.lock" "$lifecycle_dir/.operator-resume-lease.json.lock"
 rm -f "$state_record" "$TMP/state-target.json" "$WATCHDOG_TEST_LISTENER_CALLS"
 unset WATCHDOG_TEST_LISTENER_MODE WATCHDOG_TEST_STATUS_EXIT
 echo "paused provider listener veto ok"
