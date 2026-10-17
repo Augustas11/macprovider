@@ -2373,7 +2373,7 @@ actor ModelRuntime: ModelRuntimeServing {
         guard let moeProbe else { return (nil, nil) }
         let p = parityProbe
         PagedKVRuntimeDiagnostics.log(
-            "parity model=\(modelID) established=\(p.established) nLayers=\(p.nLayers) nNew=\(p.nNew) gatherKernelCalls=\(p.gatherKernelCalls) expectCalls=\(p.nLayers * p.nNew * 2) maxLogicalBlocks=\(p.maxLogicalBlocks) nonIdentityPermutation=\(p.nonIdentityPermutation)"
+            "parity model=\(modelID) established=\(p.established) nLayers=\(p.nLayers) nNew=\(p.nNew) nForwards=\(p.nForwards) gatherKernelCalls=\(p.gatherKernelCalls) expectCalls=\(p.nLayers * p.nForwards * 2) maxLogicalBlocks=\(p.maxLogicalBlocks) nonIdentityPermutation=\(p.nonIdentityPermutation)"
         )
         let m = moeProbe
         PagedKVRuntimeDiagnostics.log(
