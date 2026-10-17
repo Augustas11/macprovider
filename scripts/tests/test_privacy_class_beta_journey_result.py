@@ -92,6 +92,15 @@ def v2_bundle(manifest_name: str, summary: dict, sources: dict[str, bytes | dict
     return contract.Bundle("fixture", files, b"")
 
 
+# The committed bundle's privacy provider ID, which is also its KV namespace.
+KV_NAMESPACE = "journey-1839-privacy"
+
+
+def kv_bypass_capture() -> str:
+    """Snapshots bracketing the committed bundle's step-07/08 canary rows."""
+    return f"before_unix=1791260000\nafter_unix=1791270000\nnamespace_id={KV_NAMESPACE}\n"
+
+
 class PrivacyClassBetaSignatureRedactionTests(unittest.TestCase):
     def test_bounded_public_signatures_allow_hostname_shaped_random_bytes(self) -> None:
         for path in (
@@ -434,6 +443,57 @@ class PrivacyClassBetaEvidenceTests(unittest.TestCase):
             errors = contract.validate_signed_payload(self.root, signed, requirement_id, [PRIVACY_CLASS_BETA_JOURNEY_ID])
             self.assertTrue(any(f"cannot promote {requirement_id}" in error for error in errors), requirement_id)
 
+    def test_v2_does_not_require_kv_disk_tier_refusal(self) -> None:
+        # SPEC-049 v0.6.0: v2 releases bypass an enabled KV disk tier per
+        # request, so only the v1 baseline must show that refusal.
+        for path in sorted(self.bundle_file("step-04-core-dump-and-env-refused/kv-disk-tier").iterdir()):
+            path.unlink()
+        self.bundle_file("step-04-core-dump-and-env-refused/kv-disk-tier").rmdir()
+        bypass = self.bundle_file("step-04-core-dump-and-env-refused/kv-disk-tier-bypass")
+        bypass.mkdir()
+        (bypass / "stderr.txt").write_text("event=kv_disk_cache action=activated\n", encoding="utf-8")
+        (bypass / "capture.txt").write_text(kv_bypass_capture(), encoding="utf-8")
+        status = {"status": "ok", "enabled": True, "namespace_id": KV_NAMESPACE, "entry_count": 2, "bytes_used": 4096, "counters": {"disk_hit": 1}}
+        (bypass / "status-before.json").write_bytes(json_bytes(status))
+        (bypass / "status-after.json").write_bytes(json_bytes(status))
+        remanifest(self.root / BUNDLE)
+        bundle = contract.load_bundle(self.root, BUNDLE)
+        self.assertEqual([], contract.Checks(bundle, contract.PROFILE_V2).run("config_refusals"))
+        (bypass / "status-after.json").write_bytes(json_bytes({**status, "counters": {"disk_hit": 1, "disk_write_committed": 1}}))
+        remanifest(self.root / BUNDLE)
+        changed = contract.Checks(contract.load_bundle(self.root, BUNDLE), contract.PROFILE_V2).run("config_refusals")
+        self.assertTrue(any("must not change kv-cache counters" in error for error in changed), changed)
+        (bypass / "status-after.json").write_bytes(json_bytes(status))
+        (bypass / "capture.txt").write_text(f"before_unix=1791270000\nafter_unix=1791270001\nnamespace_id={KV_NAMESPACE}\n", encoding="utf-8")
+        remanifest(self.root / BUNDLE)
+        late = contract.Checks(contract.load_bundle(self.root, BUNDLE), contract.PROFILE_V2).run("config_refusals")
+        self.assertTrue(any("must bracket" in error for error in late), late)
+        other = {**status, "namespace_id": "another-provider"}
+        (bypass / "capture.txt").write_text(kv_bypass_capture().replace(KV_NAMESPACE, "another-provider"), encoding="utf-8")
+        (bypass / "status-before.json").write_bytes(json_bytes(other))
+        (bypass / "status-after.json").write_bytes(json_bytes(other))
+        remanifest(self.root / BUNDLE)
+        foreign = contract.Checks(contract.load_bundle(self.root, BUNDLE), contract.PROFILE_V2).run("config_refusals")
+        self.assertTrue(any("must be the privacy provider's ID" in error for error in foreign), foreign)
+        (bypass / "status-before.json").write_bytes(json_bytes(status))
+        (bypass / "status-after.json").write_bytes(json_bytes(status))
+        (bypass / "capture.txt").write_text(kv_bypass_capture(), encoding="utf-8")
+        (bypass / "stderr.txt").write_text("FATAL privacy_class_hardening_failed reasons=x\n", encoding="utf-8")
+        remanifest(self.root / BUNDLE)
+        refused = contract.Checks(contract.load_bundle(self.root, BUNDLE), contract.PROFILE_V2).run("config_refusals")
+        self.assertTrue(any("must be active in privacy mode" in error for error in refused), refused)
+        (bypass / "stderr.txt").write_text("event=kv_disk_cache action=activated\n", encoding="utf-8")
+        remanifest(self.root / BUNDLE)
+        bundle = contract.load_bundle(self.root, BUNDLE)
+        v1_errors = contract.Checks(bundle, contract.PROFILE_V1).run("config_refusals")
+        self.assertTrue(any("kv-disk-tier" in error or "bundle file is missing" in error for error in v1_errors), v1_errors)
+        self.assertIn("enabled KV disk tier untouched by the privacy canaries", contract.step_assertion(contract.PROFILE_V2, "step-04-core-dump-and-env-refused"))
+        self.assertNotIn("KV disk tier, loopback", contract.step_assertion(contract.PROFILE_V2, "step-04-core-dump-and-env-refused"))
+        self.assertEqual(
+            contract.STEP_ASSERTIONS["step-04-core-dump-and-env-refused"],
+            contract.step_assertion(contract.PROFILE_V1, "step-04-core-dump-and-env-refused"),
+        )
+
 
 class PrivacyClassBetaV2RawEvidenceTests(unittest.TestCase):
     @staticmethod
@@ -563,6 +623,16 @@ class PrivacyClassBetaV2RawEvidenceTests(unittest.TestCase):
         self.assertIs(contract.profile_for_name("v2"), contract.PROFILE_V2)
         with self.assertRaises(contract.PrivacyEvidenceError):
             contract.profile_for_name("automatic")
+
+    def kv_disk_bypass_fixture(self) -> contract.Bundle:
+        base = "step-04-core-dump-and-env-refused/kv-disk-tier-bypass"
+        status = {"status": "ok", "enabled": True, "namespace_id": KV_NAMESPACE, "entry_count": 1, "bytes_used": 64, "counters": {}}
+        return contract.Bundle("fixture", {
+            f"{base}/stderr.txt": b"event=kv_disk_cache action=activated\n",
+            f"{base}/capture.txt": kv_bypass_capture().encode(),
+            f"{base}/status-before.json": json_bytes(status),
+            f"{base}/status-after.json": json_bytes(status),
+        }, b"")
 
     def same_studio_sip_off_fixture(self, mutation: str | None = None) -> contract.Bundle:
         binding = (REPO_ROOT / BUNDLE / "step-01-bind-signed-release" / "binding.txt").read_bytes()
@@ -920,7 +990,7 @@ class PrivacyClassBetaV2RawEvidenceTests(unittest.TestCase):
                     replaced += 1
             self.assertEqual(10, replaced)
             release, fixture_key_digest = self.release_fixture()
-            fixtures = (self.same_studio_sip_off_fixture(), self.auto_fixture(), self.enrollment_fixture(), self.reenroll_fixture(), release, self.directory_fixture())
+            fixtures = (self.same_studio_sip_off_fixture(), self.kv_disk_bypass_fixture(), self.auto_fixture(), self.enrollment_fixture(), self.reenroll_fixture(), release, self.directory_fixture())
             for fixture in fixtures:
                 for relative, data in fixture.files.items():
                     if relative == "step-01-bind-signed-release/binding.txt":

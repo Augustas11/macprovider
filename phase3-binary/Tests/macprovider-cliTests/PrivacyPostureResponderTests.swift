@@ -36,6 +36,21 @@ final class PrivacyPostureResponderTests: XCTestCase {
         try assertPostureSignatures(second, signer: signer, identity: runtime.keyManager, sequence: 2)
     }
 
+    /// SPEC-049 v0.6.0: a posture never attests `kv_disk_tier_disabled=true`
+    /// once the privacy path could reach the KV disk tier; the responder stops.
+    func testLostKVDiskBypassStopsPostureAndKeyAdvertisement() throws {
+        let root = try makeStateRoot()
+        let runtime = try makeRuntime(directory: root, models: ["model-a"])
+        let probe = MutablePrivacyPostureProbe(greenPrivacyObservation())
+        let responder = makeResponder(runtime: runtime, signer: try SELivenessTestSigning.generate(), probe: probe)
+        XCTAssertNotNil(try responder.respond(to: postureChallenge(), assignedSession: "session-1"))
+
+        probe.observation.kvDiskTierDisabled = false
+        XCTAssertNil(try responder.respond(to: postureChallenge(), assignedSession: "session-1"))
+        XCTAssertNil(responder.privacyKeyRecords())
+        XCTAssertTrue(responder.isAdvertisingDisabled)
+    }
+
     func testProbeFailureDisablesAdvertisingPermanently() throws {
         defer { PrivacyRuntimeHardening.resetDecryptRecheckForTest() }
         let root = try makeStateRoot()

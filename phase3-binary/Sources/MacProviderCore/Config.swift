@@ -352,7 +352,7 @@ public struct AppConfig: Equatable, Sendable {
     // Default empty ⇒ fail-closed on every Mac that takes the binary.
     public var continuousBatchingAcceptedTuples: [ContinuousBatchingAcceptedTuple]
 
-    // SPEC-037 FR-KVP11: encrypted KV survival disk tier. Default-off; resolved
+    // SPEC-037 FR-KVP11: encrypted KV survival disk tier. Default-on (v0.2.2); resolved
     // fail-closed (invalid value ⇒ tier disabled + `errors` populated, never a
     // process abort). See `KVDiskCacheConfig`.
     public var kvDiskCache: KVDiskCacheConfig

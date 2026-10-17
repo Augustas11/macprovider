@@ -35,7 +35,6 @@ enum PrivacyAutoEnrollment {
             && checked.privacyClassRequested == serving.privacyClassRequested
             && checked.relayBlindRequested == serving.relayBlindRequested
             && checked.relayBlindStateDirectory == serving.relayBlindStateDirectory
-            && checked.kvDiskCache.enabled == serving.kvDiskCache.enabled
             && checked.model == serving.model
     }
     /// Default relay-blind state directory for automatic and forced mode
@@ -203,7 +202,9 @@ extension PrivacyRuntimeHardening {
             add(code)
         }
         if LoopbackServeSelection.select(config.model) != nil { add(PrivacyHardeningCode.loopbackRuntime) }
-        if config.kvDiskCache.enabled { add(PrivacyHardeningCode.kvDiskTierEnabled) }
+        if !PrivacyRuntimeHardening.privacyPathBypassesKVDiskTier() {
+            add(PrivacyHardeningCode.kvDiskTierPrivacyBypass)
+        }
         if !hasConfiguredStateDirectory(config) { add(PrivacyHardeningCode.stateDirectoryMissing) }
         return reasons
     }

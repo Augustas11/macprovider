@@ -6831,7 +6831,7 @@ actor ModelRuntime: ModelRuntimeServing {
     /// SPEC-049-R010. Privacy-class requests never begin a conversation-cache
     /// lease or lookup. A nil lease does not take the serial-route fence.
     static func allowsConversationCacheLease(provenance: KVIngestProvenance, nativeAllows: Bool) -> Bool {
-        nativeAllows && provenance != .privacy
+        nativeAllows && provenance.mayUseReusableKVCache
     }
 
     private static func nativeMTPCaptureEffectiveMaxOutputTokens(
@@ -9508,21 +9508,13 @@ actor ModelRuntime: ModelRuntimeServing {
     #endif
 
     /// Build the per-request cold-tier context (nil when the tier is not attached).
-    /// The FR-KVP11 gate decision requires BOTH the synthetic key prefix and
-    /// direct-HTTP provenance; the identity core carries the live model identity.
+    /// The FR-KVP11/R014 gate admits a synthetic key on direct HTTP or a valid
+    /// fleet grant on relay/Tier-2; the identity core carries the live model identity.
     private func coldContext(for request: ChatCompletionRequest, snapshot: RuntimeSnapshot) -> ConversationColdContext? {
-        guard coldTierAttached, !request.containsNonTextMessageContentPart else { return nil }
-        // Evaluate the FR-KVP11 gate FIRST (key sub-namespace + direct-HTTP provenance),
-        // independent of identity availability, so a gated request whose live identity is
-        // unavailable still reaches the telemetry sink (FR-KVP12) instead of the cold
-        // tier silently doing nothing. The pure resolution lives in
-        // `ConversationColdContext.resolve` (unit-tested per missing input).
-        let gated = KVDiskCacheGate.persists(
-            conversationKey: request.conversationKey, provenance: request.ingestProvenance,
-            fleetGrant: attachedKVDiskTier?.config.allowBuyerKeys == true ? request.fleetCacheGrant : nil)
-        return ConversationColdContext.resolve(
-            gated: gated,
-            requestModel: request.model,
+        Self.coldContext(
+            for: request,
+            tierAttached: coldTierAttached,
+            allowBuyerKeys: attachedKVDiskTier?.config.allowBuyerKeys == true,
             servedModelID: snapshot.modelID ?? request.model,
             modelSHA256: snapshot.modelHash,
             // MEDIUM-5: the catalog revision is a SEPARATE identity field from the model
@@ -9531,6 +9523,47 @@ actor ModelRuntime: ModelRuntimeServing {
             catalogRevision: verifiedModelCatalogRevision,
             tokenizerConfigSHA256: currentTokenizerConfigSHA256,
             chatTemplateSHA256: currentChatTemplateSHA256)
+    }
+
+    /// SPEC-049-R010 (v0.6.0): the KV disk tier never sees privacy-class work.
+    /// A nil cold context makes the conversation cache skip every cold-tier call,
+    /// so a privacy request gets no disk lookup, write, restore or KV telemetry,
+    /// whatever key or grant it carries. This is checked before the SPEC-037
+    /// gate; the gate and the conversation-cache lease refuse privacy as well.
+    static func coldTierAdmits(provenance: KVIngestProvenance) -> Bool {
+        provenance.mayUseReusableKVCache
+    }
+
+    static func coldContext(
+        for request: ChatCompletionRequest,
+        tierAttached: Bool,
+        allowBuyerKeys: Bool,
+        servedModelID: String,
+        modelSHA256: String?,
+        catalogRevision: String?,
+        tokenizerConfigSHA256: String?,
+        chatTemplateSHA256: String?
+    ) -> ConversationColdContext? {
+        guard tierAttached,
+              coldTierAdmits(provenance: request.ingestProvenance),
+              !request.containsNonTextMessageContentPart
+        else { return nil }
+        // Evaluate the FR-KVP11 gate FIRST (key sub-namespace + direct-HTTP provenance),
+        // independent of identity availability, so a gated request whose live identity is
+        // unavailable still reaches the telemetry sink (FR-KVP12) instead of the cold
+        // tier silently doing nothing. The pure resolution lives in
+        // `ConversationColdContext.resolve` (unit-tested per missing input).
+        let gated = KVDiskCacheGate.persists(
+            conversationKey: request.conversationKey, provenance: request.ingestProvenance,
+            fleetGrant: allowBuyerKeys ? request.fleetCacheGrant : nil)
+        return ConversationColdContext.resolve(
+            gated: gated,
+            requestModel: request.model,
+            servedModelID: servedModelID,
+            modelSHA256: modelSHA256,
+            catalogRevision: catalogRevision,
+            tokenizerConfigSHA256: tokenizerConfigSHA256,
+            chatTemplateSHA256: chatTemplateSHA256)
     }
 
     /// Token budget of the serve-time startup probe behind

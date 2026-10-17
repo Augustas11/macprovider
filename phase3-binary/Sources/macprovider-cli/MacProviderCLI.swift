@@ -436,7 +436,7 @@ struct ServeCommand: AsyncParsableCommand {
     // (KVDiskCacheConfigResolver) applies CLI-wins precedence and fails closed on any
     // invalid value. Buyer persistence also requires an authenticated fleet grant;
     // enabling policy alone never grants a request eligibility.
-    @Flag(name: .customLong("kv-disk-cache-enabled"), inversion: .prefixedNo, help: "Enable the encrypted KV-cache survival disk tier. Overrides MACPROVIDER_KV_DISK_CACHE_ENABLED and config key kv_disk_cache.enabled. Default off.")
+    @Flag(name: .customLong("kv-disk-cache-enabled"), inversion: .prefixedNo, help: "Enable the encrypted KV-cache survival disk tier. Overrides MACPROVIDER_KV_DISK_CACHE_ENABLED and config key kv_disk_cache.enabled. Default on; privacy-class requests never use it.")
     var kvDiskCacheEnabled: Bool?
 
     @Flag(name: .customLong("kv-disk-cache-allow-buyer-keys"), inversion: .prefixedNo, help: "Permit authenticated fleet conversation keys in the KV disk tier. Default on; each request still requires a valid coordinator grant and the disk tier must be enabled. Overrides MACPROVIDER_KV_DISK_CACHE_ALLOW_BUYER_KEYS and config key kv_disk_cache.allow_buyer_keys.")

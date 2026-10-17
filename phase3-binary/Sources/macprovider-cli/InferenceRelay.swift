@@ -785,9 +785,9 @@ actor InferenceRelay {
 
         do {
             let requestData = Data(body.utf8)
-            // SPEC-037 FR-KVP11: stamp ingest provenance. Neither relay nor
-            // Tier-2 traffic is ever persisted by the disk tier (only the
-            // direct-HTTP operator path is), independent of key shape.
+            // SPEC-037 FR-KVP11/R014: stamp ingest provenance. Relay and Tier-2
+            // traffic persists only with a valid coordinator fleet grant, never
+            // by key shape; privacy-class work never reaches the disk tier.
             let ingestProvenance: KVIngestProvenance = tier2Session != nil ? .tier2 : .relay
             var request: ChatCompletionRequest
             if let relayBlindOpened {

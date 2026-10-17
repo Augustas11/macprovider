@@ -293,6 +293,17 @@ PROFILE_V2 = EvidenceProfile(
     summary="signed notarized v0.2 release passed the full privacy-class beta v2 journey on Apple Silicon",
 )
 PROFILES_BY_SCHEMA = {profile.schema: profile for profile in (PROFILE_V1, PROFILE_V2)}
+
+# SPEC-049 v0.6.0: v2 releases bypass an enabled KV disk tier per request.
+STEP_ASSERTIONS_V2 = {
+    "step-04-core-dump-and-env-refused": "core dumps off, diagnostic env, loopback runtime, and relay-blind off refused before network, DYLD_* inert; enabled KV disk tier untouched by the privacy canaries",
+}
+
+
+def step_assertion(profile: EvidenceProfile, step: str) -> str:
+    if profile is PROFILE_V2 and step in STEP_ASSERTIONS_V2:
+        return STEP_ASSERTIONS_V2[step]
+    return STEP_ASSERTIONS[step]
 PROFILES_BY_JOURNEY = {profile.journey_id: profile for profile in (PROFILE_V1, PROFILE_V2)}
 
 # SPEC-049-R020 exact strings.
@@ -1690,9 +1701,41 @@ class Checks:
             errors.extend(refusal["errors"])
             expect(refusal["fatal"] and {"diagnostic_env", f"env_{variable.lower()}"} <= refusal["reasons"], errors, f"{variable} must be refused with its bounded reason")
 
+    def kv_disk_bypass(self, base: str, errors: list[str]) -> None:
+        """SPEC-049 v0.6.0: privacy mode started with the KV disk tier active,
+        and the step-07/08 privacy canaries left the tier untouched."""
+        stderr = self.b.text(f"{base}/stderr.txt")
+        expect("event=kv_disk_cache action=activated" in stderr, errors, "KV disk tier must be active in privacy mode")
+        for refusal in ("privacy_class_hardening_failed", "auto_hardening_failed", "auto_ineligible"):
+            expect(refusal not in stderr, errors, f"privacy mode with the KV disk tier on must not log {refusal}")
+        before = self.b.json_object(f"{base}/status-before.json")
+        after = self.b.json_object(f"{base}/status-after.json")
+        for status in (before, after):
+            expect(status.get("status") == "ok" and status.get("enabled") is True, errors, "kv-cache status must be ok and enabled")
+        for field in ("entry_count", "bytes_used", "counters"):
+            expect(field in before and before.get(field) == after.get(field), errors, f"privacy canaries must not change kv-cache {field}")
+        # Bind the snapshots to this provider's tier and to the canary window,
+        # and prove the tier was live with an ordinary positive-control entry.
+        capture = self.b.fields(f"{base}/capture.txt")
+        namespace = capture.get("namespace_id", "")
+        expect(bool(namespace) and before.get("namespace_id") == namespace == after.get("namespace_id"), errors, "kv-cache snapshots must name the provider's namespace")
+        # The tier namespace is the provider ID, so it must be the privacy provider's.
+        expect(namespace == self.provider_id("privacy"), errors, "kv-cache namespace must be the privacy provider's ID")
+        canaries_start, _ = self.window("step-07-canary-stream")
+        _, canaries_end = self.window("step-08-canary-nonstream")
+        expect(int(capture["before_unix"]) <= canaries_start and int(capture["after_unix"]) >= canaries_end, errors, "kv-cache snapshots must bracket the step-07 and step-08 canaries")
+        expect(isinstance(before.get("entry_count"), int) and before["entry_count"] >= 1, errors, "an ordinary positive-control entry must be persisted before the canaries")
+
     def p_config_refusals(self, errors: list[str]) -> None:
         base = "step-04-core-dump-and-env-refused"
-        for case, reason in (("kv-disk-tier", "kv_disk_tier_enabled"), ("loopback-runtime", "loopback_runtime")):
+        # SPEC-049 v0.6.0: an enabled KV disk tier is bypassed per request, not
+        # refused, so only the v1 baseline (signed 1.8.215) carries that case.
+        cases = [("loopback-runtime", "loopback_runtime")]
+        if self.profile is PROFILE_V1:
+            cases.insert(0, ("kv-disk-tier", "kv_disk_tier_enabled"))
+        else:
+            self.kv_disk_bypass(f"{base}/kv-disk-tier-bypass", errors)
+        for case, reason in cases:
             refusal = self.hardening_refusal(f"{base}/{case}")
             errors.extend(refusal["errors"])
             expect(refusal["fatal"] and reason in refusal["reasons"], errors, f"{case} must be refused with {reason}")
@@ -3212,7 +3255,7 @@ def project_payload(evidence: dict[str, Any], source: str, evidence_sha256: str,
         ],
         "result": {"status": "pass", "summary": profile.summary},
         "steps": [
-            {"id": step, "status": "pass", "assertion": STEP_ASSERTIONS[step], "artifacts": [profile.artifact_id, profile.manifest_artifact_id]}
+            {"id": step, "status": "pass", "assertion": step_assertion(profile, step), "artifacts": [profile.artifact_id, profile.manifest_artifact_id]}
             for step in profile.step_ids
         ],
         "redaction": {"secrets_redacted": True, "operator_identity_redacted": True, "local_account_names_redacted": True},

@@ -1,19 +1,28 @@
 import Foundation
 
-/// SPEC-037 FR-KVP11 — the ingest boundary a request arrived on. Threaded
-/// parallel to `conversationKey`; the KV disk-tier synthetic-key gate persists
-/// and promotes ONLY `.directHTTP` traffic (in addition to the key-prefix
-/// requirement). Every other provenance — including the `.unknown` default —
-/// never persists, so a buyer cannot reach the disk tier by crafting a key
-/// shape on a non-gateway path.
-public enum KVIngestProvenance: String, Sendable, Equatable {
+/// SPEC-037 FR-KVP11/R014 — the ingest boundary a request arrived on. Threaded
+/// parallel to `conversationKey`. The KV disk tier admits a reserved synthetic
+/// key only on `.directHTTP`, and relay/Tier-2 traffic only with a valid
+/// coordinator fleet grant; key shape alone never grants persistence.
+/// `.privacy` never touches a reusable cache (`mayUseReusableKVCache`).
+public enum KVIngestProvenance: String, Sendable, Equatable, CaseIterable {
     case directHTTP
     case relay
     case tier2
     case unknown
-    /// SPEC-049-R010. Same disk-tier refusal as `.relay`, and the conversation
-    /// cache refuses a lease for this provenance.
+    /// SPEC-049-R010. Never touches a reusable KV cache: no conversation-cache
+    /// lease and no KV disk-tier context, gate pass, or telemetry.
     case privacy
+
+    /// SPEC-049-R010: the single policy every reusable KV cache sink (hot
+    /// conversation cache, KV disk tier) consults, and the privacy posture
+    /// attests. Exhaustive so a new provenance must choose explicitly.
+    public var mayUseReusableKVCache: Bool {
+        switch self {
+        case .privacy: return false
+        case .directHTTP, .relay, .tier2, .unknown: return true
+        }
+    }
 }
 
 public struct ChatCompletionRequest: Sendable {

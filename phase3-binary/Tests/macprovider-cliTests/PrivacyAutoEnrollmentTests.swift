@@ -573,7 +573,7 @@ final class PrivacyAutoEnrollmentTests: XCTestCase {
         )
         var kvDisk = config
         kvDisk.kvDiskCache.enabled = true
-        XCTAssertEqual(PrivacyRuntimeHardening.automaticEligibilityFailures(syscalls: green, config: kvDisk), [PrivacyHardeningCode.kvDiskTierEnabled])
+        XCTAssertEqual(PrivacyRuntimeHardening.automaticEligibilityFailures(syscalls: green, config: kvDisk), [])
         var noState = config
         noState.relayBlindStateDirectory = nil
         XCTAssertEqual(PrivacyRuntimeHardening.automaticEligibilityFailures(syscalls: green, config: noState), [PrivacyHardeningCode.stateDirectoryMissing])

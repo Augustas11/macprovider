@@ -1040,7 +1040,7 @@
     {
       "spec_id": "SPEC-037",
       "title": "KV survival across provider restarts (encrypted provider-local disk tier)",
-      "version": "v0.2.1",
+      "version": "v0.2.2",
       "path": "specs/SPEC-037-kv-survival-restart.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1066,7 +1066,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "SPEC lands first (RESEARCH_233 Approach A); IMPL follows in a separate PR behind a disabled-by-default flag; KVS-01 evidence pending."
+        "rationale": "SPEC-037 v0.2.2: the encrypted disk tier is implemented and on by default with operator opt-out; privacy-class requests bypass it per request (SPEC-049 v0.6.0). Restart-survival evidence: KVS-01a and KVS-01b runbooks, KVS-02/03 Studio smoke runs, and the R016 Studio acceptance on the #2032 build. Live acceptance on a released provider is pending; every requirement stays pending."
       }
     },
     {
@@ -1521,7 +1521,7 @@
     {
       "spec_id": "SPEC-049",
       "title": "Operator-Constrained Privacy Class",
-      "version": "0.5.0",
+      "version": "0.6.0",
       "path": "specs/SPEC-049-operator-constrained-privacy-class.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1538,6 +1538,7 @@
         "SPEC-022",
         "SPEC-025",
         "SPEC-033",
+        "SPEC-037",
         "SPEC-041",
         "SPEC-042"
       ],
@@ -1551,7 +1552,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "SPEC-049 v0.2.0 defines the Beta operator-constrained privacy class with automatic provider enrollment, release-derived code approval, and the operator-signed identity directory. The coordinator, gateway, and buyer client stay default-off; the provider enters the class only on an eligible signed host. It is implemented locally with unit and integration tests. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result for the v0.1 requirement set is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json), and the v0.1.4 one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249) and superseded for v0.2.0 code by §8.2. The CLI224 eligible-network activation is recorded in §8.3 and Entries 251 and 252: the class runs in production under §8.3 without expiry, and SPEC-049-R023 promotion is not required for operation. v0.5.0 adds the code_bound_attested label (SPEC-049-R033..SPEC-049-R035), granted per posture only when the App Attest key SPEC-033 recorded for the provider asserts it; providers without App Attest keep the device-bound label. A full signed v0.2 journey, a real-hardware code-bound run, and SPEC-049-R023 remain pending; every requirement stays pending. No conformance promotion is made."
+        "rationale": "SPEC-049 v0.2.0 defines the Beta operator-constrained privacy class with automatic provider enrollment, release-derived code approval, and the operator-signed identity directory. The coordinator, gateway, and buyer client stay default-off; the provider enters the class only on an eligible signed host. It is implemented locally with unit and integration tests. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result for the v0.1 requirement set is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json), and the v0.1.4 one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249) and superseded for v0.2.0 code by §8.2. The CLI224 eligible-network activation is recorded in §8.3 and Entries 251 and 252: the class runs in production under §8.3 without expiry, and SPEC-049-R023 promotion is not required for operation. v0.5.0 adds the code_bound_attested label (SPEC-049-R033..SPEC-049-R035), granted per posture only when the App Attest key SPEC-033 recorded for the provider asserts it; providers without App Attest keep the device-bound label. v0.6.0 makes the KV disk-tier exclusion per request: the tier may be on for ordinary traffic, privacy-class requests bypass it (SPEC-049-R010), and posture field kv_disk_tier_disabled attests that bypass. A full signed v0.2 journey, a real-hardware code-bound run, and SPEC-049-R023 remain pending; every requirement stays pending. No conformance promotion is made."
       }
     },
     {
@@ -4407,15 +4408,23 @@
       "requirement_id": "SPEC-037-R011",
       "spec_id": "SPEC-037",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/MacProviderCore/KVDiskCacheConfig.swift:KVDiskCacheConfigResolver",
+        "phase3-binary/Sources/macprovider-cli/KVDiskTier.swift:persists",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:coldTierAdmits"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/KVDiskCacheConfigTests.swift:testDefaultOn",
+        "phase3-binary/Tests/macprovider-cliTests/KVDiskCacheConfigTests.swift:testOperatorOptOutViaEachSource",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyKVDiskBypassTests.swift:testNonPrivateFleetRequestStillPersistsAndRestoresFromDisk"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "FR-KVP11 (configuration and default-off rollout): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+        "rationale": "FR-KVP11 (configuration, default-on rollout from v0.2.2 with operator opt-out, authenticated fleet gate, privacy-class bypass): implemented and unit-tested; live acceptance on a released provider is pending."
       }
     },
     {
@@ -11561,12 +11570,15 @@
       "spec_id": "SPEC-049",
       "state": "pending",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/PrivacyRuntimeHardening.swift:PrivacyRuntimeHardening"
+        "phase3-binary/Sources/macprovider-cli/PrivacyRuntimeHardening.swift:PrivacyRuntimeHardening",
+        "phase3-binary/Sources/macprovider-cli/PrivacyRuntimeHardening.swift:privacyPathBypassesKVDiskTier"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/PrivacyRuntimeHardeningTests.swift:testFakeProbeAllGreenPasses",
         "phase3-binary/Tests/macprovider-cliTests/PrivacyRuntimeHardeningTests.swift:testTraceEnvRefused",
-        "phase3-binary/Tests/macprovider-cliTests/PrivacyRuntimeHardeningTests.swift:testLoopbackAndDiskTierRefused"
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyRuntimeHardeningTests.swift:testLoopbackRefusedAndDiskTierBypassed",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyKVDiskBypassTests.swift:testPrivacyPathBypassInvariantHolds",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyPostureResponderTests.swift:testLostKVDiskBypassStopsPostureAndKeyAdvertisement"
       ],
       "journeys": [
         "JOURNEY-PRIVACY-CLASS-BETA",
@@ -11636,11 +11648,16 @@
       "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/KVDiskTier.swift:persists",
-        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:allowsConversationCacheLease"
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:allowsConversationCacheLease",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:coldTierAdmits"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/InferenceRelayPrivacyTests.swift:testNoReceiptNoTelemetryNoConversationCache",
-        "test/integration/privacy_class_integration_test.go:TestPrivacyClassRedactionNoCanaryInAnyArtifact"
+        "test/integration/privacy_class_integration_test.go:TestPrivacyClassRedactionNoCanaryInAnyArtifact",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyKVDiskBypassTests.swift:testPrivacyRequestGetsNoColdContextWhateverKeyOrGrant",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyKVDiskBypassTests.swift:testPrivacyRequestNeverLooksUpWritesOrRestoresDiskTier",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyKVDiskBypassTests.swift:testNonPrivateFleetRequestStillPersistsAndRestoresFromDisk",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyKVDiskBypassTests.swift:testPrivacyRequestLeavesRealPersistedEntryUntouched"
       ],
       "journeys": [
         "JOURNEY-PRIVACY-CLASS-BETA",
