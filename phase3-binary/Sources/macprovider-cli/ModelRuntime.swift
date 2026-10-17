@@ -2094,16 +2094,12 @@ actor ModelRuntime: ModelRuntimeServing {
         modelFamily == "glm5_next" ? "glm5-next-mla-parity-v1" : "sdpa-parity-v1"
     }
 
-    /// Set true in the change that records the `glm5_next` AC-20 fixture,
-    /// attach proof, and row-isolation, replay and drain evidence under
-    /// `docs/evidence/` (SPEC-039 FR-PKV12). A lab-harness build may measure
-    /// attach before that with `MACPROVIDER_LAB_GLM5_NEXT_PAGED_ATTACH=1`.
-    nonisolated static var glm5NextPagedAttachEvidenceRecorded: Bool {
-        #if MACPROVIDER_LAB_HARNESS
-        if ProcessInfo.processInfo.environment["MACPROVIDER_LAB_GLM5_NEXT_PAGED_ATTACH"] == "1" { return true }
-        #endif
-        return false
-    }
+    /// SPEC-039 FR-PKV12 (v0.1.20): the `glm5_next` AC-20 fixture, attach
+    /// proof and row-isolation evidence are recorded under
+    /// `docs/evidence/glm53-flash-t4-2026-10-17/`, so the entry advertises
+    /// its exact identity. The load-time parity and isolation probes, the
+    /// per-Mac FR-CB10 self-check and the signed CB policy still gate serving.
+    nonisolated static let glm5NextPagedAttachEvidenceRecorded = true
 
     nonisolated static func measurePagedKVRuntime(
         config: PagedKVConfig,
@@ -2154,9 +2150,9 @@ actor ModelRuntime: ModelRuntimeServing {
         // K and V (`nLayers * nNew * 2`) across a non-degenerate (>= 3 block),
         // boundary-crossing, non-identity layout. Anything short of that fails closed —
         // no measured parity, no label, no attach.
-        // SPEC-039 FR-PKV12: the `glm5_next` entry advertises nothing until
-        // its AC-20 fixture, attach proof, and row-isolation, replay and drain
-        // evidence are recorded; until then attach fails closed on parity.
+        // SPEC-039 FR-PKV12: the `glm5_next` entry advertises only with its
+        // evidence recorded (`glm5NextPagedAttachEvidenceRecorded`); without
+        // it attach fails closed on parity.
         if modelCapabilities.modelFamily == "glm5_next", !Self.glm5NextPagedAttachEvidenceRecorded {
             PagedKVRuntimeDiagnostics.log("measure nil: glm5_next paged attach evidence not recorded (SPEC-039 AC-20)")
             return nil

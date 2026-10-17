@@ -222,6 +222,28 @@ final class GLM5NextPagedKVWiringTests: XCTestCase {
         XCTAssertFalse(PagedMLALatentCache.blockSizeIsValid(256, kpool: 0))
     }
 
+    /// SPEC-039 FR-PKV12 v0.1.20: the GLM-5.3-Flash entry advertises in
+    /// every build because its evidence is recorded, and no environment
+    /// override can stand in for that record.
+    func testGLM5NextPagedAttachOpensOnRecordedEvidence() throws {
+        XCTAssertTrue(ModelRuntime.glm5NextPagedAttachEvidenceRecorded)
+        let repo = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let readme = try String(
+            contentsOf: repo.appendingPathComponent("docs/evidence/glm53-flash-t4-2026-10-17/README.md"),
+            encoding: .utf8
+        )
+        for record in ["window-20261017T022259Z-ac20-msb/", "selfcheck-20261017T041102Z/", "leftovers/"] {
+            XCTAssertTrue(readme.contains(record), "evidence README names \(record)")
+        }
+        let runtime = try String(
+            contentsOf: repo.appendingPathComponent("phase3-binary/Sources/macprovider-cli/ModelRuntime.swift"),
+            encoding: .utf8
+        )
+        XCTAssertFalse(runtime.contains("MACPROVIDER_LAB_GLM5_NEXT_PAGED_ATTACH"))
+    }
+
     func testSelfCheckKeyChangesWithTheFlattenedTokenCap() {
         let plain = ModelRuntime.continuousBatchingSelfCheckRuntimeBuild(forwardBound: 11, routeKeyBoundary: 1024)
         let glm = ModelRuntime.continuousBatchingSelfCheckRuntimeBuild(

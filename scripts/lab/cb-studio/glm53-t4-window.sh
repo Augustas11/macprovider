@@ -19,18 +19,19 @@
 #        lone run, or first differing only at the FR-CB10 near-tie: stock
 #        serial top two within 1/1024 logit), verified_k >= 4, and decision
 #        `granted` (some rung's median gain >= 1.2x).
-#        Unsigned-tuple lab path: docs/runbooks/continuous-batching-enable-gate.md
-#        documents no lab self-check procedure for an unsigned tuple, and the
-#        signed GLM CB policy entry is T7 work bound to the final CLI CDHash.
-#        So paged attach for glm5_next is opened only by the lab-harness gate
-#        (`-DMACPROVIDER_LAB_HARNESS` build plus
-#        MACPROVIDER_LAB_GLM5_NEXT_PAGED_ATTACH=1), the documented way here.
+#        Paged attach for glm5_next is open in every build since SPEC-039
+#        v0.1.20 recorded its evidence; the lab serve needs no attach override.
 #        The serve runs `--no-join --no-idle-prewarm` WITHOUT
 #        `--autotune-candidate`: an autotune child skips the served-slots plan
 #        (MacProviderCLI `if !autotuneCandidate, ...` before AutoServedSlots),
 #        so the FR-CB10 self-check driver would never start (also recorded in
 #        1971-selfcheck/studio-selfcheck-validation.sh).
 #     3. msb-throughput, paged engine, rows 1, 2 and 4 at block 256.
+#     4. (`run-leftovers`, not in the default legs) SPEC-039 FR-PKV12
+#        replay and drain record for this identity: msb-throughput
+#        `--engine scheduler --scenario leftovers --rows 4 --prompt-tokens 1024
+#        --parity-tokens 48`, the harness the gpt-oss-120b entry used. PASS:
+#        isolation, replay, drain and parity all `pass=true`.
 #   It never binds or signals the live port; pausing the live provider is the
 #   window owner's job, and `run` refuses to start while it serves.
 #
@@ -156,7 +157,7 @@ out += [f"{k}: {v}" for k, v in want.items()]
 open(dst, "w").write("\n".join(out) + "\n")
 PY
   chmod 600 $dir/config.yaml
-  MACPROVIDER_PAGED_KV_ENABLED=1 MACPROVIDER_LAB_GLM5_NEXT_PAGED_ATTACH=1 \
+  MACPROVIDER_PAGED_KV_ENABLED=1 \
     $HARNESS/macprovider-cli serve --config $dir/config.yaml --port $LAB_PORT --no-join --no-idle-prewarm \
     > $dir/serve.log 2>&1 &
   local pid=$! t0=$(date +%s) decided=0
@@ -236,6 +237,38 @@ print("leg3 rows=" + sys.argv[2] + " " + " ".join(f"{k}={d[k]}" for k in keys))'
   done
   fi
 
+  if [[ " $LEGS " == *" 4 "* ]]; then
+  # --- Leg 4: scheduler leftovers (isolation, replay, drain, parity) ---------
+  echo "leg4 leftovers start $(date -u +%T)" | tee -a $OUT/summary.txt
+  if $HARNESS/macprovider-cli msb-throughput --model $MODEL --engine scheduler --no-compile \
+      --scenario leftovers --rows 4 --prompt-tokens 1024 --parity-tokens 48 --runs 1 --stdout-only \
+      > $OUT/leftovers.json 2> $OUT/leftovers.log \
+     && python3 - $OUT/leftovers.json <<'PY' | tee -a $OUT/summary.txt
+import json, sys
+text = open(sys.argv[1]).read()
+d = json.loads(text[text.index("{"):])
+ok = True
+def find(o, name):
+    if isinstance(o, dict):
+        if name in o and isinstance(o[name], dict):
+            return o[name]
+        for v in o.values():
+            r = find(v, name)
+            if r is not None:
+                return r
+    return None
+for name in ("isolation", "replay", "drain", "parity"):
+    part = find(d, name)
+    passed = isinstance(part, dict) and part.get("pass") is True
+    print(f"leg4 {name} pass={passed}")
+    ok = ok and passed
+print("leg4 leftovers " + ("PASS" if ok else "FAIL"))
+sys.exit(0 if ok else 1)
+PY
+  then :; else result=FAIL; echo "leg4 leftovers FAIL (see leftovers.json / leftovers.log)" | tee -a $OUT/summary.txt; fi
+  shasum -a 256 $OUT/leftovers.json $OUT/leftovers.log | tee -a $OUT/summary.txt
+  fi
+
   echo "RESULT=$result evidence=$OUT" | tee -a $OUT/summary.txt
   [[ $result == PASS ]]
 }
@@ -244,5 +277,6 @@ case ${1:-} in
   prepare) prepare ;;
   run) run ;;
   run-selfcheck) LEGS=2 run ;;
-  *) echo "usage: $0 prepare|run|run-selfcheck" >&2; exit 2 ;;
+  run-leftovers) LEGS=4 run ;;
+  *) echo "usage: $0 prepare|run|run-selfcheck|run-leftovers" >&2; exit 2 ;;
 esac

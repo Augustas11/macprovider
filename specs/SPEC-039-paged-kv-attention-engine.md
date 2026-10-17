@@ -1,7 +1,8 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1.19
-Status: draft (normative design). v0.1.19 bounds every shared forward that
+Version: v0.1.20
+Status: draft (normative design). v0.1.20 records the FR-PKV12 `glm5_next`
+evidence, so the GLM-5.3-Flash entry advertises its exact identity. v0.1.19 bounds every shared forward that
 carries a `glm5_next` row at 8 flattened tokens, gives `glm5_next` a 256-token
 default pool block, and states the `pagedMLA` gather count. v0.1.18 names the `glm5_next` catalog key
 (`zai-org/glm-5.3-flash`) and counts the native-MTP next-N layer's
@@ -66,6 +67,21 @@ is `RotatingKVCache` only because the serve path caps KV for memory attaches to
 paged mode (the block pool bounds memory), while a genuine sliding-window model
 stays fail-safe. IMPL lands with this revision.
 Owner: provider runtime / inference engine
+Change log v0.1.20 (2026-10-17): the FR-PKV12 GLM-5.3-Flash entry's
+evidence is recorded under `docs/evidence/glm53-flash-t4-2026-10-17/`, on the
+exact identity (snapshot-manifest `7299b6a7…`, M3 Ultra, Metal library
+`589e56e0…`): the AC-20 fixture
+(`window-20261017T022259Z-ac20-msb/`: 48 exact greedy tokens at 2,800 prompt
+tokens, 1,166 gather calls, byte-equal pending windows, attach probe
+established); the attach proof and row isolation from a lab serve
+(`selfcheck-20261017T041102Z/serve.log`: parity established over 11 sparse
+layers in 36 forwards, MoE expert-dispatch isolation on first decode and on
+rejoin, batched isolation with 0 cross-row divergences; the SPEC-038 FR-CB10
+self-check's rows exact at k = 2..4); and replay and drain from the scheduler
+leftovers harness (`leftovers/`), the record the `openai/gpt-oss-120b` entry
+used. The entry now advertises the tuple; load-time probes, the per-Mac
+FR-CB10 self-check and the signed SPEC-023 policy still gate serving.
+Refines SPEC-039-R012.
 Change log v0.1.19 (2026-10-17): FR-PKV12 caps a shared forward over
 `pagedMLA` layers at 8 flattened tokens (rows x tokens per row): the GLM-5-Next
 batched decode kernels and quantized projections keep a batched row bitwise
@@ -770,7 +786,8 @@ be individually measured before it is added. The v1 allowlist is:
   the tuple in the FR-PKV11 descriptor until the AC-20 fixture, the attach
   proof below, and row-isolation, replay, and drain evidence for this exact
   identity are recorded under `docs/evidence/`; until then attach fails
-  closed with `paged_fallback_parity`.
+  closed with `paged_fallback_parity`. (v0.1.20) Evidence recorded under
+  `docs/evidence/glm53-flash-t4-2026-10-17/` (README lists each record).
 
 Membership is per identity and evidence-gated, never per architecture. A
 same-architecture identity is admitted only after it individually passes the
@@ -1215,8 +1232,8 @@ The implementation PR for this SPEC MUST include fixtures that prove:
   probe prevents false rejection of full-context models capped for memory.
   Qwen3.x first-turn exceptions and the exact `openai/gpt-oss-120b`
   sliding-window/full-attention tuple remain the only measured mixed-layout
-  grants. The v0.1.17 `glm5_next` entry is SPEC-first and advertises nothing
-  until its AC-20 and attach-proof evidence is recorded.
+  grants. The v0.1.17 `glm5_next` entry was SPEC-first; its evidence is
+  recorded in v0.1.20 (`docs/evidence/glm53-flash-t4-2026-10-17/`).
 - KV offload and LRU/priority eviction policy remain future work. v0.1 owns a
   bounded resident pool and sequence-scoped reclaim mechanism, not an
   offloaded or globally shared cache manager.

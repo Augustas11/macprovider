@@ -96,3 +96,12 @@ on the unpinned `5a2b4ee` (verify 41.7 ms) and adds a census of the verify
 step itself (fused MoE 42%, KDA multi-QMV 24%), with the same varied-text
 result (1k: acceptance 0.789, 40.0 vs 41.0 tok/s). `mtp-20261017T013154Z/` is
 the same parity at the superseded `fa72942` pin.
+
+## SPEC-039 FR-PKV12 record for the GLM-5.3-Flash entry (v0.1.20)
+
+| Requirement | Record |
+| --- | --- |
+| AC-20 fixture | `window-20261017T022259Z-ac20-msb/leg1-fixture.log` |
+| Attach proof (parity, gather coverage) | `selfcheck-20261017T041102Z/serve.log`: `parity … established=true nLayers=11 nForwards=36 gatherKernelCalls=792` |
+| Row isolation | same log: MoE expert-dispatch isolation on first decode and on rejoin, `batched-isolation … proven=true crossRowDivergences=0`; FR-CB10 rows exact at k = 2..4 |
+| Replay and drain | `leftovers/` (`glm53-t4-window.sh run-leftovers`: scheduler leftovers harness, isolation / replay / drain / parity `pass=true`). **Not yet recorded; required before the campaign PR merges.** |
