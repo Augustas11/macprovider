@@ -12,7 +12,63 @@ import Tokenizers
 #if DEBUG || MACPROVIDER_LAB_HARNESS
 let nativeMTPHardwareDefaultModelID = "mlx-community/Qwen3.5-9B-4bit"
 
-/// Hidden Mac Studio lab harness for the real Qwen3.5 native-MTP path.
+/// The native-MTP family a hardware fixture exercises, chosen from the
+/// fixture target's own `config.json`.
+struct NativeMTPHardwareE2EFamily: Equatable, Sendable {
+    /// `PagedKVRuntimeModelCapabilities.modelFamily` of the target.
+    let modelFamily: String
+    let familyAdapter: String
+    /// The next-N layer ships inside the target (`checkpoint_mtp`), so the
+    /// fixture has no `mtp/` directory and the drafter is built from the
+    /// target (SPEC-048 MTP-2).
+    let embeddedMTP: Bool
+    let blockSizeTokens: Int
+    /// The paged kind the target's attention layers must use.
+    let pagedKind: PagedKVSharedForwardBackend.CacheKind
+
+    /// The Qwen3.5 fixture's paged block (unchanged from the Qwen-only harness).
+    static let qwenBlockSizeTokens = 32
+
+    static let qwen35 = NativeMTPHardwareE2EFamily(
+        modelFamily: "qwen",
+        familyAdapter: "qwen3_5_mtp_v1",
+        embeddedMTP: false,
+        blockSizeTokens: qwenBlockSizeTokens,
+        pagedKind: .pagedAttention
+    )
+
+    /// GLM-5.3-Flash: KDA on `MambaCache`, DSA on `pagedMLA` at the family
+    /// block size (SPEC-039 v0.1.19).
+    static let glm5Next = NativeMTPHardwareE2EFamily(
+        modelFamily: "glm5_next",
+        familyAdapter: "glm5_next_mtp_v1",
+        embeddedMTP: true,
+        blockSizeTokens: PagedKVConfig.familyDefaultBlockSizeTokens["glm5_next"] ?? 256,
+        pagedKind: .pagedMLA(kpool: 4)
+    )
+
+    /// The fixture directory the drafter artifact lives in.
+    var mtpDirectoryName: String { embeddedMTP ? "target" : "mtp" }
+
+    func matchesPagedKind(_ kind: PagedKVSharedForwardBackend.CacheKind) -> Bool {
+        switch (pagedKind, kind) {
+        case (.pagedAttention, .pagedAttention), (.pagedMLA, .pagedMLA): true
+        default: false
+        }
+    }
+
+    static func detect(configJSONData: Data?) -> NativeMTPHardwareE2EFamily? {
+        switch ModelRuntime.pagedKVModelCapabilities(modelID: nil, configJSONData: configJSONData).modelFamily {
+        case "qwen": .qwen35
+        case "glm5_next": .glm5Next
+        default: nil
+        }
+    }
+}
+
+/// Hidden Mac Studio lab harness for the real native-MTP path (Qwen3.5 with a
+/// separate drafter artifact, or GLM-5.3-Flash with its embedded next-N layer;
+/// the family comes from `target/config.json`).
 ///
 /// This intentionally mirrors `NativeMTPHardwareE2ETests` without XCTest so
 /// the designated lab box can run the hardware acceptance even when the host
@@ -32,7 +88,7 @@ struct NativeMTPHardwareE2ECommand: AsyncParsableCommand {
 
     @Option(
         name: .customLong("root"),
-        help: "Fixture root containing plain target/ and mtp/ snapshot directories."
+        help: "Fixture root containing a plain target/ snapshot directory, plus mtp/ for a separate drafter artifact."
     )
     var root: String?
 
@@ -137,6 +193,9 @@ final class NativeMTPHardwareE2ERunner {
     private let maxPromptTokens: Int
     private let maxPhysicalBlocks: Int
     private let verifyServePath: Bool
+    /// Detected from `target/config.json`; Qwen3.5 when unreadable, so an
+    /// unrecognized target fails the family check in the fixture load.
+    let family: NativeMTPHardwareE2EFamily
 
     static func sizedMaxPhysicalBlocks(slots: Int, promptTokens: Int, outputTokens: Int) -> Int {
         let boundedSlots = max(1, slots)
@@ -164,6 +223,19 @@ final class NativeMTPHardwareE2ERunner {
         self.maxPromptTokens = maxPromptTokens
         self.maxPhysicalBlocks = maxPhysicalBlocks
         self.verifyServePath = verifyServePath
+        family = NativeMTPHardwareE2EFamily.detect(configJSONData: try? Data(
+            contentsOf: root.appendingPathComponent("target/config.json")
+        )) ?? .qwen35
+    }
+
+    private var mtpDirectory: URL {
+        root.appendingPathComponent(family.mtpDirectoryName, isDirectory: true)
+    }
+
+    private func observeArtifacts(targetDirectory: URL) throws -> NativeMTPArtifactPairObservation {
+        family.embeddedMTP
+            ? try NativeMTPArtifactObserver.observeEmbedded(targetDirectory: targetDirectory)
+            : try NativeMTPArtifactObserver.observePair(targetDirectory: targetDirectory, mtpDirectory: mtpDirectory)
     }
 
     static func requireStudioHost() throws {
@@ -278,14 +350,14 @@ final class NativeMTPHardwareE2ERunner {
         nativeAdmissionRecorder: NativeMTPHardwareAdmissionRecorder?
     ) async throws -> NativeMTPHardwareRuntimeFixture {
         let targetDirectory = root.appendingPathComponent("target", isDirectory: true)
-        let mtpDirectory = root.appendingPathComponent("mtp", isDirectory: true)
+        let mtpDirectory = self.mtpDirectory
         try requireDirectory(targetDirectory)
         try requireDirectory(mtpDirectory)
 
         let targetIdentity = try MLXSnapshotIdentity.compute(directory: targetDirectory)
         let mtpIdentity = try MLXSnapshotIdentity.compute(directory: mtpDirectory)
         let tokenizerSHA = try sha256(of: root.appendingPathComponent("target/tokenizer.json"))
-        let manifestSHA = try sha256(of: root.appendingPathComponent("mtp/config.json"))
+        let manifestSHA = try sha256(of: mtpDirectory.appendingPathComponent("config.json"))
         let machine = MachineFingerprinter().sample()
         let signedAdmission = try makeAndValidateAdmission(
             targetIdentity: targetIdentity,
@@ -395,7 +467,7 @@ final class NativeMTPHardwareE2ERunner {
         nativeAdmissionRecorder: NativeMTPHardwareAdmissionRecorder?
     ) async throws -> NativeMTPHardwareRuntimePair {
         let targetDirectory = root.appendingPathComponent("target", isDirectory: true)
-        let mtpDirectory = root.appendingPathComponent("mtp", isDirectory: true)
+        let mtpDirectory = self.mtpDirectory
         try requireDirectory(targetDirectory)
         try requireDirectory(mtpDirectory)
         let observedTargetIdentity = try MLXSnapshotIdentity.compute(directory: targetDirectory)
@@ -405,10 +477,7 @@ final class NativeMTPHardwareE2ERunner {
         // Run the same artifact observer the production enable path runs
         // (ModelRuntime native-MTP load) so lab evidence cannot pass on artifacts
         // that production would reject.
-        let artifactObservation = try NativeMTPArtifactObserver.observePair(
-            targetDirectory: targetDirectory,
-            mtpDirectory: mtpDirectory
-        )
+        let artifactObservation = try observeArtifacts(targetDirectory: targetDirectory)
         try require(
             ModelRuntime.nativeMTPArtifactObservationMatchesAdmissionForTest(
                 artifactObservation,
@@ -423,7 +492,10 @@ final class NativeMTPHardwareE2ERunner {
             modelID: modelID,
             configJSONData: configData
         )
-        try require(modelCapabilities.modelFamily == "qwen", "expected qwen model family")
+        try require(
+            modelCapabilities.modelFamily == family.modelFamily,
+            "expected \(family.modelFamily) model family, got \(modelCapabilities.modelFamily)"
+        )
         try require(modelCapabilities.hybridDecoderArchitectureVerified, "hybrid decoder not verified")
         try require(
             ModelRuntime.nativeMTPAdmissionCacheClass(
@@ -439,14 +511,20 @@ final class NativeMTPHardwareE2ERunner {
             targetContainer = servePathLoad.targetContainer
             drafterContainer = servePathLoad.drafterContainer
         } else {
-            await Qwen35TextMTPRegistration.register()
             targetContainer = try await LLMModelFactory.shared.loadContainer(
                 from: targetDirectory,
                 using: #huggingFaceTokenizerLoader()
             )
-            drafterContainer = try await MTPDrafterModelFactory.shared.loadContainer(
-                from: mtpDirectory,
-                using: #huggingFaceTokenizerLoader()
+            let drafterPresent = await ModelRuntime.nativeMTPDrafterPresent(
+                familyAdapter: family.familyAdapter,
+                targetContainer: targetContainer
+            )
+            try require(drafterPresent, "target loaded without its MTP drafter weights")
+            drafterContainer = try await ModelRuntime.loadNativeMTPDrafterContainer(
+                familyAdapter: family.familyAdapter,
+                targetDirectory: targetDirectory,
+                drafterDirectory: mtpDirectory,
+                tokenizerLoader: #huggingFaceTokenizerLoader()
             )
         }
         let maximumBlockSize = await drafterContainer.perform { context in
@@ -462,12 +540,12 @@ final class NativeMTPHardwareE2ERunner {
                 return kind
             }
         }
-        try require(cacheKinds.contains(.pagedAttention), "paged-attention cache not observed")
+        try require(cacheKinds.contains(where: family.matchesPagedKind), "\(family.pagedKind) cache not observed")
         try require(cacheKinds.contains(.recurrentMamba), "recurrent Mamba cache not observed")
 
         let pagedConfig = PagedKVConfig(
             enabled: true,
-            blockSizeTokens: 32,
+            blockSizeTokens: family.blockSizeTokens,
             maxPhysicalBlocks: maxPhysicalBlocks
         )
         // Attach from the same live parity + batched-isolation (MoE dispatch)
@@ -485,7 +563,7 @@ final class NativeMTPHardwareE2ERunner {
             targetContainer: targetContainer,
             backend: PagedKVSharedForwardBackend(
                 container: targetContainer,
-                blockSizeTokens: 32,
+                blockSizeTokens: family.blockSizeTokens,
                 maxPhysicalBlocks: maxPhysicalBlocks,
                 poolEpoch: 1,
                 layerCount: cacheKinds.count,
@@ -508,7 +586,7 @@ final class NativeMTPHardwareE2ERunner {
         let observed = measurement.observedRuntimeIdentity
         let ordinaryBackend = PagedKVSharedForwardBackend(
             container: targetContainer,
-            blockSizeTokens: 32,
+            blockSizeTokens: family.blockSizeTokens,
             maxPhysicalBlocks: maxPhysicalBlocks,
             poolEpoch: 1,
             layerCount: cacheKinds.count,
@@ -516,7 +594,7 @@ final class NativeMTPHardwareE2ERunner {
         )
         let nativeBackend = PagedKVSharedForwardBackend(
             container: targetContainer,
-            blockSizeTokens: 32,
+            blockSizeTokens: family.blockSizeTokens,
             maxPhysicalBlocks: maxPhysicalBlocks,
             poolEpoch: 1,
             layerCount: cacheKinds.count,
@@ -655,13 +733,12 @@ final class NativeMTPHardwareE2ERunner {
         mtpIdentity: MLXSnapshotIdentity,
         machine: MachineFingerprint
     ) throws -> NativeMTPHardwareSignedAdmission {
-        let artifactObservation = try NativeMTPArtifactObserver.observePair(
-            targetDirectory: root.appendingPathComponent("target", isDirectory: true),
-            mtpDirectory: root.appendingPathComponent("mtp", isDirectory: true)
+        let artifactObservation = try observeArtifacts(
+            targetDirectory: root.appendingPathComponent("target", isDirectory: true)
         )
         let affineRepresentation = try NativeMTPArtifactObserver.affineRepresentation(for: artifactObservation)
         let tokenizerSHA = try sha256(of: root.appendingPathComponent("target/tokenizer.json"))
-        let manifestSHA = try sha256(of: root.appendingPathComponent("mtp/config.json"))
+        let manifestSHA = try sha256(of: mtpDirectory.appendingPathComponent("config.json"))
         let signer = Curve25519.Signing.PrivateKey()
         let keyID = "native-mtp-hardware-e2e"
         let selfTestBankData = try selfTestChallengeBankData(
@@ -797,9 +874,9 @@ final class NativeMTPHardwareE2ERunner {
             "schema_version": "macprovider.native-mtp-artifact-projection.v1",
             "artifacts": [
                 "target": ["path": "target", "sha256": targetSHA],
-                "mtp": ["path": "mtp", "sha256": mtpSHA],
+                "mtp": ["path": family.mtpDirectoryName, "sha256": mtpSHA],
                 "tokenizer": ["path": "target/tokenizer.json", "sha256": tokenizerSHA],
-                "manifest": ["path": "mtp/config.json", "sha256": manifestSHA],
+                "manifest": ["path": "\(family.mtpDirectoryName)/config.json", "sha256": manifestSHA],
             ],
         ])
     }
@@ -823,7 +900,7 @@ final class NativeMTPHardwareE2ERunner {
             "tokenizer_sha256": tokenizerSHA,
             "decode_path": "native_mtp",
             "mtp_manifest_sha256": manifestSHA,
-            "mtp_family_adapter": "qwen3_5_mtp_v1",
+            "mtp_family_adapter": family.familyAdapter,
             "mtp_state_class": "hybrid_stageable_rewindable",
             "mtp_head_count": 1,
             "proposal_depth": 1,
@@ -896,13 +973,13 @@ final class NativeMTPHardwareE2ERunner {
             modelSHA256: modelSHA,
             tokenizerSHA256: nil,
             chatTemplateSHA256: nil,
-            modelFamily: "qwen",
+            modelFamily: family.modelFamily,
             hardwareClass: "apple-silicon-native-mtp-e2e",
             metallibSHA256: String(repeating: "a", count: 64),
             kernelIdentifier: "macprovider_paged_kv_gather_v1",
-            blockSizeTokens: 32,
+            blockSizeTokens: family.blockSizeTokens,
             maxPhysicalBlocks: maxPhysicalBlocks,
-            maxResidentTokens: max(maxPhysicalBlocks * 32, maxContextTokens * maxBatch),
+            maxResidentTokens: max(maxPhysicalBlocks * family.blockSizeTokens, maxContextTokens * maxBatch),
             poolEpoch: 1,
             parityLabel: "native-mtp-hardware-e2e-v1"
         )

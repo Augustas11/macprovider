@@ -353,6 +353,23 @@ final class PagedMLALatentCache: GLM5NextLatentCache, CustomDebugStringConvertib
     }
 }
 
+/// T5.3 integration point for the fork's GLM-5-Next packed-verification
+/// hooks (padded verification and per-row commit on the GLM caches).
+///
+/// The provider side already follows the fork's `MTPPackedVerificationCache`
+/// contract: `PagedMLABatchLayerCache` stages every row on a copy, reports
+/// each row's valid width (`packedVerificationRowLengths`), and its pending
+/// resolutions keep exactly the accepted prefix by exact trim, whether or not
+/// the model also appends right-padding columns. What the pinned fork does not
+/// yet do is run GLM-5-Next layers over a padded packed batch (per-row
+/// lengths into the sparse attention and the KDA checkpoint, per-row commit).
+/// Until the fork's hooks are wired here, `glm5_next_mtp_v1` admission fails
+/// closed (`admission_capability_unsupported`) and the target serves ordinary
+/// decode; set this true in the change that wires them.
+enum PagedMLANativeMTPIntegration {
+    static let packedVerificationSupported = false
+}
+
 /// One `pagedMLA` layer of a continuous batch: the model projects every row
 /// together and each row attends against its own `PagedMLALatentCache`
 /// (`GLM5NextBatchedLatentCache`), exactly as a serial decode of that row.
@@ -407,6 +424,15 @@ final class PagedMLABatchLayerCache: GLM5NextBatchedLatentCache, MTPPackedVerifi
     }
 
     var mtpPackedHostBatchOffsets: [Int]? { hostOffsets }
+
+    /// Each row's valid verification width (`[lastCommitted, proposals...]`,
+    /// excluding right padding) while a packed verification is prepared;
+    /// nil otherwise. The fork's padded-verify hook for GLM-5-Next layers
+    /// reads per-row lengths from here (`PagedMLANativeMTPIntegration`).
+    var packedVerificationRowLengths: [Int]? {
+        // Row maps are positional: map `i` belongs to `rows[i]`.
+        preparedMTPPackedRowMaps?.map(\.inputCount)
+    }
 
     private var hostOffsets: [Int] {
         (stagedRows ?? rows).map(\.offset)

@@ -640,6 +640,10 @@ struct PagedKVSparseAttentionLayout: Equatable, Sendable {
     }
 }
 
+enum NativeMTPDrafterLoadError: Error, Equatable {
+    case unsupportedAdapter(String)
+}
+
 struct PagedKVRuntimeMeasurementEnvironment: Sendable {
     var metallibCandidatePaths: @Sendable () -> [String]
     var fileExists: @Sendable (String) -> Bool
@@ -10589,17 +10593,25 @@ actor ModelRuntime: ModelRuntimeServing {
             ) else {
                 return reject(reasonCode: "runtime_cache_class_unsupported", artifactRole: "runtime")
             }
+            let targetCacheKinds = await pagedKVCacheKinds(container: capturedTargetContainer)
+            let drafterPresent = await nativeMTPDrafterPresent(
+                familyAdapter: admissionCapability.familyAdapter,
+                targetContainer: capturedTargetContainer
+            )
             guard nativeMTPAdmissionCapabilitySupported(
                 admissionCapability,
                 canonicalCacheClass: canonicalCacheClass,
-                modelCapabilities: modelCapabilities
+                modelCapabilities: modelCapabilities,
+                cacheKinds: targetCacheKinds,
+                drafterPresent: drafterPresent
             ) else {
                 return reject(reasonCode: "admission_capability_unsupported", artifactRole: "sidecar")
             }
-            await Qwen35TextMTPRegistration.register()
-            let drafterContainer = try await MTPDrafterModelFactory.shared.loadContainer(
-                from: drafterDirectory,
-                using: capturedTokenizerLoader
+            let drafterContainer = try await loadNativeMTPDrafterContainer(
+                familyAdapter: admissionCapability.familyAdapter,
+                targetDirectory: capturedArtifacts.targetURL,
+                drafterDirectory: drafterDirectory,
+                tokenizerLoader: capturedTokenizerLoader
             )
             try capturedArtifacts.revalidateAfterLoad()
             let drafterRuntimeObservation = await drafterContainer.perform { context -> (maximumBlockSize: Int?, stateLayerCount: Int?) in
@@ -11127,28 +11139,161 @@ actor ModelRuntime: ModelRuntimeServing {
         )
     }
 
+    /// A native-MTP family adapter and the artifact layout it ships in
+    /// (SPEC-048 MTP-2: the adapter string determines the layout).
+    struct NativeMTPAdapterLayout: Hashable, Sendable {
+        let familyAdapter: String
+        let sourceLayout: String
+    }
+
+    /// Where an admitted adapter's drafter comes from.
+    enum NativeMTPDrafterSource: Equatable, Sendable {
+        /// A separate drafter artifact, loaded through `MTPDrafterModelFactory`.
+        case separateArtifact
+        /// The next-N layer inside the target (`checkpoint_mtp`): a
+        /// parameterless drafter that resolves the loaded target's own
+        /// `mtp[0]` layer, embeddings and lm_head, built from the target's
+        /// `config.json` without a second weight load.
+        case targetEmbedded
+    }
+
+    /// The (adapter, layout) pairs this provider can serve natively.
+    static let nativeMTPSupportedAdapterLayouts: Set<NativeMTPAdapterLayout> = [
+        NativeMTPAdapterLayout(familyAdapter: "qwen3_5_mtp_v1", sourceLayout: "separate_artifact"),
+        NativeMTPAdapterLayout(familyAdapter: "glm5_next_mtp_v1", sourceLayout: "checkpoint_mtp"),
+    ]
+
+    static func nativeMTPDrafterSource(familyAdapter: String) -> NativeMTPDrafterSource? {
+        switch familyAdapter {
+        case "qwen3_5_mtp_v1": .separateArtifact
+        case "glm5_next_mtp_v1": .targetEmbedded
+        default: nil
+        }
+    }
+
     private static func nativeMTPAdmissionCapabilitySupported(
         _ admissionCapability: NativeMTPAdmissionCapability,
         canonicalCacheClass: String,
-        modelCapabilities: PagedKVRuntimeModelCapabilities
+        modelCapabilities: PagedKVRuntimeModelCapabilities,
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind]?,
+        drafterPresent: Bool
     ) -> Bool {
-        admissionCapability.familyAdapter == "qwen3_5_mtp_v1"
-            && admissionCapability.sourceLayout == "separate_artifact"
-            && admissionCapability.predictionLayerCount == admissionCapability.maxProposalDepth
-            && admissionCapability.cacheClass == canonicalCacheClass
-            && admissionCapability.stateClass == nativeMTPExpectedStateClass(modelCapabilities: modelCapabilities)
+        let layout = NativeMTPAdapterLayout(
+            familyAdapter: admissionCapability.familyAdapter,
+            sourceLayout: admissionCapability.sourceLayout
+        )
+        guard nativeMTPSupportedAdapterLayouts.contains(layout),
+              admissionCapability.predictionLayerCount == admissionCapability.maxProposalDepth,
+              admissionCapability.cacheClass == canonicalCacheClass,
+              admissionCapability.stateClass == nativeMTPExpectedStateClass(modelCapabilities: modelCapabilities),
+              drafterPresent
+        else { return false }
+        guard nativeMTPDrafterSource(familyAdapter: layout.familyAdapter) == .targetEmbedded else {
+            return true
+        }
+        return glm5NextNativeMTPTopologySupported(
+            maxProposalDepth: admissionCapability.maxProposalDepth,
+            modelCapabilities: modelCapabilities,
+            cacheKinds: cacheKinds
+        )
+    }
+
+    /// `glm5_next_mtp_v1` (SPEC-048 MTP-2, SPEC-039 FR-PKV12/FR-PKV15): the
+    /// exact verified KDA + `pagedMLA` topology, the 8-token forward bound in
+    /// force with one row's verification inside it, and the fork's
+    /// packed-verification support for the GLM caches.
+    private static func glm5NextNativeMTPTopologySupported(
+        maxProposalDepth: Int,
+        modelCapabilities: PagedKVRuntimeModelCapabilities,
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind]?
+    ) -> Bool {
+        guard modelCapabilities.modelFamily == "glm5_next",
+              modelCapabilities.hybridDecoderArchitectureVerified,
+              let layout = modelCapabilities.sparseAttention,
+              let cacheKinds,
+              cacheKinds == layout.expectedCacheKinds,
+              let cap = PagedKVSharedForwardBackend.maxFlattenedTokensPerForward(cacheKinds: cacheKinds),
+              cap == PagedKVSharedForwardBackend.pagedMLAMaxFlattenedTokensPerForward,
+              maxProposalDepth >= 1,
+              maxProposalDepth + 1 <= cap
+        else { return false }
+        return PagedMLANativeMTPIntegration.packedVerificationSupported
     }
 
     static func nativeMTPAdmissionCapabilitySupportedForTest(
         _ admissionCapability: NativeMTPAdmissionCapability,
         canonicalCacheClass: String,
-        modelCapabilities: PagedKVRuntimeModelCapabilities
+        modelCapabilities: PagedKVRuntimeModelCapabilities,
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind]? = nil,
+        drafterPresent: Bool = true
     ) -> Bool {
         nativeMTPAdmissionCapabilitySupported(
             admissionCapability,
             canonicalCacheClass: canonicalCacheClass,
-            modelCapabilities: modelCapabilities
+            modelCapabilities: modelCapabilities,
+            cacheKinds: cacheKinds,
+            drafterPresent: drafterPresent
         )
+    }
+
+    /// Whether the adapter's drafter can exist for this target: a separate
+    /// artifact is checked at its own load; an embedded drafter needs the
+    /// target loaded with its next-N weights.
+    static func nativeMTPDrafterPresent(
+        familyAdapter: String,
+        targetContainer: ModelContainer
+    ) async -> Bool {
+        switch nativeMTPDrafterSource(familyAdapter: familyAdapter) {
+        case .separateArtifact: return true
+        case nil: return false
+        case .targetEmbedded:
+            return await targetContainer.perform { context in
+                switch context.model {
+                case let model as GLM5NextModel: model.languageModel.hasMTPWeights
+                case let model as GLM5NextTextModel: model.hasMTPWeights
+                default: false
+                }
+            }
+        }
+    }
+
+    /// The drafter container for an admitted adapter. A `checkpoint_mtp`
+    /// drafter is built from the target's `config.json` through the drafter
+    /// type registry, never through `MTPDrafterModelFactory`, which would
+    /// read the target's weight files a second time for a model that owns no
+    /// parameters.
+    static func loadNativeMTPDrafterContainer(
+        familyAdapter: String,
+        targetDirectory: URL,
+        drafterDirectory: URL,
+        tokenizerLoader: any TokenizerLoader
+    ) async throws -> MTPDrafterContainer {
+        switch nativeMTPDrafterSource(familyAdapter: familyAdapter) {
+        case .separateArtifact:
+            await Qwen35TextMTPRegistration.register()
+            return try await MTPDrafterModelFactory.shared.loadContainer(
+                from: drafterDirectory,
+                using: tokenizerLoader
+            )
+        case .targetEmbedded:
+            await GLM5NextMTPRegistration.register()
+            let configData = try Data(contentsOf: targetDirectory.appendingPathComponent("config.json"))
+            guard let object = try JSONSerialization.jsonObject(with: configData) as? [String: Any],
+                  let modelType = object["model_type"] as? String
+            else {
+                throw NativeMTPDrafterLoadError.unsupportedAdapter(familyAdapter)
+            }
+            let model = try await MTPDrafterTypeRegistry.shared.createModel(
+                configuration: configData,
+                modelType: modelType
+            )
+            return MTPDrafterContainer(context: MTPDrafterContext(
+                configuration: ModelConfiguration(directory: targetDirectory, tokenizerSource: nil, defaultPrompt: ""),
+                model: model
+            ))
+        case nil:
+            throw NativeMTPDrafterLoadError.unsupportedAdapter(familyAdapter)
+        }
     }
 
     private static func nativeMTPExpectedStateClass(
