@@ -2707,7 +2707,9 @@
         "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:func verifyMirroredChecksumSignature(",
         "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:static func reportDeferredCheckOrThrow(",
         "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:private func download(from url: URL, to destination: URL, maximumBytes: Int64)",
-        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:static let maxReleaseAssetBytes"
+        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:static let maxReleaseAssetBytes",
+        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:private func boundedData(",
+        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:final class NoSchemeDowngradeRedirects"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/SelfUpdateMirrorTests.swift:testTagResolvesFromMirrorWhenGitHubIsUnreachable",
@@ -2735,7 +2737,9 @@
         "phase3-binary/Tests/macprovider-cliTests/SelfUpdateRateLimitTests.swift:testOversizedMirroredChecksumsAreRefused",
         "phase3-binary/Tests/macprovider-cliTests/SelfUpdateDownloadCapTests.swift:testOversizedStreamWithoutContentLengthIsCancelledMidStream",
         "phase3-binary/Tests/macprovider-cliTests/SelfUpdateDownloadCapTests.swift:testDeclaredOversizeIsCancelledBeforeTheBody",
-        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateDownloadCapTests.swift:testPreparedUpdateRefusesAnOversizedChecksumsFile"
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateDownloadCapTests.swift:testPreparedUpdateRefusesAnOversizedChecksumsFile",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateDownloadCapTests.swift:testRedirectThatLeavesHTTPSIsRefused",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateDownloadCapTests.swift:testOversizedCoordinatorAdvertisementIsCancelledMidStream"
       ],
       "journeys": [
         "JOURNEY-PROVIDER-AUTOUPDATE-PHYSICAL"
@@ -8411,7 +8415,9 @@
         "scripts/test-install-version-pin.sh:s4-oversized-checksums-fails",
         "scripts/test-install-sh-consumer-health-alarm.sh:served-malicious",
         "scripts/test-install-sh-consumer-health-alarm.sh:served-url-drift",
-        "scripts/test-install-sh-consumer-health-alarm.sh:served-oversize"
+        "scripts/test-install-sh-consumer-health-alarm.sh:served-oversize",
+        "scripts/test-install-version-pin.sh:s7-oversized-api-page-fails",
+        "scripts/test-install-version-pin.sh:s8-oversized-healthz-falls-back"
       ],
       "journeys": [],
       "evidence": [],

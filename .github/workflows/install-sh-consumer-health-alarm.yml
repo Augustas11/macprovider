@@ -14,8 +14,8 @@ name: Install.sh consumer-surface health alarm
 # fallback (#2036), else latest_release_tag(). It verifies checksums.txt.sig
 # under the installer's release key and asserts a darwin-arm64 asset is HTTP
 # 200 from GitHub Releases or the release mirror. No secrets, no writes, no
-# deploy. Only the step that picks the latest release tag reads the Actions
-# token; the probe step runs with none. An authenticated probe is not faithful
+# deploy. Besides checkout, only the step that picks the latest release tag
+# reads the Actions token; the probe step runs with none. An authenticated probe is not faithful
 # (drafts become visible; #1588).
 #
 # A red run with a green parity alarm means "served bytes match a broken

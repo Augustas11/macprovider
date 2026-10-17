@@ -1216,10 +1216,12 @@ that repository copy's discovery in this order and MUST verify the resolved
 release's `checksums.txt.sig` under that copy's embedded key, reading assets
 from GitHub Releases or the mirror; a signature that does not verify is an
 alarm, never a fallback. `install.sh` and the gate MUST stream every download
-from GitHub or the mirror under a hard byte cap defined once per surface (the
-signed metadata files a few KB, each release asset well above the largest
-current asset), MUST abort a transfer as soon as it passes the cap, and MUST
-leave no partial file (v0.12.3, #2036). The mirror's
+from GitHub or the mirror, and every release-discovery response (GitHub API
+pages, the coordinator `/healthz`), under a hard byte cap defined once per
+surface (the signed metadata files a few KB, each release asset well above the
+largest current asset), MUST abort a transfer as soon as it passes the cap,
+MUST leave no partial file, and MUST refuse redirects that leave HTTPS
+(v0.12.3, #2036). The mirror's
 `latest.json` MUST NOT choose the tag: it is unsigned and mirror-controlled, and
 every public release, old or canary, carries a valid `checksums.txt.sig`. The
 embedded-key `checksums.txt.sig` verification, per-asset SHA-256, Gatekeeper,

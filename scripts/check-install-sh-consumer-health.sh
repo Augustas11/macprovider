@@ -31,7 +31,8 @@
 #
 # The repository copy is INSTALL_SH_RELEASE_TAG's dist/install.sh
 # (git show vX.Y.Z:phase3-binary/dist/install.sh), else the checkout's
-# phase3-binary/dist/install.sh.
+# phase3-binary/dist/install.sh. INSTALL_SH_REFERENCE_FILE is honored only in
+# the hermetic test mode where INSTALL_SH_FILE also replaces the fetch.
 #
 # Read-only: no secrets, no writes, no deploy. Do not source/run install.sh
 # main. Exit codes: 0 = healthy, 1 = consumer surface down, 2 = probe error.
@@ -73,6 +74,8 @@ trap 'rm -rf "$WORKDIR"' EXIT
 
 # The trusted copy, read before HOME is replaced so git keeps its config.
 REFERENCE="$WORKDIR/install.reference.sh"
+[ -z "$REFERENCE_FILE" ] || [ -n "$INSTALL_FILE" ] \
+  || die_probe "INSTALL_SH_REFERENCE_FILE is a test override and needs INSTALL_SH_FILE"
 if [ -n "$REFERENCE_FILE" ]; then
   [ -f "$REFERENCE_FILE" ] || die_probe "INSTALL_SH_REFERENCE_FILE is not a file: $REFERENCE_FILE"
   cp -- "$REFERENCE_FILE" "$REFERENCE" || die_probe "failed to copy INSTALL_SH_REFERENCE_FILE"
@@ -107,7 +110,12 @@ capped_fetch() {
   shift 2
   rm -f "$dest"
   (
-    ulimit -f $(((max_bytes + 1023) / 1024)) 2>/dev/null || true
+    # Fail closed when the limit cannot be set, unless a stricter one is in force.
+    blocks=$(((max_bytes + 1023) / 1024))
+    if ! ulimit -f "$blocks" 2>/dev/null; then
+      current="$(ulimit -f)"
+      [ "$current" != "unlimited" ] && [ "$current" -le "$blocks" ] || exit 125
+    fi
     "${CURL_SAFE[@]}" --max-filesize "$max_bytes" -o "$dest" "$@"
   ) || rc=$?
   if [ "$rc" -eq 0 ] && [ -f "$dest" ] && [ "$(wc -c < "$dest" | tr -d ' ')" -le "$max_bytes" ]; then
@@ -171,6 +179,11 @@ if grep -q '^discover_latest_release_tag()' "$INSTALLER"; then
     grep -q "^${fn}()" "$WORKDIR/fn.sh" || alarm "served install.sh has discover_latest_release_tag() but no ${fn}()"
     cat "$WORKDIR/fn.sh" >> "$LIB"
   done
+  # The copy's streamed download helper and its caps, when it has them.
+  if grep -q '^capped_download()' "$INSTALLER"; then
+    extract_function capped_download >> "$LIB"
+    grep -E '^RELEASE_(ASSET|METADATA|DISCOVERY)_MAX_BYTES=[0-9]+$' "$INSTALLER" >> "$LIB" || true
+  fi
   MIN_SUPPORTED_VERSION="$(sed -n 's/^MACPROVIDER_MIN_SUPPORTED_VERSION="\(v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)"$/\1/p' "$INSTALLER" | head -n 1)"
   [ -n "$MIN_SUPPORTED_VERSION" ] || alarm "served install.sh has no MACPROVIDER_MIN_SUPPORTED_VERSION rollback floor"
 fi

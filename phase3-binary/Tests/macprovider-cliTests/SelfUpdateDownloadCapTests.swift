@@ -20,14 +20,25 @@ final class SelfUpdateDownloadCapTests: XCTestCase {
         super.tearDown()
     }
 
-    private func update() -> SelfUpdate {
+    private func update(coordinatorURL: String? = nil) -> SelfUpdate {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StreamingMockURLProtocol.self]
         return SelfUpdate(
             currentVersion: "1.8.0",
             releasesAPIURL: nil,
+            coordinatorURL: coordinatorURL,
             session: URLSession(configuration: configuration)
         )
+    }
+
+    /// The hidden file the downloader streams into before the final move.
+    private func partial(_ destination: URL) -> URL {
+        destination.deletingLastPathComponent().appendingPathComponent(".\(destination.lastPathComponent).partial")
+    }
+
+    private func assertNoFiles(_ destination: URL, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path), file: file, line: line)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: partial(destination).path), file: file, line: line)
     }
 
     private func assetURL(_ name: String) -> URL {
@@ -56,7 +67,7 @@ final class SelfUpdateDownloadCapTests: XCTestCase {
                 UpdateError.downloadTooLarge("macprovider-cli-\(tag)-darwin-arm64.tar.gz", limit: 256 * 1_024).description
             )
         }
-        XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
+        assertNoFiles(destination)
         XCTAssertLessThan(StreamingMockURLProtocol.deliveredBytes(url), total, "the transfer was not cancelled while streaming")
     }
 
@@ -76,7 +87,7 @@ final class SelfUpdateDownloadCapTests: XCTestCase {
             XCTAssertEqual(name, "Malibu-\(tag).dmg")
             XCTAssertEqual(limit, 64 * 1_024)
         }
-        XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
+        assertNoFiles(destination)
         XCTAssertLessThan(StreamingMockURLProtocol.deliveredBytes(url), total)
     }
 
@@ -89,6 +100,39 @@ final class SelfUpdateDownloadCapTests: XCTestCase {
 
         let size = try destination.resourceValues(forKeys: [.fileSizeKey]).fileSize
         XCTAssertEqual(size, 64 * 1_024)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: partial(destination).path))
+    }
+
+    func testRedirectThatLeavesHTTPSIsRefused() async throws {
+        let url = assetURL("Malibu-\(tag).dmg")
+        let plaintext = URL(string: "http://download.example/Malibu-\(tag).dmg")!
+        StreamingMockURLProtocol.redirects = [url: plaintext]
+        StreamingMockURLProtocol.streams = [plaintext: .init(totalBytes: 1_024, declareLength: true)]
+        let destination = scratch.appendingPathComponent("redirected.dmg")
+
+        do {
+            try await update().downloadReleaseFileForTest(from: url, to: destination, maximumBytes: 64 * 1_024)
+            XCTFail("a redirect off HTTPS must be refused")
+        } catch {
+            // The redirect is refused; the transport reports it as a failed load.
+        }
+        assertNoFiles(destination)
+        XCTAssertFalse(StreamingMockURLProtocol.requested.contains(plaintext), "the plaintext redirect target was fetched")
+    }
+
+    func testOversizedCoordinatorAdvertisementIsCancelledMidStream() async throws {
+        let healthz = URL(string: "https://coordinator.example/healthz")!
+        let total = 64 * 1_024 * 1_024
+        StreamingMockURLProtocol.streams = [healthz: .init(totalBytes: total, declareLength: false)]
+
+        do {
+            _ = try await update(coordinatorURL: "wss://coordinator.example/ws/provider")
+                .coordinatorAdvertisedReleaseVersion()
+            XCTFail("an oversized advertisement must be refused")
+        } catch let error as UpdateError {
+            XCTAssertEqual(error.description, UpdateError.invalidReleaseVersion("coordinator advertised no release").description)
+        }
+        XCTAssertLessThan(StreamingMockURLProtocol.deliveredBytes(healthz), total)
     }
 
     func testHTTPErrorLeavesNoFile() async throws {
@@ -102,7 +146,7 @@ final class SelfUpdateDownloadCapTests: XCTestCase {
         } catch UpdateError.httpStatus(let status) {
             XCTAssertEqual(status, 503)
         }
-        XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
+        assertNoFiles(destination)
     }
 
     func testPreparedUpdateRefusesAnOversizedChecksumsFile() async throws {
@@ -146,6 +190,7 @@ private final class StreamingMockURLProtocol: URLProtocol {
     }
 
     nonisolated(unsafe) static var streams: [URL: Stream] = [:]
+    nonisolated(unsafe) static var redirects: [URL: URL] = [:]
     nonisolated(unsafe) private static var delivered: [URL: Int] = [:]
     nonisolated(unsafe) static var requested: [URL] = []
     private static let lock = NSLock()
@@ -157,6 +202,7 @@ private final class StreamingMockURLProtocol: URLProtocol {
     static func reset() {
         lock.lock()
         streams = [:]
+        redirects = [:]
         delivered = [:]
         requested = []
         lock.unlock()
@@ -176,7 +222,19 @@ private final class StreamingMockURLProtocol: URLProtocol {
         Self.lock.lock()
         Self.requested.append(url)
         let stream = Self.streams[url]
+        let redirect = Self.redirects[url]
         Self.lock.unlock()
+        if let redirect {
+            let response = HTTPURLResponse(
+                url: url,
+                statusCode: 302,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Location": redirect.absoluteString]
+            )!
+            client?.urlProtocol(self, wasRedirectedTo: URLRequest(url: redirect), redirectResponse: response)
+            client?.urlProtocolDidFinishLoading(self)
+            return
+        }
         guard let stream else {
             client?.urlProtocol(self, didFailWithError: URLError(.fileDoesNotExist))
             return

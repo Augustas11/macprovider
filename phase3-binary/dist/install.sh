@@ -48,6 +48,8 @@ RELEASE_MIRROR_REPO="Augustas11/macprovider"
 # margin; checksums.txt and its signature are a few KB.
 RELEASE_ASSET_MAX_BYTES=268435456
 RELEASE_METADATA_MAX_BYTES=1048576
+# One GitHub Releases API page (per_page=100, with every asset) is a few MB.
+RELEASE_DISCOVERY_MAX_BYTES=16777216
 # MACPROVIDER_RELEASE_MIRROR=1 tries the mirror before GitHub (skips GitHub
 # timeouts on networks where it is known to be blocked). 0 (default) tries
 # GitHub first and falls back to the mirror on any failure.
@@ -7783,10 +7785,14 @@ capped_download() {
   shift 2
   rm -f "$dest"
   # Rounded up to whole KiB (bash counts ulimit -f in 1024-byte units); the
-  # exact byte cap is checked below. If the hard limit is already lower, that
-  # stricter limit applies.
+  # exact byte cap is checked below. A limit that cannot be set fails closed
+  # unless an already-stricter limit is in force.
   (
-    ulimit -f $(((max_bytes + 1023) / 1024)) 2>/dev/null || true
+    blocks=$(((max_bytes + 1023) / 1024))
+    if ! ulimit -f "$blocks" 2>/dev/null; then
+      current="$(ulimit -f)"
+      [ "$current" != "unlimited" ] && [ "$current" -le "$blocks" ] || exit 125
+    fi
     curl --max-filesize "$max_bytes" -o "$dest" "$@"
   ) || rc=$?
   [ -f "$dest" ] && size="$(wc -c < "$dest" | tr -d ' ')"
@@ -7857,8 +7863,8 @@ bootstrap_standalone_python3() {
   for source in $sources; do
     rm -f "$tarball"
     if ! capped_download "$RELEASE_ASSET_MAX_BYTES" "$tarball" \
-      -fL --connect-timeout 10 --speed-limit 1024 --speed-time 120 --retry 2 --retry-connrefused --retry-max-time 120 \
-      "$source"; then
+      -fL --proto '=https' --proto-redir '=https' --connect-timeout 10 --speed-limit 1024 --speed-time 120 \
+      --retry 2 --retry-connrefused --retry-max-time 120 "$source"; then
       log "Could not download pinned python3 from $source; trying the next source."
       continue
     fi
@@ -9858,7 +9864,12 @@ latest_release_tag() {
     # Mac behind one NAT, so a retry only spends that budget again (#2036).
     api_headers="$(mktemp "${TMPDIR:-/tmp}/macprovider-github-api-headers.XXXXXX")" \
       || die 3 "failed to create a temporary file for the GitHub Releases API response headers"
-    if ! json="$(curl -fsSL --connect-timeout 10 --speed-limit 1024 --speed-time 120 -D "$api_headers" "$api_url")"; then
+    api_body="$(mktemp "${TMPDIR:-/tmp}/macprovider-github-api-body.XXXXXX")" \
+      || die 3 "failed to create a temporary file for the GitHub Releases API response"
+    if ! capped_download "$RELEASE_DISCOVERY_MAX_BYTES" "$api_body" \
+      -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 10 --speed-limit 1024 --speed-time 120 \
+      -D "$api_headers" "$api_url"; then
+      rm -f "$api_body"
       # A 403/429 with x-ratelimit-remaining: 0 is the anonymous budget, not a
       # missing release: say when it resets instead of a bare HTTP error.
       rate_limit_reset="$(awk '
@@ -9881,6 +9892,8 @@ latest_release_tag() {
       die 3 "failed to query GitHub Releases API: $api_url"
     fi
     rm -f "$api_headers"
+    json="$(cat "$api_body")"
+    rm -f "$api_body"
     # End of the release list: an empty array (or whitespace) means no more
     # pages exist, so stop rather than spending the full page budget.
     case "$(printf "%s" "$json" | tr -d '[:space:]')" in
@@ -10029,7 +10042,11 @@ mirror_latest_release_tag() {
     log "Release mirror discovery needs the coordinator's advertised release, and no coordinator is configured." >&2
     return 1
   fi
-  body="$(curl -fsS --max-filesize 65536 --connect-timeout 10 --max-time 30 --retry 2 --retry-connrefused "$coordinator_base/healthz" 2>/dev/null)" \
+  local body_file
+  body_file="$(mktemp "${TMPDIR:-/tmp}/macprovider-coordinator-healthz.XXXXXX")" || return 1
+  capped_download 65536 "$body_file" -fsS --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 30 \
+      --retry 2 --retry-connrefused "$coordinator_base/healthz" 2>/dev/null \
+    && body="$(cat "$body_file")" \
     && advertised="$(printf '%s' "$body" | python3 -c '
 import json, sys
 value = json.loads(sys.stdin.buffer.read(65536).decode("utf-8"))
@@ -10039,6 +10056,7 @@ if not isinstance(version, str) or not version:
 sys.stdout.write(version if version.startswith("v") else "v" + version)
 ' 2>/dev/null)" \
     || advertised=""
+  rm -f "$body_file"
   if [ -z "$advertised" ]; then
     log "The coordinator at $coordinator_base did not advertise a release; cannot pick a release without GitHub." >&2
     return 1
@@ -10123,14 +10141,14 @@ fetch_release_asset() {
       url="https://github.com/${GITHUB_REPO}/releases/download/${tag}/${name}"
       log "Downloading $name from GitHub Releases."
       # shellcheck disable=SC2086 # github_budget is a fixed list of flags
-      if capped_download "$max_bytes" "$dest" -fL $github_budget --speed-limit 1024 --speed-time 120 --retry-connrefused "$url"; then
+      if capped_download "$max_bytes" "$dest" -fL --proto '=https' --proto-redir '=https' $github_budget --speed-limit 1024 --speed-time 120 --retry-connrefused "$url"; then
         return 0
       fi
       RELEASE_GITHUB_UNREACHABLE=1
     else
       url="${RELEASE_MIRROR_BASE}/${tag}/${name}"
       log "Downloading $name from the Malibu release mirror."
-      if capped_download "$max_bytes" "$dest" -fL --proto '=https' --connect-timeout 15 --speed-limit 1024 --speed-time 120 --retry 3 --retry-connrefused --retry-max-time 300 "$url"; then
+      if capped_download "$max_bytes" "$dest" -fL --proto '=https' --proto-redir '=https' --connect-timeout 15 --speed-limit 1024 --speed-time 120 --retry 3 --retry-connrefused --retry-max-time 300 "$url"; then
         return 0
       fi
     fi

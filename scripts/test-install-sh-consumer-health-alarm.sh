@@ -199,6 +199,8 @@ while [ "\$#" -gt 0 ]; do
 done
 echo "\$url" >> "$WORKDIR/curl-urls.log"
 has() { case "\$mode" in *" \$1 "*) return 0 ;; esac; return 1; }
+# A response body goes to -o when the caller names a file, else to stdout.
+body() { if [ "\$out" != "/dev/null" ]; then printf '%s' "\$1" > "\$out"; else printf '%s' "\$1"; fi; }
 miss() { [ -n "\$write_fmt" ] && printf '404'; exit 22; }
 hit() {
   if [ -n "\${1:-}" ] && [ "\$out" != "/dev/null" ]; then cp "\$1" "\$out"; fi
@@ -217,7 +219,7 @@ case "\$url" in
     ;;
   https://coordinator.malibu.tech/healthz)
     has coordinator-down && exit 7
-    printf '%s' '{"status":"ok","recommended_binary_version":"1.8.123"}'
+    body '{"status":"ok","recommended_binary_version":"1.8.123"}'
     exit 0
     ;;
   https://api.github.com/*)
@@ -225,7 +227,7 @@ case "\$url" in
       [ -n "\$headers" ] && printf 'HTTP/2 403\r\nx-ratelimit-remaining: 0\r\nx-ratelimit-reset: 1790000000\r\n\r\n' > "\$headers"
       exit 22
     fi
-    printf '%s' '[{"tag_name":"v1.8.122","prerelease":false}]'
+    body '[{"tag_name":"v1.8.122","prerelease":false}]'
     exit 0
     ;;
   https://github.com/*)
@@ -530,18 +532,18 @@ printf ' ' >> "$WORKDIR/ok2-twin.sh"
 run_checker served-one-byte-drift 1 INSTALL_SH_FILE="$WORKDIR/ok2-twin.sh" INSTALL_SH_REFERENCE_FILE="$WORKDIR/ok2.sh"
 expect_output served-one-byte-drift 'differs from the repository'
 
+# The reference-file override is test-only: it needs INSTALL_SH_FILE.
+run_checker reference-override-needs-file 2 INSTALL_SH_FILE="" INSTALL_SH_URL="https://get.malibu.tech/install.sh" \
+  INSTALL_SH_REFERENCE_FILE="$WORKDIR/discover.sh"
+expect_output reference-override-needs-file 'test override'
+expect_no_fetch reference-override-needs-file 'get.malibu.tech'
+
 # The production path: the served copy is fetched over https and, matching the
 # checkout's dist/install.sh (the default repository copy), passes parity.
-cp "$WORKDIR/discover.sh" "$FIXTURES/served-install.sh"
-run_checker served-url-parity 0 INSTALL_SH_FILE="" INSTALL_SH_URL="https://get.malibu.tech/install.sh" \
-  INSTALL_SH_REFERENCE_FILE="$WORKDIR/discover.sh"
-expect_output served-url-parity 'byte-identical'
-expect_output served-url-parity 'discover_latest_release_tag resolved v1.8.123'
-
-# The checkout copy is the default repository copy.
 cp "$install_sh" "$FIXTURES/served-install.sh"
 run_checker served-url-default-reference 1 INSTALL_SH_FILE="" INSTALL_SH_URL="https://get.malibu.tech/install.sh"
 expect_output served-url-default-reference 'byte-identical to the repository checkout dist/install.sh'
+expect_output served-url-default-reference 'discover_latest_release_tag resolved v1.8.123'
 expect_output served-url-default-reference 'does not verify'
 
 # A served copy that drifts from the checkout copy alarms before any probe.

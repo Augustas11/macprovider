@@ -118,6 +118,7 @@ RELEASE_GITHUB_UNREACHABLE=0
 # The installer's caps, read from install.sh so the test tracks them.
 RELEASE_ASSET_MAX_BYTES="$(sed -n 's/^RELEASE_ASSET_MAX_BYTES=\([0-9][0-9]*\)$/\1/p' "$INSTALL_SH")"
 RELEASE_METADATA_MAX_BYTES="$(sed -n 's/^RELEASE_METADATA_MAX_BYTES=\([0-9][0-9]*\)$/\1/p' "$INSTALL_SH")"
+RELEASE_DISCOVERY_MAX_BYTES="$(sed -n 's/^RELEASE_DISCOVERY_MAX_BYTES=\([0-9][0-9]*\)$/\1/p' "$INSTALL_SH")"
 [ -n "$RELEASE_ASSET_MAX_BYTES" ] && [ -n "$RELEASE_METADATA_MAX_BYTES" ] \
   || fatal "could not read the download caps from $INSTALL_SH"
 INSTALLER_ASSET_MAX_BYTES="$RELEASE_ASSET_MAX_BYTES"
@@ -160,6 +161,10 @@ shasum() {
     return
   fi
   printf '%s  %s\n' "${MOCK_SHA:-goodhash}" "$2"
+}
+# Response bodies go to -o when the installer names a file, else to stdout.
+emit() {
+  if [ -n "$out" ]; then printf '%s' "$1" > "$out"; else printf '%s' "$1"; fi
 }
 curl() {
   local out="" url="" arg headers_out=""
@@ -226,7 +231,7 @@ curl() {
   case "$url" in
     "https://download.malibu.tech/releases/latest.json")
       [ -n "${MOCK_MIRROR_LATEST_JSON:-}" ] || return 22
-      printf '%s' "$MOCK_MIRROR_LATEST_JSON"
+      emit "$MOCK_MIRROR_LATEST_JSON"
       ;;
     *"/releases?per_page=100&page="*)
       # Page-aware release mock. install.sh paginates newest-first; each fetched
@@ -245,10 +250,10 @@ curl() {
           body="[]"
         fi
       fi
-      printf '%s' "$body"
+      emit "$body"
       ;;
     *"/healthz")
-      printf '%s' "$MOCK_HEALTH_JSON"
+      emit "$MOCK_HEALTH_JSON"
       ;;
     *"/v99.0.0/"*)
       return 22
@@ -1555,6 +1560,30 @@ report "s6-real-curl-no-file" 0 "$([ -e "$workdir/s6.out" ] && echo 1 || echo 0)
 rc=0
 ( unset -f curl; capped_download 8192 "$workdir/s6.ok" -fsS "file://$workdir/s6-source" ) >/dev/null 2>&1 || rc=$?
 report "s6-real-curl-within-cap" "0 8192" "$rc $(wc -c < "$workdir/s6.ok" | tr -d ' ')"
+
+# S7 — a GitHub Releases API page that streams past the discovery cap is cut
+# off while it streams and fails discovery; no body file is left behind.
+reset_mocks
+GITHUB_REPO="someone/fork"
+RELEASE_DISCOVERY_MAX_BYTES=4096
+MOCK_OVERSIZE_URL='https://api.github.com/*'
+MOCK_OVERSIZE_BYTES=1048576
+rc=0
+( TMPDIR="$workdir/s7-tmp"; mkdir -p "$TMPDIR"; latest_release_tag; ) >/dev/null 2>&1 || rc=$?
+report "s7-oversized-api-page-fails" 3 "$rc"
+report "s7-api-page-cut-at-cap" 4096 "$(awk '{print $3}' "$STREAM_LOG")"
+report "s7-no-body-file" "" "$(ls -A "$workdir/s7-tmp")"
+RELEASE_DISCOVERY_MAX_BYTES="$(sed -n 's/^RELEASE_DISCOVERY_MAX_BYTES=\([0-9][0-9]*\)$/\1/p' "$INSTALL_SH")"
+
+# S8 — an oversized coordinator /healthz is no advertisement (64 KiB cap):
+# discovery falls back to the GitHub Releases API.
+reset_mocks
+coordinator_base="https://coordinator.malibu.tech"
+MOCK_OVERSIZE_URL='https://coordinator.malibu.tech/healthz'
+MOCK_OVERSIZE_BYTES=1048576
+tag="$(resolve_release_tag 2>/dev/null)"
+report "s8-oversized-healthz-falls-back" "v1.7.11" "$tag"
+report "s8-healthz-cut-at-cap" 65536 "$(awk '{print $3}' "$STREAM_LOG")"
 
 if [ "$fail" -ne 0 ]; then
   printf '[install-version-pin-test] %d failed, %d passed\n' "$fail" "$pass" >&2
