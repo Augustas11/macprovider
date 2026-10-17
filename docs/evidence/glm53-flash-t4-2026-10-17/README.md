@@ -39,6 +39,30 @@ Against the `7d8dbf5` set below, `18ca526` raises batched decode (msb rows 4:
 single-row decode (35.3 to 40.4 tok/s), consistent with its read-once
 weights for 2...8 vectors and staged eval.
 
+## Final native-MTP evidence (`final-mtp/`)
+
+Both windows ran with the live provider paused and drained, the lab serve
+no-join on its own port, 1 native row, greedy request profile, depth 1.
+
+| Record | Directory | Build | Result |
+| --- | --- | --- | --- |
+| Serve-path native-MTP hardware e2e (leg 5) | `final-mtp/e2e-20261017T103928Z/` | lab harness `1718e7ba…` at fork `18ca526` | PASS, family `glm5_next`, serve path verified, 3 admissions, greedy equal. Rows 1: native 48.4 vs ordinary 38.2 tok/s (1.27×), acceptance 0.889. Rows 4: 51.5 vs 65.6 (0.79×), which is why `max_native_active_rows` is 1 |
+| `native-mtp-journey-e2e` (leg 6) | `final-mtp/journey-20261017T135947Z/` | lab harness `0ec22520…` at `07301b6bf`, fork tag `3.32.3-macprovider.10.1` (`87dc515`) | Executed steps 04, 05, 06, 07-08, 09 and 10 pass; step 12 partial (coordinator-issued SPEC-031-R033 canary is not available in the lab) |
+
+Step 05 compares the target-oracle cache state (SPEC-048 0.1.45 MTP-6) at
+every ordinary-decode window end: boundary-0 33/33, boundary-1 41/41 and
+reject-all 16/16 aligned pairs are equal, 42 of them directly after a rejected
+round, with no mismatched token counts. Steps 01-03, 11, the coordinator half
+of 12, 14 and 15 bind the signed release candidate and run at go-live
+(`docs/runbooks/native-mtp-enablement.md`).
+
+Changes between the two builds that touch native-MTP serving (HARD RULE 2):
+`c0204b532` caps glm5_next at one native row (admission only),
+`86e6e531b` moves lab-only state digests under the target lock and adds a
+fail-closed lock assertion to nine native helpers, and the fork
+tag adds config validation at model load. None changes a decode-path line, so
+the leg-5 e2e record stands for the final build.
+
 ## Superseded: the `7d8dbf5` set
 
 Everything below this line was measured at mlx-swift-lm `7d8dbf5` and is kept

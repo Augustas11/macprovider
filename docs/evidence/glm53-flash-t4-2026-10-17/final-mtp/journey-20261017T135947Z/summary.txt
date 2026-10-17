@@ -1,0 +1,14 @@
+legs=6
+leg6 mtp-journey start 13:59:48
+leg6 native-mtp-journey-e2e rc=0
+leg6 executed_steps_status=partial journey_complete=False
+leg6 step-04-serial-token-oracle status=pass failed_checks=[] uncovered=[]
+leg6 step-05-cache-state-boundary status=pass failed_checks=[] uncovered=[]
+leg6 step-06-streaming-stop status=pass failed_checks=[] uncovered=[]
+leg6 step-07-08-mixed-multirow-capacity status=pass failed_checks=[] uncovered=[]
+leg6 step-09-cancellation status=pass failed_checks=[] uncovered=[]
+leg6 step-10-warm-swap status=pass failed_checks=[] uncovered=[]
+leg6 step-12-native-selftest status=partial failed_checks=[] uncovered=['coordinator-issued SPEC-031-R033 canary and its negative outcomes']
+fef89c32109269893db2450900140dba4d982f64db165d7514a5f3c6d7ea4d1a  <lab>/t4-window-20261017T135947Z/mtp-journey.json
+10590b04d76ccec50242f2c4a638bb3b5d9d1e5a8d55adea21238db7ee175511  <lab>/t4-window-20261017T135947Z/mtp-journey.log
+RESULT=PASS evidence=<lab>/t4-window-20261017T135947Z
