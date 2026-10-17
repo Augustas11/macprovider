@@ -41,6 +41,10 @@
 #        paged KV attached, batch depth >= 2; then the lab throughput phase
 #        (`--throughput-tokens`, default 256) at 1 and 4 rows reports native
 #        over ordinary end-to-end tok/s and acceptance. Not the R015 matrix.
+#        Legs 5 and 6 run with MACPROVIDER_CB_TRACE=1 and their own time
+#        limits (MTP_E2E_TIMEOUT_S 900, MTP_JOURNEY_TIMEOUT_S 1200); on a
+#        timeout the process's stacks are sampled to <leg>-sample.txt before
+#        it is killed, so a hang cannot take the window and leaves evidence.
 #     6. (`run-mtp-journey`, not in the default legs) the hidden
 #        JOURNEY-NATIVE-MTP-SERVING hardware steps (`native-mtp-journey-e2e`:
 #        04 serial oracle, 05 cache/state boundary at the 256-token block,
@@ -104,6 +108,26 @@ prepare() {
 }
 
 status_json() { curl -fsS --max-time 5 "http://127.0.0.1:$1/v1/status" 2>/dev/null; }
+
+# Runs "$@" with stdout to $3 and stderr to $4, killed after $1 seconds.
+# On timeout it first records every thread's stack (`sample`) to
+# $OUT/$2-sample.txt, so a hang leaves its diagnosis, then exits 124.
+run_bounded() {
+  local limit=$1 label=$2 out=$3 err=$4; shift 4
+  "$@" > $out 2> $err &
+  local pid=$! t0=$(date +%s)
+  while kill -0 $pid 2>/dev/null; do
+    if (( $(date +%s) - t0 >= limit )); then
+      echo "$label TIMEOUT after ${limit}s; sampling pid $pid" | tee -a $OUT/summary.txt
+      /usr/bin/sample $pid 5 -file $OUT/$label-sample.txt > /dev/null 2>&1 || true
+      kill -TERM $pid 2>/dev/null; sleep 5; kill -KILL $pid 2>/dev/null || true
+      wait $pid 2>/dev/null || true
+      return 124
+    fi
+    sleep 5
+  done
+  wait $pid
+}
 
 # SPEC-039 FR-PKV12 replay/drain record: every leftovers scenario passed.
 evaluate_leftovers() {
@@ -311,10 +335,11 @@ print("leg3 rows=" + sys.argv[2] + " " + " ".join(f"{k}={d[k]}" for k in keys))'
   # APFS clone: the snapshot's exact files, no copy of the bytes.
   cp -cR $MODEL $fixture/target
   local e2e_rc=0
-  MACPROVIDER_NATIVE_MTP_E2E=1 MACPROVIDER_NATIVE_MTP_E2E_SERVE_PATH=${MTP_E2E_SERVE_PATH:-1} \
+  run_bounded ${MTP_E2E_TIMEOUT_S:-900} leg5 $OUT/mtp-e2e.json $OUT/mtp-e2e.log \
+    env MACPROVIDER_NATIVE_MTP_E2E=1 MACPROVIDER_NATIVE_MTP_E2E_SERVE_PATH=${MTP_E2E_SERVE_PATH:-1} MACPROVIDER_CB_TRACE=1 \
     $HARNESS/macprovider-cli native-mtp-hardware-e2e --root $fixture --model-id zai-org/glm-5.3-flash \
     --max-batch 4 --sizing-prompt-tokens 1024 --sizing-output-tokens ${MTP_E2E_TOKENS:-256} \
-    --throughput-tokens ${MTP_E2E_TOKENS:-256} > $OUT/mtp-e2e.json 2> $OUT/mtp-e2e.log || e2e_rc=$?
+    --throughput-tokens ${MTP_E2E_TOKENS:-256} || e2e_rc=$?
   echo "leg5 native-mtp-hardware-e2e rc=$e2e_rc" | tee -a $OUT/summary.txt
   local mtp_eval_rc=1
   if (( e2e_rc == 0 )); then
@@ -354,10 +379,11 @@ PY
   mkdir -p $jfixture
   cp -cR $MODEL $jfixture/target
   local journey_rc=0
-  MACPROVIDER_NATIVE_MTP_E2E=1 \
+  run_bounded ${MTP_JOURNEY_TIMEOUT_S:-1200} leg6 $OUT/mtp-journey.json $OUT/mtp-journey.log \
+    env MACPROVIDER_NATIVE_MTP_E2E=1 MACPROVIDER_CB_TRACE=1 \
     $HARNESS/macprovider-cli native-mtp-journey-e2e --root $jfixture --model-id zai-org/glm-5.3-flash \
     --qualified-slots ${JOURNEY_SLOTS:-4} --max-native-active-rows ${JOURNEY_NATIVE_ROWS:-4} \
-    --max-prompt-tokens 4096 > $OUT/mtp-journey.json 2> $OUT/mtp-journey.log || journey_rc=$?
+    --max-prompt-tokens 4096 || journey_rc=$?
   echo "leg6 native-mtp-journey-e2e rc=$journey_rc" | tee -a $OUT/summary.txt
   python3 - $OUT/mtp-journey.json <<'PY' 2>&1 | tee -a $OUT/summary.txt || true
 import json, sys

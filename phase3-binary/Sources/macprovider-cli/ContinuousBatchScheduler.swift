@@ -3042,6 +3042,14 @@ actor ContinuousBatchScheduler {
             if pumpRestartRequested {
                 pumpRestartRequested = false
                 ensurePump()
+            } else if !activePrompt.isEmpty || !activeDecode.isEmpty {
+                // Nothing restarts the pump until another request or event
+                // arrives, so rows left here wait. Say so loudly.
+                let nativeRows = activeDecode.values.filter(\.usesNativeMTP).count
+                    + activePrompt.values.filter(\.usesNativeMTP).count
+                try? FileHandle.standardError.write(contentsOf: Data(
+                    "event=continuous_batch_pump_idle_with_rows active_prompt=\(activePrompt.count) active_decode=\(activeDecode.count) waiting=\(waiting.count) native_rows=\(nativeRows) backend_cancellation_pending=\(backendCancellationPending)\n".utf8
+                ))
             }
         }
         // An exactness-probe cohort decodes only once every row of it is in

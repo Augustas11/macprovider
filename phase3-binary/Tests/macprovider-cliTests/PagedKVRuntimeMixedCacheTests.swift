@@ -7,6 +7,39 @@ import MLXNN
 import XCTest
 
 final class PagedKVRuntimeMixedCacheTests: XCTestCase {
+    /// Every scheduler is built with the backend's flattened-token bound:
+    /// an injected glm5_next (pagedMLA) backend, as the native-MTP harnesses
+    /// build, decodes at most 8 rows per forward whatever the device bound;
+    /// a backend without the cap keeps the configured bound.
+    func testSchedulerDecodeRowBoundTakesTheBackendFlattenedTokenCap() {
+        let container = ModelContainer(context: ModelContext(
+            configuration: ModelConfiguration(id: "zai-org/glm-5.3-flash"),
+            model: MixedCacheFakeModel(recorder: MixedCacheRecorder(), nextTokenByInput: [:], attentionDType: .float16),
+            processor: MixedCacheUserInputProcessor(),
+            tokenizer: MixedCacheTokenizer()
+        ))
+        let glm = PagedKVSharedForwardBackend(
+            container: container,
+            blockSizeTokens: 256,
+            maxPhysicalBlocks: 16,
+            poolEpoch: 1,
+            layerCount: 2,
+            cacheKinds: [.recurrentMamba, .pagedMLA(kpool: 4)]
+        )
+        let qwen = PagedKVSharedForwardBackend(
+            container: container,
+            blockSizeTokens: 32,
+            maxPhysicalBlocks: 16,
+            poolEpoch: 1,
+            layerCount: 2,
+            cacheKinds: [.recurrentMamba, .pagedAttention]
+        )
+        XCTAssertEqual(ModelRuntime.schedulerDecodeRowBound(configured: 11, backend: glm), 8)
+        XCTAssertEqual(ModelRuntime.schedulerDecodeRowBound(configured: 4, backend: glm), 4)
+        XCTAssertEqual(ModelRuntime.schedulerDecodeRowBound(configured: 11, backend: qwen), 11)
+        XCTAssertEqual(ModelRuntime.schedulerDecodeRowBound(configured: 11, backend: nil), 11)
+    }
+
     /// The native-MTP bench and hardware E2E inject a real paged-KV backend.
     /// That path must use the serve path's decode window, which is the same
     /// 16-step window for hybrid (Qwen3.6) and KV-only layouts.

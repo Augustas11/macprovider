@@ -5363,6 +5363,24 @@ maxTokens: 1,
         )
     }
 
+    /// The decode row bound every scheduler is built with: the configured
+    /// (device) bound capped by the backend's flattened-token bound
+    /// (`glm5_next` pagedMLA: 8, SPEC-039 v0.1.19). Applied here, where every
+    /// serve, lab and harness scheduler is built, so no construction path can
+    /// configure a wider decode forward than its backend runs.
+    nonisolated static func schedulerDecodeRowBound(
+        configured: Int,
+        backend: (any ContinuousBatchSchedulerBackend)?
+    ) -> Int {
+        guard let cap = (backend as? PagedKVSharedForwardBackend)?.maxDecodeRowsPerForward, cap < configured else {
+            return configured
+        }
+        FileHandle.standardError.write(Data(
+            "event=continuous_batch_decode_row_bound max_decode_rows_per_forward=\(cap) device_bound=\(configured) reason=flattened_token_cap\n".utf8
+        ))
+        return cap
+    }
+
     private nonisolated static func makeContinuousBatchScheduler(
         decision: PagedKVAttachDecision,
         tuple: ContinuousBatchingRequestedTuple?,
@@ -5419,7 +5437,7 @@ maxTokens: 1,
                 prefillGrouping: prefillGrouping,
                 allowsRaggedPrefillOffsets: (backend as? PagedKVSharedForwardBackend)?
                     .supportsRaggedPrefillOffsets ?? false,
-                maxDecodeRowsPerForward: maxDecodeRowsPerForward
+                maxDecodeRowsPerForward: schedulerDecodeRowBound(configured: maxDecodeRowsPerForward, backend: backend)
             ),
             allocator: allocator,
             backend: backend,
