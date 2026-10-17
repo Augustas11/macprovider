@@ -11842,7 +11842,7 @@ actor ModelRuntime: ModelRuntimeServing {
 
     private static func parseToolCallsIfRequested(_ text: String, request: ChatCompletionRequest) throws -> (content: String, toolCalls: [ToolCall]) {
         if try ToolSelectionPolicy.selection(request.promptSource.toolChoice).requiresCall {
-            let calls = try ToolCallParser.parseGuaranteedToolCalls(text)
+            let calls = try ToolCallParser.parseGuaranteedToolCalls(text, schemas: try ToolSelectionPolicy.schemas(request))
             return (calls.isEmpty ? text : "", calls)
         }
         guard let allowedFunctionNames = toolFunctionNames(from: request.promptSource.tools) else {
@@ -11958,11 +11958,11 @@ actor ModelRuntime: ModelRuntimeServing {
             : "Return exactly one call."
         switch selection {
         case .required:
-            messages.insert(ChatMessage(role: .system, content: "Call a declared function using complete JSON <tool_call> envelopes. \(callCountInstruction) Return only tool calls; arguments must match the declared schemas."), at: 0)
+            messages = StructuredOutputRenderer.prependInstruction("Call a declared function using complete <tool_call> envelopes in the tool-call format described above. \(callCountInstruction) Return only tool calls; arguments must match the declared schemas.", to: messages)
         case .named(let name):
-            messages.insert(ChatMessage(role: .system, content: "Call the declared function \(name) using a complete JSON <tool_call> envelope. \(callCountInstruction) Return only calls to that function; arguments must match its schema."), at: 0)
+            messages = StructuredOutputRenderer.prependInstruction("Call the declared function \(name) using a complete <tool_call> envelope in the tool-call format described above. \(callCountInstruction) Return only calls to that function; arguments must match its schema.", to: messages)
         case .none:
-            messages.insert(ChatMessage(role: .system, content: "Do not call any function or tool. Respond with assistant text."), at: 0)
+            messages = StructuredOutputRenderer.prependInstruction("Do not call any function or tool. Respond with assistant text.", to: messages)
         case .auto: break
         }
         let chat = try ToolPromptRenderer.renderMessages(messages, modelID: request.model)

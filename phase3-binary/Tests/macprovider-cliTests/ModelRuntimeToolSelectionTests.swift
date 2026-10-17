@@ -135,6 +135,49 @@ final class ModelRuntimeToolSelectionTests: XCTestCase {
         ))
     }
 
+    func testGuaranteedSelectionAcceptsQwen36TemplateFormatEndToEnd() throws {
+        // #2014: the live model answered required/named in its template's
+        // function-XML format and every turn failed validation.
+        let raw = "<tool_call>\n<function=lookup>\n<parameter=id>\n3\n</parameter>\n</function>\n</tool_call>"
+        for choice in ["required", ["type": "function", "function": ["name": "lookup"]]] as [Any] {
+            let request = try request(choice: choice)
+            let parsed = try ModelRuntime.parseGeneratedOutput(
+                filteredText: raw, generatedTokenIDs: [], decode: { _ in "" },
+                request: request, mode: .complete(), defaultCompletionTokens: 9
+            )
+            XCTAssertEqual(parsed.content, "")
+            XCTAssertEqual(parsed.toolCalls.map(\.functionName), ["lookup"])
+            XCTAssertEqual(parsed.toolCalls.first?.arguments, #"{"id":3}"#)
+            XCTAssertNoThrow(try ModelRuntime.validateStructuredCompletion(CompletionResult(
+                content: "", finishReason: "stop", promptTokens: 1, completionTokens: 9,
+                toolCalls: parsed.toolCalls, settlementDisposition: .eligibleOwner
+            ), request: request))
+        }
+    }
+
+    func testSelectionInstructionMergesIntoTheLeadingSystemMessage() throws {
+        // Qwen3.6's template raises when a system message is not first.
+        let body: [String: Any] = [
+            "model": ToolSelectionPolicy.supportedNativeModel,
+            "messages": [["role": "system", "content": "Be brief."], ["role": "user", "content": "Look up 3"]],
+            "tool_choice": "required", "max_tokens": 100,
+            "tools": [["type": "function", "function": ["name": "lookup", "parameters": [
+                "type": "object", "properties": ["id": ["type": "integer"]],
+                "required": ["id"], "additionalProperties": false,
+            ]]]],
+        ]
+        for choice in ["required", "none", ["type": "function", "function": ["name": "lookup"]]] as [Any] {
+            var withChoice = body
+            withChoice["tool_choice"] = choice
+            let request = try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: withChoice))
+            let chat = try ModelRuntime.userInput(for: request).prompt
+            guard case .chat(let messages) = chat else { return XCTFail("expected chat input") }
+            XCTAssertEqual(messages.map(\.role), [.system, .user])
+            XCTAssertTrue(messages[0].content.hasPrefix("Be brief."))
+            XCTAssertFalse(messages[0].content.contains("JSON <tool_call>"))
+        }
+    }
+
     func testCapabilitiesOnlyBindTheCurrentLoadedIdentity() {
         let canonical = ToolSelectionPolicy.supportedNativeModel
         // #2014: the runtime's wire identity of an alias-configured model is

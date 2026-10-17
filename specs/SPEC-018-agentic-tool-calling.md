@@ -1,6 +1,6 @@
 # SPEC-018 — Agentic tool calling (provider-side response synthesis)
 
-**Version:** 0.2.13 (2026-10-16, loaded identity of an alias-configured model)
+**Version:** 0.2.14 (2026-10-17, guaranteed envelope body follows the supported model's chat template)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.5.5, SPEC-006 v0.9, SPEC-008 (Pillar A model-hash trust layer — referenced by §10a), SPEC-011 v0.5 (warm-swap heartbeat `model_hash` — referenced by §10a), SPEC-015 v0.4 (receipts canonical output binding — see AC-17 and §N.5)
 **Status:** **LOCKED** at v0.2.10 by the streaming cleanup-rewrite byte-domain clarification. Previously LOCKED at v0.2.9 by the serial-turn `parallel_tool_calls` amendment (omitted/`false` stop after the first complete valid tool). Previously LOCKED at v0.2.8 by the #1594 OpenRouter-aligned AC-53 amendment (no independent messages[] count cap). Previously LOCKED at v0.2.7 by the Qwen3-Coder function-XML tool-call grammar amendment (documents the `<function=…><parameter=…>` XML body that Qwen3-Coder emits as a Qwen-row §3.1 body-grammar alternative, with OpenAI/MCP name charset; pending IMPL/conformance already landed on branch `fix/qwen3coder-toolcall-parse`); previously LOCKED at v0.2.6 by #784 C2b admission-timeout reconciliation — v0.2.4 spec PR #202 and IMPL PR #209 both landed (multi-turn acceptance, token-incremental streaming, `tool_call_id` validation, 1 MiB/2 MiB byte caps). v0.2.5 adds gpt-oss/OpenAI Harmony response parsing as a pending implementation/conformance gap. codex 4-lane r4 0/0/0; Claude blind-spot r2 0/0/0. SPEC-019 already depends on this as "LOCKED". The former "LOCK CANDIDATE pending PR" line was never flipped after merge. (Resolved gap, 2026-07-14, runbook item 15: AC-45's `X-MacProvider-Streaming-Mode` header — set by the coordinator on streaming `200` responses — was stripped by the public gateway's blanket `X-MacProvider-*` filter, making the "header absent" fail condition live on `api.malibu.tech`. Fixed by adding the header to the SPEC-006 v0.9.9 § 5.4 response-pass-through allowlist and un-stripping it at the gateway, validated against AC-45's closed enum. Chosen over scoping AC-45 to the coordinator surface because buyers hit the gateway, so scoping would have left AC-45's buyer-visible promise unmet. AC-45's normative text is unchanged; this is a documentation reconciliation, not a lock amendment. Residual: the coordinator currently emits the diagnostic only on the streaming success path — non-streaming AC-45 emission is a separate coordinator-side completeness item, out of scope for the gateway-strip fix.)
 
@@ -17,6 +17,22 @@ SPEC-018 is the **provider-side response synthesis contract** for OpenAI-wire to
 **Money-path**: all v0.2 changes preserve v0.1.5 settlement protection (`FaultBreakerQualifying` + zero credits on malformed streams via `billing_recorder.go:176` + `formula.go:112`).
 
 ## Change log
+
+- **v0.2.14 (2026-10-17, §3.11 guaranteed envelope body, Related: #2014):**
+  The only model qualified for `required`/named is
+  `mlx-community/Qwen3.6-35B-A3B-4bit`, and its chat template instructs
+  function-XML tool calls (`<tool_call><function=NAME><parameter=KEY>`).
+  v0.2.12 accepted only strict JSON envelope bodies and asked for them in a
+  separate system message, so the model followed its template and every
+  guaranteed turn failed validation. A `<tool_call>` envelope body MAY now
+  also be one complete function-XML call parsed with the declared schemas:
+  a `string`-typed parameter's value is its literal text, any other
+  parameter's value is strict JSON, and every name and parameter must be
+  declared exactly once. This is decoding the template's own grammar, not
+  recovery: partial, unclosed, undeclared, duplicated or untyped markup,
+  values holding call markup and text outside envelopes still fail. The
+  selection instruction now joins the leading system message, because the
+  template rejects a system message that is not first.
 
 - **v0.2.13 (2026-10-16, §3.11 loaded identity clarified, Related: #2014):**
   A native model configured under a local name with a configured catalog id
@@ -543,14 +559,22 @@ unsupported schemas fail before inference with HTTP 400
 schema or treat it as a prompt-only suggestion.
 
 The native guaranteed path MUST withhold the complete generation, parse only
-complete `<tool_call>` envelopes containing strict JSON objects, and validate
-all names and argument objects against the corresponding declared schemas
-before exposing success. Every numeric value recursively within generated
+complete `<tool_call>` envelopes, and validate all names and argument objects
+against the corresponding declared schemas before exposing success. An
+envelope body is either a strict JSON object or one complete function-XML
+call in the supported model's chat-template grammar,
+`<function=NAME>(<parameter=KEY>VALUE</parameter>)*</function>`, where a
+single newline directly after `<parameter=KEY>` and directly before
+`</parameter>`, when present, belongs to the markup. NAME MUST be a declared
+function and each KEY a property declared in its schema, at most once. The
+VALUE of a `string`-typed property is its literal text; the VALUE of any other
+property MUST be one strict JSON value. A VALUE containing `<tool_call>`,
+`</tool_call>`, `<function=`, `</function>` or `<parameter=` is malformed. Every numeric value recursively within generated
 arguments MUST also be finite with absolute magnitude at most
 `9007199254740991`; out-of-domain values are generated-output validation
 failures, even when a schema contains no numeric bound. This domain applies
-to JSON numbers, without coercing numeric-looking strings. Function-XML,
-Python syntax, duplicate keys,
+to JSON numbers, without coercing numeric-looking strings. Function-XML
+outside that complete grammar, Python syntax, duplicate keys,
 missing/invalid arguments, trailing non-whitespace, malformed or partial
 markup, and undeclared/wrong names MUST NOT be recovered into a successful
 call. The path MUST NOT fabricate arguments, insert a missing call, repair

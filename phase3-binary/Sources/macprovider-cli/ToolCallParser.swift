@@ -58,9 +58,11 @@ enum ToolCallParser {
         }
     }
 
-    /// Guaranteed modes deliberately exclude the auto-mode recovery and XML
-    /// coercion paths. Every byte outside a closed JSON envelope must be blank.
-    static func parseGuaranteedToolCalls(_ rawOutput: String) throws -> [ToolCall] {
+    /// Guaranteed modes deliberately exclude the auto-mode recovery paths. Every
+    /// byte outside a closed `<tool_call>` envelope must be blank. An envelope
+    /// body is either strict JSON or one complete function-XML call (the format
+    /// the supported Qwen3.6 chat template instructs), typed by `schemas`.
+    static func parseGuaranteedToolCalls(_ rawOutput: String, schemas: [String: JSONValue] = [:]) throws -> [ToolCall] {
         guard rawOutput.utf8.count <= SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else {
             throw ToolSelectionPolicy.outputError("Tool output exceeded byte limit")
         }
@@ -72,6 +74,23 @@ enum ToolCallParser {
                 throw ToolSelectionPolicy.outputError("Tool output requires complete closed JSON envelopes")
             }
             let bodyAndRest = remainder.dropFirst("<tool_call>".count).drop(while: { $0.isWhitespace })
+            if bodyAndRest.hasPrefix("<function=") {
+                let call = try guaranteedFunctionXMLCall(bodyAndRest, schemas: schemas)
+                let tail = call.rest.drop(while: { $0.isWhitespace })
+                guard tail.hasPrefix("</tool_call>") else {
+                    throw ToolSelectionPolicy.outputError("Tool output requires complete closed envelopes")
+                }
+                calls.append(ToolCall(
+                    id: "call_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(),
+                    functionName: call.name,
+                    arguments: try JSONValue.object(call.arguments).deterministicJSONString()
+                ))
+                guard calls.count <= ToolSelectionPolicy.maxCalls else {
+                    throw ToolSelectionPolicy.outputError("Too many tool calls")
+                }
+                remainder = tail.dropFirst("</tool_call>".count)
+                continue
+            }
             // Locate the complete JSON value before interpreting delimiters:
             // marker text inside an argument string remains ordinary data.
             guard let body = firstCompleteJSONObject(in: String(bodyAndRest)) else {
@@ -103,6 +122,60 @@ enum ToolCallParser {
             remainder = tail.dropFirst("</tool_call>".count)
         }
         return calls
+    }
+
+    /// One complete `<function=NAME>(<parameter=KEY>VALUE</parameter>)*</function>`
+    /// call, rendered as the Qwen3.6 chat template renders tool calls: one
+    /// newline around each value, a `string`-typed parameter's value is its
+    /// literal text, and any other parameter's value is strict JSON. NAME and
+    /// every KEY must be declared; nothing is coerced, repaired or defaulted,
+    /// and a value holding call markup is treated as malformed, not as data.
+    private static func guaranteedFunctionXMLCall(
+        _ text: Substring,
+        schemas: [String: JSONValue]
+    ) throws -> (name: String, arguments: [String: JSONValue], rest: Substring) {
+        let malformed = ToolSelectionPolicy.outputError("Malformed tool function envelope")
+        var cursor = text.dropFirst("<function=".count)
+        guard let nameEnd = cursor.firstIndex(of: ">") else { throw malformed }
+        let name = String(cursor[..<nameEnd])
+        guard isValidToolFunctionName(name), case .object(let schema)? = schemas[name] else { throw malformed }
+        var properties: [String: JSONValue] = [:]
+        if let declared = schema["properties"] {
+            guard case .object(let object) = declared else { throw malformed }
+            properties = object
+        }
+        cursor = cursor[cursor.index(after: nameEnd)...]
+        var arguments: [String: JSONValue] = [:]
+        while true {
+            cursor = cursor.drop(while: { $0.isWhitespace })
+            if cursor.hasPrefix("</function>") {
+                guard ToolSelectionPolicy.supportsNumericDomain(.object(arguments)) else { throw malformed }
+                return (name, arguments, cursor.dropFirst("</function>".count))
+            }
+            guard cursor.hasPrefix("<parameter=") else { throw malformed }
+            cursor = cursor.dropFirst("<parameter=".count)
+            guard let keyEnd = cursor.firstIndex(of: ">") else { throw malformed }
+            let key = String(cursor[..<keyEnd])
+            guard isValidToolParameterName(key), arguments[key] == nil,
+                  case .object(let property)? = properties[key] else { throw malformed }
+            cursor = cursor[cursor.index(after: keyEnd)...]
+            guard let close = cursor.range(of: "</parameter>") else { throw malformed }
+            var raw = cursor[..<close.lowerBound]
+            if raw.hasPrefix("\n") { raw = raw.dropFirst() }
+            if raw.hasSuffix("\n") { raw = raw.dropLast() }
+            for marker in ["<parameter=", "<function=", "</function>", "<tool_call>", "</tool_call>"] where raw.contains(marker) {
+                throw malformed
+            }
+            if property["type"] == .string("string") {
+                arguments[key] = .string(String(raw))
+            } else {
+                guard let value = try? StrictJSONParser.parse(String(raw), maxDepth: JSONSchemaValidator.maxDepth - 1) else {
+                    throw malformed
+                }
+                arguments[key] = value
+            }
+            cursor = cursor[close.upperBound...]
+        }
     }
 
     private static func recoverQwenUnclosedToolCall(
