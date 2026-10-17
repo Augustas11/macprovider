@@ -62,7 +62,7 @@
     {
       "spec_id": "SPEC-003",
       "title": "Open Onboarding: Distribution, Lifecycle & Onboarding UX",
-      "version": "0.12.2",
+      "version": "0.12.3",
       "path": "specs/SPEC-003-open-onboarding.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -564,7 +564,7 @@
     {
       "spec_id": "SPEC-020",
       "title": "Provider autoupdate",
-      "version": "v0.1.26",
+      "version": "v0.1.27",
       "path": "specs/SPEC-020-provider-autoupdate.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -2706,7 +2706,11 @@
         "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:final class GitHubAPIRateLimit",
         "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:private func gitHubAPIData(",
         "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:func verifyMirroredChecksumSignature(",
-        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:static func reportDeferredCheckOrThrow("
+        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:static func reportDeferredCheckOrThrow(",
+        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:private func download(from url: URL, to destination: URL, maximumBytes: Int64)",
+        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:static let maxReleaseAssetBytes",
+        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:private func boundedData(",
+        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:final class ReleaseRedirectPolicy"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/SelfUpdateMirrorTests.swift:testTagResolvesFromMirrorWhenGitHubIsUnreachable",
@@ -2731,7 +2735,14 @@
         "phase3-binary/Tests/macprovider-cliTests/SelfUpdateRateLimitTests.swift:testStatusAsksTheCoordinatorBeforeAnyCachedGitHubResult",
         "phase3-binary/Tests/macprovider-cliTests/SelfUpdateRateLimitTests.swift:testOnlyASpentBudgetIsClassifiedAsRateLimited",
         "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift:testRateLimitedDiscoveryIsASkippedDeferralWithoutCooldown",
-        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateRateLimitTests.swift:testOversizedMirroredChecksumsAreRefused"
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateRateLimitTests.swift:testOversizedMirroredChecksumsAreRefused",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateDownloadCapTests.swift:testOversizedStreamWithoutContentLengthIsCancelledMidStream",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateDownloadCapTests.swift:testDeclaredOversizeIsCancelledBeforeTheBody",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateDownloadCapTests.swift:testPreparedUpdateRefusesAnOversizedChecksumsFile",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateDownloadCapTests.swift:testRedirectThatLeavesHTTPSIsRefused",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateDownloadCapTests.swift:testOversizedCoordinatorAdvertisementIsCancelledMidStream",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateDownloadCapTests.swift:testRedirectToAnUnlistedHostIsRefused",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateDownloadCapTests.swift:testRedirectToTheGitHubAssetHostIsFollowed"
       ],
       "journeys": [
         "JOURNEY-PROVIDER-AUTOUPDATE-PHYSICAL"
@@ -2741,7 +2752,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1737",
-        "rationale": "SPEC-020 v0.1.20 (SPEC-020-R006): coordinator-triggered autoupdate and update --tag resolve a release tag from the SPEC-003-R004 release mirror when GitHub cannot answer; all signature and identity checks are unchanged. Signed discovery (R001) stays GitHub-only; a manual update or the Malibu Update button whose discovery is unreachable installs the coordinator-advertised release through the mirror, and the R005 recovery rail remains GitHub-only. Implemented and unit-tested; no physical autoupdate with GitHub blocked has been captured and the mirror is not yet populated. SPEC-020 v0.1.26 (#2036): a spent anonymous GitHub budget is a transport failure that is not re-requested before reset; the coordinator-advertised check verifies checksums.txt.sig; a check with no other source reports deferred until reset. Unit-tested; no physical update check with a spent budget has been captured."
+        "rationale": "SPEC-020 v0.1.20 (SPEC-020-R006): coordinator-triggered autoupdate and update --tag resolve a release tag from the SPEC-003-R004 release mirror when GitHub cannot answer; all signature and identity checks are unchanged. Signed discovery (R001) stays GitHub-only; a manual update or the Malibu Update button whose discovery is unreachable installs the coordinator-advertised release through the mirror, and the R005 recovery rail remains GitHub-only. Implemented and unit-tested; no physical autoupdate with GitHub blocked has been captured and the mirror is not yet populated. SPEC-020 v0.1.26 (#2036): a spent anonymous GitHub budget is a transport failure that is not re-requested before reset; the coordinator-advertised check verifies checksums.txt.sig; a check with no other source reports deferred until reset. Unit-tested; no physical update check with a spent budget has been captured. SPEC-020 v0.1.27 (#2036): every release download streams under a hard byte cap and an oversized transfer is cancelled without keeping a file. Unit-tested."
       }
     },
     {
@@ -8400,7 +8411,12 @@
         "phase3-binary/dist/install.sh:validate_release_mirror_mode()",
         "phase3-binary/dist/install.sh:latest_release_tag()",
         "scripts/check-install-sh-consumer-health.sh:discover_latest_release_tag",
-        "phase3-binary/app/Sources/Malibu/System/ProviderCLIVersion.swift:enum LatestReleaseClient"
+        "phase3-binary/app/Sources/Malibu/System/ProviderCLIVersion.swift:enum LatestReleaseClient",
+        "phase3-binary/dist/install.sh:capped_download()",
+        "scripts/check-install-sh-consumer-health.sh:capped_fetch()",
+        "scripts/check-install-sh-consumer-health.sh:cmp -s \"$SERVED\" \"$REFERENCE\"",
+        "phase3-binary/dist/install.sh:release_redirect_allowed()",
+        "scripts/check-install-sh-consumer-health.sh:redirect_allowed()"
       ],
       "tests": [
         "scripts/test-install-version-pin.sh:m1-github-down-pkg-from-mirror",
@@ -8419,7 +8435,24 @@
         "phase3-binary/app/Tests/MalibuTests/ProviderCLIVersionTests.swift:testSpentGitHubBudgetIsDeferredUntilReset",
         "phase3-binary/app/Tests/MalibuTests/ProviderCLIVersionTests.swift:testBadgeUsesTheConfiguredCoordinator",
         "phase3-binary/app/Tests/MalibuTests/ProviderCLIVersionTests.swift:testPersistedDeferralSurvivesRelaunchAndIsBounded",
-        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateRateLimitTests.swift:testStatusBacksOffAfterAGitHubFailure"
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateRateLimitTests.swift:testStatusBacksOffAfterAGitHubFailure",
+        "scripts/test-install-version-pin.sh:s2-stream-cut-at-cap",
+        "scripts/test-install-version-pin.sh:s3-no-partial-file",
+        "scripts/test-install-version-pin.sh:s4-oversized-checksums-fails",
+        "scripts/test-install-sh-consumer-health-alarm.sh:served-malicious",
+        "scripts/test-install-sh-consumer-health-alarm.sh:served-url-drift",
+        "scripts/test-install-sh-consumer-health-alarm.sh:served-oversize",
+        "scripts/test-install-version-pin.sh:s7-oversized-api-page-fails",
+        "scripts/test-install-version-pin.sh:s8-oversized-healthz-falls-back",
+        "scripts/test-install-version-pin.sh:s9-oversized-emergency-advertisement-fails",
+        "scripts/test-install-version-pin.sh:s10-cdn-redirect-followed",
+        "scripts/test-install-version-pin.sh:s11-redirect-refused-",
+        "scripts/test-install-sh-consumer-health-alarm.sh:redirect-elsewhere",
+        "scripts/test-install-sh-consumer-health-alarm.sh:uncapped-old-installer",
+        "scripts/test-install-sh-consumer-health-alarm.sh:release-tag-reference",
+        "scripts/test-install-version-pin.sh:s13-fork-no-mirror-redirect",
+        "scripts/test-install-sh-consumer-health-alarm.sh:legacy-redirect-elsewhere",
+        "scripts/test-install-sh-consumer-health-alarm.sh:head-installer-healthz-redirect"
       ],
       "journeys": [],
       "evidence": [],
@@ -8427,7 +8460,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1737",
-        "rationale": "SPEC-003 v0.12.0 (SPEC-003-R003): install.sh falls back to download.malibu.tech/releases for discovery and every release asset with the checksums.txt.sig chain unchanged. Implemented and covered by hermetic curl-stub tests; no fresh install on a Mac with GitHub blocked has been captured, and the Pearl nginx /releases/ route is not yet confirmed serving. SPEC-003 v0.12.2 (#2036): unpinned discovery takes the coordinator advertisement first and the anonymous GitHub API only as an unretried fallback with a deferred-until-reset report; the consumer-health gate runs the served discovery and verifies checksums.txt.sig. Hermetically tested; no live install with a spent anonymous budget has been captured."
+        "rationale": "SPEC-003 v0.12.0 (SPEC-003-R003): install.sh falls back to download.malibu.tech/releases for discovery and every release asset with the checksums.txt.sig chain unchanged. Implemented and covered by hermetic curl-stub tests; no fresh install on a Mac with GitHub blocked has been captured, and the Pearl nginx /releases/ route is not yet confirmed serving. SPEC-003 v0.12.2 (#2036): unpinned discovery takes the coordinator advertisement first and the anonymous GitHub API only as an unretried fallback with a deferred-until-reset report; the consumer-health gate runs the served discovery and verifies checksums.txt.sig. Hermetically tested; no live install with a spent anonymous budget has been captured. SPEC-003 v0.12.3 (#2036): the consumer-health gate never executes served bytes; it requires them to equal the release's repository dist/install.sh and runs that copy's discovery. install.sh and the gate stream every release-host download under a hard byte cap. Hermetically tested."
       }
     },
     {

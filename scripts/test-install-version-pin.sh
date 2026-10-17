@@ -33,6 +33,18 @@ awk '
 ' "$INSTALL_SH" >> "$lib"
 
 awk '
+  /^release_redirect_allowed\(\)/ { emit = 1 }
+  emit { print }
+  emit && /^\}$/ { exit }
+' "$INSTALL_SH" >> "$lib"
+
+awk '
+  /^capped_download\(\)/ { emit = 1 }
+  emit { print }
+  emit && /^\}$/ { exit }
+' "$INSTALL_SH" >> "$lib"
+
+awk '
   /^checksum_for_asset\(\)/ { emit = 1 }
   emit { print }
   emit && /^\}$/ { exit }
@@ -98,7 +110,7 @@ awk '
   emit && /^\}$/ { exit }
 ' "$INSTALL_SH" >> "$lib"
 
-for symbol in latest_release_tag validate_macprovider_version_tag resolve_release_tag validated_acceptance_asset_dir download_release verify_sha256 validate_staged_entries headless_acceptance_repair_mode installed_provider_binary_path validate_acceptance_upgrade_target validate_acceptance_provider_component_target validate_staged_acceptance_provider_component validate_non_emergency_pinned_target validate_emergency_target verify_emergency_coordinator_advertisement validate_emergency_config_backup stage_emergency_config_backup disable_staged_autoupdate verify_emergency_config_activation config_without_provider_token_sha256 preserve_failed_bootstrap_identity; do
+for symbol in latest_release_tag release_redirect_allowed capped_download fetch_release_asset validate_macprovider_version_tag resolve_release_tag validated_acceptance_asset_dir download_release verify_sha256 validate_staged_entries headless_acceptance_repair_mode installed_provider_binary_path validate_acceptance_upgrade_target validate_acceptance_provider_component_target validate_staged_acceptance_provider_component validate_non_emergency_pinned_target validate_emergency_target verify_emergency_coordinator_advertisement validate_emergency_config_backup stage_emergency_config_backup disable_staged_autoupdate verify_emergency_config_activation config_without_provider_token_sha256 preserve_failed_bootstrap_identity; do
   grep -q "^${symbol}()" "$lib" || fatal "could not extract $symbol from $INSTALL_SH"
 done
 
@@ -109,6 +121,15 @@ RELEASE_MIRROR_BASE="https://download.malibu.tech/releases"
 RELEASE_MIRROR_REPO="Augustas11/macprovider"
 RELEASE_MIRROR_FIRST=0
 RELEASE_GITHUB_UNREACHABLE=0
+# The installer's caps, read from install.sh so the test tracks them.
+RELEASE_ASSET_MAX_BYTES="$(sed -n 's/^RELEASE_ASSET_MAX_BYTES=\([0-9][0-9]*\)$/\1/p' "$INSTALL_SH")"
+RELEASE_METADATA_MAX_BYTES="$(sed -n 's/^RELEASE_METADATA_MAX_BYTES=\([0-9][0-9]*\)$/\1/p' "$INSTALL_SH")"
+RELEASE_DISCOVERY_MAX_BYTES="$(sed -n 's/^RELEASE_DISCOVERY_MAX_BYTES=\([0-9][0-9]*\)$/\1/p' "$INSTALL_SH")"
+[ -n "$RELEASE_ASSET_MAX_BYTES" ] && [ -n "$RELEASE_METADATA_MAX_BYTES" ] \
+  || fatal "could not read the download caps from $INSTALL_SH"
+INSTALLER_ASSET_MAX_BYTES="$RELEASE_ASSET_MAX_BYTES"
+INSTALLER_METADATA_MAX_BYTES="$RELEASE_METADATA_MAX_BYTES"
+STREAM_LOG="$workdir/stream.log"
 FETCH_LOG="$workdir/fetches.log"
 TMPDIR_PATH=""
 asset_path=""
@@ -147,8 +168,12 @@ shasum() {
   fi
   printf '%s  %s\n' "${MOCK_SHA:-goodhash}" "$2"
 }
+# Response bodies go to -o when the installer names a file, else to stdout.
+emit() {
+  if [ -n "$out" ]; then printf '%s' "$1" > "$out"; else printf '%s' "$1"; fi
+}
 curl() {
-  local out="" url="" arg headers_out=""
+  local out="" url="" arg headers_out="" write_fmt=""
   while [ "$#" -gt 0 ]; do
     arg="$1"
     shift
@@ -161,6 +186,10 @@ curl() {
         headers_out="$1"
         shift
         ;;
+      -w)
+        write_fmt="$1"
+        shift
+        ;;
       http*)
         url="$arg"
         ;;
@@ -168,6 +197,31 @@ curl() {
   done
 
   printf '%s\n' "$url" >> "$FETCH_LOG"
+  # Issue #2036: a 302 from URLs matching MOCK_REDIRECT_FROM to MOCK_REDIRECT_TO;
+  # the installer follows it itself (curl -w %{redirect_url}, no -L).
+  if [ -n "${MOCK_REDIRECT_FROM:-}" ] && [ -n "$write_fmt" ]; then
+    case "$url" in
+      $MOCK_REDIRECT_FROM)
+        [ -n "$out" ] && printf 'moved' > "$out"
+        printf '%s' "$MOCK_REDIRECT_TO"
+        return 0
+        ;;
+    esac
+  fi
+  # Issue #2036: a host streams MOCK_OVERSIZE_BYTES for URLs matching
+  # MOCK_OVERSIZE_URL, with no Content-Length (curl's --max-filesize cannot
+  # refuse it up front). head is a separate process, so it inherits the
+  # installer's file-size limit; STREAM_LOG records how many bytes it wrote.
+  if [ -n "${MOCK_OVERSIZE_URL:-}" ] && [ -n "$out" ]; then
+    case "$url" in
+      $MOCK_OVERSIZE_URL)
+        local stream_rc=0
+        head -c "$MOCK_OVERSIZE_BYTES" /dev/zero > "$out" || stream_rc=$?
+        printf '%s %s %s\n' "$url" "$stream_rc" "$(wc -c < "$out" | tr -d ' ')" >> "$STREAM_LOG"
+        return "$stream_rc"
+        ;;
+    esac
+  fi
   # Issue #1737: simulate a network where GitHub (and/or the mirror) is
   # unreachable. curl exit 7 is "failed to connect".
   case "$url" in
@@ -198,7 +252,7 @@ curl() {
   case "$url" in
     "https://download.malibu.tech/releases/latest.json")
       [ -n "${MOCK_MIRROR_LATEST_JSON:-}" ] || return 22
-      printf '%s' "$MOCK_MIRROR_LATEST_JSON"
+      emit "$MOCK_MIRROR_LATEST_JSON"
       ;;
     *"/releases?per_page=100&page="*)
       # Page-aware release mock. install.sh paginates newest-first; each fetched
@@ -217,10 +271,10 @@ curl() {
           body="[]"
         fi
       fi
-      printf '%s' "$body"
+      emit "$body"
       ;;
     *"/healthz")
-      printf '%s' "$MOCK_HEALTH_JSON"
+      emit "$MOCK_HEALTH_JSON"
       ;;
     *"/v99.0.0/"*)
       return 22
@@ -264,6 +318,13 @@ report() {
 
 reset_mocks() {
   : > "$DOWNLOAD_LOG"
+  : > "$STREAM_LOG"
+  MOCK_OVERSIZE_URL=""
+  MOCK_OVERSIZE_BYTES=0
+  MOCK_REDIRECT_FROM=""
+  MOCK_REDIRECT_TO=""
+  RELEASE_ASSET_MAX_BYTES="$INSTALLER_ASSET_MAX_BYTES"
+  RELEASE_METADATA_MAX_BYTES="$INSTALLER_METADATA_MAX_BYTES"
   : > "$RELEASE_PAGE_LOG"
   : > "$FETCH_LOG"
   MOCK_GITHUB_DOWN=0
@@ -1448,6 +1509,160 @@ tag="$(resolve_release_tag 2>/dev/null)"
 report "r8-fork-github-only" "v1.7.11" "$tag"
 report "r8-fork-no-coordinator-or-mirror" 0 \
   "$(grep -cE 'coordinator.malibu.tech|download.malibu.tech' "$FETCH_LOG" | tr -d ' ')"
+
+################################################################
+# Case S — #2036 streaming size caps on every release download.
+################################################################
+# S1 — the shipped caps bound the largest current asset (a ~45 MB DMG) with
+# margin and keep the signed metadata small.
+report "s1-asset-cap" 268435456 "$INSTALLER_ASSET_MAX_BYTES"
+report "s1-metadata-cap" 1048576 "$INSTALLER_METADATA_MAX_BYTES"
+
+# S2 — GitHub streams an oversized package with no Content-Length. The write is
+# cut off at the cap while it streams, the partial file is deleted, and the
+# byte-identical mirror serves the package instead.
+reset_mocks
+RELEASE_ASSET_MAX_BYTES=65536
+MOCK_OVERSIZE_URL='https://github.com/*.pkg'
+MOCK_OVERSIZE_BYTES=4194304
+MACPROVIDER_VERSION="v1.7.11"
+run_release_chain >/dev/null 2>&1
+read -r _ s2_rc s2_bytes < "$STREAM_LOG"
+report "s2-stream-cut-at-cap" 65536 "$s2_bytes"
+report "s2-writer-stopped" 1 "$([ "$s2_rc" -ne 0 ] && echo 1 || echo 0)"
+report "s2-cap-logged" 1 "$(grep -c 'exceeded the 65536-byte cap' "$LOG_FILE" | tr -d ' ')"
+report "s2-mirror-served" "pkg" "$(cat "$asset_path")"
+report "s2-mirror-url" \
+  "https://download.malibu.tech/releases/v1.7.11/macprovider-cli-v1.7.11-darwin-arm64.pkg" \
+  "$(cat "$DOWNLOAD_LOG")"
+rm -rf "$TMPDIR_PATH"
+
+# S3 — every host oversized: the download fails and no partial file remains.
+reset_mocks
+RELEASE_ASSET_MAX_BYTES=65536
+MOCK_OVERSIZE_URL='*.pkg'
+MOCK_OVERSIZE_BYTES=4194304
+tag="v1.7.11"
+rc=0
+fetch_release_asset macprovider-cli-v1.7.11-darwin-arm64.pkg "$workdir/s3.pkg" >/dev/null 2>&1 || rc=$?
+report "s3-all-oversized-fails" 1 "$rc"
+report "s3-no-partial-file" 0 "$([ -e "$workdir/s3.pkg" ] && echo 1 || echo 0)"
+report "s3-both-hosts-cut" 2 "$(awk '$3 == 65536' "$STREAM_LOG" | wc -l | tr -d ' ')"
+
+# S4 — checksums.txt gets the small metadata cap, not the asset cap.
+reset_mocks
+RELEASE_METADATA_MAX_BYTES=4096
+MOCK_OVERSIZE_URL='*/checksums.txt'
+MOCK_OVERSIZE_BYTES=65536
+MACPROVIDER_VERSION="v1.7.11"
+rc=0
+( run_release_chain ) >/dev/null 2>&1 || rc=$?
+report "s4-oversized-checksums-fails" 3 "$rc"
+report "s4-checksums-cut-at-metadata-cap" "4096 4096" "$(awk '{print $3}' "$STREAM_LOG" | tr '\n' ' ' | sed 's/ $//')"
+report "s4-no-asset-download" "" "$(cat "$DOWNLOAD_LOG")"
+
+# S5 — a body exactly at the cap is accepted.
+reset_mocks
+RELEASE_ASSET_MAX_BYTES=65536
+MOCK_OVERSIZE_URL='https://github.com/*.pkg'
+MOCK_OVERSIZE_BYTES=65536
+tag="v1.7.11"
+rc=0
+fetch_release_asset macprovider-cli-v1.7.11-darwin-arm64.pkg "$workdir/s5.pkg" >/dev/null 2>&1 || rc=$?
+report "s5-at-cap-accepted" 0 "$rc"
+report "s5-at-cap-bytes" 65536 "$(wc -c < "$workdir/s5.pkg" | tr -d ' ')"
+
+# S6 — real curl refuses a declared oversize (file:// knows its length)
+# before writing, and leaves no file.
+reset_mocks
+head -c 8192 /dev/zero > "$workdir/s6-source"
+rc=0
+( unset -f curl; capped_download 4096 "$workdir/s6.out" -fsS "file://$workdir/s6-source" ) >/dev/null 2>&1 || rc=$?
+report "s6-real-curl-refuses" 1 "$([ "$rc" -ne 0 ] && echo 1 || echo 0)"
+report "s6-real-curl-no-file" 0 "$([ -e "$workdir/s6.out" ] && echo 1 || echo 0)"
+rc=0
+( unset -f curl; capped_download 8192 "$workdir/s6.ok" -fsS "file://$workdir/s6-source" ) >/dev/null 2>&1 || rc=$?
+report "s6-real-curl-within-cap" "0 8192" "$rc $(wc -c < "$workdir/s6.ok" | tr -d ' ')"
+
+# S7 — a GitHub Releases API page that streams past the discovery cap is cut
+# off while it streams and fails discovery; no body file is left behind.
+reset_mocks
+GITHUB_REPO="someone/fork"
+RELEASE_DISCOVERY_MAX_BYTES=4096
+MOCK_OVERSIZE_URL='https://api.github.com/*'
+MOCK_OVERSIZE_BYTES=1048576
+rc=0
+( TMPDIR="$workdir/s7-tmp"; mkdir -p "$TMPDIR"; latest_release_tag; ) >/dev/null 2>&1 || rc=$?
+report "s7-oversized-api-page-fails" 3 "$rc"
+report "s7-api-page-cut-at-cap" 4096 "$(awk '{print $3}' "$STREAM_LOG")"
+report "s7-no-body-file" "" "$(ls -A "$workdir/s7-tmp")"
+RELEASE_DISCOVERY_MAX_BYTES="$(sed -n 's/^RELEASE_DISCOVERY_MAX_BYTES=\([0-9][0-9]*\)$/\1/p' "$INSTALL_SH")"
+
+# S8 — an oversized coordinator /healthz is no advertisement (64 KiB cap):
+# discovery falls back to the GitHub Releases API.
+reset_mocks
+coordinator_base="https://coordinator.malibu.tech"
+MOCK_OVERSIZE_URL='https://coordinator.malibu.tech/healthz'
+MOCK_OVERSIZE_BYTES=1048576
+tag="$(resolve_release_tag 2>/dev/null)"
+report "s8-oversized-healthz-falls-back" "v1.7.11" "$tag"
+report "s8-healthz-cut-at-cap" 65536 "$(awk '{print $3}' "$STREAM_LOG")"
+
+# S9 — an oversized emergency-rollback advertisement is no advertisement.
+reset_mocks
+MOCK_OVERSIZE_URL='https://coordinator.example/healthz'
+MOCK_OVERSIZE_BYTES=1048576
+rc=0
+( verify_emergency_coordinator_advertisement https://coordinator.example v1.8.30 ) >/dev/null 2>&1 || rc=$?
+report "s9-oversized-emergency-advertisement-fails" 7 "$rc"
+report "s9-emergency-healthz-cut-at-cap" 65536 "$(awk '{print $3}' "$STREAM_LOG")"
+
+# S10 — a GitHub download redirected to its asset CDN is followed; the CDN
+# bytes are what lands.
+reset_mocks
+MOCK_REDIRECT_FROM='https://github.com/*.pkg'
+MOCK_REDIRECT_TO='https://objects.githubusercontent.com/assets/macprovider-cli-v1.7.11-darwin-arm64.pkg'
+tag="v1.7.11"
+rc=0
+fetch_release_asset macprovider-cli-v1.7.11-darwin-arm64.pkg "$workdir/s10.pkg" >/dev/null 2>&1 || rc=$?
+report "s10-cdn-redirect-followed" "0 pkg" "$rc $(cat "$workdir/s10.pkg" 2>/dev/null)"
+report "s10-cdn-fetched" 1 "$(grep -c '^https://objects.githubusercontent.com/assets/' "$FETCH_LOG" | tr -d ' ')"
+
+# S11 — a redirect to any other host (or off HTTPS) is refused before it is
+# requested; the byte-identical mirror serves the asset instead.
+for target in 'https://internal.example/x.pkg' 'http://objects.githubusercontent.com/x.pkg' 'https://user@github.com.evil.example/x.pkg'; do
+  reset_mocks
+  MOCK_REDIRECT_FROM='https://github.com/*.pkg'
+  MOCK_REDIRECT_TO="$target"
+  tag="v1.7.11"
+  rc=0
+  fetch_release_asset macprovider-cli-v1.7.11-darwin-arm64.pkg "$workdir/s11.pkg" >/dev/null 2>&1 || rc=$?
+  report "s11-redirect-refused-${target%%/x.pkg}" "0 pkg 0" \
+    "$rc $(cat "$workdir/s11.pkg" 2>/dev/null) $(grep -cF "$target" "$FETCH_LOG" | tr -d ' ')"
+  report "s11-mirror-served-${target%%/x.pkg}" 1 "$(grep -c '^https://download.malibu.tech/releases/v1.7.11/' "$FETCH_LOG" | tr -d ' ')"
+done
+
+# S12 — the redirect host policy itself.
+for case in \
+  "1 https://github.com/a https://objects.githubusercontent.com/b" \
+  "1 https://github.com/a https://download.malibu.tech/releases/b" \
+  "1 https://coordinator.example/healthz https://coordinator.example/healthz/" \
+  "0 https://github.com/a https://githubusercontent.com.evil.example/b" \
+  "0 https://github.com/a http://github.com/b" \
+  "0 https://github.com/a https://169.254.169.254/latest"; do
+  set -- $case
+  got=0
+  release_redirect_allowed "$2" "$3" && got=1
+  report "s12-policy-$3" "$1" "$got"
+done
+
+# S13 — a fork never follows a redirect into the Malibu mirror.
+reset_mocks
+GITHUB_REPO="someone/fork"
+got=0
+release_redirect_allowed https://github.com/someone/fork/a https://download.malibu.tech/releases/b && got=1
+report "s13-fork-no-mirror-redirect" 0 "$got"
+GITHUB_REPO="Augustas11/macprovider"
 
 if [ "$fail" -ne 0 ]; then
   printf '[install-version-pin-test] %d failed, %d passed\n' "$fail" "$pass" >&2

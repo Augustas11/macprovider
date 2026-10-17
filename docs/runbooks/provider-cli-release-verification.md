@@ -358,17 +358,22 @@ latest tag and still be unable to resolve an installable release (observed
 prereleases hid the stable tag, the resolver died 3, and `checksums.txt`
 404'd while parity stayed green). The scheduled
 `.github/workflows/install-sh-consumer-health-alarm.yml` fetches the served
-`install.sh` and runs that copy's own unauthenticated release discovery (the
-view a fresh host gets — do not use `gh` / `GITHUB_TOKEN`):
-`discover_latest_release_tag()` when the served copy has it, which takes the
+`install.sh` and never executes it (#2036): the served bytes must equal the
+latest stable release's `dist/install.sh`, and a copy that differs is an alarm.
+It then runs that release copy's own unauthenticated release discovery (the
+view a fresh host gets — do not use `gh` / `GITHUB_TOKEN` for the probe):
+`discover_latest_release_tag()` when the copy has it, which takes the
 coordinator-advertised release and uses the anonymous GitHub API only as its
 fallback (#2036), otherwise `latest_release_tag()`. It then verifies the
-release's `checksums.txt.sig` under the served installer's embedded release key
+release's `checksums.txt.sig` under the installer's embedded release key
 and asserts a `darwin-arm64` platform asset returns HTTP 200, reading each file
-from GitHub Releases or the byte-identical `download.malibu.tech` mirror. A
-spent anonymous GitHub budget on the runner's IP therefore no longer turns the
-gate red while the coordinator advertises a release. Run it locally with
-`bash scripts/check-install-sh-consumer-health.sh`. A red health alarm with
+from GitHub Releases or the byte-identical `download.malibu.tech` mirror. Every
+download streams under a hard byte cap. A spent anonymous GitHub budget on the
+runner's IP therefore no longer turns the gate red while the coordinator
+advertises a release. Run it locally with
+`INSTALL_SH_RELEASE_TAG=vX.Y.Z bash scripts/check-install-sh-consumer-health.sh`
+(without the variable it compares against the checkout's `dist/install.sh`).
+A red health alarm with
 green parity means the curl channel is serving a broken resolver; fix the
 installer, cut the next stable CLI, and republish.
 

@@ -106,6 +106,10 @@ struct SelfUpdate {
     static let releaseMirrorHost = "download.malibu.tech"
     static let releaseMirrorPathPrefix = "/releases/"
     static let maxReleaseMirrorMetadataBytes = 256 * 1_024
+    /// Hard cap on one release asset (tarball, Malibu DMG) streamed from
+    /// GitHub or the mirror before `checksums.txt.sig` can vouch for it
+    /// (#2036). The largest asset is under 50 MB today.
+    static let maxReleaseAssetBytes: Int64 = 256 * 1_024 * 1_024
     static let launchdLabel = "live.malibu.provider"
     static let watchdogLaunchdLabel = "live.malibu.provider-watchdog"
     static let providerReloadLaunchdLabel = "\(launchdLabel)-compatibility-reload"
@@ -322,12 +326,15 @@ struct SelfUpdate {
         var request = URLRequest(url: url)
         request.timeoutInterval = 15
         request.addValue("macprovider-cli/\(currentVersion)", forHTTPHeaderField: "user-agent")
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await boundedData(
+            for: request,
+            maximumBytes: 64 * 1_024,
+            oversized: .invalidReleaseVersion("coordinator advertised no release")
+        )
         if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
             throw UpdateError.httpStatus(http.statusCode)
         }
-        guard data.count <= 64 * 1_024,
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let advertised = object["recommended_binary_version"] as? String,
               !advertised.isEmpty
         else {
@@ -552,14 +559,19 @@ struct SelfUpdate {
             let artifactIndexURL = tempDir.appendingPathComponent(artifactIndex.name)
             let checksumsURL = tempDir.appendingPathComponent(checksums.name)
             let checksumsSignatureURL = tempDir.appendingPathComponent(checksumsSignature.name)
-            try await download(from: checksums.browserDownloadURL, to: checksumsURL)
-            try await download(from: checksumsSignature.browserDownloadURL, to: checksumsSignatureURL)
+            let metadataCap = Int64(Self.maxReleaseMirrorMetadataBytes)
+            try await download(from: checksums.browserDownloadURL, to: checksumsURL, maximumBytes: metadataCap)
+            try await download(
+                from: checksumsSignature.browserDownloadURL,
+                to: checksumsSignatureURL,
+                maximumBytes: metadataCap
+            )
             try verifyChecksumSignature(checksumsURL: checksumsURL, signatureURL: checksumsSignatureURL, tempDir: tempDir)
             let checksumsText = try String(contentsOf: checksumsURL, encoding: .utf8)
             let expectedSHA = try Self.expectedSHA256(for: tarball.name, in: checksumsText)
             let expectedMalibuSHA = try Self.expectedSHA256(for: malibuDMG.name, in: checksumsText)
             let expectedArtifactIndexSHA = try Self.expectedSHA256(for: artifactIndex.name, in: checksumsText)
-            try await download(from: artifactIndex.browserDownloadURL, to: artifactIndexURL)
+            try await download(from: artifactIndex.browserDownloadURL, to: artifactIndexURL, maximumBytes: metadataCap)
             let actualArtifactIndexSHA = try Self.sha256(file: artifactIndexURL)
             guard actualArtifactIndexSHA.lowercased() == expectedArtifactIndexSHA.lowercased() else {
                 throw UpdateError.checksumMismatch(
@@ -571,8 +583,15 @@ struct SelfUpdate {
                actualArtifactIndexSHA.lowercased() != expectedArtifactIndexSHA256.lowercased() {
                 throw UpdateError.compatibilityArtifactIndexInvalid("discovery_head_digest_mismatch")
             }
-            try await download(from: tarball.browserDownloadURL, to: tarballURL)
-            try await download(from: malibuDMG.browserDownloadURL, to: malibuDMGURL)
+            // Both assets may reach their cap before checksums.txt vouches for
+            // them, so the space for both is required up front (#2036).
+            try validateFreeSpace(
+                for: tempDir,
+                requiredForKnownTarballAt: nil,
+                minimum: 2 * Self.maxReleaseAssetBytes + 512 * 1_024 * 1_024
+            )
+            try await download(from: tarball.browserDownloadURL, to: tarballURL, maximumBytes: Self.maxReleaseAssetBytes)
+            try await download(from: malibuDMG.browserDownloadURL, to: malibuDMGURL, maximumBytes: Self.maxReleaseAssetBytes)
             return try prepareValidatedUpdateAssets(
                 assetNames: release.assets.map(\.name),
                 tempDir: tempDir,
@@ -809,6 +828,10 @@ struct SelfUpdate {
         )
     }
 
+    func downloadReleaseFileForTest(from url: URL, to destination: URL, maximumBytes: Int64) async throws {
+        try await download(from: url, to: destination, maximumBytes: maximumBytes)
+    }
+
     func applyValidatedUpdateForTest(newBinary: URL) async throws {
         try await applyValidatedUpdate(
             newBinary: newBinary,
@@ -945,12 +968,13 @@ struct SelfUpdate {
         var request = URLRequest(url: url)
         request.addValue("application/vnd.github+json", forHTTPHeaderField: "accept")
         request.addValue("macprovider-cli/\(currentVersion)", forHTTPHeaderField: "user-agent")
-        let (data, response) = try await gitHubAPIData(for: request)
+        let (data, response) = try await gitHubAPIData(
+            for: request,
+            maximumBytes: Self.maxReleaseMirrorMetadataBytes,
+            oversized: .untrustedReleaseAPIURL(url.absoluteString)
+        )
         if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
             throw UpdateError.httpStatus(http.statusCode)
-        }
-        guard data.count <= Self.maxReleaseMirrorMetadataBytes else {
-            throw UpdateError.untrustedReleaseAPIURL(url.absoluteString)
         }
         return try JSONDecoder().decode(GitHubRelease.self, from: data)
     }
@@ -959,11 +983,15 @@ struct SelfUpdate {
     /// anonymous budget is known to be spent it fails fast without a request;
     /// a 403/429 with `x-ratelimit-remaining: 0` records the reset and throws
     /// `gitHubRateLimited`. There is no retry: callers fall back instead.
-    private func gitHubAPIData(for request: URLRequest) async throws -> (Data, URLResponse) {
+    private func gitHubAPIData(
+        for request: URLRequest,
+        maximumBytes: Int,
+        oversized: UpdateError
+    ) async throws -> (Data, URLResponse) {
         if let deferredUntil = gitHubRateLimit.deferral() {
             throw UpdateError.gitHubRateLimited(resetAt: deferredUntil)
         }
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await boundedData(for: request, maximumBytes: maximumBytes, oversized: oversized)
         if let http = response as? HTTPURLResponse, let limited = GitHubAPIRateLimit.error(for: http) {
             if case .gitHubRateLimited(let resetAt?) = limited {
                 gitHubRateLimit.record(resetAt: resetAt)
@@ -1026,17 +1054,13 @@ struct SelfUpdate {
         var request = URLRequest(url: url)
         request.timeoutInterval = 30
         request.addValue("macprovider-cli/\(currentVersion)", forHTTPHeaderField: "user-agent")
-        // Streamed so an oversized body is refused at the cap, never buffered.
-        let (bytes, response) = try await session.bytes(for: request)
+        let (data, response) = try await boundedData(
+            for: request,
+            maximumBytes: Self.maxReleaseMirrorMetadataBytes,
+            oversized: .untrustedDownloadURL(url.absoluteString)
+        )
         if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
             throw UpdateError.httpStatus(http.statusCode)
-        }
-        var data = Data()
-        for try await byte in bytes {
-            guard data.count < Self.maxReleaseMirrorMetadataBytes else {
-                throw UpdateError.untrustedDownloadURL(url.absoluteString)
-            }
-            data.append(byte)
         }
         guard !data.isEmpty else {
             throw UpdateError.untrustedDownloadURL(url.absoluteString)
@@ -1071,19 +1095,21 @@ struct SelfUpdate {
         }
         try validateDownloadURL(headAsset.browserDownloadURL)
         try validateDownloadURL(signatureAsset.browserDownloadURL)
-        let (headData, headResponse) = try await session.data(from: headAsset.browserDownloadURL)
+        let (headData, headResponse) = try await boundedData(
+            for: URLRequest(url: headAsset.browserDownloadURL),
+            maximumBytes: Self.maxReleaseDiscoveryHeadBytes,
+            oversized: .discoveryHeadInvalid("transport_head_oversized")
+        )
         if let http = headResponse as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
             throw UpdateError.httpStatus(http.statusCode)
         }
-        guard headData.count <= Self.maxReleaseDiscoveryHeadBytes else {
-            throw UpdateError.discoveryHeadInvalid("transport_head_oversized")
-        }
-        let (signatureData, signatureResponse) = try await session.data(from: signatureAsset.browserDownloadURL)
+        let (signatureData, signatureResponse) = try await boundedData(
+            for: URLRequest(url: signatureAsset.browserDownloadURL),
+            maximumBytes: Self.maxReleaseDiscoverySignatureBytes,
+            oversized: .discoveryHeadInvalid("transport_signature_oversized")
+        )
         if let http = signatureResponse as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
             throw UpdateError.httpStatus(http.statusCode)
-        }
-        guard signatureData.count <= Self.maxReleaseDiscoverySignatureBytes else {
-            throw UpdateError.discoveryHeadInvalid("transport_signature_oversized")
         }
         let head = try SignedReleaseDiscoveryHead.loadVerified(
             headData: headData,
@@ -1136,12 +1162,13 @@ struct SelfUpdate {
             var request = URLRequest(url: url)
             request.addValue("application/vnd.github+json", forHTTPHeaderField: "accept")
             request.addValue("macprovider-cli/\(currentVersion)", forHTTPHeaderField: "user-agent")
-            let (data, response) = try await gitHubAPIData(for: request)
+            let (data, response) = try await gitHubAPIData(
+                for: request,
+                maximumBytes: Self.maxReleaseDiscoveryListingBytes,
+                oversized: .discoveryHeadInvalid("transport_listing_oversized")
+            )
             if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
                 throw UpdateError.httpStatus(http.statusCode)
-            }
-            guard data.count <= Self.maxReleaseDiscoveryListingBytes else {
-                throw UpdateError.discoveryHeadInvalid("transport_listing_oversized")
             }
             let releases = try JSONDecoder().decode([GitHubRelease].self, from: data)
             let transports = releases.filter {
@@ -1185,7 +1212,11 @@ struct SelfUpdate {
         var request = URLRequest(url: url)
         request.addValue("application/vnd.github+json", forHTTPHeaderField: "accept")
         request.addValue("macprovider-cli/\(currentVersion)", forHTTPHeaderField: "user-agent")
-        let (data, response) = try await gitHubAPIData(for: request)
+        let (data, response) = try await gitHubAPIData(
+            for: request,
+            maximumBytes: Self.maxReleaseMirrorMetadataBytes,
+            oversized: .untrustedReleaseAPIURL(url.absoluteString)
+        )
         if let http = response as? HTTPURLResponse {
             if http.statusCode == 404 {
                 throw UpdateError.releaseNotFound
@@ -1206,12 +1237,13 @@ struct SelfUpdate {
         var request = URLRequest(url: url)
         request.addValue("macprovider-cli/\(currentVersion)", forHTTPHeaderField: "user-agent")
         request.timeoutInterval = 30
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await boundedData(
+            for: request,
+            maximumBytes: Self.maxReleaseMirrorMetadataBytes,
+            oversized: .untrustedDownloadURL(url.absoluteString)
+        )
         if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
             throw UpdateError.httpStatus(http.statusCode)
-        }
-        guard data.count <= Self.maxReleaseMirrorMetadataBytes else {
-            throw UpdateError.untrustedDownloadURL(url.absoluteString)
         }
         let release = try JSONDecoder().decode(GitHubRelease.self, from: data)
         guard release.tagName == tag else {
@@ -1281,20 +1313,100 @@ struct SelfUpdate {
         return components.url
     }
 
-    private func fetchText(from url: URL) async throws -> String {
-        let (data, response) = try await session.data(from: url)
-        if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
-            throw UpdateError.httpStatus(http.statusCode)
-        }
-        return String(decoding: data, as: UTF8.self)
+    private var redirectPolicy: ReleaseRedirectPolicy {
+        releaseMirrorEnabled ? .withMirror : .withoutMirror
     }
 
-    private func download(from url: URL, to destination: URL) async throws {
-        let (downloaded, response) = try await session.download(from: url)
-        if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
-            throw UpdateError.httpStatus(http.statusCode)
+    /// Reads one untrusted response body under a hard byte cap (#2036). A
+    /// declared length over `maximumBytes` is refused before the body, and the
+    /// task is cancelled the moment the streamed bytes pass it, so an oversized
+    /// response is never buffered. A non-2xx response returns an empty body for
+    /// the caller's status handling. Redirects may not leave HTTPS.
+    private func boundedData(
+        for request: URLRequest,
+        maximumBytes: Int,
+        oversized: UpdateError
+    ) async throws -> (Data, URLResponse) {
+        let (bytes, response) = try await session.bytes(for: request, delegate: redirectPolicy)
+        guard let requested = request.url,
+              ReleaseRedirectPolicy.allows(from: requested, to: response.url, mirrorAllowed: releaseMirrorEnabled)
+        else {
+            bytes.task.cancel()
+            throw UpdateError.untrustedDownloadURL(response.url?.absoluteString ?? "")
         }
-        try FileManager.default.moveItem(at: downloaded, to: destination)
+        if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
+            bytes.task.cancel()
+            return (Data(), response)
+        }
+        guard response.expectedContentLength <= Int64(maximumBytes) else {
+            bytes.task.cancel()
+            throw oversized
+        }
+        var data = Data()
+        for try await byte in bytes {
+            guard data.count < maximumBytes else {
+                bytes.task.cancel()
+                throw oversized
+            }
+            data.append(byte)
+        }
+        return (data, response)
+    }
+
+    /// Streams one release file to `destination` under a hard byte cap
+    /// (#2036). A declared length over `maximumBytes` is refused before the
+    /// body, and the transfer is cancelled the moment the streamed bytes pass
+    /// it. A failed or oversized download leaves no file behind.
+    private func download(from url: URL, to destination: URL, maximumBytes: Int64) async throws {
+        let partial = destination.deletingLastPathComponent()
+            .appendingPathComponent(".\(destination.lastPathComponent).partial")
+        try? FileManager.default.removeItem(at: partial)
+        do {
+            let (bytes, response) = try await session.bytes(
+                for: URLRequest(url: url),
+                delegate: redirectPolicy
+            )
+            guard ReleaseRedirectPolicy.allows(from: url, to: response.url, mirrorAllowed: releaseMirrorEnabled) else {
+                bytes.task.cancel()
+                throw UpdateError.untrustedDownloadURL(response.url?.absoluteString ?? url.absoluteString)
+            }
+            if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
+                bytes.task.cancel()
+                throw UpdateError.httpStatus(http.statusCode)
+            }
+            guard response.expectedContentLength <= maximumBytes else {
+                bytes.task.cancel()
+                throw UpdateError.downloadTooLarge(url.lastPathComponent, limit: maximumBytes)
+            }
+            guard FileManager.default.createFile(atPath: partial.path, contents: nil) else {
+                bytes.task.cancel()
+                throw CocoaError(.fileWriteUnknown)
+            }
+            let handle = try FileHandle(forWritingTo: partial)
+            defer { try? handle.close() }
+            let chunkSize = 64 * 1_024
+            var chunk = Data()
+            chunk.reserveCapacity(chunkSize)
+            var received: Int64 = 0
+            for try await byte in bytes {
+                received += 1
+                guard received <= maximumBytes else {
+                    bytes.task.cancel()
+                    throw UpdateError.downloadTooLarge(url.lastPathComponent, limit: maximumBytes)
+                }
+                chunk.append(byte)
+                if chunk.count == chunkSize {
+                    try handle.write(contentsOf: chunk)
+                    chunk.removeAll(keepingCapacity: true)
+                }
+            }
+            try handle.write(contentsOf: chunk)
+            try handle.close()
+            try FileManager.default.moveItem(at: partial, to: destination)
+        } catch {
+            try? FileManager.default.removeItem(at: partial)
+            throw error
+        }
     }
 
     private func applyValidatedUpdate(
@@ -2879,11 +2991,15 @@ struct SelfUpdate {
         }
     }
 
-    private func validateFreeSpace(for directory: URL, requiredForKnownTarballAt tarball: URL?) throws {
+    private func validateFreeSpace(
+        for directory: URL,
+        requiredForKnownTarballAt tarball: URL?,
+        minimum: Int64 = 512 * 1024 * 1024
+    ) throws {
         let attrs = try FileManager.default.attributesOfFileSystem(forPath: directory.path)
         let free = (attrs[.systemFreeSize] as? NSNumber)?.int64Value ?? 0
         let tarballSize = tarball.flatMap { (try? FileManager.default.attributesOfItem(atPath: $0.path)[.size] as? NSNumber)?.int64Value } ?? 0
-        let required = max(512 * 1024 * 1024, tarballSize * 3)
+        let required = max(minimum, tarballSize * 3)
         guard free >= required else {
             throw UpdateError.insufficientDiskSpace(required: required, available: free)
         }
@@ -3315,6 +3431,54 @@ struct GitHubAsset: Decodable {
     }
 }
 
+/// Redirect policy for every untrusted release read (#2036): a request that
+/// started on HTTPS may only be redirected over HTTPS on the default port, to
+/// its own host or to a release download host (GitHub, its asset CDN, and the
+/// Malibu mirror when the mirror is in use). Release hosts are untrusted
+/// transport; a redirect must not turn them into a probe of other endpoints.
+final class ReleaseRedirectPolicy: NSObject, URLSessionTaskDelegate, Sendable {
+    static let withMirror = ReleaseRedirectPolicy(mirrorAllowed: true)
+    static let withoutMirror = ReleaseRedirectPolicy(mirrorAllowed: false)
+
+    let mirrorAllowed: Bool
+
+    init(mirrorAllowed: Bool) {
+        self.mirrorAllowed = mirrorAllowed
+    }
+
+    static func allows(from original: URL, to target: URL?, mirrorAllowed: Bool) -> Bool {
+        guard original.scheme?.lowercased() == "https" else { return true }
+        guard let target,
+              target.scheme?.lowercased() == "https",
+              target.port == nil || target.port == 443,
+              let host = target.host?.lowercased()
+        else {
+            return false
+        }
+        return host == original.host?.lowercased()
+            || host == "github.com"
+            || host.hasSuffix(".github.com")
+            || host.hasSuffix(".githubusercontent.com")
+            || (mirrorAllowed && host == SelfUpdate.releaseMirrorHost)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        guard let original = task.originalRequest?.url,
+              Self.allows(from: original, to: request.url, mirrorAllowed: mirrorAllowed)
+        else {
+            completionHandler(nil)
+            return
+        }
+        completionHandler(request)
+    }
+}
+
 enum UpdateError: Error, CustomStringConvertible {
     case invalidURL(String)
     case httpStatus(Int)
@@ -3333,6 +3497,7 @@ enum UpdateError: Error, CustomStringConvertible {
     case processTimedOut(String, TimeInterval)
     case renameFailed(Int32)
     case untrustedDownloadURL(String)
+    case downloadTooLarge(String, limit: Int64)
     case untrustedReleaseAPIURL(String)
     case unsafeArchiveEntry(String)
     case insufficientDiskSpace(required: Int64, available: Int64)
@@ -3393,6 +3558,8 @@ enum UpdateError: Error, CustomStringConvertible {
             return "Atomic binary replacement failed with errno \(errnoValue)"
         case .untrustedDownloadURL(let url):
             return "Untrusted release asset URL: \(url)"
+        case let .downloadTooLarge(name, limit):
+            return "Release download \(name) exceeds the \(limit)-byte cap"
         case .untrustedReleaseAPIURL(let url):
             return "Untrusted release API URL: \(url)"
         case .unsafeArchiveEntry(let entry):

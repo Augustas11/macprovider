@@ -8,34 +8,52 @@
 # 30 leading prereleases hid the stable tag, the resolver died 3, and
 # checksums.txt 404'd. Parity cannot see that class of failure.
 #
-# This check fetches the SERVED installer (not the checkout copy), extracts
-# only its release-discovery functions, and runs them unauthenticated — the
-# same view a fresh host gets. A served installer with
+# This check fetches the SERVED installer and never executes its bytes
+# (#2036): a compromised installer host must not mean code execution on the
+# machine running this gate. The served bytes must first be identical to the
+# repository's phase3-binary/dist/install.sh for the release (the
+# install_sh_vs_release parity of the CLI release train); a served copy that
+# differs is an alarm. The release-discovery functions are then extracted from
+# that repository copy and run unauthenticated — the same view a fresh host
+# gets, since the bytes are identical. A copy with
 # discover_latest_release_tag() resolves exactly as an unpinned install does:
 # the coordinator-advertised release first and the anonymous GitHub Releases
 # API only as its fallback (#2036), so this gate does not depend on the
 # 60-requests-per-hour anonymous api.github.com budget of the runner's IP. An
-# older served installer is probed through its latest_release_tag() alone.
+# older copy is probed through its latest_release_tag() alone.
 # The resolved tag's checksums.txt and checksums.txt.sig are fetched from
 # GitHub Releases or the byte-identical download.malibu.tech mirror and the
-# signature is verified with the served installer's embedded release key
-# (a bad signature is an alarm, never a fallback); a darwin-arm64 platform
-# asset must then answer HTTP 200 from either host.
+# signature is verified with the installer's embedded release key (a bad
+# signature is an alarm, never a fallback); a darwin-arm64 platform asset must
+# then answer HTTP 200 from either host. Every download streams under a hard
+# byte cap.
 # An authenticated probe is not faithful (drafts become visible; #1588).
+#
+# The repository copy is INSTALL_SH_RELEASE_TAG's dist/install.sh
+# (git show vX.Y.Z:phase3-binary/dist/install.sh), else the checkout's
+# phase3-binary/dist/install.sh. INSTALL_SH_REFERENCE_FILE is honored only in
+# the hermetic test mode where INSTALL_SH_FILE also replaces the fetch.
 #
 # Read-only: no secrets, no writes, no deploy. Do not source/run install.sh
 # main. Exit codes: 0 = healthy, 1 = consumer surface down, 2 = probe error.
 set -euo pipefail
 
 PREFIX="[install-sh-consumer-health]"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 INSTALL_URL="${INSTALL_SH_URL:-https://get.malibu.tech/install.sh}"
 INSTALL_FILE="${INSTALL_SH_FILE:-}"
+RELEASE_TAG="${INSTALL_SH_RELEASE_TAG:-}"
+REFERENCE_FILE="${INSTALL_SH_REFERENCE_FILE:-}"
 GITHUB_REPO_PIN="Augustas11/macprovider"
 COORDINATOR_BASE="${INSTALL_SH_COORDINATOR_BASE:-https://coordinator.malibu.tech}"
 RELEASE_MIRROR_BASE="https://download.malibu.tech/releases"
 RESOLVER_TIMEOUT_SEC="${INSTALL_SH_RESOLVER_TIMEOUT_SEC:-120}"
 ASSET_TIMEOUT_SEC="${INSTALL_SH_ASSET_TIMEOUT_SEC:-30}"
 MAX_INSTALL_BYTES="${INSTALL_SH_MAX_BYTES:-5242880}"
+# checksums.txt and checksums.txt.sig are a few KB.
+MAX_METADATA_BYTES=1048576
+# Any one discovery response (a GitHub Releases API page is a few MB).
+MAX_DISCOVERY_BYTES=16777216
 
 die_probe() { printf '%s error: %s\n' "$PREFIX" "$*" >&2; exit 2; }
 alarm() { printf '%s ALARM: %s\n' "$PREFIX" "$*" >&2; exit 1; }
@@ -43,8 +61,9 @@ ok() { printf '%s OK: %s\n' "$PREFIX" "$*"; }
 
 [[ "$RESOLVER_TIMEOUT_SEC" =~ ^[1-9][0-9]*$ ]] || die_probe "INSTALL_SH_RESOLVER_TIMEOUT_SEC must be a positive integer"
 [[ "$ASSET_TIMEOUT_SEC" =~ ^[1-9][0-9]*$ ]] || die_probe "INSTALL_SH_ASSET_TIMEOUT_SEC must be a positive integer"
-[[ "$MAX_INSTALL_BYTES" =~ ^[1-9][0-9]*$ ]] || die_probe "INSTALL_SH_MAX_BYTES must be a positive integer"
+[[ "$MAX_INSTALL_BYTES" =~ ^[1-9][0-9]{0,9}$ ]] || die_probe "INSTALL_SH_MAX_BYTES must be a positive integer"
 [[ "$COORDINATOR_BASE" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || die_probe "INSTALL_SH_COORDINATOR_BASE must be an https:// origin (got: $COORDINATOR_BASE)"
+[ -z "$RELEASE_TAG" ] || [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die_probe "INSTALL_SH_RELEASE_TAG must be vMAJOR.MINOR.PATCH (got: $RELEASE_TAG)"
 
 # Fresh hosts have no GitHub credentials. Drop every token the runner might
 # have inherited so curl/netrc/gh cannot authenticate the resolver by accident.
@@ -54,6 +73,26 @@ unset GITHUB_TOKEN GH_TOKEN GH_ENTERPRISE_TOKEN \
 
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/install-sh-consumer-health.XXXXXX")"
 trap 'rm -rf "$WORKDIR"' EXIT
+
+# The trusted copy, read before HOME is replaced so git keeps its config.
+REFERENCE="$WORKDIR/install.reference.sh"
+[ -z "$REFERENCE_FILE" ] || [ -n "$INSTALL_FILE" ] \
+  || die_probe "INSTALL_SH_REFERENCE_FILE is a test override and needs INSTALL_SH_FILE"
+if [ -n "$REFERENCE_FILE" ]; then
+  [ -f "$REFERENCE_FILE" ] || die_probe "INSTALL_SH_REFERENCE_FILE is not a file: $REFERENCE_FILE"
+  cp -- "$REFERENCE_FILE" "$REFERENCE" || die_probe "failed to copy INSTALL_SH_REFERENCE_FILE"
+  REFERENCE_LABEL="$REFERENCE_FILE"
+elif [ -n "$RELEASE_TAG" ]; then
+  git -C "$REPO_ROOT" show "refs/tags/$RELEASE_TAG:phase3-binary/dist/install.sh" > "$REFERENCE" 2>/dev/null \
+    || die_probe "cannot read phase3-binary/dist/install.sh at tag $RELEASE_TAG (fetch the release tags first)"
+  REFERENCE_LABEL="$RELEASE_TAG dist/install.sh"
+else
+  [ -f "$REPO_ROOT/phase3-binary/dist/install.sh" ] || die_probe "missing $REPO_ROOT/phase3-binary/dist/install.sh"
+  cp -- "$REPO_ROOT/phase3-binary/dist/install.sh" "$REFERENCE" || die_probe "failed to copy the checkout dist/install.sh"
+  REFERENCE_LABEL="checkout dist/install.sh"
+fi
+[ -s "$REFERENCE" ] || die_probe "the repository install.sh ($REFERENCE_LABEL) is empty"
+
 PROBE_HOME="$WORKDIR/home"
 mkdir -p "$PROBE_HOME"
 chmod 700 "$PROBE_HOME"
@@ -63,32 +102,95 @@ export XDG_CONFIG_HOME="$PROBE_HOME"
 export GH_CONFIG_DIR="$PROBE_HOME"
 CURL_SAFE=(curl -q --netrc-file /dev/null --proto '=https' --proto-redir '=https' --tlsv1.2)
 
-SERVED="$WORKDIR/install.sh"
+# redirect_allowed <original-url> <redirect-url>: redirects stay on HTTPS and go
+# only to the original host or a release download host (#2036).
+redirect_allowed() {
+  local original_host target_host
+  case "$2" in https://*) ;; *) return 1 ;; esac
+  original_host="${1#*://}"
+  original_host="$(printf '%s' "${original_host%%/*}" | tr '[:upper:]' '[:lower:]')"
+  target_host="${2#https://}"
+  target_host="${target_host%%/*}"
+  case "$target_host" in *@*) return 1 ;; esac
+  target_host="$(printf '%s' "$target_host" | tr '[:upper:]' '[:lower:]')"
+  case "$target_host" in
+    "$original_host"|github.com|*.github.com|*.githubusercontent.com|download.malibu.tech) return 0 ;;
+  esac
+  return 1
+}
+
+# capped_fetch <max-bytes> <dest> <curl args...> <url>: download into dest under
+# a kernel file-size limit (RLIMIT_FSIZE, whole KiB), so an oversized body is
+# cut off while it streams whether or not the host declares its length; curl's
+# --max-filesize refuses a declared oversize up front. Redirects are followed
+# one hop at a time, only where redirect_allowed says. A failed, oversized or
+# redirected-elsewhere transfer leaves no file.
+capped_fetch() {
+  local max_bytes="$1" dest="$2" rc=0 url original redirect hops=0
+  shift 2
+  url="${!#}"
+  original="$url"
+  set -- "${@:1:$(($# - 1))}"
+  rm -f "$dest"
+  while :; do
+    redirect="$(
+      # Fail closed when the limit cannot be set, unless a stricter one is in force.
+      blocks=$(((max_bytes + 1023) / 1024))
+      if ! ulimit -f "$blocks" 2>/dev/null; then
+        current="$(ulimit -f)"
+        [ "$current" != "unlimited" ] && [ "$current" -le "$blocks" ] || exit 125
+      fi
+      "${CURL_SAFE[@]}" --max-filesize "$max_bytes" --max-redirs 0 -w '%{redirect_url}' -o "$dest" "$@" -- "$url"
+    )" || { rc=$?; break; }
+    [ -n "$redirect" ] || break
+    hops=$((hops + 1))
+    if [ "$hops" -gt 5 ] || ! redirect_allowed "$original" "$redirect"; then
+      rc=1
+      break
+    fi
+    url="$redirect"
+  done
+  if [ "$rc" -eq 0 ] && [ -f "$dest" ] && [ "$(wc -c < "$dest" | tr -d ' ')" -le "$max_bytes" ]; then
+    return 0
+  fi
+  rm -f "$dest"
+  return 1
+}
+
+SERVED="$WORKDIR/install.served.sh"
 if [ -n "$INSTALL_FILE" ]; then
   [ -f "$INSTALL_FILE" ] || die_probe "INSTALL_SH_FILE is not a file: $INSTALL_FILE"
+  served_bytes="$(wc -c < "$INSTALL_FILE" | tr -d ' ')"
+  [ "$served_bytes" -le "$MAX_INSTALL_BYTES" ] || die_probe "served install.sh is ${served_bytes} bytes (cap ${MAX_INSTALL_BYTES})"
   cp -- "$INSTALL_FILE" "$SERVED" || die_probe "failed to copy INSTALL_SH_FILE"
 else
   case "$INSTALL_URL" in
     https://*) ;;
     *) die_probe "INSTALL_SH_URL must be an https:// URL (got: $INSTALL_URL)" ;;
   esac
-  if ! "${CURL_SAFE[@]}" -fsSL --connect-timeout 15 --max-time 30 \
-    -o "$SERVED" -- "$INSTALL_URL"; then
-    die_probe "could not fetch $INSTALL_URL"
-  fi
+  capped_fetch "$MAX_INSTALL_BYTES" "$SERVED" -fsS --connect-timeout 15 --max-time 30 "$INSTALL_URL" \
+    || die_probe "could not fetch $INSTALL_URL within ${MAX_INSTALL_BYTES} bytes"
 fi
 [ -s "$SERVED" ] || die_probe "served install.sh is empty"
-served_bytes="$(wc -c < "$SERVED" | tr -d ' ')"
-[ "$served_bytes" -le "$MAX_INSTALL_BYTES" ] || die_probe "served install.sh is ${served_bytes} bytes (cap ${MAX_INSTALL_BYTES})"
 
-# Print one top-level function of the served installer, from its definition
-# line up to the next top-level function definition.
+# Parity before anything runs: only bytes identical to the repository copy are
+# probed, and every function below comes from the repository copy.
+if ! cmp -s "$SERVED" "$REFERENCE"; then
+  alarm "served install.sh differs from the repository $REFERENCE_LABEL (install_sh_vs_release drift); its bytes were not executed. Republish the release's dist/install.sh (docs/runbooks/provider-cli-release-verification.md)."
+fi
+ok "served install.sh is byte-identical to the repository $REFERENCE_LABEL"
+# The served bytes are no longer needed; nothing below may read them.
+rm -f "$SERVED"
+INSTALLER="$REFERENCE"
+
+# Print one top-level function of the repository installer, from its
+# definition line up to the next top-level function definition.
 extract_function() {
   awk -v name="$1" '
     !emit && index($0, name "()") == 1 { emit = 1; print; next }
     emit && /^[A-Za-z_][A-Za-z0-9_]*\(\)/ { exit }
     emit { print }
-  ' "$SERVED"
+  ' "$INSTALLER"
 }
 
 LIB="$WORKDIR/latest_release_tag.sh"
@@ -102,14 +204,22 @@ fi
 DISCOVERY_FUNCTIONS="release_mirror_enabled discovered_release_tag_acceptable version_at_least mirror_latest_release_tag discover_latest_release_tag"
 RESOLVER_MODE="latest_release_tag"
 MIN_SUPPORTED_VERSION=""
-if grep -q '^discover_latest_release_tag()' "$SERVED"; then
+if grep -q '^discover_latest_release_tag()' "$INSTALLER"; then
   RESOLVER_MODE="discover_latest_release_tag"
   for fn in $DISCOVERY_FUNCTIONS; do
     extract_function "$fn" > "$WORKDIR/fn.sh"
     grep -q "^${fn}()" "$WORKDIR/fn.sh" || alarm "served install.sh has discover_latest_release_tag() but no ${fn}()"
     cat "$WORKDIR/fn.sh" >> "$LIB"
   done
-  MIN_SUPPORTED_VERSION="$(sed -n 's/^MACPROVIDER_MIN_SUPPORTED_VERSION="\(v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)"$/\1/p' "$SERVED" | head -n 1)"
+  # The copy's streamed download helper and its caps, when it has them.
+  if grep -q '^capped_download()' "$INSTALLER"; then
+    if grep -q '^release_redirect_allowed()' "$INSTALLER"; then
+      extract_function release_redirect_allowed >> "$LIB"
+    fi
+    extract_function capped_download >> "$LIB"
+    grep -E '^RELEASE_(ASSET|METADATA|DISCOVERY)_MAX_BYTES=[0-9]+$' "$INSTALLER" >> "$LIB" || true
+  fi
+  MIN_SUPPORTED_VERSION="$(sed -n 's/^MACPROVIDER_MIN_SUPPORTED_VERSION="\(v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)"$/\1/p' "$INSTALLER" | head -n 1)"
   [ -n "$MIN_SUPPORTED_VERSION" ] || alarm "served install.sh has no MACPROVIDER_MIN_SUPPORTED_VERSION rollback floor"
 fi
 
@@ -117,12 +227,12 @@ TAG_FILE="$WORKDIR/tag"
 ERR_FILE="$WORKDIR/resolver.err"
 set +e
 python3 - "$RESOLVER_TIMEOUT_SEC" "$LIB" "$TAG_FILE" "$ERR_FILE" "$GITHUB_REPO_PIN" "$PROBE_HOME" \
-  "$RESOLVER_MODE" "$MIN_SUPPORTED_VERSION" "$COORDINATOR_BASE" <<'PY'
+  "$RESOLVER_MODE" "$MIN_SUPPORTED_VERSION" "$COORDINATOR_BASE" "$((MAX_DISCOVERY_BYTES / 1024))" <<'PY'
 import os
 import subprocess
 import sys
 
-timeout_s, lib, tag_file, err_file, repo, probe_home, mode, min_supported, coordinator = sys.argv[1:10]
+timeout_s, lib, tag_file, err_file, repo, probe_home, mode, min_supported, coordinator, max_kib = sys.argv[1:11]
 env = os.environ.copy()
 for key in (
     "GITHUB_TOKEN",
@@ -149,6 +259,68 @@ coordinator_base="$5"
 # A fresh host: no installed provider binary to protect from a downgrade.
 BINARY_PATH="$6/no-installed-macprovider-cli"
 log() { printf '[macprovider-install] %s\n' "$*" >&2; }
+# Every curl the repository copy runs, including an older release copy that
+# predates its own streamed caps, is bounded here (#2036): the response is
+# written to a scratch file under the kernel file-size limit, then replayed.
+# A caller that handles redirects itself passes -w with --max-redirs 0. For an
+# older caller the wrapper drops -L and follows each redirect itself, only over
+# HTTPS to the original host or a release download host.
+CURL_SCRATCH_DIR="$6"
+CURL_MAX_KIB="$7"
+gate_redirect_allowed() {
+  local original_host target_host
+  case "$2" in https://*) ;; *) return 1 ;; esac
+  original_host="${1#*://}"
+  original_host="$(printf '%s' "${original_host%%/*}" | tr '[:upper:]' '[:lower:]')"
+  target_host="${2#https://}"
+  target_host="${target_host%%/*}"
+  case "$target_host" in *@*) return 1 ;; esac
+  target_host="$(printf '%s' "$target_host" | tr '[:upper:]' '[:lower:]')"
+  case "$target_host" in
+    "$original_host"|github.com|*.github.com|*.githubusercontent.com|download.malibu.tech) return 0 ;;
+  esac
+  return 1
+}
+bounded_curl() {
+  (
+    ulimit -f "$CURL_MAX_KIB" 2>/dev/null || { current="$(ulimit -f)"; [ "$current" != "unlimited" ] && [ "$current" -le "$CURL_MAX_KIB" ] || exit 125; }
+    command curl --max-filesize "$((CURL_MAX_KIB * 1024))" "$@"
+  )
+}
+curl() {
+  local scratch rc=0 arg url original redirect hops=0 self_redirects=0
+  local -a args=()
+  for arg in "$@"; do
+    case "$arg" in
+      -w|--write-out) self_redirects=1; args+=("$arg") ;;
+      -L|--location) ;;
+      --*) args+=("$arg") ;;
+      -*L*) args+=("${arg//L/}") ;;
+      *) args+=("$arg") ;;
+    esac
+  done
+  scratch="$(mktemp "$CURL_SCRATCH_DIR/curl-response.XXXXXX")" || return 23
+  if [ "$self_redirects" -eq 1 ]; then
+    bounded_curl "$@" > "$scratch" || rc=$?
+  else
+    url="${args[${#args[@]}-1]}"
+    original="$url"
+    unset 'args[${#args[@]}-1]'
+    while :; do
+      redirect="$(bounded_curl --max-redirs 0 -w '%{redirect_url}' -o "$scratch" "${args[@]}" "$url")" || { rc=$?; break; }
+      [ -n "$redirect" ] || break
+      hops=$((hops + 1))
+      if [ "$hops" -gt 5 ] || ! gate_redirect_allowed "$original" "$redirect"; then
+        rc=47
+        break
+      fi
+      url="$redirect"
+    done
+  fi
+  [ "$rc" -eq 0 ] && cat "$scratch"
+  rm -f "$scratch"
+  return "$rc"
+}
 die() {
   code="$1"
   shift
@@ -162,7 +334,7 @@ die() {
 env.pop("MACPROVIDER_CHECKSUM_PUBLIC_KEY_PEM", None)
 try:
     completed = subprocess.run(
-        ["bash", "-c", script, "resolver", lib, repo, mode, min_supported, coordinator, probe_home],
+        ["bash", "-c", script, "resolver", lib, repo, mode, min_supported, coordinator, probe_home, max_kib],
         env=env,
         capture_output=True,
         text=True,
@@ -201,9 +373,8 @@ mirror_base="${RELEASE_MIRROR_BASE}/${tag}"
 fetch_release_file() {
   local name="$1" dest="$2" source
   for source in "$github_base" "$mirror_base"; do
-    rm -f "$dest"
-    if "${CURL_SAFE[@]}" -fsSL --connect-timeout 15 --max-time "$ASSET_TIMEOUT_SEC" \
-      --max-filesize 1048576 -o "$dest" -- "$source/$name" && [ -s "$dest" ]; then
+    if capped_fetch "$MAX_METADATA_BYTES" "$dest" -fsS --connect-timeout 15 --max-time "$ASSET_TIMEOUT_SEC" \
+      "$source/$name" && [ -s "$dest" ]; then
       printf '%s' "${source%%/releases/*}"
       return 0
     fi
@@ -234,20 +405,47 @@ if ! openssl dgst -sha256 -verify "$PUBLIC_KEY" -signature "$checksums_sig" "$ch
 fi
 ok "checksums.txt signature verified under the served installer's release key"
 
+# probe_status <url> <curl args...>: the final HTTP status after allowlisted
+# redirects. Any body (a host may ignore the Range request) is written under
+# a 1 MiB kernel file-size limit and discarded.
+probe_status() {
+  local url="$1" original="$1" out code redirect hops=0 scratch="$WORKDIR/probe.body"
+  shift
+  while :; do
+    out="$(
+      ulimit -f 1024 2>/dev/null || exit 125
+      "${CURL_SAFE[@]}" -sS --connect-timeout 15 --max-time "$ASSET_TIMEOUT_SEC" \
+        --max-redirs 0 -o "$scratch" -w '%{http_code} %{redirect_url}' "$@" -- "$url" || true
+    )"
+    rm -f "$scratch"
+    code="${out%% *}"
+    redirect="${out#* }"
+    [ "$redirect" != "$out" ] || redirect=""
+    case "$code" in
+      3??)
+        hops=$((hops + 1))
+        if [ -z "$redirect" ] || [ "$hops" -gt 5 ] || ! redirect_allowed "$original" "$redirect"; then
+          printf '%s' "$code"
+          return 0
+        fi
+        url="$redirect"
+        ;;
+      *)
+        printf '%s' "$code"
+        return 0
+        ;;
+    esac
+  done
+}
+
 asset_http_code() {
   local url="$1"
   local code
-  code="$(
-    "${CURL_SAFE[@]}" -sS --connect-timeout 15 --max-time "$ASSET_TIMEOUT_SEC" \
-      -L -o /dev/null -w "%{http_code}" -I -- "$url" || true
-  )"
+  code="$(probe_status "$url" -I)"
   case "$code" in
     200) printf '%s' "$code"; return 0 ;;
   esac
-  code="$(
-    "${CURL_SAFE[@]}" -sS --connect-timeout 15 --max-time "$ASSET_TIMEOUT_SEC" \
-      -L -o /dev/null -w "%{http_code}" -r 0-0 -- "$url" || true
-  )"
+  code="$(probe_status "$url" -r 0-0 --max-filesize 1048576)"
   printf '%s' "$code"
   case "$code" in
     200|206) return 0 ;;

@@ -42,6 +42,14 @@ GITHUB_REPO="${MACPROVIDER_GITHUB_REPO:-Augustas11/macprovider}"
 # stays the only authority for every byte, whichever host served it.
 RELEASE_MIRROR_BASE="https://download.malibu.tech/releases"
 RELEASE_MIRROR_REPO="Augustas11/macprovider"
+# Hard caps on the bytes streamed from any download host (GitHub or the
+# mirror), enforced while the body streams by capped_download (#2036). The
+# largest release asset is under 50 MB today, so the asset cap leaves ample
+# margin; checksums.txt and its signature are a few KB.
+RELEASE_ASSET_MAX_BYTES=268435456
+RELEASE_METADATA_MAX_BYTES=1048576
+# One GitHub Releases API page (per_page=100, with every asset) is a few MB.
+RELEASE_DISCOVERY_MAX_BYTES=16777216
 # MACPROVIDER_RELEASE_MIRROR=1 tries the mirror before GitHub (skips GitHub
 # timeouts on networks where it is known to be blocked). 0 (default) tries
 # GitHub first and falls back to the mirror on any failure.
@@ -7766,6 +7774,76 @@ _bootstrap_python_die() {
   die 8 "This Mac has no usable python3 (Apple's Command Line Tools stub or missing interpreter), and the installer could not bootstrap a pinned standalone interpreter: $*. Put a working python3 on PATH or install Apple's Command Line Developer Tools (xcode-select --install), then retry."
 }
 
+# release_redirect_allowed <original-url> <redirect-url>: a redirect may only
+# stay on HTTPS and go to the original host or a release download host
+# (GitHub, its asset CDN, and the Malibu mirror when this repository uses it),
+# never to another endpoint (#2036).
+release_redirect_allowed() {
+  local original_host target_host
+  case "$2" in https://*) ;; *) return 1 ;; esac
+  original_host="${1#*://}"
+  original_host="$(printf '%s' "${original_host%%/*}" | tr '[:upper:]' '[:lower:]')"
+  target_host="${2#https://}"
+  target_host="${target_host%%/*}"
+  case "$target_host" in *@*) return 1 ;; esac
+  target_host="$(printf '%s' "$target_host" | tr '[:upper:]' '[:lower:]')"
+  case "$target_host" in
+    "$original_host"|github.com|*.github.com|*.githubusercontent.com) return 0 ;;
+    download.malibu.tech) [ "${GITHUB_REPO:-}" = "${RELEASE_MIRROR_REPO:-}" ] && return 0 ;;
+  esac
+  return 1
+}
+
+# capped_download <max-bytes> <dest> <curl args...> <url>: curl <url> into dest
+# under a kernel file-size limit (RLIMIT_FSIZE), so an oversized body is cut
+# off as it streams, whatever the curl version and whether or not the host
+# sends a Content-Length (#2036). curl's --max-filesize refuses a declared
+# oversize before any byte is written. Redirects are followed here, one hop at
+# a time, only to hosts release_redirect_allowed accepts; callers do not pass
+# -L. A transfer that fails, exceeds the cap or is redirected elsewhere leaves
+# no file behind.
+capped_download() {
+  local max_bytes="$1" dest="$2" rc=0 size=0 url original redirect hops=0
+  shift 2
+  url="${!#}"
+  original="$url"
+  set -- "${@:1:$(($# - 1))}"
+  rm -f "$dest"
+  while :; do
+    # Rounded up to whole KiB (bash counts ulimit -f in 1024-byte units); the
+    # exact byte cap is checked below. A limit that cannot be set fails closed
+    # unless an already-stricter limit is in force.
+    redirect="$(
+      blocks=$(((max_bytes + 1023) / 1024))
+      if ! ulimit -f "$blocks" 2>/dev/null; then
+        current="$(ulimit -f)"
+        [ "$current" != "unlimited" ] && [ "$current" -le "$blocks" ] || exit 125
+      fi
+      curl --max-filesize "$max_bytes" --max-redirs 0 -w '%{redirect_url}' -o "$dest" "$@" "$url"
+    )" || { rc=$?; break; }
+    [ -n "$redirect" ] || break
+    hops=$((hops + 1))
+    if [ "$hops" -gt 5 ] || ! release_redirect_allowed "$original" "$redirect"; then
+      log "Refusing a download redirect from $original." >&2
+      rc=1
+      break
+    fi
+    url="$redirect"
+  done
+  [ -f "$dest" ] && size="$(wc -c < "$dest" | tr -d ' ')"
+  # curl exits 63 when it refuses a declared (or, on curl 8.4+, streamed)
+  # oversize; the kernel limit kills curl with exactly the rounded cap on disk.
+  if [ "$rc" -eq 63 ] || { [ "$size" -ge "$max_bytes" ] && { [ "$rc" -ne 0 ] || [ "$size" -gt "$max_bytes" ]; }; }; then
+    log "Download exceeded the ${max_bytes}-byte cap; discarded it." >&2
+    rc=1
+  fi
+  if [ "$rc" -ne 0 ]; then
+    rm -f "$dest"
+    return "$rc"
+  fi
+  return 0
+}
+
 # Install or reuse the pinned standalone CPython. Sets INSTALL_PYTHON3.
 # MACPROVIDER_PYTHON_BOOTSTRAP_DISABLE=1: fail closed (tests of the missing
 # interpreter path). URL/SHA256/dir/interpreter overrides are ignored unless
@@ -7819,8 +7897,9 @@ bootstrap_standalone_python3() {
   fi
   for source in $sources; do
     rm -f "$tarball"
-    if ! curl -fL --connect-timeout 10 --speed-limit 1024 --speed-time 120 --retry 2 --retry-connrefused --retry-max-time 120 \
-      "$source" -o "$tarball"; then
+    if ! capped_download "$RELEASE_ASSET_MAX_BYTES" "$tarball" \
+      -f --proto '=https' --connect-timeout 10 --speed-limit 1024 --speed-time 120 \
+      --retry 2 --retry-connrefused --retry-max-time 120 "$source"; then
       log "Could not download pinned python3 from $source; trying the next source."
       continue
     fi
@@ -9820,7 +9899,12 @@ latest_release_tag() {
     # Mac behind one NAT, so a retry only spends that budget again (#2036).
     api_headers="$(mktemp "${TMPDIR:-/tmp}/macprovider-github-api-headers.XXXXXX")" \
       || die 3 "failed to create a temporary file for the GitHub Releases API response headers"
-    if ! json="$(curl -fsSL --connect-timeout 10 --speed-limit 1024 --speed-time 120 -D "$api_headers" "$api_url")"; then
+    api_body="$(mktemp "${TMPDIR:-/tmp}/macprovider-github-api-body.XXXXXX")" \
+      || die 3 "failed to create a temporary file for the GitHub Releases API response"
+    if ! capped_download "$RELEASE_DISCOVERY_MAX_BYTES" "$api_body" \
+      -fsS --proto '=https' --connect-timeout 10 --speed-limit 1024 --speed-time 120 \
+      -D "$api_headers" "$api_url"; then
+      rm -f "$api_body"
       # A 403/429 with x-ratelimit-remaining: 0 is the anonymous budget, not a
       # missing release: say when it resets instead of a bare HTTP error.
       rate_limit_reset="$(awk '
@@ -9843,6 +9927,8 @@ latest_release_tag() {
       die 3 "failed to query GitHub Releases API: $api_url"
     fi
     rm -f "$api_headers"
+    json="$(cat "$api_body")"
+    rm -f "$api_body"
     # End of the release list: an empty array (or whitespace) means no more
     # pages exist, so stop rather than spending the full page budget.
     case "$(printf "%s" "$json" | tr -d '[:space:]')" in
@@ -9991,7 +10077,11 @@ mirror_latest_release_tag() {
     log "Release mirror discovery needs the coordinator's advertised release, and no coordinator is configured." >&2
     return 1
   fi
-  body="$(curl -fsS --max-filesize 65536 --connect-timeout 10 --max-time 30 --retry 2 --retry-connrefused "$coordinator_base/healthz" 2>/dev/null)" \
+  local body_file
+  body_file="$(mktemp "${TMPDIR:-/tmp}/macprovider-coordinator-healthz.XXXXXX")" || return 1
+  capped_download 65536 "$body_file" -fsS --proto '=https' --connect-timeout 10 --max-time 30 \
+      --retry 2 --retry-connrefused "$coordinator_base/healthz" 2>/dev/null \
+    && body="$(cat "$body_file")" \
     && advertised="$(printf '%s' "$body" | python3 -c '
 import json, sys
 value = json.loads(sys.stdin.buffer.read(65536).decode("utf-8"))
@@ -10001,6 +10091,7 @@ if not isinstance(version, str) or not version:
 sys.stdout.write(version if version.startswith("v") else "v" + version)
 ' 2>/dev/null)" \
     || advertised=""
+  rm -f "$body_file"
   if [ -z "$advertised" ]; then
     log "The coordinator at $coordinator_base did not advertise a release; cannot pick a release without GitHub." >&2
     return 1
@@ -10071,13 +10162,13 @@ fetch_release_asset() {
     sources="github mirror"
   fi
   # With no mirror to fall back to (a fork), GitHub keeps its original retry
-  # budget. The mirror is untrusted transport, so its bytes are size-capped
-  # before checksums.txt.sig can vouch for them.
+  # budget. Every host is untrusted transport, so its bytes are size-capped
+  # while they stream, before checksums.txt.sig can vouch for them (#2036).
   local github_budget="--connect-timeout 15 --retry 3 --retry-max-time 300"
   release_mirror_enabled && github_budget="--connect-timeout 10 --retry 2 --retry-max-time 120"
-  local mirror_cap=2147483648
+  local max_bytes="$RELEASE_ASSET_MAX_BYTES"
   case "$name" in
-    checksums.txt|checksums.txt.sig) mirror_cap=1048576 ;;
+    checksums.txt|checksums.txt.sig) max_bytes="$RELEASE_METADATA_MAX_BYTES" ;;
   esac
   for source in $sources; do
     rm -f "$dest"
@@ -10085,14 +10176,14 @@ fetch_release_asset() {
       url="https://github.com/${GITHUB_REPO}/releases/download/${tag}/${name}"
       log "Downloading $name from GitHub Releases."
       # shellcheck disable=SC2086 # github_budget is a fixed list of flags
-      if curl -fL $github_budget --speed-limit 1024 --speed-time 120 --retry-connrefused "$url" -o "$dest"; then
+      if capped_download "$max_bytes" "$dest" -f --proto '=https' $github_budget --speed-limit 1024 --speed-time 120 --retry-connrefused "$url"; then
         return 0
       fi
       RELEASE_GITHUB_UNREACHABLE=1
     else
       url="${RELEASE_MIRROR_BASE}/${tag}/${name}"
       log "Downloading $name from the Malibu release mirror."
-      if curl -fL --proto '=https' --max-filesize "$mirror_cap" --connect-timeout 15 --speed-limit 1024 --speed-time 120 --retry 3 --retry-connrefused --retry-max-time 300 "$url" -o "$dest"; then
+      if capped_download "$max_bytes" "$dest" -f --proto '=https' --connect-timeout 15 --speed-limit 1024 --speed-time 120 --retry 3 --retry-connrefused --retry-max-time 300 "$url"; then
         return 0
       fi
     fi
@@ -13792,7 +13883,15 @@ validate_emergency_target() {
 verify_emergency_coordinator_advertisement() {
   coordinator_base="$1"
   target="$2"
-  health="$(curl -fsS --max-time 10 "$coordinator_base/healthz" 2>/dev/null || true)"
+  local health_file health=""
+  health_file="$(mktemp "${TMPDIR:-/tmp}/macprovider-coordinator-healthz.XXXXXX")" \
+    || die 7 "failed to create a temporary file for the coordinator advertisement"
+  # Bounded like every other untrusted read (#2036).
+  if capped_download 65536 "$health_file" -fsS --proto '=https' --max-time 10 \
+      "$coordinator_base/healthz" 2>/dev/null; then
+    health="$(cat "$health_file")"
+  fi
+  rm -f "$health_file"
   python3 - "$target" "$health" <<'PY' \
     || die 7 "coordinator must advertise the exact rollback target before emergency provider downgrade"
 import json
