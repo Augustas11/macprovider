@@ -31,6 +31,19 @@
 #        so the FR-CB10 self-check driver would never start (also recorded in
 #        1971-selfcheck/studio-selfcheck-validation.sh).
 #     3. msb-throughput, paged engine, rows 1, 2 and 4 at block 256.
+#   glm53-t4-window.sh run-qwen36-recheck   (same window rules) SPEC-038
+#     v0.3.21 `cb-probe-v3` re-measure of the live Qwen3.6 tuple with the
+#     campaign build, CB "never off" gate: a no-join lab serve of the
+#     lab-harness binary on a copy of the live config (LIVE_CONFIG, default
+#     ~/.config/macprovider/config.yaml; only the port changes), in its own
+#     directory, so its own self-check store. That store starts as a copy of
+#     live's (LIVE_SELFCHECK_STORE), as a fleet Mac's does at the update:
+#     live's v2 grant is the prior grant the v3 re-run must keep. Live's
+#     files are only read. Every status poll from the served-slots plan on,
+#     and for POST_DECISION_S (120) after the v3 decision, must show CB
+#     active, mode not off and served_slots >= MIN_SLOTS (8). Reports
+#     verified_k, served slots, per-k decode-only gains and the decision.
+#     FAIL on any poll below the bar, CB off, or no v3 decision.
 #   It never binds or signals the live port; pausing the live provider is the
 #   window owner's job, and `run` refuses to start while it serves.
 #
@@ -85,6 +98,124 @@ prepare() {
 
 status_json() { curl -fsS --max-time 5 "http://127.0.0.1:$1/v1/status" 2>/dev/null; }
 
+# The window owner pauses the live provider; refuse to measure beside it.
+require_live_paused() {
+  local body
+  if body=$(status_json $LIVE_PORT); then
+    print -r -- $body | python3 -c 'import json,sys
+d = json.load(sys.stdin)
+paused = (d.get("lifecycle") or {}).get("operator_paused") is True
+sys.exit(0 if paused and d.get("requests_in_flight", 1) == 0 else 1)' || {
+      echo "live provider on :$LIVE_PORT is not paused with 0 in flight; not starting" >&2; exit 3; }
+  fi
+}
+
+run_qwen36_recheck() {
+  local live_config=${LIVE_CONFIG:-$HOME/.config/macprovider/config.yaml}
+  local live_store=${LIVE_SELFCHECK_STORE:-${live_config:h}/cb-self-check.json}
+  local min_slots=${MIN_SLOTS:-8}
+  [[ $LAB_PORT != $LIVE_PORT ]] || { echo "LAB_PORT must differ from LIVE_PORT" >&2; exit 2; }
+  [[ -x $HARNESS/macprovider-cli && -f $HARNESS/mlx.metallib ]] || { echo "run '$0 prepare' first" >&2; exit 2; }
+  [[ -f $live_config && -f $live_store ]] || { echo "need $live_config and $live_store" >&2; exit 2; }
+  grep -q '^model: qwen/qwen3.6-35b-a3b$' $live_config || { echo "$live_config does not serve qwen/qwen3.6-35b-a3b" >&2; exit 2; }
+  grep -q '^credential_store: protected_file$' $live_config || {
+    echo "live config must use credential_store: protected_file (isolated no-join lab serve)" >&2; exit 2; }
+  grep -qE '^draft_model:[[:space:]]*[^[:space:]]' $live_config && {
+    echo "live config sets draft_model; the self-check never runs beside a draft model" >&2; exit 2; }
+  require_live_paused
+  OUT=${OUT:-$HOME/lab-glm53/t3/qwen36-recheck-$(date -u +%Y%m%dT%H%M%SZ)}
+  local dir=$OUT/selfcheck; mkdir -p $dir; chmod 700 $OUT $dir
+  shasum -a 256 $HARNESS/macprovider-cli $HARNESS/mlx.metallib | tee $OUT/identity.sha256
+  echo "qwen36 recheck start $(date -u +%T) live_config=$live_config min_slots=$min_slots" | tee -a $OUT/summary.txt
+  # Copy of the live config with only the port changed; live's own files
+  # are never written.
+  python3 - $live_config $dir/config.yaml $LAB_PORT <<'PY'
+import sys
+src, dst, port = sys.argv[1:]
+out = [line for line in open(src).read().splitlines() if not line.startswith("port:")]
+out.append(f"port: {port}")
+open(dst, "w").write("\n".join(out) + "\n")
+PY
+  chmod 600 $dir/config.yaml
+  cp $live_store $dir/cb-self-check.json; chmod 600 $dir/cb-self-check.json
+  python3 - $dir/cb-self-check.json <<'PY' | tee -a $OUT/summary.txt
+import json, sys
+for r in json.load(open(sys.argv[1]))["records"]:
+    k, d = r["key"], r.get("decision") or {}
+    print(f"seeded prior: runtime_build={k.get('runtime_build')} decision={d.get('reason')} slots={d.get('slots')} verified={d.get('verified_slots')}")
+PY
+  MACPROVIDER_PAGED_KV_ENABLED=1 \
+    $HARNESS/macprovider-cli serve --config $dir/config.yaml --port $LAB_PORT --no-join --no-idle-prewarm \
+    > $dir/serve.log 2>&1 &
+  local pid=$! t0=$(date +%s) decided_at=0 body verdict
+  trap "kill $pid 2>/dev/null || true" EXIT INT TERM HUP
+  : > $dir/polls.jsonl
+  while kill -0 $pid 2>/dev/null && (( $(date +%s) - t0 < ${SELFCHECK_TIMEOUT_S:-5400} )); do
+    sleep 10
+    if (( decided_at )) && (( $(date +%s) - decided_at >= ${POST_DECISION_S:-120} )); then break; fi
+    body=$(status_json $LAB_PORT) || continue
+    # One line per poll: time, CB active/mode, the self-check block.
+    verdict=$(print -r -- $body | python3 -c 'import json,sys,time
+d = json.load(sys.stdin)
+cb = d.get("continuous_batching") or {}
+s = cb.get("self_check")
+row = {"t": int(time.time()), "active": cb.get("active"), "mode": cb.get("mode"), "self_check": s}
+print(json.dumps(row, sort_keys=True))
+if s is None:
+    print("loading")
+elif str(s.get("decision")) not in ("None", "pending", "deferred") and not str(s.get("decision")).startswith("prior_grant")         and "cb-probe-v3" in str(s.get("runtime_build")):
+    print("decided")
+else:
+    print("checking")')
+    print -r -- ${verdict%%$'\n'*} >> $dir/polls.jsonl
+    [[ $verdict == *decided ]] && (( decided_at == 0 )) && { decided_at=$(date +%s); print -r -- $body > $dir/status.json; }
+  done
+  kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true
+  trap - EXIT INT TERM HUP
+  grep -E "event=cb_self_check action=(step|measured|applied|ladder_ended|probe_shape_unmet|kept_prior_grant)|batching_unsupported|model artifact hash" \
+    $dir/serve.log | tee -a $OUT/summary.txt || true
+  local result=FAIL
+  if (( decided_at )) && python3 - $dir/polls.jsonl $dir/serve.log $dir/status.json $min_slots <<'PY' | tee -a $OUT/summary.txt
+import json, re, sys
+polls, log, status, min_slots = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+ok, checked, low = True, 0, []
+for line in open(polls):
+    p = json.loads(line)
+    s = p.get("self_check")
+    if s is None:
+        continue  # model load, before the served-slots plan
+    checked += 1
+    slots = int(s.get("served_slots") or 0)
+    if p.get("active") is not True or p.get("mode") in (None, "off") or slots < min_slots:
+        low.append(f"t={p['t']} active={p.get('active')} mode={p.get('mode')} decision={s.get('decision')} served_slots={slots}")
+print(f"qwen36 polls_checked={checked} polls_below_bar={len(low)}")
+for entry in low[:20]:
+    print(f"qwen36 below bar: {entry}")
+ok = checked > 0 and not low
+passes = {}
+for line in open(log):
+    f = dict(re.findall(r"(\w+)=(\S+)", line))
+    if "action=pass" in line:
+        passes.setdefault(int(f["slots"]), []).append(f)
+    if "action=measured" in line:
+        k = int(f["slots"])
+        decode = passes.get(k, [])
+        detail = " ".join(f"p{x['pass']}:serial={x['serial_decode_tps']}/batch={x['batch_decode_tps']}" for x in decode)
+        print(f"qwen36 k={k} rung={f.get('rung')} conformant={f['conformant']} decode_gain={f['gain']} {detail}".rstrip())
+s = json.load(open(status))["continuous_batching"]["self_check"]
+slots = int(s.get("served_slots") or 0)
+print(f"qwen36 decision={s.get('decision')} verified_k={s.get('verified_k')} served_slots={slots} runtime_build={s.get('runtime_build')}")
+ok = ok and slots >= min_slots
+print("qwen36 recheck " + ("PASS" if ok else "FAIL"))
+sys.exit(0 if ok else 1)
+PY
+  then result=PASS; else
+    (( decided_at )) || echo "qwen36: no cb-probe-v3 decision within ${SELFCHECK_TIMEOUT_S:-5400}s" | tee -a $OUT/summary.txt
+  fi
+  echo "RESULT=$result evidence=$OUT" | tee -a $OUT/summary.txt
+  [[ $result == PASS ]]
+}
+
 run() {
   : ${LAB_CONFIG_TEMPLATE:?LAB_CONFIG_TEMPLATE is required for the self-check leg}
   [[ $LAB_PORT != $LIVE_PORT ]] || { echo "LAB_PORT must differ from LIVE_PORT" >&2; exit 2; }
@@ -93,14 +224,7 @@ run() {
   [[ -f $MODEL/config.json ]] || { echo "no artifact at $MODEL" >&2; exit 2; }
   grep -q '^credential_store: protected_file$' $LAB_CONFIG_TEMPLATE || {
     echo "template must set credential_store: protected_file (isolated no-join lab serve)" >&2; exit 2; }
-  # The window owner pauses the live provider; refuse to measure beside it.
-  if body=$(status_json $LIVE_PORT); then
-    print -r -- $body | python3 -c 'import json,sys
-d = json.load(sys.stdin)
-paused = (d.get("lifecycle") or {}).get("operator_paused") is True
-sys.exit(0 if paused and d.get("requests_in_flight", 1) == 0 else 1)' || {
-      echo "live provider on :$LIVE_PORT is not paused with 0 in flight; not starting" >&2; exit 3; }
-  fi
+  require_live_paused
   OUT=${OUT:-$HOME/lab-glm53/t3/t4-window-$(date -u +%Y%m%dT%H%M%SZ)}
   mkdir -p $OUT
   shasum -a 256 $HARNESS/macprovider-cli $HARNESS/mlx.metallib | tee $OUT/identity.sha256
@@ -244,5 +368,6 @@ case ${1:-} in
   prepare) prepare ;;
   run) run ;;
   run-selfcheck) LEGS=2 run ;;
-  *) echo "usage: $0 prepare|run|run-selfcheck" >&2; exit 2 ;;
+  run-qwen36-recheck) run_qwen36_recheck ;;
+  *) echo "usage: $0 prepare|run|run-selfcheck|run-qwen36-recheck" >&2; exit 2 ;;
 esac
