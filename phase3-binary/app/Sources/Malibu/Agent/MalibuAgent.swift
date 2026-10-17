@@ -1142,10 +1142,14 @@ final class MalibuAgent: ObservableObject {
            snapshot.latestReleaseVersion != nil {
             return
         }
+        if latestReleaseRetryAfter == nil {
+            // A relaunch keeps honoring a deferral recorded before it.
+            latestReleaseRetryAfter = LatestReleaseClient.persistedRetryAfter(now: now)
+        }
         if let retryAfter = latestReleaseRetryAfter, now < retryAfter {
             return
         }
-        guard !latestReleaseRefreshInFlight else { return }
+        guard !latestReleaseRefreshInFlight, !isShuttingDown else { return }
         latestReleaseRefreshInFlight = true
         let healthz = LatestReleaseClient.healthzURL(coordinatorURL: ProviderConfig.readCoordinatorURL())
         Task { [weak self] in
@@ -1153,7 +1157,9 @@ final class MalibuAgent: ObservableObject {
             guard let self else { return }
             let finishedAt = Date()
             self.latestReleaseRefreshInFlight = false
+            guard !self.isShuttingDown else { return }
             self.latestReleaseRetryAfter = LatestReleaseClient.retryAfter(outcome, now: finishedAt)
+            LatestReleaseClient.persistRetryAfter(self.latestReleaseRetryAfter)
             if case .version(let version) = outcome {
                 self.latestReleaseFetchedAt = finishedAt
                 self.snapshot.latestReleaseVersion = version

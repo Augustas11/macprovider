@@ -2725,7 +2725,10 @@
         "phase3-binary/Tests/macprovider-cliTests/SelfUpdateRateLimitTests.swift:testRateLimitedCheckFailsClosedOnABadMirrorSignature",
         "phase3-binary/Tests/macprovider-cliTests/SelfUpdateRateLimitTests.swift:testMirroredChecksumsVerifyUnderTheReleaseKey",
         "phase3-binary/Tests/macprovider-cliTests/SelfUpdateRateLimitTests.swift:testMirrorDownFallsBackToGitHubReleaseDownloads",
-        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateRateLimitTests.swift:testStatusLatestVersionCachesTheDeferral"
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateRateLimitTests.swift:testStatusLatestVersionCachesTheDeferral",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateRateLimitTests.swift:testRateLimitedCheckReportsTheVerifiedCoordinatorAdvertisedRelease",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateRateLimitTests.swift:testStatusAsksTheCoordinatorBeforeAnyCachedGitHubResult",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateRateLimitTests.swift:testOnlyASpentBudgetIsClassifiedAsRateLimited"
       ],
       "journeys": [
         "JOURNEY-PROVIDER-AUTOUPDATE-PHYSICAL"
@@ -8389,7 +8392,10 @@
         "scripts/test-install-version-pin.sh:r5-deferred-until-reset",
         "scripts/test-install-sh-consumer-health-alarm.sh:head-installer-rate-limited",
         "scripts/test-install-sh-consumer-health-alarm.sh:bad-signature",
-        "phase3-binary/app/Tests/MalibuTests/ProviderCLIVersionTests.swift:testSpentGitHubBudgetIsDeferredUntilReset"
+        "phase3-binary/app/Tests/MalibuTests/ProviderCLIVersionTests.swift:testSpentGitHubBudgetIsDeferredUntilReset",
+        "phase3-binary/app/Tests/MalibuTests/ProviderCLIVersionTests.swift:testBadgeUsesTheConfiguredCoordinator",
+        "phase3-binary/app/Tests/MalibuTests/ProviderCLIVersionTests.swift:testPersistedDeferralSurvivesRelaunchAndIsBounded",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateRateLimitTests.swift:testStatusBacksOffAfterAGitHubFailure"
       ],
       "journeys": [],
       "evidence": [],

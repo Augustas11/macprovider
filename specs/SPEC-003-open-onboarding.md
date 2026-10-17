@@ -1202,8 +1202,9 @@ GitHub Releases API request MUST NOT be retried, and a 403 or 429 carrying
 `x-ratelimit-remaining: 0` MUST be reported as release discovery deferred
 until the response's `x-ratelimit-reset` rather than as a missing release. A
 client that only displays the newest release (the Malibu.app update badge,
-`malibu-cli status`) MUST use the same order and MUST NOT re-request a failing
-source before its reset or a bounded backoff. The install.sh consumer-health
+`malibu-cli status`) MUST use the same order, MUST NOT re-request the GitHub
+API before its reset (at most one hour away) or a bounded backoff after any
+other failure, and when it polls MUST back off after any failure. The install.sh consumer-health
 gate (`scripts/check-install-sh-consumer-health.sh`) MUST run the served
 installer's own discovery in this order and MUST verify the resolved release's
 `checksums.txt.sig` under the served installer's embedded key, reading assets

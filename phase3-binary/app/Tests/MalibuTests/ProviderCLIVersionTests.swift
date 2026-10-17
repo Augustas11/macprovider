@@ -160,6 +160,26 @@ final class LatestReleaseClientTests: XCTestCase {
         XCTAssertEqual(outcome, .deferred(until: now.addingTimeInterval(LatestReleaseClient.rateLimitDeferral)))
     }
 
+    func testPersistedDeferralSurvivesRelaunchAndIsBounded() throws {
+        let suite = "LatestReleaseClientTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let now = Date(timeIntervalSince1970: 1_000)
+
+        LatestReleaseClient.persistRetryAfter(now.addingTimeInterval(900), defaults: defaults)
+        XCTAssertEqual(LatestReleaseClient.persistedRetryAfter(now: now, defaults: defaults), now.addingTimeInterval(900))
+
+        LatestReleaseClient.persistRetryAfter(now.addingTimeInterval(86_400), defaults: defaults)
+        XCTAssertEqual(
+            LatestReleaseClient.persistedRetryAfter(now: now, defaults: defaults),
+            now.addingTimeInterval(LatestReleaseClient.rateLimitDeferral)
+        )
+        XCTAssertNil(LatestReleaseClient.persistedRetryAfter(now: now.addingTimeInterval(86_401), defaults: defaults))
+
+        LatestReleaseClient.persistRetryAfter(nil, defaults: defaults)
+        XCTAssertNil(LatestReleaseClient.persistedRetryAfter(now: now, defaults: defaults))
+    }
+
     func testBadgeUsesTheConfiguredCoordinator() {
         XCTAssertEqual(
             LatestReleaseClient.healthzURL(coordinatorURL: "wss://staging.example/ws/provider").absoluteString,

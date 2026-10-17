@@ -191,6 +191,25 @@ enum LatestReleaseClient {
         return min(reset, ceiling)
     }
 
+    static let retryAfterDefaultsKey = "LatestReleaseRetryAfter"
+
+    /// A retry time persisted by an earlier app process, clamped to the
+    /// longest deferral so a stored value can never block the badge longer.
+    static func persistedRetryAfter(now: Date, defaults: UserDefaults = .standard) -> Date? {
+        guard let stored = defaults.object(forKey: retryAfterDefaultsKey) as? Date, stored > now else {
+            return nil
+        }
+        return min(stored, now.addingTimeInterval(max(rateLimitDeferral, failureBackoff)))
+    }
+
+    static func persistRetryAfter(_ retryAfter: Date?, defaults: UserDefaults = .standard) {
+        if let retryAfter {
+            defaults.set(retryAfter, forKey: retryAfterDefaultsKey)
+        } else {
+            defaults.removeObject(forKey: retryAfterDefaultsKey)
+        }
+    }
+
     /// When the next fetch may run after `outcome`; nil after a version,
     /// whose freshness is governed by the caller's TTL instead.
     static func retryAfter(_ outcome: Outcome, now: Date) -> Date? {

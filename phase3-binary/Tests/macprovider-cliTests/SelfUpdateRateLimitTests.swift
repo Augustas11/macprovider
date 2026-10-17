@@ -282,6 +282,25 @@ final class SelfUpdateRateLimitTests: XCTestCase {
         XCTAssertEqual(RateLimitMockURLProtocol.requested, [latest], "a second status call does not spend the budget")
     }
 
+    func testStatusBacksOffAfterAGitHubFailure() async throws {
+        RateLimitMockURLProtocol.responses = [latest: (502, Data(), [:])]
+        let cache = home.appendingPathComponent("latest-release.json")
+        let now = Date()
+
+        for _ in 0 ..< 2 {
+            do {
+                _ = try await update(coordinator: false).latestVersionCached(cacheURL: cache, now: now)
+                XCTFail("a failed lookup produced a version")
+            } catch {}
+        }
+        XCTAssertEqual(RateLimitMockURLProtocol.requested, [latest], "a failure is not re-requested inside the backoff")
+
+        RateLimitMockURLProtocol.responses = [latest: (200, Data(#"{"tag_name":"v1.9.0","assets":[]}"#.utf8), [:])]
+        let later = now.addingTimeInterval(SelfUpdate.latestReleaseFailureBackoff + 1)
+        let version = try await update(coordinator: false).latestVersionCached(cacheURL: cache, now: later)
+        XCTAssertEqual(version, "1.9.0")
+    }
+
     func testStatusAsksTheCoordinatorBeforeAnyCachedGitHubResult() async throws {
         let cache = home.appendingPathComponent("latest-release.json")
         let now = Date()

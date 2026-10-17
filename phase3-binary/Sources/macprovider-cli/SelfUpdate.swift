@@ -898,6 +898,12 @@ struct SelfUpdate {
                 resetAt: GitHubAPIRateLimit.boundedReset(Date(timeIntervalSince1970: deferredUntil), now: now)
             )
         }
+        if let object = cachedObject,
+           let failedAt = object["failed_at"] as? TimeInterval,
+           (0 ..< Self.latestReleaseFailureBackoff).contains(now.timeIntervalSince1970 - failedAt)
+        {
+            throw UpdateError.httpStatus(503)
+        }
 
         let version: String
         do {
@@ -906,6 +912,11 @@ struct SelfUpdate {
             let bounded = GitHubAPIRateLimit.boundedReset(resetAt, now: now)
             Self.writeLatestReleaseCache(["deferred_until": bounded.timeIntervalSince1970], to: cacheURL)
             throw UpdateError.gitHubRateLimited(resetAt: bounded)
+        } catch {
+            // Any other failure backs off too, so repeated `status` calls
+            // never hammer an unreachable GitHub.
+            Self.writeLatestReleaseCache(["failed_at": now.timeIntervalSince1970], to: cacheURL)
+            throw error
         }
         Self.writeLatestReleaseCache([
             "fetched_at": now.timeIntervalSince1970,
@@ -913,6 +924,8 @@ struct SelfUpdate {
         ], to: cacheURL)
         return version
     }
+
+    static let latestReleaseFailureBackoff: TimeInterval = 600
 
     private static func writeLatestReleaseCache(_ payload: [String: Any], to cacheURL: URL) {
         try? FileManager.default.createDirectory(
