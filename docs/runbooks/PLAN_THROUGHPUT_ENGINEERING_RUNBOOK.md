@@ -207,7 +207,7 @@ Executor writes `beta/throughput-engineering/T0_SUMMARY.md` with TG0 recommendat
 # T1 — MLX engine foundation (bucket A)
 
 > **Goal:** Bump to MLX **0.32.0** / latest compatible **`mlx-swift-lm`** without correctness regression.  
-> **Current pins:** the SPEC-048 R003 fork tuple, `mlx-swift-lm` 3.32.3-macprovider.9.2 / `mlx-swift` 0.32.3-macprovider.8 / MLX core v0.32.2-macprovider.5, on Xcode 26.6 / Swift 6.3.3 (`docs/runbooks/MLX_ENGINE_UPGRADE_MATRIX.md` holds the authoritative table). The 0.31.4 pins and the Xcode 16.4 / Swift 6.1 toolchain this section was written against are historical; evidence recorded against them must not be attributed to the current runtime.
+> **Current pins:** the SPEC-048 R003 fork tuple, `mlx-swift-lm` 3.32.3-macprovider.9.3 / `mlx-swift` 0.32.3-macprovider.8 / MLX core v0.32.2-macprovider.5, on Xcode 26.6 / Swift 6.3.3 (`docs/runbooks/MLX_ENGINE_UPGRADE_MATRIX.md` holds the authoritative table). The 0.31.4 pins and the Xcode 16.4 / Swift 6.1 toolchain this section was written against are historical; evidence recorded against them must not be attributed to the current runtime.
 > **Source policy:** adopt only tagged, remotely consumable **ml-explore** releases;
 > no Darkbloom or Layr-Labs source inspection/fallback is permitted.
 

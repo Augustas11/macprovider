@@ -42,9 +42,9 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
-# Fork tag 3.32.3-macprovider.9.2 on upstream mlx-swift-lm 3.32.3 (.9 plus the
+# Fork tag 3.32.3-macprovider.9.3 on upstream mlx-swift-lm 3.32.3 (.9 plus the
 # Qwen2-VL per-image vision attention fix, issue #2016).
-SPEC048_MLX_SWIFT_LM_REVISION = "983fef9a4a7bbdc429c601ad297a45a87399e811"
+SPEC048_MLX_SWIFT_LM_REVISION = "c453f72e793e9ebfd4db830bcfff23fc01ca91a0"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
 # Fork tag 0.32.3-macprovider.8: upstream mlx-swift 0.32.3 with the MLX core

@@ -455,7 +455,7 @@ out = {
         ),
         "note": (
             "The fork patch set is rebased onto upstream mlx-swift-lm 3.32.3 "
-            "(3.32.3-macprovider.9.2) with mlx-swift 0.32.3 (0.32.3-macprovider.8) on "
+            "(3.32.3-macprovider.9.3) with mlx-swift 0.32.3 (0.32.3-macprovider.8) on "
             "a batch-invariant small-M quantized matmul MLX core fork "
             "(v0.32.2-macprovider.5); it is "
             "not approved until Studio validation and the freeze audits pass; "
