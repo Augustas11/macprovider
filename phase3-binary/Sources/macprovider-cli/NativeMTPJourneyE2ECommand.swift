@@ -84,13 +84,30 @@ private struct NativeMTPJourneyStep {
     }
 }
 
-private final class NativeMTPJourneyRunner {
+final class NativeMTPJourneyRunner {
     private let root: String
     private let modelID: String
     private let qualifiedSlots: Int
     private let maxNativeActiveRows: Int
     private let maxPromptTokens: Int
-    private static let blockTokens = 32
+    /// step-05 forces rejections at the fixture's real paged-KV block
+    /// boundaries: the family block (Qwen3.5 32, glm5_next 256).
+    static func boundaryBlockTokens(family: NativeMTPHardwareE2EFamily) -> Int {
+        family.blockSizeTokens
+    }
+
+    /// step-05 boundary row length: at least four blocks, so a large block
+    /// still has several boundaries (Qwen3.5 keeps 256).
+    static func boundaryRowTokens(blockTokens: Int) -> Int {
+        max(256, 4 * blockTokens)
+    }
+
+    /// The step-05 override for `family`. Qwen3.5 keeps the crossing-only
+    /// rule it always had; a larger block also forces the round that starts
+    /// on a boundary an accepted round stepped over.
+    static func boundaryMode(family: NativeMTPHardwareE2EFamily) -> NativeMTPLabProposalOverride.Mode {
+        .blockBoundary(blockTokens: boundaryBlockTokens(family: family), includeBlockStart: family != .qwen35)
+    }
 
     init(root: String, modelID: String, qualifiedSlots: Int, maxNativeActiveRows: Int, maxPromptTokens: Int) {
         self.root = root
@@ -101,7 +118,9 @@ private final class NativeMTPJourneyRunner {
     }
 
     func run() async throws -> (document: [String: Any], passed: Bool) {
-        let outputBudget = 512
+        let family = NativeMTPHardwareE2ERunner(rootPath: root).family
+        let boundaryTokens = Self.boundaryRowTokens(blockTokens: Self.boundaryBlockTokens(family: family))
+        let outputBudget = max(512, boundaryTokens)
         let runner = NativeMTPHardwareE2ERunner(
             rootPath: root,
             modelID: modelID,
@@ -124,7 +143,7 @@ private final class NativeMTPJourneyRunner {
         let native = fixture.runtimes.native
         let override = NativeMTPLabProposalOverride(rules: [
             (prefix: "journey-reject-all-", mode: .everyRound),
-            (prefix: "journey-boundary-", mode: .blockBoundary(blockTokens: Self.blockTokens)),
+            (prefix: "journey-boundary-", mode: Self.boundaryMode(family: family)),
         ])
         guard await native.installLabNativeMTPProposalOverride(override) else {
             throw NativeMTPHardwareE2EError.assertionFailed("native runtime has no continuous-batch scheduler")
@@ -148,7 +167,10 @@ private final class NativeMTPJourneyRunner {
             try await serialOracle(ordinary: ordinary, native: native, recorder: recorder, proposalDepth: fixture.admission.maxProposalDepth)
         }
         await run("step-05-cache-state-boundary") {
-            try await cacheStateBoundary(ordinary: ordinary, native: native, recorder: recorder, override: override)
+            try await cacheStateBoundary(
+                ordinary: ordinary, native: native, recorder: recorder, override: override,
+                boundaryTokens: boundaryTokens
+            )
         }
         await run("step-06-streaming-stop") {
             try await streamingStop(ordinary: ordinary, native: native, recorder: recorder)
@@ -300,7 +322,8 @@ private final class NativeMTPJourneyRunner {
         ordinary: ModelRuntime,
         native: ModelRuntime,
         recorder: NativeMTPHardwareAdmissionRecorder,
-        override: NativeMTPLabProposalOverride
+        override: NativeMTPLabProposalOverride,
+        boundaryTokens: Int
     ) async throws -> NativeMTPJourneyStep {
         var step = NativeMTPJourneyStep(id: "step-05-cache-state-boundary")
         let ordinaryStateObserver = NativeMTPStateDigestObserver()
@@ -321,7 +344,7 @@ private final class NativeMTPJourneyRunner {
                 let request = try makeRequest(
                     id: id,
                     prompt: prompt,
-                    maxTokens: 256,
+                    maxTokens: id.hasPrefix("journey-boundary-") ? boundaryTokens : 256,
                     temperature: 0,
                     topP: 1
                 )

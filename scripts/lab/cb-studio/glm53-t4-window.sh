@@ -41,13 +41,23 @@
 #        paged KV attached, batch depth >= 2; then the lab throughput phase
 #        (`--throughput-tokens`, default 256) at 1 and 4 rows reports native
 #        over ordinary end-to-end tok/s and acceptance. Not the R015 matrix.
+#     6. (`run-mtp-journey`, not in the default legs) the hidden
+#        JOURNEY-NATIVE-MTP-SERVING hardware steps (`native-mtp-journey-e2e`:
+#        04 serial oracle, 05 cache/state boundary at the 256-token block,
+#        06 streaming/stop, 07/08 mixed rows and capacity, 09 cancellation,
+#        10 warm swap, 12 provider self-test) on the same cloned fixture,
+#        at JOURNEY_SLOTS (4) slots, JOURNEY_NATIVE_ROWS (4) native rows and
+#        a 4096-token prompt cap. Records executed_steps_status and each
+#        step's status; PASS only when the harness exits 0 (no executed step
+#        failed). The result is lab evidence, never a journey verdict.
 #   It never binds or signals the live port; pausing the live provider is the
 #   window owner's job, and `run` refuses to start while it serves.
 #
 # Env: POC (lab copy), MODEL (artifact dir), OUT, LAB_CONFIG_TEMPLATE (an
 # isolated no-join lab config: credential_store: protected_file, no
 # draft_model; CB-accepted for the GLM artifact's tuple), LIVE_PORT (8080),
-# LEGS (default "1 2 3"; `run-selfcheck` runs leg 2 only),
+# LEGS (default "1 2 3"; any subset of 1..6 selects legs for `run`, e.g.
+# LEGS="1 2"; `run-selfcheck` runs leg 2 only),
 # LAB_PORT (18096), METALLIB (core v0.32.4-macprovider.4 kernels), XCTEST_HOST,
 # LIVE_INSTALL_DIR (prepare: pin the lab serve binary to the live version).
 set -euo pipefail
@@ -337,6 +347,32 @@ PY
   rm -rf $fixture/target
   fi
 
+  if [[ " $LEGS " == *" 6 "* ]]; then
+  # --- Leg 6: JOURNEY-NATIVE-MTP-SERVING hardware steps (lab) ---------------
+  echo "leg6 mtp-journey start $(date -u +%T)" | tee -a $OUT/summary.txt
+  local jfixture=$OUT/mtp-journey-fixture
+  mkdir -p $jfixture
+  cp -cR $MODEL $jfixture/target
+  local journey_rc=0
+  MACPROVIDER_NATIVE_MTP_E2E=1 \
+    $HARNESS/macprovider-cli native-mtp-journey-e2e --root $jfixture --model-id zai-org/glm-5.3-flash \
+    --qualified-slots ${JOURNEY_SLOTS:-4} --max-native-active-rows ${JOURNEY_NATIVE_ROWS:-4} \
+    --max-prompt-tokens 4096 > $OUT/mtp-journey.json 2> $OUT/mtp-journey.log || journey_rc=$?
+  echo "leg6 native-mtp-journey-e2e rc=$journey_rc" | tee -a $OUT/summary.txt
+  python3 - $OUT/mtp-journey.json <<'PY' 2>&1 | tee -a $OUT/summary.txt || true
+import json, sys
+text = open(sys.argv[1]).read()
+r = json.loads(text[text.index("{"):])
+print(f"leg6 executed_steps_status={r.get('executed_steps_status')} journey_complete={r.get('journey_complete')}")
+for step in r.get("steps", []):
+    failed = sorted(k for k, v in step.get("checks", {}).items() if v is not True)
+    print(f"leg6 {step['step_id']} status={step['status']} failed_checks={failed} uncovered={step.get('uncovered_contract')}")
+PY
+  (( journey_rc == 0 )) || { result=FAIL; echo "leg6 mtp-journey FAIL (see mtp-journey.json / mtp-journey.log)" | tee -a $OUT/summary.txt; }
+  shasum -a 256 $OUT/mtp-journey.json $OUT/mtp-journey.log | tee -a $OUT/summary.txt
+  rm -rf $jfixture/target
+  fi
+
   echo "RESULT=$result evidence=$OUT" | tee -a $OUT/summary.txt
   [[ $result == PASS ]]
 }
@@ -347,5 +383,6 @@ case ${1:-} in
   run-selfcheck) LEGS=2 run ;;
   run-leftovers) LEGS=4 run ;;
   run-mtp-e2e) LEGS=5 run ;;
-  *) echo "usage: $0 prepare|run|run-selfcheck|run-leftovers|run-mtp-e2e" >&2; exit 2 ;;
+  run-mtp-journey) LEGS=6 run ;;
+  *) echo "usage: $0 prepare|run|run-selfcheck|run-leftovers|run-mtp-e2e|run-mtp-journey" >&2; exit 2 ;;
 esac

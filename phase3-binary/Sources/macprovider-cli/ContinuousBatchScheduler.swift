@@ -6308,7 +6308,11 @@ actor ContinuousBatchScheduler {
 final class NativeMTPLabProposalOverride: @unchecked Sendable {
     enum Mode: Sendable, Equatable {
         case everyRound
-        case blockBoundary(blockTokens: Int)
+        /// Rounds whose staged positions cross a block boundary; with
+        /// `includeBlockStart`, also rounds that start exactly on one, so a
+        /// boundary an accepted round stepped over still gets a forced
+        /// rejection (large blocks have few boundaries to hit).
+        case blockBoundary(blockTokens: Int, includeBlockStart: Bool = false)
     }
 
     private let lock = NSLock()
@@ -6326,10 +6330,13 @@ final class NativeMTPLabProposalOverride: @unchecked Sendable {
         switch mode {
         case .everyRound:
             break
-        case .blockBoundary(let blockTokens):
+        case .blockBoundary(let blockTokens, let includeBlockStart):
             let first = committedKVTokenCount
             let last = committedKVTokenCount + proposals.count
-            guard blockTokens > 0, first / blockTokens != last / blockTokens else { return proposals }
+            guard blockTokens > 0 else { return proposals }
+            let crosses = first / blockTokens != last / blockTokens
+            let startsOnBoundary = includeBlockStart && first > 0 && first % blockTokens == 0
+            guard crosses || startsOnBoundary else { return proposals }
         }
         lock.lock()
         overriddenRounds[requestID, default: 0] += 1
