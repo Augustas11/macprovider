@@ -4074,40 +4074,86 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     /// Window 13:22Z step 05: ordinary decode records one state per 16-token
     /// window, so the old "every native round has an ordinary record" rule
     /// could never hold. The comparison is over the window-end counts the
-    /// native row lands on, all of which must match.
+    /// native row lands on, all of which must match, and a compared record
+    /// follows a rejection only when the round before it committed nothing.
     func testJourneyAlignedCacheComparisonUsesWindowEndCounts() {
         typealias Runner = NativeMTPJourneyRunner
+        typealias NativeRecord = (round: Int, tokens: Int, digest: String, committedProposals: Int?)
         let ordinary = stride(from: 45, through: 125, by: 16).map { (tokens: $0, digest: "o\($0)") }
-        // Native rounds of 1 or 2 tokens from 30 to 126.
-        var native: [(tokens: Int, digest: String, committedProposals: Int?)] = []
-        var tokens = 30
-        var step = 0
-        while tokens <= 126 {
-            let accepted = step % 3 != 0
-            native.append((tokens: tokens, digest: "o\(tokens)", committedProposals: accepted ? 1 : 0))
-            tokens += accepted ? 2 : 1
-            step += 1
+        func rounds(_ accepted: [Bool], from start: Int = 30) -> [NativeRecord] {
+            var tokens = start
+            return accepted.enumerated().map { round, accepted in
+                tokens += accepted ? 2 : 1
+                return (round: round, tokens: tokens, digest: "o\(tokens)", committedProposals: accepted ? 1 : 0)
+            }
         }
+        // Every third round rejected, from 30 tokens to past 125.
+        let native = rounds((0 ..< 60).map { $0 % 3 != 0 })
         let matched = Runner.alignedCacheComparison(native: native, ordinary: ordinary)
+        XCTAssertTrue(matched.roundsOrdered)
         XCTAssertEqual(matched.comparableOrdinaryCounts, 6)
         XCTAssertGreaterThanOrEqual(matched.pairs, 2)
         XCTAssertEqual(matched.equalPairs, matched.pairs)
-        XCTAssertGreaterThanOrEqual(matched.pairsAfterRejection, 1)
+        let expectedFollowing = native.indices.filter { index in
+            index > 0 && native[index - 1].committedProposals == 0 && ordinary.contains { $0.tokens == native[index].tokens }
+        }.count
+        XCTAssertGreaterThanOrEqual(expectedFollowing, 1)
+        XCTAssertEqual(matched.pairsFollowingRejection, expectedFollowing)
         XCTAssertTrue(matched.holds)
 
-        let pairedCount = native.first { $0.tokens % 16 == 13 && $0.tokens >= 45 }!.tokens
-        let mismatched = native.map { record in
-            record.tokens == pairedCount ? (tokens: record.tokens, digest: "different", committedProposals: record.committedProposals) : record
-        }
+        let pairedIndex = native.indices.first { index in ordinary.contains { $0.tokens == native[index].tokens } }!
+        var mismatched = native
+        mismatched[pairedIndex].digest = "different"
         let failed = Runner.alignedCacheComparison(native: mismatched, ordinary: ordinary)
         XCTAssertFalse(failed.holds)
-        XCTAssertEqual(failed.mismatchTokenCounts, [pairedCount])
+        XCTAssertEqual(failed.mismatchTokenCounts, [native[pairedIndex].tokens])
 
         XCTAssertFalse(Runner.alignedCacheComparison(native: [], ordinary: ordinary).holds)
         XCTAssertFalse(Runner.alignedCacheComparison(
-            native: native.map { (tokens: $0.tokens, digest: $0.digest, committedProposals: 1) },
-            ordinary: ordinary
-        ).holds, "no compared record follows a rejected round")
+            native: rounds(Array(repeating: true, count: 60)), ordinary: ordinary
+        ).holds, "no rejection at all")
+    }
+
+    /// The architect's negative: a rejected round whose own record lands on a
+    /// window end is not a comparison after a rejection; the next round's is.
+    func testJourneyAlignedComparisonCountsOnlyTheRoundAfterARejection() {
+        typealias Runner = NativeMTPJourneyRunner
+        let ordinary = [(tokens: 45, digest: "o45"), (tokens: 61, digest: "o61")]
+        // 30 -> ... the rejected round itself ends at 45; the next lands on 47.
+        var native: [(round: Int, tokens: Int, digest: String, committedProposals: Int?)] = []
+        var tokens = 30
+        for round in 0 ..< 16 {
+            let rejected = tokens + 1 == 45 || tokens + 1 == 61
+            tokens += rejected ? 1 : 2
+            native.append((round: round, tokens: tokens, digest: "o\(tokens)", committedProposals: rejected ? 0 : 1))
+        }
+        let selfOnly = Runner.alignedCacheComparison(native: native, ordinary: ordinary)
+        XCTAssertGreaterThanOrEqual(selfOnly.pairs, 1)
+        XCTAssertTrue(native.contains { $0.committedProposals == 0 && ordinary.map(\.tokens).contains($0.tokens) })
+        XCTAssertEqual(selfOnly.pairsFollowingRejection, 0)
+        XCTAssertFalse(selfOnly.holds)
+
+        // A rejection immediately before a round that lands on a window end.
+        let following: [(round: Int, tokens: Int, digest: String, committedProposals: Int?)] = [
+            (round: 0, tokens: 42, digest: "x", committedProposals: 1),
+            (round: 1, tokens: 43, digest: "x", committedProposals: 0),
+            (round: 2, tokens: 45, digest: "o45", committedProposals: 1),
+            (round: 3, tokens: 47, digest: "x", committedProposals: 1),
+        ]
+        XCTAssertEqual(Runner.alignedCacheComparison(native: following, ordinary: ordinary).pairsFollowingRejection, 1)
+        XCTAssertTrue(Runner.alignedCacheComparison(native: following, ordinary: ordinary).holds)
+        // An earlier but not immediately preceding rejection does not count.
+        var earlier = following
+        earlier[1].committedProposals = 1
+        earlier[0].committedProposals = 0
+        XCTAssertEqual(Runner.alignedCacheComparison(native: earlier, ordinary: ordinary).pairsFollowingRejection, 0)
+        // Rounds out of order or with a gap prove no predecessor.
+        var gapped = following
+        gapped[1].round = 5
+        XCTAssertFalse(Runner.alignedCacheComparison(native: gapped, ordinary: ordinary).holds)
+        var reversed = following
+        reversed[2].tokens = 43
+        XCTAssertFalse(Runner.alignedCacheComparison(native: reversed, ordinary: ordinary).roundsOrdered)
     }
 
     func testLabStateDigestObserverFailsClosedForPagedSlidingWindowCache() async throws {

@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.45
+**Version:** 0.1.46
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.43",
+  "version": "0.1.46",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -829,8 +829,12 @@ folded keys than one-token decode keeps (15 of 19 at `kpool` 4 after a reject
 that undoes a pool window), no forward reads them, and the next completed pool
 window refills them. Recurrent (KDA/GDN) and KV state compare whole. The lab
 oracle compares this digest at the ordinary decode-window ends that a native
-round lands on, and every such comparison, including those after a rejection,
-MUST match. Depth-zero rows retain only committed target state; when depth
+round lands on, and every such comparison MUST match. A row's native rounds are
+taken in commit order and MUST be consecutive with strictly increasing token
+counts. At least one compared round MUST immediately follow a rejected round
+of the same row, that is, its predecessor (round - 1) committed no proposal,
+so its own verification ran on rolled-back state; a rejected round's own
+record does not count. Depth-zero rows retain only committed target state; when depth
 increases, proposal state is recomputed from the current committed target
 hidden state rather than reused from a stale speculative tail.
 
@@ -1706,6 +1710,12 @@ the text-only path without image inputs; that does not admit multimodal buyer
 requests.
 
 ## 9. Changelog and history
+
+- **0.1.46 (2026-10-17)** — MTP-6: the lab oracle's "comparison after a
+  rejection" is a compared round whose immediately preceding round of the
+  same row committed no proposal, over consecutive rounds in commit order;
+  a rejected round's own record no longer counts. The embedded metadata
+  version matches the header again (it had stayed at 0.1.43).
 
 - **0.1.45 (2026-10-17)** — MTP-6: the target-oracle state digest is
   defined. A `glm5_next` paged MLA layer contributes the state a forward

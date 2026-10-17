@@ -126,32 +126,42 @@ final class NativeMTPJourneyRunner {
 
     /// step-05 target-state oracle (SPEC-048 MTP-6). Ordinary decode records
     /// its row state once per lockstep window, so the comparable token counts
-    /// are the ordinary records inside the native row's range. Holds when
-    /// every native after-finalize record at such a count has the ordinary
-    /// digest, at least a quarter of those counts (and one) are compared, and
-    /// at least one compared record follows a rejected round.
+    /// are the ordinary records inside the native row's range. `native` is
+    /// one row's after-finalize records with their round index (0, 1, 2, ...
+    /// in commit order). A compared record follows a rejection when the
+    /// immediately preceding round of the same row (round - 1) committed no
+    /// proposal: its own verify ran on the rolled-back state. Holds when the
+    /// rounds are consecutive with strictly increasing token counts, every
+    /// native record at a comparable count has the ordinary digest, at least
+    /// a quarter of those counts (and one) are compared, and at least one
+    /// compared record follows a rejection.
     struct AlignedCacheComparison {
+        let roundsOrdered: Bool
         let pairs: Int
         let equalPairs: Int
-        let pairsAfterRejection: Int
+        let pairsFollowingRejection: Int
         let comparableOrdinaryCounts: Int
         let mismatchTokenCounts: [Int]
 
         var holds: Bool {
-            pairs >= 1
+            roundsOrdered
+                && pairs >= 1
                 && equalPairs == pairs
                 && pairs * 4 >= comparableOrdinaryCounts
-                && pairsAfterRejection >= 1
+                && pairsFollowingRejection >= 1
         }
     }
 
     static func alignedCacheComparison(
-        native: [(tokens: Int, digest: String, committedProposals: Int?)],
+        native: [(round: Int, tokens: Int, digest: String, committedProposals: Int?)],
         ordinary: [(tokens: Int, digest: String)]
     ) -> AlignedCacheComparison {
+        let roundsOrdered = native.indices.allSatisfy { index in
+            native[index].round == index && (index == 0 || native[index].tokens > native[index - 1].tokens)
+        }
         let ordinaryByTokens = Dictionary(ordinary.map { ($0.tokens, $0.digest) }, uniquingKeysWith: { _, latest in latest })
-        let pairs = native.compactMap { record in
-            ordinaryByTokens[record.tokens].map { (native: record, ordinary: $0) }
+        let pairs = native.indices.compactMap { index in
+            ordinaryByTokens[native[index].tokens].map { (index: index, ordinary: $0) }
         }
         let lowest = native.map(\.tokens).min()
         let highest = native.map(\.tokens).max()
@@ -159,11 +169,15 @@ final class NativeMTPJourneyRunner {
             guard let lowest, let highest else { return false }
             return tokens >= lowest && tokens <= highest
         }
-        let mismatches = pairs.filter { $0.native.digest != $0.ordinary }.map(\.native.tokens)
+        let mismatches = pairs.filter { native[$0.index].digest != $0.ordinary }.map { native[$0.index].tokens }
+        let followingRejection = pairs.filter { pair in
+            pair.index > 0 && native[pair.index - 1].committedProposals == 0
+        }
         return AlignedCacheComparison(
+            roundsOrdered: roundsOrdered,
             pairs: pairs.count,
             equalPairs: pairs.count - mismatches.count,
-            pairsAfterRejection: pairs.filter { $0.native.committedProposals == 0 }.count,
+            pairsFollowingRejection: followingRejection.count,
             comparableOrdinaryCounts: comparable.count,
             mismatchTokenCounts: Array(mismatches.prefix(16))
         )
@@ -496,8 +510,9 @@ final class NativeMTPJourneyRunner {
                 // ends (one record per window), so only those token counts can
                 // be compared; every native round that lands on one must match.
                 let alignment = Self.alignedCacheComparison(
-                    native: afterFinalize.map {
-                        (tokens: $0.committedKVTokenCount, digest: $0.cacheDigestSHA256, committedProposals: $0.committedProposalTokens)
+                    native: afterFinalize.enumerated().map { round, record in
+                        (round: round, tokens: record.committedKVTokenCount, digest: record.cacheDigestSHA256,
+                         committedProposals: record.committedProposalTokens)
                     },
                     ordinary: ordinaryAfterDecode.map { (tokens: $0.committedKVTokenCount, digest: $0.cacheDigestSHA256) }
                 )
@@ -548,7 +563,8 @@ final class NativeMTPJourneyRunner {
                     "native_state_observer_record_count": stateRecords.count,
                     "aligned_prefix_cache_pairs": alignment.pairs,
                     "aligned_prefix_cache_equal_pairs": alignment.equalPairs,
-                    "aligned_prefix_cache_pairs_after_rejection": alignment.pairsAfterRejection,
+                    "aligned_prefix_cache_pairs_following_rejection": alignment.pairsFollowingRejection,
+                    "native_rounds_ordered": alignment.roundsOrdered,
                     "aligned_prefix_cache_comparable_ordinary_counts": alignment.comparableOrdinaryCounts,
                     "aligned_prefix_cache_mismatch_token_counts": alignment.mismatchTokenCounts,
                     "independent_drafter_recompute_records": recomputedDrafterRecords.count,

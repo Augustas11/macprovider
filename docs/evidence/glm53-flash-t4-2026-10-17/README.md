@@ -51,8 +51,13 @@ no-join on its own port, 1 native row, greedy request profile, depth 1.
 
 Step 05 compares the target-oracle cache state (SPEC-048 0.1.45 MTP-6) at
 every ordinary-decode window end: boundary-0 33/33, boundary-1 41/41 and
-reject-all 16/16 aligned pairs are equal, 42 of them directly after a rejected
-round, with no mismatched token counts. Steps 01-03, 11, the coordinator half
+reject-all 16/16 aligned pairs are equal, with no mismatched token counts. Of
+those, 8, 11 and 16 (35) are rounds whose immediately preceding round was
+rejected (SPEC-048 0.1.46). That count is re-derived offline from this run's
+`mtp-journey.log.gz` (round order and per-round token advance from the
+cbtrace `native_round`/`sch_active` lines, which reproduce the recorded 33/41/16
+pairs). The run's own `aligned_prefix_cache_pairs_after_rejection` (13, 13, 16)
+counted rejected rounds' own records under the 0.1.45 evaluator. Steps 01-03, 11, the coordinator half
 of 12, 14 and 15 bind the signed release candidate and run at go-live
 (`docs/runbooks/native-mtp-enablement.md`).
 
