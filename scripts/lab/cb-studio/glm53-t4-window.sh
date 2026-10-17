@@ -86,6 +86,32 @@ prepare() {
 
 status_json() { curl -fsS --max-time 5 "http://127.0.0.1:$1/v1/status" 2>/dev/null; }
 
+# SPEC-039 FR-PKV12 replay/drain record: every leftovers scenario passed.
+evaluate_leftovers() {
+  python3 - $1 <<'PY'
+import json, sys
+text = open(sys.argv[1]).read()
+decoder, docs, i = json.JSONDecoder(), [], 0
+while True:
+    while i < len(text) and text[i] not in "{[":
+        i += 1
+    if i >= len(text):
+        break
+    doc, i = decoder.raw_decode(text, i)
+    docs.append(doc)
+ok = bool(docs)
+print(f"leg4 documents={len(docs)}")
+for name in ("isolation", "replay", "drain", "parity"):
+    found = [d["leftovers"][name] for d in docs
+             if isinstance(d.get("leftovers"), dict) and isinstance(d["leftovers"].get(name), dict)]
+    passed = len(found) == 1 and found[0].get("pass") is True
+    print(f"leg4 {name} pass={passed}")
+    ok = ok and passed
+print("leg4 leftovers " + ("PASS" if ok else "FAIL"))
+sys.exit(0 if ok else 1)
+PY
+}
+
 run() {
   : ${LAB_CONFIG_TEMPLATE:?LAB_CONFIG_TEMPLATE is required for the self-check leg}
   [[ $LAB_PORT != $LIVE_PORT ]] || { echo "LAB_PORT must differ from LIVE_PORT" >&2; exit 2; }
@@ -240,32 +266,21 @@ print("leg3 rows=" + sys.argv[2] + " " + " ".join(f"{k}={d[k]}" for k in keys))'
   if [[ " $LEGS " == *" 4 "* ]]; then
   # --- Leg 4: scheduler leftovers (isolation, replay, drain, parity) ---------
   echo "leg4 leftovers start $(date -u +%T)" | tee -a $OUT/summary.txt
-  if $HARNESS/macprovider-cli msb-throughput --model $MODEL --engine scheduler --no-compile \
-      --scenario leftovers --rows 4 --prompt-tokens 1024 --parity-tokens 48 --runs 1 --stdout-only \
-      > $OUT/leftovers.json 2> $OUT/leftovers.log \
-     && python3 - $OUT/leftovers.json <<'PY' | tee -a $OUT/summary.txt
-import json, sys
-text = open(sys.argv[1]).read()
-d = json.loads(text[text.index("{"):])
-ok = True
-def find(o, name):
-    if isinstance(o, dict):
-        if name in o and isinstance(o[name], dict):
-            return o[name]
-        for v in o.values():
-            r = find(v, name)
-            if r is not None:
-                return r
-    return None
-for name in ("isolation", "replay", "drain", "parity"):
-    part = find(d, name)
-    passed = isinstance(part, dict) and part.get("pass") is True
-    print(f"leg4 {name} pass={passed}")
-    ok = ok and passed
-print("leg4 leftovers " + ("PASS" if ok else "FAIL"))
-sys.exit(0 if ok else 1)
-PY
-  then :; else result=FAIL; echo "leg4 leftovers FAIL (see leftovers.json / leftovers.log)" | tee -a $OUT/summary.txt; fi
+  # `--scenario leftovers` prints one JSON document per scenario
+  # (isolation, replay, drain, parity) to stdout, each with its result under
+  # `leftovers.<name>.pass`. The harness exit code is recorded on its own.
+  local msb_rc=0
+  $HARNESS/macprovider-cli msb-throughput --model $MODEL --engine scheduler --no-compile \
+    --scenario leftovers --rows 4 --prompt-tokens 1024 --parity-tokens 48 --runs 1 --stdout-only \
+    > $OUT/leftovers.json 2> $OUT/leftovers.log || msb_rc=$?
+  echo "leg4 msb-throughput rc=$msb_rc" | tee -a $OUT/summary.txt
+  local eval_rc=1
+  if (( msb_rc == 0 )); then
+    eval_rc=0
+    evaluate_leftovers $OUT/leftovers.json > $OUT/leftovers-eval.txt 2>&1 || eval_rc=$?
+    tee -a $OUT/summary.txt < $OUT/leftovers-eval.txt
+  fi
+  (( eval_rc == 0 )) || { result=FAIL; echo "leg4 leftovers FAIL (see leftovers.json / leftovers.log)" | tee -a $OUT/summary.txt; }
   shasum -a 256 $OUT/leftovers.json $OUT/leftovers.log | tee -a $OUT/summary.txt
   fi
 

@@ -77,9 +77,9 @@ established); the attach proof and row isolation from a lab serve
 (`selfcheck-20261017T041102Z/serve.log`: parity established over 11 sparse
 layers in 36 forwards, MoE expert-dispatch isolation on first decode and on
 rejoin, batched isolation with 0 cross-row divergences; the SPEC-038 FR-CB10
-self-check's rows exact at k = 2..4); and replay and drain from the scheduler
-leftovers harness (`leftovers/`), the record the `openai/gpt-oss-120b` entry
-used. The entry now advertises the tuple; load-time probes, the per-Mac
+self-check's rows exact at k = 2..4); and isolation, replay, drain and
+48-token parity from the scheduler leftovers harness (`leftovers/`, all
+`pass=true`), the record the `openai/gpt-oss-120b` entry used. The entry now advertises the tuple; load-time probes, the per-Mac
 FR-CB10 self-check and the signed SPEC-023 policy still gate serving.
 Refines SPEC-039-R012.
 Change log v0.1.19 (2026-10-17): FR-PKV12 caps a shared forward over

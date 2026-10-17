@@ -24,6 +24,7 @@ config directory and self-check store. Paths are written as `<lab>` and
 | `mtp-20261017T013154Z/` | GLMBench on fork `fa72942` | MTP oracle parity 1k/8k (superseded pin) |
 | `mtp-20261017T025000Z/` | GLMBench on fork `7d8dbf5` (pinned) | MTP oracle and varied-text parity 1k/8k, profile, kernel census |
 | `mtp-short-20261017T033515Z/` | GLMBench on fork `5a2b4ee` (not pinned; profiling only) | MTP profile, census, varied 1k |
+| `leftovers/` | `791a3cdc…` (`648fb655a`) | SPEC-039 FR-PKV12 isolation, replay, drain and parity on the scheduler |
 
 ## AC-20 / FR-PKV4 fixture (`window-…022259Z-ac20-msb/leg1-fixture.log`)
 
@@ -104,4 +105,14 @@ the same parity at the superseded `fa72942` pin.
 | AC-20 fixture | `window-20261017T022259Z-ac20-msb/leg1-fixture.log` |
 | Attach proof (parity, gather coverage) | `selfcheck-20261017T041102Z/serve.log`: `parity … established=true nLayers=11 nForwards=36 gatherKernelCalls=792` |
 | Row isolation | same log: MoE expert-dispatch isolation on first decode and on rejoin, `batched-isolation … proven=true crossRowDivergences=0`; FR-CB10 rows exact at k = 2..4 |
-| Replay and drain | `leftovers/` (`glm53-t4-window.sh run-leftovers`: scheduler leftovers harness, isolation / replay / drain / parity `pass=true`). **Not yet recorded; required before the campaign PR merges.** |
+| Replay and drain | `leftovers/` (window 2026-10-17 05:23Z, lab-harness `791a3cdc…` at `648fb655a`, `msb-throughput --engine scheduler --scenario leftovers --rows 4 --prompt-tokens 1024 --parity-tokens 48`): isolation (cancelled row ends `cancelled`, healthy row `length`, 32 tokens), replay (`eligible_owner` then `non_settling_replay`, tokens match), drain (queued rejected, both active rows complete `length`, permit valid, post-drain rejected) and parity (48 tokens, standalone and batched `[true, true]`, serial and batched token SHA-256 equal) all `pass=true`; peak RSS 122.8 GB |
+
+The window's own verdict was `FAIL` from an evaluator bug, not from the
+harness: `--scenario leftovers` prints one JSON document per scenario and the
+script parsed stdout as a single document (`JSONDecodeError: Extra data`).
+The fixed evaluator (`evaluate_leftovers` in `glm53-t4-window.sh`) re-read the
+same files offline: `leftovers/reevaluation.txt`, PASS. The harness's stderr
+ends with the parity line and no error; its exit code was not captured by
+that script version. Bytes as captured (before path abstraction):
+`leftovers.json` `19e8f66c068b507d8d0cb7c47c9413c0d7d507adf98aa790df30918c864a9433`,
+`leftovers.log` `a3f8c88d6b47962125b7f1e374a0e38696ed195dec34e7dd1f049f12376c7257`.
