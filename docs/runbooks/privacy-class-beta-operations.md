@@ -14,7 +14,7 @@ Enrollment trusts whoever completes that first attested session. Posture is devi
 
 ## Providers
 
-Nothing to do. On `macprovider-cli serve`, with `privacy_class_beta` unset, the provider runs a read-only check: code signature and hardened-runtime flags, team and signing identifier, no debug entitlements, SIP on, not traced, no diagnostic environment variables, native in-process runtime, KV disk tier off, Secure Enclave identity, and the state directory. If every check passes it turns on relay-blind and privacy mode, uses `~/.config/macprovider/relay-blind` unless `relay_blind_state_directory` is set, runs the SPEC-049-R007 hardening, and advertises its privacy keys and enrollment claim.
+Nothing to do. On `macprovider-cli serve`, with `privacy_class_beta` unset, the provider runs a read-only check: code signature and hardened-runtime flags, team and signing identifier, no debug entitlements, SIP on, not traced, no diagnostic environment variables, native in-process runtime, privacy path bypassing the KV disk tier (the tier itself may be on), Secure Enclave identity, and the state directory. If every check passes it turns on relay-blind and privacy mode, uses `~/.config/macprovider/relay-blind` unless `relay_blind_state_directory` is set, runs the SPEC-049-R007 hardening, and advertises its privacy keys and enrollment claim.
 
 If a check fails the provider serves ordinary traffic and logs one line:
 
@@ -22,7 +22,7 @@ If a check fails the provider serves ordinary traffic and logs one line:
 privacy_class auto_ineligible reasons=<codes>
 ```
 
-If the hardening itself fails it also serves ordinary traffic and logs `privacy_class auto_hardening_failed reasons=<codes>`. Dev, unsigned, ad-hoc-signed, SIP-off, loopback-runtime, and KV-disk-tier hosts land here. Autotune candidates and `--no-join` runs never try.
+If the hardening itself fails it also serves ordinary traffic and logs `privacy_class auto_hardening_failed reasons=<codes>`. Dev, unsigned, ad-hoc-signed, SIP-off, and loopback-runtime hosts land here. An enabled KV disk tier does not: since SPEC-049 v0.6.0 privacy-class requests bypass it and ordinary traffic keeps using it. Autotune candidates and `--no-join` runs never try.
 
 Opt out with any one of these:
 

@@ -33,6 +33,10 @@ same baseline contract as `JOURNEY-PRIVACY-CLASS-BETA`, except Step 06 may use
 the same designated Studio only when the reviewed bundle also contains
 `step-06-sip-off-refused/restored-validation.json` from the offline Step06
 helper. The v1 journey still requires a different SIP-disabled lab Mac.
+Step 04 also drops the enabled-KV-disk-tier refusal case: since SPEC-049
+v0.6.0 an enabled tier is bypassed per request (SPEC-049-R010), not refused,
+so the v2 step-04 assertion omits it. The v1 journey keeps the case for its
+1.8.215 baseline.
 
 17. `step-17-auto-mode-eligibility` proves automatic eligible, automatic
     ineligible, automatic hardening fallback, explicit opt-out, and explicit

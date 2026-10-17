@@ -293,6 +293,17 @@ PROFILE_V2 = EvidenceProfile(
     summary="signed notarized v0.2 release passed the full privacy-class beta v2 journey on Apple Silicon",
 )
 PROFILES_BY_SCHEMA = {profile.schema: profile for profile in (PROFILE_V1, PROFILE_V2)}
+
+# SPEC-049 v0.6.0: v2 releases bypass an enabled KV disk tier per request.
+STEP_ASSERTIONS_V2 = {
+    "step-04-core-dump-and-env-refused": "core dumps off, diagnostic env, loopback runtime, and relay-blind off refused before network, DYLD_* inert",
+}
+
+
+def step_assertion(profile: EvidenceProfile, step: str) -> str:
+    if profile is PROFILE_V2 and step in STEP_ASSERTIONS_V2:
+        return STEP_ASSERTIONS_V2[step]
+    return STEP_ASSERTIONS[step]
 PROFILES_BY_JOURNEY = {profile.journey_id: profile for profile in (PROFILE_V1, PROFILE_V2)}
 
 # SPEC-049-R020 exact strings.
@@ -1692,7 +1703,12 @@ class Checks:
 
     def p_config_refusals(self, errors: list[str]) -> None:
         base = "step-04-core-dump-and-env-refused"
-        for case, reason in (("kv-disk-tier", "kv_disk_tier_enabled"), ("loopback-runtime", "loopback_runtime")):
+        # SPEC-049 v0.6.0: an enabled KV disk tier is bypassed per request, not
+        # refused, so only the v1 baseline (signed 1.8.215) carries that case.
+        cases = [("loopback-runtime", "loopback_runtime")]
+        if self.profile is PROFILE_V1:
+            cases.insert(0, ("kv-disk-tier", "kv_disk_tier_enabled"))
+        for case, reason in cases:
             refusal = self.hardening_refusal(f"{base}/{case}")
             errors.extend(refusal["errors"])
             expect(refusal["fatal"] and reason in refusal["reasons"], errors, f"{case} must be refused with {reason}")
@@ -3212,7 +3228,7 @@ def project_payload(evidence: dict[str, Any], source: str, evidence_sha256: str,
         ],
         "result": {"status": "pass", "summary": profile.summary},
         "steps": [
-            {"id": step, "status": "pass", "assertion": STEP_ASSERTIONS[step], "artifacts": [profile.artifact_id, profile.manifest_artifact_id]}
+            {"id": step, "status": "pass", "assertion": step_assertion(profile, step), "artifacts": [profile.artifact_id, profile.manifest_artifact_id]}
             for step in profile.step_ids
         ],
         "redaction": {"secrets_redacted": True, "operator_identity_redacted": True, "local_account_names_redacted": True},

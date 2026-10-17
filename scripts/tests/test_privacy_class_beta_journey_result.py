@@ -434,6 +434,23 @@ class PrivacyClassBetaEvidenceTests(unittest.TestCase):
             errors = contract.validate_signed_payload(self.root, signed, requirement_id, [PRIVACY_CLASS_BETA_JOURNEY_ID])
             self.assertTrue(any(f"cannot promote {requirement_id}" in error for error in errors), requirement_id)
 
+    def test_v2_does_not_require_kv_disk_tier_refusal(self) -> None:
+        # SPEC-049 v0.6.0: v2 releases bypass an enabled KV disk tier per
+        # request, so only the v1 baseline must show that refusal.
+        for path in sorted(self.bundle_file("step-04-core-dump-and-env-refused/kv-disk-tier").iterdir()):
+            path.unlink()
+        self.bundle_file("step-04-core-dump-and-env-refused/kv-disk-tier").rmdir()
+        remanifest(self.root / BUNDLE)
+        bundle = contract.load_bundle(self.root, BUNDLE)
+        self.assertEqual([], contract.Checks(bundle, contract.PROFILE_V2).run("config_refusals"))
+        v1_errors = contract.Checks(bundle, contract.PROFILE_V1).run("config_refusals")
+        self.assertTrue(any("kv-disk-tier" in error or "bundle file is missing" in error for error in v1_errors), v1_errors)
+        self.assertNotIn("KV disk tier", contract.step_assertion(contract.PROFILE_V2, "step-04-core-dump-and-env-refused"))
+        self.assertEqual(
+            contract.STEP_ASSERTIONS["step-04-core-dump-and-env-refused"],
+            contract.step_assertion(contract.PROFILE_V1, "step-04-core-dump-and-env-refused"),
+        )
+
 
 class PrivacyClassBetaV2RawEvidenceTests(unittest.TestCase):
     @staticmethod
