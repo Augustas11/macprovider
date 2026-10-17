@@ -165,9 +165,11 @@ MACPROVIDER_OPS_OWNER=<session-label> PEARL_RUNTIME_TASK=vision-qualification \
 ```
 
 Expected downtime: one coordinator restart, about 5–40 seconds. The
-coordinator reads the qualification list at boot only; SIGHUP validates it
-but does not apply it. If the post-restart check fails, the tooling restores
-the overlay and restarts the coordinator once more.
+coordinator applies the qualification list at boot and on SIGHUP; the task
+still restarts once, because the new process logging the on-disk files as its
+boot config is the proof that the list is live. If the post-restart check
+fails, the tooling restores the overlay and restarts the coordinator once
+more.
 
 `status` checks the record locally with the coordinator's rules (exact fields,
 positive integers, lowercase SHA-256 hex for `model_hash`,
@@ -191,10 +193,13 @@ to log the on-disk files as its boot config.
 The task is done when the overlay holds exactly this entry and the running
 coordinator booted with it. Run again with the same record, it does nothing.
 If the overlay already holds the entry but the coordinator has not booted with
-it, it validates and restarts once. If any restart fails, it restores the
-overlay when it changed it, then makes one recovery restart that must answer
-`/healthz` and log the on-disk files as its boot config, and reports the
-outcome. An overlay entry that fails the record rules (for example a non-hex
+it, it validates and restarts once. If installing the edited overlay or the
+restart fails, it puts the original overlay bytes back and checks them on
+disk, then makes one recovery restart that must answer `/healthz` and log the
+on-disk files as its boot config, and reports the outcome. If the restore or
+the recovery restart cannot be proven, it stops with a message that the
+overlay or coordinator state is unproven: compare the overlay with the backup,
+check the coordinator and run `status`. An overlay entry that fails the record rules (for example a non-hex
 `model_hash` the coordinator itself would accept) is blocked, never done. To replace a recorded entry, reconcile the
 overlay first; the task never overwrites a different list.
 

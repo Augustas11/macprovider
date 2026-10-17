@@ -1096,7 +1096,8 @@ type RoutingConfig struct {
 	ModelClasses                  map[string]ModelClassConfig `yaml:"model_classes"`
 	// VisionQualifications is the operator-reviewed allowlist for native image
 	// inference. It is deliberately empty by default: provider self-report and a
-	// model name never establish qualified buyer capacity.
+	// model name never establish qualified buyer capacity. It applies at boot
+	// and on SIGHUP (buyer.Server.SetVisionQualifications).
 	VisionQualifications []VisionQualificationConfig `yaml:"vision_qualifications"`
 }
 

@@ -1117,26 +1117,60 @@ def read_vq_staged(args):
 def recovery_restart(args, on_disk):
     """After a failed restart: one more bounded restart of the files now on
     disk (ON_DISK says what they hold), then /healthz and the new invocation
-    must log those files as its boot config."""
+    must log those files as its boot config. Any failure is a Refused that
+    says the live state is unproven."""
+    unproven = "%s but the coordinator is not proven live on it: check the coordinator and run status now" % on_disk
     try:
         back = subprocess.run(["systemctl", "restart", args.unit], timeout=120, capture_output=True).returncode
     except subprocess.TimeoutExpired:
         back = None
+    except Exception as exc:
+        raise Refused("the recovery restart failed (%s); %s" % (failure(exc), unproven))
     if back != 0:
-        raise Refused("the recovery restart failed; %s but not proven live: check the coordinator now" % on_disk)
-    healthz(args.healthz)
-    deadline = time.monotonic() + 30
-    while not applied(args):
-        if time.monotonic() > deadline:
-            raise Refused("after the recovery restart the coordinator did not log the on-disk config as its boot "
-                          "config (%s): check the coordinator now" % on_disk)
-        time.sleep(1)
+        raise Refused("the recovery restart failed; %s" % unproven)
+    try:
+        healthz(args.healthz)
+        deadline = time.monotonic() + 30
+        while not applied(args):
+            if time.monotonic() > deadline:
+                raise Refused("the new invocation did not log the on-disk config as its boot config")
+            time.sleep(1)
+    except Exception as exc:
+        raise Refused("after the recovery restart %s; %s" % (failure(exc), unproven))
 
 
 def failure(exc):
     """A restart failure for an operator message: Refused text names no
     secret; anything else is reported by type only."""
     return str(exc) if isinstance(exc, Refused) else type(exc).__name__
+
+
+def vq_rollback(args, original, backup, exc):
+    """The overlay install or the restart failed after the edited bytes may
+    have landed. Put the original bytes back, prove they are on disk, then
+    restart onto them and prove the boot config. Always raises Refused."""
+    try:
+        with open(args.overlay, "rb") as f:
+            current = f.read()
+        if current != original:
+            tmp = write_like(args.overlay, original, args.overlay)
+            try:
+                install(tmp, args.overlay)
+            finally:
+                if os.path.lexists(tmp):
+                    os.unlink(tmp)
+        with open(args.overlay, "rb") as f:
+            if f.read() != original:
+                raise Refused("the overlay on disk is not the original bytes")
+    except Exception as rexc:
+        raise Refused("the overlay install or restart failed (%s) and restoring the original overlay failed (%s): "
+                      "the overlay on disk and the running coordinator config are UNPROVEN; compare %s with the "
+                      "backup in %s, then check the coordinator and run status now"
+                      % (failure(exc), failure(rexc), args.overlay, backup))
+    recovery_restart(args, "the original overlay is restored on disk (bytes verified)")
+    raise Refused("the overlay install or restart failed (%s); the original overlay is restored (bytes verified) and "
+                  "a recovery restart brought the coordinator back on it (/healthz answered, boot config verified)"
+                  % failure(exc))
 
 
 def apply_vision_qualification(args):
@@ -1187,21 +1221,16 @@ def apply_vision_qualification(args):
                                     "--config-overlay", tmp], env, uid, gid, 120)
                 if check.returncode != 0:
                     raise Refused("the running coordinator binary rejects the edited overlay (--validate-config)")
-                install(tmp, args.overlay)
+                # From here the edited bytes may be on disk: any failure,
+                # including one after os.replace, restores and proves.
+                try:
+                    install(tmp, args.overlay)
+                    restart(args, pid)
+                except Exception as exc:
+                    vq_rollback(args, original, backup, exc)
             finally:
-                if os.path.exists(tmp):
+                if os.path.lexists(tmp):
                     os.unlink(tmp)
-            try:
-                restart(args, pid)
-            except Exception as exc:
-                with open(args.overlay, "rb") as f:
-                    ours = f.read() == new
-                if not ours:
-                    raise
-                install(write_like(args.overlay, original, args.overlay), args.overlay)
-                recovery_restart(args, "the overlay is restored on disk")
-                raise Refused("the restart failed (%s); the overlay is restored and a recovery restart brought the "
-                              "coordinator back on it (/healthz answered, boot config verified)" % failure(exc))
             result["restarted"] = True
             print(json.dumps(result, sort_keys=True))
     finally:

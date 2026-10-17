@@ -122,11 +122,14 @@
 #                       to exactly [record] in the overlay (backup first;
 #                       refuses a different existing list; keeps other routing
 #                       keys), validate, one coordinator restart (downtime
-#                       stated first; the list is read at boot only), then
+#                       stated first; SIGHUP also applies the list, but the
+#                       restart's boot record is the proof it is live), then
 #                       require the new process to log the on-disk files as its
-#                       boot config; otherwise restore the overlay and restart
+#                       boot config; on any install or restart failure restore
+#                       the original overlay bytes, check them, and restart
 #                       again (one bounded recovery restart, the same checks,
-#                       also when the overlay was already right). Done when
+#                       also when the overlay was already right; an unproven
+#                       restore or recovery is reported as such). Done when
 #                       the overlay holds exactly this entry, valid under the
 #                       record rules, and the coordinator booted with it; an
 #                       overlay entry the rules reject is blocked.
@@ -759,8 +762,9 @@ while True:
   fi
   rm -f "$VQ_CANON"
   # The helper owns every file check (one descriptor: no symlink, one link,
-  # this user's, mode 0600, private directory) and the record rules.
-  if ! out="$(python3 -I "$OPS_LIB_DIR/pearl-cli-config.py" validate-vision-qualification "$real" "$VQ_CANON" 2>&1)"; then
+  # this user's, mode 0600, private directory) and the record rules. It gets
+  # the path as given: the resolved one above is for the repository check only.
+  if ! out="$(python3 -I "$OPS_LIB_DIR/pearl-cli-config.py" validate-vision-qualification "$file" "$VQ_CANON" 2>&1)"; then
     VQ_ERR="the qualification record is refused (private file and routing.vision_qualifications rules): $(printf '%s' "$out" | tail -n 1 | cut -c1-300)"
     return
   fi

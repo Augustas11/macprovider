@@ -226,13 +226,17 @@ class VisionQualificationFileTest(unittest.TestCase):
         shared = os.path.join(self.dir, "shared")
         os.mkdir(shared)
         os.chmod(shared, 0o775)
+        # A directory inside the private test dir: its parent passes the
+        # parent-directory check on every platform (Linux /tmp is 1777).
+        adir = os.path.join(self.dir, "adir")
+        os.mkdir(adir, 0o700)
         for path, why in ((link, "is a symlink"),
                           (hard, "regular file with one link"),
                           (self.write("open.json", mode=0o644), "must be mode 0600"),
                           (self.write("group.json", mode=0o640), "must be mode 0600"),
                           (self.write("big.json", b"x" * (pcc.VQ_MAX_BYTES + 1)), "larger than"),
                           (self.write("r.json", directory=shared), "not writable by group or others"),
-                          (self.dir, "regular file")):
+                          (adir, "regular file")):
             with self.subTest(why=why), self.assertRaisesRegex(pcc.Refused, why):
                 pcc.read_private_record(path, pcc.VQ_MAX_BYTES, "qualification record")
 
@@ -287,6 +291,120 @@ class VisionQualificationParityTest(unittest.TestCase):
                 except pcc.Refused:
                     ok = False
                 self.assertEqual(ok, case["ops_valid"])
+
+
+class VisionQualificationApplyRollbackTest(unittest.TestCase):
+    """Any failure once the edited overlay may be on disk restores the
+    original bytes, proves them, and proves a recovery restart; a rollback
+    that cannot be proven is refused as unproven state."""
+
+    ORIGINAL = b"relay_blind:\n  enabled: true\n"
+
+    def setUp(self):
+        import contextlib
+        import yaml
+        from unittest import mock
+        self.mock = mock
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(subprocess.run, ["rm", "-rf", self.dir])
+        self.overlay = os.path.join(self.dir, "overlay.yaml")
+        with open(self.overlay, "wb") as f:
+            f.write(self.ORIGINAL)
+        staged = os.path.join(self.dir, "vq.staged")
+        with open(staged, "wb") as f:
+            f.write(pcc.vq_canonical(VQ))
+        self.args = argparse.Namespace(
+            vq_staged=staged, vq_sha256=pcc.vq_digest(VQ), overlay=self.overlay,
+            config=os.path.join(self.dir, "config.yaml"), backup_root=os.path.join(self.dir, "backups"),
+            unit="coordinator.service", healthz="http://127.0.0.1:1/healthz")
+        self.new = vq_plan(self.ORIGINAL.decode()).encode()
+        self.real_install = pcc.install
+        self.installs = 0
+        self.recovery = mock.Mock(return_value=subprocess.CompletedProcess([], 0))
+        for name, value in (("guard", lambda a: contextlib.nullcontext()),
+                            ("read_vq_staged", lambda a: dict(VQ)),
+                            ("running", lambda a: (1, "/bin/coordinator", {}, os.getuid(), os.getgid())),
+                            ("load_effective", lambda a: ({}, yaml.safe_load(self.ORIGINAL))),
+                            ("as_service", lambda *a: subprocess.CompletedProcess([], 0)),
+                            ("healthz", lambda url: {}),
+                            ("applied", lambda a: True)):
+            patcher = mock.patch.object(pcc, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(pcc.subprocess, "run", self.recovery)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def install(self, fail_on):
+        """install(): the real os.replace, then the FAIL_ON-th call raises
+        (after the replace when it is the edit, before it otherwise)."""
+        def fake(tmp, path):
+            self.installs += 1
+            if self.installs == fail_on == 1:
+                os.replace(tmp, path)
+                raise OSError("directory fsync failed")
+            if self.installs == fail_on:
+                raise OSError("rollback write failed")
+            self.real_install(tmp, path)
+        patcher = self.mock.patch.object(pcc, "install", fake)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def overlay_bytes(self):
+        with open(self.overlay, "rb") as f:
+            return f.read()
+
+    def leftovers(self):
+        return sorted(n for n in os.listdir(self.dir) if n.startswith(".cli-release-"))
+
+    def test_fsync_failure_after_replace_restores_and_recovers(self):
+        self.install(fail_on=1)
+        restart = self.mock.Mock()
+        with self.mock.patch.object(pcc, "restart", restart):
+            with self.assertRaisesRegex(pcc.Refused, "original overlay is restored \\(bytes verified\\) and a "
+                                                     "recovery restart brought the coordinator back"):
+                pcc.apply_vision_qualification(self.args)
+        restart.assert_not_called()
+        self.assertEqual(self.overlay_bytes(), self.ORIGINAL)
+        self.assertEqual(self.recovery.call_args[0][0], ["systemctl", "restart", "coordinator.service"])
+        self.assertEqual(self.leftovers(), [])
+        self.assertFalse(os.path.lexists(self.args.vq_staged))
+
+    def test_restart_and_rollback_write_failure_is_unproven(self):
+        self.install(fail_on=2)
+        with self.mock.patch.object(pcc, "restart", self.mock.Mock(side_effect=pcc.Refused("restart boom"))):
+            with self.assertRaisesRegex(pcc.Refused, "restart boom.*restoring the original overlay failed "
+                                                     "\\(OSError\\)") as cm:
+                pcc.apply_vision_qualification(self.args)
+        self.assertIn("UNPROVEN", str(cm.exception))
+        self.assertIn(self.overlay, str(cm.exception))
+        self.recovery.assert_not_called()
+        self.assertEqual(self.overlay_bytes(), self.new)
+        self.assertEqual(self.leftovers(), [])
+
+    def test_recovery_restart_failure_is_unproven(self):
+        self.install(fail_on=0)
+        for setup in (lambda: setattr(self.recovery, "return_value", subprocess.CompletedProcess([], 1)),
+                      lambda: setattr(self.recovery, "side_effect", FileNotFoundError("systemctl")),
+                      self.failing_healthz):
+            with self.subTest(setup=setup):
+                with open(self.overlay, "wb") as f:
+                    f.write(self.ORIGINAL)
+                with open(self.args.vq_staged, "wb") as f:
+                    f.write(pcc.vq_canonical(VQ))
+                setup()
+                with self.mock.patch.object(pcc, "restart", self.mock.Mock(side_effect=OSError("boom"))):
+                    with self.assertRaisesRegex(pcc.Refused, "original overlay is restored on disk \\(bytes "
+                                                             "verified\\) but the coordinator is not proven live"):
+                        pcc.apply_vision_qualification(self.args)
+                self.assertEqual(self.overlay_bytes(), self.ORIGINAL)
+
+    def failing_healthz(self):
+        self.recovery.side_effect = None
+        self.recovery.return_value = subprocess.CompletedProcess([], 0)
+        patcher = self.mock.patch.object(pcc, "healthz", side_effect=pcc.Refused("/healthz did not recover"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
 
 if __name__ == "__main__":

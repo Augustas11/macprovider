@@ -731,7 +731,10 @@ vq_record "$VQ_SECRETS/target.json"
 ln -s "$VQ_SECRETS/target.json" "$VQ_SECRETS/link.json"
 ln "$VQ_SECRETS/target.json" "$VQ_SECRETS/hard.json"
 mkdir -p "$tmp/operator-secrets/shared"; chmod 775 "$tmp/operator-secrets/shared"; vq_record "$tmp/operator-secrets/shared/r.json"
-for c in "$VQ_SECRETS/hard.json|regular file with one link" "$tmp/operator-secrets/shared/r.json|not writable by group or others"; do
+# The symlink is passed to the helper as given: only the repository check
+# sees the resolved path.
+for c in "$VQ_SECRETS/link.json|is a symlink" "$VQ_SECRETS/hard.json|regular file with one link" \
+  "$tmp/operator-secrets/shared/r.json|not writable by group or others"; do
   VISION_QUALIFICATION_FILE="${c%%|*}" PEARL_RUNTIME_TASK=vision-qualification run_rc 0 "vision record ${c#*|}" scripts/ops/pearl-runtime.sh status
   expect_next record:blocked
   case "$(next_field reason)" in *"${c#*|}"*) ok ;; *) bad "record file reason: $(next_field reason)" ;; esac
@@ -771,7 +774,7 @@ rm -f "$tmp/svc/restarts"
 hits="$(healthz_hits)"
 : > "$tmp/svc/restart_fail_once"
 PEARL_RUNTIME_TASK=vision-qualification MACPROVIDER_OPS_OWNER=t run_rc 3 "vision install rolled back when the restart fails" scripts/ops/pearl-runtime.sh next --run
-expect_err "the overlay is restored and a recovery restart brought the coordinator back on it"
+expect_err "the original overlay is restored (bytes verified) and a recovery restart brought the coordinator back on it"
 expect_lock_free
 if cmp -s "$tmp/pearl/overlay.yaml" "$tmp/pearl/overlay.before" && [ ! -e "$VQ_STAGED" ]; then ok; else bad "vision overlay not restored: $(cat "$tmp/pearl/overlay.yaml")"; fi
 if [ "$(restarts)" = 1 ] && [ ! -e "$tmp/svc/restart_fail_once" ]; then ok; else bad "vision rollback recovery restarts: $(restarts)"; fi
@@ -780,7 +783,7 @@ if boot_matches_disk; then ok; else bad "vision rollback recovery did not boot t
 # The recovery restart fails too: the restored overlay is reported unproven.
 : > "$tmp/svc/restart_fail"
 PEARL_RUNTIME_TASK=vision-qualification MACPROVIDER_OPS_OWNER=t run_rc 3 "vision install when both restarts fail" scripts/ops/pearl-runtime.sh next --run
-expect_err "the recovery restart failed; the overlay is restored on disk but not proven live"
+expect_err "the recovery restart failed; the original overlay is restored on disk (bytes verified) but the coordinator is not proven live"
 if cmp -s "$tmp/pearl/overlay.yaml" "$tmp/pearl/overlay.before" && [ ! -e "$VQ_STAGED" ]; then ok; else bad "vision overlay not restored: $(cat "$tmp/pearl/overlay.yaml")"; fi
 rm -f "$tmp/svc/restart_fail"
 systemctl restart macprovider-coordinator
@@ -832,7 +835,7 @@ expect_next done:done
 printf '# edited after boot a third time\n' >> "$tmp/pearl/coordinator.yaml"
 : > "$tmp/svc/restart_fail"
 PEARL_RUNTIME_TASK=vision-qualification MACPROVIDER_OPS_OWNER=t run_rc 3 "vision unapplied-overlay restarts both fail" scripts/ops/pearl-runtime.sh next --run
-expect_err "the recovery restart failed; the overlay is unchanged on disk but not proven live"
+expect_err "the recovery restart failed; the overlay is unchanged on disk but the coordinator is not proven live"
 rm -f "$tmp/svc/restart_fail"
 systemctl restart macprovider-coordinator
 # A different record never replaces the installed one.
