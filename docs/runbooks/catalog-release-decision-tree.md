@@ -223,9 +223,23 @@ mutating anything.
   while any stale provider is connected.
 - **(e)** A model that is newly buyer-serving, or re-hashed vs live, needs a
   strict-pin buyer request and a settlement row. No noninteractive production
-  harness exists for that, so today **(e) is a preflight NO_GO**
-  (`buyer_serving_e2e`). Such a release must go through the runtime lane with
-  its E2E. A successful content deploy always logs "(e) not required".
+  harness exists for that, so **(e) is a preflight NO_GO**
+  (`buyer_serving_e2e`) while any connected provider already serves that model
+  (matched in `/poolz` by served hash, model id, or candidate key).
+  When no connected provider serves it, for example a model only a provider
+  release that is not live yet can serve, no buyer request can reach it at
+  activation: **(e) is owed** (SPEC-023-R017 5(e), v0.22.26). The verdict lists
+  the models in `buyer_serving_e2e_owed`, the deploy re-checks `/poolz` under
+  the lease (a provider that started serving one stops the deploy before any
+  mutation) and logs `(e) OWED: ...`, and `scripts/ops/catalog-activate.sh`
+  keeps a post-activation `buyer_serving_e2e` step open: the provider release
+  that first serves the model restarts its canary onto the release, sends one
+  strict-pin buyer request through the gateway, and checks its settlement row;
+  the operator records it with `next --done buyer_serving_e2e`. A deploy with
+  nothing newly buyer-serving logs "(e) not required". The runtime lane
+  (`deploy-pearl-vps.sh` with `CONFIG_MODE=preserve-live`) cannot carry a
+  release that also adds rate-card rows: the live `rewards.rate_card` lacks
+  them and the coordinator's rate-card parity check rejects the release.
 
 When (a) and (b) passed, the failure was (c), and `/poolz` shows live adopters
 of the failed release, the rollback keeps that release in the window instead of
@@ -254,12 +268,17 @@ module, and preflight hashes all of them against the commit
 (`scripts/pricing-lane-installed-writers.txt`). Do these steps in order, all
 from the same signed tag `<tag>` on `main`:
 
-1. **Updater bundle first, as root on Pearl.** On Pearl, beside a checkout of
-   `<tag>` (`git -C <checkout> checkout <tag>`, clean), run
-   `sudo ops/pearl-updater/install-pearl-updater.sh` from that checkout. This
-   installs the guard-bearing `macprovider-pearl-update`,
-   `macprovider-tier2-enforcement-watchdog` and
-   `/usr/local/share/macprovider/scripts/coordinator_config_guard.py`. It is a
+1. **Updater bundle first.** From a clean worktree at `origin/main`, run
+   `PEARL_RUNTIME_TASK=updater-bundle scripts/ops/pearl-runtime.sh status`,
+   then `next --run`. It stages `git archive` of the running tag on Pearl,
+   checks the staged writers against the tag, takes the updater and
+   coordinator-deploy locks, and runs `ops/pearl-updater/install-pearl-updater.sh`
+   from the staged tree as root. This installs the guard-bearing
+   `macprovider-pearl-update`, `macprovider-tier2-enforcement-watchdog` and
+   `/usr/local/share/macprovider/scripts/coordinator_config_guard.py`. No
+   restart: the installer only runs `systemctl daemon-reload`. The task
+   refuses a running tag whose copies of those files differ from
+   `origin/main`'s (the pricing preflight hashes `origin/main`). It is a
    prerequisite here, not deferred maintenance.
 2. **Runtime pair, then the full coordinator deploy.**
    - On Pearl, install the signed coordinator/gateway pair of `<tag>` with the
@@ -301,7 +320,7 @@ from the same signed tag `<tag>` on `main`:
    non-pricing preflight never runs `pricing_host_state`.
 
 If a later tag changes any file in the installed-writers list, repeat step 1
-from that tag before the next pricing correction.
+once that tag is running, before the next pricing correction.
 
 **Runtime floor.** The first pricing correction's journal `begin` writes
 `/opt/macprovider/.pricing-runtime-floor`. From then on the enabling runtime

@@ -19,8 +19,12 @@
 #   3 nginx_routes            every feed the release binds is routed to the coordinator
 #   4 coordinator_native_keys coordinator.yaml autotune native_mtp_* keys + pool canary
 #   5 catalog_preflight       catalog-content-release.sh --preflight (read-only)
-#   6 catalog_activation      catalog-content-release.sh --deploy (content lane), or the
-#                             full deploy-pearl-vps.sh activation when the gate names another lane
+#   6 catalog_activation      catalog-content-release.sh --deploy (content lane; a pricing
+#                             release runs with CATALOG_PRICING_ACK=<the verdict's
+#                             pricing_diff_sha256>), or the full deploy-pearl-vps.sh activation
+#                             when the gate names another lane. Refused while the canary is
+#                             operator-paused: its custody proof and evidence (c) need it
+#                             buyer_serving
 #   7 coordinator_restart     native-bound release loaded by SIGHUP after boot: restart,
 #                             because the canary self-test bank is read at boot only
 #                             (phase4-coordinator/internal/ws/server.go loadNativeMTPCanaryBank)
@@ -31,12 +35,17 @@
 #                             target provider's active serving-path counter
 #                             (CB shared_forward_calls when CB is active);
 #                             expires after 24 h
+#  11 buyer_serving_e2e       evidence (e) the activation recorded as owed (SPEC-023-R017
+#                             5(e)): no connected provider served the newly buyer-serving
+#                             model, so the provider release that first serves it owes a
+#                             provider restart onto the release, one strict-pin buyer request
+#                             through the gateway and its settlement row (operator-recorded)
 #
 # Env (or ~/.config/macprovider/ops.env): COORDINATOR_URL, GATEWAY_URL,
 # PEARL_SSH (+ PEARL_SSH_IDENTITY/PEARL_SSH_KNOWN_HOSTS for the repo scripts),
 # REMOTE_REVOCATION_DIR, STUDIO_SSH, STUDIO_SSH_KEY, STUDIO_STATUS_PORT,
 # BUYER_TOKEN_FILE, PROBE_MODEL, CATALOG_CANARY_* (as catalog-content-release.sh),
-# MACPROVIDER_OPS_OWNER (for --run).
+# CATALOG_PRICING_ACK (the reviewed price table's digest), MACPROVIDER_OPS_OWNER (for --run).
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR disable=SC2034  # OPS_NAME/NEXT_* are read by lib/common.sh
 
@@ -157,7 +166,7 @@ PY
   fact revocation_coverage_days "$coverage_days"
 
   # Provider (canary/Studio) status, read-only over ssh when configured.
-  local p_rid="" p_mtp_enabled="" p_mtp_mode="" p_cb_active="" p_connected=""
+  local p_rid="" p_mtp_enabled="" p_mtp_mode="" p_cb_active="" p_connected="" p_lifecycle="" p_paused=false
   if [ -n "${STUDIO_SSH:-}" ] && [ -n "${STUDIO_STATUS_PORT:-}" ]; then
     case "$STUDIO_STATUS_PORT" in *[!0-9]*) die "STUDIO_STATUS_PORT must be numeric" ;; esac
     studio_ssh "curl -s -m 10 http://127.0.0.1:$STUDIO_STATUS_PORT/v1/status" > "$OPS_TMP_DIR/pstatus.json" 2>/dev/null || true
@@ -166,12 +175,19 @@ PY
     p_mtp_mode="$(json_field "$OPS_TMP_DIR/pstatus.json" 'd["native_mtp"]["mode"]')"
     p_cb_active="$(json_field "$OPS_TMP_DIR/pstatus.json" 'd["continuous_batching"]["active"]')"
     p_connected="$(json_field "$OPS_TMP_DIR/pstatus.json" 'd["coordinator"]["connected"]')"
+    p_lifecycle="$(json_field "$OPS_TMP_DIR/pstatus.json" 'd["lifecycle"]["state"]')"
   fi
+  # An operator pause (a Studio bench window) survives restarts and keeps the
+  # canary out of buyer_serving: the custody proof (canary_reachable) and
+  # activation evidence (c) cannot pass until it is resumed.
+  [ "$p_lifecycle" = paused_by_operator ] && p_paused=true
   fact provider_catalog_release_id "$p_rid"
   fact provider_native_mtp_enabled "$p_mtp_enabled"
   fact provider_native_mtp_mode "$p_mtp_mode"
   fact provider_continuous_batching_active "$p_cb_active"
   fact provider_coordinator_connected "$p_connected"
+  fact provider_lifecycle_state "$p_lifecycle"
+  local paused_why="the canary provider is operator-paused (lifecycle paused_by_operator, e.g. a Studio bench window): its custody proof needs it buyer_serving and the activation restarts it onto the release, which a pause outlives; run this after the pause window ends and the provider is resumed"
 
   # ---- decide, in runbook order ----
   NEXT_RUNBOOK="$MTP_DOC"
@@ -227,13 +243,17 @@ $RB_NATIVE_POOL_CANARY"
     next_meta coordinator_native_keys "$MTP_DOC#order" "none for the edit; the keys load at the activation restart"
   fi
 
-  local verdict="$OPS_STATE_DIR/$OPS_SCOPE/preflight-$main_sha.json" fresh=false go="" pricing="" lane_detail=""
+  local verdict="$OPS_STATE_DIR/$OPS_SCOPE/preflight-$main_sha.json" fresh=false go="" pricing="" lane_detail="" failed="" owed_pf=""
+  local owed_file="$OPS_STATE_DIR/$OPS_SCOPE/buyer_serving_e2e_owed.json" deploy_log="$OPS_STATE_DIR/$OPS_SCOPE/deploy-$main_sha.log"
   if [ -f "$verdict" ] && [ -n "$(find "$verdict" -mmin -60 2>/dev/null)" ]; then
     fresh=true
     go="$(json_field "$verdict" 'd["go"]')"
     pricing="$(json_field "$verdict" '(d.get("pricing") or {}).get("pricing_diff_sha256")')"
     lane_detail="$(json_field "$verdict" 'next((c["detail"] for c in d["checks"] if c["name"] == "content_gate" and not c["ok"]), "")')"
+    failed="$(json_field "$verdict" '"; ".join("%s: %s" % (c["name"], c["detail"][:200]) for c in d["checks"] if not c["ok"] and not c["detail"].startswith("not run:"))')"
+    owed_pf="$(json_field "$verdict" '", ".join(m["model_id"] for m in d.get("buyer_serving_e2e_owed") or [])')"
   fi
+  fact preflight_failed_checks "$failed"
   if [ "$live_rid" = "$R" ]; then
     step catalog_preflight "done" "live release is $R"
     step catalog_activation "done" "live release is $R ($live_status)"
@@ -245,6 +265,8 @@ $RB_NATIVE_POOL_CANARY"
       if [ "$head_sha" != "$main_sha" ]; then
         set_next catalog_preflight blocked "Preflight the content release" "" \
           "run from a clean worktree whose HEAD is origin/main ($main_sha); tooling must match the commit"
+      elif [ "$p_paused" = true ]; then
+        set_next catalog_preflight blocked "Preflight content release $R" "" "$paused_why"
       else
         set_next catalog_preflight read "Preflight content release $R at $main_sha (no mutation)" \
 "mkdir -p '$OPS_STATE_DIR/$OPS_SCOPE'
@@ -254,19 +276,32 @@ python3 -m json.tool '$verdict'"
         next_meta catalog_preflight "$TREE_DOC#run"
       fi
     fi
-    step catalog_activation pending ""
-    local restore_cmd
+    step catalog_activation pending "${owed_pf:+evidence (e) owed after activation: $owed_pf}"
+    local restore_cmd deploy_cmd content_downtime
     restore_cmd="$(render_runbook "$RB_CATALOG_RESTORE")"
-    if [ "$fresh" = true ] && [ "$go" = true ] && [ -z "$pricing" ]; then
-      set_next catalog_activation mutate "Activate content release $R" \
-        "scripts/catalog-content-release.sh --deploy --commit $main_sha --preflight-verdict '$verdict'"
-      next_meta catalog_activation "$TREE_DOC#run" \
-        "none expected for buyers: SIGHUP reload; the canary provider restarts onto the release; a failed activation rolls back and can strand adopters for 3-11 min"
+    # The deploy's own verdict line (sorted keys: buyer_serving_e2e_owed first)
+    # records which (e) the activation left owed; only a successful deploy writes it.
+    deploy_cmd="mkdir -p '$OPS_STATE_DIR/$OPS_SCOPE'
+scripts/catalog-content-release.sh --deploy --commit $main_sha ${pricing:+--pricing-diff-sha256 $pricing }--preflight-verdict '$verdict' | tee '$deploy_log'
+python3 -I -c 'import json, sys
+v = [json.loads(l) for l in open(sys.argv[1]) if l.startswith(\"{\\\"buyer_serving_e2e_owed\\\"\")]
+owed = (v[-1] if v else {}).get(\"buyer_serving_e2e_owed\") or []
+if owed:
+    json.dump({\"release_id\": sys.argv[3], \"models\": owed}, open(sys.argv[2], \"w\"), sort_keys=True)' '$deploy_log' '$owed_file' '$R'"
+    content_downtime="no coordinator restart: one SIGHUP reloads the release${pricing:+ and the rate card}; the canary provider is drained and restarted onto the release, so the requests it would serve go to other providers of its model or wait for its restart and model load; a failed activation rolls back and can strand adopters for 3-11 min"
+    if [ "$fresh" = true ] && [ "$go" = true ] && [ "$p_paused" = true ]; then
+      set_next catalog_activation blocked "Activate content release $R" "" "$paused_why"
+    elif [ "$fresh" = true ] && [ "$go" = true ] && [ -z "$pricing" ]; then
+      set_next catalog_activation mutate "Activate content release $R${owed_pf:+ (evidence (e) owed: $owed_pf)}" "$deploy_cmd"
+      next_meta catalog_activation "$TREE_DOC#run" "$content_downtime"
+    elif [ "$fresh" = true ] && [ "$go" = true ] && [ "${CATALOG_PRICING_ACK:-}" = "$pricing" ]; then
+      set_next catalog_activation mutate "Activate pricing release $R with the acknowledged price table $pricing${owed_pf:+ (evidence (e) owed: $owed_pf)}" "$deploy_cmd"
+      next_meta catalog_activation "$TREE_DOC#preflight-and-the-price-table" "$content_downtime"
     elif [ "$fresh" = true ] && [ "$go" = true ]; then
-      set_next catalog_activation manual "Review the price table, then activate $R with its acknowledgement digest" \
-        "scripts/catalog-content-release.sh --deploy --commit $main_sha --pricing-diff-sha256 $pricing --preflight-verdict '$verdict'" \
-        "a pricing release needs the operator's acknowledgement of the shown price table"
-      next_meta catalog_activation "$TREE_DOC#preflight-and-the-price-table" "none expected for buyers: SIGHUP reload of rate card and release"
+      set_next catalog_activation blocked "Review the price table, then activate $R with its acknowledgement digest" \
+        "python3 -m json.tool '$verdict'" \
+        "a pricing release needs the operator's acknowledgement of the price table (the verdict's pricing object; the preflight printed it on stderr): after review, run with CATALOG_PRICING_ACK=$pricing"
+      next_meta catalog_activation "$TREE_DOC#preflight-and-the-price-table" ""
     elif [ "$fresh" = true ] && printf '%s' "$lane_detail" | grep -q 'lane=' && ! printf '%s' "$lane_detail" | grep -q 'lane=catalog-content'; then
       set_next catalog_activation manual "Full catalog activation with deploy-pearl-vps.sh from the running tag" \
 "# The content gate refused: $lane_detail
@@ -278,8 +313,10 @@ $restore_cmd
       next_meta catalog_activation "$ROLLOUT_DOC#catalog-activation-full-deploy" \
         "coordinator restart: seconds; a failed activation strands adopters for 3-11 min"
     elif [ "$fresh" = true ]; then
+      local hint=""
+      case "$failed" in *canary_reachable:*) [ "$p_paused" = false ] || hint=" ($paused_why)" ;; esac
       set_next catalog_activation blocked "Activate $R" "python3 -m json.tool '$verdict'" \
-        "preflight NO_GO: fix every failing check, then preflight again"
+        "preflight NO_GO: ${failed:-see the verdict}$hint; fix every failing check, then preflight again"
     fi
   fi
 
@@ -344,6 +381,38 @@ for i in \$(seq 1 24); do curl -sf -m 5 \"\$COORDINATOR_URL/healthz\" && exit 0;
     set_next gateway_proof read "Send one real buyer request through the gateway" \
       "scripts/ops/catalog-activate.sh _gateway-proof"
     next_meta gateway_proof "AGENTS.md#hard-rules--activation-evidence-and-campaign-discipline"
+  fi
+
+  # Evidence (e) the activation recorded as owed (SPEC-023-R017 5(e)).
+  local owed_models=""
+  if [ "$(json_field "$owed_file" 'd["release_id"]')" = "$R" ]; then
+    owed_models="$(json_field "$owed_file" '", ".join(m["model_id"] for m in d["models"])')"
+  fi
+  fact buyer_serving_e2e_owed "$owed_models"
+  if [ "$live_rid" != "$R" ]; then
+    step buyer_serving_e2e pending "${owed_pf:+owed after activation: $owed_pf}"
+  elif [ -z "$owed_models" ]; then
+    step buyer_serving_e2e "done" "the activation recorded no owed evidence (e)"
+  elif marker_done "$OPS_SCOPE" buyer_serving_e2e; then
+    step buyer_serving_e2e "done" "$(marker_field "$OPS_SCOPE" buyer_serving_e2e 'd.get("evidence")')"
+  else
+    step buyer_serving_e2e owed "$owed_models: owed by the provider release that first serves it (CLI train canary; #2016 live acceptance)"
+    set_next buyer_serving_e2e manual "Owed evidence (e) for $owed_models: provider restart onto $R, one strict-pin buyer request through the gateway, its settlement row" \
+"# Owed by the provider release that first serves $owed_models (the CLI train canary and the
+# #2016 live acceptance); no provider served it when $R was activated. On that canary:
+# 1. Provider restart onto the release:
+ssh \"\$STUDIO_SSH\" 'launchctl kickstart -k gui/\$(id -u)/live.malibu.provider'
+#    then its /v1/status: catalog.release_id == $R, network_state buyer_serving, the model loaded.
+# 2. One strict-pin buyer request through the gateway (the bearer rides curl --config on stdin):
+#    printf 'header = \"Authorization: Bearer %s\"\\n' \"\$(cat \"\$BUYER_TOKEN_FILE\")\" | curl -sS --config - -D - \\
+#      -H 'X-MacProvider-Pin-Provider: <canary provider id>' -H 'Content-Type: application/json' \\
+#      -d '{\"model\":\"<model>\",\"max_tokens\":16,\"messages\":[{\"role\":\"user\",\"content\":\"Reply with ok.\"}]}' \\
+#      \"\$GATEWAY_URL/v1/chat/completions\"   -> HTTP 200 and an X-Request-ID
+# 3. Its settlement row on Pearl (read-only), at the rate-card row's rates:
+#    ssh \"\$PEARL_SSH\" \"sqlite3 -readonly \$PEARL_COORDINATOR_DB \\\"SELECT model, prompt_rate_per_mtok, completion_rate_per_mtok, gross_credits FROM ledger_request_credits WHERE request_id = (SELECT request_id FROM request_log WHERE external_request_id = '<X-Request-ID>' ORDER BY id DESC LIMIT 1);\\\"\"
+# Then: scripts/ops/catalog-activate.sh next --done buyer_serving_e2e --evidence '<request id, rates, settlement row>'" \
+      "the activation found no connected provider serving $owed_models, so (e) was deferred to the provider release that serves it"
+    next_meta buyer_serving_e2e "$TREE_DOC#evidence-after-activation" "the canary restart only: requests it would serve go to other providers of its model or wait for its restart and model load"
   fi
 
   set_next "done" "done" "$R active and proven through the gateway" ""

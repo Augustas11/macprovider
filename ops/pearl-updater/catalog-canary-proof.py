@@ -134,6 +134,82 @@ def running_text_vnode_path(
     return None
 
 
+def _state_word(value: object) -> str:
+    """A status enum value safe to print: short lowercase words only."""
+    if isinstance(value, str) and re.fullmatch(r"[a-z_]{1,40}", value):
+        return value
+    return "<unreadable>"
+
+
+def status_mismatches(
+    local_status: object,
+    provider_id: str,
+    release_id: str,
+    policy_version: str,
+    digest: str,
+    signer: str,
+) -> list[str]:
+    """Name each local-status field that fails the custody proof.
+
+    Field names and status enums only: provider ids, sessions and model ids
+    are never echoed. An operator pause is named, because it is the usual
+    reason a healthy canary is not buyer_serving.
+    """
+    if not isinstance(local_status, dict):
+        return ["status is not a JSON object"]
+    out: list[str] = []
+    catalog = local_status.get("catalog")
+    coordinator = local_status.get("coordinator")
+    model_id = local_status.get("model")
+    if local_status.get("provider_id") != provider_id:
+        out.append("provider_id differs from the selected provider")
+    network_state = local_status.get("network_state")
+    if network_state != "buyer_serving":
+        lifecycle = local_status.get("lifecycle")
+        lifecycle_state = lifecycle.get("state") if isinstance(lifecycle, dict) else None
+        note = "network_state=%s (want buyer_serving)" % _state_word(network_state)
+        if lifecycle_state == "paused_by_operator":
+            note += ", the provider is operator-paused"
+        elif lifecycle_state is not None:
+            note += ", lifecycle=%s" % _state_word(lifecycle_state)
+        out.append(note)
+    if local_status.get("model_loaded") is not True:
+        out.append("model_loaded is not true")
+    if not isinstance(model_id, str) or not model_id or len(model_id) > 512 or model_id.strip() != model_id:
+        out.append("model is missing or malformed")
+    if not isinstance(coordinator, dict) or coordinator.get("connected") is not True:
+        out.append("coordinator.connected is not true")
+    assigned_id = coordinator.get("session") if isinstance(coordinator, dict) else None
+    if not isinstance(assigned_id, str) or not assigned_id:
+        out.append("coordinator.session is missing")
+    if not isinstance(catalog, dict):
+        out.append("catalog is missing")
+        return out
+    expected = (
+        ("release_id", release_id),
+        ("policy_version", policy_version),
+        ("digest", digest),
+        ("signer_key_id", signer),
+    )
+    for field, want in expected:
+        if catalog.get(field) != want:
+            out.append("catalog.%s differs from the live release" % field)
+    if re.fullmatch(r"[0-9a-f]{64}", str(catalog.get("row_identity", "")).lower()) is None:
+        out.append("catalog.row_identity is not a sha256")
+    catalog_key = catalog.get("catalog_key")
+    if catalog_key != model_id:
+        out.append("catalog.catalog_key differs from model")
+    catalog_model_id = catalog.get("model_id")
+    if (
+        not isinstance(catalog_model_id, str)
+        or not catalog_model_id
+        or len(catalog_model_id) > 512
+        or catalog_model_id.strip() != catalog_model_id
+    ):
+        out.append("catalog.model_id is missing or malformed")
+    return out
+
+
 def main() -> int:
     if len(sys.argv) != 7:
         fail("usage: catalog-canary-proof.py INSTALL_DIR PROVIDER_ID RELEASE_ID POLICY DIGEST SIGNER")
@@ -215,38 +291,17 @@ def main() -> int:
         if len(status_payload) > 1024 * 1024:
             fail("canary local status exceeds the safety limit")
         local_status = json.loads(status_payload)
-        catalog = local_status.get("catalog") if isinstance(local_status, dict) else None
-        coordinator = local_status.get("coordinator") if isinstance(local_status, dict) else None
-        assigned_id = coordinator.get("session") if isinstance(coordinator, dict) else None
-        model_id = local_status.get("model") if isinstance(local_status, dict) else None
-        catalog_key = catalog.get("catalog_key") if isinstance(catalog, dict) else None
-        catalog_model_id = catalog.get("model_id") if isinstance(catalog, dict) else None
-        if (
-            not isinstance(local_status, dict)
-            or local_status.get("provider_id") != provider_id
-            or local_status.get("network_state") != "buyer_serving"
-            or local_status.get("model_loaded") is not True
-            or not isinstance(model_id, str)
-            or not model_id
-            or len(model_id) > 512
-            or model_id.strip() != model_id
-            or not isinstance(coordinator, dict)
-            or coordinator.get("connected") is not True
-            or not isinstance(assigned_id, str)
-            or not assigned_id
-            or not isinstance(catalog, dict)
-            or catalog.get("release_id") != release_id
-            or catalog.get("policy_version") != policy_version
-            or catalog.get("digest") != digest
-            or catalog.get("signer_key_id") != signer
-            or re.fullmatch(r"[0-9a-f]{64}", str(catalog.get("row_identity", "")).lower()) is None
-            or catalog_key != model_id
-            or not isinstance(catalog_model_id, str)
-            or not catalog_model_id
-            or len(catalog_model_id) > 512
-            or catalog_model_id.strip() != catalog_model_id
-        ):
-            fail("live canary status does not match the expected provider and catalog")
+        mismatches = status_mismatches(
+            local_status, provider_id, release_id, policy_version, digest, signer
+        )
+        if mismatches:
+            fail(
+                "live canary status does not match the expected provider and catalog: "
+                + "; ".join(mismatches)
+            )
+        assigned_id = local_status["coordinator"]["session"]
+        model_id = local_status["model"]
+        catalog_model_id = local_status["catalog"]["model_id"]
 
         print(json.dumps({
             "provider_id": installed_provider_id,

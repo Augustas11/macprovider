@@ -134,6 +134,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, read("mirror-latest.json"))
         if self.path == "/v1/autotune-release" and read("autotune-release.json"):
             return self.send(200, read("autotune-release.json"))
+        # Any other coordinator route a test serves: svc/routes/<path, "/" -> "_">.
+        route_body = read(os.path.join("routes", self.path.strip("/").replace("/", "_")))
+        if route_body is not None:
+            return self.send(200, route_body)
         if self.path == "/metrics":
             parts = [v for v in (read("metrics.txt"), read("loaded.txt")) if v is not None]
             seq = read("rejections_seq")

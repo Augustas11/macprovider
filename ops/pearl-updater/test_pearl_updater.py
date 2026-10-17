@@ -9005,5 +9005,72 @@ class PearlUpdaterTests(unittest.TestCase):
             self.assertEqual(dropin.read_text(), updater_module.TRANSACTION_GATE_DROPIN_TEXT)
 
 
+class CatalogCanaryProofMismatchTests(unittest.TestCase):
+    """catalog-canary-proof.py names each failing status field, never identities."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        path = SCRIPT.with_name("catalog-canary-proof.py")
+        proof_loader = importlib.machinery.SourceFileLoader("catalog_canary_proof", str(path))
+        proof_spec = importlib.util.spec_from_loader(proof_loader.name, proof_loader)
+        assert proof_spec is not None
+        cls.proof = importlib.util.module_from_spec(proof_spec)
+        proof_loader.exec_module(cls.proof)
+
+    def status(self) -> dict:
+        return {
+            "provider_id": "provider-secret-id",
+            "network_state": "buyer_serving",
+            "model_loaded": True,
+            "model": "org/key",
+            "coordinator": {"connected": True, "session": "session-secret"},
+            "catalog": {
+                "release_id": "rel",
+                "policy_version": "pv",
+                "digest": "dg",
+                "signer_key_id": "sg",
+                "row_identity": "ab" * 32,
+                "catalog_key": "org/key",
+                "model_id": "Org/Model",
+            },
+        }
+
+    def mismatches(self, status: object) -> list[str]:
+        return self.proof.status_mismatches(status, "provider-secret-id", "rel", "pv", "dg", "sg")
+
+    def test_matching_status_passes(self) -> None:
+        self.assertEqual(self.mismatches(self.status()), [])
+
+    def test_operator_pause_is_named(self) -> None:
+        status = self.status()
+        status["network_state"] = "live_verified"
+        status["lifecycle"] = {"state": "paused_by_operator"}
+        self.assertEqual(
+            self.mismatches(status),
+            ["network_state=live_verified (want buyer_serving), the provider is operator-paused"],
+        )
+
+    def test_fields_named_without_identities(self) -> None:
+        status = self.status()
+        status["provider_id"] = "other-provider-secret"
+        status["coordinator"] = {"connected": False}
+        status["catalog"]["release_id"] = "older"
+        status["network_state"] = "Weird\nValue"
+        text = "; ".join(self.mismatches(status))
+        for want in (
+            "provider_id differs",
+            "network_state=<unreadable>",
+            "coordinator.connected is not true",
+            "coordinator.session is missing",
+            "catalog.release_id differs",
+        ):
+            self.assertIn(want, text)
+        for secret in ("provider-secret-id", "other-provider-secret", "session-secret", "older"):
+            self.assertNotIn(secret, text)
+
+    def test_non_object_status(self) -> None:
+        self.assertEqual(self.mismatches([]), ["status is not a JSON object"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -133,7 +133,7 @@ Full decision tree: `docs/runbooks/catalog-release-decision-tree.md`.
 |---|---|
 | Coordinator/gateway code, config template, units, nginx, deploy scripts | **This train** (coordinator release) |
 | Catalog content only: model hash/row/Tier-2 correction, same policy/keys/signers | Catalog-content lane (`scripts/catalog-content-release.sh`), no coordinator release |
-| Re-hash of a buyer-serving row (`model_sha256` of a recommendable, rate-carded, Tier-2-pinned row changes) | **This train**: content-lane evidence (e) needs a strict-pin buyer request + settlement row, which has no noninteractive harness, so the content preflight is `buyer_serving_e2e` NO_GO |
+| Re-hash of a buyer-serving row, or a newly buyer-serving model | Catalog-content lane when no connected provider serves the model: evidence (e) (strict-pin buyer request + settlement row) is owed by the provider release that first serves it (SPEC-023 v0.22.26). While a connected provider serves it, the content preflight is `buyer_serving_e2e` NO_GO and the release ships on **this train** |
 | Rate-card rows (pricing) | This train, until #1693 lands (in progress: after its enabling coordinator release, rows-only corrections move to the catalog-content lane; `usd_per_million_credits` / share / multiplier stay on this train) |
 | Weekly feed freshness | Automatic renewal (Wednesday); never a coordinator release |
 | `policy_version`, keyring, CLI payload | Full provider-app release (CLI train) |

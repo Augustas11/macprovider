@@ -135,6 +135,31 @@
 #                       overlay entry the rules reject is blocked.
 #   Env: VISION_QUALIFICATION_FILE and the Pearl layout above.
 #
+# One-time task (PEARL_RUNTIME_TASK=updater-bundle): install the Pearl updater
+# bundle (docs/runbooks/catalog-release-decision-tree.md "Enabling rollout
+# (once)" step 1; ops/runbooks/pearl-release-updater.md) from the RUNNING tag,
+# so the guard-bearing writers the pricing preflight hashes
+# (scripts/pricing-lane-installed-writers.txt) are that tag's bytes:
+#   1 bundle_source     read-only, local: the tag /healthz reports is an
+#                       annotated tag here, and its macprovider-pearl-update,
+#                       macprovider-tier2-enforcement-watchdog and
+#                       coordinator_config_guard.py equal origin/main's (the
+#                       commit the pricing preflight hashes against)
+#   2 pearl_state       read-only: sha256 of those three installed files
+#   3 updater_bundle    under the live-ops lock: `git archive` of the tag
+#                       (ops/pearl-updater, the catalog verifier bundle, the
+#                       config guard) into a fresh root-only staging dir on
+#                       Pearl, check the staged writers are the tag's bytes,
+#                       take the updater lock and the coordinator-deploy lock
+#                       (refuse when busy), run
+#                       ops/pearl-updater/install-pearl-updater.sh from the
+#                       staged tree, check the installed writers, remove the
+#                       staging dir. No restart: the installer only runs
+#                       systemctl daemon-reload and enables the reconcile units
+#   Done when the three installed files are the tag's bytes.
+#   Env: PEARL_UPDATER_BIN, PEARL_TIER2_WATCHDOG_BIN, PEARL_CONFIG_GUARD,
+#   PEARL_UPDATER_LOCK, PEARL_DEPLOY_LOCK (installed paths on Pearl).
+#
 # Env (or ~/.config/macprovider/ops.env): COORDINATOR_URL, GATEWAY_URL,
 # PEARL_SSH, PEARL_RUNTIME_VERSION, UPDATER_WAIT_MAX_S (default 2700),
 # PEARL_COORDINATOR_ENV (default /etc/macprovider/coordinator.env),
@@ -161,6 +186,8 @@ CI_DOC="docs/runbooks/compute-integrity-private-corpus.md"
 # requests) in about 1-31 s and starts within a second.
 CI_DOWNTIME="one coordinator restart, about 5-40 seconds (in-flight requests drain, then the coordinator starts); buyer and provider traffic through the coordinator is interrupted for that time. If the post-restart check fails, the overlay and corpus are restored and the coordinator restarts once more"
 VQ_DOC="docs/runbooks/native-vision-acceptance.md"
+UB_DOC="docs/runbooks/catalog-release-decision-tree.md"
+UB_DOWNTIME="none: installs the updater, the Tier-2 enforcement watchdog, the config guard and their units, then systemctl daemon-reload; no coordinator, gateway or provider restart"
 VQ_DOWNTIME="one coordinator restart, about 5-40 seconds (in-flight requests drain, then the coordinator starts); buyer and provider traffic through the coordinator is interrupted for that time. If the post-restart check fails, the overlay is restored and the coordinator restarts once more"
 
 # Pearl layout for the coordinator config helper (defaults: production; the
@@ -173,6 +200,8 @@ PEARL_BACKUP_ROOT="${PEARL_BACKUP_ROOT:-/root/macprovider-backups}"
 PEARL_PROC_ROOT="${PEARL_PROC_ROOT:-/proc}"
 PEARL_COMPUTE_INTEGRITY_CORPUS_PATH="${PEARL_COMPUTE_INTEGRITY_CORPUS_PATH:-/etc/macprovider/compute-integrity-corpus.json}"
 PEARL_COORDINATOR_ADMIN_URL="${PEARL_COORDINATOR_ADMIN_URL:-http://127.0.0.1:8444}"
+PEARL_UPDATER_BIN="${PEARL_UPDATER_BIN:-/usr/local/sbin/macprovider-pearl-update}"
+PEARL_TIER2_WATCHDOG_BIN="${PEARL_TIER2_WATCHDOG_BIN:-/usr/local/sbin/macprovider-tier2-enforcement-watchdog}"
 RETENTION_SCOPE="retention-run"
 
 
@@ -861,6 +890,179 @@ vq_internal() {
   fi
 }
 
+# The guard-bearing writers the updater bundle installs: "installed repo-path"
+# (a subset of scripts/pricing-lane-installed-writers.txt).
+ub_writers() {
+  printf '%s %s\n' "$PEARL_UPDATER_BIN" ops/pearl-updater/macprovider-pearl-update
+  printf '%s %s\n' "$PEARL_TIER2_WATCHDOG_BIN" ops/pearl-updater/macprovider-tier2-enforcement-watchdog
+  printf '%s %s\n' "$PEARL_CONFIG_GUARD" scripts/lib/coordinator_config_guard.py
+}
+
+# ub_source: the running tag and the expected bytes of the writers the bundle
+# installs (UB_EXPECT lines "installed sha256 repo-path"), or UB_ERR. The
+# pricing preflight hashes origin/main's copies, so the tag's must equal them.
+ub_source() {
+  UB_TAG=""; UB_COMMIT=""; UB_ERR=""; UB_EXPECT=""
+  local live="" main_sha inst repo a b
+  if fetch_coordinator_health; then
+    live="$(json_field "$OPS_TMP_DIR/healthz.json" 'd["version"]')"
+  fi
+  if ! [[ "$live" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    UB_ERR="cannot read the running coordinator tag from /healthz (COORDINATOR_URL)"
+    return
+  fi
+  git -C "$REPO_ROOT" fetch -q origin "refs/tags/$live:refs/tags/$live" 2>/dev/null || true
+  if ! UB_COMMIT="$(git -C "$REPO_ROOT" rev-parse -q --verify "$live^{commit}")"; then
+    UB_COMMIT=""
+    UB_ERR="the running tag $live is not available locally (fetch failed or tag missing)"
+    return
+  fi
+  if [ "$(git -C "$REPO_ROOT" cat-file -t "$live" 2>/dev/null)" != tag ]; then
+    UB_ERR="the running tag $live is not an annotated tag"
+    return
+  fi
+  main_sha="$(origin_main_sha)"
+  is_sha40 "$main_sha" || { UB_ERR="cannot resolve origin/main"; return; }
+  while read -r inst repo; do
+    if ! git -C "$REPO_ROOT" cat-file -e "$UB_COMMIT:$repo" 2>/dev/null; then
+      UB_ERR="the running tag $live lacks $repo"
+      return
+    fi
+    a="$(git -C "$REPO_ROOT" show "$UB_COMMIT:$repo" | shasum -a 256 | cut -d' ' -f1)"
+    b="$(git -C "$REPO_ROOT" show "$main_sha:$repo" 2>/dev/null | shasum -a 256 | cut -d' ' -f1)"
+    if [ "$a" != "$b" ]; then
+      UB_ERR="origin/main changes $repo after the running tag $live; the pricing preflight hashes origin/main's bytes, so install from a runtime tag that carries them"
+      return
+    fi
+    UB_EXPECT="$UB_EXPECT$inst $a $repo"$'\n'
+  done < <(ub_writers)
+  UB_TAG="$live"
+}
+
+ub_layout() {
+  UB_ULOCK="${PEARL_UPDATER_LOCK:-/run/lock/macprovider-pearl-updater.lock}"
+  UB_DLOCK="${PEARL_DEPLOY_LOCK:-/opt/macprovider/.coordinator-deploy.lock}"
+  local p
+  for p in "$PEARL_UPDATER_BIN" "$PEARL_TIER2_WATCHDOG_BIN" "$PEARL_CONFIG_GUARD" "$UB_ULOCK" "$UB_DLOCK"; do
+    [[ "$p" =~ ^/[A-Za-z0-9._/-]+$ ]] || refuse "Pearl paths must be absolute and plain: $p"
+  done
+}
+
+gather_updater_bundle() {
+  OPS_SCOPE="updater-bundle"
+  NEXT_RUNBOOK="$UB_DOC#enabling-rollout-once"
+  ub_layout
+  ub_source
+  fact updater_bundle_tag "$UB_TAG"
+  fact updater_bundle_commit "$UB_COMMIT"
+  if [ -n "$UB_ERR" ]; then
+    step bundle_source blocked "$UB_ERR"
+    set_next bundle_source blocked "Choose the updater bundle source" "" "$UB_ERR"
+    return
+  fi
+  local signed=false
+  git -C "$REPO_ROOT" verify-tag "$UB_TAG" >/dev/null 2>&1 && signed=true
+  fact tag_signature_verified_locally "$signed"
+  step bundle_source "done" "running tag $UB_TAG ($UB_COMMIT); its updater writers equal origin/main's"
+  if [ -z "${PEARL_SSH:-}" ]; then
+    step pearl_state blocked "PEARL_SSH is unset"
+    set_next pearl_state blocked "Read the installed updater writers on Pearl" "" "PEARL_SSH is unset"
+    return
+  fi
+  local files out="" rc=0 inst want repo got mismatched=""
+  files="$(printf '%s' "$UB_EXPECT" | awk '{printf "%s ", $1}')"
+  out="$(pearl_ssh "for f in $files; do if [ -f \"\$f\" ]; then sha256sum \"\$f\"; else echo \"MISSING \$f\"; fi; done" 2>/dev/null)" || rc=$?
+  if [ "$rc" != 0 ]; then
+    step pearl_state blocked "cannot hash the installed updater writers on Pearl (rc=$rc)"
+    set_next pearl_state blocked "Read the installed updater writers on Pearl" "" "sha256sum over ssh failed (rc=$rc)"
+    return
+  fi
+  while read -r inst want repo; do
+    [ -n "$inst" ] || continue
+    got="$(printf '%s\n' "$out" | awk -v f="$inst" '$2 == f {print $1}' | head -n 1)"
+    [ "$got" = "$want" ] || mismatched="$mismatched $inst=$(printf '%s' "${got:-MISSING}" | cut -c1-12)"
+  done <<<"$UB_EXPECT"
+  mismatched="${mismatched# }"
+  fact updater_bundle_mismatched "$mismatched"
+  if [ -z "$mismatched" ]; then
+    step pearl_state "done" "installed updater writers are $UB_TAG's bytes"
+    step updater_bundle "done" ""
+    set_next "done" "done" "the Pearl updater bundle is $UB_TAG's" ""
+    return
+  fi
+  step pearl_state "done" "differs from $UB_TAG: $mismatched"
+  step updater_bundle pending ""
+  set_next updater_bundle mutate "Install the Pearl updater bundle from the running tag $UB_TAG" \
+    "scripts/ops/pearl-runtime.sh _updater-bundle $UB_TAG $UB_COMMIT"
+  next_meta updater_bundle "$UB_DOC#enabling-rollout-once" "$UB_DOWNTIME"
+}
+
+# The root script on Pearl: `bash -s -- STAGING ULOCK DLOCK [INSTALLED SHA REPO]...`.
+# It removes the staging dir on every exit.
+ub_remote_script() {
+  cat <<'REMOTE'
+set -euo pipefail
+d="$1"; ulock="$2"; dlock="$3"; shift 3
+case "$d" in /var/tmp/macprovider-updater-bundle.*) ;; *) echo "refused: unexpected staging dir $d" >&2; exit 1 ;; esac
+trap 'rm -rf -- "$d"' EXIT
+expect=""
+while [ $# -ge 3 ]; do
+  got="$(sha256sum "$d/$3" | cut -d' ' -f1)"
+  [ "$got" = "$2" ] || { echo "refused: staged $3 is not the tag's bytes" >&2; exit 1; }
+  expect="$expect$1 $2
+"
+  shift 3
+done
+[ -n "$expect" ] || { echo "refused: no expected writer digests" >&2; exit 1; }
+for l in "$ulock" "$dlock"; do
+  if [ -L "$l" ] || [ ! -f "$l" ]; then echo "refused: lock $l is not a regular file" >&2; exit 1; fi
+done
+exec 7>>"$ulock"; flock -n 7 || { echo "lock busy: $ulock (an updater run holds it)" >&2; exit 1; }
+exec 8>>"$dlock"; flock -n 8 || { echo "lock busy: $dlock (a deploy holds it)" >&2; exit 1; }
+bash "$d/ops/pearl-updater/install-pearl-updater.sh"
+printf '%s' "$expect" | while read -r inst want; do
+  [ -n "$inst" ] || continue
+  got="$(sha256sum "$inst" | cut -d' ' -f1)"
+  [ "$got" = "$want" ] || { echo "installed $inst is not the tag's bytes after the install" >&2; exit 1; }
+  echo "installed $inst sha256 $want"
+done
+REMOTE
+}
+
+# _updater-bundle TAG COMMIT (next --run only): stage `git archive TAG` on
+# Pearl and install the updater bundle from it under both Pearl locks.
+ub_internal() {
+  [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] ||
+    refuse "_updater-bundle runs only from 'PEARL_RUNTIME_TASK=updater-bundle $0 next --run' (live-ops lock, downtime banner)"
+  require_pearl_ssh
+  ub_layout
+  ub_source
+  [ -z "$UB_ERR" ] || refuse "$UB_ERR"
+  [ "$UB_TAG" = "${1:-}" ] && [ "$UB_COMMIT" = "${2:-}" ] ||
+    refuse "the running tag is now $UB_TAG ($UB_COMMIT), not ${1:-?} (${2:-?}); run status again"
+  local e bundle staged args
+  local paths=(ops/pearl-updater scripts/catalog-verifier-bundle.txt scripts/lib/coordinator_config_guard.py)
+  bundle="$(git -C "$REPO_ROOT" show "$UB_COMMIT:scripts/catalog-verifier-bundle.txt" | grep -v '^#' | grep -v '^$' || true)"
+  for e in $bundle; do
+    [[ "$e" =~ ^scripts/[A-Za-z0-9._-]+$ ]] || refuse "unsafe catalog verifier bundle entry at $UB_TAG: $e"
+    paths+=("$e")
+  done
+  staged="$(git -C "$REPO_ROOT" archive --format=tar "$UB_COMMIT" "${paths[@]}" |
+    pearl_ssh "sudo sh -c 'umask 077; d=\$(mktemp -d /var/tmp/macprovider-updater-bundle.XXXXXXXX) && tar -xf - -C \"\$d\" && printf %s \"\$d\"'")" ||
+    die "cannot stage the $UB_TAG updater bundle on Pearl"
+  [[ "$staged" =~ ^/var/tmp/macprovider-updater-bundle\.[A-Za-z0-9]+$ ]] || die "unexpected staging dir from Pearl: $staged"
+  args="$(printf '%s' "$UB_EXPECT" | tr '\n' ' ')"
+  log "installing the updater bundle of $UB_TAG ($UB_COMMIT) on Pearl"
+  local rc=0
+  ub_remote_script | pearl_ssh "sudo bash -s -- $staged $UB_ULOCK $UB_DLOCK $args" || rc=$?
+  if [ "$rc" != 0 ]; then
+    # The root script removes its staging dir itself; this covers an ssh
+    # failure before it ran. Best effort: report the original failure.
+    pearl_ssh "sudo rm -rf -- $staged" </dev/null || log "could not remove $staged on Pearl; remove it by hand"
+    return "$rc"
+  fi
+}
+
 gather() {
   STATS_RECORDED=0
   if [ -n "${PEARL_RUNTIME_TASK:-}" ]; then
@@ -869,6 +1071,7 @@ gather() {
       retention-run) gather_retention_run; return ;;
       compute-integrity-enable) gather_compute_integrity; return ;;
       vision-qualification) gather_vision_qualification; return ;;
+      updater-bundle) gather_updater_bundle; return ;;
       *) refuse "unknown PEARL_RUNTIME_TASK: $PEARL_RUNTIME_TASK" ;;
     esac
   fi
@@ -1165,6 +1368,7 @@ internal() {
     _retention-run) retention_run_internal ;;
     _compute-integrity-enable) shift; ci_enable_internal "$@" ;;
     _vision-qualification) shift; vq_internal "$@" ;;
+    _updater-bundle) shift; ub_internal "$@" ;;
     *) usage >&2; exit 2 ;;
   esac
 }

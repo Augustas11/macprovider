@@ -9,7 +9,7 @@ not add steps of its own:
 | `cli-release.sh` | provider CLI candidate, promotion, fleet recommendation | `docs/releases/cli-release-train.md`, `docs/runbooks/provider-cli-release-verification.md` |
 | `discovery-renew.sh` | signed release-discovery freshness renewal | `.github/workflows/renew-release-discovery-head.yml` |
 | `catalog-activate.sh` | catalog, CB policy and native-MTP activation | `docs/runbooks/native-mtp-enablement.md`, `docs/runbooks/catalog-release-decision-tree.md`, `docs/runbooks/pearl-coordinator-rollout.md` |
-| `pearl-runtime.sh` | coordinator and gateway runtime release; pending stats migrations (`stats_migrate`: checked before the apply and before health, applied under the live-ops lock, no downtime); one-time retention `auto_vacuum` conversion (`PEARL_RUNTIME_TASK=retention-vacuum-conversion`); one on-demand retention run (`PEARL_RUNTIME_TASK=retention-run`, no restart); compute-integrity private corpus install (`PEARL_RUNTIME_TASK=compute-integrity-enable`, one restart); operator-reviewed native-vision qualification install into the Pearl overlay (`PEARL_RUNTIME_TASK=vision-qualification`, `VISION_QUALIFICATION_FILE`, one restart as the boot-state proof; SIGHUP also applies the list) | `docs/runbooks/pearl-coordinator-rollout.md`, `ops/runbooks/settlement-evidence-retention.md`, `docs/runbooks/compute-integrity-private-corpus.md`, `docs/runbooks/native-vision-acceptance.md` |
+| `pearl-runtime.sh` | coordinator and gateway runtime release; pending stats migrations (`stats_migrate`: checked before the apply and before health, applied under the live-ops lock, no downtime); one-time retention `auto_vacuum` conversion (`PEARL_RUNTIME_TASK=retention-vacuum-conversion`); one on-demand retention run (`PEARL_RUNTIME_TASK=retention-run`, no restart); compute-integrity private corpus install (`PEARL_RUNTIME_TASK=compute-integrity-enable`, one restart); operator-reviewed native-vision qualification install into the Pearl overlay (`PEARL_RUNTIME_TASK=vision-qualification`, `VISION_QUALIFICATION_FILE`, one restart as the boot-state proof; SIGHUP also applies the list); Pearl updater bundle install from the running tag (`PEARL_RUNTIME_TASK=updater-bundle`, both Pearl locks, no restart) | `docs/runbooks/pearl-coordinator-rollout.md`, `ops/runbooks/settlement-evidence-retention.md`, `docs/runbooks/compute-integrity-private-corpus.md`, `docs/runbooks/native-vision-acceptance.md`, `docs/runbooks/catalog-release-decision-tree.md` (Enabling rollout) |
 | `live-lock.sh` | one live actor at a time | rollout rule 3 |
 | `privacy-activate.sh` | existing signed identity approval; durable rollback | `docs/runbooks/privacy-network-activation.md`, SPEC-049 §8.3 |
 
@@ -45,6 +45,16 @@ scripts/ops/live-lock.sh acquire <label> --steal                 # only past the
   is pid-bound (`--bind-pid`): if the process that took it dies without
   releasing (SIGKILL, crash), the next `acquire` on the same host takes it
   over and logs the holder. Locks taken by hand keep TTL and `--steal` only.
+- `catalog-activate.sh` refuses the preflight and the activation while the
+  canary provider reports `lifecycle.state` `paused_by_operator`: the custody
+  proof needs it `buyer_serving`, and the activation restarts it, which a
+  pause outlives. A NO_GO names its failing checks. A pricing release runs
+  only with `CATALOG_PRICING_ACK` set to the verdict's `pricing_diff_sha256`
+  after the operator reviewed the price table. A release whose newly
+  buyer-serving model no connected provider serves activates with evidence
+  (e) owed (SPEC-023-R017 5(e)); the activation records it and the train
+  keeps a post-activation `buyer_serving_e2e` step until the operator records
+  the strict-pin buyer request and settlement row.
 - Runbook commands are never read from the Markdown at run time. They are
   constants in `lib/runbook-commands.sh`; `test-runbook-commands.sh` fails when
   one drifts from its fenced block on `origin/main`.

@@ -23,7 +23,12 @@
 # mapping, validation and restart-failure rollback with a verified recovery
 # restart (also when the overlay was already right), idempotence, a different
 # entry refused, an invalid live entry blocked, the record read through one
-# private descriptor, the provider id never printed).
+# private descriptor, the provider id never printed); catalog-activate's
+# operator-paused canary refusal, failing-check summary, acknowledged pricing
+# activation and the owed evidence (e) it records and keeps open; the
+# pearl-runtime updater-bundle install from the running tag (lock refusal,
+# staging cleanup, idempotence, drift, a tag whose writers differ from
+# origin/main, a lightweight tag).
 # Usage: bash scripts/ops/test-entrypoints.sh
 set -euo pipefail
 
@@ -1565,6 +1570,160 @@ if [ "$(state_of gateway_proof)" = "done" ]; then ok; else bad "fresh proof not 
 touch -t "$(date -v-25H +%Y%m%d%H%M 2>/dev/null || date -d '-25 hours' +%Y%m%d%H%M)" "$tmp/state/catalog-$R/gateway_proof.json"
 run_rc 0 "catalog status with an expired proof" scripts/ops/catalog-activate.sh status
 if [ "$(state_of gateway_proof)" = "pending" ]; then ok; else bad "expired proof still counted"; fi
+
+# ==== catalog-activate: canary pause, pricing ack, owed evidence (e) ===========
+MAIN_SHA="$(git -C "$W" rev-parse origin/main)"
+CSCOPE="$tmp/state/catalog-$R"
+mkdir -p "$tmp/svc/routes"
+printf '{"schema_version":"macprovider.native-mtp-admission.v1"}' > "$tmp/svc/routes/v1_native-mtp-admission"
+printf '{"expires_at":"2099-01-01T00:00:00Z"}' > "$tmp/svc/routes/v1_native-mtp-revocations.streamvc-autotune-static-v4.json"
+rm -f "$tmp/svc/autotune-release.json"
+# status_paused STATE: the canary status with lifecycle.state STATE.
+status_paused() {
+  python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["lifecycle"]={"state": sys.argv[2]}; d["network_state"]="live_verified"; json.dump(d, open(p, "w"))' "$tmp/svc/status.json" "$1"
+}
+# verdict GO PRICING_DIGEST FAILED_CHECK OWED_MODEL: a fresh preflight verdict.
+verdict() {
+  python3 - "$CSCOPE/preflight-$MAIN_SHA.json" "$@" <<'PY'
+import json, sys
+path, go, digest, failed, owed = sys.argv[1:6]
+checks = [{"name": "content_gate", "ok": True, "detail": "lane catalog-content"}]
+if failed:
+    checks.append({"name": failed, "ok": False, "detail": "canary custody proof on the live release failed: network_state=live_verified (want buyer_serving), the provider is operator-paused"})
+    checks.append({"name": "coordinator_dry_load", "ok": False, "detail": "not run: an earlier check failed"})
+json.dump({"go": go == "true", "checks": checks,
+           "pricing": {"pricing_diff_sha256": digest} if digest else None,
+           "buyer_serving_e2e_owed": [{"model_id": owed, "sha256": "ab" * 32}] if owed else []},
+          open(path, "w"), sort_keys=True)
+PY
+}
+mkdir -p "$CSCOPE"
+status_doc $CAND true
+status_paused paused_by_operator
+rm -f "$CSCOPE"/preflight-*.json
+run_rc 0 "catalog status with the canary operator-paused" scripts/ops/catalog-activate.sh status
+if [ "$(fact_of provider_lifecycle_state)" = paused_by_operator ]; then ok; else bad "lifecycle fact: $(fact_of provider_lifecycle_state)"; fi
+case "$(next_field id):$(next_field kind)" in
+  catalog_preflight:blocked) case "$(next_field reason)" in *operator-paused*) ok ;; *) bad "paused preflight reason: $(next_field reason)" ;; esac ;;
+  catalog_verify:*) ok ;;  # the fixture's catalog does not verify here; the pause is checked below
+  *) bad "paused preflight next: $(next_field id):$(next_field kind)" ;;
+esac
+verdict false "" canary_reachable ""
+run_rc 0 "catalog status with a NO_GO verdict while paused" scripts/ops/catalog-activate.sh status
+case "$(fact_of preflight_failed_checks)" in
+  "canary_reachable: canary custody proof"*) ok ;;
+  *) bad "failed checks fact: $(fact_of preflight_failed_checks)" ;;
+esac
+case "$(fact_of preflight_failed_checks)" in *"not run:"*) bad "not-run checks listed as failures" ;; *) ok ;; esac
+verdict true "" "" ""
+run_rc 0 "catalog status with a GO verdict while paused" scripts/ops/catalog-activate.sh status
+if [ "$(state_of catalog_activation)" = pending ]; then ok; else bad "activation state while paused: $(state_of catalog_activation)"; fi
+if [ "$(next_field id)" = catalog_activation ]; then
+  case "$(next_field kind):$(next_field reason)" in blocked:*operator-paused*) ok ;; *) bad "paused activation: $(next_field kind) $(next_field reason)" ;; esac
+fi
+status_doc $CAND true
+DIGEST="$(printf 'cd%.0s' $(seq 1 32))"
+verdict true "$DIGEST" "" "mlx-community/Test-VL-2B"
+run_rc 0 "catalog status with a pricing GO verdict, no ack" scripts/ops/catalog-activate.sh status
+case "$(python3 -c 'import json,sys; print(next(s["note"] for s in json.load(open(sys.argv[1]))["steps"] if s["id"] == "catalog_activation"))' "$tmp/out")" in
+  *"owed after activation: mlx-community/Test-VL-2B"*) ok ;;
+  *) bad "activation note lacks the owed model" ;;
+esac
+if [ "$(next_field id)" = catalog_activation ]; then
+  case "$(next_field kind):$(next_field reason)" in blocked:*"CATALOG_PRICING_ACK=$DIGEST"*) ok ;; *) bad "unacknowledged pricing: $(next_field kind) $(next_field reason)" ;; esac
+  CATALOG_PRICING_ACK="$DIGEST" run_rc 0 "catalog status with the price table acknowledged" scripts/ops/catalog-activate.sh status
+  expect_next catalog_activation:mutate
+  case "$(next_field command)" in *"--pricing-diff-sha256 $DIGEST --preflight-verdict"*"| tee "*buyer_serving_e2e_owed.json*) ok ;; *) bad "pricing activation command: $(next_field command)" ;; esac
+  case "$(next_field expected_downtime)" in "no coordinator restart"*) ok ;; *) bad "activation downtime: $(next_field expected_downtime)" ;; esac
+  CATALOG_PRICING_ACK="$(printf 'ef%.0s' $(seq 1 32))" run_rc 0 "catalog status with a stale acknowledgement" scripts/ops/catalog-activate.sh status
+  expect_next catalog_activation:blocked
+else
+  bad "pricing activation not offered: next is $(next_field id) ($(next_field reason))"
+fi
+# The activation command records the owed (e) from the deploy's own verdict line.
+cmd="$(CATALOG_PRICING_ACK="$DIGEST" bash -c 'cd "$1" && scripts/ops/catalog-activate.sh status' _ "$W" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["next"]["command"])')"
+mkdir -p "$tmp/fakedeploy/scripts"
+cat > "$tmp/fakedeploy/scripts/catalog-content-release.sh" <<'FAKEDEPLOY'
+#!/usr/bin/env bash
+echo "[catalog-content] deploy: preflight"
+echo '{"buyer_serving_e2e_owed": [{"model_id": "mlx-community/Test-VL-2B", "sha256": "abab"}], "checks": [], "go": true, "pricing": null}'
+echo "[catalog-content] DONE"
+FAKEDEPLOY
+chmod +x "$tmp/fakedeploy/scripts/catalog-content-release.sh"
+if (cd "$tmp/fakedeploy" && bash -euo pipefail -c "$cmd") >/dev/null 2>&1 &&
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d["release_id"] == sys.argv[2] and d["models"][0]["model_id"] == "mlx-community/Test-VL-2B" else 1)' "$CSCOPE/buyer_serving_e2e_owed.json" "$R"; then ok; else bad "activation command did not record the owed (e)"; fi
+printf '#!/usr/bin/env bash\necho "{\\"buyer_serving_e2e_owed\\": [{\\"model_id\\": \\"x\\"}]}"\nexit 4\n' > "$tmp/fakedeploy/scripts/catalog-content-release.sh"
+rm -f "$CSCOPE/buyer_serving_e2e_owed.json"
+if (cd "$tmp/fakedeploy" && bash -euo pipefail -c "$cmd") >/dev/null 2>&1; then bad "a failed deploy passed the activation step"; else ok; fi
+if [ -e "$CSCOPE/buyer_serving_e2e_owed.json" ]; then bad "a failed deploy recorded owed (e)"; else ok; fi
+# After activation: the owed (e) is a post-activation, operator-recorded step.
+printf '{"release_id":"%s","status":"live_verified","feeds":{"x":{"verified_at":"2026-01-01T00:00:00Z"}}}' "$R" > "$tmp/svc/autotune-release.json"
+printf '{"release_id":"%s","models":[{"model_id":"mlx-community/Test-VL-2B","sha256":"abab"}]}' "$R" > "$CSCOPE/buyer_serving_e2e_owed.json"
+run_rc 0 "catalog status with (e) owed after activation" scripts/ops/catalog-activate.sh status
+if [ "$(state_of buyer_serving_e2e)" = owed ]; then ok; else bad "owed (e) state: $(state_of buyer_serving_e2e)"; fi
+if [ "$(fact_of buyer_serving_e2e_owed)" = mlx-community/Test-VL-2B ]; then ok; else bad "owed (e) fact: $(fact_of buyer_serving_e2e_owed)"; fi
+printf '{"release_id":"older-release","models":[{"model_id":"m","sha256":"abab"}]}' > "$CSCOPE/buyer_serving_e2e_owed.json"
+run_rc 0 "catalog status with an owed (e) of another release" scripts/ops/catalog-activate.sh status
+if [ "$(state_of buyer_serving_e2e)" = "done" ]; then ok; else bad "another release's owed (e) counted: $(state_of buyer_serving_e2e)"; fi
+rm -f "$tmp/svc/autotune-release.json" "$CSCOPE/buyer_serving_e2e_owed.json" "$CSCOPE"/preflight-*.json
+
+# ==== pearl-runtime updater-bundle ==============================================
+UBROOT="$tmp/ubroot"
+mkdir -p "$UBROOT"
+: > "$tmp/pearl/updater.lock"; : > "$tmp/pearl/deploy.lock"
+# shellcheck disable=SC2016  # the stub expands FAKE_FLOCK_RC itself
+printf '#!/usr/bin/env bash\nexit "${FAKE_FLOCK_RC:-0}"\n' > "$tmp/bin/flock"
+chmod +x "$tmp/bin/flock"
+ub() { # run_rc args with the updater-bundle layout and the test-mode installer
+  PEARL_RUNTIME_TASK=updater-bundle PEARL_DEPLOY_LOCK="$tmp/pearl/deploy.lock" \
+    PEARL_UPDATER_BIN="$UBROOT/usr/local/sbin/macprovider-pearl-update" \
+    PEARL_TIER2_WATCHDOG_BIN="$UBROOT/usr/local/sbin/macprovider-tier2-enforcement-watchdog" \
+    PEARL_CONFIG_GUARD="$UBROOT/usr/local/share/macprovider/scripts/coordinator_config_guard.py" \
+    MACPROVIDER_UPDATER_TESTING=1 MACPROVIDER_UPDATER_INSTALL_ROOT="$UBROOT" MACPROVIDER_UPDATER_SKIP_SYSTEMD=1 \
+    MACPROVIDER_UPDATER_INSTALL_OWNER="$(id -un)" MACPROVIDER_UPDATER_INSTALL_ROOT_GROUP="$(id -gn)" \
+    MACPROVIDER_UPDATER_INSTALL_GROUP="$(id -gn)" run_rc "$@"
+}
+health v9.0.0 $LIVE
+ub 0 "updater-bundle status with nothing installed" scripts/ops/pearl-runtime.sh status
+expect_next updater_bundle:mutate
+if [ "$(fact_of updater_bundle_tag)" = v9.0.0 ]; then ok; else bad "bundle tag: $(fact_of updater_bundle_tag)"; fi
+case "$(fact_of updater_bundle_mismatched)" in *macprovider-pearl-update=MISSING*) ok ;; *) bad "mismatch fact: $(fact_of updater_bundle_mismatched)" ;; esac
+case "$(next_field expected_downtime)" in none:*) ok ;; *) bad "bundle downtime: $(next_field expected_downtime)" ;; esac
+ub 3 "_updater-bundle refuses outside next --run" scripts/ops/pearl-runtime.sh _updater-bundle v9.0.0 "$(git -C "$W" rev-parse 'v9.0.0^{commit}')"
+expect_err "runs only from"
+staging_dirs() { find /var/tmp -maxdepth 1 -name 'macprovider-updater-bundle.*' 2>/dev/null | wc -l | tr -d ' '; }
+before_dirs="$(staging_dirs)"
+FAKE_FLOCK_RC=1 ub 1 "updater-bundle refuses while the updater lock is busy" env MACPROVIDER_OPS_OWNER=t scripts/ops/pearl-runtime.sh next --run
+expect_err "lock busy"
+expect_lock_free
+if [ "$(staging_dirs)" = "$before_dirs" ]; then ok; else bad "staging dir left behind"; fi
+if [ -e "$UBROOT/usr/local/sbin/macprovider-pearl-update" ]; then bad "installed while the lock was busy"; else ok; fi
+ub 0 "updater-bundle installs from the running tag" env MACPROVIDER_OPS_OWNER=t scripts/ops/pearl-runtime.sh next --run
+expect_lock_free
+if cmp -s "$UBROOT/usr/local/sbin/macprovider-pearl-update" <(git -C "$W" show v9.0.0:ops/pearl-updater/macprovider-pearl-update); then ok; else bad "installed updater is not the tag's bytes"; fi
+ub 0 "updater-bundle status after the install" scripts/ops/pearl-runtime.sh status
+expect_next done:done
+printf '# drift\n' >> "$UBROOT/usr/local/sbin/macprovider-tier2-enforcement-watchdog"
+ub 0 "updater-bundle status with a drifted watchdog" scripts/ops/pearl-runtime.sh status
+expect_next updater_bundle:mutate
+case "$(fact_of updater_bundle_mismatched)" in *tier2-enforcement-watchdog=*) ok ;; *) bad "drift fact: $(fact_of updater_bundle_mismatched)" ;; esac
+# A running tag whose guard differs from origin/main's cannot satisfy the
+# pricing preflight: blocked, nothing offered.
+git -C "$W" checkout -q --detach v9.0.0
+printf '\n# tag-only change\n' >> "$W/scripts/lib/coordinator_config_guard.py"
+git -C "$W" -c user.name=t -c user.email=t@example.invalid commit -q -am "test: guard differs at the tag"
+git -C "$W" -c user.name=t -c user.email=t@example.invalid tag -a v9.0.7 -m "drifted runtime"
+git -C "$W" checkout -q main
+health v9.0.7 $LIVE
+ub 0 "updater-bundle status with a tag whose guard differs from origin/main" scripts/ops/pearl-runtime.sh status
+expect_next bundle_source:blocked
+case "$(next_field reason)" in *"origin/main changes scripts/lib/coordinator_config_guard.py"*) ok ;; *) bad "drift reason: $(next_field reason)" ;; esac
+git -C "$W" tag v9.0.8 "v9.0.0^{commit}"
+health v9.0.8 $LIVE
+ub 0 "updater-bundle status with a lightweight running tag" scripts/ops/pearl-runtime.sh status
+expect_next bundle_source:blocked
+health v9.0.0 $LIVE
+rm -f "$tmp/bin/flock"
 
 printf 'entry points: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
