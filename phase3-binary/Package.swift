@@ -17,7 +17,10 @@ let package = Package(
         )
     ],
     dependencies: [
-        // Fork tag 3.32.3-macprovider.9: upstream mlx-swift-lm 3.32.3 plus the
+        // Fork tag 3.32.3-macprovider.9.4: 3.32.3-macprovider.9 plus the Qwen2-VL
+        // per-image vision attention fix (issue #2016); every other model's
+        // decode path is byte-identical to .9. Tag .9 is upstream
+        // mlx-swift-lm 3.32.3 plus the
         // packed MTP verification, fused A3B MoE, GDN checkpoint and compiled
         // MTP verification step commits upstream does not carry, and upstream
         // #631 with every Qwen3.5 trace declaring the arrays it reads as
@@ -31,7 +34,7 @@ let package = Package(
         // on one Metal queue.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "dbe8bcb39a00e31b8ba9a0602c60d9388fca247d"
+            revision: "ce3bb5235317367c61c054311a830b1e81aaa6ea"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",
