@@ -127,7 +127,7 @@ struct ContinuousBatchSchedulerSnapshot: Sendable, Equatable {
 /// `GatherQMM::eval_gpu` takes `gather_qmm_rhs` when `M == 1`, `B >= 16`, the
 /// gather is right-sorted and `B / E >= 4` (B = expert selections in the
 /// call, E = experts), else `gather_qmv`. mlx-swift-lm's `SwitchGLU` (fork
-/// `3.32.3-macprovider.9`) sorts, and Qwen3.5 then takes the direct weighted
+/// `3.32.3-macprovider.9.2`) sorts, and Qwen3.5 then takes the direct weighted
 /// reduction, once a call carries 64 selections. A grouped call carries the
 /// selections of every row (A3B, 256 experts, top-8: a 32-127-token chunk
 /// takes `gather_qmv` alone, `gather_qmm_rhs` beside a second row). The fused
