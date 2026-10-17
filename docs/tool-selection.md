@@ -119,7 +119,10 @@ model sees only the selected function, and its reply is prefilled with that
 function's call opening in the template's own format (for Qwen3.6,
 `<tool_call>` followed by `<function=NAME>`), so it cannot pick another
 function. For `required` the reply is prefilled with the `<tool_call>`
-opening, so it cannot answer in prose. The prefill is internal: it never
+opening, so it cannot answer in prose. The prefill goes in only right after
+the template's reply prompt with thinking closed; if the rendered prompt ends
+any other way (for example with thinking on), that turn keeps output
+validation only. The prefill is internal: it never
 appears in the response, and it counts as a few prompt tokens. Only models
 with this support advertise `required`/named. The decoder does not constrain
 the arguments, so the output is still validated in full. It accepts complete

@@ -6770,7 +6770,7 @@ actor ModelRuntime: ModelRuntimeServing {
         generationMilliseconds: Int64,
         ttftMilliseconds: Int64? = nil,
         modelHash: String?,
-        toolCallPrefill: String? = nil
+        toolCallPrefill: String?
     ) throws -> ContinuousBatchFinalizedRow {
         // The serial path discards the model's end-of-generation token
         // before counting it; bill and cache the batched row the same way.
@@ -8552,7 +8552,8 @@ actor ModelRuntime: ModelRuntimeServing {
             stopTokenFilter: stopTokenFilter,
             requestStops: request.stop
         )
-        let parsed = try parseToolCallsIfRequested(filtered.text, request: request)
+        // Speculative decoding requires tool_choice absent: no call prefill.
+        let parsed = try parseToolCallsIfRequested(filtered.text, request: request, toolCallPrefill: nil)
         let finishReason: String
         if !parsed.toolCalls.isEmpty {
             finishReason = "tool_calls"
@@ -9021,7 +9022,7 @@ actor ModelRuntime: ModelRuntimeServing {
                             requestStops: request.stop
                         )
                         let finalDelta = Self.delta(from: emittedText, to: final.text)
-                        let parsed = try Self.parseToolCallsIfRequested(final.text, request: request)
+                        let parsed = try Self.parseToolCallsIfRequested(final.text, request: request, toolCallPrefill: nil)
                         if !finalDelta.isEmpty {
                             if let error = structuredAccumulator.append(finalDelta) {
                                 throw error
@@ -11832,7 +11833,7 @@ actor ModelRuntime: ModelRuntimeServing {
         stopTokenFilter: StopTokenFilter = StopTokenFilter(tokens: []),
         requestStops: [String] = [],
         globalHitStop: Bool = false,
-        toolCallPrefill: String? = nil
+        toolCallPrefill: String?
     ) throws -> ParsedGeneratedOutput {
         guard HarmonyResponseParser.isHarmonyModelID(request.model) else {
             if try ToolSelectionPolicy.selection(request.promptSource.toolChoice).requiresCall,
@@ -12013,7 +12014,7 @@ actor ModelRuntime: ModelRuntimeServing {
     private static func parseToolCallsIfRequested(
         _ text: String,
         request: ChatCompletionRequest,
-        toolCallPrefill: String? = nil
+        toolCallPrefill: String?
     ) throws -> (content: String, toolCalls: [ToolCall]) {
         if try ToolSelectionPolicy.selection(request.promptSource.toolChoice).requiresCall {
             // The prompt ended inside the call: parse prefill + continuation.
@@ -12120,7 +12121,8 @@ actor ModelRuntime: ModelRuntimeServing {
         for request: ChatCompletionRequest,
         templateSupportsThinkingToggle: Bool = false,
         templateSupportsPreserveThinking: Bool = false,
-        nativeVisionProfile: NativeVisionProfile? = nil
+        nativeVisionProfile: NativeVisionProfile? = nil,
+        toolSelectionModelID: String? = nil
     ) throws -> UserInput {
         if let input = try validateNativeVisionRequest(request, profile: nativeVisionProfile) {
             return try NativeVisionProfile.userInput(from: input)
@@ -12144,7 +12146,12 @@ actor ModelRuntime: ModelRuntimeServing {
             messages = Self.withLeadingSystemInstruction("Do not call any function or tool. Respond with assistant text.", to: messages)
         case .auto: break
         }
-        let chat = try ToolPromptRenderer.renderMessages(messages, modelID: request.model)
+        // A profiled identity is the loaded model even when the buyer names it
+        // by a local alias, so tool history renders in its template's format.
+        let renderModelID = ToolSelectionPolicy.guaranteedCallProfile(modelID: toolSelectionModelID) != nil
+            ? toolSelectionModelID ?? request.model
+            : request.model
+        let chat = try ToolPromptRenderer.renderMessages(messages, modelID: renderModelID)
         let tools: [[String: Any]]?
         switch selection {
         case .none:
@@ -12195,11 +12202,16 @@ actor ModelRuntime: ModelRuntimeServing {
         tokenizer: any MLXLMCommon.Tokenizer
     ) -> [Int]? {
         let suffix = tokenizer.encode(text: generationPromptSuffix, addSpecialTokens: false)
-        guard !suffix.isEmpty, promptTokens.count >= suffix.count,
-              Array(promptTokens.suffix(suffix.count)) == suffix else {
+        let prefillTokens = tokenizer.encode(text: prefill, addSpecialTokens: false)
+        // The appended tokens must be exactly what the template would have
+        // produced for suffix + prefill as one string.
+        guard !suffix.isEmpty, !prefillTokens.isEmpty, promptTokens.count >= suffix.count,
+              Array(promptTokens.suffix(suffix.count)) == suffix,
+              tokenizer.encode(text: generationPromptSuffix + prefill, addSpecialTokens: false) == suffix + prefillTokens
+        else {
             return nil
         }
-        return promptTokens + tokenizer.encode(text: prefill, addSpecialTokens: false)
+        return promptTokens + prefillTokens
     }
 
     /// Request prompt preparation for every serving path. Returns the model
@@ -12214,14 +12226,17 @@ actor ModelRuntime: ModelRuntimeServing {
         nativeVisionProfile: NativeVisionProfile? = nil,
         toolSelectionModelID: String?
     ) async throws -> (input: LMInput, toolCallPrefill: String?) {
+        // Planned first: it validates the selected name before any prompt text.
+        let plan = try toolCallPrefill(for: request, toolSelectionModelID: toolSelectionModelID)
         let input = try userInput(
             for: request,
             templateSupportsThinkingToggle: templateSupportsThinkingToggle,
             templateSupportsPreserveThinking: templateSupportsPreserveThinking,
-            nativeVisionProfile: nativeVisionProfile
+            nativeVisionProfile: nativeVisionProfile,
+            toolSelectionModelID: toolSelectionModelID
         )
         let lmInput = try await context.processor.prepare(input: input)
-        guard let plan = try toolCallPrefill(for: request, toolSelectionModelID: toolSelectionModelID) else {
+        guard let plan else {
             return (lmInput, nil)
         }
         guard let tokens = appendingToolCallPrefill(

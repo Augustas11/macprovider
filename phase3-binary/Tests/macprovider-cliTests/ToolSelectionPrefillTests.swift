@@ -160,8 +160,129 @@ final class ToolSelectionPrefillTests: XCTestCase {
         // The continuation alone is not a call; without the prefill it fails.
         XCTAssertThrowsError(try ModelRuntime.parseGeneratedOutput(
             filteredText: continuation, generatedTokenIDs: [], decode: { _ in "" }, request: named,
-            mode: .complete(), defaultCompletionTokens: 9
+            mode: .complete(), defaultCompletionTokens: 9, toolCallPrefill: nil
         ))
+    }
+
+    func testPrefilledParallelCallsAndWrongFunctionAfterNamedPrefill() throws {
+        let call = "<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call>"
+        var body = try JSONSerialization.jsonObject(with: JSONSerialization.data(withJSONObject: [
+            "model": qwen, "messages": [["role": "user", "content": "x"]], "max_tokens": 100,
+            "tool_choice": "required", "parallel_tool_calls": true,
+            "tools": [["type": "function", "function": ["name": "get_time", "parameters": [
+                "type": "object", "properties": ["city": ["type": "string"]],
+                "required": ["city"], "additionalProperties": false,
+            ]]]],
+        ])) as! [String: Any]
+        let required = try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: body))
+        let two = try ModelRuntime.parseGeneratedOutput(
+            filteredText: "<function=get_time>\n" + call + "\n<tool_call>\n<function=get_time>\n" + call,
+            generatedTokenIDs: [], decode: { _ in "" }, request: required, mode: .complete(),
+            defaultCompletionTokens: 9, toolCallPrefill: "<tool_call>\n"
+        )
+        XCTAssertEqual(two.toolCalls.map(\.functionName), ["get_time", "get_time"])
+        XCTAssertNoThrow(try ModelRuntime.validateStructuredCompletion(CompletionResult(
+            content: two.content, finishReason: "stop", promptTokens: 1, completionTokens: 9,
+            toolCalls: two.toolCalls, settlementDisposition: .eligibleOwner
+        ), request: required))
+
+        // Named prefill fixes the first call; a second call to another
+        // function still fails validation and exposes nothing.
+        body["tool_choice"] = named("get_time")
+        body["tools"] = (body["tools"] as! [[String: Any]]) + [["type": "function", "function": ["name": "get_weather", "parameters": [
+            "type": "object", "properties": ["city": ["type": "string"]],
+            "required": ["city"], "additionalProperties": false,
+        ]]]]
+        let named = try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: body))
+        let mixed = try ModelRuntime.parseGeneratedOutput(
+            filteredText: call + "\n<tool_call>\n<function=get_weather>\n" + call,
+            generatedTokenIDs: [], decode: { _ in "" }, request: named, mode: .complete(),
+            defaultCompletionTokens: 9, toolCallPrefill: "<tool_call>\n<function=get_time>\n"
+        )
+        XCTAssertThrowsError(try ModelRuntime.validateStructuredCompletion(CompletionResult(
+            content: mixed.content, finishReason: "stop", promptTokens: 1, completionTokens: 9,
+            toolCalls: mixed.toolCalls, settlementDisposition: .eligibleOwner
+        ), request: named)) { error in
+            XCTAssertEqual((error as? APIError)?.code, "tool_selection_validation_failed")
+        }
+        // Trailing text after the prefilled call is not a successful call.
+        XCTAssertThrowsError(try ModelRuntime.parseGeneratedOutput(
+            filteredText: call + " done", generatedTokenIDs: [], decode: { _ in "" }, request: named,
+            mode: .complete(), defaultCompletionTokens: 9, toolCallPrefill: "<tool_call>\n<function=get_time>\n"
+        ))
+    }
+
+    /// SPEC-038 AC-6c batched rows parse the prefill they were prompted with.
+    func testBatchedRowFinalizeParsesItsPrefill() throws {
+        let pieces = ["<parameter=city>", "\nParis\n", "</parameter>", "\n</function>", "\n</tool_call>"]
+        let ids = Array(pieces.indices)
+        let request = try request(choice: named("get_time"))
+        let result = ContinuousBatchSchedulerResult(
+            requestID: "r", conversationKey: "", generatedTokens: ids, outputTokens: ids,
+            promptTokens: 3, completionTokens: ids.count, emittedTokens: ids.count, cachedPromptTokens: 0,
+            terminalStatus: .stop, errorCode: nil, snapshot: nil, settlementDisposition: .eligibleOwner,
+            retainedCache: nil, stopCause: nil
+        )
+        func finalize(_ prefill: String?) throws -> ModelRuntime.ContinuousBatchFinalizedRow {
+            try ModelRuntime.finalizeContinuousBatchRow(
+                request: request, result: result, modelStopTokenIDs: [], promptTokenIDs: [1, 2, 3],
+                decode: { $0.map { pieces[$0] }.joined() }, stopTokenFilter: StopTokenFilter(tokens: []),
+                generationMilliseconds: 0, modelHash: nil, toolCallPrefill: prefill
+            )
+        }
+        let row = try finalize("<tool_call>\n<function=get_time>\n")
+        XCTAssertEqual(row.completion.toolCalls?.map(\.functionName), ["get_time"])
+        XCTAssertEqual(row.completion.content, "")
+        XCTAssertEqual(row.completion.finishReason, "tool_calls")
+        XCTAssertThrowsError(try finalize(nil), "a row that loses its prefill must fail, not succeed")
+    }
+
+    func testPrefillRequiresTheSameTokensAsJointEncoding() {
+        // A tokenizer that merges across the boundary would change the token
+        // sequence; the prefill is then skipped (validation only).
+        struct MergingTokenizer: MLXLMCommon.Tokenizer {
+            let base = PrefillFixtureTokenizer()
+            var bosToken: String? { nil }
+            var eosToken: String? { base.eosToken }
+            var unknownToken: String? { nil }
+            func encode(text: String, addSpecialTokens: Bool) -> [Int] {
+                text.hasSuffix("</think>\n\n<tool_call>\n") ? [9_999] : base.encode(text: text, addSpecialTokens: addSpecialTokens)
+            }
+            func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String { base.decode(tokenIds: tokenIds, skipSpecialTokens: skipSpecialTokens) }
+            func convertTokenToId(_ token: String) -> Int? { base.convertTokenToId(token) }
+            func convertIdToToken(_ id: Int) -> String? { base.convertIdToToken(id) }
+            func applyChatTemplate(messages: [[String: any Sendable]], tools: [[String: any Sendable]]?, additionalContext: [String: any Sendable]?) throws -> [Int] { [] }
+        }
+        let tokenizer = MergingTokenizer()
+        let prompt = tokenizer.encode(text: generationPrompt, addSpecialTokens: false)
+        XCTAssertNil(ModelRuntime.appendingToolCallPrefill(
+            "<tool_call>\n", generationPromptSuffix: generationPrompt, to: prompt, tokenizer: tokenizer
+        ))
+    }
+
+    /// A profiled model served under a local alias renders tool history in its
+    /// own template format.
+    func testAliasRequestRendersHistoryWithTheProfiledIdentity() throws {
+        let request = try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: [
+            "model": "local/served-name", "max_tokens": 100, "tool_choice": named("get_time"),
+            "messages": [
+                ["role": "user", "content": "Weather?"],
+                ["role": "assistant", "content": "", "tool_calls": [["id": "call_0123456789abcdef", "type": "function",
+                    "function": ["name": "get_weather", "arguments": #"{"city":"Paris"}"#]]]],
+                ["role": "tool", "tool_call_id": "call_0123456789abcdef", "content": "sunny"],
+                ["role": "user", "content": "And the time?"],
+            ],
+            "tools": [["type": "function", "function": ["name": "get_weather", "parameters": [
+                "type": "object", "properties": ["city": ["type": "string"]],
+                "required": ["city"], "additionalProperties": false,
+            ]]], ["type": "function", "function": ["name": "get_time", "parameters": [
+                "type": "object", "properties": ["city": ["type": "string"]],
+                "required": ["city"], "additionalProperties": false,
+            ]]]],
+        ]))
+        XCTAssertThrowsError(try ModelRuntime.userInput(for: request), "unchanged without a profiled identity")
+        let input = try ModelRuntime.userInput(for: request, toolSelectionModelID: qwen)
+        XCTAssertEqual(renderedToolNames(input), ["get_time"])
     }
 
     // MARK: Buyer-visible output
