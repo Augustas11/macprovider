@@ -34,7 +34,7 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.9` | `dbe8bcb39a00e31b8ba9a0602c60d9388fca247d` | `3.32.3` (`3b339ad6…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.9.4` | `ce3bb5235317367c61c054311a830b1e81aaa6ea` | `3.32.3` (`3b339ad6…`) |
 | `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.8` | `745f5e4872054ae2c1c497d2351a61b6d89e8a05` | `0.32.3` (`19601207…`) |
 | `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.2-macprovider.5` | `49d94e9fece0849443fa414e2d47813f68a51eaa` | `v0.32.2` (`1f8e74e3…`) |
 
@@ -50,7 +50,7 @@ the mlx-swift-lm fork keeps upstream's tools version.
 Every rebase replays these stacks and drops any patch upstream now carries
 (record which, and why it is equivalent).
 
-mlx-swift-lm (`3.32.3..3.32.3-macprovider.9`):
+mlx-swift-lm (`3.32.3..3.32.3-macprovider.9.4`):
 
 | Patch | Commits | What it carries |
 | --- | --- | --- |
@@ -64,6 +64,7 @@ mlx-swift-lm (`3.32.3..3.32.3-macprovider.9`):
 | Compile-state ownership | `7be182c` (upstream #631, `-x`), `905170f` | The fused GDN projection and every array a verify trace reads are declared compile state. |
 | Core pin | `37f0d7c`, `5203b73`, `45ffd95`, `b07d662`, `dbe8bcb` | Resolves the mlx-swift fork. |
 | Tests | `8941054`, `72c4ab0` | Prepared fused-GDN compiled-verify fixture and in-place reload regression. |
+| Qwen2-VL per-image vision attention (`.9.4`) | `24856d0`, `983fef9`, `c453f72`, `ce3bb52` | `Qwen2VL.swift` vision attention segmented per image (issue #2016) plus `Qwen2VLVisionSegmentationTests`; `983fef9` drops the leading batch axis the multimodal rotary embedding leaves before the segmented attention; `c453f72` batches equal-length blocks into one attention call and adds video/dtype tests; `ce3bb52` (test-only) expects the Qwen2-VL append-only media split to match the full prefill. The only change from `.9` (`dbe8bcb`); every other model's decode path is byte-identical. Tags `3.32.3-macprovider.9.1` (`24856d07…`, traps at runtime on the `cu_seqlens` precondition) `3.32.3-macprovider.9.2` (`983fef9a…`) and `3.32.3-macprovider.9.3` (`c453f72e…`) are superseded and must not be pinned. |
 
 `784f021` (Swift 6.1 tools version) is reverted by `e81dd7c`; drop both on the
 next rebase.
@@ -365,7 +366,7 @@ Measure TTFT, decode tok/s, peak RSS, Metal memory, energy/thermal state, and co
 - **RED:** any correctness, ownership, rollback, accounting, tool parsing, cold-cache ABI, artifact-parity, or unexplained performance-budget failure. Revert the pin candidate.
 - **BLOCKED:** required upstream release/package/toolchain condition is absent. Keep production pins unchanged.
 
-Current protected baseline (2026-10-16): fork `mlx-swift-lm 3.32.3-macprovider.9` (`dbe8bcb3…`, upstream `3.32.3`), fork `mlx-swift 0.32.3-macprovider.8` (`745f5e48…`, upstream `0.32.3`), and fork MLX core `v0.32.2-macprovider.5` (`49d94e9f…`, upstream `v0.32.2`), built on Xcode 26.6 / Swift 6.3.3 / macOS SDK 26.5; `swift-transformers` and `swift-jinja` exactly as pinned in `phase3-binary/Package.resolved`. Previous baseline (2026-09-04): `mlx-swift-lm 3.31.4`, `mlx-swift 0.31.4`, `swift-transformers 1.3.4`, `swift-jinja 2.4.2` on Xcode 16.4 / Swift 6.1.
+Current protected baseline (2026-10-17): fork `mlx-swift-lm 3.32.3-macprovider.9.4` (`ce3bb523…`, upstream `3.32.3`; `.9` (`dbe8bcb3…`) plus the Qwen2-VL per-image vision attention fix only), fork `mlx-swift 0.32.3-macprovider.8` (`745f5e48…`, upstream `0.32.3`), and fork MLX core `v0.32.2-macprovider.5` (`49d94e9f…`, upstream `v0.32.2`), built on Xcode 26.6 / Swift 6.3.3 / macOS SDK 26.5; `swift-transformers` and `swift-jinja` exactly as pinned in `phase3-binary/Package.resolved`. Previous baseline (2026-09-04): `mlx-swift-lm 3.31.4`, `mlx-swift 0.31.4`, `swift-transformers 1.3.4`, `swift-jinja 2.4.2` on Xcode 16.4 / Swift 6.1.
 
 `swift-transformers` was moved `1.0.0 → 1.3.3` by Dependabot #1336 without the
 #966 token-exact gate, then to `1.3.4` under that gate (2026-09-04). The gate is
