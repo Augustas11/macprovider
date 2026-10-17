@@ -1,0 +1,4 @@
+leg5 status=pass family=glm5_next serve_path_verified=True admissions=3 max_batch_depth=2 parity_proposed=7 parity_accepted=5
+leg5 rows=1 native_over_ordinary=1.270 ordinary_e2e_tps=38.2 native_e2e_tps=48.4 acceptance=0.889 greedy_equal=True
+leg5 rows=4 native_over_ordinary=0.787 ordinary_e2e_tps=65.6 native_e2e_tps=51.5 acceptance=0.870 greedy_equal=True
+leg5 mtp-e2e PASS

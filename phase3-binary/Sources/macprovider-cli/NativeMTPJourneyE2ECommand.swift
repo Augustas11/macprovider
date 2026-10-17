@@ -38,6 +38,8 @@ struct NativeMTPJourneyE2ECommand: AsyncParsableCommand {
             FileHandle.standardError.write(Data("native-mtp-journey-e2e: set MACPROVIDER_NATIVE_MTP_E2E=1 on the Mac Studio\n".utf8))
             throw ExitCode(2)
         }
+        // Before any MLX device use (the host check samples the GPU).
+        NativeMTPHardwareE2ERunner.applyServeProcessSetup(rootPath: root)
         try NativeMTPHardwareE2ERunner.requireStudioHost()
         guard (2...8).contains(qualifiedSlots),
               (1...qualifiedSlots).contains(maxNativeActiveRows),
@@ -84,13 +86,147 @@ private struct NativeMTPJourneyStep {
     }
 }
 
-private final class NativeMTPJourneyRunner {
+final class NativeMTPJourneyRunner {
     private let root: String
     private let modelID: String
     private let qualifiedSlots: Int
     private let maxNativeActiveRows: Int
     private let maxPromptTokens: Int
-    private static let blockTokens = 32
+    /// The tuple's request profile admits sampled rows (Qwen3.5). A
+    /// greedy-only tuple (glm5_next) must route them to ordinary decode with
+    /// reason `sampling` (SPEC-048 R004).
+    private var admitsSampledRows = true
+    /// step-05 forces rejections at the fixture's real paged-KV block
+    /// boundaries: the family block (Qwen3.5 32, glm5_next 256).
+    static func boundaryBlockTokens(family: NativeMTPHardwareE2EFamily) -> Int {
+        family.blockSizeTokens
+    }
+
+    /// step-05 boundary row length: at least four blocks, so a large block
+    /// still has several boundaries (Qwen3.5 keeps 256).
+    /// step-05: the backend recomputes a native row's drafter independently
+    /// on its first committed round and then each time its prefix crosses
+    /// another recompute interval. Holds when the first after-finalize record
+    /// carries a recompute and every later one is within one interval (plus
+    /// one round's commit) of the latest recompute at or before it.
+    static func drafterRecomputeCoverageHolds(
+        finalizeTokenCounts: [Int],
+        recomputedTokenCounts: [Int],
+        intervalTokens: Int = PagedKVSharedForwardBackend.labDrafterRecomputeIntervalTokens,
+        roundSlackTokens: Int = 8
+    ) -> Bool {
+        guard let first = finalizeTokenCounts.first,
+              recomputedTokenCounts.first == first
+        else { return false }
+        return finalizeTokenCounts.allSatisfy { tokens in
+            guard let latest = recomputedTokenCounts.filter({ $0 <= tokens }).max() else { return false }
+            return tokens - latest <= intervalTokens + roundSlackTokens
+        }
+    }
+
+    /// One committed native round of a row, as step 05 compares it.
+    struct NativeRoundRecord {
+        /// The bridge's per-row committed-round sequence number (nil when the
+        /// record carries none, which fails the comparison).
+        var round: Int?
+        var tokens: Int
+        var digest: String
+        var proposedTokens: Int
+        var committedProposals: Int?
+
+        /// The round proposed at least one token and committed fewer than it
+        /// proposed (at depth 1: its proposal was rejected).
+        var rejectedAProposal: Bool {
+            guard let committedProposals else { return false }
+            return proposedTokens > 0 && committedProposals < proposedTokens
+        }
+    }
+
+    /// The production record path: one row's after-finalize observer records,
+    /// in the order the observer received them.
+    static func nativeRoundRecords(_ records: [NativeMTPStateDigestRecord], requestID: String) -> [NativeRoundRecord] {
+        records.filter { $0.requestID == requestID && $0.phase == .afterFinalize }.map {
+            NativeRoundRecord(
+                round: $0.nativeRound,
+                tokens: $0.committedKVTokenCount,
+                digest: $0.cacheDigestSHA256,
+                proposedTokens: $0.proposedTokens,
+                committedProposals: $0.committedProposalTokens
+            )
+        }
+    }
+
+    /// step-05 target-state oracle (SPEC-048 MTP-6). Ordinary decode records
+    /// its row state once per lockstep window, so the comparable token counts
+    /// are the ordinary records inside the native row's range. `native` is one
+    /// row's after-finalize records; each carries the bridge's committed-round
+    /// sequence number. The sequence must be exactly 0, 1, 2, ... in record
+    /// order with strictly increasing token counts: a missing, duplicated or
+    /// reordered record fails closed. A compared record follows a rejection
+    /// when the round numbered one less rejected a proposal, so its own verify
+    /// ran on rolled-back state. Holds when the sequence is intact, every
+    /// native record at a comparable count has the ordinary digest, at least
+    /// a quarter of those counts (and one) are compared, and at least one
+    /// compared record follows a rejection.
+    struct AlignedCacheComparison {
+        let roundsOrdered: Bool
+        let pairs: Int
+        let equalPairs: Int
+        let pairsFollowingRejection: Int
+        let comparableOrdinaryCounts: Int
+        let mismatchTokenCounts: [Int]
+
+        var holds: Bool {
+            roundsOrdered
+                && pairs >= 1
+                && equalPairs == pairs
+                && pairs * 4 >= comparableOrdinaryCounts
+                && pairsFollowingRejection >= 1
+        }
+    }
+
+    static func alignedCacheComparison(
+        native: [NativeRoundRecord],
+        ordinary: [(tokens: Int, digest: String)]
+    ) -> AlignedCacheComparison {
+        let roundsOrdered = native.indices.allSatisfy { index in
+            native[index].round == index && (index == 0 || native[index].tokens > native[index - 1].tokens)
+        }
+        let ordinaryByTokens = Dictionary(ordinary.map { ($0.tokens, $0.digest) }, uniquingKeysWith: { _, latest in latest })
+        let pairs = native.indices.compactMap { index in
+            ordinaryByTokens[native[index].tokens].map { (index: index, ordinary: $0) }
+        }
+        let lowest = native.map(\.tokens).min()
+        let highest = native.map(\.tokens).max()
+        let comparable = ordinaryByTokens.keys.filter { tokens in
+            guard let lowest, let highest else { return false }
+            return tokens >= lowest && tokens <= highest
+        }
+        let mismatches = pairs.filter { native[$0.index].digest != $0.ordinary }.map { native[$0.index].tokens }
+        // Only meaningful on an intact sequence, where index - 1 is round - 1.
+        let followingRejection = roundsOrdered ? pairs.filter { pair in
+            pair.index > 0 && native[pair.index - 1].rejectedAProposal
+        } : []
+        return AlignedCacheComparison(
+            roundsOrdered: roundsOrdered,
+            pairs: pairs.count,
+            equalPairs: pairs.count - mismatches.count,
+            pairsFollowingRejection: followingRejection.count,
+            comparableOrdinaryCounts: comparable.count,
+            mismatchTokenCounts: Array(mismatches.prefix(16))
+        )
+    }
+
+    static func boundaryRowTokens(blockTokens: Int) -> Int {
+        max(256, 4 * blockTokens)
+    }
+
+    /// The step-05 override for `family`. Qwen3.5 keeps the crossing-only
+    /// rule it always had; a larger block also forces the round that starts
+    /// on a boundary an accepted round stepped over.
+    static func boundaryMode(family: NativeMTPHardwareE2EFamily) -> NativeMTPLabProposalOverride.Mode {
+        .blockBoundary(blockTokens: boundaryBlockTokens(family: family), includeBlockStart: family != .qwen35)
+    }
 
     init(root: String, modelID: String, qualifiedSlots: Int, maxNativeActiveRows: Int, maxPromptTokens: Int) {
         self.root = root
@@ -101,7 +237,10 @@ private final class NativeMTPJourneyRunner {
     }
 
     func run() async throws -> (document: [String: Any], passed: Bool) {
-        let outputBudget = 512
+        let family = NativeMTPHardwareE2ERunner(rootPath: root).family
+        admitsSampledRows = family.admitsSampledRows
+        let boundaryTokens = Self.boundaryRowTokens(blockTokens: Self.boundaryBlockTokens(family: family))
+        let outputBudget = max(512, boundaryTokens)
         let runner = NativeMTPHardwareE2ERunner(
             rootPath: root,
             modelID: modelID,
@@ -124,7 +263,7 @@ private final class NativeMTPJourneyRunner {
         let native = fixture.runtimes.native
         let override = NativeMTPLabProposalOverride(rules: [
             (prefix: "journey-reject-all-", mode: .everyRound),
-            (prefix: "journey-boundary-", mode: .blockBoundary(blockTokens: Self.blockTokens)),
+            (prefix: "journey-boundary-", mode: Self.boundaryMode(family: family)),
         ])
         guard await native.installLabNativeMTPProposalOverride(override) else {
             throw NativeMTPHardwareE2EError.assertionFailed("native runtime has no continuous-batch scheduler")
@@ -135,6 +274,7 @@ private final class NativeMTPJourneyRunner {
         // continues so one failure does not hide the others.
         var steps: [NativeMTPJourneyStep] = []
         func run(_ id: String, _ body: () async throws -> NativeMTPJourneyStep) async {
+            let started = Date()
             do {
                 steps.append(try await body())
             } catch {
@@ -143,12 +283,24 @@ private final class NativeMTPJourneyRunner {
                 failed.details["error"] = String(describing: error)
                 steps.append(failed)
             }
+            // The result document prints only at the end; a run killed at its
+            // time limit still shows which steps finished, how, and how long.
+            if let step = steps.last {
+                let status = step.document["status"] as? String ?? "fail"
+                let failing = step.checks.filter { !$0.1 }.map(\.0).prefix(8).joined(separator: ",")
+                FileHandle.standardError.write(Data(
+                    "native-mtp-journey-e2e: step=\(step.id) status=\(status) elapsed_s=\(Int(Date().timeIntervalSince(started))) failing=\(failing.isEmpty ? "-" : failing)\n".utf8
+                ))
+            }
         }
         await run("step-04-serial-token-oracle") {
             try await serialOracle(ordinary: ordinary, native: native, recorder: recorder, proposalDepth: fixture.admission.maxProposalDepth)
         }
         await run("step-05-cache-state-boundary") {
-            try await cacheStateBoundary(ordinary: ordinary, native: native, recorder: recorder, override: override)
+            try await cacheStateBoundary(
+                ordinary: ordinary, native: native, recorder: recorder, override: override,
+                boundaryTokens: boundaryTokens
+            )
         }
         await run("step-06-streaming-stop") {
             try await streamingStop(ordinary: ordinary, native: native, recorder: recorder)
@@ -209,7 +361,7 @@ private final class NativeMTPJourneyRunner {
             "qualified_slots": qualifiedSlots,
             "max_native_active_rows": maxNativeActiveRows,
             "max_prompt_tokens": maxPromptTokens,
-            "request_feature_profile": NativeMTPAdmissionSidecar.sampledRequestFeatureProfile,
+            "request_feature_profile": family.requestFeatureProfile,
             "machine": [
                 "chip": fixture.machine.chip,
                 "ram_gb": fixture.machine.ramGB,
@@ -256,6 +408,14 @@ private final class NativeMTPJourneyRunner {
             let actual = try await native.complete(request)
             let delta = NativeMTPStatusDelta(before: before, after: await native.currentSnapshot().nativeMTPStatus)
             step.check("\(id).parity", same(expected, actual))
+            if temperature != 0 || topP != 1, !admitsSampledRows {
+                // Greedy-only tuple: the sampled row is served by ordinary
+                // decode, refused at admission with reason `sampling`.
+                step.check("\(id).routed_ordinary_sampling", routedOrdinaryForSampling(recorder, id))
+                step.check("\(id).no_native_proposals", delta.proposedTokens == 0)
+                compared += 1
+                continue
+            }
             step.check("\(id).native_admitted", lastPath(recorder, id) == .nativeMTP)
             step.check("\(id).proposed", delta.proposedTokens > 0)
             accepted += delta.acceptedTokens
@@ -300,7 +460,8 @@ private final class NativeMTPJourneyRunner {
         ordinary: ModelRuntime,
         native: ModelRuntime,
         recorder: NativeMTPHardwareAdmissionRecorder,
-        override: NativeMTPLabProposalOverride
+        override: NativeMTPLabProposalOverride,
+        boundaryTokens: Int
     ) async throws -> NativeMTPJourneyStep {
         var step = NativeMTPJourneyStep(id: "step-05-cache-state-boundary")
         let ordinaryStateObserver = NativeMTPStateDigestObserver()
@@ -321,7 +482,7 @@ private final class NativeMTPJourneyRunner {
                 let request = try makeRequest(
                     id: id,
                     prompt: prompt,
-                    maxTokens: 256,
+                    maxTokens: id.hasPrefix("journey-boundary-") ? boundaryTokens : 256,
                     temperature: 0,
                     topP: 1
                 )
@@ -379,20 +540,13 @@ private final class NativeMTPJourneyRunner {
                 let beforeAbort = stateRecords.filter { $0.phase == .beforeAbort }
                 let afterAbort = stateRecords.filter { $0.phase == .afterAbort }
                 let terminalPhasePresent = phases.contains(.afterFinalize) || phases.contains(.afterAbort) || phases.contains(.abort)
-                let ordinaryCacheByTokenCount = Dictionary(ordinaryAfterDecode.map { ($0.committedKVTokenCount, $0.cacheDigestSHA256) }, uniquingKeysWith: { _, latest in latest })
-                let alignedFinalizePairs = afterFinalize.compactMap { nativeRecord -> (native: NativeMTPStateDigestRecord, ordinaryCache: String)? in
-                    guard let ordinaryCache = ordinaryCacheByTokenCount[nativeRecord.committedKVTokenCount] else { return nil }
-                    return (nativeRecord, ordinaryCache)
-                }
-                let alignedPrefixCacheMatches = !afterFinalize.isEmpty
-                    && alignedFinalizePairs.count == afterFinalize.count
-                    && alignedFinalizePairs.allSatisfy { $0.native.cacheDigestSHA256 == $0.ordinaryCache }
-                let abortPairs = Array(zip(beforeAbort, afterAbort))
-                let abortStateStable = !abortPairs.isEmpty && beforeAbort.count == afterAbort.count && abortPairs.allSatisfy { before, after in
-                    before.committedKVTokenCount == after.committedKVTokenCount
-                        && before.cacheDigestSHA256 == after.cacheDigestSHA256
-                        && before.drafterDigestSHA256 == after.drafterDigestSHA256
-                }
+                // The ordinary oracle's state exists only at its decode-window
+                // ends (one record per window), so only those token counts can
+                // be compared; every native round that lands on one must match.
+                let alignment = Self.alignedCacheComparison(
+                    native: Self.nativeRoundRecords(stateRecords, requestID: id),
+                    ordinary: ordinaryAfterDecode.map { (tokens: $0.committedKVTokenCount, digest: $0.cacheDigestSHA256) }
+                )
                 step.check("\(id).ordinary_state_observer_after_decode", !ordinaryAfterDecode.isEmpty)
                 step.check("\(id).native_state_observer_records", !stateRecords.isEmpty)
                 step.check("\(id).native_state_observer_after_verify", !afterVerify.isEmpty)
@@ -403,11 +557,16 @@ private final class NativeMTPJourneyRunner {
                         && ($0.drafterDigestSHA256.map { isSHA256Hex($0) } ?? true)
                         && ($0.pendingTargetDigestSHA256.map { isSHA256Hex($0) } ?? true)
                 })
-                step.check("\(id).aligned_prefix_cache_digest_comparison", alignedPrefixCacheMatches)
+                step.check("\(id).aligned_prefix_cache_digest_comparison", alignment.holds)
                 let recomputedDrafterRecords = stateRecords.filter {
                     $0.phase == .afterFinalize && $0.drafterRecomputeDigestSHA256 != nil
                 }
-                step.check("\(id).independent_drafter_recomputation_observed", !afterFinalize.isEmpty && recomputedDrafterRecords.count == afterFinalize.count)
+                // The O(context) recompute runs on the first committed round
+                // and once per crossed recompute interval, not every round.
+                step.check("\(id).independent_drafter_recomputation_observed", Self.drafterRecomputeCoverageHolds(
+                    finalizeTokenCounts: afterFinalize.map(\.committedKVTokenCount),
+                    recomputedTokenCounts: recomputedDrafterRecords.map(\.committedKVTokenCount)
+                ))
                 // Drafter byte parity is diagnostic: packed/full-prefix kernels
                 // may accumulate differently. Target-cache and token parity
                 // remain mandatory checks above (SPEC-048 MTP-5/MTP-6).
@@ -415,8 +574,13 @@ private final class NativeMTPJourneyRunner {
                     $0.drafterDigestSHA256 != nil && $0.drafterDigestSHA256 == $0.drafterRecomputeDigestSHA256
                 }
                 if id.hasPrefix("journey-reject-all-") {
-                    step.check("\(id).native_state_observer_reject_abort", phases.contains(.beforeAbort) && phases.contains(.afterAbort))
-                    step.check("\(id).abort_cache_and_drafter_state_stable", abortStateStable)
+                    // A rejected depth-1 round still commits its base column
+                    // (MTP-6 commit(0)); only cancellation aborts a round, and
+                    // step 09 checks abort stability.
+                    step.check("\(id).rejected_rounds_commit_without_abort",
+                        !phases.contains(.beforeAbort) && !phases.contains(.afterAbort)
+                            && afterFinalize.count >= forced
+                            && afterFinalize.allSatisfy { $0.committedProposalTokens == 0 })
                 }
                 step.details[id] = [
                     "forced_rounds": forced,
@@ -428,13 +592,18 @@ private final class NativeMTPJourneyRunner {
                     "ordinary_state_observer_record_count": ordinaryStateRecords.count,
                     "native_state_observer_phases": Array(phases.map(\.rawValue)).sorted(),
                     "native_state_observer_record_count": stateRecords.count,
-                    "aligned_prefix_cache_pairs": alignedFinalizePairs.count,
+                    "aligned_prefix_cache_pairs": alignment.pairs,
+                    "aligned_prefix_cache_equal_pairs": alignment.equalPairs,
+                    "aligned_prefix_cache_pairs_following_rejection": alignment.pairsFollowingRejection,
+                    "native_rounds_ordered": alignment.roundsOrdered,
+                    "aligned_prefix_cache_comparable_ordinary_counts": alignment.comparableOrdinaryCounts,
+                    "aligned_prefix_cache_mismatch_token_counts": alignment.mismatchTokenCounts,
                     "independent_drafter_recompute_records": recomputedDrafterRecords.count,
                     "independent_drafter_recompute_byte_equal": drafterRecomputeByteEqual,
-                    "abort_state_pairs": abortPairs.count,
+                    "abort_records": beforeAbort.count + afterAbort.count,
                     "state_observer_latest_cache_sha256": stateRecords.last?.cacheDigestSHA256 ?? "",
                     "state_observer_latest_target_sha256": stateRecords.last?.pendingTargetDigestSHA256 ?? "",
-                    "state_observer_scope": "ordinary_after_decode_vs_native_after_finalize_cache_digest",
+                    "state_observer_scope": "ordinary_window_end_vs_native_after_finalize_oracle_state_digest",
                 ]
             }
             _ = await ordinary.installLabNativeMTPStateDigestObserver(nil)
@@ -490,7 +659,14 @@ private final class NativeMTPJourneyRunner {
                 if temperature == 0 {
                     step.check("\(id).streaming_equals_non_streaming", same(expected, streamingResult))
                 }
-                step.check("\(id).native_admitted", lastPath(recorder, plainID) == .nativeMTP && lastPath(recorder, streamID) == .nativeMTP)
+                if temperature != 0, !admitsSampledRows {
+                    step.check(
+                        "\(id).routed_ordinary_sampling",
+                        routedOrdinaryForSampling(recorder, plainID) && routedOrdinaryForSampling(recorder, streamID)
+                    )
+                } else {
+                    step.check("\(id).native_admitted", lastPath(recorder, plainID) == .nativeMTP && lastPath(recorder, streamID) == .nativeMTP)
+                }
                 terminals[id] = expected.finishReason
                 streamResults[id] = streamingResult
             }
@@ -1064,6 +1240,13 @@ private final class NativeMTPJourneyRunner {
 
     private func lastPath(_ recorder: NativeMTPHardwareAdmissionRecorder, _ id: String) -> DecodePath? {
         recorder.requestSnapshot().last { $0.requestID == id }?.admission.effectivePath
+    }
+
+    /// The row was admitted to ordinary decode because the tuple does not
+    /// sign sampled rows.
+    private func routedOrdinaryForSampling(_ recorder: NativeMTPHardwareAdmissionRecorder, _ id: String) -> Bool {
+        guard let admission = recorder.requestSnapshot().last(where: { $0.requestID == id })?.admission else { return false }
+        return admission.effectivePath == .ordinary && admission.selection.nativeMTPReason == .sampling
     }
 
     private func complete(

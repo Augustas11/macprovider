@@ -1832,8 +1832,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         paddedRouteDifferences.forEach { print("  \($0)") }
     }
 
-    /// The vector-attention route port pins core `v0.32.2-macprovider.5`
-    /// (`scaled_dot_product_attention.cpp` lines 469-473, 486-523, 875): every
+    /// The vector-attention route port pins core `v0.32.4-macprovider.4`
+    /// (`scaled_dot_product_attention.cpp` lines 754-763, 772-812, 1577): every
     /// pass-count and partition-count boundary on both sides. A rebase that
     /// moves one must update the port and this table.
     func testVectorAttentionRouteMatchesTheCoreDispatchBoundaries() {
@@ -1862,6 +1862,11 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(route(8192, d: 128, mask: false), two(128, gqa: true))
         XCTAssertEqual(route(8192, d: 128, mask: true), two(128))
         XCTAssertEqual(route(8192, d: 256, mask: false), two(128))
+        // v0.32.4 adds `_gqa_12` and `_gqa_16` at head dim 128 only.
+        XCTAssertEqual(route(8192, q: 24, kv: 2, d: 128, mask: false), two(128, gqa: true))
+        XCTAssertEqual(route(8192, q: 32, kv: 2, d: 128, mask: false), two(128, gqa: true))
+        XCTAssertEqual(route(8192, q: 32, kv: 2, d: 64, mask: false), two(128))
+        XCTAssertEqual(route(8192, q: 8, kv: 2, d: 128, mask: false), two(128))
         // Max ('s').
         XCTAssertEqual(route(1023, arch: "applegpu_g15s"), one)
         XCTAssertEqual(route(1024, arch: "applegpu_g15s"), two(64))
@@ -2121,13 +2126,13 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         let quantized = try read("quantized.cpp")
         XCTAssertEqual(
             digest(region(quantized, from: { $0.hasPrefix("inline int get_qmv_batch_limit") }, through: { $0 == "}" })),
-            "53bef60bc4110c007e25e7824ddab81aaff934921c06faca58c8961c798510e8",
+            "0e3012862456a0b8a6ab5231f4e1f75fcfcabb0b80f5510baba88b45aae272ab",
             "get_qmv_batch_limit changed: re-derive ContinuousBatchDecodeRouteBound and ContinuousBatchPrefillGroupingRule"
         )
         let sdpa = try read("scaled_dot_product_attention.cpp")
         XCTAssertEqual(
             digest(region(sdpa, from: { $0.hasPrefix("void sdpa_vector_2pass(") }, through: { $0.contains("size_t k_head_stride") })),
-            "db7dbdee9644cb9902f620f34e9ecce2c108f6559190633f3ebe468e4ec7fe79",
+            "b703ced4cc336d8fea7934631dbf6d040688f95511a7e7012fce3256647d335f",
             "sdpa_vector_2pass partition/variant choice changed: re-derive PagedKVVectorAttentionRoute"
         )
         XCTAssertEqual(
@@ -2138,7 +2143,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertTrue(sdpa.contains("  if (q_pre.shape(2) <= 8) {"), "vector-mode query bound changed")
         XCTAssertEqual(
             digest(try read("kernels/sdpa_vector.h").joined(separator: "\n")),
-            "de098d50a67a865e2e64fb1700fc4819307861f009a65642679777a9a9cec7cd",
+            "32146cdd4b9982723ee696da1ad8d146682d84d2ee40098a4063a25b8a1ec322",
             "vector attention kernels changed: re-check that masked keys are skipped and keys are dealt to partitions by index"
         )
     }
@@ -3953,6 +3958,305 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
 
         XCTAssertEqual(paddedDigest, compactDigest)
         XCTAssertNotEqual(paddedDigest, changedDigest)
+    }
+
+    /// Window A2 journey steps 05 and 09: with the lab state-digest observer
+    /// installed, every glm5_next native prefill failed because the drafter
+    /// digest cut each state array as a [.., T, D] KV slab at the drafter
+    /// position; a GLM5NextAttentionCache state is already logical (empty
+    /// slots are [0]). It now hashes those arrays whole, and the digest still
+    /// tells different states apart.
+    func testDrafterDigestHashesAGLMLatentCacheStateWhole() throws {
+        try Device.withDefaultDevice(.cpu) {
+            func cache(_ latent: [Float]) -> GLM5NextAttentionCache {
+                let cache = GLM5NextAttentionCache(kpool: 4)
+                _ = cache.appendLatent(MLXArray(latent, [1, 1, latent.count, 1]))
+                return cache
+            }
+            let state = MTPDrafterState(cache: [cache([1, 2, 3])], nextPosition: 5, seedToken: nil, seedHidden: nil)
+            let same = MTPDrafterState(cache: [cache([1, 2, 3])], nextPosition: 5, seedToken: nil, seedHidden: nil)
+            let changed = MTPDrafterState(cache: [cache([1, 2, 4])], nextPosition: 5, seedToken: nil, seedHidden: nil)
+            let digest = try PagedKVSharedForwardBackend.nativeMTPDrafterDigestForTest(state: state, seed: 7)
+            XCTAssertEqual(digest, try PagedKVSharedForwardBackend.nativeMTPDrafterDigestForTest(state: same, seed: 7))
+            XCTAssertNotEqual(digest, try PagedKVSharedForwardBackend.nativeMTPDrafterDigestForTest(state: changed, seed: 7))
+        }
+    }
+
+    /// Window J: the lab digests hash each state array as concurrently
+    /// computed 1 MiB chunk digests. Every chunk is the plain SHA-256 of its
+    /// bytes, in order, and a change in any chunk changes the result.
+    func testConcurrentChunkDigestsAreOrderedPerChunkSHA256() {
+        let a = Data((0 ..< 10_000).map { UInt8($0 % 251) })
+        let b = Data((0 ..< 300).map { UInt8($0 % 7) })
+        let digests = PagedKVSharedForwardBackend.concurrentChunkDigests([a, Data(), b], chunkBytes: 4096)
+        func expected(_ data: Data) -> Data {
+            stride(from: 0, to: data.count, by: 4096).reduce(into: Data()) { result, start in
+                result.append(contentsOf: SHA256.hash(data: data[start ..< min(start + 4096, data.count)]))
+            }
+        }
+        XCTAssertEqual(digests.count, 3)
+        XCTAssertEqual(digests[0], expected(a))
+        XCTAssertEqual(digests[0].count, 3 * SHA256.byteCount)
+        XCTAssertEqual(digests[1], Data())
+        XCTAssertEqual(digests[2], expected(b))
+        var changed = a
+        changed[9_999] ^= 1
+        let changedDigests = PagedKVSharedForwardBackend.concurrentChunkDigests([changed], chunkBytes: 4096)
+        XCTAssertEqual(changedDigests[0].prefix(2 * SHA256.byteCount), digests[0].prefix(2 * SHA256.byteCount))
+        XCTAssertNotEqual(changedDigests[0], digests[0])
+    }
+
+    /// The row digest's array records see only the logical bytes: a strided
+    /// logical slice and the same values stored contiguously agree, and one
+    /// changed value in a later chunk does not.
+    func testArrayDigestRecordsHashLogicalBytesAcrossChunks() throws {
+        try Device.withDefaultDevice(.cpu) {
+            let values = (0 ..< 2 * 6 * 4).map { Float($0) }
+            let stored = MLXArray(values, [1, 2, 6, 4])
+            let logical = stored[0 ..< 4, axis: 2]
+            let compact = MLXArray((0 ..< 2).flatMap { head in
+                (0 ..< 4 * 4).map { Float(head * 24 + $0) }
+            }, [1, 2, 4, 4])
+            var changedValues = values
+            changedValues[24 + 15] += 1
+            let changed = MLXArray(changedValues, [1, 2, 6, 4])
+            let records = try PagedKVSharedForwardBackend.arrayDigestRecords([
+                (array: stored, logicalTokens: 4),
+                (array: compact, logicalTokens: nil),
+                (array: logical, logicalTokens: nil),
+                (array: changed, logicalTokens: 4),
+            ], chunkBytes: 16)
+            XCTAssertEqual(records[0], records[1])
+            XCTAssertEqual(records[0], records[2])
+            XCTAssertEqual(records[0].shape, [1, 2, 4, 4])
+            XCTAssertEqual(records[0].byteCount, 2 * 4 * 4 * 4)
+            XCTAssertEqual(records[0].chunkDigests.count, 8 * SHA256.byteCount)
+            XCTAssertNotEqual(records[0], records[3])
+            XCTAssertEqual(records[0].chunkDigests.prefix(7 * SHA256.byteCount), records[3].chunkDigests.prefix(7 * SHA256.byteCount))
+        }
+    }
+
+    /// The finalize-site drafter recompute runs on a row's first committed
+    /// round and once per crossed 256-token interval after it.
+    func testLabDrafterRecomputeIsDueOnFirstRoundAndEachCrossedInterval() {
+        typealias Backend = PagedKVSharedForwardBackend
+        XCTAssertEqual(Backend.labDrafterRecomputeIntervalTokens, 256)
+        XCTAssertTrue(Backend.labDrafterRecomputeDue(lastRecomputedPrefixTokens: nil, prefixTokens: 31))
+        XCTAssertFalse(Backend.labDrafterRecomputeDue(lastRecomputedPrefixTokens: 31, prefixTokens: 33))
+        XCTAssertFalse(Backend.labDrafterRecomputeDue(lastRecomputedPrefixTokens: 31, prefixTokens: 255))
+        XCTAssertTrue(Backend.labDrafterRecomputeDue(lastRecomputedPrefixTokens: 255, prefixTokens: 256))
+        XCTAssertTrue(Backend.labDrafterRecomputeDue(lastRecomputedPrefixTokens: 254, prefixTokens: 257))
+        XCTAssertFalse(Backend.labDrafterRecomputeDue(lastRecomputedPrefixTokens: 257, prefixTokens: 511))
+        XCTAssertTrue(Backend.labDrafterRecomputeDue(lastRecomputedPrefixTokens: 511, prefixTokens: 513))
+    }
+
+    func testJourneyDrafterRecomputeCoverageMatchesTheFinalizeSampling() {
+        let finalize = Array(stride(from: 31, through: 1_053, by: 2))
+        var last: Int?
+        var recomputed: [Int] = []
+        for tokens in finalize where PagedKVSharedForwardBackend.labDrafterRecomputeDue(
+            lastRecomputedPrefixTokens: last, prefixTokens: tokens
+        ) {
+            recomputed.append(tokens)
+            last = tokens
+        }
+        XCTAssertEqual(recomputed, [31, 257, 513, 769, 1_025])
+        XCTAssertTrue(NativeMTPJourneyRunner.drafterRecomputeCoverageHolds(
+            finalizeTokenCounts: finalize, recomputedTokenCounts: recomputed))
+        XCTAssertFalse(NativeMTPJourneyRunner.drafterRecomputeCoverageHolds(
+            finalizeTokenCounts: finalize, recomputedTokenCounts: Array(recomputed.dropFirst())))
+        XCTAssertFalse(NativeMTPJourneyRunner.drafterRecomputeCoverageHolds(
+            finalizeTokenCounts: finalize, recomputedTokenCounts: [31, 257, 769, 1_025]))
+        XCTAssertFalse(NativeMTPJourneyRunner.drafterRecomputeCoverageHolds(
+            finalizeTokenCounts: [], recomputedTokenCounts: []))
+    }
+
+    private typealias JourneyRound = NativeMTPJourneyRunner.NativeRoundRecord
+
+    private static func journeyRound(_ round: Int?, _ tokens: Int, _ digest: String, rejected: Bool) -> JourneyRound {
+        JourneyRound(round: round, tokens: tokens, digest: digest, proposedTokens: 1, committedProposals: rejected ? 0 : 1)
+    }
+
+    /// Window 13:22Z step 05: ordinary decode records one state per 16-token
+    /// window, so the old "every native round has an ordinary record" rule
+    /// could never hold. The comparison is over the window-end counts the
+    /// native row lands on, all of which must match, and a compared record
+    /// follows a rejection only when the round numbered one less rejected.
+    func testJourneyAlignedCacheComparisonUsesWindowEndCounts() {
+        typealias Runner = NativeMTPJourneyRunner
+        let ordinary = stride(from: 45, through: 125, by: 16).map { (tokens: $0, digest: "o\($0)") }
+        func rounds(_ accepted: [Bool], from start: Int = 30) -> [JourneyRound] {
+            var tokens = start
+            return accepted.enumerated().map { round, accepted in
+                tokens += accepted ? 2 : 1
+                return Self.journeyRound(round, tokens, "o\(tokens)", rejected: !accepted)
+            }
+        }
+        // Every third round rejected, from 30 tokens to past 125.
+        let native = rounds((0 ..< 60).map { $0 % 3 != 0 })
+        let matched = Runner.alignedCacheComparison(native: native, ordinary: ordinary)
+        XCTAssertTrue(matched.roundsOrdered)
+        XCTAssertEqual(matched.comparableOrdinaryCounts, 6)
+        XCTAssertGreaterThanOrEqual(matched.pairs, 2)
+        XCTAssertEqual(matched.equalPairs, matched.pairs)
+        let expectedFollowing = native.indices.filter { index in
+            index > 0 && native[index - 1].rejectedAProposal && ordinary.contains { $0.tokens == native[index].tokens }
+        }.count
+        XCTAssertGreaterThanOrEqual(expectedFollowing, 1)
+        XCTAssertEqual(matched.pairsFollowingRejection, expectedFollowing)
+        XCTAssertTrue(matched.holds)
+
+        let pairedIndex = native.indices.first { index in ordinary.contains { $0.tokens == native[index].tokens } }!
+        var mismatched = native
+        mismatched[pairedIndex].digest = "different"
+        let failed = Runner.alignedCacheComparison(native: mismatched, ordinary: ordinary)
+        XCTAssertFalse(failed.holds)
+        XCTAssertEqual(failed.mismatchTokenCounts, [native[pairedIndex].tokens])
+
+        XCTAssertFalse(Runner.alignedCacheComparison(native: [], ordinary: ordinary).holds)
+        XCTAssertFalse(Runner.alignedCacheComparison(
+            native: rounds(Array(repeating: true, count: 60)), ordinary: ordinary
+        ).holds, "no rejection at all")
+    }
+
+    /// Audit round 2: a rejected round whose own record lands on a window end
+    /// is not a comparison after a rejection; the next round's is. Round 3:
+    /// the predecessor is the bridge's round number minus one, so a missing,
+    /// duplicated, renumbered or unnumbered record fails closed.
+    func testJourneyAlignedComparisonCountsOnlyTheRoundAfterARejection() {
+        typealias Runner = NativeMTPJourneyRunner
+        let ordinary = [(tokens: 45, digest: "o45"), (tokens: 61, digest: "o61")]
+        var native: [JourneyRound] = []
+        var tokens = 30
+        for round in 0 ..< 16 {
+            let rejected = tokens + 1 == 45 || tokens + 1 == 61
+            tokens += rejected ? 1 : 2
+            native.append(Self.journeyRound(round, tokens, "o\(tokens)", rejected: rejected))
+        }
+        let selfOnly = Runner.alignedCacheComparison(native: native, ordinary: ordinary)
+        XCTAssertGreaterThanOrEqual(selfOnly.pairs, 1)
+        XCTAssertTrue(native.contains { $0.rejectedAProposal && ordinary.map(\.tokens).contains($0.tokens) })
+        XCTAssertEqual(selfOnly.pairsFollowingRejection, 0)
+        XCTAssertFalse(selfOnly.holds)
+
+        let following = [
+            Self.journeyRound(0, 42, "x", rejected: false),
+            Self.journeyRound(1, 43, "x", rejected: true),
+            Self.journeyRound(2, 45, "o45", rejected: false),
+            Self.journeyRound(3, 47, "x", rejected: false),
+        ]
+        XCTAssertEqual(Runner.alignedCacheComparison(native: following, ordinary: ordinary).pairsFollowingRejection, 1)
+        XCTAssertTrue(Runner.alignedCacheComparison(native: following, ordinary: ordinary).holds)
+        // An earlier but not immediately preceding rejection does not count.
+        var earlier = following
+        earlier[1].committedProposals = 1
+        earlier[0].committedProposals = 0
+        XCTAssertEqual(Runner.alignedCacheComparison(native: earlier, ordinary: ordinary).pairsFollowingRejection, 0)
+        // A round that proposed nothing rejected nothing.
+        var proposalFree = following
+        proposalFree[1].proposedTokens = 0
+        XCTAssertEqual(Runner.alignedCacheComparison(native: proposalFree, ordinary: ordinary).pairsFollowingRejection, 0)
+        // Missing round 1: the rejection's successor must not inherit it.
+        let missing = [following[0], following[2], following[3]]
+        let missingResult = Runner.alignedCacheComparison(native: missing, ordinary: ordinary)
+        XCTAssertFalse(missingResult.roundsOrdered)
+        XCTAssertEqual(missingResult.pairsFollowingRejection, 0)
+        XCTAssertFalse(missingResult.holds)
+        // Duplicate, reordered, renumbered from 1, unnumbered.
+        XCTAssertFalse(Runner.alignedCacheComparison(native: [following[0], following[1], following[1], following[2]], ordinary: ordinary).holds)
+        XCTAssertFalse(Runner.alignedCacheComparison(native: [following[0], following[2], following[1], following[3]], ordinary: ordinary).holds)
+        XCTAssertFalse(Runner.alignedCacheComparison(native: following.map { var r = $0; r.round = $0.round.map { $0 + 1 }; return r }, ordinary: ordinary).holds)
+        var unnumbered = following
+        unnumbered[2].round = nil
+        XCTAssertFalse(Runner.alignedCacheComparison(native: unnumbered, ordinary: ordinary).holds)
+    }
+
+    /// Round 3: through the production record path. Two bridges hold the
+    /// same token stream in a KVCacheSimple row (CPU): the ordinary one
+    /// records at every fourth token, the native one advances 2 or 1 tokens a
+    /// round and records through the bridge's finalize bookkeeping, which
+    /// numbers the rounds. The journey's extraction plus comparison holds; a
+    /// dropped after-finalize record fails closed.
+    func testJourneyComparisonOverBridgeNumberedObserverRecords() async throws {
+        try await Device.withDefaultDevice(.cpu) {
+            func backend() -> PagedKVSharedForwardBackend {
+                let descriptor = Self.bridgeDescriptor(blockSizeTokens: 4, maxPhysicalBlocks: 64)
+                return PagedKVSharedForwardBackend(
+                    container: ModelContainer(context: ModelContext(
+                        configuration: ModelConfiguration(id: descriptor.modelID),
+                        model: RuntimeBridgeFakeModel(nextTokenByInput: [:]),
+                        processor: StandInUserInputProcessor(),
+                        tokenizer: RuntimeBridgeFakeTokenizer()
+                    )),
+                    descriptor: descriptor,
+                    layerCount: 1,
+                    contiguousCacheBridge: RuntimeBridgeRecordingCacheBridge()
+                )
+            }
+            func column(_ start: Int, _ count: Int) -> (MLXArray, MLXArray) {
+                let values = (start ..< start + count).flatMap { t in (0 ..< 4).map { Float(t * 4 + $0) } }
+                return (MLXArray(values, [1, 1, count, 4]), MLXArray(values.map { -$0 }, [1, 1, count, 4]))
+            }
+            let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 64)
+            let ordinary = backend()
+            let native = backend()
+            let ordinaryCache = KVCacheSimple()
+            let nativeCache = KVCacheSimple()
+            for (bridge, cache, key) in [(ordinary, ordinaryCache, "conv:o"), (native, nativeCache, "conv:n")] {
+                let handle = try await allocator.allocate(conversationKey: key, maxTokens: 128, initialTokens: 8)
+                let prompt = column(0, 8)
+                _ = cache.update(keys: prompt.0, values: prompt.1)
+                try bridge.installRowStateForTest(caches: [cache], requestID: "row", binding: try await allocator.binding(for: handle))
+            }
+            let ordinaryObserver = NativeMTPStateDigestObserver()
+            let nativeObserver = NativeMTPStateDigestObserver()
+            ordinary.installLabNativeMTPStateDigestObserver(ordinaryObserver)
+            native.installLabNativeMTPStateDigestObserver(nativeObserver)
+            for t in 8 ..< 60 {
+                let next = column(t, 1)
+                _ = ordinaryCache.update(keys: next.0, values: next.1)
+                if (t + 1) % 4 == 0 {
+                    try await ordinary.recordLabNativeMTPStateDigest(phase: .ordinaryAfterDecode, requestIDs: ["row"])
+                }
+            }
+            var round = 0
+            while nativeCache.offset < 58 {
+                let rejected = round % 3 == 1
+                let advance = rejected ? 1 : 2
+                let next = column(nativeCache.offset, advance)
+                _ = nativeCache.update(keys: next.0, values: next.1)
+                try native.labRecordCommittedFinalizeForTest(inputs: [ContinuousBatchNativeMTPFinalizeInput(
+                    requestID: "row", proposalTokenCount: 1, committedProposalTokenCount: rejected ? 0 : 1,
+                    acceptedTokenIDs: Array(repeating: 0, count: advance), committedInputTokenCount: advance,
+                    shouldCommit: true
+                )])
+                round += 1
+            }
+            let ordinaryRecords = ordinaryObserver.snapshot().map { (tokens: $0.committedKVTokenCount, digest: $0.cacheDigestSHA256) }
+            let records = nativeObserver.snapshot()
+            XCTAssertEqual(records.filter { $0.phase == .beforeFinalize }.map(\.nativeRound), Array(0 ..< round).map { Optional($0) })
+            let rounds = NativeMTPJourneyRunner.nativeRoundRecords(records, requestID: "row")
+            XCTAssertEqual(rounds.map(\.round), Array(0 ..< round).map { Optional($0) })
+            let intact = NativeMTPJourneyRunner.alignedCacheComparison(native: rounds, ordinary: ordinaryRecords)
+            XCTAssertTrue(intact.roundsOrdered)
+            XCTAssertGreaterThanOrEqual(intact.pairs, 3)
+            XCTAssertEqual(intact.equalPairs, intact.pairs)
+            XCTAssertGreaterThanOrEqual(intact.pairsFollowingRejection, 1)
+            XCTAssertTrue(intact.holds)
+
+            // Drop the after-finalize record of a rejected round whose successor is compared.
+            let rejectedRound = try XCTUnwrap(rounds.indices.first { index in
+                index + 1 < rounds.count && rounds[index].rejectedAProposal
+                    && ordinaryRecords.contains { $0.tokens == rounds[index + 1].tokens }
+            })
+            let dropped = records.filter { !($0.phase == .afterFinalize && $0.nativeRound == rejectedRound) }
+            let gapped = NativeMTPJourneyRunner.alignedCacheComparison(
+                native: NativeMTPJourneyRunner.nativeRoundRecords(dropped, requestID: "row"),
+                ordinary: ordinaryRecords
+            )
+            XCTAssertFalse(gapped.roundsOrdered)
+            XCTAssertFalse(gapped.holds)
+        }
     }
 
     func testLabStateDigestObserverFailsClosedForPagedSlidingWindowCache() async throws {

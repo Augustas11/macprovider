@@ -24,9 +24,30 @@ struct PagedKVRuntimeParityProbeResult: Sendable, Equatable {
     let established: Bool
     let nLayers: Int
     let nNew: Int
+    /// Model forwards of the paged run: the leading 512-token prompt chunks
+    /// plus one per generated token. Every paged layer gathers twice in each.
+    let nForwards: Int
     let gatherKernelCalls: Int
     let maxLogicalBlocks: Int
     let nonIdentityPermutation: Bool
+
+    init(
+        established: Bool,
+        nLayers: Int,
+        nNew: Int,
+        nForwards: Int? = nil,
+        gatherKernelCalls: Int,
+        maxLogicalBlocks: Int,
+        nonIdentityPermutation: Bool
+    ) {
+        self.established = established
+        self.nLayers = nLayers
+        self.nNew = nNew
+        self.nForwards = nForwards ?? nNew
+        self.gatherKernelCalls = gatherKernelCalls
+        self.maxLogicalBlocks = maxLogicalBlocks
+        self.nonIdentityPermutation = nonIdentityPermutation
+    }
 
     static func failClosed(nNew: Int) -> PagedKVRuntimeParityProbeResult {
         PagedKVRuntimeParityProbeResult(
@@ -182,6 +203,16 @@ enum PagedKVRuntimeParityProbe {
                 let paged = try Self.greedyGenerate(model: model, promptTokens: promptTokens, nNew: nNew) {
                     zip(stockLayout, kinds).map { _, kind in
                         if case .recurrentMamba = kind { return MambaCache() as KVCache }
+                        if case .pagedMLA(let kpool) = kind {
+                            return PagedMLALatentCache(
+                                kpool: kpool,
+                                blockSizeTokens: blockSizeTokens,
+                                maxPhysicalBlocks: maxPhysicalBlocks,
+                                poolEpoch: 1,
+                                binding: binding,
+                                reconstructViaGather: true
+                            ) as KVCache
+                        }
                         let window: Int?
                         if case .slidingWindow(let windowTokens) = kind {
                             window = windowTokens
@@ -206,6 +237,7 @@ enum PagedKVRuntimeParityProbe {
                     established: established,
                     nLayers: nLayers,
                     nNew: nNew,
+                    nForwards: Self.prefillChunkForwards(promptTokens: promptTokens.count) + nNew,
                     gatherKernelCalls: calls,
                     maxLogicalBlocks: maxBlocks,
                     nonIdentityPermutation: nonIdentity
@@ -720,6 +752,16 @@ enum PagedKVRuntimeParityProbe {
             backend.finish(requestID: row.id)
         }
         return generated
+    }
+
+    /// Prompt chunks `greedyGenerate` runs before its generation loop (the
+    /// last, possibly partial, chunk produces the first token).
+    static func prefillChunkForwards(
+        promptTokens: Int,
+        chunkSize: Int = ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens
+    ) -> Int {
+        guard promptTokens > 0 else { return 0 }
+        return (promptTokens - 1) / max(1, chunkSize)
     }
 
     private static func greedyGenerate(

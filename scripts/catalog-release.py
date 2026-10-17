@@ -559,17 +559,28 @@ def normalize_model_key(model: str) -> str:
     def served_alias(canonical_vendor: str) -> bool:
         return namespace in {"", "mlx-community", canonical_vendor}
 
-    if served_alias("meta-llama") and key.startswith("llama-"):
-        return "meta-llama/" + key
-    if served_alias("meta-llama") and key.startswith("meta-llama-"):
-        return "meta-llama/" + key[len("meta-"):]
-    if served_alias("nvidia") and key.startswith("nvidia-nemotron-"):
-        return key[len("nvidia-"):]
-    if served_alias("openai") and key.startswith("gpt-oss-"):
-        return "openai/" + key
-    if served_alias("z-ai") and key.startswith("glm-"):
-        return "z-ai/" + key
-    return key
+    def rewritten() -> str:
+        if served_alias("meta-llama") and key.startswith("llama-"):
+            return "meta-llama/" + key
+        if served_alias("meta-llama") and key.startswith("meta-llama-"):
+            return "meta-llama/" + key[len("meta-"):]
+        if served_alias("nvidia") and key.startswith("nvidia-nemotron-"):
+            return key[len("nvidia-"):]
+        if served_alias("openai") and key.startswith("gpt-oss-"):
+            return "openai/" + key
+        if served_alias("z-ai") and key.startswith("glm-"):
+            return "z-ai/" + key
+        return key
+
+    normalized = rewritten()
+    return EXACT_MODEL_KEY_ALIASES.get(normalized, normalized)
+
+
+# Go `exactModelKeyAliases` (formula.go): whole normalized keys only.
+EXACT_MODEL_KEY_ALIASES = {
+    "z-ai/glm-5.3-flash": "zai-org/glm-5.3-flash",
+    "jundot/glm-5.3-flash-oq4e-mtp": "zai-org/glm-5.3-flash",
+}
 
 
 def sha256(data: bytes) -> str:

@@ -577,12 +577,71 @@ struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
     let modelFamily: String
     let requiresMoEDispatch: Bool
     let hybridDecoderArchitectureVerified: Bool
+    /// The verified sparse-attention layout of an allowlisted `glm5_next`
+    /// identity (SPEC-039 FR-PKV12), read from its `config.json`.
+    let sparseAttention: PagedKVSparseAttentionLayout?
 
-    init(modelFamily: String, requiresMoEDispatch: Bool, hybridDecoderArchitectureVerified: Bool = false) {
+    init(
+        modelFamily: String,
+        requiresMoEDispatch: Bool,
+        hybridDecoderArchitectureVerified: Bool = false,
+        sparseAttention: PagedKVSparseAttentionLayout? = nil
+    ) {
         self.modelFamily = modelFamily
         self.requiresMoEDispatch = requiresMoEDispatch
         self.hybridDecoderArchitectureVerified = hybridDecoderArchitectureVerified
+        self.sparseAttention = sparseAttention
     }
+
+    /// Prompt tokens of the attach-time parity probes: 513 (the production
+    /// 512-token chunk boundary), or for a sparse-attention family
+    /// `max(513, index_topk + 2 x block_size_tokens)` so the context exceeds
+    /// `index_topk` and the indexer selects over paged pooled keys
+    /// (SPEC-039 FR-PKV12).
+    func attachProbePromptTokens(blockSizeTokens: Int) -> Int {
+        let base = PagedKVRuntimeParityProbe.sharedForwardParityPromptTokens
+        guard let sparseAttention else { return base }
+        let (twoBlocks, blocksOverflow) = max(0, blockSizeTokens).multipliedReportingOverflow(by: 2)
+        let (span, spanOverflow) = sparseAttention.indexTopk.addingReportingOverflow(twoBlocks)
+        return blocksOverflow || spanOverflow ? Int.max : max(base, span)
+    }
+}
+
+/// `glm5_next` per-layer layout from `text_config` (SPEC-039 FR-PKV12):
+/// `linear_attention` layers ride `MambaCache`, `deepseek_sparse_attention`
+/// layers `pagedMLA(kpool: indexKpool)`.
+struct PagedKVSparseAttentionLayout: Equatable, Sendable {
+    static let recurrentLayerType = "linear_attention"
+    static let sparseLayerType = "deepseek_sparse_attention"
+
+    let layerTypes: [String]
+    let indexTopk: Int
+    let indexKpool: Int
+
+    var expectedCacheKinds: [PagedKVSharedForwardBackend.CacheKind] {
+        layerTypes.map { $0 == Self.sparseLayerType ? .pagedMLA(kpool: indexKpool) : .recurrentMamba }
+    }
+
+    init?(textConfig: [String: Any]) {
+        guard let layerTypes = textConfig["layer_types"] as? [String],
+              !layerTypes.isEmpty,
+              let hiddenLayers = textConfig["num_hidden_layers"] as? Int,
+              layerTypes.count == hiddenLayers,
+              layerTypes.allSatisfy({ $0 == Self.recurrentLayerType || $0 == Self.sparseLayerType }),
+              layerTypes.contains(Self.sparseLayerType),
+              let indexTopk = textConfig["index_topk"] as? Int,
+              indexTopk > 0,
+              let indexKpool = textConfig["index_kpool"] as? Int,
+              indexKpool > 0
+        else { return nil }
+        self.layerTypes = layerTypes
+        self.indexTopk = indexTopk
+        self.indexKpool = indexKpool
+    }
+}
+
+enum NativeMTPDrafterLoadError: Error, Equatable {
+    case unsupportedAdapter(String)
 }
 
 struct PagedKVRuntimeMeasurementEnvironment: Sendable {
@@ -1147,6 +1206,9 @@ struct InternalWarmupResult: Sendable {
 private struct BlockingGenerateResult: Sendable {
     let tokenIds: [Int]
     let output: String
+    /// Seconds from the first generated token to the last (mlx-swift-lm
+    /// `GenerateResult.generateTime`; prefill excluded).
+    var generateTime: TimeInterval = 0
 
     var generationTokenCount: Int {
         tokenIds.count
@@ -1155,6 +1217,7 @@ private struct BlockingGenerateResult: Sendable {
     init(_ result: GenerateResult) {
         self.tokenIds = result.tokenIds
         self.output = result.output
+        self.generateTime = result.generateTime
     }
 }
 
@@ -1595,6 +1658,9 @@ actor ModelRuntime: ModelRuntimeServing {
     // relay_serve_model_id_alias.
     private let catalogModelIDAlias: String?
     private var currentContainer: ModelContainer?
+    /// Keeps the loaded model's weights in MLX's residency sets; see
+    /// `startResidentWeightsTicket(modelFamily:)`.
+    private var residentWeightsTicket: WiredMemoryTicket?
     private var currentDraftModelID: String?
     private var currentDraftTargetModelID: String?
     private var currentDraftContainer: ModelContainer?
@@ -1794,17 +1860,31 @@ actor ModelRuntime: ModelRuntimeServing {
     nonisolated var isSettlementReceiptEligible: Bool { true }
     nonisolated var settlementRuntimeSource: String? { nil }
 
-    private nonisolated static func makeServeGenerateParameters(
+    /// The one constructor of serve generation parameters; every serial
+    /// `generate`/`TokenIterator` the provider runs takes its parameters from
+    /// here. `model` decides the KV cap: a model that sizes its own cache
+    /// (`modelSizesItsOwnKVCache`) gets no `maxKVSize`, because mlx-swift-lm's
+    /// explicit-cache check would reject its cache against any cap. Without
+    /// that cap nothing else bounds its cache, so its completion budget is
+    /// clamped to the context the prompt leaves (`serialMaxOutputTokens`).
+    nonisolated static func makeServeGenerateParameters(
+        model: any LanguageModel,
         maxTokens: Int?,
+        promptTokens: Int,
         maxContextTokens: Int,
         kvBitsOverride: Int?,
         prefillStepSize: Int,
         temperature: Float,
         topP: Float
-    ) -> GenerateParameters {
+    ) throws -> GenerateParameters {
         GenerateParameters(
-            maxTokens: maxTokens,
-            maxKVSize: maxContextTokens,
+            maxTokens: try serialMaxOutputTokens(
+                model: model,
+                requested: maxTokens,
+                promptTokens: promptTokens,
+                maxContextTokens: maxContextTokens
+            ),
+            maxKVSize: modelSizesItsOwnKVCache(model) ? nil : maxContextTokens,
             kvBits: kvBitsOverride,
             temperature: temperature,
             topP: topP,
@@ -1838,9 +1918,83 @@ actor ModelRuntime: ModelRuntimeServing {
     /// parameters the cache was built with (#1998). Prompt length is still bounded
     /// by `validatePromptTokenCount` before allocation.
     nonisolated static func serveIteratorParameters(
-        _ base: GenerateParameters, forceSimpleKV: Bool, reusedCache: Bool
+        _ base: GenerateParameters, forceSimpleKV: Bool, reusedCache: Bool, cache: [KVCache] = []
     ) -> GenerateParameters {
-        cacheParameters(base, forceSimpleKV: forceSimpleKV || reusedCache)
+        explicitCacheIteratorParameters(
+            cacheParameters(base, forceSimpleKV: forceSimpleKV || reusedCache),
+            cache: cache
+        )
+    }
+
+    /// Serial completion budget. A capped serve cache (`maxKVSize`, a
+    /// `RotatingKVCache`) already bounds memory at `maxContextTokens`, so
+    /// `requested` passes through unchanged. A model that sizes its own cache
+    /// has no such cap and gets the continuous-batching row's bound
+    /// (`continuousBatchMaxOutputTokens`): the context left after the prompt,
+    /// never more than an explicit `max_tokens` (reaching it reports
+    /// `length`), and the 413 `context_length_exceeded` when no output token
+    /// fits.
+    nonisolated static func serialMaxOutputTokens(
+        requested: Int?,
+        promptTokens: Int,
+        maxContextTokens: Int,
+        modelSizesItsOwnKVCache: Bool
+    ) throws -> Int? {
+        guard modelSizesItsOwnKVCache else { return requested }
+        let remaining = maxContextTokens - promptTokens
+        guard remaining >= 1 else {
+            throw ContinuousBatchSchedulerError.contextLengthExceeded(
+                promptTokens: promptTokens,
+                maxOutputTokens: 1,
+                contextTokens: maxContextTokens
+            ).asAPIError()!
+        }
+        guard let requested else { return remaining }
+        return min(requested, remaining)
+    }
+
+    nonisolated static func serialMaxOutputTokens(
+        model: any LanguageModel,
+        requested: Int?,
+        promptTokens: Int,
+        maxContextTokens: Int
+    ) throws -> Int? {
+        try serialMaxOutputTokens(
+            requested: requested,
+            promptTokens: promptTokens,
+            maxContextTokens: maxContextTokens,
+            modelSizesItsOwnKVCache: modelSizesItsOwnKVCache(model)
+        )
+    }
+
+    /// GLM-5-Next's sparse layers always build their own `GLM5NextLatentCache`
+    /// and ignore `maxKVSize`; mlx-swift-lm's explicit-cache check counts each
+    /// such layer as not realizing a requested cap
+    /// (`incompatibleCapacity(expected: maxKVSize, count: 11)`). Prompt length
+    /// is still bounded by `validatePromptTokenCount` before allocation.
+    nonisolated static func modelSizesItsOwnKVCache(_ model: any LanguageModel) -> Bool {
+        model is GLM5NextModel || model is GLM5NextTextModel
+    }
+
+    /// Parameters for a `TokenIterator` over an explicit cache the model sized
+    /// itself. GLM-5-Next's sparse layers always return their own
+    /// `GLM5NextLatentCache`, whatever `maxKVSize` says, and mlx-swift-lm's
+    /// explicit-cache check counts every such non-rotating attention layer as
+    /// not realizing the requested capacity (`incompatibleCapacity(expected:
+    /// maxKVSize, count: 11)` on GLM-5.3-Flash), so any serial request with the
+    /// serve cap failed. The iterator gets the uncapped parameters, as for
+    /// `KVCacheSimple` (#1998); prompt length is still bounded by
+    /// `validatePromptTokenCount` before allocation. Exactly the caches that
+    /// carry a `GLM5NextLatentCache` are affected.
+    nonisolated static func explicitCacheIteratorParameters(
+        _ parameters: GenerateParameters, cache: [KVCache]
+    ) -> GenerateParameters {
+        guard parameters.maxKVSize != nil, cache.contains(where: { $0 is any GLM5NextLatentCache }) else {
+            return parameters
+        }
+        var uncapped = parameters
+        uncapped.maxKVSize = nil
+        return uncapped
     }
 
     /// True when ConversationCache will attempt reuse (trimmed non-empty key).
@@ -1893,6 +2047,7 @@ actor ModelRuntime: ModelRuntimeServing {
             modelFamily: capabilities.modelFamily,
             requiresMoEDispatch: capabilities.requiresMoEDispatch,
             hybridDecoderArchitectureVerified: capabilities.hybridDecoderArchitectureVerified,
+            blockSizeMultiple: capabilities.sparseAttention?.indexKpool ?? 1,
             gates: modelHash?.isEmpty == false ? gates : .closed
         )
     }
@@ -1981,6 +2136,20 @@ actor ModelRuntime: ModelRuntimeServing {
         )
     }
 
+    /// SPEC-039 FR-PKV4/FR-PKV12 parity label suffix: `glm5_next` results
+    /// (MLA sparse attention over gathered latent and pooled keys) never share
+    /// a label with stock-SDPA tuples.
+    nonisolated static func pagedKVParityLabelSuffix(modelFamily: String) -> String {
+        modelFamily == "glm5_next" ? "glm5-next-mla-parity-v1" : "sdpa-parity-v1"
+    }
+
+    /// SPEC-039 FR-PKV12 (v0.1.20): the `glm5_next` AC-20 fixture, attach
+    /// proof and row-isolation evidence are recorded under
+    /// `docs/evidence/glm53-flash-t4-2026-10-17/`, so the entry advertises
+    /// its exact identity. The load-time parity and isolation probes, the
+    /// per-Mac FR-CB10 self-check and the signed CB policy still gate serving.
+    nonisolated static let glm5NextPagedAttachEvidenceRecorded = true
+
     nonisolated static func measurePagedKVRuntime(
         config: PagedKVConfig,
         modelID: String?,
@@ -2030,24 +2199,34 @@ actor ModelRuntime: ModelRuntimeServing {
         // K and V (`nLayers * nNew * 2`) across a non-degenerate (>= 3 block),
         // boundary-crossing, non-identity layout. Anything short of that fails closed —
         // no measured parity, no label, no attach.
+        // SPEC-039 FR-PKV12: the `glm5_next` entry advertises only with its
+        // evidence recorded (`glm5NextPagedAttachEvidenceRecorded`); without
+        // it attach fails closed on parity.
+        if modelCapabilities.modelFamily == "glm5_next", !Self.glm5NextPagedAttachEvidenceRecorded {
+            PagedKVRuntimeDiagnostics.log("measure nil: glm5_next paged attach evidence not recorded (SPEC-039 AC-20)")
+            return nil
+        }
+        // Every paged layer gathers twice per forward: K and V, or for
+        // `pagedMLA` the latent and the pooled keys (SPEC-039 FR-PKV4 rule 4).
         guard let parity = parityProbe,
               parity.established,
               parity.nLayers > 0,
               parity.nNew > 0,
-              parity.gatherKernelCalls == parity.nLayers * parity.nNew * 2,
+              parity.nForwards >= parity.nNew,
+              parity.gatherKernelCalls == parity.nLayers * parity.nForwards * 2,
               parity.maxLogicalBlocks >= 3,
               parity.nonIdentityPermutation
         else {
             if let p = parityProbe {
                 PagedKVRuntimeDiagnostics.log(
-                    "measure nil: parity gate (established=\(p.established) nLayers=\(p.nLayers) nNew=\(p.nNew) gatherKernelCalls=\(p.gatherKernelCalls) expect=\(p.nLayers * p.nNew * 2) maxLogicalBlocks=\(p.maxLogicalBlocks)>=3? nonIdentity=\(p.nonIdentityPermutation))")
+                    "measure nil: parity gate (established=\(p.established) nLayers=\(p.nLayers) nNew=\(p.nNew) nForwards=\(p.nForwards) gatherKernelCalls=\(p.gatherKernelCalls) expect=\(p.nLayers * p.nForwards * 2) maxLogicalBlocks=\(p.maxLogicalBlocks)>=3? nonIdentity=\(p.nonIdentityPermutation))")
             } else {
                 PagedKVRuntimeDiagnostics.log("measure nil: parity probe result nil")
             }
             return nil
         }
         let parityLabel = hexString(SHA256.hash(data: Data(
-            "\(metallibSHA256)|\(kernelIdentifier)|\(modelSHA256)|\(tokenizerSHA256 ?? "")|\(chatTemplateSHA256 ?? "")|\(hardwareClass)|\(modelID)|blk\(config.blockSizeTokens)|max\(config.maxPhysicalBlocks)|sdpa-parity-v1".utf8
+            "\(metallibSHA256)|\(kernelIdentifier)|\(modelSHA256)|\(tokenizerSHA256 ?? "")|\(chatTemplateSHA256 ?? "")|\(hardwareClass)|\(modelID)|blk\(config.blockSizeTokens)|max\(config.maxPhysicalBlocks)|\(Self.pagedKVParityLabelSuffix(modelFamily: modelCapabilities.modelFamily))".utf8
         )))
         // EVERY paging-eligible model attaches only when a batched shared-forward step is
         // proven to keep rows isolated — the SPEC-038 FR-CB6 determinism/isolation
@@ -2222,9 +2401,13 @@ actor ModelRuntime: ModelRuntimeServing {
                     modelCapabilities: modelCapabilities
                 )
         else { return (nil, nil) }
-        let promptTokens = await container.perform { context in
+        let probePromptTokens = modelCapabilities.attachProbePromptTokens(blockSizeTokens: pagedKVConfig.blockSizeTokens)
+        let encodedProbePrompt = await container.perform { context in
             context.tokenizer.encode(text: Self.pagedKVRuntimeParityProbePrompt, addSpecialTokens: true)
         }
+        let promptTokens = modelCapabilities.sparseAttention == nil
+            ? encodedProbePrompt
+            : Self.repeatedProbeTokens(encodedProbePrompt, targetCount: probePromptTokens)
         let parityProbe = await pagedKVRuntimeProber.parity(
             container,
             modelID,
@@ -2256,14 +2439,8 @@ actor ModelRuntime: ModelRuntimeServing {
             let promptB = await container.perform { context in
                 context.tokenizer.encode(text: pair.1, addSpecialTokens: true)
             }
-            let parityPromptA = Self.repeatedProbeTokens(
-                promptA,
-                targetCount: PagedKVRuntimeParityProbe.sharedForwardParityPromptTokens
-            )
-            let parityPromptB = Self.repeatedProbeTokens(
-                promptB,
-                targetCount: PagedKVRuntimeParityProbe.sharedForwardParityPromptTokens
-            )
+            let parityPromptA = Self.repeatedProbeTokens(promptA, targetCount: probePromptTokens)
+            let parityPromptB = Self.repeatedProbeTokens(promptB, targetCount: probePromptTokens)
             return await prober.moe(
                 container,
                 blockSizeTokens,
@@ -2284,7 +2461,7 @@ actor ModelRuntime: ModelRuntimeServing {
         guard let moeProbe else { return (nil, nil) }
         let p = parityProbe
         PagedKVRuntimeDiagnostics.log(
-            "parity model=\(modelID) established=\(p.established) nLayers=\(p.nLayers) nNew=\(p.nNew) gatherKernelCalls=\(p.gatherKernelCalls) expectCalls=\(p.nLayers * p.nNew * 2) maxLogicalBlocks=\(p.maxLogicalBlocks) nonIdentityPermutation=\(p.nonIdentityPermutation)"
+            "parity model=\(modelID) established=\(p.established) nLayers=\(p.nLayers) nNew=\(p.nNew) nForwards=\(p.nForwards) gatherKernelCalls=\(p.gatherKernelCalls) expectCalls=\(p.nLayers * p.nForwards * 2) maxLogicalBlocks=\(p.maxLogicalBlocks) nonIdentityPermutation=\(p.nonIdentityPermutation)"
         )
         let m = moeProbe
         PagedKVRuntimeDiagnostics.log(
@@ -2330,8 +2507,15 @@ actor ModelRuntime: ModelRuntimeServing {
         _ cacheKinds: [PagedKVSharedForwardBackend.CacheKind],
         modelCapabilities: PagedKVRuntimeModelCapabilities
     ) -> Bool {
-        guard modelCapabilities.hybridDecoderArchitectureVerified,
-              cacheKinds.contains(.pagedAttention)
+        guard modelCapabilities.hybridDecoderArchitectureVerified else { return false }
+        if modelCapabilities.modelFamily == "glm5_next" {
+            // Exactly one cache per decoder layer, in layer order, each pool
+            // width equal to `index_kpool` (SPEC-039 FR-PKV12).
+            guard let sparse = modelCapabilities.sparseAttention else { return false }
+            return cacheKinds == sparse.expectedCacheKinds
+        }
+        guard cacheKinds.contains(.pagedAttention),
+              !cacheKinds.contains(where: \.isPagedMLA)
         else { return false }
         if modelCapabilities.modelFamily == "qwen",
            cacheKinds.contains(.recurrentMamba),
@@ -2376,6 +2560,77 @@ actor ModelRuntime: ModelRuntimeServing {
         return bytes
     }
 
+    /// Families served with the process wired limit at Metal's recommended
+    /// working set for as long as the model is loaded.
+    nonisolated static let residentWeightsFamilies: Set<String> = ["glm5_next"]
+
+    /// A model-lifetime wired-limit ticket at Metal's recommended working set,
+    /// the limit mlx-lm's generation paths set. At the default limit (0) no
+    /// buffer joins MLX's residency sets, and a model this close to the working
+    /// set (GLM-5.3-Flash: ~185 GB of 239 GB on a 256 GB M3 Ultra) pays a
+    /// multi-second residency cost on every forward: 0.38 tok/s decode, while a
+    /// 30 GB cut of the same model decodes at 75 tok/s. A fixed policy always
+    /// admits, so starting the ticket never suspends a load. Nil for other
+    /// families and when Metal reports no working set.
+    nonisolated static func residentWeightsTicket(
+        modelFamily: String,
+        recommendedWorkingSetBytes: Int?
+    ) -> WiredMemoryTicket? {
+        guard residentWeightsFamilies.contains(modelFamily),
+              let bytes = recommendedWorkingSetBytes, bytes > 0
+        else { return nil }
+        return WiredMemoryTicket(
+            size: bytes, policy: MLXLMCommon.WiredFixedPolicy(limit: bytes), kind: .active)
+    }
+
+    nonisolated static func startResidentWeightsTicket(modelFamily: String) async -> WiredMemoryTicket? {
+        guard let ticket = residentWeightsTicket(
+            modelFamily: modelFamily,
+            recommendedWorkingSetBytes: GPU.maxRecommendedWorkingSetBytes()
+        ) else { return nil }
+        _ = await ticket.start()
+        return ticket
+    }
+
+    /// Families served with a larger MLX per-command-buffer byte budget, in MB.
+    /// MLX commits a command buffer once its distinct input arrays pass
+    /// `MLX_MAX_MB_PER_BUFFER` (50 MB on Max/Ultra GPUs). glm5_next's fused MoE
+    /// kernels bind whole 288-expert tensors (~4 GB per layer), so every MoE
+    /// layer forced commits: 168 command buffers and ~1.2 ms of GPU idle per
+    /// decode step at 1k on the M3 Ultra. At 65536 MB MLX's per-buffer op limit
+    /// governs instead (19 command buffers, 0.26 ms idle, round-4 window). The
+    /// value only shapes command-buffer batching; buffers still commit every
+    /// MLX op limit.
+    nonisolated static let commandBufferBudgetMBByFamily: [String: Int] = ["glm5_next": 65536]
+
+    /// The per-buffer MB budget to set for a family, or `nil` when the family
+    /// keeps MLX's default or the operator already set `MLX_MAX_MB_PER_BUFFER`.
+    nonisolated static func commandBufferBudgetMB(modelFamily: String, configured: String?) -> Int? {
+        guard let configured, !configured.isEmpty else { return commandBufferBudgetMBByFamily[modelFamily] }
+        return nil
+    }
+
+    /// Sets the family's command-buffer budget for this process. MLX reads it
+    /// once, when it creates its Metal device, so this must run before any MLX
+    /// device use (the MLX cache limit, model load). Returns the MB applied.
+    @discardableResult
+    nonisolated static func applyMLXCommandBufferBudget(modelFamily: String) -> Int? {
+        let key = "MLX_MAX_MB_PER_BUFFER"
+        guard let mb = commandBufferBudgetMB(
+            modelFamily: modelFamily, configured: ProcessInfo.processInfo.environment[key])
+        else { return nil }
+        setenv(key, String(mb), 0)
+        return mb
+    }
+
+    /// The model family of a local model target, from its `config.json`.
+    nonisolated static func localModelFamily(_ target: String) -> String? {
+        guard let directory = try? localModelDirectory(for: target),
+              let data = try? Data(contentsOf: directory.appendingPathComponent("config.json"))
+        else { return nil }
+        return pagedKVModelCapabilities(modelID: target, configJSONData: data).modelFamily
+    }
+
     nonisolated static func clearMLXBufferCacheAfterPrefill(
         using clear: () -> Void = { Memory.clearCache() }
     ) {
@@ -2407,14 +2662,17 @@ actor ModelRuntime: ModelRuntimeServing {
     ) async -> String {
         guard let container else { return Self.pagedKVUnavailableCacheClass }
         return await container.perform { context in
-            let parameters = Self.makeServeGenerateParameters(
-                maxTokens: 1,
+            // A cache-class probe: no prompt and one output token always fit.
+            guard let parameters = try? Self.makeServeGenerateParameters(
+                                model: context.model,
+maxTokens: 1,
+                promptTokens: 0,
                 maxContextTokens: maxContextTokens,
                 kvBitsOverride: kvBitsOverride,
                 prefillStepSize: prefillStepSize,
                 temperature: 0.0,
                 topP: 1.0
-            )
+            ) else { return Self.pagedKVUnavailableCacheClass }
             // The paged / continuous-batching path never uses the memory-capped serve
             // cache: batched rows are stored in the SPEC-039 paged block pool (which
             // bounds memory the way `maxKVSize` bounds the non-batched serve cache).
@@ -2491,6 +2749,11 @@ actor ModelRuntime: ModelRuntimeServing {
         if normalizedLabels.contains(where: { $0.contains("gemma4") }) { return "gemma4" }
         if normalizedLabels.contains(where: { $0.contains("glm4moe") }) { return "glm4_moe" }
         if normalizedLabels.contains(where: { $0.contains("nemotronh") }) { return "nemotron_h" }
+        // GLM-5-Next (`glm5_next`, text model `glm5_next_text`): the SPEC-039
+        // v0.1.17 KDA/DSA hybrid family. Only the allowlisted identity carries
+        // a verified layout; any other `glm5_next` artifact is a `mixed` cache
+        // class without one and fails closed.
+        if normalizedLabels.contains(where: { $0.contains("glm5next") }) { return "glm5_next" }
         return nil
     }
 
@@ -2522,14 +2785,32 @@ actor ModelRuntime: ModelRuntimeServing {
             "qwen/qwen3.6-27b": "Qwen3_5ForConditionalGeneration",
             "qwen/qwen3.6-35b-a3b": "Qwen3_5MoeForConditionalGeneration",
             "qwen/qwen3.8-27b": "Qwen3_5ForConditionalGeneration",
+            "zai-org/glm-5.3-flash": "Glm5NextForConditionalGeneration",
         ]
+        let configObject = configJSONData.flatMap {
+            try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
+        }
+        // `glm5_next` keys on the exact `architectures` array and model types
+        // and carries its verified per-layer layout (SPEC-039 FR-PKV12).
+        let sparseAttention: PagedKVSparseAttentionLayout? = {
+            guard let id = modelID?.lowercased(),
+                  let expectedArchitecture = hybridArchitectureAllowlist[id],
+                  expectedArchitecture == "Glm5NextForConditionalGeneration",
+                  let configObject,
+                  configObject["architectures"] as? [String] == [expectedArchitecture],
+                  configObject["model_type"] as? String == "glm5_next",
+                  let textConfig = configObject["text_config"] as? [String: Any],
+                  textConfig["model_type"] as? String == "glm5_next_text"
+            else { return nil }
+            return PagedKVSparseAttentionLayout(textConfig: textConfig)
+        }()
         let allowlistedArchitectureVerified: Bool = {
             guard let id = modelID?.lowercased(),
                   let expectedArchitecture = hybridArchitectureAllowlist[id],
-                  let configJSONData,
-                  let object = try? JSONSerialization.jsonObject(with: configJSONData) as? [String: Any],
-                  let architectures = object["architectures"] as? [String]
+                  let configObject,
+                  let architectures = configObject["architectures"] as? [String]
             else { return false }
+            if expectedArchitecture == "Glm5NextForConditionalGeneration" { return sparseAttention != nil }
             return architectures.contains(expectedArchitecture)
         }()
         let architectureVerified = allowlistedArchitectureVerified
@@ -2541,7 +2822,8 @@ actor ModelRuntime: ModelRuntimeServing {
             modelFamily: Self.pagedKVModelFamily(modelID: modelID, configJSONData: configJSONData),
             requiresMoEDispatch: (configJSONData.flatMap(Self.pagedKVConfigRequiresMoE) ?? false)
                 || Self.pagedKVModelIDLooksLikeExpertModel(modelID),
-            hybridDecoderArchitectureVerified: architectureVerified
+            hybridDecoderArchitectureVerified: architectureVerified,
+            sparseAttention: sparseAttention
         )
     }
 
@@ -2621,10 +2903,15 @@ actor ModelRuntime: ModelRuntimeServing {
             "num_experts_per_tok",
             "moe_intermediate_size",
         ]
-        return expertKeys.contains { key in
-            if let value = object[key] as? Int { return value > 1 }
-            if let value = object[key] as? NSNumber { return value.intValue > 1 }
-            return false
+        // Multimodal wrappers (e.g. `glm5_next`) keep the expert counts in
+        // `text_config`.
+        let scopes = [object] + ((object["text_config"] as? [String: Any]).map { [$0] } ?? [])
+        return scopes.contains { scope in
+            expertKeys.contains { key in
+                if let value = scope[key] as? Int { return value > 1 }
+                if let value = scope[key] as? NSNumber { return value.intValue > 1 }
+                return false
+            }
         }
     }
 
@@ -2964,6 +3251,8 @@ actor ModelRuntime: ModelRuntimeServing {
             try Self.verifyLoadedArtifact(directory: directory, expectedSHA256: expectedArtifactHash)
         }
         self.currentContainer = container
+        self.residentWeightsTicket = await Self.startResidentWeightsTicket(
+            modelFamily: modelCapabilities.modelFamily)
 
         let tokenizerConfigURL = directory.appendingPathComponent("tokenizer_config.json")
         if FileManager.default.fileExists(atPath: tokenizerConfigURL.path) {
@@ -4663,7 +4952,10 @@ actor ModelRuntime: ModelRuntimeServing {
                 kernelIdentifier: tuple.kernelIdentifier,
                 hardwareClass: tuple.hardwareClass,
                 osBuild: ContinuousBatchingSelfCheckKey.currentOSBuild,
-                runtimeBuild: Self.continuousBatchingSelfCheckRuntimeBuild,
+                runtimeBuild: Self.continuousBatchingSelfCheckRuntimeBuild(
+                    forwardBound: PagedKVSharedForwardBackend.deviceVerifyTokenBound,
+                    forwardTokenCap: scheduler.forwardTokenCap
+                ),
                 decodeWindow: scheduler.maxDecodeLockstepWindow
             ),
             maxRows: maxBatch,
@@ -4672,7 +4964,9 @@ actor ModelRuntime: ModelRuntimeServing {
             probeKeyBoundary: ContinuousBatchingSelfCheck.deviceRouteKeyBoundary,
             maxRequestTokens: scheduler.maxRequestTokens,
             poolTokens: scheduler.poolTokens,
-            blockSizeTokens: scheduler.blockSizeTokens
+            blockSizeTokens: scheduler.blockSizeTokens,
+            // Only a pagedMLA (`glm5_next`) backend has a flattened-token cap.
+            decodeOnlyGain: scheduler.forwardTokenCap != nil
         )
     }
 
@@ -4765,20 +5059,21 @@ actor ModelRuntime: ModelRuntimeServing {
     /// task cancels every row. With `cohort`, the rows decode only once all
     /// of them are in decode (`ContinuousBatchSchedulerRequest
     /// .selfCheckCohort`), and each row's decode tokens generated beside the
-    /// whole cohort are returned (0 otherwise).
+    /// whole cohort, and the wall seconds of those decode steps, are returned
+    /// (0 otherwise).
     func runContinuousBatchingSelfCheckBatch(
         prompts: [[Int]],
         maxOutputTokens: Int,
         idPrefix: String,
         cohort: Bool = false
-    ) async throws -> (outputs: [[Int]], seconds: Double, cohortDecodeTokens: [Int]) {
+    ) async throws -> ContinuousBatchingSelfCheckBatchRun {
         guard let scheduler = continuousBatchScheduler else {
             throw ContinuousBatchSchedulerError.requestFailed("self_check_scheduler_unavailable")
         }
         let ids = prompts.indices.map { "\(idPrefix)-\($0)" }
         let start = Date()
         let outputs = try await withTaskCancellationHandler {
-            try await withThrowingTaskGroup(of: (Int, [Int], Int).self) { group in
+            try await withThrowingTaskGroup(of: (Int, [Int], Int, Double).self) { group in
                 for (index, prompt) in prompts.enumerated() {
                     let id = ids[index]
                     group.addTask {
@@ -4793,21 +5088,29 @@ actor ModelRuntime: ModelRuntimeServing {
                             selfCheckProbe: true,
                             selfCheckCohort: cohort ? ContinuousBatchSelfCheckCohort(id: idPrefix, size: prompts.count) : nil
                         ))
-                        return (index, result.generatedTokens, result.selfCheckCohortDecodeTokens ?? 0)
+                        return (
+                            index, result.generatedTokens, result.selfCheckCohortDecodeTokens ?? 0,
+                            result.selfCheckCohortDecodeSeconds ?? 0
+                        )
                     }
                 }
                 var rows = Array(repeating: [Int](), count: prompts.count)
                 var cohortTokens = Array(repeating: 0, count: prompts.count)
-                for try await (index, tokens, decodeTokens) in group {
+                var cohortSeconds = Array(repeating: 0.0, count: prompts.count)
+                for try await (index, tokens, decodeTokens, decodeSeconds) in group {
                     rows[index] = tokens
                     cohortTokens[index] = decodeTokens
+                    cohortSeconds[index] = decodeSeconds
                 }
-                return (rows, cohortTokens)
+                return (rows, cohortTokens, cohortSeconds)
             }
         } onCancel: {
             Task { for id in ids { await scheduler.cancel(requestID: id) } }
         }
-        return (outputs.0, Date().timeIntervalSince(start), outputs.1)
+        return ContinuousBatchingSelfCheckBatchRun(
+            outputs: outputs.0, seconds: Date().timeIntervalSince(start),
+            cohortDecodeTokens: outputs.1, cohortDecodeSeconds: outputs.2
+        )
     }
 
     func continuousBatchingCapabilityForTest() -> ContinuousBatchingCapability {
@@ -5111,6 +5414,24 @@ actor ModelRuntime: ModelRuntimeServing {
         )
     }
 
+    /// The decode row bound every scheduler is built with: the configured
+    /// (device) bound capped by the backend's flattened-token bound
+    /// (`glm5_next` pagedMLA: 8, SPEC-039 v0.1.19). Applied here, where every
+    /// serve, lab and harness scheduler is built, so no construction path can
+    /// configure a wider decode forward than its backend runs.
+    nonisolated static func schedulerDecodeRowBound(
+        configured: Int,
+        backend: (any ContinuousBatchSchedulerBackend)?
+    ) -> Int {
+        guard let cap = (backend as? PagedKVSharedForwardBackend)?.maxDecodeRowsPerForward, cap < configured else {
+            return configured
+        }
+        FileHandle.standardError.write(Data(
+            "event=continuous_batch_decode_row_bound max_decode_rows_per_forward=\(cap) device_bound=\(configured) reason=flattened_token_cap\n".utf8
+        ))
+        return cap
+    }
+
     private nonisolated static func makeContinuousBatchScheduler(
         decision: PagedKVAttachDecision,
         tuple: ContinuousBatchingRequestedTuple?,
@@ -5167,7 +5488,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 prefillGrouping: prefillGrouping,
                 allowsRaggedPrefillOffsets: (backend as? PagedKVSharedForwardBackend)?
                     .supportsRaggedPrefillOffsets ?? false,
-                maxDecodeRowsPerForward: maxDecodeRowsPerForward
+                maxDecodeRowsPerForward: schedulerDecodeRowBound(configured: maxDecodeRowsPerForward, backend: backend)
             ),
             allocator: allocator,
             backend: backend,
@@ -5276,7 +5597,7 @@ actor ModelRuntime: ModelRuntimeServing {
             nativeMTPRoundByteCapacity: nativeMTPRoundByteCapacity,
             nativeMTPStatusSink: nativeMTPStatusSink,
             prefillGrouping: prefillGrouping,
-            maxDecodeRowsPerForward: continuousBatchDecodeRowBound(),
+            maxDecodeRowsPerForward: continuousBatchDecodeRowBound(cacheKinds: cacheKinds),
             replayAuthority: replayAuthority,
             contiguousCacheBridge: contiguousCacheBridge
         )
@@ -5295,12 +5616,24 @@ actor ModelRuntime: ModelRuntimeServing {
         continuousBatchingSelfCheckRuntimeBuild(forwardBound: PagedKVSharedForwardBackend.deviceVerifyTokenBound)
     }
 
+    /// A backend with a flattened-token cap (`glm5_next`) keys on the bound
+    /// it actually serves under plus the cap itself, so a grant measured
+    /// under one bound never survives a change to it.
     static func continuousBatchingSelfCheckRuntimeBuild(
-        forwardBound bound: Int,
-        routeKeyBoundary: Int = ContinuousBatchingSelfCheck.deviceRouteKeyBoundary
+        forwardBound deviceBound: Int,
+        routeKeyBoundary: Int = ContinuousBatchingSelfCheck.deviceRouteKeyBoundary,
+        forwardTokenCap: Int? = nil
     ) -> String {
-        "\(ContinuousBatchingSelfCheckKey.currentRuntimeBuild)+cb-isolation-v1/decode\(bound)/verify\(bound)"
-            + "+\(ContinuousBatchingSelfCheck.probeVersion)/route\(routeKeyBoundary)"
+        let bound = min(deviceBound, forwardTokenCap ?? Int.max)
+        let cap = forwardTokenCap.map { "+flat\($0)" } ?? ""
+        // glm5_next (the only capped backend) measures a decode-only gain
+        // (SPEC-038 v0.3.21) under its own probe version; every other key is
+        // unchanged.
+        let probe = forwardTokenCap == nil
+            ? ContinuousBatchingSelfCheck.probeVersion
+            : ContinuousBatchingSelfCheck.glm5NextProbeVersion
+        return "\(ContinuousBatchingSelfCheckKey.currentRuntimeBuild)+cb-isolation-v1/decode\(bound)/verify\(bound)"
+            + "+\(probe)/route\(routeKeyBoundary)" + cap
     }
 
     /// Metal architecture name as MLX core reads it (`MLX_METAL_GPU_ARCH`
@@ -5313,6 +5646,27 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     /// The decode row bound for this device (`ContinuousBatchDecodeRouteBound`).
+    /// The decode row bound for this device, further capped by the backend's
+    /// flattened-token bound for `cacheKinds` (`glm5_next`: 8, SPEC-039
+    /// v0.1.19), so the logged bound is the one the scheduler splits by.
+    private static func continuousBatchDecodeRowBound(cacheKinds: [PagedKVSharedForwardBackend.CacheKind]?) -> Int {
+        let deviceBound = continuousBatchDecodeRowBound()
+        let bound = effectiveDecodeRowBound(deviceBound: deviceBound, cacheKinds: cacheKinds)
+        if bound != deviceBound {
+            FileHandle.standardError.write(Data(
+                "event=continuous_batch_decode_row_bound max_decode_rows_per_forward=\(bound) device_bound=\(deviceBound) reason=flattened_token_cap\n".utf8
+            ))
+        }
+        return bound
+    }
+
+    static func effectiveDecodeRowBound(deviceBound: Int, cacheKinds: [PagedKVSharedForwardBackend.CacheKind]?) -> Int {
+        guard let cacheKinds, let cap = PagedKVSharedForwardBackend.maxFlattenedTokensPerForward(cacheKinds: cacheKinds) else {
+            return deviceBound
+        }
+        return min(deviceBound, cap)
+    }
+
     private static func continuousBatchDecodeRowBound() -> Int {
         let architecture = metalArchitectureForQuantizedRoutes()
         let deviceBound = ContinuousBatchDecodeRouteBound.maxDecodeRowsPerForward(architecture: architecture)
@@ -5653,6 +6007,11 @@ actor ModelRuntime: ModelRuntimeServing {
         }
         await conversationCache.purgeAllHot()
         currentContainer = container
+        if let previous = residentWeightsTicket {
+            residentWeightsTicket = nil
+            _ = await previous.end()
+        }
+        residentWeightsTicket = await Self.startResidentWeightsTicket(modelFamily: modelCapabilities.modelFamily)
         currentModelID = modelID
         currentModelHash = modelHash
         currentTemplateSupportsThinkingToggle = Self.resolvedTemplateSupportsThinkingToggle(
@@ -7944,8 +8303,10 @@ actor ModelRuntime: ModelRuntimeServing {
                 let input = UserInput(chat: [.user(prompt)])
                 let lmInput = try await context.processor.prepare(input: input)
                 try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
-                let parameters = Self.makeServeGenerateParameters(
-                    maxTokens: boundedMaxTokens,
+                let parameters = try Self.makeServeGenerateParameters(
+                                        model: context.model,
+maxTokens: boundedMaxTokens,
+                    promptTokens: lmInput.text.tokens.size,
                     maxContextTokens: maxContextTokens,
                     kvBitsOverride: kvBitsOverride,
                     prefillStepSize: prefillStepSize,
@@ -7953,7 +8314,9 @@ actor ModelRuntime: ModelRuntimeServing {
                     topP: 1.0
                 )
                 let kvCache = try context.model.newCache(parameters: parameters)
-                let iterator = try TokenIterator(input: lmInput, model: context.model, cache: kvCache, parameters: parameters)
+                let iterator = try TokenIterator(
+                    input: lmInput, model: context.model, cache: kvCache,
+                    parameters: Self.explicitCacheIteratorParameters(parameters, cache: kvCache))
                 return try await blockingInferenceExecutor.run { inferenceCancellation in
                     BlockingGenerateResult(generate(input: lmInput, context: context, iterator: iterator) { tokens in
                         if !tokens.isEmpty {
@@ -8146,11 +8509,22 @@ actor ModelRuntime: ModelRuntimeServing {
                     )
                     let lmInput = try await context.processor.prepare(input: input)
                     try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
-                    let parameters = Self.makeServeGenerateParameters(
-                        maxTokens: Self.labSerialEffectiveMaxTokens(
-                            requestMaxTokens: request.maxTokens,
+                    // The request's completion budget as served: unchanged for
+                    // a capped serve cache, clamped to the remaining context
+                    // for a model that sizes its own cache.
+                    let servedRequestMaxTokens = try Self.serialMaxOutputTokens(
+                        model: context.model,
+                        requested: request.maxTokens,
+                        promptTokens: lmInput.text.tokens.size,
+                        maxContextTokens: maxContextTokens
+                    )
+                    let parameters = try Self.makeServeGenerateParameters(
+                                                model: context.model,
+maxTokens: Self.labSerialEffectiveMaxTokens(
+                            requestMaxTokens: servedRequestMaxTokens,
                             labOutputCap: labSerialHooks?.outputCap
                         ),
+                        promptTokens: lmInput.text.tokens.size,
                         maxContextTokens: maxContextTokens,
                         kvBitsOverride: kvBitsOverride,
                         prefillStepSize: prefillStepSize,
@@ -8260,7 +8634,8 @@ actor ModelRuntime: ModelRuntimeServing {
                             let iterator = try TokenIterator(
                                 input: iteratorInput, model: generationContext.model, cache: kvCache,
                                 parameters: Self.serveIteratorParameters(
-                                    parameters, forceSimpleKV: forceSimpleKV, reusedCache: lease?.reusableCache != nil))
+                                    parameters, forceSimpleKV: forceSimpleKV, reusedCache: lease?.reusableCache != nil,
+                                    cache: kvCache))
                             Self.clearMLXBufferCacheAfterPrefill()
                             var serialToolObserver = NativeToolCallStreamEmitter(
                                 modelID: request.model,
@@ -8384,7 +8759,7 @@ actor ModelRuntime: ModelRuntimeServing {
 
                         let rawLengthFinish = Self.labSerialLengthFinish(
                             generatedCompletionTokens: result.generationTokenCount,
-                            requestMaxTokens: request.maxTokens,
+                            requestMaxTokens: servedRequestMaxTokens,
                             labOutputCap: labSerialHooks?.outputCap
                         )
                         let harmonyTerminalFinish = Self.isHarmonyTerminalFinish(
@@ -8925,11 +9300,22 @@ actor ModelRuntime: ModelRuntimeServing {
                     )
                     let lmInput = try await context.processor.prepare(input: input)
                     try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
-                    let parameters = Self.makeServeGenerateParameters(
-                        maxTokens: Self.labSerialEffectiveMaxTokens(
-                            requestMaxTokens: request.maxTokens,
+                    // The request's completion budget as served: unchanged for
+                    // a capped serve cache, clamped to the remaining context
+                    // for a model that sizes its own cache.
+                    let servedRequestMaxTokens = try Self.serialMaxOutputTokens(
+                        model: context.model,
+                        requested: request.maxTokens,
+                        promptTokens: lmInput.text.tokens.size,
+                        maxContextTokens: maxContextTokens
+                    )
+                    let parameters = try Self.makeServeGenerateParameters(
+                                                model: context.model,
+maxTokens: Self.labSerialEffectiveMaxTokens(
+                            requestMaxTokens: servedRequestMaxTokens,
                             labOutputCap: labSerialHooks?.outputCap
                         ),
+                        promptTokens: lmInput.text.tokens.size,
                         maxContextTokens: maxContextTokens,
                         kvBitsOverride: kvBitsOverride,
                         prefillStepSize: prefillStepSize,
@@ -9138,7 +9524,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     let iterator = try TokenIterator(
                         input: iteratorInput, model: generationContext.model, cache: kvCache,
                         parameters: Self.serveIteratorParameters(
-                            parameters, forceSimpleKV: forceSimpleKV, reusedCache: lease?.reusableCache != nil))
+                            parameters, forceSimpleKV: forceSimpleKV, reusedCache: lease?.reusableCache != nil,
+                            cache: kvCache))
                     Self.clearMLXBufferCacheAfterPrefill()
                     do {
                         let result: BlockingGenerateResult = try await blockingInferenceExecutor.run { inferenceCancellation in
@@ -9270,7 +9657,7 @@ actor ModelRuntime: ModelRuntimeServing {
                         )
                         let rawLengthFinish = Self.labSerialLengthFinish(
                             generatedCompletionTokens: result.generationTokenCount,
-                            requestMaxTokens: request.maxTokens,
+                            requestMaxTokens: servedRequestMaxTokens,
                             labOutputCap: labSerialHooks?.outputCap
                         )
                         let harmonyTerminalFinish = Self.isHarmonyTerminalFinish(
@@ -9302,7 +9689,7 @@ actor ModelRuntime: ModelRuntimeServing {
                         let finishReason: String
                         if !parsed.toolCalls.isEmpty {
                             finishReason = "tool_calls"
-                        } else if let maxTokens = request.maxTokens,
+                        } else if let maxTokens = servedRequestMaxTokens,
                            result.generationTokenCount >= maxTokens,
                            !stoppedByRequestStop,
                            !final.hitStop,
@@ -9455,8 +9842,10 @@ actor ModelRuntime: ModelRuntimeServing {
             try await container.perform { context -> [KVLayerGeometry]? in
                 let input = UserInput(chat: [.user("warmup")])
                 let lmInput = try await context.processor.prepare(input: input)
-                let parameters = Self.makeServeGenerateParameters(
-                    maxTokens: 1,
+                let parameters = try Self.makeServeGenerateParameters(
+                                        model: context.model,
+maxTokens: 1,
+                    promptTokens: lmInput.text.tokens.size,
                     maxContextTokens: maxContextTokens,
                     kvBitsOverride: kvBitsOverride,
                     prefillStepSize: prefillStepSize,
@@ -9651,9 +10040,13 @@ actor ModelRuntime: ModelRuntimeServing {
 
     /// SPEC-038 FR-CB10 serial baseline: the self-check prompts run one at a
     /// time through stock serial decode (the path a one-slot provider
-    /// serves), as total generated tokens over total wall time, so the
-    /// batched aggregate is compared on the same work.
-    func continuousBatchingSelfCheckSerialTPS(prompts: [[Int]], maxTokens: Int) async throws -> Double {
+    /// serves). `endToEndTPS` is all tokens over whole-call wall time, the
+    /// baseline every family is measured against; `decodeTPS` (v0.3.21,
+    /// glm5_next only) is the tokens after each prompt's first over the time
+    /// from that first token to the last, summed over the prompts.
+    func continuousBatchingSelfCheckSerialTPS(
+        prompts: [[Int]], maxTokens: Int
+    ) async throws -> ContinuousBatchingSelfCheckSerialRate {
         guard let container = currentContainer else {
             throw ContinuousBatchSchedulerError.requestFailed("self_check_model_unavailable")
         }
@@ -9663,14 +10056,18 @@ actor ModelRuntime: ModelRuntimeServing {
         let blockingInferenceExecutor = blockingInferenceExecutor
         var tokens = 0
         var seconds = 0.0
+        var decodeTokens = 0
+        var decodeSeconds = 0.0
         for prompt in prompts {
             try Task.checkCancellation()
             let start = Date()
             let result: BlockingGenerateResult = try await inferenceGate.withPermit {
                 try await container.perform { context in
                     let lmInput = LMInput(text: LMInput.Text(tokens: MLXArray(prompt.map(Int32.init))))
-                    let parameters = Self.makeServeGenerateParameters(
+                    let parameters = try Self.makeServeGenerateParameters(
+                        model: context.model,
                         maxTokens: maxTokens,
+                        promptTokens: prompt.count,
                         maxContextTokens: maxContextTokens,
                         kvBitsOverride: kvBitsOverride,
                         prefillStepSize: prefillStepSize,
@@ -9689,8 +10086,15 @@ actor ModelRuntime: ModelRuntimeServing {
             try Task.checkCancellation()
             seconds += Date().timeIntervalSince(start)
             tokens += result.generationTokenCount
+            if result.generationTokenCount > 1, result.generateTime > 0 {
+                decodeTokens += result.generationTokenCount - 1
+                decodeSeconds += result.generateTime
+            }
         }
-        return seconds > 0 ? Double(tokens) / seconds : 0
+        return ContinuousBatchingSelfCheckSerialRate(
+            decodeTPS: decodeSeconds > 0 ? Double(decodeTokens) / decodeSeconds : 0,
+            endToEndTPS: seconds > 0 ? Double(tokens) / seconds : 0
+        )
     }
 
     func measureStartupThroughput(maxTokens: Int = ModelRuntime.startupThroughputProbeMaxTokens) async -> Double {
@@ -9708,8 +10112,10 @@ actor ModelRuntime: ModelRuntimeServing {
                 try await container.perform { context in
                     let input = UserInput(chat: [.user(Self.startupThroughputProbePrompt)])
                     let lmInput = try await context.processor.prepare(input: input)
-                    let parameters = Self.makeServeGenerateParameters(
-                        maxTokens: maxTokens,
+                    let parameters = try Self.makeServeGenerateParameters(
+                                                model: context.model,
+maxTokens: maxTokens,
+                        promptTokens: lmInput.text.tokens.size,
                         maxContextTokens: maxContextTokens,
                         kvBitsOverride: kvBitsOverride,
                         prefillStepSize: prefillStepSize,
@@ -9793,7 +10199,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 try validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
                 let parameters = GenerateParameters(
                     maxTokens: 1,
-                    maxKVSize: maxContextTokens,
+                    maxKVSize: modelSizesItsOwnKVCache(targetContext.model) ? nil : maxContextTokens,
                     kvBits: kvBitsOverride,
                     temperature: 0.0,
                     topP: 1.0,
@@ -9832,7 +10238,7 @@ actor ModelRuntime: ModelRuntimeServing {
             try validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
             let parameters = GenerateParameters(
                 maxTokens: request.maxTokens,
-                maxKVSize: maxContextTokens,
+                maxKVSize: modelSizesItsOwnKVCache(targetContext.model) ? nil : maxContextTokens,
                 kvBits: kvBitsOverride,
                 temperature: 0.0,
                 topP: 1.0,
@@ -9953,7 +10359,7 @@ actor ModelRuntime: ModelRuntimeServing {
     ) async throws -> (ModelContainer, URL) {
         try await loadLocalContainer(
             from: target,
-            tokenizerLoader: #huggingFaceTokenizerLoader(),
+            tokenizerLoader: ChatTemplateCompatTokenizerLoader(),
             nativeVision: nativeVision
         )
     }
@@ -10340,10 +10746,14 @@ actor ModelRuntime: ModelRuntimeServing {
             ) else {
                 return reject(reasonCode: "captured_manifest_mismatch", artifactRole: "pair")
             }
-            let artifactObservation = try NativeMTPArtifactObserver.observePair(
-                targetDirectory: capturedArtifacts.targetURL,
-                mtpDirectory: drafterDirectory
-            )
+            // SPEC-048-R002: an embedded (`checkpoint_mtp`) next-N layer is
+            // observed once, inside the target artifact.
+            let artifactObservation = try admissionCapability.sourceLayout == "checkpoint_mtp"
+                ? NativeMTPArtifactObserver.observeEmbedded(targetDirectory: capturedArtifacts.targetURL)
+                : NativeMTPArtifactObserver.observePair(
+                    targetDirectory: capturedArtifacts.targetURL,
+                    mtpDirectory: drafterDirectory
+                )
             guard nativeMTPArtifactObservationMatchesAdmission(
                 artifactObservation,
                 admissionCapability: admissionCapability
@@ -10377,17 +10787,25 @@ actor ModelRuntime: ModelRuntimeServing {
             ) else {
                 return reject(reasonCode: "runtime_cache_class_unsupported", artifactRole: "runtime")
             }
+            let targetCacheKinds = await pagedKVCacheKinds(container: capturedTargetContainer)
+            let drafterPresent = await nativeMTPDrafterPresent(
+                familyAdapter: admissionCapability.familyAdapter,
+                targetContainer: capturedTargetContainer
+            )
             guard nativeMTPAdmissionCapabilitySupported(
                 admissionCapability,
                 canonicalCacheClass: canonicalCacheClass,
-                modelCapabilities: modelCapabilities
+                modelCapabilities: modelCapabilities,
+                cacheKinds: targetCacheKinds,
+                drafterPresent: drafterPresent
             ) else {
                 return reject(reasonCode: "admission_capability_unsupported", artifactRole: "sidecar")
             }
-            await Qwen35TextMTPRegistration.register()
-            let drafterContainer = try await MTPDrafterModelFactory.shared.loadContainer(
-                from: drafterDirectory,
-                using: capturedTokenizerLoader
+            let drafterContainer = try await loadNativeMTPDrafterContainer(
+                familyAdapter: admissionCapability.familyAdapter,
+                targetDirectory: capturedArtifacts.targetURL,
+                drafterDirectory: drafterDirectory,
+                tokenizerLoader: capturedTokenizerLoader
             )
             try capturedArtifacts.revalidateAfterLoad()
             let drafterRuntimeObservation = await drafterContainer.perform { context -> (maximumBlockSize: Int?, stateLayerCount: Int?) in
@@ -10707,7 +11125,7 @@ actor ModelRuntime: ModelRuntimeServing {
         }
         return NativeMTPCapturedTokenizerLoader(
             tokenizerDirectory: targetURL,
-            base: #huggingFaceTokenizerLoader()
+            base: ChatTemplateCompatTokenizerLoader()
         )
     }
 
@@ -10915,28 +11333,162 @@ actor ModelRuntime: ModelRuntimeServing {
         )
     }
 
+    /// A native-MTP family adapter and the artifact layout it ships in
+    /// (SPEC-048 MTP-2: the adapter string determines the layout).
+    struct NativeMTPAdapterLayout: Hashable, Sendable {
+        let familyAdapter: String
+        let sourceLayout: String
+    }
+
+    /// Where an admitted adapter's drafter comes from.
+    enum NativeMTPDrafterSource: Equatable, Sendable {
+        /// A separate drafter artifact, loaded through `MTPDrafterModelFactory`.
+        case separateArtifact
+        /// The next-N layer inside the target (`checkpoint_mtp`): a
+        /// parameterless drafter that resolves the loaded target's own
+        /// `mtp[0]` layer, embeddings and lm_head, built from the target's
+        /// `config.json` without a second weight load.
+        case targetEmbedded
+    }
+
+    /// The (adapter, layout) pairs this provider can serve natively.
+    static let nativeMTPSupportedAdapterLayouts: Set<NativeMTPAdapterLayout> = [
+        NativeMTPAdapterLayout(familyAdapter: "qwen3_5_mtp_v1", sourceLayout: "separate_artifact"),
+        NativeMTPAdapterLayout(familyAdapter: "glm5_next_mtp_v1", sourceLayout: "checkpoint_mtp"),
+    ]
+
+    static func nativeMTPDrafterSource(familyAdapter: String) -> NativeMTPDrafterSource? {
+        switch familyAdapter {
+        case "qwen3_5_mtp_v1": .separateArtifact
+        case "glm5_next_mtp_v1": .targetEmbedded
+        default: nil
+        }
+    }
+
     private static func nativeMTPAdmissionCapabilitySupported(
         _ admissionCapability: NativeMTPAdmissionCapability,
         canonicalCacheClass: String,
-        modelCapabilities: PagedKVRuntimeModelCapabilities
+        modelCapabilities: PagedKVRuntimeModelCapabilities,
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind]?,
+        drafterPresent: Bool
     ) -> Bool {
-        admissionCapability.familyAdapter == "qwen3_5_mtp_v1"
-            && admissionCapability.sourceLayout == "separate_artifact"
-            && admissionCapability.predictionLayerCount == admissionCapability.maxProposalDepth
-            && admissionCapability.cacheClass == canonicalCacheClass
-            && admissionCapability.stateClass == nativeMTPExpectedStateClass(modelCapabilities: modelCapabilities)
+        let layout = NativeMTPAdapterLayout(
+            familyAdapter: admissionCapability.familyAdapter,
+            sourceLayout: admissionCapability.sourceLayout
+        )
+        guard nativeMTPSupportedAdapterLayouts.contains(layout),
+              admissionCapability.predictionLayerCount == admissionCapability.maxProposalDepth,
+              admissionCapability.cacheClass == canonicalCacheClass,
+              admissionCapability.stateClass == nativeMTPExpectedStateClass(modelCapabilities: modelCapabilities),
+              drafterPresent
+        else { return false }
+        guard nativeMTPDrafterSource(familyAdapter: layout.familyAdapter) == .targetEmbedded else {
+            return true
+        }
+        return glm5NextNativeMTPTopologySupported(
+            maxProposalDepth: admissionCapability.maxProposalDepth,
+            modelCapabilities: modelCapabilities,
+            cacheKinds: cacheKinds
+        )
+    }
+
+    /// `glm5_next_mtp_v1` (SPEC-048 MTP-2, SPEC-039 FR-PKV12/FR-PKV15): the
+    /// exact verified KDA + `pagedMLA` topology and the 8-token forward bound
+    /// in force with one row's verification inside it. Packed verification
+    /// runs KDA rows through `MTPPackedMambaBatchCache` and `pagedMLA` rows
+    /// through `PagedMLABatchLayerCache`.
+    private static func glm5NextNativeMTPTopologySupported(
+        maxProposalDepth: Int,
+        modelCapabilities: PagedKVRuntimeModelCapabilities,
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind]?
+    ) -> Bool {
+        guard modelCapabilities.modelFamily == "glm5_next",
+              modelCapabilities.hybridDecoderArchitectureVerified,
+              let layout = modelCapabilities.sparseAttention,
+              let cacheKinds,
+              cacheKinds == layout.expectedCacheKinds,
+              let cap = PagedKVSharedForwardBackend.maxFlattenedTokensPerForward(cacheKinds: cacheKinds),
+              cap == PagedKVSharedForwardBackend.pagedMLAMaxFlattenedTokensPerForward,
+              maxProposalDepth >= 1,
+              maxProposalDepth + 1 <= cap
+        else { return false }
+        return true
     }
 
     static func nativeMTPAdmissionCapabilitySupportedForTest(
         _ admissionCapability: NativeMTPAdmissionCapability,
         canonicalCacheClass: String,
-        modelCapabilities: PagedKVRuntimeModelCapabilities
+        modelCapabilities: PagedKVRuntimeModelCapabilities,
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind]? = nil,
+        drafterPresent: Bool = true
     ) -> Bool {
         nativeMTPAdmissionCapabilitySupported(
             admissionCapability,
             canonicalCacheClass: canonicalCacheClass,
-            modelCapabilities: modelCapabilities
+            modelCapabilities: modelCapabilities,
+            cacheKinds: cacheKinds,
+            drafterPresent: drafterPresent
         )
+    }
+
+    /// Whether the adapter's drafter can exist for this target: a separate
+    /// artifact is checked at its own load; an embedded drafter needs the
+    /// target loaded with its next-N weights.
+    static func nativeMTPDrafterPresent(
+        familyAdapter: String,
+        targetContainer: ModelContainer
+    ) async -> Bool {
+        switch nativeMTPDrafterSource(familyAdapter: familyAdapter) {
+        case .separateArtifact: return true
+        case nil: return false
+        case .targetEmbedded:
+            return await targetContainer.perform { context in
+                switch context.model {
+                case let model as GLM5NextModel: model.languageModel.hasMTPWeights
+                case let model as GLM5NextTextModel: model.hasMTPWeights
+                default: false
+                }
+            }
+        }
+    }
+
+    /// The drafter container for an admitted adapter. A `checkpoint_mtp`
+    /// drafter is built from the target's `config.json` through the drafter
+    /// type registry, never through `MTPDrafterModelFactory`, which would
+    /// read the target's weight files a second time for a model that owns no
+    /// parameters.
+    static func loadNativeMTPDrafterContainer(
+        familyAdapter: String,
+        targetDirectory: URL,
+        drafterDirectory: URL,
+        tokenizerLoader: any TokenizerLoader
+    ) async throws -> MTPDrafterContainer {
+        switch nativeMTPDrafterSource(familyAdapter: familyAdapter) {
+        case .separateArtifact:
+            await Qwen35TextMTPRegistration.register()
+            return try await MTPDrafterModelFactory.shared.loadContainer(
+                from: drafterDirectory,
+                using: tokenizerLoader
+            )
+        case .targetEmbedded:
+            await GLM5NextMTPRegistration.register()
+            let configData = try Data(contentsOf: targetDirectory.appendingPathComponent("config.json"))
+            guard let object = try JSONSerialization.jsonObject(with: configData) as? [String: Any],
+                  let modelType = object["model_type"] as? String
+            else {
+                throw NativeMTPDrafterLoadError.unsupportedAdapter(familyAdapter)
+            }
+            let model = try await MTPDrafterTypeRegistry.shared.createModel(
+                configuration: configData,
+                modelType: modelType
+            )
+            return MTPDrafterContainer(context: MTPDrafterContext(
+                configuration: ModelConfiguration(directory: targetDirectory, tokenizerSource: nil, defaultPrompt: ""),
+                model: model
+            ))
+        case nil:
+            throw NativeMTPDrafterLoadError.unsupportedAdapter(familyAdapter)
+        }
     }
 
     private static func nativeMTPExpectedStateClass(

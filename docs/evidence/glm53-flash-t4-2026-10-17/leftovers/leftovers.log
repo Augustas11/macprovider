@@ -1,0 +1,21 @@
+event=chat_template_compat rewrite=numeric_attribute_access count=4
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+msb-throughput: isolation cancelled=cancelled healthy=length pass=true peak_rss_mb=122819
+event=batching_admitted action=scheduler_admitted
+msb-throughput: replay first=eligible_owner second=non_settling_replay tokens_match=true pass=true peak_rss_mb=122820
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+msb-throughput: drain queued=rejected active=["length", "length"] permit_valid=true post_reject=true pass=true peak_rss_mb=122838
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+msb-throughput: scheduler window_calls=3 one_token_decode_calls=0
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+msb-throughput: scheduler window_calls=3 one_token_decode_calls=0
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+msb-throughput: scheduler window_calls=6 one_token_decode_calls=0
+msb-throughput: parity compared=48 standalone=[true, true] batched=[true, true] pass=true peak_rss_mb=122838

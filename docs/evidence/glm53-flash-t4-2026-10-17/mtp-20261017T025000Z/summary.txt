@@ -1,0 +1,68 @@
+== oracle-1024
+mtp has_weights=true prompt=1024 tokens=256
+mtp plain prefill_s=8.61 decode_tok_s=39.54 oracle_match=256/256
+mtp mtp prefill_s=2.80 decode_tok_s=41.06 proposed=127 accepted=127 acceptance=1.000 oracle_match=256/256
+mtp round=0 mtp_equals_plain=true first_difference=none
+mtp plain prefill_s=2.58 decode_tok_s=41.05 oracle_match=256/256
+mtp mtp prefill_s=2.79 decode_tok_s=45.05 proposed=127 accepted=127 acceptance=1.000 oracle_match=256/256
+mtp round=1 mtp_equals_plain=true first_difference=none
+== oracle-8192
+mtp has_weights=true prompt=8192 tokens=256
+mtp plain prefill_s=35.14 decode_tok_s=34.28 oracle_match=256/256
+mtp mtp prefill_s=27.62 decode_tok_s=35.40 proposed=127 accepted=127 acceptance=1.000 oracle_match=256/256
+mtp round=0 mtp_equals_plain=true first_difference=none
+== varied-1024
+mtp has_weights=true prompt=1024 tokens=256
+mtp plain prefill_s=5.46 decode_tok_s=41.20
+mtp mtp prefill_s=2.80 decode_tok_s=39.29 proposed=142 accepted=112 acceptance=0.789
+mtp round=0 mtp_equals_plain=true first_difference=none
+mtp plain prefill_s=2.59 decode_tok_s=41.32
+mtp mtp prefill_s=2.80 decode_tok_s=40.26 proposed=142 accepted=112 acceptance=0.789
+mtp round=1 mtp_equals_plain=true first_difference=none
+== varied-8192
+mtp has_weights=true prompt=8192 tokens=256
+mtp plain prefill_s=35.90 decode_tok_s=34.39
+mtp mtp prefill_s=27.62 decode_tok_s=30.98 proposed=148 accepted=106 acceptance=0.716
+mtp round=0 mtp_equals_plain=true first_difference=none
+== profile
+mtp-profile plain_step deferred=true ms_median=29.98 min=28.42
+mtp-profile plain_step deferred=false ms_median=28.80 min=28.11
+mtp-profile verify_2col ms_median=42.09 min=41.01
+mtp-profile forward_2col_no_checkpoint ms_median=37.72 min=37.43
+mtp-profile drafter_commit accepted=0 ms_median=1.95 min=1.87
+mtp-profile drafter_commit accepted=1 ms_median=2.17 min=2.16
+== census
+mtp-census 1tok:
+family: total kernel GPU time 25.42 ms/step
+family:   8843.5 us  34.8%  n=  84.0  172356.96 MB  19489.7 GB/s  moe_fused
+family:   6049.4 us  23.8%  n= 109.0   3632.03 MB    600.4 GB/s  qmv_fast
+family:   4786.2 us  18.8%  n=  35.0   3354.70 MB    700.9 GB/s  kda_multi_qmv
+family:   3368.9 us  13.3%  n= 179.0    159.82 MB     47.4 GB/s  hc
+family:    893.9 us   3.5%  n=  34.0    374.77 MB    419.3 GB/s  kda_kernel
+family:    529.3 us   2.1%  n=  42.0    198.75 MB    375.5 GB/s  moe_router
+family:    397.7 us   1.6%  n=  12.0     16.89 MB     42.5 GB/s  gemm
+family:    186.5 us   0.7%  n=  45.0     37.60 MB    201.5 GB/s  copy
+family:    172.3 us   0.7%  n=  23.0      0.18 MB      1.1 GB/s  rmsnorm
+family:     65.7 us   0.3%  n=  11.0      3.24 MB     49.4 GB/s  softmax
+family:     64.8 us   0.3%  n=  16.0      1.86 MB     28.7 GB/s  elementwise/other
+family:     25.7 us   0.1%  n=   1.0      5.87 MB    228.6 GB/s  qmv_other
+family:     21.0 us   0.1%  n=   3.0    674.04 MB  32090.9 GB/s  gather
+family:      7.6 us   0.0%  n=   1.0      0.01 MB      1.7 GB/s  dequantize
+family:      7.3 us   0.0%  n=   1.0      0.04 MB      5.6 GB/s  reduce
+mtp-census 2tok:
+family: total kernel GPU time 46.39 ms/step
+family:  15846.0 us  34.2%  n=  84.0  172361.21 MB  10877.2 GB/s  moe_fused
+family:   9911.6 us  21.4%  n= 225.0   3547.61 MB    357.9 GB/s  qmv_fast
+family:   6590.0 us  14.2%  n= 215.0   3477.41 MB    527.7 GB/s  elementwise/other
+family:   5289.6 us  11.4%  n= 158.0     58.10 MB     11.0 GB/s  copy
+family:   4182.9 us   9.0%  n= 101.0     42.43 MB     10.1 GB/s  gemm
+family:   1913.9 us   4.1%  n= 180.0    155.64 MB     81.3 GB/s  hc
+family:    790.1 us   1.7%  n=  52.0     59.66 MB     75.5 GB/s  qmv_quad
+family:    776.0 us   1.7%  n=  34.0    309.75 MB    399.1 GB/s  kda_kernel
+family:    511.1 us   1.1%  n=  42.0    199.19 MB    389.7 GB/s  moe_router
+family:    334.8 us   0.7%  n=  16.0     12.07 MB     36.0 GB/s  qmv_other
+family:    133.8 us   0.3%  n=  23.0      0.31 MB      2.3 GB/s  rmsnorm
+family:     68.2 us   0.1%  n=  11.0      6.13 MB     89.8 GB/s  softmax
+family:     23.2 us   0.0%  n=   3.0    674.05 MB  29079.9 GB/s  gather
+family:      7.6 us   0.0%  n=   1.0      0.03 MB      3.3 GB/s  dequantize
+family:      7.4 us   0.0%  n=   1.0      0.08 MB     11.0 GB/s  reduce

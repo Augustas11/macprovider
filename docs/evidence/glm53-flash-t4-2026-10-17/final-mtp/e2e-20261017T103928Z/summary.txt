@@ -1,0 +1,17 @@
+legs=5 6
+leg5 mtp-e2e start 10:39:28
+leg5 native-mtp-hardware-e2e rc=0
+leg5 status=pass family=glm5_next serve_path_verified=True admissions=3 max_batch_depth=2 parity_proposed=7 parity_accepted=5
+leg5 rows=1 native_over_ordinary=1.270 ordinary_e2e_tps=38.2 native_e2e_tps=48.4 acceptance=0.889 greedy_equal=True
+leg5 rows=4 native_over_ordinary=0.787 ordinary_e2e_tps=65.6 native_e2e_tps=51.5 acceptance=0.870 greedy_equal=True
+leg5 mtp-e2e PASS
+9c01581d41a983912cf530b407fb3f99ee2f106c2288a98c77488762a1707de3  <lab>/t4-window-20261017T103928Z/mtp-e2e.json
+6c791469854c48aa29318457090a12cef341a1f833e69171e78d28e1ead7fc3b  <lab>/t4-window-20261017T103928Z/mtp-e2e.log
+leg6 mtp-journey start 10:54:07
+leg6 TIMEOUT after 1200s; sampling pid 61621
+leg6 native-mtp-journey-e2e rc=124
+leg6 no result document (see mtp-journey.log)
+leg6 mtp-journey FAIL (see mtp-journey.json / mtp-journey.log)
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  <lab>/t4-window-20261017T103928Z/mtp-journey.json
+a88bf5ce37c49189d8e1481684ec9f0b4d159e920a8c065bacc0b0937699d7d9  <lab>/t4-window-20261017T103928Z/mtp-journey.log
+RESULT=FAIL evidence=<lab>/t4-window-20261017T103928Z

@@ -1,0 +1,61 @@
+event=chat_template_compat rewrite=numeric_attribute_access count=4
+{
+  "aggregateCVPct" : 0.10692437874088856,
+  "aggregateTPSRuns" : [
+    58.86941430887727,
+    58.74704625945886,
+    58.833424389994796
+  ],
+  "aggregateTPSp50" : 58.833424389994796,
+  "aggregateUpliftVsPagedSingleRow" : 1.456082206001455,
+  "aggregateVsProductionSerial" : 1.4032203757685868,
+  "blockSizeTokens" : 256,
+  "compiled" : false,
+  "decodeTokensPerRow" : 128,
+  "engine" : "paged",
+  "layerCount" : 11,
+  "maxPhysicalBlocks" : 1024,
+  "mlxSwiftLMPin" : "mlxlm-18ca526706db",
+  "modelID" : "<models>\/GLM-5.3-Flash-oQ4e-mtp",
+  "modelTag" : "GLM-5.3-Flash-oQ4e-mtp",
+  "pagedSingleRowCVPct" : 0.08059322887586799,
+  "pagedSingleRowTPSRuns" : [
+    40.405290407028026,
+    40.364645196108256,
+    40.4290281691281
+  ],
+  "pagedSingleRowTPSp50" : 40.405290407028026,
+  "peakPhysFootprintMB" : 181785,
+  "peakRSSMB" : 141203,
+  "perRowFractionOfPagedSingleRow" : 0.7280411030007276,
+  "perRowTPSp50" : 29.416712194997398,
+  "productionSerialCVPct" : 0.06617682222769937,
+  "productionSerialPromptTokens" : 1024,
+  "productionSerialTPSRuns" : [
+    41.92743022119382,
+    41.918794234912646,
+    41.970597960199726
+  ],
+  "productionSerialTPSp50" : 41.92743022119382,
+  "productionSerialTTFTSecondsRuns" : [
+    3.1131869554519653,
+    3.112483024597168,
+    3.127943992614746
+  ],
+  "promptTokenLengths" : [
+    1024,
+    1024
+  ],
+  "promptTokenSHA256" : [
+    "c2d6e0a41c032e905401737f80cfeaf532576de3aef86f3382067663f683b3dd",
+    "bb27f683b1bd122f66d900e82379da023fe1014bda15ede6d18f4741f834c1ac"
+  ],
+  "promptTokensPerRow" : 1024,
+  "rows" : 2,
+  "runs" : 3,
+  "scenario" : "throughput",
+  "schemaVersion" : 4,
+  "timestamp" : "2026-10-17T09:51:34Z"
+}
+msb-throughput: model=GLM-5.3-Flash-oQ4e-mtp engine=paged compile=false rows=2 block=256 serial_tps_p50=41.9 engine_1row_tps_p50=40.4 aggregate_tps_p50=58.8 uplift_vs_1row=1.46x aggregate_vs_serial=1.40x peak_rss_mb=141203
+msb-throughput: wrote <lab>/t4-window-20261017T094515Z/msb-rows2.json

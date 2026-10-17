@@ -28,6 +28,8 @@ public struct PagedKVConfig: Equatable, Sendable {
     public var errors: [String]
     /// True only when a valid max_physical_blocks came from CLI, env, or YAML.
     public var maxPhysicalBlocksExplicit: Bool
+    /// True only when a valid block_size_tokens came from CLI, env, or YAML.
+    public var blockSizeTokensExplicit: Bool
 
     public init(
         enabled: Bool = false,
@@ -35,7 +37,8 @@ public struct PagedKVConfig: Equatable, Sendable {
         maxPhysicalBlocks: Int = PagedKVConfig.defaultMaxPhysicalBlocks,
         fallbackPolicy: PagedKVFallbackPolicy = .permissive,
         errors: [String] = [],
-        maxPhysicalBlocksExplicit: Bool = false
+        maxPhysicalBlocksExplicit: Bool = false,
+        blockSizeTokensExplicit: Bool = false
     ) {
         self.enabled = enabled
         self.blockSizeTokens = blockSizeTokens
@@ -43,6 +46,7 @@ public struct PagedKVConfig: Equatable, Sendable {
         self.fallbackPolicy = fallbackPolicy
         self.errors = errors
         self.maxPhysicalBlocksExplicit = maxPhysicalBlocksExplicit
+        self.blockSizeTokensExplicit = blockSizeTokensExplicit
     }
 
     public static func defaults() -> PagedKVConfig { PagedKVConfig() }
@@ -69,6 +73,25 @@ public struct PagedKVConfig: Equatable, Sendable {
         return covered
     }
 
+    /// The family's default block size when the operator set none
+    /// (SPEC-039 v0.1.19 FR-PKV14: 256 for `glm5_next`, whose pooled-key buffer needs
+    /// whole `index_kpool` windows per block and whose attach proof spans
+    /// `index_topk + 2 x block`). The block count is unchanged: an unset pool
+    /// keeps the FR-PKV2 default of at least 1024 blocks, and
+    /// `sizedToCover` still extends it to the advertised context. Explicit
+    /// operator values win.
+    public func withFamilyDefaults(modelFamily: String) -> PagedKVConfig {
+        guard !blockSizeTokensExplicit,
+              let familyBlock = PagedKVConfig.familyDefaultBlockSizeTokens[modelFamily]
+        else {
+            return self
+        }
+        var adjusted = self
+        adjusted.blockSizeTokens = familyBlock
+        return adjusted
+    }
+
+    public static let familyDefaultBlockSizeTokens: [String: Int] = ["glm5_next": 256]
     public static let defaultBlockSizeTokens = 16
     public static let defaultMaxPhysicalBlocks = 1024
     public static let maximumBlockSizeTokens = 4096
@@ -103,6 +126,7 @@ public enum PagedKVConfigResolver {
         var config = PagedKVConfig.defaults()
         var errors: [String] = []
         var explicitMaxBlocksSet = false
+        var explicitBlockSizeSet = false
 
         func fail(_ key: String, _ raw: String, _ expected: String) {
             errors.append("invalid \(key)=<redacted,len=\(raw.count)>; expected \(expected); paged_kv disabled")
@@ -146,11 +170,15 @@ public enum PagedKVConfigResolver {
         }
 
         if let blockSize = cli.blockSizeTokens {
-            if boundedPositive(blockSize, maximum: PagedKVConfig.maximumBlockSizeTokens) { config.blockSizeTokens = blockSize }
-            else { fail("block_size_tokens", String(blockSize), "1...\(PagedKVConfig.maximumBlockSizeTokens)") }
+            if boundedPositive(blockSize, maximum: PagedKVConfig.maximumBlockSizeTokens) {
+                config.blockSizeTokens = blockSize
+                explicitBlockSizeSet = true
+            } else { fail("block_size_tokens", String(blockSize), "1...\(PagedKVConfig.maximumBlockSizeTokens)") }
         } else if let resolved = rawInt("block_size_tokens", "MACPROVIDER_PAGED_KV_BLOCK_SIZE_TOKENS") {
-            if let value = resolved.value, boundedPositive(value, maximum: PagedKVConfig.maximumBlockSizeTokens) { config.blockSizeTokens = value }
-            else { fail("block_size_tokens", resolved.raw, "1...\(PagedKVConfig.maximumBlockSizeTokens)") }
+            if let value = resolved.value, boundedPositive(value, maximum: PagedKVConfig.maximumBlockSizeTokens) {
+                config.blockSizeTokens = value
+                explicitBlockSizeSet = true
+            } else { fail("block_size_tokens", resolved.raw, "1...\(PagedKVConfig.maximumBlockSizeTokens)") }
         }
 
         if let blocks = cli.maxPhysicalBlocks {
@@ -185,9 +213,11 @@ public enum PagedKVConfigResolver {
             config.enabled = false
             config.errors = errors
             explicitMaxBlocksSet = false
+            explicitBlockSizeSet = false
         }
 
         config.maxPhysicalBlocksExplicit = explicitMaxBlocksSet
+        config.blockSizeTokensExplicit = explicitBlockSizeSet
         return config
     }
 

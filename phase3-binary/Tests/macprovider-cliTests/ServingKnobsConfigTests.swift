@@ -654,6 +654,28 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertEqual(gemma4.modelFamily, "gemma4")
         XCTAssertFalse(PagedKVAttachGate.recognizedModelFamilies.contains(gemma4.modelFamily))
 
+        // GLM-5.3-Flash: the SPEC-039 v0.1.17 paged family, MoE from the
+        // expert counts under `text_config`.
+        let glm5Next = ModelRuntime.pagedKVModelCapabilities(
+            modelID: "Jundot/GLM-5.3-Flash-oQ4e-mtp",
+            configJSONData: Data(#"""
+            {"model_type":"glm5_next","architectures":["Glm5NextForConditionalGeneration"],
+             "text_config":{"model_type":"glm5_next_text","n_routed_experts":288,"num_experts_per_tok":8}}
+            """#.utf8)
+        )
+        XCTAssertEqual(glm5Next.modelFamily, "glm5_next")
+        XCTAssertTrue(glm5Next.requiresMoEDispatch)
+        // A path-style artifact id is not the allowlisted catalog identity.
+        XCTAssertFalse(glm5Next.hybridDecoderArchitectureVerified)
+        XCTAssertNil(glm5Next.sparseAttention)
+        XCTAssertTrue(PagedKVAttachGate.recognizedModelFamilies.contains(glm5Next.modelFamily))
+        let glm5NextText = ModelRuntime.pagedKVModelCapabilities(
+            modelID: nil,
+            configJSONData: Data(#"{"model_type":"glm5_next_text","n_routed_experts":288}"#.utf8)
+        )
+        XCTAssertEqual(glm5NextText.modelFamily, "glm5_next")
+        XCTAssertTrue(glm5NextText.requiresMoEDispatch)
+
         let invalidJSONDoesNotFallBackToModelID = ModelRuntime.pagedKVModelCapabilities(
             modelID: "mlx-community/Qwen3-8B-4bit",
             configJSONData: Data(#"{"model_type": Infinity}"#.utf8)
@@ -2710,6 +2732,38 @@ final class ServingKnobsConfigTests: XCTestCase {
             parityLabel: "sdpa-parity-v1",
             poolEpoch: 1
         )
+    }
+
+    // GLM-5.3-Flash is served with the wired limit at the recommended working
+    // set (mlx-lm's generation default); every other family keeps the default.
+    func testResidentWeightsTicketOnlyForGLM5NextAtRecommendedWorkingSet() {
+        let recommended = 239_143_780_352
+        let ticket = ModelRuntime.residentWeightsTicket(
+            modelFamily: "glm5_next", recommendedWorkingSetBytes: recommended)
+        XCTAssertEqual(ticket?.size, recommended)
+        XCTAssertEqual(ticket?.policy.limit(baseline: 0, activeSizes: [recommended]), recommended)
+        XCTAssertEqual(
+            ticket?.policy.canAdmit(baseline: recommended, activeSizes: [recommended], newSize: recommended),
+            true, "admission must never suspend a model load")
+        for family in ["qwen", "llama", "gpt_oss", "gemma4", "glm4_moe", "nemotron_h", "unknown"] {
+            XCTAssertNil(
+                ModelRuntime.residentWeightsTicket(modelFamily: family, recommendedWorkingSetBytes: recommended),
+                family)
+        }
+        XCTAssertNil(ModelRuntime.residentWeightsTicket(modelFamily: "glm5_next", recommendedWorkingSetBytes: nil))
+        XCTAssertNil(ModelRuntime.residentWeightsTicket(modelFamily: "glm5_next", recommendedWorkingSetBytes: 0))
+    }
+
+    // glm5_next decode commits command buffers by MLX's op limit, not its
+    // byte budget; an operator-set MLX_MAX_MB_PER_BUFFER is kept, and other
+    // families keep MLX's default.
+    func testCommandBufferBudgetOnlyForGLM5NextAndNeverOverridesOperator() {
+        XCTAssertEqual(ModelRuntime.commandBufferBudgetMB(modelFamily: "glm5_next", configured: nil), 65536)
+        XCTAssertEqual(ModelRuntime.commandBufferBudgetMB(modelFamily: "glm5_next", configured: ""), 65536)
+        XCTAssertNil(ModelRuntime.commandBufferBudgetMB(modelFamily: "glm5_next", configured: "40"))
+        for family in ["qwen", "llama", "gpt_oss", "gemma4", "glm4_moe", "nemotron_h", "unknown"] {
+            XCTAssertNil(ModelRuntime.commandBufferBudgetMB(modelFamily: family, configured: nil), family)
+        }
     }
 
     private static func request(

@@ -1,0 +1,57 @@
+{
+  "lane": "mlx-vlm-vendored-pr2030",
+  "vendor": {
+    "pr": "https://github.com/Blaizzy/mlx-vlm/pull/2030",
+    "merge_sha": "fa27a9a692770c39fdf57b9a985fad084a90aec2"
+  },
+  "versions": {
+    "mlx": "0.32.4",
+    "mlx-vlm": "0.7.8",
+    "mlx-lm": "0.31.4.dev132+g94cdcae13",
+    "transformers": "5.17.0",
+    "omlx": "0.7.1rc1"
+  },
+  "macos": "27.0.1",
+  "macos_build": "26A434",
+  "prefill_chunk": 2048,
+  "sampling": "greedy argmax, temperature 0, no prompt cache, batch 1",
+  "results": [
+    {
+      "prompt_tokens": 1024,
+      "decode_tokens": 256,
+      "prefill_s": 3.400560999987647,
+      "prefill_tps": 301.12678466985886,
+      "decode_s": 647.6717194590019,
+      "decode_tps": 0.3952619703911666,
+      "ttft_s": 3.400560999987647,
+      "peak_memory_gb": 186.47969549,
+      "prompt_sha256": "50ba3ab699d66baebde76d014be1b4aca9ca663979cc269e0215c28edd4197d5",
+      "decode_valid": false
+    },
+    {
+      "prompt_tokens": 8192,
+      "decode_tokens": 256,
+      "prefill_s": 23.060682915966026,
+      "prefill_tps": 355.2366610239579,
+      "decode_s": 653.9990231250413,
+      "decode_tps": 0.3914378935563855,
+      "ttft_s": 23.060682915966026,
+      "peak_memory_gb": 189.381585607,
+      "prompt_sha256": "6d64055ec39c0c1ab840ec9d6ed1bb5245d8d128637d7d25d89b4b4bc1a95b9c",
+      "decode_valid": false
+    },
+    {
+      "prompt_tokens": 65536,
+      "decode_tokens": 256,
+      "prefill_s": 385.9216367499903,
+      "prefill_tps": 169.81685855166464,
+      "decode_s": 698.8944690419594,
+      "decode_tps": 0.3662927828731044,
+      "ttft_s": 385.9216367499903,
+      "peak_memory_gb": 209.132561994,
+      "prompt_sha256": "d74f5922ad773309bae56c8f48f2cd3de9fd15b46e8b3306b06c81d9f0f272ac",
+      "decode_valid": false
+    }
+  ],
+  "note": "decode_tps from this harness is INVALID (bare per-token loop without the runtime's decode setup); prefill_tps, ttft_s, peak_memory_gb and the greedy oracle are valid. Speed reference = omlx-sweep.jsonl."
+}

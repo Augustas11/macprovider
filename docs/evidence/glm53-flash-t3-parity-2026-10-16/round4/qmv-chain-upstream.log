@@ -1,0 +1,4 @@
+chain: bits=8 61.2 us/call 1165.5 GB/s (mlx 0.32.4)
+chain: bits=6 69.1 us/call 789.2 GB/s (mlx 0.32.4)
+chain: bits=5 64.6 us/call 714.3 GB/s (mlx 0.32.4)
+chain: bits=4 41.0 us/call 919.7 GB/s (mlx 0.32.4)

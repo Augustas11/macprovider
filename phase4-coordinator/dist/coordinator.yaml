@@ -448,6 +448,10 @@ rewards:
       prompt_credits_per_mtok: 112000        # $0.112/M
       prompt_cache_hit_credits_per_mtok: 28000 # $0.028/M prefix-cache hit
       completion_credits_per_mtok: 688000    # $0.688/M
+    zai-org/glm-5.3-flash:                 # 2026-10-17 (epic #2029) — class-120b-moe explicit row; 20% undercut vs OpenRouter z-ai/glm-5.3-flash $0.0396/$0.5048 per Mtok; operator-approved
+      prompt_credits_per_mtok: 31680         # $0.03168/M
+      prompt_cache_hit_credits_per_mtok: 7920 # $0.00792/M prefix-cache hit
+      completion_credits_per_mtok: 403840    # $0.40384/M
 
 # SPEC-015 / SPEC-022 settlement policy.
 #

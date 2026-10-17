@@ -469,6 +469,31 @@
       },
       "primary_artifact_id": "mlx-4bit",
       "rate_class": "class-120b-moe"
+    },
+    "zai-org/glm-5.3-flash": {
+      "artifacts": {
+        "mlx-oq4e-mtp": {
+          "allowed_runtime_sources": [
+            "mlx_cache"
+          ],
+          "hash": "7299b6a71a38490e378e9eb6524c426392aa96e3fd561007e0540134bbef48f9",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "min_ram_gb": 234,
+          "notes": "Native Swift MLX artifact (glm5_next, KDA/DSA MoE hybrid, embedded MTP layer). min_ram_gb = 200 GB measured native peak at 64k + 4 GB for 4 CB slots of 64k paged MLA/KDA state (SPEC-039 FR-PKV13: 4,013,031,424 bytes) + 26 GB SPEC-048-R012 10% free-memory floor on 256 GB + 4 GB safety margin = 234. Snapshot-manifest hash from the 46-file per-file SHA-256 list in docs/evidence/glm53-flash-t2-2026-10-16/ and the HF file sizes at the pinned revision.",
+          "quantization": "oq4e-mixed-4-5-6-8bit-g64",
+          "runtime_format": "mlx_safetensors",
+          "size_bytes": 185947410196,
+          "source_ref": {
+            "kind": "huggingface_revision",
+            "repo_id": "Jundot/GLM-5.3-Flash-oQ4e-mtp",
+            "revision": "36defc5042d92a992a7948e83d6f110b8df69329"
+          },
+          "verification_status": "verified",
+          "verified_at": "2026-10-16"
+        }
+      },
+      "primary_artifact_id": "mlx-oq4e-mtp",
+      "rate_class": "class-120b-moe"
     }
   },
   "schema_version": "macprovider.autotune-artifacts-source.v1",

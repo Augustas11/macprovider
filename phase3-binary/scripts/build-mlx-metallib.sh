@@ -39,6 +39,7 @@ SDK_VERSION="$(xcrun -sdk macosx --show-sdk-version)"
 kernels=(
   arg_reduce
   dot
+  gather_mm_offsets
   searchsorted
   conv
   gemv
@@ -47,6 +48,9 @@ kernels=(
   rms_norm
   rope
   scaled_dot_product_attention
+  scaled_dot_product_attention_vjp
+  gated_delta_update
+  gated_delta_update_vjp
   arange
   binary
   binary_two
@@ -58,6 +62,7 @@ kernels=(
   scan
   softmax
   logsumexp
+  cross_entropy
   sort
   ternary
   unary
@@ -83,7 +88,10 @@ if [ "$METAL_VERSION" -ge 400 ] && version_ge "$SDK_VERSION" "26.2"; then
     steel/gemm/kernels/steel_gemm_gather_nax
     steel/gemm/kernels/steel_gemm_splitk_nax
     steel/gemm/kernels/steel_gemm_segmented_nax
+    steel/gemm/kernels/steel_gemm_thin_nax
     quantized_nax
+    gated_delta_update_nax
+    gated_delta_update_nax_vjp
     fp_quantized_nax
     steel/attn/kernels/steel_attention_nax
   )

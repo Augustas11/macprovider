@@ -860,7 +860,7 @@ final class KVConversationColdTierTests: XCTestCase {
     /// no serve-cache iterator keeps the capped `parameters`.
     func testSerialServeSitesUseServeIteratorParameters() throws {
         let source = try String(contentsOfFile: "Sources/macprovider-cli/ModelRuntime.swift", encoding: .utf8)
-        let wired = #"cache: kvCache,\s+parameters: Self\.serveIteratorParameters\(\s+parameters, forceSimpleKV: forceSimpleKV, reusedCache: lease\?\.reusableCache != nil\)\)"#
+        let wired = #"cache: kvCache,\s+parameters: Self\.serveIteratorParameters\(\s+parameters, forceSimpleKV: forceSimpleKV, reusedCache: lease\?\.reusableCache != nil,\s+cache: kvCache\)\)"#
         let matches = try NSRegularExpression(pattern: wired).numberOfMatches(
             in: source, range: NSRange(source.startIndex..., in: source))
         XCTAssertEqual(matches, 2, "non-streaming and streaming serial serve must use serveIteratorParameters")

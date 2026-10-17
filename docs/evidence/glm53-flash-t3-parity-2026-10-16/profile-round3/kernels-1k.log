@@ -1,0 +1,54 @@
+hc_deferred_exact=true
+load_s=30.5 active_gb=184.799015808
+wired_limit_applied=239143780352 cap=239143780352
+prefill_tps=117.1
+gpu-profile ops_per_buffer=0 wall_ms=30.23 gpu_busy_ms=23.70 idle_ms=6.53 cmdbufs/step=745.3 dispatches/step=589.0
+gpu:  us/step  n/step   MB/step     GB/s  kernel
+gpu:   5899.9    42.0 114904.13  19475.7  custom_kernel_glm5next_moe_gate_up_select__bfloat16_t_4096_2048_8_4_64_4_2_2048_0_288_1_8_64_bfloat16_t_float_
+gpu:   5104.4    75.0   3118.45    610.9  affine_qmv_fast_bfloat16_t_gs_64_b_8_batch_0_pr_0_hgs_0_r_4
+gpu:   3764.3    25.0   2710.13    720.0  custom_kernel_glm5next_multi_qmv_p6__bfloat16_t_4096_8_64_8192_8192_8192_128_128_bfloat16_t_uint32_t_bfloat16_
+gpu:   2979.2    42.0  57453.53  19285.0  custom_kernel_glm5next_moe_down_combine__bfloat16_t_2048_4096_8_4_64_4_2_8_64_bfloat16_t_uint32_t_float_uint32
+gpu:   2058.8    89.0    150.94     73.3  custom_kernel_glm5next_hc_pre_deferred__bfloat16_t_4_4096_1000_10000_bfloat16_t_float_floatc_float_floatc_floa
+gpu:   1218.8    90.0      8.88      7.3  custom_kernel_glm5next_hc_post__bfloat16_t_4_4096_20_1000_8_float_floatc_float_bfloat16_t_float_float_float
+gpu:    851.6     8.0    561.32    659.2  custom_kernel_glm5next_multi_qmv_p6__bfloat16_t_4096_5_64_8192_8192_8192_128_128_bfloat16_t_uint32_t_bfloat16_
+gpu:    628.5    26.0    291.40    463.6  custom_kernel_glm5next_kda_decode_gates__bfloat16_t_1_128_8192_64_8_64_bfloat16_t_bfloat16_t_bfloat16_t_bfloat
+gpu:    571.4    13.0    327.47    573.1  affine_qmv_fast_bfloat16_t_gs_64_b_6_batch_0_pr_0_hgs_0_r_4
+gpu:    517.9    42.0    198.75    383.8  custom_kernel_glm5next_router_logits__bfloat16_t_4096_288_bfloat16_t_float_float_float_float
+gpu:    385.4    20.0    180.22    467.6  affine_qmv_fast_bfloat16_t_gs_64_b_8_batch_1_pr_0_hgs_0_r_4
+gpu:    310.3    11.0     16.76     54.0  steel_gemm_fused_nt_bfloat16_bfloat16_bm64_bn32_bk32_wm2_wn2_has_batch_n_use_out_source_n_do_axpby_n_align_M_t
+gpu:    240.3     8.0     83.37    347.0  custom_kernel_glm5next_kda_decode_gates5__bfloat16_t_1_128_8192_64_5_64_bfloat16_t_bfloat16_t_bfloat16_t_bfloa
+gpu:    152.9    23.0      0.16      1.0  rmsbfloat16
+gpu:    111.4    11.0      2.75     24.7  gg1_copybfloat16bfloat16
+gpu:    106.5     1.0      0.13      1.2  steel_gemm_fused_tn_float32_float32_bm64_bn32_bk32_wm2_wn2_has_batch_n_use_out_source_n_do_axpby_n_align_M_n_a
+gpu:    103.4     1.0     46.18    446.6  custom_kernel_glm5next_multi_qmv_p2__bfloat16_t_4096_5_64_8192_8192_0_0_0_bfloat16_t_uint32_t_bfloat16_t_bfloa
+gpu:     90.3     1.0     37.07    410.6  custom_kernel_glm5next_multi_qmv_p4__bfloat16_t_4096_8_64_8192_128_128_64_0_bfloat16_t_uint32_t_bfloat16_t_bfl
+gpu:     65.3    11.0      3.24     49.7  block_softmax_precise_bfloat16
+gpu:     46.7     1.0      0.31      6.7  argmax_bfloat16
+gpu:     46.3    11.0      1.44     31.1  sv_Multiplybfloat16
+gpu:     26.0     1.0      5.87    225.5  affine_qmv_bfloat16_t_gs_64_b_5_batch_1_pr_0_hgs_0_r_4
+gpu:     19.5     1.0      5.87    300.3  affine_qmv_fast_bfloat16_t_gs_64_b_5_batch_1_pr_0_hgs_0_r_4
+gpu:     12.7     3.0      0.29     23.3  EV2IAsTypeBFV2IBroadcastAEGV2IBroadcastEAHV2IMinimumFGIV2ISigmoidHJV2IBroadcastHIKV2IBroadcastIHLV2IMultiplyJK
+gpu:     11.3     2.0     39.65   3521.1  gather_frontbfloat16_uint32_int_2
+gpu:      7.3     1.0      0.04      5.6  col_reduce_small_1_reduce_sumbfloat16
+gpu:      6.2     1.0      0.10     15.8  v_copybfloat16float32
+gpu:      6.0     1.0      0.01      2.4  affine_dequantize_bfloat16_t_gs_64_b_8
+gpu:      5.3     1.0    634.39 119135.4  gather_frontuint32_uint32_int_1
+gpu:      5.1     1.0      0.11     20.7  Df4IAsTypeBEf4IBroadcastADFf4IBroadcastDAGf4IMultiplyEFHf4IBroadcastGCIf4IBroadcastCGJf4IAddHIKV2OAsTypeJ_VVV_
+gpu:      4.3     1.0      0.02      3.8  vs_Multiplybfloat16
+family: total kernel GPU time 25.36 ms/step
+family:   8879.0 us  35.0%  n=  84.0  172357.66 MB  19411.7 GB/s  moe_fused
+family:   6080.6 us  24.0%  n= 109.0   3632.01 MB    597.3 GB/s  qmv_fast
+family:   4809.5 us  19.0%  n=  35.0   3354.70 MB    697.5 GB/s  kda_multi_qmv
+family:   3277.5 us  12.9%  n= 179.0    159.82 MB     48.8 GB/s  hc
+family:    868.8 us   3.4%  n=  34.0    374.77 MB    431.4 GB/s  kda_kernel
+family:    517.9 us   2.0%  n=  42.0    198.75 MB    383.8 GB/s  moe_router
+family:    416.9 us   1.6%  n=  12.0     16.89 MB     40.5 GB/s  gemm
+family:    152.9 us   0.6%  n=  23.0      0.16 MB      1.0 GB/s  rmsnorm
+family:    117.7 us   0.5%  n=  12.0      2.85 MB     24.2 GB/s  copy
+family:     68.4 us   0.3%  n=  16.0      1.86 MB     27.2 GB/s  elementwise/other
+family:     65.3 us   0.3%  n=  11.0      3.24 MB     49.7 GB/s  softmax
+family:     46.7 us   0.2%  n=   1.0      0.31 MB      6.7 GB/s  arg
+family:     26.0 us   0.1%  n=   1.0      5.87 MB    225.5 GB/s  qmv_other
+family:     16.6 us   0.1%  n=   3.0    674.04 MB  40640.7 GB/s  gather
+family:      7.3 us   0.0%  n=   1.0      0.04 MB      5.6 GB/s  reduce
+family:      6.0 us   0.0%  n=   1.0      0.01 MB      2.4 GB/s  dequantize

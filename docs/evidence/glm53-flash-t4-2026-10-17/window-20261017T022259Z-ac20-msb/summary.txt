@@ -1,0 +1,22 @@
+legs=1 2 3
+leg1 fixture start 02:23:00
+leg1 fixture PASS
+  [AC-20 glm5_next] prompt=2800 tokens=48 sparseLayers=11 gatherCalls=1166 maxLogicalBlocks=12 nonIdentity=true pending=[3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3] stateMismatches=0
+  [AC-20 glm5_next attach probe] established=true nLayers=11 nForwards=36 gatherCalls=792
+leg2 self-check start 02:30:50
+leg2 startup artifact hash accepted expected=7299b6a71a38490e378e9eb6524c426392aa96e3fd561007e0540134bbef48f9 dir=<models>/GLM-5.3-Flash-oQ4e-mtp
+event=batching_unsupported action=serial_routed reason=local_batching_capability_unavailable
+event=cb_self_check action=step max_slots=4 rows=8 queue_limit=4 probe_key_boundary=1024 resumed_at=0 remeasure=false model_sha256=7299b6a71a38490e378e9eb6524c426392aa96e3fd561007e0540134bbef48f9
+leg2 k=2 not measured
+leg2 k=3 not measured
+leg2 k=4 not measured
+leg2 decision=deferred verified_k=1 served_slots=1 best_median_gain=0.00
+leg2 self-check FAIL
+leg2 self-check FAIL (see selfcheck/)
+leg3 msb rows=1 start 02:37:33
+leg3 rows=1 aggregateTPSRuns=[35.37619901517842, 35.282254732491275, 35.39244576566993] aggregateTPSp50=35.37619901517842 pagedSingleRowTPSRuns=[35.440206495111326, 35.3951174770834, 35.40769860737452] pagedSingleRowTPSp50=35.40769860737452 perRowTPSp50=35.37619901517842 productionSerialTPSRuns=[39.90793782825574, 39.84690004900046, 39.90333430526642] productionSerialTPSp50=39.90333430526642
+leg3 msb rows=2 start 02:40:43
+leg3 rows=2 aggregateTPSRuns=[46.90330958169508, 46.94988073546351, 46.82835714012826] aggregateTPSp50=46.90330958169508 pagedSingleRowTPSRuns=[35.31815789479744, 35.304890390098414, 35.282508630931304] pagedSingleRowTPSp50=35.304890390098414 perRowTPSp50=23.45165479084754 productionSerialTPSRuns=[39.789747852069134, 39.79250681842153, 39.74941717378178] productionSerialTPSp50=39.789747852069134
+leg3 msb rows=4 start 02:44:11
+leg3 rows=4 aggregateTPSRuns=[55.922608665942796, 55.941696091419665, 55.831903793890596] aggregateTPSp50=55.922608665942796 pagedSingleRowTPSRuns=[35.29123498734765, 35.26045512883685, 35.36093253589858] pagedSingleRowTPSp50=35.29123498734765 perRowTPSp50=13.980652166485699 productionSerialTPSRuns=[39.85496520184991, 39.952705459677844, 39.84193952372388] productionSerialTPSp50=39.85496520184991
+RESULT=FAIL evidence=<lab>/t4-window-20261017T022259Z

@@ -1,0 +1,11 @@
+mtp has_weights=true prompt=1024 tokens=256
+mtp plain prefill_s=14.65 decode_tok_s=41.13 oracle_match=256/256
+mtp mtp prefill_s=2.81 decode_tok_s=40.23 proposed=127 accepted=127 acceptance=1.000 oracle_match=256/256
+mtp round=0 mtp_equals_plain=true first_difference=none
+mtp plain prefill_s=2.59 decode_tok_s=41.21 oracle_match=256/256
+mtp mtp prefill_s=2.79 decode_tok_s=42.07 proposed=127 accepted=127 acceptance=1.000 oracle_match=256/256
+mtp round=1 mtp_equals_plain=true first_difference=none
+mtp has_weights=true prompt=8192 tokens=256
+mtp plain prefill_s=48.79 decode_tok_s=34.33 oracle_match=256/256
+mtp mtp prefill_s=27.60 decode_tok_s=33.49 proposed=127 accepted=127 acceptance=1.000 oracle_match=256/256
+mtp round=0 mtp_equals_plain=true first_difference=none

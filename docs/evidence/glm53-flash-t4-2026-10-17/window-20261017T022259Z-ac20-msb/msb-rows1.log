@@ -1,0 +1,59 @@
+event=chat_template_compat rewrite=numeric_attribute_access count=4
+{
+  "aggregateCVPct" : 0.16827597385950174,
+  "aggregateTPSRuns" : [
+    35.37619901517842,
+    35.282254732491275,
+    35.39244576566993
+  ],
+  "aggregateTPSp50" : 35.37619901517842,
+  "aggregateUpliftVsPagedSingleRow" : 0.9991103744825274,
+  "aggregateVsProductionSerial" : 0.8865474434929487,
+  "blockSizeTokens" : 256,
+  "compiled" : false,
+  "decodeTokensPerRow" : 128,
+  "engine" : "paged",
+  "layerCount" : 11,
+  "maxPhysicalBlocks" : 1024,
+  "mlxSwiftLMPin" : "mlxlm-7d8dbf56e0e2",
+  "modelID" : "<models>\/GLM-5.3-Flash-oQ4e-mtp",
+  "modelTag" : "GLM-5.3-Flash-oQ4e-mtp",
+  "pagedSingleRowCVPct" : 0.06569884149564352,
+  "pagedSingleRowTPSRuns" : [
+    35.440206495111326,
+    35.3951174770834,
+    35.40769860737452
+  ],
+  "pagedSingleRowTPSp50" : 35.40769860737452,
+  "peakPhysFootprintMB" : 181251,
+  "peakRSSMB" : 124413,
+  "perRowFractionOfPagedSingleRow" : 0.9991103744825274,
+  "perRowTPSp50" : 35.37619901517842,
+  "productionSerialCVPct" : 0.08521595097893796,
+  "productionSerialPromptTokens" : 1024,
+  "productionSerialTPSRuns" : [
+    39.90793782825574,
+    39.84690004900046,
+    39.90333430526642
+  ],
+  "productionSerialTPSp50" : 39.90333430526642,
+  "productionSerialTTFTSecondsRuns" : [
+    3.113656997680664,
+    3.1139520406723022,
+    3.1145389080047607
+  ],
+  "promptTokenLengths" : [
+    1024
+  ],
+  "promptTokenSHA256" : [
+    "c2d6e0a41c032e905401737f80cfeaf532576de3aef86f3382067663f683b3dd"
+  ],
+  "promptTokensPerRow" : 1024,
+  "rows" : 1,
+  "runs" : 3,
+  "scenario" : "throughput",
+  "schemaVersion" : 4,
+  "timestamp" : "2026-10-17T02:40:42Z"
+}
+msb-throughput: model=GLM-5.3-Flash-oQ4e-mtp engine=paged compile=false rows=1 block=256 serial_tps_p50=39.9 engine_1row_tps_p50=35.4 aggregate_tps_p50=35.4 uplift_vs_1row=1.00x aggregate_vs_serial=0.89x peak_rss_mb=124413
+msb-throughput: wrote <lab>/t4-window-20261017T022259Z/msb-rows1.json
