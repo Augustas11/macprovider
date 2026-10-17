@@ -1,6 +1,6 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.44
+**Version:** 0.1.45
 
 ```json
 {
@@ -820,7 +820,17 @@ MTP auxiliary state is compared against deterministic recomputation from the
 same committed prefix using the qualified MTP adapter; ordinary decode is the
 target-KV/logit oracle, not an oracle for a head it does not execute. The state
 digest specifies component order, dtype, shape, logical length, and canonical
-byte encoding. Depth-zero rows retain only committed target state; when depth
+byte encoding. The target-oracle state is what a later forward reads plus
+the rewind headroom every committed round keeps. For a `glm5_next` paged MLA
+layer that is the latent to `offset`, the pooled indexer keys, the partial pool
+window's raw keys and gates, and the last `maxTrim - kpool` folded raw keys and
+gates: an exact rewind of rejected proposals keeps a shorter suffix of the same
+folded keys than one-token decode keeps (15 of 19 at `kpool` 4 after a reject
+that undoes a pool window), no forward reads them, and the next completed pool
+window refills them. Recurrent (KDA/GDN) and KV state compare whole. The lab
+oracle compares this digest at the ordinary decode-window ends that a native
+round lands on, and every such comparison, including those after a rejection,
+MUST match. Depth-zero rows retain only committed target state; when depth
 increases, proposal state is recomputed from the current committed target
 hidden state rather than reused from a stale speculative tail.
 
@@ -1696,6 +1706,14 @@ the text-only path without image inputs; that does not admit multimodal buyer
 requests.
 
 ## 9. Changelog and history
+
+- **0.1.45 (2026-10-17)** — MTP-6: the target-oracle state digest is
+  defined. A `glm5_next` paged MLA layer contributes the state a forward
+  reads plus the last `maxTrim - kpool` folded raw keys (rewind headroom
+  that an exact rejection leaves shorter than one-token decode does); the
+  journey's step 05 compares it at every ordinary decode-window end a native
+  round lands on, and a rejected depth-1 round is a committed round, not an
+  abort. No serving behavior changes.
 
 - **0.1.44 (2026-10-17)** — MTP-3: the campaign mlx-swift-lm row is the
   immutable fork tag `3.32.3-macprovider.10.1` (`87dc5159…`); its one commit

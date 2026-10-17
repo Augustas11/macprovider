@@ -332,6 +332,28 @@ final class PagedMLALatentCache: GLM5NextLatentCache, CustomDebugStringConvertib
         }
     }
 
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    /// The lab state observer's target-oracle view (SPEC-048 MTP-6, 0.1.45):
+    /// everything a later forward reads (latent to `offset`, pooled keys, the
+    /// partial pool window's keys and gates) plus the last `maxTrim - kpool`
+    /// folded raw keys and gates. The folded tail is rewind headroom that no
+    /// forward reads. A native round's exact `trim` of rejected proposals
+    /// keeps a shorter suffix of the same raw keys than one-token decode
+    /// keeps (after a reject that undoes a pool window, 15 of 19 at kpool 4),
+    /// as the fork's `GLM5NextLatentRowTransaction` does, and the next
+    /// completed window refills it. Every committed round rejecting at most
+    /// `kpool` proposals keeps at least `maxTrim - kpool` of them.
+    var observerOracleState: [MLXArray] {
+        let state = self.state
+        let headroom = max(0, maxTrim - kpool)
+        func tail(_ array: MLXArray) -> MLXArray {
+            guard array.ndim >= 2, array.dim(1) > headroom else { return array }
+            return array[0..., (array.dim(1) - headroom)...]
+        }
+        return [state[0], state[1], state[2], state[3], tail(state[4]), tail(state[5])]
+    }
+    #endif
+
     var metaState: [String] {
         get {
             [

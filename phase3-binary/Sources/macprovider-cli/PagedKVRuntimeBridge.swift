@@ -3195,8 +3195,15 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         // Every layer's state is canonicalized and evaluated together, then
         // hashed in one concurrent pass (one GPU wait, all cores), and fed to
         // the hasher in the same layer/slot order as before.
+        // A paged MLA layer contributes its target-oracle view: the state a
+        // later forward reads plus the rewind headroom every committed round
+        // keeps (`PagedMLALatentCache.observerOracleState`, SPEC-048 MTP-6).
         let layers = try row.caches.map { cache in
-            (cache: cache, shape: try rowTargetCacheDigestShape(for: cache), state: cache.state)
+            (
+                cache: cache,
+                shape: try rowTargetCacheDigestShape(for: cache),
+                state: (cache as? PagedMLALatentCache)?.observerOracleState ?? cache.state
+            )
         }
         let records = try Self.arrayDigestRecords(layers.flatMap { layer in
             layer.state.map { (array: $0, logicalTokens: layer.shape.logicalTokens) }
@@ -3208,6 +3215,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             Self.update(&hasher, label: "layer", value: String(layerIndex))
             Self.update(&hasher, label: "type", value: String(describing: type(of: layer.cache)))
             Self.update(&hasher, label: "offset", value: String(layer.cache.offset))
+            if layer.cache is PagedMLALatentCache {
+                Self.update(&hasher, label: "view", value: "paged_mla_oracle_state_v1")
+            }
             switch layer.shape {
             case .paged(let storedTokens, let blockSizeTokens):
                 Self.update(&hasher, label: "paged_stored_tokens", value: String(storedTokens))

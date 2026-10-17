@@ -4071,6 +4071,45 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             finalizeTokenCounts: [], recomputedTokenCounts: []))
     }
 
+    /// Window 13:22Z step 05: ordinary decode records one state per 16-token
+    /// window, so the old "every native round has an ordinary record" rule
+    /// could never hold. The comparison is over the window-end counts the
+    /// native row lands on, all of which must match.
+    func testJourneyAlignedCacheComparisonUsesWindowEndCounts() {
+        typealias Runner = NativeMTPJourneyRunner
+        let ordinary = stride(from: 45, through: 125, by: 16).map { (tokens: $0, digest: "o\($0)") }
+        // Native rounds of 1 or 2 tokens from 30 to 126.
+        var native: [(tokens: Int, digest: String, committedProposals: Int?)] = []
+        var tokens = 30
+        var step = 0
+        while tokens <= 126 {
+            let accepted = step % 3 != 0
+            native.append((tokens: tokens, digest: "o\(tokens)", committedProposals: accepted ? 1 : 0))
+            tokens += accepted ? 2 : 1
+            step += 1
+        }
+        let matched = Runner.alignedCacheComparison(native: native, ordinary: ordinary)
+        XCTAssertEqual(matched.comparableOrdinaryCounts, 6)
+        XCTAssertGreaterThanOrEqual(matched.pairs, 2)
+        XCTAssertEqual(matched.equalPairs, matched.pairs)
+        XCTAssertGreaterThanOrEqual(matched.pairsAfterRejection, 1)
+        XCTAssertTrue(matched.holds)
+
+        let pairedCount = native.first { $0.tokens % 16 == 13 && $0.tokens >= 45 }!.tokens
+        let mismatched = native.map { record in
+            record.tokens == pairedCount ? (tokens: record.tokens, digest: "different", committedProposals: record.committedProposals) : record
+        }
+        let failed = Runner.alignedCacheComparison(native: mismatched, ordinary: ordinary)
+        XCTAssertFalse(failed.holds)
+        XCTAssertEqual(failed.mismatchTokenCounts, [pairedCount])
+
+        XCTAssertFalse(Runner.alignedCacheComparison(native: [], ordinary: ordinary).holds)
+        XCTAssertFalse(Runner.alignedCacheComparison(
+            native: native.map { (tokens: $0.tokens, digest: $0.digest, committedProposals: 1) },
+            ordinary: ordinary
+        ).holds, "no compared record follows a rejected round")
+    }
+
     func testLabStateDigestObserverFailsClosedForPagedSlidingWindowCache() async throws {
         guard PagedKVMetallibGate.defaultMetallibExists() else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")

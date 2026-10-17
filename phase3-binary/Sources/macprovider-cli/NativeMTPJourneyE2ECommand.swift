@@ -124,6 +124,51 @@ final class NativeMTPJourneyRunner {
         }
     }
 
+    /// step-05 target-state oracle (SPEC-048 MTP-6). Ordinary decode records
+    /// its row state once per lockstep window, so the comparable token counts
+    /// are the ordinary records inside the native row's range. Holds when
+    /// every native after-finalize record at such a count has the ordinary
+    /// digest, at least a quarter of those counts (and one) are compared, and
+    /// at least one compared record follows a rejected round.
+    struct AlignedCacheComparison {
+        let pairs: Int
+        let equalPairs: Int
+        let pairsAfterRejection: Int
+        let comparableOrdinaryCounts: Int
+        let mismatchTokenCounts: [Int]
+
+        var holds: Bool {
+            pairs >= 1
+                && equalPairs == pairs
+                && pairs * 4 >= comparableOrdinaryCounts
+                && pairsAfterRejection >= 1
+        }
+    }
+
+    static func alignedCacheComparison(
+        native: [(tokens: Int, digest: String, committedProposals: Int?)],
+        ordinary: [(tokens: Int, digest: String)]
+    ) -> AlignedCacheComparison {
+        let ordinaryByTokens = Dictionary(ordinary.map { ($0.tokens, $0.digest) }, uniquingKeysWith: { _, latest in latest })
+        let pairs = native.compactMap { record in
+            ordinaryByTokens[record.tokens].map { (native: record, ordinary: $0) }
+        }
+        let lowest = native.map(\.tokens).min()
+        let highest = native.map(\.tokens).max()
+        let comparable = ordinaryByTokens.keys.filter { tokens in
+            guard let lowest, let highest else { return false }
+            return tokens >= lowest && tokens <= highest
+        }
+        let mismatches = pairs.filter { $0.native.digest != $0.ordinary }.map(\.native.tokens)
+        return AlignedCacheComparison(
+            pairs: pairs.count,
+            equalPairs: pairs.count - mismatches.count,
+            pairsAfterRejection: pairs.filter { $0.native.committedProposals == 0 }.count,
+            comparableOrdinaryCounts: comparable.count,
+            mismatchTokenCounts: Array(mismatches.prefix(16))
+        )
+    }
+
     static func boundaryRowTokens(blockTokens: Int) -> Int {
         max(256, 4 * blockTokens)
     }
@@ -447,20 +492,15 @@ final class NativeMTPJourneyRunner {
                 let beforeAbort = stateRecords.filter { $0.phase == .beforeAbort }
                 let afterAbort = stateRecords.filter { $0.phase == .afterAbort }
                 let terminalPhasePresent = phases.contains(.afterFinalize) || phases.contains(.afterAbort) || phases.contains(.abort)
-                let ordinaryCacheByTokenCount = Dictionary(ordinaryAfterDecode.map { ($0.committedKVTokenCount, $0.cacheDigestSHA256) }, uniquingKeysWith: { _, latest in latest })
-                let alignedFinalizePairs = afterFinalize.compactMap { nativeRecord -> (native: NativeMTPStateDigestRecord, ordinaryCache: String)? in
-                    guard let ordinaryCache = ordinaryCacheByTokenCount[nativeRecord.committedKVTokenCount] else { return nil }
-                    return (nativeRecord, ordinaryCache)
-                }
-                let alignedPrefixCacheMatches = !afterFinalize.isEmpty
-                    && alignedFinalizePairs.count == afterFinalize.count
-                    && alignedFinalizePairs.allSatisfy { $0.native.cacheDigestSHA256 == $0.ordinaryCache }
-                let abortPairs = Array(zip(beforeAbort, afterAbort))
-                let abortStateStable = !abortPairs.isEmpty && beforeAbort.count == afterAbort.count && abortPairs.allSatisfy { before, after in
-                    before.committedKVTokenCount == after.committedKVTokenCount
-                        && before.cacheDigestSHA256 == after.cacheDigestSHA256
-                        && before.drafterDigestSHA256 == after.drafterDigestSHA256
-                }
+                // The ordinary oracle's state exists only at its decode-window
+                // ends (one record per window), so only those token counts can
+                // be compared; every native round that lands on one must match.
+                let alignment = Self.alignedCacheComparison(
+                    native: afterFinalize.map {
+                        (tokens: $0.committedKVTokenCount, digest: $0.cacheDigestSHA256, committedProposals: $0.committedProposalTokens)
+                    },
+                    ordinary: ordinaryAfterDecode.map { (tokens: $0.committedKVTokenCount, digest: $0.cacheDigestSHA256) }
+                )
                 step.check("\(id).ordinary_state_observer_after_decode", !ordinaryAfterDecode.isEmpty)
                 step.check("\(id).native_state_observer_records", !stateRecords.isEmpty)
                 step.check("\(id).native_state_observer_after_verify", !afterVerify.isEmpty)
@@ -471,7 +511,7 @@ final class NativeMTPJourneyRunner {
                         && ($0.drafterDigestSHA256.map { isSHA256Hex($0) } ?? true)
                         && ($0.pendingTargetDigestSHA256.map { isSHA256Hex($0) } ?? true)
                 })
-                step.check("\(id).aligned_prefix_cache_digest_comparison", alignedPrefixCacheMatches)
+                step.check("\(id).aligned_prefix_cache_digest_comparison", alignment.holds)
                 let recomputedDrafterRecords = stateRecords.filter {
                     $0.phase == .afterFinalize && $0.drafterRecomputeDigestSHA256 != nil
                 }
@@ -488,8 +528,13 @@ final class NativeMTPJourneyRunner {
                     $0.drafterDigestSHA256 != nil && $0.drafterDigestSHA256 == $0.drafterRecomputeDigestSHA256
                 }
                 if id.hasPrefix("journey-reject-all-") {
-                    step.check("\(id).native_state_observer_reject_abort", phases.contains(.beforeAbort) && phases.contains(.afterAbort))
-                    step.check("\(id).abort_cache_and_drafter_state_stable", abortStateStable)
+                    // A rejected depth-1 round still commits its base column
+                    // (MTP-6 commit(0)); only cancellation aborts a round, and
+                    // step 09 checks abort stability.
+                    step.check("\(id).rejected_rounds_commit_without_abort",
+                        !phases.contains(.beforeAbort) && !phases.contains(.afterAbort)
+                            && afterFinalize.count >= forced
+                            && afterFinalize.allSatisfy { $0.committedProposalTokens == 0 })
                 }
                 step.details[id] = [
                     "forced_rounds": forced,
@@ -501,13 +546,17 @@ final class NativeMTPJourneyRunner {
                     "ordinary_state_observer_record_count": ordinaryStateRecords.count,
                     "native_state_observer_phases": Array(phases.map(\.rawValue)).sorted(),
                     "native_state_observer_record_count": stateRecords.count,
-                    "aligned_prefix_cache_pairs": alignedFinalizePairs.count,
+                    "aligned_prefix_cache_pairs": alignment.pairs,
+                    "aligned_prefix_cache_equal_pairs": alignment.equalPairs,
+                    "aligned_prefix_cache_pairs_after_rejection": alignment.pairsAfterRejection,
+                    "aligned_prefix_cache_comparable_ordinary_counts": alignment.comparableOrdinaryCounts,
+                    "aligned_prefix_cache_mismatch_token_counts": alignment.mismatchTokenCounts,
                     "independent_drafter_recompute_records": recomputedDrafterRecords.count,
                     "independent_drafter_recompute_byte_equal": drafterRecomputeByteEqual,
-                    "abort_state_pairs": abortPairs.count,
+                    "abort_records": beforeAbort.count + afterAbort.count,
                     "state_observer_latest_cache_sha256": stateRecords.last?.cacheDigestSHA256 ?? "",
                     "state_observer_latest_target_sha256": stateRecords.last?.pendingTargetDigestSHA256 ?? "",
-                    "state_observer_scope": "ordinary_after_decode_vs_native_after_finalize_cache_digest",
+                    "state_observer_scope": "ordinary_window_end_vs_native_after_finalize_oracle_state_digest",
                 ]
             }
             _ = await ordinary.installLabNativeMTPStateDigestObserver(nil)

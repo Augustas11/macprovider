@@ -183,6 +183,69 @@ final class PagedMLALatentCacheTests: XCTestCase {
         }
     }
 
+    /// Window 13:22Z step 05 (SPEC-048 MTP-6, 0.1.45): native rounds of depth
+    /// 1...3 with every retained count, against one-token decode of the same
+    /// tokens. At every committed length the state a forward reads (latent,
+    /// pooled keys, partial window) is bit-equal; the folded raw-key tail
+    /// (rewind headroom) is a shorter suffix after some rejections, so the
+    /// whole `state` differs there, while `observerOracleState` never does.
+    func testNativeRoundsMatchOneTokenDecodeInTheObserverOracleState() throws {
+        try Device.withDefaultDevice(.cpu) {
+            var rng = SplitMix(seed: 31)
+            let total = 240
+            let stream = randomInputs(length: total + 8, rng: &rng)
+            func column(_ t: Int) -> (MLXArray, MLXArray, MLXArray) {
+                (stream.0[.ellipsis, t ..< (t + 1), 0...], stream.1[0..., t ..< (t + 1), 0...], stream.2[0..., t ..< (t + 1), 0...])
+            }
+            let prompt = 9
+            let ordinary = makeCache()
+            let native = makeCache()
+            let promptInputs = (stream.0[.ellipsis, ..<prompt, 0...], stream.1[0..., ..<prompt, 0...], stream.2[0..., ..<prompt, 0...])
+            apply(ordinary, promptInputs)
+            apply(native, promptInputs)
+            var ordinaryStates: [Int: (state: [MLXArray], oracle: [MLXArray])] = [:]
+            for t in prompt ..< total {
+                apply(ordinary, column(t))
+                let snapshot = (state: ordinary.state, oracle: ordinary.observerOracleState)
+                eval(snapshot.state + snapshot.oracle)
+                ordinaryStates[ordinary.offset] = snapshot
+            }
+            var compared = 0
+            var foldedTailDiffered = false
+            while native.offset < total - 4 {
+                let depth = Int(rng.next() % 3) + 1
+                let retained = Int(rng.next() % UInt64(depth + 1)) + 1
+                let start = native.offset
+                let batch = PagedMLABatchLayerCache(rowCaches: [native])
+                try batch.prepareMTPPackedVerification(rowMaps: [
+                    MTPPackedVerificationRowMap(rowIndex: 0, queryOffset: start, inputCount: depth + 1, proposalCount: depth),
+                ])
+                // Accepted columns carry the decoded tokens; rejected ones differ.
+                let junk = randomInputs(length: depth + 1, rng: &rng)
+                for c in 0 ... depth {
+                    apply(batch.rowCaches[0], c < retained
+                        ? column(start + c)
+                        : (junk.0[.ellipsis, c ..< (c + 1), 0...], junk.1[0..., c ..< (c + 1), 0...], junk.2[0..., c ..< (c + 1), 0...]))
+                }
+                batch.finalize()
+                _ = try batch.pendingMTPResolutions()[0].stageCommit(inputCount: retained)
+                let label = "offset \(native.offset) depth \(depth) retained \(retained)"
+                let reference = try XCTUnwrap(ordinaryStates[native.offset], label)
+                let state = native.state
+                for index in 0 ..< 4 {
+                    XCTAssertTrue(equal(state[index], reference.state[index]), "forward-read state[\(index)] \(label)")
+                }
+                if !(equal(state[4], reference.state[4]) && equal(state[5], reference.state[5])) {
+                    foldedTailDiffered = true
+                }
+                assertStatesEqual(native.observerOracleState, reference.oracle, "oracle state \(label)")
+                compared += 1
+            }
+            XCTAssertGreaterThan(compared, 60)
+            XCTAssertTrue(foldedTailDiffered, "the folded rewind headroom never differed; the oracle view would be untested")
+        }
+    }
+
     func testAbortedVerificationLeavesRowsUntouched() throws {
         try requireMetal()
         var rng = SplitMix(seed: 5)

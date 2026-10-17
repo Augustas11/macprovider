@@ -57,7 +57,12 @@ tuple:
    reasons across all/none/partial acceptance.
 5. `step-05-cache-state-boundary` — Force rejection at every proposal
    position and at an admitted cache or hybrid-state boundary; prove exact
-   subsequent-token and state parity.
+   subsequent-token and state parity. State parity compares the row's
+   target-oracle state digest (SPEC-048 MTP-6) after every native round that
+   lands on a token count where the ordinary oracle recorded its state (the
+   end of each lockstep decode window), including rounds after a rejection.
+   A rejected round commits its base column; abort stability belongs to
+   step 09.
 6. `step-06-streaming-stop` — Prove streaming and non-streaming parity for
    EOS, token stop, a stop string spanning proposal/round boundaries, max
    tokens, early consumer stop, and a post-output injected failure with no
