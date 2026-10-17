@@ -1220,7 +1220,8 @@ from GitHub or the mirror, and every release-discovery response (GitHub API
 pages, the coordinator `/healthz`), under a hard byte cap defined once per
 surface (the signed metadata files a few KB, each release asset well above the
 largest current asset), MUST abort a transfer as soon as it passes the cap,
-MUST leave no partial file, and MUST refuse redirects that leave HTTPS
+MUST leave no partial file, and MUST follow a redirect only over HTTPS to the
+original host or a release download host (GitHub, its asset CDN, the mirror)
 (v0.12.3, #2036). The mirror's
 `latest.json` MUST NOT choose the tag: it is unsigned and mirror-controlled, and
 every public release, old or canary, carries a valid `checksums.txt.sig`. The

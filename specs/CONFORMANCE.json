@@ -2709,7 +2709,7 @@
         "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:private func download(from url: URL, to destination: URL, maximumBytes: Int64)",
         "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:static let maxReleaseAssetBytes",
         "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:private func boundedData(",
-        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:final class NoSchemeDowngradeRedirects"
+        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:final class ReleaseRedirectPolicy"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/SelfUpdateMirrorTests.swift:testTagResolvesFromMirrorWhenGitHubIsUnreachable",
@@ -2739,7 +2739,9 @@
         "phase3-binary/Tests/macprovider-cliTests/SelfUpdateDownloadCapTests.swift:testDeclaredOversizeIsCancelledBeforeTheBody",
         "phase3-binary/Tests/macprovider-cliTests/SelfUpdateDownloadCapTests.swift:testPreparedUpdateRefusesAnOversizedChecksumsFile",
         "phase3-binary/Tests/macprovider-cliTests/SelfUpdateDownloadCapTests.swift:testRedirectThatLeavesHTTPSIsRefused",
-        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateDownloadCapTests.swift:testOversizedCoordinatorAdvertisementIsCancelledMidStream"
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateDownloadCapTests.swift:testOversizedCoordinatorAdvertisementIsCancelledMidStream",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateDownloadCapTests.swift:testRedirectToAnUnlistedHostIsRefused",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateDownloadCapTests.swift:testRedirectToTheGitHubAssetHostIsFollowed"
       ],
       "journeys": [
         "JOURNEY-PROVIDER-AUTOUPDATE-PHYSICAL"
@@ -8390,7 +8392,9 @@
         "phase3-binary/app/Sources/Malibu/System/ProviderCLIVersion.swift:enum LatestReleaseClient",
         "phase3-binary/dist/install.sh:capped_download()",
         "scripts/check-install-sh-consumer-health.sh:capped_fetch()",
-        "scripts/check-install-sh-consumer-health.sh:cmp -s \"$SERVED\" \"$REFERENCE\""
+        "scripts/check-install-sh-consumer-health.sh:cmp -s \"$SERVED\" \"$REFERENCE\"",
+        "phase3-binary/dist/install.sh:release_redirect_allowed()",
+        "scripts/check-install-sh-consumer-health.sh:redirect_allowed()"
       ],
       "tests": [
         "scripts/test-install-version-pin.sh:m1-github-down-pkg-from-mirror",
@@ -8417,7 +8421,13 @@
         "scripts/test-install-sh-consumer-health-alarm.sh:served-url-drift",
         "scripts/test-install-sh-consumer-health-alarm.sh:served-oversize",
         "scripts/test-install-version-pin.sh:s7-oversized-api-page-fails",
-        "scripts/test-install-version-pin.sh:s8-oversized-healthz-falls-back"
+        "scripts/test-install-version-pin.sh:s8-oversized-healthz-falls-back",
+        "scripts/test-install-version-pin.sh:s9-oversized-emergency-advertisement-fails",
+        "scripts/test-install-version-pin.sh:s10-cdn-redirect-followed",
+        "scripts/test-install-version-pin.sh:s11-redirect-refused-",
+        "scripts/test-install-sh-consumer-health-alarm.sh:redirect-elsewhere",
+        "scripts/test-install-sh-consumer-health-alarm.sh:uncapped-old-installer",
+        "scripts/test-install-sh-consumer-health-alarm.sh:release-tag-reference"
       ],
       "journeys": [],
       "evidence": [],

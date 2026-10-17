@@ -120,6 +120,43 @@ final class SelfUpdateDownloadCapTests: XCTestCase {
         XCTAssertFalse(StreamingMockURLProtocol.requested.contains(plaintext), "the plaintext redirect target was fetched")
     }
 
+    func testRedirectToAnUnlistedHostIsRefused() async throws {
+        let url = assetURL("Malibu-\(tag).dmg")
+        let elsewhere = URL(string: "https://internal.example/Malibu-\(tag).dmg")!
+        StreamingMockURLProtocol.redirects = [url: elsewhere]
+        StreamingMockURLProtocol.streams = [elsewhere: .init(totalBytes: 1_024, declareLength: true)]
+        let destination = scratch.appendingPathComponent("elsewhere.dmg")
+
+        do {
+            try await update().downloadReleaseFileForTest(from: url, to: destination, maximumBytes: 64 * 1_024)
+            XCTFail("a redirect to an unlisted host must be refused")
+        } catch {}
+        assertNoFiles(destination)
+        XCTAssertFalse(StreamingMockURLProtocol.requested.contains(elsewhere), "the unlisted redirect target was fetched")
+    }
+
+    func testRedirectToTheGitHubAssetHostIsFollowed() async throws {
+        let url = assetURL("checksums.txt")
+        let cdn = URL(string: "https://release-assets.githubusercontent.com/checksums.txt")!
+        StreamingMockURLProtocol.redirects = [url: cdn]
+        StreamingMockURLProtocol.streams = [cdn: .init(totalBytes: 2_048, declareLength: true)]
+        let destination = scratch.appendingPathComponent("cdn-checksums.txt")
+
+        try await update().downloadReleaseFileForTest(from: url, to: destination, maximumBytes: 64 * 1_024)
+
+        XCTAssertEqual(try destination.resourceValues(forKeys: [.fileSizeKey]).fileSize, 2_048)
+    }
+
+    func testRedirectPolicy() {
+        let github = URL(string: "https://github.com/Augustas11/macprovider/releases/download/v1/x")!
+        XCTAssertTrue(ReleaseRedirectPolicy.allows(from: github, to: URL(string: "https://objects.githubusercontent.com/x")))
+        XCTAssertTrue(ReleaseRedirectPolicy.allows(from: github, to: URL(string: "https://download.malibu.tech/releases/v1/x")))
+        XCTAssertFalse(ReleaseRedirectPolicy.allows(from: github, to: URL(string: "http://objects.githubusercontent.com/x")))
+        XCTAssertFalse(ReleaseRedirectPolicy.allows(from: github, to: URL(string: "https://169.254.169.254/latest")))
+        XCTAssertFalse(ReleaseRedirectPolicy.allows(from: github, to: URL(string: "https://githubusercontent.com.evil.example/x")))
+        XCTAssertFalse(ReleaseRedirectPolicy.allows(from: github, to: nil))
+    }
+
     func testOversizedCoordinatorAdvertisementIsCancelledMidStream() async throws {
         let healthz = URL(string: "https://coordinator.example/healthz")!
         let total = 64 * 1_024 * 1_024

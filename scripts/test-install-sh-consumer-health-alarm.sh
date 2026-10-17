@@ -201,10 +201,17 @@ echo "\$url" >> "$WORKDIR/curl-urls.log"
 has() { case "\$mode" in *" \$1 "*) return 0 ;; esac; return 1; }
 # A response body goes to -o when the caller names a file, else to stdout.
 body() { if [ "\$out" != "/dev/null" ]; then printf '%s' "\$1" > "\$out"; else printf '%s' "\$1"; fi; }
-miss() { [ -n "\$write_fmt" ] && printf '404'; exit 22; }
+# Render curl's -w format: the status code, and no redirect.
+wout() {
+  local f="\$write_fmt"
+  f="\${f//%\{http_code\}/\$1}"
+  f="\${f//%\{redirect_url\}/}"
+  printf '%s' "\$f"
+}
+miss() { [ -n "\$write_fmt" ] && wout 404; exit 22; }
 hit() {
   if [ -n "\${1:-}" ] && [ "\$out" != "/dev/null" ]; then cp "\$1" "\$out"; fi
-  [ -n "\$write_fmt" ] && printf '200'
+  [ -n "\$write_fmt" ] && wout 200
   exit 0
 }
 case "\$url" in
@@ -227,11 +234,23 @@ case "\$url" in
       [ -n "\$headers" ] && printf 'HTTP/2 403\r\nx-ratelimit-remaining: 0\r\nx-ratelimit-reset: 1790000000\r\n\r\n' > "\$headers"
       exit 22
     fi
+    if has oversize-api; then
+      rc=0
+      if [ "\$out" != "/dev/null" ]; then head -c 33554432 /dev/zero > "\$out" || rc=\$?; else head -c 33554432 /dev/zero || rc=\$?; fi
+      exit "\$rc"
+    fi
     body '[{"tag_name":"v1.8.122","prerelease":false}]'
     exit 0
     ;;
   https://github.com/*)
     has github-downloads-404 && miss
+    if has redirect-elsewhere; then
+      # A 302 to an endpoint that is not a release host.
+      [ "\$out" != "/dev/null" ] && printf 'moved' > "\$out"
+      f="\${write_fmt//%\{http_code\}/302}"
+      printf '%s' "\${f//%\{redirect_url\}/https://internal.example/probe}"
+      exit 0
+    fi
     ;;
   https://download.malibu.tech/releases/*) ;;
   *)
@@ -462,6 +481,13 @@ run_checker mirror-assets 0 INSTALL_SH_FILE="$WORKDIR/discover.sh" INSTALL_SH_RE
 expect_output mirror-assets 'checksums.txt HTTP 200 from https://download.malibu.tech'
 expect_output mirror-assets 'darwin-arm64.pkg HTTP 200 from https://download.malibu.tech'
 
+# A GitHub redirect to any other endpoint is never followed; the mirror serves.
+write_curl_mock redirect-elsewhere
+run_checker redirect-elsewhere 0 INSTALL_SH_FILE="$WORKDIR/discover.sh" INSTALL_SH_REFERENCE_FILE="$WORKDIR/discover.sh"
+expect_output redirect-elsewhere 'checksums.txt HTTP 200 from https://download.malibu.tech'
+expect_output redirect-elsewhere 'darwin-arm64.pkg HTTP 200 from https://download.malibu.tech'
+expect_no_fetch redirect-elsewhere 'internal.example'
+
 # A bad checksums.txt.sig is an alarm, never a fallback to another host.
 write_curl_mock bad-sig
 run_checker bad-signature 1 INSTALL_SH_FILE="$WORKDIR/discover.sh" INSTALL_SH_REFERENCE_FILE="$WORKDIR/discover.sh"
@@ -573,6 +599,41 @@ expect_output checksums-oversize 'checksums.txt is not HTTP 200'
 run_checker bad-release-tag 2 INSTALL_SH_FILE="$WORKDIR/ok2.sh" INSTALL_SH_RELEASE_TAG='v1.8.1;id'
 run_checker missing-release-tag 2 INSTALL_SH_FILE="$WORKDIR/ok2.sh" INSTALL_SH_RELEASE_TAG='v0.0.0'
 expect_output missing-release-tag 'cannot read phase3-binary/dist/install.sh at tag v0.0.0'
+
+# An older release copy without its own caps reads the API into a shell
+# variable; the gate's curl bound still cuts the response at 16 MiB.
+write_curl_mock oversize-api
+write_fixture "$WORKDIR/uncapped.sh" "$(cat <<'EOF'
+latest_release_tag() {
+  json="$(curl -fsSL "https://api.github.com/repos/Augustas11/macprovider/releases?per_page=100&page=1")" \
+    || die 3 "failed to query GitHub Releases API"
+  printf '%s' "v1.8.$(printf '%s' "$json" | wc -c | tr -d ' ')"
+}
+EOF
+)"
+run_checker uncapped-old-installer 1 INSTALL_SH_FILE="$WORKDIR/uncapped.sh" INSTALL_SH_REFERENCE_FILE="$WORKDIR/uncapped.sh"
+expect_output uncapped-old-installer 'failed to query GitHub Releases API'
+
+# A valid INSTALL_SH_RELEASE_TAG selects that tag's dist/install.sh as the
+# repository copy (a throwaway repository holding the checker and a tag).
+tagrepo="$WORKDIR/tagrepo"
+mkdir -p "$tagrepo/scripts" "$tagrepo/phase3-binary/dist"
+cp "$checker" "$tagrepo/scripts/check-install-sh-consumer-health.sh"
+cp "$WORKDIR/discover.sh" "$tagrepo/phase3-binary/dist/install.sh"
+git -C "$tagrepo" init -q
+git -C "$tagrepo" -c user.name=t -c user.email=t@example.invalid add -A
+git -C "$tagrepo" -c user.name=t -c user.email=t@example.invalid commit -q -m tagged
+git -C "$tagrepo" tag v9.9.9
+printf '# moved on after the tag\n' >> "$tagrepo/phase3-binary/dist/install.sh"
+write_curl_mock ok
+checker_saved="$checker"
+checker="$tagrepo/scripts/check-install-sh-consumer-health.sh"
+run_checker release-tag-reference 0 INSTALL_SH_FILE="$WORKDIR/discover.sh" INSTALL_SH_RELEASE_TAG=v9.9.9
+expect_output release-tag-reference 'byte-identical to the repository v9.9.9 dist/install.sh'
+expect_output release-tag-reference 'discover_latest_release_tag resolved v1.8.123'
+run_checker release-tag-drift 1 INSTALL_SH_FILE="$tagrepo/phase3-binary/dist/install.sh" INSTALL_SH_RELEASE_TAG=v9.9.9
+expect_output release-tag-drift 'differs from the repository v9.9.9 dist/install.sh'
+checker="$checker_saved"
 
 # Fetch error against a non-https URL is a probe error (exit 2), not an ALARM.
 run_checker bad-url 2 INSTALL_SH_FILE="" INSTALL_SH_URL="http://example.invalid/install.sh"

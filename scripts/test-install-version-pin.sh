@@ -33,6 +33,12 @@ awk '
 ' "$INSTALL_SH" >> "$lib"
 
 awk '
+  /^release_redirect_allowed\(\)/ { emit = 1 }
+  emit { print }
+  emit && /^\}$/ { exit }
+' "$INSTALL_SH" >> "$lib"
+
+awk '
   /^capped_download\(\)/ { emit = 1 }
   emit { print }
   emit && /^\}$/ { exit }
@@ -104,7 +110,7 @@ awk '
   emit && /^\}$/ { exit }
 ' "$INSTALL_SH" >> "$lib"
 
-for symbol in latest_release_tag capped_download fetch_release_asset validate_macprovider_version_tag resolve_release_tag validated_acceptance_asset_dir download_release verify_sha256 validate_staged_entries headless_acceptance_repair_mode installed_provider_binary_path validate_acceptance_upgrade_target validate_acceptance_provider_component_target validate_staged_acceptance_provider_component validate_non_emergency_pinned_target validate_emergency_target verify_emergency_coordinator_advertisement validate_emergency_config_backup stage_emergency_config_backup disable_staged_autoupdate verify_emergency_config_activation config_without_provider_token_sha256 preserve_failed_bootstrap_identity; do
+for symbol in latest_release_tag release_redirect_allowed capped_download fetch_release_asset validate_macprovider_version_tag resolve_release_tag validated_acceptance_asset_dir download_release verify_sha256 validate_staged_entries headless_acceptance_repair_mode installed_provider_binary_path validate_acceptance_upgrade_target validate_acceptance_provider_component_target validate_staged_acceptance_provider_component validate_non_emergency_pinned_target validate_emergency_target verify_emergency_coordinator_advertisement validate_emergency_config_backup stage_emergency_config_backup disable_staged_autoupdate verify_emergency_config_activation config_without_provider_token_sha256 preserve_failed_bootstrap_identity; do
   grep -q "^${symbol}()" "$lib" || fatal "could not extract $symbol from $INSTALL_SH"
 done
 
@@ -167,7 +173,7 @@ emit() {
   if [ -n "$out" ]; then printf '%s' "$1" > "$out"; else printf '%s' "$1"; fi
 }
 curl() {
-  local out="" url="" arg headers_out=""
+  local out="" url="" arg headers_out="" write_fmt=""
   while [ "$#" -gt 0 ]; do
     arg="$1"
     shift
@@ -180,6 +186,10 @@ curl() {
         headers_out="$1"
         shift
         ;;
+      -w)
+        write_fmt="$1"
+        shift
+        ;;
       http*)
         url="$arg"
         ;;
@@ -187,6 +197,17 @@ curl() {
   done
 
   printf '%s\n' "$url" >> "$FETCH_LOG"
+  # Issue #2036: a 302 from URLs matching MOCK_REDIRECT_FROM to MOCK_REDIRECT_TO;
+  # the installer follows it itself (curl -w %{redirect_url}, no -L).
+  if [ -n "${MOCK_REDIRECT_FROM:-}" ] && [ -n "$write_fmt" ]; then
+    case "$url" in
+      $MOCK_REDIRECT_FROM)
+        [ -n "$out" ] && printf 'moved' > "$out"
+        printf '%s' "$MOCK_REDIRECT_TO"
+        return 0
+        ;;
+    esac
+  fi
   # Issue #2036: a host streams MOCK_OVERSIZE_BYTES for URLs matching
   # MOCK_OVERSIZE_URL, with no Content-Length (curl's --max-filesize cannot
   # refuse it up front). head is a separate process, so it inherits the
@@ -300,6 +321,8 @@ reset_mocks() {
   : > "$STREAM_LOG"
   MOCK_OVERSIZE_URL=""
   MOCK_OVERSIZE_BYTES=0
+  MOCK_REDIRECT_FROM=""
+  MOCK_REDIRECT_TO=""
   RELEASE_ASSET_MAX_BYTES="$INSTALLER_ASSET_MAX_BYTES"
   RELEASE_METADATA_MAX_BYTES="$INSTALLER_METADATA_MAX_BYTES"
   : > "$RELEASE_PAGE_LOG"
@@ -1584,6 +1607,54 @@ MOCK_OVERSIZE_BYTES=1048576
 tag="$(resolve_release_tag 2>/dev/null)"
 report "s8-oversized-healthz-falls-back" "v1.7.11" "$tag"
 report "s8-healthz-cut-at-cap" 65536 "$(awk '{print $3}' "$STREAM_LOG")"
+
+# S9 — an oversized emergency-rollback advertisement is no advertisement.
+reset_mocks
+MOCK_OVERSIZE_URL='https://coordinator.example/healthz'
+MOCK_OVERSIZE_BYTES=1048576
+rc=0
+( verify_emergency_coordinator_advertisement https://coordinator.example v1.8.30 ) >/dev/null 2>&1 || rc=$?
+report "s9-oversized-emergency-advertisement-fails" 7 "$rc"
+report "s9-emergency-healthz-cut-at-cap" 65536 "$(awk '{print $3}' "$STREAM_LOG")"
+
+# S10 — a GitHub download redirected to its asset CDN is followed; the CDN
+# bytes are what lands.
+reset_mocks
+MOCK_REDIRECT_FROM='https://github.com/*.pkg'
+MOCK_REDIRECT_TO='https://objects.githubusercontent.com/assets/macprovider-cli-v1.7.11-darwin-arm64.pkg'
+tag="v1.7.11"
+rc=0
+fetch_release_asset macprovider-cli-v1.7.11-darwin-arm64.pkg "$workdir/s10.pkg" >/dev/null 2>&1 || rc=$?
+report "s10-cdn-redirect-followed" "0 pkg" "$rc $(cat "$workdir/s10.pkg" 2>/dev/null)"
+report "s10-cdn-fetched" 1 "$(grep -c '^https://objects.githubusercontent.com/assets/' "$FETCH_LOG" | tr -d ' ')"
+
+# S11 — a redirect to any other host (or off HTTPS) is refused before it is
+# requested; the byte-identical mirror serves the asset instead.
+for target in 'https://internal.example/x.pkg' 'http://objects.githubusercontent.com/x.pkg' 'https://user@github.com.evil.example/x.pkg'; do
+  reset_mocks
+  MOCK_REDIRECT_FROM='https://github.com/*.pkg'
+  MOCK_REDIRECT_TO="$target"
+  tag="v1.7.11"
+  rc=0
+  fetch_release_asset macprovider-cli-v1.7.11-darwin-arm64.pkg "$workdir/s11.pkg" >/dev/null 2>&1 || rc=$?
+  report "s11-redirect-refused-${target%%/x.pkg}" "0 pkg 0" \
+    "$rc $(cat "$workdir/s11.pkg" 2>/dev/null) $(grep -cF "$target" "$FETCH_LOG" | tr -d ' ')"
+  report "s11-mirror-served-${target%%/x.pkg}" 1 "$(grep -c '^https://download.malibu.tech/releases/v1.7.11/' "$FETCH_LOG" | tr -d ' ')"
+done
+
+# S12 — the redirect host policy itself.
+for case in \
+  "1 https://github.com/a https://objects.githubusercontent.com/b" \
+  "1 https://github.com/a https://download.malibu.tech/releases/b" \
+  "1 https://coordinator.example/healthz https://coordinator.example/healthz/" \
+  "0 https://github.com/a https://githubusercontent.com.evil.example/b" \
+  "0 https://github.com/a http://github.com/b" \
+  "0 https://github.com/a https://169.254.169.254/latest"; do
+  set -- $case
+  got=0
+  release_redirect_allowed "$2" "$3" && got=1
+  report "s12-policy-$3" "$1" "$got"
+done
 
 if [ "$fail" -ne 0 ]; then
   printf '[install-version-pin-test] %d failed, %d passed\n' "$fail" "$pass" >&2

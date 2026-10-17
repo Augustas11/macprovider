@@ -479,8 +479,9 @@ Every release-discovery response (GitHub API pages, the signed discovery head
 and its signature, the mirror index, the coordinator advertisement) MUST be
 read under its own cap the same way and never buffered whole. A transfer whose
 declared or received size passes its cap MUST be cancelled, MUST fail that
-step, and MUST leave no file. A redirect from an HTTPS request to anything but
-HTTPS MUST be refused (v0.1.27, #2036).
+step, and MUST leave no file. A redirect of an HTTPS request MUST be followed
+only over HTTPS to the original host or a release download host (GitHub, its
+asset CDN, the mirror) (v0.1.27, #2036).
 
 R-1.5. The provider MUST attempt at most one autoupdate per coordinator session
 per target version. A reconnect that repeats the same target version MUST honor
@@ -1734,8 +1735,8 @@ Deferred to v0.3.0 or later:
 
 - v0.1.27 (2026-10-17): SPEC-020-R006 streams every release download and
   release-discovery response under a hard byte cap, cancels an oversized
-  transfer without keeping a file, and refuses redirects that leave HTTPS
-  (#2036).
+  transfer without keeping a file, and follows redirects only to release
+  hosts over HTTPS (#2036).
 - v0.1.26 (2026-10-17): SPEC-020-R006 treats a spent anonymous GitHub API
   budget (403/429 with `x-ratelimit-remaining: 0`) as a transport failure that
   is never re-requested before its reset, verifies the coordinator-advertised

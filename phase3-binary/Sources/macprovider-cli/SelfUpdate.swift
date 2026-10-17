@@ -1316,8 +1316,8 @@ struct SelfUpdate {
         maximumBytes: Int,
         oversized: UpdateError
     ) async throws -> (Data, URLResponse) {
-        let (bytes, response) = try await session.bytes(for: request, delegate: NoSchemeDowngradeRedirects.shared)
-        guard let requested = request.url, NoSchemeDowngradeRedirects.allows(from: requested, to: response.url) else {
+        let (bytes, response) = try await session.bytes(for: request, delegate: ReleaseRedirectPolicy.shared)
+        guard let requested = request.url, ReleaseRedirectPolicy.allows(from: requested, to: response.url) else {
             bytes.task.cancel()
             throw UpdateError.untrustedDownloadURL(response.url?.absoluteString ?? "")
         }
@@ -1351,9 +1351,9 @@ struct SelfUpdate {
         do {
             let (bytes, response) = try await session.bytes(
                 for: URLRequest(url: url),
-                delegate: NoSchemeDowngradeRedirects.shared
+                delegate: ReleaseRedirectPolicy.shared
             )
-            guard NoSchemeDowngradeRedirects.allows(from: url, to: response.url) else {
+            guard ReleaseRedirectPolicy.allows(from: url, to: response.url) else {
                 bytes.task.cancel()
                 throw UpdateError.untrustedDownloadURL(response.url?.absoluteString ?? url.absoluteString)
             }
@@ -3414,15 +3414,24 @@ struct GitHubAsset: Decodable {
     }
 }
 
-/// Refuses any redirect that leaves HTTPS for a request that started on
-/// HTTPS (#2036). The release hosts are untrusted transport; a redirect must
-/// not turn them into a plaintext or non-HTTP probe.
-final class NoSchemeDowngradeRedirects: NSObject, URLSessionTaskDelegate, Sendable {
-    static let shared = NoSchemeDowngradeRedirects()
+/// Redirect policy for every untrusted release read (#2036): a request that
+/// started on HTTPS may only be redirected over HTTPS, to its own host or to a
+/// release download host (GitHub, its asset CDN, the Malibu mirror). Release
+/// hosts are untrusted transport; a redirect must not turn them into a probe
+/// of other endpoints.
+final class ReleaseRedirectPolicy: NSObject, URLSessionTaskDelegate, Sendable {
+    static let shared = ReleaseRedirectPolicy()
 
     static func allows(from original: URL, to target: URL?) -> Bool {
         guard original.scheme?.lowercased() == "https" else { return true }
-        return target?.scheme?.lowercased() == "https"
+        guard let target, target.scheme?.lowercased() == "https", let host = target.host?.lowercased() else {
+            return false
+        }
+        return host == original.host?.lowercased()
+            || host == "github.com"
+            || host.hasSuffix(".github.com")
+            || host.hasSuffix(".githubusercontent.com")
+            || host == SelfUpdate.releaseMirrorHost
     }
 
     func urlSession(
