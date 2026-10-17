@@ -84,7 +84,7 @@ func (e *computeScoringEngine) operatorClear(ctx context.Context, providerID, mo
 		*st = before
 		return true, errors.New("compute-integrity clear not applied")
 	}
-	delete(e.nextDue, key)
+	e.dropDueLocked(key)
 	return true, nil
 }
 

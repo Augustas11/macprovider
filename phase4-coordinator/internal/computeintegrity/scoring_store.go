@@ -1,7 +1,7 @@
 package computeintegrity
 
-// SPEC-036 FR-23/FR-24 persistence: verification key states and scorer
-// exclusions survive coordinator restarts. No prompt, output or token data is
+// SPEC-036 FR-20/FR-23/FR-24 persistence: verification due times, key states
+// and scorer exclusions survive coordinator restarts. No prompt, output or token data is
 // stored.
 
 import (
@@ -38,6 +38,14 @@ CREATE TABLE IF NOT EXISTS compute_integrity_scorer_exclusions (
     provider_id     TEXT PRIMARY KEY,
     excluded_at_utc TEXT NOT NULL
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS compute_integrity_probe_schedule (
+    provider_id     TEXT NOT NULL,
+    model_id        TEXT NOT NULL,
+    next_due_at_utc TEXT NOT NULL,
+    updated_at_utc  TEXT NOT NULL,
+    PRIMARY KEY(provider_id, model_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_cips_updated ON compute_integrity_probe_schedule(updated_at_utc);
 `)
 	if err != nil {
 		return nil, err
@@ -250,6 +258,85 @@ SELECT started_at_utc FROM compute_integrity_verification_starts
 		out = append(out, t)
 	}
 	return out, rows.Err()
+}
+
+// ProbeDue is the FR-20 next due time of one verification key. A zero Due
+// in a SaveProbeSchedule batch deletes the key's row. UpdatedAt is set by
+// LoadProbeSchedule only.
+type ProbeDue struct {
+	ProviderID string
+	ModelID    string
+	Due        time.Time
+	UpdatedAt  time.Time
+}
+
+// LoadProbeSchedule returns every persisted due time. An unreadable row
+// fails the load.
+func (s *ScoringStore) LoadProbeSchedule(ctx context.Context) ([]ProbeDue, error) {
+	if s == nil || s.db == nil {
+		return nil, errScoringStoreClosed
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT provider_id, model_id, next_due_at_utc, updated_at_utc FROM compute_integrity_probe_schedule`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ProbeDue
+	for rows.Next() {
+		var d ProbeDue
+		var due, updated string
+		if err := rows.Scan(&d.ProviderID, &d.ModelID, &due, &updated); err != nil {
+			return nil, err
+		}
+		if d.Due, err = time.Parse(time.RFC3339Nano, due); err != nil {
+			return nil, fmt.Errorf("compute-integrity due time %w", err)
+		}
+		if d.UpdatedAt, err = time.Parse(time.RFC3339Nano, updated); err != nil {
+			return nil, fmt.Errorf("compute-integrity due update time %w", err)
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// SaveProbeSchedule writes a batch of due times in one transaction.
+func (s *ScoringStore) SaveProbeSchedule(ctx context.Context, batch []ProbeDue, now time.Time) error {
+	if s == nil || s.db == nil {
+		return errScoringStoreClosed
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, d := range batch {
+		if d.Due.IsZero() {
+			_, err = tx.ExecContext(ctx, `DELETE FROM compute_integrity_probe_schedule WHERE provider_id = ? AND model_id = ?`, d.ProviderID, d.ModelID)
+		} else {
+			_, err = tx.ExecContext(ctx, `
+INSERT INTO compute_integrity_probe_schedule (provider_id, model_id, next_due_at_utc, updated_at_utc)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(provider_id, model_id) DO UPDATE SET
+    next_due_at_utc = excluded.next_due_at_utc, updated_at_utc = excluded.updated_at_utc`,
+				d.ProviderID, d.ModelID, d.Due.UTC().Format(verificationStartFormat), now.UTC().Format(verificationStartFormat))
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// PruneProbeSchedule deletes due times neither written nor due since cutoff.
+// Both columns use the fixed-width verificationStartFormat, so text order
+// is time order.
+func (s *ScoringStore) PruneProbeSchedule(ctx context.Context, cutoff time.Time) error {
+	if s == nil || s.db == nil {
+		return errScoringStoreClosed
+	}
+	c := cutoff.UTC().Format(verificationStartFormat)
+	_, err := s.db.ExecContext(ctx, `DELETE FROM compute_integrity_probe_schedule WHERE updated_at_utc < ? AND next_due_at_utc < ?`, c, c)
+	return err
 }
 
 // LoadScorerExclusions returns every FR-24 scorer-excluded provider.
