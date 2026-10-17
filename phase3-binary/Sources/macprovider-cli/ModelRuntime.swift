@@ -5982,17 +5982,19 @@ actor ModelRuntime: ModelRuntimeServing {
         let maxContextTokens = maxContextTokens
         let templateSupportsThinkingToggle = handle.snapshot.templateSupportsThinkingToggle
         let templateSupportsPreserveThinking = handle.snapshot.templateSupportsPreserveThinking
+        let selectionModelID = toolSelectionModelID(handle.snapshot)
         try await inferenceGate.withPermit {
             try handle.drainCancelled.check()
             return try await container.perform { context in
                 try handle.drainCancelled.check()
-                let input = try Self.userInput(
+                let (lmInput, _) = try await Self.preparedRequestInput(
                     for: request,
+                    context: context,
                     templateSupportsThinkingToggle: templateSupportsThinkingToggle,
                     templateSupportsPreserveThinking: templateSupportsPreserveThinking,
-                    nativeVisionProfile: handle.snapshot.nativeVisionProfile
+                    nativeVisionProfile: handle.snapshot.nativeVisionProfile,
+                    toolSelectionModelID: selectionModelID
                 )
-                let lmInput = try await context.processor.prepare(input: input)
                 try handle.drainCancelled.check()
                 try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
             }
@@ -6110,17 +6112,19 @@ actor ModelRuntime: ModelRuntimeServing {
             let maxContextTokens = maxContextTokens
             let templateSupportsThinkingToggle = handle.snapshot.templateSupportsThinkingToggle
             let templateSupportsPreserveThinking = handle.snapshot.templateSupportsPreserveThinking
+            let selectionModelID = toolSelectionModelID(handle.snapshot)
             let inputTokens = try await inferenceGate.withPermit {
                 try handle.drainCancelled.check()
                 return try await container.perform { context in
                     try handle.drainCancelled.check()
-                    let input = try Self.userInput(
+                    let (prepared, _) = try await Self.preparedRequestInput(
                         for: request,
+                        context: context,
                         templateSupportsThinkingToggle: templateSupportsThinkingToggle,
                         templateSupportsPreserveThinking: templateSupportsPreserveThinking,
-                        nativeVisionProfile: handle.snapshot.nativeVisionProfile
+                        nativeVisionProfile: handle.snapshot.nativeVisionProfile,
+                        toolSelectionModelID: selectionModelID
                     )
-                    let prepared = try await context.processor.prepare(input: input)
                     let count = prepared.text.tokens.size
                     try Self.validatePromptTokenCount(count, maxContextTokens: maxContextTokens)
                     return count
@@ -6149,6 +6153,8 @@ actor ModelRuntime: ModelRuntimeServing {
         /// The loaded model has recurrent (hybrid) layers; computed for keyed
         /// requests only, false otherwise.
         let modelHasRecurrentLayers: Bool
+        /// SPEC-018 §3.11 call prefill ending `promptTokens`, if any.
+        let toolCallPrefill: String?
     }
 
     /// Keyed hybrid requests only: where the batched row snapshots recurrent
@@ -6763,7 +6769,8 @@ actor ModelRuntime: ModelRuntimeServing {
         stopTokenFilter: StopTokenFilter,
         generationMilliseconds: Int64,
         ttftMilliseconds: Int64? = nil,
-        modelHash: String?
+        modelHash: String?,
+        toolCallPrefill: String? = nil
     ) throws -> ContinuousBatchFinalizedRow {
         // The serial path discards the model's end-of-generation token
         // before counting it; bill and cache the batched row the same way.
@@ -6826,7 +6833,8 @@ actor ModelRuntime: ModelRuntimeServing {
             defaultCompletionTokens: completionTokenCount,
             stopTokenFilter: stopTokenFilter,
             requestStops: request.stop,
-            globalHitStop: requestStopTerminal
+            globalHitStop: requestStopTerminal,
+            toolCallPrefill: toolCallPrefill
         )
         let finishReason: String
         if !parsed.toolCalls.isEmpty {
@@ -7053,16 +7061,18 @@ actor ModelRuntime: ModelRuntimeServing {
             ? stopTokenFilter : NativeVisionProfile.stopTokenFilter
         let templateSupportsThinkingToggle = snapshot.templateSupportsThinkingToggle
         let templateSupportsPreserveThinking = snapshot.templateSupportsPreserveThinking
+        let selectionModelID = toolSelectionModelID(snapshot)
         CBTrace.log(schedulerRequestID, "rt_cb_prepare")
         let (prepared, detokenizer) = try await container.perform { context -> (ContinuousBatchPreparedRequest, StreamingDetokenizer) in
             try drainCancelled.check()
             try Task.checkCancellation()
-            let input = try Self.userInput(
+            let (lmInput, toolCallPrefill) = try await Self.preparedRequestInput(
                 for: request,
+                context: context,
                 templateSupportsThinkingToggle: templateSupportsThinkingToggle,
-                templateSupportsPreserveThinking: templateSupportsPreserveThinking
+                templateSupportsPreserveThinking: templateSupportsPreserveThinking,
+                toolSelectionModelID: selectionModelID
             )
-            let lmInput = try await context.processor.prepare(input: input)
             let promptTokens = lmInput.text.tokens.asArray(Int32.self).map(Int.init)
             try Self.validatePromptTokenCount(promptTokens.count, maxContextTokens: maxContextTokens)
             let stopTokenSequences = Self.continuousBatchStopTokenSequences(
@@ -7086,7 +7096,8 @@ actor ModelRuntime: ModelRuntimeServing {
                         hybrid: hybrid,
                         context: context
                     ),
-                    modelHasRecurrentLayers: hybrid
+                    modelHasRecurrentLayers: hybrid,
+                    toolCallPrefill: toolCallPrefill
                 ),
                 StreamingDetokenizer(tokenizer: tokenizer)
             )
@@ -7220,7 +7231,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     stopTokenFilter: stopTokenFilter,
                     generationMilliseconds: Int64(completionEndedAt.timeIntervalSince(completionStartedAt) * 1000),
                     ttftMilliseconds: nil,
-                    modelHash: snapshot.modelHash
+                    modelHash: snapshot.modelHash,
+                    toolCallPrefill: prepared.toolCallPrefill
                 )
             }
             let completion = try Self.validateStructuredCompletion(finalized.completion, request: request)
@@ -7515,16 +7527,18 @@ actor ModelRuntime: ModelRuntimeServing {
             ? stopTokenFilter : NativeVisionProfile.stopTokenFilter
         let templateSupportsThinkingToggle = snapshot.templateSupportsThinkingToggle
         let templateSupportsPreserveThinking = snapshot.templateSupportsPreserveThinking
+        let selectionModelID = toolSelectionModelID(snapshot)
         let requestStops = request.stop
         let (prepared, detokenizer) = try await container.perform { context -> (ContinuousBatchPreparedRequest, StreamingDetokenizer) in
             try drainCancelled.check()
             try Task.checkCancellation()
-            let input = try Self.userInput(
+            let (lmInput, toolCallPrefill) = try await Self.preparedRequestInput(
                 for: request,
+                context: context,
                 templateSupportsThinkingToggle: templateSupportsThinkingToggle,
-                templateSupportsPreserveThinking: templateSupportsPreserveThinking
+                templateSupportsPreserveThinking: templateSupportsPreserveThinking,
+                toolSelectionModelID: selectionModelID
             )
-            let lmInput = try await context.processor.prepare(input: input)
             let promptTokens = lmInput.text.tokens.asArray(Int32.self).map(Int.init)
             try Self.validatePromptTokenCount(promptTokens.count, maxContextTokens: maxContextTokens)
             let stopTokenSequences = Self.continuousBatchStopTokenSequences(
@@ -7548,7 +7562,8 @@ actor ModelRuntime: ModelRuntimeServing {
                         hybrid: hybrid,
                         context: context
                     ),
-                    modelHasRecurrentLayers: hybrid
+                    modelHasRecurrentLayers: hybrid,
+                    toolCallPrefill: toolCallPrefill
                 ),
                 StreamingDetokenizer(tokenizer: tokenizer)
             )
@@ -7711,7 +7726,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     stopTokenFilter: stopTokenFilter,
                     generationMilliseconds: Int64(completionEndedAt.timeIntervalSince(completionStartedAt) * 1000),
                     ttftMilliseconds: firstTokenClock.ttftMilliseconds(since: completionStartedAt),
-                    modelHash: snapshot.modelHash
+                    modelHash: snapshot.modelHash,
+                    toolCallPrefill: prepared.toolCallPrefill
                 )
             }
             // A terminal replay returns the retained result without token
@@ -8131,6 +8147,7 @@ actor ModelRuntime: ModelRuntimeServing {
             ? stopTokenFilter : NativeVisionProfile.stopTokenFilter
         let templateSupportsThinkingToggle = snapshot.templateSupportsThinkingToggle
         let templateSupportsPreserveThinking = snapshot.templateSupportsPreserveThinking
+        let selectionModelID = toolSelectionModelID(snapshot)
         let completion = try await Self.withDrainCancellation(drainCancelled) {
             try await inferenceGate.withPermit {
                 try drainCancelled.check()
@@ -8138,13 +8155,14 @@ actor ModelRuntime: ModelRuntimeServing {
                 return try await container.perform { context in
                     try drainCancelled.check()
                     try Task.checkCancellation()
-                    let input = try Self.userInput(
+                    let (lmInput, toolCallPrefill) = try await Self.preparedRequestInput(
                         for: request,
+                        context: context,
                         templateSupportsThinkingToggle: templateSupportsThinkingToggle,
                         templateSupportsPreserveThinking: templateSupportsPreserveThinking,
-                        nativeVisionProfile: snapshot.nativeVisionProfile
+                        nativeVisionProfile: snapshot.nativeVisionProfile,
+                        toolSelectionModelID: selectionModelID
                     )
-                    let lmInput = try await context.processor.prepare(input: input)
                     try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
                     let parameters = Self.makeServeGenerateParameters(
                         maxTokens: Self.labSerialEffectiveMaxTokens(
@@ -8403,7 +8421,8 @@ actor ModelRuntime: ModelRuntimeServing {
                             defaultCompletionTokens: result.generationTokenCount,
                             stopTokenFilter: stopTokenFilter,
                             requestStops: request.stop,
-                            globalHitStop: filtered.hitStop || stoppedByRequestStop
+                            globalHitStop: filtered.hitStop || stoppedByRequestStop,
+                            toolCallPrefill: toolCallPrefill
                         )
                         let finishReason: String
                         if !parsed.toolCalls.isEmpty {
@@ -8900,6 +8919,7 @@ actor ModelRuntime: ModelRuntimeServing {
             ? stopTokenFilter : NativeVisionProfile.stopTokenFilter
         let templateSupportsThinkingToggle = snapshot.templateSupportsThinkingToggle
         let templateSupportsPreserveThinking = snapshot.templateSupportsPreserveThinking
+        let selectionModelID = toolSelectionModelID(snapshot)
         return try await Self.withDrainCancellation(drainCancelled) {
             try await Self.withStructuredStreamingIdleTimeout(
                 idleState: idleState,
@@ -8917,13 +8937,14 @@ actor ModelRuntime: ModelRuntimeServing {
                 return try await container.perform { context in
                     try drainCancelled.check()
                     try Task.checkCancellation()
-                    let input = try Self.userInput(
+                    let (lmInput, toolCallPrefill) = try await Self.preparedRequestInput(
                         for: request,
+                        context: context,
                         templateSupportsThinkingToggle: templateSupportsThinkingToggle,
                         templateSupportsPreserveThinking: templateSupportsPreserveThinking,
-                        nativeVisionProfile: snapshot.nativeVisionProfile
+                        nativeVisionProfile: snapshot.nativeVisionProfile,
+                        toolSelectionModelID: selectionModelID
                     )
-                    let lmInput = try await context.processor.prepare(input: input)
                     try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
                     let parameters = Self.makeServeGenerateParameters(
                         maxTokens: Self.labSerialEffectiveMaxTokens(
@@ -9289,7 +9310,8 @@ actor ModelRuntime: ModelRuntimeServing {
                             defaultCompletionTokens: result.generationTokenCount,
                             stopTokenFilter: stopTokenFilter,
                             requestStops: request.stop,
-                            globalHitStop: final.hitStop || stoppedByRequestStop
+                            globalHitStop: final.hitStop || stoppedByRequestStop,
+                            toolCallPrefill: toolCallPrefill
                         )
                         try textEmitter.finish(
                             finalText: final.text,
@@ -11809,14 +11831,15 @@ actor ModelRuntime: ModelRuntimeServing {
         defaultCompletionTokens: Int,
         stopTokenFilter: StopTokenFilter = StopTokenFilter(tokens: []),
         requestStops: [String] = [],
-        globalHitStop: Bool = false
+        globalHitStop: Bool = false,
+        toolCallPrefill: String? = nil
     ) throws -> ParsedGeneratedOutput {
         guard HarmonyResponseParser.isHarmonyModelID(request.model) else {
             if try ToolSelectionPolicy.selection(request.promptSource.toolChoice).requiresCall,
                case .complete(let finishReason) = mode, finishReason == "length" {
                 throw ToolSelectionPolicy.outputError("Tool generation exhausted its token budget")
             }
-            let parsed = try parseToolCallsIfRequested(filteredText, request: request)
+            let parsed = try parseToolCallsIfRequested(filteredText, request: request, toolCallPrefill: toolCallPrefill)
             return ParsedGeneratedOutput(
                 content: parsed.content,
                 toolCalls: parsed.toolCalls,
@@ -11987,9 +12010,18 @@ actor ModelRuntime: ModelRuntimeServing {
         return observer.hasCompletedValidToolCall
     }
 
-    private static func parseToolCallsIfRequested(_ text: String, request: ChatCompletionRequest) throws -> (content: String, toolCalls: [ToolCall]) {
+    private static func parseToolCallsIfRequested(
+        _ text: String,
+        request: ChatCompletionRequest,
+        toolCallPrefill: String? = nil
+    ) throws -> (content: String, toolCalls: [ToolCall]) {
         if try ToolSelectionPolicy.selection(request.promptSource.toolChoice).requiresCall {
-            let calls = try ToolCallParser.parseGuaranteedToolCalls(text, schemas: try ToolSelectionPolicy.schemas(request))
+            // The prompt ended inside the call: parse prefill + continuation.
+            // Without calls the turn fails validation; the content is only the
+            // generated text, never the prefill.
+            let calls = try ToolCallParser.parseGuaranteedToolCalls(
+                (toolCallPrefill ?? "") + text, schemas: try ToolSelectionPolicy.schemas(request)
+            )
             return (calls.isEmpty ? text : "", calls)
         }
         guard let allowedFunctionNames = toolFunctionNames(from: request.promptSource.tools) else {
@@ -12114,9 +12146,14 @@ actor ModelRuntime: ModelRuntimeServing {
         }
         let chat = try ToolPromptRenderer.renderMessages(messages, modelID: request.model)
         let tools: [[String: Any]]?
-        if selection == .none {
+        switch selection {
+        case .none:
             tools = nil
-        } else {
+        case .named(let name):
+            // SPEC-018 §3.11: the template shows only the selected function.
+            tools = Self.mlxToolsForTemplate(from: request.promptSource.tools)?
+                .filter { ($0["function"] as? [String: Any])?["name"] as? String == name }
+        case .auto, .required:
             tools = Self.mlxToolsForTemplate(from: request.promptSource.tools)
         }
         let additionalContext = Self.templateAdditionalContext(
@@ -12128,6 +12165,75 @@ actor ModelRuntime: ModelRuntimeServing {
             tools: tools,
             additionalContext: additionalContext
         )
+    }
+
+    /// SPEC-018 §3.11 call prefill for a guaranteed selection on a model with
+    /// a guaranteed-call profile; nil for every other request.
+    static func toolCallPrefill(
+        for request: ChatCompletionRequest,
+        toolSelectionModelID: String?
+    ) throws -> (prefill: String, generationPromptSuffix: String)? {
+        let selection = try ToolSelectionPolicy.selection(request.promptSource.toolChoice)
+        guard selection.requiresCall,
+              let profile = ToolSelectionPolicy.guaranteedCallProfile(modelID: toolSelectionModelID) else {
+            return nil
+        }
+        // Restricts a named choice to a declared `[A-Za-z0-9_-]` name before
+        // it is written into the prompt.
+        _ = try ToolSelectionPolicy.schemas(request)
+        guard let prefill = profile.prefill(for: selection) else { return nil }
+        return (prefill, profile.generationPromptSuffix)
+    }
+
+    /// Appends the call prefill to rendered prompt tokens. The prefill goes in
+    /// only directly after the template's generation prompt, with any think
+    /// block already closed; otherwise nil, and the turn keeps validation only.
+    static func appendingToolCallPrefill(
+        _ prefill: String,
+        generationPromptSuffix: String,
+        to promptTokens: [Int],
+        tokenizer: any MLXLMCommon.Tokenizer
+    ) -> [Int]? {
+        let suffix = tokenizer.encode(text: generationPromptSuffix, addSpecialTokens: false)
+        guard !suffix.isEmpty, promptTokens.count >= suffix.count,
+              Array(promptTokens.suffix(suffix.count)) == suffix else {
+            return nil
+        }
+        return promptTokens + tokenizer.encode(text: prefill, addSpecialTokens: false)
+    }
+
+    /// Request prompt preparation for every serving path. Returns the model
+    /// input and the call prefill it ends with, if any; the parser reads the
+    /// prefill followed by the generated text, and the prefill is never
+    /// buyer-visible content.
+    static func preparedRequestInput(
+        for request: ChatCompletionRequest,
+        context: ModelContext,
+        templateSupportsThinkingToggle: Bool,
+        templateSupportsPreserveThinking: Bool,
+        nativeVisionProfile: NativeVisionProfile? = nil,
+        toolSelectionModelID: String?
+    ) async throws -> (input: LMInput, toolCallPrefill: String?) {
+        let input = try userInput(
+            for: request,
+            templateSupportsThinkingToggle: templateSupportsThinkingToggle,
+            templateSupportsPreserveThinking: templateSupportsPreserveThinking,
+            nativeVisionProfile: nativeVisionProfile
+        )
+        let lmInput = try await context.processor.prepare(input: input)
+        guard let plan = try toolCallPrefill(for: request, toolSelectionModelID: toolSelectionModelID) else {
+            return (lmInput, nil)
+        }
+        guard let tokens = appendingToolCallPrefill(
+            plan.prefill,
+            generationPromptSuffix: plan.generationPromptSuffix,
+            to: lmInput.text.tokens.asArray(Int.self),
+            tokenizer: context.tokenizer
+        ) else {
+            fputs("warning: tool-call prefill skipped; the generation prompt does not end as the profile expects\n", stderr)
+            return (lmInput, nil)
+        }
+        return (LMInput(tokens: MLXArray(tokens.map(Int32.init))), plan.prefill)
     }
 
     /// Tool-selection instructions join a leading system message, or become
