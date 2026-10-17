@@ -317,6 +317,8 @@ private final class StreamingMockURLProtocol: URLProtocol {
     private func stopped() -> Bool {
         stateLock.lock()
         defer { stateLock.unlock() }
-        return isStopped || (task.map { $0.state != .running } ?? false)
+        // A streaming consumer may suspend the task for back-pressure; only a
+        // cancelled or finished task stops the stream.
+        return isStopped || (task.map { $0.state == .canceling || $0.state == .completed } ?? false)
     }
 }
