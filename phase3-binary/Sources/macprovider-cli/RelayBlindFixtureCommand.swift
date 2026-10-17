@@ -530,7 +530,8 @@ private actor RelayReplayFixtureObserver: ModelRuntimeServing {
             decode: { $0.map(String.init).joined(separator: " ") },
             stopTokenFilter: StopTokenFilter(tokens: []),
             generationMilliseconds: 0,
-            modelHash: modelHash
+            modelHash: modelHash,
+            toolCallPrefill: nil
         )
         dispositions[submission.requestID] = finalized.completion.settlementDisposition.rawValue
         return (finalized.completion, await currentSnapshot())

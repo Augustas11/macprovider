@@ -122,7 +122,7 @@ final class HarmonyResponseParserTests: XCTestCase {
             decode: decode,
             request: request(model: "openai/gpt-oss-120b"),
             mode: .complete(finishReason: "stop"),
-            defaultCompletionTokens: ids.count
+            defaultCompletionTokens: ids.count, toolCallPrefill: nil
         )
         XCTAssertEqual(runtimeParsed.content, " \n")
         XCTAssertEqual(runtimeParsed.completionTokens, 1)
@@ -707,7 +707,7 @@ final class HarmonyResponseParserTests: XCTestCase {
             decode: decode,
             request: request(model: "mlx-community/gpt-oss-20b"),
             mode: .complete(finishReason: "stop"),
-            defaultCompletionTokens: ids.count
+            defaultCompletionTokens: ids.count, toolCallPrefill: nil
         )
 
         XCTAssertEqual(parsed.content, "Public answer")
@@ -734,7 +734,7 @@ final class HarmonyResponseParserTests: XCTestCase {
             decode: decode,
             request: request(model: "openai/gpt-oss-120b", tools: ["lookup"]),
             mode: .complete(finishReason: "stop"),
-            defaultCompletionTokens: ids.count
+            defaultCompletionTokens: ids.count, toolCallPrefill: nil
         )
 
         XCTAssertEqual(parsed.content, "")
@@ -761,7 +761,7 @@ final class HarmonyResponseParserTests: XCTestCase {
             decode: decode,
             request: request(model: "openai/gpt-oss-120b"),
             mode: .complete(finishReason: "stop"),
-            defaultCompletionTokens: ids.count
+            defaultCompletionTokens: ids.count, toolCallPrefill: nil
         )) { error in
             let apiError = error as? APIError
             XCTAssertEqual(apiError?.status, 502)
@@ -785,7 +785,7 @@ final class HarmonyResponseParserTests: XCTestCase {
             decode: decode,
             request: request(model: "openai/gpt-oss-120b", tools: ["lookup"]),
             mode: .complete(finishReason: "stop"),
-            defaultCompletionTokens: ids.count
+            defaultCompletionTokens: ids.count, toolCallPrefill: nil
         )) { error in
             let apiError = error as? APIError
             XCTAssertEqual(apiError?.status, 502)
@@ -807,7 +807,7 @@ final class HarmonyResponseParserTests: XCTestCase {
             decode: decode,
             request: request(model: "openai/gpt-oss-120b"),
             mode: .complete(finishReason: "stop"),
-            defaultCompletionTokens: ids.count
+            defaultCompletionTokens: ids.count, toolCallPrefill: nil
         )) { error in
             let apiError = error as? APIError
             XCTAssertEqual(apiError?.status, 502)
@@ -831,7 +831,7 @@ final class HarmonyResponseParserTests: XCTestCase {
             decode: decode,
             request: request(model: "openai/gpt-oss-120b", tools: ["lookup"]),
             mode: .complete(finishReason: "length"),
-            defaultCompletionTokens: ids.count
+            defaultCompletionTokens: ids.count, toolCallPrefill: nil
         )) { error in
             let apiError = error as? APIError
             XCTAssertEqual(apiError?.status, 502)
@@ -857,7 +857,7 @@ final class HarmonyResponseParserTests: XCTestCase {
             request: request(model: "openai/gpt-oss-120b", tools: ["lookup"]),
             mode: .complete(finishReason: "stop"),
             defaultCompletionTokens: ids.count,
-            requestStops: ["STOP"]
+            requestStops: ["STOP"], toolCallPrefill: nil
         )
 
         XCTAssertEqual(parsed.content, "Public ")
@@ -934,7 +934,7 @@ final class HarmonyResponseParserTests: XCTestCase {
             decode: decode,
             request: request(model: "openai/gpt-oss-120b", tools: ["lookup"]),
             mode: .complete(finishReason: "stop"),
-            defaultCompletionTokens: ids.count
+            defaultCompletionTokens: ids.count, toolCallPrefill: nil
         )) { error in
             let apiError = error as? APIError
             XCTAssertEqual(apiError?.status, 502)
@@ -957,7 +957,7 @@ final class HarmonyResponseParserTests: XCTestCase {
             decode: decode,
             request: request(model: "openai/gpt-oss-120b", tools: ["lookup"]),
             mode: .complete(finishReason: "stop"),
-            defaultCompletionTokens: ids.count
+            defaultCompletionTokens: ids.count, toolCallPrefill: nil
         )
 
         XCTAssertEqual(parsed.content, "")
@@ -980,7 +980,7 @@ final class HarmonyResponseParserTests: XCTestCase {
             decode: decode,
             request: request(model: "openai/gpt-oss-120b", tools: ["lookup"]),
             mode: .complete(finishReason: "stop"),
-            defaultCompletionTokens: ids.count
+            defaultCompletionTokens: ids.count, toolCallPrefill: nil
         )
 
         XCTAssertEqual(parsed.content, "")
@@ -1006,7 +1006,7 @@ final class HarmonyResponseParserTests: XCTestCase {
             request: request(model: "openai/gpt-oss-120b"),
             mode: .complete(finishReason: "stop"),
             defaultCompletionTokens: ids.count,
-            requestStops: ["STOP"]
+            requestStops: ["STOP"], toolCallPrefill: nil
         )
 
         XCTAssertEqual(parsed.content, "Public ")
@@ -1031,7 +1031,7 @@ final class HarmonyResponseParserTests: XCTestCase {
             request: request(model: "openai/gpt-oss-120b"),
             mode: .complete(finishReason: "request_stop"),
             defaultCompletionTokens: ids.count,
-            requestStops: ["STOP"]
+            requestStops: ["STOP"], toolCallPrefill: nil
         )
 
         XCTAssertEqual(parsed.content, "Public ")
@@ -1055,7 +1055,7 @@ final class HarmonyResponseParserTests: XCTestCase {
             request: request(model: "openai/gpt-oss-120b"),
             mode: .complete(finishReason: "request_stop"),
             defaultCompletionTokens: ids.count,
-            requestStops: ["STOP"]
+            requestStops: ["STOP"], toolCallPrefill: nil
         )) { error in
             let apiError = error as? APIError
             XCTAssertEqual(apiError?.status, 502)
@@ -1084,7 +1084,7 @@ final class HarmonyResponseParserTests: XCTestCase {
             request: request(model: "openai/gpt-oss-120b"),
             mode: .complete(finishReason: "stop"),
             defaultCompletionTokens: ids.count,
-            requestStops: ["STOP"]
+            requestStops: ["STOP"], toolCallPrefill: nil
         )
 
         XCTAssertEqual(parsed.content, "Public")
@@ -1109,7 +1109,7 @@ final class HarmonyResponseParserTests: XCTestCase {
             request: request(model: "openai/gpt-oss-120b", tools: ["lookup"]),
             mode: .complete(finishReason: "stop"),
             defaultCompletionTokens: ids.count,
-            requestStops: ["STOP"]
+            requestStops: ["STOP"], toolCallPrefill: nil
         )
 
         XCTAssertEqual(parsed.content, "")
@@ -1138,7 +1138,7 @@ final class HarmonyResponseParserTests: XCTestCase {
             request: request(model: "openai/gpt-oss-120b", tools: ["lookup"]),
             mode: .complete(finishReason: "request_stop"),
             defaultCompletionTokens: ids.count,
-            requestStops: ["STOP"]
+            requestStops: ["STOP"], toolCallPrefill: nil
         )) { error in
             let apiError = error as? APIError
             XCTAssertEqual(apiError?.status, 502)
@@ -1194,7 +1194,7 @@ final class HarmonyResponseParserTests: XCTestCase {
             request: request(model: "openai/gpt-oss-120b", tools: ["lookupSTOP"]),
             mode: .complete(finishReason: "stop"),
             defaultCompletionTokens: ids.count,
-            requestStops: ["STOP", "commentary", "json"]
+            requestStops: ["STOP", "commentary", "json"], toolCallPrefill: nil
         )
 
         XCTAssertEqual(parsed.content, "")
@@ -1294,7 +1294,7 @@ final class HarmonyResponseParserTests: XCTestCase {
             request: request(model: "openai/gpt-oss-120b", tools: ["lookup"]),
             mode: .complete(finishReason: "stop"),
             defaultCompletionTokens: ids.count,
-            requestStops: ["hiddencommentary"]
+            requestStops: ["hiddencommentary"], toolCallPrefill: nil
         )
 
         XCTAssertEqual(parsed.content, "")
@@ -1328,7 +1328,7 @@ final class HarmonyResponseParserTests: XCTestCase {
             mode: .complete(finishReason: "request_stop"),
             defaultCompletionTokens: ids.count,
             requestStops: ["hiddencommentary"],
-            globalHitStop: true
+            globalHitStop: true, toolCallPrefill: nil
         )) { error in
             let apiError = error as? APIError
             XCTAssertEqual(apiError?.status, 502)
@@ -1413,7 +1413,7 @@ final class HarmonyResponseParserTests: XCTestCase {
             request: request(model: "openai/gpt-oss-120b", tools: ["lookup"]),
             mode: .complete(finishReason: "request_stop"),
             defaultCompletionTokens: ids.count,
-            requestStops: ["STOP"]
+            requestStops: ["STOP"], toolCallPrefill: nil
         )
 
         XCTAssertEqual(parsed.content, "Public ")
@@ -1439,7 +1439,7 @@ final class HarmonyResponseParserTests: XCTestCase {
             decode: decode,
             request: request(model: "openai/gpt-oss-120b", tools: ["lookup"]),
             mode: .complete(finishReason: "stop"),
-            defaultCompletionTokens: ids.count
+            defaultCompletionTokens: ids.count, toolCallPrefill: nil
         )) { error in
             let apiError = error as? APIError
             XCTAssertEqual(apiError?.status, 502)
@@ -1457,7 +1457,7 @@ final class HarmonyResponseParserTests: XCTestCase {
             decode: decode,
             request: request(model: "openai/gpt-oss-120b", tools: ["lookup"]),
             mode: .complete(finishReason: "stop"),
-            defaultCompletionTokens: ids.count
+            defaultCompletionTokens: ids.count, toolCallPrefill: nil
         )) { error in
             let apiError = error as? APIError
             XCTAssertEqual(apiError?.status, 502)
@@ -1488,7 +1488,7 @@ final class HarmonyResponseParserTests: XCTestCase {
             decode: decode,
             request: request(model: "openai/gpt-oss-120b", tools: ["lookup"]),
             mode: .complete(finishReason: "stop"),
-            defaultCompletionTokens: ids.count
+            defaultCompletionTokens: ids.count, toolCallPrefill: nil
         )) { error in
             let apiError = error as? APIError
             XCTAssertEqual(apiError?.status, 502)
@@ -1567,7 +1567,7 @@ final class HarmonyResponseParserTests: XCTestCase {
             decode: decode,
             request: request(model: "mlx-community/Qwen3-32B-4bit", tools: ["lookup"]),
             mode: .complete(finishReason: "stop"),
-            defaultCompletionTokens: ids.count
+            defaultCompletionTokens: ids.count, toolCallPrefill: nil
         )
 
         XCTAssertEqual(parsed.content, decoded)
@@ -1610,7 +1610,7 @@ final class HarmonyResponseParserTests: XCTestCase {
             mode: .complete(finishReason: "request_stop"),
             defaultCompletionTokens: stoppedTokens.count,
             requestStops: ["STOP"],
-            globalHitStop: true
+            globalHitStop: true, toolCallPrefill: nil
         )
         XCTAssertEqual(parsed.content, "Public ")
         XCTAssertEqual(parsed.completionTokens, 1)
@@ -1658,7 +1658,7 @@ final class HarmonyResponseParserTests: XCTestCase {
             mode: .complete(finishReason: "request_stop"),
             defaultCompletionTokens: ids.count,
             requestStops: ["STOP"],
-            globalHitStop: true
+            globalHitStop: true, toolCallPrefill: nil
         )
         XCTAssertEqual(parsed.content, "Public ")
         XCTAssertEqual(parsed.completionTokens, 1)

@@ -114,8 +114,18 @@ before generation as `unsupported_tool_schema`; out-of-domain generated
 arguments fail as `tool_selection_validation_failed`. Custom stop strings and
 non-text `response_format` cannot be combined with guaranteed modes.
 
-The native path uses ordinary model generation followed by complete-output
-validation. It does not constrain sampling logits. It accepts complete
+The native path starts generation inside the call. For a named choice the
+model sees only the selected function, and its reply is prefilled with that
+function's call opening in the template's own format (for Qwen3.6,
+`<tool_call>` followed by `<function=NAME>`), so it cannot pick another
+function. For `required` the reply is prefilled with the `<tool_call>`
+opening, so it cannot answer in prose. The prefill goes in only right after
+the template's reply prompt with thinking closed; if the rendered prompt ends
+any other way (for example with thinking on), that turn keeps output
+validation only. The prefill is internal: it never
+appears in the response, and it counts as a few prompt tokens. Only models
+with this support advertise `required`/named. The decoder does not constrain
+the arguments, so the output is still validated in full. It accepts complete
 `<tool_call>` envelopes only, each holding a strict JSON call or one complete
 function-XML call in the model's own chat-template format (a `string`
 parameter is literal text, any other parameter is strict JSON). It validates
