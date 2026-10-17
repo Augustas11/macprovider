@@ -99,8 +99,11 @@ prepare() {
     sed -i '' "s/static let binaryVersion = \"[0-9.]*\"/static let binaryVersion = \"$live_version\"/" $src
     grep -q "static let binaryVersion = \"$live_version\"" $src || { echo "version pin failed" >&2; exit 3; }
   fi
+  # HARNESS_BUILD_FLAGS='-Xswiftc -D<lab harness define>' (see the PR body);
+  # release, signing and CI surfaces never spell the define.
+  : ${HARNESS_BUILD_FLAGS:?HARNESS_BUILD_FLAGS is required for the lab-harness build}
   (cd $PKG && nice -n 10 swift build -c release --product macprovider-cli \
-    --build-path .build-lab-harness -Xswiftc -DMACPROVIDER_LAB_HARNESS)
+    --build-path .build-lab-harness ${=HARNESS_BUILD_FLAGS})
   if [[ -f $src.lab-orig ]]; then mv -f $src.lab-orig $src; trap - EXIT; fi
   cp $METALLIB $HARNESS/mlx.metallib
   $HARNESS/macprovider-cli --version

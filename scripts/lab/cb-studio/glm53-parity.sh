@@ -6,7 +6,7 @@
 # Env overrides: POC (lab checkout), BIN, MODEL, ORACLE_DIR, CONTEXTS, OUT, PY.
 set -euo pipefail
 POC=${POC:-$HOME/lab-glm53/poc}
-# glm-parity exists only in a lab-harness build (-DMACPROVIDER_LAB_HARNESS).
+# glm-parity exists only in a lab-harness build (the lab harness define).
 BIN=${BIN:-$POC/phase3-binary/.build-lab-harness/release/macprovider-cli}
 MODEL=${MODEL:-$HOME/lab-glm53/models/GLM-5.3-Flash-oQ4e-mtp}
 ORACLE_DIR=${ORACLE_DIR:-$HOME/lab-glm53/t2b-20261016T1146/vlm}
