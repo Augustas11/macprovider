@@ -280,6 +280,15 @@ class NativeMTPAdmissionMultiEntryTests(unittest.TestCase):
         # Qwen may still sign the sampled profile.
         self.assertEqual(body["entries"][0]["request_feature_profile"], self.qwen["entry"]["request_feature_profile"])
 
+    def test_glm_tuple_signs_at_most_one_native_active_row(self):
+        # SPEC-048 MTP-2 (0.1.42): 4 rows decoded at 0.79x ordinary.
+        body = json.loads(build([self.qwen, self.glm], release_input()))
+        self.assertEqual(body["entries"][1]["max_native_active_rows"], 1)
+        wide = copy.deepcopy(self.glm)
+        wide["entry"]["max_native_active_rows"] = 2
+        with self.assertRaisesRegex(SidecarError, "at most 1 native active row"):
+            build([self.qwen, wide], release_input())
+
     def test_duplicate_or_empty_tuple_lists_fail_closed(self):
         with self.assertRaisesRegex(SidecarError, "sorted by the SPEC-023 sort key"):
             build([self.qwen, copy.deepcopy(self.qwen)], release_input())

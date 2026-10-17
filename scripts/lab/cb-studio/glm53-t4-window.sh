@@ -50,7 +50,7 @@
 #        04 serial oracle, 05 cache/state boundary at the 256-token block,
 #        06 streaming/stop, 07/08 mixed rows and capacity, 09 cancellation,
 #        10 warm swap, 12 provider self-test) on the same cloned fixture,
-#        at JOURNEY_SLOTS (4) slots, JOURNEY_NATIVE_ROWS (4) native rows and
+#        at JOURNEY_SLOTS (4) slots, JOURNEY_NATIVE_ROWS (1, the GLM tuple bound) native rows and
 #        a 4096-token prompt cap. Records executed_steps_status and each
 #        step's status; PASS only when the harness exits 0 (no executed step
 #        failed). The result is lab evidence, never a journey verdict.
@@ -382,7 +382,7 @@ PY
   run_bounded ${MTP_JOURNEY_TIMEOUT_S:-1200} leg6 $OUT/mtp-journey.json $OUT/mtp-journey.log \
     env MACPROVIDER_NATIVE_MTP_E2E=1 MACPROVIDER_CB_TRACE=1 \
     $HARNESS/macprovider-cli native-mtp-journey-e2e --root $jfixture --model-id zai-org/glm-5.3-flash \
-    --qualified-slots ${JOURNEY_SLOTS:-4} --max-native-active-rows ${JOURNEY_NATIVE_ROWS:-4} \
+    --qualified-slots ${JOURNEY_SLOTS:-4} --max-native-active-rows ${JOURNEY_NATIVE_ROWS:-1} \
     --max-prompt-tokens 4096 || journey_rc=$?
   echo "leg6 native-mtp-journey-e2e rc=$journey_rc" | tee -a $OUT/summary.txt
   python3 - $OUT/mtp-journey.json <<'PY' 2>&1 | tee -a $OUT/summary.txt || true

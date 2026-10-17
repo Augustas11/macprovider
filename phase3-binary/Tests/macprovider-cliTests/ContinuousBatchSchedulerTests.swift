@@ -6694,6 +6694,88 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         try await eventually { await allocator.freeBlockCount() == 16 }
     }
 
+    /// JOURNEY step-09 shape (window A2, glm5_next): the cancelled row is
+    /// native and its peer is an ordinary row (conversation key) in the same
+    /// scheduler. For every trap phase and for decode windows 1 and 16 the
+    /// cancelled row ends `cancelled`, the ordinary peer runs to its length,
+    /// and no round reservation or block stays held.
+    func testNativeMTPPhaseCancelWithOrdinaryPeerFinishesThePeer() async throws {
+        let phases: [NativeMTPLabPhaseTrapPhase] = [.afterProposal, .afterVerify, .beforeFinalize]
+        for window in [1, 16] {
+            for phase in phases {
+                let label = "phase \(phase.rawValue) window \(window)"
+                let backend = ScriptedBackend(
+                    scripts: ["peer": [21, 22, 23, 24, 25, 26, 27]],
+                    prefillTokens: ["cancelled": 10, "peer": 20],
+                    nativeTargetTopTokens: ["cancelled": [11, 12]]
+                )
+                let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+                let scheduler = try await makeScheduler(
+                    maxActiveRows: 2,
+                    maxDecodeLockstepWindow: window,
+                    maxPrefillRowsPerIteration: 2,
+                    backend: backend,
+                    allocator: allocator
+                )
+                let trap = NativeMTPLabPhaseTrap(cancellations: [phase: ["cancelled"]])
+                await scheduler.installLabNativeMTPPhaseTrap(trap)
+                let cancelled = Task {
+                    try await scheduler.submit(Self.nativeRequest(
+                        id: "cancelled", promptTokens: [1], maxOutputTokens: 6, proposals: [11], maximumDepth: 1
+                    ))
+                }
+                let peer = Task {
+                    try await scheduler.submit(ContinuousBatchSchedulerRequest(
+                        id: "peer", conversationKey: "", promptTokens: [2], maxOutputTokens: 8, temperature: 0
+                    ))
+                }
+                let cancelledResult = try await cancelled.value
+                let peerResult = try await peer.value
+                XCTAssertEqual(cancelledResult.terminalStatus, .cancelled, label)
+                XCTAssertEqual(peerResult.terminalStatus, .length, label)
+                XCTAssertEqual(peerResult.generatedTokens.count, 8, label)
+                XCTAssertEqual(peerResult.generatedTokens.first, 20, label)
+                let reserved = await scheduler.nativeMTPReservedRoundBytesSnapshot()
+                XCTAssertEqual(reserved, 0, label)
+                try await eventually { await allocator.freeBlockCount() == 16 }
+            }
+        }
+    }
+
+    /// The no-progress guard: decode passes that keep running for a row but
+    /// move nothing (no token, no terminal result) make the pump fail that
+    /// row loudly after a bounded number of passes instead of spinning
+    /// forever. A backend that omits a row's outcome already fails it
+    /// (`continuous_batching_row_sampling_failed`), checked here too.
+    func testDecodeStepsWithoutProgressFailTheRowInsteadOfSpinning() async throws {
+        let silent = SilentDecodeBackend()
+        let omitting = try await makeScheduler(
+            descriptor: Self.descriptor(maxPhysicalBlocks: 64),
+            maxActiveRows: 2,
+            backend: silent,
+            allocator: PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 64)
+        )
+        let omitted = try await omitting.submit(.init(
+            id: "omitted", conversationKey: "", promptTokens: [1], maxOutputTokens: 4
+        ))
+        XCTAssertEqual(omitted.errorCode, "continuous_batching_row_sampling_failed")
+
+        let scheduler = try await makeScheduler(
+            descriptor: Self.descriptor(maxPhysicalBlocks: 64),
+            maxActiveRows: 2,
+            backend: ScriptedBackend(scripts: ["stuck": [7, 8, 9]], prefillTokens: ["stuck": 6]),
+            allocator: PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 64)
+        )
+        await scheduler.setTestDecodeStepsAreNoOps(true)
+        let result = try await scheduler.submit(.init(
+            id: "stuck", conversationKey: "", promptTokens: [1], maxOutputTokens: 4
+        ))
+        XCTAssertEqual(result.terminalStatus, .requestFailed)
+        XCTAssertEqual(result.errorCode, "continuous_batching_scheduler_no_progress")
+        let metrics = await scheduler.metrics()
+        XCTAssertEqual(metrics.activeDecodeRows, 0)
+    }
+
     func testNativeMTPBeforeFinalizeTrapCancelsOnlySelectedRowBeforeCommit() async throws {
         let cancelledRecorder = TokenEventRecorder()
         let peerRecorder = TokenEventRecorder()
@@ -8745,6 +8827,27 @@ private final class DeliveredTokenLog: @unchecked Sendable {
 /// forward of `vectorLimit` or more rows (MLX `qmm` instead of `qmv`) picks
 /// the runner-up there. Smaller forwards are bit-exact.
 /// Fixed per-call cost for prefill and decode, for cohort timing tests.
+/// Prefills a first token, then answers every decode step with no outcome
+/// for any row.
+private actor SilentDecodeBackend: ContinuousBatchSchedulerBackend {
+    private var calls = 0
+
+    func prefill(rows: [ContinuousBatchPrefillInput]) async throws -> [ContinuousBatchPrefillOutput] {
+        rows.map {
+            ContinuousBatchPrefillOutput(requestID: $0.requestID, sampledToken: $0.sampleFirstToken ? 5 : nil)
+        }
+    }
+
+    func decode(rows: [ContinuousBatchDecodeInput]) async throws -> [ContinuousBatchDecodeOutcome] {
+        calls += 1
+        return []
+    }
+
+    func cancelInFlight() async {}
+
+    func decodeCalls() -> Int { calls }
+}
+
 private actor TimedCohortBackend: ContinuousBatchSchedulerBackend {
     private let prefillNanoseconds: UInt64
     private let decodeNanoseconds: UInt64

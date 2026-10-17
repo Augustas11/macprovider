@@ -276,6 +276,9 @@ def validate_entry(entry: object, path: str) -> dict:
     _str(entry["hardware_class"], f"{path}.hardware_class", HARDWARE_CLASS)
     _int(entry["ram_bytes"], f"{path}.ram_bytes", 1, INT_MAX)
     bound = _int(entry["max_native_active_rows"], f"{path}.max_native_active_rows", 1, 8)
+    # SPEC-048 MTP-2 (0.1.42): glm5_next serves native MTP on one active row.
+    if entry["mtp_family_adapter"] == "glm5_next_mtp_v1" and bound > 1:
+        fail(f"{path}.max_native_active_rows", "glm5_next_mtp_v1 signs at most 1 native active row")
     if bound > slots:
         fail(f"{path}.max_native_active_rows", "exceeds qualified_slots")
     if entry["request_feature_profile"] not in PROFILES:

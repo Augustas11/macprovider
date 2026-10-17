@@ -2202,6 +2202,19 @@ actor ContinuousBatchScheduler {
     private var requestAdmissionSequences: [String: UInt64] = [:]
     private var admittingRequests: [String: ContinuousBatchSchedulerRequest] = [:]
     private var nativeMTPReservedRoundBytes = 0
+    /// Bumped whenever a row applies a token or reaches a terminal result:
+    /// the pump's no-progress guard compares it across passes.
+    private var rowProgressEvents = 0
+    /// Consecutive pump passes that ran a decode step yet applied no token
+    /// and finished no row.
+    private var decodePassesWithoutProgress = 0
+    /// A pump that keeps stepping active rows without a token or terminal
+    /// result for this many passes fails them instead of spinning.
+    static let decodePassesWithoutProgressLimit = 64
+    #if DEBUG
+    private var testDecodeStepsAreNoOps = false
+    func setTestDecodeStepsAreNoOps(_ value: Bool) { testDecodeStepsAreNoOps = value }
+    #endif
     private var nativeMTPRoundByteReservations: [UUID: Int] = [:]
     private var activePrompt: [String: Row] = [:]
     private var promptOrder: [String] = []
@@ -3075,8 +3088,18 @@ actor ContinuousBatchScheduler {
             let holdCohortDecode = admissionOrPrefillProgressed && selfCheckCohortDecodeHeld
             admissionOrPrefillProgressed = false
             if !activeDecode.isEmpty && !holdCohortDecode {
+                let progressBefore = rowProgressEvents
                 await runDecodeStep()
                 madeProgress = true
+                if rowProgressEvents == progressBefore, !activeDecode.isEmpty {
+                    decodePassesWithoutProgress += 1
+                    if decodePassesWithoutProgress >= Self.decodePassesWithoutProgressLimit {
+                        decodePassesWithoutProgress = 0
+                        await failRowsWithoutDecodeProgress()
+                    }
+                } else {
+                    decodePassesWithoutProgress = 0
+                }
                 if backendCancellationPending { break }
                 if await failClosedIfNeeded() { break }
                 await processCancellations()
@@ -3097,9 +3120,33 @@ actor ContinuousBatchScheduler {
                 madeProgress = true
                 admissionOrPrefillProgressed = true
             }
+            // Admission or prefill can unblock a decode row; only passes
+            // that move nothing count toward the no-progress guard.
+            if admissionOrPrefillProgressed { decodePassesWithoutProgress = 0 }
             if await failClosedIfNeeded() { break }
             // A held decode with no other progress runs on the next pass.
             guard madeProgress || holdCohortDecode else { break }
+        }
+    }
+
+    /// The no-progress guard: decode steps keep running for these rows but
+    /// none applies a token or ends, so each fails loudly instead of the pump
+    /// spinning forever.
+    private func failRowsWithoutDecodeProgress() async {
+        let ids = activeDecode.keys.sorted()
+        try? FileHandle.standardError.write(contentsOf: Data(
+            "event=continuous_batch_no_progress action=fail_rows passes=\(Self.decodePassesWithoutProgressLimit) rows=\(ids.joined(separator: ","))\n".utf8
+        ))
+        for id in ids {
+            guard let removed = activeDecode.removeValue(forKey: id) else { continue }
+            record(.localPreparationFailed)
+            let released = await release(removed.handle)
+            finish(
+                removed,
+                status: .requestFailed,
+                errorCode: released ? "continuous_batching_scheduler_no_progress" : "continuous_batching_cleanup_failed"
+            )
+            if !released { return }
         }
     }
 
@@ -3764,6 +3811,7 @@ actor ContinuousBatchScheduler {
         nativeMTPStatusRoundStarted = true
         let backendProposals: [String: [Int]]?
         do {
+            CBTrace.log(nil, "native_round phase=propose rows=\(proposalInputs.map(\.requestID).joined(separator: ","))")
             backendProposals = try await backend.proposeNativeMTPPackedRound(rows: proposalInputs)
         } catch {
             recordNativeMTPPostoutputFailureIfVisible(
@@ -3974,6 +4022,7 @@ actor ContinuousBatchScheduler {
 
         let verifiedRows: [NativeMTPVerifiedRow]
         do {
+            CBTrace.log(nil, "native_round phase=verify rows=\(prepared.count)")
             verifiedRows = try await backend.verifyNativeMTPPackedRound(rows: prepared.map(\.input))
         } catch {
             recordNativeMTPPostoutputFailureIfVisible(
@@ -4161,7 +4210,9 @@ actor ContinuousBatchScheduler {
         }
 
         do {
+            CBTrace.log(nil, "native_round phase=finalize rows=\(finalizeRows.map { "\($0.requestID):\($0.shouldCommit)" }.joined(separator: ","))")
             try await backend.finalizeNativeMTPPackedRound(rows: finalizeRows)
+            CBTrace.log(nil, "native_round phase=finalized")
         } catch {
             recordNativeMTPPostoutputFailureIfVisible(
                 sink: nativeMTPStatusSink,
@@ -4550,6 +4601,10 @@ actor ContinuousBatchScheduler {
     }
 
     private func runDecodeStep() async {
+        #if DEBUG
+        // Test hook: a decode step that moves no row (the no-progress guard).
+        if testDecodeStepsAreNoOps { return }
+        #endif
         await fenceDisabledActiveNativeMTPRows()
         guard !cleanupFailedClosed else { return }
         noteSelfCheckCohortDecodeStep(rows: Array(activeDecode.values))
@@ -4945,6 +5000,7 @@ actor ContinuousBatchScheduler {
     }
 
     private func applyToken(_ token: Int, to initialRow: Row) async {
+        rowProgressEvents &+= 1
         guard let completion = advanceDecodeRow(token, requestID: initialRow.request.id) else { return }
         await completeDecodeRow(initialRow.request.id, completion)
     }
@@ -5776,6 +5832,7 @@ actor ContinuousBatchScheduler {
     }
 
     private func complete(requestID: String, result: ContinuousBatchSchedulerResult) {
+        rowProgressEvents &+= 1
         #if DEBUG || MACPROVIDER_LAB_HARNESS
         labNativeMTPLoadGateRecorder?.recordTerminal(requestID: requestID, status: result.terminalStatus)
         #endif

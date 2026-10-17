@@ -1467,7 +1467,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
     func testReleaseEnvelopeAcceptsEmbeddedCheckpointMTPAndCapturesTheTargetOnce() throws {
         let fixture = try makeReleaseEnvelopeFixture(
             prepareSnapshot: { base in try Self.embeddedLayout(base) },
-            entryEdit: { $0["mtp_family_adapter"] = "glm5_next_mtp_v1" }
+            entryEdit: { $0["mtp_family_adapter"] = "glm5_next_mtp_v1"; $0["max_native_active_rows"] = 1 }
         )
         defer { try? FileManager.default.removeItem(at: fixture.base.root) }
 
@@ -1495,7 +1495,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         let sampled = try makeReleaseEnvelopeFixture(
             prepareSnapshot: { base in try Self.embeddedLayout(base) },
             entryEdit: {
-                $0["mtp_family_adapter"] = "glm5_next_mtp_v1"
+                $0["mtp_family_adapter"] = "glm5_next_mtp_v1"; $0["max_native_active_rows"] = 1
                 $0["request_feature_profile"] = "native_mtp_sampled_text_v1"
             }
         )
@@ -1505,7 +1505,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         let greedy = try makeReleaseEnvelopeFixture(
             prepareSnapshot: { base in try Self.embeddedLayout(base) },
             entryEdit: {
-                $0["mtp_family_adapter"] = "glm5_next_mtp_v1"
+                $0["mtp_family_adapter"] = "glm5_next_mtp_v1"; $0["max_native_active_rows"] = 1
                 $0["request_feature_profile"] = "native_mtp_greedy_text_v1"
             }
         )
@@ -1530,8 +1530,25 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         )
     }
 
+    /// SPEC-048 MTP-2 (0.1.42): a glm5_next tuple signs at most one native
+    /// active row (window A2: 1.27x at one row, 0.79x at four); Qwen keeps
+    /// the generic 1...8 range.
+    func testEmbeddedGLMAdapterSignsAtMostOneNativeActiveRow() throws {
+        let wide = try makeReleaseEnvelopeFixture(
+            prepareSnapshot: { base in try Self.embeddedLayout(base) },
+            entryEdit: {
+                $0["mtp_family_adapter"] = "glm5_next_mtp_v1"
+                $0["max_native_active_rows"] = 2
+            }
+        )
+        defer { try? FileManager.default.removeItem(at: wide.base.root) }
+        XCTAssertEqual(try rejectedReleaseEnvelopeError(wide), .invalidValue("$.entries[0].max_native_active_rows"))
+        XCTAssertEqual(NativeMTPAdmissionSidecar.maxNativeActiveRowsBound(familyAdapter: "glm5_next_mtp_v1"), 1)
+        XCTAssertNil(NativeMTPAdmissionSidecar.maxNativeActiveRowsBound(familyAdapter: "qwen3_5_mtp_v1"))
+    }
+
     func testReleaseEnvelopeRejectsEmbeddedAdapterWithASeparateMTPMember() throws {
-        let fixture = try makeReleaseEnvelopeFixture(entryEdit: { $0["mtp_family_adapter"] = "glm5_next_mtp_v1" })
+        let fixture = try makeReleaseEnvelopeFixture(entryEdit: { $0["mtp_family_adapter"] = "glm5_next_mtp_v1"; $0["max_native_active_rows"] = 1 })
         defer { try? FileManager.default.removeItem(at: fixture.base.root) }
         XCTAssertEqual(try rejectedReleaseEnvelopeError(fixture), .invalidValue("$.artifacts.mtp"))
 
@@ -1540,7 +1557,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
             mutateProjectionArtifacts: { artifacts in
                 artifacts["manifest"] = artifacts["tokenizer"]
             },
-            entryEdit: { $0["mtp_family_adapter"] = "glm5_next_mtp_v1" }
+            entryEdit: { $0["mtp_family_adapter"] = "glm5_next_mtp_v1"; $0["max_native_active_rows"] = 1 }
         )
         defer { try? FileManager.default.removeItem(at: wrongManifest.base.root) }
         XCTAssertThrowsError(try NativeMTPAdmissionSidecar.load(

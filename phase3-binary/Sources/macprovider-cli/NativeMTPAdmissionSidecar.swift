@@ -513,6 +513,13 @@ enum NativeMTPAdmissionSidecar {
     static let maxQuantizationExceptions = 1024
     static let embeddedMTPFamilyAdapter = "glm5_next_mtp_v1"
 
+    /// The largest `max_native_active_rows` a family adapter may sign
+    /// (SPEC-048 MTP-2): 1 for `glm5_next_mtp_v1`; nil when only the
+    /// generic 1...8 range applies.
+    static func maxNativeActiveRowsBound(familyAdapter: String) -> Int? {
+        familyAdapter == embeddedMTPFamilyAdapter ? 1 : nil
+    }
+
     /// The only `request_feature_profile` values a family adapter may sign
     /// (SPEC-048 MTP-2): `glm5_next_mtp_v1` is greedy only.
     static func allowedRequestFeatureProfiles(familyAdapter: String) -> Set<String> {
@@ -1485,6 +1492,13 @@ enum NativeMTPAdmissionSidecar {
         }
         let qualifiedSlots = try requireInt(object, "qualified_slots", path: path, range: 2...8)
         let maxNativeActiveRows = try requireInt(object, "max_native_active_rows", path: path, range: 1...8)
+        // SPEC-048 MTP-2 (0.1.42): a glm5_next tuple serves native MTP on one
+        // active row; at four rows it decoded slower than ordinary batching.
+        if case .string(let adapter)? = object["mtp_family_adapter"],
+           let bound = maxNativeActiveRowsBound(familyAdapter: adapter),
+           maxNativeActiveRows > bound {
+            throw NativeMTPAdmissionSidecarError.invalidValue("\(path).max_native_active_rows")
+        }
         guard maxNativeActiveRows <= qualifiedSlots else {
             throw NativeMTPAdmissionSidecarError.invalidValue("\(path).max_native_active_rows")
         }

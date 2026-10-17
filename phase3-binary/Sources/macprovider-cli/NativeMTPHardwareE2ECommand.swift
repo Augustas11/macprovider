@@ -80,6 +80,11 @@ struct NativeMTPHardwareE2EFamily: Equatable, Sendable {
     static let glm5NextKDALayers = 34
     static let glm5NextKDAStateBytes = 64 * 128 * 128 * 4 + 3 * 24_576 * 2
 
+    /// The native active-row bound the family's tuple signs (SPEC-048 R007),
+    /// nil when the harness's slot count is used. glm5_next signs 1: at four
+    /// rows native MTP decoded at 0.79x ordinary in window A2 (1.27x at one).
+    var signedMaxNativeActiveRows: Int? { self == .glm5Next ? 1 : nil }
+
     /// Whether the tuple admits sampled rows to native MTP.
     var admitsSampledRows: Bool { requestFeatureProfile == NativeMTPAdmissionSidecar.sampledRequestFeatureProfile }
 
@@ -283,14 +288,15 @@ final class NativeMTPHardwareE2ERunner {
             .standardizedFileURL
         self.modelID = modelID
         self.maxBatch = maxBatch
-        self.maxNativeActiveRows = maxNativeActiveRows ?? maxBatch
         self.maxPromptTokens = maxPromptTokens
         self.maxPhysicalBlocks = maxPhysicalBlocks
         self.verifyServePath = verifyServePath
         self.throughputTokens = throughputTokens
-        family = NativeMTPHardwareE2EFamily.detect(configJSONData: try? Data(
+        let family = NativeMTPHardwareE2EFamily.detect(configJSONData: try? Data(
             contentsOf: root.appendingPathComponent("target/config.json")
         )) ?? .qwen35
+        self.family = family
+        self.maxNativeActiveRows = maxNativeActiveRows ?? family.signedMaxNativeActiveRows ?? maxBatch
     }
 
     private var mtpDirectory: URL {
@@ -301,6 +307,16 @@ final class NativeMTPHardwareE2ERunner {
         family.embeddedMTP
             ? try NativeMTPArtifactObserver.observeEmbedded(targetDirectory: targetDirectory)
             : try NativeMTPArtifactObserver.observePair(targetDirectory: targetDirectory, mtpDirectory: mtpDirectory)
+    }
+
+    /// `min(rows, bound)` rows admitted native and every other row sent to
+    /// ordinary decode by the active-row bound (SPEC-048 R007).
+    static func admissionsRespectNativeBound(_ admissions: [NativeMTPRuntimeAdmission], rows: Int, bound: Int) -> Bool {
+        let native = admissions.filter { $0.effectivePath == .nativeMTP }.count
+        let boundRouted = admissions.filter {
+            $0.effectivePath == .ordinary && $0.selection.nativeMTPReason == .capacityAboveNativeBound
+        }.count
+        return admissions.count == rows && native == min(rows, max(1, bound)) && native + boundRouted == rows
     }
 
     /// Applies the family's MLX command-buffer budget for this process, as
@@ -394,7 +410,12 @@ final class NativeMTPHardwareE2ERunner {
         }
         let recordedAdmissions = admissionRecorder.snapshot()
         try require(recordedAdmissions.count == requests.count, "unexpected admission count \(recordedAdmissions.count)")
-        try require(recordedAdmissions.allSatisfy { $0.effectivePath == .nativeMTP }, "non-native admission observed")
+        // Rows above the tuple's native active-row bound take ordinary decode
+        // (SPEC-048 R007); the rest must be native.
+        try require(
+            Self.admissionsRespectNativeBound(recordedAdmissions, rows: requests.count, bound: maxNativeActiveRows),
+            "native admissions do not match the native active-row bound \(maxNativeActiveRows)"
+        )
 
         let streamingStopRequest = try makeRequest(
             id: "native-mtp-real-stream-stop",
@@ -872,8 +893,9 @@ final class NativeMTPHardwareE2ERunner {
                 let delta = NativeMTPStatusDelta(before: before, after: await native.currentSnapshot().nativeMTPStatus)
                 let admissions = recorder.snapshot().dropFirst(admissionsBefore)
                 try require(
-                    admissions.count == rows && admissions.allSatisfy { $0.effectivePath == .nativeMTP },
-                    "throughput rows=\(rows) pass=\(pass): not every row admitted native"
+                    admissions.count == rows
+                        && Self.admissionsRespectNativeBound(Array(admissions), rows: rows, bound: maxNativeActiveRows),
+                    "throughput rows=\(rows) pass=\(pass): native admissions do not match the native bound \(maxNativeActiveRows)"
                 )
                 for id in expected.keys.sorted() {
                     try require(

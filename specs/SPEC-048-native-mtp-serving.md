@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.41
+**Version:** 0.1.42
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.41",
+  "version": "0.1.42",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -372,7 +372,15 @@ do not apply to this adapter; these do:
   `max_proposal_depth = 1`), shares the target's last sparse-attention top-k
   selection as the model config's `index_share_for_mtp_iteration` requires,
   and is admitted only with `request_feature_profile =
-  "native_mtp_greedy_text_v1"`. R004, R012, R014, and R015 apply unchanged.
+  "native_mtp_greedy_text_v1"`. (0.1.42) A `glm5_next_mtp_v1` tuple signs
+  `max_native_active_rows` 1, as the first Qwen3.6 tuple does: on the M3
+  Ultra (provider native path, packed verification in continuous batching,
+  depth 1, greedy, 256 tokens) one native row decoded at 1.27x ordinary
+  (48.4 vs 38.2 tok/s, acceptance 0.889), while four native rows decoded at
+  0.79x ordinary continuous batching (51.5 vs 65.6 tok/s, acceptance 0.870).
+  The sidecar loader and generator reject a larger bound for this adapter;
+  further rows take ordinary decode under the R007 load gate. R004, R012,
+  R014, and R015 apply unchanged.
 - *Provider load and admission (0.1.39).* The provider builds the drafter
   inside the loaded target: a parameterless model created from the target's
   `config.json` through the drafter type registry, which resolves the
@@ -1680,6 +1688,10 @@ the text-only path without image inputs; that does not admit multimodal buyer
 requests.
 
 ## 9. Changelog and history
+
+- **0.1.42 (2026-10-17)** — MTP-2: a `glm5_next_mtp_v1` tuple signs
+  `max_native_active_rows` 1 (measured 1.27x ordinary at one native row,
+  0.79x at four); the sidecar loader and generator reject a larger bound.
 
 - **0.1.41 (2026-10-17)** — MTP-3 campaign tuple moves to mlx-swift-lm
   `18ca5267…` (untagged; the tag stays a PENDING row), which carries the
