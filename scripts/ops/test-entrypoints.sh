@@ -1013,6 +1013,9 @@ expect_err "continuous_batching.policy.authorized is not true"
 status_doc $CAND true true false absent_fallback none attached '{"decision":"granted","served_slots":0}'
 run_rc 3 "canary probe with a self-check grant of 0 slots" scripts/ops/cli-release.sh next --done canary_smoke --probe
 expect_err "self_check.served_slots 0 < 1"
+status_doc $CAND true true false absent_fallback none attached '{"decision":"prior_grant_pending_recheck","served_slots":0}'
+run_rc 3 "canary probe with a pending re-check and no served prior grant" scripts/ops/cli-release.sh next --done canary_smoke --probe
+expect_err "self_check.served_slots 0 < 1"
 status_doc $CAND true false false live_verified failed attached '{"decision":"single_row","served_slots":1}'
 run_rc 3 "single-row canary with a failed local proof" scripts/ops/cli-release.sh next --done canary_smoke --probe
 expect_err "local_proof_result 'failed' != 'passed'"
@@ -1041,7 +1044,38 @@ rm -f "$tmp/svc/loaded.txt"
 run_rc 3 "canary probe refused without positive live registration" scripts/ops/cli-release.sh next --done canary_smoke --probe
 expect_err "not registered in the running coordinator"
 loaded "$CAND"
+# SPEC-038 FR-CB10: a prior grant serving while the new runtime identity's
+# re-check is pending is CB active; rollout verification confirms the final
+# decision (the provider runs the re-check under its admission hold).
+cp -R "$tmp/state" "$tmp/state-recheck"
+status_doc $CAND true true false absent_fallback none attached '{"decision":"prior_grant_pending_recheck","served_slots":8}'
+MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 0 "canary probe accepts a serving prior grant with its re-check pending" \
+  scripts/ops/cli-release.sh next --done canary_smoke --probe
+if python3 -c 'import json,sys; p=json.load(open(sys.argv[1]))["probe"]; sys.exit(0 if p["self_check_decision"] == "prior_grant_pending_recheck" and p["self_check_recheck_pending"] is True else 1)' \
+  "$tmp/state-recheck/cli-release-$CAND/canary_smoke.json"; then ok; else bad "pending re-check not recorded in the canary_smoke marker"; fi
+MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 0 "cli status after a pending-re-check canary" scripts/ops/cli-release.sh status
+expect_next e2e_gate:manual
+MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 3 "rollout gate refuses while the canary re-check is still pending" \
+  scripts/ops/cli-release.sh _check-canary-self-check "$CAND"
+expect_err "re-check still pending"
+status_doc $CAND true true false absent_fallback none attached '{"decision":"row_divergence_at_9","served_slots":8}'
+MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 3 "rollout gate refuses a re-check that lowered the grant" \
+  scripts/ops/cli-release.sh _check-canary-self-check "$CAND"
+expect_err "is not granted or kept_prior_grant_*"
+status_doc $LIVE true true false absent_fallback none attached '{"decision":"granted","served_slots":8}'
+MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 3 "rollout gate refuses a canary on another version" \
+  scripts/ops/cli-release.sh _check-canary-self-check "$CAND"
+status_doc $CAND true true false absent_fallback none attached '{"decision":"granted","served_slots":8}'
+MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 0 "rollout gate passes once the canary re-check granted" \
+  scripts/ops/cli-release.sh _check-canary-self-check "$CAND"
+status_doc $CAND true true false absent_fallback none attached '{"decision":"kept_prior_grant_no_net_gain","served_slots":8}'
+MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 0 "rollout gate passes a kept prior grant" \
+  scripts/ops/cli-release.sh _check-canary-self-check "$CAND"
+rm -rf "$tmp/state-recheck"
+status_doc $CAND true true false absent_fallback none attached '{"decision":"granted","served_slots":8}'
 run_rc 0 "canary probe on the candidate" scripts/ops/cli-release.sh next --done canary_smoke --probe
+STUDIO_SSH=unreachable-host run_rc 0 "rollout gate is a no-op for a canary recorded on a final decision" \
+  scripts/ops/cli-release.sh _check-canary-self-check "$CAND"
 rm -f "$tmp/svc/journal.txt"
 run_rc 0 "cli status after canary" scripts/ops/cli-release.sh status
 expect_next e2e_gate:manual
@@ -1352,7 +1386,7 @@ loaded "$CAND"
 printf '3' > "$tmp/svc/rejections"
 run_rc 0 "cli status after the bump with historical rejections" scripts/ops/cli-release.sh status
 expect_next verify_live_rollout:mutate
-case "$(next_field command)" in *"_check-privacy-rejections"*"verify-live-coordinator-release-rollout.yml"*) ok ;; *) bad "rollout command: $(next_field command)" ;; esac
+case "$(next_field command)" in *"_check-canary-self-check $CAND"*"_check-privacy-rejections"*"verify-live-coordinator-release-rollout.yml"*) ok ;; *) bad "rollout command: $(next_field command)" ;; esac
 if [ "$(fact_of privacy_unapproved_rejections_lifetime)" = "3" ]; then ok; else bad "lifetime fact: $(fact_of privacy_unapproved_rejections_lifetime)"; fi
 PRIVACY_REJECTION_WINDOW_SECONDS=0 run_rc 0 "no new rejections in the window" scripts/ops/cli-release.sh _check-privacy-rejections
 printf '1' > "$tmp/svc/rejections_bump"

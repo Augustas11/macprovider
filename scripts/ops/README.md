@@ -110,8 +110,14 @@ scripts/ops/live-lock.sh acquire <label> --steal                 # only past the
   registrations (loaded-identity metric, boot config digests) and gates the
   canary, promotion, the recommendation bump and rollout verification.
   `canary_smoke --probe` also fails on a privacy rejection of the canary in
-  Pearl's journal. `verify_live_rollout` runs `_check-privacy-rejections`
-  first: two samples of the unapproved-rejection counter over a window
+  Pearl's journal. It accepts a canary whose CB self-check is still
+  `prior_grant_pending_recheck` when the prior grant serves (`served_slots`
+  > 0, CB active) and records the pending re-check; the provider runs that
+  re-check under a bounded admission hold (SPEC-038 FR-CB10), so no buyer
+  traffic has to be stopped. `verify_live_rollout` first runs
+  `_check-canary-self-check`, which then requires the canary's final
+  `granted` (or `kept_prior_grant_*`) decision, then `_check-privacy-rejections`:
+  two samples of the unapproved-rejection counter over a window
   (`PRIVACY_REJECTION_WINDOW_SECONDS`, default 180) bound to one coordinator
   invocation; after a restart in the window it counts the unit journal
   instead. Pearl-side helper errors print only the file name and
