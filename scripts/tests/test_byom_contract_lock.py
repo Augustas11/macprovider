@@ -324,6 +324,8 @@ class BYOMContractLockTests(unittest.TestCase):
         self.assertIn("**Version:** 1.9.37", spec001)
         self.assertIn("**Version:** 0.2.11", spec044)
         self.assertIn('"version": "0.2.11"', spec044)
+        # SPEC-001 cites the v0.2.10 preparation and lock-graph clauses,
+        # which v0.2.11 (Discover view, projection bound, cached projection) left unchanged.
         self.assertIn("SPEC-044 v0.2.10", spec001)
         self.assertIn("| SPEC-001 | Phase 3 Binary: Mac Provider Inference CLI | 1.9.37 |", readme)
         self.assertIn("| SPEC-044 | Malibu Model Catalog Economics | 0.2.11 |", readme)
