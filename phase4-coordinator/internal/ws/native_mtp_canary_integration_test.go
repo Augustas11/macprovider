@@ -118,7 +118,7 @@ func TestNativeMTPCanaryTupleOfferDispatchAndResultAreTupleScoped(t *testing.T) 
 	)
 	awaitStartupSnapshots(t, server)
 	server.cfg.Pool.NativeMTPCanary.Enabled = true
-	server.nativeMTPCanaryBank = &bank
+	server.nativeMTPCanaryBanks.Store(&nativeMTPCanaryBankSet{current: &bank})
 	session := newProviderSession(provider.ProviderID, provider.AssignedID, serverConn, 16, time.Second)
 	server.sessions.Store(sessionKey(provider.ProviderID, provider.AssignedID), session)
 	go session.runWriter()
@@ -408,7 +408,7 @@ func newNativeMTPCanaryIntegrationHarness(t *testing.T) *nativeMTPCanaryIntegrat
 	)
 	awaitStartupSnapshots(t, server)
 	server.cfg.Pool.NativeMTPCanary.Enabled = true
-	server.nativeMTPCanaryBank = &bank
+	server.nativeMTPCanaryBanks.Store(&nativeMTPCanaryBankSet{current: &bank})
 	session := newProviderSession(provider.ProviderID, provider.AssignedID, serverConn, 16, time.Second)
 	server.sessions.Store(sessionKey(provider.ProviderID, provider.AssignedID), session)
 	go session.runWriter()
@@ -585,7 +585,7 @@ func TestNativeMTPTupleOfferBindsTheServedWireModelID(t *testing.T) {
 		cfg.Pool.NativeMTPCanary.IntervalS = 900
 		server := NewServer(cfg, registry, zerolog.Nop(), WithNow(func() time.Time { return now }))
 		server.cfg.Pool.NativeMTPCanary.Enabled = true
-		server.nativeMTPCanaryBank = &bank
+		server.nativeMTPCanaryBanks.Store(&nativeMTPCanaryBankSet{current: &bank})
 		tuple := NativeMTPRuntimeTuple{
 			ModelID: record.ModelID, ModelHash: record.ModelHash, ModelHashAlgorithm: "sha256",
 			ProviderRevision: "1.8.123", RuntimeRevision: "mlx-swift-lm-e874140",

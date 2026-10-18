@@ -22,6 +22,15 @@ type nativeMTPCanaryDetachedSignature struct {
 	Signature string `json:"signature"`
 }
 
+// nativeMTPCanaryBankSet is the canary's verified challenge banks: the bank of
+// the live release and, across one release transition, the bank it replaced.
+// It is replaced wholesale, never mutated, so a reader holding a pointer sees
+// one consistent pair.
+type nativeMTPCanaryBankSet struct {
+	current  *NativeMTPChallengeBank
+	previous *NativeMTPChallengeBank
+}
+
 func (s *Server) loadNativeMTPCanaryBank() {
 	cfg := s.cfg.Pool.NativeMTPCanary
 	if !cfg.Enabled {
@@ -30,10 +39,120 @@ func (s *Server) loadNativeMTPCanaryBank() {
 	bank, err := loadVerifiedNativeMTPChallengeBank(cfg)
 	if err != nil {
 		s.log.Warn().Err(err).Msg("native MTP canary disabled; challenge bank verification failed")
-		s.nativeMTPCanaryBank = nil
+		s.nativeMTPCanaryBanks.Store(nil)
 		return
 	}
-	s.nativeMTPCanaryBank = &bank
+	s.nativeMTPCanaryBanks.Store(&nativeMTPCanaryBankSet{current: &bank})
+}
+
+// currentNativeMTPCanaryBank is the bank of the live release, or nil.
+func (s *Server) currentNativeMTPCanaryBank() *NativeMTPChallengeBank {
+	if set := s.nativeMTPCanaryBanks.Load(); set != nil {
+		return set.current
+	}
+	return nil
+}
+
+// nativeMTPCanaryBankFor returns the verified bank with exactly this digest and
+// release, or nil. The bank a release reload replaced still matches while its
+// release is the live or a retained compatible-previous catalog release: a
+// provider admitted on that release holds that bank and cannot fetch another
+// one without restarting onto the new release (SPEC-031-R033 v0.3.9).
+func (s *Server) nativeMTPCanaryBankFor(sha256Hex, releaseID string) *NativeMTPChallengeBank {
+	set := s.nativeMTPCanaryBanks.Load()
+	if set == nil {
+		return nil
+	}
+	if bank := set.current; bank != nil && bank.RawSHA256 == sha256Hex && bank.ReleaseID == releaseID {
+		return bank
+	}
+	if bank := set.previous; bank != nil && bank.RawSHA256 == sha256Hex && bank.ReleaseID == releaseID &&
+		s.nativeMTPCanaryReleaseAdmitted(releaseID) {
+		return bank
+	}
+	return nil
+}
+
+// nativeMTPCanaryReleaseAdmitted reports whether a provider session may still
+// be admitted on releaseID: the live catalog release or a retained
+// compatible-previous one.
+func (s *Server) nativeMTPCanaryReleaseAdmitted(releaseID string) bool {
+	if releaseID == "" {
+		return false
+	}
+	current, compatible := s.autotuneCatalogSnapshot()
+	if current != nil && current.Version == releaseID {
+		return true
+	}
+	previous, ok := compatible[releaseID]
+	return ok && previous != nil && previous.Version == releaseID
+}
+
+// PrepareNativeMTPCanaryBankReload verifies, for the native-MTP canary, the
+// exact self-test bank bytes a release reload is about to serve, so the canary
+// bank and the served release move together (SPEC-031-R033 v0.3.9). The
+// returned commit installs the bank and keeps the replaced bank as the one
+// previous bank; the caller runs it before the release and its served feed
+// bytes are published, so no provider can fetch a bank the canary lacks. An
+// error means the release must not go live. With the canary disabled, or a
+// release that carries no native-MTP admission set, commit is a no-op.
+func (s *Server) PrepareNativeMTPCanaryBankReload(releaseID string, bankJSON, bankSig []byte) (func(), error) {
+	verified, err := verifyNativeMTPCanaryReleaseBank(s.cfg.Pool.NativeMTPCanary, releaseID, bankJSON, bankSig)
+	if err != nil {
+		return nil, err
+	}
+	if verified == nil {
+		return func() {}, nil
+	}
+	bank := *verified
+	return func() {
+		prior := s.nativeMTPCanaryBanks.Load()
+		next := &nativeMTPCanaryBankSet{current: &bank}
+		if prior != nil && prior.current != nil {
+			if prior.current.RawSHA256 == bank.RawSHA256 && prior.current.ReleaseID == bank.ReleaseID {
+				// Same bank (a re-stamp or a config-only reload): keep the pair.
+				return
+			}
+			next.previous = prior.current
+		}
+		s.nativeMTPCanaryBanks.Store(next)
+		s.log.Info().
+			Str("event", "native_mtp_canary_bank_reloaded").
+			Str("challenge_bank_release_id", bank.ReleaseID).
+			Str("challenge_bank_sha256", bank.RawSHA256).
+			Str("previous_challenge_bank_release_id", releaseIDOf(next.previous)).
+			Msg("native MTP canary challenge bank reloaded with the release")
+	}, nil
+}
+
+// ValidateNativeMTPCanaryReleaseBank runs the reload's canary-bank check
+// offline, so a release preflight refuses a release the reload would refuse.
+func ValidateNativeMTPCanaryReleaseBank(cfg config.NativeMTPCanaryConfig, releaseID string, bankJSON, bankSig []byte) error {
+	_, err := verifyNativeMTPCanaryReleaseBank(cfg, releaseID, bankJSON, bankSig)
+	return err
+}
+
+// verifyNativeMTPCanaryReleaseBank returns nil, nil when the canary is disabled
+// or the release carries no native-MTP admission set.
+func verifyNativeMTPCanaryReleaseBank(cfg config.NativeMTPCanaryConfig, releaseID string, bankJSON, bankSig []byte) (*NativeMTPChallengeBank, error) {
+	if !cfg.Enabled || (len(bankJSON) == 0 && len(bankSig) == 0) {
+		return nil, nil
+	}
+	bank, err := verifyNativeMTPChallengeBank(cfg, bankJSON, bankSig)
+	if err != nil {
+		return nil, fmt.Errorf("native MTP canary challenge bank: %w", err)
+	}
+	if bank.ReleaseID != releaseID {
+		return nil, fmt.Errorf("native MTP canary challenge bank release_id %q != reloaded release %q", bank.ReleaseID, releaseID)
+	}
+	return &bank, nil
+}
+
+func releaseIDOf(bank *NativeMTPChallengeBank) string {
+	if bank == nil {
+		return ""
+	}
+	return bank.ReleaseID
 }
 
 func loadVerifiedNativeMTPChallengeBank(cfg config.NativeMTPCanaryConfig) (NativeMTPChallengeBank, error) {
@@ -45,6 +164,10 @@ func loadVerifiedNativeMTPChallengeBank(cfg config.NativeMTPCanaryConfig) (Nativ
 	if err != nil {
 		return NativeMTPChallengeBank{}, fmt.Errorf("read challenge bank signature: %w", err)
 	}
+	return verifyNativeMTPChallengeBank(cfg, raw, sigRaw)
+}
+
+func verifyNativeMTPChallengeBank(cfg config.NativeMTPCanaryConfig, raw, sigRaw []byte) (NativeMTPChallengeBank, error) {
 	sig, err := parseNativeMTPCanaryDetachedSignature(sigRaw)
 	if err != nil {
 		return NativeMTPChallengeBank{}, fmt.Errorf("parse challenge bank signature: %w", err)
@@ -122,13 +245,19 @@ func (s *Server) handleNativeMTPTupleOffer(providerID, assignedID string, payloa
 		s.log.Warn().Str("provider_id", providerID).Msg("native MTP tuple offer rejected: stale session binding")
 		return
 	}
-	if s.nativeMTPCanaryBank == nil || !s.cfg.Pool.NativeMTPCanary.Enabled {
+	current := s.currentNativeMTPCanaryBank()
+	if current == nil || !s.cfg.Pool.NativeMTPCanary.Enabled {
 		s.log.Info().Str("provider_id", providerID).Msg("native MTP tuple offer ignored: canary disabled")
 		return
 	}
-	if offer.ChallengeBankSHA256 != s.nativeMTPCanaryBank.RawSHA256 || offer.ChallengeBankReleaseID != s.nativeMTPCanaryBank.ReleaseID {
+	bank := s.nativeMTPCanaryBankFor(offer.ChallengeBankSHA256, offer.ChallengeBankReleaseID)
+	if bank == nil {
 		s.sendNativeMTPTupleDisableForOffer(offer, "bank_mismatch")
-		s.log.Warn().Str("provider_id", providerID).Msg("native MTP tuple offer rejected: challenge bank mismatch")
+		s.log.Warn().
+			Str("provider_id", providerID).
+			Str("offered_challenge_bank_release_id", offer.ChallengeBankReleaseID).
+			Str("canary_challenge_bank_release_id", current.ReleaseID).
+			Msg("native MTP tuple offer rejected: challenge bank mismatch")
 		return
 	}
 	if offer.SidecarDigest != offer.RuntimeTuple.SidecarDigest ||
@@ -181,6 +310,7 @@ func (s *Server) handleNativeMTPTupleOffer(providerID, assignedID string, payloa
 		Uint64("target_generation", offer.TargetGeneration).
 		Str("native_mtp_runtime_tuple_sha256", offer.NativeMTPRuntimeTupleSHA256).
 		Str("challenge_bank_release_id", offer.ChallengeBankReleaseID).
+		Bool("previous_release_bank", bank != current).
 		Msg("native MTP tuple offer accepted")
 }
 
@@ -194,7 +324,7 @@ func (s *Server) runNativeMTPCanaryLoop() {
 }
 
 func (s *Server) runNativeMTPCanarySweep() {
-	if s.nativeMTPCanaryBank == nil || s.nativeMTPCanaryStore == nil {
+	if s.currentNativeMTPCanaryBank() == nil || s.nativeMTPCanaryStore == nil {
 		return
 	}
 	now := s.now()
@@ -319,16 +449,15 @@ func (s *Server) handleNativeMTPCanaryResult(providerID, assignedID string, payl
 }
 
 func (s *Server) nativeMTPChallengeForProvider(provider pool.Provider) (NativeMTPChallengeRecord, bool) {
-	if s.nativeMTPCanaryBank == nil {
-		return NativeMTPChallengeRecord{}, false
-	}
 	diag := provider.NativeMTPCanary
-	if diag == nil ||
-		diag.ChallengeBankSHA256 != s.nativeMTPCanaryBank.RawSHA256 ||
-		diag.ChallengeBankReleaseID != s.nativeMTPCanaryBank.ReleaseID {
+	if diag == nil {
 		return NativeMTPChallengeRecord{}, false
 	}
-	for _, record := range s.nativeMTPCanaryBank.Entries {
+	bank := s.nativeMTPCanaryBankFor(diag.ChallengeBankSHA256, diag.ChallengeBankReleaseID)
+	if bank == nil {
+		return NativeMTPChallengeRecord{}, false
+	}
+	for _, record := range bank.Entries {
 		if nativeMTPChallengeRecordMatchesTuple(record, diag) {
 			return record, true
 		}

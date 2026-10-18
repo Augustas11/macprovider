@@ -158,7 +158,7 @@ type Server struct {
 	losslessnessTelemetry         []LosslessnessTelemetryEvent
 	canarySanctions               CanarySanctionStore
 	nativeMTPCanaryStore          NativeMTPCanaryStateStore
-	nativeMTPCanaryBank           *NativeMTPChallengeBank
+	nativeMTPCanaryBanks          atomic.Pointer[nativeMTPCanaryBankSet]
 	nativeMTPCanaryJitter         func(time.Duration) time.Duration
 	tokens                        TokenValidator
 	relayBlindKeys                RelayBlindKeySink
@@ -1341,7 +1341,9 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 	if cfg.Pool.CanaryEnabled && registry != nil {
 		go s.runCanaryLoop()
 	}
-	if cfg.Pool.NativeMTPCanary.Enabled && s.nativeMTPCanaryBank != nil && registry != nil {
+	// The loop runs whenever the canary is enabled: a SIGHUP release reload
+	// can install the first bank after boot. A sweep with no bank is a no-op.
+	if cfg.Pool.NativeMTPCanary.Enabled && registry != nil {
 		go s.runNativeMTPCanaryLoop()
 	}
 	if registry != nil {
