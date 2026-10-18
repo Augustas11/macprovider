@@ -96,7 +96,7 @@ struct ModelSwitcherSheet: View {
             if store.listState == .checking {
                 ProgressView(ModelFeatureUI.checking)
                     .accessibilityLabel(Text(ModelFeatureUI.checking))
-            } else if store.catalogProjectionRetryAvailable {
+            } else if store.listState == .unavailable {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(String(localized: "Switching is unavailable right now.", comment: "Catalog projection unavailable"))
                         .foregroundStyle(.secondary)
@@ -110,6 +110,16 @@ struct ModelSwitcherSheet: View {
                 Text(String(localized: "No supported models were returned by the provider.", comment: "Empty model catalog"))
                     .foregroundStyle(.secondary)
             } else {
+                if store.catalogProjectionRetryAvailable {
+                    HStack(spacing: 8) {
+                        Text(String(localized: "Showing the last catalog update.", comment: "Catalog refresh failed; cached projection shown"))
+                            .foregroundStyle(.secondary)
+                        Button(ModelFeatureUI.retry) {
+                            Task { await refreshFromSnapshot() }
+                        }
+                        .accessibilityLabel(Text(String(localized: "Retry model catalog refresh", comment: "Catalog retry accessibility label")))
+                    }
+                }
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
                         if store.rows.contains(where: { $0.providerCompletionPayoutUSDPerMillionTokens != nil }) {

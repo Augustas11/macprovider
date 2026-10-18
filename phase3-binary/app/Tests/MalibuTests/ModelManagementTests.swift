@@ -1,5 +1,6 @@
 import XCTest
 import Darwin
+import Combine
 @testable import Malibu
 
 final class ModelManagementTests: XCTestCase {
@@ -1141,6 +1142,127 @@ final class ModelManagementTests: XCTestCase {
         XCTAssertEqual(store.listState, .unavailable)
         XCTAssertTrue(store.catalogProjectionRetryAvailable)
         XCTAssertEqual(store.statusLine, "Model catalog unavailable right now. The current model remains visible from provider status.")
+    }
+
+    /// A refresh behind a still-fresh projection keeps it on screen: the
+    /// list never drops to "Checking…" mid-refresh, a failed refresh keeps the
+    /// rows with Retry, and the next good refresh clears the failure.
+    @MainActor
+    func testRefreshKeepsLastGoodProjectionAndRetriesWithoutFlapping() async throws {
+        let first = Self.recentTimestamp()
+        let third = Self.timestamp(offset: 3)
+        let cli = FakeModelCLI(
+            results: [
+                ModelCLIResult(
+                    exitCode: 0,
+                    stdout: catalogEconomicsJSON(
+                        rows: [trustedEconomicsRowJSON(rateCardGeneratedAt: first, stateObservedAt: first)],
+                        generatedAt: first,
+                        projectionSequence: 1
+                    ),
+                    stderr: ""
+                ),
+                ModelCLIResult(exitCode: 1, stdout: "", stderr: "coordinator slow"),
+                ModelCLIResult(
+                    exitCode: 0,
+                    stdout: catalogEconomicsJSON(
+                        rows: [trustedEconomicsRowJSON(rateCardGeneratedAt: third, stateObservedAt: third)],
+                        generatedAt: third,
+                        projectionSequence: 2
+                    ),
+                    stderr: ""
+                ),
+            ],
+            returnDelaysNanoseconds: [nil, 300_000_000, nil]
+        )
+        let store = ModelManagementStore(
+            cli: cli,
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.cachedProjection.\(UUID().uuidString)")!
+        )
+        let peer = peer(for: MalibuModelCapabilityManifest.catalogEconomics)
+        var observed: [ModelManagementStore.ListState] = []
+        let subscription = store.$listState.sink { observed.append($0) }
+        defer { subscription.cancel() }
+
+        await store.refresh(currentModelID: "other/model", peer: peer)
+        let goodState = store.listState
+        let goodRows = store.rows.map(\.displayID)
+        XCTAssertNotEqual(goodState, .checking)
+        XCTAssertNotEqual(goodState, .unavailable)
+        XCTAssertTrue(store.hasUsableCatalogProjection)
+        let afterFirst = observed.count
+
+        let refresh = Task { await store.refresh(currentModelID: "other/model", peer: peer) }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(store.listState, goodState, "the refresh runs behind the shown projection")
+        XCTAssertEqual(store.rows.map(\.displayID), goodRows)
+        await refresh.value
+
+        XCTAssertEqual(store.listState, goodState, "a failed refresh keeps the last good projection")
+        XCTAssertEqual(store.rows.map(\.displayID), goodRows)
+        XCTAssertTrue(store.catalogRefreshFailed)
+        XCTAssertTrue(store.catalogProjectionRetryAvailable, "Retry stays available")
+        XCTAssertFalse(store.statusLine.contains("_"), store.statusLine)
+        XCTAssertEqual(
+            DashboardCopy.modelRowStatusLine(currentModelID: "other/model", listState: store.listState),
+            DashboardCopy.modelRowStatusLine(currentModelID: "other/model", listState: goodState)
+        )
+
+        await store.refresh(currentModelID: "other/model", peer: peer)
+        XCTAssertFalse(store.catalogRefreshFailed)
+        XCTAssertFalse(store.catalogProjectionRetryAvailable)
+        XCTAssertFalse(
+            observed[afterFirst...].contains(where: { $0 == .checking || $0 == .unavailable }),
+            "no Checking/unavailable flapping once a projection is shown: \(observed)"
+        )
+    }
+
+    /// "Unavailable" needs a real failure AND no usable cached projection: an
+    /// expired projection is not reused.
+    @MainActor
+    func testFailedRefreshAfterProjectionExpiryIsUnavailable() async throws {
+        let expiringAt = Self.timestamp(offset: -299.8)
+        let cli = FakeModelCLI(results: [
+            ModelCLIResult(
+                exitCode: 0,
+                stdout: catalogEconomicsJSON(
+                    rows: [trustedEconomicsRowJSON(rateCardGeneratedAt: expiringAt, stateObservedAt: expiringAt)],
+                    generatedAt: expiringAt
+                ),
+                stderr: ""
+            ),
+            ModelCLIResult(exitCode: 1, stdout: "", stderr: "boom"),
+        ])
+        let store = ModelManagementStore(
+            cli: cli,
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.cachedExpired.\(UUID().uuidString)")!
+        )
+        let peer = peer(for: MalibuModelCapabilityManifest.catalogEconomics)
+
+        await store.refresh(currentModelID: "other/model", peer: peer)
+        try await Task.sleep(nanoseconds: 400_000_000)
+        XCTAssertFalse(store.hasUsableCatalogProjection)
+        await store.refresh(currentModelID: "other/model", peer: peer)
+
+        XCTAssertTrue(store.rows.isEmpty)
+        XCTAssertEqual(store.listState, .unavailable)
+        XCTAssertTrue(store.catalogProjectionRetryAvailable)
+        XCTAssertEqual(store.statusLine, "Model catalog unavailable right now. The current model remains visible from provider status.")
+    }
+
+    @MainActor
+    func testCatalogReadTimeoutCoversTheCLIBound() {
+        let store = ModelManagementStore(
+            cli: FakeModelCLI(results: []),
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.timeoutBound.\(UUID().uuidString)")!
+        )
+        // CLI coordinator ceiling (5 s feeds + 3 s admission status) plus
+        // loopback adapters and process launch; the old 10 s cut off a
+        // healthy 14 s read and flapped the dashboard.
+        XCTAssertGreaterThanOrEqual(store.listCommandTimeoutSeconds, 15)
     }
 
     @MainActor
