@@ -857,6 +857,7 @@ jobs:
             --payload-directory "$WORK" \
             --expected-tag "$tag" \
             --expected-commit "${{ needs.build.outputs.commit }}" \
+            --expected-malibu-app-version "${tag#v}" \
             --expected-provider-admission-policy "$PROVIDER_ADMISSION_POLICY_INPUT"
           python3 scripts/compatibility-set-manifest.py sign \
             --input "$WORK/compatibility-set.json" \
@@ -868,6 +869,7 @@ jobs:
             --public-key ops/pearl-updater/release-signing-public.pem \
             --expected-tag "$tag" \
             --expected-commit "${{ needs.build.outputs.commit }}" \
+            --expected-malibu-app-version "${tag#v}" \
             --expected-provider-admission-policy "$PROVIDER_ADMISSION_POLICY_INPUT"
           cp "$WORK/compatibility-set.json" phase3-binary/dist/compatibility-set.json
           rm -f "$COMPATIBILITY_SIGNING_KEY"
@@ -1678,6 +1680,7 @@ jobs:
             --public-key ops/pearl-updater/release-signing-public.pem \
             --expected-tag "$tag" \
             --expected-commit "${{ needs.build.outputs.commit }}" \
+            --expected-malibu-app-version "${tag#v}" \
             --expected-provider-admission-policy "$PROVIDER_ADMISSION_POLICY_INPUT"
           release_assets+=("$compatibility_manifest")
           rm -rf "$compatibility_extract"

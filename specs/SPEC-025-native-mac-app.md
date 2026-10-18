@@ -670,23 +670,28 @@ time (60–240 s for the first model) in the background.
   - run from the updater-owned install path (`/Applications/Malibu.app` or
     `~/Applications/Malibu.app`) with bundle identifier `tech.malibu.app`, so
     development and test builds never relaunch;
-  - prove that the installed bundle is the Malibu member of the installed
+  - prove that the installed bundle matches the Malibu member of the installed
     CLI's release-signed compatibility set: the app version equals the set's
     `components.malibu_app.version`, its build equals that version's patch,
     and the embedded set manifest is
     byte-identical to the installed one. Without that proof the change is
     mid-transaction or out-of-band, and Malibu MUST NOT relaunch;
-  - see the new identity unchanged for 60 s with a known provider status, or
-    for 15 minutes when the provider status is unavailable, because the
+  - see the new identity unchanged for 60 s with a validated lifecycle record
+    (`record_state` `valid`), or for 15 minutes when the provider status is
+    unavailable or its lifecycle record is missing or invalid, because the
     transaction may still be restarting or rolling back;
   - defer while any of these is in flight: an `update_in_progress` or
     `rollback_in_progress` lifecycle state, a maintenance lease, a
     Malibu-driven update or repair, onboarding, quit, uninstall, or a modal
     prompt;
   - verify the installed bundle's code signature against the Malibu
-    designated requirement.
-  The relaunch opens the installed bundle as a new process, then quits through
-  the ordinary quit path, which keeps the launchd provider service running.
+    designated requirement (the running bundle must satisfy it too, so a
+    development build copied into the install path never relaunches).
+  The relaunch opens the installed bundle as a new process and quits through
+  the ordinary quit path only after the new process is running (bounded
+  wait). The ordinary quit keeps the launchd provider service running. If the
+  new process does not start, the old process keeps running and its watcher
+  retries within the attempt bound.
   Attempts are persisted and bounded across all targets: at least 10 minutes
   apart and at most 3 in any 6 hours. A bundle that cannot start, or one that
   is swapped repeatedly, therefore never loops. A rollback that restores the
@@ -695,6 +700,8 @@ time (60–240 s for the first model) in the background.
   onto a v0.31 app takes effect when that process next launches, either at the
   next login (login item) or when the user reopens Malibu. The release notes of
   the first release that ships v0.31 MUST tell operators to reopen Malibu once.
+  The release-train entry for that cut (`docs/releases/cli-release-train.md`)
+  carries the notice for the operator announcement.
   Removing the Sparkle dependency/runtime and feed settings eliminates the prior
   second update authority. Independent Malibu release publication still emits a signed
   public appcast and `latest.dmg` compatibility surface for already-installed Sparkle

@@ -52,6 +52,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let snapshot = agent.snapshot
         return AppBundleRelaunchWatcher.readiness(
             lifecycleState: snapshot.lifecycleState,
+            lifecycleRecordState: snapshot.lifecycleRecordState,
             lifecycleLeaseKind: snapshot.lifecycleLeaseKind,
             cliUpdateInProgress: snapshot.cliUpdateInProgress,
             providerSoftwareRepairInProgress: snapshot.providerSoftwareRepairInProgress,

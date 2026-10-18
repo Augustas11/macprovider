@@ -55,6 +55,7 @@ enum AppBundleRelaunchWatcher {
 
     static func readiness(
         lifecycleState: String?,
+        lifecycleRecordState: String?,
         lifecycleLeaseKind: String?,
         cliUpdateInProgress: Bool,
         providerSoftwareRepairInProgress: Bool,
@@ -66,7 +67,9 @@ enum AppBundleRelaunchWatcher {
             || lifecycleState == "rollback_in_progress" {
             return .blocked
         }
-        return lifecycleState == nil ? .unknown : .clear
+        // Only a validated persisted lifecycle record is positive evidence
+        // that no transaction is in flight; missing or invalid is unknown.
+        return lifecycleState != nil && lifecycleRecordState == "valid" ? .clear : .unknown
     }
 
     static func shouldRelaunch(
@@ -179,7 +182,10 @@ final class AppBundleRelaunchMonitor {
         guard bundle.bundleIdentifier == "tech.malibu.app",
               bundle.bundleURL.lastPathComponent == "Malibu.app",
               CLIUpdateRunner.isUpdaterOwnedMalibuInstall(bundle.bundleURL),
-              let running = AppBundleRelaunchWatcher.runningIdentity(bundle: bundle) else {
+              let running = AppBundleRelaunchWatcher.runningIdentity(bundle: bundle),
+              // A debug or ad-hoc build copied into /Applications never
+              // relaunches itself onto the installed release.
+              CLIUpdateRunner.validateMalibuAppCodeSignature(at: bundle.bundleURL) else {
             return nil
         }
         self.init(

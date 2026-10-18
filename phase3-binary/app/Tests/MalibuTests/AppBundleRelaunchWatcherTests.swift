@@ -5,8 +5,8 @@ import XCTest
 final class AppBundleRelaunchWatcherTests: XCTestCase {
     private typealias Watcher = AppBundleRelaunchWatcher
 
-    private let running = Watcher.Identity(version: "1.8.251", build: "1008251")
-    private let installed = Watcher.Identity(version: "1.8.252", build: "1008252")
+    private let running = Watcher.Identity(version: "1.8.251", build: "251")
+    private let installed = Watcher.Identity(version: "1.8.252", build: "252")
     private let start = Date(timeIntervalSince1970: 1_000_000)
 
     private func decide(
@@ -53,7 +53,7 @@ final class AppBundleRelaunchWatcherTests: XCTestCase {
         // Rollback restores the launched version: nothing to relaunch.
         XCTAssertFalse(decide(running, at: 30, &state))
         XCTAssertEqual(state, Watcher.State())
-        let other = Watcher.Identity(version: "1.8.253", build: "1008253")
+        let other = Watcher.Identity(version: "1.8.253", build: "253")
         XCTAssertFalse(decide(other, at: 45, &state))
         XCTAssertFalse(decide(other, at: 90, &state))
         XCTAssertTrue(decide(other, at: 105, &state))
@@ -105,19 +105,24 @@ final class AppBundleRelaunchWatcherTests: XCTestCase {
     func testReadinessBlocksEveryTransactionAndUserFlow() {
         func readiness(
             state: String? = "serving_buyers",
+            record: String? = "valid",
             lease: String? = nil,
             update: Bool = false,
             repair: Bool = false,
             app: Bool = false
         ) -> Watcher.Readiness {
             Watcher.readiness(
-                lifecycleState: state, lifecycleLeaseKind: lease,
+                lifecycleState: state, lifecycleRecordState: record, lifecycleLeaseKind: lease,
                 cliUpdateInProgress: update, providerSoftwareRepairInProgress: repair,
                 appFlowInProgress: app
             )
         }
         XCTAssertEqual(readiness(), .clear)
         XCTAssertEqual(readiness(state: nil), .unknown)
+        // Missing or invalid lifecycle evidence is never positive "clear".
+        XCTAssertEqual(readiness(state: "failed", record: "invalid"), .unknown)
+        XCTAssertEqual(readiness(record: "missing"), .unknown)
+        XCTAssertEqual(readiness(record: nil), .unknown)
         XCTAssertEqual(readiness(state: "update_in_progress"), .blocked)
         XCTAssertEqual(readiness(state: "rollback_in_progress"), .blocked)
         XCTAssertEqual(readiness(lease: "maintenance"), .blocked)
@@ -130,11 +135,11 @@ final class AppBundleRelaunchWatcherTests: XCTestCase {
     func testReadIdentitySeesAnInPlaceBundleSwap() throws {
         let root = try temporaryDirectory()
         let target = root.appendingPathComponent("Malibu.app", isDirectory: true)
-        try makeBundle(at: target, version: "1.8.251", build: "1008251")
+        try makeBundle(at: target, version: "1.8.251", build: "251")
         XCTAssertEqual(Watcher.readIdentity(bundleURL: target), running)
 
         let staged = root.appendingPathComponent(".Malibu.app.activation", isDirectory: true)
-        try makeBundle(at: staged, version: "1.8.252", build: "1008252")
+        try makeBundle(at: staged, version: "1.8.252", build: "252")
         XCTAssertEqual(renamex_np(staged.path, target.path, UInt32(RENAME_SWAP)), 0)
         XCTAssertEqual(Watcher.readIdentity(bundleURL: target), installed)
     }
@@ -142,11 +147,11 @@ final class AppBundleRelaunchWatcherTests: XCTestCase {
     func testReadIdentityRejectsForeignOrSymlinkedBundles() throws {
         let root = try temporaryDirectory()
         let foreign = root.appendingPathComponent("Foreign/Malibu.app", isDirectory: true)
-        try makeBundle(at: foreign, version: "1.8.252", build: "1008252", identifier: "com.example.other")
+        try makeBundle(at: foreign, version: "1.8.252", build: "252", identifier: "com.example.other")
         XCTAssertNil(Watcher.readIdentity(bundleURL: foreign))
 
         let real = root.appendingPathComponent("Real/Malibu.app", isDirectory: true)
-        try makeBundle(at: real, version: "1.8.252", build: "1008252")
+        try makeBundle(at: real, version: "1.8.252", build: "252")
         let link = root.appendingPathComponent("Link/Malibu.app", isDirectory: true)
         try FileManager.default.createDirectory(at: link.deletingLastPathComponent(), withIntermediateDirectories: true)
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
@@ -159,6 +164,12 @@ final class AppBundleRelaunchWatcherTests: XCTestCase {
         XCTAssertNil(Watcher.readIdentity(bundleURL: real))
     }
 
+    func testBuildMustBeTheVersionPatch() {
+        XCTAssertTrue(CLIUpdateRunner.buildMatchesVersionPatch(build: "252", version: "1.8.252"))
+        XCTAssertFalse(CLIUpdateRunner.buildMatchesVersionPatch(build: "224", version: "1.8.252"))
+        XCTAssertFalse(CLIUpdateRunner.buildMatchesVersionPatch(build: nil, version: "1.8.252"))
+    }
+
     @MainActor
     func testMonitorStaysOffOutsideTheUpdaterOwnedInstall() {
         // The XCTest host runs from DerivedData, never /Applications.
@@ -169,7 +180,7 @@ final class AppBundleRelaunchWatcherTests: XCTestCase {
     func testMonitorRelaunchesOnceAfterAProvenSwapAndRetriesAFailureAfterCooldown() async throws {
         let root = try temporaryDirectory()
         let bundle = root.appendingPathComponent("Malibu.app", isDirectory: true)
-        try makeBundle(at: bundle, version: "1.8.251", build: "1008251")
+        try makeBundle(at: bundle, version: "1.8.251", build: "251")
         let defaults = try XCTUnwrap(UserDefaults(suiteName: "malibu-relaunch-\(UUID().uuidString)"))
         var relaunches = 0
         var failNext = true
@@ -190,7 +201,7 @@ final class AppBundleRelaunchWatcherTests: XCTestCase {
         )
 
         XCTAssertNil(monitor.tick(now: start))
-        try makeBundle(at: bundle, version: "1.8.252", build: "1008252")
+        try makeBundle(at: bundle, version: "1.8.252", build: "252")
         // Not yet the installed CLI's signed set member: never relaunch.
         XCTAssertNil(monitor.tick(now: start.addingTimeInterval(15)))
         XCTAssertNil(monitor.tick(now: start.addingTimeInterval(600)))

@@ -779,6 +779,12 @@ enum CLIUpdateRunner {
         try await relaunchInstalledApp(at: plan.bundleURL)
     }
 
+    /// SPEC-025 v0.31: a shipped app's CFBundleVersion is its version's patch.
+    static func buildMatchesVersionPatch(build: String?, version: String) -> Bool {
+        guard let build, let patch = version.split(separator: ".").last else { return false }
+        return build == String(patch)
+    }
+
     /// True only when the installed bundle is exactly the Malibu member of the
     /// installed CLI's release-signed compatibility set: same app version and
     /// byte-identical embedded manifest. SPEC-025 §3.3 self-relaunch proof.
@@ -791,8 +797,7 @@ enum CLIUpdateRunner {
               let expectedVersion = ProviderCLIVersion.strictNormalize(expected.version),
               let installed = readInstalledMalibuAppIdentity(at: bundleURL),
               ProviderCLIVersion.strictNormalize(installed.version) == expectedVersion,
-              // SPEC-025 v0.31: the build is the version's patch component.
-              installed.build == expectedVersion.split(separator: ".").last.map(String.init),
+              buildMatchesVersionPatch(build: installed.build, version: expectedVersion),
               (try? validateEmbeddedCompatibilityManifest(
                 in: bundleURL,
                 expectedIdentity: expected
@@ -809,8 +814,29 @@ enum CLIUpdateRunner {
         guard validateMalibuAppCodeSignature(at: bundleURL) else {
             throw Error.appBundleSignatureInvalid
         }
+        let ownPID = ProcessInfo.processInfo.processIdentifier
+        let before = Set(
+            NSRunningApplication.runningApplications(withBundleIdentifier: "tech.malibu.app")
+                .map(\.processIdentifier)
+        )
         try await openUpdatedApp(at: bundleURL)
-        NSApp.terminate(nil)
+        // Quit only after the new process is actually running, so a bundle
+        // that fails to start leaves this process (and its watcher) in place.
+        let deadline = Date().addingTimeInterval(30)
+        while Date() < deadline {
+            let launched = NSRunningApplication.runningApplications(withBundleIdentifier: "tech.malibu.app")
+                .contains { app in
+                    app.processIdentifier != ownPID
+                        && !before.contains(app.processIdentifier)
+                        && !app.isTerminated
+                }
+            if launched {
+                NSApp.terminate(nil)
+                return
+            }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+        throw Error.appRelaunchFailed("the reopened Malibu did not start")
     }
 
     private static func openUpdatedApp(at bundleURL: URL) async throws {
