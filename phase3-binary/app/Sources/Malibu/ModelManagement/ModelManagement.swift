@@ -2160,8 +2160,11 @@ final class ModelManagementStore: ObservableObject {
     /// Bumped per search and at the deadline, so a late reply is ignored.
     private var browseGeneration: UInt64 = 0
     /// Upper bound for a model list/catalog read, so "Checking…" always ends
-    /// in a result or a retryable "unavailable" (#2029 P1-19).
-    var listCommandTimeoutSeconds: TimeInterval = 10
+    /// in a result or a retryable "unavailable" (#2029 P1-19). The CLI bounds
+    /// its own coordinator reads at about 8 s (SPEC-044-R002: feeds 5 s, then
+    /// admission status 3 s) and its loopback adapters at 2 s each, and
+    /// usually answers in under 2 s; this leaves headroom for process launch.
+    var listCommandTimeoutSeconds: TimeInterval = 15
     private var listCommandTimedOut = false
     private let paths: ProviderPaths
     private let defaults: UserDefaults
@@ -2183,6 +2186,10 @@ final class ModelManagementStore: ObservableObject {
     private var catalogProjectionSequence: UInt64?
     private var catalogProjectionAcceptedGeneratedAt: Date?
     private var catalogProjectionExpiryTask: Task<Void, Never>?
+    /// When the displayed projection stops being usable (SPEC-044-R003).
+    private var catalogProjectionFreshUntil: Date?
+    /// The last catalog refresh failed while a usable projection stayed on screen.
+    @Published private(set) var catalogRefreshFailed = false
 
     init(
         cli: any MalibuModelCLIRunning = MalibuModelCLI.shared,
@@ -2352,9 +2359,19 @@ final class ModelManagementStore: ObservableObject {
         )
     }
 
-    /// Retry is offered whenever switching is unavailable.
+    /// Retry is offered whenever switching is unavailable, and after a failed
+    /// refresh that left the last good projection on screen.
     var catalogProjectionRetryAvailable: Bool {
-        listState == .unavailable
+        listState == .unavailable || catalogRefreshFailed
+    }
+
+    /// A projection is on screen and still inside its freshness window, so a
+    /// refresh can run behind it instead of replacing it with "Checking…"
+    /// (SPEC-044-R008 cached projection).
+    var hasUsableCatalogProjection: Bool {
+        guard listState == .ready || listState == .viewOnly,
+              let freshUntil = catalogProjectionFreshUntil else { return false }
+        return freshUntil > Date()
     }
 
     var canPerformModelAction: Bool {
@@ -2566,6 +2583,8 @@ final class ModelManagementStore: ObservableObject {
     private func clearCatalogProjectionTracking() {
         catalogProjectionExpiryTask?.cancel()
         catalogProjectionExpiryTask = nil
+        catalogProjectionFreshUntil = nil
+        catalogRefreshFailed = false
         catalogProjectionProcessLaunchID = nil
         catalogProjectionSequence = nil
         catalogProjectionAcceptedGeneratedAt = nil
@@ -2573,7 +2592,11 @@ final class ModelManagementStore: ObservableObject {
 
     private func refreshCatalogEconomics(configuredModel: String?) async {
         let previousListState = listState
-        listState = .checking
+        // Keep the last good projection on screen while the refresh runs;
+        // "Checking…" is only for a first read or after expiry.
+        if !hasUsableCatalogProjection {
+            listState = .checking
+        }
         operation = .loadingList
         do {
             let result = try await runBoundedListCommand(arguments: [
@@ -2598,6 +2621,7 @@ final class ModelManagementStore: ObservableObject {
             self.listState = rows.contains(where: { $0.action != .none }) ? .ready : .viewOnly
             self.warmSwapAvailable = readySwitchCapabilityAvailable
             self.operation = .idle
+            self.catalogRefreshFailed = false
             await refreshPoolBindings()
             if rows.isEmpty {
                 self.statusLine = String(localized: "No network catalog rows or locally discovered models yet. Configure local runtimes in Settings to discover them here.", comment: "Catalog economics empty")
@@ -2608,10 +2632,19 @@ final class ModelManagementStore: ObservableObject {
             }
             scheduleCatalogProjectionExpiry(document)
         } catch {
+            self.catalogRefreshFailed = true
+            if hasUsableCatalogProjection {
+                // A failed refresh behind a still-fresh projection keeps it;
+                // the expiry check retires it at its freshness deadline.
+                self.operation = .idle
+                self.statusLine = String(localized: "Couldn't refresh the model catalog. Showing the last update; select Retry to try again.", comment: "Catalog economics refresh failed with cached projection")
+                return
+            }
             self.rows = []
             self.listState = .unavailable
             self.operation = .failed("projection_unavailable")
             catalogProjectionExpiryTask?.cancel()
+            catalogProjectionFreshUntil = nil
             self.statusLine = String(localized: "Model catalog unavailable right now. The current model remains visible from provider status.", comment: "Catalog economics unavailable")
         }
     }
@@ -2641,6 +2674,7 @@ final class ModelManagementStore: ObservableObject {
 
     private func scheduleCatalogProjectionExpiry(_ document: MalibuModelCatalogEconomicsDocument) {
         catalogProjectionExpiryTask?.cancel()
+        catalogProjectionFreshUntil = document.freshnessDeadline
         guard let deadline = document.freshnessDeadline else { return }
         scheduleCatalogProjectionExpiryCheck(
             processLaunchID: document.source.processLaunchID,
@@ -2661,6 +2695,7 @@ final class ModelManagementStore: ObservableObject {
                   self.catalogProjectionProcessLaunchID == processLaunchID,
                   self.catalogProjectionSequence == sequence else { return }
             self.catalogProjectionExpiryTask = nil
+            self.catalogProjectionFreshUntil = nil
             self.rows = []
             self.listState = .unavailable
             if !self.operation.blocksRefresh {

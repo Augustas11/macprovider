@@ -191,6 +191,27 @@ struct DiscoverScreen: View {
                 .padding(.horizontal, 20)
                 .padding(.top, 20)
                 .padding(.bottom, 10)
+            if store.catalogRefreshFailed {
+                // SPEC-044-R008: a failed refresh keeps the last good
+                // projection on screen and says so.
+                HStack(spacing: 8) {
+                    Text(String(localized: "Showing the last catalog update.", comment: "Catalog refresh failed; cached projection shown"))
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    Button(String(localized: "Retry", comment: "Model feature retry button")) {
+                        Task {
+                            await store.refresh(
+                                currentModelID: agent.snapshot.currentModelID,
+                                peer: MalibuModelPeerEvidence(snapshot: agent.snapshot)
+                            )
+                        }
+                    }
+                    .accessibilityLabel(Text(String(localized: "Retry model catalog refresh", comment: "Catalog retry accessibility label")))
+                }
+                .padding(.horizontal, 20)
+                .padding(.bottom, 10)
+                .accessibilityIdentifier("malibu.discover.cachedProjection")
+            }
             Divider()
             HSplitView {
                 list

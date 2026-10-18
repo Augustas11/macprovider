@@ -257,6 +257,13 @@ struct ModelsScreen: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .accessibilityAddTraits(.updatesFrequently)
+                if store.catalogRefreshFailed {
+                    // SPEC-044-R008: the last good projection stays on screen.
+                    Text(String(localized: "Showing the last catalog update.", comment: "Catalog refresh failed; cached projection shown"))
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("malibu.models.cachedProjection")
+                }
                 if store.catalogProjectionRetryAvailable {
                     Button(String(localized: "Retry", comment: "Model feature retry button")) {
                         Task {
