@@ -9,7 +9,16 @@ enum MenuBarPresentation {
         return ""
     }
 
-    static var statusItemLength: CGFloat { NSStatusItem.squareLength }
+    /// Variable length sized to the re-cut glyph, so AppKit never shrinks it.
+    static var statusItemLength: CGFloat { NSStatusItem.variableLength }
+
+    /// State badge for the glyph. Colour is never the only signal: each state
+    /// also has its own VoiceOver label.
+    static func badge(for snapshot: AgentSnapshot) -> MalibuMenuBarIcon.Badge {
+        if snapshot.state == .paused { return .paused }
+        if snapshot.thermalState?.isMenuBarAttention == true { return .attention }
+        return AgentSnapshotPresenter.statusPill(snapshot).tone == .attention ? .attention : .none
+    }
 
     static var brandIdentity: String { MalibuBrand.constructionMarkIdentity }
 }

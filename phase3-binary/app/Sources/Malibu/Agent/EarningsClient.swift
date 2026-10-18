@@ -143,6 +143,7 @@ struct MalibuRewardEligibility: Codable, Equatable {
         "held_provider_daily_cap",
         "held_wallet_daily_cap",
         "held_demotion_cooldown",
+        "held_retained_trust_hold",
         "held_epoch_disposition",
         "excluded_epoch_disposition",
         "burned_or_retired_epoch_disposition",
@@ -162,6 +163,138 @@ struct MalibuRewardEligibility: Codable, Equatable {
         "model_not_ready",
         "telemetry_unavailable",
     ]
+}
+
+/// Live trust progress from the coordinator reward projection (SPEC-021
+/// §5.3), forwarded by the CLI. Timestamps arrive as RFC3339 text.
+struct MalibuTrustProgress: Codable, Equatable {
+    let tier: AgentSnapshot.TrustTier
+    let demotionCooldownUntil: Date?
+    let demotionCooldownActive: Bool
+    let requalificationRequired: Bool
+    let uptimeOKSince: Date?
+    let uptimeRequiredSeconds: Int64
+    let unlockPairOKSince: Date?
+    let requalificationWindowSeconds: Int64
+    let verifiedReceiptCount: Int
+    let requiredReceiptCount: Int
+    let criteriaMet: [String]
+    let earliestPromotionAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case tier
+        case demotionCooldownUntil = "demotion_cooldown_until"
+        case demotionCooldownActive = "demotion_cooldown_active"
+        case requalificationRequired = "requalification_required"
+        case uptimeOKSince = "uptime_ok_since"
+        case uptimeRequiredSeconds = "uptime_required_seconds"
+        case unlockPairOKSince = "unlock_pair_ok_since"
+        case requalificationWindowSeconds = "requalification_window_seconds"
+        case verifiedReceiptCount = "verified_receipt_count"
+        case requiredReceiptCount = "required_receipt_count"
+        case criteriaMet = "criteria_met"
+        case earliestPromotionAt = "earliest_promotion_at"
+    }
+
+    init(
+        tier: AgentSnapshot.TrustTier,
+        demotionCooldownUntil: Date? = nil,
+        demotionCooldownActive: Bool = false,
+        requalificationRequired: Bool = false,
+        uptimeOKSince: Date? = nil,
+        uptimeRequiredSeconds: Int64 = 259_200,
+        unlockPairOKSince: Date? = nil,
+        requalificationWindowSeconds: Int64 = 259_200,
+        verifiedReceiptCount: Int = 0,
+        requiredReceiptCount: Int = 100,
+        criteriaMet: [String] = [],
+        earliestPromotionAt: Date? = nil
+    ) {
+        self.tier = tier
+        self.demotionCooldownUntil = demotionCooldownUntil
+        self.demotionCooldownActive = demotionCooldownActive
+        self.requalificationRequired = requalificationRequired
+        self.uptimeOKSince = uptimeOKSince
+        self.uptimeRequiredSeconds = uptimeRequiredSeconds
+        self.unlockPairOKSince = unlockPairOKSince
+        self.requalificationWindowSeconds = requalificationWindowSeconds
+        self.verifiedReceiptCount = verifiedReceiptCount
+        self.requiredReceiptCount = requiredReceiptCount
+        self.criteriaMet = criteriaMet
+        self.earliestPromotionAt = earliestPromotionAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        tier = try c.decode(AgentSnapshot.TrustTier.self, forKey: .tier)
+        demotionCooldownUntil = Self.date(try c.decodeIfPresent(String.self, forKey: .demotionCooldownUntil))
+        demotionCooldownActive = try c.decodeIfPresent(Bool.self, forKey: .demotionCooldownActive) ?? false
+        requalificationRequired = try c.decodeIfPresent(Bool.self, forKey: .requalificationRequired) ?? false
+        uptimeOKSince = Self.date(try c.decodeIfPresent(String.self, forKey: .uptimeOKSince))
+        uptimeRequiredSeconds = max(0, try c.decodeIfPresent(Int64.self, forKey: .uptimeRequiredSeconds) ?? 0)
+        unlockPairOKSince = Self.date(try c.decodeIfPresent(String.self, forKey: .unlockPairOKSince))
+        requalificationWindowSeconds = max(0, try c.decodeIfPresent(Int64.self, forKey: .requalificationWindowSeconds) ?? 0)
+        verifiedReceiptCount = max(0, try c.decodeIfPresent(Int.self, forKey: .verifiedReceiptCount) ?? 0)
+        requiredReceiptCount = max(0, try c.decodeIfPresent(Int.self, forKey: .requiredReceiptCount) ?? 0)
+        criteriaMet = Array((try c.decodeIfPresent([String].self, forKey: .criteriaMet) ?? []).prefix(16))
+        earliestPromotionAt = Self.date(try c.decodeIfPresent(String.self, forKey: .earliestPromotionAt))
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(tier, forKey: .tier)
+        try c.encodeIfPresent(demotionCooldownUntil.map(Self.text), forKey: .demotionCooldownUntil)
+        try c.encode(demotionCooldownActive, forKey: .demotionCooldownActive)
+        try c.encode(requalificationRequired, forKey: .requalificationRequired)
+        try c.encodeIfPresent(uptimeOKSince.map(Self.text), forKey: .uptimeOKSince)
+        try c.encode(uptimeRequiredSeconds, forKey: .uptimeRequiredSeconds)
+        try c.encodeIfPresent(unlockPairOKSince.map(Self.text), forKey: .unlockPairOKSince)
+        try c.encode(requalificationWindowSeconds, forKey: .requalificationWindowSeconds)
+        try c.encode(verifiedReceiptCount, forKey: .verifiedReceiptCount)
+        try c.encode(requiredReceiptCount, forKey: .requiredReceiptCount)
+        try c.encode(criteriaMet, forKey: .criteriaMet)
+        try c.encodeIfPresent(earliestPromotionAt.map(Self.text), forKey: .earliestPromotionAt)
+    }
+
+    static func date(_ text: String?) -> Date? {
+        guard let text else { return nil }
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractional.date(from: text) { return date }
+        return ISO8601DateFormatter().date(from: text)
+    }
+
+    private static func text(_ date: Date) -> String {
+        ISO8601DateFormatter().string(from: date)
+    }
+}
+
+/// Network MALIBU emission state from the coordinator reward projection.
+struct MalibuEmissionState: Codable, Equatable {
+    let active: Bool
+    let lastAccrualAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case active
+        case lastAccrualAt = "last_accrual_at"
+    }
+
+    init(active: Bool, lastAccrualAt: Date? = nil) {
+        self.active = active
+        self.lastAccrualAt = lastAccrualAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        active = try c.decode(Bool.self, forKey: .active)
+        lastAccrualAt = MalibuTrustProgress.date(try c.decodeIfPresent(String.self, forKey: .lastAccrualAt))
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(active, forKey: .active)
+        try c.encodeIfPresent(lastAccrualAt.map { ISO8601DateFormatter().string(from: $0) }, forKey: .lastAccrualAt)
+    }
 }
 
 /// Non-secret earnings projection received from the CLI over the same-user
@@ -200,6 +333,12 @@ struct ProviderEarnings: Codable, Equatable {
     /// Capability advertised by the connected CLI. Its absence preserves
     /// compatibility with older peers and prevents sending unknown commands.
     let rewardAuditSupported: Bool
+    /// payout.enabled from the coordinator; nil from older peers.
+    let payoutsEnabled: Bool?
+    /// Newest payable request time from the coordinator earnings read.
+    let lastPaidJobAt: Date?
+    let trustProgress: MalibuTrustProgress?
+    let emission: MalibuEmissionState?
 
     enum CodingKeys: String, CodingKey {
         case walletBound = "wallet_bound"
@@ -227,6 +366,10 @@ struct ProviderEarnings: Codable, Equatable {
         case malibuProjectionFresh = "malibu_projection_fresh"
         case earningsProjectionFresh = "earnings_projection_fresh"
         case rewardAuditSupported = "reward_audit_supported"
+        case payoutsEnabled = "payouts_enabled"
+        case lastPaidJobAt = "last_paid_job_at_utc"
+        case trustProgress = "trust_progress"
+        case emission
     }
 
     init(from decoder: Decoder) throws {
@@ -270,6 +413,11 @@ struct ProviderEarnings: Codable, Equatable {
         }
         earningsProjectionFresh = try c.decodeIfPresent(Bool.self, forKey: .earningsProjectionFresh) ?? false
         rewardAuditSupported = try c.decodeIfPresent(Bool.self, forKey: .rewardAuditSupported) ?? false
+        payoutsEnabled = try c.decodeIfPresent(Bool.self, forKey: .payoutsEnabled)
+        lastPaidJobAt = MalibuTrustProgress.date(try? c.decodeIfPresent(String.self, forKey: .lastPaidJobAt))
+        // Additive fields: a malformed block is dropped, never fatal.
+        trustProgress = try? c.decodeIfPresent(MalibuTrustProgress.self, forKey: .trustProgress)
+        emission = try? c.decodeIfPresent(MalibuEmissionState.self, forKey: .emission)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -311,6 +459,10 @@ struct ProviderEarnings: Codable, Equatable {
         if rewardAuditSupported {
             try c.encode(true, forKey: .rewardAuditSupported)
         }
+        try c.encodeIfPresent(payoutsEnabled, forKey: .payoutsEnabled)
+        try c.encodeIfPresent(lastPaidJobAt.map { ISO8601DateFormatter().string(from: $0) }, forKey: .lastPaidJobAt)
+        try c.encodeIfPresent(trustProgress, forKey: .trustProgress)
+        try c.encodeIfPresent(emission, forKey: .emission)
     }
 
     init(
@@ -339,7 +491,11 @@ struct ProviderEarnings: Codable, Equatable {
         idlePrewarm: ProviderIdlePrewarmSummary = .empty,
         malibuProjectionFresh: Bool = false,
         earningsProjectionFresh: Bool = false,
-        rewardAuditSupported: Bool = false
+        rewardAuditSupported: Bool = false,
+        payoutsEnabled: Bool? = nil,
+        lastPaidJobAt: Date? = nil,
+        trustProgress: MalibuTrustProgress? = nil,
+        emission: MalibuEmissionState? = nil
     ) {
         self.walletBound = walletBound
         self.trustTier = trustTier
@@ -367,6 +523,10 @@ struct ProviderEarnings: Codable, Equatable {
         self.malibuProjectionFresh = malibuProjectionFresh
         self.earningsProjectionFresh = earningsProjectionFresh
         self.rewardAuditSupported = rewardAuditSupported
+        self.payoutsEnabled = payoutsEnabled
+        self.lastPaidJobAt = lastPaidJobAt
+        self.trustProgress = trustProgress
+        self.emission = emission
     }
 }
 

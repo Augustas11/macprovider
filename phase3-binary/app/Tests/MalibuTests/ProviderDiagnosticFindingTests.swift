@@ -162,11 +162,12 @@ final class ProviderDiagnosticFindingTests: XCTestCase {
         )
     }
 
-    func testExpiredStatusLeaseAllowsFallbackEvenWhenUIWouldRetainObservation() {
+    /// #2029 P1-1: findings use the same freshness clock as the ready rows.
+    /// A 6 s-old observation is past the CLI's 5 s lease but inside Malibu's
+    /// poll retention, so it is current: no "stale" finding, no doctor fallback.
+    func testObservationInsidePollRetentionProducesNoStaleFinding() {
         let now = Date(timeIntervalSince1970: 1_788_249_600)
         var snapshot = freshStatusSnapshot(now: now.addingTimeInterval(-6))
-        snapshot.statusObservationValidForMS = 5_000
-        snapshot.statusObservationFresh = true
         snapshot.credentialState = "ready"
         XCTAssertTrue(snapshot.isLocalStatusObservationCurrent(at: now))
 
@@ -177,30 +178,40 @@ final class ProviderDiagnosticFindingTests: XCTestCase {
             evidence: "serve_dead=true",
             observedAt: now
         )
-        let credentialFallback = ProviderDiagnosticFinding(
-            signatureID: .credentialStoreUnavailable,
-            source: .credentialsStatus,
-            userMessage: "credential status fallback",
-            evidence: "condition=unavailable",
-            observedAt: now
-        )
-
         let findings = ProviderDiagnosticFindingAggregator.aggregate(
             snapshot: snapshot,
             providerLogLines: [],
             watchdogLogLines: [],
             doctorReportFindings: [doctorServeDead],
-            credentialsStatusFindings: [credentialFallback],
             now: now
         )
+        XCTAssertFalse(findings.contains { $0.signatureID == .serveUnresponsive }, "\(findings)")
+    }
 
+    func testObservationPastPollRetentionStillReportsStaleAndAllowsFallback() {
+        let now = Date(timeIntervalSince1970: 1_788_249_600)
+        let age = LocalStatusObservationPolicy.displayRetentionSeconds + 1
+        var snapshot = freshStatusSnapshot(now: now.addingTimeInterval(-age))
+        snapshot.credentialState = "ready"
+        XCTAssertFalse(snapshot.isLocalStatusObservationCurrent(at: now))
+
+        let doctorServeDead = ProviderDiagnosticFinding(
+            signatureID: .serveUnresponsive,
+            source: .doctorReport,
+            userMessage: "doctor report found serve dead",
+            evidence: "serve_dead=true",
+            observedAt: now
+        )
+        let findings = ProviderDiagnosticFindingAggregator.aggregate(
+            snapshot: snapshot,
+            providerLogLines: [],
+            watchdogLogLines: [],
+            doctorReportFindings: [doctorServeDead],
+            now: now
+        )
         XCTAssertEqual(
             findings.map { "\($0.source.rawValue):\($0.signatureID.rawValue)" },
-            [
-                "status:serve_unresponsive",
-                "doctor_report:serve_unresponsive",
-                "credentials_status:credential_store_unavailable",
-            ]
+            ["status:serve_unresponsive", "doctor_report:serve_unresponsive"]
         )
     }
 

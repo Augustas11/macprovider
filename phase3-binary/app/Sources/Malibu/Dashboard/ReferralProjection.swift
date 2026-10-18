@@ -340,6 +340,25 @@ enum ReferralPanelPresenter {
         return "\(status.remaining) remaining · \(status.redemptions) redeemed · \(total) total"
     }
 
+    /// One-line state for an unlocked invite balance (#2029). Bonus sources
+    /// are not broken down: the projection cannot attribute every bonus use.
+    static func summary(_ status: ReferralStatusProjection) -> String {
+        let total = status.baseCapacity + status.bonusCapacity
+        let state = status.remaining == 0
+            ? "All \(total) invite\(total == 1 ? "" : "s") used."
+            : "\(status.remaining) of \(total) invite\(total == 1 ? "" : "s") available."
+        guard status.canStartSocialChallenge, status.configuredBonusCapacity > 0 else { return state }
+        return "\(state) Post on X to earn \(status.configuredBonusCapacity) more."
+    }
+
+    /// The path explainer is useful only before the base invite unlocks.
+    static func showsPathChrome(_ status: ReferralStatusProjection?) -> Bool {
+        guard let status else { return true }
+        return status.socialState == ReferralStatusProjection.locked
+    }
+
+    static let copyInviteDisabledHelp = "No invite is available to copy right now."
+
     static func invitePhrase(_ count: Int) -> String {
         "\(count) invite use\(count == 1 ? "" : "s")"
     }

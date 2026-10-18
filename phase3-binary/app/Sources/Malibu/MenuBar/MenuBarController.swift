@@ -24,6 +24,7 @@ final class MenuBarController {
     private var cancellables: Set<AnyCancellable> = []
     private var latestSnapshot: AgentSnapshot = .empty
     private var dismissedUnclaimedThreshold: Double?
+    private var renderedBadge: MalibuMenuBarIcon.Badge?
 
     init(
         agent: MalibuAgent,
@@ -41,12 +42,9 @@ final class MenuBarController {
 
     private func configureButton() {
         guard let button = statusItem.button else { return }
-        let icon = MalibuMenuBarIcon.makeTemplate()
-        button.image = icon
-        button.image?.size = icon.size
-        button.image?.accessibilityDescription = "Malibu"
+        applyIcon(.none, to: button)
         button.imagePosition = .imageOnly
-        button.imageScaling = .scaleProportionallyDown
+        button.imageScaling = .scaleNone
         button.title = ""
         button.target = self
         button.action = #selector(statusBarButtonClicked(_:))
@@ -161,9 +159,16 @@ final class MenuBarController {
             button.imagePosition = .imageOnly
         }
         statusItem.button?.toolTip = menuTooltip(snapshot)
-        statusItem.button?.contentTintColor = snapshot.thermalState?.isMenuBarAttention == true
-            ? NSColor.systemOrange
-            : nil
+        if let button = statusItem.button {
+            applyIcon(MenuBarPresentation.badge(for: snapshot), to: button)
+        }
+    }
+
+    private func applyIcon(_ badge: MalibuMenuBarIcon.Badge, to button: NSStatusBarButton) {
+        guard renderedBadge != badge else { return }
+        renderedBadge = badge
+        button.image = MalibuMenuBarIcon.make(badge: badge)
+        button.setAccessibilityLabel(MalibuMenuBarIcon.accessibilityLabel(for: badge))
     }
 
     private func updateMenu(_ menu: NSMenu, snapshot: AgentSnapshot) {

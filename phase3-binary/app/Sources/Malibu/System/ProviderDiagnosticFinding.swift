@@ -97,7 +97,9 @@ enum ProviderDiagnosticFindingAggregator {
         credentialsStatusFindings: [ProviderDiagnosticFinding] = [],
         now: Date = Date()
     ) -> [ProviderDiagnosticFinding] {
-        let hasFreshStatus = snapshot.hasFreshContractValidatedStatusObservation(at: now)
+        // Same freshness clock as the ready/serving rows (#2029 P1-1): the
+        // CLI's 5 s lease alone made this report "stale" between 15 s polls.
+        let hasFreshStatus = snapshot.hasCurrentContractValidatedStatusObservation(at: now)
         let hasFreshServeOwnedCredentialState = snapshot.hasFreshServeOwnedCredentialState(at: now)
         var findings: [ProviderDiagnosticFinding] = []
         findings.append(contentsOf: statusFindings(snapshot, hasFreshStatus: hasFreshStatus, now: now))

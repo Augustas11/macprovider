@@ -179,7 +179,9 @@ enum RewardActivityPresentation {
         switch event.eventType {
         case "malibu_accrual_inserted": return "MALIBU reward recorded"
         case "malibu_hold_applied": return "MALIBU reward held"
-        case "malibu_hold_cleared": return "MALIBU hold cleared"
+        // The only producer is the wallet-cap replay at wallet bind; trust
+        // holds are never cleared (SPEC-021 §3).
+        case "malibu_hold_cleared": return "Wallet daily limit cleared"
         case "wallet_daily_cap_applied": return "Wallet daily limit applied"
         case "wallet_bind_projected": return "Reward wallet updated"
         case "trust_tier_promoted": return "Trust status updated"
@@ -237,8 +239,9 @@ enum RewardActivityPresentation {
         switch raw {
         case "per_wallet_daily_cap": return "wallet daily limit"
         case "per_provider_daily_cap": return "provider daily limit"
-        case "trust_tier_provisional", "provisional_trust_tier": return "trust review"
-        default: return "review pending"
+        case "trust_tier_provisional", "provisional_trust_tier": return "Provisional trust tier"
+        case "demotion_cooldown": return "demotion cooldown"
+        default: return "recorded hold"
         }
     }
 }

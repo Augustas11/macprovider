@@ -32,6 +32,8 @@ type ProviderRewardProjection struct {
 	WalletBound      bool
 	WalletMismatch   bool
 	Eligibility      MalibuRewardEligibilityReadModel
+	TrustProgress    ProviderTrustProgress
+	Emission         ProviderEmissionStatus
 	RecentWorkAt     *time.Time
 	RecentWorkSource string
 }
@@ -76,6 +78,13 @@ func BuildProviderRewardProjection(ctx context.Context, providerID string, deps 
 		return ProviderRewardProjection{}, err
 	}
 	bal = balanceWithAuthoritativeTrustTier(bal, trust.TrustTier)
+	// Classify holds against the same trust snapshot and clock the trust
+	// block reports, so the two never disagree within one projection.
+	var cooldown sql.NullTime
+	if trust.DemotionCooldownUntil != nil {
+		cooldown = sql.NullTime{Time: *trust.DemotionCooldownUntil, Valid: true}
+	}
+	bal.ActiveHoldReasons, bal.RetainedHoldReasons = classifyHoldReasons(bal.HoldReasons, trust.TrustTier, cooldown, now)
 	rewardWallet, err := queryRewardWalletProjection(ctx, deps.RewardsDB, providerID)
 	if err != nil {
 		return ProviderRewardProjection{}, err
@@ -88,6 +97,11 @@ func BuildProviderRewardProjection(ctx context.Context, providerID string, deps 
 	walletBound := currentWalletAllowed && !walletMismatch
 	trust = trustCriteriaWithWalletBinding(trust, walletBound)
 
+	lastAccrualAt, err := queryLastMalibuAccrual(ctx, deps.RewardsDB, providerID)
+	if err != nil {
+		return ProviderRewardProjection{}, err
+	}
+
 	hardwareState, hardwareExpiresAt := hardwareEvidenceObservation(ctx, providerID, deps.HardwareEvidence)
 	recentWorkAt, recentWorkErr := queryRecentVerifiedWork(ctx, deps.RewardsDB, providerID, now)
 	facts := MalibuRewardEligibilityFacts{
@@ -95,7 +109,8 @@ func BuildProviderRewardProjection(ctx context.Context, providerID string, deps 
 		WithdrawableMALIBU:    bal.WithdrawableMALIBU,
 		HeldMALIBU:            bal.HeldMALIBU,
 		TrustTier:             bal.TrustTier,
-		WithdrawalHoldReasons: bal.HoldReasons,
+		WithdrawalHoldReasons: bal.ActiveHoldReasons,
+		RetainedTrustHold:     len(bal.RetainedHoldReasons) > 0,
 		ProviderDailyCapped:   bal.ProviderDailyCapped,
 		WalletBound:           walletBound,
 		VerifiedReceiptCount:  trust.VerifiedReceiptCount,
@@ -118,6 +133,8 @@ func BuildProviderRewardProjection(ctx context.Context, providerID string, deps 
 		WalletBound:      walletBound,
 		WalletMismatch:   walletMismatch,
 		Eligibility:      BuildMalibuRewardEligibility(facts),
+		TrustProgress:    BuildTrustProgress(trust, now),
+		Emission:         ProviderEmissionStatus{Active: cfg.EmissionActive(), LastAccrualAt: lastAccrualAt},
 		RecentWorkAt:     recentWorkAt,
 		RecentWorkSource: "settlement_mirror_spec022_verified",
 	}, nil

@@ -1,7 +1,14 @@
 # SPEC-005 - Billing, Settlement, and Provider Rewards
 
-**Version:** 0.6.24 (2026-10-15, bounded request_log and settled ledger rollup)
+**Version:** 0.6.25 (2026-10-18, provider earnings payout state and last paid job)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.7, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.39, SPEC-024 v0.2.7 (prefix-cache cache-isolation; its billing sections are superseded by this spec). Lockstep with SPEC-023 v0.18.0 / SPEC-005-R011 / SPEC-005-R013 (SPEC-023-R019) is recorded in prose, not as a CONFORMANCE `depends_on` edge (avoids a cycle through SPEC-017/SPEC-047).
+
+**Change log v0.6.25 (2026-10-18, #2029):** §11.4 `GET
+/providers/{provider_id}/earnings` documents the `usdc_*` fields it already
+returns and adds `payouts_enabled` (the `payout.enabled` setting) and
+`last_paid_job_at_utc` (the newest payable request still in the hot ledger).
+Clients MUST NOT describe unpaid USDC as having a payout path while
+`payouts_enabled` is false. Read-only; no ledger, settlement, or payout change.
 
 **Change log v0.6.24 (2026-10-15, issue #1793):** New §2.1b bounds
 `request_log` to `storage.request_log_retention_days` (default 14, down from
@@ -2334,9 +2341,24 @@ No HTML, chart markup, Slack payload, or email body is returned.
       "completion_credits_per_mtok": 2000000
     }
   },
-  "fault_count": 1
+  "fault_count": 1,
+  "usdc_today": 0,
+  "usdc_week": 0.125,
+  "usdc_pending": 0.64,
+  "usdc_lifetime": 0.64,
+  "payouts_enabled": false,
+  "last_paid_job_at_utc": "2026-05-24T19:49:00Z"
 }
 ```
+
+`usdc_*` are `provider_credits / 1,000,000` (SPEC-016 §4.3); `usdc_today` is
+the current UTC day and `usdc_week` starts Monday 00:00 UTC. `payouts_enabled`
+is the coordinator's `payout.enabled`; when it is false no payout run will pay
+`usdc_pending`, and clients MUST NOT say or imply that one will.
+`last_paid_job_at_utc` is the RFC3339 UTC time of the newest payable request
+(`spec022_payable_request_credits`, `provider_credits > 0`) in the last 7 days;
+it is omitted when there is none (the read is bounded so it never scans a
+provider's whole history).
 
 **401 JSON error example:**
 

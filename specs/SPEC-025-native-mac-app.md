@@ -1,6 +1,17 @@
-# SPEC-025 — Native Mac App (signed `.dmg` + menu bar wrapper)
+# SPEC-025 — Native Mac App (signed `.dmg`, native Mac app with menu-bar presence)
 
-Status: DRAFT v0.31.0 · Owner: @Augustas11 · Target: 2026 Q3
+Status: DRAFT v0.32.0 · Owner: @Augustas11 · Target: 2026 Q3
+
+**Change log v0.32.0 (2026-10-18, #2029 Phase 1 truthful dashboard):**
+§3.1 and §3.2: the app launches as a menu-bar agent (`LSUIElement=true`) and
+switches to `.regular` activation (Dock icon, Cmd-Tab, main menu) while any
+Malibu window is open, returning to `.accessory` when the last one closes; a
+Dock click with no window reopens the dashboard. The menu-bar item is the
+re-cut icon-only glyph with state badges (no USDC text). The dashboard is one
+status pill, an Earnings card, a Mac health line and a collapsed Advanced
+diagnostics section; it shows no raw log tail and follows the copy contract in
+§3.2 (SPEC-021-R011/R012, SPEC-005 §11.4, SPEC-044-R004). Model-switching
+text is reconciled with the shipped Change Model flow.
 
 **Change log v0.31.0 (2026-10-18, tag-stamped app version + self-relaunch after update).** Normative, §3.3: (1) the Malibu.app component version is stamped from the release tag at build time (`CFBundleShortVersionString` = tag version, `CFBundleVersion` = its positive patch `Z`). `project.yml` carries only a `0.0.0` development default, and the candidate build, the acceptance signer and published-release verification all check both values. This supersedes the v0.17 allowance for an independently versioned Malibu component, which let a stale `1.8.224` stamp ship inside release 1.8.251. (2) After the CLI-owned update swaps the installed bundle, the running Malibu process relaunches itself onto the installed bundle, once the bundle is proven to be the installed signed set's Malibu member. The CLI still never signals, quits, or launches the app process. A pre-v0.31 process picks up the first such update at its next launch.
 
@@ -460,8 +471,12 @@ From reading `phase3-binary/`:
 1. `malibu.tech/host` → **Download for Mac** → `Malibu.dmg`.
 2. Open `.dmg` → drag `Malibu.app` to `Applications`. Standard Finder UX.
 3. Launch `Malibu.app`. Gatekeeper checks the stapled notarization ticket, no scary dialog.
-4. Menu bar icon appears (`NSStatusItem`, `LSUIElement=true` — no Dock icon;
-   `Info.plist:25-26`). On launch, `applicationDidFinishLaunching` runs
+4. Menu bar icon appears (`NSStatusItem`). The app launches as a menu-bar
+   agent (`LSUIElement=true`, `Info.plist:25-26`), so no Dock icon shows until a
+   window opens: while any Malibu window (dashboard, onboarding, settings) is
+   open the app switches to `.regular` activation (Dock icon, Cmd-Tab entry,
+   main menu with Settings…, Open Dashboard, Edit, Window, Quit) and returns to
+   `.accessory` when the last window closes (`MenuBar/DockPresence.swift`). On launch, `applicationDidFinishLaunching` runs
    `handleStartup()`, which routes on disk state via `StartupState.detect().route()`
    → `.startAgent` / `.showOnboarding` / `.showImportDialog` / `.quit`
    (`MalibuApp.swift:30-140`, `LaunchProviderController.swift:302-372`). A fresh Mac
@@ -558,25 +573,56 @@ time (60–240 s for the first model) in the background.
 
 ### 3.2 Steady state
 
-- Menu bar icon: state glyph (idle · serving · error) + today's USDC. "Serving"
-  requires BOTH the managed CLI's local `/v1/health` readiness AND
-  `network_state == "buyer_serving"` from `/v1/status`; a bare local-ready state is
-  shown as "Reconnecting" (`MalibuAgent.swift:307-355`). Steady-state health poll
+- Menu bar icon: icon-only (#664), no USDC text. The glyph is a half-sun re-cut
+  for the status bar: ink at least 14 pt (16 pt shipped) tall in an 18 pt
+  canvas, strokes at least 1.5 pt, `NSStatusItem.variableLength`,
+  `imageScaling = .scaleNone`, template image. State badges: serving or idle
+  is the plain template; paused adds a hollow ring (still template); needs
+  attention (error, a provider issue, or serious thermal state) is a
+  non-template image with a red dot. Each state has its own VoiceOver label
+  ("Malibu", "Malibu — paused", "Malibu — needs attention"); colour is never
+  the only signal. A snapshot test renders the glyph at 1x and 2x and asserts
+  the ink height and feature width. "Serving" requires BOTH the managed CLI's
+  local `/v1/health` readiness AND `network_state == "buyer_serving"` from
+  `/v1/status`; a bare local-ready state is shown as "Reconnecting"
+  (`MalibuAgent.swift:307-355`). Steady-state health poll
   every 15 s (`:381-407`); first-attach polls every 2 s up to 600 s (`:188-226`).
 - Menu (reconciled v0.3): the shipped menu-bar left-click opens the Dashboard
   window directly — there is **no popover** with USDC/MALIBU/uptime/GPU/latency in
   the shipped build (`MenuBarController.swift:56`); the menu exposes a plain **Quit**
   only, with **no "Quit and Uninstall"** item (`MenuBarController.swift:108`).
-- Dashboard (SwiftUI window, reconciled v0.3): earnings/wallet/tier **panels** +
-  live **log tail** (`DashboardWindow.swift:22`) — read-only from `EarningsClient` /
-  `MalibuAccrualClient`. The shipped dashboard has **no earnings chart, no "Copy
-  diagnostics" action, and no "Quit and Uninstall" control** (those are designed, not
-  shipped). The wallet card's "Set payout wallet" button is **disabled**
-  (SPEC-027-gated, `DashboardWindow.swift:59`). The model-swap-over-ControlSocket
-  affordance is **not** wired in the monitor-only flow; Malibu does attach to the
-  owner-only socket for typed status and referral projections (§5.2), but it does
-  not send `switch_request`. Model selection is owned by `install.sh` / autotune
-  and the CLI.
+- Dashboard (SwiftUI window, v0.32): one **status pill** (Serving, Paused,
+  Setting up, Not receiving work, Needs attention, Not running) describing
+  customer serving only; a status notice with one action appears only when the
+  Mac is not serving, and Reset/Export appear on the main surface only in an
+  error state. Below it: the model row (Change Model…), an **Earnings card**,
+  a **Mac health** line, a collapsed **Advanced diagnostics** section, and the
+  invite panel. There is no raw log tail; logs stay in exported diagnostics.
+  Copy contract:
+  - USDC: lifetime, this week and today, with "today" the UTC day for both
+    requests and USDC; "Payouts are not enabled yet in beta." while a fresh
+    earnings read reports `payouts_enabled` false (SPEC-005 §11.4). No amount
+    is labelled unpaid, since the pending figure is not net of past payouts.
+    The header shows the model and "last credited job <relative time>".
+  - MALIBU: "paused network-wide" while `emission.active` is false; the balance
+    split into held and not held; held MALIBU is "not released and not
+    withdrawable" with no implied release (SPEC-021-R012); trust progress only
+    from `trust_progress` (SPEC-021-R011), never "in progress" or "review"
+    inferred from hold reasons.
+  - Values that are not reported render as absent, never as an invented zero
+    (no "0 queued", "0 declined" or "7d uptime n/a"); latency is labelled
+    average; requests/minute is a request rate; restarts show the 7-day count
+    and the lifetime count labelled as lifetime; resolved setup failures and
+    superseded update records are not shown; machine reason codes are never
+    rendered; repeated diagnostic lines are shown once.
+  - Rates only: no $/time earnings projections (SPEC-044-R004).
+  - Changing the payout wallet lives in Settings, with the cooling-off rule
+    stated before the signer opens.
+  Change Model… opens the model switcher; switching uses the CLI's warm-swap
+  path when the provider advertises it, and a model list read is bounded so
+  "Checking…" always ends in a result or a retryable "unavailable". Malibu
+  attaches to the owner-only socket for typed status and referral projections
+  (§5.2).
 - Referral UI is likewise capability-gated: Malibu renders the sanitized CLI
   control-socket projection only when the CLI advertises `referral_status_v1`
   and `referral_fragment_links_v1`.
@@ -596,7 +642,7 @@ time (60–240 s for the first model) in the background.
   launchd health after success. Locked, permission-denied, conflict, unavailable, and
   unknown/future contracts never trigger automatic mutation.
 - On login: `SMAppService.mainApp.register()` starts `Malibu.app` in the background.
-  No Dock icon. (This registers the **app** as a login item; the **CLI daemon** is
+  Login launch shows no Dock icon until a window is opened. (This registers the **app** as a login item; the **CLI daemon** is
   owned by the launchd **provider service** `live.malibu.provider` (`KeepAlive`)
   that `install.sh` set up — a separate mechanism from the app login item, §8.)
 
@@ -805,7 +851,7 @@ evidence routes to onboarding, not a reconnect loop (`route()`
 
 ```
 Malibu.app/Contents/
-  Info.plist                       # LSUIElement=true; no update feed or URL scheme
+  Info.plist                       # LSUIElement=true (runtime switches to .regular while a window is open, §3.1); no update feed or URL scheme
   MacOS/
     Malibu                         # Swift binary (wrapper)
     macprovider-cli                # REQUIRED — signed CLI copied in by release.yml:556; verify-tier2-provider-release.sh:405 rejects a bundle without it

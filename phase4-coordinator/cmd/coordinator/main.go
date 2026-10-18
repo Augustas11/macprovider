@@ -425,6 +425,7 @@ func runCoordinator() (exitCode int) {
 	}
 	defer closePayoutReadDB()
 	billingStore.SetSQLiteMetrics(metricsHandle)
+	billingStore.SetPayoutsEnabled(cfg.Payout.Enabled)
 	billingStore.SetRouteSnapshotDB(routeSnapshotDB)
 	billingStore.SetRouteSnapshotJournalDB(routeSnapshotJournalDB)
 	billingStore.SetRouteSnapshotBusyTimeout(routeSnapshotSQLiteBusyTimeout)

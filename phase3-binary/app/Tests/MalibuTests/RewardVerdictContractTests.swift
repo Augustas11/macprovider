@@ -9,19 +9,50 @@ final class RewardVerdictContractTests: XCTestCase {
             earningState: "ineligible", withdrawalState: "ineligible",
             primaryReason: "missing_wallet_binding", reasons: ["missing_wallet_binding"]))
         XCTAssertEqual(AgentSnapshotPresenter.rewardVerdict(snapshot).malibuEarning, .ineligible)
-        XCTAssertEqual(AgentSnapshotPresenter.eligibilityLine(snapshot), "Ready for customer work · network is quiet")
-        let health = AgentSnapshotPresenter.miningHealth(snapshot)
-        XCTAssertEqual(health.reason, "A bound payout wallet is required for MALIBU reward eligibility.")
-        XCTAssertEqual(AgentSnapshotPresenter.consolidatedStatus(snapshot).nextAction,
-                       "Add a payout wallet to complete reward setup.")
+        // Customer readiness never carries the MALIBU wallet requirement.
+        XCTAssertEqual(AgentSnapshotPresenter.statusPill(snapshot).label, "Serving")
+        XCTAssertNil(AgentSnapshotPresenter.consolidatedStatus(snapshot).nextAction)
+        snapshot.malibuEmission = MalibuEmissionState(active: true)
+        XCTAssertTrue(AgentSnapshotPresenter.earningsCard(snapshot).malibuLines
+            .contains("Add a payout wallet to be eligible for MALIBU."))
     }
 
-    func testUnknownMalibuCopyDoesNotClaimTelemetryWasNeverPublished() {
-        var snapshot = trustedServing()
-        snapshot.updateRewardInputs(providerEarningsFresh: true, malibuProjectionFresh: false)
-        let status = AgentSnapshotPresenter.consolidatedStatus(snapshot)
-        XCTAssertTrue(status.meaning.contains("MALIBU reward status is temporarily unavailable"))
-        XCTAssertFalse(status.meaning.contains("not published yet"))
+    func testConsolidatedStatusDescribesServingOnlyForEveryRewardVerdict() {
+        let eligibilities = [
+            MalibuRewardEligibility(earningState: "held", withdrawalState: "held",
+                primaryReason: "held_demotion_cooldown", reasons: ["held_demotion_cooldown"]),
+            MalibuRewardEligibility(earningState: "capped", withdrawalState: "capped",
+                primaryReason: "held_wallet_daily_cap", reasons: ["held_wallet_daily_cap"]),
+            MalibuRewardEligibility(earningState: "earning", withdrawalState: "withdrawable",
+                primaryReason: "earning_verified_work", reasons: ["earning_verified_work", "withdrawable_balance_available"]),
+        ]
+        for eligibility in eligibilities {
+            var snapshot = trustedServing()
+            snapshot.updateRewardInputs(malibuWithdrawable: 3, malibuHeld: 2, malibuRewardEligibility: eligibility)
+            let status = AgentSnapshotPresenter.consolidatedStatus(snapshot)
+            XCTAssertEqual(status.phase, .live)
+            XCTAssertEqual(status.label, "Serving")
+            XCTAssertEqual(status.meaning, "This Mac is serving customer work.")
+            XCTAssertFalse(AgentSnapshotPresenter.rewardVerdict(snapshot).canClaimWithdrawable && eligibility.withdrawalState != "withdrawable")
+        }
+        var stale = trustedServing()
+        stale.updateRewardInputs(providerEarningsFresh: false, malibuProjectionFresh: false)
+        XCTAssertEqual(AgentSnapshotPresenter.consolidatedStatus(stale).label, "Serving")
+        XCTAssertNil(AgentSnapshotPresenter.earningsCard(stale).trustLine, "stale trust is not shown")
+    }
+
+    func testCappedAndEpochHoldsKeepTheirOwnCopyInTheEarningsCard() {
+        let cases: [(MalibuRewardEligibility, String)] = [
+            (MalibuRewardEligibility(earningState: "capped", withdrawalState: "capped",
+                primaryReason: "held_wallet_daily_cap", reasons: ["held_wallet_daily_cap"]), "Wallet daily limit reached."),
+            (MalibuRewardEligibility(earningState: "held", withdrawalState: "held",
+                primaryReason: "held_epoch_disposition", reasons: ["held_epoch_disposition"]), "MALIBU has a recorded settlement hold."),
+        ]
+        for (eligibility, expected) in cases {
+            var snapshot = trustedServing()
+            snapshot.updateRewardInputs(malibuWithdrawable: 3, malibuHeld: 2, malibuRewardEligibility: eligibility)
+            XCTAssertTrue(AgentSnapshotPresenter.earningsCard(snapshot).malibuLines.contains(expected), expected)
+        }
     }
 
     func testEarningVerifiedWorkDoesNotHideEligibleExistingBalance() {
@@ -80,7 +111,8 @@ final class RewardVerdictContractTests: XCTestCase {
         XCTAssertEqual(verdict.malibuWithdrawal, .held(.heldProvisionalTrustTier))
         XCTAssertFalse(verdict.canClaimWithdrawable)
         XCTAssertEqual(verdict.malibuHeld, 12.5)
-        XCTAssertNotNil(AgentSnapshotPresenter.malibuHoldLine(snapshot))
+        XCTAssertTrue(AgentSnapshotPresenter.earningsCard(snapshot).malibuLines
+            .contains("Held MALIBU is not released and not withdrawable. MALIBU has no withdrawals yet."))
     }
 
     func testTrustedLegacyRawLockMetadataIsIgnoredOnlyForZeroHeldAuthoritativeWithdrawable() {
@@ -128,7 +160,7 @@ final class RewardVerdictContractTests: XCTestCase {
             XCTAssertFalse(verdict.canClaimWithdrawable)
             XCTAssertEqual(verdict.malibuHeld, 8)
             XCTAssertEqual(verdict.malibuEarning, .unavailable)
-            XCTAssertEqual(AgentSnapshotPresenter.servingReadinessLine(snapshot), "Paused · resume to receive customer work")
+            XCTAssertEqual(AgentSnapshotPresenter.statusPill(snapshot).label, "Paused")
         }
     }
 
@@ -160,13 +192,7 @@ final class RewardVerdictContractTests: XCTestCase {
         XCTAssertFalse(verdict.canClaimWithdrawable)
         XCTAssertEqual(verdict.malibuEarning, .unavailable)
         XCTAssertEqual(snapshot.earningsUsdcToday, 3.5)
-        XCTAssertTrue(AgentSnapshotPresenter.malibuFullLine(snapshot).contains("last known"))
-    }
-
-    func testServingReadinessCannotBeInferredFromRewardBalance() {
-        var snapshot = trustedServing()
-        snapshot.networkState = "buyer_serving_unknown"
-        XCTAssertEqual(AgentSnapshotPresenter.servingReadinessLine(snapshot), "Customer availability not confirmed")
+        XCTAssertEqual(AgentSnapshotPresenter.earningsCard(snapshot).malibuLines, ["MALIBU balance: 12.00 (beta points, last known)."])
     }
 
     func testStaleTrustedTrustIsNeutralLiveAndCannotUnlockMalibu() {
@@ -182,7 +208,7 @@ final class RewardVerdictContractTests: XCTestCase {
         XCTAssertEqual(verdict.trustDisplay, .trustedStaleNeutral)
         XCTAssertEqual(verdict.malibuWithdrawal, .unknown)
         XCTAssertFalse(verdict.canClaimWithdrawable)
-        XCTAssertEqual(AgentSnapshotPresenter.trustLine(snapshot), "Live")
+        XCTAssertNil(AgentSnapshotPresenter.earningsCard(snapshot).trustLine)
     }
 
     func testFreshUsdcEarningDoesNotAssertMalibuUnlockWhenMalibuProjectionIsAbsent() {
@@ -195,9 +221,7 @@ final class RewardVerdictContractTests: XCTestCase {
         XCTAssertEqual(verdict.malibuWithdrawal, .unknown)
         XCTAssertFalse(verdict.canClaimWithdrawable)
 
-        let health = AgentSnapshotPresenter.miningHealth(snapshot)
-        XCTAssertEqual(health.reasonCode, "earning")
-        XCTAssertTrue(health.rewardSummary.contains("MALIBU unavailable"))
+        XCTAssertEqual(AgentSnapshotPresenter.earningsCard(snapshot).malibuLines, ["MALIBU status is unavailable right now."])
     }
 
     func testFreshMalibuVerdictIsIndependentFromStaleUsdcProjection() {
@@ -217,7 +241,7 @@ final class RewardVerdictContractTests: XCTestCase {
         XCTAssertEqual(verdict.usdcActivity, .none)
         XCTAssertEqual(verdict.malibuWithdrawal, .capped(.heldProviderDailyCap))
         XCTAssertFalse(verdict.canClaimWithdrawable)
-        XCTAssertEqual(AgentSnapshotPresenter.miningHealth(snapshot).reasonCode, "provider_daily_cap_held")
+        XCTAssertTrue(AgentSnapshotPresenter.earningsCard(snapshot).malibuLines.contains("Provider daily limit reached."))
     }
 
     func testEpochDispositionOutranksWithdrawableAmount() {
@@ -237,7 +261,7 @@ final class RewardVerdictContractTests: XCTestCase {
         XCTAssertEqual(verdict.reasonCode, .heldEpochDisposition)
         XCTAssertEqual(verdict.malibuWithdrawal, .epochDisposition(.heldEpochDisposition))
         XCTAssertFalse(verdict.canClaimWithdrawable)
-        XCTAssertEqual(AgentSnapshotPresenter.miningHealth(snapshot).reasonCode, "rewards_held")
+        XCTAssertTrue(AgentSnapshotPresenter.earningsCard(snapshot).malibuLines.contains("MALIBU has a recorded settlement hold."))
     }
 
     func testExplicitRewardTelemetryOutageOutranksWarmingUpAndEarningCopy() {
@@ -258,10 +282,10 @@ final class RewardVerdictContractTests: XCTestCase {
         XCTAssertEqual(verdict.malibuWithdrawal, .unavailable)
         XCTAssertEqual(verdict.reasonCode, .telemetryUnavailable)
 
-        let health = AgentSnapshotPresenter.miningHealth(snapshot)
-        XCTAssertEqual(health.status, "Reward status unavailable")
-        XCTAssertFalse(health.status.contains("No earnings yet"))
-        XCTAssertFalse(health.reason.contains("warming"))
+        XCTAssertEqual(
+            AgentSnapshotPresenter.earningsCard(snapshot).malibuLines,
+            ["MALIBU status can't be reached right now. USDC earnings are unaffected."]
+        )
     }
 
     func testReasonCodeHasClosedSemanticKnownSetAndUnknownEscapeHatch() {
@@ -373,7 +397,7 @@ final class RewardVerdictContractTests: XCTestCase {
         XCTAssertEqual(verdict.reasonCode, .unknown("future_reason"))
         XCTAssertEqual(verdict.malibuWithdrawal, .unknown)
         XCTAssertFalse(verdict.canClaimWithdrawable)
-        XCTAssertFalse(AgentSnapshotPresenter.malibuFullLine(snapshot).contains("4.00 MALIBU ·"))
+        XCTAssertEqual(AgentSnapshotPresenter.earningsCard(snapshot).malibuLines, ["MALIBU status is unavailable right now."])
     }
 
     func testMissingPrimaryReasonCannotBecomeNoActionHeldVerdict() {
@@ -409,10 +433,9 @@ final class RewardVerdictContractTests: XCTestCase {
 
         let verdict = AgentSnapshotPresenter.rewardVerdict(snapshot)
         XCTAssertEqual(verdict.usdcActivity, .none)
-        XCTAssertEqual(AgentSnapshotPresenter.usdcPeriodLabel(snapshot, verdict: verdict), "Today")
-        XCTAssertEqual(AgentSnapshotPresenter.usdcTodayDisplay(snapshot, verdict: verdict), "n/a")
-        XCTAssertFalse(AgentSnapshotPresenter.usdcFullLine(snapshot, verdict: verdict).contains("$9.25 today"))
-        XCTAssertFalse(AgentSnapshotPresenter.usdcFullLine(snapshot, verdict: verdict).contains("Today: $9.25"))
+        let summary = AgentSnapshotPresenter.earningsCard(snapshot).usdcSummary
+        XCTAssertFalse(summary.contains("$9.25"), summary)
+        XCTAssertFalse(AgentSnapshotPresenter.earningsLine(snapshot).contains("$9.25"))
     }
 
     func testUnavailableStatePreservesNonTelemetryPrimaryReason() {
@@ -450,13 +473,9 @@ final class RewardVerdictContractTests: XCTestCase {
         XCTAssertEqual(verdict.reasonCode, .walletMissing)
         XCTAssertEqual(verdict.malibuWithdrawal, .none)
         XCTAssertFalse(verdict.canClaimWithdrawable)
-        XCTAssertEqual(
-            AgentSnapshotPresenter.malibuAvailabilityLine(snapshot),
-            "MALIBU: wallet required · 1.00 held"
-        )
-        let rewardSummary = AgentSnapshotPresenter.miningHealth(snapshot).rewardSummary
-        XCTAssertFalse(rewardSummary.contains("3.00 withdrawable"))
-        XCTAssertFalse(rewardSummary.contains("3.00 available"))
+        let lines = AgentSnapshotPresenter.earningsCard(snapshot).malibuLines.joined(separator: " ")
+        XCTAssertFalse(lines.contains("3.00 withdrawable"))
+        XCTAssertFalse(lines.contains("available"))
     }
 
     func testCoordinatorNoBalanceReasonCannotUnlockPositiveMalibuAmount() {
@@ -476,10 +495,10 @@ final class RewardVerdictContractTests: XCTestCase {
         XCTAssertEqual(verdict.reasonCode, .idleNoWork)
         XCTAssertEqual(verdict.malibuWithdrawal, .none)
         XCTAssertFalse(verdict.canClaimWithdrawable)
-        let rewardSummary = AgentSnapshotPresenter.miningHealth(snapshot).rewardSummary
-        XCTAssertTrue(rewardSummary.contains("not withdrawable"))
-        XCTAssertFalse(rewardSummary.contains("3.00 withdrawable"))
-        XCTAssertFalse(rewardSummary.contains("3.00 available"))
+        let lines = AgentSnapshotPresenter.earningsCard(snapshot).malibuLines.joined(separator: " ")
+        XCTAssertTrue(lines.contains("MALIBU has no withdrawals yet."))
+        XCTAssertFalse(lines.contains("3.00 withdrawable"))
+        XCTAssertFalse(lines.contains("3.00 available"))
     }
 
     func testPositiveWithdrawableReasonRequiresNonEmptyKnownReasonsSet() {
@@ -546,150 +565,6 @@ final class RewardVerdictContractTests: XCTestCase {
             AgentSnapshotPresenter.rewardVerdict(clamped).trustProgress,
             AgentSnapshotPresenter.RewardVerdict.TrustProgress(met: 2, required: 2)
         )
-    }
-
-    func testConsolidatedStatusDemotesStaleTrustedToLive() {
-        var snapshot = trustedServing()
-        snapshot.updateRewardInputs(
-            providerEarningsFresh: false,
-            malibuProjectionFresh: false,
-            malibuWithdrawable: 8,
-            malibuHeld: 0
-        )
-
-        let status = AgentSnapshotPresenter.consolidatedStatus(snapshot)
-
-        XCTAssertEqual(status.phase, .live)
-        XCTAssertEqual(status.label, "Live")
-        XCTAssertFalse(status.meaning.lowercased().contains("unlocked"))
-        XCTAssertFalse(AgentSnapshotPresenter.rewardVerdict(snapshot).canClaimWithdrawable)
-    }
-
-    func testConsolidatedStatusDoesNotUnlockFromFreshUsdcWithoutMalibuProjection() {
-        var snapshot = trustedServing()
-        snapshot.earningsUsdcToday = 0.04
-        snapshot.updateRewardInputs(malibuProjectionFresh: false)
-
-        let status = AgentSnapshotPresenter.consolidatedStatus(snapshot)
-
-        XCTAssertEqual(status.phase, .live)
-        XCTAssertEqual(status.label, "Live")
-        XCTAssertTrue(status.meaning.contains("USDC earning is active"))
-        XCTAssertFalse(status.meaning.lowercased().contains("unlocked"))
-        XCTAssertFalse(AgentSnapshotPresenter.rewardVerdict(snapshot).canClaimWithdrawable)
-    }
-
-    func testConsolidatedStatusUsesNeutralHoldCopyForHeldCappedAndEpochVerdicts() {
-        let cases: [(name: String, eligibility: MalibuRewardEligibility, expected: String)] = [
-            (
-                "held",
-                MalibuRewardEligibility(
-                    earningState: "held",
-                    withdrawalState: "held",
-                    primaryReason: "insufficient_verified_receipts",
-                    reasons: ["insufficient_verified_receipts"]
-                ),
-                "More verified work is required."
-            ),
-            (
-                "capped",
-                MalibuRewardEligibility(
-                    earningState: "capped",
-                    withdrawalState: "capped",
-                    primaryReason: "held_wallet_daily_cap",
-                    reasons: ["held_wallet_daily_cap"]
-                ),
-                "Wallet daily limit reached."
-            ),
-            (
-                "epoch",
-                MalibuRewardEligibility(
-                    earningState: "held",
-                    withdrawalState: "held",
-                    primaryReason: "held_epoch_disposition",
-                    reasons: ["held_epoch_disposition"]
-                ),
-                "MALIBU has a recorded settlement hold."
-            ),
-        ]
-
-        for item in cases {
-            var snapshot = trustedServing()
-            snapshot.updateRewardInputs(
-                malibuWithdrawable: 3,
-                malibuHeld: 2,
-                malibuRewardEligibility: item.eligibility
-            )
-
-            let status = AgentSnapshotPresenter.consolidatedStatus(snapshot)
-
-            XCTAssertEqual(status.phase, .live, item.name)
-            XCTAssertEqual(status.label, "Live · Trusted", item.name)
-            XCTAssertEqual(status.tone, .neutral, item.name)
-            XCTAssertEqual(status.meaning, item.expected, item.name)
-            XCTAssertFalse(status.meaning.lowercased().contains("unlocked"), item.name)
-            XCTAssertFalse(AgentSnapshotPresenter.rewardVerdict(snapshot).canClaimWithdrawable, item.name)
-        }
-    }
-
-    func testConsolidatedStatusOnlyClaimsEarningForAuthoritativeTrustedVerdict() {
-        var authoritative = trustedServing()
-        authoritative.updateRewardInputs(
-            malibuWithdrawable: 1,
-            malibuRewardEligibility: MalibuRewardEligibility(
-                earningState: "earning",
-                withdrawalState: "withdrawable",
-                primaryReason: "earning_verified_work",
-                reasons: ["earning_verified_work", "withdrawable_balance_available"]
-            )
-        )
-        XCTAssertEqual(AgentSnapshotPresenter.rewardVerdict(authoritative).trustDisplay, .trustedAuthoritative)
-        XCTAssertEqual(AgentSnapshotPresenter.consolidatedStatus(authoritative).phase, .earning)
-
-        var stale = authoritative
-        stale.updateRewardInputs(providerEarningsFresh: false, malibuProjectionFresh: false)
-        XCTAssertEqual(AgentSnapshotPresenter.rewardVerdict(stale).trustDisplay, .trustedStaleNeutral)
-        XCTAssertEqual(AgentSnapshotPresenter.consolidatedStatus(stale).phase, .live)
-
-        var provisional = authoritative
-        provisional.updateRewardInputs(
-            trustTier: .provisional,
-            malibuRewardEligibility: MalibuRewardEligibility(
-                earningState: "held",
-                withdrawalState: "held",
-                primaryReason: "held_provisional_trust_tier",
-                reasons: ["held_provisional_trust_tier"]
-            )
-        )
-        XCTAssertEqual(AgentSnapshotPresenter.rewardVerdict(provisional).trustDisplay, .provisional)
-        XCTAssertEqual(AgentSnapshotPresenter.consolidatedStatus(provisional).phase, .live)
-    }
-
-    func testConsolidatedStatusCarriesTrustProgressFromVerdict() {
-        var snapshot = AgentSnapshot.empty
-        snapshot.state = .serving
-        snapshot.networkState = "buyer_serving"
-        snapshot.updateRewardInputs(
-            walletBound: true,
-            trustTier: .provisional,
-            providerEarningsFresh: true,
-            malibuProjectionFresh: true,
-            malibuRewardEligibility: MalibuRewardEligibility(
-                earningState: "held",
-                withdrawalState: "held",
-                primaryReason: "held_provisional_trust_tier",
-                reasons: ["held_provisional_trust_tier"]
-            ),
-            trustCriteriaMet: 1,
-            trustCriteriaRequired: 2
-        )
-
-        let status = AgentSnapshotPresenter.consolidatedStatus(snapshot)
-
-        XCTAssertEqual(status.phase, .live)
-        XCTAssertEqual(status.label, "Live · Provisional")
-        XCTAssertEqual(status.trustProgress, AgentSnapshotPresenter.rewardVerdict(snapshot).trustProgress)
-        XCTAssertEqual(status.nextAction, "Complete 1 more trust criteria for withdrawal eligibility.")
     }
 
     func testConsolidatedStatusClassifiesAvailabilityAndDiagnosticsBeforeRewards() {
@@ -809,7 +684,7 @@ final class RewardVerdictContractTests: XCTestCase {
             .deletingLastPathComponent()
             .appendingPathComponent("Sources/Malibu/Agent/AgentSnapshot.swift")
         let presenter = try String(contentsOf: presenterURL, encoding: .utf8)
-        let start = try XCTUnwrap(presenter.range(of: "private static func liveNextAction(_ verdict"))
+        let start = try XCTUnwrap(presenter.range(of: "static func consolidatedStatus(_ s: AgentSnapshot)"))
         let end = try XCTUnwrap(presenter.range(of: "static func publicStatus(_ s: AgentSnapshot)"))
         let p0p3Path = String(presenter[start.lowerBound..<end.lowerBound])
         let prohibited = [
@@ -833,7 +708,8 @@ final class RewardVerdictContractTests: XCTestCase {
                 "consolidated status path must consume RewardVerdict instead of \(token)"
             )
         }
-        XCTAssertTrue(p0p3Path.contains("rewardVerdict(s)"))
+        // The status pill describes customer serving only (#2029).
+        XCTAssertFalse(p0p3Path.contains("rewardVerdict(s)"))
     }
 
     func testSliceADoesNotExposeRawRewardInputsToMoneyPathViewsAndLegacyHelpers() throws {

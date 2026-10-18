@@ -98,7 +98,7 @@ struct ModelSwitcherSheet: View {
                     .accessibilityLabel(Text(ModelFeatureUI.checking))
             } else if store.catalogProjectionRetryAvailable {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(String(localized: "Model catalog unavailable. Warning: projection_unavailable.", comment: "Catalog projection unavailable"))
+                    Text(String(localized: "Switching is unavailable right now.", comment: "Catalog projection unavailable"))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     Button(ModelFeatureUI.retry) {

@@ -198,9 +198,15 @@ type AccrualBalance struct {
 	// LockedMALIBU is MALIBU locked by SPEC-050 stakes, including MALIBU in
 	// an unlock cooldown. WithdrawableMALIBU is already net of it
 	// (SPEC-050-R003); HeldMALIBU is not affected.
-	LockedMALIBU        string
-	TrustTier           string
-	HoldReasons         []string
+	LockedMALIBU string
+	TrustTier    string
+	HoldReasons  []string
+	// ActiveHoldReasons are the hold reasons that still describe the
+	// provider's present state; RetainedHoldReasons are trust holds written
+	// under an earlier trust state that rows keep (§3 retroactive unlock
+	// rule). HoldReasons stays the union for the raw read field.
+	ActiveHoldReasons   []string
+	RetainedHoldReasons []string
 	ProviderDailyCapped bool
 	ProviderDailyCap    float64
 	WalletDailyCap      float64
@@ -210,11 +216,12 @@ type AccrualBalance struct {
 func QueryAccrualBalance(ctx context.Context, db *sql.DB, providerID string, cfg Config) (AccrualBalance, error) {
 	cfg = cfg.DefaultsApplied()
 	var tier string
+	var cooldownUntil sql.NullTime
 	err := db.QueryRowContext(ctx, `
-        SELECT COALESCE(trust_tier, $2)
+        SELECT COALESCE(trust_tier, $2), demotion_cooldown_until
           FROM provider_emission_state
          WHERE provider_id = $1
-    `, providerID, TierProvisional).Scan(&tier)
+    `, providerID, TierProvisional).Scan(&tier, &cooldownUntil)
 	if err == sql.ErrNoRows {
 		tier = TierProvisional
 	} else if err != nil {
@@ -294,6 +301,8 @@ func QueryAccrualBalance(ctx context.Context, db *sql.DB, providerID string, cfg
 		return AccrualBalance{}, fmt.Errorf("provider cap state: %w", err)
 	}
 
+	active, retained := classifyHoldReasons(holds, tier, cooldownUntil, time.Now().UTC())
+
 	held := subtractDecimalStrings(accrued, withdrawable)
 	locked, netWithdrawable, err := netStakeLocks(ctx, db, providerID, withdrawable)
 	if err != nil {
@@ -306,10 +315,37 @@ func QueryAccrualBalance(ctx context.Context, db *sql.DB, providerID string, cfg
 		LockedMALIBU:        locked,
 		TrustTier:           tier,
 		HoldReasons:         holds,
+		ActiveHoldReasons:   active,
+		RetainedHoldReasons: retained,
 		ProviderDailyCapped: providerDailyCapped,
 		ProviderDailyCap:    cfg.ProviderDailyCapMALIBU,
 		WalletDailyCap:      cfg.WalletDailyCapMALIBU,
 	}, nil
+}
+
+// classifyHoldReasons splits ledger hold reasons into those that describe the
+// provider's present state and trust holds retained from an earlier state.
+// A demotion_cooldown hold is active only while the cooldown runs, and a
+// trust_tier_provisional hold only while the provider is Provisional. Rows
+// keep both holds afterwards (SPEC-021 §3): they stay held, but they no
+// longer mean a cooldown or a Provisional tier is in effect now. Cap and
+// epoch-disposition holds are always active.
+func classifyHoldReasons(holds []string, tier string, cooldownUntil sql.NullTime, now time.Time) (active, retained []string) {
+	for _, hold := range holds {
+		live := true
+		switch hold {
+		case HoldDemotionCooldown:
+			live = tier != TierTrusted && cooldownUntil.Valid && now.Before(cooldownUntil.Time)
+		case HoldTrustTierProvisional:
+			live = tier != TierTrusted
+		}
+		if live {
+			active = append(active, hold)
+		} else {
+			retained = append(retained, hold)
+		}
+	}
+	return active, retained
 }
 
 // netStakeLocks nets SPEC-050 stake locks out of withdrawable MALIBU

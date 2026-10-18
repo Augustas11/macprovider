@@ -1675,10 +1675,12 @@ protocol MalibuModelCLIRunning: AnyObject {
         onLine: @escaping @MainActor @Sendable (String) -> Void
     ) async throws -> ModelCLIResult
     func cancelCurrentOperation()
+    func forceTerminateCurrentOperation()
 }
 
 extension MalibuModelCLIRunning {
     func cancelCurrentOperation() {}
+    func forceTerminateCurrentOperation() {}
 
     func run(
         arguments: [String],
@@ -1767,6 +1769,16 @@ private final class ModelCLIProcessCancellation: @unchecked Sendable {
         lock.unlock()
         if process?.isRunning == true { process?.terminate() }
     }
+
+    /// Last resort after `cancel()` when the process ignores SIGTERM.
+    func kill() {
+        lock.lock()
+        let process = self.process
+        lock.unlock()
+        if let process, process.isRunning {
+            Darwin.kill(process.processIdentifier, SIGKILL)
+        }
+    }
 }
 
 @MainActor
@@ -1790,6 +1802,10 @@ final class MalibuModelCLI: MalibuModelCLIRunning {
 
     func cancelCurrentOperation() {
         cancellation.cancel()
+    }
+
+    func forceTerminateCurrentOperation() {
+        cancellation.kill()
     }
 
     func run(
@@ -2109,6 +2125,10 @@ final class ModelManagementStore: ObservableObject {
     @Published private(set) var poolBindings: [String: MalibuBYOMPoolBinding] = [:]
 
     private let cli: any MalibuModelCLIRunning
+    /// Upper bound for a model list/catalog read, so "Checking…" always ends
+    /// in a result or a retryable "unavailable" (#2029 P1-19).
+    var listCommandTimeoutSeconds: TimeInterval = 10
+    private var listCommandTimedOut = false
     private let paths: ProviderPaths
     private let defaults: UserDefaults
     private let powerMonitor: MalibuPowerMonitor
@@ -2296,8 +2316,9 @@ final class ModelManagementStore: ObservableObject {
         )
     }
 
+    /// Retry is offered whenever switching is unavailable.
     var catalogProjectionRetryAvailable: Bool {
-        listState == .unavailable && catalogEconomicsCapabilityAvailable
+        listState == .unavailable
     }
 
     var canPerformModelAction: Bool {
@@ -2408,15 +2429,11 @@ final class ModelManagementStore: ObservableObject {
         listState = .checking
         operation = .loadingList
         do {
-            let result = try await cli.run(
-                arguments: [
-                    "models", "list", "--json",
-                    "--config", paths.configFile.path,
-                    "--ctl-socket-path", paths.controlSocket.path,
-                ],
-                peer: peerEvidence,
-                onLine: { _ in }
-            )
+            let result = try await runBoundedListCommand(arguments: [
+                "models", "list", "--json",
+                "--config", paths.configFile.path,
+                "--ctl-socket-path", paths.controlSocket.path,
+            ])
             guard result.exitCode == 0 else { throw ModelManagementError.invalidCatalog }
             let document = try decodeList(result.stdout).validated()
             self.currentModelID = document.currentModelID ?? configuredModel
@@ -2429,8 +2446,27 @@ final class ModelManagementStore: ObservableObject {
         } catch {
             self.listState = .unavailable
             self.operation = .failed(error.localizedDescription)
-            self.statusLine = String(localized: "Model controls unavailable. The current model remains visible from provider status.", comment: "Model activity status")
+            self.statusLine = String(localized: "Switching is unavailable right now. The current model remains visible from provider status.", comment: "Model activity status")
         }
+    }
+
+    private func runBoundedListCommand(arguments: [String]) async throws -> ModelCLIResult {
+        listCommandTimedOut = false
+        let timeoutNanoseconds = UInt64(max(0, listCommandTimeoutSeconds) * 1_000_000_000)
+        let timeout = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: timeoutNanoseconds)
+            guard !Task.isCancelled, let self else { return }
+            self.listCommandTimedOut = true
+            self.cli.cancelCurrentOperation()
+            // Escalate if the CLI ignores SIGTERM.
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            guard !Task.isCancelled else { return }
+            self.cli.forceTerminateCurrentOperation()
+        }
+        defer { timeout.cancel() }
+        let result = try await cli.run(arguments: arguments, peer: peerEvidence, onLine: { _ in })
+        if listCommandTimedOut { throw ModelManagementError.listTimedOut }
+        return result
     }
 
     private func clearCatalogProjectionTracking() {
@@ -2446,19 +2482,17 @@ final class ModelManagementStore: ObservableObject {
         listState = .checking
         operation = .loadingList
         do {
-            let result = try await cli.run(
-                arguments: [
-                    "models", "catalog-economics", "--json",
-                    "--config", paths.configFile.path,
-                    "--ctl-socket-path", paths.controlSocket.path,
-                ] + byomAdapterSettings.cliArguments,
-                peer: peerEvidence,
-                onLine: { _ in }
-            )
+            let result = try await runBoundedListCommand(arguments: [
+                "models", "catalog-economics", "--json",
+                "--config", paths.configFile.path,
+                "--ctl-socket-path", paths.controlSocket.path,
+            ] + byomAdapterSettings.cliArguments)
             guard result.exitCode == 0 else { throw ModelManagementError.invalidCatalog }
             let document = try decodeCatalogEconomics(result.stdout).validated()
             guard acceptCatalogProjection(document) else {
-                self.listState = previousListState
+                // A rejected projection keeps the state already shown; it
+                // never leaves the first read stuck on "Checking".
+                self.listState = previousListState == .checking ? .unavailable : previousListState
                 self.operation = .idle
                 return
             }
@@ -2483,7 +2517,7 @@ final class ModelManagementStore: ObservableObject {
             self.listState = .unavailable
             self.operation = .failed("projection_unavailable")
             catalogProjectionExpiryTask?.cancel()
-            self.statusLine = String(localized: "Model catalog unavailable. Warning: projection_unavailable. The current model remains visible from provider status.", comment: "Catalog economics unavailable")
+            self.statusLine = String(localized: "Model catalog unavailable right now. The current model remains visible from provider status.", comment: "Catalog economics unavailable")
         }
     }
 
@@ -2537,7 +2571,7 @@ final class ModelManagementStore: ObservableObject {
             if !self.operation.blocksRefresh {
                 self.operation = .failed("projection_unavailable")
             }
-            self.statusLine = String(localized: "Model catalog unavailable. Warning: projection_unavailable. The current model remains visible from provider status.", comment: "Catalog economics unavailable")
+            self.statusLine = String(localized: "Model catalog unavailable right now. The current model remains visible from provider status.", comment: "Catalog economics unavailable")
         }
     }
 
@@ -3319,9 +3353,15 @@ private func modelIdentityKey(_ modelID: String) -> String {
 
 enum ModelManagementError: LocalizedError {
     case invalidCatalog
+    case listTimedOut
 
     var errorDescription: String? {
-        String(localized: "The provider returned an invalid model catalog. Model actions are disabled until the provider is updated.", comment: "Invalid model catalog")
+        switch self {
+        case .invalidCatalog:
+            return String(localized: "The provider returned an invalid model catalog. Model actions are disabled until the provider is updated.", comment: "Invalid model catalog")
+        case .listTimedOut:
+            return String(localized: "The provider did not answer in time.", comment: "Model list timed out")
+        }
     }
 }
 

@@ -38,6 +38,8 @@ type ProviderWalletStatus struct {
 	RewardAmounts               ProviderWalletRewardAmounts      `json:"reward_amounts"`
 	EligibilityInputs           ProviderWalletEligibilityInput   `json:"eligibility_inputs"`
 	RewardEligibility           MalibuRewardEligibilityReadModel `json:"reward_eligibility"`
+	TrustProgress               ProviderTrustProgress            `json:"trust_progress"`
+	Emission                    ProviderEmissionStatus           `json:"emission"`
 	RewardProjectionGeneratedAt string                           `json:"reward_projection_generated_at"`
 	RewardProjectionStaleAfter  string                           `json:"reward_projection_stale_after"`
 	Audit                       RewardAuditPage                  `json:"audit"`
@@ -223,6 +225,8 @@ func QueryProviderWalletStatusWithDeps(ctx context.Context, providerID string, d
 			UptimeOK:              projection.Trust.UptimeOK,
 		},
 		RewardEligibility:           projection.Eligibility,
+		TrustProgress:               projection.TrustProgress,
+		Emission:                    projection.Emission,
 		RewardProjectionGeneratedAt: projection.GeneratedAt.Format(time.RFC3339),
 		RewardProjectionStaleAfter:  projection.StaleAfter.Format(time.RFC3339),
 		Audit:                       auditPage,

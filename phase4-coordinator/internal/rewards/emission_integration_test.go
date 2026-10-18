@@ -1225,3 +1225,69 @@ func TestCapReplayPendingDoesNotDesyncConnection(t *testing.T) {
 		t.Fatalf("primary_reason after cap replay = %q, want wallet cap cleared", eligibility.PrimaryReason)
 	}
 }
+
+// SPEC-021 §5.2 v0.5: rows held by an elapsed demotion cooldown are
+// retained trust holds, not a running cooldown, and the projection reports
+// the provider's last MALIBU accrual.
+func TestElapsedCooldownHoldsAreRetainedInAccrualRead(t *testing.T) {
+	fx, adminDB := startPostgres(t)
+	_ = openRewardsWriter(t, fx)
+	ctx := context.Background()
+
+	cooldownEnded := time.Now().UTC().Add(-7 * 24 * time.Hour)
+	lastAccrual := time.Date(2026, 8, 18, 3, 5, 0, 0, time.UTC)
+	if _, err := adminDB.ExecContext(ctx, `
+        INSERT INTO provider_emission_state (provider_id, trust_tier, demotion_cooldown_until)
+        VALUES ('p_cooldown', 'provisional', $1)
+    `, cooldownEnded); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+	for _, row := range []struct {
+		ts     int64
+		amount string
+		hold   any
+	}{
+		{lastAccrual.Add(-6 * 24 * time.Hour).Unix(), "40.00", rewards.HoldDemotionCooldown},
+		{lastAccrual.Unix(), "60.00", rewards.HoldTrustTierProvisional},
+		{lastAccrual.Add(-10 * 24 * time.Hour).Unix(), "20.00", nil},
+	} {
+		if _, err := adminDB.ExecContext(ctx, `
+            INSERT INTO provider_rewards_ledger (provider_id, unix_ts, amount_malibu, withdrawal_hold_reason, reason)
+            VALUES ('p_cooldown', $1, $2::NUMERIC, $3, 'malibu_bootstrap_tick')
+        `, row.ts, row.amount, row.hold); err != nil {
+			t.Fatalf("seed ledger: %v", err)
+		}
+	}
+
+	projection, err := rewards.BuildProviderRewardProjection(ctx, "p_cooldown", rewards.ProviderRewardProjectionDeps{
+		RewardsDB: adminDB,
+		Config:    rewards.Config{SQLitePayoutDBPath: testSQLitePayoutDBPath(t)},
+	})
+	if err != nil {
+		t.Fatalf("projection: %v", err)
+	}
+	bal := projection.Balance
+	if len(bal.ActiveHoldReasons) != 1 || bal.ActiveHoldReasons[0] != rewards.HoldTrustTierProvisional {
+		t.Fatalf("active holds = %v", bal.ActiveHoldReasons)
+	}
+	if len(bal.RetainedHoldReasons) != 1 || bal.RetainedHoldReasons[0] != rewards.HoldDemotionCooldown {
+		t.Fatalf("retained holds = %v", bal.RetainedHoldReasons)
+	}
+	for _, reason := range projection.Eligibility.Reasons {
+		if reason == rewards.ReasonHeldDemotionCooldown {
+			t.Fatalf("reasons %v claim a running cooldown", projection.Eligibility.Reasons)
+		}
+	}
+	if projection.Eligibility.WithdrawalState != rewards.WithdrawalStateHeld {
+		t.Fatalf("withdrawal_state = %q, want held", projection.Eligibility.WithdrawalState)
+	}
+	if projection.Emission.Active {
+		t.Fatal("emission reported active with emission disabled")
+	}
+	if projection.Emission.LastAccrualAt == nil || !projection.Emission.LastAccrualAt.Equal(lastAccrual) {
+		t.Fatalf("last accrual = %v, want %v", projection.Emission.LastAccrualAt, lastAccrual)
+	}
+	if projection.TrustProgress.DemotionCooldownActive || !projection.TrustProgress.RequalificationRequired {
+		t.Fatalf("trust progress = %+v", projection.TrustProgress)
+	}
+}

@@ -468,6 +468,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         "referral_bootstrap_v1",
         "referral_status_v1",
         "referral_advocacy_v1",
+        // Metrics carry true requests/minute and GPU utilisation (#2029).
+        "metrics_request_rate_v1",
         "referral_repeatable_advocacy_v1",
         "referral_fragment_links_v1",
         "provider_safety_telemetry_v2",
@@ -2165,6 +2167,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             "requests_queued": snapshot.requestsQueued,
             "errors_total": snapshot.errorsTotal,
             "restart_count": snapshot.restartCount,
+            "restart_count_7d": snapshot.restartCount7d ?? NSNull(),
             "memory_rss_mb": snapshot.memoryRSSMB,
             "capacity": [
                 "ram_gb": snapshot.capacity.ramGB,
@@ -2364,6 +2367,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             "active_request_id_count": snapshot.activeRequestIDCount,
             "errors_total": snapshot.errorsTotal,
             "restart_count": snapshot.restartCount,
+            "restart_count_7d": snapshot.restartCount7d ?? NSNull(),
             "memory_rss_mb": snapshot.memoryRSSMB,
             "memory_pressure": snapshot.memoryPressure.rawValue,
             "thermal_state": snapshot.thermalState,

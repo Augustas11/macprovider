@@ -1329,6 +1329,11 @@ func (h *handler) writeProviderEarnings(w http.ResponseWriter, r *http.Request, 
 		unavailable("rate_card", err)
 		return
 	}
+	lastPaidJobAt, err := lastPaidRequestAt(ctx, h.store.reader(), providerID, time.Now().UTC())
+	if err != nil {
+		unavailable("last_paid_job", err)
+		return
+	}
 	resp := map[string]any{
 		"provider_id":            providerID,
 		"total_credits":          totalCredits,
@@ -1349,6 +1354,12 @@ func (h *handler) writeProviderEarnings(w http.ResponseWriter, r *http.Request, 
 		"usdc_week":     providerCreditsToUSDC(weekCredits),
 		"usdc_pending":  providerCreditsToUSDC(pendingCredits),
 		"usdc_lifetime": providerCreditsToUSDC(totalCredits),
+		// payouts_enabled is payout.enabled: false means unpaid USDC has no
+		// running payout path yet, so clients must not promise one.
+		"payouts_enabled": h.store.payoutsEnabled.Load(),
+	}
+	if lastPaidJobAt != "" {
+		resp["last_paid_job_at_utc"] = lastPaidJobAt
 	}
 	idlePrewarm := statsprewarm.Summary{
 		EventsLast1h:        map[string]int64{},
@@ -1795,6 +1806,33 @@ func (h *handler) providerEarningsFiguresFromViewOnce(ctx context.Context, provi
 		return out, errEarningsRollupMaturityRace
 	}
 	return out, nil
+}
+
+// lastPaidRequestAtLookback bounds the last-credited-job read to recent rows
+// so a provider with a long history and no recent payable work cannot make
+// every earnings read scan its whole hot ledger.
+const lastPaidRequestAtLookback = 7 * 24 * time.Hour
+
+// lastPaidRequestAt is the time of the provider's newest payable request in
+// the last lastPaidRequestAtLookback, RFC3339 UTC, or "" when there is none.
+// The provider_id, ts_utc index bounds the walk to that window.
+func lastPaidRequestAt(ctx context.Context, q sqlQueryer, providerID string, now time.Time) (string, error) {
+	var raw sql.NullString
+	err := q.QueryRowContext(ctx, `SELECT ts_utc FROM spec022_payable_request_credits
+WHERE provider_id=? AND ts_utc >= ? AND provider_credits > 0 ORDER BY ts_utc DESC LIMIT 1`,
+		providerID, sqliteTimeText(now.Add(-lastPaidRequestAtLookback))).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && !raw.Valid) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02 15:04:05.999999999", "2006-01-02 15:04:05"} {
+		if t, perr := time.Parse(layout, raw.String); perr == nil {
+			return t.UTC().Format(time.RFC3339), nil
+		}
+	}
+	return "", nil
 }
 
 func sumOnQ(ctx context.Context, q sqlQueryer, query string, args ...any) (int64, error) {
