@@ -218,7 +218,7 @@ extension AgentSnapshotPresenter {
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
-    // MARK: Advanced diagnostics
+    // MARK: Provider and Diagnostics screens
 
     static func requestsLine(_ s: AgentSnapshot) -> String {
         [

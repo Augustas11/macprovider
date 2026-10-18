@@ -13,7 +13,7 @@ struct MalibuApp: App {
                 // app in the Dock. Settings and the dashboard open through
                 // the same presenters as the menu-bar item.
                 CommandGroup(replacing: .appSettings) {
-                    Button("Settings…") { SettingsWindowPresenter.shared.present() }
+                    Button("Settings…") { AppDelegate.current?.presentDashboard(section: .settings) }
                         .keyboardShortcut(",", modifiers: .command)
                 }
                 CommandGroup(replacing: .newItem) {
@@ -33,6 +33,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var menuBar: MenuBarController!
     private var onboardingWindow: NSWindow?
     private var dashboardWindow: NSWindow?
+    private let navigation = MalibuNavigation()
     private var bundleRelaunchMonitor: AppBundleRelaunchMonitor?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -40,7 +41,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // completed compatibility-set transaction without reading the bundle.
         logStartupProvenance()
         AppDelegate.current = self
-        SettingsWindowPresenter.shared.agent = agent
 
         menuBar = MenuBarController(agent: agent) { [weak self] action in
             self?.handle(action)
@@ -149,7 +149,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .exportDiagnostics: exportDiagnostics()
         case .resetProviderService: resetProviderService()
         case .openSettings:
-            SettingsWindowPresenter.shared.present()
+            presentDashboard(section: .settings)
         case .quitAndUninstall:
             guard uninstallTask == nil else { return }
             guard confirmUninstall() else { return }
@@ -319,10 +319,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return alert.runModal() == .alertSecondButtonReturn
     }
 
-    func presentDashboard() {
+    func presentDashboard(section: MalibuSection? = nil) {
+        if let section {
+            navigation.show(section)
+        }
         if dashboardWindow == nil {
             dashboardWindow = DashboardWindow.make(
                 agent: agent,
+                navigation: navigation,
                 onExportDiagnostics: { [weak self] in self?.exportDiagnostics() },
                 onResetProvider: { [weak self] in self?.resetProviderService() }
             )
@@ -472,7 +476,7 @@ enum MigrationErrorCopy {
             reason = publicHandoffReason(handoffError)
         } else {
             reason = AgentSnapshotPresenter.publicErrorDetail(error.localizedDescription)
-                ?? "Technical details are available in Advanced diagnostics."
+                ?? "Technical details are available in Diagnostics."
         }
         return "\(reason)\n\nYour current setup was not changed."
     }

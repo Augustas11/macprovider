@@ -181,7 +181,7 @@ private struct OnboardingRootView: View {
             stageRow(
                 title: retryable ? "Needs retry" : "Setup failed",
                 detail: AgentSnapshotPresenter.publicErrorDetail(message)
-                    ?? "Details are available in Advanced diagnostics."
+                    ?? "Details are available in Diagnostics."
             ) {
                 VStack(alignment: .leading, spacing: 8) {
                     if stage == "referral", !repairExistingInstall {
@@ -252,7 +252,7 @@ private struct OnboardingRootView: View {
     @ViewBuilder
     private func advancedLogDisclosure(lines: [String]) -> some View {
         if !lines.isEmpty {
-            DisclosureGroup("Advanced diagnostics") {
+            DisclosureGroup("Diagnostics") {
                 ScrollView {
                     Text(lines.suffix(20).map(LogTailBuffer.redacted).joined(separator: "\n"))
                         .font(.system(.caption, design: .monospaced))
@@ -272,7 +272,7 @@ private struct OnboardingRootView: View {
             providerLogLines: agent.logLines
         )
         if !visibleDetails.isEmpty {
-            DisclosureGroup("Advanced diagnostics") {
+            DisclosureGroup("Diagnostics") {
                 ScrollView {
                     Text(visibleDetails.suffix(20).joined(separator: "\n"))
                         .font(.system(.caption, design: .monospaced))

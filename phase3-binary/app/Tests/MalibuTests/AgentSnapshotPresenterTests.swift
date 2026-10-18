@@ -781,7 +781,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         s.lastError = "boom"
         XCTAssertEqual(
             AgentSnapshotPresenter.stateLine(s),
-            "Details are available in Advanced diagnostics."
+            "Details are available in Diagnostics."
         )
     }
 
@@ -2088,7 +2088,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         snapshot.state = .serving
         snapshot.currentModelID = "llama"
 
-        let copy = (DashboardCopy.defaultPublicStrings(snapshot) + DashboardCopy.advancedDiagnosticsStrings(snapshot))
+        let copy = (DashboardCopy.defaultPublicStrings(snapshot) + DiagnosticsPresentation.screenStrings(snapshot, appVersion: "1.0"))
             .joined(separator: "\n")
             .lowercased()
         XCTAssertFalse(copy.contains("watchdog"), copy)
@@ -2101,7 +2101,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
 
         XCTAssertEqual(
             AgentSnapshotPresenter.publicErrorDetail(raw),
-            "Details are available in Advanced diagnostics."
+            "Details are available in Diagnostics."
         )
         XCTAssertEqual(
             LogTailBuffer.redacted(raw),
