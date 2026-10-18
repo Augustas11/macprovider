@@ -11,6 +11,7 @@ die() { printf '[test-canary-swap] FAIL: %s\n' "$*" >&2; exit 1; }
 log() { printf '[test-canary-swap] %s\n' "$*" >&2; }
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/canary-swap-test.XXXXXX")"
+T="$(cd "$T" && pwd -P)"
 SERVER_PID=""
 cleanup() {
   if [ -n "$SERVER_PID" ]; then
@@ -52,7 +53,9 @@ for name in names:
 header = bytearray(0x58)
 header[:4] = b"MTLB"
 struct.pack_into("<QQ", header, 0x18, 0x58, len(entries))
-open(out, "wb").write(bytes(header) + struct.pack("<I", len(names)) + entries)
+body = struct.pack("<I", len(names)) + entries
+struct.pack_into("<Q", header, 0x10, len(header) + len(body))
+open(out, "wb").write(bytes(header) + body)
 PY
 }
 MANIFEST="$REPO_ROOT/phase3-binary/mlx-metallib-required-kernels.json"
@@ -70,8 +73,21 @@ tar -czf "$T/good.tar.gz" -C "$T/good" macprovider-cli mlx.metallib mlx-swift_Cm
 make_payload "$T/bad" "$CAND" gather_mm_offsets
 tar -czf "$T/bad.tar.gz" -C "$T/bad" macprovider-cli mlx.metallib mlx-swift_Cmlx.bundle compatibility-set.json
 
+# verify_bytes TARBALL: record TARBALL as the signature-verified v$CAND bytes,
+# the way cli-release.sh signed_byte_verification leaves them.
+verify_bytes() {
+  local dir="$T/bytes" asset="macprovider-cli-v$CAND-darwin-arm64.tar.gz" scope="$T/ops-state/cli-release-$CAND"
+  rm -rf "$dir"; mkdir -p "$dir" "$scope"
+  cp "$1" "$dir/$asset"
+  printf '%s  %s\n' "$(shasum -a 256 "$dir/$asset" | awk '{print $1}')" "$asset" >"$dir/checksums.txt"
+  rm -f "$scope/canary_swap.json"
+  printf '{"bytes_dir":"%s","checksums_sha256":"%s","binary_sha256":"%s"}\n' "$dir" \
+    "$(shasum -a 256 "$dir/checksums.txt" | awk '{print $1}')" \
+    "$(shasum -a 256 "$T/good/macprovider-cli" | awk '{print $1}')" >"$scope/signed_byte_verification.json"
+}
+
 reset_install() {
-  rm -rf "$FAKE_INSTALL" "$FAKE_INSTALL".pre-* "$FAKE_INSTALL".failed-* "$T/state"/*
+  rm -rf "$FAKE_INSTALL" "$FAKE_INSTALL".pre-* "$FAKE_INSTALL".failed-* "$T/state"/* "$HOME/macprovider-canary-staging"
   make_payload "$FAKE_INSTALL" "$OLD" none
   echo loaded >"$T/state/job"
   echo 100 >"$T/state/pid"
@@ -86,11 +102,14 @@ s="$FAKE_STATE"
 running() { "$FAKE_INSTALL/macprovider-cli" --version; }
 case "$1" in
   bootout) [[ "$2" == *-watchdog ]] || echo unloaded >"$s/job" ;;
-  bootstrap) echo loaded >"$s/job"; echo $(( $(cat "$s/pid") + 1 )) >"$s/pid" ;;
+  bootstrap)
+    echo loaded >"$s/job"; echo $(( $(cat "$s/pid") + 1 )) >"$s/pid"
+    [ "$(running)" != "$FAKE_CAND" ] || touch "$s/swapped" ;;
   print)
     [ "$(cat "$s/job")" = loaded ] || exit 113
     [[ "$2" == *-watchdog ]] && exit 113
-    if [ "$(cat "$s/mode" 2>/dev/null)" = crash ] && [ "$(running)" = "$FAKE_CAND" ]; then
+    mode="$(cat "$s/mode" 2>/dev/null || true)"
+    if { [ "$mode" = crash ] || [ "$mode" = dead ]; } && [ "$(running)" = "$FAKE_CAND" ]; then
       echo $(( $(cat "$s/pid") + 1 )) >"$s/pid"
     fi
     printf '\tstate = running\n\tpid = %s\n' "$(cat "$s/pid")" ;;
@@ -102,7 +121,10 @@ cat >"$T/bin/curl" <<'SH'
 s="$FAKE_STATE"
 [ "$(cat "$s/job")" = loaded ] || exit 7
 v="$("$FAKE_INSTALL/macprovider-cli" --version)"
-if [ "$(cat "$s/mode" 2>/dev/null)" = silent ] && [ "$v" = "$FAKE_CAND" ]; then exit 7; fi
+mode="$(cat "$s/mode" 2>/dev/null || true)"
+if [ "$mode" = silent ] && [ "$v" = "$FAKE_CAND" ]; then exit 7; fi
+# dead: the candidate crashes, and the restored version never answers again.
+if [ "$mode" = dead ] && [ -f "$s/swapped" ]; then exit 7; fi
 paused=false; state=serving_buyers; net=buyer_serving
 if [ -f "$s/paused" ]; then paused=true; state=paused_by_operator; net=paused; fi
 printf '{"binary_version":"%s","model_loaded":true,"network_state":"%s","requests_in_flight":0,"lifecycle":{"state":"%s","operator_paused":%s}}\n' "$v" "$net" "$state" "$paused"
@@ -138,46 +160,73 @@ run_rc() { # WANT LABEL CMD...
 }
 installed() { "$FAKE_INSTALL/macprovider-cli" --version; }
 
-# 1. check refuses a candidate whose metallib lacks gather_mm_offsets, before any ssh.
+# 1. check refuses a candidate whose metallib lacks gather_mm_offsets; swap
+#    refuses it before any ssh; swap refuses unverified --tarball bytes.
 reset_install
 run_rc 3 "check refuses missing gather_mm_offsets" "$SWAP" check --version "$CAND" --tarball "$T/bad.tar.gz"
 grep -q "missing 1 kernel(s) from gather_mm_offsets.metal" "$T/err" || die "check did not name the missing kernel"
-run_rc 3 "swap refuses missing gather_mm_offsets" "$SWAP" swap --version "$CAND" --tarball "$T/bad.tar.gz"
+verify_bytes "$T/bad.tar.gz"
+run_rc 3 "swap refuses missing gather_mm_offsets" "$SWAP" swap --version "$CAND"
 [ "$(installed)" = "$OLD" ] || die "refused swap changed the payload"
 [ ! -f "$T/state/runner" ] || die "refused swap touched the buyer runner"
+run_rc 3 "swap refuses --tarball" "$SWAP" swap --version "$CAND" --tarball "$T/good.tar.gz"
+verify_bytes "$T/good.tar.gz"
+cp "$T/bad.tar.gz" "$T/bytes/macprovider-cli-v$CAND-darwin-arm64.tar.gz"
+run_rc 3 "swap refuses bytes that differ from the signed checksums" "$SWAP" swap --version "$CAND"
+grep -q "does not match its signed checksums.txt entry" "$T/err" || die "checksum binding not named"
 run_rc 0 "check passes a complete candidate" "$SWAP" check --version "$CAND" --tarball "$T/good.tar.gz"
 
-# 2. healthy swap: candidate installed, backup kept, resumed, runner restarted.
+# 2. healthy swap: candidate installed, backup kept, resumed, runner restarted,
+#    canary_swap recorded for the canary_smoke probe.
 reset_install
-run_rc 0 "healthy swap" "$SWAP" swap --version "$CAND" --tarball "$T/good.tar.gz"
+verify_bytes "$T/good.tar.gz"
+run_rc 0 "healthy swap" "$SWAP" swap --version "$CAND"
 [ "$(installed)" = "$CAND" ] || die "healthy swap did not install the candidate"
 ls -d "$FAKE_INSTALL".pre-"$CAND"-* >/dev/null || die "no backup of the previous payload"
 grep -qx resume_request "$T/state/frames" || die "healthy swap never resumed the provider"
 [ ! -f "$T/state/paused" ] || die "provider left paused"
 [ "$(tr '\n' ' ' <"$T/state/runner")" = "stopped started " ] || die "runner not stopped then restarted"
 [ ! -f "$MACPROVIDER_LIVE_LOCK" ] || die "live-ops lock not released"
+[ ! -d "$HOME/.macprovider-canary-swap.lock" ] || die "canary-host lock not released"
+grep -q '"kernel_check": "passed"' "$T/ops-state/cli-release-$CAND/canary_swap.json" || die "no canary_swap record"
 
-# 3. crash loop: the candidate restarts, the previous payload comes back resumed.
+# 3. crash loop: the candidate restarts, the previous version comes back serving.
 reset_install
+verify_bytes "$T/good.tar.gz"
 echo crash >"$T/state/mode"
-run_rc 5 "crash loop restores the backup" "$SWAP" swap --version "$CAND" --tarball "$T/good.tar.gz"
+run_rc 5 "crash loop restores the backup" "$SWAP" swap --version "$CAND"
 grep -q "crash loop" "$T/err" || die "crash loop not named"
 [ "$(installed)" = "$OLD" ] || die "crash loop left the candidate installed"
 ls -d "$FAKE_INSTALL".failed-"$CAND"-* >/dev/null || die "failed payload not kept"
 [ ! -f "$T/state/paused" ] || die "restored provider left paused"
 [ "$(tr '\n' ' ' <"$T/state/runner")" = "stopped started " ] || die "runner not restarted after rollback"
+[ ! -f "$T/ops-state/cli-release-$CAND/canary_swap.json" ] || die "failed swap recorded canary_swap"
 
 # 4. /v1/status silence past CANARY_STATUS_TIMEOUT_S restores the backup.
 reset_install
 echo silent >"$T/state/mode"
-run_rc 5 "status silence restores the backup" "$SWAP" swap --version "$CAND" --tarball "$T/good.tar.gz"
+run_rc 5 "status silence restores the backup" "$SWAP" swap --version "$CAND"
 grep -q "/v1/status not answering for 3s" "$T/err" || die "status silence not named"
 [ "$(installed)" = "$OLD" ] || die "status silence left the candidate installed"
 
-# 5. a swap needs the lock owner and runner commands.
+# 5. a rollback whose previous version does not come back serving needs the operator.
 reset_install
-run_rc 3 "swap without an owner" env -u MACPROVIDER_OPS_OWNER "$SWAP" swap --version "$CAND" --tarball "$T/good.tar.gz"
-run_rc 3 "swap without runner commands" env -u CANARY_RUNNER_STOP_CMD "$SWAP" swap --version "$CAND" --tarball "$T/good.tar.gz"
+echo dead >"$T/state/mode"
+run_rc 6 "rollback that does not serve again" "$SWAP" swap --version "$CAND"
+grep -q "is not buyer_serving within" "$T/err" || die "unhealthy rollback not named"
+
+# 6. preconditions: owner, runner commands, a busy canary-host lock, a
+#    half-failed runner stop (restarted anyway).
+reset_install
+run_rc 3 "swap without an owner" env -u MACPROVIDER_OPS_OWNER "$SWAP" swap --version "$CAND"
+run_rc 3 "swap without runner commands" env -u CANARY_RUNNER_STOP_CMD "$SWAP" swap --version "$CAND"
+mkdir "$HOME/.macprovider-canary-swap.lock"; echo $$ >"$HOME/.macprovider-canary-swap.lock/pid"
+run_rc 4 "swap refused while another swap holds the canary" "$SWAP" swap --version "$CAND"
+[ -d "$HOME/.macprovider-canary-swap.lock" ] || die "refused swap removed another swap's lock"
+rm -rf "$HOME/.macprovider-canary-swap.lock"
+: >"$T/state/runner"
+run_rc 3 "half-failed runner stop" env CANARY_RUNNER_STOP_CMD="echo stopped >> '$T/state/runner'; false" "$SWAP" swap --version "$CAND"
+[ "$(tr '\n' ' ' <"$T/state/runner")" = "stopped started " ] || die "half-stopped runner not restarted"
 [ "$(installed)" = "$OLD" ] || die "refused swap changed the payload"
 
 log PASS

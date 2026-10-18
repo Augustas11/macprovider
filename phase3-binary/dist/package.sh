@@ -8,7 +8,8 @@
 # Default VERSION_TAG = current short git rev. Output tarball lands at:
 #   phase3-binary/dist/phase3-binary-m4-<TAG>.tar.gz
 #
-# Tarball size is ~30-40 MB compressed.
+# Tarball size is ~100 MB compressed (two copies of the complete MLX kernel
+# library); it must stay under install.sh RELEASE_ASSET_MAX_BYTES.
 
 set -euo pipefail
 
@@ -169,7 +170,10 @@ esac
 MLX_SWIFT_RESOLVED_CHECKOUT="$RELEASE_DIR/SourcePackages/checkouts/mlx-swift"
 MLX_BUNDLE_METALLIB="$PRODUCTS/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib"
 MLX_REQUIRED_KERNELS="$PHASE3_DIR/mlx-metallib-required-kernels.json"
-echo "==> Building mlx.metallib for CLI artifact..."
+# The kernels target the package's minimum macOS (Package.swift platforms),
+# like the SwiftPM-built library did; derive below compiles the same way.
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
+echo "==> Building mlx.metallib for CLI artifact (macOS $MACOSX_DEPLOYMENT_TARGET)..."
 rm -f "$PRODUCTS/mlx.metallib"
 MLX_SWIFT_CHECKOUT="$MLX_SWIFT_RESOLVED_CHECKOUT" \
   "$PHASE3_DIR/scripts/build-mlx-metallib.sh" "$PRODUCTS"
@@ -259,6 +263,14 @@ done
   exit 1
 }
 tar czf "$TARBALL" -C "$STAGE_DIR" "${archive_members[@]}"
+# install.sh refuses a release asset above RELEASE_ASSET_MAX_BYTES while it
+# streams; never build one it would refuse.
+RELEASE_ASSET_MAX_BYTES=$(sed -n 's/^RELEASE_ASSET_MAX_BYTES=\([0-9][0-9]*\)$/\1/p' "$PHASE3_DIR/dist/install.sh")
+TARBALL_BYTES=$(wc -c <"$TARBALL" | tr -d ' ')
+[ -n "$RELEASE_ASSET_MAX_BYTES" ] && [ "$TARBALL_BYTES" -lt "$RELEASE_ASSET_MAX_BYTES" ] || {
+  echo "FATAL: $TARBALL is $TARBALL_BYTES bytes; install.sh accepts at most ${RELEASE_ASSET_MAX_BYTES:-unknown}" >&2
+  exit 1
+}
 
 echo "==> Tarball stats:"
 ls -la "$TARBALL"

@@ -1,4 +1,6 @@
 {
+  "macosx_deployment_target": "14.0",
+  "metal_version": 310,
   "mlx_core_commit": "2f512e3997349c8648f5d7c5113eb2c825aa242d",
   "mlx_swift_revision": "29d3b93375cc56cd2649b40e4310a8bc445e9874",
   "schema": "macprovider.mlx-metallib-required-kernels.v1",
@@ -71,11 +73,6 @@
       "dot_product_bfloat16_it32_tg512_sg16",
       "dot_product_float16_it32_tg512_sg16",
       "dot_product_float32_it32_tg512_sg16"
-    ],
-    "fence": [
-      "fence_update",
-      "fence_wait",
-      "input_coherent"
     ],
     "gated_delta_update": [
       "gated_delta_fused_chunk_bfloat16_t_128_128_16_16_8",

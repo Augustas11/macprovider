@@ -997,6 +997,14 @@ structured_done() {
     canary_smoke)
       if [ "$DONE_PROBE" = 1 ]; then
         [ -n "$DONE_RUN_IDS$DONE_CARRY" ] && refuse "use one kind of evidence"
+        # The canary runs the verified bytes only when scripts/ops/canary-swap.sh
+        # put them there (it checks the kernels, binds the tarball to the signed
+        # checksums and records this marker).
+        local swapped_binary
+        swapped_binary="$(marker_field "$OPS_SCOPE" canary_swap 'd.get("binary_sha256")')"
+        [ -n "$swapped_binary" ] &&
+          [ "$swapped_binary" = "$(marker_field "$OPS_SCOPE" signed_byte_verification 'd.get("binary_sha256")')" ] ||
+          refuse "no canary_swap record for the verified v$V bytes; swap with: MACPROVIDER_OPS_OWNER=<label> $OPS_DIR/canary-swap.sh swap --version $V"
         require_studio_ssh
         case "${STUDIO_STATUS_PORT:-}" in ""|*[!0-9]*) refuse "STUDIO_STATUS_PORT must be set and numeric" ;; esac
         studio_ssh "curl -s -m 10 http://127.0.0.1:$STUDIO_STATUS_PORT/v1/status" > "$OPS_TMP_DIR/canary.json" ||

@@ -37,7 +37,9 @@ for name in names:
 header = bytearray(0x58)
 header[:4] = b"MTLB"
 struct.pack_into("<QQ", header, 0x18, 0x58, len(entries))
-open(out, "wb").write(bytes(header) + struct.pack("<I", len(names)) + entries + b"ENDT")
+body = struct.pack("<I", len(names)) + entries + b"ENDT"
+struct.pack_into("<Q", header, 0x10, len(header) + len(body))
+open(out, "wb").write(bytes(header) + body)
 PY
 }
 
@@ -105,10 +107,19 @@ import importlib.util, sys
 spec = importlib.util.spec_from_file_location("k", sys.argv[1])
 k = importlib.util.module_from_spec(spec); spec.loader.exec_module(k)
 from pathlib import Path
-print(" ".join(k.required_units(Path(sys.argv[2]))))
-' "$TOOL" "$fake")"
+print(" ".join(k.required_units(Path(sys.argv[2]), int(sys.argv[3]))))
+' "$TOOL" "$fake" 320)"
 [ "$units" = "arg_reduce fence gather_mm_offsets scaled_dot_product_attention" ] ||
-  die "unexpected JIT-mode units: $units"
+  die "unexpected JIT-mode units at Metal 3.2: $units"
+units="$(python3 -c '
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("k", sys.argv[1])
+k = importlib.util.module_from_spec(spec); spec.loader.exec_module(k)
+from pathlib import Path
+print(" ".join(k.required_units(Path(sys.argv[2]), int(sys.argv[3]))))
+' "$TOOL" "$fake" 310)"
+[ "$units" = "arg_reduce gather_mm_offsets scaled_dot_product_attention" ] ||
+  die "a Metal 3.2 guard was not honored for a Metal 3.1 target: $units"
 
 # 5. the committed manifest is derived from the pinned mlx-swift revision.
 pinned="$(python3 -c '
@@ -136,7 +147,31 @@ VERIFY="$REPO_ROOT/scripts/verify-tier2-provider-release.sh"
 for label in '"provider tarball"' '"provider package payload"' '"Malibu.app"'; do
   grep -q "verify_mlx_kernels $label" "$VERIFY" || die "verify-tier2-provider-release.sh does not gate the $label metallibs"
 done
-grep -q 'gather_mm_offsets' "$REPO_ROOT/phase3-binary/scripts/build-mlx-metallib.sh" ||
-  die "build-mlx-metallib.sh does not compile gather_mm_offsets"
+# The builder compiles every unit the manifest requires (it lists sources by hand).
+BUILDER="$REPO_ROOT/phase3-binary/scripts/build-mlx-metallib.sh"
+for unit in $(python3 -c 'import json,sys; print(" ".join(json.load(open(sys.argv[1]))["units"]))' "$MANIFEST"); do
+  grep -qx -e "  $unit" -e "  kernels+=($unit)" "$BUILDER" || die "build-mlx-metallib.sh does not compile required unit $unit"
+done
+grep -q 'export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"' "$PACKAGE" ||
+  die "package.sh does not build the kernels for the package's minimum macOS"
+grep -q '^        .macOS(.v14)$' "$REPO_ROOT/phase3-binary/Package.swift" ||
+  die "Package.swift minimum macOS changed; update package.sh MACOSX_DEPLOYMENT_TARGET and regenerate the manifest"
+
+# 7. header size, section bounds, and an unparsed build_kernel call fail closed.
+cp "$WORKDIR/small.metallib" "$WORKDIR/padded.metallib"
+printf 'x' >>"$WORKDIR/padded.metallib"
+if python3 "$TOOL" list "$WORKDIR/padded.metallib" 2>/dev/null; then
+  die "metallib with a wrong header size parsed"
+fi
+printf 'build_kernel(arg_reduce)\nbuild_kernel(${UNIT_FROM_A_VARIABLE})\nif(NOT MLX_METAL_JIT)\nendif()\n' >"$fake/Source/Cmlx/mlx/mlx/backend/metal/kernels/CMakeLists.txt"
+if python3 -c '
+import importlib.util, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("k", sys.argv[1])
+k = importlib.util.module_from_spec(spec); spec.loader.exec_module(k)
+k.required_units(Path(sys.argv[2]), 400)
+' "$TOOL" "$fake" 2>/dev/null; then
+  die "an unparsed build_kernel call did not fail the derivation"
+fi
 
 log "PASS"

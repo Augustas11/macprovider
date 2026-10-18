@@ -889,8 +889,8 @@ mkdir -p "$tmp/bytes" "$tmp/pearl"
 printf '{"schema_version":1,"tag":"v%s","provider_advertised_version":"%s","provider_code_identity":{"asset":"macprovider-cli-v%s-darwin-arm64.tar.gz","member":"macprovider-cli","binary_version":"%s","binary_sha256":"%s","team_id":"ABCDE12345","signing_identifier":"live.malibu.provider.cli","slices":[{"arch":"arm64","code_cdhash":"%s"}]}}\n' \
   "$CAND" "$CAND" "$CAND" "$CAND" "$(printf 'ef%.0s' $(seq 32))" "$CDHASH" > "$tmp/bytes/pearl-release.json"
 openssl dgst -sha256 -sign "$tmp/keys/release.key" -out "$tmp/bytes/pearl-release.json.sig" "$tmp/bytes/pearl-release.json"
-printf '{"step":"signed_byte_verification","run_id":"111","candidate_sha":"%s","checksums_sha256":"%s","compatibility_set_id":"test/repo:v'"$CAND"'@%s","bytes_dir":"%s"}\n' \
-  "$B" "$(printf 'ab%.0s' $(seq 32))" "$B" "$tmp/bytes" > "$SCOPE/signed_byte_verification.json"
+printf '{"step":"signed_byte_verification","run_id":"111","candidate_sha":"%s","checksums_sha256":"%s","compatibility_set_id":"test/repo:v'"$CAND"'@%s","bytes_dir":"%s","binary_sha256":"%s"}\n' \
+  "$B" "$(printf 'ab%.0s' $(seq 32))" "$B" "$tmp/bytes" "$(printf 'cd%.0s' $(seq 32))" > "$SCOPE/signed_byte_verification.json"
 # Fake Pearl config, laid out like Pearl's: everything in the base file.
 OLD="test/repo:v$LIVE@$(printf '0%.0s' $(seq 40))"
 pearl_config() {  # pearl_config "ACCEPTED_ID ..." METADATA_DIR_OR_EMPTY [APPROVED_CDHASH]
@@ -983,6 +983,10 @@ run_rc 0 "cli status" scripts/ops/cli-release.sh status
 expect_next canary_smoke:manual
 run_rc 3 "free-text canary evidence refused" scripts/ops/cli-release.sh next --done canary_smoke --evidence "looked fine"
 expect_err "does not accept free-text"
+status_doc $CAND true
+run_rc 3 "canary probe refused without a canary-swap.sh record" scripts/ops/cli-release.sh next --done canary_smoke --probe
+expect_err "no canary_swap record"
+printf '{"step":"canary_swap","binary_sha256":"%s"}\n' "$(printf 'cd%.0s' $(seq 32))" > "$SCOPE/canary_swap.json"
 status_doc $CAND false
 run_rc 3 "canary probe with coordinator disconnected" scripts/ops/cli-release.sh next --done canary_smoke --probe
 status_doc $LIVE true

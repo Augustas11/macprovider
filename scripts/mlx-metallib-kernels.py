@@ -18,7 +18,8 @@ Subcommands:
       kernel source the MLX core's kernels/CMakeLists.txt builds outside the
       `if(NOT MLX_METAL_JIT)` block (mlx-swift builds the core in JIT mode, so
       these are exactly the kernels it never JIT-compiles and must find in the
-      library). Each unit is compiled with the Metal toolchain and its function
+      library), with its MLX_METAL_VERSION guards evaluated for
+      MACOSX_DEPLOYMENT_TARGET (package.sh builds for macOS 14.0). Each unit is compiled with the Metal toolchain and its function
       names are read back from the compiled library. With --expect, fail unless
       the derived manifest equals FILE.
 
@@ -61,6 +62,18 @@ def metallib_function_names(path: Path) -> list[str]:
     data = path.read_bytes()
     if len(data) < 0x28 or data[:4] != b"MTLB":
         raise MetallibError(f"{path}: not a metallib (missing MTLB header)")
+    # The header records the container's total size at 0x10 and four
+    # (offset, size) sections from 0x18: function list, public metadata,
+    # private metadata, bitcode. A truncated or padded file is not a library.
+    (file_size,) = struct.unpack_from("<Q", data, 0x10)
+    if file_size != len(data):
+        raise MetallibError(f"{path}: header size {file_size} != file size {len(data)}")
+    if len(data) < 0x58:
+        raise MetallibError(f"{path}: header truncated")
+    for index in range(4):
+        sec_offset, sec_size = struct.unpack_from("<QQ", data, 0x18 + 16 * index)
+        if sec_offset + sec_size > len(data):
+            raise MetallibError(f"{path}: header section {index} out of bounds")
     list_offset, list_size = struct.unpack_from("<QQ", data, 0x18)
     # The size field counts the entries after the leading u32 count.
     end = list_offset + 4 + list_size
@@ -102,7 +115,10 @@ def metallib_function_names(path: Path) -> list[str]:
     return names
 
 
-def required_units(checkout: Path) -> list[str]:
+def required_units(checkout: Path, metal_version: int) -> list[str]:
+    """build_kernel units before `if(NOT MLX_METAL_JIT)`, honoring the
+    `if(MLX_METAL_VERSION GREATER_EQUAL N)` guards the way CMake does for the
+    target's Metal language version. Any other condition fails closed."""
     cmake = checkout / KERNELS_REL / "CMakeLists.txt"
     if not cmake.is_file():
         raise MetallibError(f"missing MLX kernel CMakeLists: {cmake}")
@@ -110,10 +126,54 @@ def required_units(checkout: Path) -> list[str]:
     marker = text.find("if(NOT MLX_METAL_JIT)")
     if marker < 0:
         raise MetallibError(f"{cmake}: no `if(NOT MLX_METAL_JIT)` block; derivation rule no longer matches")
-    units = re.findall(r"^\s*build_kernel\(\s*([A-Za-z0-9_/]+)", text[:marker], re.MULTILINE)
+    head = re.sub(r"#[^\n]*", "", text[:marker])
+    # Function bodies define build_kernel; they are not calls.
+    head = re.sub(r"\bfunction\(.*?\bendfunction\([^)]*\)", "", head, flags=re.DOTALL)
+    units: list[str] = []
+    stack: list[bool] = []
+    token = re.compile(r"\b(if|endif|build_kernel)\s*\(([^)]*)\)", re.DOTALL)
+    for match in token.finditer(head):
+        word, args = match.group(1), " ".join(match.group(2).split())
+        if word == "if":
+            guard = re.fullmatch(r"MLX_METAL_VERSION GREATER_EQUAL (\d+)", args)
+            if not guard:
+                raise MetallibError(f"{cmake}: unsupported condition `if({args})` before the JIT block")
+            stack.append(metal_version >= int(guard.group(1)))
+        elif word == "endif":
+            if not stack:
+                raise MetallibError(f"{cmake}: unbalanced endif()")
+            stack.pop()
+        else:
+            unit = re.match(r"([A-Za-z0-9_/]+)(\s|$)", args)
+            if not unit:
+                raise MetallibError(f"{cmake}: unparsed `build_kernel({args})` before the JIT block")
+            if all(stack):
+                units.append(unit.group(1))
+    if stack:
+        raise MetallibError(f"{cmake}: unterminated if() before the JIT block")
     if not units:
         raise MetallibError(f"{cmake}: no JIT-mode build_kernel units found")
     return sorted(set(units))
+
+
+def target_metal_version() -> int:
+    """__METAL_VERSION__ for MACOSX_DEPLOYMENT_TARGET, as build-mlx-metallib.sh
+    and MLX's CMake detect it."""
+    out = subprocess.run(
+        ["xcrun", "-sdk", "macosx", "metal", "-E", "-x", "metal", "-P", "-", *deployment_flags()],
+        input="__METAL_VERSION__\n",
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    if not out or not out[-1].isdigit():
+        raise MetallibError("could not read __METAL_VERSION__ from the Metal toolchain")
+    return int(out[-1])
+
+
+def deployment_flags() -> list[str]:
+    target = os.environ.get("MACOSX_DEPLOYMENT_TARGET")
+    return [f"-mmacosx-version-min={target}"] if target else []
 
 
 def git_head(path: Path) -> str:
@@ -135,10 +195,7 @@ def compile_unit(checkout: Path, unit: str, workdir: Path) -> list[str]:
     stem = unit.replace("/", "_")
     air = workdir / f"{stem}.air"
     lib = workdir / f"{stem}.metallib"
-    flags = list(METAL_FLAGS)
-    target = os.environ.get("MACOSX_DEPLOYMENT_TARGET")
-    if target:
-        flags.append(f"-mmacosx-version-min={target}")
+    flags = list(METAL_FLAGS) + deployment_flags()
     subprocess.run(
         ["xcrun", "-sdk", "macosx", "metal", *flags, "-c", str(src), f"-I{checkout / MLX_ROOT_REL}", "-o", str(air)],
         check=True,
@@ -148,7 +205,8 @@ def compile_unit(checkout: Path, unit: str, workdir: Path) -> list[str]:
 
 
 def derive(checkout: Path) -> dict:
-    units = required_units(checkout)
+    metal_version = target_metal_version()
+    units = required_units(checkout, metal_version)
     with tempfile.TemporaryDirectory(prefix="mlx-required-kernels.") as tmp:
         workdir = Path(tmp)
         with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as pool:
@@ -158,6 +216,8 @@ def derive(checkout: Path) -> dict:
         "schema": SCHEMA,
         "mlx_swift_revision": git_head(checkout),
         "mlx_core_commit": git_head(checkout / MLX_ROOT_REL),
+        "macosx_deployment_target": os.environ.get("MACOSX_DEPLOYMENT_TARGET") or "sdk-default",
+        "metal_version": metal_version,
         "units": names,
     }
 

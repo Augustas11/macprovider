@@ -20,7 +20,7 @@ DOWNLOAD_RETRY_SLEEP="${DOWNLOAD_RETRY_SLEEP:-5}"
 PROVIDER_RUNTIME_MODE="${PROVIDER_RUNTIME_MODE:-execute}"
 PROVIDER_EXPECTED_ARCHES="${PROVIDER_EXPECTED_ARCHES:-}"
 PROVIDER_LIPO_BIN="${PROVIDER_LIPO_BIN:-}"
-MLX_REQUIRED_KERNELS="${MLX_REQUIRED_KERNELS:-$REPO_ROOT/phase3-binary/mlx-metallib-required-kernels.json}"
+MLX_REQUIRED_KERNELS="$REPO_ROOT/phase3-binary/mlx-metallib-required-kernels.json"
 
 log() { printf '[tier2-provider-release] %s\n' "$*" >&2; }
 die() { printf '[tier2-provider-release] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -52,7 +52,6 @@ Environment:
   PROVIDER_RUNTIME_MODE                execute (default) or structural
   PROVIDER_EXPECTED_ARCHES             required in structural mode
   PROVIDER_LIPO_BIN                    absolute lipo path when validating arches
-  MLX_REQUIRED_KERNELS                 default: phase3-binary/mlx-metallib-required-kernels.json
 USAGE
 }
 
@@ -110,8 +109,9 @@ provider_version_requires_catalog() {
 # library-loaded kernels (gather_mm_offsets, ...) the SwiftPM-bundled
 # default.metallib lacks. From it on every shipped metallib must carry every
 # kernel scripts/mlx-metallib-kernels.py derived from the pinned mlx-swift.
+# Keyed on the release tag, not the PROVIDER_VERSION override.
 provider_version_requires_mlx_kernel_gate() {
-  [[ "$PROVIDER_VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || return 1
+  [[ "${RELEASE_TAG#v}" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || return 1
   [ "${BASH_REMATCH[1]}" -gt 1 ] || \
     { [ "${BASH_REMATCH[1]}" -eq 1 ] && [ "${BASH_REMATCH[2]}" -gt 8 ]; } || \
     { [ "${BASH_REMATCH[1]}" -eq 1 ] && [ "${BASH_REMATCH[2]}" -eq 8 ] && [ "${BASH_REMATCH[3]}" -ge 254 ]; }
