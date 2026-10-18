@@ -163,6 +163,7 @@ public struct MalibuRewardEligibility: Codable, Equatable, Sendable {
         "held_provider_daily_cap",
         "held_wallet_daily_cap",
         "held_demotion_cooldown",
+        "held_retained_trust_hold",
         "held_epoch_disposition",
         "excluded_epoch_disposition",
         "burned_or_retired_epoch_disposition",
@@ -200,6 +201,9 @@ struct MalibuAccrualSummary: Decodable, Equatable, Sendable {
     let withdrawalHoldReasons: [String]
     let rewardEligibility: MalibuRewardEligibility?
     let projectionFreshness: RewardProjectionFreshness
+    let retainedHoldReasons: [String]?
+    let trustProgress: ProviderTrustProgressSummary?
+    let emission: ProviderEmissionSummary?
 
     enum CodingKeys: String, CodingKey {
         case accruedMALIBU = "accrued_malibu"
@@ -217,6 +221,9 @@ struct MalibuAccrualSummary: Decodable, Equatable, Sendable {
         case rewardEligibility = "reward_eligibility"
         case projectionGeneratedAt = "reward_projection_generated_at"
         case projectionStaleAfter = "reward_projection_stale_after"
+        case retainedHoldReasons = "retained_hold_reasons"
+        case trustProgress = "trust_progress"
+        case emission
     }
 
     init(from decoder: Decoder) throws {
@@ -271,6 +278,11 @@ struct MalibuAccrualSummary: Decodable, Equatable, Sendable {
             generatedAtKey: .projectionGeneratedAt,
             staleAfterKey: .projectionStaleAfter
         )
+        // Additive v0.5 fields: an older coordinator omits them and a
+        // malformed block is dropped rather than failing the whole read.
+        retainedHoldReasons = try? c.decodeIfPresent([String].self, forKey: .retainedHoldReasons)
+        trustProgress = try? c.decodeIfPresent(ProviderTrustProgressSummary.self, forKey: .trustProgress)
+        emission = try? c.decodeIfPresent(ProviderEmissionSummary.self, forKey: .emission)
     }
 
     func isFresh(at date: Date) -> Bool {

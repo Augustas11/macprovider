@@ -16,6 +16,8 @@ struct ProviderWalletStatusSummary: Decodable, Equatable, Sendable {
     let rewardEligibility: MalibuRewardEligibility?
     let audit: ProviderWalletAuditPageSummary?
     let projectionFreshness: RewardProjectionFreshness
+    let trustProgress: ProviderTrustProgressSummary?
+    let emission: ProviderEmissionSummary?
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
@@ -31,6 +33,8 @@ struct ProviderWalletStatusSummary: Decodable, Equatable, Sendable {
         case audit
         case projectionGeneratedAt = "reward_projection_generated_at"
         case projectionStaleAfter = "reward_projection_stale_after"
+        case trustProgress = "trust_progress"
+        case emission
     }
 
     init(from decoder: Decoder) throws {
@@ -51,6 +55,8 @@ struct ProviderWalletStatusSummary: Decodable, Equatable, Sendable {
             rewardEligibility = MalibuRewardEligibility.unavailableForMissingObject()
             audit = nil
             projectionFreshness = .legacy
+            trustProgress = nil
+            emission = nil
             return
         }
         schemaVersion = rawSchema
@@ -70,6 +76,8 @@ struct ProviderWalletStatusSummary: Decodable, Equatable, Sendable {
             generatedAtKey: .projectionGeneratedAt,
             staleAfterKey: .projectionStaleAfter
         )
+        trustProgress = try? c.decodeIfPresent(ProviderTrustProgressSummary.self, forKey: .trustProgress)
+        emission = try? c.decodeIfPresent(ProviderEmissionSummary.self, forKey: .emission)
     }
 
     func isFresh(at date: Date) -> Bool {
