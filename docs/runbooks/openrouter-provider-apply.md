@@ -45,7 +45,10 @@ The probe validates:
   OpenRouter-like streaming requests
 - early provider-capacity shedding as `no_provider_available` HTTP 429 in the
   explicit saturation pass; account/quota/rate-limit 429s do not satisfy this
-  check
+  check. A burst in which every request returns 200 passes as
+  `saturation_absorbed` (capacity exceeded the burst); it carries no 429
+  evidence, so size the burst above live slot capacity when 429 evidence is
+  wanted
 - `/privacy` retaining the plaintext/no-ZDR/no-training disclosure and the
   request-log retention statement in days (the configured period; 14 days by default)
 

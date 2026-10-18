@@ -530,6 +530,9 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
             ("tools", {"type": "enum", "values": ["auto"]}),
             ("tool_choice", {"type": "enum", "values": ["none", "required"]}),
             ("tool_choice", {"type": "enum", "values": ["auto", "bogus"]}),
+            ("tool_choice", {"type": "enum", "values": ["auto", ["x"]]}),
+            ("tool_choice", {"type": "enum", "values": ["auto", "auto"]}),
+            ("tool_choice", {"type": "enum", "values": ["required", "auto"]}),
             ("tool_choice", {"type": "enum", "values": []}),
             ("response_format", {"type": "enum", "values": ["text", "json_object", "json_schema"]}),
             ("response_format", {"type": "object", "properties": {"type": {"type": "enum", "values": ["xml"]}, "json_schema": {"type": "unknown"}}}),
@@ -996,6 +999,7 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
             got = probe.run_benchmark("https://api.example.test", "secret", "model", 2, 2, 16, 0.0, 5000, 0.0, True)
         self.assertEqual(got["ok"], 2)
         self.assertEqual(got["shed_429"], 0)
+        self.assertEqual(got["classification"], "saturation_absorbed")
 
     def test_saturation_classification_absorbed_only_at_full_success(self):
         base = {"statuses": {"200": 2}, "shed_429": 0, "non_capacity_failures": 0}
