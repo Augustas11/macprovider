@@ -48,6 +48,33 @@ final class ModelCatalogEconomicsTests: XCTestCase {
         XCTAssertTrue(source["rate_card_signature_digest"] is NSNull)
     }
 
+    func testIncompleteAdmissionReadDegradesRowsAndWarnsTheProjection() throws {
+        let inputs = try Self.staticInputs()
+        func project(complete: Bool) -> ModelCatalogEconomicsWire {
+            ModelCatalogEconomicsBuilder.makeProjection(
+                generatedAt: Self.date("2027-01-15T08:01:00Z"),
+                cliVersion: "test",
+                cliBuildCommit: "test",
+                processLaunchID: "launch-test",
+                processStartedAt: Self.date("2027-01-15T08:00:00Z"),
+                projectionSequence: 7,
+                currentModelID: nil,
+                discovery: Self.discovery(candidate: Self.candidate()),
+                admissionStatuses: [:],
+                demand: inputs.demand,
+                candidateCatalog: inputs.candidateCatalog,
+                rateCard: inputs.rateCard
+            ).withAdmissionReadOutcome(complete: complete)
+        }
+        let partial = project(complete: false)
+        XCTAssertTrue(partial.warnings.contains("admission_state_missing"))
+        let row = try XCTUnwrap(partial.rows.first { $0.actionModelID == Self.candidateID })
+        XCTAssertEqual(row.admission.source, "local_default")
+        XCTAssertFalse(row.admission.catalogEconomicsPermitted)
+        XCTAssertNil(row.providerCompletionPayoutUSDPerMillionTokens)
+        XCTAssertFalse(project(complete: true).warnings.contains("admission_state_missing"))
+    }
+
     func testProjectionEmitsEvaluateOnlyForEvaluatableCandidates() throws {
         let inputs = try Self.staticInputs()
         let blockedCandidate = Self.candidate(

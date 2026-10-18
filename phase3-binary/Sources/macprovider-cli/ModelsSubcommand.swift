@@ -914,7 +914,17 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
             supportedModels: supportedModels,
             ctlSocketPath: ctlSocketPath
         )
-        let currentModelID = await readCurrentModelID(config: modelsConfig)
+        // SPEC-044-R002 projection bound: the coordinator feeds start now and
+        // overlap with the control-socket read and local discovery; each feed
+        // URL is read once per command, over one bounded, HTTP-cached session.
+        let resolvedCoordinatorURL = try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config)
+        let matcherBaseURL = offlineArtifactFeed
+            ? nil
+            : BYOMModelAdmissionClient.httpBaseURL(from: resolvedCoordinatorURL) ?? BYOMLiveCatalogMatcher.productionBaseURL
+        let fetcher = CoordinatorFeedFetcher()
+        await fetcher.prefetch(CoordinatorFeedFetcher.catalogEconomicsFeedURLs(matcherBaseURL: matcherBaseURL))
+        async let currentModelIDRead = Self.readCurrentModelID(config: modelsConfig)
+        async let inputsRead = AutotuneStaticInputs(fetch: { try await fetcher.fetch($0) }).loadRecommendationInputs()
         let environment = try await BYOMDiscoveryEnvironment.productionForConfig(
             configPath: config,
             namespacePath: localDiscoveryNamespacePath,
@@ -924,24 +934,25 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
             lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
             llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
             llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
-        ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config)).withLoopbackRuntimeProbes()
+        ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: resolvedCoordinatorURL, inputs: AutotuneStaticInputs(fetch: { try await fetcher.fetch($0) })).withLoopbackRuntimeProbes()
         // BYOM identity is resolved through the one matcher selection every
         // admission command shares (#1816): the coordinator's signed live
         // artifact feed when usable, else the compiled-in release; the
         // artifact selection loaded below contributes its §3.7.6 warnings.
         let discovery = await BYOMDiscoveryRunner(environment: environment).discover()
-        let inputs = await AutotuneStaticInputs().loadRecommendationInputs()
         let admissions = await readAdmissionStatuses(
             discovery: discovery
         )
+        let inputs = await inputsRead
+        let currentModelID = await currentModelIDRead
         let document = ModelCatalogEconomicsBuilder.makeProjection(
             currentModelID: currentModelID,
             discovery: discovery,
-            admissionStatuses: admissions,
+            admissionStatuses: admissions.statuses,
             demand: inputs.demand,
             candidateCatalog: inputs.candidate,
             rateCard: inputs.rateCard
-        )
+        ).withAdmissionReadOutcome(complete: admissions.complete)
         // SPEC-044's projection warning codes are a closed enum of v0.1 feed
         // classes; the artifact-feed classes are reported beside them here
         // rather than mapped onto codes that would misattribute the failure to
@@ -955,7 +966,7 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
         try ModelSwitchingWireCodec.printJSON(document)
     }
 
-    private func readCurrentModelID(config: AppConfig?) async -> String? {
+    private static func readCurrentModelID(config: AppConfig?) async -> String? {
         guard let config else { return nil }
         let socketPath = ControlSocketPaths.resolve(ctlSocketPath: config.ctlSocketPath)
         guard let (connection, status) = try? await connectAndReadStatus(socketPath: socketPath) else {
@@ -967,30 +978,33 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
 
     private func readAdmissionStatuses(
         discovery: BYOMDiscoveryWire
-    ) async -> [String: BYOMAdmissionStatusWire] {
+    ) async -> CatalogEconomicsAdmissionReader.Result {
+        let none = CatalogEconomicsAdmissionReader.Result(statuses: [:], complete: true)
         guard !skipCoordinatorStatus,
               let resolved = try? loadModelAdmissionRuntimeConfig(),
-              let client = try? BYOMModelAdmissionClient(coordinatorURL: resolved.coordinatorURL)
+              let baseURL = BYOMModelAdmissionClient.httpBaseURL(from: resolved.coordinatorURL)
         else {
-            return [:]
+            return none
         }
         guard let bearer = try? ProviderCredentialStoreFactory
             .providerStore(for: resolved.config)
             .load(providerID: resolved.providerID) else {
-            return [:]
+            return none
         }
-        var statuses: [String: BYOMAdmissionStatusWire] = [:]
-        for candidate in discovery.candidates {
-            guard let status = try? await client.status(
-                candidateID: candidate.candidateID,
-                providerID: resolved.providerID,
-                bearerToken: bearer
-            ) else {
-                continue
-            }
-            statuses[candidate.candidateID] = status
+        // One session for every candidate so the reads share one TLS
+        // connection instead of a handshake each.
+        let configuration = BYOMModelAdmissionClient.urlSessionConfiguration(for: baseURL)
+        configuration.timeoutIntervalForRequest = CatalogEconomicsAdmissionReader.deadlineSeconds
+        configuration.timeoutIntervalForResource = CatalogEconomicsAdmissionReader.deadlineSeconds
+        let session = URLSession(configuration: configuration, delegate: NoRedirectURLSessionDelegate(), delegateQueue: nil)
+        defer { session.finishTasksAndInvalidate() }
+        let client = BYOMModelAdmissionClient(baseURL: baseURL, session: session)
+        let providerID = resolved.providerID
+        return await CatalogEconomicsAdmissionReader.read(
+            candidateIDs: discovery.candidates.map(\.candidateID)
+        ) { candidateID in
+            try? await client.status(candidateID: candidateID, providerID: providerID, bearerToken: bearer)
         }
-        return statuses
     }
 
     private func loadModelAdmissionRuntimeConfig() throws -> (
