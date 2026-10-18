@@ -139,3 +139,36 @@ never resident.
    its self-check on the GLM challenge and offers the tuple; done when
    `/v1/status` shows `native_mtp.enabled=true` and a buyer request through
    the gateway is served with native MTP.
+
+## After the 1.8.256 R015 FAIL: R015 v2 and the release it binds
+
+R015 on 1.8.256 failed (window 2026-10-18T13:38Z, `analysis.json`
+`224b18b0…`): the one-row cells keep their decode gain, the 4096-token TTFT
+bound and every gated-cell gate fail. The diagnosis and the fix (commit
+`ada2ecb96`, SPEC-038 v0.3.22 FR-CB2: on a backend whose grouped prefill rows
+always run alone, as glm5_next's do, a native prompt row joins ragged groups)
+are in `docs/research/spec048-r015/glm53-flash-r015-v2/PREREGISTRATION.md`.
+The v2 run measures a lab-harness build of that commit.
+
+1.8.256 does not contain the fix, so the GLM entry cannot bind it. The order
+is:
+
+1. R015 v2 passes on the lab harness (policy `7e3d3e8d…`).
+2. The campaign PR merges; the next CLI release carries the fix. Its
+   release input replaces `native-mtp-admission-release.v1.8.256.json`:
+   `source_commit`, `provider_revision`, `reproducible_build_sha256` and
+   `live_executable_cdhash` of that release, and the `challenge_bank_sha256`
+   of the bank written in step 4 below.
+3. `benchmark_policy_sha256` becomes `7e3d3e8d…`; the pending performance
+   fields take the v2 `analysis.json`. The correctness, state and batch
+   digests stay: the fix moves when a native row's prompt chunk runs, not the
+   serial prefill path or any decode path the journey record covers, and the
+   v2 gated cells hard-fail on any native/ordinary token difference.
+4. The challenge-bank entry stays when the new release's `mlx.metallib`
+   SHA-256 equals `3d9b4a74…`: the self-check is one row, which never joins a
+   group, so its tokens, counters and committed state do not change. A
+   different metallib means re-recording the entry with
+   `glm53-mtp-admission-window.sh bank` on the signed release before the cut.
+5. The Qwen3.6 A3B entry rebinds to the new release by identity only: its
+   backend keeps the equal-offset rule (paged attention has no flattened-token
+   cap), so no A3B scheduling or decode line changes.

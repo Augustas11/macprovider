@@ -5621,10 +5621,10 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
     func testRaggedPrefillGroupingKeepsTheHeadChunkWhenItAdvancesMostTokens() {
         let group = ContinuousBatchPrefillGrouping.select(
             [
-                .init(requestID: "a", promptOffset: 0, naturalChunkTokens: 512),
-                .init(requestID: "b", promptOffset: 900, naturalChunkTokens: 300),
-                .init(requestID: "c", promptOffset: 512, naturalChunkTokens: 512),
-                .init(requestID: "d", promptOffset: 100, naturalChunkTokens: 260),
+                .init(requestID: "a", promptOffset: 0, naturalChunkTokens: 512, sharesRaggedOffsets: true),
+                .init(requestID: "b", promptOffset: 900, naturalChunkTokens: 300, sharesRaggedOffsets: true),
+                .init(requestID: "c", promptOffset: 512, naturalChunkTokens: 512, sharesRaggedOffsets: true),
+                .init(requestID: "d", promptOffset: 100, naturalChunkTokens: 260, sharesRaggedOffsets: true),
             ],
             maxRows: 4,
             tokenBudget: 1024
@@ -5639,10 +5639,10 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         // is the head's join.
         let group = ContinuousBatchPrefillGrouping.select(
             [
-                .init(requestID: "a", promptOffset: 600, naturalChunkTokens: 512),
-                .init(requestID: "b", promptOffset: 900, naturalChunkTokens: 300),
-                .init(requestID: "c", promptOffset: 1100, naturalChunkTokens: 512),
-                .init(requestID: "d", promptOffset: 700, naturalChunkTokens: 260),
+                .init(requestID: "a", promptOffset: 600, naturalChunkTokens: 512, sharesRaggedOffsets: true),
+                .init(requestID: "b", promptOffset: 900, naturalChunkTokens: 300, sharesRaggedOffsets: true),
+                .init(requestID: "c", promptOffset: 1100, naturalChunkTokens: 512, sharesRaggedOffsets: true),
+                .init(requestID: "d", promptOffset: 700, naturalChunkTokens: 260, sharesRaggedOffsets: true),
             ],
             maxRows: 4,
             tokenBudget: 2048
@@ -5651,10 +5651,10 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         // A 40-token final head chunk never cuts a peer's chunk either.
         let finalHead = ContinuousBatchPrefillGrouping.select(
             [
-                .init(requestID: "head", promptOffset: 1000, naturalChunkTokens: 40),
-                .init(requestID: "long", promptOffset: 0, naturalChunkTokens: 512),
-                .init(requestID: "short", promptOffset: 800, naturalChunkTokens: 70),
-                .init(requestID: "same", promptOffset: 900, naturalChunkTokens: 40),
+                .init(requestID: "head", promptOffset: 1000, naturalChunkTokens: 40, sharesRaggedOffsets: true),
+                .init(requestID: "long", promptOffset: 0, naturalChunkTokens: 512, sharesRaggedOffsets: true),
+                .init(requestID: "short", promptOffset: 800, naturalChunkTokens: 70, sharesRaggedOffsets: true),
+                .init(requestID: "same", promptOffset: 900, naturalChunkTokens: 40, sharesRaggedOffsets: true),
             ],
             maxRows: 4,
             tokenBudget: 1024
@@ -5666,9 +5666,9 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         func group(_ chunk: Int) -> ContinuousBatchPrefillGroup? {
             ContinuousBatchPrefillGrouping.select(
                 [
-                    .init(requestID: "a", promptOffset: 40, naturalChunkTokens: chunk),
-                    .init(requestID: "b", promptOffset: 20, naturalChunkTokens: chunk),
-                    .init(requestID: "c", promptOffset: 40, naturalChunkTokens: chunk),
+                    .init(requestID: "a", promptOffset: 40, naturalChunkTokens: chunk, sharesRaggedOffsets: true),
+                    .init(requestID: "b", promptOffset: 20, naturalChunkTokens: chunk, sharesRaggedOffsets: true),
+                    .init(requestID: "c", promptOffset: 40, naturalChunkTokens: chunk, sharesRaggedOffsets: true),
                 ],
                 maxRows: 4,
                 tokenBudget: 2048,
@@ -5690,11 +5690,11 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertFalse(ContinuousBatchPrefillGrouping.withinKeySpread(minOffset: 0, maxOffset: 513, chunkTokens: 512))
         let group = ContinuousBatchPrefillGrouping.select(
             [
-                .init(requestID: "a", promptOffset: 0, naturalChunkTokens: 512),
-                .init(requestID: "b", promptOffset: 900, naturalChunkTokens: 300),
-                .init(requestID: "c", promptOffset: 512, naturalChunkTokens: 512),
-                .init(requestID: "d", promptOffset: 100, naturalChunkTokens: 260),
-                .init(requestID: "far", promptOffset: 4000, naturalChunkTokens: 512),
+                .init(requestID: "a", promptOffset: 0, naturalChunkTokens: 512, sharesRaggedOffsets: true),
+                .init(requestID: "b", promptOffset: 900, naturalChunkTokens: 300, sharesRaggedOffsets: true),
+                .init(requestID: "c", promptOffset: 512, naturalChunkTokens: 512, sharesRaggedOffsets: true),
+                .init(requestID: "d", promptOffset: 100, naturalChunkTokens: 260, sharesRaggedOffsets: true),
+                .init(requestID: "far", promptOffset: 4000, naturalChunkTokens: 512, sharesRaggedOffsets: true),
             ],
             maxRows: 4,
             tokenBudget: 2048
@@ -5704,7 +5704,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         // Equal offsets are never limited by the cap.
         let same = ContinuousBatchPrefillGrouping.select(
             (0 ..< 4).map {
-                ContinuousBatchPrefillCandidate(requestID: "s\($0)", promptOffset: 3000, naturalChunkTokens: 256)
+                ContinuousBatchPrefillCandidate(requestID: "s\($0)", promptOffset: 3000, naturalChunkTokens: 256, sharesRaggedOffsets: false)
             },
             maxRows: 4,
             tokenBudget: 2048
@@ -5712,64 +5712,103 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(same?.requestIDs, ["s0", "s1", "s2", "s3"])
     }
 
-    func testRaggedPrefillGroupsANativeRowWithTheOrdinaryRowsArrivingWithIt() async throws {
-        // SPEC-048 R015 gated cells: a native prompt row kept out of ragged
-        // groups prefilled alone, ahead of the rows arriving with it, whose
-        // prefill then stalled its decode. It now shares calls with them.
-        let prefillGate = AsyncGate()
-        let backend = ScriptedBackend(
-            scripts: ["ordinary-1": [102], "ordinary-2": [103]],
-            prefillGate: prefillGate,
-            nativeTargetTopTokens: ["native": [5]]
+    func testRaggedPrefillGroupingKeepsNativeRowsAtTheHeadOffset() {
+        let group = ContinuousBatchPrefillGrouping.select(
+            [
+                .init(requestID: "head", promptOffset: 0, naturalChunkTokens: 4, sharesRaggedOffsets: true),
+                .init(requestID: "native-elsewhere", promptOffset: 4, naturalChunkTokens: 4, sharesRaggedOffsets: false),
+                .init(requestID: "native-same", promptOffset: 0, naturalChunkTokens: 4, sharesRaggedOffsets: false),
+                .init(requestID: "ordinary-elsewhere", promptOffset: 8, naturalChunkTokens: 4, sharesRaggedOffsets: true),
+                .init(requestID: "ordinary-same", promptOffset: 0, naturalChunkTokens: 4, sharesRaggedOffsets: true),
+            ],
+            maxRows: 8,
+            tokenBudget: 64
         )
-        let scheduler = try await makeScheduler(
-            maxActiveRows: 3,
-            maxPromptChunkTokens: 2,
-            maxPrefillRowsPerIteration: 3,
-            maxPrefillTokensPerIteration: 6,
-            allowsRaggedPrefillOffsets: true,
-            backend: backend
+        XCTAssertEqual(
+            group,
+            ContinuousBatchPrefillGroup(chunkTokens: 4, requestIDs: ["head", "native-same", "ordinary-same"])
         )
+    }
 
-        let native = Task {
-            try await scheduler.submit(Self.nativeRequest(
-                id: "native",
-                promptTokens: [1, 2, 3, 4],
-                maxOutputTokens: 1,
-                proposals: [5],
-                maximumDepth: 1
-            ))
-        }
-        try await eventually { await backend.prefillCallCount() == 1 }
-        let ordinary = (1...2).map { index in
-            Task {
-                try await scheduler.submit(.init(
-                    id: "ordinary-\(index)",
-                    conversationKey: "",
-                    promptTokens: [index * 10 + 1, index * 10 + 2, index * 10 + 3, index * 10 + 4],
+    func testNativePromptRowJoinsARaggedGroupOnlyWhereGroupedRowsPrefillAlone() async throws {
+        // SPEC-048 R015 gated cells: kept out of ragged groups, a native row
+        // prefilled alone, ahead of the rows arriving with it, whose prefill
+        // then stalled its decode. Where every grouped row takes its own
+        // forward (SPEC-038 v0.3.22 FR-CB2) it takes its turn in the group.
+        for joins in [true, false] {
+            let prefillGate = AsyncGate()
+            let backend = ScriptedBackend(
+                scripts: ["ordinary-1": [102], "ordinary-2": [103]],
+                prefillGate: prefillGate,
+                nativeTargetTopTokens: ["native": [5]]
+            )
+            let scheduler = try await makeScheduler(
+                maxActiveRows: 3,
+                maxPromptChunkTokens: 2,
+                maxPrefillRowsPerIteration: 3,
+                maxPrefillTokensPerIteration: 6,
+                allowsRaggedPrefillOffsets: true,
+                nativeMTPPromptRowsJoinRaggedPrefill: joins,
+                backend: backend
+            )
+            let native = Task {
+                try await scheduler.submit(Self.nativeRequest(
+                    id: "native",
+                    promptTokens: [1, 2, 3, 4],
                     maxOutputTokens: 1,
-                    temperature: 0.0,
-                    topP: 1.0
+                    proposals: [5],
+                    maximumDepth: 1
                 ))
             }
+            try await eventually { await backend.prefillCallCount() == 1 }
+            let ordinary = (1...2).map { index in
+                Task {
+                    try await scheduler.submit(.init(
+                        id: "ordinary-\(index)",
+                        conversationKey: "",
+                        promptTokens: [index * 10 + 1, index * 10 + 2, index * 10 + 3, index * 10 + 4],
+                        maxOutputTokens: 1,
+                        temperature: 0.0,
+                        topP: 1.0
+                    ))
+                }
+            }
+            try await eventually { await scheduler.metrics().waitingCount >= 2 }
+            await prefillGate.open()
+            _ = try await native.value
+            for task in ordinary { _ = try await task.value }
+
+            let committed = await backend.prefillCommittedCounts()
+            if joins {
+                // The native head at offset 2 leads the two new rows at offset 0.
+                XCTAssertTrue(committed.contains(["native": 2, "ordinary-1": 0, "ordinary-2": 0]), "\(committed)")
+            } else {
+                XCTAssertTrue(committed.contains(["native": 2]), "\(committed)")
+                XCTAssertFalse(committed.contains { $0["native"] != nil && $0.count > 1 }, "\(committed)")
+            }
+            let prefills = await backend.prefillInputs()
+            XCTAssertTrue(prefills.filter { $0.requestID == "native" }.allSatisfy(\.nativeMTPPromptPrefill))
+            XCTAssertFalse(prefills.filter { $0.requestID != "native" }.contains(where: \.nativeMTPPromptPrefill))
+            let metrics = await scheduler.metrics()
+            XCTAssertEqual(metrics.slotsFree, metrics.slotsTotal)
         }
-        try await eventually { await scheduler.metrics().waitingCount >= 2 }
-        await prefillGate.open()
+    }
 
-        _ = try await native.value
-        for task in ordinary { _ = try await task.value }
-
-        let committed = await backend.prefillCommittedCounts()
-        // The native head at offset 2 leads the two new rows at offset 0.
-        XCTAssertTrue(
-            committed.contains(["native": 2, "ordinary-1": 0, "ordinary-2": 0]),
-            "\(committed)"
-        )
-        let prefills = await backend.prefillInputs()
-        XCTAssertTrue(prefills.filter { $0.requestID == "native" }.allSatisfy(\.nativeMTPPromptPrefill))
-        XCTAssertFalse(prefills.filter { $0.requestID != "native" }.contains(where: \.nativeMTPPromptPrefill))
-        let metrics = await scheduler.metrics()
-        XCTAssertEqual(metrics.slotsFree, metrics.slotsTotal)
+    func testNativeRowsJoinRaggedGroupsOnlyWhenRaggedOffsetsAreAllowed() throws {
+        func configuration(ragged: Bool, joins: Bool) -> ContinuousBatchSchedulerConfiguration {
+            ContinuousBatchSchedulerConfiguration(
+                descriptor: Self.descriptor(),
+                tuple: Self.tuple(),
+                maxActiveRows: 2,
+                decodeHeadroomTokens: 2,
+                allowsRaggedPrefillOffsets: ragged,
+                nativeMTPPromptRowsJoinRaggedPrefill: joins,
+                snapshot: ContinuousBatchSchedulerSnapshot(modelID: "m", modelSHA256: "s", weightsGeneration: 1)
+            )
+        }
+        XCTAssertTrue(configuration(ragged: true, joins: true).nativeMTPPromptRowsJoinRaggedPrefill)
+        XCTAssertFalse(configuration(ragged: false, joins: true).nativeMTPPromptRowsJoinRaggedPrefill)
+        XCTAssertFalse(configuration(ragged: true, joins: false).nativeMTPPromptRowsJoinRaggedPrefill)
     }
 
     func testRaggedPrefillGroupingHonoursRowCapAndTokenBudget() {
@@ -5777,7 +5816,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             ContinuousBatchPrefillCandidate(
                 requestID: "r\($0)",
                 promptOffset: $0 * 64,
-                naturalChunkTokens: 256
+                naturalChunkTokens: 256,
+                sharesRaggedOffsets: true
             )
         }
         XCTAssertEqual(
@@ -7808,6 +7848,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         maxPrefillRowsPerIteration: Int = 1,
         maxPrefillTokensPerIteration: Int? = nil,
         allowsRaggedPrefillOffsets: Bool = false,
+        nativeMTPPromptRowsJoinRaggedPrefill: Bool = false,
         prefillGrouping: ContinuousBatchPrefillGroupingRule = .unconstrained,
         nativeMTPRoundByteCapacity: Int? = nil,
         nativeMTPStatusSink: NativeMTPStatusSink? = nil,
@@ -7838,6 +7879,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             maxPrefillTokensPerIteration: maxPrefillTokensPerIteration,
             maxPromptChunkTokens: maxPromptChunkTokens,
             allowsRaggedPrefillOffsets: allowsRaggedPrefillOffsets,
+            nativeMTPPromptRowsJoinRaggedPrefill: nativeMTPPromptRowsJoinRaggedPrefill,
             tokenDeliveryBufferLimit: tokenDeliveryBufferLimit,
             tokenDeliveryTimeoutNanoseconds: tokenDeliveryTimeoutNanoseconds,
             queueWaitTimeoutNanoseconds: queueWaitTimeoutNanoseconds,

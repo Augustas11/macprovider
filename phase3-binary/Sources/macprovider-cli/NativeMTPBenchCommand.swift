@@ -115,16 +115,24 @@ enum NativeMTPBenchPrompts {
     /// count and this bisection returns the text that appending one salt at a
     /// time until the target is reached returns, in a few tokenizations
     /// instead of one per salt.
+    /// A count still below the target at `maximumSalts` salts fails instead
+    /// of growing the text without bound.
     static func fewestReachingSalts(
         target: Int,
+        maximumSalts: Int = 1 << 16,
         count: (Int) async throws -> Int
-    ) async rethrows -> (salts: Int, count: Int) {
+    ) async throws -> (salts: Int, count: Int) {
         var below = -1
         var reaching = 0
         var reachingCount = try await count(reaching)
         while reachingCount < target {
+            guard reaching < maximumSalts else {
+                throw NativeMTPBenchError.assertionFailed(
+                    "prompt sizing: \(maximumSalts) salts reach \(reachingCount) of \(target) served tokens"
+                )
+            }
             below = reaching
-            reaching = max(1, reaching * 2)
+            reaching = min(maximumSalts, max(1, reaching * 2))
             reachingCount = try await count(reaching)
         }
         while reaching - below > 1 {

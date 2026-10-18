@@ -299,6 +299,12 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     /// .supportsRaggedPrefillOffsets`); otherwise a ragged group would only
     /// run serially inside one iteration and stall decode for longer.
     let allowsRaggedPrefillOffsets: Bool
+    /// Whether a native-MTP prompt row may join a ragged prefill group
+    /// (SPEC-038 v0.3.22 FR-CB2). Set only when the backend prefills every
+    /// row of a group in its own forward
+    /// (`PagedKVSharedForwardBackend.prefillsGroupedRowsAlone`), so joining
+    /// changes when a native row's chunk runs, never a forward's shape.
+    let nativeMTPPromptRowsJoinRaggedPrefill: Bool
     let drainTimeoutNanoseconds: UInt64
     let drainCancellationGraceNanoseconds: UInt64
     let terminalResultLimit: Int
@@ -356,6 +362,7 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         maxPrefillTokensPerIteration: Int? = nil,
         maxPromptChunkTokens: Int = 256,
         allowsRaggedPrefillOffsets: Bool = false,
+        nativeMTPPromptRowsJoinRaggedPrefill: Bool = false,
         drainTimeoutNanoseconds: UInt64 = 30_000_000_000,
         drainCancellationGraceNanoseconds: UInt64 = 5_000_000_000,
         terminalResultLimit: Int? = nil,
@@ -394,6 +401,8 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         self.prefillGrouping = prefillGrouping
         self.maxPromptChunkTokens = max(1, maxPromptChunkTokens)
         self.allowsRaggedPrefillOffsets = allowsRaggedPrefillOffsets
+        self.nativeMTPPromptRowsJoinRaggedPrefill = allowsRaggedPrefillOffsets
+            && nativeMTPPromptRowsJoinRaggedPrefill
         self.maxPrefillTokensPerIteration = max(
             1,
             maxPrefillTokensPerIteration ?? self.maxPromptChunkTokens
@@ -900,6 +909,10 @@ struct ContinuousBatchPrefillCandidate: Sendable, Equatable {
     /// chunk limit and the group token budget, the chunk the row prefills
     /// when it runs alone.
     let naturalChunkTokens: Int
+    /// False for a row that may share a prefill group only with rows at its
+    /// own offset (native-MTP prompt rows, unless
+    /// `nativeMTPPromptRowsJoinRaggedPrefill`).
+    let sharesRaggedOffsets: Bool
 }
 
 struct ContinuousBatchPrefillGroup: Sendable, Equatable {
@@ -937,16 +950,24 @@ enum ContinuousBatchPrefillGrouping {
             ? max(1, min(maxRows, tokenBudget / length))
             : 1
         var ids = [head.requestID]
+        var sameOffset = true
+        var allRagged = head.sharesRaggedOffsets
         var minOffset = head.promptOffset
         var maxOffset = head.promptOffset
         for candidate in candidates.dropFirst() where ids.count < rowCap {
             guard candidate.naturalChunkTokens == length else { continue }
+            let atHeadOffset = candidate.promptOffset == head.promptOffset
+            guard (sameOffset && atHeadOffset) || (allRagged && candidate.sharesRaggedOffsets) else {
+                continue
+            }
             let groupMin = min(minOffset, candidate.promptOffset)
             let groupMax = max(maxOffset, candidate.promptOffset)
             guard withinKeySpread(minOffset: groupMin, maxOffset: groupMax, chunkTokens: length) else {
                 continue
             }
             ids.append(candidate.requestID)
+            sameOffset = sameOffset && atHeadOffset
+            allRagged = allRagged && candidate.sharesRaggedOffsets
             minOffset = groupMin
             maxOffset = groupMax
         }
@@ -5609,16 +5630,16 @@ actor ContinuousBatchScheduler {
             guard rowsByID[id] == nil, let row = activePrompt[id] else { continue }
             let naturalChunk = prefillEnd(for: row, maxChunkTokens: chunkLimit) - row.prefillCursor
             guard naturalChunk > 0 else { continue }
-            // Native-MTP prompt rows group like ordinary rows. Kept apart,
-            // a native row's prompt ran alone and ahead of the rows arriving
-            // with it, which then stalled its decode with their prefill
-            // (SPEC-048 R015 gated cells, GLM-5.3-Flash on CLI 1.8.256). The
-            // backend still prefills a native row in a shape it proves
-            // (`PagedKVSharedForwardBackend.prefillPartitions`).
+            // Kept out of ragged groups, a native row prefills alone and
+            // ahead of the rows arriving with it, whose prefill then stalls
+            // its decode (SPEC-048 R015 gated cells, GLM-5.3-Flash on CLI
+            // 1.8.256). Where every grouped row takes its own forward, it
+            // takes its FCFS turn in the group like an ordinary row.
             candidates.append(ContinuousBatchPrefillCandidate(
                 requestID: id,
                 promptOffset: row.prefillCursor,
-                naturalChunkTokens: naturalChunk
+                naturalChunkTokens: naturalChunk,
+                sharesRaggedOffsets: !row.usesNativeMTP || configuration.nativeMTPPromptRowsJoinRaggedPrefill
             ))
             rowsByID[id] = row
         }

@@ -765,6 +765,18 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         cacheKinds.contains(where: \.isPagedMLA) ? pagedMLAMaxFlattenedTokensPerForward : nil
     }
 
+    /// Whether every row of a prefill group prefills in its own forward: no
+    /// two-row shared forward fits under the flattened-token cap at the
+    /// smallest chunk that may group (`glm5_next`: an 8-token cap against
+    /// 144-token grouped chunks). On such a backend a native-MTP prompt row
+    /// may join a ragged group (SPEC-038 v0.3.22 FR-CB2): it still prefills
+    /// alone, on the serial path its drafter seeding is proven on.
+    static func prefillsGroupedRowsAlone(cacheKinds: [CacheKind], minimumGroupedChunkTokens: Int) -> Bool {
+        guard let cap = maxFlattenedTokensPerForward(cacheKinds: cacheKinds) else { return false }
+        let (tokens, overflow) = max(1, minimumGroupedChunkTokens).multipliedReportingOverflow(by: 2)
+        return overflow || tokens > cap
+    }
+
     /// Rows one decode forward may carry beyond the device route bound
     /// (`pagedMLA`: `pagedMLAMaxFlattenedTokensPerForward`); nil when only the
     /// device bound applies. The scheduler splits larger decode steps.
@@ -886,235 +898,204 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         defer { endOperation() }
         return try await container.perform(nonSendable: inputs) { context, inputs in
             self.enterTargetLock(); defer { self.exitTargetLock() }
-            var outputsByID: [String: ContinuousBatchPrefillOutput] = [:]
-            for group in Self.prefillPartitions(inputs) {
-                for output in try await self.prefillGroup(group, context: context) {
-                    outputsByID[output.requestID] = output
+            let raggedOffsets = Self.hasRaggedPromptOffsets(inputs)
+            if Self.canSharePrefillForward(inputs),
+               self.sharedForwardFits(rows: inputs.count, tokensPerRow: inputs[0].promptTokens.count),
+               !raggedOffsets || self.supportsRaggedPrefillOffsets {
+                let rowStates = inputs.map {
+                    self.rowState(
+                        for: $0.requestID,
+                        binding: $0.binding,
+                        initialOffset: $0.committedKVTokenCount
+                    )
                 }
-            }
-            return inputs.compactMap { outputsByID[$0.requestID] }
-        }
-    }
-
-    /// The groups one prefill call runs, in order. A ragged group that mixes
-    /// native-MTP prompt rows with ordinary rows runs as two groups: the
-    /// ordinary rows keep the ragged shared forward they take without a
-    /// native peer, and the native rows prefill at one offset or serially
-    /// (`canSharePrefillForward`), the shapes their drafter seeding is
-    /// proven on. Every row still prefills exactly its own chunk.
-    static func prefillPartitions(
-        _ inputs: [ContinuousBatchPrefillInput]
-    ) -> [[ContinuousBatchPrefillInput]] {
-        guard hasRaggedPromptOffsets(inputs), inputs.contains(where: \.nativeMTPPromptPrefill) else {
-            return [inputs]
-        }
-        return [
-            inputs.filter { !$0.nativeMTPPromptPrefill },
-            inputs.filter(\.nativeMTPPromptPrefill),
-        ].filter { !$0.isEmpty }
-    }
-
-    private func prefillGroup(
-        _ inputs: [ContinuousBatchPrefillInput],
-        context: ModelContext
-    ) async throws -> [ContinuousBatchPrefillOutput] {
-        let raggedOffsets = Self.hasRaggedPromptOffsets(inputs)
-        if Self.canSharePrefillForward(inputs),
-           self.sharedForwardFits(rows: inputs.count, tokensPerRow: inputs[0].promptTokens.count),
-           !raggedOffsets || self.supportsRaggedPrefillOffsets {
-            let rowStates = inputs.map {
-                self.rowState(
-                    for: $0.requestID,
-                    binding: $0.binding,
-                    initialOffset: $0.committedKVTokenCount
-                )
-            }
-            // Generic LMOutput.State cannot be split safely by row. The
-            // supported paged and hybrid runtimes keep recurrent state in
-            // their cache layers; any backend-level state uses the proven
-            // serial fallback instead.
-            if rowStates.allSatisfy({ $0.state == nil }),
-               let batchedCaches = self.makeBatchedCachesIfCompatible(
-                   from: rowStates.map(\.caches),
-                   raggedPrefill: raggedOffsets
-               ) {
-                let cachesAsKV = batchedCaches.map(\.cache)
-                let chunkLength = inputs[0].promptTokens.count
-                let prompt = MLXArray(
-                    inputs.flatMap(\.promptTokens).map(Int32.init)
-                ).reshaped([inputs.count, chunkLength])
-                let text = LMInput.Text(tokens: prompt)
-                // Native rows join the same [B, L] forward as their
-                // ordinary peers, so every row's target state matches the
-                // MTP-disabled run of this group. The emit flag only adds
-                // the prompt hidden states the drafters are seeded from.
-                let hasNativeRows = inputs.contains(where: \.nativeMTPPromptPrefill)
-                var sharedState: LMOutput.State?
-                if hasNativeRows {
-                    var emit = LMOutput.State()
-                    emit[mtpEmitFlagKey] = true
-                    sharedState = emit
-                }
-                let output = withPreparedCache(cachesAsKV, lengths: text.sequenceLengths) {
-                    context.model(text, cache: cachesAsKV, state: sharedState)
-                }
-                let promptHidden = hasNativeRows
-                    ? Self.sharedPrefillPromptHidden(output.state, rows: inputs.count, chunkLength: chunkLength)
-                    : nil
-                // A ragged forward that attended outside the per-row
-                // path is rejected before anything is sampled or
-                // committed; its rows fail below.
-                let attentionBypassed = raggedOffsets
-                    && self.noteRaggedPrefillAttentionBypass(batchedCaches)
-                if !attentionBypassed,
-                   hasNativeRows ? promptHidden != nil : output.state == nil,
-                   Self.hasValidBatchState(batchedCaches) {
-                    let sampledTokens: [Int]?
-                    if inputs.contains(where: \.sampleFirstToken) {
-                        sampledTokens = ContinuousBatchRowSampler.sample(
-                            logits: output.logits[0..., -1, 0...],
-                            rows: inputs.map(Self.samplerRow)
-                        ).asArray(Int.self)
-                        guard sampledTokens?.count == inputs.count else {
-                            throw ContinuousBatchSchedulerError.unsupported(
-                                "continuous_batching_invalid_logits_shape"
-                            )
-                        }
-                    } else {
-                        sampledTokens = nil
+                // Generic LMOutput.State cannot be split safely by row. The
+                // supported paged and hybrid runtimes keep recurrent state in
+                // their cache layers; any backend-level state uses the proven
+                // serial fallback instead.
+                if rowStates.allSatisfy({ $0.state == nil }),
+                   let batchedCaches = self.makeBatchedCachesIfCompatible(
+                       from: rowStates.map(\.caches),
+                       raggedPrefill: raggedOffsets
+                   ) {
+                    let cachesAsKV = batchedCaches.map(\.cache)
+                    let chunkLength = inputs[0].promptTokens.count
+                    let prompt = MLXArray(
+                        inputs.flatMap(\.promptTokens).map(Int32.init)
+                    ).reshaped([inputs.count, chunkLength])
+                    let text = LMInput.Text(tokens: prompt)
+                    // Native rows join the same [B, L] forward as their
+                    // ordinary peers, so every row's target state matches the
+                    // MTP-disabled run of this group. The emit flag only adds
+                    // the prompt hidden states the drafters are seeded from.
+                    let hasNativeRows = inputs.contains(where: \.nativeMTPPromptPrefill)
+                    var sharedState: LMOutput.State?
+                    if hasNativeRows {
+                        var emit = LMOutput.State()
+                        emit[mtpEmitFlagKey] = true
+                        sharedState = emit
                     }
-                    eval(cachesAsKV)
-                    batchedCaches.forEach { $0.syncRowsFromBatch() }
-                    for (index, input) in inputs.enumerated() {
-                        try self.setRowState(rowStates[index], for: input.requestID, binding: input.binding)
+                    let output = withPreparedCache(cachesAsKV, lengths: text.sequenceLengths) {
+                        context.model(text, cache: cachesAsKV, state: sharedState)
                     }
-                    var drafterFailures = Set<Int>()
-                    if let promptHidden {
-                        for (index, input) in inputs.enumerated() where input.nativeMTPPromptPrefill {
-                            do {
-                                try await self.seedNativeMTPDrafterFromPrefill(
-                                    targetModel: context.model,
-                                    input: input,
-                                    targetHidden: promptHidden.take(MLXArray([Int32(index)]), axis: 0),
-                                    positionDeltas: nil,
-                                    sampledToken: input.sampleFirstToken ? sampledTokens?[index] : nil
+                    let promptHidden = hasNativeRows
+                        ? Self.sharedPrefillPromptHidden(output.state, rows: inputs.count, chunkLength: chunkLength)
+                        : nil
+                    // A ragged forward that attended outside the per-row
+                    // path is rejected before anything is sampled or
+                    // committed; its rows fail below.
+                    let attentionBypassed = raggedOffsets
+                        && self.noteRaggedPrefillAttentionBypass(batchedCaches)
+                    if !attentionBypassed,
+                       hasNativeRows ? promptHidden != nil : output.state == nil,
+                       Self.hasValidBatchState(batchedCaches) {
+                        let sampledTokens: [Int]?
+                        if inputs.contains(where: \.sampleFirstToken) {
+                            sampledTokens = ContinuousBatchRowSampler.sample(
+                                logits: output.logits[0..., -1, 0...],
+                                rows: inputs.map(Self.samplerRow)
+                            ).asArray(Int.self)
+                            guard sampledTokens?.count == inputs.count else {
+                                throw ContinuousBatchSchedulerError.unsupported(
+                                    "continuous_batching_invalid_logits_shape"
                                 )
-                            } catch {
-                                // The shared target forward stays committed
-                                // for every peer; only this row fails.
-                                ContinuousBatchingPolicy.logPrefillFailed(error)
-                                self.removeRowState(for: input.requestID)
-                                drafterFailures.insert(index)
+                            }
+                        } else {
+                            sampledTokens = nil
+                        }
+                        eval(cachesAsKV)
+                        batchedCaches.forEach { $0.syncRowsFromBatch() }
+                        for (index, input) in inputs.enumerated() {
+                            try self.setRowState(rowStates[index], for: input.requestID, binding: input.binding)
+                        }
+                        var drafterFailures = Set<Int>()
+                        if let promptHidden {
+                            for (index, input) in inputs.enumerated() where input.nativeMTPPromptPrefill {
+                                do {
+                                    try await self.seedNativeMTPDrafterFromPrefill(
+                                        targetModel: context.model,
+                                        input: input,
+                                        targetHidden: promptHidden.take(MLXArray([Int32(index)]), axis: 0),
+                                        positionDeltas: nil,
+                                        sampledToken: input.sampleFirstToken ? sampledTokens?[index] : nil
+                                    )
+                                } catch {
+                                    // The shared target forward stays committed
+                                    // for every peer; only this row fails.
+                                    ContinuousBatchingPolicy.logPrefillFailed(error)
+                                    self.removeRowState(for: input.requestID)
+                                    drafterFailures.insert(index)
+                                }
                             }
                         }
+                        self.clearDecodeSession()
+                        CBTrace.log(nil, "prefill_shared rows=\(inputs.count) chunk=\(chunkLength) ragged=\(raggedOffsets)")
+                        return inputs.enumerated().map { index, input in
+                            drafterFailures.contains(index)
+                                ? ContinuousBatchPrefillOutput(
+                                    requestID: input.requestID,
+                                    failureCode: "continuous_batching_prefill_failed"
+                                )
+                                : ContinuousBatchPrefillOutput(
+                                    requestID: input.requestID,
+                                    sampledToken: input.sampleFirstToken ? sampledTokens?[index] : nil
+                                )
+                        }
                     }
-                    self.clearDecodeSession()
-                    CBTrace.log(nil, "prefill_shared rows=\(inputs.count) chunk=\(chunkLength) ragged=\(raggedOffsets)")
-                    return inputs.enumerated().map { index, input in
-                        drafterFailures.contains(index)
-                            ? ContinuousBatchPrefillOutput(
-                                requestID: input.requestID,
+                    // Backend-level LMOutput.State cannot be split safely by
+                    // row. The speculative batched caches have not been synced
+                    // back, so discard them and use the isolated serial path.
+                    // A ragged group is different: each row's paged cache took
+                    // its chunk in place during the forward, so a serial retry
+                    // would append the chunk twice. Fail those rows instead
+                    // (also when the forward bypassed per-row attention).
+                    if raggedOffsets {
+                        for input in inputs {
+                            self.removeRowState(for: input.requestID)
+                        }
+                        self.clearDecodeSession()
+                        return inputs.map {
+                            ContinuousBatchPrefillOutput(
+                                requestID: $0.requestID,
                                 failureCode: "continuous_batching_prefill_failed"
                             )
-                            : ContinuousBatchPrefillOutput(
-                                requestID: input.requestID,
-                                sampledToken: input.sampleFirstToken ? sampledTokens?[index] : nil
-                            )
-                    }
-                }
-                // Backend-level LMOutput.State cannot be split safely by
-                // row. The speculative batched caches have not been synced
-                // back, so discard them and use the isolated serial path.
-                // A ragged group is different: each row's paged cache took
-                // its chunk in place during the forward, so a serial retry
-                // would append the chunk twice. Fail those rows instead
-                // (also when the forward bypassed per-row attention).
-                if raggedOffsets {
-                    for input in inputs {
-                        self.removeRowState(for: input.requestID)
-                    }
-                    self.clearDecodeSession()
-                    return inputs.map {
-                        ContinuousBatchPrefillOutput(
-                            requestID: $0.requestID,
-                            failureCode: "continuous_batching_prefill_failed"
-                        )
+                        }
                     }
                 }
             }
-        }
 
-        var outputs: [ContinuousBatchPrefillOutput] = []
-        outputs.reserveCapacity(inputs.count)
-        for input in inputs {
-            do {
-                var state = self.rowState(
-                    for: input.requestID,
-                    binding: input.binding,
-                    initialOffset: input.committedKVTokenCount
-                )
-                var sampledToken: Int?
-                if !input.promptTokens.isEmpty {
-                    let prompt = MLXArray(input.promptTokens.map(Int32.init))
-                        .reshaped([1, input.promptTokens.count])
-                    let text = LMInput.Text(tokens: prompt)
-                    var modelState = state.state
-                    if input.nativeMTPPromptPrefill {
-                        modelState = modelState ?? LMOutput.State()
-                        modelState?[mtpEmitFlagKey] = true
-                    }
-                    let output = withPreparedCache(state.caches, lengths: text.sequenceLengths) {
-                        context.model(text, cache: state.caches, state: modelState)
-                    }
-                    if input.sampleFirstToken {
-                        sampledToken = ContinuousBatchRowSampler.sample(
-                            logits: output.logits[0..., -1, 0...],
-                            rows: [Self.samplerRow(input)]
-                        ).asArray(Int.self).first
-                    } else {
-                        sampledToken = nil
-                    }
-                    if input.nativeMTPPromptPrefill {
-                        guard let targetHidden = output.state?[mtpLastHiddenStatesKey] else {
-                            throw ContinuousBatchSchedulerError.unsupported(
-                                "native_mtp_missing_prompt_hidden_state"
+            var outputs: [ContinuousBatchPrefillOutput] = []
+            outputs.reserveCapacity(inputs.count)
+            for input in inputs {
+                do {
+                    var state = self.rowState(
+                        for: input.requestID,
+                        binding: input.binding,
+                        initialOffset: input.committedKVTokenCount
+                    )
+                    var sampledToken: Int?
+                    if !input.promptTokens.isEmpty {
+                        let prompt = MLXArray(input.promptTokens.map(Int32.init))
+                            .reshaped([1, input.promptTokens.count])
+                        let text = LMInput.Text(tokens: prompt)
+                        var modelState = state.state
+                        if input.nativeMTPPromptPrefill {
+                            modelState = modelState ?? LMOutput.State()
+                            modelState?[mtpEmitFlagKey] = true
+                        }
+                        let output = withPreparedCache(state.caches, lengths: text.sequenceLengths) {
+                            context.model(text, cache: state.caches, state: modelState)
+                        }
+                        if input.sampleFirstToken {
+                            sampledToken = ContinuousBatchRowSampler.sample(
+                                logits: output.logits[0..., -1, 0...],
+                                rows: [Self.samplerRow(input)]
+                            ).asArray(Int.self).first
+                        } else {
+                            sampledToken = nil
+                        }
+                        if input.nativeMTPPromptPrefill {
+                            guard let targetHidden = output.state?[mtpLastHiddenStatesKey] else {
+                                throw ContinuousBatchSchedulerError.unsupported(
+                                    "native_mtp_missing_prompt_hidden_state"
+                                )
+                            }
+                            try await self.seedNativeMTPDrafterFromPrefill(
+                                targetModel: context.model,
+                                input: input,
+                                targetHidden: targetHidden,
+                                positionDeltas: output.state?[mtpPositionDeltasKey],
+                                sampledToken: sampledToken
                             )
                         }
-                        try await self.seedNativeMTPDrafterFromPrefill(
-                            targetModel: context.model,
-                            input: input,
-                            targetHidden: targetHidden,
-                            positionDeltas: output.state?[mtpPositionDeltasKey],
-                            sampledToken: sampledToken
-                        )
+                        // Earlier chunks evaluate only cache state. The final
+                        // chunk also evaluates its sampled token, matching
+                        // `TokenIterator.prepare` on the serial path.
+                        eval(state.caches)
+                        // The drafter emission is per-call output, not row
+                        // state: a stateless row stays stateless so it can
+                        // share later batched forwards with other rows.
+                        if !(input.nativeMTPPromptPrefill && state.state == nil) {
+                            state.state = output.state
+                        }
                     }
-                    // Earlier chunks evaluate only cache state. The final
-                    // chunk also evaluates its sampled token, matching
-                    // `TokenIterator.prepare` on the serial path.
-                    eval(state.caches)
-                    // The drafter emission is per-call output, not row
-                    // state: a stateless row stays stateless so it can
-                    // share later batched forwards with other rows.
-                    if !(input.nativeMTPPromptPrefill && state.state == nil) {
-                        state.state = output.state
-                    }
+                    try self.setRowState(state, for: input.requestID, binding: input.binding)
+                    outputs.append(ContinuousBatchPrefillOutput(
+                        requestID: input.requestID,
+                        sampledToken: input.sampleFirstToken ? sampledToken : nil
+                    ))
+                } catch {
+                    ContinuousBatchingPolicy.logPrefillFailed(error)
+                    self.removeRowState(for: input.requestID)
+                    outputs.append(ContinuousBatchPrefillOutput(
+                        requestID: input.requestID,
+                        failureCode: "continuous_batching_prefill_failed"
+                    ))
                 }
-                try self.setRowState(state, for: input.requestID, binding: input.binding)
-                outputs.append(ContinuousBatchPrefillOutput(
-                    requestID: input.requestID,
-                    sampledToken: input.sampleFirstToken ? sampledToken : nil
-                ))
-            } catch {
-                ContinuousBatchingPolicy.logPrefillFailed(error)
-                self.removeRowState(for: input.requestID)
-                outputs.append(ContinuousBatchPrefillOutput(
-                    requestID: input.requestID,
-                    failureCode: "continuous_batching_prefill_failed"
-                ))
             }
+            self.clearDecodeSession()
+            return outputs
         }
-        self.clearDecodeSession()
-        return outputs
     }
 
     /// The `[B, >=L, hidden]` prompt hidden states of a shared prefill that

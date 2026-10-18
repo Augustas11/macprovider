@@ -27,8 +27,11 @@
 # Both legs need the GPU and all of unified memory: run them only inside an
 # announced Studio window with the buyer runner stopped, the live provider
 # paused, drained to 0 in flight and booted out, and an independent watchdog
-# armed. The script refuses to start while :8080 answers. Pausing and
-# restoring the live provider is the window owner's job.
+# armed. The script refuses to start, and each R015 step refuses to start,
+# while anything listens on :8080, a `macprovider-cli serve` process runs, or
+# the live provider's LaunchAgent is loaded; one window runs at a time (a lock
+# directory). Pausing and restoring the live provider is the window owner's
+# job.
 #
 # Binary: the bank leg ran a lab-harness release build of the v1.8.256 tag
 # source with this branch's lab-only journey overlay. The r015 leg runs a
@@ -37,8 +40,10 @@
 # canary compares exact tokens, counters and committed state.
 #
 # Env: HARNESS (dir holding macprovider-cli + mlx.metallib), MODEL (served
-# artifact dir), OUT, POLICY, LIVE_PORT (8080), BANK_MIN_SPEEDUP (1.20),
-# BANK_TIMEOUT_S (1800), R015_STEP_TIMEOUT_S (3600), R015_FROM (1).
+# artifact dir), OUT, POLICY, BANK_MIN_SPEEDUP (1.20), BANK_TIMEOUT_S (1800),
+# R015_STEP_TIMEOUT_S (3600), R015_FROM (1). The r015 leg refuses a harness
+# whose macprovider-cli is not R015_HARNESS_SHA256, the build of
+# PROVIDER_COMMIT named in the preregistration.
 set -euo pipefail
 export PATH=/usr/sbin:/opt/homebrew/bin:/usr/bin:/bin
 # The bench records `xcrun swift --version` and `xcodebuild -version`; the
@@ -48,11 +53,14 @@ HARNESS=${HARNESS:-$HOME/lab-glm53-r015v2/src/phase3-binary/.build-lab-harness/r
 MODEL=${MODEL:-"$HOME/Library/Application Support/macprovider/models/Jundot--GLM-5.3-Flash-oQ4e-mtp/36defc5042d92a992a7948e83d6f110b8df69329/7299b6a71a38490e378e9eb6524c426392aa96e3fd561007e0540134bbef48f9"}
 OUT=${OUT:-$HOME/lab-glm53-r015v2/window-$(date -u +%Y%m%dT%H%M%SZ)}
 POLICY=${POLICY:-$HOME/lab-glm53-r015v2/policy.json}
-LIVE_PORT=${LIVE_PORT:-8080}
+LIVE_PORT=8080
+LIVE_LABEL=live.malibu.provider
+LOCK=$HOME/.glm53-mtp-admission-window.lock
 MODEL_ID=zai-org/glm-5.3-flash
 RELEASE_METALLIB_SHA256=3d9b4a747758128cc5418e62c5ad8e282a11b0d436423537137e013beaa1261b
 POLICY_SHA256=7e3d3e8dcc10bc56b31d106a412a03a77ef63c025b711baef6dae62d41748b45
 PROVIDER_COMMIT=ada2ecb96a3756808b3492ec1c386b95ea4428a0
+R015_HARNESS_SHA256=pending
 CHALLENGE_ID=native-mtp-selftest-glm53-flash-0001
 # Candidate challenge texts, in preference order. The first is the text the
 # journey has always used (GLM: acceptance 19/43, about 1.0x at 07301b6bf).
@@ -63,10 +71,24 @@ CANDIDATES=(
   'native_mtp_selftest_v1 synthetic challenge: complete the code.'$'\n''def fibonacci(n):'$'\n''    if n < 2:'$'\n''        return n'$'\n''    return'
 )
 
-preflight() {
-  if curl -fsS --max-time 3 "http://127.0.0.1:$LIVE_PORT/v1/status" > /dev/null 2>&1; then
-    echo "refusing: the live provider answers on :$LIVE_PORT" >&2; exit 3
+# Refuses while the live provider could share the GPU: a listener on its
+# port (any response or none), a serve process, or its LaunchAgent loaded.
+live_absent() {
+  if lsof -nP -iTCP:$LIVE_PORT -sTCP:LISTEN > /dev/null 2>&1; then
+    echo "refusing: something listens on :$LIVE_PORT" >&2; return 3
   fi
+  if pgrep -f "macprovider-cli serve" > /dev/null 2>&1; then
+    echo "refusing: a macprovider-cli serve process runs" >&2; return 3
+  fi
+  if launchctl print gui/$(id -u)/$LIVE_LABEL > /dev/null 2>&1; then
+    echo "refusing: $LIVE_LABEL is loaded" >&2; return 3
+  fi
+}
+
+preflight() {
+  live_absent || exit 3
+  mkdir $LOCK 2> /dev/null || { echo "refusing: another window holds $LOCK" >&2; exit 3; }
+  LOCKED=1
   [[ -x $HARNESS/macprovider-cli && -f $HARNESS/mlx.metallib ]] || { echo "no harness at $HARNESS" >&2; exit 3; }
   [[ $(shasum -a 256 $HARNESS/mlx.metallib | cut -d' ' -f1) == $RELEASE_METALLIB_SHA256 ]] ||
     { echo "refusing: $HARNESS/mlx.metallib is not the signed 1.8.256 metallib" >&2; exit 3; }
@@ -102,6 +124,7 @@ fixture() {
 
 bank() {
   echo "bank start $(date -u +%FT%TZ)" | tee -a $OUT/summary.txt
+  rm -f $OUT/bank-journey.json $OUT/bank-entry.json
   local root=$(fixture bank-fixture) rc=0
   local args=()
   for text in "${CANDIDATES[@]}"; do args+=(--selftest-prompt "$text"); done
@@ -111,8 +134,8 @@ bank() {
     --qualified-slots 4 --max-native-active-rows 1 --max-prompt-tokens 4096 \
     --selftest-only --selftest-challenge-id $CHALLENGE_ID "${args[@]}" || rc=$?
   echo "bank native-mtp-journey-e2e rc=$rc end $(date -u +%FT%TZ)" | tee -a $OUT/summary.txt
-  # A failed bank leg does not stop `run`: R015 still uses the window.
-  { python3 - $OUT/bank-journey.json ${BANK_MIN_SPEEDUP:-1.20} $OUT/bank-entry.json <<'PY' 2>&1 || true; } | tee -a $OUT/summary.txt
+  local verdict=0
+  python3 - $OUT/bank-journey.json ${BANK_MIN_SPEEDUP:-1.20} $OUT/bank-entry.json > $OUT/bank-verdict.txt 2>&1 <<'PY' || verdict=$?
 import json, sys
 text = open(sys.argv[1]).read()
 if "{" not in text:
@@ -131,7 +154,13 @@ if chosen is None:
 json.dump(chosen["challenge_bank_entry"], open(sys.argv[3], "w"), sort_keys=True, separators=(",", ":"))
 print(f"bank PASS: candidate {chosen['selftest_prompt_index']} -> {sys.argv[3]}")
 PY
+  tee -a $OUT/summary.txt < $OUT/bank-verdict.txt
   rm -rf $root/target
+  if (( rc != 0 || verdict != 0 )); then
+    rm -f $OUT/bank-entry.json
+    echo "bank FAIL (journey rc=$rc, verdict rc=$verdict)" | tee -a $OUT/summary.txt
+    return 1
+  fi
 }
 
 # One bench process per step: each loads GLM once and exits, so a cell never
@@ -150,6 +179,8 @@ R015_STEPS=(
 r015() {
   [[ $(shasum -a 256 $POLICY | cut -d' ' -f1) == $POLICY_SHA256 ]] ||
     { echo "refusing: $POLICY is not the frozen GLM R015 policy" >&2; exit 3; }
+  [[ $(shasum -a 256 $HARNESS/macprovider-cli | cut -d' ' -f1) == $R015_HARNESS_SHA256 ]] ||
+    { echo "refusing: $HARNESS/macprovider-cli is not the preregistered build of $PROVIDER_COMMIT" >&2; exit 3; }
   echo "r015 start $(date -u +%FT%TZ)" | tee -a $OUT/summary.txt
   # The fixture is target/ only: the GLM next-N layer is embedded in it.
   local root=$(fixture r015-fixture) rc=0 step=0
@@ -160,6 +191,7 @@ r015() {
   # moved aside first (the bench refuses to resume it).
   for args in "${(@)R015_STEPS[${R015_FROM:-1},-1]}"; do
     step=$((step + 1))
+    live_absent || { rc=3; break; }
     echo "r015 step '$args' start $(date -u +%FT%TZ)" | tee -a $OUT/summary.txt
     run_bounded ${R015_STEP_TIMEOUT_S:-3600} r015-$step $OUT/r015-$step.stdout $OUT/r015-$step.log \
       $bench ${=args} || rc=$?
@@ -171,9 +203,14 @@ r015() {
   return $rc
 }
 
+# Top level: a zsh EXIT trap set inside a function fires when it returns.
+LOCKED=
+trap '[[ -n $LOCKED ]] && rmdir $LOCK 2> /dev/null' EXIT
+
 case ${1:-} in
   bank) preflight; bank ;;
   r015) preflight; r015 ;;
-  run) preflight; bank; r015 ;;
+  # A failed bank leg does not stop `run`: R015 still uses the window.
+  run) preflight; bank || echo "run: continuing to r015 after the bank failure" | tee -a $OUT/summary.txt; r015 ;;
   *) echo "usage: $0 bank|r015|run" >&2; exit 2 ;;
 esac

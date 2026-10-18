@@ -306,7 +306,7 @@ final class NativeMTPBenchPolicyTests: XCTestCase {
             var linear = 0
             while counts[linear] < target { linear += 1 }
             var tokenizations = 0
-            let found = await NativeMTPBenchPrompts.fewestReachingSalts(target: target) { salts in
+            let found = try await NativeMTPBenchPrompts.fewestReachingSalts(target: target) { salts in
                 tokenizations += 1
                 return counts[salts]
             }
@@ -314,6 +314,15 @@ final class NativeMTPBenchPolicyTests: XCTestCase {
             XCTAssertEqual(found.count, counts[linear], "target \(target)")
             XCTAssertLessThanOrEqual(tokenizations, 2 * 10 + 2, "target \(target)")
         }
+    }
+
+    func testPromptSaltBisectionFailsWhenTheTargetIsOutOfReach() async {
+        do {
+            _ = try await NativeMTPBenchPrompts.fewestReachingSalts(target: 1_000, maximumSalts: 100) { min($0, 500) }
+            XCTFail("an unreachable target must fail")
+        } catch {}
+        let reachedAtTheBound = try? await NativeMTPBenchPrompts.fewestReachingSalts(target: 100, maximumSalts: 100) { $0 }
+        XCTAssertEqual(reachedAtTheBound?.salts, 100)
     }
 
     func testEveryBlockNeedsItsSizedPrompts() throws {
