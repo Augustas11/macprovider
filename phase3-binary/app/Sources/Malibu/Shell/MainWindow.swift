@@ -55,14 +55,35 @@ final class MalibuNavigation: ObservableObject {
     }
 }
 
+/// Text that came from the provider (status, logs, lifecycle) is shown as
+/// one plain line: control, format (including bidi overrides) and separator
+/// characters are dropped and the length is capped.
+enum ShellText {
+    static func display(_ text: String, maxLength: Int = 240) -> String {
+        var out = String.UnicodeScalarView()
+        for scalar in text.unicodeScalars {
+            switch scalar.properties.generalCategory {
+            case .control, .format, .lineSeparator, .paragraphSeparator, .surrogate, .privateUse, .unassigned:
+                if scalar == "\n" || scalar == "\t" { out.append(" ") }
+            default:
+                out.append(scalar)
+            }
+        }
+        let line = String(out)
+        guard line.count > maxLength else { return line }
+        return String(line.prefix(maxLength - 1)) + "…"
+    }
+}
+
 /// Sidebar footer: the loaded model and one health line (SPEC-025-R002).
 enum ShellSidebarPresentation {
-    static func footerModel(_ snapshot: AgentSnapshot, modelStoreCurrent: String?) -> String {
-        let model = modelStoreCurrent ?? snapshot.currentModelID
-        guard let model, !model.isEmpty else {
+    /// Only the model the provider reports in status counts as loaded; a
+    /// model merely named in the config is not shown as loaded.
+    static func footerModel(_ snapshot: AgentSnapshot) -> String {
+        guard let model = snapshot.currentModelID, !model.isEmpty else {
             return String(localized: "No model loaded", comment: "Sidebar footer without a model")
         }
-        return shortModelName(model)
+        return ShellText.display(shortModelName(model), maxLength: 80)
     }
 
     /// The last path component of a model id ("mlx-community/Qwen3-8B-4bit"
@@ -194,11 +215,11 @@ struct MainShellView: View {
 
             Divider()
             VStack(alignment: .leading, spacing: 2) {
-                Text(ShellSidebarPresentation.footerModel(agent.snapshot, modelStoreCurrent: modelStore.currentModelID))
+                Text(ShellSidebarPresentation.footerModel(agent.snapshot))
                     .font(.caption.monospaced())
                     .lineLimit(1)
                     .truncationMode(.middle)
-                    .help(modelStore.currentModelID ?? agent.snapshot.currentModelID ?? "")
+                    .help(ShellText.display(agent.snapshot.currentModelID ?? ""))
                 if let health = ShellSidebarPresentation.footerHealth(agent.snapshot) {
                     Text(health)
                         .font(.caption2)

@@ -25,13 +25,14 @@ final class ShellScreensTests: XCTestCase {
 
     func testSidebarFooterShowsLoadedModelAndHealth() {
         var snapshot = AgentSnapshot.empty
-        XCTAssertEqual(ShellSidebarPresentation.footerModel(snapshot, modelStoreCurrent: nil), "No model loaded")
+        XCTAssertEqual(ShellSidebarPresentation.footerModel(snapshot), "No model loaded")
         XCTAssertNil(ShellSidebarPresentation.footerHealth(snapshot))
         snapshot.currentModelID = "mlx-community/Llama-3.2-3B-Instruct-4bit"
         snapshot.advertisedMaxConcurrency = 1
         snapshot.thermalState = .nominal
-        XCTAssertEqual(ShellSidebarPresentation.footerModel(snapshot, modelStoreCurrent: nil), "Llama-3.2-3B-Instruct-4bit")
-        XCTAssertEqual(ShellSidebarPresentation.footerModel(snapshot, modelStoreCurrent: "org/other"), "other")
+        XCTAssertEqual(ShellSidebarPresentation.footerModel(snapshot), "Llama-3.2-3B-Instruct-4bit")
+        snapshot.currentModelID = "org/evil\u{202E}name\nline"
+        XCTAssertEqual(ShellSidebarPresentation.footerModel(snapshot), "evilname line", "provider text is one plain line")
         XCTAssertEqual(ShellSidebarPresentation.footerHealth(snapshot), "1 slot · cool")
         snapshot.advertisedMaxConcurrency = 4
         snapshot.thermalState = .critical
@@ -120,10 +121,30 @@ final class ShellScreensTests: XCTestCase {
         XCTAssertEqual(ModelsPresentation.localSummary([]), "0 models on this Mac")
     }
 
-    func testSwitchingLineReplacesTheStuckCheckingText() {
-        XCTAssertEqual(ModelsPresentation.switchingLine(listState: .ready), "Switching available.")
-        XCTAssertEqual(ModelsPresentation.switchingLine(listState: .viewOnly), "Switching off: warm swap is not running on this Mac.")
-        XCTAssertEqual(ModelsPresentation.switchingLine(listState: .unavailable), "Switching unavailable right now.")
+    func testSwitchingLineFollowsWarmSwapNotRowActions() {
+        XCTAssertEqual(ModelsPresentation.switchingLine(listState: .ready, warmSwapAvailable: true), "Switching available.")
+        XCTAssertEqual(ModelsPresentation.switchingLine(listState: .viewOnly, warmSwapAvailable: true), "Switching available.",
+                       "a projection with only the current model still has switching")
+        XCTAssertEqual(ModelsPresentation.switchingLine(listState: .ready, warmSwapAvailable: false), "Switching off: warm swap is not running on this Mac.",
+                       "an evaluate-only projection does not mean switching works")
+        XCTAssertEqual(ModelsPresentation.switchingLine(listState: .unavailable, warmSwapAvailable: true), "Switching unavailable right now.")
+    }
+
+    func testRowsFollowTheCompleteSpec044R005Order() throws {
+        let rows = try [
+            Self.row(key: "b-model", weightsLocal: true, supplyDeficit: 1.0),
+            Self.row(key: "a-model", weightsLocal: true, supplyDeficit: 1.0),
+            Self.row(key: "c-model", weightsLocal: true, supplyDeficit: 2.0),
+            Self.row(key: "d-model", weightsLocal: true, demandRank: 3),
+            Self.row(key: "e-model", weightsLocal: true, completion: 0.9),
+        ].shuffled()
+        XCTAssertEqual(rows.sortedForDisplay().map(\.id), ["e-model", "d-model", "c-model", "a-model", "b-model"],
+                       "rate, then demand rank, then supply deficit, then canonical identity bytes")
+    }
+
+    func testProviderTextIsShownAsOnePlainLine() {
+        XCTAssertEqual(ShellText.display("a\u{0007}b\u{200F}c\nd"), "abc d")
+        XCTAssertEqual(ShellText.display(String(repeating: "x", count: 50), maxLength: 10), "xxxxxxxxx…")
     }
 
     func testModelsScreenCopyCarriesTheRateDisclosureAndNoIncomeClaims() throws {
@@ -181,6 +202,10 @@ final class ShellScreensTests: XCTestCase {
         let catalog = try Self.row(key: "catalog-model", weightsLocal: true)
         let byom = try Self.row(key: "local-candidate", economicsState: "blocked", catalogPermitted: false)
         XCTAssertEqual(DiscoverPresentation.catalogRows([catalog, byom]).map(\.id), ["catalog-model"])
+        XCTAssertTrue(DiscoverPresentation.showsRecommendation("Catalog-Model", rows: [catalog, byom]))
+        XCTAssertFalse(DiscoverPresentation.showsRecommendation("local-candidate", rows: [catalog, byom]),
+                       "a recommendation's rates never show for a non-catalog model")
+        XCTAssertFalse(DiscoverPresentation.showsRecommendation(nil, rows: [catalog]))
     }
 
     func testDiscoverFitFilterAndSortsKeepCatalogOrderAsTieBreak() throws {
@@ -242,6 +267,7 @@ final class ShellScreensTests: XCTestCase {
         XCTAssertThrowsError(try MalibuOtherMLXModel.decodeBrowse(Self.browseJSON(actionModelID: "\"x\"")))
         XCTAssertThrowsError(try MalibuOtherMLXModel.decodeBrowse(Self.browseJSON(schema: "models_browse.v2")))
         XCTAssertThrowsError(try MalibuOtherMLXModel.decodeBrowse(Self.browseJSON(extraRowKey: true)))
+        XCTAssertThrowsError(try MalibuOtherMLXModel.decodeBrowse(Self.browseJSON(extraRootKey: true)), "the envelope is closed too")
         XCTAssertThrowsError(try MalibuOtherMLXModel.decodeBrowse(Self.browseJSON(modelID: "/Users/me/model")))
         XCTAssertThrowsError(try MalibuOtherMLXModel.decodeBrowse(Self.browseJSON(fit: "huge")))
     }
@@ -278,6 +304,13 @@ final class ShellScreensTests: XCTestCase {
         ]))
         XCTAssertNil(unsafe.continuousBatchingMode, "free text is never rendered")
         XCTAssertNil(unsafe.continuousBatchingActive)
+
+        let unknown = try XCTUnwrap(ProviderEngineStatus.decode(status: [
+            "continuous_batching": ["mode": "turbo", "active": false],
+            "native_mtp": ["supported": true, "enabled": true, "mode": "hyper"],
+        ]))
+        XCTAssertNil(ProviderScreenPresentation.continuousBatchingLine(unknown), "an unknown CB mode is not shown as a known state")
+        XCTAssertNil(ProviderScreenPresentation.nativeMTPLine(unknown), "an unknown MTP mode is not shown as a known state")
     }
 
     func testProviderScreenShowsReportedValuesOnlyAndPauseMatchesState() {
@@ -386,12 +419,13 @@ final class ShellScreensTests: XCTestCase {
         demandRank: Int = 7,
         switchable: Bool = false,
         economicsState: String = "trusted",
-        catalogPermitted: Bool = true
+        catalogPermitted: Bool = true,
+        supplyDeficit: Double = 1.5
     ) throws -> MalibuModelRow {
         let json = rowJSON(
             key: key, isCurrent: isCurrent, fit: fit, weightsLocal: weightsLocal, runtimeState: runtimeState,
             estimatedGB: estimatedGB, completion: completion, demandRank: demandRank, switchable: switchable,
-            economicsState: economicsState, catalogPermitted: catalogPermitted
+            economicsState: economicsState, catalogPermitted: catalogPermitted, supplyDeficit: supplyDeficit
         )
         let decoded = try JSONDecoder().decode(MalibuModelCatalogEconomicsDocument.Row.self, from: Data(json.utf8))
         return try XCTUnwrap(MalibuModelRow(economics: decoded, currentModelID: nil, warmSwapAvailable: true))
@@ -408,7 +442,8 @@ final class ShellScreensTests: XCTestCase {
         demandRank: Int = 7,
         switchable: Bool = false,
         economicsState: String = "trusted",
-        catalogPermitted: Bool = true
+        catalogPermitted: Bool = true,
+        supplyDeficit: Double = 1.5
     ) -> String {
         let unavailable = #"{"available":false,"requires_confirmation":false,"transaction_kind":null,"transaction_id":null,"action_timeout_seconds":null,"estimated_bytes":null,"unavailable_reason":"action_unavailable"}"#
         let switchAction = switchable
@@ -416,7 +451,7 @@ final class ShellScreensTests: XCTestCase {
             : unavailable
         let state = runtimeState ?? (isCurrent ? "current" : (switchable ? "ready" : "catalog"))
         return """
-        {"model_key":"\(key)","served_model_id":"\(key)","display_model_id":"\(key)","action_model_id":"\(key)","is_current":\(isCurrent),"weights_present_locally":\(weightsLocal),"runtime_state":"\(state)","estimated_gb":\(estimatedGB),"fit":"\(fit)","disabled_reason":null,"warning_codes":["admission_state_not_settlement_capable"],"admission":{"state":"catalog_priced","source":"coordinator","coordinator_event_id":"event-1","state_observed_at":"\(timestamp)","catalog_economics_permitted":\(catalogPermitted),"settlement_capable":false},"provider_guidance":{"state_label_key":"byom.admission.catalog_priced","state_meaning_key":"byom.admission.not_earning","next_action":"withdraw","transition_reason_code":null,"earning_path_class":"not_earning_yet_catalog_or_receipt_path_exists"},"rate_card_version":"rates-v1","rate_card_generated_at":"\(timestamp)","rate_card_key":"\(key)","rate_source":"live_signed","prompt_rate_usd_per_million_tokens":0.2,"completion_rate_usd_per_million_tokens":0.4,"provider_share_bps":9000,"provider_prompt_payout_usd_per_million_tokens":0.18,"provider_completion_payout_usd_per_million_tokens":\(completion),"economics_state":"\(economicsState)","demand_rank":\(demandRank),"demand_weight":0.65,"ready_provider_count":4,"supply_deficit_score":1.5,"switch":\(switchAction),"prepare":\(unavailable),"evaluate":\(unavailable),"adopt_recommendation":\(unavailable),"cleanup_staging":\(unavailable)}
+        {"model_key":"\(key)","served_model_id":"\(key)","display_model_id":"\(key)","action_model_id":"\(key)","is_current":\(isCurrent),"weights_present_locally":\(weightsLocal),"runtime_state":"\(state)","estimated_gb":\(estimatedGB),"fit":"\(fit)","disabled_reason":null,"warning_codes":["admission_state_not_settlement_capable"],"admission":{"state":"catalog_priced","source":"coordinator","coordinator_event_id":"event-1","state_observed_at":"\(timestamp)","catalog_economics_permitted":\(catalogPermitted),"settlement_capable":false},"provider_guidance":{"state_label_key":"byom.admission.catalog_priced","state_meaning_key":"byom.admission.not_earning","next_action":"withdraw","transition_reason_code":null,"earning_path_class":"not_earning_yet_catalog_or_receipt_path_exists"},"rate_card_version":"rates-v1","rate_card_generated_at":"\(timestamp)","rate_card_key":"\(key)","rate_source":"live_signed","prompt_rate_usd_per_million_tokens":0.2,"completion_rate_usd_per_million_tokens":0.4,"provider_share_bps":9000,"provider_prompt_payout_usd_per_million_tokens":0.18,"provider_completion_payout_usd_per_million_tokens":\(completion),"economics_state":"\(economicsState)","demand_rank":\(demandRank),"demand_weight":0.65,"ready_provider_count":4,"supply_deficit_score":\(supplyDeficit),"switch":\(switchAction),"prepare":\(unavailable),"evaluate":\(unavailable),"adopt_recommendation":\(unavailable),"cleanup_staging":\(unavailable)}
         """
     }
 
@@ -426,10 +461,11 @@ final class ShellScreensTests: XCTestCase {
         fit: String = "fits",
         actionable: Bool = false,
         actionModelID: String = "null",
-        extraRowKey: Bool = false
+        extraRowKey: Bool = false,
+        extraRootKey: Bool = false
     ) -> String {
         """
-        {"schema_version":"\(schema)","generated_at":"2026-10-18T00:00:00Z","source":"huggingface_mlx_community","query":"qwen","limit":30,"fits_only":false,"max_gb":null,"ram_gb":32,"rows":[{"model_id":"\(modelID)","display_id":"\(modelID)","action_model_id":\(actionModelID),"source":"huggingface_mlx_community","fit":"\(fit)","estimated_gb":4.6,"actionable":\(actionable)\(extraRowKey ? #","earnable":true"# : "")}]}
+        {\(extraRootKey ? #""earnable":true,"# : "")"schema_version":"\(schema)","generated_at":"2026-10-18T00:00:00Z","source":"huggingface_mlx_community","query":"qwen","limit":30,"fits_only":false,"max_gb":null,"ram_gb":32,"rows":[{"model_id":"\(modelID)","display_id":"\(modelID)","action_model_id":\(actionModelID),"source":"huggingface_mlx_community","fit":"\(fit)","estimated_gb":4.6,"actionable":\(actionable)\(extraRowKey ? #","earnable":true"# : "")}]}
         """
     }
 }

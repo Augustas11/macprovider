@@ -375,6 +375,7 @@ struct AgentSnapshot: Equatable {
         lifecycleLeaseKind = nil
         lifecycleLeaseOperationID = nil
         lifecycleLeaseExpiresWallMS = nil
+        providerEngine = nil
         if currentModelIDFromStatus {
             currentModelID = nil
         }

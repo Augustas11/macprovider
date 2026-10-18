@@ -22,7 +22,8 @@ enum DashboardCopy {
 
     static func modelRowStatusLine(
         currentModelID: String?,
-        listState: ModelManagementStore.ListState
+        listState: ModelManagementStore.ListState,
+        warmSwapAvailable: Bool = true
     ) -> String {
         guard currentModelID != nil else {
             switch listState {
@@ -37,10 +38,10 @@ enum DashboardCopy {
         switch listState {
         case .checking:
             return String(localized: "Serving this model. Checking whether switching is available…", comment: "Dashboard model checking switch")
-        case .ready:
-            return String(localized: "Serving this model. Switching is available.", comment: "Dashboard model ready to switch")
-        case .viewOnly:
-            return String(localized: "Serving this model. Switching is off until warm swap is running.", comment: "Dashboard model view-only")
+        case .ready, .viewOnly:
+            return warmSwapAvailable
+                ? String(localized: "Serving this model. Switching is available.", comment: "Dashboard model ready to switch")
+                : String(localized: "Serving this model. Switching is off until warm swap is running.", comment: "Dashboard model view-only")
         case .unavailable:
             return String(localized: "Serving this model. Switching is unavailable right now; open Models to retry.", comment: "Dashboard model switch unavailable")
         }
@@ -73,11 +74,13 @@ enum DashboardCopy {
     static func yourModelLines(
         currentModelID: String?,
         listState: ModelManagementStore.ListState,
+        warmSwapAvailable: Bool = true,
         rows: [MalibuModelRow]
     ) -> [String] {
         var lines: [String] = [
-            currentModelID ?? String(localized: "Checking…", comment: "Dashboard model loading state"),
-            modelRowStatusLine(currentModelID: currentModelID, listState: listState),
+            currentModelID.map { ShellText.display($0) }
+                ?? String(localized: "No model reported", comment: "Dashboard model absent"),
+            modelRowStatusLine(currentModelID: currentModelID, listState: listState, warmSwapAvailable: warmSwapAvailable),
         ]
         if let current = rows.first(where: { $0.category == .current }),
            let summary = ModelsPresentation.rateAndDemand(current, allRows: rows) {
@@ -243,10 +246,11 @@ struct DashboardView: View {
     }
 
     private var yourModelPanel: some View {
-        let current = modelStore.currentModelID ?? agent.snapshot.currentModelID
+        let current = agent.snapshot.currentModelID
         let lines = DashboardCopy.yourModelLines(
             currentModelID: current,
             listState: modelStore.listState,
+            warmSwapAvailable: modelStore.warmSwapAvailable,
             rows: modelStore.rows
         )
         return ShellPanel(DashboardCopy.yourModelTitle) {

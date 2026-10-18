@@ -1701,11 +1701,16 @@ extension MalibuModelCLIRunning {
 private final class ModelCLIOutputBuffer: @unchecked Sendable {
     private let lock = NSLock()
     private var value = ""
+    private var byteCount = 0
 
-    func append(_ text: String) {
+    /// Appends and returns the total UTF-8 byte count buffered so far.
+    @discardableResult
+    func append(_ text: String) -> Int {
         lock.lock()
+        defer { lock.unlock() }
         value.append(text)
-        lock.unlock()
+        byteCount += text.utf8.count
+        return byteCount
     }
 
     func read() -> String {
@@ -1799,6 +1804,13 @@ final class MalibuModelCLI: MalibuModelCLIRunning {
 
     static let shared = MalibuModelCLI()
     private let cancellation = ModelCLIProcessCancellation()
+    /// When set, a process whose stdout or stderr exceeds this many bytes is
+    /// killed, so an oversized reply cannot grow memory without bound.
+    private let maxOutputBytes: Int?
+
+    init(maxOutputBytes: Int? = nil) {
+        self.maxOutputBytes = maxOutputBytes
+    }
 
     func cancelCurrentOperation() {
         cancellation.cancel()
@@ -1818,6 +1830,7 @@ final class MalibuModelCLI: MalibuModelCLIRunning {
         let executable = try resolveExecutable(peer: peer)
         let environment = try ProcessEnvironmentSanitizer.sanitized()
         let cancellation = self.cancellation
+        let maxOutputBytes = self.maxOutputBytes
         return try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: priority.dispatchQoS).async {
                 let process = Process()
@@ -1846,7 +1859,12 @@ final class MalibuModelCLI: MalibuModelCLIRunning {
                         let data = handle.availableData
                         guard !data.isEmpty else { return }
                         let text = String(decoding: data, as: UTF8.self)
-                        buffer.append(text)
+                        if let maxOutputBytes, buffer.append(text) > maxOutputBytes {
+                            handle.readabilityHandler = nil
+                            cancellation.kill()
+                            return
+                        }
+                        if maxOutputBytes == nil { buffer.append(text) }
                         if deliverLines {
                             for value in stdoutLines.append(text) {
                                 deliveries.enter()
@@ -2108,6 +2126,9 @@ final class ModelManagementStore: ObservableObject {
     @Published private(set) var rows: [MalibuModelRow] = []
     @Published private(set) var currentModelID: String?
     @Published private(set) var listState: ListState = .checking
+    /// Whether the provider runs with warm swap, independent of whether any
+    /// row currently offers an action.
+    @Published private(set) var warmSwapAvailable = false
     @Published private(set) var operation: Operation = .idle
     @Published private(set) var cooldownSecondsRemaining: Int? = nil
     @Published private(set) var peerObservationFresh = false
@@ -2134,7 +2155,8 @@ final class ModelManagementStore: ObservableObject {
     /// cancellation slot.
     private let browseCLI: any MalibuModelCLIRunning
     var browseCommandTimeoutSeconds: TimeInterval = 20
-    private var browseTimedOut = false
+    /// Bumped per search and at the deadline, so a late reply is ignored.
+    private var browseGeneration: UInt64 = 0
     /// Upper bound for a model list/catalog read, so "Checking…" always ends
     /// in a result or a retryable "unavailable" (#2029 P1-19).
     var listCommandTimeoutSeconds: TimeInterval = 10
@@ -2162,7 +2184,7 @@ final class ModelManagementStore: ObservableObject {
 
     init(
         cli: any MalibuModelCLIRunning = MalibuModelCLI.shared,
-        browseCLI: any MalibuModelCLIRunning = MalibuModelCLI(),
+        browseCLI: any MalibuModelCLIRunning = MalibuModelCLI(maxOutputBytes: 1_048_576),
         paths: ProviderPaths = .current,
         defaults: UserDefaults = .standard,
         powerMonitor: MalibuPowerMonitor = MalibuPowerMonitor()
@@ -2432,6 +2454,7 @@ final class ModelManagementStore: ObservableObject {
         clearCatalogProjectionTracking()
         guard supportsLegacyList else {
             listState = .viewOnly
+            warmSwapAvailable = false
             operation = .idle
             statusLine = configuredModel == nil
                 ? String(localized: "Model controls require a fresh compatible provider update. The current model remains view-only.", comment: "Model capability gate")
@@ -2451,6 +2474,7 @@ final class ModelManagementStore: ObservableObject {
             self.currentModelID = document.currentModelID ?? configuredModel
             self.rows = document.rows.map { MalibuModelRow(row: $0, currentModelID: self.currentModelID, warmSwapAvailable: document.warmSwapAvailable) }
             self.listState = document.warmSwapAvailable ? .ready : .viewOnly
+            self.warmSwapAvailable = document.warmSwapAvailable
             self.statusLine = document.warmSwapAvailable
                 ? String(localized: "Model controls ready.", comment: "Model activity status")
                 : String(localized: "Provider is not running with warm swap; model controls are view-only.", comment: "Model activity status")
@@ -2486,33 +2510,35 @@ final class ModelManagementStore: ObservableObject {
         }
         guard otherMLXState != .loading else { return }
         let family = MalibuOtherMLXModel.sanitizedQuery(query)
+        browseGeneration &+= 1
+        let generation = browseGeneration
         otherMLXState = .loading
         var arguments = ["models", "browse", "--json", "--limit", "30"]
         if let family { arguments += ["--family", family] }
         let runner = browseCLI
         let timeoutNanoseconds = UInt64(max(0, browseCommandTimeoutSeconds) * 1_000_000_000)
-        browseTimedOut = false
-        let timeout = Task { @MainActor [weak self] in
+        // A hard deadline: the screen leaves "loading" when it passes, whether
+        // or not the subprocess has exited yet.
+        let deadline = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: timeoutNanoseconds)
-            guard !Task.isCancelled else { return }
-            self?.browseTimedOut = true
+            guard !Task.isCancelled, let self, self.browseGeneration == generation else { return }
+            self.browseGeneration &+= 1
+            self.otherMLXModels = []
+            self.otherMLXState = .unavailable(String(localized: "Hugging Face did not answer in time. Try again.", comment: "Browse timed out"))
             runner.cancelCurrentOperation()
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
-            guard !Task.isCancelled else { return }
             runner.forceTerminateCurrentOperation()
         }
-        defer { timeout.cancel() }
+        defer { deadline.cancel() }
         do {
             let result = try await runner.run(arguments: arguments, peer: peerEvidence, onLine: { _ in })
-            guard !browseTimedOut else { throw ModelManagementError.listTimedOut }
+            guard browseGeneration == generation else { return }
             guard result.exitCode == 0 else { throw ModelManagementError.invalidCatalog }
             otherMLXModels = try MalibuOtherMLXModel.decodeBrowse(result.stdout)
             otherMLXState = .loaded
         } catch {
+            guard browseGeneration == generation else { return }
             otherMLXModels = []
-            otherMLXState = .unavailable(browseTimedOut
-                ? String(localized: "Hugging Face did not answer in time. Try again.", comment: "Browse timed out")
-                : String(localized: "Other MLX models can't be listed right now.", comment: "Browse failed"))
+            otherMLXState = .unavailable(String(localized: "Other MLX models can't be listed right now.", comment: "Browse failed"))
         }
     }
 
@@ -2568,6 +2594,7 @@ final class ModelManagementStore: ObservableObject {
             ).sortedForDisplay()
             self.currentModelID = configuredModel ?? rows.first(where: { $0.category == .current })?.id
             self.listState = rows.contains(where: { $0.action != .none }) ? .ready : .viewOnly
+            self.warmSwapAvailable = readySwitchCapabilityAvailable
             self.operation = .idle
             await refreshPoolBindings()
             if rows.isEmpty {
@@ -3500,6 +3527,12 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
     let providerShareBPS: Int?
     /// Providers ready to serve this model on the network; trusted rows only.
     let readyProviderCount: Int?
+    /// SPEC-044-R005 tie-break inputs; trusted rows only.
+    let supplyDeficitScore: Double?
+    let demandWeight: Double?
+    /// SPEC-044-R005 canonical row identity: tag and value, each prefixed by
+    /// its unsigned 32-bit big-endian UTF-8 byte length.
+    let canonicalIdentity: [UInt8]
     let warningCodes: [String]
     var action: Action
     var blockReason: String?
@@ -3526,6 +3559,9 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         demandRank = nil
         providerShareBPS = nil
         readyProviderCount = nil
+        supplyDeficitScore = nil
+        demandWeight = nil
+        canonicalIdentity = Self.canonicalIdentity(tag: "catalog", value: row.actionModelID)
         warningCodes = []
         if row.modelID == currentModelID || row.state == "warm" {
             category = .current
@@ -3586,6 +3622,9 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         demandRank = row.economicsState == "trusted" ? row.demandRank : nil
         providerShareBPS = row.economicsState == "trusted" ? row.providerShareBPS : nil
         readyProviderCount = row.economicsState == "trusted" ? row.readyProviderCount : nil
+        supplyDeficitScore = row.economicsState == "trusted" ? row.supplyDeficitScore : nil
+        demandWeight = row.economicsState == "trusted" ? row.demandWeight : nil
+        canonicalIdentity = Self.canonicalIdentity(row)
         providerPromptPayoutUSDPerMillionTokens = row.economicsState == "trusted"
             ? row.providerPromptPayoutUSDPerMillionTokens
             : nil
@@ -3671,6 +3710,9 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         demandRank = nil
         providerShareBPS = nil
         readyProviderCount = nil
+        supplyDeficitScore = nil
+        demandWeight = nil
+        canonicalIdentity = Self.canonicalIdentity(row)
         warningCodes = ["projection_unsupported"]
         action = .none
         if currentModelID.map({ modelIdentityKey($0) == modelIdentityKey(projectedID) }) == true || row.isCurrent {
@@ -3680,6 +3722,20 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
             category = .blocked
             blockReason = String(localized: "Model catalog row unavailable because the provider CLI returned an unsupported catalog contract.", comment: "Unsupported catalog row")
         }
+    }
+
+    static func canonicalIdentity(_ row: MalibuModelCatalogEconomicsDocument.Row) -> [UInt8] {
+        row.actionModelID.map { canonicalIdentity(tag: "candidate", value: $0) }
+            ?? canonicalIdentity(tag: "catalog", value: row.modelKey)
+    }
+
+    static func canonicalIdentity(tag: String, value: String) -> [UInt8] {
+        func prefixed(_ text: String) -> [UInt8] {
+            let bytes = Array(text.utf8)
+            let length = UInt32(bytes.count)
+            return [UInt8(length >> 24 & 0xFF), UInt8(length >> 16 & 0xFF), UInt8(length >> 8 & 0xFF), UInt8(length & 0xFF)] + bytes
+        }
+        return prefixed(tag) + prefixed(value)
     }
 
     var categoryLabel: String {
@@ -3979,19 +4035,37 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
     }
 }
 
-private extension Array where Element == MalibuModelRow {
+extension Array where Element == MalibuModelRow {
+    /// The SPEC-044-R005 total order: section, completion payout (desc),
+    /// demand rank (asc), supply deficit (desc), demand weight (desc), ready
+    /// provider count (asc), each with nulls last, then the canonical identity
+    /// bytes. Non-trusted rows carry no economics, so components 2-6 are null.
     func sortedForDisplay() -> [MalibuModelRow] {
         sorted { lhs, rhs in
             let leftCategory = categoryRank(lhs.category)
             let rightCategory = categoryRank(rhs.category)
             if leftCategory != rightCategory { return leftCategory < rightCategory }
-            let leftRate = lhs.providerCompletionPayoutUSDPerMillionTokens ?? -1
-            let rightRate = rhs.providerCompletionPayoutUSDPerMillionTokens ?? -1
-            if leftRate != rightRate { return leftRate > rightRate }
-            let leftDemand = lhs.demandRank ?? Int.max
-            let rightDemand = rhs.demandRank ?? Int.max
-            if leftDemand != rightDemand { return leftDemand < rightDemand }
-            return lhs.displayID.localizedStandardCompare(rhs.displayID) == .orderedAscending
+            for order in [
+                Self.compare(lhs.providerCompletionPayoutUSDPerMillionTokens, rhs.providerCompletionPayoutUSDPerMillionTokens, descending: true),
+                Self.compare(lhs.demandRank.map(Double.init), rhs.demandRank.map(Double.init), descending: false),
+                Self.compare(lhs.supplyDeficitScore, rhs.supplyDeficitScore, descending: true),
+                Self.compare(lhs.demandWeight, rhs.demandWeight, descending: true),
+                Self.compare(lhs.readyProviderCount.map(Double.init), rhs.readyProviderCount.map(Double.init), descending: false),
+            ] where order != .orderedSame {
+                return order == .orderedAscending
+            }
+            return lhs.canonicalIdentity.lexicographicallyPrecedes(rhs.canonicalIdentity)
+        }
+    }
+
+    private static func compare(_ lhs: Double?, _ rhs: Double?, descending: Bool) -> ComparisonResult {
+        switch (lhs, rhs) {
+        case let (l?, r?):
+            if l == r { return .orderedSame }
+            return (descending ? l > r : l < r) ? .orderedAscending : .orderedDescending
+        case (.some, .none): return .orderedAscending
+        case (.none, .some): return .orderedDescending
+        case (.none, .none): return .orderedSame
         }
     }
 
@@ -4050,10 +4124,32 @@ struct MalibuOtherMLXModel: Identifiable, Equatable, Sendable {
         let source: String
         let rows: [Row]
 
-        enum CodingKeys: String, CodingKey {
+        enum CodingKeys: String, CodingKey, CaseIterable {
             case schemaVersion = "schema_version"
+            case generatedAt = "generated_at"
             case source
+            case query
+            case limit
+            case fitsOnly = "fits_only"
+            case maxGB = "max_gb"
+            case ramGB = "ram_gb"
             case rows
+        }
+
+        /// Closed envelope: every models_browse.v1 key is required, and any
+        /// other key rejects the reply.
+        init(from decoder: Decoder) throws {
+            try rejectUnknownKeys(decoder, allowed: CodingKeys.allCases.map(\.stringValue))
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            schemaVersion = try container.decode(String.self, forKey: .schemaVersion)
+            _ = try container.decode(String.self, forKey: .generatedAt)
+            source = try container.decode(String.self, forKey: .source)
+            _ = try decodeExplicitNullableString(container, .query)
+            _ = try container.decode(Int.self, forKey: .limit)
+            _ = try container.decode(Bool.self, forKey: .fitsOnly)
+            _ = try decodeExplicitNullableInt(container, .maxGB)
+            _ = try container.decode(Int.self, forKey: .ramGB)
+            rows = try container.decode([Row].self, forKey: .rows)
         }
     }
 

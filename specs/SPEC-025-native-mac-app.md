@@ -678,9 +678,12 @@ projections (SPEC-044-R004), colour never the only signal.
   request until the local-use requirements for Chat are specified.
 - **SPEC-025-R002 Sidebar header and footer.** The sidebar header MUST show
   the brand tile, "Malibu" and the §3.2 status pill. The footer MUST show the
-  loaded model (last path component; the full id as help text) and, when
+  model the provider reports in its local status (last path component; the
+  full id as help text), never a model only named in the config, and, when
   reported, the slot count and thermal state; it shows "No model loaded"
-  rather than a guess.
+  rather than a guess. Text that comes from the provider (model ids, reasons,
+  log lines) is shown as one plain line with control, format and separator
+  characters removed and its length capped.
 - **SPEC-025-R003 Dashboard.** The Dashboard MUST keep the Phase 1 status
   pill, status notice and Earnings card (§3.2) and add: a **Your model** card
   with the served model, the switching line (R004), and, for a trusted current
@@ -689,7 +692,8 @@ projections (SPEC-044-R004), colour never the only signal.
   card with the health line and a link to Diagnostics; a recommendation tip
   only for an actionable recommendation; and an invite nudge only while a
   current invite link can be copied. Reset and Export appear on the Dashboard
-  only in an error state.
+  only in an error state, except the Export action that accompanies the
+  hardware-evidence blocker in the Earnings card (§3.2).
 - **SPEC-025-R004 Models.** Models MUST render the SPEC-044 projection in the
   SPEC-044-R008 sections as a table with Model, Size, Fit, Status, provider
   completion rate per 1M tokens and Action, one reason line per row saying
@@ -698,7 +702,8 @@ projections (SPEC-044-R004), colour never the only signal.
   models whose weights are on this Mac, and a filter. The switching line MUST
   be exactly one of: checking, "Switching available.", "Switching off: warm
   swap is not running on this Mac.", or "Switching unavailable right now."
-  with Retry. A footer MUST state that switching pauses new customer work
+  with Retry; available and off follow whether the provider runs with warm
+  swap, not whether some row currently offers an action. A footer MUST state that switching pauses new customer work
   while the new model loads (HTTP 503) and never downloads. Quantization,
   architecture, parameter count and capability columns or badges MUST NOT be
   shown until the signed catalog row and the SPEC-044 projection carry them.
@@ -715,8 +720,9 @@ projections (SPEC-044-R004), colour never the only signal.
   the new model; a failure states that the Mac keeps serving the model it
   reports. Closing the sheet does not cancel the switch.
 - **SPEC-025-R006 Discover.** Discover MUST follow SPEC-044-R013, with the
-  fit filter on by default, and MUST keep the recommendation (Adopt, Not now,
-  Stop) as a pinned row. A `models browse` search runs only on an explicit
+  fit filter on by default. The recommendation (Adopt, Not now, Stop) is
+  pinned above the list and shown only when it names a row Discover lists, so
+  its rates never appear for a model outside the trusted catalog. A `models browse` search runs only on an explicit
   provider search, in its own subprocess bounded to 20 s, with the search term
   limited to letters, digits, space, dot, dash and underscore, never starting
   with a dash.
@@ -726,18 +732,20 @@ projections (SPEC-044-R004), colour never the only signal.
   accepted tokens per step, ready, paused after a fallback, off, or not
   available), the current queue/thermal/GPU/latency chips, requests, tokens,
   the current run and restarts, and the loopback endpoints with a note that
-  they answer only on this Mac. Values come only from `/v1/status` and the
-  metrics frame; CB and MTP fields are decoded as closed lowercase tokens and
+  they answer only on this Mac. Values come from the provider's local
+  status, health and metrics reports and the Mac's thermal state; CB and MTP
+  modes are accepted only from the CLI's closed enums (an unknown mode is not
+  shown), they are cleared when the status observation is invalidated, and
   absent fields are omitted. Pause asks for confirmation and says running
   requests finish; Resume appears only while paused.
 - **SPEC-025-R008 Diagnostics.** Diagnostics MUST always offer Export
   diagnostics and Reset provider service, and show Findings (humanised, once
   each), Events & identity (last restart, current setup failure, current
   update, last recovery, provider access, network verification and their
-  repair state), Logs (the redacted recent provider log tail with
-  idle-warm-up lines collapsed into a count and a Problems filter) and Status
-  (app and provider software versions, status contract, service instance,
-  lifecycle, slots).
+  repair state), Logs (the redacted recent provider log tail, at most 300
+  lines of at most 500 characters each, with idle-warm-up lines collapsed into
+  a count and a Problems filter) and Status (app and provider software
+  versions, status contract, lifecycle, slots).
 - **SPEC-025-R009 Settings.** Settings MUST host the payout wallet with the
   cooling-off rule (§3.2), the invite panel (§3.2), an "Open Malibu at login"
   toggle backed by `SMAppService.mainApp`, the Dock rule (Dock and Cmd-Tab

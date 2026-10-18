@@ -7,7 +7,9 @@ struct MalibuApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        Settings { ModelSettingsView() }
+        // SwiftUI needs a scene; Settings live in the main window (SPEC-025-R001),
+        // so this one only points there.
+        Settings { SettingsRedirectView() }
             .commands {
                 // The main menu is visible while a Malibu window keeps the
                 // app in the Dock. Settings and the dashboard open through

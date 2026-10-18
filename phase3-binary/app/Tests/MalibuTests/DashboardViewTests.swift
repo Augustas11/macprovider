@@ -8,7 +8,7 @@ final class DashboardViewTests: XCTestCase {
             "Serving this model. Switching is available."
         )
         XCTAssertEqual(
-            DashboardCopy.modelRowStatusLine(currentModelID: "meta-llama/llama-3.2-3b-instruct", listState: .viewOnly),
+            DashboardCopy.modelRowStatusLine(currentModelID: "meta-llama/llama-3.2-3b-instruct", listState: .viewOnly, warmSwapAvailable: false),
             "Serving this model. Switching is off until warm swap is running."
         )
         XCTAssertEqual(

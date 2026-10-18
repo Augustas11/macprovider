@@ -118,14 +118,15 @@ enum ModelsPresentation {
 
     /// The honest switching line that replaces "Checking whether switching is
     /// available" (#2029 §8.4).
-    static func switchingLine(listState: ModelManagementStore.ListState) -> String {
+    /// Switching depends on warm swap, not on whether some row has an action.
+    static func switchingLine(listState: ModelManagementStore.ListState, warmSwapAvailable: Bool) -> String {
         switch listState {
         case .checking:
             return String(localized: "Checking whether switching is available…", comment: "Switching line")
-        case .ready:
-            return String(localized: "Switching available.", comment: "Switching line")
-        case .viewOnly:
-            return String(localized: "Switching off: warm swap is not running on this Mac.", comment: "Switching line")
+        case .ready, .viewOnly:
+            return warmSwapAvailable
+                ? String(localized: "Switching available.", comment: "Switching line")
+                : String(localized: "Switching off: warm swap is not running on this Mac.", comment: "Switching line")
         case .unavailable:
             return String(localized: "Switching unavailable right now.", comment: "Switching line")
         }
@@ -139,12 +140,13 @@ enum ModelsPresentation {
     static func screenStrings(
         rows: [MalibuModelRow],
         listState: ModelManagementStore.ListState,
+        warmSwapAvailable: Bool = true,
         filter: String = ""
     ) -> [String] {
         var strings = [
             String(localized: "Models", comment: "Models screen title"),
             localSummary(rows),
-            switchingLine(listState: listState),
+            switchingLine(listState: listState, warmSwapAvailable: warmSwapAvailable),
         ]
         if rows.contains(where: { $0.providerCompletionPayoutUSDPerMillionTokens != nil }) {
             strings.append(rateDisclosure)
@@ -251,7 +253,7 @@ struct ModelsScreen: View {
                     .accessibilityIdentifier("malibu.models.filter")
             }
             HStack(spacing: 8) {
-                Text(ModelsPresentation.switchingLine(listState: store.listState))
+                Text(ModelsPresentation.switchingLine(listState: store.listState, warmSwapAvailable: store.warmSwapAvailable))
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .accessibilityAddTraits(.updatesFrequently)
@@ -270,7 +272,7 @@ struct ModelsScreen: View {
                     ProgressView().controlSize(.small)
                 }
             }
-            if store.statusLine != ModelsPresentation.switchingLine(listState: store.listState) {
+            if store.statusLine != ModelsPresentation.switchingLine(listState: store.listState, warmSwapAvailable: store.warmSwapAvailable) {
                 Text(store.statusLine)
                     .font(.caption)
                     .foregroundStyle(.secondary)

@@ -38,6 +38,7 @@ struct SettingsScreen: View {
     @ObservedObject var agent: MalibuAgent
     @State private var openAtLogin = AppLoginItem.isRegistered
     @State private var loginError: String?
+    @State private var loginChangeInFlight = false
 
     var body: some View {
         ScrollView {
@@ -58,6 +59,9 @@ struct SettingsScreen: View {
                         get: { openAtLogin },
                         set: { setOpenAtLogin($0) }
                     ))
+                    // One change at a time, so a slow unregister cannot land
+                    // after a newer register.
+                    .disabled(loginChangeInFlight)
                     Text(SettingsPresentation.dockNote)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -107,6 +111,7 @@ struct SettingsScreen: View {
     }
 
     private func setOpenAtLogin(_ enabled: Bool) {
+        guard !loginChangeInFlight else { return }
         loginError = nil
         if enabled {
             do {
@@ -116,12 +121,29 @@ struct SettingsScreen: View {
             }
             openAtLogin = AppLoginItem.isRegistered
         } else {
+            loginChangeInFlight = true
             Task {
                 if await AppLoginItem.unregisterReturningError() != nil {
                     loginError = SettingsPresentation.loginFailed
                 }
                 openAtLogin = AppLoginItem.isRegistered
+                loginChangeInFlight = false
             }
         }
+    }
+}
+
+/// The SwiftUI Settings scene's content. Settings live in the main window;
+/// this opens them there and closes itself.
+struct SettingsRedirectView: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        Text(String(localized: "Settings are in the Malibu window.", comment: "Settings scene redirect"))
+            .padding(24)
+            .onAppear {
+                AppDelegate.current?.presentDashboard(section: .settings)
+                dismiss()
+            }
     }
 }

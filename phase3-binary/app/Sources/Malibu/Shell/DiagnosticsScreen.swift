@@ -40,13 +40,18 @@ enum DiagnosticsPresentation {
     static let logsNote = String(localized: "Recent provider log lines, with paths and secrets removed. Export diagnostics to share the full set with support.", comment: "Diagnostics logs note")
 
     static func findings(_ s: AgentSnapshot) -> [String] {
-        let lines = AgentSnapshotPresenter.diagnosticFindingLines(s)
+        let lines = AgentSnapshotPresenter.diagnosticFindingLines(s).map { ShellText.display($0, maxLength: 600) }
         return lines.isEmpty ? [noFindings] : lines
     }
 
     struct Row: Equatable {
         let title: String
         let value: String
+
+        init(title: String, value: String) {
+            self.title = title
+            self.value = ShellText.display(value, maxLength: 600)
+        }
     }
 
     static func eventRows(_ s: AgentSnapshot) -> [Row] {
@@ -77,9 +82,6 @@ enum DiagnosticsPresentation {
             Row(title: String(localized: "Provider software", comment: "Diagnostics row"), value: AgentSnapshotPresenter.compatibilitySetLine(s)),
             Row(title: String(localized: "Status contract", comment: "Diagnostics row"), value: AgentSnapshotPresenter.statusContractLine(s)),
         ]
-        if let service = AgentSnapshotPresenter.serviceInstanceLine(s) {
-            rows.append(Row(title: String(localized: "Service", comment: "Diagnostics row"), value: service))
-        }
         if let lifecycle = AgentSnapshotPresenter.lifecycleLine(s) {
             rows.append(Row(title: String(localized: "Provider status", comment: "Diagnostics row"), value: lifecycle))
         }
@@ -96,6 +98,11 @@ enum DiagnosticsPresentation {
 
     /// Idle-prewarm ticks are collapsed into a count; "Problems" keeps only
     /// lines that name an error, failure, warning, refusal or timeout.
+    /// At most this many lines, each at most `maxLogLineLength` characters,
+    /// reach the screen.
+    static let maxLogLines = 300
+    static let maxLogLineLength = 500
+
     static func filteredLog(_ lines: [String], filter: LogFilter) -> FilteredLog {
         var kept: [String] = []
         var hidden = 0
@@ -108,9 +115,9 @@ enum DiagnosticsPresentation {
             if filter == .problems, !problemMarkers.contains(where: lower.contains) {
                 continue
             }
-            kept.append(line)
+            kept.append(ShellText.display(line, maxLength: maxLogLineLength))
         }
-        return FilteredLog(lines: kept, hiddenIdlePrewarm: hidden)
+        return FilteredLog(lines: Array(kept.suffix(maxLogLines)), hiddenIdlePrewarm: hidden)
     }
 
     static func hiddenLine(_ count: Int) -> String? {
@@ -215,19 +222,19 @@ struct DiagnosticsScreen: View {
             agent.snapshot.credentialRepairLastError,
             agent.snapshot.admissionIdentityRecoveryLastError,
         ].compactMap { $0 }.enumerated()), id: \.offset) { _, error in
-            Text(error)
+            Text(ShellText.display(error, maxLength: 600))
                 .font(.caption)
                 .foregroundStyle(.red)
                 .fixedSize(horizontal: false, vertical: true)
         }
         if let instruction = agent.snapshot.admissionIdentityRecoveryApprovalInstruction {
-            Text(instruction)
+            Text(ShellText.display(instruction, maxLength: 600))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
         }
         if let request = agent.snapshot.admissionIdentityRecoveryOperatorRequest {
-            Text(request)
+            Text(ShellText.display(request, maxLength: 2_000))
                 .font(.system(.caption, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
@@ -254,11 +261,15 @@ struct DiagnosticsScreen: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             ScrollView {
-                Text(filtered.lines.suffix(300).joined(separator: "\n"))
-                    .font(.caption.monospaced())
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(8)
+                LazyVStack(alignment: .leading, spacing: 1) {
+                    ForEach(Array(filtered.lines.enumerated()), id: \.offset) { _, line in
+                        Text(line)
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .padding(8)
             }
             .background(RoundedRectangle(cornerRadius: 6).fill(Color.gray.opacity(0.08)))
             .accessibilityIdentifier("malibu.diagnostics.logs")

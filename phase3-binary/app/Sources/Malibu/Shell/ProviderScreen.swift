@@ -11,9 +11,12 @@ struct ProviderEngineStatus: Equatable, Sendable {
     let slotsFree: Int?
     let waitingRequests: Int?
     let nativeMTPSupported: Bool?
-    let nativeMTPEnabled: Bool?
     let nativeMTPMode: String?
     let nativeMTPMeanAcceptedLength: Double?
+
+    /// `ContinuousBatchingMode` and `NativeMTPStatusMode` in the CLI.
+    static let continuousBatchingModes: Set<String> = ["off", "canary", "on"]
+    static let nativeMTPModes: Set<String> = ["off", "eligible", "active", "degraded_depth_zero"]
 
     static func decode(status object: [String: Any]) -> ProviderEngineStatus? {
         let cb = object["continuous_batching"] as? [String: Any]
@@ -29,7 +32,13 @@ struct ProviderEngineStatus: Equatable, Sendable {
             guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
             return number.boolValue
         }
-        func token(_ value: Any?) -> String? {
+        /// Only a value from the CLI's closed enum is kept; anything else is
+        /// treated as not reported.
+        func token(_ value: Any?, _ allowed: Set<String>) -> String? {
+            guard let string = value as? String, allowed.contains(string) else { return nil }
+            return string
+        }
+        func presentToken(_ value: Any?) -> String? {
             guard let string = value as? String, !string.isEmpty, string.count <= 64,
                   string.unicodeScalars.allSatisfy({ CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789_").contains($0) })
             else { return nil }
@@ -39,15 +48,14 @@ struct ProviderEngineStatus: Equatable, Sendable {
             .flatMap { CFGetTypeID($0) == CFBooleanGetTypeID() ? nil : $0.doubleValue }
             .flatMap { $0.isFinite && $0 >= 0 ? $0 : nil }
         return ProviderEngineStatus(
-            continuousBatchingMode: token(cb?["mode"]),
+            continuousBatchingMode: token(cb?["mode"], Self.continuousBatchingModes),
             continuousBatchingActive: bool(cb?["active"]),
-            continuousBatchingUnsupportedReason: token(cb?["unsupported_reason"]),
+            continuousBatchingUnsupportedReason: presentToken(cb?["unsupported_reason"]),
             slotsTotal: int(scheduler?["slots_total"]),
             slotsFree: int(scheduler?["slots_free"]),
             waitingRequests: int(scheduler?["waiting_count"]),
             nativeMTPSupported: bool(mtp?["supported"]),
-            nativeMTPEnabled: bool(mtp?["enabled"]),
-            nativeMTPMode: token(mtp?["mode"]),
+            nativeMTPMode: token(mtp?["mode"], Self.nativeMTPModes),
             nativeMTPMeanAcceptedLength: meanAccepted
         )
     }
@@ -59,6 +67,11 @@ enum ProviderScreenPresentation {
     struct Row: Equatable {
         let title: String
         let value: String
+
+        init(title: String, value: String) {
+            self.title = title
+            self.value = ShellText.display(value, maxLength: 600)
+        }
     }
 
     static let endpointsNote = String(localized: "These endpoints answer only on this Mac (loopback). Customers reach this Mac through the Malibu network, not through these.", comment: "Provider endpoints note")
@@ -85,11 +98,12 @@ enum ProviderScreenPresentation {
     }
 
     static func nativeMTPLine(_ engine: ProviderEngineStatus?) -> String? {
-        guard let engine, engine.nativeMTPSupported != nil || engine.nativeMTPMode != nil else { return nil }
-        guard engine.nativeMTPSupported == true else {
+        guard let engine, let supported = engine.nativeMTPSupported else { return nil }
+        guard supported else {
             return String(localized: "Not available for this model.", comment: "Native MTP unsupported")
         }
-        switch engine.nativeMTPMode {
+        guard let mode = engine.nativeMTPMode else { return nil }
+        switch mode {
         case "active":
             if let mean = engine.nativeMTPMeanAcceptedLength, mean > 0 {
                 return String(localized: "On · \(mean.formatted(.number.precision(.fractionLength(2)))) tokens accepted per step", comment: "Native MTP active with acceptance")
@@ -100,9 +114,7 @@ enum ProviderScreenPresentation {
         case "degraded_depth_zero":
             return String(localized: "Paused after a verification fallback; serving continues without it.", comment: "Native MTP degraded")
         default:
-            return engine.nativeMTPEnabled == true
-                ? String(localized: "On", comment: "Native MTP active")
-                : String(localized: "Off", comment: "Native MTP off")
+            return String(localized: "Off", comment: "Native MTP off")
         }
     }
 

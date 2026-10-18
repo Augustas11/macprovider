@@ -222,12 +222,17 @@ struct DiscoverScreen: View {
     }
 
     private var list: some View {
+        VStack(alignment: .leading, spacing: 0) {
+        // Pinned above the list, and only for a signed catalog model, so a
+        // recommendation's rates never appear for a non-catalog model.
+        if let recommendation = store.recommendation,
+           DiscoverPresentation.showsRecommendation(recommendation.displayModelID, rows: store.rows) {
+            recommendationCallout(recommendation)
+                .padding(12)
+            Divider()
+        }
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
-                if let recommendation = store.recommendation {
-                    recommendationCallout(recommendation)
-                        .padding(12)
-                }
                 if DiscoverPresentation.catalogRows(store.rows).isEmpty {
                     Text(store.listState == .checking
                          ? String(localized: "Loading the catalog…", comment: "Discover loading")
@@ -285,6 +290,7 @@ struct DiscoverScreen: View {
                     .padding(12)
             }
         }
+        }
     }
 
     @ViewBuilder
@@ -335,7 +341,7 @@ struct DiscoverScreen: View {
             VStack(alignment: .leading, spacing: 4) {
                 Button(String(localized: "Switch to this model…", comment: "Discover switch action")) { switchRow = row }
                     .disabled(!store.canPerformModelAction)
-                Text(ModelsPresentation.switchingLine(listState: store.listState))
+                Text(ModelsPresentation.switchingLine(listState: store.listState, warmSwapAvailable: store.warmSwapAvailable))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -470,6 +476,15 @@ struct DiscoverScreen: View {
 }
 
 extension DiscoverPresentation {
+    /// The recommendation is shown only when it names a trusted catalog row.
+    static func showsRecommendation(_ target: String?, rows: [MalibuModelRow]) -> Bool {
+        guard let target else { return false }
+        let key = target.lowercased()
+        return catalogRows(rows).contains { row in
+            row.id.lowercased() == key || row.catalogVerifiedModelKey?.lowercased() == key
+        }
+    }
+
     static func otherMLXSubtitle(_ model: MalibuOtherMLXModel) -> String {
         let size = model.estimatedGB.map {
             String(localized: "\($0.formatted(.number.precision(.fractionLength(1)))) GB", comment: "HF model size")
