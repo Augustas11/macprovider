@@ -102,14 +102,19 @@ cat >"$T/bin/launchctl" <<'SH'
 s="$FAKE_STATE"
 running() { "$FAKE_INSTALL/macprovider-cli" --version; }
 case "$1" in
-  bootout) [[ "$2" == *-watchdog ]] || echo unloaded >"$s/job" ;;
+  bootout) if [[ "$2" == *-watchdog ]]; then rm -f "$s/wd"; else echo unloaded >"$s/job"; fi ;;
   bootstrap)
+    if [[ "$3" == *-watchdog.plist ]]; then touch "$s/wd"; exit 0; fi
     echo loaded >"$s/job"; echo $(( $(cat "$s/pid") + 1 )) >"$s/pid"
     [ "$(running)" != "$FAKE_CAND" ] || touch "$s/swapped" ;;
   print)
+    if [[ "$2" == *-watchdog ]]; then [ -f "$s/wd" ] || exit 113; printf '\tstate = running\n'; exit 0; fi
     [ "$(cat "$s/job")" = loaded ] || exit 113
-    [[ "$2" == *-watchdog ]] && exit 113
     mode="$(cat "$s/mode" 2>/dev/null || true)"
+    # wdkick: an armed watchdog kickstarts the candidate while it is loaded.
+    if [ "$mode" = wdkick ] && [ -f "$s/wd" ] && [ "$(running)" = "$FAKE_CAND" ]; then
+      echo $(( $(cat "$s/pid") + 1 )) >"$s/pid"
+    fi
     if { [ "$mode" = crash ] || [ "$mode" = dead ]; } && [ "$(running)" = "$FAKE_CAND" ]; then
       echo $(( $(cat "$s/pid") + 1 )) >"$s/pid"
     fi
@@ -216,6 +221,33 @@ echo dead >"$T/state/mode"
 run_rc 6 "rollback that does not serve again" "$SWAP" swap --version "$CAND"
 grep -q "is not buyer_serving within" "$T/err" || die "unhealthy rollback not named"
 [ "$(tr '\n' ' ' <"$T/state/runner")" = "stopped " ] || die "runner restarted onto a canary that needs the operator"
+
+# 5a. an installed watchdog stays unloaded while the candidate loads (an armed
+#     watchdog would kickstart it mid-load) and is restarted once it serves.
+reset_install
+verify_bytes "$T/good.tar.gz"
+touch "$HOME/Library/LaunchAgents/live.malibu.provider-watchdog.plist" "$T/state/wd"
+echo wdkick >"$T/state/mode"
+run_rc 0 "watchdog held off during the candidate load" "$SWAP" swap --version "$CAND"
+[ "$(installed)" = "$CAND" ] || die "watchdog kick rolled the candidate back"
+[ -f "$T/state/wd" ] || die "watchdog not restarted after the candidate served"
+grep -q "watchdog live.malibu.provider-watchdog restarted" "$T/err" || die "watchdog restart not reported"
+# watchdog after a rollback: restarted when the old version serves again (rc 5);
+# reported as left unloaded when the operator must recover (rc 6).
+reset_install
+verify_bytes "$T/good.tar.gz"
+touch "$T/state/wd"
+echo crash >"$T/state/mode"
+run_rc 5 "watchdog restarted after a rollback" "$SWAP" swap --version "$CAND"
+[ -f "$T/state/wd" ] || die "watchdog not restarted after the rollback served"
+reset_install
+verify_bytes "$T/good.tar.gz"
+touch "$T/state/wd"
+echo dead >"$T/state/mode"
+run_rc 6 "watchdog reported unloaded on operator recovery" "$SWAP" swap --version "$CAND"
+[ ! -f "$T/state/wd" ] || die "watchdog loaded onto a canary that needs the operator"
+grep -q "watchdog live.malibu.provider-watchdog left unloaded" "$T/err" || die "unloaded watchdog not reported"
+rm -f "$HOME/Library/LaunchAgents/live.malibu.provider-watchdog.plist" "$T/state/wd" "$T/state/mode"
 
 # 5b. an install dir reached through a symlinked ancestor is refused untouched.
 reset_install
