@@ -114,9 +114,11 @@ scripts/ops/live-lock.sh acquire <label> --steal                 # only past the
   `prior_grant_pending_recheck` when the prior grant serves (`served_slots`
   > 0, CB active) and records the pending re-check; the provider runs that
   re-check under a bounded admission hold (SPEC-038 FR-CB10), so no buyer
-  traffic has to be stopped. `verify_live_rollout` first runs
-  `_check-canary-self-check`, which then requires the canary's final
-  `granted` (or `kept_prior_grant_*`) decision, then `_check-privacy-rejections`:
+  traffic has to be stopped. The next step, `canary_self_check`
+  (`_check-canary-self-check`), then requires the same canary (provider,
+  version, compatibility set, self-check key) to report the final `granted`
+  or kept-prior-grant decision with the admission hold ended; promotion waits
+  for it. `verify_live_rollout` runs `_check-privacy-rejections` first:
   two samples of the unapproved-rejection counter over a window
   (`PRIVACY_REJECTION_WINDOW_SECONDS`, default 180) bound to one coordinator
   invocation; after a restart in the window it counts the unit journal
