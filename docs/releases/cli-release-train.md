@@ -64,8 +64,11 @@ Verified 2026-10-10 against public release metadata, the release train
 
 ## Next CLI release — net changes vs 1.8.251 (tracked 2026-10-18)
 
-Live fleet target: **1.8.251**. Staged: `binaryVersion` **1.8.254** (v1.8.252 and v1.8.253
-are runtime releases). Every PR below is merged and none is open, so the cut is authorized.
+Live fleet target: **1.8.251**. Staged: `binaryVersion` **1.8.256** (v1.8.252, v1.8.253 and
+v1.8.255 are runtime releases). The 1.8.254 candidate failed its Studio canary
+(`Unable to load kernel gather_mm_offsets`: the release metallib was SwiftPM's partial
+library) and was never tagged; #2052 fixes the release metallib. Every PR below is merged
+and none is open, so the cut is authorized.
 
 | PR | Issue | Provider-side change | Status |
 |---|---|---|---|
@@ -73,6 +76,9 @@ are runtime releases). Every PR below is merged and none is open, so the cut is 
 | #2048 | #2015 | Watchdog never kicks an operator-paused or resuming provider: final pause/lease re-check and kick under the lifecycle store locks; listener probe tri-state (SPEC-020 v0.1.28) | merged |
 | #2047 | #2029 | GLM-5.3-Flash on the native engine: paged MLA continuous batching, native MTP-1; mlx-swift-lm `3.32.3-macprovider.10.1` (core v0.32.4 line, carries the Qwen2-VL per-image fix); listed catalog cut `published-2026-10-17-glm53-flash-listed-v1` | merged |
 | #2049 | #2036 | Malibu.app is stamped from the release tag (was a stale 1.8.224) and relaunches itself onto the installed bundle after a CLI self-update (SPEC-025 v0.31) | merged |
+| #2050 | #2029 | Native MTP: the canary bank moves with the release in one publication; providers re-offer the tuple after `bank_mismatch` (coordinator half ships in runtime v1.8.255) | merged |
+| #2051 | — | Malibu app lean, truthful dashboard (UX audit Phase 1): one status pill and earnings card, honest MALIBU/payout/trust copy, real metrics, menu-bar icon, Dock presence (coordinator half ships in runtime v1.8.255) | merged |
+| #2052 | #2029 | Release metallib compiles every kernel the pinned MLX core loads (388 required, gated in package/acceptance/release/tier-2 verify); guarded `scripts/ops/canary-swap.sh` with kernel preflight and crash-loop auto-rollback | merged |
 
 Order: Pearl runtime v1.8.253 (coordinator billing aliases from #2047) and the listed
 catalog activation before the canary. The mlx-swift-lm pin moves to the v0.32.4 core line,
