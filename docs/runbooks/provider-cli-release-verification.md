@@ -151,10 +151,11 @@ past V. Leave V in `revoked_ids`.
   bytes after final signing, notarization, stapling, and packaging.
 - The updater must accept the release from the previous stable CLI.
 - The DMG's Malibu.app `CFBundleShortVersionString` equals the tag version and
-  `CFBundleVersion` equals its patch component. Builds stamp both from the tag
-  through `scripts/malibu-app-version.sh`; `project.yml` keeps only the
-  `0.0.0` development default. `scripts/verify-tier2-provider-release.sh`
-  fails a published release whose app version differs from the tag.
+  `CFBundleVersion` equals `major*1000000 + minor*1000 + patch`. Builds stamp
+  both from the tag through `scripts/malibu-app-version.sh`; `project.yml`
+  keeps only the `0.0.0` development default. The protected acceptance signer
+  and `scripts/verify-tier2-provider-release.sh` both fail an app whose
+  version or build differs from the tag.
 - Candidate workflow success is not production verification.
 - Public release assets are immutable; do not patch a bad release in place.
 

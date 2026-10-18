@@ -231,10 +231,8 @@ MALIBU_BUILD_STEP = r'''        if: ${{ github.event.inputs.promote_run_id == ''
           set -euo pipefail
           tag="${{ steps.release_source.outputs.tag }}"
           # SPEC-025 §3.3: the release tag stamps the app version and build.
-          version_env="$(bash scripts/malibu-app-version.sh "$tag")"
-          eval "$version_env"
-          version="$MALIBU_APP_VERSION"
-          build="$MALIBU_APP_BUILD"
+          version_line="$(bash scripts/malibu-app-version.sh "$tag")"
+          read -r version build <<<"$version_line"
           cd phase3-binary/app
           "$RUNNER_TEMP/xcodegen-2.45.4/xcodegen/bin/xcodegen" generate
           xcodebuild \

@@ -30,11 +30,11 @@ esac
 # SPEC-025 §3.3: Malibu.app is stamped from the release tag at build time, so
 # the manifest's Malibu component is the tag version, never project.yml's
 # development default.
-MALIBU_APP_VERSION_ENV="$(bash "$REPO_ROOT/scripts/malibu-app-version.sh" "$MANIFEST_TAG")" || {
+MALIBU_APP_VERSION_LINE="$(bash "$REPO_ROOT/scripts/malibu-app-version.sh" "$MANIFEST_TAG")" || {
   echo "FATAL: could not resolve Malibu app component version from $MANIFEST_TAG" >&2
   exit 1
 }
-eval "$MALIBU_APP_VERSION_ENV"
+MALIBU_APP_VERSION="${MALIBU_APP_VERSION_LINE%% *}"
 RELEASE_DIR="./build-release"
 OUT_DIR="./dist"
 TARBALL="$OUT_DIR/phase3-binary-m4-${TAG}.tar.gz"

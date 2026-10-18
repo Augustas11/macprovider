@@ -154,12 +154,25 @@ expect_fixture_failure hardcoded-build 'must keep the development default'
 
 reset_fixture
 stamp_output="$(run_fixture_guard)"
-grep -q "Malibu is stamped $binary_version build ${binary_version##*.} from the release tag" <<<"$stamp_output"
+grep -q "Malibu is stamped $binary_version build " <<<"$stamp_output"
 
-# The stamp helper accepts only an exact release tag with a positive patch.
+# The stamp helper accepts only an exact release tag and derives a positive,
+# strictly increasing build across patch, minor, and major bumps.
 stamp_helper="$repo_root/scripts/malibu-app-version.sh"
-[[ "$(bash "$stamp_helper" v1.8.251)" == "MALIBU_APP_VERSION='1.8.251'"$'\n'"MALIBU_APP_BUILD='251'" ]]
-for bad_tag in 1.8.251 v1.8 v1.8.251-rc1 v1.9.0 v01.8.2 "v1.8.2;id" ""; do
+[[ "$(bash "$stamp_helper" v1.8.251)" == "1.8.251 1008251" ]]
+[[ "$(bash "$stamp_helper" v1.9.0)" == "1.9.0 1009000" ]]
+[[ "$(bash "$stamp_helper" v2.0.0)" == "2.0.0 2000000" ]]
+[[ "$(bash "$stamp_helper" v0.0.1)" == "0.0.1 1" ]]
+previous_build=0
+for ordered_tag in v0.0.1 v1.8.224 v1.8.251 v1.8.999 v1.9.0 v1.10.0 v2.0.0 v999.999.999; do
+  read -r _ build <<<"$(bash "$stamp_helper" "$ordered_tag")"
+  if (( build <= previous_build )); then
+    echo "Malibu app build for $ordered_tag ($build) does not increase over $previous_build" >&2
+    exit 1
+  fi
+  previous_build="$build"
+done
+for bad_tag in 1.8.251 v1.8 v1.8.251-rc1 v0.0.0 v01.8.2 v1.1000.0 "v1.8.2;id" "v1.8.2 x" ""; do
   if bash "$stamp_helper" "$bad_tag" >/dev/null 2>&1; then
     echo "Malibu app stamp helper accepted invalid tag: $bad_tag" >&2
     exit 1

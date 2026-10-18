@@ -203,9 +203,8 @@ jobs:
           set -euo pipefail
           # SPEC-025 §3.3: the release tag stamps the app version; project.yml
           # carries only a development default.
-          version_file="$RUNNER_TEMP/malibu-app-version.env"
-          bash control/scripts/malibu-app-version.sh "$TAG" > "$version_file"
-          source "$version_file"
+          version_line="$(bash control/scripts/malibu-app-version.sh "$TAG")"
+          read -r malibu_app_version malibu_app_build <<<"$version_line"
           cd candidate/phase3-binary/app
           "$RUNNER_TEMP/xcodegen-2.45.4/xcodegen/bin/xcodegen" generate
           package_resolution_args=(archive)
@@ -224,8 +223,8 @@ jobs:
             "${package_resolution_args[@]}" \
             ARCHS=arm64 \
             CODE_SIGNING_ALLOWED=NO \
-            MARKETING_VERSION="$MALIBU_APP_VERSION" \
-            CURRENT_PROJECT_VERSION="$MALIBU_APP_BUILD"
+            MARKETING_VERSION="$malibu_app_version" \
+            CURRENT_PROJECT_VERSION="$malibu_app_build"
           cp -R "$RUNNER_TEMP/Malibu.xcarchive/Products/Applications/Malibu.app" \
             "$RUNNER_TEMP/Malibu.app"
 
@@ -248,11 +247,10 @@ jobs:
           malibu_build="$(/usr/libexec/PlistBuddy \
             -c 'Print :CFBundleVersion' \
             "$RUNNER_TEMP/Malibu.app/Contents/Info.plist")"
-          version_file="$RUNNER_TEMP/malibu-app-version.env"
-          bash control/scripts/malibu-app-version.sh "$TAG" > "$version_file"
-          source "$version_file"
-          [[ "$malibu_version" = "$MALIBU_APP_VERSION" && "$malibu_build" = "$MALIBU_APP_BUILD" ]] || {
-            echo "::error::Malibu.app Info.plist reports $malibu_version/$malibu_build, expected $MALIBU_APP_VERSION/$MALIBU_APP_BUILD for $TAG" >&2
+          version_line="$(bash control/scripts/malibu-app-version.sh "$TAG")"
+          read -r expected_malibu_version expected_malibu_build <<<"$version_line"
+          [[ "$malibu_version" = "$expected_malibu_version" && "$malibu_build" = "$expected_malibu_build" ]] || {
+            echo "::error::Malibu.app Info.plist reports $malibu_version/$malibu_build, expected $expected_malibu_version/$expected_malibu_build for $TAG" >&2
             exit 1
           }
           python3 control/scripts/compatibility-set-manifest.py validate \

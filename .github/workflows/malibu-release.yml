@@ -147,8 +147,8 @@ jobs:
             -derivedDataPath "$RUNNER_TEMP/MalibuTestDerivedData" \
             test
           rm -rf "$RUNNER_TEMP/MalibuTestDerivedData"
-          version_env="$(bash "$GITHUB_WORKSPACE/scripts/malibu-app-version.sh" "v${APP_VERSION}")"
-          eval "$version_env"
+          version_line="$(bash "$GITHUB_WORKSPACE/scripts/malibu-app-version.sh" "v${APP_VERSION}")"
+          read -r malibu_app_version malibu_app_build <<<"$version_line"
           xcodebuild \
             -project Malibu.xcodeproj \
             -scheme Malibu \
@@ -158,12 +158,12 @@ jobs:
             archive \
             ARCHS=arm64 \
             CODE_SIGNING_ALLOWED=NO \
-            MARKETING_VERSION="$MALIBU_APP_VERSION" \
-            CURRENT_PROJECT_VERSION="$MALIBU_APP_BUILD"
+            MARKETING_VERSION="$malibu_app_version" \
+            CURRENT_PROJECT_VERSION="$malibu_app_build"
           cp -R "$RUNNER_TEMP/Malibu.xcarchive/Products/Applications/Malibu.app" \
             "$RUNNER_TEMP/Malibu.app"
           plist="$RUNNER_TEMP/Malibu.app/Contents/Info.plist"
-          app_build="$MALIBU_APP_BUILD"
+          app_build="$malibu_app_build"
           /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist" |
             grep -qx 'tech.malibu.app'
           /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \

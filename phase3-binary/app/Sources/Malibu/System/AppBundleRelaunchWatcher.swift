@@ -6,35 +6,46 @@ import Foundation
 /// never keeps running old in-memory code against a newer CLI.
 ///
 /// The decision is a pure function of the running identity, the on-disk
-/// identity, and the persisted attempt ledger. It waits for the swap to settle,
-/// defers while an update, rollback, onboarding, quit or modal is in progress,
-/// and caps attempts per target so a bundle that cannot launch never loops.
+/// identity, the provider readiness, and the persisted attempt ledger. It waits
+/// for the swap to settle, defers while an update, rollback, onboarding, quit
+/// or modal is in flight, waits longer while the provider status is unknown,
+/// and caps attempts so a bundle that cannot start never loops.
 enum AppBundleRelaunchWatcher {
+    /// Release versions are unique per tag (SPEC-025 v0.31), so the bundle's
+    /// version and build identify it. A rollback that restores the launched
+    /// version is therefore never a relaunch target.
     struct Identity: Equatable, Sendable {
-        let version: String?
-        let build: String?
-        let executableDevice: UInt64
-        let executableInode: UInt64
+        let version: String
+        let build: String
+    }
 
-        var fingerprint: String {
-            "\(version ?? "-")|\(build ?? "-")|\(executableDevice):\(executableInode)"
-        }
+    enum Readiness: Equatable, Sendable {
+        /// A transaction or a user flow is in flight: never relaunch now.
+        case blocked
+        /// Provider status is unavailable, so an update may still be in
+        /// flight: relaunch only after the long settle window.
+        case unknown
+        case clear
     }
 
     struct Policy: Equatable, Sendable {
-        /// The on-disk identity must stay unchanged this long before relaunch.
+        /// The on-disk identity must stay unchanged this long with a clear
+        /// provider status before relaunch.
         var settleSeconds: TimeInterval = 60
-        /// Minimum spacing between two attempts at the same target.
-        var retryCooldownSeconds: TimeInterval = 600
-        /// Attempts at one target before the watcher gives up on it.
-        var maxAttemptsPerTarget = 3
+        /// With an unknown provider status the change must persist past the
+        /// default 10-minute maintenance lease before relaunch.
+        var unknownSettleSeconds: TimeInterval = 15 * 60
+        /// Minimum spacing between any two relaunch attempts.
+        var retryCooldownSeconds: TimeInterval = 10 * 60
+        /// At most this many attempts in any rolling window.
+        var maxAttemptsPerWindow = 3
+        var attemptWindowSeconds: TimeInterval = 6 * 60 * 60
     }
 
-    /// Persisted across relaunches so a target that never comes up cannot loop.
+    /// Persisted across relaunches so a target that never comes up, or a
+    /// bundle swapped repeatedly, cannot drive a relaunch loop.
     struct AttemptLedger: Equatable, Sendable {
-        var targetFingerprint: String?
-        var attempts = 0
-        var lastAttemptAt: Date?
+        var attempts: [Date] = []
     }
 
     struct State: Equatable, Sendable {
@@ -42,10 +53,26 @@ enum AppBundleRelaunchWatcher {
         var pendingSince: Date?
     }
 
+    static func readiness(
+        lifecycleState: String?,
+        lifecycleLeaseKind: String?,
+        cliUpdateInProgress: Bool,
+        providerSoftwareRepairInProgress: Bool,
+        appFlowInProgress: Bool
+    ) -> Readiness {
+        if appFlowInProgress || cliUpdateInProgress || providerSoftwareRepairInProgress
+            || lifecycleLeaseKind == "maintenance"
+            || lifecycleState == "update_in_progress"
+            || lifecycleState == "rollback_in_progress" {
+            return .blocked
+        }
+        return lifecycleState == nil ? .unknown : .clear
+    }
+
     static func shouldRelaunch(
         running: Identity,
         onDisk: Identity?,
-        blocked: Bool,
+        readiness: Readiness,
         now: Date,
         state: inout State,
         ledger: AttemptLedger,
@@ -60,41 +87,37 @@ enum AppBundleRelaunchWatcher {
             state = State(pending: onDisk, pendingSince: now)
             return false
         }
-        guard !blocked,
-              let since = state.pendingSince,
-              now.timeIntervalSince(since) >= policy.settleSeconds else {
+        let settle: TimeInterval
+        switch readiness {
+        case .blocked: return false
+        case .unknown: settle = policy.unknownSettleSeconds
+        case .clear: settle = policy.settleSeconds
+        }
+        guard let since = state.pendingSince, now.timeIntervalSince(since) >= settle else {
             return false
         }
-        if ledger.targetFingerprint == onDisk.fingerprint {
-            guard ledger.attempts < policy.maxAttemptsPerTarget else { return false }
-            if let last = ledger.lastAttemptAt,
-               now.timeIntervalSince(last) < policy.retryCooldownSeconds {
-                return false
-            }
+        let recent = ledger.attempts.map { min($0, now) }
+        if let last = recent.max(), now.timeIntervalSince(last) < policy.retryCooldownSeconds {
+            return false
         }
-        return true
+        let inWindow = recent.filter { now.timeIntervalSince($0) < policy.attemptWindowSeconds }
+        return inWindow.count < policy.maxAttemptsPerWindow
     }
 
     static func recordingAttempt(
         on ledger: AttemptLedger,
-        target: Identity,
-        now: Date
+        now: Date,
+        policy: Policy = Policy()
     ) -> AttemptLedger {
-        let attempts = ledger.targetFingerprint == target.fingerprint ? ledger.attempts + 1 : 1
-        return AttemptLedger(
-            targetFingerprint: target.fingerprint,
-            attempts: attempts,
-            lastAttemptAt: now
-        )
+        let kept = ledger.attempts
+            .map { min($0, now) }
+            .filter { now.timeIntervalSince($0) < policy.attemptWindowSeconds }
+        return AttemptLedger(attempts: Array((kept + [now]).suffix(policy.maxAttemptsPerWindow)))
     }
 
-    /// Reads the installed bundle's version, build and executable file
-    /// identity without following a symlinked bundle or executable.
-    static func readIdentity(
-        bundleURL: URL,
-        executableName: String,
-        fileManager: FileManager = .default
-    ) -> Identity? {
+    /// Reads the installed bundle's version and build without following a
+    /// symlinked bundle or Info.plist.
+    static func readIdentity(bundleURL: URL, fileManager: FileManager = .default) -> Identity? {
         let bundle = bundleURL.standardizedFileURL
         var bundleInfo = stat()
         guard lstat(bundle.path, &bundleInfo) == 0,
@@ -111,85 +134,83 @@ enum AppBundleRelaunchWatcher {
                 from: data,
                 format: nil
               ) as? [String: Any],
-              plist["CFBundleIdentifier"] as? String == "tech.malibu.app" else {
+              plist["CFBundleIdentifier"] as? String == "tech.malibu.app",
+              let version = plist["CFBundleShortVersionString"] as? String,
+              let build = plist["CFBundleVersion"] as? String else {
             return nil
         }
-        guard !executableName.isEmpty, !executableName.contains("/") else { return nil }
-        let executable = bundle.appendingPathComponent("Contents/MacOS/\(executableName)")
-        var executableInfo = stat()
-        guard lstat(executable.path, &executableInfo) == 0,
-              (executableInfo.st_mode & S_IFMT) == S_IFREG else {
-            return nil
-        }
-        return Identity(
-            version: plist["CFBundleShortVersionString"] as? String,
-            build: plist["CFBundleVersion"] as? String,
-            executableDevice: UInt64(bitPattern: Int64(executableInfo.st_dev)),
-            executableInode: UInt64(executableInfo.st_ino)
-        )
+        return Identity(version: version, build: build)
     }
 
-    /// The identity this process launched from. The executable inode is read
-    /// once at launch; a later in-place swap gives the path a new inode.
+    /// The identity this process launched from (Bundle.main caches its
+    /// Info.plist at launch, so a later swap does not change it).
     static func runningIdentity(bundle: Bundle = .main) -> Identity? {
-        guard let executableURL = bundle.executableURL else { return nil }
-        var info = stat()
-        guard lstat(executableURL.path, &info) == 0,
-              (info.st_mode & S_IFMT) == S_IFREG else {
+        guard let version = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+              let build = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String else {
             return nil
         }
-        return Identity(
-            version: bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
-            build: bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String,
-            executableDevice: UInt64(bitPattern: Int64(info.st_dev)),
-            executableInode: UInt64(info.st_ino)
-        )
+        return Identity(version: version, build: build)
     }
 }
 
 /// Drives `AppBundleRelaunchWatcher` on a timer for the running app.
 @MainActor
 final class AppBundleRelaunchMonitor {
-    private static let ledgerTargetKey = "malibu.selfRelaunch.targetFingerprint"
-    private static let ledgerAttemptsKey = "malibu.selfRelaunch.attempts"
-    private static let ledgerLastAttemptKey = "malibu.selfRelaunch.lastAttemptAt"
+    static let ledgerKey = "malibu.selfRelaunch.attempts"
 
     private let bundleURL: URL
-    private let executableName: String
     private let running: AppBundleRelaunchWatcher.Identity
-    private let isBlocked: @MainActor () -> Bool
+    private let readiness: @MainActor () -> AppBundleRelaunchWatcher.Readiness
+    private let isCLIOwnedInstall: @MainActor (URL) -> Bool
     private let relaunch: @MainActor (URL) async throws -> Void
     private let defaults: UserDefaults
     private let interval: TimeInterval
+    private let policy: AppBundleRelaunchWatcher.Policy
     private var state = AppBundleRelaunchWatcher.State()
     private var timer: Timer?
-    private var relaunching = false
+    private(set) var relaunching = false
 
     /// Returns nil unless this process is the updater-owned installed
     /// Malibu.app, so development and test builds never relaunch.
-    init?(
+    convenience init?(
         bundle: Bundle = .main,
-        isBlocked: @escaping @MainActor () -> Bool,
-        relaunch: @escaping @MainActor (URL) async throws -> Void = { url in
-            try await CLIUpdateRunner.relaunchInstalledApp(at: url)
-        },
-        defaults: UserDefaults = .standard,
-        interval: TimeInterval = 15
+        readiness: @escaping @MainActor () -> AppBundleRelaunchWatcher.Readiness
     ) {
         guard bundle.bundleIdentifier == "tech.malibu.app",
               bundle.bundleURL.lastPathComponent == "Malibu.app",
               CLIUpdateRunner.isUpdaterOwnedMalibuInstall(bundle.bundleURL),
-              let executableName = bundle.executableURL?.lastPathComponent,
               let running = AppBundleRelaunchWatcher.runningIdentity(bundle: bundle) else {
             return nil
         }
-        self.bundleURL = bundle.bundleURL
-        self.executableName = executableName
+        self.init(
+            bundleURL: bundle.bundleURL,
+            running: running,
+            readiness: readiness,
+            isCLIOwnedInstall: { url in
+                CLIUpdateRunner.installedAppMatchesInstalledCompatibilitySet(bundleURL: url)
+            },
+            relaunch: { url in try await CLIUpdateRunner.relaunchInstalledApp(at: url) }
+        )
+    }
+
+    init(
+        bundleURL: URL,
+        running: AppBundleRelaunchWatcher.Identity,
+        readiness: @escaping @MainActor () -> AppBundleRelaunchWatcher.Readiness,
+        isCLIOwnedInstall: @escaping @MainActor (URL) -> Bool,
+        relaunch: @escaping @MainActor (URL) async throws -> Void,
+        defaults: UserDefaults = .standard,
+        interval: TimeInterval = 15,
+        policy: AppBundleRelaunchWatcher.Policy = .init()
+    ) {
+        self.bundleURL = bundleURL
         self.running = running
-        self.isBlocked = isBlocked
+        self.readiness = readiness
+        self.isCLIOwnedInstall = isCLIOwnedInstall
         self.relaunch = relaunch
         self.defaults = defaults
         self.interval = interval
+        self.policy = policy
     }
 
     func start() {
@@ -207,31 +228,36 @@ final class AppBundleRelaunchMonitor {
         timer = nil
     }
 
-    private func tick(now: Date = Date()) {
-        guard !relaunching else { return }
-        let onDisk = AppBundleRelaunchWatcher.readIdentity(
-            bundleURL: bundleURL,
-            executableName: executableName
-        )
+    /// One evaluation. Returns the relaunch task when it starts one.
+    @discardableResult
+    func tick(now: Date = Date()) -> Task<Void, Never>? {
+        guard !relaunching else { return nil }
+        let onDisk = AppBundleRelaunchWatcher.readIdentity(bundleURL: bundleURL)
+        var readiness = self.readiness()
+        // Relaunch only onto the Malibu member of the installed CLI's signed
+        // compatibility set: anything else is mid-transaction or out-of-band.
+        if readiness != .blocked, let onDisk, onDisk != running, !isCLIOwnedInstall(bundleURL) {
+            readiness = .blocked
+        }
         let ledger = loadLedger()
         guard AppBundleRelaunchWatcher.shouldRelaunch(
             running: running,
             onDisk: onDisk,
-            blocked: isBlocked(),
+            readiness: readiness,
             now: now,
             state: &state,
-            ledger: ledger
+            ledger: ledger,
+            policy: policy
         ), let target = onDisk else {
-            return
+            return nil
         }
-        saveLedger(AppBundleRelaunchWatcher.recordingAttempt(on: ledger, target: target, now: now))
+        saveLedger(AppBundleRelaunchWatcher.recordingAttempt(on: ledger, now: now, policy: policy))
         relaunching = true
         NSLog(
             "[malibu] installed Malibu.app changed (running %@ build %@, installed %@ build %@); relaunching onto the installed bundle",
-            running.version ?? "unknown", running.build ?? "unknown",
-            target.version ?? "unknown", target.build ?? "unknown"
+            running.version, running.build, target.version, target.build
         )
-        Task { @MainActor [weak self] in
+        return Task { @MainActor [weak self] in
             guard let self else { return }
             do {
                 try await self.relaunch(self.bundleURL)
@@ -243,16 +269,13 @@ final class AppBundleRelaunchMonitor {
     }
 
     private func loadLedger() -> AppBundleRelaunchWatcher.AttemptLedger {
-        AppBundleRelaunchWatcher.AttemptLedger(
-            targetFingerprint: defaults.string(forKey: Self.ledgerTargetKey),
-            attempts: defaults.integer(forKey: Self.ledgerAttemptsKey),
-            lastAttemptAt: defaults.object(forKey: Self.ledgerLastAttemptKey) as? Date
+        let stored = (defaults.array(forKey: Self.ledgerKey) as? [Double]) ?? []
+        return AppBundleRelaunchWatcher.AttemptLedger(
+            attempts: stored.suffix(policy.maxAttemptsPerWindow).map { Date(timeIntervalSince1970: $0) }
         )
     }
 
     private func saveLedger(_ ledger: AppBundleRelaunchWatcher.AttemptLedger) {
-        defaults.set(ledger.targetFingerprint, forKey: Self.ledgerTargetKey)
-        defaults.set(ledger.attempts, forKey: Self.ledgerAttemptsKey)
-        defaults.set(ledger.lastAttemptAt, forKey: Self.ledgerLastAttemptKey)
+        defaults.set(ledger.attempts.map(\.timeIntervalSince1970), forKey: Self.ledgerKey)
     }
 }

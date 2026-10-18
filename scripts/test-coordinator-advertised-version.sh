@@ -113,17 +113,11 @@ if [[ "$app_version" != "0.0.0" || "$app_build" != "0" ]]; then
   echo "project.yml must keep the development default MARKETING_VERSION \"0.0.0\" / CURRENT_PROJECT_VERSION \"0\" (found $app_version/$app_build); release builds stamp the version from the tag" >&2
   exit 1
 fi
-release_app_version="$binary_version"
-release_app_build="${binary_version##*.}"
-if [[ -n "$expected_version" ]]; then
-  stamped="$(bash "$app_version_helper" "v$expected_version")" || exit 1
-  eval "$stamped"
-  if [[ "$MALIBU_APP_VERSION" != "$expected_version" || "$MALIBU_APP_BUILD" != "${expected_version##*.}" ]]; then
-    echo "Malibu app stamp $MALIBU_APP_VERSION/$MALIBU_APP_BUILD does not match release tag v$expected_version" >&2
-    exit 1
-  fi
-  release_app_version="$MALIBU_APP_VERSION"
-  release_app_build="$MALIBU_APP_BUILD"
+stamp_line="$(bash "$app_version_helper" "v$binary_version")" || exit 1
+read -r release_app_version release_app_build <<<"$stamp_line"
+if [[ "$release_app_version" != "$binary_version" ]]; then
+  echo "Malibu app stamp $release_app_version does not match release version $binary_version" >&2
+  exit 1
 fi
 
 config_files=(

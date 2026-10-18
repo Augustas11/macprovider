@@ -438,7 +438,7 @@ test "$(defaults read "$MALIBU_APP/Contents/Info" CFBundleIdentifier)" = tech.ma
 MALIBU_VERSION="$(defaults read "$MALIBU_APP/Contents/Info" CFBundleShortVersionString)"
 MALIBU_BUILD="$(defaults read "$MALIBU_APP/Contents/Info" CFBundleVersion)"
 test "v$MALIBU_VERSION" = "$TAG"
-test "$MALIBU_BUILD" = "${TAG##*.}"
+test "$MALIBU_BUILD $MALIBU_VERSION" = "$(bash scripts/malibu-app-version.sh "$TAG" | awk '{ print $2 " " $1 }')"
 xcrun stapler validate "$MALIBU_APP"
 spctl -a -t exec "$MALIBU_APP"
 cmp "$HOME/macprovider/compatibility-set.json" \

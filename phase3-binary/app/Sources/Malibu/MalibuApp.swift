@@ -39,8 +39,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // SPEC-025 §3.3: relaunch onto the installed bundle after the
         // CLI-owned update swaps it, instead of running stale code.
-        bundleRelaunchMonitor = AppBundleRelaunchMonitor(isBlocked: { [weak self] in
-            self?.bundleRelaunchBlocked ?? true
+        bundleRelaunchMonitor = AppBundleRelaunchMonitor(readiness: { [weak self] in
+            self?.bundleRelaunchReadiness ?? .blocked
         })
         bundleRelaunchMonitor?.start()
     }
@@ -48,17 +48,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Defers a self-relaunch while the provider update/rollback transaction,
     /// a Malibu-driven update or repair, onboarding, quit, uninstall, or a
     /// modal prompt is in flight.
-    private var bundleRelaunchBlocked: Bool {
+    private var bundleRelaunchReadiness: AppBundleRelaunchWatcher.Readiness {
         let snapshot = agent.snapshot
-        return terminationDrain != nil
-            || uninstallTask != nil
-            || onboardingWindow != nil
-            || NSApp.modalWindow != nil
-            || snapshot.cliUpdateInProgress
-            || snapshot.providerSoftwareRepairInProgress
-            || snapshot.lifecycleLeaseKind == "maintenance"
-            || snapshot.lifecycleState == "update_in_progress"
-            || snapshot.lifecycleState == "rollback_in_progress"
+        return AppBundleRelaunchWatcher.readiness(
+            lifecycleState: snapshot.lifecycleState,
+            lifecycleLeaseKind: snapshot.lifecycleLeaseKind,
+            cliUpdateInProgress: snapshot.cliUpdateInProgress,
+            providerSoftwareRepairInProgress: snapshot.providerSoftwareRepairInProgress,
+            appFlowInProgress: terminationDrain != nil
+                || uninstallTask != nil
+                || onboardingWindow != nil
+                || NSApp.modalWindow != nil
+        )
     }
 
     // SPEC-026 §7.3: browser deep-link onboarding retired.

@@ -779,6 +779,27 @@ enum CLIUpdateRunner {
         try await relaunchInstalledApp(at: plan.bundleURL)
     }
 
+    /// True only when the installed bundle is exactly the Malibu member of the
+    /// installed CLI's release-signed compatibility set: same app version and
+    /// byte-identical embedded manifest. SPEC-025 §3.3 self-relaunch proof.
+    static func installedAppMatchesInstalledCompatibilitySet(bundleURL: URL) -> Bool {
+        guard let executable = try? installedProviderExecutableForAppProof(),
+              let expected = try? expectedAppIdentityFromInstalledProviderManifest(
+                executableURL: executable
+              ),
+              expected.compatibilityManifestBytes != nil,
+              let expectedVersion = ProviderCLIVersion.strictNormalize(expected.version),
+              let installed = readInstalledMalibuAppIdentity(at: bundleURL),
+              ProviderCLIVersion.strictNormalize(installed.version) == expectedVersion,
+              (try? validateEmbeddedCompatibilityManifest(
+                in: bundleURL,
+                expectedIdentity: expected
+              )) != nil else {
+            return false
+        }
+        return true
+    }
+
     /// Opens the signature-verified installed bundle as a new process, then
     /// quits this one. Quit keeps the launchd provider running.
     @MainActor
