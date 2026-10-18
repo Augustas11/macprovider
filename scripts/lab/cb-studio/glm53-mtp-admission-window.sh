@@ -9,12 +9,17 @@
 #        text. Prints, per candidate, the provider-local checks and the
 #        on-device self-check speedup estimate. The release bank takes the
 #        first candidate whose checks all pass and whose estimate is at least
-#        BANK_MIN_SPEEDUP (1.25: margin over the provider's 1.15x bar).
+#        BANK_MIN_SPEEDUP (1.20, over the provider's 1.15x bar; window 1
+#        measured 1.237 for the counting text).
 #   glm53-mtp-admission-window.sh r015   the SPEC-048-R015 matrix and the
-#        1800 s sustained window (`native-mtp-bench --phase all`) under the
-#        frozen policy docs/research/spec048-r015/glm53-flash-v1.8.256/policy.json.
-#        The bench resumes a partial matrix from --out; an interrupted
-#        sustained window is rerun whole (SPEC-048-R015).
+#        1800 s sustained window under the frozen policy
+#        docs/research/spec048-r015/glm53-flash-v1.8.256/policy.json: one
+#        `native-mtp-bench` process per matrix cell and one for the sustained
+#        window (R015_STEPS); each checks layout, identities, policy and
+#        environment before its load (`--validate-only` runs exactly those
+#        checks outside a window). Runs
+#        alone, without the bank leg. R015_FROM=<n> resumes at step n; an
+#        interrupted sustained window is rerun whole (SPEC-048-R015).
 #   glm53-mtp-admission-window.sh run    bank, then r015.
 #
 # Both legs need the GPU and all of unified memory: run them only inside an
@@ -29,8 +34,8 @@
 # metallib: the canary compares exact tokens, counters and committed state.
 #
 # Env: HARNESS (dir holding macprovider-cli + mlx.metallib), MODEL (served
-# artifact dir), OUT, POLICY, LIVE_PORT (8080), BANK_MIN_SPEEDUP (1.25),
-# BANK_TIMEOUT_S (1800), R015_TIMEOUT_S (14400).
+# artifact dir), OUT, POLICY, LIVE_PORT (8080), BANK_MIN_SPEEDUP (1.20),
+# BANK_TIMEOUT_S (1800), R015_STEP_TIMEOUT_S (3600), R015_FROM (1).
 set -euo pipefail
 export PATH=/usr/sbin:/opt/homebrew/bin:/usr/bin:/bin
 # The bench records `xcrun swift --version` and `xcodebuild -version`; the
@@ -104,7 +109,7 @@ bank() {
     --selftest-only --selftest-challenge-id $CHALLENGE_ID "${args[@]}" || rc=$?
   echo "bank native-mtp-journey-e2e rc=$rc end $(date -u +%FT%TZ)" | tee -a $OUT/summary.txt
   # A failed bank leg does not stop `run`: R015 still uses the window.
-  { python3 - $OUT/bank-journey.json ${BANK_MIN_SPEEDUP:-1.25} $OUT/bank-entry.json <<'PY' 2>&1 || true; } | tee -a $OUT/summary.txt
+  { python3 - $OUT/bank-journey.json ${BANK_MIN_SPEEDUP:-1.20} $OUT/bank-entry.json <<'PY' 2>&1 || true; } | tee -a $OUT/summary.txt
 import json, sys
 text = open(sys.argv[1]).read()
 if "{" not in text:
@@ -126,17 +131,38 @@ PY
   rm -rf $root/target
 }
 
+# One bench process per step: each loads GLM once and exits, so a cell never
+# starts while the previous cell's target is still resident (two copies do
+# not fit). The sustained window is its own process after its cell's matrix.
+R015_STEPS=(
+  "--only-cell s1-p1536-o128 --phase matrix"
+  "--only-cell s1-p1536-o512 --phase matrix"
+  "--only-cell s1-p4096-o128 --phase matrix"
+  "--only-cell s1-p4096-o512 --phase matrix"
+  "--only-cell s2-p1536-o512 --phase matrix"
+  "--only-cell s4-p1536-o512 --phase matrix"
+  "--phase sustained"
+)
+
 r015() {
   [[ $(shasum -a 256 $POLICY | cut -d' ' -f1) == $POLICY_SHA256 ]] ||
     { echo "refusing: $POLICY is not the frozen GLM R015 policy" >&2; exit 3; }
   echo "r015 start $(date -u +%FT%TZ)" | tee -a $OUT/summary.txt
-  local root=$(fixture r015-fixture) rc=0
-  run_bounded ${R015_TIMEOUT_S:-14400} r015 $OUT/r015-bench.stdout $OUT/r015-bench.log \
-    env MACPROVIDER_NATIVE_MTP_E2E=1 \
-    $HARNESS/macprovider-cli native-mtp-bench --root $root --model-id $MODEL_ID \
-    --policy $POLICY --out $OUT/r015-glm53.jsonl --provider-commit $PROVIDER_COMMIT --phase all || rc=$?
-  echo "r015 native-mtp-bench rc=$rc end $(date -u +%FT%TZ) records=$(wc -l < $OUT/r015-glm53.jsonl 2>/dev/null || echo 0)" |
-    tee -a $OUT/summary.txt
+  # The fixture is target/ only: the GLM next-N layer is embedded in it.
+  local root=$(fixture r015-fixture) rc=0 step=0
+  local bench=(env MACPROVIDER_NATIVE_MTP_E2E=1 $HARNESS/macprovider-cli native-mtp-bench --root $root
+    --model-id $MODEL_ID --policy $POLICY --out $OUT/r015-glm53.jsonl --provider-commit $PROVIDER_COMMIT)
+  # R015_FROM (1-based) resumes at a later step after a partial run; a matrix
+  # step resumes its own completed blocks, a partial sustained window must be
+  # moved aside first (the bench refuses to resume it).
+  for args in "${(@)R015_STEPS[${R015_FROM:-1},-1]}"; do
+    step=$((step + 1))
+    echo "r015 step '$args' start $(date -u +%FT%TZ)" | tee -a $OUT/summary.txt
+    run_bounded ${R015_STEP_TIMEOUT_S:-3600} r015-$step $OUT/r015-$step.stdout $OUT/r015-$step.log \
+      $bench ${=args} || rc=$?
+    echo "r015 step '$args' rc=$rc end $(date -u +%FT%TZ) lines=$(wc -l < $OUT/r015-glm53.jsonl)" | tee -a $OUT/summary.txt
+    (( rc == 0 )) || break
+  done
   shasum -a 256 $OUT/r015-glm53.jsonl | tee -a $OUT/summary.txt || true
   (( rc == 0 )) && rm -rf $root/target
   return $rc

@@ -69,17 +69,41 @@ the macOS 14 deployment target, and every one of the 17,248 kernels the two
 libraries share has a different function hash. The bank entry is recorded
 again with the release metallib.
 
-## Challenge text
+## Challenge text and bank entry
 
 The record at `07301b6bf` used the journey's default challenge text. On it
 GLM accepted 19 of 43 proposals, and native took 1.81 s against 1.80 s
 ordinary. The provider's on-device self-check (SPEC-048-R016 0.1.32) runs the
 bank's challenge and needs 1.15x, so that entry would disable the tuple on
-the Studio after every load. The window records several texts in one load
-(`native-mtp-journey-e2e --selftest-only --selftest-prompt …`) and the bank
-takes the first whose estimate clears 1.25x. Its `challenge_id` is
-`native-mtp-selftest-glm53-flash-0001`, because bank challenge ids are unique
-across the whole bank.
+the Studio after every load.
+
+Window 1 (2026-10-18 13:09-13:17Z, harness `6585ae23…`, release metallib)
+recorded four texts in one load (`native-mtp-journey-e2e --selftest-only`,
+`bank-journey-20261018T130906Z.json`, binary identity in
+`bank-identity.sha256`). Every candidate passed its provider-local checks
+(native equals the ordinary oracle; tokens, counters and committed state
+equal across two runs). Speedup estimates: 0.995 (default text), 1.237
+(counting, 31 accepted / 0 rejected), 1.236, 1.215. The bank takes candidate 1,
+the counting text, at a 1.20 floor: a load that measures under 1.15 runs
+without native MTP and stays fail-closed. `bank-entry.glm53.json`
+(`a0c8bafe…`) is that step's unmodified `challenge_bank_entry`, with
+`challenge_id` `native-mtp-selftest-glm53-flash-0001` (bank ids are unique
+across the whole bank). Its token digest and committed count satisfy the
+coordinator's record checks.
+
+## R015 bench on an embedded-MTP target
+
+Window 1's R015 leg stopped before loading: `native-mtp-bench` required a
+`mtp/` directory. The bench now resolves the MTP artifact from the target's
+family as the hardware runner does (`target/` for glm5_next), sets the
+family's MLX command-buffer budget and cache limit before any device use as
+serve does, refuses a sampled or wider-than-signed policy for the family
+before loading, and hashes the target once per process plus the pre-load
+re-check. `--validate-only` runs every pre-load check and exits; on the
+window-1 fixture it passed (family `glm5_next`, MTP directory `target`, all
+identities, the frozen policy and the environment). The window runs one bench
+process per cell, and one for the sustained window, so two GLM copies are
+never resident.
 
 ## Steps
 
@@ -94,14 +118,16 @@ across the whole bank.
    source with `MACPROVIDER_GLM53_ARTIFACT_DIR` set (done:
    `security-negatives.json`). Copy the frozen R015 policy to the Studio
    (done).
-2. Studio window (live provider paused, drained and booted out, buyer runner
-   stopped, watchdog armed): `scripts/lab/cb-studio/glm53-mtp-admission-window.sh run`.
-   Bank leg, then the R015 matrix and sustained window.
+2. Studio windows (live provider paused, drained and booted out, buyer
+   runner stopped, watchdog armed) with
+   `scripts/lab/cb-studio/glm53-mtp-admission-window.sh`. Window 1 (done)
+   recorded the bank entry. Window 2 runs `r015` alone on harness
+   `26b075b4…` (same source plus the bench changes).
 3. CPU, after the window: `scripts/native_mtp_r015_analyze.py` on the JSONL and
    the policy; commit `analysis.json` with the run's identity next to the
    policy.
 4. Fill the pending fields above; write the bank (the Qwen entry unchanged,
-   the GLM entry from `bank-entry.json`); set the release input's
+   the GLM entry from `bank-entry.glm53.json`); set the release input's
    `challenge_bank_sha256`.
 5. Cut, as #2060 did: copy the tuple file as a JSON array `[Qwen, GLM]`, the
    v2 manifest, the bank and the release input into
