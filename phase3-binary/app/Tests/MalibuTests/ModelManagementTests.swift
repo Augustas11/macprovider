@@ -1103,6 +1103,26 @@ final class ModelManagementTests: XCTestCase {
         XCTAssertEqual(store.listState, .viewOnly)
     }
 
+    /// #2029 P1-19: a list read that never answers ends in a retryable
+    /// "unavailable", never an endless "Checking".
+    @MainActor
+    func testHungListReadTimesOutToRetryableUnavailable() async throws {
+        let cli = HangingModelCLI()
+        let store = ModelManagementStore(
+            cli: cli,
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.timeout.\(UUID().uuidString)")!
+        )
+        store.listCommandTimeoutSeconds = 0.2
+
+        await store.refresh(currentModelID: "org/current", peer: peer(for: MalibuModelCapabilityManifest.catalogEconomics))
+
+        XCTAssertTrue(cli.cancelled, "the hung subprocess is terminated")
+        XCTAssertEqual(store.listState, .unavailable)
+        XCTAssertTrue(store.catalogProjectionRetryAvailable)
+        XCTAssertFalse(store.statusLine.contains("_"), store.statusLine)
+    }
+
     @MainActor
     func testRefreshFallsBackToStaticCurrentStateWhenProjectionFails() async throws {
         let cli = FakeModelCLI(results: [
@@ -1120,7 +1140,7 @@ final class ModelManagementTests: XCTestCase {
         XCTAssertEqual(store.currentModelID, "org/current")
         XCTAssertEqual(store.listState, .unavailable)
         XCTAssertTrue(store.catalogProjectionRetryAvailable)
-        XCTAssertTrue(store.statusLine.contains("projection_unavailable"))
+        XCTAssertEqual(store.statusLine, "Model catalog unavailable right now. The current model remains visible from provider status.")
     }
 
     @MainActor
@@ -1172,7 +1192,7 @@ final class ModelManagementTests: XCTestCase {
         } else {
             XCTFail("Expected runtime conflict to remain after projection expiry, got \(store.operation)")
         }
-        XCTAssertTrue(store.statusLine.contains("projection_unavailable"))
+        XCTAssertEqual(store.statusLine, "Model catalog unavailable right now. The current model remains visible from provider status.")
     }
 
     @MainActor
@@ -1224,7 +1244,7 @@ final class ModelManagementTests: XCTestCase {
         } else {
             XCTFail("Expected reconciliation to remain after projection expiry, got \(store.operation)")
         }
-        XCTAssertTrue(store.statusLine.contains("projection_unavailable"))
+        XCTAssertEqual(store.statusLine, "Model catalog unavailable right now. The current model remains visible from provider status.")
     }
 
     @MainActor
@@ -1271,7 +1291,7 @@ final class ModelManagementTests: XCTestCase {
         } else {
             XCTFail("Expected switching operation to remain after projection expiry, got \(store.operation)")
         }
-        XCTAssertTrue(store.statusLine.contains("projection_unavailable"))
+        XCTAssertEqual(store.statusLine, "Model catalog unavailable right now. The current model remains visible from provider status.")
 
         switchTask.cancel()
         await switchTask.value
@@ -1315,7 +1335,7 @@ final class ModelManagementTests: XCTestCase {
         XCTAssertTrue(store.rows.isEmpty)
         XCTAssertEqual(store.listState, .unavailable)
         XCTAssertTrue(store.catalogProjectionRetryAvailable)
-        XCTAssertTrue(store.statusLine.contains("projection_unavailable"))
+        XCTAssertEqual(store.statusLine, "Model catalog unavailable right now. The current model remains visible from provider status.")
     }
 
     @MainActor
@@ -2863,6 +2883,27 @@ private enum ModelTestTimestamp {
 }
 
 @MainActor
+private final class HangingModelCLI: MalibuModelCLIRunning {
+    private(set) var cancelled = false
+    private var waiter: CheckedContinuation<ModelCLIResult, Never>?
+
+    func run(
+        arguments: [String],
+        peer: MalibuModelPeerEvidence?,
+        stdinData: Data?,
+        priority: ModelCLIWorkPriority,
+        onLine: @escaping @MainActor @Sendable (String) -> Void
+    ) async throws -> ModelCLIResult {
+        await withCheckedContinuation { waiter = $0 }
+    }
+
+    func cancelCurrentOperation() {
+        cancelled = true
+        waiter?.resume(returning: ModelCLIResult(exitCode: 15, stdout: "", stderr: ""))
+        waiter = nil
+    }
+}
+
 private final class FakeModelCLI: MalibuModelCLIRunning {
     var invocations: [[String]] = []
     private var results: [ModelCLIResult]
