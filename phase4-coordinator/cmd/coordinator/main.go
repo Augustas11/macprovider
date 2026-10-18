@@ -4700,14 +4700,21 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 	var reloadedAutotuneCatalog *autotune.Catalog
 	var reloadedAutotuneCompatible []*autotune.Catalog
 	var reloadedAutotuneFeeds buyer.AutotuneFeeds
+	var commitNativeMTPCanaryBank func()
 	haveReloadedAutotune := false
 	if strings.TrimSpace(cfg.AutotuneFeeds.AutotuneCandidatesPath) != "" {
 		if feeds, catalog, compatible, aerr := loadAutotuneCatalogForReload(cfg.AutotuneFeeds); aerr != nil {
 			logger.Error().Err(aerr).Msg("autotune feed reload rejected; keeping prior catalog and served feeds")
+		} else if commit, berr := wsServer.PrepareNativeMTPCanaryBankReload(feeds.NativeMTP.ReleaseID, feeds.NativeMTP.SelftestBankJSON, feeds.NativeMTP.SelftestBankSig); berr != nil {
+			// SPEC-031-R033 v0.3.9: the canary bank moves with the release.
+			// A release whose bank the canary cannot verify never goes live,
+			// so no provider is offered a bank the canary would reject.
+			logger.Error().Err(berr).Msg("autotune feed reload rejected; keeping prior catalog, served feeds and native MTP canary bank")
 		} else {
 			reloadedAutotuneCatalog = catalog
 			reloadedAutotuneCompatible = compatible
 			reloadedAutotuneFeeds = feeds
+			commitNativeMTPCanaryBank = commit
 			effectiveAutotuneCatalog = catalog
 			haveReloadedAutotune = true
 		}
@@ -4861,7 +4868,10 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 		// RequireActiveReleaseBinding against reloadedAutotuneCatalog, so this
 		// swap cannot install a catalog that conflicts with the applied tier2
 		// rows. The WS admission catalog and the buyer-served feed bytes swap
-		// together.
+		// together. The native-MTP canary bank is installed first: a provider
+		// fetches its bank from the served feed, so the canary must already
+		// hold that bank when the bytes go out (SPEC-031-R033 v0.3.9).
+		commitNativeMTPCanaryBank()
 		wsServer.SetAutotuneCatalog(reloadedAutotuneCatalog, reloadedAutotuneCompatible...)
 		if billingSnapshotCommitted {
 			buyerServer.PublishEconomics(cfg.Rewards, billingSnapshotID, cfg.Stats.Rollup.UsdPerMillionCredits, &reloadedAutotuneFeeds)
