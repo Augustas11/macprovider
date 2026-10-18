@@ -15,7 +15,7 @@ struct NativeMTPBenchCommand: AsyncParsableCommand {
         shouldDisplay: false
     )
 
-    @Option(name: .customLong("root"), help: "Fixture root containing target/ and mtp/ snapshot directories.")
+    @Option(name: .customLong("root"), help: "Fixture root containing target/ (and mtp/ unless the target embeds its MTP layer).")
     var root: String
 
     @Option(name: .customLong("model-id"), help: "Model ID bound into requests/runtime.")
@@ -39,12 +39,22 @@ struct NativeMTPBenchCommand: AsyncParsableCommand {
     )
     var phase: NativeMTPBenchPhase = .all
 
+    @Flag(
+        name: .customLong("validate-only"),
+        help: "Check the fixture layout, identities, frozen policy, environment and --out, then exit without loading the model."
+    )
+    var validateOnly = false
+
     func run() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["MACPROVIDER_NATIVE_MTP_E2E"] == "1" else {
             FileHandle.standardError.write(Data("native-mtp-bench: set MACPROVIDER_NATIVE_MTP_E2E=1 on the Mac Studio\n".utf8))
             throw ExitCode(2)
         }
+        // Before any MLX device use (the host check samples the GPU): the
+        // family's command-buffer budget and cache limit, as serve and the
+        // journey harness set them.
+        NativeMTPHardwareE2ERunner.applyServeProcessSetup(rootPath: root)
         try NativeMTPHardwareE2ERunner.requireStudioHost()
         guard providerCommit.range(of: #"^[0-9a-f]{40}$"#, options: .regularExpression) != nil else {
             throw ValidationError("--provider-commit must be lowercase 40-hex")
@@ -58,7 +68,34 @@ struct NativeMTPBenchCommand: AsyncParsableCommand {
             providerCommit: providerCommit,
             phase: phase
         )
+        if validateOnly {
+            try bench.validate()
+            return
+        }
         try await bench.run()
+    }
+}
+
+/// The fixture directories one bench root holds: `target/`, and `mtp/` for a
+/// separate drafter artifact; a target that embeds its next-N layer
+/// (`checkpoint_mtp`, glm5_next) is its own MTP artifact (SPEC-048 MTP-2).
+struct NativeMTPBenchFixtureLayout: Equatable {
+    let family: NativeMTPHardwareE2EFamily
+    let targetDirectory: URL
+    let mtpDirectory: URL
+
+    static func resolve(root: URL) -> NativeMTPBenchFixtureLayout {
+        let targetDirectory = root.appendingPathComponent("target", isDirectory: true)
+        // As the hardware runner: Qwen3.5 when the config is unreadable, so an
+        // unrecognized target fails the family check in the fixture load.
+        let family = NativeMTPHardwareE2EFamily.detect(configJSONData: try? Data(
+            contentsOf: targetDirectory.appendingPathComponent("config.json")
+        )) ?? .qwen35
+        return NativeMTPBenchFixtureLayout(
+            family: family,
+            targetDirectory: targetDirectory,
+            mtpDirectory: root.appendingPathComponent(family.mtpDirectoryName, isDirectory: true)
+        )
     }
 }
 
@@ -106,9 +143,44 @@ private final class NativeMTPBenchRunner {
         self.phase = phase
         self.policySHA256 = try Self.sha256(of: self.policyURL)
         self.policy = try NativeMTPBenchPolicy.load(from: self.policyURL)
+        self.layout = NativeMTPBenchFixtureLayout.resolve(root: self.root)
+        try policy.validateFamily(layout.family)
     }
 
-    func run() async throws {
+    private let layout: NativeMTPBenchFixtureLayout
+    /// The target identity this process verified at start; the fixture load
+    /// re-checks it once more right before loading (no third full hash).
+    private var verifiedTargetIdentity: MLXSnapshotIdentity?
+
+    /// `--validate-only`: every check `run()` makes before its first model
+    /// load, then a one-line summary. No MLX model is loaded.
+    func validate() throws {
+        let checked = try preflight()
+        let summary: [String: Any] = [
+            "validate_only": "pass",
+            "family": layout.family.modelFamily,
+            "mtp_directory": layout.family.mtpDirectoryName,
+            "target_sha256": checked.targetIdentity.digest,
+            "mtp_sha256": checked.mtpIdentity.digest,
+            "tokenizer_sha256": checked.tokenizerSHA256,
+            "policy_sha256": policySHA256,
+            "cells": policy.matrixCells.map(\.id),
+            "sustained_cell_id": policy.sustainedCellID,
+            "existing_records": checked.existing.hasRecords,
+        ]
+        FileHandle.standardOutput.write(try JSONSerialization.data(withJSONObject: summary, options: [.sortedKeys]))
+        FileHandle.standardOutput.write(Data("\n".utf8))
+    }
+
+    private struct Preflight {
+        let targetIdentity: MLXSnapshotIdentity
+        let mtpIdentity: MLXSnapshotIdentity
+        let tokenizerSHA256: String
+        let environment: NativeMTPBenchEnvironment
+        let existing: NativeMTPExistingEvidence
+    }
+
+    private func preflight() throws -> Preflight {
         if let onlyCell, policy.cell(id: onlyCell) == nil {
             throw NativeMTPBenchError.invalidPolicy("--only-cell does not identify a policy matrix cell")
         }
@@ -120,12 +192,15 @@ private final class NativeMTPBenchRunner {
                 throw NativeMTPBenchError.invalidPolicy("--phase sustained runs only sustained_cell_id")
             }
         }
-        let targetDirectory = root.appendingPathComponent("target", isDirectory: true)
-        let mtpDirectory = root.appendingPathComponent("mtp", isDirectory: true)
+        let targetDirectory = layout.targetDirectory
+        let mtpDirectory = layout.mtpDirectory
         try Self.requireDirectory(targetDirectory)
         try Self.requireDirectory(mtpDirectory)
         let targetIdentity = try MLXSnapshotIdentity.compute(directory: targetDirectory)
-        let mtpIdentity = try MLXSnapshotIdentity.compute(directory: mtpDirectory)
+        // An embedded MTP layer is the target artifact: one identity, hashed once.
+        let mtpIdentity = layout.family.embeddedMTP
+            ? targetIdentity
+            : try MLXSnapshotIdentity.compute(directory: mtpDirectory)
         let tokenizerSHA = try Self.sha256(of: targetDirectory.appendingPathComponent("tokenizer.json"))
         try policy.validateObserved(modelID: modelID, targetSHA256: targetIdentity.digest, mtpSHA256: mtpIdentity.digest, tokenizerSHA256: tokenizerSHA)
         let environment = NativeMTPBenchEnvironment.capture(providerCommit: providerCommit)
@@ -167,6 +242,23 @@ private final class NativeMTPBenchRunner {
                 "refusing to append a full matrix to non-empty --out; use --only-cell to resume"
             )
         }
+        return Preflight(
+            targetIdentity: targetIdentity,
+            mtpIdentity: mtpIdentity,
+            tokenizerSHA256: tokenizerSHA,
+            environment: environment,
+            existing: existing
+        )
+    }
+
+    func run() async throws {
+        let checked = try preflight()
+        let targetIdentity = checked.targetIdentity
+        let mtpIdentity = checked.mtpIdentity
+        let tokenizerSHA = checked.tokenizerSHA256
+        let environment = checked.environment
+        let existing = checked.existing
+        verifiedTargetIdentity = targetIdentity
         let writer = try NativeMTPJSONLWriter(url: outURL, append: existing.hasRecords)
         defer { try? writer.close() }
 
@@ -315,6 +407,7 @@ private final class NativeMTPBenchRunner {
         )
         let fixture = try await runner.loadRuntimeFixture(
             maxContextTokens: cell.promptTokens + cell.maxTokens + 256,
+            knownTargetIdentity: verifiedTargetIdentity,
             ordinaryAdmissionRecorder: nil,
             nativeAdmissionRecorder: NativeMTPHardwareAdmissionRecorder()
         )
@@ -1212,6 +1305,25 @@ struct NativeMTPBenchPolicy {
 
     func qualifiedSlots(for cell: NativeMTPBenchCell) -> Int {
         max(2, cell.slots)
+    }
+
+    /// The fixture family's own tuple limits, checked before any model load:
+    /// a greedy-only family (glm5_next) routes sampled rows to ordinary
+    /// decode, and a family that signs a native active-row bound measures at
+    /// most that bound, so either mismatch could only fail after the load.
+    func validateFamily(_ family: NativeMTPHardwareE2EFamily) throws {
+        if !family.admitsSampledRows, temperature > 0 {
+            throw NativeMTPBenchError.invalidPolicy(
+                "temperature must be 0: \(family.familyAdapter) admits greedy rows only"
+            )
+        }
+        if let signed = family.signedMaxNativeActiveRows, !exploratory {
+            guard let bound = maxNativeActiveRows, bound <= signed else {
+                throw NativeMTPBenchError.invalidPolicy(
+                    "max_native_active_rows must be at most \(signed) for \(family.familyAdapter)"
+                )
+            }
+        }
     }
 
     /// The runtime bound for one cell. A cell's runtime is qualified at its
