@@ -1037,7 +1037,8 @@ final class CoordinatorClientTests: XCTestCase {
         recorder: CoordinatorFrameRecorder,
         revocations: NativeMTPRevocationStub = NativeMTPRevocationStub(),
         sendOverride: CoordinatorClient.SendOverride? = nil,
-        nativeMTPTupleDisableHandler: ((ModelRuntime) -> CoordinatorClient.NativeMTPTupleDisableHandler)? = nil
+        nativeMTPTupleDisableHandler: ((ModelRuntime) -> CoordinatorClient.NativeMTPTupleDisableHandler)? = nil,
+        nativeMTPServedBankDigest: CoordinatorClient.NativeMTPServedBankDigest? = nil
     ) async throws -> (CoordinatorClient, ModelRuntime, NativeMTPPublishedTupleOffer) {
         let runtime = ModelRuntime(
             modelID: "model-a",
@@ -1061,7 +1062,8 @@ final class CoordinatorClientTests: XCTestCase {
             recorder: recorder,
             modelRuntime: runtime,
             sendOverride: sendOverride,
-            nativeMTPTupleDisableHandler: nativeMTPTupleDisableHandler?(runtime)
+            nativeMTPTupleDisableHandler: nativeMTPTupleDisableHandler?(runtime),
+            nativeMTPServedBankDigest: nativeMTPServedBankDigest
         )
         await client.acceptAssignedSessionForTest(assignedID: "assigned-native-mtp")
         return (client, runtime, offer)
@@ -1203,6 +1205,35 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(offers.count, 2, "the new session re-offers the tuple rejected by the old one")
         let published = await runtime.currentSnapshot().nativeMTPTupleOffer
         XCTAssertEqual(published, offer)
+    }
+
+    // A served-bank fetch still in flight when its poll is stopped (here by a
+    // new session) must not observe the digest it returns.
+    func testNativeMTPStoppedBankPollDoesNotObserveItsInFlightFetch() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let interleaving = NativeMTPInterleaving()
+        let bank = NativeMTPTupleReofferTests.offer().challengeBankSHA256
+        let (client, _, _) = try await makeNativeMTPReofferClient(
+            recorder: recorder,
+            nativeMTPServedBankDigest: {
+                await interleaving.pause()
+                return bank
+            }
+        )
+        defer { Task { await client.stop() } }
+        await client.setNativeMTPServedBankPollDelayForTest(nanoseconds: 1_000_000)
+
+        try await client.sendNativeMTPTupleOfferForTest()
+        try await client.handleCoordinatorPayloadForTest(try Self.nativeMTPTupleDisable(reason: "bank_mismatch"))
+        await interleaving.waitPaused()
+        let poll = await client.nativeMTPServedBankPollTaskForTest()
+        XCTAssertNotNil(poll)
+        await client.cleanupConnectionForTest()
+        interleaving.resume()
+        await poll?.value
+
+        let observed = await client.observedCoordinatorNativeMTPBankSHA256ForTest()
+        XCTAssertNil(observed, "a stopped poll observed its in-flight fetch")
     }
 
     // An offer whose send completes after a disconnect must not record its
@@ -9954,6 +9985,7 @@ final class CoordinatorClientTests: XCTestCase {
         catalogModelSHA256: String? = nil,
         catalogArtifactIdentity: CoordinatorClient.CatalogArtifactIdentity? = nil,
         nativeMTPTupleDisableHandler: CoordinatorClient.NativeMTPTupleDisableHandler? = nil,
+        nativeMTPServedBankDigest: CoordinatorClient.NativeMTPServedBankDigest? = nil,
         computeScoreExecutor: CoordinatorClient.ComputeScoreExecutor? = nil,
         catalogEnvelopeRefresher: CoordinatorClient.CatalogEnvelopeRefresher? = nil,
         catalogEnvelopeRefreshMinimumInterval: TimeInterval = 300,
@@ -10037,7 +10069,7 @@ final class CoordinatorClientTests: XCTestCase {
             catalogModelSHA256: catalogModelSHA256,
             catalogArtifactIdentity: catalogArtifactIdentity,
             nativeMTPTupleDisableHandler: nativeMTPTupleDisableHandler,
-            nativeMTPServedBankDigest: { nil },
+            nativeMTPServedBankDigest: nativeMTPServedBankDigest ?? { nil },
             computeScoreExecutor: computeScoreExecutor,
             catalogEnvelopeRefresher: catalogEnvelopeRefresher,
             catalogEnvelopeRefreshMinimumInterval: catalogEnvelopeRefreshMinimumInterval,

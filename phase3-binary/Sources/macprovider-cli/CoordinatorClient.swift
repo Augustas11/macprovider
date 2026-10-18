@@ -755,6 +755,7 @@ actor CoordinatorClient {
     private var observedCoordinatorNativeMTPBankSHA256: String?
     private var nativeMTPServedBankPollTask: Task<Void, Never>?
     private var nativeMTPServedBankPollGeneration: UInt64 = 0
+    private var nativeMTPServedBankPollDelayOverrideNanoseconds: UInt64?
     /// The parked tuple the runtime discarded (revoked while parked); never
     /// parked again for a re-offer.
     private var nativeMTPDiscardedParkedOffer: NativeMTPPublishedTupleOffer?
@@ -7837,19 +7838,22 @@ actor CoordinatorClient {
         nativeMTPServedBankPollGeneration &+= 1
         let generation = nativeMTPServedBankPollGeneration
         let fetchDigest = nativeMTPServedBankDigest
+        let delayOverride = nativeMTPServedBankPollDelayOverrideNanoseconds
         nativeMTPServedBankPollTask = Task { [weak self] in
             var attempt = 0
             while !Task.isCancelled {
-                let delay = NativeMTPServedBankPoll.delaySeconds(attempt: attempt)
-                try? await Task.sleep(nanoseconds: delay * 1_000_000_000)
+                let delay = delayOverride ?? NativeMTPServedBankPoll.delaySeconds(attempt: attempt) * 1_000_000_000
+                try? await Task.sleep(nanoseconds: delay)
                 attempt += 1
                 guard !Task.isCancelled,
                       let client = self,
                       await client.nativeMTPTupleAwaitingReoffer() else {
                     break
                 }
-                if let digest = await fetchDigest() {
-                    await client.observeCoordinatorNativeMTPChallengeBank(sha256: digest)
+                // The fetch suspends: a poll stopped meanwhile (a new
+                // session, a discarded or restored tuple) must not observe.
+                if let digest = await fetchDigest(), !Task.isCancelled {
+                    await client.observeCoordinatorNativeMTPChallengeBank(sha256: digest, pollGeneration: generation)
                 }
             }
             await self?.nativeMTPServedBankPollEnded(generation)
@@ -7869,6 +7873,11 @@ actor CoordinatorClient {
 
     private func nativeMTPTupleAwaitingReoffer() -> Bool {
         nativeMTPTupleReofferGate.awaitingReoffer
+    }
+
+    private func observeCoordinatorNativeMTPChallengeBank(sha256: String, pollGeneration: UInt64) async {
+        guard pollGeneration == nativeMTPServedBankPollGeneration else { return }
+        await observeCoordinatorNativeMTPChallengeBank(sha256: sha256)
     }
 
     private func observeCoordinatorNativeMTPChallengeBank(sha256: String) async {
@@ -7916,6 +7925,18 @@ actor CoordinatorClient {
 
     func observeCoordinatorNativeMTPChallengeBankForTest(sha256: String) async {
         await observeCoordinatorNativeMTPChallengeBank(sha256: sha256)
+    }
+
+    func setNativeMTPServedBankPollDelayForTest(nanoseconds: UInt64) {
+        nativeMTPServedBankPollDelayOverrideNanoseconds = nanoseconds
+    }
+
+    func nativeMTPServedBankPollTaskForTest() -> Task<Void, Never>? {
+        nativeMTPServedBankPollTask
+    }
+
+    func observedCoordinatorNativeMTPBankSHA256ForTest() -> String? {
+        observedCoordinatorNativeMTPBankSHA256
     }
 
     func nativeMTPTupleAwaitingReofferForTest() -> Bool {

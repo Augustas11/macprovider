@@ -105,6 +105,80 @@ final class NativeMTPTupleReofferTests: XCTestCase {
         XCTAssertEqual(published, replacement)
     }
 
+    private func parkedRuntime(
+        _ revocations: NativeMTPRevocationStub
+    ) async -> (ModelRuntime, NativeMTPPublishedTupleOffer) {
+        let runtime = ModelRuntime(
+            modelID: "model-a",
+            maxBatch: 1,
+            nativeMTPMode: .auto,
+            warmSwapEnabled: false,
+            loader: { _ in throw APIError(status: 503, message: "unused", type: "server_error", code: "unused") }
+        )
+        let offer = Self.offer()
+        await runtime.installNativeMTPTupleOfferForTest(offer)
+        await runtime.setNativeMTPRevocationPollerForTest(revocations.poller)
+        await runtime.setNativeMTPRevokedSetReaderForTest(revocations.reader)
+        let parked = await runtime.parkNativeMTPTupleForReoffer(
+            admissionTupleSHA256: offer.nativeMTPAdmissionTupleSHA256,
+            servedSnapshotID: offer.servedSnapshotID,
+            targetGeneration: offer.targetGeneration
+        )
+        XCTAssertTrue(parked)
+        return (runtime, offer)
+    }
+
+    private func waitUntil(_ what: String, _ condition: () async -> Bool) async {
+        for _ in 0..<5_000 {
+            if await condition() { return }
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTFail("timed out waiting for \(what)")
+    }
+
+    // A revocation delivered by the watcher while the restore awaits the
+    // scheduler re-enable discards the tuple; the restore re-fences and never
+    // publishes it.
+    func testRevocationDuringRestoreEnableIsNeverRepublished() async {
+        let revocations = NativeMTPRevocationStub()
+        let (runtime, offer) = await parkedRuntime(revocations)
+        await waitUntil("the parked watcher") { revocations.watchers > 0 }
+        let interleaving = NativeMTPInterleaving()
+        await runtime.setNativeMTPTupleEnableHookForTest { await interleaving.pause() }
+
+        let restore = Task { await runtime.restoreParkedNativeMTPTuple(offer) }
+        await interleaving.waitPaused()
+        revocations.revoke()
+        await waitUntil("the parked tuple discarded") { await !runtime.nativeMTPTupleIsParkedForTest() }
+        interleaving.resume()
+        let outcome = await restore.value
+
+        XCTAssertNotEqual(outcome, .restored)
+        let published = await runtime.currentSnapshot().nativeMTPTupleOffer
+        XCTAssertNil(published, "a tuple revoked during the restore was republished")
+    }
+
+    // A revocation that only the final verified read sees (the feed changed
+    // while the fence was lifted) also refuses publication.
+    func testFinalRevocationReadBeforePublicationRefusesTheTuple() async {
+        let revocations = NativeMTPRevocationStub()
+        let (runtime, offer) = await parkedRuntime(revocations)
+        let interleaving = NativeMTPInterleaving()
+        await runtime.setNativeMTPTupleEnableHookForTest { await interleaving.pause() }
+
+        let restore = Task { await runtime.restoreParkedNativeMTPTuple(offer) }
+        await interleaving.waitPaused()
+        revocations.setRevokedSet([offer.nativeMTPAdmissionTupleSHA256])
+        interleaving.resume()
+        let outcome = await restore.value
+
+        XCTAssertEqual(outcome, .revoked)
+        let published = await runtime.currentSnapshot().nativeMTPTupleOffer
+        XCTAssertNil(published)
+        let parked = await runtime.nativeMTPTupleIsParkedForTest()
+        XCTAssertFalse(parked, "a revoked tuple is discarded")
+    }
+
     func testNothingIsDueUntilATupleIsParked() {
         var gate = NativeMTPTupleReofferGate()
         XCTAssertFalse(gate.awaitingReoffer)
