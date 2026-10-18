@@ -1079,37 +1079,30 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     snapshot: preSnapshot
                 )
                 do {
+                    // SPEC-001-R011: local work is admitted before it registers any
+                    // runtime state, so a queued local request holds nothing.
+                    if let localLease {
+                        let admission = await providerStatus.beginLocalRequest(localLease, isCancelled: { disconnect.isDisconnected })
+                        guard case .admitted(let admittedAt) = admission else {
+                            Self.writeLocalAdmissionRefusal(admission, writer: writer)
+                            return
+                        }
+                        startedAt = admittedAt
+                        providerRequestStarted = true
+                    }
                     let handle = try await modelRuntime.acquireRequestHandle(request)
                     CBTrace.log(auditRequestID, "http_handle")
                     defer {
                         Task { await modelRuntime.unregisterInFlight(handle.registrationID) }
                     }
-                    let admission: LocalAdmission
-                    if let localLease {
-                        admission = await providerStatus.beginLocalRequest(localLease, isCancelled: { disconnect.isDisconnected })
-                    } else if let admittedAt = await providerStatus.beginRequestIfAccepting() {
-                        admission = .admitted(admittedAt)
-                    } else {
-                        admission = .unavailable
-                    }
-                    guard case .admitted(let admittedAt) = admission else {
-                        switch admission {
-                        case .cancelled:
-                            writer.close()
-                        case .preempted:
-                            writer.writeAPIError(.localPreempted(running: false))
-                        case .admitted, .unavailable:
-                            writer.writeAPIError(APIError(
-                                status: 503,
-                                message: "Provider is paused or draining",
-                                type: "server_error",
-                                code: "provider_paused"
-                            ))
+                    if localLease == nil {
+                        guard let admittedAt = await providerStatus.beginRequestIfAccepting() else {
+                            Self.writeLocalAdmissionRefusal(.unavailable, writer: writer)
+                            return
                         }
-                        return
+                        startedAt = admittedAt
+                        providerRequestStarted = true
                     }
-                    startedAt = admittedAt
-                    providerRequestStarted = true
                     CBTrace.log(auditRequestID, "http_provider_admitted")
                     await idlePrewarmer?.cancelInflightPrewarm()
                     CBTrace.log(auditRequestID, "http_runtime_call")
@@ -1467,36 +1460,29 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             // buyer-visible token, not the SSE head.
             let emittedBuyerToken = StreamedFlag()
             do {
+                // SPEC-001-R011: local work is admitted before it registers any
+                // runtime state, so a queued local request holds nothing.
+                if let localLease {
+                    let admission = await providerStatus.beginLocalRequest(localLease, isCancelled: { disconnect.isDisconnected })
+                    guard case .admitted(let admittedAt) = admission else {
+                        Self.writeLocalAdmissionRefusal(admission, writer: writer)
+                        return
+                    }
+                    startedAt = admittedAt
+                    providerRequestStarted = true
+                }
                 let handle = try await modelRuntime.acquireRequestHandle(request)
                 defer {
                     Task { await modelRuntime.unregisterInFlight(handle.registrationID) }
                 }
-                let admission: LocalAdmission
-                if let localLease {
-                    admission = await providerStatus.beginLocalRequest(localLease, isCancelled: { disconnect.isDisconnected })
-                } else if let admittedAt = await providerStatus.beginRequestIfAccepting() {
-                    admission = .admitted(admittedAt)
-                } else {
-                    admission = .unavailable
-                }
-                guard case .admitted(let admittedAt) = admission else {
-                    switch admission {
-                    case .cancelled:
-                        writer.close()
-                    case .preempted:
-                        writer.writeAPIError(.localPreempted(running: false))
-                    case .admitted, .unavailable:
-                        writer.writeAPIError(APIError(
-                            status: 503,
-                            message: "Provider is paused or draining",
-                            type: "server_error",
-                            code: "provider_paused"
-                        ))
+                if localLease == nil {
+                    guard let admittedAt = await providerStatus.beginRequestIfAccepting() else {
+                        Self.writeLocalAdmissionRefusal(.unavailable, writer: writer)
+                        return
                     }
-                    return
+                    startedAt = admittedAt
+                    providerRequestStarted = true
                 }
-                startedAt = admittedAt
-                providerRequestStarted = true
                 await idlePrewarmer?.cancelInflightPrewarm()
                 try await modelRuntime.preflight(request, with: handle)
 
@@ -1746,6 +1732,23 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             }
         }
         localLease?.onPreempt { task.cancel() }
+    }
+
+    /// The terminal answer for a request that was not admitted.
+    fileprivate static func writeLocalAdmissionRefusal(_ admission: LocalAdmission, writer: ResponseWriter) {
+        switch admission {
+        case .cancelled:
+            writer.close()
+        case .preempted:
+            writer.writeAPIError(.localPreempted(running: false))
+        case .admitted, .unavailable:
+            writer.writeAPIError(APIError(
+                status: 503,
+                message: "Provider is paused or draining",
+                type: "server_error",
+                code: "provider_paused"
+            ))
+        }
     }
 
     static func modelIDForValidation(warmSwapEnabled: Bool, bootModelID: String?, runtimeSnapshot: RuntimeSnapshot) -> String? {

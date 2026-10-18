@@ -1029,8 +1029,7 @@ actor ContinuousBatchingSelfCheckDriver {
     private static func parseDate(_ value: String) -> Date? { ISO8601DateFormatter().date(from: value) }
 
     private func isIdle() async -> Bool {
-        let snapshot = await providerStatus.snapshot()
-        guard snapshot.requestsInFlight == 0 else { return false }
+        guard await !providerStatus.hasInferenceWork() else { return false }
         return await providerStatus.secondsSinceLastActivityOrPrewarm() >= idleSeconds
     }
 
@@ -1049,7 +1048,7 @@ actor ContinuousBatchingSelfCheckDriver {
             group.addTask { try await body() }
             group.addTask {
                 while !Task.isCancelled {
-                    if await providerStatus.snapshot().requestsInFlight > 0 { throw StepError.yielded }
+                    if await providerStatus.hasInferenceWork() { throw StepError.yielded }
                     try await Task.sleep(nanoseconds: 100_000_000)
                 }
                 return nil

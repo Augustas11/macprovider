@@ -20,6 +20,8 @@ struct LocalPriorityPolicy: Sendable, Equatable {
     static let defaultPreemptionWindowMS = 0
     static let maximumPreemptionWindowMS = 2_000
     static let defaultQueueWaitMS = 30_000
+    /// Local requests that may wait for a slot at once; more are declined.
+    static let maximumQueuedLocalRequests = 16
 
     var reservedBuyerSlots = LocalPriorityPolicy.defaultReservedBuyerSlots
     var preemptionWindowMS = LocalPriorityPolicy.defaultPreemptionWindowMS

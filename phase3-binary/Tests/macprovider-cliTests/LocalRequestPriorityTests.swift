@@ -139,6 +139,69 @@ final class LocalRequestPriorityTests: XCTestCase {
         XCTAssertLessThan(elapsedMS, 1_000, "preemption must fire at the window, not later")
     }
 
+    func testBuyerThatFinishesInsideTheWindowLeavesLocalWorkAlone() async throws {
+        let status = makeStatus(slots: 1, preemptionWindowMS: 200)
+        let lease = LocalPreemptionLease()
+        guard case .admitted = await status.beginLocalRequest(lease) else { return XCTFail("local not admitted") }
+        let buyerStart = await status.beginRequest()
+        await status.finishRequest(startedAt: buyerStart, completion: nil, failed: false)
+        try await Task.sleep(nanoseconds: 400_000_000)
+        XCTAssertFalse(lease.isPreempted, "the buyer no longer needs the slot at the window's end")
+    }
+
+    func testFinishedLocalRequestIsNeverPreemptedLater() async throws {
+        let status = makeStatus(slots: 1, preemptionWindowMS: 100)
+        let lease = LocalPreemptionLease()
+        guard case .admitted = await status.beginLocalRequest(lease) else { return XCTFail("local not admitted") }
+        _ = await status.beginRequest()
+        await status.finishLocalRequest(lease, completion: completion(prompt: 1, output: 1), failed: false)
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertFalse(lease.isPreempted)
+        let usage = await status.currentLocalUsage()
+        XCTAssertEqual(usage.requestsCompleted, 1)
+        XCTAssertEqual(usage.requestsPreempted, 0)
+    }
+
+    func testLocalQueueIsBounded() async throws {
+        let status = makeStatus(slots: 1, queueWaitMS: 1_000)
+        _ = await status.beginRequest()
+        var waiters: [Task<LocalAdmission, Never>] = []
+        for _ in 0..<LocalPriorityPolicy.maximumQueuedLocalRequests {
+            waiters.append(Task { await status.beginLocalRequest(LocalPreemptionLease()) })
+        }
+        try await Task.sleep(nanoseconds: 200_000_000)
+        let started = DispatchTime.now().uptimeNanoseconds
+        let overflow = await status.beginLocalRequest(LocalPreemptionLease())
+        XCTAssertEqual(overflow, .preempted)
+        XCTAssertLessThan(DispatchTime.now().uptimeNanoseconds - started, 300_000_000, "a full queue declines at once")
+        for waiter in waiters {
+            let result = await waiter.value
+            XCTAssertEqual(result, .preempted)
+        }
+        let usage = await status.currentLocalUsage()
+        XCTAssertEqual(usage.requestsDeclined, LocalPriorityPolicy.maximumQueuedLocalRequests + 1)
+    }
+
+    func testProcessDrainPreemptsLocalWorkButOperatorPauseDrainDoesNot() async throws {
+        let status = makeStatus(slots: 2)
+        let lease = LocalPreemptionLease()
+        guard case .admitted = await status.beginLocalRequest(lease) else { return XCTFail("local not admitted") }
+        let pauseDrained = await status.waitUntilDrained(timeoutSeconds: 1)
+        XCTAssertTrue(pauseDrained)
+        XCTAssertFalse(lease.isPreempted, "an operator pause keeps local work running")
+        let hasWork = await status.hasInferenceWork()
+        XCTAssertTrue(hasWork, "internal work yields to local work")
+
+        lease.onPreempt {
+            Task { await status.finishLocalRequest(lease, completion: nil, failed: false) }
+        }
+        let drained = await status.waitUntilDrained(timeoutSeconds: 2, preemptingLocal: true)
+        XCTAssertTrue(drained)
+        XCTAssertTrue(lease.isPreempted)
+        let idle = await status.hasInferenceWork()
+        XCTAssertFalse(idle)
+    }
+
     func testOperatorPauseLetsTheProviderUseAllSlotsLocally() async throws {
         let status = makeStatus(slots: 2)
         await status.setOperatorPauseFence(true)

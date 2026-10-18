@@ -6666,8 +6666,12 @@ maxTokens: 1,
         let templateSupportsPreserveThinking = handle.snapshot.templateSupportsPreserveThinking
         let selectionModelID = toolSelectionModelID(handle.snapshot)
         try await inferenceGate.withPermit {
+            // A cancelled request (client gone, or local work preempted by a
+            // buyer under SPEC-001-R011) releases the gate without preparing.
+            try Task.checkCancellation()
             try handle.drainCancelled.check()
             return try await container.perform { context in
+                try Task.checkCancellation()
                 try handle.drainCancelled.check()
                 let (lmInput, _) = try await Self.preparedRequestInput(
                     for: request,

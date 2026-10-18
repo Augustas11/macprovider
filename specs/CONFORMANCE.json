@@ -13680,7 +13680,8 @@
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/LocalRequestPriorityTests.swift:final class LocalRequestPriorityTests",
-        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:func testHeartbeatExcludesLocalRequests"
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:func testHeartbeatExcludesLocalRequests",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:func testBuyerPreemptsLocalRowAndTakesItsSlot"
       ],
       "journeys": [],
       "evidence": [],
@@ -13688,7 +13689,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2054",
-        "rationale": "Local-use accounting separation and customers-first admission are covered by fixture runtimes shaped like the serial and continuous-batching gates. Released-provider acceptance with the in-app Chat client remains pending."
+        "rationale": "Local-use accounting separation and customers-first admission are covered by fixture runtimes shaped like the serial and continuous-batching gates and by the real continuous-batching scheduler. Released-provider acceptance with the in-app Chat client remains pending."
       }
     }
   ]

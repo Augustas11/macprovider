@@ -6387,7 +6387,7 @@ actor CoordinatorClient {
         try? await sendStateUpdate(state: .draining, reason: reason)
         try? await sendDrainStatus(phase: "starting")
         try? await sendDrainStatus(phase: "in_progress")
-        let drained = await providerStatus.waitUntilDrained(timeoutSeconds: drainTimeoutSeconds)
+        let drained = await providerStatus.waitUntilDrained(timeoutSeconds: drainTimeoutSeconds, preemptingLocal: true)
         if !drained {
             await inferenceRelay?.cancelAll()
             _ = await inferenceRelay?.waitUntilIdle(timeoutSeconds: 5)
@@ -6422,7 +6422,7 @@ actor CoordinatorClient {
         try? await sendStateUpdate(state: .draining, reason: reason)
         try? await sendDrainStatus(phase: "starting")
         try? await sendDrainStatus(phase: "in_progress")
-        let drained = await providerStatus.waitUntilDrained(timeoutSeconds: drainTimeoutSeconds)
+        let drained = await providerStatus.waitUntilDrained(timeoutSeconds: drainTimeoutSeconds, preemptingLocal: true)
         if !drained {
             await inferenceRelay?.cancelAll()
             _ = await inferenceRelay?.waitUntilIdle(timeoutSeconds: 5)
@@ -7197,7 +7197,7 @@ actor CoordinatorClient {
         sideEffect?.fired = true
         try await sendDrainStatus(phase: "starting")
         try await sendDrainStatus(phase: "in_progress")
-        let softDrained = await providerStatus.waitUntilDrained(timeoutSeconds: 120)
+        let softDrained = await providerStatus.waitUntilDrained(timeoutSeconds: 120, preemptingLocal: true)
         if softDrained {
             try await sendDrainStatus(phase: "complete")
             return true
@@ -7214,7 +7214,7 @@ actor CoordinatorClient {
             inflightRequests: snapshot.requestsInFlight,
             extraMetadata: Self.downgradeDirectionMetadata(target: target)
         ))
-        let hardDrained = await providerStatus.waitUntilDrained(timeoutSeconds: 30)
+        let hardDrained = await providerStatus.waitUntilDrained(timeoutSeconds: 30, preemptingLocal: true)
         if hardDrained {
             try await sendDrainStatus(phase: "complete")
             return true
@@ -7229,7 +7229,7 @@ actor CoordinatorClient {
         heartbeatWatchdogTask?.cancel()
         heartbeatWatchdogTask = nil
         await providerStatus.setState(.draining, reason: "autoupdate_to_\(target)")
-        let softDrained = await providerStatus.waitUntilDrained(timeoutSeconds: 120)
+        let softDrained = await providerStatus.waitUntilDrained(timeoutSeconds: 120, preemptingLocal: true)
         if softDrained {
             return true
         }
@@ -7244,7 +7244,7 @@ actor CoordinatorClient {
             attempt: 1,
             inflightRequests: snapshot.requestsInFlight
         ))
-        let hardDrained = await providerStatus.waitUntilDrained(timeoutSeconds: 30)
+        let hardDrained = await providerStatus.waitUntilDrained(timeoutSeconds: 30, preemptingLocal: true)
         if !hardDrained {
             await setReadyUnlessOperatorPaused(reason: "autoupdate_drain_timeout")
         }

@@ -2252,8 +2252,10 @@ always network work.
 *Accounting.* Local work MUST NOT be counted in the heartbeat
 `requests_served_since_last`, latency, throughput, `slots_free`, request,
 token or error totals, persisted request statistics, or any coordinator frame.
-It MUST NOT produce a v0.4 settlement receipt or other billing evidence, and
-it earns nothing. `GET /v1/status` MUST report local work only under a
+It MUST NOT produce a v0.4 settlement receipt, and it earns nothing. A
+SPEC-015 v0.3 provenance receipt on a local response is unchanged; it carries
+no coordinator settlement binding, cannot be settled, and is not billing,
+earnings or served-work evidence. `GET /v1/status` MUST report local work only under a
 separate `local_usage` object with `billable:false`, `heartbeat_counted:false`,
 `priority:"customers_first"`, `requests_in_flight`, `requests_total`,
 `requests_completed`, `requests_failed`, `requests_preempted`,
@@ -2272,20 +2274,32 @@ engine path:
    (`local_reserved_buyer_slots`, default 1, capped at *S* − 1). Local work
    MUST also not take a slot that network work holds. With *S* = 1, *R* = 0.
 2. Local work that does not fit MUST wait behind network work and MUST NOT
-   delay a network request's admission. A local request still waiting after
-   30 seconds MUST fail with HTTP 503 `local_preempted` (`retryable:true`)
+   delay a network request's admission. It is admitted before it registers any
+   runtime state, so a waiting local request holds no runtime capacity. At
+   most 16 local requests wait at once; another, or one still waiting after
+   30 seconds, MUST fail with HTTP 503 `local_preempted` (`retryable:true`)
    without running.
 3. When a network request is admitted while network plus local work would
    exceed *S*, the provider MUST preempt the most recently admitted local
    requests, one per excess slot, no later than the preemption window
    (`local_preemption_window_ms`, default 0, at most 2,000 ms) after that
-   admission. Preemption cancels the local request through the existing
-   cancellation path. A local client still connected receives HTTP 503
-   `local_preempted`; a stream that already started receives the same error
-   as a terminal SSE event followed by `[DONE]` and never a success terminal.
-4. An operator pause fences network work only. While paused, local work MAY use
+   admission. With a nonzero window the provider MUST re-check at the window's
+   end and preempt only if network work still needs the slot. Preemption
+   cancels the local request through the existing cancellation path (the
+   request's cancellation predicate and task), including while it waits for or
+   holds the inference gate during prompt preparation. A local client still
+   connected receives HTTP 503 `local_preempted`; a stream that already
+   started receives the same error as a terminal SSE event followed by
+   `[DONE]` and never a success terminal. A local request whose generation
+   already completed when preemption takes effect completes normally.
+4. An operator pause fences network work only: its drain waits for network
+   work and leaves local work running, and while paused local work MAY use
    every slot (*R* = 0). A draining provider or one with no loaded model MUST
-   reject local work with the same 503 `provider_paused` a buyer gets.
+   reject new local work with the same 503 `provider_paused` a buyer gets.
+   Process-exit and update drains MUST preempt local work and wait for it.
+5. Internal work that yields to network requests (idle prewarm, the
+   continuous-batching self-check) MUST also yield to local work, without
+   counting local work in any buyer-facing figure.
 
 Contract tests MUST cover counter separation including the heartbeat,
 reservation, queueing, preemption and the preemption window on serial-shaped
