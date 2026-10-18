@@ -1700,6 +1700,48 @@ run_rc 0 "catalog status after the owed (e) is recorded" scripts/ops/catalog-act
 if [ "$(state_of buyer_serving_e2e)" != owed ] && [ "$(fact_of buyer_serving_e2e_owed)" = None ]; then ok; else bad "recorded owed (e) still open: $(state_of buyer_serving_e2e) $(fact_of buyer_serving_e2e_owed)"; fi
 rm -rf "$tmp/svc/autotune-release.json" "$OWED_DIR" "$tmp/state/catalog-other" "$CSCOPE"/preflight-*.json
 
+# ==== catalog-activate: canary bank moves with the release (SPEC-031-R033) =====
+# A coordinator that reloads its canary bank with the release needs no restart:
+# the step checks the bank it reports. One that predates it is restarted here.
+cp "$tmp/svc/healthz.json" "$tmp/saved-healthz.json"
+VERIFIED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+printf '{"release_id":"%s","status":"live_verified","feeds":{"x":{"verified_at":"%s"}}}' "$R" "$VERIFIED" > "$tmp/svc/autotune-release.json"
+# canary_health RELOADS BANK_RELEASE UPTIME
+canary_health() {
+  python3 - "$tmp/svc/healthz.json" "$@" <<'PYC'
+import json, sys
+path, reloads, bank, uptime = sys.argv[1:5]
+d = {"status": "ok", "version": "v9.0.0", "uptime_s": int(uptime)}
+if reloads == "true":
+    d["native_mtp_canary_bank_reloads"] = True
+if bank:
+    d["native_mtp_canary_bank_release_id"] = bank
+json.dump(d, open(path, "w"))
+PYC
+}
+canary_health true "$R" 100000
+run_rc 0 "catalog status: canary bank reloaded with the release" scripts/ops/catalog-activate.sh status
+if [ "$(state_of canary_bank)" = "done" ] && [ "$(fact_of coordinator_restart_needed_for_bank)" = False ]; then ok; else bad "reloaded canary bank: $(state_of canary_bank) restart=$(fact_of coordinator_restart_needed_for_bank)"; fi
+case "$(next_field id)" in canary_bank) bad "a reloaded canary bank still offers a step: $(next_field title)" ;; *) ok ;; esac
+canary_health true "older-release" 100000
+run_rc 0 "catalog status: canary holds another release's bank" scripts/ops/catalog-activate.sh status
+if [ "$(state_of canary_bank)" = blocked ]; then ok; else bad "stale canary bank not blocked: $(state_of canary_bank)"; fi
+if [ "$(next_field id)" = canary_bank ]; then
+  case "$(next_field kind):$(next_field reason)" in blocked:*"a restart fixes neither"*) ok ;; *) bad "stale bank next: $(next_field kind) $(next_field reason)" ;; esac
+  case "$(next_field command)" in *systemctl*) bad "a reload-capable coordinator was offered a restart" ;; *) ok ;; esac
+fi
+canary_health false "" 100000
+run_rc 0 "catalog status: boot-only canary bank, release loaded by SIGHUP" scripts/ops/catalog-activate.sh status
+if [ "$(state_of canary_bank)" = pending ] && [ "$(fact_of coordinator_restart_needed_for_bank)" = True ]; then ok; else bad "boot-only bank: $(state_of canary_bank) restart=$(fact_of coordinator_restart_needed_for_bank)"; fi
+if [ "$(next_field id)" = canary_bank ]; then
+  case "$(next_field kind):$(next_field command)" in mutate:*"systemctl restart macprovider-coordinator"*) ok ;; *) bad "boot-only bank next: $(next_field kind) $(next_field command)" ;; esac
+fi
+canary_health false "" 10
+run_rc 0 "catalog status: boot-only canary bank, booted after the release" scripts/ops/catalog-activate.sh status
+if [ "$(state_of canary_bank)" = "done" ]; then ok; else bad "booted-after bank: $(state_of canary_bank)"; fi
+cp "$tmp/saved-healthz.json" "$tmp/svc/healthz.json"
+rm -f "$tmp/svc/autotune-release.json" "$tmp/saved-healthz.json"
+
 # ==== pearl-runtime updater-bundle ==============================================
 UBROOT="$tmp/ubroot"
 mkdir -p "$UBROOT"

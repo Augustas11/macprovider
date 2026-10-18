@@ -128,6 +128,33 @@ no production config load may make the tuple selectable before that promotion.
    the local self-test. `GET /v1/status` must show `native_mtp.enabled=true`
    and `mode` of `eligible` or `active`.
 
+## Activating a later native-bound release
+
+Once the keys above are in `coordinator.yaml`, a new native-bound catalog
+release goes live through `scripts/ops/catalog-activate.sh` with one SIGHUP
+and no coordinator restart (SPEC-031-R033 v0.3.9):
+
+- The SIGHUP reload verifies the release's served self-test bank under the
+  `pool.native_mtp_canary` keys and installs it as the canary bank before the
+  release and its feeds go live. If the canary cannot verify the bank, the
+  reload refuses the whole release and the prior release, feeds and bank stay
+  live. The coordinator journal then says `autotune feed reload rejected;
+  keeping prior catalog, served feeds and native MTP canary bank`.
+- The canary keeps the bank it replaced. A provider still on the previous
+  release is admitted with that bank while that release is retained as
+  compatible-previous.
+- Step 7 `canary_bank` reads `/healthz`. `native_mtp_canary_bank_reloads:
+  true` with `native_mtp_canary_bank_release_id` equal to the release means
+  done. A coordinator built before this change does not report the field.
+  For one of those, step 7 is the restart that loads the bank, and the
+  activation is not done until the restart runs.
+- A provider whose offer was rejected with `bank_mismatch` (for example
+  against a coordinator built before this change) does not need a model
+  reload. It offers its tuple again on its next coordinator session, or once
+  the coordinator serves the bank it qualified on (SPEC-048-R016 v0.1.48).
+  `event=native_mtp_tuple_offer action=parked` and `action=restored` in the
+  provider log show this.
+
 ## Adding a second model to the admission set
 
 A sidecar with two or more model entries uses the v2 projection manifest
