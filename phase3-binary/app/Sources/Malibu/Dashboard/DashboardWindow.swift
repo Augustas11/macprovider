@@ -210,7 +210,7 @@ struct DashboardView: View {
                 Text(MalibuSection.dashboard.title)
                     .font(.title2.weight(.semibold))
                 if let subtitle = AgentSnapshotPresenter.dashboardSubtitle(agent.snapshot) {
-                    Text(subtitle)
+                    Text(ShellText.display(subtitle))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(2)

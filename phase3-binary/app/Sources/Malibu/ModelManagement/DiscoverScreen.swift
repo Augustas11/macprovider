@@ -247,7 +247,7 @@ struct DiscoverScreen: View {
         // Pinned above the list, and only for a signed catalog model, so a
         // recommendation's rates never appear for a non-catalog model.
         if let recommendation = store.recommendation,
-           DiscoverPresentation.showsRecommendation(recommendation.displayModelID, rows: store.rows) {
+           DiscoverPresentation.showsRecommendation(recommendation.displayModelID, rows: visible) {
             recommendationCallout(recommendation)
                 .padding(12)
             Divider()

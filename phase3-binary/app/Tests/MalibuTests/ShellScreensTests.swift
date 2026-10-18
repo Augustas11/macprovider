@@ -218,6 +218,13 @@ final class ShellScreensTests: XCTestCase {
         XCTAssertFalse(DiscoverPresentation.showsRecommendation("local-candidate", rows: [catalog, byom]),
                        "a recommendation's rates never show for a non-catalog model")
         XCTAssertFalse(DiscoverPresentation.showsRecommendation(nil, rows: [catalog]))
+
+        // The callout follows the list's search and fit filter (SPEC-025-R006).
+        let searchedAway = DiscoverPresentation.visibleRows([catalog], search: "zzz", fitsOnly: false, sort: .catalog)
+        XCTAssertFalse(DiscoverPresentation.showsRecommendation("catalog-model", rows: searchedAway))
+        let tooBig = try Self.row(key: "too-big", fit: "does_not_fit", weightsLocal: true, estimatedGB: 400)
+        let fitting = DiscoverPresentation.visibleRows([catalog, tooBig], search: "", fitsOnly: true, sort: .catalog)
+        XCTAssertFalse(DiscoverPresentation.showsRecommendation("too-big", rows: fitting))
     }
 
     func testDiscoverFitFilterAndSortsKeepCatalogOrderAsTieBreak() throws {

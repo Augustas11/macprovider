@@ -1752,14 +1752,31 @@ private final class ModelCLIOutputLineBuffer: @unchecked Sendable {
     }
 }
 
-private final class ModelCLIProcessCancellation: @unchecked Sendable {
+final class ModelCLIProcessCancellation: @unchecked Sendable {
     private let lock = NSLock()
     private weak var process: Process?
+    /// One-shot runners latch a cancel that arrives before the process is
+    /// installed, so a late launch is refused instead of outliving its deadline.
+    private let latches: Bool
+    private var cancelled = false
 
-    func install(_ process: Process) {
+    init(latches: Bool = false) {
+        self.latches = latches
+    }
+
+    /// False when a latched cancel already arrived; the caller must not launch.
+    func install(_ process: Process) -> Bool {
         lock.lock()
+        defer { lock.unlock() }
+        guard !cancelled else { return false }
         self.process = process
-        lock.unlock()
+        return true
+    }
+
+    var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
     }
 
     func clear(_ process: Process) {
@@ -1770,6 +1787,7 @@ private final class ModelCLIProcessCancellation: @unchecked Sendable {
 
     func cancel() {
         lock.lock()
+        if latches { cancelled = true }
         let process = self.process
         lock.unlock()
         if process?.isRunning == true { process?.terminate() }
@@ -1778,6 +1796,7 @@ private final class ModelCLIProcessCancellation: @unchecked Sendable {
     /// Last resort after `cancel()` when the process ignores SIGTERM.
     func kill() {
         lock.lock()
+        if latches { cancelled = true }
         let process = self.process
         lock.unlock()
         if let process, process.isRunning {
@@ -1803,13 +1822,16 @@ final class MalibuModelCLI: MalibuModelCLIRunning {
     }
 
     static let shared = MalibuModelCLI()
-    private let cancellation = ModelCLIProcessCancellation()
+    private let cancellation: ModelCLIProcessCancellation
     /// When set, a process whose stdout or stderr exceeds this many bytes is
     /// killed, so an oversized reply cannot grow memory without bound.
     private let maxOutputBytes: Int?
 
-    init(maxOutputBytes: Int? = nil) {
+    /// `oneShot` runners serve a single command: a cancel that lands before
+    /// the launch stops it from launching at all.
+    init(maxOutputBytes: Int? = nil, oneShot: Bool = false) {
         self.maxOutputBytes = maxOutputBytes
+        self.cancellation = ModelCLIProcessCancellation(latches: oneShot)
     }
 
     func cancelCurrentOperation() {
@@ -1834,7 +1856,10 @@ final class MalibuModelCLI: MalibuModelCLIRunning {
         return try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: priority.dispatchQoS).async {
                 let process = Process()
-                cancellation.install(process)
+                guard cancellation.install(process) else {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
                 defer { cancellation.clear(process) }
                 let stdoutPipe = Pipe()
                 let stderrPipe = Pipe()
@@ -1881,6 +1906,8 @@ final class MalibuModelCLI: MalibuModelCLIRunning {
 
                 do {
                     try process.run()
+                    // A latched cancel that raced the launch still stops it.
+                    if cancellation.isCancelled { cancellation.kill() }
                     if let stdinData, let stdinPipe {
                         stdinPipe.fileHandleForWriting.write(stdinData)
                         stdinPipe.fileHandleForWriting.closeFile()
@@ -2193,7 +2220,7 @@ final class ModelManagementStore: ObservableObject {
 
     init(
         cli: any MalibuModelCLIRunning = MalibuModelCLI.shared,
-        makeBrowseCLI: @escaping () -> any MalibuModelCLIRunning = { MalibuModelCLI(maxOutputBytes: 1_048_576) },
+        makeBrowseCLI: @escaping () -> any MalibuModelCLIRunning = { MalibuModelCLI(maxOutputBytes: 1_048_576, oneShot: true) },
         paths: ProviderPaths = .current,
         defaults: UserDefaults = .standard,
         powerMonitor: MalibuPowerMonitor = MalibuPowerMonitor()
@@ -2628,11 +2655,14 @@ final class ModelManagementStore: ObservableObject {
             self.currentModelID = configuredModel ?? rows.first(where: { $0.category == .current })?.id
             self.listState = rows.contains(where: { $0.action != .none }) ? .ready : .viewOnly
             self.warmSwapAvailable = readySwitchCapabilityAvailable
-            self.operation = .idle
             self.catalogRefreshFailed = false
             // Install the freshness deadline before any further await.
             scheduleCatalogProjectionExpiry(document)
+            // The refresh stays a blocking operation until the pool-binding
+            // read finishes, so a status-driven refresh or a model action
+            // cannot overlap it on the shared CLI runner.
             await refreshPoolBindings()
+            if operation == .loadingList { operation = .idle }
             // The projection may have expired or been replaced meanwhile; its
             // own status line then stands.
             guard catalogProjectionProcessLaunchID == document.source.processLaunchID,
@@ -2724,10 +2754,26 @@ final class ModelManagementStore: ObservableObject {
         }
     }
 
+    /// A row from a confirmation sheet authorizes an action only while the
+    /// projection on screen still carries it unchanged; a row from an expired
+    /// or replaced projection does not (SPEC-044-R003, R006).
+    private func rowIsInCurrentProjection(_ row: MalibuModelRow) -> Bool {
+        rows.contains(row)
+    }
+
+    /// `rowIsInCurrentProjection`, telling the provider why nothing started.
+    private func rowStillCurrent(_ row: MalibuModelRow) -> Bool {
+        guard rowIsInCurrentProjection(row) else {
+            statusLine = String(localized: "The model catalog changed since this was opened, so nothing started. Review the updated row and try again.", comment: "Stale model row action refused")
+            return false
+        }
+        return true
+    }
+
     /// Returns false when the switch did not start (controls not ready).
     @discardableResult
     func switchTo(_ row: MalibuModelRow, operationName: String = "switch") async -> Bool {
-        guard row.action == .switchModel, canPerformModelAction else { return false }
+        guard row.action == .switchModel, rowIsInCurrentProjection(row), canPerformModelAction else { return false }
         let from = currentModelID
         activeSwitchTransactionID = nil
         terminalSwitchTransactionID = nil
@@ -2774,6 +2820,7 @@ final class ModelManagementStore: ObservableObject {
     func activate(_ row: MalibuModelRow) async {
         guard row.action == .evaluate,
               row.evaluateTransaction != nil,
+              rowStillCurrent(row),
               canPerformModelAction else { return }
         let from = currentModelID
         operation = .loadingList
@@ -2864,7 +2911,7 @@ final class ModelManagementStore: ObservableObject {
     /// #1816: withdraw a coordinator-backed BYOM offer
     /// (`models admission withdraw --yes`), then refresh.
     func withdraw(_ row: MalibuModelRow) async {
-        guard row.canWithdraw, canPerformBYOMAction else { return }
+        guard row.canWithdraw, rowStillCurrent(row), canPerformBYOMAction else { return }
         operation = .loadingList
         statusLine = String(localized: "Withdrawing the coordinator offer…", comment: "BYOM withdraw status")
         do {
@@ -2888,7 +2935,7 @@ final class ModelManagementStore: ObservableObject {
     /// creator signs into the pool manifest.
     func propose(_ row: MalibuModelRow, poolID rawPoolID: String) async {
         let poolID = rawPoolID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard row.canProposeToPool, canPerformBYOMAction else { return }
+        guard row.canProposeToPool, rowStillCurrent(row), canPerformBYOMAction else { return }
         guard poolID.range(of: MalibuBYOMPoolBinding.poolIDPattern, options: .regularExpression) != nil else {
             statusLine = String(localized: "Enter the 22-character Trusted Pool id from the pool creator.", comment: "BYOM propose invalid pool id")
             return

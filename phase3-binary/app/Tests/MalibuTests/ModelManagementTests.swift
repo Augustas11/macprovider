@@ -2586,6 +2586,19 @@ final class ModelManagementTests: XCTestCase {
         XCTAssertTrue(store.rows.isEmpty, "browse results never become catalog rows")
     }
 
+    func testOneShotRunnerRefusesALaunchAfterAnEarlyCancel() {
+        let oneShot = ModelCLIProcessCancellation(latches: true)
+        oneShot.cancel()
+        XCTAssertTrue(oneShot.isCancelled)
+        XCTAssertFalse(oneShot.install(Process()), "a browse cancelled before launch never launches")
+
+        // The shared runner serves many commands, so an idle cancel is not latched.
+        let shared = ModelCLIProcessCancellation()
+        shared.cancel()
+        XCTAssertFalse(shared.isCancelled)
+        XCTAssertTrue(shared.install(Process()))
+    }
+
     @MainActor
     func testBrowseOtherMLXModelsNeedsTheCatalogJSONCapabilityAndTimesOut() async throws {
         let hanging = HangingModelCLI()

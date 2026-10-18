@@ -9809,7 +9809,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1257",
-        "rationale": "SPEC-044 v0.2.10 freezes R005 as the sole exact total row-order tuple and rejects duplicate canonical row identities. The existing localized display-name tie-break does not implement that tuple. The named future tests must prove valid local-default and coordinator-backed non-trusted preparation rows remain visible in Needs preparation, reserved offer_rejected rows remain non-actionable, and every locale and input order yields the same canonical order; implementation and release evidence remain pending."
+        "rationale": "SPEC-044 v0.2.10 freezes R005 as the sole exact total row-order tuple and rejects duplicate canonical row identities. Malibu now sorts by that tuple with the canonical identity bytes as the final tie-break (sortedForDisplay, #2054); state stays pending until the release evidence below exists. The named future tests must prove valid local-default and coordinator-backed non-trusted preparation rows remain visible in Needs preparation, reserved offer_rejected rows remain non-actionable, and every locale and input order yields the same canonical order; implementation and release evidence remain pending."
       }
     },
     {

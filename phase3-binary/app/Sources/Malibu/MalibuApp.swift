@@ -19,7 +19,7 @@ struct MalibuApp: App {
                         .keyboardShortcut(",", modifiers: .command)
                 }
                 CommandGroup(replacing: .newItem) {
-                    Button("Open Dashboard") { AppDelegate.current?.presentDashboard() }
+                    Button("Open Dashboard") { AppDelegate.current?.presentDashboard(section: .dashboard) }
                         .keyboardShortcut("d", modifiers: .command)
                 }
             }
@@ -87,7 +87,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// dashboard instead of doing nothing.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag {
-            presentDashboard()
+            presentDashboard(section: .dashboard)
         }
         return true
     }
@@ -142,7 +142,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func handle(_ action: MenuBarController.Action) {
         switch action {
-        case .openDashboard: presentDashboard()
+        case .openDashboard: presentDashboard(section: .dashboard)
         case .openOnboarding: presentOnboarding()
         case .pause: Task { await agent.pause() }
         case .resume: Task { await agent.resume() }
