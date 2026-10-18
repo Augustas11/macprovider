@@ -1,9 +1,63 @@
 import Foundation
 
-/// Bounded, fail-closed tool selection. This validates complete output; it does
-/// not claim that the decoder constrains logits or guarantees a successful call.
+/// Bounded, fail-closed tool selection. Guaranteed modes start generation
+/// inside a call (SPEC-018 §3.11 call prefill) and validate the complete
+/// output; the decoder does not constrain logits.
 public enum ToolSelectionPolicy {
     public static let supportedNativeModel = "mlx-community/Qwen3.6-35B-A3B-4bit"
+
+    /// How a chat template opens a tool call.
+    public enum CallFormat: Equatable, Sendable {
+        /// `<tool_call>\n<function=NAME>\n<parameter=KEY>...` (Qwen3.6).
+        case functionXML
+        /// `<tool_call>\n{"name": "NAME", "arguments": {...}}`.
+        case jsonEnvelope
+    }
+
+    /// Per-model guaranteed-call profile. `generationPromptSuffix` is the
+    /// exact text the template's generation prompt ends with when it has
+    /// closed any think block; the call prefill is placed only after it.
+    public struct GuaranteedCallProfile: Equatable, Sendable {
+        public let format: CallFormat
+        public let generationPromptSuffix: String
+
+        public init(format: CallFormat, generationPromptSuffix: String) {
+            self.format = format
+            self.generationPromptSuffix = generationPromptSuffix
+        }
+
+        /// The assistant-turn prefill for a guaranteed selection: `required`
+        /// opens the envelope, a named choice also opens the selected call.
+        /// Names are already restricted to `[A-Za-z0-9_-]` by `schemas`.
+        public func prefill(for selection: Selection) -> String? {
+            switch selection {
+            case .required:
+                return "<tool_call>\n"
+            case .named(let name):
+                switch format {
+                case .functionXML: return "<tool_call>\n<function=\(name)>\n"
+                case .jsonEnvelope: return "<tool_call>\n{\"name\": \"\(name)\", \"arguments\": "
+                }
+            case .auto, .none:
+                return nil
+            }
+        }
+    }
+
+    /// Exact loaded identities that support `required`/named, with the
+    /// template facts the call prefill needs. A model without an entry gets
+    /// neither guaranteed mode.
+    public static let guaranteedCallProfiles: [String: GuaranteedCallProfile] = [
+        supportedNativeModel: GuaranteedCallProfile(
+            format: .functionXML,
+            generationPromptSuffix: "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        ),
+    ]
+
+    public static func guaranteedCallProfile(modelID: String?) -> GuaranteedCallProfile? {
+        modelID.flatMap { guaranteedCallProfiles[$0] }
+    }
+
     public static let maxCalls = 128
     public static let maxGuaranteedTokens = 16_384
     public static let maxSafeNumericMagnitude = 9_007_199_254_740_991
@@ -36,13 +90,13 @@ public enum ToolSelectionPolicy {
 
     public static func modes(modelID: String?, runtime: String) -> [String] {
         guard runtime == "mlx_cache" else { return ["auto"] }
-        return modelID == supportedNativeModel ? ["auto", "none", "required", "named"] : ["auto", "none"]
+        return guaranteedCallProfile(modelID: modelID) != nil ? ["auto", "none", "required", "named"] : ["auto", "none"]
     }
 
     public static func validateRequest(_ request: ChatCompletionRequest, loadedModelID: String?, runtime: String) throws {
         let mode = try selection(request.promptSource.toolChoice)
         guard mode.holdsOutput else { return }
-        guard runtime == "mlx_cache", !mode.requiresCall || loadedModelID == supportedNativeModel else {
+        guard runtime == "mlx_cache", !mode.requiresCall || guaranteedCallProfile(modelID: loadedModelID) != nil else {
             throw unsupported("This model/runtime does not support the requested tool selection")
         }
         guard mode.requiresCall else { return }

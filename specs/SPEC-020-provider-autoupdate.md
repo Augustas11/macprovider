@@ -1,6 +1,6 @@
 # SPEC-020 - Provider autoupdate
 
-Version: v0.1.27
+Version: v0.1.28
 Status: Normative; coordinator-independent recovery is reconciled and
 implementation remains nonconformant under issue #610. The production path ran
 the 2026-07-10 incident-recovery
@@ -1123,16 +1123,40 @@ MUST NOT replace an updater/startup/maintenance lease. The watchdog MUST validat
 its owner UID, exact supervised PID, process start, executable, boot session,
 wall and monotonic clocks, and a maximum duration of 60 seconds before granting
 grace, including while the listener is absent. After either clock expires,
-normal wedge-restart eligibility resumes. An already-unpaused resume command
+normal wedge-restart eligibility resumes. The operator-pause and lease vetoes
+MUST hold on every restart-recommending path, including a lost or unprovable
+listener, and MUST be re-evaluated after the restart-worthy verdict as the last
+step before the kickstart, so a resume that lands after the watchdog's first
+lease check still suppresses the restart. That final evaluation and the
+kickstart request MUST run while the watchdog holds the lifecycle stores' own
+exclusive locks (the existing lock files of `state-v1.json`, `lease.json` and
+`operator-resume-lease.json`, opened read-only, never created, and verified to
+be the regular owner-UID file at that path), acquired all-or-nothing within a
+bounded wait. A store that stays busy, or whose data file exists while its lock
+is missing or invalid, defers the restart to a later tick. The watchdog MUST
+hold the locks until the kickstart request returns; if it has not returned
+within the same bound, the watchdog MUST abort the request while still holding
+the locks, record no restart cooldown, and then release them. The
+pause veto MUST read the durable pause fence from the persisted lifecycle record
+(`operator_paused` true in `state-v1.json` beside the leases, the field the
+serve process itself honors at startup), not only from `/v1/status`, and MUST
+accept the record only when it meets the lifecycle store's own invariants: a
+regular non-symlink file with one link, owned by the lease owner UID, mode 0600,
+1 byte to 64 KiB, integer schema version 1, authority `macprovider_cli`, the
+record's mandatory fields present with their JSON types, and `operator_paused` a
+JSON boolean or absent. A missing or invalid record is not a pause. Listener ownership is
+tri-state: a probe that fails, exceeds its bounded timeout or output size, or
+prints anything other than PIDs is indeterminate and MUST NOT recommend a
+restart; a clean not-owned answer MUST repeat on one retry before it may. An already-unpaused resume command
 MUST NOT renew grace; a new pause/resume cycle may create a fresh window. A
 failure to publish grace MUST leave the provider paused and reject resume.
 Consuming the SPEC-025 §5.2
 `model_liveness_token_v1` to additionally catch the listener-alive/model-dead
 wedge — and a domain-aware wedge target for headless/system-domain (RFC-001 F3) —
-are deferred follow-ups that must first define the stall threshold and its owner,
-a persisted operator-pause signal readable without the HTTP surface, and the
-pre-first-token / process-wide hard-freeze cases before they may authorize a
-restart.
+are deferred follow-ups that must first define the stall threshold and its owner
+and the pre-first-token / process-wide hard-freeze cases before they may
+authorize a restart. The persisted operator-pause signal readable without the
+HTTP surface is the lifecycle record's `operator_paused` fence above.
 
 Beyond its own boot-arm and cooldown markers, and its own private
 supervisor-telemetry state files (`supervisor-beacon.json` plus its seq/counter/
@@ -1733,6 +1757,14 @@ Deferred to v0.3.0 or later:
 
 ## Change log
 
+- v0.1.28 (2026-10-17): R-4.14 applies the operator-pause and lease vetoes
+  to every restart-recommending path, including a lost or unprovable listener,
+  and re-checks them after the restart verdict, closing the window where a
+  resume landing mid-evaluation was kickstarted. The final vetoes and the
+  kickstart request run under the lifecycle stores' own locks. The pause veto
+  reads the persisted `operator_paused` fence under the store's file and schema
+  invariants. A failed, timed-out or oversized listener probe is
+  indeterminate, and a not-owned answer must repeat once before it counts.
 - v0.1.27 (2026-10-17): SPEC-020-R006 streams every release download and
   release-discovery response under a hard byte cap, cancels an oversized
   transfer without keeping a file, and follows redirects only to release

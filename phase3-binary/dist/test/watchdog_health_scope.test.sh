@@ -175,6 +175,11 @@ with open(path, "w", encoding="utf-8") as handle:
     handle.write("\n")
 PY
   chmod 600 "$lease_path"
+  lease_lock="$(dirname "$lease_path")/.$(basename "$lease_path").lock"
+  if [ ! -e "$lease_lock" ]; then
+    : > "$lease_lock"
+    chmod 600 "$lease_lock"
+  fi
 }
 
 # F1 (RFC-001 #1382, SPEC-020 R-4.14): with no validated launchd PID the
@@ -343,6 +348,217 @@ export WATCHDOG_TEST_STATUS_BODY
 run_watchdog
 grep -F 'provider process 4242 failed local /v1/health after arming; requesting launchd restart' "$TMP/logs/watchdog.log" >/dev/null
 grep -F 'provider restart requested for live.malibu.provider via launchctl kickstart -k reason=local_health_failed_after_arming' "$TMP/logs/watchdog.log" >/dev/null
+
+# SPEC-020 R-4.14: an operator-paused provider is never kicked for health
+# reasons, including when its listener is lost or cannot be proven. The pause
+# is read from the persisted lifecycle record, not only from /v1/status.
+# Listener probes that fail or time out are indeterminate, not "lost", and a
+# clean not-owned answer must repeat before it can recommend a restart.
+cat > "$TMP/bin/lsof" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *'-d txt -Fn'*)
+    printf 'n%s\n' "/usr/lib/dyld"
+    printf 'n%s\n' "$HOME/macprovider/macprovider-cli"
+    ;;
+  *)
+    echo call >> "$WATCHDOG_TEST_LISTENER_CALLS"
+    case "${WATCHDOG_TEST_LISTENER_MODE:-owned}" in
+      owned) echo 4242 ;;
+      foreign) echo 9999 ;;
+      none) exit 1 ;;
+      noise) echo "lsof: WARNING: can't stat() file system" >&2; exit 1 ;;
+      pid_noise) echo 4242; echo "lsof: status error on /dev/fd" >&2 ;;
+      fail) exit 2 ;;
+      hang) exec sleep 30 ;;
+      flap)
+        if [ "$(wc -l < "$WATCHDOG_TEST_LISTENER_CALLS")" -le 2 ]; then echo 9999; else echo 4242; fi
+        ;;
+    esac
+    ;;
+esac
+EOF
+chmod +x "$TMP/bin/lsof"
+lifecycle_dir="$TMP/home/Library/Application Support/macprovider/lifecycle"
+state_record="$lifecycle_dir/state-v1.json"
+mkdir -p "$lifecycle_dir"
+chmod 700 "$lifecycle_dir"
+for lock_name in .state-v1.json.lock .lease.json.lock .operator-resume-lease.json.lock; do
+  : > "$lifecycle_dir/$lock_name"
+  chmod 600 "$lifecycle_dir/$lock_name"
+done
+WATCHDOG_TEST_LISTENER_CALLS="$TMP/listener-calls"
+MACPROVIDER_WATCHDOG_LISTENER_RETRY_DELAY_SECONDS=0
+MACPROVIDER_WATCHDOG_LISTENER_PROBE_TIMEOUT_SECONDS=1
+export WATCHDOG_TEST_LISTENER_CALLS MACPROVIDER_WATCHDOG_LISTENER_RETRY_DELAY_SECONDS MACPROVIDER_WATCHDOG_LISTENER_PROBE_TIMEOUT_SECONDS
+unpaused_unavailable='{"status":"unavailable","lifecycle":{"operator_paused":false,"state":"serving_buyers"}}'
+
+record_json() {
+  printf '{"version":1,"sequence":7,"transition_id":"t","transition_at":"x","reason_code":"r","writer":"serve","authority":"macprovider_cli","state":"%s","operator_paused":%s}\n' "$1" "$2"
+}
+
+# Usage: listener_case <listener-mode> <record> <expect: kick|no-kick> [status-exit]
+# record: paused | paused_state | unpaused | symlink | mode644 | hardlink |
+#         no_authority | bad_version | float_version | int_paused |
+#         null_paused | no_sequence | bad_paused_type | oversized | none
+listener_case() {
+  mode="$1"; record="$2"; expect="$3"; status_exit="${4:-0}"
+  : > "$TMP/logs/watchdog.log"
+  : > "$TMP/launchctl.log"
+  : > "$WATCHDOG_TEST_LISTENER_CALLS"
+  rm -f "$TMP/home/.local/share/macprovider-watchdog/state/last_kick" "$state_record" "$TMP/state-target.json"
+  case "$record" in
+    paused) record_json paused_by_operator true > "$state_record" ;;
+    paused_state) record_json paused_by_operator false > "$state_record" ;;
+    unpaused) record_json serving_buyers false > "$state_record" ;;
+    symlink)
+      record_json paused_by_operator true > "$TMP/state-target.json"
+      chmod 600 "$TMP/state-target.json"
+      ln -s "$TMP/state-target.json" "$state_record"
+      ;;
+    mode644) record_json paused_by_operator true > "$state_record" ;;
+    hardlink)
+      record_json paused_by_operator true > "$state_record"
+      ln "$state_record" "$TMP/state-target.json"
+      ;;
+    no_authority) printf '%s\n' '{"sequence":7,"transition_id":"t","transition_at":"x","reason_code":"r","writer":"serve","version":1,"state":"paused_by_operator","operator_paused":true}' > "$state_record" ;;
+    bad_version) printf '%s\n' '{"sequence":7,"transition_id":"t","transition_at":"x","reason_code":"r","writer":"serve","version":2,"authority":"macprovider_cli","state":"paused_by_operator","operator_paused":true}' > "$state_record" ;;
+    float_version) printf '%s\n' '{"sequence":7,"transition_id":"t","transition_at":"x","reason_code":"r","writer":"serve","version":1.0,"authority":"macprovider_cli","state":"paused_by_operator","operator_paused":true}' > "$state_record" ;;
+    null_paused) printf '%s\n' '{"version":1,"sequence":7,"transition_id":"t","transition_at":"x","reason_code":"r","writer":"serve","authority":"macprovider_cli","state":"paused_by_operator","operator_paused":null}' > "$state_record" ;;
+    no_sequence) printf '%s\n' '{"version":1,"transition_id":"t","transition_at":"x","reason_code":"r","writer":"serve","authority":"macprovider_cli","state":"paused_by_operator","operator_paused":true}' > "$state_record" ;;
+    int_paused) printf '%s\n' '{"sequence":7,"transition_id":"t","transition_at":"x","reason_code":"r","writer":"serve","version":1,"authority":"macprovider_cli","state":"paused_by_operator","operator_paused":1}' > "$state_record" ;;
+    bad_paused_type) printf '%s\n' '{"sequence":7,"transition_id":"t","transition_at":"x","reason_code":"r","writer":"serve","version":1,"authority":"macprovider_cli","state":"paused_by_operator","operator_paused":"yes"}' > "$state_record" ;;
+    oversized)
+      /usr/bin/python3 -c 'import json,sys; print(json.dumps({"version":1,"sequence":7,"transition_id":"t","transition_at":"x","reason_code":"r","writer":"serve","authority":"macprovider_cli","state":"paused_by_operator","operator_paused":True,"pad":"x"*70000}))' > "$state_record"
+      ;;
+    none) : ;;
+  esac
+  if [ -f "$state_record" ] && [ ! -L "$state_record" ]; then
+    if [ "$record" = mode644 ]; then chmod 644 "$state_record"; else chmod 600 "$state_record"; fi
+  fi
+  WATCHDOG_TEST_LISTENER_MODE="$mode"
+  WATCHDOG_TEST_STATUS_BODY="$unpaused_unavailable"
+  WATCHDOG_TEST_STATUS_EXIT="$status_exit"
+  export WATCHDOG_TEST_LISTENER_MODE WATCHDOG_TEST_STATUS_BODY WATCHDOG_TEST_STATUS_EXIT
+  run_watchdog
+  if [ "$expect" = kick ]; then
+    grep -F 'kickstart -k' "$TMP/launchctl.log" >/dev/null || {
+      echo "listener=$mode record=$record must keep unpaused wedge recovery" >&2
+      exit 1
+    }
+  elif grep -F 'kickstart -k' "$TMP/launchctl.log" >/dev/null; then
+    echo "listener=$mode record=$record must not kick the provider" >&2
+    exit 1
+  fi
+}
+
+for mode in foreign none noise owned; do
+  listener_case "$mode" paused no-kick
+  grep -F 'operator-paused per the persisted lifecycle record; watchdog never restarts a paused provider' "$TMP/logs/watchdog.log" >/dev/null
+done
+# The pause is the operator_paused boolean the serve process honors at
+# startup; a paused_by_operator state without it is not a pause.
+listener_case foreign paused_state kick
+# A record that fails the Swift store's file or schema invariants is not a pause.
+for record in symlink mode644 hardlink no_authority bad_version float_version int_paused null_paused no_sequence bad_paused_type oversized; do
+  listener_case foreign "$record" kick
+done
+for mode in noise pid_noise fail hang; do
+  listener_case "$mode" unpaused no-kick
+  grep -F 'is indeterminate (probe failed or timed out); not treating it as lost' "$TMP/logs/watchdog.log" >/dev/null
+done
+listener_case flap unpaused no-kick 71
+if [ "$(wc -l < "$WATCHDOG_TEST_LISTENER_CALLS")" -lt 3 ]; then
+  echo "a not-owned listener verdict must be re-probed once before it counts" >&2
+  exit 1
+fi
+for mode in foreign none; do
+  listener_case "$mode" unpaused kick
+  if [ "$(wc -l < "$WATCHDOG_TEST_LISTENER_CALLS")" -lt 3 ]; then
+    echo "listener=$mode restart must follow two not-owned probes" >&2
+    exit 1
+  fi
+done
+listener_case foreign none kick
+
+# Restart gate: the final vetoes and the kickstart request run while the
+# watchdog holds the lifecycle stores' own flocks; a busy store defers.
+cat > "$TMP/bin/launchctl" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >> "$WATCHDOG_TEST_LAUNCHCTL_LOG"
+case "$*" in
+  print*) printf 'pid = %s\n' "$WATCHDOG_TEST_SERVICE_PID" ;;
+  kickstart*)
+    /usr/bin/python3 -c '
+import fcntl, sys
+handle = open(sys.argv[1], "rb")
+try:
+    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    print("gate=free")
+except BlockingIOError:
+    print("gate=held")
+' "$WATCHDOG_TEST_GATE_LOCK" >> "$WATCHDOG_TEST_GATE_LOG"
+    if [ -n "${WATCHDOG_TEST_KICKSTART_HANG:-}" ]; then
+      exec sleep 30
+    fi
+    ;;
+esac
+EOF
+chmod +x "$TMP/bin/launchctl"
+WATCHDOG_TEST_GATE_LOCK="$lifecycle_dir/.state-v1.json.lock"
+WATCHDOG_TEST_GATE_LOG="$TMP/gate.log"
+export WATCHDOG_TEST_GATE_LOCK WATCHDOG_TEST_GATE_LOG
+: > "$WATCHDOG_TEST_GATE_LOG"
+listener_case foreign unpaused kick
+if [ "$(cat "$WATCHDOG_TEST_GATE_LOG")" != "gate=held" ]; then
+  echo "kickstart must be requested while the restart gate holds the lifecycle lock" >&2
+  exit 1
+fi
+/usr/bin/python3 -c '
+import fcntl, sys, time
+handle = open(sys.argv[1], "rb")
+fcntl.flock(handle, fcntl.LOCK_EX)
+time.sleep(6)
+' "$lifecycle_dir/.lease.json.lock" </dev/null >/dev/null 2>&1 &
+gate_holder_pid=$!
+sleep 0.5
+MACPROVIDER_WATCHDOG_RESTART_GATE_SECONDS=1
+export MACPROVIDER_WATCHDOG_RESTART_GATE_SECONDS
+listener_case foreign unpaused no-kick
+grep -F 'restart deferred: lifecycle store busy' "$TMP/logs/watchdog.log" >/dev/null
+kill "$gate_holder_pid" >/dev/null 2>&1 || true
+wait "$gate_holder_pid" >/dev/null 2>&1 || true
+
+# A launchctl that does not return is aborted while the gate is still held,
+# and the tick finishes instead of waiting on it.
+: > "$WATCHDOG_TEST_GATE_LOG"
+WATCHDOG_TEST_KICKSTART_HANG=1
+export WATCHDOG_TEST_KICKSTART_HANG
+gate_started="$(date +%s)"
+listener_case foreign unpaused kick
+if [ "$(( $(date +%s) - gate_started ))" -ge 20 ]; then
+  echo "a hung kickstart must not hold the watchdog tick" >&2
+  exit 1
+fi
+grep -F 'did not complete within 1s; aborted under the restart gate' "$TMP/logs/watchdog.log" >/dev/null
+[ "$(cat "$WATCHDOG_TEST_GATE_LOG")" = "gate=held" ]
+if [ -e "$TMP/home/.local/share/macprovider-watchdog/state/last_kick" ]; then
+  echo "an aborted kickstart must not start the restart cooldown" >&2
+  exit 1
+fi
+unset WATCHDOG_TEST_KICKSTART_HANG
+
+# A store whose lock is missing cannot be synchronized with: defer.
+rm -f "$lifecycle_dir/.state-v1.json.lock"
+listener_case foreign unpaused no-kick
+grep -F 'restart deferred: lifecycle store busy' "$TMP/logs/watchdog.log" >/dev/null
+: > "$lifecycle_dir/.state-v1.json.lock"
+chmod 600 "$lifecycle_dir/.state-v1.json.lock"
+unset MACPROVIDER_WATCHDOG_RESTART_GATE_SECONDS WATCHDOG_TEST_GATE_LOCK WATCHDOG_TEST_GATE_LOG
+rm -f "$lifecycle_dir/.state-v1.json.lock" "$lifecycle_dir/.lease.json.lock" "$lifecycle_dir/.operator-resume-lease.json.lock"
+rm -f "$state_record" "$TMP/state-target.json" "$WATCHDOG_TEST_LISTENER_CALLS"
+unset WATCHDOG_TEST_LISTENER_MODE WATCHDOG_TEST_STATUS_EXIT
+echo "paused provider listener veto ok"
 unset WATCHDOG_TEST_HEALTH_STATUS WATCHDOG_TEST_STATUS_BODY
 
 # Darwin-only below: the lifecycle-lease process-identity cases use
@@ -484,6 +700,79 @@ for resume_case in valid expired oversized wrong_pid wrong_kind; do
 done
 rm -f "$resume_lease_path"
 echo "operator resume grace and expiry ok"
+
+# 2026-10-17 incident: the operator resume landed after the watchdog's first
+# lease check but before its /v1/status read, which then saw "unavailable,
+# not paused" and kicked the resuming provider. Resume publishes its grace
+# lease before clearing the pause, so the veto re-check after the status
+# verdict must see it and grant grace.
+staged_resume_lease="$TMP/staged-operator-resume-lease.json"
+write_watchdog_lease startup "$provider_owner_pid" few_seconds "" "$staged_resume_lease" 60000
+cat > "$TMP/bin/lsof" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *'-d txt -Fn'*)
+    printf 'n%s\n' "/usr/lib/dyld"
+    printf 'n%s\n' "$WATCHDOG_TEST_BINARY_PATH"
+    ;;
+  *) echo "$WATCHDOG_TEST_SERVICE_PID" ;;
+esac
+EOF
+cat > "$TMP/bin/curl" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  */v1/health*) exit 22 ;;
+  */v1/status*)
+    echo call >> "$WATCHDOG_TEST_STATUS_CALLS"
+    if [ "$(wc -l < "$WATCHDOG_TEST_STATUS_CALLS")" -eq "$WATCHDOG_TEST_ACT_ON_STATUS_CALL" ]; then
+      case "$WATCHDOG_TEST_ACTION" in
+        resume)
+          cp "$WATCHDOG_TEST_STAGED_RESUME_LEASE" "$WATCHDOG_TEST_RESUME_LEASE_PATH"
+          chmod 600 "$WATCHDOG_TEST_RESUME_LEASE_PATH"
+          ;;
+        pause)
+          printf '%s\n' '{"version":1,"sequence":7,"transition_id":"t","transition_at":"x","reason_code":"r","writer":"operator_command","authority":"macprovider_cli","state":"paused_by_operator","operator_paused":true}' > "$WATCHDOG_TEST_STATE_RECORD"
+          chmod 600 "$WATCHDOG_TEST_STATE_RECORD"
+          ;;
+      esac
+    fi
+    printf '%s\n' '{"status":"unavailable","lifecycle":{"operator_paused":false,"state":"locally_ready_connecting"}}'
+    ;;
+  *) exit 7 ;;
+esac
+EOF
+chmod +x "$TMP/bin/lsof" "$TMP/bin/curl"
+WATCHDOG_TEST_STAGED_RESUME_LEASE="$staged_resume_lease"
+WATCHDOG_TEST_RESUME_LEASE_PATH="$resume_lease_path"
+WATCHDOG_TEST_STATE_RECORD="$TMP/home/Library/Application Support/macprovider/lifecycle/state-v1.json"
+WATCHDOG_TEST_STATUS_CALLS="$TMP/status-calls"
+for lock_name in .state-v1.json.lock .operator-resume-lease.json.lock; do
+  : > "$TMP/home/Library/Application Support/macprovider/lifecycle/$lock_name"
+  chmod 600 "$TMP/home/Library/Application Support/macprovider/lifecycle/$lock_name"
+done
+export WATCHDOG_TEST_STAGED_RESUME_LEASE WATCHDOG_TEST_RESUME_LEASE_PATH WATCHDOG_TEST_STATE_RECORD WATCHDOG_TEST_STATUS_CALLS
+# Status call 1 is the restart verdict; call 2 is the pre-kick telemetry capture.
+for race in resume:1 resume:2 pause:2; do
+  WATCHDOG_TEST_ACTION="${race%%:*}"
+  WATCHDOG_TEST_ACT_ON_STATUS_CALL="${race##*:}"
+  export WATCHDOG_TEST_ACTION WATCHDOG_TEST_ACT_ON_STATUS_CALL
+  : > "$TMP/logs/watchdog.log"
+  : > "$TMP/launchctl.log"
+  : > "$WATCHDOG_TEST_STATUS_CALLS"
+  rm -f "$resume_lease_path" "$WATCHDOG_TEST_STATE_RECORD" "$TMP/home/.local/share/macprovider-watchdog/state/last_kick"
+  run_watchdog
+  if grep -F 'kickstart -k' "$TMP/launchctl.log" >/dev/null; then
+    echo "a $WATCHDOG_TEST_ACTION landing at status call $WATCHDOG_TEST_ACT_ON_STATUS_CALL must not be kicked" >&2
+    exit 1
+  fi
+  case "$WATCHDOG_TEST_ACTION" in
+    resume) grep -F 'gained a validated operator-resume lease during restart evaluation; watchdog grants bounded grace' "$TMP/logs/watchdog.log" >/dev/null ;;
+    pause) grep -F 'operator-paused per the persisted lifecycle record' "$TMP/logs/watchdog.log" >/dev/null ;;
+  esac
+done
+rm -f "$resume_lease_path" "$staged_resume_lease" "$WATCHDOG_TEST_STATE_RECORD" "$WATCHDOG_TEST_STATUS_CALLS"
+unset WATCHDOG_TEST_STAGED_RESUME_LEASE WATCHDOG_TEST_RESUME_LEASE_PATH WATCHDOG_TEST_STATE_RECORD WATCHDOG_TEST_STATUS_CALLS WATCHDOG_TEST_ACTION WATCHDOG_TEST_ACT_ON_STATUS_CALL
+echo "operator resume during restart evaluation ok"
 
 kill "$provider_owner_pid"
 wait "$provider_owner_pid" >/dev/null 2>&1 || true

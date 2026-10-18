@@ -1330,7 +1330,7 @@ final class ModelRuntimeSwapTests: XCTestCase {
             decode: { tokenIDs in tokenIDs.map { decoded[$0] ?? "" }.joined() },
             request: makeRequest(model: "mlx-community/Qwen3-32B-4bit"),
             mode: .complete(finishReason: "request_stop"),
-            defaultCompletionTokens: stoppedTokens.count
+            defaultCompletionTokens: stoppedTokens.count, toolCallPrefill: nil
         )
         XCTAssertEqual(parsed.content, "answer ")
         XCTAssertEqual(parsed.completionTokens, stoppedTokens.count)

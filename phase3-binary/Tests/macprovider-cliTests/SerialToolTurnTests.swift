@@ -17,7 +17,7 @@ final class SerialToolTurnTests: XCTestCase {
             decode: { _ in "" },
             request: try request(parallelToolCalls: nil),
             mode: .complete(finishReason: "stop"),
-            defaultCompletionTokens: 12
+            defaultCompletionTokens: 12, toolCallPrefill: nil
         )
         XCTAssertEqual(parsed.toolCalls.map(\.functionName), ["find_definition"])
         XCTAssertEqual(parsed.generatedCompletionTokens, 12)
@@ -31,7 +31,7 @@ final class SerialToolTurnTests: XCTestCase {
             decode: { _ in "" },
             request: try request(parallelToolCalls: true),
             mode: .complete(finishReason: "stop"),
-            defaultCompletionTokens: 12
+            defaultCompletionTokens: 12, toolCallPrefill: nil
         )
         XCTAssertEqual(
             parsed.toolCalls.map(\.functionName),

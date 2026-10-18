@@ -1,6 +1,6 @@
 # SPEC-018 — Agentic tool calling (provider-side response synthesis)
 
-**Version:** 0.2.14 (2026-10-17, guaranteed envelope body follows the supported model's chat template)
+**Version:** 0.2.15 (2026-10-17, guaranteed selection starts generation inside the call)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.5.5, SPEC-006 v0.9, SPEC-008 (Pillar A model-hash trust layer — referenced by §10a), SPEC-011 v0.5 (warm-swap heartbeat `model_hash` — referenced by §10a), SPEC-015 v0.4 (receipts canonical output binding — see AC-17 and §N.5)
 **Status:** **LOCKED** at v0.2.10 by the streaming cleanup-rewrite byte-domain clarification. Previously LOCKED at v0.2.9 by the serial-turn `parallel_tool_calls` amendment (omitted/`false` stop after the first complete valid tool). Previously LOCKED at v0.2.8 by the #1594 OpenRouter-aligned AC-53 amendment (no independent messages[] count cap). Previously LOCKED at v0.2.7 by the Qwen3-Coder function-XML tool-call grammar amendment (documents the `<function=…><parameter=…>` XML body that Qwen3-Coder emits as a Qwen-row §3.1 body-grammar alternative, with OpenAI/MCP name charset; pending IMPL/conformance already landed on branch `fix/qwen3coder-toolcall-parse`); previously LOCKED at v0.2.6 by #784 C2b admission-timeout reconciliation — v0.2.4 spec PR #202 and IMPL PR #209 both landed (multi-turn acceptance, token-incremental streaming, `tool_call_id` validation, 1 MiB/2 MiB byte caps). v0.2.5 adds gpt-oss/OpenAI Harmony response parsing as a pending implementation/conformance gap. codex 4-lane r4 0/0/0; Claude blind-spot r2 0/0/0. SPEC-019 already depends on this as "LOCKED". The former "LOCK CANDIDATE pending PR" line was never flipped after merge. (Resolved gap, 2026-07-14, runbook item 15: AC-45's `X-MacProvider-Streaming-Mode` header — set by the coordinator on streaming `200` responses — was stripped by the public gateway's blanket `X-MacProvider-*` filter, making the "header absent" fail condition live on `api.malibu.tech`. Fixed by adding the header to the SPEC-006 v0.9.9 § 5.4 response-pass-through allowlist and un-stripping it at the gateway, validated against AC-45's closed enum. Chosen over scoping AC-45 to the coordinator surface because buyers hit the gateway, so scoping would have left AC-45's buyer-visible promise unmet. AC-45's normative text is unchanged; this is a documentation reconciliation, not a lock amendment. Residual: the coordinator currently emits the diagnostic only on the streaming success path — non-streaming AC-45 emission is a separate coordinator-side completeness item, out of scope for the gateway-strip fix.)
 
@@ -17,6 +17,22 @@ SPEC-018 is the **provider-side response synthesis contract** for OpenAI-wire to
 **Money-path**: all v0.2 changes preserve v0.1.5 settlement protection (`FaultBreakerQualifying` + zero credits on malformed streams via `billing_recorder.go:176` + `formula.go:112`).
 
 ## Change log
+
+- **v0.2.15 (2026-10-17, §3.11 call prefill, Related: #2014):**
+  On released CLI 1.8.251 the qualified Qwen3.6 model ignored the selection
+  instruction: a named choice called another declared function, and
+  `required` without a buyer system message answered in prose. Both failed
+  validation with HTTP 502. §3.11 now constrains generation for models with a
+  guaranteed-call profile. A named choice renders only the selected function
+  in the template's tool list, and the assistant turn is prefilled with the
+  template's call opening for that function. `required` prefills the envelope
+  opening with every declared tool rendered. The prefill follows the
+  generation prompt only when the template has closed any think block; the
+  parser reads the prefill followed by the generated text; the prefill is
+  never buyer-visible content and never a receipt input. Guaranteed modes are
+  advertised and admitted only for models with a profile. This is a §10c.1
+  amendment (**Amendment 7**) of the v0.2.12 §3.11 statement that the
+  guarantee is output validation after ordinary model generation.
 
 - **v0.2.14 (2026-10-17, §3.11 guaranteed envelope body, Related: #2014):**
   The only model qualified for `required`/named is
@@ -516,7 +532,7 @@ explicit tool modes for relay-blind/encrypted envelopes.
 
 | Loaded model and runtime | `auto` | `none` | `required` and named function |
 |---|---|---|---|
-| Native `mlx_cache`, exact loaded `mlx-community/Qwen3.6-35B-A3B-4bit` | Existing behavior | Supported | Complete-generation schema holdback |
+| Native `mlx_cache`, exact loaded `mlx-community/Qwen3.6-35B-A3B-4bit` (guaranteed-call profile: function-XML) | Existing behavior | Supported | Call prefill plus complete-generation schema holdback |
 | Other native `mlx_cache` identities | Existing behavior | Supported | Unsupported |
 | External/loopback runtimes | Existing behavior | Unsupported | Unsupported |
 
@@ -596,7 +612,42 @@ envelope, in the grammar above, is now accepted; all other function-XML remains
 excluded.
 
 The guarantee is output validation after ordinary model generation, not a
-claim of constrained token sampling. Token exhaustion/`length`, invalid
+claim of constrained token sampling.
+
+**AMENDED v0.2.15 (Amendment 7):** the sentence above described v0.2.12–v0.2.14.
+A model qualifies for `required`/named only through a **guaranteed-call
+profile**: its exact loaded identity, its template's call format, and the exact
+text the template's generation prompt ends with once any think block is closed.
+The supported identity's profile is function-XML with generation-prompt suffix
+`<|im_start|>assistant\n<think>\n\n</think>\n\n` (`enable_thinking: false`).
+For a model with a profile the provider MUST constrain generation as follows:
+
+- A named choice MUST render only the selected function in the chat
+  template's tool list. The template renders it in its own format.
+- The assistant turn MUST be prefilled with the call opening, appended as
+  prompt tokens directly after the template's generation prompt: for
+  `required`, `<tool_call>\n`; for a named choice, `<tool_call>\n<function=NAME>\n`
+  (function-XML) or `<tool_call>\n{"name": "NAME", "arguments": ` (JSON
+  envelope). `required` keeps every declared tool rendered.
+- The prefill is placed only when the rendered prompt's final tokens equal
+  the tokenized generation-prompt suffix. A template that leaves a think
+  block open (thinking on), or any other mismatch, MUST NOT be prefilled;
+  that turn keeps the validation-only behavior of v0.2.14.
+- The parser MUST read the prefill followed by the generated text, under the
+  same complete-envelope grammar and validation as above.
+- The prefill is internal prompt text. It MUST NOT appear in buyer-visible
+  content, deltas, or errors. Receipts keep canonicalizing the buyer's
+  request; the rendered subset of tools is a deterministic function of the
+  signed `tools` and `tool_choice`. The prefill tokens are prompt tokens: they
+  count in `prompt_tokens`, and token-keyed prompt and KV caches key on them
+  like any other prompt token.
+
+Models without a guaranteed-call profile neither advertise nor admit
+`required`/named. The decoder still does not constrain logits; the selected
+function name is fixed by the prompt, and arguments, closure and cardinality
+remain enforced by complete-output validation.
+
+Token exhaustion/`length`, invalid
 arguments, incomplete output, or another generated-output validation failure
 MUST terminate with `tool_selection_validation_failed` (HTTP 502 before
 headers, a terminal error after stream commitment). Cancellation and timeout
@@ -1039,6 +1090,7 @@ Amendment log:
 - Amendment 3 (v0.2.8): AC-53 / §10d.1 v0.2.0-locked maximum `messages[]` length 256 → DELETED as an independent cap. Rationale: the count cap is not a model constraint and blocks legitimate coding-agent sessions (Pi/Cline 300+ messages); OpenRouter and OrcaRouter impose no message-count limit. Residual risk: large-but-under-body-cap arrays still cost validation CPU. Mitigation: AC-50 4 MiB raw-body cap (public gateway SPEC-006 default `request_body_bytes` may be stricter), AC-51/AC-52 aggregate byte caps, AC-54 tool-call count, AC-55 linear validation, and the served context window.
 - Amendment 4 (v0.2.9): §2.2 v0.1-locked “preserve all N recognized tool calls” → scoped to `parallel_tool_calls: true`. Omitted/`false` is serial: stop after the first complete valid tool. Rationale: agent loops (Pi) omit the field and execute one tool per turn; leftover decode after a valid tool hangs or kills the stream. Residual risk: a client wanting two tools in one assistant message must send `parallel_tool_calls: true`. Mitigation: explicit request boolean; default matches Pi.
 
+- Amendment 7 (v0.2.15): §3.11 v0.2.12 "the guarantee is output validation after ordinary model generation" → guaranteed-call profile with named-only tool rendering and an assistant-turn call prefill. Rationale: on CLI 1.8.251 the qualified model ignored the selection instruction (wrong function for a named choice, prose for `required`), so the guarantee failed live. Mitigation: per-model profile, prefill only after a closed think block, parser over prefill plus continuation, unchanged complete-output validation. Residual risk: arguments are still unconstrained by the decoder and can fail validation; a template whose generation prompt does not match its profile falls back to validation only.
 - Amendment 6 (v0.2.14): §3.11 "Function-XML MUST NOT be recovered into a successful call" → only function-XML outside one complete template-grammar call per envelope is excluded. Rationale: the only qualified model's chat template instructs function-XML, so the v0.2.12 rule made every guaranteed turn fail. Mitigation: exact grammar, declared names and parameters only, schema-directed typing with strict JSON for non-string values, markup inside values rejected, and the unchanged complete-output validation. Residual risk: a string value that legitimately contains call markup fails validation instead of succeeding.
 - Amendment 5 (v0.2.12): §5/AC-13 v0.1 auto-only rejection → §3.11 explicit model/runtime matrix; v0.2.9 §2.2 serial early-stop and §10d.4 incremental tool emission → ordinary `auto` only, with complete-generation holdback for `required`/named; AC-45 adds `buffered_tool_selection` to its diagnostic enum. Rationale: selected modes must be preserved and successful calls must satisfy the selected name, schema and cardinality. Mitigation: strict bounds, capability routing, full holdback and explicit failures. Residual risk: generation may fail validation; no fabricated or repaired call is substituted.
 

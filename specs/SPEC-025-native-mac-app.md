@@ -1,6 +1,8 @@
 # SPEC-025 — Native Mac App (signed `.dmg` + menu bar wrapper)
 
-Status: DRAFT v0.30.1 · Owner: @Augustas11 · Target: 2026 Q3
+Status: DRAFT v0.30.2 · Owner: @Augustas11 · Target: 2026 Q3
+
+**Change log v0.30.2 (2026-10-17):** Editorial, no normative change: §5.2 notes that SPEC-020 R-4.14 v0.1.28 now defines the persisted operator-pause signal; the stall threshold, its owner and the hard-freeze cases stay deferred.
 
 **Change log v0.30.1 (2026-10-14, public-repo cleanup):** Editorial, no normative change: owner is the GitHub handle.
 
@@ -812,10 +814,11 @@ treating an absent `model_liveness` object as "unknown", never as unhealthy.
 signal only**. It is NOT yet an input to the watchdog restart predicate (§5.3),
 which is unchanged. Wiring the token into an out-of-process wedge-prober restart
 decision (the listener-alive/model-dead recovery path) is an explicit deferred
-follow-up that must first define the stall threshold and its owner, a persisted
-operator-pause signal readable without the HTTP surface, and the
+follow-up that must first define the stall threshold and its owner and the
 pre-first-token / process-wide hard-freeze cases before it may authorize a
-restart. Coordinator export of the signal (heartbeat action events, dwell,
+restart. The persisted operator-pause signal readable without the HTTP surface
+is now defined by SPEC-020 R-4.14 (v0.1.28): the lifecycle record's durable
+pause fence. Coordinator export of the signal (heartbeat action events, dwell,
 token-age, topology beacon) is the separate supervisor telemetry contract
 deferred to RFC-001 §7 / follow-up F5, and MUST NOT be smuggled into
 `last_autoupdate_event`.

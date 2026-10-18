@@ -112,7 +112,7 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
             decode: vocab.decode,
             stopTokenFilter: Self.stopTokenFilter,
             generationMilliseconds: 0,
-            modelHash: nil
+            modelHash: nil, toolCallPrefill: nil
         )
     }
 
@@ -154,7 +154,7 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
             defaultCompletionTokens: generated.count,
             stopTokenFilter: Self.stopTokenFilter,
             requestStops: request.stop,
-            globalHitStop: filtered.hitStop
+            globalHitStop: filtered.hitStop, toolCallPrefill: nil
         )
         let completion = try ModelRuntime.validateStructuredCompletion(CompletionResult(
             content: parsed.content,
@@ -215,7 +215,7 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
                 defaultCompletionTokens: generated.count,
                 stopTokenFilter: Self.stopTokenFilter,
                 requestStops: request.stop,
-                globalHitStop: final.hitStop
+                globalHitStop: final.hitStop, toolCallPrefill: nil
             )
             try emitter.finish(
                 finalText: final.text,
