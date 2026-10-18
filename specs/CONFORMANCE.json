@@ -9715,10 +9715,17 @@
         "phase3-binary/Sources/macprovider-cli/ModelCatalogEconomics.swift:struct ModelCatalogEconomicsWire",
         "phase3-binary/Sources/macprovider-cli/ModelCatalogEconomics.swift:struct ModelCatalogEconomicsBuilder",
         "phase3-binary/Sources/macprovider-cli/ModelsSubcommand.swift:struct ModelsCatalogEconomicsCommand",
+        "phase3-binary/Sources/macprovider-cli/CatalogEconomicsFetch.swift:actor CoordinatorFeedFetcher",
+        "phase3-binary/Sources/macprovider-cli/CatalogEconomicsFetch.swift:enum CatalogEconomicsAdmissionReader",
         "phase3-binary/app/Sources/Malibu/ModelManagement/ModelManagement.swift:struct MalibuModelCatalogEconomicsDocument"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/ModelCatalogEconomicsTests.swift::testLocalOnlyCandidateEncodesExplicitNullMoneyFields",
+        "phase3-binary/Tests/macprovider-cliTests/ModelCatalogEconomicsTests.swift::testIncompleteAdmissionReadDegradesRowsAndWarnsTheProjection",
+        "phase3-binary/Tests/macprovider-cliTests/CatalogEconomicsFetchTests.swift::testFeedFetcherReadsEachURLOnceAndOverlapsReads",
+        "phase3-binary/Tests/macprovider-cliTests/CatalogEconomicsFetchTests.swift::testSlowFeedHitsItsDeadlineInsteadOfHoldingTheProjection",
+        "phase3-binary/Tests/macprovider-cliTests/CatalogEconomicsFetchTests.swift::testAdmissionReadsRunConcurrentlyUpToTheCap",
+        "phase3-binary/Tests/macprovider-cliTests/CatalogEconomicsFetchTests.swift::testOneSlowAdmissionReadDoesNotBlockTheOthers",
         "phase3-binary/Tests/macprovider-cliTests/ModelCatalogEconomicsTests.swift::testCatalogPricedFreshSignedRateCardPermitsEconomicsWithoutSettlement",
         "phase3-binary/Tests/macprovider-cliTests/ModelCatalogEconomicsTests.swift::testSettlementCapableRequiresCoordinatorSettlementState",
         "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testCatalogEconomicsDecodeRejectsUnsupportedEnvelopeKeys",
@@ -9858,11 +9865,15 @@
       "state": "pending",
       "implementation": [
         "phase3-binary/app/Sources/Malibu/ModelManagement/ModelManagement.swift:var catalogProjectionRetryAvailable",
+        "phase3-binary/app/Sources/Malibu/ModelManagement/ModelManagement.swift:var hasUsableCatalogProjection",
         "phase3-binary/app/Sources/Malibu/ModelManagement/ModelManagement.swift:private func refreshCatalogEconomics",
         "phase3-binary/app/Sources/Malibu/ModelManagement/ModelsScreen.swift:struct ModelsScreen"
       ],
       "tests": [
         "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testRefreshFallsBackToStaticCurrentStateWhenProjectionFails",
+        "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testRefreshKeepsLastGoodProjectionAndRetriesWithoutFlapping",
+        "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testFailedRefreshAfterProjectionExpiryIsUnavailable",
+        "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testCatalogReadTimeoutCoversTheCLIBound",
         "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testLegacyFallbackCancelsPreviousCatalogProjectionExpiry",
         "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testCatalogProjectionExpiryClearsRowsAfterOperationFailure",
         "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testCatalogProjectionExpiryClearsRowsDuringRuntimeConflict",

@@ -17,6 +17,15 @@ Discover follows SPEC-044-R013. Provider shows reported serving, slot,
 continuous batching and native MTP state. Chat is a placeholder until the
 local-use requirements land. Quantization, architecture, parameter and
 capability columns stay off until the signed catalog carries them.
+This revision also covers the catalog refresh and the brand mark: (1) Models,
+Discover and the Dashboard model row keep the last good catalog projection on
+screen while a refresh runs and after a failed refresh, with a "Showing the
+last catalog update" notice and Retry, until the projection's SPEC-044-R003
+freshness deadline; "unavailable" needs a failed read and no usable
+projection (SPEC-044-R008). The catalog read bound is 15 s, above the CLI's
+own coordinator bound (SPEC-044-R002). (2) The menu-bar glyph, Dock icon and
+in-app tile draw the brand kit's Construction mark: a cut-out dome in a band,
+seven tapered rays and two side beams on the baseline.
 
 **Change log v0.32.0 (2026-10-18, #2029 Phase 1 truthful dashboard):**
 §3.1 and §3.2: the app launches as a menu-bar agent (`LSUIElement=true`) and
@@ -589,9 +598,10 @@ time (60–240 s for the first model) in the background.
 
 ### 3.2 Steady state
 
-- Menu bar icon: icon-only (#664), no USDC text. The glyph is a half-sun re-cut
-  for the status bar: ink at least 14 pt (16 pt shipped) tall in an 18 pt
-  canvas, strokes at least 1.5 pt, `NSStatusItem.variableLength`,
+- Menu bar icon: icon-only (#664), no USDC text. The glyph is the brand
+  Construction mark re-cut for the status bar (cut-out dome in a band, seven
+  rays, and the two side beams on the baseline): ink at least 14 pt tall in an
+  18 pt tall canvas, strokes at least 1.5 pt, nothing touching the canvas edge, `NSStatusItem.variableLength`,
   `imageScaling = .scaleNone`, template image. State badges: serving or idle
   is the plain template; paused adds a hollow ring (still template); needs
   attention (error, a provider issue, or serious thermal state) is a
@@ -636,8 +646,12 @@ time (60–240 s for the first model) in the background.
     stated before the signer opens.
   Models (SPEC-025-R004) switches through the CLI's warm-swap path when the
   provider advertises it, and a model list read is bounded so "Checking…"
-  always ends in a result or a retryable "unavailable". Malibu attaches to the
-  owner-only socket for typed status and referral projections (§5.2).
+  always ends in a result or a retryable "unavailable". A refresh runs behind
+  the last good catalog projection instead of returning to "Checking…", and a
+  failed refresh keeps that projection, with Retry, until its freshness
+  deadline (SPEC-044-R008); "unavailable" means a failed read with no usable
+  projection. Malibu attaches to the owner-only socket for typed status and
+  referral projections (§5.2).
 - Referral UI is likewise capability-gated: Malibu renders the sanitized CLI
   control-socket projection only when the CLI advertises `referral_status_v1`
   and `referral_fragment_links_v1`.
