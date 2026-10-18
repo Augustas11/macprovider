@@ -340,11 +340,15 @@ enum AutotuneModelContextCap {
             return nil
         }
 
-        let usableKVBytes = usableKVBytes(
+        // The one row's fixed recurrent state comes out of the budget before
+        // the per-token term divides it.
+        let budgetBytes = usableKVBytes(
             hardwareMemoryGB: hardwareMemoryGB,
             catalogMinRAMGB: catalogMinRAMGB,
             verifiedArtifactSizeBytes: verifiedArtifactSizeBytes
         )
+        let fixedBytes = UInt64(recurrentStateBytesPerSequence(in: root))
+        let usableKVBytes = budgetBytes > fixedBytes ? budgetBytes - fixedBytes : 0
         let additionalTokens = Int(min(
             UInt64(maximumAcceptedContext - minimumServeContext),
             usableKVBytes / UInt64(bytesPerToken)
@@ -383,13 +387,16 @@ enum AutotuneModelContextCap {
             catalogMinRAMGB: catalogMinRAMGB,
             verifiedArtifactSizeBytes: verifiedArtifactSizeBytes
         )
-        // One slot holds a full-context KV cache; guard the product against
-        // overflow before dividing.
-        guard let perSlotKVBytes = checkedProduct([UInt64(bytesPerToken), UInt64(calibrationContextTokens)]),
-              perSlotKVBytes > 0
+        // One slot holds a full-context KV cache plus its fixed recurrent
+        // state; guard the arithmetic against overflow before dividing.
+        guard let perSlotTokenBytes = checkedProduct([UInt64(bytesPerToken), UInt64(calibrationContextTokens)]),
+              case let perSlot = perSlotTokenBytes.addingReportingOverflow(UInt64(recurrentStateBytesPerSequence(in: root))),
+              !perSlot.overflow,
+              perSlot.partialValue > 0
         else {
             return nil
         }
+        let perSlotKVBytes = perSlot.partialValue
         let slots = usableKVBytes / perSlotKVBytes
         return max(1, Int(min(slots, UInt64(Int.max))))
     }
@@ -610,7 +617,82 @@ enum AutotuneModelContextCap {
         strictConfigRoot(configData).flatMap(kvCacheBytesPerToken(in:))
     }
 
+    /// Row-local fixed state bytes for one sequence (0 when the config has no
+    /// KDA `linear_attn_config`). SPEC-039 FR-PKV13 `glm5_next` sizing input:
+    /// every `linear_attention` layer holds an fp32 recurrent state
+    /// (`num_heads × head_dim²`) and a bf16 short-convolution state
+    /// (`(short_conv_kernel_size − 1) × 3 × num_heads × head_dim`), whatever
+    /// the context.
+    static func recurrentStateBytesPerSequence(configData: Data) -> Int {
+        strictConfigRoot(configData).map(recurrentStateBytesPerSequence(in:)) ?? 0
+    }
+
+    private static func recurrentStateBytesPerSequence(in root: [String: Any]) -> Int {
+        let text = root["text_config"] as? [String: Any] ?? root
+        guard let linear = text["linear_attn_config"] as? [String: Any],
+              let heads = firstInt(in: linear, paths: [["num_heads"]]),
+              let headDim = firstInt(in: linear, paths: [["head_dim"]])
+        else {
+            return 0
+        }
+        let kernel = firstInt(in: linear, paths: [["short_conv_kernel_size"]]) ?? 1
+        let layerTypes = (text["layer_types"] as? [Any])?.compactMap { $0 as? String }
+        let layers = layerTypes?.filter { $0 == "linear_attention" }.count
+            ?? (linear["kda_layers"] as? [Any])?.count
+            ?? 0
+        guard layers > 0,
+              let recurrent = checkedProduct([UInt64(heads), UInt64(headDim), UInt64(headDim), 4]),
+              let conv = checkedProduct([UInt64(kernel - 1), 3, UInt64(heads), UInt64(headDim), UInt64(bytesPerKVElement)]),
+              case let perLayer = recurrent.addingReportingOverflow(conv), !perLayer.overflow,
+              let total = checkedProduct([UInt64(layers), perLayer.partialValue]),
+              total <= UInt64(Int.max)
+        else {
+            return 0
+        }
+        return Int(total)
+    }
+
+    /// Multi-head latent attention (`kv_lora_rank`): each attention layer
+    /// caches one bf16 latent of `kv_lora_rank + qk_rope_head_dim` values per
+    /// token, not per-head K/V. A sparse-attention indexer adds its bf16 key
+    /// (`index_head_dim` values, pooled over `index_kpool` tokens when
+    /// `index_kpool_compress` is set), and each next-N (MTP) layer carries the
+    /// same cache (SPEC-039 FR-PKV13 `glm5_next`: 11 × 1,088 + 1,088 bytes).
+    private static func latentKVCacheBytesPerToken(in root: [String: Any], kvLoraRank: Int) -> Int? {
+        let text = root["text_config"] as? [String: Any] ?? root
+        guard let declaredLayers = firstInt(in: text, paths: [["num_hidden_layers"], ["n_layer"], ["num_layers"]]) else {
+            return nil
+        }
+        let ropeDim = intValue(in: text, path: ["qk_rope_head_dim"]) ?? 0
+        let nextNLayers = intValue(in: text, path: ["num_nextn_predict_layers"]) ?? 0
+        guard ropeDim >= 0, nextNLayers >= 0 else {
+            return nil
+        }
+        let attentionTypes: Set<String> = ["full_attention", "deepseek_sparse_attention"]
+        let layerTypes = (text["layer_types"] as? [Any])?.compactMap { $0 as? String }
+        let layers = layerTypes?.count == declaredLayers
+            ? layerTypes?.filter { attentionTypes.contains($0) }.count ?? 0
+            : declaredLayers
+        var indexerBytes: UInt64 = 0
+        if let indexHeadDim = firstInt(in: text, paths: [["index_head_dim"]]) {
+            let pooled = (text["index_kpool_compress"] as? Bool) == true
+            let kpool = pooled ? firstInt(in: text, paths: [["index_kpool"]]) ?? 1 : 1
+            let keyBytes = UInt64(indexHeadDim) * UInt64(bytesPerKVElement)
+            indexerBytes = (keyBytes + UInt64(kpool) - 1) / UInt64(kpool)
+        }
+        guard let latentBytes = checkedProduct([UInt64(kvLoraRank + ropeDim), UInt64(bytesPerKVElement)]),
+              let bytes = checkedProduct([UInt64(layers + nextNLayers), latentBytes + indexerBytes]),
+              bytes <= UInt64(Int.max)
+        else {
+            return nil
+        }
+        return Int(bytes)
+    }
+
     private static func kvCacheBytesPerToken(in root: [String: Any]) -> Int? {
+        if let kvLoraRank = firstInt(in: root, paths: [["kv_lora_rank"], ["text_config", "kv_lora_rank"]]) {
+            return latentKVCacheBytesPerToken(in: root, kvLoraRank: kvLoraRank)
+        }
         guard let declaredLayers = firstInt(in: root, paths: [
             ["num_hidden_layers"],
             ["n_layer"],
