@@ -10602,12 +10602,16 @@ final class NativeMTPRevocationStub: @unchecked Sendable {
     private var revokedSet: Set<String> = []
     private var unavailable = false
 
+    private func locked<T>(_ body: () throws -> T) rethrows -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return try body()
+    }
+
     var poller: ModelRuntime.NativeMTPRevocationPoller {
         { [self] _, onRevoked in
             let (stream, continuation) = AsyncStream<Void>.makeStream()
-            lock.lock()
-            continuations.append(continuation)
-            lock.unlock()
+            locked { continuations.append(continuation) }
             for await _ in stream {
                 await onRevoked()
                 return
@@ -10617,36 +10621,25 @@ final class NativeMTPRevocationStub: @unchecked Sendable {
 
     var reader: ModelRuntime.NativeMTPRevokedSetReader {
         { [self] _, _ in
-            lock.lock()
-            defer { lock.unlock() }
-            if unavailable { throw NativeMTPRevocationFeedError.missingFeed }
-            return revokedSet
+            try locked {
+                if unavailable { throw NativeMTPRevocationFeedError.missingFeed }
+                return revokedSet
+            }
         }
     }
 
-    var watchers: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return continuations.count
-    }
+    var watchers: Int { locked { continuations.count } }
 
     func revoke() {
-        lock.lock()
-        let latest = continuations.last
-        lock.unlock()
-        latest?.yield()
+        locked { continuations.last }?.yield()
     }
 
     func setRevokedSet(_ set: Set<String>) {
-        lock.lock()
-        revokedSet = set
-        lock.unlock()
+        locked { revokedSet = set }
     }
 
     func setUnavailable(_ value: Bool) {
-        lock.lock()
-        unavailable = value
-        lock.unlock()
+        locked { unavailable = value }
     }
 }
 

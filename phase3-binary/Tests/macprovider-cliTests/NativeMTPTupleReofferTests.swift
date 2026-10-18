@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import MacProviderCore
 import XCTest
 @testable import macprovider_cli
 
