@@ -33,6 +33,18 @@ struct NativeMTPJourneyE2ECommand: AsyncParsableCommand {
     @Option(name: .customLong("max-prompt-tokens"), help: "Tuple max_prompt_tokens.")
     var maxPromptTokens: Int = 4096
 
+    @Flag(name: .customLong("selftest-only"), help: "Run only step 12 (the challenge-bank record), one model load.")
+    var selfTestOnly = false
+
+    @Option(
+        name: .customLong("selftest-prompt"),
+        help: "Step-12 challenge text, encoded with special tokens; repeat to record one step 12 per text in one load."
+    )
+    var selfTestPrompts: [String] = []
+
+    @Option(name: .customLong("selftest-challenge-id"), help: "Step-12 challenge_id; unique within one bank.")
+    var selfTestChallengeID: String = NativeMTPJourneyRunner.defaultSelfTestChallengeID
+
     func run() async throws {
         guard ProcessInfo.processInfo.environment["MACPROVIDER_NATIVE_MTP_E2E"] == "1" else {
             FileHandle.standardError.write(Data("native-mtp-journey-e2e: set MACPROVIDER_NATIVE_MTP_E2E=1 on the Mac Studio\n".utf8))
@@ -51,7 +63,10 @@ struct NativeMTPJourneyE2ECommand: AsyncParsableCommand {
             modelID: modelID,
             qualifiedSlots: qualifiedSlots,
             maxNativeActiveRows: maxNativeActiveRows,
-            maxPromptTokens: maxPromptTokens
+            maxPromptTokens: maxPromptTokens,
+            selfTestOnly: selfTestOnly,
+            selfTestPrompts: selfTestPrompts.isEmpty ? [NativeMTPJourneyRunner.defaultSelfTestPrompt] : selfTestPrompts,
+            selfTestChallengeID: selfTestChallengeID
         )
         let result = try await journey.run()
         let data = try JSONSerialization.data(withJSONObject: result.document, options: [.sortedKeys])
@@ -92,6 +107,12 @@ final class NativeMTPJourneyRunner {
     private let qualifiedSlots: Int
     private let maxNativeActiveRows: Int
     private let maxPromptTokens: Int
+    private let selfTestOnly: Bool
+    private let selfTestPrompts: [String]
+    private let selfTestChallengeID: String
+    static let defaultSelfTestPrompt =
+        "native_mtp_selftest_v1 synthetic challenge: continue the sequence alpha beta gamma delta"
+    static let defaultSelfTestChallengeID = "native-mtp-selftest-journey-0001"
     /// The tuple's request profile admits sampled rows (Qwen3.5). A
     /// greedy-only tuple (glm5_next) must route them to ordinary decode with
     /// reason `sampling` (SPEC-048 R004).
@@ -228,12 +249,24 @@ final class NativeMTPJourneyRunner {
         .blockBoundary(blockTokens: boundaryBlockTokens(family: family), includeBlockStart: family != .qwen35)
     }
 
-    init(root: String, modelID: String, qualifiedSlots: Int, maxNativeActiveRows: Int, maxPromptTokens: Int) {
+    init(
+        root: String,
+        modelID: String,
+        qualifiedSlots: Int,
+        maxNativeActiveRows: Int,
+        maxPromptTokens: Int,
+        selfTestOnly: Bool = false,
+        selfTestPrompts: [String] = [NativeMTPJourneyRunner.defaultSelfTestPrompt],
+        selfTestChallengeID: String = NativeMTPJourneyRunner.defaultSelfTestChallengeID
+    ) {
         self.root = root
         self.modelID = modelID
         self.qualifiedSlots = qualifiedSlots
         self.maxNativeActiveRows = maxNativeActiveRows
         self.maxPromptTokens = maxPromptTokens
+        self.selfTestOnly = selfTestOnly
+        self.selfTestPrompts = selfTestPrompts
+        self.selfTestChallengeID = selfTestChallengeID
     }
 
     func run() async throws -> (document: [String: Any], passed: Bool) {
@@ -293,35 +326,42 @@ final class NativeMTPJourneyRunner {
                 ))
             }
         }
-        await run("step-04-serial-token-oracle") {
-            try await serialOracle(ordinary: ordinary, native: native, recorder: recorder, proposalDepth: fixture.admission.maxProposalDepth)
+        // --selftest-only: step 12 alone, for a challenge-bank record.
+        if !selfTestOnly {
+            await run("step-04-serial-token-oracle") {
+                try await serialOracle(ordinary: ordinary, native: native, recorder: recorder, proposalDepth: fixture.admission.maxProposalDepth)
+            }
+            await run("step-05-cache-state-boundary") {
+                try await cacheStateBoundary(
+                    ordinary: ordinary, native: native, recorder: recorder, override: override,
+                    boundaryTokens: boundaryTokens
+                )
+            }
+            await run("step-06-streaming-stop") {
+                try await streamingStop(ordinary: ordinary, native: native, recorder: recorder)
+            }
+            await run("step-07-08-mixed-multirow-capacity") {
+                try await mixedMultirowAndCapacity(
+                    ordinary: ordinary,
+                    native: native,
+                    recorder: recorder,
+                    gateRecorder: gateRecorder,
+                    container: fixture.runtimes.targetContainer
+                )
+            }
+            await run("step-09-cancellation") {
+                try await cancellation(ordinary: ordinary, native: native, recorder: recorder)
+            }
         }
-        await run("step-05-cache-state-boundary") {
-            try await cacheStateBoundary(
-                ordinary: ordinary, native: native, recorder: recorder, override: override,
-                boundaryTokens: boundaryTokens
-            )
+        for (index, prompt) in selfTestPrompts.enumerated() {
+            await run("step-12-native-selftest") {
+                try await selfTest(ordinary: ordinary, native: native, fixture: fixture, prompt: prompt, promptIndex: index)
+            }
         }
-        await run("step-06-streaming-stop") {
-            try await streamingStop(ordinary: ordinary, native: native, recorder: recorder)
-        }
-        await run("step-07-08-mixed-multirow-capacity") {
-            try await mixedMultirowAndCapacity(
-                ordinary: ordinary,
-                native: native,
-                recorder: recorder,
-                gateRecorder: gateRecorder,
-                container: fixture.runtimes.targetContainer
-            )
-        }
-        await run("step-09-cancellation") {
-            try await cancellation(ordinary: ordinary, native: native, recorder: recorder)
-        }
-        await run("step-12-native-selftest") {
-            try await selfTest(ordinary: ordinary, native: native, fixture: fixture)
-        }
-        await run("step-10-warm-swap") {
-            try await warmSwapBoundary(ordinary: ordinary, native: native, recorder: recorder, fixture: fixture)
+        if !selfTestOnly {
+            await run("step-10-warm-swap") {
+                try await warmSwapBoundary(ordinary: ordinary, native: native, recorder: recorder, fixture: fixture)
+            }
         }
         let reportSteps = steps.sorted { stepOrder($0.id) < stepOrder($1.id) }
         let passed = reportSteps.allSatisfy(\.passed)
@@ -333,7 +373,7 @@ final class NativeMTPJourneyRunner {
             // Covers only the hardware steps below; never a journey verdict.
             "journey_complete": false,
             "executed_steps_status": executedStatus,
-            "covered_steps": [
+            "covered_steps": selfTestOnly ? ["step-12-native-canary (provider-local self-test half)"] : [
                 "step-04-serial-token-oracle",
                 "step-05-cache-state-boundary",
                 "step-06-streaming-stop",
@@ -1124,37 +1164,51 @@ final class NativeMTPJourneyRunner {
     /// shape at the fixed depth is exact against the ordinary oracle and
     /// deterministic across runs, so its counters and committed-state digest
     /// can be signed into the release challenge bank. Emits that record.
-    private func selfTest(ordinary: ModelRuntime, native: ModelRuntime, fixture: NativeMTPHardwareRuntimeFixture) async throws -> NativeMTPJourneyStep {
+    private func selfTest(
+        ordinary: ModelRuntime,
+        native: ModelRuntime,
+        fixture: NativeMTPHardwareRuntimeFixture,
+        prompt: String,
+        promptIndex: Int
+    ) async throws -> NativeMTPJourneyStep {
         var step = NativeMTPJourneyStep(id: "step-12-native-selftest")
         step.uncovered = ["coordinator-issued SPEC-031-R033 canary and its negative outcomes"]
         let promptTokenIDs = try await fixture.runtimes.targetContainer.perform { context in
-            context.tokenizer.encode(
-                text: "native_mtp_selftest_v1 synthetic challenge: continue the sequence alpha beta gamma delta",
-                addSpecialTokens: true
-            )
+            context.tokenizer.encode(text: prompt, addSpecialTokens: true)
         }
+        // Execution ids are replay keys: each prompt gets its own (the first
+        // keeps the ids every earlier record used).
+        let suffix = promptIndex == 0 ? "" : "-p\(promptIndex)"
         let maxCompletionTokens = 64
         let depth = fixture.admission.maxProposalDepth
+        // Native twice, then ordinary: the provider's self-check order, so the
+        // speedup estimate below sees the same warm/cold split.
+        // Distinct execution ids: a reused id would replay the retained
+        // terminal result and make determinism trivially true.
+        var started = Date()
+        let first = try await native.labTokenProbe(
+            id: "native-mtp-selftest-journey-0001-run-a\(suffix)",
+            promptTokenIDs: promptTokenIDs,
+            maxCompletionTokens: maxCompletionTokens,
+            nativeDepth: depth
+        )
+        let firstSeconds = Date().timeIntervalSince(started)
+        started = Date()
+        let second = try await native.labTokenProbe(
+            id: "native-mtp-selftest-journey-0001-run-b\(suffix)",
+            promptTokenIDs: promptTokenIDs,
+            maxCompletionTokens: maxCompletionTokens,
+            nativeDepth: depth
+        )
+        let secondSeconds = Date().timeIntervalSince(started)
+        started = Date()
         let oracle = try await ordinary.labTokenProbe(
-            id: "native-mtp-selftest-oracle",
+            id: "native-mtp-selftest-oracle\(suffix)",
             promptTokenIDs: promptTokenIDs,
             maxCompletionTokens: maxCompletionTokens,
             nativeDepth: nil
         )
-        // Distinct execution ids: a reused id would replay the retained
-        // terminal result and make determinism trivially true.
-        let first = try await native.labTokenProbe(
-            id: "native-mtp-selftest-journey-0001-run-a",
-            promptTokenIDs: promptTokenIDs,
-            maxCompletionTokens: maxCompletionTokens,
-            nativeDepth: depth
-        )
-        let second = try await native.labTokenProbe(
-            id: "native-mtp-selftest-journey-0001-run-b",
-            promptTokenIDs: promptTokenIDs,
-            maxCompletionTokens: maxCompletionTokens,
-            nativeDepth: depth
-        )
+        let ordinarySeconds = Date().timeIntervalSince(started)
         func digest(_ result: ContinuousBatchSchedulerResult) -> String? {
             guard let counters = result.nativeMTPCounters else { return nil }
             return NativeMTPSelfTestDigest.committedStateDigest(
@@ -1178,7 +1232,7 @@ final class NativeMTPJourneyRunner {
             // Exactly the SPEC-031-R033 challenge-bank entry fields; the release
             // signs this into native-mtp-selftest-bank.json.
             step.details["challenge_bank_entry"] = [
-                "challenge_id": "native-mtp-selftest-journey-0001",
+                "challenge_id": selfTestChallengeID,
                 "model_id": modelID,
                 "model_hash": fixture.targetIdentity.digest,
                 "tokenizer_sha256": fixture.tokenizerSHA256,
@@ -1199,6 +1253,25 @@ final class NativeMTPJourneyRunner {
                 "expected_committed_state_sha256": state,
             ] as [String: Any]
         }
+        // The provider's on-device self-check (SPEC-048-R016 0.1.32) runs this
+        // same challenge and needs native at least 1.15x faster than ordinary
+        // (best of two native runs). An estimate only: the provider times both
+        // paths on one paged engine, this step on two runtimes.
+        let verdict = NativeMTPOnDeviceSelfCheck.decide(
+            mtpTokens: first.generatedTokens,
+            mtpSeconds: min(firstSeconds, secondSeconds),
+            ordinaryTokens: oracle.generatedTokens,
+            ordinarySeconds: ordinarySeconds
+        )
+        step.details["on_device_selfcheck_estimate"] = [
+            "ordinary_seconds": ordinarySeconds,
+            "native_best_seconds": min(firstSeconds, secondSeconds),
+            "speedup": verdict.speedup,
+            "minimum_speedup": NativeMTPOnDeviceSelfCheck.minimumSpeedup,
+            "reason": verdict.reason,
+        ] as [String: Any]
+        step.details["selftest_prompt_index"] = promptIndex
+        step.details["selftest_prompt"] = prompt
         step.details["coordinator_canary"] = "not_run_isolated_no_join"
         return step
     }
