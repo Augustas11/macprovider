@@ -36,19 +36,19 @@ struct ModelRowView: View {
                     // authoritative name; the provider-reported display name is
                     // shown as clearly-labelled secondary text so it can never be
                     // mistaken for a catalog-verified identity.
-                    Text(catalogVerifiedModelKey)
+                    Text(ShellText.display(catalogVerifiedModelKey))
                         .font(.body.monospaced())
                         .lineLimit(2)
                         .truncationMode(.middle)
                         .textSelection(.enabled)
-                    Text(String(localized: "Provider-reported: \(row.displayID)", comment: "Provider-reported model name shown under the catalog-verified identity"))
+                    Text(String(localized: "Provider-reported: \(ShellText.display(row.displayID))", comment: "Provider-reported model name shown under the catalog-verified identity"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .textSelection(.enabled)
                 } else {
-                    Text(row.displayID)
+                    Text(ShellText.display(row.displayID))
                         .font(.body.monospaced())
                         .lineLimit(2)
                         .truncationMode(.middle)
@@ -133,17 +133,17 @@ struct ModelRowView: View {
                 } else if row.action == .evaluate {
                     Button(ModelFeatureUI.activate, action: onAction)
                         .disabled(!enabled)
-                        .accessibilityLabel(Text(String(localized: "Evaluate \(row.displayID)", comment: "Evaluation accessibility label")))
+                        .accessibilityLabel(Text(String(localized: "Evaluate \(ShellText.display(row.displayID))", comment: "Evaluation accessibility label")))
                 }
                 if row.canProposeToPool {
                     Button(ModelFeatureUI.proposeToPool, action: onPropose)
                         .disabled(!byomEnabled)
-                        .accessibilityLabel(Text(String(localized: "Propose \(row.displayID) to a Trusted Pool", comment: "Propose accessibility label")))
+                        .accessibilityLabel(Text(String(localized: "Propose \(ShellText.display(row.displayID)) to a Trusted Pool", comment: "Propose accessibility label")))
                 }
                 if row.canWithdraw {
                     Button(ModelFeatureUI.withdraw, role: .destructive, action: onWithdraw)
                         .disabled(!byomEnabled)
-                        .accessibilityLabel(Text(String(localized: "Withdraw the offer for \(row.displayID)", comment: "Withdraw accessibility label")))
+                        .accessibilityLabel(Text(String(localized: "Withdraw the offer for \(ShellText.display(row.displayID))", comment: "Withdraw accessibility label")))
                 }
             }
         }
@@ -231,7 +231,7 @@ struct PoolProposeSheet: View {
         VStack(alignment: .leading, spacing: 12) {
             Text(String(localized: "Propose to a Trusted Pool", comment: "Propose sheet title"))
                 .font(.title3.weight(.semibold))
-            Text(row.displayID)
+            Text(ShellText.display(row.displayID))
                 .font(.body.monospaced())
                 .lineLimit(2)
                 .truncationMode(.middle)

@@ -2515,7 +2515,7 @@ final class ModelManagementStore: ObservableObject {
         self.currentModelID = configuredModel
         let supportsLegacyList = readySwitchCapabilityAvailable
         if catalogEconomicsCapabilityAvailable {
-            if background, servedModelUnchanged, hasUsableCatalogProjection, !catalogRefreshFailed,
+            if background, servedModelUnchanged, hasUsableCatalogProjection,
                let notBefore = catalogBackgroundRefreshNotBefore, notBefore > Date() {
                 return
             }
@@ -2613,16 +2613,19 @@ final class ModelManagementStore: ObservableObject {
         }
     }
 
-    private func runBoundedListCommand(arguments: [String]) async throws -> ModelCLIResult {
+    /// Escalation from SIGTERM to SIGKILL for a bounded read.
+    private static let listCommandKillGraceSeconds: TimeInterval = 3
+
+    private func runBoundedListCommand(arguments: [String], timeoutSeconds: TimeInterval? = nil) async throws -> ModelCLIResult {
         listCommandTimedOut = false
-        let timeoutNanoseconds = UInt64(max(0, listCommandTimeoutSeconds) * 1_000_000_000)
+        let timeoutNanoseconds = UInt64(max(0, timeoutSeconds ?? listCommandTimeoutSeconds) * 1_000_000_000)
         let timeout = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: timeoutNanoseconds)
             guard !Task.isCancelled, let self else { return }
             self.listCommandTimedOut = true
             self.cli.cancelCurrentOperation()
             // Escalate if the CLI ignores SIGTERM.
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            try? await Task.sleep(nanoseconds: UInt64(Self.listCommandKillGraceSeconds * 1_000_000_000))
             guard !Task.isCancelled else { return }
             self.cli.forceTerminateCurrentOperation()
         }
@@ -2701,6 +2704,9 @@ final class ModelManagementStore: ObservableObject {
     private func catalogRefreshDidFail() {
         catalogRefreshFailed = true
         if hasUsableCatalogProjection {
+            // Status polling waits out the same interval before trying again;
+            // Retry reads at once.
+            catalogBackgroundRefreshNotBefore = Date().addingTimeInterval(catalogBackgroundRefreshSeconds)
             // A failed refresh behind a still-fresh projection keeps it; the
             // expiry check retires it at its freshness deadline.
             operation = .idle
@@ -3021,10 +3027,16 @@ final class ModelManagementStore: ObservableObject {
         var bindings: [String: MalibuBYOMPoolBinding] = [:]
         let budgetEnds = Date().addingTimeInterval(poolBindingReadBudgetSeconds)
         for row in rows where row.earningPathClass == "pool_attested_earning" || row.poolScopeCandidate {
-            guard Date() < budgetEnds else { break }
+            // Each read gets only what is left of the budget, less the kill
+            // grace, so the readback as a whole ends inside the budget.
+            let readSeconds = min(
+                listCommandTimeoutSeconds,
+                budgetEnds.timeIntervalSinceNow - Self.listCommandKillGraceSeconds
+            )
+            guard readSeconds >= 1 else { break }
             guard let result = try? await runBoundedListCommand(arguments: [
                 "models", "admission", "status", row.id, "--json", "--config", paths.configFile.path,
-            ] + byomAdapterSettings.cliArguments), result.exitCode == 0,
+            ] + byomAdapterSettings.cliArguments, timeoutSeconds: readSeconds), result.exitCode == 0,
                 let status = try? Self.decodeStrict(MalibuBYOMAdmissionStatusDocument.self, from: result.stdout),
                 (try? status.validated(expectedCandidateID: row.id)) != nil,
                 status.providerGuidance.earningPathClass == row.earningPathClass,

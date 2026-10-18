@@ -1382,6 +1382,33 @@ final class ModelManagementTests: XCTestCase {
     }
 
     @MainActor
+    func testStatusDrivenRefreshAlsoWaitsAfterAFailedRefresh() async throws {
+        let cli = FakeModelCLI(results: [
+            ModelCLIResult(
+                exitCode: 0,
+                stdout: catalogEconomicsJSON(rows: [trustedEconomicsRowJSON()], generatedAt: Self.timestamp(offset: -1)),
+                stderr: ""
+            ),
+            ModelCLIResult(exitCode: 1, stdout: "", stderr: "coordinator unavailable"),
+        ])
+        let store = ModelManagementStore(
+            cli: cli,
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.backgroundAfterFailure.\(UUID().uuidString)")!
+        )
+        let peer = peer(for: MalibuModelCapabilityManifest.catalogEconomics)
+        await store.refresh(currentModelID: "other/model", peer: peer)
+        await store.refresh(currentModelID: "other/model", peer: peer)
+        XCTAssertTrue(store.catalogRefreshFailed)
+        XCTAssertFalse(store.rows.isEmpty, "the last good projection stays")
+
+        await store.refresh(currentModelID: "other/model", peer: peer, background: true)
+        XCTAssertEqual(cli.invocations.count, 2, "status polling does not retry a failed refresh every 15 s")
+        XCTAssertEqual(store.operation, .idle)
+        XCTAssertTrue(store.catalogProjectionRetryAvailable, "Retry stays offered")
+    }
+
+    @MainActor
     func testSwitchReportsNotStartedWhenControlsAreNotReady() async throws {
         let cli = FakeModelCLI(results: [
             ModelCLIResult(

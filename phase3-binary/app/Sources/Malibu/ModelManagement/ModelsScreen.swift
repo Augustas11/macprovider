@@ -468,7 +468,7 @@ struct ModelsScreen: View {
                     Text(ShellText.display(previous))
                         .font(.caption.monospaced())
                         .textSelection(.enabled)
-                    Button(String(localized: "Revert to \(previous)", comment: "Revert action with target model")) {
+                    Button(String(localized: "Revert to \(ShellText.display(previous))", comment: "Revert action with target model")) {
                         if let row = store.rows.first(where: {
                             $0.id.lowercased(with: nil) == previous.lowercased(with: nil)
                         }) {
