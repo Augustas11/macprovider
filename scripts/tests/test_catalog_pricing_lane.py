@@ -84,7 +84,7 @@ class SpliceBoundaryTests(unittest.TestCase):
     def test_tracked_boundary_keeps_settlement_comments_outside(self) -> None:
         start, end = cr.coordinator_rate_card_block_span(TRACKED, "tracked")
         self.assertTrue(TRACKED[start:].startswith(b"  rate_card:\n    # Wave 1 subset"))
-        self.assertTrue(TRACKED[:end].endswith(b"completion_credits_per_mtok: 688000    # $0.688/M\n"))
+        self.assertTrue(TRACKED[:end].endswith(b"completion_credits_per_mtok: 88000     # $0.088/M\n"))
         self.assertTrue(TRACKED[end:].startswith(SETTLEMENT_TAIL))
 
     def test_identity_splice_is_byte_identical(self) -> None:
@@ -400,11 +400,15 @@ class EffectiveDiffTests(unittest.TestCase):
     def test_ack_file_schema(self) -> None:
         committed = (CANONICAL / "acknowledged-pricing-moves.json").read_bytes()
         # #2016: the Qwen2-VL promotion moved both served spellings off default.
+        # #2029: the GLM-5.3-Flash promotion moves its served artifact id and
+        # OpenRouter slug onto the zai-org/glm-5.3-flash row.
         self.assertEqual(
             cr.load_pricing_move_acks(committed, "committed"),
             {
                 ("mlx-community/Qwen2-VL-2B-Instruct-4bit", "default", "qwen2-vl-2b-instruct"),
                 ("mlx-community/qwen2-vl-2b-instruct-4bit", "default", "qwen2-vl-2b-instruct"),
+                ("Jundot/GLM-5.3-Flash-oQ4e-mtp", "default", "zai-org/glm-5.3-flash"),
+                ("z-ai/glm-5.3-flash", "default", "zai-org/glm-5.3-flash"),
             },
         )
         for bad in (
