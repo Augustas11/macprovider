@@ -1,6 +1,10 @@
 package rewards
 
-import "strconv"
+import (
+	"database/sql"
+	"strconv"
+	"time"
+)
 
 const MalibuRewardEligibilitySchemaV1 = "malibu_reward_eligibility.v1"
 
@@ -28,6 +32,7 @@ const (
 	ReasonHeldProviderDailyCap             = "held_provider_daily_cap"
 	ReasonHeldWalletDailyCap               = "held_wallet_daily_cap"
 	ReasonHeldDemotionCooldown             = "held_demotion_cooldown"
+	ReasonHeldRetainedTrustHold            = "held_retained_trust_hold"
 	ReasonHeldEpochDisposition             = "held_epoch_disposition"
 	ReasonExcludedEpochDisposition         = "excluded_epoch_disposition"
 	ReasonBurnedOrRetiredEpochDisposition  = "burned_or_retired_epoch_disposition"
@@ -80,11 +85,15 @@ type MalibuRewardEligibilityReadModel struct {
 // runtime-health, hardware-evidence, and compute-integrity owners without
 // changing the response shape.
 type MalibuRewardEligibilityFacts struct {
-	AccruedMALIBU          string
-	WithdrawableMALIBU     string
-	HeldMALIBU             string
-	TrustTier              string
-	WithdrawalHoldReasons  []string
+	AccruedMALIBU         string
+	WithdrawableMALIBU    string
+	HeldMALIBU            string
+	TrustTier             string
+	WithdrawalHoldReasons []string
+	// RetainedTrustHold reports held MALIBU whose trust hold was written
+	// under an earlier trust state (an elapsed demotion cooldown, or a
+	// Provisional tier before promotion). Those rows stay held.
+	RetainedTrustHold      bool
 	ProviderDailyCapped    bool
 	WalletBound            bool
 	VerifiedReceiptCount   int
@@ -101,12 +110,20 @@ func RewardEligibilityFromBalanceAndTrust(bal AccrualBalance, trust TrustCriteri
 }
 
 func rewardEligibilityFromBalanceTrustAndWallet(bal AccrualBalance, trust TrustCriteriaStatus, walletBound bool) MalibuRewardEligibilityReadModel {
+	if bal.ActiveHoldReasons == nil && bal.RetainedHoldReasons == nil {
+		var cooldown sql.NullTime
+		if trust.DemotionCooldownUntil != nil {
+			cooldown = sql.NullTime{Time: *trust.DemotionCooldownUntil, Valid: true}
+		}
+		bal.ActiveHoldReasons, bal.RetainedHoldReasons = classifyHoldReasons(bal.HoldReasons, bal.TrustTier, cooldown, time.Now().UTC())
+	}
 	return BuildMalibuRewardEligibility(MalibuRewardEligibilityFacts{
 		AccruedMALIBU:         bal.AccruedMALIBU,
 		WithdrawableMALIBU:    bal.WithdrawableMALIBU,
 		HeldMALIBU:            bal.HeldMALIBU,
 		TrustTier:             bal.TrustTier,
-		WithdrawalHoldReasons: bal.HoldReasons,
+		WithdrawalHoldReasons: bal.ActiveHoldReasons,
+		RetainedTrustHold:     len(bal.RetainedHoldReasons) > 0,
 		ProviderDailyCapped:   bal.ProviderDailyCapped,
 		WalletBound:           walletBound,
 		VerifiedReceiptCount:  trust.VerifiedReceiptCount,
@@ -200,6 +217,9 @@ func orderedRewardReasons(f MalibuRewardEligibilityFacts) []string {
 	if f.ProviderDailyCapped {
 		add(ReasonHeldProviderDailyCap)
 	}
+	if f.RetainedTrustHold && decimalPositive(f.HeldMALIBU) {
+		add(ReasonHeldRetainedTrustHold)
+	}
 
 	if !f.WalletBound {
 		add(ReasonMissingWalletBinding)
@@ -280,7 +300,8 @@ func withdrawalStateFor(f MalibuRewardEligibilityFacts, reasons []string) string
 	}
 	if containsReason(reasons, ReasonHeldProvisionalTrustTier) ||
 		containsReason(reasons, ReasonHeldDemotionCooldown) ||
-		containsReason(reasons, ReasonHeldEpochDisposition) {
+		containsReason(reasons, ReasonHeldEpochDisposition) ||
+		containsReason(reasons, ReasonHeldRetainedTrustHold) {
 		return WithdrawalStateHeld
 	}
 	if containsReason(reasons, ReasonMissingWalletBinding) {
@@ -302,11 +323,14 @@ func primaryRewardReason(withdrawalState, earningState string, reasons []string)
 		ReasonBurnedOrRetiredEpochDisposition,
 		ReasonExcludedEpochDisposition,
 		ReasonHeldEpochDisposition,
+		// Missing hardware evidence is an earning blocker the provider can
+		// act on; it outranks trust holds, which have no provider action.
+		ReasonHardwareEvidenceMissingOrExpired,
 		ReasonHeldDemotionCooldown,
 		ReasonHeldProvisionalTrustTier,
+		ReasonHeldRetainedTrustHold,
 		ReasonMissingWalletBinding,
 		ReasonComputeIntegrityUnavailable,
-		ReasonHardwareEvidenceMissingOrExpired,
 		ReasonHardwareEvidenceUnavailable,
 		ReasonLocalOnBattery,
 		ReasonLocalThermalPressure,

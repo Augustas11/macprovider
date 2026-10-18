@@ -46,10 +46,13 @@ type TrustCriteriaStatus struct {
 	CriteriaMet           int
 	CriteriaRequired      int
 	UnlockPairOKSince     *time.Time
-	VerifiedReceiptCount  int
-	WalletBound           bool
-	AppAttested           bool
-	OperatorPromoted      bool
-	UptimeOK              bool
-	WalletBalanceOK       bool
+	// UptimeOKSince is the start of the current gap-free A1 heartbeat
+	// window, nil while the provider has no current heartbeat.
+	UptimeOKSince        *time.Time
+	VerifiedReceiptCount int
+	WalletBound          bool
+	AppAttested          bool
+	OperatorPromoted     bool
+	UptimeOK             bool
+	WalletBalanceOK      bool
 }

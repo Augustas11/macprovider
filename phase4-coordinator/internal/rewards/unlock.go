@@ -503,6 +503,11 @@ func QueryTrustCriteriaStatus(ctx context.Context, db, payoutDB *sql.DB, provide
 		t := st.UnlockPairOKSince.Time
 		pairSince = &t
 	}
+	var uptimeOKSince *time.Time
+	if uptimeSince.Valid {
+		t := uptimeSince.Time.UTC()
+		uptimeOKSince = &t
+	}
 	tier := st.TrustTier
 	if tier == "" {
 		tier = TierProvisional
@@ -515,6 +520,7 @@ func QueryTrustCriteriaStatus(ctx context.Context, db, payoutDB *sql.DB, provide
 		CriteriaMet:           met,
 		CriteriaRequired:      2,
 		UnlockPairOKSince:     pairSince,
+		UptimeOKSince:         uptimeOKSince,
 		VerifiedReceiptCount:  receiptCount,
 		WalletBound:           walletBound,
 		AppAttested:           appAttested,
