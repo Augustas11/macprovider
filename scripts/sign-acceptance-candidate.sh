@@ -383,6 +383,27 @@ spctl -a -vvv -t exec "$app"
 # packaging regression can never reach a published DMG again).
 [[ -f "$app/Contents/MacOS/mlx.metallib" ]] ||
   die "signed Malibu.app lacks adjacent mlx.metallib for the bundled macprovider-cli"
+# Every metallib this candidate ships carries every kernel the pinned MLX core
+# loads by name (CLI 1.8.254 shipped without gather_mm_offsets), judged by the
+# candidate commit's own manifest.
+mlx_manifest="$signing_tmp/mlx-metallib-required-kernels.json"
+mlx_manifest_path="phase3-binary/mlx-metallib-required-kernels.json"
+if git -C "$root" cat-file -e "$candidate_commit:$mlx_manifest_path" 2>/dev/null; then
+  git -C "$root" show "$candidate_commit:$mlx_manifest_path" >"$mlx_manifest"
+else
+  curl -fsSL --proto '=https' --max-time 60 \
+    "https://raw.githubusercontent.com/$repository/$candidate_commit/$mlx_manifest_path" -o "$mlx_manifest" ||
+    die "cannot read $mlx_manifest_path at candidate commit $candidate_commit"
+fi
+mlx_shipped_metallibs=("$cli_work/mlx.metallib" "$app/Contents/MacOS/mlx.metallib")
+for bundled_metallib in \
+  "$cli_work/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib" \
+  "$app/Contents/MacOS/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib"; do
+  [[ -f "$bundled_metallib" ]] && mlx_shipped_metallibs+=("$bundled_metallib")
+done
+python3 "$root/scripts/mlx-metallib-kernels.py" check \
+  --manifest "$mlx_manifest" "${mlx_shipped_metallibs[@]}" ||
+  die "a shipped metallib lacks kernels the pinned MLX core loads by name"
 
 mkdir "$output_dir"
 provider_asset="$output_dir/macprovider-cli-${tag}-darwin-arm64.tar.gz"
@@ -431,6 +452,14 @@ codesign --sign "$signing_identity" --keychain "$keychain" --timestamp "$malibu_
   --wait
 xcrun stapler staple "$malibu_asset"
 xcrun stapler validate "$malibu_asset"
+# install.sh refuses any release asset above RELEASE_ASSET_MAX_BYTES.
+release_asset_max_bytes="$(sed -n 's/^RELEASE_ASSET_MAX_BYTES=\([0-9][0-9]*\)$/\1/p' "$root/phase3-binary/dist/install.sh")"
+[[ "$release_asset_max_bytes" =~ ^[0-9]+$ ]] || die "install.sh RELEASE_ASSET_MAX_BYTES not found"
+for sized_asset in "$provider_asset" "$malibu_asset"; do
+  sized_bytes="$(wc -c <"$sized_asset" | tr -d ' ')"
+  (( sized_bytes < release_asset_max_bytes )) ||
+    die "$(basename "$sized_asset") is $sized_bytes bytes; install.sh accepts at most $release_asset_max_bytes"
+done
 
 install -m 0755 "$coordinator" "$output_dir/coordinator-linux-amd64"
 install -m 0755 "$coordinator_cli" "$output_dir/coordinator-cli-linux-amd64"

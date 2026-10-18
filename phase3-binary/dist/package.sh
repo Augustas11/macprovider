@@ -8,7 +8,8 @@
 # Default VERSION_TAG = current short git rev. Output tarball lands at:
 #   phase3-binary/dist/phase3-binary-m4-<TAG>.tar.gz
 #
-# Tarball size is ~30-40 MB compressed.
+# Tarball size is ~100 MB compressed (two copies of the complete MLX kernel
+# library); it must stay under install.sh RELEASE_ASSET_MAX_BYTES.
 
 set -euo pipefail
 
@@ -159,19 +160,40 @@ case "$PACKAGE_HOST_ARCH" in
     exit 1
     ;;
 esac
-if [ ! -f "$PRODUCTS/mlx.metallib" ]; then
-  if [ -f "$PRODUCTS/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib" ]; then
-    cp "$PRODUCTS/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib" "$PRODUCTS/mlx.metallib"
-  else
-    echo "==> Building mlx.metallib for CLI artifact..."
-    MLX_SWIFT_CHECKOUT="$RELEASE_DIR/SourcePackages/checkouts/mlx-swift" \
-      "$PHASE3_DIR/scripts/build-mlx-metallib.sh" "$PRODUCTS"
-  fi
-fi
+# Always compile the full MLX kernel library from the resolved mlx-swift
+# checkout. SwiftPM's bundled default.metallib holds only the kernel sources
+# mlx-swift copied into mlx-generated/metal, which lags the pinned MLX core
+# (core v0.32.4 needs gather_mm_offsets, gated_delta_update, ...; the 1.8.254
+# candidate shipped that partial library and crash-looped on MoE models).
+# Both shipped libraries get the same complete bytes: MLX loads the colocated
+# mlx.metallib first and falls back to the bundle's default.metallib.
+MLX_SWIFT_RESOLVED_CHECKOUT="$RELEASE_DIR/SourcePackages/checkouts/mlx-swift"
+MLX_BUNDLE_METALLIB="$PRODUCTS/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib"
+MLX_REQUIRED_KERNELS="$PHASE3_DIR/mlx-metallib-required-kernels.json"
+# The kernels target the package's minimum macOS (Package.swift platforms),
+# like the SwiftPM-built library did; derive below compiles the same way.
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
+echo "==> Building mlx.metallib for CLI artifact (macOS $MACOSX_DEPLOYMENT_TARGET)..."
+rm -f "$PRODUCTS/mlx.metallib"
+MLX_SWIFT_CHECKOUT="$MLX_SWIFT_RESOLVED_CHECKOUT" \
+  "$PHASE3_DIR/scripts/build-mlx-metallib.sh" "$PRODUCTS"
 [ -f "$PRODUCTS/mlx.metallib" ] || {
   echo "FATAL: mlx.metallib not found — Metal toolchain may be missing"
   exit 1
 }
+if [ -f "$MLX_BUNDLE_METALLIB" ]; then
+  cp "$PRODUCTS/mlx.metallib" "$MLX_BUNDLE_METALLIB"
+fi
+echo "==> Verifying MLX kernel coverage against the pinned mlx-swift checkout..."
+python3 "$REPO_ROOT/scripts/mlx-metallib-kernels.py" derive \
+  --mlx-swift-checkout "$MLX_SWIFT_RESOLVED_CHECKOUT" \
+  --expect "$MLX_REQUIRED_KERNELS"
+mlx_shipped_metallibs=("$PRODUCTS/mlx.metallib")
+if [ -f "$MLX_BUNDLE_METALLIB" ]; then
+  mlx_shipped_metallibs+=("$MLX_BUNDLE_METALLIB")
+fi
+python3 "$REPO_ROOT/scripts/mlx-metallib-kernels.py" check \
+  --manifest "$MLX_REQUIRED_KERNELS" "${mlx_shipped_metallibs[@]}"
 
 echo "==> Build products:"
 ls -la "$PRODUCTS/macprovider-cli"
@@ -241,6 +263,14 @@ done
   exit 1
 }
 tar czf "$TARBALL" -C "$STAGE_DIR" "${archive_members[@]}"
+# install.sh refuses a release asset above RELEASE_ASSET_MAX_BYTES while it
+# streams; never build one it would refuse.
+RELEASE_ASSET_MAX_BYTES=$(sed -n 's/^RELEASE_ASSET_MAX_BYTES=\([0-9][0-9]*\)$/\1/p' "$PHASE3_DIR/dist/install.sh")
+TARBALL_BYTES=$(wc -c <"$TARBALL" | tr -d ' ')
+[ -n "$RELEASE_ASSET_MAX_BYTES" ] && [ "$TARBALL_BYTES" -lt "$RELEASE_ASSET_MAX_BYTES" ] || {
+  echo "FATAL: $TARBALL is $TARBALL_BYTES bytes; install.sh accepts at most ${RELEASE_ASSET_MAX_BYTES:-unknown}" >&2
+  exit 1
+}
 
 echo "==> Tarball stats:"
 ls -la "$TARBALL"

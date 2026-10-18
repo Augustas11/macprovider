@@ -82,7 +82,12 @@ if [ "$METAL_VERSION" -ge 320 ]; then
   kernels+=(fence)
 fi
 
-if [ "$METAL_VERSION" -ge 400 ] && version_ge "$SDK_VERSION" "26.2"; then
+# MLX's kernels/CMakeLists.txt builds the NAX kernels only when the deployment
+# target is also >= 26.2; a library built for an older target must not carry
+# Metal 4 kernels. Without MACOSX_DEPLOYMENT_TARGET (lab builds) the compiler
+# targets the SDK, as before.
+if [ "$METAL_VERSION" -ge 400 ] && version_ge "$SDK_VERSION" "26.2" &&
+   version_ge "${MACOSX_DEPLOYMENT_TARGET:-$SDK_VERSION}" "26.2"; then
   kernels+=(
     steel/gemm/kernels/steel_gemm_fused_nax
     steel/gemm/kernels/steel_gemm_gather_nax

@@ -1076,6 +1076,14 @@ jobs:
           cp "$WORK/mlx.metallib" "$APP/Contents/MacOS/mlx.metallib"
           find "$WORK" -mindepth 1 -maxdepth 1 -name '*.bundle' \
             -exec cp -R {} "$APP/Contents/MacOS"/ \;
+          # Every shipped metallib carries every kernel the pinned MLX core
+          # loads by name (CLI 1.8.254 shipped without gather_mm_offsets).
+          app_metallibs=("$APP/Contents/MacOS/mlx.metallib")
+          if [ -f "$APP/Contents/MacOS/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib" ]; then
+            app_metallibs+=("$APP/Contents/MacOS/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib")
+          fi
+          python3 scripts/mlx-metallib-kernels.py check \
+            --manifest phase3-binary/mlx-metallib-required-kernels.json "${app_metallibs[@]}"
           cp "$WORK/compatibility-set.json" "$APP/Contents/Resources/compatibility-set.json"
           cmp "$WORK/compatibility-set.json" "$APP/Contents/Resources/compatibility-set.json"
           [ -d "$WORK/compatibility-set-local" ] || {

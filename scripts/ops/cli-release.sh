@@ -40,7 +40,8 @@
 #                           later Pearl-mutating step. A runtime that reports no
 #                           compatibility_policy_mode predates repository admission: blocked
 #                           until the coordinator runtime ships (pearl-runtime.sh)
-#   6 canary_smoke          exact signed-candidate install/join smoke; recorded only with
+#   6 canary_smoke          exact signed-candidate install/join smoke (scripts/ops/canary-swap.sh
+#                           swap); recorded only with
 #                           structured evidence: `next --done canary_smoke --probe` (the script
 #                           reads the canary's /v1/status over STUDIO_SSH: binary_version ==
 #                           candidate, coordinator.connected, candidate compatibility set,
@@ -713,9 +714,11 @@ scripts/ops/cli-release.sh _stage-privacy-identity $V"
   else
     step canary_smoke pending ""
     set_next canary_smoke manual "Exact signed-candidate install/join smoke on the canary Mac" \
-"# docs/releases/cli-release-train.md Promotion gate item 4 (operator approval: restarts the live provider)
-# Install the verified bytes from $OPS_STATE_DIR/$OPS_SCOPE/ on the canary, then confirm:
-#   macprovider-cli --version == $V; joins via compatibility set $compat_id;
+"# docs/releases/cli-release-train.md Promotion gate item 5 (operator approval: restarts the live provider)
+# Swap the verified bytes from $OPS_STATE_DIR/$OPS_SCOPE/ onto the canary (checks every shipped
+# metallib's MLX kernels first; a crash loop or a silent /v1/status restores the backup and resumes):
+MACPROVIDER_OPS_OWNER=<session-label> $OPS_DIR/canary-swap.sh swap --version $V
+# Then confirm: macprovider-cli --version == $V; joins via compatibility set $compat_id;
 #   operator pause survives coordinator drain; one bounded buyer request is served.
 # Record it with structured evidence (free text is refused):
 #   $0 next --done canary_smoke --probe        (reads /v1/status via STUDIO_SSH and reuses catalog gateway proof)"
@@ -994,6 +997,27 @@ structured_done() {
     canary_smoke)
       if [ "$DONE_PROBE" = 1 ]; then
         [ -n "$DONE_RUN_IDS$DONE_CARRY" ] && refuse "use one kind of evidence"
+        # The canary runs the verified bytes only when scripts/ops/canary-swap.sh
+        # put them there (it checks the kernels, binds the tarball to the signed
+        # checksums and records this marker).
+        local swap_field swap_ok=1
+        for swap_field in candidate_sha checksums_sha256 binary_sha256; do
+          [ -n "$(marker_field "$OPS_SCOPE" canary_swap "d.get(\"$swap_field\")")" ] &&
+            [ "$(marker_field "$OPS_SCOPE" canary_swap "d.get(\"$swap_field\")")" = \
+              "$(marker_field "$OPS_SCOPE" signed_byte_verification "d.get(\"$swap_field\")")" ] || swap_ok=0
+        done
+        [ "$(marker_field "$OPS_SCOPE" canary_swap 'd.get("kernel_check")')" = passed ] || swap_ok=0
+        # The swapped tarball is the one the verified checksums.txt names.
+        local swap_bytes_dir swap_tarball_sha
+        swap_bytes_dir="$(marker_field "$OPS_SCOPE" signed_byte_verification 'd.get("bytes_dir")')"
+        swap_tarball_sha="$(awk -v a="macprovider-cli-v$V-darwin-arm64.tar.gz" '$2 == a { print $1 }' \
+          "$swap_bytes_dir/checksums.txt" 2>/dev/null | head -n1)"
+        [ -n "$swap_tarball_sha" ] &&
+          [ "$(shasum -a 256 "$swap_bytes_dir/checksums.txt" | awk '{print $1}')" = \
+            "$(marker_field "$OPS_SCOPE" signed_byte_verification 'd.get("checksums_sha256")')" ] &&
+          [ "$(marker_field "$OPS_SCOPE" canary_swap 'd.get("tarball_sha256")')" = "$swap_tarball_sha" ] || swap_ok=0
+        [ "$swap_ok" = 1 ] ||
+          refuse "no canary_swap record for the verified v$V bytes; swap with: MACPROVIDER_OPS_OWNER=<label> $OPS_DIR/canary-swap.sh swap --version $V"
         require_studio_ssh
         case "${STUDIO_STATUS_PORT:-}" in ""|*[!0-9]*) refuse "STUDIO_STATUS_PORT must be set and numeric" ;; esac
         studio_ssh "curl -s -m 10 http://127.0.0.1:$STUDIO_STATUS_PORT/v1/status" > "$OPS_TMP_DIR/canary.json" ||
