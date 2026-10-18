@@ -4296,14 +4296,15 @@ maxTokens: 1,
         // SPEC-048-R014 (v0.1.32): only a feed naming the tuple disables it.
         // A stale or unreachable feed revokes nothing; polling resumes. The
         // disable reaches a current tuple and a parked one alike.
-        nativeMTPRevocationRefreshTask = Task { [weak self] in
-            await poller(inputs) {
-                await self?.disableNativeMTPTuple(
-                    admissionTupleSHA256: tupleSHA256,
-                    servedSnapshotID: servedSnapshotID,
-                    targetGeneration: targetGeneration
-                )
-            }
+        let onRevoked: @Sendable () async -> Void = { [weak self] in
+            await self?.disableNativeMTPTuple(
+                admissionTupleSHA256: tupleSHA256,
+                servedSnapshotID: servedSnapshotID,
+                targetGeneration: targetGeneration
+            )
+        }
+        nativeMTPRevocationRefreshTask = Task {
+            await poller(inputs, onRevoked)
         }
     }
 

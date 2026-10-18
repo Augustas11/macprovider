@@ -1319,7 +1319,11 @@ verified feed naming it discards it. Before a parked tuple is restored, the
 provider reads the newest verified revocation state (network first, else the
 last-known verified feed): a tuple it names is discarded, and with no
 verified state at all the tuple stays parked and fenced, so a restore fails
-closed where a fresh load would not. Before 0.1.30: sidecars and
+closed where a fresh load would not. The tuple stays parked, and so under its
+revocation watch, until the moment it is published: the state is read again
+after the scheduler fence is lifted, and publication follows that final
+identity and revocation check with no suspension in between; a revocation
+at any earlier point discards the tuple and the restore re-fences it. Before 0.1.30: sidecars and
 serving-journey results expire after 90 days. Renewal creates a new immutable release/sidecar, reruns the local
 self-test and signed serving journey, the 30-minute sustained cell, ordinary
 and MTP parity sample, and post-gateway eligibility sample. The full matrix may
@@ -1749,8 +1753,11 @@ requests.
   offers it again once per new coordinator session, or once when the
   coordinator's served bank becomes the bank it qualified on, without a
   model reload and without re-running the self-check. A parked tuple keeps
-  its revocation watch and is discarded when revoked; a restore re-reads the
-  revocation state and fails closed without one (R014). Rejections and the
+  its revocation watch and is discarded when revoked, up to the moment a
+  restore publishes it; a restore reads the revocation state before lifting
+  the fence and again right before publication, and fails closed without
+  one (R014). A bank poll stopped while its fetch is in flight never acts
+  on the result. Rejections and the
   offer dedupe are bound to their session. Paired with SPEC-031-R033 v0.3.9,
   under which the coordinator canary bank moves with the release.
 

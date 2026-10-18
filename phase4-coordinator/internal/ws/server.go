@@ -164,9 +164,12 @@ type Server struct {
 	// staged; the publication that installs the catalog applies it
 	// (SPEC-031-R033).
 	nativeMTPCanaryStagedBank atomic.Pointer[nativeMTPCanaryBankTransition]
-	nativeMTPCanaryJitter     func(time.Duration) time.Duration
-	tokens                    TokenValidator
-	relayBlindKeys            RelayBlindKeySink
+	// nativeMTPOfferCommitHook (tests only) runs between a tuple offer's bank
+	// check and its guarded store, where a publication may interleave.
+	nativeMTPOfferCommitHook func()
+	nativeMTPCanaryJitter    func(time.Duration) time.Duration
+	tokens                   TokenValidator
+	relayBlindKeys           RelayBlindKeySink
 	// SPEC-003 v0.8 FR-C9.1 — separate issuer field so validator and
 	// issuer roles can be wired independently. Production wires the same
 	// concrete *auth.Store to both (see main.go), but tests can override

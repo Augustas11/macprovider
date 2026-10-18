@@ -839,8 +839,10 @@ is the exact signed bank bytes of the release it serves. At boot the canary
 bank is the served release's self-test bank from the same verified feed
 snapshot that serves the admission set: it MUST verify under the canary
 keyring, name the served release, and be byte-identical (same SHA-256) to the
-configured challenge bank file; otherwise the canary holds no bank and every
-offer fails closed as `bank_mismatch`. A coordinator that loads a new release
+configured challenge bank file; otherwise the canary holds no bank at all
+(not even a retained previous one) and every offer fails closed as
+`bank_mismatch`. Only a served release that intentionally carries no bank may
+keep a retained compatible-previous bank. A coordinator that loads a new release
 without restarting (a configuration reload) MUST verify that release's served
 bank bytes under the canary keyring before the release goes live. A bank the
 canary cannot verify, or one naming another release, refuses the whole
@@ -864,7 +866,14 @@ previous bank only while its release stays admitted, otherwise it is dropped.
 After a coordinator restart the previous bank is rebuilt from the retained
 compatible-previous release's own verified native-MTP set, so its providers
 keep binding. No other bank matches, and an offer that matches none is the
-tuple-scoped `bank_mismatch` failure. The coordinator reports, on `/healthz`,
+tuple-scoped `bank_mismatch` failure. An enabled canary that holds no bank
+answers every offer with `bank_mismatch` too (so the provider parks and
+re-offers once a bank arrives); only a disabled canary ignores offers. The
+bank check and the recording of an admitted offer are one step against the
+release: the check is repeated under the release's catalog lock and the offer
+is stored inside that same hold, so a publication that retires the bank
+lands wholly before the check (the offer gets `bank_mismatch`) or wholly
+after the store. The coordinator reports, on `/healthz`,
 that its canary bank moves with the release
 (`native_mtp_canary_bank_reloads`), the `release_id` of the current bank
 (`native_mtp_canary_bank_release_id`) and the SHA-256 of its exact bytes
@@ -1186,8 +1195,11 @@ before the breaker and canary coexist under load.
   published as one release transition. Any bank, current or previous, binds
   an offer only while its release is admitted by the same snapshot; a
   release without a native-MTP set retires the current bank. At boot the
-  canary bank is bound to the served feed snapshot (release and SHA-256), and
-  one retained compatible-previous release's bank is rebuilt. `/healthz`
+  canary bank is bound to the served feed snapshot (release and SHA-256); a
+  served bank that fails verification leaves no bank at all, and only a
+  bankless current release keeps one rebuilt retained compatible-previous
+  bank. An enabled canary without a bank answers offers with `bank_mismatch`;
+  the bank check and the offer's recording are one step against the release. `/healthz`
   reports the canary bank's release and SHA-256. Before this, the bank was
   read at boot only, and a reload-activated release rejected every provider
   offer with `bank_mismatch` until a coordinator restart.

@@ -4520,7 +4520,10 @@
         "phase4-coordinator/internal/ws/native_mtp_canary_bank_reload_test.go:TestHealthzReportsTheNativeMTPCanaryBankReleaseAndDigest",
         "phase4-coordinator/cmd/coordinator/native_mtp_canary_reload_test.go:TestSIGHUPReleaseWithoutNativeMTPFeedsRetiresTheCanaryBank",
         "phase4-coordinator/cmd/coordinator/native_mtp_canary_reload_test.go:TestCoordinatorRestartRebuildsTheRetainedPreviousCanaryBank",
-        "phase4-coordinator/cmd/coordinator/reload_billing_failure_test.go:TestSIGHUPReloadBillingFailureLeavesNoPartialState"
+        "phase4-coordinator/cmd/coordinator/reload_billing_failure_test.go:TestSIGHUPReloadBillingFailureLeavesNoPartialState",
+        "phase4-coordinator/internal/ws/native_mtp_canary_bank_reload_test.go:TestNativeMTPCanaryOfferRacingAPublicationIsNotAdmitted",
+        "phase4-coordinator/internal/ws/native_mtp_canary_bank_reload_test.go:TestNativeMTPCanaryWithoutABankAnswersBankMismatchThenAdmitsAfterReload",
+        "phase4-coordinator/internal/ws/native_mtp_canary_bank_reload_test.go:TestNativeMTPCanaryBootInvalidCurrentBankInstallsNoPreviousBank"
       ],
       "journeys": [
         "JOURNEY-NATIVE-MTP-SERVING"
@@ -11470,7 +11473,10 @@
         "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testNativeMTPBankMismatchSpanningASessionChangeStaysDueForTheNewSession",
         "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testNativeMTPOfferSendSpanningADisconnectDoesNotSuppressTheNewSession",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPTupleReofferTests.swift:testDisableAfterTheFenceKeepsATupleInstalledDuringIt",
-        "phase3-binary/Tests/macprovider-cliTests/NativeMTPTupleReofferTests.swift:testParkAfterTheFenceDoesNotParkOverATupleInstalledDuringIt"
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPTupleReofferTests.swift:testParkAfterTheFenceDoesNotParkOverATupleInstalledDuringIt",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPTupleReofferTests.swift:testRevocationDuringRestoreEnableIsNeverRepublished",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPTupleReofferTests.swift:testFinalRevocationReadBeforePublicationRefusesTheTuple",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testNativeMTPStoppedBankPollDoesNotObserveItsInFlightFetch"
       ],
       "journeys": [
         "JOURNEY-NATIVE-MTP-SERVING"

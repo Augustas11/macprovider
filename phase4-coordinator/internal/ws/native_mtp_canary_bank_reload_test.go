@@ -19,6 +19,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/autotune"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/gobwas/ws/wsutil"
 	"github.com/rs/zerolog"
 )
 
@@ -479,5 +480,112 @@ func TestNativeMTPCanaryRestartRebuildsTheRetainedPreviousBank(t *testing.T) {
 		WithNativeMTPCanaryServedBanks(live, []NativeMTPCanaryServedBank{previous}))
 	if set := s.nativeMTPCanaryBanks.Load(); set == nil || set.previous != nil {
 		t.Fatalf("restart rebuilt a bank of a release that is not retained: %+v", set)
+	}
+}
+
+// ---- round-2 interleavings
+
+// attachSession stores a live provider session for the fixture provider and
+// returns a reader of the frames the coordinator sends it.
+func (f *nativeMTPBankReloadFixture) attachSession(t *testing.T) func() NativeMTPTupleDisable {
+	t.Helper()
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() {
+		_ = clientConn.Close()
+		_ = serverConn.Close()
+	})
+	session := newProviderSession(f.provider.ProviderID, f.provider.AssignedID, serverConn, 16, time.Second)
+	f.server.sessions.Store(sessionKey(f.provider.ProviderID, f.provider.AssignedID), session)
+	go session.runWriter()
+	return func() NativeMTPTupleDisable {
+		t.Helper()
+		if err := clientConn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := wsutil.ReadServerText(clientConn)
+		if err != nil {
+			t.Fatalf("no frame from the coordinator: %v", err)
+		}
+		disable, _, err := ParseNativeMTPTupleDisable(raw)
+		if err != nil {
+			t.Fatalf("parse disable: %v raw=%s", err, string(raw))
+		}
+		return disable
+	}
+}
+
+func (f *nativeMTPBankReloadFixture) verifiedBank(t *testing.T, releaseID string) *NativeMTPChallengeBank {
+	t.Helper()
+	raw, sig := nativeMTPSignedReleaseBank(t, f.priv, f.keyID, releaseID)
+	bank, err := verifyNativeMTPCanaryReleaseBank(f.server.cfg.Pool.NativeMTPCanary, releaseID, raw, sig)
+	if err != nil || bank == nil {
+		t.Fatalf("verify %s: %v", releaseID, err)
+	}
+	return bank
+}
+
+// A release publication that retires the matched bank between the offer's
+// bank check and its store wins: the offer is not admitted and the provider
+// is told bank_mismatch.
+func TestNativeMTPCanaryOfferRacingAPublicationIsNotAdmitted(t *testing.T) {
+	f := newNativeMTPBankReloadFixture(t)
+	read := f.attachSession(t)
+	old := f.reload(t, "release-old")
+	f.server.nativeMTPOfferCommitHook = func() {
+		f.server.nativeMTPOfferCommitHook = nil
+		f.reloadPlain(t, "release-plain")
+	}
+	if f.offer(t, old) {
+		t.Fatal("an offer whose bank a racing publication retired was admitted")
+	}
+	if disable := read(); disable.Reason != "bank_mismatch" {
+		t.Fatalf("racing publication disable=%+v, want bank_mismatch", disable)
+	}
+	// Without the race the same offer is admitted against a live bank.
+	again := f.reload(t, "release-old")
+	if !f.offer(t, again) {
+		t.Fatal("offer on the live release's bank was not admitted")
+	}
+}
+
+// An enabled canary with no bank answers an offer with bank_mismatch, so the
+// provider parks; once a reload installs the bank, the same session's
+// re-offer is admitted.
+func TestNativeMTPCanaryWithoutABankAnswersBankMismatchThenAdmitsAfterReload(t *testing.T) {
+	f := newNativeMTPBankReloadFixture(t)
+	read := f.attachSession(t)
+	if f.server.nativeMTPCanaryBanks.Load() != nil {
+		t.Fatal("fixture canary starts with a bank")
+	}
+	bank := f.verifiedBank(t, "release-new")
+	if f.offer(t, bank) {
+		t.Fatal("a canary without a bank admitted an offer")
+	}
+	if disable := read(); disable.Reason != "bank_mismatch" {
+		t.Fatalf("no-bank canary disable=%+v, want bank_mismatch", disable)
+	}
+	reloaded := f.reload(t, "release-new")
+	if !f.offer(t, reloaded) {
+		t.Fatal("the same session's re-offer after the bank reload was not admitted")
+	}
+}
+
+// Boot: a served bank that fails verification leaves the canary with no
+// bank at all; a valid retained previous bank is not installed in its place.
+// Only an intentionally bankless current release keeps the previous bank.
+func TestNativeMTPCanaryBootInvalidCurrentBankInstallsNoPreviousBank(t *testing.T) {
+	f := newNativeMTPBankReloadFixture(t)
+	previous := f.served(t, "release-old")
+	invalid := f.served(t, "release-live")
+	invalid.BankJSON = append([]byte(nil), invalid.BankJSON...)
+	invalid.BankJSON[len(invalid.BankJSON)-2] = ' '
+	catalogs := WithAutotuneCatalog(releaseCatalog("release-live"), releaseCatalog("release-old"))
+	if s := f.bootServer(t, nil, catalogs, WithNativeMTPCanaryServedBanks(invalid, []NativeMTPCanaryServedBank{previous})); s.nativeMTPCanaryBanks.Load() != nil {
+		t.Fatalf("an invalid current bank fell back to the previous bank: %+v", s.nativeMTPCanaryBanks.Load())
+	}
+	bankless := NativeMTPCanaryServedBank{ReleaseID: "release-live"}
+	s := f.bootServer(t, nil, catalogs, WithNativeMTPCanaryServedBanks(bankless, []NativeMTPCanaryServedBank{previous}))
+	if set := s.nativeMTPCanaryBanks.Load(); set == nil || set.current != nil || set.previous == nil || set.previous.ReleaseID != "release-old" {
+		t.Fatalf("a bankless current release did not keep its retained previous bank: %+v", set)
 	}
 }
