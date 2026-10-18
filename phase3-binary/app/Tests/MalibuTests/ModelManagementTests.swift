@@ -2328,6 +2328,49 @@ final class ModelManagementTests: XCTestCase {
         XCTAssertFalse(ModelManagementStore.Operation.idle.blocksRefresh)
     }
 
+    @MainActor
+    func testBrowseOtherMLXModelsRunsBrowseOnItsOwnRunnerAndStaysNonActionable() async throws {
+        let cli = FakeModelCLI(results: [])
+        let browse = FakeModelCLI(results: [
+            ModelCLIResult(exitCode: 0, stdout: ShellScreensTests.browseJSON(), stderr: ""),
+        ])
+        let store = ModelManagementStore(
+            cli: cli,
+            browseCLI: browse,
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.browse.\(UUID().uuidString)")!
+        )
+        await store.refresh(currentModelID: "org/current", peer: peer(for: MalibuModelCapabilityManifest.catalogJSON))
+
+        await store.browseOtherMLXModels(query: "--qwen")
+
+        XCTAssertEqual(browse.invocations, [["models", "browse", "--json", "--limit", "30", "--family", "qwen"]])
+        XCTAssertTrue(cli.invocations.isEmpty, "browse never shares the catalog runner")
+        XCTAssertEqual(store.otherMLXState, .loaded)
+        XCTAssertEqual(store.otherMLXModels.map(\.id), ["mlx-community/Qwen3-8B-4bit"])
+        XCTAssertTrue(store.rows.isEmpty, "browse results never become catalog rows")
+    }
+
+    @MainActor
+    func testBrowseOtherMLXModelsNeedsTheCatalogJSONCapabilityAndTimesOut() async throws {
+        let hanging = HangingModelCLI()
+        let store = ModelManagementStore(
+            cli: FakeModelCLI(results: []),
+            browseCLI: hanging,
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.browse-timeout.\(UUID().uuidString)")!
+        )
+        await store.browseOtherMLXModels(query: "qwen")
+        XCTAssertEqual(store.otherMLXState, .unavailable("Searching other MLX models needs a newer provider."))
+
+        await store.refresh(currentModelID: "org/current", peer: peer(for: MalibuModelCapabilityManifest.catalogJSON))
+        store.browseCommandTimeoutSeconds = 0.2
+        await store.browseOtherMLXModels(query: "qwen")
+        XCTAssertTrue(hanging.cancelled)
+        XCTAssertEqual(store.otherMLXState, .unavailable("Hugging Face did not answer in time. Try again."))
+        XCTAssertTrue(store.otherMLXModels.isEmpty)
+    }
+
     private func catalogEconomicsJSON(
         rows: [String],
         generatedAt: String = "2026-08-09T00:00:00Z",

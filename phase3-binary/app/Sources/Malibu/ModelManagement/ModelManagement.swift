@@ -2124,7 +2124,17 @@ final class ModelManagementStore: ObservableObject {
     /// #1816: coordinator pool bindings read back by candidate id.
     @Published private(set) var poolBindings: [String: MalibuBYOMPoolBinding] = [:]
 
+    /// #2054 P2-5: Hugging Face mlx-community search results. Never earnable,
+    /// never actionable, never mixed into the catalog rows.
+    @Published private(set) var otherMLXModels: [MalibuOtherMLXModel] = []
+    @Published private(set) var otherMLXState: OtherMLXBrowseState = .idle
+
     private let cli: any MalibuModelCLIRunning
+    /// A separate runner so a browse never shares the catalog read's
+    /// cancellation slot.
+    private let browseCLI: any MalibuModelCLIRunning
+    var browseCommandTimeoutSeconds: TimeInterval = 20
+    private var browseTimedOut = false
     /// Upper bound for a model list/catalog read, so "Checking…" always ends
     /// in a result or a retryable "unavailable" (#2029 P1-19).
     var listCommandTimeoutSeconds: TimeInterval = 10
@@ -2152,11 +2162,13 @@ final class ModelManagementStore: ObservableObject {
 
     init(
         cli: any MalibuModelCLIRunning = MalibuModelCLI.shared,
+        browseCLI: any MalibuModelCLIRunning = MalibuModelCLI(),
         paths: ProviderPaths = .current,
         defaults: UserDefaults = .standard,
         powerMonitor: MalibuPowerMonitor = MalibuPowerMonitor()
     ) {
         self.cli = cli
+        self.browseCLI = browseCLI
         self.paths = paths
         self.defaults = defaults
         self.powerMonitor = powerMonitor
@@ -2447,6 +2459,60 @@ final class ModelManagementStore: ObservableObject {
             self.listState = .unavailable
             self.operation = .failed(error.localizedDescription)
             self.statusLine = String(localized: "Switching is unavailable right now. The current model remains visible from provider status.", comment: "Model activity status")
+        }
+    }
+
+    enum OtherMLXBrowseState: Equatable {
+        case idle
+        case loading
+        case loaded
+        case unavailable(String)
+    }
+
+    var otherMLXBrowseAvailable: Bool {
+        MalibuModelCapabilityManifest.checkedIn.supports(
+            MalibuModelCapabilityManifest.catalogJSON,
+            peer: peerEvidence
+        )
+    }
+
+    /// Runs `models browse --json` (Hugging Face mlx-community search) on an
+    /// explicit provider request. Results are discovery-only: SPEC-044-R006
+    /// keeps them non-actionable and out of the catalog sections.
+    func browseOtherMLXModels(query: String) async {
+        guard otherMLXBrowseAvailable else {
+            otherMLXState = .unavailable(String(localized: "Searching other MLX models needs a newer provider.", comment: "Browse capability unavailable"))
+            return
+        }
+        guard otherMLXState != .loading else { return }
+        let family = MalibuOtherMLXModel.sanitizedQuery(query)
+        otherMLXState = .loading
+        var arguments = ["models", "browse", "--json", "--limit", "30"]
+        if let family { arguments += ["--family", family] }
+        let runner = browseCLI
+        let timeoutNanoseconds = UInt64(max(0, browseCommandTimeoutSeconds) * 1_000_000_000)
+        browseTimedOut = false
+        let timeout = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: timeoutNanoseconds)
+            guard !Task.isCancelled else { return }
+            self?.browseTimedOut = true
+            runner.cancelCurrentOperation()
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            guard !Task.isCancelled else { return }
+            runner.forceTerminateCurrentOperation()
+        }
+        defer { timeout.cancel() }
+        do {
+            let result = try await runner.run(arguments: arguments, peer: peerEvidence, onLine: { _ in })
+            guard !browseTimedOut else { throw ModelManagementError.listTimedOut }
+            guard result.exitCode == 0 else { throw ModelManagementError.invalidCatalog }
+            otherMLXModels = try MalibuOtherMLXModel.decodeBrowse(result.stdout)
+            otherMLXState = .loaded
+        } catch {
+            otherMLXModels = []
+            otherMLXState = .unavailable(browseTimedOut
+                ? String(localized: "Hugging Face did not answer in time. Try again.", comment: "Browse timed out")
+                : String(localized: "Other MLX models can't be listed right now.", comment: "Browse failed"))
         }
     }
 
@@ -3430,6 +3496,10 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
     let providerPromptPayoutUSDPerMillionTokens: Double?
     let providerCompletionPayoutUSDPerMillionTokens: Double?
     let demandRank: Int?
+    /// Provider share of the catalog rate, in basis points; trusted rows only.
+    let providerShareBPS: Int?
+    /// Providers ready to serve this model on the network; trusted rows only.
+    let readyProviderCount: Int?
     let warningCodes: [String]
     var action: Action
     var blockReason: String?
@@ -3454,6 +3524,8 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         providerPromptPayoutUSDPerMillionTokens = nil
         providerCompletionPayoutUSDPerMillionTokens = nil
         demandRank = nil
+        providerShareBPS = nil
+        readyProviderCount = nil
         warningCodes = []
         if row.modelID == currentModelID || row.state == "warm" {
             category = .current
@@ -3496,10 +3568,6 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         weightsPresentLocally = row.weightsPresentLocally
         fit = Self.displayFit(row.fit)
         estimatedGB = row.estimatedGB
-    /// Provider share of the catalog rate, in basis points; trusted rows only.
-    let providerShareBPS: Int?
-    /// Providers ready to serve this model on the network; trusted rows only.
-    let readyProviderCount: Int?
         economicsState = row.economicsState
         admissionState = row.admission.state
         admissionSource = row.admission.source
@@ -3516,6 +3584,8 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         evaluateTransaction = Self.evaluateTransaction(from: row.evaluateAction)
         warningCodes = row.warningCodes
         demandRank = row.economicsState == "trusted" ? row.demandRank : nil
+        providerShareBPS = row.economicsState == "trusted" ? row.providerShareBPS : nil
+        readyProviderCount = row.economicsState == "trusted" ? row.readyProviderCount : nil
         providerPromptPayoutUSDPerMillionTokens = row.economicsState == "trusted"
             ? row.providerPromptPayoutUSDPerMillionTokens
             : nil
@@ -3524,8 +3594,6 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
             : nil
 
         let hasTrustedEconomics = row.economicsState == "trusted" && row.admission.catalogEconomicsPermitted
-        providerShareBPS = nil
-        readyProviderCount = nil
         let switchAvailable = hasTrustedEconomics && Self.actionIsAvailable(
             row.switchAction,
             kind: "switch_model",
@@ -3584,8 +3652,6 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
 
         id = projectedID
         displayID = row.displayModelID
-        providerShareBPS = row.economicsState == "trusted" ? row.providerShareBPS : nil
-        readyProviderCount = row.economicsState == "trusted" ? row.readyProviderCount : nil
         catalogVerifiedModelKey = nil
         nonEarningDisclosure = nil
         state = row.runtimeState
@@ -3603,6 +3669,8 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         providerPromptPayoutUSDPerMillionTokens = nil
         providerCompletionPayoutUSDPerMillionTokens = nil
         demandRank = nil
+        providerShareBPS = nil
+        readyProviderCount = nil
         warningCodes = ["projection_unsupported"]
         action = .none
         if currentModelID.map({ modelIdentityKey($0) == modelIdentityKey(projectedID) }) == true || row.isCurrent {
@@ -3669,8 +3737,6 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
             && earningPathClass == "no_earning_path_in_v0_1"
     }
 
-        providerShareBPS = nil
-        readyProviderCount = nil
     /// SPEC-047-R010/R011 wording for a coordinator pool binding.
     func poolBindingLine(_ binding: MalibuBYOMPoolBinding) -> String {
         earningPathClass == "pool_attested_earning"
@@ -3937,5 +4003,97 @@ private extension Array where Element == MalibuModelRow {
         case .needsPreparation: return 3
         case .blocked: return 4
         }
+    }
+}
+
+/// One `models_browse.v1` row: a Hugging Face mlx-community model. It is not
+/// in the Malibu catalog, has no rate and cannot be switched to from Malibu.
+struct MalibuOtherMLXModel: Identifiable, Equatable, Sendable {
+    let id: String
+    let fit: String
+    let estimatedGB: Double?
+
+    private struct Wire: Decodable {
+        struct Row: Decodable {
+            let modelID: String
+            let displayID: String
+            let actionModelID: String?
+            let source: String
+            let fit: String
+            let estimatedGB: Double?
+            let actionable: Bool
+
+            enum CodingKeys: String, CodingKey, CaseIterable {
+                case modelID = "model_id"
+                case displayID = "display_id"
+                case actionModelID = "action_model_id"
+                case source
+                case fit
+                case estimatedGB = "estimated_gb"
+                case actionable
+            }
+
+            init(from decoder: Decoder) throws {
+                try rejectUnknownKeys(decoder, allowed: CodingKeys.allCases.map(\.stringValue))
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+                modelID = try container.decode(String.self, forKey: .modelID)
+                displayID = try container.decode(String.self, forKey: .displayID)
+                actionModelID = try decodeExplicitNullableString(container, .actionModelID)
+                source = try container.decode(String.self, forKey: .source)
+                fit = try container.decode(String.self, forKey: .fit)
+                estimatedGB = try decodeExplicitNullableDouble(container, .estimatedGB)
+                actionable = try container.decode(Bool.self, forKey: .actionable)
+            }
+        }
+
+        let schemaVersion: String
+        let source: String
+        let rows: [Row]
+
+        enum CodingKeys: String, CodingKey {
+            case schemaVersion = "schema_version"
+            case source
+            case rows
+        }
+    }
+
+    static let maxRows = 200
+
+    /// Strict decode: wrong schema, a non-HF source, an actionable row or an
+    /// unsafe identifier rejects the whole reply.
+    static func decodeBrowse(_ stdout: String) throws -> [MalibuOtherMLXModel] {
+        guard let data = stdout.data(using: .utf8) else { throw ModelManagementError.invalidCatalog }
+        let wire: Wire
+        do {
+            try MalibuStrictJSON.rejectDuplicateKeys(data)
+            wire = try JSONDecoder().decode(Wire.self, from: data)
+        } catch {
+            throw ModelManagementError.invalidCatalog
+        }
+        guard wire.schemaVersion == "models_browse.v1",
+              wire.source == "huggingface_mlx_community",
+              wire.rows.count <= maxRows else { throw ModelManagementError.invalidCatalog }
+        return try wire.rows.map { row in
+            guard row.source == "huggingface_mlx_community",
+                  !row.actionable,
+                  row.actionModelID == nil,
+                  isSafeModelID(row.modelID),
+                  ["fits", "tight", "wont_fit", "unknown"].contains(row.fit),
+                  row.estimatedGB.map({ $0 >= 0 && $0.isFinite }) ?? true else {
+                throw ModelManagementError.invalidCatalog
+            }
+            return MalibuOtherMLXModel(id: row.modelID, fit: row.fit, estimatedGB: row.estimatedGB)
+        }
+    }
+
+    /// A search term passed as `--family`: letters, digits, space, dot, dash
+    /// and underscore only, never starting with a dash (so it cannot read as
+    /// a flag), at most 64 characters; nil when empty.
+    static func sanitizedQuery(_ raw: String) -> String? {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: " ._-"))
+        let filtered = String(String.UnicodeScalarView(raw.unicodeScalars.filter { allowed.contains($0) && $0.isASCII }))
+            .trimmingCharacters(in: CharacterSet(charactersIn: " -"))
+        guard !filtered.isEmpty else { return nil }
+        return String(filtered.prefix(64))
     }
 }
