@@ -1706,23 +1706,45 @@ rm -rf "$tmp/svc/autotune-release.json" "$OWED_DIR" "$tmp/state/catalog-other" "
 cp "$tmp/svc/healthz.json" "$tmp/saved-healthz.json"
 VERIFIED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 printf '{"release_id":"%s","status":"live_verified","feeds":{"x":{"verified_at":"%s"}}}' "$R" "$VERIFIED" > "$tmp/svc/autotune-release.json"
-# canary_health RELOADS BANK_RELEASE UPTIME
+# The served self-test bank and its SHA-256 (the digest the canary must hold).
+printf '{"release_id":"%s","entries":[]}' "$R" > "$tmp/svc/routes/v1_native-mtp-selftest-bank"
+SERVED_BANK_SHA="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$tmp/svc/routes/v1_native-mtp-selftest-bank")"
+# canary_health RELOADS BANK_RELEASE UPTIME [BANK_SHA256]
 canary_health() {
   python3 - "$tmp/svc/healthz.json" "$@" <<'PYC'
 import json, sys
 path, reloads, bank, uptime = sys.argv[1:5]
+sha = sys.argv[5] if len(sys.argv) > 5 else ""
 d = {"status": "ok", "version": "v9.0.0", "uptime_s": int(uptime)}
 if reloads == "true":
     d["native_mtp_canary_bank_reloads"] = True
 if bank:
     d["native_mtp_canary_bank_release_id"] = bank
+if sha:
+    d["native_mtp_canary_bank_sha256"] = sha
 json.dump(d, open(path, "w"))
 PYC
 }
-canary_health true "$R" 100000
+canary_health true "$R" 100000 "$SERVED_BANK_SHA"
 run_rc 0 "catalog status: canary bank reloaded with the release" scripts/ops/catalog-activate.sh status
 if [ "$(state_of canary_bank)" = "done" ] && [ "$(fact_of coordinator_restart_needed_for_bank)" = False ]; then ok; else bad "reloaded canary bank: $(state_of canary_bank) restart=$(fact_of coordinator_restart_needed_for_bank)"; fi
+if [ "$(fact_of coordinator_canary_bank_sha256)" = "$SERVED_BANK_SHA" ] && [ "$(fact_of live_selftest_bank_sha256)" = "$SERVED_BANK_SHA" ]; then ok; else bad "bank digest facts: canary=$(fact_of coordinator_canary_bank_sha256) served=$(fact_of live_selftest_bank_sha256)"; fi
 case "$(next_field id)" in canary_bank) bad "a reloaded canary bank still offers a step: $(next_field title)" ;; *) ok ;; esac
+# Same release id, stale bytes: never done.
+canary_health true "$R" 100000 "$(printf '0%.0s' $(seq 1 64))"
+run_rc 0 "catalog status: canary holds a stale bank under the release id" scripts/ops/catalog-activate.sh status
+if [ "$(state_of canary_bank)" = blocked ]; then ok; else bad "same-id stale canary bank not blocked: $(state_of canary_bank)"; fi
+case "$(next_field id):$(next_field command)" in canary_bank:*systemctl*) bad "a stale-digest bank was offered a restart" ;; *) ok ;; esac
+# A runtime that reports the release but no digest is never done.
+canary_health true "$R" 100000
+run_rc 0 "catalog status: canary reports no bank digest" scripts/ops/catalog-activate.sh status
+if [ "$(state_of canary_bank)" = blocked ]; then ok; else bad "digest-less canary bank not blocked: $(state_of canary_bank)"; fi
+# The served bank unreadable: the digest cannot be compared.
+mv "$tmp/svc/routes/v1_native-mtp-selftest-bank" "$tmp/saved-bank"
+canary_health true "$R" 100000 "$SERVED_BANK_SHA"
+run_rc 0 "catalog status: served bank unreadable" scripts/ops/catalog-activate.sh status
+if [ "$(state_of canary_bank)" = unknown ]; then ok; else bad "unreadable served bank: $(state_of canary_bank)"; fi
+mv "$tmp/saved-bank" "$tmp/svc/routes/v1_native-mtp-selftest-bank"
 canary_health true "older-release" 100000
 run_rc 0 "catalog status: canary holds another release's bank" scripts/ops/catalog-activate.sh status
 if [ "$(state_of canary_bank)" = blocked ]; then ok; else bad "stale canary bank not blocked: $(state_of canary_bank)"; fi
@@ -1740,7 +1762,7 @@ canary_health false "" 10
 run_rc 0 "catalog status: boot-only canary bank, booted after the release" scripts/ops/catalog-activate.sh status
 if [ "$(state_of canary_bank)" = "done" ]; then ok; else bad "booted-after bank: $(state_of canary_bank)"; fi
 cp "$tmp/saved-healthz.json" "$tmp/svc/healthz.json"
-rm -f "$tmp/svc/autotune-release.json" "$tmp/saved-healthz.json"
+rm -f "$tmp/svc/autotune-release.json" "$tmp/saved-healthz.json" "$tmp/svc/routes/v1_native-mtp-selftest-bank"
 
 # ==== pearl-runtime updater-bundle ==============================================
 UBROOT="$tmp/ubroot"
