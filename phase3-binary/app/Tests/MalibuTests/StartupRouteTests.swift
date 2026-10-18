@@ -673,7 +673,7 @@ final class StartupRouteTests: XCTestCase {
         ].joined(separator: "\n").lowercased()
 
         XCTAssertTrue(copy.contains("current setup was not changed"))
-        XCTAssertTrue(copy.contains("advanced diagnostics"))
+        XCTAssertTrue(copy.contains("in diagnostics"))
         XCTAssertEqual(MigrationErrorCopy.cancelButton, "Cancel")
         XCTAssertEqual(MigrationErrorCopy.retryButton, "Try Again")
         XCTAssertFalse(copy.contains("coordinator"), copy)

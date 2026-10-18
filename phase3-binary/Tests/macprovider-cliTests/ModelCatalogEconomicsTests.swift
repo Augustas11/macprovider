@@ -48,6 +48,42 @@ final class ModelCatalogEconomicsTests: XCTestCase {
         XCTAssertTrue(source["rate_card_signature_digest"] is NSNull)
     }
 
+    func testIncompleteAdmissionReadDegradesRowsAndWarnsTheProjection() throws {
+        let inputs = try Self.staticInputs()
+        func project(missed: Set<String>) -> ModelCatalogEconomicsWire {
+            ModelCatalogEconomicsBuilder.makeProjection(
+                generatedAt: Self.date("2027-01-15T08:01:00Z"),
+                cliVersion: "test",
+                cliBuildCommit: "test",
+                processLaunchID: "launch-test",
+                processStartedAt: Self.date("2027-01-15T08:00:00Z"),
+                projectionSequence: 7,
+                currentModelID: nil,
+                discovery: Self.discovery(candidate: Self.candidate()),
+                admissionStatuses: [:],
+                demand: inputs.demand,
+                candidateCatalog: inputs.candidateCatalog,
+                rateCard: inputs.rateCard
+            ).withAdmissionReadOutcome(missedCandidateIDs: missed)
+        }
+        let full = project(missed: [])
+        let partial = project(missed: [Self.candidateID])
+        XCTAssertTrue(partial.warnings.contains("admission_state_missing"))
+        let row = try XCTUnwrap(partial.rows.first { $0.actionModelID == Self.candidateID })
+        XCTAssertTrue(row.warningCodes.contains("admission_state_missing"))
+        XCTAssertEqual(row.warningCodes, row.warningCodes.sorted())
+        XCTAssertEqual(row.admission.source, "local_default")
+        XCTAssertFalse(row.admission.catalogEconomicsPermitted)
+        XCTAssertNil(row.providerCompletionPayoutUSDPerMillionTokens)
+        XCTAssertFalse(full.warnings.contains("admission_state_missing"))
+        let unmarked = try XCTUnwrap(full.rows.first { $0.actionModelID == Self.candidateID })
+        XCTAssertEqual(
+            Set(row.warningCodes).subtracting(unmarked.warningCodes),
+            Set(unmarked.warningCodes).contains("admission_state_missing") ? [] : ["admission_state_missing"]
+        )
+        XCTAssertEqual(full.rows.count, partial.rows.count)
+    }
+
     func testProjectionEmitsEvaluateOnlyForEvaluatableCandidates() throws {
         let inputs = try Self.staticInputs()
         let blockedCandidate = Self.candidate(

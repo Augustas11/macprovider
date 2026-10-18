@@ -101,6 +101,9 @@ enum InstalledProviderMonitor {
         let admissionIdentityCoordinatorKeyRole: String?
         let admissionIdentityTransitionError: String?
         let admissionIdentityRecoveryAction: String?
+        /// Continuous batching and native MTP state from `/v1/status`, for the
+        /// Provider screen (#2054). nil when the CLI does not report them.
+        var engine: ProviderEngineStatus? = nil
     }
 
     static func readHTTPPort(paths: ProviderPaths = .current) -> Int? {
@@ -971,7 +974,8 @@ enum InstalledProviderMonitor {
                 : nil,
             admissionIdentityRecoveryAction: trustTypedFields && trustAdmissionIdentity
                 ? stringValue(admissionIdentity["recovery_action"])
-                : nil
+                : nil,
+            engine: trustTypedFields ? ProviderEngineStatus.decode(status: object) : nil
         )
     }
 

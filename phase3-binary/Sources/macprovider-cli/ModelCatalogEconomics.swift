@@ -140,7 +140,7 @@ struct ModelCatalogEconomicsWire: Codable, Equatable, Sendable {
         let estimatedGB: Double?
         let fit: String
         let disabledReason: String?
-        let warningCodes: [String]
+        var warningCodes: [String]
         let admission: Admission
         let providerGuidance: BYOMDiscoveryWire.Guidance
         let rateCardVersion: String?

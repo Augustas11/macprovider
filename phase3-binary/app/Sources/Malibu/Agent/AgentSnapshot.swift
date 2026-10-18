@@ -145,6 +145,8 @@ struct AgentSnapshot: Equatable {
     /// until a fresh projection arrives. Distinct from `providerEarningsFresh`.
     var hasObservedProviderEarnings: Bool = false
     var advertisedMaxConcurrency: Int?
+    /// Continuous batching and native MTP state (#2054 Provider screen).
+    var providerEngine: ProviderEngineStatus? = nil
     var catalogState: String?
     var catalogReleaseID: String?
     var catalogDigest: String?
@@ -373,6 +375,7 @@ struct AgentSnapshot: Equatable {
         lifecycleLeaseKind = nil
         lifecycleLeaseOperationID = nil
         lifecycleLeaseExpiresWallMS = nil
+        providerEngine = nil
         if currentModelIDFromStatus {
             currentModelID = nil
         }
@@ -1966,7 +1969,7 @@ enum AgentSnapshotPresenter {
         if s.lifecycleRecordState == "invalid" {
             return "Provider history invalid · restart required"
         }
-        // Keep Advanced diagnostics aligned with public #582 titles/actions.
+        // Keep Diagnostics aligned with public #582 titles/actions.
         if let outcome = hardwareOnboardingLifecycleLine(s) {
             return outcome
         }
@@ -2499,7 +2502,7 @@ enum AgentSnapshotPresenter {
         }
         let redacted = LogTailBuffer.redacted(error)
         guard redacted != "[redacted]" else {
-            return "Details are available in Advanced diagnostics."
+            return "Details are available in Diagnostics."
         }
         let lower = redacted.lowercased()
         let internalMarkers = [
@@ -2526,7 +2529,7 @@ enum AgentSnapshotPresenter {
             "--",
         ]
         if internalMarkers.contains(where: { lower.contains($0) }) {
-            return "Details are available in Advanced diagnostics."
+            return "Details are available in Diagnostics."
         }
         let allowedPrefixes = [
             "Invite code",
@@ -2555,7 +2558,7 @@ enum AgentSnapshotPresenter {
         if allowedPrefixes.contains(where: { redacted.hasPrefix($0) }) {
             return redacted
         }
-        return "Details are available in Advanced diagnostics."
+        return "Details are available in Diagnostics."
     }
 
     /// Adaptive USDC precision: sub-cent amounts (e.g. per-token accrual)
@@ -2686,7 +2689,7 @@ enum AgentSnapshotPresenter {
         case "app_attestation_missing", "compute_integrity_pending":
             return "Wait for verification to complete."
         case "compute_integrity_blocked", "provider_token_untrusted":
-            return "Review Advanced diagnostics."
+            return "Review Diagnostics."
         default:
             return "Try again when reward status refreshes."
         }

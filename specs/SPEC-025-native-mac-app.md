@@ -1,6 +1,31 @@
 # SPEC-025 — Native Mac App (signed `.dmg`, native Mac app with menu-bar presence)
 
-Status: DRAFT v0.32.0 · Owner: @Augustas11 · Target: 2026 Q3
+Status: DRAFT v0.33.0 · Owner: @Augustas11 · Target: 2026 Q3
+
+**Change log v0.33.0 (2026-10-18, #2054 Phase 2 sidebar shell):**
+Adds §3.2.1 with the first R-numbered requirements of this spec,
+SPEC-025-R001 to R009: the main window is one sidebar shell (Dashboard, Chat,
+Models, Discover, Provider, then Settings and Diagnostics) with the status
+pill in the sidebar header and the loaded model and health in its footer.
+The Dashboard keeps the Phase 1 status pill and Earnings card and gains a
+"Your model" card; Advanced diagnostics moves to Diagnostics; the invite
+panel and the Settings window move into the Settings section (Cmd-, opens
+it). Models replaces the Change Model sheet with the SPEC-044-R008 library,
+the switch confirmation states the SPEC-011 customer impact (HTTP 503 while
+loading and draining, no cancel, no download) and follows switch progress.
+Discover follows SPEC-044-R013. Provider shows reported serving, slot,
+continuous batching and native MTP state. Chat is a placeholder until the
+local-use requirements land. Quantization, architecture, parameter and
+capability columns stay off until the signed catalog carries them.
+This revision also covers the catalog refresh and the brand mark: (1) Models,
+Discover and the Dashboard model row keep the last good catalog projection on
+screen while a refresh runs and after a failed refresh, with a "Showing the
+last catalog update" notice and Retry, until the projection's SPEC-044-R003
+freshness deadline; "unavailable" needs a failed read and no usable
+projection (SPEC-044-R008). The catalog read bound is 15 s, above the CLI's
+own coordinator bound (SPEC-044-R002). (2) The menu-bar glyph, Dock icon and
+in-app tile draw the brand kit's Construction mark: a cut-out dome in a band,
+seven tapered rays and two side beams on the baseline.
 
 **Change log v0.32.0 (2026-10-18, #2029 Phase 1 truthful dashboard):**
 §3.1 and §3.2: the app launches as a menu-bar agent (`LSUIElement=true`) and
@@ -573,9 +598,10 @@ time (60–240 s for the first model) in the background.
 
 ### 3.2 Steady state
 
-- Menu bar icon: icon-only (#664), no USDC text. The glyph is a half-sun re-cut
-  for the status bar: ink at least 14 pt (16 pt shipped) tall in an 18 pt
-  canvas, strokes at least 1.5 pt, `NSStatusItem.variableLength`,
+- Menu bar icon: icon-only (#664), no USDC text. The glyph is the brand
+  Construction mark re-cut for the status bar (cut-out dome in a band, seven
+  rays, and the two side beams on the baseline): ink at least 14 pt tall in an
+  18 pt tall canvas, strokes at least 1.5 pt, nothing touching the canvas edge, `NSStatusItem.variableLength`,
   `imageScaling = .scaleNone`, template image. State badges: serving or idle
   is the plain template; paused adds a hollow ring (still template); needs
   attention (error, a provider issue, or serious thermal state) is a
@@ -591,13 +617,13 @@ time (60–240 s for the first model) in the background.
   window directly — there is **no popover** with USDC/MALIBU/uptime/GPU/latency in
   the shipped build (`MenuBarController.swift:56`); the menu exposes a plain **Quit**
   only, with **no "Quit and Uninstall"** item (`MenuBarController.swift:108`).
-- Dashboard (SwiftUI window, v0.32): one **status pill** (Serving, Paused,
+- Dashboard (the Dashboard section of the main window, §3.2.1): one **status pill** (Serving, Paused,
   Setting up, Not receiving work, Needs attention, Not running) describing
   customer serving only; a status notice with one action appears only when the
   Mac is not serving, and Reset/Export appear on the main surface only in an
-  error state. Below it: the model row (Change Model…), an **Earnings card**,
-  a **Mac health** line, a collapsed **Advanced diagnostics** section, and the
-  invite panel. There is no raw log tail; logs stay in exported diagnostics.
+  error state. Below it: an **Earnings card**, a **Your model** card and a
+  **This Mac** health card (SPEC-025-R003). Diagnostics, the invite panel and
+  logs live in their own sections (§3.2.1).
   Copy contract:
   - USDC: lifetime, this week and today, with "today" the UTC day for both
     requests and USDC; "Payouts are not enabled yet in beta." while a fresh
@@ -618,11 +644,14 @@ time (60–240 s for the first model) in the background.
   - Rates only: no $/time earnings projections (SPEC-044-R004).
   - Changing the payout wallet lives in Settings, with the cooling-off rule
     stated before the signer opens.
-  Change Model… opens the model switcher; switching uses the CLI's warm-swap
-  path when the provider advertises it, and a model list read is bounded so
-  "Checking…" always ends in a result or a retryable "unavailable". Malibu
-  attaches to the owner-only socket for typed status and referral projections
-  (§5.2).
+  Models (SPEC-025-R004) switches through the CLI's warm-swap path when the
+  provider advertises it, and a model list read is bounded so "Checking…"
+  always ends in a result or a retryable "unavailable". A refresh runs behind
+  the last good catalog projection instead of returning to "Checking…", and a
+  failed refresh keeps that projection, with Retry, until its freshness
+  deadline (SPEC-044-R008); "unavailable" means a failed read with no usable
+  projection. Malibu attaches to the owner-only socket for typed status and
+  referral projections (§5.2).
 - Referral UI is likewise capability-gated: Malibu renders the sanitized CLI
   control-socket projection only when the CLI advertises `referral_status_v1`
   and `referral_fragment_links_v1`.
@@ -634,7 +663,7 @@ time (60–240 s for the first model) in the background.
   presents status for at most 90 seconds, and clears it when the owner-only
   control connection closes. X challenge nonces, share URLs, and composer
   intents remain in CLI custody; Malibu receives only pending expiry/state.
-- The dashboard also renders the compatible local status-contract version, exact
+- The Diagnostics section (SPEC-025-R008) renders the compatible local status-contract version, exact
   process instance (role/PID/short instance ID), last CLI-authored lifecycle state and
   reason, and typed credential recovery guidance. A repair button is shown only for
   `recovery_action=repair_from_protected_source`; it invokes the signature-validated
@@ -645,6 +674,99 @@ time (60–240 s for the first model) in the background.
   Login launch shows no Dock icon until a window is opened. (This registers the **app** as a login item; the **CLI daemon** is
   owned by the launchd **provider service** `live.malibu.provider` (`KeepAlive`)
   that `install.sh` set up — a separate mechanism from the app login item, §8.)
+
+### 3.2.1 Main window: sidebar shell (#2054 Phase 2)
+
+These requirements govern the main window. Copy rules from §3.2 apply to
+every section: reported values only, no machine reason codes, no $/time
+projections (SPEC-044-R004), colour never the only signal.
+
+- **SPEC-025-R001 Shell.** Malibu MUST present one main window titled
+  "Malibu": a sidebar with, in order, Dashboard, Chat, Models, Discover,
+  Provider, then a separate group with Settings and Diagnostics, and a detail
+  pane showing the selected section. It opens on Dashboard. "Open Dashboard"
+  opens it on Dashboard; "Settings…" (Cmd-,) and the menu-bar Settings item
+  open the same window on Settings; there is no separate settings window.
+  The minimum content size is 820 × 560 pt, and no section may grow the
+  window past its frame. Chat MUST stay a placeholder that sends no inference
+  request until the local-use requirements for Chat are specified.
+- **SPEC-025-R002 Sidebar header and footer.** The sidebar header MUST show
+  the brand tile, "Malibu" and the §3.2 status pill. The footer MUST show the
+  model the provider reports in its local status (last path component; the
+  full id as help text), never a model only named in the config, and, when
+  reported, the slot count and thermal state; it shows "No model loaded"
+  rather than a guess. Text that comes from the provider (model ids, reasons,
+  log lines) is shown as one plain line with control, format and separator
+  characters removed and its length capped.
+- **SPEC-025-R003 Dashboard.** The Dashboard MUST keep the Phase 1 status
+  pill, status notice and Earnings card (§3.2) and add: a **Your model** card
+  with the served model, the switching line (R004), and, for a trusted current
+  row, its provider share rate and demand rank with the SPEC-044-R004
+  disclosure beside them, plus links to Models and Discover; a **This Mac**
+  card with the health line and a link to Diagnostics; a recommendation tip
+  only for an actionable recommendation; and an invite nudge only while a
+  current invite link can be copied. Reset and Export appear on the Dashboard
+  only in an error state, except the Export action that accompanies the
+  hardware-evidence blocker in the Earnings card (§3.2).
+- **SPEC-025-R004 Models.** Models MUST render the SPEC-044 projection in the
+  SPEC-044-R008 sections as a table with Model, Size, Fit, Status, provider
+  completion rate per 1M tokens and Action, one reason line per row saying
+  why the model can or cannot be served here, the SPEC-044-R004 disclosure in
+  the same scroll container, a header with the count and approximate size of
+  models whose weights are on this Mac, and a filter. The switching line MUST
+  be exactly one of: checking, "Switching available.", "Switching off: warm
+  swap is not running on this Mac.", or "Switching unavailable right now."
+  with Retry; available and off follow whether the provider runs with warm
+  swap, not whether some row currently offers an action. A footer MUST state that switching pauses new customer work
+  while the new model loads (HTTP 503) and never downloads. Quantization,
+  architecture, parameter count and capability columns or badges MUST NOT be
+  shown until the signed catalog row and the SPEC-044 projection carry them.
+- **SPEC-025-R005 Switch confirmation and progress.** Before a switch or
+  revert, Malibu MUST state: the from and to models; that customers get a
+  "provider loading" response (HTTP 503) while the new model loads and
+  running requests drain (SPEC-011 R-3.2.3); that a switch cannot be
+  cancelled once it starts; that it uses weights already on this Mac and
+  downloads nothing; that a failed load leaves the current model serving; and,
+  for a trusted row, its provider share rate and demand rank with the
+  SPEC-044-R004 disclosure and any non-earning caveat. After confirmation it
+  MUST show the CLI's switch phases (requested, loading, draining, loaded)
+  with elapsed time and MUST report success only after the provider confirms
+  the new model; a failure states that the Mac keeps serving the model it
+  reports. Closing the sheet does not cancel the switch.
+- **SPEC-025-R006 Discover.** Discover MUST follow SPEC-044-R013, with the
+  fit filter on by default. The recommendation (Adopt, Not now, Stop) is
+  pinned above the list and shown only when it names a row Discover lists, so
+  its rates never appear for a model outside the trusted catalog. A `models browse` search runs only on an explicit
+  provider search, in its own subprocess bounded to 20 s, with the search term
+  limited to letters, digits, space, dot, dash and underscore, never starting
+  with a dash.
+- **SPEC-025-R007 Provider.** Provider MUST show the status pill, the
+  lifecycle line, customer slots, continuous batching state (on with free rows
+  and waiting requests, off, or not active), native MTP state (on with mean
+  accepted tokens per step, ready, paused after a fallback, off, or not
+  available), the current queue/thermal/GPU/latency chips, requests, tokens,
+  the current run and restarts, and the loopback endpoints with a note that
+  they answer only on this Mac. Values come from the provider's local
+  status, health and metrics reports and the Mac's thermal state; CB and MTP
+  modes are accepted only from the CLI's closed enums (an unknown mode is not
+  shown), they are cleared when the status observation is invalidated, and
+  absent fields are omitted. Pause asks for confirmation and says running
+  requests finish; Resume appears only while paused.
+- **SPEC-025-R008 Diagnostics.** Diagnostics MUST always offer Export
+  diagnostics and Reset provider service, and show Findings (humanised, once
+  each), Events & identity (last restart, current setup failure, current
+  update, last recovery, provider access, network verification and their
+  repair state), Logs (the redacted recent provider log tail, at most 300
+  lines of at most 500 characters each, with idle-warm-up lines collapsed into
+  a count and a Problems filter) and Status (app and provider software
+  versions, status contract, lifecycle, slots).
+- **SPEC-025-R009 Settings.** Settings MUST host the payout wallet with the
+  cooling-off rule (§3.2), the invite panel (§3.2), an "Open Malibu at login"
+  toggle backed by `SMAppService.mainApp`, the Dock rule (Dock and Cmd-Tab
+  while a window is open, §3.1), provider software update status with the
+  install action when an update is available, the model settings (local
+  runtimes, background recommendations) and About (app and provider software
+  versions).
 
 ### 3.3 Updates — CLI-owned signed compatibility set
 
