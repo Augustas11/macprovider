@@ -6,6 +6,7 @@ public struct ControlMetricsSnapshot: Equatable, Sendable {
     public var malibuAccrued: Double?
     public var providerEarnings: ProviderEarningsSummary?
     public var gpuC: Double?
+    public var gpuUtilizationPct: Double?
     public var latencyP50Ms: Int?
     public var uptimeSec: Int = 0
     public var requestsServedToday: Int?
@@ -22,6 +23,7 @@ public struct ControlMetricsSnapshot: Equatable, Sendable {
         malibuAccrued: Double? = nil,
         providerEarnings: ProviderEarningsSummary? = nil,
         gpuC: Double? = nil,
+        gpuUtilizationPct: Double? = nil,
         latencyP50Ms: Int? = nil,
         uptimeSec: Int = 0,
         requestsServedToday: Int? = nil,
@@ -37,6 +39,7 @@ public struct ControlMetricsSnapshot: Equatable, Sendable {
         self.malibuAccrued = malibuAccrued
         self.providerEarnings = providerEarnings
         self.gpuC = gpuC
+        self.gpuUtilizationPct = gpuUtilizationPct
         self.latencyP50Ms = latencyP50Ms
         self.uptimeSec = uptimeSec
         self.requestsServedToday = requestsServedToday
@@ -53,9 +56,13 @@ public struct ControlMetricsSnapshot: Equatable, Sendable {
         provider snapshot: ProviderSnapshot,
         providerEarnings: ProviderEarningsSummary?
     ) -> ControlMetricsSnapshot {
+        // Requests per minute over the since-last window. The window is at
+        // least a minute for the rate so one request in a short window does
+        // not read as a burst.
         let rpm: Double?
-        if let tps = snapshot.throughputTPSSinceLast, tps > 0 {
-            rpm = tps * 60
+        if let started = snapshot.windowStartedAt {
+            let minutes = max(Date().timeIntervalSince(started), 60) / 60
+            rpm = Double(snapshot.requestsServedSinceLast) / minutes
         } else {
             rpm = nil
         }
@@ -64,6 +71,7 @@ public struct ControlMetricsSnapshot: Equatable, Sendable {
             malibuAccrued: providerEarnings?.malibuToday,
             providerEarnings: providerEarnings,
             gpuC: nil,
+            gpuUtilizationPct: snapshot.gpuUtilizationPercent,
             latencyP50Ms: snapshot.avgLatencyMSSinceLast.map { Int($0.rounded()) },
             uptimeSec: snapshot.uptimeSeconds,
             requestsServedToday: snapshot.requestsToday,

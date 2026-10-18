@@ -17,6 +17,10 @@ struct ProviderStatsRecord: Codable, Equatable {
     var errorsTotal: Int
     var restartCount: Int
     var updatedAt: Date
+    /// Serve boot times within the last 7 days, newest last and bounded, so
+    /// the dashboard can show a recent restart count beside the lifetime one.
+    /// Older records decode it as nil.
+    var recentRestartsAt: [Date]? = nil
 
     enum CodingKeys: String, CodingKey {
         case version
@@ -31,6 +35,7 @@ struct ProviderStatsRecord: Codable, Equatable {
         case errorsTotal = "errors_total"
         case restartCount = "restart_count"
         case updatedAt = "updated_at"
+        case recentRestartsAt = "recent_restarts_at"
     }
 
     static func empty(providerID: String, now: Date = Date()) -> ProviderStatsRecord {
@@ -39,7 +44,7 @@ struct ProviderStatsRecord: Codable, Equatable {
             providerID: providerID,
             requestsTotal: 0,
             requestsToday: 0,
-            requestsTodayDayStart: Calendar.current.startOfDay(for: now),
+            requestsTodayDayStart: ProviderStatus.utcCalendar.startOfDay(for: now),
             inputTokensToday: 0,
             outputTokensToday: 0,
             inputTokensAllTime: 0,

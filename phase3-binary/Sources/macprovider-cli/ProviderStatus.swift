@@ -416,6 +416,10 @@ struct ProviderSnapshot: Sendable {
     let transitionID: String
     let transitionAt: Date
     let transitionReason: String
+    /// Serve boots in the last 7 days (restartCount is lifetime).
+    var restartCount7d: Int? = nil
+    /// Start of the since-last window that requestsServedSinceLast covers.
+    var windowStartedAt: Date? = nil
 
     var slotsFree: Int {
         if thermallyThrottled { return 0 }
@@ -510,7 +514,7 @@ actor ProviderStatus {
     private var status: ProviderHealthState
     private var requestsTotal = 0
     private var requestsToday = 0
-    private var tokensTodayDayStart = Calendar.current.startOfDay(for: Date())
+    private var tokensTodayDayStart = ProviderStatus.utcCalendar.startOfDay(for: Date())
     private let statsStore: ProviderStatsStore?
     private let persistedProviderID: String?
     private var inputTokensToday: Int64 = 0
@@ -520,6 +524,8 @@ actor ProviderStatus {
     private var requestsInFlight = 0
     private var errorsTotal = 0
     private var restartCount = 0
+    private var recentRestartsAt: [Date] = []
+    private var windowStartedAt = Date()
     private var windowRequests = 0
     private var windowLatencyMS = 0.0
     private var windowCompletionTokens = 0
@@ -943,9 +949,12 @@ actor ProviderStatus {
             specDecodeGeneration: specDecodeGeneration,
             transitionID: transitionID,
             transitionAt: transitionAt,
-            transitionReason: transitionReason
+            transitionReason: transitionReason,
+            restartCount7d: Self.restarts(recentRestartsAt, within: Self.recentRestartWindow, of: Date()).count,
+            windowStartedAt: windowStartedAt
         )
         if resetWindow {
+            windowStartedAt = Date()
             windowRequests = 0
             windowLatencyMS = 0
             windowCompletionTokens = 0
@@ -1050,8 +1059,23 @@ actor ProviderStatus {
         return true
     }
 
+    /// "Today" counters roll over at 00:00 UTC, the same boundary the
+    /// coordinator uses for USDC today, so requests and earnings agree.
+    static let utcCalendar: Calendar = {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        return calendar
+    }()
+
+    static let recentRestartWindow: TimeInterval = 7 * 24 * 60 * 60
+    static let recentRestartLimit = 512
+
+    static func restarts(_ dates: [Date], within window: TimeInterval, of now: Date) -> [Date] {
+        dates.filter { $0 <= now && now.timeIntervalSince($0) <= window }
+    }
+
     private func rolloverDayCountersIfNeeded(now: Date = Date()) {
-        let dayStart = Calendar.current.startOfDay(for: now)
+        let dayStart = Self.utcCalendar.startOfDay(for: now)
         guard dayStart > tokensTodayDayStart else { return }
         tokensTodayDayStart = dayStart
         requestsToday = 0
@@ -1098,11 +1122,17 @@ actor ProviderStatus {
 
     private func bootstrapPersistedStats() {
         guard let statsStore, let persistedProviderID else { return }
+        let now = Date()
         if let record = statsStore.load(), record.providerID == persistedProviderID {
             applyLoadedStats(record)
             restartCount = record.restartCount + 1
+            recentRestartsAt = Array(
+                (Self.restarts(record.recentRestartsAt ?? [], within: Self.recentRestartWindow, of: now) + [now])
+                    .suffix(Self.recentRestartLimit)
+            )
         } else {
             restartCount = 0
+            recentRestartsAt = []
         }
         persistStats()
     }
@@ -1135,7 +1165,8 @@ actor ProviderStatus {
                 outputTokensAllTime: outputTokensAllTime,
                 errorsTotal: errorsTotal,
                 restartCount: restartCount,
-                updatedAt: now
+                updatedAt: now,
+                recentRestartsAt: recentRestartsAt
             )
         )
     }

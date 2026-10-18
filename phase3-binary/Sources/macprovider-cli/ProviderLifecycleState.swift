@@ -213,9 +213,29 @@ struct ProviderLifecycleStateRecord: Codable, Equatable, Sendable {
             operatorPaused: operatorPaused,
             lastRestart: state == .startingProvider ? event : previous?.lastRestart,
             lastRejection: rejectionStates.contains(state) ? event : previous?.lastRejection,
-            lastUpdate: writer == .updater || updateStates.contains(state) ? event : previous?.lastUpdate,
+            lastUpdate: writer == .updater
+                || updateStates.contains(state)
+                || installedSoftwareChanged(previous: previous, state: state, compatibilitySetID: compatibilitySetID)
+                ? event : previous?.lastUpdate,
             lastWatchdog: writer == .watchdog ? event : previous?.lastWatchdog
         )
+    }
+
+    /// A transition that names a different compatibility set than the last
+    /// recorded update means new provider software is running, installed by
+    /// the updater or by any other path (installer, app bundle). Recording
+    /// it keeps `last_update` current instead of naming an old self-update.
+    /// Serve-start transitions carry no compatibility set, so the first
+    /// transition of a boot that does carry one is the one recorded.
+    private static func installedSoftwareChanged(
+        previous: ProviderLifecycleStateRecord?,
+        state: ProviderLifecycleState,
+        compatibilitySetID: String?
+    ) -> Bool {
+        guard let previous, let current = normalized(compatibilitySetID) else {
+            return false
+        }
+        return current != previous.lastUpdate?.compatibilitySetID
     }
 
     private static let rejectionStates: [ProviderLifecycleState] = [

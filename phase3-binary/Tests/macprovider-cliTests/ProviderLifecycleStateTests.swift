@@ -334,6 +334,48 @@ final class ProviderLifecycleStateTests: XCTestCase {
         XCTAssertEqual(second.sequence, 2)
     }
 
+    func testLastUpdateFollowsInstalledSoftwareChangeOutsideTheUpdater() throws {
+        let fixture = try Fixture()
+        let store = ProviderLifecycleStateStore(url: fixture.recordURL)
+        let selfUpdate = try store.transition(
+            to: .updateInProgress,
+            reasonCode: "signed_compatibility_set_validated",
+            writer: .updater,
+            compatibilitySetID: "Augustas11/macprovider:v1.8.123@aaaa",
+            operationID: "self-update:old"
+        )
+        XCTAssertEqual(selfUpdate.lastUpdate?.transitionID, selfUpdate.transitionID)
+        let restart = try store.transition(
+            to: .startingProvider,
+            reasonCode: "maintenance_handoff_restart",
+            writer: .serve,
+            operationID: "self-update:old"
+        )
+        XCTAssertEqual(restart.lastUpdate?.transitionID, selfUpdate.transitionID)
+        let sameVersion = try store.transition(
+            to: .importingCredentials,
+            reasonCode: "resolving_cli_keychain_custody",
+            writer: .serve,
+            compatibilitySetID: "Augustas11/macprovider:v1.8.123@aaaa",
+            operationID: "self-update:old"
+        )
+        XCTAssertEqual(sameVersion.lastUpdate?.transitionID, selfUpdate.transitionID,
+                       "the same software must not refresh last_update")
+
+        // A later install by another path (installer or app bundle) runs new
+        // software without any updater transition.
+        _ = try store.transition(to: .startingProvider, reasonCode: "launchd_service_started", writer: .serve, operationID: "serve:new")
+        let newVersion = try store.transition(
+            to: .importingCredentials,
+            reasonCode: "resolving_cli_keychain_custody",
+            writer: .serve,
+            compatibilitySetID: "Augustas11/macprovider:v1.8.251@bbbb",
+            operationID: "serve:new"
+        )
+        XCTAssertEqual(newVersion.lastUpdate?.transitionID, newVersion.transitionID)
+        XCTAssertEqual(newVersion.lastUpdate?.compatibilitySetID, "Augustas11/macprovider:v1.8.251@bbbb")
+    }
+
     func testSignificantReasonsSurviveReturnToServing() throws {
         let fixture = try Fixture()
         let store = ProviderLifecycleStateStore(url: fixture.recordURL)
