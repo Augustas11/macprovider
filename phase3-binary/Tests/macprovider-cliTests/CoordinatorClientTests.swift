@@ -211,9 +211,12 @@ final class CoordinatorClientTests: XCTestCase {
     private static let nativeMTPAdmissionTupleSHA256 = String(repeating: "7", count: 64)
     private static let nativeMTPRuntimeTupleSHA256 = "2886709db5f6b3cc0c37d70da2f665bb368dd2e4f48ac07befbfb7f8ee3d5060"
 
-    private static func nativeMTPTupleDisable() throws -> [String: Any] {
+    private static func nativeMTPTupleDisable(
+        reason: String = "mismatch",
+        nonce: String = "abcdef0123456789abcdef0123456789"
+    ) throws -> [String: Any] {
         let issuedAt = ISO8601DateFormatter().string(from: Date())
-        let digest = try nativeMTPTupleDisableRequestDigest(issuedAt: issuedAt)
+        let digest = try nativeMTPTupleDisableRequestDigest(issuedAt: issuedAt, reason: reason, nonce: nonce)
         return [
             "type": "native_mtp_tuple_disable_v1",
             "version": 1,
@@ -223,14 +226,18 @@ final class CoordinatorClientTests: XCTestCase {
             "native_mtp_admission_tuple_sha256": Self.nativeMTPAdmissionTupleSHA256,
             "served_snapshot_id": "snapshot-a",
             "native_mtp_runtime_tuple_sha256": Self.nativeMTPRuntimeTupleSHA256,
-            "reason": "mismatch",
-            "nonce": "abcdef0123456789abcdef0123456789",
+            "reason": reason,
+            "nonce": nonce,
             "issued_at": issuedAt,
             "request_digest": digest,
         ]
     }
 
-    private static func nativeMTPTupleDisableRequestDigest(issuedAt: String) throws -> String {
+    private static func nativeMTPTupleDisableRequestDigest(
+        issuedAt: String,
+        reason: String = "mismatch",
+        nonce: String = "abcdef0123456789abcdef0123456789"
+    ) throws -> String {
         let canonical = try RFC8785JCS.canonicalStringRawStrings(.object([
             "schema_version": .int(1),
             "provider_id": .string("provider-test"),
@@ -239,8 +246,8 @@ final class CoordinatorClientTests: XCTestCase {
             "native_mtp_admission_tuple_sha256": .string(Self.nativeMTPAdmissionTupleSHA256),
             "served_snapshot_id": .string("snapshot-a"),
             "native_mtp_runtime_tuple_sha256": .string(Self.nativeMTPRuntimeTupleSHA256),
-            "reason": .string("mismatch"),
-            "nonce": .string("abcdef0123456789abcdef0123456789"),
+            "reason": .string(reason),
+            "nonce": .string(nonce),
             "issued_at": .string(issuedAt),
         ]))
         return SHA256.hash(data: Data(canonical.utf8)).map { String(format: "%02x", $0) }.joined()
@@ -1021,6 +1028,141 @@ final class CoordinatorClientTests: XCTestCase {
         let frames = await recorder.frames.dropFirst(initialCount)
         XCTAssertEqual(frames.first?["type"] as? String, "nak")
         XCTAssertEqual(frames.first?["in_reply_to"] as? String, "native_mtp_tuple_disable_v1")
+    }
+
+    // SPEC-048-R016 v0.1.48: a coordinator `bank_mismatch` parks the tuple
+    // (fenced, not torn down) and the provider offers it again without a
+    // model reload, bounded to one offer per session or observed bank change.
+    private func makeNativeMTPReofferClient(
+        recorder: CoordinatorFrameRecorder
+    ) async throws -> (CoordinatorClient, ModelRuntime, NativeMTPPublishedTupleOffer) {
+        let runtime = ModelRuntime(
+            modelID: "model-a",
+            maxBatch: 1,
+            nativeMTPMode: .auto,
+            warmSwapEnabled: false,
+            loader: { _ in throw APIError(status: 503, message: "unused", type: "server_error", code: "unused") }
+        )
+        let offer = NativeMTPTupleReofferTests.offer()
+        XCTAssertEqual(offer.nativeMTPAdmissionTupleSHA256, Self.nativeMTPAdmissionTupleSHA256)
+        await runtime.installNativeMTPTupleOfferForTest(offer)
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: recorder, modelRuntime: runtime)
+        await client.acceptAssignedSessionForTest(assignedID: "assigned-native-mtp")
+        return (client, runtime, offer)
+    }
+
+    private func nativeMTPOfferFrames(_ recorder: CoordinatorFrameRecorder) async -> [[String: Any]] {
+        await recorder.frames.filter { $0["type"] as? String == "native_mtp_tuple_offer_v1" }
+    }
+
+    func testNativeMTPBankMismatchParksTupleAndReoffersOnANewSession() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let (client, runtime, offer) = try await makeNativeMTPReofferClient(recorder: recorder)
+        defer { Task { await client.stop() } }
+
+        try await client.sendNativeMTPTupleOfferForTest()
+        try await client.sendNativeMTPTupleOfferForTest()
+        var offers = await nativeMTPOfferFrames(recorder)
+        XCTAssertEqual(offers.count, 1, "identical offers are deduplicated per session")
+        XCTAssertEqual(offers.first?["native_mtp_runtime_tuple_sha256"] as? String, Self.nativeMTPRuntimeTupleSHA256)
+
+        try await client.handleCoordinatorPayloadForTest(try Self.nativeMTPTupleDisable(reason: "bank_mismatch"))
+        let parked = await runtime.nativeMTPTupleIsParkedForTest()
+        XCTAssertTrue(parked)
+        let fenced = await runtime.currentSnapshot().nativeMTPTupleOffer
+        XCTAssertNil(fenced, "a parked tuple does not serve")
+        let awaiting = await client.nativeMTPTupleAwaitingReofferForTest()
+        XCTAssertTrue(awaiting)
+
+        try await client.sendNativeMTPTupleOfferForTest()
+        offers = await nativeMTPOfferFrames(recorder)
+        XCTAssertEqual(offers.count, 1, "the rejecting session does not re-offer")
+
+        // The coordinator restarts: a new session re-offers without a reload.
+        await client.cleanupConnectionForTest()
+        await client.acceptAssignedSessionForTest(assignedID: "assigned-native-mtp")
+        try await client.sendNativeMTPTupleOfferForTest()
+        try await client.sendNativeMTPTupleOfferForTest()
+        offers = await nativeMTPOfferFrames(recorder)
+        XCTAssertEqual(offers.count, 2)
+        XCTAssertEqual(offers.last?["challenge_bank_sha256"] as? String, offer.challengeBankSHA256)
+        XCTAssertEqual(offers.last?["selftest_pass_digest"] as? String, offer.selftestPassDigest,
+                       "the re-offer carries the original self-check; it is not re-run")
+        let restored = await runtime.currentSnapshot().nativeMTPTupleOffer
+        XCTAssertEqual(restored, offer)
+        let stillParked = await runtime.nativeMTPTupleIsParkedForTest()
+        XCTAssertFalse(stillParked)
+    }
+
+    func testNativeMTPParkedTupleReoffersWhenTheCoordinatorServesItsBank() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let (client, runtime, offer) = try await makeNativeMTPReofferClient(recorder: recorder)
+        defer { Task { await client.stop() } }
+        let stale = String(repeating: "c", count: 64)
+        await client.observeCoordinatorNativeMTPChallengeBankForTest(sha256: stale)
+
+        try await client.sendNativeMTPTupleOfferForTest()
+        try await client.handleCoordinatorPayloadForTest(try Self.nativeMTPTupleDisable(reason: "bank_mismatch"))
+        await client.observeCoordinatorNativeMTPChallengeBankForTest(sha256: String(repeating: "d", count: 64))
+        var offers = await nativeMTPOfferFrames(recorder)
+        XCTAssertEqual(offers.count, 1, "a bank this provider did not qualify on is no trigger")
+
+        await client.observeCoordinatorNativeMTPChallengeBankForTest(sha256: offer.challengeBankSHA256)
+        await client.observeCoordinatorNativeMTPChallengeBankForTest(sha256: offer.challengeBankSHA256)
+        offers = await nativeMTPOfferFrames(recorder)
+        XCTAssertEqual(offers.count, 2, "one re-offer once the coordinator serves the offered bank")
+        let restored = await runtime.currentSnapshot().nativeMTPTupleOffer
+        XCTAssertEqual(restored, offer)
+    }
+
+    func testNativeMTPRepeatedBankMismatchDoesNotLoop() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let (client, _, offer) = try await makeNativeMTPReofferClient(recorder: recorder)
+        defer { Task { await client.stop() } }
+
+        try await client.sendNativeMTPTupleOfferForTest()
+        try await client.handleCoordinatorPayloadForTest(try Self.nativeMTPTupleDisable(reason: "bank_mismatch"))
+        await client.observeCoordinatorNativeMTPChallengeBankForTest(sha256: offer.challengeBankSHA256)
+        var offers = await nativeMTPOfferFrames(recorder)
+        XCTAssertEqual(offers.count, 2)
+
+        // Rejected again while the coordinator serves the same bank.
+        try await client.handleCoordinatorPayloadForTest(try Self.nativeMTPTupleDisable(
+            reason: "bank_mismatch",
+            nonce: "0123456789abcdef0123456789abcdef"
+        ))
+        await client.observeCoordinatorNativeMTPChallengeBankForTest(sha256: String(repeating: "d", count: 64))
+        await client.observeCoordinatorNativeMTPChallengeBankForTest(sha256: offer.challengeBankSHA256)
+        try await client.sendNativeMTPTupleOfferForTest()
+        offers = await nativeMTPOfferFrames(recorder)
+        XCTAssertEqual(offers.count, 2, "no second re-offer in the same session for the same bank")
+
+        await client.cleanupConnectionForTest()
+        await client.acceptAssignedSessionForTest(assignedID: "assigned-native-mtp")
+        try await client.sendNativeMTPTupleOfferForTest()
+        offers = await nativeMTPOfferFrames(recorder)
+        XCTAssertEqual(offers.count, 3, "a later session tries once more")
+    }
+
+    func testNativeMTPTupleFailureDisableIsNotReoffered() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let (client, runtime, _) = try await makeNativeMTPReofferClient(recorder: recorder)
+        defer { Task { await client.stop() } }
+
+        try await client.sendNativeMTPTupleOfferForTest()
+        try await client.handleCoordinatorPayloadForTest(try Self.nativeMTPTupleDisable(reason: "mismatch"))
+        let parked = await runtime.nativeMTPTupleIsParkedForTest()
+        XCTAssertFalse(parked, "a canary failure tears the tuple down")
+        await client.cleanupConnectionForTest()
+        await client.acceptAssignedSessionForTest(assignedID: "assigned-native-mtp")
+        try await client.sendNativeMTPTupleOfferForTest()
+        let offers = await nativeMTPOfferFrames(recorder)
+        XCTAssertEqual(offers.count, 1)
     }
 
     func testRequestCapacityTransitionsSendCoordinatorStateUpdates() async throws {
@@ -9717,6 +9859,7 @@ final class CoordinatorClientTests: XCTestCase {
             catalogModelSHA256: catalogModelSHA256,
             catalogArtifactIdentity: catalogArtifactIdentity,
             nativeMTPTupleDisableHandler: nativeMTPTupleDisableHandler,
+            nativeMTPServedBankDigest: { nil },
             computeScoreExecutor: computeScoreExecutor,
             catalogEnvelopeRefresher: catalogEnvelopeRefresher,
             catalogEnvelopeRefreshMinimumInterval: catalogEnvelopeRefreshMinimumInterval,

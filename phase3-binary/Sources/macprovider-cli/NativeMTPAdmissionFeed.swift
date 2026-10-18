@@ -134,6 +134,25 @@ enum NativeMTPAdmissionFeed {
         )
     }
 
+    /// SHA-256 of the self-test bank the static-feed origin serves now, or nil
+    /// when it cannot be read. A digest only: nothing here admits a tuple
+    /// (SPEC-048-R016 v0.1.48 re-offer trigger).
+    static func servedBankSHA256(
+        fetcher: Fetcher = defaultFetch,
+        baseURL: URL = productionBaseURL
+    ) async -> String? {
+        guard let url = try? memberURL(baseURL: baseURL, name: "native-mtp-selftest-bank"),
+              let body = try? await fetch(
+                url,
+                maxBytes: NativeMTPAdmissionSidecar.maxSelfTestChallengeBankBytes,
+                fetcher: fetcher
+              )
+        else {
+            return nil
+        }
+        return SHA256.hash(data: body).map { String(format: "%02x", $0) }.joined()
+    }
+
     private static func memberURL(baseURL: URL, name: String) throws -> URL {
         guard baseURL.scheme == "https" || StaticFeedOrigin.isLabLoopback(baseURL),
               baseURL.host?.isEmpty == false,
