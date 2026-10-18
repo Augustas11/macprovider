@@ -1,6 +1,6 @@
 # SPEC-031 — Canary Probe, Degrade & Sanction Lifecycle
 
-**Status:** v0.3.8
+**Status:** v0.3.9
 **Date:** 2026-07-13
 **Depends on:** SPEC-002 (coordinator provider state machine: FR-P5 routing eligibility, FR-P8a admission warm-up, FR-P11a circuit-breaker; F-2 amendment defines provisional/pinned admission), SPEC-003 (open provider onboarding, tier semantics), SPEC-006 §5.2 / §17.2 (buyer error contract, 404/503), SPEC-008 (attestation — owns model/weight identity claims), SPEC-018/019 (buyer error envelope + `retryable`)
 **Related infrastructure:** SPEC-030 (losslessness probe) and SPEC-048 native
@@ -834,6 +834,26 @@ passed, since the bank bytes are pinned by the signed admission. A bank whose
 bank record and MUST NOT accept a caller-supplied prompt or expected value in
 its place.
 
+**[v0.3.9] The bank moves with the release.** The coordinator's canary bank
+is the exact signed bank bytes of the release it serves. A coordinator that
+loads a new release without restarting (a configuration reload) MUST verify
+that release's served bank bytes under the canary keyring and install them as
+the canary bank before the release and its served feed bytes go live, so a
+provider can never fetch a bank the canary does not hold. A bank the canary
+cannot verify, or one naming another release, refuses the whole release: the
+prior release, its served feeds and its bank stay in force together. A tuple
+offer binds only to a bank whose digest and `release_id` both match. Besides
+the current bank, the coordinator MAY keep exactly the one bank the latest
+release replaced, and an offer binds to it only while that bank's release is
+still the live or a retained compatible-previous admitted catalog release: a
+provider admitted on that release holds that bank and cannot fetch another
+one without restarting onto the new release. No other bank matches, and an
+offer that matches none is the tuple-scoped `bank_mismatch` failure. The
+coordinator reports, on `/healthz`, that its canary bank moves with the
+release (`native_mtp_canary_bank_reloads`) and the `release_id` of the bank
+the canary holds (`native_mtp_canary_bank_release_id`), so activation tooling
+proves the bank moved instead of restarting the coordinator.
+
 The profile uses synthetic coordinator-owned data; maximum completion is 64
 tokens, prompt input is at most 8 KiB and 2,048 tokens, and the release-bound
 signed challenge bank contains at most 256 entries. It never exceeds the signed
@@ -1140,6 +1160,14 @@ before the breaker and canary coexist under load.
 
 ## 18. Changelog
 
+- **v0.3.9 (2026-10-18):** FR-CAN33: the native-MTP canary bank moves with
+  the release. A configuration reload that loads a native-bound release
+  verifies and installs that release's served bank for the canary before the
+  release goes live, and refuses the release when the canary cannot verify
+  it. The one bank a reload replaced still binds offers while its release is
+  still admitted. `/healthz` reports the canary bank's release. Before this,
+  the bank was read at boot only, and a reload-activated release rejected
+  every provider offer with `bank_mismatch` until a coordinator restart.
 - **v0.3.8 (2026-10-14):** Editorial: the FR-CAN23 correlation-epoch design
   memo moved to `docs/design/fr-can23-correlation-epoch.md`. No normative
   change.
