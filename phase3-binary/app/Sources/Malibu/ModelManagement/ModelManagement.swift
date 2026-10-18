@@ -3496,6 +3496,10 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         weightsPresentLocally = row.weightsPresentLocally
         fit = Self.displayFit(row.fit)
         estimatedGB = row.estimatedGB
+    /// Provider share of the catalog rate, in basis points; trusted rows only.
+    let providerShareBPS: Int?
+    /// Providers ready to serve this model on the network; trusted rows only.
+    let readyProviderCount: Int?
         economicsState = row.economicsState
         admissionState = row.admission.state
         admissionSource = row.admission.source
@@ -3520,6 +3524,8 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
             : nil
 
         let hasTrustedEconomics = row.economicsState == "trusted" && row.admission.catalogEconomicsPermitted
+        providerShareBPS = nil
+        readyProviderCount = nil
         let switchAvailable = hasTrustedEconomics && Self.actionIsAvailable(
             row.switchAction,
             kind: "switch_model",
@@ -3578,6 +3584,8 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
 
         id = projectedID
         displayID = row.displayModelID
+        providerShareBPS = row.economicsState == "trusted" ? row.providerShareBPS : nil
+        readyProviderCount = row.economicsState == "trusted" ? row.readyProviderCount : nil
         catalogVerifiedModelKey = nil
         nonEarningDisclosure = nil
         state = row.runtimeState
@@ -3661,6 +3669,8 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
             && earningPathClass == "no_earning_path_in_v0_1"
     }
 
+        providerShareBPS = nil
+        readyProviderCount = nil
     /// SPEC-047-R010/R011 wording for a coordinator pool binding.
     func poolBindingLine(_ binding: MalibuBYOMPoolBinding) -> String {
         earningPathClass == "pool_attested_earning"
