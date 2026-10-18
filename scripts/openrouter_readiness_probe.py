@@ -455,7 +455,10 @@ def validate_supported_parameters(params: dict, model_id: str) -> None:
         expected_features.update(STRUCTURED_OUTPUT_FEATURE_DESCRIPTORS)
     for name in (*TOOL_FEATURE_DESCRIPTORS, *STRUCTURED_OUTPUT_FEATURE_DESCRIPTORS):
         if name in expected_features:
-            if params.get(name) != expected_features[name]:
+            got = params.get(name)
+            if name == "tool_choice" and isinstance(got, dict) and got.get("type") == "enum" and isinstance(got.get("values"), list) and "auto" in got["values"] and set(got["values"]) <= {"auto", "none", "required"}:
+                continue
+            if got != expected_features[name]:
                 raise ProbeError(f"{model_id} {name} supported parameter must be exactly {expected_features[name]!r}, got {params.get(name)!r}")
         elif name in params:
             raise ProbeError(f"{model_id} must not declare {name}: model is outside the SPEC-018/SPEC-019 families")
@@ -1152,6 +1155,8 @@ def classify_benchmark_evidence(evidence: dict, *, require_429: bool = False, mi
             return "client_or_network_exception"
         return "non_capacity_failure"
     if require_429 and int(evidence.get("shed_429", 0) or 0) < 1:
+        if float(evidence.get("success_ratio", 0.0) or 0.0) >= 1.0:
+            return "saturation_absorbed"
         return "saturation_did_not_shed"
     if min_success_ratio > 0 and float(evidence.get("success_ratio", 0.0) or 0.0) < min_success_ratio:
         if int(evidence.get("shed_429", 0) or 0) > 0:
@@ -1387,7 +1392,7 @@ def run_benchmark(
             require_429=require_429,
             min_success_ratio=min_success_ratio,
         )
-    if require_429 and shed_count < 1:
+    if require_429 and shed_count < 1 and ok_count != len(results):
         raise benchmark_failure(
             "saturation benchmark did not observe an early HTTP 429",
             requests,

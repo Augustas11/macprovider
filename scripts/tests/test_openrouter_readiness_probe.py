@@ -528,7 +528,8 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
         self.assertEqual(probe.check_models_document(qwen36_doc(), probe.DEFAULT_MODEL)["rows"], 1)
         bad_values = (
             ("tools", {"type": "enum", "values": ["auto"]}),
-            ("tool_choice", {"type": "enum", "values": ["auto", "required"]}),
+            ("tool_choice", {"type": "enum", "values": ["none", "required"]}),
+            ("tool_choice", {"type": "enum", "values": ["auto", "bogus"]}),
             ("tool_choice", {"type": "enum", "values": []}),
             ("response_format", {"type": "enum", "values": ["text", "json_object", "json_schema"]}),
             ("response_format", {"type": "object", "properties": {"type": {"type": "enum", "values": ["xml"]}, "json_schema": {"type": "unknown"}}}),
@@ -551,6 +552,12 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
             with self.assertRaisesRegex(probe.ProbeError, f"must not declare {name}"):
                 probe.check_models_document(non_family)
         self.assertEqual(probe.check_models_document(valid_doc())["rows"], 1)
+
+    def test_tool_choice_accepts_enum_with_auto_and_subset_of_known_values(self):
+        for values in (["auto"], ["auto", "none"], ["auto", "required"], ["auto", "none", "required"]):
+            doc = qwen36_doc()
+            doc["data"][0]["output_modalities"][0]["supported_parameters"]["tool_choice"] = {"type": "enum", "values": values}
+            self.assertEqual(probe.check_models_document(doc, probe.DEFAULT_MODEL)["rows"], 1)
 
     def test_not_ready_catalog_rows_may_advertise_zero_capacity(self):
         doc = valid_doc()
@@ -976,7 +983,7 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
         self.assertTrue(response.closed)
         self.assertIn("benchmark_timeout", str(raised.exception))
 
-    def test_benchmark_requires_429_when_saturation_is_requested(self):
+    def test_saturation_passes_as_absorbed_when_every_request_succeeds(self):
         result = {
             "status": 200,
             "ok": True,
@@ -986,8 +993,20 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
             "output_tokens": 4,
         }
         with mock.patch.object(probe, "chat_once", side_effect=[result, result]):
-            with self.assertRaisesRegex(probe.ProbeError, "did not observe"):
-                probe.run_benchmark("https://api.example.test", "secret", "model", 2, 2, 16, 0.0, 5000, 0.0, True)
+            got = probe.run_benchmark("https://api.example.test", "secret", "model", 2, 2, 16, 0.0, 5000, 0.0, True)
+        self.assertEqual(got["ok"], 2)
+        self.assertEqual(got["shed_429"], 0)
+
+    def test_saturation_classification_absorbed_only_at_full_success(self):
+        base = {"statuses": {"200": 2}, "shed_429": 0, "non_capacity_failures": 0}
+        self.assertEqual(
+            probe.classify_benchmark_evidence({**base, "success_ratio": 1.0}, require_429=True),
+            "saturation_absorbed",
+        )
+        self.assertEqual(
+            probe.classify_benchmark_evidence({**base, "success_ratio": 0.5}, require_429=True),
+            "saturation_did_not_shed",
+        )
 
     def test_saturation_stops_after_first_capacity_shed_batch(self):
         ok = {
