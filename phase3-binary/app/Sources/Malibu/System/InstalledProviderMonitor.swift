@@ -27,6 +27,7 @@ enum InstalledProviderMonitor {
         let outputTokensAllTime: Int64?
         let uptimeSeconds: Int?
         let restartCount: Int?
+        var restartCount7d: Int? = nil
     }
 
     struct StatusSnapshot: Equatable {
@@ -703,7 +704,8 @@ enum InstalledProviderMonitor {
                 inputTokensAllTime: inputTokensAllTime,
                 outputTokensAllTime: outputTokensAllTime,
                 uptimeSeconds: uptimeSeconds,
-                restartCount: restartCount
+                restartCount: restartCount,
+                restartCount7d: (object["restart_count_7d"] as? Int).map { max(0, $0) }
             )
         } catch {
             return nil

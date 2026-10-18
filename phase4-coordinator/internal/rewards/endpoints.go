@@ -98,6 +98,9 @@ func NewAccrualHandler(deps AccrualHandlerDeps) http.Handler {
 			"reward_projection_generated_at": projection.GeneratedAt.Format(time.RFC3339),
 			"reward_projection_stale_after":  projection.StaleAfter.Format(time.RFC3339),
 			"reward_eligibility":             projection.Eligibility,
+			"retained_hold_reasons":          nonNilStrings(projection.Balance.RetainedHoldReasons),
+			"trust_progress":                 projection.TrustProgress,
+			"emission":                       projection.Emission,
 		})
 	})
 }
@@ -220,6 +223,13 @@ func writeAuditJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func nonNilStrings(in []string) []string {
+	if in == nil {
+		return []string{}
+	}
+	return in
 }
 
 func bearerToken(header string) string {

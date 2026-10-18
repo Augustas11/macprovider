@@ -283,6 +283,7 @@ public enum ControlSocketCodec {
                 )
             }
             if let gpuC = metrics.gpuC { frame["gpu_c"] = gpuC }
+            if let gpuUtilizationPct = metrics.gpuUtilizationPct { frame["gpu_utilization_pct"] = gpuUtilizationPct }
             if let latencyP50Ms = metrics.latencyP50Ms { frame["latency_p50_ms"] = latencyP50Ms }
             if let requestsServedToday = metrics.requestsServedToday { frame["requests_served_today"] = requestsServedToday }
             if let requestsServedAllTime = metrics.requestsServedAllTime { frame["requests_served_all_time"] = requestsServedAllTime }
@@ -573,6 +574,7 @@ public enum ControlSocketCodec {
                 malibuAccrued: optionalDoubleField("malibu_accrued", in: object),
                 providerEarnings: try decodeProviderEarnings(in: object),
                 gpuC: optionalDoubleField("gpu_c", in: object),
+                gpuUtilizationPct: optionalDoubleField("gpu_utilization_pct", in: object),
                 latencyP50Ms: optionalIntField("latency_p50_ms", in: object),
                 uptimeSec: try intField("uptime_sec", in: object),
                 requestsServedToday: optionalIntField("requests_served_today", in: object),

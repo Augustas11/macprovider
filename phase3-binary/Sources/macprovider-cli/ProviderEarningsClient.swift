@@ -29,6 +29,102 @@ public struct ProviderIdlePrewarmSummary: Codable, Equatable, Sendable {
     }
 }
 
+/// Live trust progress from the coordinator reward projection (SPEC-021
+/// §5.3). Timestamps stay RFC3339 text; readers parse and validate them.
+public struct ProviderTrustProgressSummary: Codable, Equatable, Sendable {
+    public let tier: String
+    public let demotionCooldownUntil: String?
+    public let demotionCooldownActive: Bool
+    public let requalificationRequired: Bool
+    public let uptimeOKSince: String?
+    public let uptimeRequiredSeconds: Int64
+    public let unlockPairOKSince: String?
+    public let requalificationWindowSeconds: Int64
+    public let verifiedReceiptCount: Int
+    public let requiredReceiptCount: Int
+    public let criteriaMet: [String]
+    public let earliestPromotionAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case tier
+        case demotionCooldownUntil = "demotion_cooldown_until"
+        case demotionCooldownActive = "demotion_cooldown_active"
+        case requalificationRequired = "requalification_required"
+        case uptimeOKSince = "uptime_ok_since"
+        case uptimeRequiredSeconds = "uptime_required_seconds"
+        case unlockPairOKSince = "unlock_pair_ok_since"
+        case requalificationWindowSeconds = "requalification_window_seconds"
+        case verifiedReceiptCount = "verified_receipt_count"
+        case requiredReceiptCount = "required_receipt_count"
+        case criteriaMet = "criteria_met"
+        case earliestPromotionAt = "earliest_promotion_at"
+    }
+
+    public init(
+        tier: String,
+        demotionCooldownUntil: String? = nil,
+        demotionCooldownActive: Bool = false,
+        requalificationRequired: Bool = false,
+        uptimeOKSince: String? = nil,
+        uptimeRequiredSeconds: Int64 = 259_200,
+        unlockPairOKSince: String? = nil,
+        requalificationWindowSeconds: Int64 = 259_200,
+        verifiedReceiptCount: Int = 0,
+        requiredReceiptCount: Int = 100,
+        criteriaMet: [String] = [],
+        earliestPromotionAt: String? = nil
+    ) {
+        self.tier = tier
+        self.demotionCooldownUntil = demotionCooldownUntil
+        self.demotionCooldownActive = demotionCooldownActive
+        self.requalificationRequired = requalificationRequired
+        self.uptimeOKSince = uptimeOKSince
+        self.uptimeRequiredSeconds = uptimeRequiredSeconds
+        self.unlockPairOKSince = unlockPairOKSince
+        self.requalificationWindowSeconds = requalificationWindowSeconds
+        self.verifiedReceiptCount = verifiedReceiptCount
+        self.requiredReceiptCount = requiredReceiptCount
+        self.criteriaMet = criteriaMet
+        self.earliestPromotionAt = earliestPromotionAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let rawTier = try c.decode(String.self, forKey: .tier).lowercased()
+        guard rawTier == "provisional" || rawTier == "trusted" else {
+            throw DecodingError.dataCorruptedError(forKey: .tier, in: c, debugDescription: "Invalid trust tier")
+        }
+        tier = rawTier
+        demotionCooldownUntil = try c.decodeIfPresent(String.self, forKey: .demotionCooldownUntil)
+        demotionCooldownActive = try c.decodeIfPresent(Bool.self, forKey: .demotionCooldownActive) ?? false
+        requalificationRequired = try c.decodeIfPresent(Bool.self, forKey: .requalificationRequired) ?? false
+        uptimeOKSince = try c.decodeIfPresent(String.self, forKey: .uptimeOKSince)
+        uptimeRequiredSeconds = max(0, try c.decodeIfPresent(Int64.self, forKey: .uptimeRequiredSeconds) ?? 0)
+        unlockPairOKSince = try c.decodeIfPresent(String.self, forKey: .unlockPairOKSince)
+        requalificationWindowSeconds = max(0, try c.decodeIfPresent(Int64.self, forKey: .requalificationWindowSeconds) ?? 0)
+        verifiedReceiptCount = max(0, try c.decodeIfPresent(Int.self, forKey: .verifiedReceiptCount) ?? 0)
+        requiredReceiptCount = max(0, try c.decodeIfPresent(Int.self, forKey: .requiredReceiptCount) ?? 0)
+        criteriaMet = Array((try c.decodeIfPresent([String].self, forKey: .criteriaMet) ?? []).prefix(16))
+        earliestPromotionAt = try c.decodeIfPresent(String.self, forKey: .earliestPromotionAt)
+    }
+}
+
+/// Network MALIBU emission state from the coordinator reward projection.
+public struct ProviderEmissionSummary: Codable, Equatable, Sendable {
+    public let active: Bool
+    public let lastAccrualAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case active
+        case lastAccrualAt = "last_accrual_at"
+    }
+
+    public init(active: Bool, lastAccrualAt: String? = nil) {
+        self.active = active
+        self.lastAccrualAt = lastAccrualAt
+    }
+}
+
 /// Provider-facing read model returned by GET /providers/{provider_id}/earnings.
 /// The CLI owns the provider bearer and exposes this non-secret projection to
 /// same-user local clients over the 0600 control socket.
@@ -66,6 +162,14 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
     /// this bundle in the current metrics cycle. A provider-earnings response
     /// alone must not authorize reward availability or trust copy.
     public let malibuProjectionFresh: Bool
+    /// payout.enabled from the earnings endpoint; nil from older coordinators.
+    public let payoutsEnabled: Bool?
+    /// Newest payable request time (RFC3339 UTC) from the earnings endpoint.
+    public let lastPaidJobAtUTC: String?
+    /// Trust holds kept from an earlier trust state (SPEC-021 §5.2).
+    public let malibuRetainedHoldReasons: [String]?
+    public let trustProgress: ProviderTrustProgressSummary?
+    public let emission: ProviderEmissionSummary?
 
     enum CodingKeys: String, CodingKey {
         case walletBound = "wallet_bound"
@@ -92,6 +196,11 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
         case idlePrewarm = "idle_prewarm"
         case malibuProjectionFresh = "malibu_projection_fresh"
         case earningsProjectionFresh = "earnings_projection_fresh"
+        case payoutsEnabled = "payouts_enabled"
+        case lastPaidJobAtUTC = "last_paid_job_at_utc"
+        case malibuRetainedHoldReasons = "malibu_retained_hold_reasons"
+        case trustProgress = "trust_progress"
+        case emission
     }
 
     public init(from decoder: Decoder) throws {
@@ -142,6 +251,11 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
         }
         earningsProjectionFresh = try container.decodeIfPresent(Bool.self, forKey: .earningsProjectionFresh) ?? false
         rewardAuditSupported = try container.decodeIfPresent(Bool.self, forKey: .rewardAuditSupported) ?? false
+        payoutsEnabled = try container.decodeIfPresent(Bool.self, forKey: .payoutsEnabled)
+        lastPaidJobAtUTC = try container.decodeIfPresent(String.self, forKey: .lastPaidJobAtUTC)
+        malibuRetainedHoldReasons = try container.decodeIfPresent([String].self, forKey: .malibuRetainedHoldReasons)
+        trustProgress = try? container.decodeIfPresent(ProviderTrustProgressSummary.self, forKey: .trustProgress)
+        emission = try? container.decodeIfPresent(ProviderEmissionSummary.self, forKey: .emission)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -172,6 +286,11 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
         try container.encode(idlePrewarm, forKey: .idlePrewarm)
         try container.encode(malibuProjectionFresh, forKey: .malibuProjectionFresh)
         try container.encode(earningsProjectionFresh, forKey: .earningsProjectionFresh)
+        try container.encodeIfPresent(payoutsEnabled, forKey: .payoutsEnabled)
+        try container.encodeIfPresent(lastPaidJobAtUTC, forKey: .lastPaidJobAtUTC)
+        try container.encodeIfPresent(malibuRetainedHoldReasons, forKey: .malibuRetainedHoldReasons)
+        try container.encodeIfPresent(trustProgress, forKey: .trustProgress)
+        try container.encodeIfPresent(emission, forKey: .emission)
     }
 
     private static func decodePresencePreservingCriteria(
@@ -206,7 +325,12 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
         rewardAuditSupported: Bool = false,
         idlePrewarm: ProviderIdlePrewarmSummary = .empty,
         malibuProjectionFresh: Bool = false,
-        earningsProjectionFresh: Bool = false
+        earningsProjectionFresh: Bool = false,
+        payoutsEnabled: Bool? = nil,
+        lastPaidJobAtUTC: String? = nil,
+        malibuRetainedHoldReasons: [String]? = nil,
+        trustProgress: ProviderTrustProgressSummary? = nil,
+        emission: ProviderEmissionSummary? = nil
     ) {
         self.walletBound = walletBound
         self.trustTier = trustTier
@@ -232,6 +356,11 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
         self.idlePrewarm = idlePrewarm
         self.malibuProjectionFresh = malibuProjectionFresh
         self.earningsProjectionFresh = earningsProjectionFresh
+        self.payoutsEnabled = payoutsEnabled
+        self.lastPaidJobAtUTC = lastPaidJobAtUTC
+        self.malibuRetainedHoldReasons = malibuRetainedHoldReasons
+        self.trustProgress = trustProgress
+        self.emission = emission
     }
 
     func markingEarningsProjectionFresh() -> ProviderEarningsSummary {
@@ -259,7 +388,9 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
             rewardAuditSupported: rewardAuditSupported,
             idlePrewarm: idlePrewarm,
             malibuProjectionFresh: false,
-            earningsProjectionFresh: true
+            earningsProjectionFresh: true,
+            payoutsEnabled: payoutsEnabled,
+            lastPaidJobAtUTC: lastPaidJobAtUTC
         )
     }
 
@@ -288,7 +419,12 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
             rewardAuditSupported: rewardAuditSupported,
             idlePrewarm: idlePrewarm,
             malibuProjectionFresh: true,
-            earningsProjectionFresh: earningsProjectionFresh
+            earningsProjectionFresh: earningsProjectionFresh,
+            payoutsEnabled: payoutsEnabled,
+            lastPaidJobAtUTC: lastPaidJobAtUTC,
+            malibuRetainedHoldReasons: accrual.retainedHoldReasons,
+            trustProgress: accrual.trustProgress,
+            emission: accrual.emission
         )
     }
 
@@ -323,7 +459,11 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
             rewardAuditSupported: rewardAuditSupported,
             idlePrewarm: idlePrewarm,
             malibuProjectionFresh: true,
-            earningsProjectionFresh: earningsProjectionFresh
+            earningsProjectionFresh: earningsProjectionFresh,
+            payoutsEnabled: payoutsEnabled,
+            lastPaidJobAtUTC: lastPaidJobAtUTC,
+            trustProgress: walletStatus.trustProgress,
+            emission: walletStatus.emission
         )
     }
 
@@ -352,7 +492,9 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
             rewardAuditSupported: rewardAuditSupported,
             idlePrewarm: idlePrewarm,
             malibuProjectionFresh: false,
-            earningsProjectionFresh: earningsProjectionFresh
+            earningsProjectionFresh: earningsProjectionFresh,
+            payoutsEnabled: payoutsEnabled,
+            lastPaidJobAtUTC: lastPaidJobAtUTC
         )
     }
 
@@ -414,7 +556,12 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
             rewardAuditSupported: true,
             idlePrewarm: idlePrewarm,
             malibuProjectionFresh: malibuProjectionFresh,
-            earningsProjectionFresh: earningsProjectionFresh
+            earningsProjectionFresh: earningsProjectionFresh,
+            payoutsEnabled: payoutsEnabled,
+            lastPaidJobAtUTC: lastPaidJobAtUTC,
+            malibuRetainedHoldReasons: malibuRetainedHoldReasons,
+            trustProgress: trustProgress,
+            emission: emission
         )
     }
 }

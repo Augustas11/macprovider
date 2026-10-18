@@ -44,18 +44,102 @@ struct MalibuBrandTile: View {
     }
 }
 
-/// Monochrome Construction sunburst silhouette for the menu bar.
+/// Menu-bar glyph (#2029 P1-20, SPEC-025 §3.2): a half-sun re-cut for the
+/// status bar. The full-colour tile keeps the 9-ray Construction mark; at
+/// menu-bar size that mark rendered 7.9 pt tall with 0.95 pt ray bases, so
+/// this glyph fills the canvas instead: a filled dome and five round-capped
+/// 1.8 pt rays, ink 16 pt tall in an 18 pt canvas.
 enum MalibuMenuBarIcon {
-    static let defaultPointSize: CGFloat = 18
+    enum Badge: Equatable {
+        /// Serving or idle: the plain template glyph.
+        case none
+        /// Paused: a hollow ring cut into the template, still template.
+        case paused
+        /// Needs attention: a red dot; the image is not a template so the
+        /// dot keeps its colour, and the glyph is drawn in the label colour.
+        case attention
+    }
 
-    static func makeTemplate(pointSize: CGFloat = defaultPointSize) -> NSImage {
-        let size = NSSize(width: pointSize, height: pointSize)
+    static let canvasHeight: CGFloat = 18
+    static let canvasWidth: CGFloat = 30
+    static let baselineY: CGFloat = 1
+    static let domeRadius: CGFloat = 6
+    static let rayInnerRadius: CGFloat = 8.6
+    static let rayOuterRadius: CGFloat = 15.1
+    static let rayStrokeWidth: CGFloat = 1.8
+    static let rayAnglesDegrees: [Double] = [30, 60, 90, 120, 150]
+    static let badgeDiameter: CGFloat = 6
+    static let badgeRingWidth: CGFloat = 1.5
+
+    static var size: NSSize { NSSize(width: canvasWidth, height: canvasHeight) }
+
+    static func make(badge: Badge = .none) -> NSImage {
         let image = NSImage(size: size, flipped: false) { rect in
-            MalibuConstructionSunburstGeometry.fill(in: rect, color: .black, yUp: true)
+            let glyphColor: NSColor = badge == .attention ? .labelColor : .black
+            drawGlyph(in: rect, color: glyphColor, clearBadge: badge != .none)
+            switch badge {
+            case .none:
+                break
+            case .paused:
+                let ring = NSBezierPath(ovalIn: badgeRect(in: rect).insetBy(dx: badgeRingWidth / 2, dy: badgeRingWidth / 2))
+                ring.lineWidth = badgeRingWidth
+                NSColor.black.setStroke()
+                ring.stroke()
+            case .attention:
+                NSColor.systemRed.setFill()
+                NSBezierPath(ovalIn: badgeRect(in: rect)).fill()
+            }
             return true
         }
-        image.isTemplate = true
+        image.isTemplate = badge != .attention
+        image.accessibilityDescription = accessibilityLabel(for: badge)
         return image
+    }
+
+    /// Kept for callers that want the plain template glyph.
+    static func makeTemplate() -> NSImage { make(badge: .none) }
+
+    static func accessibilityLabel(for badge: Badge) -> String {
+        switch badge {
+        case .none: return "Malibu"
+        case .paused: return "Malibu — paused"
+        case .attention: return "Malibu — needs attention"
+        }
+    }
+
+    static func badgeRect(in rect: CGRect) -> CGRect {
+        CGRect(x: rect.maxX - badgeDiameter, y: rect.maxY - badgeDiameter,
+               width: badgeDiameter, height: badgeDiameter)
+    }
+
+    static func drawGlyph(in rect: CGRect, color: NSColor, clearBadge: Bool) {
+        NSGraphicsContext.saveGraphicsState()
+        if clearBadge {
+            // Leave a gap around the badge so it reads as separate.
+            let clip = NSBezierPath(rect: rect)
+            clip.append(NSBezierPath(ovalIn: badgeRect(in: rect).insetBy(dx: -1.5, dy: -1.5)))
+            clip.windingRule = .evenOdd
+            clip.addClip()
+        }
+        color.setFill()
+        color.setStroke()
+        let center = CGPoint(x: rect.midX, y: rect.minY + baselineY)
+        let dome = NSBezierPath()
+        dome.appendArc(withCenter: center, radius: domeRadius, startAngle: 0, endAngle: 180, clockwise: false)
+        dome.close()
+        dome.fill()
+        for degrees in rayAnglesDegrees {
+            let radians = degrees * .pi / 180
+            let ray = NSBezierPath()
+            ray.move(to: CGPoint(x: center.x + CGFloat(cos(radians)) * rayInnerRadius,
+                                 y: center.y + CGFloat(sin(radians)) * rayInnerRadius))
+            ray.line(to: CGPoint(x: center.x + CGFloat(cos(radians)) * rayOuterRadius,
+                                 y: center.y + CGFloat(sin(radians)) * rayOuterRadius))
+            ray.lineWidth = rayStrokeWidth
+            ray.lineCapStyle = .round
+            ray.stroke()
+        }
+        NSGraphicsContext.restoreGraphicsState()
     }
 }
 

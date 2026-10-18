@@ -38,6 +38,9 @@ type Store struct {
 	routeSnapshotBusyTimeoutMS atomic.Int64
 	settlementMu               sync.RWMutex
 	settlement                 SettlementConfig
+	// payoutsEnabled mirrors payout.enabled so the provider earnings read
+	// can say whether unpaid USDC has a payout path (SPEC-005 §11.4).
+	payoutsEnabled atomic.Bool
 
 	// routeSnapshotJournalPruneCursor is the journal id the R-15.10 prune
 	// walk resumes after; the mutex serializes prune runs.
@@ -139,6 +142,14 @@ func NewStore(db *sql.DB) (*Store, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// SetPayoutsEnabled records whether the payout runner is enabled.
+func (s *Store) SetPayoutsEnabled(enabled bool) {
+	if s == nil {
+		return
+	}
+	s.payoutsEnabled.Store(enabled)
 }
 
 func (s *Store) SetSQLiteMetrics(metrics SQLiteMetrics) {

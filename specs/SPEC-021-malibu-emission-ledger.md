@@ -1,8 +1,23 @@
 # SPEC-021 — MALIBU rewards emission ledger
 
-**Version:** 0.4.1 (2026-10-13, SPEC-050 stake locks)
+**Version:** 0.5.0 (2026-10-18, live trust progress, retained holds, emission state)
 **Status:** DRAFT — implementation target for Session C (`ops/runbooks/malibu-bootstrap-emission.md`)  
 **Depends on:** SPEC-026 v0.13 §5.1–§5.2, §5.5, §10 step 8; SPEC-017 v0.1.8 (`provider_rewards_ledger`); SPEC-005 (buyer billing and settlement ledger separation); SPEC-016 v0.1.19 (`provider_payout_addresses` projection); SPEC-022 (verified-receipt-only USDC earnings); SPEC-034 (referral/admission anti-wash boundary); SPEC-036 (compute-integrity reward gating input)
+
+**Change log v0.5.0 (2026-10-18, #2029 truthful provider dashboard):**
+- Held MALIBU stays held: §3 states that no code path or operator job
+  releases `trust_tier_provisional` or `demotion_cooldown` rows, and §7 forbids
+  provider copy that implies a release.
+- `QueryAccrualBalance` splits hold reasons into active and retained. A
+  `demotion_cooldown` hold is active only while `demotion_cooldown_until` is in
+  the future; a `trust_tier_provisional` hold only while the provider is
+  Provisional. The new reason `held_retained_trust_hold` (§5.2) covers held rows
+  whose trust hold is no longer the provider's present state, so the
+  eligibility model never reports an elapsed cooldown as running.
+- `hardware_evidence_missing_or_expired` outranks trust holds for
+  `primary_reason` (§5.2 precedence rule 7).
+- The accrual and wallet reads add `retained_hold_reasons` (accrual only),
+  `trust_progress` and `emission` (§5.3).
 
 **Change log v0.4.1 (2026-10-13, #1062 SPEC-050 stake locks):**
 - MALIBU locked by the SPEC-050 stake ledger (including MALIBU in an unlock
@@ -329,7 +344,7 @@ separate epoch-disposition fact with its own reason, actor, timestamp, source
 row or aggregate reference, and audit/projection visibility. The legacy hold
 field MUST NOT be overloaded with new arbitrary strings.
 
-**Retroactive unlock rule:** Tier transition to Trusted clears holds on **new** accrual rows only. Existing ledger rows retain their original `withdrawal_hold_reason`; operators MAY run a one-shot reconciliation job to clear holds on pre-unlock rows (out of v0.1 scope).
+**Retroactive unlock rule:** Tier transition to Trusted clears holds on **new** accrual rows only. Existing ledger rows retain their original `withdrawal_hold_reason`. The same applies when a demotion cooldown elapses: rows written with `demotion_cooldown` keep that hold. No worker, runner, or operator job releases `trust_tier_provisional` or `demotion_cooldown` rows (v0.5.0); such MALIBU stays held and is not withdrawable. Provider surfaces MUST present it that way and MUST NOT imply a future release (SPEC-021-R012). Any future release requires a new normative revision of this section.
 
 ### 3.1 Usage-gated reward epochs (v0.4)
 
@@ -621,6 +636,7 @@ USDC `ledger_payout_ready` runner is unchanged.
   "provider_daily_capped": false,
   "wallet_daily_cap_malibu": "100",
   "withdrawal_hold_reasons": ["trust_tier_provisional"],
+  "retained_hold_reasons": [],
   "locked_malibu": "0",
   "reward_eligibility": {
     "schema_version": "malibu_reward_eligibility.v1",
@@ -632,9 +648,25 @@ USDC `ledger_payout_ready` runner is unchanged.
       "missing_wallet_binding",
       "insufficient_verified_receipts"
     ]
-  }
+  },
+  "trust_progress": {
+    "tier": "provisional",
+    "demotion_cooldown_active": false,
+    "requalification_required": false,
+    "uptime_ok_since": "2026-10-16T03:52:00Z",
+    "uptime_required_seconds": 259200,
+    "requalification_window_seconds": 259200,
+    "verified_receipt_count": 12,
+    "required_receipt_count": 100,
+    "criteria_met": []
+  },
+  "emission": {"active": false, "last_accrual_at": "2026-08-18T03:05:00Z"}
 }
 ```
+
+`withdrawal_hold_reasons` lists every distinct hold reason on the provider's
+held rows. `retained_hold_reasons` is the subset that no longer describes the
+provider's present state (§3 retroactive unlock rule); see §5.2.
 
 `withdrawable_malibu` MUST use the canonical v0.4 withdrawability predicate in
 §2.6. Legacy rows with no v0.4 epoch-disposition fact are withdrawable only when
@@ -735,10 +767,11 @@ Reason vocabulary:
 |--------|-------|---------|
 | `earning_verified_work` | coordinator reward/read model | Recent verified work was observed by the reward owner under §4.2.1 and can be presented as active earning. |
 | `eligible_idle_no_work` | coordinator reward/read model | An authoritative fresh mirror watermark found no current earning work. It does not prove that a request is not in flight. |
-| `held_provisional_trust_tier` | MALIBU ledger/trust | Accrual is visible but held because the provider is not Trusted. Maps from `withdrawal_hold_reason = trust_tier_provisional`. |
+| `held_provisional_trust_tier` | MALIBU ledger/trust | Accrual is visible but held because the provider is not Trusted. Maps from `withdrawal_hold_reason = trust_tier_provisional` while the provider is Provisional. |
 | `held_provider_daily_cap` | provider emission state | The provider has reached its UTC-day MALIBU cap. Maps from `provider_emission_state.provider_day_malibu >= daily_cap_malibu` for the current UTC day. |
 | `held_wallet_daily_cap` | MALIBU ledger | Accrual is held or capped by the bound-wallet daily MALIBU cap. Maps from `withdrawal_hold_reason = per_wallet_daily_cap`. |
-| `held_demotion_cooldown` | MALIBU ledger/trust | Accrual is held during post-demotion requalification. Maps from `withdrawal_hold_reason = demotion_cooldown`. |
+| `held_demotion_cooldown` | MALIBU ledger/trust | Accrual is held during post-demotion requalification. Maps from `withdrawal_hold_reason = demotion_cooldown` only while `demotion_cooldown_until` is in the future. |
+| `held_retained_trust_hold` | MALIBU ledger/trust | Held MALIBU whose `trust_tier_provisional` or `demotion_cooldown` hold was written under an earlier trust state (an elapsed cooldown, or a Provisional tier before promotion). The rows stay held under §3; this reason makes `withdrawal_state = held` and does not affect `earning_state`. Emitted only when held MALIBU is positive. |
 | `withdrawable_balance_available` | MALIBU ledger + v0.4 epoch-disposition facts | At least one MALIBU ledger row satisfies the canonical withdrawability predicate in §2.6. |
 | `withdrawable_no_balance` | MALIBU ledger | No MALIBU is currently withdrawable and no held MALIBU exists. |
 | `held_epoch_disposition` | v0.4 epoch-disposition facts | An active `hold` disposition prevents MALIBU from being withdrawable. |
@@ -779,6 +812,45 @@ Precedence:
 6. Runtime-health reasons, when reported into v1 by the reward owner, affect
    earning opportunity only. They MUST NOT make already-accrued MALIBU
    withdrawable or non-withdrawable by themselves.
+7. `hardware_evidence_missing_or_expired` outranks `held_demotion_cooldown`,
+   `held_provisional_trust_tier` and `held_retained_trust_hold` for
+   `primary_reason` (v0.5.0): it blocks new accrual and has a provider action,
+   while a trust hold has none. `withdrawal_state` is unchanged by this rule.
+
+v0.5.0 adds `held_retained_trust_hold` to the closed reason set under the same
+`malibu_reward_eligibility.v1` schema. Readers that predate it treat it as an
+unknown reason (generic unavailable copy, logged for upgrade), as this section
+requires.
+
+### 5.3 Live trust progress and emission state (v0.5.0)
+
+The accrual and wallet reads include two objects from the same coherent
+projection.
+
+`trust_progress` reports the unlock evaluator's own state (§4.5):
+
+| Field | Semantics |
+|-------|-----------|
+| `tier` | `provisional` or `trusted`. |
+| `demotion_cooldown_until` | The provider's cooldown end, if it was ever demoted. |
+| `demotion_cooldown_active` | True only while that time is in the future. |
+| `requalification_required` | True after any demotion: the pair must co-hold for `requalification_window_seconds` before promotion. |
+| `uptime_ok_since` | Start of the current gap-free A1 heartbeat window; absent without a current heartbeat. |
+| `uptime_required_seconds`, `requalification_window_seconds` | The evaluator windows (72 h each). |
+| `unlock_pair_ok_since` | Start of the current continuous pair hold. |
+| `verified_receipt_count`, `required_receipt_count` | E1 progress. |
+| `criteria_met` | Distinct criterion IDs currently met. |
+| `earliest_promotion_at` | Present only when the rest of the path depends on time alone: E1 met and the A1 window running, or the pair already held. It assumes no missed hourly heartbeat sample and is a lower bound, not a promise. |
+
+`emission` reports `active` (true only when the coordinator runs a MALIBU
+issuance worker: `enabled` plus `bootstrap_tick_enabled` or
+`useful_work_enabled`, with `epoch_enabled` off, since the epoch path has no
+policy engine yet) and `last_accrual_at` (the provider's newest positive
+MALIBU ledger row).
+
+Provider surfaces MUST derive trust copy from `trust_progress`, not from ledger
+hold reasons (SPEC-021-R011). When `trust_progress` is absent they show the tier
+only.
 
 USDC payout readiness remains owned by SPEC-016/SPEC-022 projections. A client MAY
 display USDC and MALIBU readiness in the same UI, but MUST NOT collapse
@@ -815,9 +887,10 @@ Rollback: set `malibu_emission.enabled: false`; accrual rows freeze, tier transi
 
 | Surface | Field / copy |
 |---------|----------------|
-| Control socket | `metricsResponse.malibuAccrued` |
-| Success card | "Provisional — earn up to 25 MALIBU/day (non-withdrawable until Trusted)" |
-| Lock icon | All MALIBU displays when `trust_tier != trusted` |
+| Control socket | `metricsResponse.provider_earnings` carries the §5 and §5.3 fields |
+| Earnings card | Held MALIBU: "Held MALIBU is not released and not withdrawable." No copy may say or imply that held MALIBU unlocks, releases, or becomes withdrawable later. |
+| Emission off | "MALIBU rewards are paused network-wide." plus the last accrual date when known |
+| Trust | Progress from `trust_progress` only; never "in progress" or "review" derived from hold reasons |
 
 Coordinator → CLI metrics wiring is C3; this spec defines the read API in §5.
 
@@ -837,6 +910,8 @@ Coordinator → CLI metrics wiring is C3; this spec defines the read API in §5.
 | `SPEC-021-R008` | Draft | Reward issuance MUST preserve a wash-traffic disposition trail that records v0.4 hold, exclusion, burn, retirement, or release decisions with actor, timestamp, reason, and affected source rows or aggregates, without overloading the closed `withdrawal_hold_reason` vocabulary. |
 | `SPEC-021-R009` | Draft | Reward projections MUST report emitted, held, withdrawable, capped, excluded, burned, and retired MALIBU totals with generated-at/stale-after metadata and redaction of private buyer/provider/request material. |
 | `SPEC-021-R010` | Draft | MALIBU reward accrual, caps, holds, burns, retirements, and projections MUST NOT mutate buyer debit, USDC payout readiness, or SPEC-005/SPEC-016/SPEC-022 settlement ledger state. |
+| `SPEC-021-R011` | Draft | The provider read model MUST distinguish a live demotion cooldown or Provisional hold from a hold retained from an earlier trust state, and MUST expose the evaluator's live trust windows (`trust_progress`) and the emission state (`emission`). Provider surfaces MUST derive trust copy from those fields, not from ledger hold reasons. |
+| `SPEC-021-R012` | Draft | Provider surfaces MUST describe held MALIBU as held and not withdrawable, and MUST NOT state or imply that it will be released, while §3 defines no release path. |
 
 ---
 
@@ -879,4 +954,4 @@ Coordinator → CLI metrics wiring is C3; this spec defines the read API in §5.
 
 ---
 
-*End of SPEC-MALIBU-EMISSION-LEDGER v0.4.1.*
+*End of SPEC-MALIBU-EMISSION-LEDGER v0.5.0.*

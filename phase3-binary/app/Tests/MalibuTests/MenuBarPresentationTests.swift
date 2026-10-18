@@ -19,7 +19,7 @@ final class MenuBarPresentationTests: XCTestCase {
             MenuBarPresentation.buttonTitle(for: snapshot, dismissedThreshold: nil),
             ""
         )
-        XCTAssertEqual(MenuBarPresentation.statusItemLength, NSStatusItem.squareLength)
+        XCTAssertEqual(MenuBarPresentation.statusItemLength, NSStatusItem.variableLength)
         XCTAssertEqual(
             MenuBarPresentation.brandIdentity,
             MalibuBrand.constructionMarkIdentity
@@ -28,10 +28,10 @@ final class MenuBarPresentationTests: XCTestCase {
     }
 
     func testConstructionMenuBarIconIsTemplateSizedForMenuBar() {
-        let icon = MalibuMenuBarIcon.makeTemplate(pointSize: MalibuMenuBarIcon.defaultPointSize)
+        let icon = MalibuMenuBarIcon.makeTemplate()
         XCTAssertTrue(icon.isTemplate)
-        XCTAssertEqual(icon.size.width, MalibuMenuBarIcon.defaultPointSize)
-        XCTAssertEqual(icon.size.height, MalibuMenuBarIcon.defaultPointSize)
+        XCTAssertEqual(icon.size.width, MalibuMenuBarIcon.canvasWidth)
+        XCTAssertEqual(icon.size.height, MalibuMenuBarIcon.canvasHeight)
         XCTAssertEqual(MalibuConstructionSunburstGeometry.rayCount, 9)
         XCTAssertEqual(MalibuConstructionSunburstGeometry.rayAnglesDegrees.count, 9)
         XCTAssertEqual(MalibuConstructionSunburstGeometry.firstRayDegrees, 12)
