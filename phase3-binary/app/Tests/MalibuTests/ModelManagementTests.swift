@@ -1252,6 +1252,89 @@ final class ModelManagementTests: XCTestCase {
         XCTAssertEqual(store.statusLine, "Model catalog unavailable right now. The current model remains visible from provider status.")
     }
 
+    /// A rejected (ordering-stale) reply is a failed refresh: a usable
+    /// projection stays with the last-update notice and Retry.
+    @MainActor
+    func testRejectedProjectionKeepsUsableProjectionWithRetry() async throws {
+        let first = Self.recentTimestamp()
+        let cli = FakeModelCLI(results: [
+            ModelCLIResult(
+                exitCode: 0,
+                stdout: catalogEconomicsJSON(
+                    rows: [trustedEconomicsRowJSON(rateCardGeneratedAt: first, stateObservedAt: first)],
+                    generatedAt: first,
+                    projectionSequence: 2
+                ),
+                stderr: ""
+            ),
+            ModelCLIResult(
+                exitCode: 0,
+                stdout: catalogEconomicsJSON(
+                    rows: [trustedEconomicsRowJSON(rateCardGeneratedAt: first, stateObservedAt: first)],
+                    generatedAt: first,
+                    projectionSequence: 1
+                ),
+                stderr: ""
+            ),
+        ])
+        let store = ModelManagementStore(
+            cli: cli,
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.rejectedCached.\(UUID().uuidString)")!
+        )
+        let peer = peer(for: MalibuModelCapabilityManifest.catalogEconomics)
+        await store.refresh(currentModelID: "other/model", peer: peer)
+        let shown = store.rows.map(\.displayID)
+        let state = store.listState
+
+        await store.refresh(currentModelID: "other/model", peer: peer)
+
+        XCTAssertEqual(store.rows.map(\.displayID), shown)
+        XCTAssertEqual(store.listState, state)
+        XCTAssertTrue(store.catalogRefreshFailed)
+        XCTAssertTrue(store.catalogProjectionRetryAvailable)
+    }
+
+    /// Actions close at the freshness deadline itself, even before the expiry
+    /// task has run (SPEC-044-R003).
+    @MainActor
+    func testCatalogActionsCloseAtTheFreshnessDeadlineBeforeExpiryRuns() async throws {
+        let expiringAt = Self.timestamp(offset: -299.7)
+        let action = availableActionJSON(kind: "switch_model", timeout: 20)
+        let cli = FakeModelCLI(results: [
+            ModelCLIResult(
+                exitCode: 0,
+                stdout: catalogEconomicsJSON(
+                    rows: [trustedEconomicsRowJSON(
+                        switchAction: action,
+                        rateCardGeneratedAt: expiringAt,
+                        stateObservedAt: expiringAt
+                    )],
+                    generatedAt: expiringAt
+                ),
+                stderr: ""
+            ),
+        ])
+        let store = ModelManagementStore(
+            cli: cli,
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.deadlineActions.\(UUID().uuidString)")!
+        )
+        await store.refresh(currentModelID: "other/model", peer: peer(for: [
+            MalibuModelCapabilityManifest.catalogEconomics,
+            MalibuModelCapabilityManifest.readySwitch,
+        ]))
+        XCTAssertTrue(store.canPerformModelAction)
+        XCTAssertTrue(store.canPerformBYOMAction)
+
+        // Block the main actor past the deadline so the expiry task cannot run.
+        Thread.sleep(forTimeInterval: 0.5)
+        XCTAssertFalse(store.rows.isEmpty, "the expiry task has not run yet")
+        XCTAssertFalse(store.canPerformModelAction)
+        XCTAssertFalse(store.canPerformBYOMAction)
+        XCTAssertFalse(store.canAdoptRecommendation)
+    }
+
     @MainActor
     func testCatalogReadTimeoutCoversTheCLIBound() {
         let store = ModelManagementStore(

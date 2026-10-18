@@ -410,7 +410,7 @@ enum MalibuConstructionSunburstGeometry {
     /// SVG path data for a y-down path, two decimals.
     static func svgPathData(_ path: CGPath) -> String {
         var parts: [String] = []
-        func f(_ p: CGPoint) -> String { String(format: "%.2f %.2f", p.x, p.y) }
+        func f(_ p: CGPoint) -> String { String(format: "%.2f %.2f", locale: Locale(identifier: "en_US_POSIX"), p.x, p.y) }
         path.applyWithBlock { pointer in
             let e = pointer.pointee
             switch e.type {

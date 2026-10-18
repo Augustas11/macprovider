@@ -32,14 +32,10 @@ actor CoordinatorFeedFetcher {
     }()
 
     static let boundedLoad: Load = { url in
-        let data = try await AutotuneStaticInputs.fetchHonoringRateLimit(
+        try await AutotuneStaticInputs.fetchHonoringRateLimit(
             url,
-            load: { try await session.data(from: $0) }
+            load: { try await session.boundedData(for: URLRequest(url: $0), limit: BYOMLiveCatalogMatcher.maxFetchBytes) }
         )
-        guard data.count <= BYOMLiveCatalogMatcher.maxFetchBytes else {
-            throw AutotuneRecommendError.invalidStaticJSON("response too large")
-        }
-        return data
     }
 
     private let load: Load
@@ -93,8 +89,10 @@ actor CoordinatorFeedFetcher {
         var urls = ["demand-rank", "autotune-candidates", "rate-card"].flatMap { name in
             [name, "\(name).sig"].map { AutotuneStaticInputs.staticFeedURL(baseURL: StaticFeedOrigin.base, name: $0) }
         }
+        // The matcher reads its candidate catalog from the static-feed origin
+        // above and only the artifact feed from its own base.
         if let matcherBaseURL {
-            urls += ["autotune-candidates", "autotune-candidates.sig", "catalog-artifacts", "catalog-artifacts.sig"]
+            urls += ["catalog-artifacts", "catalog-artifacts.sig"]
                 .map { AutotuneStaticInputs.staticFeedURL(baseURL: matcherBaseURL, name: $0) }
         }
         var seen = Set<URL>()
@@ -112,8 +110,9 @@ enum CatalogEconomicsAdmissionReader {
 
     struct Result: Sendable {
         var statuses: [String: BYOMAdmissionStatusWire]
-        /// False when the deadline cut off at least one read.
-        var complete: Bool
+        /// Candidates whose read the deadline cut off (not those that failed).
+        var missedCandidateIDs: Set<String>
+        var complete: Bool { missedCandidateIDs.isEmpty }
     }
 
     private enum Event: Sendable {
@@ -128,18 +127,18 @@ enum CatalogEconomicsAdmissionReader {
         status: @escaping @Sendable (String) async -> BYOMAdmissionStatusWire?
     ) async -> Result {
         var pending = Array(Set(candidateIDs)).sorted()
-        guard !pending.isEmpty else { return Result(statuses: [:], complete: true) }
+        guard !pending.isEmpty else { return Result(statuses: [:], missedCandidateIDs: []) }
         let width = max(1, maxConcurrentReads)
         return await withTaskGroup(of: Event.self) { group in
             group.addTask {
                 try? await Task.sleep(nanoseconds: UInt64(max(0, deadlineSeconds) * 1_000_000_000))
                 return .deadline
             }
-            var inFlight = 0
+            var inFlight = Set<String>()
             func startNext() {
                 guard !pending.isEmpty else { return }
                 let candidateID = pending.removeFirst()
-                inFlight += 1
+                inFlight.insert(candidateID)
                 group.addTask { .read(candidateID, await status(candidateID)) }
             }
             for _ in 0..<width { startNext() }
@@ -148,34 +147,64 @@ enum CatalogEconomicsAdmissionReader {
                 switch event {
                 case .deadline:
                     group.cancelAll()
-                    return Result(statuses: statuses, complete: false)
+                    return Result(statuses: statuses, missedCandidateIDs: inFlight.union(pending))
                 case let .read(candidateID, wire):
-                    inFlight -= 1
+                    inFlight.remove(candidateID)
                     if let wire { statuses[candidateID] = wire }
                     startNext()
-                    if inFlight == 0 {
+                    if inFlight.isEmpty {
                         group.cancelAll()
-                        return Result(statuses: statuses, complete: true)
+                        return Result(statuses: statuses, missedCandidateIDs: [])
                     }
                 }
             }
-            return Result(statuses: statuses, complete: true)
+            return Result(statuses: statuses, missedCandidateIDs: inFlight.union(pending))
         }
     }
 }
 
 extension ModelCatalogEconomicsWire {
-    /// SPEC-044-R002 projection bound: when the admission read hit its
-    /// deadline, the rows it missed already carry `local_default` admission
-    /// and `admission_state_missing`; the projection says so too.
-    func withAdmissionReadOutcome(complete: Bool) -> ModelCatalogEconomicsWire {
-        guard !complete, !warnings.contains("admission_state_missing") else { return self }
+    /// SPEC-044-R002 projection bound: rows whose admission read the
+    /// deadline cut off are already on `local_default` admission (no status
+    /// was read); they and the projection carry `admission_state_missing`.
+    func withAdmissionReadOutcome(missedCandidateIDs: Set<String>) -> ModelCatalogEconomicsWire {
+        guard !missedCandidateIDs.isEmpty else { return self }
+        let marked = rows.map { row -> Row in
+            guard let candidateID = row.actionModelID,
+                  missedCandidateIDs.contains(candidateID),
+                  !row.warningCodes.contains("admission_state_missing") else { return row }
+            var copy = row
+            copy.warningCodes = (row.warningCodes + ["admission_state_missing"]).sorted()
+            return copy
+        }
         return ModelCatalogEconomicsWire(
             generatedAt: generatedAt,
             projectionSequence: projectionSequence,
             source: source,
-            rows: rows,
-            warnings: (warnings + ["admission_state_missing"]).sorted()
+            rows: marked,
+            warnings: Set(warnings + ["admission_state_missing"]).sorted()
         )
+    }
+}
+
+extension URLSession {
+    /// Reads a response body, refusing it as soon as it exceeds `limit`
+    /// bytes, so concurrent reads cannot buffer oversized bodies.
+    func boundedData(for request: URLRequest, limit: Int) async throws -> (Data, URLResponse) {
+        let (bytes, response) = try await self.bytes(for: request)
+        if response.expectedContentLength > Int64(limit) {
+            bytes.task.cancel()
+            throw URLError(.dataLengthExceedsMaximum)
+        }
+        var data = Data()
+        data.reserveCapacity(min(limit, max(0, Int(response.expectedContentLength))))
+        for try await byte in bytes {
+            data.append(byte)
+            if data.count > limit {
+                bytes.task.cancel()
+                throw URLError(.dataLengthExceedsMaximum)
+            }
+        }
+        return (data, response)
     }
 }

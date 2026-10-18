@@ -50,7 +50,7 @@ final class ModelCatalogEconomicsTests: XCTestCase {
 
     func testIncompleteAdmissionReadDegradesRowsAndWarnsTheProjection() throws {
         let inputs = try Self.staticInputs()
-        func project(complete: Bool) -> ModelCatalogEconomicsWire {
+        func project(missed: Set<String>) -> ModelCatalogEconomicsWire {
             ModelCatalogEconomicsBuilder.makeProjection(
                 generatedAt: Self.date("2027-01-15T08:01:00Z"),
                 cliVersion: "test",
@@ -64,15 +64,24 @@ final class ModelCatalogEconomicsTests: XCTestCase {
                 demand: inputs.demand,
                 candidateCatalog: inputs.candidateCatalog,
                 rateCard: inputs.rateCard
-            ).withAdmissionReadOutcome(complete: complete)
+            ).withAdmissionReadOutcome(missedCandidateIDs: missed)
         }
-        let partial = project(complete: false)
+        let full = project(missed: [])
+        let partial = project(missed: [Self.candidateID])
         XCTAssertTrue(partial.warnings.contains("admission_state_missing"))
         let row = try XCTUnwrap(partial.rows.first { $0.actionModelID == Self.candidateID })
+        XCTAssertTrue(row.warningCodes.contains("admission_state_missing"))
+        XCTAssertEqual(row.warningCodes, row.warningCodes.sorted())
         XCTAssertEqual(row.admission.source, "local_default")
         XCTAssertFalse(row.admission.catalogEconomicsPermitted)
         XCTAssertNil(row.providerCompletionPayoutUSDPerMillionTokens)
-        XCTAssertFalse(project(complete: true).warnings.contains("admission_state_missing"))
+        XCTAssertFalse(full.warnings.contains("admission_state_missing"))
+        let unmarked = try XCTUnwrap(full.rows.first { $0.actionModelID == Self.candidateID })
+        XCTAssertEqual(
+            Set(row.warningCodes).subtracting(unmarked.warningCodes),
+            Set(unmarked.warningCodes).contains("admission_state_missing") ? [] : ["admission_state_missing"]
+        )
+        XCTAssertEqual(full.rows.count, partial.rows.count)
     }
 
     func testProjectionEmitsEvaluateOnlyForEvaluatableCandidates() throws {

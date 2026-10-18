@@ -2259,6 +2259,7 @@ final class ModelManagementStore: ObservableObject {
               recommendationAdoptionCapabilityAvailable,
               peerObservationFresh,
               peerEvidence.isFresh(),
+              catalogProjectionActionable,
               operation == .idle else { return false }
         return true
     }
@@ -2374,8 +2375,16 @@ final class ModelManagementStore: ObservableObject {
         return freshUntil > Date()
     }
 
+    /// Catalog-economics rows authorize actions only inside their freshness
+    /// window, checked directly rather than waiting for the expiry task
+    /// (SPEC-044-R003). The legacy list has no such window.
+    var catalogProjectionActionable: Bool {
+        catalogProjectionFreshUntil == nil || hasUsableCatalogProjection
+    }
+
     var canPerformModelAction: Bool {
-        guard readySwitchCapabilityAvailable, peerObservationFresh, peerEvidence.isFresh() else { return false }
+        guard readySwitchCapabilityAvailable, peerObservationFresh, peerEvidence.isFresh(),
+              catalogProjectionActionable else { return false }
         if let cooldownUntil { return cooldownUntil <= Date() }
         return listState == .ready && operation == .idle
     }
@@ -2591,7 +2600,6 @@ final class ModelManagementStore: ObservableObject {
     }
 
     private func refreshCatalogEconomics(configuredModel: String?) async {
-        let previousListState = listState
         // Keep the last good projection on screen while the refresh runs;
         // "Checking…" is only for a first read or after expiry.
         if !hasUsableCatalogProjection {
@@ -2607,10 +2615,10 @@ final class ModelManagementStore: ObservableObject {
             guard result.exitCode == 0 else { throw ModelManagementError.invalidCatalog }
             let document = try decodeCatalogEconomics(result.stdout).validated()
             guard acceptCatalogProjection(document) else {
-                // A rejected projection keeps the state already shown; it
-                // never leaves the first read stuck on "Checking".
-                self.listState = previousListState == .checking ? .unavailable : previousListState
-                self.operation = .idle
+                // A rejected projection is a failed refresh: it keeps a usable
+                // projection with Retry, and never leaves the first read stuck
+                // on "Checking".
+                catalogRefreshDidFail()
                 return
             }
             self.rows = document.rowsForMalibu(
@@ -2622,6 +2630,8 @@ final class ModelManagementStore: ObservableObject {
             self.warmSwapAvailable = readySwitchCapabilityAvailable
             self.operation = .idle
             self.catalogRefreshFailed = false
+            // Install the freshness deadline before any further await.
+            scheduleCatalogProjectionExpiry(document)
             await refreshPoolBindings()
             if rows.isEmpty {
                 self.statusLine = String(localized: "No network catalog rows or locally discovered models yet. Configure local runtimes in Settings to discover them here.", comment: "Catalog economics empty")
@@ -2630,23 +2640,27 @@ final class ModelManagementStore: ObservableObject {
             } else {
                 self.statusLine = String(localized: "Network catalog loaded with no trusted rate rows available.", comment: "Catalog economics no trusted rates")
             }
-            scheduleCatalogProjectionExpiry(document)
         } catch {
-            self.catalogRefreshFailed = true
-            if hasUsableCatalogProjection {
-                // A failed refresh behind a still-fresh projection keeps it;
-                // the expiry check retires it at its freshness deadline.
-                self.operation = .idle
-                self.statusLine = String(localized: "Couldn't refresh the model catalog. Showing the last update; select Retry to try again.", comment: "Catalog economics refresh failed with cached projection")
-                return
-            }
-            self.rows = []
-            self.listState = .unavailable
-            self.operation = .failed("projection_unavailable")
-            catalogProjectionExpiryTask?.cancel()
-            catalogProjectionFreshUntil = nil
-            self.statusLine = String(localized: "Model catalog unavailable right now. The current model remains visible from provider status.", comment: "Catalog economics unavailable")
+            catalogRefreshDidFail()
         }
+    }
+
+    private func catalogRefreshDidFail() {
+        catalogRefreshFailed = true
+        if hasUsableCatalogProjection {
+            // A failed refresh behind a still-fresh projection keeps it; the
+            // expiry check retires it at its freshness deadline.
+            operation = .idle
+            statusLine = String(localized: "Couldn't refresh the model catalog. Showing the last update; select Retry to try again.", comment: "Catalog economics refresh failed with cached projection")
+            return
+        }
+        rows = []
+        listState = .unavailable
+        operation = .failed("projection_unavailable")
+        catalogProjectionExpiryTask?.cancel()
+        catalogProjectionExpiryTask = nil
+        catalogProjectionFreshUntil = nil
+        statusLine = String(localized: "Model catalog unavailable right now. The current model remains visible from provider status.", comment: "Catalog economics unavailable")
     }
 
     private func acceptCatalogProjection(_ document: MalibuModelCatalogEconomicsDocument) -> Bool {
@@ -2923,7 +2937,7 @@ final class ModelManagementStore: ObservableObject {
     /// BYOM admission actions need a fresh provider observation and no other
     /// model action in flight, but not warm swap.
     var canPerformBYOMAction: Bool {
-        peerObservationFresh && peerEvidence.isFresh() && operation == .idle
+        peerObservationFresh && peerEvidence.isFresh() && operation == .idle && catalogProjectionActionable
     }
 
     /// Reads the coordinator's pool binding for rows that need pool-scoped
