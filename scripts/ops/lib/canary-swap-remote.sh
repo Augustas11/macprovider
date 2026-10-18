@@ -120,11 +120,16 @@ stop_jobs() {
   return 1
 }
 
-# start_jobs: bootstrap the provider and (when installed) its watchdog; fails
-# when either is not loaded afterwards.
+# start_jobs: bootstrap the provider and, unless "provider" is passed, its
+# watchdog (when installed); fails when a requested job is not loaded
+# afterwards. The swap and the rollback start the provider alone: an installed
+# watchdog armed for this boot would treat the new process's model-load
+# window as a failed /v1/health and kickstart it, which reads as a crash loop.
+# The watchdog comes back only once the provider is buyer_serving.
 start_jobs() {
-  local job ok
-  for job in "$LABEL" "$WATCHDOG_LABEL"; do
+  local job ok jobs="$LABEL $WATCHDOG_LABEL"
+  [ "${1:-}" = provider ] && jobs="$LABEL"
+  for job in $jobs; do
     [ -f "$LA_DIR/$job.plist" ] || continue
     ok=0
     for _ in 1 2 3 4 5; do
@@ -137,6 +142,23 @@ start_jobs() {
     done
     [ "$ok" = 1 ] || { say "launchctl bootstrap of $job failed"; return 1; }
   done
+}
+
+# start_watchdog: bring the installed watchdog back once the provider serves.
+# A failure is reported, not fatal: the provider is already serving.
+start_watchdog() {
+  [ -f "$LA_DIR/$WATCHDOG_LABEL.plist" ] || return 0
+  launchctl print "$DOMAIN/$WATCHDOG_LABEL" >/dev/null 2>&1 && return 0
+  local _
+  for _ in 1 2 3 4 5; do
+    if launchctl bootstrap "$DOMAIN" "$LA_DIR/$WATCHDOG_LABEL.plist" 2>/dev/null ||
+       launchctl print "$DOMAIN/$WATCHDOG_LABEL" >/dev/null 2>&1; then
+      say "watchdog $WATCHDOG_LABEL restarted"
+      return 0
+    fi
+    sleep 2
+  done
+  say "!!! watchdog $WATCHDOG_LABEL did not start; bootstrap it by hand"
 }
 
 # wait_serving VERSION: resume (the operator pause outlives a restart) until
@@ -183,11 +205,12 @@ restore_backup() {
   stop_jobs || { say "!!! rollback could not stop the candidate job; restore $BACKUP into $INSTALL_DIR by hand"; finish 6; }
   mv "$INSTALL_DIR" "$FAILED_DIR" || { say "!!! could not move the candidate payload aside; restore $BACKUP by hand"; finish 6; }
   cp -Rp "$BACKUP" "$INSTALL_DIR" || { say "!!! could not copy $BACKUP back to $INSTALL_DIR; do it by hand"; finish 6; }
-  start_jobs || { say "!!! restored $BACKUP but the provider job did not start; bootstrap $LABEL by hand"; finish 6; }
+  start_jobs provider || { say "!!! restored $BACKUP but the provider job did not start; bootstrap $LABEL by hand"; finish 6; }
   if ! wait_serving "$OLD_VERSION"; then
     say "!!! restored $BACKUP but $OLD_VERSION is not buyer_serving within ${READY_TIMEOUT_S}s; check the provider and send resume_request on $SOCKET"
     finish 6
   fi
+  start_watchdog
   say "ROLLBACK done: $OLD_VERSION buyer_serving again; failed payload kept at $FAILED_DIR"
   finish 5
 }
@@ -324,7 +347,7 @@ for d in $MANAGED_DIRS; do
 done
 chmod 755 "$INSTALL_DIR/macprovider-cli"
 cmp "$STAGE/macprovider-cli" "$INSTALL_DIR/macprovider-cli" || restore_backup "installed binary differs from the staged candidate"
-start_jobs || restore_backup "provider job did not start"
+start_jobs provider || restore_backup "provider job did not start"
 say "restarted on $VERSION"
 
 # --- watch: crash loop or status silence restores the backup ----------------
@@ -365,5 +388,6 @@ while :; do
   [ $(( t - start )) -lt "$READY_TIMEOUT_S" ] || restore_backup "not buyer_serving within ${READY_TIMEOUT_S}s"
   sleep "$POLL_S"
 done
+start_watchdog
 say "OK: canary serves $VERSION (pid $pid0); previous payload kept at $BACKUP"
 finish 0
