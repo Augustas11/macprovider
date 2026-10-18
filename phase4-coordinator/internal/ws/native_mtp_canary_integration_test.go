@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/autotune"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/gobwas/ws/wsutil"
@@ -118,6 +119,7 @@ func TestNativeMTPCanaryTupleOfferDispatchAndResultAreTupleScoped(t *testing.T) 
 	)
 	awaitStartupSnapshots(t, server)
 	server.cfg.Pool.NativeMTPCanary.Enabled = true
+	server.SetAutotuneCatalog(&autotune.Catalog{Version: bank.ReleaseID})
 	server.nativeMTPCanaryBanks.Store(&nativeMTPCanaryBankSet{current: &bank})
 	session := newProviderSession(provider.ProviderID, provider.AssignedID, serverConn, 16, time.Second)
 	server.sessions.Store(sessionKey(provider.ProviderID, provider.AssignedID), session)
@@ -408,6 +410,7 @@ func newNativeMTPCanaryIntegrationHarness(t *testing.T) *nativeMTPCanaryIntegrat
 	)
 	awaitStartupSnapshots(t, server)
 	server.cfg.Pool.NativeMTPCanary.Enabled = true
+	server.SetAutotuneCatalog(&autotune.Catalog{Version: bank.ReleaseID})
 	server.nativeMTPCanaryBanks.Store(&nativeMTPCanaryBankSet{current: &bank})
 	session := newProviderSession(provider.ProviderID, provider.AssignedID, serverConn, 16, time.Second)
 	server.sessions.Store(sessionKey(provider.ProviderID, provider.AssignedID), session)
@@ -585,6 +588,7 @@ func TestNativeMTPTupleOfferBindsTheServedWireModelID(t *testing.T) {
 		cfg.Pool.NativeMTPCanary.IntervalS = 900
 		server := NewServer(cfg, registry, zerolog.Nop(), WithNow(func() time.Time { return now }))
 		server.cfg.Pool.NativeMTPCanary.Enabled = true
+		server.SetAutotuneCatalog(&autotune.Catalog{Version: bank.ReleaseID})
 		server.nativeMTPCanaryBanks.Store(&nativeMTPCanaryBankSet{current: &bank})
 		tuple := NativeMTPRuntimeTuple{
 			ModelID: record.ModelID, ModelHash: record.ModelHash, ModelHashAlgorithm: "sha256",

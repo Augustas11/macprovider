@@ -32,6 +32,9 @@ type releaseSnapshotState struct {
 	stagedCompatible []*autotune.Catalog
 	catalogStaged    bool
 	stagedTier2      *tier2.Catalog
+	// stagedCanaryBank is the native-MTP canary bank transition of the
+	// staged release, applied with the catalog (SPEC-031-R033).
+	stagedCanaryBank *nativeMTPCanaryBankTransition
 }
 
 func (r *releaseSnapshotState) stagingEnabled() bool { return r.staging }
@@ -46,6 +49,33 @@ func (r *releaseSnapshotState) stageTier2(next *tier2.Catalog) {
 	r.stageMu.Lock()
 	r.stagedTier2 = next
 	r.stageMu.Unlock()
+}
+
+func (r *releaseSnapshotState) stageCanaryBank(t *nativeMTPCanaryBankTransition) {
+	r.stageMu.Lock()
+	r.stagedCanaryBank = t
+	r.stageMu.Unlock()
+}
+
+// takeStagedCanaryBank returns and clears the staged canary bank transition.
+func (r *releaseSnapshotState) takeStagedCanaryBank() *nativeMTPCanaryBankTransition {
+	r.stageMu.Lock()
+	defer r.stageMu.Unlock()
+	t := r.stagedCanaryBank
+	r.stagedCanaryBank = nil
+	return t
+}
+
+// discardStaged drops every staged part of a reload that failed before
+// publication, so a later publication never promotes it.
+func (r *releaseSnapshotState) discardStaged() *tier2.Catalog {
+	r.stageMu.Lock()
+	defer r.stageMu.Unlock()
+	staged := r.stagedTier2
+	r.stagedCatalog, r.stagedCompatible, r.catalogStaged = nil, nil, false
+	r.stagedTier2 = nil
+	r.stagedCanaryBank = nil
+	return staged
 }
 
 func (r *releaseSnapshotState) hasStaged() bool {

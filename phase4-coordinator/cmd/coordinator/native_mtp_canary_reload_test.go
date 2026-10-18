@@ -6,13 +6,19 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/buyer"
 	"github.com/augstar/macprovider-coordinator/internal/config"
+	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
+	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 	"github.com/rs/zerolog"
 )
 
@@ -76,18 +82,80 @@ func logEvents(t *testing.T, logs *bytes.Buffer, event string) []map[string]any 
 	return out
 }
 
-// SPEC-031-R033 v0.3.9: a SIGHUP release reload moves the native-MTP canary
-// bank with the catalog; no coordinator restart is needed for the new bank.
+// nativeMTPCanaryBootServers boots the WS/buyer pair the way main() does for
+// the canary: the admission catalog and the canary banks come from the same
+// verified feed snapshot (nativeMTPCanaryBootOption).
+func nativeMTPCanaryBootServers(t *testing.T, cfg config.Config, logger zerolog.Logger) (config.Config, *providerws.Server, *buyer.Server) {
+	t.Helper()
+	feeds, catalog, compatible, err := loadAutotuneCatalogForReload(cfg.AutotuneFeeds)
+	if err != nil {
+		t.Fatalf("boot feeds: %v", err)
+	}
+	cfg.Auth.OperatorKey = "0123456789abcdefABCDEFghijklmnop"
+	cfg.Auth.GatewayServiceToken = "fedcba9876543210FEDCBAzyxwvutsrq"
+	cfg.Pool.WarmupGateEnabled = false
+	registry := pool.NewRegistry(nil)
+	wsServer := providerws.NewServer(cfg, registry, logger,
+		providerws.WithAutotuneCatalog(catalog, compatible...),
+		nativeMTPCanaryBootOption(cfg.AutotuneFeeds, feeds, zerolog.Nop()),
+	)
+	buyerServer := buyer.NewServer(registry, logger, time.Unix(1716768000, 0),
+		buyer.WithTier2Config(cfg.Tier2),
+		buyer.WithGatewayServiceToken(cfg.Auth.GatewayServiceToken),
+	)
+	buyerServer.SetAutotuneFeeds(feeds)
+	if err := tier2.Configure(cfg.Tier2, zerolog.Nop()); err != nil {
+		t.Fatalf("startup Configure: %v", err)
+	}
+	return cfg, wsServer, buyerServer
+}
+
+// retainRelease copies the live release directory to releases/<id> and lists
+// it in .previous-target, the deployer's compatible-previous layout.
+func retainRelease(t *testing.T, liveRoot, releaseID string) {
+	t.Helper()
+	dst := filepath.Join(liveRoot, "releases", releaseID)
+	if err := os.CopyFS(dst, os.DirFS(filepath.Join(liveRoot, "current"))); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(liveRoot, ".previous-target"), []byte("releases/"+releaseID+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func healthzCanaryBank(t *testing.T, wsServer *providerws.Server) (string, string) {
+	t.Helper()
+	srv := httptest.NewServer(wsServer.Handler())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var body struct {
+		ReleaseID string `json:"native_mtp_canary_bank_release_id"`
+		SHA256    string `json:"native_mtp_canary_bank_sha256"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	return body.ReleaseID, body.SHA256
+}
+
+// SPEC-031-R033: a SIGHUP release reload moves the native-MTP canary bank
+// with the catalog; no coordinator restart is needed for the new bank. The
+// replaced bank stays as the previous bank while its release is retained.
 func TestSIGHUPReleaseReloadMovesTheNativeMTPCanaryBank(t *testing.T) {
 	defer tier2.ResetForTest()
 	liveRoot := t.TempDir()
 	cfg := nativeMTPCanaryReloadConfig(t, liveRoot, "release-live")
 	var wsLogs bytes.Buffer
-	startup, _, wsServer, buyerServer := reloadTestServersWithLogger(cfg, zerolog.New(&wsLogs))
-	if err := tier2.Configure(startup.Tier2, zerolog.Nop()); err != nil {
-		t.Fatalf("startup Configure: %v", err)
+	startup, wsServer, buyerServer := nativeMTPCanaryBootServers(t, cfg, zerolog.New(&wsLogs))
+	if got, _ := healthzCanaryBank(t, wsServer); got != "release-live" {
+		t.Fatalf("boot canary bank release=%q", got)
 	}
 
+	retainRelease(t, liveRoot, "release-live")
 	current := filepath.Join(liveRoot, "current")
 	writeValidatorRelease(t, current, "release-next", reloadTestHash)
 	writeValidatorNativeMTPSet(t, current, "release-next")
@@ -103,6 +171,72 @@ func TestSIGHUPReleaseReloadMovesTheNativeMTPCanaryBank(t *testing.T) {
 	}
 	if events[0]["challenge_bank_release_id"] != "release-next" || events[0]["previous_challenge_bank_release_id"] != "release-live" {
 		t.Fatalf("canary bank reload event=%v", events[0])
+	}
+	bank, err := os.ReadFile(filepath.Join(current, "native-mtp-selftest-bank.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if release, sha := healthzCanaryBank(t, wsServer); release != "release-next" || sha != sha256Hex(bank) {
+		t.Fatalf("healthz canary bank=%q/%q want release-next/%s", release, sha, sha256Hex(bank))
+	}
+}
+
+// A release without native-MTP feeds retires the old current bank: with the
+// old release not retained it is dropped, so it admits nothing.
+func TestSIGHUPReleaseWithoutNativeMTPFeedsRetiresTheCanaryBank(t *testing.T) {
+	defer tier2.ResetForTest()
+	liveRoot := t.TempDir()
+	cfg := nativeMTPCanaryReloadConfig(t, liveRoot, "release-live")
+	var wsLogs bytes.Buffer
+	startup, wsServer, buyerServer := nativeMTPCanaryBootServers(t, cfg, zerolog.New(&wsLogs))
+
+	next := startup
+	next.AutotuneFeeds.NativeMTPAdmissionPath = ""
+	next.AutotuneFeeds.NativeMTPAdmissionSigPath = ""
+	next.AutotuneFeeds.NativeMTPArtifactManifestPath = ""
+	next.AutotuneFeeds.NativeMTPSelftestBankPath = ""
+	next.AutotuneFeeds.NativeMTPSelftestBankSigPath = ""
+	next.AutotuneFeeds.NativeMTPRevocationsDir = ""
+	writeValidatorRelease(t, filepath.Join(liveRoot, "current"), "release-plain", reloadTestHash)
+	var logs bytes.Buffer
+	reloadCoordinatorConfig(writeReloadConfig(t, next), "", startup.Tier2, zerolog.New(&logs), wsServer, buyerServer, nil, nil, nil)
+
+	if got := wsServer.CurrentAutotuneCatalog(); got == nil || got.Version != "release-plain" {
+		t.Fatalf("live catalog=%v; reload logs=%s", got, logs.String())
+	}
+	if release, sha := healthzCanaryBank(t, wsServer); release != "" || sha != "" {
+		t.Fatalf("a release without native-MTP feeds left the old bank current: %q/%q", release, sha)
+	}
+	events := logEvents(t, &wsLogs, "native_mtp_canary_bank_reloaded")
+	if len(events) != 1 || events[0]["retired_challenge_bank_release_id"] != "release-live" || events[0]["previous_challenge_bank_release_id"] != "" {
+		t.Fatalf("canary bank retirement event=%v", events)
+	}
+}
+
+// After a coordinator restart the canary rebuilds the retained
+// compatible-previous release's bank from that release's verified feed set.
+func TestCoordinatorRestartRebuildsTheRetainedPreviousCanaryBank(t *testing.T) {
+	defer tier2.ResetForTest()
+	liveRoot := t.TempDir()
+	cfg := nativeMTPCanaryReloadConfig(t, liveRoot, "release-live")
+	retainRelease(t, liveRoot, "release-live")
+	current := filepath.Join(liveRoot, "current")
+	writeValidatorRelease(t, current, "release-next", reloadTestHash)
+	writeValidatorNativeMTPSet(t, current, "release-next")
+
+	var wsLogs bytes.Buffer
+	_, wsServer, _ := nativeMTPCanaryBootServers(t, cfg, zerolog.New(&wsLogs))
+	if release, _ := healthzCanaryBank(t, wsServer); release != "release-next" {
+		t.Fatalf("restart canary bank release=%q", release)
+	}
+	previous, err := os.ReadFile(filepath.Join(liveRoot, "releases", "release-live", "native-mtp-selftest-bank.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := logEvents(t, &wsLogs, "native_mtp_canary_bank_loaded")
+	if len(events) != 1 || events[0]["previous_challenge_bank_release_id"] != "release-live" ||
+		events[0]["previous_challenge_bank_sha256"] != sha256Hex(previous) {
+		t.Fatalf("restart did not rebuild the retained previous release's canary bank: %v", events)
 	}
 }
 

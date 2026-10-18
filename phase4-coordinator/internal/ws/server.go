@@ -159,6 +159,7 @@ type Server struct {
 	canarySanctions               CanarySanctionStore
 	nativeMTPCanaryStore          NativeMTPCanaryStateStore
 	nativeMTPCanaryBanks          atomic.Pointer[nativeMTPCanaryBankSet]
+	nativeMTPCanaryBoot           *nativeMTPCanaryBootBanks
 	nativeMTPCanaryJitter         func(time.Duration) time.Duration
 	tokens                        TokenValidator
 	relayBlindKeys                RelayBlindKeySink
@@ -703,13 +704,25 @@ func (s *Server) publishRelease(catalog *autotune.Catalog, compatible []*autotun
 // write lock.
 func (s *Server) publishReleaseLocked(catalog *autotune.Catalog, compatible []*autotune.Catalog, sets map[string]*artifactidentity.Index, catalogGiven bool) uint64 {
 	if catalogGiven {
-		next := buildCompatibleCatalogSet(catalog, compatible)
-		s.autotuneCatalogMu.Lock()
-		s.autotuneCatalog = catalog
-		s.autotuneCompatibleCatalogs = next
-		s.autotuneCatalogMu.Unlock()
+		s.installCatalogLocked(catalog, compatible)
 	}
 	return s.artifactIdentitySets.publishLocked(sets, false)
+}
+
+// installCatalogLocked swaps the admission catalog and compatible set and,
+// in the same autotuneCatalogMu hold, applies the native-MTP canary bank
+// transition the reload staged (SPEC-031-R033): the bank moves with the
+// catalog, so no reader admits a new-release tuple against the old catalog
+// or keeps an obsolete release's bank current. The caller holds the release
+// write lock.
+func (s *Server) installCatalogLocked(catalog *autotune.Catalog, compatible []*autotune.Catalog) {
+	next := buildCompatibleCatalogSet(catalog, compatible)
+	transition := s.artifactIdentitySets.takeStagedCanaryBank()
+	s.autotuneCatalogMu.Lock()
+	s.autotuneCatalog = catalog
+	s.autotuneCompatibleCatalogs = next
+	s.applyNativeMTPCanaryBankTransitionLocked(transition)
+	s.autotuneCatalogMu.Unlock()
 }
 
 // publishStagedKeepingSets publishes whatever a reload staged (catalog half,
@@ -720,11 +733,7 @@ func (s *Server) publishStagedKeepingSets() uint64 {
 	defer s.artifactIdentitySets.mu.Unlock()
 	catalog, compatible, staged := s.artifactIdentitySets.takeStagedCatalog()
 	if staged {
-		next := buildCompatibleCatalogSet(catalog, compatible)
-		s.autotuneCatalogMu.Lock()
-		s.autotuneCatalog = catalog
-		s.autotuneCompatibleCatalogs = next
-		s.autotuneCatalogMu.Unlock()
+		s.installCatalogLocked(catalog, compatible)
 	}
 	return s.artifactIdentitySets.publishLocked(nil, true)
 }
@@ -909,6 +918,14 @@ func WithReleaseStaging() Option {
 	return func(s *Server) {
 		s.artifactIdentitySets.staging = true
 	}
+}
+
+// DiscardStagedRelease drops everything a reload staged (catalog half,
+// Tier-2 material, canary bank transition) when the reload is rejected
+// before publication, so the live release stays whole and no later
+// publication promotes the rejected parts.
+func (s *Server) DiscardStagedRelease() {
+	tier2.DiscardStaged(s.artifactIdentitySets.discardStaged())
 }
 
 // StageTier2 implements tier2.ReleasePublisher: the reload's validated
@@ -7449,6 +7466,11 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		// the bank the canary holds; empty when the canary is off or has none.
 		NativeMTPCanaryBankReloads   bool   `json:"native_mtp_canary_bank_reloads"`
 		NativeMTPCanaryBankReleaseID string `json:"native_mtp_canary_bank_release_id,omitempty"`
+		// NativeMTPCanaryBankSHA256 is the SHA-256 of the current bank's
+		// exact bytes; activation tooling requires it to equal the served
+		// /v1/native-mtp-selftest-bank bytes, so a stale bank under the same
+		// release id never reports done.
+		NativeMTPCanaryBankSHA256 string `json:"native_mtp_canary_bank_sha256,omitempty"`
 	}{
 		Status:   "ok",
 		UptimeS:  int64(s.now().Sub(s.started).Seconds()),
@@ -7475,6 +7497,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.Pool.NativeMTPCanary.Enabled {
 		if bank := s.currentNativeMTPCanaryBank(); bank != nil {
 			resp.NativeMTPCanaryBankReleaseID = bank.ReleaseID
+			resp.NativeMTPCanaryBankSHA256 = bank.RawSHA256
 		}
 	}
 	for _, p := range providers {

@@ -1149,6 +1149,7 @@ func runCoordinator() (exitCode int) {
 		logger.Fatal().Msg("privacy class enabled requires the relay-blind store")
 	}
 	wsOpts = append(wsOpts, providerws.WithFleetCache(fleetCacheStore))
+	wsOpts = append(wsOpts, nativeMTPCanaryBootOption(cfg.AutotuneFeeds, autotuneFeeds, logger))
 	wsServer := providerws.NewServer(cfg, registry, logger, wsOpts...)
 	// SPEC-047-R001 v0.1.5: the SIGHUP reload's Tier-2 material is staged and
 	// promoted with the release publication instead of swapped on its own.
@@ -2025,6 +2026,28 @@ func isSameVersionRestampDir(name, prefix string) bool {
 // returns the served feed bytes, the parsed active catalog, and the compatible
 // previous catalogs, or an error — the caller keeps the prior catalog on any
 // error (fail-closed), so a bad feed can never be swapped in.
+// nativeMTPCanaryBootOption binds the boot canary bank to the served feed
+// snapshot (SPEC-031-R033): the live release's served self-test bank and the
+// banks of the retained compatible-previous releases, newest first, so a
+// restart neither trusts a bank other than the one providers fetch nor drops
+// the bank of a retained previous release.
+func nativeMTPCanaryBootOption(cfg config.AutotuneFeedsConfig, feeds buyer.AutotuneFeeds, logger zerolog.Logger) providerws.Option {
+	current := providerws.NativeMTPCanaryServedBank{
+		ReleaseID: feeds.NativeMTP.ReleaseID,
+		BankJSON:  feeds.NativeMTP.SelftestBankJSON,
+		BankSig:   feeds.NativeMTP.SelftestBankSig,
+	}
+	previousFeeds, errs := buyer.LoadPreviousNativeMTPFeeds(cfg)
+	for _, err := range errs {
+		logger.Warn().Err(err).Msg("retained previous release native-MTP set not loaded; the canary holds no bank for it")
+	}
+	previous := make([]providerws.NativeMTPCanaryServedBank, 0, len(previousFeeds))
+	for _, f := range previousFeeds {
+		previous = append(previous, providerws.NativeMTPCanaryServedBank{ReleaseID: f.ReleaseID, BankJSON: f.SelftestBankJSON, BankSig: f.SelftestBankSig})
+	}
+	return providerws.WithNativeMTPCanaryServedBanks(current, previous)
+}
+
 func loadAutotuneCatalogForReload(cfg config.AutotuneFeedsConfig) (buyer.AutotuneFeeds, *autotune.Catalog, []*autotune.Catalog, error) {
 	feeds, err := buyer.LoadAutotuneFeeds(cfg)
 	if err != nil {
@@ -4578,6 +4601,10 @@ func walletMutationGuardHandler() http.Handler {
 
 var configureDefaultStrict = tier2.ConfigureDefaultStrict
 
+// reloadBillingConfigV05 is the SIGHUP billing snapshot step; tests replace it
+// to inject a billing failure.
+var reloadBillingConfigV05 = (*billing.Store).ReloadBillingConfigV05
+
 // activeReleaseBindingGuard is the #608 post-load Tier-2 guard shared by the
 // SIGHUP reload and --validate-autotune-release.
 func activeReleaseBindingGuard(autotuneCatalog *autotune.Catalog) func(*tier2.Catalog) error {
@@ -4700,13 +4727,13 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 	var reloadedAutotuneCatalog *autotune.Catalog
 	var reloadedAutotuneCompatible []*autotune.Catalog
 	var reloadedAutotuneFeeds buyer.AutotuneFeeds
-	var commitNativeMTPCanaryBank func()
+	var stageNativeMTPCanaryBank func()
 	haveReloadedAutotune := false
 	if strings.TrimSpace(cfg.AutotuneFeeds.AutotuneCandidatesPath) != "" {
 		if feeds, catalog, compatible, aerr := loadAutotuneCatalogForReload(cfg.AutotuneFeeds); aerr != nil {
 			logger.Error().Err(aerr).Msg("autotune feed reload rejected; keeping prior catalog and served feeds")
-		} else if commit, berr := wsServer.PrepareNativeMTPCanaryBankReload(feeds.NativeMTP.ReleaseID, feeds.NativeMTP.SelftestBankJSON, feeds.NativeMTP.SelftestBankSig); berr != nil {
-			// SPEC-031-R033 v0.3.9: the canary bank moves with the release.
+		} else if stage, berr := wsServer.PrepareNativeMTPCanaryBankReload(feeds.NativeMTP.ReleaseID, feeds.NativeMTP.SelftestBankJSON, feeds.NativeMTP.SelftestBankSig); berr != nil {
+			// SPEC-031-R033: the canary bank moves with the release.
 			// A release whose bank the canary cannot verify never goes live,
 			// so no provider is offered a bank the canary would reject.
 			logger.Error().Err(berr).Msg("autotune feed reload rejected; keeping prior catalog, served feeds and native MTP canary bank")
@@ -4714,7 +4741,7 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 			reloadedAutotuneCatalog = catalog
 			reloadedAutotuneCompatible = compatible
 			reloadedAutotuneFeeds = feeds
-			commitNativeMTPCanaryBank = commit
+			stageNativeMTPCanaryBank = stage
 			effectiveAutotuneCatalog = catalog
 			haveReloadedAutotune = true
 		}
@@ -4804,11 +4831,9 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 		logger.Error().Err(err).Msg("tier2 config reload rejected")
 		return
 	}
-	wsServer.SetTier2Config(cfg.Tier2)
-	buyerServer.SetTier2Config(cfg.Tier2)
-	if len(billingStores) > 0 && billingStores[0] != nil {
-		billingStores[0].SetOutputBytesPerTokenCeiling(cfg.Tier2.OutputBytesPerTokenCeiling)
-	}
+	// The Tier-2 config, the buyer/WS Tier-2 views and the billing output
+	// ceiling are applied only after the fallible billing snapshot below
+	// commits: a rejected reload leaves every one of them as it was.
 	billingSnapshotCommitted := false
 	var billingSnapshotID int64
 	if len(billingStores) > 0 && billingStores[0] != nil {
@@ -4819,7 +4844,7 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 		// written, and the force-void flag stays at its prior value.
 		// Only AFTER COMMIT do we publish the rewards / settlement
 		// in-memory configs that depend on the snapshot id.
-		snapshotID, err := billingStores[0].ReloadBillingConfigV05(
+		snapshotID, err := reloadBillingConfigV05(billingStores[0],
 			context.Background(),
 			cfg.Rewards,
 			cfg.Billing.QuarantineResolutionForceVoidEnabled,
@@ -4830,6 +4855,9 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 		)
 		if err != nil {
 			logger.Error().Err(err).Msg("billing config reload rejected (snapshot + flag audit atomic)")
+			// Nothing this reload staged (Tier-2 catalog, admission
+			// catalog, canary bank) may be promoted by a later publication.
+			wsServer.DiscardStagedRelease()
 			// Fail closed: a rejected reload never leaves the one-time
 			// ceiling restatement reachable.
 			if offErr := billingStores[0].SetCeilingRestatementEnabled(context.Background(), false, "sighup"); offErr != nil {
@@ -4855,6 +4883,11 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 			Str("event", "spec005_v0_4_route_layer_flag_reload").
 			Msg("quarantine force-void route-layer flag reloaded")
 	}
+	wsServer.SetTier2Config(cfg.Tier2)
+	buyerServer.SetTier2Config(cfg.Tier2)
+	if len(billingStores) > 0 && billingStores[0] != nil {
+		billingStores[0].SetOutputBytesPerTokenCeiling(cfg.Tier2.OutputBytesPerTokenCeiling)
+	}
 	if haveReloadedAutotune {
 		// #1268 MED-1: publish the autotune catalog + served feed bytes only
 		// AFTER every fallible reload step above (telemetry-drift build, tier2
@@ -4868,10 +4901,10 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 		// RequireActiveReleaseBinding against reloadedAutotuneCatalog, so this
 		// swap cannot install a catalog that conflicts with the applied tier2
 		// rows. The WS admission catalog and the buyer-served feed bytes swap
-		// together. The native-MTP canary bank is installed first: a provider
-		// fetches its bank from the served feed, so the canary must already
-		// hold that bank when the bytes go out (SPEC-031-R033 v0.3.9).
-		commitNativeMTPCanaryBank()
+		// together. The native-MTP canary bank transition is staged here and
+		// applied by the same publication that swaps the catalog, under the
+		// catalog lock and ahead of the served feed bytes (SPEC-031-R033).
+		stageNativeMTPCanaryBank()
 		wsServer.SetAutotuneCatalog(reloadedAutotuneCatalog, reloadedAutotuneCompatible...)
 		if billingSnapshotCommitted {
 			buyerServer.PublishEconomics(cfg.Rewards, billingSnapshotID, cfg.Stats.Rollup.UsdPerMillionCredits, &reloadedAutotuneFeeds)
