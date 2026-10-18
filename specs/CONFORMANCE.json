@@ -3532,7 +3532,9 @@
       ],
       "tests": [
         "scripts/test-catalog-release.sh:continuous-batching-policy.json",
-        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSignedPolicyTests.swift:testValidMixedCachePolicyProducesExactCoverage"
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSignedPolicyTests.swift:testValidMixedCachePolicyProducesExactCoverage",
+        "scripts/tests/test_cb_policy_max_served_slots.py::MaxServedSlotsReleaseGateTest",
+        "phase4-coordinator/internal/buyer/continuous_batching_policy_max_served_slots_test.go:TestContinuousBatchingPolicyMaxServedSlotsValidation"
       ],
       "journeys": [
         "JOURNEY-PROVIDER-PREBETA-ADMISSION"
