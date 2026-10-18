@@ -78,9 +78,13 @@ enum BYOMLiveCatalogMatcher {
 
 extension BYOMDiscoveryEnvironment {
     /// The same environment with the live-or-compiled-in matcher installed.
-    func withCatalogMatcher(offline: Bool, coordinatorURL: String?) async -> BYOMDiscoveryEnvironment {
+    func withCatalogMatcher(
+        offline: Bool,
+        coordinatorURL: String?,
+        inputs: AutotuneStaticInputs = AutotuneStaticInputs(fetch: BYOMLiveCatalogMatcher.boundedFetch)
+    ) async -> BYOMDiscoveryEnvironment {
         var copy = self
-        copy.catalogMatcher = await BYOMLiveCatalogMatcher.resolve(offline: offline, coordinatorURL: coordinatorURL).matcher
+        copy.catalogMatcher = await BYOMLiveCatalogMatcher.resolve(offline: offline, coordinatorURL: coordinatorURL, inputs: inputs).matcher
         return copy
     }
 }
