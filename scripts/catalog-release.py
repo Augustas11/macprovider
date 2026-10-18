@@ -164,6 +164,15 @@ ARTIFACT_RUNTIME_SOURCE_MIN_CONSUMER = {"mlxlm_loopback": (0, 17, 0), "omlx_loop
 # (runtime_format, source_ref.kind) -> the SPEC-023 revision that made the
 # source tuple legal. This is independent of allowed_runtime_sources floors.
 ARTIFACT_SOURCE_KIND_MIN_CONSUMER = {("gguf", "huggingface_revision"): (0, 16, 0)}
+# SPEC-023 v0.22.28 rollout gate for the CB policy feed, as for the artifact
+# feed above: the oldest SPEC-023 consumer (provider CLI and coordinator) that
+# must read every CB policy this generator emits. Strict readers reject a whole
+# policy with an unknown entry field, so a field introduced by a later revision
+# is refused until this floor is raised, in a reviewed change, after every
+# consumer implements it.
+CB_POLICY_CONSUMER_FLOOR = (0, 22, 27)
+# optional CB policy entry field -> the SPEC-023 revision that made it legal.
+CB_POLICY_FIELD_MIN_CONSUMER = {"max_served_slots": (0, 22, 28)}
 # SPEC-005 §5.5 NormalizeModelKey parity (phase4-coordinator/internal/billing/formula.go).
 KNOWN_MODEL_NAMESPACES = frozenset({"mlx-community", "openai", "google", "meta-llama", "nvidia", "qwen"})
 TIER2_HASH_SCOPES = {
@@ -1480,6 +1489,19 @@ def validate_cb_policy(
     return value
 
 
+def require_cb_policy_consumer_floor(entries: list, floor: tuple = None) -> None:
+    """SPEC-023 v0.22.28: refuse to emit a CB entry field the consumer floor cannot read."""
+    floor = CB_POLICY_CONSUMER_FLOOR if floor is None else floor
+    for index, entry in enumerate(entries):
+        for field, needed in sorted(CB_POLICY_FIELD_MIN_CONSUMER.items()):
+            if field in entry and floor < needed:
+                fail(
+                    f"continuous-batching-policy.entries[{index}].{field} needs every consumer at SPEC-023 "
+                    f"v{'.'.join(map(str, needed))}; the generator consumer floor is "
+                    f"v{'.'.join(map(str, floor))} (raise CB_POLICY_CONSUMER_FLOOR only after the rollout)"
+                )
+
+
 def cb_policy_source_entries() -> list[dict]:
     if not CB_POLICY_SOURCE_PATH.exists():
         return []
@@ -1542,6 +1564,7 @@ def default_cb_policy(candidate: bytes, candidate_obj: dict, signer_key_id: str 
         )
     policy = canonical_sorted_bytes(value)
     validate_cb_policy(policy, candidate, candidate_obj, signer_key_id=signer)
+    require_cb_policy_consumer_floor(value["entries"])
     return policy
 
 
@@ -5719,6 +5742,8 @@ def verify_directory(
     demand_obj = validate_demand(demand)
     rate_card_obj = validate_rate_card(rate_card)
     cb_policy_obj = validate_cb_policy(cb_policy, candidate, candidate_obj)
+    # SPEC-023 v0.22.28: an assembled release is held to the same floor.
+    require_cb_policy_consumer_floor(cb_policy_obj["entries"])
     validate_release_inputs(candidate_obj, demand_obj, rate_card_obj)
     if candidate != canonical_bytes(candidate_obj) or demand != canonical_bytes(demand_obj) or rate_card != canonical_bytes(rate_card_obj) or cb_policy != canonical_sorted_bytes(cb_policy_obj):
         fail("release directory feeds are not deterministic canonical bytes")

@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -50,7 +52,8 @@ type continuousBatchingPolicyEntry struct {
 	Provenance          *continuousBatchingPolicyProvenance `json:"provenance"`
 	// MaxServedSlots is the optional SPEC-038 FR-CB11 (v0.3.22) signed
 	// served-slot ceiling; absent entries keep their pre-v0.3.22 identity.
-	MaxServedSlots *int `json:"max_served_slots,omitempty"`
+	// Raw, so an explicit null is seen and rejected instead of read as absent.
+	MaxServedSlots json.RawMessage `json:"max_served_slots,omitempty"`
 }
 
 // continuousBatchingMaxServedSlotsLimit mirrors the CLI's
@@ -170,8 +173,8 @@ func validateContinuousBatchingPolicyEntry(feed continuousBatchingPolicyFeed, in
 	if entry.CachedTurnsAccepted == nil {
 		return fmt.Errorf("%s.cached_turns_accepted is required", label)
 	}
-	if entry.MaxServedSlots != nil && (*entry.MaxServedSlots < 1 || *entry.MaxServedSlots > continuousBatchingMaxServedSlotsLimit) {
-		return fmt.Errorf("%s.max_served_slots must be an integer from 1 to %d", label, continuousBatchingMaxServedSlotsLimit)
+	if _, _, err := continuousBatchingMaxServedSlots(entry); err != nil {
+		return fmt.Errorf("%s.%w", label, err)
 	}
 	if entry.Provenance == nil {
 		return fmt.Errorf("%s.provenance is required", label)
@@ -220,6 +223,24 @@ func validateContinuousBatchingPolicyProvenance(label string, provenance continu
 	return nil
 }
 
+// continuousBatchingMaxServedSlots reads the optional ceiling: absent, or a
+// plain JSON integer (no sign, fraction or exponent) from 1 to the limit.
+// Anything else, explicit null included, is an error.
+func continuousBatchingMaxServedSlots(entry continuousBatchingPolicyEntry) (int, bool, error) {
+	if entry.MaxServedSlots == nil {
+		return 0, false, nil
+	}
+	raw := string(entry.MaxServedSlots)
+	slots, err := strconv.Atoi(raw)
+	if err != nil || !continuousBatchingMaxServedSlotsPattern.MatchString(raw) ||
+		slots < 1 || slots > continuousBatchingMaxServedSlotsLimit {
+		return 0, true, fmt.Errorf("max_served_slots must be an integer from 1 to %d", continuousBatchingMaxServedSlotsLimit)
+	}
+	return slots, true, nil
+}
+
+var continuousBatchingMaxServedSlotsPattern = regexp.MustCompile(`^[1-9][0-9]?$`)
+
 func continuousBatchingTupleSHA256(feed continuousBatchingPolicyFeed, entry continuousBatchingPolicyEntry) (string, error) {
 	entryWithoutDigest := map[string]any{
 		"model_key":             entry.ModelKey,
@@ -245,8 +266,10 @@ func continuousBatchingTupleSHA256(feed continuousBatchingPolicyFeed, entry cont
 			"live_executable_cdhash":  entry.Provenance.LiveExecutableCDHash,
 		},
 	}
-	if entry.MaxServedSlots != nil {
-		entryWithoutDigest["max_served_slots"] = *entry.MaxServedSlots
+	if slots, present, err := continuousBatchingMaxServedSlots(entry); err != nil {
+		return "", err
+	} else if present {
+		entryWithoutDigest["max_served_slots"] = slots
 	}
 	identity := map[string]any{
 		"schema_version":           "macprovider.continuous-batching-policy-tuple.v1",

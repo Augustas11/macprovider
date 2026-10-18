@@ -82,6 +82,30 @@ class MaxServedSlotsGeneratorTest(unittest.TestCase):
             catalog_release.validate_cb_policy(data, CANDIDATE_BYTES, CANDIDATE_OBJ)
 
 
+class MaxServedSlotsConsumerFloorTest(unittest.TestCase):
+    """SPEC-023 v0.22.28: the generator refuses the field below its consumer floor."""
+
+    def test_floor_refuses_the_field_until_every_consumer_reads_it(self):
+        entries = [{"model_key": "m", "max_served_slots": 4}]
+        self.assertLess(catalog_release.CB_POLICY_CONSUMER_FLOOR, (0, 22, 28))
+        with self.assertRaisesRegex(catalog_release.CatalogError, "CB_POLICY_CONSUMER_FLOOR"):
+            catalog_release.require_cb_policy_consumer_floor(entries)
+        catalog_release.require_cb_policy_consumer_floor(entries, floor=(0, 22, 28))
+        catalog_release.require_cb_policy_consumer_floor([{"model_key": "m"}])
+
+    def test_generator_refuses_an_authored_ceiling_below_the_floor(self):
+        source = catalog_release.cb_policy_source_entries()
+        self.assertTrue(source, "committed policy source has entries")
+        source[0]["max_served_slots"] = 4
+        original = catalog_release.cb_policy_source_entries
+        catalog_release.cb_policy_source_entries = lambda: [dict(entry) for entry in source]
+        try:
+            with self.assertRaisesRegex(catalog_release.CatalogError, "max_served_slots needs every consumer"):
+                catalog_release.default_cb_policy(CANDIDATE_BYTES, CANDIDATE_OBJ, signer_key_id="test-key")
+        finally:
+            catalog_release.cb_policy_source_entries = original
+
+
 class MaxServedSlotsReleaseGateTest(unittest.TestCase):
     def test_live_gate_accepts_a_ceiling_and_rejects_a_malformed_one(self):
         policy = json.loads(CB_POLICY_BYTES)

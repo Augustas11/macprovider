@@ -58,8 +58,7 @@ func TestContinuousBatchingPolicyMaxServedSlotsTupleIdentity(t *testing.T) {
 	if digest != cbGoldenTupleWithoutCeiling {
 		t.Fatalf("absent ceiling changed the tuple identity: %s", digest)
 	}
-	four := 4
-	entry.MaxServedSlots = &four
+	entry.MaxServedSlots = json.RawMessage("4")
 	digest, err = continuousBatchingTupleSHA256(feed, entry)
 	if err != nil {
 		t.Fatal(err)
@@ -75,14 +74,18 @@ func TestContinuousBatchingPolicyMaxServedSlotsValidation(t *testing.T) {
 	raw := func(literal string, sign bool) []byte {
 		feed, entry := cbCeilingFixture()
 		if sign {
-			var value int
-			if err := json.Unmarshal([]byte(literal), &value); err == nil {
-				entry.MaxServedSlots = &value
-			}
+			entry.MaxServedSlots = json.RawMessage(literal)
 		}
 		digest, err := continuousBatchingTupleSHA256(feed, entry)
 		if err != nil {
-			t.Fatal(err)
+			if !sign {
+				t.Fatal(err)
+			}
+			// An invalid ceiling has no identity; sign the entry without it.
+			entry.MaxServedSlots = nil
+			if digest, err = continuousBatchingTupleSHA256(feed, entry); err != nil {
+				t.Fatal(err)
+			}
 		}
 		entry.TupleSHA256 = digest
 		entry.MaxServedSlots = nil
@@ -110,7 +113,7 @@ func TestContinuousBatchingPolicyMaxServedSlotsValidation(t *testing.T) {
 			t.Fatalf("max_served_slots %s accepted or wrong error: %v", bad, err)
 		}
 	}
-	for _, bad := range []string{"4.5", "true", `"4"`, "1e1"} {
+	for _, bad := range []string{"4.5", "4.0", "true", `"4"`, "1e1", "04", "null"} {
 		if _, err := validateContinuousBatchingPolicyFeed(raw(bad, false), "test-key"); err == nil {
 			t.Fatalf("max_served_slots %s accepted", bad)
 		}

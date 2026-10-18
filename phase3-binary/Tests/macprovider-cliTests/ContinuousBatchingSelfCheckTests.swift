@@ -223,6 +223,12 @@ final class ContinuousBatchingSelfCheckTests: XCTestCase {
         XCTAssertEqual(ContinuousBatchingSelfCheckResolution.resolve(
             store: store, target: unbounded, ownerPinned: nil, provisional: nil
         )?.servedSlots, 16)
+
+        // A warm swap rebuilds the scheduler with rows under the new model's ceiling.
+        XCTAssertEqual(ModelRuntime.rowsUnderPolicyCeiling(rows: 16, ceiling: 4), 4)
+        XCTAssertEqual(ModelRuntime.rowsUnderPolicyCeiling(rows: 2, ceiling: 4), 2)
+        XCTAssertEqual(ModelRuntime.rowsUnderPolicyCeiling(rows: 16, ceiling: nil), 16)
+        XCTAssertEqual(ModelRuntime.rowsUnderPolicyCeiling(rows: 16, ceiling: 1), 1)
     }
 
     /// Startup and every swap: a stored decision, else an older-runtime or

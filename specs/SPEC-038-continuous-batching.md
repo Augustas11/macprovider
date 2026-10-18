@@ -1445,8 +1445,9 @@ NOT change `slots_total`.
    one), no count above it is built, measured or served. It caps the scheduler
    rows and the initial count at startup, an owner pin (the pin itself is kept,
    so a warm swap to another model applies that model's ceiling), the FR-CB10
-   ladder bound, every stored, prior or provisional grant, and the count a
-   warm swap or adoption serves before its self-check applies. It never raises
+   ladder bound, every stored, prior or provisional grant, and, on a warm
+   swap or adoption, the rebuilt scheduler rows and the count served before
+   its self-check applies. It never raises
    a count above another bound, and it does not apply while the policy is not
    verified (an unverified policy revokes nothing and bounds nothing). A
    bound that grows when the ceiling is raised or removed re-runs the ladder

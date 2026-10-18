@@ -22,8 +22,11 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
   256 GB Studio. A CLI or coordinator that predates this revision rejects a
   whole policy carrying the field as an unknown field: that CLI then revokes
   nothing and loses its provisional and cached-turn grants until it updates.
-  A release therefore publishes the field only after both the CLI and the
-  coordinator runtime that read it are live.
+  This is enforced at generation, as the v0.17.1 artifact-feed rollout gate:
+  `scripts/catalog-release.py` refuses to emit or assemble a policy whose
+  entry carries `max_served_slots` while `CB_POLICY_CONSUMER_FLOOR` is below
+  v0.22.28. The floor is raised only in a reviewed change, after every
+  provider CLI and coordinator that reads the release implements v0.22.28.
 - **v0.22.27 (2026-10-17)** — Native-MTP admission for multi-width affine
   artifacts (epic #2029, lockstep with SPEC-048 0.1.36). R024 per-module
   override widths are `4`, `5`, `6`, or `8` bits (MLX affine packs 5- and
@@ -3863,6 +3866,10 @@ studio_campaign_sha256, provider_cli_version, live_executable_cdhash}`.
 from 1 to 32: the SPEC-038 FR-CB11 served-slot ceiling for that model
 artifact. Any other type or value MUST be rejected. When present it is part
 of the `tuple_sha256` identity; when absent the entry's identity is unchanged.
+The release generator MUST refuse to emit or assemble a policy carrying it
+while its CB policy consumer floor (`CB_POLICY_CONSUMER_FLOOR`) is below
+v0.22.28; the floor MUST be raised only in a reviewed change, after every
+provider CLI and coordinator that reads the release implements v0.22.28.
 `tuple_sha256` is computed over the release-bound root identity and the entry
 with `tuple_sha256` removed, under the domain
 `macprovider.continuous-batching-policy-tuple.v1`. For the current runtime
