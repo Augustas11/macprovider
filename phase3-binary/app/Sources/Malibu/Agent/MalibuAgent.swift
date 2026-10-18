@@ -1032,6 +1032,7 @@ final class MalibuAgent: ObservableObject {
         if let restarts = health.restartCount {
             snapshot.restartCount = restarts
         }
+        snapshot.restartCount7d = health.restartCount7d
         return health.ready
     }
 
@@ -1706,7 +1707,12 @@ final class MalibuAgent: ObservableObject {
                 snapshot.queueDepth = queueDepth
                 snapshot.requestsServedToday = requestsToday
                 snapshot.requestsServedAllTime = requestsAllTime
-                snapshot.requestsPerMinute = requestsPerMinute
+                // CLIs before metrics_request_rate_v1 sent completion
+                // tokens/s x 60 here. Keep Malibu's own request-count rate
+                // from /v1/health for them.
+                if snapshot.localStatusCapabilities.contains("metrics_request_rate_v1") {
+                    snapshot.requestsPerMinute = requestsPerMinute
+                }
                 snapshot.inputTokensToday = inputTokensToday
                 snapshot.outputTokensToday = outputTokensToday
                 snapshot.inputTokensAllTime = inputTokensAllTime
@@ -1946,6 +1952,11 @@ final class MalibuAgent: ObservableObject {
         snapshot.outputTokensToday = nil
         snapshot.inputTokensAllTime = nil
         snapshot.outputTokensAllTime = nil
+        snapshot.restartCount7d = nil
+        snapshot.payoutsEnabled = nil
+        snapshot.lastPaidJobAt = nil
+        snapshot.malibuTrustProgress = nil
+        snapshot.malibuEmission = nil
     }
 
     private func startProviderLogTail(paths: ProviderPaths = .current) {

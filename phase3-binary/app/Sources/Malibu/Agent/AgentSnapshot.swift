@@ -60,9 +60,10 @@ struct AgentSnapshot: Equatable {
     var latencyP50Ms: Int?
     var latencyP99Ms: Int?
     var queueDepth: Int?
-    var uptime7dPct: Double?
-    var declinedRequests: Int?
+    /// Lifetime serve boots for this provider id (CLI stats store).
     var restartCount: Int?
+    /// Serve boots in the last 7 days; nil from CLIs before #2029.
+    var restartCount7d: Int? = nil
     var weightsPath: String?
     var thermalState: MalibuThermalState?
     var lastError: String?
@@ -178,6 +179,13 @@ struct AgentSnapshot: Equatable {
     var payoutLastError: String? = nil
     var payoutLastStatus: String? = nil
 
+    // SPEC-005 §11.4 / SPEC-021 §5.3 facts for the Earnings card. Each is
+    // nil until a fresh projection from a peer that reports it arrives.
+    var payoutsEnabled: Bool? = nil
+    var lastPaidJobAt: Date? = nil
+    var malibuTrustProgress: MalibuTrustProgress? = nil
+    var malibuEmission: MalibuEmissionState? = nil
+
     // Whether the CLI has explicitly acknowledged a pause; distinct from
     // "we optimistically flipped the UI" — pauseAck accepted:false must NOT
     // leave the UI showing Paused.
@@ -288,6 +296,16 @@ struct AgentSnapshot: Equatable {
         localStatusContractCompatible == true
             && localStatusCapabilities.contains("status_observation_v1")
             && rawStatusObservationFresh(at: now)
+    }
+
+    /// The display-side freshness test: the same retention window as
+    /// `isLocalStatusObservationCurrent`, so diagnostic findings agree with
+    /// the ready/serving rows between polls. Mutation gates keep using the
+    /// CLI's raw `valid_for_ms` lease (`hasFreshContractValidatedStatusObservation`).
+    func hasCurrentContractValidatedStatusObservation(at now: Date = Date()) -> Bool {
+        localStatusContractCompatible == true
+            && localStatusCapabilities.contains("status_observation_v1")
+            && isLocalStatusObservationCurrent(at: now)
     }
 
     func hasFreshServeOwnedCredentialState(at now: Date = Date()) -> Bool {
@@ -543,9 +561,17 @@ struct AgentSnapshot: Equatable {
             earningsUsdcPending = providerEarnings.usdcPending
             earningsUsdcLifetime = providerEarnings.usdcLifetime
             hasObservedProviderEarnings = true
+            payoutsEnabled = providerEarnings.payoutsEnabled
+            lastPaidJobAt = providerEarnings.lastPaidJobAt
         }
         idlePrewarmSummary = providerEarnings.idlePrewarm
-        guard rewardInputs.malibuProjectionFresh else { return }
+        guard rewardInputs.malibuProjectionFresh else {
+            malibuTrustProgress = nil
+            malibuEmission = nil
+            return
+        }
+        malibuTrustProgress = providerEarnings.trustProgress
+        malibuEmission = providerEarnings.emission
         walletBound = providerEarnings.walletBound
         rewardInputs.trustTier = providerEarnings.trustTier
         malibuAccruedToday = providerEarnings.malibuToday
@@ -589,8 +615,6 @@ struct AgentSnapshot: Equatable {
         latencyP50Ms: nil,
         latencyP99Ms: nil,
         queueDepth: nil,
-        uptime7dPct: nil,
-        declinedRequests: nil,
         restartCount: nil,
         weightsPath: nil,
         thermalState: nil,
@@ -706,7 +730,7 @@ enum AgentSnapshotPresenter {
     }
 
     struct ConsolidatedStatus: Equatable {
-        enum Phase: String { case settingUp, live, earning, needsAttention }
+        enum Phase: String { case settingUp, live, needsAttention }
         enum Tone: String { case positive, neutral, attention }
 
         let phase: Phase
@@ -714,16 +738,6 @@ enum AgentSnapshotPresenter {
         let label: String
         let meaning: String
         let nextAction: String?
-        let trustProgress: RewardVerdict.TrustProgress?
-    }
-
-    struct MiningHealth: Equatable {
-        let status: String
-        let reasonCode: String
-        let reason: String
-        let nextAction: String
-        let rewardSummary: String
-        let trustSummary: String
     }
 
     struct RewardVerdict: Equatable {
@@ -734,6 +748,7 @@ enum AgentSnapshotPresenter {
             case heldWalletDailyCap
             case heldProvisionalTrustTier
             case heldDemotionCooldown
+            case heldRetainedTrustHold
             case heldEpochDisposition
             case excludedEpochDisposition
             case burnedOrRetiredEpochDisposition
@@ -771,6 +786,7 @@ enum AgentSnapshotPresenter {
                 case .heldWalletDailyCap: return "held_wallet_daily_cap"
                 case .heldProvisionalTrustTier: return "held_provisional_trust_tier"
                 case .heldDemotionCooldown: return "held_demotion_cooldown"
+                case .heldRetainedTrustHold: return "held_retained_trust_hold"
                 case .heldEpochDisposition: return "held_epoch_disposition"
                 case .excludedEpochDisposition: return "excluded_epoch_disposition"
                 case .burnedOrRetiredEpochDisposition: return "burned_or_retired_epoch_disposition"
@@ -811,6 +827,7 @@ enum AgentSnapshotPresenter {
                 case "held_wallet_daily_cap": return .heldWalletDailyCap
                 case "held_provisional_trust_tier": return .heldProvisionalTrustTier
                 case "held_demotion_cooldown": return .heldDemotionCooldown
+                case "held_retained_trust_hold": return .heldRetainedTrustHold
                 case "held_epoch_disposition": return .heldEpochDisposition
                 case "excluded_epoch_disposition": return .excludedEpochDisposition
                 case "burned_or_retired_epoch_disposition": return .burnedOrRetiredEpochDisposition
@@ -884,6 +901,9 @@ enum AgentSnapshotPresenter {
         let malibuHeld: Double?
         let unpaidLedgerBacklogUSDC: Double?
         let unpaidLedgerBacklogMALIBU: Double?
+        /// The coordinator reports no verified hardware evidence for this Mac,
+        /// which blocks new MALIBU accrual (not USDC).
+        var earningNeedsHardwareEvidence: Bool = false
     }
 
     static func rewardVerdict(_ s: AgentSnapshot) -> RewardVerdict {
@@ -975,45 +995,11 @@ enum AgentSnapshotPresenter {
             malibuWithdrawable: inputs.malibuWithdrawable,
             malibuHeld: inputs.malibuHeld,
             unpaidLedgerBacklogUSDC: s.unpaidLedgerBacklogUSDC,
-            unpaidLedgerBacklogMALIBU: s.unpaidLedgerBacklogMALIBU
+            unpaidLedgerBacklogMALIBU: s.unpaidLedgerBacklogMALIBU,
+            earningNeedsHardwareEvidence: !rewardTelemetryUnavailable
+                && authoritativeEligibility.map { hasCoherentKnownReasonSet($0)
+                    && $0.reasons.contains("hardware_evidence_missing_or_expired") } == true
         )
-    }
-
-    static func malibuRewardTextColorIsLocked(_ verdict: RewardVerdict) -> Bool {
-        verdict.malibuWithdrawal == .lockedProvisional
-    }
-
-    static func malibuEarningLine(_ verdict: RewardVerdict) -> String {
-        switch verdict.malibuEarning {
-        case .earning: return "Verified useful work observed recently"
-        case .eligibleIdle: return "Eligible · waiting for verified work"
-        case .held: return "Rewards are held"
-        case .capped: return "Reward cap reached"
-        case .ineligible: return "Not currently eligible to earn"
-        case .unavailable:
-            switch verdict.earningReason {
-            case .computeIntegrityUnavailable: return "Earning status unavailable · work verification unavailable"
-            case .computeIntegrityPending: return "Earning status pending work verification"
-            case .hardwareEvidenceUnavailable: return "Earning status unavailable · hardware verification unavailable"
-            default: return "Earning status unavailable"
-            }
-        }
-    }
-
-    private static func hasHistoricalTrustHold(_ verdict: RewardVerdict) -> Bool {
-        guard verdict.trustDisplay == .trustedAuthoritative,
-              case .held(let reason) = verdict.malibuWithdrawal else { return false }
-        return reason == .heldProvisionalTrustTier || reason == .heldDemotionCooldown
-    }
-
-    static func servingReadinessLine(_ s: AgentSnapshot) -> String {
-        if s.state == .paused { return "Paused · resume to receive customer work" }
-        if s.state == .idle { return "Not running" }
-        if s.state == .error || hasDoctorServeDead(s) { return "Needs attention · check diagnostics" }
-        guard s.isLocalStatusObservationCurrent(at: Date()) else { return "Availability unknown · refreshing" }
-        if isModelPreparing(s) { return "Preparing the model" }
-        if s.state == .serving && s.networkState == "buyer_serving" { return "Ready for customer work" }
-        return "Customer availability not confirmed"
     }
 
     private static func hasFreshUsdcActivity(_ s: AgentSnapshot) -> Bool {
@@ -1086,7 +1072,8 @@ enum AgentSnapshotPresenter {
             // The primary reason can describe earning, not the existing balance.
             // Require the positive ledger reason and reject contradictory holds.
             let blockers: Set<String> = ["held_provider_daily_cap", "held_wallet_daily_cap",
-                "held_provisional_trust_tier", "held_demotion_cooldown", "held_epoch_disposition",
+                "held_provisional_trust_tier", "held_demotion_cooldown", "held_retained_trust_hold",
+                "held_epoch_disposition",
                 "excluded_epoch_disposition", "burned_or_retired_epoch_disposition",
                 "missing_wallet_binding", "provider_token_untrusted"]
             if let blocker = eligibility.reasons.first(where: blockers.contains) {
@@ -1113,7 +1100,8 @@ enum AgentSnapshotPresenter {
                 ? .heldWalletDailyCap : .heldProviderDailyCap
             return (.capped(reason), reason)
         case "held":
-            let holds = ["held_epoch_disposition", "held_demotion_cooldown", "held_provisional_trust_tier"]
+            let holds = ["held_epoch_disposition", "held_demotion_cooldown", "held_provisional_trust_tier",
+                "held_retained_trust_hold"]
             let reason = holds.first(where: eligibility.reasons.contains).map(RewardVerdict.ReasonCode.coordinator)
                 ?? (code == .insufficientVerifiedReceipts ? code : .rewardsHeld)
             return (withdrawalFromNonWithdrawableEligibility(reason), reason)
@@ -1223,324 +1211,7 @@ enum AgentSnapshotPresenter {
         return hasDistinctUnlockPair(inputs.economicCriteria, inputs.additionalCriteria)
     }
 
-    static func miningHealth(_ s: AgentSnapshot) -> MiningHealth {
-        miningHealth(s, verdict: rewardVerdict(s))
-    }
-
-    static func miningHealth(_ s: AgentSnapshot, verdict: RewardVerdict) -> MiningHealth {
-        func result(
-            status: String,
-            code: String,
-            reason: String,
-            action: String
-        ) -> MiningHealth {
-            MiningHealth(
-                status: status,
-                reasonCode: code,
-                reason: reason,
-                nextAction: action,
-                rewardSummary: miningRewardSummary(s, verdict: verdict),
-                trustSummary: miningTrustSummary(verdict)
-            )
-        }
-
-        if s.state == .idle {
-            return result(
-                status: "Not running",
-                code: "not_running",
-                reason: "The provider service is stopped.",
-                action: "Start provider setup."
-            )
-        }
-        if s.state == .paused {
-            return result(
-                status: "Paused",
-                code: "provider_paused",
-                reason: "This Mac will not receive customer work while paused.",
-                action: "Choose Resume when ready."
-            )
-        }
-        if s.state == .error {
-            return result(
-                status: "Needs attention",
-                code: "provider_error",
-                reason: publicErrorDetail(s.lastError) ?? "The provider reported an error.",
-                action: publicStatus(s).safeNextAction ?? "Export diagnostics for support."
-            )
-        }
-        if miningSkipCount(s, verdict: verdict, "on_battery") > 0 {
-            return result(
-                status: "Blocked locally",
-                code: "local_on_battery",
-                reason: "This Mac is on battery.",
-                action: "Plug in power to earn."
-            )
-        }
-        if miningSkipCount(s, verdict: verdict, "thermal_pressure") > 0 {
-            return result(
-                status: "Blocked locally",
-                code: "local_thermal_pressure",
-                reason: "Thermal pressure is limiting local work.",
-                action: "Let this Mac cool before earning resumes."
-            )
-        }
-        if miningSkipCount(s, verdict: verdict, "model_not_loaded") > 0 || isModelPreparing(s) {
-            return result(
-                status: "Preparing",
-                code: "local_model_preparing",
-                reason: "The model is still loading or checking local setup.",
-                action: "Keep Malibu open while setup continues."
-            )
-        }
-        if verdict.reasonCode == .telemetryUnavailable {
-            return result(
-                status: "Reward status unavailable",
-                code: verdict.reasonCode.rawValue,
-                reason: "MALIBU reward status can't be reached right now. Your USDC earnings are unaffected.",
-                action: "Nothing to do — this refreshes on its own."
-            )
-        }
-        if !verdict.providerEarningsFresh && !verdict.hasObservedProviderEarnings && verdict.malibuWithdrawal == .unknown {
-            // Reframe only when the provider is genuinely buyer-serving-admitted
-            // (isNetworkReady) AND has no fresh MALIBU projection that a later
-            // branch would report as held/withdrawable/locked. This keeps the
-            // forward-looking "No earnings yet" copy off not-yet-admitted,
-            // reconnecting, or reward-bearing states — those keep the
-            // conservative wording below. For such a clean fresh-provider state
-            // this is normal, not a fault: frame it forward and name the one real
-            // next step (bind a payout wallet, or complete trust criteria).
-            if isNetworkReady(s) && !verdict.malibuProjectionFresh {
-                let action: String
-                if s.walletBound == false {
-                    action = "Add a payout wallet so withdrawal eligibility can be evaluated."
-                } else if let criteria = trustCriteriaAction(verdict) {
-                    action = criteria
-                } else {
-                    action = "Stay online — you'll start earning as customer jobs arrive."
-                }
-                return result(
-                    status: "No earnings yet",
-                    code: RewardVerdict.ReasonCode.rewardProjectionUnavailable.rawValue,
-                    reason: "You're live and building trust. Earnings appear after your first paid job.",
-                    action: action
-                )
-            }
-            return result(
-                status: "Reward status unavailable",
-                code: "reward_projection_unavailable",
-                reason: "Fresh earnings or MALIBU reward telemetry is not available yet.",
-                action: isActive(s) ? "Keep Malibu open while reward status refreshes." : "Start the provider to refresh reward status."
-            )
-        }
-        if verdict.reasonCode == .walletMissing {
-            return result(
-                status: "No payout wallet yet",
-                code: verdict.reasonCode.rawValue,
-                reason: "A bound payout wallet is required for MALIBU reward eligibility.",
-                action: "Add a payout wallet to complete reward setup."
-            )
-        }
-        switch verdict.malibuWithdrawal {
-        case .capped(.heldProviderDailyCap):
-            return result(
-                status: "Provider cap held",
-                code: "provider_daily_cap_held",
-                reason: "MALIBU above the provider daily cap is held.",
-                action: "Wait for the next UTC day."
-            )
-        case .capped(.heldWalletDailyCap):
-            return result(
-                status: "Wallet cap held",
-                code: "wallet_daily_cap_held",
-                reason: "MALIBU above the wallet daily cap is held.",
-                action: "Wait for the next UTC day or use a wallet below the cap."
-            )
-        case .lockedProvisional:
-            return result(
-                status: "Trust verification incomplete",
-                code: RewardVerdict.ReasonCode.trustTierProvisional.rawValue,
-                reason: "MALIBU withdrawal eligibility requires Trusted status. Existing held rewards remain visible.",
-                action: trustCriteriaAction(verdict) ?? "Complete trust criteria for withdrawal eligibility."
-            )
-        case .held(let reason):
-            if hasHistoricalTrustHold(verdict) {
-                return result(status: "Rewards held", code: "rewards_held",
-                    reason: "Earlier rewards retain their original trust hold.",
-                    action: "No action is available in Malibu for this hold.")
-            }
-            switch reason {
-            case .computeIntegrityBlocked, .providerTokenUntrusted:
-                return result(
-                    status: "Reward eligibility needs review",
-                    code: "reward_eligibility_review",
-                    reason: sentence(rewardReasonCopy(reason)),
-                    action: rewardReasonNextAction(reason)
-                )
-            default:
-                return result(
-                    status: "Rewards held",
-                    code: RewardVerdict.ReasonCode.rewardsHeld.rawValue,
-                    reason: sentence(rewardReasonCopy(reason)),
-                    action: rewardReasonNextAction(reason)
-                )
-            }
-        case .epochDisposition(let reason):
-            let status = reason == .heldEpochDisposition ? "Rewards held" : "Reward epoch update"
-            return result(
-                status: status,
-                code: reason == .heldEpochDisposition
-                    ? RewardVerdict.ReasonCode.rewardsHeld.rawValue
-                    : "reward_epoch_disposition",
-                reason: sentence(rewardReasonCopy(reason)),
-                action: rewardReasonNextAction(reason)
-            )
-        case .unavailable:
-            return result(
-                status: "Reward status unavailable",
-                code: RewardVerdict.ReasonCode.telemetryUnavailable.rawValue,
-                reason: "MALIBU reward status could not be determined right now.",
-                action: "Nothing to do — this refreshes on its own."
-            )
-        case .unlocked:
-            return result(
-                status: "Withdrawable",
-                code: RewardVerdict.ReasonCode.trustedWithdrawable.rawValue,
-                reason: "Trusted reward projection reports withdrawable MALIBU.",
-                action: "No local action needed."
-            )
-        case .unknown:
-            break
-        case .none:
-            break
-        case .capped(let reason):
-            return result(
-                status: "Rewards held",
-                code: reason.rawValue,
-                reason: sentence(rewardReasonCopy(reason)),
-                action: rewardReasonNextAction(reason)
-            )
-        }
-        if verdict.usdcActivity == .earning {
-            return result(
-                status: "USDC earning",
-                code: "earning",
-                reason: "USDC activity is reported in the current window. This does not establish MALIBU earning or withdrawal eligibility.",
-                action: "No local action needed."
-            )
-        }
-        if (s.requestsServedToday ?? 0) > 0 {
-            return result(
-                status: "Waiting for settlement",
-                code: "eligible_waiting_settlement",
-                reason: "Work ran today; paid credits appear when jobs settle.",
-                action: "No local action needed."
-            )
-        }
-        if isNetworkReady(s) {
-            return result(
-                status: "Eligible, idle",
-                code: "idle_no_work",
-                reason: "This Mac is ready for customer work, but the network is quiet right now.",
-                action: "Keep Malibu online."
-            )
-        }
-        return result(
-            status: publicStatus(s).title,
-            code: "customer_availability_pending",
-            reason: publicStatus(s).detail ?? "Customer availability is still being checked.",
-            action: publicStatus(s).safeNextAction ?? "Keep Malibu open while status updates."
-        )
-    }
-
-    private static func miningSkipCount(_ s: AgentSnapshot, verdict: RewardVerdict, _ reason: String) -> Int64 {
-        guard verdict.providerEarningsFresh else { return 0 }
-        return s.idlePrewarmSummary.skipsByReasonLast1h[reason] ?? 0
-    }
-
-    private static func miningRewardSummary(_ s: AgentSnapshot) -> String {
-        miningRewardSummary(s, verdict: rewardVerdict(s))
-    }
-
-    private static func miningRewardSummary(_ s: AgentSnapshot, verdict: RewardVerdict) -> String {
-        let usdc = canShowLastKnownUSDC(s, verdict: verdict)
-            ? s.earningsUsdcToday.map { "\(formatUSDC($0)) \(usdcSummarySuffix(verdict))" } ?? "n/a USDC today"
-            : "USDC unavailable"
-        let malibu: String
-        switch verdict.malibuWithdrawal {
-        case .unavailable:
-            malibu = "MALIBU reward status unavailable"
-        case .unknown:
-            malibu = "MALIBU unavailable"
-        default:
-            malibu = miningMalibuSummary(verdict)
-        }
-        return "\(usdc) · \(malibu)"
-    }
-
-    private static func miningMalibuSummary(_ verdict: RewardVerdict) -> String {
-        let withdrawableAmount = verdict.malibuWithdrawable.map { String(format: "%.2f", $0) } ?? "n/a"
-        let held = verdict.malibuHeld.map { String(format: "%.2f held", $0) } ?? "n/a held"
-        switch verdict.malibuWithdrawal {
-        case .unlocked:
-            return "MALIBU \(withdrawableAmount) withdrawable / \(held)"
-        case .held, .lockedProvisional, .epochDisposition:
-            return "MALIBU not withdrawable / \(held)"
-        case .capped:
-            return "MALIBU withdrawal capped / \(held)"
-        case .none where verdict.reasonCode == .walletMissing:
-            return "MALIBU wallet required / \(held)"
-        case .none:
-            return "MALIBU not withdrawable / \(held)"
-        case .unavailable:
-            return "MALIBU reward status unavailable"
-        case .unknown:
-            return "MALIBU unavailable"
-        }
-    }
-
-    private static func miningTrustSummary(_ s: AgentSnapshot) -> String {
-        miningTrustSummary(rewardVerdict(s))
-    }
-
-    private static func miningTrustSummary(_ verdict: RewardVerdict) -> String {
-        switch verdict.trustDisplay {
-        case .trustedAuthoritative:
-            return "Trust: Trusted"
-        case .trustedStaleNeutral:
-            return "MALIBU trust status unavailable"
-        case .provisional:
-            if verdict.reasonCode == .heldDemotionCooldown {
-                return "Trust: Provisional · Trust review in progress"
-            }
-            if let progress = verdict.trustProgress {
-                return "Trust: Provisional · \(progress.met) of \(progress.required) criteria met"
-            }
-            return "Trust: Provisional"
-        case .unknown:
-            return "MALIBU trust status unavailable"
-        }
-    }
-
-    private static func trustCriteriaAction(_ verdict: RewardVerdict) -> String? {
-        if verdict.reasonCode == .heldDemotionCooldown {
-            return "Keep Malibu online while trust review completes."
-        }
-        guard let progress = verdict.trustProgress,
-              progress.required > progress.met else { return nil }
-        return "Complete \(progress.required - progress.met) more trust criteria for withdrawal eligibility."
-    }
-
-    private static func liveNextAction(_ verdict: RewardVerdict) -> String? {
-        if verdict.reasonCode == .walletMissing || !verdict.walletBound {
-            return "Add a payout wallet to complete reward setup."
-        }
-        if verdict.trustDisplay == .provisional {
-            return trustCriteriaAction(verdict) ?? "Trust status refreshes automatically; held rewards remain visible."
-        }
-        return nil
-    }
-
-    private static func isActive(_ s: AgentSnapshot) -> Bool {
+    static func isActive(_ s: AgentSnapshot) -> Bool {
         s.state == .serving || s.state == .paused || isLocalOnly(s)
     }
 
@@ -1595,8 +1266,7 @@ enum AgentSnapshotPresenter {
                 tone: s.state == .error ? .attention : .neutral,
                 label: publicS.title,
                 meaning: publicS.detail ?? "",
-                nextAction: publicS.safeNextAction,
-                trustProgress: nil
+                nextAction: publicS.safeNextAction
             )
         }
 
@@ -1612,8 +1282,7 @@ enum AgentSnapshotPresenter {
                 tone: .attention,
                 label: publicS.title,
                 meaning: meaning,
-                nextAction: publicS.safeNextAction,
-                trustProgress: nil
+                nextAction: publicS.safeNextAction
             )
         }
 
@@ -1628,8 +1297,7 @@ enum AgentSnapshotPresenter {
                     : "Malibu can't confirm customer availability because the network is unavailable.",
                 nextAction: localOffline
                     ? "Reconnect this Mac to the internet."
-                    : "Keep Malibu open while status updates.",
-                trustProgress: nil
+                    : "Keep Malibu open while status updates."
             )
         }
 
@@ -1642,8 +1310,7 @@ enum AgentSnapshotPresenter {
                 tone: .attention,
                 label: publicS.title,
                 meaning: publicS.detail ?? "This Mac cannot receive customer work in its current state.",
-                nextAction: publicS.safeNextAction,
-                trustProgress: nil
+                nextAction: publicS.safeNextAction
             )
         }
 
@@ -1654,8 +1321,7 @@ enum AgentSnapshotPresenter {
                     tone: .neutral,
                     label: publicS.title,
                     meaning: publicS.detail ?? "Customer availability is temporarily interrupted.",
-                    nextAction: publicS.safeNextAction ?? "Keep Malibu open while status updates.",
-                    trustProgress: nil
+                    nextAction: publicS.safeNextAction ?? "Keep Malibu open while status updates."
                 )
             }
 
@@ -1664,8 +1330,7 @@ enum AgentSnapshotPresenter {
                 tone: .neutral,
                 label: s.state == .starting ? "Setting up" : publicS.title,
                 meaning: publicS.detail ?? "Getting this Mac ready for customer work.",
-                nextAction: publicS.safeNextAction ?? "Keep Malibu open while setup finishes.",
-                trustProgress: nil
+                nextAction: publicS.safeNextAction ?? "Keep Malibu open while setup finishes."
             )
         }
 
@@ -1675,8 +1340,7 @@ enum AgentSnapshotPresenter {
                 tone: .neutral,
                 label: publicS.title,
                 meaning: publicS.detail ?? "Provider software is updating in the background.",
-                nextAction: publicS.safeNextAction,
-                trustProgress: nil
+                nextAction: publicS.safeNextAction
             )
         }
 
@@ -1686,94 +1350,18 @@ enum AgentSnapshotPresenter {
                 tone: .neutral,
                 label: publicS.title,
                 meaning: publicS.detail ?? "Provider software is updating in the background.",
-                nextAction: publicS.safeNextAction,
-                trustProgress: nil
+                nextAction: publicS.safeNextAction
             )
         }
 
-        let verdict = rewardVerdict(s)
-        let phase: ConsolidatedStatus.Phase
-        let label: String
-        switch verdict.trustDisplay {
-        case .trustedAuthoritative:
-            phase = verdict.malibuEarning == .earning ? .earning : .live
-            label = verdict.malibuEarning == .earning ? "Earning · Trusted" : "Live · Trusted"
-        case .trustedStaleNeutral:
-            phase = .live
-            label = "Live"
-        case .provisional:
-            phase = .live
-            label = "Live · Provisional"
-        case .unknown:
-            phase = .live
-            label = "Live"
-        }
-
-        let meaning: String
-        let nextAction: String?
-        switch verdict.malibuWithdrawal {
-        case .unlocked where verdict.canClaimWithdrawable:
-            meaning = "Your existing MALIBU balance is eligible for withdrawal. Payment execution is not available in Malibu yet."
-            nextAction = liveNextAction(verdict)
-        case .capped(let reason), .epochDisposition(let reason):
-            meaning = sentence(rewardReasonCopy(reason))
-            nextAction = rewardReasonNextAction(reason)
-        case .held(let reason):
-            if hasHistoricalTrustHold(verdict) {
-                meaning = "Earlier rewards retain their original trust hold."
-                nextAction = "No action is available in Malibu for this hold."
-            } else {
-                meaning = sentence(rewardReasonCopy(reason))
-                nextAction = reason == .heldProvisionalTrustTier
-                    ? trustCriteriaAction(verdict) ?? rewardReasonNextAction(reason)
-                    : rewardReasonNextAction(reason)
-            }
-        case .lockedProvisional:
-            meaning = "MALIBU withdrawal eligibility requires Trusted status. Existing held rewards remain visible."
-            nextAction = trustCriteriaAction(verdict) ?? "Complete trust criteria for withdrawal eligibility."
-        case .unavailable:
-            meaning = "MALIBU reward status could not be determined right now."
-            nextAction = rewardReasonNextAction(verdict.reasonCode)
-        case .unknown:
-            meaning = verdict.usdcActivity == .earning
-                ? "USDC earning is active. MALIBU reward status is temporarily unavailable."
-                : "MALIBU reward status is temporarily unavailable."
-            nextAction = rewardReasonNextAction(verdict.reasonCode)
-        case .none where verdict.reasonCode == .walletMissing || !verdict.walletBound:
-            meaning = "A bound payout wallet is required for MALIBU reward eligibility."
-            nextAction = "Add a payout wallet to complete reward setup."
-        case .none:
-            switch verdict.usdcActivity {
-            case .earning:
-                meaning = verdict.trustDisplay == .trustedStaleNeutral
-                    ? "USDC earning is active. MALIBU trust status is unavailable."
-                    : "Paid work or rewards have settled in the current window."
-                nextAction = liveNextAction(verdict)
-            case .idle:
-                meaning = "This Mac is ready for customer work, but the network is quiet right now."
-                nextAction = liveNextAction(verdict) ?? "Keep Malibu online."
-            case .unavailable:
-                meaning = "Fresh earnings or MALIBU reward telemetry is not available yet."
-                nextAction = "Keep Malibu open while reward status refreshes."
-            case .none:
-                meaning = "This Mac is approved and available for customer work."
-                nextAction = liveNextAction(verdict)
-            }
-        case .unlocked:
-            meaning = "MALIBU withdrawal status is being verified."
-            nextAction = rewardReasonNextAction(verdict.reasonCode)
-        }
-
-        let tone: ConsolidatedStatus.Tone = phase == .earning && verdict.canClaimWithdrawable
-            ? .positive
-            : .neutral
+        // Reward state lives in the Earnings card; the status pill describes
+        // customer serving only, so it never mixes in trust or MALIBU holds.
         return ConsolidatedStatus(
-            phase: phase,
-            tone: tone,
-            label: label,
-            meaning: meaning,
-            nextAction: publicS.safeNextAction ?? nextAction,
-            trustProgress: verdict.trustProgress
+            phase: .live,
+            tone: .positive,
+            label: "Serving",
+            meaning: "This Mac is serving customer work.",
+            nextAction: publicS.safeNextAction
         )
     }
 
@@ -1968,7 +1556,7 @@ enum AgentSnapshotPresenter {
         }
     }
 
-    private static func isModelPreparing(_ s: AgentSnapshot) -> Bool {
+    static func isModelPreparing(_ s: AgentSnapshot) -> Bool {
         switch s.lifecycleState {
         case "installing", "importing_credentials", "starting_provider",
              "validating_catalog", "loading_model", "locally_ready_connecting",
@@ -2106,48 +1694,6 @@ enum AgentSnapshotPresenter {
         }
     }
 
-    static func dashboardSubtitle(_ s: AgentSnapshot) -> String? {
-        let status = publicStatus(s)
-        let verdict = rewardVerdict(s)
-        switch s.state {
-        case .serving where !isNetworkReady(s):
-            return status.detail
-        case .serving where !verdict.providerEarningsFresh && !verdict.hasObservedProviderEarnings:
-            return "Ready for customer work · earnings unavailable"
-        case .serving where idleEarningsAreZero(s):
-            return idleHonestySubtitle(s)
-        case .serving:
-            return s.currentModelID
-        case .reconnecting where isLocalOnly(s):
-            return publicErrorDetail(s.lastError) ?? status.detail
-        case .reconnecting:
-            return publicErrorDetail(s.lastError) ?? status.detail
-        case .starting:
-            return publicErrorDetail(s.lastError) ?? status.detail
-        case .error:
-            return status.detail
-        default:
-            return nil
-        }
-    }
-
-    /// Ready + $0 is usually a quiet network, not a broken Mac. Queue depth
-    /// and today's request count distinguish those cases from work waiting
-    /// locally or unpaid work that has not settled.
-    private static func idleHonestySubtitle(_ s: AgentSnapshot) -> String {
-        if (s.queueDepth ?? 0) > 0 {
-            return "Ready · work is queued on this Mac"
-        }
-        if (s.requestsServedToday ?? 0) > 0 {
-            return "Ready · work ran; paid credits appear when a job settles"
-        }
-        return "Ready for customer work · network is quiet"
-    }
-
-    private static func idleEarningsAreZero(_ s: AgentSnapshot) -> Bool {
-        (s.earningsUsdcToday ?? 0) == 0
-    }
-
     static func stateLine(_ s: AgentSnapshot) -> String {
         // Prefer reason-first public titles for #582 onboarding outcomes so the
         // reused v1 lifecycle state labels do not override them in the menu.
@@ -2177,86 +1723,42 @@ enum AgentSnapshotPresenter {
         }
     }
 
+    /// Header subtitle: what is running and when work was last paid, or the
+    /// one status detail when the Mac is not serving.
+    static func dashboardSubtitle(_ s: AgentSnapshot, now: Date = Date()) -> String? {
+        let status = publicStatus(s)
+        switch s.state {
+        case .serving where !isNetworkReady(s):
+            return status.detail
+        case .serving:
+            var parts: [String] = []
+            if let model = s.currentModelID { parts.append(model) }
+            if let lastPaid = s.lastPaidJobAt, lastPaid <= now.addingTimeInterval(60) {
+                parts.append("last paid job \(relativeTime(lastPaid, now: now))")
+            }
+            return parts.isEmpty ? nil : parts.joined(separator: " · ")
+        case .reconnecting, .starting:
+            return publicErrorDetail(s.lastError) ?? status.detail
+        case .error:
+            return status.detail
+        default:
+            return nil
+        }
+    }
+
+    /// Menu-bar earnings row: USDC only. "Today" is the UTC day, the same
+    /// boundary the coordinator uses.
     static func earningsLine(_ s: AgentSnapshot) -> String {
         earningsLine(s, verdict: rewardVerdict(s))
     }
 
     static func earningsLine(_ s: AgentSnapshot, verdict: RewardVerdict) -> String {
-        if !verdict.providerEarningsFresh || !verdict.malibuProjectionFresh {
-            if !canShowLastKnownUSDC(s, verdict: verdict), s.malibuAccruedToday == nil {
-                return isActive(s) ? "Today: reward status unavailable" : "Today: not running"
-            }
-            if verdict.malibuWithdrawal == .unavailable, s.earningsUsdcToday == nil {
-                return isActive(s) ? "Today: reward status unavailable" : "Today: not running"
-            }
-            let usdc = canShowLastKnownUSDC(s, verdict: verdict)
-                ? s.earningsUsdcToday.map { formatUSDC($0) } ?? "n/a"
-                : "n/a"
-            let malibu: String
-            switch verdict.malibuWithdrawal {
-            case .unknown, .unavailable:
-                malibu = "MALIBU reward status unavailable"
-            default:
-                malibu = malibuTodayLine(s, verdict: verdict, compact: false)
-            }
-            let prefix = isShowingLastKnownUSDC(s, verdict: verdict) ? "Last known" : "Today"
-            return "\(prefix): \(usdc) USDC · \(malibu)"
+        guard canShowLastKnownUSDC(s, verdict: verdict), let today = s.earningsUsdcToday else {
+            return isActive(s) ? "USDC earnings unavailable" : "Not running"
         }
-        switch (s.earningsUsdcToday, s.malibuAccruedToday) {
-        case (nil, nil):
-            return isActive(s) ? "Today: reward status unavailable" : "Today: not running"
-        case let (usdc?, malibu?):
-            return "Today: \(formatUSDC(usdc)) USDC · \(malibuDisplay(malibu, verdict: verdict))"
-        case let (usdc?, nil):
-            return "Today: \(formatUSDC(usdc)) USDC · \(malibuTodayLine(s, verdict: verdict, compact: false))"
-        case let (nil, malibu?):
-            return "Today: n/a USDC · \(malibuDisplay(malibu, verdict: verdict))"
-        }
-    }
-
-    /// Priority-ordered explanation for why a serving provider is not
-    /// currently earning, sourced from the last-hour idle-prewarm skip
-    /// counts. Gated by `providerEarningsFresh` since idle-prewarm data
-    /// arrives on the same projection as the other earnings fields.
-    static func eligibilityLine(_ s: AgentSnapshot) -> String? {
-        eligibilityLine(s, verdict: rewardVerdict(s))
-    }
-
-    static func eligibilityLine(_ s: AgentSnapshot, verdict: RewardVerdict) -> String? {
-        if hasHistoricalTrustHold(verdict) { return "Earlier MALIBU rewards remain held" }
-        switch verdict.malibuWithdrawal {
-        case .unavailable:
-            return "Reward status unavailable"
-        case .held(let reason), .capped(let reason), .epochDisposition(let reason):
-            return rewardReasonCopy(reason)
-        case .lockedProvisional:
-            return "MALIBU withdrawals require Trusted status"
-        case .unlocked:
-            return "MALIBU balance is eligible for withdrawal · payment execution not available yet"
-        default:
-            break
-        }
-        guard verdict.providerEarningsFresh else { return nil }
-        let skips = s.idlePrewarmSummary.skipsByReasonLast1h
-        if (skips["on_battery"] ?? 0) > 0 {
-            return "On battery — plug in to earn"
-        }
-        if (skips["thermal_pressure"] ?? 0) > 0 {
-            return "Thermal throttle — waiting to cool before earning"
-        }
-        if (skips["model_not_loaded"] ?? 0) > 0 {
-            return "Model is preparing — earning starts when ready"
-        }
-        if (s.queueDepth ?? 0) > 0 {
-            return "Work is queued on this Mac"
-        }
-        if isNetworkReady(s) || s.state == .serving {
-            if (s.requestsServedToday ?? 0) > 0, idleEarningsAreZero(s) {
-                return "Work ran today · paid credits show when a job settles"
-            }
-            return "Ready for customer work · network is quiet"
-        }
-        return nil
+        let lifetime = s.earningsUsdcLifetime.map { " · \(formatUSDC($0)) lifetime" } ?? ""
+        let prefix = isShowingLastKnownUSDC(s, verdict: verdict) ? "USDC last known" : "USDC today (UTC)"
+        return "\(prefix): \(formatUSDC(today))\(lifetime)"
     }
 
     static func backlogLine(_ s: AgentSnapshot) -> String? {
@@ -2272,7 +1774,15 @@ enum AgentSnapshotPresenter {
               usdc + malibu > 0 else {
             return nil
         }
-        return String(format: "Unclaimed: $%.2f USDC · %@", usdc, malibuDisplay(malibu, verdict: verdict))
+        return String(format: "Unclaimed: $%.2f USDC · %.2f MALIBU · add a payout wallet", usdc, malibu)
+    }
+
+    static func relativeTime(_ date: Date, now: Date = Date()) -> String {
+        let seconds = max(0, Int(now.timeIntervalSince(date)))
+        if seconds < 60 { return "just now" }
+        if seconds < 3_600 { return "\(seconds / 60) min ago" }
+        if seconds < 86_400 { return "\(seconds / 3_600) h ago" }
+        return "\(seconds / 86_400) d ago"
     }
 
     static func modelLine(_ s: AgentSnapshot) -> String {
@@ -2347,7 +1857,7 @@ enum AgentSnapshotPresenter {
         }
         switch (s.admissionIdentityState, s.coordinatorIdentityAdmissionMode) {
         case ("ready", "signature"):
-            return "Ready · verified by this Mac"
+            return "Ready · verified"
         case ("ready", "exemption"):
             return "Ready locally · temporary network approval active"
         case ("ready", _):
@@ -2487,16 +1997,6 @@ enum AgentSnapshotPresenter {
         return nil
     }
 
-    static func lifecycleEventLine(_ event: ProviderLifecycleEventSnapshot) -> String {
-        var parts = [publicReason(event.reason)]
-        parts.append(lifecycleStateLabel(event.state, reason: event.reason))
-        return parts.joined(separator: " · ")
-    }
-
-    static func lifecycleEventDisplay(_ event: ProviderLifecycleEventSnapshot) -> String {
-        "\(lifecycleEventLine(event)) · \(event.transitionAt.formatted(date: .abbreviated, time: .shortened))"
-    }
-
     static func advertisedCapacityLine(_ s: AgentSnapshot) -> String {
         let capacity = s.advertisedMaxConcurrency.map { value in
             "\(value) buyer slot\(value == 1 ? "" : "s")"
@@ -2517,7 +2017,7 @@ enum AgentSnapshotPresenter {
         }
     }
 
-    private static func lifecycleStateLabel(_ state: String, reason: String? = nil) -> String {
+    static func lifecycleStateLabel(_ state: String, reason: String? = nil) -> String {
         if state == "catalog_incompatible", reason == catalogRefreshReason {
             return "Catalog refresh needed"
         }
@@ -2588,233 +2088,6 @@ enum AgentSnapshotPresenter {
         return "v\(current) · up to date"
     }
 
-    static func requestsLine(_ s: AgentSnapshot) -> String {
-        [
-            s.requestsServedToday.map { "\(formatCount($0)) today" }
-                ?? (isActive(s) ? "0 today" : "n/a today"),
-            s.requestsServedAllTime.map { "\(formatCount($0)) all-time" }
-                ?? (isActive(s) ? "0 all-time" : "n/a all-time"),
-            s.requestsPerMinute.map { String(format: "%.1f req/min", $0) }
-                ?? (isActive(s) ? "0.0 req/min" : "n/a req/min")
-        ].joined(separator: " · ")
-    }
-
-    static func tokenLine(_ s: AgentSnapshot) -> String {
-        let today = tokenPair(input: s.inputTokensToday, output: s.outputTokensToday, suffix: "today")
-        let allTime = tokenPair(input: s.inputTokensAllTime, output: s.outputTokensAllTime, suffix: "all-time")
-        return "\(today)\n\(allTime)"
-    }
-
-    static func usdcFullLine(_ s: AgentSnapshot) -> String {
-        usdcFullLine(s, verdict: rewardVerdict(s))
-    }
-
-    static func usdcFullLine(_ s: AgentSnapshot, verdict: RewardVerdict) -> String {
-        if !canShowLastKnownUSDC(s, verdict: verdict) {
-            let today = "n/a today"
-            return "\(today) · n/a wk · n/a accrued · n/a life"
-        }
-        let todaySuffix = isShowingLastKnownUSDC(s, verdict: verdict) ? "last known" : "today"
-        return [
-            s.earningsUsdcToday.map { "\(formatUSDC($0)) \(todaySuffix)" } ?? "n/a today",
-            s.earningsUsdcWeek.map { "\(formatUSDC($0)) wk" } ?? "n/a wk",
-            s.earningsUsdcPending.map { "\(formatUSDC($0)) accrued" } ?? "n/a accrued",
-            s.earningsUsdcLifetime.map { "\(formatUSDC($0)) life" } ?? "n/a life"
-        ].joined(separator: " · ")
-    }
-
-    /// Caption for the accrued amount in `usdcFullLine`, kept on its own line
-    /// so the full line stays scannable.
-    static func usdcAccrualCaption(_ s: AgentSnapshot) -> String? {
-        usdcAccrualCaption(s, verdict: rewardVerdict(s))
-    }
-
-    static func usdcAccrualCaption(_ s: AgentSnapshot, verdict: RewardVerdict) -> String? {
-        guard verdict.usdcActivity != .unavailable,
-              verdict.usdcActivity != .none,
-              s.earningsUsdcPending != nil else { return nil }
-        return "Accrued — payouts open in beta"
-    }
-
-    static func usdcTodayDisplay(_ s: AgentSnapshot) -> String {
-        usdcTodayDisplay(s, verdict: rewardVerdict(s))
-    }
-
-    static func usdcTodayDisplay(_ s: AgentSnapshot, verdict: RewardVerdict) -> String {
-        guard canShowLastKnownUSDC(s, verdict: verdict) else {
-            return "n/a"
-        }
-        return s.earningsUsdcToday.map { formatUSDC($0) } ?? "n/a"
-    }
-
-    static func usdcPeriodLabel(_ s: AgentSnapshot, verdict: RewardVerdict) -> String {
-        isShowingLastKnownUSDC(s, verdict: verdict) ? "Last known" : "Today"
-    }
-
-    static func malibuFullLine(_ s: AgentSnapshot) -> String {
-        malibuFullLine(s, verdict: rewardVerdict(s))
-    }
-
-    static func malibuFullLine(_ s: AgentSnapshot, verdict: RewardVerdict) -> String {
-        if !verdict.malibuProjectionFresh, let balance = s.malibuAccruedAllTime {
-            return String(format: "MALIBU %.2f accrued · last known · eligibility unavailable", balance)
-        }
-        if verdict.malibuWithdrawal == .unknown {
-            let today = "n/a MALIBU today"
-            return "\(today) · n/a all-time"
-        }
-        if verdict.malibuWithdrawal == .unavailable {
-            let allTime = s.malibuAccruedAllTime.map { String(format: "%.2f all-time", $0) }
-                ?? "n/a all-time"
-            return "MALIBU today unavailable · \(allTime) · reward status unavailable"
-        }
-        let today = malibuTodayLine(s, verdict: verdict, compact: true)
-        let allTime = s.malibuAccruedAllTime.map { String(format: "%.2f all-time", $0) }
-            ?? "n/a all-time"
-        switch verdict.malibuWithdrawal {
-        case .unlocked:
-            return "\(today) · \(allTime)"
-        case .none:
-            return "\(today) · \(allTime)"
-        case .lockedProvisional:
-            return "\(today) · \(allTime) · [locked] Trusted status required"
-        case .held(let reason), .capped(let reason), .epochDisposition(let reason):
-            return "\(today) · \(allTime) · \(rewardReasonShortCopy(reason))"
-        case .unavailable, .unknown:
-            return "\(today) · \(allTime)"
-        }
-    }
-
-    private static func malibuTodayLine(_ s: AgentSnapshot, verdict: RewardVerdict, compact: Bool) -> String {
-        if let malibu = s.malibuAccruedToday {
-            return malibuDisplay(malibu, verdict: verdict, compact: compact)
-        }
-        if s.malibuAccruedAllTime != nil || verdict.malibuWithdrawable != nil || verdict.malibuHeld != nil {
-            return "MALIBU daily not reported yet"
-        }
-        return compact ? "n/a MALIBU today" : "n/a MALIBU"
-    }
-
-    static func malibuAvailabilityLine(_ s: AgentSnapshot) -> String? {
-        malibuAvailabilityLine(s, verdict: rewardVerdict(s))
-    }
-
-    static func malibuAvailabilityLine(_ s: AgentSnapshot, verdict: RewardVerdict) -> String? {
-        guard verdict.malibuWithdrawal != .unknown,
-              verdict.malibuWithdrawable != nil || verdict.malibuHeld != nil else { return nil }
-        let withdrawable: String
-        switch verdict.malibuWithdrawal {
-        case .unlocked:
-            withdrawable = verdict.malibuWithdrawable.map { String(format: "%.2f eligible for withdrawal", $0) } ?? "eligibility unavailable"
-        case .none where verdict.reasonCode == .walletMissing:
-            withdrawable = "wallet required"
-        case .none:
-            withdrawable = "not withdrawable"
-        case .held, .lockedProvisional, .epochDisposition:
-            withdrawable = "not withdrawable"
-        case .capped:
-            withdrawable = "withdrawal capped"
-        case .unavailable:
-            withdrawable = "status unavailable"
-        case .unknown:
-            return nil
-        }
-        let held = verdict.malibuHeld.map { String(format: "%.2f held", $0) } ?? "n/a held"
-        return "MALIBU: \(withdrawable) · \(held)"
-    }
-
-    static func malibuHoldLine(_ s: AgentSnapshot) -> String? {
-        malibuHoldLine(s, verdict: rewardVerdict(s))
-    }
-
-    static func malibuHoldLine(_ s: AgentSnapshot, verdict: RewardVerdict) -> String? {
-        if hasHistoricalTrustHold(verdict) {
-            return "Earlier rewards retain their original trust hold. No action is available in Malibu for this hold."
-        }
-        switch verdict.malibuWithdrawal {
-        case .held(let reason), .capped(let reason), .epochDisposition(let reason):
-            return "MALIBU status: \(rewardReasonCopy(reason)) Next: \(rewardReasonNextAction(reason))"
-        case .unavailable:
-            return "MALIBU status: \(rewardReasonCopy(.telemetryUnavailable)) Next: \(rewardReasonNextAction(.telemetryUnavailable))"
-        default:
-            break
-        }
-        return nil
-    }
-
-    static func trustLine(_ s: AgentSnapshot) -> String {
-        trustLine(rewardVerdict(s))
-    }
-
-    static func trustLine(_ verdict: RewardVerdict) -> String {
-        switch verdict.trustDisplay {
-        case .trustedAuthoritative:
-            return "Trusted"
-        case .trustedStaleNeutral:
-            return "Live"
-        case .provisional:
-            if verdict.reasonCode == .heldDemotionCooldown {
-                return "Provisional — Trust review in progress"
-            }
-            if let progress = verdict.trustProgress {
-                let base = "Provisional — \(progress.met) of \(progress.required) criteria met"
-                return progress.required > progress.met ? "\(base) · Trust criteria →" : base
-            }
-            return "Provisional"
-        case .unknown:
-            return "MALIBU trust status unavailable"
-        }
-    }
-
-    static func uptimeLine(_ s: AgentSnapshot) -> String {
-        var parts: [String] = []
-        if let sec = s.uptimeSec, isActive(s) {
-            parts.append("\(formatDuration(sec)) current run")
-        } else if isActive(s) {
-            parts.append("current run n/a")
-        }
-        if let pct = s.uptime7dPct {
-            parts.append(String(format: "%.1f%% uptime (7d)", pct))
-        } else if isActive(s) {
-            parts.append("7d uptime n/a")
-        }
-        parts.append(s.declinedRequests.map { "\($0) declined" } ?? (isActive(s) ? "0 declined" : "n/a declined"))
-        parts.append(s.restartCount.map { "\($0) restarts" } ?? (isActive(s) ? "0 restarts" : "n/a restarts"))
-        return parts.joined(separator: " · ")
-    }
-
-    static func gpuChip(_ s: AgentSnapshot) -> String {
-        if let util = s.gpuUtilizationPct {
-            return String(format: "GPU %.0f%%", util)
-        }
-        if let temp = s.gpuTemperatureC {
-            return String(format: "GPU %.0f°C", temp)
-        }
-        return "GPU n/a"
-    }
-
-    static func latencyChip(_ s: AgentSnapshot) -> String {
-        switch (s.latencyP50Ms, s.latencyP99Ms) {
-        case let (p50?, p99?):
-            return "p50 \(p50)ms · p99 \(p99)ms"
-        case let (p50?, nil):
-            return "p50 \(p50)ms · p99 n/a"
-        case let (nil, p99?):
-            return "p50 n/a · p99 \(p99)ms"
-        case (nil, nil):
-            return isActive(s) ? "Latency n/a" : "Latency n/a"
-        }
-    }
-
-    static func queueChip(_ s: AgentSnapshot) -> String {
-        if let depth = s.queueDepth { return "\(depth) queued" }
-        return isActive(s) ? "0 queued" : "Queue n/a"
-    }
-
-    static func thermalChip(_ s: AgentSnapshot) -> String {
-        s.thermalState?.label ?? (isActive(s) ? "Thermal OK" : "Thermal n/a")
-    }
-
     static func unclaimedBadge(_ s: AgentSnapshot, dismissedThreshold: Double?) -> String? {
         unclaimedBadge(s, verdict: rewardVerdict(s), dismissedThreshold: dismissedThreshold)
     }
@@ -2865,13 +2138,18 @@ enum AgentSnapshotPresenter {
             && !s.cliUpdateInProgress
     }
 
+    /// Humanised finding lines, one per distinct message. Machine cause codes
+    /// stay in exported diagnostics; they are never rendered here.
     static func diagnosticFindingLines(_ s: AgentSnapshot) -> [String] {
-        s.diagnosticFindings.map { finding in
-            let title = diagnosticTitle(finding)
-            let cause = diagnosticCause(finding)
-            let context = diagnosticContext(finding, snapshot: s)
-            return ([title, LogTailBuffer.redacted(finding.userMessage), "Cause: \(cause)"] + context)
-                .joined(separator: " · ")
+        var seen = Set<String>()
+        return s.diagnosticFindings.compactMap { finding in
+            var parts = [diagnosticTitle(finding), LogTailBuffer.redacted(finding.userMessage)]
+            if finding.signatureID == .serveUnresponsive, !hasNetworkStateEvidence(finding) {
+                parts.append("Cause unknown")
+            }
+            parts.append(contentsOf: diagnosticContext(finding, snapshot: s))
+            let line = parts.joined(separator: " · ")
+            return seen.insert(line).inserted ? line : nil
         }
     }
 
@@ -2994,7 +2272,7 @@ enum AgentSnapshotPresenter {
         case .credentialsStatus:
             return !s.hasFreshServeOwnedCredentialState()
         case .doctorReport, .appPollingHistory, .providerLogDiagnostics:
-            return !s.hasFreshContractValidatedStatusObservation()
+            return !s.hasCurrentContractValidatedStatusObservation()
         }
     }
 
@@ -3013,17 +2291,6 @@ enum AgentSnapshotPresenter {
             return "Model verification"
         case .autoupdateDisabled:
             return "Automatic updates"
-        }
-    }
-
-    private static func diagnosticCause(_ finding: ProviderDiagnosticFinding) -> String {
-        switch finding.signatureID {
-        case .serveUnresponsive:
-            return hasNetworkStateEvidence(finding) ? "status_context" : "unknown_cause"
-        case .autoupdateHomeACLRejected:
-            return "repair_delivery_pending"
-        default:
-            return finding.signatureID.rawValue
         }
     }
 
@@ -3293,41 +2560,17 @@ enum AgentSnapshotPresenter {
     /// Adaptive USDC precision: sub-cent amounts (e.g. per-token accrual)
     /// render as `$0.00` at two decimals, hiding real earnings. Show 4
     /// decimals only for nonzero amounts under a cent; otherwise `$%.2f`.
-    private static func formatUSDC(_ amount: Double) -> String {
+    static func formatUSDC(_ amount: Double) -> String {
         if amount != 0 && abs(amount) < 0.01 {
             return String(format: "$%.4f", amount)
         }
         return String(format: "$%.2f", amount)
     }
 
-    private static func sentence(_ clause: String) -> String {
+    static func sentence(_ clause: String) -> String {
         guard let first = clause.first else { return clause }
         let capitalized = first.uppercased() + clause.dropFirst()
         return capitalized.hasSuffix(".") ? capitalized : capitalized + "."
-    }
-
-    private static func malibuDisplay(_ amount: Double, verdict: RewardVerdict, compact: Bool = false) -> String {
-        switch verdict.malibuWithdrawal {
-        case .unlocked:
-            return String(format: "%.2f MALIBU", amount)
-        case .none where verdict.reasonCode != .walletMissing:
-            return String(format: "%.2f MALIBU", amount)
-        case .capped:
-            if compact {
-                return String(format: "%.2f MALIBU today (capped)", amount)
-            }
-            return String(format: "[capped] %.2f MALIBU", amount)
-        case .unavailable:
-            if compact {
-                return "MALIBU today unavailable"
-            }
-            return "MALIBU reward status unavailable"
-        case .held, .lockedProvisional, .epochDisposition, .none, .unknown:
-            if compact {
-                return String(format: "%.2f MALIBU today (locked)", amount)
-            }
-            return String(format: "[locked] %.2f MALIBU", amount)
-        }
     }
 
     private static let leftoverProvisionalHoldReasons: Set<String> = [
@@ -3339,51 +2582,33 @@ enum AgentSnapshotPresenter {
         "held_demotion_cooldown",
     ]
 
-
-    private static func canShowLastKnownUSDC(_ s: AgentSnapshot) -> Bool {
+    static func canShowLastKnownUSDC(_ s: AgentSnapshot) -> Bool {
         canShowLastKnownUSDC(s, verdict: rewardVerdict(s))
     }
 
-    private static func canShowLastKnownUSDC(_ s: AgentSnapshot, verdict: RewardVerdict) -> Bool {
+    static func canShowLastKnownUSDC(_ s: AgentSnapshot, verdict: RewardVerdict) -> Bool {
         if verdict.providerEarningsFresh {
             return verdict.usdcActivity != .unavailable
         }
         return s.hasObservedProviderEarnings && s.earningsUsdcToday != nil
     }
 
-    private static func isShowingLastKnownUSDC(_ s: AgentSnapshot, verdict: RewardVerdict) -> Bool {
+    static func isShowingLastKnownUSDC(_ s: AgentSnapshot, verdict: RewardVerdict) -> Bool {
         !verdict.providerEarningsFresh && s.hasObservedProviderEarnings && s.earningsUsdcToday != nil
     }
 
-    private static func usdcSummarySuffix(_ verdict: RewardVerdict) -> String {
-        verdict.providerEarningsFresh ? "USDC today" : "USDC last known"
-    }
-
-    private static func rewardReasonShortCopy(_ reason: RewardVerdict.ReasonCode) -> String {
-        switch reason {
-        case .heldProviderDailyCap, .heldWalletDailyCap:
-            return "limited by daily cap"
-        case .telemetryUnavailable:
-            return "reward status unavailable"
-        case .unknown:
-            return "reward status needs review"
-        case .excludedEpochDisposition, .burnedOrRetiredEpochDisposition:
-            return "epoch reward update"
-        default:
-            return "locked until eligible"
-        }
-    }
-
-    private static func rewardReasonCopy(_ reason: String) -> String {
+    static func rewardReasonCopy(_ reason: String) -> String {
         switch reason {
         case "held_provider_daily_cap":
             return "provider daily limit reached"
         case "held_wallet_daily_cap":
             return "wallet daily limit reached"
         case "held_provisional_trust_tier":
-            return "Trust verification is incomplete"
+            return "MALIBU accrued while Provisional is held"
         case "held_demotion_cooldown":
-            return "Trust verification is in progress"
+            return "MALIBU accrued during a demotion cooldown is held"
+        case "held_retained_trust_hold":
+            return "MALIBU from an earlier trust state is held"
         case "held_epoch_disposition":
             return "MALIBU has a recorded settlement hold"
         case "excluded_epoch_disposition":
@@ -3406,11 +2631,11 @@ enum AgentSnapshotPresenter {
              "telemetry_unavailable":
             return "reward status is unavailable"
         default:
-            return "reward eligibility is still being verified"
+            return "reward status needs review"
         }
     }
 
-    private static func rewardReasonCopy(_ reason: RewardVerdict.ReasonCode) -> String {
+    static func rewardReasonCopy(_ reason: RewardVerdict.ReasonCode) -> String {
         switch reason {
         case .telemetryUnavailable:
             return "MALIBU reward status is temporarily unavailable"
@@ -3419,9 +2644,9 @@ enum AgentSnapshotPresenter {
         case .trustedWithdrawable:
             return "the existing balance is eligible for withdrawal; payment execution is not available yet"
         case .rewardsHeld:
-            return "payout eligibility is still being verified"
+            return "MALIBU is held"
         case .trustTierProvisional:
-            return "Trust verification is incomplete"
+            return "MALIBU accrued while Provisional is held"
         case .rewardProjectionUnavailable:
             return "MALIBU reward status is temporarily unavailable"
         case .rewardProjectionWarmingUp:
@@ -3441,16 +2666,14 @@ enum AgentSnapshotPresenter {
         }
     }
 
-    private static func rewardReasonNextAction(_ reason: String) -> String {
+    static func rewardReasonNextAction(_ reason: String) -> String {
         switch reason {
         case "held_provider_daily_cap":
             return "The provider cap resets at the next UTC day."
         case "held_wallet_daily_cap":
             return "The wallet cap resets at the next UTC day."
-        case "held_provisional_trust_tier":
-            return "Complete the remaining trust criteria for withdrawal eligibility."
-        case "held_demotion_cooldown":
-            return "Keep Malibu online while trust review completes."
+        case "held_provisional_trust_tier", "held_demotion_cooldown", "held_retained_trust_hold":
+            return "No action is available for held MALIBU."
         case "held_epoch_disposition":
             return "No local action is available in Malibu for this recorded hold."
         case "excluded_epoch_disposition", "burned_or_retired_epoch_disposition":
@@ -3468,7 +2691,7 @@ enum AgentSnapshotPresenter {
         }
     }
 
-    private static func rewardReasonNextAction(_ reason: RewardVerdict.ReasonCode) -> String {
+    static func rewardReasonNextAction(_ reason: RewardVerdict.ReasonCode) -> String {
         switch reason {
         case .unknown:
             return "Keep Malibu open while reward status refreshes."
@@ -3487,11 +2710,11 @@ enum AgentSnapshotPresenter {
         }
     }
 
-    private static func tokenPair(input: Int64?, output: Int64?, suffix: String) -> String {
+    static func tokenPair(input: Int64?, output: Int64?, suffix: String) -> String {
         "\(formatTokens(input)) in / \(formatTokens(output)) out \(suffix)"
     }
 
-    private static func formatTokens(_ value: Int64?) -> String {
+    static func formatTokens(_ value: Int64?) -> String {
         guard let value else { return "0" }
         if value >= 1_000_000 {
             return String(format: "%.1fM", Double(value) / 1_000_000)
@@ -3502,7 +2725,7 @@ enum AgentSnapshotPresenter {
         return "\(value)"
     }
 
-    private static func formatCount(_ value: Int) -> String {
+    static func formatCount(_ value: Int) -> String {
         let formatter = NumberFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.numberStyle = .decimal
@@ -3511,7 +2734,7 @@ enum AgentSnapshotPresenter {
         return formatter.string(from: NSNumber(value: value)) ?? "\(value)"
     }
 
-    private static func formatDuration(_ seconds: Int) -> String {
+    static func formatDuration(_ seconds: Int) -> String {
         if seconds < 60 { return "\(seconds)s" }
         if seconds < 3600 { return String(format: "%dm", seconds / 60) }
         return String(format: "%dh %dm", seconds / 3600, (seconds % 3600) / 60)

@@ -26,10 +26,10 @@ final class AgentSnapshotPresenterTests: XCTestCase {
     func testEarningsLineShowsUnavailableWhenBothMetricsMissingWhileServing() {
         var s = AgentSnapshot.empty
         s.state = .serving
-        XCTAssertEqual(AgentSnapshotPresenter.earningsLine(s), "Today: reward status unavailable")
+        XCTAssertEqual(AgentSnapshotPresenter.earningsLine(s), "USDC earnings unavailable")
     }
 
-    func testMalibuDailyMissingExplainsProjectionInsteadOfShowingNA() {
+    func testMissingMalibuDailyIsNotPresentedAsAPendingReport() {
         var s = AgentSnapshot.empty
         s.state = .serving
         s.earningsUsdcToday = 0.04
@@ -48,28 +48,20 @@ final class AgentSnapshotPresenterTests: XCTestCase {
             )
         )
 
-        XCTAssertEqual(
-            AgentSnapshotPresenter.earningsLine(s),
-            "Today: $0.04 USDC · MALIBU daily not reported yet"
-        )
-        XCTAssertEqual(
-            AgentSnapshotPresenter.malibuFullLine(s),
-            "MALIBU daily not reported yet · 12.50 all-time · locked until eligible"
-        )
+        XCTAssertEqual(AgentSnapshotPresenter.earningsLine(s), "USDC today (UTC): $0.04")
+        let malibu = AgentSnapshotPresenter.earningsCard(s).malibuLines.joined(separator: " ")
+        XCTAssertEqual(malibu, "MALIBU balance: 12.50 (beta points) · 12.50 held · 0.00 not held. Held MALIBU is not released and not withdrawable. MALIBU has no withdrawals yet.")
+        XCTAssertFalse(malibu.contains("not reported yet"))
+        XCTAssertFalse(malibu.contains("locked until eligible"))
     }
 
-    func testUptimeLineLabelsProviderProcessRuntimeAsCurrentRun() {
+    func testRunLineLabelsCurrentRunAndLifetimeRestarts() {
         var s = AgentSnapshot.empty
         s.state = .serving
         s.uptimeSec = 75
-        s.uptime7dPct = 99.5
-        s.declinedRequests = 0
         s.restartCount = 2
 
-        XCTAssertEqual(
-            AgentSnapshotPresenter.uptimeLine(s),
-            "1m current run · 99.5% uptime (7d) · 0 declined · 2 restarts"
-        )
+        XCTAssertEqual(AgentSnapshotPresenter.runLine(s), "1m current run · 2 restarts lifetime")
     }
 
     func testShortShowsServingWhenNoEarningsYet() {
@@ -316,7 +308,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
 
         XCTAssertTrue(AgentSnapshotPresenter.isNetworkReady(snapshot))
         XCTAssertEqual(AgentSnapshotPresenter.publicStatus(snapshot).title, "Provider is ready")
-        XCTAssertEqual(AgentSnapshotPresenter.usdcTodayDisplay(snapshot), "$0.04")
+        XCTAssertTrue(AgentSnapshotPresenter.earningsCard(snapshot).usdcSummary.contains("$0.04 today (UTC)"))
     }
 
     func testIncumbentJobHistoryHoldsReadyOnFirstLaunchWithoutPersistFile() {
@@ -793,7 +785,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         )
     }
 
-    func testProvisionalMalibuIsRenderedLocked() {
+    func testProvisionalMalibuIsKeptOffTheMenuEarningsRow() {
         var s = AgentSnapshot.empty
         s.state = .serving
         s.earningsUsdcToday = 1
@@ -809,7 +801,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
                 reasons: ["held_provisional_trust_tier"]
             )
         )
-        XCTAssertTrue(AgentSnapshotPresenter.earningsLine(s).contains("[locked] 2.00 MALIBU"))
+        XCTAssertEqual(AgentSnapshotPresenter.earningsLine(s), "USDC today (UTC): $1.00")
         XCTAssertFalse(AgentSnapshotPresenter.earningsLine(s).contains("unlocks at Trusted"))
     }
 
@@ -858,7 +850,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         snapshot.coordinatorIdentityAdmissionMode = "signature"
         XCTAssertEqual(
             AgentSnapshotPresenter.admissionIdentityLine(snapshot),
-            "Ready · verified by this Mac"
+            "Ready · verified"
         )
 
         snapshot.coordinatorIdentityAdmissionMode = "exemption"
@@ -1120,9 +1112,9 @@ final class AgentSnapshotPresenterTests: XCTestCase {
             AgentSnapshotPresenter.advertisedCapacityLine(snapshot),
             "8 buyer slots · available to customers"
         )
-        XCTAssertEqual(
-            AgentSnapshotPresenter.lifecycleEventLine(event),
-            "provider recovery rollback post start rejoin timeout · Provider recovery"
+        XCTAssertTrue(
+            AgentSnapshotPresenter.lifecycleEventDisplay(event).hasPrefix("Provider recovery · "),
+            "a reason code is never rendered as prose"
         )
     }
 
@@ -1137,12 +1129,8 @@ final class AgentSnapshotPresenterTests: XCTestCase {
             compatibilitySetID: nil,
             operationID: nil
         )
-        XCTAssertEqual(
-            AgentSnapshotPresenter.lifecycleEventLine(event),
-            "Provider service started · Starting provider"
-        )
         XCTAssertTrue(AgentSnapshotPresenter.lifecycleEventDisplay(event).hasPrefix(
-            "Provider service started · Starting provider · "
+            "Provider service started · "
         ))
     }
 
@@ -1654,11 +1642,8 @@ final class AgentSnapshotPresenterTests: XCTestCase {
             trustCriteriaRequired: 4
         )
 
-        XCTAssertEqual(AgentSnapshotPresenter.malibuAvailabilityLine(snapshot), "MALIBU: not withdrawable · 12.50 held")
-        XCTAssertEqual(
-            AgentSnapshotPresenter.malibuHoldLine(snapshot),
-            "MALIBU status: Trust verification is incomplete Next: Complete the remaining trust criteria for withdrawal eligibility."
-        )
+        let heldLine = "Held MALIBU is not released and not withdrawable. MALIBU has no withdrawals yet."
+        XCTAssertTrue(AgentSnapshotPresenter.earningsCard(snapshot).malibuLines.contains(heldLine))
 
         snapshot.updateRewardInputs(
             malibuHoldReasons: ["per_wallet_daily_cap"],
@@ -1669,10 +1654,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
                 reasons: ["held_wallet_daily_cap"]
             )
         )
-        XCTAssertEqual(
-            AgentSnapshotPresenter.malibuHoldLine(snapshot),
-            "MALIBU status: wallet daily limit reached Next: The wallet cap resets at the next UTC day."
-        )
+        XCTAssertTrue(AgentSnapshotPresenter.earningsCard(snapshot).malibuLines.contains("Wallet daily limit reached."))
 
         snapshot.updateRewardInputs(
             malibuHoldReasons: [],
@@ -1683,10 +1665,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
                 reasons: ["held_provider_daily_cap"]
             )
         )
-        XCTAssertEqual(
-            AgentSnapshotPresenter.malibuHoldLine(snapshot),
-            "MALIBU status: provider daily limit reached Next: The provider cap resets at the next UTC day."
-        )
+        XCTAssertTrue(AgentSnapshotPresenter.earningsCard(snapshot).malibuLines.contains("Provider daily limit reached."))
 
         snapshot.updateRewardInputs(
             trustTier: .provisional,
@@ -1697,10 +1676,10 @@ final class AgentSnapshotPresenterTests: XCTestCase {
                 reasons: ["held_demotion_cooldown"]
             )
         )
-        XCTAssertEqual(
-            AgentSnapshotPresenter.malibuHoldLine(snapshot),
-            "MALIBU status: Trust verification is in progress Next: Keep Malibu online while trust review completes."
-        )
+        let cooldownLines = AgentSnapshotPresenter.earningsCard(snapshot).malibuLines
+        XCTAssertTrue(cooldownLines.contains(heldLine))
+        XCTAssertFalse(cooldownLines.joined().contains("in progress"))
+        XCTAssertFalse(cooldownLines.joined().contains("review"))
     }
 
     func testRewardEligibilityV1OverridesLegacyMalibuPresentation() {
@@ -1723,16 +1702,10 @@ final class AgentSnapshotPresenterTests: XCTestCase {
             )
         )
 
-        XCTAssertEqual(AgentSnapshotPresenter.eligibilityLine(snapshot), "Earlier MALIBU rewards remain held")
-        XCTAssertEqual(
-            AgentSnapshotPresenter.malibuAvailabilityLine(snapshot),
-            "MALIBU: not withdrawable · 0.00 held"
-        )
-        XCTAssertEqual(
-            AgentSnapshotPresenter.malibuFullLine(snapshot),
-            "2.00 MALIBU today (locked) · 2.00 all-time · locked until eligible"
-        )
-        XCTAssertNotNil(AgentSnapshotPresenter.malibuHoldLine(snapshot))
+        XCTAssertEqual(AgentSnapshotPresenter.rewardVerdict(snapshot).malibuWithdrawal, .held(.heldProvisionalTrustTier))
+        let lines = AgentSnapshotPresenter.earningsCard(snapshot).malibuLines
+        XCTAssertEqual(lines, ["MALIBU balance: 2.00 (beta points).", "MALIBU has no withdrawals yet."])
+        XCTAssertFalse(lines.joined().contains("eligible for withdrawal"))
     }
 
     func testTrustedSnapshotRetainsAuthoritativeHistoricalHoldCopy() {
@@ -1757,22 +1730,11 @@ final class AgentSnapshotPresenterTests: XCTestCase {
             )
         )
 
-        let health = AgentSnapshotPresenter.miningHealth(snapshot)
-        XCTAssertNotEqual(health.reasonCode, "trust_tier_provisional")
-        XCTAssertEqual(health.reasonCode, "rewards_held")
-        XCTAssertFalse(health.status.contains("Locked"))
-        XCTAssertTrue(health.status.contains("Rewards held"))
-        XCTAssertNotNil(AgentSnapshotPresenter.malibuHoldLine(snapshot))
-        XCTAssertNotEqual(
-            AgentSnapshotPresenter.eligibilityLine(snapshot),
-            "MALIBU is locked until Trusted"
-        )
-        XCTAssertTrue(AgentSnapshotPresenter.malibuFullLine(snapshot).contains("locked"))
-        XCTAssertFalse(AgentSnapshotPresenter.malibuFullLine(snapshot).contains("Locked"))
-        XCTAssertFalse(
-            (AgentSnapshotPresenter.malibuHoldLine(snapshot) ?? "")
-                .contains("Trust verification is incomplete")
-        )
+        let card = AgentSnapshotPresenter.earningsCard(snapshot)
+        XCTAssertTrue(card.malibuLines.contains("Held MALIBU is not released and not withdrawable. MALIBU has no withdrawals yet."))
+        XCTAssertEqual(card.trustLine, "Trust: Trusted. Trust affects MALIBU only, not USDC.")
+        XCTAssertFalse(card.malibuLines.joined().contains("Trust verification"))
+        XCTAssertEqual(AgentSnapshotPresenter.statusPill(snapshot).label, "Serving")
     }
 
     func testRewardEligibilityUsesFreshMalibuProjectionWithoutFreshUSDCProjection() {
@@ -1792,11 +1754,8 @@ final class AgentSnapshotPresenterTests: XCTestCase {
             )
         )
 
-        XCTAssertEqual(AgentSnapshotPresenter.eligibilityLine(snapshot), "Earlier MALIBU rewards remain held")
-        XCTAssertEqual(
-            AgentSnapshotPresenter.malibuFullLine(snapshot),
-            "2.00 MALIBU today (locked) · 2.00 all-time · locked until eligible"
-        )
+        XCTAssertEqual(AgentSnapshotPresenter.rewardVerdict(snapshot).malibuWithdrawal, .held(.heldProvisionalTrustTier))
+        XCTAssertTrue(AgentSnapshotPresenter.earningsCard(snapshot).malibuLines.contains("MALIBU balance: 2.00 (beta points)."))
     }
 
     func testProviderEarningsUnknownRewardEligibilityPreservesUnknownReason() throws {
@@ -1853,8 +1812,10 @@ final class AgentSnapshotPresenterTests: XCTestCase {
             malibuRewardEligibility: decoded.malibuRewardEligibility
         )
 
-        XCTAssertEqual(AgentSnapshotPresenter.malibuAvailabilityLine(snapshot), "MALIBU: status unavailable · 0.00 held")
-        XCTAssertEqual(AgentSnapshotPresenter.eligibilityLine(snapshot), "Reward status unavailable")
+        XCTAssertEqual(
+            AgentSnapshotPresenter.earningsCard(snapshot).malibuLines,
+            ["MALIBU status can't be reached right now. USDC earnings are unaffected."]
+        )
     }
 
     func testUnavailableRewardEligibilityDoesNotRenderLockedAmount() {
@@ -1870,11 +1831,10 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         )
 
         let earningsLine = AgentSnapshotPresenter.earningsLine(snapshot)
-        let fullLine = AgentSnapshotPresenter.malibuFullLine(snapshot)
-        XCTAssertEqual(earningsLine, "Today: $0.04 USDC · MALIBU reward status unavailable")
-        XCTAssertEqual(fullLine, "MALIBU today unavailable · 8.00 all-time · reward status unavailable")
-        XCTAssertFalse(earningsLine.contains("[locked]"))
-        XCTAssertFalse(fullLine.contains("locked"))
+        let lines = AgentSnapshotPresenter.earningsCard(snapshot).malibuLines
+        XCTAssertEqual(earningsLine, "USDC today (UTC): $0.04")
+        XCTAssertEqual(lines, ["MALIBU status can't be reached right now. USDC earnings are unaffected."])
+        XCTAssertFalse(lines.joined().contains("locked"))
     }
 
     func testDefaultPresenterStringsDoNotExposeInternalTerms() {
@@ -2123,26 +2083,17 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         XCTAssertTrue(publicStrings.contains("provider status update"), publicStrings)
     }
 
-    func testDashboardDefaultStringsExcludeAdvancedLogs() {
+    func testDashboardShowsNoRawLogLines() {
         var snapshot = AgentSnapshot.empty
         snapshot.state = .serving
         snapshot.currentModelID = "llama"
-        let logs = [
-            "watchdog recovery started",
-            "coordinator join requires model_artifact_sha256",
-        ]
 
-        let defaultCopy = DashboardCopy.defaultPublicStrings(snapshot)
+        let copy = (DashboardCopy.defaultPublicStrings(snapshot) + DashboardCopy.advancedDiagnosticsStrings(snapshot))
             .joined(separator: "\n")
             .lowercased()
-        let advancedCopy = DashboardCopy.advancedDiagnosticsStrings(snapshot, logLines: logs)
-            .joined(separator: "\n")
-            .lowercased()
-
-        XCTAssertFalse(defaultCopy.contains("watchdog"), defaultCopy)
-        XCTAssertFalse(defaultCopy.contains("coordinator"), defaultCopy)
-        XCTAssertTrue(advancedCopy.contains("watchdog"), advancedCopy)
-        XCTAssertTrue(advancedCopy.contains("coordinator"), advancedCopy)
+        XCTAssertFalse(copy.contains("watchdog"), copy)
+        XCTAssertFalse(copy.contains("coordinator"), copy)
+        XCTAssertFalse(copy.contains("idle_prewarm"), copy)
     }
 
     func testRawInternalErrorFallsBackToAdvancedDiagnosticsGuidance() {
@@ -2271,7 +2222,8 @@ final class AgentSnapshotPresenterTests: XCTestCase {
 
         XCTAssertEqual(status.title, "Provider status is unavailable")
         XCTAssertEqual(status.detail, "Malibu cannot confirm current provider status. Cause unknown.")
-        XCTAssertTrue(diagnosticLines.joined(separator: "\n").contains("Cause: unknown_cause"))
+        XCTAssertTrue(diagnosticLines.joined(separator: "\n").contains("Cause unknown"))
+        XCTAssertFalse(diagnosticLines.joined(separator: "\n").contains("unknown_cause"))
     }
 
     func testStaleObservationIDDoesNotFabricateNetworkContext() {
@@ -2293,7 +2245,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
 
         XCTAssertEqual(status.title, "Provider status is unavailable")
         XCTAssertEqual(status.detail, "Malibu cannot confirm current provider status. Cause unknown.")
-        XCTAssertTrue(diagnosticLines.contains("Cause: unknown_cause"))
+        XCTAssertTrue(diagnosticLines.contains("Cause unknown"))
         XCTAssertFalse(diagnosticLines.contains("Network context:"))
     }
 

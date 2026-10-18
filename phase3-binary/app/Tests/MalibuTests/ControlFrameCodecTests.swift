@@ -174,7 +174,7 @@ final class ControlFrameCodecTests: XCTestCase {
         }
         XCTAssertEqual(
             RewardActivityPresentation.detailLines(for: usefulWork),
-            ["1.25 MALIBU", "Source: verified useful work", "Hold: trust review"]
+            ["1.25 MALIBU", "Source: verified useful work", "Hold: Provisional trust tier"]
         )
 
         let bootstrap = RewardActivityEvent(
@@ -422,16 +422,12 @@ final class ControlFrameCodecTests: XCTestCase {
         ))
 
         XCTAssertEqual(AgentSnapshotPresenter.rewardVerdict(agent.snapshot).malibuWithdrawal, .unknown)
-        XCTAssertNil(AgentSnapshotPresenter.malibuAvailabilityLine(agent.snapshot))
-        XCTAssertNil(AgentSnapshotPresenter.malibuHoldLine(agent.snapshot))
-        XCTAssertFalse(AgentSnapshotPresenter.usdcFullLine(agent.snapshot).contains("$18.40"))
-        XCTAssertEqual(
-            AgentSnapshotPresenter.malibuFullLine(agent.snapshot),
-            "MALIBU 50.00 accrued · last known · eligibility unavailable"
-        )
+        let card = AgentSnapshotPresenter.earningsCard(agent.snapshot)
+        XCTAssertFalse(card.usdcSummary.contains("$18.40"))
+        XCTAssertEqual(card.malibuLines, ["MALIBU balance: 50.00 (beta points, last known)."])
+        XCTAssertNil(card.trustLine, "stale trust state is not shown")
         XCTAssertFalse(AgentSnapshotPresenter.earningsLine(agent.snapshot).contains("[locked]"))
         XCTAssertFalse(AgentSnapshotPresenter.earningsLine(agent.snapshot).contains("Trusted"))
-        XCTAssertEqual(AgentSnapshotPresenter.trustLine(agent.snapshot), "MALIBU trust status unavailable")
         XCTAssertNil(AgentSnapshotPresenter.backlogLine(agent.snapshot))
     }
 
@@ -521,10 +517,8 @@ final class ControlFrameCodecTests: XCTestCase {
         let earningsOnlyVerdict = AgentSnapshotPresenter.rewardVerdict(agent.snapshot)
         XCTAssertEqual(earningsOnlyVerdict.usdcActivity, .earning)
         XCTAssertEqual(earningsOnlyVerdict.malibuWithdrawal, .unknown)
-        XCTAssertEqual(AgentSnapshotPresenter.usdcTodayDisplay(agent.snapshot), "$4.00")
-        XCTAssertNil(AgentSnapshotPresenter.malibuAvailabilityLine(agent.snapshot))
-        XCTAssertTrue(AgentSnapshotPresenter.earningsLine(agent.snapshot).contains("$4.00 USDC"))
-        XCTAssertTrue(AgentSnapshotPresenter.earningsLine(agent.snapshot).contains("MALIBU reward status unavailable"))
+        XCTAssertTrue(AgentSnapshotPresenter.earningsCard(agent.snapshot).usdcSummary.contains("$4.00 today (UTC)"))
+        XCTAssertEqual(AgentSnapshotPresenter.earningsLine(agent.snapshot), "USDC today (UTC): $4.00 · $20.00 lifetime")
 
         let accrualOnly = ProviderEarnings(
             walletBound: false,
@@ -566,16 +560,9 @@ final class ControlFrameCodecTests: XCTestCase {
         let accrualOnlyVerdict = AgentSnapshotPresenter.rewardVerdict(agent.snapshot)
         XCTAssertEqual(accrualOnlyVerdict.usdcActivity, .none)
         XCTAssertEqual(accrualOnlyVerdict.malibuWithdrawal, .unavailable)
-        XCTAssertEqual(AgentSnapshotPresenter.usdcTodayDisplay(agent.snapshot), "n/a")
-        XCTAssertEqual(
-            AgentSnapshotPresenter.malibuAvailabilityLine(agent.snapshot),
-            "MALIBU: status unavailable · 8.00 held"
-        )
-        XCTAssertEqual(
-            AgentSnapshotPresenter.malibuFullLine(agent.snapshot),
-            "MALIBU today unavailable · 30.00 all-time · reward status unavailable"
-        )
-        XCTAssertEqual(AgentSnapshotPresenter.earningsLine(agent.snapshot), "Today: reward status unavailable")
+        let accrualCard = AgentSnapshotPresenter.earningsCard(agent.snapshot)
+        XCTAssertFalse(accrualCard.usdcSummary.contains("$"), "stale USDC is not shown as today's money")
+        XCTAssertEqual(accrualCard.malibuLines, ["MALIBU status can't be reached right now. USDC earnings are unaffected."])
     }
 
     @MainActor
@@ -624,16 +611,12 @@ final class ControlFrameCodecTests: XCTestCase {
 
         XCTAssertEqual(AgentSnapshotPresenter.rewardVerdict(agent.snapshot).usdcActivity, .earning)
         XCTAssertEqual(agent.snapshot.idlePrewarmSummary.skipsByReasonLast1h["on_battery"], 1)
-        XCTAssertEqual(AgentSnapshotPresenter.eligibilityLine(agent.snapshot), "On battery — plug in to earn")
     }
 
     @MainActor
     func testLegacyMetricsFrameWithoutGranularCriteriaUsesCounterFallback() throws {
         let snapshot = try snapshotAfterControlFrameBridgeFixture("legacy-trust-counters.jsonl")
 
-        let trustLine = AgentSnapshotPresenter.trustLine(snapshot)
-        XCTAssertTrue(trustLine.contains("1 of 2"), trustLine)
-        XCTAssertFalse(trustLine.contains("0 of 2"), trustLine)
         XCTAssertEqual(
             AgentSnapshotPresenter.rewardVerdict(snapshot).trustProgress,
             AgentSnapshotPresenter.RewardVerdict.TrustProgress(met: 1, required: 2)
@@ -644,9 +627,6 @@ final class ControlFrameCodecTests: XCTestCase {
     func testEmptyGranularCriteriaFrameDoesNotUseLegacyCounterFallback() throws {
         let snapshot = try snapshotAfterControlFrameBridgeFixture("empty-granular-criteria.jsonl")
 
-        let trustLine = AgentSnapshotPresenter.trustLine(snapshot)
-        XCTAssertTrue(trustLine.contains("0 of 2"), trustLine)
-        XCTAssertFalse(trustLine.contains("1 of 2"), trustLine)
         XCTAssertEqual(
             AgentSnapshotPresenter.rewardVerdict(snapshot).trustProgress,
             AgentSnapshotPresenter.RewardVerdict.TrustProgress(met: 0, required: 2)
@@ -657,9 +637,6 @@ final class ControlFrameCodecTests: XCTestCase {
     func testOverlappingGranularCriteriaFrameRequiresDistinctSecondSlot() throws {
         let snapshot = try snapshotAfterControlFrameBridgeFixture("overlapping-granular-criteria.jsonl")
 
-        let trustLine = AgentSnapshotPresenter.trustLine(snapshot)
-        XCTAssertTrue(trustLine.contains("1 of 2"), trustLine)
-        XCTAssertFalse(trustLine.contains("2 of 2"), trustLine)
         XCTAssertEqual(
             AgentSnapshotPresenter.rewardVerdict(snapshot).trustProgress,
             AgentSnapshotPresenter.RewardVerdict.TrustProgress(met: 1, required: 2)

@@ -26,13 +26,11 @@ enum DashboardWindow {
 }
 
 enum DashboardCopy {
-    static let currentStateTitle = "Current state"
-    static let meaningTitle = "What this means"
-    static let nextActionTitle = "Next safe action"
-    static let miningHealthTitle = "Mining Health"
-    static let miningReasonTitle = "Reason"
-    static let miningRewardsTitle = "Rewards"
-    static let miningEligibilityTitle = "Eligibility"
+    static let earningsTitle = "Earnings (USDC)"
+    static let malibuTitle = "MALIBU (beta points)"
+    static let macHealthTitle = "This Mac"
+    static let advancedDiagnosticsTitle = "Advanced diagnostics"
+    static let changeWalletInSettings = "Change the payout wallet in Settings."
     static let resetProviderTitle = "Reset provider service"
     static let exportDiagnosticsTitle = "Export diagnostics…"
     static let recoveryHelpTitle = "If something is stuck"
@@ -57,44 +55,72 @@ enum DashboardCopy {
         }
         switch listState {
         case .checking:
-            return String(localized: "Serving this model. Checking whether switching is available.", comment: "Dashboard model checking switch")
+            return String(localized: "Serving this model. Checking whether switching is available…", comment: "Dashboard model checking switch")
         case .ready:
-            return String(localized: "Serving this model. Change Model lists other options.", comment: "Dashboard model ready to switch")
+            return String(localized: "Serving this model. Switching is available.", comment: "Dashboard model ready to switch")
         case .viewOnly:
-            return String(localized: "Serving this model. Live switching is off until warm swap is running.", comment: "Dashboard model view-only")
+            return String(localized: "Serving this model. Switching is off until warm swap is running.", comment: "Dashboard model view-only")
         case .unavailable:
-            return String(localized: "Serving this model. Open Change Model to see why switching is unavailable.", comment: "Dashboard model switch unavailable")
+            return String(localized: "Serving this model. Switching is unavailable right now; open Change Model to retry.", comment: "Dashboard model switch unavailable")
         }
     }
 
-    static func defaultPublicStrings(_ snapshot: AgentSnapshot) -> [String] {
-        let status = AgentSnapshotPresenter.consolidatedStatus(snapshot)
-        let mining = AgentSnapshotPresenter.miningHealth(snapshot)
-        return [
-            currentStateTitle,
-            status.label,
-            meaningTitle,
-            status.meaning,
-            nextActionTitle,
-            status.nextAction,
-            miningHealthTitle,
-            mining.status,
-            miningReasonTitle,
-            mining.reason,
-            miningRewardsTitle,
-            mining.rewardSummary,
-            miningEligibilityTitle,
-            mining.trustSummary,
-            mining.nextAction,
-        ].compactMap { $0 }
+    /// Whether the dashboard shows the status notice (meaning, next action
+    /// and recovery) under the header. A serving Mac shows only the pill.
+    static func showsStatusNotice(_ snapshot: AgentSnapshot) -> Bool {
+        AgentSnapshotPresenter.statusPill(snapshot).label != "Serving"
     }
 
-    static func advancedDiagnosticsStrings(_ snapshot: AgentSnapshot, logLines: [String]) -> [String] {
-        var strings = ["Advanced diagnostics"]
+    /// Reset and Export appear on the main surface only in an error state;
+    /// otherwise they live in Advanced diagnostics.
+    static func showsRecoveryOnMainSurface(_ snapshot: AgentSnapshot) -> Bool {
+        AgentSnapshotPresenter.statusPill(snapshot).tone == .attention
+    }
+
+    /// Every string the default (collapsed) dashboard shows, in order. Used by
+    /// tests and by the text render in the PR evidence.
+    static func defaultPublicStrings(_ snapshot: AgentSnapshot, now: Date = Date()) -> [String] {
+        let pill = AgentSnapshotPresenter.statusPill(snapshot)
+        let status = AgentSnapshotPresenter.consolidatedStatus(snapshot)
+        let card = AgentSnapshotPresenter.earningsCard(snapshot, now: now)
+        var strings = ["Malibu"]
+        if let subtitle = AgentSnapshotPresenter.dashboardSubtitle(snapshot, now: now) { strings.append(subtitle) }
+        strings.append(pill.label)
+        if showsStatusNotice(snapshot) {
+            strings.append(status.meaning)
+            if let action = status.nextAction { strings.append(action) }
+        }
+        strings.append(earningsTitle)
+        strings.append(card.usdcSummary)
+        if let unpaid = card.unpaidLine { strings.append(unpaid) }
+        if let address = snapshot.payoutRegisteredAddress {
+            strings.append("Payout wallet \(PayoutWalletFlow.truncateAddress(address))")
+        }
+        strings.append(malibuTitle)
+        strings.append(contentsOf: card.malibuLines)
+        if let trust = card.trustLine { strings.append(trust) }
+        if let blocker = card.hardwareBlocker { strings.append(blocker) }
+        if let health = AgentSnapshotPresenter.macHealthLine(snapshot) {
+            strings.append(macHealthTitle)
+            strings.append(health)
+        }
+        strings.append(advancedDiagnosticsTitle)
+        return strings
+    }
+
+    static func advancedDiagnosticsStrings(_ snapshot: AgentSnapshot) -> [String] {
+        var strings = [advancedDiagnosticsTitle]
         strings.append(contentsOf: AgentSnapshotPresenter.diagnosticFindingLines(snapshot))
-        strings.append(contentsOf: logLines.map(LogTailBuffer.redacted))
-        strings.append(AgentSnapshotPresenter.modelLine(snapshot))
         strings.append(AgentSnapshotPresenter.compatibilitySetLine(snapshot))
+        strings.append(AgentSnapshotPresenter.requestsLine(snapshot))
+        strings.append(AgentSnapshotPresenter.runLine(snapshot))
+        if let failure = AgentSnapshotPresenter.currentSetupFailure(snapshot) {
+            strings.append(AgentSnapshotPresenter.lifecycleEventDisplay(failure))
+        }
+        if let update = AgentSnapshotPresenter.currentLastUpdate(snapshot) {
+            strings.append(AgentSnapshotPresenter.lastUpdateDisplay(update))
+        }
+        strings.append(contentsOf: AgentSnapshotPresenter.diagnosticChips(snapshot))
         return strings
     }
 }
@@ -108,29 +134,17 @@ private struct DashboardView: View {
     @State private var rewardActivityExpanded = false
     @ObservedObject private var modelStore = ModelManagementStore.shared
 
-    @State private var advancedDiagnosticsExpanded = true
+    // Collapsed by default (#2029): diagnostics are for support, not the
+    // provider's first read.
+    @State private var advancedDiagnosticsExpanded = false
 
     var body: some View {
         ScrollView {
         VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 12) {
-                MalibuBrandTile()
-                    .frame(width: 28, height: 28)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Malibu")
-                        .font(.system(size: 15, weight: .semibold))
-                    if let subtitle = AgentSnapshotPresenter.dashboardSubtitle(agent.snapshot) {
-                        Text(subtitle)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                    }
-                }
-                Spacer()
-                let status = AgentSnapshotPresenter.consolidatedStatus(agent.snapshot)
-                Text(status.label)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(color(for: status.tone))
+            header
+
+            if DashboardCopy.showsStatusNotice(agent.snapshot) {
+                statusNotice
             }
 
             HStack(alignment: .center, spacing: 12) {
@@ -237,216 +251,24 @@ private struct DashboardView: View {
                 .accessibilityElement(children: .contain)
             }
 
-            miningHealthPanel
+            earningsPanel
 
-            HStack(alignment: .top, spacing: 16) {
-                panel {
-                    let rewardVerdict = AgentSnapshotPresenter.rewardVerdict(agent.snapshot)
-                    Text(AgentSnapshotPresenter.usdcPeriodLabel(agent.snapshot, verdict: rewardVerdict))
-                        .font(.caption)
+            if let health = AgentSnapshotPresenter.macHealthLine(agent.snapshot) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(DashboardCopy.macHealthTitle)
+                        .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
-                    Text(AgentSnapshotPresenter.usdcTodayDisplay(agent.snapshot, verdict: rewardVerdict))
-                        .font(.system(size: 28, weight: .semibold, design: .rounded))
-                    Text(AgentSnapshotPresenter.usdcFullLine(agent.snapshot, verdict: rewardVerdict))
-                        .foregroundStyle(.secondary)
+                    Text(health)
                         .font(.callout)
-                    if let caption = AgentSnapshotPresenter.usdcAccrualCaption(agent.snapshot, verdict: rewardVerdict) {
-                        Text(caption)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                    Text(AgentSnapshotPresenter.malibuFullLine(agent.snapshot, verdict: rewardVerdict))
-                        .foregroundStyle(
-                            AgentSnapshotPresenter.malibuRewardTextColorIsLocked(rewardVerdict)
-                                ? MalibuBrand.coral
-                                : .secondary
-                        )
-                        .font(.callout)
-                    if let availability = AgentSnapshotPresenter.malibuAvailabilityLine(agent.snapshot, verdict: rewardVerdict) {
-                        Text(availability)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    if let hold = AgentSnapshotPresenter.malibuHoldLine(agent.snapshot, verdict: rewardVerdict) {
-                        Text(hold)
-                            .font(.caption)
-                            .foregroundStyle(MalibuBrand.coral)
-                    }
-                    if let backlog = AgentSnapshotPresenter.backlogLine(agent.snapshot, verdict: rewardVerdict) {
-                        Text(backlog)
-                            .font(.caption)
-                            .foregroundStyle(MalibuBrand.coral)
-                    }
-                    if let eligibility = AgentSnapshotPresenter.eligibilityLine(agent.snapshot, verdict: rewardVerdict) {
-                        Text(eligibility)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    if let address = agent.snapshot.payoutRegisteredAddress {
-                        Text("Payout wallet \(PayoutWalletFlow.truncateAddress(address))")
-                            .font(.caption.monospaced())
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                        if let pending = agent.snapshot.payoutPendingUntilUTC,
-                           let end = Self.parseUTC(pending),
-                           end > Date() {
-                            Text("Cooling off until \(end.formatted(date: .abbreviated, time: .shortened))")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    Button(agent.snapshot.payoutRegistrationInProgress
-                           ? (agent.snapshot.payoutRegistrationCanCancel
-                              ? "Waiting for wallet…"
-                              : "Registering wallet…")
-                           : (agent.snapshot.payoutRegisteredAddress == nil ? "Add wallet" : "Change wallet")) {
-                        showAddWalletSheet = true
-                    }
-                    .disabled(agent.snapshot.payoutRegistrationInProgress
-                              || agent.snapshot.localProviderID == nil)
-                    if let error = agent.snapshot.payoutLastError {
-                        Text(error)
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                            .fixedSize(horizontal: false, vertical: true)
-                    } else if let status = agent.snapshot.payoutLastStatus {
-                        Text(status == "rotated" ? "Wallet rotated." : "Wallet registered.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    RewardActivityPanel(
-                        agent: agent,
-                        isExpanded: $rewardActivityExpanded
-                    )
                 }
-
-                statsPanel {
-                    let status = AgentSnapshotPresenter.consolidatedStatus(agent.snapshot)
-                    MetricRow(title: DashboardCopy.currentStateTitle, value: status.label)
-                    MetricRow(title: DashboardCopy.meaningTitle, value: status.meaning)
-                    if let action = status.nextAction {
-                        MetricRow(title: DashboardCopy.nextActionTitle, value: action)
-                    }
-                    primaryActionButton
-                    recoveryActions
-                    DisclosureGroup("Advanced diagnostics", isExpanded: $advancedDiagnosticsExpanded) {
-                        VStack(alignment: .leading, spacing: 12) {
-                            MetricRow(title: "Running model", value: AgentSnapshotPresenter.modelLine(agent.snapshot))
-                            if let path = agent.snapshot.weightsPath {
-                                DisclosureGroup("Weights path") {
-                                    Text(path)
-                                        .font(.caption.monospaced())
-                                        .textSelection(.enabled)
-                                }
-                            } else if agent.snapshot.state == .serving || agent.snapshot.state == .paused {
-                                MetricRow(title: "Weights path", value: "Managed by provider")
-                            }
-                            MetricRow(title: "Trust tier", value: AgentSnapshotPresenter.trustLine(agent.snapshot))
-                            MetricRow(
-                                title: "Malibu app",
-                                value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Version unknown"
-                            )
-                            MetricRow(title: "Provider software", value: AgentSnapshotPresenter.compatibilitySetLine(agent.snapshot))
-                            MetricRow(title: "Customer capacity", value: AgentSnapshotPresenter.advertisedCapacityLine(agent.snapshot))
-                            if let lifecycle = AgentSnapshotPresenter.lifecycleLine(agent.snapshot) {
-                                MetricRow(title: "Provider status", value: lifecycle)
-                            }
-                            if let event = agent.snapshot.lifecycleLastRestart {
-                                MetricRow(
-                                    title: "Last restart",
-                                    value: AgentSnapshotPresenter.lifecycleEventDisplay(event)
-                                )
-                            } else {
-                                MetricRow(title: "Last restart", value: "Not recorded this session")
-                            }
-                            if let event = agent.snapshot.lifecycleLastRejection {
-                                MetricRow(
-                                    title: "Last setup failure",
-                                    value: AgentSnapshotPresenter.lifecycleEventDisplay(event)
-                                )
-                            } else {
-                                MetricRow(title: "Last setup failure", value: "None recorded")
-                            }
-                            if let event = agent.snapshot.lifecycleLastUpdate {
-                                MetricRow(
-                                    title: "Last update",
-                                    value: AgentSnapshotPresenter.lifecycleEventDisplay(event)
-                                )
-                            }
-                            if let event = agent.snapshot.lifecycleLastWatchdog {
-                                MetricRow(
-                                    title: "Last provider recovery",
-                                    value: AgentSnapshotPresenter.lifecycleEventDisplay(event)
-                                )
-                            }
-                            MetricRow(title: "Provider access", value: AgentSnapshotPresenter.credentialLine(agent.snapshot))
-                            MetricRow(title: "Network verification", value: AgentSnapshotPresenter.admissionIdentityLine(agent.snapshot))
-                            if agent.snapshot.credentialRepairInProgress
-                                || agent.snapshot.admissionIdentityRecoveryInProgress {
-                                ProgressView("Repairing provider...")
-                                    .controlSize(.small)
-                            }
-                            if let error = agent.snapshot.credentialRepairLastError {
-                                Text(error)
-                                    .font(.caption)
-                                    .foregroundStyle(.red)
-                            }
-                            if let instruction = agent.snapshot.admissionIdentityRecoveryApprovalInstruction {
-                                Text(instruction)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .textSelection(.enabled)
-                            }
-                            if let request = agent.snapshot.admissionIdentityRecoveryOperatorRequest {
-                                Text(request)
-                                    .font(.system(.caption, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                                    .textSelection(.enabled)
-                            }
-                            if let error = agent.snapshot.admissionIdentityRecoveryLastError {
-                                Text(error)
-                                    .font(.caption)
-                                    .foregroundStyle(.red)
-                            }
-                            if let status = AgentSnapshotPresenter.cliUpdateStatusLine(agent.snapshot) {
-                                Text(status)
-                                    .font(.caption)
-                                    .foregroundStyle(
-                                        agent.snapshot.cliUpdateLastError == nil
-                                            && agent.snapshot.providerSoftwareRepairLastError == nil
-                                            ? Color.secondary
-                                            : Color.red
-                                    )
-                            }
-                            ForEach(
-                                Array(AgentSnapshotPresenter.diagnosticFindingLines(agent.snapshot).enumerated()),
-                                id: \.offset
-                            ) { _, line in
-                                Text(line)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                    .textSelection(.enabled)
-                            }
-                            if !agent.logLines.isEmpty {
-                                LogTailView(lines: agent.logLines)
-                                    .frame(minHeight: 120, maxHeight: 180)
-                            }
-                            MetricRow(title: "Requests", value: AgentSnapshotPresenter.requestsLine(agent.snapshot))
-                            MetricRow(title: "Tokens", value: AgentSnapshotPresenter.tokenLine(agent.snapshot))
-                            MetricRow(title: "Current run", value: AgentSnapshotPresenter.uptimeLine(agent.snapshot))
-                            HStack(spacing: 8) {
-                                MetricChip(text: AgentSnapshotPresenter.queueChip(agent.snapshot), tone: queueTone)
-                                MetricChip(text: AgentSnapshotPresenter.thermalChip(agent.snapshot), tone: thermalTone)
-                                MetricChip(text: AgentSnapshotPresenter.gpuChip(agent.snapshot), tone: .neutral)
-                                MetricChip(text: AgentSnapshotPresenter.latencyChip(agent.snapshot), tone: .neutral)
-                            }
-                            .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-                    .accessibilityIdentifier("malibu.dashboard.advanced-diagnostics")
-                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
+                .background(panelBackground)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("\(DashboardCopy.macHealthTitle): \(health)")
             }
+
+            advancedDiagnostics
 
             if agent.snapshot.localProviderID != nil {
                 ReferralPanel(agent: agent)
@@ -487,50 +309,229 @@ private struct DashboardView: View {
         }
     }
 
-    private var miningHealthPanel: some View {
-        let rewardVerdict = AgentSnapshotPresenter.rewardVerdict(agent.snapshot)
-        let mining = AgentSnapshotPresenter.miningHealth(agent.snapshot, verdict: rewardVerdict)
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(DashboardCopy.miningHealthTitle)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Text(mining.status)
-                    .font(.callout.weight(.semibold))
-                    .foregroundStyle(miningTone(mining.reasonCode))
-                    .accessibilityIdentifier("malibu.dashboard.mining-status")
+    private var header: some View {
+        HStack(spacing: 12) {
+            MalibuBrandTile()
+                .frame(width: 28, height: 28)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Malibu")
+                    .font(.system(size: 15, weight: .semibold))
+                if let subtitle = AgentSnapshotPresenter.dashboardSubtitle(agent.snapshot) {
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                }
             }
-            VStack(alignment: .leading, spacing: 8) {
-                MetricRow(title: "Serving readiness", value: AgentSnapshotPresenter.servingReadinessLine(agent.snapshot))
-                MetricRow(title: "MALIBU earning", value: AgentSnapshotPresenter.malibuEarningLine(rewardVerdict))
-                MetricRow(title: DashboardCopy.miningReasonTitle, value: mining.reason)
-                MetricRow(title: DashboardCopy.miningRewardsTitle, value: mining.rewardSummary)
-                MetricRow(
-                    title: "MALIBU withdrawal",
-                    value: AgentSnapshotPresenter.malibuAvailabilityLine(agent.snapshot, verdict: rewardVerdict)
-                        ?? "Status unavailable"
-                )
-                MetricRow(title: DashboardCopy.miningEligibilityTitle, value: mining.trustSummary)
-                MetricRow(title: DashboardCopy.nextActionTitle, value: mining.nextAction)
+            Spacer()
+            StatusPillView(pill: AgentSnapshotPresenter.statusPill(agent.snapshot))
+        }
+    }
+
+    private var statusNotice: some View {
+        let status = AgentSnapshotPresenter.consolidatedStatus(agent.snapshot)
+        return VStack(alignment: .leading, spacing: 8) {
+            Text(status.meaning)
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+            if let action = status.nextAction {
+                Text(action)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            primaryActionButton
+            if DashboardCopy.showsRecoveryOnMainSurface(agent.snapshot) {
+                recoveryActions
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
         .background(panelBackground)
         .accessibilityElement(children: .contain)
     }
 
-    private func miningTone(_ reasonCode: String) -> Color {
-        switch reasonCode {
-        case "earning", "trusted_withdrawable":
-            return .green
-        case "idle_no_work", "eligible_waiting_settlement", "customer_availability_pending":
-            return .secondary
-        case "not_running", "provider_paused", "reward_projection_unavailable":
-            return MalibuBrand.sunnyYellow
-        default:
-            return MalibuBrand.coral
+    private var earningsPanel: some View {
+        let card = AgentSnapshotPresenter.earningsCard(agent.snapshot)
+        return VStack(alignment: .leading, spacing: 10) {
+            Text(DashboardCopy.earningsTitle)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(card.usdcSummary)
+                .font(.title3.weight(.semibold))
+                .fixedSize(horizontal: false, vertical: true)
+            if let unpaid = card.unpaidLine {
+                Text(unpaid)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+            walletRow
+            Divider()
+            Text(DashboardCopy.malibuTitle)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            ForEach(Array(card.malibuLines.enumerated()), id: \.offset) { _, line in
+                Text(line)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let trust = card.trustLine {
+                Text(trust)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("malibu.dashboard.trust-progress")
+            }
+            if let blocker = card.hardwareBlocker {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(blocker)
+                        .font(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button(DashboardCopy.exportDiagnosticsTitle) { onExportDiagnostics() }
+                }
+            }
+            RewardActivityPanel(
+                agent: agent,
+                isExpanded: $rewardActivityExpanded
+            )
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .background(panelBackground)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("malibu.dashboard.earnings")
+    }
+
+    @ViewBuilder
+    private var walletRow: some View {
+        if let address = agent.snapshot.payoutRegisteredAddress {
+            Text("Payout wallet \(PayoutWalletFlow.truncateAddress(address))")
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .help(DashboardCopy.changeWalletInSettings)
+            if let pending = agent.snapshot.payoutPendingUntilUTC,
+               let end = PayoutWalletSettingsSection.parseUTC(pending),
+               end > Date() {
+                Text("Cooling off until \(end.formatted(date: .abbreviated, time: .shortened))")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        } else {
+            Button(agent.snapshot.payoutRegistrationInProgress ? "Registering wallet…" : "Add wallet") {
+                showAddWalletSheet = true
+            }
+            .disabled(agent.snapshot.payoutRegistrationInProgress || agent.snapshot.localProviderID == nil)
+        }
+        if let error = agent.snapshot.payoutLastError {
+            Text(error)
+                .font(.caption)
+                .foregroundStyle(.red)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var advancedDiagnostics: some View {
+        DisclosureGroup(DashboardCopy.advancedDiagnosticsTitle, isExpanded: $advancedDiagnosticsExpanded) {
+            VStack(alignment: .leading, spacing: 12) {
+                MetricRow(
+                    title: "Malibu app",
+                    value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Version unknown"
+                )
+                MetricRow(title: "Provider software", value: AgentSnapshotPresenter.compatibilitySetLine(agent.snapshot))
+                MetricRow(title: "Slots", value: AgentSnapshotPresenter.advertisedCapacityLine(agent.snapshot))
+                if let lifecycle = AgentSnapshotPresenter.lifecycleLine(agent.snapshot) {
+                    MetricRow(title: "Provider status", value: lifecycle)
+                }
+                if let event = agent.snapshot.lifecycleLastRestart {
+                    MetricRow(title: "Last restart", value: AgentSnapshotPresenter.lifecycleEventDisplay(event))
+                }
+                if let event = AgentSnapshotPresenter.currentSetupFailure(agent.snapshot) {
+                    MetricRow(title: "Setup failure", value: AgentSnapshotPresenter.lifecycleEventDisplay(event))
+                }
+                if let event = AgentSnapshotPresenter.currentLastUpdate(agent.snapshot) {
+                    MetricRow(title: "Last update", value: AgentSnapshotPresenter.lastUpdateDisplay(event))
+                }
+                if let event = agent.snapshot.lifecycleLastWatchdog {
+                    MetricRow(title: "Last provider recovery", value: AgentSnapshotPresenter.lifecycleEventDisplay(event))
+                }
+                MetricRow(title: "Provider access", value: AgentSnapshotPresenter.credentialLine(agent.snapshot))
+                MetricRow(title: "Network verification", value: AgentSnapshotPresenter.admissionIdentityLine(agent.snapshot))
+                if agent.snapshot.credentialRepairInProgress
+                    || agent.snapshot.admissionIdentityRecoveryInProgress {
+                    ProgressView("Repairing provider...")
+                        .controlSize(.small)
+                }
+                if let error = agent.snapshot.credentialRepairLastError {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+                if let instruction = agent.snapshot.admissionIdentityRecoveryApprovalInstruction {
+                    Text(instruction)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                if let request = agent.snapshot.admissionIdentityRecoveryOperatorRequest {
+                    Text(request)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                if let error = agent.snapshot.admissionIdentityRecoveryLastError {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+                if let status = AgentSnapshotPresenter.cliUpdateStatusLine(agent.snapshot) {
+                    Text(status)
+                        .font(.caption)
+                        .foregroundStyle(
+                            agent.snapshot.cliUpdateLastError == nil
+                                && agent.snapshot.providerSoftwareRepairLastError == nil
+                                ? Color.secondary
+                                : Color.red
+                        )
+                }
+                ForEach(
+                    Array(AgentSnapshotPresenter.diagnosticFindingLines(agent.snapshot).enumerated()),
+                    id: \.offset
+                ) { _, line in
+                    Text(line)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
+                MetricRow(title: "Requests", value: AgentSnapshotPresenter.requestsLine(agent.snapshot))
+                MetricRow(title: "Tokens", value: AgentSnapshotPresenter.tokenLine(agent.snapshot))
+                MetricRow(title: "Current run", value: AgentSnapshotPresenter.runLine(agent.snapshot))
+                let chips = AgentSnapshotPresenter.diagnosticChips(agent.snapshot)
+                if !chips.isEmpty {
+                    HStack(spacing: 8) {
+                        ForEach(chips, id: \.self) { chip in
+                            MetricChip(text: chip, tone: chipTone(chip))
+                        }
+                    }
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+                recoveryActions
+            }
+            .padding(.top, 6)
+        }
+        .accessibilityIdentifier("malibu.dashboard.advanced-diagnostics")
+    }
+
+    private func chipTone(_ chip: String) -> MetricChip.Tone {
+        if chip.hasSuffix("queued"), (agent.snapshot.queueDepth ?? 0) > 0 { return .attention }
+        if chip.hasPrefix("Thermal"),
+           agent.snapshot.thermalState == .serious || agent.snapshot.thermalState == .critical {
+            return .attention
+        }
+        return .neutral
     }
 
     @ViewBuilder
@@ -608,71 +609,42 @@ private struct DashboardView: View {
         }
     }
 
-    @ViewBuilder
-    private func panel<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            content()
-        }
-        .frame(maxWidth: .infinity, minHeight: 250, alignment: .topLeading)
-        .padding(16)
-        .background(panelBackground)
-    }
-
-    @ViewBuilder
-    private func statsPanel<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            content()
-        }
-        .frame(maxWidth: .infinity, minHeight: 250, alignment: .topLeading)
-        .padding(16)
-        .background(panelBackground)
-    }
-
     private var panelBackground: some View {
         RoundedRectangle(cornerRadius: 8)
             .fill(Color.gray.opacity(0.08))
             .overlay(
                 RoundedRectangle(cornerRadius: 8)
-                    .strokeBorder(MalibuBrand.coral.opacity(0.25), lineWidth: 1)
+                    .strokeBorder(Color.gray.opacity(0.18), lineWidth: 1)
             )
     }
+}
 
-    private var queueTone: MetricChip.Tone {
-        (agent.snapshot.queueDepth ?? 0) > 0 ? .attention : .neutral
-    }
+/// The single status pill: colour plus a text label, never colour alone.
+private struct StatusPillView: View {
+    let pill: AgentSnapshotPresenter.StatusPill
 
-    private var thermalTone: MetricChip.Tone {
-        switch agent.snapshot.thermalState {
-        case .serious, .critical: return .attention
-        default: return .neutral
+    var body: some View {
+        HStack(spacing: 5) {
+            Circle()
+                .fill(color)
+                .frame(width: 7, height: 7)
+            Text(pill.label)
+                .font(.caption.weight(.semibold))
         }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 4)
+        .background(Capsule().fill(color.opacity(0.14)))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(pill.accessibilityLabel)
+        .accessibilityIdentifier("malibu.dashboard.status-pill")
     }
 
-    private func color(for state: AgentSnapshot.State) -> Color {
-        switch state {
-        case .serving: return .green
-        case .starting, .reconnecting: return MalibuBrand.coral
-        case .paused: return MalibuBrand.sunnyYellow
-        case .error: return .red
-        case .idle: return .secondary
-        }
-    }
-
-    private func color(for tone: AgentSnapshotPresenter.ConsolidatedStatus.Tone) -> Color {
-        switch tone {
+    private var color: Color {
+        switch pill.tone {
         case .positive: return .green
         case .neutral: return .secondary
-        case .attention: return MalibuBrand.coral
+        case .attention: return .red
         }
-    }
-
-    private static func parseUTC(_ raw: String) -> Date? {
-        let withFraction = ISO8601DateFormatter()
-        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let d = withFraction.date(from: raw) { return d }
-        let plain = ISO8601DateFormatter()
-        plain.formatOptions = [.withInternetDateTime]
-        return plain.date(from: raw)
     }
 }
 
@@ -772,7 +744,7 @@ private struct RewardActivityPanel: View {
     }
 }
 
-private struct AddWalletSheet: View {
+struct AddWalletSheet: View {
     @ObservedObject var agent: MalibuAgent
     @Binding var isPresented: Bool
     @State private var pasteAddress = ""
@@ -915,35 +887,44 @@ private struct ReferralPanel: View {
         return agent.snapshot.referralAvailability
     }
 
+    /// An unlocked balance renders as one summary line; other states keep
+    /// their headline and explanation.
+    private var summaryStatus: ReferralStatusProjection? {
+        guard availability == .available, let status, status.joinLinksEnabled,
+              status.socialState != ReferralStatusProjection.locked,
+              status.socialState != ReferralStatusProjection.revoked else { return nil }
+        return status
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Invite providers")
                         .font(.headline)
-                    Text(ReferralPanelPresenter.pathChrome)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    Text(ReferralPanelPresenter.headline(availability: availability, status: status))
-                        .font(.callout.weight(.semibold))
-                    Text(ReferralPanelPresenter.detail(availability: availability, status: status))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    if ReferralPanelPresenter.showsPathChrome(status) {
+                        Text(ReferralPanelPresenter.pathChrome)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    if let summaryStatus {
+                        Text(ReferralPanelPresenter.summary(summaryStatus))
+                            .font(.callout)
+                    } else {
+                        Text(ReferralPanelPresenter.headline(availability: availability, status: status))
+                            .font(.callout.weight(.semibold))
+                        Text(ReferralPanelPresenter.detail(availability: availability, status: status))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 Spacer()
                 if agent.snapshot.referralActionInProgress {
                     ProgressView().controlSize(.small)
                 }
-                Button("Refresh") {
-                    Task { await agent.refreshReferralStatus() }
-                }
-                .disabled(!agent.snapshot.hasTrustedReferralBoundary() || agent.snapshot.referralActionInProgress)
             }
 
             if availability == .available, let status {
-                Text(ReferralPanelPresenter.capacity(status))
-                    .font(.caption.monospacedDigit())
-
                 HStack(spacing: 8) {
                     Button("Copy private invite") {
                         guard status.isCurrent(), let invite = status.availableInviteURL else { return }
@@ -951,6 +932,9 @@ private struct ReferralPanel: View {
                         NSPasteboard.general.setString(invite.absoluteString, forType: .string)
                     }
                     .disabled(!status.isCurrent() || status.availableInviteURL == nil)
+                    .help(status.isCurrent() && status.availableInviteURL != nil
+                          ? "Copies your private invite link."
+                          : ReferralPanelPresenter.copyInviteDisabledHelp)
 
                     if status.canStartSocialChallenge,
                        agent.snapshot.localStatusCapabilities.contains("referral_advocacy_v1"),
@@ -1010,7 +994,7 @@ private struct ReferralPanel: View {
                 .fill(Color.gray.opacity(0.08))
                 .overlay(
                     RoundedRectangle(cornerRadius: 8)
-                        .strokeBorder(MalibuBrand.coral.opacity(0.25), lineWidth: 1)
+                        .strokeBorder(Color.gray.opacity(0.18), lineWidth: 1)
                 )
         )
         .task(id: agent.snapshot.localProviderID) {
@@ -1103,40 +1087,5 @@ private struct MetricChip: View {
         case .neutral: return .primary
         case .attention: return .primary
         }
-    }
-}
-
-private struct LogTailView: NSViewRepresentable {
-    let lines: [String]
-
-    func makeNSView(context: Context) -> NSScrollView {
-        let text = NSTextView()
-        text.isEditable = false
-        text.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-        text.textColor = .secondaryLabelColor
-        text.backgroundColor = .clear
-        let scroll = NSScrollView()
-        scroll.hasVerticalScroller = true
-        scroll.documentView = text
-        scroll.borderType = .lineBorder
-        return scroll
-    }
-
-    func updateNSView(_ nsView: NSScrollView, context: Context) {
-        guard let text = nsView.documentView as? NSTextView else { return }
-        let shouldStickToBottom = isNearBottom(nsView)
-        let next = lines.isEmpty ? "" : lines.joined(separator: "\n") + "\n"
-        if text.string != next {
-            text.string = next
-            if shouldStickToBottom {
-                text.scrollToEndOfDocument(nil)
-            }
-        }
-    }
-
-    private func isNearBottom(_ scroll: NSScrollView) -> Bool {
-        guard let document = scroll.documentView else { return true }
-        let visible = scroll.contentView.bounds
-        return visible.maxY >= document.bounds.height - 24
     }
 }
