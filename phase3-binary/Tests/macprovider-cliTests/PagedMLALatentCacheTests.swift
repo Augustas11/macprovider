@@ -153,8 +153,10 @@ final class PagedMLALatentCacheTests: XCTestCase {
     /// strict facade with postForwardCacheOffsetMismatch on the shared-KV
     /// source layer (expected 283, actual 284) because the padding column was
     /// written into the short row's staged copy. Each staged copy now takes
-    /// only its valid columns; checked on the CPU device (no metallib needed).
+    /// only its valid columns; checked on the CPU device. MLX still loads the
+    /// default metallib to create a stream, so hosts without one skip.
     func testPaddedVerifyColumnsWriteNothingIntoTheStagedCopy() throws {
+        try requireMetal()
         try Device.withDefaultDevice(.cpu) {
             var rng = SplitMix(seed: 9)
             let rows = [makeCache(), makeCache(), makeCache(), makeCache()]
@@ -190,6 +192,7 @@ final class PagedMLALatentCacheTests: XCTestCase {
     /// (rewind headroom) is a shorter suffix after some rejections, so the
     /// whole `state` differs there, while `observerOracleState` never does.
     func testNativeRoundsMatchOneTokenDecodeInTheObserverOracleState() throws {
+        try requireMetal()
         try Device.withDefaultDevice(.cpu) {
             var rng = SplitMix(seed: 31)
             let total = 240

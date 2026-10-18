@@ -3967,6 +3967,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     /// slots are [0]). It now hashes those arrays whole, and the digest still
     /// tells different states apart.
     func testDrafterDigestHashesAGLMLatentCacheStateWhole() throws {
+        try requireMetal()
         try Device.withDefaultDevice(.cpu) {
             func cache(_ latent: [Float]) -> GLM5NextAttentionCache {
                 let cache = GLM5NextAttentionCache(kpool: 4)
@@ -4010,6 +4011,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     /// logical slice and the same values stored contiguously agree, and one
     /// changed value in a later chunk does not.
     func testArrayDigestRecordsHashLogicalBytesAcrossChunks() throws {
+        try requireMetal()
         try Device.withDefaultDevice(.cpu) {
             let values = (0 ..< 2 * 6 * 4).map { Float($0) }
             let stored = MLXArray(values, [1, 2, 6, 4])
@@ -4178,6 +4180,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     /// numbers the rounds. The journey's extraction plus comparison holds; a
     /// dropped after-finalize record fails closed.
     func testJourneyComparisonOverBridgeNumberedObserverRecords() async throws {
+        try requireMetal()
         try await Device.withDefaultDevice(.cpu) {
             func backend() -> PagedKVSharedForwardBackend {
                 let descriptor = Self.bridgeDescriptor(blockSizeTokens: 4, maxPhysicalBlocks: 64)
