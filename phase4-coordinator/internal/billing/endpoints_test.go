@@ -1645,3 +1645,43 @@ func TestReconcileEndpointRefusesRangeBeforeRequestLogWindow(t *testing.T) {
 		t.Fatalf("in-window range: status=%d body=%s", w.Code, w.Body.String())
 	}
 }
+
+// SPEC-005 §11.4: the provider earnings read states whether payouts run and
+// when the newest payable request settled, so a client never promises a
+// payout that payout.enabled=false cannot make.
+func TestEarningsEndpointReportsPayoutStateAndLastPaidJob(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	older := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Second)
+	newer := time.Now().UTC().Add(-1 * time.Hour).Truncate(time.Second)
+	insertCredit(t, store.db, "provider-a", older, 1000)
+	insertCredit(t, store.db, "provider-a", newer, 2000)
+
+	read := func() map[string]any {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/providers/provider-a/earnings", nil)
+		req.Header.Set("Authorization", "Bearer good")
+		w := httptest.NewRecorder()
+		store.Handlers("operator", fakeTokens{"good": "provider-a"}, true, 60).ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+		}
+		var resp map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	resp := read()
+	if resp["payouts_enabled"] != false {
+		t.Fatalf("payouts_enabled=%v want false by default", resp["payouts_enabled"])
+	}
+	if got := resp["last_paid_job_at_utc"]; got != newer.Format(time.RFC3339) {
+		t.Fatalf("last_paid_job_at_utc=%v want %s", got, newer.Format(time.RFC3339))
+	}
+
+	store.SetPayoutsEnabled(true)
+	if resp := read(); resp["payouts_enabled"] != true {
+		t.Fatalf("payouts_enabled=%v want true", resp["payouts_enabled"])
+	}
+}
