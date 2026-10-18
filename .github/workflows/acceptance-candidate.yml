@@ -197,8 +197,14 @@ jobs:
 
       - name: Build candidate Malibu.app
         shell: bash
+        env:
+          TAG: ${{ steps.source.outputs.tag }}
         run: |
           set -euo pipefail
+          # SPEC-025 §3.3: the release tag stamps the app version; project.yml
+          # carries only a development default.
+          version_line="$(bash control/scripts/malibu-app-version.sh "$TAG")"
+          read -r malibu_app_version malibu_app_build <<<"$version_line"
           cd candidate/phase3-binary/app
           "$RUNNER_TEMP/xcodegen-2.45.4/xcodegen/bin/xcodegen" generate
           package_resolution_args=(archive)
@@ -216,7 +222,9 @@ jobs:
             -archivePath "$RUNNER_TEMP/Malibu.xcarchive" \
             "${package_resolution_args[@]}" \
             ARCHS=arm64 \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_ALLOWED=NO \
+            MARKETING_VERSION="$malibu_app_version" \
+            CURRENT_PROJECT_VERSION="$malibu_app_build"
           cp -R "$RUNNER_TEMP/Malibu.xcarchive/Products/Applications/Malibu.app" \
             "$RUNNER_TEMP/Malibu.app"
 
@@ -236,6 +244,15 @@ jobs:
           malibu_version="$(/usr/libexec/PlistBuddy \
             -c 'Print :CFBundleShortVersionString' \
             "$RUNNER_TEMP/Malibu.app/Contents/Info.plist")"
+          malibu_build="$(/usr/libexec/PlistBuddy \
+            -c 'Print :CFBundleVersion' \
+            "$RUNNER_TEMP/Malibu.app/Contents/Info.plist")"
+          version_line="$(bash control/scripts/malibu-app-version.sh "$TAG")"
+          read -r expected_malibu_version expected_malibu_build <<<"$version_line"
+          [[ "$malibu_version" = "$expected_malibu_version" && "$malibu_build" = "$expected_malibu_build" ]] || {
+            echo "::error::Malibu.app Info.plist reports $malibu_version/$malibu_build, expected $expected_malibu_version/$expected_malibu_build for $TAG" >&2
+            exit 1
+          }
           python3 control/scripts/compatibility-set-manifest.py validate \
             --input "$payload/compatibility-set.json" \
             --payload-directory "$payload" \

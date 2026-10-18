@@ -17,6 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var menuBar: MenuBarController!
     private var onboardingWindow: NSWindow?
     private var dashboardWindow: NSWindow?
+    private var bundleRelaunchMonitor: AppBundleRelaunchMonitor?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Log both installed versions so support can identify a partially
@@ -36,6 +37,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { @MainActor [weak self] in
             await self?.handleStartup()
         }
+        // SPEC-025 §3.3: relaunch onto the installed bundle after the
+        // CLI-owned update swaps it, instead of running stale code.
+        bundleRelaunchMonitor = AppBundleRelaunchMonitor(readiness: { [weak self] in
+            self?.bundleRelaunchReadiness ?? .blocked
+        })
+        bundleRelaunchMonitor?.start()
+    }
+
+    /// Defers a self-relaunch while the provider update/rollback transaction,
+    /// a Malibu-driven update or repair, onboarding, quit, uninstall, or a
+    /// modal prompt is in flight.
+    private var bundleRelaunchReadiness: AppBundleRelaunchWatcher.Readiness {
+        let snapshot = agent.snapshot
+        return AppBundleRelaunchWatcher.readiness(
+            lifecycleState: snapshot.lifecycleState,
+            lifecycleRecordState: snapshot.lifecycleRecordState,
+            lifecycleLeaseKind: snapshot.lifecycleLeaseKind,
+            cliUpdateInProgress: snapshot.cliUpdateInProgress,
+            providerSoftwareRepairInProgress: snapshot.providerSoftwareRepairInProgress,
+            appFlowInProgress: terminationDrain != nil
+                || uninstallTask != nil
+                || onboardingWindow != nil
+                || NSApp.modalWindow != nil
+        )
     }
 
     // SPEC-026 §7.3: browser deep-link onboarding retired.

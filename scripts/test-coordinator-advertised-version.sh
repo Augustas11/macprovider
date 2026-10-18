@@ -4,7 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source_file="$repo_root/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift"
 app_project_file="$repo_root/phase3-binary/app/project.yml"
-release_builds_file="$repo_root/phase3-binary/app/release-builds.tsv"
+app_version_helper="$repo_root/scripts/malibu-app-version.sh"
 expected_version="${1:-}"
 expected_version="${expected_version#v}"
 previous_stable_version=""
@@ -52,8 +52,8 @@ if [[ ! -f "$app_project_file" ]]; then
   echo "missing Malibu app project: $app_project_file" >&2
   exit 1
 fi
-if [[ ! -f "$release_builds_file" ]]; then
-  echo "missing Malibu release-build ledger: $release_builds_file" >&2
+if [[ ! -f "$app_version_helper" ]]; then
+  echo "missing Malibu app version helper: $app_version_helper" >&2
   exit 1
 fi
 
@@ -106,48 +106,19 @@ if [[ "$app_build_count" -ne 1 ]]; then
 fi
 app_build="$app_build_lines"
 
-python3 - "$release_builds_file" "$app_version" "$app_build" <<'PY'
-import re
-import sys
-
-ledger_path, expected_version, expected_build = sys.argv[1:]
-rows = []
-for line_number, raw in enumerate(open(ledger_path, encoding="utf-8"), 1):
-    line = raw.split("#", 1)[0].strip()
-    if not line:
-        continue
-    fields = line.split()
-    if len(fields) != 2 or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", fields[0]) or not re.fullmatch(r"[1-9][0-9]*", fields[1]):
-        raise SystemExit(f"invalid Malibu release-build ledger entry at {ledger_path}:{line_number}")
-    version = tuple(int(part) for part in fields[0].split("."))
-    rows.append((version, fields[0], int(fields[1]), line_number))
-
-if not rows:
-    raise SystemExit(f"Malibu release-build ledger is empty: {ledger_path}")
-if len({row[1] for row in rows}) != len(rows):
-    raise SystemExit(f"Malibu release-build ledger contains a duplicate version: {ledger_path}")
-if len({row[2] for row in rows}) != len(rows):
-    raise SystemExit(f"Malibu release-build ledger contains a duplicate build: {ledger_path}")
-
-ordered = sorted(rows)
-for previous, current in zip(ordered, ordered[1:]):
-    if current[2] <= previous[2]:
-        raise SystemExit(
-            f"Malibu release-build ledger is not strictly increasing: "
-            f"{previous[1]} build {previous[2]} -> {current[1]} build {current[2]}"
-        )
-
-matches = [row for row in rows if row[1] == expected_version]
-if len(matches) != 1:
-    raise SystemExit(
-        f"Malibu release-build ledger must contain exactly one entry for {expected_version}"
-    )
-if str(matches[0][2]) != expected_build:
-    raise SystemExit(
-        f"Malibu app build {expected_build} disagrees with release-build ledger "
-        f"{expected_version} build {matches[0][2]}"
-    )
-PY
+# SPEC-025 §3.3: the shipped app version is stamped from the release tag at
+# build time. project.yml keeps only the development default so a stale
+# hardcoded release version can never reach a shipped bundle again.
+if [[ "$app_version" != "0.0.0" || "$app_build" != "0" ]]; then
+  echo "project.yml must keep the development default MARKETING_VERSION \"0.0.0\" / CURRENT_PROJECT_VERSION \"0\" (found $app_version/$app_build); release builds stamp the version from the tag" >&2
+  exit 1
+fi
+stamp_line="$(bash "$app_version_helper" "v$binary_version")" || exit 1
+read -r release_app_version release_app_build <<<"$stamp_line"
+if [[ "$release_app_version" != "$binary_version" ]]; then
+  echo "Malibu app stamp $release_app_version does not match release version $binary_version" >&2
+  exit 1
+fi
 
 config_files=(
   "$repo_root/phase4-coordinator/dist/coordinator.yaml"
@@ -194,7 +165,7 @@ if [[ -n "$previous_stable_version" ]]; then
     echo "staged candidate $staged_candidate_version does not match CLI binary $binary_version" >&2
     exit 1
   fi
-  echo "CLI $binary_version is staged with previous stable coordinator recommendation $previous_stable_version; Malibu $app_version build $app_build is validated independently"
+  echo "CLI $binary_version is staged with previous stable coordinator recommendation $previous_stable_version; Malibu is stamped $release_app_version build $release_app_build from the release tag"
 else
-  echo "CLI and coordinator advertised versions are aligned at $binary_version; Malibu $app_version build $app_build is validated independently"
+  echo "CLI and coordinator advertised versions are aligned at $binary_version; Malibu is stamped $release_app_version build $release_app_build from the release tag"
 fi

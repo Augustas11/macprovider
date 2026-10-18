@@ -730,7 +730,7 @@ enum CLIUpdateRunner {
         }
     }
 
-    private static func isUpdaterOwnedMalibuInstall(_ url: URL) -> Bool {
+    static func isUpdaterOwnedMalibuInstall(_ url: URL) -> Bool {
         let standardized = url.standardizedFileURL
         let perUser = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Applications/Malibu.app", isDirectory: true)
@@ -740,7 +740,7 @@ enum CLIUpdateRunner {
         return standardized == system || standardized == perUser
     }
 
-    private static func validateMalibuAppCodeSignature(at appURL: URL) -> Bool {
+    static func validateMalibuAppCodeSignature(at appURL: URL) -> Bool {
         var staticCode: SecStaticCode?
         guard SecStaticCodeCreateWithPath(appURL as CFURL, [], &staticCode) == errSecSuccess,
               let staticCode else {
@@ -776,11 +776,67 @@ enum CLIUpdateRunner {
 
     @MainActor
     private static func defaultRelaunchUpdatedApp(_ plan: UpdatedAppRelaunchPlan) async throws {
-        guard validateMalibuAppCodeSignature(at: plan.bundleURL) else {
+        try await relaunchInstalledApp(at: plan.bundleURL)
+    }
+
+    /// SPEC-025 v0.31: a shipped app's CFBundleVersion is its version's patch.
+    static func buildMatchesVersionPatch(build: String?, version: String) -> Bool {
+        guard let build, let patch = version.split(separator: ".").last else { return false }
+        return build == String(patch)
+    }
+
+    /// True only when the installed bundle is exactly the Malibu member of the
+    /// installed CLI's release-signed compatibility set: same app version and
+    /// byte-identical embedded manifest. SPEC-025 §3.3 self-relaunch proof.
+    static func installedAppMatchesInstalledCompatibilitySet(bundleURL: URL) -> Bool {
+        guard let executable = try? installedProviderExecutableForAppProof(),
+              let expected = try? expectedAppIdentityFromInstalledProviderManifest(
+                executableURL: executable
+              ),
+              expected.compatibilityManifestBytes != nil,
+              let expectedVersion = ProviderCLIVersion.strictNormalize(expected.version),
+              let installed = readInstalledMalibuAppIdentity(at: bundleURL),
+              ProviderCLIVersion.strictNormalize(installed.version) == expectedVersion,
+              buildMatchesVersionPatch(build: installed.build, version: expectedVersion),
+              (try? validateEmbeddedCompatibilityManifest(
+                in: bundleURL,
+                expectedIdentity: expected
+              )) != nil else {
+            return false
+        }
+        return true
+    }
+
+    /// Opens the signature-verified installed bundle as a new process, then
+    /// quits this one. Quit keeps the launchd provider running.
+    @MainActor
+    static func relaunchInstalledApp(at bundleURL: URL) async throws {
+        guard validateMalibuAppCodeSignature(at: bundleURL) else {
             throw Error.appBundleSignatureInvalid
         }
-        try await openUpdatedApp(at: plan.bundleURL)
-        NSApp.terminate(nil)
+        let ownPID = ProcessInfo.processInfo.processIdentifier
+        let before = Set(
+            NSRunningApplication.runningApplications(withBundleIdentifier: "tech.malibu.app")
+                .map(\.processIdentifier)
+        )
+        try await openUpdatedApp(at: bundleURL)
+        // Quit only after the new process is actually running, so a bundle
+        // that fails to start leaves this process (and its watcher) in place.
+        let deadline = Date().addingTimeInterval(30)
+        while Date() < deadline {
+            let launched = NSRunningApplication.runningApplications(withBundleIdentifier: "tech.malibu.app")
+                .contains { app in
+                    app.processIdentifier != ownPID
+                        && !before.contains(app.processIdentifier)
+                        && !app.isTerminated
+                }
+            if launched {
+                NSApp.terminate(nil)
+                return
+            }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+        throw Error.appRelaunchFailed("the reopened Malibu did not start")
     }
 
     private static func openUpdatedApp(at bundleURL: URL) async throws {

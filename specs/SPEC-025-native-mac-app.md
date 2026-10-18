@@ -1,6 +1,8 @@
 # SPEC-025 — Native Mac App (signed `.dmg` + menu bar wrapper)
 
-Status: DRAFT v0.30.2 · Owner: @Augustas11 · Target: 2026 Q3
+Status: DRAFT v0.31.0 · Owner: @Augustas11 · Target: 2026 Q3
+
+**Change log v0.31.0 (2026-10-18, tag-stamped app version + self-relaunch after update).** Normative, §3.3: (1) the Malibu.app component version is stamped from the release tag at build time (`CFBundleShortVersionString` = tag version, `CFBundleVersion` = its positive patch `Z`). `project.yml` carries only a `0.0.0` development default, and the candidate build, the acceptance signer and published-release verification all check both values. This supersedes the v0.17 allowance for an independently versioned Malibu component, which let a stale `1.8.224` stamp ship inside release 1.8.251. (2) After the CLI-owned update swaps the installed bundle, the running Malibu process relaunches itself onto the installed bundle, once the bundle is proven to be the installed signed set's Malibu member. The CLI still never signals, quits, or launches the app process. A pre-v0.31 process picks up the first such update at its next launch.
 
 **Change log v0.30.2 (2026-10-17):** Editorial, no normative change: §5.2 notes that SPEC-020 R-4.14 v0.1.28 now defines the persisted operator-pause signal; the stall threshold, its owner and the hard-freeze cases stay deferred.
 
@@ -606,9 +608,28 @@ time (60–240 s for the first model) in the background.
   checked before mutation.
 - The compatibility-set release version names the immutable signed set and remains
   equal to its `v<release-version>` tag. `components.malibu_app.version` and
-  `components.provider_cli.version` name the actual independently versioned members;
-  they are valid semantic versions but need not equal each other or the set release
-  version for a private acceptance candidate. Coordinator admission remains bound to
+  `components.provider_cli.version` name the actual members. The provider CLI
+  component is a valid semantic version that need not equal the set release
+  version for a private acceptance candidate. The Malibu component MUST equal
+  the set release version (v0.31). Every compatibility-set build (release and
+  acceptance candidate) stamps Malibu.app from the tag `vX.Y.Z` through one
+  helper (`scripts/malibu-app-version.sh`): `CFBundleShortVersionString` =
+  `X.Y.Z` and `CFBundleVersion` = `Z`, the positive-patch contract that the
+  release trust-anchor preflight already enforces (a `vX.Y.0` tag stays
+  unreleasable until a reviewed change replaces that contract). The checked-in project carries only a `0.0.0`/`0`
+  development default, which a release-version guard keeps unchanged. The
+  candidate build, the protected acceptance signer, and published-release
+  verification each fail when the app's version or build differs from the
+  helper's values for the tag. The protected signer also binds the signed
+  manifest's `components.malibu_app.version` to the tag. Acceptance cases: a
+  stale project stamp, a wrong build with the right version, and a
+  rejected `vX.Y.0` tag.
+  `malibu-release.yml` (the legacy independent publication surface for
+  already-installed Sparkle clients) stamps the app from its own
+  `v<version>` tag with the same helper. It embeds a named CLI release's set
+  manifest, so its app version can differ from that manifest's Malibu
+  component. That surface is not a compatibility-set activation, and the
+  frozen v1.8.39 Sparkle bridge stays a separate one-time legacy artifact. Coordinator admission remains bound to
   the set release version. The set ID remains
   `<repository>:<release-tag>@<commit>`; component versions do not create parallel set
   identities.
@@ -641,6 +662,46 @@ time (60–240 s for the first model) in the background.
   otherwise.
 - The launchd CLI owns both scheduled and user-requested updates. Malibu's menu and
   dashboard invoke `malibu-cli update`; they do not download or replace artifacts.
+- Running-app continuity (v0.31). The CLI replaces the installed Malibu.app with an
+  atomic swap and MUST NOT signal, quit, or launch the Malibu process. Malibu
+  MUST notice that its installed bundle's `CFBundleShortVersionString` or
+  `CFBundleVersion` differs from the values it launched with, and relaunch onto
+  the installed bundle. Before relaunching, Malibu MUST:
+  - run from the updater-owned install path (`/Applications/Malibu.app` or
+    `~/Applications/Malibu.app`) with bundle identifier `tech.malibu.app`, so
+    development and test builds never relaunch;
+  - prove that the installed bundle matches the Malibu member of the installed
+    CLI's release-signed compatibility set: the app version equals the set's
+    `components.malibu_app.version`, its build equals that version's patch,
+    and the embedded set manifest is
+    byte-identical to the installed one. Without that proof the change is
+    mid-transaction or out-of-band, and Malibu MUST NOT relaunch;
+  - see the new identity unchanged for 60 s with a validated lifecycle record
+    (`record_state` `valid`), or for 15 minutes when the provider status is
+    unavailable or its lifecycle record is missing or invalid, because the
+    transaction may still be restarting or rolling back;
+  - defer while any of these is in flight: an `update_in_progress` or
+    `rollback_in_progress` lifecycle state, a maintenance lease, a
+    Malibu-driven update or repair, onboarding, quit, uninstall, or a modal
+    prompt;
+  - verify the installed bundle's code signature against the Malibu
+    designated requirement (the running bundle must satisfy it too, so a
+    development build copied into the install path never relaunches).
+  The relaunch opens the installed bundle as a new process and quits through
+  the ordinary quit path only after the new process is running (bounded
+  wait). The ordinary quit keeps the launchd provider service running. If the
+  new process does not start, the old process keeps running and its watcher
+  retries within the attempt bound.
+  Attempts are persisted and bounded across all targets: at least 10 minutes
+  apart and at most 3 in any 6 hours. A bundle that cannot start, or one that
+  is swapped repeatedly, therefore never loops. A rollback that restores the
+  launched version cancels the pending relaunch.
+  First hop: a Malibu process older than v0.31 has no watcher. The first update
+  onto a v0.31 app takes effect when that process next launches, either at the
+  next login (login item) or when the user reopens Malibu. The release notes of
+  the first release that ships v0.31 MUST tell operators to reopen Malibu once.
+  The release-train entry for that cut (`docs/releases/cli-release-train.md`)
+  carries the notice for the operator announcement.
   Removing the Sparkle dependency/runtime and feed settings eliminates the prior
   second update authority. Independent Malibu release publication still emits a signed
   public appcast and `latest.dmg` compatibility surface for already-installed Sparkle

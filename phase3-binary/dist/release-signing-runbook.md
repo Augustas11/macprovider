@@ -437,11 +437,8 @@ codesign --verify --strict --deep "$MALIBU_APP"
 test "$(defaults read "$MALIBU_APP/Contents/Info" CFBundleIdentifier)" = tech.malibu.app
 MALIBU_VERSION="$(defaults read "$MALIBU_APP/Contents/Info" CFBundleShortVersionString)"
 MALIBU_BUILD="$(defaults read "$MALIBU_APP/Contents/Info" CFBundleVersion)"
-awk -F '\t' -v version="$MALIBU_VERSION" -v build="$MALIBU_BUILD" \
-  '$1 == version && $2 == build { found = 1 } END { exit !found }' \
-  phase3-binary/app/release-builds.tsv
 test "v$MALIBU_VERSION" = "$TAG"
-test "$MALIBU_BUILD" = "${TAG##*.}"
+test "$MALIBU_VERSION $MALIBU_BUILD" = "$(bash scripts/malibu-app-version.sh "$TAG")"
 xcrun stapler validate "$MALIBU_APP"
 spctl -a -t exec "$MALIBU_APP"
 cmp "$HOME/macprovider/compatibility-set.json" \
@@ -489,8 +486,9 @@ Wait until the unsigned `build` job succeeds and `sign_publish` is waiting for
 the independent `production-release` environment review. Do not approve yet.
 The candidate build preflights Malibu's bundle identity, path shape, absence of
 legacy update keys, and absence of a Sparkle runtime before capturing unsigned
-inputs. Malibu remains independently versioned; the app version/build must match
-the requested `vX.Y.Z` tag as `X.Y.Z/Z`.
+inputs. The build stamps Malibu from the requested `vX.Y.Z` tag through
+`scripts/malibu-app-version.sh`, so the app version/build is `X.Y.Z/Z`
+(SPEC-025 v0.31).
 Recheck that `origin/main` is still the captured commit, create the signed
 annotated tag at that exact commit, push it, and verify the peeled remote target:
 

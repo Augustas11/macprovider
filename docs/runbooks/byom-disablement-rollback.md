@@ -63,7 +63,7 @@ CLI release containing them — they stay merged-but-unreleased.
   a new release from the prior stable tag; do **not** patch an immutable release
   in place. Follow `docs/runbooks/provider-cli-release-verification.md` (SHA
   byte-identity between the app-embedded and standalone `macprovider-cli`,
-  updater path from the previous stable, `release-builds.tsv` row). The
+  updater path from the previous stable, Malibu.app version equal to the tag). The
   fleet-updater hazard here is standard release safety, not BYOM: BYOM enables no
   earning, so a rollback loses no money-path state.
 - **Fastest partial kill without a release:** set

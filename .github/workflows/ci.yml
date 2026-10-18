@@ -646,11 +646,15 @@ jobs:
           set -euo pipefail
           cd phase3-binary/app
           "$RUNNER_TEMP/xcodegen-2.45.4/xcodegen/bin/xcodegen" generate
+          # A scratch DerivedData keeps the Debug test host out of the
+          # shared DerivedData that Launchpad indexes as an installed app.
           xcodebuild test \
             -project Malibu.xcodeproj \
             -scheme Malibu \
             -configuration Debug \
-            -destination 'platform=macOS'
+            -destination 'platform=macOS' \
+            -derivedDataPath "$RUNNER_TEMP/MalibuTestDerivedData"
+          rm -rf "$RUNNER_TEMP/MalibuTestDerivedData"
 
       - name: Verify macOS upgrade rollback and manual process recovery
         run: bash phase3-binary/dist/test/install_upgrade_evidence_rollback.test.sh

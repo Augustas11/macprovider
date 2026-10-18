@@ -492,6 +492,35 @@ if [ -n "$app_expected_sha" ]; then
   app_path="$app_mount_dir/Malibu.app"
   [ -d "$app_path" ] || die "$app_asset does not contain Malibu.app"
   [ -x "$app_path/Contents/MacOS/macprovider-cli" ] || die "Malibu.app lacks executable bundled macprovider-cli"
+  # SPEC-025 §3.3: the shipped app is stamped from the release tag.
+  [ ! -L "$app_path" ] && [ -d "$app_path/Contents" ] && [ ! -L "$app_path/Contents" ] ||
+    die "Malibu.app bundle or Contents is a symlink"
+  app_expected_stamp="$(bash "$SCRIPT_DIR/malibu-app-version.sh" "$RELEASE_TAG")" ||
+    die "release tag $RELEASE_TAG has no Malibu.app version stamp"
+  app_bundle_stamp="$(python3 -c '
+import os, plistlib, stat, sys
+path = sys.argv[1]
+try:
+    if not stat.S_ISREG(os.lstat(path).st_mode):
+        raise SystemExit(1)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as handle:
+        info = plistlib.load(handle)
+except SystemExit:
+    raise
+except Exception:
+    raise SystemExit(1)
+if not isinstance(info, dict) or info.get("CFBundleIdentifier") != "tech.malibu.app":
+    raise SystemExit(1)
+version = info.get("CFBundleShortVersionString")
+build = info.get("CFBundleVersion")
+if not isinstance(version, str) or not isinstance(build, str) or " " in version or " " in build:
+    raise SystemExit(1)
+print(version + " " + build)
+' "$app_path/Contents/Info.plist")" || die "Malibu.app Info.plist is not a regular tech.malibu.app plist with version and build"
+  [ "$app_bundle_stamp" = "$app_expected_stamp" ] ||
+    die "Malibu.app version/build $app_bundle_stamp does not match release tag $RELEASE_TAG ($app_expected_stamp)"
+  log "Malibu.app version matches release tag: $app_bundle_stamp"
   app_tar_payload_dir="$tmpdir/app-tar-payload"
   mkdir -p "$app_tar_payload_dir"
   tar -xzf "$tarball_path" -C "$app_tar_payload_dir" macprovider-cli || die "provider tarball lacks macprovider-cli"

@@ -201,6 +201,16 @@ app_root_count="$(find "$app_work" -mindepth 1 -maxdepth 1 -print | wc -l | tr -
   die "Malibu archive must contain exactly one Malibu.app root"
 app="$app_work/Malibu.app"
 [[ -d "$app/Contents/MacOS" && -d "$app/Contents/Resources" ]] || die "Malibu.app structure is invalid"
+# SPEC-025 §3.3: the protected signer independently binds the app stamp to
+# the tag before any signature is produced.
+app_info="$app/Contents/Info.plist"
+[[ -f "$app_info" && ! -L "$app_info" ]] || die "Malibu.app Info.plist is absent or unsafe"
+app_expected_stamp="$(bash "$root/scripts/malibu-app-version.sh" "$tag")" ||
+  die "tag has no Malibu.app version stamp"
+app_actual_stamp="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app_info") $(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app_info")" ||
+  die "Malibu.app Info.plist lacks version or build"
+[[ "$app_actual_stamp" == "$app_expected_stamp" ]] ||
+  die "Malibu.app version/build $app_actual_stamp does not match $tag ($app_expected_stamp)"
 
 python3 "$metadata" validate-provider-payload --directory "$cli_work"
 # The provider payload stays at exactly nine catalog names. Reconstruct the
@@ -232,6 +242,7 @@ python3 "$compatibility" validate \
   --payload-directory "$cli_work" \
   --expected-tag "$tag" \
   --expected-commit "$candidate_commit" \
+  --expected-malibu-app-version "${app_expected_stamp%% *}" \
   --expected-provider-admission-policy "$provider_admission_policy"
 python3 "$compatibility" sign \
   --input "$cli_work/compatibility-set.json" \
@@ -244,6 +255,7 @@ python3 "$compatibility" validate \
   --public-key "$release_public_key" \
   --expected-tag "$tag" \
   --expected-commit "$candidate_commit" \
+  --expected-malibu-app-version "${app_expected_stamp%% *}" \
   --expected-provider-admission-policy "$provider_admission_policy" \
   --openssl "$openssl_bin"
 

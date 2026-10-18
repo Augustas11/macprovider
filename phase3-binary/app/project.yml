@@ -23,8 +23,12 @@ settings:
     SWIFT_VERSION: "5.9"
     ENABLE_HARDENED_RUNTIME: YES
     CODE_SIGN_STYLE: Manual
-    MARKETING_VERSION: "1.8.224"
-    CURRENT_PROJECT_VERSION: "224"
+    # Development default only. Release, candidate, and independent Malibu
+    # builds override both from the release tag via
+    # scripts/malibu-app-version.sh (SPEC-025 §3.3); a shipped app never
+    # carries these values.
+    MARKETING_VERSION: "0.0.0"
+    CURRENT_PROJECT_VERSION: "0"
     OTHER_SWIFT_FLAGS: "-strict-concurrency=complete"
 
 targets:

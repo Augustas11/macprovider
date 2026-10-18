@@ -253,26 +253,9 @@ jobs:
         run: |
           set -euo pipefail
           tag="${{ steps.release_source.outputs.tag }}"
-          version="${tag#v}"
-          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-            echo "::error::release tag does not contain a semantic Malibu version: $tag" >&2
-            exit 1
-          }
-          build="$(awk -v version="$version" '
-            $0 !~ /^[[:space:]]*#/ && NF >= 2 && $1 == version {
-              count += 1
-              value = $2
-            }
-            END {
-              if (count != 1 || value !~ /^[0-9]+$/) {
-                exit 1
-              }
-              print value
-            }
-          ' phase3-binary/app/release-builds.tsv)" || {
-            echo "::error::phase3-binary/app/release-builds.tsv must contain exactly one numeric build for Malibu $version" >&2
-            exit 1
-          }
+          # SPEC-025 §3.3: the release tag stamps the app version and build.
+          version_line="$(bash scripts/malibu-app-version.sh "$tag")"
+          read -r version build <<<"$version_line"
           cd phase3-binary/app
           "$RUNNER_TEMP/xcodegen-2.45.4/xcodegen/bin/xcodegen" generate
           xcodebuild \
@@ -874,6 +857,7 @@ jobs:
             --payload-directory "$WORK" \
             --expected-tag "$tag" \
             --expected-commit "${{ needs.build.outputs.commit }}" \
+            --expected-malibu-app-version "${tag#v}" \
             --expected-provider-admission-policy "$PROVIDER_ADMISSION_POLICY_INPUT"
           python3 scripts/compatibility-set-manifest.py sign \
             --input "$WORK/compatibility-set.json" \
@@ -885,6 +869,7 @@ jobs:
             --public-key ops/pearl-updater/release-signing-public.pem \
             --expected-tag "$tag" \
             --expected-commit "${{ needs.build.outputs.commit }}" \
+            --expected-malibu-app-version "${tag#v}" \
             --expected-provider-admission-policy "$PROVIDER_ADMISSION_POLICY_INPUT"
           cp "$WORK/compatibility-set.json" phase3-binary/dist/compatibility-set.json
           rm -f "$COMPATIBILITY_SIGNING_KEY"
@@ -1048,22 +1033,8 @@ jobs:
             exit 1
           fi
           test -d "$APP"
-          version="${tag#v}"
-          build="$(awk -v version="$version" '
-            $0 !~ /^[[:space:]]*#/ && NF >= 2 && $1 == version {
-              count += 1
-              value = $2
-            }
-            END {
-              if (count != 1 || value !~ /^[0-9]+$/) {
-                exit 1
-              }
-              print value
-            }
-          ' phase3-binary/app/release-builds.tsv)" || {
-            echo "::error::phase3-binary/app/release-builds.tsv must contain exactly one numeric build for Malibu $version" >&2
-            exit 1
-          }
+          version_line="$(bash scripts/malibu-app-version.sh "$tag")"
+          read -r version build <<<"$version_line"
           actual_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
           actual_build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Contents/Info.plist")"
           [[ "$actual_version" = "$version" && "$actual_build" = "$build" ]] || {
@@ -1709,6 +1680,7 @@ jobs:
             --public-key ops/pearl-updater/release-signing-public.pem \
             --expected-tag "$tag" \
             --expected-commit "${{ needs.build.outputs.commit }}" \
+            --expected-malibu-app-version "${tag#v}" \
             --expected-provider-admission-policy "$PROVIDER_ADMISSION_POLICY_INPUT"
           release_assets+=("$compatibility_manifest")
           rm -rf "$compatibility_extract"
