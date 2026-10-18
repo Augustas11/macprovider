@@ -120,7 +120,7 @@
     {
       "spec_id": "SPEC-005",
       "title": "Billing, Settlement, and Provider Rewards",
-      "version": "0.6.24",
+      "version": "0.6.25",
       "path": "specs/SPEC-005-billing.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -594,7 +594,7 @@
     {
       "spec_id": "SPEC-021",
       "title": "MALIBU rewards emission ledger",
-      "version": "0.4.1",
+      "version": "0.5.0",
       "path": "specs/SPEC-021-malibu-emission-ledger.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -724,8 +724,8 @@
     },
     {
       "spec_id": "SPEC-025",
-      "title": "Native Mac App (signed `.dmg` + menu bar wrapper)",
-      "version": "v0.31.0",
+      "title": "Native Mac App (signed `.dmg`, native Mac app with menu-bar presence)",
+      "version": "v0.32.0",
       "path": "specs/SPEC-025-native-mac-app.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -8354,6 +8354,36 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/929",
         "rationale": "SPEC-021 v0.4 reasserts separation from buyer debit, USDC payout readiness, and settlement ledgers; implementation and regression tests are not yet mapped."
+      }
+    },
+    {
+      "requirement_id": "SPEC-021-R011",
+      "spec_id": "SPEC-021",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2029",
+        "rationale": "SPEC-021 v0.5.0 adds live vs retained hold reasons, trust_progress and emission to the provider read model; unit and integration tests exist but conformance fragments are not yet mapped."
+      }
+    },
+    {
+      "requirement_id": "SPEC-021-R012",
+      "spec_id": "SPEC-021",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2029",
+        "rationale": "SPEC-021 v0.5.0 forbids provider copy that implies a release of held MALIBU; Malibu app copy tests exist but conformance fragments are not yet mapped."
       }
     },
     {
