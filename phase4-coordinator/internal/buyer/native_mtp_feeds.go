@@ -420,3 +420,54 @@ func (s *Server) handleNativeMTPRevocations(w http.ResponseWriter, r *http.Reque
 		s.log.Warn().Err(err).Msg("write native-MTP revocation feed failed")
 	}
 }
+
+// LoadPreviousNativeMTPFeeds loads the native-MTP admission set each retained
+// compatible-previous release directory carries, newest first, verified
+// exactly as the current release's set (same file names as the configured
+// paths, bound to that release's own verified candidate catalog). A release
+// directory without the set is skipped; one whose set fails verification is
+// skipped and reported, never blocking boot. The coordinator rebuilds the
+// canary's compatible-previous bank from it after a restart (SPEC-031-R033).
+func LoadPreviousNativeMTPFeeds(cfg config.AutotuneFeedsConfig) ([]NativeMTPFeeds, []error) {
+	if strings.TrimSpace(cfg.NativeMTPAdmissionPath) == "" {
+		return nil, nil
+	}
+	dirs, err := PreviousAutotuneReleaseTargets(cfg)
+	if err != nil {
+		return nil, []error{err}
+	}
+	keyring, err := cfg.DecodePublicKeyring()
+	if err != nil {
+		return nil, []error{err}
+	}
+	var out []NativeMTPFeeds
+	var errs []error
+	for _, dir := range dirs {
+		if _, statErr := os.Stat(filepath.Join(dir, filepath.Base(cfg.NativeMTPAdmissionPath))); statErr != nil {
+			continue
+		}
+		releaseCfg := cfg
+		releaseCfg.DemandRankPath, releaseCfg.DemandRankSigPath = "", ""
+		releaseCfg.AutotuneCandidatesPath = filepath.Join(dir, "autotune-candidates.json")
+		releaseCfg.AutotuneCandidatesSigPath = releaseCfg.AutotuneCandidatesPath + ".sig"
+		feeds, err := LoadPreviousAutotuneCandidateFeed(releaseCfg)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("verify %s: %w", dir, err))
+			continue
+		}
+		releaseCfg.NativeMTPAdmissionPath = filepath.Join(dir, filepath.Base(cfg.NativeMTPAdmissionPath))
+		releaseCfg.NativeMTPAdmissionSigPath = filepath.Join(dir, filepath.Base(cfg.NativeMTPAdmissionSigPath))
+		releaseCfg.NativeMTPArtifactManifestPath = filepath.Join(dir, filepath.Base(cfg.NativeMTPArtifactManifestPath))
+		releaseCfg.NativeMTPSelftestBankPath = filepath.Join(dir, filepath.Base(cfg.NativeMTPSelftestBankPath))
+		releaseCfg.NativeMTPSelftestBankSigPath = filepath.Join(dir, filepath.Base(cfg.NativeMTPSelftestBankSigPath))
+		releaseCfg.NativeMTPRevocationsDir = filepath.Join(dir, filepath.Base(cfg.NativeMTPRevocationsDir))
+		candidates := loadedAutotuneFeed{jsonBytes: feeds.AutotuneCandidatesJSON, sigBytes: feeds.AutotuneCandidatesSig, verification: feeds.AutotuneCandidatesVerification}
+		set, err := loadNativeMTPFeeds(releaseCfg, keyring, candidates)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("verify %s native-MTP set: %w", dir, err))
+			continue
+		}
+		out = append(out, set)
+	}
+	return out, errs
+}

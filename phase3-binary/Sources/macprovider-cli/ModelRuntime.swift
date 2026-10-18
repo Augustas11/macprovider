@@ -1540,6 +1540,57 @@ actor ModelRuntime: ModelRuntimeServing {
     func setNativeMTPDisabledStatusReasonForTest(_ reason: NativeMTPStatusReason) {
         currentNativeMTPStatusSink.adopt(NativeMTPStatusSink.disabled(resetGeneration: 1, reason: reason))
     }
+
+    /// Publishes a tuple offer as a passed self-check would, without a model.
+    /// The tuple is bound to a revocation feed signer, as a sidecar binds it;
+    /// tests drive that feed through the injectable poller and reader.
+    func installNativeMTPTupleOfferForTest(_ offer: NativeMTPPublishedTupleOffer) {
+        currentNativeMTPTupleOffer = offer
+        parkedNativeMTPTuple = nil
+        currentNativeMTPRevocationRefresh = NativeMTPRevocationRefreshInputs(
+            signerKeyID: "test-revocation-signer",
+            trustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring(publicKeysByKeyID: [:], requiredKeyID: "test-revocation-signer"),
+            tupleSHA256: offer.nativeMTPAdmissionTupleSHA256,
+            servedSnapshotID: offer.servedSnapshotID,
+            targetGeneration: offer.targetGeneration
+        )
+    }
+
+    func nativeMTPTupleIsParkedForTest() -> Bool {
+        parkedNativeMTPTuple != nil
+    }
+
+    func nativeMTPRevocationWatcherActiveForTest() -> Bool {
+        nativeMTPRevocationRefreshTask != nil
+    }
+
+    func setNativeMTPRevocationPollerForTest(_ poller: @escaping NativeMTPRevocationPoller) {
+        nativeMTPRevocationPoller = poller
+    }
+
+    func setNativeMTPRevokedSetReaderForTest(_ reader: @escaping NativeMTPRevokedSetReader) {
+        nativeMTPRevokedSetReader = reader
+    }
+
+    /// Runs after the scheduler fence inside `disableNativeMTPTuple`, so a test
+    /// can interleave a load or swap at that suspension point.
+    func setNativeMTPTupleFenceHookForTest(_ hook: (@Sendable () async -> Void)?) {
+        nativeMTPTupleFenceHookForTest = hook
+    }
+
+    /// Runs after the scheduler re-enable inside `restoreParkedNativeMTPTuple`,
+    /// so a test can revoke or interleave at that suspension point.
+    /// A load or warm swap as the runtime sees it: the published tuple is
+    /// cleared and the spec-decode generation advances.
+    func simulateNativeMTPTupleSwapForTest() {
+        parkedNativeMTPTuple = nil
+        currentNativeMTPTupleOffer = nil
+        currentSpecDecodeGeneration += 1
+    }
+
+    func setNativeMTPTupleEnableHookForTest(_ hook: (@Sendable () async -> Void)?) {
+        nativeMTPTupleEnableHookForTest = hook
+    }
     #endif
 
     private static func nativeMTPStatusReason(for selectorReason: NativeMTPSelectorReason) -> NativeMTPStatusReason {
@@ -1668,10 +1719,33 @@ actor ModelRuntime: ModelRuntimeServing {
     private var currentNativeMTPCapability: NativeMTPCapability?
     private var currentNativeMTPAdmissionCapability: NativeMTPAdmissionCapability?
     private var currentNativeMTPStatusSink = NativeMTPStatusSink.disabled()
-    private var currentNativeMTPTupleOffer: NativeMTPPublishedTupleOffer?
+    private var currentNativeMTPTupleOffer: NativeMTPPublishedTupleOffer? {
+        didSet { nativeMTPPublishedTupleOffer.set(currentNativeMTPTupleOffer, generation: currentSpecDecodeGeneration) }
+    }
+    /// The published tuple and spec-decode generation, readable without an
+    /// actor hop: the coordinator client checks it immediately before it
+    /// sends an offer, with no suspension in between.
+    nonisolated let nativeMTPPublishedTupleOffer = NativeMTPPublishedTupleOfferBox()
     private var currentNativeMTPSelfTestInput: NativeMTPSelfTestInput?
     private var currentNativeVisionProfile: NativeVisionProfile?
     private var nativeMTPRevocationRefreshTask: Task<Void, Never>?
+    private var currentNativeMTPRevocationRefresh: NativeMTPRevocationRefreshInputs?
+    /// A tuple the coordinator rejected with `bank_mismatch`, fenced but kept
+    /// so it can be offered again without a model reload (SPEC-048-R016
+    /// v0.1.48). Cleared by every load, swap, and teardown.
+    private var parkedNativeMTPTuple: ParkedNativeMTPTuple?
+    /// Told when a parked tuple is discarded because it was revoked or
+    /// disabled while parked, so the coordinator client drops its re-offer.
+    private var nativeMTPParkedTupleDiscardHandler: (@Sendable (NativeMTPPublishedTupleOffer) async -> Void)?
+    private var nativeMTPRevocationPoller: NativeMTPRevocationPoller = ModelRuntime.liveNativeMTPRevocationPoller
+    private var nativeMTPRevokedSetReader: NativeMTPRevokedSetReader = ModelRuntime.liveNativeMTPRevokedSetReader
+    /// A restore is between its first check and publication; a second
+    /// restore of the same tuple is refused meanwhile.
+    private var nativeMTPRestoreInFlight = false
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    private var nativeMTPTupleFenceHookForTest: (@Sendable () async -> Void)?
+    private var nativeMTPTupleEnableHookForTest: (@Sendable () async -> Void)?
+    #endif
     private var nativeMTPStatusResetGeneration: UInt64 = 0
     private let configuredDraftModelID: String?
     private let configuredDraftModelLoadPath: String?
@@ -1685,7 +1759,9 @@ actor ModelRuntime: ModelRuntimeServing {
     private let configuredNativeMTPRevokedTupleSHA256: Set<String>?
     private let configuredNativeMTPResolvedArtifactAuthority: NativeMTPResolvedArtifactAuthority?
     private let nativeMTPSelfTestRunner: NativeMTPSelfTestRunner
-    private var currentSpecDecodeGeneration = 0
+    private var currentSpecDecodeGeneration = 0 {
+        didSet { nativeMTPPublishedTupleOffer.set(currentNativeMTPTupleOffer, generation: currentSpecDecodeGeneration) }
+    }
     private let numDraftTokens: Int
     private let stopTokenFilter: StopTokenFilter
     private var currentModelHash: String?
@@ -3324,12 +3400,14 @@ maxTokens: 1,
             self.currentNativeMTPAdmissionCapability = nativeMTPLoad.admissionCapability
             self.currentNativeMTPCapability = nil
             self.currentNativeMTPTupleOffer = nil
+            self.parkedNativeMTPTuple = nil
             self.currentNativeMTPSelfTestInput = nativeMTPLoad.selfTestInput
         } else {
             self.currentNativeMTPDrafterContainer = nil
             self.currentNativeMTPAdmissionCapability = nil
             self.currentNativeMTPCapability = nil
             self.currentNativeMTPTupleOffer = nil
+            self.parkedNativeMTPTuple = nil
             self.currentNativeMTPSelfTestInput = nil
         }
         publishNativeMTPStatusSink(
@@ -3990,8 +4068,17 @@ maxTokens: 1,
               offer.nativeMTPAdmissionTupleSHA256 == admissionTupleSHA256,
               offer.servedSnapshotID == servedSnapshotID,
               offer.targetGeneration == targetGeneration else {
+            // A tuple parked after `bank_mismatch` is fenced already; a
+            // revocation or any other disable discards it (SPEC-048-R016).
+            if let parked = parkedNativeMTPTuple,
+               parked.offer.nativeMTPAdmissionTupleSHA256 == admissionTupleSHA256,
+               parked.offer.servedSnapshotID == servedSnapshotID,
+               parked.offer.targetGeneration == targetGeneration {
+                await discardParkedNativeMTPTuple(reason: reason)
+            }
             return
         }
+        let specDecodeGeneration = currentSpecDecodeGeneration
         stopNativeMTPRevocationRefresh()
         let fence = NativeMTPTupleFence(
             admissionTupleSHA256: admissionTupleSHA256,
@@ -3999,15 +4086,205 @@ maxTokens: 1,
             targetGeneration: targetGeneration
         )
         await continuousBatchScheduler?.disableNativeMTPTuple(fence)
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        if let hook = nativeMTPTupleFenceHookForTest {
+            await hook()
+        }
+        #endif
+        // A load or swap that ran while the fence was applied owns the
+        // runtime now: its tuple is not this one and must not be cleared.
+        guard currentSpecDecodeGeneration == specDecodeGeneration,
+              currentNativeMTPTupleOffer == offer else {
+            return
+        }
         currentNativeMTPCapability = nil
         currentNativeMTPAdmissionCapability = nil
         currentNativeMTPTupleOffer = nil
         currentNativeMTPSelfTestInput = nil
         currentNativeMTPDrafterContainer = nil
+        parkedNativeMTPTuple = nil
         currentNativeMTPStatusSink.adopt(NativeMTPStatusSink.disabled(
             resetGeneration: UInt64(max(0, currentSpecDecodeGeneration)),
             reason: reason
         ))
+    }
+
+    private struct ParkedNativeMTPTuple {
+        let offer: NativeMTPPublishedTupleOffer
+        let capability: NativeMTPCapability?
+        let admissionCapability: NativeMTPAdmissionCapability?
+        let drafterContainer: MTPDrafterContainer?
+        let selfTestInput: NativeMTPSelfTestInput?
+        let revocationRefresh: NativeMTPRevocationRefreshInputs?
+        let specDecodeGeneration: Int
+    }
+
+    /// SPEC-048-R016 (v0.1.48): a coordinator `bank_mismatch` fences the tuple
+    /// like any disable (queued native rows fail, active rows finish
+    /// ordinary), but keeps the qualified load so the provider can offer the
+    /// same tuple again on a new session or a coordinator bank change. Returns
+    /// whether the tuple was parked.
+    @discardableResult
+    func parkNativeMTPTupleForReoffer(
+        admissionTupleSHA256: String,
+        servedSnapshotID: String,
+        targetGeneration: UInt64
+    ) async -> Bool {
+        guard let offer = currentNativeMTPTupleOffer,
+              offer.nativeMTPAdmissionTupleSHA256 == admissionTupleSHA256,
+              offer.servedSnapshotID == servedSnapshotID,
+              offer.targetGeneration == targetGeneration else {
+            return false
+        }
+        let parked = ParkedNativeMTPTuple(
+            offer: offer,
+            capability: currentNativeMTPCapability,
+            admissionCapability: currentNativeMTPAdmissionCapability,
+            drafterContainer: currentNativeMTPDrafterContainer,
+            selfTestInput: currentNativeMTPSelfTestInput,
+            revocationRefresh: currentNativeMTPRevocationRefresh,
+            specDecodeGeneration: currentSpecDecodeGeneration
+        )
+        await disableNativeMTPTuple(
+            admissionTupleSHA256: admissionTupleSHA256,
+            servedSnapshotID: servedSnapshotID,
+            targetGeneration: targetGeneration,
+            reason: .tupleNotAdmitted
+        )
+        // A load or swap that ran while the fence was applied owns the
+        // runtime now; the parked tuple belongs to the replaced one.
+        guard currentSpecDecodeGeneration == parked.specDecodeGeneration,
+              currentNativeMTPTupleOffer == nil else {
+            return false
+        }
+        parkedNativeMTPTuple = parked
+        // Parking never pauses revocation: the watcher keeps polling for the
+        // parked tuple, and a feed naming it discards it (SPEC-048-R016).
+        if let revocationRefresh = parked.revocationRefresh {
+            startNativeMTPRevocationRefresh(revocationRefresh)
+        }
+        return true
+    }
+
+    /// Registers the coordinator client's hook for a parked tuple discarded
+    /// by a revocation or another disable while it waited for a re-offer.
+    func setNativeMTPParkedTupleDiscardHandler(_ handler: (@Sendable (NativeMTPPublishedTupleOffer) async -> Void)?) {
+        nativeMTPParkedTupleDiscardHandler = handler
+    }
+
+    private func discardParkedNativeMTPTuple(reason: NativeMTPStatusReason) async {
+        guard let parked = parkedNativeMTPTuple else { return }
+        parkedNativeMTPTuple = nil
+        stopNativeMTPRevocationRefresh()
+        currentNativeMTPStatusSink.adopt(NativeMTPStatusSink.disabled(
+            resetGeneration: UInt64(max(0, currentSpecDecodeGeneration)),
+            reason: reason
+        ))
+        FileHandle.standardError.write(Data(
+            "event=native_mtp_tuple_offer action=discarded reason=\(reason.rawValue) target_generation=\(parked.offer.targetGeneration)\n".utf8
+        ))
+        await nativeMTPParkedTupleDiscardHandler?(parked.offer)
+    }
+
+    /// Restores the parked tuple for a re-offer: lifts its scheduler fence and
+    /// republishes the qualified capability, exactly the state a fresh load
+    /// reaches after its self-check, with revocation polling resumed.
+    ///
+    /// The tuple stays parked (and so under its revocation watch) until the
+    /// moment it is published: a revocation at any suspension below discards
+    /// it and the restore then re-fences and gives up. The latest revocation
+    /// state (network first, else the last-known verified feed,
+    /// SPEC-048-R014) is read before the fence is lifted and again after, and
+    /// publication follows the final identity and revocation check with no
+    /// suspension in between. A revoked tuple is discarded; with no verified
+    /// state at all the tuple stays parked and fenced (fail closed).
+    func restoreParkedNativeMTPTuple(_ offer: NativeMTPPublishedTupleOffer) async -> NativeMTPTupleRestoreOutcome {
+        guard nativeMTPRestoreInFlight == false,
+              let parked = parkedNativeMTPTuple,
+              parked.offer == offer,
+              currentNativeMTPTupleOffer == nil,
+              parked.specDecodeGeneration == currentSpecDecodeGeneration else {
+            return .gone
+        }
+        guard let revocation = parked.revocationRefresh else {
+            return .revocationUnavailable
+        }
+        nativeMTPRestoreInFlight = true
+        defer { nativeMTPRestoreInFlight = false }
+        let fence = NativeMTPTupleFence(
+            admissionTupleSHA256: offer.nativeMTPAdmissionTupleSHA256,
+            servedSnapshotID: offer.servedSnapshotID,
+            targetGeneration: offer.targetGeneration
+        )
+        let firstCheck = await nativeMTPRestoreRevocationCheck(offer, revocation)
+        guard firstCheck == .restored else { return firstCheck }
+
+        await continuousBatchScheduler?.enableNativeMTPTuple(fence)
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        if let hook = nativeMTPTupleEnableHookForTest {
+            await hook()
+        }
+        #endif
+        // Final check after the fence was lifted: identity, then a fresh
+        // verified revocation read. Nothing suspends between it and
+        // publication, so a revocation lands either before (refused) or
+        // after (the restarted watcher disables the published tuple).
+        let finalCheck = await nativeMTPRestoreRevocationCheck(offer, revocation)
+        guard finalCheck == .restored else {
+            await continuousBatchScheduler?.disableNativeMTPTuple(fence)
+            return finalCheck
+        }
+        parkedNativeMTPTuple = nil
+        currentNativeMTPCapability = parked.capability
+        currentNativeMTPAdmissionCapability = parked.admissionCapability
+        currentNativeMTPDrafterContainer = parked.drafterContainer
+        currentNativeMTPSelfTestInput = parked.selfTestInput
+        currentNativeMTPTupleOffer = parked.offer
+        startNativeMTPRevocationRefresh(revocation)
+        publishNativeMTPStatusSink(
+            capability: parked.capability,
+            admissionCapability: parked.admissionCapability,
+            reasonIfDisabled: .tupleNotAdmitted
+        )
+        return .restored
+    }
+
+    /// One restore-time check: reads the newest verified revocation state,
+    /// then confirms the same tuple is still parked and nothing replaced it.
+    /// `.restored` means "may proceed"; a revoked tuple is discarded.
+    private func nativeMTPRestoreRevocationCheck(
+        _ offer: NativeMTPPublishedTupleOffer,
+        _ revocation: NativeMTPRevocationRefreshInputs
+    ) async -> NativeMTPTupleRestoreOutcome {
+        let revoked: Set<String>
+        do {
+            revoked = try await nativeMTPRevokedSetReader(revocation.signerKeyID, revocation.trustedKeyring)
+        } catch {
+            FileHandle.standardError.write(Data(
+                "event=native_mtp_tuple_offer action=restore_refused reason=revocation_state_unavailable\n".utf8
+            ))
+            return .revocationUnavailable
+        }
+        // The read suspended: a load, swap or revocation may have run.
+        guard let current = parkedNativeMTPTuple,
+              current.offer == offer,
+              currentNativeMTPTupleOffer == nil,
+              current.specDecodeGeneration == currentSpecDecodeGeneration else {
+            return .gone
+        }
+        if revoked.contains(revocation.tupleSHA256) {
+            await discardParkedNativeMTPTuple(reason: .tupleRevoked)
+            return .revoked
+        }
+        return .restored
+    }
+
+    struct NativeMTPRevocationRefreshInputs: Sendable {
+        let signerKeyID: String
+        let trustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring
+        let tupleSHA256: String
+        let servedSnapshotID: String
+        let targetGeneration: UInt64
     }
 
     private func startNativeMTPRevocationRefresh(load: NativeMTPRuntimeLoadResult) {
@@ -4016,40 +4293,84 @@ maxTokens: 1,
               let trustedKeyring = load.revocationTrustedKeyring else {
             return
         }
-        let tupleSHA256 = load.admissionCapability.tupleSHA256
-        let servedSnapshotID = load.servedSnapshotID
-        let targetGeneration = load.selfTestInput.servedSnapshot?.generation ?? 0
-        let verifier = NativeMTPRevocationEd25519Verifier(publicKeysByKeyID: trustedKeyring.publicKeysByKeyID)
-        let store = KeychainNativeMTPRevocationStore.live()
+        startNativeMTPRevocationRefresh(NativeMTPRevocationRefreshInputs(
+            signerKeyID: signerKeyID,
+            trustedKeyring: trustedKeyring,
+            tupleSHA256: load.admissionCapability.tupleSHA256,
+            servedSnapshotID: load.servedSnapshotID,
+            targetGeneration: load.selfTestInput.servedSnapshot?.generation ?? 0
+        ))
+    }
+
+    private func startNativeMTPRevocationRefresh(_ inputs: NativeMTPRevocationRefreshInputs) {
+        stopNativeMTPRevocationRefresh()
+        currentNativeMTPRevocationRefresh = inputs
+        let tupleSHA256 = inputs.tupleSHA256
+        let servedSnapshotID = inputs.servedSnapshotID
+        let targetGeneration = inputs.targetGeneration
+        let poller = nativeMTPRevocationPoller
         // SPEC-048-R014 (v0.1.32): only a feed naming the tuple disables it.
-        // A stale or unreachable feed revokes nothing; polling resumes.
-        nativeMTPRevocationRefreshTask = Task { [weak self] in
-            while !Task.isCancelled {
-                let revoked = RevokedFlag()
-                await NativeMTPRevocationFeedManager.pollWhileActive(
-                    pinnedSignerKeyID: signerKeyID,
-                    tupleSHA256: tupleSHA256,
-                    verifier: verifier,
-                    store: store
-                ) { _ in
-                    revoked.set()
-                    await self?.disableNativeMTPTuple(
-                        admissionTupleSHA256: tupleSHA256,
-                        servedSnapshotID: servedSnapshotID,
-                        targetGeneration: targetGeneration
-                    )
-                } onUnavailable: {
-                    FileHandle.standardError.write(Data(
-                        "event=native_mtp_revocation_feed action=unavailable effect=none\n".utf8
-                    ))
-                }
-                if revoked.isSet || Task.isCancelled { return }
-                try? await Task.sleep(nanoseconds: UInt64(NativeMTPRevocationFeedManager.refreshIntervalSeconds * 1_000_000_000))
-            }
+        // A stale or unreachable feed revokes nothing; polling resumes. The
+        // disable reaches a current tuple and a parked one alike.
+        let onRevoked: @Sendable () async -> Void = { [weak self] in
+            await self?.disableNativeMTPTuple(
+                admissionTupleSHA256: tupleSHA256,
+                servedSnapshotID: servedSnapshotID,
+                targetGeneration: targetGeneration
+            )
+        }
+        nativeMTPRevocationRefreshTask = Task {
+            await poller(inputs, onRevoked)
         }
     }
 
-    private final class RevokedFlag: @unchecked Sendable {
+    /// Polls the revocation feed for one tuple until it is revoked (calling
+    /// `onRevoked` once) or the task is cancelled.
+    typealias NativeMTPRevocationPoller = @Sendable (
+        NativeMTPRevocationRefreshInputs,
+        _ onRevoked: @escaping @Sendable () async -> Void
+    ) async -> Void
+
+    /// The revoked admission-tuple set of the newest verified feed: network
+    /// first, else the last-known verified feed; throws when neither exists.
+    typealias NativeMTPRevokedSetReader = @Sendable (
+        _ signerKeyID: String,
+        _ trustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring
+    ) async throws -> Set<String>
+
+    static let liveNativeMTPRevocationPoller: NativeMTPRevocationPoller = { inputs, onRevoked in
+        let verifier = NativeMTPRevocationEd25519Verifier(publicKeysByKeyID: inputs.trustedKeyring.publicKeysByKeyID)
+        let store = KeychainNativeMTPRevocationStore.live()
+        while !Task.isCancelled {
+            let revoked = RevokedFlag()
+            await NativeMTPRevocationFeedManager.pollWhileActive(
+                pinnedSignerKeyID: inputs.signerKeyID,
+                tupleSHA256: inputs.tupleSHA256,
+                verifier: verifier,
+                store: store
+            ) { _ in
+                revoked.set()
+                await onRevoked()
+            } onUnavailable: {
+                FileHandle.standardError.write(Data(
+                    "event=native_mtp_revocation_feed action=unavailable effect=none\n".utf8
+                ))
+            }
+            if revoked.isSet || Task.isCancelled { return }
+            try? await Task.sleep(nanoseconds: UInt64(NativeMTPRevocationFeedManager.refreshIntervalSeconds * 1_000_000_000))
+        }
+    }
+
+    static let liveNativeMTPRevokedSetReader: NativeMTPRevokedSetReader = { signerKeyID, trustedKeyring in
+        let state = try await NativeMTPRevocationFeedManager.loadNetworkFirst(
+            pinnedSignerKeyID: signerKeyID,
+            verifier: NativeMTPRevocationEd25519Verifier(publicKeysByKeyID: trustedKeyring.publicKeysByKeyID),
+            store: KeychainNativeMTPRevocationStore.live()
+        )
+        return state.feed.revokedSet
+    }
+
+    final class RevokedFlag: @unchecked Sendable {
         private let lock = NSLock()
         private var value = false
         func set() { lock.lock(); value = true; lock.unlock() }
@@ -4059,6 +4380,7 @@ maxTokens: 1,
     private func stopNativeMTPRevocationRefresh() {
         nativeMTPRevocationRefreshTask?.cancel()
         nativeMTPRevocationRefreshTask = nil
+        currentNativeMTPRevocationRefresh = nil
     }
 
     private func executeNativeMTPSelfTest(
@@ -6094,6 +6416,7 @@ maxTokens: 1,
         currentNativeMTPCapability = nil
         currentNativeMTPAdmissionCapability = nil
         currentNativeMTPTupleOffer = nil
+        parkedNativeMTPTuple = nil
         currentSpecDecodeGeneration += 1
         await rebuildContinuousBatchScheduler(container: container)
         if continuousBatchScheduler == nil {

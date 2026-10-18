@@ -2502,6 +2502,13 @@ actor ContinuousBatchScheduler {
         ensurePump()
     }
 
+    /// Lifts the fence of a tuple the runtime re-admits after a coordinator
+    /// `bank_mismatch` (SPEC-048-R016 v0.1.48). Rows already moved to ordinary
+    /// decode stay ordinary; only later requests may take native MTP again.
+    func enableNativeMTPTuple(_ fence: NativeMTPTupleFence) {
+        disabledNativeMTPTupleFences.remove(fence)
+    }
+
     func drain() async throws -> ContinuousBatchDrainPermit {
         guard !cleanupFailedClosed else {
             throw ContinuousBatchSchedulerError.unsupported(

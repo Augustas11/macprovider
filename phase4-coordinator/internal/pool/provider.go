@@ -3443,12 +3443,36 @@ func (r *Registry) ApplyStateUpdate(providerID, assignedID string, update StateU
 }
 
 func (r *Registry) SetNativeMTPTupleOffer(providerID, assignedID string, update NativeMTPTupleOfferUpdate) (Provider, bool) {
+	return r.SetNativeMTPTupleOfferGuarded(providerID, assignedID, update, func(store func()) { store() })
+}
+
+// SetNativeMTPTupleOfferGuarded is SetNativeMTPTupleOffer whose store runs
+// inside guard, under the registry lock: guard calls store only when the
+// offer may still be admitted, so the admission check and the store are one
+// step against a concurrent release publication. False when the session is
+// not active or guard did not store.
+func (r *Registry) SetNativeMTPTupleOfferGuarded(providerID, assignedID string, update NativeMTPTupleOfferUpdate, guard func(store func())) (Provider, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	p := r.providers[providerID]
 	if p == nil || p.AssignedID != assignedID {
 		return Provider{}, false
 	}
+	stored := false
+	guard(func() {
+		r.storeNativeMTPTupleOfferLocked(p, update)
+		stored = true
+	})
+	if !stored {
+		return Provider{}, false
+	}
+	cp := *p
+	cp.conn = nil
+	cp.NativeMTPCanary = cloneNativeMTPCanaryDiagnostics(p.NativeMTPCanary)
+	return cp, true
+}
+
+func (r *Registry) storeNativeMTPTupleOfferLocked(p *Provider, update NativeMTPTupleOfferUpdate) {
 	at := update.OfferedAt
 	if at.IsZero() {
 		at = time.Now().UTC()
@@ -3479,10 +3503,6 @@ func (r *Registry) SetNativeMTPTupleOffer(providerID, assignedID string, update 
 		ProposalDepth:                 update.ProposalDepth,
 		OfferedAt:                     at.UTC(),
 	}
-	cp := *p
-	cp.conn = nil
-	cp.NativeMTPCanary = cloneNativeMTPCanaryDiagnostics(p.NativeMTPCanary)
-	return cp, true
 }
 
 func (r *Registry) UpdateNativeMTPCanaryStatus(providerID, assignedID, runtimeTupleSHA256 string, update NativeMTPCanaryStatusUpdate) bool {

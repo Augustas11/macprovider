@@ -159,6 +159,9 @@ func validateAutotuneRelease(configPath, configOverlay, dir, previousTarget stri
 	if err := validateAutotuneRuntimeEconomics(feeds, cfg); err != nil {
 		fail("autotune runtime economics: %v", err)
 	}
+	if err := ws.ValidateNativeMTPCanaryReleaseBank(cfg.Pool.NativeMTPCanary, feeds.NativeMTP.ReleaseID, feeds.NativeMTP.SelftestBankJSON, feeds.NativeMTP.SelftestBankSig); err != nil {
+		fail("native MTP canary bank: %v", err)
+	}
 	for _, o := range opts {
 		validatePricingRelease(&r, o, configPath, configOverlay, cfg, feeds)
 	}
