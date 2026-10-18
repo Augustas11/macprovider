@@ -650,6 +650,81 @@ enum ContinuousBatchingSelfCheck {
         max(1, min(ownerPinned ?? decision.slots, decision.verifiedSlots, maxRows))
     }
 
+    /// SPEC-038 FR-CB10 item 3 (v0.3.22): a check with no stored decision on
+    /// its key that has been due this long without an idle window runs under
+    /// an admission hold.
+    static let admissionHoldAfterSeconds: Double = 120
+    /// The longest the check itself runs under one hold (the drain before it
+    /// is bounded by the drain timeout); an unfinished ladder resumes at the
+    /// next hold, no sooner than `admissionHoldAfterSeconds` later.
+    static let admissionHoldCheckSeconds: Double = 300
+
+    static func admissionHoldDue(dueSince: Date, notBefore: Date, after: Double, now: Date) -> Bool {
+        now >= notBefore && now.timeIntervalSince(dueSince) >= after
+    }
+
+    enum AdmissionHoldOutcome: Equatable {
+        /// The hold did not start: a lifecycle lease, a pause, a drain, or a
+        /// provider that is not serving.
+        case skipped(reason: String)
+        /// In-flight requests did not finish within the drain timeout; none
+        /// was cancelled and the check did not run.
+        case drainTimeout
+        /// The check stored a decision.
+        case completed
+        /// The check ran but yielded (its bound, a pause or a drain) or failed;
+        /// completed widths persist and the ladder resumes later.
+        case yielded
+
+        var label: String {
+            switch self {
+            case .skipped: return "skipped"
+            case .drainTimeout: return "drain_timeout"
+            case .completed: return "completed"
+            case .yielded: return "yielded"
+            }
+        }
+    }
+
+    /// SPEC-038 FR-CB10 item 3 (v0.3.22): stop admitting new requests, let
+    /// the in-flight ones finish (bounded by the drain timeout; none is
+    /// cancelled or dropped), run `check`, then re-open admission. Never
+    /// starts under a lifecycle lease, an operator pause or a drain; a pause or
+    /// drain that begins later keeps its state when the hold ends. `check`
+    /// returns whether it stored a decision.
+    static func runUnderAdmissionHold(
+        providerStatus: ProviderStatus,
+        drainSeconds: Int,
+        lifecycleLease: String?,
+        context: String,
+        log: @Sendable (String) -> Void,
+        check: @Sendable () async -> Bool
+    ) async -> AdmissionHoldOutcome {
+        var refusal = lifecycleLease.map { "lifecycle_lease_\($0)" }
+        if refusal == nil { refusal = await providerStatus.beginSelfCheckAdmissionHold() }
+        if let refusal {
+            await providerStatus.noteSelfCheckAdmissionHoldSkipped(reason: refusal)
+            log("event=cb_self_check action=admission_hold_skipped reason=\(refusal) \(context)")
+            return .skipped(reason: refusal)
+        }
+        let startedAt = Date()
+        log("event=cb_self_check action=admission_hold_start in_flight=\(await providerStatus.requestsInFlightCount()) drain_timeout_s=\(drainSeconds) \(context)")
+        let drainDeadline = startedAt.addingTimeInterval(TimeInterval(max(0, drainSeconds)))
+        while await providerStatus.requestsInFlightCount() > 0, Date() < drainDeadline, !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        let outcome: AdmissionHoldOutcome
+        if await providerStatus.requestsInFlightCount() > 0 || Task.isCancelled {
+            outcome = .drainTimeout
+        } else {
+            log("event=cb_self_check action=admission_hold_drained drain_s=\(String(format: "%.1f", Date().timeIntervalSince(startedAt)))")
+            outcome = await check() ? .completed : .yielded
+        }
+        await providerStatus.endSelfCheckAdmissionHold(outcome: outcome.label)
+        log("event=cb_self_check action=admission_hold_end outcome=\(outcome.label) held_s=\(Int(Date().timeIntervalSince(startedAt))) \(context)")
+        return outcome
+    }
+
     /// Wait before the next attempt after `deferrals` consecutive yields to
     /// traffic: doubling from `base`, at most 15 minutes. Progress is kept, so
     /// a busy Mac still finishes one step per idle window.
@@ -951,8 +1026,22 @@ actor ContinuousBatchingSelfCheckDriver {
     private let idleSeconds: Double
     private let pollSeconds: Double
     private let log: @Sendable (String) -> Void
+    /// SPEC-038 FR-CB10 item 3 (v0.3.22): a check due this long without an
+    /// idle window runs under an admission hold.
+    private let admissionHoldAfterSeconds: Double
+    /// Bounds a hold's drain; the provider's configured drain timeout.
+    private let admissionHoldDrainSeconds: Int
+    /// Bounds the check under one hold; an unfinished ladder resumes later.
+    private let admissionHoldCheckSeconds: Double
+    /// A valid lifecycle (maintenance or startup) lease, if one is held.
+    private let lifecycleLease: @Sendable () -> String?
     private var deferrals = 0
     private var nextAttemptAt = Date.distantPast
+    /// When the check for this key first found no stored decision.
+    private var checkDueSince: (key: ContinuousBatchingSelfCheckKey, at: Date)?
+    private var admissionHoldNotBefore = Date.distantPast
+    /// Set while a step runs under an admission hold: past it the step yields.
+    private var admissionHoldDeadline: Date?
     /// The width whose probe the previous attempt saw refused with
     /// backpressure, for that target only; any other outcome clears it.
     private var backpressureRefusal: (target: ContinuousBatchingSelfCheckTarget, slots: Int)?
@@ -967,6 +1056,10 @@ actor ContinuousBatchingSelfCheckDriver {
         provisional: Provisional? = nil,
         idleSeconds: Double = 10,
         pollSeconds: Double = 5,
+        admissionHoldAfterSeconds: Double = ContinuousBatchingSelfCheck.admissionHoldAfterSeconds,
+        admissionHoldDrainSeconds: Int = 30,
+        admissionHoldCheckSeconds: Double = ContinuousBatchingSelfCheck.admissionHoldCheckSeconds,
+        lifecycleLease: @escaping @Sendable () -> String? = { nil },
         log: @escaping @Sendable (String) -> Void
     ) {
         self.runtime = runtime
@@ -976,6 +1069,10 @@ actor ContinuousBatchingSelfCheckDriver {
         self.provisional = provisional
         self.idleSeconds = idleSeconds
         self.pollSeconds = max(0.1, pollSeconds)
+        self.admissionHoldAfterSeconds = max(0, admissionHoldAfterSeconds)
+        self.admissionHoldDrainSeconds = max(0, admissionHoldDrainSeconds)
+        self.admissionHoldCheckSeconds = max(1, admissionHoldCheckSeconds)
+        self.lifecycleLease = lifecycleLease
         self.log = log
     }
 
@@ -1001,6 +1098,7 @@ actor ContinuousBatchingSelfCheckDriver {
                 continue
             }
             if let record, let decision = record.decision {
+                checkDueSince = nil
                 if pending { await apply(decision, target: target, source: "stored") }
                 let bound = ContinuousBatchingSelfCheck.ladderUpperBound(
                     target: target, ownerPinned: ownerPinnedSlots, crashedSlots: record.crashedSlots
@@ -1021,8 +1119,54 @@ actor ContinuousBatchingSelfCheckDriver {
                     source: "prior_grant"
                 )
             }
-            guard Date() >= nextAttemptAt, await isIdle() else { continue }
-            await measure(target, remeasureOf: nil)
+            if checkDueSince?.key != target.key { checkDueSince = (target.key, Date()) }
+            if Date() >= nextAttemptAt, await isIdle() {
+                await measure(target, remeasureOf: nil)
+                continue
+            }
+            // A busy Mac never finds an idle window under steady traffic: once
+            // the check has been due long enough, hold admission and run it.
+            if let due = checkDueSince,
+               ContinuousBatchingSelfCheck.admissionHoldDue(
+                dueSince: due.at, notBefore: admissionHoldNotBefore, after: admissionHoldAfterSeconds, now: Date()
+               ) {
+                await measureUnderAdmissionHold(target, dueSeconds: Date().timeIntervalSince(due.at))
+            }
+        }
+    }
+
+    /// SPEC-038 FR-CB10 item 3 (v0.3.22): the check under an admission hold
+    /// (`ContinuousBatchingSelfCheck.runUnderAdmissionHold`). A prior grant
+    /// keeps serving until the check decides; holds are at least
+    /// `admissionHoldAfterSeconds` apart.
+    private func measureUnderAdmissionHold(_ target: ContinuousBatchingSelfCheckTarget, dueSeconds: Double) async {
+        admissionHoldNotBefore = Date().addingTimeInterval(admissionHoldAfterSeconds)
+        _ = await ContinuousBatchingSelfCheck.runUnderAdmissionHold(
+            providerStatus: providerStatus,
+            drainSeconds: admissionHoldDrainSeconds,
+            lifecycleLease: lifecycleLease(),
+            context: "due_s=\(Int(dueSeconds)) model_sha256=\(target.key.modelSHA256)",
+            log: log
+        ) {
+            await self.measureWithinAdmissionHold(target)
+        }
+    }
+
+    /// The check under a hold: bounded by `admissionHoldCheckSeconds`, after
+    /// which the step yields and the ladder resumes at the next hold.
+    private func measureWithinAdmissionHold(_ target: ContinuousBatchingSelfCheckTarget) async -> Bool {
+        admissionHoldDeadline = Date().addingTimeInterval(admissionHoldCheckSeconds)
+        await measure(target, remeasureOf: nil)
+        admissionHoldDeadline = nil
+        let record = store.record(for: target.key)
+        return record?.decision != nil && record?.inProgressSlots == nil
+    }
+
+    private static func deferralReason(_ error: Error) -> String {
+        switch error {
+        case StepError.admissionHoldEnded: return "admission_hold_ended"
+        case is StepError: return "request_in_flight"
+        default: return "step_failed error=\(String(describing: error).prefix(200))"
         }
     }
 
@@ -1036,20 +1180,30 @@ actor ContinuousBatchingSelfCheckDriver {
 
     private enum StepError: Error {
         case yielded
+        /// An admission hold ran out, or a pause or drain began during it.
+        case admissionHoldEnded
         /// The exactness probe at this width could not run its full shape.
         case probeShapeUnmet(slots: Int)
     }
 
-    /// Runs `body` and cancels it as soon as a request is in flight.
+    /// Runs `body` and cancels it as soon as a request is in flight, or, under
+    /// an admission hold, once the hold's check bound passes or the provider
+    /// leaves ready/busy (an operator pause or a drain).
     private func yieldingToRequests<T: Sendable>(
         _ body: @escaping @Sendable () async throws -> T
     ) async throws -> T {
         let providerStatus = providerStatus
+        let holdDeadline = admissionHoldDeadline
         return try await withThrowingTaskGroup(of: T?.self) { group in
             group.addTask { try await body() }
             group.addTask {
                 while !Task.isCancelled {
-                    if await providerStatus.snapshot().requestsInFlight > 0 { throw StepError.yielded }
+                    let snapshot = await providerStatus.snapshot()
+                    if snapshot.requestsInFlight > 0 { throw StepError.yielded }
+                    if let holdDeadline,
+                       Date() >= holdDeadline || !(snapshot.status == .ready || snapshot.status == .busy) {
+                        throw StepError.admissionHoldEnded
+                    }
                     try await Task.sleep(nanoseconds: 100_000_000)
                 }
                 return nil
@@ -1348,7 +1502,7 @@ actor ContinuousBatchingSelfCheckDriver {
             if previous == nil, await runtime.continuousBatchingSelfCheckState() == .pending {
                 await report(decision: "deferred", target: target)
             }
-            log("event=cb_self_check action=deferred deferrals=\(deferrals) retry_in_s=\(Int(wait)) reason=\(error is StepError ? "request_in_flight" : "step_failed error=\(String(describing: error).prefix(200))")")
+            log("event=cb_self_check action=deferred deferrals=\(deferrals) retry_in_s=\(Int(wait)) reason=\(Self.deferralReason(error))")
         }
     }
 

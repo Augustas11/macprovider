@@ -13,6 +13,40 @@ enum ProviderHealthState: String, Sendable {
     case unavailable
 }
 
+/// Why `ProviderStatus.admitRequest` admitted or refused a request.
+enum ProviderRequestAdmission: Sendable, Equatable {
+    case admitted(Date)
+    case pausedOrDraining
+    /// SPEC-038 FR-CB10 item 3 (v0.3.22): retryable; no inference ran.
+    case selfCheckAdmissionHold
+}
+
+/// SPEC-038 FR-CB10 item 3 (v0.3.22): the self-check admission hold, as
+/// `/v1/status` `continuous_batching.self_check_admission_hold` reports it.
+struct ContinuousBatchingAdmissionHoldStatus: Sendable, Equatable {
+    var active = false
+    var startedAt: Date?
+    var holdsTotal = 0
+    var lastOutcome: String?
+    var lastEndedAt: Date?
+    var lastSkipReason: String?
+    var lastSkippedAt: Date?
+
+    var jsonObject: [String: Any] {
+        let formatter = ISO8601DateFormatter()
+        func date(_ value: Date?) -> Any { value.map { formatter.string(from: $0) as Any } ?? NSNull() }
+        return [
+            "active": active,
+            "started_at": date(startedAt),
+            "holds_total": holdsTotal,
+            "last_outcome": lastOutcome.map { $0 as Any } ?? NSNull(),
+            "last_ended_at": date(lastEndedAt),
+            "last_skip_reason": lastSkipReason.map { $0 as Any } ?? NSNull(),
+            "last_skipped_at": date(lastSkippedAt),
+        ]
+    }
+}
+
 enum ProviderMemoryPressure: String, Sendable {
     case normal
     case warning
@@ -420,9 +454,11 @@ struct ProviderSnapshot: Sendable {
     var restartCount7d: Int? = nil
     /// Start of the since-last window that requestsServedSinceLast covers.
     var windowStartedAt: Date? = nil
+    /// SPEC-038 FR-CB10 item 3 (v0.3.22): the self-check admission hold.
+    var cbSelfCheckAdmissionHold: ContinuousBatchingAdmissionHoldStatus? = nil
 
     var slotsFree: Int {
-        if thermallyThrottled { return 0 }
+        if thermallyThrottled || cbSelfCheckAdmissionHold?.active == true { return 0 }
         return max(0, capacity.maxConcurrency - requestsInFlight)
     }
 
@@ -539,6 +575,7 @@ actor ProviderStatus {
     private var recommendedBinaryVersion: String?
     private var catalogCompatibilityConfirmed = false
     private var activeRequestIDs = Set<String>()
+    private var cbAdmissionHold = ContinuousBatchingAdmissionHoldStatus()
     private let thermalGate: ThermalGate?
     private let memoryPressureProvider: MemoryPressureProviding
     private let workloadTelemetryProvider: ProviderWorkloadTelemetryProviding
@@ -655,9 +692,57 @@ actor ProviderStatus {
     /// Requests admitted before the transition remain counted and are drained;
     /// requests racing after it are rejected without entering the runtime.
     func beginRequestIfAccepting(requestID: String? = nil) async -> Date? {
-        guard status != .draining, status != .unavailable else { return nil }
-        return await beginRequest(requestID: requestID)
+        if case .admitted(let startedAt) = await admitRequest(requestID: requestID) { return startedAt }
+        return nil
     }
+
+    /// `beginRequestIfAccepting`, naming why a request was refused: a pause or
+    /// drain, or the SPEC-038 FR-CB10 self-check admission hold (a retryable
+    /// queue-pressure refusal). The check and the in-flight count move
+    /// together, so a request either counts toward a hold's drain or is refused.
+    func admitRequest(requestID: String? = nil) async -> ProviderRequestAdmission {
+        guard status != .draining, status != .unavailable else { return .pausedOrDraining }
+        guard !cbAdmissionHold.active else { return .selfCheckAdmissionHold }
+        return .admitted(await beginRequest(requestID: requestID))
+    }
+
+    func requestsInFlightCount() -> Int { requestsInFlight }
+
+    /// SPEC-038 FR-CB10 item 3 (v0.3.22): stop admitting new requests so a due
+    /// self-check can run. In-flight requests are not touched; the caller
+    /// waits for them. Refused (returns the reason) while an operator pause
+    /// holds, the provider is draining, unavailable or degraded, or a hold is
+    /// already active. Routing sees the provider busy with no free slot.
+    func beginSelfCheckAdmissionHold() async -> String? {
+        guard !operatorPauseFence else { return "operator_paused" }
+        guard modelLoaded, status == .ready || status == .busy else { return "provider_\(status.rawValue)" }
+        guard !cbAdmissionHold.active else { return "already_held" }
+        cbAdmissionHold.active = true
+        cbAdmissionHold.startedAt = Date()
+        cbAdmissionHold.holdsTotal += 1
+        await refreshAvailabilityState()
+        return nil
+    }
+
+    /// Ends the hold and re-opens admission. A pause or drain that began
+    /// during the hold keeps its state: only a ready/busy provider is
+    /// re-published as available.
+    func endSelfCheckAdmissionHold(outcome: String) async {
+        guard cbAdmissionHold.active else { return }
+        cbAdmissionHold.active = false
+        cbAdmissionHold.startedAt = nil
+        cbAdmissionHold.lastOutcome = outcome
+        cbAdmissionHold.lastEndedAt = Date()
+        await refreshAvailabilityState()
+    }
+
+    /// Records a due hold that did not start (pause, drain or lifecycle lease).
+    func noteSelfCheckAdmissionHoldSkipped(reason: String) {
+        cbAdmissionHold.lastSkipReason = reason
+        cbAdmissionHold.lastSkippedAt = Date()
+    }
+
+    func selfCheckAdmissionHoldStatus() -> ContinuousBatchingAdmissionHoldStatus { cbAdmissionHold }
 
     func finishRequest(startedAt: Date, completion: CompletionResult?, failed: Bool, requestID: String? = nil) async {
         noteRealRequestEnd()
@@ -897,7 +982,7 @@ actor ProviderStatus {
         let specAcceptanceRate = specDecodeWindowDraftedTokens > 0
             ? Double(specDecodeWindowAcceptedTokens) / Double(specDecodeWindowDraftedTokens)
             : nil
-        let effectiveStatus: ProviderHealthState = (throttled && (status == .ready || status == .busy)) ? .busy : status
+        let effectiveStatus: ProviderHealthState = ((throttled || cbAdmissionHold.active) && (status == .ready || status == .busy)) ? .busy : status
         let snapshot = ProviderSnapshot(
             status: effectiveStatus,
             modelID: modelID,
@@ -951,7 +1036,8 @@ actor ProviderStatus {
             transitionAt: transitionAt,
             transitionReason: transitionReason,
             restartCount7d: Self.restarts(recentRestartsAt, within: Self.recentRestartWindow, of: Date()).count,
-            windowStartedAt: windowStartedAt
+            windowStartedAt: windowStartedAt,
+            cbSelfCheckAdmissionHold: cbAdmissionHold
         )
         if resetWindow {
             windowStartedAt = Date()
@@ -984,14 +1070,15 @@ actor ProviderStatus {
         guard status == .ready || status == .busy else {
             return
         }
-        let capacityFull = requestsInFlight >= capacity.maxConcurrency
+        let held = cbAdmissionHold.active
+        let capacityFull = held || requestsInFlight >= capacity.maxConcurrency
         let nextState: ProviderHealthState = capacityFull ? .busy : .ready
         let reason = lastObservedThermalThrottle
             ? "thermal_throttled"
-            : (capacityFull ? "request_capacity_full" : "request_capacity_available")
+            : (held ? "cb_self_check_admission_hold" : (capacityFull ? "request_capacity_full" : "request_capacity_available"))
         let stateChanged = transition(to: nextState, reason: reason)
         let emittedState = lastObservedThermalThrottle ? .busy : nextState
-        let slotsFree = lastObservedThermalThrottle ? 0 : max(0, capacity.maxConcurrency - requestsInFlight)
+        let slotsFree = (lastObservedThermalThrottle || held) ? 0 : max(0, capacity.maxConcurrency - requestsInFlight)
         let baselineSlotsFree = pendingRequestCapacitySlotsFree ?? lastPublishedRequestCapacitySlotsFree
         let baselineSlotsTotal = pendingRequestCapacitySlotsTotal ?? lastPublishedRequestCapacitySlotsTotal
         let slotsChanged = baselineSlotsFree != slotsFree
