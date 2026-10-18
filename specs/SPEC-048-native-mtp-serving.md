@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.47
+**Version:** 0.1.48
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.47",
+  "version": "0.1.48",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -1313,7 +1313,17 @@ only (it must follow `issued_at`); an admitted model keeps native MTP past the
 date, and revocation is the off switch. A stale or unreachable revocation
 feed keeps the last-known verified revocations (0.1.31); with no feed ever
 verified, nothing is revoked. The provider keeps polling and disables the
-tuple only when a verified feed names it. Before 0.1.30: sidecars and
+tuple only when a verified feed names it. **(0.1.48)** A tuple parked after a
+coordinator `bank_mismatch` (MTP-16) stays under the same revocation watch; a
+verified feed naming it discards it. Before a parked tuple is restored, the
+provider reads the newest verified revocation state (network first, else the
+last-known verified feed): a tuple it names is discarded, and with no
+verified state at all the tuple stays parked and fenced, so a restore fails
+closed where a fresh load would not. The tuple stays parked, and so under its
+revocation watch, until the moment it is published: the state is read again
+after the scheduler fence is lifted, and publication follows that final
+identity and revocation check with no suspension in between; a revocation
+at any earlier point discards the tuple and the restore re-fences it. Before 0.1.30: sidecars and
 serving-journey results expire after 90 days. Renewal creates a new immutable release/sidecar, reruns the local
 self-test and signed serving journey, the 30-minute sustained cell, ordinary
 and MTP parity sample, and post-gateway eligibility sample. The full matrix may
@@ -1584,6 +1594,30 @@ buyer capacity. A mismatch, timeout, expired result, unsupported-path fallback,
 or ordinary/classic execution disables only the exact native-MTP tuple and
 preserves provider readiness and ordinary/classic routing.
 
+**(0.1.48) Tuple offer and re-offer.** The provider offers a tuple that passed
+its self-check (`native_mtp_tuple_offer_v1`) once per coordinator session;
+an identical offer is not repeated in that session. A coordinator
+`bank_mismatch` disable says the canary does not hold the challenge bank the
+provider qualified on, not that the tuple failed: the provider fences the
+tuple exactly as for any disable (no further native-MTP rows for it), but
+keeps its qualified load instead of discarding it. It offers that same tuple
+again, restoring it to the state a fresh load reaches after its self-check,
+only on (1) a new coordinator session, at most once per session, or (2) the
+coordinator's served self-test bank becoming the bank the provider offers,
+at most once per session and observed bank. While a tuple waits, the
+provider reads the served bank's digest at most every 60 seconds, doubling
+to 15 minutes. The re-offer carries the original self-check result; the
+provider re-runs the self-check only when its own bank changes, which
+arrives with a new release's admission set and so with a new tuple load. A
+load, warm swap, revocation, or any other disable reason discards the
+parked tuple. Parking never pauses revocation: the parked tuple keeps its
+revocation watch, and a restore first re-reads the revocation state (R014).
+The rejection is bound to the coordinator session it arrived on and the
+offer dedupe is per session, so a disconnect racing either never consumes
+or suppresses the next session's re-offer; a disable or park that suspends
+while a load or swap installs a new tuple never clears the new one. No other
+event re-offers, so repeated rejections never loop.
+
 Neither path may use buyer data or emit usage, receipt, billing, reward,
 settlement, or payout activity. Every actual-path/counter/state value is
 provider-authored operational regression evidence under a cooperative released-
@@ -1713,6 +1747,19 @@ the text-only path without image inputs; that does not admit multimodal buyer
 requests.
 
 ## 9. Changelog and history
+
+- **0.1.48 (2026-10-18)** — MTP-16: tuple offer and re-offer. A coordinator
+  `bank_mismatch` fences the tuple but keeps its qualified load; the provider
+  offers it again once per new coordinator session, or once when the
+  coordinator's served bank becomes the bank it qualified on, without a
+  model reload and without re-running the self-check. A parked tuple keeps
+  its revocation watch and is discarded when revoked, up to the moment a
+  restore publishes it; a restore reads the revocation state before lifting
+  the fence and again right before publication, and fails closed without
+  one (R014). A bank poll stopped while its fetch is in flight never acts
+  on the result. Rejections and the
+  offer dedupe are bound to their session. Paired with SPEC-031-R033 v0.3.9,
+  under which the coordinator canary bank moves with the release.
 
 - **0.1.47 (2026-10-17)** — MTP-6: the lab oracle's round order is the
   bridge's per-row committed-round number carried by each after-finalize

@@ -25,9 +25,15 @@
 #                             when the gate names another lane. Refused while the canary is
 #                             operator-paused: its custody proof and evidence (c) need it
 #                             buyer_serving
-#   7 coordinator_restart     native-bound release loaded by SIGHUP after boot: restart,
-#                             because the canary self-test bank is read at boot only
-#                             (phase4-coordinator/internal/ws/server.go loadNativeMTPCanaryBank)
+#   7 canary_bank             native-bound: the coordinator canary holds the release's
+#                             self-test bank. A coordinator that reports
+#                             native_mtp_canary_bank_reloads on /healthz reloads the bank
+#                             with the release (SPEC-031-R033 v0.3.9), so this step only
+#                             checks native_mtp_canary_bank_release_id == the release and
+#                             native_mtp_canary_bank_sha256 == the SHA-256 of the served
+#                             /v1/native-mtp-selftest-bank bytes; one that predates it
+#                             read the bank at boot, and the step restarts it before the
+#                             activation can be done
 #   8 provider_restart        canary/Studio provider reports the new catalog release
 #   9 live_probe              provider /v1/status: native_mtp enabled+eligible|active,
 #                             continuous_batching active
@@ -137,11 +143,13 @@ gather() {
   fact nginx_missing_routes "${missing# }"
 
   # Native feeds.
-  local adm_code="" live_bank_rid="" slot_exp="" slot_current=false
+  local adm_code="" live_bank_rid="" live_bank_sha="" slot_exp="" slot_current=false
   if [ "$native_bound" = true ] && [ -n "$base" ]; then
     adm_code="$(http_get "$base/v1/native-mtp-admission" "$OPS_TMP_DIR/adm.json")"
-    http_get "$base/v1/native-mtp-selftest-bank" "$OPS_TMP_DIR/bank.json" >/dev/null
-    live_bank_rid="$(json_field "$OPS_TMP_DIR/bank.json" 'd["release_id"]')"
+    if [ "$(http_get "$base/v1/native-mtp-selftest-bank" "$OPS_TMP_DIR/bank.json")" = "200" ]; then
+      live_bank_rid="$(json_field "$OPS_TMP_DIR/bank.json" 'd["release_id"]')"
+      live_bank_sha="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$OPS_TMP_DIR/bank.json")"
+    fi
     local key_id
     key_id="$(json_field "$REPO_ROOT/$AUTOTUNE/native-mtp-admission.json" 'd["revocation_signer_key_id"]')"
     if [ "$(http_get "$base/v1/native-mtp-revocations.$key_id.json" "$OPS_TMP_DIR/rev.json")" = "200" ]; then
@@ -152,6 +160,7 @@ gather() {
   fi
   fact live_native_admission_http "$adm_code"
   fact live_selftest_bank_release_id "$live_bank_rid"
+  fact live_selftest_bank_sha256 "$live_bank_sha"
   fact live_revocation_slot_expires_at "$slot_exp"
   fact live_revocation_slot_current "$slot_current"
 
@@ -358,9 +367,37 @@ $restore_cmd
     fi
   fi
 
-  # Boot-only canary bank: a SIGHUP-loaded native-bound release needs a restart.
-  local restart_needed=false
-  if [ "$native_bound" = true ] && [ "$live_rid" = "$R" ] && [ -n "$uptime" ] && [ -n "$verified_min" ]; then
+  # SPEC-031-R033: the coordinator canary reloads its self-test bank with the
+  # SIGHUP release reload and reports the bank it holds on /healthz, release
+  # and SHA-256. Done needs both to match the served bank: the release id
+  # alone would pass a stale bank re-labelled with the same release. A
+  # runtime without that signal read the bank at boot only, so a
+  # SIGHUP-loaded native-bound release still needs a restart, in this step.
+  local bank_reloads canary_bank_rid canary_bank_sha restart_needed=false
+  bank_reloads="$(json_field "$OPS_TMP_DIR/healthz.json" 'd.get("native_mtp_canary_bank_reloads")')"
+  canary_bank_rid="$(json_field "$OPS_TMP_DIR/healthz.json" 'd.get("native_mtp_canary_bank_release_id")')"
+  canary_bank_sha="$(json_field "$OPS_TMP_DIR/healthz.json" 'd.get("native_mtp_canary_bank_sha256")')"
+  fact coordinator_canary_bank_reloads "${bank_reloads:-false}"
+  fact coordinator_canary_bank_release_id "$canary_bank_rid"
+  fact coordinator_canary_bank_sha256 "$canary_bank_sha"
+  if [ "$native_bound" != true ]; then
+    step canary_bank "done" "release is not native-bound"
+  elif [ "$live_rid" != "$R" ]; then
+    step canary_bank pending "after activation"
+  elif [ "$bank_reloads" = true ]; then
+    if [ "$canary_bank_rid" = "$R" ] && [ -n "$live_bank_sha" ] && [ "$canary_bank_sha" = "$live_bank_sha" ]; then
+      step canary_bank "done" "canary holds the served $R self-test bank (sha256 $live_bank_sha), reloaded with the release"
+    elif [ -z "$live_bank_sha" ]; then
+      step canary_bank unknown "served /v1/native-mtp-selftest-bank unreadable; cannot compare the canary bank digest"
+    else
+      step canary_bank blocked "canary bank '${canary_bank_rid:-none}' sha256 '${canary_bank_sha:-none}' != served $R sha256 $live_bank_sha"
+      set_next canary_bank blocked "Make the coordinator canary hold the served $R self-test bank" "" \
+        "the coordinator reloads the canary bank with the release but holds '${canary_bank_rid:-none}' (sha256 '${canary_bank_sha:-none}'), not the served $R bank (sha256 $live_bank_sha): the pool native_mtp_canary block is missing or disabled, its keys do not verify the bank, or the coordinator predates the bank digest on /healthz (journal: 'native MTP canary'); a restart fixes neither"
+      next_meta canary_bank "$MTP_DOC#order"
+    fi
+  elif [ -z "$uptime" ] || [ -z "$verified_min" ]; then
+    step canary_bank unknown "coordinator /healthz or /v1/autotune-release unreadable"
+  else
     restart_needed="$(python3 - "$uptime" "$verified_min" <<'PY'
 import datetime, sys
 now = datetime.datetime.now(datetime.timezone.utc)
@@ -369,19 +406,17 @@ verified = datetime.datetime.strptime(sys.argv[2], "%Y-%m-%dT%H:%M:%SZ").replace
 print("true" if verified - started > datetime.timedelta(seconds=120) else "false")
 PY
 )"
-  fi
-  fact coordinator_restart_needed_for_bank "$restart_needed"
-  if [ "$restart_needed" = true ]; then
-    step coordinator_restart pending "feeds were reloaded after boot; canary bank is boot-only"
-    set_next coordinator_restart mutate "Restart the coordinator so the native canary loads the $R self-test bank" \
+    if [ "$restart_needed" = true ]; then
+      step canary_bank pending "this coordinator reads the canary bank at boot only and loaded $R by SIGHUP"
+      set_next canary_bank mutate "Restart the coordinator so the native canary loads the $R self-test bank" \
 "ssh \"\$PEARL_SSH\" 'flock -n /run/lock/macprovider-pearl-updater.lock flock -n /opt/macprovider/.coordinator-deploy.lock systemctl restart macprovider-coordinator'
 for i in \$(seq 1 24); do curl -sf -m 5 \"\$COORDINATOR_URL/healthz\" && exit 0; sleep 5; done; echo 'coordinator not healthy after 120 s' >&2; exit 1"
-    next_meta coordinator_restart "$ROLLOUT_DOC" "coordinator restart: a few seconds of buyer outage"
-  elif [ "$live_rid" = "$R" ]; then
-    step coordinator_restart "done" "booted on or after the release load"
-  else
-    step coordinator_restart pending "after activation"
+      next_meta canary_bank "$ROLLOUT_DOC" "coordinator restart: a few seconds of buyer outage"
+    else
+      step canary_bank "done" "booted on or after the release load"
+    fi
   fi
+  fact coordinator_restart_needed_for_bank "$restart_needed"
 
   if [ -z "$p_rid" ]; then
     step provider_restart unknown "STUDIO_SSH/STUDIO_STATUS_PORT unset or status unreadable"

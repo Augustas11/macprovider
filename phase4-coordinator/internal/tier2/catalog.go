@@ -185,6 +185,14 @@ func PublishStaged(c *Catalog) bool {
 	return true
 }
 
+// DiscardStaged drops a catalog ConfigureDefaultStrict staged for a reload
+// that failed before publication; any other pointer is left alone.
+func DiscardStaged(c *Catalog) {
+	if c != nil {
+		stagedCatalog.CompareAndSwap(c, nil)
+	}
+}
+
 func init() {
 	defaultCatalog.Store(NewCatalog())
 }

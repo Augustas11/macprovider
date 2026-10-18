@@ -48,6 +48,17 @@ func (r *releaseSnapshotState) stageTier2(next *tier2.Catalog) {
 	r.stageMu.Unlock()
 }
 
+// discardStaged drops every staged part of a reload that failed before
+// publication, so a later publication never promotes it.
+func (r *releaseSnapshotState) discardStaged() *tier2.Catalog {
+	r.stageMu.Lock()
+	defer r.stageMu.Unlock()
+	staged := r.stagedTier2
+	r.stagedCatalog, r.stagedCompatible, r.catalogStaged = nil, nil, false
+	r.stagedTier2 = nil
+	return staged
+}
+
 func (r *releaseSnapshotState) hasStaged() bool {
 	r.stageMu.Lock()
 	defer r.stageMu.Unlock()

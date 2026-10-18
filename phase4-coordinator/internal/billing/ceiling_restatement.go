@@ -80,6 +80,12 @@ func (s *Store) SetOutputBytesPerTokenCeiling(n int) {
 	s.outputBytesPerTokenCeiling.Store(int64(n))
 }
 
+// OutputBytesPerTokenCeiling is the ceiling SetOutputBytesPerTokenCeiling
+// last applied.
+func (s *Store) OutputBytesPerTokenCeiling() int {
+	return int(s.outputBytesPerTokenCeiling.Load())
+}
+
 // CeilingRestatementInput is one operator-triggered restatement batch.
 type CeilingRestatementInput struct {
 	OperatorID string
