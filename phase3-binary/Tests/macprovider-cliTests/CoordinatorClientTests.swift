@@ -1038,7 +1038,8 @@ final class CoordinatorClientTests: XCTestCase {
         revocations: NativeMTPRevocationStub = NativeMTPRevocationStub(),
         sendOverride: CoordinatorClient.SendOverride? = nil,
         nativeMTPTupleDisableHandler: ((ModelRuntime) -> CoordinatorClient.NativeMTPTupleDisableHandler)? = nil,
-        nativeMTPServedBankDigest: CoordinatorClient.NativeMTPServedBankDigest? = nil
+        nativeMTPServedBankDigest: CoordinatorClient.NativeMTPServedBankDigest? = nil,
+        nativeMTPTupleRestoreHandler: ((ModelRuntime) -> CoordinatorClient.NativeMTPTupleRestoreHandler)? = nil
     ) async throws -> (CoordinatorClient, ModelRuntime, NativeMTPPublishedTupleOffer) {
         let runtime = ModelRuntime(
             modelID: "model-a",
@@ -1063,7 +1064,8 @@ final class CoordinatorClientTests: XCTestCase {
             modelRuntime: runtime,
             sendOverride: sendOverride,
             nativeMTPTupleDisableHandler: nativeMTPTupleDisableHandler?(runtime),
-            nativeMTPServedBankDigest: nativeMTPServedBankDigest
+            nativeMTPServedBankDigest: nativeMTPServedBankDigest,
+            nativeMTPTupleRestoreHandler: nativeMTPTupleRestoreHandler?(runtime)
         )
         await client.acceptAssignedSessionForTest(assignedID: "assigned-native-mtp")
         return (client, runtime, offer)
@@ -1203,6 +1205,76 @@ final class CoordinatorClientTests: XCTestCase {
         try await client.sendNativeMTPTupleOfferForTest()
         let offers = await nativeMTPOfferFrames(recorder)
         XCTAssertEqual(offers.count, 2, "the new session re-offers the tuple rejected by the old one")
+        let published = await runtime.currentSnapshot().nativeMTPTupleOffer
+        XCTAssertEqual(published, offer)
+    }
+
+    // A load or warm swap that lands while the client awaits the restore (after
+    // the runtime republished the tuple) must not let the stale tuple go out.
+    func testNativeMTPSwapDuringRestoreSendsNoStaleOffer() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let (client, runtime, _) = try await makeNativeMTPReofferClient(
+            recorder: recorder,
+            nativeMTPTupleRestoreHandler: { runtime in
+                { offer in
+                    let outcome = await runtime.restoreParkedNativeMTPTuple(offer)
+                    // The swap runs after publication, before the client resumes.
+                    await runtime.simulateNativeMTPTupleSwapForTest()
+                    return outcome
+                }
+            }
+        )
+        defer { Task { await client.stop() } }
+
+        try await client.sendNativeMTPTupleOfferForTest()
+        try await client.handleCoordinatorPayloadForTest(try Self.nativeMTPTupleDisable(reason: "bank_mismatch"))
+        await client.cleanupConnectionForTest()
+        await client.acceptAssignedSessionForTest(assignedID: "assigned-native-mtp")
+        try await client.sendNativeMTPTupleOfferForTest()
+
+        let offers = await nativeMTPOfferFrames(recorder)
+        XCTAssertEqual(offers.count, 1, "a tuple a swap replaced during the restore was offered")
+        let awaiting = await client.nativeMTPTupleAwaitingReofferForTest()
+        XCTAssertFalse(awaiting, "the stale due state is dropped")
+        let published = await runtime.currentSnapshot().nativeMTPTupleOffer
+        XCTAssertNil(published)
+    }
+
+    // A re-offer whose send fails while the session stays accepted is retried
+    // on the same session (bounded backoff) until it goes out once.
+    func testNativeMTPReofferSendFailureWithoutDisconnectIsRetried() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let failures = NativeMTPSendFailures(count: 1)
+        let (client, runtime, offer) = try await makeNativeMTPReofferClient(
+            recorder: recorder,
+            sendOverride: { frame in
+                if frame["type"] as? String == "native_mtp_tuple_offer_v1", failures.shouldFail() {
+                    throw URLError(.networkConnectionLost)
+                }
+                await recorder.append(frame)
+            }
+        )
+        defer { Task { await client.stop() } }
+        await client.setNativeMTPTupleOfferRetryDelayForTest(nanoseconds: 1_000_000)
+
+        failures.arm(0)
+        try await client.sendNativeMTPTupleOfferForTest()
+        try await client.handleCoordinatorPayloadForTest(try Self.nativeMTPTupleDisable(reason: "bank_mismatch"))
+        await client.cleanupConnectionForTest()
+        await client.acceptAssignedSessionForTest(assignedID: "assigned-native-mtp")
+        failures.arm(1)
+        do {
+            try await client.sendNativeMTPTupleOfferForTest()
+            XCTFail("the injected send failure did not surface")
+        } catch {}
+        var offers = await nativeMTPOfferFrames(recorder)
+        XCTAssertEqual(offers.count, 1, "the failed re-offer was not recorded")
+
+        await waitUntil("the retried re-offer") { await self.nativeMTPOfferFrames(recorder).count == 2 }
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        offers = await nativeMTPOfferFrames(recorder)
+        XCTAssertEqual(offers.count, 2, "the retry offers once, then stops")
+        XCTAssertEqual(offers.last?["native_mtp_runtime_tuple_sha256"] as? String, Self.nativeMTPRuntimeTupleSHA256)
         let published = await runtime.currentSnapshot().nativeMTPTupleOffer
         XCTAssertEqual(published, offer)
     }
@@ -9986,6 +10058,7 @@ final class CoordinatorClientTests: XCTestCase {
         catalogArtifactIdentity: CoordinatorClient.CatalogArtifactIdentity? = nil,
         nativeMTPTupleDisableHandler: CoordinatorClient.NativeMTPTupleDisableHandler? = nil,
         nativeMTPServedBankDigest: CoordinatorClient.NativeMTPServedBankDigest? = nil,
+        nativeMTPTupleRestoreHandler: CoordinatorClient.NativeMTPTupleRestoreHandler? = nil,
         computeScoreExecutor: CoordinatorClient.ComputeScoreExecutor? = nil,
         catalogEnvelopeRefresher: CoordinatorClient.CatalogEnvelopeRefresher? = nil,
         catalogEnvelopeRefreshMinimumInterval: TimeInterval = 300,
@@ -10069,6 +10142,7 @@ final class CoordinatorClientTests: XCTestCase {
             catalogModelSHA256: catalogModelSHA256,
             catalogArtifactIdentity: catalogArtifactIdentity,
             nativeMTPTupleDisableHandler: nativeMTPTupleDisableHandler,
+            nativeMTPTupleRestoreHandler: nativeMTPTupleRestoreHandler,
             nativeMTPServedBankDigest: nativeMTPServedBankDigest ?? { nil },
             computeScoreExecutor: computeScoreExecutor,
             catalogEnvelopeRefresher: catalogEnvelopeRefresher,
@@ -10693,6 +10767,28 @@ final class NativeMTPInterleaving: @unchecked Sendable {
     func resume() {
         resumed.continuation.yield()
         resumed.continuation.finish()
+    }
+}
+
+/// Fails the next `count` gated sends once armed.
+final class NativeMTPSendFailures: @unchecked Sendable {
+    private let lock = NSLock()
+    private var remaining: Int
+
+    init(count: Int) { remaining = count }
+
+    func arm(_ count: Int) {
+        lock.lock()
+        remaining = count
+        lock.unlock()
+    }
+
+    func shouldFail() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard remaining > 0 else { return false }
+        remaining -= 1
+        return true
     }
 }
 

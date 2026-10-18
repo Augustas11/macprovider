@@ -112,3 +112,27 @@ enum NativeMTPServedBankPoll {
         return min(initialDelaySeconds << UInt64(shift), maximumDelaySeconds)
     }
 }
+
+/// The runtime's published native-MTP tuple and spec-decode generation, kept
+/// under a lock so the coordinator client can confirm, synchronously and
+/// right before a send, that the tuple it is about to offer is still the one
+/// the runtime publishes (no load or swap in between).
+final class NativeMTPPublishedTupleOfferBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var offer: NativeMTPPublishedTupleOffer?
+    private var generation = 0
+
+    func set(_ offer: NativeMTPPublishedTupleOffer?, generation: Int) {
+        lock.lock()
+        self.offer = offer
+        self.generation = generation
+        lock.unlock()
+    }
+
+    /// The published tuple and its generation.
+    func current() -> (offer: NativeMTPPublishedTupleOffer?, generation: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (offer, generation)
+    }
+}

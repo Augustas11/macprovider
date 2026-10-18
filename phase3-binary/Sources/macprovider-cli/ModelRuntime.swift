@@ -1580,6 +1580,14 @@ actor ModelRuntime: ModelRuntimeServing {
 
     /// Runs after the scheduler re-enable inside `restoreParkedNativeMTPTuple`,
     /// so a test can revoke or interleave at that suspension point.
+    /// A load or warm swap as the runtime sees it: the published tuple is
+    /// cleared and the spec-decode generation advances.
+    func simulateNativeMTPTupleSwapForTest() {
+        parkedNativeMTPTuple = nil
+        currentNativeMTPTupleOffer = nil
+        currentSpecDecodeGeneration += 1
+    }
+
     func setNativeMTPTupleEnableHookForTest(_ hook: (@Sendable () async -> Void)?) {
         nativeMTPTupleEnableHookForTest = hook
     }
@@ -1711,7 +1719,13 @@ actor ModelRuntime: ModelRuntimeServing {
     private var currentNativeMTPCapability: NativeMTPCapability?
     private var currentNativeMTPAdmissionCapability: NativeMTPAdmissionCapability?
     private var currentNativeMTPStatusSink = NativeMTPStatusSink.disabled()
-    private var currentNativeMTPTupleOffer: NativeMTPPublishedTupleOffer?
+    private var currentNativeMTPTupleOffer: NativeMTPPublishedTupleOffer? {
+        didSet { nativeMTPPublishedTupleOffer.set(currentNativeMTPTupleOffer, generation: currentSpecDecodeGeneration) }
+    }
+    /// The published tuple and spec-decode generation, readable without an
+    /// actor hop: the coordinator client checks it immediately before it
+    /// sends an offer, with no suspension in between.
+    nonisolated let nativeMTPPublishedTupleOffer = NativeMTPPublishedTupleOfferBox()
     private var currentNativeMTPSelfTestInput: NativeMTPSelfTestInput?
     private var currentNativeVisionProfile: NativeVisionProfile?
     private var nativeMTPRevocationRefreshTask: Task<Void, Never>?
@@ -1745,7 +1759,9 @@ actor ModelRuntime: ModelRuntimeServing {
     private let configuredNativeMTPRevokedTupleSHA256: Set<String>?
     private let configuredNativeMTPResolvedArtifactAuthority: NativeMTPResolvedArtifactAuthority?
     private let nativeMTPSelfTestRunner: NativeMTPSelfTestRunner
-    private var currentSpecDecodeGeneration = 0
+    private var currentSpecDecodeGeneration = 0 {
+        didSet { nativeMTPPublishedTupleOffer.set(currentNativeMTPTupleOffer, generation: currentSpecDecodeGeneration) }
+    }
     private let numDraftTokens: Int
     private let stopTokenFilter: StopTokenFilter
     private var currentModelHash: String?
