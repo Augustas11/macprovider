@@ -64,10 +64,21 @@ Verified 2026-10-10 against public release metadata, the release train
 
 ## Next CLI release — net changes vs 1.8.251 (tracked 2026-10-18)
 
+Live fleet target: **1.8.251**. Staged: `binaryVersion` **1.8.254** (v1.8.252 and v1.8.253
+are runtime releases). Every PR below is merged and none is open, so the cut is authorized.
+
 | PR | Issue | Provider-side change | Status |
 |---|---|---|---|
-| #2047 | — | GLM-5.3-Flash on the native engine: paged MLA continuous batching, native MTP-1, listed catalog cut | merged |
+| #2046 | #2014 | Guaranteed tool selection starts inside the call: named choice renders only the selected function and prefills its call opening; `required` prefills the envelope (SPEC-018 v0.2.15); lab real-model acceptance 6/6 on the Studio, stream and non-stream, CB on and off | merged |
+| #2048 | #2015 | Watchdog never kicks an operator-paused or resuming provider: final pause/lease re-check and kick under the lifecycle store locks; listener probe tri-state (SPEC-020 v0.1.28) | merged |
+| #2047 | #2029 | GLM-5.3-Flash on the native engine: paged MLA continuous batching, native MTP-1; mlx-swift-lm `3.32.3-macprovider.10.1` (core v0.32.4 line, carries the Qwen2-VL per-image fix); listed catalog cut `published-2026-10-17-glm53-flash-listed-v1` | merged |
 | #2049 | #2036 | Malibu.app is stamped from the release tag (was a stale 1.8.224) and relaunches itself onto the installed bundle after a CLI self-update (SPEC-025 v0.31) | merged |
+
+Order: Pearl runtime v1.8.253 (coordinator billing aliases from #2047) and the listed
+catalog activation before the canary. The mlx-swift-lm pin moves to the v0.32.4 core line,
+so the CB self-check re-measures on each Mac and native-MTP admission re-binds to this
+identity. Live proof owed after the cut: #2014 (named and `required` through the gateway on
+Qwen3.6), before the Studio switches to GLM-5.3-Flash.
 
 Release notes for this cut MUST tell operators to reopen Malibu once
 (SPEC-025 v0.31 first hop): a running pre-v0.31 Malibu has no relaunch
