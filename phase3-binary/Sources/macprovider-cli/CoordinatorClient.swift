@@ -167,8 +167,8 @@ actor CoordinatorClient {
     typealias NativeMTPCanaryExecutor = @Sendable (NativeMTPCanaryRequestPayload) async -> NativeMTPCanaryResultPayload
     typealias NativeMTPTupleDisableHandler = @Sendable (NativeMTPTupleDisablePayload) async -> Void
     /// Restores a tuple parked after a coordinator `bank_mismatch` so it can be
-    /// offered again; false when the runtime no longer holds it.
-    typealias NativeMTPTupleRestoreHandler = @Sendable (NativeMTPPublishedTupleOffer) async -> Bool
+    /// offered again, after the runtime re-checked its revocation state.
+    typealias NativeMTPTupleRestoreHandler = @Sendable (NativeMTPPublishedTupleOffer) async -> NativeMTPTupleRestoreOutcome
     /// SHA-256 of the self-test bank the coordinator serves now, or nil.
     typealias NativeMTPServedBankDigest = @Sendable () async -> String?
     /// SPEC-036 FR-21 teacher-forced scoring job. Nil when this runtime cannot
@@ -755,6 +755,10 @@ actor CoordinatorClient {
     private var observedCoordinatorNativeMTPBankSHA256: String?
     private var nativeMTPServedBankPollTask: Task<Void, Never>?
     private var nativeMTPServedBankPollGeneration: UInt64 = 0
+    /// The parked tuple the runtime discarded (revoked while parked); never
+    /// parked again for a re-offer.
+    private var nativeMTPDiscardedParkedOffer: NativeMTPPublishedTupleOffer?
+    private var nativeMTPParkedTupleDiscardHandlerRegistered = false
     private var nativeMTPTupleDisableReplayDigests: [String] = []
     private var nativeMTPTupleDisableReplaySet: Set<String> = []
     private static let requestCapacityStateUpdateCoalesceNanoseconds: UInt64 = 20_000_000
@@ -1112,7 +1116,7 @@ actor CoordinatorClient {
             }
         }
         self.nativeMTPTupleRestoreHandler = nativeMTPTupleRestoreHandler ?? { offer in
-            guard let runtime = modelRuntime as? ModelRuntime else { return false }
+            guard let runtime = modelRuntime as? ModelRuntime else { return .gone }
             return await runtime.restoreParkedNativeMTPTuple(offer)
         }
         self.nativeMTPServedBankDigest = nativeMTPServedBankDigest ?? {
@@ -2854,6 +2858,13 @@ actor CoordinatorClient {
                 let evicted = nativeMTPTupleDisableReplayDigests.removeFirst()
                 nativeMTPTupleDisableReplaySet.remove(evicted)
             }
+            // The handler suspends; a disconnect can start a new session
+            // meanwhile. The rejection belongs to this session and this offer.
+            let rejectingEpoch = connectionEpoch
+            let rejectedOffer = lastSentNativeMTPTupleOffer
+            if reason == "bank_mismatch" {
+                await registerNativeMTPParkedTupleDiscardHandlerIfNeeded()
+            }
             await nativeMTPTupleDisableHandler(NativeMTPTupleDisablePayload(
                 providerID: providerID,
                 assignedID: acceptedAssignedProviderID ?? "",
@@ -2866,26 +2877,37 @@ actor CoordinatorClient {
                 issuedAt: issuedAt,
                 requestDigest: requestDigest
             ))
+            let sessionUnchanged = connectionEpoch == rejectingEpoch
             if reason == "bank_mismatch",
-               let offer = lastSentNativeMTPTupleOffer,
+               let offer = rejectedOffer,
+               offer != nativeMTPDiscardedParkedOffer,
                offer.nativeMTPAdmissionTupleSHA256 == admissionTupleSHA256,
                offer.servedSnapshotID == servedSnapshotID,
                offer.targetGeneration == targetGeneration {
+                // Recorded against the rejecting session: when a new session
+                // began during the handler, that session is still due its
+                // one re-offer.
                 nativeMTPTupleReofferGate.park(
                     offer,
-                    session: connectionEpoch,
+                    session: rejectingEpoch,
                     observedCoordinatorBankSHA256: observedCoordinatorNativeMTPBankSHA256
                 )
-                startNativeMTPServedBankPollIfNeeded()
                 Self.logNativeMTPTupleOffer(
                     action: "parked",
                     detail: "reason=bank_mismatch target_generation=\(targetGeneration) challenge_bank_release_id=\(Self.sanitizedDiagnosticText(offer.challengeBankReleaseID, maxLength: 120))"
                 )
+                if sessionUnchanged {
+                    startNativeMTPServedBankPollIfNeeded()
+                } else {
+                    await offerNativeMTPTupleOnCurrentSession()
+                }
             } else if reason != "bank_mismatch" {
                 nativeMTPTupleReofferGate.clear()
                 stopNativeMTPServedBankPoll()
             }
-            lastNativeMTPTupleOfferDigest = nil
+            if sessionUnchanged {
+                lastNativeMTPTupleOfferDigest = nil
+            }
         } catch {
             try await sendNAK(
                 inReplyTo: "native_mtp_tuple_disable_v1",
@@ -7716,7 +7738,11 @@ actor CoordinatorClient {
               !assignedID.isEmpty else {
             return
         }
+        // Every suspension below can span a disconnect; nothing this call
+        // records may land on a session other than the one it began on.
+        let epoch = connectionEpoch
         let snapshot = await modelRuntime.currentSnapshot()
+        guard connectionEpoch == epoch, coordinatorSessionAccepted else { return }
         var published = snapshot.nativeMTPTupleOffer
         if let published, let parked = nativeMTPTupleReofferGate.parked?.offer, parked != published {
             // A new load published its own tuple: the parked one is gone.
@@ -7728,17 +7754,29 @@ actor CoordinatorClient {
             session: connectionEpoch,
             observedCoordinatorBankSHA256: observedCoordinatorNativeMTPBankSHA256
            ) {
-            guard await nativeMTPTupleRestoreHandler(due) else {
-                nativeMTPTupleReofferGate.clear()
-                stopNativeMTPServedBankPoll()
+            switch await nativeMTPTupleRestoreHandler(due) {
+            case .restored:
+                break
+            case .revocationUnavailable:
+                // Fail closed: it stays parked; a later trigger may try again.
+                Self.logNativeMTPTupleOffer(action: "skipped", detail: "reason=revocation_state_unavailable")
+                return
+            case .gone, .revoked:
+                if nativeMTPTupleReofferGate.parked?.offer == due {
+                    nativeMTPTupleReofferGate.clear()
+                    stopNativeMTPServedBankPoll()
+                }
                 Self.logNativeMTPTupleOffer(action: "skipped", detail: "reason=parked_tuple_not_restorable")
                 return
             }
             nativeMTPTupleReofferGate.markRestored()
             stopNativeMTPServedBankPoll()
-            lastNativeMTPTupleOfferDigest = nil
             published = due
             Self.logNativeMTPTupleOffer(action: "restored", detail: "target_generation=\(due.targetGeneration)")
+            // The restored tuple is the runtime's published offer now; a
+            // session that ended meanwhile offers it from its successor.
+            guard connectionEpoch == epoch, coordinatorSessionAccepted else { return }
+            lastNativeMTPTupleOfferDigest = nil
         }
         guard let offer = published else { return }
         guard let identity = nativeMTPTupleOfferWireIdentity(for: offer) else {
@@ -7779,6 +7817,10 @@ actor CoordinatorClient {
             selftestObservedAt: ISO8601DateFormatter().string(from: offer.selftestObservedAt)
         )
         try await send(payload.wireObject)
+        // The dedupe and the rejection key are session-scoped: a send that
+        // completes after a disconnect must not suppress the new session's
+        // first offer.
+        guard connectionEpoch == epoch else { return }
         lastNativeMTPTupleOfferDigest = offerDigest
         lastSentNativeMTPTupleOffer = offer
         Self.logNativeMTPTupleOffer(
@@ -7832,6 +7874,10 @@ actor CoordinatorClient {
     private func observeCoordinatorNativeMTPChallengeBank(sha256: String) async {
         guard sha256 != observedCoordinatorNativeMTPBankSHA256 else { return }
         observedCoordinatorNativeMTPBankSHA256 = sha256
+        await offerNativeMTPTupleOnCurrentSession()
+    }
+
+    private func offerNativeMTPTupleOnCurrentSession() async {
         guard coordinatorSessionAccepted, nativeMTPTupleReofferGate.awaitingReoffer else { return }
         await acquireStateUpdateSendPermit()
         defer { releaseStateUpdateSendPermit() }
@@ -7843,6 +7889,25 @@ actor CoordinatorClient {
                 detail: "error=\(Self.sanitizedDiagnosticText(String(describing: error)))"
             )
         }
+    }
+
+    private func registerNativeMTPParkedTupleDiscardHandlerIfNeeded() async {
+        guard !nativeMTPParkedTupleDiscardHandlerRegistered,
+              let runtime = modelRuntime as? ModelRuntime else { return }
+        nativeMTPParkedTupleDiscardHandlerRegistered = true
+        await runtime.setNativeMTPParkedTupleDiscardHandler { [weak self] offer in
+            await self?.nativeMTPParkedTupleDiscarded(offer)
+        }
+    }
+
+    /// The runtime discarded a parked tuple (revoked, or disabled for another
+    /// reason, while it waited): drop its re-offer at once.
+    func nativeMTPParkedTupleDiscarded(_ offer: NativeMTPPublishedTupleOffer) {
+        nativeMTPDiscardedParkedOffer = offer
+        guard nativeMTPTupleReofferGate.parked?.offer == offer else { return }
+        nativeMTPTupleReofferGate.clear()
+        stopNativeMTPServedBankPoll()
+        Self.logNativeMTPTupleOffer(action: "discarded", detail: "reason=parked_tuple_revoked target_generation=\(offer.targetGeneration)")
     }
 
     func sendNativeMTPTupleOfferForTest() async throws {

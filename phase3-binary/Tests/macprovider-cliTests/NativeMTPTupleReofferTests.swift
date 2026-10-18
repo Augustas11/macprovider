@@ -39,6 +39,71 @@ final class NativeMTPTupleReofferTests: XCTestCase {
         )
     }
 
+    // A disable that suspends at the scheduler fence must not erase a tuple a
+    // concurrent load or swap installed at that suspension point.
+    func testDisableAfterTheFenceKeepsATupleInstalledDuringIt() async {
+        let runtime = ModelRuntime(
+            modelID: "model-a",
+            maxBatch: 1,
+            nativeMTPMode: .auto,
+            warmSwapEnabled: false,
+            loader: { _ in throw APIError(status: 503, message: "unused", type: "server_error", code: "unused") }
+        )
+        let old = Self.offer(generation: 7)
+        let replacement = Self.offer(generation: 8)
+        await runtime.installNativeMTPTupleOfferForTest(old)
+        let interleaving = NativeMTPInterleaving()
+        await runtime.setNativeMTPTupleFenceHookForTest { await interleaving.pause() }
+
+        let disable = Task {
+            await runtime.disableNativeMTPTuple(
+                admissionTupleSHA256: old.nativeMTPAdmissionTupleSHA256,
+                servedSnapshotID: old.servedSnapshotID,
+                targetGeneration: old.targetGeneration
+            )
+        }
+        await interleaving.waitPaused()
+        await runtime.installNativeMTPTupleOfferForTest(replacement)
+        interleaving.resume()
+        await disable.value
+
+        let published = await runtime.currentSnapshot().nativeMTPTupleOffer
+        XCTAssertEqual(published, replacement, "the resumed disable erased the newly installed tuple")
+    }
+
+    func testParkAfterTheFenceDoesNotParkOverATupleInstalledDuringIt() async {
+        let runtime = ModelRuntime(
+            modelID: "model-a",
+            maxBatch: 1,
+            nativeMTPMode: .auto,
+            warmSwapEnabled: false,
+            loader: { _ in throw APIError(status: 503, message: "unused", type: "server_error", code: "unused") }
+        )
+        let old = Self.offer(generation: 7)
+        let replacement = Self.offer(generation: 8)
+        await runtime.installNativeMTPTupleOfferForTest(old)
+        let interleaving = NativeMTPInterleaving()
+        await runtime.setNativeMTPTupleFenceHookForTest { await interleaving.pause() }
+
+        let park = Task {
+            await runtime.parkNativeMTPTupleForReoffer(
+                admissionTupleSHA256: old.nativeMTPAdmissionTupleSHA256,
+                servedSnapshotID: old.servedSnapshotID,
+                targetGeneration: old.targetGeneration
+            )
+        }
+        await interleaving.waitPaused()
+        await runtime.installNativeMTPTupleOfferForTest(replacement)
+        interleaving.resume()
+        let parked = await park.value
+
+        XCTAssertFalse(parked)
+        let isParked = await runtime.nativeMTPTupleIsParkedForTest()
+        XCTAssertFalse(isParked)
+        let published = await runtime.currentSnapshot().nativeMTPTupleOffer
+        XCTAssertEqual(published, replacement)
+    }
+
     func testNothingIsDueUntilATupleIsParked() {
         var gate = NativeMTPTupleReofferGate()
         XCTAssertFalse(gate.awaitingReoffer)

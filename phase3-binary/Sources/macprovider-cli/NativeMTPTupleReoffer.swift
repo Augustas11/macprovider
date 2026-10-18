@@ -86,6 +86,20 @@ struct NativeMTPTupleReofferGate: Sendable, Equatable {
     }
 }
 
+/// What restoring a parked tuple for a re-offer did (SPEC-048-R016).
+enum NativeMTPTupleRestoreOutcome: Sendable, Equatable {
+    /// Restored and published again; offer it.
+    case restored
+    /// Nothing matching is parked: a load or swap replaced it, or it was
+    /// discarded. The re-offer is dropped.
+    case gone
+    /// The latest verified revocation feed names it: discarded.
+    case revoked
+    /// No verified revocation state could be read: it stays parked and
+    /// fenced (fail closed), and a later trigger may try again.
+    case revocationUnavailable
+}
+
 /// Poll schedule for the coordinator's served self-test bank while a tuple
 /// waits for a re-offer: 60 s doubling to a 15-minute ceiling.
 enum NativeMTPServedBankPoll {

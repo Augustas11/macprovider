@@ -1034,7 +1034,10 @@ final class CoordinatorClientTests: XCTestCase {
     // (fenced, not torn down) and the provider offers it again without a
     // model reload, bounded to one offer per session or observed bank change.
     private func makeNativeMTPReofferClient(
-        recorder: CoordinatorFrameRecorder
+        recorder: CoordinatorFrameRecorder,
+        revocations: NativeMTPRevocationStub = NativeMTPRevocationStub(),
+        sendOverride: CoordinatorClient.SendOverride? = nil,
+        nativeMTPTupleDisableHandler: ((ModelRuntime) -> CoordinatorClient.NativeMTPTupleDisableHandler)? = nil
     ) async throws -> (CoordinatorClient, ModelRuntime, NativeMTPPublishedTupleOffer) {
         let runtime = ModelRuntime(
             modelID: "model-a",
@@ -1046,14 +1049,189 @@ final class CoordinatorClientTests: XCTestCase {
         let offer = NativeMTPTupleReofferTests.offer()
         XCTAssertEqual(offer.nativeMTPAdmissionTupleSHA256, Self.nativeMTPAdmissionTupleSHA256)
         await runtime.installNativeMTPTupleOfferForTest(offer)
+        await runtime.setNativeMTPRevocationPollerForTest(revocations.poller)
+        await runtime.setNativeMTPRevokedSetReaderForTest(revocations.reader)
         let status = ProviderStatus(
             modelID: "model-a",
             modelLoaded: true,
             capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
         )
-        let client = try await makeClient(status: status, recorder: recorder, modelRuntime: runtime)
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            modelRuntime: runtime,
+            sendOverride: sendOverride,
+            nativeMTPTupleDisableHandler: nativeMTPTupleDisableHandler?(runtime)
+        )
         await client.acceptAssignedSessionForTest(assignedID: "assigned-native-mtp")
         return (client, runtime, offer)
+    }
+
+    /// Waits (bounded) for an asynchronous chain the test cannot await directly.
+    private func waitUntil(
+        _ what: String,
+        timeoutNanoseconds: UInt64 = 5_000_000_000,
+        _ condition: () async -> Bool
+    ) async {
+        let deadline = DispatchTime.now().uptimeNanoseconds + timeoutNanoseconds
+        while !(await condition()) {
+            if DispatchTime.now().uptimeNanoseconds > deadline {
+                XCTFail("timed out waiting for \(what)")
+                return
+            }
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+    }
+
+    // SPEC-048-R016: parking never pauses revocation. A feed naming the
+    // parked tuple discards it and drops the client's re-offer at once.
+    func testNativeMTPParkedTupleIsDiscardedWhenRevokedWhileParked() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let revocations = NativeMTPRevocationStub()
+        let (client, runtime, _) = try await makeNativeMTPReofferClient(recorder: recorder, revocations: revocations)
+        defer { Task { await client.stop() } }
+
+        try await client.sendNativeMTPTupleOfferForTest()
+        try await client.handleCoordinatorPayloadForTest(try Self.nativeMTPTupleDisable(reason: "bank_mismatch"))
+        let watching = await runtime.nativeMTPRevocationWatcherActiveForTest()
+        XCTAssertTrue(watching, "the revocation watcher stays active while the tuple is parked")
+        await waitUntil("the parked watcher") { revocations.watchers > 0 }
+
+        revocations.revoke()
+        await waitUntil("the parked tuple discarded") { await !runtime.nativeMTPTupleIsParkedForTest() }
+        await waitUntil("the re-offer dropped") { await !client.nativeMTPTupleAwaitingReofferForTest() }
+
+        await client.cleanupConnectionForTest()
+        await client.acceptAssignedSessionForTest(assignedID: "assigned-native-mtp")
+        try await client.sendNativeMTPTupleOfferForTest()
+        let offers = await nativeMTPOfferFrames(recorder)
+        XCTAssertEqual(offers.count, 1, "a tuple revoked while parked is never offered again")
+        let published = await runtime.currentSnapshot().nativeMTPTupleOffer
+        XCTAssertNil(published)
+    }
+
+    // Before a restore the runtime reads the latest revocation state: a
+    // revoked tuple is discarded, never restored or offered.
+    func testNativeMTPRestoreRefusesATupleTheLatestFeedRevokes() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let revocations = NativeMTPRevocationStub()
+        let (client, runtime, _) = try await makeNativeMTPReofferClient(recorder: recorder, revocations: revocations)
+        defer { Task { await client.stop() } }
+
+        try await client.sendNativeMTPTupleOfferForTest()
+        try await client.handleCoordinatorPayloadForTest(try Self.nativeMTPTupleDisable(reason: "bank_mismatch"))
+        revocations.setRevokedSet([Self.nativeMTPAdmissionTupleSHA256])
+
+        await client.cleanupConnectionForTest()
+        await client.acceptAssignedSessionForTest(assignedID: "assigned-native-mtp")
+        try await client.sendNativeMTPTupleOfferForTest()
+        let offers = await nativeMTPOfferFrames(recorder)
+        XCTAssertEqual(offers.count, 1, "a revoked tuple is not re-offered")
+        let parked = await runtime.nativeMTPTupleIsParkedForTest()
+        XCTAssertFalse(parked, "a revoked tuple is discarded")
+        let published = await runtime.currentSnapshot().nativeMTPTupleOffer
+        XCTAssertNil(published)
+        let awaiting = await client.nativeMTPTupleAwaitingReofferForTest()
+        XCTAssertFalse(awaiting)
+    }
+
+    // With no verified revocation state at all, a restore fails closed: the
+    // tuple stays parked and fenced, and a later session tries again.
+    func testNativeMTPRestoreFailsClosedWithoutRevocationState() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let revocations = NativeMTPRevocationStub()
+        let (client, runtime, offer) = try await makeNativeMTPReofferClient(recorder: recorder, revocations: revocations)
+        defer { Task { await client.stop() } }
+
+        try await client.sendNativeMTPTupleOfferForTest()
+        try await client.handleCoordinatorPayloadForTest(try Self.nativeMTPTupleDisable(reason: "bank_mismatch"))
+        revocations.setUnavailable(true)
+
+        await client.cleanupConnectionForTest()
+        await client.acceptAssignedSessionForTest(assignedID: "assigned-native-mtp")
+        try await client.sendNativeMTPTupleOfferForTest()
+        var offers = await nativeMTPOfferFrames(recorder)
+        XCTAssertEqual(offers.count, 1, "no re-offer without a verified revocation state")
+        var published = await runtime.currentSnapshot().nativeMTPTupleOffer
+        XCTAssertNil(published, "the tuple stays fenced")
+        let parked = await runtime.nativeMTPTupleIsParkedForTest()
+        XCTAssertTrue(parked, "the tuple stays parked")
+
+        revocations.setUnavailable(false)
+        await client.cleanupConnectionForTest()
+        await client.acceptAssignedSessionForTest(assignedID: "assigned-native-mtp")
+        try await client.sendNativeMTPTupleOfferForTest()
+        offers = await nativeMTPOfferFrames(recorder)
+        XCTAssertEqual(offers.count, 2, "a later session re-offers once the state is readable")
+        published = await runtime.currentSnapshot().nativeMTPTupleOffer
+        XCTAssertEqual(published, offer)
+    }
+
+    // A disconnect while the runtime fences a `bank_mismatch` tuple: the
+    // rejection belongs to the old session, so the new session is still due
+    // its one re-offer.
+    func testNativeMTPBankMismatchSpanningASessionChangeStaysDueForTheNewSession() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let interleaving = NativeMTPInterleaving()
+        let (client, runtime, offer) = try await makeNativeMTPReofferClient(
+            recorder: recorder,
+            nativeMTPTupleDisableHandler: { runtime in
+                { payload in
+                    await runtime.parkNativeMTPTupleForReoffer(
+                        admissionTupleSHA256: payload.nativeMTPAdmissionTupleSHA256,
+                        servedSnapshotID: payload.servedSnapshotID,
+                        targetGeneration: payload.targetGeneration
+                    )
+                    await interleaving.pause()
+                }
+            }
+        )
+        defer { Task { await client.stop() } }
+
+        try await client.sendNativeMTPTupleOfferForTest()
+        let disable = try Self.nativeMTPTupleDisable(reason: "bank_mismatch")
+        let rejection = Task { try await client.handleCoordinatorPayloadForTest(disable) }
+        await interleaving.waitPaused()
+        // The coordinator restarts while the handler is suspended.
+        await client.cleanupConnectionForTest()
+        await client.acceptAssignedSessionForTest(assignedID: "assigned-native-mtp")
+        interleaving.resume()
+        try await rejection.value
+
+        try await client.sendNativeMTPTupleOfferForTest()
+        let offers = await nativeMTPOfferFrames(recorder)
+        XCTAssertEqual(offers.count, 2, "the new session re-offers the tuple rejected by the old one")
+        let published = await runtime.currentSnapshot().nativeMTPTupleOffer
+        XCTAssertEqual(published, offer)
+    }
+
+    // An offer whose send completes after a disconnect must not record its
+    // dedupe digest against the new session.
+    func testNativeMTPOfferSendSpanningADisconnectDoesNotSuppressTheNewSession() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let interleaving = NativeMTPInterleaving()
+        let gated = NativeMTPSendGate()
+        let (client, _, _) = try await makeNativeMTPReofferClient(
+            recorder: recorder,
+            sendOverride: { frame in
+                await recorder.append(frame)
+                if frame["type"] as? String == "native_mtp_tuple_offer_v1", gated.takeFirst() {
+                    await interleaving.pause()
+                }
+            }
+        )
+        defer { Task { await client.stop() } }
+
+        let first = Task { try await client.sendNativeMTPTupleOfferForTest() }
+        await interleaving.waitPaused()
+        await client.cleanupConnectionForTest()
+        await client.acceptAssignedSessionForTest(assignedID: "assigned-native-mtp")
+        interleaving.resume()
+        try await first.value
+
+        try await client.sendNativeMTPTupleOfferForTest()
+        let offers = await nativeMTPOfferFrames(recorder)
+        XCTAssertEqual(offers.count, 2, "the new session sends its own first offer")
     }
 
     private func nativeMTPOfferFrames(_ recorder: CoordinatorFrameRecorder) async -> [[String: Any]] {
@@ -10413,6 +10591,97 @@ private actor CoordinatorFrameRecorder {
 
     func append(_ frame: [String: Any]) {
         frames.append(frame)
+    }
+}
+
+/// A controllable native-MTP revocation feed: the watcher's poller waits for
+/// `revoke()`, and the restore-time reader returns the configured set.
+final class NativeMTPRevocationStub: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuations: [AsyncStream<Void>.Continuation] = []
+    private var revokedSet: Set<String> = []
+    private var unavailable = false
+
+    var poller: ModelRuntime.NativeMTPRevocationPoller {
+        { [self] _, onRevoked in
+            let (stream, continuation) = AsyncStream<Void>.makeStream()
+            lock.lock()
+            continuations.append(continuation)
+            lock.unlock()
+            for await _ in stream {
+                await onRevoked()
+                return
+            }
+        }
+    }
+
+    var reader: ModelRuntime.NativeMTPRevokedSetReader {
+        { [self] _, _ in
+            lock.lock()
+            defer { lock.unlock() }
+            if unavailable { throw NativeMTPRevocationFeedError.missingFeed }
+            return revokedSet
+        }
+    }
+
+    var watchers: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return continuations.count
+    }
+
+    func revoke() {
+        lock.lock()
+        let latest = continuations.last
+        lock.unlock()
+        latest?.yield()
+    }
+
+    func setRevokedSet(_ set: Set<String>) {
+        lock.lock()
+        revokedSet = set
+        lock.unlock()
+    }
+
+    func setUnavailable(_ value: Bool) {
+        lock.lock()
+        unavailable = value
+        lock.unlock()
+    }
+}
+
+/// A barrier at one suspension point: the code under test calls `pause()`,
+/// the test waits for it with `waitPaused()`, interleaves, then `resume()`s.
+final class NativeMTPInterleaving: @unchecked Sendable {
+    private let paused = AsyncStream<Void>.makeStream()
+    private let resumed = AsyncStream<Void>.makeStream()
+
+    func pause() async {
+        paused.continuation.yield()
+        for await _ in resumed.stream { return }
+    }
+
+    func waitPaused() async {
+        for await _ in paused.stream { return }
+    }
+
+    func resume() {
+        resumed.continuation.yield()
+        resumed.continuation.finish()
+    }
+}
+
+/// True exactly once, for the first gated send.
+final class NativeMTPSendGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var taken = false
+
+    func takeFirst() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if taken { return false }
+        taken = true
+        return true
     }
 }
 
