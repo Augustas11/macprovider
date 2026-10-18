@@ -9,7 +9,8 @@ app/
 ├── project.yml                    # XcodeGen input — generates Malibu.xcodeproj
 ├── Malibu.entitlements
 ├── scripts/
-│   └── generate-app-icon.sh       # SVG → 10 PNG sizes via qlmanage (no deps)
+│   ├── generate-app-icon.sh       # brand geometry → 10 AppIcon PNGs + SVG (swiftc, no deps)
+│   └── app-icon/main.swift        # renderer the script compiles with BrandMark.swift
 └── Sources/Malibu/
     ├── MalibuApp.swift            # @main + AppDelegate + menu/onboarding routing
     ├── Info.plist                 # merged with keys from project.yml
