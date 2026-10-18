@@ -6,7 +6,8 @@
 #
 # Payload-only swap of the live provider to a verified candidate tarball:
 # pause and drain, back up the install dir, replace the payload, restart, then
-# watch. A provider process restart (crash loop) or a /v1/status silence of
+# watch (the installed watchdog stays booted out until the candidate, or the
+# restored version, is buyer_serving). A provider process restart (crash loop) or a /v1/status silence of
 # STATUS_TIMEOUT_S restores the backup, waits until the previous version is
 # buyer_serving again, and resumes it. Config and LaunchAgents are never edited.
 #
@@ -189,9 +190,18 @@ LOCKED=0
 OLD_VERSION=""
 
 # finish RC: the single exit; records RC for the operator side.
+# watchdog_note: on an operator-recovery exit the watchdog is deliberately
+# left booted out (it would kick a half-restored provider); say so.
+watchdog_note() {
+  [ -f "$LA_DIR/$WATCHDOG_LABEL.plist" ] || return 0
+  launchctl print "$DOMAIN/$WATCHDOG_LABEL" >/dev/null 2>&1 && return 0
+  say "!!! watchdog $WATCHDOG_LABEL left unloaded; bootstrap it once the provider is buyer_serving: launchctl bootstrap $DOMAIN $LA_DIR/$WATCHDOG_LABEL.plist"
+}
+
 finish() {
   FINISHED=1
   trap - EXIT
+  [ "$1" != 6 ] || watchdog_note
   printf '%s\n' "$1" >"$RESULT_FILE.tmp" && mv "$RESULT_FILE.tmp" "$RESULT_FILE"
   if [ "$LOCKED" = 1 ] && [ "$(cat "$LOCK_DIR/pid" 2>/dev/null || true)" = "$$" ]; then
     rm -rf "$LOCK_DIR"

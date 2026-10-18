@@ -232,6 +232,21 @@ run_rc 0 "watchdog held off during the candidate load" "$SWAP" swap --version "$
 [ "$(installed)" = "$CAND" ] || die "watchdog kick rolled the candidate back"
 [ -f "$T/state/wd" ] || die "watchdog not restarted after the candidate served"
 grep -q "watchdog live.malibu.provider-watchdog restarted" "$T/err" || die "watchdog restart not reported"
+# watchdog after a rollback: restarted when the old version serves again (rc 5);
+# reported as left unloaded when the operator must recover (rc 6).
+reset_install
+verify_bytes "$T/good.tar.gz"
+touch "$T/state/wd"
+echo crash >"$T/state/mode"
+run_rc 5 "watchdog restarted after a rollback" "$SWAP" swap --version "$CAND"
+[ -f "$T/state/wd" ] || die "watchdog not restarted after the rollback served"
+reset_install
+verify_bytes "$T/good.tar.gz"
+touch "$T/state/wd"
+echo dead >"$T/state/mode"
+run_rc 6 "watchdog reported unloaded on operator recovery" "$SWAP" swap --version "$CAND"
+[ ! -f "$T/state/wd" ] || die "watchdog loaded onto a canary that needs the operator"
+grep -q "watchdog live.malibu.provider-watchdog left unloaded" "$T/err" || die "unloaded watchdog not reported"
 rm -f "$HOME/Library/LaunchAgents/live.malibu.provider-watchdog.plist" "$T/state/wd" "$T/state/mode"
 
 # 5b. an install dir reached through a symlinked ancestor is refused untouched.
