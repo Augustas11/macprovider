@@ -2356,9 +2356,9 @@ the current UTC day and `usdc_week` starts Monday 00:00 UTC. `payouts_enabled`
 is the coordinator's `payout.enabled`; when it is false no payout run will pay
 `usdc_pending`, and clients MUST NOT say or imply that one will.
 `last_paid_job_at_utc` is the RFC3339 UTC time of the newest payable request
-(`spec022_payable_request_credits`, `provider_credits > 0`) still in the hot
-ledger; it is omitted when none remains there (retention may have rolled every
-row up, §7.8).
+(`spec022_payable_request_credits`, `provider_credits > 0`) in the last 7 days;
+it is omitted when there is none (the read is bounded so it never scans a
+provider's whole history).
 
 **401 JSON error example:**
 

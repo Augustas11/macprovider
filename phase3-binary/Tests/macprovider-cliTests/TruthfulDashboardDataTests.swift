@@ -118,9 +118,9 @@ final class TruthfulDashboardDataTests: XCTestCase {
             malibuAccrualClient: nil,
             providerToken: nil
         )
-        // Three requests in a window shorter than a minute: 3 req/min, never
-        // completion tokens/s x 60.
-        XCTAssertEqual(try XCTUnwrap(metrics.requestsPerMinute), 3, accuracy: 0.01)
+        // Three requests inside the 15 s floor: 12 req/min, never completion
+        // tokens/s x 60 (500 tokens per request would read as thousands).
+        XCTAssertEqual(try XCTUnwrap(metrics.requestsPerMinute), 12, accuracy: 0.5)
         XCTAssertEqual(metrics.gpuUtilizationPct, 42)
         let frame = try JSONSerialization.jsonObject(with: ControlSocketCodec.encodeMetrics(metrics)) as? [String: Any]
         XCTAssertEqual(frame?["gpu_utilization_pct"] as? Double, 42)

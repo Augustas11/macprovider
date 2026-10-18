@@ -1774,7 +1774,8 @@ enum AgentSnapshotPresenter {
               usdc + malibu > 0 else {
             return nil
         }
-        return String(format: "Unclaimed: $%.2f USDC · %.2f MALIBU · add a payout wallet", usdc, malibu)
+        guard usdc > 0 else { return nil }
+        return String(format: "Unclaimed: $%.2f USDC · add a payout wallet", usdc)
     }
 
     static func relativeTime(_ date: Date, now: Date = Date()) -> String {

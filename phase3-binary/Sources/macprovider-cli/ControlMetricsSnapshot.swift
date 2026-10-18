@@ -56,12 +56,12 @@ public struct ControlMetricsSnapshot: Equatable, Sendable {
         provider snapshot: ProviderSnapshot,
         providerEarnings: ProviderEarningsSummary?
     ) -> ControlMetricsSnapshot {
-        // Requests per minute over the since-last window. The window is at
-        // least a minute for the rate so one request in a short window does
-        // not read as a burst.
+        // Requests per minute over the since-last window (the heartbeat
+        // resets it). A 15 s floor keeps one request just after a reset from
+        // reading as a burst.
         let rpm: Double?
         if let started = snapshot.windowStartedAt {
-            let minutes = max(Date().timeIntervalSince(started), 60) / 60
+            let minutes = max(Date().timeIntervalSince(started), 15) / 60
             rpm = Double(snapshot.requestsServedSinceLast) / minutes
         } else {
             rpm = nil

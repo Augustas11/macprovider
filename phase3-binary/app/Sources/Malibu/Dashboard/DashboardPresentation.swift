@@ -99,14 +99,15 @@ extension AgentSnapshotPresenter {
         if let emission = s.malibuEmission, !emission.active {
             var line = "MALIBU rewards are paused network-wide."
             if let last = emission.lastAccrualAt {
-                line += " No new MALIBU since \(last.formatted(.dateTime.day().month(.abbreviated)))."
+                line += " No new MALIBU since \(shortDate(last))."
             }
             lines.append(line)
         }
         let held = max(0, verdict.malibuHeld ?? 0)
         if let total = s.malibuAccruedAllTime {
             if held > 0 {
-                let notHeld = max(0, verdict.malibuWithdrawable ?? max(0, total - held))
+                // Not held = total minus held; stake locks are not holds.
+                let notHeld = max(0, total - held)
                 lines.append(String(format: "MALIBU balance: %.2f (beta points) · %.2f held · %.2f not held.", total, held, notHeld))
             } else {
                 lines.append(String(format: "MALIBU balance: %.2f (beta points).", total))
@@ -122,7 +123,9 @@ extension AgentSnapshotPresenter {
             break
         }
         if s.malibuEmission?.active == true, verdict.reasonCode == .walletMissing || !verdict.walletBound {
-            lines.append("Add a payout wallet to be eligible for MALIBU.")
+            lines.append(held > 0
+                ? "Add a payout wallet to be eligible for new MALIBU. It does not release held MALIBU."
+                : "Add a payout wallet to be eligible for MALIBU.")
         }
         return lines
     }
@@ -149,34 +152,48 @@ extension AgentSnapshotPresenter {
         if progress.verifiedReceiptCount < progress.requiredReceiptCount {
             parts.append("verified jobs \(formatCount(progress.verifiedReceiptCount)) of \(formatCount(progress.requiredReceiptCount))")
         }
-        let uptimeRequired = Int(progress.uptimeRequiredSeconds / 3_600)
-        var uptimeDone = false
-        if let since = progress.uptimeOKSince, progress.uptimeRequiredSeconds > 0 {
-            let hours = max(0, Int(now.timeIntervalSince(since) / 3_600))
-            if hours >= uptimeRequired {
-                uptimeDone = true
-            } else {
+        // A distinct pair can be E1 with A1 (uptime) or with A4 (app
+        // attestation); only show the uptime window when the pair still
+        // needs it.
+        let met = Set(progress.criteriaMet)
+        let pairMet = progress.unlockPairOKSince != nil
+            || (met.contains("E1") && (met.contains("A1") || met.contains("A4")))
+        let window = Int(progress.requalificationWindowSeconds / 3_600)
+        if !pairMet {
+            let uptimeRequired = Int(progress.uptimeRequiredSeconds / 3_600)
+            if let since = progress.uptimeOKSince, uptimeRequired > 0 {
+                let hours = min(uptimeRequired, max(0, Int(now.timeIntervalSince(since) / 3_600)))
                 parts.append("online without a gap \(hours) of \(uptimeRequired) h")
+            } else if uptimeRequired > 0 {
+                parts.append("needs \(uptimeRequired) h online without a gap")
             }
-        } else if uptimeRequired > 0 {
-            parts.append("needs \(uptimeRequired) h online without a gap")
-        }
-        if progress.requalificationRequired, uptimeDone {
-            let window = Int(progress.requalificationWindowSeconds / 3_600)
+            if progress.requalificationRequired {
+                parts.append("then \(window) h of requalification")
+            }
+        } else if progress.requalificationRequired {
             if let pairSince = progress.unlockPairOKSince {
                 let hours = min(window, max(0, Int(now.timeIntervalSince(pairSince) / 3_600)))
                 parts.append("requalifying \(hours) of \(window) h")
             } else {
-                parts.append("then \(window) h of requalification")
+                parts.append("\(window) h of requalification starts at the next hourly check")
             }
-        } else if progress.requalificationRequired, !uptimeDone {
-            parts.append("then \(Int(progress.requalificationWindowSeconds / 3_600)) h of requalification")
         }
         if let earliest = progress.earliestPromotionAt {
-            let date = earliest.formatted(.dateTime.day().month(.abbreviated))
+            let date = shortDate(earliest)
             parts.append(earliest <= now ? "Trusted at the next hourly check" : "earliest Trusted \(date) if online without a gap")
         }
         return parts.joined(separator: " · ") + "." + suffix
+    }
+
+    static func shortDate(_ date: Date) -> String {
+        date.formatted(.dateTime.day().month(.abbreviated))
+    }
+
+    /// "today (UTC)" only for CLIs whose counters roll at the UTC day
+    /// (#2029, shipped with `metrics_request_rate_v1`); older CLIs roll at
+    /// local midnight.
+    static func todayLabel(_ s: AgentSnapshot) -> String {
+        s.localStatusCapabilities.contains("metrics_request_rate_v1") ? "today (UTC)" : "today"
     }
 
     /// One line for the Mac's health, from reported values only.
@@ -205,7 +222,7 @@ extension AgentSnapshotPresenter {
 
     static func requestsLine(_ s: AgentSnapshot) -> String {
         [
-            "\(s.requestsServedToday.map(formatCount) ?? "—") today (UTC)",
+            "\(s.requestsServedToday.map(formatCount) ?? "—") \(todayLabel(s))",
             "\(s.requestsServedAllTime.map(formatCount) ?? "—") all-time",
             s.requestsPerMinute.map { String(format: "%.1f req/min", $0) },
         ].compactMap { $0 }.joined(separator: " · ")
@@ -216,7 +233,7 @@ extension AgentSnapshotPresenter {
             guard input != nil || output != nil else { return "— \(suffix)" }
             return "\(input.map { formatTokens($0) } ?? "—") in / \(output.map { formatTokens($0) } ?? "—") out \(suffix)"
         }
-        return pair(s.inputTokensToday, s.outputTokensToday, "today (UTC)")
+        return pair(s.inputTokensToday, s.outputTokensToday, todayLabel(s))
             + "\n" + pair(s.inputTokensAllTime, s.outputTokensAllTime, "all-time")
     }
 

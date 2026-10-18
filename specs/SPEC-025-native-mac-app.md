@@ -591,7 +591,7 @@ time (60–240 s for the first model) in the background.
   window directly — there is **no popover** with USDC/MALIBU/uptime/GPU/latency in
   the shipped build (`MenuBarController.swift:56`); the menu exposes a plain **Quit**
   only, with **no "Quit and Uninstall"** item (`MenuBarController.swift:108`).
-- Dashboard (SwiftUI window, v0.31): one **status pill** (Serving, Paused,
+- Dashboard (SwiftUI window, v0.32): one **status pill** (Serving, Paused,
   Setting up, Not receiving work, Needs attention, Not running) describing
   customer serving only; a status notice with one action appears only when the
   Mac is not serving, and Reset/Export appear on the main surface only in an

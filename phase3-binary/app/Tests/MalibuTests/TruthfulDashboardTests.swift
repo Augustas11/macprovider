@@ -110,7 +110,8 @@ final class TruthfulDashboardTests: XCTestCase {
 
     func testEmissionOffIsStatedNetworkWide() {
         let card = AgentSnapshotPresenter.earningsCard(auditSnapshot(), now: now)
-        XCTAssertEqual(card.malibuLines.first, "MALIBU rewards are paused network-wide. No new MALIBU since 18 Aug.")
+        let lastAccrual = ISO8601DateFormatter().date(from: "2026-08-18T03:05:00Z")!
+        XCTAssertEqual(card.malibuLines.first, "MALIBU rewards are paused network-wide. No new MALIBU since \(AgentSnapshotPresenter.shortDate(lastAccrual)).")
         XCTAssertNil(card.hardwareBlocker, "an earning blocker is noise while emission is off")
 
         var running = auditSnapshot(emission: .some(MalibuEmissionState(active: true)))
@@ -145,10 +146,43 @@ final class TruthfulDashboardTests: XCTestCase {
 
     func testTrustShowsRealProgressAndETA() {
         let line = AgentSnapshotPresenter.earningsCard(auditSnapshot(), now: now).trustLine
+        let earliest = ISO8601DateFormatter().date(from: "2026-10-22T03:52:00Z")!
         XCTAssertEqual(
             line,
-            "Trust: Provisional · online without a gap 44 of 72 h · then 72 h of requalification · earliest Trusted 22 Oct if online without a gap. Trust affects MALIBU only, not USDC."
+            "Trust: Provisional · online without a gap 44 of 72 h · then 72 h of requalification · earliest Trusted \(AgentSnapshotPresenter.shortDate(earliest)) if online without a gap. Trust affects MALIBU only, not USDC."
         )
+    }
+
+    /// E1 with A4 is a valid pair: no uptime requirement is shown.
+    func testTrustWithAttestationPairShowsRequalificationNotUptime() {
+        let pairSince = now.addingTimeInterval(-10 * 3_600)
+        let snapshot = auditSnapshot(trustProgress: .some(MalibuTrustProgress(
+            tier: .provisional,
+            requalificationRequired: true,
+            unlockPairOKSince: pairSince,
+            verifiedReceiptCount: 1_500,
+            criteriaMet: ["E1", "A4"],
+            earliestPromotionAt: pairSince.addingTimeInterval(72 * 3_600)
+        )))
+        let line = AgentSnapshotPresenter.earningsCard(snapshot, now: now).trustLine ?? ""
+        XCTAssertTrue(line.contains("requalifying 10 of 72 h"), line)
+        XCTAssertFalse(line.contains("online without a gap 0"), line)
+        XCTAssertFalse(line.contains("needs 72 h"), line)
+    }
+
+    func testNotHeldIsTotalMinusHeldNotNetOfStakeLocks() {
+        var snapshot = auditSnapshot()
+        snapshot.updateRewardInputs(malibuWithdrawable: 10)
+        XCTAssertTrue(AgentSnapshotPresenter.earningsCard(snapshot, now: now).malibuLines
+            .contains("MALIBU balance: 120.00 (beta points) · 100.00 held · 20.00 not held."))
+    }
+
+    func testWalletGuidanceNeverSuggestsReleasingHeldMalibu() {
+        var snapshot = auditSnapshot(emission: .some(MalibuEmissionState(active: true)))
+        snapshot.walletBound = false
+        snapshot.updateRewardInputs(walletBound: false)
+        let lines = AgentSnapshotPresenter.earningsCard(snapshot, now: now).malibuLines
+        XCTAssertTrue(lines.contains("Add a payout wallet to be eligible for new MALIBU. It does not release held MALIBU."), "\(lines)")
     }
 
     func testTrustWithoutEvaluatorWindowsShowsTierOnly() {

@@ -28,8 +28,9 @@ final class DashboardViewTests: XCTestCase {
         snapshot.networkState = "buyer_serving"
 
         XCTAssertEqual(AgentSnapshotPresenter.modelLine(snapshot), "Connected")
-        XCTAssertEqual(AgentSnapshotPresenter.requestsLine(snapshot), "— today (UTC) · — all-time")
-        XCTAssertEqual(AgentSnapshotPresenter.tokenLine(snapshot), "— today (UTC)\n— all-time")
+        XCTAssertEqual(AgentSnapshotPresenter.requestsLine(snapshot), "— today · — all-time",
+                       "an older CLI rolls at local midnight, so no UTC label")
+        XCTAssertEqual(AgentSnapshotPresenter.tokenLine(snapshot), "— today\n— all-time")
         XCTAssertEqual(AgentSnapshotPresenter.runLine(snapshot), "—")
         XCTAssertEqual(AgentSnapshotPresenter.diagnosticChips(snapshot), [], "no 0 queued / Thermal OK / GPU n/a")
         XCTAssertEqual(AgentSnapshotPresenter.dashboardHeadline(snapshot), "Provider is ready")
@@ -54,6 +55,7 @@ final class DashboardViewTests: XCTestCase {
         snapshot.uptimeSec = 35_880
         snapshot.restartCount = 2000
         snapshot.restartCount7d = 1
+        snapshot.localStatusCapabilities = ["metrics_request_rate_v1"]
 
         XCTAssertEqual(AgentSnapshotPresenter.requestsLine(snapshot), "142 today (UTC) · 8,204 all-time · 3.1 req/min")
         XCTAssertTrue(AgentSnapshotPresenter.tokenLine(snapshot).hasPrefix("1.2M in / 3.8M out today (UTC)"))

@@ -1329,7 +1329,7 @@ func (h *handler) writeProviderEarnings(w http.ResponseWriter, r *http.Request, 
 		unavailable("rate_card", err)
 		return
 	}
-	lastPaidJobAt, err := lastPaidRequestAt(ctx, h.store.reader(), providerID)
+	lastPaidJobAt, err := lastPaidRequestAt(ctx, h.store.reader(), providerID, time.Now().UTC())
 	if err != nil {
 		unavailable("last_paid_job", err)
 		return
@@ -1808,14 +1808,19 @@ func (h *handler) providerEarningsFiguresFromViewOnce(ctx context.Context, provi
 	return out, nil
 }
 
-// lastPaidRequestAt is the time of the provider's newest payable request
-// still in the hot ledger, RFC3339 UTC, or "" when none is there (retention
-// may have rolled every row up). The provider_id, ts_utc index lets SQLite
-// stop at the first payable row walking backwards.
-func lastPaidRequestAt(ctx context.Context, q sqlQueryer, providerID string) (string, error) {
+// lastPaidRequestAtLookback bounds the last-credited-job read to recent rows
+// so a provider with a long history and no recent payable work cannot make
+// every earnings read scan its whole hot ledger.
+const lastPaidRequestAtLookback = 7 * 24 * time.Hour
+
+// lastPaidRequestAt is the time of the provider's newest payable request in
+// the last lastPaidRequestAtLookback, RFC3339 UTC, or "" when there is none.
+// The provider_id, ts_utc index bounds the walk to that window.
+func lastPaidRequestAt(ctx context.Context, q sqlQueryer, providerID string, now time.Time) (string, error) {
 	var raw sql.NullString
 	err := q.QueryRowContext(ctx, `SELECT ts_utc FROM spec022_payable_request_credits
-WHERE provider_id=? AND provider_credits > 0 ORDER BY ts_utc DESC LIMIT 1`, providerID).Scan(&raw)
+WHERE provider_id=? AND ts_utc >= ? AND provider_credits > 0 ORDER BY ts_utc DESC LIMIT 1`,
+		providerID, sqliteTimeText(now.Add(-lastPaidRequestAtLookback))).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && !raw.Valid) {
 		return "", nil
 	}

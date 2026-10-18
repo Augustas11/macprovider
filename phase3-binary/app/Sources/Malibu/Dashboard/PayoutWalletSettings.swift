@@ -32,7 +32,8 @@ struct PayoutWalletSettingsSection: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            if agent.snapshot.payoutsEnabled == false {
+            if agent.snapshot.payoutsEnabled == false,
+               AgentSnapshotPresenter.rewardVerdict(agent.snapshot).providerEarningsFresh {
                 Text("Payouts are not enabled yet in beta.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
