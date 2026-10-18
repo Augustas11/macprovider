@@ -219,7 +219,7 @@ func (s *Server) PrepareNativeMTPCanaryBankReload(releaseID string, bankJSON, ba
 		return func() {}, nil
 	}
 	transition := &nativeMTPCanaryBankTransition{bank: verified, releaseID: releaseID}
-	return func() { s.artifactIdentitySets.stageCanaryBank(transition) }, nil
+	return func() { s.nativeMTPCanaryStagedBank.Store(transition) }, nil
 }
 
 // applyNativeMTPCanaryBankTransitionLocked installs a staged bank transition

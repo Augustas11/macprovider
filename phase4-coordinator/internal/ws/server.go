@@ -160,9 +160,13 @@ type Server struct {
 	nativeMTPCanaryStore          NativeMTPCanaryStateStore
 	nativeMTPCanaryBanks          atomic.Pointer[nativeMTPCanaryBankSet]
 	nativeMTPCanaryBoot           *nativeMTPCanaryBootBanks
-	nativeMTPCanaryJitter         func(time.Duration) time.Duration
-	tokens                        TokenValidator
-	relayBlindKeys                RelayBlindKeySink
+	// nativeMTPCanaryStagedBank is the canary bank transition a reload
+	// staged; the publication that installs the catalog applies it
+	// (SPEC-031-R033).
+	nativeMTPCanaryStagedBank atomic.Pointer[nativeMTPCanaryBankTransition]
+	nativeMTPCanaryJitter     func(time.Duration) time.Duration
+	tokens                    TokenValidator
+	relayBlindKeys            RelayBlindKeySink
 	// SPEC-003 v0.8 FR-C9.1 — separate issuer field so validator and
 	// issuer roles can be wired independently. Production wires the same
 	// concrete *auth.Store to both (see main.go), but tests can override
@@ -717,7 +721,7 @@ func (s *Server) publishReleaseLocked(catalog *autotune.Catalog, compatible []*a
 // write lock.
 func (s *Server) installCatalogLocked(catalog *autotune.Catalog, compatible []*autotune.Catalog) {
 	next := buildCompatibleCatalogSet(catalog, compatible)
-	transition := s.artifactIdentitySets.takeStagedCanaryBank()
+	transition := s.nativeMTPCanaryStagedBank.Swap(nil)
 	s.autotuneCatalogMu.Lock()
 	s.autotuneCatalog = catalog
 	s.autotuneCompatibleCatalogs = next
@@ -925,6 +929,7 @@ func WithReleaseStaging() Option {
 // before publication, so the live release stays whole and no later
 // publication promotes the rejected parts.
 func (s *Server) DiscardStagedRelease() {
+	s.nativeMTPCanaryStagedBank.Store(nil)
 	tier2.DiscardStaged(s.artifactIdentitySets.discardStaged())
 }
 
