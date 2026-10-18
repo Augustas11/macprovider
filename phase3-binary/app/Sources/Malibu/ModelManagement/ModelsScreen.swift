@@ -44,7 +44,7 @@ enum ModelsPresentation {
     /// The name shown for a row: the catalog-verified key when the coordinator
     /// verified it, otherwise the provider-reported name.
     static func name(_ row: MalibuModelRow) -> String {
-        row.catalogVerifiedModelKey ?? row.displayID
+        ShellText.display(row.catalogVerifiedModelKey ?? row.displayID)
     }
 
     static func sizeText(_ row: MalibuModelRow) -> String {
@@ -363,7 +363,7 @@ struct ModelsScreen: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .textSelection(.enabled)
-                        .help(row.displayID)
+                        .help(ShellText.display(row.displayID))
                 }
                 if let reason = ModelsPresentation.reason(row) {
                     Text(reason)
@@ -431,7 +431,7 @@ struct ModelsScreen: View {
             case .evaluate:
                 Button(String(localized: "Preflight", comment: "Short BYOM activation action")) { start(row) }
                     .disabled(!store.canPerformModelAction)
-                    .accessibilityLabel(Text(String(localized: "Evaluate \(row.displayID)", comment: "Evaluation accessibility label")))
+                    .accessibilityLabel(Text(String(localized: "Evaluate \(ShellText.display(row.displayID))", comment: "Evaluation accessibility label")))
             case .none:
                 EmptyView()
             }
@@ -442,7 +442,7 @@ struct ModelsScreen: View {
             }
             .buttonStyle(.borderless)
             .help(String(localized: "Why this model can or can't be served here", comment: "Model details help"))
-            .accessibilityLabel(Text(String(localized: "Details for \(row.displayID)", comment: "Model details accessibility label")))
+            .accessibilityLabel(Text(String(localized: "Details for \(ShellText.display(row.displayID))", comment: "Model details accessibility label")))
         }
     }
 

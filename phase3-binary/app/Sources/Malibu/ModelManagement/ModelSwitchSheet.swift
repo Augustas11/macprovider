@@ -13,7 +13,7 @@ enum SwitchSheetPresentation {
 
     static let steps = ["requested", "loading", "draining", "loaded"]
 
-    static let notStarted = String(localized: "The provider's model controls were not ready, so nothing changed. Refresh Models and try again.", comment: "Switch did not start")
+    static let notStarted = String(localized: "Nothing changed: the provider's model controls were not ready or the model catalog changed since this opened. Review Models and try again.", comment: "Switch did not start")
 
     static func stepTitle(_ phase: String) -> String {
         switch phase {

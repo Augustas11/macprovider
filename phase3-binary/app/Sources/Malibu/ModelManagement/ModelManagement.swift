@@ -2215,6 +2215,12 @@ final class ModelManagementStore: ObservableObject {
     private var catalogProjectionExpiryTask: Task<Void, Never>?
     /// When the displayed projection stops being usable (SPEC-044-R003).
     private var catalogProjectionFreshUntil: Date?
+    /// Status-driven refreshes skip the catalog read until this time while a
+    /// usable projection is on screen; Retry and model actions always read.
+    private var catalogBackgroundRefreshNotBefore: Date?
+    var catalogBackgroundRefreshSeconds: TimeInterval = 120
+    /// Total time the pool-binding readback may hold a refresh open.
+    var poolBindingReadBudgetSeconds: TimeInterval = 20
     /// The last catalog refresh failed while a usable projection stayed on screen.
     @Published private(set) var catalogRefreshFailed = false
 
@@ -2451,9 +2457,14 @@ final class ModelManagementStore: ObservableObject {
 
     private var cooldownUntil: Date?
 
+    /// `background` marks a refresh driven by a provider status observation:
+    /// it skips the catalog read while a usable projection is recent, so
+    /// status polling neither re-reads the coordinator every 15 s nor keeps
+    /// closing model actions behind `.loadingList`.
     func refresh(
         currentModelID: String?,
-        peer: MalibuModelPeerEvidence = .unavailable
+        peer: MalibuModelPeerEvidence = .unavailable,
+        background: Bool = false
     ) async {
         updatePeerEvidence(peer)
         if let pendingSwitch {
@@ -2500,9 +2511,14 @@ final class ModelManagementStore: ObservableObject {
             return
         }
         let configuredModel = currentModelID ?? ProviderConfig.readModel(paths: paths)
+        let servedModelUnchanged = configuredModel.map(modelIdentityKey) == self.currentModelID.map(modelIdentityKey)
         self.currentModelID = configuredModel
         let supportsLegacyList = readySwitchCapabilityAvailable
         if catalogEconomicsCapabilityAvailable {
+            if background, servedModelUnchanged, hasUsableCatalogProjection, !catalogRefreshFailed,
+               let notBefore = catalogBackgroundRefreshNotBefore, notBefore > Date() {
+                return
+            }
             await refreshCatalogEconomics(configuredModel: configuredModel)
             return
         }
@@ -2620,6 +2636,7 @@ final class ModelManagementStore: ObservableObject {
         catalogProjectionExpiryTask?.cancel()
         catalogProjectionExpiryTask = nil
         catalogProjectionFreshUntil = nil
+        catalogBackgroundRefreshNotBefore = nil
         catalogRefreshFailed = false
         catalogProjectionProcessLaunchID = nil
         catalogProjectionSequence = nil
@@ -2658,6 +2675,7 @@ final class ModelManagementStore: ObservableObject {
             self.catalogRefreshFailed = false
             // Install the freshness deadline before any further await.
             scheduleCatalogProjectionExpiry(document)
+            catalogBackgroundRefreshNotBefore = Date().addingTimeInterval(catalogBackgroundRefreshSeconds)
             // The refresh stays a blocking operation until the pool-binding
             // read finishes, so a status-driven refresh or a model action
             // cannot overlap it on the shared CLI runner.
@@ -2773,7 +2791,7 @@ final class ModelManagementStore: ObservableObject {
     /// Returns false when the switch did not start (controls not ready).
     @discardableResult
     func switchTo(_ row: MalibuModelRow, operationName: String = "switch") async -> Bool {
-        guard row.action == .switchModel, rowIsInCurrentProjection(row), canPerformModelAction else { return false }
+        guard row.action == .switchModel, rowStillCurrent(row), canPerformModelAction else { return false }
         let from = currentModelID
         activeSwitchTransactionID = nil
         terminalSwitchTransactionID = nil
@@ -2997,17 +3015,16 @@ final class ModelManagementStore: ObservableObject {
     /// displayed row. Read-only; failed, malformed, missing, or mismatched
     /// status clears the prior binding and leaves the row in an unavailable
     /// pool-eligibility state instead of showing an unnamed positive claim.
+    /// Each read is bounded like a list read, and the readback as a whole by
+    /// `poolBindingReadBudgetSeconds`; rows it does not reach keep no binding.
     private func refreshPoolBindings() async {
         var bindings: [String: MalibuBYOMPoolBinding] = [:]
+        let budgetEnds = Date().addingTimeInterval(poolBindingReadBudgetSeconds)
         for row in rows where row.earningPathClass == "pool_attested_earning" || row.poolScopeCandidate {
-            guard let result = try? await cli.run(
-                arguments: [
-                    "models", "admission", "status", row.id, "--json", "--config", paths.configFile.path,
-                ] + byomAdapterSettings.cliArguments,
-                peer: peerEvidence,
-                priority: .interactive,
-                onLine: { _ in }
-            ), result.exitCode == 0,
+            guard Date() < budgetEnds else { break }
+            guard let result = try? await runBoundedListCommand(arguments: [
+                "models", "admission", "status", row.id, "--json", "--config", paths.configFile.path,
+            ] + byomAdapterSettings.cliArguments), result.exitCode == 0,
                 let status = try? Self.decodeStrict(MalibuBYOMAdmissionStatusDocument.self, from: result.stdout),
                 (try? status.validated(expectedCandidateID: row.id)) != nil,
                 status.providerGuidance.earningPathClass == row.earningPathClass,
@@ -3062,6 +3079,8 @@ final class ModelManagementStore: ObservableObject {
 
     private func commitSuccessfulSwitch(_ pending: PendingSwitch) {
         pendingSwitch = nil
+        // Rows are blocked until the next projection; read it on the next status.
+        catalogBackgroundRefreshNotBefore = nil
         currentModelID = pending.targetModelID
         previousModelID = pending.fromModelID
         previousModelAt = Date()

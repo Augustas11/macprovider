@@ -1349,6 +1349,39 @@ final class ModelManagementTests: XCTestCase {
     }
 
     @MainActor
+    func testStatusDrivenRefreshSkipsARecentProjectionButRetryReads() async throws {
+        func projection(_ sequence: UInt64) -> ModelCLIResult {
+            ModelCLIResult(
+                exitCode: 0,
+                stdout: catalogEconomicsJSON(
+                    rows: [trustedEconomicsRowJSON()],
+                    generatedAt: Self.timestamp(offset: -1),
+                    projectionSequence: sequence
+                ),
+                stderr: ""
+            )
+        }
+        let cli = FakeModelCLI(results: [projection(1), projection(2)])
+        let store = ModelManagementStore(
+            cli: cli,
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.backgroundRefresh.\(UUID().uuidString)")!
+        )
+        let peer = peer(for: MalibuModelCapabilityManifest.catalogEconomics)
+
+        await store.refresh(currentModelID: "other/model", peer: peer, background: true)
+        XCTAssertEqual(cli.invocations.count, 1, "the first status observation reads the catalog")
+        XCTAssertEqual(store.operation, .idle)
+
+        await store.refresh(currentModelID: "other/model", peer: peer, background: true)
+        XCTAssertEqual(cli.invocations.count, 1, "a status observation does not re-read a recent projection")
+        XCTAssertEqual(store.operation, .idle, "model actions stay open")
+
+        await store.refresh(currentModelID: "other/model", peer: peer)
+        XCTAssertEqual(cli.invocations.count, 2, "Retry always reads")
+    }
+
+    @MainActor
     func testSwitchReportsNotStartedWhenControlsAreNotReady() async throws {
         let cli = FakeModelCLI(results: [
             ModelCLIResult(

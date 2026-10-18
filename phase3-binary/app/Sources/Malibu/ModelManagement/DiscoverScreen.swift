@@ -325,7 +325,7 @@ struct DiscoverScreen: View {
                         .truncationMode(.middle)
                         .textSelection(.enabled)
                     if row.catalogVerifiedModelKey != nil, row.displayID != row.catalogVerifiedModelKey {
-                        Text(String(localized: "Provider-reported: \(row.displayID)", comment: "Provider-reported model name shown under the catalog-verified identity"))
+                        Text(String(localized: "Provider-reported: \(ShellText.display(row.displayID))", comment: "Provider-reported model name shown under the catalog-verified identity"))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .textSelection(.enabled)
@@ -409,7 +409,7 @@ struct DiscoverScreen: View {
                     }
                     ForEach(store.otherMLXModels) { model in
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(model.id)
+                            Text(ShellText.display(model.id))
                                 .font(.caption.monospaced())
                                 .lineLimit(1)
                                 .truncationMode(.middle)

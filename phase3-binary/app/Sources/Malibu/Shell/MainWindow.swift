@@ -173,7 +173,8 @@ struct MainShellView: View {
             }
             await modelStore.refresh(
                 currentModelID: agent.snapshot.currentModelID,
-                peer: MalibuModelPeerEvidence(snapshot: agent.snapshot)
+                peer: MalibuModelPeerEvidence(snapshot: agent.snapshot),
+                background: true
             )
             await modelStore.startBackgroundCheckIfEligible(thermalState: agent.snapshot.thermalState)
         }
