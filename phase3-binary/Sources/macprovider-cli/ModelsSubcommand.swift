@@ -952,7 +952,7 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
             demand: inputs.demand,
             candidateCatalog: inputs.candidate,
             rateCard: inputs.rateCard
-        ).withAdmissionReadOutcome(complete: admissions.complete)
+        ).withAdmissionReadOutcome(missedCandidateIDs: admissions.missedCandidateIDs)
         // SPEC-044's projection warning codes are a closed enum of v0.1 feed
         // classes; the artifact-feed classes are reported beside them here
         // rather than mapped onto codes that would misattribute the failure to
@@ -979,7 +979,7 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
     private func readAdmissionStatuses(
         discovery: BYOMDiscoveryWire
     ) async -> CatalogEconomicsAdmissionReader.Result {
-        let none = CatalogEconomicsAdmissionReader.Result(statuses: [:], complete: true)
+        let none = CatalogEconomicsAdmissionReader.Result(statuses: [:], missedCandidateIDs: [])
         guard !skipCoordinatorStatus,
               let resolved = try? loadModelAdmissionRuntimeConfig(),
               let baseURL = BYOMModelAdmissionClient.httpBaseURL(from: resolved.coordinatorURL)

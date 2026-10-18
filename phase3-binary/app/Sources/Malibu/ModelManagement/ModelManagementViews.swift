@@ -106,9 +106,6 @@ struct ModelSwitcherSheet: View {
                     }
                     .accessibilityLabel(Text(String(localized: "Retry model catalog refresh", comment: "Catalog retry accessibility label")))
                 }
-            } else if store.rows.isEmpty {
-                Text(String(localized: "No supported models were returned by the provider.", comment: "Empty model catalog"))
-                    .foregroundStyle(.secondary)
             } else {
                 if store.catalogProjectionRetryAvailable {
                     HStack(spacing: 8) {
@@ -120,48 +117,53 @@ struct ModelSwitcherSheet: View {
                         .accessibilityLabel(Text(String(localized: "Retry model catalog refresh", comment: "Catalog retry accessibility label")))
                     }
                 }
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-                        if store.rows.contains(where: { $0.providerCompletionPayoutUSDPerMillionTokens != nil }) {
-                            Text(String(localized: "Catalog rates are informational. Final provider credit depends on eligible demand, uptime, accepted requests, trust state, routing, token mix, settlement, and active policy status.", comment: "Catalog economics disclosure"))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        section(ModelFeatureUI.current, category: .current)
-                        section(ModelFeatureUI.ready, category: .ready)
-                        section(ModelFeatureUI.networkCatalog, category: .networkCatalog)
-                        section(ModelFeatureUI.needsPreparation, category: .needsPreparation)
-                        section(ModelFeatureUI.blocked, category: .blocked)
-                        if let previous = store.previousModelID {
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text(String(localized: "Previous confirmed model", comment: "Revert section"))
-                                    .font(.headline)
-                                Text(previous)
-                                    .font(.caption.monospaced())
-                                    .textSelection(.enabled)
-                                Button(String(localized: "Revert to \(previous)", comment: "Revert action with target model")) {
-                                    if let row = store.rows.first(where: {
-                                        $0.id.lowercased(with: nil) == previous.lowercased(with: nil)
-                                    }) {
-                                        pendingSwitch = row
-                                        pendingOperationName = "revert"
-                                        showConfirmation = true
-                                    } else {
-                                        Task { await store.revert() }
+                if store.rows.isEmpty {
+                    Text(String(localized: "No supported models were returned by the provider.", comment: "Empty model catalog"))
+                        .foregroundStyle(.secondary)
+                } else {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 16) {
+                            if store.rows.contains(where: { $0.providerCompletionPayoutUSDPerMillionTokens != nil }) {
+                                Text(String(localized: "Catalog rates are informational. Final provider credit depends on eligible demand, uptime, accepted requests, trust state, routing, token mix, settlement, and active policy status.", comment: "Catalog economics disclosure"))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            section(ModelFeatureUI.current, category: .current)
+                            section(ModelFeatureUI.ready, category: .ready)
+                            section(ModelFeatureUI.networkCatalog, category: .networkCatalog)
+                            section(ModelFeatureUI.needsPreparation, category: .needsPreparation)
+                            section(ModelFeatureUI.blocked, category: .blocked)
+                            if let previous = store.previousModelID {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text(String(localized: "Previous confirmed model", comment: "Revert section"))
+                                        .font(.headline)
+                                    Text(previous)
+                                        .font(.caption.monospaced())
+                                        .textSelection(.enabled)
+                                    Button(String(localized: "Revert to \(previous)", comment: "Revert action with target model")) {
+                                        if let row = store.rows.first(where: {
+                                            $0.id.lowercased(with: nil) == previous.lowercased(with: nil)
+                                        }) {
+                                            pendingSwitch = row
+                                            pendingOperationName = "revert"
+                                            showConfirmation = true
+                                        } else {
+                                            Task { await store.revert() }
+                                        }
+                                    }
+                                    .disabled(!store.canRevert)
+                                    .accessibilityLabel(Text(String(localized: "Revert to previous model", comment: "Revert accessibility label")))
+                                    if let reason = store.revertUnavailableReason {
+                                        Text(reason)
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                            .fixedSize(horizontal: false, vertical: true)
                                     }
                                 }
-                                .disabled(!store.canRevert)
-                                .accessibilityLabel(Text(String(localized: "Revert to previous model", comment: "Revert accessibility label")))
-                                if let reason = store.revertUnavailableReason {
-                                    Text(reason)
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                }
                             }
+                            historyView
                         }
-                        historyView
                     }
                 }
             }

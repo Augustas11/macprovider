@@ -81,6 +81,35 @@ final class CatalogEconomicsFetchTests: XCTestCase {
         XCTAssertLessThanOrEqual(CoordinatorFeedFetcher.feedDeadlineSeconds, 5)
     }
 
+    func testDeadlineReportsQueuedAndInFlightReadsAsMissed() async {
+        let result = await CatalogEconomicsAdmissionReader.read(
+            candidateIDs: ["a", "b", "c"],
+            deadlineSeconds: 0.3,
+            maxConcurrentReads: 1
+        ) { id in
+            if id == "a" { return Self.status(id) }
+            try? await Task.sleep(nanoseconds: 30_000_000_000)
+            return nil
+        }
+        XCTAssertEqual(Set(result.statuses.keys), ["a"])
+        XCTAssertEqual(result.missedCandidateIDs, ["b", "c"], "the in-flight read and the queued one")
+    }
+
+    func testBoundedDataRefusesAnOversizedBody() async throws {
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        let small = URLRequest(url: URL(string: "data:application/json;base64,e30=")!)
+        let (data, _) = try await session.boundedData(for: small, limit: 16)
+        XCTAssertEqual(String(decoding: data, as: UTF8.self), "{}")
+        let large = URLRequest(url: URL(string: "data:text/plain;base64," + Data(repeating: 0x41, count: 64).base64EncodedString())!)
+        do {
+            _ = try await session.boundedData(for: large, limit: 16)
+            XCTFail("expected the size bound to refuse the body")
+        } catch {
+            XCTAssertEqual((error as? URLError)?.code, .dataLengthExceedsMaximum)
+        }
+    }
+
     func testCatalogEconomicsFeedURLsCoverSignedPairsWithoutDuplicates() {
         let offline = CoordinatorFeedFetcher.catalogEconomicsFeedURLs(matcherBaseURL: nil)
         XCTAssertEqual(offline.count, 6)
@@ -89,7 +118,11 @@ final class CatalogEconomicsFetchTests: XCTestCase {
         XCTAssertEqual(Set(live).count, live.count)
         XCTAssertTrue(live.contains { $0.lastPathComponent == "catalog-artifacts.sig" })
         let elsewhere = CoordinatorFeedFetcher.catalogEconomicsFeedURLs(matcherBaseURL: Self.base)
-        XCTAssertEqual(elsewhere.count, 10)
+        XCTAssertEqual(elsewhere.count, 8, "only the artifact pair is read from the matcher base")
+        XCTAssertEqual(
+            Set(elsewhere.filter { $0.host == Self.base.host }.map(\.lastPathComponent)),
+            ["catalog-artifacts", "catalog-artifacts.sig"]
+        )
     }
 
     func testFeedSessionIsBoundedAndHonoursHTTPCaching() {
@@ -136,6 +169,7 @@ final class CatalogEconomicsFetchTests: XCTestCase {
         }
         let elapsed = Date().timeIntervalSince(started)
         XCTAssertFalse(result.complete)
+        XCTAssertEqual(result.missedCandidateIDs, ["slow"])
         XCTAssertEqual(Set(result.statuses.keys), ["fast-a", "fast-b"])
         XCTAssertLessThan(elapsed, 2, "the deadline bounds the read, not the slowest source")
     }
@@ -145,6 +179,7 @@ final class CatalogEconomicsFetchTests: XCTestCase {
             id == "a" ? nil : Self.status(id)
         }
         XCTAssertTrue(result.complete)
+        XCTAssertTrue(result.missedCandidateIDs.isEmpty)
         XCTAssertEqual(Array(result.statuses.keys), ["b"])
         let empty = await CatalogEconomicsAdmissionReader.read(candidateIDs: []) { _ in
             XCTFail("no candidates, no reads")
