@@ -174,6 +174,7 @@ test-dist-release:
 	bash -n scripts/lib/autotune-activate.sh
 	bash scripts/test-tier2-provider-artifact.sh
 	bash scripts/test-tier2-provider-release.sh
+	bash scripts/test-mlx-metallib-kernels.sh
 	bash scripts/test-tier2-activation-safety.sh
 	bash scripts/test-tier2-attestation-safety.sh
 	bash scripts/test-tier2-behavioral-safety.sh
@@ -190,6 +191,7 @@ test-dist-release:
 	bash scripts/ops/test-live-lock.sh
 	bash scripts/ops/test-runbook-commands.sh
 	bash scripts/ops/test-entrypoints.sh
+	bash scripts/ops/test-canary-swap.sh
 
 # Installer, watchdog, and coordinator/gateway deploy scripts.
 test-dist-deploy:

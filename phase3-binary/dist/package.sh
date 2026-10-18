@@ -159,19 +159,37 @@ case "$PACKAGE_HOST_ARCH" in
     exit 1
     ;;
 esac
-if [ ! -f "$PRODUCTS/mlx.metallib" ]; then
-  if [ -f "$PRODUCTS/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib" ]; then
-    cp "$PRODUCTS/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib" "$PRODUCTS/mlx.metallib"
-  else
-    echo "==> Building mlx.metallib for CLI artifact..."
-    MLX_SWIFT_CHECKOUT="$RELEASE_DIR/SourcePackages/checkouts/mlx-swift" \
-      "$PHASE3_DIR/scripts/build-mlx-metallib.sh" "$PRODUCTS"
-  fi
-fi
+# Always compile the full MLX kernel library from the resolved mlx-swift
+# checkout. SwiftPM's bundled default.metallib holds only the kernel sources
+# mlx-swift copied into mlx-generated/metal, which lags the pinned MLX core
+# (core v0.32.4 needs gather_mm_offsets, gated_delta_update, ...; the 1.8.254
+# candidate shipped that partial library and crash-looped on MoE models).
+# Both shipped libraries get the same complete bytes: MLX loads the colocated
+# mlx.metallib first and falls back to the bundle's default.metallib.
+MLX_SWIFT_RESOLVED_CHECKOUT="$RELEASE_DIR/SourcePackages/checkouts/mlx-swift"
+MLX_BUNDLE_METALLIB="$PRODUCTS/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib"
+MLX_REQUIRED_KERNELS="$PHASE3_DIR/mlx-metallib-required-kernels.json"
+echo "==> Building mlx.metallib for CLI artifact..."
+rm -f "$PRODUCTS/mlx.metallib"
+MLX_SWIFT_CHECKOUT="$MLX_SWIFT_RESOLVED_CHECKOUT" \
+  "$PHASE3_DIR/scripts/build-mlx-metallib.sh" "$PRODUCTS"
 [ -f "$PRODUCTS/mlx.metallib" ] || {
   echo "FATAL: mlx.metallib not found — Metal toolchain may be missing"
   exit 1
 }
+if [ -f "$MLX_BUNDLE_METALLIB" ]; then
+  cp "$PRODUCTS/mlx.metallib" "$MLX_BUNDLE_METALLIB"
+fi
+echo "==> Verifying MLX kernel coverage against the pinned mlx-swift checkout..."
+python3 "$REPO_ROOT/scripts/mlx-metallib-kernels.py" derive \
+  --mlx-swift-checkout "$MLX_SWIFT_RESOLVED_CHECKOUT" \
+  --expect "$MLX_REQUIRED_KERNELS"
+mlx_shipped_metallibs=("$PRODUCTS/mlx.metallib")
+if [ -f "$MLX_BUNDLE_METALLIB" ]; then
+  mlx_shipped_metallibs+=("$MLX_BUNDLE_METALLIB")
+fi
+python3 "$REPO_ROOT/scripts/mlx-metallib-kernels.py" check \
+  --manifest "$MLX_REQUIRED_KERNELS" "${mlx_shipped_metallibs[@]}"
 
 echo "==> Build products:"
 ls -la "$PRODUCTS/macprovider-cli"

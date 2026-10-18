@@ -40,7 +40,8 @@
 #                           later Pearl-mutating step. A runtime that reports no
 #                           compatibility_policy_mode predates repository admission: blocked
 #                           until the coordinator runtime ships (pearl-runtime.sh)
-#   6 canary_smoke          exact signed-candidate install/join smoke; recorded only with
+#   6 canary_smoke          exact signed-candidate install/join smoke (scripts/ops/canary-swap.sh
+#                           swap); recorded only with
 #                           structured evidence: `next --done canary_smoke --probe` (the script
 #                           reads the canary's /v1/status over STUDIO_SSH: binary_version ==
 #                           candidate, coordinator.connected, candidate compatibility set,
@@ -713,9 +714,11 @@ scripts/ops/cli-release.sh _stage-privacy-identity $V"
   else
     step canary_smoke pending ""
     set_next canary_smoke manual "Exact signed-candidate install/join smoke on the canary Mac" \
-"# docs/releases/cli-release-train.md Promotion gate item 4 (operator approval: restarts the live provider)
-# Install the verified bytes from $OPS_STATE_DIR/$OPS_SCOPE/ on the canary, then confirm:
-#   macprovider-cli --version == $V; joins via compatibility set $compat_id;
+"# docs/releases/cli-release-train.md Promotion gate item 5 (operator approval: restarts the live provider)
+# Swap the verified bytes from $OPS_STATE_DIR/$OPS_SCOPE/ onto the canary (checks every shipped
+# metallib's MLX kernels first; a crash loop or a silent /v1/status restores the backup and resumes):
+MACPROVIDER_OPS_OWNER=<session-label> $OPS_DIR/canary-swap.sh swap --version $V
+# Then confirm: macprovider-cli --version == $V; joins via compatibility set $compat_id;
 #   operator pause survives coordinator drain; one bounded buyer request is served.
 # Record it with structured evidence (free text is refused):
 #   $0 next --done canary_smoke --probe        (reads /v1/status via STUDIO_SSH and reuses catalog gateway proof)"

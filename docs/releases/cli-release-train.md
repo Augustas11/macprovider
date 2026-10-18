@@ -1013,7 +1013,14 @@ mainland-provider installer handoff.
    setup (`docs/runbooks/privacy-class-beta-operations.md` "One-time setup")
    with one coordinator restart, staging the identity right after. CLI 1.8.230 shipped without this and
    every upgraded provider's privacy advertisement was refused for ~12 h.
-5. Exact signed-candidate install/join smoke. Verify the installed CLI advertises
+5. Exact signed-candidate install/join smoke. Swap the candidate onto the
+   canary only with `MACPROVIDER_OPS_OWNER=<label> scripts/ops/canary-swap.sh
+   swap --version <ver>`: it refuses a candidate whose `mlx.metallib` or
+   bundled `default.metallib` lacks a kernel the pinned MLX core loads by name
+   (the 1.8.254 candidate shipped without `gather_mm_offsets` and could not
+   load MoE models), and after the restart it restores the backup and
+   resumes the previous version on a provider restart or a `/v1/status`
+   silence of 120 s. Verify the installed CLI advertises
    1.8.217, joins through Pearl's exact compatibility set, preserves operator
    pause through coordinator drain, and serves a bounded request. Do not touch
    the designated Studio until the operator releases its current session lock.

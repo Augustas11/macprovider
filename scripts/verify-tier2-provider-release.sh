@@ -20,6 +20,7 @@ DOWNLOAD_RETRY_SLEEP="${DOWNLOAD_RETRY_SLEEP:-5}"
 PROVIDER_RUNTIME_MODE="${PROVIDER_RUNTIME_MODE:-execute}"
 PROVIDER_EXPECTED_ARCHES="${PROVIDER_EXPECTED_ARCHES:-}"
 PROVIDER_LIPO_BIN="${PROVIDER_LIPO_BIN:-}"
+MLX_REQUIRED_KERNELS="${MLX_REQUIRED_KERNELS:-$REPO_ROOT/phase3-binary/mlx-metallib-required-kernels.json}"
 
 log() { printf '[tier2-provider-release] %s\n' "$*" >&2; }
 die() { printf '[tier2-provider-release] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -51,6 +52,7 @@ Environment:
   PROVIDER_RUNTIME_MODE                execute (default) or structural
   PROVIDER_EXPECTED_ARCHES             required in structural mode
   PROVIDER_LIPO_BIN                    absolute lipo path when validating arches
+  MLX_REQUIRED_KERNELS                 default: phase3-binary/mlx-metallib-required-kernels.json
 USAGE
 }
 
@@ -102,6 +104,33 @@ provider_version_requires_catalog() {
   [ "$major" -gt 1 ] || \
     { [ "$major" -eq 1 ] && [ "$minor" -gt 8 ]; } || \
     { [ "$major" -eq 1 ] && [ "$minor" -eq 8 ] && [ "$patch" -ge 31 ]; }
+}
+
+# Provider CLI 1.8.254 is the first release on MLX core v0.32.4, whose
+# library-loaded kernels (gather_mm_offsets, ...) the SwiftPM-bundled
+# default.metallib lacks. From it on every shipped metallib must carry every
+# kernel scripts/mlx-metallib-kernels.py derived from the pinned mlx-swift.
+provider_version_requires_mlx_kernel_gate() {
+  [[ "$PROVIDER_VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || return 1
+  [ "${BASH_REMATCH[1]}" -gt 1 ] || \
+    { [ "${BASH_REMATCH[1]}" -eq 1 ] && [ "${BASH_REMATCH[2]}" -gt 8 ]; } || \
+    { [ "${BASH_REMATCH[1]}" -eq 1 ] && [ "${BASH_REMATCH[2]}" -eq 8 ] && [ "${BASH_REMATCH[3]}" -ge 254 ]; }
+}
+
+# verify_mlx_kernels LABEL DIR: DIR holds mlx.metallib and optionally
+# mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib.
+verify_mlx_kernels() {
+  local label="$1" dir="$2" libs=()
+  provider_version_requires_mlx_kernel_gate || return 0
+  require_file "$MLX_REQUIRED_KERNELS"
+  [ -f "$dir/mlx.metallib" ] || die "$label lacks mlx.metallib"
+  libs+=("$dir/mlx.metallib")
+  if [ -f "$dir/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib" ]; then
+    libs+=("$dir/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib")
+  fi
+  python3 "$SCRIPT_DIR/mlx-metallib-kernels.py" check --manifest "$MLX_REQUIRED_KERNELS" "${libs[@]}" ||
+    die "$label ships a metallib missing kernels the pinned MLX core loads by name"
+  log "$label MLX kernel coverage verified"
 }
 
 sha256_file() {
@@ -443,6 +472,7 @@ if [ -n "$pkg_expected_sha" ]; then
   pkgutil --expand-full "$pkg_path" "$pkg_expand_dir" || die "failed to expand provider package"
   [ -x "$pkg_expand_dir/Payload/macprovider-cli" ] || die "provider package payload lacks executable macprovider-cli"
   validate_payload_entries "$pkg_expand_dir/Payload" "provider package payload"
+  verify_mlx_kernels "provider package payload" "$pkg_expand_dir/Payload"
 
   tar_binary_sha="$(sha256_file "$tar_payload_dir/macprovider-cli")"
   pkg_binary_sha="$(sha256_file "$pkg_expand_dir/Payload/macprovider-cli")"
@@ -533,6 +563,7 @@ print(version + " " + build)
      [ ! -f "$app_path/Contents/MacOS/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib" ]; then
     die "Malibu.app lacks adjacent MLX Metal resources for bundled macprovider-cli"
   fi
+  verify_mlx_kernels "Malibu.app" "$app_path/Contents/MacOS"
   codesign --verify --strict --deep --verbose=2 "$app_path" || die "Malibu.app code signature verification failed"
   log "Malibu.app code signature verified"
   xcrun stapler validate "$app_dmg_path" || die "Malibu.app DMG stapler validation failed"
@@ -543,6 +574,16 @@ print(version + " " + build)
   app_mount_dir=""
 else
   log "no Malibu.app DMG entry in checksums.txt; app-track release absent"
+fi
+
+if provider_version_requires_mlx_kernel_gate; then
+  kernel_payload_dir="$tmpdir/kernel-payload"
+  mkdir -p "$kernel_payload_dir"
+  tar -xzf "$tarball_path" -C "$kernel_payload_dir" mlx.metallib || die "provider tarball lacks mlx.metallib"
+  if tar -tzf "$tarball_path" | grep -x 'mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib' >/dev/null; then
+    tar -xzf "$tarball_path" -C "$kernel_payload_dir" mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib
+  fi
+  verify_mlx_kernels "provider tarball" "$kernel_payload_dir"
 fi
 
 PROVIDER_ARTIFACT="$tarball_path" \
