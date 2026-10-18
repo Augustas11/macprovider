@@ -52,12 +52,12 @@ final class DashboardViewTests: XCTestCase {
         snapshot.queueDepth = 3
         snapshot.thermalState = .serious
         snapshot.uptimeSec = 35_880
-        snapshot.restartCount = 2286
+        snapshot.restartCount = 2000
         snapshot.restartCount7d = 1
 
         XCTAssertEqual(AgentSnapshotPresenter.requestsLine(snapshot), "142 today (UTC) · 8,204 all-time · 3.1 req/min")
         XCTAssertTrue(AgentSnapshotPresenter.tokenLine(snapshot).hasPrefix("1.2M in / 3.8M out today (UTC)"))
-        XCTAssertEqual(AgentSnapshotPresenter.runLine(snapshot), "9h 58m current run · 1 restart in 7 days · 2,286 restarts lifetime")
+        XCTAssertEqual(AgentSnapshotPresenter.runLine(snapshot), "9h 58m current run · 1 restart in 7 days · 2,000 restarts lifetime")
         XCTAssertEqual(
             AgentSnapshotPresenter.diagnosticChips(snapshot),
             ["3 queued", "Thermal serious", "GPU 62%", "avg latency 42 ms"]

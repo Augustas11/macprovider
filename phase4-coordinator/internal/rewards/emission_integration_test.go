@@ -1247,9 +1247,9 @@ func TestElapsedCooldownHoldsAreRetainedInAccrualRead(t *testing.T) {
 		amount string
 		hold   any
 	}{
-		{lastAccrual.Add(-6 * 24 * time.Hour).Unix(), "74.74", rewards.HoldDemotionCooldown},
-		{lastAccrual.Unix(), "138.80", rewards.HoldTrustTierProvisional},
-		{lastAccrual.Add(-10 * 24 * time.Hour).Unix(), "43.49", nil},
+		{lastAccrual.Add(-6 * 24 * time.Hour).Unix(), "40.00", rewards.HoldDemotionCooldown},
+		{lastAccrual.Unix(), "60.00", rewards.HoldTrustTierProvisional},
+		{lastAccrual.Add(-10 * 24 * time.Hour).Unix(), "20.00", nil},
 	} {
 		if _, err := adminDB.ExecContext(ctx, `
             INSERT INTO provider_rewards_ledger (provider_id, unix_ts, amount_malibu, withdrawal_hold_reason, reason)

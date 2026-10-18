@@ -19,24 +19,24 @@ final class TruthfulDashboardTests: XCTestCase {
         snapshot.currentModelID = "meta-llama/llama-3.2-3b-instruct"
         snapshot.thermalState = .nominal
         snapshot.uptimeSec = 35_880
-        snapshot.restartCount = 2286
+        snapshot.restartCount = 2000
         snapshot.restartCount7d = 1
         snapshot.advertisedMaxConcurrency = 1
         snapshot.earningsUsdcToday = 0
         snapshot.earningsUsdcWeek = 0.0001
         snapshot.earningsUsdcPending = 0.152012
         snapshot.earningsUsdcLifetime = 0.154264
-        snapshot.malibuAccruedAllTime = 257.03
+        snapshot.malibuAccruedAllTime = 120.00
         snapshot.payoutsEnabled = false
         snapshot.lastPaidJobAt = now.addingTimeInterval(-7 * 3_600)
-        snapshot.payoutRegisteredAddress = "0xBE1c000000000000000000000000000000005dcd"
+        snapshot.payoutRegisteredAddress = "0x1234000000000000000000000000000000abcd"
         snapshot.updateRewardInputs(
             walletBound: true,
             trustTier: .provisional,
             providerEarningsFresh: true,
             malibuProjectionFresh: true,
-            malibuWithdrawable: 43.49,
-            malibuHeld: 213.54,
+            malibuWithdrawable: 20.00,
+            malibuHeld: 100.00,
             malibuHoldReasons: ["demotion_cooldown", "trust_tier_provisional"],
             malibuRewardEligibility: eligibility ?? MalibuRewardEligibility(
                 earningState: "ineligible",
@@ -59,7 +59,7 @@ final class TruthfulDashboardTests: XCTestCase {
             demotionCooldownActive: false,
             requalificationRequired: true,
             uptimeOKSince: uptimeSince,
-            verifiedReceiptCount: 12_587,
+            verifiedReceiptCount: 1_500,
             requiredReceiptCount: 100,
             criteriaMet: ["E1"],
             earliestPromotionAt: uptimeSince.addingTimeInterval(144 * 3_600)
@@ -100,7 +100,7 @@ final class TruthfulDashboardTests: XCTestCase {
 
     func testHeldMalibuIsStatedAsHeldNotReleasedNotWithdrawable() {
         let card = AgentSnapshotPresenter.earningsCard(auditSnapshot(), now: now)
-        XCTAssertTrue(card.malibuLines.contains("MALIBU balance: 257.03 (beta points) · 213.54 held · 43.49 not held."))
+        XCTAssertTrue(card.malibuLines.contains("MALIBU balance: 120.00 (beta points) · 100.00 held · 20.00 not held."))
         XCTAssertTrue(card.malibuLines.contains("Held MALIBU is not released and not withdrawable. MALIBU has no withdrawals yet."))
         let text = card.malibuLines.joined(separator: " ")
         for promise in ["will be released", "until Trusted", "until eligible", "eligible for withdrawal", "withdrawable MALIBU"] {
@@ -186,7 +186,7 @@ final class TruthfulDashboardTests: XCTestCase {
         let strings = DashboardCopy.defaultPublicStrings(snapshot, now: now)
         XCTAssertEqual(strings.filter { $0 == "Serving" }.count, 1)
         XCTAssertEqual(Set(strings).count, strings.count, "a message repeats on the main screen: \(strings)")
-        XCTAssertEqual(strings.filter { $0.contains("213.54") }.count, 1)
+        XCTAssertEqual(strings.filter { $0.contains("100.00") }.count, 1)
         XCTAssertEqual(strings.filter { $0.contains("Trust:") }.count, 1)
         assertNoForbiddenCopy(strings)
     }

@@ -12,9 +12,9 @@ final class TruthfulDashboardDataTests: XCTestCase {
     func testAccrualDecodesLiveTrustEmissionAndRetainedHolds() throws {
         let json = """
         {
-          "accrued_malibu": "257.03",
-          "withdrawable_malibu": "43.49",
-          "held_malibu": "213.54",
+          "accrued_malibu": "120.00",
+          "withdrawable_malibu": "20.00",
+          "held_malibu": "100.00",
           "trust_tier": "provisional",
           "withdrawal_hold_reasons": ["demotion_cooldown", "trust_tier_provisional"],
           "retained_hold_reasons": ["demotion_cooldown"],
@@ -33,7 +33,7 @@ final class TruthfulDashboardDataTests: XCTestCase {
             "uptime_ok_since": "2026-10-16T03:52:00Z",
             "uptime_required_seconds": 259200,
             "requalification_window_seconds": 259200,
-            "verified_receipt_count": 12587,
+            "verified_receipt_count": 1500,
             "required_receipt_count": 100,
             "criteria_met": ["E1"],
             "earliest_promotion_at": "2026-10-22T03:52:00Z"
@@ -45,7 +45,7 @@ final class TruthfulDashboardDataTests: XCTestCase {
         XCTAssertEqual(summary.rewardEligibility?.reasons.last, "held_retained_trust_hold")
         XCTAssertEqual(summary.retainedHoldReasons, ["demotion_cooldown"])
         XCTAssertEqual(summary.trustProgress?.earliestPromotionAt, "2026-10-22T03:52:00Z")
-        XCTAssertEqual(summary.trustProgress?.verifiedReceiptCount, 12587)
+        XCTAssertEqual(summary.trustProgress?.verifiedReceiptCount, 1500)
         XCTAssertEqual(summary.emission, ProviderEmissionSummary(active: false, lastAccrualAt: "2026-08-18T03:05:00Z"))
 
         let merged = ProviderEarningsSummary(
@@ -136,7 +136,7 @@ final class TruthfulDashboardDataTests: XCTestCase {
         let store = ProviderStatsStore(fileURL: directory.appendingPathComponent("mac.json"))
         let now = Date()
         var record = ProviderStatsRecord.empty(providerID: "mac", now: now)
-        record.restartCount = 2286
+        record.restartCount = 2000
         record.recentRestartsAt = [now.addingTimeInterval(-8 * 86_400), now.addingTimeInterval(-2 * 86_400)]
         store.save(record)
 
@@ -148,7 +148,7 @@ final class TruthfulDashboardDataTests: XCTestCase {
             statsStore: store
         )
         let snap = await status.snapshot()
-        XCTAssertEqual(snap.restartCount, 2287, "lifetime count is unchanged")
+        XCTAssertEqual(snap.restartCount, 2001, "lifetime count is unchanged")
         XCTAssertEqual(snap.restartCount7d, 2, "the 8-day-old boot is outside the window; this boot counts")
         XCTAssertEqual(store.load()?.recentRestartsAt?.count, 2)
     }

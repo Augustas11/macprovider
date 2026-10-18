@@ -42,14 +42,14 @@ func TestClassifyHoldReasonsSeparatesLiveFromRetainedTrustHolds(t *testing.T) {
 // ended on 10 Oct must not be reported as a running cooldown.
 func TestElapsedCooldownRowsAreRetainedNotACurrentCooldown(t *testing.T) {
 	got := BuildMalibuRewardEligibility(MalibuRewardEligibilityFacts{
-		AccruedMALIBU:         "257.03",
-		WithdrawableMALIBU:    "43.49",
-		HeldMALIBU:            "213.54",
+		AccruedMALIBU:         "120.00",
+		WithdrawableMALIBU:    "20.00",
+		HeldMALIBU:            "100.00",
 		TrustTier:             TierProvisional,
 		WithdrawalHoldReasons: []string{HoldTrustTierProvisional},
 		RetainedTrustHold:     true,
 		WalletBound:           true,
-		VerifiedReceiptCount:  12587,
+		VerifiedReceiptCount:  1500,
 		HardwareEvidenceState: HardwareEvidenceStateMissing,
 	})
 	if containsReason(got.Reasons, ReasonHeldDemotionCooldown) {
@@ -70,13 +70,13 @@ func TestElapsedCooldownRowsAreRetainedNotACurrentCooldown(t *testing.T) {
 
 func TestTrustedProviderRetainedHoldsStayHeld(t *testing.T) {
 	got := BuildMalibuRewardEligibility(MalibuRewardEligibilityFacts{
-		AccruedMALIBU:         "257.03",
-		WithdrawableMALIBU:    "43.49",
-		HeldMALIBU:            "213.54",
+		AccruedMALIBU:         "120.00",
+		WithdrawableMALIBU:    "20.00",
+		HeldMALIBU:            "100.00",
 		TrustTier:             TierTrusted,
 		RetainedTrustHold:     true,
 		WalletBound:           true,
-		VerifiedReceiptCount:  12587,
+		VerifiedReceiptCount:  1500,
 		HardwareEvidenceState: HardwareEvidenceStateVerified,
 		ComputeIntegrityState: ComputeIntegrityStateVerified,
 	})
@@ -117,7 +117,7 @@ func TestBuildTrustProgressEarliestPromotion(t *testing.T) {
 		{
 			name: "audit case: E1 met, A1 window running, cooldown elapsed",
 			trust: TrustCriteriaStatus{TrustTier: TierProvisional, DemotionCooldownUntil: &cooldown,
-				UptimeOKSince: &uptimeSince, VerifiedReceiptCount: 12587,
+				UptimeOKSince: &uptimeSince, VerifiedReceiptCount: 1500,
 				EconomicSatisfied: []string{CriterionE1Receipts}, AdditionalSatisfied: []string{CriterionE1Receipts}},
 			want: ptr(uptimeSince.Add(72 * time.Hour).Add(72 * time.Hour)),
 		},
@@ -171,7 +171,7 @@ func TestBuildTrustProgressReportsEvaluatorWindows(t *testing.T) {
 	got := BuildTrustProgress(TrustCriteriaStatus{
 		TrustTier:             TierProvisional,
 		DemotionCooldownUntil: &cooldown,
-		VerifiedReceiptCount:  12587,
+		VerifiedReceiptCount:  1500,
 		EconomicSatisfied:     []string{CriterionE1Receipts},
 		AdditionalSatisfied:   []string{CriterionE1Receipts},
 	}, now)
