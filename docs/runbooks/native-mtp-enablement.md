@@ -144,8 +144,10 @@ and no coordinator restart (SPEC-031-R033 v0.3.9):
   release is admitted with that bank while that release is retained as
   compatible-previous.
 - Step 7 `canary_bank` reads `/healthz`. `native_mtp_canary_bank_reloads:
-  true` with `native_mtp_canary_bank_release_id` equal to the release means
-  done. A coordinator built before this change does not report the field.
+  true` with `native_mtp_canary_bank_release_id` equal to the release and
+  `native_mtp_canary_bank_sha256` equal to the SHA-256 of the served
+  `/v1/native-mtp-selftest-bank` bytes means done; a release id match alone
+  does not. A coordinator built before this change does not report the field.
   For one of those, step 7 is the restart that loads the bank, and the
   activation is not done until the restart runs.
 - A provider whose offer was rejected with `bank_mismatch` (for example

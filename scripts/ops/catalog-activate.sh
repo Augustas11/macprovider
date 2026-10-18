@@ -29,7 +29,9 @@
 #                             self-test bank. A coordinator that reports
 #                             native_mtp_canary_bank_reloads on /healthz reloads the bank
 #                             with the release (SPEC-031-R033 v0.3.9), so this step only
-#                             checks native_mtp_canary_bank_release_id; one that predates it
+#                             checks native_mtp_canary_bank_release_id == the release and
+#                             native_mtp_canary_bank_sha256 == the SHA-256 of the served
+#                             /v1/native-mtp-selftest-bank bytes; one that predates it
 #                             read the bank at boot, and the step restarts it before the
 #                             activation can be done
 #   8 provider_restart        canary/Studio provider reports the new catalog release
