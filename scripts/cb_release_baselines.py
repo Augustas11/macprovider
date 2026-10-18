@@ -10,6 +10,16 @@ CB_QUALIFIED_PROVENANCE_SOURCES = {"packaged_studio_campaign", "release_review",
 CB_POLICY_SCHEMA = "macprovider.continuous-batching-policy.v1"
 CB_POLICY_TUPLE_SCHEMA = "macprovider.continuous-batching-policy-tuple.v1"
 CB_POLICY_TUPLE_DOMAIN = b"macprovider.continuous-batching-policy-tuple.v1\n"
+# SPEC-038 FR-CB11 (v0.3.22): optional signed served-slot ceiling per entry,
+# a JSON integer in 1..32 (`ProviderCapacity.maxConcurrencyOverrideLimit`).
+CB_POLICY_OPTIONAL_ENTRY_FIELDS = {"max_served_slots"}
+CB_MAX_SERVED_SLOTS_LIMIT = 32
+
+
+def valid_max_served_slots(value: object) -> bool:
+    return type(value) is int and 1 <= value <= CB_MAX_SERVED_SLOTS_LIMIT
+
+
 REQUIRED_CB_BASELINES = {
     "studio-qwen3.6-a3b-v1": {
         "model_key": "qwen/qwen3.6-35b-a3b",

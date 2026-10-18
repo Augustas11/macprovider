@@ -2696,6 +2696,10 @@ struct ServeCommand: AsyncParsableCommand {
                 contextTokens: servedContextTokens,
                 weightsBytes: servedWeightsBytes
             )
+            let policyCeiling = AutoServedSlots.policyServedSlotCeiling(
+                continuousBatchingPolicy,
+                modelKeys: currentPolicyKeys
+            )
             let plan = AutoServedSlots.plan(
                 configuredSlots: configuredSlots,
                 source: resolved.maxConcurrencySource,
@@ -2713,12 +2717,13 @@ struct ServeCommand: AsyncParsableCommand {
                         memoryFitCap: memoryFitCap
                     )
                 },
-                memoryFitKnown: memoryFitCap != nil
+                memoryFitKnown: memoryFitCap != nil,
+                policyCeiling: policyCeiling
             )
             resolved.maxConcurrencyOverride = plan.rows
             autoServedSlots = plan
             FileHandle.standardError.write(Data(
-                "event=served_slots action=planned rows=\(plan.rows) served=\(plan.initialServed) reason=\(plan.reason) configured=\(configuredSlots.map(String.init) ?? "unset") source=\(resolved.maxConcurrencySource?.rawValue ?? "autotune")\n".utf8
+                "event=served_slots action=planned rows=\(plan.rows) served=\(plan.initialServed) reason=\(plan.reason) configured=\(configuredSlots.map(String.init) ?? "unset") source=\(resolved.maxConcurrencySource?.rawValue ?? "autotune") policy_ceiling=\(policyCeiling.map(String.init) ?? "none")\n".utf8
             ))
         }
 

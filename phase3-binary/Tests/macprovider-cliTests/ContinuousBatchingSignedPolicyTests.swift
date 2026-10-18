@@ -347,6 +347,123 @@ final class ContinuousBatchingSignedPolicyTests: XCTestCase {
         }
     }
 
+    /// SPEC-038 FR-CB11 (v0.3.22): an optional signed served-slot ceiling.
+    func testMaxServedSlotsIsParsedAndBoundToTheTupleDigest() throws {
+        let capped = try makeFixture(mutate: { entry in
+            entry["max_served_slots"] = 4
+        })
+        let selection = try ContinuousBatchingSignedPolicy.verify(
+            policyData: capped.policyData,
+            signatureData: capped.signatureData,
+            catalog: capped.catalog,
+            trustedKeyring: capped.trustedKeyring,
+            now: capped.now
+        )
+        XCTAssertEqual(selection.entries.first?.maxServedSlots, 4)
+        XCTAssertEqual(selection.servedSlotCeiling(modelSHA256: String(repeating: "b", count: 64)), 4)
+        XCTAssertEqual(selection.servedSlotCeiling(modelKeys: ["qwen/qwen3.5-27b"]), 4)
+        XCTAssertNil(selection.servedSlotCeiling(modelSHA256: String(repeating: "f", count: 64)))
+        XCTAssertNil(selection.servedSlotCeiling(modelKeys: ["other/model"]))
+
+        let absent = try makeFixture()
+        let unbounded = try ContinuousBatchingSignedPolicy.verify(
+            policyData: absent.policyData,
+            signatureData: absent.signatureData,
+            catalog: absent.catalog,
+            trustedKeyring: absent.trustedKeyring,
+            now: absent.now
+        )
+        XCTAssertNil(unbounded.entries.first?.maxServedSlots)
+        XCTAssertNil(unbounded.servedSlotCeiling(modelSHA256: String(repeating: "b", count: 64)))
+
+        // Added after signing: the tuple digest no longer matches.
+        let unsignedCeiling = try makeFixture(recomputeTuple: false, mutate: { entry in
+            entry["max_served_slots"] = 4
+        })
+        XCTAssertThrowsError(try ContinuousBatchingSignedPolicy.verify(
+            policyData: unsignedCeiling.policyData,
+            signatureData: unsignedCeiling.signatureData,
+            catalog: unsignedCeiling.catalog,
+            trustedKeyring: unsignedCeiling.trustedKeyring,
+            now: unsignedCeiling.now
+        )) { error in
+            XCTAssertEqual(error as? ContinuousBatchingSignedPolicyError, .invalidValue("$.entries[0].tuple_sha256"))
+        }
+    }
+
+    /// The same tuple identity scripts/catalog-release.py and the coordinator
+    /// derive (continuous_batching_policy_max_served_slots_test.go goldens).
+    func testMaxServedSlotsTupleDigestMatchesTheGeneratorGolden() throws {
+        var entry: [String: Any] = [
+            "model_key": "qwen/qwen3.6-35b-a3b",
+            "model_id": "qwen/qwen3.6-35b-a3b",
+            "model_sha256": String(repeating: "2", count: 64),
+            "tokenizer_sha256": String(repeating: "3", count: 64),
+            "chat_template_sha256": String(repeating: "4", count: 64),
+            "cache_class": "mixed",
+            "kv_dtype": "fp16",
+            "requires_moe": true,
+            "hardware_class": "apple-silicon:Apple M3 Ultra:ram-256gb",
+            "metallib_sha256": String(repeating: "5", count: 64),
+            "kernel_identifier": "macprovider_paged_kv_gather_v1",
+            "rollout": "canary",
+            "cached_turns_accepted": false,
+            "provenance": [
+                "source": "packaged_studio_campaign",
+                "status": "qualified",
+                "evidence_id": "cb-test",
+                "package_manifest_sha256": String(repeating: "6", count: 64),
+                "studio_campaign_sha256": String(repeating: "7", count: 64),
+                "provider_cli_version": "1.8.220",
+                "live_executable_cdhash": String(repeating: "8", count: 40),
+            ],
+        ]
+        func digest() throws -> String {
+            // Round-trip through JSON so numbers arrive as the parser sees them.
+            let data = try JSONSerialization.data(withJSONObject: entry)
+            let parsed = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            return try ContinuousBatchingSignedPolicy.tupleSHA256(
+                releaseID: "release-cb-1",
+                policyVersion: "autotune-policy-v1",
+                generatedAt: "2026-10-06T00:00:00Z",
+                expiresAt: "2026-12-25T00:00:00Z",
+                candidateCatalogSHA256: String(repeating: "1", count: 64),
+                signerKeyID: "test-key",
+                entry: parsed
+            )
+        }
+        XCTAssertEqual(try digest(), "88f96ab3ba6525df8ae0324215ed13132588299145df3cf74f09cf713e35d644")
+        entry["max_served_slots"] = 4
+        XCTAssertEqual(try digest(), "569a8148ef6551eeb0f63b68c13ced37a20d79396bcddb52c2357582a6f69596")
+    }
+
+    func testMalformedMaxServedSlotsIsRejected() throws {
+        let cases: [(Any, ContinuousBatchingSignedPolicyError)] = [
+            (0, .invalidValue("$.entries[0].max_served_slots")),
+            (-1, .invalidValue("$.entries[0].max_served_slots")),
+            (ProviderCapacity.maxConcurrencyOverrideLimit + 1, .invalidValue("$.entries[0].max_served_slots")),
+            (Int64.max, .invalidValue("$.entries[0].max_served_slots")),
+            (4.5, .wrongType("$.entries[0].max_served_slots")),
+            (true, .wrongType("$.entries[0].max_served_slots")),
+            ("4", .wrongType("$.entries[0].max_served_slots")),
+            (NSNull(), .wrongType("$.entries[0].max_served_slots")),
+        ]
+        for (value, expected) in cases {
+            let fixture = try makeFixture(mutate: { entry in
+                entry["max_served_slots"] = value
+            })
+            XCTAssertThrowsError(try ContinuousBatchingSignedPolicy.verify(
+                policyData: fixture.policyData,
+                signatureData: fixture.signatureData,
+                catalog: fixture.catalog,
+                trustedKeyring: fixture.trustedKeyring,
+                now: fixture.now
+            ), "\(value)") { error in
+                XCTAssertEqual(error as? ContinuousBatchingSignedPolicyError, expected, "\(value)")
+            }
+        }
+    }
+
     func testLoaderReturnsLiveVerifiedOrReasonCodedEmptyFallback() async throws {
         let fixture = try makeFixture()
         let baseURL = URL(string: "https://example.invalid")!

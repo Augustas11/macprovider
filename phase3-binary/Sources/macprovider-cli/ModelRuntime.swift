@@ -5288,8 +5288,17 @@ maxTokens: 1,
             poolTokens: scheduler.poolTokens,
             blockSizeTokens: scheduler.blockSizeTokens,
             // Only a pagedMLA (`glm5_next`) backend has a flattened-token cap.
-            decodeOnlyGain: scheduler.forwardTokenCap != nil
+            decodeOnlyGain: scheduler.forwardTokenCap != nil,
+            policyCeiling: continuousBatchingPolicyServedSlotCeiling(modelSHA256: tuple.modelSHA256)
         )
+    }
+
+    /// SPEC-038 FR-CB11 (v0.3.22): the verified signed policy's
+    /// `max_served_slots` for this model artifact, or nil.
+    private func continuousBatchingPolicyServedSlotCeiling(modelSHA256: String?) -> Int? {
+        guard continuousBatchingPolicyLoadResult.status == .liveVerified,
+              let modelSHA256, !modelSHA256.isEmpty else { return nil }
+        return continuousBatchingPolicyLoadResult.selection.servedSlotCeiling(modelSHA256: modelSHA256)
     }
 
     /// True when the loaded tuple can batch at all; false sends `serve` to one
@@ -6319,9 +6328,14 @@ maxTokens: 1,
             maxBatch = adoptionKnobs.maxBatch
         }
         // A managed provider serves the owner pin or one slot until the new
-        // model's self-check (or its stored result) decides.
+        // model's self-check (or its stored result) decides, never above the
+        // new model's signed policy ceiling.
         let swapServedSlots: Int? = servedSlotsManaged
-            ? min(ownerPinnedServedSlots ?? 1, maxBatch)
+            ? max(1, min(
+                ownerPinnedServedSlots ?? 1,
+                maxBatch,
+                continuousBatchingPolicyServedSlotCeiling(modelSHA256: modelHash) ?? .max
+            ))
             : adoptionKnobs?.maxBatch
         if let swapServedSlots {
             servedSlotLimit = swapServedSlots

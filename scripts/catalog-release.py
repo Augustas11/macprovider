@@ -60,6 +60,9 @@ _baselines_spec.loader.exec_module(_cb_baselines)
 CB_POLICY_SCHEMA = _cb_baselines.CB_POLICY_SCHEMA
 CB_POLICY_TUPLE_SCHEMA = _cb_baselines.CB_POLICY_TUPLE_SCHEMA
 CB_POLICY_TUPLE_DOMAIN = _cb_baselines.CB_POLICY_TUPLE_DOMAIN
+CB_POLICY_OPTIONAL_ENTRY_FIELDS = _cb_baselines.CB_POLICY_OPTIONAL_ENTRY_FIELDS
+CB_MAX_SERVED_SLOTS_LIMIT = _cb_baselines.CB_MAX_SERVED_SLOTS_LIMIT
+valid_max_served_slots = _cb_baselines.valid_max_served_slots
 REQUIRED_CB_BASELINES = _cb_baselines.REQUIRED_CB_BASELINES
 CB_QUALIFIED_PROVENANCE_SOURCES = _cb_baselines.CB_QUALIFIED_PROVENANCE_SOURCES
 
@@ -1404,7 +1407,9 @@ def validate_cb_policy(
         entry_label = f"{label}.entries[{index}]"
         if not isinstance(entry, dict):
             fail(f"{entry_label}: must be an object")
-        exact_keys(entry, entry_fields, entry_fields, entry_label)
+        exact_keys(entry, entry_fields | CB_POLICY_OPTIONAL_ENTRY_FIELDS, entry_fields, entry_label)
+        if "max_served_slots" in entry and not valid_max_served_slots(entry["max_served_slots"]):
+            fail(f"{entry_label}: max_served_slots must be an integer from 1 to {CB_MAX_SERVED_SLOTS_LIMIT}")
         tuple_sha256 = entry["tuple_sha256"]
         if not isinstance(tuple_sha256, str) or not HEX64.fullmatch(tuple_sha256):
             fail(f"{entry_label}: tuple_sha256 must be lowercase 64-hex")

@@ -48,7 +48,14 @@ type continuousBatchingPolicyEntry struct {
 	Rollout             string                              `json:"rollout"`
 	CachedTurnsAccepted *bool                               `json:"cached_turns_accepted"`
 	Provenance          *continuousBatchingPolicyProvenance `json:"provenance"`
+	// MaxServedSlots is the optional SPEC-038 FR-CB11 (v0.3.22) signed
+	// served-slot ceiling; absent entries keep their pre-v0.3.22 identity.
+	MaxServedSlots *int `json:"max_served_slots,omitempty"`
 }
+
+// continuousBatchingMaxServedSlotsLimit mirrors the CLI's
+// ProviderCapacity.maxConcurrencyOverrideLimit.
+const continuousBatchingMaxServedSlotsLimit = 32
 
 type continuousBatchingPolicyProvenance struct {
 	Source                string `json:"source"`
@@ -163,6 +170,9 @@ func validateContinuousBatchingPolicyEntry(feed continuousBatchingPolicyFeed, in
 	if entry.CachedTurnsAccepted == nil {
 		return fmt.Errorf("%s.cached_turns_accepted is required", label)
 	}
+	if entry.MaxServedSlots != nil && (*entry.MaxServedSlots < 1 || *entry.MaxServedSlots > continuousBatchingMaxServedSlotsLimit) {
+		return fmt.Errorf("%s.max_served_slots must be an integer from 1 to %d", label, continuousBatchingMaxServedSlotsLimit)
+	}
 	if entry.Provenance == nil {
 		return fmt.Errorf("%s.provenance is required", label)
 	}
@@ -234,6 +244,9 @@ func continuousBatchingTupleSHA256(feed continuousBatchingPolicyFeed, entry cont
 			"provider_cli_version":    entry.Provenance.ProviderCLIVersion,
 			"live_executable_cdhash":  entry.Provenance.LiveExecutableCDHash,
 		},
+	}
+	if entry.MaxServedSlots != nil {
+		entryWithoutDigest["max_served_slots"] = *entry.MaxServedSlots
 	}
 	identity := map[string]any{
 		"schema_version":           "macprovider.continuous-batching-policy-tuple.v1",

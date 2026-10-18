@@ -665,7 +665,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.22.27",
+      "version": "v0.22.28",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1101,7 +1101,7 @@
     {
       "spec_id": "SPEC-038",
       "title": "Continuous batching for concurrent provider inference",
-      "version": "v0.3.21",
+      "version": "v0.3.22",
       "path": "specs/SPEC-038-continuous-batching.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1136,7 +1136,7 @@
     {
       "spec_id": "SPEC-039",
       "title": "Paged KV / paged-attention engine",
-      "version": "v0.1.20",
+      "version": "v0.1.21",
       "path": "specs/SPEC-039-paged-kv-attention-engine.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -5379,11 +5379,25 @@
       "spec_id": "SPEC-038",
       "state": "pending",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/AutoServedSlots.swift:static func plan"
+        "phase3-binary/Sources/macprovider-cli/AutoServedSlots.swift:static func plan",
+        "phase3-binary/Sources/macprovider-cli/AutoServedSlots.swift:static func policyServedSlotCeiling",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSignedPolicy.swift:func servedSlotCeiling(modelSHA256",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:var policyCeiling: Int?",
+        "phase4-coordinator/internal/buyer/continuous_batching_policy_feed.go:MaxServedSlots *int"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/AutoServedSlotsTests.swift:testOwnerPinnedIsKept",
-        "phase3-binary/Tests/macprovider-cliTests/AutoServedSlotsTests.swift:testM1AndM2NonUltraCapAtFive"
+        "phase3-binary/Tests/macprovider-cliTests/AutoServedSlotsTests.swift:testM1AndM2NonUltraCapAtFive",
+        "phase3-binary/Tests/macprovider-cliTests/AutoServedSlotsTests.swift:testPolicyCeilingCapsEveryPlanAndNeverRaisesOne",
+        "phase3-binary/Tests/macprovider-cliTests/AutoServedSlotsTests.swift:testAbsentPolicyCeilingKeepsEveryPlanUnchanged",
+        "phase3-binary/Tests/macprovider-cliTests/AutoServedSlotsTests.swift:testPolicyServedSlotCeilingIsTheLowestForTheServedModel",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testPolicyCeilingCapsTheLadderAndEveryGrant",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSignedPolicyTests.swift:testMaxServedSlotsIsParsedAndBoundToTheTupleDigest",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSignedPolicyTests.swift:testMalformedMaxServedSlotsIsRejected",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSignedPolicyTests.swift:testMaxServedSlotsTupleDigestMatchesTheGeneratorGolden",
+        "phase4-coordinator/internal/buyer/continuous_batching_policy_max_served_slots_test.go:TestContinuousBatchingPolicyMaxServedSlotsValidation",
+        "phase4-coordinator/internal/buyer/continuous_batching_policy_max_served_slots_test.go:TestContinuousBatchingPolicyMaxServedSlotsTupleIdentity",
+        "scripts/tests/test_cb_policy_max_served_slots.py::MaxServedSlotsGeneratorTest"
       ],
       "journeys": [],
       "evidence": [],

@@ -116,6 +116,8 @@ CB_QUALIFIED_PROVENANCE_SOURCES = _cb_baselines.CB_QUALIFIED_PROVENANCE_SOURCES
 CB_POLICY_SCHEMA = _cb_baselines.CB_POLICY_SCHEMA
 CB_POLICY_TUPLE_DOMAIN = _cb_baselines.CB_POLICY_TUPLE_DOMAIN
 CB_POLICY_TUPLE_SCHEMA = _cb_baselines.CB_POLICY_TUPLE_SCHEMA
+CB_POLICY_OPTIONAL_ENTRY_FIELDS = _cb_baselines.CB_POLICY_OPTIONAL_ENTRY_FIELDS
+valid_max_served_slots = _cb_baselines.valid_max_served_slots
 REQUIRED_CB_BASELINES = _cb_baselines.REQUIRED_CB_BASELINES
 REQUIRED_CB_ENTRY_FIELDS = {
     "tuple_sha256", "model_key", "model_id", "model_sha256", "tokenizer_sha256",
@@ -468,8 +470,10 @@ def require_continuous_batching_tuple(
     for index, entry in enumerate(entries):
         if not isinstance(entry, dict):
             fail(f"continuous-batching-policy.json entries[{index}] is not an object")
-        if set(entry) != REQUIRED_CB_ENTRY_FIELDS:
+        if set(entry) - CB_POLICY_OPTIONAL_ENTRY_FIELDS != REQUIRED_CB_ENTRY_FIELDS:
             fail(f"continuous-batching-policy.json entries[{index}] has unexpected fields")
+        if "max_served_slots" in entry and not valid_max_served_slots(entry["max_served_slots"]):
+            fail(f"continuous-batching-policy.json entries[{index}].max_served_slots is not an integer from 1 to 32")
         provenance = entry.get("provenance")
         if not isinstance(provenance, dict):
             fail(f"continuous-batching-policy.json entries[{index}].provenance is not an object")
