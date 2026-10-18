@@ -1000,10 +1000,14 @@ structured_done() {
         # The canary runs the verified bytes only when scripts/ops/canary-swap.sh
         # put them there (it checks the kernels, binds the tarball to the signed
         # checksums and records this marker).
-        local swapped_binary
-        swapped_binary="$(marker_field "$OPS_SCOPE" canary_swap 'd.get("binary_sha256")')"
-        [ -n "$swapped_binary" ] &&
-          [ "$swapped_binary" = "$(marker_field "$OPS_SCOPE" signed_byte_verification 'd.get("binary_sha256")')" ] ||
+        local swap_field swap_ok=1
+        for swap_field in candidate_sha checksums_sha256 binary_sha256; do
+          [ -n "$(marker_field "$OPS_SCOPE" canary_swap "d.get(\"$swap_field\")")" ] &&
+            [ "$(marker_field "$OPS_SCOPE" canary_swap "d.get(\"$swap_field\")")" = \
+              "$(marker_field "$OPS_SCOPE" signed_byte_verification "d.get(\"$swap_field\")")" ] || swap_ok=0
+        done
+        [ "$(marker_field "$OPS_SCOPE" canary_swap 'd.get("kernel_check")')" = passed ] || swap_ok=0
+        [ "$swap_ok" = 1 ] ||
           refuse "no canary_swap record for the verified v$V bytes; swap with: MACPROVIDER_OPS_OWNER=<label> $OPS_DIR/canary-swap.sh swap --version $V"
         require_studio_ssh
         case "${STUDIO_STATUS_PORT:-}" in ""|*[!0-9]*) refuse "STUDIO_STATUS_PORT must be set and numeric" ;; esac

@@ -167,7 +167,9 @@ RUNNER_TOUCHED=0
 finish() {
   local rc=$?
   trap - EXIT
-  if [ "$RUNNER_TOUCHED" = 1 ]; then
+  if [ "$RUNNER_TOUCHED" = 1 ] && [ "$rc" = 6 ]; then
+    log "!!! buyer runner left STOPPED until the canary is recovered; then run CANARY_RUNNER_START_CMD"
+  elif [ "$RUNNER_TOUCHED" = 1 ]; then
     if bash -c "$CANARY_RUNNER_START_CMD" >&2; then
       log "buyer runner restarted"
     else
@@ -187,8 +189,12 @@ if [ "$CANARY_RUNNER_STOP_CMD" != none ]; then
   log "buyer runner stopped"
 fi
 
-stage="\$HOME/macprovider-canary-staging/v$V-$(date -u +%Y%m%dT%H%M%SZ)"
-studio_ssh "umask 077 && mkdir -p \"$stage\" && cat > \"$stage/candidate.tar.gz\"" < "$TARBALL" ||
+# A unique stage per run: its log and result belong to this run only.
+stage="$(studio_ssh "umask 077 && mkdir -p \"\$HOME/macprovider-canary-staging\" && mktemp -d \"\$HOME/macprovider-canary-staging/v$V-XXXXXX\"")" ||
+  refuse "could not create a staging dir on the canary"
+case "$stage" in /*/macprovider-canary-staging/v"$V"-*) ;; *) refuse "unexpected canary staging dir: $stage" ;; esac
+q "$stage" >/dev/null
+studio_ssh "cat > \"$stage/candidate.tar.gz\"" < "$TARBALL" ||
   refuse "could not stage the candidate on the canary"
 studio_ssh "cat > \"$stage/canary-swap-remote.sh\"" < "$OPS_DIR/lib/canary-swap-remote.sh" ||
   refuse "could not stage the swap script on the canary"
@@ -229,7 +235,10 @@ case "$rc" in 0|4|5|6) ;; *) log "!!! canary swap reported '$rc'"; exit 6 ;; esa
 case "$rc" in
   0)
     mark_done "$OPS_SCOPE" canary_swap "canary-swap.sh swapped v$V" \
-      "$(printf '{"tarball_sha256":"%s","binary_sha256":"%s","kernel_check":"passed"}' "$TARBALL_SHA" "$BINARY_SHA")"
+      "$(printf '{"candidate_sha":"%s","checksums_sha256":"%s","tarball_sha256":"%s","binary_sha256":"%s","kernel_check":"passed"}' \
+        "$(marker_field "$OPS_SCOPE" signed_byte_verification 'd.get("candidate_sha")')" \
+        "$(marker_field "$OPS_SCOPE" signed_byte_verification 'd.get("checksums_sha256")')" \
+        "$TARBALL_SHA" "$BINARY_SHA")"
     log "canary serves v$V; record it: scripts/ops/cli-release.sh next --done canary_smoke --probe"
     ;;
   4) log "canary refused the swap before touching the payload; provider resumed on its previous version" ;;

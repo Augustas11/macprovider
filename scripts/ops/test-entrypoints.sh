@@ -986,7 +986,14 @@ expect_err "does not accept free-text"
 status_doc $CAND true
 run_rc 3 "canary probe refused without a canary-swap.sh record" scripts/ops/cli-release.sh next --done canary_smoke --probe
 expect_err "no canary_swap record"
-printf '{"step":"canary_swap","binary_sha256":"%s"}\n' "$(printf 'cd%.0s' $(seq 32))" > "$SCOPE/canary_swap.json"
+printf '{"step":"canary_swap","binary_sha256":"%s","candidate_sha":"%s","checksums_sha256":"%s","kernel_check":"%s"}\n' \
+  "$(printf 'cd%.0s' $(seq 32))" "$B" "$(printf 'ab%.0s' $(seq 32))" failed > "$SCOPE/canary_swap.json"
+run_rc 3 "canary probe refused with a canary_swap record whose kernel check failed" scripts/ops/cli-release.sh next --done canary_smoke --probe
+printf '{"step":"canary_swap","binary_sha256":"%s","candidate_sha":"%s","checksums_sha256":"%s","kernel_check":"passed"}\n' \
+  "$(printf 'cd%.0s' $(seq 32))" "$B" "$(printf 'ef%.0s' $(seq 32))" > "$SCOPE/canary_swap.json"
+run_rc 3 "canary probe refused with a stale canary_swap record" scripts/ops/cli-release.sh next --done canary_smoke --probe
+printf '{"step":"canary_swap","binary_sha256":"%s","candidate_sha":"%s","checksums_sha256":"%s","kernel_check":"passed"}\n' \
+  "$(printf 'cd%.0s' $(seq 32))" "$B" "$(printf 'ab%.0s' $(seq 32))" > "$SCOPE/canary_swap.json"
 status_doc $CAND false
 run_rc 3 "canary probe with coordinator disconnected" scripts/ops/cli-release.sh next --done canary_smoke --probe
 status_doc $LIVE true

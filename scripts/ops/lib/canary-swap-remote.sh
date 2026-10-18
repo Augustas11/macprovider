@@ -171,7 +171,9 @@ finish() {
   FINISHED=1
   trap - EXIT
   printf '%s\n' "$1" >"$RESULT_FILE.tmp" && mv "$RESULT_FILE.tmp" "$RESULT_FILE"
-  [ "$LOCKED" = 0 ] || rm -rf "$LOCK_DIR"
+  if [ "$LOCKED" = 1 ] && [ "$(cat "$LOCK_DIR/pid" 2>/dev/null || true)" = "$$" ]; then
+    rm -rf "$LOCK_DIR"
+  fi
   exit "$1"
 }
 
@@ -224,8 +226,17 @@ else
     printf '4\n' >"$RESULT_FILE"
     exit 4
   fi
-  say "taking over stale canary-swap lock (pid ${holder:-unknown})"
-  LOCKED=1
+  # Atomic takeover: only the run whose rename wins may create the lock again.
+  if mv "$LOCK_DIR" "$LOCK_DIR.stale.$$" 2>/dev/null && mkdir "$LOCK_DIR" 2>/dev/null; then
+    rm -rf "$LOCK_DIR.stale.$$"
+    say "took over stale canary-swap lock (pid ${holder:-unknown})"
+    LOCKED=1
+  else
+    say "REFUSED: could not take over the canary-swap lock"
+    trap - EXIT
+    printf '4\n' >"$RESULT_FILE"
+    exit 4
+  fi
 fi
 echo $$ >"$LOCK_DIR/pid"
 
@@ -235,6 +246,10 @@ case "$INSTALL_DIR" in
 esac
 case "$INSTALL_DIR" in *"/../"*|*/..|*"/./"*|*/.|*//*) refuse "install dir $INSTALL_DIR is not canonical" ;; esac
 [ -d "$INSTALL_DIR" ] && [ ! -L "$INSTALL_DIR" ] || refuse "install dir $INSTALL_DIR is missing or a symlink"
+# No symlinked ancestor below $HOME either: the physical path must be the
+# lexical one, so every mv/cp/rm below stays inside it.
+[ "$(cd "$INSTALL_DIR" && pwd -P)" = "$(cd "$HOME" && pwd -P)/${INSTALL_DIR#"$HOME"/}" ] ||
+  refuse "install dir $INSTALL_DIR resolves through a symlink"
 [ -O "$INSTALL_DIR" ] || refuse "install dir $INSTALL_DIR is not owned by $(id -un)"
 [ ! -e "$BACKUP" ] && [ ! -e "$FAILED_DIR" ] || refuse "backup path $BACKUP already exists"
 [ -f "$LA_DIR/$LABEL.plist" ] || refuse "missing LaunchAgent $LA_DIR/$LABEL.plist"

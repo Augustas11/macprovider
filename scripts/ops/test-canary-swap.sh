@@ -214,6 +214,16 @@ reset_install
 echo dead >"$T/state/mode"
 run_rc 6 "rollback that does not serve again" "$SWAP" swap --version "$CAND"
 grep -q "is not buyer_serving within" "$T/err" || die "unhealthy rollback not named"
+[ "$(tr '\n' ' ' <"$T/state/runner")" = "stopped " ] || die "runner restarted onto a canary that needs the operator"
+
+# 5b. an install dir reached through a symlinked ancestor is refused untouched.
+reset_install
+mkdir -p "$T/elsewhere"
+mv "$FAKE_INSTALL" "$T/elsewhere/macprovider"
+ln -s "$T/elsewhere" "$HOME/link"
+run_rc 4 "install dir behind a symlinked ancestor" env CANARY_INSTALL_DIR="$HOME/link/macprovider" "$SWAP" swap --version "$CAND"
+grep -q "resolves through a symlink" "$T/err" || die "symlinked ancestor not named"
+rm "$HOME/link"; mv "$T/elsewhere/macprovider" "$FAKE_INSTALL"
 
 # 6. preconditions: owner, runner commands, a busy canary-host lock, a
 #    half-failed runner stop (restarted anyway).

@@ -20,7 +20,7 @@ DOWNLOAD_RETRY_SLEEP="${DOWNLOAD_RETRY_SLEEP:-5}"
 PROVIDER_RUNTIME_MODE="${PROVIDER_RUNTIME_MODE:-execute}"
 PROVIDER_EXPECTED_ARCHES="${PROVIDER_EXPECTED_ARCHES:-}"
 PROVIDER_LIPO_BIN="${PROVIDER_LIPO_BIN:-}"
-MLX_REQUIRED_KERNELS="$REPO_ROOT/phase3-binary/mlx-metallib-required-kernels.json"
+MLX_REQUIRED_KERNELS=""
 
 log() { printf '[tier2-provider-release] %s\n' "$*" >&2; }
 die() { printf '[tier2-provider-release] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -119,9 +119,32 @@ provider_version_requires_mlx_kernel_gate() {
 
 # verify_mlx_kernels LABEL DIR: DIR holds mlx.metallib and optionally
 # mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib.
+# resolve_mlx_manifest: the required-kernel manifest of the commit the release
+# was built from (the verified tarball's compatibility-set.json), so a later
+# pin bump on this checkout never re-judges an immutable release.
+resolve_mlx_manifest() {
+  local commit path="phase3-binary/mlx-metallib-required-kernels.json" out="$tmpdir/mlx-required-kernels.json"
+  [ -z "$MLX_REQUIRED_KERNELS" ] || return 0
+  mkdir -p "$tmpdir/mlx-manifest-src"
+  tar -xzf "$tarball_path" -C "$tmpdir/mlx-manifest-src" compatibility-set.json ||
+    die "provider tarball lacks compatibility-set.json"
+  commit="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["signed"]["release"]["commit"])' \
+    "$tmpdir/mlx-manifest-src/compatibility-set.json")" || die "compatibility-set.json names no release commit"
+  [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || die "compatibility-set.json release commit is not a sha: $commit"
+  if git -C "$REPO_ROOT" cat-file -e "$commit:$path" 2>/dev/null; then
+    git -C "$REPO_ROOT" show "$commit:$path" >"$out"
+  else
+    "$CURL_BIN" -fsSL --proto '=https' --max-time 60 \
+      "https://raw.githubusercontent.com/$GITHUB_REPO/$commit/$path" -o "$out" ||
+      die "cannot read $path at release commit $commit"
+  fi
+  MLX_REQUIRED_KERNELS="$out"
+}
+
 verify_mlx_kernels() {
   local label="$1" dir="$2" libs=()
   provider_version_requires_mlx_kernel_gate || return 0
+  resolve_mlx_manifest
   require_file "$MLX_REQUIRED_KERNELS"
   [ -f "$dir/mlx.metallib" ] || die "$label lacks mlx.metallib"
   libs+=("$dir/mlx.metallib")
