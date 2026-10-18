@@ -1,8 +1,17 @@
 {
-  "catalog_id": "macprovider-tier2-model-catalog-2026-10-17-qwen2vl-v1",
+  "catalog_id": "macprovider-tier2-model-catalog-2026-10-18-glm53-flash-v1",
   "expires_at": "2026-12-25T00:00:00Z",
-  "issued_at": "2026-10-17T00:00:00Z",
+  "issued_at": "2026-10-17T23:30:00Z",
   "models": [
+    {
+      "artifact_kind": "mlx_weight_file",
+      "hash_scope": "macprovider.snapshot-manifest.v1",
+      "model_id": "Jundot/GLM-5.3-Flash-oQ4e-mtp",
+      "min_ram_gb": 234,
+      "notes": "Buyer-serving candidate zai-org/glm-5.3-flash (epic #2029 native glm5_next engine); identity from signed SPEC-023 row.",
+      "sha256": "7299b6a71a38490e378e9eb6524c426392aa96e3fd561007e0540134bbef48f9",
+      "source": "operator-curated"
+    },
     {
       "artifact_kind": "mlx_weight_file",
       "hash_scope": "macprovider.snapshot-manifest.v1",
@@ -169,7 +178,7 @@
   "signature": {
     "alg": "Ed25519",
     "key_id": "catalog-key-2026q2",
-    "sig": "AGDlkPWylhxjSkPvV2hpP1L7s-6A2_koV9XE3xeGq7TpJxgN0UquYLhMp0w_Em9swn_ZDFV-PMw3Lnz9p-9XCA"
+    "sig": "sF030aE294e7f8ZfZa0hBgMA6HprC1RagZYcafaF5oO4QVJTGwZ0iyiuAWFwmF-17L68M8S2XsIWFhqG7eMCBw"
   },
   "version": 1
 }

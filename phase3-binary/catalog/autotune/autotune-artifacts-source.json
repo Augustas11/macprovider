@@ -492,7 +492,8 @@
           "verified_at": "2026-10-16"
         }
       },
-      "primary_artifact_id": "mlx-oq4e-mtp"
+      "primary_artifact_id": "mlx-oq4e-mtp",
+      "rate_class": "class-120b-moe"
     }
   },
   "schema_version": "macprovider.autotune-artifacts-source.v1",

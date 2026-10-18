@@ -128,7 +128,9 @@ class ReceiptTests(unittest.TestCase):
                 endpoint["data"]["id"] = source_id
                 endpoints[source_id] = endpoint
                 existing_ranked.add(source_id)
-            for index in range(12, 44):
+            # Pad the cohort past the documented top 50 with unmapped models;
+            # each mapped policy model above takes one of those slots.
+            for index in range(13, 44):
                 model_id = f"unknown/model-{index}"
                 rankings["data"].append({"date": "2026-08-03", "model_permaslug": model_id, "total_tokens": str(9000 - index)})
                 models["data"].append({"id": model_id, "canonical_slug": model_id, "name": f"Unknown {index}", "pricing": None})
