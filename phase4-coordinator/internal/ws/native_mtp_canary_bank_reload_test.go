@@ -345,17 +345,17 @@ func TestNativeMTPCanaryBankReloadOfTheSameBankKeepsThePreviousBank(t *testing.T
 }
 
 func TestNativeMTPCanaryBankReloadIsANoOpWithTheCanaryDisabled(t *testing.T) {
-	f := newNativeMTPBankReloadFixture(t)
-	prior := f.reload(t, "release-old")
-	f.server.cfg.Pool.NativeMTPCanary.Enabled = false
+	// Build the server with the canary disabled from the start: the canary
+	// loop reads the config concurrently, so the test must not flip it live.
+	f := newNativeMTPBankReloadFixture(t, func(s *Server) { s.cfg.Pool.NativeMTPCanary.Enabled = false })
 	stage, err := f.server.PrepareNativeMTPCanaryBankReload("release-x", []byte("{}"), []byte("{}"))
 	if err != nil {
 		t.Fatalf("disabled canary: %v", err)
 	}
 	stage()
 	f.publish("release-x", "release-old")
-	if f.server.currentNativeMTPCanaryBank() != prior {
-		t.Fatal("a disabled canary moved its bank")
+	if f.server.currentNativeMTPCanaryBank() != nil {
+		t.Fatal("a disabled canary installed a bank")
 	}
 	if err := ValidateNativeMTPCanaryReleaseBank(f.server.cfg.Pool.NativeMTPCanary, "release-x", []byte("{}"), []byte("{}")); err != nil {
 		t.Fatalf("offline validation with the canary disabled: %v", err)
