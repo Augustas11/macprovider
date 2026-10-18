@@ -25,6 +25,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/computeintegrity"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 )
 
 type fakeHold struct {
@@ -169,13 +170,17 @@ type scoringHarness struct {
 	clock      atomic.Int64
 	dispatched atomic.Int64
 	cheatProbe atomic.Int64
-	cheaters   map[string]bool
-	conns      []net.Conn
-	logs       *lockedBuffer
-	db         *sql.DB
-	silent     sync.Map
-	short      sync.Map
-	hotJobs    atomic.Int64
+	// cheatGreedy counts greedy probes sent to a cheater. Under the cold
+	// sampled prior the cheater's output scores in band, and hot probes are
+	// cover, so only greedy probes (and escalation probes) can expose it.
+	cheatGreedy atomic.Int64
+	cheaters    map[string]bool
+	conns       []net.Conn
+	logs        *lockedBuffer
+	db          *sql.DB
+	silent      sync.Map
+	short       sync.Map
+	hotJobs     atomic.Int64
 }
 
 type lockedBuffer struct {
@@ -232,10 +237,15 @@ func newScoringHarness(t *testing.T, providers map[string]string, cheaters map[s
 			_ = c.Close()
 		}
 	})
-	db, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "ci.db")+"?_pragma=busy_timeout(5000)")
+	db, err := sql.Open("sqlite", sqliteutil.WithPragmas(filepath.Join(t.TempDir(), "ci.db")))
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Like the production handle (requestlog.OpenStore), one connection: a
+	// pooled second connection lets a probe's start write and a transition
+	// transaction deadlock into SQLITE_BUSY, deferring the transition.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	t.Cleanup(func() { _ = db.Close() })
 	h.db = db
 	store, err := computeintegrity.NewScoringStore(context.Background(), db)
@@ -258,6 +268,9 @@ func newScoringHarness(t *testing.T, providers map[string]string, cheaters map[s
 			}
 			if h.cheaters[d.ProviderID] {
 				h.cheatProbe.Add(1)
+				if body["temperature"] == 0.0 {
+					h.cheatGreedy.Add(1)
+				}
 				return ComputeIntegrityProbeResponse{OutputText: "CHEAP output", Complete: true}, nil
 			}
 			return ComputeIntegrityProbeResponse{OutputText: "HONEST output", Complete: true}, nil
@@ -344,17 +357,23 @@ func TestComputeScoringHonestProvidersPassAndCheaterFailsWithHold(t *testing.T) 
 		"honest": "github:1", "cheat": "github:2", "scorer-a": "github:3", "scorer-b": "github:4",
 	}
 	h := newScoringHarness(t, providers, map[string]bool{"cheat": true})
-	for i := 0; i < 12 && h.state("cheat") != computeintegrity.VerificationFailed; i++ {
-		h.round(2 * time.Hour)
-		if h.state("cheat") == computeintegrity.VerificationSuspect {
-			// Escalation cadence.
-			for j := 0; j < 8 && h.state("cheat") == computeintegrity.VerificationSuspect; j++ {
-				h.round(20 * time.Minute)
-			}
+	// The probe classes the cheater draws depend on how concurrent probes
+	// interleave on the shared rng, so the run is bounded by evidence, not by
+	// a round count: one greedy probe makes the key suspect and three
+	// escalation probes (greedy while the sampled band is cold) fail it.
+	const greedyToFail = 4
+	for rounds := 0; h.state("cheat") != computeintegrity.VerificationFailed && h.cheatGreedy.Load() < greedyToFail; rounds++ {
+		if rounds == 500 {
+			t.Fatalf("cheater drew %d greedy probes in %d rounds", h.cheatGreedy.Load(), rounds)
 		}
+		step := 2 * time.Hour
+		if h.state("cheat") == computeintegrity.VerificationSuspect {
+			step = 20 * time.Minute // escalation cadence
+		}
+		h.round(step)
 	}
 	if got := h.state("cheat"); got != computeintegrity.VerificationFailed {
-		t.Fatalf("cheater state = %s, want failed", got)
+		t.Fatalf("cheater state = %s after %d greedy probes, want failed", got, h.cheatGreedy.Load())
 	}
 	cheat, ok := h.registry.Resolve("cheat", "as-cheat")
 	if !ok || !cheat.ComputeIntegritySuspended || cheat.RoutingEligible() {
