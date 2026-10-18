@@ -571,6 +571,9 @@ actor ProviderStatus {
     private var localPreemptionScheduled = Set<UUID>()
     private var localUsage = LocalUsageSnapshot()
     private var localQueuedCount = 0
+    /// Closed by a process-exit or update drain until the provider is reset
+    /// to ready; an operator pause never closes it.
+    private var localAdmissionClosed = false
     private var localCapacityWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
 
     init(
@@ -1011,7 +1014,7 @@ actor ProviderStatus {
     /// draining. An operator pause stops network buyers only, so the
     /// provider can still use its own model while paused.
     private var acceptsLocalRequests: Bool {
-        guard modelLoaded else { return false }
+        guard modelLoaded, !localAdmissionClosed else { return false }
         switch status {
         case .ready, .busy, .degraded: return true
         case .draining: return false
@@ -1089,20 +1092,29 @@ actor ProviderStatus {
     }
 
     /// Idempotent: only the first call for an admitted lease counts.
-    func finishLocalRequest(_ lease: LocalPreemptionLease, completion: CompletionResult?, failed: Bool) {
+    /// `succeeded` marks a completed request that has no `CompletionResult`
+    /// (a token utility).
+    func finishLocalRequest(
+        _ lease: LocalPreemptionLease,
+        completion: CompletionResult?,
+        failed: Bool,
+        succeeded: Bool = false
+    ) {
         guard let index = localLeases.firstIndex(where: { $0 === lease }) else { return }
         localLeases.remove(at: index)
         localPreemptionScheduled.remove(lease.id)
         noteRealRequestEnd()
         localUsage.requestsTotal += 1
-        if let completion {
+        if completion != nil || succeeded {
             localUsage.requestsCompleted += 1
-            localUsage.promptTokensTotal += Int64(completion.promptTokens)
-            localUsage.completionTokensTotal += Int64(completion.completionTokens)
+            localUsage.promptTokensTotal += Int64(completion?.promptTokens ?? 0)
+            localUsage.completionTokensTotal += Int64(completion?.completionTokens ?? 0)
         } else if lease.isPreempted {
             localUsage.requestsPreempted += 1
         } else if failed {
             localUsage.requestsFailed += 1
+        } else {
+            localUsage.requestsCancelled += 1
         }
         wakeLocalCapacityWaiters()
     }
@@ -1152,15 +1164,23 @@ actor ProviderStatus {
         }
     }
 
+    /// Reopens local admission after a process-exit or update drain that did
+    /// not end the process.
+    func reopenLocalAdmission() {
+        localAdmissionClosed = false
+    }
+
     /// Waits for buyer work to finish. `preemptingLocal` (process exit and
     /// update drains) also preempts local work and waits for it; an operator
     /// pause leaves local work running.
     func waitUntilDrained(timeoutSeconds: Int, preemptingLocal: Bool = false) async -> Bool {
         let deadline = Date().addingTimeInterval(TimeInterval(max(0, timeoutSeconds)))
         if preemptingLocal {
+            localAdmissionClosed = true
             localLeases.forEach { $0.preempt() }
+            wakeLocalCapacityWaiters()
         }
-        while requestsInFlight > 0 || (preemptingLocal && !localLeases.isEmpty) {
+        while requestsInFlight > 0 || (preemptingLocal && (!localLeases.isEmpty || localQueuedCount > 0)) {
             if Date() >= deadline {
                 return false
             }

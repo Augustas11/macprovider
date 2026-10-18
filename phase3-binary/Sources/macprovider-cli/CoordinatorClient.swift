@@ -6422,7 +6422,7 @@ actor CoordinatorClient {
         try? await sendStateUpdate(state: .draining, reason: reason)
         try? await sendDrainStatus(phase: "starting")
         try? await sendDrainStatus(phase: "in_progress")
-        let drained = await providerStatus.waitUntilDrained(timeoutSeconds: drainTimeoutSeconds, preemptingLocal: true)
+        let drained = await providerStatus.waitUntilDrained(timeoutSeconds: drainTimeoutSeconds)
         if !drained {
             await inferenceRelay?.cancelAll()
             _ = await inferenceRelay?.waitUntilIdle(timeoutSeconds: 5)
@@ -6449,6 +6449,9 @@ actor CoordinatorClient {
     /// resumeByOperator() clears, so while paused these resets land on
     /// `unavailable` instead of re-entering buyer routing.
     private func setReadyUnlessOperatorPaused(reason: String) async {
+        // SPEC-001-R011: an update drain that did not end the process
+        // reopens local admission.
+        await providerStatus.reopenLocalAdmission()
         if operatorPaused {
             await providerStatus.setState(.unavailable, reason: "operator_paused")
         } else {

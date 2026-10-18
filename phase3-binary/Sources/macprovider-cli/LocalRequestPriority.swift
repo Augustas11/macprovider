@@ -94,6 +94,7 @@ struct LocalUsageSnapshot: Sendable, Equatable {
     var requestsCompleted = 0
     var requestsFailed = 0
     var requestsPreempted = 0
+    var requestsCancelled = 0
     var requestsDeclined = 0
     var promptTokensTotal: Int64 = 0
     var completionTokensTotal: Int64 = 0
@@ -111,6 +112,7 @@ struct LocalUsageSnapshot: Sendable, Equatable {
             "requests_completed": requestsCompleted,
             "requests_failed": requestsFailed,
             "requests_preempted": requestsPreempted,
+            "requests_cancelled": requestsCancelled,
             "requests_declined": requestsDeclined,
             "prompt_tokens_total": promptTokensTotal,
             "completion_tokens_total": completionTokensTotal,

@@ -806,7 +806,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     let result = try await runtime.localTokenUtility(request, shouldCancel: { disconnect.isDisconnected || lease.isPreempted })
                     let encoded = try JSONEncoder().encode(result)
                     let object = try JSONSerialization.jsonObject(with: encoded)
-                    await status.finishLocalRequest(lease, completion: nil, failed: false)
+                    await status.finishLocalRequest(lease, completion: nil, failed: false, succeeded: true)
                     if disconnect.isDisconnected { writer.close() } else { writer.writeJSON(status: .ok, body: object) }
                 } catch {
                     await status.finishLocalRequest(lease, completion: nil, failed: !(error is CancellationError))

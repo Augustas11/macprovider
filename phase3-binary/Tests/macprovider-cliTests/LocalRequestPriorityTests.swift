@@ -202,6 +202,40 @@ final class LocalRequestPriorityTests: XCTestCase {
         XCTAssertFalse(idle)
     }
 
+    func testEveryAdmittedLocalRequestEndsInExactlyOneOutcome() async throws {
+        let status = makeStatus(slots: 4, reservedBuyerSlots: 0)
+        let utility = LocalPreemptionLease()
+        let cancelled = LocalPreemptionLease()
+        guard case .admitted = await status.beginLocalRequest(utility),
+              case .admitted = await status.beginLocalRequest(cancelled) else { return XCTFail("local not admitted") }
+        await status.finishLocalRequest(utility, completion: nil, failed: false, succeeded: true)
+        await status.finishLocalRequest(cancelled, completion: nil, failed: false)
+        let usage = await status.currentLocalUsage()
+        XCTAssertEqual(usage.requestsTotal, 2)
+        XCTAssertEqual(usage.requestsCompleted, 1, "a successful token utility is a completed request")
+        XCTAssertEqual(usage.requestsCancelled, 1, "a client cancel is its own outcome")
+        XCTAssertEqual(usage.requestsCompleted + usage.requestsFailed + usage.requestsPreempted + usage.requestsCancelled, usage.requestsTotal)
+    }
+
+    func testUpdateDrainSettlesQueuedLocalWaitersAndStaysClosedUntilReopened() async throws {
+        let status = makeStatus(slots: 1, queueWaitMS: 5_000)
+        let buyerStart = await status.beginRequest()
+        let queued = Task { await status.beginLocalRequest(LocalPreemptionLease()) }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        let drain = Task { await status.waitUntilDrained(timeoutSeconds: 3, preemptingLocal: true) }
+        let queuedResult = await queued.value
+        XCTAssertEqual(queuedResult, .unavailable, "a draining provider settles queued local work")
+        await status.finishRequest(startedAt: buyerStart, completion: nil, failed: false)
+        let drained = await drain.value
+        XCTAssertTrue(drained)
+        let afterDrain = await status.beginLocalRequest(LocalPreemptionLease())
+        XCTAssertEqual(afterDrain, .unavailable, "local admission stays closed after an update drain")
+        await status.reopenLocalAdmission()
+        guard case .admitted = await status.beginLocalRequest(LocalPreemptionLease()) else {
+            return XCTFail("reset to ready reopens local admission")
+        }
+    }
+
     func testOperatorPauseLetsTheProviderUseAllSlotsLocally() async throws {
         let status = makeStatus(slots: 2)
         await status.setOperatorPauseFence(true)

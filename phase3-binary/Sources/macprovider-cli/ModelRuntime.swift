@@ -6681,6 +6681,7 @@ maxTokens: 1,
                     nativeVisionProfile: handle.snapshot.nativeVisionProfile,
                     toolSelectionModelID: selectionModelID
                 )
+                try Task.checkCancellation()
                 try handle.drainCancelled.check()
                 try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
             }
@@ -8853,6 +8854,9 @@ maxTokens: boundedMaxTokens,
                         nativeVisionProfile: snapshot.nativeVisionProfile,
                         toolSelectionModelID: selectionModelID
                     )
+                    // Cancelled during preparation (client gone, or local
+                    // work preempted under SPEC-001-R011): release the gate.
+                    try Task.checkCancellation()
                     try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
                     // The request's completion budget as served: unchanged for
                     // a capped serve cache, clamped to the remaining context
@@ -9648,6 +9652,9 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         nativeVisionProfile: snapshot.nativeVisionProfile,
                         toolSelectionModelID: selectionModelID
                     )
+                    // Cancelled during preparation (client gone, or local
+                    // work preempted under SPEC-001-R011): release the gate.
+                    try Task.checkCancellation()
                     try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
                     // The request's completion budget as served: unchanged for
                     // a capped serve cache, clamped to the remaining context
