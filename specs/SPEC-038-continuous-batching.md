@@ -1,11 +1,26 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.21
+Version: v0.3.22
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.22 (2026-10-18, FR-CB10 admission hold for a due check):**
+FR-CB10 item 3: a check that must run on a key with no stored decision (a
+new runtime identity on a Mac with a prior grant, `prior_grant_pending_recheck`,
+or a first qualification) never found an idle window under steady buyer
+traffic; on CLI 1.8.250, 1.8.251 and 1.8.256 the operator stopped the buyer
+traffic by hand. Once such a check has been due for 2 minutes without an idle
+window, the provider holds admission: it stops admitting new requests (they are
+refused with the retryable queue-pressure status and routing sees no free
+slot), lets in-flight requests finish within the drain timeout without
+cancelling any, runs the check for at most 5 minutes, and re-opens admission.
+The prior grant keeps serving until the check decides. A hold never starts
+under an operator pause, a drain or a valid lifecycle lease, and a pause or
+drain that begins during it ends the check as a yield. Re-measurements of a
+stored decision still wait for an idle window. `/v1/status` reports the hold.
+
 **Change log v0.3.21 (2026-10-17, FR-CB10 decode-only gain for glm5_next):**
 FR-CB10: for `glm5_next` models only, the self-check's throughput gain
 compares decode rates instead of end-to-end rates. Its slow prefill
@@ -1249,7 +1264,31 @@ above are superseded where they conflict:
 3. The check MUST NOT block serving. It runs only while no request is in
    flight after an idle interval and abandons a step when a request arrives;
    completed steps persist, so a busy Mac resumes where it stopped, and
-   consecutive deferrals back off (doubling, at most 15 minutes). Each width
+   consecutive deferrals back off (doubling, at most 15 minutes).
+   (v0.3.22) **Admission hold.** A check on a key with no stored decision
+   (`prior_grant_pending_recheck`, `pending` or `deferred`) that has been due
+   for 2 minutes without an idle window MUST run under an admission hold, and
+   MUST NOT otherwise hold admission (a re-measurement of a stored decision
+   keeps waiting for an idle window). Under the hold the provider MUST stop
+   admitting new requests: a relay request (a relay-blind one keeps its
+   existing refusal) is refused before admission with
+   `error_queue_full`, the status the coordinator re-routes, and a direct
+   HTTP request with the retryable `continuous_batching_stream_backpressure`
+   and its `Retry-After` bound (no inference runs for either), and the
+   provider reports itself busy with no free slot. It MUST let every in-flight
+   request finish and MUST NOT cancel or drop one; if they have not finished
+   within the configured drain timeout the hold ends without a check. The
+   check then runs for at most 5 minutes (an unfinished ladder yields and
+   resumes at the next hold), and admission re-opens. Holds are at least 2
+   minutes apart. The prior grant keeps serving until the check decides. A
+   hold MUST NOT start under an operator pause, while the provider is
+   draining, unavailable or degraded, or while a valid lifecycle (maintenance
+   or startup) lease is held; a pause or drain that begins during the hold
+   ends its check as a yield and keeps its own state when the hold ends. The
+   hold is logged (`event=cb_self_check action=admission_hold_*`) and reported
+   in `/v1/status` `continuous_batching.self_check_admission_hold` (active,
+   started_at, holds_total, last_outcome, last_ended_at, last_skip_reason,
+   last_skipped_at). Each width
    is journaled before any inference for it runs (its alone runs included),
    and a width whose journal write fails is not run: a step found unfinished
    on restart (the process died, e.g. a Metal OOM at a high k), including

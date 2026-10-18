@@ -1,7 +1,8 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1.20
-Status: draft (normative design). v0.1.20 records the FR-PKV12 `glm5_next`
+Version: v0.1.21
+Status: draft (normative design). v0.1.21 (follows SPEC-038 v0.3.22) counts
+the SPEC-038 FR-CB10 admission hold as the self-check's idle window. v0.1.20 records the FR-PKV12 `glm5_next`
 evidence, so the GLM-5.3-Flash entry advertises its exact identity. v0.1.19 bounds every shared forward that
 carries a `glm5_next` row at 8 flattened tokens, gives `glm5_next` a 256-token
 default pool block, and states the `pagedMLA` gather count. v0.1.18 names the `glm5_next` catalog key
@@ -971,7 +972,9 @@ rule (SPEC-038 FR-CB10). On a Mac that already batches the model, throughput
 alone never removes the grant (SPEC-038 FR-CB10 v0.3.15). A longer idle-time measurement over every granted slot count replaces
 the startup micro-benchmark this paragraph rejected. The signed policy may
 only revoke a model artifact on a runtime revision (Metal library SHA-256 and
-kernel identifier); it no longer grants acceptance.
+kernel identifier); it no longer grants acceptance. (v0.1.21) A SPEC-038
+FR-CB10 admission hold, during which no buyer request is admitted or in
+flight, is such an idle window.
 
 ### FR-PKV14 — operator configuration surface (SPEC-039-R014)
 
