@@ -1336,6 +1336,60 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertFalse(PagedKVSharedForwardBackend.canSharePrefillForward([atZero, lagging]))
     }
 
+    func testPrefillPartitionsSplitAMixedRaggedGroupIntoOrdinaryAndNativeRows() async throws {
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 32)
+        func input(_ id: String, offset: Int, native: Bool = false) async throws -> ContinuousBatchPrefillInput {
+            let handle = try await allocator.allocate(conversationKey: id, maxTokens: 16)
+            _ = try await allocator.extend(handle, by: offset + 3)
+            return ContinuousBatchPrefillInput(
+                requestID: id,
+                promptTokens: [1, 1, 1],
+                binding: try await allocator.binding(for: handle),
+                promptTokenOffset: offset,
+                committedKVTokenCount: offset,
+                targetKVTokenCount: offset + 3,
+                isFinalChunk: false,
+                nativeMTPPromptPrefill: native
+            )
+        }
+        func ids(_ groups: [[ContinuousBatchPrefillInput]]) -> [[String]] {
+            groups.map { $0.map(\.requestID) }
+        }
+        let nativeAtZero = try await input("native-0", offset: 0, native: true)
+        let ordinaryAtFour = try await input("ordinary-4", offset: 4)
+        let ordinaryAtZero = try await input("ordinary-0", offset: 0)
+        let nativeAtFour = try await input("native-4", offset: 4, native: true)
+
+        // The ordinary rows keep their ragged shared forward; the native
+        // rows run as their own group, which prefills serially because its
+        // offsets differ.
+        let mixed = PagedKVSharedForwardBackend.prefillPartitions(
+            [nativeAtZero, ordinaryAtFour, ordinaryAtZero, nativeAtFour]
+        )
+        XCTAssertEqual(ids(mixed), [["ordinary-4", "ordinary-0"], ["native-0", "native-4"]])
+        XCTAssertTrue(PagedKVSharedForwardBackend.canSharePrefillForward(mixed[0]))
+        XCTAssertFalse(PagedKVSharedForwardBackend.canSharePrefillForward(mixed[1]))
+
+        // A lone native row in a ragged group prefills alone.
+        XCTAssertEqual(
+            ids(PagedKVSharedForwardBackend.prefillPartitions([ordinaryAtZero, ordinaryAtFour, nativeAtFour])),
+            [["ordinary-0", "ordinary-4"], ["native-4"]]
+        )
+        // Groups at one offset, and ragged groups without a native row, stay whole.
+        XCTAssertEqual(
+            ids(PagedKVSharedForwardBackend.prefillPartitions([nativeAtZero, ordinaryAtZero])),
+            [["native-0", "ordinary-0"]]
+        )
+        XCTAssertEqual(
+            ids(PagedKVSharedForwardBackend.prefillPartitions([ordinaryAtZero, ordinaryAtFour])),
+            [["ordinary-0", "ordinary-4"]]
+        )
+        XCTAssertEqual(
+            ids(PagedKVSharedForwardBackend.prefillPartitions([nativeAtZero, nativeAtFour])),
+            [["native-0", "native-4"]]
+        )
+    }
+
     func testRaggedPrefillMaskIsPerRowCausalAndHidesShorterRowPadding() throws {
         try requireMetal()
         let mask = PagedKVRaggedPrefillMask.make(queryTokens: 2, rowOffsets: [0, 3], windowSize: nil)

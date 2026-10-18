@@ -108,6 +108,46 @@ enum NativeMTPBenchPhase: String, ExpressibleByArgument, Sendable {
     case sustained
 }
 
+/// R015 prompt realization helpers (`deterministic_synthetic_unique_v2`).
+enum NativeMTPBenchPrompts {
+    /// The fewest salts whose prompt's served count reaches `target`, and
+    /// that count. Each salt appends tokens, so the count rises with the salt
+    /// count and this bisection returns the text that appending one salt at a
+    /// time until the target is reached returns, in a few tokenizations
+    /// instead of one per salt.
+    static func fewestReachingSalts(
+        target: Int,
+        count: (Int) async throws -> Int
+    ) async rethrows -> (salts: Int, count: Int) {
+        var below = -1
+        var reaching = 0
+        var reachingCount = try await count(reaching)
+        while reachingCount < target {
+            below = reaching
+            reaching = max(1, reaching * 2)
+            reachingCount = try await count(reaching)
+        }
+        while reaching - below > 1 {
+            let middle = below + (reaching - below) / 2
+            let middleCount = try await count(middle)
+            if middleCount < target {
+                below = middle
+            } else {
+                reaching = middle
+                reachingCount = middleCount
+            }
+        }
+        return (reaching, reachingCount)
+    }
+
+    static func forBlock(_ block: Int, in promptsByBlock: [Int: [String]]) throws -> [String] {
+        guard let prompts = promptsByBlock[block] else {
+            throw NativeMTPBenchError.assertionFailed("no prompts sized for block \(block)")
+        }
+        return prompts
+    }
+}
+
 private final class NativeMTPBenchRunner {
     private let root: URL
     private let modelID: String
@@ -300,17 +340,26 @@ private final class NativeMTPBenchRunner {
         completedWarmups: Set<Int>
     ) async throws {
         let fixture = try await fixture(for: cell)
-        for warmup in 0..<policy.warmupRuns {
-            let block = -1 - warmup
-            guard !completedWarmups.contains(block) else { continue }
-            let prompts = try await makePrompts(runtime: fixture.runtimes.ordinary, cell: cell, block: block)
+        // Every block's prompts are sized before the first timed run, so no
+        // block starts after an idle GPU gap its partner run did not have.
+        // Sized between blocks, the first run of each block measured about
+        // 2.4 s more TTFT on both paths at 4096 tokens (GLM-5.3-Flash, window
+        // 2026-10-18T13:38Z), and the counterbalanced order turned that into
+        // a bimodal paired TTFT ratio.
+        let warmupBlocks = (0..<policy.warmupRuns).map { -1 - $0 }.filter { !completedWarmups.contains($0) }
+        let matrixBlocks = (0..<policy.blocks).filter { !completedBlocks.contains($0) }
+        var promptsByBlock: [Int: [String]] = [:]
+        for block in warmupBlocks + matrixBlocks {
+            promptsByBlock[block] = try await makePrompts(runtime: fixture.runtimes.ordinary, cell: cell, block: block)
+        }
+        for block in warmupBlocks {
+            let prompts = try NativeMTPBenchPrompts.forBlock(block, in: promptsByBlock)
             _ = try await runPath(.ordinary, cell: cell, block: block, order: 0, prompts: prompts, runtime: fixture.runtimes.ordinary, fixture: fixture, writer: writer, warmup: true)
             _ = try await runPath(.nativeMTP, cell: cell, block: block, order: 1, prompts: prompts, runtime: fixture.runtimes.native, fixture: fixture, writer: writer, warmup: true)
         }
         let nativeFirstByBlock = NativeMTPBenchPolicy.nativeFirstOrder(seed: policy.seed, cell: cell, blocks: policy.blocks)
-        for block in 0..<policy.blocks {
-            guard !completedBlocks.contains(block) else { continue }
-            let prompts = try await makePrompts(runtime: fixture.runtimes.ordinary, cell: cell, block: block)
+        for block in matrixBlocks {
+            let prompts = try NativeMTPBenchPrompts.forBlock(block, in: promptsByBlock)
             let nativeFirst = nativeFirstByBlock[block]
             var ordinaryResult: NativeMTPBenchRunResult?
             var nativeResult: NativeMTPBenchRunResult?
@@ -594,14 +643,15 @@ private final class NativeMTPBenchRunner {
             }
             var prompts: [String] = []
             for row in 0..<cell.slots {
-                var salt = 0
-                var text = "Native MTP R015 deterministic prompt cell \(cell.id) block \(block) row \(row)."
-                var count = try await servedCount(text)
-                while count < finalTarget {
-                    text += " measurement-\(block)-\(row)-\(salt) throughput parity tokens"
-                    count = try await servedCount(text)
-                    salt += 1
+                func saltedText(_ salts: Int) -> String {
+                    (0..<salts).reduce("Native MTP R015 deterministic prompt cell \(cell.id) block \(block) row \(row).") {
+                        $0 + " measurement-\(block)-\(row)-\($1) throughput parity tokens"
+                    }
                 }
+                let (salts, count) = try await NativeMTPBenchPrompts.fewestReachingSalts(target: finalTarget) {
+                    try await servedCount(saltedText($0))
+                }
+                let text = saltedText(salts)
                 guard (lower...finalUpper).contains(count) else {
                     throw NativeMTPBenchError.assertionFailed(
                         "served prompt token count \(count) outside \(lower)...\(finalUpper) for stratum \(cell.promptTokens)"

@@ -1,11 +1,25 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.21
+Version: v0.3.22
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.22 (2026-10-19, FR-CB2 native-MTP prompt rows in ragged prefill steps):**
+FR-CB2: a native-MTP prompt row still never shares a ragged-offset forward,
+but it now takes its FCFS turn in the same prefill step as the ragged group it
+would otherwise join, under the same chunk-length, key-spread, row and token
+bounds. The backend runs that step's ordinary rows as one group and its native
+rows as another (one shared forward at one offset, otherwise serially).
+Kept out of the group, a native row prefilled alone and ahead of the rows
+that arrived with it, whose prefill then stalled its decode: on the GLM-5.3-Flash
+R015 gated cells (CLI 1.8.256), where every native row ran at depth zero, the
+native arm's first row got its first token about 1 s earlier and the windowed
+decode rate read -6% (2 rows) and -10% (4 rows) at an end-to-end ratio of
+0.99, failing the gated limits for a schedule difference rather than a decode
+cost.
+
 **Change log v0.3.21 (2026-10-17, FR-CB10 decode-only gain for glm5_next):**
 FR-CB10: for `glm5_next` models only, the self-check's throughput gain
 compares decode rates instead of end-to-end rates. Its slow prefill
@@ -720,6 +734,16 @@ one compatible prefill group when all of these hold:
 - no layer presents a per-row trimmed K/V window (sliding-window layers keep
   the equal-offset rule);
 - no row is a native-MTP prompt row (those keep the equal-offset rule).
+
+**(v0.3.22)** A native-MTP prompt row still joins the prefill step that a
+ragged group forms, under the same chunk-length, key-spread, row and token
+bounds as an ordinary row; it never shares the ragged forward. The backend
+runs that step's ordinary rows as one group, which keeps the ragged shared
+forward they take without a native peer, and its native rows as another,
+prefilled in one forward only at one offset and otherwise serially. Every row
+still prefills exactly its own balanced chunk. The selection therefore never
+depends on whether a row is native, so a native row's prompt progresses
+exactly as it would on the ordinary path.
 
 The scheduler MUST form a ragged group only when the backend declares that it
 runs this shape in one forward. A backend whose ragged shared forward cannot
