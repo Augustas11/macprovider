@@ -1,0 +1,10 @@
+Test Case '-[MLXLMTests.GLM5NextTests testBatchedDecodeMatchesSerialRowsOnRealCut]' started.
+Test Case '-[MLXLMTests.GLM5NextTests testBatchedDecodeMatchesSerialRowsOnRealCut]' passed (21.861 seconds).
+Test Case '-[MLXLMTests.GLM5NextTests testMTPSpeculativeGreedyMatchesPlainGreedyOnRealCut]' started.
+Test Case '-[MLXLMTests.GLM5NextTests testMTPSpeculativeGreedyMatchesPlainGreedyOnRealCut]' passed (2.934 seconds).
+Test Case '-[MLXLMTests.GLM5NextTests testPackedVerifyWithMixedWidthsMatchesSerialRowsOnRealCut]' started.
+Test Case '-[MLXLMTests.GLM5NextTests testPackedVerifyWithMixedWidthsMatchesSerialRowsOnRealCut]' passed (3.250 seconds).
+	 Executed 3 tests, with 0 failures (0 unexpected) in 28.046 (28.046) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 28.046 (28.046) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 28.046 (28.047) seconds
+glm5next_mtp_real_cut proposed=62 accepted=0

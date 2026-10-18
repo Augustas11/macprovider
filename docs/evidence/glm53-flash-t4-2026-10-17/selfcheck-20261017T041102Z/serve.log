@@ -1,0 +1,146 @@
+event=batching_unsupported action=serial_routed reason=local_batching_capability_unavailable
+event=continuous_batching_policy action=resolved status=absent_empty_off_fallback entries=0 revocations=0 emergency_off=false
+event=served_slots action=planned rows=8 served=1 reason=self_check_pending configured=4 source=autotune
+mlx_max_mb_per_buffer=65536 family=glm5_next
+mlx_cache_limit_bytes=2147483648
+event=chat_template_compat rewrite=numeric_attribute_access count=4
+[paged-kv] moe-isolation first prefill=[23176,264] serial=[23176,264] decodeA=[398, 33297, 1910, 1849, 9929, 476, 2526, 11216, 369, 12847, 38, 2828, 11, 85004, 11, 323] serialA=[398, 33297, 1910, 1849, 9929, 476, 2526, 11216, 369, 12847, 38, 2828, 11, 85004, 11, 323] decodeB=[8, 8363, 20147, 11, 44339, 11, 30515, 293, 8, 8363, 20147, 11, 34002, 11, 60986, 272] serialB=[8, 8363, 20147, 11, 44339, 11, 30515, 293, 8, 8363, 20147, 11, 34002, 11, 60986, 272]
+[paged-kv] moe-isolation rejoin decodeA=[73750] serialA=[73750] decodeB=[8] serialB=[8]
+[paged-kv] parity model=zai-org/glm-5.3-flash established=true nLayers=11 nNew=32 nForwards=36 gatherKernelCalls=792 expectCalls=792 maxLogicalBlocks=11 nonIdentityPermutation=true
+[paged-kv] batched-isolation model=zai-org/glm-5.3-flash requiresMoE=true proven=true rowsDecoded=2 rowFailures=0 crossRowDivergences=0 challengeDistinguishing=true
+[paged-kv] measure OK: runtime measurement complete, paged-KV attach eligible for model=zai-org/glm-5.3-flash
+[paged-kv] runtime-identity model=zai-org/glm-5.3-flash model_sha256=7299b6a71a38490e378e9eb6524c426392aa96e3fd561007e0540134bbef48f9 hardware_class=apple-silicon:Apple M3 Ultra:ram-256gb metallib_sha256=589e56e0794dcf6fcebf7f7edbda562404653e606d6ac9bb9bdf7025a608a094 kernel_identifier=macprovider_paged_kv_gather_v1
+event=continuous_batch_prefill_grouping min_grouped_chunk_tokens=144
+event=continuous_batch_decode_row_bound max_decode_rows_per_forward=11
+event=continuous_batch_decode_row_bound max_decode_rows_per_forward=8 device_bound=11 reason=flattened_token_cap
+event=served_slots action=applied slots=1 rows=8 reason=self_check_pending
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=cb_self_check action=step max_slots=4 rows=8 queue_limit=4 probe_key_boundary=1024 resumed_at=0 remeasure=false model_sha256=7299b6a71a38490e378e9eb6524c426392aa96e3fd561007e0540134bbef48f9
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=cb_self_check action=pass slots=2 pass=0 serial_decode_tps=43.1 serial_e2e_tps=27.8 batch_decode_tps=47.8 batch_e2e_tps=30.7 batch_wall_s=3.129 cohort_decode_s=1.966 cohort_decode_tokens=94
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=cb_self_check action=pass slots=2 pass=1 serial_decode_tps=43.3 serial_e2e_tps=27.9 batch_decode_tps=47.9 batch_e2e_tps=31.1 batch_wall_s=3.083 cohort_decode_s=1.961 cohort_decode_tokens=94
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=cb_self_check action=pass slots=2 pass=2 serial_decode_tps=43.2 serial_e2e_tps=27.9 batch_decode_tps=47.9 batch_e2e_tps=31.1 batch_wall_s=3.087 cohort_decode_s=1.961 cohort_decode_tokens=94
+event=cb_self_check action=measured slots=2 rung=true conformant=true cohort_decode_tokens=47 divergent_rows=none aggregate_tps=47.9 serial_tps=43.2 gain=1.11
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=cb_self_check action=pass slots=3 pass=0 serial_decode_tps=43.1 serial_e2e_tps=20.5 batch_decode_tps=52.9 batch_e2e_tps=23.1 batch_wall_s=6.245 cohort_decode_s=2.667 cohort_decode_tokens=141
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=cb_self_check action=pass slots=3 pass=1 serial_decode_tps=43.1 serial_e2e_tps=20.6 batch_decode_tps=53.0 batch_e2e_tps=23.0 batch_wall_s=6.247 cohort_decode_s=2.661 cohort_decode_tokens=141
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=cb_self_check action=pass slots=3 pass=2 serial_decode_tps=43.1 serial_e2e_tps=20.5 batch_decode_tps=53.1 batch_e2e_tps=23.2 batch_wall_s=6.194 cohort_decode_s=2.656 cohort_decode_tokens=141
+event=cb_self_check action=measured slots=3 rung=true conformant=true cohort_decode_tokens=47 divergent_rows=none aggregate_tps=53.0 serial_tps=43.1 gain=1.23
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=cb_self_check action=pass slots=4 pass=0 serial_decode_tps=42.9 serial_e2e_tps=15.9 batch_decode_tps=56.8 batch_e2e_tps=17.7 batch_wall_s=10.849 cohort_decode_s=3.307 cohort_decode_tokens=188
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=cb_self_check action=pass slots=4 pass=1 serial_decode_tps=42.8 serial_e2e_tps=15.8 batch_decode_tps=56.4 batch_e2e_tps=17.7 batch_wall_s=10.864 cohort_decode_s=3.331 cohort_decode_tokens=188
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=cb_self_check action=pass slots=4 pass=2 serial_decode_tps=42.8 serial_e2e_tps=15.8 batch_decode_tps=56.6 batch_e2e_tps=17.7 batch_wall_s=10.859 cohort_decode_s=3.321 cohort_decode_tokens=188
+event=cb_self_check action=measured slots=4 rung=true conformant=true cohort_decode_tokens=47 divergent_rows=none aggregate_tps=56.6 serial_tps=42.8 gain=1.32
+event=cb_self_check action=applied source=measured reason=granted slots=3 verified_k=4 model_sha256=7299b6a71a38490e378e9eb6524c426392aa96e3fd561007e0540134bbef48f9
+malibu-cli config
+  port: 18096
+  model: zai-org/glm-5.3-flash
+  draft_model: <unset>
+  num_draft_tokens: 3
+  publishes_spec_decode_telemetry: false
+  coordinator_url: <unset>
+  provider_id: <unset, will use per-instance UUID>
+  endpoint_url: <unset, WS-tunneled>
+  config: <lab>/t4-window-20261017T041102Z/selfcheck/config.yaml
+  log_level: info
+  log_format: json
+  tier2_mda_artifact_path: <unset>
+  kv_bits: <unset, mlx default>
+  max_context: 65536
+  max_batch: 8
+  continuous_batching: canary
+  continuous_batch_queue_limit: 4
+  continuous_batch_queue_wait_timeout_ms: <unset, 30000>
+  continuous_batch_prefill_tokens_per_iteration: <unset, 2048>
+  continuous_batching_cached_turns: false
+  enable_receipts: false
+  relay_blind_enabled: false
+  privacy_class_beta: false
+  idle_prewarm.enabled: false
+  idle_prewarm.idle_threshold_seconds: 30.0
+  idle_prewarm.tick_seconds: 5.0
+  idle_prewarm.max_tokens: 1
+  idle_prewarm.prompt: warm
+  idle_prewarm.run_on_battery: false
+  stream_interval: 1
+  prefill_step_size: 512
+Listening on http://127.0.0.1:18096

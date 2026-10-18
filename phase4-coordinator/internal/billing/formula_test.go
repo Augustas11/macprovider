@@ -88,6 +88,84 @@ func TestRateFor_NormalizesGLMAliases(t *testing.T) {
 	}
 }
 
+// GLM-5.3-Flash (epic #2029): the catalog key, its OpenRouter slug, the bare
+// name and the served artifact id bill at the zai-org/glm-5.3-flash row; near
+// misses and other GLM keys do not.
+func TestRateFor_NormalizesGLM53FlashAliasesExactly(t *testing.T) {
+	rateGLM53 := RateCardEntry{PromptCreditsPerMtok: 31680, PromptCacheHitCreditsPerMtok: 7920, CompletionCreditsPerMtok: 403840}
+	rateGLM45 := RateCardEntry{PromptCreditsPerMtok: 112000, PromptCacheHitCreditsPerMtok: 28000, CompletionCreditsPerMtok: 688000}
+	rateDefault := RateCardEntry{PromptCreditsPerMtok: 500000, PromptCacheHitCreditsPerMtok: 125000, CompletionCreditsPerMtok: 1000000}
+	card := map[string]RateCardEntry{
+		"zai-org/glm-5.3-flash": rateGLM53,
+		"z-ai/glm-4.5-air":      rateGLM45,
+		"default":               rateDefault,
+	}
+	cases := []struct {
+		model string
+		want  RateCardEntry
+	}{
+		{"zai-org/glm-5.3-flash", rateGLM53},
+		{"z-ai/glm-5.3-flash", rateGLM53},
+		{"Z-AI/GLM-5.3-Flash", rateGLM53},
+		{"glm-5.3-flash", rateGLM53},
+		{"Jundot/GLM-5.3-Flash-oQ4e-mtp", rateGLM53},
+		{"z-ai/glm-5.3-flash-free", rateGLM53},
+		{"z-ai/glm-5.3-flashx", rateDefault},
+		{"z-ai/glm-5.3", rateDefault},
+		{"zai-org/glm-5.3-flash-mtp", rateDefault},
+		{"jundot/glm-5.3-flash", rateDefault},
+		{"google/glm-5.3-flash", rateDefault},
+		{"z-ai/glm-4.7-flash", rateDefault},
+		{"z-ai/glm-4.5-air", rateGLM45},
+		{"mlx-community/GLM-4.5-Air-4bit", rateGLM45},
+		{"glm-4.5-air", rateGLM45},
+	}
+	for _, tc := range cases {
+		if got := RateFor(card, tc.model); got != tc.want {
+			t.Errorf("RateFor(%q) = %+v, want %+v", tc.model, got, tc.want)
+		}
+	}
+}
+
+// The alias table holds whole normalized keys for GLM-5.3-Flash only, so no
+// other model's normalization can change through it.
+func TestExactModelKeyAliasesAreOnlyTheGLM53FlashIdentities(t *testing.T) {
+	want := map[string]string{
+		"z-ai/glm-5.3-flash":            "zai-org/glm-5.3-flash",
+		"jundot/glm-5.3-flash-oq4e-mtp": "zai-org/glm-5.3-flash",
+	}
+	if len(exactModelKeyAliases) != len(want) {
+		t.Fatalf("exactModelKeyAliases = %v, want %v", exactModelKeyAliases, want)
+	}
+	for from, to := range want {
+		if exactModelKeyAliases[from] != to {
+			t.Fatalf("exactModelKeyAliases[%q] = %q, want %q", from, exactModelKeyAliases[from], to)
+		}
+		if NormalizeModelKey(to) != to {
+			t.Fatalf("alias target %q must be a fixed point", to)
+		}
+	}
+}
+
+func TestModelsEquivalent_GLM53FlashCatalogKeyMatchesServedID(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"zai-org/glm-5.3-flash", "Jundot/GLM-5.3-Flash-oQ4e-mtp", true},
+		{"z-ai/glm-5.3-flash", "Jundot/GLM-5.3-Flash-oQ4e-mtp", true},
+		{"glm-5.3-flash", "zai-org/glm-5.3-flash", true},
+		{"z-ai/glm-5.3-flashx", "zai-org/glm-5.3-flash", false},
+		{"google/glm-5.3-flash", "zai-org/glm-5.3-flash", false},
+		{"z-ai/glm-4.5-air", "zai-org/glm-5.3-flash", false},
+	}
+	for _, tc := range cases {
+		if got := ModelsEquivalent(tc.a, tc.b); got != tc.want {
+			t.Errorf("ModelsEquivalent(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
 func TestRateFor_FallsBackToDefault(t *testing.T) {
 	rateD := RateCardEntry{PromptCreditsPerMtok: 100, CompletionCreditsPerMtok: 200}
 	got := RateFor(map[string]RateCardEntry{"default": rateD}, "something-not-in-card")

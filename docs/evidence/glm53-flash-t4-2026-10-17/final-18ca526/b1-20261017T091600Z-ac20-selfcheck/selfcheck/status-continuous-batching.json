@@ -1,0 +1,48 @@
+{
+  "continuous_batching": {
+    "active": true,
+    "cache_class": "mixed",
+    "mode": "canary",
+    "paged_kv_decision": "attached",
+    "policy": {
+      "authorization_source": "baked_empty_off",
+      "authorized": false,
+      "cached_turns_authorized": false,
+      "decision_reason": "self_check_granted_3",
+      "emergency_off_override": false,
+      "expires_at": null,
+      "load_status": "absent_empty_off_fallback",
+      "local_proof_result": "passed",
+      "policy_sha256": null,
+      "policy_version": null,
+      "release_id": null,
+      "rollout_mode": "off",
+      "signer_key_id": null,
+      "tuple_sha256": null
+    },
+    "scheduler": {
+      "active_decode_rows": 0,
+      "max_observed_batch_depth": 4,
+      "shared_forward_calls": 60,
+      "slots_free": 8,
+      "slots_total": 8,
+      "waiting_count": 0
+    },
+    "self_check": {
+      "decision": "granted",
+      "deferrals": 0,
+      "hardware_class": "apple-silicon:Apple M3 Ultra:ram-256gb",
+      "kernel_identifier": "macprovider_paged_kv_gather_v1",
+      "metallib_sha256": "589e56e0794dcf6fcebf7f7edbda562404653e606d6ac9bb9bdf7025a608a094",
+      "model_sha256": "7299b6a71a38490e378e9eb6524c426392aa96e3fd561007e0540134bbef48f9",
+      "os_build": "Version 27.0.1 (Build 26A434)",
+      "runtime_build": "18ca526706dbffb9b1ce825046fe46a691d875b6/0.32.3+29d3b93375cc56cd2649b40e4310a8bc445e9874+cb-isolation-v1/decode8/verify8+cb-probe-v3/route1024+flat8",
+      "served_slots": 3,
+      "verified_k": 4
+    },
+    "unsupported_reason": null
+  },
+  "model": "zai-org/glm-5.3-flash",
+  "model_hash": "7299b6a71a38490e378e9eb6524c426392aa96e3fd561007e0540134bbef48f9",
+  "model_hash_algorithm": "macprovider.snapshot-manifest.v1"
+}

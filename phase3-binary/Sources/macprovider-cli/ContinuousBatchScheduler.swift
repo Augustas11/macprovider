@@ -112,7 +112,7 @@ struct ContinuousBatchSchedulerSnapshot: Sendable, Equatable {
 /// alone; otherwise a row's numerics depend on its batch neighbours. A shared
 /// prefill feeds `[rows, chunk]` tokens, and every quantized projection
 /// flattens that to `M = rows x chunk` (`QuantizedMatmul::eval_gpu`,
-/// `mlx/backend/metal/quantized.cpp`, MLX core fork `v0.32.2-macprovider.5`):
+/// `mlx/backend/metal/quantized.cpp`, MLX core fork `v0.32.4-macprovider.4`):
 /// `M < vector_limit` takes `qmv` (or `qmv_quad` at K 64/128), else `qmm`,
 /// with `vector_limit = get_qmv_batch_limit(K, N, device)` for transposed
 /// weights and 4 otherwise. Within each route a row's result does not depend
@@ -238,10 +238,11 @@ struct ContinuousBatchPrefillGroupingRule: Sendable, Equatable {
 /// row decoded beside enough neighbours would switch kernels and reduction
 /// order. A decode forward carries at most `vector limit - 1` rows, where the
 /// limit is the smallest `get_qmv_batch_limit` of the device over every K and
-/// N (core `v0.32.2-macprovider.5`, `mlx/backend/metal/quantized.cpp`). The
+/// N (core `v0.32.4-macprovider.4`, `mlx/backend/metal/quantized.cpp`). The
 /// smallest value belongs to the K or N above 4096 branch, which every served
-/// model reaches through its output head. M3 Ultra: 12, so 11 rows; M1/M2
-/// non-Ultra: 6, so 5 rows; M3-M5 non-Ultra: 13, so 12 rows.
+/// model reaches through its output head. M3 Ultra: 12, so 11 rows; M1 Pro
+/// (`g13s`): 7, so 6 rows; other M1/M2 non-Ultra: 6, so 5 rows; M3-M5
+/// non-Ultra: 13, so 12 rows.
 enum ContinuousBatchDecodeRouteBound {
     /// Port of core `get_qmv_batch_limit` for transposed quantized weights.
     /// `architecture` is the Metal architecture name (`applegpu_g15d`), or
@@ -262,7 +263,8 @@ enum ContinuousBatchDecodeRouteBound {
         } else if generation >= 15 && !isUltra {
             return small ? 13 : (medium ? 15 : 13)
         } else if generation >= 13 {
-            return isUltra ? (small ? 32 : (medium ? 18 : 12)) : (small ? 14 : (medium ? 10 : 6))
+            let large = generation == 13 && bytes.last == UInt8(ascii: "s") ? 7 : 6
+            return isUltra ? (small ? 32 : (medium ? 18 : 12)) : (small ? 14 : (medium ? 10 : large))
         } else {
             return isUltra ? (small ? 32 : (medium ? 18 : 12)) : (small ? 18 : (medium ? 12 : 10))
         }
@@ -729,6 +731,10 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
     /// Exactness-probe rows only (`selfCheckCohort` set): decode tokens this
     /// row generated while its whole cohort, and nothing else, was decoding.
     var selfCheckCohortDecodeTokens: Int? = nil
+    /// Cohort rows only: wall seconds of the decode steps counted in
+    /// `selfCheckCohortDecodeTokens` (SPEC-038 FR-CB10 v0.3.21 decode-only
+    /// gain). Timing, not identity: not compared by `==`.
+    var selfCheckCohortDecodeSeconds: Double? = nil
 
     func withSettlementDisposition(
         _ disposition: ContinuousBatchSettlementDisposition
@@ -751,7 +757,8 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
             serialToolStopTokenCount: serialToolStopTokenCount,
             serialConversationCache: disposition == .eligibleOwner ? serialConversationCache : nil,
             nativeMTPCounters: nativeMTPCounters,
-            selfCheckCohortDecodeTokens: selfCheckCohortDecodeTokens
+            selfCheckCohortDecodeTokens: selfCheckCohortDecodeTokens,
+            selfCheckCohortDecodeSeconds: selfCheckCohortDecodeSeconds
         )
     }
 
@@ -774,7 +781,8 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
             serialToolStopTokenCount: serialToolStopTokenCount,
             serialConversationCache: serialConversationCache,
             nativeMTPCounters: nativeMTPCounters,
-            selfCheckCohortDecodeTokens: selfCheckCohortDecodeTokens
+            selfCheckCohortDecodeTokens: selfCheckCohortDecodeTokens,
+            selfCheckCohortDecodeSeconds: selfCheckCohortDecodeSeconds
         )
     }
 
@@ -2098,6 +2106,10 @@ actor ContinuousBatchScheduler {
         /// count when the current full-width run began.
         var selfCheckCohortDecodeTokens = 0
         var selfCheckCohortRunStart: Int?
+        /// Uptime nanoseconds spent in closed full-width runs, and when the
+        /// open one began.
+        var selfCheckCohortDecodeNanoseconds: UInt64 = 0
+        var selfCheckCohortRunStartedAt: UInt64?
 
         var retainedLogicalTokenCount: Int {
             request.promptTokens.count + generatedTokens.count
@@ -2161,6 +2173,12 @@ actor ContinuousBatchScheduler {
     /// exactness probe's shape.
     nonisolated var maxRequestTokens: Int { configuration.maxRequestTokens }
     nonisolated var blockSizeTokens: Int { configuration.descriptor.blockSizeTokens }
+    /// The backend's flattened-token bound on one shared forward, beyond the
+    /// device route bound (`glm5_next`: 8, SPEC-039 v0.1.19); nil when only
+    /// the device bound applies.
+    nonisolated var forwardTokenCap: Int? {
+        (backend as? PagedKVSharedForwardBackend)?.maxDecodeRowsPerForward
+    }
     nonisolated var poolTokens: Int {
         configuration.descriptor.blockSizeTokens * configuration.descriptor.maxPhysicalBlocks
     }
@@ -2184,6 +2202,19 @@ actor ContinuousBatchScheduler {
     private var requestAdmissionSequences: [String: UInt64] = [:]
     private var admittingRequests: [String: ContinuousBatchSchedulerRequest] = [:]
     private var nativeMTPReservedRoundBytes = 0
+    /// Bumped whenever a row applies a token or reaches a terminal result:
+    /// the pump's no-progress guard compares it across passes.
+    private var rowProgressEvents = 0
+    /// Consecutive pump passes that ran a decode step yet applied no token
+    /// and finished no row.
+    private var decodePassesWithoutProgress = 0
+    /// A pump that keeps stepping active rows without a token or terminal
+    /// result for this many passes fails them instead of spinning.
+    static let decodePassesWithoutProgressLimit = 64
+    #if DEBUG
+    private var testDecodeStepsAreNoOps = false
+    func setTestDecodeStepsAreNoOps(_ value: Bool) { testDecodeStepsAreNoOps = value }
+    #endif
     private var nativeMTPRoundByteReservations: [UUID: Int] = [:]
     private var activePrompt: [String: Row] = [:]
     private var promptOrder: [String] = []
@@ -3024,6 +3055,20 @@ actor ContinuousBatchScheduler {
             if pumpRestartRequested {
                 pumpRestartRequested = false
                 ensurePump()
+            } else if !activePrompt.isEmpty || !activeDecode.isEmpty {
+                // Nothing restarts the pump until another request or event
+                // arrives, so rows left here wait. Say so loudly.
+                let nativeRows = activeDecode.values.filter(\.usesNativeMTP).count
+                    + activePrompt.values.filter(\.usesNativeMTP).count
+                try? FileHandle.standardError.write(contentsOf: Data(
+                    "event=continuous_batch_pump_idle_with_rows active_prompt=\(activePrompt.count) active_decode=\(activeDecode.count) waiting=\(waiting.count) native_rows=\(nativeRows) backend_cancellation_pending=\(backendCancellationPending)\n".utf8
+                ))
+            } else if nativeMTPReservedRoundBytes > 0 || !nativeMTPRoundByteReservations.isEmpty {
+                // No row is active, so no native round can hold bytes: a
+                // reservation leaked and would refuse later rounds.
+                try? FileHandle.standardError.write(contentsOf: Data(
+                    "event=native_mtp_round_bytes_outstanding_when_idle reserved_bytes=\(nativeMTPReservedRoundBytes) reservations=\(nativeMTPRoundByteReservations.count)\n".utf8
+                ))
             }
         }
         // An exactness-probe cohort decodes only once every row of it is in
@@ -3043,8 +3088,18 @@ actor ContinuousBatchScheduler {
             let holdCohortDecode = admissionOrPrefillProgressed && selfCheckCohortDecodeHeld
             admissionOrPrefillProgressed = false
             if !activeDecode.isEmpty && !holdCohortDecode {
+                let progressBefore = rowProgressEvents
                 await runDecodeStep()
                 madeProgress = true
+                if rowProgressEvents == progressBefore, !activeDecode.isEmpty {
+                    decodePassesWithoutProgress += 1
+                    if decodePassesWithoutProgress >= Self.decodePassesWithoutProgressLimit {
+                        decodePassesWithoutProgress = 0
+                        await failRowsWithoutDecodeProgress()
+                    }
+                } else {
+                    decodePassesWithoutProgress = 0
+                }
                 if backendCancellationPending { break }
                 if await failClosedIfNeeded() { break }
                 await processCancellations()
@@ -3065,9 +3120,33 @@ actor ContinuousBatchScheduler {
                 madeProgress = true
                 admissionOrPrefillProgressed = true
             }
+            // Admission or prefill can unblock a decode row; only passes
+            // that move nothing count toward the no-progress guard.
+            if admissionOrPrefillProgressed { decodePassesWithoutProgress = 0 }
             if await failClosedIfNeeded() { break }
             // A held decode with no other progress runs on the next pass.
             guard madeProgress || holdCohortDecode else { break }
+        }
+    }
+
+    /// The no-progress guard: decode steps keep running for these rows but
+    /// none applies a token or ends, so each fails loudly instead of the pump
+    /// spinning forever.
+    private func failRowsWithoutDecodeProgress() async {
+        let ids = activeDecode.keys.sorted()
+        try? FileHandle.standardError.write(contentsOf: Data(
+            "event=continuous_batch_no_progress action=fail_rows passes=\(Self.decodePassesWithoutProgressLimit) rows=\(ids.joined(separator: ","))\n".utf8
+        ))
+        for id in ids {
+            guard let removed = activeDecode.removeValue(forKey: id) else { continue }
+            record(.localPreparationFailed)
+            let released = await release(removed.handle)
+            finish(
+                removed,
+                status: .requestFailed,
+                errorCode: released ? "continuous_batching_scheduler_no_progress" : "continuous_batching_cleanup_failed"
+            )
+            if !released { return }
         }
     }
 
@@ -3110,6 +3189,7 @@ actor ContinuousBatchScheduler {
     /// them serially too).
     private func noteSelfCheckCohortDecodeStep(rows: [Row]) {
         guard rows.contains(where: { $0.request.selfCheckCohort != nil }) else { return }
+        let now = DispatchTime.now().uptimeNanoseconds
         for row in rows {
             guard let cohort = row.request.selfCheckCohort, var active = activeDecode[row.request.id] else { continue }
             let fullWidth = rows.count >= cohort.size
@@ -3117,10 +3197,15 @@ actor ContinuousBatchScheduler {
             if fullWidth {
                 if active.selfCheckCohortRunStart == nil {
                     active.selfCheckCohortRunStart = active.generatedTokens.count
+                    active.selfCheckCohortRunStartedAt = now
                 }
             } else if let start = active.selfCheckCohortRunStart {
                 active.selfCheckCohortDecodeTokens += max(0, active.generatedTokens.count - start)
                 active.selfCheckCohortRunStart = nil
+                if let startedAt = active.selfCheckCohortRunStartedAt, now > startedAt {
+                    active.selfCheckCohortDecodeNanoseconds += now - startedAt
+                }
+                active.selfCheckCohortRunStartedAt = nil
             }
             activeDecode[row.request.id] = active
         }
@@ -3130,6 +3215,15 @@ actor ContinuousBatchScheduler {
         guard row.request.selfCheckCohort != nil else { return nil }
         let open = row.selfCheckCohortRunStart.map { max(0, row.generatedTokens.count - $0) } ?? 0
         return row.selfCheckCohortDecodeTokens + open
+    }
+
+    /// Wall seconds of the steps `selfCheckCohortDecodeTokens(of:)` counts:
+    /// closed runs plus an open run up to now (the row's finish).
+    private static func selfCheckCohortDecodeSeconds(of row: Row) -> Double? {
+        guard row.request.selfCheckCohort != nil else { return nil }
+        let now = DispatchTime.now().uptimeNanoseconds
+        let open = row.selfCheckCohortRunStartedAt.map { now > $0 ? now - $0 : 0 } ?? 0
+        return Double(row.selfCheckCohortDecodeNanoseconds + open) / 1_000_000_000
     }
 
     private func startBackendCancellation() {
@@ -3311,9 +3405,20 @@ actor ContinuousBatchScheduler {
             throw ContinuousBatchSchedulerError.requestFailed("continuous_batching_native_mtp_window_bytes_unavailable")
         }
         let (nextReserved, overflow) = nativeMTPReservedRoundBytes.addingReportingOverflow(bytes)
+        let sample = configuration.nativeMTPRoundSystemMemoryProbe.sample()
         guard !overflow,
               nextReserved <= configuration.nativeMTPRoundByteCapacity,
-              nativeMTPSystemMemoryHeadroomAdmits(reservedAfter: nextReserved) else {
+              Self.nativeMTPSystemMemoryHeadroomAdmits(reservedAfter: nextReserved, sample: sample) else {
+            // SPEC-048 R012: say which bound refused, with every number.
+            let floor = sample.map { max(1, $0.physicalBytes / 10) }
+            try? FileHandle.standardError.write(contentsOf: Data(
+                ("event=native_mtp_round_reservation_refused requested_bytes=\(bytes) reserved_before_bytes=\(nativeMTPReservedRoundBytes) "
+                    + "outstanding_reservations=\(nativeMTPRoundByteReservations.count) capacity_bytes=\(configuration.nativeMTPRoundByteCapacity) "
+                    + "available_bytes=\(sample.map { String($0.availableBytes) } ?? "unavailable") "
+                    + "physical_bytes=\(sample.map { String($0.physicalBytes) } ?? "unavailable") "
+                    + "floor_bytes=\(floor.map(String.init) ?? "unavailable") "
+                    + "reason=\(overflow ? "overflow" : nextReserved > configuration.nativeMTPRoundByteCapacity ? "capacity" : "system_headroom")\n").utf8
+            ))
             throw ContinuousBatchSchedulerError.requestFailed("continuous_batching_native_mtp_round_memory_exhausted")
         }
         let id = UUID()
@@ -3322,9 +3427,14 @@ actor ContinuousBatchScheduler {
         return NativeMTPRoundByteReservation(id: id, bytes: bytes)
     }
 
-    private func nativeMTPSystemMemoryHeadroomAdmits(reservedAfter: Int) -> Bool {
+    /// SPEC-048 R012: the round's reservation fits above the 10% physical
+    /// free-memory floor.
+    static func nativeMTPSystemMemoryHeadroomAdmits(
+        reservedAfter: Int,
+        sample: NativeMTPRoundSystemMemorySample?
+    ) -> Bool {
         guard reservedAfter > 0,
-              let sample = configuration.nativeMTPRoundSystemMemoryProbe.sample(),
+              let sample,
               sample.availableBytes > 0,
               sample.physicalBytes > 0 else {
             return false
@@ -3701,6 +3811,7 @@ actor ContinuousBatchScheduler {
         nativeMTPStatusRoundStarted = true
         let backendProposals: [String: [Int]]?
         do {
+            CBTrace.log(nil, "native_round phase=propose rows=\(proposalInputs.map(\.requestID).joined(separator: ","))")
             backendProposals = try await backend.proposeNativeMTPPackedRound(rows: proposalInputs)
         } catch {
             recordNativeMTPPostoutputFailureIfVisible(
@@ -3911,6 +4022,7 @@ actor ContinuousBatchScheduler {
 
         let verifiedRows: [NativeMTPVerifiedRow]
         do {
+            CBTrace.log(nil, "native_round phase=verify rows=\(prepared.count)")
             verifiedRows = try await backend.verifyNativeMTPPackedRound(rows: prepared.map(\.input))
         } catch {
             recordNativeMTPPostoutputFailureIfVisible(
@@ -4098,7 +4210,9 @@ actor ContinuousBatchScheduler {
         }
 
         do {
+            CBTrace.log(nil, "native_round phase=finalize rows=\(finalizeRows.map { "\($0.requestID):\($0.shouldCommit)" }.joined(separator: ","))")
             try await backend.finalizeNativeMTPPackedRound(rows: finalizeRows)
+            CBTrace.log(nil, "native_round phase=finalized")
         } catch {
             recordNativeMTPPostoutputFailureIfVisible(
                 sink: nativeMTPStatusSink,
@@ -4487,6 +4601,10 @@ actor ContinuousBatchScheduler {
     }
 
     private func runDecodeStep() async {
+        #if DEBUG
+        // Test hook: a decode step that moves no row (the no-progress guard).
+        if testDecodeStepsAreNoOps { return }
+        #endif
         await fenceDisabledActiveNativeMTPRows()
         guard !cleanupFailedClosed else { return }
         noteSelfCheckCohortDecodeStep(rows: Array(activeDecode.values))
@@ -4532,9 +4650,10 @@ actor ContinuousBatchScheduler {
         // Each forward stays below the device's quantized-matmul vector limit
         // (`ContinuousBatchDecodeRouteBound`); a backend whose model attended
         // outside its per-row attention path decodes one row per forward.
-        let rowBound = (backend as? PagedKVSharedForwardBackend)?.serializesPaddedRows == true
+        let pagedBackend = backend as? PagedKVSharedForwardBackend
+        let rowBound = pagedBackend?.serializesPaddedRows == true
             ? 1
-            : configuration.maxDecodeRowsPerForward
+            : min(configuration.maxDecodeRowsPerForward, pagedBackend?.maxDecodeRowsPerForward ?? Int.max)
         if rows.count > rowBound {
             for start in stride(from: 0, to: rows.count, by: rowBound) {
                 let part = rows[start ..< min(start + rowBound, rows.count)]
@@ -4881,6 +5000,7 @@ actor ContinuousBatchScheduler {
     }
 
     private func applyToken(_ token: Int, to initialRow: Row) async {
+        rowProgressEvents &+= 1
         guard let completion = advanceDecodeRow(token, requestID: initialRow.request.id) else { return }
         await completeDecodeRow(initialRow.request.id, completion)
     }
@@ -5670,7 +5790,8 @@ actor ContinuousBatchScheduler {
                 : nil,
             serialConversationCache: isSuccessful ? serialConversationCache : nil,
             nativeMTPCounters: row.nativeMTPCounters,
-            selfCheckCohortDecodeTokens: Self.selfCheckCohortDecodeTokens(of: row)
+            selfCheckCohortDecodeTokens: Self.selfCheckCohortDecodeTokens(of: row),
+            selfCheckCohortDecodeSeconds: Self.selfCheckCohortDecodeSeconds(of: row)
         )
         complete(requestID: row.request.id, result: result)
     }
@@ -5704,12 +5825,14 @@ actor ContinuousBatchScheduler {
                 ? row.request.serialToolStopObserver?.stopTokenCount
                 : nil,
             nativeMTPCounters: row.nativeMTPCounters,
-            selfCheckCohortDecodeTokens: Self.selfCheckCohortDecodeTokens(of: row)
+            selfCheckCohortDecodeTokens: Self.selfCheckCohortDecodeTokens(of: row),
+            selfCheckCohortDecodeSeconds: Self.selfCheckCohortDecodeSeconds(of: row)
         )
         complete(requestID: row.request.id, result: result)
     }
 
     private func complete(requestID: String, result: ContinuousBatchSchedulerResult) {
+        rowProgressEvents &+= 1
         #if DEBUG || MACPROVIDER_LAB_HARNESS
         labNativeMTPLoadGateRecorder?.recordTerminal(requestID: requestID, status: result.terminalStatus)
         #endif
@@ -6272,7 +6395,11 @@ actor ContinuousBatchScheduler {
 final class NativeMTPLabProposalOverride: @unchecked Sendable {
     enum Mode: Sendable, Equatable {
         case everyRound
-        case blockBoundary(blockTokens: Int)
+        /// Rounds whose staged positions cross a block boundary; with
+        /// `includeBlockStart`, also rounds that start exactly on one, so a
+        /// boundary an accepted round stepped over still gets a forced
+        /// rejection (large blocks have few boundaries to hit).
+        case blockBoundary(blockTokens: Int, includeBlockStart: Bool = false)
     }
 
     private let lock = NSLock()
@@ -6290,10 +6417,13 @@ final class NativeMTPLabProposalOverride: @unchecked Sendable {
         switch mode {
         case .everyRound:
             break
-        case .blockBoundary(let blockTokens):
+        case .blockBoundary(let blockTokens, let includeBlockStart):
             let first = committedKVTokenCount
             let last = committedKVTokenCount + proposals.count
-            guard blockTokens > 0, first / blockTokens != last / blockTokens else { return proposals }
+            guard blockTokens > 0 else { return proposals }
+            let crosses = first / blockTokens != last / blockTokens
+            let startsOnBoundary = includeBlockStart && first > 0 && first % blockTokens == 0
+            guard crosses || startsOnBoundary else { return proposals }
         }
         lock.lock()
         overriddenRounds[requestID, default: 0] += 1

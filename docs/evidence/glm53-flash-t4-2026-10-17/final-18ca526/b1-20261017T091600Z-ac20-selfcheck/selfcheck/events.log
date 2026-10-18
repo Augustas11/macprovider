@@ -1,0 +1,26 @@
+event=batching_unsupported action=serial_routed reason=local_batching_capability_unavailable
+event=continuous_batching_policy action=resolved status=absent_empty_off_fallback entries=0 revocations=0 emergency_off=false
+event=served_slots action=planned rows=8 served=1 reason=self_check_pending configured=4 source=autotune
+[paged-kv] moe-isolation first prefill=[23176,264] serial=[23176,264] decodeA=[398, 33297, 1910, 1849, 9929, 476, 2526, 11216, 369, 12847, 38, 2828, 11, 85004, 11, 323] serialA=[398, 33297, 1910, 1849, 9929, 476, 2526, 11216, 369, 12847, 38, 2828, 11, 85004, 11, 323] decodeB=[8, 8363, 20147, 11, 44339, 11, 30515, 293, 8, 8363, 20147, 11, 34002, 11, 60986, 272] serialB=[8, 8363, 20147, 11, 44339, 11, 30515, 293, 8, 8363, 20147, 11, 34002, 11, 60986, 272]
+[paged-kv] moe-isolation rejoin decodeA=[73750] serialA=[73750] decodeB=[8] serialB=[8]
+[paged-kv] parity model=zai-org/glm-5.3-flash established=true nLayers=11 nNew=32 nForwards=36 gatherKernelCalls=792 expectCalls=792 maxLogicalBlocks=11 nonIdentityPermutation=true
+[paged-kv] batched-isolation model=zai-org/glm-5.3-flash requiresMoE=true proven=true rowsDecoded=2 rowFailures=0 crossRowDivergences=0 challengeDistinguishing=true
+[paged-kv] measure OK: runtime measurement complete, paged-KV attach eligible for model=zai-org/glm-5.3-flash
+[paged-kv] runtime-identity model=zai-org/glm-5.3-flash model_sha256=7299b6a71a38490e378e9eb6524c426392aa96e3fd561007e0540134bbef48f9 hardware_class=apple-silicon:Apple M3 Ultra:ram-256gb metallib_sha256=589e56e0794dcf6fcebf7f7edbda562404653e606d6ac9bb9bdf7025a608a094 kernel_identifier=macprovider_paged_kv_gather_v1
+event=continuous_batch_decode_row_bound max_decode_rows_per_forward=11
+event=continuous_batch_decode_row_bound max_decode_rows_per_forward=8 device_bound=11 reason=flattened_token_cap
+event=served_slots action=applied slots=1 rows=8 reason=self_check_pending
+event=cb_self_check action=step max_slots=4 rows=8 queue_limit=4 probe_key_boundary=1024 resumed_at=0 remeasure=false model_sha256=7299b6a71a38490e378e9eb6524c426392aa96e3fd561007e0540134bbef48f9
+event=cb_self_check action=pass slots=2 pass=0 serial_decode_tps=43.5 serial_e2e_tps=27.8 batch_decode_tps=58.7 batch_e2e_tps=35.0 batch_wall_s=2.739 cohort_decode_s=1.600 cohort_decode_tokens=94
+event=cb_self_check action=pass slots=2 pass=1 serial_decode_tps=43.5 serial_e2e_tps=27.9 batch_decode_tps=58.8 batch_e2e_tps=34.3 batch_wall_s=2.803 cohort_decode_s=1.599 cohort_decode_tokens=94
+event=cb_self_check action=pass slots=2 pass=2 serial_decode_tps=43.5 serial_e2e_tps=27.9 batch_decode_tps=58.8 batch_e2e_tps=34.3 batch_wall_s=2.795 cohort_decode_s=1.598 cohort_decode_tokens=94
+event=cb_self_check action=measured slots=2 rung=true conformant=true cohort_decode_tokens=47 divergent_rows=none aggregate_tps=58.8 serial_tps=43.5 gain=1.35
+event=cb_self_check action=pass slots=3 pass=0 serial_decode_tps=43.3 serial_e2e_tps=20.5 batch_decode_tps=65.2 batch_e2e_tps=25.4 batch_wall_s=5.671 cohort_decode_s=2.161 cohort_decode_tokens=141
+event=cb_self_check action=pass slots=3 pass=1 serial_decode_tps=43.3 serial_e2e_tps=20.4 batch_decode_tps=65.0 batch_e2e_tps=24.9 batch_wall_s=5.784 cohort_decode_s=2.169 cohort_decode_tokens=141
+event=cb_self_check action=pass slots=3 pass=2 serial_decode_tps=43.3 serial_e2e_tps=20.5 batch_decode_tps=65.6 batch_e2e_tps=25.5 batch_wall_s=5.650 cohort_decode_s=2.150 cohort_decode_tokens=141
+event=cb_self_check action=measured slots=3 rung=true conformant=true cohort_decode_tokens=47 divergent_rows=none aggregate_tps=65.2 serial_tps=43.3 gain=1.51
+event=cb_self_check action=pass slots=4 pass=0 serial_decode_tps=43.2 serial_e2e_tps=15.8 batch_decode_tps=70.1 batch_e2e_tps=18.8 batch_wall_s=10.217 cohort_decode_s=2.682 cohort_decode_tokens=188
+event=cb_self_check action=pass slots=4 pass=1 serial_decode_tps=43.2 serial_e2e_tps=15.8 batch_decode_tps=72.3 batch_e2e_tps=19.0 batch_wall_s=10.090 cohort_decode_s=2.602 cohort_decode_tokens=188
+event=cb_self_check action=pass slots=4 pass=2 serial_decode_tps=43.2 serial_e2e_tps=15.8 batch_decode_tps=71.7 batch_e2e_tps=19.1 batch_wall_s=10.040 cohort_decode_s=2.620 cohort_decode_tokens=188
+event=cb_self_check action=measured slots=4 rung=true conformant=true cohort_decode_tokens=47 divergent_rows=none aggregate_tps=71.7 serial_tps=43.2 gain=1.66
+event=cb_self_check action=applied source=measured reason=granted slots=3 verified_k=4 model_sha256=7299b6a71a38490e378e9eb6524c426392aa96e3fd561007e0540134bbef48f9

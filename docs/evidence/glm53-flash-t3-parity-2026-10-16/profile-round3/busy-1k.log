@@ -1,0 +1,5 @@
+hc_deferred_exact=true
+load_s=32.8 active_gb=184.799015808
+wired_limit_applied=239143780352 cap=239143780352
+prefill_tps=98.5
+gpu-profile ops_per_buffer=default wall_ms=27.56 gpu_busy_ms=23.51 idle_ms=4.05 cmdbufs/step=168.1 dispatches/step=589.0

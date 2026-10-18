@@ -1890,3 +1890,18 @@ func keyHash(s string) [32]byte {
 	}
 	return sum
 }
+
+// The stored demand model allowlist matches the router's for GLM-5.3-Flash
+// (epic #2029): exact identities only.
+func TestValidDemandModelIDKnowsGLM53FlashIdentitiesExactly(t *testing.T) {
+	for _, model := range []string{"zai-org/glm-5.3-flash", "z-ai/glm-5.3-flash", "Jundot/GLM-5.3-Flash-oQ4e-mtp"} {
+		if !validDemandModelID(model) || sanitizeStoredDemandModelID(model, true) != model {
+			t.Errorf("%q must be a known demand model id", model)
+		}
+	}
+	for _, model := range []string{"z-ai/glm-5.3-flashx", "zai-org/glm-5.3", "glm-5.3-flash", "jundot/glm-5.3-flash-oq4e-mtp"} {
+		if validDemandModelID(model) {
+			t.Errorf("%q must not be a known demand model id", model)
+		}
+	}
+}

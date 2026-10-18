@@ -1,0 +1,272 @@
+[
+ {
+  "messages": [
+   {
+    "content": "You are terse.",
+    "role": "system"
+   },
+   {
+    "content": "Name a prime above 10.",
+    "role": "user"
+   }
+  ],
+  "name": "system_user"
+ },
+ {
+  "messages": [
+   {
+    "content": "Hi",
+    "role": "user"
+   },
+   {
+    "content": "Hello! How can I help?",
+    "role": "assistant"
+   },
+   {
+    "content": "Count to three.",
+    "role": "user"
+   }
+  ],
+  "name": "multi_turn"
+ },
+ {
+  "messages": [
+   {
+    "content": "2+2?",
+    "role": "user"
+   },
+   {
+    "content": "4",
+    "reasoning_content": "Add two and two.",
+    "role": "assistant"
+   },
+   {
+    "content": "And 3+3?",
+    "role": "user"
+   }
+  ],
+  "name": "reasoning_content"
+ },
+ {
+  "messages": [
+   {
+    "content": "q",
+    "role": "user"
+   },
+   {
+    "content": "<think>plan</think>answer",
+    "role": "assistant"
+   },
+   {
+    "content": "next",
+    "role": "user"
+   }
+  ],
+  "name": "think_in_content"
+ },
+ {
+  "messages": [
+   {
+    "content": [
+     {
+      "text": "part one ",
+      "type": "text"
+     },
+     {
+      "text": "part two",
+      "type": "text"
+     }
+    ],
+    "role": "user"
+   }
+  ],
+  "name": "content_parts"
+ },
+ {
+  "context": {
+   "reasoning_effort": "low"
+  },
+  "messages": [
+   {
+    "content": "quick one",
+    "role": "user"
+   }
+  ],
+  "name": "reasoning_effort_low"
+ },
+ {
+  "context": {
+   "clear_thinking": true
+  },
+  "messages": [
+   {
+    "content": "a",
+    "role": "user"
+   },
+   {
+    "content": "b",
+    "reasoning_content": "r1",
+    "role": "assistant"
+   },
+   {
+    "content": "c",
+    "role": "user"
+   }
+  ],
+  "name": "clear_thinking"
+ },
+ {
+  "messages": [
+   {
+    "content": "Use tools.",
+    "role": "system"
+   },
+   {
+    "content": "Weather in Oslo for 2 days?",
+    "role": "user"
+   },
+   {
+    "content": "",
+    "role": "assistant",
+    "tool_calls": [
+     {
+      "function": {
+       "arguments": {
+        "city": "Oslo",
+        "days": 2
+       },
+       "name": "get_weather"
+      },
+      "id": "call_1",
+      "type": "function"
+     }
+    ]
+   },
+   {
+    "content": "{\"temp\": 4}",
+    "role": "tool",
+    "tool_call_id": "call_1"
+   },
+   {
+    "content": "Thanks",
+    "role": "user"
+   }
+  ],
+  "name": "tools_and_calls",
+  "tools": [
+   {
+    "function": {
+     "description": "Weather for a city",
+     "name": "get_weather",
+     "parameters": {
+      "properties": {
+       "city": {
+        "type": "string"
+       },
+       "days": {
+        "type": "integer"
+       }
+      },
+      "required": [
+       "city"
+      ],
+      "type": "object"
+     }
+    },
+    "type": "function"
+   }
+  ]
+ },
+ {
+  "messages": [
+   {
+    "content": "go",
+    "role": "user"
+   },
+   {
+    "content": "",
+    "role": "assistant",
+    "tool_calls": [
+     {
+      "function": {
+       "arguments": {
+        "x": "1"
+       },
+       "name": "f"
+      },
+      "id": "a",
+      "type": "function"
+     },
+     {
+      "function": {
+       "arguments": {
+        "x": [
+         1,
+         2
+        ]
+       },
+       "name": "f"
+      },
+      "id": "b",
+      "type": "function"
+     }
+    ]
+   },
+   {
+    "content": "B",
+    "role": "tool",
+    "tool_call_id": "b"
+   },
+   {
+    "content": "A",
+    "role": "tool",
+    "tool_call_id": "a"
+   }
+  ],
+  "name": "two_tool_results_sorted",
+  "tools": [
+   {
+    "function": {
+     "name": "f",
+     "parameters": {
+      "properties": {},
+      "type": "object"
+     }
+    },
+    "type": "function"
+   }
+  ]
+ },
+ {
+  "messages": [
+   {
+    "content": "go",
+    "role": "user"
+   },
+   {
+    "content": "",
+    "role": "assistant",
+    "tool_calls": [
+     {
+      "function": {
+       "arguments": {},
+       "name": "f"
+      },
+      "id": "t1",
+      "type": "function"
+     }
+    ]
+   },
+   {
+    "content": [
+     {
+      "output": "result text",
+      "tool_call_id": "t1"
+     }
+    ],
+    "role": "tool"
+   }
+  ],
+  "name": "tool_output_list"
+ }
+]

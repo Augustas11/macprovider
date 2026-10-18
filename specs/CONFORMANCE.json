@@ -665,7 +665,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.22.26",
+      "version": "v0.22.27",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1101,7 +1101,7 @@
     {
       "spec_id": "SPEC-038",
       "title": "Continuous batching for concurrent provider inference",
-      "version": "v0.3.20",
+      "version": "v0.3.21",
       "path": "specs/SPEC-038-continuous-batching.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1136,7 +1136,7 @@
     {
       "spec_id": "SPEC-039",
       "title": "Paged KV / paged-attention engine",
-      "version": "v0.1.16",
+      "version": "v0.1.20",
       "path": "specs/SPEC-039-paged-kv-attention-engine.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1475,7 +1475,7 @@
     {
       "spec_id": "SPEC-048",
       "title": "Native Multi-Token Prediction Serving",
-      "version": "0.1.34",
+      "version": "0.1.47",
       "path": "specs/SPEC-048-native-mtp-serving.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -3498,7 +3498,12 @@
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testReleaseEnvelopeRejectsNativeActiveRowBoundOutsideQualifiedSlots",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testReleaseEnvelopeBindsSignedPromptBoundIntoCapabilityAndTupleIdentity",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testGoldenSidecarTupleIdentityMatchesPythonGenerator",
-        "scripts/tests/test_native_mtp_admission_sidecar.py:class NativeMTPAdmissionSidecarTests"
+        "scripts/tests/test_native_mtp_admission_sidecar.py:class NativeMTPAdmissionSidecarTests",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testReleaseEnvelopeAcceptsUpTo1024QuantizationExceptions",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPGLM5NextObservationTests.swift:testAffineRepresentationAdmitsUpTo1024Exceptions",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPGLM5NextObservationTests.swift:testOverrideWidthsOtherThanFourFiveSixEightFailClosed",
+        "scripts/tests/test_native_mtp_admission_sidecar.py:class NativeMTPAdmissionMultiEntryTests",
+        "scripts/tests/test_native_mtp_admission_sidecar.py:class NativeMTPProjectionManifestTests"
       ],
       "journeys": [
         "JOURNEY-NATIVE-MTP-SERVING"
@@ -3508,7 +3513,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "SPEC-023 v0.22.9 defines the closed signed native-MTP admission sidecar. The strict consumer is implemented (#1770) and fails closed on the live executable CDHash binding, complete-window byte closure, MLX affine 4-bit representation, the SPEC-048-R007 max_native_active_rows bound, the greedy/sampled request profile, and the signed max_prompt_tokens bound, with negative fixtures. An unsigned sidecar generator (scripts/native_mtp_admission_sidecar.py) renders and validates the closed body and both identities with a cross-language golden; release-ledger binding, signing, and signed release evidence are not implemented, so the requirement stays pending."
+        "rationale": "SPEC-023 v0.22.9 defines the closed signed native-MTP admission sidecar; v0.22.27 admits per-module affine override widths 4, 5, 6, or 8 and up to 1024 exceptions per array (GLM-5.3-Flash carries 554), and the generator builds multi-entry sidecars and the v2 multi-model projection manifest. The strict consumer is implemented (#1770) and fails closed on the live executable CDHash binding, complete-window byte closure, MLX affine 4-bit representation, the SPEC-048-R007 max_native_active_rows bound, the greedy/sampled request profile, and the signed max_prompt_tokens bound, with negative fixtures. An unsigned sidecar generator (scripts/native_mtp_admission_sidecar.py) renders and validates the closed body and both identities with a cross-language golden; release-ledger binding, signing, and signed release evidence are not implemented, so the requirement stays pending."
       }
     },
     {
@@ -11078,13 +11083,18 @@
       "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/NativeMTP.swift:struct NativeMTPCapability",
-        "phase3-binary/Sources/macprovider-cli/NativeMTPArtifactObservation.swift:enum NativeMTPArtifactObserver"
+        "phase3-binary/Sources/macprovider-cli/NativeMTPArtifactObservation.swift:enum NativeMTPArtifactObserver",
+        "phase3-binary/Sources/macprovider-cli/NativeMTPAdmissionSidecar.swift:static func sourceLayout"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/ModelRuntimeSwapTests.swift:testNativeMTPCapabilityRejectsSignedFieldMismatches",
         "phase3-binary/Tests/macprovider-cliTests/ModelRuntimeSwapTests.swift:testNativeMTPArtifactObservationMustMatchSignedCapability",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPArtifactObservationTests.swift:testAffineFourRejectsUnpairedMismatchedAndPaddedHeaders",
-        "phase3-binary/Tests/macprovider-cliTests/NativeMTPArtifactObservationTests.swift:testUnquantizedObservationRejectsMissingFloat32AndGarbageDType"
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPArtifactObservationTests.swift:testUnquantizedObservationRejectsMissingFloat32AndGarbageDType",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPGLM5NextObservationTests.swift:testEmbeddedObservationAcceptsAPostSanitizeCheckpointWithFiveSixEightBitOverrides",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPGLM5NextObservationTests.swift:testEmbeddedObservationRejectsNamesTheLoaderWouldRewriteOrDrop",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testReleaseEnvelopeAcceptsEmbeddedCheckpointMTPAndCapturesTheTargetOnce",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testMultiModelSidecarReadsTheV2ProjectionByModelKey"
       ],
       "journeys": [
         "JOURNEY-NATIVE-MTP-SERVING"
@@ -11136,7 +11146,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "SPEC-048 v0.1.34 authorizes the operator's permanent three-fork MLX runtime: mlx-swift-lm 3.32.3-macprovider.9.4 (ce3bb5235317367c61c054311a830b1e81aaa6ea, upstream 3.32.3; 3.32.3-macprovider.9 (dbe8bcb39a00e31b8ba9a0602c60d9388fca247d) plus only the Qwen2-VL per-image vision attention fix for issue #2016, every other decode path byte-identical, so the Qwen3.6 CB and native-MTP re-bind is identity-only), mlx-swift 0.32.3-macprovider.8 (745f5e4872054ae2c1c497d2351a61b6d89e8a05, upstream 0.32.3), and MLX core v0.32.2-macprovider.5 (49d94e9fece0849443fa414e2d47813f68a51eaa, upstream v0.32.2), each pinned by full revision and rebased per adopted upstream release under the MLX_ENGINE_UPGRADE_MATRIX per-rebase acceptance gate. The tuple carries the previously reviewed MTP transaction, packed verification, packed drafter, fused A3B MoE (exact stock module types only), and checkpointed GDN surfaces, plus the compiled MTP verification step, declared compile state for every trace, batch-invariant small-M quantized matmul routing, and every-thread compiled-function erase. Mac Studio startup batched-isolation probes pass with fused MoE on and off and native-MTP R015 passed on the compile-state fix (docs/research/mlx-swift-lm-3.32.3/). R003 stays pending for native serving: native-MTP R015 gates signing and activation of a native tuple, not this pin, and nothing here makes any production tuple eligible."
+        "rationale": "SPEC-048 v0.1.44 authorizes the epic #2029 campaign fork tuple: mlx-swift-lm fork tag 3.32.3-macprovider.10.1 (87dc5159c87d73f4d7abd524fbdd17760cf56285, branch glm53/tuple-0324; upstream 3.32.3; on the fork's 3.32.3-macprovider.10 b4077dcb28336b388f3d09be2a091c12f8e179aa, which is the #2028 tuple's 3.32.3-macprovider.9 dbe8bcb3 plus the core v0.32.4 pin and the upstream #622 exact-rewind fix with KVCache.maxTrimCount, and adds the GLM-5-Next files and model and drafter registration, plus a single-sync greedy round and an optional MTPAdaptiveDepth controller in MTPSpeculativeTokenIterator that the provider does not use, depth-D MambaCache rollback (the depth-1 checkpoint path unchanged), and the #2035 Qwen2-VL per-image vision attention fix, and GLM-5-Next configuration validation at load, which changes no decode-path line), mlx-swift 0.32.3-macprovider.9 (29d3b93375cc56cd2649b40e4310a8bc445e9874, upstream 0.32.3), and MLX core v0.32.4-macprovider.4 (2f512e3997349c8648f5d7c5113eb2c825aa242d, upstream v0.32.4), each pinned by full revision and rebased per adopted upstream release under the MLX_ENGINE_UPGRADE_MATRIX per-rebase acceptance gate. The tuple carries the previously reviewed MTP transaction, packed verification, packed drafter, fused A3B MoE (exact stock module types only), and checkpointed GDN surfaces, the compiled MTP verification step, declared compile state for every trace, batch-invariant small-M quantized matmul routing, every-thread compiled-function erase, the #2028 caller-stream propagation (checked by scripts/check_mlx_core_streams.py and MLXCoreStreamPropagationTests against SPEC048_MLX_CORE_REVISION), plus the GLM-5-Next model, attention cache, batched latent caches and fused decode kernels (T3 parity: docs/evidence/glm53-flash-t3-parity-2026-10-16/), its MTP-1 target-side verification with one-token rewind, GLM5NextMTPDraftModel drafter, packed verification inside continuous batching (GLM5NextLatentCacheBatch row transactions), the fused multi-vector projection glm5NextQMVBatch (bitwise equal to the one-vector path) the one-dispatch KDA verify step glm5NextKDAVerifyStep, and depth-D drafting and verification with GLM5NextMTPDraftModel serving at depth 1 by default (the provider's paged equivalent and admission gate are SPEC-048 MTP-2). The review record for this tuple is PENDING on two items, the JOURNEY-NATIVE-MTP-SERVING run on the final tagged tuple and the GLM R015 record; the #2028 tuple (3.32.3-macprovider.9 / 0.32.3-macprovider.8 / v0.32.2-macprovider.5, audits/2026-10-16-2028-gptoss-decode/) and the earlier 3.32.3-macprovider.6 tuple keep their review records. No production build may resolve an untagged mlx-swift-lm revision; the upstream watch verifies that the tag resolves to the pinned revision. R003 stays pending for native serving: native-MTP R015 gates signing and activation of a native tuple, not this pin, and nothing here makes any production tuple eligible."
       }
     },
     {

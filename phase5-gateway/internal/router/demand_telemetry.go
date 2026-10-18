@@ -583,6 +583,7 @@ func knownDemandModelID(model string) bool {
 		"qwen/qwen3.5-35b-a3b",
 		"qwen/qwen3-30b-a3b-instruct-2507",
 		"z-ai/glm-4.5-air",
+		"zai-org/glm-5.3-flash", "z-ai/glm-5.3-flash",
 		"mlx-community/gpt-oss-20b-MXFP4-Q4",
 		"mlx-community/gpt-oss-20b-MXFP4-Q8",
 		"mlx-community/gpt-oss-120b-4bit",
@@ -605,7 +606,8 @@ func knownDemandModelID(model string) bool {
 		"mlx-community/Ministral-3-3B-Instruct-2512-4bit",
 		"Ministral-3-3B-Instruct-2512-4bit",
 		"Qwen3.5-9B-4bit",
-		"mlx-community/GLM-4.5-Air-4bit":
+		"mlx-community/GLM-4.5-Air-4bit",
+		"Jundot/GLM-5.3-Flash-oQ4e-mtp":
 		return true
 	default:
 		return false

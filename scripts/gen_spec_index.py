@@ -184,11 +184,41 @@ def lint_root() -> int:
     return 0
 
 
+METADATA_JSON_RE = re.compile(r"```json\s*\n(\{.*?\})\s*\n```", re.S)
+
+
+def embedded_version_mismatches(specs) -> list[str]:
+    """A spec's leading ```json metadata block (the one carrying `spec_id`)
+    must name the same version as its `**Version:**` header; the two drifted
+    (SPEC-048 0.1.43 vs 0.1.45, SPEC-043 0.3.3 vs 0.3.5)."""
+    problems = []
+    for _num, _title, version, rel in specs:
+        text = open(os.path.join(SPECS_DIR, rel), encoding="utf-8", errors="replace").read(6000)
+        match = METADATA_JSON_RE.search(text)
+        if not match:
+            continue
+        try:
+            metadata = json.loads(match.group(1))
+        except ValueError:
+            continue
+        if not isinstance(metadata, dict) or "spec_id" not in metadata or "version" not in metadata:
+            continue
+        if str(metadata["version"]).lstrip("v") != version.lstrip("v"):
+            problems.append(f"{rel}: metadata version {metadata['version']} != header {version}")
+    return problems
+
+
 def main() -> int:
     if "--lint" in sys.argv[1:]:
         return lint_root()
     check = "--check" in sys.argv[1:]
     specs = collect()
+    if check:
+        mismatches = embedded_version_mismatches(specs)
+        if mismatches:
+            for problem in mismatches:
+                print(f"error: {problem}", file=sys.stderr)
+            sys.exit("error: embedded spec metadata version differs from the header")
     metadata, states = load_governance()
     print(f"canonical specs: {len(specs)}", file=sys.stderr)
     try:

@@ -2,6 +2,7 @@ import ArgumentParser
 import CryptoKit
 import Foundation
 import MacProviderCore
+import MLX
 import MLXHuggingFace
 import MLXLMCommon
 import MLXLLM
@@ -12,7 +13,113 @@ import Tokenizers
 #if DEBUG || MACPROVIDER_LAB_HARNESS
 let nativeMTPHardwareDefaultModelID = "mlx-community/Qwen3.5-9B-4bit"
 
-/// Hidden Mac Studio lab harness for the real Qwen3.5 native-MTP path.
+/// The native-MTP family a hardware fixture exercises, chosen from the
+/// fixture target's own `config.json`.
+struct NativeMTPHardwareE2EFamily: Equatable, Sendable {
+    /// `PagedKVRuntimeModelCapabilities.modelFamily` of the target.
+    let modelFamily: String
+    let familyAdapter: String
+    /// The next-N layer ships inside the target (`checkpoint_mtp`), so the
+    /// fixture has no `mtp/` directory and the drafter is built from the
+    /// target (SPEC-048 MTP-2).
+    let embeddedMTP: Bool
+    let blockSizeTokens: Int
+    /// The paged kind the target's attention layers must use.
+    let pagedKind: PagedKVSharedForwardBackend.CacheKind
+
+    /// The Qwen3.5 fixture's paged block (unchanged from the Qwen-only harness).
+    static let qwenBlockSizeTokens = 32
+
+    static let qwen35 = NativeMTPHardwareE2EFamily(
+        modelFamily: "qwen",
+        familyAdapter: "qwen3_5_mtp_v1",
+        embeddedMTP: false,
+        blockSizeTokens: qwenBlockSizeTokens,
+        pagedKind: .pagedAttention
+    )
+
+    /// GLM-5.3-Flash: KDA on `MambaCache`, DSA on `pagedMLA` at the family
+    /// block size (SPEC-039 v0.1.19).
+    static let glm5Next = NativeMTPHardwareE2EFamily(
+        modelFamily: "glm5_next",
+        familyAdapter: "glm5_next_mtp_v1",
+        embeddedMTP: true,
+        blockSizeTokens: PagedKVConfig.familyDefaultBlockSizeTokens["glm5_next"] ?? 256,
+        pagedKind: .pagedMLA(kpool: 4)
+    )
+
+    /// The lab tuple's `request_feature_profile`: sampled where the family
+    /// may sign it (Qwen3.5), greedy only for `glm5_next` (SPEC-048 MTP-2).
+    var requestFeatureProfile: String {
+        NativeMTPAdmissionSidecar.allowedRequestFeatureProfiles(familyAdapter: familyAdapter)
+            .contains(NativeMTPAdmissionSidecar.sampledRequestFeatureProfile)
+            ? NativeMTPAdmissionSidecar.sampledRequestFeatureProfile
+            : NativeMTPAdmissionSidecar.greedyRequestFeatureProfile
+    }
+
+    /// The lab tuple's `complete_window_bytes_by_depth` (SPEC-048 R012): the
+    /// bytes one row's native round stages, so the scheduler's round
+    /// reservation and its 10% free-memory floor check run on honest
+    /// numbers. glm5_next, as the provider stages it: a copy of every sparse
+    /// layer's latent and pooled keys (11 target layers plus the next-N
+    /// layer, 1,088 bytes per context token each, SPEC-048 MTP-12 sizing)
+    /// and one KDA recurrent plus convolution state set (34 layers x
+    /// 4,341,760 bytes) per kept prefix of a depth-d verify (d + 1 sets).
+    /// Qwen3.5 keeps the placeholder its harness always signed.
+    func completeWindowBytesByDepth(maxContextTokens: Int, maxDepth: Int = 1) -> [Int] {
+        guard self == .glm5Next else { return [1_048_576, 2_097_152] }
+        let context = max(1, maxContextTokens)
+        let latent = Self.glm5NextStagedLatentLayers * Self.glm5NextLatentBytesPerToken * context
+        return (0 ... max(0, maxDepth)).map { depth in
+            latent + (depth + 1) * Self.glm5NextKDALayers * Self.glm5NextKDAStateBytes
+        }
+    }
+
+    static let glm5NextStagedLatentLayers = 12
+    static let glm5NextLatentBytesPerToken = 1_088
+    static let glm5NextKDALayers = 34
+    static let glm5NextKDAStateBytes = 64 * 128 * 128 * 4 + 3 * 24_576 * 2
+
+    /// The native active-row bound the family's tuple signs (SPEC-048 R007),
+    /// nil when the harness's slot count is used. glm5_next signs 1: at four
+    /// rows native MTP decoded at 0.79x ordinary in window A2 (1.27x at one).
+    var signedMaxNativeActiveRows: Int? { self == .glm5Next ? 1 : nil }
+
+    /// Whether the tuple admits sampled rows to native MTP.
+    var admitsSampledRows: Bool { requestFeatureProfile == NativeMTPAdmissionSidecar.sampledRequestFeatureProfile }
+
+    /// The serve path's process setup for this family, which the harness
+    /// must match or it measures another runtime: the MLX per-command-buffer
+    /// budget (`ModelRuntime.commandBufferBudgetMBByFamily`, set before any
+    /// MLX device use) and the model-lifetime resident-weights ticket
+    /// (`ModelRuntime.residentWeightsFamilies`). Without the ticket a
+    /// GLM-5.3-Flash target pays a residency cost on every forward (about
+    /// 2.2 s per decode step in window A2).
+    var commandBufferBudgetMB: Int? { ModelRuntime.commandBufferBudgetMBByFamily[modelFamily] }
+    var holdsResidentWeights: Bool { ModelRuntime.residentWeightsFamilies.contains(modelFamily) }
+
+    /// The fixture directory the drafter artifact lives in.
+    var mtpDirectoryName: String { embeddedMTP ? "target" : "mtp" }
+
+    func matchesPagedKind(_ kind: PagedKVSharedForwardBackend.CacheKind) -> Bool {
+        switch (pagedKind, kind) {
+        case (.pagedAttention, .pagedAttention), (.pagedMLA, .pagedMLA): true
+        default: false
+        }
+    }
+
+    static func detect(configJSONData: Data?) -> NativeMTPHardwareE2EFamily? {
+        switch ModelRuntime.pagedKVModelCapabilities(modelID: nil, configJSONData: configJSONData).modelFamily {
+        case "qwen": .qwen35
+        case "glm5_next": .glm5Next
+        default: nil
+        }
+    }
+}
+
+/// Hidden Mac Studio lab harness for the real native-MTP path (Qwen3.5 with a
+/// separate drafter artifact, or GLM-5.3-Flash with its embedded next-N layer;
+/// the family comes from `target/config.json`).
 ///
 /// This intentionally mirrors `NativeMTPHardwareE2ETests` without XCTest so
 /// the designated lab box can run the hardware acceptance even when the host
@@ -32,7 +139,7 @@ struct NativeMTPHardwareE2ECommand: AsyncParsableCommand {
 
     @Option(
         name: .customLong("root"),
-        help: "Fixture root containing plain target/ and mtp/ snapshot directories."
+        help: "Fixture root containing a plain target/ snapshot directory, plus mtp/ for a separate drafter artifact."
     )
     var root: String?
 
@@ -48,6 +155,12 @@ struct NativeMTPHardwareE2ECommand: AsyncParsableCommand {
     @Option(name: .customLong("sizing-output-tokens"), help: "Output-token budget used to size paged-KV blocks. Default 8.")
     var sizingOutputTokens: Int = 8
 
+    @Option(
+        name: .customLong("throughput-tokens"),
+        help: "Greedy completion tokens per row for the lab throughput phase (rows 1 and --max-batch, ordinary vs native, parity required). 0 skips it. Default 0."
+    )
+    var throughputTokens: Int = 0
+
     func run() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["MACPROVIDER_NATIVE_MTP_E2E"] == "1" else {
@@ -56,8 +169,6 @@ struct NativeMTPHardwareE2ECommand: AsyncParsableCommand {
             ))
             throw ExitCode(2)
         }
-        // Unconditional: a pass line from any other host is not lab evidence.
-        try NativeMTPHardwareE2ERunner.requireStudioHost()
         let rootPath = root ?? environment["MACPROVIDER_NATIVE_MTP_E2E_ROOT"]
         guard let rootPath, !rootPath.isEmpty else {
             FileHandle.standardError.write(Data(
@@ -65,8 +176,15 @@ struct NativeMTPHardwareE2ECommand: AsyncParsableCommand {
             ))
             throw ExitCode(2)
         }
+        // Before any MLX device use (the host check samples the GPU).
+        NativeMTPHardwareE2ERunner.applyServeProcessSetup(rootPath: rootPath)
+        // Unconditional: a pass line from any other host is not lab evidence.
+        try NativeMTPHardwareE2ERunner.requireStudioHost()
         guard maxBatch >= 1, sizingPromptTokens >= 1, sizingOutputTokens >= 1 else {
             throw ValidationError("--max-batch, --sizing-prompt-tokens, and --sizing-output-tokens must be >=1")
+        }
+        guard (0...4096).contains(throughputTokens) else {
+            throw ValidationError("--throughput-tokens must be 0...4096")
         }
         let maxPhysicalBlocks = NativeMTPHardwareE2ERunner.sizedMaxPhysicalBlocks(
             slots: maxBatch,
@@ -78,7 +196,8 @@ struct NativeMTPHardwareE2ECommand: AsyncParsableCommand {
             modelID: modelID,
             maxBatch: maxBatch,
             maxPhysicalBlocks: maxPhysicalBlocks,
-            verifyServePath: environment["MACPROVIDER_NATIVE_MTP_E2E_SERVE_PATH"] == "1"
+            verifyServePath: environment["MACPROVIDER_NATIVE_MTP_E2E_SERVE_PATH"] == "1",
+            throughputTokens: throughputTokens
         ).run()
         FileHandle.standardOutput.write(Data(report.jsonLine.utf8))
         FileHandle.standardOutput.write(Data("\n".utf8))
@@ -106,6 +225,9 @@ struct NativeMTPHardwareRuntimePair: @unchecked Sendable {
     let ordinary: ModelRuntime
     let native: ModelRuntime
     let targetContainer: ModelContainer
+    /// The serve path's resident-weights ticket for the one loaded target,
+    /// held for the run (nil for families served without one).
+    var residentWeights: WiredMemoryTicket? = nil
 }
 
 struct NativeMTPHardwareRuntimeFixture: @unchecked Sendable {
@@ -137,6 +259,11 @@ final class NativeMTPHardwareE2ERunner {
     private let maxPromptTokens: Int
     private let maxPhysicalBlocks: Int
     private let verifyServePath: Bool
+    /// Lab throughput phase completion tokens per row; 0 skips it.
+    private let throughputTokens: Int
+    /// Detected from `target/config.json`; Qwen3.5 when unreadable, so an
+    /// unrecognized target fails the family check in the fixture load.
+    let family: NativeMTPHardwareE2EFamily
 
     static func sizedMaxPhysicalBlocks(slots: Int, promptTokens: Int, outputTokens: Int) -> Int {
         let boundedSlots = max(1, slots)
@@ -154,16 +281,64 @@ final class NativeMTPHardwareE2ERunner {
         maxNativeActiveRows: Int? = nil,
         maxPromptTokens: Int = 1_048_576,
         maxPhysicalBlocks: Int = 512,
-        verifyServePath: Bool = false
+        verifyServePath: Bool = false,
+        throughputTokens: Int = 0
     ) {
         root = URL(fileURLWithPath: (rootPath as NSString).expandingTildeInPath, isDirectory: true)
             .standardizedFileURL
         self.modelID = modelID
         self.maxBatch = maxBatch
-        self.maxNativeActiveRows = maxNativeActiveRows ?? maxBatch
         self.maxPromptTokens = maxPromptTokens
         self.maxPhysicalBlocks = maxPhysicalBlocks
         self.verifyServePath = verifyServePath
+        self.throughputTokens = throughputTokens
+        let family = NativeMTPHardwareE2EFamily.detect(configJSONData: try? Data(
+            contentsOf: root.appendingPathComponent("target/config.json")
+        )) ?? .qwen35
+        self.family = family
+        self.maxNativeActiveRows = maxNativeActiveRows ?? family.signedMaxNativeActiveRows ?? maxBatch
+    }
+
+    private var mtpDirectory: URL {
+        root.appendingPathComponent(family.mtpDirectoryName, isDirectory: true)
+    }
+
+    private func observeArtifacts(targetDirectory: URL) throws -> NativeMTPArtifactPairObservation {
+        family.embeddedMTP
+            ? try NativeMTPArtifactObserver.observeEmbedded(targetDirectory: targetDirectory)
+            : try NativeMTPArtifactObserver.observePair(targetDirectory: targetDirectory, mtpDirectory: mtpDirectory)
+    }
+
+    /// `min(rows, bound)` rows admitted native and every other row sent to
+    /// ordinary decode by the active-row bound (SPEC-048 R007).
+    static func admissionsRespectNativeBound(_ admissions: [NativeMTPRuntimeAdmission], rows: Int, bound: Int) -> Bool {
+        let native = admissions.filter { $0.effectivePath == .nativeMTP }.count
+        let boundRouted = admissions.filter {
+            $0.effectivePath == .ordinary && $0.selection.nativeMTPReason == .capacityAboveNativeBound
+        }.count
+        return admissions.count == rows && native == min(rows, max(1, bound)) && native + boundRouted == rows
+    }
+
+    /// Applies the family's MLX command-buffer budget for this process, as
+    /// `serve` does. Must run before any MLX device use; returns the MB set.
+    @discardableResult
+    static func applyServeProcessSetup(rootPath: String, mlxCacheLimitMB: Int? = 2048) -> Int? {
+        let root = URL(fileURLWithPath: (rootPath as NSString).expandingTildeInPath, isDirectory: true)
+        let family = NativeMTPHardwareE2EFamily.detect(configJSONData: try? Data(
+            contentsOf: root.appendingPathComponent("target/config.json")
+        ))
+        // The budget first: MLX reads it when it creates its device.
+        let mb = family.flatMap { ModelRuntime.applyMLXCommandBufferBudget(modelFamily: $0.modelFamily) }
+        if let mb, let family {
+            FileHandle.standardError.write(Data("native-mtp-e2e: mlx_max_mb_per_buffer=\(mb) family=\(family.modelFamily)\n".utf8))
+        }
+        // The lab and live serve configs bound MLX's buffer cache
+        // (`mlx_cache_limit_mb: 2048`); unbounded, freed round buffers stay
+        // cached and take the memory the native round's free-memory floor reads.
+        if let applied = ModelRuntime.applyMLXCacheLimit(megabytes: mlxCacheLimitMB) {
+            FileHandle.standardError.write(Data("native-mtp-e2e: mlx_cache_limit_bytes=\(applied)\n".utf8))
+        }
+        return mb
     }
 
     static func requireStudioHost() throws {
@@ -211,7 +386,11 @@ final class NativeMTPHardwareE2ERunner {
                 "ordinary decode not reproducible for \(id): first=\(String(reflecting: ordinary[id]?.content)) repeat=\(String(reflecting: ordinaryRepeat[id]?.content))"
             )
         }
+        let countersBefore = await nativeRuntime.currentSnapshot().nativeMTPStatus
         let native = try await completeConcurrently(requests, with: nativeRuntime)
+        let parityCounters = NativeMTPStatusDelta(
+            before: countersBefore, after: await nativeRuntime.currentSnapshot().nativeMTPStatus
+        )
         try require(native.keys.sorted() == ordinary.keys.sorted(), "ordinary/native key mismatch")
         for id in ordinary.keys.sorted() {
             guard let expected = ordinary[id], let actual = native[id] else {
@@ -231,7 +410,12 @@ final class NativeMTPHardwareE2ERunner {
         }
         let recordedAdmissions = admissionRecorder.snapshot()
         try require(recordedAdmissions.count == requests.count, "unexpected admission count \(recordedAdmissions.count)")
-        try require(recordedAdmissions.allSatisfy { $0.effectivePath == .nativeMTP }, "non-native admission observed")
+        // Rows above the tuple's native active-row bound take ordinary decode
+        // (SPEC-048 R007); the rest must be native.
+        try require(
+            Self.admissionsRespectNativeBound(recordedAdmissions, rows: requests.count, bound: maxNativeActiveRows),
+            "native admissions do not match the native active-row bound \(maxNativeActiveRows)"
+        )
 
         let streamingStopRequest = try makeRequest(
             id: "native-mtp-real-stream-stop",
@@ -240,12 +424,20 @@ final class NativeMTPHardwareE2ERunner {
             stop: ["STOP"]
         )
         let handle = try await nativeRuntime.acquireRequestHandle(streamingStopRequest)
-        defer { Task { await nativeRuntime.unregisterInFlight(handle.registrationID) } }
         let streamRecorder = NativeMTPHardwareStreamRecorder()
         let admissionsBeforeStreaming = admissionRecorder.snapshot().count
-        _ = try await nativeRuntime.stream(streamingStopRequest, with: handle) { chunk in
-            streamRecorder.append(chunk)
+        // Unregistered as soon as the stream ends: a registration held to the
+        // end of `run()` counts as an active row and pushed the throughput
+        // phase's last row over the native active-row bound (window A2).
+        do {
+            _ = try await nativeRuntime.stream(streamingStopRequest, with: handle) { chunk in
+                streamRecorder.append(chunk)
+            }
+        } catch {
+            await nativeRuntime.unregisterInFlight(handle.registrationID)
+            throw error
         }
+        await nativeRuntime.unregisterInFlight(handle.registrationID)
         try require(!streamRecorder.snapshot().isEmpty, "stream produced no chunks")
         let admissionsAfterStreaming = admissionRecorder.snapshot()
         try require(
@@ -259,8 +451,16 @@ final class NativeMTPHardwareE2ERunner {
         let maxDepth = snapshot.continuousBatching?.scheduler?.maxObservedBatchDepth ?? 0
         try require(maxDepth >= 2, "batch depth below 2: \(maxDepth)")
         let totalAdmissions = admissionRecorder.snapshot().count
+        let labThroughput = throughputTokens > 0
+            ? try await measureLabThroughput(
+                ordinary: ordinaryRuntime, native: nativeRuntime, recorder: admissionRecorder
+            )
+            : nil
+        let labThroughputJSON = try labThroughput.map {
+            String(decoding: try JSONSerialization.data(withJSONObject: $0, options: [.sortedKeys]), as: UTF8.self)
+        } ?? "null"
         let json = """
-        {"schema":"macprovider.native-mtp-hardware-e2e-result.v1","status":"pass","evidence_class":"correctness_only","model_id":"\(modelID)","target_sha256":"\(targetIdentity.digest)","mtp_sha256":"\(mtpIdentity.digest)","admissions":\(totalAdmissions),"max_observed_batch_depth":\(maxDepth),"serve_path_verified":\(verifyServePath)}
+        {"schema":"macprovider.native-mtp-hardware-e2e-result.v1","status":"pass","evidence_class":"correctness_only","model_id":"\(modelID)","model_family":"\(family.modelFamily)","family_adapter":"\(family.familyAdapter)","target_sha256":"\(targetIdentity.digest)","mtp_sha256":"\(mtpIdentity.digest)","admissions":\(totalAdmissions),"max_observed_batch_depth":\(maxDepth),"serve_path_verified":\(verifyServePath),"parity_proposed":\(parityCounters.proposedTokens),"parity_accepted":\(parityCounters.acceptedTokens),"parity_rejected":\(parityCounters.rejectedTokens),"lab_throughput":\(labThroughputJSON)}
         """
         return NativeMTPHardwareE2EReport(
             targetSHA256: targetIdentity.digest,
@@ -278,19 +478,20 @@ final class NativeMTPHardwareE2ERunner {
         nativeAdmissionRecorder: NativeMTPHardwareAdmissionRecorder?
     ) async throws -> NativeMTPHardwareRuntimeFixture {
         let targetDirectory = root.appendingPathComponent("target", isDirectory: true)
-        let mtpDirectory = root.appendingPathComponent("mtp", isDirectory: true)
+        let mtpDirectory = self.mtpDirectory
         try requireDirectory(targetDirectory)
         try requireDirectory(mtpDirectory)
 
         let targetIdentity = try MLXSnapshotIdentity.compute(directory: targetDirectory)
         let mtpIdentity = try MLXSnapshotIdentity.compute(directory: mtpDirectory)
         let tokenizerSHA = try sha256(of: root.appendingPathComponent("target/tokenizer.json"))
-        let manifestSHA = try sha256(of: root.appendingPathComponent("mtp/config.json"))
+        let manifestSHA = try sha256(of: mtpDirectory.appendingPathComponent("config.json"))
         let machine = MachineFingerprinter().sample()
         let signedAdmission = try makeAndValidateAdmission(
             targetIdentity: targetIdentity,
             mtpIdentity: mtpIdentity,
-            machine: machine
+            machine: machine,
+            maxContextTokens: maxContextTokens
         )
         let admission = signedAdmission.capability
         try require(admission.targetArtifactSHA256 == targetIdentity.digest, "target digest admission mismatch")
@@ -395,7 +596,7 @@ final class NativeMTPHardwareE2ERunner {
         nativeAdmissionRecorder: NativeMTPHardwareAdmissionRecorder?
     ) async throws -> NativeMTPHardwareRuntimePair {
         let targetDirectory = root.appendingPathComponent("target", isDirectory: true)
-        let mtpDirectory = root.appendingPathComponent("mtp", isDirectory: true)
+        let mtpDirectory = self.mtpDirectory
         try requireDirectory(targetDirectory)
         try requireDirectory(mtpDirectory)
         let observedTargetIdentity = try MLXSnapshotIdentity.compute(directory: targetDirectory)
@@ -405,10 +606,7 @@ final class NativeMTPHardwareE2ERunner {
         // Run the same artifact observer the production enable path runs
         // (ModelRuntime native-MTP load) so lab evidence cannot pass on artifacts
         // that production would reject.
-        let artifactObservation = try NativeMTPArtifactObserver.observePair(
-            targetDirectory: targetDirectory,
-            mtpDirectory: mtpDirectory
-        )
+        let artifactObservation = try observeArtifacts(targetDirectory: targetDirectory)
         try require(
             ModelRuntime.nativeMTPArtifactObservationMatchesAdmissionForTest(
                 artifactObservation,
@@ -423,7 +621,10 @@ final class NativeMTPHardwareE2ERunner {
             modelID: modelID,
             configJSONData: configData
         )
-        try require(modelCapabilities.modelFamily == "qwen", "expected qwen model family")
+        try require(
+            modelCapabilities.modelFamily == family.modelFamily,
+            "expected \(family.modelFamily) model family, got \(modelCapabilities.modelFamily)"
+        )
         try require(modelCapabilities.hybridDecoderArchitectureVerified, "hybrid decoder not verified")
         try require(
             ModelRuntime.nativeMTPAdmissionCacheClass(
@@ -439,15 +640,30 @@ final class NativeMTPHardwareE2ERunner {
             targetContainer = servePathLoad.targetContainer
             drafterContainer = servePathLoad.drafterContainer
         } else {
-            await Qwen35TextMTPRegistration.register()
             targetContainer = try await LLMModelFactory.shared.loadContainer(
                 from: targetDirectory,
-                using: #huggingFaceTokenizerLoader()
+                using: ChatTemplateCompatTokenizerLoader()
             )
-            drafterContainer = try await MTPDrafterModelFactory.shared.loadContainer(
-                from: mtpDirectory,
-                using: #huggingFaceTokenizerLoader()
+            let drafterPresent = await ModelRuntime.nativeMTPDrafterPresent(
+                familyAdapter: family.familyAdapter,
+                targetContainer: targetContainer
             )
+            try require(drafterPresent, "target loaded without its MTP drafter weights")
+            drafterContainer = try await ModelRuntime.loadNativeMTPDrafterContainer(
+                familyAdapter: family.familyAdapter,
+                targetDirectory: targetDirectory,
+                drafterDirectory: mtpDirectory,
+                tokenizerLoader: ChatTemplateCompatTokenizerLoader()
+            )
+        }
+        // One target is loaded and shared by the ordinary and native
+        // runtimes (the embedded drafter is parameterless); keep it resident
+        // as serve does.
+        let residentWeights = family.holdsResidentWeights
+            ? await ModelRuntime.startResidentWeightsTicket(modelFamily: family.modelFamily)
+            : nil
+        if family.holdsResidentWeights {
+            try require(residentWeights != nil, "\(family.modelFamily) target could not start its resident-weights ticket")
         }
         let maximumBlockSize = await drafterContainer.perform { context in
             context.model.maximumBlockSize
@@ -462,12 +678,12 @@ final class NativeMTPHardwareE2ERunner {
                 return kind
             }
         }
-        try require(cacheKinds.contains(.pagedAttention), "paged-attention cache not observed")
+        try require(cacheKinds.contains(where: family.matchesPagedKind), "\(family.pagedKind) cache not observed")
         try require(cacheKinds.contains(.recurrentMamba), "recurrent Mamba cache not observed")
 
         let pagedConfig = PagedKVConfig(
             enabled: true,
-            blockSizeTokens: 32,
+            blockSizeTokens: family.blockSizeTokens,
             maxPhysicalBlocks: maxPhysicalBlocks
         )
         // Attach from the same live parity + batched-isolation (MoE dispatch)
@@ -485,7 +701,7 @@ final class NativeMTPHardwareE2ERunner {
             targetContainer: targetContainer,
             backend: PagedKVSharedForwardBackend(
                 container: targetContainer,
-                blockSizeTokens: 32,
+                blockSizeTokens: family.blockSizeTokens,
                 maxPhysicalBlocks: maxPhysicalBlocks,
                 poolEpoch: 1,
                 layerCount: cacheKinds.count,
@@ -508,7 +724,7 @@ final class NativeMTPHardwareE2ERunner {
         let observed = measurement.observedRuntimeIdentity
         let ordinaryBackend = PagedKVSharedForwardBackend(
             container: targetContainer,
-            blockSizeTokens: 32,
+            blockSizeTokens: family.blockSizeTokens,
             maxPhysicalBlocks: maxPhysicalBlocks,
             poolEpoch: 1,
             layerCount: cacheKinds.count,
@@ -516,7 +732,7 @@ final class NativeMTPHardwareE2ERunner {
         )
         let nativeBackend = PagedKVSharedForwardBackend(
             container: targetContainer,
-            blockSizeTokens: 32,
+            blockSizeTokens: family.blockSizeTokens,
             maxPhysicalBlocks: maxPhysicalBlocks,
             poolEpoch: 1,
             layerCount: cacheKinds.count,
@@ -556,7 +772,8 @@ final class NativeMTPHardwareE2ERunner {
         return NativeMTPHardwareRuntimePair(
             ordinary: ordinary,
             native: native,
-            targetContainer: targetContainer
+            targetContainer: targetContainer,
+            residentWeights: residentWeights
         )
     }
 
@@ -629,16 +846,109 @@ final class NativeMTPHardwareE2ERunner {
         }
     }
 
+    /// Lab throughput phase (`--throughput-tokens`): greedy rows at 1 and
+    /// `maxBatch` concurrent requests, ordinary then native on the same
+    /// prompts, three passes each. Every native row must equal its ordinary
+    /// row and be admitted native. Rates are end to end (all completion
+    /// tokens over the batch wall time, prefill included); this is lab
+    /// evidence, not the SPEC-048 R015 matrix (`native-mtp-bench`).
+    private func measureLabThroughput(
+        ordinary: ModelRuntime,
+        native: ModelRuntime,
+        recorder: NativeMTPHardwareAdmissionRecorder
+    ) async throws -> [String: Any] {
+        let prompts = [
+            "Explain in three sentences why the sky appears blue.",
+            "Write a short Python function that reverses a linked list, then explain it.",
+            "Describe a quiet harbor town at dawn in one paragraph.",
+            "List five prime numbers greater than one hundred and say why each is prime.",
+            "Summarize the rules of chess for a beginner.",
+            "Give three tips for learning a new language, with an example for each.",
+            "Write a haiku about winter rain, then explain its imagery.",
+            "Compare TCP and UDP in a short table.",
+        ]
+        let passes = 3
+        var cells: [[String: Any]] = []
+        for rows in Array(Set([1, max(1, min(maxBatch, prompts.count))])).sorted() {
+            var ratios: [Double] = []
+            var ordinaryRates: [Double] = []
+            var nativeRates: [Double] = []
+            var proposed: UInt64 = 0
+            var accepted: UInt64 = 0
+            var rejected: UInt64 = 0
+            for pass in 0..<passes {
+                let requests = try (0..<rows).map {
+                    try makeRequest(
+                        id: "native-mtp-tput-r\(rows)-p\(pass)-\($0)", prompt: prompts[$0], maxTokens: throughputTokens
+                    )
+                }
+                let ordinaryStart = Date()
+                let expected = try await completeConcurrently(requests, with: ordinary)
+                let ordinarySeconds = Date().timeIntervalSince(ordinaryStart)
+                let admissionsBefore = recorder.snapshot().count
+                let before = await native.currentSnapshot().nativeMTPStatus
+                let nativeStart = Date()
+                let actual = try await completeConcurrently(requests, with: native)
+                let nativeSeconds = Date().timeIntervalSince(nativeStart)
+                let delta = NativeMTPStatusDelta(before: before, after: await native.currentSnapshot().nativeMTPStatus)
+                let admissions = recorder.snapshot().dropFirst(admissionsBefore)
+                try require(
+                    admissions.count == rows
+                        && Self.admissionsRespectNativeBound(Array(admissions), rows: rows, bound: maxNativeActiveRows),
+                    "throughput rows=\(rows) pass=\(pass): native admissions do not match the native bound \(maxNativeActiveRows)"
+                )
+                for id in expected.keys.sorted() {
+                    try require(
+                        actual[id]?.content == expected[id]?.content
+                            && actual[id]?.completionTokens == expected[id]?.completionTokens,
+                        "throughput greedy mismatch for \(id)"
+                    )
+                }
+                let tokens = Double(expected.values.reduce(0) { $0 + $1.completionTokens })
+                let ordinaryRate = ordinarySeconds > 0 ? tokens / ordinarySeconds : 0
+                let nativeRate = nativeSeconds > 0 ? tokens / nativeSeconds : 0
+                ordinaryRates.append(ordinaryRate)
+                nativeRates.append(nativeRate)
+                if ordinaryRate > 0 { ratios.append(nativeRate / ordinaryRate) }
+                proposed += delta.proposedTokens
+                accepted += delta.acceptedTokens
+                rejected += delta.rejectedTokens
+            }
+            func median(_ values: [Double]) -> Double {
+                let sorted = values.sorted()
+                guard !sorted.isEmpty else { return 0 }
+                return sorted.count % 2 == 1
+                    ? sorted[sorted.count / 2]
+                    : (sorted[sorted.count / 2 - 1] + sorted[sorted.count / 2]) / 2
+            }
+            cells.append([
+                "rows": rows,
+                "passes": passes,
+                "completion_tokens_per_row": throughputTokens,
+                "ordinary_e2e_tps_median": median(ordinaryRates),
+                "native_e2e_tps_median": median(nativeRates),
+                "native_over_ordinary_median": median(ratios),
+                "proposed": proposed,
+                "accepted": accepted,
+                "rejected": rejected,
+                "acceptance": proposed > 0 ? Double(accepted) / Double(proposed) : 0,
+                "greedy_equal": true,
+            ])
+        }
+        return ["r015_formal": false, "rate_basis": "end_to_end_batch_wall", "cells": cells]
+    }
+
     private func makeRequest(
         id: String,
         prompt: String,
         stream: Bool = false,
-        stop: [String]? = nil
+        stop: [String]? = nil,
+        maxTokens: Int = 8
     ) throws -> ChatCompletionRequest {
         var object: [String: Any] = [
             "model": modelID,
             "messages": [["role": "user", "content": prompt]],
-            "max_tokens": 8,
+            "max_tokens": maxTokens,
             "temperature": 0,
             "top_p": 1.0,
             "stream": stream,
@@ -653,15 +963,15 @@ final class NativeMTPHardwareE2ERunner {
     private func makeAndValidateAdmission(
         targetIdentity: MLXSnapshotIdentity,
         mtpIdentity: MLXSnapshotIdentity,
-        machine: MachineFingerprint
+        machine: MachineFingerprint,
+        maxContextTokens: Int
     ) throws -> NativeMTPHardwareSignedAdmission {
-        let artifactObservation = try NativeMTPArtifactObserver.observePair(
-            targetDirectory: root.appendingPathComponent("target", isDirectory: true),
-            mtpDirectory: root.appendingPathComponent("mtp", isDirectory: true)
+        let artifactObservation = try observeArtifacts(
+            targetDirectory: root.appendingPathComponent("target", isDirectory: true)
         )
         let affineRepresentation = try NativeMTPArtifactObserver.affineRepresentation(for: artifactObservation)
         let tokenizerSHA = try sha256(of: root.appendingPathComponent("target/tokenizer.json"))
-        let manifestSHA = try sha256(of: root.appendingPathComponent("mtp/config.json"))
+        let manifestSHA = try sha256(of: mtpDirectory.appendingPathComponent("config.json"))
         let signer = Curve25519.Signing.PrivateKey()
         let keyID = "native-mtp-hardware-e2e"
         let selfTestBankData = try selfTestChallengeBankData(
@@ -693,6 +1003,7 @@ final class NativeMTPHardwareE2ERunner {
             options: [.atomic]
         )
         let sidecarData = try releaseEnvelopeData(
+            maxContextTokens: maxContextTokens,
             machine: machine,
             targetSHA: targetIdentity.digest,
             tokenizerSHA: tokenizerSHA,
@@ -797,14 +1108,15 @@ final class NativeMTPHardwareE2ERunner {
             "schema_version": "macprovider.native-mtp-artifact-projection.v1",
             "artifacts": [
                 "target": ["path": "target", "sha256": targetSHA],
-                "mtp": ["path": "mtp", "sha256": mtpSHA],
+                "mtp": ["path": family.mtpDirectoryName, "sha256": mtpSHA],
                 "tokenizer": ["path": "target/tokenizer.json", "sha256": tokenizerSHA],
-                "manifest": ["path": "mtp/config.json", "sha256": manifestSHA],
+                "manifest": ["path": "\(family.mtpDirectoryName)/config.json", "sha256": manifestSHA],
             ],
         ])
     }
 
     private func releaseEnvelopeData(
+        maxContextTokens: Int,
         machine: MachineFingerprint,
         targetSHA: String,
         tokenizerSHA: String,
@@ -823,11 +1135,11 @@ final class NativeMTPHardwareE2ERunner {
             "tokenizer_sha256": tokenizerSHA,
             "decode_path": "native_mtp",
             "mtp_manifest_sha256": manifestSHA,
-            "mtp_family_adapter": "qwen3_5_mtp_v1",
+            "mtp_family_adapter": family.familyAdapter,
             "mtp_state_class": "hybrid_stageable_rewindable",
             "mtp_head_count": 1,
             "proposal_depth": 1,
-            "complete_window_bytes_by_depth": [1_048_576, 2_097_152],
+            "complete_window_bytes_by_depth": family.completeWindowBytesByDepth(maxContextTokens: maxContextTokens),
             "runtime_revision": Self.upstreamRevision,
             "provider_revision": Self.providerRevision,
             "source_commit": Self.providerRevision,
@@ -838,9 +1150,10 @@ final class NativeMTPHardwareE2ERunner {
             "ram_bytes": machine.ramGB * 1_073_741_824,
             "qualified_slots": maxBatch,
             "max_native_active_rows": maxNativeActiveRows,
-            // The lab tuple qualifies sampled rows too (target-sample exact
-            // match), so temperature cells measure the native path.
-            "request_feature_profile": NativeMTPAdmissionSidecar.sampledRequestFeatureProfile,
+            // A Qwen3.5 lab tuple qualifies sampled rows too (target-sample
+            // exact match), so temperature cells measure the native path; a
+            // glm5_next tuple is greedy only.
+            "request_feature_profile": family.requestFeatureProfile,
             "max_prompt_tokens": maxPromptTokens,
             "decrease_threshold_ppm": 1,
             "increase_threshold_ppm": 2,
@@ -896,13 +1209,13 @@ final class NativeMTPHardwareE2ERunner {
             modelSHA256: modelSHA,
             tokenizerSHA256: nil,
             chatTemplateSHA256: nil,
-            modelFamily: "qwen",
+            modelFamily: family.modelFamily,
             hardwareClass: "apple-silicon-native-mtp-e2e",
             metallibSHA256: String(repeating: "a", count: 64),
             kernelIdentifier: "macprovider_paged_kv_gather_v1",
-            blockSizeTokens: 32,
+            blockSizeTokens: family.blockSizeTokens,
             maxPhysicalBlocks: maxPhysicalBlocks,
-            maxResidentTokens: max(maxPhysicalBlocks * 32, maxContextTokens * maxBatch),
+            maxResidentTokens: max(maxPhysicalBlocks * family.blockSizeTokens, maxContextTokens * maxBatch),
             poolEpoch: 1,
             parityLabel: "native-mtp-hardware-e2e-v1"
         )

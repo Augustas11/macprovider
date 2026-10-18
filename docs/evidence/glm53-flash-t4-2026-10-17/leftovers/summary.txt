@@ -1,0 +1,6 @@
+legs=4
+leg4 leftovers start 05:23:10
+leg4 leftovers FAIL (see leftovers.json / leftovers.log)
+19e8f66c068b507d8d0cb7c47c9413c0d7d507adf98aa790df30918c864a9433  <lab>/t4-window-20261017T052309Z/leftovers.json
+a3f8c88d6b47962125b7f1e374a0e38696ed195dec34e7dd1f049f12376c7257  <lab>/t4-window-20261017T052309Z/leftovers.log
+RESULT=FAIL evidence=<lab>/t4-window-20261017T052309Z

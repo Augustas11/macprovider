@@ -128,6 +128,37 @@ no production config load may make the tuple selectable before that promotion.
    the local self-test. `GET /v1/status` must show `native_mtp.enabled=true`
    and `mode` of `eligible` or `active`.
 
+## Adding a second model to the admission set
+
+A sidecar with two or more model entries uses the v2 projection manifest
+(`macprovider.native-mtp-artifact-projection.v2`, keyed by `model_key`). A
+GLM-5.3-Flash entry also carries 5- and 6-bit overrides and more than 256
+exceptions (SPEC-023 v0.22.27). A CLI older than the one that reads these
+rejects the whole admission set, and every native-MTP tuple on it falls back to
+ordinary decode, Qwen included. SPEC-048-R014 item 10 therefore fixes the order:
+
+1. **CLI cut with the readers.** The campaign CLI cut ships the v2 projection
+   reader, the embedded `checkpoint_mtp` observer, and the wider R024 bounds.
+   Until step 2 holds, keep publishing the single-model admission set: one
+   tuple input, the v1 projection, the existing Qwen entry unchanged.
+2. **That CLI is the released one.** Publish it, then wait until it is the
+   released CLI (the published stable, with the updater path from the previous
+   stable confirmed). Do not publish the multi-model set before this.
+3. **Multi-model catalog release.** Commit the tuple file as a JSON array of
+   tuple inputs (Qwen and GLM), and render the projection with
+   `python3 scripts/native_mtp_admission_sidecar.py projection --models
+   <models.json> --out phase3-binary/catalog/autotune/native-mtp-artifact-manifest.json`,
+   where `models.json` maps each `model_key` to its
+   `{target, mtp, tokenizer, manifest}` artifacts. The GLM `mtp` member is the
+   target directory and its `manifest` is the target's `config.json`. Set the
+   release input's `artifact_manifest_sha256` to the new manifest's SHA-256
+   and continue at step 4 of the order above. All entries share the
+   release-owned provenance of that one CLI (SPEC-048-R013).
+
+The Qwen entry's bytes are unchanged by the merge. Its
+`native_mtp_admission_tuple_sha256` still changes, because the identity covers
+the whole sidecar.
+
 ## Renewal and revocation slots
 
 The admission sidecar and self-test bank no longer expire on the provider

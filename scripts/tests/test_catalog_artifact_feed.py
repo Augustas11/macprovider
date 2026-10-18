@@ -2384,6 +2384,14 @@ class HermeticRelease:
         ]
         if not bound:
             return
+        # Rows the activation release did not bind were admitted after it, by
+        # this or any later intake release.
+        activation_id = min(
+            bound, key=lambda rid: catalog_release.release_order_key(rid, ledger["releases"][rid])
+        )
+        activation_keys = {
+            binding["model_key"] for binding in ledger["releases"][activation_id]["artifact_bindings"]
+        }
         for release_id in bound:
             del ledger["releases"][release_id]
         ledger["schema_version"] = catalog_release.LEDGER_SCHEMA_V2
@@ -2409,9 +2417,12 @@ class HermeticRelease:
         # Rows admitted through the intake lane after activation did not exist
         # in the pre-activation release: drop them, with their artifact-source
         # and tier2-binding entries, and the intake decision that admitted them.
+        # The committed intake decision names only the latest release's
+        # admissions, so earlier intake releases' rows come from the ledger.
         intake_path = self.catalog / "intake-decision.json"
         if intake_path.exists():
             admitted = {d["model_key"] for d in json.loads(intake_path.read_text())["decisions"]}
+            admitted |= set(json.loads((self.catalog / "autotune-candidates.json").read_text())["rows"]) - activation_keys
             intake_path.unlink()
             candidates_path = self.catalog / "autotune-candidates.json"
             candidates = json.loads(candidates_path.read_text())
@@ -2490,20 +2501,23 @@ class HermeticRelease:
         path.write_text(json.dumps(tier2, indent=2) + "\n")
 
     def strip_promoted_rate_rows(self, admitted: set[str]) -> None:
-        """Drop the rate rows a promotion introduced, found through the
-        acknowledged pricing move that let the promoted model resolve onto them."""
-        acks_path = self.catalog / "acknowledged-pricing-moves.json"
-        if not acks_path.exists():
-            return
-        acks = json.loads(acks_path.read_text())
-        promoted = {key.lower() for key in admitted}
-        rows = {m["to_row"] for m in acks["moves"] if m["model"].lower() in promoted}
-        if not rows:
-            return
-        acks["moves"] = [m for m in acks["moves"] if m["to_row"] not in rows]
-        acks_path.write_text(json.dumps(acks, indent=2) + "\n")
+        """Drop the rate rows an admission introduced: the rows keyed by the
+        admitted model itself, and those found through the acknowledged
+        pricing move that let a promoted model resolve onto them."""
         source_path = self.catalog / "rate-card-source.json"
         source = json.loads(source_path.read_text())
+        rows = {key for key in admitted if key in source["rows"]}
+        acks_path = self.catalog / "acknowledged-pricing-moves.json"
+        if acks_path.exists():
+            acks = json.loads(acks_path.read_text())
+            promoted = {key.lower() for key in admitted}
+            moved = {m["to_row"] for m in acks["moves"] if m["model"].lower() in promoted}
+            if moved:
+                rows |= moved
+                acks["moves"] = [m for m in acks["moves"] if m["to_row"] not in moved]
+                acks_path.write_text(json.dumps(acks, indent=2) + "\n")
+        if not rows:
+            return
         for row in rows:
             source["rows"].pop(row, None)
         source_path.write_text(json.dumps(source, indent=2, sort_keys=True) + "\n")

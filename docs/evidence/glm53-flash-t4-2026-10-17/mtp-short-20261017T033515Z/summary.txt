@@ -1,0 +1,90 @@
+== profile
+mtp-profile plain_step deferred=true ms_median=28.16 min=27.74
+mtp-profile plain_step deferred=false ms_median=28.52 min=28.26
+mtp-profile verify_2col ms_median=41.74 min=41.07
+mtp-profile forward_2col_no_checkpoint ms_median=37.95 min=37.37
+mtp-profile drafter_commit accepted=0 ms_median=1.99 min=1.95
+mtp-profile drafter_commit accepted=1 ms_median=2.27 min=2.24
+== census families
+mtp-census 1tok:
+family: total kernel GPU time 25.47 ms/step
+family:   8845.4 us  34.7%  n=  84.0  172356.96 MB  19485.5 GB/s  moe_fused
+family:   6025.7 us  23.7%  n= 109.0   3632.03 MB    602.8 GB/s  qmv_fast
+family:   4807.9 us  18.9%  n=  35.0   3354.70 MB    697.7 GB/s  kda_multi_qmv
+family:   3421.7 us  13.4%  n= 179.0    159.82 MB     46.7 GB/s  hc
+family:    894.7 us   3.5%  n=  34.0    374.77 MB    418.9 GB/s  kda_kernel
+family:    528.8 us   2.1%  n=  42.0    198.75 MB    375.8 GB/s  moe_router
+family:    400.9 us   1.6%  n=  12.0     16.89 MB     42.1 GB/s  gemm
+family:    191.0 us   0.7%  n=  45.0     37.60 MB    196.8 GB/s  copy
+family:    168.6 us   0.7%  n=  23.0      0.18 MB      1.1 GB/s  rmsnorm
+family:     64.5 us   0.3%  n=  11.0      3.24 MB     50.3 GB/s  softmax
+family:     64.3 us   0.3%  n=  16.0      1.86 MB     28.9 GB/s  elementwise/other
+family:     26.0 us   0.1%  n=   1.0      5.87 MB    225.9 GB/s  qmv_other
+family:     17.8 us   0.1%  n=   3.0    674.04 MB  37858.7 GB/s  gather
+family:      7.4 us   0.0%  n=   1.0      0.04 MB      5.5 GB/s  reduce
+family:      6.4 us   0.0%  n=   1.0      0.01 MB      2.0 GB/s  dequantize
+mtp-census verify_2col:
+family: total kernel GPU time 37.60 ms/step
+family:  15908.0 us  42.3%  n=  84.0  172361.17 MB  10834.9 GB/s  moe_fused
+family:   8864.2 us  23.6%  n=  35.0   3356.68 MB    378.7 GB/s  kda_multi_qmv
+family:   5946.2 us  15.8%  n= 115.0   3453.61 MB    580.8 GB/s  elementwise/other
+family:   3447.7 us   9.2%  n= 179.0    178.90 MB     51.9 GB/s  hc
+family:   1291.2 us   3.4%  n=  34.0    524.64 MB    406.3 GB/s  kda_kernel
+family:    756.7 us   2.0%  n=  23.0     33.78 MB     44.6 GB/s  gemm
+family:    547.6 us   1.5%  n=  42.0    199.15 MB    363.7 GB/s  moe_router
+family:    266.3 us   0.7%  n=  21.0    188.15 MB    706.6 GB/s  qmv_fast
+family:    215.3 us   0.6%  n=  80.0     43.64 MB    202.7 GB/s  copy
+family:    179.2 us   0.5%  n=  23.0      0.31 MB      1.7 GB/s  rmsnorm
+family:    140.8 us   0.4%  n=  22.0      6.49 MB     46.1 GB/s  softmax
+family:     23.4 us   0.1%  n=   3.0    674.05 MB  28800.2 GB/s  gather
+family:      7.6 us   0.0%  n=   1.0      0.03 MB      3.3 GB/s  dequantize
+family:      6.9 us   0.0%  n=   1.0      0.08 MB     11.9 GB/s  reduce
+== census verify kernels (top 40)
+gpu:  us/step  n/step   MB/step     GB/s  kernel
+gpu:  10688.2    42.0 114905.91  10750.7  custom_kernel_glm5next_moe_gate_up_select__bfloat16_t_4096_2048_8_4_64_4_2_2048_0_288_1_8_64_bfloat16_t_float_
+gpu:   7070.9    25.0   2711.58    383.5  custom_kernel_glm5next_multi_qmv_p6__bfloat16_t_4096_8_64_4_2_8192_8192_8192_128_128_64_bfloat16_t_uint32_t_bf
+gpu:   5219.8    42.0  57455.25  11007.1  custom_kernel_glm5next_moe_down_combine__bfloat16_t_2048_4096_8_4_64_4_2_8_64_bfloat16_t_uint32_t_float_uint32
+gpu:   2161.3    89.0    161.16     74.6  custom_kernel_glm5next_hc_pre_deferred__bfloat16_t_4_4096_1000_10000_bfloat16_t_float_float_float_floatc_float
+gpu:   1448.3     8.0    561.78    387.9  custom_kernel_glm5next_multi_qmv_p6__bfloat16_t_4096_5_64_4_2_8192_8192_8192_128_128_64_bfloat16_t_uint32_t_bf
+gpu:   1401.3    25.0    892.52    636.9  custom_kernel_glm5next_qmv_batch__bfloat16_t_8192_4096_8_64_4_2_2_bfloat16_t_uint32_t_bfloat16_t_bfloat16_t_bf
+gpu:   1286.4    90.0     17.74     13.8  custom_kernel_glm5next_hc_post__bfloat16_t_4_4096_20_1000_8_float_floatc_float_bfloat16_t_float_float_float
+gpu:   1059.5    10.0    713.85    673.7  custom_kernel_glm5next_qmv_batch__bfloat16_t_16384_4096_8_64_4_2_2_bfloat16_t_uint32_t_bfloat16_t_bfloat16_t_b
+gpu:    896.2    26.0    406.01    453.0  custom_kernel_glm5next_kda_verify_gates__bfloat16_t_2_128_8192_64_8_64_1_bfloat16_t_bfloat16_t_bfloat16_t_bflo
+gpu:    870.4     1.0    674.68    775.2  custom_kernel_glm5next_qmv_batch__bfloat16_t_4096_154880_8_64_4_2_2_bfloat16_t_uint32_t_bfloat16_t_bfloat16_t_
+gpu:    728.9     6.0    321.31    440.8  custom_kernel_glm5next_qmv_batch__bfloat16_t_4096_12288_8_64_4_2_2_bfloat16_t_uint32_t_bfloat16_t_bfloat16_t_b
+gpu:    569.9    22.0     33.52     58.8  steel_gemm_fused_nt_bfloat16_bfloat16_bm64_bn32_bk32_wm2_wn2_has_batch_n_use_out_source_n_do_axpby_n_align_M_t
+gpu:    547.6    42.0    199.15    363.7  custom_kernel_glm5next_router_logits__bfloat16_t_4096_288_bfloat16_t_float_float_float_float
+gpu:    470.9     9.0    245.81    521.9  custom_kernel_glm5next_qmv_batch__bfloat16_t_8192_4096_6_64_4_2_2_bfloat16_t_uint32_t_bfloat16_t_bfloat16_t_bf
+gpu:    421.1    10.0    268.12    636.7  custom_kernel_glm5next_qmv_batch__bfloat16_t_1536_16384_8_64_4_2_2_bfloat16_t_uint32_t_bfloat16_t_bfloat16_t_b
+gpu:    395.0     8.0    118.63    300.3  custom_kernel_glm5next_kda_verify_gates5__bfloat16_t_2_128_8192_64_5_64_1_bfloat16_t_bfloat16_t_bfloat16_t_bfl
+gpu:    243.8     3.0    160.67    659.1  custom_kernel_glm5next_qmv_batch__bfloat16_t_12288_4096_8_64_4_2_2_bfloat16_t_uint32_t_bfloat16_t_bfloat16_t_b
+gpu:    239.0    20.0    182.19    762.2  affine_qmv_fast_bfloat16_t_gs_64_b_8_batch_1_pr_0_hgs_0_r_4
+gpu:    231.9    10.0     67.09    289.3  custom_kernel_glm5next_qmv_batch__bfloat16_t_4096_1536_8_64_4_2_2_bfloat16_t_uint32_t_bfloat16_t_bfloat16_t_bf
+gpu:    206.9    10.0     22.47    108.6  custom_kernel_glm5next_qmv_batch__bfloat16_t_4096_512_8_64_4_2_2_bfloat16_t_uint32_t_bfloat16_t_bfloat16_t_bfl
+gpu:    186.9     1.0     46.22    247.3  custom_kernel_glm5next_multi_qmv_p2__bfloat16_t_4096_5_64_4_2_8192_8192_0_0_0_0_bfloat16_t_uint32_t_bfloat16_t
+gpu:    186.8     1.0      0.26      1.4  steel_gemm_fused_tn_float32_float32_bm64_bn32_bk32_wm2_wn2_has_batch_n_use_out_source_n_do_axpby_n_align_M_n_a
+gpu:    179.2    23.0      0.31      1.7  rmsbfloat16
+gpu:    158.1     1.0     37.09    234.7  custom_kernel_glm5next_multi_qmv_p4__bfloat16_t_4096_8_64_4_2_8192_128_128_64_0_0_bfloat16_t_uint32_t_bfloat16
+gpu:    140.8    22.0      6.49     46.1  block_softmax_precise_bfloat16
+gpu:    109.6    11.0      2.88     26.3  sn_copybfloat16bfloat16
+gpu:    108.4    22.0      4.31     39.8  g2_Multiplybfloat16
+gpu:     96.8     1.0     54.61    564.2  custom_kernel_glm5next_qmv_batch__bfloat16_t_16384_4096_6_64_4_2_2_bfloat16_t_uint32_t_bfloat16_t_bfloat16_t_b
+gpu:     51.9    44.0     37.51    722.3  gg1_copybfloat16bfloat16
+gpu:     48.8    24.0      3.05     62.5  g3_copybfloat16bfloat16
+gpu:     38.1     1.0     20.52    538.5  custom_kernel_glm5next_qmv_batch__bfloat16_t_1536_16384_6_64_4_2_2_bfloat16_t_uint32_t_bfloat16_t_bfloat16_t_b
+gpu:     27.3     1.0      5.96    218.8  affine_qmv_fast_bfloat16_t_gs_64_b_5_batch_1_pr_0_hgs_0_r_4
+gpu:     23.3     1.0      5.14    220.6  custom_kernel_glm5next_qmv_batch__bfloat16_t_4096_1536_6_64_4_2_2_bfloat16_t_uint32_t_bfloat16_t_bfloat16_t_bf
+gpu:     21.7     1.0      1.72     79.2  custom_kernel_glm5next_qmv_batch__bfloat16_t_4096_512_6_64_4_2_2_bfloat16_t_uint32_t_bfloat16_t_bfloat16_t_bfl
+gpu:     17.3     2.0     39.65   2296.9  gather_frontbfloat16_int32_int_2
+gpu:     13.8     3.0      0.54     39.1  EV2IAsTypeBFV2IBroadcastAEGV2IBroadcastEAHV2IMinimumFGIV2ISigmoidHJV2IBroadcastHIKV2IBroadcastIHLV2IMultiplyJK
+gpu:      7.6     1.0      0.03      3.3  affine_dequantize_bfloat16_t_gs_64_b_8
+gpu:      6.9     1.0      0.08     11.9  col_reduce_small_1_reduce_sumbfloat16
+gpu:      6.1     1.0    634.40 103293.7  gather_frontuint32_int32_int_1
+== varied 1k
+mtp has_weights=true prompt=1024 tokens=256
+mtp plain prefill_s=9.74 decode_tok_s=40.99
+mtp mtp prefill_s=2.80 decode_tok_s=39.96 proposed=142 accepted=112 acceptance=0.789
+mtp round=0 mtp_equals_plain=true first_difference=none
+mtp plain prefill_s=2.60 decode_tok_s=41.05
+mtp mtp prefill_s=2.82 decode_tok_s=40.02 proposed=142 accepted=112 acceptance=0.789
+mtp round=1 mtp_equals_plain=true first_difference=none

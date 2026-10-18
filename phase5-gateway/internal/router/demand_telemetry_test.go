@@ -463,3 +463,18 @@ func demandEventCount(t *testing.T, dbPath, accountID string) int {
 	}
 	return count
 }
+
+// GLM-5.3-Flash (epic #2029): the catalog key, the OpenRouter slug and the
+// served artifact id are recorded as themselves; near misses stay bucketed.
+func TestDemandTelemetryKnowsGLM53FlashIdentitiesExactly(t *testing.T) {
+	for _, model := range []string{"zai-org/glm-5.3-flash", "z-ai/glm-5.3-flash", "Jundot/GLM-5.3-Flash-oQ4e-mtp", "z-ai/glm-4.5-air", "mlx-community/GLM-4.5-Air-4bit"} {
+		if got := sanitizeDemandModelID(model); got != model {
+			t.Errorf("sanitizeDemandModelID(%q) = %q, want the model itself", model, got)
+		}
+	}
+	for _, model := range []string{"z-ai/glm-5.3-flashx", "zai-org/glm-5.3", "glm-5.3-flash", "jundot/glm-5.3-flash-oq4e-mtp"} {
+		if got := sanitizeDemandModelID(model); got != demandUnknownModelID {
+			t.Errorf("sanitizeDemandModelID(%q) = %q, want %q", model, got, demandUnknownModelID)
+		}
+	}
+}

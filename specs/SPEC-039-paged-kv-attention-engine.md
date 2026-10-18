@@ -1,7 +1,19 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1.16
-Status: draft (normative design). v0.1.16 is editorial: the FR-PKV12
+Version: v0.1.20
+Status: draft (normative design). v0.1.20 records the FR-PKV12 `glm5_next`
+evidence, so the GLM-5.3-Flash entry advertises its exact identity. v0.1.19 bounds every shared forward that
+carries a `glm5_next` row at 8 flattened tokens, gives `glm5_next` a 256-token
+default pool block, and states the `pagedMLA` gather count. v0.1.18 names the `glm5_next` catalog key
+(`zai-org/glm-5.3-flash`) and counts the native-MTP next-N layer's
+sparse-attention cache in the FR-PKV13 sizing input. v0.1.17 adds the `glm5_next` hybrid paged
+family (epic #2029): a `pagedMLA(kpool:)` cache kind that pages the MLA latent
+and the indexer's pooled keys of each DeepSeek-sparse-attention layer through
+the unchanged `macprovider_paged_kv_gather_v1` kernel, KDA linear-attention
+layers on the existing recurrent `MambaCache` path, its own parity label, a
+sparse-attention-length attach probe, and an FR-PKV12 entry for the exact
+GLM-5.3-Flash identity that the code may advertise only after that identity's
+recorded parity and isolation evidence. v0.1.16 is editorial: the FR-PKV12
 gpt-oss-120b evidence record moved to `docs/evidence/`. v0.1.15 (follows SPEC-038 v0.3.15) turns
 paged KV on by default for a coordinator-joined provider unless
 `paged_kv.enabled` is set explicitly or the CB emergency off is set, and
@@ -55,6 +67,52 @@ is `RotatingKVCache` only because the serve path caps KV for memory attaches to
 paged mode (the block pool bounds memory), while a genuine sliding-window model
 stays fail-safe. IMPL lands with this revision.
 Owner: provider runtime / inference engine
+Change log v0.1.20 (2026-10-17): the FR-PKV12 GLM-5.3-Flash entry's
+evidence is recorded under `docs/evidence/glm53-flash-t4-2026-10-17/`, on the
+exact identity (snapshot-manifest `7299b6a7…`, M3 Ultra, Metal library
+`589e56e0…`), at the pinned mlx-swift-lm `18ca526` in `final-18ca526/`:
+the AC-20 fixture (`b1-20261017T091600Z-ac20-selfcheck/leg1-fixture.log`:
+48 exact greedy tokens at 2,800 prompt tokens, 1,166 gather calls,
+byte-equal pending windows, attach probe established); the attach proof and
+row isolation from a lab serve (`b1-…/selfcheck/serve.log`: parity
+established over 11 sparse layers in 36 forwards, MoE expert-dispatch
+isolation on first decode and on rejoin, batched isolation with 0 cross-row
+divergences; the SPEC-038 FR-CB10 self-check's rows exact at k = 2..4); and
+isolation, replay, drain and 48-token parity from the scheduler leftovers
+harness (`b2-20261017T094515Z-msb-leftovers/leftovers.*`, all `pass=true`),
+the record the `openai/gpt-oss-120b` entry used. The same records at the
+earlier `7d8dbf5` pin are kept there as superseded. The entry now advertises the tuple; load-time probes, the per-Mac
+FR-CB10 self-check and the signed SPEC-023 policy still gate serving.
+Refines SPEC-039-R012.
+Change log v0.1.19 (2026-10-17): FR-PKV12 caps a shared forward over
+`pagedMLA` layers at 8 flattened tokens (rows x tokens per row): the GLM-5-Next
+batched decode kernels and quantized projections keep a batched row bitwise
+equal to its serial run only up to that size on the measured hardware. Decode
+steps split, packed verifications group, and a shared prefill that would
+exceed it runs per row. FR-PKV14 makes 256 the `glm5_next` default
+`block_size_tokens` when the operator sets none. FR-PKV4 states that the
+attach-time gather count for a `pagedMLA` layer is two per forward (latent and
+pooled keys) over every prefill chunk and decode forward, and that both
+buffers use the same physical block order. Refines SPEC-039-R004, R012, R014.
+Change log v0.1.18 (2026-10-17): the FR-PKV12 GLM-5.3-Flash entry keys on
+catalog model id `zai-org/glm-5.3-flash` plus `Glm5NextForConditionalGeneration`.
+The FR-PKV13 `glm5_next` sizing input is computed from the admitted config
+and adds the next-N layer's cache (SPEC-048 R012): 1,003,257,856 bytes per
+64k row with native MTP, 931,954,688 without. Selecting a per-family pool
+block size (256 for `glm5_next`) remains IMPL work. No requirement changes.
+Change log v0.1.17 (2026-10-17): FR-PKV12 gains the `glm5_next` mixed
+topology (`MambaCache` on `linear_attention` layers, `pagedMLA(kpool:)` on
+`deepseek_sparse_attention` layers) and a SPEC-first allowlist entry keyed by
+`Glm5NextForConditionalGeneration` (the `architectures[0]` of
+`Jundot/GLM-5.3-Flash-oQ4e-mtp` @ `36defc5042d92a992a7948e83d6f110b8df69329`).
+The entry advertises nothing until its AC-20 fixture and attach-time
+parity/isolation evidence are recorded. FR-PKV3 keeps the kernel identifier
+and gives `glm5_next` the parity label `glm5-next-mla-parity-v1`. FR-PKV4 adds
+the latent/pooled-key fixture rules. The attach probe for a sparse-attention
+family is at least `index_topk + 2 × block_size_tokens` prompt tokens so the
+indexer's sparse selection runs. FR-PKV15 names the `pagedMLA` transactional
+components. No other family is admitted; refines SPEC-039-R003, R004, R012,
+R013, and R015.
 Change log v0.1.14 (2026-10-01): FR-PKV12 admits the exact
 `openai/gpt-oss-120b` identity with `GptOssForCausalLM` in the artifact's
 `config.json` architectures. Evidence is recorded in
@@ -250,6 +308,8 @@ invariant.
 | Same-conversation retention | Retaining a sequence's own physical blocks between its turns and reattaching them to a new decode, preserving SPEC-024 token-granular LCP/trim, without sharing blocks across conversations (FR-PKV10). |
 | Block-table handle | The engine-issued reference a consumer holds for one sequence's block table; the engine allocates the physical blocks, the consumer binds/extends/releases through the handle (FR-PKV2, FR-PKV10). |
 | Broader prefix sharing | Any reuse beyond the same conversation's own blocks: cross-conversation, cross-buyer, cross-account, global content-addressed, or salted-prefix sharing. Not in v0.1. |
+| Paged MLA layout (`pagedMLA(kpool:)`) | The `glm5_next` sparse-attention layer layout (v0.1.17): one paged MLA latent buffer (`[B, 1, T, kv_lora_rank]`, token stride `kv_lora_rank`) plus one paged pooled-indexer-key buffer (one key of `index_head_dim` per `kpool` tokens), both addressed by the sequence's single block table. The not-yet-complete pool window (fewer than `kpool` tokens of indexer keys and gate scores) is row-local auxiliary state, not paged. |
+| Sparse-attention family | A family whose attention layers select a top-`index_topk` subset of prior positions through an indexer once the context exceeds `index_topk`, and attend densely below it (v0.1.17: `glm5_next`). |
 | KV offload | Moving KV blocks outside the resident unified-memory pool (SSD, remote memory, or another process). Not in v0.1. |
 
 ## 4. Normative requirements
@@ -272,6 +332,13 @@ models and MoE models whose attention path uses ordinary per-layer
 `KVCacheSimple`-equivalent caches. Architecture-specific code MAY exist only
 as an explicit compatibility adapter for a model family with a different
 public cache contract; it MUST NOT be the default injection mechanism.
+The `glm5_next` sparse-attention layers use such an adapter (v0.1.17): the
+pinned model consumes its own `GLM5NextAttentionCache` (MLA latent plus pooled
+indexer keys) rather than `attentionWithCacheUpdate`, so the `pagedMLA(kpool:)`
+adapter (FR-PKV12) stores that cache's latent and pooled keys in paged blocks
+and hands the model logical-order arrays through the same cache contract. The
+model's MLA projection, indexer scoring, top-k selection, sparse attention,
+and logits stay on the unmodified model path.
 
 The cache MAY reshape or gather K/V internally, but it MUST leave RoPE,
 GQA/MQA mapping, causal masks, and logits computation to the unmodified model
@@ -368,6 +435,22 @@ The gather kernel MUST NOT change attention math. It reorders storage only:
 RoPE'd keys, grouped heads, causal masking, scale, softmax, and value
 accumulation remain owned by the existing model/SDPA path.
 
+**`pagedMLA` (v0.1.17).** The `glm5_next` latent and pooled-key buffers use the
+same registered kernel, `macprovider_paged_kv_gather_v1`, with no new kernel
+and no new kernel identifier. The latent gather runs with
+`block_size_tokens` and token stride `kv_lora_rank` (512 for the admitted
+identity); the pooled-key gather runs with block size
+`block_size_tokens / index_kpool` and token stride `index_head_dim` (128).
+Both read the same physical block IDs in the same logical order. The gathered
+arrays feed the model's own MLA sparse attention and indexer instead of stock
+SDPA; that path, not the gather, owns latent up-projection, indexer scores,
+top-k selection, the tail-window selection, masking, and softmax. The
+runtime parity label for a `glm5_next` tuple is `glm5-next-mla-parity-v1`, so
+SPEC-038 FR-CB10 coverage and the SPEC-023 CB policy can never carry a
+`glm5_next` result onto an `sdpa-parity-v1` tuple or the reverse. The Metal
+library SHA-256 and kernel identifier in that runtime identity are unchanged
+by this revision.
+
 **Production-throughput boundary.** A gather-every-step path MAY satisfy
 correctness, descriptor, allocator, and fail-safe proof obligations, but it is
 not automatically production serving evidence. If measured gather overhead
@@ -420,6 +503,52 @@ fixture did not prove `gpt-oss-120b`. For v0.1.14,
 `openai/gpt-oss-120b` adds its own exact-identity packaged-runtime evidence.
 `gemma4`, `glm4_moe`, `nemotron_h`, and other catalog families remain outside
 the allowlist until they have equivalent FR-PKV4 evidence.
+
+**`glm5_next` latent / pooled-key fixture (v0.1.17, AC-20).** The `glm5_next`
+family's fixture runs the exact admitted artifact (environment-gated, real
+weights) and MUST satisfy all of the following in addition to the rules
+above:
+
+1. *One block table, two buffers.* The configured `block_size_tokens` MUST be
+   a positive multiple of `index_kpool`; otherwise attach fails closed with
+   `paged_fallback_allocator`. Logical block `j` of the latent buffer holds
+   tokens `[j·b, (j+1)·b)` and logical block `j` of the pooled-key buffer
+   holds the `b / index_kpool` pooled keys of exactly those tokens, at the
+   same physical block ID. The fixture MUST prove both buffers are read
+   through the same non-identity permutation.
+2. *Non-degenerate span.* The prompt MUST be at least
+   `index_topk + 2 × block_size_tokens` tokens (2560 for `index_topk` 2048 and
+   the 256-token `glm5_next` block), so the context exceeds `index_topk`
+   before decode begins, the indexer's dense bypass is off, and every decode
+   step selects a strict subset of pooled windows. A fixture whose context
+   never exceeds `index_topk` exercises only dense attention and does not
+   satisfy this gate.
+3. *Boundaries.* The decode MUST cross at least one latent block boundary and
+   complete at least one pool window (`index_kpool` tokens) during decode, so
+   a pooled key is appended to the paged buffer mid-decode.
+4. *Coverage proof.* The gather MUST be shown to run for the latent and the
+   pooled-key buffer of every `deepseek_sparse_attention` layer on every
+   prefill chunk and decode step under test (v0.1.19: exactly
+   `2 × sparse layers × (prefill chunks + decode forwards)` gather calls once
+   the first pool window is complete, with the pooled-key buffer read through
+   the same physical block order as the latent). `linear_attention` (KDA) layers
+   stay on `MambaCache` and are not paged; their state is compared exactly
+   under FR-PKV12's recurrent-row rules.
+5. *Row-local window.* The incomplete pool window (pending indexer keys and
+   gate scores, fewer than `index_kpool` tokens) is row-local state. It MUST
+   be byte-equal to the stock cache's pending window after every step under
+   test, and it MUST NOT be stored in or read from another row's blocks.
+6. *Gate.* At least 48 exact greedy tokens against the stock
+   `GLM5NextAttentionCache` path over the same prompt, prefilled in the
+   production at-most-512-token chunks. The latent and pooled keys stay in the
+   model's unquantized activation dtype; `kv_bits` remains unsupported
+   (FR-PKV5).
+
+The T3 single-stream evidence for this artifact
+(`docs/evidence/glm53-flash-t3-parity-2026-10-16/`: native engine 256/256
+greedy tokens against the reference at 1k, 8k, and 64k) proves the stock
+`GLM5NextAttentionCache` path. It is the oracle for this fixture, not a
+substitute for it.
 
 The implementation MUST fail closed if parity is not established for a model
 or cache class selected for paged mode. Tolerance-based tensor comparison MAY
@@ -646,6 +775,21 @@ be individually measured before it is added. The v1 allowlist is:
 - `openai/gpt-oss-120b` with `GptOssForCausalLM` in the artifact's
   `config.json` architectures (MoE sliding-window/full-attention decoder; the
   paged path MUST additionally pass cross-row shared-forward isolation).
+- (v0.1.17, SPEC-first) the GLM-5.3-Flash identity `zai-org/glm-5.3-flash`
+  (catalog key from v0.1.18), the catalog model whose verified artifact is `Jundot/GLM-5.3-Flash-oQ4e-mtp` @
+  `36defc5042d92a992a7948e83d6f110b8df69329`, with
+  `architectures[0] == "Glm5NextForConditionalGeneration"`, top-level
+  `model_type` `glm5_next`, and `text_config.model_type` `glm5_next_text` in
+  the artifact's `config.json` (KDA/DSA MoE hybrid decoder; the paged path
+  MUST additionally pass cross-row MoE expert-dispatch isolation). The code
+  entry keys on that exact `architectures[0]` value plus the catalog model
+  id; a path-only alias, another `glm5_next` artifact, or a config whose
+  `architectures` array differs fails closed. The entry MUST NOT advertise
+  the tuple in the FR-PKV11 descriptor until the AC-20 fixture, the attach
+  proof below, and row-isolation, replay, and drain evidence for this exact
+  identity are recorded under `docs/evidence/`; until then attach fails
+  closed with `paged_fallback_parity`. (v0.1.20) Evidence recorded under
+  `docs/evidence/glm53-flash-t4-2026-10-17/` (README lists each record).
 
 Membership is per identity and evidence-gated, never per architecture. A
 same-architecture identity is admitted only after it individually passes the
@@ -653,13 +797,40 @@ parity and isolation gates on the packaged runtime. For an allowlisted hybrid,
 the attach-time proof MUST compare at least 48 exact greedy tokens after a
 513-token prompt partitioned in the same at-most-512-token chunks used by
 production serving; a shorter, differently partitioned, or non-exact proof
-fails closed.
+fails closed. For a sparse-attention family (`glm5_next`) the attach-time
+proof prompt MUST instead be at least
+`max(513, index_topk + 2 × block_size_tokens)` tokens, read from the resident
+model's `config.json` and the pool's configured block size (2560 for the
+admitted identity at block 256), in the same production chunks: a 513-token
+probe stays below `index_topk`, runs only the indexer's dense bypass, and
+proves nothing about sparse selection over paged pooled keys.
 
 Each allowlisted identity requires the exact runtime cache topology measured
 for that identity: Qwen hybrid rows use `MambaCache` on recurrent layers and
 `KVCacheSimple` on full-attention layers, while `openai/gpt-oss-120b` uses
 keep=0 `RotatingKVCache` on sliding-window layers and `KVCacheSimple` on
-full-attention layers. The engine MUST preserve each row's recurrent state
+full-attention layers. The `glm5_next` identity uses exactly one cache per
+decoder layer in layer order: `MambaCache` at every `linear_attention` index of
+`text_config.layer_types` (34 KDA layers for the admitted artifact) and
+`pagedMLA(kpool: text_config.index_kpool)` at every
+`deepseek_sparse_attention` index (11 layers, `index_kpool` 4). The runtime
+recognizes a `GLM5NextAttentionCache` as `pagedMLA` only when its pool width
+equals the config's `index_kpool`; any other count, order, or class fails
+closed. The native-MTP next-N layer is not part of this topology; its state
+belongs to SPEC-048. The KDA layers ride the existing recurrent
+(`.recurrentMamba`) path unchanged. **Forward size bound (v0.1.19).** Every
+shared forward over a `pagedMLA` topology MUST carry at most 8 flattened
+tokens (rows × tokens per row). The GLM-5-Next batched decode kernels and the
+model's quantized projections keep each batched row bitwise equal to its
+serial run only up to that size on the measured hardware (past the core's
+per-device `qmv` limit the projections switch to `qmm` and rows diverge). A
+decode step with more rows MUST split into forwards of at most 8 rows, packed
+native-MTP verification MUST group rows so each group carries at most 8 target
+tokens, and a shared prompt prefill whose rows × chunk length exceeds 8 MUST
+prefill each row in its own forward. The bound is a property of the code path,
+not an operator setting; the SPEC-038 FR-CB10 self-check still decides the
+served slot count, and its stored key records the bound the rows were measured
+under, so a grant never survives a change to it. The engine MUST preserve each row's recurrent state
 where present, page only attention KV, and pass token-parity and multi-step
 batched row-isolation gates, including row leave and join, before advertising
 the exact tuple. Adding a further mixed identity to this allowlist is a
@@ -759,6 +930,22 @@ These are normative define-and-record obligations; the specific byte and
 percentage values are chosen by the IMPL against real evidence and recorded in
 diagnostics and acceptance fixtures.
 
+**`glm5_next` sizing input (v0.1.17, computed in v0.1.18).** A `glm5_next`
+row's resident state is the paged latent (`kv_lora_rank` values per token per
+sparse layer), the paged pooled keys (`index_head_dim` values per
+`index_kpool` tokens per sparse layer), and the row-local KDA recurrent and
+short-convolution state of every `linear_attention` layer. For the admitted
+config (bf16 latent and pooled keys, fp32 recurrent state) each sparse layer
+holds `512 × 2 + 128 × 2 / 4 = 1,088` bytes per token, each KDA layer holds
+`64 × 128 × 128 × 4 + 3 × 24,576 × 2 = 4,341,760` bytes, and one row at a
+65,536-token context holds 11 × 71,303,168 + 34 × 4,341,760 = 931,954,688
+bytes. A native-MTP row adds the next-N layer's own sparse-attention cache,
+71,303,168 bytes at that context (SPEC-048 R012), for 1,003,257,856 bytes.
+The recorded design point is 4 slots at 64k with 256-token blocks
+(4,013,031,424 bytes with native MTP). These are IMPL sizing inputs recorded
+with the evidence; the served slot count stays a SPEC-038 FR-CB10 on-device
+decision.
+
 The overhead ceiling is enforced per tuple through SPEC-038 FR-CB10 acceptance
 coverage, not by a startup micro-benchmark. A throughput measurement at
 process start is too short and too noisy to gate on, and a false failure would
@@ -796,7 +983,7 @@ least:
 | YAML `paged_kv:` key | Env var | CLI flag | Default | Rule |
 |---|---|---|---|---|
 | `enabled` | `MACPROVIDER_PAGED_KV_ENABLED` | `--paged-kv-enabled` | `false` | bool; invalid ⇒ paged disabled, error logged |
-| `block_size_tokens` | `MACPROVIDER_PAGED_KV_BLOCK_SIZE_TOKENS` | `--paged-kv-block-size-tokens` | IMPL-set | positive integer, fixed per pool (FR-PKV2); invalid ⇒ disabled |
+| `block_size_tokens` | `MACPROVIDER_PAGED_KV_BLOCK_SIZE_TOKENS` | `--paged-kv-block-size-tokens` | IMPL-set (v0.1.19: 256 for `glm5_next`) | positive integer, fixed per pool (FR-PKV2); invalid ⇒ disabled |
 | `max_physical_blocks` | `MACPROVIDER_PAGED_KV_MAX_PHYSICAL_BLOCKS` | `--paged-kv-max-physical-blocks` | unset ⇒ covers advertised `max_context_tokens` (min 1024) | pool capacity bound (FR-PKV2), or an equivalent `max_pool_bytes`; > 0; invalid ⇒ disabled |
 | `fallback_policy` | `MACPROVIDER_PAGED_KV_FALLBACK_POLICY` | `--paged-kv-fallback-policy` | `permissive` | `permissive` (stock-route) or `strict` (fail preflight) (FR-PKV7); invalid ⇒ disabled |
 
@@ -839,6 +1026,15 @@ same abort/commit ownership rules. The primitive MUST be safe under ragged
 multi-row shared forwards: one row's shorter commit or abort MUST NOT change
 another row's staged tail.
 
+For a `pagedMLA` layer (v0.1.17) the checkpointed components are the latent
+and pooled-key block tables with their valid lengths, and the row-local
+pending pool window (indexer keys and gate scores of the incomplete
+`index_kpool` window). `commit(k)` MUST leave the pooled-key count, the pending
+window, and the latent length exactly as one-token-at-a-time decode of the
+accepted prefix would, including when the accepted prefix completes or
+splits a pool window; `abort` restores all three. KDA layers checkpoint their
+recurrent and short-convolution state as other recurrent layers do.
+
 Admission remains restricted to the FR-PKV12 descriptor plus an explicit
 native-MTP transactional capability for the exact topology. Genuine
 `RotatingKVCache`/sliding-window, unallowlisted `CacheList`, unproven recurrent
@@ -861,6 +1057,8 @@ MTP state.
 | Gather-feeds-SDPA exact parity passes, but overhead ceiling fails | Valid correctness/parity evidence only; paged mode MUST NOT serve real traffic through that path for the tuple. |
 | SPEC-038 consumes descriptor/handles/FR-PKV10 through another measured shared-forward path | Allowed only if that path preserves this spec's logical-order, descriptor, fallback, isolation, and overhead gates and passes SPEC-038 real-serving evidence. |
 | Fully-fused op configured | Explicit mode-gated extension; must pass all fp16 parity fixtures before use. |
+| `glm5_next` identity at attach, AC-20 and attach-proof evidence not yet recorded | Fail safe to stock with `paged_fallback_parity`; paged not advertised (FR-PKV12). |
+| `glm5_next` pool block size not a multiple of `index_kpool` | Fail safe to stock with `paged_fallback_allocator` (FR-PKV4). |
 
 ## 6. Acceptance criteria (fixtures)
 
@@ -975,6 +1173,21 @@ The implementation PR for this SPEC MUST include fixtures that prove:
   oracle with no cross-row block or recurrent-state mutation. A sliding-window,
   unallowlisted hybrid, or quantized-KV tuple MUST lack the transactional
   capability and fail native-MTP admission.
+- **AC-20 `glm5_next` paged MLA exact parity (FR-PKV4, FR-PKV12, v0.1.17):**
+  on the exact admitted artifact, the `pagedMLA` latent and pooled-key buffers
+  meet every FR-PKV4 `glm5_next` rule (one block table for both buffers,
+  non-identity permutation, prompt of at least
+  `index_topk + 2 × block_size_tokens` tokens, a latent block boundary and a
+  completed pool window during decode, gather coverage on every sparse layer
+  and step, byte-equal row-local pending window) and produce at least 48 exact
+  greedy tokens against the stock `GLM5NextAttentionCache` path. The fixture
+  also runs the batched shared-forward input-isolation and MoE
+  expert-dispatch isolation probes, row leave and join, replay, and drain
+  with KDA rows on `MambaCache`. The runtime identity carries the kernel
+  identifier `macprovider_paged_kv_gather_v1` and the parity label
+  `glm5-next-mla-parity-v1`. A block size that is not a multiple of
+  `index_kpool` and a `GLM5NextAttentionCache` whose pool width differs from
+  the config both fail closed.
 
 ## 7. No-go list
 
@@ -1021,7 +1234,8 @@ The implementation PR for this SPEC MUST include fixtures that prove:
   probe prevents false rejection of full-context models capped for memory.
   Qwen3.x first-turn exceptions and the exact `openai/gpt-oss-120b`
   sliding-window/full-attention tuple remain the only measured mixed-layout
-  grants.
+  grants. The v0.1.17 `glm5_next` entry was SPEC-first; its evidence is
+  recorded in v0.1.20 (`docs/evidence/glm53-flash-t4-2026-10-17/`).
 - KV offload and LRU/priority eviction policy remain future work. v0.1 owns a
   bounded resident pool and sequence-scoped reclaim mechanism, not an
   offloaded or globally shared cache manager.

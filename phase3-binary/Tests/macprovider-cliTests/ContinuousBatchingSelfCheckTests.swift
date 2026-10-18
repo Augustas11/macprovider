@@ -652,6 +652,78 @@ final class ContinuousBatchingSelfCheckTests: XCTestCase {
         }
     }
 
+    /// SPEC-038 FR-CB10 v0.3.21: the batched rate is the cohort's decode
+    /// tokens over the common span (the longest row's), never a sum of
+    /// per-row spans; no decode beside the whole cohort is no rate.
+    func testCohortDecodeRateIsTotalTokensOverTheCommonSpan() {
+        XCTAssertEqual(
+            ContinuousBatchingSelfCheck.cohortDecodeTPS(tokens: [47, 47, 47, 47], seconds: [1.0, 1.0, 0.98, 0.99]),
+            188, accuracy: 1e-9
+        )
+        XCTAssertEqual(ContinuousBatchingSelfCheck.cohortDecodeTPS(tokens: [0, 0], seconds: [0, 0]), 0)
+        XCTAssertEqual(ContinuousBatchingSelfCheck.cohortDecodeTPS(tokens: [16, 16], seconds: [0, 0]), 0)
+        XCTAssertEqual(ContinuousBatchingSelfCheck.cohortDecodeTPS(tokens: [16, 16], seconds: []), 0)
+        XCTAssertEqual(ContinuousBatchingSelfCheck.cohortDecodeTPS(tokens: [16, 16], seconds: [.nan, 0.5]), 64, accuracy: 1e-9)
+    }
+
+    /// SPEC-038 v0.3.21 is scoped to glm5_next: a Qwen3.6 tuple (no
+    /// flattened-token cap) keeps origin/main's key byte for byte, so its
+    /// stored grant still matches and never re-measures; only the capped
+    /// glm5_next key moves to the decode-only probe version.
+    func testDecodeOnlyGainLeavesTheQwenSelfCheckKeyUnchanged() {
+        let base = ContinuousBatchingSelfCheckKey.currentRuntimeBuild
+        XCTAssertEqual(
+            ModelRuntime.continuousBatchingSelfCheckRuntimeBuild(forwardBound: 11, routeKeyBoundary: 1024),
+            "\(base)+cb-isolation-v1/decode11/verify11+cb-probe-v2/route1024"
+        )
+        XCTAssertEqual(
+            ModelRuntime.continuousBatchingSelfCheckRuntimeBuild(forwardBound: 11, routeKeyBoundary: 4096),
+            "\(base)+cb-isolation-v1/decode11/verify11+cb-probe-v2/route4096"
+        )
+        let qwen = ContinuousBatchingSelfCheckKey(
+            modelSHA256: "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+            metallibSHA256: "16f1000b756e66caaee9ed0340f617e232aab36aa820e014012f0002c183214e",
+            kernelIdentifier: "macprovider_paged_kv_gather_v1",
+            hardwareClass: "apple-silicon:Apple M3 Ultra:ram-256gb",
+            osBuild: "26.0 (25A354)",
+            runtimeBuild: ModelRuntime.continuousBatchingSelfCheckRuntimeBuild(forwardBound: 11, routeKeyBoundary: 1024),
+            decodeWindow: 16
+        )
+        let stored = ContinuousBatchingSelfCheckKey(
+            modelSHA256: qwen.modelSHA256, metallibSHA256: qwen.metallibSHA256,
+            kernelIdentifier: qwen.kernelIdentifier, hardwareClass: qwen.hardwareClass, osBuild: qwen.osBuild,
+            runtimeBuild: "\(base)+cb-isolation-v1/decode11/verify11+cb-probe-v2/route1024", decodeWindow: 16
+        )
+        XCTAssertEqual(qwen, stored, "a Qwen3.6 key stored before this change still matches")
+        XCTAssertTrue(ModelRuntime.continuousBatchingSelfCheckRuntimeBuild(
+            forwardBound: 11, routeKeyBoundary: 1024, forwardTokenCap: 8
+        ).hasSuffix("+cb-probe-v3/route1024+flat8"))
+        XCTAssertFalse(ContinuousBatchingSelfCheckTarget(key: qwen, maxRows: 8).decodeOnlyGain)
+    }
+
+    /// The throughput passes time decode only on both sides for a
+    /// `decodeOnlyGain` (glm5_next) target (v0.3.21): the batch runs as a
+    /// cohort and its rate comes from the cohort span, the serial side from
+    /// the stock decode rate. Every other target keeps the end-to-end rates.
+    func testThroughputPassesCompareDecodeRatesOnly() throws {
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+                .appendingPathComponent("Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(source.contains("idPrefix: \"cb-self-check-\\(attempt)-k\\(slots)-p\\(pass)\",\n                            cohort: decodeOnly"))
+        XCTAssertTrue(source.contains("let serial = decodeOnly ? serialRate.decodeTPS : serialRate.endToEndTPS"))
+        XCTAssertTrue(source.contains("let aggregate = decodeOnly\n                        ? ContinuousBatchingSelfCheck.cohortDecodeTPS("))
+        let runtime = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+                .appendingPathComponent("Sources/macprovider-cli/ModelRuntime.swift"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(runtime.contains("decodeOnlyGain: scheduler.forwardTokenCap != nil"))
+    }
+
     /// Changing the probe changes what a stored result means: the key moves,
     /// a stored refusal re-runs, and a stored grant keeps the Mac serving
     /// through the re-run.

@@ -103,6 +103,15 @@ struct NativeMTPObservedTensorPair: Equatable, Sendable {
 struct NativeMTPArtifactPairObservation: Equatable, Sendable {
     let target: NativeMTPArtifactObservation
     let mtp: NativeMTPArtifactObservation
+    /// SPEC-048-R002 `checkpoint_mtp`: target and MTP are one artifact and one
+    /// config, so each override is recorded once under `target/`.
+    let embedded: Bool
+
+    init(target: NativeMTPArtifactObservation, mtp: NativeMTPArtifactObservation, embedded: Bool = false) {
+        self.target = target
+        self.mtp = mtp
+        self.embedded = embedded
+    }
 }
 
 struct NativeMTPAffineRepresentation: Equatable, Sendable {
@@ -122,6 +131,12 @@ enum NativeMTPArtifactObserver {
     static let maxSafetensorsTensorNameUTF8Bytes = 4 * 1024
     static let maxSafetensorsTensorRank = 8
     static let maxSafetensorsTensorDimension = 1 << 30
+    /// SPEC-023-R024 (v0.22.27): each quantization exceptions array holds at
+    /// most 1024 entries.
+    static let maxQuantizationExceptions = 1024
+    /// SPEC-023-R024 (v0.22.27): admitted per-module affine override widths.
+    /// MLX packs each into whole `uint32` words.
+    static let admittedAffineOverrideBits: Set<Int> = [4, 5, 6, 8]
 
     static func observe(directory: URL, fileManager: FileManager = .default) throws -> NativeMTPArtifactObservation {
         try observe(directory: directory, fileManager: fileManager, tensorNamePolicy: .permissive)
@@ -134,6 +149,22 @@ enum NativeMTPArtifactObserver {
     ) throws -> NativeMTPArtifactObservation {
         let config = try loadConfig(directory: directory)
         let layerCount = try mtpPredictionLayerCount(in: config)
+        return try observe(
+            directory: directory,
+            config: config,
+            layerCount: layerCount,
+            fileManager: fileManager,
+            tensorNamePolicy: tensorNamePolicy
+        )
+    }
+
+    private static func observe(
+        directory: URL,
+        config: [String: Any],
+        layerCount: Int,
+        fileManager: FileManager,
+        tensorNamePolicy: TensorNamePolicy
+    ) throws -> NativeMTPArtifactObservation {
         let headers = try loadSafetensorsHeaders(directory: directory, fileManager: fileManager)
         let tensors = try loaderConsumedTensors(headers, policy: tensorNamePolicy)
         let format = try observeFormat(config: config, tensors: tensors, policy: tensorNamePolicy)
@@ -162,6 +193,45 @@ enum NativeMTPArtifactObserver {
         return NativeMTPArtifactPairObservation(target: target, mtp: mtp)
     }
 
+    /// SPEC-048-R002 (0.1.35) `glm5_next_mtp_v1` / `checkpoint_mtp`: the
+    /// next-N layer is part of the target artifact, so one directory and one
+    /// config are observed once and serve as both target and MTP.
+    static func observeEmbedded(
+        targetDirectory: URL,
+        fileManager: FileManager = .default
+    ) throws -> NativeMTPArtifactPairObservation {
+        let config = try loadConfig(directory: targetDirectory)
+        let hiddenLayers = try glm5NextHiddenLayerCount(in: config)
+        let observation = try observe(
+            directory: targetDirectory,
+            config: config,
+            layerCount: 1,
+            fileManager: fileManager,
+            tensorNamePolicy: .glm5Next(hiddenLayers: hiddenLayers)
+        )
+        return NativeMTPArtifactPairObservation(target: observation, mtp: observation, embedded: true)
+    }
+
+    /// The exact GLM-5-Next config identity SPEC-048-R002 admits, returning
+    /// `text_config.num_hidden_layers`.
+    private static func glm5NextHiddenLayerCount(in config: [String: Any]) throws -> Int {
+        guard config["model_type"] as? String == "glm5_next",
+              let architectures = config["architectures"] as? [Any],
+              architectures.count == 1,
+              architectures.first as? String == "Glm5NextForConditionalGeneration",
+              let text = config["text_config"] as? [String: Any],
+              text["model_type"] as? String == "glm5_next_text" else {
+            throw NativeMTPArtifactObservationError.malformedConfig("glm5_next identity")
+        }
+        guard intValue(text["num_nextn_predict_layers"]) == 1 else {
+            throw NativeMTPArtifactObservationError.invalidMTPPredictionLayerCount
+        }
+        guard let hiddenLayers = intValue(text["num_hidden_layers"]), (1...1024).contains(hiddenLayers) else {
+            throw NativeMTPArtifactObservationError.malformedConfig("glm5_next num_hidden_layers")
+        }
+        return hiddenLayers
+    }
+
     static func affineRepresentation(
         for observation: NativeMTPArtifactPairObservation
     ) throws -> NativeMTPAffineRepresentation {
@@ -187,19 +257,21 @@ enum NativeMTPArtifactObserver {
         ]))
         let bytes = Data(canonical.utf8)
         let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        // An embedded (checkpoint_mtp) pair shares one config: every override
+        // is recorded once, under `target/` (SPEC-048-R002).
         let perLayerExceptions = prefixedModules(
             target: observation.target.affineModuleOverrides.keys,
-            mtp: observation.mtp.affineModuleOverrides.keys
+            mtp: observation.embedded ? [] : Array(observation.mtp.affineModuleOverrides.keys)
         )
         let unquantizedExceptions = prefixedModules(
             target: observation.target.unquantizedModules,
-            mtp: observation.mtp.unquantizedModules
+            mtp: observation.embedded ? [] : observation.mtp.unquantizedModules
         )
-        guard perLayerExceptions.count <= 256,
+        guard perLayerExceptions.count <= maxQuantizationExceptions,
               perLayerExceptions.allSatisfy(isAdmissionExceptionName) else {
             throw NativeMTPArtifactObservationError.unsupportedQuantization("mlx affine too many per-layer exceptions")
         }
-        guard unquantizedExceptions.count <= 256,
+        guard unquantizedExceptions.count <= maxQuantizationExceptions,
               unquantizedExceptions.allSatisfy(isAdmissionExceptionName) else {
             throw NativeMTPArtifactObservationError.unsupportedQuantization("mlx affine too many unquantized exceptions")
         }
@@ -252,7 +324,7 @@ enum NativeMTPArtifactObserver {
         var overrides: [String: RFC8785JCS.Value] = [:]
         for (module, override) in observation.affineModuleOverrides {
             guard isAdmissionModuleName(module),
-                  [4, 8].contains(override.bits),
+                  admittedAffineOverrideBits.contains(override.bits),
                   [32, 64, 128].contains(override.groupSize) else {
                 throw NativeMTPArtifactObservationError.unsupportedQuantization("invalid affine manifest override")
             }
@@ -474,7 +546,8 @@ enum NativeMTPArtifactObserver {
             }
             if isFloatingWeightDType(tensor.dtype),
                !declaredUnquantized.isEmpty
-                || (isNeverQuantizedFloatingTensor(tensor) && expectedScaleName(for: tensor.name, available: scaleTensors) == nil) {
+                || ((isNeverQuantizedFloatingTensor(tensor) || isFamilyFloatingParameter(tensor, policy: policy))
+                    && expectedScaleName(for: tensor.name, available: scaleTensors) == nil) {
                 guard let expectedByteCount = checkedMultiply(tensor.elementCount, bytesPerElement(tensor.dtype)),
                       tensor.byteCount == expectedByteCount else {
                     throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("unquantized tensor \(tensor.name) byte span")
@@ -492,7 +565,6 @@ enum NativeMTPArtifactObserver {
             }
             var tensorBits = bitsPerValue
             var tensorGroupSize = groupSize
-            var tensorValuesPerPackedElement = valuesPerPackedElement
             // The pinned loader quantizes the module at its post-sanitize path
             // and looks overrides up by that exact path (BaseConfiguration
             // PerLayerQuantization.quantization(layer:)); no other spelling applies.
@@ -506,7 +578,6 @@ enum NativeMTPArtifactObserver {
             if let (overrideKey, override) = overrideMatch {
                 tensorBits = override.bits
                 tensorGroupSize = override.groupSize
-                tensorValuesPerPackedElement = requiredPackedBits / override.bits
                 consumedOverrides.insert(overrideKey)
             }
             guard let expectedPackedByteCount = checkedMultiply(tensor.elementCount, bytesPerElement(tensor.dtype)),
@@ -542,12 +613,16 @@ enum NativeMTPArtifactObserver {
                 }
                 pairedBiases.insert(biasName)
             }
-            guard let logicalInputColumns = checkedMultiply(
-                tensor.shape[tensor.shape.count - 1],
-                tensorValuesPerPackedElement
-            ) else {
+            // MLX packs `bits`-wide values contiguously into uint32 words, so the
+            // packed width times 32 must be a whole number of values (5- and
+            // 6-bit rows span word boundaries; 4 and 8 never do).
+            guard let packedBits = checkedMultiply(tensor.shape[tensor.shape.count - 1], requiredPackedBits) else {
                 throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("logical columns overflow for \(tensor.name)")
             }
+            guard packedBits % tensorBits == 0 else {
+                throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("packed width for \(tensor.name)")
+            }
+            let logicalInputColumns = packedBits / tensorBits
             let paddedInputColumns = try checkedRoundUp(logicalInputColumns, toMultipleOf: tensorGroupSize, tensorName: tensor.name)
             if paddedInputColumns != logicalInputColumns,
                !representation.paddingExceptions.contains(tensor.name) {
@@ -592,7 +667,7 @@ enum NativeMTPArtifactObserver {
 
     /// Parses mlx-lm per-module quantization overrides, e.g.
     /// `"language_model.model.layers.0.mlp.gate": {"bits": 8, "group_size": 64}`.
-    /// Only affine widths the packed U32 layout can hold exactly are accepted.
+    /// Only the SPEC-023-R024 widths (4, 5, 6, 8) are accepted.
     private static func affineModuleOverrides(in quantization: [String: Any]) throws -> [String: NativeMTPAffineModuleOverride] {
         var overrides: [String: NativeMTPAffineModuleOverride] = [:]
         for (key, value) in quantization where !quantizationGlobalKeys.contains(key) {
@@ -607,7 +682,7 @@ enum NativeMTPArtifactObserver {
             if object["mode"] != nil, object["mode"] as? String != "affine" {
                 throw NativeMTPArtifactObservationError.unsupportedQuantization("mlx affine module override mode")
             }
-            guard let bits = intValue(object["bits"]), [4, 8].contains(bits) else {
+            guard let bits = intValue(object["bits"]), admittedAffineOverrideBits.contains(bits) else {
                 throw NativeMTPArtifactObservationError.unsupportedQuantization("mlx affine module override bits")
             }
             guard let groupSize = intValue(object["group_size"]), [32, 64, 128].contains(groupSize) else {
@@ -641,6 +716,10 @@ enum NativeMTPArtifactObserver {
             return name.hasPrefix("language_model.") ? name : "language_model." + name
         case .mtp:
             return name.hasPrefix("mtp.") ? name : "mtp." + name
+        case .glm5Next:
+            // Only post-sanitize checkpoints are admitted (validateTensorName),
+            // on which the GLM5Next sanitizer is the identity.
+            return name
         }
     }
 
@@ -727,6 +806,16 @@ enum NativeMTPArtifactObserver {
     ) throws -> [SafetensorsTensor] {
         var consumed: [SafetensorsTensor] = []
         for tensor in headers.flatMap(\.tensors) {
+            if case .glm5Next = policy {
+                // `GLM5NextWeights.textKey` drops exactly these dotted
+                // namespaces; nothing else is filtered.
+                if glm5NextVisionPrefixes.contains(where: { tensor.name.hasPrefix($0) }) {
+                    continue
+                }
+                try validateTensorName(tensor.name, policy: policy)
+                consumed.append(tensor)
+                continue
+            }
             if policy != .mtp, isTargetLoaderDiscarded(tensor.name) {
                 guard tensor.name.hasPrefix("vision_tower.") || tensor.name.hasPrefix("model.visual.") else {
                     throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("target tensor namespace \(tensor.name)")
@@ -747,6 +836,59 @@ enum NativeMTPArtifactObserver {
         case permissive
         case target
         case mtp
+        /// SPEC-048-R002 `glm5_next_mtp_v1` embedded checkpoint; carries
+        /// `text_config.num_hidden_layers` for the next-N key check.
+        case glm5Next(hiddenLayers: Int)
+    }
+
+    private static let glm5NextVisionPrefixes = ["vision_model.", "vision_tower.", "visual.", "model.visual."]
+
+    /// Names `GLM5NextWeights.sanitize` would rewrite. The observer admits only
+    /// a checkpoint already in the post-sanitize layout (SPEC-048-R002 0.1.36).
+    private static let glm5NextSanitizerRewriteMarkers = [
+        ".hc_attn_", ".hc_ffn_", ".mlp.experts.", ".kv_b_proj.", ".q_conv1d.", ".k_conv1d.",
+        ".v_conv1d.", ".mlp.gate.scales", ".mlp.gate.biases", ".self_attn.A_log",
+        ".self_attn.dt_bias", ".self_attn.f_a_proj.", ".self_attn.f_b_proj.",
+    ]
+
+    /// Unpaired floating parameters the GLM5Next model holds as plain
+    /// parameters or unquantized layers (SPEC-048-R002 0.1.36).
+    private static let glm5NextFloatingParameterSuffixes = [
+        ".attn_hc.fn", ".ffn_hc.fn", ".mlp.gate.weight",
+        ".indexer.index_kpool_compress_ape", ".indexer.index_kpool_compress_gate",
+    ]
+
+    private static func isFamilyFloatingParameter(_ tensor: SafetensorsTensor, policy: TensorNamePolicy) -> Bool {
+        guard case .glm5Next = policy, isFloatingWeightDType(tensor.dtype) else { return false }
+        return tensor.name == "language_model.mtp.0.eh_proj.weight"
+            || glm5NextFloatingParameterSuffixes.contains(where: { tensor.name.hasSuffix($0) })
+    }
+
+    private static func validateGLM5NextTensorName(_ name: String, hiddenLayers: Int) throws {
+        func reject() -> NativeMTPArtifactObservationError {
+            .incompatibleSafetensorsHeaders("glm5_next tensor namespace \(name)")
+        }
+        guard !glm5NextSanitizerRewriteMarkers.contains(where: { name.contains($0) }) else { throw reject() }
+        if name.hasPrefix("language_model.lm_head.") { return }
+        if name.hasPrefix("language_model.mtp.") {
+            guard name.hasPrefix("language_model.mtp.0.") else { throw reject() }
+            let rest = name.dropFirst("language_model.mtp.0.".count)
+            guard !rest.hasPrefix("shared_head."), !rest.hasPrefix("embed_tokens.") else { throw reject() }
+            return
+        }
+        guard name.hasPrefix("language_model.model.") else { throw reject() }
+        let layerPrefix = "language_model.model.layers."
+        if name.hasPrefix(layerPrefix) {
+            let rest = name.dropFirst(layerPrefix.count)
+            guard let dot = rest.firstIndex(of: "."),
+                  let index = Int(rest[..<dot]),
+                  String(index) == rest[..<dot],
+                  (0..<hiddenLayers).contains(index) else {
+                // A DeepSeek-style next-N key (index >= num_hidden_layers) is
+                // silently remapped into `mtp.*` or dropped by the loader.
+                throw reject()
+            }
+        }
     }
 
     private static func validateTensorName(_ name: String, policy: TensorNamePolicy) throws {
@@ -761,6 +903,8 @@ enum NativeMTPArtifactObserver {
                   path.hasPrefix("language_model.model.") || path.hasPrefix("language_model.lm_head.") else {
                 throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("target tensor namespace \(name)")
             }
+        case .glm5Next(let hiddenLayers):
+            try validateGLM5NextTensorName(name, hiddenLayers: hiddenLayers)
         case .mtp:
             // The pinned standalone-drafter loader (`qwenMTPSanitizeWeights`,
             // standaloneCheckpoint) matches the exact, case-sensitive `mtp.`

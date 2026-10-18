@@ -1,0 +1,1 @@
+5a2b4ee Keep GLM-5-Next MTP verification on the deferred hyper-connection kernels

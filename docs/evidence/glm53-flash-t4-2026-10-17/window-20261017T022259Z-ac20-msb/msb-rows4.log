@@ -1,0 +1,65 @@
+event=chat_template_compat rewrite=numeric_attribute_access count=4
+{
+  "aggregateCVPct" : 0.10493996053651286,
+  "aggregateTPSRuns" : [
+    55.922608665942796,
+    55.941696091419665,
+    55.831903793890596
+  ],
+  "aggregateTPSp50" : 55.922608665942796,
+  "aggregateUpliftVsPagedSingleRow" : 1.5846033352471727,
+  "aggregateVsProductionSerial" : 1.4031528664676163,
+  "blockSizeTokens" : 256,
+  "compiled" : false,
+  "decodeTokensPerRow" : 128,
+  "engine" : "paged",
+  "layerCount" : 11,
+  "maxPhysicalBlocks" : 1024,
+  "mlxSwiftLMPin" : "mlxlm-7d8dbf56e0e2",
+  "modelID" : "<models>\/GLM-5.3-Flash-oQ4e-mtp",
+  "modelTag" : "GLM-5.3-Flash-oQ4e-mtp",
+  "pagedSingleRowCVPct" : 0.14581700611149287,
+  "pagedSingleRowTPSRuns" : [
+    35.29123498734765,
+    35.26045512883685,
+    35.36093253589858
+  ],
+  "pagedSingleRowTPSp50" : 35.29123498734765,
+  "peakPhysFootprintMB" : 182685,
+  "peakRSSMB" : 123699,
+  "perRowFractionOfPagedSingleRow" : 0.39615083381179317,
+  "perRowTPSp50" : 13.980652166485699,
+  "productionSerialCVPct" : 0.15179794901633675,
+  "productionSerialPromptTokens" : 1024,
+  "productionSerialTPSRuns" : [
+    39.85496520184991,
+    39.952705459677844,
+    39.84193952372388
+  ],
+  "productionSerialTPSp50" : 39.85496520184991,
+  "productionSerialTTFTSecondsRuns" : [
+    3.1145119667053223,
+    3.116992950439453,
+    3.1158339977264404
+  ],
+  "promptTokenLengths" : [
+    1024,
+    1024,
+    1024,
+    1024
+  ],
+  "promptTokenSHA256" : [
+    "c2d6e0a41c032e905401737f80cfeaf532576de3aef86f3382067663f683b3dd",
+    "bb27f683b1bd122f66d900e82379da023fe1014bda15ede6d18f4741f834c1ac",
+    "3923e437beaf0f76bb205078aa2ff48ff22f47f09b7c84d8d0d9a2fd9d820620",
+    "4c073ae313b6b2c55fd68f7629d3f6b683d0ebb16feb4e4e90de8b2fb4862067"
+  ],
+  "promptTokensPerRow" : 1024,
+  "rows" : 4,
+  "runs" : 3,
+  "scenario" : "throughput",
+  "schemaVersion" : 4,
+  "timestamp" : "2026-10-17T02:48:18Z"
+}
+msb-throughput: model=GLM-5.3-Flash-oQ4e-mtp engine=paged compile=false rows=4 block=256 serial_tps_p50=39.9 engine_1row_tps_p50=35.3 aggregate_tps_p50=55.9 uplift_vs_1row=1.58x aggregate_vs_serial=1.40x peak_rss_mb=123699
+msb-throughput: wrote <lab>/t4-window-20261017T022259Z/msb-rows4.json

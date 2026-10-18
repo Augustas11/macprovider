@@ -11,12 +11,15 @@ from scripts import read_swiftpm_pins
 from scripts.read_swiftpm_pins import (
     SPEC048_MLX_CORE_FORK,
     SPEC048_MLX_CORE_REVISION,
+    SPEC048_MLX_CORE_TAG,
     SPEC048_MLX_CORE_UPSTREAM_BASE,
     SPEC048_MLX_SWIFT_FORK,
     SPEC048_MLX_SWIFT_LM_FORK,
     SPEC048_MLX_SWIFT_LM_REVISION,
+    SPEC048_MLX_SWIFT_LM_TAG,
     SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE,
     SPEC048_MLX_SWIFT_REVISION,
+    SPEC048_MLX_SWIFT_TAG,
     SPEC048_MLX_SWIFT_UPSTREAM_BASE,
     read_pins,
     read_production_pins,
@@ -91,7 +94,7 @@ class SwiftPMPinParsingTests(unittest.TestCase):
         payload = json.loads(fixture.read_text())
         payload["pins"][1]["location"] = "https://github.com/Augustas11/mlx-swift-lm.git"
         payload["pins"][1]["state"] = {
-            "revision": "ce3bb5235317367c61c054311a830b1e81aaa6ea"
+            "revision": "87dc5159c87d73f4d7abd524fbdd17760cf56285"
         }
         with tempfile.TemporaryDirectory() as temporary:
             resolved = Path(temporary) / "Package.resolved"
@@ -101,11 +104,11 @@ class SwiftPMPinParsingTests(unittest.TestCase):
 
         self.assertEqual(
             pins["mlx_swift_lm"],
-            "ce3bb5235317367c61c054311a830b1e81aaa6ea",
+            "87dc5159c87d73f4d7abd524fbdd17760cf56285",
         )
         self.assertEqual(
             pins["mlx_swift_lm_revision"],
-            "ce3bb5235317367c61c054311a830b1e81aaa6ea",
+            "87dc5159c87d73f4d7abd524fbdd17760cf56285",
         )
 
     def test_fails_closed_when_spec048_fork_uses_unreviewed_revision(self):
@@ -126,7 +129,7 @@ class SwiftPMPinParsingTests(unittest.TestCase):
         payload = json.loads(fixture.read_text())
         payload["pins"][1]["location"] = "https://github.com/Augustas11/mlx-swift-lm.git"
         payload["pins"][1]["state"] = {
-            "revision": "ca8c384c4fb6bc7d2fbb7c70a18c34b935701805"
+            "revision": "72c4ab082a08f291ba270a7303880e90036742e3"
         }
         with tempfile.TemporaryDirectory() as temporary:
             resolved = Path(temporary) / "Package.resolved"
@@ -139,7 +142,7 @@ class SwiftPMPinParsingTests(unittest.TestCase):
         payload = json.loads(fixture.read_text())
         payload["pins"][0]["location"] = "https://github.com/Augustas11/mlx-swift"
         payload["pins"][0]["state"] = {
-            "revision": "745f5e4872054ae2c1c497d2351a61b6d89e8a05"
+            "revision": "29d3b93375cc56cd2649b40e4310a8bc445e9874"
         }
         with tempfile.TemporaryDirectory() as temporary:
             resolved = Path(temporary) / "Package.resolved"
@@ -147,9 +150,9 @@ class SwiftPMPinParsingTests(unittest.TestCase):
 
             pins = read_pins(resolved)
 
-        self.assertEqual(pins["mlx_swift"], "745f5e4872054ae2c1c497d2351a61b6d89e8a05")
+        self.assertEqual(pins["mlx_swift"], "29d3b93375cc56cd2649b40e4310a8bc445e9874")
         self.assertEqual(
-            pins["mlx_swift_revision"], "745f5e4872054ae2c1c497d2351a61b6d89e8a05"
+            pins["mlx_swift_revision"], "29d3b93375cc56cd2649b40e4310a8bc445e9874"
         )
 
     def test_fails_closed_when_mlx_swift_fork_uses_unreviewed_revision(self):
@@ -170,7 +173,7 @@ class SwiftPMPinParsingTests(unittest.TestCase):
         payload = json.loads(fixture.read_text())
         payload["pins"][0]["location"] = "https://github.com/Augustas11/mlx-swift"
         payload["pins"][0]["state"] = {
-            "revision": "745f5e4872054ae2c1c497d2351a61b6d89e8a05",
+            "revision": "29d3b93375cc56cd2649b40e4310a8bc445e9874",
             "version": "0.32.3",
         }
         with tempfile.TemporaryDirectory() as temporary:
@@ -185,10 +188,10 @@ class SwiftPMPinParsingTests(unittest.TestCase):
         pins = read_pins(resolved)
 
         self.assertEqual(
-            pins["mlx_swift_lm_revision"], "ce3bb5235317367c61c054311a830b1e81aaa6ea"
+            pins["mlx_swift_lm_revision"], "87dc5159c87d73f4d7abd524fbdd17760cf56285"
         )
         self.assertEqual(
-            pins["mlx_swift_revision"], "745f5e4872054ae2c1c497d2351a61b6d89e8a05"
+            pins["mlx_swift_revision"], "29d3b93375cc56cd2649b40e4310a8bc445e9874"
         )
 
     def test_fails_closed_when_upstream_mlx_swift_lm_is_revision_only(self):
@@ -255,7 +258,7 @@ class ProductionForkTupleTests(unittest.TestCase):
 
     def test_rejects_wrong_fork_revision(self):
         for lm, swift in (
-            ((self.LM_FORK[0], "ca8c384c4fb6bc7d2fbb7c70a18c34b935701805"), self.SWIFT_FORK),
+            ((self.LM_FORK[0], "72c4ab082a08f291ba270a7303880e90036742e3"), self.SWIFT_FORK),
             (self.LM_FORK, (self.SWIFT_FORK[0], "19601207e9a0de51e03ee6ec0c3c5f3784275075")),
         ):
             with self.subTest(lm=lm, swift=swift):
@@ -282,6 +285,7 @@ class ReviewedForkTupleSourceTests(unittest.TestCase):
     ROOT = Path(__file__).parents[2]
     EXCEPTION_FIELDS = {
         "native_mtp_exception_revision": SPEC048_MLX_SWIFT_LM_REVISION,
+        "native_mtp_exception_tag": SPEC048_MLX_SWIFT_LM_TAG,
         "native_mtp_exception_base": SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE,
         "native_mtp_exception_repo": "Augustas11/mlx-swift-lm",
         "native_mtp_exception_mlx_swift_revision": SPEC048_MLX_SWIFT_REVISION,
@@ -320,6 +324,15 @@ class ReviewedForkTupleSourceTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertEqual(namespace[name], expected)
 
+    def test_reviewed_revisions_and_bases_are_full_object_ids(self):
+        for value in (
+            SPEC048_MLX_SWIFT_LM_REVISION, SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE,
+            SPEC048_MLX_SWIFT_REVISION, SPEC048_MLX_SWIFT_UPSTREAM_BASE,
+            SPEC048_MLX_CORE_REVISION, SPEC048_MLX_CORE_UPSTREAM_BASE,
+        ):
+            with self.subTest(value=value):
+                self.assertRegex(value, r"^[0-9a-f]{40}$")
+
     def test_reviewed_fork_tuple_matches_the_spec048_fork_table(self):
         spec = (self.ROOT / "specs" / "SPEC-048-native-mtp-serving.md").read_text()
         rows = {
@@ -327,13 +340,16 @@ class ReviewedForkTupleSourceTests(unittest.TestCase):
             for line in spec.splitlines()
             if line.startswith("| `https://github.com/Augustas11/")
         }
-        for fork, revision, base in (
-            (SPEC048_MLX_SWIFT_LM_FORK, SPEC048_MLX_SWIFT_LM_REVISION, SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE),
-            (SPEC048_MLX_SWIFT_FORK, SPEC048_MLX_SWIFT_REVISION, SPEC048_MLX_SWIFT_UPSTREAM_BASE),
-            (SPEC048_MLX_CORE_FORK, SPEC048_MLX_CORE_REVISION, SPEC048_MLX_CORE_UPSTREAM_BASE),
+        for fork, tag, revision, base in (
+            (SPEC048_MLX_SWIFT_LM_FORK, SPEC048_MLX_SWIFT_LM_TAG, SPEC048_MLX_SWIFT_LM_REVISION, SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE),
+            (SPEC048_MLX_SWIFT_FORK, SPEC048_MLX_SWIFT_TAG, SPEC048_MLX_SWIFT_REVISION, SPEC048_MLX_SWIFT_UPSTREAM_BASE),
+            (SPEC048_MLX_CORE_FORK, SPEC048_MLX_CORE_TAG, SPEC048_MLX_CORE_REVISION, SPEC048_MLX_CORE_UPSTREAM_BASE),
         ):
             with self.subTest(fork=fork):
                 cells = [cell.strip() for cell in rows[fork].split("|")]
+                # Architect r1: every row names an immutable fork tag, never a
+                # pending or branch-only revision.
+                self.assertEqual(cells[2], f"`{tag}`")
                 self.assertEqual(cells[3], f"`{revision}`")
                 self.assertIn(f"(`{base}`)", cells[4])
 

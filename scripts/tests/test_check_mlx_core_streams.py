@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.check_mlx_core_streams import REQUIRED, CoreRootError, scan
+from scripts.check_mlx_core_streams import strip_comments_and_strings, REQUIRED, CoreRootError, scan
 
 SCRIPT = Path(__file__).resolve().parents[1] / "check_mlx_core_streams.py"
 
@@ -242,6 +242,38 @@ array f(const array& a, const Stream& stream) {
         findings = scan(root)
         self.assertEqual(len(findings), 2, findings)
         self.assertTrue(all("add(" in f for f in findings))
+
+    def test_lexer_keeps_code_after_a_string_holding_comment_markers(self):
+        # A "//" inside a string is not a comment, so the call after it on the
+        # same line is still checked (#2028 audit carry).
+        root = ops_cpp("""
+array f(const array& x, StreamOrDevice s) {
+  auto msg = "see // and /* here"; auto y = astype(x, float32);
+  return add(y, x, s);
+}
+""")
+        findings = scan(root)
+        self.assertEqual(len(findings), 1, findings)
+        self.assertIn("astype(x, float32)", findings[0])
+
+    def test_lexer_keeps_code_after_a_comment_holding_a_quote(self):
+        root = ops_cpp("""
+array f(const array& x, StreamOrDevice s) {
+  // the caller's "stream
+  auto y = astype(x, float32);
+  return add(y, x, s);
+}
+""")
+        findings = scan(root)
+        self.assertEqual(len(findings), 1, findings)
+
+    def test_lexer_blanks_raw_strings_and_char_literals(self):
+        text = 'auto a = R"x(astype(y, f))x"; char q = \'"\'; int n = 1\'000; f(z);'
+        stripped = strip_comments_and_strings(text)
+        self.assertEqual(len(stripped), len(text))
+        self.assertNotIn("astype", stripped)
+        self.assertIn("1'000", stripped)
+        self.assertIn("f(z);", stripped)
 
     def test_missing_required_file_fails_closed(self):
         root = core()

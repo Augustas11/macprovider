@@ -1,0 +1,56 @@
+{
+  "aggregateCVPct" : 0.04168874968803383,
+  "aggregateTPSRuns" : [
+    40.39358469375636,
+    40.41417035672651,
+    40.38079080462502
+  ],
+  "aggregateTPSp50" : 40.39358469375636,
+  "aggregateUpliftVsPagedSingleRow" : 1.002240577257029,
+  "aggregateVsProductionSerial" : 0.9651602067851279,
+  "blockSizeTokens" : 256,
+  "compiled" : false,
+  "decodeTokensPerRow" : 128,
+  "engine" : "paged",
+  "layerCount" : 11,
+  "maxPhysicalBlocks" : 1024,
+  "mlxSwiftLMPin" : "mlxlm-18ca526706db",
+  "modelID" : "<models>\/GLM-5.3-Flash-oQ4e-mtp",
+  "modelTag" : "GLM-5.3-Flash-oQ4e-mtp",
+  "pagedSingleRowCVPct" : 0.26766889739114985,
+  "pagedSingleRowTPSRuns" : [
+    40.30328207655201,
+    40.44181456713389,
+    40.229168971626706
+  ],
+  "pagedSingleRowTPSp50" : 40.30328207655201,
+  "peakPhysFootprintMB" : 181240,
+  "peakRSSMB" : 137585,
+  "perRowFractionOfPagedSingleRow" : 1.002240577257029,
+  "perRowTPSp50" : 40.39358469375636,
+  "productionSerialCVPct" : 0.13994465233249065,
+  "productionSerialPromptTokens" : 1024,
+  "productionSerialTPSRuns" : [
+    41.851688880029755,
+    41.771570964594325,
+    41.88558475803269
+  ],
+  "productionSerialTPSp50" : 41.851688880029755,
+  "productionSerialTTFTSecondsRuns" : [
+    3.114117980003357,
+    3.1154719591140747,
+    3.113882064819336
+  ],
+  "promptTokenLengths" : [
+    1024
+  ],
+  "promptTokenSHA256" : [
+    "c2d6e0a41c032e905401737f80cfeaf532576de3aef86f3382067663f683b3dd"
+  ],
+  "promptTokensPerRow" : 1024,
+  "rows" : 1,
+  "runs" : 3,
+  "scenario" : "throughput",
+  "schemaVersion" : 4,
+  "timestamp" : "2026-10-17T09:48:17Z"
+}

@@ -17,15 +17,14 @@ let package = Package(
         )
     ],
     dependencies: [
-        // Fork tag 3.32.3-macprovider.9.4: 3.32.3-macprovider.9 plus the Qwen2-VL
-        // per-image vision attention fix (issue #2016); every other model's
-        // decode path is byte-identical to .9. Tag .9 is upstream
-        // mlx-swift-lm 3.32.3 plus the
+        // Fork tag 3.32.3-macprovider.10.1 (branch glm53/tuple-0324, on 3.32.3-macprovider.10):
+        // upstream mlx-swift-lm 3.32.3 plus the 3.32.3-macprovider.9 stack (the
         // packed MTP verification, fused A3B MoE, GDN checkpoint and compiled
         // MTP verification step commits upstream does not carry, and upstream
         // #631 with every Qwen3.5 trace declaring the arrays it reads as
-        // compile state. It resolves the Augustas11/mlx-swift fork
-        // (tag 0.32.3-macprovider.8), whose MLX core keeps small-M quantized
+        // compile state) and the GLM-5-Next text model with batched rows. It
+        // resolves the Augustas11/mlx-swift fork (tag 0.32.3-macprovider.9, MLX
+        // core v0.32.4-macprovider.4), whose MLX core keeps small-M quantized
         // matmuls on one kernel route so a row decodes the same tokens alone
         // and inside a continuous batch (the startup batched-isolation gate),
         // erases a freed compiled function from every thread's compile cache
@@ -34,7 +33,7 @@ let package = Package(
         // on one Metal queue.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "ce3bb5235317367c61c054311a830b1e81aaa6ea"
+            revision: "87dc5159c87d73f4d7abd524fbdd17760cf56285"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

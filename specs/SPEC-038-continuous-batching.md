@@ -1,11 +1,23 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.20
+Version: v0.3.21
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.21 (2026-10-17, FR-CB10 decode-only gain for glm5_next):**
+FR-CB10: for `glm5_next` models only, the self-check's throughput gain
+compares decode rates instead of end-to-end rates. Its slow prefill
+dominates the short-prompt throughput passes, which pulled the ratio toward
+1 (1.04-1.06x at k = 2..4 on the Studio while its steady batched decode
+measured 1.18x / 1.40x at 2 / 4 rows). The serial rate is each prompt's
+tokens after its first over the time from that first token to its last; the
+batch runs as a cohort and its rate is the cohort's decode tokens over the
+common span in which every row decoded together. Its key carries probe
+version `cb-probe-v3`. Every other model family keeps the end-to-end
+measurement and `cb-probe-v2`, so their stored results are unchanged.
+
 **Change log v0.3.20 (2026-10-15, FR-CB10 exactness probe):**
 FR-CB10: the self-check's isolation probe now exercises the failure it
 missed. On the Studio, main's self-check granted 16 rows while 16 rows in one
@@ -1213,7 +1225,12 @@ above are superseded where they conflict:
    decode. On the SPEC-023-R009 ladder rungs each k runs three repeats of
    stock serial decode then the batch, back to back on the same prompts; the
    gain is the median batch/serial ratio (widths between rungs are verified
-   for isolation but not picked). It grants the rung with the highest gain, preferring the lowest k
+   for isolation but not picked). (v0.3.21) For `glm5_next` only, both
+   rates are decode rates: the serial rate is each prompt's tokens after its
+   first over the time from that first token to its last, summed over the
+   prompts; the batch runs as a cohort, held until every row has prefilled,
+   and its rate is the cohort's decode tokens over the common wall-clock
+   span in which every row decoded together. It grants the rung with the highest gain, preferring the lowest k
    within 15% of it, only when that gain is at least 1.2x; otherwise a fresh
    Mac serves serially. The highest k whose rows all passed is recorded as
    `verified_k`.

@@ -3,7 +3,7 @@
 Issue #2016 implements `qwen2vl-inline-v1` for
 `mlx-community/Qwen2-VL-2B-Instruct-4bit` at revision
 `01af461cdb9574acc09084a0ef94e216e142b085`, using MLXVLM from pinned
-`mlx-swift-lm` revision `ce3bb5235317367c61c054311a830b1e81aaa6ea`.
+`mlx-swift-lm` revision `87dc5159c87d73f4d7abd524fbdd17760cf56285`.
 Source compatibility is not hardware qualification. No prior native image
 qualification was found; existing VLM-origin evidence exercises text serving.
 The new decode path is `NativeVisionProfile.userInput` →

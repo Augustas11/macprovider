@@ -1,0 +1,7 @@
+hc_deferred_exact=true
+load_s=35.8 active_gb=184.799015808
+wired_limit_applied=239143780352 cap=239143780352
+mtp has_weights=true prompt=8192 tokens=256
+mtp plain prefill_s=48.79 decode_tok_s=34.33 oracle_match=256/256
+mtp mtp prefill_s=27.60 decode_tok_s=33.49 proposed=127 accepted=127 acceptance=1.000 oracle_match=256/256
+mtp round=0 mtp_equals_plain=true first_difference=none

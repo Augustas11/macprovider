@@ -1486,7 +1486,8 @@ final class AutotuneRecommendTests: XCTestCase {
                 )
                 let label = "\(key) on \(hardware.memoryGB) GB: context \(pair.context) x \(pair.slots) slots"
                 let bytesPerToken = try XCTUnwrap(AutotuneModelContextCap.kvCacheBytesPerToken(configData: pair.configData), label)
-                let kvBytes = UInt64(bytesPerToken) * UInt64(pair.context) * UInt64(pair.slots)
+                let fixedBytes = AutotuneModelContextCap.recurrentStateBytesPerSequence(configData: pair.configData)
+                let kvBytes = (UInt64(bytesPerToken) * UInt64(pair.context) + UInt64(fixedBytes)) * UInt64(pair.slots)
                 XCTAssertLessThanOrEqual(kvBytes + occupiedBytes, physicalBytes, label)
                 XCTAssertGreaterThanOrEqual(pair.slots, 1, label)
                 XCTAssertLessThanOrEqual(pair.slots, hardware.recommendedMaxBatch, label)
@@ -1505,6 +1506,22 @@ final class AutotuneRecommendTests: XCTestCase {
             }
         }
         XCTAssertGreaterThan(checked, 2 * catalog.rows.count)
+    }
+
+    /// SPEC-039 FR-PKV13 `glm5_next` sizing input: the signed GLM-5.3-Flash
+    /// config has no per-head K/V. Each of its 11 sparse layers and its next-N
+    /// layer cache 512 × 2 + 128 × 2 / 4 = 1,088 bytes per token, and each of
+    /// its 34 KDA layers holds 4,341,760 bytes of fixed state, so one 64k row
+    /// is 1,003,257,856 bytes. Counting it as zero per-token bytes would
+    /// leave the slots unbounded by memory.
+    func testGLM53FlashKVSizingMatchesSPEC039GLM5NextSizingInput() throws {
+        let geometry = try XCTUnwrap(Self.signedCandidateConfigGeometry["zai-org/glm-5.3-flash"])
+        let config = Data(geometry.json.utf8)
+        let bytesPerToken = try XCTUnwrap(AutotuneModelContextCap.kvCacheBytesPerToken(configData: config))
+        XCTAssertEqual(bytesPerToken, 12 * 1_088)
+        let fixedBytes = AutotuneModelContextCap.recurrentStateBytesPerSequence(configData: config)
+        XCTAssertEqual(fixedBytes, 34 * 4_341_760)
+        XCTAssertEqual(bytesPerToken * 65_536 + fixedBytes, 1_003_257_856)
     }
 
     /// The auditor's case: signed GLM-4.5-Air on a 256 GB Ultra kept its
@@ -6436,6 +6453,10 @@ final class AutotuneRecommendTests: XCTestCase {
         "z-ai/glm-4.5-air": (
             revision: "60837794f3caafc4682dd1a9188a82c55a9100ef",
             json: #"{"max_position_embeddings":131072,"num_hidden_layers":46,"hidden_size":4096,"num_attention_heads":96,"num_key_value_heads":8,"head_dim":128}"#
+        ),
+        "zai-org/glm-5.3-flash": (
+            revision: "36defc5042d92a992a7948e83d6f110b8df69329",
+            json: #"{"text_config":{"max_position_embeddings":1048576,"num_hidden_layers":45,"hidden_size":4096,"num_attention_heads":64,"num_key_value_heads":64,"head_dim":0,"kv_lora_rank":512,"qk_rope_head_dim":0,"index_head_dim":128,"index_kpool":4,"index_kpool_compress":true,"num_nextn_predict_layers":1,"layer_types":["linear_attention","linear_attention","linear_attention","deepseek_sparse_attention","linear_attention","linear_attention","linear_attention","deepseek_sparse_attention","linear_attention","linear_attention","linear_attention","deepseek_sparse_attention","linear_attention","linear_attention","linear_attention","deepseek_sparse_attention","linear_attention","linear_attention","linear_attention","deepseek_sparse_attention","linear_attention","linear_attention","linear_attention","deepseek_sparse_attention","linear_attention","linear_attention","linear_attention","deepseek_sparse_attention","linear_attention","linear_attention","linear_attention","deepseek_sparse_attention","linear_attention","linear_attention","linear_attention","deepseek_sparse_attention","linear_attention","linear_attention","linear_attention","deepseek_sparse_attention","linear_attention","linear_attention","linear_attention","deepseek_sparse_attention","linear_attention"],"linear_attn_config":{"num_heads":64,"head_dim":128,"short_conv_kernel_size":4}}}"#
         ),
     ]
 

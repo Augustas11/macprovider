@@ -1,0 +1,23 @@
+Test Case '-[MLXLMTests.GLM5NextTests testChunkedPrefillMatchesSinglePrefill]' passed (0.572 seconds).
+Test Case '-[MLXLMTests.GLM5NextTests testConfigurationDerivesLayerPatternFromLinearAttentionConfig]' passed (0.000 seconds).
+Test Case '-[MLXLMTests.GLM5NextTests testDeferredHyperConnectionDecodeMatchesChainBitwise]' passed (1.783 seconds).
+Test Case '-[MLXLMTests.GLM5NextTests testDenseBypassMatchesIndexerPathWithinTopk]' passed (0.536 seconds).
+Test Case '-[MLXLMTests.GLM5NextTests testForwardShapesWithAndWithoutCache]' passed (0.494 seconds).
+Test Case '-[MLXLMTests.GLM5NextTests testFusedDecodeKeepsModelLogitsBitwise]' passed (1.020 seconds).
+Test Case '-[MLXLMTests.GLM5NextTests testFusedDSASelectMatchesOpPathBitwise]' passed (0.401 seconds).
+Test Case '-[MLXLMTests.GLM5NextTests testFusedHyperConnectionDecodeKernels]' passed (0.026 seconds).
+Test Case '-[MLXLMTests.GLM5NextTests testFusedKDADecodeMatchesOpPathBitwise]' passed (0.142 seconds).
+Test Case '-[MLXLMTests.GLM5NextTests testFusedMoEExpertsMatchOpPathBitwise]' passed (0.236 seconds).
+Test Case '-[MLXLMTests.GLM5NextTests testFusedMoERouterMatchesOpPathBitwise]' passed (0.102 seconds).
+Test Case '-[MLXLMTests.GLM5NextTests testIncrementalDecodeMatchesPrefill]' passed (1.315 seconds).
+Test Case '-[MLXLMTests.GLM5NextTests testIndexerSelectionIsActivePastTopk]' passed (0.306 seconds).
+Test Case '-[MLXLMTests.GLM5NextTests testLoadWeightsWithPerLayerQuantization]' passed (0.292 seconds).
+Test Case '-[MLXLMTests.GLM5NextTests testModuleNamesMatchArtifactTensorNames]' passed (0.010 seconds).
+Test Case '-[MLXLMTests.GLM5NextTests testQuantizedFusedKDADecodeMatchesOpPathBitwise]' passed (0.942 seconds).
+Test Case '-[MLXLMTests.GLM5NextTests testSanitizeKeepsArtifactLayoutAndDropsVision]' passed (0.230 seconds).
+Test Case '-[MLXLMTests.GLM5NextTests testSanitizeMapsHuggingFaceLayout]' passed (0.110 seconds).
+Test Case '-[MLXLMTests.GLM5NextTests testSanitizeWithoutMTPWeightsDropsMTPModules]' passed (0.226 seconds).
+Test Case '-[MLXLMTests.GLM5NextTests testVectorizedGatedDeltaKernelMatchesOps]' passed (0.007 seconds).
+	 Executed 20 tests, with 0 failures (0 unexpected) in 8.750 (8.751) seconds
+	 Executed 20 tests, with 0 failures (0 unexpected) in 8.750 (8.751) seconds
+	 Executed 20 tests, with 0 failures (0 unexpected) in 8.750 (8.751) seconds

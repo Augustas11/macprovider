@@ -1,5 +1,7 @@
 import Foundation
+import MLXHuggingFace
 import MLXLMCommon
+import Tokenizers
 import MacProviderCore
 import XCTest
 @testable import macprovider_cli
@@ -115,6 +117,122 @@ final class ModelRuntimeSwapTests: XCTestCase {
         XCTAssertFalse(supported(makeNativeMTPAdmissionCapability(predictionLayerCount: 2)))
         XCTAssertFalse(supported(makeNativeMTPAdmissionCapability(cacheClass: "kv_cache_simple")))
         XCTAssertFalse(supported(makeNativeMTPAdmissionCapability(stateClass: "stageable_rewindable")))
+    }
+
+    /// SPEC-048 MTP-2 / T5.3: `glm5_next_mtp_v1` pairs only with
+    /// `checkpoint_mtp`, and admits only with its drafter present, the exact
+    /// KDA + pagedMLA topology, and the 8-token forward bound in force with a
+    /// row's verification inside it.
+    func testGLM5NextNativeMTPAdmissionGate() throws {
+        let glm = ModelRuntime.pagedKVModelCapabilities(
+            modelID: "zai-org/glm-5.3-flash",
+            configJSONData: GLM5NextPagedKVWiringTests.config()
+        )
+        let layout = try XCTUnwrap(glm.sparseAttention)
+        let kinds = layout.expectedCacheKinds
+        func supported(
+            _ capability: NativeMTPAdmissionCapability,
+            modelCapabilities: PagedKVRuntimeModelCapabilities? = nil,
+            cacheKinds: [PagedKVSharedForwardBackend.CacheKind]? = nil,
+            drafterPresent: Bool = true
+        ) -> Bool {
+            ModelRuntime.nativeMTPAdmissionCapabilitySupportedForTest(
+                capability,
+                canonicalCacheClass: "paged_kv",
+                modelCapabilities: modelCapabilities ?? glm,
+                cacheKinds: cacheKinds ?? kinds,
+                drafterPresent: drafterPresent
+            )
+        }
+        let embedded = makeNativeMTPAdmissionCapability(
+            familyAdapter: "glm5_next_mtp_v1",
+            sourceLayout: "checkpoint_mtp"
+        )
+        XCTAssertTrue(supported(embedded))
+        XCTAssertFalse(supported(makeNativeMTPAdmissionCapability(
+            familyAdapter: "glm5_next_mtp_v1", sourceLayout: "separate_artifact"
+        )))
+        XCTAssertFalse(supported(makeNativeMTPAdmissionCapability(
+            familyAdapter: "qwen3_5_mtp_v1", sourceLayout: "checkpoint_mtp"
+        )))
+        XCTAssertFalse(supported(embedded, drafterPresent: false))
+        XCTAssertFalse(supported(embedded, cacheKinds: kinds.map { kind -> PagedKVSharedForwardBackend.CacheKind in
+            kind.isPagedMLA ? .pagedAttention : kind
+        }))
+        XCTAssertFalse(supported(embedded, cacheKinds: Array(kinds.dropLast())))
+        XCTAssertFalse(supported(embedded, cacheKinds: kinds.map { kind -> PagedKVSharedForwardBackend.CacheKind in
+            kind.isPagedMLA ? .pagedMLA(kpool: 2) : kind
+        }))
+        XCTAssertFalse(supported(embedded, modelCapabilities: PagedKVRuntimeModelCapabilities(
+            modelFamily: "glm5_next", requiresMoEDispatch: true, hybridDecoderArchitectureVerified: true
+        )))
+        // A row's verification (depth + 1 tokens) must fit the 8-token bound.
+        XCTAssertFalse(supported(makeNativeMTPAdmissionCapability(
+            familyAdapter: "glm5_next_mtp_v1", sourceLayout: "checkpoint_mtp",
+            predictionLayerCount: 8, maxProposalDepth: 8
+        )))
+        // The Qwen tuple is unaffected by the new parameters.
+        let qwen = PagedKVRuntimeModelCapabilities(
+            modelFamily: "qwen", requiresMoEDispatch: false, hybridDecoderArchitectureVerified: true
+        )
+        XCTAssertTrue(supported(makeNativeMTPAdmissionCapability(), modelCapabilities: qwen,
+                                cacheKinds: [.recurrentMamba, .pagedAttention]))
+        XCTAssertFalse(supported(makeNativeMTPAdmissionCapability(), modelCapabilities: qwen,
+                                 cacheKinds: [.recurrentMamba, .pagedAttention], drafterPresent: false))
+    }
+
+    func testNativeMTPDrafterSourceFollowsTheAdapter() {
+        XCTAssertEqual(ModelRuntime.nativeMTPDrafterSource(familyAdapter: "qwen3_5_mtp_v1"), .separateArtifact)
+        XCTAssertEqual(ModelRuntime.nativeMTPDrafterSource(familyAdapter: "glm5_next_mtp_v1"), .targetEmbedded)
+        XCTAssertNil(ModelRuntime.nativeMTPDrafterSource(familyAdapter: "qwen3_mtp_v1"))
+        XCTAssertEqual(ModelRuntime.nativeMTPSupportedAdapterLayouts, [
+            .init(familyAdapter: "qwen3_5_mtp_v1", sourceLayout: "separate_artifact"),
+            .init(familyAdapter: "glm5_next_mtp_v1", sourceLayout: "checkpoint_mtp"),
+        ])
+        // Each adapter's admitted layout is the one the sidecar derives from it.
+        for layout in ModelRuntime.nativeMTPSupportedAdapterLayouts {
+            XCTAssertEqual(
+                NativeMTPAdmissionSidecar.sourceLayout(forFamilyAdapter: layout.familyAdapter),
+                layout.sourceLayout
+            )
+        }
+    }
+
+    func testEmbeddedDrafterLoadRejectsAnUnknownAdapter() async {
+        do {
+            _ = try await ModelRuntime.loadNativeMTPDrafterContainer(
+                familyAdapter: "unknown_mtp_v1",
+                targetDirectory: URL(fileURLWithPath: "/nonexistent"),
+                drafterDirectory: URL(fileURLWithPath: "/nonexistent"),
+                tokenizerLoader: #huggingFaceTokenizerLoader()
+            )
+            XCTFail("expected unsupportedAdapter")
+        } catch let error as NativeMTPDrafterLoadError {
+            XCTAssertEqual(error, .unsupportedAdapter("unknown_mtp_v1"))
+        } catch {
+            XCTFail("unexpected \(error)")
+        }
+    }
+
+    func testEmbeddedDrafterLoadNeedsTheTargetModelType() async throws {
+        // A config without `model_type` fails before any model is created.
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("glm5-next-drafter-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data(#"{"architectures":["Glm5NextForConditionalGeneration"]}"#.utf8)
+            .write(to: directory.appendingPathComponent("config.json"))
+        do {
+            _ = try await ModelRuntime.loadNativeMTPDrafterContainer(
+                familyAdapter: "glm5_next_mtp_v1",
+                targetDirectory: directory,
+                drafterDirectory: directory,
+                tokenizerLoader: #huggingFaceTokenizerLoader()
+            )
+            XCTFail("a config without model_type must not load a drafter")
+        } catch let error as NativeMTPDrafterLoadError {
+            XCTAssertEqual(error, .unsupportedAdapter("glm5_next_mtp_v1"))
+        }
     }
 
     func testNativeMTPArtifactObservationMustMatchSignedCapability() {

@@ -34,6 +34,12 @@ struct NativeMTPStateDigestRecord: Equatable, Sendable {
     let committedKVTokenCount: Int
     let proposedTokens: Int
     let committedProposalTokens: Int?
+    /// The row's committed native-round sequence number (0, 1, 2, ...),
+    /// assigned by the bridge when a committing finalize begins and carried by
+    /// that round's before- and after-finalize records; nil on other phases.
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    var nativeRound: Int? = nil
+    #endif
 }
 
 final class NativeMTPStateDigestObserver: @unchecked Sendable {
@@ -549,12 +555,21 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         /// presented to attention as the rotating-equivalent suffix — not a
         /// ring buffer, and not sink-token keep>0.
         case slidingWindow(windowTokens: Int)
+        /// SPEC-039 v0.1.17 `glm5_next` sparse-attention layer: the MLA latent
+        /// and the indexer's pooled keys (one per `kpool` tokens) paged on the
+        /// row's one block table (`PagedMLALatentCache`).
+        case pagedMLA(kpool: Int)
 
         var usesPagedKVCache: Bool {
             switch self {
-            case .pagedAttention, .slidingWindow: true
+            case .pagedAttention, .slidingWindow, .pagedMLA: true
             case .recurrentMamba: false
             }
+        }
+
+        var isPagedMLA: Bool {
+            if case .pagedMLA = self { return true }
+            return false
         }
 
         var hasSlidingWindow: Bool {
@@ -563,6 +578,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
 
         static func recognized(from cache: KVCache) -> CacheKind? {
+            if let latent = cache as? any GLM5NextLatentCache {
+                guard latent.kpool >= 1 else { return nil }
+                return .pagedMLA(kpool: latent.kpool)
+            }
             if cache is KVCacheSimple { return .pagedAttention }
             if cache is MambaCache { return .recurrentMamba }
             if cache is RotatingKVCache {
@@ -641,6 +660,47 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     /// contiguous KV. Tests keep the default off so fake models are not traced.
     let compiledDecode: Bool
     private let lock = NSLock()
+    /// Holders of this backend's target `container.perform` (exclusive, so
+    /// at most one). Every MLX evaluation of the native-MTP round runs
+    /// inside one: forwards, sampling, drafter state, lab digests.
+    private var targetLockHolders = 0
+
+    fileprivate func enterTargetLock() {
+        lock.lock()
+        targetLockHolders += 1
+        lock.unlock()
+    }
+
+    fileprivate func exitTargetLock() {
+        lock.lock()
+        targetLockHolders -= 1
+        lock.unlock()
+    }
+
+    /// Fails closed when a native-MTP helper that evaluates MLX arrays runs
+    /// outside the target container's lock, where it could evaluate
+    /// concurrently with a forward on the shared container.
+    func requireTargetLockHeld(_ site: String) throws {
+        lock.lock()
+        let held = targetLockHolders > 0
+        lock.unlock()
+        guard held else {
+            try? FileHandle.standardError.write(contentsOf: Data(
+                "event=native_mtp_target_lock_not_held site=\(site)\n".utf8
+            ))
+            throw ContinuousBatchSchedulerError.unsupported("native_mtp_target_lock_not_held")
+        }
+    }
+
+    #if DEBUG
+    /// Runs `body` holding this backend's target lock, for tests.
+    func withTargetLockForTest<R: Sendable>(_ body: @Sendable () throws -> R) async throws -> R {
+        try await container.perform { _ in
+            self.enterTargetLock(); defer { self.exitTargetLock() }
+            return try body()
+        }
+    }
+    #endif
     private var rows: [String: RowState] = [:]
     private var decodeSession: DecodeSession?
     private var nativeMTPPendingTransactions: [String: NativeMTPPendingTransaction] = [:]
@@ -692,6 +752,32 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     /// Consecutive packed-verify groups in packed-row order, each carrying at
     /// most `maxTokens` target tokens (rows x the group's widest row), and at
     /// least one row.
+    /// Most tokens (rows x tokens per row) one shared `glm5_next` forward
+    /// carries. The GLM-5-Next fused decode kernels and quantized projections
+    /// keep a batched row bitwise equal to its serial decode only up to this
+    /// many flattened tokens; past the core's `qmv` vector limit the
+    /// projections switch to `qmm` and rows diverge (SPEC-038 FR-CB2).
+    static let pagedMLAMaxFlattenedTokensPerForward = 8
+
+    /// The flattened-token cap of a shared forward over these layers, or nil
+    /// when only the device route bound applies.
+    static func maxFlattenedTokensPerForward(cacheKinds: [CacheKind]) -> Int? {
+        cacheKinds.contains(where: \.isPagedMLA) ? pagedMLAMaxFlattenedTokensPerForward : nil
+    }
+
+    /// Rows one decode forward may carry beyond the device route bound
+    /// (`pagedMLA`: `pagedMLAMaxFlattenedTokensPerForward`); nil when only the
+    /// device bound applies. The scheduler splits larger decode steps.
+    let maxDecodeRowsPerForward: Int?
+
+    /// Whether `rows` prompt chunks of `chunkLength` tokens fit one shared
+    /// forward under this backend's flattened-token cap.
+    func sharedForwardFits(rows: Int, tokensPerRow: Int) -> Bool {
+        guard let cap = maxDecodeRowsPerForward else { return true }
+        let (tokens, overflow) = rows.multipliedReportingOverflow(by: tokensPerRow)
+        return !overflow && tokens <= cap
+    }
+
     static func verifyGroups(widths: [Int], maxTokens: Int) -> [Range<Int>] {
         var groups: [Range<Int>] = []
         var start = 0
@@ -725,6 +811,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     private var labNativeMTPCommittedPrefixHidden: [String: [MLXArray]] = [:]
     private var labNativeMTPCommittedPrefixTargetBonus: [String: Int] = [:]
     private var labNativeMTPPrefixPositionDeltasUnsupported: Set<String> = []
+    private var labNativeMTPLastFinalizeRecomputePrefixTokens: [String: Int] = [:]
+    private var labNativeMTPNextRound: [String: Int] = [:]
     #endif
 
     init(
@@ -743,15 +831,19 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         self.container = container
         self.drafterContainer = drafterContainer
         self.nativeMTPDrafterColumnCap = max(1, nativeMTPDrafterColumnCap)
-        self.maxVerifyTokensPerForward = max(1, maxVerifyTokensPerForward ?? Self.deviceVerifyTokenBound)
+        let resolvedKinds = (cacheKinds?.isEmpty == false)
+            ? cacheKinds!
+            : Array(repeating: CacheKind.pagedAttention, count: max(1, layerCount))
+        let flattenedCap = Self.maxFlattenedTokensPerForward(cacheKinds: resolvedKinds)
+        self.maxVerifyTokensPerForward = min(
+            max(1, maxVerifyTokensPerForward ?? Self.deviceVerifyTokenBound),
+            flattenedCap ?? Int.max
+        )
+        self.maxDecodeRowsPerForward = flattenedCap
         self.blockSizeTokens = blockSizeTokens
         self.maxPhysicalBlocks = maxPhysicalBlocks
         self.poolEpoch = poolEpoch
-        if let cacheKinds, !cacheKinds.isEmpty {
-            self.cacheKinds = cacheKinds
-        } else {
-            self.cacheKinds = Array(repeating: .pagedAttention, count: max(1, layerCount))
-        }
+        self.cacheKinds = resolvedKinds
         self.contiguousCacheBridge = contiguousCacheBridge
         self.compiledDecode = compiledDecode
     }
@@ -793,8 +885,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
         defer { endOperation() }
         return try await container.perform(nonSendable: inputs) { context, inputs in
+            self.enterTargetLock(); defer { self.exitTargetLock() }
             let raggedOffsets = Self.hasRaggedPromptOffsets(inputs)
             if Self.canSharePrefillForward(inputs),
+               self.sharedForwardFits(rows: inputs.count, tokensPerRow: inputs[0].promptTokens.count),
                !raggedOffsets || self.supportsRaggedPrefillOffsets {
                 let rowStates = inputs.map {
                     self.rowState(
@@ -876,6 +970,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                                 } catch {
                                     // The shared target forward stays committed
                                     // for every peer; only this row fails.
+                                    ContinuousBatchingPolicy.logPrefillFailed(error)
                                     self.removeRowState(for: input.requestID)
                                     drafterFailures.insert(index)
                                 }
@@ -978,6 +1073,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                         sampledToken: input.sampleFirstToken ? sampledToken : nil
                     ))
                 } catch {
+                    ContinuousBatchingPolicy.logPrefillFailed(error)
                     self.removeRowState(for: input.requestID)
                     outputs.append(ContinuousBatchPrefillOutput(
                         requestID: input.requestID,
@@ -1023,6 +1119,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         positionDeltas: MLXArray?,
         sampledToken: Int?
     ) async throws {
+        try requireTargetLockHeld("seed_drafter_from_prefill")
         let tailToken: Int
         if input.isFinalChunk {
             guard let sampledToken else {
@@ -1161,6 +1258,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
 
         let decoded: [ContinuousBatchDecodeOutcome] = try await container.perform(nonSendable: supportedInputs) { context, supportedInputs in
+            self.enterTargetLock(); defer { self.exitTargetLock() }
             let (decodable, capFailures) = await self.catchingUpNativeMTPDrafterColumnsAtCap(
                 targetModel: context.model,
                 inputs: supportedInputs,
@@ -1211,6 +1309,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             return inputs.map { .rowFailure(requestID: $0.requestID) }
         }
         let decoded: [ContinuousBatchDecodeOutcome] = try await container.perform(nonSendable: supportedInputs) { context, supportedInputs in
+            self.enterTargetLock(); defer { self.exitTargetLock() }
             let (decodable, capFailures) = await self.catchingUpNativeMTPDrafterColumnsAtCap(
                 targetModel: context.model,
                 inputs: supportedInputs,
@@ -1266,6 +1365,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         let pendingIDs = inputs.map(\.requestID).filter { hasPendingNativeMTPDrafterColumns(for: $0) }
         if !pendingIDs.isEmpty {
             try await container.perform { context in
+                self.enterTargetLock(); defer { self.exitTargetLock() }
                 try await self.flushNativeMTPDrafterColumns(
                     targetModel: context.model,
                     requestIDs: pendingIDs,
@@ -1358,6 +1458,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         rows inputs: [ContinuousBatchNativeMTPVerifyInput]
     ) async throws -> [NativeMTPVerifiedRow] {
         let verified: [NativeMTPVerifiedRow] = try await container.perform(nonSendable: inputs) { context, inputs in
+            self.enterTargetLock(); defer { self.exitTargetLock() }
             // A cancellation between groups of a split round stops before
             // this group touches row state.
             try self.throwIfCancelRequested()
@@ -1452,6 +1553,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
         defer { endOperation() }
         try await container.perform(nonSendable: inputs) { context, inputs in
+            self.enterTargetLock(); defer { self.exitTargetLock() }
             if inputs.allSatisfy({ !$0.shouldCommit }) {
                 // Proposal never mutates drafter state, so an aborted round
                 // only drops its staged target transactions.
@@ -1486,10 +1588,14 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             let transactions = try self.consumeNativeMTPPendingTransactions(for: inputs)
             try self.validateNativeMTPFinalizeInputs(inputs, transactions: transactions)
             #if DEBUG || MACPROVIDER_LAB_HARNESS
+            let labRounds = self.labBeginNativeMTPCommittedRound(
+                requestIDs: inputs.filter(\.shouldCommit).map(\.requestID)
+            )
             try self.recordNativeMTPStateDigest(
                 phase: .beforeFinalize,
                 inputs: inputs,
-                transactions: transactions
+                transactions: transactions,
+                rounds: labRounds
             )
             #endif
             let committing = inputs.filter(\.shouldCommit).compactMap { input in
@@ -1544,7 +1650,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     )
                     try await self.labRecomputeNativeMTPDrafterDigest(
                         targetModel: context.model,
-                        requestID: input.requestID
+                        requestID: input.requestID,
+                        sampledAtFinalize: true
                     )
                 }
                 #endif
@@ -1556,7 +1663,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             try self.recordNativeMTPStateDigest(
                 phase: .afterFinalize,
                 inputs: inputs,
-                transactions: transactions
+                transactions: transactions,
+                rounds: labRounds
             )
             #endif
         }
@@ -1580,9 +1688,13 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         lock.lock()
         let observer = labNativeMTPStateDigestObserver
         lock.unlock()
-        guard let observer else { return }
-        if phase == .afterAbort, !requestIDs.isEmpty {
-            try await container.perform(nonSendable: requestIDs) { context, requestIDs in
+        guard let observer, !requestIDs.isEmpty else { return }
+        // The digests evaluate the row and drafter state, so they run under
+        // the target lock like every forward (window A2: they ran outside it,
+        // beside a decode window on the same container).
+        try await container.perform(nonSendable: requestIDs) { context, requestIDs in
+            self.enterTargetLock(); defer { self.exitTargetLock() }
+            if phase == .afterAbort {
                 for requestID in requestIDs {
                     self.labClearNativeMTPDrafterRecomputeDigest(requestID: requestID)
                     try await self.labRecomputeNativeMTPDrafterDigest(
@@ -1591,21 +1703,21 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     )
                 }
             }
-        }
-        for requestID in requestIDs {
-            let digest = try nativeMTPStateDigest(requestID: requestID, transaction: nil)
-            observer.record(NativeMTPStateDigestRecord(
-                requestID: requestID,
-                phase: phase,
-                digestSHA256: digest.combined,
-                cacheDigestSHA256: digest.cache,
-                drafterDigestSHA256: digest.drafter,
-                pendingTargetDigestSHA256: nil,
-                drafterRecomputeDigestSHA256: digest.drafterRecompute,
-                committedKVTokenCount: rowStateTokenCount(for: requestID),
-                proposedTokens: 0,
-                committedProposalTokens: nil
-            ))
+            for requestID in requestIDs {
+                let digest = try self.nativeMTPStateDigest(requestID: requestID, transaction: nil)
+                observer.record(NativeMTPStateDigestRecord(
+                    requestID: requestID,
+                    phase: phase,
+                    digestSHA256: digest.combined,
+                    cacheDigestSHA256: digest.cache,
+                    drafterDigestSHA256: digest.drafter,
+                    pendingTargetDigestSHA256: nil,
+                    drafterRecomputeDigestSHA256: digest.drafterRecompute,
+                    committedKVTokenCount: self.rowStateTokenCount(for: requestID),
+                    proposedTokens: 0,
+                    committedProposalTokens: nil
+                ))
+            }
         }
     }
     #endif
@@ -1624,6 +1736,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         recurrentCheckpoint: RecurrentStateCheckpoint?
     ) async throws {
         let unavailable = ContinuousBatchSchedulerError.unsupported("continuous_batching_retained_hybrid_cache_unavailable")
+        // SPEC-039 FR-PKV12: a `glm5_next` row serves first-turn/cache-miss
+        // requests only; no FR-CB10 grant covers a retained MLA handoff.
+        guard !cacheKinds.contains(where: \.isPagedMLA) else { throw unavailable }
         guard cacheKinds.contains(.recurrentMamba) else {
             guard recurrentCheckpoint == nil else { throw unavailable }
             let state = RowState(caches: handoff.caches, state: nil)
@@ -1655,6 +1770,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             case .pagedAttention, .slidingWindow:
                 guard let cache = attention.next() else { throw unavailable }
                 caches.append(cache)
+            case .pagedMLA:
+                throw unavailable
             case .recurrentMamba:
                 guard let state = recurrentCheckpoint.states[index], !state.isEmpty else { throw unavailable }
                 let cache = MambaCache()
@@ -1723,7 +1840,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         tokenCount: Int,
         recurrentCheckpoints: [RecurrentStateCheckpoint]
     ) async throws -> ContinuousBatchSerialConversationCache? {
-        guard cacheKinds.contains(.recurrentMamba), !recurrentCheckpoints.isEmpty else { return nil }
+        guard cacheKinds.contains(.recurrentMamba),
+              !cacheKinds.contains(where: \.isPagedMLA),
+              !recurrentCheckpoints.isEmpty
+        else { return nil }
         guard beginOperation() else {
             throw ContinuousBatchSchedulerError.unsupported("continuous_batching_backend_cancelled")
         }
@@ -1750,6 +1870,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                         throw PagedKVContiguousCacheBridgeError.blockTableMismatch
                     }
                     layers.append(cache)
+                case .pagedMLA:
+                    throw PagedKVContiguousCacheBridgeError.blockTableMismatch
                 case .recurrentMamba:
                     let cache = MambaCache()
                     if let state = terminal?.states[index] {
@@ -1771,7 +1893,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             lock.lock()
             cancelRequested = true
             decodeSession = nil
-            let handlesToDiscard = rows.compactMap { Self.pagedAttentionCaches(in: $0.value.caches).first?.binding.handle }
+            let handlesToDiscard = rows.compactMap { Self.storageHandle(in: $0.value.caches) }
             rows.removeAll()
             nativeMTPPendingTransactions.removeAll()
             nativeMTPDrafterStates.removeAll()
@@ -1783,6 +1905,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             labNativeMTPCommittedPrefixHidden.removeAll()
             labNativeMTPCommittedPrefixTargetBonus.removeAll()
             labNativeMTPPrefixPositionDeltasUnsupported.removeAll()
+            labNativeMTPLastFinalizeRecomputePrefixTokens.removeAll()
+            labNativeMTPNextRound.removeAll()
             #endif
             if activeOperations == 0 {
                 lock.unlock()
@@ -1863,6 +1987,16 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                         reconstructViaGather: false,
                         attentionWindowTokens: windowTokens
                     )
+                case .pagedMLA(let kpool):
+                    PagedMLALatentCache(
+                        kpool: kpool,
+                        blockSizeTokens: blockSizeTokens,
+                        maxPhysicalBlocks: maxPhysicalBlocks,
+                        poolEpoch: poolEpoch,
+                        binding: binding,
+                        initialOffset: initialOffset,
+                        reconstructViaGather: false
+                    )
                 case .recurrentMamba:
                     MambaCache()
                 }
@@ -1904,7 +2038,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         lock.lock()
         let removed = rows.removeValue(forKey: requestID)
         lock.unlock()
-        if discardRecordedCache, let handle = removed.flatMap({ Self.pagedAttentionCaches(in: $0.caches).first?.binding.handle }) {
+        if discardRecordedCache, let handle = removed.flatMap({ Self.storageHandle(in: $0.caches) }) {
             contiguousCacheBridge?.discard(handle: handle)
         }
     }
@@ -1916,6 +2050,11 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         onStep: ContinuousBatchDecodeWindowStepObserver? = nil
     ) throws -> [ContinuousBatchDecodeOutcome] {
         let decodeSteps = max(1, steps)
+        // A capped backend (`pagedMLA`) never forms a wider forward; the
+        // scheduler splits decode steps to fit.
+        guard sharedForwardFits(rows: supportedInputs.count, tokensPerRow: 1) else {
+            throw ContinuousBatchSchedulerError.unsupported("continuous_batching_forward_token_cap")
+        }
         var rowStates = supportedInputs.map {
             self.rowState(
                 for: $0.requestID,
@@ -2320,6 +2459,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         positionDeltas: MLXArray?,
         targetBonusToken: Int
     ) throws {
+        try requireTargetLockHeld("lab_record_committed_prefix")
         guard labNativeMTPObserverInstalled(), !tokens.isEmpty else { return }
         guard tokens.count == hidden.count else {
             throw ContinuousBatchSchedulerError.unsupported("native_mtp_drafter_recompute_shape_mismatch")
@@ -2370,10 +2510,31 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         lock.unlock()
     }
 
+    /// The independent recompute re-prepares a drafter over the row's whole
+    /// committed prefix, so it costs O(context) per call; run on every
+    /// finalize it grew window J's finalize phase from 117 to 168 ms over
+    /// ~450 tokens. At finalize (`sampledAtFinalize`) it runs on a row's
+    /// first committed round and then once each time the prefix crosses
+    /// another multiple of this many tokens (the glm5_next paged-KV block).
+    /// Prefill, prompt-chunk, flush and abort sites still recompute on every
+    /// call; they run once per request or rarely.
+    static let labDrafterRecomputeIntervalTokens = 256
+
+    static func labDrafterRecomputeDue(
+        lastRecomputedPrefixTokens: Int?,
+        prefixTokens: Int,
+        intervalTokens: Int = labDrafterRecomputeIntervalTokens
+    ) -> Bool {
+        guard let lastRecomputedPrefixTokens else { return true }
+        return prefixTokens / intervalTokens > lastRecomputedPrefixTokens / intervalTokens
+    }
+
     private func labRecomputeNativeMTPDrafterDigest(
         targetModel: any LanguageModel,
-        requestID: String
+        requestID: String,
+        sampledAtFinalize: Bool = false
     ) async throws {
+        try requireTargetLockHeld("lab_recompute_drafter_digest")
         guard labNativeMTPObserverInstalled(), let drafterContainer else { return }
         lock.lock()
         let tokens = labNativeMTPCommittedPrefixTokens[requestID] ?? []
@@ -2381,8 +2542,13 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         let unsupportedPositionDeltas = labNativeMTPPrefixPositionDeltasUnsupported.contains(requestID)
         let targetBonus = labNativeMTPCommittedPrefixTargetBonus[requestID]
         let actualSeed = nativeMTPDrafterSeedTokens[requestID]
+        let lastRecomputedPrefixTokens = labNativeMTPLastFinalizeRecomputePrefixTokens[requestID]
         lock.unlock()
         guard actualSeed != nil, let targetBonus, !tokens.isEmpty else { return }
+        guard !sampledAtFinalize || Self.labDrafterRecomputeDue(
+            lastRecomputedPrefixTokens: lastRecomputedPrefixTokens,
+            prefixTokens: tokens.count
+        ) else { return }
         guard tokens.count == hidden.count else {
             throw ContinuousBatchSchedulerError.unsupported("native_mtp_drafter_recompute_shape_mismatch")
         }
@@ -2424,6 +2590,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         // retain its recomputed digest as evidence without rejecting finalize.
         lock.lock()
         nativeMTPDrafterRecomputeDigests[requestID] = recomputedDigest
+        if sampledAtFinalize {
+            labNativeMTPLastFinalizeRecomputePrefixTokens[requestID] = tokens.count
+        }
         lock.unlock()
     }
     #endif
@@ -2461,6 +2630,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         firstBonusToken: Int,
         requestID: String
     ) async throws {
+        try requireTargetLockHeld("prepare_drafter_state")
         guard let drafterContainer else { return }
         guard targetHidden.ndim == 3,
               targetHidden.dim(0) == 1,
@@ -2517,6 +2687,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         positionDeltas: MLXArray?,
         tailToken: Int
     ) async throws {
+        try requireTargetLockHeld("advance_drafter_prompt_chunk")
         guard let drafterContainer else { return }
         let chunkCount = input.promptTokens.count
         guard targetHidden.ndim == 3,
@@ -2653,6 +2824,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         requestIDs: [String],
         minimumColumns: Int
     ) async throws {
+        try requireTargetLockHeld("flush_drafter_columns")
         guard let drafterContainer, !requestIDs.isEmpty else { return }
         let (flushIDs, advanceRows) = try pendingNativeMTPDrafterAdvanceRows(
             requestIDs: requestIDs,
@@ -2755,6 +2927,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         targetModel: any LanguageModel,
         rows: [(ContinuousBatchNativeMTPFinalizeInput, NativeMTPPendingTransaction)]
     ) async throws -> MTPPackedDrafterAdvanceResult? {
+        try requireTargetLockHeld("advance_drafters")
         guard let drafterContainer, !rows.isEmpty else { return nil }
         let advanceRows = try rows.map { input, transaction -> MTPPackedDrafterAdvanceRow in
             guard let state = nativeMTPDrafterState(for: input.requestID),
@@ -2884,6 +3057,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         labNativeMTPCommittedPrefixHidden.removeValue(forKey: requestID)
         labNativeMTPCommittedPrefixTargetBonus.removeValue(forKey: requestID)
         labNativeMTPPrefixPositionDeltasUnsupported.remove(requestID)
+        labNativeMTPLastFinalizeRecomputePrefixTokens.removeValue(forKey: requestID)
+        labNativeMTPNextRound.removeValue(forKey: requestID)
         #endif
         lock.unlock()
     }
@@ -2956,10 +3131,38 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
     }
 
+    /// Assigns each committing row its next native-round sequence number.
+    /// Every committing finalize takes one, observer or not, so a round whose
+    /// records go missing leaves a gap the journey detects.
+    private func labBeginNativeMTPCommittedRound(requestIDs: [String]) -> [String: Int] {
+        lock.lock()
+        defer { lock.unlock() }
+        var rounds: [String: Int] = [:]
+        for requestID in requestIDs {
+            let round = labNativeMTPNextRound[requestID, default: 0]
+            rounds[requestID] = round
+            labNativeMTPNextRound[requestID] = round + 1
+        }
+        return rounds
+    }
+
+    #if DEBUG
+    /// The finalize path's lab bookkeeping without a forward: assigns the
+    /// committing rows' round numbers and records their before- and
+    /// after-finalize digests, as `finalizeNativeMTPPackedRound` does.
+    func labRecordCommittedFinalizeForTest(inputs: [ContinuousBatchNativeMTPFinalizeInput]) throws {
+        enterTargetLock(); defer { exitTargetLock() }
+        let rounds = labBeginNativeMTPCommittedRound(requestIDs: inputs.filter(\.shouldCommit).map(\.requestID))
+        try recordNativeMTPStateDigest(phase: .beforeFinalize, inputs: inputs, transactions: [:], rounds: rounds)
+        try recordNativeMTPStateDigest(phase: .afterFinalize, inputs: inputs, transactions: [:], rounds: rounds)
+    }
+    #endif
+
     private func recordNativeMTPStateDigest(
         phase: NativeMTPStateDigestPhase,
         inputs: [ContinuousBatchNativeMTPFinalizeInput],
-        transactions: [String: NativeMTPPendingTransaction]
+        transactions: [String: NativeMTPPendingTransaction],
+        rounds: [String: Int] = [:]
     ) throws {
         lock.lock()
         let observer = labNativeMTPStateDigestObserver
@@ -2981,7 +3184,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 drafterRecomputeDigestSHA256: digest.drafterRecompute,
                 committedKVTokenCount: rowStateTokenCount(for: input.requestID),
                 proposedTokens: transaction?.proposalTokenCount ?? input.proposalTokenCount,
-                committedProposalTokens: input.committedProposalTokenCount
+                committedProposalTokens: input.committedProposalTokenCount,
+                nativeRound: rounds[input.requestID]
             ))
         }
     }
@@ -3024,35 +3228,52 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     }
 
     private func rowTargetCacheDigest(requestID: String) throws -> String {
+        try requireTargetLockHeld("row_target_cache_digest")
         lock.lock()
         let row = rows[requestID]
         lock.unlock()
         guard let row else {
             throw ContinuousBatchSchedulerError.unsupported("native_mtp_observer_missing_row_state")
         }
+        // Every layer's state is canonicalized and evaluated together, then
+        // hashed in one concurrent pass (one GPU wait, all cores), and fed to
+        // the hasher in the same layer/slot order as before.
+        // A paged MLA layer contributes its target-oracle view: the state a
+        // later forward reads plus the rewind headroom every committed round
+        // keeps (`PagedMLALatentCache.observerOracleState`, SPEC-048 MTP-6).
+        let layers = try row.caches.map { cache in
+            (
+                cache: cache,
+                shape: try rowTargetCacheDigestShape(for: cache),
+                state: (cache as? PagedMLALatentCache)?.observerOracleState ?? cache.state
+            )
+        }
+        let records = try Self.arrayDigestRecords(layers.flatMap { layer in
+            layer.state.map { (array: $0, logicalTokens: layer.shape.logicalTokens) }
+        })
+        var nextRecord = records.makeIterator()
         var hasher = SHA256()
         Self.update(&hasher, label: "kind", value: "row-cache")
-        for (layerIndex, cache) in row.caches.enumerated() {
+        for (layerIndex, layer) in layers.enumerated() {
             Self.update(&hasher, label: "layer", value: String(layerIndex))
-            Self.update(&hasher, label: "type", value: String(describing: type(of: cache)))
-            Self.update(&hasher, label: "offset", value: String(cache.offset))
-            let digestShape = try rowTargetCacheDigestShape(for: cache)
-            switch digestShape {
+            Self.update(&hasher, label: "type", value: String(describing: type(of: layer.cache)))
+            Self.update(&hasher, label: "offset", value: String(layer.cache.offset))
+            if layer.cache is PagedMLALatentCache {
+                Self.update(&hasher, label: "view", value: "paged_mla_oracle_state_v1")
+            }
+            switch layer.shape {
             case .paged(let storedTokens, let blockSizeTokens):
                 Self.update(&hasher, label: "paged_stored_tokens", value: String(storedTokens))
                 Self.update(&hasher, label: "paged_block_size_tokens", value: String(blockSizeTokens))
             case .standard:
                 break
             }
-            let state = cache.state
-            Self.update(&hasher, label: "slot_count", value: String(state.count))
-            for (slotIndex, array) in state.enumerated() {
-                try Self.updateArrayDigest(
-                    &hasher,
-                    label: "slot_\(slotIndex)",
-                    array: array,
-                    logicalTokens: digestShape.logicalTokens
-                )
+            Self.update(&hasher, label: "slot_count", value: String(layer.state.count))
+            for slotIndex in layer.state.indices {
+                guard let record = nextRecord.next() else {
+                    throw ContinuousBatchSchedulerError.unsupported("native_mtp_observer_digest_record_mismatch")
+                }
+                Self.update(&hasher, label: "slot_\(slotIndex)", record: record)
             }
         }
         return Self.hexString(hasher.finalize())
@@ -3152,12 +3373,17 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
         for (layerIndex, cache) in state.cache.enumerated() {
             update(&hasher, label: "layer", value: String(layerIndex))
+            // A glm5_next drafter cache's state is already exactly its logical
+            // contents (latent to `offset`, pooled, pending and folded keys,
+            // empty slots as [0]), not [.., T, D] KV slabs to cut at the
+            // drafter position.
+            let logicalTokens: Int? = cache is any GLM5NextLatentCache ? nil : state.nextPosition
             for (slotIndex, array) in cache.state.enumerated() {
                 try updateArrayDigest(
                     &hasher,
                     label: "slot_\(slotIndex)",
                     array: array,
-                    logicalTokens: state.nextPosition
+                    logicalTokens: logicalTokens
                 )
             }
         }
@@ -3181,6 +3407,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     #endif
 
     private func nativeMTPDrafterDigest(requestID: String) throws -> String? {
+        try requireTargetLockHeld("drafter_digest")
         lock.lock()
         let state = nativeMTPDrafterStates[requestID]
         let seed = nativeMTPDrafterSeedTokens[requestID]
@@ -3239,18 +3466,108 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         array: MLXArray,
         logicalTokens: Int?
     ) throws {
-        switch array.dtype {
-        case .float16, .bfloat16, .float32, .int32, .int64, .uint32, .uint64, .bool:
-            break
-        default:
-            throw ContinuousBatchSchedulerError.unsupported("native_mtp_observer_unsupported_dtype")
+        let records = try arrayDigestRecords([(array: array, logicalTokens: logicalTokens)])
+        update(&hasher, label: label, record: records[0])
+    }
+
+    /// One state array's digest input: its layout and the SHA-256 of each
+    /// fixed-size chunk of its logical bytes, in order.
+    struct ArrayDigestRecord: Equatable {
+        let dType: String
+        let dTypeBits: Int
+        let shape: [Int]
+        let byteCount: Int
+        let chunkDigests: Data
+    }
+
+    /// A glm5_next row holds ~140 MB of KDA recurrent state (34 layers of
+    /// 64x128x128 fp32) besides its MLA latent cache. One serial SHA-256
+    /// pass over it took ~50 ms per digest, and the observer takes four per
+    /// native round (window J: 52/83/117 ms propose/verify/finalize phases at
+    /// 30 tokens of context, against 0/33/3 ms without the observer). The
+    /// bytes are now hashed as 1 MiB chunks on every core; equal bytes still
+    /// give equal digests and any changed byte changes its chunk digest.
+    static let labDigestChunkBytes = 1 << 20
+
+    static func arrayDigestRecords(
+        _ arrays: [(array: MLXArray, logicalTokens: Int?)],
+        chunkBytes: Int = labDigestChunkBytes
+    ) throws -> [ArrayDigestRecord] {
+        for entry in arrays {
+            switch entry.array.dtype {
+            case .float16, .bfloat16, .float32, .int32, .int64, .uint32, .uint64, .bool:
+                break
+            default:
+                throw ContinuousBatchSchedulerError.unsupported("native_mtp_observer_unsupported_dtype")
+            }
         }
-        let canonical = try canonicalLogicalArray(array, logicalTokens: logicalTokens)
-        let data = canonical.asData(access: .copy)
-        update(&hasher, label: "\(label).dtype", value: String(describing: data.dType))
-        update(&hasher, label: "\(label).dtype_bits", value: String(canonical.itemSize * 8))
-        update(&hasher, label: "\(label).shape", value: data.shape.map(String.init).joined(separator: "x"))
-        update(&hasher, label: "\(label).bytes", data: data.data)
+        let canonical = try arrays.map { try canonicalLogicalArray($0.array, logicalTokens: $0.logicalTokens) }
+        // One evaluation for every array instead of one GPU wait per slot.
+        eval(canonical)
+        return withExtendedLifetime(canonical) {
+            // A contiguous array is read in place (the no-copy Data is valid
+            // while `canonical` is alive); a strided slice is copied once. An
+            // empty array (a GLM latent cache's unused slot) has no backing
+            // pointer for the no-copy path.
+            let data = canonical.map { $0.size == 0 ? $0.asData(access: .copy) : $0.asData(access: .noCopyIfContiguous) }
+            let chunkDigests = concurrentChunkDigests(data.map(\.data), chunkBytes: chunkBytes)
+            return canonical.indices.map { index in
+                ArrayDigestRecord(
+                    dType: String(describing: data[index].dType),
+                    dTypeBits: canonical[index].itemSize * 8,
+                    shape: data[index].shape,
+                    byteCount: data[index].data.count,
+                    chunkDigests: chunkDigests[index]
+                )
+            }
+        }
+    }
+
+    /// The concatenated SHA-256 digests of each buffer's `chunkBytes`
+    /// chunks (empty for an empty buffer), computed concurrently.
+    static func concurrentChunkDigests(_ buffers: [Data], chunkBytes: Int) -> [Data] {
+        precondition(chunkBytes > 0)
+        var work: [(buffer: Int, range: Range<Int>)] = []
+        for (index, buffer) in buffers.enumerated() {
+            var start = 0
+            while start < buffer.count {
+                let end = min(start + chunkBytes, buffer.count)
+                work.append((index, start ..< end))
+                start = end
+            }
+        }
+        let chunks = work
+        let digestBytes = SHA256.byteCount
+        var flat = [UInt8](repeating: 0, count: chunks.count * digestBytes)
+        flat.withUnsafeMutableBytes { output in
+            let output = output
+            DispatchQueue.concurrentPerform(iterations: chunks.count) { item in
+                let (buffer, range) = chunks[item]
+                let digest = buffers[buffer].withUnsafeBytes { bytes in
+                    var hasher = SHA256()
+                    hasher.update(bufferPointer: UnsafeRawBufferPointer(rebasing: bytes[range]))
+                    return hasher.finalize()
+                }
+                digest.withUnsafeBytes { digestBytesPointer in
+                    UnsafeMutableRawBufferPointer(
+                        rebasing: output[(item * digestBytes) ..< ((item + 1) * digestBytes)]
+                    ).copyMemory(from: digestBytesPointer)
+                }
+            }
+        }
+        var result = Array(repeating: Data(), count: buffers.count)
+        for (item, entry) in chunks.enumerated() {
+            result[entry.buffer].append(contentsOf: flat[(item * digestBytes) ..< ((item + 1) * digestBytes)])
+        }
+        return result
+    }
+
+    private static func update(_ hasher: inout SHA256, label: String, record: ArrayDigestRecord) {
+        update(&hasher, label: "\(label).dtype", value: record.dType)
+        update(&hasher, label: "\(label).dtype_bits", value: String(record.dTypeBits))
+        update(&hasher, label: "\(label).shape", value: record.shape.map(String.init).joined(separator: "x"))
+        update(&hasher, label: "\(label).byte_count", value: String(record.byteCount))
+        update(&hasher, label: "\(label).chunk_sha256", data: record.chunkDigests)
     }
 
     private static func canonicalLogicalArray(
@@ -3430,7 +3747,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             let rowMaps = tokenRows.enumerated().map { index, row in
                 MTPPackedVerificationRowMap(
                     rowIndex: index,
-                    queryOffset: states[index].caches.compactMap { $0 as? PagedKVCache }.first?.offset ?? 0,
+                    queryOffset: states[index].caches.lazy.compactMap { ($0 as? PagedKVCache)?.offset ?? ($0 as? PagedMLALatentCache)?.offset }.first ?? 0,
                     inputCount: row.count,
                     proposalCount: row.count - 1
                 )
@@ -3692,6 +4009,27 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                         }
                     }
                 )
+            case .pagedMLA:
+                let rows = rowCaches.compactMap { $0[layerIndex] as? PagedMLALatentCache }
+                guard rows.count == rowCaches.count else {
+                    throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
+                }
+                // Rows keep their own state; the batch only routes each row of
+                // the forward to its cache, so there is nothing to sync.
+                let cache = PagedMLABatchLayerCache(rowCaches: rows)
+                return PagedKVSharedLayerBatch(
+                    cache: cache,
+                    validateBatchStateClosure: {},
+                    syncRowsFromBatchClosure: {},
+                    writebackCompiledInnerStateClosure: { _, _ in
+                        throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
+                    },
+                    pendingMTPResolutionsClosure: {
+                        try cache.pendingMTPResolutions().map {
+                            NativeMTPPendingLayerResolution.pagedMLA($0)
+                        }
+                    }
+                )
             case .recurrentMamba:
                 let rows = rowCaches.compactMap { $0[layerIndex] as? MambaCache }
                 guard rows.count == rowCaches.count else {
@@ -3760,6 +4098,12 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
 
     private static func pagedAttentionCaches(in caches: [KVCache]) -> [PagedKVCache] {
         caches.compactMap { $0 as? PagedKVCache }
+    }
+
+    /// The block-table handle a row's paged layers are bound to.
+    private static func storageHandle(in caches: [KVCache]) -> PagedKVBlockTableHandle? {
+        if let paged = pagedAttentionCaches(in: caches).first { return paged.binding.handle }
+        return caches.lazy.compactMap { ($0 as? PagedMLALatentCache)?.binding.handle }.first
     }
 
     private static func packMambaRows(_ rows: [MambaCache], into batch: MambaCache) throws {
@@ -3906,10 +4250,11 @@ struct PagedKVRowAttentionExtent: Equatable {
 
 /// The vector attention route MLX core takes for a call (query length at
 /// most 8), ported from core fork `Augustas11/mlx` tag
-/// `v0.32.2-macprovider.5`, `mlx/backend/metal/scaled_dot_product_attention.cpp`:
-/// vector mode at line 812 (`q_pre.shape(2) <= 8`), one vs two passes at
-/// line 875, the `_gqa` first-pass kernel at lines 469-473, the partition
-/// count at lines 486-523 (with the `MLX_SDPA_BLOCKS` override at 519).
+/// `v0.32.4-macprovider.4`, `mlx/backend/metal/scaled_dot_product_attention.cpp`:
+/// vector mode at line 1508 (`q_pre.shape(2) <= 8`), one vs two passes at
+/// line 1577, the `_gqa_<factor>` first-pass kernel at lines 754-763 (8x GQA
+/// at head dim 64/128, 12x/16x GQA at head dim 128), the partition count at
+/// lines 772-812 (with the `MLX_SDPA_BLOCKS` override at 808).
 /// Within one route a row's result does not depend on padding: both kernels
 /// (`kernels/sdpa_vector.h`) deal key `i` to partition `i mod P`, skip
 /// masked keys, and reduce the `P` partials in a fixed order. A rebase that
@@ -3950,8 +4295,10 @@ enum PagedKVVectorAttentionRoute {
         let large = device == "d" || device == "s"
         let twoPass = (large && n >= 1024) || (kvHeads < queryHeads && n >= 4096)
         guard twoPass else { return Route(twoPass: false, partitions: 32, gqaKernel: false) }
-        let gqaKernel = !hasArrayMask && queryTokens == 1 && queryHeads == 8 * kvHeads
-            && headDim == valueDim && (headDim == 64 || headDim == 128) && n >= 8192
+        let gqaFactor = queryHeads / kvHeads
+        let gqaDims = (gqaFactor == 8 && (headDim == 64 || headDim == 128))
+            || ((gqaFactor == 12 || gqaFactor == 16) && headDim == 128)
+        let gqaKernel = !hasArrayMask && queryTokens == 1 && headDim == valueDim && gqaDims && n >= 8192
         let simdGroups = (queryHeads / kvHeads) * queryTokens
         var partitions: Int
         if device == "s" {
@@ -4061,11 +4408,13 @@ enum PagedKVRowAttention {
 
 private enum NativeMTPPendingLayerResolution {
     case pagedAttention(PagedKVBatchLayerCache.PendingMTPResolution)
+    case pagedMLA(PagedMLABatchLayerCache.PendingMTPResolution)
     case recurrent(MTPPackedMambaRowTransaction)
 
     var inputTokenCount: Int {
         switch self {
         case .pagedAttention(let resolution): resolution.inputTokenCount
+        case .pagedMLA(let resolution): resolution.inputTokenCount
         case .recurrent(let resolution): resolution.inputCount
         }
     }
@@ -4073,6 +4422,7 @@ private enum NativeMTPPendingLayerResolution {
     var proposalTokenCount: Int {
         switch self {
         case .pagedAttention(let resolution): resolution.proposalTokenCount
+        case .pagedMLA(let resolution): resolution.proposalTokenCount
         case .recurrent(let resolution): resolution.proposalCount
         }
     }
@@ -4082,6 +4432,8 @@ private enum NativeMTPPendingLayerResolution {
     func stageCommit(inputCount: Int) throws -> [MLXArray] {
         switch self {
         case .pagedAttention(let resolution):
+            try resolution.stageCommit(inputCount: inputCount)
+        case .pagedMLA(let resolution):
             try resolution.stageCommit(inputCount: inputCount)
         case .recurrent(let resolution):
             try resolution.stageCommit(retaining: inputCount)
