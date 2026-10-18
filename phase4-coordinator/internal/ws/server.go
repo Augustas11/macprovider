@@ -7442,6 +7442,13 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		// sends compatibility_set_revoked to exactly revoked sessions, so a
 		// rollback (recommend older + revoke) moves them down (SPEC-020-R007).
 		CompatibilityPolicyRevokedSignal bool `json:"compatibility_policy_revoked_signal,omitempty"`
+		// NativeMTPCanaryBankReloads tells activation tooling that this
+		// runtime moves the native-MTP canary challenge bank with a SIGHUP
+		// release reload (SPEC-031-R033 v0.3.9), so an activation needs no
+		// coordinator restart. NativeMTPCanaryBankReleaseID is the release of
+		// the bank the canary holds; empty when the canary is off or has none.
+		NativeMTPCanaryBankReloads   bool   `json:"native_mtp_canary_bank_reloads"`
+		NativeMTPCanaryBankReleaseID string `json:"native_mtp_canary_bank_release_id,omitempty"`
 	}{
 		Status:   "ok",
 		UptimeS:  int64(s.now().Sub(s.started).Seconds()),
@@ -7463,6 +7470,12 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		CompatibilityPolicyRevokedIDs: compatibilityPolicyRevokedIDs,
 		// Repository mode is the only mode that revokes.
 		CompatibilityPolicyRevokedSignal: compatibilityPolicyMode == "repository",
+		NativeMTPCanaryBankReloads:       true,
+	}
+	if s.cfg.Pool.NativeMTPCanary.Enabled {
+		if bank := s.currentNativeMTPCanaryBank(); bank != nil {
+			resp.NativeMTPCanaryBankReleaseID = bank.ReleaseID
+		}
 	}
 	for _, p := range providers {
 		switch p.State {

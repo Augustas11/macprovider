@@ -4,7 +4,10 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -228,5 +231,32 @@ func TestNativeMTPCanaryBankReloadIsANoOpWithoutCanaryOrNativeSet(t *testing.T) 
 	}
 	if err := ValidateNativeMTPCanaryReleaseBank(f.server.cfg.Pool.NativeMTPCanary, "release-x", []byte("{}"), []byte("{}")); err != nil {
 		t.Fatalf("offline validation with the canary disabled: %v", err)
+	}
+}
+
+// Activation tooling reads the canary bank release from /healthz to prove the
+// bank moved with the release instead of scheduling a restart.
+func TestHealthzReportsTheNativeMTPCanaryBankRelease(t *testing.T) {
+	f := newNativeMTPBankReloadFixture(t)
+	read := func() map[string]any {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		f.server.handleHealthz(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+		var body map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+	body := read()
+	if body["native_mtp_canary_bank_reloads"] != true {
+		t.Fatalf("healthz reload signal=%v", body["native_mtp_canary_bank_reloads"])
+	}
+	if _, ok := body["native_mtp_canary_bank_release_id"]; ok {
+		t.Fatalf("healthz names a bank before one is loaded: %v", body)
+	}
+	f.reload(t, "release-new")
+	if got := read()["native_mtp_canary_bank_release_id"]; got != "release-new" {
+		t.Fatalf("healthz canary bank release=%v", got)
 	}
 }
