@@ -3198,7 +3198,16 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(seconds.count, 4)
         let span = try XCTUnwrap(seconds.max())
         XCTAssertGreaterThanOrEqual(span, 16 * 0.005, "every counted decode step is in the span")
-        XCTAssertLessThan(span, 0.15, "no prefill is in the span: \(seconds)")
+        // Bound by the measured times, not the nominal sleeps: the cohort's
+        // decode calls plus scheduler overhead stay under half of the
+        // shortest prefill, which any prefill inside the span would exceed.
+        let decodeSeconds = await backend.decodeSeconds
+        let prefillSeconds = await backend.prefillSeconds
+        let shortestPrefill = try XCTUnwrap(prefillSeconds.min())
+        XCTAssertLessThan(
+            span, decodeSeconds + shortestPrefill / 2,
+            "no prefill is in the span: \(seconds), decode \(decodeSeconds), shortest prefill \(shortestPrefill)"
+        )
         let rate = ContinuousBatchingSelfCheck.cohortDecodeTPS(
             tokens: results.compactMap(\.selfCheckCohortDecodeTokens), seconds: seconds
         )
@@ -8857,8 +8866,15 @@ private actor TimedCohortBackend: ContinuousBatchSchedulerBackend {
         self.decodeNanoseconds = decodeNanoseconds
     }
 
+    /// Measured wall seconds of each prefill call and of all decode calls:
+    /// a loaded host oversleeps, so the test bounds against these.
+    private(set) var prefillSeconds: [Double] = []
+    private(set) var decodeSeconds: Double = 0
+
     func prefill(rows: [ContinuousBatchPrefillInput]) async throws -> [ContinuousBatchPrefillOutput] {
+        let started = DispatchTime.now().uptimeNanoseconds
         try await Task.sleep(nanoseconds: prefillNanoseconds * UInt64(rows.count))
+        prefillSeconds.append(Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000_000)
         return rows.map { row in
             ContinuousBatchPrefillOutput(
                 requestID: row.requestID,
@@ -8868,7 +8884,9 @@ private actor TimedCohortBackend: ContinuousBatchSchedulerBackend {
     }
 
     func decode(rows: [ContinuousBatchDecodeInput]) async throws -> [ContinuousBatchDecodeOutcome] {
+        let started = DispatchTime.now().uptimeNanoseconds
         try await Task.sleep(nanoseconds: decodeNanoseconds)
+        decodeSeconds += Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000_000
         return rows.map { row in
             .output(ContinuousBatchDecodeOutput(
                 requestID: row.requestID,
