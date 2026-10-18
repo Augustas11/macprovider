@@ -2538,6 +2538,11 @@ final class ModelManagementStore: ObservableObject {
             // Install the freshness deadline before any further await.
             scheduleCatalogProjectionExpiry(document)
             await refreshPoolBindings()
+            // The projection may have expired or been replaced meanwhile; its
+            // own status line then stands.
+            guard catalogProjectionProcessLaunchID == document.source.processLaunchID,
+                  catalogProjectionSequence == document.projectionSequence,
+                  hasUsableCatalogProjection else { return }
             if rows.isEmpty {
                 self.statusLine = String(localized: "No network catalog rows or locally discovered models yet. Configure local runtimes in Settings to discover them here.", comment: "Catalog economics empty")
             } else if rows.contains(where: { $0.providerCompletionPayoutUSDPerMillionTokens != nil }) {
