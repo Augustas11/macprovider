@@ -222,7 +222,7 @@ final class AppBundleRelaunchMonitor {
     func start() {
         guard timer == nil else { return }
         let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.tick() }
+            MainActor.assumeIsolated { _ = self?.tick() }
         }
         timer.tolerance = interval / 3
         RunLoop.main.add(timer, forMode: .common)
@@ -263,7 +263,7 @@ final class AppBundleRelaunchMonitor {
             "[malibu] installed Malibu.app changed (running %@ build %@, installed %@ build %@); relaunching onto the installed bundle",
             running.version, running.build, target.version, target.build
         )
-        return Task { @MainActor [weak self] in
+        return Task<Void, Never> { @MainActor [weak self] in
             guard let self else { return }
             do {
                 try await self.relaunch(self.bundleURL)
