@@ -66,6 +66,20 @@ final class MenuBarIconSnapshotTests: XCTestCase {
         }
     }
 
+    func testGlyphKeepsTheBrandMarksSideRays() {
+        let angles = MalibuMenuBarIcon.rayAnglesDegrees
+        XCTAssertEqual(angles.first, MalibuConstructionSunburstGeometry.firstRayDegrees, "left side ray missing")
+        XCTAssertEqual(angles.last, MalibuConstructionSunburstGeometry.lastRayDegrees, "right side ray missing")
+        XCTAssertEqual(angles.count, 7)
+        // The side rays stay inside the canvas and above the baseline.
+        for degrees in [angles.first!, angles.last!] {
+            let r = degrees * .pi / 180
+            let x = MalibuMenuBarIcon.canvasWidth / 2 + CGFloat(cos(r)) * MalibuMenuBarIcon.rayOuterRadius
+            XCTAssertGreaterThanOrEqual(x, MalibuMenuBarIcon.rayStrokeWidth / 2)
+            XCTAssertLessThanOrEqual(x, MalibuMenuBarIcon.canvasWidth - MalibuMenuBarIcon.rayStrokeWidth / 2)
+        }
+    }
+
     func testStateBadgesAndLabels() {
         XCTAssertTrue(MalibuMenuBarIcon.make(badge: .none).isTemplate)
         XCTAssertTrue(MalibuMenuBarIcon.make(badge: .paused).isTemplate)
