@@ -19,20 +19,22 @@ cd "$PHASE3_DIR"
 TAG=${1:-$(git rev-parse --short HEAD)}
 PROVIDER_CLI_VERSION=$(sed -n 's/^[[:space:]]*static let binaryVersion = "\([0-9][0-9.]*\)"$/\1/p' \
   "$PHASE3_DIR/Sources/macprovider-cli/CoordinatorClient.swift" | head -1)
-MALIBU_APP_VERSION=$(sed -n 's/^[[:space:]]*MARKETING_VERSION:[[:space:]]*"\([0-9][0-9.]*\)"$/\1/p' \
-  "$PHASE3_DIR/app/project.yml" | head -1)
 [ -n "$PROVIDER_CLI_VERSION" ] || {
   echo "FATAL: could not resolve provider CLI component version" >&2
-  exit 1
-}
-[ -n "$MALIBU_APP_VERSION" ] || {
-  echo "FATAL: could not resolve Malibu app component version" >&2
   exit 1
 }
 case "$TAG" in
   v[0-9]*.[0-9]*.[0-9]*) MANIFEST_TAG="$TAG" ;;
   *) MANIFEST_TAG="v$PROVIDER_CLI_VERSION" ;;
 esac
+# SPEC-025 §3.3: Malibu.app is stamped from the release tag at build time, so
+# the manifest's Malibu component is the tag version, never project.yml's
+# development default.
+MALIBU_APP_VERSION_ENV="$(bash "$REPO_ROOT/scripts/malibu-app-version.sh" "$MANIFEST_TAG")" || {
+  echo "FATAL: could not resolve Malibu app component version from $MANIFEST_TAG" >&2
+  exit 1
+}
+eval "$MALIBU_APP_VERSION_ENV"
 RELEASE_DIR="./build-release"
 OUT_DIR="./dist"
 TARBALL="$OUT_DIR/phase3-binary-m4-${TAG}.tar.gz"

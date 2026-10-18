@@ -52,6 +52,21 @@ open Malibu.xcodeproj                    # or:
 xcodebuild -project Malibu.xcodeproj -scheme Malibu -configuration Release
 ```
 
+Local builds report the `0.0.0` development version from `project.yml`.
+Release and candidate builds stamp `MARKETING_VERSION` and
+`CURRENT_PROJECT_VERSION` from the release tag (`scripts/malibu-app-version.sh`).
+
+Run the app tests with a scratch DerivedData so the Debug test host never
+lands in `~/Library/Developer/Xcode/DerivedData`, where Launchpad lists it as
+an installed app:
+
+```
+dd="$(mktemp -d)"
+xcodebuild test -project Malibu.xcodeproj -scheme Malibu -configuration Debug \
+  -destination 'platform=macOS' -derivedDataPath "$dd"
+rm -rf "$dd"
+```
+
 ## Running against a locally-built CLI
 
 The `.app` looks for `macprovider-cli` at `Contents/MacOS/macprovider-cli` first, then falls back to `$MALIBU_CLI_PATH`. For local dev:

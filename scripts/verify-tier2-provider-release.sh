@@ -492,6 +492,22 @@ if [ -n "$app_expected_sha" ]; then
   app_path="$app_mount_dir/Malibu.app"
   [ -d "$app_path" ] || die "$app_asset does not contain Malibu.app"
   [ -x "$app_path/Contents/MacOS/macprovider-cli" ] || die "Malibu.app lacks executable bundled macprovider-cli"
+  # SPEC-025 §3.3: the shipped app is stamped from the release tag.
+  app_bundle_version="$(python3 -c '
+import plistlib, sys
+try:
+    with open(sys.argv[1], "rb") as handle:
+        info = plistlib.load(handle)
+except Exception:
+    raise SystemExit(1)
+version = info.get("CFBundleShortVersionString") if isinstance(info, dict) else None
+if not isinstance(version, str):
+    raise SystemExit(1)
+print(version)
+' "$app_path/Contents/Info.plist")" || die "Malibu.app Info.plist lacks CFBundleShortVersionString"
+  [ "$app_bundle_version" = "${RELEASE_TAG#v}" ] ||
+    die "Malibu.app CFBundleShortVersionString $app_bundle_version does not match release tag $RELEASE_TAG"
+  log "Malibu.app version matches release tag: $app_bundle_version"
   app_tar_payload_dir="$tmpdir/app-tar-payload"
   mkdir -p "$app_tar_payload_dir"
   tar -xzf "$tarball_path" -C "$app_tar_payload_dir" macprovider-cli || die "provider tarball lacks macprovider-cli"

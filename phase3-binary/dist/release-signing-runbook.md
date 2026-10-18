@@ -437,9 +437,6 @@ codesign --verify --strict --deep "$MALIBU_APP"
 test "$(defaults read "$MALIBU_APP/Contents/Info" CFBundleIdentifier)" = tech.malibu.app
 MALIBU_VERSION="$(defaults read "$MALIBU_APP/Contents/Info" CFBundleShortVersionString)"
 MALIBU_BUILD="$(defaults read "$MALIBU_APP/Contents/Info" CFBundleVersion)"
-awk -F '\t' -v version="$MALIBU_VERSION" -v build="$MALIBU_BUILD" \
-  '$1 == version && $2 == build { found = 1 } END { exit !found }' \
-  phase3-binary/app/release-builds.tsv
 test "v$MALIBU_VERSION" = "$TAG"
 test "$MALIBU_BUILD" = "${TAG##*.}"
 xcrun stapler validate "$MALIBU_APP"

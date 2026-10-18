@@ -730,7 +730,7 @@ enum CLIUpdateRunner {
         }
     }
 
-    private static func isUpdaterOwnedMalibuInstall(_ url: URL) -> Bool {
+    static func isUpdaterOwnedMalibuInstall(_ url: URL) -> Bool {
         let standardized = url.standardizedFileURL
         let perUser = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Applications/Malibu.app", isDirectory: true)
@@ -740,7 +740,7 @@ enum CLIUpdateRunner {
         return standardized == system || standardized == perUser
     }
 
-    private static func validateMalibuAppCodeSignature(at appURL: URL) -> Bool {
+    static func validateMalibuAppCodeSignature(at appURL: URL) -> Bool {
         var staticCode: SecStaticCode?
         guard SecStaticCodeCreateWithPath(appURL as CFURL, [], &staticCode) == errSecSuccess,
               let staticCode else {
@@ -776,10 +776,17 @@ enum CLIUpdateRunner {
 
     @MainActor
     private static func defaultRelaunchUpdatedApp(_ plan: UpdatedAppRelaunchPlan) async throws {
-        guard validateMalibuAppCodeSignature(at: plan.bundleURL) else {
+        try await relaunchInstalledApp(at: plan.bundleURL)
+    }
+
+    /// Opens the signature-verified installed bundle as a new process, then
+    /// quits this one. Quit keeps the launchd provider running.
+    @MainActor
+    static func relaunchInstalledApp(at bundleURL: URL) async throws {
+        guard validateMalibuAppCodeSignature(at: bundleURL) else {
             throw Error.appBundleSignatureInvalid
         }
-        try await openUpdatedApp(at: plan.bundleURL)
+        try await openUpdatedApp(at: bundleURL)
         NSApp.terminate(nil)
     }
 

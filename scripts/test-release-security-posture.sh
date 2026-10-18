@@ -230,26 +230,11 @@ MALIBU_BUILD_STEP = r'''        if: ${{ github.event.inputs.promote_run_id == ''
         run: |
           set -euo pipefail
           tag="${{ steps.release_source.outputs.tag }}"
-          version="${tag#v}"
-          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-            echo "::error::release tag does not contain a semantic Malibu version: $tag" >&2
-            exit 1
-          }
-          build="$(awk -v version="$version" '
-            $0 !~ /^[[:space:]]*#/ && NF >= 2 && $1 == version {
-              count += 1
-              value = $2
-            }
-            END {
-              if (count != 1 || value !~ /^[0-9]+$/) {
-                exit 1
-              }
-              print value
-            }
-          ' phase3-binary/app/release-builds.tsv)" || {
-            echo "::error::phase3-binary/app/release-builds.tsv must contain exactly one numeric build for Malibu $version" >&2
-            exit 1
-          }
+          # SPEC-025 §3.3: the release tag stamps the app version and build.
+          version_env="$(bash scripts/malibu-app-version.sh "$tag")"
+          eval "$version_env"
+          version="$MALIBU_APP_VERSION"
+          build="$MALIBU_APP_BUILD"
           cd phase3-binary/app
           "$RUNNER_TEMP/xcodegen-2.45.4/xcodegen/bin/xcodegen" generate
           xcodebuild \

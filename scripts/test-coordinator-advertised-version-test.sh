@@ -9,9 +9,6 @@ app_project_file="$repo_root/phase3-binary/app/project.yml"
 binary_version="$(sed -nE 's/^[[:space:]]*static let binaryVersion = "([^"]+)".*$/\1/p' "$source_file" | head -n 1)"
 app_version="$(sed -nE 's/^[[:space:]]*MARKETING_VERSION: "([^"]+)".*$/\1/p' "$app_project_file" | head -n 1)"
 app_build="$(sed -nE 's/^[[:space:]]*CURRENT_PROJECT_VERSION: "?([0-9]+)"?.*$/\1/p' "$app_project_file" | head -n 1)"
-future_version="${app_version%.*}.$((${app_version##*.} + 1))"
-future_build="$((app_build + 1))"
-future_version_pattern="${future_version//./\\.}"
 work="$(mktemp -d "${TMPDIR:-/tmp}/release-version-cohesion.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
@@ -55,7 +52,7 @@ reset_fixture() {
   cp "$version_guard" "$fixture/scripts/test-coordinator-advertised-version.sh"
   cp "$source_file" "$fixture/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift"
   cp "$app_project_file" "$fixture/phase3-binary/app/project.yml"
-  cp "$repo_root/phase3-binary/app/release-builds.tsv" "$fixture/phase3-binary/app/release-builds.tsv"
+  cp "$repo_root/scripts/malibu-app-version.sh" "$fixture/scripts/malibu-app-version.sh"
   cp "$repo_root/phase4-coordinator/dist/coordinator.yaml" "$fixture/phase4-coordinator/dist/coordinator.yaml"
   cp "$repo_root/phase4-coordinator/coordinator.yaml.example" "$fixture/phase4-coordinator/coordinator.yaml.example"
   cp "$repo_root/phase4-coordinator/dist/coordinator.yaml.example" "$fixture/phase4-coordinator/dist/coordinator.yaml.example"
@@ -143,26 +140,30 @@ reset_fixture
 printf '%s\n' '    CURRENT_PROJECT_VERSION: "999"' >> "$fixture/phase3-binary/app/project.yml"
 expect_fixture_failure duplicate-build 'exactly one numeric CURRENT_PROJECT_VERSION definition (found 2)'
 
-# Malibu and the CLI release independently. A future Malibu release must append
-# a new, strictly larger build without changing the CLI or coordinator version.
+# SPEC-025 §3.3: a shipped app version comes from the release tag, so a
+# hardcoded release version in project.yml is rejected.
 reset_fixture
-sed "s/$app_version/$future_version/g" "$fixture/phase3-binary/app/project.yml" > "$fixture/phase3-binary/app/project.yml.next"
+sed "s/MARKETING_VERSION: \"$app_version\"/MARKETING_VERSION: \"$binary_version\"/" "$fixture/phase3-binary/app/project.yml" > "$fixture/phase3-binary/app/project.yml.next"
 mv "$fixture/phase3-binary/app/project.yml.next" "$fixture/phase3-binary/app/project.yml"
-if run_fixture_guard >"$work/future-missing-build.out" 2>&1; then
-  echo "version guard accepted a future release without a release-build ledger entry" >&2
-  exit 1
-fi
-grep -q "exactly one entry for $future_version" "$work/future-missing-build.out"
-printf '%s\t%s\n' "$future_version" "$app_build" >> "$fixture/phase3-binary/app/release-builds.tsv"
-if run_fixture_guard >"$work/future-reused-build.out" 2>&1; then
-  echo "version guard accepted a future release that reused build $app_build" >&2
-  exit 1
-fi
-grep -q 'duplicate build' "$work/future-reused-build.out"
-sed "s/${future_version_pattern}[[:space:]]*$app_build/$future_version $future_build/" "$fixture/phase3-binary/app/release-builds.tsv" > "$fixture/phase3-binary/app/release-builds.tsv.next"
-mv "$fixture/phase3-binary/app/release-builds.tsv.next" "$fixture/phase3-binary/app/release-builds.tsv"
-sed "s/CURRENT_PROJECT_VERSION: \"$app_build\"/CURRENT_PROJECT_VERSION: \"$future_build\"/" "$fixture/phase3-binary/app/project.yml" > "$fixture/phase3-binary/app/project.yml.next"
-mv "$fixture/phase3-binary/app/project.yml.next" "$fixture/phase3-binary/app/project.yml"
-run_fixture_guard
+expect_fixture_failure hardcoded-marketing 'must keep the development default'
 
-echo "independent Malibu and CLI release-version regression checks passed"
+reset_fixture
+sed "s/CURRENT_PROJECT_VERSION: \"$app_build\"/CURRENT_PROJECT_VERSION: \"${binary_version##*.}\"/" "$fixture/phase3-binary/app/project.yml" > "$fixture/phase3-binary/app/project.yml.next"
+mv "$fixture/phase3-binary/app/project.yml.next" "$fixture/phase3-binary/app/project.yml"
+expect_fixture_failure hardcoded-build 'must keep the development default'
+
+reset_fixture
+stamp_output="$(run_fixture_guard)"
+grep -q "Malibu is stamped $binary_version build ${binary_version##*.} from the release tag" <<<"$stamp_output"
+
+# The stamp helper accepts only an exact release tag with a positive patch.
+stamp_helper="$repo_root/scripts/malibu-app-version.sh"
+[[ "$(bash "$stamp_helper" v1.8.251)" == "MALIBU_APP_VERSION='1.8.251'"$'\n'"MALIBU_APP_BUILD='251'" ]]
+for bad_tag in 1.8.251 v1.8 v1.8.251-rc1 v1.9.0 v01.8.2 "v1.8.2;id" ""; do
+  if bash "$stamp_helper" "$bad_tag" >/dev/null 2>&1; then
+    echo "Malibu app stamp helper accepted invalid tag: $bad_tag" >&2
+    exit 1
+  fi
+done
+
+echo "tag-stamped Malibu and CLI release-version regression checks passed"

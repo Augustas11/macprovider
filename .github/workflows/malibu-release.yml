@@ -109,11 +109,9 @@ jobs:
           test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
           git fetch --quiet --no-tags origin refs/heads/main:refs/remotes/origin/main
           test "$(git rev-parse refs/remotes/origin/main)" = "$SOURCE_COMMIT"
-          project_version="$(sed -nE 's/^[[:space:]]*MARKETING_VERSION:[[:space:]]*"([^"]+)".*$/\1/p' phase3-binary/app/project.yml)"
-          project_build="$(sed -nE 's/^[[:space:]]*CURRENT_PROJECT_VERSION:[[:space:]]*"?([0-9]+)"?.*$/\1/p' phase3-binary/app/project.yml)"
-          test "$project_version" = "$APP_VERSION"
-          test "$project_build" = "${APP_VERSION##*.}"
-          grep -Eq "^${APP_VERSION}[[:space:]]+${project_build}$" phase3-binary/app/release-builds.tsv
+          # SPEC-025 §3.3: the app is stamped from the release version at build
+          # time; project.yml carries only a development default.
+          bash scripts/malibu-app-version.sh "v${APP_VERSION}" >/dev/null
           if git ls-remote --exit-code --tags origin "refs/tags/v${APP_VERSION}" >/dev/null 2>&1; then
             echo "::error::release tag v${APP_VERSION} already exists" >&2
             exit 1
@@ -135,6 +133,8 @@ jobs:
 
       - name: Test and archive Malibu
         shell: bash
+        env:
+          APP_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
           cd phase3-binary/app
@@ -144,7 +144,11 @@ jobs:
             -scheme Malibu \
             -configuration Debug \
             -destination "platform=macOS" \
+            -derivedDataPath "$RUNNER_TEMP/MalibuTestDerivedData" \
             test
+          rm -rf "$RUNNER_TEMP/MalibuTestDerivedData"
+          version_env="$(bash "$GITHUB_WORKSPACE/scripts/malibu-app-version.sh" "v${APP_VERSION}")"
+          eval "$version_env"
           xcodebuild \
             -project Malibu.xcodeproj \
             -scheme Malibu \
@@ -153,12 +157,13 @@ jobs:
             -archivePath "$RUNNER_TEMP/Malibu.xcarchive" \
             archive \
             ARCHS=arm64 \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_ALLOWED=NO \
+            MARKETING_VERSION="$MALIBU_APP_VERSION" \
+            CURRENT_PROJECT_VERSION="$MALIBU_APP_BUILD"
           cp -R "$RUNNER_TEMP/Malibu.xcarchive/Products/Applications/Malibu.app" \
             "$RUNNER_TEMP/Malibu.app"
           plist="$RUNNER_TEMP/Malibu.app/Contents/Info.plist"
-          app_build='${{ inputs.version }}'
-          app_build="${app_build##*.}"
+          app_build="$MALIBU_APP_BUILD"
           /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist" |
             grep -qx 'tech.malibu.app'
           /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \

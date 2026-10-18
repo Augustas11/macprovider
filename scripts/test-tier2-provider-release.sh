@@ -114,9 +114,18 @@ make_release_fixture() {
   case "$app_mode" in
     none)
       ;;
-    good|bad-cli)
+    good|bad-cli|bad-version)
       local app_root="$fixture_dir/app-root"
       mkdir -p "$app_root/Malibu.app/Contents/MacOS"
+      local app_plist_version="$version"
+      if [ "$app_mode" = "bad-version" ]; then
+        app_plist_version="1.8.224"
+      fi
+      python3 -c '
+import plistlib, sys
+with open(sys.argv[1], "wb") as handle:
+    plistlib.dump({"CFBundleIdentifier": "tech.malibu.app", "CFBundleShortVersionString": sys.argv[2]}, handle)
+' "$app_root/Malibu.app/Contents/Info.plist" "$app_plist_version"
       printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$app_root/Malibu.app/Contents/MacOS/Malibu"
       cp "$binary_dir/macprovider-cli" "$app_root/Malibu.app/Contents/MacOS/macprovider-cli"
       if [ "$app_mode" = "bad-cli" ]; then
@@ -381,6 +390,19 @@ if PATH="$WORKDIR:$PATH" \
   die "mismatched Malibu.app CLI unexpectedly passed"
 fi
 assert_contains "$WORKDIR/bad-app.err" "Malibu.app bundled binary sha256 differs from tarball binary"
+assert_contains "$WORKDIR/app.err" "Malibu.app version matches release tag: 1.2.6"
+
+stale_app_fixture="$WORKDIR/stale-app-release"
+make_release_fixture "$stale_app_fixture" "1.2.6" "1" "none" "bad-version"
+if PATH="$WORKDIR:$PATH" \
+  CURL_BIN="$WORKDIR/curl" \
+  RELEASE_FIXTURE_DIR="$stale_app_fixture" \
+  MACPROVIDER_CHECKSUM_PUBLIC_KEY_PEM="$PUBLIC_KEY_PEM" \
+  RELEASE_TAG=v1.2.6 \
+  "$VERIFIER" >"$WORKDIR/stale-app.out" 2>"$WORKDIR/stale-app.err"; then
+  die "stale Malibu.app version stamp unexpectedly passed"
+fi
+assert_contains "$WORKDIR/stale-app.err" "Malibu.app CFBundleShortVersionString 1.8.224 does not match release tag v1.2.6"
 
 bad_package_fixture="$WORKDIR/bad-package-release"
 make_release_fixture "$bad_package_fixture" "1.2.6" "1" "bad-extra"
