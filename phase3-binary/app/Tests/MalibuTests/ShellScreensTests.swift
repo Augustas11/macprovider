@@ -142,6 +142,17 @@ final class ShellScreensTests: XCTestCase {
                        "rate, then demand rank, then supply deficit, then canonical identity bytes")
     }
 
+    func testAfterASwitchOnlyTheNewModelReadsAsCurrent() throws {
+        let rows = try [
+            Self.row(key: "old-model", isCurrent: true),
+            Self.row(key: "new-model", weightsLocal: true, switchable: true),
+        ]
+        let after = rows.map { $0.reclassified(currentModelID: "new-model", warmSwapAvailable: true) }.sortedForDisplay()
+        XCTAssertEqual(after.filter { $0.category == .current }.map(\.id), ["new-model"])
+        XCTAssertEqual(after.first?.id, "new-model")
+        XCTAssertTrue(after.allSatisfy { $0.action == .none }, "no new action until the catalog refreshes")
+    }
+
     func testProviderTextIsShownAsOnePlainLine() {
         XCTAssertEqual(ShellText.display("a\u{0007}b\u{200F}c\nd"), "abc d")
         XCTAssertEqual(ShellText.display(String(repeating: "x", count: 50), maxLength: 10), "xxxxxxxxx…")
@@ -172,6 +183,7 @@ final class ShellScreensTests: XCTestCase {
         XCTAssertTrue(text.contains("nothing is downloaded"))
         XCTAssertTrue(text.contains(d("Provider share rate $0§36")))
         XCTAssertTrue(lines.contains(ModelsPresentation.rateDisclosure))
+        XCTAssertTrue(ModelsPresentation.rateDisclosure.contains("sanctions or probation"), "SPEC-044-R004 names sanctions and probation")
         XCTAssertTrue(lines.contains(try XCTUnwrap(ready.nonEarningDisclosure)), "a catalog_priced row keeps its no-credit caveat")
         assertNoForbiddenCopy(lines)
         XCTAssertEqual(SwitchSheetPresentation.confirmTitle(target: "x", isRevert: false), "Switch to x?")
@@ -311,6 +323,11 @@ final class ShellScreensTests: XCTestCase {
         ]))
         XCTAssertNil(ProviderScreenPresentation.continuousBatchingLine(unknown), "an unknown CB mode is not shown as a known state")
         XCTAssertNil(ProviderScreenPresentation.nativeMTPLine(unknown), "an unknown MTP mode is not shown as a known state")
+
+        let partial = try XCTUnwrap(ProviderEngineStatus.decode(status: [
+            "continuous_batching": ["mode": "on", "active": true, "scheduler": ["slots_total": 8]],
+        ]))
+        XCTAssertEqual(ProviderScreenPresentation.continuousBatchingLine(partial), "On", "a missing free count is omitted, not zero")
     }
 
     func testProviderScreenShowsReportedValuesOnlyAndPauseMatchesState() {

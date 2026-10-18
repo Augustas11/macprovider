@@ -2153,7 +2153,9 @@ final class ModelManagementStore: ObservableObject {
     private let cli: any MalibuModelCLIRunning
     /// A separate runner so a browse never shares the catalog read's
     /// cancellation slot.
-    private let browseCLI: any MalibuModelCLIRunning
+    /// Builds a fresh runner for every search, so a timed-out search's
+    /// cancellation can never reach a later one.
+    private let makeBrowseCLI: () -> any MalibuModelCLIRunning
     var browseCommandTimeoutSeconds: TimeInterval = 20
     /// Bumped per search and at the deadline, so a late reply is ignored.
     private var browseGeneration: UInt64 = 0
@@ -2184,13 +2186,13 @@ final class ModelManagementStore: ObservableObject {
 
     init(
         cli: any MalibuModelCLIRunning = MalibuModelCLI.shared,
-        browseCLI: any MalibuModelCLIRunning = MalibuModelCLI(maxOutputBytes: 1_048_576),
+        makeBrowseCLI: @escaping () -> any MalibuModelCLIRunning = { MalibuModelCLI(maxOutputBytes: 1_048_576) },
         paths: ProviderPaths = .current,
         defaults: UserDefaults = .standard,
         powerMonitor: MalibuPowerMonitor = MalibuPowerMonitor()
     ) {
         self.cli = cli
-        self.browseCLI = browseCLI
+        self.makeBrowseCLI = makeBrowseCLI
         self.paths = paths
         self.defaults = defaults
         self.powerMonitor = powerMonitor
@@ -2414,7 +2416,7 @@ final class ModelManagementStore: ObservableObject {
                 } else if peerObservationFresh, let currentModelID {
                     self.currentModelID = currentModelID
                     operation = .runtimeConflict(expected: pendingSwitch.targetModelID, observed: currentModelID)
-                    statusLine = String(localized: "Runtime state conflict. The provider reports \(currentModelID), not \(pendingSwitch.targetModelID). New model actions remain disabled until the runtime state is reconciled.", comment: "Model runtime conflict")
+                    statusLine = String(localized: "Runtime state conflict. The provider reports \(ShellText.display(currentModelID)), not \(ShellText.display(pendingSwitch.targetModelID)). New model actions remain disabled until the runtime state is reconciled.", comment: "Model runtime conflict")
                 } else {
                     statusLine = String(localized: "Reconciling runtime state… New model actions remain disabled until the provider confirms the loaded model.", comment: "Model runtime reconciliation")
                 }
@@ -2515,7 +2517,7 @@ final class ModelManagementStore: ObservableObject {
         otherMLXState = .loading
         var arguments = ["models", "browse", "--json", "--limit", "30"]
         if let family { arguments += ["--family", family] }
-        let runner = browseCLI
+        let runner = makeBrowseCLI()
         let timeoutNanoseconds = UInt64(max(0, browseCommandTimeoutSeconds) * 1_000_000_000)
         // A hard deadline: the screen leaves "loading" when it passes, whether
         // or not the subprocess has exited yet.
@@ -2668,8 +2670,10 @@ final class ModelManagementStore: ObservableObject {
         }
     }
 
-    func switchTo(_ row: MalibuModelRow, operationName: String = "switch") async {
-        guard row.action == .switchModel, canPerformModelAction else { return }
+    /// Returns false when the switch did not start (controls not ready).
+    @discardableResult
+    func switchTo(_ row: MalibuModelRow, operationName: String = "switch") async -> Bool {
+        guard row.action == .switchModel, canPerformModelAction else { return false }
         let from = currentModelID
         activeSwitchTransactionID = nil
         terminalSwitchTransactionID = nil
@@ -2696,7 +2700,7 @@ final class ModelManagementStore: ObservableObject {
         } catch {
             cancelSwitchWatchdog()
             recordFailure(operation: operationName, from: from, to: row.id, reason: safeOperationError(error))
-            return
+            return true
         }
         cancelSwitchWatchdog()
         guard result.exitCode == 0,
@@ -2705,11 +2709,12 @@ final class ModelManagementStore: ObservableObject {
               phase == "loaded" else {
             let reason = operationFailureReason(from: result)
             recordFailure(operation: operationName, from: from, to: row.id, reason: reason)
-            return
+            return true
         }
         pendingSwitch = PendingSwitch(operationName: operationName, fromModelID: from, targetModelID: row.id)
         operation = .reconciling(target: row.id)
         statusLine = String(localized: "Reconciling runtime state… New model actions remain disabled until the provider confirms the loaded model.", comment: "Model runtime reconciliation")
+        return true
     }
 
     func activate(_ row: MalibuModelRow) async {
@@ -2972,7 +2977,7 @@ final class ModelManagementStore: ObservableObject {
             outcome: "success",
             reason: nil
         ))
-        rows = rows.map { $0.reclassified(currentModelID: currentModelID, warmSwapAvailable: true) }
+        rows = rows.map { $0.reclassified(currentModelID: currentModelID, warmSwapAvailable: true) }.sortedForDisplay()
         saveState()
     }
 
@@ -3956,7 +3961,9 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         if currentModelID.map({ modelIdentityKey(id) == modelIdentityKey($0) }) == true {
             copy.category = .current
             copy.blockReason = nil
-        } else if category == .ready {
+        } else if category == .ready || category == .current {
+            // The previously current row is no longer served; only one row
+            // may read as current until the refreshed projection arrives.
             copy.category = .blocked
             copy.blockReason = String(localized: "Refresh the model catalog before starting another model action.", comment: "Catalog action refresh guard")
         }

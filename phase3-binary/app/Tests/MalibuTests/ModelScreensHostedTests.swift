@@ -18,7 +18,7 @@ final class ModelScreensHostedTests: XCTestCase {
         let cli = ProjectionCLI(stdout: Self.projection(rows: rows))
         let store = ModelManagementStore(
             cli: cli,
-            browseCLI: ProjectionCLI(stdout: ""),
+            makeBrowseCLI: { ProjectionCLI(stdout: "") },
             paths: Self.paths(),
             defaults: UserDefaults(suiteName: "ModelScreensHostedTests.\(UUID().uuidString)")!
         )

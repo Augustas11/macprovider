@@ -414,20 +414,20 @@ struct DiscoverScreen: View {
                 : String(localized: "No installed model recommendation", comment: "No recommendation callout title"))
                 .font(.headline)
             if let target = recommendation.displayModelID {
-                Text(target)
+                Text(ShellText.display(target))
                     .font(.callout.monospaced())
                     .lineLimit(2)
                     .truncationMode(.middle)
                     .textSelection(.enabled)
             }
             if let rationale = recommendation.displayRationale {
-                Text(rationale)
+                Text(ShellText.display(rationale, maxLength: 600))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             ForEach(recommendation.displayEvidenceLines, id: \.self) { line in
-                Text(line)
+                Text(ShellText.display(line, maxLength: 600))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -437,14 +437,19 @@ struct DiscoverScreen: View {
                 Text(String(localized: "Estimated rates: prompt $\(prompt, format: .number.precision(.fractionLength(2...4))) / 1M; completion $\(completion, format: .number.precision(.fractionLength(2...4))) / 1M.", comment: "Recommendation estimated rates"))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+                // SPEC-044-R004: the disclosure travels with these rates.
+                Text(ModelsPresentation.rateDisclosure)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if !recommendation.warnings.isEmpty {
-                Text(String(localized: "Warnings: \(recommendation.warnings.joined(separator: ", "))", comment: "Recommendation warnings"))
+                Text(String(localized: "Warnings: \(recommendation.warnings.map { ShellText.display($0) }.joined(separator: ", "))", comment: "Recommendation warnings"))
                     .font(.caption2)
                     .foregroundStyle(.orange)
             }
             if let unavailableReason = store.recommendationAdoptionUnavailableReason {
-                Text(unavailableReason)
+                Text(ShellText.display(unavailableReason, maxLength: 600))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

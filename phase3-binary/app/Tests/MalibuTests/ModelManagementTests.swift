@@ -1144,6 +1144,36 @@ final class ModelManagementTests: XCTestCase {
     }
 
     @MainActor
+    func testSwitchReportsNotStartedWhenControlsAreNotReady() async throws {
+        let cli = FakeModelCLI(results: [
+            ModelCLIResult(
+                exitCode: 0,
+                stdout: catalogEconomicsJSON(
+                    rows: [trustedEconomicsRowJSON(switchAction: availableActionJSON(kind: "switch_model", timeout: 20))],
+                    generatedAt: Self.timestamp(offset: -1)
+                ),
+                stderr: ""
+            ),
+        ])
+        let store = ModelManagementStore(
+            cli: cli,
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.switchNotStarted.\(UUID().uuidString)")!
+        )
+        // No ready-switch capability: the row is listed but switching is closed.
+        await store.refresh(currentModelID: "other/model", peer: peer(for: MalibuModelCapabilityManifest.catalogEconomics))
+        let row = try XCTUnwrap(store.rows.first)
+        XCTAssertFalse(store.canPerformModelAction)
+        let invocationsBefore = cli.invocations.count
+
+        let started = await store.switchTo(row)
+
+        XCTAssertFalse(started, "the switch sheet must leave \"requested\" when nothing started")
+        XCTAssertEqual(cli.invocations.count, invocationsBefore, "no switch command runs")
+        XCTAssertEqual(store.operation, .idle)
+    }
+
+    @MainActor
     func testCatalogProjectionExpiryClearsRowsDuringRuntimeConflict() async throws {
         let expiringAt = Self.timestamp(offset: -299.8)
         let action = availableActionJSON(kind: "switch_model", timeout: 20)
@@ -1400,7 +1430,7 @@ final class ModelManagementTests: XCTestCase {
 
     func testCatalogEconomicsDisplayCopyAvoidsForbiddenRewardClaims() {
         let strings = [
-            "Catalog rates are informational. Final provider credit depends on eligible demand, uptime, accepted requests, trust state, routing, token mix, settlement, and active policy status.",
+            "Catalog rates are informational. Final provider credit depends on eligible demand, uptime, accepted requests, trust state, routing, token mix, settlement, and any active sanctions or probation.",
             "Provider share rate: completion $0.36 per 1M tokens.",
             "Provider share rate: prompt $0.18 per 1M tokens.",
             "No provider credit yet; catalog and receipt checks are still required.",
@@ -2336,7 +2366,7 @@ final class ModelManagementTests: XCTestCase {
         ])
         let store = ModelManagementStore(
             cli: cli,
-            browseCLI: browse,
+            makeBrowseCLI: { browse },
             paths: testProviderPaths(),
             defaults: UserDefaults(suiteName: "ModelManagementTests.browse.\(UUID().uuidString)")!
         )
@@ -2354,9 +2384,13 @@ final class ModelManagementTests: XCTestCase {
     @MainActor
     func testBrowseOtherMLXModelsNeedsTheCatalogJSONCapabilityAndTimesOut() async throws {
         let hanging = HangingModelCLI()
+        var runnersMade = 0
         let store = ModelManagementStore(
             cli: FakeModelCLI(results: []),
-            browseCLI: hanging,
+            makeBrowseCLI: {
+                runnersMade += 1
+                return hanging
+            },
             paths: testProviderPaths(),
             defaults: UserDefaults(suiteName: "ModelManagementTests.browse-timeout.\(UUID().uuidString)")!
         )
@@ -2369,6 +2403,11 @@ final class ModelManagementTests: XCTestCase {
         XCTAssertTrue(hanging.cancelled)
         XCTAssertEqual(store.otherMLXState, .unavailable("Hugging Face did not answer in time. Try again."))
         XCTAssertTrue(store.otherMLXModels.isEmpty)
+
+        // A retry gets its own runner, so the timed-out search's cancellation
+        // can never reach it.
+        await store.browseOtherMLXModels(query: "qwen")
+        XCTAssertEqual(runnersMade, 2)
     }
 
     private func catalogEconomicsJSON(

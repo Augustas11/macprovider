@@ -13,6 +13,8 @@ enum SwitchSheetPresentation {
 
     static let steps = ["requested", "loading", "draining", "loaded"]
 
+    static let notStarted = String(localized: "The provider's model controls were not ready, so nothing changed. Refresh Models and try again.", comment: "Switch did not start")
+
     static func stepTitle(_ phase: String) -> String {
         switch phase {
         case "requested": return String(localized: "Switch requested", comment: "Switch progress step")
@@ -30,7 +32,7 @@ enum SwitchSheetPresentation {
 
     static func confirmLines(row: MalibuModelRow, currentModelID: String?, allRows: [MalibuModelRow]) -> [String] {
         var lines = [
-            String(localized: "From \(currentModelID ?? "the current model") to \(ModelsPresentation.name(row)).", comment: "Switch sheet transition"),
+            String(localized: "From \(currentModelID.map { ShellText.display($0) } ?? "the current model") to \(ModelsPresentation.name(row)).", comment: "Switch sheet transition"),
             String(localized: "Customers get a \"provider loading\" response (HTTP 503) while the new model loads and requests already running finish. Switching can't be cancelled once it starts.", comment: "Switch sheet customer impact"),
             String(localized: "The weights are already on this Mac; nothing is downloaded. If loading fails, this Mac keeps serving the current model.", comment: "Switch sheet local-only note"),
         ]
@@ -95,9 +97,11 @@ struct ModelSwitchSheet: View {
     let onClose: () -> Void
     @State private var started = false
     @State private var observedStart = false
+    @State private var refusedToStart = false
 
     private var stage: SwitchSheetPresentation.Stage {
         guard started else { return .confirm }
+        if refusedToStart { return .failed(SwitchSheetPresentation.notStarted) }
         return SwitchSheetPresentation.stage(
             operation: store.operation,
             target: row.id,
@@ -133,7 +137,10 @@ struct ModelSwitchSheet: View {
                            ? String(localized: "Revert", comment: "Model feature action")
                            : String(localized: "Switch", comment: "Model feature action")) {
                         started = true
-                        Task { await store.switchTo(row, operationName: isRevert ? "revert" : "switch") }
+                        Task {
+                            let didStart = await store.switchTo(row, operationName: isRevert ? "revert" : "switch")
+                            if !didStart { refusedToStart = true }
+                        }
                     }
                     .keyboardShortcut(.defaultAction)
                     .disabled(!store.canPerformModelAction)

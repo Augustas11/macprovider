@@ -10101,7 +10101,7 @@
       "spec_id": "SPEC-025",
       "state": "pending",
       "implementation": [
-        "phase3-binary/app/Sources/Malibu/Shell/ProviderScreen.swift:struct ProviderEngineStatus",
+        "phase3-binary/app/Sources/Malibu/Agent/ProviderEngineStatus.swift:struct ProviderEngineStatus",
         "phase3-binary/app/Sources/Malibu/Shell/ProviderScreen.swift:enum ProviderScreenPresentation"
       ],
       "tests": [

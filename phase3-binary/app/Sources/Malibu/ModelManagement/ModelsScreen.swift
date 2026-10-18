@@ -4,7 +4,7 @@ import SwiftUI
 /// Copy and row projection for the Models and Discover screens. Rates only:
 /// no $/time figures and no income claims (SPEC-044-R004).
 enum ModelsPresentation {
-    static let rateDisclosure = String(localized: "Catalog rates are informational. Final provider credit depends on eligible demand, uptime, accepted requests, trust state, routing, token mix, settlement, and active policy status.", comment: "Catalog economics disclosure")
+    static let rateDisclosure = String(localized: "Catalog rates are informational. Final provider credit depends on eligible demand, uptime, accepted requests, trust state, routing, token mix, settlement, and any active sanctions or probation.", comment: "Catalog economics disclosure")
     static let switchingCost = String(localized: "Switching pauses new customer work while the new model loads: customers get a \"provider loading\" response (HTTP 503) until it is ready. Weights must already be on this Mac; switching never downloads.", comment: "Models footer switching cost")
 
     struct Section: Equatable {
@@ -458,7 +458,7 @@ struct ModelsScreen: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(String(localized: "Previous confirmed model", comment: "Revert section"))
                         .font(.headline)
-                    Text(previous)
+                    Text(ShellText.display(previous))
                         .font(.caption.monospaced())
                         .textSelection(.enabled)
                     Button(String(localized: "Revert to \(previous)", comment: "Revert action with target model")) {
@@ -488,7 +488,7 @@ struct ModelsScreen: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(String(localized: "\(ModelsPresentation.operationLabel(entry.operation)): \(ModelsPresentation.outcomeLabel(entry.outcome))", comment: "Model history operation and outcome"))
                                 .font(.caption.weight(.semibold))
-                            Text(String(localized: "From \(entry.fromModelID ?? "No previous model") to \(entry.toModelID)", comment: "Model history transition"))
+                            Text(String(localized: "From \(entry.fromModelID.map { ShellText.display($0) } ?? "No previous model") to \(ShellText.display(entry.toModelID))", comment: "Model history transition"))
                                 .font(.caption.monospaced())
                                 .lineLimit(2)
                                 .truncationMode(.middle)
