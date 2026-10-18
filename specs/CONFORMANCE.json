@@ -725,7 +725,7 @@
     {
       "spec_id": "SPEC-025",
       "title": "Native Mac App (signed `.dmg`, native Mac app with menu-bar presence)",
-      "version": "v0.32.0",
+      "version": "v0.33.0",
       "path": "specs/SPEC-025-native-mac-app.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1322,7 +1322,7 @@
     {
       "spec_id": "SPEC-044",
       "title": "Malibu Model Catalog Economics",
-      "version": "0.2.10",
+      "version": "0.2.11",
       "path": "specs/SPEC-044-malibu-model-catalog-economics.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -4171,7 +4171,7 @@
       "implementation": [
         "phase3-binary/app/Sources/Malibu/Agent/AgentSnapshot.swift:private static func publicStatusForTopDiagnosticFinding",
         "phase3-binary/app/Sources/Malibu/Agent/MalibuAgent.swift:private func refreshDiagnosticFindings",
-        "phase3-binary/app/Sources/Malibu/Dashboard/DashboardWindow.swift:static func advancedDiagnosticsStrings",
+        "phase3-binary/app/Sources/Malibu/Shell/DiagnosticsScreen.swift:static func screenStrings",
         "phase3-binary/app/Sources/Malibu/System/ProviderDiagnosticFinding.swift:enum ProviderDiagnosticFindingAggregator",
         "phase3-binary/Sources/macprovider-cli/DoctorCommand.swift:static func findings",
         "phase3-binary/Sources/macprovider-cli/DoctorCommand.swift:static func statusObservation"
@@ -9789,7 +9789,7 @@
       "implementation": [
         "phase3-binary/app/Sources/Malibu/ModelManagement/ModelManagement.swift:struct MalibuModelRow",
         "phase3-binary/app/Sources/Malibu/ModelManagement/ModelManagement.swift:func sortedForDisplay",
-        "phase3-binary/app/Sources/Malibu/ModelManagement/ModelManagementViews.swift:ModelSwitcherSheet"
+        "phase3-binary/app/Sources/Malibu/ModelManagement/ModelsScreen.swift:struct ModelsScreen"
       ],
       "tests": [
         "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testCatalogEconomicsValidationAcceptsTrustedCoordinatorRows",
@@ -9837,7 +9837,7 @@
       "state": "pending",
       "implementation": [
         "phase3-binary/app/Sources/Malibu/ModelManagement/ModelManagement.swift:private func refreshCatalogEconomics",
-        "phase3-binary/app/Sources/Malibu/ModelManagement/ModelManagementViews.swift:ModelSwitcherSheet"
+        "phase3-binary/app/Sources/Malibu/ModelManagement/ModelsScreen.swift:struct ModelsScreen"
       ],
       "tests": [
         "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testRefreshUsesCatalogEconomicsProjectionWhenAdvertised",
@@ -9859,7 +9859,7 @@
       "implementation": [
         "phase3-binary/app/Sources/Malibu/ModelManagement/ModelManagement.swift:var catalogProjectionRetryAvailable",
         "phase3-binary/app/Sources/Malibu/ModelManagement/ModelManagement.swift:private func refreshCatalogEconomics",
-        "phase3-binary/app/Sources/Malibu/ModelManagement/ModelManagementViews.swift:ModelSwitcherSheet"
+        "phase3-binary/app/Sources/Malibu/ModelManagement/ModelsScreen.swift:struct ModelsScreen"
       ],
       "tests": [
         "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testRefreshFallsBackToStaticCurrentStateWhenProjectionFails",
@@ -9884,7 +9884,7 @@
       "spec_id": "SPEC-044",
       "state": "pending",
       "implementation": [
-        "phase3-binary/app/Sources/Malibu/ModelManagement/ModelManagementViews.swift:ModelSwitcherSheet",
+        "phase3-binary/app/Sources/Malibu/ModelManagement/ModelsScreen.swift:struct ModelsScreen",
         "phase3-binary/app/Sources/Malibu/ModelManagement/ModelManagementViews.swift:ModelRowView"
       ],
       "tests": [
@@ -9972,6 +9972,212 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1257",
         "rationale": "Slice #1257 adds partial Malibu projection decoding, grouping, old-CLI fallback, projection-failed fallback, forbidden-copy, and action-gating coverage. SPEC-044 v0.2.10 now assigns the complete CSPRNG/restart/freshness/feed-trust, conditional-copy, reserved offer_rejected quarantine, total-ranking/UX, compatibility/transport, bounded-cancel and dispatch-state contention, exhaustive lock traces and pairwise overlaps, failed-dispatch durability interleavings, recovery/ACL, and signed-journey matrices to concrete acceptance lanes; that evidence remains pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-025-R001",
+      "spec_id": "SPEC-025",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/app/Sources/Malibu/Shell/MainWindow.swift:enum MalibuSection",
+        "phase3-binary/app/Sources/Malibu/Shell/MainWindow.swift:struct MainShellView"
+      ],
+      "tests": [
+        "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testSidebarSectionsAreInTheAuditOrder",
+        "phase3-binary/app/Tests/MalibuTests/DashboardWindowE2ETests.swift::testHostedShellVisitsEverySectionResizesAndScrolls"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2054",
+        "rationale": "Phase 2 shell requirement added in SPEC-025 v0.33.0; app view-model and hosted-window tests exist, conformance fragments and release evidence are not yet mapped."
+      }
+    },
+    {
+      "requirement_id": "SPEC-025-R002",
+      "spec_id": "SPEC-025",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/app/Sources/Malibu/Shell/MainWindow.swift:enum ShellSidebarPresentation"
+      ],
+      "tests": [
+        "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testSidebarFooterShowsLoadedModelAndHealth"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2054",
+        "rationale": "Phase 2 shell requirement added in SPEC-025 v0.33.0; app view-model and hosted-window tests exist, conformance fragments and release evidence are not yet mapped."
+      }
+    },
+    {
+      "requirement_id": "SPEC-025-R003",
+      "spec_id": "SPEC-025",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/app/Sources/Malibu/Dashboard/DashboardWindow.swift:struct DashboardView"
+      ],
+      "tests": [
+        "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testDashboardYourModelCardShowsRateDemandAndDisclosureForTrustedCurrentRow",
+        "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testDashboardHasNoAdvancedDiagnosticsAndNoInviteNudgeWithoutAnInvite"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2054",
+        "rationale": "Phase 2 shell requirement added in SPEC-025 v0.33.0; app view-model and hosted-window tests exist, conformance fragments and release evidence are not yet mapped."
+      }
+    },
+    {
+      "requirement_id": "SPEC-025-R004",
+      "spec_id": "SPEC-025",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/app/Sources/Malibu/ModelManagement/ModelsScreen.swift:struct ModelsScreen"
+      ],
+      "tests": [
+        "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testModelsSectionsFollowSpec044R008OrderAndFilter",
+        "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testModelsScreenCopyCarriesTheRateDisclosureAndNoIncomeClaims",
+        "phase3-binary/app/Tests/MalibuTests/ModelScreensHostedTests.swift::testPopulatedModelsAndDiscoverScreensRender"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2054",
+        "rationale": "Phase 2 shell requirement added in SPEC-025 v0.33.0; app view-model and hosted-window tests exist, conformance fragments and release evidence are not yet mapped."
+      }
+    },
+    {
+      "requirement_id": "SPEC-025-R005",
+      "spec_id": "SPEC-025",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/app/Sources/Malibu/ModelManagement/ModelSwitchSheet.swift:struct ModelSwitchSheet"
+      ],
+      "tests": [
+        "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testSwitchConfirmationStatesCustomerImpactAndNoCancel",
+        "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testSwitchSheetStageFollowsSwitchProgress"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2054",
+        "rationale": "Phase 2 shell requirement added in SPEC-025 v0.33.0; app view-model and hosted-window tests exist, conformance fragments and release evidence are not yet mapped."
+      }
+    },
+    {
+      "requirement_id": "SPEC-025-R006",
+      "spec_id": "SPEC-025",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/app/Sources/Malibu/ModelManagement/DiscoverScreen.swift:struct DiscoverScreen",
+        "phase3-binary/app/Sources/Malibu/ModelManagement/ModelManagement.swift:func browseOtherMLXModels"
+      ],
+      "tests": [
+        "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testBrowseQueryIsSanitized",
+        "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testBrowseOtherMLXModelsNeedsTheCatalogJSONCapabilityAndTimesOut"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2054",
+        "rationale": "Phase 2 shell requirement added in SPEC-025 v0.33.0; app view-model and hosted-window tests exist, conformance fragments and release evidence are not yet mapped."
+      }
+    },
+    {
+      "requirement_id": "SPEC-025-R007",
+      "spec_id": "SPEC-025",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/app/Sources/Malibu/Shell/ProviderScreen.swift:struct ProviderEngineStatus",
+        "phase3-binary/app/Sources/Malibu/Shell/ProviderScreen.swift:enum ProviderScreenPresentation"
+      ],
+      "tests": [
+        "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testEngineStatusDecodesCBAndMTPFromStatus",
+        "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testProviderScreenShowsReportedValuesOnlyAndPauseMatchesState"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2054",
+        "rationale": "Phase 2 shell requirement added in SPEC-025 v0.33.0; app view-model and hosted-window tests exist, conformance fragments and release evidence are not yet mapped."
+      }
+    },
+    {
+      "requirement_id": "SPEC-025-R008",
+      "spec_id": "SPEC-025",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/app/Sources/Malibu/Shell/DiagnosticsScreen.swift:enum DiagnosticsPresentation"
+      ],
+      "tests": [
+        "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testDiagnosticsLogFilterCollapsesIdlePrewarmNoise",
+        "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testDiagnosticsAlwaysOffersExportAndResetAndNamesNoFindingsHonestly"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2054",
+        "rationale": "Phase 2 shell requirement added in SPEC-025 v0.33.0; app view-model and hosted-window tests exist, conformance fragments and release evidence are not yet mapped."
+      }
+    },
+    {
+      "requirement_id": "SPEC-025-R009",
+      "spec_id": "SPEC-025",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/app/Sources/Malibu/Shell/SettingsScreen.swift:struct SettingsScreen"
+      ],
+      "tests": [
+        "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testSettingsHostsWalletStartupUpdatesAndAbout"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2054",
+        "rationale": "Phase 2 shell requirement added in SPEC-025 v0.33.0; app view-model and hosted-window tests exist, conformance fragments and release evidence are not yet mapped."
+      }
+    },
+    {
+      "requirement_id": "SPEC-044-R013",
+      "spec_id": "SPEC-044",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/app/Sources/Malibu/ModelManagement/DiscoverScreen.swift:enum DiscoverPresentation",
+        "phase3-binary/app/Sources/Malibu/ModelManagement/ModelManagement.swift:struct MalibuOtherMLXModel"
+      ],
+      "tests": [
+        "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testDiscoverListsSignedCatalogRowsOnly",
+        "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testDiscoverFitFilterAndSortsKeepCatalogOrderAsTieBreak",
+        "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testDiscoverDetailShowsRatesShareDemandAndProvidersOnly",
+        "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testBrowseDecodeIsStrictAndNeverActionable",
+        "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testBrowseOtherMLXModelsRunsBrowseOnItsOwnRunnerAndStaysNonActionable"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2054",
+        "rationale": "SPEC-044 v0.2.11 adds the Discover view of the projection; app tests exist, release evidence and conformance fragments are not yet mapped."
       }
     },
     {

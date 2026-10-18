@@ -1,12 +1,12 @@
 # SPEC-044 - Malibu Model Catalog Economics
 
-**Version:** 0.2.10
+**Version:** 0.2.11
 
 ```json
 {
   "spec_id": "SPEC-044",
   "title": "Malibu Model Catalog Economics",
-  "version": "0.2.10",
+  "version": "0.2.11",
   "path": "specs/SPEC-044-malibu-model-catalog-economics.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -1422,6 +1422,40 @@ boundaries:
   Assert identical total order in every locale and fail-closed static fallback
   for a duplicate identity.
 
+**SPEC-044-R013 - Discover view.** Malibu MAY present a Discover view of the
+same validated projection, alongside the R008 sections, to help a provider
+compare catalog models. The Discover view:
+
+1. MUST list only rows with `economics_state: "trusted"` and
+   `admission.catalog_economics_permitted: true`, named by their catalog
+   `model_key`. Locally discovered candidates without a trusted catalog
+   identity, and every non-trusted row, stay in the R008 sections only. When
+   no row qualifies, the view MUST say that no signed catalog rates are
+   available and point to the R008 sections for per-row reasons.
+2. MUST follow R004: provider share rates per 1,000,000 tokens, the provider
+   share of the catalog rate as a percentage of `provider_share_bps`,
+   `demand_rank`, `ready_provider_count`, approximate size and fit against
+   this Mac's memory, local readiness, and the row's reason. The R004
+   variability disclosure MUST stay visible in the same scroll container as
+   the rate-bearing list and in the detail pane. No amount per time period.
+3. MAY filter by a provider search term and by `fit: "fits"`, and MAY offer a
+   provider-selected sort by `demand_rank` (ascending), provider completion
+   payout rate (descending) or `estimated_gb` (ascending), nulls last. The
+   default order MUST be the R005 tuple, and every provider-selected sort MUST
+   be stable over the R005 order so R005 breaks every tie. This is the only
+   exception to R005's sole-ordering rule and applies only inside Discover.
+4. MUST gate actions exactly as R006: `Switch` only for a row the R008
+   sections would show as `Ready`, through the same confirmation; `Prepare`
+   only for a typed `prepare_model` transaction on that row. While the
+   projection offers no preparation transaction, the view MUST say that
+   download and preparation are not offered in Malibu yet and MUST NOT start a
+   download or run a preparation command itself.
+5. MAY show `models browse` (Hugging Face `mlx-community`) results only in a
+   separate section labelled as not in the catalog and not earnable, only
+   after an explicit provider search, never merged into catalog rows, never
+   with a rate, demand or action, and decoded strictly as `models_browse.v1`
+   with every row non-actionable and `action_model_id: null` (R006).
+
 ## 4. Implementation, tests, and journeys
 
 The intended implementation is a CLI-first projection, then an app-only presentation layer:
@@ -1474,6 +1508,14 @@ The current Malibu recommendation path may remain as a companion callout, but th
 The app should preserve the current provider mental model: Malibu observes and asks the signed CLI to do work; the CLI owns custody, model artifacts, feed validation, update/recovery, admission, and billing-derived economics.
 
 ## 8. Changelog and history
+
+- 0.2.11 - Adds R013, the Discover view of the same projection (#2054 Phase 2):
+  trusted catalog rows only, R004 rates/share/demand/provider count with the
+  disclosure kept beside the rates, a stable provider-selected sort over the
+  R005 order as the only R005 exception, R006 action gating with an explicit
+  "not offered yet" state while no `prepare_model` transaction exists, and
+  `models browse` results only in a separate not-earnable, non-actionable
+  section. Conformance remains pending.
 
 - 0.2.10 - Aligns Build 1 preparation with SPEC-047 v0.1.9: the closed decoder
   still recognizes `offer_rejected`, but no v0.2 coordinator origin can append
