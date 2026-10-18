@@ -1048,7 +1048,7 @@ loaded "$CAND"
 # re-check is pending is CB active; rollout verification confirms the final
 # decision (the provider runs the re-check under its admission hold).
 cp -R "$tmp/state" "$tmp/state-recheck"
-SCK='"model_sha256":"m1","metallib_sha256":"l1","kernel_identifier":"k1","hardware_class":"h1","os_build":"o1","runtime_build":"r1"'
+SCK='"model_sha256":"m1","metallib_sha256":"l1","kernel_identifier":"k1","hardware_class":"h1","os_build":"o1","runtime_build":"r1","decode_window":16'
 sc() { printf '{"decision":"%s","served_slots":%s,%s}' "$1" "$2" "${3:-$SCK}"; }
 status_hold() { # STATUS_DOC_ARGS... with self_check_admission_hold.active=$HOLD_ACTIVE
   python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["continuous_batching"]["self_check_admission_hold"]={"active": sys.argv[2]=="true","holds_total":1}; json.dump(d,open(p,"w"))' "$tmp/svc/status.json" "$1"
@@ -1094,6 +1094,24 @@ expect_next e2e_gate:manual
 status_doc $CAND true true false absent_fallback none attached "$(sc kept_prior_grant_no_net_gain 1)"; status_hold false
 MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 0 "re-check gate passes a kept prior grant at one slot" \
   scripts/ops/cli-release.sh _check-canary-self-check "$CAND"
+status_doc $CAND true true false absent_fallback none attached "$(sc granted true)"; status_hold false
+MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 3 "re-check gate refuses a non-integer slot count" \
+  scripts/ops/cli-release.sh _check-canary-self-check "$CAND"
+# A re-recorded canary_smoke (another key) invalidates the earlier confirmation.
+smoke_edit() { python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); exec(sys.argv[2]); json.dump(d,open(p,"w"))' "$tmp/state-recheck/cli-release-$CAND/canary_smoke.json" "$1"; }
+MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 0 "cli status with the confirmation in place" scripts/ops/cli-release.sh status
+expect_next e2e_gate:manual
+smoke_edit 'd["probe"]["self_check_key"]["runtime_build"] = "r3"'
+MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 0 "cli status after canary_smoke was re-recorded" scripts/ops/cli-release.sh status
+expect_next canary_self_check:read
+# A first qualification still pending at canary time also needs confirmation.
+smoke_edit 'd["probe"].update(self_check_decision="pending", policy_authorized=True, policy_load_status="live_verified", policy_local_proof_result="passed"); d["probe"]["self_check_key"]["runtime_build"] = "r1"'
+MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 0 "cli status after a pending first-check canary" scripts/ops/cli-release.sh status
+expect_next canary_self_check:read
+status_doc $CAND true true false absent_fallback none attached "$(sc pending 1)"; status_hold false
+MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 3 "re-check gate refuses a first check still pending" \
+  scripts/ops/cli-release.sh _check-canary-self-check "$CAND"
+expect_err "'pending': re-check still pending"
 rm -rf "$tmp/state-recheck"
 mkdir -p "$tmp/state-norecord"
 MACPROVIDER_OPS_STATE_DIR="$tmp/state-norecord" run_rc 3 "re-check gate fails closed without a canary record" \

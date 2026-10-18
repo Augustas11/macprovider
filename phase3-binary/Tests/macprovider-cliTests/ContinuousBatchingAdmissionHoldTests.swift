@@ -205,12 +205,12 @@ final class ContinuousBatchingAdmissionHoldTests: XCTestCase {
             }
             return true
         }
-        XCTAssertEqual(outcome, .yielded)
+        XCTAssertEqual(outcome, .checkBound)
         XCTAssertLessThan(Date().timeIntervalSince(started), 3)
         XCTAssertEqual(reopened.refused, false, "admission re-opened before the cancelled check returned")
         let hold = await status.selfCheckAdmissionHoldStatus()
         XCTAssertFalse(hold.active)
-        XCTAssertEqual(hold.lastOutcome, "yielded")
+        XCTAssertEqual(hold.lastOutcome, "check_bound")
     }
 
     func testPauseLeaseOrTargetChangeDuringTheCheckEndsTheHold() async {
@@ -253,6 +253,23 @@ final class ContinuousBatchingAdmissionHoldTests: XCTestCase {
         }
         XCTAssertEqual(swappedOutcome, .yielded)
         XCTAssertNil(ran.inFlight)
+    }
+
+    func testCheckBoundEscalatesAfterBoundYieldsUpToFourTimes() {
+        let base = ContinuousBatchingSelfCheck.admissionHoldCheckSeconds
+        XCTAssertEqual(ContinuousBatchingSelfCheck.admissionHoldCheckBound(base: base, consecutiveBoundYields: 0), 300)
+        XCTAssertEqual(ContinuousBatchingSelfCheck.admissionHoldCheckBound(base: base, consecutiveBoundYields: 1), 600)
+        XCTAssertEqual(ContinuousBatchingSelfCheck.admissionHoldCheckBound(base: base, consecutiveBoundYields: 5), 1200)
+        XCTAssertEqual(ContinuousBatchingSelfCheck.admissionHoldJitterSeconds, 900)
+    }
+
+    func testReportCarriesTheDecodeWindow() {
+        let key = ContinuousBatchingSelfCheckKey(
+            modelSHA256: "m", metallibSHA256: "l", kernelIdentifier: "k", hardwareClass: "h",
+            osBuild: "o", runtimeBuild: "r", decodeWindow: 16
+        )
+        let json = ContinuousBatchingSelfCheckReport(decision: "granted", servedSlots: 8, verifiedSlots: 8, key: key).jsonObject
+        XCTAssertEqual(json["decode_window"] as? Int, 16)
     }
 
     func testDrainBoundEscalatesAfterDrainTimeoutsUpToFourTimes() {

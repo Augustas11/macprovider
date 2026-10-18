@@ -198,6 +198,7 @@ public struct ContinuousBatchingSelfCheckReport: Sendable, Equatable {
     public let hardwareClass: String?
     public let osBuild: String?
     public let runtimeBuild: String?
+    public let decodeWindow: Int?
 
     init(
         decision: String,
@@ -216,6 +217,7 @@ public struct ContinuousBatchingSelfCheckReport: Sendable, Equatable {
         self.hardwareClass = key?.hardwareClass
         self.osBuild = key?.osBuild
         self.runtimeBuild = key?.runtimeBuild
+        self.decodeWindow = key?.decodeWindow
     }
 
     var jsonObject: [String: Any] {
@@ -231,6 +233,7 @@ public struct ContinuousBatchingSelfCheckReport: Sendable, Equatable {
             "hardware_class": nullable(hardwareClass),
             "os_build": nullable(osBuild),
             "runtime_build": nullable(runtimeBuild),
+            "decode_window": decodeWindow.map { $0 as Any } ?? NSNull(),
         ]
     }
 }
@@ -655,9 +658,10 @@ enum ContinuousBatchingSelfCheck {
     /// an admission hold. Holds are also at least this far apart, counted
     /// from the end of the previous one.
     static let admissionHoldAfterSeconds: Double = 120
-    /// Each Mac adds a random 0..60 s to the first due time so Macs that
-    /// re-key together (a release) do not all hold admission at once.
-    static let admissionHoldJitterSeconds: Double = 60
+    /// Each Mac adds a random 0..15 min to the first due time so Macs that
+    /// re-key together (a release) spread their holds instead of all
+    /// withdrawing capacity at once.
+    static let admissionHoldJitterSeconds: Double = 900
     /// The longest the check itself runs under one hold (the drain before it
     /// is bounded separately); an unfinished ladder resumes at the next idle
     /// window or hold.
@@ -668,6 +672,13 @@ enum ContinuousBatchingSelfCheck {
     /// cannot starve the check forever while each hold stays bounded.
     static func admissionHoldDrainSeconds(base: Int, consecutiveDrainTimeouts: Int) -> Int {
         max(0, base) << min(max(0, consecutiveDrainTimeouts), 2)
+    }
+
+    /// The check bound for a hold: `admissionHoldCheckSeconds`, doubled after
+    /// each consecutive hold that reached it without deciding, up to 4x, so a
+    /// width longer than one bound still completes.
+    static func admissionHoldCheckBound(base: Double, consecutiveBoundYields: Int) -> Double {
+        base * Double(1 << min(max(0, consecutiveBoundYields), 2))
     }
 
     static func admissionHoldDue(dueSince: Date, notBefore: Date, after: Double, now: Date) -> Bool {
@@ -683,9 +694,11 @@ enum ContinuousBatchingSelfCheck {
         case drainTimeout
         /// The check stored a decision.
         case completed
-        /// The check ran but yielded (its bound, a pause or a drain) or failed;
-        /// completed widths persist and the ladder resumes later.
+        /// The check ran but yielded (a pause, drain, lease or target change)
+        /// or failed; completed widths persist and the ladder resumes later.
         case yielded
+        /// The check reached its bound without deciding.
+        case checkBound
 
         var label: String {
             switch self {
@@ -693,6 +706,7 @@ enum ContinuousBatchingSelfCheck {
             case .drainTimeout: return "drain_timeout"
             case .completed: return "completed"
             case .yielded: return "yielded"
+            case .checkBound: return "check_bound"
             }
         }
     }
@@ -766,7 +780,7 @@ enum ContinuousBatchingSelfCheck {
                 task.cancel()
                 // Admission re-opens now; the cancelled check is still awaited
                 // so the driver never runs two checks at once.
-                let outcome = await end(.yielded, reason: reason)
+                let outcome = await end(reason == "check_bound" ? .checkBound : .yielded, reason: reason)
                 _ = await task.value
                 return outcome
             }
@@ -1088,6 +1102,7 @@ actor ContinuousBatchingSelfCheckDriver {
     /// This Mac's 0..`admissionHoldJitterSeconds` offset on the first due time.
     private let admissionHoldJitter: Double
     private var consecutiveDrainTimeouts = 0
+    private var consecutiveCheckBounds = 0
     private var deferrals = 0
     private var nextAttemptAt = Date.distantPast
     /// When the check for this key first found no stored decision.
@@ -1180,6 +1195,7 @@ actor ContinuousBatchingSelfCheckDriver {
             if checkDueSince?.key != target.key {
                 checkDueSince = (target.key, Date())
                 consecutiveDrainTimeouts = 0
+                consecutiveCheckBounds = 0
             }
             let idle = await isIdle()
             if idle {
@@ -1188,7 +1204,7 @@ actor ContinuousBatchingSelfCheckDriver {
             }
             // A busy Mac never finds an idle window under steady traffic: once
             // the check has been due long enough, hold admission and run it.
-            if let due = checkDueSince,
+            if let due = checkDueSince, Date() >= nextAttemptAt,
                ContinuousBatchingSelfCheck.admissionHoldDue(
                 dueSince: due.at, notBefore: admissionHoldNotBefore,
                 after: admissionHoldAfterSeconds + admissionHoldJitter, now: Date()
@@ -1209,7 +1225,9 @@ actor ContinuousBatchingSelfCheckDriver {
             drainSeconds: ContinuousBatchingSelfCheck.admissionHoldDrainSeconds(
                 base: admissionHoldDrainSeconds, consecutiveDrainTimeouts: consecutiveDrainTimeouts
             ),
-            checkSeconds: admissionHoldCheckSeconds,
+            checkSeconds: ContinuousBatchingSelfCheck.admissionHoldCheckBound(
+                base: admissionHoldCheckSeconds, consecutiveBoundYields: consecutiveCheckBounds
+            ),
             lifecycleLease: lifecycleLease,
             stillValid: { await runtime.continuousBatchingSelfCheckTarget(includeDecided: true) == target },
             context: "due_s=\(Int(dueSeconds)) model_sha256=\(target.key.modelSHA256)",
@@ -1218,6 +1236,7 @@ actor ContinuousBatchingSelfCheckDriver {
             await self.measureWithinAdmissionHold(target)
         }
         consecutiveDrainTimeouts = outcome == .drainTimeout ? consecutiveDrainTimeouts + 1 : 0
+        consecutiveCheckBounds = outcome == .checkBound ? consecutiveCheckBounds + 1 : 0
         // Spaced from the end of this hold, not its start.
         admissionHoldNotBefore = Date().addingTimeInterval(admissionHoldAfterSeconds)
     }
@@ -1225,7 +1244,9 @@ actor ContinuousBatchingSelfCheckDriver {
     /// The check under a hold: bounded by `admissionHoldCheckSeconds`, after
     /// which the step yields and the ladder resumes at the next hold.
     private func measureWithinAdmissionHold(_ target: ContinuousBatchingSelfCheckTarget) async -> Bool {
-        admissionHoldDeadline = Date().addingTimeInterval(admissionHoldCheckSeconds)
+        admissionHoldDeadline = Date().addingTimeInterval(ContinuousBatchingSelfCheck.admissionHoldCheckBound(
+            base: admissionHoldCheckSeconds, consecutiveBoundYields: consecutiveCheckBounds
+        ))
         await measure(target, remeasureOf: nil)
         admissionHoldDeadline = nil
         let record = store.record(for: target.key)
@@ -1236,6 +1257,7 @@ actor ContinuousBatchingSelfCheckDriver {
         switch error {
         case StepError.admissionHoldEnded: return "admission_hold_ended"
         case is StepError: return "request_in_flight"
+        case is CancellationError: return "cancelled"
         default: return "step_failed error=\(String(describing: error).prefix(200))"
         }
     }
@@ -1276,10 +1298,13 @@ actor ContinuousBatchingSelfCheckDriver {
                     }
                     try await Task.sleep(nanoseconds: 100_000_000)
                 }
-                return nil
+                throw CancellationError()
             }
             defer { group.cancelAll() }
             while let next = try await group.next() {
+                // A cancelled step (an admission hold that ended) may return a
+                // truncated run: never record it as a measurement.
+                try Task.checkCancellation()
                 if let value = next { return value }
             }
             throw StepError.yielded
@@ -1487,6 +1512,7 @@ actor ContinuousBatchingSelfCheckDriver {
                 }
                 let gain = Self.median(ratios)
                 let aggregate = Self.median(aggregates)
+                try Task.checkCancellation()
                 if isRung { record.serialTPS = max(record.serialTPS, Self.median(serials)) }
                 record.measurements.append(.init(
                     slots: slots, conformant: conformant, nearTieRows: nearTieRows, aggregateTPS: aggregate,
@@ -1497,6 +1523,7 @@ actor ContinuousBatchingSelfCheckDriver {
                 log("event=cb_self_check action=measured slots=\(slots) rung=\(isRung) conformant=\(conformant) cohort_decode_tokens=\(cohortTokens) divergent_rows=\(divergences.isEmpty ? "none" : divergences.joined(separator: ",")) aggregate_tps=\(String(format: "%.1f", aggregate)) serial_tps=\(String(format: "%.1f", Self.median(serials))) gain=\(String(format: "%.2f", gain))")
                 if !conformant { break }
             }
+            try Task.checkCancellation()
             deferrals = 0
             nextAttemptAt = .distantPast
             backpressureRefusal = nil
@@ -1566,13 +1593,18 @@ actor ContinuousBatchingSelfCheckDriver {
                     break
                 }
             }
-            deferrals += 1
-            let wait = ContinuousBatchingSelfCheck.deferralBackoffSeconds(deferrals: deferrals, base: pollSeconds)
-            nextAttemptAt = Date().addingTimeInterval(wait)
+            // A step ended by its own admission hold (its bound, a pause, a
+            // lease or a target change) is spaced by the hold interval, not
+            // the deferral backoff.
+            if admissionHoldDeadline == nil {
+                deferrals += 1
+                let wait = ContinuousBatchingSelfCheck.deferralBackoffSeconds(deferrals: deferrals, base: pollSeconds)
+                nextAttemptAt = Date().addingTimeInterval(wait)
+            }
             if previous == nil, await runtime.continuousBatchingSelfCheckState() == .pending {
                 await report(decision: "deferred", target: target)
             }
-            log("event=cb_self_check action=deferred deferrals=\(deferrals) retry_in_s=\(Int(wait)) reason=\(Self.deferralReason(error))")
+            log("event=cb_self_check action=deferred deferrals=\(deferrals) retry_in_s=\(Int(max(0, nextAttemptAt.timeIntervalSinceNow))) reason=\(Self.deferralReason(error))")
         }
     }
 

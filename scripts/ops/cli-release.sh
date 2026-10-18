@@ -738,7 +738,7 @@ MACPROVIDER_OPS_OWNER=<session-label> $OPS_DIR/canary-swap.sh swap --version $V
         step canary_self_check "done" "final self-check decision recorded at canary_smoke"
       fi
     else
-      step canary_self_check pending "canary_smoke recorded prior_grant_pending_recheck"
+      step canary_self_check pending "canary_smoke recorded an undecided self-check"
       set_next canary_self_check read "Confirm the canary's continuous-batching re-check decided" \
         "scripts/ops/cli-release.sh _check-canary-self-check $V"
     fi
@@ -975,14 +975,27 @@ marker_canary_probe_matches() {
   fi
 }
 
+# canary_smoke_undecided: canary_smoke recorded a self-check that had not
+# decided yet (a pending re-check of a prior grant, or a first check).
+canary_smoke_undecided() {
+  case "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("self_check_decision")')" in
+    prior_grant_pending_recheck|pending|deferred) return 0 ;;
+  esac
+  return 1
+}
+
+canary_smoke_digest() { shasum -a 256 "$(marker_path "$OPS_SCOPE" canary_smoke)" 2>/dev/null | awk '{print $1}'; }
+
 # canary_self_check_confirmed SHA: canary_smoke recorded a final self-check
-# decision, or _check-canary-self-check confirmed one for this candidate.
+# decision, or _check-canary-self-check confirmed one for this candidate and
+# exactly the current canary_smoke record (a re-recorded smoke needs a new one).
 canary_self_check_confirmed() {
   local sha="$1"
-  [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("self_check_decision")')" != prior_grant_pending_recheck ] &&
-    return 0
+  canary_smoke_undecided || return 0
   marker_done "$OPS_SCOPE" canary_self_check &&
-    [ "$(marker_field "$OPS_SCOPE" canary_self_check 'd.get("candidate_sha")')" = "$sha" ]
+    [ "$(marker_field "$OPS_SCOPE" canary_self_check 'd.get("candidate_sha")')" = "$sha" ] &&
+    [ -n "$(canary_smoke_digest)" ] &&
+    [ "$(marker_field "$OPS_SCOPE" canary_self_check 'd.get("canary_smoke_sha256")')" = "$(canary_smoke_digest)" ]
 }
 
 # check_journey_run RUN_ID CANDIDATE_SHA VERSION -> JSON evidence on stdout, or refuse.
@@ -1077,7 +1090,7 @@ got = {
     "emergency_off_override": policy.get("emergency_off_override"),
     "provider_id": d.get("provider_id"),
     "self_check_key": {k: (cb.get("self_check") or {}).get(k) for k in
-                       ("model_sha256", "metallib_sha256", "kernel_identifier", "hardware_class", "os_build", "runtime_build")},
+                       ("model_sha256", "metallib_sha256", "kernel_identifier", "hardware_class", "os_build", "runtime_build", "decode_window")},
 }
 bad = []
 if got["binary_version"] != v: bad.append("binary_version %r != %r" % (got["binary_version"], v))
@@ -1093,13 +1106,16 @@ single_row = got["self_check_decision"] == "single_row"
 recheck_pending = got["self_check_decision"] == "prior_grant_pending_recheck"
 if recheck_pending:
     got["self_check_recheck_pending"] = True
+# Every undecided self-check is confirmed later by canary_self_check, on the
+# same provider and self-check key.
+if got["self_check_decision"] in ("prior_grant_pending_recheck", "pending", "deferred"):
     if not got["provider_id"] or not got["self_check_key"]["model_sha256"]:
-        bad.append("a pending re-check needs provider_id and the self_check key to confirm it later")
+        bad.append("an undecided self-check needs provider_id and the self_check key to confirm it later")
 if got["continuous_batching_active"] is not True and not single_row: bad.append("continuous_batching.active is not true")
 if got["paged_kv_decision"] != "attached": bad.append("continuous_batching.paged_kv_decision %r != 'attached'" % (got["paged_kv_decision"],))
 if got["self_check_decision"] == "granted" or recheck_pending:
     # #1947: CB is authorized by the on-device self-check; the signed policy only revokes.
-    if not isinstance(got["self_check_served_slots"], int) or got["self_check_served_slots"] < 1:
+    if type(got["self_check_served_slots"]) is not int or got["self_check_served_slots"] < 1:
         bad.append("continuous_batching.self_check.served_slots %r < 1" % (got["self_check_served_slots"],))
     if got["emergency_off_override"] is not False:
         bad.append("continuous_batching.policy.emergency_off_override is not false")
@@ -1385,7 +1401,7 @@ check_canary_self_check() {
   is_sha40 "$sha" || refuse "no verified candidate SHA is recorded for v$V"
   marker_canary_probe_matches "$sha" || refuse "no canary_smoke status probe recorded for candidate $sha"
   decision="$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("self_check_decision")')"
-  if [ "$decision" != prior_grant_pending_recheck ]; then
+  if ! canary_smoke_undecided; then
     log "canary_smoke recorded the final self-check decision '$decision'; nothing to confirm"
     return 0
   fi
@@ -1413,14 +1429,14 @@ key = probe.get("self_check_key") or {}
 if not key.get("model_sha256"): bad.append("canary_smoke recorded no self_check key")
 for k, want in key.items():
     if sc.get(k) != want: bad.append("self_check.%s %r != %r recorded at canary_smoke" % (k, sc.get(k), want))
-if decision == "prior_grant_pending_recheck":
-    bad.append("self_check re-check still pending (admission hold active=%r holds_total=%r last_outcome=%r last_skip_reason=%r); re-run once it decides"
+if decision in ("prior_grant_pending_recheck", "pending", "deferred"):
+    bad.append("self_check %r: re-check still pending" % (decision,) + " (admission hold active=%r holds_total=%r last_outcome=%r last_skip_reason=%r); re-run once it decides"
                % (hold.get("active"), hold.get("holds_total"), hold.get("last_outcome"), hold.get("last_skip_reason")))
 elif decision not in final:
     bad.append("self_check decision %r is not one of %s" % (decision, ", ".join(final)))
 if hold.get("active") is not False: bad.append("self_check_admission_hold.active is %r, not false" % (hold.get("active"),))
 if cb.get("active") is not True: bad.append("continuous_batching.active is not true")
-if not isinstance(slots, int) or slots < 1: bad.append("self_check.served_slots %r < 1" % (slots,))
+if type(slots) is not int or slots < 1: bad.append("self_check.served_slots %r < 1" % (slots,))
 if (cb.get("policy") or {}).get("emergency_off_override") is not False: bad.append("continuous_batching.policy.emergency_off_override is not false")
 if bad:
     sys.stderr.write("; ".join(bad) + "\n"); sys.exit(1)
@@ -1428,7 +1444,7 @@ print(json.dumps({"self_check_decision": decision, "self_check_served_slots": sl
 PY
 )" || refuse "the canary's continuous-batching re-check has not confirmed the grant"
   mark_done "$OPS_SCOPE" canary_self_check "canary re-check decided: $out" \
-    "$(python3 -c 'import json,sys; print(json.dumps({"candidate_sha": sys.argv[1], "final": json.loads(sys.argv[2])}))' "$sha" "$out")"
+    "$(python3 -c 'import json,sys; print(json.dumps({"candidate_sha": sys.argv[1], "canary_smoke_sha256": sys.argv[3], "final": json.loads(sys.argv[2])}))' "$sha" "$out" "$(canary_smoke_digest)")"
   log "canary self-check re-check decided: $out"
 }
 
