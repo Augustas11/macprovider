@@ -1313,7 +1313,13 @@ only (it must follow `issued_at`); an admitted model keeps native MTP past the
 date, and revocation is the off switch. A stale or unreachable revocation
 feed keeps the last-known verified revocations (0.1.31); with no feed ever
 verified, nothing is revoked. The provider keeps polling and disables the
-tuple only when a verified feed names it. Before 0.1.30: sidecars and
+tuple only when a verified feed names it. **(0.1.48)** A tuple parked after a
+coordinator `bank_mismatch` (MTP-16) stays under the same revocation watch; a
+verified feed naming it discards it. Before a parked tuple is restored, the
+provider reads the newest verified revocation state (network first, else the
+last-known verified feed): a tuple it names is discarded, and with no
+verified state at all the tuple stays parked and fenced, so a restore fails
+closed where a fresh load would not. Before 0.1.30: sidecars and
 serving-journey results expire after 90 days. Renewal creates a new immutable release/sidecar, reruns the local
 self-test and signed serving journey, the 30-minute sustained cell, ordinary
 and MTP parity sample, and post-gateway eligibility sample. The full matrix may
@@ -1600,7 +1606,13 @@ to 15 minutes. The re-offer carries the original self-check result; the
 provider re-runs the self-check only when its own bank changes, which
 arrives with a new release's admission set and so with a new tuple load. A
 load, warm swap, revocation, or any other disable reason discards the
-parked tuple. No other event re-offers, so repeated rejections never loop.
+parked tuple. Parking never pauses revocation: the parked tuple keeps its
+revocation watch, and a restore first re-reads the revocation state (R014).
+The rejection is bound to the coordinator session it arrived on and the
+offer dedupe is per session, so a disconnect racing either never consumes
+or suppresses the next session's re-offer; a disable or park that suspends
+while a load or swap installs a new tuple never clears the new one. No other
+event re-offers, so repeated rejections never loop.
 
 Neither path may use buyer data or emit usage, receipt, billing, reward,
 settlement, or payout activity. Every actual-path/counter/state value is
@@ -1736,9 +1748,11 @@ requests.
   `bank_mismatch` fences the tuple but keeps its qualified load; the provider
   offers it again once per new coordinator session, or once when the
   coordinator's served bank becomes the bank it qualified on, without a
-  model reload and without re-running the self-check. Paired with
-  SPEC-031-R033 v0.3.9, under which the coordinator canary bank moves with
-  the release.
+  model reload and without re-running the self-check. A parked tuple keeps
+  its revocation watch and is discarded when revoked; a restore re-reads the
+  revocation state and fails closed without one (R014). Rejections and the
+  offer dedupe are bound to their session. Paired with SPEC-031-R033 v0.3.9,
+  under which the coordinator canary bank moves with the release.
 
 - **0.1.47 (2026-10-17)** — MTP-6: the lab oracle's round order is the
   bridge's per-row committed-round number carried by each after-finalize

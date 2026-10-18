@@ -4498,14 +4498,29 @@
         "phase4-coordinator/internal/ws/native_mtp_canary.go:EvaluateNativeMTPCanaryCoreResult",
         "phase4-coordinator/internal/ws/native_mtp_canary_integration.go:loadVerifiedNativeMTPChallengeBank",
         "phase4-coordinator/internal/ws/native_mtp_canary_integration.go:PrepareNativeMTPCanaryBankReload",
-        "phase4-coordinator/internal/ws/native_mtp_canary_integration.go:nativeMTPCanaryBankFor"
+        "phase4-coordinator/internal/ws/native_mtp_canary_integration.go:nativeMTPCanaryBankFor",
+        "phase4-coordinator/internal/ws/native_mtp_canary_integration.go:applyNativeMTPCanaryBankTransitionLocked",
+        "phase4-coordinator/internal/ws/native_mtp_canary_integration.go:loadNativeMTPCanaryBank",
+        "phase4-coordinator/internal/ws/server.go:installCatalogLocked",
+        "phase4-coordinator/cmd/coordinator/main.go:nativeMTPCanaryBootOption",
+        "phase4-coordinator/internal/buyer/native_mtp_feeds.go:LoadPreviousNativeMTPFeeds",
+        "scripts/ops/catalog-activate.sh:native_mtp_canary_bank_sha256"
       ],
       "tests": [
         "phase4-coordinator/internal/ws/native_mtp_canary_test.go:TestNativeMTPCanaryCoreRequestAndResultEvaluation",
         "phase4-coordinator/internal/ws/native_mtp_canary_test.go:TestNativeMTPCanaryStoreIsTupleScopedAndReplaySafe",
         "phase4-coordinator/internal/ws/native_mtp_canary_bank_reload_test.go:TestNativeMTPCanaryBankReloadsWithTheRelease",
         "phase4-coordinator/internal/ws/native_mtp_canary_bank_reload_test.go:TestNativeMTPCanaryPreviousBankBindsOnlyWhileItsReleaseIsAdmitted",
-        "phase4-coordinator/internal/ws/native_mtp_canary_bank_reload_test.go:TestNativeMTPCanaryBankReloadRejectsUnverifiedBankAndKeepsThePriorBank"
+        "phase4-coordinator/internal/ws/native_mtp_canary_bank_reload_test.go:TestNativeMTPCanaryBankReloadRejectsUnverifiedBankAndKeepsThePriorBank",
+        "phase4-coordinator/internal/ws/native_mtp_canary_bank_reload_test.go:TestNativeMTPCanaryCurrentBankRequiresReleaseAdmission",
+        "phase4-coordinator/internal/ws/native_mtp_canary_bank_reload_test.go:TestNativeMTPCanaryNoBankReleaseRetiresTheCurrentBank",
+        "phase4-coordinator/internal/ws/native_mtp_canary_bank_reload_test.go:TestNativeMTPCanaryBankPublishesWithTheCatalogAndServedFeeds",
+        "phase4-coordinator/internal/ws/native_mtp_canary_bank_reload_test.go:TestNativeMTPCanaryBootBankIsBoundToTheServedFeed",
+        "phase4-coordinator/internal/ws/native_mtp_canary_bank_reload_test.go:TestNativeMTPCanaryRestartRebuildsTheRetainedPreviousBank",
+        "phase4-coordinator/internal/ws/native_mtp_canary_bank_reload_test.go:TestHealthzReportsTheNativeMTPCanaryBankReleaseAndDigest",
+        "phase4-coordinator/cmd/coordinator/native_mtp_canary_reload_test.go:TestSIGHUPReleaseWithoutNativeMTPFeedsRetiresTheCanaryBank",
+        "phase4-coordinator/cmd/coordinator/native_mtp_canary_reload_test.go:TestCoordinatorRestartRebuildsTheRetainedPreviousCanaryBank",
+        "phase4-coordinator/cmd/coordinator/reload_billing_failure_test.go:TestSIGHUPReloadBillingFailureLeavesNoPartialState"
       ],
       "journeys": [
         "JOURNEY-NATIVE-MTP-SERVING"
@@ -11439,14 +11454,23 @@
         "phase3-binary/Sources/macprovider-cli/NativeMTPSelfTest.swift:NativeMTPSelfTestChallenge",
         "phase3-binary/Sources/macprovider-cli/NativeMTPSelfTest.swift:NativeMTPSelfTestRuntimeTuple",
         "phase3-binary/Sources/macprovider-cli/NativeMTP.swift:enum NativeMTPOnDeviceSelfCheck",
-        "phase3-binary/Sources/macprovider-cli/NativeMTPTupleReoffer.swift:struct NativeMTPTupleReofferGate"
+        "phase3-binary/Sources/macprovider-cli/NativeMTPTupleReoffer.swift:struct NativeMTPTupleReofferGate",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:func restoreParkedNativeMTPTuple",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:func parkNativeMTPTupleForReoffer"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPSelfTestTests.swift:testChallengeBankParsesExactRecordAndPassingExecutionEvaluatesTupleOnlyPass",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPSelfTestTests.swift:testEvaluatorRejectsEachRuntimeMismatch",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testTokenMismatchKeepsNativeMTPOff",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPTupleReofferTests.swift:testRepeatedRejectionsNeverLoop",
-        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testNativeMTPBankMismatchParksTupleAndReoffersOnANewSession"
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testNativeMTPBankMismatchParksTupleAndReoffersOnANewSession",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testNativeMTPParkedTupleIsDiscardedWhenRevokedWhileParked",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testNativeMTPRestoreRefusesATupleTheLatestFeedRevokes",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testNativeMTPRestoreFailsClosedWithoutRevocationState",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testNativeMTPBankMismatchSpanningASessionChangeStaysDueForTheNewSession",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testNativeMTPOfferSendSpanningADisconnectDoesNotSuppressTheNewSession",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPTupleReofferTests.swift:testDisableAfterTheFenceKeepsATupleInstalledDuringIt",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPTupleReofferTests.swift:testParkAfterTheFenceDoesNotParkOverATupleInstalledDuringIt"
       ],
       "journeys": [
         "JOURNEY-NATIVE-MTP-SERVING"
