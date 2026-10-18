@@ -889,8 +889,11 @@ mkdir -p "$tmp/bytes" "$tmp/pearl"
 printf '{"schema_version":1,"tag":"v%s","provider_advertised_version":"%s","provider_code_identity":{"asset":"macprovider-cli-v%s-darwin-arm64.tar.gz","member":"macprovider-cli","binary_version":"%s","binary_sha256":"%s","team_id":"ABCDE12345","signing_identifier":"live.malibu.provider.cli","slices":[{"arch":"arm64","code_cdhash":"%s"}]}}\n' \
   "$CAND" "$CAND" "$CAND" "$CAND" "$(printf 'ef%.0s' $(seq 32))" "$CDHASH" > "$tmp/bytes/pearl-release.json"
 openssl dgst -sha256 -sign "$tmp/keys/release.key" -out "$tmp/bytes/pearl-release.json.sig" "$tmp/bytes/pearl-release.json"
+TARBALL_SHA_FIXTURE="$(printf '12%.0s' $(seq 32))"
+printf '%s  macprovider-cli-v%s-darwin-arm64.tar.gz\n' "$TARBALL_SHA_FIXTURE" "$CAND" > "$tmp/bytes/checksums.txt"
+CHECKSUMS_SHA_FIXTURE="$(shasum -a 256 "$tmp/bytes/checksums.txt" | awk '{print $1}')"
 printf '{"step":"signed_byte_verification","run_id":"111","candidate_sha":"%s","checksums_sha256":"%s","compatibility_set_id":"test/repo:v'"$CAND"'@%s","bytes_dir":"%s","binary_sha256":"%s"}\n' \
-  "$B" "$(printf 'ab%.0s' $(seq 32))" "$B" "$tmp/bytes" "$(printf 'cd%.0s' $(seq 32))" > "$SCOPE/signed_byte_verification.json"
+  "$B" "$CHECKSUMS_SHA_FIXTURE" "$B" "$tmp/bytes" "$(printf 'cd%.0s' $(seq 32))" > "$SCOPE/signed_byte_verification.json"
 # Fake Pearl config, laid out like Pearl's: everything in the base file.
 OLD="test/repo:v$LIVE@$(printf '0%.0s' $(seq 40))"
 pearl_config() {  # pearl_config "ACCEPTED_ID ..." METADATA_DIR_OR_EMPTY [APPROVED_CDHASH]
@@ -986,14 +989,17 @@ expect_err "does not accept free-text"
 status_doc $CAND true
 run_rc 3 "canary probe refused without a canary-swap.sh record" scripts/ops/cli-release.sh next --done canary_smoke --probe
 expect_err "no canary_swap record"
-printf '{"step":"canary_swap","binary_sha256":"%s","candidate_sha":"%s","checksums_sha256":"%s","kernel_check":"%s"}\n' \
-  "$(printf 'cd%.0s' $(seq 32))" "$B" "$(printf 'ab%.0s' $(seq 32))" failed > "$SCOPE/canary_swap.json"
+canary_swap_record() { # CHECKSUMS_SHA TARBALL_SHA KERNEL_CHECK
+  printf '{"step":"canary_swap","binary_sha256":"%s","candidate_sha":"%s","checksums_sha256":"%s","tarball_sha256":"%s","kernel_check":"%s"}\n' \
+    "$(printf 'cd%.0s' $(seq 32))" "$B" "$1" "$2" "$3" > "$SCOPE/canary_swap.json"
+}
+canary_swap_record "$CHECKSUMS_SHA_FIXTURE" "$TARBALL_SHA_FIXTURE" failed
 run_rc 3 "canary probe refused with a canary_swap record whose kernel check failed" scripts/ops/cli-release.sh next --done canary_smoke --probe
-printf '{"step":"canary_swap","binary_sha256":"%s","candidate_sha":"%s","checksums_sha256":"%s","kernel_check":"passed"}\n' \
-  "$(printf 'cd%.0s' $(seq 32))" "$B" "$(printf 'ef%.0s' $(seq 32))" > "$SCOPE/canary_swap.json"
+canary_swap_record "$(printf 'ef%.0s' $(seq 32))" "$TARBALL_SHA_FIXTURE" passed
 run_rc 3 "canary probe refused with a stale canary_swap record" scripts/ops/cli-release.sh next --done canary_smoke --probe
-printf '{"step":"canary_swap","binary_sha256":"%s","candidate_sha":"%s","checksums_sha256":"%s","kernel_check":"passed"}\n' \
-  "$(printf 'cd%.0s' $(seq 32))" "$B" "$(printf 'ab%.0s' $(seq 32))" > "$SCOPE/canary_swap.json"
+canary_swap_record "$CHECKSUMS_SHA_FIXTURE" "$(printf '34%.0s' $(seq 32))" passed
+run_rc 3 "canary probe refused when the swapped tarball is not the verified one" scripts/ops/cli-release.sh next --done canary_smoke --probe
+canary_swap_record "$CHECKSUMS_SHA_FIXTURE" "$TARBALL_SHA_FIXTURE" passed
 status_doc $CAND false
 run_rc 3 "canary probe with coordinator disconnected" scripts/ops/cli-release.sh next --done canary_smoke --probe
 status_doc $LIVE true

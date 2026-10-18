@@ -51,10 +51,11 @@ CMD="${1:-}"
 [ "$#" -gt 0 ] && shift
 V=""
 TARBALL=""
+TARBALL_OVERRIDE=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --version) [ "$#" -ge 2 ] || { usage >&2; exit 2; }; V="$2"; shift 2 ;;
-    --tarball) [ "$#" -ge 2 ] || { usage >&2; exit 2; }; TARBALL="$2"; shift 2 ;;
+    --tarball) [ "$#" -ge 2 ] || { usage >&2; exit 2; }; TARBALL="$2"; TARBALL_OVERRIDE=1; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
   esac
@@ -84,6 +85,27 @@ bind_verified_tarball() {
   TARBALL_SHA="$(awk -v a="$ASSET" '$2 == a { print $1 }' "$bytes_dir/checksums.txt" | head -n1)"
   [ -n "$TARBALL_SHA" ] && [ "$(shasum -a 256 "$TARBALL" | awk '{print $1}')" = "$TARBALL_SHA" ] ||
     refuse "$TARBALL does not match its signed checksums.txt entry"
+}
+
+# candidate_manifest: the required-kernel manifest of the commit the candidate
+# was built from (signed_byte_verification candidate_sha), not this checkout's.
+# check --tarball without a verified candidate uses this checkout's manifest.
+candidate_manifest() {
+  local sha path="phase3-binary/mlx-metallib-required-kernels.json" out="$OPS_TMP_DIR/mlx-required-kernels.json"
+  sha="$(marker_field "$OPS_SCOPE" signed_byte_verification 'd.get("candidate_sha")')"
+  if [ "$CMD" = check ] && [ -n "$TARBALL_OVERRIDE" ]; then
+    printf '%s\n' "$REPO_ROOT/$path"
+    return
+  fi
+  is_sha40 "$sha" || refuse "the signed_byte_verification record names no candidate_sha"
+  if git -C "$REPO_ROOT" cat-file -e "$sha:$path" 2>/dev/null; then
+    git -C "$REPO_ROOT" show "$sha:$path" >"$out"
+  else
+    curl -fsSL --proto '=https' --max-time 60 \
+      "https://raw.githubusercontent.com/$(gh_repo)/$sha/$path" -o "$out" ||
+      refuse "cannot read $path at candidate commit $sha"
+  fi
+  printf '%s\n' "$out"
 }
 
 check_candidate() {
@@ -118,8 +140,7 @@ PY
   if [ -f "$payload/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib" ]; then
     libs+=("$payload/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib")
   fi
-  python3 "$REPO_ROOT/scripts/mlx-metallib-kernels.py" check \
-    --manifest "$REPO_ROOT/phase3-binary/mlx-metallib-required-kernels.json" "${libs[@]}" >&2 ||
+  python3 "$REPO_ROOT/scripts/mlx-metallib-kernels.py" check --manifest "$(candidate_manifest)" "${libs[@]}" >&2 ||
     refuse "candidate metallib lacks kernels the pinned MLX core loads by name; do not swap it onto the canary"
   log "candidate v$V passed the pre-swap checks"
 }
@@ -163,11 +184,14 @@ q "${CANARY_CTL_SOCKET:-}" >/dev/null
 OPS_LOCK_OWNER="$MACPROVIDER_OPS_OWNER"
 
 RUNNER_TOUCHED=0
+REMOTE_STARTED=0
 # shellcheck disable=SC2329  # EXIT trap
 finish() {
   local rc=$?
   trap - EXIT
-  if [ "$RUNNER_TOUCHED" = 1 ] && [ "$rc" = 6 ]; then
+  # Once the remote run may have started, only its conclusive result (0, 4, 5)
+  # lets buyers back: a signal, a lost launch or exit 6 leaves the runner down.
+  if [ "$RUNNER_TOUCHED" = 1 ] && [ "$REMOTE_STARTED" = 1 ] && ! case "$rc" in 0|4|5) true ;; *) false ;; esac; then
     log "!!! buyer runner left STOPPED until the canary is recovered; then run CANARY_RUNNER_START_CMD"
   elif [ "$RUNNER_TOUCHED" = 1 ]; then
     if bash -c "$CANARY_RUNNER_START_CMD" >&2; then
@@ -203,6 +227,7 @@ log "staged v$V on the canary ($TARBALL_SHA)"
 args="\"$stage/candidate.tar.gz\" $(q "$TARBALL_SHA") $(q "$V") $(q "${CANARY_INSTALL_DIR:-}") \
 $(q "${CANARY_LAUNCHD_LABEL:-live.malibu.provider}") $(q "${CANARY_CTL_SOCKET:-}") $(q "$STUDIO_STATUS_PORT") \
 $(q "$STATUS_TIMEOUT_S") $(q "$READY_TIMEOUT_S") $(q "$DRAIN_TIMEOUT_S") $(q "$STABLE_S") $(q "$POLL_S") \"$stage/result\""
+REMOTE_STARTED=1
 studio_ssh "cd \"$stage\" && nohup bash canary-swap-remote.sh $args > \"$stage/run.log\" 2>&1 < /dev/null &" ||
   refuse "could not start the swap on the canary"
 

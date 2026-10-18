@@ -384,9 +384,17 @@ spctl -a -vvv -t exec "$app"
 [[ -f "$app/Contents/MacOS/mlx.metallib" ]] ||
   die "signed Malibu.app lacks adjacent mlx.metallib for the bundled macprovider-cli"
 # Every metallib this candidate ships carries every kernel the pinned MLX core
-# loads by name (CLI 1.8.254 shipped without gather_mm_offsets). The control
-# tree's manifest applies: candidates are cut from the control commit, and a
-# pin it does not match fails closed here.
+# loads by name (CLI 1.8.254 shipped without gather_mm_offsets), judged by the
+# candidate commit's own manifest.
+mlx_manifest="$signing_tmp/mlx-metallib-required-kernels.json"
+mlx_manifest_path="phase3-binary/mlx-metallib-required-kernels.json"
+if git -C "$root" cat-file -e "$candidate_commit:$mlx_manifest_path" 2>/dev/null; then
+  git -C "$root" show "$candidate_commit:$mlx_manifest_path" >"$mlx_manifest"
+else
+  curl -fsSL --proto '=https' --max-time 60 \
+    "https://raw.githubusercontent.com/$repository/$candidate_commit/$mlx_manifest_path" -o "$mlx_manifest" ||
+    die "cannot read $mlx_manifest_path at candidate commit $candidate_commit"
+fi
 mlx_shipped_metallibs=("$cli_work/mlx.metallib" "$app/Contents/MacOS/mlx.metallib")
 for bundled_metallib in \
   "$cli_work/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib" \
@@ -394,7 +402,7 @@ for bundled_metallib in \
   [[ -f "$bundled_metallib" ]] && mlx_shipped_metallibs+=("$bundled_metallib")
 done
 python3 "$root/scripts/mlx-metallib-kernels.py" check \
-  --manifest "$root/phase3-binary/mlx-metallib-required-kernels.json" "${mlx_shipped_metallibs[@]}" ||
+  --manifest "$mlx_manifest" "${mlx_shipped_metallibs[@]}" ||
   die "a shipped metallib lacks kernels the pinned MLX core loads by name"
 
 mkdir "$output_dir"

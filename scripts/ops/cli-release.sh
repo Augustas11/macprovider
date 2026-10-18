@@ -1007,6 +1007,15 @@ structured_done() {
               "$(marker_field "$OPS_SCOPE" signed_byte_verification "d.get(\"$swap_field\")")" ] || swap_ok=0
         done
         [ "$(marker_field "$OPS_SCOPE" canary_swap 'd.get("kernel_check")')" = passed ] || swap_ok=0
+        # The swapped tarball is the one the verified checksums.txt names.
+        local swap_bytes_dir swap_tarball_sha
+        swap_bytes_dir="$(marker_field "$OPS_SCOPE" signed_byte_verification 'd.get("bytes_dir")')"
+        swap_tarball_sha="$(awk -v a="macprovider-cli-v$V-darwin-arm64.tar.gz" '$2 == a { print $1 }' \
+          "$swap_bytes_dir/checksums.txt" 2>/dev/null | head -n1)"
+        [ -n "$swap_tarball_sha" ] &&
+          [ "$(shasum -a 256 "$swap_bytes_dir/checksums.txt" | awk '{print $1}')" = \
+            "$(marker_field "$OPS_SCOPE" signed_byte_verification 'd.get("checksums_sha256")')" ] &&
+          [ "$(marker_field "$OPS_SCOPE" canary_swap 'd.get("tarball_sha256")')" = "$swap_tarball_sha" ] || swap_ok=0
         [ "$swap_ok" = 1 ] ||
           refuse "no canary_swap record for the verified v$V bytes; swap with: MACPROVIDER_OPS_OWNER=<label> $OPS_DIR/canary-swap.sh swap --version $V"
         require_studio_ssh

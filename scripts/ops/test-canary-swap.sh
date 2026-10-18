@@ -81,7 +81,8 @@ verify_bytes() {
   cp "$1" "$dir/$asset"
   printf '%s  %s\n' "$(shasum -a 256 "$dir/$asset" | awk '{print $1}')" "$asset" >"$dir/checksums.txt"
   rm -f "$scope/canary_swap.json"
-  printf '{"bytes_dir":"%s","checksums_sha256":"%s","binary_sha256":"%s"}\n' "$dir" \
+  printf '{"candidate_sha":"%s","bytes_dir":"%s","checksums_sha256":"%s","binary_sha256":"%s"}\n' \
+    "$(git -C "$REPO_ROOT" rev-parse HEAD)" "$dir" \
     "$(shasum -a 256 "$dir/checksums.txt" | awk '{print $1}')" \
     "$(shasum -a 256 "$T/good/macprovider-cli" | awk '{print $1}')" >"$scope/signed_byte_verification.json"
 }

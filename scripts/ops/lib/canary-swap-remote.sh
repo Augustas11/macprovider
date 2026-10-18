@@ -215,30 +215,40 @@ trap 'say "ignoring SIGHUP"' HUP
 refuse() { say "REFUSED: $*"; exit 4; }
 
 # --- preflight: nothing touched yet -----------------------------------------
-# One swap at a time on this Mac, whichever operator Mac started it.
-if mkdir "$LOCK_DIR" 2>/dev/null; then
-  LOCKED=1
-else
+# One swap at a time on this Mac, whichever operator Mac started it. The lock
+# is published with its owner pid already inside (rename of a prepared dir),
+# so no run ever sees an ownerless lock; one without a readable pid is busy.
+lock_refused() {
+  say "REFUSED: $1"
+  trap - EXIT
+  printf '4\n' >"$RESULT_FILE"
+  exit 4
+}
+publish_lock() {
+  python3 - "$LOCK_DIR" "$$" <<'PY'
+import os, sys, tempfile
+lock, pid = sys.argv[1], sys.argv[2]
+prep = tempfile.mkdtemp(prefix=os.path.basename(lock) + ".init.", dir=os.path.dirname(lock))
+with open(os.path.join(prep, "pid"), "w") as f:
+    f.write(pid + "\n")
+try:
+    os.rename(prep, lock)  # fails when lock exists and is not empty
+except OSError:
+    os.remove(os.path.join(prep, "pid")); os.rmdir(prep)
+    sys.exit(1)
+PY
+}
+if ! publish_lock; then
   holder="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
-  if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
-    say "REFUSED: another canary swap (pid $holder) is running on this Mac"
-    trap - EXIT
-    printf '4\n' >"$RESULT_FILE"
-    exit 4
-  fi
-  # Atomic takeover: only the run whose rename wins may create the lock again.
-  if mv "$LOCK_DIR" "$LOCK_DIR.stale.$$" 2>/dev/null && mkdir "$LOCK_DIR" 2>/dev/null; then
-    rm -rf "$LOCK_DIR.stale.$$"
-    say "took over stale canary-swap lock (pid ${holder:-unknown})"
-    LOCKED=1
-  else
-    say "REFUSED: could not take over the canary-swap lock"
-    trap - EXIT
-    printf '4\n' >"$RESULT_FILE"
-    exit 4
-  fi
+  case "$holder" in ''|*[!0-9]*) lock_refused "canary-swap lock $LOCK_DIR has no owner pid; remove it by hand if no swap runs" ;; esac
+  kill -0 "$holder" 2>/dev/null && lock_refused "another canary swap (pid $holder) is running on this Mac"
+  # Stale owner: only the run whose rename wins may publish again.
+  mv "$LOCK_DIR" "$LOCK_DIR.stale.$$" 2>/dev/null || lock_refused "could not take over the canary-swap lock"
+  rm -rf "$LOCK_DIR.stale.$$"
+  publish_lock || lock_refused "could not take over the canary-swap lock"
+  say "took over stale canary-swap lock (pid $holder)"
 fi
-echo $$ >"$LOCK_DIR/pid"
+LOCKED=1
 
 case "$INSTALL_DIR" in
   "$HOME"/?*) ;;
