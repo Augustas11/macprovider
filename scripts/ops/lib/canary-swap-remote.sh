@@ -189,19 +189,19 @@ FINISHED=0
 LOCKED=0
 OLD_VERSION=""
 
-# finish RC: the single exit; records RC for the operator side.
 # watchdog_note: on an operator-recovery exit the watchdog is deliberately
 # left booted out (it would kick a half-restored provider); say so.
 watchdog_note() {
   [ -f "$LA_DIR/$WATCHDOG_LABEL.plist" ] || return 0
   launchctl print "$DOMAIN/$WATCHDOG_LABEL" >/dev/null 2>&1 && return 0
-  say "!!! watchdog $WATCHDOG_LABEL left unloaded; bootstrap it once the provider is buyer_serving: launchctl bootstrap $DOMAIN $LA_DIR/$WATCHDOG_LABEL.plist"
+  say "!!! watchdog $WATCHDOG_LABEL left unloaded; bootstrap it once the provider is buyer_serving: launchctl bootstrap $DOMAIN '$LA_DIR/$WATCHDOG_LABEL.plist'"
 }
 
+# finish RC: the single exit; records RC for the operator side.
 finish() {
   FINISHED=1
   trap - EXIT
-  [ "$1" != 6 ] || watchdog_note
+  [ "$1" != 6 ] || watchdog_note || true
   printf '%s\n' "$1" >"$RESULT_FILE.tmp" && mv "$RESULT_FILE.tmp" "$RESULT_FILE"
   if [ "$LOCKED" = 1 ] && [ "$(cat "$LOCK_DIR/pid" 2>/dev/null || true)" = "$$" ]; then
     rm -rf "$LOCK_DIR"
