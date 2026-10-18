@@ -121,7 +121,7 @@ final class ContinuousBatchingAdmissionHoldTests: XCTestCase {
         }
         let observed = InFlightObservation()
         let outcome = await ContinuousBatchingSelfCheck.runUnderAdmissionHold(
-            providerStatus: status, drainSeconds: 5, lifecycleLease: nil, context: "test", log: { _ in }
+            providerStatus: status, drainSeconds: 5, lifecycleLease: { nil }, context: "test", log: { _ in }
         ) {
             let inFlight = await status.requestsInFlightCount()
             let refused = await status.admitRequest(requestID: "arrived-during-check")
@@ -143,7 +143,7 @@ final class ContinuousBatchingAdmissionHoldTests: XCTestCase {
         let startedAt = await status.beginRequestIfAccepting(requestID: "never-finishes")!
         let checked = InFlightObservation()
         let outcome = await ContinuousBatchingSelfCheck.runUnderAdmissionHold(
-            providerStatus: status, drainSeconds: 0, lifecycleLease: nil, context: "test", log: { _ in }
+            providerStatus: status, drainSeconds: 0, lifecycleLease: { nil }, context: "test", log: { _ in }
         ) {
             checked.set(inFlight: -1, refused: false)
             return true
@@ -165,7 +165,7 @@ final class ContinuousBatchingAdmissionHoldTests: XCTestCase {
         let status = makeStatus()
         let lines = LogLines()
         let leased = await ContinuousBatchingSelfCheck.runUnderAdmissionHold(
-            providerStatus: status, drainSeconds: 5, lifecycleLease: "maintenance", context: "test",
+            providerStatus: status, drainSeconds: 5, lifecycleLease: { "maintenance" }, context: "test",
             log: { lines.append($0) }
         ) {
             XCTFail("no check under a maintenance lease")
@@ -179,7 +179,7 @@ final class ContinuousBatchingAdmissionHoldTests: XCTestCase {
 
         await status.setOperatorPauseFence(true)
         let paused = await ContinuousBatchingSelfCheck.runUnderAdmissionHold(
-            providerStatus: status, drainSeconds: 5, lifecycleLease: nil, context: "test", log: { _ in }
+            providerStatus: status, drainSeconds: 5, lifecycleLease: { nil }, context: "test", log: { _ in }
         ) {
             XCTFail("no check under an operator pause")
             return true
@@ -187,10 +187,97 @@ final class ContinuousBatchingAdmissionHoldTests: XCTestCase {
         XCTAssertEqual(paused, .skipped(reason: "operator_paused"))
     }
 
+    func testCheckBoundReopensAdmissionWithoutWaitingForTheCheck() async {
+        let status = makeStatus()
+        let reopened = InFlightObservation()
+        let started = Date()
+        let outcome = await ContinuousBatchingSelfCheck.runUnderAdmissionHold(
+            providerStatus: status, drainSeconds: 5, checkSeconds: 0.2, lifecycleLease: { nil }, context: "test", log: { _ in }
+        ) {
+            // A check that ignores the bound until it is cancelled.
+            while !Task.isCancelled { try? await Task.sleep(nanoseconds: 20_000_000) }
+            let admission = await status.admitRequest(requestID: "after-bound")
+            if case .admitted(let at) = admission {
+                reopened.set(inFlight: 1, refused: false)
+                await status.finishRequest(startedAt: at, completion: nil, failed: false, requestID: "after-bound")
+            } else {
+                reopened.set(inFlight: 0, refused: true)
+            }
+            return true
+        }
+        XCTAssertEqual(outcome, .yielded)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 3)
+        XCTAssertEqual(reopened.refused, false, "admission re-opened before the cancelled check returned")
+        let hold = await status.selfCheckAdmissionHoldStatus()
+        XCTAssertFalse(hold.active)
+        XCTAssertEqual(hold.lastOutcome, "yielded")
+    }
+
+    func testPauseLeaseOrTargetChangeDuringTheCheckEndsTheHold() async {
+        // A pause that begins during the check.
+        let paused = makeStatus()
+        let pausedOutcome = await ContinuousBatchingSelfCheck.runUnderAdmissionHold(
+            providerStatus: paused, drainSeconds: 5, lifecycleLease: { nil }, context: "test", log: { _ in }
+        ) {
+            await paused.setOperatorPauseFence(true)
+            while !Task.isCancelled { try? await Task.sleep(nanoseconds: 20_000_000) }
+            return false
+        }
+        XCTAssertEqual(pausedOutcome, .yielded)
+        let pausedSnapshot = await paused.snapshot()
+        XCTAssertEqual(pausedSnapshot.status, .unavailable, "the pause keeps its state")
+
+        // A lifecycle lease acquired during the check.
+        let leased = makeStatus()
+        let lease = LeaseFlag()
+        let leasedOutcome = await ContinuousBatchingSelfCheck.runUnderAdmissionHold(
+            providerStatus: leased, drainSeconds: 5, lifecycleLease: { lease.value }, context: "test", log: { _ in }
+        ) {
+            lease.set("maintenance")
+            while !Task.isCancelled { try? await Task.sleep(nanoseconds: 20_000_000) }
+            return false
+        }
+        XCTAssertEqual(leasedOutcome, .yielded)
+        let leasedHold = await leased.selfCheckAdmissionHoldStatus()
+        XCTAssertFalse(leasedHold.active)
+
+        // The self-check target changed (a model swap): the check never starts.
+        let swapped = makeStatus()
+        let ran = InFlightObservation()
+        let swappedOutcome = await ContinuousBatchingSelfCheck.runUnderAdmissionHold(
+            providerStatus: swapped, drainSeconds: 5, lifecycleLease: { nil }, stillValid: { false },
+            context: "test", log: { _ in }
+        ) {
+            ran.set(inFlight: 0, refused: false)
+            return true
+        }
+        XCTAssertEqual(swappedOutcome, .yielded)
+        XCTAssertNil(ran.inFlight)
+    }
+
+    func testDrainBoundEscalatesAfterDrainTimeoutsUpToFourTimes() {
+        XCTAssertEqual(ContinuousBatchingSelfCheck.admissionHoldDrainSeconds(base: 30, consecutiveDrainTimeouts: 0), 30)
+        XCTAssertEqual(ContinuousBatchingSelfCheck.admissionHoldDrainSeconds(base: 30, consecutiveDrainTimeouts: 1), 60)
+        XCTAssertEqual(ContinuousBatchingSelfCheck.admissionHoldDrainSeconds(base: 30, consecutiveDrainTimeouts: 2), 120)
+        XCTAssertEqual(ContinuousBatchingSelfCheck.admissionHoldDrainSeconds(base: 30, consecutiveDrainTimeouts: 9), 120)
+    }
+
+    func testRefusalRetryHintRunsToTheHoldBound() async {
+        let status = makeStatus()
+        let none = await status.selfCheckAdmissionHoldRetryAfterSeconds()
+        XCTAssertNil(none)
+        let now = Date()
+        _ = await status.beginSelfCheckAdmissionHold(expectedEndAt: now.addingTimeInterval(330))
+        let hint = await status.selfCheckAdmissionHoldRetryAfterSeconds(now: now)
+        XCTAssertEqual(hint, 330)
+        let late = await status.selfCheckAdmissionHoldRetryAfterSeconds(now: now.addingTimeInterval(400))
+        XCTAssertEqual(late, 1)
+    }
+
     func testUnfinishedCheckReportsYieldedAndReopensAdmission() async {
         let status = makeStatus()
         let outcome = await ContinuousBatchingSelfCheck.runUnderAdmissionHold(
-            providerStatus: status, drainSeconds: 5, lifecycleLease: nil, context: "test", log: { _ in }
+            providerStatus: status, drainSeconds: 5, lifecycleLease: { nil }, context: "test", log: { _ in }
         ) { false }
         XCTAssertEqual(outcome, .yielded)
         let after = await status.snapshot()
@@ -266,4 +353,12 @@ private final class LogLines: @unchecked Sendable {
 
     func append(_ line: String) { lock.lock(); defer { lock.unlock() }; lines.append(line) }
     var all: [String] { lock.lock(); defer { lock.unlock() }; return lines }
+}
+
+private final class LeaseFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: String?
+
+    func set(_ value: String) { lock.lock(); stored = value; lock.unlock() }
+    var value: String? { lock.lock(); defer { lock.unlock() }; return stored }
 }

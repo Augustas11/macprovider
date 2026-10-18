@@ -40,6 +40,10 @@
 #                           later Pearl-mutating step. A runtime that reports no
 #                           compatibility_policy_mode predates repository admission: blocked
 #                           until the coordinator runtime ships (pearl-runtime.sh)
+#   6a canary_self_check    only when canary_smoke recorded prior_grant_pending_recheck: the
+#                           same canary (provider, version, self-check key) now reports the final
+#                           granted / kept_prior_grant_* decision with the admission hold ended
+#                           (_check-canary-self-check); gates promotion
 #   6 canary_smoke          exact signed-candidate install/join smoke (scripts/ops/canary-swap.sh
 #                           swap); recorded only with
 #                           structured evidence: `next --done canary_smoke --probe` (the script
@@ -72,9 +76,7 @@
 #   8 recommendation_bump   next --run: _pearl-config sets latest_binary_version and
 #                           compatibility_set.target_id, restarts, and checks /healthz
 #                           recommended_binary_version and compatibility_policy_target_id
-#   9 verify_live_rollout   _check-canary-self-check (a canary_smoke taken while the canary's CB
-#                           re-check was pending needs its final decision), then
-#                           _check-privacy-rejections (two samples of the
+#   9 verify_live_rollout   _check-privacy-rejections (two samples of the
 #                           posture_unapproved_code_identity counter over
 #                           PRIVACY_REJECTION_WINDOW_SECONDS, default 180; journal fallback),
 #                           then verify-live-coordinator-release-rollout.yml
@@ -726,6 +728,24 @@ MACPROVIDER_OPS_OWNER=<session-label> $OPS_DIR/canary-swap.sh swap --version $V
 #   $0 next --done canary_smoke --probe        (reads /v1/status via STUDIO_SSH and reuses catalog gateway proof)"
   fi
 
+  # 6a. a canary taken while its CB re-check was pending: confirm the final
+  # decision on the same canary before promotion.
+  if marker_canary_probe_matches "$ok_sha"; then
+    if canary_self_check_confirmed "$ok_sha"; then
+      if marker_done "$OPS_SCOPE" canary_self_check; then
+        step canary_self_check "done" "$(marker_field "$OPS_SCOPE" canary_self_check 'd.get("evidence")')"
+      else
+        step canary_self_check "done" "final self-check decision recorded at canary_smoke"
+      fi
+    else
+      step canary_self_check pending "canary_smoke recorded prior_grant_pending_recheck"
+      set_next canary_self_check read "Confirm the canary's continuous-batching re-check decided" \
+        "scripts/ops/cli-release.sh _check-canary-self-check $V"
+    fi
+  else
+    step canary_self_check pending ""
+  fi
+
   # 7. in-scope e2e on the candidate (Promotion gate item 3).
   if [ "$published" = true ] || marker_candidate_matches e2e_gate "$ok_sha"; then
     step e2e_gate "done" "$(marker_field "$OPS_SCOPE" e2e_gate 'd.get("evidence")')"
@@ -793,10 +813,11 @@ MACPROVIDER_OPS_OWNER=<session-label> $OPS_DIR/canary-swap.sh swap --version $V
     if [ -n "$prod_active" ]; then
       set_next promotion blocked "Promote v$V" "" "production-release group busy: $prod_active"
     elif ! marker_run_matches signed_byte_verification "$ok_id" ||
-      ! marker_canary_probe_matches "$ok_sha" || ! marker_candidate_matches e2e_gate "$ok_sha" ||
+      ! marker_canary_probe_matches "$ok_sha" || ! canary_self_check_confirmed "$ok_sha" ||
+      ! marker_candidate_matches e2e_gate "$ok_sha" ||
       ! registrations_live || [ "$tag_state" != on_candidate ]; then
       set_next promotion blocked "Promote v$V" "" \
-        "physical_acceptance_confirmed=true needs verified bytes, canary smoke, e2e evidence, live Pearl registrations and the signed v$V tag for $ok_sha"
+        "physical_acceptance_confirmed=true needs verified bytes, canary smoke (and its CB re-check decided), e2e evidence, live Pearl registrations and the signed v$V tag for $ok_sha"
     else
       set_next promotion mutate "Promote acceptance run $ok_id to the public v$V release" \
 "scripts/ops/cli-release.sh _check-registrations $V
@@ -851,8 +872,7 @@ gh workflow run promote-acceptance-candidate.yml -R $(gh_repo) --ref main \\
       set_next verify_live_rollout blocked "Verify the live rollout of v$V" "" "production-release group busy: $prod_active"
     else
       set_next verify_live_rollout mutate "Verify the live coordinator rollout and publish discovery for v$V" \
-"scripts/ops/cli-release.sh _check-canary-self-check $V
-scripts/ops/cli-release.sh _check-privacy-rejections
+"scripts/ops/cli-release.sh _check-privacy-rejections
 gh workflow run verify-live-coordinator-release-rollout.yml -R $(gh_repo) --ref main -f tag=v$V"
     fi
   fi
@@ -955,6 +975,16 @@ marker_canary_probe_matches() {
   fi
 }
 
+# canary_self_check_confirmed SHA: canary_smoke recorded a final self-check
+# decision, or _check-canary-self-check confirmed one for this candidate.
+canary_self_check_confirmed() {
+  local sha="$1"
+  [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("self_check_decision")')" != prior_grant_pending_recheck ] &&
+    return 0
+  marker_done "$OPS_SCOPE" canary_self_check &&
+    [ "$(marker_field "$OPS_SCOPE" canary_self_check 'd.get("candidate_sha")')" = "$sha" ]
+}
+
 # check_journey_run RUN_ID CANDIDATE_SHA VERSION -> JSON evidence on stdout, or refuse.
 # The run must be a successful signed journey run that names the candidate.
 check_journey_run() {
@@ -1045,6 +1075,9 @@ got = {
     "self_check_decision": (cb.get("self_check") or {}).get("decision"),
     "self_check_served_slots": (cb.get("self_check") or {}).get("served_slots"),
     "emergency_off_override": policy.get("emergency_off_override"),
+    "provider_id": d.get("provider_id"),
+    "self_check_key": {k: (cb.get("self_check") or {}).get(k) for k in
+                       ("model_sha256", "metallib_sha256", "kernel_identifier", "hardware_class", "os_build", "runtime_build")},
 }
 bad = []
 if got["binary_version"] != v: bad.append("binary_version %r != %r" % (got["binary_version"], v))
@@ -1058,7 +1091,10 @@ single_row = got["self_check_decision"] == "single_row"
 # is re-checked; the re-check runs under the provider admission hold, and
 # _check-canary-self-check (verify_live_rollout) confirms its final decision.
 recheck_pending = got["self_check_decision"] == "prior_grant_pending_recheck"
-if recheck_pending: got["self_check_recheck_pending"] = True
+if recheck_pending:
+    got["self_check_recheck_pending"] = True
+    if not got["provider_id"] or not got["self_check_key"]["model_sha256"]:
+        bad.append("a pending re-check needs provider_id and the self_check key to confirm it later")
 if got["continuous_batching_active"] is not True and not single_row: bad.append("continuous_batching.active is not true")
 if got["paged_kv_decision"] != "attached": bad.append("continuous_batching.paged_kv_decision %r != 'attached'" % (got["paged_kv_decision"],))
 if got["self_check_decision"] == "granted" or recheck_pending:
@@ -1334,46 +1370,66 @@ print(b["count"] - a["count"] if same and b["count"] >= a["count"] else "reset")
   log "no posture_unapproved_code_identity rejections in ${window}s"
 }
 
-# _check-canary-self-check VERSION: when canary_smoke accepted a prior grant
-# whose continuous-batching re-check was still pending
-# (prior_grant_pending_recheck), the canary must now report the re-check's
-# final decision: granted or kept_prior_grant_* with CB active. The provider
-# runs a due re-check under a bounded admission hold, so this needs no traffic
-# stop. A canary_smoke recorded on a final decision needs nothing more.
+# _check-canary-self-check VERSION (step canary_self_check): canary_smoke
+# accepted a prior grant whose continuous-batching re-check was still pending
+# (prior_grant_pending_recheck). The same canary (provider id, version,
+# self-check key) must now report the final decision: granted or a kept prior
+# grant, CB active, the admission hold ended. The provider runs a due re-check
+# under a bounded admission hold, so no traffic stop is needed. Fails closed on
+# a missing or foreign canary_smoke record; records canary_self_check.
 check_canary_self_check() {
-  local V="${1-}" decision
+  local V="${1-}" sha decision probe out
   is_semver "$V" || die "usage: _check-canary-self-check VERSION"
   OPS_SCOPE="cli-release-$V"
+  sha="$(marker_field "$OPS_SCOPE" signed_byte_verification 'd.get("candidate_sha")')"
+  is_sha40 "$sha" || refuse "no verified candidate SHA is recorded for v$V"
+  marker_canary_probe_matches "$sha" || refuse "no canary_smoke status probe recorded for candidate $sha"
   decision="$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("self_check_decision")')"
   if [ "$decision" != prior_grant_pending_recheck ]; then
-    log "canary_smoke recorded self-check decision '${decision:-none}'; no pending re-check to confirm"
+    log "canary_smoke recorded the final self-check decision '$decision'; nothing to confirm"
     return 0
   fi
+  probe="$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get("probe", {})))' \
+    "$(marker_path "$OPS_SCOPE" canary_smoke)")" || refuse "canary_smoke record unreadable"
   require_studio_ssh
   case "${STUDIO_STATUS_PORT:-}" in ""|*[!0-9]*) refuse "STUDIO_STATUS_PORT must be set and numeric" ;; esac
   studio_ssh "curl -s -m 10 http://127.0.0.1:$STUDIO_STATUS_PORT/v1/status" > "$OPS_TMP_DIR/canary-recheck.json" ||
     refuse "canary /v1/status not readable over STUDIO_SSH"
-  python3 - "$OPS_TMP_DIR/canary-recheck.json" "$V" <<'PY' || refuse "the canary's continuous-batching re-check has not confirmed the grant"
+  out="$(python3 - "$OPS_TMP_DIR/canary-recheck.json" "$V" "$probe" <<'PY'
 import json, sys
-d, v = json.load(open(sys.argv[1])), sys.argv[2]
+d, v, probe = json.load(open(sys.argv[1])), sys.argv[2], json.loads(sys.argv[3])
 cb = d.get("continuous_batching") or {}
 sc = cb.get("self_check") or {}
 hold = cb.get("self_check_admission_hold") or {}
 decision, slots = sc.get("decision"), sc.get("served_slots")
+final = ("granted", "kept_prior_grant_no_net_gain", "kept_prior_grant_serial_baseline_unavailable")
 bad = []
 if d.get("binary_version") != v: bad.append("binary_version %r != %r" % (d.get("binary_version"), v))
+if probe.get("compatibility_set_id") and d.get("compatibility_set_id") != probe.get("compatibility_set_id"):
+    bad.append("compatibility_set_id %r != %r" % (d.get("compatibility_set_id"), probe.get("compatibility_set_id")))
+if not probe.get("provider_id") or d.get("provider_id") != probe.get("provider_id"):
+    bad.append("provider_id %r is not the canary_smoke provider %r" % (d.get("provider_id"), probe.get("provider_id")))
+key = probe.get("self_check_key") or {}
+if not key.get("model_sha256"): bad.append("canary_smoke recorded no self_check key")
+for k, want in key.items():
+    if sc.get(k) != want: bad.append("self_check.%s %r != %r recorded at canary_smoke" % (k, sc.get(k), want))
 if decision == "prior_grant_pending_recheck":
     bad.append("self_check re-check still pending (admission hold active=%r holds_total=%r last_outcome=%r last_skip_reason=%r); re-run once it decides"
                % (hold.get("active"), hold.get("holds_total"), hold.get("last_outcome"), hold.get("last_skip_reason")))
-elif decision != "granted" and not str(decision or "").startswith("kept_prior_grant"):
-    bad.append("self_check decision %r is not granted or kept_prior_grant_*" % (decision,))
+elif decision not in final:
+    bad.append("self_check decision %r is not one of %s" % (decision, ", ".join(final)))
+if hold.get("active") is not False: bad.append("self_check_admission_hold.active is %r, not false" % (hold.get("active"),))
 if cb.get("active") is not True: bad.append("continuous_batching.active is not true")
-if not isinstance(slots, int) or slots < 2: bad.append("self_check.served_slots %r < 2" % (slots,))
+if not isinstance(slots, int) or slots < 1: bad.append("self_check.served_slots %r < 1" % (slots,))
 if (cb.get("policy") or {}).get("emergency_off_override") is not False: bad.append("continuous_batching.policy.emergency_off_override is not false")
 if bad:
     sys.stderr.write("; ".join(bad) + "\n"); sys.exit(1)
-print("canary self-check re-check decided: %s at %d slots" % (decision, slots))
+print(json.dumps({"self_check_decision": decision, "self_check_served_slots": slots, "provider_id": d.get("provider_id")}, sort_keys=True))
 PY
+)" || refuse "the canary's continuous-batching re-check has not confirmed the grant"
+  mark_done "$OPS_SCOPE" canary_self_check "canary re-check decided: $out" \
+    "$(python3 -c 'import json,sys; print(json.dumps({"candidate_sha": sys.argv[1], "final": json.loads(sys.argv[2])}))' "$sha" "$out")"
+  log "canary self-check re-check decided: $out"
 }
 
 # _stage-privacy-identity VERSION

@@ -26,6 +26,8 @@ enum ProviderRequestAdmission: Sendable, Equatable {
 struct ContinuousBatchingAdmissionHoldStatus: Sendable, Equatable {
     var active = false
     var startedAt: Date?
+    /// The hold's outer bound (drain plus check), for the retry hint.
+    var expectedEndAt: Date?
     var holdsTotal = 0
     var lastOutcome: String?
     var lastEndedAt: Date?
@@ -38,6 +40,7 @@ struct ContinuousBatchingAdmissionHoldStatus: Sendable, Equatable {
         return [
             "active": active,
             "started_at": date(startedAt),
+            "expected_end_at": date(expectedEndAt),
             "holds_total": holdsTotal,
             "last_outcome": lastOutcome.map { $0 as Any } ?? NSNull(),
             "last_ended_at": date(lastEndedAt),
@@ -713,12 +716,15 @@ actor ProviderStatus {
     /// waits for them. Refused (returns the reason) while an operator pause
     /// holds, the provider is draining, unavailable or degraded, or a hold is
     /// already active. Routing sees the provider busy with no free slot.
-    func beginSelfCheckAdmissionHold() async -> String? {
+    /// `expectedEndAt` (the drain plus check bound) sets the refusals'
+    /// retry hint.
+    func beginSelfCheckAdmissionHold(expectedEndAt: Date? = nil) async -> String? {
         guard !operatorPauseFence else { return "operator_paused" }
         guard modelLoaded, status == .ready || status == .busy else { return "provider_\(status.rawValue)" }
         guard !cbAdmissionHold.active else { return "already_held" }
         cbAdmissionHold.active = true
         cbAdmissionHold.startedAt = Date()
+        cbAdmissionHold.expectedEndAt = expectedEndAt
         cbAdmissionHold.holdsTotal += 1
         await refreshAvailabilityState()
         return nil
@@ -731,6 +737,7 @@ actor ProviderStatus {
         guard cbAdmissionHold.active else { return }
         cbAdmissionHold.active = false
         cbAdmissionHold.startedAt = nil
+        cbAdmissionHold.expectedEndAt = nil
         cbAdmissionHold.lastOutcome = outcome
         cbAdmissionHold.lastEndedAt = Date()
         await refreshAvailabilityState()
@@ -743,6 +750,19 @@ actor ProviderStatus {
     }
 
     func selfCheckAdmissionHoldStatus() -> ContinuousBatchingAdmissionHoldStatus { cbAdmissionHold }
+
+    /// Whether a held self-check may keep running: no operator pause, and the
+    /// provider is still ready/busy (not draining, unavailable or degraded).
+    func isServingForSelfCheckAdmissionHold() -> Bool {
+        !operatorPauseFence && modelLoaded && (status == .ready || status == .busy)
+    }
+
+    /// Retry hint for a request refused by the hold: until its bound, at least
+    /// one second (the scheduler's queue-wait hint when the bound is unknown).
+    func selfCheckAdmissionHoldRetryAfterSeconds(now: Date = Date()) -> Int? {
+        guard cbAdmissionHold.active, let end = cbAdmissionHold.expectedEndAt else { return nil }
+        return max(1, Int(end.timeIntervalSince(now).rounded(.up)))
+    }
 
     func finishRequest(startedAt: Date, completion: CompletionResult?, failed: Bool, requestID: String? = nil) async {
         noteRealRequestEnd()

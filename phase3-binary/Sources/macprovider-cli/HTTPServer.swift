@@ -770,8 +770,12 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             let disconnect = ClientDisconnectState()
             inflightDisconnects.append(disconnect)
             let task = Task {
-                guard let startedAt = await status.beginRequestIfAccepting() else {
-                    writer.writeAPIError(APIError(status: 503, message: "Provider is paused or draining", type: "server_error", code: "provider_paused"))
+                let admission = await status.admitRequest()
+                guard case .admitted(let startedAt) = admission else {
+                    writer.writeAPIError(
+                        Self.admissionRefusalError(admission),
+                        retryAfterSecondsOverride: await status.selfCheckAdmissionHoldRetryAfterSeconds()
+                    )
                     return
                 }
                 do {
@@ -1051,7 +1055,10 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     }
                     let admission = await providerStatus.admitRequest()
                     guard case .admitted(let admittedAt) = admission else {
-                        writer.writeAPIError(Self.admissionRefusalError(admission))
+                        writer.writeAPIError(
+                            Self.admissionRefusalError(admission),
+                            retryAfterSecondsOverride: await providerStatus.selfCheckAdmissionHoldRetryAfterSeconds()
+                        )
                         return
                     }
                     startedAt = admittedAt
@@ -1403,7 +1410,10 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 }
                 let admission = await providerStatus.admitRequest()
                 guard case .admitted(let admittedAt) = admission else {
-                    writer.writeAPIError(Self.admissionRefusalError(admission))
+                    writer.writeAPIError(
+                        Self.admissionRefusalError(admission),
+                        retryAfterSecondsOverride: await providerStatus.selfCheckAdmissionHoldRetryAfterSeconds()
+                    )
                     return
                 }
                 startedAt = admittedAt
@@ -2995,6 +3005,7 @@ private struct ResponseWriter: @unchecked Sendable {
     func writeAPIError(
         _ error: APIError,
         extraHeaders: [(String, String)] = [],
+        retryAfterSecondsOverride: Int? = nil,
         completion: (@Sendable (Bool) -> Void)? = nil
     ) {
         writeJSON(
@@ -3002,7 +3013,7 @@ private struct ResponseWriter: @unchecked Sendable {
             body: error.envelope,
             extraHeaders: RouterHandler.retryGuidanceHeaders(
                 code: error.code,
-                seconds: retryAfterSeconds
+                seconds: retryAfterSecondsOverride ?? retryAfterSeconds
             ) + extraHeaders,
             completion: completion
         )

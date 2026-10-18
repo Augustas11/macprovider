@@ -972,9 +972,10 @@ rule (SPEC-038 FR-CB10). On a Mac that already batches the model, throughput
 alone never removes the grant (SPEC-038 FR-CB10 v0.3.15). A longer idle-time measurement over every granted slot count replaces
 the startup micro-benchmark this paragraph rejected. The signed policy may
 only revoke a model artifact on a runtime revision (Metal library SHA-256 and
-kernel identifier); it no longer grants acceptance. (v0.1.21) A SPEC-038
-FR-CB10 admission hold, during which no buyer request is admitted or in
-flight, is such an idle window.
+kernel identifier); it no longer grants acceptance. (v0.1.21) The check
+phase of a SPEC-038 FR-CB10 admission hold is such an idle window: it starts
+only after the hold's drain has finished every in-flight buyer request, and
+no buyer request is admitted until it ends.
 
 ### FR-PKV14 — operator configuration surface (SPEC-039-R014)
 

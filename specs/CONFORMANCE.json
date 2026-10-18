@@ -5376,6 +5376,8 @@
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testCheckRunsOnlyAfterInFlightRequestsFinishAndNoneIsDropped",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testDrainTimeoutSkipsTheCheckCancelsNothingAndReopensAdmission",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testLifecycleLeaseAndPauseSkipTheHold",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testCheckBoundReopensAdmissionWithoutWaitingForTheCheck",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testPauseLeaseOrTargetChangeDuringTheCheckEndsTheHold",
         "phase3-binary/Tests/macprovider-cliTests/InferenceRelayTests.swift:testSelfCheckAdmissionHoldRefusesWithTheReroutedQueueFullStatus"
       ],
       "journeys": [],

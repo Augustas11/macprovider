@@ -1048,30 +1048,57 @@ loaded "$CAND"
 # re-check is pending is CB active; rollout verification confirms the final
 # decision (the provider runs the re-check under its admission hold).
 cp -R "$tmp/state" "$tmp/state-recheck"
-status_doc $CAND true true false absent_fallback none attached '{"decision":"prior_grant_pending_recheck","served_slots":8}'
+SCK='"model_sha256":"m1","metallib_sha256":"l1","kernel_identifier":"k1","hardware_class":"h1","os_build":"o1","runtime_build":"r1"'
+sc() { printf '{"decision":"%s","served_slots":%s,%s}' "$1" "$2" "${3:-$SCK}"; }
+status_hold() { # STATUS_DOC_ARGS... with self_check_admission_hold.active=$HOLD_ACTIVE
+  python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["continuous_batching"]["self_check_admission_hold"]={"active": sys.argv[2]=="true","holds_total":1}; json.dump(d,open(p,"w"))' "$tmp/svc/status.json" "$1"
+}
+status_doc $CAND true true false absent_fallback none attached "$(sc prior_grant_pending_recheck 8)"
 MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 0 "canary probe accepts a serving prior grant with its re-check pending" \
   scripts/ops/cli-release.sh next --done canary_smoke --probe
-if python3 -c 'import json,sys; p=json.load(open(sys.argv[1]))["probe"]; sys.exit(0 if p["self_check_decision"] == "prior_grant_pending_recheck" and p["self_check_recheck_pending"] is True else 1)' \
+if python3 -c 'import json,sys; p=json.load(open(sys.argv[1]))["probe"]; sys.exit(0 if p["self_check_decision"] == "prior_grant_pending_recheck" and p["self_check_recheck_pending"] is True and p["provider_id"] == "canary-test-id" and p["self_check_key"]["runtime_build"] == "r1" else 1)' \
   "$tmp/state-recheck/cli-release-$CAND/canary_smoke.json"; then ok; else bad "pending re-check not recorded in the canary_smoke marker"; fi
 MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 0 "cli status after a pending-re-check canary" scripts/ops/cli-release.sh status
-expect_next e2e_gate:manual
-MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 3 "rollout gate refuses while the canary re-check is still pending" \
+expect_next canary_self_check:read
+case "$(next_field command)" in "scripts/ops/cli-release.sh _check-canary-self-check $CAND") ok ;; *) bad "canary_self_check command: $(next_field command)" ;; esac
+status_hold true
+MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 3 "re-check gate refuses while the re-check is still pending" \
   scripts/ops/cli-release.sh _check-canary-self-check "$CAND"
 expect_err "re-check still pending"
-status_doc $CAND true true false absent_fallback none attached '{"decision":"row_divergence_at_9","served_slots":8}'
-MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 3 "rollout gate refuses a re-check that lowered the grant" \
+status_doc $CAND true true false absent_fallback none attached "$(sc granted 8)"; status_hold true
+MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 3 "re-check gate refuses while the admission hold is active" \
   scripts/ops/cli-release.sh _check-canary-self-check "$CAND"
-expect_err "is not granted or kept_prior_grant_*"
-status_doc $LIVE true true false absent_fallback none attached '{"decision":"granted","served_slots":8}'
-MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 3 "rollout gate refuses a canary on another version" \
+expect_err "self_check_admission_hold.active is True"
+status_doc $CAND true true false absent_fallback none attached "$(sc row_divergence_at_9 8)"; status_hold false
+MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 3 "re-check gate refuses a re-check that lowered the grant" \
   scripts/ops/cli-release.sh _check-canary-self-check "$CAND"
-status_doc $CAND true true false absent_fallback none attached '{"decision":"granted","served_slots":8}'
-MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 0 "rollout gate passes once the canary re-check granted" \
+expect_err "is not one of granted"
+status_doc $CAND true true false absent_fallback none attached "$(sc kept_prior_grant_anything 8)"; status_hold false
+MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 3 "re-check gate refuses an unknown kept decision" \
   scripts/ops/cli-release.sh _check-canary-self-check "$CAND"
-status_doc $CAND true true false absent_fallback none attached '{"decision":"kept_prior_grant_no_net_gain","served_slots":8}'
-MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 0 "rollout gate passes a kept prior grant" \
+status_doc $CAND true true false absent_fallback none attached "$(sc granted 8 "${SCK/r1/r2}")"; status_hold false
+MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 3 "re-check gate refuses a decision on another self-check key" \
+  scripts/ops/cli-release.sh _check-canary-self-check "$CAND"
+expect_err "self_check.runtime_build"
+status_doc $LIVE true true false absent_fallback none attached "$(sc granted 8)"; status_hold false
+MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 3 "re-check gate refuses a canary on another version" \
+  scripts/ops/cli-release.sh _check-canary-self-check "$CAND"
+status_doc $CAND true true false absent_fallback none attached "$(sc granted 8)"; status_hold false
+MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 0 "refused checks record nothing" scripts/ops/cli-release.sh status
+expect_next canary_self_check:read
+MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 0 "re-check gate passes once the canary re-check granted" \
+  scripts/ops/cli-release.sh _check-canary-self-check "$CAND"
+if [ -f "$tmp/state-recheck/cli-release-$CAND/canary_self_check.json" ]; then ok; else bad "canary_self_check not recorded"; fi
+MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 0 "cli status after the re-check is confirmed" scripts/ops/cli-release.sh status
+expect_next e2e_gate:manual
+status_doc $CAND true true false absent_fallback none attached "$(sc kept_prior_grant_no_net_gain 1)"; status_hold false
+MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 0 "re-check gate passes a kept prior grant at one slot" \
   scripts/ops/cli-release.sh _check-canary-self-check "$CAND"
 rm -rf "$tmp/state-recheck"
+mkdir -p "$tmp/state-norecord"
+MACPROVIDER_OPS_STATE_DIR="$tmp/state-norecord" run_rc 3 "re-check gate fails closed without a canary record" \
+  scripts/ops/cli-release.sh _check-canary-self-check "$CAND"
+rm -rf "$tmp/state-norecord"
 status_doc $CAND true true false absent_fallback none attached '{"decision":"granted","served_slots":8}'
 run_rc 0 "canary probe on the candidate" scripts/ops/cli-release.sh next --done canary_smoke --probe
 STUDIO_SSH=unreachable-host run_rc 0 "rollout gate is a no-op for a canary recorded on a final decision" \
@@ -1386,7 +1413,7 @@ loaded "$CAND"
 printf '3' > "$tmp/svc/rejections"
 run_rc 0 "cli status after the bump with historical rejections" scripts/ops/cli-release.sh status
 expect_next verify_live_rollout:mutate
-case "$(next_field command)" in *"_check-canary-self-check $CAND"*"_check-privacy-rejections"*"verify-live-coordinator-release-rollout.yml"*) ok ;; *) bad "rollout command: $(next_field command)" ;; esac
+case "$(next_field command)" in *"_check-privacy-rejections"*"verify-live-coordinator-release-rollout.yml"*) ok ;; *) bad "rollout command: $(next_field command)" ;; esac
 if [ "$(fact_of privacy_unapproved_rejections_lifetime)" = "3" ]; then ok; else bad "lifetime fact: $(fact_of privacy_unapproved_rejections_lifetime)"; fi
 PRIVACY_REJECTION_WINDOW_SECONDS=0 run_rc 0 "no new rejections in the window" scripts/ops/cli-release.sh _check-privacy-rejections
 printf '1' > "$tmp/svc/rejections_bump"
