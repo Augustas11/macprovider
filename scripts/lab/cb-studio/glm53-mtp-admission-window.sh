@@ -58,8 +58,8 @@ LIVE_LABEL=live.malibu.provider
 LOCK=$HOME/.glm53-mtp-admission-window.lock
 MODEL_ID=zai-org/glm-5.3-flash
 RELEASE_METALLIB_SHA256=3d9b4a747758128cc5418e62c5ad8e282a11b0d436423537137e013beaa1261b
-POLICY_SHA256=7e3d3e8dcc10bc56b31d106a412a03a77ef63c025b711baef6dae62d41748b45
-PROVIDER_COMMIT=ada2ecb96a3756808b3492ec1c386b95ea4428a0
+POLICY_SHA256=5ca7e3b34a7eec5163a136782d85551cd57f6da0da0b02c808355ba02a67cfab
+PROVIDER_COMMIT=916faf3b7faedc815d864987a185c1464e5c4962
 R015_HARNESS_SHA256=pending
 CHALLENGE_ID=native-mtp-selftest-glm53-flash-0001
 # Candidate challenge texts, in preference order. The first is the text the
