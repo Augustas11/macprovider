@@ -8,11 +8,27 @@ struct MalibuApp: App {
 
     var body: some Scene {
         Settings { ModelSettingsView() }
+            .commands {
+                // The main menu is visible while a Malibu window keeps the
+                // app in the Dock. Settings and the dashboard open through
+                // the same presenters as the menu-bar item.
+                CommandGroup(replacing: .appSettings) {
+                    Button("Settings…") { SettingsWindowPresenter.shared.present() }
+                        .keyboardShortcut(",", modifiers: .command)
+                }
+                CommandGroup(replacing: .newItem) {
+                    Button("Open Dashboard") { AppDelegate.current?.presentDashboard() }
+                        .keyboardShortcut("d", modifiers: .command)
+                }
+            }
     }
 }
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// The running delegate, for menu commands declared on the SwiftUI scene.
+    private(set) static weak var current: AppDelegate?
+
     private let agent = MalibuAgent()
     private var menuBar: MenuBarController!
     private var onboardingWindow: NSWindow?
@@ -23,6 +39,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Log both installed versions so support can identify a partially
         // completed compatibility-set transaction without reading the bundle.
         logStartupProvenance()
+        AppDelegate.current = self
+        SettingsWindowPresenter.shared.agent = agent
 
         menuBar = MenuBarController(agent: agent) { [weak self] action in
             self?.handle(action)
@@ -61,6 +79,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 || onboardingWindow != nil
                 || NSApp.modalWindow != nil
         )
+    }
+
+    /// A Dock click (or Finder relaunch) with no window open shows the
+    /// dashboard instead of doing nothing.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag {
+            presentDashboard()
+        }
+        return true
     }
 
     // SPEC-026 §7.3: browser deep-link onboarding retired.
@@ -180,8 +207,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.onboardingWindow = nil
             }
         }
-        onboardingWindow?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        if let onboardingWindow {
+            DockPresenceController.shared.present(onboardingWindow)
+        }
     }
 
     private func handleStartup() async {
@@ -291,7 +319,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return alert.runModal() == .alertSecondButtonReturn
     }
 
-    private func presentDashboard() {
+    func presentDashboard() {
         if dashboardWindow == nil {
             dashboardWindow = DashboardWindow.make(
                 agent: agent,
@@ -299,8 +327,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 onResetProvider: { [weak self] in self?.resetProviderService() }
             )
         }
-        dashboardWindow?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        if let dashboardWindow {
+            DockPresenceController.shared.present(dashboardWindow)
+        }
     }
 
     private func exportDiagnostics() {
