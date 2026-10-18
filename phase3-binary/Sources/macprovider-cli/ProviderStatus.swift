@@ -1146,6 +1146,15 @@ actor ProviderStatus {
         inputTokensAllTime = max(0, record.inputTokensAllTime)
         outputTokensAllTime = max(0, record.outputTokensAllTime)
         errorsTotal = max(0, record.errorsTotal)
+        // Records written before #2029 kept a local-midnight day start. Their
+        // daily counters cannot be split at the UTC boundary, so they restart
+        // once rather than be shown as a UTC day they do not describe.
+        if Self.utcCalendar.startOfDay(for: tokensTodayDayStart) != tokensTodayDayStart {
+            tokensTodayDayStart = Self.utcCalendar.startOfDay(for: Date())
+            requestsToday = 0
+            inputTokensToday = 0
+            outputTokensToday = 0
+        }
         rolloverDayCountersIfNeeded()
     }
 

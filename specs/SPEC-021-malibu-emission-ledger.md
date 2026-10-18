@@ -844,7 +844,8 @@ projection.
 
 `emission` reports `active` (true only when the coordinator runs a MALIBU
 issuance worker: `enabled` plus `bootstrap_tick_enabled` or
-`useful_work_enabled`) and `last_accrual_at` (the provider's newest positive
+`useful_work_enabled`, with `epoch_enabled` off, since the epoch path has no
+policy engine yet) and `last_accrual_at` (the provider's newest positive
 MALIBU ledger row).
 
 Provider surfaces MUST derive trust copy from `trust_progress`, not from ledger

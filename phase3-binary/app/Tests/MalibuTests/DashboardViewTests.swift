@@ -35,7 +35,7 @@ final class DashboardViewTests: XCTestCase {
         XCTAssertEqual(AgentSnapshotPresenter.dashboardHeadline(snapshot), "Provider is ready")
         let card = AgentSnapshotPresenter.earningsCard(snapshot)
         XCTAssertEqual(card.usdcSummary, "USDC earnings are unavailable right now.")
-        XCTAssertNil(card.unpaidLine)
+        XCTAssertNil(card.payoutLine)
     }
 
     func testPopulatedMetricsAreLabelledHonestly() {

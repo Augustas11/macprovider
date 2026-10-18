@@ -78,6 +78,13 @@ func BuildProviderRewardProjection(ctx context.Context, providerID string, deps 
 		return ProviderRewardProjection{}, err
 	}
 	bal = balanceWithAuthoritativeTrustTier(bal, trust.TrustTier)
+	// Classify holds against the same trust snapshot and clock the trust
+	// block reports, so the two never disagree within one projection.
+	var cooldown sql.NullTime
+	if trust.DemotionCooldownUntil != nil {
+		cooldown = sql.NullTime{Time: *trust.DemotionCooldownUntil, Valid: true}
+	}
+	bal.ActiveHoldReasons, bal.RetainedHoldReasons = classifyHoldReasons(bal.HoldReasons, trust.TrustTier, cooldown, now)
 	rewardWallet, err := queryRewardWalletProjection(ctx, deps.RewardsDB, providerID)
 	if err != nil {
 		return ProviderRewardProjection{}, err

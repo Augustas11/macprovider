@@ -600,9 +600,10 @@ time (60–240 s for the first model) in the background.
   invite panel. There is no raw log tail; logs stay in exported diagnostics.
   Copy contract:
   - USDC: lifetime, this week and today, with "today" the UTC day for both
-    requests and USDC; unpaid USDC with "Payouts are not enabled yet in beta."
-    while `payouts_enabled` is false (SPEC-005 §11.4). The header shows the
-    model and "last paid job <relative time>".
+    requests and USDC; "Payouts are not enabled yet in beta." while a fresh
+    earnings read reports `payouts_enabled` false (SPEC-005 §11.4). No amount
+    is labelled unpaid, since the pending figure is not net of past payouts.
+    The header shows the model and "last credited job <relative time>".
   - MALIBU: "paused network-wide" while `emission.active` is false; the balance
     split into held and not held; held MALIBU is "not released and not
     withdrawable" with no implied release (SPEC-021-R012); trust progress only

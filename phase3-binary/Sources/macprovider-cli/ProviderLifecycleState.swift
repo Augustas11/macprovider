@@ -235,7 +235,14 @@ struct ProviderLifecycleStateRecord: Codable, Equatable, Sendable {
         guard let previous, let current = normalized(compatibilitySetID) else {
             return false
         }
-        return current != previous.lastUpdate?.compatibilitySetID
+        if let recorded = previous.lastUpdate {
+            return current != recorded.compatibilitySetID
+        }
+        // No update recorded yet: only a known earlier set proves a change.
+        guard let earlier = previous.compatibilitySetID ?? previous.lastRestart?.compatibilitySetID else {
+            return false
+        }
+        return current != earlier
     }
 
     private static let rejectionStates: [ProviderLifecycleState] = [

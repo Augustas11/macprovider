@@ -179,7 +179,9 @@ enum RewardActivityPresentation {
         switch event.eventType {
         case "malibu_accrual_inserted": return "MALIBU reward recorded"
         case "malibu_hold_applied": return "MALIBU reward held"
-        case "malibu_hold_cleared": return "MALIBU hold cleared"
+        // The only producer is the wallet-cap replay at wallet bind; trust
+        // holds are never cleared (SPEC-021 §3).
+        case "malibu_hold_cleared": return "Wallet daily limit cleared"
         case "wallet_daily_cap_applied": return "Wallet daily limit applied"
         case "wallet_bind_projected": return "Reward wallet updated"
         case "trust_tier_promoted": return "Trust status updated"

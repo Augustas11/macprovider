@@ -128,14 +128,19 @@ final class TruthfulDashboardTests: XCTestCase {
         let snapshot = auditSnapshot()
         let card = AgentSnapshotPresenter.earningsCard(snapshot, now: now)
         XCTAssertEqual(card.usdcSummary, "$0.15 lifetime · $0.0001 this week · $0.00 today (UTC)")
-        XCTAssertEqual(card.unpaidLine, "Unpaid: $0.15 · Payouts are not enabled yet in beta.")
+        XCTAssertEqual(card.payoutLine, "Payouts are not enabled yet in beta. USDC earnings stay recorded.")
+        XCTAssertFalse((card.payoutLine ?? "").contains("Unpaid"), "pending is not net of past payouts")
 
         var enabled = snapshot
         enabled.payoutsEnabled = true
-        XCTAssertEqual(AgentSnapshotPresenter.earningsCard(enabled, now: now).unpaidLine, "Unpaid: $0.15")
+        XCTAssertNil(AgentSnapshotPresenter.earningsCard(enabled, now: now).payoutLine)
         var unknown = snapshot
         unknown.payoutsEnabled = nil
-        XCTAssertEqual(AgentSnapshotPresenter.earningsCard(unknown, now: now).unpaidLine, "Unpaid: $0.15")
+        XCTAssertNil(AgentSnapshotPresenter.earningsCard(unknown, now: now).payoutLine)
+        var stale = snapshot
+        stale.updateRewardInputs(providerEarningsFresh: false)
+        stale.hasObservedProviderEarnings = true
+        XCTAssertNil(AgentSnapshotPresenter.earningsCard(stale, now: now).payoutLine, "no payout claim from a stale read")
     }
 
     func testTrustShowsRealProgressAndETA() {
@@ -186,10 +191,10 @@ final class TruthfulDashboardTests: XCTestCase {
         assertNoForbiddenCopy(strings)
     }
 
-    func testHeaderShowsLastPaidJobNotPendingCredits() {
+    func testHeaderShowsLastCreditedJob() {
         XCTAssertEqual(
             AgentSnapshotPresenter.dashboardSubtitle(auditSnapshot(), now: now),
-            "meta-llama/llama-3.2-3b-instruct · last paid job 7 h ago"
+            "meta-llama/llama-3.2-3b-instruct · last credited job 7 h ago"
         )
     }
 

@@ -1734,7 +1734,7 @@ enum AgentSnapshotPresenter {
             var parts: [String] = []
             if let model = s.currentModelID { parts.append(model) }
             if let lastPaid = s.lastPaidJobAt, lastPaid <= now.addingTimeInterval(60) {
-                parts.append("last paid job \(relativeTime(lastPaid, now: now))")
+                parts.append("last credited job \(relativeTime(lastPaid, now: now))")
             }
             return parts.isEmpty ? nil : parts.joined(separator: " · ")
         case .reconnecting, .starting:

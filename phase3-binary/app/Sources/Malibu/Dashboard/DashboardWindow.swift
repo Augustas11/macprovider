@@ -74,7 +74,7 @@ enum DashboardCopy {
     /// Reset and Export appear on the main surface only in an error state;
     /// otherwise they live in Advanced diagnostics.
     static func showsRecoveryOnMainSurface(_ snapshot: AgentSnapshot) -> Bool {
-        AgentSnapshotPresenter.statusPill(snapshot).tone == .attention
+        snapshot.state == .error
     }
 
     /// Every string the default (collapsed) dashboard shows, in order. Used by
@@ -92,7 +92,7 @@ enum DashboardCopy {
         }
         strings.append(earningsTitle)
         strings.append(card.usdcSummary)
-        if let unpaid = card.unpaidLine { strings.append(unpaid) }
+        if let payout = card.payoutLine { strings.append(payout) }
         if let address = snapshot.payoutRegisteredAddress {
             strings.append("Payout wallet \(PayoutWalletFlow.truncateAddress(address))")
         }
@@ -361,8 +361,8 @@ private struct DashboardView: View {
             Text(card.usdcSummary)
                 .font(.title3.weight(.semibold))
                 .fixedSize(horizontal: false, vertical: true)
-            if let unpaid = card.unpaidLine {
-                Text(unpaid)
+            if let payout = card.payoutLine {
+                Text(payout)
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }

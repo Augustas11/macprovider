@@ -20,8 +20,9 @@ extension AgentSnapshotPresenter {
     struct EarningsCard: Equatable {
         /// Lifetime, week, and UTC-day USDC, or why they are unavailable.
         let usdcSummary: String
-        /// Unpaid USDC and the payout state, when the balance is known.
-        let unpaidLine: String?
+        /// The payout state, from a fresh earnings read only. It carries no
+        /// amount: the pending figure is not net of past payouts.
+        let payoutLine: String?
         let malibuLines: [String]
         let trustLine: String?
         /// Shown only while MALIBU emission runs and the coordinator reports
@@ -53,7 +54,7 @@ extension AgentSnapshotPresenter {
         let verdict = rewardVerdict(s)
         return EarningsCard(
             usdcSummary: usdcSummary(s, verdict: verdict),
-            unpaidLine: unpaidLine(s, verdict: verdict),
+            payoutLine: payoutLine(s, verdict: verdict),
             malibuLines: malibuLines(s, verdict: verdict),
             trustLine: trustLine(s, verdict: verdict, now: now),
             hardwareBlocker: s.malibuEmission?.active == true && verdict.earningNeedsHardwareEvidence
@@ -76,13 +77,9 @@ extension AgentSnapshotPresenter {
         return isShowingLastKnownUSDC(s, verdict: verdict) ? "Last known: \(line)" : line
     }
 
-    private static func unpaidLine(_ s: AgentSnapshot, verdict: RewardVerdict) -> String? {
-        guard canShowLastKnownUSDC(s, verdict: verdict), let unpaid = s.earningsUsdcPending else { return nil }
-        let amount = "Unpaid: \(formatUSDC(unpaid))"
-        switch s.payoutsEnabled {
-        case false?: return "\(amount) · Payouts are not enabled yet in beta."
-        default: return amount
-        }
+    private static func payoutLine(_ s: AgentSnapshot, verdict: RewardVerdict) -> String? {
+        guard verdict.providerEarningsFresh, s.payoutsEnabled == false else { return nil }
+        return "Payouts are not enabled yet in beta. USDC earnings stay recorded."
     }
 
     private static func malibuLines(_ s: AgentSnapshot, verdict: RewardVerdict) -> [String] {

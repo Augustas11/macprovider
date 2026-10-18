@@ -1675,10 +1675,12 @@ protocol MalibuModelCLIRunning: AnyObject {
         onLine: @escaping @MainActor @Sendable (String) -> Void
     ) async throws -> ModelCLIResult
     func cancelCurrentOperation()
+    func forceTerminateCurrentOperation()
 }
 
 extension MalibuModelCLIRunning {
     func cancelCurrentOperation() {}
+    func forceTerminateCurrentOperation() {}
 
     func run(
         arguments: [String],
@@ -1767,6 +1769,16 @@ private final class ModelCLIProcessCancellation: @unchecked Sendable {
         lock.unlock()
         if process?.isRunning == true { process?.terminate() }
     }
+
+    /// Last resort after `cancel()` when the process ignores SIGTERM.
+    func kill() {
+        lock.lock()
+        let process = self.process
+        lock.unlock()
+        if let process, process.isRunning {
+            Darwin.kill(process.processIdentifier, SIGKILL)
+        }
+    }
 }
 
 @MainActor
@@ -1790,6 +1802,10 @@ final class MalibuModelCLI: MalibuModelCLIRunning {
 
     func cancelCurrentOperation() {
         cancellation.cancel()
+    }
+
+    func forceTerminateCurrentOperation() {
+        cancellation.kill()
     }
 
     func run(
@@ -2442,6 +2458,10 @@ final class ModelManagementStore: ObservableObject {
             guard !Task.isCancelled, let self else { return }
             self.listCommandTimedOut = true
             self.cli.cancelCurrentOperation()
+            // Escalate if the CLI ignores SIGTERM.
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            guard !Task.isCancelled else { return }
+            self.cli.forceTerminateCurrentOperation()
         }
         defer { timeout.cancel() }
         let result = try await cli.run(arguments: arguments, peer: peerEvidence, onLine: { _ in })

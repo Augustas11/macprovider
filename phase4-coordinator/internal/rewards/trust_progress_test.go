@@ -200,6 +200,7 @@ func TestEmissionActiveRequiresAnIssuanceWorker(t *testing.T) {
 		{Config{Enabled: true, EpochEnabled: true}, false},
 		{Config{Enabled: true, BootstrapTickEnabled: true}, true},
 		{Config{Enabled: true, UsefulWorkEnabled: true}, true},
+		{Config{Enabled: true, UsefulWorkEnabled: true, EpochEnabled: true}, false},
 	}
 	for _, tc := range cases {
 		if got := tc.cfg.EmissionActive(); got != tc.want {

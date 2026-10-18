@@ -376,6 +376,20 @@ final class ProviderLifecycleStateTests: XCTestCase {
         XCTAssertEqual(newVersion.lastUpdate?.compatibilitySetID, "Augustas11/macprovider:v1.8.251@bbbb")
     }
 
+    func testFirstCompatibilitySetWithoutEarlierRecordIsNotAnUpdate() throws {
+        let fixture = try Fixture()
+        let store = ProviderLifecycleStateStore(url: fixture.recordURL)
+        _ = try store.transition(to: .startingProvider, reasonCode: "launchd_service_started", writer: .serve, operationID: "serve:one")
+        let record = try store.transition(
+            to: .importingCredentials,
+            reasonCode: "resolving_cli_keychain_custody",
+            writer: .serve,
+            compatibilitySetID: "Augustas11/macprovider:v1.8.251@bbbb",
+            operationID: "serve:one"
+        )
+        XCTAssertNil(record.lastUpdate, "no earlier set is known, so nothing proves a change")
+    }
+
     func testSignificantReasonsSurviveReturnToServing() throws {
         let fixture = try Fixture()
         let store = ProviderLifecycleStateStore(url: fixture.recordURL)

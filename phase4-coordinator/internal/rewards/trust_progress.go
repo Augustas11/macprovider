@@ -32,9 +32,10 @@ type ProviderEmissionStatus struct {
 }
 
 // EmissionActive reports whether a MALIBU issuance worker runs. The v0.4
-// epoch path has no policy engine yet, so it never emits.
+// epoch path has no policy engine yet: with epoch_enabled set, both workers
+// return ErrEpochPolicyEngineUnavailable, so nothing emits.
 func (c Config) EmissionActive() bool {
-	return c.Enabled && (c.BootstrapTickEnabled || c.UsefulWorkEnabled)
+	return c.Enabled && !c.EpochEnabled && (c.BootstrapTickEnabled || c.UsefulWorkEnabled)
 }
 
 // BuildTrustProgress derives the live trust block from the evaluator state.

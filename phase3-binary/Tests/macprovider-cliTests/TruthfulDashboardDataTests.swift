@@ -176,3 +176,28 @@ final class TruthfulDashboardDataTests: XCTestCase {
         )
     }
 }
+
+final class TruthfulDashboardMigrationTests: XCTestCase {
+    func testLegacyLocalMidnightDayStartRestartsDailyCountersOnce() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let store = ProviderStatsStore(fileURL: directory.appendingPathComponent("mac.json"))
+        var record = ProviderStatsRecord.empty(providerID: "mac")
+        // A UTC+8 local midnight is 16:00 UTC the previous day.
+        record.requestsTodayDayStart = ProviderStatus.utcCalendar.startOfDay(for: Date()).addingTimeInterval(-8 * 3_600)
+        record.requestsToday = 9
+        record.requestsTotal = 100
+        store.save(record)
+
+        let status = ProviderStatus(
+            modelID: "m",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 4_000, maxConcurrencyOverride: 1),
+            providerID: "mac",
+            statsStore: store
+        )
+        let snap = await status.snapshot()
+        XCTAssertEqual(snap.requestsToday, 0, "a local-day count is not shown as the UTC day")
+        XCTAssertEqual(snap.requestsTotal, 100, "lifetime totals are kept")
+    }
+}
