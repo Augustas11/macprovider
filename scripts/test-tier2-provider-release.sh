@@ -392,7 +392,7 @@ if PATH="$WORKDIR:$PATH" \
   die "mismatched Malibu.app CLI unexpectedly passed"
 fi
 assert_contains "$WORKDIR/bad-app.err" "Malibu.app bundled binary sha256 differs from tarball binary"
-assert_contains "$WORKDIR/app.err" "Malibu.app version matches release tag: 1.2.6 1002006"
+assert_contains "$WORKDIR/app.err" "Malibu.app version matches release tag: 1.2.6 6"
 
 stale_app_fixture="$WORKDIR/stale-app-release"
 make_release_fixture "$stale_app_fixture" "1.2.6" "1" "none" "bad-version"
@@ -404,7 +404,7 @@ if PATH="$WORKDIR:$PATH" \
   "$VERIFIER" >"$WORKDIR/stale-app.out" 2>"$WORKDIR/stale-app.err"; then
   die "stale Malibu.app version stamp unexpectedly passed"
 fi
-assert_contains "$WORKDIR/stale-app.err" "Malibu.app version/build 1.8.224 1002006 does not match release tag v1.2.6"
+assert_contains "$WORKDIR/stale-app.err" "Malibu.app version/build 1.8.224 6 does not match release tag v1.2.6"
 
 stale_build_fixture="$WORKDIR/stale-build-release"
 make_release_fixture "$stale_build_fixture" "1.2.6" "1" "none" "bad-build"

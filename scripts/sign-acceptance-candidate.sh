@@ -242,6 +242,7 @@ python3 "$compatibility" validate \
   --payload-directory "$cli_work" \
   --expected-tag "$tag" \
   --expected-commit "$candidate_commit" \
+  --expected-malibu-app-version "${app_expected_stamp%% *}" \
   --expected-provider-admission-policy "$provider_admission_policy"
 python3 "$compatibility" sign \
   --input "$cli_work/compatibility-set.json" \
@@ -254,6 +255,7 @@ python3 "$compatibility" validate \
   --public-key "$release_public_key" \
   --expected-tag "$tag" \
   --expected-commit "$candidate_commit" \
+  --expected-malibu-app-version "${app_expected_stamp%% *}" \
   --expected-provider-admission-policy "$provider_admission_policy" \
   --openssl "$openssl_bin"
 

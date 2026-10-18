@@ -2,7 +2,7 @@
 
 Status: DRAFT v0.31.0 · Owner: @Augustas11 · Target: 2026 Q3
 
-**Change log v0.31.0 (2026-10-18, tag-stamped app version + self-relaunch after update).** Normative, §3.3: (1) the Malibu.app component version is stamped from the release tag at build time (`CFBundleShortVersionString` = tag version, `CFBundleVersion` = `X*1000000 + Y*1000 + Z`). `project.yml` carries only a `0.0.0` development default, and the candidate build, the acceptance signer and published-release verification all check both values. This supersedes the v0.17 allowance for an independently versioned Malibu component, which let a stale `1.8.224` stamp ship inside release 1.8.251. (2) After the CLI-owned update swaps the installed bundle, the running Malibu process relaunches itself onto the installed bundle, once the bundle is proven to be the installed signed set's Malibu member. The CLI still never signals, quits, or launches the app process. A pre-v0.31 process picks up the first such update at its next launch.
+**Change log v0.31.0 (2026-10-18, tag-stamped app version + self-relaunch after update).** Normative, §3.3: (1) the Malibu.app component version is stamped from the release tag at build time (`CFBundleShortVersionString` = tag version, `CFBundleVersion` = its positive patch `Z`). `project.yml` carries only a `0.0.0` development default, and the candidate build, the acceptance signer and published-release verification all check both values. This supersedes the v0.17 allowance for an independently versioned Malibu component, which let a stale `1.8.224` stamp ship inside release 1.8.251. (2) After the CLI-owned update swaps the installed bundle, the running Malibu process relaunches itself onto the installed bundle, once the bundle is proven to be the installed signed set's Malibu member. The CLI still never signals, quits, or launches the app process. A pre-v0.31 process picks up the first such update at its next launch.
 
 **Change log v0.30.2 (2026-10-17):** Editorial, no normative change: §5.2 notes that SPEC-020 R-4.14 v0.1.28 now defines the persisted operator-pause signal; the stall threshold, its owner and the hard-freeze cases stay deferred.
 
@@ -614,14 +614,16 @@ time (60–240 s for the first model) in the background.
   the set release version (v0.31). Every compatibility-set build (release and
   acceptance candidate) stamps Malibu.app from the tag `vX.Y.Z` through one
   helper (`scripts/malibu-app-version.sh`): `CFBundleShortVersionString` =
-  `X.Y.Z` and `CFBundleVersion` = `X*1000000 + Y*1000 + Z` (components 0-999),
-  a positive build that strictly increases with the tag and exceeds every
-  pre-v0.31 ledger build. The checked-in project carries only a `0.0.0`/`0`
+  `X.Y.Z` and `CFBundleVersion` = `Z`, the positive-patch contract that the
+  release trust-anchor preflight already enforces (a `vX.Y.0` tag stays
+  unreleasable until a reviewed change replaces that contract). The checked-in project carries only a `0.0.0`/`0`
   development default, which a release-version guard keeps unchanged. The
   candidate build, the protected acceptance signer, and published-release
   verification each fail when the app's version or build differs from the
-  helper's values for the tag. Acceptance cases: a stale project stamp, a
-  wrong build with the right version, and `vX.Y.0` / `vX.0.0` tags.
+  helper's values for the tag. The protected signer also binds the signed
+  manifest's `components.malibu_app.version` to the tag. Acceptance cases: a
+  stale project stamp, a wrong build with the right version, and a
+  rejected `vX.Y.0` tag.
   `malibu-release.yml` (the legacy independent publication surface for
   already-installed Sparkle clients) stamps the app from its own
   `v<version>` tag with the same helper. It embeds a named CLI release's set
@@ -670,7 +672,8 @@ time (60–240 s for the first model) in the background.
     development and test builds never relaunch;
   - prove that the installed bundle is the Malibu member of the installed
     CLI's release-signed compatibility set: the app version equals the set's
-    `components.malibu_app.version`, and the embedded set manifest is
+    `components.malibu_app.version`, its build equals that version's patch,
+    and the embedded set manifest is
     byte-identical to the installed one. Without that proof the change is
     mid-transaction or out-of-band, and Malibu MUST NOT relaunch;
   - see the new identity unchanged for 60 s with a known provider status, or

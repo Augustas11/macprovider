@@ -156,23 +156,28 @@ reset_fixture
 stamp_output="$(run_fixture_guard)"
 grep -q "Malibu is stamped $binary_version build " <<<"$stamp_output"
 
-# The stamp helper accepts only an exact release tag and derives a positive,
-# strictly increasing build across patch, minor, and major bumps.
+# The stamp helper accepts only an exact release tag. CFBundleVersion is the
+# positive patch component, the contract prepare-malibu-bootstrap-trust-anchor.py
+# enforces on every release.
 stamp_helper="$repo_root/scripts/malibu-app-version.sh"
-[[ "$(bash "$stamp_helper" v1.8.251)" == "1.8.251 1008251" ]]
-[[ "$(bash "$stamp_helper" v1.9.0)" == "1.9.0 1009000" ]]
-[[ "$(bash "$stamp_helper" v2.0.0)" == "2.0.0 2000000" ]]
-[[ "$(bash "$stamp_helper" v0.0.1)" == "0.0.1 1" ]]
-previous_build=0
-for ordered_tag in v0.0.1 v1.8.224 v1.8.251 v1.8.999 v1.9.0 v1.10.0 v2.0.0 v999.999.999; do
-  read -r _ build <<<"$(bash "$stamp_helper" "$ordered_tag")"
-  if (( build <= previous_build )); then
-    echo "Malibu app build for $ordered_tag ($build) does not increase over $previous_build" >&2
-    exit 1
-  fi
-  previous_build="$build"
-done
-for bad_tag in 1.8.251 v1.8 v1.8.251-rc1 v0.0.0 v01.8.2 v1.1000.0 "v1.8.2;id" "v1.8.2 x" ""; do
+[[ "$(bash "$stamp_helper" v1.8.251)" == "1.8.251 251" ]]
+[[ "$(bash "$stamp_helper" v2.10.7)" == "2.10.7 7" ]]
+read -r stamped_version stamped_build <<<"$(bash "$stamp_helper" "v$binary_version")"
+# The release trust-anchor preflight accepts exactly the helper's stamp.
+python3 -c '
+import importlib.util, sys
+path = sys.argv[1]
+spec = importlib.util.spec_from_file_location("trust_anchor", path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+version, build = sys.argv[2], sys.argv[3]
+module.validate_identity(
+    {"CFBundleIdentifier": "tech.malibu.app", "CFBundleExecutable": "Malibu",
+     "CFBundleShortVersionString": version, "CFBundleVersion": build},
+    "v" + version,
+)
+' "$repo_root/scripts/prepare-malibu-bootstrap-trust-anchor.py" "$stamped_version" "$stamped_build"
+for bad_tag in 1.8.251 v1.8 v1.8.251-rc1 v1.9.0 v0.0.0 v01.8.2 "v1.8.2;id" "v1.8.2 x" ""; do
   if bash "$stamp_helper" "$bad_tag" >/dev/null 2>&1; then
     echo "Malibu app stamp helper accepted invalid tag: $bad_tag" >&2
     exit 1

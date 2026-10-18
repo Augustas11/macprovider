@@ -11,24 +11,15 @@
 # CURRENT_PROJECT_VERSION, and release verification compares the built bundle
 # with them (SPEC-025 §3.3).
 #
-# CFBundleVersion is X*1000000 + Y*1000 + Z: a positive decimal that strictly
-# increases with the tag across patch, minor, and major bumps (1.8.252 ->
-# 1008252, 2.0.0 -> 2000000) and stays above every ledger build shipped
-# before v0.31 (at most 224).
+# CFBundleVersion is the tag's patch component, the contract that
+# scripts/prepare-malibu-bootstrap-trust-anchor.py already enforces on every
+# release (positive decimal equal to the patch), so a patch of 0 is rejected.
 set -euo pipefail
 
 tag="${1:-}"
-if [[ "$#" -ne 1 || ! "$tag" =~ ^v(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})$ ]]; then
-  printf '[malibu-app-version] ERROR: release tag %s is not v<major>.<minor>.<patch> with components 0-999\n' \
+if [[ "$#" -ne 1 || ! "$tag" =~ ^v((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.([1-9][0-9]*))$ ]]; then
+  printf '[malibu-app-version] ERROR: release tag %s is not v<major>.<minor>.<patch> with a positive patch\n' \
     "$tag" >&2
   exit 1
 fi
-major="${BASH_REMATCH[1]}"
-minor="${BASH_REMATCH[2]}"
-patch="${BASH_REMATCH[3]}"
-build=$((major * 1000000 + minor * 1000 + patch))
-if [[ "$build" -le 0 ]]; then
-  printf '[malibu-app-version] ERROR: release tag %s yields no positive build\n' "$tag" >&2
-  exit 1
-fi
-printf '%s.%s.%s %s\n' "$major" "$minor" "$patch" "$build"
+printf '%s %s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[4]}"

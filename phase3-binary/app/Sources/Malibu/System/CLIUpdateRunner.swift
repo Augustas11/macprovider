@@ -791,6 +791,8 @@ enum CLIUpdateRunner {
               let expectedVersion = ProviderCLIVersion.strictNormalize(expected.version),
               let installed = readInstalledMalibuAppIdentity(at: bundleURL),
               ProviderCLIVersion.strictNormalize(installed.version) == expectedVersion,
+              // SPEC-025 v0.31: the build is the version's patch component.
+              installed.build == expectedVersion.split(separator: ".").last.map(String.init),
               (try? validateEmbeddedCompatibilityManifest(
                 in: bundleURL,
                 expectedIdentity: expected

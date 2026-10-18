@@ -493,6 +493,8 @@ if [ -n "$app_expected_sha" ]; then
   [ -d "$app_path" ] || die "$app_asset does not contain Malibu.app"
   [ -x "$app_path/Contents/MacOS/macprovider-cli" ] || die "Malibu.app lacks executable bundled macprovider-cli"
   # SPEC-025 §3.3: the shipped app is stamped from the release tag.
+  [ ! -L "$app_path" ] && [ -d "$app_path/Contents" ] && [ ! -L "$app_path/Contents" ] ||
+    die "Malibu.app bundle or Contents is a symlink"
   app_expected_stamp="$(bash "$SCRIPT_DIR/malibu-app-version.sh" "$RELEASE_TAG")" ||
     die "release tag $RELEASE_TAG has no Malibu.app version stamp"
   app_bundle_stamp="$(python3 -c '
