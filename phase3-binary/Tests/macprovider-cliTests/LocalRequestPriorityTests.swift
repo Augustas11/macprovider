@@ -236,6 +236,53 @@ final class LocalRequestPriorityTests: XCTestCase {
         }
     }
 
+    func testOverlappingWindowsKeepTheBuyerThatStillNeedsASlotAndSpareTheOlderLocal() async throws {
+        let status = makeStatus(slots: 2, reservedBuyerSlots: 0, preemptionWindowMS: 150)
+        let older = LocalPreemptionLease()
+        let newer = LocalPreemptionLease()
+        guard case .admitted = await status.beginLocalRequest(older),
+              case .admitted = await status.beginLocalRequest(newer) else { return XCTFail("local not admitted") }
+        let firstBuyer = await status.beginRequest()
+        _ = await status.beginRequest()
+        await status.finishRequest(startedAt: firstBuyer, completion: nil, failed: false)
+        try await eventually(timeoutNanoseconds: 2_000_000_000) { newer.isPreempted }
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertTrue(newer.isPreempted, "the remaining buyer still needs one slot")
+        XCTAssertFalse(older.isPreempted, "the older local request keeps its slot")
+    }
+
+    func testRequestsNeverAdmittedAreCountedAsDeclined() async throws {
+        let status = makeStatus(slots: 1)
+        let cancelled = await status.beginLocalRequest(LocalPreemptionLease(), isCancelled: { true })
+        XCTAssertEqual(cancelled, .cancelled)
+        await status.setState(.draining, reason: "drain")
+        let unavailable = await status.beginLocalRequest(LocalPreemptionLease())
+        XCTAssertEqual(unavailable, .unavailable)
+        let usage = await status.currentLocalUsage()
+        XCTAssertEqual(usage.requestsDeclined, 2)
+        XCTAssertEqual(usage.requestsTotal, 0)
+    }
+
+    func testPausedProviderReportsNoBuyerReservation() async throws {
+        let status = makeStatus(slots: 4)
+        let before = await status.currentLocalUsage()
+        XCTAssertEqual(before.reservedBuyerSlots, 1)
+        await status.setOperatorPauseFence(true)
+        let paused = await status.currentLocalUsage()
+        XCTAssertEqual(paused.reservedBuyerSlots, 0)
+    }
+
+    func testTimedOutUpdateDrainReopensLocalAdmission() async throws {
+        let status = makeStatus(slots: 1)
+        _ = await status.beginRequest()
+        let drained = await status.waitUntilDrained(timeoutSeconds: 0, preemptingLocal: true)
+        XCTAssertFalse(drained)
+        let usage = await status.snapshot()
+        XCTAssertEqual(usage.requestsInFlight, 1)
+        let local = await status.beginLocalRequest(LocalPreemptionLease())
+        XCTAssertEqual(local, .preempted, "the buyer holds the only slot, but admission is open again")
+    }
+
     func testOperatorPauseLetsTheProviderUseAllSlotsLocally() async throws {
         let status = makeStatus(slots: 2)
         await status.setOperatorPauseFence(true)

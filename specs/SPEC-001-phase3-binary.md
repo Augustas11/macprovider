@@ -2263,7 +2263,9 @@ separate `local_usage` object with `billable:false`, `heartbeat_counted:false`,
 `reserved_buyer_slots`, `preemption_window_ms` and `queue_wait_ms`. Every
 admitted local request ends in exactly one of completed (including a
 successful token utility), failed, preempted or cancelled, which sum to
-`requests_total`; `requests_declined` counts requests never admitted. These
+`requests_total`; `requests_declined` counts every request never admitted
+(queue full or timed out, unavailable, or cancelled while waiting).
+`reserved_buyer_slots` is the effective reservation (0 while paused). These
 counters cover the current process only. The local-status capability
 `local_chat_priority_v1` and a `local_priority` object in
 `GET /v1/capabilities` advertise this policy.
@@ -2287,7 +2289,8 @@ engine path:
    requests, one per excess slot, no later than the preemption window
    (`local_preemption_window_ms`, default 0, at most 2,000 ms) after that
    admission. With a nonzero window the provider MUST re-check at the window's
-   end and preempt only if network work still needs the slot. Preemption
+   end and preempt only if network work still needs the slot, choosing the
+   newest local request whose window has ended or is pending. Preemption
    cancels the local request through the existing cancellation path (the
    request's cancellation predicate and task), which is checked while waiting
    for the inference gate, before and after prompt preparation, and at every
@@ -2300,10 +2303,10 @@ engine path:
    work and leaves local work running, and while paused local work MAY use
    every slot (*R* = 0). A draining provider or one with no loaded model MUST
    reject new local work with the same 503 `provider_paused` a buyer gets.
-   A coordinator-initiated drain keeps serving local work. Process-exit and
-   update drains MUST preempt admitted local work, settle queued local requests
-   with 503 `provider_paused`, wait for both, and keep local admission closed
-   until the provider is reset to ready.
+   A coordinator-initiated drain leaves admitted local work running. Process-exit
+   and update drains MUST preempt admitted local work, settle queued local
+   requests with 503 `provider_paused`, wait for both, and keep local admission
+   closed until the drain times out or the provider publishes ready again.
 5. Internal work that yields to network requests (idle prewarm, the
    continuous-batching self-check) MUST also yield to local work, without
    counting local work in any buyer-facing figure.

@@ -7680,6 +7680,11 @@ actor CoordinatorClient {
     }
 
     private func sendStateUpdate(state requestedState: ProviderHealthState?, reason requestedReason: String) async throws {
+        // SPEC-001-R011: publishing ready ends any update drain, so local
+        // admission reopens with it.
+        if requestedState == .ready {
+            await providerStatus.reopenLocalAdmission()
+        }
         var newState = requestedState
         var reason = requestedReason
         if operatorPaused, newState == .ready || newState == .busy {

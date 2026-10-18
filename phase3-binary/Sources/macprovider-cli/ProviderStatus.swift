@@ -1004,7 +1004,9 @@ actor ProviderStatus {
     func currentLocalUsage() -> LocalUsageSnapshot {
         var usage = localUsage
         usage.requestsInFlight = localLeases.count
-        usage.reservedBuyerSlots = localPriorityPolicy.reservation(forServedSlots: max(1, capacity.maxConcurrency))
+        usage.reservedBuyerSlots = operatorPauseFence
+            ? 0
+            : localPriorityPolicy.reservation(forServedSlots: max(1, capacity.maxConcurrency))
         usage.preemptionWindowMS = localPriorityPolicy.preemptionWindowMS
         usage.queueWaitMS = localPriorityPolicy.queueWaitMS
         return usage
@@ -1040,12 +1042,19 @@ actor ProviderStatus {
         var queued = false
         defer { if queued { localQueuedCount -= 1 } }
         while true {
-            guard acceptsLocalRequests else { return .unavailable }
+            // Every outcome other than admission counts as declined.
+            guard acceptsLocalRequests else {
+                localUsage.requestsDeclined += 1
+                return .unavailable
+            }
             if lease.isPreempted {
                 localUsage.requestsDeclined += 1
                 return .preempted
             }
-            if isCancelled() || Task.isCancelled { return .cancelled }
+            if isCancelled() || Task.isCancelled {
+                localUsage.requestsDeclined += 1
+                return .cancelled
+            }
             if localRequestFits() {
                 localLeases.append(lease)
                 noteRealRequestStart()
@@ -1126,17 +1135,21 @@ actor ProviderStatus {
         requestsInFlight > 0 || !localLeases.isEmpty
     }
 
+    /// Buyers plus every admitted local request not yet preempted, over the
+    /// served slots. Leases already scheduled for preemption still occupy
+    /// their slots until their window ends.
     private func localExcess() -> Int {
         let slots = max(1, capacity.maxConcurrency)
-        let running = localLeases.filter { !localPreemptionScheduled.contains($0.id) && !$0.isPreempted }
-        return requestsInFlight + running.count - slots
+        let active = localLeases.filter { !$0.isPreempted }
+        return requestsInFlight + active.count - slots
     }
 
     /// A buyer must never wait on local work: when buyers plus local
     /// requests exceed the served slots, preempt the newest local requests,
     /// each within the preemption window.
     private func enforceBuyerPriority() {
-        var excess = localExcess()
+        let alreadyScheduled = localLeases.filter { localPreemptionScheduled.contains($0.id) && !$0.isPreempted }.count
+        var excess = localExcess() - alreadyScheduled
         guard excess > 0 else { return }
         let windowMS = localPriorityPolicy.preemptionWindowMS
         let running = localLeases.filter { !localPreemptionScheduled.contains($0.id) && !$0.isPreempted }
@@ -1159,8 +1172,16 @@ actor ProviderStatus {
     private func expirePreemptionWindow(_ lease: LocalPreemptionLease) {
         guard localPreemptionScheduled.remove(lease.id) != nil,
               localLeases.contains(where: { $0 === lease }) else { return }
-        if localExcess() > 0 {
-            lease.preempt()
+        // While buyers still need slots, preempt the newest of this lease and
+        // the leases already marked for preemption, so a buyer that left in
+        // between never costs an older request its slot.
+        while localExcess() > 0 {
+            let candidates = localLeases.filter {
+                !$0.isPreempted && ($0 === lease || localPreemptionScheduled.contains($0.id))
+            }
+            guard let newest = candidates.last else { return }
+            localPreemptionScheduled.remove(newest.id)
+            newest.preempt()
         }
     }
 
@@ -1182,6 +1203,8 @@ actor ProviderStatus {
         }
         while requestsInFlight > 0 || (preemptingLocal && (!localLeases.isEmpty || localQueuedCount > 0)) {
             if Date() >= deadline {
+                // A drain that timed out leaves the provider serving.
+                if preemptingLocal { localAdmissionClosed = false }
                 return false
             }
             try? await Task.sleep(nanoseconds: 100_000_000)
