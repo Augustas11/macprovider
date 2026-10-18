@@ -61,13 +61,16 @@ enum MalibuMenuBarIcon {
     }
 
     static let canvasHeight: CGFloat = 18
-    static let canvasWidth: CGFloat = 30
+    static let canvasWidth: CGFloat = 32
     static let baselineY: CGFloat = 1
     static let domeRadius: CGFloat = 6
     static let rayInnerRadius: CGFloat = 8.6
     static let rayOuterRadius: CGFloat = 15.1
     static let rayStrokeWidth: CGFloat = 1.8
-    static let rayAnglesDegrees: [Double] = [30, 60, 90, 120, 150]
+    /// Seven rays from 12° to 168° keep the brand mark's two near-horizontal
+    /// side rays (the 9-ray mark spans the same 12°–168°) while staying legible
+    /// at menu-bar size.
+    static let rayAnglesDegrees: [Double] = [12, 38, 64, 90, 116, 142, 168]
     static let badgeDiameter: CGFloat = 6
     static let badgeRingWidth: CGFloat = 1.5
 
