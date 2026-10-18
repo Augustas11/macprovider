@@ -1,6 +1,14 @@
 # SPEC-025 — Native Mac App (signed `.dmg`, native Mac app with menu-bar presence)
 
-Status: DRAFT v0.32.0 · Owner: @Augustas11 · Target: 2026 Q3
+Status: DRAFT v0.33.0 · Owner: @Augustas11 · Target: 2026 Q3
+
+**Change log v0.33.0 (2026-10-18, Related: #2054):**
+§3.2 "Local use of the provider's own model": an in-app Chat (or any local
+client the app starts) is local use under SPEC-001-R011. The app gates it on
+`local_chat_priority_v1`, shows local counts only from `local_usage` and only
+as local use, never adds them to earnings, served requests or receipts, keeps
+chat history on this Mac, and shows `local_preempted` as "a customer needed
+this Mac". Customers stay first unless the operator pauses customer work.
 
 **Change log v0.32.0 (2026-10-18, #2029 Phase 1 truthful dashboard):**
 §3.1 and §3.2: the app launches as a menu-bar agent (`LSUIElement=true`) and
@@ -641,6 +649,24 @@ time (60–240 s for the first model) in the background.
   installed CLI, accepts bounded version-1 JSON stdout, discards stderr, and waits for
   launchd health after success. Locked, permission-denied, conflict, unavailable, and
   unknown/future contracts never trigger automatic mutation.
+- **Local use of the provider's own model (SPEC-001-R011).** Requests the app
+  sends to the CLI's loopback `/v1/chat/completions` or `/v1/responses` are local
+  use: not billable, not counted, and lower priority than network buyers.
+  - The app MUST NOT offer Chat (or any other local inference UI) unless the CLI
+    advertises `local_chat_priority_v1`, and MAY offer it only for the model the
+    CLI has loaded.
+  - The app MUST show local activity only from `/v1/status` `local_usage`, labelled
+    as local use on this Mac. It MUST NOT add local counts to earnings, served
+    requests, tokens served, receipts or any customer-facing figure, and MUST NOT
+    present local use as earning anything.
+  - Customers come first by default. On HTTP 503 `local_preempted`, or the same
+    code as a terminal stream event, the app MUST say that a customer needed this
+    Mac and MUST NOT retry automatically in a loop. Only the operator's explicit
+    pause of customer work (the existing operator pause, §5.2) gives local use
+    every slot, and the app MUST state that customers are not served while paused.
+  - Chat history MUST stay on this Mac. The app MUST send `store:false` (or omit
+    `store`) and full-input turns, and MUST NOT send the
+    `X-MacProvider-Settlement-Metadata` header or a privacy-class header.
 - On login: `SMAppService.mainApp.register()` starts `Malibu.app` in the background.
   Login launch shows no Dock icon until a window is opened. (This registers the **app** as a login item; the **CLI daemon** is
   owned by the launchd **provider service** `live.malibu.provider` (`KeepAlive`)

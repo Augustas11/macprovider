@@ -168,15 +168,19 @@ final class HTTPServerLocalResponsesTests: XCTestCase {
                 }
                 do {
                     try await self.waitUntil { await runtime.entered }
+                    // SPEC-001-R011: local work is counted apart from buyer
+                    // work and never consumes a published buyer slot.
                     let active = await status.snapshot()
-                    XCTAssertEqual(active.requestsInFlight, 1)
-                    XCTAssertEqual(active.slotsFree, 0)
+                    XCTAssertEqual(active.localUsage.requestsInFlight, 1)
+                    XCTAssertEqual(active.requestsInFlight, 0)
+                    XCTAssertEqual(active.slotsFree, 1)
                     task.cancel()
                     _ = await task.result
                     try await self.waitUntil { await runtime.cancelled }
-                    try await self.waitUntil { await status.snapshot().requestsInFlight == 0 }
+                    try await self.waitUntil { await status.snapshot().localUsage.requestsInFlight == 0 }
                     let drained = await status.snapshot()
                     XCTAssertEqual(drained.slotsFree, 1)
+                    XCTAssertEqual(drained.requestsTotal, 0)
                 } catch {
                     task.cancel()
                     _ = await task.result

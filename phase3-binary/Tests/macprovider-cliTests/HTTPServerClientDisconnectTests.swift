@@ -157,7 +157,8 @@ final class HTTPServerClientDisconnectTests: XCTestCase {
         try await withDisconnectHTTPServer(
             runtime: runtime,
             pipeliningAssistance: false,
-            maxConcurrency: 2
+            // Two local inferences plus the SPEC-001-R011 buyer reservation.
+            maxConcurrency: 3
         ) { port in
             let descriptor = try connectAndSend(port: port, stream: false, keepAlive: true)
             // Pipelined before the first response is written: two inferences

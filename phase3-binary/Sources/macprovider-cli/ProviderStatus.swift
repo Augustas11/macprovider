@@ -420,6 +420,8 @@ struct ProviderSnapshot: Sendable {
     var restartCount7d: Int? = nil
     /// Start of the since-last window that requestsServedSinceLast covers.
     var windowStartedAt: Date? = nil
+    /// SPEC-001-R011: local (non-network) use, kept out of every field above.
+    var localUsage = LocalUsageSnapshot()
 
     var slotsFree: Int {
         if thermallyThrottled { return 0 }
@@ -561,6 +563,13 @@ actor ProviderStatus {
     private var pendingRequestCapacitySlotsFree: Int?
     private var pendingRequestCapacitySlotsTotal: Int?
     private var lastObservedThermalThrottle = false
+    // SPEC-001-R011: local requests, in admission order. They never touch
+    // requestsInFlight, the since-last window, the day/all-time counters or
+    // persisted stats, so heartbeats and buyer-facing stats exclude them.
+    private var localPriorityPolicy = LocalPriorityPolicy()
+    private var localLeases: [LocalPreemptionLease] = []
+    private var localPreemptionScheduled = Set<UUID>()
+    private var localUsage = LocalUsageSnapshot()
 
     init(
         modelID: String?,
@@ -608,6 +617,7 @@ actor ProviderStatus {
         if let requestID {
             activeRequestIDs.insert(requestID)
         }
+        enforceBuyerPriority()
         await refreshAvailabilityState()
         return Date()
     }
@@ -691,6 +701,15 @@ actor ProviderStatus {
         persistStats()
     }
 
+    /// Routes a request's end to the buyer or the SPEC-001-R011 local books.
+    func finishRequest(startedAt: Date, completion: CompletionResult?, failed: Bool, localLease: LocalPreemptionLease?) async {
+        if let localLease {
+            finishLocalRequest(localLease, completion: completion, failed: failed)
+        } else {
+            await finishRequest(startedAt: startedAt, completion: completion, failed: failed)
+        }
+    }
+
     func currentSpecDecodeGeneration() -> Int {
         specDecodeGeneration
     }
@@ -727,6 +746,7 @@ actor ProviderStatus {
             maxContextSource: capacity.maxContextSource,
             throughputProbe: capacity.throughputProbe
         )
+        enforceBuyerPriority()
         // Publish the new slot count at once (request-capacity handler), so
         // coordinator routing does not keep the old count until a heartbeat.
         await refreshAvailabilityState()
@@ -773,6 +793,7 @@ actor ProviderStatus {
             )
         }
         modelLoaded = true
+        enforceBuyerPriority()
         if status == .unavailable {
             transition(to: .ready, reason: "target_swap_completed")
         }
@@ -898,7 +919,7 @@ actor ProviderStatus {
             ? Double(specDecodeWindowAcceptedTokens) / Double(specDecodeWindowDraftedTokens)
             : nil
         let effectiveStatus: ProviderHealthState = (throttled && (status == .ready || status == .busy)) ? .busy : status
-        let snapshot = ProviderSnapshot(
+        var snapshot = ProviderSnapshot(
             status: effectiveStatus,
             modelID: modelID,
             modelHash: modelHash,
@@ -953,6 +974,7 @@ actor ProviderStatus {
             restartCount7d: Self.restarts(recentRestartsAt, within: Self.recentRestartWindow, of: Date()).count,
             windowStartedAt: windowStartedAt
         )
+        snapshot.localUsage = currentLocalUsage()
         if resetWindow {
             windowStartedAt = Date()
             windowRequests = 0
@@ -963,6 +985,109 @@ actor ProviderStatus {
             specDecodeWindowAcceptedTokens = 0
         }
         return snapshot
+    }
+
+    // MARK: - SPEC-001-R011 local requests
+
+    func setLocalPriorityPolicy(_ policy: LocalPriorityPolicy) {
+        localPriorityPolicy = policy
+    }
+
+    func currentLocalUsage() -> LocalUsageSnapshot {
+        var usage = localUsage
+        usage.requestsInFlight = localLeases.count
+        usage.reservedBuyerSlots = localPriorityPolicy.reservation(forServedSlots: max(1, capacity.maxConcurrency))
+        usage.preemptionWindowMS = localPriorityPolicy.preemptionWindowMS
+        usage.queueWaitMS = localPriorityPolicy.queueWaitMS
+        return usage
+    }
+
+    /// Local work runs while the model is loaded and the provider is not
+    /// draining. An operator pause stops network buyers only, so the
+    /// provider can still use its own model while paused.
+    private var acceptsLocalRequests: Bool {
+        guard modelLoaded else { return false }
+        switch status {
+        case .ready, .busy, .degraded: return true
+        case .draining: return false
+        case .unavailable: return operatorPauseFence
+        }
+    }
+
+    private func localRequestFits() -> Bool {
+        let slots = max(1, capacity.maxConcurrency)
+        let reserved = operatorPauseFence ? 0 : localPriorityPolicy.reservation(forServedSlots: slots)
+        return localLeases.count < slots - reserved
+            && requestsInFlight + localLeases.count < slots
+    }
+
+    /// Admits a local request only into a slot no buyer holds or is reserved
+    /// for. While buyers hold them it waits, polling, for at most the
+    /// policy's queue wait. Buyers never wait here.
+    func beginLocalRequest(
+        _ lease: LocalPreemptionLease,
+        isCancelled: @escaping @Sendable () -> Bool = { false }
+    ) async -> LocalAdmission {
+        let deadline = Date().addingTimeInterval(Double(localPriorityPolicy.queueWaitMS) / 1000)
+        while true {
+            guard acceptsLocalRequests else { return .unavailable }
+            if lease.isPreempted {
+                localUsage.requestsDeclined += 1
+                return .preempted
+            }
+            if isCancelled() || Task.isCancelled { return .cancelled }
+            if localRequestFits() {
+                localLeases.append(lease)
+                noteRealRequestStart()
+                return .admitted(Date())
+            }
+            if Date() >= deadline {
+                localUsage.requestsDeclined += 1
+                return .preempted
+            }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+    }
+
+    /// Idempotent: only the first call for an admitted lease counts.
+    func finishLocalRequest(_ lease: LocalPreemptionLease, completion: CompletionResult?, failed: Bool) {
+        guard let index = localLeases.firstIndex(where: { $0 === lease }) else { return }
+        localLeases.remove(at: index)
+        localPreemptionScheduled.remove(lease.id)
+        noteRealRequestEnd()
+        localUsage.requestsTotal += 1
+        if let completion {
+            localUsage.requestsCompleted += 1
+            localUsage.promptTokensTotal += Int64(completion.promptTokens)
+            localUsage.completionTokensTotal += Int64(completion.completionTokens)
+        } else if lease.isPreempted {
+            localUsage.requestsPreempted += 1
+        } else if failed {
+            localUsage.requestsFailed += 1
+        }
+    }
+
+    /// A buyer must never wait on local work: when buyers plus local
+    /// requests exceed the served slots, preempt the newest local requests,
+    /// each within the preemption window.
+    private func enforceBuyerPriority() {
+        let slots = max(1, capacity.maxConcurrency)
+        let running = localLeases.filter { !localPreemptionScheduled.contains($0.id) && !$0.isPreempted }
+        var excess = requestsInFlight + running.count - slots
+        guard excess > 0 else { return }
+        let windowMS = localPriorityPolicy.preemptionWindowMS
+        for lease in running.reversed() where excess > 0 {
+            localPreemptionScheduled.insert(lease.id)
+            excess -= 1
+            if windowMS <= 0 {
+                lease.preempt()
+            } else {
+                Task {
+                    try? await Task.sleep(nanoseconds: UInt64(windowMS) * 1_000_000)
+                    lease.preempt()
+                }
+            }
+        }
     }
 
     func waitUntilDrained(timeoutSeconds: Int) async -> Bool {

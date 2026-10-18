@@ -738,6 +738,20 @@ struct ServeCommand: AsyncParsableCommand {
             ).utf8))
             throw ExitCode(2)
         }
+        if let reserved = resolved.localReservedBuyerSlots,
+           !(0 ... LocalPriorityPolicy.maximumReservedBuyerSlots).contains(reserved) {
+            FileHandle.standardError.write(Data((
+                "local_reserved_buyer_slots \(reserved) must be in 0...\(LocalPriorityPolicy.maximumReservedBuyerSlots)\n"
+            ).utf8))
+            throw ExitCode(2)
+        }
+        if let windowMS = resolved.localPreemptionWindowMS,
+           !(0 ... LocalPriorityPolicy.maximumPreemptionWindowMS).contains(windowMS) {
+            FileHandle.standardError.write(Data((
+                "local_preemption_window_ms \(windowMS) must be in 0...\(LocalPriorityPolicy.maximumPreemptionWindowMS)\n"
+            ).utf8))
+            throw ExitCode(2)
+        }
         if let queueWaitTimeoutMS = resolved.continuousBatchQueueWaitTimeoutMS,
            !(1 ... ContinuousBatchSchedulerConfiguration.maximumQueueWaitTimeoutMS).contains(queueWaitTimeoutMS) {
             FileHandle.standardError.write(Data((
@@ -3147,6 +3161,10 @@ struct ServeCommand: AsyncParsableCommand {
             specDecodeNumDraftTokens: speculativeCacheWrapValidated ? resolved.numDraftTokens : nil,
             providerID: resolved.providerID
         )
+        await providerStatus.setLocalPriorityPolicy(LocalPriorityPolicy(
+            reservedBuyerSlots: resolved.localReservedBuyerSlots ?? LocalPriorityPolicy.defaultReservedBuyerSlots,
+            preemptionWindowMS: resolved.localPreemptionWindowMS ?? LocalPriorityPolicy.defaultPreemptionWindowMS
+        ))
         if operatorPausedInitially {
             // Fence first: no swap completion or request accounting may make a
             // restored pause routable, with or without a coordinator session.
