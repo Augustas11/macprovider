@@ -67,7 +67,7 @@ Verified 2026-10-10 against public release metadata, the release train
 | PR | Issue | Provider-side change | Status |
 |---|---|---|---|
 | #2047 | — | GLM-5.3-Flash on the native engine: paged MLA continuous batching, native MTP-1, listed catalog cut | merged |
-| #2049 | #2036 | Malibu.app is stamped from the release tag (was a stale 1.8.224) and relaunches itself onto the installed bundle after a CLI self-update (SPEC-025 v0.31) | in progress |
+| #2049 | #2036 | Malibu.app is stamped from the release tag (was a stale 1.8.224) and relaunches itself onto the installed bundle after a CLI self-update (SPEC-025 v0.31) | merged |
 
 Release notes for this cut MUST tell operators to reopen Malibu once
 (SPEC-025 v0.31 first hop): a running pre-v0.31 Malibu has no relaunch
