@@ -145,6 +145,8 @@ struct AgentSnapshot: Equatable {
     /// until a fresh projection arrives. Distinct from `providerEarningsFresh`.
     var hasObservedProviderEarnings: Bool = false
     var advertisedMaxConcurrency: Int?
+    /// Continuous batching and native MTP state (#2054 Provider screen).
+    var providerEngine: ProviderEngineStatus? = nil
     var catalogState: String?
     var catalogReleaseID: String?
     var catalogDigest: String?
