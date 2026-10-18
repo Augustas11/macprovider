@@ -11,6 +11,16 @@
       "model": "mlx-community/qwen2-vl-2b-instruct-4bit",
       "from_row": "default",
       "to_row": "qwen2-vl-2b-instruct"
+    },
+    {
+      "model": "Jundot/GLM-5.3-Flash-oQ4e-mtp",
+      "from_row": "default",
+      "to_row": "zai-org/glm-5.3-flash"
+    },
+    {
+      "model": "z-ai/glm-5.3-flash",
+      "from_row": "default",
+      "to_row": "zai-org/glm-5.3-flash"
     }
   ]
 }
