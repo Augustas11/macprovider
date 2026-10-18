@@ -13,7 +13,9 @@
 #        measured 1.237 for the counting text).
 #   glm53-mtp-admission-window.sh r015   the SPEC-048-R015 matrix and the
 #        1800 s sustained window under the frozen policy
-#        docs/research/spec048-r015/glm53-flash-v1.8.256/policy.json: one
+#        docs/research/spec048-r015/glm53-flash-r015-v2/policy.json (the
+#        1.8.256 policy failed on the gated-cell prefill schedule and the
+#        4096 TTFT order effect; see that directory's PREREGISTRATION.md): one
 #        `native-mtp-bench` process per matrix cell and one for the sustained
 #        window (R015_STEPS); each checks layout, identities, policy and
 #        environment before its load (`--validate-only` runs exactly those
@@ -28,10 +30,11 @@
 # armed. The script refuses to start while :8080 answers. Pausing and
 # restoring the live provider is the window owner's job.
 #
-# Binary: a lab-harness release build of the v1.8.256 tag source with the
-# lab-only journey overlay (this branch's NativeMTPJourneyE2ECommand.swift),
-# carrying the signed 1.8.256 mlx.metallib (3d9b4a74...), never a lab-built
-# metallib: the canary compares exact tokens, counters and committed state.
+# Binary: the bank leg ran a lab-harness release build of the v1.8.256 tag
+# source with this branch's lab-only journey overlay. The r015 leg runs a
+# lab-harness release build of this branch at PROVIDER_COMMIT. Both carry the
+# signed 1.8.256 mlx.metallib (3d9b4a74...), never a lab-built metallib: the
+# canary compares exact tokens, counters and committed state.
 #
 # Env: HARNESS (dir holding macprovider-cli + mlx.metallib), MODEL (served
 # artifact dir), OUT, POLICY, LIVE_PORT (8080), BANK_MIN_SPEEDUP (1.20),
@@ -41,15 +44,15 @@ export PATH=/usr/sbin:/opt/homebrew/bin:/usr/bin:/bin
 # The bench records `xcrun swift --version` and `xcodebuild -version`; the
 # frozen policy names the Command Line Tools toolchain, so no Xcode override.
 unset DEVELOPER_DIR
-HARNESS=${HARNESS:-$HOME/lab-glm53-mtp/src/phase3-binary/.build-lab-harness/release}
+HARNESS=${HARNESS:-$HOME/lab-glm53-r015v2/src/phase3-binary/.build-lab-harness/release}
 MODEL=${MODEL:-"$HOME/Library/Application Support/macprovider/models/Jundot--GLM-5.3-Flash-oQ4e-mtp/36defc5042d92a992a7948e83d6f110b8df69329/7299b6a71a38490e378e9eb6524c426392aa96e3fd561007e0540134bbef48f9"}
-OUT=${OUT:-$HOME/lab-glm53-mtp/window-$(date -u +%Y%m%dT%H%M%SZ)}
-POLICY=${POLICY:-$HOME/lab-glm53-mtp/policy.json}
+OUT=${OUT:-$HOME/lab-glm53-r015v2/window-$(date -u +%Y%m%dT%H%M%SZ)}
+POLICY=${POLICY:-$HOME/lab-glm53-r015v2/policy.json}
 LIVE_PORT=${LIVE_PORT:-8080}
 MODEL_ID=zai-org/glm-5.3-flash
 RELEASE_METALLIB_SHA256=3d9b4a747758128cc5418e62c5ad8e282a11b0d436423537137e013beaa1261b
-POLICY_SHA256=14741db03be1fc6ac4e1c9009b1747e6259f9c82881ac00ff12654692737904c
-PROVIDER_COMMIT=2a575c453639938ff6dbbf905001b7ea893d650d
+POLICY_SHA256=7e3d3e8dcc10bc56b31d106a412a03a77ef63c025b711baef6dae62d41748b45
+PROVIDER_COMMIT=ada2ecb96a3756808b3492ec1c386b95ea4428a0
 CHALLENGE_ID=native-mtp-selftest-glm53-flash-0001
 # Candidate challenge texts, in preference order. The first is the text the
 # journey has always used (GLM: acceptance 19/43, about 1.0x at 07301b6bf).

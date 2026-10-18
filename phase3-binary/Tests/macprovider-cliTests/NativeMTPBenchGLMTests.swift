@@ -13,7 +13,7 @@ final class NativeMTPBenchGLMTests: XCTestCase {
         .deletingLastPathComponent()
         .deletingLastPathComponent()
         .deletingLastPathComponent()
-        .appendingPathComponent("docs/research/spec048-r015/glm53-flash-v1.8.256/policy.json")
+        .appendingPathComponent("docs/research/spec048-r015/glm53-flash-r015-v2/policy.json")
 
     func testGLMFixtureResolvesItsMTPArtifactToTheTarget() throws {
         let root = try fixtureRoot(config: GLM5NextPagedKVWiringTests.config())
