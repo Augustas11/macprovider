@@ -85,6 +85,21 @@ final class NativeMTPHardwareE2EGLMTests: XCTestCase {
         XCTAssertEqual(NativeMTPHardwareE2EFamily.qwen35.completeWindowBytesByDepth(maxContextTokens: 65_536), [1_048_576, 2_097_152])
     }
 
+    func testJourneySelfTestOptionsKeepTheRecordedChallengeByDefault() throws {
+        let defaults = try NativeMTPJourneyE2ECommand.parse(["--root", "/fixture"])
+        XCTAssertFalse(defaults.selfTestOnly)
+        XCTAssertEqual(defaults.selfTestPrompts, [])
+        XCTAssertEqual(defaults.selfTestChallengeID, "native-mtp-selftest-journey-0001")
+        let glm = try NativeMTPJourneyE2ECommand.parse([
+            "--root", "/fixture", "--selftest-only",
+            "--selftest-prompt", "first", "--selftest-prompt", "second",
+            "--selftest-challenge-id", "native-mtp-selftest-glm53-flash-0001",
+        ])
+        XCTAssertTrue(glm.selfTestOnly)
+        XCTAssertEqual(glm.selfTestPrompts, ["first", "second"])
+        XCTAssertEqual(glm.selfTestChallengeID, "native-mtp-selftest-glm53-flash-0001")
+    }
+
     func testThroughputPhaseIsOptInAndBounded() throws {
         XCTAssertEqual(try NativeMTPHardwareE2ECommand.parse([]).throughputTokens, 0)
         XCTAssertEqual(

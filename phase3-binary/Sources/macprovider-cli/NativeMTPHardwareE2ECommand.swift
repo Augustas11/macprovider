@@ -472,8 +472,11 @@ final class NativeMTPHardwareE2ERunner {
         )
     }
 
+    /// `knownTargetIdentity`: the caller hashed the target in this process
+    /// already; `loadRuntimePair` still re-hashes it right before loading.
     func loadRuntimeFixture(
         maxContextTokens: Int,
+        knownTargetIdentity: MLXSnapshotIdentity? = nil,
         ordinaryAdmissionRecorder: NativeMTPHardwareAdmissionRecorder?,
         nativeAdmissionRecorder: NativeMTPHardwareAdmissionRecorder?
     ) async throws -> NativeMTPHardwareRuntimeFixture {
@@ -482,8 +485,11 @@ final class NativeMTPHardwareE2ERunner {
         try requireDirectory(targetDirectory)
         try requireDirectory(mtpDirectory)
 
-        let targetIdentity = try MLXSnapshotIdentity.compute(directory: targetDirectory)
-        let mtpIdentity = try MLXSnapshotIdentity.compute(directory: mtpDirectory)
+        let targetIdentity = try knownTargetIdentity ?? MLXSnapshotIdentity.compute(directory: targetDirectory)
+        // An embedded MTP layer is the target artifact: one identity, hashed once.
+        let mtpIdentity = family.embeddedMTP
+            ? targetIdentity
+            : try MLXSnapshotIdentity.compute(directory: mtpDirectory)
         let tokenizerSHA = try sha256(of: root.appendingPathComponent("target/tokenizer.json"))
         let manifestSHA = try sha256(of: mtpDirectory.appendingPathComponent("config.json"))
         let machine = MachineFingerprinter().sample()
@@ -600,7 +606,9 @@ final class NativeMTPHardwareE2ERunner {
         try requireDirectory(targetDirectory)
         try requireDirectory(mtpDirectory)
         let observedTargetIdentity = try MLXSnapshotIdentity.compute(directory: targetDirectory)
-        let observedMTPIdentity = try MLXSnapshotIdentity.compute(directory: mtpDirectory)
+        let observedMTPIdentity = family.embeddedMTP
+            ? observedTargetIdentity
+            : try MLXSnapshotIdentity.compute(directory: mtpDirectory)
         try require(observedTargetIdentity == targetIdentity, "target identity changed during load")
         try require(observedMTPIdentity == mtpIdentity, "MTP identity changed during load")
         // Run the same artifact observer the production enable path runs

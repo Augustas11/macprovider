@@ -1336,6 +1336,21 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertFalse(PagedKVSharedForwardBackend.canSharePrefillForward([atZero, lagging]))
     }
 
+    func testGroupedPrefillRowsRunAloneOnlyUnderAFlattenedTokenCapBelowTwoGroupedChunks() {
+        typealias Backend = PagedKVSharedForwardBackend
+        let mla: [Backend.CacheKind] = [.recurrentMamba, .pagedMLA(kpool: 4)]
+        let glmRule = ContinuousBatchPrefillGroupingRule.sortedGatherMoE(numExperts: 288, topK: 8)
+        XCTAssertEqual(glmRule.minimumGroupedChunkTokens, 144)
+        XCTAssertTrue(Backend.prefillsGroupedRowsAlone(cacheKinds: mla, minimumGroupedChunkTokens: glmRule.minimumGroupedChunkTokens))
+        XCTAssertTrue(Backend.prefillsGroupedRowsAlone(cacheKinds: mla, minimumGroupedChunkTokens: Int.max))
+        // Two 4-token rows fit the 8-token cap: they share a forward.
+        XCTAssertFalse(Backend.prefillsGroupedRowsAlone(cacheKinds: mla, minimumGroupedChunkTokens: 4))
+        XCTAssertTrue(Backend.prefillsGroupedRowsAlone(cacheKinds: mla, minimumGroupedChunkTokens: 5))
+        // Without a flattened-token cap grouped rows may share a forward.
+        XCTAssertFalse(Backend.prefillsGroupedRowsAlone(cacheKinds: [.pagedAttention], minimumGroupedChunkTokens: 144))
+        XCTAssertFalse(Backend.prefillsGroupedRowsAlone(cacheKinds: [.slidingWindow(windowTokens: 128)], minimumGroupedChunkTokens: 33))
+    }
+
     func testRaggedPrefillMaskIsPerRowCausalAndHidesShorterRowPadding() throws {
         try requireMetal()
         let mask = PagedKVRaggedPrefillMask.make(queryTokens: 2, rowOffsets: [0, 3], windowSize: nil)

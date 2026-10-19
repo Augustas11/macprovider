@@ -1,11 +1,27 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.23
+Version: v0.3.24
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.24 (2026-10-19, FR-CB2 serial prefill cohorts):**
+FR-CB2: on a backend that prefills every row of a prefill step in its own
+forward (no two-row shared forward fits its flattened-token cap at the
+smallest chunk that may group; `glm5_next`: 8 tokens against 144-token
+chunks), the rows of a step are a serial prefill cohort, which claims no
+batched prefill, and a native-MTP prompt row now joins it like an ordinary
+row. It still prefills alone, on the serial path, so no forward changes
+shape; only the order of chunks does. Kept out of the group, a native row
+prefilled alone and ahead of the rows that arrived with it, whose prefill
+then stalled its decode: on the GLM-5.3-Flash R015 gated cells (CLI
+1.8.256), where every native row ran at depth zero, the native arm's first
+row got its first token about 1 s earlier and the windowed decode rate read
+-6% (2 rows) and -10% (4 rows) at an end-to-end ratio of 0.99. Backends on
+which grouped rows can share a forward keep the equal-offset rule for native
+rows.
+
 **Change log v0.3.23 (2026-10-19, FR-CB10 admission hold for a due check):**
 FR-CB10 item 3: a check that must run on a key with no stored decision (a
 new runtime identity on a Mac with a prior grant, `prior_grant_pending_recheck`,
@@ -748,7 +764,24 @@ one compatible prefill group when all of these hold:
   of a shorter row;
 - no layer presents a per-row trimmed K/V window (sliding-window layers keep
   the equal-offset rule);
-- no row is a native-MTP prompt row (those keep the equal-offset rule).
+- no row is a native-MTP prompt row (those keep the equal-offset rule),
+  except as below.
+
+**(v0.3.24) Serial prefill cohorts.** On a backend on which no shared
+forward of two rows fits at the smallest chunk length that may group (its
+flattened-token cap is below twice `minimumGroupedChunkTokens`), the rows the
+scheduler selects for one prefill step are a *serial prefill cohort*, not a
+compatible prefill group: the backend prefills each of them in its own
+forward, in selection order, and the cohort claims no batched prefill. The
+one-shared-forward requirements above, and the requirement that the backend
+declare the ragged shape as one forward, apply to compatible prefill groups
+only. A cohort is selected under the same rules as a ragged group (FCFS head
+leads, its own balanced chunk sets the length, key-spread, row and token
+bounds, no chunk crosses a recurrent checkpoint), and a native-MTP prompt row
+MUST be selected for it exactly like an ordinary row, so its prompt
+progresses as it would on the ordinary path. It still prefills alone, with
+its own drafter seeding, and never shares a forward. On every other backend
+native rows keep the equal-offset rule.
 
 The scheduler MUST form a ragged group only when the backend declares that it
 runs this shape in one forward. A backend whose ragged shared forward cannot

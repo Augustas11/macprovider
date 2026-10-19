@@ -5752,6 +5752,7 @@ maxTokens: 1,
         nativeMTPStatusSink: NativeMTPStatusSink?,
         prefillGrouping: ContinuousBatchPrefillGroupingRule,
         allowsRaggedPrefillOffsets: Bool = false,
+        nativeMTPPromptRowsJoinRaggedPrefill: Bool = false,
         maxDecodeRowsPerForward: Int = Int.max
     ) -> ContinuousBatchSchedulerConfiguration {
         ContinuousBatchSchedulerConfiguration(
@@ -5773,6 +5774,7 @@ maxTokens: 1,
                 ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens
             ),
             allowsRaggedPrefillOffsets: allowsRaggedPrefillOffsets,
+            nativeMTPPromptRowsJoinRaggedPrefill: nativeMTPPromptRowsJoinRaggedPrefill,
             tokenDeliveryBufferLimit: ContinuousBatchSchedulerConfiguration.productionTokenDeliveryBufferLimit,
             queueWaitTimeoutNanoseconds: Self.queueWaitTimeoutNanoseconds(queueWaitTimeoutMS),
             // The row cap is the served context, not the scheduler's
@@ -5867,6 +5869,12 @@ maxTokens: 1,
                 prefillGrouping: prefillGrouping,
                 allowsRaggedPrefillOffsets: (backend as? PagedKVSharedForwardBackend)?
                     .supportsRaggedPrefillOffsets ?? false,
+                nativeMTPPromptRowsJoinRaggedPrefill: (backend as? PagedKVSharedForwardBackend).map {
+                    PagedKVSharedForwardBackend.prefillsGroupedRowsAlone(
+                        cacheKinds: $0.cacheKinds,
+                        minimumGroupedChunkTokens: prefillGrouping.minimumGroupedChunkTokens
+                    )
+                } ?? false,
                 maxDecodeRowsPerForward: schedulerDecodeRowBound(configured: maxDecodeRowsPerForward, backend: backend)
             ),
             allocator: allocator,

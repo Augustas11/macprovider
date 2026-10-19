@@ -1,0 +1,18 @@
+metal-tests ContinuousBatchSchedulerTests rc=0 	 Executed 181 tests, with 0 failures (0 unexpected) in 6.391 (6.425) seconds
+metal-tests PagedKVRuntimeBridgeTests rc=0 	 Executed 94 tests, with 0 failures (0 unexpected) in 6.673 (6.679) seconds
+r015 start 2026-10-19T01:03:14Z
+r015 step '--only-cell s1-p1536-o128 --phase matrix' start 2026-10-19T01:03:14Z
+r015 step '--only-cell s1-p1536-o128 --phase matrix' rc=0 end 2026-10-19T01:11:19Z lines=      23
+r015 step '--only-cell s1-p1536-o512 --phase matrix' start 2026-10-19T01:11:19Z
+r015 step '--only-cell s1-p1536-o512 --phase matrix' rc=0 end 2026-10-19T01:22:36Z lines=      45
+r015 step '--only-cell s1-p4096-o128 --phase matrix' start 2026-10-19T01:22:36Z
+r015 step '--only-cell s1-p4096-o128 --phase matrix' rc=0 end 2026-10-19T01:33:53Z lines=      67
+r015 step '--only-cell s1-p4096-o512 --phase matrix' start 2026-10-19T01:33:53Z
+r015 step '--only-cell s1-p4096-o512 --phase matrix' rc=0 end 2026-10-19T01:48:32Z lines=      89
+r015 step '--only-cell s2-p1536-o512 --phase matrix' start 2026-10-19T01:48:32Z
+r015 step '--only-cell s2-p1536-o512 --phase matrix' rc=0 end 2026-10-19T02:03:57Z lines=     111
+r015 step '--only-cell s4-p1536-o512 --phase matrix' start 2026-10-19T02:03:57Z
+r015 step '--only-cell s4-p1536-o512 --phase matrix' rc=0 end 2026-10-19T02:27:37Z lines=     133
+r015 step '--phase sustained' start 2026-10-19T02:27:37Z
+r015 step '--phase sustained' rc=0 end 2026-10-19T03:04:00Z lines=     169
+a0acbd83c625f970ef2f3a89fc76ab5315ae61561afe0240447bb708d2768b10  /Users/a1/lab-glm53-r015v2/window-20261019T010258Z/r015-glm53.jsonl
