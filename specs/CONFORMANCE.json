@@ -1101,7 +1101,7 @@
     {
       "spec_id": "SPEC-038",
       "title": "Continuous batching for concurrent provider inference",
-      "version": "v0.3.22",
+      "version": "v0.3.23",
       "path": "specs/SPEC-038-continuous-batching.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1136,7 +1136,7 @@
     {
       "spec_id": "SPEC-039",
       "title": "Paged KV / paged-attention engine",
-      "version": "v0.1.21",
+      "version": "v0.1.22",
       "path": "specs/SPEC-039-paged-kv-attention-engine.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -5347,7 +5347,11 @@
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:private func selfCheckCohortComplete",
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:func runContinuousBatchingSelfCheckBatch",
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:func continuousBatchingSelfCheckTarget",
-        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static func reusableLoneOutputs"
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static func reusableLoneOutputs",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static func runUnderAdmissionHold",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static func admissionHoldDue",
+        "phase3-binary/Sources/macprovider-cli/ProviderStatus.swift:func beginSelfCheckAdmissionHold",
+        "phase3-binary/Sources/macprovider-cli/ProviderStatus.swift:func admitRequest"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testRowDivergenceAtTwoServesSerially",
@@ -5367,7 +5371,17 @@
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testCrashBeforeAnySerialBaselineRevokesAPriorGrant",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testStoredProbeLoneOutputsAreReusedOnlyForTheirOwnPrompts",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testProbeShapeUnavailableRerunsWhenTheShapeFits",
-        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testStoreIgnoresAFileReadableByOtherUsers"
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testStoreIgnoresAFileReadableByOtherUsers",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testHoldIsDueOnlyAfterTheDeferralBoundAndHoldsAreSpacedApart",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testHoldRefusesNewRequestsKeepsInFlightOnesAndResumes",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testHoldNeverStartsUnderAnOperatorPauseOrADrain",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testPauseDuringTheHoldSurvivesTheHoldEnding",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testCheckRunsOnlyAfterInFlightRequestsFinishAndNoneIsDropped",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testDrainTimeoutSkipsTheCheckCancelsNothingAndReopensAdmission",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testLifecycleLeaseAndPauseSkipTheHold",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testCheckBoundReopensAdmissionWithoutWaitingForTheCheck",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testPauseLeaseOrTargetChangeDuringTheCheckEndsTheHold",
+        "phase3-binary/Tests/macprovider-cliTests/InferenceRelayTests.swift:testSelfCheckAdmissionHoldRefusesWithTheReroutedQueueFullStatus"
       ],
       "journeys": [],
       "evidence": [],

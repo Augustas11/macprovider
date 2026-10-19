@@ -1,11 +1,27 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.22
+Version: v0.3.23
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.23 (2026-10-19, FR-CB10 admission hold for a due check):**
+FR-CB10 item 3: a check that must run on a key with no stored decision (a
+new runtime identity on a Mac with a prior grant, `prior_grant_pending_recheck`,
+or a first qualification) never found an idle window under steady buyer
+traffic; on CLI 1.8.250, 1.8.251 and 1.8.256 the operator stopped the buyer
+traffic by hand. Once such a check has been due for 2-17 minutes on a busy Mac,
+the provider holds admission: it stops admitting new requests (they are
+refused with the retryable queue-pressure status and routing sees no free
+slot), lets in-flight requests finish within the drain bound without
+cancelling any, runs the check for a bounded interval (initially 5 minutes,
+doubling after consecutive bound yields up to 20 minutes), and re-opens admission.
+The prior grant keeps serving until the check decides. A hold never starts
+under an operator pause, a drain or a valid lifecycle lease, and one that
+appears during it ends the hold as a yield. Re-measurements of a stored
+decision still wait for an idle window. `/v1/status` reports the hold.
+
 **Change log v0.3.22 (2026-10-19, FR-CB11 signed served-slot ceiling):**
 FR-CB10 and FR-CB11: a positive signed policy entry may carry
 `max_served_slots` (SPEC-023 v0.22.28), the most slots its model artifact may
@@ -1263,7 +1279,45 @@ above are superseded where they conflict:
 3. The check MUST NOT block serving. It runs only while no request is in
    flight after an idle interval and abandons a step when a request arrives;
    completed steps persist, so a busy Mac resumes where it stopped, and
-   consecutive deferrals back off (doubling, at most 15 minutes). Each width
+   consecutive deferrals back off (doubling, at most 15 minutes).
+   (v0.3.23) **Admission hold.** A check on a key with no stored decision
+   (`prior_grant_pending_recheck`, `pending` or `deferred`) that has been due
+   for 2 minutes plus a per-Mac random offset of up to 15 minutes (to spread
+   holds across Macs that re-key together) while the Mac is not idle MUST run
+   under an admission hold, and MUST NOT otherwise hold admission (a
+   re-measurement of a stored decision keeps waiting for an idle window, and
+   an idle Mac runs the check without a hold). Under the hold the provider
+   MUST stop admitting new requests: a relay request (a relay-blind one keeps
+   its existing refusal) is refused before admission with `error_queue_full`,
+   the status the coordinator re-routes without a breaker fault, and a direct
+   HTTP request with the retryable `continuous_batching_stream_backpressure`
+   and a `Retry-After` that runs to the hold's bound (no inference runs for
+   either); heartbeats and capacity updates report the provider busy with no
+   free slot. A coordinator that still counts its own forwarded requests may
+   ignore that report until one of them ends; a request it routes meanwhile
+   is refused as above and re-routed. The provider MUST let every in-flight
+   request finish and MUST NOT cancel or drop one; if they have not finished
+   within the drain bound (the configured drain timeout, doubled after each
+   consecutive drain timeout up to 4x) the hold ends without a check. The
+   check then runs for at most 5 minutes initially, doubled after each
+   consecutive check-bound yield up to 20 minutes. Completed exactness probes
+   and completed serial/batch throughput pairs persist, so an unfinished width resumes
+   without repeating completed work. Cancelled or incomplete inference results
+   MUST NOT become measurements or grant decisions. At the bound admission re-opens
+   even if the check has not returned (it is cancelled, yields to the first
+   buyer request, and the ladder resumes at the next idle window or hold).
+   Holds are at least 2 minutes apart, counted from the end of the previous
+   one. The prior grant keeps serving until the check decides. A hold MUST
+   NOT start under an operator pause, while the provider is draining,
+   unavailable or degraded, or while a valid lifecycle (maintenance or
+   startup) lease is held, and it ends as a yield the moment any of these
+   appears or the self-check target changes (a model swap); a pause or drain
+   keeps its own state when the hold ends. The hold is logged
+   (`event=cb_self_check action=admission_hold_*`) and reported in
+   `/v1/status` `continuous_batching.self_check_admission_hold` (active,
+   started_at, expected_end_at, holds_total, last_outcome, last_ended_at,
+   last_skip_reason, last_skipped_at); `active` is the admission state,
+   whatever the scheduler's own free rows. Each width
    is journaled before any inference for it runs (its alone runs included),
    and a width whose journal write fails is not run: a step found unfinished
    on restart (the process died, e.g. a Metal OOM at a high k), including

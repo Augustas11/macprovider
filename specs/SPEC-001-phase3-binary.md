@@ -2310,7 +2310,13 @@ engine path:
    closed until the drain times out or the provider publishes ready again.
 5. Internal work that yields to network requests (idle prewarm, the
    continuous-batching self-check) MUST also yield to local work, without
-   counting local work in any buyer-facing figure.
+   counting local work in any buyer-facing figure. The bounded SPEC-038
+   self-check admission hold fences new local work, including queued requests
+   and token utilities, with HTTP 503 `continuous_batching_stream_backpressure`
+   and the hold's `Retry-After` guidance. It drains already-admitted local work
+   without cancelling it before running the check; drain timeout reopens
+   admission without running the check. A pause ends the hold under SPEC-038,
+   after which the operator's ordinary local-use permission remains intact.
 
 Contract tests MUST cover counter separation including the heartbeat,
 reservation, queueing, preemption and the preemption window on serial-shaped

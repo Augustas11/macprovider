@@ -79,6 +79,8 @@ enum LocalAdmission: Sendable, Equatable {
     case admitted(Date)
     /// The provider is draining or has no model; same answer a buyer gets.
     case unavailable
+    /// A bounded continuous-batching self-check holds admission for all work.
+    case selfCheckAdmissionHold
     /// Buyers held every slot local work may use for the whole queue wait,
     /// or a buyer preempted the request while it waited.
     case preempted

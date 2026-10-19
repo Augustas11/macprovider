@@ -118,6 +118,56 @@ final class InferenceRelayTests: XCTestCase {
         XCTAssertEqual(admissionLimit, 8)
     }
 
+    /// SPEC-038 FR-CB10 item 3: a request that arrives during the self-check
+    /// admission hold is refused with the status the coordinator re-routes,
+    /// before it reaches the runtime; admission re-opens when the hold ends.
+    func testSelfCheckAdmissionHoldRefusesWithTheReroutedQueueFullStatus() async throws {
+        let status = ProviderStatus(
+            modelID: "mlx-community/Test-Model",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: 2)
+        )
+        let recorder = FrameRecorder()
+        let relay = InferenceRelay(
+            modelRuntime: FakeStreamingRuntime(),
+            providerStatus: status,
+            loadedModelID: "mlx-community/Test-Model",
+            maxActiveRequests: 2,
+            maxBodyBytes: 4096,
+            sendFrame: { frame in await recorder.append(frame) }
+        )
+        let body = #"{"model":"mlx-community/Test-Model","messages":[{"role":"user","content":"hello"}],"max_tokens":20,"stream":true}"#
+        let refusal = await status.beginSelfCheckAdmissionHold()
+        XCTAssertNil(refusal)
+        try await relay.handleInferenceRequest([
+            "type": "inference_request", "request_id": "req-held", "stream": true, "body": body,
+        ])
+        let held = try await waitForFrames({ frames in
+            frames.contains { $0["type"] as? String == "inference_response_end" && $0["request_id"] as? String == "req-held" }
+        }, from: { await recorder.frames })
+        let end = try XCTUnwrap(held.first {
+            $0["type"] as? String == "inference_response_end" && $0["request_id"] as? String == "req-held"
+        })
+        XCTAssertEqual(end["status"] as? String, "error_queue_full")
+        XCTAssertEqual(end["chunks_sent"] as? Int, 0)
+        XCTAssertFalse(held.contains { $0["type"] as? String == "inference_response_chunk" })
+        let inFlightDuringHold = await status.requestsInFlightCount()
+        XCTAssertEqual(inFlightDuringHold, 0)
+
+        await status.endSelfCheckAdmissionHold(outcome: "completed")
+        try await relay.handleInferenceRequest([
+            "type": "inference_request", "request_id": "req-after", "stream": true, "body": body,
+        ])
+        try await waitUntil {
+            await recorder.frames.contains {
+                $0["type"] as? String == "inference_response_chunk" && $0["request_id"] as? String == "req-after"
+            }
+        }
+        try await relay.handleCancelRequest(["type": "cancel_request", "request_id": "req-after", "reason": "test_cleanup"])
+        let drained = await relay.waitUntilIdle(timeoutSeconds: 2)
+        XCTAssertTrue(drained)
+    }
+
     func testOneAdvertisedSeatRejectsSecondRelayRequest() async throws {
         try await assertRelayCapacity(seats: 1)
     }

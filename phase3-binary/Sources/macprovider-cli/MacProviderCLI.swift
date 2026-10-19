@@ -3204,6 +3204,13 @@ struct ServeCommand: AsyncParsableCommand {
                 store: cbSelfCheckStore,
                 ownerPinnedSlots: plan.ownerPinned,
                 provisional: cbProvisional,
+                admissionHoldDrainSeconds: resolved.drainTimeoutSeconds,
+                lifecycleLease: {
+                    // A maintenance or startup lease means a lifecycle step owns
+                    // the process; never hold admission under it.
+                    guard case .valid(let lease) = lifecycleLeaseStore.inspect() else { return nil }
+                    return lease.kind.rawValue
+                },
                 log: { line in FileHandle.standardError.write(Data((line + "\n").utf8)) }
             )
             return Task { await driver.run() }

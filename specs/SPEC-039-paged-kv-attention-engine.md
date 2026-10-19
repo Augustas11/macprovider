@@ -1,7 +1,9 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1.21
-Status: draft (normative design). v0.1.21 notes that a signed policy entry may
+Version: v0.1.22
+Status: draft (normative design). v0.1.22 (follows SPEC-038 v0.3.23) counts
+the SPEC-038 FR-CB10 admission hold as the self-check's idle window.
+v0.1.21 notes that a signed policy entry may
 also carry a served-slot ceiling (SPEC-038 v0.3.22 FR-CB11); it only lowers
 the count the FR-CB10 self-check may serve. v0.1.20 records the FR-PKV12 `glm5_next`
 evidence, so the GLM-5.3-Flash entry advertises its exact identity. v0.1.19 bounds every shared forward that
@@ -973,7 +975,11 @@ rule (SPEC-038 FR-CB10). On a Mac that already batches the model, throughput
 alone never removes the grant (SPEC-038 FR-CB10 v0.3.15). A longer idle-time measurement over every granted slot count replaces
 the startup micro-benchmark this paragraph rejected. The signed policy may
 only revoke a model artifact on a runtime revision (Metal library SHA-256 and
-kernel identifier); it no longer grants acceptance. **(v0.1.21)** A positive
+kernel identifier); it no longer grants acceptance. (v0.1.22) The check
+phase of a SPEC-038 FR-CB10 admission hold is such an idle window: it starts
+only after the hold's drain has finished every in-flight buyer request, and
+no buyer request is admitted until it ends.
+**(v0.1.21)** A positive
 entry may also carry `max_served_slots`, which caps the slot count the
 self-check may measure or serve for that model artifact (SPEC-038 FR-CB11
 v0.3.22); it never raises one.

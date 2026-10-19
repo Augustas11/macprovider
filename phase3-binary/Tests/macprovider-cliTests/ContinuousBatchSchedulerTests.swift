@@ -3039,9 +3039,11 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         let outputTokens = ContinuousBatchingSelfCheck.exactnessOutputTokens(decodeWindow: 16)
         for bound in [Int.max, 11] {
             let backend = KernelRouteBackend(vectorLimit: 12)
+            // Exactness must not depend on when the no-op delivery sink is scheduled.
             let scheduler = try await makeScheduler(
                 descriptor: Self.descriptor(maxPhysicalBlocks: 1024),
                 maxActiveRows: rows,
+                tokenDeliveryBufferLimit: outputTokens,
                 maxDecodeLockstepWindow: 16,
                 maxDecodeRowsPerForward: bound,
                 maxPrefillRowsPerIteration: 4,
