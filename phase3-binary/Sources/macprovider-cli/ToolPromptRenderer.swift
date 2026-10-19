@@ -98,7 +98,7 @@ private enum ToolPromptProfile {
     }
 
     private func renderNativeToolCall(_ call: MacProviderCore.ToolCall, format: ToolSelectionPolicy.CallFormat) throws -> String {
-        let arguments: JSONValue
+        let arguments: MacProviderCore.JSONValue
         do {
             arguments = try StrictJSONParser.parse(call.arguments)
         } catch {
@@ -111,7 +111,7 @@ private enum ToolPromptProfile {
         }
         switch format {
         case .jsonEnvelope:
-            let name = try JSONValue.string(call.functionName).deterministicJSONString()
+            let name = try MacProviderCore.JSONValue.string(call.functionName).deterministicJSONString()
             return "<tool_call>\n{\"name\": \(name), \"arguments\": \(try arguments.deterministicJSONString())}\n</tool_call>"
         case .functionXML:
             let safeName: (String) -> Bool = { value in
