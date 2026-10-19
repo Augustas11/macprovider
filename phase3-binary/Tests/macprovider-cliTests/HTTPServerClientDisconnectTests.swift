@@ -21,7 +21,13 @@ final class HTTPServerClientDisconnectTests: XCTestCase {
         let runtime = DisconnectProbeRuntime(mode: .awaitDisconnect, probe: probe)
 
         try await withDisconnectHTTPServer(runtime: runtime) { port in
-            try sendChatCompletionAndClose(port: port, stream: false)
+            do {
+                let descriptor = try connectAndSend(port: port, stream: false)
+                defer { close(descriptor) }
+                // A close before admission correctly skips inference entirely;
+                // this test observes the predicate of an admitted request.
+                try await eventuallyTrue { probe.observedInference }
+            }
             try await eventuallyTrue { probe.observedDisconnect }
         }
         XCTAssertTrue(probe.observedDisconnect, "closing the connection must flip shouldCancel")
@@ -32,7 +38,13 @@ final class HTTPServerClientDisconnectTests: XCTestCase {
         let runtime = DisconnectProbeRuntime(mode: .awaitDisconnect, probe: probe)
 
         try await withDisconnectHTTPServer(runtime: runtime) { port in
-            try sendChatCompletionAndClose(port: port, stream: true)
+            do {
+                let descriptor = try connectAndSend(port: port, stream: true)
+                defer { close(descriptor) }
+                // A close before admission correctly skips inference entirely;
+                // this test observes the predicate of an admitted request.
+                try await eventuallyTrue { probe.observedInference }
+            }
             try await eventuallyTrue { probe.observedDisconnect }
         }
         XCTAssertTrue(probe.observedDisconnect, "closing the connection must flip shouldCancel")
@@ -54,6 +66,21 @@ final class HTTPServerClientDisconnectTests: XCTestCase {
             try await eventuallyTrue { probe.observedDisconnect }
         }
         XCTAssertTrue(probe.observedDisconnect, "a close during inference must flip shouldCancel")
+    }
+
+    func testDisconnectFlagPrecedesCancellationIncludingLateRegistration() {
+        for disconnectFirst in [false, true] {
+            let state = ClientDisconnectState()
+            let probe = DisconnectProbe()
+            if disconnectFirst { state.markDisconnected() }
+            state.onDisconnect {
+                XCTAssertTrue(state.isDisconnected, "cancellation must observe the disconnected flag")
+                probe.noteDisconnect()
+            }
+            state.markDisconnected()
+            state.markDisconnected()
+            XCTAssertEqual(probe.observedDisconnectCount, 1, "the armed cancellation runs exactly once")
+        }
     }
 
     // MARK: - Terminal outcome, before the first buyer-visible token
@@ -484,16 +511,19 @@ private actor DisconnectProbeRuntime: ModelRuntimeServing {
         }
     }
 
-    /// Polls the way `ModelRuntime.withDrainAndClientCancellation` does, so
-    /// the fixture exercises the same contract the real engine relies on.
+    /// Observe the predicate both while polling and when task cancellation
+    /// interrupts the sleep. Task cancellation alone never counts as proof
+    /// that the per-request disconnect state was signalled.
     private func waitForCancel(
         _ shouldCancel: @escaping @Sendable () -> Bool
     ) async throws -> CompletionResult {
         probe.noteInference()
+        defer {
+            if shouldCancel() { probe.noteDisconnect() }
+        }
         let deadline = DispatchTime.now().uptimeNanoseconds + 5_000_000_000
         while DispatchTime.now().uptimeNanoseconds < deadline {
             if shouldCancel() {
-                probe.noteDisconnect()
                 throw CancellationError()
             }
             try await Task.sleep(nanoseconds: 5_000_000)
@@ -644,11 +674,6 @@ private func connectAndSend(port: Int, stream: Bool, keepAlive: Bool = false) th
 
     try sendAll(descriptor: descriptor, data: request)
     return descriptor
-}
-
-private func sendChatCompletionAndClose(port: Int, stream: Bool) throws {
-    let descriptor = try connectAndSend(port: port, stream: stream)
-    close(descriptor)
 }
 
 private func sendChatCompletionAndRead(port: Int, stream: Bool) throws -> RawHTTPResponse {
