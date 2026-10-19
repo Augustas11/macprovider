@@ -9,7 +9,10 @@ accounts with no stake are re-read, each read under a 250 ms deadline. The read
 is installed only when the stake ledger initialised. A failed or timed-out read
 falls back to the other ownership sources and is counted; it never refuses
 buyers. Every ownership refusal is counted and logged. The gateway identity
-lookup runs on its read-only connection pool.
+lookup runs on its read-only connection pool. Path A requires the
+`X-MacProvider-Origin: coordinator` marker on every HTTP-direct dispatch,
+including warm-up and canary probes, and treats a provider `local_preempted`
+answer as a retryable, non-faulting provider failure.
 
 **Change log v1.6.21 (2026-10-15, issue #1355):** SPEC-002-R005 now learns
 from non-streamed traffic. Every attempt's times run from provider dispatch
@@ -993,7 +996,13 @@ request as a standard HTTP POST to the provider's reachable endpoint
 (Cloudflare tunnel URL or direct IP). The WebSocket carries control
 plane only (registration, heartbeats, state, preflight, commands).
 This is the v1.0.x behavior, preserved for pinned providers with
-operator-managed tunnels.
+operator-managed tunnels. Every HTTP-direct dispatch to a provider (buyer
+requests with or without settlement metadata, FR-P8a warm-up probes and
+canary probes) MUST carry `X-MacProvider-Origin: coordinator`, so the provider
+never classifies coordinator traffic as local work (SPEC-001-R011). A
+provider answer of HTTP 503 `local_preempted` is a retryable provider failure:
+the attempt advances as a 502 under the retry budget and neither degrades the
+provider nor counts as a breaker fault.
 
 **Path B — WS-tunneled (v1.1 default for new providers).** The
 coordinator sends the buyer's request as an `inference_request` message

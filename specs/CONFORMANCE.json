@@ -725,7 +725,7 @@
     {
       "spec_id": "SPEC-025",
       "title": "Native Mac App (signed `.dmg`, native Mac app with menu-bar presence)",
-      "version": "v0.34.0",
+      "version": "v0.34.1",
       "path": "specs/SPEC-025-native-mac-app.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -13933,7 +13933,12 @@
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:func testBuyerPreemptsLocalRowAndTakesItsSlot",
         "phase4-coordinator/internal/buyer/local_preempted_origin_test.go:func TestHTTPNonStreamingLocalPreemptedRetriesWithOriginMarker",
         "phase4-coordinator/internal/buyer/local_preempted_origin_test.go:func TestHTTPStreamingLocalPreemptedRetriesWithOriginMarker",
-        "phase4-coordinator/internal/ws/http_origin_marker_test.go:func TestHTTPCanaryAndWarmupCarryCoordinatorOriginMarker"
+        "phase4-coordinator/internal/ws/http_origin_marker_test.go:func TestHTTPCanaryAndWarmupCarryCoordinatorOriginMarker",
+        "phase3-binary/Tests/macprovider-cliTests/LocalRequestPriorityTests.swift:func testOriginIsLocalOnlyWithTheExplicitLoopbackMarker",
+        "phase3-binary/Tests/macprovider-cliTests/LocalRequestPriorityTests.swift:func testCoordinatorProbeWithoutMetadataAndUnmarkedClientsAreNetworkOverHTTP",
+        "phase3-binary/Tests/macprovider-cliTests/LocalRequestPriorityTests.swift:func testSelfCheckHoldPreemptsRunningLocalChatAndDrainsPromptly",
+        "phase3-binary/Tests/macprovider-cliTests/LocalRequestPriorityTests.swift:func testLocalNeverTakesTheNativeMTPRowAndBuyerKeepsIt",
+        "phase3-binary/Tests/macprovider-cliTests/LocalRequestPriorityTests.swift:func testLocalPrefillChecksPreemptionBetweenChunks"
       ],
       "journeys": [],
       "evidence": [],
@@ -13990,7 +13995,8 @@
         "phase3-binary/app/Sources/Malibu/ConnectedApps/ConnectedAppsScreen.swift:final class ConnectedAppsStore"
       ],
       "tests": [
-        "phase3-binary/app/Tests/MalibuTests/ConnectedAppsTests.swift:final class ConnectedAppsTests"
+        "phase3-binary/app/Tests/MalibuTests/ConnectedAppsTests.swift:final class ConnectedAppsTests",
+        "phase3-binary/app/Tests/MalibuTests/ConnectedAppsTests.swift:func testOpenCodeLauncherIgnoresRepositoryConfiguration"
       ],
       "journeys": [],
       "evidence": [],

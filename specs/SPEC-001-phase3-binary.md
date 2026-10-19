@@ -3,12 +3,20 @@
 **Version:** 1.9.39 (2026-10-19, coordinator origin marker on HTTP-direct dispatch)
 
 **Change log v1.9.39 (2026-10-19, Related: #2054):**
-Amends `SPEC-001-R011` and the coordinator HTTP-forwarding wire contract. The
-coordinator sends `X-MacProvider-Origin: coordinator` on every HTTP-direct
-dispatch (buyer requests, canary probes and warmup gates), including those
-without settlement metadata (observe mode or no billing store). A request
-carrying the marker is network work, never local. A coordinator that receives
-`local_preempted` treats it as a retryable provider failure. No trust-tier,
+Amends `SPEC-001-R011` and the coordinator HTTP-forwarding wire contract.
+Local work is now opt-in: only a loopback request with exactly one
+`X-MacProvider-Origin: local-app` and no coordinator marker or settlement
+metadata is local; unmarked clients, observe-mode dispatches and coordinator
+probes are network. The coordinator sends `X-MacProvider-Origin: coordinator`
+on every HTTP-direct dispatch (buyer requests, canary probes and warmup
+gates). Local requests are checked for preemption between serial prefill
+chunks, are never native-MTP eligible, are admitted one at a time on a
+multi-slot unpaused provider, and are preempted by a warm-swap drain and when
+the SPEC-038 self-check hold begins (`local_drain_timeout` reports an idle
+drain timeout). Network direct-HTTP requests keep handle acquisition before
+admission. Local request log lines carry a `local:`-prefixed `request_id`. A
+coordinator that receives `local_preempted` treats it as a retryable provider
+failure. No trust-tier,
 settlement or hardware-acceptance claim is added.
 
 **Change log v1.9.38 (2026-10-18, Related: #2054):**
@@ -2251,17 +2259,17 @@ remain pending until independently recorded; fixtures alone MUST NOT promote
 these requirements to live conformance.
 
 **SPEC-001-R011 — Local use is unbilled, uncounted and yields to buyers.**
-A request on the loopback listener is *network* work when it carries
-coordinator settlement metadata (`X-MacProvider-Settlement-Metadata`) that
-parses, or the coordinator origin marker `X-MacProvider-Origin: coordinator`.
-The coordinator sends the marker on every HTTP-direct dispatch, including
-buyer requests without settlement metadata (observe mode or no billing store),
-canary probes and warmup gates, so coordinator traffic is never preempted or
-uncounted as local work. Malformed metadata, any other origin value and
-identity hint headers do not change this classification. Every other request, including all SPEC-001-R010 token utilities, is
-*local* work. Under the SPEC-001-R009 local-process trust policy this is a
-classification, not an authentication boundary. WebSocket relay requests are
-always network work.
+A request on the loopback listener is *local* only when the peer is loopback
+and it carries exactly one `X-MacProvider-Origin: local-app` and neither
+`X-MacProvider-Origin: coordinator` nor an `X-MacProvider-Settlement-Metadata`
+header (parsable or not). Every other request, including coordinator canary
+and warmup probes, observe-mode dispatches and unmarked loopback clients, is
+*network* work. The coordinator sends `X-MacProvider-Origin: coordinator` on
+every HTTP-direct dispatch (buyer requests with or without settlement
+metadata, canary probes and warmup gates). SPEC-001-R010 token utilities are
+always local. WebSocket relay requests are always network. Under the
+SPEC-001-R009 local-process trust policy this is a classification, not an
+authentication boundary.
 
 *Accounting.* Local work MUST NOT be counted in the heartbeat
 `requests_served_since_last`, latency, throughput, `slots_free`, request,
@@ -2269,7 +2277,8 @@ token or error totals, persisted request statistics, or any coordinator frame.
 It MUST NOT produce a v0.4 settlement receipt, and it earns nothing. A
 SPEC-015 v0.3 provenance receipt on a local response is unchanged; it carries
 no coordinator settlement binding, cannot be settled, and is not billing,
-earnings or served-work evidence. `GET /v1/status` MUST report local work only under a
+earnings or served-work evidence. Receipt-audit and KV-cache request log
+lines for local requests carry a `local:`-prefixed `request_id`. `GET /v1/status` MUST report local work only under a
 separate `local_usage` object with `billable:false`, `heartbeat_counted:false`,
 `priority:"customers_first"`, `requests_in_flight`, `requests_total`,
 `requests_completed`, `requests_failed`, `requests_preempted`,
@@ -2307,8 +2316,8 @@ engine path:
    newest local request whose window has ended or is pending. Preemption
    cancels the local request through the existing cancellation path (the
    request's cancellation predicate and task), which is checked while waiting
-   for the inference gate, before and after prompt preparation, and at every
-   decode step; the slot is released at the next such point. A local client still
+   for the inference gate, before and after prompt preparation, between serial
+   prefill chunks of a local request, and at every decode step; the slot is released at the next such point. A local client still
    connected receives HTTP 503 `local_preempted`; a stream that already
    started receives the same error as a terminal SSE event followed by
    `[DONE]` and never a success terminal. A local request whose generation
@@ -2317,7 +2326,8 @@ engine path:
    work and leaves local work running, and while paused local work MAY use
    every slot (*R* = 0). A draining provider or one with no loaded model MUST
    reject new local work with the same 503 `provider_paused` a buyer gets.
-   A coordinator-initiated drain leaves admitted local work running. Process-exit
+   A coordinator-initiated drain leaves admitted local work running. A runtime
+   (warm-swap) drain preempts admitted local work. Process-exit
    and update drains MUST preempt admitted local work, settle queued local
    requests with 503 `provider_paused`, wait for both, and keep local admission
    closed until the drain times out or the provider publishes ready again.
@@ -2326,10 +2336,21 @@ engine path:
    counting local work in any buyer-facing figure. The bounded SPEC-038
    self-check admission hold fences new local work, including queued requests
    and token utilities, with HTTP 503 `continuous_batching_stream_backpressure`
-   and the hold's `Retry-After` guidance. It drains already-admitted local work
-   without cancelling it before running the check; drain timeout reopens
-   admission without running the check. A pause ends the hold under SPEC-038,
+   and the hold's `Retry-After` guidance. The hold preempts admitted local work
+   when it begins and drains it before running the check; drain timeout
+   reopens admission without running the check. A drain timeout during which
+   no network request was in flight is reported as `local_drain_timeout` and
+   does not escalate the next hold's drain bound. A pause ends the hold under SPEC-038,
    after which the operator's ordinary local-use permission remains intact.
+6. A local request is never native-MTP eligible. A network request's
+   native-MTP active-row count excludes local rows; when one is admitted
+   native while local rows are active, the provider preempts the local work.
+   While more than one slot is served and the provider is not operator-paused,
+   at most one local request is admitted at a time.
+7. Network direct-HTTP requests keep the pre-R011 order: handle acquisition
+   (with warm-swap snapshot semantics) precedes provider admission. Only local
+   requests are admitted before handle acquisition and observe the actual swap
+   state.
 
 Contract tests MUST cover counter separation including the heartbeat,
 reservation, queueing, preemption and the preemption window on serial-shaped
@@ -3171,7 +3192,8 @@ Every coordinator HTTP-direct dispatch to `/v1/chat/completions` (buyer
 requests, canary probes and warmup gates) MUST carry
 `X-MacProvider-Origin: coordinator`, with or without settlement metadata. The
 provider classifies a request carrying it as network work under
-`SPEC-001-R011`. It is a classification, not an authentication boundary, and
+`SPEC-001-R011`; only a loopback request marked `X-MacProvider-Origin:
+local-app` without either coordinator signal is local. It is a classification, not an authentication boundary, and
 it never creates a settlement receipt without settlement metadata. If a
 provider still answers a coordinator dispatch with HTTP 503 `local_preempted`,
 the coordinator MUST treat it as a retryable provider failure: the attempt is
