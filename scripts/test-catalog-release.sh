@@ -305,6 +305,8 @@ expected_history = {
     # Superseded by the GLM-only v1-projection admission set: CLI 1.8.257's
     # admission store projection reads only the v1 manifest.
     "published-2026-10-19-glm53-flash-native-mtp-v257",
+    # Superseded by the same GLM-only admission set rebound to CLI 1.8.258.
+    "published-2026-10-19-glm53-flash-native-mtp-v257-v2",
     current_release_id,
 }
 if set(ledger["releases"]) != expected_history:
