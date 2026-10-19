@@ -291,5 +291,48 @@ final class NativeMTPBenchPolicyTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: url) }
         return try NativeMTPBenchPolicy.load(from: url)
     }
+
+    /// Prompt sizing bisects the salt count. On any rising token count it
+    /// picks the text that adding one salt at a time picks
+    /// (`deterministic_synthetic_unique_v2`), in a logarithmic number of
+    /// tokenizations.
+    func testPromptSaltBisectionMatchesTheOneSaltAtATimeSearch() async throws {
+        // Served counts like the R015 strata: a template prefix, then 9 to 13
+        // tokens per salt.
+        let counts = (0 ..< 600).reduce(into: [24]) { counts, salt in
+            counts.append(counts.last! + 9 + (salt * 7) % 5)
+        }
+        for target in [1, 24, 25, 1536, 1537, 4072, counts[400], counts[400] + 1] {
+            var linear = 0
+            while counts[linear] < target { linear += 1 }
+            var tokenizations = 0
+            let found = try await NativeMTPBenchPrompts.fewestReachingSalts(target: target) { salts in
+                tokenizations += 1
+                return counts[salts]
+            }
+            XCTAssertEqual(found.salts, linear, "target \(target)")
+            XCTAssertEqual(found.count, counts[linear], "target \(target)")
+            XCTAssertLessThanOrEqual(tokenizations, 2 * 10 + 2, "target \(target)")
+        }
+    }
+
+    func testPromptSaltBisectionFailsWhenTheTargetIsOutOfReach() async {
+        do {
+            _ = try await NativeMTPBenchPrompts.fewestReachingSalts(target: 1_000, maximumSalts: 100) { min($0, 500) }
+            XCTFail("an unreachable target must fail")
+        } catch {}
+        let reachedAtTheBound = try? await NativeMTPBenchPrompts.fewestReachingSalts(target: 100, maximumSalts: 100) { $0 }
+        XCTAssertEqual(reachedAtTheBound?.salts, 100)
+        // Doubling saturates at a bound near Int.max instead of overflowing.
+        do {
+            _ = try await NativeMTPBenchPrompts.fewestReachingSalts(target: 10, maximumSalts: Int.max) { _ in 0 }
+            XCTFail("an unreachable target must fail")
+        } catch {}
+    }
+
+    func testEveryBlockNeedsItsSizedPrompts() throws {
+        XCTAssertEqual(try NativeMTPBenchPrompts.forBlock(0, in: [-1: ["w"], 0: ["a", "b"]]), ["a", "b"])
+        XCTAssertThrowsError(try NativeMTPBenchPrompts.forBlock(1, in: [0: ["a"]]))
+    }
 }
 #endif

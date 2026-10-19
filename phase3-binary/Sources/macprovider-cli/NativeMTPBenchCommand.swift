@@ -15,7 +15,7 @@ struct NativeMTPBenchCommand: AsyncParsableCommand {
         shouldDisplay: false
     )
 
-    @Option(name: .customLong("root"), help: "Fixture root containing target/ and mtp/ snapshot directories.")
+    @Option(name: .customLong("root"), help: "Fixture root containing target/ (and mtp/ unless the target embeds its MTP layer).")
     var root: String
 
     @Option(name: .customLong("model-id"), help: "Model ID bound into requests/runtime.")
@@ -39,12 +39,22 @@ struct NativeMTPBenchCommand: AsyncParsableCommand {
     )
     var phase: NativeMTPBenchPhase = .all
 
+    @Flag(
+        name: .customLong("validate-only"),
+        help: "Check the fixture layout, identities, frozen policy, environment and --out, then exit without loading the model."
+    )
+    var validateOnly = false
+
     func run() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["MACPROVIDER_NATIVE_MTP_E2E"] == "1" else {
             FileHandle.standardError.write(Data("native-mtp-bench: set MACPROVIDER_NATIVE_MTP_E2E=1 on the Mac Studio\n".utf8))
             throw ExitCode(2)
         }
+        // Before any MLX device use (the host check samples the GPU): the
+        // family's command-buffer budget and cache limit, as serve and the
+        // journey harness set them.
+        NativeMTPHardwareE2ERunner.applyServeProcessSetup(rootPath: root)
         try NativeMTPHardwareE2ERunner.requireStudioHost()
         guard providerCommit.range(of: #"^[0-9a-f]{40}$"#, options: .regularExpression) != nil else {
             throw ValidationError("--provider-commit must be lowercase 40-hex")
@@ -58,7 +68,34 @@ struct NativeMTPBenchCommand: AsyncParsableCommand {
             providerCommit: providerCommit,
             phase: phase
         )
+        if validateOnly {
+            try bench.validate()
+            return
+        }
         try await bench.run()
+    }
+}
+
+/// The fixture directories one bench root holds: `target/`, and `mtp/` for a
+/// separate drafter artifact; a target that embeds its next-N layer
+/// (`checkpoint_mtp`, glm5_next) is its own MTP artifact (SPEC-048 MTP-2).
+struct NativeMTPBenchFixtureLayout: Equatable {
+    let family: NativeMTPHardwareE2EFamily
+    let targetDirectory: URL
+    let mtpDirectory: URL
+
+    static func resolve(root: URL) -> NativeMTPBenchFixtureLayout {
+        let targetDirectory = root.appendingPathComponent("target", isDirectory: true)
+        // As the hardware runner: Qwen3.5 when the config is unreadable, so an
+        // unrecognized target fails the family check in the fixture load.
+        let family = NativeMTPHardwareE2EFamily.detect(configJSONData: try? Data(
+            contentsOf: targetDirectory.appendingPathComponent("config.json")
+        )) ?? .qwen35
+        return NativeMTPBenchFixtureLayout(
+            family: family,
+            targetDirectory: targetDirectory,
+            mtpDirectory: root.appendingPathComponent(family.mtpDirectoryName, isDirectory: true)
+        )
     }
 }
 
@@ -69,6 +106,54 @@ enum NativeMTPBenchPhase: String, ExpressibleByArgument, Sendable {
     case all
     case matrix
     case sustained
+}
+
+/// R015 prompt realization helpers (`deterministic_synthetic_unique_v2`).
+enum NativeMTPBenchPrompts {
+    /// The fewest salts whose prompt's served count reaches `target`, and
+    /// that count. Each salt appends tokens, so the count rises with the salt
+    /// count and this bisection returns the text that appending one salt at a
+    /// time until the target is reached returns, in a few tokenizations
+    /// instead of one per salt.
+    /// A count still below the target at `maximumSalts` salts fails instead
+    /// of growing the text without bound.
+    static func fewestReachingSalts(
+        target: Int,
+        maximumSalts: Int = 1 << 16,
+        count: (Int) async throws -> Int
+    ) async throws -> (salts: Int, count: Int) {
+        var below = -1
+        var reaching = 0
+        var reachingCount = try await count(reaching)
+        while reachingCount < target {
+            guard reaching < maximumSalts else {
+                throw NativeMTPBenchError.assertionFailed(
+                    "prompt sizing: \(maximumSalts) salts reach \(reachingCount) of \(target) served tokens"
+                )
+            }
+            below = reaching
+            reaching = reaching > maximumSalts / 2 ? maximumSalts : max(1, reaching * 2)
+            reachingCount = try await count(reaching)
+        }
+        while reaching - below > 1 {
+            let middle = below + (reaching - below) / 2
+            let middleCount = try await count(middle)
+            if middleCount < target {
+                below = middle
+            } else {
+                reaching = middle
+                reachingCount = middleCount
+            }
+        }
+        return (reaching, reachingCount)
+    }
+
+    static func forBlock(_ block: Int, in promptsByBlock: [Int: [String]]) throws -> [String] {
+        guard let prompts = promptsByBlock[block] else {
+            throw NativeMTPBenchError.assertionFailed("no prompts sized for block \(block)")
+        }
+        return prompts
+    }
 }
 
 private final class NativeMTPBenchRunner {
@@ -106,9 +191,44 @@ private final class NativeMTPBenchRunner {
         self.phase = phase
         self.policySHA256 = try Self.sha256(of: self.policyURL)
         self.policy = try NativeMTPBenchPolicy.load(from: self.policyURL)
+        self.layout = NativeMTPBenchFixtureLayout.resolve(root: self.root)
+        try policy.validateFamily(layout.family)
     }
 
-    func run() async throws {
+    private let layout: NativeMTPBenchFixtureLayout
+    /// The target identity this process verified at start; the fixture load
+    /// re-checks it once more right before loading (no third full hash).
+    private var verifiedTargetIdentity: MLXSnapshotIdentity?
+
+    /// `--validate-only`: every check `run()` makes before its first model
+    /// load, then a one-line summary. No MLX model is loaded.
+    func validate() throws {
+        let checked = try preflight()
+        let summary: [String: Any] = [
+            "validate_only": "pass",
+            "family": layout.family.modelFamily,
+            "mtp_directory": layout.family.mtpDirectoryName,
+            "target_sha256": checked.targetIdentity.digest,
+            "mtp_sha256": checked.mtpIdentity.digest,
+            "tokenizer_sha256": checked.tokenizerSHA256,
+            "policy_sha256": policySHA256,
+            "cells": policy.matrixCells.map(\.id),
+            "sustained_cell_id": policy.sustainedCellID,
+            "existing_records": checked.existing.hasRecords,
+        ]
+        FileHandle.standardOutput.write(try JSONSerialization.data(withJSONObject: summary, options: [.sortedKeys]))
+        FileHandle.standardOutput.write(Data("\n".utf8))
+    }
+
+    private struct Preflight {
+        let targetIdentity: MLXSnapshotIdentity
+        let mtpIdentity: MLXSnapshotIdentity
+        let tokenizerSHA256: String
+        let environment: NativeMTPBenchEnvironment
+        let existing: NativeMTPExistingEvidence
+    }
+
+    private func preflight() throws -> Preflight {
         if let onlyCell, policy.cell(id: onlyCell) == nil {
             throw NativeMTPBenchError.invalidPolicy("--only-cell does not identify a policy matrix cell")
         }
@@ -120,12 +240,15 @@ private final class NativeMTPBenchRunner {
                 throw NativeMTPBenchError.invalidPolicy("--phase sustained runs only sustained_cell_id")
             }
         }
-        let targetDirectory = root.appendingPathComponent("target", isDirectory: true)
-        let mtpDirectory = root.appendingPathComponent("mtp", isDirectory: true)
+        let targetDirectory = layout.targetDirectory
+        let mtpDirectory = layout.mtpDirectory
         try Self.requireDirectory(targetDirectory)
         try Self.requireDirectory(mtpDirectory)
         let targetIdentity = try MLXSnapshotIdentity.compute(directory: targetDirectory)
-        let mtpIdentity = try MLXSnapshotIdentity.compute(directory: mtpDirectory)
+        // An embedded MTP layer is the target artifact: one identity, hashed once.
+        let mtpIdentity = layout.family.embeddedMTP
+            ? targetIdentity
+            : try MLXSnapshotIdentity.compute(directory: mtpDirectory)
         let tokenizerSHA = try Self.sha256(of: targetDirectory.appendingPathComponent("tokenizer.json"))
         try policy.validateObserved(modelID: modelID, targetSHA256: targetIdentity.digest, mtpSHA256: mtpIdentity.digest, tokenizerSHA256: tokenizerSHA)
         let environment = NativeMTPBenchEnvironment.capture(providerCommit: providerCommit)
@@ -135,6 +258,7 @@ private final class NativeMTPBenchRunner {
         try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
         let existing = try NativeMTPExistingEvidence.loadIfPresent(
             url: outURL,
+            policy: policy,
             policySHA256: policySHA256,
             providerCommit: providerCommit,
             modelID: modelID,
@@ -167,6 +291,23 @@ private final class NativeMTPBenchRunner {
                 "refusing to append a full matrix to non-empty --out; use --only-cell to resume"
             )
         }
+        return Preflight(
+            targetIdentity: targetIdentity,
+            mtpIdentity: mtpIdentity,
+            tokenizerSHA256: tokenizerSHA,
+            environment: environment,
+            existing: existing
+        )
+    }
+
+    func run() async throws {
+        let checked = try preflight()
+        let targetIdentity = checked.targetIdentity
+        let mtpIdentity = checked.mtpIdentity
+        let tokenizerSHA = checked.tokenizerSHA256
+        let environment = checked.environment
+        let existing = checked.existing
+        verifiedTargetIdentity = targetIdentity
         let writer = try NativeMTPJSONLWriter(url: outURL, append: existing.hasRecords)
         defer { try? writer.close() }
 
@@ -208,17 +349,26 @@ private final class NativeMTPBenchRunner {
         completedWarmups: Set<Int>
     ) async throws {
         let fixture = try await fixture(for: cell)
-        for warmup in 0..<policy.warmupRuns {
-            let block = -1 - warmup
-            guard !completedWarmups.contains(block) else { continue }
-            let prompts = try await makePrompts(runtime: fixture.runtimes.ordinary, cell: cell, block: block)
+        // Every block's prompts are sized before the first timed run, so no
+        // block starts after an idle GPU gap its partner run did not have.
+        // Sized between blocks, the first run of each block measured about
+        // 2.4 s more TTFT on both paths at 4096 tokens (GLM-5.3-Flash, window
+        // 2026-10-18T13:38Z), and the counterbalanced order turned that into
+        // a bimodal paired TTFT ratio.
+        let warmupBlocks = (0..<policy.warmupRuns).map { -1 - $0 }.filter { !completedWarmups.contains($0) }
+        let matrixBlocks = (0..<policy.blocks).filter { !completedBlocks.contains($0) }
+        var promptsByBlock: [Int: [String]] = [:]
+        for block in warmupBlocks + matrixBlocks {
+            promptsByBlock[block] = try await makePrompts(runtime: fixture.runtimes.ordinary, cell: cell, block: block)
+        }
+        for block in warmupBlocks {
+            let prompts = try NativeMTPBenchPrompts.forBlock(block, in: promptsByBlock)
             _ = try await runPath(.ordinary, cell: cell, block: block, order: 0, prompts: prompts, runtime: fixture.runtimes.ordinary, fixture: fixture, writer: writer, warmup: true)
             _ = try await runPath(.nativeMTP, cell: cell, block: block, order: 1, prompts: prompts, runtime: fixture.runtimes.native, fixture: fixture, writer: writer, warmup: true)
         }
         let nativeFirstByBlock = NativeMTPBenchPolicy.nativeFirstOrder(seed: policy.seed, cell: cell, blocks: policy.blocks)
-        for block in 0..<policy.blocks {
-            guard !completedBlocks.contains(block) else { continue }
-            let prompts = try await makePrompts(runtime: fixture.runtimes.ordinary, cell: cell, block: block)
+        for block in matrixBlocks {
+            let prompts = try NativeMTPBenchPrompts.forBlock(block, in: promptsByBlock)
             let nativeFirst = nativeFirstByBlock[block]
             var ordinaryResult: NativeMTPBenchRunResult?
             var nativeResult: NativeMTPBenchRunResult?
@@ -315,6 +465,7 @@ private final class NativeMTPBenchRunner {
         )
         let fixture = try await runner.loadRuntimeFixture(
             maxContextTokens: cell.promptTokens + cell.maxTokens + 256,
+            knownTargetIdentity: verifiedTargetIdentity,
             ordinaryAdmissionRecorder: nil,
             nativeAdmissionRecorder: NativeMTPHardwareAdmissionRecorder()
         )
@@ -501,14 +652,15 @@ private final class NativeMTPBenchRunner {
             }
             var prompts: [String] = []
             for row in 0..<cell.slots {
-                var salt = 0
-                var text = "Native MTP R015 deterministic prompt cell \(cell.id) block \(block) row \(row)."
-                var count = try await servedCount(text)
-                while count < finalTarget {
-                    text += " measurement-\(block)-\(row)-\(salt) throughput parity tokens"
-                    count = try await servedCount(text)
-                    salt += 1
+                func saltedText(_ salts: Int) -> String {
+                    (0..<salts).reduce("Native MTP R015 deterministic prompt cell \(cell.id) block \(block) row \(row).") {
+                        $0 + " measurement-\(block)-\(row)-\($1) throughput parity tokens"
+                    }
                 }
+                let (salts, count) = try await NativeMTPBenchPrompts.fewestReachingSalts(target: finalTarget) {
+                    try await servedCount(saltedText($0))
+                }
+                let text = saltedText(salts)
                 guard (lower...finalUpper).contains(count) else {
                     throw NativeMTPBenchError.assertionFailed(
                         "served prompt token count \(count) outside \(lower)...\(finalUpper) for stratum \(cell.promptTokens)"
@@ -1214,6 +1366,25 @@ struct NativeMTPBenchPolicy {
         max(2, cell.slots)
     }
 
+    /// The fixture family's own tuple limits, checked before any model load:
+    /// a greedy-only family (glm5_next) routes sampled rows to ordinary
+    /// decode, and a family that signs a native active-row bound measures at
+    /// most that bound, so either mismatch could only fail after the load.
+    func validateFamily(_ family: NativeMTPHardwareE2EFamily) throws {
+        if !family.admitsSampledRows, temperature > 0 {
+            throw NativeMTPBenchError.invalidPolicy(
+                "temperature must be 0: \(family.familyAdapter) admits greedy rows only"
+            )
+        }
+        if let signed = family.signedMaxNativeActiveRows, !exploratory {
+            guard let bound = maxNativeActiveRows, bound <= signed else {
+                throw NativeMTPBenchError.invalidPolicy(
+                    "max_native_active_rows must be at most \(signed) for \(family.familyAdapter)"
+                )
+            }
+        }
+    }
+
     /// The runtime bound for one cell. A cell's runtime is qualified at its
     /// own slot count, and a signed bound may not exceed that; a cell at or
     /// below the policy bound never engages the gate either way.
@@ -1367,7 +1538,39 @@ struct NativeMTPBenchPolicy {
     }
 }
 
-private struct NativeMTPExistingEvidence {
+struct NativeMTPExistingEvidence {
+    /// A resumed record counts only for the policy cell it names, with that
+    /// cell's shape, inside its phase's block range: matrix 0..<blocks,
+    /// warmup -1...-warmup_runs, sustained only for the sustained cell.
+    static func validateResumedRecord(
+        _ record: [String: Any],
+        cellID: String,
+        block: Int,
+        sustained: Bool,
+        warmup: Bool,
+        policy: NativeMTPBenchPolicy,
+        line: Int
+    ) throws {
+        func reject(_ reason: String) -> NativeMTPBenchError {
+            .assertionFailed("existing --out line \(line): \(reason)")
+        }
+        guard let cell = policy.cell(id: cellID) else { throw reject("cell \(cellID) is not in the policy") }
+        guard (record["slots"] as? NSNumber)?.intValue == cell.slots,
+              (record["prompt_tokens"] as? NSNumber)?.intValue == cell.promptTokens,
+              (record["max_tokens"] as? NSNumber)?.intValue == cell.maxTokens else {
+            throw reject("shape does not match cell \(cellID)")
+        }
+        let inRange: Bool
+        if sustained {
+            inRange = !warmup && cellID == policy.sustainedCellID && block >= 0
+        } else if warmup {
+            inRange = block <= -1 && block >= -policy.warmupRuns
+        } else {
+            inRange = (0..<policy.blocks).contains(block)
+        }
+        guard inRange else { throw reject("block \(block) is outside its phase for \(cellID)") }
+    }
+
     let hasRecords: Bool
     let completedMatrixBlocks: [String: Set<Int>]
     let completedWarmups: [String: Set<Int>]
@@ -1376,6 +1579,7 @@ private struct NativeMTPExistingEvidence {
 
     static func loadIfPresent(
         url: URL,
+        policy: NativeMTPBenchPolicy,
         policySHA256: String,
         providerCommit: String,
         modelID: String,
@@ -1443,6 +1647,10 @@ private struct NativeMTPExistingEvidence {
                 )
             }
             let block = blockNumber.intValue
+            try validateResumedRecord(
+                record, cellID: cellID, block: block, sustained: sustained, warmup: warmup,
+                policy: policy, line: offset + 2
+            )
             let recordKey = "\(cellID)|\(block)|\(path)|\(sustained)|\(warmup)"
             guard seen.insert(recordKey).inserted else {
                 throw NativeMTPBenchError.assertionFailed(

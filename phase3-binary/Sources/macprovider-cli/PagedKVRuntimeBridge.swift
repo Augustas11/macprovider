@@ -765,6 +765,18 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         cacheKinds.contains(where: \.isPagedMLA) ? pagedMLAMaxFlattenedTokensPerForward : nil
     }
 
+    /// Whether every row of a prefill group prefills in its own forward: no
+    /// two-row shared forward fits under the flattened-token cap at the
+    /// smallest chunk that may group (`glm5_next`: an 8-token cap against
+    /// 144-token grouped chunks). On such a backend a native-MTP prompt row
+    /// may join a ragged group (SPEC-038 v0.3.24 FR-CB2): it still prefills
+    /// alone, on the serial path its drafter seeding is proven on.
+    static func prefillsGroupedRowsAlone(cacheKinds: [CacheKind], minimumGroupedChunkTokens: Int) -> Bool {
+        guard let cap = maxFlattenedTokensPerForward(cacheKinds: cacheKinds) else { return false }
+        let (tokens, overflow) = max(1, minimumGroupedChunkTokens).multipliedReportingOverflow(by: 2)
+        return overflow || tokens > cap
+    }
+
     /// Rows one decode forward may carry beyond the device route bound
     /// (`pagedMLA`: `pagedMLAMaxFlattenedTokensPerForward`); nil when only the
     /// device bound applies. The scheduler splits larger decode steps.
