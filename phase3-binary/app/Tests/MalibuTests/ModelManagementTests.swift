@@ -2688,6 +2688,292 @@ final class ModelManagementTests: XCTestCase {
         XCTAssertEqual(runnersMade, 2)
     }
 
+    // MARK: SPEC-044-R014 catalog-only rows, catalog reference rate, download
+
+    private func mappedRows(_ rowJSON: String, warnings: String = "[]") throws -> [MalibuModelRow] {
+        let document = try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(ShellScreensTests.projectionJSON(rows: [rowJSON], warnings: warnings).utf8)
+        )
+        return try document.validated().rowsForMalibu(currentModelID: "other/model", warmSwapAvailable: true)
+    }
+
+    private func isDemoted(_ rowJSON: String, warnings: String = "[]", file: StaticString = #filePath, line: UInt = #line) throws -> Bool {
+        let rows = try mappedRows(rowJSON, warnings: warnings)
+        let row = try XCTUnwrap(rows.first, file: file, line: line)
+        return row.warningCodes == ["projection_unsupported"]
+    }
+
+    func testCatalogOnlyRowFromTheR014CLIValidatesWithItsRateAndDownload() throws {
+        let rows = try mappedRows(ShellScreensTests.catalogOnlyRowJSON(
+            key: "qwen/qwen3-8b", modelID: "mlx-community/Qwen3-8B-4bit", downloadBytes: 4_600_000_000
+        ))
+        let row = try XCTUnwrap(rows.first)
+        XCTAssertFalse(row.warningCodes.contains("projection_unsupported"))
+        XCTAssertTrue(row.isCatalogOnly)
+        XCTAssertTrue(row.isSignedCatalogEntry)
+        XCTAssertNil(row.catalogVerifiedModelKey, "a catalog reference rate is not a verified earning identity")
+        XCTAssertEqual(row.economicsState, "catalog_reference")
+        XCTAssertEqual(row.providerCompletionPayoutUSDPerMillionTokens, 0.36)
+        XCTAssertEqual(row.nonEarningDisclosure, "Network catalog rate. This Mac is not earning it yet.")
+        XCTAssertEqual(row.action, .download)
+        XCTAssertEqual(row.category, .needsPreparation)
+        XCTAssertEqual(row.categoryLabel, "Not downloaded")
+        XCTAssertEqual(row.downloadTransaction, MalibuModelRow.DownloadTransaction(
+            transactionID: "8d3c5d4c-3e4f-47ac-b72d-7f8f172747a0", timeoutSeconds: 1800, estimatedBytes: 4_600_000_000
+        ))
+        XCTAssertNotEqual(row.earningPathClass, "settlement_capable")
+    }
+
+    /// The real `models catalog-economics --json` output of the R014 CLI,
+    /// captured from a lab build with no local models (every catalog row is
+    /// catalog-only), decodes and validates without a single demoted row.
+    func testRealR014CLIProjectionDecodesWithRatesAndDownloads() throws {
+        let url = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "catalog-economics-r014-lab", withExtension: "json"))
+        let data = try Data(contentsOf: url)
+        try MalibuStrictJSON.rejectDuplicateKeys(data)
+        let document = try JSONDecoder().decode(MalibuModelCatalogEconomicsDocument.self, from: data)
+        let generatedAt = try XCTUnwrap(document.generatedAtDate)
+        let rows = try document.validated(now: generatedAt.addingTimeInterval(30))
+            .rowsForMalibu(currentModelID: nil, warmSwapAvailable: true)
+        XCTAssertEqual(rows.count, document.rows.count)
+        XCTAssertFalse(rows.isEmpty)
+        for row in rows {
+            XCTAssertFalse(row.warningCodes.contains("projection_unsupported"), row.id)
+            XCTAssertTrue(row.isCatalogOnly, row.id)
+            XCTAssertTrue(row.isSignedCatalogEntry, row.id)
+            XCTAssertEqual(row.economicsState, "catalog_reference", row.id)
+            XCTAssertNotNil(row.providerCompletionPayoutUSDPerMillionTokens, row.id)
+            XCTAssertNotNil(row.nonEarningDisclosure, row.id)
+            XCTAssertNil(row.catalogVerifiedModelKey, row.id)
+            XCTAssertEqual(row.action, .download, row.id)
+            XCTAssertEqual(row.category, .needsPreparation, row.id)
+            XCTAssertGreaterThan(row.downloadTransaction?.estimatedBytes ?? 0, 0, row.id)
+        }
+        XCTAssertEqual(DiscoverPresentation.catalogRows(rows).count, rows.count)
+        XCTAssertEqual(
+            ModelsPresentation.title(try XCTUnwrap(rows.first { $0.modelKey == "qwen3-8b" })),
+            "Qwen3 8B · 4-bit"
+        )
+    }
+
+    func testCatalogReferenceIsRejectedOffCatalogOnlyRowsOrWhenIncompleteOrUntrusted() throws {
+        let valid = ShellScreensTests.catalogOnlyRowJSON(key: "qwen/qwen3-8b", modelID: "mlx-community/Qwen3-8B-4bit")
+        XCTAssertFalse(try isDemoted(valid))
+        for (fault, json) in [
+            ("weights local", valid.replacingOccurrences(of: #""weights_present_locally":false"#, with: #""weights_present_locally":true"#)),
+            ("missing share", valid.replacingOccurrences(of: #""provider_share_bps":9000"#, with: #""provider_share_bps":null"#)),
+            ("static rate", valid.replacingOccurrences(of: #""rate_source":"live_signed""#, with: #""rate_source":"static_signed""#)),
+            ("no caveat warning", valid.replacingOccurrences(of: #""admission_state_not_settlement_capable","#, with: "")),
+            ("blocking warning", valid.replacingOccurrences(of: #""model_not_local""#, with: #""model_not_local","feed_stale""#)),
+            ("coordinator admission", valid.replacingOccurrences(of: #""source":"local_default""#, with: #""source":"coordinator""#)),
+            ("candidate id", valid.replacingOccurrences(of: #""action_model_id":null"#, with: #""action_model_id":"byom_abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrst""#)),
+            ("evaluate offered", valid.replacingOccurrences(
+                of: #""evaluate":{"available":false,"requires_confirmation":false,"transaction_kind":null,"transaction_id":null,"action_timeout_seconds":null,"estimated_bytes":null,"unavailable_reason":"no_cli_transaction_available"}"#,
+                with: #""evaluate":{"available":true,"requires_confirmation":false,"transaction_kind":"evaluate_model","transaction_id":"c23c5d4c-3e4f-47ac-b72d-7f8f172747a0","action_timeout_seconds":10,"estimated_bytes":null,"unavailable_reason":null}"#
+            )),
+        ] {
+            XCTAssertNotEqual(json, valid, fault)
+            XCTAssertTrue(try isDemoted(json), "catalog_reference with \(fault) must be demoted")
+        }
+        XCTAssertTrue(try isDemoted(valid, warnings: #"["feed_fallback"]"#), "a projection-level trust warning blocks the rate")
+        XCTAssertFalse(try isDemoted(valid, warnings: #"["admission_state_missing"]"#), "a missed admission read does not touch catalog-only rows")
+        // catalog_reference on a candidate row is never accepted.
+        let candidate = trustedEconomicsRowJSON().replacingOccurrences(of: #""economics_state":"trusted""#, with: #""economics_state":"catalog_reference""#)
+        XCTAssertTrue(try isDemoted(candidate))
+    }
+
+    func testCatalogDownloadIsAcceptedOnlyOnACatalogOnlyRowThatFits() throws {
+        let valid = ShellScreensTests.catalogOnlyRowJSON(key: "qwen/qwen3-8b", modelID: "mlx-community/Qwen3-8B-4bit", downloadBytes: 4_600_000_000)
+        XCTAssertFalse(try isDemoted(valid))
+        XCTAssertFalse(try isDemoted(ShellScreensTests.catalogOnlyRowJSON(
+            key: "qwen/qwen3-8b", modelID: "mlx-community/Qwen3-8B-4bit", downloadBytes: 4_600_000_000, catalogReference: false
+        )), "a download does not need a catalog rate")
+        for (fault, json) in [
+            ("no confirmation", valid.replacingOccurrences(of: #""available":true,"requires_confirmation":true"#, with: #""available":true,"requires_confirmation":false"#)),
+            ("no size", valid.replacingOccurrences(of: #""estimated_bytes":4600000000"#, with: #""estimated_bytes":null"#)),
+            ("does not fit", valid.replacingOccurrences(of: #""fit":"fits""#, with: #""fit":"does_not_fit""#)),
+            ("other action id", valid.replacingOccurrences(of: #""action_model_id":"qwen/qwen3-8b""#, with: #""action_model_id":"qwen/other""#)),
+            ("catalog runtime", valid.replacingOccurrences(of: #""runtime_state":"needs_preparation""#, with: #""runtime_state":"catalog""#)),
+            ("wrong kind", valid.replacingOccurrences(of: #""transaction_kind":"prepare_model""#, with: #""transaction_kind":"cleanup_staging""#)),
+        ] {
+            XCTAssertNotEqual(json, valid, fault)
+            XCTAssertTrue(try isDemoted(json), "download with \(fault) must be demoted")
+        }
+        // A prepare on any other row stays refused.
+        let trustedPrepare = trustedEconomicsRowJSON().replacingOccurrences(
+            of: #""prepare":{"available":false,"requires_confirmation":false,"transaction_kind":null,"transaction_id":null,"action_timeout_seconds":null,"estimated_bytes":null,"unavailable_reason":"action_unavailable"}"#,
+            with: #""prepare":{"available":true,"requires_confirmation":true,"transaction_kind":"prepare_model","transaction_id":"c23c5d4c-3e4f-47ac-b72d-7f8f172747a0","action_timeout_seconds":1800,"estimated_bytes":100,"unavailable_reason":null}"#
+        )
+        XCTAssertNotEqual(trustedPrepare, trustedEconomicsRowJSON())
+        XCTAssertTrue(try isDemoted(trustedPrepare))
+    }
+
+    func testCatalogOnlyRowFromCLI1_8_258IsAcceptedWithAPlainReason() throws {
+        // CLI 1.8.258 labels the catalog-only not_offered sentinel local_only.
+        let legacy = ShellScreensTests.catalogOnlyRowJSON(
+            key: "qwen/qwen3-8b", modelID: "mlx-community/Qwen3-8B-4bit", catalogReference: false, guidanceLabel: "byom.local.local_only"
+        )
+        let row = try XCTUnwrap(try mappedRows(legacy).first)
+        XCTAssertFalse(row.warningCodes.contains("projection_unsupported"))
+        XCTAssertEqual(row.category, .needsPreparation)
+        XCTAssertEqual(row.action, .none)
+        XCTAssertTrue(row.isSignedCatalogEntry)
+        XCTAssertEqual(row.blockReason, "Not on this Mac. Update the provider software to download it from Malibu.")
+        XCTAssertFalse(row.blockReason?.contains("unsupported") ?? true)
+
+        // The legacy label is accepted on that sentinel only.
+        let candidateNotOffered = localOnlyBYOMRowJSON().replacingOccurrences(
+            of: #""state":"local_only","source":"local_default""#,
+            with: #""state":"not_offered","source":"local_default""#
+        )
+        XCTAssertTrue(try isDemoted(candidateNotOffered), "a local_only label on another not_offered row stays rejected")
+        let withDownload = ShellScreensTests.catalogOnlyRowJSON(
+            key: "qwen/qwen3-8b", modelID: "mlx-community/Qwen3-8B-4bit", downloadBytes: 100, guidanceLabel: "byom.local.local_only"
+        )
+        XCTAssertTrue(try isDemoted(withDownload), "the legacy label is never paired with a download")
+    }
+
+    func testDemotedRowsGiveAPlainReason() throws {
+        let broken = ShellScreensTests.catalogOnlyRowJSON(key: "qwen/qwen3-8b", modelID: "mlx-community/Qwen3-8B-4bit")
+            .replacingOccurrences(of: #""provider_share_bps":9000"#, with: #""provider_share_bps":null"#)
+        let row = try XCTUnwrap(try mappedRows(broken).first)
+        XCTAssertEqual(row.warningCodes, ["projection_unsupported"])
+        XCTAssertEqual(row.blockReason, "Not on this Mac, and Malibu can't read this model's catalog details. Update Malibu or the provider software.")
+        let tooBig = broken.replacingOccurrences(of: #""fit":"fits""#, with: #""fit":"does_not_fit""#)
+        XCTAssertEqual(try XCTUnwrap(try mappedRows(tooBig).first).blockReason, "Needs more memory than this Mac has.")
+    }
+
+    func testDownloadEventDecoderIsStrictAndBounded() throws {
+        let tx = "8d3c5d4c-3e4f-47ac-b72d-7f8f172747a0"
+        func line(_ state: String, sequence: Int = 1, error: String = "null", progress: String = "null", extra: String = "") -> String {
+            #"{"schema":"model_catalog_transaction_event.v1","transaction_id":"\#(tx)","transaction_kind":"prepare_model","model_key":"qwen/qwen3-8b","event_sequence":\#(sequence),"emitted_at":"2027-01-15T08:00:00Z","state":"\#(state)","progress":\#(progress),"error_code":\#(error),"warning_code":null\#(extra)}"#
+        }
+        let running = try MalibuModelDownloadEvent.decode(line("running", progress: #"{"stage_label_key":"downloading","bytes_completed":10,"bytes_expected":100,"percent_complete":10,"heartbeat":true}"#))
+        XCTAssertEqual(running.bytesCompleted, 10)
+        XCTAssertEqual(running.bytesExpected, 100)
+        XCTAssertEqual(try MalibuModelDownloadEvent.decode(line("failed", error: #""transfer_failed""#)).errorCode, "transfer_failed")
+        XCTAssertThrowsError(try MalibuModelDownloadEvent.decode(line("failed")), "failed needs an error code")
+        XCTAssertThrowsError(try MalibuModelDownloadEvent.decode(line("succeeded", error: #""transfer_failed""#)))
+        XCTAssertThrowsError(try MalibuModelDownloadEvent.decode(line("paused")))
+        XCTAssertThrowsError(try MalibuModelDownloadEvent.decode(line("queued", extra: #","earning":true"#)))
+        XCTAssertThrowsError(try MalibuModelDownloadEvent.decode(line("queued", sequence: 0)))
+        XCTAssertThrowsError(try MalibuModelDownloadEvent.decode(line("queued").replacingOccurrences(of: "model_catalog_transaction_event.v1", with: "model_catalog_transaction_event.v2")))
+        XCTAssertThrowsError(try MalibuModelDownloadEvent.decode(line("queued") + String(repeating: " ", count: 16_384)))
+        XCTAssertThrowsError(try MalibuModelDownloadEvent.decode("not json"))
+    }
+
+    @MainActor
+    private func downloadStore(
+        downloadBytes: Int64 = 4_600_000_000,
+        timeoutSeconds: Int = 1800,
+        downloadCLI: @escaping () -> any MalibuModelCLIRunning
+    ) async throws -> (ModelManagementStore, FakeModelCLI, MalibuModelRow) {
+        let projection = ModelCLIResult(
+            exitCode: 0,
+            stdout: ShellScreensTests.projectionJSON(rows: [ShellScreensTests.catalogOnlyRowJSON(
+                key: "qwen/qwen3-8b", modelID: "mlx-community/Qwen3-8B-4bit", downloadBytes: downloadBytes, timeoutSeconds: timeoutSeconds
+            )]),
+            stderr: ""
+        )
+        let cli = FakeModelCLI(results: [projection, projection])
+        let store = ModelManagementStore(
+            cli: cli,
+            makeDownloadCLI: downloadCLI,
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.download.\(UUID().uuidString)")!
+        )
+        await store.refresh(
+            currentModelID: "other/model",
+            peer: peer(for: [MalibuModelCapabilityManifest.readySwitch, MalibuModelCapabilityManifest.catalogEconomics])
+        )
+        let row = try XCTUnwrap(store.rows.first { $0.id == "qwen/qwen3-8b" })
+        XCTAssertEqual(row.action, .download)
+        XCTAssertTrue(store.canStartDownload)
+        return (store, cli, row)
+    }
+
+    private static func downloadEvent(_ state: String, sequence: Int, transactionID: String = "8d3c5d4c-3e4f-47ac-b72d-7f8f172747a0", modelKey: String = "qwen/qwen3-8b", error: String = "null", progress: String = "null") -> String {
+        #"{"schema":"model_catalog_transaction_event.v1","transaction_id":"\#(transactionID)","transaction_kind":"prepare_model","model_key":"\#(modelKey)","event_sequence":\#(sequence),"emitted_at":"2027-01-15T08:00:00Z","state":"\#(state)","progress":\#(progress),"error_code":\#(error),"warning_code":null}"#
+    }
+
+    @MainActor
+    func testDownloadRunsPrepareCatalogFollowsOnlyItsEventsAndRefreshes() async throws {
+        let progress = #"{"stage_label_key":"downloading","bytes_completed":1000000000,"bytes_expected":4600000000,"percent_complete":21.7,"heartbeat":true}"#
+        let script = ScriptedDownloadCLI(lines: [
+            Self.downloadEvent("queued", sequence: 1),
+            Self.downloadEvent("running", sequence: 2, progress: progress),
+            Self.downloadEvent("succeeded", sequence: 3, transactionID: "00000000-0000-4000-8000-000000000000"),
+            Self.downloadEvent("succeeded", sequence: 3, modelKey: "qwen/other"),
+            Self.downloadEvent("running", sequence: 2, progress: progress),
+            "garbage",
+            Self.downloadEvent("succeeded", sequence: 4),
+        ], exitCode: 0)
+        var observed: [ModelManagementStore.DownloadState?] = []
+        let (store, cli, row) = try await downloadStore(downloadCLI: { script })
+        script.onLine = { observed.append(store.download) }
+
+        await store.startDownload(row)
+
+        XCTAssertEqual(script.invocations, [[
+            "models", "prepare-catalog", "qwen/qwen3-8b",
+            "--transaction-id", "8d3c5d4c-3e4f-47ac-b72d-7f8f172747a0",
+            "--json", "--config", cli.invocations[0][4],
+        ]])
+        XCTAssertEqual(observed[1]?.phase, .running)
+        XCTAssertEqual(observed[1]?.bytesCompleted, 1_000_000_000)
+        XCTAssertEqual(observed[1]?.bytesExpected, 4_600_000_000)
+        XCTAssertNil(store.download)
+        XCTAssertEqual(cli.invocations.count, 2, "the projection refreshes after the download")
+        XCTAssertEqual(store.downloadResult, .init(rowID: "qwen/qwen3-8b", message: "Downloaded and verified Qwen3 8B · 4-bit. It's on this Mac now.", succeeded: true))
+        XCTAssertEqual(store.history.last?.operation, "download")
+        XCTAssertEqual(store.history.last?.outcome, "success")
+    }
+
+    @MainActor
+    func testDownloadNeedsASucceededEventAndExitZero() async throws {
+        let noTerminal = ScriptedDownloadCLI(lines: [Self.downloadEvent("queued", sequence: 1)], exitCode: 0)
+        let (store, _, row) = try await downloadStore(downloadCLI: { noTerminal })
+        await store.startDownload(row)
+        XCTAssertEqual(store.history.last?.outcome, "failed")
+        XCTAssertEqual(store.downloadResult?.message, "The download of Qwen3 8B · 4-bit didn't finish. Check the network connection and try again.")
+        XCTAssertEqual(store.downloadResult?.succeeded, false)
+
+        let disk = ScriptedDownloadCLI(lines: [
+            Self.downloadEvent("queued", sequence: 1),
+            Self.downloadEvent("failed", sequence: 2, error: #""insufficient_disk_space""#),
+        ], exitCode: 4)
+        let (diskStore, _, diskRow) = try await downloadStore(downloadCLI: { disk })
+        await diskStore.startDownload(diskRow)
+        XCTAssertEqual(diskStore.downloadResult?.message, "Not enough free disk space to download Qwen3 8B · 4-bit. Free up space and try again.")
+    }
+
+    @MainActor
+    func testCancelDownloadAsksTheCLIAndReportsCancelled() async throws {
+        let hanging = CancellableDownloadCLI()
+        let (store, _, row) = try await downloadStore(downloadCLI: { hanging })
+        let task = Task { await store.startDownload(row) }
+        while store.download == nil { await Task.yield() }
+        XCTAssertFalse(store.canStartDownload, "one download at a time")
+        store.cancelDownload()
+        await task.value
+        XCTAssertTrue(hanging.cancelled)
+        XCTAssertNil(store.download)
+        XCTAssertEqual(store.downloadResult?.message, "Download cancelled. The model you serve is unchanged.")
+        XCTAssertEqual(store.history.last?.outcome, "cancelled")
+    }
+
+    @MainActor
+    func testSilentDownloadIsCancelledAfterTheActionTimeout() async throws {
+        let silent = CancellableDownloadCLI(emitsOnCancel: false)
+        let (store, _, row) = try await downloadStore(timeoutSeconds: 1, downloadCLI: { silent })
+        store.downloadWatchdogIntervalSeconds = 0.05
+        store.downloadDelayedSeconds = 0.1
+        await store.startDownload(row)
+        XCTAssertTrue(silent.cancelled)
+        XCTAssertEqual(store.downloadResult?.message, "The download of Qwen3 8B · 4-bit stopped reporting progress, so Malibu cancelled it. The model you serve is unchanged. Try again.")
+    }
+
     private func catalogEconomicsJSON(
         rows: [String],
         generatedAt: String = "2026-08-09T00:00:00Z",
@@ -3295,5 +3581,70 @@ private final class FakeModelCLI: MalibuModelCLIRunning {
             onLine(String(line))
         }
         return result
+    }
+}
+
+/// Delivers fixed `prepare-catalog` lines, one at a time, and records them.
+@MainActor
+private final class ScriptedDownloadCLI: MalibuModelCLIRunning {
+    var invocations: [[String]] = []
+    var onLine: (() -> Void)?
+    private let lines: [String]
+    private let exitCode: Int32
+
+    init(lines: [String], exitCode: Int32) {
+        self.lines = lines
+        self.exitCode = exitCode
+    }
+
+    func run(
+        arguments: [String],
+        peer: MalibuModelPeerEvidence?,
+        stdinData: Data?,
+        priority: ModelCLIWorkPriority,
+        onLine deliver: @escaping @MainActor @Sendable (String) -> Void
+    ) async throws -> ModelCLIResult {
+        invocations.append(arguments)
+        for line in lines {
+            deliver(line)
+            onLine?()
+        }
+        return ModelCLIResult(exitCode: exitCode, stdout: lines.joined(separator: "\n"), stderr: "")
+    }
+}
+
+/// Runs until cancelled; on cancel it reports the CLI's cancelled events.
+@MainActor
+private final class CancellableDownloadCLI: MalibuModelCLIRunning {
+    private(set) var cancelled = false
+    private let emitsOnCancel: Bool
+    private var waiter: CheckedContinuation<ModelCLIResult, Never>?
+    private var deliver: (@MainActor @Sendable (String) -> Void)?
+
+    init(emitsOnCancel: Bool = true) {
+        self.emitsOnCancel = emitsOnCancel
+    }
+
+    func run(
+        arguments: [String],
+        peer: MalibuModelPeerEvidence?,
+        stdinData: Data?,
+        priority: ModelCLIWorkPriority,
+        onLine: @escaping @MainActor @Sendable (String) -> Void
+    ) async throws -> ModelCLIResult {
+        deliver = onLine
+        return await withCheckedContinuation { waiter = $0 }
+    }
+
+    func cancelCurrentOperation() {
+        cancelled = true
+        let tx = "8d3c5d4c-3e4f-47ac-b72d-7f8f172747a0"
+        if emitsOnCancel {
+            for (sequence, state) in [(1, "cancel_requested"), (2, "cancelled")] {
+                deliver?(#"{"schema":"model_catalog_transaction_event.v1","transaction_id":"\#(tx)","transaction_kind":"prepare_model","model_key":"qwen/qwen3-8b","event_sequence":\#(sequence),"emitted_at":"2027-01-15T08:00:00Z","state":"\#(state)","progress":null,"error_code":null,"warning_code":null}"#)
+            }
+        }
+        waiter?.resume(returning: ModelCLIResult(exitCode: emitsOnCancel ? 130 : 15, stdout: "", stderr: ""))
+        waiter = nil
     }
 }

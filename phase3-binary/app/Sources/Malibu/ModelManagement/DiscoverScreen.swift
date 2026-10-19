@@ -1,9 +1,10 @@
 import AppKit
 import SwiftUI
 
-/// Discover: signed-catalog models with trusted economics, filtered to what
-/// this Mac can serve, with rates, provider share, demand rank and provider
-/// count only (SPEC-044-R004, SPEC-044-R013, SPEC-025-R005).
+/// Discover: every signed catalog model, filtered to what this Mac can serve,
+/// with rates, provider share, demand rank and provider count only where the
+/// projection carries a trusted or catalog-reference rate (SPEC-044-R004,
+/// SPEC-044-R013, SPEC-044-R014, SPEC-025-R006).
 enum DiscoverPresentation {
     enum Sort: String, CaseIterable, Identifiable {
         /// The SPEC-044-R005 order the store already applied.
@@ -24,15 +25,22 @@ enum DiscoverPresentation {
         }
     }
 
-    static let emptyCatalog = String(localized: "No signed catalog models with trusted rates are available right now. Models lists every row with the reason it can or can't be served.", comment: "Discover empty catalog")
+    static let emptyCatalog = String(localized: "No signed catalog models are available right now. Models lists every row with the reason it can or can't be served.", comment: "Discover empty catalog")
     static let emptyFilter = String(localized: "No catalog model matches. Turn off \"Fits this Mac\" or clear the search to see more.", comment: "Discover empty after filter")
     static let otherMLXTitle = String(localized: "Other MLX models (not earnable)", comment: "Discover HF section title")
     static let otherMLXExplainer = String(localized: "Search results from Hugging Face mlx-community. These are not in the Malibu catalog: they carry no rate, earn nothing on the network, and can't be switched to from Malibu.", comment: "Discover HF section explainer")
 
-    /// Catalog rows only: a coordinator-verified catalog identity with trusted
-    /// economics. BYOM candidates and untrusted rows stay in Models.
+    /// Signed catalog models only (SPEC-044-R013 item 1): trusted catalog
+    /// rows, catalog-only rows and local candidates with a verified catalog
+    /// key. Candidates without a catalog identity stay in Models.
     static func catalogRows(_ rows: [MalibuModelRow]) -> [MalibuModelRow] {
-        rows.filter { $0.catalogVerifiedModelKey != nil }
+        rows.filter(\.isSignedCatalogEntry)
+    }
+
+    /// The selected row: the provider's choice while it stays visible,
+    /// otherwise the first visible row.
+    static func selection(_ visible: [MalibuModelRow], selectedID: String?) -> MalibuModelRow? {
+        visible.first(where: { $0.id == selectedID }) ?? visible.first
     }
 
     /// Search, fit filter and a provider-chosen sort. Every non-default sort
@@ -69,6 +77,11 @@ enum DiscoverPresentation {
 
     static func listSubtitle(_ row: MalibuModelRow) -> String {
         var parts = [ModelsPresentation.sizeText(row), ModelsPresentation.fitText(row)]
+        if row.category != .current {
+            parts.append(row.weightsPresentLocally
+                ? String(localized: "on this Mac", comment: "Discover list local state")
+                : String(localized: "not downloaded", comment: "Discover list local state"))
+        }
         if row.providerCompletionPayoutUSDPerMillionTokens != nil {
             parts.append(ModelsPresentation.rateText(row) + " / 1M out")
         }
@@ -121,20 +134,17 @@ enum DiscoverPresentation {
     enum PrimaryAction: Equatable {
         case serving
         case switchModel
-        /// SPEC-044-R006: Malibu shows Prepare only for a typed CLI
-        /// transaction; the projection offers none yet.
-        case preparationNotOffered
+        /// SPEC-044-R014: a typed `prepare_model` download on this row.
+        case download
         case none
     }
 
     static func primaryAction(_ row: MalibuModelRow) -> PrimaryAction {
         if row.category == .current { return .serving }
         if row.action == .switchModel { return .switchModel }
-        if !row.weightsPresentLocally || row.category == .needsPreparation { return .preparationNotOffered }
+        if row.action == .download { return .download }
         return .none
     }
-
-    static let preparationNotOffered = String(localized: "Download & prepare isn't offered in Malibu yet. When the provider software offers it for this model, it appears here; then Switch.", comment: "Discover prepare unavailable")
 
     static func screenStrings(
         rows: [MalibuModelRow],
@@ -153,12 +163,14 @@ enum DiscoverPresentation {
             strings.append(ModelsPresentation.rateDisclosure)
         }
         for row in visible {
-            strings.append(ModelsPresentation.name(row) + " — " + listSubtitle(row))
+            strings.append(ModelsPresentation.title(row) + " (" + ModelsPresentation.name(row) + ") — " + listSubtitle(row))
         }
         if let first = visible.first {
-            strings.append("[\(ModelsPresentation.name(first))]")
+            strings.append("[\(ModelsPresentation.title(first))]")
             strings.append(contentsOf: detailLines(first, hostMemoryGB: hostMemoryGB))
-            if primaryAction(first) == .preparationNotOffered { strings.append(preparationNotOffered) }
+            if primaryAction(first) == .download {
+                strings.append(ModelsPresentation.downloadConfirmationMessage(first))
+            }
         }
         strings.append(otherMLXTitle)
         return strings
@@ -173,6 +185,7 @@ struct DiscoverScreen: View {
     @State private var sort: DiscoverPresentation.Sort = .catalog
     @State private var selectedID: String?
     @State private var switchRow: MalibuModelRow?
+    @State private var pendingDownload: MalibuModelRow?
     @State private var otherQuery = ""
     @State private var otherExpanded = false
 
@@ -181,8 +194,7 @@ struct DiscoverScreen: View {
     }
 
     private var selected: MalibuModelRow? {
-        let rows = visible
-        return rows.first(where: { $0.id == selectedID }) ?? rows.first
+        DiscoverPresentation.selection(visible, selectedID: selectedID)
     }
 
     var body: some View {
@@ -222,6 +234,18 @@ struct DiscoverScreen: View {
         }
         .sheet(item: $switchRow) { row in
             ModelSwitchSheet(store: store, row: row, isRevert: false) { switchRow = nil }
+        }
+        .confirmationDialog(
+            pendingDownload.map(ModelsPresentation.downloadConfirmationTitle) ?? "",
+            isPresented: Binding(get: { pendingDownload != nil }, set: { if !$0 { pendingDownload = nil } })
+        ) {
+            Button(String(localized: "Download", comment: "Model download confirm action")) {
+                if let row = pendingDownload { Task { await store.startDownload(row) } }
+                pendingDownload = nil
+            }
+            Button(String(localized: "Cancel", comment: "Model download confirmation cancel"), role: .cancel) { pendingDownload = nil }
+        } message: {
+            Text(pendingDownload.map(ModelsPresentation.downloadConfirmationMessage) ?? "")
         }
         .accessibilityIdentifier("malibu.discover")
     }
@@ -286,11 +310,14 @@ struct DiscoverScreen: View {
                                             .foregroundStyle(.green)
                                             .accessibilityHidden(true)
                                     }
-                                    Text(ModelsPresentation.name(row))
-                                        .font(.callout.monospaced())
-                                        .lineLimit(1)
-                                        .truncationMode(.middle)
+                                    Text(ModelsPresentation.title(row))
+                                        .font(.callout.weight(.medium))
+                                        .fixedSize(horizontal: false, vertical: true)
                                 }
+                                Text(ModelsPresentation.name(row))
+                                    .font(.caption2.monospaced())
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
                                 Text(DiscoverPresentation.listSubtitle(row))
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
@@ -319,10 +346,13 @@ struct DiscoverScreen: View {
         if let row = selected {
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
+                    Text(ModelsPresentation.title(row))
+                        .font(.title3.weight(.semibold))
+                        .fixedSize(horizontal: false, vertical: true)
                     Text(ModelsPresentation.name(row))
-                        .font(.title3.monospaced().weight(.semibold))
-                        .lineLimit(2)
-                        .truncationMode(.middle)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
                     if row.catalogVerifiedModelKey != nil, row.displayID != row.catalogVerifiedModelKey {
                         Text(String(localized: "Provider-reported: \(ShellText.display(row.displayID))", comment: "Provider-reported model name shown under the catalog-verified identity"))
@@ -366,11 +396,14 @@ struct DiscoverScreen: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-        case .preparationNotOffered:
-            Text(DiscoverPresentation.preparationNotOffered)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+        case .download:
+            VStack(alignment: .leading, spacing: 4) {
+                ModelDownloadControl(store: store, row: row, showsSize: true) { pendingDownload = row }
+                Text(ModelsPresentation.downloadConfirmationMessage(row))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         case .none:
             EmptyView()
         }
