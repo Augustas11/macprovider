@@ -223,11 +223,12 @@ func TestStakeAllowancePlainRequestsSpendAllowanceFirst(t *testing.T) {
 	requireBins(t)
 	pg := startStakePostgres(t)
 	providerID := "prov-stake-" + randHex(t, 4)
+	ownedProviderID := providerID + "-owned"
 	s := newScenario(t, scenarioOpts{
 		seedAccount:       true,
 		providerID:        providerID,
 		coordinatorConfig: stakeCoordinatorConfig(pg),
-		beforeCoordinator: func(s *scenario) { seedStake(s, pg, providerID+"-owned", 2) },
+		beforeCoordinator: func(s *scenario) { seedStake(s, pg, ownedProviderID, 2) },
 	})
 	defer s.shutdown()
 
@@ -316,8 +317,8 @@ func TestStakeAllowancePlainRequestsSpendAllowanceFirst(t *testing.T) {
 	}
 
 	// The seeded MALIBU is locked: the stake is netted out of withdrawable.
-	if locked := pg.exec(fmt.Sprintf(`SELECT SUM(amount_units) FROM malibu_stake_events WHERE provider_id = '%s'`, providerID)); locked != "1200000000" {
-		t.Fatalf("locked units %s", locked)
+	if locked := pg.exec(fmt.Sprintf(`SELECT SUM(amount_units) FROM malibu_stake_events WHERE provider_id = '%s'`, ownedProviderID)); locked != "1200000000" {
+		t.Fatalf("locked units for %s: %q, want 1200000000", ownedProviderID, locked)
 	}
 }
 

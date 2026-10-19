@@ -7,12 +7,17 @@
 
 .PHONY: test test-coordinator test-coordinator-billing-race test-coordinator test-coordinator-race-integration test-gateway test-integration test-dist test-relay-blind-parity \
         test-dist-catalog test-dist-python test-dist-release test-dist-deploy \
-        test-byom-e2e test-byom-discovery-journey test-openai-wire \
+        test-byom-e2e test-byom-discovery-journey test-openai-wire test-local-chat-app-core \
         vet vet-coordinator vet-gateway \
         lint-coordinator \
         build-linux check check-exceptions fmt fmt-check verify-autotune-catalog
 
 test: test-coordinator test-coordinator-billing-race test-gateway test-integration test-dist
+
+# Opt-in Studio acceptance. The script requires a verified host, exclusive
+# provider window and isolated no-join provider PID; it is not part of CI.
+test-local-chat-app-core:
+	bash scripts/test-local-chat-app-core.sh
 
 # BYOM CLI onboarding process E2E. This is MANUAL macOS release evidence, not
 # part of `make test` / required PR coverage: it builds the Swift macprovider-cli
