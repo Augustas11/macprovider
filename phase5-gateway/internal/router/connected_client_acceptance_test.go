@@ -76,7 +76,10 @@ func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion
 		}
 	}
 
-	const model = "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit"
+	model, err := connectedClientModel(os.Getenv("MACPROVIDER_TEST_CLIENT_MODEL"), synthetic)
+	if err != nil {
+		t.Fatal(err)
+	}
 	contextTokens, err := connectedClientContext(os.Getenv("MACPROVIDER_TEST_CLIENT_CONTEXT"), synthetic)
 	if err != nil {
 		t.Fatal(err)
@@ -778,6 +781,18 @@ func TestConnectedClientSyntheticProtocol(t *testing.T) {
 	}
 }
 
+func connectedClientModel(raw string, synthetic bool) (string, error) {
+	const instruct = "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit"
+	const coder = "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"
+	if synthetic || raw == "" {
+		return instruct, nil
+	}
+	if raw == instruct || raw == coder {
+		return raw, nil
+	}
+	return "", fmt.Errorf("fixture model must match one of the two qualified exact identities")
+}
+
 func connectedClientContext(raw string, synthetic bool) (int, error) {
 	if synthetic || raw == "" || raw == "8192" {
 		return 8192, nil
@@ -822,6 +837,18 @@ func connectedStreamUsage(body []byte) string {
 }
 
 func TestConnectedClientContextBinding(t *testing.T) {
+	const instruct = "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit"
+	const coder = "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"
+	for _, tc := range []struct {
+		raw       string
+		synthetic bool
+		want      string
+	}{{"", false, instruct}, {instruct, false, instruct}, {coder, false, coder}, {coder, true, instruct}, {"Qwen3-Coder", false, ""}, {"other/model", false, ""}, {coder + " ", false, ""}} {
+		got, err := connectedClientModel(tc.raw, tc.synthetic)
+		if got != tc.want || (err != nil) != (tc.want == "") {
+			t.Fatal("unexpected fixture model resolution")
+		}
+	}
 	for _, tc := range []struct {
 		raw       string
 		synthetic bool
