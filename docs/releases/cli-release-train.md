@@ -71,8 +71,14 @@ section below this one shipped as v1.8.256.
 |---|---|---|---|
 | #2059 | — | Malibu app redesign Phase 2: sidebar shell, Models, Discover, fast catalog, brand mark | merged |
 | #2064 | #2029 | Signed CB policy `max_served_slots` ceiling (SPEC-023 v0.22.28 §12.6, SPEC-038 v0.3.22, SPEC-039 v0.1.21): the CLI parses the optional field and caps planned rows, the self-check ladder, stored/prior/provisional grants and the warm-swap interim count by the lowest ceiling of the matching verified entries; absent field = unchanged behaviour | merged |
-| #2062 | — | Run a due CB self-check under a bounded admission hold; canary accepts the prior grant | open (draft) |
+| #2062 | #2061 | Bounded admission holds let due CB self-checks progress under sustained traffic while preserving existing requests and the prior grant; completed probes and paired throughput measurements survive interruptions, cancelled results cannot qualify, and canary confirmation binds the final grant to the exact smoke identity. Malibu waits for updater output capture before classifying rollback failures | merged (`8a444ff59`); awaiting CLI release |
 | #2063 | #2029 | GLM-5.3-Flash native MTP: R015 v2 on the prefill-schedule fix | open (draft) |
+
+#2062 validation: all 28 jobs passed in [hosted CI run 39189689441](https://github.com/Augustas11/macprovider/actions/runs/39189689441)
+on reviewed head `764b34de0`; code, security and architecture audits have no unresolved
+Critical, High or Medium findings. This records merged source, not a signed CLI release
+or live rollout. #2062 requires no coordinator/gateway runtime change; deliver it through
+`scripts/ops/cli-release.sh` (`status`, `next`, then one documented `next --run` step at a time).
 
 Deploy order for #2064: a policy that carries `max_served_slots` is refused by every
 release path until `scripts/cb_release_baselines.py` `CB_POLICY_CONSUMER_FLOOR` is raised
