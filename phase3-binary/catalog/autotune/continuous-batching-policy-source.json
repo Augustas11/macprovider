@@ -31,6 +31,7 @@
       "hardware_class": "apple-silicon:Apple M3 Ultra:ram-256gb",
       "kernel_identifier": "macprovider_paged_kv_gather_v1",
       "kv_dtype": "fp16",
+      "max_served_slots": 4,
       "metallib_sha256": "3d9b4a747758128cc5418e62c5ad8e282a11b0d436423537137e013beaa1261b",
       "model_id": "zai-org/glm-5.3-flash",
       "model_key": "zai-org/glm-5.3-flash",

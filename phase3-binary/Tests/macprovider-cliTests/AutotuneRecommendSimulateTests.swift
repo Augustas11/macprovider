@@ -65,7 +65,7 @@ final class AutotuneRecommendSimulateTests: XCTestCase {
         XCTAssertEqual(result.demandRankVersion, Self.bakedStaticReleaseID)
     }
 
-    private static let bakedStaticReleaseID = "published-2026-10-19-glm53-flash-native-mtp-v258"
+    private static let bakedStaticReleaseID = "published-2026-10-20-glm53-flash-cb-ceiling-v1"
 
     private static var bakedRateCardVersion: String {
         (try? AutotuneStaticInputs.decodeRateCard(Data(AutotuneStaticInputs.bakedRateCardJSON.utf8)).version) ?? ""

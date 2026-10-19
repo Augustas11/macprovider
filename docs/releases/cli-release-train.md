@@ -106,13 +106,14 @@ Critical, High or Medium findings. This records merged source, not a signed CLI 
 or live rollout. #2062 requires no coordinator/gateway runtime change; deliver it through
 `scripts/ops/cli-release.sh` (`status`, `next`, then one documented `next --run` step at a time).
 
-Deploy order for #2064: a policy that carries `max_served_slots` is refused by every
+Deploy order for #2064 (done): a policy that carries `max_served_slots` is refused by every
 release path until `scripts/cb_release_baselines.py` `CB_POLICY_CONSUMER_FLOOR` is raised
-from `(0, 22, 27)` to `(0, 22, 28)`. Raise it in a reviewed change only after **both** this
-CLI cut and the Pearl runtime carrying #2064's coordinator half are live; older CLIs reject
-a whole policy that carries the field. The GLM-5.3-Flash ceiling (4 served slots, from rows
-1/2/4 evidence) then lands in a catalog cut through `scripts/ops/catalog-activate.sh`; until
-then the Studio pins 4 slots with an owner-pinned `max_concurrency_override`.
+from `(0, 22, 27)` to `(0, 22, 28)`, because older CLIs reject a whole policy that carries the
+field. This CLI cut and Pearl runtime v1.8.259 (#2064's coordinator half, 2026-10-19) are
+both live, so the floor is raised and the GLM-5.3-Flash ceiling (4 served slots, from rows
+1/2/4 evidence) is signed in catalog `published-2026-10-20-glm53-flash-cb-ceiling-v1`,
+activated through `scripts/ops/catalog-activate.sh`. The Studio's owner-pinned
+`max_concurrency_override` is no longer needed once the signed ceiling caps its grant.
 
 ## Next CLI release — net changes vs 1.8.251 (tracked 2026-10-18; released as v1.8.256)
 
