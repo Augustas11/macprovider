@@ -1,0 +1,9 @@
+== fixed
+event=continuous_batching_policy action=resolved status=absent_empty_off_fallback entries=0 revocations=0 emergency_off=false
+event=served_slots action=planned rows=4 served=4 reason=owner_pinned configured=4 source=owner policy_ceiling=none
+event=served_slots action=applied slots=4 rows=4 reason=self_check_granted
+== unfixed
+event=continuous_batching_policy action=resolved status=absent_empty_off_fallback entries=0 revocations=0 emergency_off=false
+event=served_slots action=planned rows=4 served=4 reason=owner_pinned configured=4 source=owner
+event=served_slots action=applied slots=4 rows=4 reason=self_check_granted
+event=continuous_batch_no_progress action=fail_rows passes=64 rows=cbnoprog-b1-1792396905

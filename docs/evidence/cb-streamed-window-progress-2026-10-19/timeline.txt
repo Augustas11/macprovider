@@ -1,0 +1,16 @@
+[07:42:14] window start; live pid 89638
+[07:42:14] drained
+[07:42:17] live stopped
+[07:42:17] fixed serve started pid=40834
+[07:48:40] fixed CB active served_slots=4 slots_total=4 decision=granted after 383s
+[07:48:40] fixed load abc start
+[07:55:19] fixed load done: {"case": "a", "summary": "PASS", "wall_s": 288.1, "completion_tokens": [4096, 4096, 4096, 4096]} {"case": "b", "summary": "PASS", "wall_s": 55.5, "completion_tokens": [2048]} {"case": "c", "summary": "PASS", "wall_s": 55.6, "completion_tokens": [2048]} 
+[07:55:21] fixed serve stopped; no_progress lines=0
+[07:55:22] unfixed serve started pid=41521
+[08:01:45] unfixed CB active served_slots=4 slots_total=4 decision=granted after 383s
+[08:01:45] unfixed load b start
+[08:02:15] unfixed load done: {"case": "b", "summary": "FAIL", "wall_s": 29.7, "completion_tokens": [null]} 
+[08:02:17] unfixed serve stopped; no_progress lines=1
+[08:02:17] lab legs done 1203s after pause
+[08:02:17] RESTORE: kill lab, enable + bootstrap provider and watchdog
+[08:10:02] RESTORED buyer_serving glm pid=42054 cb_active=true served_slots=4 slots_total=4 binary=1.8.256

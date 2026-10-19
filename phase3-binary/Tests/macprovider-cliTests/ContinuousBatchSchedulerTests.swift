@@ -6927,6 +6927,126 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(metrics.activeDecodeRows, 0)
     }
 
+    /// Streamed window tokens are progress for the no-progress guard. With a
+    /// 16-step window every token arrives through the streamed path, so 64
+    /// healthy windows (about 1024 tokens) must not read as a stall: 4 rows
+    /// and 1 row each run past 1025 tokens and end `.length` with the full
+    /// count.
+    func testStreamedWindowsPast64PassesAreProgress() async throws {
+        let backend = StreamingWindowBackend(scripts: [
+            "r1": [10, 11], "r2": [20, 21], "r3": [30, 31], "r4": [40, 41],
+        ])
+        let scheduler = try await makeScheduler(
+            descriptor: Self.descriptor(blockSizeTokens: 16, maxPhysicalBlocks: 512),
+            maxActiveRows: 4,
+            tokenDeliveryBufferLimit: 4096,
+            maxDecodeLockstepWindow: 16,
+            maxPrefillRowsPerIteration: 4,
+            backend: backend,
+            allocator: PagedKVBlockAllocator(blockSizeTokens: 16, maxPhysicalBlocks: 512)
+        )
+        let results = try await withThrowingTaskGroup(of: ContinuousBatchSchedulerResult.self) { group in
+            for id in ["r1", "r2", "r3", "r4"] {
+                group.addTask {
+                    try await scheduler.submit(.init(
+                        id: id, conversationKey: "", promptTokens: [1, 2, 3], maxOutputTokens: 1100, temperature: 0
+                    ))
+                }
+            }
+            var out: [ContinuousBatchSchedulerResult] = []
+            for try await result in group { out.append(result) }
+            return out
+        }
+        XCTAssertEqual(results.count, 4)
+        for result in results {
+            XCTAssertEqual(result.terminalStatus, .length, "errorCode=\(String(describing: result.errorCode))")
+            XCTAssertNil(result.errorCode)
+            XCTAssertEqual(result.completionTokens, 1100)
+            XCTAssertEqual(result.outputTokens.count, 1100)
+        }
+        let windows = await backend.stepsRunPerWindow()
+        XCTAssertGreaterThan(windows.count, ContinuousBatchScheduler.decodePassesWithoutProgressLimit)
+        XCTAssertTrue(windows.contains(16))
+
+        let single = StreamingWindowBackend(scripts: ["s1": [10, 11]])
+        let singleScheduler = try await makeScheduler(
+            descriptor: Self.descriptor(blockSizeTokens: 16, maxPhysicalBlocks: 512),
+            maxActiveRows: 4,
+            tokenDeliveryBufferLimit: 4096,
+            maxDecodeLockstepWindow: 16,
+            backend: single,
+            allocator: PagedKVBlockAllocator(blockSizeTokens: 16, maxPhysicalBlocks: 512)
+        )
+        let one = try await singleScheduler.submit(.init(
+            id: "s1", conversationKey: "", promptTokens: [1, 2, 3], maxOutputTokens: 1100, temperature: 0
+        ))
+        XCTAssertEqual(one.terminalStatus, .length, "errorCode=\(String(describing: one.errorCode))")
+        XCTAssertEqual(one.completionTokens, 1100)
+        XCTAssertEqual(one.outputTokens.count, 1100)
+        let singleWindows = await single.stepsRunPerWindow()
+        XCTAssertGreaterThan(singleWindows.count, ContinuousBatchScheduler.decodePassesWithoutProgressLimit)
+    }
+
+    /// Control: a row under 64 windows (1000 tokens) finishes too.
+    func testStreamedWindowsUnder64PassesFinish() async throws {
+        let backend = StreamingWindowBackend(scripts: ["c1": [10, 11]])
+        let scheduler = try await makeScheduler(
+            descriptor: Self.descriptor(blockSizeTokens: 16, maxPhysicalBlocks: 512),
+            maxActiveRows: 4,
+            tokenDeliveryBufferLimit: 4096,
+            maxDecodeLockstepWindow: 16,
+            backend: backend,
+            allocator: PagedKVBlockAllocator(blockSizeTokens: 16, maxPhysicalBlocks: 512)
+        )
+        let result = try await scheduler.submit(.init(
+            id: "c1", conversationKey: "", promptTokens: [1, 2, 3], maxOutputTokens: 1000, temperature: 0
+        ))
+        XCTAssertEqual(result.terminalStatus, .length, "errorCode=\(String(describing: result.errorCode))")
+        XCTAssertEqual(result.completionTokens, 1000)
+    }
+
+    /// A real stall still trips the guard after streamed windows: the row
+    /// streams past 64 windows, then the backend halts and later decode
+    /// passes stream nothing and apply nothing, so the guard fails the row
+    /// after 64 such passes instead of spinning.
+    func testStreamedWindowsThatHaltStillTripTheNoProgressGuard() async throws {
+        let recorder = TokenEventRecorder()
+        let gate = AsyncGate()
+        let haltBeforeWindow = 70
+        let backend = StreamingWindowBackend(
+            scripts: ["halts": [10, 11]],
+            gate: gate,
+            haltBeforeWindow: haltBeforeWindow
+        )
+        let scheduler = try await makeScheduler(
+            descriptor: Self.descriptor(blockSizeTokens: 16, maxPhysicalBlocks: 512),
+            maxActiveRows: 4,
+            tokenDeliveryBufferLimit: 4096,
+            maxDecodeLockstepWindow: 16,
+            backend: backend,
+            allocator: PagedKVBlockAllocator(blockSizeTokens: 16, maxPhysicalBlocks: 512)
+        )
+        let submitted = Task {
+            try await scheduler.submit(
+                .init(id: "halts", conversationKey: "", promptTokens: [1, 2, 3], maxOutputTokens: 4096, temperature: 0),
+                tokenSink: { recorder.append($0) }
+            )
+        }
+        try await eventually(timeoutNanoseconds: 30_000_000_000) { await backend.blockedAtGate() }
+        await scheduler.setTestDecodeStepsAreNoOps(true)
+        await gate.open()
+        let result = try await submitted.value
+        XCTAssertEqual(result.terminalStatus, .requestFailed)
+        XCTAssertEqual(result.errorCode, "continuous_batching_scheduler_no_progress")
+        XCTAssertGreaterThan(result.emittedTokens, 1025)
+        XCTAssertLessThan(result.emittedTokens, 4096)
+        XCTAssertEqual(recorder.events().count, result.emittedTokens)
+        let windows = await backend.finishedWindowCount()
+        XCTAssertEqual(windows, haltBeforeWindow + 1)
+        let metrics = await scheduler.metrics()
+        XCTAssertEqual(metrics.activeDecodeRows, 0)
+    }
+
     func testNativeMTPBeforeFinalizeTrapCancelsOnlySelectedRowBeforeCommit() async throws {
         let cancelledRecorder = TokenEventRecorder()
         let peerRecorder = TokenEventRecorder()
@@ -8312,6 +8432,7 @@ private actor StreamingWindowBackend: ContinuousBatchSchedulerBackend {
     private let streamedTokenOffset: Int
     private let malformedStep: Int?
     private let extraReturnedTokens: Int
+    private let haltBeforeWindow: Int?
     private var stepsRun: [Int] = []
     private var waitingAtGate = false
 
@@ -8321,7 +8442,8 @@ private actor StreamingWindowBackend: ContinuousBatchSchedulerBackend {
         gate: AsyncGate? = nil,
         streamedTokenOffset: Int = 0,
         malformedStep: Int? = nil,
-        extraReturnedTokens: Int = 0
+        extraReturnedTokens: Int = 0,
+        haltBeforeWindow: Int? = nil
     ) {
         self.scripts = scripts
         self.gateAfterStep = gateAfterStep
@@ -8329,6 +8451,7 @@ private actor StreamingWindowBackend: ContinuousBatchSchedulerBackend {
         self.streamedTokenOffset = streamedTokenOffset
         self.malformedStep = malformedStep
         self.extraReturnedTokens = extraReturnedTokens
+        self.haltBeforeWindow = haltBeforeWindow
     }
 
     func prefill(rows: [ContinuousBatchPrefillInput]) async throws -> [ContinuousBatchPrefillOutput] {
@@ -8354,6 +8477,11 @@ private actor StreamingWindowBackend: ContinuousBatchSchedulerBackend {
         steps: Int,
         onStep: ContinuousBatchDecodeWindowStepObserver?
     ) async throws -> [ContinuousBatchDecodeOutcome] {
+        if stepsRun.count == haltBeforeWindow, let gate {
+            waitingAtGate = true
+            await gate.wait()
+            waitingAtGate = false
+        }
         var collected: [[Int]] = rows.map { _ in [] }
         var ran = 0
         for step in 0 ..< steps {
