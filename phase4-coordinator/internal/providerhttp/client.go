@@ -20,3 +20,17 @@ func Init(timeoutS int) {
 		},
 	}
 }
+
+// OriginHeader marks every coordinator HTTP-direct dispatch to a provider
+// (buyer traffic, canary probes, warmup gates). A provider treats a request
+// carrying it as network traffic, never as local chat, whether or not the
+// request also carries settlement metadata (SPEC-001-R011).
+const (
+	OriginHeader           = "X-MacProvider-Origin"
+	OriginCoordinatorValue = "coordinator"
+)
+
+// SetCoordinatorOrigin stamps the coordinator origin marker on h.
+func SetCoordinatorOrigin(h http.Header) {
+	h.Set(OriginHeader, OriginCoordinatorValue)
+}

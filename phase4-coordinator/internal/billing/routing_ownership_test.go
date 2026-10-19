@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -109,7 +111,7 @@ func TestBuyerOwnedProvidersIncludesUnmaturedStake(t *testing.T) {
 			return 7, nil
 		}
 		return 0, nil
-	})
+	}, nil)
 	owned, err := store.BuyerOwnedProviders(context.Background(), "acct", nil)
 	if err != nil || !owned["own"] || owned["other"] {
 		t.Fatalf("owned=%v err=%v", owned, err)
@@ -118,10 +120,121 @@ func TestBuyerOwnedProvidersIncludesUnmaturedStake(t *testing.T) {
 	if err != nil || len(owned) != 0 {
 		t.Fatalf("no-link=%v err=%v", owned, err)
 	}
+}
+
+func TestBuyerOwnedProvidersCachesPositiveStakeIdentity(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	execAll(t, store.db, selfDealFixtureSchema, `INSERT INTO provider_ownership VALUES ('own',7),('later',9)`)
+	var calls atomic.Int64
+	var failing atomic.Bool
+	ids := map[string]int64{"acct": 7}
+	var idsMu sync.Mutex
+	store.SetRoutingStakeIdentityLookup(func(_ context.Context, account string) (int64, error) {
+		calls.Add(1)
+		if failing.Load() {
+			return 0, errors.New("postgres down")
+		}
+		idsMu.Lock()
+		defer idsMu.Unlock()
+		return ids[account], nil
+	}, nil)
+	for i := 0; i < 3; i++ {
+		owned, err := store.BuyerOwnedProviders(context.Background(), "acct", nil)
+		if err != nil || !owned["own"] {
+			t.Fatalf("owned=%v err=%v", owned, err)
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("positive identity re-read Postgres: calls=%d", got)
+	}
+	// A cached positive identity survives a later Postgres fault.
+	failing.Store(true)
+	if owned, err := store.BuyerOwnedProviders(context.Background(), "acct", nil); err != nil || !owned["own"] {
+		t.Fatalf("cached identity lost on fault: owned=%v err=%v", owned, err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("cached identity queried Postgres: calls=%d", got)
+	}
+	// No-stake accounts are re-read, so a new stake fences the next dispatch.
+	failing.Store(false)
+	if owned, _ := store.BuyerOwnedProviders(context.Background(), "newcomer", nil); len(owned) != 0 {
+		t.Fatalf("no-stake owned=%v", owned)
+	}
+	idsMu.Lock()
+	ids["newcomer"] = 9
+	idsMu.Unlock()
+	if owned, _ := store.BuyerOwnedProviders(context.Background(), "newcomer", nil); !owned["later"] {
+		t.Fatalf("new stake not observed: owned=%v", owned)
+	}
+}
+
+func TestBuyerOwnedProvidersStakeFaultFallsBackToOtherSources(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	execAll(t, store.db, selfDealFixtureSchema, `INSERT INTO provider_ownership VALUES ('granted',7),('header',8)`)
+	grantAllowance(t, store, AllowanceStake{AccountID: "acct", GitHubUserID: 7, Units: malibu(10)})
+	var reported []string
 	store.SetRoutingStakeIdentityLookup(func(context.Context, string) (int64, error) {
 		return 0, errors.New("configured stake source unavailable")
-	})
-	if _, err = store.BuyerOwnedProviders(context.Background(), "unlinked", nil); err == nil {
-		t.Fatal("stake lookup failed open")
+	}, func(account string, err error) { reported = append(reported, account) })
+	owned, err := store.BuyerOwnedProviders(context.Background(), "acct", []int64{8})
+	if err != nil || !owned["granted"] || !owned["header"] {
+		t.Fatalf("fallback lost other sources: owned=%v err=%v", owned, err)
+	}
+	owned, err = store.BuyerOwnedProviders(context.Background(), "ordinary", nil)
+	if err != nil || len(owned) != 0 {
+		t.Fatalf("ordinary buyer refused on stake fault: owned=%v err=%v", owned, err)
+	}
+	if store.RoutingStakeIdentityFallbacks() != 2 || len(reported) != 2 {
+		t.Fatalf("fallbacks=%d reported=%v", store.RoutingStakeIdentityFallbacks(), reported)
+	}
+}
+
+func TestBuyerOwnedProvidersHeldStakeLedgerHitsDeadline(t *testing.T) {
+	old := RoutingStakeIdentityTimeout
+	RoutingStakeIdentityTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { RoutingStakeIdentityTimeout = old })
+	_, store := newRequestAndBillingStores(t)
+	execAll(t, store.db, selfDealFixtureSchema, `INSERT INTO provider_ownership VALUES ('header',8)`)
+	release := make(chan struct{})
+	defer close(release)
+	store.SetRoutingStakeIdentityLookup(func(ctx context.Context, _ string) (int64, error) {
+		if _, ok := ctx.Deadline(); !ok {
+			t.Error("stake identity read has no deadline")
+		}
+		select {
+		case <-ctx.Done(): // a held Postgres connection honours the deadline
+			return 0, ctx.Err()
+		case <-release:
+			return 7, nil
+		}
+	}, nil)
+	var wg sync.WaitGroup
+	start := time.Now()
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			owned, err := store.BuyerOwnedProviders(context.Background(), "acct", []int64{8})
+			if err != nil || !owned["header"] {
+				t.Errorf("held ledger: owned=%v err=%v", owned, err)
+			}
+		}()
+	}
+	wg.Wait()
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("held stake ledger stalled buyers for %v", elapsed)
+	}
+	if got := store.RoutingStakeIdentityFallbacks(); got != 8 {
+		t.Fatalf("fallbacks=%d", got)
+	}
+}
+
+func TestBuyerOwnedProvidersWithoutStakeLedgerContributesNothing(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	execAll(t, store.db, selfDealFixtureSchema, `INSERT INTO provider_ownership VALUES ('own',7)`)
+	store.SetRoutingStakeIdentityLookup(nil, nil)
+	owned, err := store.BuyerOwnedProviders(context.Background(), "acct", nil)
+	if err != nil || len(owned) != 0 || store.RoutingStakeIdentityFallbacks() != 0 {
+		t.Fatalf("unconfigured ledger: owned=%v err=%v", owned, err)
 	}
 }

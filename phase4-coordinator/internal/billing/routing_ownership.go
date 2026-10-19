@@ -4,16 +4,67 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 )
 
 type RoutingStakeIdentityLookup func(context.Context, string) (int64, error)
 
+// RoutingStakeIdentityTimeout bounds one rewards-ledger stake identity read
+// on the dispatch path. A var so tests can shorten it.
+var RoutingStakeIdentityTimeout = 250 * time.Millisecond
+
+// routingStakeIdentitySource is the dispatch-path view of the rewards-ledger
+// stake identity (SPEC-050-R002, SPEC-002-R008). A positive identity never
+// changes once written, so it is cached for the process lifetime; only
+// accounts with no stake are re-read, each read under a short deadline.
+type routingStakeIdentitySource struct {
+	lookup     RoutingStakeIdentityLookup
+	onFallback func(accountID string, err error)
+	positive   sync.Map // account id -> int64 (> 0)
+	fallbacks  atomic.Int64
+}
+
 // SetRoutingStakeIdentityLookup installs the configured rewards-ledger read.
-// Configured source failures propagate; an unconfigured ledger has no link.
-func (s *Store) SetRoutingStakeIdentityLookup(lookup RoutingStakeIdentityLookup) {
+// Install it only when the stake ledger initialised; without it the stake
+// source contributes no identity. A failed or timed-out read is not
+// propagated: the dispatch falls back to the other ownership sources
+// (gateway identities, allowance grants, trust-pool owners) and onFallback
+// is told, so a rewards-database fault never refuses buyers.
+func (s *Store) SetRoutingStakeIdentityLookup(lookup RoutingStakeIdentityLookup, onFallback func(accountID string, err error)) {
 	if lookup != nil {
-		s.routingStakeIdentity.Store(&lookup)
+		s.routingStakeIdentity.Store(&routingStakeIdentitySource{lookup: lookup, onFallback: onFallback})
 	}
+}
+
+// RoutingStakeIdentityFallbacks counts stake identity reads that failed or
+// timed out and fell back to the other ownership sources.
+func (s *Store) RoutingStakeIdentityFallbacks() int64 {
+	if source := s.routingStakeIdentity.Load(); source != nil {
+		return source.fallbacks.Load()
+	}
+	return 0
+}
+
+func (src *routingStakeIdentitySource) identity(ctx context.Context, accountID string) int64 {
+	if cached, ok := src.positive.Load(accountID); ok {
+		return cached.(int64)
+	}
+	readCtx, cancel := context.WithTimeout(ctx, RoutingStakeIdentityTimeout)
+	defer cancel()
+	id, err := src.lookup(readCtx, accountID)
+	if err != nil {
+		src.fallbacks.Add(1)
+		if src.onFallback != nil {
+			src.onFallback(accountID, err)
+		}
+		return 0
+	}
+	if id > 0 {
+		src.positive.Store(accountID, id)
+	}
+	return id
 }
 
 // BuyerOwnedProviders reads authoritative owner links without the reward
@@ -30,11 +81,7 @@ func (s *Store) BuyerOwnedProviders(ctx context.Context, accountID string, githu
 		ids[id] = true
 	}
 	if source := s.routingStakeIdentity.Load(); source != nil {
-		id, err := (*source)(ctx, accountID)
-		if err != nil {
-			return nil, err
-		}
-		if id > 0 {
+		if id := source.identity(ctx, accountID); id > 0 {
 			ids[id] = true
 		}
 	}
