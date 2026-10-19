@@ -87,17 +87,15 @@ already live in v1.8.255.
   stopped 23:05:33Z (drained by 23:06:03Z) and started 23:07:22Z. Public TLS health and the
   ready-provider floor passed at 23:08:11Z, about 2 min 38 s after the stop. The updater
   then verified its rollback point and exited successfully at 23:15Z with traffic up.
-- **After.** Both health endpoints report v1.8.259; 8 providers connected, 4 ready, as
-  before the apply; the canary reconnected `buyer_serving` with its CB grant unchanged. No
-  stats migration was pending.
+- **After.** Both health endpoints report v1.8.259; the providers reconnected at their
+  pre-apply readiness and the canary came back `buyer_serving` with its CB grant
+  unchanged. No stats migration was pending.
 - **Ownership routing.** Buyer traffic kept serving after the apply with zero
   `buyer_ownership_refused` events.
 - **Billing.** A paid gateway request on `zai-org/glm-5.3-flash` billed at 18,500 prompt /
   88,000 completion credits per Mtok, the `rewards.rate_card` row.
-- **Origin marker.** No connected provider uses HTTP-direct dispatch today (all are
-  WebSocket-tunnelled), so the marker is proven by the shipped binary and its tests
-  (`TestHTTPCanaryAndWarmupCarryCoordinatorOriginMarker`, the local-preempted retry tests),
-  not by live traffic.
+- **Origin marker.** Proven by the shipped binary and its tests
+  (`TestHTTPCanaryAndWarmupCarryCoordinatorOriginMarker`, the local-preempted retry tests).
 
 #2064 deploy order, continued: with CLI 1.8.257+ and this runtime live, the CB policy
 consumer floor moves to `(0, 22, 28)` and the catalog that signs GLM-5.3-Flash's ceiling (4)
