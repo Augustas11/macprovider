@@ -2218,7 +2218,8 @@
         "phase3-binary/Sources/macprovider-cli/ModelArtifactDiagnostics.swift:enum ModelCatalogPreparation",
         "phase3-binary/Sources/macprovider-cli/ModelArtifactDiagnostics.swift:static func candidateLocations(",
         "phase3-binary/Sources/macprovider-cli/ModelArtifactDiagnostics.swift:func loadDiagnosticsConfig(",
-        "phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:static func pinnedArtifactLoadCandidate("
+        "phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:static func pinnedArtifactLoadCandidate(",
+        "phase3-binary/Sources/macprovider-cli/ModelsPrepareCatalogCommand.swift:enum ModelsPrepareCatalogRunner"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/ModelArtifactDiagnosticsTests.swift:testCatalogRowSuspectWhenCompleteBytesAtPinnedRevisionHashDifferently",
@@ -2237,7 +2238,10 @@
         "phase3-binary/Tests/macprovider-cliTests/ModelArtifactDiagnosticsTests.swift:testHumanOutputRedactsLocalPathsAndEvidence",
         "phase3-binary/Tests/macprovider-cliTests/ModelArtifactDiagnosticsTests.swift:testCatalogProfileRejectsLaneAOnlyOptions",
         "phase3-binary/Tests/macprovider-cliTests/ModelArtifactDiagnosticsTests.swift:testRepairCacheCleanupFailureStaysVisibleWhenTheArtifactVerifies",
-        "phase3-binary/Tests/macprovider-cliTests/ModelArtifactDiagnosticsTests.swift:testPrepareAdoptsAVerifiedHFSnapshotIntoTheDurableStoreServeLoads"
+        "phase3-binary/Tests/macprovider-cliTests/ModelArtifactDiagnosticsTests.swift:testPrepareAdoptsAVerifiedHFSnapshotIntoTheDurableStoreServeLoads",
+        "phase3-binary/Tests/macprovider-cliTests/ModelArtifactDiagnosticsTests.swift:testPrepareCatalogDownloadsAndReportsQueuedRunningSucceeded",
+        "phase3-binary/Tests/macprovider-cliTests/ModelArtifactDiagnosticsTests.swift:testPrepareCatalogCancelStopsTheDownloadRemovesPartialsAndReportsCancelled",
+        "phase3-binary/Tests/macprovider-cliTests/ModelArtifactDiagnosticsTests.swift:testPrepareCatalogCommandParsesAndRefusesBadInputBeforeWork"
       ],
       "journeys": [],
       "evidence": [],
@@ -10087,7 +10091,10 @@
       "tests": [
         "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testModelsSectionsFollowSpec044R008OrderAndFilter",
         "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testModelsScreenCopyCarriesTheRateDisclosureAndNoIncomeClaims",
-        "phase3-binary/app/Tests/MalibuTests/ModelScreensHostedTests.swift::testPopulatedModelsAndDiscoverScreensRender"
+        "phase3-binary/app/Tests/MalibuTests/ModelScreensHostedTests.swift::testPopulatedModelsAndDiscoverScreensRender",
+        "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testReadableTitlesComeFromTheModelIdentifier",
+        "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testDownloadProgressCopy",
+        "phase3-binary/app/Tests/MalibuTests/ModelScreensHostedTests.swift::testDownloadInProgressRenders"
       ],
       "journeys": [],
       "evidence": [],
@@ -10128,7 +10135,8 @@
       ],
       "tests": [
         "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testBrowseQueryIsSanitized",
-        "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testBrowseOtherMLXModelsNeedsTheCatalogJSONCapabilityAndTimesOut"
+        "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testBrowseOtherMLXModelsNeedsTheCatalogJSONCapabilityAndTimesOut",
+        "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testCatalogOnlyRowsListInDiscoverWithFitDownloadAndFirstRowSelected"
       ],
       "journeys": [],
       "evidence": [],
@@ -10212,7 +10220,8 @@
         "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testDiscoverFitFilterAndSortsKeepCatalogOrderAsTieBreak",
         "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testDiscoverDetailShowsRatesShareDemandAndProvidersOnly",
         "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testBrowseDecodeIsStrictAndNeverActionable",
-        "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testBrowseOtherMLXModelsRunsBrowseOnItsOwnRunnerAndStaysNonActionable"
+        "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testBrowseOtherMLXModelsRunsBrowseOnItsOwnRunnerAndStaysNonActionable",
+        "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testCatalogOnlyRowsListInDiscoverWithFitDownloadAndFirstRowSelected"
       ],
       "journeys": [],
       "evidence": [],
@@ -10221,6 +10230,45 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2054",
         "rationale": "SPEC-044 v0.2.11 adds the Discover view of the projection; app tests exist, release evidence and conformance fragments are not yet mapped."
+      }
+    },
+    {
+      "requirement_id": "SPEC-044-R014",
+      "spec_id": "SPEC-044",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/CatalogEconomicsCatalogOnly.swift:enum CatalogOnlyRowProjection",
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:static func catalogOnlyGuidance(",
+        "phase3-binary/Sources/macprovider-cli/ModelsPrepareCatalogCommand.swift:enum ModelsPrepareCatalogRunner",
+        "phase3-binary/app/Sources/Malibu/ModelManagement/ModelManagement.swift:static func isCatalogOnlyRow(",
+        "phase3-binary/app/Sources/Malibu/ModelManagement/ModelManagement.swift:func startDownload("
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ModelCatalogEconomicsTests.swift:testCatalogOnlyRowUsesSourceAwareNotOfferedGuidance",
+        "phase3-binary/Tests/macprovider-cliTests/ModelCatalogEconomicsTests.swift:testCatalogOnlyRowCarriesTheSignedRateAsCatalogReferenceNeverTrusted",
+        "phase3-binary/Tests/macprovider-cliTests/ModelCatalogEconomicsTests.swift:testCatalogOnlyRowWithStaleRateCardKeepsMoneyFieldsNull",
+        "phase3-binary/Tests/macprovider-cliTests/ModelCatalogEconomicsTests.swift:testCatalogOnlyRowOffersAConfirmedDownloadOnlyWhenItFitsWithAVerifiedArtifact",
+        "phase3-binary/Tests/macprovider-cliTests/ModelCatalogEconomicsTests.swift:testCatalogDownloadSizesNeedAVerifiedPrimaryMatchingTheSignedPin",
+        "phase3-binary/Tests/macprovider-cliTests/ModelCatalogEconomicsTests.swift:testV2CatalogOnlySentinelStaysUnavailableWhenV1OffersADownload",
+        "phase3-binary/Tests/macprovider-cliTests/ModelArtifactDiagnosticsTests.swift:testPrepareCatalogDownloadsAndReportsQueuedRunningSucceeded",
+        "phase3-binary/Tests/macprovider-cliTests/ModelArtifactDiagnosticsTests.swift:testPrepareCatalogCancelStopsTheDownloadRemovesPartialsAndReportsCancelled",
+        "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testRealR014CLIProjectionDecodesWithRatesAndDownloads",
+        "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testCatalogReferenceIsRejectedOffCatalogOnlyRowsOrWhenIncompleteOrUntrusted",
+        "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testCatalogDownloadIsAcceptedOnlyOnACatalogOnlyRowThatFits",
+        "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testCatalogOnlyRowFromCLI1_8_258IsAcceptedWithAPlainReason",
+        "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testDownloadRunsPrepareCatalogFollowsOnlyItsEventsAndRefreshes",
+        "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testCancelDownloadAsksTheCLIAndReportsCancelled",
+        "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testSilentDownloadIsCancelledAfterTheActionTimeout",
+        "phase3-binary/Tests/macprovider-cliTests/ModelCatalogEconomicsTests.swift:testCatalogReferenceRateEqualsTheTrustedRateForTheSameKey",
+        "phase3-binary/Tests/macprovider-cliTests/ModelCatalogEconomicsTests.swift:testCatalogOnlyRowsLeaveCandidateRowsUntouched"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2054",
+        "rationale": "SPEC-044 v0.2.12 adds R014 (v1 catalog-only guidance, catalog reference rate, confirmed catalog download through models prepare-catalog). CLI and app tests exist and a lab build's real projection decodes in the app; a real download from Malibu on a provider Mac and release evidence are pending."
       }
     },
     {
@@ -14000,7 +14048,10 @@
       ],
       "tests": [
         "phase3-binary/app/Tests/MalibuTests/ConnectedAppsTests.swift:final class ConnectedAppsTests",
-        "phase3-binary/app/Tests/MalibuTests/ConnectedAppsTests.swift:func testOpenCodeLauncherIgnoresRepositoryConfiguration"
+        "phase3-binary/app/Tests/MalibuTests/ConnectedAppsTests.swift:func testOpenCodeLauncherIgnoresRepositoryConfiguration",
+        "phase3-binary/app/Tests/MalibuTests/ConnectedAppsTests.swift::testNotPrivateBannerSaysPrivateModeDoesNotApplyAndPointsToMalibuChat",
+        "phase3-binary/app/Tests/MalibuTests/ConnectedAppsTests.swift::testGatewayModelsNeedASavedKeyAndLoadAfterSaving",
+        "phase3-binary/app/Tests/MalibuTests/ConnectedAppsTests.swift::testGatewayModelLoadErrorsShowBesideTheButton"
       ],
       "journeys": [],
       "evidence": [],
