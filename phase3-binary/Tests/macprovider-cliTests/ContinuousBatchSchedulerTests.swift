@@ -5794,6 +5794,65 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         }
     }
 
+    func testAFailedPeerInARaggedGroupWithANativeRowFailsAlone() async throws {
+        let prefillGate = AsyncGate()
+        let backend = ScriptedBackend(
+            scripts: ["ordinary-1": [102], "ordinary-2": [103]],
+            prefillGate: prefillGate,
+            prefillRowFailures: ["ordinary-1"],
+            nativeTargetTopTokens: ["native": [5]]
+        )
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 3,
+            maxPromptChunkTokens: 2,
+            maxPrefillRowsPerIteration: 3,
+            maxPrefillTokensPerIteration: 6,
+            allowsRaggedPrefillOffsets: true,
+            nativeMTPPromptRowsJoinRaggedPrefill: true,
+            backend: backend
+        )
+        let native = Task {
+            try await scheduler.submit(Self.nativeRequest(
+                id: "native",
+                promptTokens: [1, 2, 3, 4],
+                maxOutputTokens: 1,
+                proposals: [5],
+                maximumDepth: 1
+            ))
+        }
+        try await eventually { await backend.prefillCallCount() == 1 }
+        let ordinary = (1...2).map { index in
+            Task {
+                try await scheduler.submit(.init(
+                    id: "ordinary-\(index)",
+                    conversationKey: "",
+                    promptTokens: [index * 10 + 1, index * 10 + 2, index * 10 + 3, index * 10 + 4],
+                    maxOutputTokens: 1,
+                    temperature: 0.0,
+                    topP: 1.0
+                ))
+            }
+        }
+        try await eventually { await scheduler.metrics().waitingCount >= 2 }
+        await prefillGate.open()
+
+        let nativeResult = try await native.value
+        let failed = try await ordinary[0].value
+        let peer = try await ordinary[1].value
+        let committed = await backend.prefillCommittedCounts()
+        XCTAssertTrue(committed.contains(["native": 2, "ordinary-1": 0, "ordinary-2": 0]), "\(committed)")
+        XCTAssertEqual(nativeResult.terminalStatus, .length)
+        XCTAssertEqual(nativeResult.outputTokens.count, 1)
+        XCTAssertEqual(failed.terminalStatus, .requestFailed)
+        XCTAssertEqual(failed.errorCode, "continuous_batching_prefill_failed")
+        XCTAssertEqual(peer.terminalStatus, .length)
+        XCTAssertEqual(peer.outputTokens, [103])
+        let finished = await backend.finishedRequests()
+        XCTAssertEqual(Set(finished), ["native", "ordinary-1", "ordinary-2"])
+        let metrics = await scheduler.metrics()
+        XCTAssertEqual(metrics.slotsFree, metrics.slotsTotal)
+    }
+
     func testNativeRowsJoinRaggedGroupsOnlyWhenRaggedOffsetsAreAllowed() throws {
         func configuration(ragged: Bool, joins: Bool) -> ContinuousBatchSchedulerConfiguration {
             ContinuousBatchSchedulerConfiguration(

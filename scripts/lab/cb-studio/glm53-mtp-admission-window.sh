@@ -22,7 +22,6 @@
 #        checks outside a window). Runs
 #        alone, without the bank leg. R015_FROM=<n> resumes at step n; an
 #        interrupted sustained window is rerun whole (SPEC-048-R015).
-#   glm53-mtp-admission-window.sh run    bank, then r015.
 #
 # Both legs need the GPU and all of unified memory: run them only inside an
 # announced Studio window with the buyer runner stopped, the live provider
@@ -33,13 +32,14 @@
 # directory). Pausing and restoring the live provider is the window owner's
 # job.
 #
-# Binary: the bank leg ran a lab-harness release build of the v1.8.256 tag
-# source with this branch's lab-only journey overlay. The r015 leg runs a
-# lab-harness release build of this branch at PROVIDER_COMMIT. Both carry the
-# signed 1.8.256 mlx.metallib (3d9b4a74...), never a lab-built metallib: the
-# canary compares exact tokens, counters and committed state.
+# Binaries: the bank leg runs BANK_HARNESS, the lab-harness release build of
+# the v1.8.256 tag source with this branch's lab-only journey overlay (window
+# 1, harness 6585ae23...). The r015 leg runs HARNESS, the lab-harness release
+# build of this branch at PROVIDER_COMMIT. Both carry the signed 1.8.256
+# mlx.metallib (3d9b4a74...), never a lab-built metallib: the canary compares
+# exact tokens, counters and committed state. The legs run separately.
 #
-# Env: HARNESS (dir holding macprovider-cli + mlx.metallib), MODEL (served
+# Env: HARNESS and BANK_HARNESS (dirs holding macprovider-cli + mlx.metallib), MODEL (served
 # artifact dir), OUT, POLICY, BANK_MIN_SPEEDUP (1.20), BANK_TIMEOUT_S (1800),
 # R015_STEP_TIMEOUT_S (3600), R015_FROM (1). The r015 leg refuses a harness
 # whose macprovider-cli is not R015_HARNESS_SHA256, the build of
@@ -50,6 +50,7 @@ export PATH=/usr/sbin:/opt/homebrew/bin:/usr/bin:/bin
 # frozen policy names the Command Line Tools toolchain, so no Xcode override.
 unset DEVELOPER_DIR
 HARNESS=${HARNESS:-$HOME/lab-glm53-r015v2/src/phase3-binary/.build-lab-harness/release}
+BANK_HARNESS=${BANK_HARNESS:-$HOME/lab-glm53-mtp/src/phase3-binary/.build-lab-harness/release}
 MODEL=${MODEL:-"$HOME/Library/Application Support/macprovider/models/Jundot--GLM-5.3-Flash-oQ4e-mtp/36defc5042d92a992a7948e83d6f110b8df69329/7299b6a71a38490e378e9eb6524c426392aa96e3fd561007e0540134bbef48f9"}
 OUT=${OUT:-$HOME/lab-glm53-r015v2/window-$(date -u +%Y%m%dT%H%M%SZ)}
 POLICY=${POLICY:-$HOME/lab-glm53-r015v2/policy.json}
@@ -60,7 +61,7 @@ MODEL_ID=zai-org/glm-5.3-flash
 RELEASE_METALLIB_SHA256=3d9b4a747758128cc5418e62c5ad8e282a11b0d436423537137e013beaa1261b
 POLICY_SHA256=5ca7e3b34a7eec5163a136782d85551cd57f6da0da0b02c808355ba02a67cfab
 PROVIDER_COMMIT=916faf3b7faedc815d864987a185c1464e5c4962
-R015_HARNESS_SHA256=pending
+R015_HARNESS_SHA256=0ac0606b71cf501277cb2f243dc57da715c8101c478b9ddc43a8dbafce9a8e59
 CHALLENGE_ID=native-mtp-selftest-glm53-flash-0001
 # Candidate challenge texts, in preference order. The first is the text the
 # journey has always used (GLM: acceptance 19/43, about 1.0x at 07301b6bf).
@@ -85,24 +86,33 @@ live_absent() {
   fi
 }
 
+# preflight <harness dir>
 preflight() {
+  local harness=$1
   live_absent || exit 3
-  mkdir $LOCK 2> /dev/null || { echo "refusing: another window holds $LOCK" >&2; exit 3; }
+  mkdir "$LOCK" 2> /dev/null || { echo "refusing: another window holds $LOCK" >&2; exit 3; }
   LOCKED=1
-  [[ -x $HARNESS/macprovider-cli && -f $HARNESS/mlx.metallib ]] || { echo "no harness at $HARNESS" >&2; exit 3; }
-  [[ $(shasum -a 256 $HARNESS/mlx.metallib | cut -d' ' -f1) == $RELEASE_METALLIB_SHA256 ]] ||
-    { echo "refusing: $HARNESS/mlx.metallib is not the signed 1.8.256 metallib" >&2; exit 3; }
-  mkdir -p $OUT
-  shasum -a 256 $HARNESS/macprovider-cli $HARNESS/mlx.metallib | tee $OUT/identity.sha256
+  [[ -x $harness/macprovider-cli && -f $harness/mlx.metallib ]] || { echo "no harness at $harness" >&2; exit 3; }
+  [[ $(shasum -a 256 "$harness/mlx.metallib" | cut -d' ' -f1) == $RELEASE_METALLIB_SHA256 ]] ||
+    { echo "refusing: $harness/mlx.metallib is not the signed 1.8.256 metallib" >&2; exit 3; }
+  mkdir -p "$OUT"
+  shasum -a 256 "$harness/macprovider-cli" "$harness/mlx.metallib" | tee "$OUT/identity.sha256"
 }
 
 # Runs "$@" with stdout to $3 and stderr to $4, killed after $1 seconds; on a
-# timeout the stacks are sampled first so a hang leaves its diagnosis.
+# timeout the stacks are sampled first so a hang leaves its diagnosis. It is
+# also killed, and fails, as soon as the live provider could share the GPU.
 run_bounded() {
   local limit=$1 label=$2 out=$3 err=$4; shift 4
-  "$@" > $out 2> $err &
+  "$@" > "$out" 2> "$err" &
   local pid=$! t0=$(date +%s)
   while kill -0 $pid 2>/dev/null; do
+    if ! live_absent 2>> "$OUT/summary.txt"; then
+      echo "$label stopped: the live provider appeared" | tee -a "$OUT/summary.txt"
+      kill -TERM $pid 2>/dev/null; sleep 5; kill -KILL $pid 2>/dev/null || true
+      wait $pid 2>/dev/null || true
+      return 125
+    fi
     if (( $(date +%s) - t0 >= limit )); then
       echo "$label TIMEOUT after ${limit}s; sampling pid $pid" | tee -a $OUT/summary.txt
       /usr/bin/sample $pid 5 -file $OUT/$label-sample.txt > /dev/null 2>&1 || true
@@ -117,9 +127,9 @@ run_bounded() {
 
 fixture() {
   local root=$OUT/$1
-  mkdir -p $root
-  [[ -d $root/target ]] || cp -cR "$MODEL" $root/target
-  echo $root
+  mkdir -p "$root"
+  [[ -d $root/target ]] || cp -cR "$MODEL" "$root/target"
+  echo "$root"
 }
 
 bank() {
@@ -130,7 +140,7 @@ bank() {
   for text in "${CANDIDATES[@]}"; do args+=(--selftest-prompt "$text"); done
   run_bounded ${BANK_TIMEOUT_S:-1800} bank $OUT/bank-journey.json $OUT/bank-journey.log \
     env MACPROVIDER_NATIVE_MTP_E2E=1 \
-    $HARNESS/macprovider-cli native-mtp-journey-e2e --root $root --model-id $MODEL_ID \
+    $BANK_HARNESS/macprovider-cli native-mtp-journey-e2e --root $root --model-id $MODEL_ID \
     --qualified-slots 4 --max-native-active-rows 1 --max-prompt-tokens 4096 \
     --selftest-only --selftest-challenge-id $CHALLENGE_ID "${args[@]}" || rc=$?
   echo "bank native-mtp-journey-e2e rc=$rc end $(date -u +%FT%TZ)" | tee -a $OUT/summary.txt
@@ -155,7 +165,7 @@ json.dump(chosen["challenge_bank_entry"], open(sys.argv[3], "w"), sort_keys=True
 print(f"bank PASS: candidate {chosen['selftest_prompt_index']} -> {sys.argv[3]}")
 PY
   tee -a $OUT/summary.txt < $OUT/bank-verdict.txt
-  rm -rf $root/target
+  rm -rf -- "$root/target"
   if (( rc != 0 || verdict != 0 )); then
     rm -f $OUT/bank-entry.json
     echo "bank FAIL (journey rc=$rc, verdict rc=$verdict)" | tee -a $OUT/summary.txt
@@ -189,7 +199,11 @@ r015() {
   # R015_FROM (1-based) resumes at a later step after a partial run; a matrix
   # step resumes its own completed blocks, a partial sustained window must be
   # moved aside first (the bench refuses to resume it).
-  for args in "${(@)R015_STEPS[${R015_FROM:-1},-1]}"; do
+  local from=${R015_FROM:-1}
+  [[ $from == <-> ]] && (( from >= 1 && from <= ${#R015_STEPS} )) ||
+    { echo "refusing: R015_FROM must be 1..${#R015_STEPS}" >&2; exit 3; }
+  step=$((from - 1))
+  for args in "${(@)R015_STEPS[$from,-1]}"; do
     step=$((step + 1))
     live_absent || { rc=3; break; }
     echo "r015 step '$args' start $(date -u +%FT%TZ)" | tee -a $OUT/summary.txt
@@ -199,7 +213,7 @@ r015() {
     (( rc == 0 )) || break
   done
   shasum -a 256 $OUT/r015-glm53.jsonl | tee -a $OUT/summary.txt || true
-  (( rc == 0 )) && rm -rf $root/target
+  (( rc == 0 )) && rm -rf -- "$root/target"
   return $rc
 }
 
@@ -208,9 +222,7 @@ LOCKED=
 trap '[[ -n $LOCKED ]] && rmdir $LOCK 2> /dev/null' EXIT
 
 case ${1:-} in
-  bank) preflight; bank ;;
-  r015) preflight; r015 ;;
-  # A failed bank leg does not stop `run`: R015 still uses the window.
-  run) preflight; bank || echo "run: continuing to r015 after the bank failure" | tee -a $OUT/summary.txt; r015 ;;
-  *) echo "usage: $0 bank|r015|run" >&2; exit 2 ;;
+  bank) preflight "$BANK_HARNESS"; bank ;;
+  r015) preflight "$HARNESS"; r015 ;;
+  *) echo "usage: $0 bank|r015" >&2; exit 2 ;;
 esac

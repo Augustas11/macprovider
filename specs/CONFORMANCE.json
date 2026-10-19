@@ -5161,6 +5161,7 @@
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testRaggedPrefillGroupingKeepsNativeRowsAtTheHeadOffset",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testNativePromptRowJoinsARaggedGroupOnlyWhereGroupedRowsPrefillAlone",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testNativeRowsJoinRaggedGroupsOnlyWhenRaggedOffsetsAreAllowed",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testAFailedPeerInARaggedGroupWithANativeRowFailsAlone",
         "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testGroupedPrefillRowsRunAloneOnlyUnderAFlattenedTokenCapBelowTwoGroupedChunks",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testRaggedPrefillGroupingHonoursRowCapAndTokenBudget",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testRaggedPrefillGroupingCapsTheKeySpread",

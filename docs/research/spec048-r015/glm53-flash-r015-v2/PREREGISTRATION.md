@@ -14,7 +14,11 @@ FAIL.
 - Binary: a lab-harness release build of `provider_commit` with the signed
   1.8.256 `mlx.metallib` (`3d9b4a74…`); the fix changes no kernel. The
   window script refuses any other `macprovider-cli` than
-  `R015_HARNESS_SHA256`, recorded here when the build is done: pending.
+  `R015_HARNESS_SHA256`:
+  `0ac0606b71cf501277cb2f243dc57da715c8101c478b9ddc43a8dbafce9a8e59`, built on
+  the Studio from `provider_commit` (`swift build -c release --product
+  macprovider-cli --build-path .build-lab-harness -Xswiftc
+  -DMACPROVIDER_LAB_HARNESS`, 2026-10-19T00:00Z).
 - Environment: as in the 1.8.256 preregistration (`Mac15,14`, Apple M3 Ultra,
   256 GB, macOS `26A434`, Swift 6.3.3 from the Command Line Tools), re-read on
   the Studio on 2026-10-19.
