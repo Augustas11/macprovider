@@ -1,7 +1,7 @@
 # SPEC-010 — Provider Model Catalog
 
-**Version:** 1.16
-**Status:** v1.16 pool-scoped identity boundary (R007(j), #1816,
+**Version:** 1.17
+**Status:** v1.17 event-reporting catalog preparation command (R008, 2026-10-20) over v1.16 pool-scoped identity boundary (R007(j), #1816,
 2026-10-01; v1.15 draft amended before landing) over v1.14 MLX-snapshot identity leg for `omlx_loopback` (R009(f),
 #1690 M9, 2026-09-25) over v1.13 serving-time GGUF binding for
 `lmstudio_loopback` (R007(i), #1690 M9, 2026-09-25) over v1.12 MLX-snapshot identity leg for
@@ -46,6 +46,16 @@ SPEC-023 owns candidate-catalog `bench_gate` provenance, including
   artifact-derived identity across a scheduled catalog re-stamp by resolving
   in its own release's set (slice-4 implementation). Bounded
   `model-catalog-identity` amendment.
+
+**Change log v1.17 (Related: #2059 — Malibu catalog download):**
+- R008: `models prepare-catalog <key> --transaction-id <uuid> --json` is the
+  dedicated catalog preparation command the section already named as the
+  future home. It runs the same `--profile catalog` preparation without
+  `--repair-cache` and reports it as SPEC-044-R014
+  `model_catalog_transaction_event.v1` lines for Malibu's Download action. On
+  SIGINT or SIGTERM it stops the download and removes only that model's
+  interrupted-download leftovers. The `--profile catalog` form is unchanged.
+  No wire, admission, settlement, pricing, or R001-R007 semantics change.
 
 **Change log v1.16 (issue #1816 round-1 audit fixes):**
 - R007(j): the pool entry is the SPEC-042-R015 `pool_model_entries/v1`
@@ -1469,11 +1479,21 @@ algorithm.
   argument of `<command>` that is not a plain word is POSIX single-quoted so
   it can be pasted into a shell. The catalog
   profile refuses (exit 2) options that apply only to the `build1-lane-a`
-  profile (`--yes`, `--coordinator-url`, `--timeout-seconds`). A dedicated
-  `models prepare-catalog` command is the intended future home of this
-  behavior; the `--profile catalog` form MUST NOT accrue further
-  profile-specific behavior. Neither
-  command changes config, the active model, admission, or settlement.
+  profile (`--yes`, `--coordinator-url`, `--timeout-seconds`). The dedicated
+  `models prepare-catalog <key> --transaction-id <uuid> --json` command (v1.17)
+  runs the same preparation without `--repair-cache` and reports it only as
+  SPEC-044-R014 `model_catalog_transaction_event.v1` lines on stdout:
+  `queued`, `running` with stage `downloading` at least every 10 seconds, and
+  one terminal `succeeded` (exit 0, after `ready (verified)`), `failed`
+  (exit 4 for a refused key, untrusted catalog, missing space or failed
+  transfer; exit 5 for a hash mismatch or other verification failure), or
+  `cancel_requested` then `cancelled` (exit 130). SIGINT or SIGTERM stops the
+  download and removes only that model's interrupted-download leftovers, by
+  the same rule as `--repair-cache`. The transaction ID MUST be a UUID v4 and
+  the key MUST resolve to a pinned signed row before any download. The
+  `--profile catalog` form MUST NOT accrue further profile-specific behavior.
+  None of these commands changes config, the active model, admission, or
+  settlement.
 
 ---
 

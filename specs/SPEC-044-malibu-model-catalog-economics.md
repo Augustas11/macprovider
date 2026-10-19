@@ -1,12 +1,12 @@
 # SPEC-044 - Malibu Model Catalog Economics
 
-**Version:** 0.2.11
+**Version:** 0.2.12
 
 ```json
 {
   "spec_id": "SPEC-044",
   "title": "Malibu Model Catalog Economics",
-  "version": "0.2.11",
+  "version": "0.2.12",
   "path": "specs/SPEC-044-malibu-model-catalog-economics.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -99,7 +99,7 @@ Fresh local status is one flat capability set. Among generation-namespace values
 
 The checked-in v1 manifest and current v1 flat status are conforming because the manifest places `model_catalog_economics_v1` in `local_status_capabilities`, places `models catalog-economics.v1` and `model_catalog_economics.v1` in `command_schemas`, and status carries that exact trio alongside unrelated values. A new Malibu manifest retaining a complete v1 tier selects v1 with the current old CLI. The current v1-only Malibu manifest paired with a v2-only CLI falls back without a call. A new Malibu manifest with a complete v2 tier selects v2 only with the exact v2 flat-status trio. Only after one valid generation trio is selected may a projection request be launched. If that request fails, times out, or returns a malformed envelope, Malibu MUST show the static current-model card with exact English source warning **model catalog unavailable**, warning code `projection_unavailable`, and a retry affordance, while exposing no catalog action or economics. A v1-only client MUST retain its existing fallback and MUST NOT invoke v2 run/cancel forms; a v2-serving CLI MUST NOT send a v2 envelope to a client that did not negotiate the exact v2 trio. Malibu MUST NOT fetch coordinator rate feeds, parse static feed files, verify feed signatures, compute billing rates from raw feed bytes, derive action eligibility from app-local heuristics, or present a SPEC-046 discovered candidate as a network economics row unless SPEC-047 admission state permits that presentation. Locally motivated preparation under R002/R003 is permitted only as a non-economics local-readiness action and MUST preserve the candidate's authoritative admission and earning disclosures.
 
-**SPEC-044-R002 - Versioned row schema.** The CLI projection MUST emit a closed, versioned JSON envelope with `schema: "model_catalog_economics.v1"`, a wall-clock RFC3339 `generated_at`, a monotonic unsigned integer `projection_sequence`, a `source` object identifying the CLI build and feed provenance, an array of rows, and a projection-level `warnings` array. The v1 `source` object MUST include `cli_version`, `cli_build_commit`, `process_launch_id`, `process_started_at`, `projection_protocol_version`, `rate_card_source`, nullable `rate_card_digest`, nullable `rate_card_signature_digest`, nullable `demand_feed_digest`, nullable `candidate_feed_digest`, and `rate_card_max_age_seconds`; `process_launch_id` MUST be a lowercase hyphen-separated UUID v4 string generated fresh on CLI process start from at least 128 bits of CSPRNG entropy and MUST NOT be derivable from a PID, host serial, MAC address, host UUID, provider id, wallet, username, or any other hardware or identity value. `source.rate_card_source` MUST use the same closed enum as row `rate_source`: `live_signed`, `static_signed`, or `none`. `projection_sequence` MUST increase within a single CLI process for each newly generated projection and MAY reset after CLI restart; callers MUST use it only to order projections that have the same `source.process_launch_id`. When Malibu observes a new `source.process_launch_id`, it MUST treat the projection as a new CLI session, reset its ordering baseline, discard older in-flight projection ordering comparisons, and show a brief reconnecting or refreshing state before rendering the new projection. Each row MUST include model identity (`model_key`, `served_model_id`, `display_model_id`, nullable `action_model_id`), local state (`is_current`, `weights_present_locally`, `runtime_state`, nullable `estimated_gb`, `fit`, nullable `disabled_reason`, `warning_codes`), admission state (`admission`), economics (nullable `rate_card_version`, nullable `rate_card_generated_at`, nullable `rate_card_key`, `rate_source`, nullable `prompt_rate_usd_per_million_tokens`, nullable `completion_rate_usd_per_million_tokens`, nullable `provider_share_bps`, nullable `provider_prompt_payout_usd_per_million_tokens`, nullable `provider_completion_payout_usd_per_million_tokens`, `economics_state`), demand signals (nullable `demand_rank`, nullable `demand_weight`, nullable `ready_provider_count`, nullable `supply_deficit_score`), and actions (`switch`, `prepare`, `evaluate`, `adopt_recommendation`, `cleanup_staging`) as explicit objects with `available`, `requires_confirmation`, nullable `transaction_kind`, nullable `transaction_id`, nullable `action_timeout_seconds`, nullable `estimated_bytes`, and nullable `unavailable_reason`. The row `admission` object MUST include `state`, `source`, nullable `coordinator_event_id`, nullable `state_observed_at`, `catalog_economics_permitted`, and `settlement_capable`; `source` is `local_default` or `coordinator`, `state` MUST use the SPEC-046/SPEC-047 admission-state enum, `source: "local_default"` permits only `local_only`, `not_offered`, or `offerable` and MUST set `catalog_economics_permitted: false` and `settlement_capable: false`, `source: "coordinator"` permits only SPEC-047 coordinator states, `catalog_economics_permitted` MAY be true only when `source: "coordinator"` and `state` is `catalog_priced` or `settlement_capable`, and `settlement_capable` MAY be true only when `source: "coordinator"` and `state` is `settlement_capable`. Rows whose `admission` object is missing, malformed, stale relative to the signed rate-card evidence, or inconsistent with SPEC-047 MUST set `economics_state` to `blocked` or `unavailable`, null all money-facing payout fields, and make money-motivated actions unavailable. Row `warning_codes` MUST be an array of closed warning-code enum values that apply to that specific row; the top-level `warnings` array applies to the projection as a whole. `economics_state: "trusted"` MUST include non-null rate-card identity, provider-share, and prompt/completion catalog and payout fields, and MUST require `admission.catalog_economics_permitted: true`; Malibu MUST NOT render earning-eligible, settlement-ready, or paid-routing copy unless `admission.settlement_capable: true`. Rows with `rate_source: "none"` or `economics_state: "unavailable"` MUST set rate-card identity and all rate/payout numeric fields to null rather than placeholder zero values. Rows with `economics_state: "blocked"` MUST set money-facing rate/payout fields to null unless the CLI can still identify a verified signed rate card while blocking actions for a non-rate reason; Malibu MUST hide economics copy for blocked rows unless `economics_state` is `trusted`. Rows with `economics_state: "fallback"` or `"stale"` MAY include the signed/static/stale rate fields only as disabled warning context and MUST NOT render them as actionable trusted economics. For an available action, `transaction_kind`, `transaction_id`, and `action_timeout_seconds` MUST be non-null; `action_timeout_seconds` MUST be greater than zero and MUST NOT exceed 1800 seconds. For available `switch_model`, `prepare_model`, `switch_model_deferred`, `cleanup_staging`, `adopt_recommendation`, and any `evaluate_model` action with non-null `estimated_bytes` or `action_timeout_seconds` greater than 10 seconds, `requires_confirmation` MUST be true, and Malibu MUST enforce confirmation for those transaction kinds even if a malformed projection sets the flag false. For an unavailable action, `transaction_kind`, `transaction_id`, and `action_timeout_seconds` MUST be null. A row's `rate_source` MUST be equal to `source.rate_card_source` unless the row uses a more conservative value, where `none` is more conservative than `static_signed`, and `static_signed` is more conservative than `live_signed`. Closed v1 enum values are: `runtime_state` = `current`, `ready`, `catalog`, `needs_preparation`, `blocked`; `fit` = `fits`, `does_not_fit`, `unknown`; admission `source` = `local_default`, `coordinator`; admission `state` = `local_only`, `not_offered`, `offerable`, `offer_submitted`, `offer_rejected`, `sandbox_probe_only`, `network_visible_unpriced`, `network_admitted_unsettled`, `catalog_priced`, `settlement_capable`, `withdrawn`, `revoked`; `rate_source` = `live_signed`, `static_signed`, `none`; `economics_state` = `trusted`, `fallback`, `stale`, `blocked`, `unavailable`; warning codes = `feed_fallback`, `feed_stale`, `feed_signature_invalid`, `feed_generation_mismatch`, `rate_multiplier_unknown`, `model_not_local`, `model_not_supported`, `hardware_fit_unknown`, `hardware_does_not_fit`, `admission_state_missing`, `admission_state_not_settlement_capable`, `warm_swap_unavailable`, `action_unavailable`, `old_cli_fallback`, `projection_unavailable`, `projection_timeout`, `staging_cleanup_required`; action `transaction_kind` = `switch_model`, `switch_model_deferred`, `prepare_model`, `evaluate_model`, `adopt_recommendation`, `cleanup_staging`, or null when unavailable. The v1 transaction event stream MUST use a closed JSON-lines envelope with `schema: "model_catalog_transaction_event.v1"`, matching `transaction_id`, matching `transaction_kind`, `model_key`, monotonic per-transaction `event_sequence`, RFC3339 `emitted_at`, `state`, nullable `progress`, nullable `error_code`, and nullable `warning_code`. Closed event `state` values are `queued`, `running`, `cancel_requested`, `cancelled`, `succeeded`, `failed`, and `timed_out`; `progress`, when present, MUST include a localized-safe `stage_label_key` and at least one of `bytes_completed`/nullable `bytes_expected`, `percent_complete`, or `heartbeat`. Cancellation MUST be requested through the same CLI-owned transaction interface, MUST produce either `cancel_requested` followed by `cancelled` or a terminal `succeeded`/`failed` if the commit point has already passed, and MUST never require Malibu to kill the CLI process or delete files directly. Unknown enum values, unknown action transaction kinds, malformed event envelopes, or event transaction mismatches MUST make the affected row or transaction non-actionable and show a generic unsupported warning; they MUST NOT make Malibu reject the whole projection unless the projection envelope schema itself is unsupported.
+**SPEC-044-R002 - Versioned row schema.** The CLI projection MUST emit a closed, versioned JSON envelope with `schema: "model_catalog_economics.v1"`, a wall-clock RFC3339 `generated_at`, a monotonic unsigned integer `projection_sequence`, a `source` object identifying the CLI build and feed provenance, an array of rows, and a projection-level `warnings` array. The v1 `source` object MUST include `cli_version`, `cli_build_commit`, `process_launch_id`, `process_started_at`, `projection_protocol_version`, `rate_card_source`, nullable `rate_card_digest`, nullable `rate_card_signature_digest`, nullable `demand_feed_digest`, nullable `candidate_feed_digest`, and `rate_card_max_age_seconds`; `process_launch_id` MUST be a lowercase hyphen-separated UUID v4 string generated fresh on CLI process start from at least 128 bits of CSPRNG entropy and MUST NOT be derivable from a PID, host serial, MAC address, host UUID, provider id, wallet, username, or any other hardware or identity value. `source.rate_card_source` MUST use the same closed enum as row `rate_source`: `live_signed`, `static_signed`, or `none`. `projection_sequence` MUST increase within a single CLI process for each newly generated projection and MAY reset after CLI restart; callers MUST use it only to order projections that have the same `source.process_launch_id`. When Malibu observes a new `source.process_launch_id`, it MUST treat the projection as a new CLI session, reset its ordering baseline, discard older in-flight projection ordering comparisons, and show a brief reconnecting or refreshing state before rendering the new projection. Each row MUST include model identity (`model_key`, `served_model_id`, `display_model_id`, nullable `action_model_id`), local state (`is_current`, `weights_present_locally`, `runtime_state`, nullable `estimated_gb`, `fit`, nullable `disabled_reason`, `warning_codes`), admission state (`admission`), economics (nullable `rate_card_version`, nullable `rate_card_generated_at`, nullable `rate_card_key`, `rate_source`, nullable `prompt_rate_usd_per_million_tokens`, nullable `completion_rate_usd_per_million_tokens`, nullable `provider_share_bps`, nullable `provider_prompt_payout_usd_per_million_tokens`, nullable `provider_completion_payout_usd_per_million_tokens`, `economics_state`), demand signals (nullable `demand_rank`, nullable `demand_weight`, nullable `ready_provider_count`, nullable `supply_deficit_score`), and actions (`switch`, `prepare`, `evaluate`, `adopt_recommendation`, `cleanup_staging`) as explicit objects with `available`, `requires_confirmation`, nullable `transaction_kind`, nullable `transaction_id`, nullable `action_timeout_seconds`, nullable `estimated_bytes`, and nullable `unavailable_reason`. The row `admission` object MUST include `state`, `source`, nullable `coordinator_event_id`, nullable `state_observed_at`, `catalog_economics_permitted`, and `settlement_capable`; `source` is `local_default` or `coordinator`, `state` MUST use the SPEC-046/SPEC-047 admission-state enum, `source: "local_default"` permits only `local_only`, `not_offered`, or `offerable` and MUST set `catalog_economics_permitted: false` and `settlement_capable: false`, `source: "coordinator"` permits only SPEC-047 coordinator states, `catalog_economics_permitted` MAY be true only when `source: "coordinator"` and `state` is `catalog_priced` or `settlement_capable`, and `settlement_capable` MAY be true only when `source: "coordinator"` and `state` is `settlement_capable`. Rows whose `admission` object is missing, malformed, stale relative to the signed rate-card evidence, or inconsistent with SPEC-047 MUST set `economics_state` to `blocked` or `unavailable`, null all money-facing payout fields, and make money-motivated actions unavailable. Row `warning_codes` MUST be an array of closed warning-code enum values that apply to that specific row; the top-level `warnings` array applies to the projection as a whole. `economics_state: "trusted"` MUST include non-null rate-card identity, provider-share, and prompt/completion catalog and payout fields, and MUST require `admission.catalog_economics_permitted: true`; Malibu MUST NOT render earning-eligible, settlement-ready, or paid-routing copy unless `admission.settlement_capable: true`. Rows with `rate_source: "none"` or `economics_state: "unavailable"` MUST set rate-card identity and all rate/payout numeric fields to null rather than placeholder zero values. Rows with `economics_state: "blocked"` MUST set money-facing rate/payout fields to null unless the CLI can still identify a verified signed rate card while blocking actions for a non-rate reason; Malibu MUST hide economics copy for blocked rows unless `economics_state` is `trusted`. Rows with `economics_state: "fallback"` or `"stale"` MAY include the signed/static/stale rate fields only as disabled warning context and MUST NOT render them as actionable trusted economics. For an available action, `transaction_kind`, `transaction_id`, and `action_timeout_seconds` MUST be non-null; `action_timeout_seconds` MUST be greater than zero and MUST NOT exceed 1800 seconds. For available `switch_model`, `prepare_model`, `switch_model_deferred`, `cleanup_staging`, `adopt_recommendation`, and any `evaluate_model` action with non-null `estimated_bytes` or `action_timeout_seconds` greater than 10 seconds, `requires_confirmation` MUST be true, and Malibu MUST enforce confirmation for those transaction kinds even if a malformed projection sets the flag false. For an unavailable action, `transaction_kind`, `transaction_id`, and `action_timeout_seconds` MUST be null. A row's `rate_source` MUST be equal to `source.rate_card_source` unless the row uses a more conservative value, where `none` is more conservative than `static_signed`, and `static_signed` is more conservative than `live_signed`. Closed v1 enum values are: `runtime_state` = `current`, `ready`, `catalog`, `needs_preparation`, `blocked`; `fit` = `fits`, `does_not_fit`, `unknown`; admission `source` = `local_default`, `coordinator`; admission `state` = `local_only`, `not_offered`, `offerable`, `offer_submitted`, `offer_rejected`, `sandbox_probe_only`, `network_visible_unpriced`, `network_admitted_unsettled`, `catalog_priced`, `settlement_capable`, `withdrawn`, `revoked`; `rate_source` = `live_signed`, `static_signed`, `none`; `economics_state` = `trusted`, `fallback`, `stale`, `blocked`, `unavailable`, and, in the v1 envelope only, `catalog_reference` (defined solely by R014); warning codes = `feed_fallback`, `feed_stale`, `feed_signature_invalid`, `feed_generation_mismatch`, `rate_multiplier_unknown`, `model_not_local`, `model_not_supported`, `hardware_fit_unknown`, `hardware_does_not_fit`, `admission_state_missing`, `admission_state_not_settlement_capable`, `warm_swap_unavailable`, `action_unavailable`, `old_cli_fallback`, `projection_unavailable`, `projection_timeout`, `staging_cleanup_required`; action `transaction_kind` = `switch_model`, `switch_model_deferred`, `prepare_model`, `evaluate_model`, `adopt_recommendation`, `cleanup_staging`, or null when unavailable. The v1 transaction event stream MUST use a closed JSON-lines envelope with `schema: "model_catalog_transaction_event.v1"`, matching `transaction_id`, matching `transaction_kind`, `model_key`, monotonic per-transaction `event_sequence`, RFC3339 `emitted_at`, `state`, nullable `progress`, nullable `error_code`, and nullable `warning_code`. Closed event `state` values are `queued`, `running`, `cancel_requested`, `cancelled`, `succeeded`, `failed`, and `timed_out`; `progress`, when present, MUST include a localized-safe `stage_label_key` and at least one of `bytes_completed`/nullable `bytes_expected`, `percent_complete`, or `heartbeat`. Cancellation MUST be requested through the same CLI-owned transaction interface, MUST produce either `cancel_requested` followed by `cancelled` or a terminal `succeeded`/`failed` if the commit point has already passed, and MUST never require Malibu to kill the CLI process or delete files directly. Unknown enum values, unknown action transaction kinds, malformed event envelopes, or event transaction mismatches MUST make the affected row or transaction non-actionable and show a generic unsupported warning; they MUST NOT make Malibu reject the whole projection unless the projection envelope schema itself is unsupported.
 
 Projection bound (v0.2.11). The CLI MUST bound the coordinator reads behind
 one projection so that a slow source degrades rows instead of delaying the
@@ -1457,16 +1457,23 @@ boundaries:
 same validated projection, alongside the R008 sections, to help a provider
 compare catalog models. The Discover view:
 
-1. MUST list only rows with `economics_state: "trusted"` and
-   `admission.catalog_economics_permitted: true`, named by their catalog
-   `model_key`. Locally discovered candidates without a trusted catalog
-   identity, and every non-trusted row, stay in the R008 sections only. When
-   no row qualifies, the view MUST say that no signed catalog rates are
-   available and point to the R008 sections for per-row reasons.
+1. MUST list every signed catalog model in the projection and nothing else:
+   rows with `economics_state: "trusted"` and
+   `admission.catalog_economics_permitted: true`; R014 catalog-only rows; and
+   locally discovered candidates whose `model_key` is a signed catalog key
+   (a `byom_` candidate `action_model_id` with a different `model_key`) and
+   that carry no `admission_state_missing` warning. Candidates with no
+   catalog identity stay in the R008 sections only. Each row shows its fit
+   against this Mac inline, and the first visible row is selected when no
+   other row is. When no row qualifies, the view MUST say that no signed
+   catalog models are available right now and point to the R008 sections
+   for per-row reasons.
 2. MUST follow R004: provider share rates per 1,000,000 tokens, the provider
    share of the catalog rate as a percentage of `provider_share_bps`,
    `demand_rank`, `ready_provider_count`, approximate size and fit against
-   this Mac's memory, local readiness, and the row's reason. The R004
+   this Mac's memory, local readiness, and the row's reason, for trusted and
+   R014 `catalog_reference` rows only; a `catalog_reference` row always
+   carries the R014 not-earning caveat beside its rates. The R004
    variability disclosure MUST stay visible in the same scroll container as
    the rate-bearing list and in the detail pane. No amount per time period.
 3. MAY filter by a provider search term and by `fit: "fits"`, and MAY offer a
@@ -1476,16 +1483,108 @@ compare catalog models. The Discover view:
    be stable over the R005 order so R005 breaks every tie. This is the only
    exception to R005's sole-ordering rule and applies only inside Discover.
 4. MUST gate actions exactly as R006: `Switch` only for a row the R008
-   sections would show as `Ready`, through the same confirmation; `Prepare`
-   only for a typed `prepare_model` transaction on that row. While the
-   projection offers no preparation transaction, the view MUST say that
-   download and preparation are not offered in Malibu yet and MUST NOT start a
-   download or run a preparation command itself.
+   sections would show as `Ready`, through the same confirmation; `Download`
+   only for an R014 `prepare_model` transaction on that row, through the R014
+   confirmation. A row with no available typed action shows its reason, and
+   the view MUST NOT start a download or run a preparation command any other
+   way.
 5. MAY show `models browse` (Hugging Face `mlx-community`) results only in a
    separate section labelled as not in the catalog and not earnable, only
    after an explicit provider search, never merged into catalog rows, never
    with a rate, demand or action, and decoded strictly as `models_browse.v1`
    with every row non-actionable and `action_model_id: null` (R006).
+
+**SPEC-044-R014 - Catalog reference rate and catalog download (v1).** This
+requirement applies to the `model_catalog_economics.v1` envelope only. The v2
+catalog-only sentinel in the R002/R003 v2 amendment is unchanged.
+
+1. *Catalog-only row.* For each signed candidate-catalog entry with no local
+   candidate in the same projection snapshot, the CLI MUST emit one
+   catalog-only row: `model_key` is the signed catalog key,
+   `served_model_id` and `display_model_id` are the signed row's `model_id`,
+   `weights_present_locally: false`, and the admission object is exactly
+   `source: "local_default"`, `state: "not_offered"`, null
+   `coordinator_event_id` and `state_observed_at`, and both authorization
+   booleans false. Its `provider_guidance` MUST be `state_label_key:
+   "byom.local.not_offered"`, `state_meaning_key:
+   "byom.local.not_offered_coordinator_state_unavailable"`, `next_action:
+   "fix_local_blocker"`, `transition_reason_code: "requires_preparation"`,
+   and `earning_path_class: "local_inventory_only"`, which matches the
+   source-aware label rule for `local_default`. CLI releases up to 1.8.258
+   emit `byom.local.local_only` on this row; Malibu MUST accept that label
+   only on a catalog-only row with null `action_model_id` and `runtime_state:
+   "catalog"`, and MUST keep rejecting it on every other `not_offered` row.
+2. *Catalog reference rate.* When the signed rate card would make a
+   coordinator-admitted row `trusted` under R003 (a live signed, fresh rate
+   card with no blocking feed warning and an exact non-default rate row for
+   the key), the catalog-only row MUST carry `economics_state:
+   "catalog_reference"`, `rate_source: "live_signed"`, the rate-card
+   identity, catalog prompt and completion rates, `provider_share_bps`, the
+   provider prompt and completion payout fields, the demand signals exactly
+   as a trusted row would carry them, and warning code
+   `admission_state_not_settlement_capable`. Otherwise it keeps a non-trusted
+   state with every money and demand-weight field null. `catalog_reference`
+   means the network's signed catalog rate for this model, which this Mac is
+   not admitted for and is not earning. It never sets
+   `catalog_economics_permitted` or `settlement_capable`, never makes a row
+   `trusted`, and never makes `Switch`, `Evaluate`, `Adopt`, or `Clean up`
+   available. Malibu MUST show its rates under R004 with the not-earning
+   caveat beside them and in their accessibility label, MUST NOT show
+   earning-eligible, settlement-ready, or paid-routing copy for it, and MUST
+   treat as malformed a `catalog_reference` row that is not a catalog-only
+   row, lacks any money field, has a `rate_source` or projection
+   `rate_card_source` other than `live_signed`, a stale
+   `rate_card_generated_at`, a trusted-economics blocking warning, or lacks
+   `admission_state_not_settlement_capable`. The R005 tuple orders these rows
+   by their rates inside their section.
+3. *Catalog download action.* A catalog-only row whose `fit` is `fits`, whose
+   signed catalog row pins a revision and `model_sha256`, and whose current
+   signed artifact feed binds a `verified` primary `mlx_safetensors` artifact
+   with that hash and revision and a size from 1 byte to 1 TiB MUST set
+   `action_model_id` to its `model_key`, `runtime_state:
+   "needs_preparation"`, null `disabled_reason`, `estimated_gb` to that size
+   in GB, and an available `prepare` action with `transaction_kind:
+   "prepare_model"`, a fresh UUID v4 `transaction_id`,
+   `requires_confirmation: true`, `action_timeout_seconds: 1800`, and
+   `estimated_bytes` equal to the artifact size. Every other action stays
+   unavailable. Otherwise `action_model_id` is null, `runtime_state` is
+   `catalog`, every action is unavailable, and `disabled_reason` is
+   `hardware_does_not_fit` when the model does not fit, else
+   `no_cli_transaction_available`. This download is locally motivated: it is
+   allowed for any economics state of the catalog-only row, it is not a
+   money-motivated R003 action, and its copy MUST NOT use rate, payout,
+   share, or demand as the reason to download.
+4. *Download command.* Malibu runs the action only after confirmation, with
+   `malibu-cli models prepare-catalog <action_model_id> --transaction-id
+   <transaction_id> --json` (SPEC-010-R008). The command resolves the signed
+   row again, downloads and verifies it through the SPEC-010-R008 catalog
+   preparation path, and writes only `model_catalog_transaction_event.v1`
+   lines to stdout with `transaction_kind: "prepare_model"` and the signed
+   catalog key as `model_key`: `queued`; then `running` with
+   `stage_label_key: "downloading"` at least every 10 seconds, carrying bytes
+   completed and expected when known and a heartbeat otherwise; then exactly
+   one terminal event. `succeeded` (exit 0) follows a `ready (verified)`
+   final state. `failed` carries an error code and exits 4 for a refused key,
+   untrusted catalog, missing space, or a failed transfer, and 5 for a hash
+   mismatch or other verification failure. SIGINT or SIGTERM stops the
+   download, removes only that model's interrupted-download leftovers, and
+   ends with `cancel_requested` then `cancelled` (exit 130). The command never
+   changes config, the served model, admission, or settlement.
+5. *Malibu download flow.* The confirmation MUST name the model, show the
+   download size from `estimated_bytes`, say that the files are verified
+   against the signed catalog, and say that downloading does not change the
+   model this Mac serves, does not offer it to the network, and does not
+   start earning. While a download runs, Malibu MUST show progress (bytes when
+   reported) and Cancel, show a delayed state after 30 seconds without an
+   event, and cancel and report that the download needs attention after
+   `action_timeout_seconds` without any event. Total download time is not
+   bounded, because it depends on the network; this replaces the R011
+   dispatch timeout for this action only. Malibu MUST accept only events whose
+   `transaction_id`, `transaction_kind`, and `model_key` match the action,
+   MUST ignore other lines, MUST report success only after a `succeeded` event
+   with exit 0, and then MUST refresh the projection under R011. One download
+   runs at a time. The R008 `Needs preparation` section MAY be titled **Not
+   downloaded**.
 
 ## 4. Implementation, tests, and journeys
 
@@ -1528,7 +1627,7 @@ Issue #1240 records the direction change that SPEC-044 is a network economics UX
 
 ## 7. Current contract notes
 
-The desired provider copy is comparative and bounded: "Provider share rate", "Fits this Mac", "Needs preparation", "Catalog rate unavailable", and "Network demand signal" are acceptable labels. "Earn $X/day", "best paying", "guaranteed payout", and "serve this to get paid more" are not acceptable labels.
+The desired provider copy is comparative and bounded: "Provider share rate", "Fits this Mac", "Needs preparation", "Not downloaded", "Catalog rate unavailable", and "Network demand signal" are acceptable labels. "Earn $X/day", "best paying", "guaranteed payout", and "serve this to get paid more" are not acceptable labels.
 
 The `Network catalog` section is a discovery lane, not a promise that traffic will arrive. A high-rate model may still be disabled because it does not fit, lacks local verified weights, has stale economics, lacks enough demand, fails trust state, or has no safe CLI transaction.
 
@@ -1539,6 +1638,19 @@ The current Malibu recommendation path may remain as a companion callout, but th
 The app should preserve the current provider mental model: Malibu observes and asks the signed CLI to do work; the CLI owns custody, model artifacts, feed validation, update/recovery, admission, and billing-derived economics.
 
 ## 8. Changelog and history
+
+- 0.2.12 - Adds R014 for the v1 envelope (Related: #2059): catalog-only rows
+  carry the source-aware `byom.local.not_offered` guidance (Malibu also
+  accepts the `byom.local.local_only` label CLI 1.8.258 emits on that row);
+  a catalog-only row with a fresh live signed rate row carries it as
+  `economics_state: "catalog_reference"`, a catalog rate this Mac is not
+  admitted for and is not earning, with the not-earning caveat; a
+  catalog-only row that fits and has a verified signed artifact offers a
+  confirmed `prepare_model` download run through `models prepare-catalog`
+  with progress, cancel, and a refresh after success. R013 Discover now lists
+  every signed catalog model with fit inline, the first row selected, and
+  `Download` gated as R006. The v2 catalog-only sentinel is unchanged.
+  Conformance remains pending.
 
 - 0.2.11 - Adds R013, the Discover view of the same projection (#2054 Phase 2):
   trusted catalog rows only, R004 rates/share/demand/provider count with the
