@@ -695,6 +695,16 @@ enum ContinuousBatchingSelfCheck {
         max(0, base) << min(max(0, consecutiveDrainTimeouts), 2)
     }
 
+    /// Only a buyer drain timeout escalates the next hold's drain bound; a
+    /// timeout on local work alone (SPEC-001-R011) leaves the count as is.
+    static func nextConsecutiveDrainTimeouts(_ current: Int, after outcome: AdmissionHoldOutcome) -> Int {
+        switch outcome {
+        case .drainTimeout: return current + 1
+        case .localDrainTimeout: return current
+        default: return 0
+        }
+    }
+
     /// The check bound for a hold: `admissionHoldCheckSeconds`, doubled after
     /// each consecutive hold that reached it without deciding, up to 4x.
     /// Completed units persist; an individual unit must still fit the bound.
@@ -1301,10 +1311,9 @@ actor ContinuousBatchingSelfCheckDriver {
         ) {
             await self.measureWithinAdmissionHold(target)
         }
-        // A timeout on local work alone never escalates the buyer-facing bound.
-        if outcome != .localDrainTimeout {
-            consecutiveDrainTimeouts = outcome == .drainTimeout ? consecutiveDrainTimeouts + 1 : 0
-        }
+        consecutiveDrainTimeouts = ContinuousBatchingSelfCheck.nextConsecutiveDrainTimeouts(
+            consecutiveDrainTimeouts, after: outcome
+        )
         consecutiveCheckBounds = outcome == .checkBound ? consecutiveCheckBounds + 1 : 0
         // Spaced from the end of this hold, not its start.
         admissionHoldNotBefore = Date().addingTimeInterval(admissionHoldAfterSeconds)

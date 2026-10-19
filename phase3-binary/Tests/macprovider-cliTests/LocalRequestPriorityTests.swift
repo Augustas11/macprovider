@@ -736,10 +736,15 @@ final class LocalRequestPriorityTests: XCTestCase {
     }
 
     func testDriverDoesNotEscalateDrainBoundForLocalOnlyTimeouts() {
-        // The driver escalates only on `.drainTimeout`; `.localDrainTimeout`
-        // leaves the count unchanged (see measureUnderAdmissionHold).
-        XCTAssertNotEqual(ContinuousBatchingSelfCheck.AdmissionHoldOutcome.localDrainTimeout, .drainTimeout)
-        XCTAssertEqual(ContinuousBatchingSelfCheck.admissionHoldDrainSeconds(base: 30, consecutiveDrainTimeouts: 0), 30)
+        typealias Check = ContinuousBatchingSelfCheck
+        XCTAssertEqual(Check.nextConsecutiveDrainTimeouts(0, after: .localDrainTimeout), 0)
+        XCTAssertEqual(Check.nextConsecutiveDrainTimeouts(1, after: .localDrainTimeout), 1)
+        XCTAssertEqual(Check.nextConsecutiveDrainTimeouts(1, after: .drainTimeout), 2)
+        XCTAssertEqual(Check.nextConsecutiveDrainTimeouts(2, after: .completed), 0)
+        // Repeated local-only timeouts keep the 30 s bound instead of 60/120 s.
+        var count = 0
+        for _ in 0..<3 { count = Check.nextConsecutiveDrainTimeouts(count, after: .localDrainTimeout) }
+        XCTAssertEqual(Check.admissionHoldDrainSeconds(base: 30, consecutiveDrainTimeouts: count), 30)
     }
 
     func testSwapDrainPreemptsAdmittedLocalWork() async throws {
