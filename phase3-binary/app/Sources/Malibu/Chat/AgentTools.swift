@@ -158,6 +158,10 @@ actor AgentWorkspace {
                 $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXNAMLEN) + 1) { String(cString: $0) }
             }
             if name == "." || name == ".." { continue }
+            // A control character (newline included) could forge extra lines
+            // or tool-output structure in the model's context; such names are
+            // not listed, searched or readable through these tools.
+            if name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) { continue }
             bytes += name.utf8.count + 1
             guard names.count < Self.entryLimit, bytes <= Self.outputByteLimit else { throw ChatFailure.limit }
             names.append(name)
@@ -167,7 +171,12 @@ actor AgentWorkspace {
     private func search(path: String, query: String, depth: Int, visited: inout Int, scanned: inout Int,
                         output: inout [String], outputBytes: inout Int, deadline: ContinuousClock.Instant) throws {
         guard depth <= 5 else { return }
-        for name in try entries(path: path, deadline: deadline) {
+        let names: [String]
+        do { names = try entries(path: path, deadline: deadline) }
+        // A subdirectory over the entry limit is skipped, not fatal to the
+        // whole search; the requested directory itself still must fit.
+        catch ChatFailure.limit where depth > 0 { return }
+        for name in names {
             try check(deadline)
             visited += 1
             guard visited <= Self.entryLimit else { throw ChatFailure.limit }

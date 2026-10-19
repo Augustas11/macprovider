@@ -96,12 +96,53 @@ final class ConnectedAppsTests: XCTestCase {
         for app in [ConnectedApp.codex, .openCode, .goose, .crush] {
             let text = String(decoding: try ConnectedAppConfiguration.launcher(app: app,
                 executable: URL(fileURLWithPath: "/fake/cli'with-space"),
-                config: URL(fileURLWithPath: "/fake/config/client/config.json"), model: model), as: UTF8.self)
-            XCTAssertTrue(text.contains("security find-generic-password -s tech.malibu.connected-apps -a buyer -w"))
+                config: URL(fileURLWithPath: "/fake/config/client/config.json"), model: model,
+                keyHandoff: URL(fileURLWithPath: "/fake/handoff/key")), as: UTF8.self)
+            // The key arrives through a one-time handoff file, never via
+            // /usr/bin/security (which would widen the Keychain ACL).
+            XCTAssertFalse(text.contains("security find-generic-password"))
+            XCTAssertTrue(text.contains("KEY_FILE='/fake/handoff/key'"))
+            let read = try XCTUnwrap(text.range(of: "MALIBU_API_KEY=$(cat -- \"$KEY_FILE\""))
+            let remove = try XCTUnwrap(text.range(of: "rm -f -- \"$KEY_FILE\""))
+            let exec = try XCTUnwrap(text.range(of: "exec '/fake/cli"))
+            XCTAssertLessThan(read.lowerBound, remove.lowerBound)
+            XCTAssertLessThan(remove.lowerBound, exec.lowerBound, "the handoff is deleted before the client runs")
             XCTAssertTrue(text.contains("export MALIBU_API_KEY"))
             XCTAssertTrue(text.contains("exec '/fake/cli'\\''with-space'"))
             XCTAssertFalse(text.contains("FAKE_BUYER_KEY"))
             if app == .codex { XCTAssertTrue(text.contains("codex-cli 0.163.0")) }
+        }
+    }
+
+    func testOpenCodeLauncherIgnoresRepositoryConfiguration() throws {
+        let text = String(decoding: try ConnectedAppConfiguration.launcher(app: .openCode,
+            executable: URL(fileURLWithPath: "/fake/opencode"),
+            config: URL(fileURLWithPath: "/fake/opencode.json"), model: model,
+            keyHandoff: URL(fileURLWithPath: "/fake/handoff/key")), as: UTF8.self)
+        XCTAssertTrue(text.contains("export OPENCODE_DISABLE_PROJECT_CONFIG=1\n"))
+        XCTAssertTrue(text.contains("export OPENCODE_CONFIG_PROJECT_DISABLE=1\n"))
+        XCTAssertLessThan(try XCTUnwrap(text.range(of: "OPENCODE_DISABLE_PROJECT_CONFIG")).lowerBound,
+                          try XCTUnwrap(text.range(of: "exec ")).lowerBound)
+    }
+
+    func testKeyExposureCopyIsHonestAndCrushIsWarned() {
+        XCTAssertTrue(ConnectedAppConfiguration.keyExposure.contains("can read the key"))
+        XCTAssertTrue(ConnectedAppConfiguration.keyExposure.contains("spend-limited"))
+        XCTAssertTrue(ConnectedAppConfiguration.crushProjectConfigWarning.contains(".crushrc"))
+    }
+
+    func testLaunchHandoffIsPrivateAndReplaceable() throws {
+        try temporary { root in
+            let file = root.appendingPathComponent("handoff/opencode.key")
+            try ConnectedBuyerKeychain.writeLaunchHandoff("first", to: file)
+            try ConnectedBuyerKeychain.writeLaunchHandoff("second", to: file)
+            XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "second")
+            let fileMode = (try FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as? NSNumber)?.intValue
+            let dirMode = (try FileManager.default.attributesOfItem(atPath: file.deletingLastPathComponent().path)[.posixPermissions] as? NSNumber)?.intValue
+            XCTAssertEqual(fileMode, 0o600)
+            XCTAssertEqual(dirMode, 0o700)
+            ConnectedBuyerKeychain.removeLaunchHandoff(file)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
         }
     }
 
@@ -172,8 +213,11 @@ final class ConnectedAppsTests: XCTestCase {
             try tx.apply(try tx.preview(target: target, proposed: Data("new".utf8)), named: "test")
             try tx.restore(named: "test")
             XCTAssertEqual(try Data(contentsOf: target), original)
-            XCTAssertEqual(try ConnectedConfigTransaction.read(target).mode, 0o600)
+            XCTAssertEqual(try ConnectedConfigTransaction.read(target).mode, 0o644, "restore keeps the original's mode")
             XCTAssertNil(try tx.receipt(named: "test"))
+            XCTAssertEqual(ConnectedConfigTransaction.restoredMode(0o664), 0o644)
+            XCTAssertEqual(ConnectedConfigTransaction.restoredMode(0o4755), 0o755)
+            XCTAssertEqual(ConnectedConfigTransaction.restoredMode(nil), 0o600)
         }
     }
 

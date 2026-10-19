@@ -68,17 +68,25 @@ final class ConnectedConfigTransaction {
         guard let record = try receipt(named: name) else { return }
         let target = URL(fileURLWithPath: record.path)
         let current = try Self.read(target)
+        // The original's own mode, minus group/other write and special bits,
+        // so restore neither revives unsafe permissions nor hides a file
+        // the user had made readable.
+        let restoredMode = Self.restoredMode(record.original.mode)
         if current.bytes == record.original.bytes {
             // Covers a failed write or repeated restore without reviving unsafe permissions.
-            if current.bytes != nil && current.mode != 0o600 {
-                try Self.replace(target, expected: current, bytes: current.bytes, mode: 0o600)
+            if current.bytes != nil && current.mode.map(mode_t.init) != restoredMode {
+                try Self.replace(target, expected: current, bytes: current.bytes, mode: restoredMode)
             }
         } else {
             guard current.bytes == record.installed else { throw ConnectedAppsError.conflict }
-            try Self.replace(target, expected: current, bytes: record.original.bytes, mode: 0o600)
+            try Self.replace(target, expected: current, bytes: record.original.bytes, mode: restoredMode)
         }
         let saved = try Self.read(receiptURL(name))
         try Self.replace(receiptURL(name), expected: saved, bytes: nil, mode: 0o600)
+    }
+
+    static func restoredMode(_ original: UInt16?) -> mode_t {
+        mode_t(original ?? 0o600) & 0o755
     }
 
     private func receiptURL(_ name: String) -> URL {

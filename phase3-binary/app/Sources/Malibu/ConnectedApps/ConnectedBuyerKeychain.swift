@@ -32,6 +32,35 @@ enum ConnectedBuyerKeychain {
         }
         return key
     }
+    /// Hands the key to one launcher run: a 0600 regular file in a 0700
+    /// directory owned by this user, which the launcher reads once and
+    /// deletes. Any stale handoff is replaced.
+    static func writeLaunchHandoff(_ key: String, to file: URL) throws {
+        let directory = file.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        var status = stat()
+        guard lstat(directory.path, &status) == 0, status.st_mode & S_IFMT == S_IFDIR,
+              status.st_uid == getuid(), chmod(directory.path, 0o700) == 0 else {
+            throw ConnectedAppsError.credential
+        }
+        removeLaunchHandoff(file)
+        let descriptor = open(file.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard descriptor >= 0 else { throw ConnectedAppsError.credential }
+        let bytes = Data(key.utf8)
+        let written = bytes.withUnsafeBytes { write(descriptor, $0.baseAddress, $0.count) }
+        let synced = fchmod(descriptor, 0o600) == 0 && fsync(descriptor) == 0
+        close(descriptor)
+        guard written == bytes.count, synced else {
+            removeLaunchHandoff(file)
+            throw ConnectedAppsError.credential
+        }
+    }
+
+    static func removeLaunchHandoff(_ file: URL) {
+        _ = unlink(file.path)
+    }
+
     static func delete() throws {
         let status = SecItemDelete(query as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else { throw ConnectedAppsError.credential }

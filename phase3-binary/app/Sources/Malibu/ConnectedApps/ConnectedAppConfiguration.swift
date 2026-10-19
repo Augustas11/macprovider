@@ -51,6 +51,10 @@ enum ConnectedAppsError: Error, LocalizedError {
 enum ConnectedAppConfiguration {
     static let gateway = URL(string: "https://api.malibu.tech/v1")!
     static let privacy = "Not private — prompts and responses are visible to the Malibu gateway and the serving provider. Buyer usage is billed to your account."
+    /// The key is in the launched CLI's environment, so anything that CLI
+    /// loads or runs can read it. This is the honest scope of "injection".
+    static let keyExposure = "The launched CLI receives your buyer key in its environment. Repository configuration the client loads, and commands its agent runs, can read the key and send it elsewhere. Use a dedicated, spend-limited buyer key."
+    static let crushProjectConfigWarning = "Crush also loads configuration from the directory you launch it in (for example ./.crushrc) and has no switch to ignore it. A repository's Crush configuration can redirect requests or read your buyer key. Launch Crush only in repositories you trust."
     static let cursorDisclosure = "Cursor also sends your key and prompts through Cursor's servers. BYOK covers supported chat models; Tab uses Cursor models. Verify custom endpoint support in your installed Cursor version."
 
     static func json(_ object: [String: Any]) throws -> Data {
@@ -148,13 +152,18 @@ enum ConnectedAppConfiguration {
     }
     static func shell(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'" }
 
-    static func launcher(app: ConnectedApp, executable: URL, config: URL, model: ConnectedModel) throws -> Data {
+    static func launcher(app: ConnectedApp, executable: URL, config: URL, model: ConnectedModel, keyHandoff: URL) throws -> Data {
         guard app != .cursor else { throw ConnectedAppsError.invalidConfiguration }
         var environment = ""
         var arguments = ""
         switch app {
         case .codex: environment = "export CODEX_HOME=\(shell(config.deletingLastPathComponent().path))\n"
-        case .openCode: environment = "export OPENCODE_CONFIG=\(shell(config.path))\n"
+        case .openCode:
+            // Ignore a repository's opencode.json / .opencode so it cannot
+            // re-point the Malibu provider and capture the key. OpenCode reads
+            // OPENCODE_CONFIG_PROJECT_DISABLE ?? OPENCODE_DISABLE_PROJECT_CONFIG
+            // (anomalyco/opencode packages/cli/src/server-process.ts).
+            environment = "export OPENCODE_CONFIG=\(shell(config.path))\nexport OPENCODE_DISABLE_PROJECT_CONFIG=1\nexport OPENCODE_CONFIG_PROJECT_DISABLE=1\n"
         case .goose:
             environment = "export XDG_CONFIG_HOME=\(shell(config.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().path))\n"
             arguments = " session start --provider malibu --model \(shell(model.id))"
@@ -164,14 +173,19 @@ enum ConnectedAppConfiguration {
         let versionGuard = app == .codex
             ? "test \"$(\(shell(executable.path)) --version)\" = 'codex-cli 0.163.0' || { echo 'This setup requires Codex CLI 0.163.0.' >&2; exit 1; }\n"
             : ""
+        // Malibu's Launch writes the key to a private 0600 file in a 0700
+        // directory; this reads it once and deletes it, so no other program
+        // needs Keychain access and the key never appears in arguments or here.
         return Data("""
         #!/bin/sh
         set -eu
-        \(versionGuard)# Read only this app's buyer key. It never appears in command arguments or this file.
-        MALIBU_API_KEY=$(/usr/bin/security find-generic-password -s tech.malibu.connected-apps -a buyer -w)
+        KEY_FILE=\(shell(keyHandoff.path))
+        if [ ! -f "$KEY_FILE" ] || [ -L "$KEY_FILE" ]; then echo 'Use Launch in Malibu to deliver the buyer key.' >&2; exit 1; fi
+        MALIBU_API_KEY=$(cat -- "$KEY_FILE" || true)
+        rm -f -- "$KEY_FILE"
         test -n "$MALIBU_API_KEY"
         export MALIBU_API_KEY
-        \(environment)exec \(shell(executable.path))\(arguments)
+        \(versionGuard)\(environment)exec \(shell(executable.path))\(arguments)
 
         """.utf8)
     }

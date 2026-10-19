@@ -45,6 +45,7 @@ final class ConnectedAppsStore: ObservableObject {
     func forgetKey() {
         perform {
             try ConnectedBuyerKeychain.delete()
+            ConnectedApp.allCases.forEach { ConnectedBuyerKeychain.removeLaunchHandoff(self.keyHandoffURL($0)) }
             self.models = []
             self.modelID = ""
             self.status = "Buyer key removed. Connected launchers cannot authenticate until a key is saved."
@@ -96,10 +97,11 @@ final class ConnectedAppsStore: ObservableObject {
             if existing.bytes != nil && previous == nil { throw ConnectedAppsError.conflict }
             let config = try ConnectedAppConfiguration.configuration(app: app, model: model, original: nil, catalog: managedCatalog)
             entries.append((try self.transactions.preview(target: target, proposed: config), app.slug + "-config", false))
-            let launcher = try ConnectedAppConfiguration.launcher(app: app, executable: executable, config: target, model: model)
+            let launcher = try ConnectedAppConfiguration.launcher(app: app, executable: executable, config: target, model: model,
+                                                                  keyHandoff: self.keyHandoffURL(app))
             entries.append((try self.transactions.preview(target: self.launcherURL(app), proposed: launcher), app.slug + "-launch", true))
             self.pending = entries
-            self.previewText = "App: \(app.rawValue)\nModel: \(model.id)\nAPI: \(app.api.rawValue)\nConfiguration: \(target.path)\nLauncher: \(self.launcherURL(app).path)\nCredential: Keychain (injected only into the launched CLI)\nBackups: private app storage; exact original bytes retained.\n\n" + String(decoding: config, as: UTF8.self)
+            self.previewText = "App: \(app.rawValue)\nModel: \(model.id)\nAPI: \(app.api.rawValue)\nConfiguration: \(target.path)\nLauncher: \(self.launcherURL(app).path)\nCredential: Keychain, handed to each Launch through a private one-time file. \(ConnectedAppConfiguration.keyExposure)\(app == .crush ? "\n" + ConnectedAppConfiguration.crushProjectConfigWarning : "")\nBackups: private app storage; exact original bytes retained.\n\n" + String(decoding: config, as: UTF8.self)
             self.status = previous == nil ? "Preview ready. Set up explicitly to write these files." : "Existing setup found. Identical setup is safe to repeat; restore before changing the model or executable."
         }
     }
@@ -148,6 +150,7 @@ final class ConnectedAppsStore: ObservableObject {
             if let catalog = try self.transactions.receipt(named: self.app.slug + "-catalog") {
                 guard try ConnectedConfigTransaction.read(URL(fileURLWithPath: catalog.path)).bytes == catalog.installed else { throw ConnectedAppsError.conflict }
             }
+            try ConnectedBuyerKeychain.writeLaunchHandoff(try ConnectedBuyerKeychain.read(), to: self.keyHandoffURL(self.app))
             NSWorkspace.shared.open([URL(fileURLWithPath: launcher.path)],
                                     withApplicationAt: URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app"),
                                     configuration: NSWorkspace.OpenConfiguration())
@@ -180,6 +183,7 @@ final class ConnectedAppsStore: ObservableObject {
         }
     }
     private func launcherURL(_ app: ConnectedApp) -> URL { root.appendingPathComponent(app.slug + "/Launch.command") }
+    private func keyHandoffURL(_ app: ConnectedApp) -> URL { root.appendingPathComponent("handoff/" + app.slug + ".key") }
 
     private func perform(_ action: () throws -> Void) {
         do { try action() }
@@ -213,7 +217,8 @@ struct ConnectedAppsScreen: View {
                         Button("Forget buyer key") { store.forgetKey() }.disabled(store.busy)
                         Link("Get a buyer key", destination: URL(string: "https://www.malibu.tech/console/")!)
                     }
-                    Text("This is your buyer key, separate from provider earnings credentials. Launchers retrieve it from Keychain; macOS may ask you to allow access.").font(.caption)
+                    Text("This is your buyer key, separate from provider earnings credentials. Malibu keeps it in Keychain and hands it to each Launch through a private one-time file.").font(.caption)
+                    Text(ConnectedAppConfiguration.keyExposure).font(.caption).foregroundStyle(.orange)
                 }
                 ShellPanel("App and model") {
                     Picker("App", selection: $store.app) { ForEach(ConnectedApp.allCases) { Text($0.rawValue).tag($0) } }.disabled(store.busy)
@@ -235,6 +240,9 @@ struct ConnectedAppsScreen: View {
                             Button("Select installed CLI…") { store.chooseExecutable() }
                             Text(store.executable?.lastPathComponent ?? "No CLI selected").font(.caption)
                         }.disabled(store.busy)
+                        if store.app == .crush {
+                            Text(ConnectedAppConfiguration.crushProjectConfigWarning).font(.caption).foregroundStyle(.orange)
+                        }
                         if store.app == .codex {
                             Text("Codex CLI 0.163.0: Malibu generates a text-only catalog from the gateway model and published context size. Other CLI versions require format validation before setup. Responses, tools and streaming still require client acceptance testing.").font(.caption)
                         }
