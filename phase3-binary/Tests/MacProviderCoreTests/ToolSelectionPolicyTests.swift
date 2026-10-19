@@ -45,6 +45,30 @@ final class ToolSelectionPolicyTests: XCTestCase {
         XCTAssertNoThrow(try ToolSelectionPolicy.validateOutput(calls: [Self.call()], finishReason: "tool_calls", generatedTokens: 9, request: request))
     }
 
+    func testAdditionalProfilesRequireExactLoadedIdentityAndRetainRequestBounds() throws {
+        let models = [
+            "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit",
+        ]
+        for model in models {
+            for choice in ["required", ["type": "function", "function": ["name": "lookup"]]] as [Any] {
+                let request = try Self.request(choice: choice, extra: ["model": "buyer/alias"])
+                XCTAssertNoThrow(try ToolSelectionPolicy.validateRequest(request, loadedModelID: model, runtime: "mlx_cache"))
+                XCTAssertEqual(ToolSelectionPolicy.modes(modelID: model, runtime: "mlx_cache"), ["auto", "none", "required", "named"])
+                for alias in [model.lowercased(), model + "-copy", model.replacingOccurrences(of: "4bit", with: "8bit"),
+                              String(model.split(separator: "/").last!), "local/" + model, "buyer/alias"] {
+                    XCTAssertNil(ToolSelectionPolicy.guaranteedCallProfile(modelID: alias))
+                    XCTAssertEqual(ToolSelectionPolicy.modes(modelID: alias, runtime: "mlx_cache"), ["auto", "none"])
+                    XCTAssertThrowsError(try ToolSelectionPolicy.validateRequest(request, loadedModelID: alias, runtime: "mlx_cache"))
+                }
+                XCTAssertThrowsError(try ToolSelectionPolicy.validateRequest(request, loadedModelID: model, runtime: "ollama_loopback"))
+                for extra: [String: Any] in [["max_tokens": NSNull()], ["max_tokens": 16_385], ["stop": ["cut"]]] {
+                    XCTAssertThrowsError(try ToolSelectionPolicy.validateRequest(Self.request(choice: choice, extra: extra), loadedModelID: model, runtime: "mlx_cache"))
+                }
+            }
+        }
+    }
+
     func testNamedUnavailableAndWrongName() throws {
         let named: [String: Any] = ["type": "function", "function": ["name": "lookup"]]
         let request = try Self.request(choice: named)

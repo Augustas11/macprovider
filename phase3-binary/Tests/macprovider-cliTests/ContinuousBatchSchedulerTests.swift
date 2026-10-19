@@ -7891,6 +7891,59 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(depth, 3)
     }
 
+    /// SPEC-001-R011 on the real scheduler: a local row counts against the
+    /// served-slot row limit, so a buyer that preempts it queues only until
+    /// the row is cancelled through the same `shouldCancel` unwinding
+    /// `ModelRuntime.withDrainAndClientCancellation` uses, then runs.
+    func testBuyerPreemptsLocalRowAndTakesItsSlot() async throws {
+        let decodeGate = AsyncGate()
+        let backend = ScriptedBackend(scripts: [
+            "local": [1, 2, 3, 4, 5, 6, 7, 8],
+            "buyer": [8, 9],
+        ], decodeGate: decodeGate)
+        let scheduler = try await makeScheduler(maxActiveRows: 2, backend: backend)
+        await scheduler.setBuyerRowLimit(1)
+        let status = ProviderStatus(
+            modelID: "fixture-model",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: 1)
+        )
+        let lease = LocalPreemptionLease()
+        guard case .admitted = await status.beginLocalRequest(lease) else { return XCTFail("local not admitted") }
+
+        let local = Task { () -> ContinuousBatchSchedulerResult in
+            try await withThrowingTaskGroup(of: ContinuousBatchSchedulerResult.self) { group in
+                group.addTask {
+                    try await scheduler.submit(.init(id: "local", conversationKey: "", promptTokens: [1], maxOutputTokens: 8))
+                }
+                group.addTask {
+                    while !lease.isPreempted { try await Task.sleep(nanoseconds: 10_000_000) }
+                    throw CancellationError()
+                }
+                defer { group.cancelAll() }
+                return try await group.next()!
+            }
+        }
+        try await eventually { await backend.decodeCallCount() >= 1 }
+
+        _ = await status.beginRequest()
+        XCTAssertTrue(lease.isPreempted)
+        let buyer = Task {
+            try await scheduler.submit(.init(id: "buyer", conversationKey: "", promptTokens: [2], maxOutputTokens: 2))
+        }
+        // The local row still holds the only buyer-countable row.
+        try await eventually { await scheduler.metrics().waitingCount == 1 }
+        await decodeGate.open()
+
+        do {
+            let localResult = try await local.value
+            XCTAssertEqual(localResult.terminalStatus, .cancelled)
+        } catch is CancellationError {}
+        let buyerResult = try await buyer.value
+        XCTAssertEqual(buyerResult.outputTokens, [8, 9])
+        XCTAssertEqual(buyerResult.terminalStatus, .length)
+    }
+
     private func makeScheduler(
         descriptor: PagedKVDescriptor = descriptor(),
         tuple: ContinuousBatchingRequestedTuple = tuple(),

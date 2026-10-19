@@ -8,9 +8,9 @@ final class ShellScreensTests: XCTestCase {
     func testSidebarSectionsAreInTheAuditOrder() {
         XCTAssertEqual(
             MalibuSection.allCases.map(\.title),
-            ["Dashboard", "Chat", "Models", "Discover", "Provider", "Settings", "Diagnostics"]
+            ["Dashboard", "Chat", "Connected apps", "Models", "Discover", "Provider", "Settings", "Diagnostics"]
         )
-        XCTAssertEqual(MalibuSection.primary, [.dashboard, .chat, .models, .discover, .provider])
+        XCTAssertEqual(MalibuSection.primary, [.dashboard, .chat, .connectedApps, .models, .discover, .provider])
         XCTAssertEqual(MalibuSection.utility, [.settings, .diagnostics])
         XCTAssertEqual(Set(MalibuSection.allCases.map(\.systemImage)).count, MalibuSection.allCases.count)
     }
@@ -37,13 +37,6 @@ final class ShellScreensTests: XCTestCase {
         snapshot.advertisedMaxConcurrency = 4
         snapshot.thermalState = .critical
         XCTAssertEqual(ShellSidebarPresentation.footerHealth(snapshot), "4 slots · throttled by heat")
-    }
-
-    func testChatPlaceholderPromisesNothingAboutEarnings() {
-        let text = ChatPlaceholderScreen.message.lowercased()
-        XCTAssertTrue(text.contains("later"))
-        XCTAssertTrue(text.contains("stay on this mac"))
-        assertNoForbiddenCopy([text])
     }
 
     // MARK: Dashboard

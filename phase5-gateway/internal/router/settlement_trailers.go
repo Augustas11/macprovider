@@ -69,6 +69,7 @@ func (s *Server) setCoordinatorChatContext(h http.Header, r *http.Request, accou
 	bearer := s.cfg.Coordinator.UpstreamCoordinatorBearer()
 	h.Set("Authorization", "Bearer "+bearer)
 	h.Set("X-MacProvider-Account", accountID)
+	s.setRoutingIdentity(h, r, accountID)
 	h.Set("X-Request-ID", requestID(r))
 	// The MAC key is the bearer, so advertise only when one is configured.
 	if strings.TrimSpace(bearer) != "" {

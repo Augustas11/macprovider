@@ -74,7 +74,7 @@ enum KeychainStore {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             DispatchQueue.global().async {
                 var firstError: NSError?
-                for service in ["tech.malibu.provider", "tech.malibu.auth"] {
+                for service in ["tech.malibu.provider", "tech.malibu.auth", "tech.malibu.connected-apps"] {
                     let query: [String: Any] = [
                         kSecClass as String: kSecClassGenericPassword,
                         kSecAttrService as String: service

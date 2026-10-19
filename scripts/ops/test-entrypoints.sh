@@ -394,6 +394,10 @@ printf 'auth:\n  operator_key: env:OPERATOR_KEY\n' > "$tmp/pearl/coordinator.yam
 printf 'relay_blind:\n  enabled: true\n' > "$tmp/pearl/overlay.yaml"
 printf 'OPS_FAKE_SECRET=x\0OPERATOR_KEY=%s\0' "$RKEY" > "$tmp/proc/$(cat "$tmp/svc/mainpid")/environ"
 export PEARL_COORDINATOR_ADMIN_URL="http://127.0.0.1:$PORT" RETENTION_RUN_POLL_S=0 RETENTION_RUN_WAIT_MAX_S=5
+# Keep ordinary fixture runs outside the real 03:00 UTC guard; the explicit
+# near-nightly cases below override this safely distant fixture schedule.
+PEARL_RETENTION_NIGHTLY_UTC="$(python3 -c 'import datetime as d; print((d.datetime.now(d.timezone.utc)+d.timedelta(hours=12)).strftime("%H:%M"))')"
+export PEARL_RETENTION_NIGHTLY_UTC
 RSCOPE="$tmp/state/retention-run"
 PEARL_SSH= PEARL_RUNTIME_TASK=retention-run run_rc 0 "retention run without ssh" scripts/ops/pearl-runtime.sh status
 expect_next window:blocked
@@ -494,7 +498,7 @@ if [ -e "$RSCOPE/run.json" ]; then bad "an older report was recorded as this run
 rm -f "$tmp/svc/retention_no_report"
 rm -rf "$RSCOPE" "$tmp/svc/retention_report.json" "$tmp/svc/retention_overdue" "$tmp/svc/retention_db" "$tmp/svc/retention_posts"
 rm -f "$tmp/pearl/coordinator.yaml" "$tmp/pearl/overlay.yaml"
-unset PEARL_COORDINATOR_ADMIN_URL RETENTION_RUN_POLL_S RETENTION_RUN_WAIT_MAX_S
+unset PEARL_COORDINATOR_ADMIN_URL RETENTION_RUN_POLL_S RETENTION_RUN_WAIT_MAX_S PEARL_RETENTION_NIGHTLY_UTC
 
 sqlite3 "$VDB" "UPDATE settlement_evidence_retention_state SET last_lap_completed_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-2 hours')" >/dev/null
 PEARL_RUNTIME_TASK=retention-vacuum-conversion run_rc 0 "vacuum task after the drain" scripts/ops/pearl-runtime.sh status

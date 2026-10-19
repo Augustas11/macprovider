@@ -457,6 +457,8 @@ struct ProviderSnapshot: Sendable {
     var restartCount7d: Int? = nil
     /// Start of the since-last window that requestsServedSinceLast covers.
     var windowStartedAt: Date? = nil
+    /// SPEC-001-R011: local (non-network) use, kept out of every field above.
+    var localUsage = LocalUsageSnapshot()
     /// SPEC-038 FR-CB10 item 3 (v0.3.22): the self-check admission hold.
     var cbSelfCheckAdmissionHold: ContinuousBatchingAdmissionHoldStatus? = nil
 
@@ -601,6 +603,18 @@ actor ProviderStatus {
     private var pendingRequestCapacitySlotsFree: Int?
     private var pendingRequestCapacitySlotsTotal: Int?
     private var lastObservedThermalThrottle = false
+    // SPEC-001-R011: local requests, in admission order. They never touch
+    // requestsInFlight, the since-last window, the day/all-time counters or
+    // persisted stats, so heartbeats and buyer-facing stats exclude them.
+    private var localPriorityPolicy = LocalPriorityPolicy()
+    private var localLeases: [LocalPreemptionLease] = []
+    private var localPreemptionScheduled = Set<UUID>()
+    private var localUsage = LocalUsageSnapshot()
+    private var localQueuedCount = 0
+    /// Closed by a process-exit or update drain until the provider is reset
+    /// to ready; an operator pause never closes it.
+    private var localAdmissionClosed = false
+    private var localCapacityWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
 
     init(
         modelID: String?,
@@ -648,6 +662,7 @@ actor ProviderStatus {
         if let requestID {
             activeRequestIDs.insert(requestID)
         }
+        enforceBuyerPriority()
         await refreshAvailabilityState()
         return Date()
     }
@@ -726,6 +741,10 @@ actor ProviderStatus {
         cbAdmissionHold.startedAt = Date()
         cbAdmissionHold.expectedEndAt = expectedEndAt
         cbAdmissionHold.holdsTotal += 1
+        // SPEC-001-R011: buyers are refused for the hold, so nothing else
+        // would ever preempt local work; preempt it now so the hold drains
+        // within its bound. New local admission is fenced by the hold itself.
+        preemptAdmittedLocalWork()
         await refreshAvailabilityState()
         return nil
     }
@@ -740,6 +759,7 @@ actor ProviderStatus {
         cbAdmissionHold.expectedEndAt = nil
         cbAdmissionHold.lastOutcome = outcome
         cbAdmissionHold.lastEndedAt = Date()
+        wakeLocalCapacityWaiters()
         await refreshAvailabilityState()
     }
 
@@ -770,6 +790,7 @@ actor ProviderStatus {
         if let requestID {
             activeRequestIDs.remove(requestID)
         }
+        wakeLocalCapacityWaiters()
         rolloverDayCountersIfNeeded()
         requestsTotal += 1
         requestsToday += 1
@@ -794,6 +815,15 @@ actor ProviderStatus {
         }
         await refreshAvailabilityState()
         persistStats()
+    }
+
+    /// Routes a request's end to the buyer or the SPEC-001-R011 local books.
+    func finishRequest(startedAt: Date, completion: CompletionResult?, failed: Bool, localLease: LocalPreemptionLease?) async {
+        if let localLease {
+            finishLocalRequest(localLease, completion: completion, failed: failed)
+        } else {
+            await finishRequest(startedAt: startedAt, completion: completion, failed: failed)
+        }
     }
 
     func currentSpecDecodeGeneration() -> Int {
@@ -832,6 +862,8 @@ actor ProviderStatus {
             maxContextSource: capacity.maxContextSource,
             throughputProbe: capacity.throughputProbe
         )
+        enforceBuyerPriority()
+        wakeLocalCapacityWaiters()
         // Publish the new slot count at once (request-capacity handler), so
         // coordinator routing does not keep the old count until a heartbeat.
         await refreshAvailabilityState()
@@ -878,6 +910,8 @@ actor ProviderStatus {
             )
         }
         modelLoaded = true
+        enforceBuyerPriority()
+        wakeLocalCapacityWaiters()
         if status == .unavailable {
             transition(to: .ready, reason: "target_swap_completed")
         }
@@ -1003,7 +1037,7 @@ actor ProviderStatus {
             ? Double(specDecodeWindowAcceptedTokens) / Double(specDecodeWindowDraftedTokens)
             : nil
         let effectiveStatus: ProviderHealthState = ((throttled || cbAdmissionHold.active) && (status == .ready || status == .busy)) ? .busy : status
-        let snapshot = ProviderSnapshot(
+        var snapshot = ProviderSnapshot(
             status: effectiveStatus,
             modelID: modelID,
             modelHash: modelHash,
@@ -1059,6 +1093,7 @@ actor ProviderStatus {
             windowStartedAt: windowStartedAt,
             cbSelfCheckAdmissionHold: cbAdmissionHold
         )
+        snapshot.localUsage = currentLocalUsage()
         if resetWindow {
             windowStartedAt = Date()
             windowRequests = 0
@@ -1071,10 +1106,228 @@ actor ProviderStatus {
         return snapshot
     }
 
-    func waitUntilDrained(timeoutSeconds: Int) async -> Bool {
+    // MARK: - SPEC-001-R011 local requests
+
+    func setLocalPriorityPolicy(_ policy: LocalPriorityPolicy) {
+        localPriorityPolicy = policy
+    }
+
+    func currentLocalUsage() -> LocalUsageSnapshot {
+        var usage = localUsage
+        usage.requestsInFlight = localLeases.count
+        usage.reservedBuyerSlots = operatorPauseFence
+            ? 0
+            : localPriorityPolicy.reservation(forServedSlots: max(1, capacity.maxConcurrency))
+        usage.preemptionWindowMS = localPriorityPolicy.preemptionWindowMS
+        usage.queueWaitMS = localPriorityPolicy.queueWaitMS
+        return usage
+    }
+
+    /// Local work runs while the model is loaded and the provider is not
+    /// draining. An operator pause stops network buyers only, so the
+    /// provider can still use its own model while paused.
+    private var acceptsLocalRequests: Bool {
+        guard modelLoaded, !localAdmissionClosed else { return false }
+        switch status {
+        case .ready, .busy, .degraded: return true
+        case .draining: return false
+        case .unavailable: return operatorPauseFence
+        }
+    }
+
+    private func localRequestFits() -> Bool {
+        let slots = max(1, capacity.maxConcurrency)
+        let limit = operatorPauseFence ? slots : localPriorityPolicy.localSlotLimit(forServedSlots: slots)
+        return localLeases.count < limit
+            && requestsInFlight + localLeases.count < slots
+    }
+
+    /// Preempts every admitted local request (a self-check hold, a runtime
+    /// swap drain, or a buyer that would otherwise lose its native-MTP row).
+    /// Queued local requests are woken to re-check admission.
+    func preemptAdmittedLocalWork() {
+        localLeases.forEach { $0.preempt() }
+        wakeLocalCapacityWaiters()
+    }
+
+    /// Admits a local request only into a slot no buyer holds or is reserved
+    /// for. While buyers hold them it waits for a capacity change, for at most
+    /// the policy's queue wait, in a bounded queue. Buyers never wait here.
+    func beginLocalRequest(
+        _ lease: LocalPreemptionLease,
+        isCancelled: @escaping @Sendable () -> Bool = { false }
+    ) async -> LocalAdmission {
+        let deadline = Date().addingTimeInterval(Double(localPriorityPolicy.queueWaitMS) / 1000)
+        var queued = false
+        defer { if queued { localQueuedCount -= 1 } }
+        while true {
+            // Every outcome other than admission counts as declined.
+            guard acceptsLocalRequests else {
+                localUsage.requestsDeclined += 1
+                return .unavailable
+            }
+            if lease.isPreempted {
+                localUsage.requestsDeclined += 1
+                return .preempted
+            }
+            if isCancelled() || Task.isCancelled {
+                localUsage.requestsDeclined += 1
+                return .cancelled
+            }
+            if cbAdmissionHold.active {
+                localUsage.requestsDeclined += 1
+                return .selfCheckAdmissionHold
+            }
+            if localRequestFits() {
+                localLeases.append(lease)
+                noteRealRequestStart()
+                return .admitted(Date())
+            }
+            if !queued {
+                guard localQueuedCount < LocalPriorityPolicy.maximumQueuedLocalRequests else {
+                    localUsage.requestsDeclined += 1
+                    return .preempted
+                }
+                localQueuedCount += 1
+                queued = true
+            }
+            let now = Date()
+            guard now < deadline else {
+                localUsage.requestsDeclined += 1
+                return .preempted
+            }
+            // Woken by any capacity change; the bounded fallback also covers
+            // state transitions and client disconnects that send no wake.
+            await waitForLocalCapacityChange(maxWait: min(deadline.timeIntervalSince(now), 0.25))
+        }
+    }
+
+    private func waitForLocalCapacityChange(maxWait: TimeInterval) async {
+        let id = UUID()
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            localCapacityWaiters[id] = continuation
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(max(0, maxWait) * 1_000_000_000))
+                await self?.resumeLocalCapacityWaiter(id)
+            }
+        }
+    }
+
+    private func resumeLocalCapacityWaiter(_ id: UUID) {
+        localCapacityWaiters.removeValue(forKey: id)?.resume()
+    }
+
+    private func wakeLocalCapacityWaiters() {
+        let waiters = localCapacityWaiters
+        localCapacityWaiters.removeAll()
+        waiters.values.forEach { $0.resume() }
+    }
+
+    /// Idempotent: only the first call for an admitted lease counts.
+    /// `succeeded` marks a completed request that has no `CompletionResult`
+    /// (a token utility).
+    func finishLocalRequest(
+        _ lease: LocalPreemptionLease,
+        completion: CompletionResult?,
+        failed: Bool,
+        succeeded: Bool = false
+    ) {
+        guard let index = localLeases.firstIndex(where: { $0 === lease }) else { return }
+        localLeases.remove(at: index)
+        localPreemptionScheduled.remove(lease.id)
+        noteRealRequestEnd()
+        localUsage.requestsTotal += 1
+        if completion != nil || succeeded {
+            localUsage.requestsCompleted += 1
+            localUsage.promptTokensTotal += Int64(completion?.promptTokens ?? 0)
+            localUsage.completionTokensTotal += Int64(completion?.completionTokens ?? 0)
+        } else if lease.isPreempted {
+            localUsage.requestsPreempted += 1
+        } else if failed {
+            localUsage.requestsFailed += 1
+        } else {
+            localUsage.requestsCancelled += 1
+        }
+        wakeLocalCapacityWaiters()
+    }
+
+    /// True while any buyer or local request holds runtime capacity. Internal
+    /// work (idle prewarm, the continuous-batching self-check) yields to both;
+    /// buyer-facing counters stay buyer-only.
+    func hasInferenceWork() -> Bool {
+        requestsInFlight > 0 || !localLeases.isEmpty
+    }
+
+    /// Buyers plus every admitted local request not yet preempted, over the
+    /// served slots. Leases already scheduled for preemption still occupy
+    /// their slots until their window ends.
+    private func localExcess() -> Int {
+        let slots = max(1, capacity.maxConcurrency)
+        let active = localLeases.filter { !$0.isPreempted }
+        return requestsInFlight + active.count - slots
+    }
+
+    /// A buyer must never wait on local work: when buyers plus local
+    /// requests exceed the served slots, preempt the newest local requests,
+    /// each within the preemption window.
+    private func enforceBuyerPriority() {
+        let alreadyScheduled = localLeases.filter { localPreemptionScheduled.contains($0.id) && !$0.isPreempted }.count
+        var excess = localExcess() - alreadyScheduled
+        guard excess > 0 else { return }
+        let windowMS = localPriorityPolicy.preemptionWindowMS
+        let running = localLeases.filter { !localPreemptionScheduled.contains($0.id) && !$0.isPreempted }
+        for lease in running.reversed() where excess > 0 {
+            excess -= 1
+            if windowMS <= 0 {
+                lease.preempt()
+            } else {
+                localPreemptionScheduled.insert(lease.id)
+                Task { [weak self] in
+                    try? await Task.sleep(nanoseconds: UInt64(windowMS) * 1_000_000)
+                    await self?.expirePreemptionWindow(lease)
+                }
+            }
+        }
+    }
+
+    /// At the window's end, preempt only if buyers still need the slot: a
+    /// buyer that finished inside the window leaves the local request alone.
+    private func expirePreemptionWindow(_ lease: LocalPreemptionLease) {
+        guard localPreemptionScheduled.remove(lease.id) != nil,
+              localLeases.contains(where: { $0 === lease }) else { return }
+        // While buyers still need slots, preempt the newest of this lease and
+        // the leases already marked for preemption, so a buyer that left in
+        // between never costs an older request its slot.
+        while localExcess() > 0 {
+            let candidates = localLeases.filter {
+                !$0.isPreempted && ($0 === lease || localPreemptionScheduled.contains($0.id))
+            }
+            guard let newest = candidates.last else { return }
+            localPreemptionScheduled.remove(newest.id)
+            newest.preempt()
+        }
+    }
+
+    /// Reopens local admission after a process-exit or update drain that did
+    /// not end the process.
+    func reopenLocalAdmission() {
+        localAdmissionClosed = false
+    }
+
+    /// Waits for buyer work to finish. `preemptingLocal` (process exit and
+    /// update drains) also preempts local work and waits for it; an operator
+    /// pause leaves local work running.
+    func waitUntilDrained(timeoutSeconds: Int, preemptingLocal: Bool = false) async -> Bool {
         let deadline = Date().addingTimeInterval(TimeInterval(max(0, timeoutSeconds)))
-        while requestsInFlight > 0 {
+        if preemptingLocal {
+            localAdmissionClosed = true
+            localLeases.forEach { $0.preempt() }
+            wakeLocalCapacityWaiters()
+        }
+        while requestsInFlight > 0 || (preemptingLocal && (!localLeases.isEmpty || localQueuedCount > 0)) {
             if Date() >= deadline {
+                // A drain that timed out leaves the provider serving.
+                if preemptingLocal { localAdmissionClosed = false }
                 return false
             }
             try? await Task.sleep(nanoseconds: 100_000_000)

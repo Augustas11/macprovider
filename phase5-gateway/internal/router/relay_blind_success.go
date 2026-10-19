@@ -97,6 +97,10 @@ func (s *Server) relayBlindUpstream(r *http.Request, method, path, account, sess
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+s.cfg.Coordinator.UpstreamCoordinatorBearer())
 	req.Header.Set("X-MacProvider-Account", account)
+	s.setRoutingIdentity(req.Header, r, account)
+	if (path == "/v1/relay-blind/route-reservations" || path == "/v1/relay-blind/consume") && req.Header.Get(routingGitHubIDsHeader) == "unavailable" {
+		return nil, errRoutingIdentityUnavailable
+	}
 	req.Header.Set("X-Request-ID", requestID(r))
 	if session != "" {
 		req.Header.Set("X-MacProvider-Wallet-Session", session)
@@ -366,6 +370,11 @@ func (s *Server) dispatchRelayBlindChat(w http.ResponseWriter, r *http.Request, 
 	// capability, set together; subject.AccountID is account.
 	s.setCoordinatorChatContext(up.Header, r, subject.AccountID)
 	advertiseCapacityShed429(up.Header)
+	if up.Header.Get(routingGitHubIDsHeader) == "unavailable" {
+		_ = s.refundWalletAwareReservation(subject, requestID(r))
+		writeError(w, 503, "api_error", "relay_blind_required_unavailable", "Relay-blind dispatch unavailable")
+		return
+	}
 	if sessionAuth == nil {
 		setAllowanceRequestHeaders(up.Header, env.Model, window, env.InputTokenUpperBound, env.MaxOutputTokens, subject.AllowanceRequired)
 	}

@@ -695,6 +695,16 @@ enum ContinuousBatchingSelfCheck {
         max(0, base) << min(max(0, consecutiveDrainTimeouts), 2)
     }
 
+    /// Only a buyer drain timeout escalates the next hold's drain bound; a
+    /// timeout on local work alone (SPEC-001-R011) leaves the count as is.
+    static func nextConsecutiveDrainTimeouts(_ current: Int, after outcome: AdmissionHoldOutcome) -> Int {
+        switch outcome {
+        case .drainTimeout: return current + 1
+        case .localDrainTimeout: return current
+        default: return 0
+        }
+    }
+
     /// The check bound for a hold: `admissionHoldCheckSeconds`, doubled after
     /// each consecutive hold that reached it without deciding, up to 4x.
     /// Completed units persist; an individual unit must still fit the bound.
@@ -713,6 +723,10 @@ enum ContinuousBatchingSelfCheck {
         /// In-flight requests did not finish within the drain timeout; none
         /// was cancelled and the check did not run.
         case drainTimeout
+        /// SPEC-001-R011: only preempted local work was still unwinding at
+        /// the drain bound. The check did not run, and the drain bound does
+        /// not escalate (no buyer request caused the timeout).
+        case localDrainTimeout
         /// The check stored a decision.
         case completed
         /// The check ran but yielded (a pause, drain, lease or target change)
@@ -725,6 +739,7 @@ enum ContinuousBatchingSelfCheck {
             switch self {
             case .skipped: return "skipped"
             case .drainTimeout: return "drain_timeout"
+            case .localDrainTimeout: return "local_drain_timeout"
             case .completed: return "completed"
             case .yielded: return "yielded"
             case .checkBound: return "check_bound"
@@ -780,13 +795,19 @@ enum ContinuousBatchingSelfCheck {
             return outcome
         }
         let drainDeadline = startedAt.addingTimeInterval(drainBound)
-        let neededDrain = await providerStatus.requestsInFlightCount() > 0
-        while await providerStatus.requestsInFlightCount() > 0, Date() < drainDeadline {
+        let neededDrain = await providerStatus.hasInferenceWork()
+        // The hold preempted admitted local work when it began; only buyer
+        // work seen during the drain makes a timeout a buyer drain timeout.
+        var sawBuyerWork = await providerStatus.requestsInFlightCount() > 0
+        while await providerStatus.hasInferenceWork(), Date() < drainDeadline {
             if let reason = await interruption() { return await end(.yielded, reason: reason) }
             try? await Task.sleep(nanoseconds: 50_000_000)
+            if await providerStatus.requestsInFlightCount() > 0 { sawBuyerWork = true }
         }
-        if await providerStatus.requestsInFlightCount() > 0 { return await end(.drainTimeout) }
-        if neededDrain, Date() >= drainDeadline { return await end(.drainTimeout) }
+        if await providerStatus.requestsInFlightCount() > 0 { sawBuyerWork = true }
+        let timeoutOutcome: AdmissionHoldOutcome = sawBuyerWork ? .drainTimeout : .localDrainTimeout
+        if await providerStatus.hasInferenceWork() { return await end(timeoutOutcome) }
+        if neededDrain, Date() >= drainDeadline { return await end(timeoutOutcome) }
         // Re-validate after the drain, immediately before any check work.
         if let reason = await interruption() { return await end(.yielded, reason: reason) }
         log("event=cb_self_check action=admission_hold_drained drain_s=\(String(format: "%.1f", Date().timeIntervalSince(startedAt)))")
@@ -1290,7 +1311,9 @@ actor ContinuousBatchingSelfCheckDriver {
         ) {
             await self.measureWithinAdmissionHold(target)
         }
-        consecutiveDrainTimeouts = outcome == .drainTimeout ? consecutiveDrainTimeouts + 1 : 0
+        consecutiveDrainTimeouts = ContinuousBatchingSelfCheck.nextConsecutiveDrainTimeouts(
+            consecutiveDrainTimeouts, after: outcome
+        )
         consecutiveCheckBounds = outcome == .checkBound ? consecutiveCheckBounds + 1 : 0
         // Spaced from the end of this hold, not its start.
         admissionHoldNotBefore = Date().addingTimeInterval(admissionHoldAfterSeconds)
@@ -1320,8 +1343,7 @@ actor ContinuousBatchingSelfCheckDriver {
     private static func parseDate(_ value: String) -> Date? { ISO8601DateFormatter().date(from: value) }
 
     private func isIdle() async -> Bool {
-        let snapshot = await providerStatus.snapshot()
-        guard snapshot.requestsInFlight == 0 else { return false }
+        guard await !providerStatus.hasInferenceWork() else { return false }
         return await providerStatus.secondsSinceLastActivityOrPrewarm() >= idleSeconds
     }
 
@@ -1347,8 +1369,8 @@ actor ContinuousBatchingSelfCheckDriver {
             group.addTask { try await body() }
             group.addTask {
                 while !Task.isCancelled {
+                    if await providerStatus.hasInferenceWork() { throw StepError.yielded }
                     let snapshot = await providerStatus.snapshot()
-                    if snapshot.requestsInFlight > 0 { throw StepError.yielded }
                     if holdDeadline != nil,
                        !(snapshot.status == .ready || snapshot.status == .busy) {
                         throw StepError.admissionHoldEnded
@@ -1630,7 +1652,7 @@ actor ContinuousBatchingSelfCheckDriver {
             // A buyer request during the step can take rows from the cohort;
             // that is a yield, not a probe result.
             if !Task.isCancelled, case StepError.probeShapeUnmet(let slots) = error,
-               await providerStatus.snapshot().requestsInFlight == 0,
+               await !providerStatus.hasInferenceWork(),
                await providerStatus.secondsSinceLastRealActivity() >= Date().timeIntervalSince(stepStartedAt) {
                 // Fail closed: decide on the widths verified below it, and
                 // run the full ladder again later.
@@ -1646,7 +1668,7 @@ actor ContinuousBatchingSelfCheckDriver {
             // scheduler refusing the probe itself (its queue or token budget,
             // or a native-MTP integrity probe holding it).
             if !Task.isCancelled, (error as? ContinuousBatchSchedulerError) == .backpressure, let refusedAt,
-               await providerStatus.snapshot().requestsInFlight == 0,
+               await !providerStatus.hasInferenceWork(),
                await providerStatus.secondsSinceLastRealActivity() >= Date().timeIntervalSince(stepStartedAt) {
                 let verifiedPrefix = record.measurements.last?.slots ?? 1
                 // The count this Mac serves now (an owner pin can serve above

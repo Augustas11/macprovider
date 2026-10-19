@@ -489,7 +489,11 @@ func (s *Server) handleRelayBlindReservation(w http.ResponseWriter, r *http.Requ
 	}
 	unlockSelection := s.relayBlind.lockAccountSelection(account.ID())
 	defer func() { unlockSelection() }()
-	provider, key, found, refused := s.selectRelayBlindProvider(r.Context(), account.ID(), request.Model, request.EncryptedRequestBytes, false, relayblind.KeyClassRelayBlind, request.Requires)
+	provider, key, found, refused, ownershipErr := s.selectRelayBlindProvider(r.Context(), account.ID(), request.Model, request.EncryptedRequestBytes, false, relayblind.KeyClassRelayBlind, request.Requires)
+	if ownershipErr != nil && ownershipErr.ownershipLookupFailed {
+		writeRelayBlindError(w, "relay_blind_required_unavailable", "Relay-blind execution is unavailable")
+		return
+	}
 	if refused {
 		s.writeRelayBlindCapabilityRefusal(w, r, relayblind.PrivacyRejectPhaseReservation, false)
 		return
@@ -702,14 +706,22 @@ func relayBlindPinnedLaneCap(maxPending, slotsTotal int) int {
 }
 
 // selectRelayBlindProvider returns the selected provider and key, whether one
-// was found, and whether the SPEC-041-R004 capability gate refused the
-// request: an otherwise eligible provider serves the model and none supports
-// a capability in requires.
-func (s *Server) selectRelayBlindProvider(ctx context.Context, accountID, model string, encryptedBytes int64, requireFree bool, class string, requires []string) (pool.Provider, relayblind.KeyRecord, bool, bool) {
+// was found, whether the SPEC-041-R004 capability gate refused the
+// request (an otherwise eligible provider serves the model and none supports
+// a capability in requires), and the buyer-ownership refusal when the
+// ownership lookup could not answer.
+func (s *Server) selectRelayBlindProvider(ctx context.Context, accountID, model string, encryptedBytes int64, requireFree bool, class string, requires []string) (pool.Provider, relayblind.KeyRecord, bool, bool, *routeError) {
+	owned, ownershipErr := s.buyerOwnedProviders(ctx)
+	if ownershipErr != nil {
+		return pool.Provider{}, relayblind.KeyRecord{}, false, false, ownershipErr
+	}
 	var providers []pool.Provider
 	var keys []relayblind.KeyRecord
 	incapable := false
 	for _, provider := range s.pool.Snapshot() {
+		if owned[provider.ProviderID] {
+			continue
+		}
 		eligible := relayBlindBindable(provider)
 		if requireFree {
 			eligible = provider.RoutingEligible()
@@ -737,9 +749,9 @@ func (s *Server) selectRelayBlindProvider(ctx context.Context, accountID, model 
 	}
 	order := s.orderRelayBlindCandidates(accountID, providers)
 	if len(order) == 0 {
-		return pool.Provider{}, relayblind.KeyRecord{}, false, incapable
+		return pool.Provider{}, relayblind.KeyRecord{}, false, incapable, nil
 	}
-	return providers[order[0]], keys[order[0]], true, false
+	return providers[order[0]], keys[order[0]], true, false, nil
 }
 
 // orderRelayBlindCandidates returns the indexes of fully eligible providers
@@ -1096,7 +1108,11 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 	// burn rejects the consumed row. If the write fails, the in-process
 	// claim stays until reservation expiry so the authorization cannot
 	// dispatch from this coordinator in the meantime.
+	// Every burn is pre-dispatch: the provider never received the envelope,
+	// so the response carries the no-prior-dispatch marker and the gateway
+	// refunds the buyer's reservation.
 	burn := func(code string) {
+		w.Header().Set(settlementNoPriorDispatchHeader, "1")
 		writeCtx, cancelWrite := durableCtx()
 		defer cancelWrite()
 		if err := s.relayBlind.store.RejectPredispatch(writeCtx, heldBinding, code, s.now()); err != nil {
@@ -1159,6 +1175,18 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 			return
 		}
 		writeRelayBlindError(w, code, "Relay-blind provider session or key expired")
+		return
+	}
+	if routeErr := s.checkBuyerProviderOwnership(r.Context(), provider.ProviderID); routeErr != nil {
+		burn("relay_blind_required_unavailable")
+		if reservation.PrivacyClass {
+			reason := relayblind.PrivacyRejectDispatchUnavailable
+			if routeErr.ownershipLookupFailed {
+				reason = relayblind.PrivacyRejectStoreUnavailable
+			}
+			s.notePrivacyRouteRejection(w, r, relayblind.PrivacyRejectPhaseDispatch, "relay_blind_required_unavailable", reason)
+		}
+		writeRelayBlindError(w, "relay_blind_required_unavailable", "No eligible provider available")
 		return
 	}
 	quotaMetered := false

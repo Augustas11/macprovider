@@ -10017,6 +10017,44 @@ final class CoordinatorClientTests: XCTestCase {
         )
     }
 
+    /// SPEC-001-R011: local requests never reach heartbeat counters or the
+    /// buyer slot count, even while one is running.
+    func testHeartbeatExcludesLocalRequests() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 2),
+            modelHash: String(repeating: "a", count: 64)
+        )
+        let client = try await makeClient(status: status, recorder: recorder)
+
+        let finished = LocalPreemptionLease()
+        guard case .admitted = await status.beginLocalRequest(finished) else { return XCTFail("local not admitted") }
+        await status.finishLocalRequest(
+            finished,
+            completion: CompletionResult(content: "x", finishReason: "stop", promptTokens: 5, completionTokens: 9, settlementDisposition: .eligibleOwner),
+            failed: false
+        )
+        let running = LocalPreemptionLease()
+        guard case .admitted = await status.beginLocalRequest(running) else { return XCTFail("local not admitted") }
+        let buyerStart = await status.beginRequest()
+        await status.finishRequest(
+            startedAt: buyerStart,
+            completion: CompletionResult(content: "y", finishReason: "stop", promptTokens: 1, completionTokens: 2, settlementDisposition: .eligibleOwner),
+            failed: false
+        )
+
+        try await client.sendHeartbeatForTest()
+        let frames = await recorder.frames
+        let heartbeat = try XCTUnwrap(frames.last)
+        XCTAssertEqual(heartbeat["type"] as? String, "heartbeat")
+        XCTAssertEqual(heartbeat["requests_served_since_last"] as? Int, 1)
+        XCTAssertEqual(heartbeat["slots_free"] as? Int, 2)
+        XCTAssertEqual(heartbeat["slots_total"] as? Int, 2)
+        XCTAssertNil(heartbeat["local_usage"])
+    }
+
     private func makeClient(
         status: ProviderStatus,
         recorder: CoordinatorFrameRecorder,

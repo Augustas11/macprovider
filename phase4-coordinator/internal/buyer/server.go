@@ -222,7 +222,8 @@ func spec018Retryable(code string) bool {
 }
 
 type Server struct {
-	pool *pool.Registry
+	buyerOwnership BuyerOwnershipLookup
+	pool           *pool.Registry
 	// trustPools holds SPEC-042 Trusted Pool membership/revocation state.
 	// Nil unless WithPoolMembership is supplied. Without a pool authority
 	// header, default deployments stay byte-identical; with one, nil fails
@@ -234,8 +235,12 @@ type Server struct {
 	poolModelPricingBounds func() *poolmanifest.PoolModelPricingBounds
 	// poolRejectionTimingFloor is the SPEC-043-R007 active minimum for
 	// pool_unavailable rejection paths. Zero defaults to 50 ms.
-	poolRejectionTimingFloor       time.Duration
-	log                            zerolog.Logger
+	poolRejectionTimingFloor time.Duration
+	log                      zerolog.Logger
+	// ownershipLookupRefusals and ownedProviderRefusals count buyer-ownership
+	// refusals (SPEC-002-R008) by cause.
+	ownershipLookupRefusals        atomic.Int64
+	ownedProviderRefusals          atomic.Int64
 	createdAt                      int64
 	preflight                      PreflightFunc
 	preflightThreshold             int
@@ -814,6 +819,9 @@ func WithBilling(store *billing.Store, cfg config.RewardsConfig) Option {
 		defer s.billingMu.Unlock()
 		s.billing = store
 		s.billingCfg = cfg
+		if store != nil && s.buyerOwnership == nil {
+			s.buyerOwnership = store.BuyerOwnedProviders
+		}
 	}
 }
 
@@ -1027,7 +1035,7 @@ type authenticatedAccountContextKey struct{}
 
 func (s *Server) gatewayContextMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !s.requireGatewayContext {
+		if !s.requireGatewayContext && !s.internalBearerAuthorizedRemote(r.Header, r.RemoteAddr) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -1038,10 +1046,15 @@ func (s *Server) gatewayContextMiddleware(next http.Handler) http.Handler {
 		accountID := sanitizeAccountID(r.Header.Get("X-MacProvider-Account"))
 		account, err := requestlog.NewAuthenticatedAccount(accountID)
 		if err != nil {
+			if !s.requireGatewayContext {
+				next.ServeHTTP(w, r)
+				return
+			}
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Gateway account context is required")
 			return
 		}
 		ctx := context.WithValue(r.Context(), authenticatedAccountContextKey{}, account)
+		ctx = context.WithValue(ctx, routingIdentityContextKey{}, parseRoutingIdentity(r.Header))
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -1269,6 +1282,8 @@ func (s *Server) handleStreamingMetrics(w http.ResponseWriter, r *http.Request) 
 		downgradeEvictions = s.streamingDowngrade.evictionsForTest()
 	}
 	_, _ = w.Write([]byte(s.streamingTiming.prometheusText(downgradeEvictions)))
+	_, _ = fmt.Fprintf(w, "# HELP macprovider_buyer_ownership_refusals_total Buyer requests refused by the SPEC-002-R008 ownership fence.\n# TYPE macprovider_buyer_ownership_refusals_total counter\nmacprovider_buyer_ownership_refusals_total{reason=\"lookup_unavailable\"} %d\nmacprovider_buyer_ownership_refusals_total{reason=\"owned_provider\"} %d\n",
+		s.ownershipLookupRefusals.Load(), s.ownedProviderRefusals.Load())
 }
 
 func (s *Server) InternalHandler() http.Handler {
@@ -3492,6 +3507,7 @@ func (s *Server) forwardHTTPSequence(
 			upReq.Header.Set("X-Request-ID", originalRequestID)
 			setProviderMaxOutputTokensHeader(upReq.Header, r.Header)
 			setSettlementMetadataHeader(upReq.Header, settlementMetadata)
+			providerhttp.SetCoordinatorOrigin(upReq.Header)
 			state.phaseTiming.markProviderDispatchStart(phaseTimingNow(s), state.provider.AssignedID)
 			resp, doErr := providerhttp.Client.Do(upReq)
 			if doErr == nil && resp != nil {
@@ -3672,6 +3688,7 @@ func (s *Server) forwardHTTPSequence(
 			}
 			// Non-200 path.
 			status := 0
+			localPreempted := false
 			attempt := requestLogAttempt{}
 			var respBody []byte
 			if resp != nil {
@@ -3688,6 +3705,11 @@ func (s *Server) forwardHTTPSequence(
 				attempt.ErrorCode = nullUsageProviderErrorCode(respBody)
 				if code := httpProviderContextExceededCode(status, respBody); code != "" {
 					attempt.ErrorCode = code
+				}
+				if httpProviderLocalPreempted(status, respBody) {
+					localPreempted = true
+					status = http.StatusBadGateway
+					attempt.ErrorCode = providerLocalPreemptedCode
 				}
 				receiptValue := normalizeReceiptHeaderValue(resp.Header.Get("X-MacProvider-Receipt"))
 				terminalState := terminalStateFromAttempt(status, http.StatusText(status), attempt.ErrorCode)
@@ -3766,7 +3788,7 @@ func (s *Server) forwardHTTPSequence(
 				// audit H1). Only short-circuit when the retry budget
 				// is genuinely exhausted; otherwise fall through so
 				// the buyer's explicit retry budget is honored.
-				if attempt.ErrorCode != "" && providerReceiptEligible(state.provider) {
+				if attempt.ErrorCode != "" && !localPreempted && providerReceiptEligible(state.provider) {
 					if !s.shouldRetry(r, startedAt, state.explicitRetries, state.faultedProviders, status, nil) {
 						attempt.SettlementOutput = settlementOutputForContentAt("", nil, nil, terminalState, terminalTS)
 						if cancelled, ok := s.poolAttemptCancelledDuringDispatch(r, state); ok {
@@ -3811,8 +3833,10 @@ func (s *Server) forwardHTTPSequence(
 				attempt.SettlementOutput = settlementOutputForContent("", nil, nil, terminalStateFromAttempt(status, "Selected provider failed; buyer should retry", attempt.ErrorCode))
 			}
 			tr := classifyHTTPResult(resp, doErr, attempt)
-			s.log.Warn().Err(doErr).Int("status", status).Str("request_id", requestID).Str("provider_id", state.provider.ProviderID).Msg("provider request failed")
-			if status != 0 {
+			s.log.Warn().Err(doErr).Int("status", status).Str("error_code", attempt.ErrorCode).Str("request_id", requestID).Str("provider_id", state.provider.ProviderID).Msg("provider request failed")
+			if localPreempted {
+				tr.status = status
+			} else if status != 0 {
 				s.handleProviderFailure(state.provider, status)
 			}
 			return dispatchedAttempt{
@@ -5135,6 +5159,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 	upReq.Header.Set("X-Request-ID", requestID)
 	setProviderMaxOutputTokensHeader(upReq.Header, r.Header)
 	setSettlementMetadataHeader(upReq.Header, settlementMetadata)
+	providerhttp.SetCoordinatorOrigin(upReq.Header)
 	markProviderDone := func() {
 		if state != nil {
 			now := phaseTimingNow(s)
@@ -5201,6 +5226,12 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 			w.Header().Set(engineResponseHeader, providerEngineClass(provider))
 			w.Header().Set("X-MacProvider-Route", provider.AssignedID)
 			return wsForwardContextExceeded, resp.StatusCode, attempt
+		}
+		if httpProviderLocalPreempted(resp.StatusCode, respBody) {
+			s.log.Warn().Int("status", resp.StatusCode).Str("error_code", providerLocalPreemptedCode).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider preempted coordinator request as local work")
+			attempt.Status = http.StatusBadGateway
+			attempt.ErrorCode = providerLocalPreemptedCode
+			return wsForwardFailed, http.StatusBadGateway, attempt
 		}
 		s.log.Warn().Int("status", resp.StatusCode).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider returned non-200")
 		s.handleProviderFailure(provider, resp.StatusCode)
@@ -7908,6 +7939,9 @@ type routeError struct {
 	// legacy is the pre-#1906 503 a capacity shed answers with when the
 	// caller did not send capacityShed429CapabilityHeader (buyerRouteError).
 	legacy *routeError
+	// ownershipLookupFailed marks a buyer-ownership refusal caused by a
+	// lookup that could not answer, not by an owned provider.
+	ownershipLookupFailed bool
 }
 
 func byomNonSettlementRouteError(model string) *routeError {
@@ -8052,7 +8086,25 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		headers.Del("X-MacProvider-Internal-Conv")
 		headers.Del("X-MacProvider-Internal-Conv-Cache")
 	}
+	owned, ownershipErr := s.buyerOwnedProviders(ctx)
+	if ownershipErr != nil {
+		return pool.Provider{}, ownershipErr
+	}
 	providers := s.pool.Snapshot()
+	if pinned := headers.Get("X-MacProvider-Provider"); pinned != "" && owned[pinned] {
+		return pool.Provider{}, s.ownershipRefusal(false, nil)
+	}
+	if session := headers.Get("X-MacProvider-Session"); session != "" {
+		for _, p := range providers {
+			if p.AssignedID == session && owned[p.ProviderID] {
+				return pool.Provider{}, s.ownershipRefusal(false, nil)
+			}
+		}
+	}
+	providers = filterBuyerOwnedProviders(providers, owned)
+	if len(providers) == 0 && len(owned) > 0 {
+		return pool.Provider{}, s.ownershipRefusal(false, nil)
+	}
 	estimatedTokens := routingRequestPromptTokenEstimate(req.raw, req.hasVision)
 	admissionCtx, admissionCancel := newRouteSnapshotDispatchContext(ctx)
 	defer admissionCancel()
@@ -11802,6 +11854,28 @@ func nullUsageProviderErrorCode(body []byte) string {
 		return ""
 	}
 	return spec001EndStatus(envelope.Error.Code)
+}
+
+// providerLocalPreemptedCode is the SPEC-001-R011 provider refusal for local
+// work. Coordinator dispatches carry the origin marker and are never local,
+// so this answer only means the provider misclassified the request. It is a
+// retryable provider failure: the attempt advances to another provider as a
+// 502 and the provider is neither degraded nor breaker-faulted.
+const providerLocalPreemptedCode = "local_preempted"
+
+func httpProviderLocalPreempted(status int, body []byte) bool {
+	if status != http.StatusServiceUnavailable {
+		return false
+	}
+	var envelope struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return false
+	}
+	return strings.TrimSpace(envelope.Error.Code) == providerLocalPreemptedCode
 }
 
 func httpProviderContextExceededCode(status int, body []byte) string {

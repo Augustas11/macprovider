@@ -39,6 +39,7 @@ func setupStakeAllowance(ctx context.Context, cfg *config.Config, coordinatorDB,
 		} else {
 			deps.Ledger = ledger
 			source = stakeSourceAdapter{ledger: ledger}
+			installRoutingStakeIdentity(billingStore, ledger, logger)
 		}
 	} else {
 		logger.Warn().Msg("SPEC-050 stake ledger unavailable: malibu_emission.writer_dsn is not set")
@@ -48,6 +49,28 @@ func setupStakeAllowance(ctx context.Context, cfg *config.Config, coordinatorDB,
 			time.Duration(cfg.StakeAllowance.RefreshCheckIntervalSeconds)*time.Second, logger)
 	}
 	return stakeallowance.NewHandler(deps)
+}
+
+// installRoutingStakeIdentity adds the stake ledger as a dispatch ownership
+// source (SPEC-002-R008). malibu_emission has no read-only DSN, so the read
+// shares the rewards writer pool; billing caches positive identities for the
+// process lifetime and bounds each read with RoutingStakeIdentityTimeout, so
+// steady-state dispatch only reads Postgres for accounts that have not staked.
+// A failed read falls back to the other ownership sources and is logged.
+func installRoutingStakeIdentity(billingStore *billing.Store, ledger *rewards.StakeLedger, logger zerolog.Logger) {
+	if billingStore == nil || ledger == nil {
+		return
+	}
+	billingStore.SetRoutingStakeIdentityLookup(ledger.AccountStakeIdentity, func(accountID string, err error) {
+		// A rewards outage fails every uncached read: log the first and
+		// every hundredth so the outage is visible without a line per buyer.
+		total := billingStore.RoutingStakeIdentityFallbacks()
+		if total != 1 && total%100 != 0 {
+			return
+		}
+		logger.Warn().Err(err).Str("account_id", accountID).Int64("fallbacks_total", total).
+			Msg("SPEC-002-R008 stake identity read failed; ownership uses gateway identities, allowance grants and trust-pool owners")
+	})
 }
 
 func allowancePolicy(c config.StakeAllowanceConfig) billing.AllowancePolicy {

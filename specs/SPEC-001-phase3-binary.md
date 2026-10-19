@@ -1,6 +1,33 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.37 (2026-10-16, provider-local stateless APIs)
+**Version:** 1.9.39 (2026-10-19, coordinator origin marker on HTTP-direct dispatch)
+
+**Change log v1.9.39 (2026-10-19, Related: #2054):**
+Amends `SPEC-001-R011` and the coordinator HTTP-forwarding wire contract.
+Local work is now opt-in: only a loopback request with exactly one
+`X-MacProvider-Origin: local-app` and no coordinator marker or settlement
+metadata is local; unmarked clients, observe-mode dispatches and coordinator
+probes are network. The coordinator sends `X-MacProvider-Origin: coordinator`
+on every HTTP-direct dispatch (buyer requests, canary probes and warmup
+gates). Local requests are checked for preemption between serial prefill
+chunks, are never native-MTP eligible, are admitted one at a time on a
+multi-slot unpaused provider, and are preempted by a warm-swap drain and when
+the SPEC-038 self-check hold begins (`local_drain_timeout` reports an idle
+drain timeout). Network direct-HTTP requests keep handle acquisition before
+admission. Local request log lines carry a `local:`-prefixed `request_id`. A
+coordinator that receives `local_preempted` treats it as a retryable provider
+failure. No trust-tier,
+settlement or hardware-acceptance claim is added.
+
+**Change log v1.9.38 (2026-10-18, Related: #2054):**
+Adds `SPEC-001-R011` and amends `SPEC-001-R009`. A request on the loopback
+listener without coordinator settlement metadata is local use. Local use is
+not billable and is never counted in heartbeat, buyer-facing or persisted
+request statistics; `/v1/status` reports it under `local_usage`. Local
+requests yield to network buyers: a reserved buyer slot when more than one
+slot is served, queueing behind buyers, and preemption within a bounded
+window with HTTP 503 `local_preempted`. No trust-tier, settlement or
+hardware-acceptance claim is added.
 
 **Change log v1.9.37 (2026-10-16, Related: #2018):**
 Adds SPEC-001-R009/R010 for the provider-local stateless Responses subset and
@@ -2170,7 +2197,9 @@ length-limited output MUST be incomplete. Client disconnect MUST cancel the
 underlying runtime request through the existing request handle. Local Responses,
 local Chat Completions and network requests MUST share existing runtime admission,
 capacity, cancellation and cleanup ownership; no independent engine or weight
-copy is permitted. Model/status discovery MUST advertise the exact supported
+copy is permitted. Local requests are admitted to that shared capacity only under
+SPEC-001-R011: they are not billable, not counted as served work, and lower
+priority than network buyers. Model/status discovery MUST advertise the exact supported
 local endpoints and model-dependent utilities without implying remote endpoint
 or runtime capabilities. `GET /v1/capabilities` MUST expose a `responses` object with `endpoint`,
 `stateless:true`, `store:false`, `stream:true`, `retained_responses:false`,
@@ -2228,6 +2257,106 @@ No utility result is billing, settlement, trust-tier or hardware acceptance
 evidence. Studio hardware acceptance and approved released-provider acceptance
 remain pending until independently recorded; fixtures alone MUST NOT promote
 these requirements to live conformance.
+
+**SPEC-001-R011 — Local use is unbilled, uncounted and yields to buyers.**
+A request on the loopback listener is *local* only when the peer is loopback
+and it carries exactly one `X-MacProvider-Origin: local-app` and neither
+`X-MacProvider-Origin: coordinator` nor an `X-MacProvider-Settlement-Metadata`
+header (parsable or not). Every other request, including coordinator canary
+and warmup probes, observe-mode dispatches and unmarked loopback clients, is
+*network* work. The coordinator sends `X-MacProvider-Origin: coordinator` on
+every HTTP-direct dispatch (buyer requests with or without settlement
+metadata, canary probes and warmup gates). SPEC-001-R010 token utilities are
+always local. WebSocket relay requests are always network. Under the
+SPEC-001-R009 local-process trust policy this is a classification, not an
+authentication boundary.
+
+*Accounting.* Local work MUST NOT be counted in the heartbeat
+`requests_served_since_last`, latency, throughput, `slots_free`, request,
+token or error totals, persisted request statistics, or any coordinator frame.
+It MUST NOT produce a v0.4 settlement receipt, and it earns nothing. A
+SPEC-015 v0.3 provenance receipt on a local response is unchanged; it carries
+no coordinator settlement binding, cannot be settled, and is not billing,
+earnings or served-work evidence. Receipt-audit and KV-cache request log
+lines for local requests carry a `local:`-prefixed `request_id`. `GET /v1/status` MUST report local work only under a
+separate `local_usage` object with `billable:false`, `heartbeat_counted:false`,
+`priority:"customers_first"`, `requests_in_flight`, `requests_total`,
+`requests_completed`, `requests_failed`, `requests_preempted`,
+`requests_cancelled`, `requests_declined`, `prompt_tokens_total`, `completion_tokens_total`,
+`reserved_buyer_slots`, `preemption_window_ms` and `queue_wait_ms`. Every
+admitted local request ends in exactly one of completed (including a
+successful token utility), failed, preempted or cancelled, which sum to
+`requests_total`; `requests_declined` counts every request never admitted
+(queue full or timed out, unavailable, or cancelled while waiting).
+`reserved_buyer_slots` is the effective reservation (0 while paused). These
+counters cover the current process only. The local-status capability
+`local_chat_priority_v1` and a `local_priority` object in
+`GET /v1/capabilities` advertise this policy.
+
+*Priority.* Paying network buyers always win, on the serial and the
+continuous-batching path alike, because admission happens before either
+engine path:
+
+1. With *S* served slots and *S* > 1, local work MUST NOT hold more than
+   *S* − *R* slots, where *R* is the buyer reservation
+   (`local_reserved_buyer_slots`, default 1, capped at *S* − 1). Local work
+   MUST also not take a slot that network work holds. With *S* = 1, *R* = 0.
+2. Local work that does not fit MUST wait behind network work and MUST NOT
+   delay a network request's admission. It is admitted before it registers any
+   runtime state, so a waiting local request holds no runtime capacity. At
+   most 16 local requests wait at once; another, or one still waiting after
+   30 seconds, MUST fail with HTTP 503 `local_preempted` (`retryable:true`)
+   without running.
+3. When a network request is admitted while network plus local work would
+   exceed *S*, the provider MUST preempt the most recently admitted local
+   requests, one per excess slot, no later than the preemption window
+   (`local_preemption_window_ms`, default 0, at most 2,000 ms) after that
+   admission. With a nonzero window the provider MUST re-check at the window's
+   end and preempt only if network work still needs the slot, choosing the
+   newest local request whose window has ended or is pending. Preemption
+   cancels the local request through the existing cancellation path (the
+   request's cancellation predicate and task), which is checked while waiting
+   for the inference gate, before and after prompt preparation, between serial
+   prefill chunks of a local request, and at every decode step; the slot is released at the next such point. A local client still
+   connected receives HTTP 503 `local_preempted`; a stream that already
+   started receives the same error as a terminal SSE event followed by
+   `[DONE]` and never a success terminal. A local request whose generation
+   already completed when preemption takes effect completes normally.
+4. An operator pause fences network work only: its drain waits for network
+   work and leaves local work running, and while paused local work MAY use
+   every slot (*R* = 0). A draining provider or one with no loaded model MUST
+   reject new local work with the same 503 `provider_paused` a buyer gets.
+   A coordinator-initiated drain leaves admitted local work running. A runtime
+   (warm-swap) drain preempts admitted local work. Process-exit
+   and update drains MUST preempt admitted local work, settle queued local
+   requests with 503 `provider_paused`, wait for both, and keep local admission
+   closed until the drain times out or the provider publishes ready again.
+5. Internal work that yields to network requests (idle prewarm, the
+   continuous-batching self-check) MUST also yield to local work, without
+   counting local work in any buyer-facing figure. The bounded SPEC-038
+   self-check admission hold fences new local work, including queued requests
+   and token utilities, with HTTP 503 `continuous_batching_stream_backpressure`
+   and the hold's `Retry-After` guidance. The hold preempts admitted local work
+   when it begins and drains it before running the check; drain timeout
+   reopens admission without running the check. A drain timeout during which
+   no network request was in flight is reported as `local_drain_timeout` and
+   does not escalate the next hold's drain bound. A pause ends the hold under SPEC-038,
+   after which the operator's ordinary local-use permission remains intact.
+6. A local request is never native-MTP eligible. A network request's
+   native-MTP active-row count excludes local rows; when one is admitted
+   native while local rows are active, the provider preempts the local work.
+   While more than one slot is served and the provider is not operator-paused,
+   at most one local request is admitted at a time.
+7. Network direct-HTTP requests keep the pre-R011 order: handle acquisition
+   (with warm-swap snapshot semantics) precedes provider admission. Only local
+   requests are admitted before handle acquisition and observe the actual swap
+   state.
+
+Contract tests MUST cover counter separation including the heartbeat,
+reservation, queueing, preemption and the preemption window on serial-shaped
+and continuous-batching-shaped admission, and the 503 `local_preempted`
+semantics. Fixtures alone MUST NOT promote this requirement to live
+conformance.
 
 ### 6.1. GET /v1/models
 
@@ -3059,6 +3188,19 @@ or negative value and MUST apply a valid value with the same minimum rule. The
 header changes runtime generation only; receipt canonicalization continues to
 use the original body value, including `null`/omitted.
 
+Every coordinator HTTP-direct dispatch to `/v1/chat/completions` (buyer
+requests, canary probes and warmup gates) MUST carry
+`X-MacProvider-Origin: coordinator`, with or without settlement metadata. The
+provider classifies a request carrying it as network work under
+`SPEC-001-R011`; only a loopback request marked `X-MacProvider-Origin:
+local-app` without either coordinator signal is local. It is a classification, not an authentication boundary, and
+it never creates a settlement receipt without settlement metadata. If a
+provider still answers a coordinator dispatch with HTTP 503 `local_preempted`,
+the coordinator MUST treat it as a retryable provider failure: the attempt is
+logged with error code `local_preempted`, advances under the buyer's retry
+budget as a 502, never reaches the buyer verbatim, and neither degrades the
+provider nor counts as a breaker fault.
+
 **Size limit:** The coordinator MUST NOT send an `inference_request`
 whose total WS frame size exceeds 16 MB. This accommodates the largest
 legal request body (10 MB per FR-8 Stage 1) plus envelope overhead.
@@ -3705,7 +3847,13 @@ binary MUST be rejected with HTTP 503 and OpenAI envelope
 `{error: {type: "service_unavailable", code: "provider_loading"}}` per
 SPEC-011 v0.5 R-3.2.3 and R-3.4.4. In-flight requests started in
 `ready` MUST continue to completion using their snapshot reference per
-SPEC-011 v0.5 R-3.2.2.
+SPEC-011 v0.5 R-3.2.2. This applies to both local and settlement-classified
+HTTP inference, including the Responses adapter and token utilities. HTTP
+admission MUST check the actual runtime state atomically with handle capture;
+it MUST NOT use the relay's old-model-during-loading snapshot policy.
+`GET /v1/capabilities` MUST report local inference and token utilities
+unavailable during loading or draining. An already-captured HTTP handle keeps
+its old snapshot and may finish normally.
 
 #### 6.8.4. No-starve rule
 

@@ -9,7 +9,7 @@
     {
       "spec_id": "SPEC-001",
       "title": "Phase 3 Binary: Mac Provider Inference CLI",
-      "version": "1.9.37",
+      "version": "1.9.39",
       "path": "specs/SPEC-001-phase3-binary.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -35,7 +35,7 @@
     {
       "spec_id": "SPEC-002",
       "title": "Phase 4 Coordinator: Mac Provider Request Router",
-      "version": "1.6.21",
+      "version": "1.6.23",
       "path": "specs/SPEC-002-coordinator.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -152,7 +152,7 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.60",
+      "version": "0.9.61",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -504,7 +504,7 @@
     {
       "spec_id": "SPEC-018",
       "title": "Agentic tool calling (provider-side response synthesis)",
-      "version": "0.2.15",
+      "version": "0.2.16",
       "path": "specs/SPEC-018-agentic-tool-calling.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -725,7 +725,7 @@
     {
       "spec_id": "SPEC-025",
       "title": "Native Mac App (signed `.dmg`, native Mac app with menu-bar presence)",
-      "version": "v0.33.0",
+      "version": "v0.34.1",
       "path": "specs/SPEC-025-native-mac-app.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1558,7 +1558,7 @@
     {
       "spec_id": "SPEC-050",
       "title": "MALIBU Stake Allowance",
-      "version": "0.1.0",
+      "version": "0.1.2",
       "path": "specs/SPEC-050-malibu-stake-allowance.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -6527,7 +6527,7 @@
     {
       "requirement_id": "SPEC-006-R001",
       "spec_id": "SPEC-006",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase5-gateway/internal/auth/keys.go:Validate"
       ],
@@ -6539,21 +6539,13 @@
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:160d0e2ff62b0e40c65dd3741a35de4be322ea8e",
-          "source": null,
-          "captured_at": "2026-09-18",
-          "expires_at": "2026-10-18"
-        },
-        {
-          "artifact": "sha256:3ff2a7603caa0a3a28d71f5eba4852b60efb56d850b085a77f6e0e1742bda0a7",
-          "source": "journeys/evidence/buyer-paid-path-20260918T034532Z.spec-005-r001-spec-005-r002-spec-006-r001-spec-006-r002-spec-022-r001-spec-022-r002-spec-022-r003-spec-022-r010.journey-result.signed.json",
-          "captured_at": "2026-09-18",
-          "expires_at": "2026-10-18"
-        }
-      ],
-      "gap": null
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2054",
+        "rationale": "Phase 3 updates the mapped buyer authentication flow fixture to a valid authoritative routing identity. Historical paid-path evidence no longer binds the current test fragment; fresh deployed paid-path acceptance remains pending. Historical journey artifacts are retained unchanged."
+      }
     },
     {
       "requirement_id": "SPEC-006-R002",
@@ -13447,7 +13439,8 @@
         "phase4-coordinator/internal/rewards/stake.go:ParseMALIBUUnits",
         "phase4-coordinator/internal/stats/migrations/032_malibu_stake_ledger.up.sql:malibu_stake_events_idempotency",
         "phase4-coordinator/internal/rewards/stake.go:checkStakeRate",
-        "phase4-coordinator/internal/rewards/stake.go:accountIdentity"
+        "phase4-coordinator/internal/rewards/stake.go:accountIdentity",
+        "phase4-coordinator/internal/rewards/stake.go:AccountStakeIdentity"
       ],
       "tests": [
         "phase4-coordinator/internal/rewards/stake_integration_test.go:TestStakeLockIsBoundedIdempotentAndNettedFromWithdrawable",
@@ -13459,7 +13452,8 @@
         "phase4-coordinator/internal/rewards/stake_integration_test.go:TestStakeChangesAreRateLimitedPerAccount",
         "phase4-coordinator/internal/stakeallowance/handler_test.go:TestStakeHandlerUnlockNeedsNoGitHubIdentity",
         "phase4-coordinator/internal/rewards/stake_integration_test.go:TestStakeOwnershipAndIdentityRules",
-        "phase4-coordinator/internal/rewards/stake_integration_test.go:TestStakeRateBoundCountsEveryAppendedEvent"
+        "phase4-coordinator/internal/rewards/stake_integration_test.go:TestStakeRateBoundCountsEveryAppendedEvent",
+        "phase4-coordinator/internal/billing/routing_ownership_test.go:TestBuyerOwnedProvidersCachesPositiveStakeIdentity"
       ],
       "journeys": [],
       "evidence": [],
@@ -13678,7 +13672,7 @@
       "tests": [
         "phase4-coordinator/internal/billing/allowance_selfdeal_test.go:TestAllowanceSelfDealingRelations",
         "phase4-coordinator/internal/billing/allowance_selfdeal_test.go:TestAllowanceSelfDealingFailsSafe",
-        "phase4-coordinator/internal/buyer/allowance_hook_test.go:TestAllowanceSelfDealtAttemptIsRewardsExcluded"
+        "phase4-coordinator/internal/buyer/allowance_hook_test.go:TestAllowanceOwnedProviderExcludedBeforeDispatch"
       ],
       "journeys": [],
       "evidence": [],
@@ -13924,6 +13918,149 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2018",
         "rationale": "Provider-local stateless Responses and exact loaded-generation token utilities. Shared contract fixtures do not establish hardware lifecycle, shared-capacity or released-provider acceptance; those acceptance gates remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-001-R011",
+      "spec_id": "SPEC-001",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/LocalRequestPriority.swift:struct LocalPriorityPolicy",
+        "phase3-binary/Sources/macprovider-cli/ProviderStatus.swift:actor ProviderStatus",
+        "phase3-binary/Sources/macprovider-cli/HTTPServer.swift:final class RouterHandler",
+        "phase4-coordinator/internal/providerhttp/client.go:func SetCoordinatorOrigin",
+        "phase4-coordinator/internal/buyer/server.go:func httpProviderLocalPreempted"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/LocalRequestPriorityTests.swift:final class LocalRequestPriorityTests",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:func testHeartbeatExcludesLocalRequests",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:func testBuyerPreemptsLocalRowAndTakesItsSlot",
+        "phase4-coordinator/internal/buyer/local_preempted_origin_test.go:func TestHTTPNonStreamingLocalPreemptedRetriesWithOriginMarker",
+        "phase4-coordinator/internal/buyer/local_preempted_origin_test.go:func TestHTTPStreamingLocalPreemptedRetriesWithOriginMarker",
+        "phase4-coordinator/internal/ws/http_origin_marker_test.go:func TestHTTPCanaryAndWarmupCarryCoordinatorOriginMarker",
+        "phase3-binary/Tests/macprovider-cliTests/LocalRequestPriorityTests.swift:func testOriginIsLocalOnlyWithTheExplicitLoopbackMarker",
+        "phase3-binary/Tests/macprovider-cliTests/LocalRequestPriorityTests.swift:func testCoordinatorProbeWithoutMetadataAndUnmarkedClientsAreNetworkOverHTTP",
+        "phase3-binary/Tests/macprovider-cliTests/LocalRequestPriorityTests.swift:func testSelfCheckHoldPreemptsRunningLocalChatAndDrainsPromptly",
+        "phase3-binary/Tests/macprovider-cliTests/LocalRequestPriorityTests.swift:func testLocalNeverTakesTheNativeMTPRowAndBuyerKeepsIt",
+        "phase3-binary/Tests/macprovider-cliTests/LocalRequestPriorityTests.swift:func testLocalPrefillChecksPreemptionBetweenChunks"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2054",
+        "rationale": "Local-use accounting separation and customers-first admission are covered by fixture runtimes shaped like the serial and continuous-batching gates and by the real continuous-batching scheduler. Released-provider acceptance with the in-app Chat client remains pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-025-R010",
+      "spec_id": "SPEC-025",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/app/Sources/Malibu/Chat/ChatStore.swift:final class ChatStore"
+      ],
+      "tests": [
+        "phase3-binary/app/Tests/MalibuTests/ChatStoreTests.swift:final class ChatStoreTests"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2054",
+        "rationale": "Phase 3 source and regression fixtures implemented; release and live app acceptance remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-025-R011",
+      "spec_id": "SPEC-025",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/app/Sources/Malibu/Chat/AgentTools.swift:actor AgentWorkspace"
+      ],
+      "tests": [
+        "phase3-binary/app/Tests/MalibuTests/AgentToolTests.swift:final class AgentToolTests"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2054",
+        "rationale": "Phase 3 source and regression fixtures implemented; release and live app acceptance remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-025-R012",
+      "spec_id": "SPEC-025",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/app/Sources/Malibu/ConnectedApps/ConnectedAppsScreen.swift:final class ConnectedAppsStore"
+      ],
+      "tests": [
+        "phase3-binary/app/Tests/MalibuTests/ConnectedAppsTests.swift:final class ConnectedAppsTests",
+        "phase3-binary/app/Tests/MalibuTests/ConnectedAppsTests.swift:func testOpenCodeLauncherIgnoresRepositoryConfiguration"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2054",
+        "rationale": "Phase 3 source and regression fixtures implemented; release and live app acceptance remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-002-R008",
+      "spec_id": "SPEC-002",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/buyer/routing_ownership.go:func (s *Server) buyerOwnedProviders",
+        "phase4-coordinator/internal/billing/routing_ownership.go:func (s *Store) BuyerOwnedProviders",
+        "phase4-coordinator/cmd/coordinator/stake_allowance.go:func installRoutingStakeIdentity",
+        "phase4-coordinator/internal/buyer/routing_ownership.go:func (s *Server) ownershipRefusal",
+        "phase5-gateway/internal/router/routing_identity.go:func (s *Server) setRoutingIdentity"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/buyer/routing_ownership_test.go:func TestBuyerOwnershipSelectionPaths",
+        "phase4-coordinator/internal/billing/routing_ownership_test.go:func TestBuyerOwnedProvidersCachesPositiveStakeIdentity",
+        "phase4-coordinator/internal/billing/routing_ownership_test.go:func TestBuyerOwnedProvidersStakeFaultFallsBackToOtherSources",
+        "phase4-coordinator/internal/billing/routing_ownership_test.go:func TestBuyerOwnedProvidersHeldStakeLedgerHitsDeadline",
+        "phase4-coordinator/internal/billing/routing_ownership_test.go:func TestBuyerOwnedProvidersWithoutStakeLedgerContributesNothing",
+        "phase4-coordinator/cmd/coordinator/stake_allowance_test.go:func TestStakeRoutingIdentityNotInstalledWhenLedgerFails",
+        "phase4-coordinator/cmd/coordinator/stake_allowance_test.go:func TestStakeRoutingIdentityUnreachableLedgerFallsBack",
+        "phase4-coordinator/internal/buyer/routing_ownership_test.go:func TestBuyerOwnershipEncryptedDispatchRevalidates",
+        "phase4-coordinator/internal/buyer/routing_ownership_test.go:func TestBuyerOwnershipRelayBlindReservationLookupFailureIsTransient",
+        "phase5-gateway/internal/router/routing_identity_test.go:func TestRoutingIdentityUsesReadStoreWhileWriterHeld",
+        "phase5-gateway/internal/storage/sqlite/routing_identity_test.go:func TestRoutingGitHubIdentitiesReadOnlyDuringHeldWriter"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2054",
+        "rationale": "Authoritative buyer ownership exclusion implemented with source fixtures; deployed gateway/coordinator acceptance remains pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-006-R023",
+      "spec_id": "SPEC-006",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/internal/router/routing_identity.go:func (s *Server) setRoutingIdentity"
+      ],
+      "tests": [
+        "phase5-gateway/internal/router/connected_apps_contract_test.go:func TestConnectedAppsAPIContractPreservesToolsAndTrustedIdentity"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2054",
+        "rationale": "Authoritative buyer ownership exclusion implemented with source fixtures; deployed gateway/coordinator acceptance remains pending."
       }
     }
   ]

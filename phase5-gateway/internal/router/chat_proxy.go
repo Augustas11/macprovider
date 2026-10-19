@@ -746,6 +746,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			// signed-finality capability, set together.
 			s.setCoordinatorChatContext(upReq.Header, r, subject.AccountID)
 			advertiseCapacityShed429(upReq.Header)
+			if upReq.Header.Get(routingGitHubIDsHeader) == "unavailable" {
+				return nil, errRoutingIdentityUnavailable
+			}
 			// SPEC-050-R007: API-key requests are admitted against the
 			// account's allowance on the coordinator before dispatch.
 			if !authn.Demo && authn.WalletSession == nil {
@@ -909,6 +912,14 @@ func (s *Server) doCoordinatorChatWithRetry(upCtx context.Context, r *http.Reque
 		}
 		upReq, err := buildUpReq()
 		if err != nil {
+			if errors.Is(err, errRoutingIdentityUnavailable) {
+				// Preserve evidence of earlier dispatched attempts. Returning a
+				// transport error here would refund even their billable work.
+				h := make(http.Header)
+				h.Set("Content-Type", "application/json")
+				h.Set(settlementNoPriorDispatchHeader, "1")
+				return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: h, Body: io.NopCloser(strings.NewReader(`{"error":{"type":"service_unavailable","code":"no_provider_available","message":"No eligible provider available"}}`))}, false, priorProviderDispatch, nil
+			}
 			return nil, false, priorProviderDispatch, err
 		}
 		resp, err := s.client.Do(upReq)

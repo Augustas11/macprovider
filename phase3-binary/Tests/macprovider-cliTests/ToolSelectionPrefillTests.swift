@@ -59,6 +59,49 @@ final class ToolSelectionPrefillTests: XCTestCase {
 
     // MARK: Prompt assembly per mode
 
+    func testCatalogProfilesUseTheirPinnedTemplateGrammarAndSuffix() throws {
+        let candidates: [(String, ToolSelectionPolicy.CallFormat, String, String)] = [
+            ("mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit", .functionXML,
+             "<tool_call>\n<function=get_time>\n", "<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call>"),
+            ("mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit", .jsonEnvelope,
+             "<tool_call>\n{\"name\": \"get_time\", \"arguments\": ", "{\"city\":\"Paris\"}}\n</tool_call>"),
+        ]
+        let tokenizer = PrefillFixtureTokenizer()
+        let suffix = "<|im_start|>assistant\n"
+        for (model, format, namedPrefill, continuation) in candidates {
+            let profile = try XCTUnwrap(ToolSelectionPolicy.guaranteedCallProfile(modelID: model))
+            XCTAssertEqual(profile.format, format)
+            XCTAssertEqual(profile.generationPromptSuffix, suffix)
+            for choice in ["required", named("get_time")] as [Any] {
+                let request = try request(choice: choice, model: model)
+                let plan = try XCTUnwrap(ModelRuntime.toolCallPrefill(for: request, toolSelectionModelID: model))
+                let selection = try ToolSelectionPolicy.selection(request.promptSource.toolChoice)
+                XCTAssertEqual(plan.prefill, selection == .required ? "<tool_call>\n" : namedPrefill)
+                let prompt = tokenizer.encode(text: "<|im_start|>user\nHi<|im_end|>\n" + suffix, addSpecialTokens: false)
+                XCTAssertEqual(ModelRuntime.appendingToolCallPrefill(plan.prefill, generationPromptSuffix: plan.generationPromptSuffix,
+                    to: prompt, tokenizer: tokenizer), prompt + tokenizer.encode(text: plan.prefill, addSpecialTokens: false))
+                for mismatch in [suffix + "<think>\n", generationPrompt, "<|im_start|>assistant "] {
+                    XCTAssertNil(ModelRuntime.appendingToolCallPrefill(plan.prefill, generationPromptSuffix: plan.generationPromptSuffix,
+                        to: tokenizer.encode(text: mismatch, addSpecialTokens: false), tokenizer: tokenizer))
+                }
+                let generated = String(namedPrefill.dropFirst(plan.prefill.count)) + continuation
+                let parsed = try ModelRuntime.parseGeneratedOutput(filteredText: generated, generatedTokenIDs: [], decode: { _ in "" },
+                    request: request, mode: .complete(), defaultCompletionTokens: 9, toolCallPrefill: plan.prefill)
+                XCTAssertEqual(parsed.content, "")
+                XCTAssertEqual(parsed.toolCalls.map(\.functionName), ["get_time"])
+                XCTAssertEqual(parsed.toolCalls.first?.arguments, #"{"city":"Paris"}"#)
+                XCTAssertNoThrow(try ModelRuntime.validateStructuredCompletion(CompletionResult(content: parsed.content, finishReason: "stop",
+                    promptTokens: 1, completionTokens: 9, toolCalls: parsed.toolCalls, settlementDisposition: .eligibleOwner), request: request))
+                for invalid in [String(generated.dropLast()), generated + " trailing prose"] {
+                    XCTAssertThrowsError(try ModelRuntime.parseGeneratedOutput(filteredText: invalid, generatedTokenIDs: [], decode: { _ in "" },
+                        request: request, mode: .complete(), defaultCompletionTokens: 9, toolCallPrefill: plan.prefill))
+                }
+                XCTAssertThrowsError(try ModelRuntime.validateStructuredCompletion(CompletionResult(content: parsed.content, finishReason: "length",
+                    promptTokens: 1, completionTokens: 100, toolCalls: parsed.toolCalls, settlementDisposition: .eligibleOwner), request: request))
+            }
+        }
+    }
+
     func testNamedChoiceRendersOnlyTheSelectedFunction() throws {
         XCTAssertEqual(renderedToolNames(try ModelRuntime.userInput(for: request(choice: named("get_time")))), ["get_time"])
         XCTAssertEqual(renderedToolNames(try ModelRuntime.userInput(for: request(choice: "required"))), ["get_weather", "get_time"])

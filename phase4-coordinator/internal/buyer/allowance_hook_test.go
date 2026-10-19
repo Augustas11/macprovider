@@ -24,6 +24,9 @@ func (s allowanceTestSource) EarningStakes(context.Context, time.Time, time.Dura
 func newAllowanceHarness(t *testing.T, stakes ...billing.AllowanceStake) *econHarness {
 	t.Helper()
 	h, _ := newEconHarness(t, WithGatewayServiceToken(allowanceTestServiceToken), WithRequireGatewayContext(true))
+	if _, err := h.db.Exec(`CREATE TABLE IF NOT EXISTS provider_ownership (provider_id TEXT PRIMARY KEY, github_user_id INTEGER NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
 	policy := billing.AllowancePolicy{DailyBudgetCredits: 10_000_000, CreditsPerMALIBU: 1000, PerAccountDailyCapCredits: 1_000_000, MinStakeAge: time.Hour}
 	if _, _, err := h.store.RefreshAllowanceDay(context.Background(), time.Now().UTC(), allowanceTestSource{stakes: stakes}, policy); err != nil {
 		t.Fatal(err)
@@ -124,11 +127,14 @@ func TestCoordinatorAllowanceAdmissionFundsAndSplits(t *testing.T) {
 	}
 }
 
-// SPEC-050-R010: an allowance request served by the staker's own provider is
-// written rewards-excluded; one served by an unrelated provider is not, and
-// both providers keep their credit.
-func TestAllowanceSelfDealtAttemptIsRewardsExcluded(t *testing.T) {
+// SPEC-050-R010 / SPEC-002-R008: an allowance request is never dispatched to
+// the staker's own provider. A provider the staker does not own but which
+// shares a payout address with the staker's provider stays routable; its
+// request is written rewards-excluded. An unrelated provider is not excluded,
+// and every serving provider keeps its credit.
+func TestAllowanceOwnedProviderExcludedBeforeDispatch(t *testing.T) {
 	h := newAllowanceHarness(t,
+		billing.AllowanceStake{AccountID: "acct_owner", GitHubUserID: 6, Units: 100 * billing.AllowanceUnitsPerMALIBU},
 		billing.AllowanceStake{AccountID: "acct_self", GitHubUserID: 7, Units: 100 * billing.AllowanceUnitsPerMALIBU},
 		billing.AllowanceStake{AccountID: "acct_clean", GitHubUserID: 8, Units: 100 * billing.AllowanceUnitsPerMALIBU},
 	)
@@ -137,17 +143,24 @@ func TestAllowanceSelfDealtAttemptIsRewardsExcluded(t *testing.T) {
 		`CREATE TABLE IF NOT EXISTS provider_payout_addresses (provider_id TEXT NOT NULL, chain TEXT NOT NULL, address TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS referral_issuers (issuer_id TEXT PRIMARY KEY, code_type TEXT NOT NULL, provider_id TEXT)`,
 		`CREATE TABLE IF NOT EXISTS referral_redemptions (campaign TEXT NOT NULL, provider_id TEXT NOT NULL, issuer_id TEXT NOT NULL)`,
-		`INSERT INTO provider_ownership VALUES ('p1', 7), ('p_clean', 8)`,
+		// p1 is the only serving provider. acct_self owns p_mine (offline),
+		// which shares p1's payout address; acct_owner owns p1.
+		`INSERT INTO provider_ownership VALUES ('p1', 6), ('p_mine', 7), ('p_clean', 8)`,
+		`INSERT INTO provider_payout_addresses VALUES ('p1', 'base', '0xAbC'), ('p_mine', 'base', '0xabc')`,
 	} {
 		if _, err := h.db.Exec(stmt); err != nil {
 			t.Fatal(err)
 		}
 	}
+	rec := allowanceChat(h, "acct_owner", "ext-acct_owner", allowanceHeaders("50", false))
+	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "no_provider_available") || ledgerRowsFor(t, h, "acct_owner", "ext-acct_owner") != 0 {
+		t.Fatalf("own route was dispatched or billed: %d %s", rec.Code, rec.Body.String())
+	}
 	for account, want := range map[string]int{"acct_self": 1, "acct_clean": 0} {
 		external := "ext-" + account
 		rec := allowanceChat(h, account, external, allowanceHeaders("50", false))
 		if rec.Code != http.StatusOK || rec.Header().Get(allowanceFundingHeader) != billing.AllowanceFundingAllowance {
-			t.Fatalf("%s status %d headers %v", account, rec.Code, rec.Header())
+			t.Fatalf("%s status %d headers %v body %s", account, rec.Code, rec.Header(), rec.Body.String())
 		}
 		var excluded int
 		var providerCredits int64

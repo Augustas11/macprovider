@@ -38,6 +38,9 @@ func TestStrangerKeyOpenAIChatUsageFlow(t *testing.T) {
 		if got != "Bearer service-token" {
 			t.Fatalf("forwarded Authorization=%q, want %q", got, "Bearer service-token")
 		}
+		if got := r.Header.Get(routingGitHubIDsHeader); got != "10001" {
+			t.Fatalf("forwarded GitHub identity=%q, want authenticated numeric identity", got)
+		}
 		forwardedRequestID = r.Header.Get("X-Request-ID")
 		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
 			"id":"chatcmpl_phase_e",
@@ -49,7 +52,7 @@ func TestStrangerKeyOpenAIChatUsageFlow(t *testing.T) {
 		}`), nil
 	})}
 	h, _, _, _ := newTestHarnessConfig(t, fakeOAuth{identity: auth.OAuthIdentity{
-		ProviderUserID: "stranger-1",
+		ProviderUserID: "10001",
 		Email:          "stranger@example.test",
 		Scopes:         []string{"read:user"},
 	}}, func(cfg *config.Config) {

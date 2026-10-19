@@ -205,7 +205,7 @@ func TestRelayBlindEnforceSelectionAppliesSettlementPrerequisites(t *testing.T) 
 			if got := f.server.relayBlindSettlementPrerequisite(provider); got != tc.reason {
 				t.Fatalf("prerequisite=%q want %q", got, tc.reason)
 			}
-			_, _, found, _ := f.server.selectRelayBlindProvider(context.Background(), "", "model-a", 2048, false, relayblind.KeyClassRelayBlind, nil)
+			_, _, found, _, _ := f.server.selectRelayBlindProvider(context.Background(), "", "model-a", 2048, false, relayblind.KeyClassRelayBlind, nil)
 			if found != (tc.reason == "") {
 				t.Fatalf("selected=%v want %v", found, tc.reason == "")
 			}
@@ -249,11 +249,11 @@ func TestRelayBlindSelectionExcludesPoolModelBoundSession(t *testing.T) {
 		if provider.ModelAdmissionPoolModelID == "" {
 			t.Fatal("fixture did not keep the pool model binding")
 		}
-		if _, _, found, _ := f.server.selectRelayBlindProvider(context.Background(), "", "model-a", 2048, false, relayblind.KeyClassRelayBlind, nil); found {
+		if _, _, found, _, _ := f.server.selectRelayBlindProvider(context.Background(), "", "model-a", 2048, false, relayblind.KeyClassRelayBlind, nil); found {
 			t.Fatalf("mode=%s selected a pool-model-bound session", mode)
 		}
 		unbound := newRelayBlindSettlementFixture(t, now, mode, profile, nil, nil)
-		if _, _, found, _ := unbound.server.selectRelayBlindProvider(context.Background(), "", "model-a", 2048, false, relayblind.KeyClassRelayBlind, nil); !found {
+		if _, _, found, _, _ := unbound.server.selectRelayBlindProvider(context.Background(), "", "model-a", 2048, false, relayblind.KeyClassRelayBlind, nil); !found {
 			t.Fatalf("mode=%s did not select the unbound session", mode)
 		}
 	}

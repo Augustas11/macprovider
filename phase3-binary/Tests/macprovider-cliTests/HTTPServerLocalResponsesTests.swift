@@ -162,21 +162,29 @@ final class HTTPServerLocalResponsesTests: XCTestCase {
             let status = ProviderStatus(modelID: "fixture-model", modelLoaded: true, capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: 1))
             try await withServer(runtime: runtime, providerStatus: status) { port in
                 let task = Task {
-                    try await self.post(port: port, path: path, body: path == "/v1/responses"
+                    // A Responses client marks itself local (SPEC-001-R011);
+                    // token utilities are always local.
+                    try await self.post(port: port, path: path, headers: [
+                        RouterHandler.requestOriginHeaderName: RouterHandler.localAppOriginValue,
+                    ], body: path == "/v1/responses"
                         ? ["model": "fixture-model", "input": "hello"]
                         : ["model": "fixture-model", "text": "hello"])
                 }
                 do {
                     try await self.waitUntil { await runtime.entered }
+                    // SPEC-001-R011: local work is counted apart from buyer
+                    // work and never consumes a published buyer slot.
                     let active = await status.snapshot()
-                    XCTAssertEqual(active.requestsInFlight, 1)
-                    XCTAssertEqual(active.slotsFree, 0)
+                    XCTAssertEqual(active.localUsage.requestsInFlight, 1)
+                    XCTAssertEqual(active.requestsInFlight, 0)
+                    XCTAssertEqual(active.slotsFree, 1)
                     task.cancel()
                     _ = await task.result
                     try await self.waitUntil { await runtime.cancelled }
-                    try await self.waitUntil { await status.snapshot().requestsInFlight == 0 }
+                    try await self.waitUntil { await status.snapshot().localUsage.requestsInFlight == 0 }
                     let drained = await status.snapshot()
                     XCTAssertEqual(drained.slotsFree, 1)
+                    XCTAssertEqual(drained.requestsTotal, 0)
                 } catch {
                     task.cancel()
                     _ = await task.result

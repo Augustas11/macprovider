@@ -1,6 +1,6 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.60 (2026-10-16, authenticated fleet cache purge)
+**Version:** 0.9.61 (2026-10-19, authoritative routing identity)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.17, SPEC-003 v0.7, SPEC-004 v0.3.2
 
 **Change log v0.9.59 (2026-10-15, Related: #2016):**
@@ -4997,3 +4997,24 @@ The operator MUST execute all 9 items before SPEC-006 v0.8 is deployed to produc
 9. Sticky affinity disclosure parity MUST be complete before `routing.sticky_enabled` is set to `true` in production: the v0.8 § 1.6 and § 5.3.1 sticky disclosure language MUST appear in (a) the signup flow, (b) the single-page docs, (c) `/v1/models tier1_disclosure.sticky_affinity`, and (d) any SDK README the operator distributes. Operators who keep `routing.sticky_enabled: false` do NOT need to surface sticky-specific language. [§ 1.6 + § 5.3.1 above]
 
 This checklist is the operator-side counterpart to SPEC-006 v0.8's spec-side disclosure language. Together they implement the audit's recommendation: keep Tier 1 narrow, explicit, and operationally hardened, while treating provider-private prompts, attestation, model integrity, sticky privacy disclosure, and marketplace-grade settlement as separate launch gates.
+
+
+## SPEC-006-R023 — Trusted routing ownership identity
+
+Every buyer inference hop (Chat Completions, translated Responses/Messages,
+and relay-blind reservation/consume/dispatch) MUST derive account identity
+from authenticated credentials and the gateway database. All GitHub identities
+linked to that account MUST be read, without choosing only the first link.
+The gateway MUST overwrite the internal routing identity header defined in
+SPEC-002-R008; buyer-supplied copies MUST never cross the proxy boundary.
+Successful no-link and lookup failure are distinct (`none` and `unavailable`).
+Unavailable or malformed authoritative identity MUST never become a no-link
+success. Wallet sessions use the persisted owning account; demo subjects have
+no OAuth link. The coordinator rechecks its provider ownership before every
+dispatch, including retries and resumed encrypted reservations.
+
+These checks apply identically to streaming and non-streaming requests and
+preserve supported tool-call and tool-result envelopes. Connected-app fixtures
+prove only the covered API behavior; they do not establish installed-client
+compatibility, additional model qualification, or private transport for
+Responses/Messages.

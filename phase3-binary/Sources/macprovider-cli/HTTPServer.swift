@@ -470,6 +470,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         "referral_advocacy_v1",
         // Metrics carry true requests/minute and GPU utilisation (#2029).
         "metrics_request_rate_v1",
+        // SPEC-001-R011: local use is counted apart and yields to buyers.
+        "local_chat_priority_v1",
         "referral_repeatable_advocacy_v1",
         "referral_fragment_links_v1",
         "provider_safety_telemetry_v2",
@@ -720,13 +722,27 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     private func handleLocalCapabilities(context: ChannelHandlerContext) {
         let writer = ResponseWriter(context: context)
         let runtime = modelRuntime
+        let providerStatus = providerStatus
         Task {
             let responses = await runtime.localResponsesCapabilities()
             let utilities = await runtime.localTokenUtilityCapabilities()
+            let localUsage = await providerStatus.currentLocalUsage()
             writer.writeJSON(status: .ok, body: [
                 "object": "local_capabilities",
                 "model": responses.model as Any? ?? NSNull(),
                 "authorization": ["policy": "loopback_local_process", "bearer_auth": false],
+                // SPEC-001-R011: local use is not billable, not counted, and
+                // yields to network buyers.
+                "local_priority": [
+                    "capability": "local_chat_priority_v1",
+                    "priority": "customers_first",
+                    "billable": false,
+                    "heartbeat_counted": false,
+                    "reserved_buyer_slots": localUsage.reservedBuyerSlots,
+                    "preemption_window_ms": localUsage.preemptionWindowMS,
+                    "queue_wait_ms": localUsage.queueWaitMS,
+                    "preempted_error_code": "local_preempted",
+                ],
                 "responses": [
                     "endpoint": "/v1/responses", "stateless": true, "store": false,
                     "stream": true, "retained_responses": false,
@@ -769,32 +785,48 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             let prewarmer = idlePrewarmer
             let disconnect = ClientDisconnectState()
             inflightDisconnects.append(disconnect)
+            // SPEC-001-R011: token utilities are local use only.
+            let lease = LocalPreemptionLease()
             let task = Task {
-                let admission = await status.admitRequest()
-                guard case .admitted(let startedAt) = admission else {
-                    writer.writeAPIError(
-                        Self.admissionRefusalError(admission),
-                        retryAfterSecondsOverride: await status.selfCheckAdmissionHoldRetryAfterSeconds()
+                switch await status.beginLocalRequest(lease, isCancelled: { disconnect.isDisconnected }) {
+                case .admitted:
+                    break
+                case .cancelled:
+                    writer.close()
+                    return
+                case .preempted:
+                    writer.writeAPIError(.localPreempted(running: false))
+                    return
+                case .selfCheckAdmissionHold:
+                    Self.writeLocalAdmissionRefusal(
+                        .selfCheckAdmissionHold, writer: writer,
+                        retryAfterSeconds: await status.selfCheckAdmissionHoldRetryAfterSeconds()
                     )
+                    return
+                case .unavailable:
+                    writer.writeAPIError(APIError(status: 503, message: "Provider is paused or draining", type: "server_error", code: "provider_paused"))
                     return
                 }
                 do {
                     await prewarmer?.cancelInflightPrewarm()
-                    let result = try await runtime.localTokenUtility(request, shouldCancel: { disconnect.isDisconnected })
+                    let result = try await runtime.localTokenUtility(request, shouldCancel: { disconnect.isDisconnected || lease.isPreempted })
                     let encoded = try JSONEncoder().encode(result)
                     let object = try JSONSerialization.jsonObject(with: encoded)
-                    await status.finishRequest(startedAt: startedAt, completion: nil, failed: false)
+                    await status.finishLocalRequest(lease, completion: nil, failed: false, succeeded: true)
                     if disconnect.isDisconnected { writer.close() } else { writer.writeJSON(status: .ok, body: object) }
                 } catch {
-                    await status.finishRequest(startedAt: startedAt, completion: nil, failed: !(error is CancellationError))
+                    await status.finishLocalRequest(lease, completion: nil, failed: !(error is CancellationError))
                     if disconnect.isDisconnected {
                         writer.close()
+                    } else if lease.isPreempted {
+                        writer.writeAPIError(.localPreempted(running: true))
                     } else {
                         writer.writeAPIError(error as? APIError ?? APIError(status: 500, message: "Token utility failed", type: "server_error", code: "internal_error"))
                     }
                 }
             }
             disconnect.onDisconnect { task.cancel() }
+            lease.onPreempt { task.cancel() }
         } catch let error as APIError {
             writeAPIError(context: context, error)
         } catch {
@@ -969,6 +1001,18 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         let inboundRequestID = rawInboundRequestID.flatMap(ChatCompletionRequest.normalizedRequestID)
         let auditRequestID = inboundRequestID ?? UUID().uuidString
         let settlementMetadata = Self.settlementMetadata(from: requestHead?.headers.first(name: Self.settlementMetadataHeaderName))
+        // SPEC-001-R011: local is classified positively (see `requestOrigin`).
+        // Anything else, including coordinator probes that carry no
+        // settlement metadata, is network work with buyer priority.
+        let origin = Self.requestOrigin(
+            headers: requestHead?.headers ?? HTTPHeaders(),
+            settlementMetadata: settlementMetadata,
+            peerIsLoopback: Self.isLoopbackPeer(context.remoteAddress)
+        )
+        let localLease: LocalPreemptionLease? = origin == .local ? LocalPreemptionLease() : nil
+        // Receipt-audit and KV-cache log lines tag local work so it never
+        // reads as buyer traffic; receipts keep the inbound request id.
+        let logRequestID = Self.logRequestID(auditRequestID, localLease: localLease)
         var parsedRequest: ChatCompletionRequest?
 
         do {
@@ -1008,7 +1052,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 
             if request.stream {
                 if settlementMetadata == nil {
-                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .streamingRequest)
+                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: .streamingRequest)
                 }
                 handleStreamingChatCompletions(
                     request: request,
@@ -1020,6 +1064,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     providerID: providerID,
                     requestID: auditRequestID,
                     settlementMetadata: settlementMetadata,
+                    localLease: localLease,
                     idlePrewarmer: idlePrewarmer
                 )
                 return
@@ -1027,7 +1072,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 
             let providerStatus = providerStatus
             let idlePrewarmer = idlePrewarmer
-            Task.detached { @Sendable [modelRuntime, providerStatus, request, writer, warmSwapEnabled, receiptBuilder, providerID, auditRequestID, settlementMetadata, idlePrewarmer, requestAcceptedAt, disconnect] in
+            let task = Task.detached { @Sendable [modelRuntime, providerStatus, request, writer, warmSwapEnabled, receiptBuilder, providerID, auditRequestID, logRequestID, settlementMetadata, idlePrewarmer, requestAcceptedAt, disconnect, localLease] in
                 var startedAt = requestAcceptedAt
                 var providerRequestStarted = false
                 // SPEC-015 §M.2.2 atomic-read invariant — capture
@@ -1048,33 +1093,56 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     snapshot: preSnapshot
                 )
                 do {
-                    let handle = try await modelRuntime.acquireRequestHandle(request)
-                    CBTrace.log(auditRequestID, "http_handle")
+                    let handle: RequestHandle
+                    if let localLease {
+                        // SPEC-001-R011: local admission and buyer preemption
+                        // precede runtime registration, so queued local work
+                        // holds nothing, and a new local request sees the
+                        // actual swap state.
+                        let admission = await providerStatus.beginLocalRequest(localLease, isCancelled: { disconnect.isDisconnected })
+                        guard case .admitted(let admittedAt) = admission else {
+                            Self.writeLocalAdmissionRefusal(admission, writer: writer, retryAfterSeconds: await providerStatus.selfCheckAdmissionHoldRetryAfterSeconds())
+                            return
+                        }
+                        startedAt = admittedAt
+                        providerRequestStarted = true
+                        try Task.checkCancellation()
+                        handle = try await modelRuntime.acquireLocalRequestHandle(request)
+                        CBTrace.log(auditRequestID, "http_handle")
+                    } else {
+                        // Network buyers keep the pre-R011 order: the
+                        // swap-snapshot handle first (a warm swap's old model
+                        // still serves), then provider admission, so
+                        // validation and swap refusals never reach buyer stats.
+                        handle = try await modelRuntime.acquireRequestHandle(request)
+                        CBTrace.log(auditRequestID, "http_handle")
+                        let admission = await providerStatus.admitRequest()
+                        guard case .admitted(let admittedAt) = admission else {
+                            Task { await modelRuntime.unregisterInFlight(handle.registrationID) }
+                            writer.writeAPIError(
+                                Self.admissionRefusalError(admission),
+                                retryAfterSecondsOverride: await providerStatus.selfCheckAdmissionHoldRetryAfterSeconds()
+                            )
+                            return
+                        }
+                        startedAt = admittedAt
+                        providerRequestStarted = true
+                    }
                     defer {
                         Task { await modelRuntime.unregisterInFlight(handle.registrationID) }
                     }
-                    let admission = await providerStatus.admitRequest()
-                    guard case .admitted(let admittedAt) = admission else {
-                        writer.writeAPIError(
-                            Self.admissionRefusalError(admission),
-                            retryAfterSecondsOverride: await providerStatus.selfCheckAdmissionHoldRetryAfterSeconds()
-                        )
-                        return
-                    }
-                    startedAt = admittedAt
-                    providerRequestStarted = true
                     CBTrace.log(auditRequestID, "http_provider_admitted")
                     await idlePrewarmer?.cancelInflightPrewarm()
                     CBTrace.log(auditRequestID, "http_runtime_call")
-                    let (completion, servedSnapshot) = try await modelRuntime.completeWithServedSnapshot(request, with: handle, shouldCancel: { disconnect.isDisconnected })
+                    let (completion, servedSnapshot) = try await modelRuntime.completeWithServedSnapshot(request, with: handle, shouldCancel: { disconnect.isDisconnected || localLease?.isPreempted == true })
                     CBTrace.log(auditRequestID, "http_runtime_returned")
                     guard !disconnect.isDisconnected else {
                         // The buyer left while generation ran: a buyer
                         // disconnect, not a completion. No usage, receipt,
                         // or completion telemetry, and nothing is written.
-                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: false)
+                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: false, localLease: localLease)
                         if settlementMetadata != nil {
-                            ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .writeFailed)
+                            ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: .writeFailed)
                         }
                         writer.close()
                         return
@@ -1085,10 +1153,10 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         settlementMetadata: settlementMetadata
                     )
                     let unixTsSeconds = Int64(Date().timeIntervalSince1970)
-                    await providerStatus.finishRequest(startedAt: startedAt, completion: completion, failed: false)
+                    await providerStatus.finishRequest(startedAt: startedAt, completion: completion, failed: false, localLease: localLease)
                     KVCacheTelemetry.emitRequestCompleted(
                         providerID: providerID,
-                        requestID: auditRequestID,
+                        requestID: logRequestID,
                         modelID: request.model,
                         stream: false,
                         completion: completion
@@ -1129,15 +1197,25 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         let tokensOut = Int64(completion.generatedCompletionTokens)
                         writer.writeJSON(status: .ok, body: response, extraHeaders: Self.receiptExtraHeaders(header: header, settlementMetadata: settlementMetadata, terminalStateTSUnixMS: terminalStateTSUnixMS)) { delivered in
                             if delivered {
-                                ReceiptAudit.emitIssued(providerID: providerID, requestID: auditRequestID, modelID: request.model, tokensOut: tokensOut, ttftMs: ttftMs, unixTs: unixTsSeconds)
+                                ReceiptAudit.emitIssued(providerID: providerID, requestID: logRequestID, modelID: request.model, tokensOut: tokensOut, ttftMs: ttftMs, unixTs: unixTsSeconds)
                             } else {
-                                ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .writeFailed)
+                                ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: .writeFailed)
                             }
                         }
                     case .omitted(let reason):
-                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: reason)
+                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: reason)
                         writer.writeJSON(status: .ok, body: response)
                     }
+	                } catch where localLease?.isPreempted == true {
+	                    // SPEC-001-R011: a network buyer needed the slot.
+	                    if providerRequestStarted {
+	                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: false, localLease: localLease)
+	                    }
+	                    if disconnect.isDisconnected {
+	                        writer.close()
+	                    } else {
+	                        writer.writeAPIError(.localPreempted(running: providerRequestStarted))
+	                    }
 	                } catch is CancellationError {
 	                    CBTrace.log(auditRequestID, "http_catch_cancellation")
 	                    // SPEC-038 AC-25 (`:620`) and #1690: the buyer closed
@@ -1151,9 +1229,9 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 	                    // `withTaskCancellationHandler`, which runs
 	                    // `cancelWaiter`.
 	                    if providerRequestStarted {
-	                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: false)
+	                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: false, localLease: localLease)
 	                    }
-	                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .preTokenCancel)
+	                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: .preTokenCancel)
 	                    if disconnect.isDisconnected {
 	                        // Nothing is written to the closed socket.
 	                        writer.close()
@@ -1163,14 +1241,14 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 	                } catch is DrainCancelledError {
 	                    CBTrace.log(auditRequestID, "http_catch_drain")
 	                    if providerRequestStarted {
-	                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
+	                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true, localLease: localLease)
 	                    }
-	                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .modelSwapViolation)
+	                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: .modelSwapViolation)
 	                    writer.writeJSON(status: .serviceUnavailable, body: Self.swapDrainTimeoutEnvelope())
 	                } catch let apiErr as APIError {
 	                    CBTrace.log(auditRequestID, "http_catch_api_error")
 	                    if providerRequestStarted {
-	                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
+	                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true, localLease: localLease)
 	                    }
 	                    do {
                         let receipt = try Self.errorReceiptHeaderResult(
@@ -1186,25 +1264,25 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         case .issued(let header, let ttftMs, let unixTs):
                             writer.writeAPIError(apiErr, extraHeaders: [(Self.receiptHeaderName, header)]) { delivered in
                                 if delivered {
-                                    ReceiptAudit.emitIssued(providerID: providerID, requestID: auditRequestID, modelID: request.model, tokensOut: 0, ttftMs: ttftMs, unixTs: unixTs)
+                                    ReceiptAudit.emitIssued(providerID: providerID, requestID: logRequestID, modelID: request.model, tokensOut: 0, ttftMs: ttftMs, unixTs: unixTs)
                                 } else {
-                                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .writeFailed)
+                                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: .writeFailed)
                                 }
                             }
                         case .omitted(let reason):
-                            ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: reason)
+                            ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: reason)
                             writer.writeAPIError(apiErr)
                         case .notReceiptEligible:
                             writer.writeAPIError(apiErr)
                         }
                     } catch {
-                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .constructionFailed)
+                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: .constructionFailed)
                         writer.writeAPIError(apiErr)
                     }
 	                } catch {
 	                    CBTrace.log(auditRequestID, "http_catch_other")
 	                    if providerRequestStarted {
-	                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
+	                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true, localLease: localLease)
 	                    }
 	                    // Do not stamp every unexpected error as model_not_loaded.
 	                    // Once the request was admitted the model was loaded; a
@@ -1225,26 +1303,33 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         case .issued(let header, let ttftMs, let unixTs):
                             writer.writeAPIError(apiError, extraHeaders: [(Self.receiptHeaderName, header)]) { delivered in
                                 if delivered {
-                                    ReceiptAudit.emitIssued(providerID: providerID, requestID: auditRequestID, modelID: request.model, tokensOut: 0, ttftMs: ttftMs, unixTs: unixTs)
+                                    ReceiptAudit.emitIssued(providerID: providerID, requestID: logRequestID, modelID: request.model, tokensOut: 0, ttftMs: ttftMs, unixTs: unixTs)
                                 } else {
-                                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .writeFailed)
+                                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: .writeFailed)
                                 }
                             }
                         case .omitted(let reason):
-                            ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: reason)
+                            ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: reason)
                             writer.writeAPIError(apiError)
                         case .notReceiptEligible:
                             writer.writeAPIError(apiError)
                         }
                     } catch {
-                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .constructionFailed)
+                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: .constructionFailed)
                         writer.writeAPIError(apiError)
                     }
                 }
             }
+            if let localLease {
+                // Buyers keep the pre-R011 disconnect contract (`shouldCancel`).
+                disconnect.onDisconnect { task.cancel() }
+                localLease.onPreempt { task.cancel() }
+            }
         } catch let parseError as APIError {
-            Task { [providerStatus] in
-                await providerStatus.recordError()
+            if localLease == nil {
+                Task { [providerStatus] in
+                    await providerStatus.recordError()
+                }
             }
             if let request = parsedRequest, !request.stream {
                 let writer = ResponseWriter(context: context, retryAfterSeconds: queueWaitRetryAfterSeconds)
@@ -1278,27 +1363,29 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     case .issued(let header, let ttftMs, let unixTs):
                         writer.writeAPIError(parseError, extraHeaders: [(Self.receiptHeaderName, header)]) { delivered in
                             if delivered {
-                                ReceiptAudit.emitIssued(providerID: providerID, requestID: auditRequestID, modelID: request.model, tokensOut: 0, ttftMs: ttftMs, unixTs: unixTs)
+                                ReceiptAudit.emitIssued(providerID: providerID, requestID: logRequestID, modelID: request.model, tokensOut: 0, ttftMs: ttftMs, unixTs: unixTs)
                             } else {
-                                ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .writeFailed)
+                                ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: .writeFailed)
                             }
                         }
                     case .omitted(let reason):
-                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: reason)
+                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: reason)
                         writer.writeAPIError(parseError)
                     case .notReceiptEligible:
                         writer.writeAPIError(parseError)
                     }
                 } catch {
-                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .constructionFailed)
+                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: .constructionFailed)
                     writer.writeAPIError(parseError)
                 }
             } else {
                 writeAPIError(context: context, parseError)
             }
         } catch {
-            Task { [providerStatus] in
-                await providerStatus.recordError()
+            if localLease == nil {
+                Task { [providerStatus] in
+                    await providerStatus.recordError()
+                }
             }
             writeAPIError(
                 context: context,
@@ -1390,13 +1477,15 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         providerID: String?,
         requestID: String,
         settlementMetadata: SettlementReceiptMetadata?,
+        localLease: LocalPreemptionLease?,
         idlePrewarmer: IdlePrewarmer?
     ) {
         let created = Int(Date().timeIntervalSince1970)
         let id = "chatcmpl-\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())"
 
         let providerStatus = providerStatus
-        Task.detached { @Sendable [modelRuntime, providerStatus, request, writer, warmSwapEnabled, receiptBuilder, providerID, requestID, settlementMetadata, idlePrewarmer, disconnect] in
+        let logRequestID = Self.logRequestID(requestID, localLease: localLease)
+        let task = Task.detached { @Sendable [modelRuntime, providerStatus, request, writer, warmSwapEnabled, receiptBuilder, providerID, requestID, logRequestID, settlementMetadata, idlePrewarmer, disconnect, localLease] in
             var startedAt = Date()
             var providerRequestStarted = false
             var sseStarted = false
@@ -1404,20 +1493,39 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             // buyer-visible token, not the SSE head.
             let emittedBuyerToken = StreamedFlag()
             do {
-                let handle = try await modelRuntime.acquireRequestHandle(request)
+                let handle: RequestHandle
+                if let localLease {
+                    // SPEC-001-R011: local admission and buyer preemption
+                    // precede runtime registration, so queued local work holds
+                    // nothing, and a new local request sees the actual swap state.
+                    let admission = await providerStatus.beginLocalRequest(localLease, isCancelled: { disconnect.isDisconnected })
+                    guard case .admitted(let admittedAt) = admission else {
+                        Self.writeLocalAdmissionRefusal(admission, writer: writer, retryAfterSeconds: await providerStatus.selfCheckAdmissionHoldRetryAfterSeconds())
+                        return
+                    }
+                    startedAt = admittedAt
+                    providerRequestStarted = true
+                    try Task.checkCancellation()
+                    handle = try await modelRuntime.acquireLocalRequestHandle(request)
+                } else {
+                    // Network buyers keep the pre-R011 order: the swap-snapshot
+                    // handle first, then provider admission.
+                    handle = try await modelRuntime.acquireRequestHandle(request)
+                    let admission = await providerStatus.admitRequest()
+                    guard case .admitted(let admittedAt) = admission else {
+                        Task { await modelRuntime.unregisterInFlight(handle.registrationID) }
+                        writer.writeAPIError(
+                            Self.admissionRefusalError(admission),
+                            retryAfterSecondsOverride: await providerStatus.selfCheckAdmissionHoldRetryAfterSeconds()
+                        )
+                        return
+                    }
+                    startedAt = admittedAt
+                    providerRequestStarted = true
+                }
                 defer {
                     Task { await modelRuntime.unregisterInFlight(handle.registrationID) }
                 }
-                let admission = await providerStatus.admitRequest()
-                guard case .admitted(let admittedAt) = admission else {
-                    writer.writeAPIError(
-                        Self.admissionRefusalError(admission),
-                        retryAfterSecondsOverride: await providerStatus.selfCheckAdmissionHoldRetryAfterSeconds()
-                    )
-                    return
-                }
-                startedAt = admittedAt
-                providerRequestStarted = true
                 await idlePrewarmer?.cancelInflightPrewarm()
                 try await modelRuntime.preflight(request, with: handle)
 
@@ -1440,7 +1548,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 let streamedToolArgs = StreamedToolCallArgs()
                 // A buyer that disconnects mid-stream cancels generation
                 // (the runtime stops; a loopback runtime cancels upstream).
-                let completion = try await modelRuntime.stream(request, with: handle, shouldCancel: { disconnect.isDisconnected }) { chunk in
+                let completion = try await modelRuntime.stream(request, with: handle, shouldCancel: { disconnect.isDisconnected || localLease?.isPreempted == true }) { chunk in
                     emittedBuyerToken.set()
                     switch chunk {
                     case .content(let text):
@@ -1470,21 +1578,21 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         )
                     }
                 }
-                await providerStatus.finishRequest(startedAt: startedAt, completion: completion, failed: false)
+                await providerStatus.finishRequest(startedAt: startedAt, completion: completion, failed: false, localLease: localLease)
                 // The buyer left after generation finished: the relay's
                 // cancelled-after-completion case. The tokens were generated,
                 // but nothing (usage, [DONE], receipt) can reach the buyer, so
                 // no completion telemetry and no receipt.
                 guard !disconnect.isDisconnected else {
                     if settlementMetadata != nil {
-                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .writeFailed)
+                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: .writeFailed)
                     }
                     writer.close()
                     return
                 }
                 KVCacheTelemetry.emitRequestCompleted(
                     providerID: providerID,
-                    requestID: requestID,
+                    requestID: logRequestID,
                     modelID: request.model,
                     stream: true,
                     completion: completion
@@ -1562,19 +1670,33 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         let tokensOut = Int64(completion.generatedCompletionTokens)
                         receiptDelivery = { delivered in
                             if delivered {
-                                ReceiptAudit.emitIssued(providerID: providerID, requestID: requestID, modelID: modelID, tokensOut: tokensOut, ttftMs: ttftMs, unixTs: unixTsSeconds)
+                                ReceiptAudit.emitIssued(providerID: providerID, requestID: logRequestID, modelID: modelID, tokensOut: tokensOut, ttftMs: ttftMs, unixTs: unixTsSeconds)
                             } else {
-                                ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .writeFailed)
+                                ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: .writeFailed)
                             }
                         }
                     case .omitted(let reason):
-                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: reason)
+                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: reason)
                     }
                 }
                 writer.writeSSEDone(trailers: trailers, completion: receiptDelivery)
+            } catch where localLease?.isPreempted == true {
+                // SPEC-001-R011: a network buyer needed the slot.
+                if providerRequestStarted {
+                    await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: false, localLease: localLease)
+                }
+                let preempted = APIError.localPreempted(running: providerRequestStarted)
+                if disconnect.isDisconnected {
+                    writer.close()
+                } else if sseStarted {
+                    writer.writeSSEJSON(preempted.envelope)
+                    writer.writeSSEDone()
+                } else {
+                    writer.writeAPIError(preempted)
+                }
             } catch let error as APIError {
                 if providerRequestStarted {
-                    await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
+                    await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true, localLease: localLease)
                 }
                 if sseStarted {
                     // SPEC-038 `:614` "or equivalent": the SSE head is long
@@ -1600,15 +1722,15 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 // emitted. Non-settling either side of the first-token
                 // boundary: no receipt is built and no trailer is written.
                 if providerRequestStarted {
-                    await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: false)
+                    await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: false, localLease: localLease)
                 }
                 if disconnect.isDisconnected {
                     // Nothing can reach a closed connection. A receipt that
                     // was due is recorded as undeliverable.
                     if sseStarted, settlementMetadata != nil {
-                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .writeFailed)
+                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: .writeFailed)
                     } else if !sseStarted {
-                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .preTokenCancel)
+                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: .preTokenCancel)
                     }
                     writer.close()
                 } else {
@@ -1617,18 +1739,18 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     let cancelError = Self.buyerCancelledError(inferenceRan: emittedBuyerToken.get())
                     if sseStarted {
                         if settlementMetadata != nil {
-                            ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .writeFailed)
+                            ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: .writeFailed)
                         }
                         writer.writeSSEJSON(cancelError.envelope)
                         writer.writeSSEDone()
                     } else {
-                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .preTokenCancel)
+                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: .preTokenCancel)
                         writer.writeAPIError(cancelError)
                     }
                 }
             } catch is DrainCancelledError {
                 if providerRequestStarted {
-                    await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
+                    await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true, localLease: localLease)
                 }
                 if sseStarted {
                     writer.writeSSEJSON(Self.swapDrainTimeoutEnvelope())
@@ -1638,7 +1760,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 }
             } catch {
                 if providerRequestStarted {
-                    await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
+                    await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true, localLease: localLease)
                 }
                 let apiError = Self.unexpectedInferenceAPIError(
                     error: error,
@@ -1651,6 +1773,33 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     writer.writeAPIError(apiError)
                 }
             }
+        }
+        if let localLease {
+            // Buyers keep the pre-R011 disconnect contract (`shouldCancel`).
+            disconnect.onDisconnect { task.cancel() }
+            localLease.onPreempt { task.cancel() }
+        }
+    }
+
+    /// The terminal answer for a request that was not admitted.
+    fileprivate static func writeLocalAdmissionRefusal(_ admission: LocalAdmission, writer: ResponseWriter, retryAfterSeconds: Int? = nil) {
+        switch admission {
+        case .cancelled:
+            writer.close()
+        case .preempted:
+            writer.writeAPIError(.localPreempted(running: false))
+        case .selfCheckAdmissionHold:
+            writer.writeAPIError(
+                admissionRefusalError(.selfCheckAdmissionHold),
+                retryAfterSecondsOverride: retryAfterSeconds
+            )
+        case .admitted, .unavailable:
+            writer.writeAPIError(APIError(
+                status: 503,
+                message: "Provider is paused or draining",
+                type: "server_error",
+                code: "provider_paused"
+            ))
         }
     }
 
@@ -1789,6 +1938,46 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     static let receiptPendingDeadlineHeaderName = "X-MacProvider-Receipt-Pending-Deadline-Seconds"
     static let lateReceiptSettlementHeaderName = "X-MacProvider-Late-Receipt-Settlement"
     static let maxReceiptHeaderBytes = 4096
+    /// SPEC-001-R011 request origin. The coordinator sends `coordinator` on
+    /// every HTTP-direct dispatch (probes included); Malibu.app's Chat
+    /// transport sends `local-app`.
+    static let requestOriginHeaderName = "X-MacProvider-Origin"
+    static let coordinatorOriginValue = "coordinator"
+    static let localAppOriginValue = "local-app"
+
+    /// SPEC-001-R011: local is a positive classification. A request is local
+    /// only from a loopback peer that carries exactly one `local-app` origin
+    /// marker and nothing a coordinator dispatch carries (the coordinator
+    /// marker or a settlement-metadata header, parsable or not). Every other
+    /// request, including an unknown loopback client with no marker, is
+    /// network: misclassifying a buyer as local would let local policy
+    /// preempt or deprioritise paid work, while treating an unmarked local
+    /// tool as a buyer only costs that tool its local accounting.
+    static func requestOrigin(
+        headers: HTTPHeaders,
+        settlementMetadata: SettlementReceiptMetadata?,
+        peerIsLoopback: Bool
+    ) -> RequestOrigin {
+        let markers = headers[requestOriginHeaderName].map {
+            $0.trimmingCharacters(in: .whitespaces).lowercased()
+        }
+        guard peerIsLoopback,
+              settlementMetadata == nil,
+              headers[settlementMetadataHeaderName].isEmpty,
+              !markers.contains(coordinatorOriginValue),
+              markers == [localAppOriginValue]
+        else { return .network }
+        return .local
+    }
+
+    static func logRequestID(_ requestID: String, localLease: LocalPreemptionLease?) -> String {
+        localLease == nil ? requestID : "local:" + requestID
+    }
+
+    static func isLoopbackPeer(_ address: SocketAddress?) -> Bool {
+        guard let ip = address?.ipAddress else { return false }
+        return ip == "127.0.0.1" || ip == "::1" || ip == "::ffff:127.0.0.1"
+    }
 
     private static func settlementMetadata(from encoded: String?) -> SettlementReceiptMetadata? {
         guard let encoded, !encoded.isEmpty,
@@ -2377,6 +2566,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             "requests_in_flight": snapshot.requestsInFlight,
             "requests_queued": snapshot.requestsQueued,
             "active_request_id_count": snapshot.activeRequestIDCount,
+            "local_usage": snapshot.localUsage.statusJSON,
             "errors_total": snapshot.errorsTotal,
             "restart_count": snapshot.restartCount,
             "restart_count_7d": snapshot.restartCount7d ?? NSNull(),

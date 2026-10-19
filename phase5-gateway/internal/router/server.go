@@ -106,6 +106,7 @@ func (s *Server) readStore() ReadStore {
 }
 
 type Store interface {
+	routingIdentityLookup
 	storage.AuthStore
 	storage.UsageStore
 	storage.DemandTelemetryStore
@@ -125,6 +126,7 @@ type Store interface {
 // through readStore() — that's a compile error. Bound by what
 // router/explorer.go and the /v1/usage path actually call.
 type ReadStore interface {
+	routingIdentityLookup
 	storage.ExplorerStore
 	DailyUsage(ctx context.Context, accountID, windowDate string) (int64, int64, error)
 	ListAPIKeys(ctx context.Context, accountID string) ([]storage.APIKeySummary, error)

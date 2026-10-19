@@ -89,7 +89,9 @@ func (pg *stakePostgres) exec(statement string) string {
 
 // seedStake gives the provider withdrawable MALIBU and records a lock the
 // account placed two days ago, so it is mature for today's refresh. It also
-// links the account and the provider to the same GitHub identity.
+// links the account and its staking provider to the same GitHub identity.
+// That owned Mac is distinct from the serving provider: buyer traffic must
+// never route back to the buyer's own provider, regardless of funding source.
 func seedStake(s *scenario, pg *stakePostgres, providerID string, lockedMALIBU int) {
 	s.t.Helper()
 	pg.exec(fmt.Sprintf(`INSERT INTO provider_rewards_ledger (provider_id, unix_ts, amount_malibu, withdrawal_hold_reason, reason, external_ref)
@@ -221,11 +223,12 @@ func TestStakeAllowancePlainRequestsSpendAllowanceFirst(t *testing.T) {
 	requireBins(t)
 	pg := startStakePostgres(t)
 	providerID := "prov-stake-" + randHex(t, 4)
+	ownedProviderID := providerID + "-owned"
 	s := newScenario(t, scenarioOpts{
 		seedAccount:       true,
 		providerID:        providerID,
 		coordinatorConfig: stakeCoordinatorConfig(pg),
-		beforeCoordinator: func(s *scenario) { seedStake(s, pg, providerID, 2) },
+		beforeCoordinator: func(s *scenario) { seedStake(s, pg, ownedProviderID, 2) },
 	})
 	defer s.shutdown()
 
@@ -314,8 +317,8 @@ func TestStakeAllowancePlainRequestsSpendAllowanceFirst(t *testing.T) {
 	}
 
 	// The seeded MALIBU is locked: the stake is netted out of withdrawable.
-	if locked := pg.exec(fmt.Sprintf(`SELECT SUM(amount_units) FROM malibu_stake_events WHERE provider_id = '%s'`, providerID)); locked != "1200000000" {
-		t.Fatalf("locked units %s", locked)
+	if locked := pg.exec(fmt.Sprintf(`SELECT SUM(amount_units) FROM malibu_stake_events WHERE provider_id = '%s'`, ownedProviderID)); locked != "1200000000" {
+		t.Fatalf("locked units for %s: %q, want 1200000000", ownedProviderID, locked)
 	}
 }
 
@@ -347,7 +350,7 @@ func TestStakeAllowancePrivateRequestSpendsAllowanceFirst(t *testing.T) {
 		coordinatorRelayBlindEnabled: true,
 		relayBlindIdentityPublicKeys: map[string]string{providerID: fixture.descriptor.IdentityPublicKey},
 		coordinatorConfig:            stakeCoordinatorConfig(pg),
-		beforeCoordinator:            func(s *scenario) { seedStake(s, pg, providerID, 1) },
+		beforeCoordinator:            func(s *scenario) { seedStake(s, pg, providerID+"-owned", 1) },
 	})
 	defer s.shutdown()
 	disconnect := connectSwiftRelayProvider(t, s.rootCtx, s, fixture)

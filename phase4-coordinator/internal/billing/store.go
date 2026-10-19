@@ -21,6 +21,7 @@ type RewardsConfig = config.RewardsConfig
 type SettlementConfig = config.SettlementConfig
 
 type Store struct {
+	routingStakeIdentity atomic.Pointer[routingStakeIdentitySource]
 	// selfDealMemo briefly caches SPEC-050-R010 self-dealing answers.
 	selfDealMemo selfDealMemo
 	// allowanceProcess is this process's SPEC-050 allowance-hold epoch.

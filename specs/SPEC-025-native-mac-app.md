@@ -1,6 +1,23 @@
 # SPEC-025 — Native Mac App (signed `.dmg`, native Mac app with menu-bar presence)
 
-Status: DRAFT v0.33.0 · Owner: @Augustas11 · Target: 2026 Q3
+Status: DRAFT v0.34.1 · Owner: @Augustas11 · Target: 2026 Q3
+
+**Change log v0.34.1 (2026-10-19, Related: #2054):**
+Local Chat marks its loopback requests `X-MacProvider-Origin: local-app`, the
+only marker SPEC-001-R011 treats as local. Connected apps hand the buyer key
+from Keychain to the client launcher through a one-time 0600 file in a 0700
+directory that is read once and deleted, and export it to the client
+environment; the interface discloses that repository configuration and agent
+commands can read it and recommends a dedicated, spend-limited buyer key.
+OpenCode project configuration is disabled for launched sessions and Crush
+users are warned.
+
+**Change log v0.34.0 (2026-10-19, Related: #2054 Phase 3):**
+Replaces the Chat placeholder with capability-gated local Chat, bounded
+read-only workspace tools, and Connected apps. Adds SPEC-025-R010–R012 in
+§3.2.2. Local use follows SPEC-001-R011 and is never earnings. Connected
+apps use buyer credentials and a remote gateway with explicit privacy
+limits, protected reversible configuration, and endpoint-specific tests.
 
 **Change log v0.33.0 (2026-10-18, #2054 Phase 2 sidebar shell):**
 Adds §3.2.1 with the first R-numbered requirements of this spec,
@@ -682,14 +699,13 @@ every section: reported values only, no machine reason codes, no $/time
 projections (SPEC-044-R004), colour never the only signal.
 
 - **SPEC-025-R001 Shell.** Malibu MUST present one main window titled
-  "Malibu": a sidebar with, in order, Dashboard, Chat, Models, Discover,
+  "Malibu": a sidebar with, in order, Dashboard, Chat, Connected apps, Models, Discover,
   Provider, then a separate group with Settings and Diagnostics, and a detail
   pane showing the selected section. It opens on Dashboard. "Open Dashboard"
   opens it on Dashboard; "Settings…" (Cmd-,) and the menu-bar Settings item
   open the same window on Settings; there is no separate settings window.
   The minimum content size is 820 × 560 pt, and no section may grow the
-  window past its frame. Chat MUST stay a placeholder that sends no inference
-  request until the local-use requirements for Chat are specified.
+  window past its frame. Chat follows the capability-gated local-use requirements in §3.2.2.
 - **SPEC-025-R002 Sidebar header and footer.** The sidebar header MUST show
   the brand tile, "Malibu" and the §3.2 status pill. The footer MUST show the
   model the provider reports in its local status (last path component; the
@@ -767,6 +783,78 @@ projections (SPEC-044-R004), colour never the only signal.
   install action when an update is available, the model settings (local
   runtimes, background recommendations) and About (app and provider software
   versions).
+
+### 3.2.2 Local Chat and Connected apps
+
+- **SPEC-025-R010 Local Chat.** Chat MUST use the provider's loopback HTTP
+  endpoint on the configured local port. It MUST NOT redirect or fall back
+  to a gateway. Before sending, it MUST verify `local_chat_priority_v1`
+  and the actual loaded model from fresh provider capability/status data.
+  Missing capability, model, or provider readiness MUST produce an actionable
+  unavailable state, never inferred support. Show the loaded model and
+  explain that conversation content stays on this Mac and customers keep
+  priority. Stream incremental text and provide Stop. Cancellation, provider
+  disconnect, malformed/oversized streams, model changes and
+  `local_preempted` MUST end the current turn without accepting stale output
+  from an earlier task. History MUST be bounded, remain in memory, and never
+  enter logs/diagnostics. Local activity may be shown only from `local_usage`
+  and never folded into paid counters or earnings. Every Chat request MUST carry exactly one
+  `X-MacProvider-Origin: local-app`, the marker that makes it local work under
+  SPEC-001-R011. Do not send buyer keys,
+  settlement metadata or privacy headers to the loopback endpoint. The
+  loopback trust policy is SPEC-001-R009, not an authentication assertion.
+- **SPEC-025-R011 Bounded Agent mode.** Agent mode MUST be explicit and
+  available only when the current loaded runtime advertises guaranteed tool
+  selection under SPEC-018. Tools MUST come from a fixed app-owned registry
+  of read-only workspace operations. The user selects the workspace root;
+  a model cannot select or widen it. No shell, file mutation, arbitrary
+  network access or executable tool registration is permitted. Validate
+  names and argument schemas before execution. Root and intermediate file
+  access MUST use descriptor-relative no-follow checks at open time, so
+  symlink replacement cannot escape the selected root. Bound bytes while
+  reading, tool-output bytes, calls, rounds, elapsed time and conversation
+  size; Stop cancels inference and tool processing. Unknown/malformed tools,
+  unavailable capability and exceeded bounds MUST fail visibly without
+  executing extra operations. Tool results are untrusted conversation data,
+  never permission to alter the registry, root or limits.
+- **SPEC-025-R012 Connected apps.** Connected apps MUST distinguish local
+  Chat from buyer-funded requests to the Malibu gateway. Offer automated
+  setup only for documented supported client configuration formats. Cursor
+  uses a documented manual Settings handoff until a supported configuration
+  API exists; do not mutate undocumented stores or claim that a handoff is
+  a tested client connection. The interface MUST distinguish configured,
+  endpoint-tested and actual client compatibility. Codex uses Responses;
+  each other adapter uses its documented endpoint semantics. Never infer
+  model capabilities or context limits not provided by trusted metadata.
+  Protect the user's buyer key in a dedicated Keychain service or protected
+  user-owned files outside repositories (directories 0700, files 0600).
+  Never display secrets in previews, logs, diagnostics, subprocess arguments
+  or errors. Supply a working documented credential mechanism, not an
+  unresolved environment placeholder. A launched client receives the key from
+  Keychain through a one-time file (0600, in a 0700 directory) that the
+  launcher reads once and deletes; the launcher exports the key to the client
+  environment. The interface MUST disclose that repository configuration and
+  agent commands run by the client can read that environment, and recommend a
+  dedicated, spend-limited buyer key. OpenCode sessions MUST be launched with
+  project configuration disabled (`OPENCODE_DISABLE_PROJECT_CONFIG=1` and
+  `OPENCODE_CONFIG_PROJECT_DISABLE=1`); Crush, which has no such switch, MUST
+  carry a visible warning. Setup requires an explicit app action
+  after a preview. Before changing config, protect an exact-byte original
+  backup (which may itself contain secrets), refuse symlinks/nonregular
+  files, bound input, preserve unrelated fields, and compare the file with
+  the preview before atomic replacement. Restore MUST compare with the
+  installed bytes and refuse conflicting subsequent edits; absent originals
+  may be removed only when this comparison succeeds. Never recreate unsafe
+  file permissions on restore. Unsupported or ambiguous formats MUST remain
+  unchanged. A connection test MUST exercise the selected API/model with
+  bounded cost/time/response size and reject credential-bearing redirects;
+  a models-list fetch alone is not a connection test. Show **Not private**
+  persistently before setup and on gateway status: ordinary gateway requests
+  are visible to the gateway and serving provider, and Cursor can additionally
+  transmit through Cursor's servers. Do not claim relay-blind Responses or
+  Messages. A gateway test is not evidence that an external client works.
+  The coordinator's authoritative no-self-routing contract applies to buyer
+  requests independently of any client configuration or exclusion hint.
 
 ### 3.3 Updates — CLI-owned signed compatibility set
 

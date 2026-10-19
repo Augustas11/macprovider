@@ -33,6 +33,10 @@ protocol ModelRuntimeServing: Actor {
     /// before emitting validation evidence or starting inference.
     func relayBlindPrepare(_ request: ChatCompletionRequest) async throws -> RelayBlindPreparedRequest
     func acquireRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle
+    /// SPEC-001-R011 local requests (chat and token utilities) observe the
+    /// actual swap state and are tracked as local rows; network buyers on
+    /// HTTP and the relay keep the snapshot-based `acquireRequestHandle`.
+    func acquireLocalRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle
     func unregisterInFlight(_ id: Int)
     func currentSnapshot() async -> RuntimeSnapshot
     /// Identity/status surface the serve command reads to build ProviderStatus.
@@ -244,6 +248,11 @@ private enum StructuredStreamingIdleRaceResult<T: Sendable>: Sendable {
 }
 
 extension ModelRuntimeServing {
+    /// Runtimes without model swaps share their ordinary admission path.
+    func acquireLocalRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle {
+        try acquireRequestHandle(request)
+    }
+
     func localResponsesCapabilities() async -> LocalResponsesCapabilities { .unavailable }
 
 
@@ -1456,11 +1465,31 @@ actor ModelRuntime: ModelRuntimeServing {
         )
     }
 
+    /// SPEC-001-R011: the other active rows a request's native-MTP admission
+    /// resolves against (the caller's own handle is registered). A local row
+    /// never takes the native row; a buyer's count leaves local rows out,
+    /// because they are preempted for it.
+    static func nativeMTPOtherActiveRows(isLocal: Bool, registeredRows: Int, localRows: Int) -> Int {
+        isLocal ? Int.max : max(0, registeredRows - 1 - localRows)
+    }
+
+    static func nativeMTPBuyerPreemptsLocal(_ admission: NativeMTPRuntimeAdmission, isLocal: Bool, localRows: Int) -> Bool {
+        !isLocal && admission.usesNativeMTP && localRows > 0
+    }
+
     private func nativeMTPRuntimeAdmission(
         for request: ChatCompletionRequest,
-        snapshot: RuntimeSnapshot
+        snapshot: RuntimeSnapshot,
+        handle: RequestHandle
     ) -> NativeMTPRuntimeAdmission {
-        let otherActiveRows = inFlightCancellations.count - 1
+        // SPEC-001-R011: local rows never take a native-MTP row, and a
+        // buyer's row count ignores them (the scheduler's load gate covers
+        // the overlap until the preempted local rows leave).
+        let isLocal = localRegistrationIDs.contains(handle.registrationID)
+        let localRows = localRegistrationIDs.count
+        let otherActiveRows = Self.nativeMTPOtherActiveRows(
+            isLocal: isLocal, registeredRows: inFlightCancellations.count, localRows: localRows
+        )
         let admission = Self.nativeMTPRuntimeAdmission(
             for: request,
             draftConfigured: snapshot.hasTargetCompatibleDraft || currentDraftModelID != nil,
@@ -1481,6 +1510,17 @@ actor ModelRuntime: ModelRuntimeServing {
         // Check and registration are both actor-isolated, so a burst of
         // concurrent arrivals cannot all observe an empty runtime.
         .resolvingActiveRows(otherActiveRows: otherActiveRows)
+        if isLocal {
+            // Local selection is not buyer-facing native-MTP status.
+            testNativeMTPAdmissionRequestObserver?(request.requestID, admission, otherActiveRows)
+            return admission
+        }
+        if Self.nativeMTPBuyerPreemptsLocal(admission, isLocal: isLocal, localRows: localRows) {
+            // A buyer that can run native MTP must not wait at depth zero
+            // behind local rows: preempt them.
+            let providerStatus = providerStatus
+            Task { await providerStatus?.preemptAdmittedLocalWork() }
+        }
         recordNativeMTPAdmissionStatus(admission)
         testNativeMTPAdmissionObserver?(admission)
         testNativeMTPAdmissionRequestObserver?(request.requestID, admission, otherActiveRows)
@@ -1901,6 +1941,9 @@ actor ModelRuntime: ModelRuntimeServing {
     private var signalContinuations: [UUID: AsyncStream<SwapSignal>.Continuation] = [:]
     private var nextInFlightID: Int = 0
     private var inFlightCancellations: [Int: @Sendable () -> Void] = [:]
+    /// SPEC-001-R011: registrations made by `acquireLocalRequestHandle`, the
+    /// local-origin admission path (local chat and token utilities).
+    private var localRegistrationIDs: Set<Int> = []
     private let loader: @Sendable (String) async throws -> (ModelContainer, String, String?)
     private let testLoader: (@Sendable (String) async throws -> (String, String?))?
     private let testCompletion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)?
@@ -6321,6 +6364,8 @@ maxTokens: 1,
         guard let providerStatus else {
             return false
         }
+        // SPEC-001-R011: a swap drain does not wait out local work.
+        await providerStatus.preemptAdmittedLocalWork()
         let drainStartMs = Int64(Date().timeIntervalSince1970 * 1000)
         let timeoutMs = Int64(timeoutSeconds * 1000)
         while !Task.isCancelled {
@@ -6660,11 +6705,13 @@ maxTokens: 1,
 
     func unregisterInFlight(_ id: Int) {
         inFlightCancellations.removeValue(forKey: id)
+        localRegistrationIDs.remove(id)
     }
 
     private func cancelAllInFlightForDrainTimeout() {
         let cancels = Array(inFlightCancellations.values)
         inFlightCancellations.removeAll()
+        localRegistrationIDs.removeAll()
         for cancel in cancels {
             cancel()
         }
@@ -6686,6 +6733,14 @@ maxTokens: 1,
                 == ToolSelectionPolicy.supportedNativeModel
         else { return snapshot.modelID }
         return ToolSelectionPolicy.supportedNativeModel
+    }
+
+    func acquireLocalRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle {
+        // Check and register in one actor turn so a swap cannot interleave.
+        try Self.validateReady(state)
+        let handle = try acquireRequestHandle(request)
+        localRegistrationIDs.insert(handle.registrationID)
+        return handle
     }
 
     func acquireRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle {
@@ -6737,8 +6792,12 @@ maxTokens: 1,
         let templateSupportsPreserveThinking = handle.snapshot.templateSupportsPreserveThinking
         let selectionModelID = toolSelectionModelID(handle.snapshot)
         try await inferenceGate.withPermit {
+            // A cancelled request (client gone, or local work preempted by a
+            // buyer under SPEC-001-R011) releases the gate without preparing.
+            try Task.checkCancellation()
             try handle.drainCancelled.check()
             return try await container.perform { context in
+                try Task.checkCancellation()
                 try handle.drainCancelled.check()
                 let (lmInput, _) = try await Self.preparedRequestInput(
                     for: request,
@@ -6748,6 +6807,7 @@ maxTokens: 1,
                     nativeVisionProfile: handle.snapshot.nativeVisionProfile,
                     toolSelectionModelID: selectionModelID
                 )
+                try Task.checkCancellation()
                 try handle.drainCancelled.check()
                 try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
             }
@@ -6756,6 +6816,7 @@ maxTokens: 1,
 
 
     func localResponsesCapabilities() async -> LocalResponsesCapabilities {
+        guard state == .ready else { return .unavailable }
         let snapshot = requestStartSnapshot()
         guard snapshot.state == .ready, snapshot.container != nil, let model = snapshot.modelID else {
             return .unavailable
@@ -6766,6 +6827,9 @@ maxTokens: 1,
     }
 
     func localTokenUtilityCapabilities() async -> LocalTokenUtilityCapabilities {
+        guard state == .ready else {
+            return LocalTokenUtilityCapabilities(model: nil, modelHash: nil, generation: nil, operations: [])
+        }
         let snapshot = requestStartSnapshot()
         guard snapshot.state == .ready, snapshot.container != nil, snapshot.modelID != nil else {
             return LocalTokenUtilityCapabilities(model: nil, modelHash: nil, generation: nil, operations: [])
@@ -6778,7 +6842,7 @@ maxTokens: 1,
 
 
     func localTokenUtility(_ request: LocalTokenUtilityRequest, shouldCancel: @escaping @Sendable () -> Bool) async throws -> LocalTokenUtilityResult {
-        let handle = try acquireRequestHandle(request.admissionRequest())
+        let handle = try acquireLocalRequestHandle(request.admissionRequest())
         let generation = selfCheckGeneration
         defer { unregisterInFlight(handle.registrationID) }
         if request.operation == .applyTemplate, currentChatTemplateSHA256 == nil {
@@ -8791,7 +8855,7 @@ maxTokens: boundedMaxTokens,
             snapshot: snapshot,
             emitTelemetry: true
         )
-        let nativeMTPAdmission = nativeMTPRuntimeAdmission(for: request, snapshot: snapshot)
+        let nativeMTPAdmission = nativeMTPRuntimeAdmission(for: request, snapshot: snapshot, handle: handle)
         if !request.containsNonTextMessageContentPart {
             try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
         }
@@ -8894,6 +8958,7 @@ maxTokens: boundedMaxTokens,
         let speculativeCacheWrapValidated = speculativeCacheWrapValidated
         let prefillStepSize = Self.effectivePrefillStepSize(
             configured: prefillStepSize, containsImage: request.containsNonTextMessageContentPart)
+        let isLocalRequest = localRegistrationIDs.contains(handle.registrationID)
         let conversationCache = conversationCache
         // SPEC-037 stage 5 — per-request cold-tier context, captured before the
         // nonisolated inference closure (nil unless the disk tier is attached).
@@ -8920,6 +8985,9 @@ maxTokens: boundedMaxTokens,
                         nativeVisionProfile: snapshot.nativeVisionProfile,
                         toolSelectionModelID: selectionModelID
                     )
+                    // Cancelled during preparation (client gone, or local
+                    // work preempted under SPEC-001-R011): release the gate.
+                    try Task.checkCancellation()
                     try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
                     // The request's completion budget as served: unchanged for
                     // a capped serve cache, clamped to the remaining context
@@ -8954,6 +9022,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                        let numDraftTokens = snapshot.numDraftTokens,
                        speculativeCacheWrapValidated,
                        labSerialHooks == nil,
+                       !isLocalRequest,
                        Self.speculativeCacheWindowSafe(
                            promptTokens: promptTokenIds.count,
                            maxTokens: request.maxTokens,
@@ -9041,6 +9110,23 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 context: generationContext, prefillStepSize: prefillStepSize)
                             if let resumeAt = recurrent.resumeAt {
                                 iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
+                            }
+                            if isLocalRequest, !request.containsNonTextMessageContentPart {
+                                // SPEC-001-R011: a local prompt prefills in chunks with a
+                                // preemption check before each, so a buyer never waits on a
+                                // long local prefill. Buyer prefill is unchanged.
+                                let start = promptTokenIds.count - iteratorInput.text.tokens.size
+                                let resumeAt = try Self.cancellableLocalPrefill(
+                                    tokenCount: promptTokenIds.count, from: start, stepSize: prefillStepSize,
+                                    isCancelled: { Task.isCancelled || shouldCancel() || drainCancelled.isFired }
+                                ) { range in
+                                    let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[range])))
+                                    _ = generationContext.model(chunk[text: .newAxis], cache: kvCache, state: nil)
+                                    eval(kvCache)
+                                }
+                                if resumeAt > start {
+                                    iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
+                                }
                             }
 
                             let iterator = try TokenIterator(
@@ -9526,7 +9612,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
             snapshot: snapshot,
             emitTelemetry: false
         )
-        let nativeMTPAdmission = nativeMTPRuntimeAdmission(for: request, snapshot: snapshot)
+        let nativeMTPAdmission = nativeMTPRuntimeAdmission(for: request, snapshot: snapshot, handle: handle)
         if !request.containsNonTextMessageContentPart {
             try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
         }
@@ -9680,6 +9766,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         let speculativeCacheWrapValidated = speculativeCacheWrapValidated
         let prefillStepSize = Self.effectivePrefillStepSize(
             configured: prefillStepSize, containsImage: request.containsNonTextMessageContentPart)
+        let isLocalRequest = localRegistrationIDs.contains(handle.registrationID)
         let conversationCache = conversationCache
         // SPEC-037 stage 5 — per-request cold-tier context (streaming endpoint).
         let coldContext = coldContext(for: request, snapshot: snapshot)
@@ -9715,6 +9802,9 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         nativeVisionProfile: snapshot.nativeVisionProfile,
                         toolSelectionModelID: selectionModelID
                     )
+                    // Cancelled during preparation (client gone, or local
+                    // work preempted under SPEC-001-R011): release the gate.
+                    try Task.checkCancellation()
                     try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
                     // The request's completion budget as served: unchanged for
                     // a capped serve cache, clamped to the remaining context
@@ -9767,6 +9857,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                        let numDraftTokens = snapshot.numDraftTokens,
                        speculativeCacheWrapValidated,
                        labSerialHooks == nil,
+                       !isLocalRequest,
                        Self.speculativeCacheWindowSafe(
                            promptTokens: promptTokenIds.count,
                            maxTokens: request.maxTokens,
@@ -9901,6 +9992,23 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         context: generationContext, prefillStepSize: prefillStepSize)
                     if let resumeAt = recurrent.resumeAt {
                         iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
+                    }
+                    if isLocalRequest, !request.containsNonTextMessageContentPart {
+                        // SPEC-001-R011: a local prompt prefills in chunks with a
+                        // preemption check before each, so a buyer never waits on a
+                        // long local prefill. Buyer prefill is unchanged.
+                        let start = promptTokenIds.count - iteratorInput.text.tokens.size
+                        let resumeAt = try Self.cancellableLocalPrefill(
+                            tokenCount: promptTokenIds.count, from: start, stepSize: prefillStepSize,
+                            isCancelled: { Task.isCancelled || shouldCancel() || drainCancelled.isFired }
+                        ) { range in
+                            let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[range])))
+                            _ = generationContext.model(chunk[text: .newAxis], cache: kvCache, state: nil)
+                            eval(kvCache)
+                        }
+                        if resumeAt > start {
+                            iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
+                        }
                     }
 
                     var stoppedByRequestStop = false
@@ -12528,6 +12636,28 @@ maxTokens: maxTokens,
             checkpoints.append(checkpoint)
         }
         return (checkpoints, cursor > cachedTokens ? cursor : nil)
+    }
+
+    /// SPEC-001-R011: prefills `[start, tokenCount)` in `stepSize` chunks,
+    /// checking `isCancelled` before each chunk, and leaves the final
+    /// (at most `stepSize`) tokens for the TokenIterator, exactly as its own
+    /// prefill would. Returns the index the iterator continues from.
+    static func cancellableLocalPrefill(
+        tokenCount: Int,
+        from start: Int,
+        stepSize: Int,
+        isCancelled: () -> Bool,
+        prefill: (Range<Int>) throws -> Void
+    ) throws -> Int {
+        let step = max(1, stepSize)
+        var cursor = max(0, start)
+        while tokenCount - cursor > step {
+            if isCancelled() { throw CancellationError() }
+            try prefill(cursor ..< cursor + step)
+            cursor += step
+        }
+        if isCancelled() { throw CancellationError() }
+        return cursor
     }
 
     static func captureRecurrentCheckpoint(cache: [KVCache], tokenCount: Int) -> RecurrentStateCheckpoint? {

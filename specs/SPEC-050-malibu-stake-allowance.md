@@ -1,6 +1,6 @@
 # SPEC-050 - MALIBU Stake Allowance
 
-**Version:** 0.1.0
+**Version:** 0.1.2
 Status: draft
 Owner: @Augustas11
 Issue: https://github.com/Augustas11/macprovider/issues/1062
@@ -9,7 +9,7 @@ Issue: https://github.com/Augustas11/macprovider/issues/1062
 {
   "spec_id": "SPEC-050",
   "title": "MALIBU Stake Allowance",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "path": "specs/SPEC-050-malibu-stake-allowance.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -30,6 +30,12 @@ Issue: https://github.com/Augustas11/macprovider/issues/1062
   }
 }
 ```
+
+**Change log v0.1.2 (2026-10-19, Related: #2054):** SPEC-050-R002 states that
+the persisted stake identity is immutable once positive, so the SPEC-002-R008
+routing read may cache it for the process lifetime and must bound uncached
+reads; a failed read falls back to the other ownership sources instead of
+refusing buyers.
 
 ## 1. Purpose and scope
 
@@ -150,6 +156,10 @@ lock is effective only while the provider is owned by the identity that placed
 it: a former owner's lock neither earns (SPEC-050-R004) nor keeps the current
 owner from staking. An account stakes under one GitHub identity for good; a
 lock under a different identity is refused with `409 stake_identity_changed`.
+The persisted identity is therefore immutable once positive: SPEC-002-R008
+caches it for the process lifetime on the dispatch path, re-reads only
+accounts with no stake under a 250 ms deadline, and falls back to the other
+ownership sources when a read fails.
 An account's total stake MUST NOT exceed 10,000,000,000 MALIBU (`400
 stake_bound_exceeded`). An unlock MUST NOT exceed the account's current
 earning-or-maturing stake, is taken in descending `provider_id` order, and
@@ -268,6 +278,12 @@ allowance request earns USDC exactly as for a paid request. The operator funds
 the allowance from the configured daily budget.
 
 ### SPEC-050-R010 - Self-dealt allowance traffic earns no MALIBU
+
+SPEC-002-R008 excludes owned providers before inference, for paid and allowance
+traffic alike. An own-provider request therefore produces no inference,
+provider credit or reward; it is not a permitted self-funded route. The reward
+exclusion below remains defense in depth for historical rows and the broader
+shared-payout/referral relation, which does not itself establish ownership.
 
 When an allowance-funded attempt is served by a provider that is self-dealing
 for the account, its ledger row MUST be written with `rewards_excluded = 1`, so
