@@ -233,6 +233,10 @@ type privacySelection struct {
 // assurance is the requested SPEC-049-R034 label; a code-bound request ranks
 // only sessions whose latest verified posture is code-bound.
 func (s *Server) selectPrivacyProvider(ctx context.Context, accountID, model string, encryptedBytes int64, requires []string, scope *trustpool.Snapshot, assurance string) (privacySelection, string, string) {
+	owned, ownershipErr := s.buyerOwnedProviders(ctx)
+	if ownershipErr != nil {
+		return privacySelection{}, privacyClassUnavailable, relayblind.PrivacyRejectStoreUnavailable
+	}
 	if reason := s.privacyDisabledReason(ctx); reason != "" {
 		s.logPrivacyGateRejection(reason)
 		return privacySelection{}, privacyClassDisabled, reason
@@ -251,6 +255,9 @@ func (s *Server) selectPrivacyProvider(ctx context.Context, accountID, model str
 		closest = relayblind.PrivacyRejectPoolNoEligibleMember
 	}
 	for _, provider := range s.pool.Snapshot() {
+		if owned[provider.ProviderID] {
+			continue
+		}
 		if !relayBlindBindable(provider) || !provider.IsWSTunneled() || !modelIDEqual(provider.ModelID, model) {
 			continue
 		}

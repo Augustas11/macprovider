@@ -88,6 +88,30 @@ final class ModelRuntimeToolSelectionTests: XCTestCase {
         await runtime.unregisterInFlight(handle.registrationID)
     }
 
+    func testAdditionalExactProfilesHoldStreamingUntilSchemaAndSelectionValidate() async throws {
+        for model in ["mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit", "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit"] {
+            for choice in ["required", ["type": "function", "function": ["name": "lookup"]]] as [Any] {
+                for valid in [true, false] {
+                    let runtime = runtime(arguments: valid ? #"{"id":3}"# : #"{"id":"wrong"}"#, modelID: model)
+                    let request = try request(choice: choice, stream: true, model: model)
+                    let handle = try await runtime.acquireRequestHandle(request)
+                    let chunks = ToolSelectionChunkLog()
+                    do {
+                        let result = try await runtime.stream(request, with: handle, onChunk: { chunks.append($0) })
+                        XCTAssertTrue(valid, "invalid schema must not succeed")
+                        XCTAssertEqual(result.toolCalls?.first?.functionName, "lookup")
+                        XCTAssertEqual(chunks.count, 1)
+                    } catch let error as APIError {
+                        XCTAssertFalse(valid)
+                        XCTAssertEqual(error.code, "tool_selection_validation_failed")
+                        XCTAssertEqual(chunks.count, 0, "invalid held output must not escape")
+                    }
+                    await runtime.unregisterInFlight(handle.registrationID)
+                }
+            }
+        }
+    }
+
     func testNoneStripsToolDescriptorsAndRejectsCalls() async throws {
         let request = try request(choice: "none")
         let input = try ModelRuntime.userInput(for: request)

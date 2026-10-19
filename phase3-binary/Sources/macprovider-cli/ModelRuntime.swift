@@ -33,6 +33,9 @@ protocol ModelRuntimeServing: Actor {
     /// before emitting validation evidence or starting inference.
     func relayBlindPrepare(_ request: ChatCompletionRequest) async throws -> RelayBlindPreparedRequest
     func acquireRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle
+    /// New HTTP requests must observe actual swap state; existing handles and
+    /// the coordinator relay retain their snapshot-based serving contract.
+    func acquireHTTPRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle
     func unregisterInFlight(_ id: Int)
     func currentSnapshot() async -> RuntimeSnapshot
     /// Identity/status surface the serve command reads to build ProviderStatus.
@@ -244,6 +247,11 @@ private enum StructuredStreamingIdleRaceResult<T: Sendable>: Sendable {
 }
 
 extension ModelRuntimeServing {
+    /// Runtimes without model swaps share their ordinary admission path.
+    func acquireHTTPRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle {
+        try acquireRequestHandle(request)
+    }
+
     func localResponsesCapabilities() async -> LocalResponsesCapabilities { .unavailable }
 
 
@@ -6653,6 +6661,12 @@ maxTokens: 1,
         return ToolSelectionPolicy.supportedNativeModel
     }
 
+    func acquireHTTPRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle {
+        // Check and register in one actor turn so a swap cannot interleave.
+        try Self.validateReady(state)
+        return try acquireRequestHandle(request)
+    }
+
     func acquireRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle {
         let snapshot = requestStartSnapshot()
         try Self.validateReady(snapshot.state)
@@ -6702,8 +6716,12 @@ maxTokens: 1,
         let templateSupportsPreserveThinking = handle.snapshot.templateSupportsPreserveThinking
         let selectionModelID = toolSelectionModelID(handle.snapshot)
         try await inferenceGate.withPermit {
+            // A cancelled request (client gone, or local work preempted by a
+            // buyer under SPEC-001-R011) releases the gate without preparing.
+            try Task.checkCancellation()
             try handle.drainCancelled.check()
             return try await container.perform { context in
+                try Task.checkCancellation()
                 try handle.drainCancelled.check()
                 let (lmInput, _) = try await Self.preparedRequestInput(
                     for: request,
@@ -6713,6 +6731,7 @@ maxTokens: 1,
                     nativeVisionProfile: handle.snapshot.nativeVisionProfile,
                     toolSelectionModelID: selectionModelID
                 )
+                try Task.checkCancellation()
                 try handle.drainCancelled.check()
                 try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
             }
@@ -6721,6 +6740,7 @@ maxTokens: 1,
 
 
     func localResponsesCapabilities() async -> LocalResponsesCapabilities {
+        guard state == .ready else { return .unavailable }
         let snapshot = requestStartSnapshot()
         guard snapshot.state == .ready, snapshot.container != nil, let model = snapshot.modelID else {
             return .unavailable
@@ -6731,6 +6751,9 @@ maxTokens: 1,
     }
 
     func localTokenUtilityCapabilities() async -> LocalTokenUtilityCapabilities {
+        guard state == .ready else {
+            return LocalTokenUtilityCapabilities(model: nil, modelHash: nil, generation: nil, operations: [])
+        }
         let snapshot = requestStartSnapshot()
         guard snapshot.state == .ready, snapshot.container != nil, snapshot.modelID != nil else {
             return LocalTokenUtilityCapabilities(model: nil, modelHash: nil, generation: nil, operations: [])
@@ -6743,7 +6766,7 @@ maxTokens: 1,
 
 
     func localTokenUtility(_ request: LocalTokenUtilityRequest, shouldCancel: @escaping @Sendable () -> Bool) async throws -> LocalTokenUtilityResult {
-        let handle = try acquireRequestHandle(request.admissionRequest())
+        let handle = try acquireHTTPRequestHandle(request.admissionRequest())
         let generation = selfCheckGeneration
         defer { unregisterInFlight(handle.registrationID) }
         if request.operation == .applyTemplate, currentChatTemplateSHA256 == nil {
@@ -8885,6 +8908,9 @@ maxTokens: boundedMaxTokens,
                         nativeVisionProfile: snapshot.nativeVisionProfile,
                         toolSelectionModelID: selectionModelID
                     )
+                    // Cancelled during preparation (client gone, or local
+                    // work preempted under SPEC-001-R011): release the gate.
+                    try Task.checkCancellation()
                     try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
                     // The request's completion budget as served: unchanged for
                     // a capped serve cache, clamped to the remaining context
@@ -9680,6 +9706,9 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         nativeVisionProfile: snapshot.nativeVisionProfile,
                         toolSelectionModelID: selectionModelID
                     )
+                    // Cancelled during preparation (client gone, or local
+                    // work preempted under SPEC-001-R011): release the gate.
+                    try Task.checkCancellation()
                     try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
                     // The request's completion budget as served: unchanged for
                     // a capped serve cache, clamped to the remaining context

@@ -1,6 +1,6 @@
 # SPEC-018 — Agentic tool calling (provider-side response synthesis)
 
-**Version:** 0.2.15 (2026-10-17, guaranteed selection starts generation inside the call)
+**Version:** 0.2.16 (2026-10-19, exact Connected apps tool-selection profiles)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.5.5, SPEC-006 v0.9, SPEC-008 (Pillar A model-hash trust layer — referenced by §10a), SPEC-011 v0.5 (warm-swap heartbeat `model_hash` — referenced by §10a), SPEC-015 v0.4 (receipts canonical output binding — see AC-17 and §N.5)
 **Status:** **LOCKED** at v0.2.10 by the streaming cleanup-rewrite byte-domain clarification. Previously LOCKED at v0.2.9 by the serial-turn `parallel_tool_calls` amendment (omitted/`false` stop after the first complete valid tool). Previously LOCKED at v0.2.8 by the #1594 OpenRouter-aligned AC-53 amendment (no independent messages[] count cap). Previously LOCKED at v0.2.7 by the Qwen3-Coder function-XML tool-call grammar amendment (documents the `<function=…><parameter=…>` XML body that Qwen3-Coder emits as a Qwen-row §3.1 body-grammar alternative, with OpenAI/MCP name charset; pending IMPL/conformance already landed on branch `fix/qwen3coder-toolcall-parse`); previously LOCKED at v0.2.6 by #784 C2b admission-timeout reconciliation — v0.2.4 spec PR #202 and IMPL PR #209 both landed (multi-turn acceptance, token-incremental streaming, `tool_call_id` validation, 1 MiB/2 MiB byte caps). v0.2.5 adds gpt-oss/OpenAI Harmony response parsing as a pending implementation/conformance gap. codex 4-lane r4 0/0/0; Claude blind-spot r2 0/0/0. SPEC-019 already depends on this as "LOCKED". The former "LOCK CANDIDATE pending PR" line was never flipped after merge. (Resolved gap, 2026-07-14, runbook item 15: AC-45's `X-MacProvider-Streaming-Mode` header — set by the coordinator on streaming `200` responses — was stripped by the public gateway's blanket `X-MacProvider-*` filter, making the "header absent" fail condition live on `api.malibu.tech`. Fixed by adding the header to the SPEC-006 v0.9.9 § 5.4 response-pass-through allowlist and un-stripping it at the gateway, validated against AC-45's closed enum. Chosen over scoping AC-45 to the coordinator surface because buyers hit the gateway, so scoping would have left AC-45's buyer-visible promise unmet. AC-45's normative text is unchanged; this is a documentation reconciliation, not a lock amendment. Residual: the coordinator currently emits the diagnostic only on the streaming success path — non-streaming AC-45 emission is a separate coordinator-side completeness item, out of scope for the gateway-strip fix.)
 
@@ -533,10 +533,12 @@ explicit tool modes for relay-blind/encrypted envelopes.
 | Loaded model and runtime | `auto` | `none` | `required` and named function |
 |---|---|---|---|
 | Native `mlx_cache`, exact loaded `mlx-community/Qwen3.6-35B-A3B-4bit` (guaranteed-call profile: function-XML) | Existing behavior | Supported | Call prefill plus complete-generation schema holdback |
+| Native `mlx_cache`, exact loaded `mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit` (function-XML) | Existing behavior | Supported | Call prefill plus complete-generation schema holdback |
+| Native `mlx_cache`, exact loaded `mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit` (JSON envelope) | Existing behavior | Supported | Call prefill plus complete-generation schema holdback |
 | Other native `mlx_cache` identities | Existing behavior | Supported | Unsupported |
 | External/loopback runtimes | Existing behavior | Unsupported | Unsupported |
 
-A buyer alias can use the first row only when routing resolves to that same
+A buyer alias can use a supported row only when routing resolves to that same
 loaded model identity. When a native provider loads its configured model under
 a local name and advertises a configured catalog id for it, the provider MUST
 evaluate this matrix against that catalog id while the configured model is the
@@ -618,8 +620,27 @@ claim of constrained token sampling.
 A model qualifies for `required`/named only through a **guaranteed-call
 profile**: its exact loaded identity, its template's call format, and the exact
 text the template's generation prompt ends with once any think block is closed.
-The supported identity's profile is function-XML with generation-prompt suffix
+The Qwen3.6 identity's profile is function-XML with generation-prompt suffix
 `<|im_start|>assistant\n<think>\n\n</think>\n\n` (`enable_thinking: false`).
+The two non-thinking profiles use `<|im_start|>assistant\n`. Their call
+grammars and suffixes come from the exact catalog-pinned upstream templates:
+
+| Exact model identity | Template revision | Call grammar | SHA-256 of UTF-8 `chat_template.jinja` |
+|---|---|---|---|
+| `mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit` | [`6e302ea604ad9ab206367e2c501d1571023e7b6d`](https://huggingface.co/mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit/blob/6e302ea604ad9ab206367e2c501d1571023e7b6d/chat_template.jinja) | function-XML | `672e747c77e990320152343b0a4951222e40de5645297905d89afba05586d827` |
+| `mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit` | [`e9675aa3ca5f900ccef55267914466d55ab325fa`](https://huggingface.co/mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit/blob/e9675aa3ca5f900ccef55267914466d55ab325fa/chat_template.jinja) | JSON envelope | `40c21f34cf67d8c760ef72f8ad3ae5afad514299d4b06e91dd9a8d705af7b541` |
+
+These are exact identity entries, never family-name, case-folded, quantization,
+or local-path matches. An unresolved alias is unsupported. Template inspection
+and parser fixtures establish compatibility, not hardware qualification. Before
+shipping an additional entry, designated-Studio correctness acceptance MUST
+cover required/named selection in both streaming and non-streaming mode using
+the pinned model, with complete validated calls and no leaked prefill. Each
+case MUST also replay the assistant call and matching tool result and produce
+a final answer using that result. Existing
+Qwen3.6 evidence does not qualify either additional identity. Failed or missing
+acceptance leaves that entry unqualified and MUST prevent its release.
+
 For a model with a profile the provider MUST constrain generation as follows:
 
 - A named choice MUST render only the selected function in the chat
@@ -1090,6 +1111,7 @@ Amendment log:
 - Amendment 3 (v0.2.8): AC-53 / §10d.1 v0.2.0-locked maximum `messages[]` length 256 → DELETED as an independent cap. Rationale: the count cap is not a model constraint and blocks legitimate coding-agent sessions (Pi/Cline 300+ messages); OpenRouter and OrcaRouter impose no message-count limit. Residual risk: large-but-under-body-cap arrays still cost validation CPU. Mitigation: AC-50 4 MiB raw-body cap (public gateway SPEC-006 default `request_body_bytes` may be stricter), AC-51/AC-52 aggregate byte caps, AC-54 tool-call count, AC-55 linear validation, and the served context window.
 - Amendment 4 (v0.2.9): §2.2 v0.1-locked “preserve all N recognized tool calls” → scoped to `parallel_tool_calls: true`. Omitted/`false` is serial: stop after the first complete valid tool. Rationale: agent loops (Pi) omit the field and execute one tool per turn; leftover decode after a valid tool hangs or kills the stream. Residual risk: a client wanting two tools in one assistant message must send `parallel_tool_calls: true`. Mitigation: explicit request boolean; default matches Pi.
 
+- Amendment 8 (v0.2.16): §3.11 exact identity matrix adds the catalog-pinned Qwen3-Coder-30B-A3B-Instruct and Qwen3-30B-A3B-Instruct-2507 4bit profiles. Their upstream templates use different call grammars with the same non-thinking assistant suffix. Release requires designated-Studio required/named, stream/non-stream and tool-history correctness acceptance for each added identity; template fixtures alone are not qualification. Existing schema, token, byte, cardinality and output-holdback bounds remain unchanged. Unqualified aliases remain unsupported.
 - Amendment 7 (v0.2.15): §3.11 v0.2.12 "the guarantee is output validation after ordinary model generation" → guaranteed-call profile with named-only tool rendering and an assistant-turn call prefill. Rationale: on CLI 1.8.251 the qualified model ignored the selection instruction (wrong function for a named choice, prose for `required`), so the guarantee failed live. Mitigation: per-model profile, prefill only after a closed think block, parser over prefill plus continuation, unchanged complete-output validation. Residual risk: arguments are still unconstrained by the decoder and can fail validation; a template whose generation prompt does not match its profile falls back to validation only.
 - Amendment 6 (v0.2.14): §3.11 "Function-XML MUST NOT be recovered into a successful call" → only function-XML outside one complete template-grammar call per envelope is excluded. Rationale: the only qualified model's chat template instructs function-XML, so the v0.2.12 rule made every guaranteed turn fail. Mitigation: exact grammar, declared names and parameters only, schema-directed typing with strict JSON for non-string values, markup inside values rejected, and the unchanged complete-output validation. Residual risk: a string value that legitimately contains call markup fails validation instead of succeeding.
 - Amendment 5 (v0.2.12): §5/AC-13 v0.1 auto-only rejection → §3.11 explicit model/runtime matrix; v0.2.9 §2.2 serial early-stop and §10d.4 incremental tool emission → ordinary `auto` only, with complete-generation holdback for `required`/named; AC-45 adds `buffered_tool_selection` to its diagnostic enum. Rationale: selected modes must be preserved and successful calls must satisfy the selected name, schema and cardinality. Mitigation: strict bounds, capability routing, full holdback and explicit failures. Residual risk: generation may fail validation; no fabricated or repaired call is substituted.

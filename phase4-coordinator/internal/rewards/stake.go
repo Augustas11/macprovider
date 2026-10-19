@@ -259,6 +259,15 @@ func providerOwnerLockedUnits(ctx context.Context, q queryRower, providerID stri
 	return units, nil
 }
 
+// AccountStakeIdentity exposes the immutable persisted stake-account link for
+// routing exclusion, including an immature stake with no allowance grant yet.
+func AccountStakeIdentity(ctx context.Context, db *sql.DB, accountID string) (int64, error) {
+	if db == nil {
+		return 0, errors.New("stake identity database unavailable")
+	}
+	return accountIdentity(ctx, db, accountID)
+}
+
 // accountIdentity is the one GitHub identity an account has staked under,
 // or 0 before its first lock (SPEC-050-R002: the identity is fixed).
 func accountIdentity(ctx context.Context, q interface {

@@ -1612,3 +1612,20 @@ func allowedByCreatorCeilingLocked(ceilings map[string]map[string]struct{}, crea
 	_, ok := allowed[id]
 	return ok
 }
+
+// OwnedProvidersForAccount returns only authoritative owner assignments and
+// owned-provider ceilings. Delegated membership never establishes ownership.
+func (r *Registry) OwnedProvidersForAccount(accountID string) map[string]bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	owned := make(map[string]bool)
+	for id, account := range r.providerOwnerAccounts {
+		if account == accountID {
+			owned[id] = true
+		}
+	}
+	for id := range r.providerCeilings[accountID] {
+		owned[id] = true
+	}
+	return owned
+}

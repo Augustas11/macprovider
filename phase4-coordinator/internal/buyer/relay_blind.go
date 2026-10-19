@@ -706,10 +706,17 @@ func relayBlindPinnedLaneCap(maxPending, slotsTotal int) int {
 // request: an otherwise eligible provider serves the model and none supports
 // a capability in requires.
 func (s *Server) selectRelayBlindProvider(ctx context.Context, accountID, model string, encryptedBytes int64, requireFree bool, class string, requires []string) (pool.Provider, relayblind.KeyRecord, bool, bool) {
+	owned, ownershipErr := s.buyerOwnedProviders(ctx)
+	if ownershipErr != nil {
+		return pool.Provider{}, relayblind.KeyRecord{}, false, false
+	}
 	var providers []pool.Provider
 	var keys []relayblind.KeyRecord
 	incapable := false
 	for _, provider := range s.pool.Snapshot() {
+		if owned[provider.ProviderID] {
+			continue
+		}
 		eligible := relayBlindBindable(provider)
 		if requireFree {
 			eligible = provider.RoutingEligible()
@@ -1159,6 +1166,11 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 			return
 		}
 		writeRelayBlindError(w, code, "Relay-blind provider session or key expired")
+		return
+	}
+	if routeErr := s.checkBuyerProviderOwnership(r.Context(), provider.ProviderID); routeErr != nil {
+		burn("relay_blind_required_unavailable")
+		writeRelayBlindError(w, "relay_blind_required_unavailable", "No eligible provider available")
 		return
 	}
 	quotaMetered := false

@@ -214,9 +214,9 @@ actor IdlePrewarmer {
             return
         }
 
-        let snapshot = await providerStatus.snapshot()
+        let busy = await providerStatus.hasInferenceWork()
         guard !shouldStopTick() else { return }
-        guard snapshot.requestsInFlight == 0 else {
+        guard !busy else {
             logSkipped("busy")
             return
         }
@@ -251,9 +251,9 @@ actor IdlePrewarmer {
             return
         }
 
-        let finalSnapshot = await providerStatus.snapshot()
+        let finalBusy = await providerStatus.hasInferenceWork()
         guard !shouldStopTick() else { return }
-        guard finalSnapshot.requestsInFlight == 0 else {
+        guard !finalBusy else {
             logSkipped("busy")
             return
         }

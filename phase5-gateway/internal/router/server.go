@@ -106,6 +106,7 @@ func (s *Server) readStore() ReadStore {
 }
 
 type Store interface {
+	routingIdentityLookup
 	storage.AuthStore
 	storage.UsageStore
 	storage.DemandTelemetryStore

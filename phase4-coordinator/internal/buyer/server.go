@@ -222,7 +222,8 @@ func spec018Retryable(code string) bool {
 }
 
 type Server struct {
-	pool *pool.Registry
+	buyerOwnership BuyerOwnershipLookup
+	pool           *pool.Registry
 	// trustPools holds SPEC-042 Trusted Pool membership/revocation state.
 	// Nil unless WithPoolMembership is supplied. Without a pool authority
 	// header, default deployments stay byte-identical; with one, nil fails
@@ -814,6 +815,9 @@ func WithBilling(store *billing.Store, cfg config.RewardsConfig) Option {
 		defer s.billingMu.Unlock()
 		s.billing = store
 		s.billingCfg = cfg
+		if store != nil && s.buyerOwnership == nil {
+			s.buyerOwnership = store.BuyerOwnedProviders
+		}
 	}
 }
 
@@ -1027,7 +1031,7 @@ type authenticatedAccountContextKey struct{}
 
 func (s *Server) gatewayContextMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !s.requireGatewayContext {
+		if !s.requireGatewayContext && !s.internalBearerAuthorizedRemote(r.Header, r.RemoteAddr) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -1038,10 +1042,15 @@ func (s *Server) gatewayContextMiddleware(next http.Handler) http.Handler {
 		accountID := sanitizeAccountID(r.Header.Get("X-MacProvider-Account"))
 		account, err := requestlog.NewAuthenticatedAccount(accountID)
 		if err != nil {
+			if !s.requireGatewayContext {
+				next.ServeHTTP(w, r)
+				return
+			}
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Gateway account context is required")
 			return
 		}
 		ctx := context.WithValue(r.Context(), authenticatedAccountContextKey{}, account)
+		ctx = context.WithValue(ctx, routingIdentityContextKey{}, parseRoutingIdentity(r.Header))
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -8052,7 +8061,25 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		headers.Del("X-MacProvider-Internal-Conv")
 		headers.Del("X-MacProvider-Internal-Conv-Cache")
 	}
+	owned, ownershipErr := s.buyerOwnedProviders(ctx)
+	if ownershipErr != nil {
+		return pool.Provider{}, ownershipErr
+	}
 	providers := s.pool.Snapshot()
+	if pinned := headers.Get("X-MacProvider-Provider"); pinned != "" && owned[pinned] {
+		return pool.Provider{}, ownershipUnavailable()
+	}
+	if session := headers.Get("X-MacProvider-Session"); session != "" {
+		for _, p := range providers {
+			if p.AssignedID == session && owned[p.ProviderID] {
+				return pool.Provider{}, ownershipUnavailable()
+			}
+		}
+	}
+	providers = filterBuyerOwnedProviders(providers, owned)
+	if len(providers) == 0 && len(owned) > 0 {
+		return pool.Provider{}, ownershipUnavailable()
+	}
 	estimatedTokens := routingRequestPromptTokenEstimate(req.raw, req.hasVision)
 	admissionCtx, admissionCancel := newRouteSnapshotDispatchContext(ctx)
 	defer admissionCancel()

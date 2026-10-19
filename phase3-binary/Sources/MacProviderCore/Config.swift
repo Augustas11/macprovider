@@ -340,6 +340,15 @@ public struct AppConfig: Equatable, Sendable {
     // `MACPROVIDER_CONTINUOUS_BATCHING_CACHED_TURNS`, CLI
     // `--[no-]continuous-batching-cached-turns`.
     public var continuousBatchingCachedTurns: Bool
+    // SPEC-001-R011: customers-first policy for local (loopback, non-network)
+    // requests. Slots local work may never take while `max_concurrency` > 1
+    // (unset ⇒ 1), and how long a buyer may wait before local work in its
+    // slot is preempted (unset ⇒ 0 ms). yaml keys
+    // `local_reserved_buyer_slots` / `local_preemption_window_ms`, env
+    // `MACPROVIDER_LOCAL_RESERVED_BUYER_SLOTS` /
+    // `MACPROVIDER_LOCAL_PREEMPTION_WINDOW_MS`.
+    public var localReservedBuyerSlots: Int? = nil
+    public var localPreemptionWindowMS: Int? = nil
     // MLX buffer-cache ceiling in MiB. MLX defaults it to its memory limit, so
     // freed GPU buffers accumulate for the life of the process (Studio live
     // provider 2026-09-24: 50 GB fresh -> ~130 GB under traffic -> kernel
@@ -942,6 +951,8 @@ public enum ConfigLoader {
             key: "continuous_batch_prefill_tokens_per_iteration",
             expected: "integer >= 1"
         )
+        try assign(&config.localReservedBuyerSlots, from: dict, key: "local_reserved_buyer_slots", expected: "integer >= 0")
+        try assign(&config.localPreemptionWindowMS, from: dict, key: "local_preemption_window_ms", expected: "integer >= 0")
         try assign(
             &config.continuousBatchingCachedTurns,
             from: dict,
@@ -1167,6 +1178,8 @@ public enum ConfigLoader {
             expected: "boolean"
         )
         try assign(&config.mlxCacheLimitMB, from: environment, env: "MACPROVIDER_MLX_CACHE_LIMIT_MB", expected: "integer >= 0")
+        try assign(&config.localReservedBuyerSlots, from: environment, env: "MACPROVIDER_LOCAL_RESERVED_BUYER_SLOTS", expected: "integer >= 0")
+        try assign(&config.localPreemptionWindowMS, from: environment, env: "MACPROVIDER_LOCAL_PREEMPTION_WINDOW_MS", expected: "integer >= 0")
         return config
     }
 

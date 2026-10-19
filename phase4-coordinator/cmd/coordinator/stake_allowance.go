@@ -28,6 +28,11 @@ func setupStakeAllowance(ctx context.Context, cfg *config.Config, coordinatorDB,
 	}
 	if billingStore != nil {
 		deps.Allowance = billingStore
+		if rewardsDB != nil {
+			billingStore.SetRoutingStakeIdentityLookup(func(ctx context.Context, accountID string) (int64, error) {
+				return rewards.AccountStakeIdentity(ctx, rewardsDB, accountID)
+			})
+		}
 	}
 	var source billing.AllowanceStakeSource
 	if rewardsDB != nil {

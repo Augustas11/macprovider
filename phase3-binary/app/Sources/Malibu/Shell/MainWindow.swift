@@ -6,6 +6,7 @@ import SwiftUI
 enum MalibuSection: String, CaseIterable, Identifiable, Hashable {
     case dashboard
     case chat
+    case connectedApps
     case models
     case discover
     case provider
@@ -18,6 +19,7 @@ enum MalibuSection: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .dashboard: return String(localized: "Dashboard", comment: "Sidebar section")
         case .chat: return String(localized: "Chat", comment: "Sidebar section")
+        case .connectedApps: return String(localized: "Connected apps", comment: "Sidebar section")
         case .models: return String(localized: "Models", comment: "Sidebar section")
         case .discover: return String(localized: "Discover", comment: "Sidebar section")
         case .provider: return String(localized: "Provider", comment: "Sidebar section")
@@ -30,6 +32,7 @@ enum MalibuSection: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .dashboard: return "square.grid.2x2"
         case .chat: return "bubble.left.and.bubble.right"
+        case .connectedApps: return "app.connected.to.app.below.fill"
         case .models: return "square.stack.3d.up"
         case .discover: return "magnifyingglass"
         case .provider: return "arrow.up.arrow.down"
@@ -246,7 +249,9 @@ struct MainShellView: View {
                 onResetProvider: onResetProvider
             )
         case .chat:
-            ChatPlaceholderScreen()
+            ChatScreen(agent: agent)
+        case .connectedApps:
+            ConnectedAppsScreen()
         case .models:
             ModelsScreen(store: modelStore, agent: agent)
         case .discover:
@@ -262,26 +267,6 @@ struct MainShellView: View {
                 onResetProvider: onResetProvider
             )
         }
-    }
-}
-
-/// Chat is built in Phase 3 (#2054); the sidebar item is present so the
-/// window structure does not change when it lands.
-struct ChatPlaceholderScreen: View {
-    static let title = String(localized: "Chat", comment: "Chat placeholder title")
-    static let message = String(localized: "Chat with the model this Mac serves is coming in a later Malibu update. Paying customers will keep priority, and chats will stay on this Mac.", comment: "Chat placeholder message")
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(Self.title)
-                .font(.title2.weight(.semibold))
-            Text(Self.message)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(24)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .accessibilityIdentifier("malibu.chat.placeholder")
     }
 }
 

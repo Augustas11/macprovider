@@ -1,6 +1,6 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.21 (2026-10-15, non-streamed performance evidence)
+**Version:** 1.6.22 (2026-10-19, authoritative buyer ownership exclusion)
 
 **Change log v1.6.21 (2026-10-15, issue #1355):** SPEC-002-R005 now learns
 from non-streamed traffic. Every attempt's times run from provider dispatch
@@ -5575,3 +5575,36 @@ response the coordinator writes after that selection, including its error
 responses. Relay-blind
 and privacy-class responses MUST NOT carry it. The gateway forwards it under
 SPEC-006-R020.
+
+
+## SPEC-002-R008 — Buyer ownership exclusion
+
+Buyer inference MUST NOT dispatch to any provider the buyer owns. Before
+selection and again immediately before each dispatch, the coordinator MUST
+resolve all established owner links from trusted persisted identity: gateway
+OAuth account identities, coordinator stake/allowance identity records and provider
+ownership, plus operator-configured provider owner accounts and creator-owned
+provider ceilings. Buyer-provided account, provider, or owner hints MUST NOT
+establish identity. Wallet-session credentials resolve to their persisted buyer
+account; wallet possession alone MUST NOT imply a GitHub identity or ownership
+of an unrelated payout address.
+
+The gateway supplies its database-derived GitHub identities in the internal
+`X-MacProvider-Internal-Routing-GitHub-IDs` header: `none` means a successful
+lookup with no link, comma-separated positive decimal IDs mean established
+links, and `unavailable` means the lookup failed. The coordinator honors this
+only in authenticated gateway account context. A required lookup failure,
+malformed assertion, or unavailable production ownership resolver MUST deny
+inference. Successful absence of links preserves ordinary, demo and legacy
+routing. A legacy gateway without the header still receives the coordinator's
+persisted account ownership checks.
+
+All owned Macs MUST be removed before normal ranking, sticky affinity, pool
+routing, explicit provider/session pins, capacity queues, retries, fallbacks,
+and relay-blind/privacy-class reservation. A pin MUST NOT override exclusion.
+Revalidation after a wait and before dispatch MUST reject newly owned or
+unverifiable candidates. Plaintext exclusion uses `503 no_provider_available`;
+encrypted routes use their existing unavailable-capacity errors. Exclusion
+MUST happen before provider dispatch, receipt creation or provider credit; a
+never-dispatched attempt MUST remain unbilled. Reward exclusion in SPEC-050
+is additional protection and MUST NOT substitute for this routing gate.

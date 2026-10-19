@@ -68,6 +68,15 @@ func (s *Server) forwardWithFailover(
 ) (shouldFallThroughToHTTP bool) {
 	failoverAttempted := false
 	for {
+		if routeErr := s.checkBuyerProviderOwnership(r.Context(), state.provider.ProviderID); routeErr != nil {
+			s.releaseQueuedSlotReservation(state)
+			rec.logRow("", routeErr.status, nil, nil, routeErr.message, routeErr.code, state.explicitRetries)
+			if !rec.providerCredited {
+				w.Header().Set(settlementNoPriorDispatchHeader, "1")
+			}
+			writeError(w, routeErr.status, routeErr.code, routeErr.message)
+			return false
+		}
 		// SPEC-042 R005 generation fence — checked before EVERY dispatch, not
 		// just the initial one. advanceToNextProvider (retry) and
 		// failoverCandidate (failover) re-select and refresh state.poolGeneration

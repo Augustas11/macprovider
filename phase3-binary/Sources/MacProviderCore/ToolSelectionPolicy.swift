@@ -52,6 +52,17 @@ public enum ToolSelectionPolicy {
             format: .functionXML,
             generationPromptSuffix: "<|im_start|>assistant\n<think>\n\n</think>\n\n"
         ),
+        // Catalog-pinned chat_template.jinja templates and their hashes are
+        // recorded in SPEC-018 §3.11. Both end at a non-thinking assistant turn;
+        // their call grammars differ, so they must not share a family default.
+        "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit": GuaranteedCallProfile(
+            format: .functionXML,
+            generationPromptSuffix: "<|im_start|>assistant\n"
+        ),
+        "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit": GuaranteedCallProfile(
+            format: .jsonEnvelope,
+            generationPromptSuffix: "<|im_start|>assistant\n"
+        ),
     ]
 
     public static func guaranteedCallProfile(modelID: String?) -> GuaranteedCallProfile? {

@@ -24,6 +24,9 @@ func (s allowanceTestSource) EarningStakes(context.Context, time.Time, time.Dura
 func newAllowanceHarness(t *testing.T, stakes ...billing.AllowanceStake) *econHarness {
 	t.Helper()
 	h, _ := newEconHarness(t, WithGatewayServiceToken(allowanceTestServiceToken), WithRequireGatewayContext(true))
+	if _, err := h.db.Exec(`CREATE TABLE IF NOT EXISTS provider_ownership (provider_id TEXT PRIMARY KEY, github_user_id INTEGER NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
 	policy := billing.AllowancePolicy{DailyBudgetCredits: 10_000_000, CreditsPerMALIBU: 1000, PerAccountDailyCapCredits: 1_000_000, MinStakeAge: time.Hour}
 	if _, _, err := h.store.RefreshAllowanceDay(context.Background(), time.Now().UTC(), allowanceTestSource{stakes: stakes}, policy); err != nil {
 		t.Fatal(err)
@@ -127,7 +130,7 @@ func TestCoordinatorAllowanceAdmissionFundsAndSplits(t *testing.T) {
 // SPEC-050-R010: an allowance request served by the staker's own provider is
 // written rewards-excluded; one served by an unrelated provider is not, and
 // both providers keep their credit.
-func TestAllowanceSelfDealtAttemptIsRewardsExcluded(t *testing.T) {
+func TestAllowanceOwnedProviderExcludedBeforeDispatch(t *testing.T) {
 	h := newAllowanceHarness(t,
 		billing.AllowanceStake{AccountID: "acct_self", GitHubUserID: 7, Units: 100 * billing.AllowanceUnitsPerMALIBU},
 		billing.AllowanceStake{AccountID: "acct_clean", GitHubUserID: 8, Units: 100 * billing.AllowanceUnitsPerMALIBU},
@@ -143,9 +146,16 @@ func TestAllowanceSelfDealtAttemptIsRewardsExcluded(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	WithBuyerOwnershipLookup(h.store.BuyerOwnedProviders)(h.server)
 	for account, want := range map[string]int{"acct_self": 1, "acct_clean": 0} {
 		external := "ext-" + account
 		rec := allowanceChat(h, account, external, allowanceHeaders("50", false))
+		if account == "acct_self" {
+			if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "no_provider_available") || ledgerRowsFor(t, h, account, external) != 0 {
+				t.Fatalf("own route was dispatched or billed: %d %s", rec.Code, rec.Body.String())
+			}
+			continue
+		}
 		if rec.Code != http.StatusOK || rec.Header().Get(allowanceFundingHeader) != billing.AllowanceFundingAllowance {
 			t.Fatalf("%s status %d headers %v", account, rec.Code, rec.Header())
 		}

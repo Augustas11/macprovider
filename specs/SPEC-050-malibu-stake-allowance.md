@@ -1,6 +1,6 @@
 # SPEC-050 - MALIBU Stake Allowance
 
-**Version:** 0.1.0
+**Version:** 0.1.1
 Status: draft
 Owner: @Augustas11
 Issue: https://github.com/Augustas11/macprovider/issues/1062
@@ -268,6 +268,12 @@ allowance request earns USDC exactly as for a paid request. The operator funds
 the allowance from the configured daily budget.
 
 ### SPEC-050-R010 - Self-dealt allowance traffic earns no MALIBU
+
+SPEC-002-R008 excludes owned providers before inference, for paid and allowance
+traffic alike. An own-provider request therefore produces no inference,
+provider credit or reward; it is not a permitted self-funded route. The reward
+exclusion below remains defense in depth for historical rows and the broader
+shared-payout/referral relation, which does not itself establish ownership.
 
 When an allowance-funded attempt is served by a provider that is self-dealing
 for the account, its ledger row MUST be written with `rewards_excluded = 1`, so
