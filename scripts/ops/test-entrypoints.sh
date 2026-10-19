@@ -1053,6 +1053,10 @@ sc() { printf '{"decision":"%s","served_slots":%s,%s}' "$1" "$2" "${3:-$SCK}"; }
 status_hold() { # STATUS_DOC_ARGS... with self_check_admission_hold.active=$HOLD_ACTIVE
   python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["continuous_batching"]["self_check_admission_hold"]={"active": sys.argv[2]=="true","holds_total":1}; json.dump(d,open(p,"w"))' "$tmp/svc/status.json" "$1"
 }
+status_doc $CAND true true false absent_fallback none attached '{"decision":"prior_grant_pending_recheck","served_slots":8,"model_sha256":"m1"}'
+MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 3 "canary probe refuses an incomplete pending self-check key" \
+  scripts/ops/cli-release.sh next --done canary_smoke --probe
+expect_err "needs provider_id and the self_check key"
 status_doc $CAND true true false absent_fallback none attached "$(sc prior_grant_pending_recheck 8)"
 MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 0 "canary probe accepts a serving prior grant with its re-check pending" \
   scripts/ops/cli-release.sh next --done canary_smoke --probe
@@ -1080,6 +1084,10 @@ status_doc $CAND true true false absent_fallback none attached "$(sc granted 8 "
 MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 3 "re-check gate refuses a decision on another self-check key" \
   scripts/ops/cli-release.sh _check-canary-self-check "$CAND"
 expect_err "self_check.runtime_build"
+status_doc $CAND true true false absent_fallback none attached "$(sc granted 8 "${SCK/16/1}")"; status_hold false
+MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 3 "re-check gate refuses a decision on another decode window" \
+  scripts/ops/cli-release.sh _check-canary-self-check "$CAND"
+expect_err "self_check.decode_window"
 status_doc $LIVE true true false absent_fallback none attached "$(sc granted 8)"; status_hold false
 MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 3 "re-check gate refuses a canary on another version" \
   scripts/ops/cli-release.sh _check-canary-self-check "$CAND"

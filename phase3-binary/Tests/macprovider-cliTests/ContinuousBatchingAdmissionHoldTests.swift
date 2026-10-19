@@ -263,6 +263,30 @@ final class ContinuousBatchingAdmissionHoldTests: XCTestCase {
         XCTAssertEqual(ContinuousBatchingSelfCheck.admissionHoldJitterSeconds, 900)
     }
 
+    func testCancelledRuntimeResultYieldsWithoutBecomingADecision() async {
+        let status = makeStatus()
+        let outcome = await ContinuousBatchingSelfCheck.runUnderAdmissionHold(
+            providerStatus: status, drainSeconds: 0, checkSeconds: 0.1,
+            lifecycleLease: { nil }, context: "test", log: { _ in }
+        ) {
+            while !Task.isCancelled { try? await Task.sleep(nanoseconds: 10_000_000) }
+            // A scheduler may report success while its caller was cancelled.
+            // Exercise the same terminal gate as the runtime's batch collector.
+            do {
+                try ModelRuntime.validateContinuousBatchingSelfCheckTerminal(.length)
+                XCTFail("a cancelled self-check must not store a measurement")
+                return true
+            } catch {
+                XCTAssertTrue(error is CancellationError)
+                return false
+            }
+        }
+        XCTAssertEqual(outcome, .checkBound, "the watchdog owns expiry even when the check returns false")
+        let hold = await status.selfCheckAdmissionHoldStatus()
+        XCTAssertFalse(hold.active)
+        XCTAssertEqual(hold.lastOutcome, "check_bound")
+    }
+
     func testReportCarriesTheDecodeWindow() {
         let key = ContinuousBatchingSelfCheckKey(
             modelSHA256: "m", metallibSHA256: "l", kernelIdentifier: "k", hardwareClass: "h",

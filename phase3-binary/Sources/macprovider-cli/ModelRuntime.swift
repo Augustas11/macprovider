@@ -5346,6 +5346,7 @@ maxTokens: 1,
         report: ContinuousBatchingSelfCheckReport? = nil,
         publishCapacity: Bool = false
     ) async -> Bool {
+        guard !Task.isCancelled else { return false }
         if let expected, continuousBatchingSelfCheckTarget(includeDecided: true) != expected {
             return false
         }
@@ -5370,17 +5371,22 @@ maxTokens: 1,
     /// Greedy prompts for the self-check, tokenized with the loaded chat
     /// template so rows look like buyer turns.
     func continuousBatchingSelfCheckPrompts(_ texts: [String]) async throws -> [[Int]] {
+        try Task.checkCancellation()
         guard let container = currentContainer else {
             throw ContinuousBatchSchedulerError.requestFailed("self_check_model_unavailable")
         }
-        return try await container.perform { context in
+        let prompts = try await container.perform { context in
             var prompts: [[Int]] = []
             for text in texts {
+                try Task.checkCancellation()
                 let lmInput = try await context.processor.prepare(input: UserInput(chat: [.user(text)]))
+                try Task.checkCancellation()
                 prompts.append(lmInput.text.tokens.asArray(Int32.self).map(Int.init))
             }
             return prompts
         }
+        try Task.checkCancellation()
+        return prompts
     }
 
     /// SPEC-038 FR-CB10: whether a batched row's first divergence from the
@@ -5396,10 +5402,13 @@ maxTokens: 1,
         batchedToken: Int,
         otherRowsAloneTokens: [Int]
     ) async throws -> (nearTie: Bool, margin: Float?, reason: String) {
+        try Task.checkCancellation()
         guard let container = currentContainer else { return (false, nil, "model_unavailable") }
         let reference = try await container.perform { context in
-            try PagedKVRuntimeParityProbe.serialReference(model: context.model, prompt: prompt + sharedPrefix)
+            try Task.checkCancellation()
+            return try PagedKVRuntimeParityProbe.serialReference(model: context.model, prompt: prompt + sharedPrefix)
         }
+        try Task.checkCancellation()
         return ContinuousBatchingSelfCheck.divergenceVerdict(
             reference: reference, aloneToken: aloneToken, batchedToken: batchedToken,
             otherRowsAloneTokens: otherRowsAloneTokens
@@ -5419,6 +5428,7 @@ maxTokens: 1,
         idPrefix: String,
         cohort: Bool = false
     ) async throws -> ContinuousBatchingSelfCheckBatchRun {
+        try Task.checkCancellation()
         guard let scheduler = continuousBatchScheduler else {
             throw ContinuousBatchSchedulerError.requestFailed("self_check_scheduler_unavailable")
         }
@@ -5429,6 +5439,7 @@ maxTokens: 1,
                 for (index, prompt) in prompts.enumerated() {
                     let id = ids[index]
                     group.addTask {
+                        try Task.checkCancellation()
                         let result = try await scheduler.submit(ContinuousBatchSchedulerRequest(
                             id: id,
                             conversationKey: "",
@@ -5440,6 +5451,7 @@ maxTokens: 1,
                             selfCheckProbe: true,
                             selfCheckCohort: cohort ? ContinuousBatchSelfCheckCohort(id: idPrefix, size: prompts.count) : nil
                         ))
+                        try Self.validateContinuousBatchingSelfCheckTerminal(result.terminalStatus)
                         return (
                             index, result.generatedTokens, result.selfCheckCohortDecodeTokens ?? 0,
                             result.selfCheckCohortDecodeSeconds ?? 0
@@ -5450,6 +5462,7 @@ maxTokens: 1,
                 var cohortTokens = Array(repeating: 0, count: prompts.count)
                 var cohortSeconds = Array(repeating: 0.0, count: prompts.count)
                 for try await (index, tokens, decodeTokens, decodeSeconds) in group {
+                    try Task.checkCancellation()
                     rows[index] = tokens
                     cohortTokens[index] = decodeTokens
                     cohortSeconds[index] = decodeSeconds
@@ -5459,10 +5472,24 @@ maxTokens: 1,
         } onCancel: {
             Task { for id in ids { await scheduler.cancel(requestID: id) } }
         }
+        try Task.checkCancellation()
         return ContinuousBatchingSelfCheckBatchRun(
             outputs: outputs.0, seconds: Date().timeIntervalSince(start),
             cohortDecodeTokens: outputs.1, cohortDecodeSeconds: outputs.2
         )
+    }
+
+    /// Scheduler cancellation is a terminal result, not necessarily a thrown
+    /// error. Never let its partial tokens become isolation or gain evidence.
+    nonisolated static func validateContinuousBatchingSelfCheckTerminal(
+        _ status: ContinuousBatchSchedulerTerminalStatus
+    ) throws {
+        try Task.checkCancellation()
+        switch status {
+        case .stop, .length: return
+        case .cancelled: throw CancellationError()
+        default: throw ContinuousBatchSchedulerError.requestFailed("self_check_\(status.rawValue)")
+        }
     }
 
     func continuousBatchingCapabilityForTest() -> ContinuousBatchingCapability {

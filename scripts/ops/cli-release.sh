@@ -1109,7 +1109,10 @@ if recheck_pending:
 # Every undecided self-check is confirmed later by canary_self_check, on the
 # same provider and self-check key.
 if got["self_check_decision"] in ("prior_grant_pending_recheck", "pending", "deferred"):
-    if not got["provider_id"] or not got["self_check_key"]["model_sha256"]:
+    key = got["self_check_key"]
+    if (not got["provider_id"] or
+        any(not isinstance(key[k], str) or not key[k] for k in key if k != "decode_window") or
+        type(key["decode_window"]) is not int or key["decode_window"] < 1):
         bad.append("an undecided self-check needs provider_id and the self_check key to confirm it later")
 if got["continuous_batching_active"] is not True and not single_row: bad.append("continuous_batching.active is not true")
 if got["paged_kv_decision"] != "attached": bad.append("continuous_batching.paged_kv_decision %r != 'attached'" % (got["paged_kv_decision"],))
@@ -1394,7 +1397,7 @@ print(b["count"] - a["count"] if same and b["count"] >= a["count"] else "reset")
 # under a bounded admission hold, so no traffic stop is needed. Fails closed on
 # a missing or foreign canary_smoke record; records canary_self_check.
 check_canary_self_check() {
-  local V="${1-}" sha decision probe out
+  local V="${1-}" sha decision probe out smoke_digest
   is_semver "$V" || die "usage: _check-canary-self-check VERSION"
   OPS_SCOPE="cli-release-$V"
   sha="$(marker_field "$OPS_SCOPE" signed_byte_verification 'd.get("candidate_sha")')"
@@ -1405,6 +1408,8 @@ check_canary_self_check() {
     log "canary_smoke recorded the final self-check decision '$decision'; nothing to confirm"
     return 0
   fi
+  smoke_digest="$(canary_smoke_digest)"
+  [ -n "$smoke_digest" ] || refuse "canary_smoke record unreadable"
   probe="$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get("probe", {})))' \
     "$(marker_path "$OPS_SCOPE" canary_smoke)")" || refuse "canary_smoke record unreadable"
   require_studio_ssh
@@ -1426,8 +1431,12 @@ if probe.get("compatibility_set_id") and d.get("compatibility_set_id") != probe.
 if not probe.get("provider_id") or d.get("provider_id") != probe.get("provider_id"):
     bad.append("provider_id %r is not the canary_smoke provider %r" % (d.get("provider_id"), probe.get("provider_id")))
 key = probe.get("self_check_key") or {}
-if not key.get("model_sha256"): bad.append("canary_smoke recorded no self_check key")
-for k, want in key.items():
+key_fields = ("model_sha256", "metallib_sha256", "kernel_identifier", "hardware_class", "os_build", "runtime_build")
+if (any(not isinstance(key.get(k), str) or not key[k] for k in key_fields) or
+    type(key.get("decode_window")) is not int or key["decode_window"] < 1):
+    bad.append("canary_smoke recorded no complete self_check key")
+for k in (*key_fields, "decode_window"):
+    want = key.get(k)
     if sc.get(k) != want: bad.append("self_check.%s %r != %r recorded at canary_smoke" % (k, sc.get(k), want))
 if decision in ("prior_grant_pending_recheck", "pending", "deferred"):
     bad.append("self_check %r: re-check still pending" % (decision,) + " (admission hold active=%r holds_total=%r last_outcome=%r last_skip_reason=%r); re-run once it decides"
@@ -1443,8 +1452,9 @@ if bad:
 print(json.dumps({"self_check_decision": decision, "self_check_served_slots": slots, "provider_id": d.get("provider_id")}, sort_keys=True))
 PY
 )" || refuse "the canary's continuous-batching re-check has not confirmed the grant"
+  [ "$(canary_smoke_digest)" = "$smoke_digest" ] || refuse "canary_smoke changed during confirmation; re-run the check"
   mark_done "$OPS_SCOPE" canary_self_check "canary re-check decided: $out" \
-    "$(python3 -c 'import json,sys; print(json.dumps({"candidate_sha": sys.argv[1], "canary_smoke_sha256": sys.argv[3], "final": json.loads(sys.argv[2])}))' "$sha" "$out" "$(canary_smoke_digest)")"
+    "$(python3 -c 'import json,sys; print(json.dumps({"candidate_sha": sys.argv[1], "canary_smoke_sha256": sys.argv[3], "final": json.loads(sys.argv[2])}))' "$sha" "$out" "$smoke_digest")"
   log "canary self-check re-check decided: $out"
 }
 

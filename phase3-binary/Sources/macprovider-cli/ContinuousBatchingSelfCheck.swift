@@ -123,7 +123,7 @@ struct ContinuousBatchingSelfCheckTarget: Sendable, Equatable {
 /// One self-check batch through the scheduler: each row's tokens, the wall
 /// time from submission to the last row's end, and for a cohort run each
 /// row's decode tokens beside the whole cohort and those steps' seconds.
-struct ContinuousBatchingSelfCheckBatchRun: Sendable, Equatable {
+struct ContinuousBatchingSelfCheckBatchRun: Sendable, Equatable, Codable {
     let outputs: [[Int]]
     let seconds: Double
     let cohortDecodeTokens: [Int]
@@ -133,7 +133,7 @@ struct ContinuousBatchingSelfCheckBatchRun: Sendable, Equatable {
 /// The stock serial baseline over the self-check prompts: end-to-end
 /// tokens/s (the gain denominator) and decode-only tokens/s (the denominator
 /// for a `decodeOnlyGain` target, SPEC-038 v0.3.21).
-struct ContinuousBatchingSelfCheckSerialRate: Sendable, Equatable {
+struct ContinuousBatchingSelfCheckSerialRate: Sendable, Equatable, Codable {
     let decodeTPS: Double
     let endToEndTPS: Double
 }
@@ -696,8 +696,8 @@ enum ContinuousBatchingSelfCheck {
     }
 
     /// The check bound for a hold: `admissionHoldCheckSeconds`, doubled after
-    /// each consecutive hold that reached it without deciding, up to 4x, so a
-    /// width longer than one bound still completes.
+    /// each consecutive hold that reached it without deciding, up to 4x.
+    /// Completed units persist; an individual unit must still fit the bound.
     static func admissionHoldCheckBound(base: Double, consecutiveBoundYields: Int) -> Double {
         base * Double(1 << min(max(0, consecutiveBoundYields), 2))
     }
@@ -780,11 +780,13 @@ enum ContinuousBatchingSelfCheck {
             return outcome
         }
         let drainDeadline = startedAt.addingTimeInterval(drainBound)
+        let neededDrain = await providerStatus.requestsInFlightCount() > 0
         while await providerStatus.requestsInFlightCount() > 0, Date() < drainDeadline {
             if let reason = await interruption() { return await end(.yielded, reason: reason) }
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
         if await providerStatus.requestsInFlightCount() > 0 { return await end(.drainTimeout) }
+        if neededDrain, Date() >= drainDeadline { return await end(.drainTimeout) }
         // Re-validate after the drain, immediately before any check work.
         if let reason = await interruption() { return await end(.yielded, reason: reason) }
         log("event=cb_self_check action=admission_hold_drained drain_s=\(String(format: "%.1f", Date().timeIntervalSince(startedAt)))")
@@ -807,7 +809,9 @@ enum ContinuousBatchingSelfCheck {
             }
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
-        return await end(await task.value ? .completed : .yielded)
+        let decided = await task.value
+        if let reason = await interruption() { return await end(.yielded, reason: reason) }
+        return await end(decided ? .completed : .yielded)
     }
 
     /// Wait before the next attempt after `deferrals` consecutive yields to
@@ -937,6 +941,22 @@ struct ContinuousBatchingSelfCheckStore: Sendable {
 
     let url: URL
 
+    /// Completed inference units within the current width survive a hold
+    /// ending. A cancelled unit is never checkpointed. The prompts bind the
+    /// checkpoint as well as the enclosing record's model/runtime key.
+    struct WidthProgress: Codable, Equatable {
+        let slots: Int
+        let promptSHA256s: [String]
+        let probePromptSHA256s: [String]
+        var probe: ContinuousBatchingSelfCheckBatchRun?
+        var passes: [Pass] = []
+
+        struct Pass: Codable, Equatable {
+            let serial: ContinuousBatchingSelfCheckSerialRate
+            let batch: ContinuousBatchingSelfCheckBatchRun
+        }
+    }
+
     struct Record: Codable, Equatable {
         let key: ContinuousBatchingSelfCheckKey
         /// Nil while the ladder is still running.
@@ -965,6 +985,19 @@ struct ContinuousBatchingSelfCheckStore: Sendable {
         /// output is reused only for the same prompt.
         var probeAloneOutputs: [[Int]]?
         var probePromptSHA256s: [String]?
+        var widthProgress: WidthProgress?
+
+        mutating func prepareWidth(slots: Int, prompts: [[Int]], probePrompts: [[Int]]) {
+            let promptDigests = prompts.prefix(slots).map(ContinuousBatchingSelfCheck.promptSHA256)
+            let probeDigests = probePrompts.prefix(slots).map(ContinuousBatchingSelfCheck.promptSHA256)
+            if widthProgress?.slots != slots
+                || widthProgress?.promptSHA256s != promptDigests
+                || widthProgress?.probePromptSHA256s != probeDigests {
+                widthProgress = .init(
+                    slots: slots, promptSHA256s: promptDigests, probePromptSHA256s: probeDigests
+                )
+            }
+        }
 
         enum CodingKeys: String, CodingKey {
             case key
@@ -981,6 +1014,7 @@ struct ContinuousBatchingSelfCheckStore: Sendable {
             case ladderBound = "ladder_bound"
             case probeAloneOutputs = "probe_alone_outputs"
             case probePromptSHA256s = "probe_prompt_sha256s"
+            case widthProgress = "width_progress"
         }
     }
 
@@ -1300,11 +1334,13 @@ actor ContinuousBatchingSelfCheckDriver {
     }
 
     /// Runs `body` and cancels it as soon as a request is in flight, or, under
-    /// an admission hold, once the hold's check bound passes or the provider
-    /// leaves ready/busy (an operator pause or a drain).
+    /// an admission hold, the provider leaves ready/busy. The outer hold
+    /// watchdog alone owns the timeout, so every expiry increments its bound
+    /// escalation counter instead of racing an inner generic yield.
     private func yieldingToRequests<T: Sendable>(
         _ body: @escaping @Sendable () async throws -> T
     ) async throws -> T {
+        try Task.checkCancellation()
         let providerStatus = providerStatus
         let holdDeadline = admissionHoldDeadline
         return try await withThrowingTaskGroup(of: T?.self) { group in
@@ -1313,8 +1349,8 @@ actor ContinuousBatchingSelfCheckDriver {
                 while !Task.isCancelled {
                     let snapshot = await providerStatus.snapshot()
                     if snapshot.requestsInFlight > 0 { throw StepError.yielded }
-                    if let holdDeadline,
-                       Date() >= holdDeadline || !(snapshot.status == .ready || snapshot.status == .busy) {
+                    if holdDeadline != nil,
+                       !(snapshot.status == .ready || snapshot.status == .busy) {
                         throw StepError.admissionHoldEnded
                     }
                     try await Task.sleep(nanoseconds: 100_000_000)
@@ -1352,6 +1388,7 @@ actor ContinuousBatchingSelfCheckDriver {
         _ target: ContinuousBatchingSelfCheckTarget,
         remeasureOf previous: ContinuousBatchingSelfCheckStore.Record?
     ) async {
+        guard !Task.isCancelled else { return }
         let runtime = runtime
         let crashedSlots = (previous ?? store.record(for: target.key))?.crashedSlots
         let configuredSlots = ContinuousBatchingSelfCheck.ladderUpperBound(
@@ -1374,6 +1411,7 @@ actor ContinuousBatchingSelfCheckDriver {
             if previous.remeasureInProgress != true {
                 record.measurements = []
                 record.serialTPS = 0
+                record.widthProgress = nil
                 record.remeasureInProgress = true
             }
         } else {
@@ -1402,12 +1440,15 @@ actor ContinuousBatchingSelfCheckDriver {
         log("event=cb_self_check action=step max_slots=\(maxSlots) rows=\(target.maxRows) queue_limit=\(target.queueLimit) probe_key_boundary=\(target.probeKeyBoundary) resumed_at=\(record.measurements.count) remeasure=\(previous != nil) model_sha256=\(target.key.modelSHA256)")
         let stepStartedAt = Date()
         do {
+            try Task.checkCancellation()
             let tokens = ContinuousBatchingSelfCheck.maxOutputTokens
             // Scheduler request ids are idempotency keys; never reuse one.
             let attempt = UUID().uuidString.prefix(8).lowercased()
-            let prompts = try await runtime.continuousBatchingSelfCheckPrompts(
-                ContinuousBatchingSelfCheck.promptTexts(count: maxSlots)
-            )
+            let prompts = try await yieldingToRequests {
+                try await runtime.continuousBatchingSelfCheckPrompts(
+                    ContinuousBatchingSelfCheck.promptTexts(count: maxSlots)
+                )
+            }
             let probeTokens = ContinuousBatchingSelfCheck.exactnessOutputTokens(decodeWindow: target.key.decodeWindow)
             let requiredCohortTokens = ContinuousBatchingSelfCheck.requiredCohortDecodeTokens(
                 decodeWindow: target.key.decodeWindow
@@ -1424,6 +1465,8 @@ actor ContinuousBatchingSelfCheckDriver {
                 try await runtime.continuousBatchingSelfCheckSerialTPS(prompts: [prompts[0]], maxTokens: 8)
             }
             for slots in 2...maxSlots where !record.measurements.contains(where: { $0.slots == slots }) {
+                try Task.checkCancellation()
+                record.prepareWidth(slots: slots, prompts: prompts, probePrompts: probePrompts)
                 // Journal before any inference for this width, alone runs included.
                 record.inProgressSlots = slots
                 try save(record)
@@ -1446,14 +1489,21 @@ actor ContinuousBatchingSelfCheckDriver {
                     probeAlone.append(row.outputs[0])
                     record.probeAloneOutputs = probeAlone
                     record.probePromptSHA256s = probePrompts.prefix(probeAlone.count).map(ContinuousBatchingSelfCheck.promptSHA256)
+                    try save(record)
                 }
                 let probe: ContinuousBatchingSelfCheckBatchRun
                 do {
-                    probe = try await yieldingToRequests {
-                        try await runtime.runContinuousBatchingSelfCheckBatch(
-                            prompts: Array(probePrompts.prefix(slots)), maxOutputTokens: probeTokens,
-                            idPrefix: "cb-self-check-\(attempt)-probe-k\(slots)", cohort: true
-                        )
+                    if let completed = record.widthProgress?.probe {
+                        probe = completed
+                    } else {
+                        probe = try await yieldingToRequests {
+                            try await runtime.runContinuousBatchingSelfCheckBatch(
+                                prompts: Array(probePrompts.prefix(slots)), maxOutputTokens: probeTokens,
+                                idPrefix: "cb-self-check-\(attempt)-probe-k\(slots)", cohort: true
+                            )
+                        }
+                        record.widthProgress?.probe = probe
+                        try save(record)
                     }
                 } catch where (error as? ContinuousBatchSchedulerError) == .queueWaitTimedOut {
                     // The cohort never all reached a row: its shape was not met.
@@ -1467,6 +1517,8 @@ actor ContinuousBatchingSelfCheckDriver {
                 var divergences = probeCheck.divergences
                 let cohortTokens = probe.cohortDecodeTokens.min() ?? 0
                 if conformant, cohortTokens < requiredCohortTokens {
+                    // A shape failure is retried, never reused as a successful unit.
+                    record.widthProgress?.probe = nil
                     log("event=cb_self_check action=probe_shape_unmet slots=\(slots) cohort_decode_tokens=\(cohortTokens) required=\(requiredCohortTokens)")
                     throw StepError.probeShapeUnmet(slots: slots)
                 }
@@ -1479,6 +1531,7 @@ actor ContinuousBatchingSelfCheckDriver {
                         )
                     }
                     record.aloneOutputs.append(row.outputs[0])
+                    try save(record)
                 }
                 // Rungs: repeats of stock serial then batched, back to back on
                 // the same prompts; the gain is the median ratio. For a
@@ -1497,19 +1550,28 @@ actor ContinuousBatchingSelfCheckDriver {
                 var serials: [Double] = []
                 for pass in 0..<(conformant ? (isRung ? Self.repeats : 1) : 0) {
                     var serialRate = ContinuousBatchingSelfCheckSerialRate(decodeTPS: 0, endToEndTPS: 0)
-                    if isRung {
-                        serialRate = try await yieldingToRequests {
-                            try await runtime.continuousBatchingSelfCheckSerialTPS(prompts: serialPrompts, maxTokens: tokens)
+                    let batch: ContinuousBatchingSelfCheckBatchRun
+                    if let completed = record.widthProgress?.passes, pass < completed.count {
+                        serialRate = completed[pass].serial
+                        batch = completed[pass].batch
+                    } else {
+                        if isRung {
+                            serialRate = try await yieldingToRequests {
+                                try await runtime.continuousBatchingSelfCheckSerialTPS(prompts: serialPrompts, maxTokens: tokens)
+                            }
                         }
+                        let decodeOnly = target.decodeOnlyGain
+                        batch = try await yieldingToRequests {
+                            try await runtime.runContinuousBatchingSelfCheckBatch(
+                                prompts: batchPrompts, maxOutputTokens: tokens, idPrefix: "cb-self-check-\(attempt)-k\(slots)-p\(pass)",
+                                cohort: decodeOnly
+                            )
+                        }
+                        record.widthProgress?.passes.append(.init(serial: serialRate, batch: batch))
+                        try save(record)
                     }
                     let decodeOnly = target.decodeOnlyGain
                     let serial = decodeOnly ? serialRate.decodeTPS : serialRate.endToEndTPS
-                    let batch = try await yieldingToRequests {
-                        try await runtime.runContinuousBatchingSelfCheckBatch(
-                            prompts: batchPrompts, maxOutputTokens: tokens, idPrefix: "cb-self-check-\(attempt)-k\(slots)-p\(pass)",
-                            cohort: decodeOnly
-                        )
-                    }
                     passes.append(batch.outputs)
                     let generated = batch.outputs.reduce(0) { $0 + $1.count }
                     let endToEnd = batch.seconds > 0 ? Double(generated) / batch.seconds : 0
@@ -1544,6 +1606,7 @@ actor ContinuousBatchingSelfCheckDriver {
                     gain: gain, throughputMeasured: isRung && !passes.isEmpty
                 ))
                 record.inProgressSlots = nil
+                record.widthProgress = nil
                 try save(record)
                 log("event=cb_self_check action=measured slots=\(slots) rung=\(isRung) conformant=\(conformant) cohort_decode_tokens=\(cohortTokens) divergent_rows=\(divergences.isEmpty ? "none" : divergences.joined(separator: ",")) aggregate_tps=\(String(format: "%.1f", aggregate)) serial_tps=\(String(format: "%.1f", Self.median(serials))) gain=\(String(format: "%.2f", gain))")
                 if !conformant { break }
@@ -1566,7 +1629,7 @@ actor ContinuousBatchingSelfCheckDriver {
             backpressureRefusal = nil
             // A buyer request during the step can take rows from the cohort;
             // that is a yield, not a probe result.
-            if case StepError.probeShapeUnmet(let slots) = error,
+            if !Task.isCancelled, case StepError.probeShapeUnmet(let slots) = error,
                await providerStatus.snapshot().requestsInFlight == 0,
                await providerStatus.secondsSinceLastRealActivity() >= Date().timeIntervalSince(stepStartedAt) {
                 // Fail closed: decide on the widths verified below it, and
@@ -1582,7 +1645,7 @@ actor ContinuousBatchingSelfCheckDriver {
             // Backpressure with no buyer request during the step is the
             // scheduler refusing the probe itself (its queue or token budget,
             // or a native-MTP integrity probe holding it).
-            if (error as? ContinuousBatchSchedulerError) == .backpressure, let refusedAt,
+            if !Task.isCancelled, (error as? ContinuousBatchSchedulerError) == .backpressure, let refusedAt,
                await providerStatus.snapshot().requestsInFlight == 0,
                await providerStatus.secondsSinceLastRealActivity() >= Date().timeIntervalSince(stepStartedAt) {
                 let verifiedPrefix = record.measurements.last?.slots ?? 1
@@ -1644,7 +1707,10 @@ actor ContinuousBatchingSelfCheckDriver {
         let lengths = ContinuousBatchingSelfCheck.exactnessPromptLengths(
             count: count, keyBoundary: target.probeKeyBoundary, outputTokens: outputTokens
         )
-        let full = try await runtime.continuousBatchingSelfCheckPrompts(ContinuousBatchingSelfCheck.exactnessTexts(lengths: lengths))
+        let runtime = runtime
+        let full = try await yieldingToRequests {
+            try await runtime.continuousBatchingSelfCheckPrompts(ContinuousBatchingSelfCheck.exactnessTexts(lengths: lengths))
+        }
         guard full.count == lengths.count, full.count >= 2 else {
             throw StepError.probeShapeUnmet(slots: max(2, min(full.count, lengths.count) + 1))
         }
@@ -1718,7 +1784,9 @@ actor ContinuousBatchingSelfCheckDriver {
         probeShapeUnmetAt: Int? = nil
     ) async {
         // A swap during the measurement changes the target; drop the result.
-        guard await runtime.continuousBatchingSelfCheckTarget(includeDecided: true) == target else { return }
+        guard !Task.isCancelled,
+              await runtime.continuousBatchingSelfCheckTarget(includeDecided: true) == target,
+              !Task.isCancelled else { return }
         let fresh = ContinuousBatchingSelfCheck.decide(
             serialTPS: record.serialTPS, measurements: record.measurements, crashedAt: crashedAt,
             probeShapeUnmetAt: probeShapeUnmetAt
@@ -1743,6 +1811,7 @@ actor ContinuousBatchingSelfCheckDriver {
             final.crashedSlots = min(record.crashedSlots ?? crashedAt, crashedAt)
         }
         final.inProgressSlots = nil
+        final.widthProgress = nil
         final.remeasureInProgress = nil
         final.decidedAt = ISO8601DateFormatter().string(from: Date())
         try? save(final)

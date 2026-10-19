@@ -11,7 +11,7 @@ FR-CB10 item 3: a check that must run on a key with no stored decision (a
 new runtime identity on a Mac with a prior grant, `prior_grant_pending_recheck`,
 or a first qualification) never found an idle window under steady buyer
 traffic; on CLI 1.8.250, 1.8.251 and 1.8.256 the operator stopped the buyer
-traffic by hand. Once such a check has been due for 2-3 minutes on a busy Mac,
+traffic by hand. Once such a check has been due for 2-17 minutes on a busy Mac,
 the provider holds admission: it stops admitting new requests (they are
 refused with the retryable queue-pressure status and routing sees no free
 slot), lets in-flight requests finish within the drain bound without
@@ -1301,7 +1301,7 @@ above are superseded where they conflict:
    consecutive drain timeout up to 4x) the hold ends without a check. The
    check then runs for at most 5 minutes initially, doubled after each
    consecutive check-bound yield up to 20 minutes. Completed exactness probes
-   and individual throughput passes persist, so an unfinished width resumes
+   and completed serial/batch throughput pairs persist, so an unfinished width resumes
    without repeating completed work. Cancelled or incomplete inference results
    MUST NOT become measurements or grant decisions. At the bound admission re-opens
    even if the check has not returned (it is cancelled, yields to the first
