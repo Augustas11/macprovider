@@ -1205,11 +1205,14 @@ final class ModelCatalogEconomicsTests: XCTestCase {
             candidateCatalog: inputs.candidateCatalog,
             rateCard: inputs.rateCard
         )
-        let projected = Self.catalogOnlyProjection(
-            inputs: inputs,
+        let projected = plain.withCatalogOnlyRows(CatalogOnlyRowProjection.Inputs(
+            candidateCatalog: inputs.candidateCatalog,
+            demand: inputs.demand,
+            rateCard: inputs.rateCard,
+            generatedAt: inputs.rateCard.value.generatedAt.addingTimeInterval(60),
             downloadSizes: [Self.catalogModelKey: 1_000],
-            discovery: Self.discovery(candidate: Self.candidate())
-        )
+            hostRAMGB: 512
+        ))
         XCTAssertEqual(plain.rows.count, projected.rows.count)
         XCTAssertEqual(
             plain.rows.first { $0.actionModelID == Self.candidateID },
