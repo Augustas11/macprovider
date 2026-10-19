@@ -7,17 +7,19 @@ struct MalibuApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        Settings { ModelSettingsView() }
+        // SwiftUI needs a scene; Settings live in the main window (SPEC-025-R001),
+        // so this one only points there.
+        Settings { SettingsRedirectView() }
             .commands {
                 // The main menu is visible while a Malibu window keeps the
                 // app in the Dock. Settings and the dashboard open through
                 // the same presenters as the menu-bar item.
                 CommandGroup(replacing: .appSettings) {
-                    Button("Settings…") { SettingsWindowPresenter.shared.present() }
+                    Button("Settings…") { AppDelegate.current?.presentDashboard(section: .settings) }
                         .keyboardShortcut(",", modifiers: .command)
                 }
                 CommandGroup(replacing: .newItem) {
-                    Button("Open Dashboard") { AppDelegate.current?.presentDashboard() }
+                    Button("Open Dashboard") { AppDelegate.current?.presentDashboard(section: .dashboard) }
                         .keyboardShortcut("d", modifiers: .command)
                 }
             }
@@ -33,6 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var menuBar: MenuBarController!
     private var onboardingWindow: NSWindow?
     private var dashboardWindow: NSWindow?
+    private let navigation = MalibuNavigation()
     private var bundleRelaunchMonitor: AppBundleRelaunchMonitor?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -40,7 +43,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // completed compatibility-set transaction without reading the bundle.
         logStartupProvenance()
         AppDelegate.current = self
-        SettingsWindowPresenter.shared.agent = agent
 
         menuBar = MenuBarController(agent: agent) { [weak self] action in
             self?.handle(action)
@@ -85,7 +87,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// dashboard instead of doing nothing.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag {
-            presentDashboard()
+            presentDashboard(section: .dashboard)
         }
         return true
     }
@@ -140,7 +142,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func handle(_ action: MenuBarController.Action) {
         switch action {
-        case .openDashboard: presentDashboard()
+        case .openDashboard: presentDashboard(section: .dashboard)
         case .openOnboarding: presentOnboarding()
         case .pause: Task { await agent.pause() }
         case .resume: Task { await agent.resume() }
@@ -149,7 +151,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .exportDiagnostics: exportDiagnostics()
         case .resetProviderService: resetProviderService()
         case .openSettings:
-            SettingsWindowPresenter.shared.present()
+            presentDashboard(section: .settings)
         case .quitAndUninstall:
             guard uninstallTask == nil else { return }
             guard confirmUninstall() else { return }
@@ -319,10 +321,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return alert.runModal() == .alertSecondButtonReturn
     }
 
-    func presentDashboard() {
+    func presentDashboard(section: MalibuSection? = nil) {
+        if let section {
+            navigation.show(section)
+        }
         if dashboardWindow == nil {
             dashboardWindow = DashboardWindow.make(
                 agent: agent,
+                navigation: navigation,
                 onExportDiagnostics: { [weak self] in self?.exportDiagnostics() },
                 onResetProvider: { [weak self] in self?.resetProviderService() }
             )
@@ -472,7 +478,7 @@ enum MigrationErrorCopy {
             reason = publicHandoffReason(handoffError)
         } else {
             reason = AgentSnapshotPresenter.publicErrorDetail(error.localizedDescription)
-                ?? "Technical details are available in Advanced diagnostics."
+                ?? "Technical details are available in Diagnostics."
         }
         return "\(reason)\n\nYour current setup was not changed."
     }

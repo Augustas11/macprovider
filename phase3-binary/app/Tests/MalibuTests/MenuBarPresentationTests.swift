@@ -24,7 +24,7 @@ final class MenuBarPresentationTests: XCTestCase {
             MenuBarPresentation.brandIdentity,
             MalibuBrand.constructionMarkIdentity
         )
-        XCTAssertEqual(MalibuBrand.constructionMarkIdentity, "malibu.construction-sunburst.v1")
+        XCTAssertEqual(MalibuBrand.constructionMarkIdentity, "malibu.construction-sunburst.v2")
     }
 
     func testConstructionMenuBarIconIsTemplateSizedForMenuBar() {
@@ -32,10 +32,9 @@ final class MenuBarPresentationTests: XCTestCase {
         XCTAssertTrue(icon.isTemplate)
         XCTAssertEqual(icon.size.width, MalibuMenuBarIcon.canvasWidth)
         XCTAssertEqual(icon.size.height, MalibuMenuBarIcon.canvasHeight)
-        XCTAssertEqual(MalibuConstructionSunburstGeometry.rayCount, 9)
-        XCTAssertEqual(MalibuConstructionSunburstGeometry.rayAnglesDegrees.count, 9)
-        XCTAssertEqual(MalibuConstructionSunburstGeometry.firstRayDegrees, 12)
-        XCTAssertEqual(MalibuConstructionSunburstGeometry.lastRayDegrees, 168)
+        XCTAssertEqual(MalibuConstructionSunburstGeometry.rayCount, 7)
+        XCTAssertEqual(MalibuConstructionSunburstGeometry.rayTipRadii.count, 7)
+        XCTAssertEqual(MalibuConstructionSunburstGeometry.sideBeamAnglesDegrees, [0, 180])
         let appKit = MalibuConstructionSunburstGeometry.path(
             in: CGRect(x: 0, y: 0, width: 64, height: 64),
             yUp: true
@@ -45,6 +44,43 @@ final class MenuBarPresentationTests: XCTestCase {
         )
         XCTAssertFalse(appKit.isEmpty)
         XCTAssertFalse(swiftUI.isEmpty)
+    }
+
+    /// The brand-kit mark: an open dome ringed by a band, seven rays, and
+    /// two side beams on the baseline (mark points, origin at the baseline centre).
+    func testConstructionMarkHasCutOutDomeRaysAndSideBeams() {
+        let mark = MalibuConstructionSunburstGeometry.unitMark
+        let box = mark.boundingBoxOfPath
+        XCTAssertEqual(box.minX, -145.39, accuracy: 0.1)
+        XCTAssertEqual(box.maxX, 145.39, accuracy: 0.1)
+        XCTAssertEqual(box.minY, 0, accuracy: 0.01)
+        XCTAssertEqual(box.maxY, 133.03, accuracy: 0.1)
+        XCTAssertFalse(mark.contains(CGPoint(x: 0, y: 20)), "dome must be a cut-out")
+        XCTAssertTrue(mark.contains(CGPoint(x: 0, y: 55)), "band rings the cut-out")
+        XCTAssertTrue(mark.contains(CGPoint(x: -135, y: 4)), "left side beam")
+        XCTAssertTrue(mark.contains(CGPoint(x: 135, y: 4)), "right side beam")
+        XCTAssertFalse(mark.contains(CGPoint(x: 135, y: 20)), "side beams stay on the baseline")
+        let geometry = MalibuConstructionSunburstGeometry.self
+        for (degrees, radius) in zip(geometry.rayAnglesDegrees, geometry.rayTipRadii) {
+            let r = degrees * .pi / 180
+            let nearTip = radius - 6
+            XCTAssertTrue(mark.contains(CGPoint(x: CGFloat(cos(r)) * nearTip, y: CGFloat(sin(r)) * nearTip)),
+                          "ray at \(degrees)°")
+        }
+        for degrees in [35.0, 57.0, 79.0, 101.0, 123.0, 145.0] {
+            let r = degrees * .pi / 180
+            XCTAssertFalse(mark.contains(CGPoint(x: CGFloat(cos(r)) * 110, y: CGFloat(sin(r)) * 110)),
+                           "gap between rays at \(degrees)°")
+        }
+    }
+
+    /// The checked-in SVG is an export of the geometry; regenerate it with
+    /// scripts/generate-app-icon.sh when the geometry changes.
+    func testCheckedInBrandSVGMatchesGeometry() throws {
+        let svg = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/Malibu/Resources/Brand/malibu-icon.svg")
+        XCTAssertEqual(try String(contentsOf: svg, encoding: .utf8), MalibuConstructionSunburstGeometry.appIconSVG())
     }
 
     func testTooltipStillSurfacesPublicStatusWithoutMenuBarTitle() {

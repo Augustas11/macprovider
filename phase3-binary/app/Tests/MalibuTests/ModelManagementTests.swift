@@ -1,5 +1,6 @@
 import XCTest
 import Darwin
+import Combine
 @testable import Malibu
 
 final class ModelManagementTests: XCTestCase {
@@ -1143,6 +1144,300 @@ final class ModelManagementTests: XCTestCase {
         XCTAssertEqual(store.statusLine, "Model catalog unavailable right now. The current model remains visible from provider status.")
     }
 
+    /// A refresh behind a still-fresh projection keeps it on screen: the
+    /// list never drops to "Checking…" mid-refresh, a failed refresh keeps the
+    /// rows with Retry, and the next good refresh clears the failure.
+    @MainActor
+    func testRefreshKeepsLastGoodProjectionAndRetriesWithoutFlapping() async throws {
+        let first = Self.recentTimestamp()
+        let third = Self.timestamp(offset: 3)
+        let cli = FakeModelCLI(
+            results: [
+                ModelCLIResult(
+                    exitCode: 0,
+                    stdout: catalogEconomicsJSON(
+                        rows: [trustedEconomicsRowJSON(rateCardGeneratedAt: first, stateObservedAt: first)],
+                        generatedAt: first,
+                        projectionSequence: 1
+                    ),
+                    stderr: ""
+                ),
+                ModelCLIResult(exitCode: 1, stdout: "", stderr: "coordinator slow"),
+                ModelCLIResult(
+                    exitCode: 0,
+                    stdout: catalogEconomicsJSON(
+                        rows: [trustedEconomicsRowJSON(rateCardGeneratedAt: third, stateObservedAt: third)],
+                        generatedAt: third,
+                        projectionSequence: 2
+                    ),
+                    stderr: ""
+                ),
+            ],
+            returnDelaysNanoseconds: [nil, 300_000_000, nil]
+        )
+        let store = ModelManagementStore(
+            cli: cli,
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.cachedProjection.\(UUID().uuidString)")!
+        )
+        let peer = peer(for: MalibuModelCapabilityManifest.catalogEconomics)
+        var observed: [ModelManagementStore.ListState] = []
+        let subscription = store.$listState.sink { observed.append($0) }
+        defer { subscription.cancel() }
+
+        await store.refresh(currentModelID: "other/model", peer: peer)
+        let goodState = store.listState
+        let goodRows = store.rows.map(\.displayID)
+        XCTAssertNotEqual(goodState, .checking)
+        XCTAssertNotEqual(goodState, .unavailable)
+        XCTAssertTrue(store.hasUsableCatalogProjection)
+        let afterFirst = observed.count
+
+        let refresh = Task { await store.refresh(currentModelID: "other/model", peer: peer) }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(store.listState, goodState, "the refresh runs behind the shown projection")
+        XCTAssertEqual(store.rows.map(\.displayID), goodRows)
+        await refresh.value
+
+        XCTAssertEqual(store.listState, goodState, "a failed refresh keeps the last good projection")
+        XCTAssertEqual(store.rows.map(\.displayID), goodRows)
+        XCTAssertTrue(store.catalogRefreshFailed)
+        XCTAssertTrue(store.catalogProjectionRetryAvailable, "Retry stays available")
+        XCTAssertFalse(store.statusLine.contains("_"), store.statusLine)
+        XCTAssertEqual(
+            DashboardCopy.modelRowStatusLine(currentModelID: "other/model", listState: store.listState),
+            DashboardCopy.modelRowStatusLine(currentModelID: "other/model", listState: goodState)
+        )
+
+        await store.refresh(currentModelID: "other/model", peer: peer)
+        XCTAssertFalse(store.catalogRefreshFailed)
+        XCTAssertFalse(store.catalogProjectionRetryAvailable)
+        XCTAssertFalse(
+            observed[afterFirst...].contains(where: { $0 == .checking || $0 == .unavailable }),
+            "no Checking/unavailable flapping once a projection is shown: \(observed)"
+        )
+    }
+
+    /// "Unavailable" needs a real failure AND no usable cached projection: an
+    /// expired projection is not reused.
+    @MainActor
+    func testFailedRefreshAfterProjectionExpiryIsUnavailable() async throws {
+        let expiringAt = Self.timestamp(offset: -299.8)
+        let cli = FakeModelCLI(results: [
+            ModelCLIResult(
+                exitCode: 0,
+                stdout: catalogEconomicsJSON(
+                    rows: [trustedEconomicsRowJSON(rateCardGeneratedAt: expiringAt, stateObservedAt: expiringAt)],
+                    generatedAt: expiringAt
+                ),
+                stderr: ""
+            ),
+            ModelCLIResult(exitCode: 1, stdout: "", stderr: "boom"),
+        ])
+        let store = ModelManagementStore(
+            cli: cli,
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.cachedExpired.\(UUID().uuidString)")!
+        )
+        let peer = peer(for: MalibuModelCapabilityManifest.catalogEconomics)
+
+        await store.refresh(currentModelID: "other/model", peer: peer)
+        try await Task.sleep(nanoseconds: 400_000_000)
+        XCTAssertFalse(store.hasUsableCatalogProjection)
+        await store.refresh(currentModelID: "other/model", peer: peer)
+
+        XCTAssertTrue(store.rows.isEmpty)
+        XCTAssertEqual(store.listState, .unavailable)
+        XCTAssertTrue(store.catalogProjectionRetryAvailable)
+        XCTAssertEqual(store.statusLine, "Model catalog unavailable right now. The current model remains visible from provider status.")
+    }
+
+    /// A rejected (ordering-stale) reply is a failed refresh: a usable
+    /// projection stays with the last-update notice and Retry.
+    @MainActor
+    func testRejectedProjectionKeepsUsableProjectionWithRetry() async throws {
+        let first = Self.recentTimestamp()
+        let cli = FakeModelCLI(results: [
+            ModelCLIResult(
+                exitCode: 0,
+                stdout: catalogEconomicsJSON(
+                    rows: [trustedEconomicsRowJSON(rateCardGeneratedAt: first, stateObservedAt: first)],
+                    generatedAt: first,
+                    projectionSequence: 2
+                ),
+                stderr: ""
+            ),
+            ModelCLIResult(
+                exitCode: 0,
+                stdout: catalogEconomicsJSON(
+                    rows: [trustedEconomicsRowJSON(rateCardGeneratedAt: first, stateObservedAt: first)],
+                    generatedAt: first,
+                    projectionSequence: 1
+                ),
+                stderr: ""
+            ),
+        ])
+        let store = ModelManagementStore(
+            cli: cli,
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.rejectedCached.\(UUID().uuidString)")!
+        )
+        let peer = peer(for: MalibuModelCapabilityManifest.catalogEconomics)
+        await store.refresh(currentModelID: "other/model", peer: peer)
+        let shown = store.rows.map(\.displayID)
+        let state = store.listState
+
+        await store.refresh(currentModelID: "other/model", peer: peer)
+
+        XCTAssertEqual(store.rows.map(\.displayID), shown)
+        XCTAssertEqual(store.listState, state)
+        XCTAssertTrue(store.catalogRefreshFailed)
+        XCTAssertTrue(store.catalogProjectionRetryAvailable)
+    }
+
+    /// Actions close at the freshness deadline itself, even before the expiry
+    /// task has run (SPEC-044-R003).
+    @MainActor
+    func testCatalogActionsCloseAtTheFreshnessDeadlineBeforeExpiryRuns() async throws {
+        let expiringAt = Self.timestamp(offset: -299.7)
+        let action = availableActionJSON(kind: "switch_model", timeout: 20)
+        let cli = FakeModelCLI(results: [
+            ModelCLIResult(
+                exitCode: 0,
+                stdout: catalogEconomicsJSON(
+                    rows: [trustedEconomicsRowJSON(
+                        switchAction: action,
+                        rateCardGeneratedAt: expiringAt,
+                        stateObservedAt: expiringAt
+                    )],
+                    generatedAt: expiringAt
+                ),
+                stderr: ""
+            ),
+        ])
+        let store = ModelManagementStore(
+            cli: cli,
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.deadlineActions.\(UUID().uuidString)")!
+        )
+        await store.refresh(currentModelID: "other/model", peer: peer(for: [
+            MalibuModelCapabilityManifest.catalogEconomics,
+            MalibuModelCapabilityManifest.readySwitch,
+        ]))
+        XCTAssertTrue(store.canPerformModelAction)
+        XCTAssertTrue(store.canPerformBYOMAction)
+
+        // Block the main actor past the deadline so the expiry task cannot run.
+        Thread.sleep(forTimeInterval: 0.5)
+        XCTAssertFalse(store.rows.isEmpty, "the expiry task has not run yet")
+        XCTAssertFalse(store.canPerformModelAction)
+        XCTAssertFalse(store.canPerformBYOMAction)
+        XCTAssertFalse(store.canAdoptRecommendation)
+    }
+
+    @MainActor
+    func testCatalogReadTimeoutCoversTheCLIBound() {
+        let store = ModelManagementStore(
+            cli: FakeModelCLI(results: []),
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.timeoutBound.\(UUID().uuidString)")!
+        )
+        // CLI coordinator ceiling (5 s feeds + 3 s admission status) plus
+        // loopback adapters and process launch; the old 10 s cut off a
+        // healthy 14 s read and flapped the dashboard.
+        XCTAssertGreaterThanOrEqual(store.listCommandTimeoutSeconds, 15)
+    }
+
+    @MainActor
+    func testStatusDrivenRefreshSkipsARecentProjectionButRetryReads() async throws {
+        func projection(_ sequence: UInt64) -> ModelCLIResult {
+            ModelCLIResult(
+                exitCode: 0,
+                stdout: catalogEconomicsJSON(
+                    rows: [trustedEconomicsRowJSON()],
+                    generatedAt: Self.timestamp(offset: -1),
+                    projectionSequence: sequence
+                ),
+                stderr: ""
+            )
+        }
+        let cli = FakeModelCLI(results: [projection(1), projection(2)])
+        let store = ModelManagementStore(
+            cli: cli,
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.backgroundRefresh.\(UUID().uuidString)")!
+        )
+        let peer = peer(for: MalibuModelCapabilityManifest.catalogEconomics)
+
+        await store.refresh(currentModelID: "other/model", peer: peer, background: true)
+        XCTAssertEqual(cli.invocations.count, 1, "the first status observation reads the catalog")
+        XCTAssertEqual(store.operation, .idle)
+
+        await store.refresh(currentModelID: "other/model", peer: peer, background: true)
+        XCTAssertEqual(cli.invocations.count, 1, "a status observation does not re-read a recent projection")
+        XCTAssertEqual(store.operation, .idle, "model actions stay open")
+
+        await store.refresh(currentModelID: "other/model", peer: peer)
+        XCTAssertEqual(cli.invocations.count, 2, "Retry always reads")
+    }
+
+    @MainActor
+    func testStatusDrivenRefreshAlsoWaitsAfterAFailedRefresh() async throws {
+        let cli = FakeModelCLI(results: [
+            ModelCLIResult(
+                exitCode: 0,
+                stdout: catalogEconomicsJSON(rows: [trustedEconomicsRowJSON()], generatedAt: Self.timestamp(offset: -1)),
+                stderr: ""
+            ),
+            ModelCLIResult(exitCode: 1, stdout: "", stderr: "coordinator unavailable"),
+        ])
+        let store = ModelManagementStore(
+            cli: cli,
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.backgroundAfterFailure.\(UUID().uuidString)")!
+        )
+        let peer = peer(for: MalibuModelCapabilityManifest.catalogEconomics)
+        await store.refresh(currentModelID: "other/model", peer: peer)
+        await store.refresh(currentModelID: "other/model", peer: peer)
+        XCTAssertTrue(store.catalogRefreshFailed)
+        XCTAssertFalse(store.rows.isEmpty, "the last good projection stays")
+
+        await store.refresh(currentModelID: "other/model", peer: peer, background: true)
+        XCTAssertEqual(cli.invocations.count, 2, "status polling does not retry a failed refresh every 15 s")
+        XCTAssertEqual(store.operation, .idle)
+        XCTAssertTrue(store.catalogProjectionRetryAvailable, "Retry stays offered")
+    }
+
+    @MainActor
+    func testSwitchReportsNotStartedWhenControlsAreNotReady() async throws {
+        let cli = FakeModelCLI(results: [
+            ModelCLIResult(
+                exitCode: 0,
+                stdout: catalogEconomicsJSON(
+                    rows: [trustedEconomicsRowJSON(switchAction: availableActionJSON(kind: "switch_model", timeout: 20))],
+                    generatedAt: Self.timestamp(offset: -1)
+                ),
+                stderr: ""
+            ),
+        ])
+        let store = ModelManagementStore(
+            cli: cli,
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.switchNotStarted.\(UUID().uuidString)")!
+        )
+        // No ready-switch capability: the row is listed but switching is closed.
+        await store.refresh(currentModelID: "other/model", peer: peer(for: MalibuModelCapabilityManifest.catalogEconomics))
+        let row = try XCTUnwrap(store.rows.first)
+        XCTAssertFalse(store.canPerformModelAction)
+        let invocationsBefore = cli.invocations.count
+
+        let started = await store.switchTo(row)
+
+        XCTAssertFalse(started, "the switch sheet must leave \"requested\" when nothing started")
+        XCTAssertEqual(cli.invocations.count, invocationsBefore, "no switch command runs")
+        XCTAssertEqual(store.operation, .idle)
+    }
+
     @MainActor
     func testCatalogProjectionExpiryClearsRowsDuringRuntimeConflict() async throws {
         let expiringAt = Self.timestamp(offset: -299.8)
@@ -1400,7 +1695,7 @@ final class ModelManagementTests: XCTestCase {
 
     func testCatalogEconomicsDisplayCopyAvoidsForbiddenRewardClaims() {
         let strings = [
-            "Catalog rates are informational. Final provider credit depends on eligible demand, uptime, accepted requests, trust state, routing, token mix, settlement, and active policy status.",
+            "Catalog rates are informational. Final provider credit depends on eligible demand, uptime, accepted requests, trust state, routing, token mix, settlement, and any active sanctions or probation.",
             "Provider share rate: completion $0.36 per 1M tokens.",
             "Provider share rate: prompt $0.18 per 1M tokens.",
             "No provider credit yet; catalog and receipt checks are still required.",
@@ -2326,6 +2621,71 @@ final class ModelManagementTests: XCTestCase {
         XCTAssertTrue(ModelManagementStore.Operation.checkingRecommendation(phase: "planning").blocksRefresh)
         XCTAssertTrue(ModelManagementStore.Operation.adoptingRecommendation(target: "org/model", phase: "config_apply").blocksRefresh)
         XCTAssertFalse(ModelManagementStore.Operation.idle.blocksRefresh)
+    }
+
+    @MainActor
+    func testBrowseOtherMLXModelsRunsBrowseOnItsOwnRunnerAndStaysNonActionable() async throws {
+        let cli = FakeModelCLI(results: [])
+        let browse = FakeModelCLI(results: [
+            ModelCLIResult(exitCode: 0, stdout: ShellScreensTests.browseJSON(), stderr: ""),
+        ])
+        let store = ModelManagementStore(
+            cli: cli,
+            makeBrowseCLI: { browse },
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.browse.\(UUID().uuidString)")!
+        )
+        await store.refresh(currentModelID: "org/current", peer: peer(for: MalibuModelCapabilityManifest.catalogJSON))
+
+        await store.browseOtherMLXModels(query: "--qwen")
+
+        XCTAssertEqual(browse.invocations, [["models", "browse", "--json", "--limit", "30", "--family", "qwen"]])
+        XCTAssertTrue(cli.invocations.isEmpty, "browse never shares the catalog runner")
+        XCTAssertEqual(store.otherMLXState, .loaded)
+        XCTAssertEqual(store.otherMLXModels.map(\.id), ["mlx-community/Qwen3-8B-4bit"])
+        XCTAssertTrue(store.rows.isEmpty, "browse results never become catalog rows")
+    }
+
+    func testOneShotRunnerRefusesALaunchAfterAnEarlyCancel() {
+        let oneShot = ModelCLIProcessCancellation(latches: true)
+        oneShot.cancel()
+        XCTAssertTrue(oneShot.isCancelled)
+        XCTAssertFalse(oneShot.install(Process()), "a browse cancelled before launch never launches")
+
+        // The shared runner serves many commands, so an idle cancel is not latched.
+        let shared = ModelCLIProcessCancellation()
+        shared.cancel()
+        XCTAssertFalse(shared.isCancelled)
+        XCTAssertTrue(shared.install(Process()))
+    }
+
+    @MainActor
+    func testBrowseOtherMLXModelsNeedsTheCatalogJSONCapabilityAndTimesOut() async throws {
+        let hanging = HangingModelCLI()
+        var runnersMade = 0
+        let store = ModelManagementStore(
+            cli: FakeModelCLI(results: []),
+            makeBrowseCLI: {
+                runnersMade += 1
+                return hanging
+            },
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.browse-timeout.\(UUID().uuidString)")!
+        )
+        await store.browseOtherMLXModels(query: "qwen")
+        XCTAssertEqual(store.otherMLXState, .unavailable("Searching other MLX models needs a newer provider."))
+
+        await store.refresh(currentModelID: "org/current", peer: peer(for: MalibuModelCapabilityManifest.catalogJSON))
+        store.browseCommandTimeoutSeconds = 0.2
+        await store.browseOtherMLXModels(query: "qwen")
+        XCTAssertTrue(hanging.cancelled)
+        XCTAssertEqual(store.otherMLXState, .unavailable("Hugging Face did not answer in time. Try again."))
+        XCTAssertTrue(store.otherMLXModels.isEmpty)
+
+        // A retry gets its own runner, so the timed-out search's cancellation
+        // can never reach it.
+        await store.browseOtherMLXModels(query: "qwen")
+        XCTAssertEqual(runnersMade, 2)
     }
 
     private func catalogEconomicsJSON(

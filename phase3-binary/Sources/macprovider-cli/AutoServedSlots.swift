@@ -9,7 +9,9 @@ import MacProviderCore
 /// on-device continuous-batching self-check (`ContinuousBatchingSelfCheck`)
 /// picks the count, at most the memory-fit recommendation for this Mac. Until
 /// it decides, serve runs one slot, or the configured count when a signed
-/// positive policy entry names the served model (provisional grant).
+/// positive policy entry names the served model (provisional grant). A signed
+/// `max_served_slots` (SPEC-038 FR-CB11 v0.3.22) caps every one of these,
+/// the owner pin included; it never raises a count.
 enum AutoServedSlots {
     /// MLX's quantized matmul switches from the vector kernel (qmv) to the
     /// matrix kernel (qmm) above 5 rows. On M1/M2 GPUs (Ultra excepted) rows
@@ -41,11 +43,16 @@ enum AutoServedSlots {
         emergencyOff: Bool,
         provisionalPolicyEntry: Bool,
         recommendedSlots: () -> Int,
-        memoryFitKnown: Bool = false
+        memoryFitKnown: Bool = false,
+        policyCeiling: Int? = nil
     ) -> Plan {
+        let ceiling = max(1, policyCeiling ?? .max)
         let configured = ProviderCapacity.servedSlotCount(maxConcurrencyOverride: configuredSlots)
         if source == .owner {
-            return Plan(rows: configured, initialServed: configured, ownerPinned: configured, reason: "owner_pinned")
+            // The pin itself stays as written: a warm swap to another model
+            // applies that model's own ceiling (`grantableRows`).
+            let pinned = min(configured, ceiling)
+            return Plan(rows: pinned, initialServed: pinned, ownerPinned: configured, reason: "owner_pinned")
         }
         if draftConfigured {
             return Plan(rows: 1, initialServed: 1, ownerPinned: nil, reason: "draft_model")
@@ -53,11 +60,11 @@ enum AutoServedSlots {
         if emergencyOff {
             return Plan(rows: 1, initialServed: 1, ownerPinned: nil, reason: "emergency_off")
         }
-        let recommended = min(max(1, recommendedSlots()), ProviderCapacity.maxConcurrencyOverrideLimit)
+        let recommended = min(max(1, recommendedSlots()), ProviderCapacity.maxConcurrencyOverrideLimit, ceiling)
         if provisionalPolicyEntry {
             // SPEC-023-R009: never above a computable memory fit; without one
             // the configured count already served keeps its rows.
-            let rows = memoryFitKnown ? recommended : max(recommended, configured)
+            let rows = memoryFitKnown ? recommended : min(max(recommended, configured), ceiling)
             return Plan(
                 rows: rows,
                 initialServed: min(configured, rows),
@@ -108,6 +115,16 @@ enum AutoServedSlots {
         return policy.selection.entries.contains {
             modelKeys.contains($0.modelKey) && $0.rollout != .off
         }
+    }
+
+    /// SPEC-038 FR-CB11 (v0.3.22): the signed `max_served_slots` for the
+    /// served model key; nil without a verified policy or without one.
+    static func policyServedSlotCeiling(
+        _ policy: ContinuousBatchingPolicyLoadResult,
+        modelKeys: Set<String>
+    ) -> Int? {
+        guard policy.status == .liveVerified else { return nil }
+        return policy.selection.servedSlotCeiling(modelKeys: modelKeys)
     }
 }
 

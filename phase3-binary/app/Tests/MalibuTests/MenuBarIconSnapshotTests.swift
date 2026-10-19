@@ -46,12 +46,14 @@ final class MenuBarIconSnapshotTests: XCTestCase {
 
     func testEveryRayIsAtLeastOneAndAHalfPointsWide() throws {
         XCTAssertGreaterThanOrEqual(MalibuMenuBarIcon.rayStrokeWidth, 1.5)
+        XCTAssertGreaterThanOrEqual(MalibuMenuBarIcon.sideBeamThickness, 1.5)
         let bitmap = try render(MalibuMenuBarIcon.make(), scale: 2)
         let center = CGPoint(x: MalibuMenuBarIcon.canvasWidth / 2, y: MalibuMenuBarIcon.baselineY)
-        let mid = (MalibuMenuBarIcon.rayInnerRadius + MalibuMenuBarIcon.rayOuterRadius) / 2
-        for degrees in MalibuMenuBarIcon.rayAnglesDegrees {
+        for (degrees, tipRadius) in zip(MalibuMenuBarIcon.rayAnglesDegrees, MalibuMenuBarIcon.rayTipRadii) {
             let r = degrees * .pi / 180
-            let p = CGPoint(x: center.x + CGFloat(cos(r)) * mid, y: center.y + CGFloat(sin(r)) * mid)
+            // Measure two thirds of the way out, where the taper is narrow.
+            let along = MalibuMenuBarIcon.rayInnerRadius + (tipRadius - MalibuMenuBarIcon.rayInnerRadius) * 2 / 3
+            let p = CGPoint(x: center.x + CGFloat(cos(r)) * along, y: center.y + CGFloat(sin(r)) * along)
             let normal = CGPoint(x: -CGFloat(sin(r)), y: CGFloat(cos(r)))
             var inked = 0
             // Sample across the ray in 0.05 pt steps.
@@ -63,6 +65,37 @@ final class MenuBarIconSnapshotTests: XCTestCase {
             }
             let width = CGFloat(inked) * 0.05
             XCTAssertGreaterThanOrEqual(width, 1.5, "ray at \(degrees)° renders \(width) pt wide")
+        }
+    }
+
+    /// The glyph is the brand mark simplified: same ray count and angles, a
+    /// cut-out dome, and both horizontal side beams inside the canvas.
+    func testGlyphKeepsTheBrandMarksDomeRaysAndSideBeams() throws {
+        XCTAssertEqual(MalibuMenuBarIcon.rayAnglesDegrees, MalibuConstructionSunburstGeometry.rayAnglesDegrees)
+        XCTAssertEqual(MalibuMenuBarIcon.rayAnglesDegrees.count, 7)
+        let bitmap = try render(MalibuMenuBarIcon.make(), scale: 2)
+        func inked(_ x: CGFloat, _ y: CGFloat) -> Bool {
+            bitmap.alpha(Int(x * bitmap.scale), Int(y * bitmap.scale)) > 0.5
+        }
+        let midX = MalibuMenuBarIcon.canvasWidth / 2
+        let beamY = MalibuMenuBarIcon.baselineY + MalibuMenuBarIcon.sideBeamThickness / 2
+        let beamTip = MalibuMenuBarIcon.sideBeamTipX
+        XCTAssertTrue(inked(midX - beamTip + 1, beamY), "left side beam missing")
+        XCTAssertTrue(inked(midX + beamTip - 1, beamY), "right side beam missing")
+        XCTAssertFalse(inked(midX - beamTip + 1, beamY + 2), "left side beam must stay on the baseline")
+        XCTAssertFalse(inked(midX + beamTip - 1, beamY + 2), "right side beam must stay on the baseline")
+        XCTAssertFalse(inked(midX, MalibuMenuBarIcon.baselineY + 1), "dome must be a cut-out")
+        XCTAssertTrue(inked(midX, MalibuMenuBarIcon.baselineY + MalibuMenuBarIcon.cutoutRadius + 1), "band missing")
+        // Everything stays inside the canvas.
+        XCTAssertGreaterThanOrEqual(midX - beamTip, 0.5)
+        XCTAssertGreaterThanOrEqual(MalibuMenuBarIcon.baselineY, 0.5)
+        for x in 0..<bitmap.rep.pixelsWide {
+            XCTAssertLessThan(bitmap.alpha(x, 0), 0.5, "ink touches the bottom edge")
+            XCTAssertLessThan(bitmap.alpha(x, bitmap.rep.pixelsHigh - 1), 0.5, "ink touches the top edge")
+        }
+        for y in 0..<bitmap.rep.pixelsHigh {
+            XCTAssertLessThan(bitmap.alpha(0, y), 0.5, "ink touches the left edge")
+            XCTAssertLessThan(bitmap.alpha(bitmap.rep.pixelsWide - 1, y), 0.5, "ink touches the right edge")
         }
     }
 

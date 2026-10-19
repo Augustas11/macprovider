@@ -448,6 +448,10 @@ rewards:
       prompt_credits_per_mtok: 112000        # $0.112/M
       prompt_cache_hit_credits_per_mtok: 28000 # $0.028/M prefix-cache hit
       completion_credits_per_mtok: 688000    # $0.688/M
+    zai-org/glm-5.3-flash:                 # epic #2029 recommendable cut — class-120b-moe explicit row; best-in-market against trusted competing sellers, operator-approved 2026-10-18
+      prompt_credits_per_mtok: 18500         # $0.0185/M
+      prompt_cache_hit_credits_per_mtok: 5500 # $0.0055/M prefix-cache hit
+      completion_credits_per_mtok: 88000     # $0.088/M
 
 # SPEC-015 / SPEC-022 settlement policy.
 #

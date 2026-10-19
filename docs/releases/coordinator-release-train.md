@@ -65,6 +65,21 @@ happens across many sessions and agents: read this file before cutting or
 applying a coordinator release, and update it in the same commit or PR after any
 release-affecting action. If reality and this file disagree, fix this file.
 
+## Next coordinator release — net changes vs live v1.8.255 (tracked 2026-10-19)
+
+Live on Pearl: runtime **v1.8.255** (coordinator + gateway), recommending CLI 1.8.256.
+Catalog `published-2026-10-18-glm53-flash-recommendable-v1` (#2060) is live; it was a
+catalog activation (one SIGHUP), not a runtime release.
+
+| PR | Issue | Coordinator/gateway change | Status |
+|---|---|---|---|
+| #2064 | #2029 | Coordinator autotune feed validator accepts the optional signed CB policy field `max_served_slots` (integer 1–32, inside `tuple_sha256`; malformed values fail closed); generator and live release gate share the bound via `scripts/cb_release_baselines.py` | merged |
+
+Order: ship this runtime and the CLI cut carrying #2064, then raise
+`CB_POLICY_CONSUMER_FLOOR` to `(0, 22, 28)` in a reviewed change, then cut the catalog that
+sets GLM-5.3-Flash's ceiling (4). Until the floor moves, every release path refuses a policy
+carrying the field, so nothing live changes before both consumers can parse it.
+
 ## Next coordinator release — net changes vs live v1.8.247 (tracked 2026-10-16)
 
 Live on Pearl: runtime **v1.8.247** (coordinator + gateway), recommending CLI

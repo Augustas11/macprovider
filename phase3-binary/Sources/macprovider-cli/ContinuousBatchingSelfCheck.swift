@@ -105,13 +105,17 @@ struct ContinuousBatchingSelfCheckTarget: Sendable, Equatable {
     /// the first), because its slow prefill dominates the short-prompt
     /// passes. False keeps the end-to-end measurement every other family has.
     var decodeOnlyGain: Bool = false
+    /// SPEC-038 FR-CB11 (v0.3.22): the signed policy's `max_served_slots` for
+    /// this model artifact. Nil: no policy ceiling.
+    var policyCeiling: Int? = nil
 
-    /// The most slots any grant may serve on this target: the scheduler rows
-    /// and queue limit, capped by the widest exactness-probe shape they hold
+    /// The most slots any grant may serve on this target: the scheduler rows,
+    /// queue limit and signed policy ceiling, capped by the widest
+    /// exactness-probe shape they hold
     /// (`ContinuousBatchingSelfCheck.exactnessProbeBound`). A stored, prior or
     /// provisional grant above it is served only up to it.
     var grantableRows: Int {
-        let configured = max(1, min(maxRows, queueLimit))
+        let configured = max(1, min(maxRows, queueLimit, policyCeiling ?? .max))
         return min(configured, ContinuousBatchingSelfCheck.exactnessProbeBound(target: self, maxCount: configured))
     }
 }
@@ -475,10 +479,22 @@ enum ContinuousBatchingSelfCheck {
     }
 
     /// The widest count the ladder probes: the scheduler rows (the memory-fit
-    /// plan), an owner pin, the width below a crashed one, and the scheduler
-    /// queue limit (wider probes are refused with backpressure).
-    static func ladderUpperBound(maxRows: Int, ownerPinned: Int?, crashedSlots: Int?, queueLimit: Int) -> Int {
-        min(ownerPinned.map { min($0, maxRows) } ?? maxRows, crashedSlots.map { $0 - 1 } ?? .max, queueLimit)
+    /// plan), an owner pin, the width below a crashed one, the scheduler
+    /// queue limit (wider probes are refused with backpressure), and the
+    /// signed policy ceiling (SPEC-038 FR-CB11 v0.3.22).
+    static func ladderUpperBound(
+        maxRows: Int,
+        ownerPinned: Int?,
+        crashedSlots: Int?,
+        queueLimit: Int,
+        policyCeiling: Int? = nil
+    ) -> Int {
+        min(
+            ownerPinned.map { min($0, maxRows) } ?? maxRows,
+            crashedSlots.map { $0 - 1 } ?? .max,
+            queueLimit,
+            policyCeiling ?? .max
+        )
     }
 
     /// The ladder bound for `target`, including the widest exactness-probe
@@ -489,7 +505,11 @@ enum ContinuousBatchingSelfCheck {
         crashedSlots: Int?
     ) -> Int {
         let configured = ladderUpperBound(
-            maxRows: target.maxRows, ownerPinned: ownerPinned, crashedSlots: crashedSlots, queueLimit: target.queueLimit
+            maxRows: target.maxRows,
+            ownerPinned: ownerPinned,
+            crashedSlots: crashedSlots,
+            queueLimit: target.queueLimit,
+            policyCeiling: target.policyCeiling
         )
         return min(configured, exactnessProbeBound(target: target, maxCount: configured))
     }
@@ -644,7 +664,8 @@ enum ContinuousBatchingSelfCheck {
     }
 
     /// The count `serve` advertises: the decision (or the owner pin), never
-    /// above the highest verified slot count or the scheduler rows.
+    /// above the highest verified slot count or `maxRows` (callers pass the
+    /// target's `grantableRows`, which carries the signed policy ceiling).
     static func servedSlots(
         decision: ContinuousBatchingSelfCheckDecision,
         ownerPinned: Int?,
@@ -1334,7 +1355,11 @@ actor ContinuousBatchingSelfCheckDriver {
         let runtime = runtime
         let crashedSlots = (previous ?? store.record(for: target.key))?.crashedSlots
         let configuredSlots = ContinuousBatchingSelfCheck.ladderUpperBound(
-            maxRows: target.maxRows, ownerPinned: ownerPinnedSlots, crashedSlots: crashedSlots, queueLimit: target.queueLimit
+            maxRows: target.maxRows,
+            ownerPinned: ownerPinnedSlots,
+            crashedSlots: crashedSlots,
+            queueLimit: target.queueLimit,
+            policyCeiling: target.policyCeiling
         )
         let maxSlots = ContinuousBatchingSelfCheck.ladderUpperBound(
             target: target, ownerPinned: ownerPinnedSlots, crashedSlots: crashedSlots

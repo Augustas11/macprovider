@@ -63,19 +63,3 @@ struct PayoutWalletSettingsSection: View {
         return plain.date(from: raw)
     }
 }
-
-/// Settings window content: payout wallet (when a provider is attached) and
-/// the existing model settings.
-struct MalibuSettingsView: View {
-    let agent: MalibuAgent?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            if let agent {
-                PayoutWalletSettingsSection(agent: agent)
-                    .padding([.horizontal, .top], 20)
-            }
-            ModelSettingsView()
-        }
-    }
-}

@@ -23,6 +23,30 @@
       "requires_moe": true,
       "rollout": "canary",
       "tokenizer_sha256": "eec97aac7c5f9ba9159d4784222300eccf5ff2e6b4aeb193c8c939c912633510"
+    },
+    {
+      "cache_class": "mixed",
+      "cached_turns_accepted": false,
+      "chat_template_sha256": "6138d780f0ca0e16e3b174cb9b4d782525e32a2f63255d66e707b4c491a7ac6d",
+      "hardware_class": "apple-silicon:Apple M3 Ultra:ram-256gb",
+      "kernel_identifier": "macprovider_paged_kv_gather_v1",
+      "kv_dtype": "fp16",
+      "metallib_sha256": "3d9b4a747758128cc5418e62c5ad8e282a11b0d436423537137e013beaa1261b",
+      "model_id": "zai-org/glm-5.3-flash",
+      "model_key": "zai-org/glm-5.3-flash",
+      "model_sha256": "7299b6a71a38490e378e9eb6524c426392aa96e3fd561007e0540134bbef48f9",
+      "provenance": {
+        "evidence_id": "glm53-flash-t4-2026-10-17-final-18ca526-b1-selfcheck-granted-3",
+        "live_executable_cdhash": "a775f10652452256a9d5929ff24f47c815a8f115",
+        "package_manifest_sha256": "98578218416352357fd05174a9ba92067498a6e1cb33ebb5a3dc010dfe128ebd",
+        "provider_cli_version": "1.8.256",
+        "source": "release_review",
+        "status": "qualified",
+        "studio_campaign_sha256": "fbd89a3facf075de7df5d7f4afae493f203f3e516bb4250e6b65a32b3a742361"
+      },
+      "requires_moe": true,
+      "rollout": "canary",
+      "tokenizer_sha256": "1e9d4f69cfe47ae2d32262646881c81e4a79e58ebb3ac1c8c41477372c1b714d"
     }
   ],
   "schema_version": "macprovider.continuous-batching-policy-source.v1"
