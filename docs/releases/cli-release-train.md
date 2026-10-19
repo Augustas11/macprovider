@@ -64,11 +64,12 @@ Verified 2026-10-10 against public release metadata, the release train
 
 ## Next CLI release — net changes vs 1.8.257 (tracked 2026-10-19)
 
-Live fleet target: **1.8.257** (released 2026-10-19 11:18Z on Pearl runtime v1.8.255). No
-provider-side PR has merged since; start rows here when one does.
+Live fleet target: **1.8.257** (released 2026-10-19 11:18Z on Pearl runtime v1.8.255). Staged:
+`binaryVersion` **1.8.258**. Every PR below is merged and none is open, so the cut is authorized.
 
 | PR | Issue | Provider-side change | Status |
 |---|---|---|---|
+| #2070 | #2029 | Gateway auto-prefix requests stay native-MTP eligible under a fleet-cache grant: `withFleetCacheGrant` keeps the cache-only conversation-key marker when the grant names the installed key (SPEC-048-R004/R009), so paid gateway plain-text requests no longer fall to ordinary decode with `conversation_key`; the native-MTP store reads v1 and v2 projection manifests and selects the served `model_key`; a cache-only native row that falls back to serial keeps its ordinary cache lease. Release-build Studio e2e on GLM-5.3-Flash (`docs/evidence/glm53-flash-mtp-gateway-eligibility-2026-10-19/`) | merged (`ac42cd3ee`); awaiting CLI release |
 
 ## Next CLI release — net changes vs 1.8.256 (tracked 2026-10-19; released as v1.8.257)
 
