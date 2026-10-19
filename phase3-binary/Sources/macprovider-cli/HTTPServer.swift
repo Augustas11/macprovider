@@ -770,8 +770,12 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             let disconnect = ClientDisconnectState()
             inflightDisconnects.append(disconnect)
             let task = Task {
-                guard let startedAt = await status.beginRequestIfAccepting() else {
-                    writer.writeAPIError(APIError(status: 503, message: "Provider is paused or draining", type: "server_error", code: "provider_paused"))
+                let admission = await status.admitRequest()
+                guard case .admitted(let startedAt) = admission else {
+                    writer.writeAPIError(
+                        Self.admissionRefusalError(admission),
+                        retryAfterSecondsOverride: await status.selfCheckAdmissionHoldRetryAfterSeconds()
+                    )
                     return
                 }
                 do {
@@ -1049,13 +1053,12 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     defer {
                         Task { await modelRuntime.unregisterInFlight(handle.registrationID) }
                     }
-                    guard let admittedAt = await providerStatus.beginRequestIfAccepting() else {
-                        writer.writeAPIError(APIError(
-                            status: 503,
-                            message: "Provider is paused or draining",
-                            type: "server_error",
-                            code: "provider_paused"
-                        ))
+                    let admission = await providerStatus.admitRequest()
+                    guard case .admitted(let admittedAt) = admission else {
+                        writer.writeAPIError(
+                            Self.admissionRefusalError(admission),
+                            retryAfterSecondsOverride: await providerStatus.selfCheckAdmissionHoldRetryAfterSeconds()
+                        )
                         return
                     }
                     startedAt = admittedAt
@@ -1405,13 +1408,12 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 defer {
                     Task { await modelRuntime.unregisterInFlight(handle.registrationID) }
                 }
-                guard let admittedAt = await providerStatus.beginRequestIfAccepting() else {
-                    writer.writeAPIError(APIError(
-                        status: 503,
-                        message: "Provider is paused or draining",
-                        type: "server_error",
-                        code: "provider_paused"
-                    ))
+                let admission = await providerStatus.admitRequest()
+                guard case .admitted(let admittedAt) = admission else {
+                    writer.writeAPIError(
+                        Self.admissionRefusalError(admission),
+                        retryAfterSecondsOverride: await providerStatus.selfCheckAdmissionHoldRetryAfterSeconds()
+                    )
                     return
                 }
                 startedAt = admittedAt
@@ -1723,6 +1725,16 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             inferenceRan: inferenceRan,
             settlementRan: false
         )
+    }
+
+    /// A refused admission. The SPEC-038 FR-CB10 self-check admission hold is
+    /// queue pressure: the retryable pre-admission code with its `Retry-After`
+    /// bound (no inference ran). A pause or drain keeps `provider_paused`.
+    static func admissionRefusalError(_ admission: ProviderRequestAdmission) -> APIError {
+        if admission == .selfCheckAdmissionHold, let error = ContinuousBatchSchedulerError.backpressure.asAPIError() {
+            return error
+        }
+        return APIError(status: 503, message: "Provider is paused or draining", type: "server_error", code: "provider_paused")
     }
 
     static func swapDrainTimeoutEnvelope() -> [String: Any] {
@@ -2385,7 +2397,9 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 "throughput_probe_max_tokens": snapshot.capacity.throughputProbe.map { $0.maxTokens as Any } ?? NSNull(),
                 "throughput_probe_model": jsonNullable(snapshot.capacity.throughputProbe?.modelID),
             ],
-            "continuous_batching": continuousBatchingStatusFields(runtimeSnapshot?.continuousBatching),
+            "continuous_batching": continuousBatchingStatusFields(
+                runtimeSnapshot?.continuousBatching, admissionHold: snapshot.cbSelfCheckAdmissionHold
+            ),
             "native_mtp": (runtimeSnapshot?.nativeMTPStatus ?? NativeMTPStatusSink.disabled().snapshot()).statusObject(),
             "coordinator": [
                 "connected": snapshot.coordinatorConnected,
@@ -2505,7 +2519,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     static func continuousBatchingStatusFields(
-        _ snapshot: RuntimeContinuousBatchingSnapshot?
+        _ snapshot: RuntimeContinuousBatchingSnapshot?,
+        admissionHold: ContinuousBatchingAdmissionHoldStatus? = nil
     ) -> [String: Any] {
         let scheduler = snapshot?.scheduler
         let policy = snapshot?.policy
@@ -2532,6 +2547,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 "decision_reason": policy?.decisionReason ?? "policy_absent",
             ],
             "self_check": snapshot?.selfCheck.map { $0.jsonObject as Any } ?? NSNull(),
+            "self_check_admission_hold": (admissionHold ?? ContinuousBatchingAdmissionHoldStatus()).jsonObject,
             "scheduler": [
                 "active_decode_rows": scheduler?.activeDecodeRows ?? 0,
                 "waiting_count": scheduler?.waitingCount ?? 0,
@@ -2989,6 +3005,7 @@ private struct ResponseWriter: @unchecked Sendable {
     func writeAPIError(
         _ error: APIError,
         extraHeaders: [(String, String)] = [],
+        retryAfterSecondsOverride: Int? = nil,
         completion: (@Sendable (Bool) -> Void)? = nil
     ) {
         writeJSON(
@@ -2996,7 +3013,7 @@ private struct ResponseWriter: @unchecked Sendable {
             body: error.envelope,
             extraHeaders: RouterHandler.retryGuidanceHeaders(
                 code: error.code,
-                seconds: retryAfterSeconds
+                seconds: retryAfterSecondsOverride ?? retryAfterSeconds
             ) + extraHeaders,
             completion: completion
         )

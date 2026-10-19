@@ -123,7 +123,7 @@ struct ContinuousBatchingSelfCheckTarget: Sendable, Equatable {
 /// One self-check batch through the scheduler: each row's tokens, the wall
 /// time from submission to the last row's end, and for a cohort run each
 /// row's decode tokens beside the whole cohort and those steps' seconds.
-struct ContinuousBatchingSelfCheckBatchRun: Sendable, Equatable {
+struct ContinuousBatchingSelfCheckBatchRun: Sendable, Equatable, Codable {
     let outputs: [[Int]]
     let seconds: Double
     let cohortDecodeTokens: [Int]
@@ -133,7 +133,7 @@ struct ContinuousBatchingSelfCheckBatchRun: Sendable, Equatable {
 /// The stock serial baseline over the self-check prompts: end-to-end
 /// tokens/s (the gain denominator) and decode-only tokens/s (the denominator
 /// for a `decodeOnlyGain` target, SPEC-038 v0.3.21).
-struct ContinuousBatchingSelfCheckSerialRate: Sendable, Equatable {
+struct ContinuousBatchingSelfCheckSerialRate: Sendable, Equatable, Codable {
     let decodeTPS: Double
     let endToEndTPS: Double
 }
@@ -202,6 +202,7 @@ public struct ContinuousBatchingSelfCheckReport: Sendable, Equatable {
     public let hardwareClass: String?
     public let osBuild: String?
     public let runtimeBuild: String?
+    public let decodeWindow: Int?
 
     init(
         decision: String,
@@ -220,6 +221,7 @@ public struct ContinuousBatchingSelfCheckReport: Sendable, Equatable {
         self.hardwareClass = key?.hardwareClass
         self.osBuild = key?.osBuild
         self.runtimeBuild = key?.runtimeBuild
+        self.decodeWindow = key?.decodeWindow
     }
 
     var jsonObject: [String: Any] {
@@ -235,6 +237,7 @@ public struct ContinuousBatchingSelfCheckReport: Sendable, Equatable {
             "hardware_class": nullable(hardwareClass),
             "os_build": nullable(osBuild),
             "runtime_build": nullable(runtimeBuild),
+            "decode_window": decodeWindow.map { $0 as Any } ?? NSNull(),
         ]
     }
 }
@@ -671,6 +674,146 @@ enum ContinuousBatchingSelfCheck {
         max(1, min(ownerPinned ?? decision.slots, decision.verifiedSlots, maxRows))
     }
 
+    /// SPEC-038 FR-CB10 item 3 (v0.3.22): a check with no stored decision on
+    /// its key that has been due this long without an idle window runs under
+    /// an admission hold. Holds are also at least this far apart, counted
+    /// from the end of the previous one.
+    static let admissionHoldAfterSeconds: Double = 120
+    /// Each Mac adds a random 0..15 min to the first due time so Macs that
+    /// re-key together (a release) spread their holds instead of all
+    /// withdrawing capacity at once.
+    static let admissionHoldJitterSeconds: Double = 900
+    /// The longest the check itself runs under one hold (the drain before it
+    /// is bounded separately); an unfinished ladder resumes at the next idle
+    /// window or hold.
+    static let admissionHoldCheckSeconds: Double = 300
+
+    /// The drain bound for a hold: the configured drain timeout, doubled after
+    /// each consecutive drain timeout up to 4x, so long-running requests
+    /// cannot starve the check forever while each hold stays bounded.
+    static func admissionHoldDrainSeconds(base: Int, consecutiveDrainTimeouts: Int) -> Int {
+        max(0, base) << min(max(0, consecutiveDrainTimeouts), 2)
+    }
+
+    /// The check bound for a hold: `admissionHoldCheckSeconds`, doubled after
+    /// each consecutive hold that reached it without deciding, up to 4x.
+    /// Completed units persist; an individual unit must still fit the bound.
+    static func admissionHoldCheckBound(base: Double, consecutiveBoundYields: Int) -> Double {
+        base * Double(1 << min(max(0, consecutiveBoundYields), 2))
+    }
+
+    static func admissionHoldDue(dueSince: Date, notBefore: Date, after: Double, now: Date) -> Bool {
+        now >= notBefore && now.timeIntervalSince(dueSince) >= after
+    }
+
+    enum AdmissionHoldOutcome: Equatable, Sendable {
+        /// The hold did not start: a lifecycle lease, a pause, a drain, or a
+        /// provider that is not serving.
+        case skipped(reason: String)
+        /// In-flight requests did not finish within the drain timeout; none
+        /// was cancelled and the check did not run.
+        case drainTimeout
+        /// The check stored a decision.
+        case completed
+        /// The check ran but yielded (a pause, drain, lease or target change)
+        /// or failed; completed widths persist and the ladder resumes later.
+        case yielded
+        /// The check reached its bound without deciding.
+        case checkBound
+
+        var label: String {
+            switch self {
+            case .skipped: return "skipped"
+            case .drainTimeout: return "drain_timeout"
+            case .completed: return "completed"
+            case .yielded: return "yielded"
+            case .checkBound: return "check_bound"
+            }
+        }
+    }
+
+    /// SPEC-038 FR-CB10 item 3 (v0.3.22): stop admitting new requests, let
+    /// the in-flight ones finish (bounded by `drainSeconds`; none is cancelled
+    /// or dropped), run `check` for at most `checkSeconds`, then re-open
+    /// admission. Never starts under a lifecycle lease, an operator pause or a
+    /// drain. The hold ends early, as a yield, the moment a lease appears, the
+    /// provider stops serving (a pause or drain, whose state it keeps), or
+    /// `stillValid` fails (the self-check target changed); admission re-opens
+    /// at the bound even if `check` has not returned yet (it is cancelled and
+    /// awaited, and yields to the first buyer request). `check` returns
+    /// whether it stored a decision.
+    static func runUnderAdmissionHold(
+        providerStatus: ProviderStatus,
+        drainSeconds: Int,
+        checkSeconds: Double = admissionHoldCheckSeconds,
+        lifecycleLease: @escaping @Sendable () -> String?,
+        stillValid: @escaping @Sendable () async -> Bool = { true },
+        context: String,
+        log: @escaping @Sendable (String) -> Void,
+        check: @escaping @Sendable () async -> Bool
+    ) async -> AdmissionHoldOutcome {
+        let drainBound = TimeInterval(max(0, drainSeconds))
+        var refusal = lifecycleLease().map { "lifecycle_lease_\($0)" }
+        if refusal == nil {
+            refusal = await providerStatus.beginSelfCheckAdmissionHold(
+                expectedEndAt: Date().addingTimeInterval(drainBound + checkSeconds)
+            )
+        }
+        if let refusal {
+            await providerStatus.noteSelfCheckAdmissionHoldSkipped(reason: refusal)
+            log("event=cb_self_check action=admission_hold_skipped reason=\(refusal) \(context)")
+            return .skipped(reason: refusal)
+        }
+        let startedAt = Date()
+        log("event=cb_self_check action=admission_hold_start in_flight=\(await providerStatus.requestsInFlightCount()) drain_timeout_s=\(drainSeconds) \(context)")
+        /// Why the hold must end now, or nil while it may continue.
+        @Sendable func interruption() async -> String? {
+            if Task.isCancelled { return "cancelled" }
+            if let lease = lifecycleLease() { return "lifecycle_lease_\(lease)" }
+            if await !providerStatus.isServingForSelfCheckAdmissionHold() { return "provider_not_serving" }
+            if await !stillValid() { return "target_changed" }
+            return nil
+        }
+        func end(_ outcome: AdmissionHoldOutcome, reason: String? = nil) async -> AdmissionHoldOutcome {
+            await providerStatus.endSelfCheckAdmissionHold(outcome: outcome.label)
+            log("event=cb_self_check action=admission_hold_end outcome=\(outcome.label)\(reason.map { " reason=\($0)" } ?? "") held_s=\(Int(Date().timeIntervalSince(startedAt))) \(context)")
+            return outcome
+        }
+        let drainDeadline = startedAt.addingTimeInterval(drainBound)
+        let neededDrain = await providerStatus.requestsInFlightCount() > 0
+        while await providerStatus.requestsInFlightCount() > 0, Date() < drainDeadline {
+            if let reason = await interruption() { return await end(.yielded, reason: reason) }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        if await providerStatus.requestsInFlightCount() > 0 { return await end(.drainTimeout) }
+        if neededDrain, Date() >= drainDeadline { return await end(.drainTimeout) }
+        // Re-validate after the drain, immediately before any check work.
+        if let reason = await interruption() { return await end(.yielded, reason: reason) }
+        log("event=cb_self_check action=admission_hold_drained drain_s=\(String(format: "%.1f", Date().timeIntervalSince(startedAt)))")
+        let finished = AdmissionHoldCheckCompletion()
+        let task = Task {
+            let decided = await check()
+            finished.markDone()
+            return decided
+        }
+        let checkDeadline = Date().addingTimeInterval(checkSeconds)
+        while !finished.isDone {
+            let reason = Date() >= checkDeadline ? "check_bound" : await interruption()
+            if let reason {
+                task.cancel()
+                // Admission re-opens now; the cancelled check is still awaited
+                // so the driver never runs two checks at once.
+                let outcome = await end(reason == "check_bound" ? .checkBound : .yielded, reason: reason)
+                _ = await task.value
+                return outcome
+            }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        let decided = await task.value
+        if let reason = await interruption() { return await end(.yielded, reason: reason) }
+        return await end(decided ? .completed : .yielded)
+    }
+
     /// Wait before the next attempt after `deferrals` consecutive yields to
     /// traffic: doubling from `base`, at most 15 minutes. Progress is kept, so
     /// a busy Mac still finishes one step per idle window.
@@ -798,6 +941,22 @@ struct ContinuousBatchingSelfCheckStore: Sendable {
 
     let url: URL
 
+    /// Completed inference units within the current width survive a hold
+    /// ending. A cancelled unit is never checkpointed. The prompts bind the
+    /// checkpoint as well as the enclosing record's model/runtime key.
+    struct WidthProgress: Codable, Equatable {
+        let slots: Int
+        let promptSHA256s: [String]
+        let probePromptSHA256s: [String]
+        var probe: ContinuousBatchingSelfCheckBatchRun?
+        var passes: [Pass] = []
+
+        struct Pass: Codable, Equatable {
+            let serial: ContinuousBatchingSelfCheckSerialRate
+            let batch: ContinuousBatchingSelfCheckBatchRun
+        }
+    }
+
     struct Record: Codable, Equatable {
         let key: ContinuousBatchingSelfCheckKey
         /// Nil while the ladder is still running.
@@ -826,6 +985,19 @@ struct ContinuousBatchingSelfCheckStore: Sendable {
         /// output is reused only for the same prompt.
         var probeAloneOutputs: [[Int]]?
         var probePromptSHA256s: [String]?
+        var widthProgress: WidthProgress?
+
+        mutating func prepareWidth(slots: Int, prompts: [[Int]], probePrompts: [[Int]]) {
+            let promptDigests = prompts.prefix(slots).map(ContinuousBatchingSelfCheck.promptSHA256)
+            let probeDigests = probePrompts.prefix(slots).map(ContinuousBatchingSelfCheck.promptSHA256)
+            if widthProgress?.slots != slots
+                || widthProgress?.promptSHA256s != promptDigests
+                || widthProgress?.probePromptSHA256s != probeDigests {
+                widthProgress = .init(
+                    slots: slots, promptSHA256s: promptDigests, probePromptSHA256s: probeDigests
+                )
+            }
+        }
 
         enum CodingKeys: String, CodingKey {
             case key
@@ -842,6 +1014,7 @@ struct ContinuousBatchingSelfCheckStore: Sendable {
             case ladderBound = "ladder_bound"
             case probeAloneOutputs = "probe_alone_outputs"
             case probePromptSHA256s = "probe_prompt_sha256s"
+            case widthProgress = "width_progress"
         }
     }
 
@@ -972,8 +1145,26 @@ actor ContinuousBatchingSelfCheckDriver {
     private let idleSeconds: Double
     private let pollSeconds: Double
     private let log: @Sendable (String) -> Void
+    /// SPEC-038 FR-CB10 item 3 (v0.3.22): a check due this long without an
+    /// idle window runs under an admission hold.
+    private let admissionHoldAfterSeconds: Double
+    /// Bounds a hold's drain; the provider's configured drain timeout.
+    private let admissionHoldDrainSeconds: Int
+    /// Bounds the check under one hold; an unfinished ladder resumes later.
+    private let admissionHoldCheckSeconds: Double
+    /// A valid lifecycle (maintenance or startup) lease, if one is held.
+    private let lifecycleLease: @Sendable () -> String?
+    /// This Mac's 0..`admissionHoldJitterSeconds` offset on the first due time.
+    private let admissionHoldJitter: Double
+    private var consecutiveDrainTimeouts = 0
+    private var consecutiveCheckBounds = 0
     private var deferrals = 0
     private var nextAttemptAt = Date.distantPast
+    /// When the check for this key first found no stored decision.
+    private var checkDueSince: (key: ContinuousBatchingSelfCheckKey, at: Date)?
+    private var admissionHoldNotBefore = Date.distantPast
+    /// Set while a step runs under an admission hold: past it the step yields.
+    private var admissionHoldDeadline: Date?
     /// The width whose probe the previous attempt saw refused with
     /// backpressure, for that target only; any other outcome clears it.
     private var backpressureRefusal: (target: ContinuousBatchingSelfCheckTarget, slots: Int)?
@@ -988,6 +1179,11 @@ actor ContinuousBatchingSelfCheckDriver {
         provisional: Provisional? = nil,
         idleSeconds: Double = 10,
         pollSeconds: Double = 5,
+        admissionHoldAfterSeconds: Double = ContinuousBatchingSelfCheck.admissionHoldAfterSeconds,
+        admissionHoldDrainSeconds: Int = 30,
+        admissionHoldCheckSeconds: Double = ContinuousBatchingSelfCheck.admissionHoldCheckSeconds,
+        lifecycleLease: @escaping @Sendable () -> String? = { nil },
+        admissionHoldJitter: Double = Double.random(in: 0...ContinuousBatchingSelfCheck.admissionHoldJitterSeconds),
         log: @escaping @Sendable (String) -> Void
     ) {
         self.runtime = runtime
@@ -997,6 +1193,11 @@ actor ContinuousBatchingSelfCheckDriver {
         self.provisional = provisional
         self.idleSeconds = idleSeconds
         self.pollSeconds = max(0.1, pollSeconds)
+        self.admissionHoldAfterSeconds = max(0, admissionHoldAfterSeconds)
+        self.admissionHoldDrainSeconds = max(0, admissionHoldDrainSeconds)
+        self.admissionHoldCheckSeconds = max(1, admissionHoldCheckSeconds)
+        self.lifecycleLease = lifecycleLease
+        self.admissionHoldJitter = max(0, admissionHoldJitter)
         self.log = log
     }
 
@@ -1011,7 +1212,10 @@ actor ContinuousBatchingSelfCheckDriver {
     func run() async {
         while !Task.isCancelled {
             try? await Task.sleep(nanoseconds: UInt64(pollSeconds * 1_000_000_000))
-            guard let target = await runtime.continuousBatchingSelfCheckTarget(includeDecided: true) else { continue }
+            guard let target = await runtime.continuousBatchingSelfCheckTarget(includeDecided: true) else {
+                checkDueSince = nil
+                continue
+            }
             let pending = await runtime.continuousBatchingSelfCheckState() == .pending
             let record = store.record(for: target.key)
             if let record, let crashed = record.inProgressSlots {
@@ -1022,6 +1226,7 @@ actor ContinuousBatchingSelfCheckDriver {
                 continue
             }
             if let record, let decision = record.decision {
+                checkDueSince = nil
                 if pending { await apply(decision, target: target, source: "stored") }
                 let bound = ContinuousBatchingSelfCheck.ladderUpperBound(
                     target: target, ownerPinned: ownerPinnedSlots, crashedSlots: record.crashedSlots
@@ -1042,8 +1247,73 @@ actor ContinuousBatchingSelfCheckDriver {
                     source: "prior_grant"
                 )
             }
-            guard Date() >= nextAttemptAt, await isIdle() else { continue }
-            await measure(target, remeasureOf: nil)
+            if checkDueSince?.key != target.key {
+                checkDueSince = (target.key, Date())
+                consecutiveDrainTimeouts = 0
+                consecutiveCheckBounds = 0
+            }
+            let idle = await isIdle()
+            if idle {
+                if Date() >= nextAttemptAt { await measure(target, remeasureOf: nil) }
+                continue
+            }
+            // A busy Mac never finds an idle window under steady traffic: once
+            // the check has been due long enough, hold admission and run it.
+            if let due = checkDueSince, Date() >= nextAttemptAt,
+               ContinuousBatchingSelfCheck.admissionHoldDue(
+                dueSince: due.at, notBefore: admissionHoldNotBefore,
+                after: admissionHoldAfterSeconds + admissionHoldJitter, now: Date()
+               ) {
+                await measureUnderAdmissionHold(target, dueSeconds: Date().timeIntervalSince(due.at))
+            }
+        }
+    }
+
+    /// SPEC-038 FR-CB10 item 3 (v0.3.22): the check under an admission hold
+    /// (`ContinuousBatchingSelfCheck.runUnderAdmissionHold`). A prior grant
+    /// keeps serving until the check decides; holds are at least
+    /// `admissionHoldAfterSeconds` apart.
+    private func measureUnderAdmissionHold(_ target: ContinuousBatchingSelfCheckTarget, dueSeconds: Double) async {
+        let runtime = runtime
+        let outcome = await ContinuousBatchingSelfCheck.runUnderAdmissionHold(
+            providerStatus: providerStatus,
+            drainSeconds: ContinuousBatchingSelfCheck.admissionHoldDrainSeconds(
+                base: admissionHoldDrainSeconds, consecutiveDrainTimeouts: consecutiveDrainTimeouts
+            ),
+            checkSeconds: ContinuousBatchingSelfCheck.admissionHoldCheckBound(
+                base: admissionHoldCheckSeconds, consecutiveBoundYields: consecutiveCheckBounds
+            ),
+            lifecycleLease: lifecycleLease,
+            stillValid: { await runtime.continuousBatchingSelfCheckTarget(includeDecided: true) == target },
+            context: "due_s=\(Int(dueSeconds)) model_sha256=\(target.key.modelSHA256)",
+            log: log
+        ) {
+            await self.measureWithinAdmissionHold(target)
+        }
+        consecutiveDrainTimeouts = outcome == .drainTimeout ? consecutiveDrainTimeouts + 1 : 0
+        consecutiveCheckBounds = outcome == .checkBound ? consecutiveCheckBounds + 1 : 0
+        // Spaced from the end of this hold, not its start.
+        admissionHoldNotBefore = Date().addingTimeInterval(admissionHoldAfterSeconds)
+    }
+
+    /// The check under a hold: bounded by `admissionHoldCheckSeconds`, after
+    /// which the step yields and the ladder resumes at the next hold.
+    private func measureWithinAdmissionHold(_ target: ContinuousBatchingSelfCheckTarget) async -> Bool {
+        admissionHoldDeadline = Date().addingTimeInterval(ContinuousBatchingSelfCheck.admissionHoldCheckBound(
+            base: admissionHoldCheckSeconds, consecutiveBoundYields: consecutiveCheckBounds
+        ))
+        await measure(target, remeasureOf: nil)
+        admissionHoldDeadline = nil
+        let record = store.record(for: target.key)
+        return record?.decision != nil && record?.inProgressSlots == nil
+    }
+
+    private static func deferralReason(_ error: Error) -> String {
+        switch error {
+        case StepError.admissionHoldEnded: return "admission_hold_ended"
+        case is StepError: return "request_in_flight"
+        case is CancellationError: return "cancelled"
+        default: return "step_failed error=\(String(describing: error).prefix(200))"
         }
     }
 
@@ -1057,26 +1327,41 @@ actor ContinuousBatchingSelfCheckDriver {
 
     private enum StepError: Error {
         case yielded
+        /// An admission hold ran out, or a pause or drain began during it.
+        case admissionHoldEnded
         /// The exactness probe at this width could not run its full shape.
         case probeShapeUnmet(slots: Int)
     }
 
-    /// Runs `body` and cancels it as soon as a request is in flight.
+    /// Runs `body` and cancels it as soon as a request is in flight, or, under
+    /// an admission hold, the provider leaves ready/busy. The outer hold
+    /// watchdog alone owns the timeout, so every expiry increments its bound
+    /// escalation counter instead of racing an inner generic yield.
     private func yieldingToRequests<T: Sendable>(
         _ body: @escaping @Sendable () async throws -> T
     ) async throws -> T {
+        try Task.checkCancellation()
         let providerStatus = providerStatus
+        let holdDeadline = admissionHoldDeadline
         return try await withThrowingTaskGroup(of: T?.self) { group in
             group.addTask { try await body() }
             group.addTask {
                 while !Task.isCancelled {
-                    if await providerStatus.snapshot().requestsInFlight > 0 { throw StepError.yielded }
+                    let snapshot = await providerStatus.snapshot()
+                    if snapshot.requestsInFlight > 0 { throw StepError.yielded }
+                    if holdDeadline != nil,
+                       !(snapshot.status == .ready || snapshot.status == .busy) {
+                        throw StepError.admissionHoldEnded
+                    }
                     try await Task.sleep(nanoseconds: 100_000_000)
                 }
-                return nil
+                throw CancellationError()
             }
             defer { group.cancelAll() }
             while let next = try await group.next() {
+                // A cancelled step (an admission hold that ended) may return a
+                // truncated run: never record it as a measurement.
+                try Task.checkCancellation()
                 if let value = next { return value }
             }
             throw StepError.yielded
@@ -1103,6 +1388,7 @@ actor ContinuousBatchingSelfCheckDriver {
         _ target: ContinuousBatchingSelfCheckTarget,
         remeasureOf previous: ContinuousBatchingSelfCheckStore.Record?
     ) async {
+        guard !Task.isCancelled else { return }
         let runtime = runtime
         let crashedSlots = (previous ?? store.record(for: target.key))?.crashedSlots
         let configuredSlots = ContinuousBatchingSelfCheck.ladderUpperBound(
@@ -1125,6 +1411,7 @@ actor ContinuousBatchingSelfCheckDriver {
             if previous.remeasureInProgress != true {
                 record.measurements = []
                 record.serialTPS = 0
+                record.widthProgress = nil
                 record.remeasureInProgress = true
             }
         } else {
@@ -1153,12 +1440,15 @@ actor ContinuousBatchingSelfCheckDriver {
         log("event=cb_self_check action=step max_slots=\(maxSlots) rows=\(target.maxRows) queue_limit=\(target.queueLimit) probe_key_boundary=\(target.probeKeyBoundary) resumed_at=\(record.measurements.count) remeasure=\(previous != nil) model_sha256=\(target.key.modelSHA256)")
         let stepStartedAt = Date()
         do {
+            try Task.checkCancellation()
             let tokens = ContinuousBatchingSelfCheck.maxOutputTokens
             // Scheduler request ids are idempotency keys; never reuse one.
             let attempt = UUID().uuidString.prefix(8).lowercased()
-            let prompts = try await runtime.continuousBatchingSelfCheckPrompts(
-                ContinuousBatchingSelfCheck.promptTexts(count: maxSlots)
-            )
+            let prompts = try await yieldingToRequests {
+                try await runtime.continuousBatchingSelfCheckPrompts(
+                    ContinuousBatchingSelfCheck.promptTexts(count: maxSlots)
+                )
+            }
             let probeTokens = ContinuousBatchingSelfCheck.exactnessOutputTokens(decodeWindow: target.key.decodeWindow)
             let requiredCohortTokens = ContinuousBatchingSelfCheck.requiredCohortDecodeTokens(
                 decodeWindow: target.key.decodeWindow
@@ -1175,6 +1465,8 @@ actor ContinuousBatchingSelfCheckDriver {
                 try await runtime.continuousBatchingSelfCheckSerialTPS(prompts: [prompts[0]], maxTokens: 8)
             }
             for slots in 2...maxSlots where !record.measurements.contains(where: { $0.slots == slots }) {
+                try Task.checkCancellation()
+                record.prepareWidth(slots: slots, prompts: prompts, probePrompts: probePrompts)
                 // Journal before any inference for this width, alone runs included.
                 record.inProgressSlots = slots
                 try save(record)
@@ -1197,14 +1489,21 @@ actor ContinuousBatchingSelfCheckDriver {
                     probeAlone.append(row.outputs[0])
                     record.probeAloneOutputs = probeAlone
                     record.probePromptSHA256s = probePrompts.prefix(probeAlone.count).map(ContinuousBatchingSelfCheck.promptSHA256)
+                    try save(record)
                 }
                 let probe: ContinuousBatchingSelfCheckBatchRun
                 do {
-                    probe = try await yieldingToRequests {
-                        try await runtime.runContinuousBatchingSelfCheckBatch(
-                            prompts: Array(probePrompts.prefix(slots)), maxOutputTokens: probeTokens,
-                            idPrefix: "cb-self-check-\(attempt)-probe-k\(slots)", cohort: true
-                        )
+                    if let completed = record.widthProgress?.probe {
+                        probe = completed
+                    } else {
+                        probe = try await yieldingToRequests {
+                            try await runtime.runContinuousBatchingSelfCheckBatch(
+                                prompts: Array(probePrompts.prefix(slots)), maxOutputTokens: probeTokens,
+                                idPrefix: "cb-self-check-\(attempt)-probe-k\(slots)", cohort: true
+                            )
+                        }
+                        record.widthProgress?.probe = probe
+                        try save(record)
                     }
                 } catch where (error as? ContinuousBatchSchedulerError) == .queueWaitTimedOut {
                     // The cohort never all reached a row: its shape was not met.
@@ -1218,6 +1517,8 @@ actor ContinuousBatchingSelfCheckDriver {
                 var divergences = probeCheck.divergences
                 let cohortTokens = probe.cohortDecodeTokens.min() ?? 0
                 if conformant, cohortTokens < requiredCohortTokens {
+                    // A shape failure is retried, never reused as a successful unit.
+                    record.widthProgress?.probe = nil
                     log("event=cb_self_check action=probe_shape_unmet slots=\(slots) cohort_decode_tokens=\(cohortTokens) required=\(requiredCohortTokens)")
                     throw StepError.probeShapeUnmet(slots: slots)
                 }
@@ -1230,6 +1531,7 @@ actor ContinuousBatchingSelfCheckDriver {
                         )
                     }
                     record.aloneOutputs.append(row.outputs[0])
+                    try save(record)
                 }
                 // Rungs: repeats of stock serial then batched, back to back on
                 // the same prompts; the gain is the median ratio. For a
@@ -1248,19 +1550,28 @@ actor ContinuousBatchingSelfCheckDriver {
                 var serials: [Double] = []
                 for pass in 0..<(conformant ? (isRung ? Self.repeats : 1) : 0) {
                     var serialRate = ContinuousBatchingSelfCheckSerialRate(decodeTPS: 0, endToEndTPS: 0)
-                    if isRung {
-                        serialRate = try await yieldingToRequests {
-                            try await runtime.continuousBatchingSelfCheckSerialTPS(prompts: serialPrompts, maxTokens: tokens)
+                    let batch: ContinuousBatchingSelfCheckBatchRun
+                    if let completed = record.widthProgress?.passes, pass < completed.count {
+                        serialRate = completed[pass].serial
+                        batch = completed[pass].batch
+                    } else {
+                        if isRung {
+                            serialRate = try await yieldingToRequests {
+                                try await runtime.continuousBatchingSelfCheckSerialTPS(prompts: serialPrompts, maxTokens: tokens)
+                            }
                         }
+                        let decodeOnly = target.decodeOnlyGain
+                        batch = try await yieldingToRequests {
+                            try await runtime.runContinuousBatchingSelfCheckBatch(
+                                prompts: batchPrompts, maxOutputTokens: tokens, idPrefix: "cb-self-check-\(attempt)-k\(slots)-p\(pass)",
+                                cohort: decodeOnly
+                            )
+                        }
+                        record.widthProgress?.passes.append(.init(serial: serialRate, batch: batch))
+                        try save(record)
                     }
                     let decodeOnly = target.decodeOnlyGain
                     let serial = decodeOnly ? serialRate.decodeTPS : serialRate.endToEndTPS
-                    let batch = try await yieldingToRequests {
-                        try await runtime.runContinuousBatchingSelfCheckBatch(
-                            prompts: batchPrompts, maxOutputTokens: tokens, idPrefix: "cb-self-check-\(attempt)-k\(slots)-p\(pass)",
-                            cohort: decodeOnly
-                        )
-                    }
                     passes.append(batch.outputs)
                     let generated = batch.outputs.reduce(0) { $0 + $1.count }
                     let endToEnd = batch.seconds > 0 ? Double(generated) / batch.seconds : 0
@@ -1288,16 +1599,19 @@ actor ContinuousBatchingSelfCheckDriver {
                 }
                 let gain = Self.median(ratios)
                 let aggregate = Self.median(aggregates)
+                try Task.checkCancellation()
                 if isRung { record.serialTPS = max(record.serialTPS, Self.median(serials)) }
                 record.measurements.append(.init(
                     slots: slots, conformant: conformant, nearTieRows: nearTieRows, aggregateTPS: aggregate,
                     gain: gain, throughputMeasured: isRung && !passes.isEmpty
                 ))
                 record.inProgressSlots = nil
+                record.widthProgress = nil
                 try save(record)
                 log("event=cb_self_check action=measured slots=\(slots) rung=\(isRung) conformant=\(conformant) cohort_decode_tokens=\(cohortTokens) divergent_rows=\(divergences.isEmpty ? "none" : divergences.joined(separator: ",")) aggregate_tps=\(String(format: "%.1f", aggregate)) serial_tps=\(String(format: "%.1f", Self.median(serials))) gain=\(String(format: "%.2f", gain))")
                 if !conformant { break }
             }
+            try Task.checkCancellation()
             deferrals = 0
             nextAttemptAt = .distantPast
             backpressureRefusal = nil
@@ -1315,7 +1629,7 @@ actor ContinuousBatchingSelfCheckDriver {
             backpressureRefusal = nil
             // A buyer request during the step can take rows from the cohort;
             // that is a yield, not a probe result.
-            if case StepError.probeShapeUnmet(let slots) = error,
+            if !Task.isCancelled, case StepError.probeShapeUnmet(let slots) = error,
                await providerStatus.snapshot().requestsInFlight == 0,
                await providerStatus.secondsSinceLastRealActivity() >= Date().timeIntervalSince(stepStartedAt) {
                 // Fail closed: decide on the widths verified below it, and
@@ -1331,7 +1645,7 @@ actor ContinuousBatchingSelfCheckDriver {
             // Backpressure with no buyer request during the step is the
             // scheduler refusing the probe itself (its queue or token budget,
             // or a native-MTP integrity probe holding it).
-            if (error as? ContinuousBatchSchedulerError) == .backpressure, let refusedAt,
+            if !Task.isCancelled, (error as? ContinuousBatchSchedulerError) == .backpressure, let refusedAt,
                await providerStatus.snapshot().requestsInFlight == 0,
                await providerStatus.secondsSinceLastRealActivity() >= Date().timeIntervalSince(stepStartedAt) {
                 let verifiedPrefix = record.measurements.last?.slots ?? 1
@@ -1367,13 +1681,18 @@ actor ContinuousBatchingSelfCheckDriver {
                     break
                 }
             }
-            deferrals += 1
-            let wait = ContinuousBatchingSelfCheck.deferralBackoffSeconds(deferrals: deferrals, base: pollSeconds)
-            nextAttemptAt = Date().addingTimeInterval(wait)
+            // A step ended by its own admission hold (its bound, a pause, a
+            // lease or a target change) is spaced by the hold interval, not
+            // the deferral backoff.
+            if admissionHoldDeadline == nil {
+                deferrals += 1
+                let wait = ContinuousBatchingSelfCheck.deferralBackoffSeconds(deferrals: deferrals, base: pollSeconds)
+                nextAttemptAt = Date().addingTimeInterval(wait)
+            }
             if previous == nil, await runtime.continuousBatchingSelfCheckState() == .pending {
                 await report(decision: "deferred", target: target)
             }
-            log("event=cb_self_check action=deferred deferrals=\(deferrals) retry_in_s=\(Int(wait)) reason=\(error is StepError ? "request_in_flight" : "step_failed error=\(String(describing: error).prefix(200))")")
+            log("event=cb_self_check action=deferred deferrals=\(deferrals) retry_in_s=\(Int(max(0, nextAttemptAt.timeIntervalSinceNow))) reason=\(Self.deferralReason(error))")
         }
     }
 
@@ -1388,7 +1707,10 @@ actor ContinuousBatchingSelfCheckDriver {
         let lengths = ContinuousBatchingSelfCheck.exactnessPromptLengths(
             count: count, keyBoundary: target.probeKeyBoundary, outputTokens: outputTokens
         )
-        let full = try await runtime.continuousBatchingSelfCheckPrompts(ContinuousBatchingSelfCheck.exactnessTexts(lengths: lengths))
+        let runtime = runtime
+        let full = try await yieldingToRequests {
+            try await runtime.continuousBatchingSelfCheckPrompts(ContinuousBatchingSelfCheck.exactnessTexts(lengths: lengths))
+        }
         guard full.count == lengths.count, full.count >= 2 else {
             throw StepError.probeShapeUnmet(slots: max(2, min(full.count, lengths.count) + 1))
         }
@@ -1462,7 +1784,9 @@ actor ContinuousBatchingSelfCheckDriver {
         probeShapeUnmetAt: Int? = nil
     ) async {
         // A swap during the measurement changes the target; drop the result.
-        guard await runtime.continuousBatchingSelfCheckTarget(includeDecided: true) == target else { return }
+        guard !Task.isCancelled,
+              await runtime.continuousBatchingSelfCheckTarget(includeDecided: true) == target,
+              !Task.isCancelled else { return }
         let fresh = ContinuousBatchingSelfCheck.decide(
             serialTPS: record.serialTPS, measurements: record.measurements, crashedAt: crashedAt,
             probeShapeUnmetAt: probeShapeUnmetAt
@@ -1487,6 +1811,7 @@ actor ContinuousBatchingSelfCheckDriver {
             final.crashedSlots = min(record.crashedSlots ?? crashedAt, crashedAt)
         }
         final.inProgressSlots = nil
+        final.widthProgress = nil
         final.remeasureInProgress = nil
         final.decidedAt = ISO8601DateFormatter().string(from: Date())
         try? save(final)
@@ -1531,4 +1856,13 @@ actor ContinuousBatchingSelfCheckDriver {
         }
         log("event=cb_self_check action=applied source=\(source) reason=\(decision.reason) slots=\(slots) verified_k=\(decision.verifiedSlots) model_sha256=\(target.key.modelSHA256)")
     }
+}
+
+/// Set once by the admission-hold check task when it returns.
+final class AdmissionHoldCheckCompletion: @unchecked Sendable {
+    private let lock = NSLock()
+    private var done = false
+
+    func markDone() { lock.lock(); done = true; lock.unlock() }
+    var isDone: Bool { lock.lock(); defer { lock.unlock() }; return done }
 }

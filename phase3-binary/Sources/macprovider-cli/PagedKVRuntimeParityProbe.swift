@@ -959,17 +959,22 @@ enum PagedKVRuntimeParityProbe {
         model: any LanguageModel,
         prompt: [Int]
     ) throws -> SerialReference {
+        try Task.checkCancellation()
         let cache = try model.newCache(parameters: nil)
         let tokens = MLXArray(prompt.map(Int32.init)).reshaped([1, prompt.count])
         let logits = model(tokens, cache: cache)
+        try Task.checkCancellation()
         let vocab = logits.dim(logits.ndim - 1)
         let flat = logits.reshaped([-1, vocab])
         let row = flat[flat.dim(0) - 1]
         let order = argSort(row, axis: -1)
         let count = order.dim(0)
         let top1 = count >= 1 ? Int(order[count - 1].item(Int32.self)) : 0
+        try Task.checkCancellation()
         let top2 = count >= 2 ? Int(order[count - 2].item(Int32.self)) : top1
-        return SerialReference(top1: top1, top2: top2, logits: row.asArray(Float.self))
+        let reference = SerialReference(top1: top1, top2: top2, logits: row.asArray(Float.self))
+        try Task.checkCancellation()
+        return reference
     }
 
     private static func decodedTokensByID(from outcomes: [ContinuousBatchDecodeOutcome]) -> DecodedProbeTokens {

@@ -785,7 +785,9 @@ final class ContinuousBatchingSelfCheckTests: XCTestCase {
                 .appendingPathComponent("Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift"),
             encoding: .utf8
         )
-        XCTAssertTrue(source.contains("idPrefix: \"cb-self-check-\\(attempt)-k\\(slots)-p\\(pass)\",\n                            cohort: decodeOnly"))
+        // Check the cohort argument independently of nesting/indentation.
+        let normalizedSource = source.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        XCTAssertTrue(normalizedSource.contains("idPrefix: \"cb-self-check-\\(attempt)-k\\(slots)-p\\(pass)\", cohort: decodeOnly"))
         XCTAssertTrue(source.contains("let serial = decodeOnly ? serialRate.decodeTPS : serialRate.endToEndTPS"))
         XCTAssertTrue(source.contains("let aggregate = decodeOnly\n                        ? ContinuousBatchingSelfCheck.cohortDecodeTPS("))
         let runtime = try String(
@@ -941,6 +943,72 @@ final class ContinuousBatchingSelfCheckTests: XCTestCase {
     }
 
     // MARK: - Store
+
+    func testInterruptedWidthResumesItsPersistedInferenceUnits() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cb-width-resume-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = ContinuousBatchingSelfCheckStore(configPath: directory.appendingPathComponent("config.yaml").path)
+        let key = ContinuousBatchingSelfCheckKey(
+            modelSHA256: "m", metallibSHA256: "x", kernelIdentifier: "k", hardwareClass: "h", osBuild: "o"
+        )
+        let prompts = [[1, 2], [3, 4]]
+        let probePrompts = [[5, 6], [7, 8]]
+        let batch = ContinuousBatchingSelfCheckBatchRun(
+            outputs: [[11, 12], [13, 14]], seconds: 2, cohortDecodeTokens: [1, 1], cohortDecodeSeconds: [1, 1]
+        )
+        let serial = ContinuousBatchingSelfCheckSerialRate(decodeTPS: 2, endToEndTPS: 1)
+        var record = ContinuousBatchingSelfCheckStore.Record(
+            key: key, decision: nil, serialTPS: 0, measurements: [], aloneOutputs: [],
+            inProgressSlots: 2, decidedAt: nil
+        )
+        record.prepareWidth(slots: 2, prompts: prompts, probePrompts: probePrompts)
+        record.widthProgress?.probe = batch
+        record.widthProgress?.passes = [.init(serial: serial, batch: batch)]
+        // A graceful yield clears the crash journal but keeps completed units.
+        record.inProgressSlots = nil
+        try store.store(record)
+
+        let reopened = ContinuousBatchingSelfCheckStore(url: store.url)
+        var resumed = try XCTUnwrap(reopened.record(for: key))
+        resumed.prepareWidth(slots: 2, prompts: prompts, probePrompts: probePrompts)
+        XCTAssertEqual(resumed.widthProgress, record.widthProgress)
+        XCTAssertEqual(resumed.widthProgress?.passes.count, 1, "resume at pass 1, not pass 0")
+        XCTAssertNil(resumed.inProgressSlots, "a bounded yield must not be recovered as a crash")
+        XCTAssertNil(resumed.decision, "partial progress never authorizes a width")
+        XCTAssertTrue(resumed.measurements.isEmpty)
+
+        resumed.prepareWidth(slots: 2, prompts: prompts, probePrompts: [[99], [7, 8]])
+        XCTAssertNil(resumed.widthProgress?.probe, "changed prompts invalidate the checkpoint")
+        XCTAssertEqual(resumed.widthProgress?.passes.count, 0)
+    }
+
+    func testSelfCheckRejectsCancelledAndFailedSchedulerTerminals() {
+        for status in [ContinuousBatchSchedulerTerminalStatus.stop, .length] {
+            XCTAssertNoThrow(try ModelRuntime.validateContinuousBatchingSelfCheckTerminal(status))
+        }
+        XCTAssertThrowsError(try ModelRuntime.validateContinuousBatchingSelfCheckTerminal(.cancelled)) {
+            XCTAssertTrue($0 is CancellationError)
+        }
+        for status in [ContinuousBatchSchedulerTerminalStatus.requestFailed, .batchFailed, .rejected] {
+            XCTAssertThrowsError(try ModelRuntime.validateContinuousBatchingSelfCheckTerminal(status)) {
+                XCTAssertEqual($0 as? ContinuousBatchSchedulerError, .requestFailed("self_check_\(status.rawValue)"))
+            }
+        }
+    }
+
+    func testCancelledSelfCheckDiscardsEvenASuccessfulSchedulerTerminal() async {
+        let cancelled = await Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            do {
+                try ModelRuntime.validateContinuousBatchingSelfCheckTerminal(.length)
+                return false
+            } catch {
+                return error is CancellationError
+            }
+        }.value
+        XCTAssertTrue(cancelled)
+    }
 
     func testStoredDecisionIsKeyedOnModelRuntimeAndHardware() throws {
         let directory = FileManager.default.temporaryDirectory
