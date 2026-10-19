@@ -300,6 +300,8 @@ expected_history = {
     "published-2026-10-17-qwen2vl-recommendable-v1",
     # Superseded by the GLM-5.3-Flash promotion to recommendable.
     "published-2026-10-17-glm53-flash-listed-v1",
+    # Superseded by the two-entry native-MTP admission set bound to CLI 1.8.257.
+    "published-2026-10-18-glm53-flash-recommendable-v1",
     current_release_id,
 }
 if set(ledger["releases"]) != expected_history:
