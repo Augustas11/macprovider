@@ -447,13 +447,28 @@ enum NativeMTPStoreProjection {
         return Member(repoID: halves.joined(separator: "/"), revision: parts[1], sha256: sha256)
     }
 
-    /// The target and MTP members of a projection manifest in store layout,
-    /// or nil when the manifest is not one.
-    static func members(manifest: Data) -> (target: Member, mtp: Member)? {
-        guard let object = try? JSONSerialization.jsonObject(with: manifest) as? [String: Any],
-              object["schema_version"] as? String == "macprovider.native-mtp-artifact-projection.v1",
-              let artifacts = object["artifacts"] as? [String: Any]
-        else {
+    /// The target and MTP members that a projection manifest in store layout
+    /// names for `modelKey`, or nil when the manifest is not one. The v1 form
+    /// carries one `artifacts` object; the v2 form (SPEC-048 v0.1.35) keys one
+    /// per `model_key` under `models`, and a missing key stays ordinary. The
+    /// sidecar loader re-checks either form strictly against its entries.
+    static func members(manifest: Data, modelKey: String) -> (target: Member, mtp: Member)? {
+        guard let object = try? JSONSerialization.jsonObject(with: manifest) as? [String: Any] else {
+            return nil
+        }
+        let artifacts: [String: Any]
+        switch object["schema_version"] as? String {
+        case NativeMTPAdmissionSidecar.artifactProjectionSchemaV1?:
+            guard let single = object["artifacts"] as? [String: Any] else { return nil }
+            artifacts = single
+        case NativeMTPAdmissionSidecar.artifactProjectionSchemaV2?:
+            guard let models = object["models"] as? [String: Any],
+                  let selected = models[modelKey] as? [String: Any]
+            else {
+                return nil
+            }
+            artifacts = selected
+        default:
             return nil
         }
         func entry(_ name: String) -> Member? {
@@ -478,6 +493,7 @@ enum NativeMTPStoreProjection {
     /// verified drafter is in the store; nil leaves the provider ordinary.
     static func prepare(
         manifest: Data,
+        modelKey: String,
         servedTargetURL: URL,
         resolver: CachedModelArtifactResolver,
         fetchDrafter: (CachedModelArtifactResolver, CandidateCatalog.Row, Date) async throws -> VerifiedModelArtifact = {
@@ -485,7 +501,7 @@ enum NativeMTPStoreProjection {
         },
         now: Date = Date()
     ) async -> URL? {
-        guard let members = members(manifest: manifest) else { return nil }
+        guard let members = members(manifest: manifest, modelKey: modelKey) else { return nil }
         let root = resolver.durableRoot.standardizedFileURL
         func resolved(_ member: Member) -> String {
             root.appendingPathComponent(storePath(member), isDirectory: true).standardizedFileURL.path

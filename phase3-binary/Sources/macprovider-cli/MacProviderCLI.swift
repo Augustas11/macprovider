@@ -1245,6 +1245,7 @@ struct ServeCommand: AsyncParsableCommand {
                     .appendingPathComponent(NativeMTPAdmissionFeed.manifestFileName)),
                   let storeRoot = await NativeMTPStoreProjection.prepare(
                     manifest: manifest,
+                    modelKey: modelKey,
                     servedTargetURL: targetURL,
                     resolver: artifactResolver
                   )

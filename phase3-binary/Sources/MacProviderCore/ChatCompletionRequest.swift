@@ -246,9 +246,15 @@ public struct ChatCompletionRequest: Sendable {
     /// Installs trusted fleet eligibility after the relay transport has
     /// authenticated and authorized the coordinator grant. A revoked token is
     /// refused without retaining a conversation key, preventing hot-only
-    /// downgrade of a rejected fleet request.
+    /// downgrade of a rejected fleet request. The grant does not change what
+    /// kind of key it covers: the coordinator issues grants for auto-prefix
+    /// keys too, so the cache-only marker survives when the grant names the
+    /// key already installed (SPEC-048-R009).
     public func withFleetCacheGrant(_ grant: FleetConversationCacheGrant?) -> ChatCompletionRequest {
         let accepted = grant?.isValid == true ? grant : nil
+        let keepsCacheOnly = conversationCacheOnly
+            && accepted != nil
+            && accepted?.conversationKey == conversationKey
         return ChatCompletionRequest(
             model: model,
             messages: messages,
@@ -264,7 +270,7 @@ public struct ChatCompletionRequest: Sendable {
             responseFormat: responseFormat,
             promptSource: promptSource,
             conversationKey: accepted?.conversationKey,
-            conversationCacheOnly: false,
+            conversationCacheOnly: keepsCacheOnly,
             fleetCacheGrant: accepted,
             requestID: requestID,
             topLevelKeys: topLevelKeys,

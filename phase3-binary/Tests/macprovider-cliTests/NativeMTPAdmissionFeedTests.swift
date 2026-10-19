@@ -288,18 +288,88 @@ final class NativeMTPAdmissionFeedTests: XCTestCase {
     private let targetSHA = String(repeating: "a", count: 64)
     private let drafterSHA = String(repeating: "b", count: 64)
 
-    private func storeManifest(targetPath: String? = nil, mtpPath: String? = nil) throws -> Data {
+    private func storeArtifacts(targetPath: String? = nil, mtpPath: String? = nil) -> [String: Any] {
         let target = targetPath ?? "mlx-community--Qwen3.6-35B-A3B-4bit/\(targetRevision)/\(targetSHA)"
         let mtp = mtpPath ?? "mlx-community--Qwen3.6-35B-A3B-MTP-4bit/\(drafterRevision)/\(drafterSHA)"
-        return try JSONSerialization.data(withJSONObject: [
+        return [
+            "target": ["path": target, "sha256": targetSHA],
+            "mtp": ["path": mtp, "sha256": drafterSHA],
+            "tokenizer": ["path": target + "/tokenizer.json", "sha256": String(repeating: "c", count: 64)],
+            "manifest": ["path": mtp + "/config.json", "sha256": String(repeating: "d", count: 64)],
+        ]
+    }
+
+    private func storeManifest(targetPath: String? = nil, mtpPath: String? = nil) throws -> Data {
+        try JSONSerialization.data(withJSONObject: [
             "schema_version": "macprovider.native-mtp-artifact-projection.v1",
-            "artifacts": [
-                "target": ["path": target, "sha256": targetSHA],
-                "mtp": ["path": mtp, "sha256": drafterSHA],
-                "tokenizer": ["path": target + "/tokenizer.json", "sha256": String(repeating: "c", count: 64)],
-                "manifest": ["path": mtp + "/config.json", "sha256": String(repeating: "d", count: 64)],
+            "artifacts": storeArtifacts(targetPath: targetPath, mtpPath: mtpPath),
+        ])
+    }
+
+    /// A two-model admission set's manifest (SPEC-048 v0.1.35): the Qwen3.6
+    /// entry plus a GLM-5.3-Flash entry whose target carries its own MTP head.
+    private let glmRevision = String(repeating: "3", count: 40)
+    private let glmSHA = String(repeating: "f", count: 64)
+
+    private func twoModelStoreManifest() throws -> Data {
+        let glm = "Jundot--GLM-5.3-Flash-oQ4e-mtp/\(glmRevision)/\(glmSHA)"
+        return try JSONSerialization.data(withJSONObject: [
+            "schema_version": "macprovider.native-mtp-artifact-projection.v2",
+            "models": [
+                "qwen/qwen3.6-35b-a3b": storeArtifacts(),
+                "zai-org/glm-5.3-flash": [
+                    "target": ["path": glm, "sha256": glmSHA],
+                    "mtp": ["path": glm, "sha256": glmSHA],
+                    "tokenizer": ["path": glm + "/tokenizer.json", "sha256": String(repeating: "c", count: 64)],
+                    "manifest": ["path": glm + "/config.json", "sha256": String(repeating: "d", count: 64)],
+                ],
             ],
         ])
+    }
+
+    func testStoreProjectionReadsEachModelOfATwoModelManifest() async throws {
+        let manifest = try twoModelStoreManifest()
+        XCTAssertEqual(
+            NativeMTPStoreProjection.members(manifest: manifest, modelKey: "qwen/qwen3.6-35b-a3b")?.mtp,
+            .init(repoID: "mlx-community/Qwen3.6-35B-A3B-MTP-4bit", revision: drafterRevision, sha256: drafterSHA)
+        )
+        let glm = try XCTUnwrap(NativeMTPStoreProjection.members(manifest: manifest, modelKey: "zai-org/glm-5.3-flash"))
+        XCTAssertEqual(glm.target, .init(repoID: "Jundot/GLM-5.3-Flash-oQ4e-mtp", revision: glmRevision, sha256: glmSHA))
+        XCTAssertEqual(glm.mtp, glm.target)
+        XCTAssertNil(NativeMTPStoreProjection.members(manifest: manifest, modelKey: "qwen/qwen3.6-27b"))
+
+        let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("store-\(UUID().uuidString)")
+        let resolver = CachedModelArtifactResolver(durableRoot: root)
+        let servedGLM = root.appendingPathComponent("Jundot--GLM-5.3-Flash-oQ4e-mtp/\(glmRevision)/\(glmSHA)")
+        let prepared = await NativeMTPStoreProjection.prepare(
+            manifest: manifest,
+            modelKey: "zai-org/glm-5.3-flash",
+            servedTargetURL: servedGLM,
+            resolver: resolver,
+            fetchDrafter: { _, row, _ in
+                VerifiedModelArtifact(
+                    modelArgument: servedGLM.path, sha256: row.modelSHA256!, sizeBytes: 1,
+                    configJSONData: nil, configSHA256: nil
+                )
+            }
+        )
+        XCTAssertEqual(prepared?.path, root.standardizedFileURL.path)
+        // The served artifact is GLM, so the Qwen3.6 entry does not bind.
+        let mismatched = await NativeMTPStoreProjection.prepare(
+            manifest: manifest,
+            modelKey: "qwen/qwen3.6-35b-a3b",
+            servedTargetURL: servedGLM,
+            resolver: resolver,
+            fetchDrafter: { _, row, _ in
+                VerifiedModelArtifact(
+                    modelArgument: servedGLM.path, sha256: row.modelSHA256!, sizeBytes: 1,
+                    configJSONData: nil, configSHA256: nil
+                )
+            }
+        )
+        XCTAssertNil(mismatched)
+        // A v1 manifest still names its one model whatever key is asked.
+        XCTAssertNotNil(NativeMTPStoreProjection.members(manifest: try storeManifest(), modelKey: "zai-org/glm-5.3-flash"))
     }
 
     func testStoreProjectionMemberReversesTheStoreEscapingExactly() {
@@ -328,7 +398,7 @@ final class NativeMTPAdmissionFeedTests: XCTestCase {
         let drafterURL = root.appendingPathComponent("mlx-community--Qwen3.6-35B-A3B-MTP-4bit/\(drafterRevision)/\(drafterSHA)")
         var requested: CandidateCatalog.Row?
         let prepared = await NativeMTPStoreProjection.prepare(
-            manifest: try storeManifest(),
+            manifest: try storeManifest(), modelKey: "qwen/qwen3.6-35b-a3b",
             servedTargetURL: served,
             resolver: resolver,
             fetchDrafter: { _, row, _ in
@@ -359,23 +429,24 @@ final class NativeMTPAdmissionFeedTests: XCTestCase {
         // The projection's target is not the artifact being served.
         let other = root.appendingPathComponent("other/\(targetRevision)/\(targetSHA)")
         let notServed = await NativeMTPStoreProjection.prepare(
-            manifest: try storeManifest(), servedTargetURL: other, resolver: resolver, fetchDrafter: fetched(drafterURL))
+            manifest: try storeManifest(), modelKey: "qwen/qwen3.6-35b-a3b", servedTargetURL: other, resolver: resolver, fetchDrafter: fetched(drafterURL))
         XCTAssertNil(notServed)
         // The drafter cannot be fetched.
         let unreachable = await NativeMTPStoreProjection.prepare(
-            manifest: try storeManifest(), servedTargetURL: served, resolver: resolver,
+            manifest: try storeManifest(), modelKey: "qwen/qwen3.6-35b-a3b", servedTargetURL: served, resolver: resolver,
             fetchDrafter: { _, _, _ in throw AutotuneRecommendError.invalidArtifact("offline") })
         XCTAssertNil(unreachable)
         // The adopted drafter is not at the projected path, or not the projected bytes.
         let misplaced = await NativeMTPStoreProjection.prepare(
-            manifest: try storeManifest(), servedTargetURL: served, resolver: resolver,
+            manifest: try storeManifest(), modelKey: "qwen/qwen3.6-35b-a3b", servedTargetURL: served, resolver: resolver,
             fetchDrafter: fetched(root.appendingPathComponent("elsewhere")))
         XCTAssertNil(misplaced)
         let wrongBytes = await NativeMTPStoreProjection.prepare(
-            manifest: try storeManifest(), servedTargetURL: served, resolver: resolver,
+            manifest: try storeManifest(), modelKey: "qwen/qwen3.6-35b-a3b", servedTargetURL: served, resolver: resolver,
             fetchDrafter: fetched(drafterURL, sha: String(repeating: "e", count: 64)))
         XCTAssertNil(wrongBytes)
         // A bundle-layout manifest is not a store projection.
-        XCTAssertNil(NativeMTPStoreProjection.members(manifest: try storeManifest(targetPath: "target", mtpPath: "mtp")))
+        XCTAssertNil(NativeMTPStoreProjection.members(
+            manifest: try storeManifest(targetPath: "target", mtpPath: "mtp"), modelKey: "qwen/qwen3.6-35b-a3b"))
     }
 }

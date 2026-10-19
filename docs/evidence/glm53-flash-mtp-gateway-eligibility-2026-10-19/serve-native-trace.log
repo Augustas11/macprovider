@@ -1,0 +1,23 @@
+event=native_mtp_self_check result=passed speedup=1.26 tokens=64
+cbtrace t=1316289340 rid=lab-glm-mtp-elig-f2261834f5eb4458960ce2cd2e478562 ev=rt_cb_lease cached=-1
+cbtrace t=1316289340 rid=lab-glm-mtp-elig-f2261834f5eb4458960ce2cd2e478562 ev=rt_native path=native_mtp reason=eligible cache_only=false
+cbtrace t=1316296627 rid=lab-glm-mtp-elig-208be88ec8eb4cca84094aa3caa172e6 ev=rt_cb_lease cached=-1
+cbtrace t=1316296627 rid=lab-glm-mtp-elig-208be88ec8eb4cca84094aa3caa172e6 ev=rt_native path=ordinary reason=unknown_request_field cache_only=false
+cbtrace t=1316303311 rid=lab-glm-mtp-elig-fc4c2040c0434f7e9df55342d3a7bce9 ev=rt_cb_lease cached=-1
+cbtrace t=1316303311 rid=lab-glm-mtp-elig-fc4c2040c0434f7e9df55342d3a7bce9 ev=rt_native path=native_mtp reason=eligible cache_only=false
+cbtrace t=1316308603 rid=lab-glm-mtp-elig-beb70d75a60c4535b7e286b6e0d856da ev=rt_cb_lease cached=-1
+cbtrace t=1316308603 rid=lab-glm-mtp-elig-beb70d75a60c4535b7e286b6e0d856da ev=rt_native path=ordinary reason=unknown_request_field cache_only=false
+cbtrace t=1316315315 rid=lab-glm-mtp-elig-7b502ad59a8140208ab1a5e0a12a7bbf ev=rt_cb_lease cached=-1
+cbtrace t=1316315315 rid=lab-glm-mtp-elig-7b502ad59a8140208ab1a5e0a12a7bbf ev=rt_native path=ordinary reason=tools cache_only=false
+cbtrace t=1316317409 rid=lab-glm-mtp-elig-d87de50631264af681b7751f25957add ev=rt_cb_lease cached=0
+cbtrace t=1316317409 rid=lab-glm-mtp-elig-d87de50631264af681b7751f25957add ev=rt_native path=ordinary reason=conversation_key cache_only=false
+cbtrace t=1316324059 rid=lab-glm-mtp-elig-d170a60e838748f888411869dd986ad8 ev=rt_cb_lease cached=-1
+cbtrace t=1316324059 rid=lab-glm-mtp-elig-d170a60e838748f888411869dd986ad8 ev=rt_native path=native_mtp reason=eligible cache_only=false
+cbtrace t=1316324060 rid=lab-glm-mtp-elig-4ad1401828034976b31a8f0e936ef534 ev=rt_cb_lease cached=-1
+cbtrace t=1316324060 rid=lab-glm-mtp-elig-4ad1401828034976b31a8f0e936ef534 ev=rt_native path=ordinary reason=capacity_above_native_bound cache_only=false
+cbtrace t=1316324060 rid=lab-glm-mtp-elig-16bdfc1f6a484f8280b3983ab2aede51 ev=rt_cb_lease cached=-1
+cbtrace t=1316324060 rid=lab-glm-mtp-elig-16bdfc1f6a484f8280b3983ab2aede51 ev=rt_native path=ordinary reason=capacity_above_native_bound cache_only=false
+cbtrace t=1316324060 rid=lab-glm-mtp-elig-5ca94b85137a4c4b908ed5f04c3f66e5 ev=rt_cb_lease cached=-1
+cbtrace t=1316324060 rid=lab-glm-mtp-elig-5ca94b85137a4c4b908ed5f04c3f66e5 ev=rt_native path=ordinary reason=capacity_above_native_bound cache_only=false
+event=native_mtp_load_gate action=depth_zero active_rows=4 bound=1
+event=native_mtp_load_gate action=restore active_rows=3 bound=9223372036854775807
