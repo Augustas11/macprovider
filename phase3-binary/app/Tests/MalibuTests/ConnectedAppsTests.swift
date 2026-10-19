@@ -194,6 +194,47 @@ final class ConnectedAppsTests: XCTestCase {
         }
     }
 
+    func testRetainedRecoveryTightensPermissionsWithoutChangingBytesOrOriginal() throws {
+        try temporary { root in
+            let original = root.appendingPathComponent("config")
+            let recovery = root.appendingPathComponent(".malibu-recovery-test")
+            let bytes = Data("newer concurrent config bytes".utf8)
+            try bytes.write(to: recovery)
+            try Data("restored original".utf8).write(to: original)
+            XCTAssertEqual(chmod(root.path, 0o755), 0)
+            XCTAssertEqual(chmod(original.path, 0o644), 0)
+            XCTAssertEqual(chmod(recovery.path, 0o644), 0)
+            let parent = open(root.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            XCTAssertGreaterThanOrEqual(parent, 0)
+            defer { close(parent) }
+            try ConnectedConfigTransaction.protectRetainedRecovery(parent: parent, name: recovery.lastPathComponent)
+            XCTAssertEqual(try Data(contentsOf: recovery), bytes)
+            XCTAssertEqual(try ConnectedConfigTransaction.read(recovery).mode, 0o600)
+            XCTAssertEqual(try ConnectedConfigTransaction.read(original).mode, 0o644)
+        }
+    }
+
+    func testRetainedRecoveryRejectsSymlinksAndHardlinksWithoutChmodTarget() throws {
+        try temporary { root in
+            let original = root.appendingPathComponent("config")
+            let symlink = root.appendingPathComponent(".malibu-recovery-symlink")
+            let hardlink = root.appendingPathComponent(".malibu-recovery-hardlink")
+            try Data("unchanged".utf8).write(to: original)
+            XCTAssertEqual(chmod(original.path, 0o644), 0)
+            try FileManager.default.createSymbolicLink(at: symlink, withDestinationURL: original)
+            try FileManager.default.linkItem(at: original, to: hardlink)
+            let parent = open(root.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            XCTAssertGreaterThanOrEqual(parent, 0)
+            defer { close(parent) }
+            for recovery in [symlink, hardlink] {
+                XCTAssertThrowsError(try ConnectedConfigTransaction.protectRetainedRecovery(parent: parent, name: recovery.lastPathComponent))
+            }
+            let attributes = try FileManager.default.attributesOfItem(atPath: original.path)
+            XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o644)
+            XCTAssertEqual(try Data(contentsOf: original), Data("unchanged".utf8))
+        }
+    }
+
     func testNoFollowLeafAndAncestorAndReadLimit() throws {
         try temporary { root in
             let real = root.appendingPathComponent("real")
@@ -233,9 +274,15 @@ final class ConnectedAppsTests: XCTestCase {
     }
 
     private func temporary(_ body: (URL) throws -> Void) throws {
-        let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent("connected-apps-test-" + UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
-        defer { try? FileManager.default.removeItem(at: root) }
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("connected-apps-test-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        // Foundation resolvingSymlinksInPath normalizes /private/var back to
+        // /var on macOS. POSIX realpath retains the actual ancestor path needed
+        // by the production descriptor walk, which must still reject symlinks.
+        let resolved = try XCTUnwrap(realpath(temporary.path, nil))
+        defer { free(resolved) }
+        let root = URL(fileURLWithPath: String(cString: resolved), isDirectory: true)
         try body(root)
     }
 }

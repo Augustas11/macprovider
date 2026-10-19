@@ -18,13 +18,23 @@ actor AgentWorkspace {
         let scoped = url.startAccessingSecurityScopedResource()
         // Resolve the explicitly selected root once; all subsequent accesses
         // use the held descriptor, even if its original pathname is replaced.
-        let canonical = url.resolvingSymlinksInPath().standardizedFileURL
+        // Foundation deliberately preserves some system aliases (/var, /tmp)
+        // even after resolvingSymlinksInPath. POSIX realpath supplies the actual
+        // component path needed by the no-follow walk below. Never standardize
+        // that result back through Foundation before opening it.
+        guard url.isFileURL, !url.path.contains("\0"),
+              let resolved = url.path.withCString({ Darwin.realpath($0, nil) }) else {
+            if scoped { url.stopAccessingSecurityScopedResource() }
+            throw ChatFailure.unsafePath
+        }
+        let canonicalPath = String(cString: resolved)
+        free(resolved)
         var fd = Darwin.open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC)
         guard fd >= 0 else {
             if scoped { url.stopAccessingSecurityScopedResource() }
             throw ChatFailure.unsafePath
         }
-        for part in canonical.path.split(separator: "/") {
+        for part in canonicalPath.split(separator: "/") {
             let next = String(part).withCString { openat(fd, $0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) }
             Darwin.close(fd); fd = next
             if fd < 0 { break }
@@ -33,7 +43,7 @@ actor AgentWorkspace {
             if scoped { url.stopAccessingSecurityScopedResource() }
             throw ChatFailure.unsafePath
         }
-        self.root = fd; self.name = canonical.lastPathComponent
+        self.root = fd; self.name = URL(fileURLWithPath: canonicalPath).lastPathComponent
         self.securityScopedURL = scoped ? url : nil
         self.beforeOpen = beforeOpen
     }

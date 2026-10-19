@@ -96,7 +96,8 @@ final class ToolSelectionPrefillTests: XCTestCase {
                     XCTAssertThrowsError(try ModelRuntime.parseGeneratedOutput(filteredText: invalid, generatedTokenIDs: [], decode: { _ in "" },
                         request: request, mode: .complete(), defaultCompletionTokens: 9, toolCallPrefill: plan.prefill))
                 }
-                XCTAssertThrowsError(try ToolSelectionPolicy.validateOutput(calls: parsed.toolCalls, finishReason: "length", generatedTokens: 100, request: request))
+                XCTAssertThrowsError(try ModelRuntime.validateStructuredCompletion(CompletionResult(content: parsed.content, finishReason: "length",
+                    promptTokens: 1, completionTokens: 100, toolCalls: parsed.toolCalls, settlementDisposition: .eligibleOwner), request: request))
             }
         }
     }

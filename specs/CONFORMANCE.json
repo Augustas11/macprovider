@@ -6509,7 +6509,7 @@
     {
       "requirement_id": "SPEC-006-R001",
       "spec_id": "SPEC-006",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase5-gateway/internal/auth/keys.go:Validate"
       ],
@@ -6521,21 +6521,13 @@
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:160d0e2ff62b0e40c65dd3741a35de4be322ea8e",
-          "source": null,
-          "captured_at": "2026-09-18",
-          "expires_at": "2026-10-18"
-        },
-        {
-          "artifact": "sha256:3ff2a7603caa0a3a28d71f5eba4852b60efb56d850b085a77f6e0e1742bda0a7",
-          "source": "journeys/evidence/buyer-paid-path-20260918T034532Z.spec-005-r001-spec-005-r002-spec-006-r001-spec-006-r002-spec-022-r001-spec-022-r002-spec-022-r003-spec-022-r010.journey-result.signed.json",
-          "captured_at": "2026-09-18",
-          "expires_at": "2026-10-18"
-        }
-      ],
-      "gap": null
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2054",
+        "rationale": "Phase 3 updates the mapped buyer authentication flow fixture to a valid authoritative routing identity. Historical paid-path evidence no longer binds the current test fragment; fresh deployed paid-path acceptance remains pending. Historical journey artifacts are retained unchanged."
+      }
     },
     {
       "requirement_id": "SPEC-006-R002",

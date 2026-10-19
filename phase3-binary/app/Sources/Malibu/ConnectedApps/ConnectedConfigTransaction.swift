@@ -175,6 +175,7 @@ final class ConnectedConfigTransaction {
                     // to the newly installed inode. No recovery version is silently deleted.
                     removeTemporary = false
                     _ = renameatx_np(parent, temporary, parent, url.lastPathComponent, UInt32(RENAME_SWAP))
+                    try protectRetainedRecovery(parent: parent, name: temporary)
                     throw ConnectedAppsError.conflict
                 }
             }
@@ -188,11 +189,34 @@ final class ConnectedConfigTransaction {
                 guard unlinkat(parent, displaced, 0) == 0 else { throw ConnectedAppsError.unsafeFile }
             } catch {
                 // EXCL preserves a new concurrent file; the displaced version stays available.
-                _ = renameatx_np(parent, displaced, parent, url.lastPathComponent, UInt32(RENAME_EXCL))
+                if renameatx_np(parent, displaced, parent, url.lastPathComponent, UInt32(RENAME_EXCL)) != 0 {
+                    try protectRetainedRecovery(parent: parent, name: displaced)
+                }
                 throw ConnectedAppsError.conflict
             }
         }
         guard fsync(parent) == 0 else { throw ConnectedAppsError.unsafeFile }
+    }
+
+    /// A failed rollback can leave the displaced config in its original directory.
+    /// Protect only the retained inode, without following a substituted symlink or
+    /// changing permissions on the original target after a successful rollback.
+    static func protectRetainedRecovery(parent: Int32, name: String) throws {
+        guard !name.isEmpty, name != ".", name != "..", !name.contains("/") else {
+            throw ConnectedAppsError.unsafeFile
+        }
+        let descriptor = openat(parent, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard descriptor >= 0 else { throw ConnectedAppsError.unsafeFile }
+        defer { close(descriptor) }
+        var status = stat()
+        guard fstat(descriptor, &status) == 0,
+              status.st_mode & S_IFMT == S_IFREG,
+              status.st_uid == getuid(), status.st_nlink == 1 else {
+            throw ConnectedAppsError.unsafeFile
+        }
+        guard fchmod(descriptor, 0o600) == 0, fsync(descriptor) == 0 else {
+            throw ConnectedAppsError.unsafeFile
+        }
     }
 
     private static func privateDirectory(_ url: URL, create: Bool) throws {

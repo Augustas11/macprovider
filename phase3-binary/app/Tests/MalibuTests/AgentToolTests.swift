@@ -28,6 +28,16 @@ final class AgentToolTests: XCTestCase {
         let matches = try await workspace.execute(call("search_files", ["path": ".", "query": "find"]), deadline: deadline)
         XCTAssertEqual(matches, "notes.txt:2: find this")
     }
+    func testSelectedRootAliasResolvesBeforeNoFollowTraversal() async throws {
+        let selected = root.appendingPathComponent("selected")
+        try FileManager.default.createDirectory(at: selected, withIntermediateDirectories: false)
+        try Data("selected root".utf8).write(to: selected.appendingPathComponent("note.txt"))
+        let alias = root.appendingPathComponent("alias")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: selected)
+        let workspace = try AgentWorkspace(url: alias)
+        let result = try await workspace.execute(call("read_file", ["path": "note.txt"]), deadline: deadline)
+        XCTAssertEqual(result, "selected root")
+    }
     func testRejectsTraversalSymlinksAndSpecialFiles() async throws {
         try write("safe.txt", "safe")
         try FileManager.default.createSymbolicLink(atPath: root.appendingPathComponent("link").path, withDestinationPath: "/etc")

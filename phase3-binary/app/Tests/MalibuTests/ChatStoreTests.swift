@@ -103,6 +103,7 @@ final class ChatStoreTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: folder) }
         try Data("selected content".utf8).write(to: folder.appendingPathComponent("note.txt"))
         store.selectFolder(folder)
+        _ = try XCTUnwrap(store.folderName)
         store.agentMode = true
         await store.refresh(port: 9042)
         store.send("Summarize note.txt")
@@ -126,7 +127,9 @@ final class ChatStoreTests: XCTestCase {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("ChatLimit-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: folder) }
-        store.selectFolder(folder); store.agentMode = true
+        store.selectFolder(folder)
+        _ = try XCTUnwrap(store.folderName)
+        store.agentMode = true
         await store.refresh(port: 9042)
         store.send("keep listing")
         for index in 0..<ChatStore.maxRounds {
