@@ -5249,11 +5249,21 @@ maxTokens: 1,
     func configureServedSlots(
         managed: Bool,
         ownerPinned: Int?,
-        resolver: (@Sendable (ContinuousBatchingSelfCheckTarget) -> ContinuousBatchingSelfCheckResolution?)? = nil
+        resolver: (@Sendable (ContinuousBatchingSelfCheckTarget) -> ContinuousBatchingSelfCheckResolution?)? = nil,
+        rowsBeforePolicyCeiling: Int? = nil
     ) {
         servedSlotsManaged = managed
         ownerPinnedServedSlots = ownerPinned
         servedSlotsResolver = resolver
+        if let rowsBeforePolicyCeiling {
+            maxBatchBeforePolicyCeiling = min(
+                max(maxBatch, rowsBeforePolicyCeiling), ProviderCapacity.maxConcurrencyOverrideLimit
+            )
+        }
+    }
+
+    func maxBatchBeforePolicyCeilingForTest() -> Int {
+        maxBatchBeforePolicyCeiling
     }
 
     func servedSlotLimitForTest() async -> Int {

@@ -2680,6 +2680,9 @@ struct ServeCommand: AsyncParsableCommand {
         // one (or a provisional grant) and the on-device self-check sets it.
         // Loopback runtimes and autotune children keep their configured count.
         var autoServedSlots: AutoServedSlots.Plan?
+        // The plan's rows without the startup model's signed ceiling: a warm
+        // swap applies only the target model's own ceiling (SPEC-038 FR-CB11).
+        var rowsBeforePolicyCeiling: Int?
         var configuredSlotsForProvisional: Int?
         if !autotuneCandidate, resolved.model.flatMap({ LoopbackServeSelection.select($0) }) == nil {
             let memoryGB = ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil).ramGB
@@ -2700,7 +2703,7 @@ struct ServeCommand: AsyncParsableCommand {
                 continuousBatchingPolicy,
                 modelKeys: currentPolicyKeys
             )
-            let plan = AutoServedSlots.plan(
+            let planInputs = { (ceiling: Int?) in AutoServedSlots.plan(
                 configuredSlots: configuredSlots,
                 source: resolved.maxConcurrencySource,
                 draftConfigured: resolved.draftModel?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
@@ -2718,8 +2721,10 @@ struct ServeCommand: AsyncParsableCommand {
                     )
                 },
                 memoryFitKnown: memoryFitCap != nil,
-                policyCeiling: policyCeiling
-            )
+                policyCeiling: ceiling
+            ) }
+            let plan = planInputs(policyCeiling)
+            rowsBeforePolicyCeiling = policyCeiling == nil ? plan.rows : planInputs(nil).rows
             resolved.maxConcurrencyOverride = plan.rows
             autoServedSlots = plan
             FileHandle.standardError.write(Data(
@@ -3018,10 +3023,13 @@ struct ServeCommand: AsyncParsableCommand {
                     store: store, target: target, ownerPinned: ownerPinned, provisional: provisional
                 )
             }
+            // A startup memory bound below the planned rows still applies to
+            // the swap baseline; the startup model's ceiling does not.
             await mlxRuntime.configureServedSlots(
                 managed: plan.selfChecked,
                 ownerPinned: ownerPinned,
-                resolver: plan.selfChecked ? resolver : nil
+                resolver: plan.selfChecked ? resolver : nil,
+                rowsBeforePolicyCeiling: rows < plan.rows ? rows : rowsBeforePolicyCeiling
             )
             if plan.selfChecked,
                let target = await mlxRuntime.continuousBatchingSelfCheckTarget(),

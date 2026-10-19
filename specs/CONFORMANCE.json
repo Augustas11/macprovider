@@ -3534,7 +3534,8 @@
         "scripts/test-catalog-release.sh:continuous-batching-policy.json",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSignedPolicyTests.swift:testValidMixedCachePolicyProducesExactCoverage",
         "scripts/tests/test_cb_policy_max_served_slots.py::MaxServedSlotsReleaseGateTest",
-        "phase4-coordinator/internal/buyer/continuous_batching_policy_max_served_slots_test.go:TestContinuousBatchingPolicyMaxServedSlotsValidation"
+        "phase4-coordinator/internal/buyer/continuous_batching_policy_max_served_slots_test.go:TestContinuousBatchingPolicyMaxServedSlotsValidation",
+        "scripts/tests/test_cb_policy_max_served_slots.py::MaxServedSlotsConsumerFloorTest"
       ],
       "journeys": [
         "JOURNEY-PROVIDER-PREBETA-ADMISSION"
@@ -5385,7 +5386,8 @@
         "phase3-binary/Sources/macprovider-cli/AutoServedSlots.swift:static func policyServedSlotCeiling",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSignedPolicy.swift:func servedSlotCeiling(modelSHA256",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:var policyCeiling: Int?",
-        "phase4-coordinator/internal/buyer/continuous_batching_policy_feed.go:MaxServedSlots *int"
+        "phase4-coordinator/internal/buyer/continuous_batching_policy_feed.go:func continuousBatchingMaxServedSlots",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:nonisolated static func rowsUnderPolicyCeiling"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/AutoServedSlotsTests.swift:testOwnerPinnedIsKept",
@@ -5399,7 +5401,8 @@
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSignedPolicyTests.swift:testMaxServedSlotsTupleDigestMatchesTheGeneratorGolden",
         "phase4-coordinator/internal/buyer/continuous_batching_policy_max_served_slots_test.go:TestContinuousBatchingPolicyMaxServedSlotsValidation",
         "phase4-coordinator/internal/buyer/continuous_batching_policy_max_served_slots_test.go:TestContinuousBatchingPolicyMaxServedSlotsTupleIdentity",
-        "scripts/tests/test_cb_policy_max_served_slots.py::MaxServedSlotsGeneratorTest"
+        "scripts/tests/test_cb_policy_max_served_slots.py::MaxServedSlotsGeneratorTest",
+        "phase3-binary/Tests/macprovider-cliTests/ModelRuntimeSwapTests.swift:testWarmSwapAppliesOnlyTheTargetModelsPolicyCeilingToSchedulerRows"
       ],
       "journeys": [],
       "evidence": [],

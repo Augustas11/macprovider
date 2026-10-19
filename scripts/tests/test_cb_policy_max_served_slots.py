@@ -13,6 +13,7 @@ import json
 import pathlib
 import re
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 CATALOG = ROOT / "phase3-binary" / "catalog" / "autotune"
@@ -31,6 +32,14 @@ release_gate = _load("release_gate_max_served_slots", "scripts/verify-live-coord
 CANDIDATE_BYTES = (CATALOG / "autotune-candidates.json").read_bytes()
 CANDIDATE_OBJ = catalog_release.validate_candidate(CANDIDATE_BYTES)
 CB_POLICY_BYTES = (CATALOG / "continuous-batching-policy.json").read_bytes()
+FIELD_FLOOR = (0, 22, 28)
+
+
+def raised_floor():
+    """Both loaded copies of cb_release_baselines at the v0.22.28 floor."""
+    return mock.patch.multiple(
+        catalog_release._cb_baselines, CB_POLICY_CONSUMER_FLOOR=FIELD_FLOOR
+    ), mock.patch.multiple(release_gate._cb_baselines, CB_POLICY_CONSUMER_FLOOR=FIELD_FLOOR)
 
 
 def with_ceiling(policy: dict, index: int, value: object, *, resign: bool = True) -> bytes:
@@ -63,13 +72,26 @@ class MaxServedSlotsGeneratorTest(unittest.TestCase):
         )
         self.assertEqual(regenerated, CB_POLICY_BYTES.rstrip(b"\n"))
 
+    def use_raised_floor(self):
+        patches = raised_floor()
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
     def test_signed_ceiling_validates(self):
+        self.use_raised_floor()
         for value in (1, 4, catalog_release.CB_MAX_SERVED_SLOTS_LIMIT):
             data = with_ceiling(self.policy, 0, value)
             validated = catalog_release.validate_cb_policy(data, CANDIDATE_BYTES, CANDIDATE_OBJ)
             self.assertEqual(validated["entries"][0]["max_served_slots"], value)
 
+    def test_signed_ceiling_is_refused_below_the_consumer_floor(self):
+        data = with_ceiling(self.policy, 0, 4)
+        with self.assertRaisesRegex(catalog_release.CatalogError, "CB_POLICY_CONSUMER_FLOOR"):
+            catalog_release.validate_cb_policy(data, CANDIDATE_BYTES, CANDIDATE_OBJ)
+
     def test_malformed_ceiling_is_rejected(self):
+        self.use_raised_floor()
         for value in (0, -1, 33, True, False, 4.0, 4.5, "4", None, [4]):
             with self.subTest(value=value):
                 data = with_ceiling(self.policy, 0, value)
@@ -77,6 +99,7 @@ class MaxServedSlotsGeneratorTest(unittest.TestCase):
                     catalog_release.validate_cb_policy(data, CANDIDATE_BYTES, CANDIDATE_OBJ)
 
     def test_unsigned_ceiling_breaks_the_tuple_identity(self):
+        self.use_raised_floor()
         data = with_ceiling(self.policy, 0, 4, resign=False)
         with self.assertRaisesRegex(catalog_release.CatalogError, "tuple_sha256"):
             catalog_release.validate_cb_policy(data, CANDIDATE_BYTES, CANDIDATE_OBJ)
@@ -87,7 +110,7 @@ class MaxServedSlotsConsumerFloorTest(unittest.TestCase):
 
     def test_floor_refuses_the_field_until_every_consumer_reads_it(self):
         entries = [{"model_key": "m", "max_served_slots": 4}]
-        self.assertLess(catalog_release.CB_POLICY_CONSUMER_FLOOR, (0, 22, 28))
+        self.assertLess(catalog_release._cb_baselines.CB_POLICY_CONSUMER_FLOOR, FIELD_FLOOR)
         with self.assertRaisesRegex(catalog_release.CatalogError, "CB_POLICY_CONSUMER_FLOOR"):
             catalog_release.require_cb_policy_consumer_floor(entries)
         catalog_release.require_cb_policy_consumer_floor(entries, floor=(0, 22, 28))
@@ -100,7 +123,7 @@ class MaxServedSlotsConsumerFloorTest(unittest.TestCase):
         original = catalog_release.cb_policy_source_entries
         catalog_release.cb_policy_source_entries = lambda: [dict(entry) for entry in source]
         try:
-            with self.assertRaisesRegex(catalog_release.CatalogError, "max_served_slots needs every consumer"):
+            with self.assertRaisesRegex(catalog_release.CatalogError, "CB_POLICY_CONSUMER_FLOOR"):
                 catalog_release.default_cb_policy(CANDIDATE_BYTES, CANDIDATE_OBJ, signer_key_id="test-key")
         finally:
             catalog_release.cb_policy_source_entries = original
@@ -115,6 +138,11 @@ class MaxServedSlotsReleaseGateTest(unittest.TestCase):
             if release_gate.entry_matches_stable_baseline(entry, release_gate.REQUIRED_CB_BASELINES[baseline_id])
         )
         capped = json.loads(with_ceiling(policy, index, 4))
+        with self.assertRaisesRegex(release_gate.GateError, "CB_POLICY_CONSUMER_FLOOR"):
+            release_gate.require_continuous_batching_tuple(capped, baseline_id)
+        for patch in raised_floor():
+            patch.start()
+            self.addCleanup(patch.stop)
         entry = release_gate.require_continuous_batching_tuple(capped, baseline_id)
         self.assertEqual(entry["max_served_slots"], 4)
         for value in (0, 33, True, "4"):

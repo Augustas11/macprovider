@@ -467,6 +467,9 @@ def require_continuous_batching_tuple(
     entries = cb_policy.get("entries")
     if not isinstance(entries, list):
         fail("continuous-batching-policy.json entries is not an array")
+    floor_violation = _cb_baselines.cb_policy_consumer_floor_violation(entries)
+    if floor_violation is not None:
+        fail(f"continuous-batching-policy.json {floor_violation}")
     for index, entry in enumerate(entries):
         if not isinstance(entry, dict):
             fail(f"continuous-batching-policy.json entries[{index}] is not an object")
