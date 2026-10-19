@@ -56,6 +56,8 @@ OUT=${OUT:-$HOME/lab-glm53-r015v2/window-$(date -u +%Y%m%dT%H%M%SZ)}
 POLICY=${POLICY:-$HOME/lab-glm53-r015v2/policy.json}
 LIVE_PORT=8080
 LIVE_LABEL=live.malibu.provider
+# The live provider's binary; other lab `serve` processes on the Mac are not it.
+LIVE_BINARY=$HOME/macprovider/macprovider-cli
 LOCK=$HOME/.glm53-mtp-admission-window.lock
 MODEL_ID=zai-org/glm-5.3-flash
 RELEASE_METALLIB_SHA256=3d9b4a747758128cc5418e62c5ad8e282a11b0d436423537137e013beaa1261b
@@ -76,7 +78,7 @@ CANDIDATES=(
 )
 
 # Refuses while the live provider could share the GPU: a listener on its
-# port (any response or none), a serve process, or its LaunchAgent loaded.
+# port (any response or none), its serve process, or its LaunchAgent loaded.
 # Fails closed: any probe output or error other than "none" refuses.
 live_absent() {
   local listeners probe
@@ -84,9 +86,9 @@ live_absent() {
   if [[ -n $listeners ]] || ! command -v lsof > /dev/null; then
     echo "refusing: :$LIVE_PORT has a listener or cannot be probed" >&2; return 3
   fi
-  probe=0; pgrep -f "macprovider-cli serve" > /dev/null 2>&1 || probe=$?
+  probe=0; pgrep -f "^$LIVE_BINARY serve" > /dev/null 2>&1 || probe=$?
   if (( probe != 1 )); then
-    echo "refusing: a macprovider-cli serve process runs or cannot be probed" >&2; return 3
+    echo "refusing: the live $LIVE_BINARY serve process runs or cannot be probed" >&2; return 3
   fi
   probe=0; launchctl print gui/$(id -u)/$LIVE_LABEL > /dev/null 2>&1 || probe=$?
   if (( probe != 113 )); then
