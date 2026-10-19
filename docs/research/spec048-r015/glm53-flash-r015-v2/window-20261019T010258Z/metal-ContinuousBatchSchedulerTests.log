@@ -1,0 +1,714 @@
+Test Suite 'Selected tests' started at 2026-10-18 18:03:00.132.
+Test Suite 'phase3-binaryPackageTests.xctest' started at 2026-10-18 18:03:00.133.
+Test Suite 'ContinuousBatchSchedulerTests' started at 2026-10-18 18:03:00.133.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testAC10DrainTimeoutFailsClosedAndLeavesOldWorkOnItsSnapshot]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testAC10DrainTimeoutFailsClosedAndLeavesOldWorkOnItsSnapshot]' passed (0.054 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testAC11BatchForwardFailureCleansEveryParticipatingRow]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_forward_failed action=fail_closed reason=backendfailure
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testAC11BatchForwardFailureCleansEveryParticipatingRow]' passed (0.003 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testAC17AC24MidDecodeAllocatorExtensionFailureFailsOnlyThatRowAndReleasesBlocks]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testAC17AC24MidDecodeAllocatorExtensionFailureFailsOnlyThatRowAndReleasesBlocks]' passed (0.031 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testAC20AC10DrainRejectsQueuedWorkAndDuplicateSubmitReturnsSameTerminal]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testAC20AC10DrainRejectsQueuedWorkAndDuplicateSubmitReturnsSameTerminal]' passed (0.062 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testAC20DuplicateRequestMismatchIsRejectedAfterTerminalResult]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testAC20DuplicateRequestMismatchIsRejectedAfterTerminalResult]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testAC24AdmissionPoolCapacityRejectsWithoutRunningInference]' started.
+event=batching_pool_capacity_rejected request_id=too-large prompt_tokens=2 max_output_tokens=2 pool_tokens=1
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testAC24AdmissionPoolCapacityRejectsWithoutRunningInference]' passed (0.000 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testAC25CarriedSchedulerCodesMapToStatusByShape]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testAC25CarriedSchedulerCodesMapToStatusByShape]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testAC25DeliveryBackpressureIsAPostTokenNonRetryableOutcome]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testAC25DeliveryBackpressureIsAPostTokenNonRetryableOutcome]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testAC25OverdueRequestIsExpiredAtAdmissionEvenIfItsTimerHasNotRun]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testAC25OverdueRequestIsExpiredAtAdmissionEvenIfItsTimerHasNotRun]' passed (0.333 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testAC25QueuePressureCodesSerializeAsRetryable]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testAC25QueuePressureCodesSerializeAsRetryable]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testAC25QueueWaitDeadlineDoesNotExpireAdmittedRows]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testAC25QueueWaitDeadlineDoesNotExpireAdmittedRows]' passed (0.002 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testAC25QueueWaitDeadlineRejectsUnadmittedRequestAndLeavesNoState]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testAC25QueueWaitDeadlineRejectsUnadmittedRequestAndLeavesNoState]' passed (0.177 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testAC25QueueWaitTimeoutReleasesTheReplayClaimSoTheSameIDCanRetry]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testAC25QueueWaitTimeoutReleasesTheReplayClaimSoTheSameIDCanRetry]' passed (0.180 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testAC25SchedulerErrorAPIMappingIsExhaustiveAndNonSettling]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testAC25SchedulerErrorAPIMappingIsExhaustiveAndNonSettling]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testAC25StaleQueueWaitTimeoutDuringAdmissionKeepsTheDeadline]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testAC25StaleQueueWaitTimeoutDuringAdmissionKeepsTheDeadline]' passed (0.966 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testAC25UnmappedSchedulerErrorsRethrowUnchanged]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testAC25UnmappedSchedulerErrorsRethrowUnchanged]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testAC3CancellationIsIdempotentAndLeavesHealthyRowRunning]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testAC3CancellationIsIdempotentAndLeavesHealthyRowRunning]' passed (0.017 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testActiveRowsDecodeABoundedWindowBetweenPrefillChunks]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testActiveRowsDecodeABoundedWindowBetweenPrefillChunks]' passed (0.033 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testAFailedPeerInARaggedGroupWithANativeRowFailsAlone]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testAFailedPeerInARaggedGroupWithANativeRowFailsAlone]' passed (0.033 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testAggregateQueuedTokenBudgetBackpressuresBeforeRetention]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testAggregateQueuedTokenBudgetBackpressuresBeforeRetention]' passed (0.062 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testBatchedOutputBudgetIsRemainingContextAndClampsExplicitMaxTokens]' started.
+event=batching_rejected code=context_length_exceeded prompt_tokens=200000 max_output_tokens=1 cap=200000
+event=batching_rejected code=context_length_exceeded prompt_tokens=200000 max_output_tokens=1 cap=200000
+event=batching_rejected code=context_length_exceeded prompt_tokens=200000 max_output_tokens=1 cap=200000
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testBatchedOutputBudgetIsRemainingContextAndClampsExplicitMaxTokens]' passed (0.007 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testBatchedPrefillPreservesDecodeOrderFallbackFairnessAndCancellationIsolation]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testBatchedPrefillPreservesDecodeOrderFallbackFairnessAndCancellationIsolation]' passed (0.103 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testBuyerRowLimitCapsBatchDepthBelowSchedulerRows]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testBuyerRowLimitCapsBatchDepthBelowSchedulerRows]' passed (0.004 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCachedPromptTokensCannotExceedPromptLengthEvenWithRetainedHandoff]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCachedPromptTokensCannotExceedPromptLengthEvenWithRetainedHandoff]' passed (0.125 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCachedPromptTokensRequireRetainedPagedKVHandoff]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCachedPromptTokensRequireRetainedPagedKVHandoff]' passed (0.000 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCancelDuringFailingRetainedInstallReportsCancelled]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCancelDuringFailingRetainedInstallReportsCancelled]' passed (0.015 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCancelDuringHopDoesNotMaskOverlongWindowResult]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCancelDuringHopDoesNotMaskOverlongWindowResult]' passed (0.016 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCancelDuringHybridRetainedInstallReleasesTheRow]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCancelDuringHybridRetainedInstallReleasesTheRow]' passed (0.015 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCancelDuringRecurrentSnapshotCancelsWithoutMaterializing]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCancelDuringRecurrentSnapshotCancelsWithoutMaterializing]' passed (0.015 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCancelDuringTerminalMaterializeSuppressesTheCache]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCancelDuringTerminalMaterializeSuppressesTheCache]' passed (0.016 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCancellationDuringFailingPrefillWinsTerminalRace]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCancellationDuringFailingPrefillWinsTerminalRace]' passed (0.015 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCancellationDuringPrefillWinsForZeroOutputRequest]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCancellationDuringPrefillWinsForZeroOutputRequest]' passed (0.016 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCancellationDuringThrownGroupPrefillFailureWinsOnlyForCancelledRow]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_prefill_failed action=fail_closed reason=backendfailure
+event=batching_admitted action=scheduler_admitted
+event=batching_prefill_failed action=fail_closed reason=backendfailure
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCancellationDuringThrownGroupPrefillFailureWinsOnlyForCancelledRow]' passed (0.016 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCancelledHangingTokenSinkHardTimeoutReleasesSchedulerState]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCancelledHangingTokenSinkHardTimeoutReleasesSchedulerState]' passed (0.057 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCancelledHybridRowDeliversNoSerialCacheAndReleasesBlocks]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCancelledHybridRowDeliversNoSerialCacheAndReleasesBlocks]' passed (0.016 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCancellingDrainKeepsSchedulerFailedClosedUntilOldWorkFinishes]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCancellingDrainKeepsSchedulerFailedClosedUntilOldWorkFinishes]' passed (0.031 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCancellingDuplicateWaiterDoesNotCancelSharedRequest]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCancellingDuplicateWaiterDoesNotCancelSharedRequest]' passed (0.031 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCancelMidWindowStopsDeliveryAndEndsWindowEarly]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCancelMidWindowStopsDeliveryAndEndsWindowEarly]' passed (0.016 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCanonicalSerialToolStopBoundaryIsRetainedForTerminalReplay]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCanonicalSerialToolStopBoundaryIsRetainedForTerminalReplay]' passed (0.003 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCleanupFailureCannotProduceSuccessAndFailsSchedulerClosed]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCleanupFailureCannotProduceSuccessAndFailsSchedulerClosed]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCleanupFailureStopsCurrentPumpBeforeAdmittingAnotherRow]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCleanupFailureStopsCurrentPumpBeforeAdmittingAnotherRow]' passed (0.031 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCohortDecodeSecondsCoverTheCohortDecodeAndNotPrefill]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCohortDecodeSecondsCoverTheCohortDecodeAndNotPrefill]' passed (0.922 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testConfigurationHonorsExplicitPrefillTokensPerIterationAndDefault]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testConfigurationHonorsExplicitPrefillTokensPerIterationAndDefault]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testContextLengthExceededMapsToSerialContextError]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testContextLengthExceededMapsToSerialContextError]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testConversationCacheRetainedPagedKVHitLeavesTrimToSchedulerHandoff]' started.
+event=conv_cache action=miss key_hash=413055e0 reason=cold_start
+event=conv_cache action=cold_unattached key_hash=413055e0
+event=conv_cache action=hit key_hash=413055e0 cached_prompt_tokens=34 prompt_tokens=40 lcp=34 trim_by=6 conv_cache_entries=0 conv_cache_tokens=0
+event=batching_admitted action=scheduler_admitted
+event=conv_cache action=cold_unattached key_hash=413055e0
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testConversationCacheRetainedPagedKVHitLeavesTrimToSchedulerHandoff]' passed (0.055 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testConversationKeyWithoutReusableStateBatchesAsFreshRequest]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testConversationKeyWithoutReusableStateBatchesAsFreshRequest]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCrossConversationRetainedHandoffFailureDiscardsOwner]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testCrossConversationRetainedHandoffFailureDiscardsOwner]' passed (0.000 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testDecodeForwardsNeverCarryMoreRowsThanTheDecodeRouteBound]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testDecodeForwardsNeverCarryMoreRowsThanTheDecodeRouteBound]' passed (0.003 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testDecodeRouteBoundFollowsTheCoreVectorLimitPerDevice]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testDecodeRouteBoundFollowsTheCoreVectorLimitPerDevice]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testDecodeStepsWithoutProgressFailTheRowInsteadOfSpinning]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=continuous_batch_no_progress action=fail_rows passes=64 rows=stuck
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testDecodeStepsWithoutProgressFailTheRowInsteadOfSpinning]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testDeliveredRetainedCacheCanBeReclaimedAfterCallerCancellationRace]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testDeliveredRetainedCacheCanBeReclaimedAfterCallerCancellationRace]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testDeliveryBackpressureMidWindowKeepsBackpressureTerminal]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testDeliveryBackpressureMidWindowKeepsBackpressureTerminal]' passed (0.076 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testDescriptorDrivenLocalCapabilityRejectsUnsupportedTuple]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testDescriptorDrivenLocalCapabilityRejectsUnsupportedTuple]' passed (0.000 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testDrainGraceDeadlineDoesNotAwaitWedgedBackendCancellation]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testDrainGraceDeadlineDoesNotAwaitWedgedBackendCancellation]' passed (0.046 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testDrainWaitsForPendingTerminalTokenDelivery]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testDrainWaitsForPendingTerminalTokenDelivery]' passed (0.041 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testDuplicateDuringDeferredTerminalCompletionIsNotStranded]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testDuplicateDuringDeferredTerminalCompletionIsNotStranded]' passed (0.075 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testDuplicateSuccessfulWaitersHaveExactlyOneSettlementOwner]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testDuplicateSuccessfulWaitersHaveExactlyOneSettlementOwner]' passed (0.028 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testDurableReplayAuthorityAllowsLocalRetentionToRollWithoutReexecution]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testDurableReplayAuthorityAllowsLocalRetentionToRollWithoutReexecution]' passed (0.003 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testEveryCarriedSchedulerCodeIsClassified]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testEveryCarriedSchedulerCodeIsClassified]' passed (0.011 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testExactnessProbeCatchesTheQmmFlipAboveTheVectorLimitOnlyWithoutTheRowBound]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testExactnessProbeCatchesTheQmmFlipAboveTheVectorLimitOnlyWithoutTheRowBound]' passed (0.059 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testExactnessProbeCohortThatNeverFillsRunsNothingAndTimesOut]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testExactnessProbeCohortThatNeverFillsRunsNothingAndTimesOut]' passed (0.537 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testFailedHybridRowDeliversNoSerialCacheAndReleasesBlocks]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_forward_failed action=fail_closed reason=backendfailure
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testFailedHybridRowDeliversNoSerialCacheAndReleasesBlocks]' passed (0.003 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testFinalPrefillCommitsWholePromptAndSamplesWithoutDecode]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testFinalPrefillCommitsWholePromptAndSamplesWithoutDecode]' passed (0.002 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testFinalPrefillCoversWholePromptAndSeedsDecodeWithFirstGeneratedToken]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testFinalPrefillCoversWholePromptAndSeedsDecodeWithFirstGeneratedToken]' passed (0.002 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testForcedDrainPreservesDeliveredDuplicateAsSettlementOwner]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testForcedDrainPreservesDeliveredDuplicateAsSettlementOwner]' passed (0.105 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testForcedDrainStopsPendingTerminalDeliveryBeforeReturningTimeout]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testForcedDrainStopsPendingTerminalDeliveryBeforeReturningTimeout]' passed (0.062 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testFullPromptCachedRangeDiscardsSuppliedRetainedOwner]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testFullPromptCachedRangeDiscardsSuppliedRetainedOwner]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testHangingTokenSinkHardTimeoutKeepsLiveTaskCapacityBounded]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testHangingTokenSinkHardTimeoutKeepsLiveTaskCapacityBounded]' passed (0.052 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testHybridCachedTurnResumesFromRetainedCheckpointAndChains]' started.
+event=conv_cache action=miss key_hash=67cdb90d reason=cold_start
+event=batching_admitted action=scheduler_admitted
+event=conv_cache action=cold_unattached key_hash=67cdb90d
+event=conv_cache action=hit key_hash=67cdb90d cached_prompt_tokens=42 prompt_tokens=48 lcp=42 trim_by=0 recurrent_checkpoint=42 conv_cache_entries=0 conv_cache_tokens=0
+event=batching_admitted action=scheduler_admitted
+event=conv_cache action=cold_unattached key_hash=67cdb90d
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testHybridCachedTurnResumesFromRetainedCheckpointAndChains]' passed (0.005 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testHybridCachedTurnReusesSoleReplyEndCheckpoint]' started.
+event=conv_cache action=miss key_hash=de629fcc reason=cold_start
+event=batching_admitted action=scheduler_admitted
+event=conv_cache action=cold_unattached key_hash=de629fcc
+event=conv_cache action=hit key_hash=de629fcc cached_prompt_tokens=42 prompt_tokens=43 lcp=42 trim_by=0 recurrent_checkpoint=42 conv_cache_entries=0 conv_cache_tokens=0
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testHybridCachedTurnReusesSoleReplyEndCheckpoint]' passed (0.003 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testHybridModelStopRetainedCacheUsesCanonicalTokenCount]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testHybridModelStopRetainedCacheUsesCanonicalTokenCount]' passed (0.003 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testHybridRetainedHandoffWithoutCheckpointAtCachedLengthFailsClosed]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testHybridRetainedHandoffWithoutCheckpointAtCachedLengthFailsClosed]' passed (0.002 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testHybridTerminalSnapshotLossPublishesNoCache]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testHybridTerminalSnapshotLossPublishesNoCache]' passed (0.002 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testIdleDecodeUsesLockstepWindowAndAppliesEveryToken]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testIdleDecodeUsesLockstepWindowAndAppliesEveryToken]' passed (0.002 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testInvalidCachedRangeDiscardsSuppliedRetainedOwner]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testInvalidCachedRangeDiscardsSuppliedRetainedOwner]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testKeyedHybridRowSplitsPrefillAtCheckpointsAndDeliversSerialCache]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testKeyedHybridRowSplitsPrefillAtCheckpointsAndDeliversSerialCache]' passed (0.002 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testKeylessOrPositionlessHybridRowCapturesNothing]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testKeylessOrPositionlessHybridRowCapturesNothing]' passed (0.002 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testLabBatchCompositionWaitsForEveryRowAndUsesDeclaredOrder]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testLabBatchCompositionWaitsForEveryRowAndUsesDeclaredOrder]' passed (0.013 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testLabDecodeOutputCapLimitsNativeMultiTokenRoundBeforeFinalize]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testLabDecodeOutputCapLimitsNativeMultiTokenRoundBeforeFinalize]' passed (0.006 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testLabDecodeOutputCapStopsOrdinaryAtCapturedCompletionWithoutChangingRequestMax]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testLabDecodeOutputCapStopsOrdinaryAtCapturedCompletionWithoutChangingRequestMax]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testLoadGateRecorderCountsARowThatFinishesWhileHeld]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=native_mtp_load_gate action=depth_zero active_rows=2 bound=1
+event=native_mtp_load_gate action=restore active_rows=1 bound=9223372036854775807
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testLoadGateRecorderCountsARowThatFinishesWhileHeld]' passed (0.005 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testLoadGateRecorderCountsHeldRoundsAndRestoration]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=native_mtp_load_gate action=depth_zero active_rows=2 bound=1
+event=native_mtp_load_gate action=restore active_rows=1 bound=1
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testLoadGateRecorderCountsHeldRoundsAndRestoration]' passed (0.007 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testLockstepWindowDeliversEachStepBeforeTheWindowReturns]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testLockstepWindowDeliversEachStepBeforeTheWindowReturns]' passed (0.016 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testLockstepWindowOverflowsDefaultDeliveryBufferWhenSinkCannotDrain]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testLockstepWindowOverflowsDefaultDeliveryBufferWhenSinkCannotDrain]' passed (0.062 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testLockstepWindowStopSequenceAppliesTokensSequentially]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testLockstepWindowStopSequenceAppliesTokensSequentially]' passed (0.002 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testLockstepWindowStreamsEveryRowAndKeepsUsageExact]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testLockstepWindowStreamsEveryRowAndKeepsUsageExact]' passed (0.003 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testLongPrefillChunksAreBalancedInsteadOfLeavingTinyTail]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testLongPrefillChunksAreBalancedInsteadOfLeavingTinyTail]' passed (0.004 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testLongPrefillIsActuallyChunkedAndDecodeRunsBetweenChunks]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testLongPrefillIsActuallyChunkedAndDecodeRunsBetweenChunks]' passed (0.019 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testMalformedBackendTokenFailsOnlyItsRow]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testMalformedBackendTokenFailsOnlyItsRow]' passed (0.032 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testMalformedBackendTokenFailsRowWithoutReturningPartialOutput]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testMalformedBackendTokenFailsRowWithoutReturningPartialOutput]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testMalformedStepHaltsStreamingAndWindowResultDelivers]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testMalformedStepHaltsStreamingAndWindowResultDelivers]' passed (0.016 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testMissingContiguousBridgeAdmissionFailureDiscardsSuppliedRetainedOwner]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testMissingContiguousBridgeAdmissionFailureDiscardsSuppliedRetainedOwner]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testMoETupleAdmitsWhenPromotionEvidenceIsAvailable]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testMoETupleAdmitsWhenPromotionEvidenceIsAvailable]' passed (0.000 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testMoETupleRequiresSeparatePromotionEvidenceAtSchedulerAdmission]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testMoETupleRequiresSeparatePromotionEvidenceAtSchedulerAdmission]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testMultiTokenStopPrefixIsHeldBackUntilMatchedOrDisproved]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testMultiTokenStopPrefixIsHeldBackUntilMatchedOrDisproved]' passed (0.003 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPAbortFinalizationErrorFailsClosedAndIsVisible]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_forward_failed action=fail_closed reason=backendfailure
+event=batching_forward_failed action=fail_closed reason=backendfailure
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPAbortFinalizationErrorFailsClosedAndIsVisible]' passed (0.004 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPAfterProposalTrapCancelsOnlySelectedRowBeforeVerify]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPAfterProposalTrapCancelsOnlySelectedRowBeforeVerify]' passed (0.003 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPAfterVerifyTrapCancelsOnlySelectedRowBeforeFinalize]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPAfterVerifyTrapCancelsOnlySelectedRowBeforeFinalize]' passed (0.002 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPAppliesTerminalFilterBeforeBonusCandidate]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPAppliesTerminalFilterBeforeBonusCandidate]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPBackendWithoutFinalizerFailsClosedForNonemptyRows]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_forward_failed action=fail_closed reason=continuous_batching_native_mtp_backend_unavailable
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPBackendWithoutFinalizerFailsClosedForNonemptyRows]' passed (0.002 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPBeforeFinalizeTrapCancelsOnlySelectedRowBeforeCommit]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPBeforeFinalizeTrapCancelsOnlySelectedRowBeforeCommit]' passed (0.002 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPByteCapacityFailureReducesDepthBeforeProposal]' started.
+event=batching_admitted action=scheduler_admitted
+event=native_mtp_round_reservation_refused requested_bytes=32 reserved_before_bytes=0 outstanding_reservations=0 capacity_bytes=24 available_bytes=1000000000 physical_bytes=1000000000 floor_bytes=100000000 reason=capacity
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPByteCapacityFailureReducesDepthBeforeProposal]' passed (0.002 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPCancellationBeforeFinalizeRollsBackTransactionalCandidates]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPCancellationBeforeFinalizeRollsBackTransactionalCandidates]' passed (0.016 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPConcurrentRowsCannotOvercommitRoundByteBudgetBeforeProposal]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=native_mtp_round_reservation_refused requested_bytes=16 reserved_before_bytes=16 outstanding_reservations=1 capacity_bytes=24 available_bytes=1000000000 physical_bytes=1000000000 floor_bytes=100000000 reason=capacity
+event=batching_forward_failed action=fail_closed reason=continuous_batching_native_mtp_round_memory_exhausted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPConcurrentRowsCannotOvercommitRoundByteBudgetBeforeProposal]' passed (0.047 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPConcurrentRowsHonorSystemHeadroomAndRelease]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=native_mtp_round_reservation_refused requested_bytes=16 reserved_before_bytes=16 outstanding_reservations=1 capacity_bytes=64 available_bytes=124 physical_bytes=1000 floor_bytes=100 reason=system_headroom
+event=batching_forward_failed action=fail_closed reason=continuous_batching_native_mtp_round_memory_exhausted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPConcurrentRowsHonorSystemHeadroomAndRelease]' passed (0.047 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPDisableDuringFinalizeFailsOnlyStaleRowAndHealthyPeerCommits]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPDisableDuringFinalizeFailsOnlyStaleRowAndHealthyPeerCommits]' passed (0.049 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPDisableWhileVerifyInFlightAbortsWithoutApplyingNativeOutput]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPDisableWhileVerifyInFlightAbortsWithoutApplyingNativeOutput]' passed (0.016 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPDoesNotExposeTransactionalCandidatesBeforeFinalizeAndAbortsOnVerifyThrow]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_forward_failed action=fail_closed reason=backendfailure
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPDoesNotExposeTransactionalCandidatesBeforeFinalizeAndAbortsOnVerifyThrow]' passed (0.018 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPFirstRoundFailureBeforeVisibleOutputDoesNotIncrementPostoutputFailures]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_forward_failed action=fail_closed reason=backendfailure
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPFirstRoundFailureBeforeVisibleOutputDoesNotIncrementPostoutputFailures]' passed (0.004 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPForcedDepthZeroKeepsNativeVerificationIdentity]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPForcedDepthZeroKeepsNativeVerificationIdentity]' passed (0.002 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPLabCommitTimingObserverRecordsOnlyMetadata]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPLabCommitTimingObserverRecordsOnlyMetadata]' passed (0.000 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPLabPhaseTrapRecordsExactPhaseAndConsumesCancellations]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPLabPhaseTrapRecordsExactPhaseAndConsumesCancellations]' passed (0.000 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPLaterRoundFailureAfterVisibleOutputIncrementsPostoutputFailures]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_forward_failed action=fail_closed reason=backendfailure
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPLaterRoundFailureAfterVisibleOutputIncrementsPostoutputFailures]' passed (0.002 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPLoadGateHoldsDepthZeroAboveBoundAndRestoresWithHysteresis]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=native_mtp_load_gate action=depth_zero active_rows=2 bound=1
+event=native_mtp_load_gate action=restore active_rows=1 bound=1
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPLoadGateHoldsDepthZeroAboveBoundAndRestoresWithHysteresis]' passed (0.010 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPLoadGateLeavesMixedBatchWithinBoundAtFullDepth]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPLoadGateLeavesMixedBatchWithinBoundAtFullDepth]' passed (0.003 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPPackedRoundPartitionsOrdinaryRowsFromRaggedNativeRows]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPPackedRoundPartitionsOrdinaryRowsFromRaggedNativeRows]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPPhaseCancelWithOrdinaryPeerFinishesThePeer]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPPhaseCancelWithOrdinaryPeerFinishesThePeer]' passed (0.008 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPPromptLongerThanOneChunkPrefillsEveryChunkWithItsNextPromptToken]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPPromptLongerThanOneChunkPrefillsEveryChunkWithItsNextPromptToken]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPProposalFailureReleasesCompleteRoundReservation]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_forward_failed action=fail_closed reason=backendfailure
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPProposalFailureReleasesCompleteRoundReservation]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPProposalIsNotCalledBeforeCompleteRoundReservation]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPProposalIsNotCalledBeforeCompleteRoundReservation]' passed (0.016 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPRejectionAtEachPositionCommitsOnlyAcceptedPrefix]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPRejectionAtEachPositionCommitsOnlyAcceptedPrefix]' passed (0.003 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPSystemHeadroomFailureAtDepthZeroFailsBeforeProposal]' started.
+event=batching_admitted action=scheduler_admitted
+event=native_mtp_round_reservation_refused requested_bytes=32 reserved_before_bytes=0 outstanding_reservations=0 capacity_bytes=64 available_bytes=107 physical_bytes=1000 floor_bytes=100 reason=system_headroom
+event=native_mtp_round_reservation_refused requested_bytes=8 reserved_before_bytes=0 outstanding_reservations=0 capacity_bytes=64 available_bytes=107 physical_bytes=1000 floor_bytes=100 reason=system_headroom
+event=batching_forward_failed action=fail_closed reason=continuous_batching_native_mtp_round_memory_exhausted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPSystemHeadroomFailureAtDepthZeroFailsBeforeProposal]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPSystemHeadroomFailureReducesDepthBeforeProposal]' started.
+event=batching_admitted action=scheduler_admitted
+event=native_mtp_round_reservation_refused requested_bytes=32 reserved_before_bytes=0 outstanding_reservations=0 capacity_bytes=64 available_bytes=124 physical_bytes=1000 floor_bytes=100 reason=system_headroom
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeMTPSystemHeadroomFailureReducesDepthBeforeProposal]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativePromptRowJoinsARaggedGroupOnlyWhereGroupedRowsPrefillAlone]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativePromptRowJoinsARaggedGroupOnlyWhereGroupedRowsPrefillAlone]' passed (0.065 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeRowsJoinRaggedGroupsOnlyWhenRaggedOffsetsAreAllowed]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNativeRowsJoinRaggedGroupsOnlyWhenRaggedOffsetsAreAllowed]' passed (0.000 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNonHybridCachedTurnIsAdmittedOnlyWithFlagAndResumesAtLCP]' started.
+event=conv_cache action=miss key_hash=364a29e0 reason=cold_start
+event=batching_admitted action=scheduler_admitted
+event=conv_cache action=cold_unattached key_hash=364a29e0
+event=conv_cache action=hit key_hash=364a29e0 cached_prompt_tokens=37 prompt_tokens=40 lcp=37 trim_by=0 conv_cache_entries=0 conv_cache_tokens=0
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNonHybridCachedTurnIsAdmittedOnlyWithFlagAndResumesAtLCP]' passed (0.003 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNonSettlingReplayResultDropsRetainedCacheOwnership]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testNonSettlingReplayResultDropsRetainedCacheOwnership]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testOfferRacingDrainExitIsDeliveredAndTerminalCompletes]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testOfferRacingDrainExitIsDeliveredAndTerminalCompletes]' passed (0.017 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testOneStepWhilePrefillingKeepsStrictAlternation]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testOneStepWhilePrefillingKeepsStrictAlternation]' passed (0.029 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testOversizedQueueWaitIsClampedNotTurnedIntoAnUnboundedWait]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testOversizedQueueWaitIsClampedNotTurnedIntoAnUnboundedWait]' passed (0.000 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testPartialDecodeLeaseCleanupFailureStillUnwindsEveryPreparedRow]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testPartialDecodeLeaseCleanupFailureStillUnwindsEveryPreparedRow]' passed (0.046 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testPoolPressureWithPromptAndDecodeHeadroomQueuesLongPromptWorkWithoutExtensionFailure]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testPoolPressureWithPromptAndDecodeHeadroomQueuesLongPromptWorkWithoutExtensionFailure]' passed (0.005 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testPositiveCachedTerminalReplayDiscardsSuppliedRetainedOwner]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testPositiveCachedTerminalReplayDiscardsSuppliedRetainedOwner]' passed (0.017 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testPrefillBackendFailureFailsClosedWithReasonCodedTelemetry]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_prefill_failed action=fail_closed reason=continuous_batching_invalid_cache_layout
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testPrefillBackendFailureFailsClosedWithReasonCodedTelemetry]' passed (0.002 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testPrefillBatchesCompatibleChunksWithinRowAndTokenBudgets]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testPrefillBatchesCompatibleChunksWithinRowAndTokenBudgets]' passed (0.035 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testPrefillChunksBelowTheGroupingBoundPrefillAlone]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testPrefillChunksBelowTheGroupingBoundPrefillAlone]' passed (0.185 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testPrefillGroupingRuleFromModelConfiguration]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testPrefillGroupingRuleFromModelConfiguration]' passed (0.006 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testPrivacyQueueWaitTimeoutReleasesInMemoryClaim]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testPrivacyQueueWaitTimeoutReleasesInMemoryClaim]' passed (0.188 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testPrivacyRequestReplayClaimStaysInMemoryAndStillGuardsReplay]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testPrivacyRequestReplayClaimStaysInMemoryAndStillGuardsReplay]' passed (0.017 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testProductionDeliveryBufferAbsorbsLockstepWhileSinkDrains]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testProductionDeliveryBufferAbsorbsLockstepWhileSinkDrains]' passed (0.101 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testProductionSchedulerConfigurationCapsRowsAtServedContext]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testProductionSchedulerConfigurationCapsRowsAtServedContext]' passed (0.002 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testQueuedCancellationDiscardsSuppliedRetainedOwner]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testQueuedCancellationDiscardsSuppliedRetainedOwner]' passed (0.028 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testQueuedJoinForcesOneTokenDecodeThenWindowResumes]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testQueuedJoinForcesOneTokenDecodeThenWindowResumes]' passed (0.032 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testRaggedPrefillGroupingCapsTheKeySpread]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testRaggedPrefillGroupingCapsTheKeySpread]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testRaggedPrefillGroupingHonoursRowCapAndTokenBudget]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testRaggedPrefillGroupingHonoursRowCapAndTokenBudget]' passed (0.000 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testRaggedPrefillGroupingKeepsChunksBelowTheGroupingBoundAlone]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testRaggedPrefillGroupingKeepsChunksBelowTheGroupingBoundAlone]' passed (0.000 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testRaggedPrefillGroupingKeepsNativeRowsAtTheHeadOffset]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testRaggedPrefillGroupingKeepsNativeRowsAtTheHeadOffset]' passed (0.000 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testRaggedPrefillGroupingKeepsTheHeadChunkWhenItAdvancesMostTokens]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testRaggedPrefillGroupingKeepsTheHeadChunkWhenItAdvancesMostTokens]' passed (0.000 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testRaggedPrefillGroupingNeverShortensARowsChunkToMeetAPeer]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testRaggedPrefillGroupingNeverShortensARowsChunkToMeetAPeer]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testRaggedPrefillGroupsRowsAtDifferentOffsetsWithOneChunkLength]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testRaggedPrefillGroupsRowsAtDifferentOffsetsWithOneChunkLength]' passed (0.030 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testRequestRetentionAndQueueTokenBudgetsRejectBeforeBackendWork]' started.
+event=batching_rejected code=context_length_exceeded prompt_tokens=8 max_output_tokens=1 cap=8
+event=batching_rejected code=context_length_exceeded prompt_tokens=1 max_output_tokens=9 cap=8
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testRequestRetentionAndQueueTokenBudgetsRejectBeforeBackendWork]' passed (0.003 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testRequestTokenCapAboveLegacyDefaultAdmitsLongRows]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testRequestTokenCapAboveLegacyDefaultAdmitsLongRows]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testRetainedPagedKVHandoffResumesPrefillAtStickyLCP]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testRetainedPagedKVHandoffResumesPrefillAtStickyLCP]' passed (0.022 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testRetainedReattachExpandsMaxLogicalTokensForContinuation]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testRetainedReattachExpandsMaxLogicalTokensForContinuation]' passed (0.000 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testRetainedStickyStopSequenceCommitsCanonicalGeneratedTokens]' started.
+event=batching_admitted action=scheduler_admitted
+event=conv_cache action=miss key_hash=413055e0 reason=cold_start
+event=conv_cache action=cold_unattached key_hash=413055e0
+event=conv_cache action=hit key_hash=413055e0 cached_prompt_tokens=43 prompt_tokens=44 lcp=43 trim_by=0 conv_cache_entries=0 conv_cache_tokens=0
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testRetainedStickyStopSequenceCommitsCanonicalGeneratedTokens]' passed (0.002 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testRowLocalSamplerFailureDoesNotFailHealthyRows]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testRowLocalSamplerFailureDoesNotFailHealthyRows]' passed (0.031 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testRuntimeReplayAuthorityBoundsPrivacyClaims]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testRuntimeReplayAuthorityBoundsPrivacyClaims]' passed (0.012 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testRuntimeReplayAuthorityKeepsPrivacyClaimsOffDisk]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testRuntimeReplayAuthorityKeepsPrivacyClaimsOffDisk]' passed (0.007 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testSameIDOtherClassIsMismatchNotAttach]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testSameIDOtherClassIsMismatchNotAttach]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testSchedulerContractBoundedFCFSQueueRejectsAtBackpressureLimit]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testSchedulerContractBoundedFCFSQueueRejectsAtBackpressureLimit]' passed (0.031 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testSchedulerContractMatchesReferenceSerialTokenUsageAndStops]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testSchedulerContractMatchesReferenceSerialTokenUsageAndStops]' passed (0.029 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testSchedulerContractMoERowsFeedTheirOwnCurrentTokenAndTelemetryStaysPerRow]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testSchedulerContractMoERowsFeedTheirOwnCurrentTokenAndTelemetryStaysPerRow]' passed (0.045 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testSchedulerContractSharedForwardIsolatesUsageStopsAndSamplers]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testSchedulerContractSharedForwardIsolatesUsageStopsAndSamplers]' passed (0.028 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testSelfCheckKeyCarriesTheRowIsolationPolicy]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testSelfCheckKeyCarriesTheRowIsolationPolicy]' passed (0.046 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testSelfCheckRowsUseEverySchedulerRow]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testSelfCheckRowsUseEverySchedulerRow]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testSerialPrefillFallbackFailureIsRequestLocal]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testSerialPrefillFallbackFailureIsRequestLocal]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testSlowTokenSinkCannotBlockSchedulerAndIsBoundedPerWaiter]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testSlowTokenSinkCannotBlockSchedulerAndIsBoundedPerWaiter]' passed (0.031 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testStopEarlyEndsDecodingRowAsStopAtNextToken]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testStopEarlyEndsDecodingRowAsStopAtNextToken]' passed (0.012 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testStopSequenceWinsWhenItAlsoReachesOutputLimit]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testStopSequenceWinsWhenItAlsoReachesOutputLimit]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testStopTokenMidWindowTruncatesStreamExactly]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testStopTokenMidWindowTruncatesStreamExactly]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testStreamedTokensThatDisagreeWithWindowResultFailTheRow]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testStreamedTokensThatDisagreeWithWindowResultFailTheRow]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testTerminalAndDiagnosticRetentionAreBounded]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testTerminalAndDiagnosticRetentionAreBounded]' passed (0.004 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testTerminalFailureAfterStreamedTokensIsPostInference]' started.
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testTerminalFailureAfterStreamedTokensIsPostInference]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testTerminalReplayDiscardsSuppliedRetainedOwner]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testTerminalReplayDiscardsSuppliedRetainedOwner]' passed (0.016 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testTerminalResultWaitsForAcceptedTokenDelivery]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testTerminalResultWaitsForAcceptedTokenDelivery]' passed (0.088 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testTerminalRetainFailureReleasesFreshHandleWithoutFailClosing]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testTerminalRetainFailureReleasesFreshHandleWithoutFailClosing]' passed (0.003 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testTimedOutTerminalDeliveryDiscardsRetainedPagedKVOwner]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testTimedOutTerminalDeliveryDiscardsRetainedPagedKVOwner]' passed (0.053 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testTokenSinkStreamsDeltasAndFailureRetainsEmittedAccounting]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_forward_failed action=fail_closed reason=backendfailure
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testTokenSinkStreamsDeltasAndFailureRetainsEmittedAccounting]' passed (0.002 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testTwoRetainedConversationKeysShareDecodeBatchWithoutCrossAttribution]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testTwoRetainedConversationKeysShareDecodeBatchWithoutCrossAttribution]' passed (0.032 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testWindowResultLongerThanWindowFailsTheRow]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testWindowResultLongerThanWindowFailsTheRow]' passed (0.002 seconds).
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testZeroOutputHybridRowMaterializesTheFullPrefilledPrompt]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.ContinuousBatchSchedulerTests testZeroOutputHybridRowMaterializesTheFullPrefilledPrompt]' passed (0.002 seconds).
+Test Suite 'ContinuousBatchSchedulerTests' passed at 2026-10-18 18:03:06.556.
+	 Executed 181 tests, with 0 failures (0 unexpected) in 6.391 (6.423) seconds
+Test Suite 'phase3-binaryPackageTests.xctest' passed at 2026-10-18 18:03:06.557.
+	 Executed 181 tests, with 0 failures (0 unexpected) in 6.391 (6.424) seconds
+Test Suite 'Selected tests' passed at 2026-10-18 18:03:06.557.
+	 Executed 181 tests, with 0 failures (0 unexpected) in 6.391 (6.425) seconds

@@ -1,0 +1,352 @@
+Test Suite 'Selected tests' started at 2026-10-18 18:03:06.850.
+Test Suite 'phase3-binaryPackageTests.xctest' started at 2026-10-18 18:03:06.851.
+Test Suite 'PagedKVRuntimeBridgeTests' started at 2026-10-18 18:03:06.851.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testArrayDigestRecordsHashLogicalBytesAcrossChunks]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testArrayDigestRecordsHashLogicalBytesAcrossChunks]' passed (0.024 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testAttachedModelRuntimeCancelsBlockedCompletionSubmit]' started.
+event=continuous_batch_decode_row_bound max_decode_rows_per_forward=11
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testAttachedModelRuntimeCancelsBlockedCompletionSubmit]' passed (0.032 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testAttachedModelRuntimeCancelsBlockedStreamingSubmit]' started.
+event=continuous_batch_decode_row_bound max_decode_rows_per_forward=11
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testAttachedModelRuntimeCancelsBlockedStreamingSubmit]' passed (0.015 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testAttachedModelRuntimeServesFreshGreedyRequestsThroughScheduler]' started.
+event=continuous_batch_decode_row_bound max_decode_rows_per_forward=11
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testAttachedModelRuntimeServesFreshGreedyRequestsThroughScheduler]' passed (0.003 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testAttachedServePathBoundsRowsByServedContext]' started.
+event=continuous_batch_decode_row_bound max_decode_rows_per_forward=11
+event=batching_admitted action=scheduler_admitted
+event=continuous_batch_decode_row_bound max_decode_rows_per_forward=11
+event=batching_rejected code=context_length_exceeded prompt_tokens=4 max_output_tokens=1 cap=4
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testAttachedServePathBoundsRowsByServedContext]' passed (0.002 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testAttachedServePathPrefillFailureReturnsReasonCoded503]' started.
+event=continuous_batch_decode_row_bound max_decode_rows_per_forward=11
+event=batching_admitted action=scheduler_admitted
+event=batching_prefill_failed action=fail_closed reason=continuous_batching_invalid_cache_layout
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testAttachedServePathPrefillFailureReturnsReasonCoded503]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testAttachedServePathPrefillsChatPreparedMultiTokenPrompt]' started.
+event=continuous_batch_decode_row_bound max_decode_rows_per_forward=11
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testAttachedServePathPrefillsChatPreparedMultiTokenPrompt]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testChunkedNativePromptsKeepGreedyParityWithOrdinaryAtLongLengths]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testChunkedNativePromptsKeepGreedyParityWithOrdinaryAtLongLengths]' passed (0.598 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testChunkedPromptPrefillSeedsTheDrafterLikeSinglePassPrefill]' started.
+event=batching_prefill_failed action=fail_closed reason=native_mtp_missing_drafter_state
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testChunkedPromptPrefillSeedsTheDrafterLikeSinglePassPrefill]' passed (0.025 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testCompiledWritebackKeepsEachRowsOwnTargetLength]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testCompiledWritebackKeepsEachRowsOwnTargetLength]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testCompiledWritebackThrowsOnMalformedCompiledState]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testCompiledWritebackThrowsOnMalformedCompiledState]' passed (0.000 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testCompiledWritebackThrowsWhenCompiledShorterThanARowTarget]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testCompiledWritebackThrowsWhenCompiledShorterThanARowTarget]' passed (0.000 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testConcurrentChunkDigestsAreOrderedPerChunkSHA256]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testConcurrentChunkDigestsAreOrderedPerChunkSHA256]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testContiguousCacheBridgePreservesMidBlockTrimAcrossExtractAndRetainReattach]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testContiguousCacheBridgePreservesMidBlockTrimAcrossExtractAndRetainReattach]' passed (0.004 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testContiguousCacheBridgeRecordsBFloat16KV]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testContiguousCacheBridgeRecordsBFloat16KV]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testContiguousCacheBridgeRejectsCrossHandleCacheRecord]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testContiguousCacheBridgeRejectsCrossHandleCacheRecord]' passed (0.000 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testContiguousCacheBridgeRestoresLiveKVCacheByteExactAndRoundTrips]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testContiguousCacheBridgeRestoresLiveKVCacheByteExactAndRoundTrips]' passed (0.002 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testConversationKeyWithoutRetainedHandoffRunsAsFreshSchedulerRow]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testConversationKeyWithoutRetainedHandoffRunsAsFreshSchedulerRow]' passed (0.000 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testCoreRoutingSourcesMatchThePortedDispatch]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testCoreRoutingSourcesMatchThePortedDispatch]' passed (0.004 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testDetachedHiddenColumnDoesNotPinTheBatchOutput]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testDetachedHiddenColumnDoesNotPinTheBatchOutput]' passed (0.651 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testDrafterDigestHashesAGLMLatentCacheStateWhole]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testDrafterDigestHashesAGLMLatentCacheStateWhole]' passed (0.002 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testGPTOSS120BMixedArchitectureRequiresExactAllowlistedIdentityAndConfigMetadata]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testGPTOSS120BMixedArchitectureRequiresExactAllowlistedIdentityAndConfigMetadata]' passed (0.000 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testGroupedPrefillRowsRunAloneOnlyUnderAFlattenedTokenCapBelowTwoGroupedChunks]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testGroupedPrefillRowsRunAloneOnlyUnderAFlattenedTokenCapBelowTwoGroupedChunks]' passed (0.000 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testHeldNativeRowBuffersColumnsWithoutAdvancingItsDrafter]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=native_mtp_load_gate action=depth_zero active_rows=2 bound=1
+event=native_mtp_load_gate action=restore active_rows=1 bound=9223372036854775807
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testHeldNativeRowBuffersColumnsWithoutAdvancingItsDrafter]' passed (0.569 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testHeldNativeRowCatchesUpItsDrafterAtTheColumnCap]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=native_mtp_load_gate action=depth_zero active_rows=2 bound=1
+event=native_mtp_load_gate action=restore active_rows=1 bound=1
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=native_mtp_load_gate action=depth_zero active_rows=2 bound=1
+event=native_mtp_load_gate action=restore active_rows=1 bound=1
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testHeldNativeRowCatchesUpItsDrafterAtTheColumnCap]' passed (0.925 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testJourneyAlignedCacheComparisonUsesWindowEndCounts]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testJourneyAlignedCacheComparisonUsesWindowEndCounts]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testJourneyAlignedComparisonCountsOnlyTheRoundAfterARejection]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testJourneyAlignedComparisonCountsOnlyTheRoundAfterARejection]' passed (0.000 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testJourneyComparisonOverBridgeNumberedObserverRecords]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testJourneyComparisonOverBridgeNumberedObserverRecords]' passed (0.023 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testJourneyDrafterRecomputeCoverageMatchesTheFinalizeSampling]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testJourneyDrafterRecomputeCoverageMatchesTheFinalizeSampling]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testKeyedNativeRowCommitsTheOrdinarySerialConversationCacheEntry]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testKeyedNativeRowCommitsTheOrdinarySerialConversationCacheEntry]' passed (0.112 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testLabDrafterRecomputeIsDueOnFirstRoundAndEachCrossedInterval]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testLabDrafterRecomputeIsDueOnFirstRoundAndEachCrossedInterval]' passed (0.000 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testLabDrafterStateDigestIgnoresPhysicalPaddingBeyondCommittedPrefix]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testLabDrafterStateDigestIgnoresPhysicalPaddingBeyondCommittedPrefix]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testLabStateDigestObserverFailsClosedForPagedSlidingWindowCache]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testLabStateDigestObserverFailsClosedForPagedSlidingWindowCache]' passed (0.000 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testLabStateDigestObserverFailsClosedForUnknownCacheKind]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testLabStateDigestObserverFailsClosedForUnknownCacheKind]' passed (0.000 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testLabStateDigestObserverRecordsPagedKVCacheLogicalPrefix]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testLabStateDigestObserverRecordsPagedKVCacheLogicalPrefix]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testLoadGatedNativeRowRidesOrdinaryForwardAndRestoresDrafterState]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=native_mtp_load_gate action=depth_zero active_rows=2 bound=1
+event=native_mtp_load_gate action=restore active_rows=1 bound=1
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testLoadGatedNativeRowRidesOrdinaryForwardAndRestoresDrafterState]' passed (0.583 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testLockstepSharedForwardDecodePopulatesBatchInnerState]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testLockstepSharedForwardDecodePopulatesBatchInnerState]' passed (0.005 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testLockstepWindowReturnsEverySampledTokenInOrder]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testLockstepWindowReturnsEverySampledTokenInOrder]' passed (0.002 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testLockstepWindowStreamsStepsAndEndsWhenObserverStops]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testLockstepWindowStreamsStepsAndEndsWhenObserverStops]' passed (0.003 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testMeasuredMixedPagedKVTopologyIsFamilySpecific]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testMeasuredMixedPagedKVTopologyIsFamilySpecific]' passed (0.000 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testMoEDispatchGateRequiresGenuinelyProvenSharedForwardIsolation]' started.
+[paged-kv] measure nil: batched-isolation probe result nil
+[paged-kv] measure nil: batched-isolation gate (proven=false sharedForwardParity=false parityTokens=0 challengeDistinguishing=false rowsDecoded=0 rowFailures=0 crossRowDivergences=0)
+[paged-kv] measure nil: batched-isolation gate (proven=false sharedForwardParity=false parityTokens=0 challengeDistinguishing=true rowsDecoded=1 rowFailures=0 crossRowDivergences=0)
+[paged-kv] measure nil: batched-isolation gate (proven=false sharedForwardParity=false parityTokens=0 challengeDistinguishing=true rowsDecoded=2 rowFailures=1 crossRowDivergences=0)
+[paged-kv] measure nil: batched-isolation gate (proven=false sharedForwardParity=false parityTokens=0 challengeDistinguishing=true rowsDecoded=2 rowFailures=0 crossRowDivergences=1)
+[paged-kv] measure nil: batched-isolation gate (proven=true sharedForwardParity=false parityTokens=0 challengeDistinguishing=false rowsDecoded=1 rowFailures=1 crossRowDivergences=1)
+[paged-kv] measure nil: batched-isolation gate (proven=true sharedForwardParity=false parityTokens=0 challengeDistinguishing=false rowsDecoded=2 rowFailures=0 crossRowDivergences=0)
+[paged-kv] measure nil: batched-isolation gate (proven=true sharedForwardParity=false parityTokens=48 challengeDistinguishing=true rowsDecoded=2 rowFailures=0 crossRowDivergences=0)
+[paged-kv] measure nil: batched-isolation gate (proven=true sharedForwardParity=true parityTokens=47 challengeDistinguishing=true rowsDecoded=2 rowFailures=0 crossRowDivergences=0)
+[paged-kv] measure OK: runtime measurement complete, paged-KV attach eligible for model=mlx-community/Qwen-Test
+[paged-kv] runtime-identity model=mlx-community/Qwen-Test model_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa hardware_class=apple-silicon:Apple M-test:ram-64gb metallib_sha256=504601045fd0aed35b35f33701e8f568f97eddaf46dbedba3c98d3ed3a7db39e kernel_identifier=macprovider_paged_kv_gather_v1
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testMoEDispatchGateRequiresGenuinelyProvenSharedForwardIsolation]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testMTPPackedCacheAbortRestoresExactRowsAfterFacadeFinalize]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testMTPPackedCacheAbortRestoresExactRowsAfterFacadeFinalize]' passed (0.000 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testMTPPackedCacheKeepsUnequalOffsetsAndReorderedRowsIndependent]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testMTPPackedCacheKeepsUnequalOffsetsAndReorderedRowsIndependent]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testMTPPackedCacheRejectsMalformedMapsBeforeMutation]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testMTPPackedCacheRejectsMalformedMapsBeforeMutation]' passed (0.000 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testMTPPackedCacheRejectsOutOfRangeResolutionWithoutRowMutation]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testMTPPackedCacheRejectsOutOfRangeResolutionWithoutRowMutation]' passed (0.000 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testMTPPackedCacheResolutionCommitsBaseColumnAndAcceptedPrefixOnly]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testMTPPackedCacheResolutionCommitsBaseColumnAndAcceptedPrefixOnly]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testMTPPackedCacheStagedCommitMatchesPerRowCommitByteForByte]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testMTPPackedCacheStagedCommitMatchesPerRowCommitByteForByte]' passed (0.002 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testMTPPackedCacheStagesProposalColumnsPrivatelyAndIgnoresPadding]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testMTPPackedCacheStagesProposalColumnsPrivatelyAndIgnoresPadding]' passed (0.000 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testNativeDrafterSeedFailureAfterSharedPrefillFailsOnlyThatRow]' started.
+event=batching_prefill_failed action=fail_closed reason=native_mtp_missing_prompt_bonus_token
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testNativeDrafterSeedFailureAfterSharedPrefillFailsOnlyThatRow]' passed (0.002 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testNativeMTPAdmissionCacheClassCanonicalizesOnlyVerifiedPagedRuntime]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testNativeMTPAdmissionCacheClassCanonicalizesOnlyVerifiedPagedRuntime]' passed (0.000 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testNativeMTPCountersAggregateAcrossRounds]' started.
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testNativeMTPCountersAggregateAcrossRounds]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testNativeMTPIntegrityProbeBlocksBuyerAdmissionAndReleasesAfterCompletion]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testNativeMTPIntegrityProbeBlocksBuyerAdmissionAndReleasesAfterCompletion]' passed (0.031 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testNativeMTPIntegrityProbeDoesNotClaimTheDurableReplayWindow]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testNativeMTPIntegrityProbeDoesNotClaimTheDurableReplayWindow]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testNativeMTPPromptPrefillUsesBoundedFinalPrefillHiddenWithoutReplay]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testNativeMTPPromptPrefillUsesBoundedFinalPrefillHiddenWithoutReplay]' passed (0.003 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testNativeMTPTupleDisableRejectsNewAndQueuedRowsAndContinuesPreoutputOrdinary]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testNativeMTPTupleDisableRejectsNewAndQueuedRowsAndContinuesPreoutputOrdinary]' passed (0.152 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testNativeRowSharesTheOrdinaryPrefillForwardOfItsGroup]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testNativeRowSharesTheOrdinaryPrefillForwardOfItsGroup]' passed (0.007 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testOnlyRowsInThePaddedCallsRouteShareIt]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testOnlyRowsInThePaddedCallsRouteShareIt]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testPackedTopTokenIDsMatchPerRowArgmaxInPackedOrder]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testPackedTopTokenIDsMatchPerRowArgmaxInPackedOrder]' passed (0.006 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testPackedVerifyGroupsStayWithinTheTokenBound]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testPackedVerifyGroupsStayWithinTheTokenBound]' passed (0.002 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testParityLabelIsTupleBoundAndRejectsMismatchedIdentity]' started.
+[paged-kv] measure OK: runtime measurement complete, paged-KV attach eligible for model=mlx-community/Qwen-Test
+[paged-kv] runtime-identity model=mlx-community/Qwen-Test model_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa hardware_class=apple-silicon:Apple M-test:ram-64gb metallib_sha256=504601045fd0aed35b35f33701e8f568f97eddaf46dbedba3c98d3ed3a7db39e kernel_identifier=macprovider_paged_kv_gather_v1
+[paged-kv] measure OK: runtime measurement complete, paged-KV attach eligible for model=mlx-community/Qwen-Test
+[paged-kv] runtime-identity model=mlx-community/Qwen-Test model_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd hardware_class=apple-silicon:Apple M-test:ram-64gb metallib_sha256=504601045fd0aed35b35f33701e8f568f97eddaf46dbedba3c98d3ed3a7db39e kernel_identifier=macprovider_paged_kv_gather_v1
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testParityLabelIsTupleBoundAndRejectsMismatchedIdentity]' passed (0.004 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testParityProbeAbsentFailsClosedToNoMeasurementAndNoAttach]' started.
+[paged-kv] measure nil: parity probe result nil
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testParityProbeAbsentFailsClosedToNoMeasurementAndNoAttach]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testPerRowAttentionKeepsTheSingleCallForForeignMasksAndMissingHistory]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testPerRowAttentionKeepsTheSingleCallForForeignMasksAndMissingHistory]' passed (0.047 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testProductionReplayAuthorityClaimsStableRequestFingerprintOnce]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testProductionReplayAuthorityClaimsStableRequestFingerprintOnce]' passed (0.012 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testProductionRuntimeMeasurementBuildsLiveIdentityAndSizingProof]' started.
+[paged-kv] measure OK: runtime measurement complete, paged-KV attach eligible for model=mlx-community/Qwen-Test
+[paged-kv] runtime-identity model=mlx-community/Qwen-Test model_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa hardware_class=apple-silicon:Apple M-test:ram-64gb metallib_sha256=504601045fd0aed35b35f33701e8f568f97eddaf46dbedba3c98d3ed3a7db39e kernel_identifier=macprovider_paged_kv_gather_v1
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testProductionRuntimeMeasurementBuildsLiveIdentityAndSizingProof]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testProductionRuntimeMeasurementIgnoresAdjacentParitySidecarByDefault]' started.
+[paged-kv] measure nil: parity probe result nil
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testProductionRuntimeMeasurementIgnoresAdjacentParitySidecarByDefault]' passed (0.003 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testProductionRuntimeMeasurementMissingMetallibStaysNil]' started.
+[paged-kv] measure nil: metallib file absent/unreadable/empty (candidates=["/tmp/absent/default.metallib"])
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testProductionRuntimeMeasurementMissingMetallibStaysNil]' passed (0.000 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testProductionRuntimeMeasurementRejectsIncompleteLiveInputs]' started.
+[paged-kv] measure nil: kernel identifier not registered
+[paged-kv] measure nil: parity probe result nil
+[paged-kv] measure nil: hardware fingerprint unresolved (chip=unknown ramGB=64)
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testProductionRuntimeMeasurementRejectsIncompleteLiveInputs]' passed (0.000 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testProductionSchedulerRequestIDUsesIngressIdentityWhenPresent]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testProductionSchedulerRequestIDUsesIngressIdentityWhenPresent]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testProductionSchedulerSubmissionCarriesIngestProvenance]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testProductionSchedulerSubmissionCarriesIngestProvenance]' passed (0.000 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testQwen35AndQwen36MixedRuntimesAttachOnlyWithVerifiedArchitecture]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testQwen35AndQwen36MixedRuntimesAttachOnlyWithVerifiedArchitecture]' passed (0.002 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testQwen35HybridArchitectureRequiresExactTupleAndConfigMetadata]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testQwen35HybridArchitectureRequiresExactTupleAndConfigMetadata]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testQwen3xHybridArchitectureRequiresExactAllowlistedIdentityAndConfigMetadata]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testQwen3xHybridArchitectureRequiresExactAllowlistedIdentityAndConfigMetadata]' passed (0.001 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testRaggedPrefillAttentionMatchesLoneCausalAttentionBitwise]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testRaggedPrefillAttentionMatchesLoneCausalAttentionBitwise]' passed (0.376 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testRaggedPrefillMaskIsPerRowCausalAndHidesShorterRowPadding]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testRaggedPrefillMaskIsPerRowCausalAndHidesShorterRowPadding]' passed (0.002 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testRaggedPromptKeepsAWindowedMaskForSplitRows]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testRaggedPromptKeepsAWindowedMaskForSplitRows]' passed (0.005 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testRealQwen35DensePrefillGroupingFollowsTheKernelRouteBound]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testRealQwen35DensePrefillGroupingFollowsTheKernelRouteBound]' passed (0.234 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testRealQwen35MoEPrefillGroupingFollowsTheKernelRouteBound]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testRealQwen35MoEPrefillGroupingFollowsTheKernelRouteBound]' passed (0.314 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testRealQwen35NativeRowInSharedPrefillGroupMatchesMTPDisabledGroup]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testRealQwen35NativeRowInSharedPrefillGroupMatchesMTPDisabledGroup]' passed (0.069 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testRealQwen35PackedNativeMTPRowsMatchSerialOrdinaryGreedy]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testRealQwen35PackedNativeMTPRowsMatchSerialOrdinaryGreedy]' passed (0.259 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testRealQwen35PackedNativeMTPRowsVerifiedInBoundedGroupsMatchSerialOrdinaryGreedy]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testRealQwen35PackedNativeMTPRowsVerifiedInBoundedGroupsMatchSerialOrdinaryGreedy]' passed (0.276 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testRealQwen35RaggedPrefillGroupingFollowsTheKernelRouteBound]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testRealQwen35RaggedPrefillGroupingFollowsTheKernelRouteBound]' passed (0.175 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testRealQwen35RaggedSharedPrefillMatchesPerRowPrefill]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testRealQwen35RaggedSharedPrefillMatchesPerRowPrefill]' passed (0.077 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testRealSharedForwardBackendCancelWaitsForActivePrefill]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testRealSharedForwardBackendCancelWaitsForActivePrefill]' passed (0.062 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testRealSharedForwardBackendGreedyMatchesLoneAndMixedOffsetBatch]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testRealSharedForwardBackendGreedyMatchesLoneAndMixedOffsetBatch]' passed (0.004 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testRowAttentionExtentsSplitOnlyPaddedRows]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testRowAttentionExtentsSplitOnlyPaddedRows]' passed (0.000 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testRuntimeCapabilityRequiresMeasuredObservedIdentityAndBackend]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testRuntimeCapabilityRequiresMeasuredObservedIdentityAndBackend]' passed (0.000 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testSeededSampledNativeRowsMatchSeededOrdinaryRows]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testSeededSampledNativeRowsMatchSeededOrdinaryRows]' passed (0.483 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testSharedDecodeAndVerifyAttentionMatchLoneBitsAtServedHeadDims]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testSharedDecodeAndVerifyAttentionMatchLoneBitsAtServedHeadDims]' passed (0.380 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testSharedDecodeWindowAttentionMatchesLoneBitsEveryStep]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testSharedDecodeWindowAttentionMatchesLoneBitsEveryStep]' passed (0.042 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testSharedForwardBackendFinishPreservesRetainedPagedHandoffRecord]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testSharedForwardBackendFinishPreservesRetainedPagedHandoffRecord]' passed (0.000 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testSharedForwardGreedyMatchesSerialLoneAndFullBatchWithUsageAndStops]' started.
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testSharedForwardGreedyMatchesSerialLoneAndFullBatchWithUsageAndStops]' passed (0.031 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testSharedPrefillCompatibilityAllowsRaggedOffsetsWithOneChunkLength]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testSharedPrefillCompatibilityAllowsRaggedOffsetsWithOneChunkLength]' passed (0.000 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testSlidingWindowDecodeRowsMatchTheirLoneBits]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testSlidingWindowDecodeRowsMatchTheirLoneBits]' passed (0.008 seconds).
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testVectorAttentionRouteMatchesTheCoreDispatchBoundaries]' started.
+Test Case '-[macprovider_cliTests.PagedKVRuntimeBridgeTests testVectorAttentionRouteMatchesTheCoreDispatchBoundaries]' passed (0.000 seconds).
+Test Suite 'PagedKVRuntimeBridgeTests' passed at 2026-10-18 18:03:13.529.
+	 Executed 94 tests, with 0 failures (0 unexpected) in 6.673 (6.678) seconds
+Test Suite 'phase3-binaryPackageTests.xctest' passed at 2026-10-18 18:03:13.529.
+	 Executed 94 tests, with 0 failures (0 unexpected) in 6.673 (6.678) seconds
+Test Suite 'Selected tests' passed at 2026-10-18 18:03:13.529.
+	 Executed 94 tests, with 0 failures (0 unexpected) in 6.673 (6.679) seconds
+decode-isolation padded single call differs from lone (9):
+  prefill 16/2x256 histories [3000, 3968, 2100] row 0 (3000 keys) max |diff| 6.1035156e-05
+  prefill 16/2x256 histories [3000, 3968, 2100] row 2 (2100 keys) max |diff| 0.00024414062
+  prefill 16/2x256 histories [3900, 4100] row 0 (3900 keys) max |diff| 0.00024414062
+  prefill 16/2x256 histories [7000, 8100] row 0 (7000 keys) max |diff| 0.00012207031
+  prefill 24/4x256 histories [0, 7, 30] row 1 (7 keys) max |diff| 0.00012207031
+  prefill 24/4x256 histories [3000, 3968, 2100] row 0 (3000 keys) max |diff| 0.00024414062
+  prefill 24/4x256 histories [3000, 3968, 2100] row 2 (2100 keys) max |diff| 3.7252903e-09
+  prefill 24/4x256 histories [3900, 4100] row 0 (3900 keys) max |diff| 0.00024414062
+  prefill 24/4x256 histories [7000, 8100] row 0 (7000 keys) max |diff| 6.1035156e-05
+decode-isolation padded single call differs from lone (18):
+  decode 16/2x256 histories [600, 901, 1501, 3000, 9000] row 0 (600 keys) max |diff| 0.0009765625
+  decode 16/2x256 histories [600, 901, 1501, 3000, 9000] row 1 (901 keys) max |diff| 0.0009765625
+  decode 16/2x256 histories [1022, 1023, 4095, 16383, 16400] row 0 (1022 keys) max |diff| 0.0009765625
+  decode 16/2x256 histories [1022, 1023, 4095, 16383, 16400] row 1 (1023 keys) max |diff| 0.0009765625
+  decode 16/2x256 histories [1022, 1023, 4095, 16383, 16400] row 2 (4095 keys) max |diff| 0.00048828125
+  decode 24/4x256 histories [600, 901, 1501, 3000, 9000] row 0 (600 keys) max |diff| 0.001953125
+  decode 24/4x256 histories [600, 901, 1501, 3000, 9000] row 1 (901 keys) max |diff| 0.0009765625
+  decode 24/4x256 histories [1022, 1023, 4095, 16383, 16400] row 0 (1022 keys) max |diff| 0.0009765625
+  decode 24/4x256 histories [1022, 1023, 4095, 16383, 16400] row 1 (1023 keys) max |diff| 0.0009765625
+  decode 24/4x256 histories [1022, 1023, 4095, 16383, 16400] row 2 (4095 keys) max |diff| 0.00048828125
+  decode 16/2x128 histories [600, 901, 1501, 3000, 9000] row 0 (600 keys) max |diff| 0.0009765625
+  decode 16/2x128 histories [600, 901, 1501, 3000, 9000] row 1 (901 keys) max |diff| 0.0009765625
+  decode 16/2x128 histories [600, 901, 1501, 3000, 9000] row 4 (9000 keys) max |diff| 0.00024414062
+  decode 16/2x128 histories [1022, 1023, 4095, 16383, 16400] row 0 (1022 keys) max |diff| 0.0009765625
+  decode 16/2x128 histories [1022, 1023, 4095, 16383, 16400] row 1 (1023 keys) max |diff| 0.0009765625
+  decode 16/2x128 histories [1022, 1023, 4095, 16383, 16400] row 2 (4095 keys) max |diff| 0.00036621094
+  decode 16/2x128 histories [1022, 1023, 4095, 16383, 16400] row 3 (16383 keys) max |diff| 0.00024414062
+  decode 16/2x128 histories [1022, 1023, 4095, 16383, 16400] row 4 (16400 keys) max |diff| 0.00024414062
