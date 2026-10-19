@@ -1465,6 +1465,18 @@ actor ModelRuntime: ModelRuntimeServing {
         )
     }
 
+    /// SPEC-001-R011: the other active rows a request's native-MTP admission
+    /// resolves against (the caller's own handle is registered). A local row
+    /// never takes the native row; a buyer's count leaves local rows out,
+    /// because they are preempted for it.
+    static func nativeMTPOtherActiveRows(isLocal: Bool, registeredRows: Int, localRows: Int) -> Int {
+        isLocal ? Int.max : max(0, registeredRows - 1 - localRows)
+    }
+
+    static func nativeMTPBuyerPreemptsLocal(_ admission: NativeMTPRuntimeAdmission, isLocal: Bool, localRows: Int) -> Bool {
+        !isLocal && admission.usesNativeMTP && localRows > 0
+    }
+
     private func nativeMTPRuntimeAdmission(
         for request: ChatCompletionRequest,
         snapshot: RuntimeSnapshot,
@@ -1475,7 +1487,9 @@ actor ModelRuntime: ModelRuntimeServing {
         // the overlap until the preempted local rows leave).
         let isLocal = localRegistrationIDs.contains(handle.registrationID)
         let localRows = localRegistrationIDs.count
-        let otherActiveRows = isLocal ? Int.max : max(0, inFlightCancellations.count - 1 - localRows)
+        let otherActiveRows = Self.nativeMTPOtherActiveRows(
+            isLocal: isLocal, registeredRows: inFlightCancellations.count, localRows: localRows
+        )
         let admission = Self.nativeMTPRuntimeAdmission(
             for: request,
             draftConfigured: snapshot.hasTargetCompatibleDraft || currentDraftModelID != nil,
@@ -1501,7 +1515,7 @@ actor ModelRuntime: ModelRuntimeServing {
             testNativeMTPAdmissionRequestObserver?(request.requestID, admission, otherActiveRows)
             return admission
         }
-        if admission.usesNativeMTP, localRows > 0 {
+        if Self.nativeMTPBuyerPreemptsLocal(admission, isLocal: isLocal, localRows: localRows) {
             // A buyer that can run native MTP must not wait at depth zero
             // behind local rows: preempt them.
             let providerStatus = providerStatus

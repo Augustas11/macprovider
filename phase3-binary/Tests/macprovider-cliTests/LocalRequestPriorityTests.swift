@@ -764,8 +764,8 @@ final class LocalRequestPriorityTests: XCTestCase {
     }
 
     /// Finding 3: a local row never takes the native-MTP row, and a buyer
-    /// arriving beside local work is admitted native (its row count ignores
-    /// local rows) and preempts the local work.
+    /// arriving beside local work keeps native eligibility (its row count
+    /// ignores local rows) and preempts the local work.
     func testLocalNeverTakesTheNativeMTPRowAndBuyerKeepsIt() async throws {
         let recorder = NativeAdmissionRecorder()
         let release = AsyncSemaphore(value: 0)
@@ -808,8 +808,33 @@ final class LocalRequestPriorityTests: XCTestCase {
         await runtime.unregisterInFlight(buyerHandle.registrationID)
         let buyer = try XCTUnwrap(recorder.admission(for: "buyer-1"))
         XCTAssertEqual(buyer.otherRows, 0, "local rows do not count against the buyer's native row bound")
-        XCTAssertTrue(buyer.admission.usesNativeMTP, "the buyer keeps the native-MTP row")
-        try await eventually { lease.isPreempted }
+        XCTAssertEqual(recorder.admission(for: "local-1")?.otherRows, Int.max, "local resolves as if the native bound were full")
+        // This fixture has no drafter/scheduler, so the native path itself is
+        // covered by the static decision below.
+        let capability = NativeMTPCapability(
+            admitted: true, revoked: false, revocationStateAvailable: true,
+            supportsCurrentProcessor: true, supportsCurrentStateCache: true,
+            supportsStreaming: true, supportsNonStreaming: true, supportsStopSequences: false,
+            hasQualifiedRowMappedTransactions: true, maximumProposalDepth: 2,
+            maximumPromptTokens: 4096, maximumCompletionTokens: 256,
+            maximumNativeActiveRows: 1, supportsSampling: false
+        )
+        let eligible = ModelRuntime.nativeMTPRuntimeAdmission(
+            for: buyerRequest, draftConfigured: false, draftLoaded: false, numDraftTokens: nil,
+            nativeMTPMode: .auto, nativeMTPCapability: capability, schedulerSupportsNativeMTP: true
+        )
+        XCTAssertTrue(eligible.usesNativeMTP, "\(eligible.selection)")
+        let localRows = ModelRuntime.nativeMTPOtherActiveRows(isLocal: true, registeredRows: 1, localRows: 1)
+        XCTAssertFalse(eligible.resolvingActiveRows(otherActiveRows: localRows).usesNativeMTP, "local never takes the native row, even alone")
+        let buyerBesideLocal = eligible.resolvingActiveRows(
+            otherActiveRows: ModelRuntime.nativeMTPOtherActiveRows(isLocal: false, registeredRows: 2, localRows: 1))
+        XCTAssertTrue(buyerBesideLocal.usesNativeMTP, "a local row never demotes a buyer to ordinary decode")
+        XCTAssertTrue(ModelRuntime.nativeMTPBuyerPreemptsLocal(buyerBesideLocal, isLocal: false, localRows: 1))
+        XCTAssertFalse(ModelRuntime.nativeMTPBuyerPreemptsLocal(buyerBesideLocal, isLocal: false, localRows: 0))
+        let buyerBesideBuyer = eligible.resolvingActiveRows(
+            otherActiveRows: ModelRuntime.nativeMTPOtherActiveRows(isLocal: false, registeredRows: 3, localRows: 1))
+        XCTAssertFalse(buyerBesideBuyer.usesNativeMTP, "the signed bound still counts other buyers")
+        XCTAssertFalse(lease.isPreempted, "an ordinary-path buyer does not preempt local work for native MTP")
 
         await release.resize(to: 1)
         _ = try? await local.value
@@ -831,8 +856,8 @@ final class LocalRequestPriorityTests: XCTestCase {
         ) { chunks.append($0) }
         // Same split TokenIterator would make: the final <= step tokens stay
         // with the iterator.
-        XCTAssertEqual(chunks, [100 ..< 612])
-        XCTAssertEqual(resumeAt, 612)
+        XCTAssertEqual(chunks, [100 ..< 612, 612 ..< 1_124])
+        XCTAssertEqual(resumeAt, 1_124)
         XCTAssertEqual(try ModelRuntime.cancellableLocalPrefill(tokenCount: 400, from: 0, stepSize: 512, isCancelled: { false }) { _ in XCTFail("short prompt") }, 0)
 
         var calls = 0

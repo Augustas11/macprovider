@@ -74,7 +74,7 @@ final class ConnectedConfigTransaction {
         let restoredMode = Self.restoredMode(record.original.mode)
         if current.bytes == record.original.bytes {
             // Covers a failed write or repeated restore without reviving unsafe permissions.
-            if current.bytes != nil && current.mode.map(mode_t.init) != restoredMode {
+            if current.bytes != nil && current.mode.map({ mode_t($0) }) != restoredMode {
                 try Self.replace(target, expected: current, bytes: current.bytes, mode: restoredMode)
             }
         } else {
