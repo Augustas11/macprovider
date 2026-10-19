@@ -21,6 +21,14 @@ enum ConnectedBuyerKeychain {
             guard SecItemAdd(added as CFDictionary, nil) == errSecSuccess else { throw ConnectedAppsError.credential }
         } else if status != errSecSuccess { throw ConnectedAppsError.credential }
     }
+    /// Whether a buyer key is saved, without reading the secret.
+    static func exists() -> Bool {
+        var request = query
+        request[kSecReturnData as String] = false
+        request[kSecMatchLimit as String] = kSecMatchLimitOne
+        return SecItemCopyMatching(request as CFDictionary, nil) == errSecSuccess
+    }
+
     static func read() throws -> String {
         var request = query
         request[kSecReturnData as String] = true
