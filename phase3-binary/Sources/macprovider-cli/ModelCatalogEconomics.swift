@@ -843,9 +843,7 @@ struct ModelCatalogEconomicsBuilder {
         admissionStatuses: [String: BYOMAdmissionStatusWire],
         demand: AutotuneStaticSelection<DemandRank>,
         candidateCatalog: AutotuneStaticSelection<CandidateCatalog>,
-        rateCard: AutotuneStaticSelection<RateCardProjection>?,
-        catalogDownloadSizes: [String: Int64] = [:],
-        hostRAMGB: Int = ModelFit.detectRAMGB()
+        rateCard: AutotuneStaticSelection<RateCardProjection>?
     ) -> ModelCatalogEconomicsWire {
         let rateCardSource = source(for: rateCard)
         let feedWarnings = demand.warnings
@@ -882,12 +880,7 @@ struct ModelCatalogEconomicsBuilder {
                 catalogRow: catalogRow,
                 currentModelID: currentModelID,
                 demand: demand.value,
-                rateCard: rateCard,
-                rateCardSource: rateCardSource,
-                feedWarnings: feedWarnings,
-                generatedAt: generatedAt,
-                downloadBytes: catalogDownloadSizes[key],
-                hostRAMGB: hostRAMGB
+                rateCardSource: rateCardSource
             )
             rows.append(row)
         }
@@ -1172,7 +1165,7 @@ struct ModelCatalogEconomicsBuilder {
                 catalogEconomicsPermitted: false,
                 settlementCapable: false
             ),
-            providerGuidance: BYOMDiscoveryGuidance.catalogOnlyGuidance(),
+            providerGuidance: BYOMDiscoveryGuidance.guidance(forAdmissionState: "not_offered", warnings: []),
             rateCardVersion: nil,
             rateCardGeneratedAt: nil,
             rateCardKey: nil,
@@ -1288,22 +1281,12 @@ struct ModelCatalogEconomicsBuilder {
         return .evaluateModel(transactionID: UUID().uuidString.lowercased())
     }
 
-    /// SPEC-044-R014: the v1 catalog-only row. Its admission is the
-    /// conservative local-default `not_offered` sentinel; its economics are the
-    /// signed catalog rate as `catalog_reference` (never `trusted`); and a
-    /// model that fits with a verified signed artifact offers a confirmed
-    /// `prepare_model` download.
     private static func makeCatalogOnlyRow(
         modelKey: String,
         catalogRow: CandidateCatalog.Row,
         currentModelID: String?,
         demand: DemandRank,
-        rateCard: AutotuneStaticSelection<RateCardProjection>?,
-        rateCardSource: String,
-        feedWarnings: Set<AutotuneRecommendWarning>,
-        generatedAt: Date,
-        downloadBytes: Int64?,
-        hostRAMGB: Int
+        rateCardSource: String
     ) -> ModelCatalogEconomicsWire.Row {
         let admission = ModelCatalogEconomicsWire.Admission(
             state: "not_offered",
@@ -1314,98 +1297,42 @@ struct ModelCatalogEconomicsBuilder {
             settlementCapable: false
         )
         let demandRow = demand.rows[modelKey]
-        let isCurrent = currentModelMatches(currentModelID, catalogRow.modelID)
-        let fits = hostRAMGB >= catalogRow.minRAMGB
-        let reference = signedRateFields(
-            modelKey: modelKey,
-            rateCard: rateCard,
-            rateCardSource: rateCardSource,
-            feedWarnings: feedWarnings,
-            generatedAt: generatedAt
-        )
-        let economics = reference.state == "trusted"
-            ? reference
-            : nullEconomics(state: "blocked", rateSource: "none", warnings: reference.warningCodes)
-        let isReference = economics.state == "trusted"
-        var warnings = Set(["admission_state_not_settlement_capable", "model_not_local"])
-        warnings.formUnion(feedWarnings.flatMap(mapFeedWarning))
-        warnings.formUnion(economics.warningCodes)
-        let downloadable = fits
-            && !isCurrent
-            && downloadBytes.map { $0 > 0 && $0 <= Int64(ModelPreparationContracts.maxEstimatedBytes) } == true
-            && feedWarnings.isDisjoint(with: [.candidateCatalogIntegrityFailure, .candidateCatalogUpdateRequired])
         let unavailable = ModelCatalogEconomicsWire.Action.unavailable("no_cli_transaction_available")
-        let prepare: ModelCatalogEconomicsWire.Action
-        if downloadable, let downloadBytes {
-            prepare = .prepareModel(transactionID: UUID().uuidString.lowercased(), estimatedBytes: downloadBytes)
-        } else {
-            prepare = unavailable
-            warnings.insert("action_unavailable")
-        }
-        if !fits {
-            warnings.insert("hardware_does_not_fit")
-        }
-        let estimatedGB = downloadBytes.map { Double($0) / 1_000_000_000 } ?? Double(catalogRow.minRAMGB)
+        let isCurrent = currentModelMatches(currentModelID, catalogRow.modelID)
         return ModelCatalogEconomicsWire.Row(
             modelKey: modelKey,
             servedModelID: catalogRow.modelID,
             displayModelID: catalogRow.modelID,
-            actionModelID: prepare.available ? modelKey : nil,
+            actionModelID: nil,
             isCurrent: isCurrent,
             weightsPresentLocally: false,
-            runtimeState: prepare.available ? "needs_preparation" : "catalog",
-            estimatedGB: estimatedGB,
-            fit: fits ? "fits" : "does_not_fit",
-            disabledReason: prepare.available ? nil : (fits ? "no_cli_transaction_available" : "hardware_does_not_fit"),
-            warningCodes: Array(warnings).sorted(),
+            runtimeState: "catalog",
+            estimatedGB: Double(catalogRow.minRAMGB),
+            fit: ModelFit.detectRAMGB() >= catalogRow.minRAMGB ? "fits" : "does_not_fit",
+            disabledReason: "no_cli_transaction_available",
+            warningCodes: ["admission_state_not_settlement_capable", "model_not_local", "action_unavailable"],
             admission: admission,
-            providerGuidance: BYOMDiscoveryGuidance.catalogOnlyGuidance(),
-            rateCardVersion: economics.rateCardVersion,
-            rateCardGeneratedAt: economics.rateCardGeneratedAt,
-            rateCardKey: economics.rateCardKey,
-            rateSource: isReference ? economics.rateSource : "none",
-            promptRateUSDPerMillionTokens: economics.promptRate,
-            completionRateUSDPerMillionTokens: economics.completionRate,
-            providerShareBPS: economics.providerShareBPS,
-            providerPromptPayoutUSDPerMillionTokens: economics.providerPromptPayout,
-            providerCompletionPayoutUSDPerMillionTokens: economics.providerCompletionPayout,
-            economicsState: isReference ? "catalog_reference" : "blocked",
+            providerGuidance: BYOMDiscoveryGuidance.guidance(forAdmissionState: "not_offered", warnings: []),
+            rateCardVersion: nil,
+            rateCardGeneratedAt: nil,
+            rateCardKey: nil,
+            rateSource: conservativeRateSource(rateCardSource, permitted: false),
+            promptRateUSDPerMillionTokens: nil,
+            completionRateUSDPerMillionTokens: nil,
+            providerShareBPS: nil,
+            providerPromptPayoutUSDPerMillionTokens: nil,
+            providerCompletionPayoutUSDPerMillionTokens: nil,
+            economicsState: "blocked",
             demandRank: demandRow?.rank,
-            demandWeight: isReference ? demandRow?.demandWeight : nil,
-            readyProviderCount: isReference ? demandRow?.readyProviderCount : nil,
-            supplyDeficitScore: isReference ? demandRow?.effectiveSupplyDeficitMultiplier : nil,
+            demandWeight: nil,
+            readyProviderCount: nil,
+            supplyDeficitScore: nil,
             switchAction: unavailable,
-            prepare: prepare,
+            prepare: unavailable,
             evaluate: unavailable,
             adoptRecommendation: unavailable,
             cleanupStaging: ModelCatalogEconomicsWire.Action.unavailable("staging_cleanup_not_required")
         )
-    }
-
-    /// SPEC-044-R014-3: catalog key -> size of the current signed artifact
-    /// feed's verified primary `mlx_safetensors` artifact that matches the
-    /// signed catalog row's pinned revision and hash. Only these keys can be
-    /// downloaded from Malibu.
-    static func catalogDownloadSizes(
-        candidateCatalog: CandidateCatalog,
-        artifactFeed: ArtifactFeed?
-    ) -> [String: Int64] {
-        guard let feed = artifactFeed else { return [:] }
-        var sizes: [String: Int64] = [:]
-        for (key, row) in candidateCatalog.rows {
-            guard let revision = row.modelRevision, !revision.isEmpty,
-                  let sha = row.modelSHA256, !sha.isEmpty,
-                  let model = feed.models[key],
-                  let primary = model.artifacts[model.primaryArtifactID],
-                  primary.runtimeFormat == ArtifactFeed.primaryFormat,
-                  primary.verificationStatus == "verified",
-                  primary.hash == sha,
-                  primary.sourceRef.revision == revision,
-                  primary.sizeBytes > 0
-            else { continue }
-            sizes[key] = Int64(primary.sizeBytes)
-        }
-        return sizes
     }
 
     private struct EconomicsFields {
@@ -1433,25 +1360,6 @@ struct ModelCatalogEconomicsBuilder {
         guard admission.catalogEconomicsPermitted else {
             return nullEconomics(state: "blocked", rateSource: conservativeRateSource(rateCardSource, permitted: false), warnings: ["admission_state_not_settlement_capable"])
         }
-        return signedRateFields(
-            modelKey: modelKey,
-            rateCard: rateCard,
-            rateCardSource: rateCardSource,
-            feedWarnings: feedWarnings,
-            generatedAt: generatedAt
-        )
-    }
-
-    /// The R003 rate-card checks without the admission gate: `trusted` here
-    /// means the signed rate row itself is trustworthy, not that this Mac may
-    /// earn it.
-    private static func signedRateFields(
-        modelKey: String?,
-        rateCard: AutotuneStaticSelection<RateCardProjection>?,
-        rateCardSource: String,
-        feedWarnings: Set<AutotuneRecommendWarning>,
-        generatedAt: Date
-    ) -> EconomicsFields {
         guard let modelKey, let rateCard else {
             return nullEconomics(state: "unavailable", rateSource: "none", warnings: ["projection_unavailable"])
         }

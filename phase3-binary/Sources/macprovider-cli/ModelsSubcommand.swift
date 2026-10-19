@@ -952,12 +952,18 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
             admissionStatuses: admissions.statuses,
             demand: inputs.demand,
             candidateCatalog: inputs.candidate,
+            rateCard: inputs.rateCard
+        ).withCatalogOnlyRows(CatalogOnlyRowProjection.Inputs(
+            candidateCatalog: inputs.candidate,
+            demand: inputs.demand,
             rateCard: inputs.rateCard,
-            catalogDownloadSizes: ModelCatalogEconomicsBuilder.catalogDownloadSizes(
+            generatedAt: Date(),
+            downloadSizes: CatalogOnlyRowProjection.downloadSizes(
                 candidateCatalog: inputs.candidate.value,
                 artifactFeed: inputs.artifactFeed.value?.feed
-            )
-        ).withAdmissionReadOutcome(missedCandidateIDs: admissions.missedCandidateIDs)
+            ),
+            hostRAMGB: ModelFit.detectRAMGB()
+        )).withAdmissionReadOutcome(missedCandidateIDs: admissions.missedCandidateIDs)
         // SPEC-044's projection warning codes are a closed enum of v0.1 feed
         // classes; the artifact-feed classes are reported beside them here
         // rather than mapped onto codes that would misattribute the failure to

@@ -171,8 +171,8 @@ enum ModelsPrepareCatalogRunner {
         var stagedBytes: @Sendable (ModelArtifactSignedRow, CachedModelArtifactResolver) -> Int64
         /// Removes only this model's interrupted-download leftovers.
         var removePartials: @Sendable (ModelArtifactSignedRow, CachedModelArtifactResolver) -> Void
-        /// At most 10 s (SPEC-044-R014-4); 5 s leaves margin.
-        var progressIntervalNanoseconds: UInt64 = 5_000_000_000
+        /// At most 10 s (SPEC-044-R014-4); 8 s leaves margin and keeps a long download's output small.
+        var progressIntervalNanoseconds: UInt64 = 8_000_000_000
 
         static let live = Dependencies(
             resolveRow: { try await ModelArtifactSignedRowResolver.resolve(key: $0) },

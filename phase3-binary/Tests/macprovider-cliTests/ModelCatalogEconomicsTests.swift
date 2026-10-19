@@ -980,18 +980,38 @@ final class ModelCatalogEconomicsTests: XCTestCase {
         downloadSizes: [String: Int64] = [:],
         hostRAMGB: Int = 512
     ) throws -> ModelCatalogEconomicsWire {
-        let inputs = try Self.staticInputs()
+        try Self.catalogOnlyProjection(inputs: Self.staticInputs(), generatedAt: generatedAt, downloadSizes: downloadSizes, hostRAMGB: hostRAMGB)
+    }
+
+    private static func catalogOnlyProjection(
+        inputs: (
+            demand: AutotuneStaticSelection<DemandRank>,
+            candidateCatalog: AutotuneStaticSelection<CandidateCatalog>,
+            rateCard: AutotuneStaticSelection<RateCardProjection>
+        ),
+        generatedAt: Date? = nil,
+        downloadSizes: [String: Int64] = [:],
+        hostRAMGB: Int = 512,
+        discovery: BYOMDiscoveryWire? = nil,
+        admissionStatuses: [String: BYOMAdmissionStatusWire] = [:]
+    ) -> ModelCatalogEconomicsWire {
+        let at = generatedAt ?? inputs.rateCard.value.generatedAt.addingTimeInterval(60)
         return ModelCatalogEconomicsBuilder.makeProjection(
-            generatedAt: generatedAt ?? inputs.rateCard.value.generatedAt.addingTimeInterval(60),
+            generatedAt: at,
             currentModelID: nil,
-            discovery: Self.discovery(candidates: []),
-            admissionStatuses: [:],
+            discovery: discovery ?? Self.discovery(candidates: []),
+            admissionStatuses: admissionStatuses,
             demand: inputs.demand,
             candidateCatalog: inputs.candidateCatalog,
+            rateCard: inputs.rateCard
+        ).withCatalogOnlyRows(CatalogOnlyRowProjection.Inputs(
+            candidateCatalog: inputs.candidateCatalog,
+            demand: inputs.demand,
             rateCard: inputs.rateCard,
-            catalogDownloadSizes: downloadSizes,
+            generatedAt: at,
+            downloadSizes: downloadSizes,
             hostRAMGB: hostRAMGB
-        )
+        ))
     }
 
     func testCatalogOnlyRowUsesSourceAwareNotOfferedGuidance() throws {
@@ -1097,17 +1117,7 @@ final class ModelCatalogEconomicsTests: XCTestCase {
     func testCatalogOnlyDownloadIsOffForAnUntrustedCandidateCatalog() throws {
         var inputs = try Self.staticInputs()
         inputs.candidateCatalog.warnings.insert(.candidateCatalogIntegrityFailure)
-        let projection = ModelCatalogEconomicsBuilder.makeProjection(
-            generatedAt: inputs.rateCard.value.generatedAt.addingTimeInterval(60),
-            currentModelID: nil,
-            discovery: Self.discovery(candidates: []),
-            admissionStatuses: [:],
-            demand: inputs.demand,
-            candidateCatalog: inputs.candidateCatalog,
-            rateCard: inputs.rateCard,
-            catalogDownloadSizes: [Self.catalogModelKey: 1_000],
-            hostRAMGB: 512
-        )
+        let projection = Self.catalogOnlyProjection(inputs: inputs, downloadSizes: [Self.catalogModelKey: 1_000])
         let row = try XCTUnwrap(projection.rows.first { $0.modelKey == Self.catalogModelKey })
         XCTAssertFalse(row.prepare.available)
         XCTAssertNotEqual(row.economicsState, "catalog_reference")
@@ -1145,14 +1155,68 @@ final class ModelCatalogEconomicsTests: XCTestCase {
             )
         }
         XCTAssertEqual(
-            ModelCatalogEconomicsBuilder.catalogDownloadSizes(candidateCatalog: catalog, artifactFeed: feed())[Self.catalogModelKey],
+            CatalogOnlyRowProjection.downloadSizes(candidateCatalog: catalog, artifactFeed: feed())[Self.catalogModelKey],
             12_100_000_000
         )
-        XCTAssertTrue(ModelCatalogEconomicsBuilder.catalogDownloadSizes(candidateCatalog: catalog, artifactFeed: nil).isEmpty)
-        XCTAssertNil(ModelCatalogEconomicsBuilder.catalogDownloadSizes(candidateCatalog: catalog, artifactFeed: feed(status: "declared"))[Self.catalogModelKey])
-        XCTAssertNil(ModelCatalogEconomicsBuilder.catalogDownloadSizes(candidateCatalog: catalog, artifactFeed: feed(hash: String(repeating: "f", count: 64)))[Self.catalogModelKey])
-        XCTAssertNil(ModelCatalogEconomicsBuilder.catalogDownloadSizes(candidateCatalog: catalog, artifactFeed: feed(revision: String(repeating: "c", count: 40)))[Self.catalogModelKey])
-        XCTAssertNil(ModelCatalogEconomicsBuilder.catalogDownloadSizes(candidateCatalog: catalog, artifactFeed: feed(format: "gguf"))[Self.catalogModelKey])
+        XCTAssertTrue(CatalogOnlyRowProjection.downloadSizes(candidateCatalog: catalog, artifactFeed: nil).isEmpty)
+        XCTAssertNil(CatalogOnlyRowProjection.downloadSizes(candidateCatalog: catalog, artifactFeed: feed(status: "declared"))[Self.catalogModelKey])
+        XCTAssertNil(CatalogOnlyRowProjection.downloadSizes(candidateCatalog: catalog, artifactFeed: feed(hash: String(repeating: "f", count: 64)))[Self.catalogModelKey])
+        XCTAssertNil(CatalogOnlyRowProjection.downloadSizes(candidateCatalog: catalog, artifactFeed: feed(revision: String(repeating: "c", count: 40)))[Self.catalogModelKey])
+        XCTAssertNil(CatalogOnlyRowProjection.downloadSizes(candidateCatalog: catalog, artifactFeed: feed(format: "gguf"))[Self.catalogModelKey])
+    }
+
+    func testCatalogReferenceRateEqualsTheTrustedRateForTheSameKey() throws {
+        let inputs = try Self.staticInputs()
+        let reference = try XCTUnwrap(
+            Self.catalogOnlyProjection(inputs: inputs).rows.first { $0.modelKey == Self.catalogModelKey }
+        )
+        let admitted = try XCTUnwrap(ModelCatalogEconomicsBuilder.makeProjection(
+            generatedAt: inputs.rateCard.value.generatedAt.addingTimeInterval(60),
+            currentModelID: nil,
+            discovery: Self.discovery(candidate: Self.candidate()),
+            admissionStatuses: [Self.candidateID: Self.status(state: "catalog_priced", source: "coordinator")],
+            demand: inputs.demand,
+            candidateCatalog: inputs.candidateCatalog,
+            rateCard: inputs.rateCard
+        ).rows.first { $0.actionModelID == Self.candidateID })
+        XCTAssertEqual(admitted.economicsState, "trusted")
+        XCTAssertEqual(reference.economicsState, "catalog_reference")
+        XCTAssertEqual(reference.rateCardVersion, admitted.rateCardVersion)
+        XCTAssertEqual(reference.rateCardGeneratedAt, admitted.rateCardGeneratedAt)
+        XCTAssertEqual(reference.rateCardKey, admitted.rateCardKey)
+        XCTAssertEqual(reference.rateSource, admitted.rateSource)
+        XCTAssertEqual(reference.promptRateUSDPerMillionTokens, admitted.promptRateUSDPerMillionTokens)
+        XCTAssertEqual(reference.completionRateUSDPerMillionTokens, admitted.completionRateUSDPerMillionTokens)
+        XCTAssertEqual(reference.providerShareBPS, admitted.providerShareBPS)
+        XCTAssertEqual(reference.providerPromptPayoutUSDPerMillionTokens, admitted.providerPromptPayoutUSDPerMillionTokens)
+        XCTAssertEqual(reference.providerCompletionPayoutUSDPerMillionTokens, admitted.providerCompletionPayoutUSDPerMillionTokens)
+        XCTAssertEqual(reference.demandWeight, admitted.demandWeight)
+        XCTAssertEqual(reference.readyProviderCount, admitted.readyProviderCount)
+    }
+
+    func testCatalogOnlyRowsLeaveCandidateRowsUntouched() throws {
+        let inputs = try Self.staticInputs()
+        let plain = ModelCatalogEconomicsBuilder.makeProjection(
+            generatedAt: inputs.rateCard.value.generatedAt.addingTimeInterval(60),
+            currentModelID: nil,
+            discovery: Self.discovery(candidate: Self.candidate()),
+            admissionStatuses: [:],
+            demand: inputs.demand,
+            candidateCatalog: inputs.candidateCatalog,
+            rateCard: inputs.rateCard
+        )
+        let projected = Self.catalogOnlyProjection(
+            inputs: inputs,
+            downloadSizes: [Self.catalogModelKey: 1_000],
+            discovery: Self.discovery(candidate: Self.candidate())
+        )
+        XCTAssertEqual(plain.rows.count, projected.rows.count)
+        XCTAssertEqual(
+            plain.rows.first { $0.actionModelID == Self.candidateID },
+            projected.rows.first { $0.actionModelID == Self.candidateID }
+        )
+        XCTAssertFalse(projected.rows.contains { $0.modelKey == Self.catalogModelKey && $0.actionModelID == Self.catalogModelKey },
+                       "a model with a local candidate has no catalog-only download row")
     }
 
     func testV2CatalogOnlySentinelStaysUnavailableWhenV1OffersADownload() throws {
