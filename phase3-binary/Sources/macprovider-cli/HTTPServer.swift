@@ -1001,10 +1001,18 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         let inboundRequestID = rawInboundRequestID.flatMap(ChatCompletionRequest.normalizedRequestID)
         let auditRequestID = inboundRequestID ?? UUID().uuidString
         let settlementMetadata = Self.settlementMetadata(from: requestHead?.headers.first(name: Self.settlementMetadataHeaderName))
-        // SPEC-001-R011: parsable settlement metadata classifies network work.
-        // This is local-process policy, not authentication; other loopback work is local:
-        // counted apart from buyer stats and lower priority than buyers.
-        let localLease: LocalPreemptionLease? = settlementMetadata == nil ? LocalPreemptionLease() : nil
+        // SPEC-001-R011: local is classified positively (see `requestOrigin`).
+        // Anything else, including coordinator probes that carry no
+        // settlement metadata, is network work with buyer priority.
+        let origin = Self.requestOrigin(
+            headers: requestHead?.headers ?? HTTPHeaders(),
+            settlementMetadata: settlementMetadata,
+            peerIsLoopback: Self.isLoopbackPeer(context.remoteAddress)
+        )
+        let localLease: LocalPreemptionLease? = origin == .local ? LocalPreemptionLease() : nil
+        // Receipt-audit and KV-cache log lines tag local work so it never
+        // reads as buyer traffic; receipts keep the inbound request id.
+        let logRequestID = Self.logRequestID(auditRequestID, localLease: localLease)
         var parsedRequest: ChatCompletionRequest?
 
         do {
@@ -1044,7 +1052,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 
             if request.stream {
                 if settlementMetadata == nil {
-                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .streamingRequest)
+                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: .streamingRequest)
                 }
                 handleStreamingChatCompletions(
                     request: request,
@@ -1064,7 +1072,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 
             let providerStatus = providerStatus
             let idlePrewarmer = idlePrewarmer
-            let task = Task.detached { @Sendable [modelRuntime, providerStatus, request, writer, warmSwapEnabled, receiptBuilder, providerID, auditRequestID, settlementMetadata, idlePrewarmer, requestAcceptedAt, disconnect, localLease] in
+            let task = Task.detached { @Sendable [modelRuntime, providerStatus, request, writer, warmSwapEnabled, receiptBuilder, providerID, auditRequestID, logRequestID, settlementMetadata, idlePrewarmer, requestAcceptedAt, disconnect, localLease] in
                 var startedAt = requestAcceptedAt
                 var providerRequestStarted = false
                 // SPEC-015 §M.2.2 atomic-read invariant — capture
@@ -1085,9 +1093,12 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     snapshot: preSnapshot
                 )
                 do {
-                    // SPEC-001-R011: admission and buyer preemption precede any
-                    // runtime registration, so queued local work holds nothing.
+                    let handle: RequestHandle
                     if let localLease {
+                        // SPEC-001-R011: local admission and buyer preemption
+                        // precede runtime registration, so queued local work
+                        // holds nothing, and a new local request sees the
+                        // actual swap state.
                         let admission = await providerStatus.beginLocalRequest(localLease, isCancelled: { disconnect.isDisconnected })
                         guard case .admitted(let admittedAt) = admission else {
                             Self.writeLocalAdmissionRefusal(admission, writer: writer, retryAfterSeconds: await providerStatus.selfCheckAdmissionHoldRetryAfterSeconds())
@@ -1095,10 +1106,19 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         }
                         startedAt = admittedAt
                         providerRequestStarted = true
-                    }
-                    if localLease == nil {
+                        try Task.checkCancellation()
+                        handle = try await modelRuntime.acquireLocalRequestHandle(request)
+                        CBTrace.log(auditRequestID, "http_handle")
+                    } else {
+                        // Network buyers keep the pre-R011 order: the
+                        // swap-snapshot handle first (a warm swap's old model
+                        // still serves), then provider admission, so
+                        // validation and swap refusals never reach buyer stats.
+                        handle = try await modelRuntime.acquireRequestHandle(request)
+                        CBTrace.log(auditRequestID, "http_handle")
                         let admission = await providerStatus.admitRequest()
                         guard case .admitted(let admittedAt) = admission else {
+                            Task { await modelRuntime.unregisterInFlight(handle.registrationID) }
                             writer.writeAPIError(
                                 Self.admissionRefusalError(admission),
                                 retryAfterSecondsOverride: await providerStatus.selfCheckAdmissionHoldRetryAfterSeconds()
@@ -1108,9 +1128,6 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         startedAt = admittedAt
                         providerRequestStarted = true
                     }
-                    try Task.checkCancellation()
-                    let handle = try await modelRuntime.acquireHTTPRequestHandle(request)
-                    CBTrace.log(auditRequestID, "http_handle")
                     defer {
                         Task { await modelRuntime.unregisterInFlight(handle.registrationID) }
                     }
@@ -1125,7 +1142,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         // or completion telemetry, and nothing is written.
                         await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: false, localLease: localLease)
                         if settlementMetadata != nil {
-                            ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .writeFailed)
+                            ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: .writeFailed)
                         }
                         writer.close()
                         return
@@ -1139,7 +1156,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     await providerStatus.finishRequest(startedAt: startedAt, completion: completion, failed: false, localLease: localLease)
                     KVCacheTelemetry.emitRequestCompleted(
                         providerID: providerID,
-                        requestID: auditRequestID,
+                        requestID: logRequestID,
                         modelID: request.model,
                         stream: false,
                         completion: completion
@@ -1180,13 +1197,13 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         let tokensOut = Int64(completion.generatedCompletionTokens)
                         writer.writeJSON(status: .ok, body: response, extraHeaders: Self.receiptExtraHeaders(header: header, settlementMetadata: settlementMetadata, terminalStateTSUnixMS: terminalStateTSUnixMS)) { delivered in
                             if delivered {
-                                ReceiptAudit.emitIssued(providerID: providerID, requestID: auditRequestID, modelID: request.model, tokensOut: tokensOut, ttftMs: ttftMs, unixTs: unixTsSeconds)
+                                ReceiptAudit.emitIssued(providerID: providerID, requestID: logRequestID, modelID: request.model, tokensOut: tokensOut, ttftMs: ttftMs, unixTs: unixTsSeconds)
                             } else {
-                                ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .writeFailed)
+                                ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: .writeFailed)
                             }
                         }
                     case .omitted(let reason):
-                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: reason)
+                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: reason)
                         writer.writeJSON(status: .ok, body: response)
                     }
 	                } catch where localLease?.isPreempted == true {
@@ -1214,7 +1231,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 	                    if providerRequestStarted {
 	                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: false, localLease: localLease)
 	                    }
-	                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .preTokenCancel)
+	                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: .preTokenCancel)
 	                    if disconnect.isDisconnected {
 	                        // Nothing is written to the closed socket.
 	                        writer.close()
@@ -1226,7 +1243,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 	                    if providerRequestStarted {
 	                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true, localLease: localLease)
 	                    }
-	                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .modelSwapViolation)
+	                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: .modelSwapViolation)
 	                    writer.writeJSON(status: .serviceUnavailable, body: Self.swapDrainTimeoutEnvelope())
 	                } catch let apiErr as APIError {
 	                    CBTrace.log(auditRequestID, "http_catch_api_error")
@@ -1247,19 +1264,19 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         case .issued(let header, let ttftMs, let unixTs):
                             writer.writeAPIError(apiErr, extraHeaders: [(Self.receiptHeaderName, header)]) { delivered in
                                 if delivered {
-                                    ReceiptAudit.emitIssued(providerID: providerID, requestID: auditRequestID, modelID: request.model, tokensOut: 0, ttftMs: ttftMs, unixTs: unixTs)
+                                    ReceiptAudit.emitIssued(providerID: providerID, requestID: logRequestID, modelID: request.model, tokensOut: 0, ttftMs: ttftMs, unixTs: unixTs)
                                 } else {
-                                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .writeFailed)
+                                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: .writeFailed)
                                 }
                             }
                         case .omitted(let reason):
-                            ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: reason)
+                            ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: reason)
                             writer.writeAPIError(apiErr)
                         case .notReceiptEligible:
                             writer.writeAPIError(apiErr)
                         }
                     } catch {
-                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .constructionFailed)
+                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: .constructionFailed)
                         writer.writeAPIError(apiErr)
                     }
 	                } catch {
@@ -1286,25 +1303,28 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         case .issued(let header, let ttftMs, let unixTs):
                             writer.writeAPIError(apiError, extraHeaders: [(Self.receiptHeaderName, header)]) { delivered in
                                 if delivered {
-                                    ReceiptAudit.emitIssued(providerID: providerID, requestID: auditRequestID, modelID: request.model, tokensOut: 0, ttftMs: ttftMs, unixTs: unixTs)
+                                    ReceiptAudit.emitIssued(providerID: providerID, requestID: logRequestID, modelID: request.model, tokensOut: 0, ttftMs: ttftMs, unixTs: unixTs)
                                 } else {
-                                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .writeFailed)
+                                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: .writeFailed)
                                 }
                             }
                         case .omitted(let reason):
-                            ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: reason)
+                            ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: reason)
                             writer.writeAPIError(apiError)
                         case .notReceiptEligible:
                             writer.writeAPIError(apiError)
                         }
                     } catch {
-                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .constructionFailed)
+                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: .constructionFailed)
                         writer.writeAPIError(apiError)
                     }
                 }
             }
-            disconnect.onDisconnect { task.cancel() }
-            localLease?.onPreempt { task.cancel() }
+            if let localLease {
+                // Buyers keep the pre-R011 disconnect contract (`shouldCancel`).
+                disconnect.onDisconnect { task.cancel() }
+                localLease.onPreempt { task.cancel() }
+            }
         } catch let parseError as APIError {
             if localLease == nil {
                 Task { [providerStatus] in
@@ -1343,19 +1363,19 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     case .issued(let header, let ttftMs, let unixTs):
                         writer.writeAPIError(parseError, extraHeaders: [(Self.receiptHeaderName, header)]) { delivered in
                             if delivered {
-                                ReceiptAudit.emitIssued(providerID: providerID, requestID: auditRequestID, modelID: request.model, tokensOut: 0, ttftMs: ttftMs, unixTs: unixTs)
+                                ReceiptAudit.emitIssued(providerID: providerID, requestID: logRequestID, modelID: request.model, tokensOut: 0, ttftMs: ttftMs, unixTs: unixTs)
                             } else {
-                                ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .writeFailed)
+                                ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: .writeFailed)
                             }
                         }
                     case .omitted(let reason):
-                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: reason)
+                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: reason)
                         writer.writeAPIError(parseError)
                     case .notReceiptEligible:
                         writer.writeAPIError(parseError)
                     }
                 } catch {
-                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .constructionFailed)
+                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: .constructionFailed)
                     writer.writeAPIError(parseError)
                 }
             } else {
@@ -1464,7 +1484,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         let id = "chatcmpl-\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())"
 
         let providerStatus = providerStatus
-        let task = Task.detached { @Sendable [modelRuntime, providerStatus, request, writer, warmSwapEnabled, receiptBuilder, providerID, requestID, settlementMetadata, idlePrewarmer, disconnect, localLease] in
+        let logRequestID = Self.logRequestID(requestID, localLease: localLease)
+        let task = Task.detached { @Sendable [modelRuntime, providerStatus, request, writer, warmSwapEnabled, receiptBuilder, providerID, requestID, logRequestID, settlementMetadata, idlePrewarmer, disconnect, localLease] in
             var startedAt = Date()
             var providerRequestStarted = false
             var sseStarted = false
@@ -1472,9 +1493,11 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             // buyer-visible token, not the SSE head.
             let emittedBuyerToken = StreamedFlag()
             do {
-                // SPEC-001-R011: admission and buyer preemption precede any
-                // runtime registration, so queued local work holds nothing.
+                let handle: RequestHandle
                 if let localLease {
+                    // SPEC-001-R011: local admission and buyer preemption
+                    // precede runtime registration, so queued local work holds
+                    // nothing, and a new local request sees the actual swap state.
                     let admission = await providerStatus.beginLocalRequest(localLease, isCancelled: { disconnect.isDisconnected })
                     guard case .admitted(let admittedAt) = admission else {
                         Self.writeLocalAdmissionRefusal(admission, writer: writer, retryAfterSeconds: await providerStatus.selfCheckAdmissionHoldRetryAfterSeconds())
@@ -1482,10 +1505,15 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     }
                     startedAt = admittedAt
                     providerRequestStarted = true
-                }
-                if localLease == nil {
+                    try Task.checkCancellation()
+                    handle = try await modelRuntime.acquireLocalRequestHandle(request)
+                } else {
+                    // Network buyers keep the pre-R011 order: the swap-snapshot
+                    // handle first, then provider admission.
+                    handle = try await modelRuntime.acquireRequestHandle(request)
                     let admission = await providerStatus.admitRequest()
                     guard case .admitted(let admittedAt) = admission else {
+                        Task { await modelRuntime.unregisterInFlight(handle.registrationID) }
                         writer.writeAPIError(
                             Self.admissionRefusalError(admission),
                             retryAfterSecondsOverride: await providerStatus.selfCheckAdmissionHoldRetryAfterSeconds()
@@ -1495,8 +1523,6 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     startedAt = admittedAt
                     providerRequestStarted = true
                 }
-                try Task.checkCancellation()
-                let handle = try await modelRuntime.acquireHTTPRequestHandle(request)
                 defer {
                     Task { await modelRuntime.unregisterInFlight(handle.registrationID) }
                 }
@@ -1559,14 +1585,14 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 // no completion telemetry and no receipt.
                 guard !disconnect.isDisconnected else {
                     if settlementMetadata != nil {
-                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .writeFailed)
+                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: .writeFailed)
                     }
                     writer.close()
                     return
                 }
                 KVCacheTelemetry.emitRequestCompleted(
                     providerID: providerID,
-                    requestID: requestID,
+                    requestID: logRequestID,
                     modelID: request.model,
                     stream: true,
                     completion: completion
@@ -1644,13 +1670,13 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         let tokensOut = Int64(completion.generatedCompletionTokens)
                         receiptDelivery = { delivered in
                             if delivered {
-                                ReceiptAudit.emitIssued(providerID: providerID, requestID: requestID, modelID: modelID, tokensOut: tokensOut, ttftMs: ttftMs, unixTs: unixTsSeconds)
+                                ReceiptAudit.emitIssued(providerID: providerID, requestID: logRequestID, modelID: modelID, tokensOut: tokensOut, ttftMs: ttftMs, unixTs: unixTsSeconds)
                             } else {
-                                ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .writeFailed)
+                                ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: .writeFailed)
                             }
                         }
                     case .omitted(let reason):
-                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: reason)
+                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: reason)
                     }
                 }
                 writer.writeSSEDone(trailers: trailers, completion: receiptDelivery)
@@ -1702,9 +1728,9 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     // Nothing can reach a closed connection. A receipt that
                     // was due is recorded as undeliverable.
                     if sseStarted, settlementMetadata != nil {
-                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .writeFailed)
+                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: .writeFailed)
                     } else if !sseStarted {
-                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .preTokenCancel)
+                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: .preTokenCancel)
                     }
                     writer.close()
                 } else {
@@ -1713,12 +1739,12 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     let cancelError = Self.buyerCancelledError(inferenceRan: emittedBuyerToken.get())
                     if sseStarted {
                         if settlementMetadata != nil {
-                            ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .writeFailed)
+                            ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: .writeFailed)
                         }
                         writer.writeSSEJSON(cancelError.envelope)
                         writer.writeSSEDone()
                     } else {
-                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .preTokenCancel)
+                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: logRequestID, reason: .preTokenCancel)
                         writer.writeAPIError(cancelError)
                     }
                 }
@@ -1748,8 +1774,11 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 }
             }
         }
-        disconnect.onDisconnect { task.cancel() }
-        localLease?.onPreempt { task.cancel() }
+        if let localLease {
+            // Buyers keep the pre-R011 disconnect contract (`shouldCancel`).
+            disconnect.onDisconnect { task.cancel() }
+            localLease.onPreempt { task.cancel() }
+        }
     }
 
     /// The terminal answer for a request that was not admitted.
@@ -1909,6 +1938,46 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     static let receiptPendingDeadlineHeaderName = "X-MacProvider-Receipt-Pending-Deadline-Seconds"
     static let lateReceiptSettlementHeaderName = "X-MacProvider-Late-Receipt-Settlement"
     static let maxReceiptHeaderBytes = 4096
+    /// SPEC-001-R011 request origin. The coordinator sends `coordinator` on
+    /// every HTTP-direct dispatch (probes included); Malibu.app's Chat
+    /// transport sends `local-app`.
+    static let requestOriginHeaderName = "X-MacProvider-Origin"
+    static let coordinatorOriginValue = "coordinator"
+    static let localAppOriginValue = "local-app"
+
+    /// SPEC-001-R011: local is a positive classification. A request is local
+    /// only from a loopback peer that carries exactly one `local-app` origin
+    /// marker and nothing a coordinator dispatch carries (the coordinator
+    /// marker or a settlement-metadata header, parsable or not). Every other
+    /// request, including an unknown loopback client with no marker, is
+    /// network: misclassifying a buyer as local would let local policy
+    /// preempt or deprioritise paid work, while treating an unmarked local
+    /// tool as a buyer only costs that tool its local accounting.
+    static func requestOrigin(
+        headers: HTTPHeaders,
+        settlementMetadata: SettlementReceiptMetadata?,
+        peerIsLoopback: Bool
+    ) -> RequestOrigin {
+        let markers = headers[requestOriginHeaderName].map {
+            $0.trimmingCharacters(in: .whitespaces).lowercased()
+        }
+        guard peerIsLoopback,
+              settlementMetadata == nil,
+              headers[settlementMetadataHeaderName].isEmpty,
+              !markers.contains(coordinatorOriginValue),
+              markers == [localAppOriginValue]
+        else { return .network }
+        return .local
+    }
+
+    static func logRequestID(_ requestID: String, localLease: LocalPreemptionLease?) -> String {
+        localLease == nil ? requestID : "local:" + requestID
+    }
+
+    static func isLoopbackPeer(_ address: SocketAddress?) -> Bool {
+        guard let ip = address?.ipAddress else { return false }
+        return ip == "127.0.0.1" || ip == "::1" || ip == "::ffff:127.0.0.1"
+    }
 
     private static func settlementMetadata(from encoded: String?) -> SettlementReceiptMetadata? {
         guard let encoded, !encoded.isEmpty,

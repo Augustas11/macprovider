@@ -741,7 +741,10 @@ actor ProviderStatus {
         cbAdmissionHold.startedAt = Date()
         cbAdmissionHold.expectedEndAt = expectedEndAt
         cbAdmissionHold.holdsTotal += 1
-        wakeLocalCapacityWaiters()
+        // SPEC-001-R011: buyers are refused for the hold, so nothing else
+        // would ever preempt local work; preempt it now so the hold drains
+        // within its bound. New local admission is fenced by the hold itself.
+        preemptAdmittedLocalWork()
         await refreshAvailabilityState()
         return nil
     }
@@ -1134,9 +1137,17 @@ actor ProviderStatus {
 
     private func localRequestFits() -> Bool {
         let slots = max(1, capacity.maxConcurrency)
-        let reserved = operatorPauseFence ? 0 : localPriorityPolicy.reservation(forServedSlots: slots)
-        return localLeases.count < slots - reserved
+        let limit = operatorPauseFence ? slots : localPriorityPolicy.localSlotLimit(forServedSlots: slots)
+        return localLeases.count < limit
             && requestsInFlight + localLeases.count < slots
+    }
+
+    /// Preempts every admitted local request (a self-check hold, a runtime
+    /// swap drain, or a buyer that would otherwise lose its native-MTP row).
+    /// Queued local requests are woken to re-check admission.
+    func preemptAdmittedLocalWork() {
+        localLeases.forEach { $0.preempt() }
+        wakeLocalCapacityWaiters()
     }
 
     /// Admits a local request only into a slot no buyer holds or is reserved

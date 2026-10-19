@@ -65,7 +65,7 @@ final class LocalRequestPriorityTests: XCTestCase {
     // MARK: - Admission policy
 
     func testReservationKeepsOneSlotFreeForBuyersOnAMultiSlotProvider() async throws {
-        let status = makeStatus(slots: 4, queueWaitMS: 100)
+        let status = makeStatus(slots: 4, queueWaitMS: 100, localRowCap: 4)
         var leases: [LocalPreemptionLease] = []
         for _ in 0..<3 {
             let lease = LocalPreemptionLease()
@@ -84,6 +84,22 @@ final class LocalRequestPriorityTests: XCTestCase {
         // The next buyer would wait on local work: only the newest yields.
         _ = await status.beginRequest()
         XCTAssertEqual(leases.map(\.isPreempted), [false, false, true])
+    }
+
+    func testLocalWorkTakesAtMostOneRowBesideBuyersWhenBatching() async throws {
+        XCTAssertEqual(LocalPriorityPolicy().localSlotLimit(forServedSlots: 1), 1)
+        XCTAssertEqual(LocalPriorityPolicy().localSlotLimit(forServedSlots: 8), 1)
+        XCTAssertEqual(LocalPriorityPolicy(reservedBuyerSlots: 0).localSlotLimit(forServedSlots: 8), 1)
+        let status = makeStatus(slots: 8, queueWaitMS: 100)
+        let first = LocalPreemptionLease()
+        guard case .admitted = await status.beginLocalRequest(first) else { return XCTFail("local not admitted") }
+        let second = await status.beginLocalRequest(LocalPreemptionLease())
+        XCTAssertEqual(second, .preempted, "a second local row never joins the decode batch beside buyers")
+        // An operator pause fences buyers, so local work may use every slot.
+        await status.setOperatorPauseFence(true)
+        guard case .admitted = await status.beginLocalRequest(LocalPreemptionLease()) else {
+            return XCTFail("paused provider admits more local rows")
+        }
     }
 
     func testConfiguredReservationIsCappedBelowTheServedSlots() {
@@ -203,7 +219,7 @@ final class LocalRequestPriorityTests: XCTestCase {
     }
 
     func testEveryAdmittedLocalRequestEndsInExactlyOneOutcome() async throws {
-        let status = makeStatus(slots: 4, reservedBuyerSlots: 0)
+        let status = makeStatus(slots: 4, reservedBuyerSlots: 0, localRowCap: 4)
         let utility = LocalPreemptionLease()
         let cancelled = LocalPreemptionLease()
         guard case .admitted = await status.beginLocalRequest(utility),
@@ -237,7 +253,7 @@ final class LocalRequestPriorityTests: XCTestCase {
     }
 
     func testOverlappingWindowsKeepTheBuyerThatStillNeedsASlotAndSpareTheOlderLocal() async throws {
-        let status = makeStatus(slots: 2, reservedBuyerSlots: 0, preemptionWindowMS: 150)
+        let status = makeStatus(slots: 2, reservedBuyerSlots: 0, preemptionWindowMS: 150, localRowCap: 2)
         let older = LocalPreemptionLease()
         let newer = LocalPreemptionLease()
         guard case .admitted = await status.beginLocalRequest(older),
@@ -304,7 +320,7 @@ final class LocalRequestPriorityTests: XCTestCase {
     }
 
     func testServedSlotShrinkPreemptsLocalWorkThatNoLongerFits() async throws {
-        let status = makeStatus(slots: 2, reservedBuyerSlots: 0)
+        let status = makeStatus(slots: 2, reservedBuyerSlots: 0, localRowCap: 2)
         let older = LocalPreemptionLease()
         let newer = LocalPreemptionLease()
         guard case .admitted = await status.beginLocalRequest(older),
@@ -336,7 +352,7 @@ final class LocalRequestPriorityTests: XCTestCase {
     func testContinuousBatchingPathReservesABuyerSlotAndPreemptsOnlyTheNewestLocal() async throws {
         let probe = SlotProbe()
         let runtime = SlotFixtureRuntime(slots: 4, shape: .continuousBatching, probe: probe)
-        let status = makeStatus(slots: 4, queueWaitMS: 200)
+        let status = makeStatus(slots: 4, queueWaitMS: 200, localRowCap: 4)
         try await withPriorityHTTPServer(runtime: runtime, status: status) { port in
             var locals: [Task<LocalHTTPResponse, Error>] = []
             for index in 0..<3 {
@@ -437,30 +453,75 @@ final class LocalRequestPriorityTests: XCTestCase {
         }
     }
 
-    func testMalformedSettlementAndOriginHintsRemainLocal() async throws {
+    func testOriginIsLocalOnlyWithTheExplicitLoopbackMarker() {
+        func origin(_ headers: [(String, String)], loopback: Bool = true) -> RequestOrigin {
+            RouterHandler.requestOrigin(
+                headers: HTTPHeaders(headers),
+                settlementMetadata: nil,
+                peerIsLoopback: loopback
+            )
+        }
+        XCTAssertEqual(origin([("X-MacProvider-Origin", "local-app")]), .local)
+        XCTAssertEqual(origin([("X-MacProvider-Origin", " Local-App ")]), .local)
+        // Unknown loopback clients are buyers: the safe default keeps buyer priority.
+        XCTAssertEqual(origin([]), .network)
+        XCTAssertEqual(origin([("X-MacProvider-Origin", "local")]), .network)
+        // Anything a coordinator dispatch carries is network, marker or not.
+        XCTAssertEqual(origin([("X-MacProvider-Origin", "coordinator")]), .network)
+        XCTAssertEqual(origin([("X-MacProvider-Origin", "local-app"), ("X-MacProvider-Origin", "coordinator")]), .network)
+        XCTAssertEqual(origin([("X-MacProvider-Origin", "local-app"), (RouterHandler.settlementMetadataHeaderName, "not-base64-json")]), .network)
+        XCTAssertEqual(origin([("X-MacProvider-Origin", "local-app")], loopback: false), .network)
+        XCTAssertTrue(RouterHandler.isLoopbackPeer(try? SocketAddress(ipAddress: "127.0.0.1", port: 1)))
+        XCTAssertTrue(RouterHandler.isLoopbackPeer(try? SocketAddress(ipAddress: "::1", port: 1)))
+        XCTAssertFalse(RouterHandler.isLoopbackPeer(try? SocketAddress(ipAddress: "192.168.1.2", port: 1)))
+        XCTAssertFalse(RouterHandler.isLoopbackPeer(nil))
+    }
+
+    func testCoordinatorProbeWithoutMetadataAndUnmarkedClientsAreNetworkOverHTTP() async throws {
         let probe = SlotProbe()
         let runtime = SlotFixtureRuntime(slots: 1, shape: .serial, probe: probe)
         let status = makeStatus(slots: 1)
         try await withPriorityHTTPServer(runtime: runtime, status: status) { port in
-            for metadata in ["not-base64-json", "e30"] {
-                let response = try await post(port: port, content: "local-quick", headers: [
-                    RouterHandler.settlementMetadataHeaderName: metadata,
-                    "X-Request-Origin": "network",
-                    "X-Provider-Id": "provider-a",
-                    "Authorization": "Bearer local-process-hint",
-                ])
-                XCTAssertEqual(response.status, 200, response.body)
-            }
-            // This is classification, not an authentication claim: a local
-            // process can supply parsable metadata and is classified network.
-            let network = try await post(port: port, content: "buyer", network: true)
-            XCTAssertEqual(network.status, 200, network.body)
+            // A coordinator canary/warmup probe: coordinator marker, no metadata.
+            let coordinatorProbe = try await post(port: port, content: "probe", origin: "coordinator")
+            XCTAssertEqual(coordinatorProbe.status, 200, coordinatorProbe.body)
+            // An unknown loopback client with no marker.
+            let unmarked = try await post(port: port, content: "unmarked", origin: nil)
+            XCTAssertEqual(unmarked.status, 200, unmarked.body)
+            // Malformed metadata never makes a marked request local.
+            let malformed = try await post(port: port, content: "malformed", headers: [
+                RouterHandler.settlementMetadataHeaderName: "not-base64-json",
+            ])
+            XCTAssertEqual(malformed.status, 200, malformed.body)
+            // Malibu.app Chat is local.
+            let chat = try await post(port: port, content: "chat")
+            XCTAssertEqual(chat.status, 200, chat.body)
         }
         let snapshot = await status.snapshot(resetWindow: true)
-        XCTAssertEqual(snapshot.requestsServedSinceLast, 1)
-        XCTAssertEqual(snapshot.localUsage.requestsCompleted, 2)
+        XCTAssertEqual(snapshot.requestsServedSinceLast, 3, "coordinator, unmarked and metadata-carrying requests are buyer work")
+        XCTAssertEqual(snapshot.localUsage.requestsCompleted, 1, "only the app-marked chat is local")
     }
 
+    func testCoordinatorProbeWithoutMetadataPreemptsRunningLocalChat() async throws {
+        let probe = SlotProbe()
+        let runtime = SlotFixtureRuntime(slots: 1, shape: .serial, probe: probe)
+        let status = makeStatus(slots: 1)
+        try await withPriorityHTTPServer(runtime: runtime, status: status) { port in
+            let local = Task { try await post(port: port, content: "local-hold") }
+            try await eventually { probe.entered("local-hold") }
+            let coordinatorProbe = try await post(port: port, content: "probe", origin: "coordinator")
+            XCTAssertEqual(coordinatorProbe.status, 200, coordinatorProbe.body)
+            let localResult = try await local.value
+            XCTAssertEqual(localResult.errorCode, "local_preempted", localResult.body)
+        }
+        let usage = await status.currentLocalUsage()
+        XCTAssertEqual(usage.requestsPreempted, 1)
+    }
+
+    /// Finding 4 regression: buyers on direct HTTP keep the base (8a444ff59)
+    /// order. A warm swap's `.loading` still serves the old model through the
+    /// snapshot handle, and `.draining` answers `provider_loading`; only new
+    /// local requests see the actual swap state.
     func testNewHTTPRequestsRejectLoadingAndDrainingButCapturedHandleSurvives() async throws {
         let loaderGate = AsyncSemaphore(value: 0)
         let status = makeStatus(slots: 1)
@@ -479,7 +540,7 @@ final class LocalRequestPriorityTests: XCTestCase {
         let request = try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: [
             "model": "fixture-model", "messages": [["role": "user", "content": "hello"]],
         ]))
-        let existing = try await runtime.acquireHTTPRequestHandle(request)
+        let existing = try await runtime.acquireLocalRequestHandle(request)
         let swap = try await runtime.beginSwap(targetModelID: "new-model")
         do {
             for expectedState in [SwapState.loading, .draining] {
@@ -493,7 +554,7 @@ final class LocalRequestPriorityTests: XCTestCase {
                 let snapshot = await runtime.currentSnapshot()
                 XCTAssertEqual(snapshot.state, expectedState)
                 do {
-                    _ = try await runtime.acquireHTTPRequestHandle(request)
+                    _ = try await runtime.acquireLocalRequestHandle(request)
                     XCTFail("new HTTP handle admitted while \(expectedState)")
                 } catch let error as APIError {
                     XCTAssertEqual(error.code, "provider_loading")
@@ -505,10 +566,16 @@ final class LocalRequestPriorityTests: XCTestCase {
                 XCTAssertTrue(utilities.operations.isEmpty)
                 try await withPriorityHTTPServer(runtime: runtime, status: status) { port in
                     for stream in [false, true] {
-                        for network in [false, true] {
-                            let rejected = try await post(port: port, content: "hello", stream: stream, network: network)
-                            XCTAssertEqual(rejected.status, 503, rejected.body)
-                            XCTAssertEqual(rejected.errorCode, "provider_loading")
+                        let local = try await post(port: port, content: "hello", stream: stream)
+                        XCTAssertEqual(local.status, 503, local.body)
+                        XCTAssertEqual(local.errorCode, "provider_loading")
+                        let buyer = try await post(port: port, content: "hello", stream: stream, network: true)
+                        if expectedState == .loading {
+                            XCTAssertEqual(buyer.status, 200, "a warm swap's old model still serves buyers: \(buyer.body)")
+                            XCTAssertTrue(buyer.body.contains("fixture-model"), buyer.body)
+                        } else {
+                            XCTAssertEqual(buyer.status, 503, buyer.body)
+                            XCTAssertEqual(buyer.errorCode, "provider_loading", "draining keeps the base error code")
                         }
                     }
                 }
@@ -528,6 +595,38 @@ final class LocalRequestPriorityTests: XCTestCase {
         XCTAssertEqual(after.modelID, "new-model")
         let usage = await status.currentLocalUsage()
         XCTAssertEqual(usage.requestsInFlight, 0, "swap refusals release local admission")
+        let buyerStats = await status.snapshot()
+        XCTAssertEqual(buyerStats.requestsTotal, 2, "only the two buyers served during loading reach buyer stats")
+        XCTAssertEqual(buyerStats.errorsTotal, 0, "swap refusals before admission are not buyer errors")
+    }
+
+    func testBuyerValidationErrorIsRefusedBeforeAdmissionLikeBase() async throws {
+        let status = makeStatus(slots: 1)
+        let runtime = ModelRuntime(
+            modelID: "fixture-model", modelHash: "hash", warmSwapEnabled: false,
+            loader: { _ in throw CancellationError() },
+            testCompletion: { snapshot, _ in
+                CompletionResult(content: snapshot.modelID ?? "", finishReason: "stop",
+                                 promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner)
+            }
+        )
+        await runtime.setProviderStatus(status)
+        let lease = LocalPreemptionLease()
+        guard case .admitted = await status.beginLocalRequest(lease) else { return XCTFail("local not admitted") }
+        try await withPriorityHTTPServer(runtime: runtime, status: status) { port in
+            for stream in [false, true] {
+                let rejected = try await post(port: port, content: "hello", stream: stream, network: true,
+                                              extraBody: ["presence_penalty": 1])
+                XCTAssertEqual(rejected.status, 400, rejected.body)
+                XCTAssertEqual(rejected.errorCode, "unsupported_sampling_penalty")
+            }
+        }
+        XCTAssertFalse(lease.isPreempted, "an invalid buyer request is never admitted, so it preempts nothing")
+        let snapshot = await status.snapshot()
+        XCTAssertEqual(snapshot.requestsTotal, 0)
+        XCTAssertEqual(snapshot.errorsTotal, 0)
+        XCTAssertEqual(snapshot.requestsInFlight, 0)
+        await status.finishLocalRequest(lease, completion: nil, failed: false)
     }
 
     func testSelfCheckHoldFencesLocalAdmissionAndPauseStillPermitsLocalAfterHold() async throws {
@@ -538,7 +637,7 @@ final class LocalRequestPriorityTests: XCTestCase {
         XCTAssertNil(refusal)
         let declined = await status.beginLocalRequest(LocalPreemptionLease())
         XCTAssertEqual(declined, .selfCheckAdmissionHold)
-        XCTAssertFalse(existing.isPreempted, "the hold drains local work without cancelling it")
+        XCTAssertTrue(existing.isPreempted, "buyers are refused during the hold, so the hold itself preempts local work")
         let held = await status.snapshot()
         XCTAssertEqual(held.localUsage.requestsInFlight, 1)
         XCTAssertEqual(held.localUsage.requestsDeclined, 1)
@@ -568,7 +667,7 @@ final class LocalRequestPriorityTests: XCTestCase {
             let usage = await status.currentLocalUsage()
             XCTAssertEqual(usage.requestsInFlight, 0, "local work must drain before the self-check")
             XCTAssertEqual(usage.requestsTotal, 1)
-            XCTAssertFalse(lease.isPreempted)
+            XCTAssertTrue(lease.isPreempted)
             let declined = await status.beginLocalRequest(LocalPreemptionLease())
             XCTAssertEqual(declined, .selfCheckAdmissionHold)
             return true
@@ -580,7 +679,7 @@ final class LocalRequestPriorityTests: XCTestCase {
         await status.finishLocalRequest(after, completion: nil, failed: false)
     }
 
-    func testSelfCheckHoldLocalDrainTimeoutSkipsCheckWithoutPreemption() async throws {
+    func testSelfCheckHoldLocalOnlyDrainTimeoutIsNotABuyerDrainTimeout() async throws {
         let status = makeStatus(slots: 2)
         let lease = LocalPreemptionLease()
         guard case .admitted = await status.beginLocalRequest(lease) else { return XCTFail("local not admitted") }
@@ -590,13 +689,161 @@ final class LocalRequestPriorityTests: XCTestCase {
             XCTFail("self-check must not run beside a local request")
             return true
         }
-        XCTAssertEqual(outcome, .drainTimeout)
-        XCTAssertFalse(lease.isPreempted)
+        // The preempted lease is still unwinding at the bound: the check is
+        // skipped, but the timeout is not counted as a buyer drain timeout.
+        XCTAssertEqual(outcome, .localDrainTimeout)
+        XCTAssertEqual(outcome.label, "local_drain_timeout")
+        XCTAssertTrue(lease.isPreempted)
         let hold = await status.selfCheckAdmissionHoldStatus()
         XCTAssertFalse(hold.active)
         let usage = await status.currentLocalUsage()
         XCTAssertEqual(usage.requestsInFlight, 1)
         await status.finishLocalRequest(lease, completion: nil, failed: false)
+    }
+
+    /// Finding 1: one long local Chat must not turn the self-check hold into
+    /// repeated 30 -> 60 -> 120 s buyer refusals. The hold preempts it, drains
+    /// within the normal bound, runs the check, and reopens to buyers.
+    func testSelfCheckHoldPreemptsRunningLocalChatAndDrainsPromptly() async throws {
+        let probe = SlotProbe()
+        let runtime = SlotFixtureRuntime(slots: 1, shape: .serial, probe: probe)
+        let status = makeStatus(slots: 1)
+        try await withPriorityHTTPServer(runtime: runtime, status: status) { port in
+            let local = Task { try await post(port: port, content: "local-hold") }
+            try await eventually { probe.entered("local-hold") }
+            let started = Date()
+            let outcome = await ContinuousBatchingSelfCheck.runUnderAdmissionHold(
+                providerStatus: status, drainSeconds: 30, checkSeconds: 5, lifecycleLease: { nil },
+                context: "local-test", log: { _ in }
+            ) {
+                let busy = await status.hasInferenceWork()
+                XCTAssertFalse(busy, "the check runs only after local work drained")
+                return true
+            }
+            XCTAssertEqual(outcome, .completed)
+            XCTAssertLessThan(Date().timeIntervalSince(started), 3, "the hold never waits out local work")
+            let localResult = try await local.value
+            XCTAssertEqual(localResult.errorCode, "local_preempted", localResult.body)
+            // Admission is open again: a buyer is served right after the hold.
+            let buyer = try await post(port: port, content: "buyer", network: true)
+            XCTAssertEqual(buyer.status, 200, buyer.body)
+        }
+        let snapshot = await status.snapshot(resetWindow: true)
+        XCTAssertEqual(snapshot.localUsage.requestsPreempted, 1)
+        XCTAssertEqual(snapshot.requestsServedSinceLast, 1)
+        let hold = await status.selfCheckAdmissionHoldStatus()
+        XCTAssertEqual(hold.lastOutcome, "completed")
+    }
+
+    func testDriverDoesNotEscalateDrainBoundForLocalOnlyTimeouts() {
+        // The driver escalates only on `.drainTimeout`; `.localDrainTimeout`
+        // leaves the count unchanged (see measureUnderAdmissionHold).
+        XCTAssertNotEqual(ContinuousBatchingSelfCheck.AdmissionHoldOutcome.localDrainTimeout, .drainTimeout)
+        XCTAssertEqual(ContinuousBatchingSelfCheck.admissionHoldDrainSeconds(base: 30, consecutiveDrainTimeouts: 0), 30)
+    }
+
+    func testSwapDrainPreemptsAdmittedLocalWork() async throws {
+        let status = makeStatus(slots: 1)
+        let lease = LocalPreemptionLease()
+        guard case .admitted = await status.beginLocalRequest(lease) else { return XCTFail("local not admitted") }
+        lease.onPreempt { Task { await status.finishLocalRequest(lease, completion: nil, failed: false) } }
+        let runtime = ModelRuntime(
+            modelID: "fixture-model", modelHash: "old-hash", warmSwapEnabled: true,
+            loader: { _ in throw CancellationError() },
+            testLoader: { target in (target, "new-hash") },
+            testCompletion: { _, _ in
+                CompletionResult(content: "x", finishReason: "stop", promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner)
+            }
+        )
+        await runtime.setProviderStatus(status)
+        let swap = try await runtime.beginSwap(targetModelID: "new-model")
+        try await swap.value
+        XCTAssertTrue(lease.isPreempted, "a runtime swap drain preempts local work instead of waiting it out")
+        let after = await runtime.currentSnapshot()
+        XCTAssertEqual(after.modelID, "new-model")
+    }
+
+    /// Finding 3: a local row never takes the native-MTP row, and a buyer
+    /// arriving beside local work is admitted native (its row count ignores
+    /// local rows) and preempts the local work.
+    func testLocalNeverTakesTheNativeMTPRowAndBuyerKeepsIt() async throws {
+        let recorder = NativeAdmissionRecorder()
+        let release = AsyncSemaphore(value: 0)
+        let status = makeStatus(slots: 1)
+        let runtime = ModelRuntime(
+            modelID: "fixture-model",
+            modelHash: "hash",
+            nativeMTPMode: .auto,
+            nativeMTPCapability: NativeMTPCapability(
+                admitted: true, revoked: false, revocationStateAvailable: true,
+                supportsCurrentProcessor: true, supportsCurrentStateCache: true,
+                supportsStreaming: true, supportsNonStreaming: true, supportsStopSequences: false,
+                hasQualifiedRowMappedTransactions: true, maximumProposalDepth: 2,
+                maximumPromptTokens: 4096, maximumCompletionTokens: 256,
+                maximumNativeActiveRows: 1, supportsSampling: false
+            ),
+            nativeMTPSchedulerSupported: true,
+            testNativeMTPAdmissionRequestObserver: { requestID, admission, otherRows in
+                recorder.append(requestID ?? "", admission, otherRows)
+            },
+            warmSwapEnabled: false,
+            loader: { _ in throw CancellationError() },
+            testCompletion: { _, request in
+                if request.messages.last?.content == "local" { try await release.withPermit {} }
+                return CompletionResult(content: "ok", finishReason: "stop", promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner)
+            }
+        )
+        await runtime.setProviderStatus(status)
+        let lease = LocalPreemptionLease()
+        guard case .admitted = await status.beginLocalRequest(lease) else { return XCTFail("local not admitted") }
+        let localRequest = try nativeRequest(content: "local", id: "local-1")
+        let localHandle = try await runtime.acquireLocalRequestHandle(localRequest)
+        let local = Task { try await runtime.completeWithServedSnapshot(localRequest, with: localHandle) }
+        try await eventually { recorder.admission(for: "local-1") != nil }
+        XCTAssertEqual(recorder.admission(for: "local-1")?.admission.usesNativeMTP, false, "local is never native-MTP eligible")
+
+        let buyerRequest = try nativeRequest(content: "buyer", id: "buyer-1")
+        let buyerHandle = try await runtime.acquireRequestHandle(buyerRequest)
+        _ = try await runtime.completeWithServedSnapshot(buyerRequest, with: buyerHandle)
+        await runtime.unregisterInFlight(buyerHandle.registrationID)
+        let buyer = try XCTUnwrap(recorder.admission(for: "buyer-1"))
+        XCTAssertEqual(buyer.otherRows, 0, "local rows do not count against the buyer's native row bound")
+        XCTAssertTrue(buyer.admission.usesNativeMTP, "the buyer keeps the native-MTP row")
+        try await eventually { lease.isPreempted }
+
+        await release.resize(to: 1)
+        _ = try? await local.value
+        await runtime.unregisterInFlight(localHandle.registrationID)
+        await status.finishLocalRequest(lease, completion: nil, failed: false)
+    }
+
+    private func nativeRequest(content: String, id: String) throws -> ChatCompletionRequest {
+        try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: [
+            "model": "fixture-model", "messages": [["role": "user", "content": content]],
+            "temperature": 0, "top_p": 1.0,
+        ])).withRequestID(id)
+    }
+
+    func testLocalPrefillChecksPreemptionBetweenChunks() throws {
+        var chunks: [Range<Int>] = []
+        let resumeAt = try ModelRuntime.cancellableLocalPrefill(
+            tokenCount: 1_300, from: 100, stepSize: 512, isCancelled: { false }
+        ) { chunks.append($0) }
+        // Same split TokenIterator would make: the final <= step tokens stay
+        // with the iterator.
+        XCTAssertEqual(chunks, [100 ..< 612])
+        XCTAssertEqual(resumeAt, 612)
+        XCTAssertEqual(try ModelRuntime.cancellableLocalPrefill(tokenCount: 400, from: 0, stepSize: 512, isCancelled: { false }) { _ in XCTFail("short prompt") }, 0)
+
+        var calls = 0
+        var preempted = false
+        XCTAssertThrowsError(try ModelRuntime.cancellableLocalPrefill(
+            tokenCount: 10_000, from: 0, stepSize: 512, isCancelled: { preempted }
+        ) { _ in
+            calls += 1
+            if calls == 2 { preempted = true }
+        }) { XCTAssertTrue($0 is CancellationError) }
+        XCTAssertEqual(calls, 2, "preemption stops prefill at the next chunk boundary")
     }
 
     func testSelfCheckHoldSettlesQueuedLocalWithoutRuntimeAdmission() async throws {
@@ -692,7 +939,8 @@ final class LocalRequestPriorityTests: XCTestCase {
         slots: Int,
         reservedBuyerSlots: Int = LocalPriorityPolicy.defaultReservedBuyerSlots,
         preemptionWindowMS: Int = 0,
-        queueWaitMS: Int = 5_000
+        queueWaitMS: Int = 5_000,
+        localRowCap: Int = LocalPriorityPolicy.defaultMaximumLocalRowsWhenBatching
     ) -> ProviderStatus {
         let status = ProviderStatus(
             modelID: "fixture-model",
@@ -702,7 +950,8 @@ final class LocalRequestPriorityTests: XCTestCase {
         let policy = LocalPriorityPolicy(
             reservedBuyerSlots: reservedBuyerSlots,
             preemptionWindowMS: preemptionWindowMS,
-            queueWaitMS: queueWaitMS
+            queueWaitMS: queueWaitMS,
+            maximumLocalRowsWhenBatching: localRowCap
         )
         let ready = expectation(description: "policy")
         Task {
@@ -719,6 +968,23 @@ final class LocalRequestPriorityTests: XCTestCase {
 }
 
 // MARK: - Fixtures
+
+private final class NativeAdmissionRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var entries: [String: (admission: NativeMTPRuntimeAdmission, otherRows: Int)] = [:]
+
+    func append(_ requestID: String, _ admission: NativeMTPRuntimeAdmission, _ otherRows: Int) {
+        lock.lock()
+        entries[requestID] = (admission, otherRows)
+        lock.unlock()
+    }
+
+    func admission(for requestID: String) -> (admission: NativeMTPRuntimeAdmission, otherRows: Int)? {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries[requestID]
+    }
+}
 
 private final class SlotProbe: @unchecked Sendable {
     private let lock = NSLock()
@@ -949,19 +1215,33 @@ private let priorityTestSession: URLSession = {
     return URLSession(configuration: configuration)
 }()
 
-private func post(port: Int, content: String, stream: Bool = false, network: Bool = false, headers: [String: String] = [:]) async throws -> LocalHTTPResponse {
+/// `network` sends what a coordinator dispatch carries (settlement metadata
+/// and the coordinator origin marker). Otherwise the request carries
+/// `origin` (Malibu.app's local marker by default; nil sends none).
+private func post(
+    port: Int,
+    content: String,
+    stream: Bool = false,
+    network: Bool = false,
+    origin: String? = RouterHandler.localAppOriginValue,
+    headers: [String: String] = [:],
+    extraBody: [String: Any] = [:]
+) async throws -> LocalHTTPResponse {
     var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
     request.httpMethod = "POST"
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     if network {
         request.setValue(settlementMetadataHeaderValue, forHTTPHeaderField: RouterHandler.settlementMetadataHeaderName)
+        request.setValue(RouterHandler.coordinatorOriginValue, forHTTPHeaderField: RouterHandler.requestOriginHeaderName)
+    } else if let origin {
+        request.setValue(origin, forHTTPHeaderField: RouterHandler.requestOriginHeaderName)
     }
     for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
     request.httpBody = try JSONSerialization.data(withJSONObject: [
         "model": "fixture-model",
         "messages": [["role": "user", "content": content]],
         "stream": stream,
-    ])
+    ].merging(extraBody) { _, new in new })
     let (data, response) = try await priorityTestSession.data(for: request)
     return LocalHTTPResponse(
         status: (response as? HTTPURLResponse)?.statusCode ?? 0,

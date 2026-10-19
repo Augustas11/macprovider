@@ -26,12 +26,23 @@ struct LocalPriorityPolicy: Sendable, Equatable {
     var reservedBuyerSlots = LocalPriorityPolicy.defaultReservedBuyerSlots
     var preemptionWindowMS = LocalPriorityPolicy.defaultPreemptionWindowMS
     var queueWaitMS = LocalPriorityPolicy.defaultQueueWaitMS
+    /// Local rows allowed beside buyers when more than one slot is served
+    /// (continuous batching): local work never fills the decode batch.
+    var maximumLocalRowsWhenBatching = LocalPriorityPolicy.defaultMaximumLocalRowsWhenBatching
+    static let defaultMaximumLocalRowsWhenBatching = 1
 
     /// Slots local work may never take. A single-slot provider reserves
     /// nothing (local work could never run) and relies on preemption instead.
     func reservation(forServedSlots slots: Int) -> Int {
         guard slots > 1 else { return 0 }
         return min(max(0, reservedBuyerSlots), slots - 1)
+    }
+
+    /// Local requests that may hold slots at once while buyers can arrive:
+    /// the unreserved slots, and at most one row when batching.
+    func localSlotLimit(forServedSlots slots: Int) -> Int {
+        let unreserved = max(1, slots) - reservation(forServedSlots: slots)
+        return slots > 1 ? min(unreserved, max(1, maximumLocalRowsWhenBatching)) : unreserved
     }
 }
 

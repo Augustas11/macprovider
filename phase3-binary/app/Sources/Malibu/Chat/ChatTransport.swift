@@ -209,10 +209,7 @@ final class LocalChatTransport: ChatTransport {
     }
     func complete(at endpoint: ChatEndpoint, body: Data,
                   onText: @escaping @MainActor (String) -> Void) async throws -> ChatCompletion {
-        var request = URLRequest(url: endpoint.url("/v1/chat/completions"))
-        request.httpMethod = "POST"; request.httpBody = body
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        let request = Self.completionRequest(at: endpoint, body: body)
         let (bytes, response) = try await session.bytes(for: request, delegate: redirect)
         guard let http = response as? HTTPURLResponse else { throw ChatFailure.malformed }
         if http.statusCode != 200 {
@@ -240,6 +237,20 @@ final class LocalChatTransport: ChatTransport {
         }
         throw ChatFailure.malformed
     }
+    /// SPEC-001-R011: the provider classifies a loopback request as local
+    /// only when it carries this explicit marker; anything else is a buyer.
+    nonisolated static let originHeader = "X-MacProvider-Origin"
+    nonisolated static let localOrigin = "local-app"
+
+    nonisolated static func completionRequest(at endpoint: ChatEndpoint, body: Data) -> URLRequest {
+        var request = URLRequest(url: endpoint.url("/v1/chat/completions"))
+        request.httpMethod = "POST"; request.httpBody = body
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        request.setValue(localOrigin, forHTTPHeaderField: originHeader)
+        return request
+    }
+
     private func check(_ response: URLResponse) throws {
         guard let response = response as? HTTPURLResponse else { throw ChatFailure.malformed }
         guard response.statusCode == 200 else { throw ChatFailure.http(response.statusCode) }

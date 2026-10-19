@@ -61,6 +61,14 @@ final class ChatTransportTests: XCTestCase {
         XCTAssertThrowsError(try ChatCapability.parse(capabilities: cap, status: Self.status(model: "different")))
         XCTAssertThrowsError(try ChatCapability.parse(capabilities: Data("{}".utf8), status: status))
     }
+    func testCompletionRequestCarriesExplicitLocalOriginMarker() throws {
+        let request = LocalChatTransport.completionRequest(at: try ChatEndpoint(port: 9042), body: Data("{}".utf8))
+        XCTAssertEqual(request.url?.absoluteString, "http://127.0.0.1:9042/v1/chat/completions")
+        XCTAssertEqual(request.httpMethod, "POST")
+        // The provider treats an unmarked loopback request as a paying buyer.
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-MacProvider-Origin"), "local-app")
+        XCTAssertNil(request.value(forHTTPHeaderField: "X-MacProvider-Settlement-Metadata"))
+    }
     func testEndpointCannotBecomeRemoteOrInventDefaultPort() throws {
         XCTAssertEqual(try ChatEndpoint(port: 9042).url("/v1/capabilities").absoluteString,
                        "http://127.0.0.1:9042/v1/capabilities")

@@ -162,7 +162,11 @@ final class HTTPServerLocalResponsesTests: XCTestCase {
             let status = ProviderStatus(modelID: "fixture-model", modelLoaded: true, capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: 1))
             try await withServer(runtime: runtime, providerStatus: status) { port in
                 let task = Task {
-                    try await self.post(port: port, path: path, body: path == "/v1/responses"
+                    // A Responses client marks itself local (SPEC-001-R011);
+                    // token utilities are always local.
+                    try await self.post(port: port, path: path, headers: [
+                        RouterHandler.requestOriginHeaderName: RouterHandler.localAppOriginValue,
+                    ], body: path == "/v1/responses"
                         ? ["model": "fixture-model", "input": "hello"]
                         : ["model": "fixture-model", "text": "hello"])
                 }
