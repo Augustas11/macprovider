@@ -302,6 +302,9 @@ expected_history = {
     "published-2026-10-17-glm53-flash-listed-v1",
     # Superseded by the two-entry native-MTP admission set bound to CLI 1.8.257.
     "published-2026-10-18-glm53-flash-recommendable-v1",
+    # Superseded by the GLM-only v1-projection admission set: CLI 1.8.257's
+    # admission store projection reads only the v1 manifest.
+    "published-2026-10-19-glm53-flash-native-mtp-v257",
     current_release_id,
 }
 if set(ledger["releases"]) != expected_history:
