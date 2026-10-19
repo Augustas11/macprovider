@@ -1013,6 +1013,17 @@ def main() -> int:
                 f"{cb_policy.get('candidate_catalog_sha256')!r} does not match the served "
                 f"autotune-candidates.json bytes {candidate_digest}"
             )
+        # SPEC-023 v0.22.28: no served policy may carry an entry field the
+        # consumer floor cannot read, whether or not a baseline is required.
+        cb_entries = cb_policy.get("entries") if isinstance(cb_policy, dict) else None
+        if not isinstance(cb_entries, list):
+            fail("continuous-batching-policy.json entries is not an array")
+        for index, entry in enumerate(cb_entries):
+            if isinstance(entry, dict) and "max_served_slots" in entry and not valid_max_served_slots(entry["max_served_slots"]):
+                fail(f"continuous-batching-policy.json entries[{index}].max_served_slots is not an integer from 1 to 32")
+        floor_violation = _cb_baselines.cb_policy_consumer_floor_violation(cb_entries)
+        if floor_violation is not None:
+            fail(f"continuous-batching-policy.json {floor_violation}")
         if args.required_continuous_batching_baseline is not None:
             require_continuous_batching_tuple(
                 cb_policy,

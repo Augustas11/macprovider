@@ -2758,6 +2758,13 @@ struct ServeCommand: AsyncParsableCommand {
         // each verified switch target from the same verified config.json.
         let switchMemoryGB = ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil).ramGB
         var switchTargets: [(ids: [String], recomputed: Int, slots: Int)] = []
+        // Switch targets start from the rows planned before the startup
+        // model's signed ceiling; each target's own memory fit and ceiling
+        // (applied at the swap) bound it (SPEC-038 FR-CB11 v0.3.22).
+        let switchBaselineSlots = max(
+            ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride),
+            rowsBeforePolicyCeiling ?? 0
+        )
         let targetAuthorities = Self.localRuntimeTargetAuthorities(
             supportedModels: resolved.supportedModels,
             artifactResolver: targetResolver,
@@ -2770,8 +2777,9 @@ struct ServeCommand: AsyncParsableCommand {
                     configJSONData: artifact.configJSONData,
                     configSHA256: artifact.configSHA256,
                     draftModel: ProviderCapacity.servedDraftModel(configured: resolved.draftModel),
-                    // The slot count this serve runs (`maxBatch` below).
-                    slots: ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride),
+                    // The slot count this serve runs (`maxBatch` below), before
+                    // the startup model's policy ceiling.
+                    slots: switchBaselineSlots,
                     modelWeightSizeBytes: artifact.sizeBytes > 0 ? UInt64(artifact.sizeBytes) : nil
                 )
                 switchTargets.append((ids, knobs.context, knobs.slots))
