@@ -837,6 +837,58 @@ final class InferenceRelayTests: XCTestCase {
         }
     }
 
+    /// SPEC-048-R009: the coordinator issues a fleet-cache grant for the
+    /// gateway's auto-prefix key and marks the key cache-only. Installing the
+    /// grant keeps the marker, so a plain-text gateway request stays native-MTP
+    /// eligible; a sticky key with the same grant stays sticky.
+    func testRelayFleetGrantKeepsTheCacheOnlyMarker() async throws {
+        for (marker, expected) in [(true, true), (false, false)] {
+            let root = FileManager.default.temporaryDirectory
+                .appendingPathComponent("fleet-relay-cache-only-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let runtime = FakeCompletionRuntime()
+            let recorder = FrameRecorder()
+            let relay = InferenceRelay(
+                modelRuntime: runtime,
+                providerStatus: ProviderStatus(
+                    modelID: "mlx-community/Test-Model",
+                    modelLoaded: true,
+                    capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: 1)
+                ),
+                loadedModelID: "mlx-community/Test-Model",
+                maxActiveRequests: 1,
+                maxBodyBytes: 4096,
+                fleetCacheAuthority: FleetConversationCacheAuthority(
+                    storageURL: root.appendingPathComponent("revocations.json")
+                ),
+                sendFrame: { frame in await recorder.append(frame) }
+            )
+            var message: [String: Any] = [
+                "type": "inference_request",
+                "request_id": "req-fleet-cache-only",
+                "stream": false,
+                "body": #"{"model":"mlx-community/Test-Model","messages":[{"role":"user","content":"hello"}],"max_tokens":20,"temperature":0,"stream":false}"#,
+                "conversation_key": "conv:auto-prefix",
+                "fleet_cache": ["conversation_key": "conv:auto-prefix", "generation": 1],
+            ]
+            if marker { message["conversation_cache_only"] = true }
+
+            try await relay.handleInferenceRequest(message)
+            _ = try await waitForFrames { frames in
+                frames.contains { $0["type"] as? String == "inference_response_end" }
+            } from: {
+                await recorder.frames
+            }
+            let keys = await runtime.observedConversationKeys()
+            let flags = await runtime.observedConversationCacheOnlyFlags()
+            let grants = await runtime.observedFleetGrantKeys()
+            XCTAssertEqual(keys, ["conv:auto-prefix"], "marker \(marker)")
+            XCTAssertEqual(flags, [expected], "marker \(marker)")
+            XCTAssertEqual(grants, ["conv:auto-prefix"], "marker \(marker)")
+        }
+    }
+
     // SPEC-015 §M.0 / §M.2 — coordinator-WS-mediated non-streaming
     // receipt carries the 9-field v0.3 tuple with
     // `receipt_version == "3"` and `model_hash` matching the
@@ -2431,6 +2483,7 @@ private actor FakePreflightRejectRuntime: ModelRuntimeServing {
 private actor FakeCompletionRuntime: ModelRuntimeServing {
     private var conversationKeys: [String?] = []
     private var conversationCacheOnlyFlags: [Bool] = []
+    private var fleetGrantKeys: [String?] = []
 
     var loadedModelHash: String? { nil }
     var loadedModelHashAlgorithm: String? { nil }
@@ -2448,12 +2501,17 @@ private actor FakeCompletionRuntime: ModelRuntimeServing {
         conversationCacheOnlyFlags
     }
 
+    func observedFleetGrantKeys() -> [String?] {
+        fleetGrantKeys
+    }
+
     func complete(
         _ request: ChatCompletionRequest,
         shouldCancel: @escaping @Sendable () -> Bool
     ) async throws -> CompletionResult {
         conversationKeys.append(request.conversationKey)
         conversationCacheOnlyFlags.append(request.conversationCacheOnly)
+        fleetGrantKeys.append(request.fleetCacheGrant?.conversationKey)
         return CompletionResult(content: "encrypted answer", finishReason: "stop", promptTokens: 5, completionTokens: 2, settlementDisposition: .eligibleOwner)
     }
 

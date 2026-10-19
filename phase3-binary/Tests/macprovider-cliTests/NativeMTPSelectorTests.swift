@@ -574,6 +574,77 @@ final class NativeMTPSelectorTests: XCTestCase {
         XCTAssertFalse(request.withConversationKey("conv:auto").conversationCacheOnly)
     }
 
+    /// SPEC-048-R004/R009: a gateway chat request reaches the runtime the way
+    /// the relay builds it: auto-prefix key marked cache-only, then the
+    /// coordinator's fleet grant for that key. Plain text stays eligible;
+    /// tools stay ordinary; a grant for another key carries no marker.
+    func testGatewayShapedRequestWithFleetGrantStaysEligible() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("native-mtp-gateway-shape-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let authority = FleetConversationCacheAuthority(storageURL: root.appendingPathComponent("floors.json"))
+        let key = "conv:" + String(repeating: "ab", count: 32)
+        let grant = try authority.authorize(conversationKey: key, generation: 1)
+        func relayed(_ extra: [String: Any] = [:], cacheOnly: Bool = true) throws -> ChatCompletionRequest {
+            var body: [String: Any] = [
+                "messages": [["role": "user", "content": "Write a short paragraph about rivers."]],
+                "max_tokens": 256,
+                "stream": true,
+                "stream_options": ["include_usage": true],
+            ]
+            for (name, value) in extra { body[name] = value }
+            return try makeRequest(extra: body)
+                .withConversationKey(key, cacheOnly: cacheOnly)
+                .withRequestID("req-gateway-shape")
+                .withIngestProvenance(.relay)
+                .withFleetCacheGrant(grant)
+                .withMaxTokensLimit(4096)
+        }
+        func admission(_ request: ChatCompletionRequest) -> NativeMTPRuntimeAdmission {
+            ModelRuntime.nativeMTPRuntimeAdmission(
+                for: request,
+                draftConfigured: false,
+                draftLoaded: false,
+                numDraftTokens: nil,
+                nativeMTPMode: .auto,
+                nativeMTPCapability: admittedCapability(),
+                schedulerSupportsNativeMTP: true
+            )
+        }
+
+        let plain = try relayed()
+        XCTAssertEqual(plain.conversationKey, key)
+        XCTAssertTrue(plain.conversationCacheOnly)
+        XCTAssertEqual(plain.fleetCacheGrant?.conversationKey, key)
+        let native = admission(plain)
+        XCTAssertEqual(native.selection.nativeMTPReason, .eligible)
+        XCTAssertTrue(native.usesNativeMTP)
+        XCTAssertTrue(native.allowsConversationCacheLease(cacheOnlyKey: plain.conversationCacheOnly))
+        XCTAssertTrue(native.resolvingConversationCacheLease(
+            hasConversationKey: true, leaseAllowed: true, cachedPromptTokens: 0, keyedRowsCommitSerialFormat: true
+        ).usesNativeMTP)
+
+        let tools = admission(try relayed([
+            "tools": [["type": "function", "function": ["name": "lookup", "parameters": ["type": "object"]]]],
+        ]))
+        XCTAssertEqual(tools.selection.nativeMTPReason, .tools)
+        XCTAssertFalse(tools.usesNativeMTP)
+
+        let sticky = try relayed(cacheOnly: false)
+        XCTAssertFalse(sticky.conversationCacheOnly)
+        XCTAssertEqual(admission(sticky).selection.nativeMTPReason, .conversationKey)
+
+        let otherGrant = try authority.authorize(conversationKey: "conv:other", generation: 1)
+        let regranted = try makeRequest()
+            .withConversationKey(key, cacheOnly: true)
+            .withFleetCacheGrant(otherGrant)
+        XCTAssertEqual(regranted.conversationKey, "conv:other")
+        XCTAssertFalse(regranted.conversationCacheOnly)
+        XCTAssertFalse(try makeRequest().withConversationKey(key, cacheOnly: true)
+            .withFleetCacheGrant(nil).conversationCacheOnly)
+    }
+
     /// The lease decides a cache-only native row: only a miss on a runtime
     /// that commits keyed rows in serial format stays native.
     func testCacheOnlyNativeAdmissionResolvesOnTheLease() throws {
