@@ -1,0 +1,2 @@
+{"case": "b", "tag": "b1", "prompt_tokens_target": 500, "max_tokens": 2048, "stream": false, "http_status": 503, "seconds": 29.7, "prompt_tokens": null, "completion_tokens": null, "finish_reason": null, "error": {"inference_ran": false, "code": "continuous_batching_scheduler_no_progress", "settlement_ran": false, "request_id": null, "retryable": false, "message": "Inference engine unavailable", "type": "server_error", "param": null}}
+{"case": "b", "summary": "FAIL", "wall_s": 29.7, "completion_tokens": [null]}

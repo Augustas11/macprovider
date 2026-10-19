@@ -1,0 +1,9 @@
+{"case": "a", "tag": "a1", "prompt_tokens_target": 1000, "max_tokens": 4096, "stream": false, "http_status": 200, "seconds": 285.7, "prompt_tokens": 1118, "completion_tokens": 4096, "finish_reason": "length"}
+{"case": "a", "tag": "a2", "prompt_tokens_target": 2000, "max_tokens": 4096, "stream": false, "http_status": 200, "seconds": 287.4, "prompt_tokens": 2210, "completion_tokens": 4096, "finish_reason": "length"}
+{"case": "a", "tag": "a3", "prompt_tokens_target": 3000, "max_tokens": 4096, "stream": false, "http_status": 200, "seconds": 288.1, "prompt_tokens": 3302, "completion_tokens": 4096, "finish_reason": "length"}
+{"case": "a", "tag": "a4", "prompt_tokens_target": 3000, "max_tokens": 4096, "stream": false, "http_status": 200, "seconds": 287.7, "prompt_tokens": 3302, "completion_tokens": 4096, "finish_reason": "length"}
+{"case": "a", "summary": "PASS", "wall_s": 288.1, "completion_tokens": [4096, 4096, 4096, 4096]}
+{"case": "b", "tag": "b1", "prompt_tokens_target": 500, "max_tokens": 2048, "stream": false, "http_status": 200, "seconds": 55.5, "prompt_tokens": 572, "completion_tokens": 2048, "finish_reason": "length"}
+{"case": "b", "summary": "PASS", "wall_s": 55.5, "completion_tokens": [2048]}
+{"case": "c", "tag": "c1", "prompt_tokens_target": 500, "max_tokens": 2048, "stream": true, "http_status": 200, "seconds": 55.6, "ttft_s": 2.12, "content_chunks": 1998, "done": true, "finish_reason": "length", "completion_tokens": 2048, "prompt_tokens": 572}
+{"case": "c", "summary": "PASS", "wall_s": 55.6, "completion_tokens": [2048]}
