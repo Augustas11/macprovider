@@ -2,6 +2,7 @@ package buyer
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -134,12 +135,19 @@ func TestBuyerOwnershipRelayBlindReservationExcludesOwned(t *testing.T) {
 	WithBuyerOwnershipLookup(func(context.Context, string, []int64) (map[string]bool, error) {
 		return map[string]bool{"provider-a": true}, nil
 	})(s)
-	_, _, found, _ := s.selectRelayBlindProvider(ctx, "acct", "model-a", 2048, false, relayblind.KeyClassRelayBlind, nil)
+	_, _, found, _, _ := s.selectRelayBlindProvider(ctx, "acct", "model-a", 2048, false, relayblind.KeyClassRelayBlind, nil)
 	if found {
 		t.Fatal("relay-blind reserved owned provider")
 	}
+	WithBuyerOwnershipLookup(func(context.Context, string, []int64) (map[string]bool, error) {
+		return nil, errors.New("ownership store closed")
+	})(s)
+	_, _, found, _, ownershipErr := s.selectRelayBlindProvider(ctx, "acct", "model-a", 2048, false, relayblind.KeyClassRelayBlind, nil)
+	if found || ownershipErr == nil || !ownershipErr.ownershipLookupFailed {
+		t.Fatalf("lookup failure: found=%v err=%+v", found, ownershipErr)
+	}
 	WithBuyerOwnershipLookup(func(context.Context, string, []int64) (map[string]bool, error) { return nil, nil })(s)
-	_, _, found, _ = s.selectRelayBlindProvider(ctx, "acct", "model-a", 2048, false, relayblind.KeyClassRelayBlind, nil)
+	_, _, found, _, _ = s.selectRelayBlindProvider(ctx, "acct", "model-a", 2048, false, relayblind.KeyClassRelayBlind, nil)
 	if !found {
 		t.Fatal("successful no-link lookup excluded ordinary relay-blind buyer")
 	}
@@ -158,12 +166,20 @@ func TestBuyerOwnershipOperatorMapAppliesGlobally(t *testing.T) {
 }
 
 func TestBuyerOwnershipEncryptedDispatchRevalidates(t *testing.T) {
-	for _, private := range []bool{false, true} {
-		t.Run(fmt.Sprintf("privacy=%v", private), func(t *testing.T) {
+	for _, tc := range []struct {
+		private, lookupFails bool
+	}{{false, false}, {true, false}, {false, true}, {true, true}} {
+		private := tc.private
+		t.Run(fmt.Sprintf("privacy=%v/lookup_fails=%v", private, tc.lookupFails), func(t *testing.T) {
 			var dispatches atomic.Int32
 			h := newPrivacyHarness(t, privacyHarnessConfig{privacyKey: true, privacyEnabled: true, relayKey: true, relay: privacySuccessRelay(`{"choices":[]}`, nil, &dispatches)})
+			metrics := &recordingRouteMetrics{}
+			h.authority.UseMetrics(metrics)
 			owned := false
 			WithBuyerOwnershipLookup(func(context.Context, string, []int64) (map[string]bool, error) {
+				if owned && tc.lookupFails {
+					return nil, errors.New("ownership store closed")
+				}
 				return map[string]bool{h.provider.ProviderID: owned}, nil
 			})(h.server)
 			reservation := h.reserve(t, private)
@@ -188,6 +204,23 @@ func TestBuyerOwnershipEncryptedDispatchRevalidates(t *testing.T) {
 			if rr.Code != 503 || dispatches.Load() != 0 {
 				t.Fatalf("owned encrypted dispatch=%d status=%d body=%s", dispatches.Load(), rr.Code, rr.Body.String())
 			}
+			if rr.Header().Get(settlementNoPriorDispatchHeader) != "1" {
+				t.Fatal("pre-dispatch ownership refusal lacks the no-prior-dispatch marker")
+			}
+			reason := relayblind.PrivacyRejectDispatchUnavailable
+			if tc.lookupFails {
+				reason = relayblind.PrivacyRejectStoreUnavailable
+			}
+			want := 0
+			if private {
+				want = 1
+			}
+			if got := metrics.count(relayblind.PrivacyRejectPhaseDispatch, reason); got != want {
+				t.Fatalf("privacy rejection %s counted %d, want %d", reason, got, want)
+			}
+			if tc.lookupFails && h.server.ownershipLookupRefusals.Load() == 0 || !tc.lookupFails && h.server.ownedProviderRefusals.Load() == 0 {
+				t.Fatal("ownership refusal was not counted")
+			}
 			row, err := h.store.LookupReservation(context.Background(), consume.ProviderBinding)
 			if err != nil || row.State != relayblind.ReservationStateRejected {
 				t.Fatalf("reservation state=%s err=%v", row.State, err)
@@ -208,5 +241,17 @@ func TestBuyerOwnershipFailoverCannotSelectOwnProvider(t *testing.T) {
 	next, ok := s.failoverCandidate(routingOwnerContext(t, "acct"), "fallback", poolChatReq(""), http.Header{}, failed, nil, "day", &forwardState{})
 	if ok {
 		t.Fatalf("failover selected owned provider: %s", next.ProviderID)
+	}
+}
+
+func TestBuyerOwnershipRelayBlindReservationLookupFailureIsTransient(t *testing.T) {
+	h := newPrivacyHarness(t, privacyHarnessConfig{privacyKey: true, privacyEnabled: true, relayKey: true})
+	WithBuyerOwnershipLookup(func(context.Context, string, []int64) (map[string]bool, error) {
+		return nil, errors.New("ownership store closed")
+	})(h.server)
+	raw, _ := json.Marshal(relayblind.ReservationRequest{EndpointFamily: relayblind.EndpointChatCompletions, Model: "model-a", MaxOutputTokens: 32, InputTokenUpperBound: 96, EncryptedRequestBytes: 2048})
+	rr := relayBlindRequest(t, h.server, http.MethodPost, "/v1/relay-blind/route-reservations", raw, "")
+	if rr.Code != http.StatusServiceUnavailable || !strings.Contains(rr.Body.String(), `"relay_blind_required_unavailable"`) {
+		t.Fatalf("status=%d body=%s, want transient relay_blind_required_unavailable", rr.Code, rr.Body.String())
 	}
 }

@@ -19,10 +19,13 @@ type routingIdentityLookup interface {
 // The header is an assertion from the authenticated gateway database, never
 // an inbound header. The explicit unavailable state makes even an encrypted
 // reservation fail closed at the coordinator before any provider dispatch.
+// The lookup runs on the read-only pool: it is on every chat attempt, so it
+// must not queue behind settlement on the single writer connection. WAL makes
+// every committed identity link visible to the reader.
 func (s *Server) setRoutingIdentity(h http.Header, r *http.Request, accountID string) {
 	h.Set(routingGitHubIDsHeader, "unavailable")
-	lookup, ok := s.store.(routingIdentityLookup)
-	if !ok {
+	lookup := s.readStore()
+	if lookup == nil {
 		return
 	}
 	ids, err := lookup.RoutingGitHubIdentities(r.Context(), accountID)

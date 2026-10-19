@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/augstar/macprovider-gateway/internal/storage"
 )
@@ -97,5 +98,39 @@ func assertRoutingFailureHasNoBilledTokens(t *testing.T, dbPath, account string)
 	var billed int64
 	if err := db.QueryRow(`SELECT COALESCE(SUM(prompt_tokens + completion_tokens),0) FROM usage_events WHERE account_id = ?`, account).Scan(&billed); err != nil || billed != 0 {
 		t.Fatalf("billed tokens=%d err=%v", billed, err)
+	}
+}
+
+// heldWriterStore models the primary store while settlement holds its single
+// connection: any identity lookup on it blocks until the caller gives up.
+type heldWriterStore struct{ Store }
+
+func (heldWriterStore) RoutingGitHubIdentities(ctx context.Context, _ string) ([]int64, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+type routingIdentityReadStore struct {
+	ReadStore
+	ids []int64
+}
+
+func (s routingIdentityReadStore) RoutingGitHubIdentities(context.Context, string) ([]int64, error) {
+	return s.ids, nil
+}
+
+func TestRoutingIdentityUsesReadStoreWhileWriterHeld(t *testing.T) {
+	s := &Server{store: heldWriterStore{}, readOnlyStore: routingIdentityReadStore{ids: []int64{7}}}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	r := httptest.NewRequest("POST", "/v1/chat/completions", nil).WithContext(ctx)
+	h := http.Header{}
+	start := time.Now()
+	s.setRoutingIdentity(h, r, "account")
+	if got := h.Get(routingGitHubIDsHeader); got != "7" {
+		t.Fatalf("routing identity=%q, want 7 from the read store", got)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("routing identity waited %v on the held writer", elapsed)
 	}
 }

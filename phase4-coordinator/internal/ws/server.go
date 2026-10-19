@@ -5605,6 +5605,7 @@ func (s *Server) runHTTPWarmupGateAttempt(ctx context.Context, provider pool.Pro
 		return false
 	}
 	req.Header.Set("Content-Type", "application/json")
+	providerhttp.SetCoordinatorOrigin(req.Header)
 	resp, err := providerhttp.Client.Do(req)
 	if err != nil {
 		return false
@@ -5950,6 +5951,7 @@ func (s *Server) runHTTPCanaryProbeAttempt(ctx context.Context, provider pool.Pr
 		return canaryProbeSkip, canaryProbeMetrics{}
 	}
 	req.Header.Set("Content-Type", "application/json")
+	providerhttp.SetCoordinatorOrigin(req.Header)
 	resp, err := providerhttp.Client.Do(req)
 	if err != nil {
 		return canaryProbeFail, canaryProbeMetrics{FailReason: canaryFailRelay}

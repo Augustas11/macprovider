@@ -2,6 +2,7 @@ package buyer
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -50,8 +51,19 @@ func parseRoutingIdentity(h http.Header) routingIdentity {
 	return identity
 }
 
-func ownershipUnavailable() *routeError {
-	return &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "No eligible provider available"}
+// ownershipRefusal is the buyer-safe ownership refusal. lookupFailed marks a
+// routing identity or ownership lookup that could not answer (transient);
+// otherwise the buyer owns the only eligible or the pinned provider. Each
+// refusal is counted and logged with fixed fields only.
+func (s *Server) ownershipRefusal(lookupFailed bool, err error) *routeError {
+	if lookupFailed {
+		total := s.ownershipLookupRefusals.Add(1)
+		s.log.Warn().Err(err).Str("event", "buyer_ownership_refused").Str("reason", "lookup_unavailable").Int64("refusals_total", total).Msg("buyer ownership lookup unavailable; request refused")
+	} else {
+		total := s.ownedProviderRefusals.Add(1)
+		s.log.Info().Str("event", "buyer_ownership_refused").Str("reason", "owned_provider").Int64("refusals_total", total).Msg("buyer-owned provider refused for dispatch")
+	}
+	return &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "No eligible provider available", ownershipLookupFailed: lookupFailed}
 }
 
 func (s *Server) buyerOwnedProviders(ctx context.Context) (map[string]bool, *routeError) {
@@ -61,17 +73,17 @@ func (s *Server) buyerOwnedProviders(ctx context.Context) (map[string]bool, *rou
 	} // direct legacy calls have no asserted owner
 	identity, _ := ctx.Value(routingIdentityContextKey{}).(routingIdentity)
 	if identity.unavailable {
-		return nil, ownershipUnavailable()
+		return nil, s.ownershipRefusal(true, errors.New("routing identity header invalid"))
 	}
 	owned := map[string]bool{}
 	if s.buyerOwnership != nil {
 		var err error
 		owned, err = s.buyerOwnership(ctx, account.ID(), identity.ids)
 		if err != nil {
-			return nil, ownershipUnavailable()
+			return nil, s.ownershipRefusal(true, err)
 		}
 	} else if len(identity.ids) != 0 {
-		return nil, ownershipUnavailable()
+		return nil, s.ownershipRefusal(true, errors.New("routing identity without ownership lookup"))
 	}
 	if owned == nil {
 		owned = map[string]bool{}
@@ -90,7 +102,7 @@ func (s *Server) checkBuyerProviderOwnership(ctx context.Context, providerID str
 		return routeErr
 	}
 	if owned[providerID] {
-		return ownershipUnavailable()
+		return s.ownershipRefusal(false, nil)
 	}
 	return nil
 }

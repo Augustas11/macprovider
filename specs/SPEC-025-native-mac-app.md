@@ -1,6 +1,16 @@
 # SPEC-025 — Native Mac App (signed `.dmg`, native Mac app with menu-bar presence)
 
-Status: DRAFT v0.34.0 · Owner: @Augustas11 · Target: 2026 Q3
+Status: DRAFT v0.34.1 · Owner: @Augustas11 · Target: 2026 Q3
+
+**Change log v0.34.1 (2026-10-19, Related: #2054):**
+Local Chat marks its loopback requests `X-MacProvider-Origin: local-app`, the
+only marker SPEC-001-R011 treats as local. Connected apps hand the buyer key
+from Keychain to the client launcher through a one-time 0600 file in a 0700
+directory that is read once and deleted, and export it to the client
+environment; the interface discloses that repository configuration and agent
+commands can read it and recommends a dedicated, spend-limited buyer key.
+OpenCode project configuration is disabled for launched sessions and Crush
+users are warned.
 
 **Change log v0.34.0 (2026-10-19, Related: #2054 Phase 3):**
 Replaces the Chat placeholder with capability-gated local Chat, bounded
@@ -788,7 +798,9 @@ projections (SPEC-044-R004), colour never the only signal.
   `local_preempted` MUST end the current turn without accepting stale output
   from an earlier task. History MUST be bounded, remain in memory, and never
   enter logs/diagnostics. Local activity may be shown only from `local_usage`
-  and never folded into paid counters or earnings. Do not send buyer keys,
+  and never folded into paid counters or earnings. Every Chat request MUST carry exactly one
+  `X-MacProvider-Origin: local-app`, the marker that makes it local work under
+  SPEC-001-R011. Do not send buyer keys,
   settlement metadata or privacy headers to the loopback endpoint. The
   loopback trust policy is SPEC-001-R009, not an authentication assertion.
 - **SPEC-025-R011 Bounded Agent mode.** Agent mode MUST be explicit and
@@ -818,7 +830,15 @@ projections (SPEC-044-R004), colour never the only signal.
   user-owned files outside repositories (directories 0700, files 0600).
   Never display secrets in previews, logs, diagnostics, subprocess arguments
   or errors. Supply a working documented credential mechanism, not an
-  unresolved environment placeholder. Setup requires an explicit app action
+  unresolved environment placeholder. A launched client receives the key from
+  Keychain through a one-time file (0600, in a 0700 directory) that the
+  launcher reads once and deletes; the launcher exports the key to the client
+  environment. The interface MUST disclose that repository configuration and
+  agent commands run by the client can read that environment, and recommend a
+  dedicated, spend-limited buyer key. OpenCode sessions MUST be launched with
+  project configuration disabled (`OPENCODE_DISABLE_PROJECT_CONFIG=1` and
+  `OPENCODE_CONFIG_PROJECT_DISABLE=1`); Crush, which has no such switch, MUST
+  carry a visible warning. Setup requires an explicit app action
   after a preview. Before changing config, protect an exact-byte original
   backup (which may itself contain secrets), refuse symlinks/nonregular
   files, bound input, preserve unrelated fields, and compare the file with
