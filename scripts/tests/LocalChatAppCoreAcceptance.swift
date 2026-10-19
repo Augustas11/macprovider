@@ -33,7 +33,7 @@ private enum LocalChatAppCoreAcceptance {
     static func main() async {
         var report: [String: Any] = ["result": "fail", "port": 18055, "transport": "actual_app_core"]
         do {
-            // Defense in depth: the launcher also validates sysctl/scutil and
+            // Defense in depth: the launcher also validates sysctl/hostname and
             // the exact --no-join listening process before compiling anything.
             guard ProcessInfo.processInfo.environment["MACPROVIDER_TEST_STUDIO_HOST"]?.isEmpty == false,
                   ProcessInfo.processInfo.environment["MACPROVIDER_CHAT_ACCEPTANCE_READY"] == "1"

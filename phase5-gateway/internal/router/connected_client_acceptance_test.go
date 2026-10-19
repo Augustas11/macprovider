@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -28,23 +29,33 @@ import (
 // coordinator routing. The provider owner must make the qualified model ready
 // before setting these variables; this test never starts or replaces a provider.
 func TestConnectedCodexClientAcceptance(t *testing.T) {
-	runConnectedClientAcceptance(t, "codex", "CODEX", "codex-cli 0.163.0")
+	runConnectedClientAcceptance(t, "codex", "CODEX", "codex-cli 0.163.0", false)
 }
 
 func TestConnectedOpenCodeClientAcceptance(t *testing.T) {
-	runConnectedClientAcceptance(t, "opencode", "OPENCODE", "1.17.9")
+	runConnectedClientAcceptance(t, "opencode", "OPENCODE", "1.17.9", false)
 }
 
 func TestConnectedGooseClientAcceptance(t *testing.T) {
-	runConnectedClientAcceptance(t, "goose", "GOOSE", "1.45.0")
+	runConnectedClientAcceptance(t, "goose", "GOOSE", "1.45.0", false)
 }
 
-func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion string) {
+// Protocol fixtures isolate native client/gateway interoperability from model
+// automatic tool selection. They never contact the isolated provider.
+func TestConnectedOpenCodeClientProtocol(t *testing.T) {
+	runConnectedClientAcceptance(t, "opencode", "OPENCODE", "1.17.9", true)
+}
+
+func TestConnectedGooseClientProtocol(t *testing.T) {
+	runConnectedClientAcceptance(t, "goose", "GOOSE", "1.45.0", true)
+}
+
+func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion string, synthetic bool) {
 	binary, upstream := os.Getenv("MACPROVIDER_TEST_"+envPrefix+"_BIN"), os.Getenv("MACPROVIDER_TEST_"+envPrefix+"_UPSTREAM")
-	if binary == "" || upstream == "" {
+	if binary == "" || (!synthetic && upstream == "") || (synthetic && os.Getenv("MACPROVIDER_TEST_"+envPrefix+"_PROTOCOL") != "1") {
 		t.Skip("requires explicit client binary and isolated Studio provider URL")
 	}
-	if upstream != "http://127.0.0.1:18055" || !filepath.IsAbs(binary) {
+	if (!synthetic && upstream != "http://127.0.0.1:18055") || !filepath.IsAbs(binary) {
 		t.Fatal("acceptance requires an absolute client path and the isolated provider on loopback18055")
 	}
 	if runtime.GOOS != "darwin" {
@@ -66,7 +77,12 @@ func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion
 	}
 
 	const model = "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit"
-	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Native clients resolve cwd physically; use the same path for tool permissions.
+
 	for _, name := range []string{"home", "codex-home", "xdg-config", "xdg-data", "xdg-cache", "tmp", "workspace"} {
 		if err := os.Mkdir(filepath.Join(root, name), 0700); err != nil {
 			t.Fatal(err)
@@ -88,7 +104,7 @@ func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
 	defer cancel()
 	var mu sync.Mutex
-	calls, streamed, matchedResult := 0, false, false
+	calls, inbound, streamed, matchedResult := 0, 0, false, false
 	transport := &http.Transport{Proxy: nil, ResponseHeaderTimeout: 90 * time.Second}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -136,6 +152,19 @@ func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion
 			cancel()
 			return nil, fmt.Errorf("client exceeded six inference requests")
 		}
+		t.Logf("upstream request shape: %s", connectedRequestShape(body))
+		if synthetic {
+			held, err := connectedSyntheticToolResponse(body, kind, filepath.Join(root, "workspace"), marker)
+			if err != nil {
+				cancel()
+				return nil, err
+			}
+			if err := validateConnectedToolStream(held, kind, filepath.Join(root, "workspace")); err != nil {
+				cancel()
+				return nil, err
+			}
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream"}}, string(held)), nil
+		}
 		// Preserve the gateway-produced body; only the destination and fixture
 		// service headers differ from the normal coordinator transport.
 		forward, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstream+"/v1/chat/completions", bytes.NewReader(body))
@@ -167,9 +196,36 @@ func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion
 	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
 		enableResponsesWithCoordinator(cfg)
 		cfg.Limits.MaxTokensPerRequest = 1024
-	}, WithHTTPClient(client))
+	}, WithHTTPClient(client), WithNow(time.Now))
 	key := createAccountAndKey(t, store, cfg, "connected-fixture")
-	server := httptest.NewServer(h)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && (r.URL.Path == "/v1/chat/completions" || r.URL.Path == "/v1/responses") {
+			mu.Lock()
+			inbound++
+			tooMany := inbound > 12
+			mu.Unlock()
+			if tooMany {
+				cancel()
+				http.Error(w, "fixture request limit", http.StatusTooManyRequests)
+				return
+			}
+			body, err := io.ReadAll(io.LimitReader(r.Body, 4<<20))
+			if err != nil {
+				http.Error(w, "fixture request read failed", http.StatusBadRequest)
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			var shape struct {
+				MaxTokens           int64 `json:"max_tokens"`
+				MaxCompletionTokens int64 `json:"max_completion_tokens"`
+				MaxOutputTokens     int64 `json:"max_output_tokens"`
+			}
+			if json.Unmarshal(body, &shape) == nil {
+				t.Logf("client request budget: max_tokens=%d max_completion_tokens=%d max_output_tokens=%d", shape.MaxTokens, shape.MaxCompletionTokens, shape.MaxOutputTokens)
+			}
+		}
+		h.ServeHTTP(w, r)
+	}))
 	defer server.Close()
 
 	// Mirrors ConnectedAppConfiguration's conservative Codex0.163.0 catalog;
@@ -211,8 +267,10 @@ env_key = "MALIBU_API_KEY"
 	}
 	finalPath := filepath.Join(root, "final.txt")
 	prompt := "Use exec_command with exactly cmd=cat marker.txt to read the current workspace marker. Do not inspect any other file or use the network. Reply with exactly its contents and nothing else."
-	if kind != "codex" {
-		prompt = "Read only " + filepath.Join(root, "workspace", "marker.txt") + " using the read tool (or text_editor view for Goose). Do not inspect any other file, execute a shell command, or use the network. Reply with exactly its contents and nothing else."
+	if kind == "opencode" {
+		prompt = "Read only " + filepath.Join(root, "workspace", "marker.txt") + " using the read tool. Do not inspect any other file, execute a shell command, or use the network. Reply with exactly its contents and nothing else."
+	} else if kind == "goose" {
+		prompt = "Use shell with exactly command=cat marker.txt to read the current workspace marker. Do not inspect any other file or use the network. Reply with exactly its contents and nothing else."
 	}
 	var args []string
 	switch kind {
@@ -225,7 +283,7 @@ env_key = "MALIBU_API_KEY"
 		data, err := json.Marshal(map[string]any{"model": "malibu/" + model, "provider": map[string]any{
 			"malibu": map[string]any{"npm": "@ai-sdk/openai-compatible", "name": "Malibu",
 				"options": map[string]any{"baseURL": server.URL + "/v1", "apiKey": "{env:MALIBU_API_KEY}"},
-				"models":  map[string]any{model: map[string]any{"name": model}}},
+				"models":  map[string]any{model: map[string]any{"name": model, "limit": map[string]any{"context": 8192, "output": 1024}}}},
 		}})
 		if err != nil {
 			t.Fatal(err)
@@ -255,7 +313,7 @@ env_key = "MALIBU_API_KEY"
 	output := &connectedClientOutput{}
 	cmd.Stdout, cmd.Stderr = output, output
 	if err := cmd.Run(); err != nil {
-		t.Fatalf("isolated %s failed: %v (client output withheld)", kind, err)
+		t.Fatalf("isolated %s failed: %v; %s", kind, err, connectedClientSummary(kind, output.String(), marker))
 	}
 	var final []byte
 	if kind == "codex" {
@@ -264,14 +322,14 @@ env_key = "MALIBU_API_KEY"
 		final = []byte(connectedClientFinalText(kind, output.String()))
 	}
 	if err != nil || strings.TrimSpace(string(final)) != marker {
-		t.Fatalf("%s did not return the exact fixture marker: %v (client output withheld)", kind, err)
+		t.Fatalf("%s did not return the exact fixture marker: %v; %s", kind, err, connectedClientSummary(kind, output.String(), marker))
 	}
 	mu.Lock()
 	defer mu.Unlock()
 	if calls < 2 || !streamed || !matchedResult {
 		t.Fatalf("missing real streaming tool round trip: requests=%d streamed=%v matched_result=%v", calls, streamed, matchedResult)
 	}
-	t.Logf("%s completed streaming and a matching file-tool result through the gateway (%d model requests)", expectedVersion, calls)
+	t.Logf("%s completed streaming and a matching file-tool result through the gateway (synthetic=%v upstream_requests=%d)", expectedVersion, synthetic, calls)
 }
 
 // Keep client diagnostics bounded even if a client loops or emits verbose logs.
@@ -325,12 +383,18 @@ func connectedClientFinalText(kind, output string) string {
 					Text string `json:"text"`
 				} `json:"content"`
 			}
-			if json.Unmarshal(event["message"], &message) != nil || message.Role != "assistant" {
+			if json.Unmarshal(event["message"], &message) != nil {
+				continue
+			}
+			if message.Role != "assistant" {
+				final = ""
 				continue
 			}
 			for _, content := range message.Content {
 				if content.Type == "text" {
-					final = content.Text
+					final += content.Text
+				} else {
+					final = ""
 				}
 			}
 		}
@@ -452,10 +516,11 @@ func validateConnectedToolStream(body []byte, kind, workspace string) error {
 		}
 		allowed = map[string]bool{"filePath": true, "offset": true, "limit": true}
 	case "goose":
-		if name != "developer__text_editor" || stringArg("command") != "view" || stringArg("path") != filepath.Join(workspace, "marker.txt") {
+		command := stringArg("command")
+		if name != "shell" || (command != "cat marker.txt" && command != "cat ./marker.txt" && command != "/bin/cat marker.txt" && command != "/bin/cat ./marker.txt") || !numericArg("timeout_secs", 10) {
 			return reject("check16")
 		}
-		allowed = map[string]bool{"command": true, "path": true}
+		allowed = map[string]bool{"command": true, "timeout_secs": true}
 	default:
 		return reject("check17")
 	}
@@ -486,7 +551,11 @@ func TestConnectedClientToolGuard(t *testing.T) {
 		{"unknown tool", "codex", "other", `{"cmd":"cat marker.txt"}`, false},
 		{"read", "opencode", "read", `{"filePath":"/fixture/workspace/marker.txt"}`, true},
 		{"outside read", "opencode", "read", `{"filePath":"/private/secret"}`, false},
-		{"view", "goose", "developer__text_editor", `{"command":"view","path":"/fixture/workspace/marker.txt"}`, true},
+		{"goose-read", "goose", "shell", `{"command":"cat marker.txt","timeout_secs":5}`, true},
+		{"goose-outside", "goose", "shell", `{"command":"cat /etc/passwd"}`, false},
+		{"goose-metacharacters", "goose", "shell", `{"command":"cat marker.txt;env"}`, false},
+		{"goose-cwd", "goose", "shell", `{"command":"cat marker.txt","workdir":"/tmp"}`, false},
+		{"goose-timeout", "goose", "shell", `{"command":"cat marker.txt","timeout_secs":11}`, false},
 		{"edit", "goose", "developer__text_editor", `{"command":"create","path":"/fixture/workspace/marker.txt"}`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -517,5 +586,174 @@ data: [DONE]
 	unsafe := bytes.ReplaceAll(fragmented, []byte("marker.txt"), []byte("marker.txt;env"))
 	if validateConnectedToolStream(unsafe, "codex", workspace) == nil {
 		t.Fatal("accepted fragmented unsafe call")
+	}
+}
+
+func TestConnectedClientFinalText(t *testing.T) {
+	// Goose1.45.0 emits incremental Message events, not a single final object:
+	// https://github.com/block/goose/blob/v1.45.0/crates/goose-cli/src/session/mod.rs
+	goose := `{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"Reading"}]}}
+{"type":"message","message":{"role":"assistant","content":[{"type":"toolRequest"}]}}
+{"type":"message","message":{"role":"user","content":[{"type":"toolResponse","text":"marker-secret"}]}}
+{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"marker-"}]}}
+{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"secret"}]}}
+{"type":"complete"}`
+	if got := connectedClientFinalText("goose", goose); got != "marker-secret" {
+		t.Fatalf("Goose final text=%q", got)
+	}
+	if got := connectedClientFinalText("goose", `{"type":"message","message":{"role":"user","content":[{"type":"toolResponse","text":"marker-secret"}]}}`); got != "" {
+		t.Fatal("tool result counted as final answer")
+	}
+}
+
+// Diagnostics expose fixed schema counters and error fingerprints only, never
+// arbitrary client messages, model output, tool results, paths, or credentials.
+func connectedClientSummary(kind, output, marker string) string {
+	counts := map[string]int{}
+	errors := []string{}
+	for _, line := range strings.Split(output, "\n") {
+		var event struct {
+			Type    string `json:"type"`
+			Error   string `json:"error"`
+			Message struct {
+				Role    string `json:"role"`
+				Content []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"message"`
+		}
+		if json.Unmarshal([]byte(line), &event) != nil {
+			counts["non_json_lines"]++
+			continue
+		}
+		switch event.Type {
+		case "message", "error", "complete", "text", "step_start", "step_finish", "tool_use":
+			counts[event.Type]++
+		default:
+			counts["other_event"]++
+		}
+		if event.Error != "" {
+			sum := sha256.Sum256([]byte(event.Error))
+			errors = append(errors, hex.EncodeToString(sum[:]))
+			for _, word := range []string{"missing field", "invalid type", "EOF", "unexpected end", "tool", "stream", "decode", "parse", "context", "rate limit", "function", "tokens", "400", "403", "429"} {
+				if strings.Contains(strings.ToLower(event.Error), strings.ToLower(word)) {
+					counts["error_has_"+word]++
+				}
+			}
+		}
+		if event.Message.Role == "assistant" {
+			counts["assistant_messages"]++
+			for _, item := range event.Message.Content {
+				if item.Type == "text" {
+					counts["assistant_text_bytes"] += len(item.Text)
+				} else {
+					counts["assistant_non_text"]++
+				}
+			}
+		}
+	}
+	counts["extracted_final_bytes"] = len(connectedClientFinalText(kind, output))
+	summary, _ := json.Marshal(map[string]any{"schema_counts": counts, "error_sha256": errors, "output_contains_marker": strings.Contains(output, marker)})
+	return string(summary)
+}
+
+// Report only schema counts and known tool availability, never request content.
+func connectedRequestShape(body []byte) string {
+	var payload struct {
+		Messages []struct {
+			Role string `json:"role"`
+		} `json:"messages"`
+		Tools []struct {
+			Function struct {
+				Name string `json:"name"`
+			} `json:"function"`
+		} `json:"tools"`
+	}
+	counts := map[string]int{}
+	if json.Unmarshal(body, &payload) != nil {
+		return `{"invalid_json":1}`
+	}
+	for _, message := range payload.Messages {
+		switch message.Role {
+		case "system", "developer", "user", "assistant", "tool":
+			counts[message.Role]++
+		default:
+			counts["other_role"]++
+		}
+	}
+	counts["tools"] = len(payload.Tools)
+	for _, tool := range payload.Tools {
+		switch tool.Function.Name {
+		case "read", "shell", "exec_command", "functions.exec_command":
+			counts[tool.Function.Name]++
+		}
+	}
+	data, _ := json.Marshal(counts)
+	return string(data)
+}
+
+func connectedSyntheticToolResponse(body []byte, kind, workspace, marker string) ([]byte, error) {
+	var payload struct {
+		Messages []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+		Tools []struct {
+			Function struct {
+				Name string `json:"name"`
+			} `json:"function"`
+		} `json:"tools"`
+	}
+	if json.Unmarshal(body, &payload) != nil {
+		return nil, fmt.Errorf("invalid synthetic request")
+	}
+	toolName := "read"
+	arguments := map[string]any{"filePath": filepath.Join(workspace, "marker.txt")}
+	if kind == "goose" {
+		toolName = "shell"
+		arguments = map[string]any{"command": "cat marker.txt"}
+	}
+	hasTool, hasResult := false, false
+	for _, tool := range payload.Tools {
+		hasTool = hasTool || tool.Function.Name == toolName
+	}
+	for _, message := range payload.Messages {
+		hasResult = hasResult || (message.Role == "tool" && strings.Contains(string(message.Content), marker))
+	}
+	delta := map[string]any{"role": "assistant", "content": "Fixture title"}
+	finish := "stop"
+	if hasResult {
+		delta["content"] = marker
+	} else if hasTool {
+		encoded, _ := json.Marshal(arguments)
+		delete(delta, "content")
+		delta["tool_calls"] = []any{map[string]any{"index": 0, "id": "call_fixture", "type": "function", "function": map[string]any{"name": toolName, "arguments": string(encoded)}}}
+		finish = "tool_calls"
+	} else if len(payload.Tools) != 0 {
+		return nil, fmt.Errorf("synthetic request missing expected marker read tool")
+	}
+	frame, _ := json.Marshal(map[string]any{"id": "chatcmpl_fixture", "object": "chat.completion.chunk", "created": 1, "model": "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit", "choices": []any{map[string]any{"index": 0, "delta": delta, "finish_reason": finish}}, "usage": map[string]int{"prompt_tokens": 4, "completion_tokens": 8, "total_tokens": 12}})
+	return []byte("data: " + string(frame) + "\n\ndata: [DONE]\n\n"), nil
+}
+
+func TestConnectedClientSyntheticProtocol(t *testing.T) {
+	for _, kind := range []string{"opencode", "goose"} {
+		name := "read"
+		if kind == "goose" {
+			name = "shell"
+		}
+		body := []byte(fmt.Sprintf(`{"messages":[{"role":"user","content":"private"}],"tools":[{"type":"function","function":{"name":%q}}]}`, name))
+		response, err := connectedSyntheticToolResponse(body, kind, "/fixture", "marker-secret")
+		if err != nil || validateConnectedToolStream(response, kind, "/fixture") != nil {
+			t.Fatalf("synthetic tool guard: kind=%s error=%v", kind, err)
+		}
+		if strings.Contains(connectedRequestShape(body), "private") {
+			t.Fatal("request diagnostics exposed content")
+		}
+		final, err := connectedSyntheticToolResponse([]byte(`{"messages":[{"role":"tool","content":"marker-secret"}]}`), kind, "/fixture", "marker-secret")
+		if err != nil || !bytes.Contains(final, []byte("marker-secret")) || validateConnectedToolStream(final, kind, "/fixture") != nil {
+			t.Fatal("synthetic final response invalid")
+		}
 	}
 }

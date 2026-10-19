@@ -8,7 +8,7 @@ fail() { printf '{"result":"fail","reason":"%s"}\n' "$1" >&2; exit 1; }
 [[ -n "${MACPROVIDER_TEST_STUDIO_HOST:-}" ]] || fail required_studio_host_missing
 [[ "${MACPROVIDER_CHAT_ACCEPTANCE_READY:-}" == "1" ]] || fail exclusive_window_not_confirmed
 [[ "$(uname -s)" == "Darwin" ]] || fail wrong_os
-[[ "$(scutil --get LocalHostName)" == "$MACPROVIDER_TEST_STUDIO_HOST" ]] || fail wrong_host
+[[ "$(/bin/hostname)" == "$MACPROVIDER_TEST_STUDIO_HOST" ]] || fail wrong_host
 [[ "$(sysctl -n hw.model)" == "Mac15,14" ]] || fail wrong_hardware
 [[ "${MACPROVIDER_CHAT_ACCEPTANCE_PROVIDER_PID:-}" =~ ^[1-9][0-9]*$ ]] || fail provider_pid_missing
 provider_args="$(ps -p "$MACPROVIDER_CHAT_ACCEPTANCE_PROVIDER_PID" -o command=)"
