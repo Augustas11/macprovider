@@ -660,6 +660,194 @@ final class ModelArtifactDiagnosticsTests: XCTestCase {
         XCTAssertTrue(text.contains("<external>/elsewhere"), text)
     }
 
+    // MARK: prepare-catalog (SPEC-010-R008 v1.17, SPEC-044-R014-4)
+
+    private final class EventLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: [ModelPreparationTransactionEvent] = []
+        var events: [ModelPreparationTransactionEvent] {
+            lock.lock(); defer { lock.unlock() }
+            return stored
+        }
+        func append(_ event: ModelPreparationTransactionEvent) {
+            lock.lock(); stored.append(event); lock.unlock()
+        }
+    }
+
+    private final class Counter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored = 0
+        var value: Int {
+            lock.lock(); defer { lock.unlock() }
+            return stored
+        }
+        func increment() {
+            lock.lock(); stored += 1; lock.unlock()
+        }
+    }
+
+    private static let prepareTransactionID = "3f0c6b1e-8c2d-4f6a-9b1e-2d3c4b5a6f70"
+
+    private func prepareCatalog(
+        row: ModelArtifactSignedRow?,
+        resolver: CachedModelArtifactResolver,
+        cancellation: ModelsPrepareCatalogCancellation = ModelsPrepareCatalogCancellation(),
+        prepare: (@Sendable (ModelArtifactSignedRow, CachedModelArtifactResolver, String?) async -> ModelPrepareOutcome)? = nil,
+        removed: Counter? = nil
+    ) async -> (Int32, [ModelPreparationTransactionEvent]) {
+        let log = EventLog()
+        let sink = ModelsPrepareCatalogEventSink(transactionID: Self.prepareTransactionID) { log.append($0) }
+        var dependencies = ModelsPrepareCatalogRunner.Dependencies.live
+        dependencies.resolveRow = { key in
+            guard let row else { throw ModelArtifactSignedRowError.unknownModel(key) }
+            return row
+        }
+        if let prepare { dependencies.prepare = prepare }
+        dependencies.removePartials = { _, _ in removed?.increment() }
+        dependencies.progressIntervalNanoseconds = 10_000_000
+        let exit = await ModelsPrepareCatalogRunner.run(
+            key: "namespace/model",
+            resolver: resolver,
+            config: nil,
+            sink: sink,
+            cancellation: cancellation,
+            dependencies: dependencies
+        )
+        return (exit, log.events)
+    }
+
+    private func assertOneTransaction(_ events: [ModelPreparationTransactionEvent], file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertEqual(events.map(\.eventSequence), Array(1...max(1, events.count)), file: file, line: line)
+        XCTAssertTrue(events.allSatisfy { $0.transactionID == Self.prepareTransactionID }, file: file, line: line)
+        XCTAssertTrue(events.allSatisfy { $0.transactionKind == .prepareModel }, file: file, line: line)
+        XCTAssertTrue(events.allSatisfy { $0.modelKey == "namespace/model" }, file: file, line: line)
+        XCTAssertTrue(events.allSatisfy { $0.schema == "model_catalog_transaction_event.v1" }, file: file, line: line)
+    }
+
+    func testPrepareCatalogDownloadsAndReportsQueuedRunningSucceeded() async throws {
+        let served = try tempDir()
+        try writeCompleteSnapshot(at: served)
+        let row = makeRow(sha256: try ModelArtifactVerifier.canonicalArtifactHash(directory: served))
+        let (resolver, _) = try makeResolver(downloader: try fakeDownloader(serving: served))
+
+        let (exit, events) = await prepareCatalog(row: row, resolver: resolver)
+
+        XCTAssertEqual(exit, 0)
+        assertOneTransaction(events)
+        XCTAssertEqual(events.first?.state, .queued)
+        XCTAssertEqual(events.dropFirst().first?.state, .running)
+        XCTAssertEqual(events.dropFirst().first?.progress?.stageLabelKey, "downloading")
+        XCTAssertEqual(events.dropFirst().first?.progress?.heartbeat, true)
+        XCTAssertEqual(events.last?.state, .succeeded)
+        XCTAssertEqual(events.filter { [.succeeded, .failed, .cancelled, .timedOut].contains($0.state) }.count, 1)
+        XCTAssertEqual(ModelArtifactDiagnostics.diagnose(row: row, resolver: resolver).locationKind, .durableStore)
+    }
+
+    func testPrepareCatalogReportsHashMismatchAsVerificationFailure() async throws {
+        let served = try tempDir()
+        try writeCompleteSnapshot(at: served)
+        let row = makeRow(sha256: String(repeating: "1", count: 64))
+        let (resolver, _) = try makeResolver(downloader: try fakeDownloader(serving: served))
+
+        let (exit, events) = await prepareCatalog(row: row, resolver: resolver)
+
+        XCTAssertEqual(exit, 5)
+        assertOneTransaction(events)
+        XCTAssertEqual(events.last?.state, .failed)
+        XCTAssertEqual(events.last?.errorCode, .verificationFailed)
+    }
+
+    func testPrepareCatalogReportsATransferFailure() async throws {
+        let downloader = HuggingFaceSnapshotDownloader(
+            fetch: { _ in throw URLError(.notConnectedToInternet) },
+            download: { _ in throw URLError(.notConnectedToInternet) }
+        )
+        let (resolver, _) = try makeResolver(downloader: downloader)
+        let row = makeRow(sha256: String(repeating: "1", count: 64))
+
+        let (exit, events) = await prepareCatalog(row: row, resolver: resolver)
+
+        XCTAssertEqual(exit, 4)
+        assertOneTransaction(events)
+        XCTAssertEqual(events.last?.state, .failed)
+        XCTAssertEqual(events.last?.errorCode, .transferFailed)
+    }
+
+    func testPrepareCatalogRefusesAnUnknownKeyBeforeAnyWork() async throws {
+        let (resolver, _) = try makeResolver()
+
+        let (exit, events) = await prepareCatalog(row: nil, resolver: resolver)
+
+        XCTAssertEqual(exit, 4)
+        XCTAssertEqual(events.map(\.state), [.failed])
+        XCTAssertEqual(events.first?.errorCode, .authorityUnavailable)
+    }
+
+    func testPrepareCatalogCancelStopsTheDownloadRemovesPartialsAndReportsCancelled() async throws {
+        let (resolver, _) = try makeResolver()
+        let row = makeRow(sha256: String(repeating: "1", count: 64))
+        let cancellation = ModelsPrepareCatalogCancellation()
+        let removed = Counter()
+        let started = expectation(description: "download started")
+        let (exit, events) = await withTaskGroup(of: (Int32, [ModelPreparationTransactionEvent])?.self) { group in
+            group.addTask {
+                await self.prepareCatalog(
+                    row: row,
+                    resolver: resolver,
+                    cancellation: cancellation,
+                    prepare: { row, resolver, config in
+                        started.fulfill()
+                        while !Task.isCancelled {
+                            try? await Task.sleep(nanoseconds: 5_000_000)
+                        }
+                        return await ModelCatalogPreparation.prepare(row: row, resolver: resolver, repairCache: false, config: config)
+                    },
+                    removed: removed
+                )
+            }
+            group.addTask {
+                await self.fulfillment(of: [started], timeout: 5)
+                try? await Task.sleep(nanoseconds: 30_000_000)
+                cancellation.request()
+                return nil
+            }
+            var result: (Int32, [ModelPreparationTransactionEvent]) = (-1, [])
+            for await value in group { if let value { result = value } }
+            return result
+        }
+
+        XCTAssertEqual(exit, 130)
+        assertOneTransaction(events)
+        XCTAssertEqual(Array(events.suffix(2).map(\.state)), [.cancelRequested, .cancelled])
+        XCTAssertFalse(events.dropLast(2).contains { $0.state == .cancelRequested || $0.state == .cancelled })
+        XCTAssertEqual(removed.value, 1)
+    }
+
+    func testPrepareCatalogCommandParsesAndRefusesBadInputBeforeWork() async throws {
+        let names = ModelsCommand.configuration.subcommands.map { $0.configuration.commandName }
+        XCTAssertTrue(names.contains("prepare-catalog"))
+        let command = try ModelsPrepareCatalogCommand.parse([
+            "qwen/qwen3-8b", "--transaction-id", Self.prepareTransactionID, "--json",
+        ])
+        XCTAssertEqual(command.catalogKey, "qwen/qwen3-8b")
+        XCTAssertTrue(command.emitJSON)
+        XCTAssertThrowsError(try ModelsPrepareCatalogCommand.parse(["qwen/qwen3-8b", "--json"]))
+
+        for arguments in [
+            ["qwen/qwen3-8b", "--transaction-id", Self.prepareTransactionID],
+            ["qwen/qwen3-8b", "--transaction-id", "not-a-uuid", "--json"],
+            ["qwen/qwen3-8b", "--transaction-id", Self.prepareTransactionID.uppercased(), "--json"],
+        ] {
+            let refused = try ModelsPrepareCatalogCommand.parse(arguments)
+            do {
+                try await refused.run()
+                XCTFail("expected refusal for \(arguments)")
+            } catch let error as ExitCode {
+                XCTAssertEqual(error.rawValue, 2)
+            }
+        }
+    }
+
     // MARK: Fixtures
 
     private func makeRow(sha256: String) -> ModelArtifactSignedRow {
