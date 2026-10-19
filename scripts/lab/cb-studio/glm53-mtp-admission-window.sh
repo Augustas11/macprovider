@@ -62,6 +62,9 @@ RELEASE_METALLIB_SHA256=3d9b4a747758128cc5418e62c5ad8e282a11b0d436423537137e013b
 POLICY_SHA256=5ca7e3b34a7eec5163a136782d85551cd57f6da0da0b02c808355ba02a67cfab
 PROVIDER_COMMIT=916faf3b7faedc815d864987a185c1464e5c4962
 R015_HARNESS_SHA256=0ac0606b71cf501277cb2f243dc57da715c8101c478b9ddc43a8dbafce9a8e59
+# Window 1's bank harness (bank-identity.sha256); re-recording the bank on
+# another build changes this in a reviewed commit.
+BANK_HARNESS_SHA256=6585ae2336497f59d5099e542ae544794a8943e8014658789b3377accd6fb538
 CHALLENGE_ID=native-mtp-selftest-glm53-flash-0001
 # Candidate challenge texts, in preference order. The first is the text the
 # journey has always used (GLM: acceptance 19/43, about 1.0x at 07301b6bf).
@@ -74,15 +77,20 @@ CANDIDATES=(
 
 # Refuses while the live provider could share the GPU: a listener on its
 # port (any response or none), a serve process, or its LaunchAgent loaded.
+# Fails closed: any probe output or error other than "none" refuses.
 live_absent() {
-  if lsof -nP -iTCP:$LIVE_PORT -sTCP:LISTEN > /dev/null 2>&1; then
-    echo "refusing: something listens on :$LIVE_PORT" >&2; return 3
+  local listeners probe
+  listeners=$(lsof -nP -t -iTCP:$LIVE_PORT -sTCP:LISTEN 2>&1) || true
+  if [[ -n $listeners ]] || ! command -v lsof > /dev/null; then
+    echo "refusing: :$LIVE_PORT has a listener or cannot be probed" >&2; return 3
   fi
-  if pgrep -f "macprovider-cli serve" > /dev/null 2>&1; then
-    echo "refusing: a macprovider-cli serve process runs" >&2; return 3
+  probe=0; pgrep -f "macprovider-cli serve" > /dev/null 2>&1 || probe=$?
+  if (( probe != 1 )); then
+    echo "refusing: a macprovider-cli serve process runs or cannot be probed" >&2; return 3
   fi
-  if launchctl print gui/$(id -u)/$LIVE_LABEL > /dev/null 2>&1; then
-    echo "refusing: $LIVE_LABEL is loaded" >&2; return 3
+  probe=0; launchctl print gui/$(id -u)/$LIVE_LABEL > /dev/null 2>&1 || probe=$?
+  if (( probe != 113 )); then
+    echo "refusing: $LIVE_LABEL is loaded or cannot be probed" >&2; return 3
   fi
 }
 
@@ -133,6 +141,8 @@ fixture() {
 }
 
 bank() {
+  [[ $(shasum -a 256 "$BANK_HARNESS/macprovider-cli" | cut -d' ' -f1) == $BANK_HARNESS_SHA256 ]] ||
+    { echo "refusing: $BANK_HARNESS/macprovider-cli is not the recorded bank harness" >&2; exit 3; }
   echo "bank start $(date -u +%FT%TZ)" | tee -a $OUT/summary.txt
   rm -f $OUT/bank-journey.json $OUT/bank-entry.json
   local root=$(fixture bank-fixture) rc=0

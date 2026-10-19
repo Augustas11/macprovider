@@ -323,6 +323,11 @@ final class NativeMTPBenchPolicyTests: XCTestCase {
         } catch {}
         let reachedAtTheBound = try? await NativeMTPBenchPrompts.fewestReachingSalts(target: 100, maximumSalts: 100) { $0 }
         XCTAssertEqual(reachedAtTheBound?.salts, 100)
+        // Doubling saturates at a bound near Int.max instead of overflowing.
+        do {
+            _ = try await NativeMTPBenchPrompts.fewestReachingSalts(target: 10, maximumSalts: Int.max) { _ in 0 }
+            XCTFail("an unreachable target must fail")
+        } catch {}
     }
 
     func testEveryBlockNeedsItsSizedPrompts() throws {

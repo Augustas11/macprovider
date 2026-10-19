@@ -45,6 +45,32 @@ final class NativeMTPBenchGLMTests: XCTestCase {
         XCTAssertNoThrow(try policy.validateFamily(.qwen35))
     }
 
+    func testResumeCountsARecordOnlyForItsPolicyCellShapeAndPhase() throws {
+        let policy = try NativeMTPBenchPolicy.load(from: Self.glmPolicyURL)
+        func check(
+            cell: String, slots: Int = 2, prompt: Int = 1536, output: Int = 512,
+            block: Int, sustained: Bool = false, warmup: Bool = false
+        ) throws {
+            try NativeMTPExistingEvidence.validateResumedRecord(
+                ["slots": slots, "prompt_tokens": prompt, "max_tokens": output],
+                cellID: cell, block: block, sustained: sustained, warmup: warmup, policy: policy, line: 2
+            )
+        }
+        XCTAssertNoThrow(try check(cell: "s2-p1536-o512", block: 9))
+        XCTAssertNoThrow(try check(cell: "s2-p1536-o512", block: -1, warmup: true))
+        XCTAssertNoThrow(try check(cell: "s4-p1536-o512", slots: 4, block: 12, sustained: true))
+        // A record whose fields name another stratum than its cell id.
+        XCTAssertThrowsError(try check(cell: "s2-p1536-o512", slots: 4, block: 0))
+        XCTAssertThrowsError(try check(cell: "s2-p1536-o512", prompt: 4096, block: 0))
+        // A cell the policy does not have.
+        XCTAssertThrowsError(try check(cell: "s8-p1536-o512", slots: 8, block: 0))
+        // Blocks outside their phase.
+        XCTAssertThrowsError(try check(cell: "s2-p1536-o512", block: 10))
+        XCTAssertThrowsError(try check(cell: "s2-p1536-o512", block: -1))
+        XCTAssertThrowsError(try check(cell: "s2-p1536-o512", block: -2, warmup: true))
+        XCTAssertThrowsError(try check(cell: "s2-p1536-o512", block: 0, sustained: true))
+    }
+
     func testGreedyOnlyFamilyRefusesASampledPolicyBeforeLoading() throws {
         var object = try glmPolicyObject()
         object["temperature"] = 0.7

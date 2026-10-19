@@ -363,7 +363,11 @@ final class NativeMTPJourneyRunner {
                 try await warmSwapBoundary(ordinary: ordinary, native: native, recorder: recorder, fixture: fixture)
             }
         }
-        let reportSteps = steps.sorted { stepOrder($0.id) < stepOrder($1.id) }
+        // Stable: the self-test steps share one id and stay in prompt order,
+        // so the bank's first passing candidate is the first declared one.
+        let reportSteps = steps.enumerated().sorted {
+            (stepOrder($0.element.id), $0.offset) < (stepOrder($1.element.id), $1.offset)
+        }.map(\.element)
         let passed = reportSteps.allSatisfy(\.passed)
         // pass only when every executed step is complete; partial when any
         // passing step leaves journey clauses uncovered.

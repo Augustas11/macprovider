@@ -132,7 +132,7 @@ enum NativeMTPBenchPrompts {
                 )
             }
             below = reaching
-            reaching = min(maximumSalts, max(1, reaching * 2))
+            reaching = reaching > maximumSalts / 2 ? maximumSalts : max(1, reaching * 2)
             reachingCount = try await count(reaching)
         }
         while reaching - below > 1 {
@@ -258,6 +258,7 @@ private final class NativeMTPBenchRunner {
         try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
         let existing = try NativeMTPExistingEvidence.loadIfPresent(
             url: outURL,
+            policy: policy,
             policySHA256: policySHA256,
             providerCommit: providerCommit,
             modelID: modelID,
@@ -1537,7 +1538,39 @@ struct NativeMTPBenchPolicy {
     }
 }
 
-private struct NativeMTPExistingEvidence {
+struct NativeMTPExistingEvidence {
+    /// A resumed record counts only for the policy cell it names, with that
+    /// cell's shape, inside its phase's block range: matrix 0..<blocks,
+    /// warmup -1...-warmup_runs, sustained only for the sustained cell.
+    static func validateResumedRecord(
+        _ record: [String: Any],
+        cellID: String,
+        block: Int,
+        sustained: Bool,
+        warmup: Bool,
+        policy: NativeMTPBenchPolicy,
+        line: Int
+    ) throws {
+        func reject(_ reason: String) -> NativeMTPBenchError {
+            .assertionFailed("existing --out line \(line): \(reason)")
+        }
+        guard let cell = policy.cell(id: cellID) else { throw reject("cell \(cellID) is not in the policy") }
+        guard (record["slots"] as? NSNumber)?.intValue == cell.slots,
+              (record["prompt_tokens"] as? NSNumber)?.intValue == cell.promptTokens,
+              (record["max_tokens"] as? NSNumber)?.intValue == cell.maxTokens else {
+            throw reject("shape does not match cell \(cellID)")
+        }
+        let inRange: Bool
+        if sustained {
+            inRange = !warmup && cellID == policy.sustainedCellID && block >= 0
+        } else if warmup {
+            inRange = block <= -1 && block >= -policy.warmupRuns
+        } else {
+            inRange = (0..<policy.blocks).contains(block)
+        }
+        guard inRange else { throw reject("block \(block) is outside its phase for \(cellID)") }
+    }
+
     let hasRecords: Bool
     let completedMatrixBlocks: [String: Set<Int>]
     let completedWarmups: [String: Set<Int>]
@@ -1546,6 +1579,7 @@ private struct NativeMTPExistingEvidence {
 
     static func loadIfPresent(
         url: URL,
+        policy: NativeMTPBenchPolicy,
         policySHA256: String,
         providerCommit: String,
         modelID: String,
@@ -1613,6 +1647,10 @@ private struct NativeMTPExistingEvidence {
                 )
             }
             let block = blockNumber.intValue
+            try validateResumedRecord(
+                record, cellID: cellID, block: block, sustained: sustained, warmup: warmup,
+                policy: policy, line: offset + 2
+            )
             let recordKey = "\(cellID)|\(block)|\(path)|\(sustained)|\(warmup)"
             guard seen.insert(recordKey).inserted else {
                 throw NativeMTPBenchError.assertionFailed(
