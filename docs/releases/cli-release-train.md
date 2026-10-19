@@ -64,8 +64,9 @@ Verified 2026-10-10 against public release metadata, the release train
 
 ## Next CLI release — net changes vs 1.8.256 (tracked 2026-10-19)
 
-Live fleet target: **1.8.256** (released 2026-10-18 on Pearl runtime v1.8.255). The
-section below this one shipped as v1.8.256.
+Live fleet target: **1.8.256** (released 2026-10-18 on Pearl runtime v1.8.255). Staged:
+`binaryVersion` **1.8.257**. The section below this one shipped as v1.8.256. Every PR
+below is merged and none is open, so the cut is authorized.
 
 | PR | Issue | Provider-side change | Status |
 |---|---|---|---|
@@ -73,6 +74,8 @@ section below this one shipped as v1.8.256.
 | #2064 | #2029 | Signed CB policy `max_served_slots` ceiling (SPEC-023 v0.22.28 §12.6, SPEC-038 v0.3.22, SPEC-039 v0.1.21): the CLI parses the optional field and caps planned rows, the self-check ladder, stored/prior/provisional grants and the warm-swap interim count by the lowest ceiling of the matching verified entries; absent field = unchanged behaviour | merged |
 | #2062 | #2061 | Bounded admission holds let due CB self-checks progress under sustained traffic while preserving existing requests and the prior grant; completed probes and paired throughput measurements survive interruptions, cancelled results cannot qualify, and canary confirmation binds the final grant to the exact smoke identity. Malibu waits for updater output capture before classifying rollback failures | merged (`8a444ff59`); awaiting CLI release |
 | #2063 | #2029 | Native-MTP prompt rows join serial prefill cohorts where grouped rows always prefill alone (glm5_next; SPEC-038 v0.3.24 FR-CB2, SPEC-048 0.1.49 R009); paged-attention scheduling unchanged. R015 v2 PASS on a lab-harness build of `cf0571a5f` (`docs/research/spec048-r015/glm53-flash-r015-v2/`); the GLM native-MTP admission binds the next CLI release (staged inputs README, "After the 1.8.256 R015 FAIL") | merged (`1f69236b3`); awaiting CLI release |
+| #2065 | #2054 | Local Chat and Connected apps in Malibu: loopback requests carrying `X-MacProvider-Origin: local-app` are local work (the coordinator stamps `coordinator` on every HTTP-direct dispatch); local work yields to the CB self-check hold and to buyer rows, never takes the native-MTP row; buyer-safe ownership routing keeps an account's requests off providers its linked identity owns (coordinator/gateway half ships in the next Pearl runtime) | merged (`e266a1ad2`); awaiting CLI release |
+| #2066 | #2029 | CB no-progress guard counts streamed decode-window tokens: on 1.8.253–1.8.256 every CB request past ~1025 output tokens failed with `continuous_batching_scheduler_no_progress` after 64 16-step windows. Release-build Studio e2e on GLM-5.3-Flash: 4 concurrent 1.1k–3.3k-token prompts to 4096 tokens, plus 2048 non-stream and stream, all complete (`docs/evidence/cb-streamed-window-progress-2026-10-19/`) | merged (`31b380ac4`); awaiting CLI release |
 
 #2062 validation: all 28 jobs passed in [hosted CI run 39189689441](https://github.com/Augustas11/macprovider/actions/runs/39189689441)
 on reviewed head `764b34de0`; code, security and architecture audits have no unresolved
