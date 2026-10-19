@@ -1,6 +1,15 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.22 (2026-10-19, authoritative buyer ownership exclusion)
+**Version:** 1.6.23 (2026-10-19, bounded stake identity source for ownership exclusion)
+
+**Change log v1.6.23 (2026-10-19, Related: #2054):** SPEC-002-R008 bounds the
+coordinator stake identity read on the dispatch path. A positive stake identity
+is immutable (SPEC-050-R002), so it is cached for the process lifetime; only
+accounts with no stake are re-read, each read under a 250 ms deadline. The read
+is installed only when the stake ledger initialised. A failed or timed-out read
+falls back to the other ownership sources and is counted; it never refuses
+buyers. Every ownership refusal is counted and logged. The gateway identity
+lookup runs on its read-only connection pool.
 
 **Change log v1.6.21 (2026-10-15, issue #1355):** SPEC-002-R005 now learns
 from non-streamed traffic. Every attempt's times run from provider dispatch
@@ -5597,14 +5606,36 @@ only in authenticated gateway account context. A required lookup failure,
 malformed assertion, or unavailable production ownership resolver MUST deny
 inference. Successful absence of links preserves ordinary, demo and legacy
 routing. A legacy gateway without the header still receives the coordinator's
-persisted account ownership checks.
+persisted account ownership checks. The gateway MUST read the identities from
+its read-only connection pool, never from the single settlement writer
+connection; WAL makes every committed link visible to that reader.
+
+The coordinator stake identity (SPEC-050-R002) is read from the rewards
+database only when the stake ledger initialised; without a ledger it
+contributes no identity. A positive stake identity never changes, so the
+coordinator MAY cache it for the process lifetime and MUST re-read only
+accounts with no stake. Each uncached read MUST be bounded by a 250 ms
+deadline. A failed or timed-out stake read MUST NOT refuse buyers: the
+coordinator resolves ownership from the remaining sources (the gateway
+identities, allowance-grant identities, provider ownership and trust-pool
+owners), counts the fallback and logs it. Staking requires the account's
+GitHub identity, which the gateway normally asserts, and a stake reaches the
+allowance grants once it matures, so the fallback loses only an immature
+stake's link while the rewards database is unreachable; SPEC-050-R010 still
+excludes any such self-dealt allowance attempt from rewards. Every ownership
+refusal MUST be counted by cause (lookup unavailable or owned provider) and
+logged with fixed fields only.
 
 All owned Macs MUST be removed before normal ranking, sticky affinity, pool
 routing, explicit provider/session pins, capacity queues, retries, fallbacks,
 and relay-blind/privacy-class reservation. A pin MUST NOT override exclusion.
 Revalidation after a wait and before dispatch MUST reject newly owned or
 unverifiable candidates. Plaintext exclusion uses `503 no_provider_available`;
-encrypted routes use their existing unavailable-capacity errors. Exclusion
+encrypted routes use their existing unavailable-capacity errors. On a
+relay-blind route an ownership lookup that cannot answer is the transient
+`relay_blind_required_unavailable`, never `relay_blind_provider_unsupported`;
+a refusal of a consumed authorization carries the no-prior-dispatch marker,
+and a privacy-class refusal is recorded under SPEC-049-R030. Exclusion
 MUST happen before provider dispatch, receipt creation or provider credit; a
 never-dispatched attempt MUST remain unbilled. Reward exclusion in SPEC-050
 is additional protection and MUST NOT substitute for this routing gate.

@@ -1,6 +1,15 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.38 (2026-10-18, local use is unbilled, uncounted and yields to buyers)
+**Version:** 1.9.39 (2026-10-19, coordinator origin marker on HTTP-direct dispatch)
+
+**Change log v1.9.39 (2026-10-19, Related: #2054):**
+Amends `SPEC-001-R011` and the coordinator HTTP-forwarding wire contract. The
+coordinator sends `X-MacProvider-Origin: coordinator` on every HTTP-direct
+dispatch (buyer requests, canary probes and warmup gates), including those
+without settlement metadata (observe mode or no billing store). A request
+carrying the marker is network work, never local. A coordinator that receives
+`local_preempted` treats it as a retryable provider failure. No trust-tier,
+settlement or hardware-acceptance claim is added.
 
 **Change log v1.9.38 (2026-10-18, Related: #2054):**
 Adds `SPEC-001-R011` and amends `SPEC-001-R009`. A request on the loopback
@@ -2242,10 +2251,14 @@ remain pending until independently recorded; fixtures alone MUST NOT promote
 these requirements to live conformance.
 
 **SPEC-001-R011 — Local use is unbilled, uncounted and yields to buyers.**
-A request on the loopback listener is *network* work only when it carries
+A request on the loopback listener is *network* work when it carries
 coordinator settlement metadata (`X-MacProvider-Settlement-Metadata`) that
-parses; malformed metadata and identity/origin hint headers do not change
-this classification. Every other request, including all SPEC-001-R010 token utilities, is
+parses, or the coordinator origin marker `X-MacProvider-Origin: coordinator`.
+The coordinator sends the marker on every HTTP-direct dispatch, including
+buyer requests without settlement metadata (observe mode or no billing store),
+canary probes and warmup gates, so coordinator traffic is never preempted or
+uncounted as local work. Malformed metadata, any other origin value and
+identity hint headers do not change this classification. Every other request, including all SPEC-001-R010 token utilities, is
 *local* work. Under the SPEC-001-R009 local-process trust policy this is a
 classification, not an authentication boundary. WebSocket relay requests are
 always network work.
@@ -3153,6 +3166,18 @@ For HTTP-forwarding, the coordinator carries the same optional limit in
 or negative value and MUST apply a valid value with the same minimum rule. The
 header changes runtime generation only; receipt canonicalization continues to
 use the original body value, including `null`/omitted.
+
+Every coordinator HTTP-direct dispatch to `/v1/chat/completions` (buyer
+requests, canary probes and warmup gates) MUST carry
+`X-MacProvider-Origin: coordinator`, with or without settlement metadata. The
+provider classifies a request carrying it as network work under
+`SPEC-001-R011`. It is a classification, not an authentication boundary, and
+it never creates a settlement receipt without settlement metadata. If a
+provider still answers a coordinator dispatch with HTTP 503 `local_preempted`,
+the coordinator MUST treat it as a retryable provider failure: the attempt is
+logged with error code `local_preempted`, advances under the buyer's retry
+budget as a 502, never reaches the buyer verbatim, and neither degrades the
+provider nor counts as a breaker fault.
 
 **Size limit:** The coordinator MUST NOT send an `inference_request`
 whose total WS frame size exceeds 16 MB. This accommodates the largest

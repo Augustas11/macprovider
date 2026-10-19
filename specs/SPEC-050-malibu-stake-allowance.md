@@ -1,6 +1,6 @@
 # SPEC-050 - MALIBU Stake Allowance
 
-**Version:** 0.1.1
+**Version:** 0.1.2
 Status: draft
 Owner: @Augustas11
 Issue: https://github.com/Augustas11/macprovider/issues/1062
@@ -9,7 +9,7 @@ Issue: https://github.com/Augustas11/macprovider/issues/1062
 {
   "spec_id": "SPEC-050",
   "title": "MALIBU Stake Allowance",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "path": "specs/SPEC-050-malibu-stake-allowance.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -30,6 +30,12 @@ Issue: https://github.com/Augustas11/macprovider/issues/1062
   }
 }
 ```
+
+**Change log v0.1.2 (2026-10-19, Related: #2054):** SPEC-050-R002 states that
+the persisted stake identity is immutable once positive, so the SPEC-002-R008
+routing read may cache it for the process lifetime and must bound uncached
+reads; a failed read falls back to the other ownership sources instead of
+refusing buyers.
 
 ## 1. Purpose and scope
 
@@ -150,6 +156,10 @@ lock is effective only while the provider is owned by the identity that placed
 it: a former owner's lock neither earns (SPEC-050-R004) nor keeps the current
 owner from staking. An account stakes under one GitHub identity for good; a
 lock under a different identity is refused with `409 stake_identity_changed`.
+The persisted identity is therefore immutable once positive: SPEC-002-R008
+caches it for the process lifetime on the dispatch path, re-reads only
+accounts with no stake under a 250 ms deadline, and falls back to the other
+ownership sources when a read fails.
 An account's total stake MUST NOT exceed 10,000,000,000 MALIBU (`400
 stake_bound_exceeded`). An unlock MUST NOT exceed the account's current
 earning-or-maturing stake, is taken in descending `provider_id` order, and
