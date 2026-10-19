@@ -2800,6 +2800,11 @@ final class ModelManagementTests: XCTestCase {
             XCTAssertNotEqual(json, valid, fault)
             XCTAssertTrue(try isDemoted(json), "download with \(fault) must be demoted")
         }
+        for key in ["--config", "Qwen/Qwen3-8B", "-x"] {
+            XCTAssertTrue(try isDemoted(ShellScreensTests.catalogOnlyRowJSON(
+                key: key, modelID: "mlx-community/Qwen3-8B-4bit", downloadBytes: 100
+            )), "a download key outside the signed catalog grammar (\(key)) is refused")
+        }
         // A prepare on any other row stays refused.
         let trustedPrepare = trustedEconomicsRowJSON().replacingOccurrences(
             of: #""prepare":{"available":false,"requires_confirmation":false,"transaction_kind":null,"transaction_id":null,"action_timeout_seconds":null,"estimated_bytes":null,"unavailable_reason":"action_unavailable"}"#,

@@ -525,6 +525,11 @@ struct ModelsScreen: View {
     @ViewBuilder
     private func actionCell(_ row: MalibuModelRow) -> some View {
         HStack(spacing: 6) {
+            // A running download keeps its progress and Cancel even if a
+            // refresh or a switch changed the row's action meanwhile.
+            if store.download?.rowID == row.id, row.action != .download {
+                ModelDownloadControl(store: store, row: row, showsSize: true) {}
+            }
             switch row.action {
             case .switchModel:
                 Button(String(localized: "Switch", comment: "Model feature action")) { start(row) }

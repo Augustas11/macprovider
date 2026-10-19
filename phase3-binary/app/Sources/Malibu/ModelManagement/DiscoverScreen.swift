@@ -385,6 +385,13 @@ struct DiscoverScreen: View {
 
     @ViewBuilder
     private func primaryAction(_ row: MalibuModelRow) -> some View {
+        if store.download?.rowID == row.id, row.action != .download {
+            ModelDownloadControl(store: store, row: row, showsSize: true) {}
+        }
+        if let result = store.downloadResult, result.rowID == row.id, result.succeeded {
+            Label(result.message, systemImage: "checkmark.circle")
+                .font(.callout)
+        }
         switch DiscoverPresentation.primaryAction(row) {
         case .serving:
             Label(String(localized: "This Mac is serving this model.", comment: "Discover serving"), systemImage: "checkmark.circle")

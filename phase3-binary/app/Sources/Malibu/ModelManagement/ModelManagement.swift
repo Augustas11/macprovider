@@ -825,6 +825,9 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
         let prepare = row.prepareAction
         guard isCatalogOnlyRow(row),
               row.actionModelID == row.modelKey,
+              // The key becomes a CLI argument: the signed catalog key grammar
+              // (SPEC-023 §3.7.3), so it can never read as an option.
+              row.modelKey.range(of: #"^[a-z0-9][a-z0-9._/-]{0,127}$"#, options: .regularExpression) != nil,
               row.fit == "fits",
               !row.isCurrent,
               prepare.available,
