@@ -332,11 +332,20 @@ class NativeMTPAdmissionMultiEntryTests(unittest.TestCase):
 class NativeMTPProjectionManifestTests(unittest.TestCase):
     """SPEC-048 0.1.35 projection manifest: v1 for one model, v2 keyed by model_key."""
 
-    def test_single_model_projection_is_the_committed_v1_bytes(self):
+    def test_committed_projection_is_the_v2_bytes_of_its_models(self):
         committed = PROJECTION.read_bytes()
-        artifacts = json.loads(committed)["artifacts"]
-        self.assertEqual(build_projection({QWEN_KEY: artifacts}), committed)
-        self.assertEqual(read_projection(committed, [QWEN_KEY], QWEN_KEY), artifacts)
+        body = json.loads(committed)
+        self.assertEqual(body["schema_version"], PROJECTION_V2_SCHEMA)
+        models = body["models"]
+        self.assertEqual(build_projection(models), committed)
+        for key in models:
+            self.assertEqual(read_projection(committed, sorted(models), key), models[key])
+
+    def test_single_model_projection_is_v1_bytes(self):
+        artifacts = projection_artifacts("qwen")
+        data = build_projection({QWEN_KEY: artifacts})
+        self.assertEqual(json.loads(data)["schema_version"], PROJECTION_V1_SCHEMA)
+        self.assertEqual(read_projection(data, [QWEN_KEY], QWEN_KEY), artifacts)
 
     def test_multi_model_projection_is_v2_keyed_by_model_key(self):
         models = {QWEN_KEY: projection_artifacts("qwen"), GLM_KEY: projection_artifacts("glm")}

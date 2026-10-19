@@ -2418,12 +2418,14 @@ class HermeticRelease:
         # in the pre-activation release: drop them, with their artifact-source
         # and tier2-binding entries, and the intake decision that admitted them.
         # The committed intake decision names only the latest release's
-        # admissions, so earlier intake releases' rows come from the ledger.
+        # admissions, so earlier intake releases' rows come from the ledger. A
+        # later release that admits nothing carries no intake decision at all.
         intake_path = self.catalog / "intake-decision.json"
+        admitted = set(json.loads((self.catalog / "autotune-candidates.json").read_text())["rows"]) - activation_keys
         if intake_path.exists():
-            admitted = {d["model_key"] for d in json.loads(intake_path.read_text())["decisions"]}
-            admitted |= set(json.loads((self.catalog / "autotune-candidates.json").read_text())["rows"]) - activation_keys
+            admitted |= {d["model_key"] for d in json.loads(intake_path.read_text())["decisions"]}
             intake_path.unlink()
+        if admitted:
             candidates_path = self.catalog / "autotune-candidates.json"
             candidates = json.loads(candidates_path.read_text())
             for key in admitted:
