@@ -785,7 +785,9 @@ final class ContinuousBatchingSelfCheckTests: XCTestCase {
                 .appendingPathComponent("Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift"),
             encoding: .utf8
         )
-        XCTAssertTrue(source.contains("idPrefix: \"cb-self-check-\\(attempt)-k\\(slots)-p\\(pass)\",\n                            cohort: decodeOnly"))
+        // Check the cohort argument independently of nesting/indentation.
+        let normalizedSource = source.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        XCTAssertTrue(normalizedSource.contains("idPrefix: \"cb-self-check-\\(attempt)-k\\(slots)-p\\(pass)\", cohort: decodeOnly"))
         XCTAssertTrue(source.contains("let serial = decodeOnly ? serialRate.decodeTPS : serialRate.endToEndTPS"))
         XCTAssertTrue(source.contains("let aggregate = decodeOnly\n                        ? ContinuousBatchingSelfCheck.cohortDecodeTPS("))
         let runtime = try String(
