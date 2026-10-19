@@ -4981,6 +4981,9 @@ actor ContinuousBatchScheduler {
                 continue
             }
             streamed.tokens.append(token)
+            // A streamed token is row progress: windows past the guard's
+            // pass limit deliver every token here, never via applyToken.
+            rowProgressEvents &+= 1
             streamed.completion = advanceDecodeRow(token, requestID: id)
             streamedWindowRows[id] = streamed
         }
