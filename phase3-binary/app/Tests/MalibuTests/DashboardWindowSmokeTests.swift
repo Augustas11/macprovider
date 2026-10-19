@@ -14,19 +14,19 @@ final class DashboardWindowSmokeTests: XCTestCase {
         defer { window.close() }
 
         XCTAssertTrue(window.styleMask.contains(.resizable))
-        XCTAssertEqual(window.contentMinSize.width, 640)
-        XCTAssertEqual(window.contentMinSize.height, 520)
+        XCTAssertEqual(window.contentMinSize.width, 820)
+        XCTAssertEqual(window.contentMinSize.height, 560)
         XCTAssertEqual(window.title, "Malibu")
 
         window.orderFrontRegardless()
         window.contentView?.layoutSubtreeIfNeeded()
-        window.setContentSize(NSSize(width: 660, height: 540))
+        window.setContentSize(NSSize(width: 840, height: 580))
         window.contentView?.layoutSubtreeIfNeeded()
 
-        XCTAssertGreaterThanOrEqual(window.frame.width, 640)
-        XCTAssertGreaterThanOrEqual(window.frame.height, 520)
-        XCTAssertLessThan(window.contentMinSize.width, 780)
-        XCTAssertLessThan(window.contentMinSize.height, 740)
+        XCTAssertGreaterThanOrEqual(window.frame.width, 820)
+        XCTAssertGreaterThanOrEqual(window.frame.height, 560)
+        XCTAssertLessThan(window.contentMinSize.width, DashboardWindow.defaultContentSize.width)
+        XCTAssertLessThan(window.contentMinSize.height, DashboardWindow.defaultContentSize.height)
     }
 
     private static func readyUSDCWithoutMALIBU() -> AgentSnapshot {

@@ -1,35 +1,11 @@
 import AppKit
 import SwiftUI
 
-@MainActor
-enum DashboardWindow {
-    static func make(
-        agent: MalibuAgent,
-        onExportDiagnostics: @escaping () -> Void,
-        onResetProvider: @escaping () -> Void
-    ) -> NSWindow {
-        let hosting = NSHostingController(rootView: DashboardView(
-            agent: agent,
-            onExportDiagnostics: onExportDiagnostics,
-            onResetProvider: onResetProvider
-        ))
-        hosting.sizingOptions = []
-        let window = NSWindow(contentViewController: hosting)
-        window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-        window.title = "Malibu"
-        window.contentMinSize = NSSize(width: 640, height: 520)
-        window.setContentSize(NSSize(width: 780, height: 740))
-        window.center()
-        window.isReleasedWhenClosed = false
-        return window
-    }
-}
-
 enum DashboardCopy {
     static let earningsTitle = "Earnings (USDC)"
     static let malibuTitle = "MALIBU (beta points)"
     static let macHealthTitle = "This Mac"
-    static let advancedDiagnosticsTitle = "Advanced diagnostics"
+    static let yourModelTitle = "Your model"
     static let changeWalletInSettings = "Change the payout wallet in Settings."
     static let resetProviderTitle = "Reset provider service"
     static let exportDiagnosticsTitle = "Export diagnostics…"
@@ -38,10 +14,16 @@ enum DashboardCopy {
     static let resetProviderConfirmDetail = "Repairs the background service and keeps your provider identity and downloaded models. Use this if setup is stuck or the provider will not start."
     static let resetProviderConfirmButton = "Reset provider service"
     static let resetProviderCancelButton = "Cancel"
+    static let openModels = String(localized: "Models", comment: "Dashboard link to the Models section")
+    static let compareInDiscover = String(localized: "Compare in Discover", comment: "Dashboard link to the Discover section")
+    static let openDiagnostics = String(localized: "Diagnostics", comment: "Dashboard link to the Diagnostics section")
+    static let invitesNudge = String(localized: "You have provider invites to share.", comment: "Dashboard invite nudge")
+    static let openInvites = String(localized: "Invites in Settings", comment: "Dashboard link to Settings invites")
 
     static func modelRowStatusLine(
         currentModelID: String?,
-        listState: ModelManagementStore.ListState
+        listState: ModelManagementStore.ListState,
+        warmSwapAvailable: Bool = true
     ) -> String {
         guard currentModelID != nil else {
             switch listState {
@@ -56,12 +38,12 @@ enum DashboardCopy {
         switch listState {
         case .checking:
             return String(localized: "Serving this model. Checking whether switching is available…", comment: "Dashboard model checking switch")
-        case .ready:
-            return String(localized: "Serving this model. Switching is available.", comment: "Dashboard model ready to switch")
-        case .viewOnly:
-            return String(localized: "Serving this model. Switching is off until warm swap is running.", comment: "Dashboard model view-only")
+        case .ready, .viewOnly:
+            return warmSwapAvailable
+                ? String(localized: "Serving this model. Switching is available.", comment: "Dashboard model ready to switch")
+                : String(localized: "Serving this model. Switching is off until warm swap is running.", comment: "Dashboard model view-only")
         case .unavailable:
-            return String(localized: "Serving this model. Switching is unavailable right now; open Change Model to retry.", comment: "Dashboard model switch unavailable")
+            return String(localized: "Serving this model. Switching is unavailable right now; open Models to retry.", comment: "Dashboard model switch unavailable")
         }
     }
 
@@ -72,18 +54,54 @@ enum DashboardCopy {
     }
 
     /// Reset and Export appear on the main surface only in an error state;
-    /// otherwise they live in Advanced diagnostics.
+    /// otherwise they live in Diagnostics.
     static func showsRecoveryOnMainSurface(_ snapshot: AgentSnapshot) -> Bool {
         snapshot.state == .error
     }
 
-    /// Every string the default (collapsed) dashboard shows, in order. Used by
-    /// tests and by the text render in the PR evidence.
-    static func defaultPublicStrings(_ snapshot: AgentSnapshot, now: Date = Date()) -> [String] {
+    /// The invite nudge appears only while a current invite link can be copied.
+    static func showsInviteNudge(_ snapshot: AgentSnapshot) -> Bool {
+        guard snapshot.hasTrustedReferralBoundary(),
+              snapshot.referralAvailability == .available,
+              let status = snapshot.referralStatus,
+              status.isCurrent() else { return false }
+        return status.availableInviteURL != nil
+    }
+
+    /// The "Your model" card: the served model, its catalog rate and demand
+    /// when trusted, and whether switching is available. No $/time figures
+    /// (SPEC-044-R004).
+    static func yourModelLines(
+        currentModelID: String?,
+        listState: ModelManagementStore.ListState,
+        warmSwapAvailable: Bool = true,
+        rows: [MalibuModelRow]
+    ) -> [String] {
+        var lines: [String] = [
+            currentModelID.map { ShellText.display($0) }
+                ?? String(localized: "No model reported", comment: "Dashboard model absent"),
+            modelRowStatusLine(currentModelID: currentModelID, listState: listState, warmSwapAvailable: warmSwapAvailable),
+        ]
+        if let current = rows.first(where: { $0.category == .current }),
+           let summary = ModelsPresentation.rateAndDemand(current, allRows: rows) {
+            lines.append(summary)
+            lines.append(ModelsPresentation.rateDisclosure)
+        }
+        return lines
+    }
+
+    /// Every string the default dashboard shows, in order. Used by tests and
+    /// by the text render in the PR evidence.
+    static func defaultPublicStrings(
+        _ snapshot: AgentSnapshot,
+        listState: ModelManagementStore.ListState = .checking,
+        rows: [MalibuModelRow] = [],
+        now: Date = Date()
+    ) -> [String] {
         let pill = AgentSnapshotPresenter.statusPill(snapshot)
         let status = AgentSnapshotPresenter.consolidatedStatus(snapshot)
         let card = AgentSnapshotPresenter.earningsCard(snapshot, now: now)
-        var strings = ["Malibu"]
+        var strings = ["Dashboard"]
         if let subtitle = AgentSnapshotPresenter.dashboardSubtitle(snapshot, now: now) { strings.append(subtitle) }
         strings.append(pill.label)
         if showsStatusNotice(snapshot) {
@@ -100,43 +118,32 @@ enum DashboardCopy {
         strings.append(contentsOf: card.malibuLines)
         if let trust = card.trustLine { strings.append(trust) }
         if let blocker = card.hardwareBlocker { strings.append(blocker) }
+        strings.append(yourModelTitle)
+        strings.append(contentsOf: yourModelLines(
+            currentModelID: snapshot.currentModelID,
+            listState: listState,
+            rows: rows
+        ))
         if let health = AgentSnapshotPresenter.macHealthLine(snapshot) {
             strings.append(macHealthTitle)
             strings.append(health)
         }
-        strings.append(advancedDiagnosticsTitle)
-        return strings
-    }
-
-    static func advancedDiagnosticsStrings(_ snapshot: AgentSnapshot) -> [String] {
-        var strings = [advancedDiagnosticsTitle]
-        strings.append(contentsOf: AgentSnapshotPresenter.diagnosticFindingLines(snapshot))
-        strings.append(AgentSnapshotPresenter.compatibilitySetLine(snapshot))
-        strings.append(AgentSnapshotPresenter.requestsLine(snapshot))
-        strings.append(AgentSnapshotPresenter.runLine(snapshot))
-        if let failure = AgentSnapshotPresenter.currentSetupFailure(snapshot) {
-            strings.append(AgentSnapshotPresenter.lifecycleEventDisplay(failure))
-        }
-        if let update = AgentSnapshotPresenter.currentLastUpdate(snapshot) {
-            strings.append(AgentSnapshotPresenter.lastUpdateDisplay(update))
-        }
-        strings.append(contentsOf: AgentSnapshotPresenter.diagnosticChips(snapshot))
+        if showsInviteNudge(snapshot) { strings.append(invitesNudge) }
         return strings
     }
 }
 
-private struct DashboardView: View {
+/// Dashboard section of the main window: the Phase 1 status pill and
+/// Earnings card, the served model, Mac health and, in an error state, the
+/// single recovery action (SPEC-025-R003).
+struct DashboardView: View {
     @ObservedObject var agent: MalibuAgent
+    let navigate: (MalibuSection) -> Void
     let onExportDiagnostics: () -> Void
     let onResetProvider: () -> Void
     @State private var showAddWalletSheet = false
-    @State private var showModelSheet = false
     @State private var rewardActivityExpanded = false
     @ObservedObject private var modelStore = ModelManagementStore.shared
-
-    // Collapsed by default (#2029): diagnostics are for support, not the
-    // provider's first read.
-    @State private var advancedDiagnosticsExpanded = false
 
     var body: some View {
         ScrollView {
@@ -147,131 +154,37 @@ private struct DashboardView: View {
                 statusNotice
             }
 
-            HStack(alignment: .center, spacing: 12) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(String(localized: "Model", comment: "Dashboard model row label"))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text(modelStore.currentModelID
-                         ?? agent.snapshot.currentModelID
-                         ?? String(localized: "Checking…", comment: "Dashboard model loading state"))
-                        .font(.body.monospaced())
-                        .lineLimit(2)
-                        .truncationMode(.middle)
-                        .textSelection(.enabled)
-                        .accessibilityLabel(Text(String(localized: "Current provider model", comment: "Dashboard model accessibility label")))
-                    Text(DashboardCopy.modelRowStatusLine(
-                        currentModelID: modelStore.currentModelID ?? agent.snapshot.currentModelID,
-                        listState: modelStore.listState
-                    ))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                }
-                Spacer()
-                AppKitActionButton(
-                    title: String(localized: "Change Model…", comment: "Dashboard model action"),
-                    accessibilityIdentifier: "malibu.dashboard.change-model",
-                    action: { showModelSheet = true }
-                )
-                .fixedSize()
-                .accessibilityHint(Text(String(localized: "Opens the model switcher and shows provider guards before any action.", comment: "Dashboard model action hint")))
-                Button {
-                    SettingsWindowPresenter.shared.present()
-                } label: {
-                    Image(systemName: "gearshape")
-                }
-                .buttonStyle(.borderless)
-                .help(String(localized: "Settings", comment: "Dashboard settings help"))
-                .accessibilityIdentifier("malibu.dashboard.settings")
-                .accessibilityLabel(Text(String(localized: "Settings", comment: "Dashboard settings action")))
-            }
-            .padding(12)
-            .background(RoundedRectangle(cornerRadius: 8).fill(Color.gray.opacity(0.08)))
-
-            if let recommendation = modelStore.recommendation {
-                VStack(alignment: .leading, spacing: 7) {
-                    Text(recommendation.isRecommendationResult
-                        ? String(localized: "Recommended installed model", comment: "Dashboard recommendation title")
-                        : String(localized: "No installed model recommendation", comment: "Dashboard no recommendation title"))
-                        .font(.caption.weight(.semibold))
-                    if let target = recommendation.displayModelID {
-                        Text(target)
-                            .font(.body.monospaced())
-                            .lineLimit(2)
-                            .truncationMode(.middle)
-                    }
-                    if let rationale = recommendation.displayRationale {
-                        Text(rationale)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    ForEach(recommendation.displayEvidenceLines, id: \.self) { line in
-                        Text(line)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                    Text(String(localized: "Scope: signed catalog \(recommendation.inputs.candidateCatalogVersion) for \(recommendation.hardware.chip), \(recommendation.hardware.memoryGB) GB.", comment: "Recommendation evidence scope"))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    if let prompt = recommendation.promptRateUSDPerMillionTokens,
-                       let completion = recommendation.completionRateUSDPerMillionTokens {
-                        Text(String(localized: "Estimated rates: prompt $\(prompt, format: .number.precision(.fractionLength(2...4))) / 1M; completion $\(completion, format: .number.precision(.fractionLength(2...4))) / 1M.", comment: "Recommendation estimated rates"))
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                    if !recommendation.warnings.isEmpty {
-                        Text(String(localized: "Warnings: \(recommendation.warnings.joined(separator: ", "))", comment: "Recommendation warnings"))
-                            .font(.caption2)
-                            .foregroundStyle(.orange)
-                    }
-                    if let unavailableReason = modelStore.recommendationAdoptionUnavailableReason {
-                        Text(unavailableReason)
-                            .font(.caption2)
-                            .foregroundStyle(recommendation.isActionable ? Color.secondary : Color.orange)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    HStack {
-                        if recommendation.isRecommendationResult {
-                            Button(String(localized: "Adopt", comment: "Dashboard recommendation action")) {
-                                Task { await modelStore.adoptRecommendation() }
-                            }
-                            .disabled(!modelStore.canAdoptRecommendation)
-                            Button(String(localized: "Not now", comment: "Dashboard recommendation snooze")) {
-                                modelStore.snoozeRecommendation()
-                            }
-                        }
-                        Button(String(localized: "Stop background recommendations", comment: "Dashboard recommendation opt-out")) {
-                            modelStore.stopBackgroundRecommendations()
-                        }
-                    }
-                }
-                .padding(12)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Color.accentColor.opacity(0.09)))
-                .accessibilityElement(children: .contain)
-            }
-
             earningsPanel
 
-            if let health = AgentSnapshotPresenter.macHealthLine(agent.snapshot) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(DashboardCopy.macHealthTitle)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    Text(health)
-                        .font(.callout)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(12)
-                .background(panelBackground)
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel("\(DashboardCopy.macHealthTitle): \(health)")
+            HStack(alignment: .top, spacing: 16) {
+                yourModelPanel
+                macHealthPanel
             }
 
-            advancedDiagnostics
+            if let recommendation = modelStore.recommendation,
+               recommendation.isRecommendationResult,
+               recommendation.isActionable,
+               let target = recommendation.displayModelID {
+                ShellPanel(String(localized: "Tip", comment: "Dashboard tip title")) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(String(localized: "Recommended for this Mac: \(target)", comment: "Dashboard recommendation tip"))
+                            .font(.callout)
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                        Spacer()
+                        Button(DashboardCopy.compareInDiscover) { navigate(.discover) }
+                    }
+                }
+            }
 
-            if agent.snapshot.localProviderID != nil {
-                ReferralPanel(agent: agent)
+            if DashboardCopy.showsInviteNudge(agent.snapshot) {
+                HStack {
+                    Text(DashboardCopy.invitesNudge)
+                        .font(.callout)
+                    Spacer()
+                    Button(DashboardCopy.openInvites) { navigate(.settings) }
+                }
+                .padding(.horizontal, 4)
             }
         }
         .padding(20)
@@ -279,45 +192,25 @@ private struct DashboardView: View {
         }
         .scrollIndicators(.visible)
         .accessibilityIdentifier("malibu.dashboard.scroll")
-        .frame(minWidth: 640, maxWidth: .infinity, minHeight: 480, maxHeight: .infinity)
         .sheet(isPresented: $showAddWalletSheet) {
             AddWalletSheet(agent: agent, isPresented: $showAddWalletSheet)
         }
-        .sheet(isPresented: $showModelSheet) {
-            ModelSwitcherSheet(store: modelStore, agent: agent, isPresented: $showModelSheet)
-        }
-        .task(id: "\(agent.snapshot.localProviderID ?? "unknown"):\(agent.snapshot.statusObservationID ?? "unknown")") {
-            if agent.snapshot.localProviderID != nil {
-                await agent.refreshPayoutRegistration()
-            }
-            await modelStore.refresh(
-                currentModelID: agent.snapshot.currentModelID,
-                peer: MalibuModelPeerEvidence(snapshot: agent.snapshot)
-            )
-            await modelStore.startBackgroundCheckIfEligible(thermalState: agent.snapshot.thermalState)
+        .task(id: agent.rewardAuditSupported) {
             if agent.rewardAuditSupported,
                agent.rewardActivityEvents.isEmpty,
                !agent.rewardActivityLoading {
                 await agent.loadRewardActivity()
             }
         }
-        .onChange(of: agent.rewardAuditSupported) { supported in
-            guard supported,
-                  agent.rewardActivityEvents.isEmpty,
-                  !agent.rewardActivityLoading else { return }
-            Task { await agent.loadRewardActivity() }
-        }
     }
 
     private var header: some View {
         HStack(spacing: 12) {
-            MalibuBrandTile()
-                .frame(width: 28, height: 28)
             VStack(alignment: .leading, spacing: 2) {
-                Text("Malibu")
-                    .font(.system(size: 15, weight: .semibold))
+                Text(MalibuSection.dashboard.title)
+                    .font(.title2.weight(.semibold))
                 if let subtitle = AgentSnapshotPresenter.dashboardSubtitle(agent.snapshot) {
-                    Text(subtitle)
+                    Text(ShellText.display(subtitle))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
@@ -343,13 +236,56 @@ private struct DashboardView: View {
             }
             primaryActionButton
             if DashboardCopy.showsRecoveryOnMainSurface(agent.snapshot) {
-                recoveryActions
+                RecoveryActions(onExportDiagnostics: onExportDiagnostics, onResetProvider: onResetProvider)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
         .background(panelBackground)
         .accessibilityElement(children: .contain)
+    }
+
+    private var yourModelPanel: some View {
+        let current = agent.snapshot.currentModelID
+        let lines = DashboardCopy.yourModelLines(
+            currentModelID: current,
+            listState: modelStore.listState,
+            warmSwapAvailable: modelStore.warmSwapAvailable,
+            rows: modelStore.rows
+        )
+        return ShellPanel(DashboardCopy.yourModelTitle) {
+            Text(lines[0])
+                .font(.body.monospaced())
+                .lineLimit(2)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+                .accessibilityLabel(Text(String(localized: "Current provider model", comment: "Dashboard model accessibility label")))
+            ForEach(Array(lines.dropFirst().enumerated()), id: \.offset) { _, line in
+                Text(line)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: 8) {
+                Button(DashboardCopy.openModels) { navigate(.models) }
+                    .accessibilityIdentifier("malibu.dashboard.open-models")
+                Button(DashboardCopy.compareInDiscover) { navigate(.discover) }
+                    .accessibilityIdentifier("malibu.dashboard.open-discover")
+            }
+        }
+        .accessibilityIdentifier("malibu.dashboard.your-model")
+    }
+
+    private var macHealthPanel: some View {
+        ShellPanel(DashboardCopy.macHealthTitle) {
+            Text(AgentSnapshotPresenter.macHealthLine(agent.snapshot)
+                 ?? String(localized: "Health appears while the provider runs.", comment: "Dashboard Mac health absent"))
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+            Button(DashboardCopy.openDiagnostics) { navigate(.diagnostics) }
+                .accessibilityIdentifier("malibu.dashboard.open-diagnostics")
+        }
+        .accessibilityIdentifier("malibu.dashboard.mac-health")
     }
 
     private var earningsPanel: some View {
@@ -433,107 +369,6 @@ private struct DashboardView: View {
         }
     }
 
-    private var advancedDiagnostics: some View {
-        DisclosureGroup(DashboardCopy.advancedDiagnosticsTitle, isExpanded: $advancedDiagnosticsExpanded) {
-            VStack(alignment: .leading, spacing: 12) {
-                MetricRow(
-                    title: "Malibu app",
-                    value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Version unknown"
-                )
-                MetricRow(title: "Provider software", value: AgentSnapshotPresenter.compatibilitySetLine(agent.snapshot))
-                MetricRow(title: "Slots", value: AgentSnapshotPresenter.advertisedCapacityLine(agent.snapshot))
-                if let lifecycle = AgentSnapshotPresenter.lifecycleLine(agent.snapshot) {
-                    MetricRow(title: "Provider status", value: lifecycle)
-                }
-                if let event = agent.snapshot.lifecycleLastRestart {
-                    MetricRow(title: "Last restart", value: AgentSnapshotPresenter.lifecycleEventDisplay(event))
-                }
-                if let event = AgentSnapshotPresenter.currentSetupFailure(agent.snapshot) {
-                    MetricRow(title: "Setup failure", value: AgentSnapshotPresenter.lifecycleEventDisplay(event))
-                }
-                if let event = AgentSnapshotPresenter.currentLastUpdate(agent.snapshot) {
-                    MetricRow(title: "Last update", value: AgentSnapshotPresenter.lastUpdateDisplay(event))
-                }
-                if let event = agent.snapshot.lifecycleLastWatchdog {
-                    MetricRow(title: "Last provider recovery", value: AgentSnapshotPresenter.lifecycleEventDisplay(event))
-                }
-                MetricRow(title: "Provider access", value: AgentSnapshotPresenter.credentialLine(agent.snapshot))
-                MetricRow(title: "Network verification", value: AgentSnapshotPresenter.admissionIdentityLine(agent.snapshot))
-                if agent.snapshot.credentialRepairInProgress
-                    || agent.snapshot.admissionIdentityRecoveryInProgress {
-                    ProgressView("Repairing provider...")
-                        .controlSize(.small)
-                }
-                if let error = agent.snapshot.credentialRepairLastError {
-                    Text(error)
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                }
-                if let instruction = agent.snapshot.admissionIdentityRecoveryApprovalInstruction {
-                    Text(instruction)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                }
-                if let request = agent.snapshot.admissionIdentityRecoveryOperatorRequest {
-                    Text(request)
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                }
-                if let error = agent.snapshot.admissionIdentityRecoveryLastError {
-                    Text(error)
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                }
-                if let status = AgentSnapshotPresenter.cliUpdateStatusLine(agent.snapshot) {
-                    Text(status)
-                        .font(.caption)
-                        .foregroundStyle(
-                            agent.snapshot.cliUpdateLastError == nil
-                                && agent.snapshot.providerSoftwareRepairLastError == nil
-                                ? Color.secondary
-                                : Color.red
-                        )
-                }
-                ForEach(
-                    Array(AgentSnapshotPresenter.diagnosticFindingLines(agent.snapshot).enumerated()),
-                    id: \.offset
-                ) { _, line in
-                    Text(line)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .textSelection(.enabled)
-                }
-                MetricRow(title: "Requests", value: AgentSnapshotPresenter.requestsLine(agent.snapshot))
-                MetricRow(title: "Tokens", value: AgentSnapshotPresenter.tokenLine(agent.snapshot))
-                MetricRow(title: "Current run", value: AgentSnapshotPresenter.runLine(agent.snapshot))
-                let chips = AgentSnapshotPresenter.diagnosticChips(agent.snapshot)
-                if !chips.isEmpty {
-                    HStack(spacing: 8) {
-                        ForEach(chips, id: \.self) { chip in
-                            MetricChip(text: chip, tone: chipTone(chip))
-                        }
-                    }
-                    .fixedSize(horizontal: false, vertical: true)
-                }
-                recoveryActions
-            }
-            .padding(.top, 6)
-        }
-        .accessibilityIdentifier("malibu.dashboard.advanced-diagnostics")
-    }
-
-    private func chipTone(_ chip: String) -> MetricChip.Tone {
-        if chip.hasSuffix("queued"), (agent.snapshot.queueDepth ?? 0) > 0 { return .attention }
-        if chip.hasPrefix("Thermal"),
-           agent.snapshot.thermalState == .serious || agent.snapshot.thermalState == .critical {
-            return .attention
-        }
-        return .neutral
-    }
-
     @ViewBuilder
     private var primaryActionButton: some View {
         let status = AgentSnapshotPresenter.publicStatus(agent.snapshot)
@@ -582,33 +417,6 @@ private struct DashboardView: View {
         }
     }
 
-    @ViewBuilder
-    private var recoveryActions: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(DashboardCopy.recoveryHelpTitle)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 8) {
-                    Button(DashboardCopy.resetProviderTitle) {
-                        onResetProvider()
-                    }
-                    Button(DashboardCopy.exportDiagnosticsTitle) {
-                        onExportDiagnostics()
-                    }
-                }
-                VStack(alignment: .leading, spacing: 8) {
-                    Button(DashboardCopy.resetProviderTitle) {
-                        onResetProvider()
-                    }
-                    Button(DashboardCopy.exportDiagnosticsTitle) {
-                        onExportDiagnostics()
-                    }
-                }
-            }
-        }
-    }
-
     private var panelBackground: some View {
         RoundedRectangle(cornerRadius: 8)
             .fill(Color.gray.opacity(0.08))
@@ -619,32 +427,27 @@ private struct DashboardView: View {
     }
 }
 
-/// The single status pill: colour plus a text label, never colour alone.
-private struct StatusPillView: View {
-    let pill: AgentSnapshotPresenter.StatusPill
+/// Reset and Export, shared by the Dashboard error state and Diagnostics.
+struct RecoveryActions: View {
+    let onExportDiagnostics: () -> Void
+    let onResetProvider: () -> Void
 
     var body: some View {
-        HStack(spacing: 5) {
-            Circle()
-                .fill(color)
-                .frame(width: 7, height: 7)
-            Text(pill.label)
-                .font(.caption.weight(.semibold))
+        VStack(alignment: .leading, spacing: 8) {
+            Text(DashboardCopy.recoveryHelpTitle)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) { buttons }
+                VStack(alignment: .leading, spacing: 8) { buttons }
+            }
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 4)
-        .background(Capsule().fill(color.opacity(0.14)))
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(pill.accessibilityLabel)
-        .accessibilityIdentifier("malibu.dashboard.status-pill")
     }
 
-    private var color: Color {
-        switch pill.tone {
-        case .positive: return .green
-        case .neutral: return .secondary
-        case .attention: return .red
-        }
+    @ViewBuilder
+    private var buttons: some View {
+        Button(DashboardCopy.resetProviderTitle) { onResetProvider() }
+        Button(DashboardCopy.exportDiagnosticsTitle) { onExportDiagnostics() }
     }
 }
 
@@ -873,7 +676,7 @@ struct AddWalletSheet: View {
     }
 }
 
-private struct ReferralPanel: View {
+struct ReferralPanel: View {
     @ObservedObject var agent: MalibuAgent
     @State private var postURL = ""
 
@@ -1004,62 +807,7 @@ private struct ReferralPanel: View {
     }
 }
 
-private struct AppKitActionButton: NSViewRepresentable {
-    let title: String
-    let accessibilityIdentifier: String
-    let action: () -> Void
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(action: action)
-    }
-
-    func makeNSView(context: Context) -> NSButton {
-        let button = NSButton(title: title, target: context.coordinator, action: #selector(Coordinator.run))
-        button.bezelStyle = .rounded
-        button.setButtonType(.momentaryPushIn)
-        button.setAccessibilityIdentifier(accessibilityIdentifier)
-        button.setAccessibilityLabel(title)
-        return button
-    }
-
-    func updateNSView(_ button: NSButton, context: Context) {
-        button.title = title
-        button.setAccessibilityIdentifier(accessibilityIdentifier)
-        context.coordinator.action = action
-    }
-
-    final class Coordinator: NSObject {
-        var action: () -> Void
-        init(action: @escaping () -> Void) {
-            self.action = action
-        }
-
-        @objc func run() {
-            action()
-        }
-    }
-}
-
-private struct MetricRow: View {
-    let title: String
-    let value: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Text(value)
-                .font(.callout)
-                .lineLimit(nil)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(title): \(value)")
-    }
-}
-
-private struct MetricChip: View {
+struct MetricChip: View {
     enum Tone { case neutral, attention }
 
     let text: String

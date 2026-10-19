@@ -1,6 +1,6 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.27
+version: v0.22.28
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-02
@@ -8,6 +8,25 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
 
 ## Change log
 
+- **v0.22.28 (2026-10-19)** — Signed served-slot ceiling (lockstep with
+  SPEC-038 v0.3.22 FR-CB11). A `continuous-batching-policy.json` entry MAY
+  carry `max_served_slots`, a JSON integer from 1 to 32 (the served hard cap
+  `max_concurrency_override_limit`); booleans, fractions, strings, `null` and
+  out-of-range values fail closed. It is part of the entry the `tuple_sha256`
+  identity covers, so it is signed like every other field, and an entry
+  without it keeps its exact bytes and identity. It is authored in
+  `continuous-batching-policy-source.json` like the rest of the entry and is
+  set only from recorded evidence for the model artifact (the widest row
+  count that evidence measured). The GLM-5.3-Flash Studio campaign measured
+  rows 1, 2 and 4 only, while its self-check could grant up to 16 rows on a
+  256 GB Studio. A CLI or coordinator that predates this revision rejects a
+  whole policy carrying the field as an unknown field: that CLI then revokes
+  nothing and loses its provisional and cached-turn grants until it updates.
+  This is enforced at generation, as the v0.17.1 artifact-feed rollout gate:
+  `scripts/catalog-release.py` refuses to emit or assemble a policy whose
+  entry carries `max_served_slots` while `CB_POLICY_CONSUMER_FLOOR` is below
+  v0.22.28. The floor is raised only in a reviewed change, after every
+  provider CLI and coordinator that reads the release implements v0.22.28.
 - **v0.22.27 (2026-10-17)** — Native-MTP admission for multi-width affine
   artifacts (epic #2029, lockstep with SPEC-048 0.1.36). R024 per-module
   override widths are `4`, `5`, `6`, or `8` bits (MLX affine packs 5- and
@@ -3843,6 +3862,14 @@ release-derived identity. Each published entry MUST bind the exact FR-CB10 ident
 `cached_turns_accepted`, and `provenance`. `provenance` is the closed object
 `{source, status, evidence_id, package_manifest_sha256,
 studio_campaign_sha256, provider_cli_version, live_executable_cdhash}`.
+**[v0.22.28]** An entry MAY also carry `max_served_slots`, a JSON integer
+from 1 to 32: the SPEC-038 FR-CB11 served-slot ceiling for that model
+artifact. Any other type or value MUST be rejected. When present it is part
+of the `tuple_sha256` identity; when absent the entry's identity is unchanged.
+The release generator MUST refuse to emit or assemble a policy carrying it
+while its CB policy consumer floor (`CB_POLICY_CONSUMER_FLOOR`) is below
+v0.22.28; the floor MUST be raised only in a reviewed change, after every
+provider CLI and coordinator that reads the release implements v0.22.28.
 `tuple_sha256` is computed over the release-bound root identity and the entry
 with `tuple_sha256` removed, under the domain
 `macprovider.continuous-batching-policy-tuple.v1`. For the current runtime
@@ -3874,7 +3901,9 @@ with `rollout: "off"` names its `model_sha256`, `metallib_sha256` and
 `kernel_identifier` (hardware class does not narrow a revocation); each Mac
 then qualifies batching with the SPEC-038 FR-CB10 on-device self-check. A
 positive entry is only a provisional grant for its model artifact until that
-Mac's self-check decides, plus the exact-tuple `cached_turns_accepted` grant.
+Mac's self-check decides, plus the exact-tuple `cached_turns_accepted` grant
+and, from v0.22.28, its optional `max_served_slots` ceiling (SPEC-038 FR-CB11),
+which only lowers the served count.
 A missing, stale, unsigned, wrong-signer, malformed, future-dated or
 catalog-mismatched policy revokes nothing (it no longer means "CB off").
 `catalog-release.py` writes the structural `expires_at` as

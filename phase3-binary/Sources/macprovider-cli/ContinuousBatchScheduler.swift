@@ -300,7 +300,7 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     /// run serially inside one iteration and stall decode for longer.
     let allowsRaggedPrefillOffsets: Bool
     /// Whether a native-MTP prompt row may join a ragged prefill group
-    /// (SPEC-038 v0.3.22 FR-CB2). Set only when the backend prefills every
+    /// (SPEC-038 v0.3.24 FR-CB2). Set only when the backend prefills every
     /// row of a group in its own forward
     /// (`PagedKVSharedForwardBackend.prefillsGroupedRowsAlone`), so joining
     /// changes when a native row's chunk runs, never a forward's shape.

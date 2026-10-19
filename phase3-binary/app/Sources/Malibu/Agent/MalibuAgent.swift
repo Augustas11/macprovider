@@ -869,6 +869,7 @@ final class MalibuAgent: ObservableObject {
             snapshot.networkState = status.networkState
             providerProjectionEligible = true
             snapshot.advertisedMaxConcurrency = status.advertisedMaxConcurrency
+            snapshot.providerEngine = status.engine
             snapshot.catalogState = status.catalogState
             snapshot.catalogReleaseID = status.catalogReleaseID
             snapshot.catalogDigest = status.catalogDigest

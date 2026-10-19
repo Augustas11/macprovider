@@ -2680,6 +2680,9 @@ struct ServeCommand: AsyncParsableCommand {
         // one (or a provisional grant) and the on-device self-check sets it.
         // Loopback runtimes and autotune children keep their configured count.
         var autoServedSlots: AutoServedSlots.Plan?
+        // The plan's rows without the startup model's signed ceiling: a warm
+        // swap applies only the target model's own ceiling (SPEC-038 FR-CB11).
+        var rowsBeforePolicyCeiling: Int?
         var configuredSlotsForProvisional: Int?
         if !autotuneCandidate, resolved.model.flatMap({ LoopbackServeSelection.select($0) }) == nil {
             let memoryGB = ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil).ramGB
@@ -2696,7 +2699,11 @@ struct ServeCommand: AsyncParsableCommand {
                 contextTokens: servedContextTokens,
                 weightsBytes: servedWeightsBytes
             )
-            let plan = AutoServedSlots.plan(
+            let policyCeiling = AutoServedSlots.policyServedSlotCeiling(
+                continuousBatchingPolicy,
+                modelKeys: currentPolicyKeys
+            )
+            let planInputs = { (ceiling: Int?) in AutoServedSlots.plan(
                 configuredSlots: configuredSlots,
                 source: resolved.maxConcurrencySource,
                 draftConfigured: resolved.draftModel?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
@@ -2713,12 +2720,15 @@ struct ServeCommand: AsyncParsableCommand {
                         memoryFitCap: memoryFitCap
                     )
                 },
-                memoryFitKnown: memoryFitCap != nil
-            )
+                memoryFitKnown: memoryFitCap != nil,
+                policyCeiling: ceiling
+            ) }
+            let plan = planInputs(policyCeiling)
+            rowsBeforePolicyCeiling = policyCeiling == nil ? plan.rows : planInputs(nil).rows
             resolved.maxConcurrencyOverride = plan.rows
             autoServedSlots = plan
             FileHandle.standardError.write(Data(
-                "event=served_slots action=planned rows=\(plan.rows) served=\(plan.initialServed) reason=\(plan.reason) configured=\(configuredSlots.map(String.init) ?? "unset") source=\(resolved.maxConcurrencySource?.rawValue ?? "autotune")\n".utf8
+                "event=served_slots action=planned rows=\(plan.rows) served=\(plan.initialServed) reason=\(plan.reason) configured=\(configuredSlots.map(String.init) ?? "unset") source=\(resolved.maxConcurrencySource?.rawValue ?? "autotune") policy_ceiling=\(policyCeiling.map(String.init) ?? "none")\n".utf8
             ))
         }
 
@@ -2748,6 +2758,13 @@ struct ServeCommand: AsyncParsableCommand {
         // each verified switch target from the same verified config.json.
         let switchMemoryGB = ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil).ramGB
         var switchTargets: [(ids: [String], recomputed: Int, slots: Int)] = []
+        // Switch targets start from the rows planned before the startup
+        // model's signed ceiling; each target's own memory fit and ceiling
+        // (applied at the swap) bound it (SPEC-038 FR-CB11 v0.3.22).
+        let switchBaselineSlots = max(
+            ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride),
+            rowsBeforePolicyCeiling ?? 0
+        )
         let targetAuthorities = Self.localRuntimeTargetAuthorities(
             supportedModels: resolved.supportedModels,
             artifactResolver: targetResolver,
@@ -2760,8 +2777,9 @@ struct ServeCommand: AsyncParsableCommand {
                     configJSONData: artifact.configJSONData,
                     configSHA256: artifact.configSHA256,
                     draftModel: ProviderCapacity.servedDraftModel(configured: resolved.draftModel),
-                    // The slot count this serve runs (`maxBatch` below).
-                    slots: ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride),
+                    // The slot count this serve runs (`maxBatch` below), before
+                    // the startup model's policy ceiling.
+                    slots: switchBaselineSlots,
                     modelWeightSizeBytes: artifact.sizeBytes > 0 ? UInt64(artifact.sizeBytes) : nil
                 )
                 switchTargets.append((ids, knobs.context, knobs.slots))
@@ -3013,10 +3031,13 @@ struct ServeCommand: AsyncParsableCommand {
                     store: store, target: target, ownerPinned: ownerPinned, provisional: provisional
                 )
             }
+            // A startup memory bound below the planned rows still applies to
+            // the swap baseline; the startup model's ceiling does not.
             await mlxRuntime.configureServedSlots(
                 managed: plan.selfChecked,
                 ownerPinned: ownerPinned,
-                resolver: plan.selfChecked ? resolver : nil
+                resolver: plan.selfChecked ? resolver : nil,
+                rowsBeforePolicyCeiling: rows < plan.rows ? rows : rowsBeforePolicyCeiling
             )
             if plan.selfChecked,
                let target = await mlxRuntime.continuousBatchingSelfCheckTarget(),
@@ -3165,6 +3186,13 @@ struct ServeCommand: AsyncParsableCommand {
                 store: cbSelfCheckStore,
                 ownerPinnedSlots: plan.ownerPinned,
                 provisional: cbProvisional,
+                admissionHoldDrainSeconds: resolved.drainTimeoutSeconds,
+                lifecycleLease: {
+                    // A maintenance or startup lease means a lifecycle step owns
+                    // the process; never hold admission under it.
+                    guard case .valid(let lease) = lifecycleLeaseStore.inspect() else { return nil }
+                    return lease.kind.rawValue
+                },
                 log: { line in FileHandle.standardError.write(Data((line + "\n").utf8)) }
             )
             return Task { await driver.run() }

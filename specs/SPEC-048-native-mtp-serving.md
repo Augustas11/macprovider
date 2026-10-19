@@ -1047,7 +1047,7 @@ mutation, so the change is a selection and never a fallback:
   the lease, and reports `cached_prompt_tokens = 0`.
 
 Such a native row runs the shared prompt prefill of R007 (the same forward as
-its ordinary peers; **(0.1.49)** in a SPEC-038 v0.3.22 serial prefill cohort,
+its ordinary peers; **(0.1.49)** in a SPEC-038 v0.3.24 serial prefill cohort,
 where every row takes its own forward, its own forward over the same chunk
 and checkpoint boundaries) and captures the same prompt recurrent
 checkpoints. At a
@@ -1752,10 +1752,10 @@ requests.
 ## 9. Changelog and history
 
 - **0.1.49 (2026-10-19)** — R009: a cache-only native row in a SPEC-038
-  v0.3.22 serial prefill cohort (a backend whose grouped prefill rows always
+  v0.3.24 serial prefill cohort (a backend whose grouped prefill rows always
   run alone, such as glm5_next) prefills in its own forward over the same
   chunk and checkpoint boundaries as its ordinary peers; its published entry
-  is unchanged. SPEC-038 v0.3.22 lets native prompt rows join such cohorts,
+  is unchanged. SPEC-038 v0.3.24 lets native prompt rows join such cohorts,
   which removes the prefill-schedule difference behind the GLM-5.3-Flash
   gated-cell R015 failure on CLI 1.8.256.
 - **0.1.48 (2026-10-18)** — MTP-16: tuple offer and re-offer. A coordinator

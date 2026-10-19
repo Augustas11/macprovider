@@ -36,7 +36,7 @@ Decode-path lines changed since that evidence (commits `ada2ecb96`..`cf0571a5f`)
   a ragged-group candidate when
   `ContinuousBatchSchedulerConfiguration.nativeMTPPromptRowsJoinRaggedPrefill`
   holds, which `ModelRuntime` sets from
-  `PagedKVSharedForwardBackend.prefillsGroupedRowsAlone` (SPEC-038 v0.3.22
+  `PagedKVSharedForwardBackend.prefillsGroupedRowsAlone` (SPEC-038 v0.3.24
   FR-CB2): no two-row shared prefill forward fits the backend's
   flattened-token cap at the smallest chunk that may group (glm5_next: 8
   tokens against 144). Every grouped GLM row already prefills alone on the

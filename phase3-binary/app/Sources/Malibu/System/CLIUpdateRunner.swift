@@ -300,41 +300,39 @@ enum CLIUpdateRunner {
 
                 process.environment = environment
 
-                let emit: (Pipe) -> Void = { pipe in
-                    pipe.fileHandleForReading.readabilityHandler = { handle in
-                        let chunk = handle.availableData
-                        guard !chunk.isEmpty else { return }
-                        let text = String(decoding: chunk, as: UTF8.self)
-                        outputState.append(text)
-                        for line in text.split(whereSeparator: \.isNewline) {
-                            let trimmed = String(line)
-                            guard !trimmed.isEmpty else { continue }
-                            Task { @MainActor in onLogLine(trimmed) }
-                        }
-                    }
-                }
-                emit(stdout)
-                emit(stderr)
-
                 do {
                     try process.run()
                 } catch {
                     continuation.resume(throwing: Error.launchFailed(error.localizedDescription))
                     return
                 }
-                process.waitUntilExit()
-                stdout.fileHandleForReading.readabilityHandler = nil
-                stderr.fileHandleForReading.readabilityHandler = nil
-                for pipe in [stdout, stderr] {
-                    let tail = pipe.fileHandleForReading.readDataToEndOfFile()
-                    if !tail.isEmpty {
-                        let text = String(decoding: tail, as: UTF8.self)
-                        outputState.append(text)
-                        for line in text.split(whereSeparator: \.isNewline) where !line.isEmpty {
-                            Task { @MainActor in onLogLine(String(line)) }
+
+                // Read each stream through EOF on its own queue. A
+                // readabilityHandler can already own a chunk when it is
+                // removed after process termination; the post-exit drain can
+                // then see no bytes and classify a rollback marker before the
+                // handler appends it. Owning and joining these readers makes
+                // exit classification depend on the complete output.
+                let readerGroup = DispatchGroup()
+                func stream(_ pipe: Pipe) {
+                    readerGroup.enter()
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        defer { readerGroup.leave() }
+                        while true {
+                            let chunk = pipe.fileHandleForReading.availableData
+                            guard !chunk.isEmpty else { return }
+                            let text = String(decoding: chunk, as: UTF8.self)
+                            outputState.append(text)
+                            for line in text.split(whereSeparator: \.isNewline) where !line.isEmpty {
+                                Task { @MainActor in onLogLine(String(line)) }
+                            }
                         }
                     }
                 }
+                stream(stdout)
+                stream(stderr)
+                process.waitUntilExit()
+                readerGroup.wait()
                 continuation.resume(returning: process.terminationStatus)
             }
         }

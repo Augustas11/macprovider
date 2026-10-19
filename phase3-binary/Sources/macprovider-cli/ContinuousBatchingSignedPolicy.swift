@@ -19,6 +19,9 @@ struct ContinuousBatchingPolicyEntry: Sendable, Equatable {
     let rollout: ContinuousBatchingMode
     let tuple: ContinuousBatchingAcceptedTuple
     let provenance: ContinuousBatchingPolicyProvenance
+    /// SPEC-038 FR-CB11 (v0.3.22): the most slots this model artifact may
+    /// serve on any Mac, from the signed evidence. Nil: no policy ceiling.
+    var maxServedSlots: Int? = nil
 }
 
 /// SPEC-038 FR-CB10 (v0.3.15): the signed policy only revokes. A
@@ -64,6 +67,19 @@ struct ContinuousBatchingPolicySelection: Sendable, Equatable {
 
     var acceptanceCoverage: ContinuousBatchingAcceptanceCoverage {
         ContinuousBatchingAcceptanceCoverage(acceptedTuples: entries.map(\.tuple))
+    }
+
+    /// SPEC-038 FR-CB11 (v0.3.22): the lowest `max_served_slots` among the
+    /// positive entries for this model artifact; nil when none carries one.
+    func servedSlotCeiling(modelSHA256: String) -> Int? {
+        entries.filter { $0.rollout != .off && $0.tuple.modelSHA256 == modelSHA256 }
+            .compactMap(\.maxServedSlots).min()
+    }
+
+    /// The same ceiling by catalog model key, before the artifact is loaded.
+    func servedSlotCeiling(modelKeys: Set<String>) -> Int? {
+        entries.filter { $0.rollout != .off && modelKeys.contains($0.modelKey) }
+            .compactMap(\.maxServedSlots).min()
     }
 }
 
@@ -307,6 +323,7 @@ enum ContinuousBatchingSignedPolicy {
                 "tuple_sha256", "model_key", "model_id", "model_sha256", "tokenizer_sha256",
                 "chat_template_sha256", "cache_class", "kv_dtype", "requires_moe", "hardware_class",
                 "metallib_sha256", "kernel_identifier", "rollout", "cached_turns_accepted", "provenance",
+                "max_served_slots",
             ],
             required: [
                 "tuple_sha256", "model_key", "model_id", "model_sha256", "tokenizer_sha256",
@@ -353,8 +370,26 @@ enum ContinuousBatchingSignedPolicy {
                 kernelIdentifier: try requireShortString(entry, "kernel_identifier", path: path),
                 cachedTurnsAccepted: try requireBool(entry, "cached_turns_accepted", path: path)
             ),
-            provenance: provenance
+            provenance: provenance,
+            maxServedSlots: try optionalServedSlots(entry, "max_served_slots", path: path)
         )
+    }
+
+    /// An optional JSON integer in 1...`ProviderCapacity.maxConcurrencyOverrideLimit`;
+    /// booleans and fractional numbers are rejected.
+    private static func optionalServedSlots(_ object: [String: Any], _ key: String, path: String) throws -> Int? {
+        guard let value = object[key] else { return nil }
+        // Integer encodings only, as `CanonicalJSON` reads them for the tuple digest.
+        guard let number = value as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID(),
+              ["q", "l", "i", "s", "c", "Q", "L", "I", "S", "C"].contains(String(cString: number.objCType)) else {
+            throw ContinuousBatchingSignedPolicyError.wrongType("\(path).\(key)")
+        }
+        guard number.compare(NSNumber(value: 1)) != .orderedAscending,
+              number.compare(NSNumber(value: ProviderCapacity.maxConcurrencyOverrideLimit)) != .orderedDescending else {
+            throw ContinuousBatchingSignedPolicyError.invalidValue("\(path).\(key)")
+        }
+        return number.intValue
     }
 
     private static func parseProvenance(

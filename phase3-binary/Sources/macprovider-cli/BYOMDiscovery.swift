@@ -1929,7 +1929,13 @@ struct BYOMModelAdmissionClient: Sendable {
         let data: Data
         let response: URLResponse
         if let session {
-            (data, response) = try await session.data(for: request)
+            // An injected session may carry concurrent reads
+            // (catalog-economics); refuse an oversized body while streaming.
+            do {
+                (data, response) = try await session.boundedData(for: request, limit: Self.maxStatusResponseBytes)
+            } catch let error as URLError where error.code == .dataLengthExceedsMaximum {
+                throw BYOMModelAdmissionError.invalidStatusSchema
+            }
         } else {
             let ephemeral = URLSession(
                 configuration: Self.urlSessionConfiguration(for: baseURL),

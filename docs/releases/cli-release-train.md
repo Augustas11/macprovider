@@ -62,7 +62,27 @@ Verified 2026-10-10 against public release metadata, the release train
 | Installer | `get.malibu.tech/install.sh` matches the v1.8.232 `dist/install.sh` (train step `install_sh_vs_release: parity`). |
 | Release mirror | `download.malibu.tech/releases/v1.8.232/` byte-identical to GitHub (33 assets verified); `latest.json` promoted from `v1.8.224` to `v1.8.232` on 2026-10-10 with `publish-release-mirror.sh --promote-latest`. |
 
-## Next CLI release — net changes vs 1.8.251 (tracked 2026-10-18)
+## Next CLI release — net changes vs 1.8.256 (tracked 2026-10-19)
+
+Live fleet target: **1.8.256** (released 2026-10-18 on Pearl runtime v1.8.255). The
+section below this one shipped as v1.8.256.
+
+| PR | Issue | Provider-side change | Status |
+|---|---|---|---|
+| #2059 | — | Malibu app redesign Phase 2: sidebar shell, Models, Discover, fast catalog, brand mark | merged |
+| #2064 | #2029 | Signed CB policy `max_served_slots` ceiling (SPEC-023 v0.22.28 §12.6, SPEC-038 v0.3.22, SPEC-039 v0.1.21): the CLI parses the optional field and caps planned rows, the self-check ladder, stored/prior/provisional grants and the warm-swap interim count by the lowest ceiling of the matching verified entries; absent field = unchanged behaviour | merged |
+| #2062 | — | Run a due CB self-check under a bounded admission hold; canary accepts the prior grant | open (draft) |
+| #2063 | #2029 | GLM-5.3-Flash native MTP: R015 v2 on the prefill-schedule fix | open (draft) |
+
+Deploy order for #2064: a policy that carries `max_served_slots` is refused by every
+release path until `scripts/cb_release_baselines.py` `CB_POLICY_CONSUMER_FLOOR` is raised
+from `(0, 22, 27)` to `(0, 22, 28)`. Raise it in a reviewed change only after **both** this
+CLI cut and the Pearl runtime carrying #2064's coordinator half are live; older CLIs reject
+a whole policy that carries the field. The GLM-5.3-Flash ceiling (4 served slots, from rows
+1/2/4 evidence) then lands in a catalog cut through `scripts/ops/catalog-activate.sh`; until
+then the Studio pins 4 slots with an owner-pinned `max_concurrency_override`.
+
+## Next CLI release — net changes vs 1.8.251 (tracked 2026-10-18; released as v1.8.256)
 
 Live fleet target: **1.8.251**. Staged: `binaryVersion` **1.8.256** (v1.8.252, v1.8.253 and
 v1.8.255 are runtime releases). The 1.8.254 candidate failed its Studio canary

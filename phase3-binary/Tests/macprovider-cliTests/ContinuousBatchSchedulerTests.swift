@@ -3039,9 +3039,11 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         let outputTokens = ContinuousBatchingSelfCheck.exactnessOutputTokens(decodeWindow: 16)
         for bound in [Int.max, 11] {
             let backend = KernelRouteBackend(vectorLimit: 12)
+            // Exactness must not depend on when the no-op delivery sink is scheduled.
             let scheduler = try await makeScheduler(
                 descriptor: Self.descriptor(maxPhysicalBlocks: 1024),
                 maxActiveRows: rows,
+                tokenDeliveryBufferLimit: outputTokens,
                 maxDecodeLockstepWindow: 16,
                 maxDecodeRowsPerForward: bound,
                 maxPrefillRowsPerIteration: 4,
@@ -5734,7 +5736,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         // SPEC-048 R015 gated cells: kept out of ragged groups, a native row
         // prefilled alone, ahead of the rows arriving with it, whose prefill
         // then stalled its decode. Where every grouped row takes its own
-        // forward (SPEC-038 v0.3.22 FR-CB2) it takes its turn in the group.
+        // forward (SPEC-038 v0.3.24 FR-CB2) it takes its turn in the group.
         for joins in [true, false] {
             let prefillGate = AsyncGate()
             let backend = ScriptedBackend(

@@ -8,12 +8,12 @@ final class DashboardViewTests: XCTestCase {
             "Serving this model. Switching is available."
         )
         XCTAssertEqual(
-            DashboardCopy.modelRowStatusLine(currentModelID: "meta-llama/llama-3.2-3b-instruct", listState: .viewOnly),
+            DashboardCopy.modelRowStatusLine(currentModelID: "meta-llama/llama-3.2-3b-instruct", listState: .viewOnly, warmSwapAvailable: false),
             "Serving this model. Switching is off until warm swap is running."
         )
         XCTAssertEqual(
             DashboardCopy.modelRowStatusLine(currentModelID: "meta-llama/llama-3.2-3b-instruct", listState: .unavailable),
-            "Serving this model. Switching is unavailable right now; open Change Model to retry."
+            "Serving this model. Switching is unavailable right now; open Models to retry."
         )
         XCTAssertEqual(
             DashboardCopy.modelRowStatusLine(currentModelID: "meta-llama/llama-3.2-3b-instruct", listState: .checking),

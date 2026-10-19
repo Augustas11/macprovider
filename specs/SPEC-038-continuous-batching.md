@@ -1,12 +1,12 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.22
+Version: v0.3.24
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
-**Change log v0.3.22 (2026-10-19, FR-CB2 serial prefill cohorts):**
+**Change log v0.3.24 (2026-10-19, FR-CB2 serial prefill cohorts):**
 FR-CB2: on a backend that prefills every row of a prefill step in its own
 forward (no two-row shared forward fits its flattened-token cap at the
 smallest chunk that may group; `glm5_next`: 8 tokens against 144-token
@@ -21,6 +21,35 @@ row got its first token about 1 s earlier and the windowed decode rate read
 -6% (2 rows) and -10% (4 rows) at an end-to-end ratio of 0.99. Backends on
 which grouped rows can share a forward keep the equal-offset rule for native
 rows.
+
+**Change log v0.3.23 (2026-10-19, FR-CB10 admission hold for a due check):**
+FR-CB10 item 3: a check that must run on a key with no stored decision (a
+new runtime identity on a Mac with a prior grant, `prior_grant_pending_recheck`,
+or a first qualification) never found an idle window under steady buyer
+traffic; on CLI 1.8.250, 1.8.251 and 1.8.256 the operator stopped the buyer
+traffic by hand. Once such a check has been due for 2-17 minutes on a busy Mac,
+the provider holds admission: it stops admitting new requests (they are
+refused with the retryable queue-pressure status and routing sees no free
+slot), lets in-flight requests finish within the drain bound without
+cancelling any, runs the check for a bounded interval (initially 5 minutes,
+doubling after consecutive bound yields up to 20 minutes), and re-opens admission.
+The prior grant keeps serving until the check decides. A hold never starts
+under an operator pause, a drain or a valid lifecycle lease, and one that
+appears during it ends the hold as a yield. Re-measurements of a stored
+decision still wait for an idle window. `/v1/status` reports the hold.
+
+**Change log v0.3.22 (2026-10-19, FR-CB11 signed served-slot ceiling):**
+FR-CB10 and FR-CB11: a positive signed policy entry may carry
+`max_served_slots` (SPEC-023 v0.22.28), the most slots its model artifact may
+serve on any Mac. The self-check's ladder measured every width up to the
+scheduler rows, which come from the memory fit, the paged-KV pool and the
+served hard cap; none of these is a throughput bound. On the 256 GB Studio,
+GLM-5.3-Flash was granted 16 slots while its throughput evidence covers 1, 2
+and 4 rows. Only an owner pin bounded it, and autotune drops the owner source
+when it re-applies. The ceiling now caps the scheduler rows at startup, the
+ladder bound, every stored, prior or provisional grant, the owner pin and the
+warm-swap count. It never raises a count, and an entry without it behaves as
+before.
 
 **Change log v0.3.21 (2026-10-17, FR-CB10 decode-only gain for glm5_next):**
 FR-CB10: for `glm5_next` models only, the self-check's throughput gain
@@ -738,7 +767,7 @@ one compatible prefill group when all of these hold:
 - no row is a native-MTP prompt row (those keep the equal-offset rule),
   except as below.
 
-**(v0.3.22) Serial prefill cohorts.** On a backend on which no shared
+**(v0.3.24) Serial prefill cohorts.** On a backend on which no shared
 forward of two rows fits at the smallest chunk length that may group (its
 flattened-token cap is below twice `minimumGroupedChunkTokens`), the rows the
 scheduler selects for one prefill step are a *serial prefill cohort*, not a
@@ -1230,7 +1259,8 @@ above are superseded where they conflict:
    it submits k distinct fixed greedy prompts together. (v0.3.17) The ladder
    also stops at the scheduler's waiting-queue limit, because a wider probe is
    refused with backpressure before any row runs (and at an owner pin and
-   below a crashed width). The bound is stored with the decision; a decision
+   below a crashed width, and, from v0.3.22, at the signed `max_served_slots`
+   for the model artifact, FR-CB11 item 5). The bound is stored with the decision; a decision
    whose every width up to that bound passed re-runs when the bound grows.
    Like the scheduler rows, the bound is configuration, not a measurement: a
    prior or provisional grant wider than it is served only up to the
@@ -1282,7 +1312,45 @@ above are superseded where they conflict:
 3. The check MUST NOT block serving. It runs only while no request is in
    flight after an idle interval and abandons a step when a request arrives;
    completed steps persist, so a busy Mac resumes where it stopped, and
-   consecutive deferrals back off (doubling, at most 15 minutes). Each width
+   consecutive deferrals back off (doubling, at most 15 minutes).
+   (v0.3.23) **Admission hold.** A check on a key with no stored decision
+   (`prior_grant_pending_recheck`, `pending` or `deferred`) that has been due
+   for 2 minutes plus a per-Mac random offset of up to 15 minutes (to spread
+   holds across Macs that re-key together) while the Mac is not idle MUST run
+   under an admission hold, and MUST NOT otherwise hold admission (a
+   re-measurement of a stored decision keeps waiting for an idle window, and
+   an idle Mac runs the check without a hold). Under the hold the provider
+   MUST stop admitting new requests: a relay request (a relay-blind one keeps
+   its existing refusal) is refused before admission with `error_queue_full`,
+   the status the coordinator re-routes without a breaker fault, and a direct
+   HTTP request with the retryable `continuous_batching_stream_backpressure`
+   and a `Retry-After` that runs to the hold's bound (no inference runs for
+   either); heartbeats and capacity updates report the provider busy with no
+   free slot. A coordinator that still counts its own forwarded requests may
+   ignore that report until one of them ends; a request it routes meanwhile
+   is refused as above and re-routed. The provider MUST let every in-flight
+   request finish and MUST NOT cancel or drop one; if they have not finished
+   within the drain bound (the configured drain timeout, doubled after each
+   consecutive drain timeout up to 4x) the hold ends without a check. The
+   check then runs for at most 5 minutes initially, doubled after each
+   consecutive check-bound yield up to 20 minutes. Completed exactness probes
+   and completed serial/batch throughput pairs persist, so an unfinished width resumes
+   without repeating completed work. Cancelled or incomplete inference results
+   MUST NOT become measurements or grant decisions. At the bound admission re-opens
+   even if the check has not returned (it is cancelled, yields to the first
+   buyer request, and the ladder resumes at the next idle window or hold).
+   Holds are at least 2 minutes apart, counted from the end of the previous
+   one. The prior grant keeps serving until the check decides. A hold MUST
+   NOT start under an operator pause, while the provider is draining,
+   unavailable or degraded, or while a valid lifecycle (maintenance or
+   startup) lease is held, and it ends as a yield the moment any of these
+   appears or the self-check target changes (a model swap); a pause or drain
+   keeps its own state when the hold ends. The hold is logged
+   (`event=cb_self_check action=admission_hold_*`) and reported in
+   `/v1/status` `continuous_batching.self_check_admission_hold` (active,
+   started_at, expected_end_at, holds_total, last_outcome, last_ended_at,
+   last_skip_reason, last_skipped_at); `active` is the admission state,
+   whatever the scheduler's own free rows. Each width
    is journaled before any inference for it runs (its alone runs included),
    and a width whose journal write fails is not run: a step found unfinished
    on restart (the process died, e.g. a Metal OOM at a high k), including
@@ -1319,7 +1387,10 @@ divergence; the check is defence in depth.
    pool concurrency ceiling).
 5. Positive entries authorize nothing else, except the per-tuple
    `cached_turns_accepted` grant below. The emergency `continuous_batching:
-   off` override still forces serial.
+   off` override still forces serial. **(v0.3.22)** A positive entry's
+   optional `max_served_slots` only lowers: it is one more ladder bound
+   (item 1) and caps every grant served for that model artifact
+   (FR-CB11 item 5).
 
 **(v0.2.9)** An accepted-tuple entry MAY carry `cached_turns_accepted`
 (boolean, default false; any non-boolean value MUST be rejected at
@@ -1455,6 +1526,19 @@ NOT change `slots_total`.
    swap or adoption serves the owner pin or one slot until the new model's
    stored result, prior grant or self-check applies.
 4. A tuple that cannot batch at all (no attached engine, revoked) serves 1.
+5. **(v0.3.22)** When the verified signed policy carries `max_served_slots`
+   on a positive entry for the served model (by catalog key before load, by
+   model SHA-256 once loaded; the lowest value when several entries carry
+   one), no count above it is built, measured or served. It caps the scheduler
+   rows and the initial count at startup, an owner pin (the pin itself is kept,
+   so a warm swap to another model applies that model's ceiling), the FR-CB10
+   ladder bound, every stored, prior or provisional grant, and, on a warm
+   swap or adoption, the rebuilt scheduler rows and the count served before
+   its self-check applies. It never raises
+   a count above another bound, and it does not apply while the policy is not
+   verified (an unverified policy revokes nothing and bounds nothing). A
+   bound that grows when the ceiling is raised or removed re-runs the ladder
+   (FR-CB10 item 1). An entry without it changes nothing.
 
 Loopback runtimes (SPEC-046) and autotune children keep their configured
 count. The coordinator's `pool.max_concurrency_ceiling` still clamps routed

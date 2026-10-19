@@ -145,7 +145,7 @@ never resident.
 R015 on 1.8.256 failed (window 2026-10-18T13:38Z, `analysis.json`
 `224b18b0…`): the one-row cells keep their decode gain, the 4096-token TTFT
 bound and every gated-cell gate fail. The diagnosis and the fix (commit
-`cf0571a5f`, SPEC-038 v0.3.22 FR-CB2: on a backend whose grouped prefill rows
+`cf0571a5f`, SPEC-038 v0.3.24 FR-CB2: on a backend whose grouped prefill rows
 always run alone, as glm5_next's do, a native prompt row joins ragged groups)
 are in `docs/research/spec048-r015/glm53-flash-r015-v2/PREREGISTRATION.md`.
 The v2 run measures a lab-harness build of that commit.

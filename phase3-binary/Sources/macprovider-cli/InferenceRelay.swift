@@ -410,19 +410,23 @@ actor InferenceRelay {
             return
         }
 
-        guard let startedAt = await providerStatus.beginRequestIfAccepting(requestID: requestID) else {
+        let admission = await providerStatus.admitRequest(requestID: requestID)
+        guard case .admitted(let startedAt) = admission else {
             if let relayBlindOpened {
                 try await terminateClaimedRelay(
                     relayBlindOpened, requestID: requestID, stream: stream, error: .providerUnsupported
                 )
                 return
             }
+            // SPEC-038 FR-CB10 item 3: the self-check admission hold is queue
+            // pressure, the one pre-admission status the coordinator re-routes.
+            let held = admission == .selfCheckAdmissionHold
             try await Self.sendEndFrame([
                 "type": "inference_response_end",
                 "request_id": requestID,
-                "status": "error_provider_paused",
+                "status": held ? "error_queue_full" : "error_provider_paused",
                 "chunks_sent": 0,
-                "error": "Provider is paused or draining",
+                "error": held ? "Provider is briefly holding admission for a continuous-batching self-check" : "Provider is paused or draining",
             ], requestID: requestID, stream: stream, tier2Session: tier2Session, sendFrame: sendFrame)
             return
         }
