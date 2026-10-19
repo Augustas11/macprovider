@@ -77,6 +77,24 @@ func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion
 	}
 
 	const model = "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit"
+	contextTokens, err := connectedClientContext(os.Getenv("MACPROVIDER_TEST_CLIENT_CONTEXT"), synthetic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !synthetic {
+		statusTransport := &http.Transport{Proxy: nil}
+		defer statusTransport.CloseIdleConnections()
+		statusClient := &http.Client{Transport: statusTransport, Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+		response, err := statusClient.Get(upstream + "/v1/status")
+		if err != nil {
+			t.Fatal("isolated provider status unavailable")
+		}
+		statusBody, readErr := io.ReadAll(io.LimitReader(response.Body, (1<<20)+1))
+		response.Body.Close()
+		if readErr != nil || len(statusBody) > 1<<20 || response.StatusCode != http.StatusOK || !connectedProviderMatches(statusBody, model, contextTokens) {
+			t.Fatal("isolated provider model/context does not match the explicit fixture setting")
+		}
+	}
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -136,6 +154,7 @@ func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion
 		}
 		mu.Lock()
 		calls++
+		callNumber := calls
 		tooMany := calls > 6
 		streamed = true
 		ids := make(map[string]bool)
@@ -152,7 +171,7 @@ func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion
 			cancel()
 			return nil, fmt.Errorf("client exceeded six inference requests")
 		}
-		t.Logf("upstream request shape: %s", connectedRequestShape(body))
+		t.Logf("upstream request %d shape: %s", callNumber, connectedRequestShape(body))
 		if synthetic {
 			held, err := connectedSyntheticToolResponse(body, kind, filepath.Join(root, "workspace"), marker)
 			if err != nil {
@@ -188,6 +207,7 @@ func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion
 			cancel()
 			return nil, err
 		}
+		t.Logf("upstream response %d usage: %s", callNumber, connectedStreamUsage(held))
 		// Hold all model bytes until every complete tool call is validated. This
 		// verifies SSE protocol compatibility, not time-to-first-token latency.
 		response.Body = io.NopCloser(bytes.NewReader(held))
@@ -229,16 +249,16 @@ func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion
 	defer server.Close()
 
 	// Mirrors ConnectedAppConfiguration's conservative Codex0.163.0 catalog;
-	// the 8192 context is the isolated provider's qualified cap.
+	// every context field matches the verified isolated provider capacity.
 	catalog, err := json.Marshal(map[string]any{"models": []any{map[string]any{
 		"slug": model, "display_name": model,
 		"description":                "Isolated gateway acceptance fixture",
 		"model_messages":             map[string]any{"instructions_template": "You are a coding assistant. Use the available tools to complete the user's request and verify your work."},
 		"supported_reasoning_levels": []any{}, "shell_type": "unified_exec", "visibility": "list",
 		"supported_in_api": true, "priority": 1, "support_verbosity": false,
-		"truncation_policy":            map[string]any{"mode": "tokens", "limit": 8192},
+		"truncation_policy":            map[string]any{"mode": "tokens", "limit": min(10000, contextTokens)},
 		"experimental_supported_tools": []any{}, "input_modalities": []string{"text"},
-		"context_window": 8192, "max_context_window": 8192, "upgrade": nil, "apply_patch_tool_type": nil,
+		"context_window": contextTokens, "max_context_window": contextTokens, "upgrade": nil, "apply_patch_tool_type": nil,
 		"supports_reasoning_summary_parameter": false, "tool_mode": "direct", "node_repl_disabled": true, "use_responses_lite": false,
 	}}})
 	if err != nil {
@@ -283,7 +303,7 @@ env_key = "MALIBU_API_KEY"
 		data, err := json.Marshal(map[string]any{"model": "malibu/" + model, "provider": map[string]any{
 			"malibu": map[string]any{"npm": "@ai-sdk/openai-compatible", "name": "Malibu",
 				"options": map[string]any{"baseURL": server.URL + "/v1", "apiKey": "{env:MALIBU_API_KEY}"},
-				"models":  map[string]any{model: map[string]any{"name": model, "limit": map[string]any{"context": 8192, "output": 1024}}}},
+				"models":  map[string]any{model: map[string]any{"name": model, "limit": map[string]any{"context": contextTokens, "output": 1024}}}},
 		}})
 		if err != nil {
 			t.Fatal(err)
@@ -298,7 +318,7 @@ env_key = "MALIBU_API_KEY"
 		}
 		data, err := json.Marshal(map[string]any{"name": "malibu", "engine": "openai", "display_name": "Malibu", "description": "Isolated gateway acceptance fixture",
 			"api_key_env": "MALIBU_API_KEY", "base_url": server.URL + "/v1/chat/completions", "requires_auth": true, "supports_streaming": true,
-			"models": []any{map[string]any{"name": model, "context_limit": 8192}}})
+			"models": []any{map[string]any{"name": model, "context_limit": contextTokens}}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -755,5 +775,72 @@ func TestConnectedClientSyntheticProtocol(t *testing.T) {
 		if err != nil || !bytes.Contains(final, []byte("marker-secret")) || validateConnectedToolStream(final, kind, "/fixture") != nil {
 			t.Fatal("synthetic final response invalid")
 		}
+	}
+}
+
+func connectedClientContext(raw string, synthetic bool) (int, error) {
+	if synthetic || raw == "" || raw == "8192" {
+		return 8192, nil
+	}
+	if raw == "16384" {
+		return 16384, nil
+	}
+	return 0, fmt.Errorf("fixture context must be 8192 or 16384")
+}
+
+func connectedProviderMatches(body []byte, model string, contextTokens int) bool {
+	var status struct {
+		Model    string `json:"model"`
+		Capacity struct {
+			MaxContextTokens int `json:"max_context_tokens"`
+		} `json:"capacity"`
+	}
+	return !anthropicRawHasDuplicateKeys(body) && json.Unmarshal(body, &status) == nil && status.Model == model && status.Capacity.MaxContextTokens == contextTokens
+}
+
+// The validated SSE may contain sensitive text; retain only numeric usage.
+func connectedStreamUsage(body []byte) string {
+	var usage struct {
+		Prompt     int `json:"prompt_tokens"`
+		Completion int `json:"completion_tokens"`
+		Total      int `json:"total_tokens"`
+	}
+	found := false
+	for _, line := range strings.Split(string(body), "\n") {
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		var frame struct {
+			Usage json.RawMessage `json:"usage"`
+		}
+		if json.Unmarshal([]byte(strings.TrimSpace(strings.TrimPrefix(line, "data:"))), &frame) == nil && len(frame.Usage) > 0 && string(frame.Usage) != "null" && json.Unmarshal(frame.Usage, &usage) == nil {
+			found = true
+		}
+	}
+	encoded, _ := json.Marshal(map[string]any{"present": found, "prompt_tokens": usage.Prompt, "completion_tokens": usage.Completion, "total_tokens": usage.Total})
+	return string(encoded)
+}
+
+func TestConnectedClientContextBinding(t *testing.T) {
+	for _, tc := range []struct {
+		raw       string
+		synthetic bool
+		want      int
+	}{{"", false, 8192}, {"16384", false, 16384}, {"16384", true, 8192}, {"32768", false, 0}} {
+		got, err := connectedClientContext(tc.raw, tc.synthetic)
+		if got != tc.want || (err != nil) != (tc.want == 0) {
+			t.Fatal("unexpected fixture context resolution")
+		}
+	}
+	good := []byte(`{"model":"fixture-model","capacity":{"max_context_tokens":16384}}`)
+	if !connectedProviderMatches(good, "fixture-model", 16384) || connectedProviderMatches(good, "other", 16384) || connectedProviderMatches(good, "fixture-model", 8192) {
+		t.Fatal("provider identity/capacity binding failed")
+	}
+	if connectedProviderMatches([]byte(`{"model":"other","model":"fixture-model","capacity":{"max_context_tokens":16384}}`), "fixture-model", 16384) {
+		t.Fatal("accepted duplicate status identity")
+	}
+	usage := connectedStreamUsage([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"private\"}}]}\n\ndata: {\"usage\":{\"prompt_tokens\":7300,\"completion_tokens\":20,\"total_tokens\":7320}}\n\ndata: [DONE]\n"))
+	if strings.Contains(usage, "private") || !strings.Contains(usage, `"total_tokens":7320`) {
+		t.Fatal("numeric usage diagnostics failed")
 	}
 }
