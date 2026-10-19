@@ -109,8 +109,17 @@ no signing key and never re-signs. The release is built from
 - Optional: `REMOTE_AUTOTUNE_DIR` (default `/opt/macprovider/autotune`),
   `COORDINATOR_UNIT` (default `macprovider-coordinator`),
   `CATALOG_EVIDENCE_WATCH_SECONDS` (600), `CATALOG_EVIDENCE_POLL_SECONDS` (30),
-  `CATALOG_CANARY_RECOVERY_SECONDS` (180), `CATALOG_EVIDENCE_SETTLE_SECONDS`
-  (30), `AA_LEASE_MAX_SECONDS` (2700).
+  `CATALOG_CANARY_RECOVERY_SECONDS` (1800; a large model such as
+  GLM-5.3-Flash keeps the canary's status silent for 7-13 minutes while it
+  loads, and the wait ends as soon as the canary proof passes),
+  `CATALOG_EVIDENCE_SETTLE_SECONDS` (30), `AA_LEASE_MAX_SECONDS` (the larger
+  of 2700 and the sum of the lane's waits: 900 + coordinator ready + canary
+  recovery + watch + gateway convergence + 6 x settle seconds),
+  `AA_LEASE_ROLLBACK_SECONDS` (300 + 2 x coordinator ready seconds). The
+  controller sends a heartbeat on the lease channel every
+  `AA_LEASE_HEARTBEAT_SECONDS` (10). The Pearl lease runner exits and frees
+  both locks when no frame arrives for `AA_LEASE_IDLE_SECONDS` (180), so a
+  dead controller never leaves an orphaned runner holding them.
 - No coordinator deploy, renewal, Pearl update, or Tier-2 enforcement
   transaction is in progress (`pearl_locks_free`), and no pricing transaction
   journal exists (`pricing_txn_absent`).

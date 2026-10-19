@@ -1675,6 +1675,16 @@ run_rc 0 "proof accepted when CB shared forward calls move" scripts/ops/catalog-
 if python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d["request_id"].startswith("ops-proof-") and d["cb_shared_forward_calls_delta"] > 0 and d["served_by_canary"] is True else 1)' "$tmp/state/catalog-$R/gateway_proof.json"; then ok; else bad "proof marker lacks request id / CB scheduler delta"; fi
 run_rc 0 "catalog status with a fresh proof" scripts/ops/catalog-activate.sh status
 if [ "$(state_of gateway_proof)" = "done" ]; then ok; else bad "fresh proof not done"; fi
+# Without PROBE_MODEL the proof asks for the model the canary's /v1/status
+# reports serving, not a catalog constant the canary may not serve.
+python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["model"]="canary/served-model"; json.dump(d, open(p, "w"))' "$tmp/svc/status.json"
+printf 'canary/served-model\n' > "$tmp/svc/gateway_models"
+run_rc 0 "proof defaults to the model the canary serves" env -u PROBE_MODEL scripts/ops/catalog-activate.sh _gateway-proof
+if [ "$(cat "$tmp/svc/last_model")" = "canary/served-model" ]; then ok; else bad "proof asked for $(cat "$tmp/svc/last_model"), not the canary's served model"; fi
+python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d.pop("model"); json.dump(d, open(p, "w"))' "$tmp/svc/status.json"
+run_rc 3 "proof refused when the canary reports no served model and PROBE_MODEL is unset" env -u PROBE_MODEL scripts/ops/catalog-activate.sh _gateway-proof
+expect_err "reports no served model"
+rm -f "$tmp/svc/gateway_models"
 touch -t "$(date -v-25H +%Y%m%d%H%M 2>/dev/null || date -d '-25 hours' +%Y%m%d%H%M)" "$tmp/state/catalog-$R/gateway_proof.json"
 run_rc 0 "catalog status with an expired proof" scripts/ops/catalog-activate.sh status
 if [ "$(state_of gateway_proof)" = "pending" ]; then ok; else bad "expired proof still counted"; fi

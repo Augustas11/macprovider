@@ -20,9 +20,12 @@
 #   over STUDIO_SSH and start it detached, so a dropped ssh session cannot cut
 #   a swap or a rollback short; this side polls its log and result. The remote
 #   pauses and drains, backs up the install dir, swaps the payload, restarts and
-#   resumes. A provider process restart or a /v1/status silence of
-#   CANARY_STATUS_TIMEOUT_S (default 120) restores the backup and resumes the
-#   previous version once it is buyer_serving again. The buyer runner is
+#   resumes. A provider process restart or exit (crash loop), or a /v1/status
+#   silence of CANARY_STATUS_TIMEOUT_S (default 120) after the candidate
+#   reported its model loaded, restores the backup and resumes the previous
+#   version once it is buyer_serving again. Silence while the model loads is
+#   not a failure (a large model keeps /v1/status silent for minutes): with
+#   the same pid alive it is bounded by CANARY_READY_TIMEOUT_S. The buyer runner is
 #   restarted on every exit. A successful swap records the canary_swap marker
 #   that `cli-release.sh next --done canary_smoke --probe` requires.
 #
