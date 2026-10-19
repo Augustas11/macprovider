@@ -145,7 +145,7 @@ never resident.
 R015 on 1.8.256 failed (window 2026-10-18T13:38Z, `analysis.json`
 `224b18b0…`): the one-row cells keep their decode gain, the 4096-token TTFT
 bound and every gated-cell gate fail. The diagnosis and the fix (commit
-`916faf3b7`, SPEC-038 v0.3.22 FR-CB2: on a backend whose grouped prefill rows
+`cf0571a5f`, SPEC-038 v0.3.22 FR-CB2: on a backend whose grouped prefill rows
 always run alone, as glm5_next's do, a native prompt row joins ragged groups)
 are in `docs/research/spec048-r015/glm53-flash-r015-v2/PREREGISTRATION.md`.
 The v2 run measures a lab-harness build of that commit.
@@ -153,13 +153,13 @@ The v2 run measures a lab-harness build of that commit.
 1.8.256 does not contain the fix, so the GLM entry cannot bind it. The order
 is:
 
-1. R015 v2 passes on the lab harness (policy `5ca7e3b3…`).
+1. R015 v2 passes on the lab harness (policy `ed775bdb…`).
 2. The campaign PR merges; the next CLI release carries the fix. Its
    release input replaces `native-mtp-admission-release.v1.8.256.json`:
    `source_commit`, `provider_revision`, `reproducible_build_sha256` and
    `live_executable_cdhash` of that release, and the `challenge_bank_sha256`
    of the bank written in step 4 below.
-3. `benchmark_policy_sha256` becomes `5ca7e3b3…`; the pending performance
+3. `benchmark_policy_sha256` becomes `ed775bdb…`; the pending performance
    fields take the v2 `analysis.json`. The correctness, state and batch
    digests stay: the fix moves when a native row's prompt chunk runs, not the
    serial prefill path or any decode path the journey record covers, and the
