@@ -146,7 +146,6 @@ func TestAllowanceOwnedProviderExcludedBeforeDispatch(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	WithBuyerOwnershipLookup(h.store.BuyerOwnedProviders)(h.server)
 	for account, want := range map[string]int{"acct_self": 1, "acct_clean": 0} {
 		external := "ext-" + account
 		rec := allowanceChat(h, account, external, allowanceHeaders("50", false))

@@ -9,7 +9,7 @@ Issue: https://github.com/Augustas11/macprovider/issues/1062
 {
   "spec_id": "SPEC-050",
   "title": "MALIBU Stake Allowance",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "path": "specs/SPEC-050-malibu-stake-allowance.md",
   "status": "draft",
   "owner": "@Augustas11",

@@ -36,9 +36,16 @@ enum ToolPromptRenderer {
 
 private enum ToolPromptProfile {
     case qwen3
+    case qwenNative(ToolSelectionPolicy.CallFormat)
     case llama33
 
     static func detect(modelID: String) -> ToolPromptProfile? {
+        // The added exact profiles follow their pinned native templates. Keep
+        // the existing Qwen3.6 and family-wide history contract unchanged.
+        if modelID != ToolSelectionPolicy.supportedNativeModel,
+           let profile = ToolSelectionPolicy.guaranteedCallProfile(modelID: modelID) {
+            return .qwenNative(profile.format)
+        }
         if modelID.localizedCaseInsensitiveContains("qwen2.5") ||
             modelID.localizedCaseInsensitiveContains("qwen3")
         {
@@ -66,6 +73,10 @@ private enum ToolPromptProfile {
         let id = message.toolCallID ?? ""
         let content = message.content ?? ""
         switch self {
+        case .qwenNative:
+            // The native template wraps role=tool itself. Prewrapping here
+            // creates nested envelopes and exposes transport IDs to the model.
+            return content
         case .qwen3:
             return "<tool_response id=\"\(escapeAttribute(id))\">\n\(content)\n</tool_response>"
         case .llama33:
@@ -74,12 +85,52 @@ private enum ToolPromptProfile {
     }
 
     private func renderToolCall(_ call: MacProviderCore.ToolCall) throws -> String {
+        if case .qwenNative(let format) = self {
+            return try renderNativeToolCall(call, format: format)
+        }
         let body = try toolCallBody(call)
         switch self {
-        case .qwen3:
+        case .qwen3, .qwenNative:
             return "<tool_call>\(body)</tool_call>"
         case .llama33:
             return "<|python_tag|>\(body)<|eom_id|>"
+        }
+    }
+
+    private func renderNativeToolCall(_ call: MacProviderCore.ToolCall, format: ToolSelectionPolicy.CallFormat) throws -> String {
+        let arguments: JSONValue
+        do {
+            arguments = try StrictJSONParser.parse(call.arguments)
+        } catch {
+            // History is request input, not generated output. In particular,
+            // the parser's output-depth error must not claim inference ran.
+            throw APIError(status: 400, message: "Tool history arguments must be bounded strict JSON", code: "invalid_tools")
+        }
+        guard case .object(let parameters) = arguments else {
+            throw APIError(status: 400, message: "Tool history arguments must be an object", code: "invalid_tools")
+        }
+        switch format {
+        case .jsonEnvelope:
+            let name = try JSONValue.string(call.functionName).deterministicJSONString()
+            return "<tool_call>\n{\"name\": \(name), \"arguments\": \(try arguments.deterministicJSONString())}\n</tool_call>"
+        case .functionXML:
+            let safeName: (String) -> Bool = { value in
+                !value.isEmpty && value.utf8.allSatisfy {
+                    (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || $0 == 95 || $0 == 45
+                }
+            }
+            guard safeName(call.functionName), parameters.keys.allSatisfy(safeName) else {
+                throw APIError(status: 400, message: "Tool history names are outside the native XML grammar", code: "invalid_tools")
+            }
+            var rendered = "<tool_call>\n<function=\(call.functionName)>\n"
+            for key in parameters.keys.sorted() {
+                guard let value = parameters[key] else { continue }
+                let text: String
+                if case .string(let string) = value { text = string }
+                else { text = try value.deterministicJSONString() }
+                rendered += "<parameter=\(key)>\n\(text)\n</parameter>\n"
+            }
+            return rendered + "</function>\n</tool_call>"
         }
     }
 
@@ -96,7 +147,7 @@ private enum ToolPromptProfile {
 
         let body: [String: Any]
         switch self {
-        case .qwen3:
+        case .qwen3, .qwenNative:
             body = [
                 "name": call.functionName,
                 "arguments": argumentsObject,

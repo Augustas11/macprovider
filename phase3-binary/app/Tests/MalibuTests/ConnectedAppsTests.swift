@@ -118,9 +118,20 @@ final class ConnectedAppsTests: XCTestCase {
         XCTAssertThrowsError(try ConnectedGatewayClient.validateCompletion(Data(#"{"status":"incomplete","output":[]}"#.utf8), api: .responses))
     }
 
+    func testChatCompletionRequiresStoppedNonemptyAnswer() {
+        for fixture in [
+            #"{"choices":[{"message":{"content":"OK"}}]}"#,
+            #"{"choices":[{"finish_reason":"length","message":{"content":"partial"}}]}"#,
+            #"{"choices":[{"finish_reason":"stop","message":{"content":""}}]}"#,
+            #"{"choices":[{"finish_reason":"stop","message":{"content":"   "}}]}"#
+        ] {
+            XCTAssertThrowsError(try ConnectedGatewayClient.validateCompletion(Data(fixture.utf8), api: .chatCompletions))
+        }
+    }
+
     func testInferenceCompletionAndRedactedFailureClasses() throws {
         try ConnectedGatewayClient.validateCompletion(Data(#"{"status":"completed","output":[{"content":[{"type":"output_text","text":"OK"}]}]}"#.utf8), api: .responses)
-        try ConnectedGatewayClient.validateCompletion(Data(#"{"choices":[{"message":{"content":"OK"}}]}"#.utf8), api: .chatCompletions)
+        try ConnectedGatewayClient.validateCompletion(Data(#"{"choices":[{"finish_reason":"stop","message":{"content":"OK"}}]}"#.utf8), api: .chatCompletions)
         XCTAssertNotEqual(ConnectedAppsError.http(401).localizedDescription, ConnectedAppsError.http(429).localizedDescription)
         XCTAssertFalse(ConnectedAppsError.http(500).localizedDescription.contains("500"))
     }

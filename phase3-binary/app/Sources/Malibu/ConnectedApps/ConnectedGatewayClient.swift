@@ -66,7 +66,9 @@ struct ConnectedGatewayClient {
             }
         case .chatCompletions:
             hasText = (root["choices"] as? [[String: Any]] ?? []).contains {
-                !((($0["message"] as? [String: Any])?["content"] as? String) ?? "").isEmpty
+                $0["finish_reason"] as? String == "stop"
+                    && !((($0["message"] as? [String: Any])?["content"] as? String) ?? "")
+                        .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             }
         }
         guard hasText else { throw ConnectedAppsError.invalidResponse }

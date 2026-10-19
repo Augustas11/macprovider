@@ -13660,7 +13660,7 @@
       "tests": [
         "phase4-coordinator/internal/billing/allowance_selfdeal_test.go:TestAllowanceSelfDealingRelations",
         "phase4-coordinator/internal/billing/allowance_selfdeal_test.go:TestAllowanceSelfDealingFailsSafe",
-        "phase4-coordinator/internal/buyer/allowance_hook_test.go:TestAllowanceSelfDealtAttemptIsRewardsExcluded"
+        "phase4-coordinator/internal/buyer/allowance_hook_test.go:TestAllowanceOwnedProviderExcludedBeforeDispatch"
       ],
       "journeys": [],
       "evidence": [],

@@ -641,6 +641,17 @@ a final answer using that result. Existing
 Qwen3.6 evidence does not qualify either additional identity. Failed or missing
 acceptance leaves that entry unqualified and MUST prevent its release.
 
+For these two added exact profiles, assistant call history MUST use the same
+native grammar as its template: function-XML for Coder, JSON `name` and
+`arguments` for Instruct. Transport-only call IDs and `type` MUST NOT be
+inserted into those native call bodies. Request validation still binds each
+tool result to its preceding call ID before rendering. Tool result content
+MUST reach the native template as raw `role: tool` content so that the template
+adds exactly one tool-response envelope. XML function and parameter names
+outside `[A-Za-z0-9_-]+` fail before rendering. String parameter values remain
+strings; non-string values use deterministic JSON serialization. The legacy
+Qwen3.6 and other model-family history behavior is unchanged.
+
 For a model with a profile the provider MUST constrain generation as follows:
 
 - A named choice MUST render only the selected function in the chat
