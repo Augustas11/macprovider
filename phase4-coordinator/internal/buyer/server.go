@@ -235,12 +235,12 @@ type Server struct {
 	poolModelPricingBounds func() *poolmanifest.PoolModelPricingBounds
 	// poolRejectionTimingFloor is the SPEC-043-R007 active minimum for
 	// pool_unavailable rejection paths. Zero defaults to 50 ms.
-	poolRejectionTimingFloor       time.Duration
-	log                            zerolog.Logger
+	poolRejectionTimingFloor time.Duration
+	log                      zerolog.Logger
 	// ownershipLookupRefusals and ownedProviderRefusals count buyer-ownership
 	// refusals (SPEC-002-R008) by cause.
-	ownershipLookupRefusals atomic.Int64
-	ownedProviderRefusals   atomic.Int64
+	ownershipLookupRefusals        atomic.Int64
+	ownedProviderRefusals          atomic.Int64
 	createdAt                      int64
 	preflight                      PreflightFunc
 	preflightThreshold             int
