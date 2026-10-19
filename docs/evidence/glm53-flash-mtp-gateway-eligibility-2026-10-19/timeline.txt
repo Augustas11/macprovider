@@ -1,0 +1,25 @@
+[15:35:41] window start; live pid 4938
+[15:35:42] drained
+[15:35:43] live stopped
+[15:35:43] live257 serve started pid=16760
+[15:46:40] live257 serve not ready (CB + native MTP eligible) after 657s
+[15:46:40] live257 serve stopped; rt_native lines=0 no_progress=0
+[15:46:40] fixed serve started pid=17747
+[15:49:21] fixed serve not ready (CB + native MTP eligible) after 161s
+[15:49:21] fixed serve stopped; rt_native lines=0 no_progress=0
+[15:49:21] lab legs done 820s after pause
+[15:49:21] RESTORE: kill lab, enable + bootstrap provider and watchdog
+[16:03:18] RESTORED buyer_serving glm binary=1.8.257 cb_active=true native_mode=eligible native_enabled=true
+[16:03:44] window start; live pid 18109
+[16:03:45] drained
+[16:03:46] live stopped
+[16:03:46] live257 serve started pid=21484
+[16:16:01] live257 ready: CB active slots_total=4 native_mtp mode=eligible family=glm5_next_mtp_v1 after 735s
+[16:18:48] live257 validate done
+[16:18:51] live257 serve stopped; rt_native lines=0 no_progress=0
+[16:18:51] fixed serve started pid=22992
+[16:31:06] fixed ready: CB active slots_total=4 native_mtp mode=eligible family=glm5_next_mtp_v1 after 735s
+[16:33:03] fixed validate done
+[16:33:05] fixed serve stopped; rt_native lines=10 no_progress=0
+[16:33:05] lab legs done 1760s after pause
+[16:33:05] RESTORE: kill lab, enable + bootstrap provider and watchdog
