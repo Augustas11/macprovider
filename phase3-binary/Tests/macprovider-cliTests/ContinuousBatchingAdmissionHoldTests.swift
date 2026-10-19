@@ -196,6 +196,12 @@ final class ContinuousBatchingAdmissionHoldTests: XCTestCase {
         ) {
             // A check that ignores the bound until it is cancelled.
             while !Task.isCancelled { try? await Task.sleep(nanoseconds: 20_000_000) }
+            // Cancellation precedes reopening. Keep this check unfinished
+            // while allowing the hold owner to publish the admission change.
+            let reopenDeadline = Date().addingTimeInterval(1)
+            while await status.selfCheckAdmissionHoldStatus().active, Date() < reopenDeadline {
+                await Task.yield()
+            }
             let admission = await status.admitRequest(requestID: "after-bound")
             if case .admitted(let at) = admission {
                 reopened.set(inFlight: 1, refused: false)
