@@ -116,6 +116,8 @@ CB_QUALIFIED_PROVENANCE_SOURCES = _cb_baselines.CB_QUALIFIED_PROVENANCE_SOURCES
 CB_POLICY_SCHEMA = _cb_baselines.CB_POLICY_SCHEMA
 CB_POLICY_TUPLE_DOMAIN = _cb_baselines.CB_POLICY_TUPLE_DOMAIN
 CB_POLICY_TUPLE_SCHEMA = _cb_baselines.CB_POLICY_TUPLE_SCHEMA
+CB_POLICY_OPTIONAL_ENTRY_FIELDS = _cb_baselines.CB_POLICY_OPTIONAL_ENTRY_FIELDS
+valid_max_served_slots = _cb_baselines.valid_max_served_slots
 REQUIRED_CB_BASELINES = _cb_baselines.REQUIRED_CB_BASELINES
 REQUIRED_CB_ENTRY_FIELDS = {
     "tuple_sha256", "model_key", "model_id", "model_sha256", "tokenizer_sha256",
@@ -465,11 +467,16 @@ def require_continuous_batching_tuple(
     entries = cb_policy.get("entries")
     if not isinstance(entries, list):
         fail("continuous-batching-policy.json entries is not an array")
+    floor_violation = _cb_baselines.cb_policy_consumer_floor_violation(entries)
+    if floor_violation is not None:
+        fail(f"continuous-batching-policy.json {floor_violation}")
     for index, entry in enumerate(entries):
         if not isinstance(entry, dict):
             fail(f"continuous-batching-policy.json entries[{index}] is not an object")
-        if set(entry) != REQUIRED_CB_ENTRY_FIELDS:
+        if set(entry) - CB_POLICY_OPTIONAL_ENTRY_FIELDS != REQUIRED_CB_ENTRY_FIELDS:
             fail(f"continuous-batching-policy.json entries[{index}] has unexpected fields")
+        if "max_served_slots" in entry and not valid_max_served_slots(entry["max_served_slots"]):
+            fail(f"continuous-batching-policy.json entries[{index}].max_served_slots is not an integer from 1 to 32")
         provenance = entry.get("provenance")
         if not isinstance(provenance, dict):
             fail(f"continuous-batching-policy.json entries[{index}].provenance is not an object")
@@ -1006,6 +1013,17 @@ def main() -> int:
                 f"{cb_policy.get('candidate_catalog_sha256')!r} does not match the served "
                 f"autotune-candidates.json bytes {candidate_digest}"
             )
+        # SPEC-023 v0.22.28: no served policy may carry an entry field the
+        # consumer floor cannot read, whether or not a baseline is required.
+        cb_entries = cb_policy.get("entries") if isinstance(cb_policy, dict) else None
+        if not isinstance(cb_entries, list):
+            fail("continuous-batching-policy.json entries is not an array")
+        for index, entry in enumerate(cb_entries):
+            if isinstance(entry, dict) and "max_served_slots" in entry and not valid_max_served_slots(entry["max_served_slots"]):
+                fail(f"continuous-batching-policy.json entries[{index}].max_served_slots is not an integer from 1 to 32")
+        floor_violation = _cb_baselines.cb_policy_consumer_floor_violation(cb_entries)
+        if floor_violation is not None:
+            fail(f"continuous-batching-policy.json {floor_violation}")
         if args.required_continuous_batching_baseline is not None:
             require_continuous_batching_tuple(
                 cb_policy,

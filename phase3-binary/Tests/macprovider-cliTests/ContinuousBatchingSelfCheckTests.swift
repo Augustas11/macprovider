@@ -158,6 +158,79 @@ final class ContinuousBatchingSelfCheckTests: XCTestCase {
         XCTAssertNil(store.priorGrant(for: old))
     }
 
+    /// SPEC-038 FR-CB11 (v0.3.22): a signed `max_served_slots` bounds the
+    /// ladder and every grant served on the target, the owner pin included,
+    /// and never raises a lower bound.
+    func testPolicyCeilingCapsTheLadderAndEveryGrant() throws {
+        let key = ContinuousBatchingSelfCheckKey(
+            modelSHA256: "m", metallibSHA256: "x", kernelIdentifier: "k", hardwareClass: "h", osBuild: "o"
+        )
+        var target = ContinuousBatchingSelfCheckTarget(key: key, maxRows: 16)
+        let unbounded = target
+        target.policyCeiling = 4
+        XCTAssertEqual(ContinuousBatchingSelfCheck.ladderUpperBound(target: unbounded, ownerPinned: nil, crashedSlots: nil), 16)
+        XCTAssertEqual(ContinuousBatchingSelfCheck.ladderUpperBound(target: target, ownerPinned: nil, crashedSlots: nil), 4)
+        XCTAssertEqual(ContinuousBatchingSelfCheck.ladderUpperBound(target: target, ownerPinned: 8, crashedSlots: nil), 4)
+        XCTAssertEqual(ContinuousBatchingSelfCheck.ladderUpperBound(target: target, ownerPinned: 2, crashedSlots: nil), 2)
+        XCTAssertEqual(ContinuousBatchingSelfCheck.ladderUpperBound(target: target, ownerPinned: nil, crashedSlots: 3), 2)
+        XCTAssertEqual(
+            ContinuousBatchingSelfCheck.ladderUpperBound(maxRows: 16, ownerPinned: nil, crashedSlots: nil, queueLimit: 16, policyCeiling: 4), 4
+        )
+        XCTAssertEqual(
+            ContinuousBatchingSelfCheck.ladderUpperBound(maxRows: 3, ownerPinned: nil, crashedSlots: nil, queueLimit: 16, policyCeiling: 4), 3
+        )
+        XCTAssertEqual(
+            ContinuousBatchingSelfCheck.ladderUpperBound(maxRows: 16, ownerPinned: nil, crashedSlots: nil, queueLimit: 16),
+            ContinuousBatchingSelfCheck.ladderUpperBound(maxRows: 16, ownerPinned: nil, crashedSlots: nil, queueLimit: 16, policyCeiling: nil)
+        )
+        XCTAssertEqual(ContinuousBatchingSelfCheck.ladder(maxRows: ContinuousBatchingSelfCheck.ladderUpperBound(
+            target: target, ownerPinned: nil, crashedSlots: nil
+        )).max(), 4)
+        XCTAssertEqual(unbounded.grantableRows, 16)
+        XCTAssertEqual(target.grantableRows, 4)
+        var tightQueue = target
+        tightQueue.queueLimit = 2
+        XCTAssertEqual(tightQueue.grantableRows, 2, "the ceiling never raises another cap")
+        var single = target
+        single.policyCeiling = 1
+        XCTAssertEqual(single.grantableRows, 1)
+        XCTAssertEqual(ContinuousBatchingSelfCheck.ladder(maxRows: single.grantableRows), [])
+
+        let wide = ContinuousBatchingSelfCheckDecision(slots: 16, reason: "granted", verifiedSlots: 16)
+        XCTAssertEqual(ContinuousBatchingSelfCheck.servedSlots(decision: wide, ownerPinned: nil, maxRows: target.grantableRows), 4)
+        XCTAssertEqual(ContinuousBatchingSelfCheck.servedSlots(decision: wide, ownerPinned: 8, maxRows: target.grantableRows), 4)
+        XCTAssertEqual(ContinuousBatchingSelfCheck.servedSlots(decision: wide, ownerPinned: 3, maxRows: target.grantableRows), 3)
+        XCTAssertEqual(ContinuousBatchingSelfCheck.servedSlots(decision: wide, ownerPinned: nil, maxRows: unbounded.grantableRows), 16)
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cb-policy-ceiling-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = ContinuousBatchingSelfCheckStore(configPath: directory.appendingPathComponent("config.yaml").path)
+        // A provisional grant and a stored wider grant are both served only up to it.
+        XCTAssertEqual(ContinuousBatchingSelfCheckResolution.resolve(
+            store: store, target: target, ownerPinned: nil, provisional: .init(modelSHA256: "m", slots: 16)
+        )?.servedSlots, 4)
+        XCTAssertEqual(ContinuousBatchingSelfCheckResolution.resolve(
+            store: store, target: target, ownerPinned: 8, provisional: .init(modelSHA256: "m", slots: 16)
+        )?.servedSlots, 4)
+        try store.store(.init(
+            key: key, decision: wide, serialTPS: 1,
+            measurements: [], aloneOutputs: [], inProgressSlots: nil, decidedAt: "2026-10-19T00:00:00Z"
+        ))
+        XCTAssertEqual(ContinuousBatchingSelfCheckResolution.resolve(
+            store: store, target: target, ownerPinned: nil, provisional: nil
+        )?.servedSlots, 4)
+        XCTAssertEqual(ContinuousBatchingSelfCheckResolution.resolve(
+            store: store, target: unbounded, ownerPinned: nil, provisional: nil
+        )?.servedSlots, 16)
+
+        // A warm swap rebuilds the scheduler with rows under the new model's ceiling.
+        XCTAssertEqual(ModelRuntime.rowsUnderPolicyCeiling(rows: 16, ceiling: 4), 4)
+        XCTAssertEqual(ModelRuntime.rowsUnderPolicyCeiling(rows: 2, ceiling: 4), 2)
+        XCTAssertEqual(ModelRuntime.rowsUnderPolicyCeiling(rows: 16, ceiling: nil), 16)
+        XCTAssertEqual(ModelRuntime.rowsUnderPolicyCeiling(rows: 16, ceiling: 1), 1)
+    }
+
     /// Startup and every swap: a stored decision, else an older-runtime or
     /// signed provisional grant for the same model, else nothing.
     func testResolutionPrefersStoredThenPriorAndBindsProvisionalToItsModel() throws {

@@ -129,6 +129,105 @@ final class AutoServedSlotsTests: XCTestCase {
         XCTAssertFalse(AutoServedSlots.policyAuthorizesServedModel(live, modelKeys: ["llama"], emergencyOff: false))
     }
 
+    // MARK: - Signed served-slot ceiling (SPEC-038 FR-CB11 v0.3.22)
+
+    func testPolicyCeilingCapsEveryPlanAndNeverRaisesOne() {
+        func capped(
+            configured: Int?, source: MaxConcurrencySource?, provisional: Bool,
+            recommended: Int, memoryFitKnown: Bool = false, ceiling: Int?
+        ) -> AutoServedSlots.Plan {
+            AutoServedSlots.plan(
+                configuredSlots: configured, source: source, draftConfigured: false, emergencyOff: false,
+                provisionalPolicyEntry: provisional, recommendedSlots: { recommended },
+                memoryFitKnown: memoryFitKnown, policyCeiling: ceiling
+            )
+        }
+        // Self-check pending: the ladder's rows stop at the ceiling.
+        XCTAssertEqual(
+            capped(configured: nil, source: nil, provisional: false, recommended: 16, ceiling: 4),
+            .init(rows: 4, initialServed: 1, ownerPinned: nil, reason: "self_check_pending")
+        )
+        // Provisional grant, with and without a computable memory fit.
+        XCTAssertEqual(
+            capped(configured: 16, source: nil, provisional: true, recommended: 16, memoryFitKnown: true, ceiling: 4),
+            .init(rows: 4, initialServed: 4, ownerPinned: nil, reason: "provisional_policy_entry")
+        )
+        XCTAssertEqual(
+            capped(configured: 16, source: nil, provisional: true, recommended: 8, ceiling: 4),
+            .init(rows: 4, initialServed: 4, ownerPinned: nil, reason: "provisional_policy_entry")
+        )
+        // An owner pin above the ceiling is served at the ceiling; the pin
+        // itself is kept for a warm swap to another model.
+        XCTAssertEqual(
+            capped(configured: 8, source: .owner, provisional: false, recommended: 16, ceiling: 4),
+            .init(rows: 4, initialServed: 4, ownerPinned: 8, reason: "owner_pinned")
+        )
+        // A ceiling above the other caps changes nothing.
+        XCTAssertEqual(
+            capped(configured: nil, source: nil, provisional: false, recommended: 2, ceiling: 4),
+            .init(rows: 2, initialServed: 1, ownerPinned: nil, reason: "self_check_pending")
+        )
+        XCTAssertEqual(
+            capped(configured: 2, source: .owner, provisional: false, recommended: 16, ceiling: 4),
+            .init(rows: 2, initialServed: 2, ownerPinned: 2, reason: "owner_pinned")
+        )
+        XCTAssertEqual(
+            capped(configured: 2, source: nil, provisional: true, recommended: 3, memoryFitKnown: true, ceiling: 4),
+            .init(rows: 3, initialServed: 2, ownerPinned: nil, reason: "provisional_policy_entry")
+        )
+    }
+
+    func testAbsentPolicyCeilingKeepsEveryPlanUnchanged() {
+        let inputs: [(Int?, MaxConcurrencySource?, Bool, Bool, Bool, Int, Bool)] = [
+            (nil, nil, false, false, false, 16, false),
+            (8, .autotune, false, false, false, 4, false),
+            (8, nil, false, false, true, 4, false),
+            (8, nil, false, false, true, 4, true),
+            (3, .owner, false, false, false, 16, false),
+            (4, nil, true, false, true, 8, false),
+            (4, nil, false, true, false, 8, false),
+        ]
+        for (configured, source, draft, off, provisional, recommended, fit) in inputs {
+            let before = AutoServedSlots.plan(
+                configuredSlots: configured, source: source, draftConfigured: draft, emergencyOff: off,
+                provisionalPolicyEntry: provisional, recommendedSlots: { recommended }, memoryFitKnown: fit
+            )
+            let after = AutoServedSlots.plan(
+                configuredSlots: configured, source: source, draftConfigured: draft, emergencyOff: off,
+                provisionalPolicyEntry: provisional, recommendedSlots: { recommended }, memoryFitKnown: fit,
+                policyCeiling: nil
+            )
+            XCTAssertEqual(before, after)
+        }
+    }
+
+    func testPolicyServedSlotCeilingIsTheLowestForTheServedModel() {
+        var capped = Self.entry(modelKey: "zai-org/glm-5.3-flash", rollout: .on)
+        capped.maxServedSlots = 4
+        var tighter = Self.entry(modelKey: "zai-org/glm-5.3-flash", rollout: .canary)
+        tighter.maxServedSlots = 2
+        var revoked = Self.entry(modelKey: "zai-org/glm-5.3-flash", rollout: .off)
+        revoked.maxServedSlots = 1
+        let unbounded = Self.entry(modelKey: "zai-org/glm-5.3-flash", rollout: .on)
+        func load(_ entries: [ContinuousBatchingPolicyEntry], status: ContinuousBatchingPolicyLoadStatus = .liveVerified) -> ContinuousBatchingPolicyLoadResult {
+            ContinuousBatchingPolicyLoadResult(
+                selection: ContinuousBatchingPolicySelection(
+                    releaseID: "r", policyVersion: "v", generatedAt: .distantPast, expiresAt: .distantFuture,
+                    candidateCatalogSHA256: "", signerKeyID: "k", source: "coordinator", entries: entries
+                ),
+                status: status, policySHA256: "p", signerKeyID: "k"
+            )
+        }
+        let keys: Set<String> = ["zai-org/glm-5.3-flash"]
+        XCTAssertEqual(AutoServedSlots.policyServedSlotCeiling(load([capped, unbounded]), modelKeys: keys), 4)
+        XCTAssertEqual(AutoServedSlots.policyServedSlotCeiling(load([capped, tighter]), modelKeys: keys), 2)
+        // A revocation carries no ceiling; an unverified policy none either.
+        XCTAssertEqual(AutoServedSlots.policyServedSlotCeiling(load([capped, revoked]), modelKeys: keys), 4)
+        XCTAssertNil(AutoServedSlots.policyServedSlotCeiling(load([unbounded]), modelKeys: keys))
+        XCTAssertNil(AutoServedSlots.policyServedSlotCeiling(load([capped], status: .integrityFailureFallback), modelKeys: keys))
+        XCTAssertNil(AutoServedSlots.policyServedSlotCeiling(load([capped]), modelKeys: ["qwen/qwen3.6-35b-a3b"]))
+    }
+
     // MARK: - Helpers
 
     private func load(file: String, environment: [String: String] = [:], cli: CLIOverrides = CLIOverrides()) throws -> AppConfig {

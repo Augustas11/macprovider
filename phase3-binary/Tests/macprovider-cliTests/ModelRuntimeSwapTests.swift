@@ -1062,6 +1062,65 @@ final class ModelRuntimeSwapTests: XCTestCase {
         XCTAssertEqual(restored, 8)
     }
 
+    /// SPEC-038 FR-CB11 (v0.3.22): a warm swap rebuilds the scheduler with
+    /// rows under the target model's own signed ceiling, never the startup
+    /// model's, and swapping back to an uncapped model restores the rows.
+    func testWarmSwapAppliesOnlyTheTargetModelsPolicyCeilingToSchedulerRows() async throws {
+        func entry(modelKey: String, modelSHA256: String, ceiling: Int?) -> ContinuousBatchingPolicyEntry {
+            var entry = ContinuousBatchingPolicyEntry(
+                tupleSHA256: String(repeating: "a", count: 64),
+                modelKey: modelKey,
+                rollout: .on,
+                tuple: ContinuousBatchingAcceptedTuple(
+                    modelID: modelKey, modelSHA256: modelSHA256, cacheClass: "", kvDType: .fp16,
+                    requiresMoE: false, hardwareClass: "", metallibSHA256: "", kernelIdentifier: ""
+                ),
+                provenance: ContinuousBatchingPolicyProvenance(
+                    source: "", status: "", evidenceID: "", packageManifestSHA256: "",
+                    studioCampaignSHA256: "", providerCLIVersion: "", liveExecutableCDHash: ""
+                )
+            )
+            entry.maxServedSlots = ceiling
+            return entry
+        }
+        let policy = ContinuousBatchingPolicyLoadResult(
+            selection: ContinuousBatchingPolicySelection(
+                releaseID: "r", policyVersion: "v", generatedAt: .distantPast, expiresAt: .distantFuture,
+                candidateCatalogSHA256: "", signerKeyID: "k", source: "coordinator",
+                entries: [
+                    entry(modelKey: "old-model", modelSHA256: "old-model-hash", ceiling: 4),
+                    entry(modelKey: "capped-model", modelSHA256: "capped-model-hash", ceiling: 2),
+                ]
+            ),
+            status: .liveVerified, policySHA256: "p", signerKeyID: "k"
+        )
+        let runtime = ModelRuntime(
+            modelID: "old-model",
+            modelHash: "old-model-hash",
+            maxBatch: 4,
+            continuousBatchingPolicyLoadResult: policy,
+            warmSwapEnabled: true,
+            loader: { _ in throw TestError.unexpectedContainerLoader },
+            testLoader: { target in (target, "\(target)-hash") }
+        )
+        // Startup planned 16 rows, capped to 4 by the startup model's ceiling.
+        await runtime.configureServedSlots(managed: true, ownerPinned: nil, rowsBeforePolicyCeiling: 16)
+        let baseline = await runtime.maxBatchBeforePolicyCeilingForTest()
+        XCTAssertEqual(baseline, 16)
+
+        try await runtime.beginSwap(targetModelID: "free-model", adoptionKnobs: ModelRuntimeAdoptionServeKnobs?.none).value
+        let uncapped = await runtime.maxBatchForTest()
+        XCTAssertEqual(uncapped, 16, "the startup model's ceiling does not follow a swap")
+
+        try await runtime.beginSwap(targetModelID: "capped-model", adoptionKnobs: ModelRuntimeAdoptionServeKnobs?.none).value
+        let capped = await runtime.maxBatchForTest()
+        XCTAssertEqual(capped, 2)
+
+        try await runtime.beginSwap(targetModelID: "old-model", adoptionKnobs: ModelRuntimeAdoptionServeKnobs?.none).value
+        let back = await runtime.maxBatchForTest()
+        XCTAssertEqual(back, 4)
+    }
+
     /// #1689 L2: a draft-capped context recomputes to the same number for
     /// another model; that switch is still an adoption, not the configured
     /// value, because the record names a different model.

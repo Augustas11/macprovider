@@ -1870,6 +1870,9 @@ actor ModelRuntime: ModelRuntimeServing {
     private var servedSlotsResolver: (@Sendable (ContinuousBatchingSelfCheckTarget) -> ContinuousBatchingSelfCheckResolution?)?
     private let blockingInferenceExecutor: BlockingInferenceExecutor
     private var maxBatch: Int
+    /// The scheduler rows before a signed policy ceiling (SPEC-038 FR-CB11
+    /// v0.3.22): a warm swap re-applies the new model's own ceiling to it.
+    private var maxBatchBeforePolicyCeiling: Int
     private let continuousBatchingMode: ContinuousBatchingMode
     private let continuousBatchQueueLimit: Int?
     /// SPEC-038 AC-25 bounded admission wait, in milliseconds. Nil ⇒ the
@@ -3184,6 +3187,7 @@ maxTokens: 1,
         self.conversationCache = ConversationCache()
         let boundedMaxBatch = min(max(1, maxBatch), ProviderCapacity.maxConcurrencyOverrideLimit)
         self.maxBatch = boundedMaxBatch
+        self.maxBatchBeforePolicyCeiling = boundedMaxBatch
         self.inferenceGate = AsyncSemaphore(value: boundedMaxBatch)
         self.servedSlotLimit = boundedMaxBatch
         self.blockingInferenceExecutor = BlockingInferenceExecutor(label: "live.malibu.provider.inference")
@@ -3796,6 +3800,7 @@ maxTokens: 1,
         self.continuousBatchScheduler = nil
         self.conversationCache = ConversationCache()
         self.maxBatch = boundedMaxBatch
+        self.maxBatchBeforePolicyCeiling = boundedMaxBatch
         self.inferenceGate = AsyncSemaphore(value: boundedMaxBatch)
         self.servedSlotLimit = boundedMaxBatch
         self.blockingInferenceExecutor = BlockingInferenceExecutor(label: "live.malibu.provider.inference")
@@ -5244,11 +5249,21 @@ maxTokens: 1,
     func configureServedSlots(
         managed: Bool,
         ownerPinned: Int?,
-        resolver: (@Sendable (ContinuousBatchingSelfCheckTarget) -> ContinuousBatchingSelfCheckResolution?)? = nil
+        resolver: (@Sendable (ContinuousBatchingSelfCheckTarget) -> ContinuousBatchingSelfCheckResolution?)? = nil,
+        rowsBeforePolicyCeiling: Int? = nil
     ) {
         servedSlotsManaged = managed
         ownerPinnedServedSlots = ownerPinned
         servedSlotsResolver = resolver
+        if let rowsBeforePolicyCeiling {
+            maxBatchBeforePolicyCeiling = min(
+                max(maxBatch, rowsBeforePolicyCeiling), ProviderCapacity.maxConcurrencyOverrideLimit
+            )
+        }
+    }
+
+    func maxBatchBeforePolicyCeilingForTest() -> Int {
+        maxBatchBeforePolicyCeiling
     }
 
     func servedSlotLimitForTest() async -> Int {
@@ -5288,8 +5303,23 @@ maxTokens: 1,
             poolTokens: scheduler.poolTokens,
             blockSizeTokens: scheduler.blockSizeTokens,
             // Only a pagedMLA (`glm5_next`) backend has a flattened-token cap.
-            decodeOnlyGain: scheduler.forwardTokenCap != nil
+            decodeOnlyGain: scheduler.forwardTokenCap != nil,
+            policyCeiling: continuousBatchingPolicyServedSlotCeiling(modelSHA256: tuple.modelSHA256)
         )
+    }
+
+    /// Scheduler rows under a signed served-slot ceiling: never above it,
+    /// never raised by it, at least one.
+    nonisolated static func rowsUnderPolicyCeiling(rows: Int, ceiling: Int?) -> Int {
+        max(1, min(rows, ceiling ?? .max))
+    }
+
+    /// SPEC-038 FR-CB11 (v0.3.22): the verified signed policy's
+    /// `max_served_slots` for this model artifact, or nil.
+    private func continuousBatchingPolicyServedSlotCeiling(modelSHA256: String?) -> Int? {
+        guard continuousBatchingPolicyLoadResult.status == .liveVerified,
+              let modelSHA256, !modelSHA256.isEmpty else { return nil }
+        return continuousBatchingPolicyLoadResult.selection.servedSlotCeiling(modelSHA256: modelSHA256)
     }
 
     /// True when the loaded tuple can batch at all; false sends `serve` to one
@@ -6316,8 +6346,14 @@ maxTokens: 1,
         if let adoptionKnobs {
             maxContextTokens = adoptionKnobs.maxContext
             kvBitsOverride = adoptionKnobs.kvBits
-            maxBatch = adoptionKnobs.maxBatch
+            maxBatchBeforePolicyCeiling = adoptionKnobs.maxBatch
         }
+        // The rebuilt scheduler never has more rows than the new model's
+        // signed policy ceiling (SPEC-038 FR-CB11 v0.3.22).
+        maxBatch = Self.rowsUnderPolicyCeiling(
+            rows: maxBatchBeforePolicyCeiling,
+            ceiling: servedSlotsManaged ? continuousBatchingPolicyServedSlotCeiling(modelSHA256: modelHash) : nil
+        )
         // A managed provider serves the owner pin or one slot until the new
         // model's self-check (or its stored result) decides.
         let swapServedSlots: Int? = servedSlotsManaged

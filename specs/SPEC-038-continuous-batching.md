@@ -1,11 +1,24 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.21
+Version: v0.3.22
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.22 (2026-10-19, FR-CB11 signed served-slot ceiling):**
+FR-CB10 and FR-CB11: a positive signed policy entry may carry
+`max_served_slots` (SPEC-023 v0.22.28), the most slots its model artifact may
+serve on any Mac. The self-check's ladder measured every width up to the
+scheduler rows, which come from the memory fit, the paged-KV pool and the
+served hard cap; none of these is a throughput bound. On the 256 GB Studio,
+GLM-5.3-Flash was granted 16 slots while its throughput evidence covers 1, 2
+and 4 rows. Only an owner pin bounded it, and autotune drops the owner source
+when it re-applies. The ceiling now caps the scheduler rows at startup, the
+ladder bound, every stored, prior or provisional grant, the owner pin and the
+warm-swap count. It never raises a count, and an entry without it behaves as
+before.
+
 **Change log v0.3.21 (2026-10-17, FR-CB10 decode-only gain for glm5_next):**
 FR-CB10: for `glm5_next` models only, the self-check's throughput gain
 compares decode rates instead of end-to-end rates. Its slow prefill
@@ -1197,7 +1210,8 @@ above are superseded where they conflict:
    it submits k distinct fixed greedy prompts together. (v0.3.17) The ladder
    also stops at the scheduler's waiting-queue limit, because a wider probe is
    refused with backpressure before any row runs (and at an owner pin and
-   below a crashed width). The bound is stored with the decision; a decision
+   below a crashed width, and, from v0.3.22, at the signed `max_served_slots`
+   for the model artifact, FR-CB11 item 5). The bound is stored with the decision; a decision
    whose every width up to that bound passed re-runs when the bound grows.
    Like the scheduler rows, the bound is configuration, not a measurement: a
    prior or provisional grant wider than it is served only up to the
@@ -1286,7 +1300,10 @@ divergence; the check is defence in depth.
    pool concurrency ceiling).
 5. Positive entries authorize nothing else, except the per-tuple
    `cached_turns_accepted` grant below. The emergency `continuous_batching:
-   off` override still forces serial.
+   off` override still forces serial. **(v0.3.22)** A positive entry's
+   optional `max_served_slots` only lowers: it is one more ladder bound
+   (item 1) and caps every grant served for that model artifact
+   (FR-CB11 item 5).
 
 **(v0.2.9)** An accepted-tuple entry MAY carry `cached_turns_accepted`
 (boolean, default false; any non-boolean value MUST be rejected at
@@ -1422,6 +1439,19 @@ NOT change `slots_total`.
    swap or adoption serves the owner pin or one slot until the new model's
    stored result, prior grant or self-check applies.
 4. A tuple that cannot batch at all (no attached engine, revoked) serves 1.
+5. **(v0.3.22)** When the verified signed policy carries `max_served_slots`
+   on a positive entry for the served model (by catalog key before load, by
+   model SHA-256 once loaded; the lowest value when several entries carry
+   one), no count above it is built, measured or served. It caps the scheduler
+   rows and the initial count at startup, an owner pin (the pin itself is kept,
+   so a warm swap to another model applies that model's ceiling), the FR-CB10
+   ladder bound, every stored, prior or provisional grant, and, on a warm
+   swap or adoption, the rebuilt scheduler rows and the count served before
+   its self-check applies. It never raises
+   a count above another bound, and it does not apply while the policy is not
+   verified (an unverified policy revokes nothing and bounds nothing). A
+   bound that grows when the ceiling is raised or removed re-runs the ladder
+   (FR-CB10 item 1). An entry without it changes nothing.
 
 Loopback runtimes (SPEC-046) and autotune children keep their configured
 count. The coordinator's `pool.max_concurrency_ceiling` still clamps routed
