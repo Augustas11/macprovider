@@ -19,6 +19,27 @@ final class ConnectedAppsTests: XCTestCase {
         XCTAssertEqual(options["apiKey"] as? String, "{env:MALIBU_API_KEY}")
     }
 
+    func testOpenCodeUsesServedContextAndBoundedOutputInsteadOfClientDefault() throws {
+        for (context, declaredOutput, expectedOutput) in [
+            (8192, nil as Int?, 1024),
+            (512, nil, 512),
+            (8192, 256, 256),
+            (8192, 32768, 1024)
+        ] {
+            let selected = ConnectedModel(id: "actual-gateway-model", contextWindow: context, maxOutputTokens: declaredOutput)
+            let bytes = try ConnectedAppConfiguration.configuration(app: .openCode, model: selected, original: nil)
+            let root = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+            let providers = try XCTUnwrap(root["provider"] as? [String: Any])
+            let malibu = try XCTUnwrap(providers["malibu"] as? [String: Any])
+            let models = try XCTUnwrap(malibu["models"] as? [String: Any])
+            let entry = try XCTUnwrap(models[selected.id] as? [String: Any])
+            let limits = try XCTUnwrap(entry["limit"] as? [String: Int])
+            XCTAssertEqual(limits, ["context": context, "output": expectedOutput])
+        }
+        let unknown = ConnectedModel(id: "class-alias", contextWindow: 0, maxOutputTokens: nil)
+        XCTAssertThrowsError(try ConnectedAppConfiguration.configuration(app: .openCode, model: unknown, original: nil))
+    }
+
     func testAmbiguousJSONAndExistingProviderAreRefused() {
         for source in [#"{"provider":{},"provider":{}}"#, "{// comment\n}", #"{"provider":{"malibu":{}}}"#, #"{"provider":false}"#] {
             XCTAssertThrowsError(try ConnectedAppConfiguration.configuration(app: .openCode, model: model, original: Data(source.utf8)))
@@ -43,7 +64,7 @@ final class ConnectedAppsTests: XCTestCase {
     func testMetadataIsNotFabricatedForUnknownContext() {
         let unknown = ConnectedModel(id: "class-alias", contextWindow: nil, maxOutputTokens: nil)
         XCTAssertThrowsError(try ConnectedAppConfiguration.codexCatalog(model: unknown))
-        for app in [ConnectedApp.goose, .crush] {
+        for app in [ConnectedApp.openCode, .goose, .crush] {
             XCTAssertThrowsError(try ConnectedAppConfiguration.configuration(app: app, model: unknown, original: nil))
         }
     }

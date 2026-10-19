@@ -46,8 +46,10 @@ buyer account. This is separate from local Chat and provider earnings credential
 | Crush | Isolated XDG configuration with `crushrc` | Chat Completions | Uses its OpenAI-compatible provider. |
 | Cursor | Manual Settings handoff | Verify in installed client | Malibu does not edit Cursor's internal settings or claim its API compatibility. |
 
-Codex, Goose and Crush setup requires the gateway to publish a model context
-window. The app does not infer that metadata from an alias. Client binaries are
+Codex, OpenCode, Goose and Crush setup requires the gateway to publish a model context
+window. OpenCode config uses the documented model `limit.context` and
+`limit.output` fields: the served context and a client output budget capped at
+1,024 tokens (or the smaller served context/published output limit). The app does not infer that metadata from an alias. Client binaries are
 not installed or updated by Malibu. Cursor also routes requests through Cursor
 servers; verify custom endpoint/model support in the installed version.
 

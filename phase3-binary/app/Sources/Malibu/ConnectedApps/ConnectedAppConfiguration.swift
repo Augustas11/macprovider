@@ -82,6 +82,10 @@ enum ConnectedAppConfiguration {
 
             """.utf8)
         case .openCode:
+            guard let context = model.contextWindow, context > 0 else { throw ConnectedAppsError.unavailableMetadata }
+            // Explicit client policy prevents OpenCode defaulting to a generation
+            // budget larger than the served context. It is not a model maximum claim.
+            let output = min(context, model.maxOutputTokens ?? 1024, 1024)
             var root: [String: Any] = [:]
             if let original, !original.isEmpty {
                 try MalibuStrictJSON.rejectDuplicateKeys(original)
@@ -93,7 +97,8 @@ enum ConnectedAppConfiguration {
             guard providers["malibu"] == nil else { throw ConnectedAppsError.conflict }
             providers["malibu"] = ["npm": "@ai-sdk/openai-compatible", "name": "Malibu",
                                    "options": ["baseURL": base, "apiKey": "{env:MALIBU_API_KEY}"],
-                                   "models": [model.id: ["name": model.id]]]
+                                   "models": [model.id: ["name": model.id,
+                                                         "limit": ["context": context, "output": output]]]]
             root["provider"] = providers
             root["model"] = "malibu/\(model.id)"
             return try json(root)
