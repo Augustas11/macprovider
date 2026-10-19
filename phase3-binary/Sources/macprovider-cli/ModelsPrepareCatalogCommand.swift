@@ -54,10 +54,15 @@ struct ModelsPrepareCatalogCommand: AsyncParsableCommand {
         let cancellation = ModelsPrepareCatalogCancellation()
         let sources = Self.installCancellationSources { cancellation.request() }
         defer { sources.forEach { $0.cancel() } }
+        let configuredKey = appConfig.modelCatalogKey
+        let configuredPath = appConfig.modelArtifactPath
         let exitCode = await ModelsPrepareCatalogRunner.run(
             key: catalogKey,
             resolver: CachedModelArtifactResolver.forConfig(appConfig),
             config: config,
+            // Serve loads a configured artifact for its catalog key, so that
+            // location decides readiness, exactly as `--profile catalog`.
+            configuredArtifactPath: { $0 == configuredKey ? configuredPath : nil },
             sink: sink,
             cancellation: cancellation
         )
@@ -88,6 +93,7 @@ final class ModelsPrepareCatalogEventSink: @unchecked Sendable {
     private let write: @Sendable (ModelPreparationTransactionEvent) -> Void
     private var nextSequence = 1
     private var terminal = false
+    private var cancelRequestEmitted = false
 
     init(transactionID: String, write: @escaping @Sendable (ModelPreparationTransactionEvent) -> Void) {
         self.transactionID = transactionID
@@ -101,10 +107,32 @@ final class ModelsPrepareCatalogEventSink: @unchecked Sendable {
         modelKey: String,
         state: ModelPreparationEventState,
         progress: ModelPreparationTransactionEvent.Progress? = nil,
-        errorCode: ModelPreparationEventErrorCode? = nil
+        errorCode: ModelPreparationEventErrorCode? = nil,
+        warningCode: ModelPreparationEventWarningCode? = nil
     ) -> Bool {
         lock.lock()
         defer { lock.unlock() }
+        return emitLocked(modelKey: modelKey, state: state, progress: progress, errorCode: errorCode, warningCode: warningCode)
+    }
+
+    /// `cancel_requested` exactly once and always before `cancelled`, whether
+    /// the signal handler or the terminal path gets there first.
+    func emitCancelRequestedOnce(modelKey: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !cancelRequestEmitted else { return }
+        if emitLocked(modelKey: modelKey, state: .cancelRequested, progress: nil, errorCode: nil, warningCode: nil) {
+            cancelRequestEmitted = true
+        }
+    }
+
+    private func emitLocked(
+        modelKey: String,
+        state: ModelPreparationEventState,
+        progress: ModelPreparationTransactionEvent.Progress?,
+        errorCode: ModelPreparationEventErrorCode?,
+        warningCode: ModelPreparationEventWarningCode?
+    ) -> Bool {
         guard !terminal,
               let event = try? ModelPreparationTransactionEvent(
                   transactionID: transactionID,
@@ -115,7 +143,7 @@ final class ModelsPrepareCatalogEventSink: @unchecked Sendable {
                   state: state,
                   progress: progress,
                   errorCode: errorCode,
-                  warningCode: nil
+                  warningCode: warningCode
               )
         else { return false }
         write(event)
@@ -166,18 +194,31 @@ enum ModelsPrepareCatalogRunner {
 
     struct Dependencies: Sendable {
         var resolveRow: @Sendable (String) async throws -> ModelArtifactSignedRow
-        var prepare: @Sendable (ModelArtifactSignedRow, CachedModelArtifactResolver, String?) async -> ModelPrepareOutcome
+        /// (row, resolver, configured artifact path, config path)
+        var prepare: @Sendable (ModelArtifactSignedRow, CachedModelArtifactResolver, String?, String?) async -> ModelPrepareOutcome
         /// Bytes of completed files the downloader has staged so far.
         var stagedBytes: @Sendable (ModelArtifactSignedRow, CachedModelArtifactResolver) -> Int64
-        /// Removes only this model's interrupted-download leftovers.
-        var removePartials: @Sendable (ModelArtifactSignedRow, CachedModelArtifactResolver) -> Void
+        /// The paths of this model's interrupted-download leftovers.
+        var partialPaths: @Sendable (ModelArtifactSignedRow, CachedModelArtifactResolver) -> Set<String>
+        /// Removes this model's leftovers that are not in the given set (they
+        /// appeared during this run). True when nothing unsafe or unremovable
+        /// is left behind.
+        var removeNewPartials: @Sendable (ModelArtifactSignedRow, CachedModelArtifactResolver, Set<String>) -> Bool
+        /// Takes the per-user single-run lock; nil when another run holds it.
+        var acquireRunLock: @Sendable () -> (@Sendable () -> Void)?
         /// At most 10 s (SPEC-044-R014-4); 8 s leaves margin and keeps a long download's output small.
         var progressIntervalNanoseconds: UInt64 = 8_000_000_000
 
         static let live = Dependencies(
             resolveRow: { try await ModelArtifactSignedRowResolver.resolve(key: $0) },
-            prepare: { row, resolver, config in
-                await ModelCatalogPreparation.prepare(row: row, resolver: resolver, repairCache: false, config: config)
+            prepare: { row, resolver, configuredArtifactPath, config in
+                await ModelCatalogPreparation.prepare(
+                    row: row,
+                    resolver: resolver,
+                    repairCache: false,
+                    configuredArtifactPath: configuredArtifactPath,
+                    config: config
+                )
             },
             stagedBytes: { row, resolver in
                 let snapshots = resolver.snapshotURL(modelID: row.modelID, revision: row.revision).deletingLastPathComponent()
@@ -186,11 +227,48 @@ enum ModelsPrepareCatalogRunner {
                     $0 + (ModelArtifactDiagnostics.regularFileBytes(in: snapshots.appendingPathComponent($1)) ?? 0)
                 }
             },
-            removePartials: { row, resolver in
-                let partials = ModelArtifactDiagnostics.findPartials(row: row, resolver: resolver)
-                _ = ModelArtifactDiagnostics.removePartials(partials, row: row, resolver: resolver)
+            partialPaths: { row, resolver in
+                Set(ModelArtifactDiagnostics.findPartials(row: row, resolver: resolver).map(\.url.path))
+            },
+            removeNewPartials: { row, resolver, preexisting in
+                let fresh = ModelArtifactDiagnostics.findPartials(row: row, resolver: resolver)
+                    .filter { !preexisting.contains($0.url.path) }
+                let safe = fresh.filter { partial in
+                    [resolver.hubRoot, resolver.durableRoot].contains {
+                        ModelsPrepareCatalogRunner.isBelowWithoutSymlinks(partial.url, root: $0)
+                    }
+                }
+                let (_, failures) = ModelArtifactDiagnostics.removePartials(safe, row: row, resolver: resolver)
+                return safe.count == fresh.count && failures.isEmpty
+            },
+            acquireRunLock: {
+                let path = (NSTemporaryDirectory() as NSString).appendingPathComponent("macprovider-prepare-catalog.lock")
+                let descriptor = open(path, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600)
+                guard descriptor >= 0 else { return nil }
+                guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
+                    close(descriptor)
+                    return nil
+                }
+                return { close(descriptor) }
             }
         )
+    }
+
+    /// True when `url` is below `root` and no path component from `root`
+    /// down to `url` is a symlink, so a removal cannot leave the root.
+    static func isBelowWithoutSymlinks(_ url: URL, root: URL) -> Bool {
+        let rootComponents = root.standardizedFileURL.pathComponents
+        let components = url.standardizedFileURL.pathComponents
+        guard components.count > rootComponents.count,
+              Array(components.prefix(rootComponents.count)) == rootComponents else { return false }
+        var current = root.standardizedFileURL
+        for component in components.dropFirst(rootComponents.count) {
+            guard component != "..", component != "." else { return false }
+            current.appendPathComponent(component)
+            var info = stat()
+            guard lstat(current.path, &info) == 0, (info.st_mode & S_IFMT) != S_IFLNK else { return false }
+        }
+        return true
     }
 
     /// Runs one transaction and returns the process exit status: 0 succeeded,
@@ -200,6 +278,7 @@ enum ModelsPrepareCatalogRunner {
         key: String,
         resolver: CachedModelArtifactResolver,
         config: String?,
+        configuredArtifactPath: @Sendable (String) -> String? = { _ in nil },
         sink: ModelsPrepareCatalogEventSink,
         cancellation: ModelsPrepareCatalogCancellation,
         dependencies: Dependencies = .live
@@ -213,12 +292,19 @@ enum ModelsPrepareCatalogRunner {
             return 4
         }
         let modelKey = row.catalogKey
+        guard let releaseRunLock = dependencies.acquireRunLock() else {
+            writeDiagnosticsStderr("models prepare-catalog refused: another prepare-catalog is running")
+            sink.emit(modelKey: modelKey, state: .failed, errorCode: .operationConflict)
+            return 4
+        }
+        defer { releaseRunLock() }
         sink.emit(modelKey: modelKey, state: .queued)
         if cancellation.isRequested {
-            sink.emit(modelKey: modelKey, state: .cancelRequested)
+            sink.emitCancelRequestedOnce(modelKey: modelKey)
             sink.emit(modelKey: modelKey, state: .cancelled)
             return 130
         }
+        let preexistingPartials = dependencies.partialPaths(row, resolver)
 
         let expected = row.artifactSizeBytes.map(Int64.init)
         func reportProgress() {
@@ -236,9 +322,10 @@ enum ModelsPrepareCatalogRunner {
         }
         reportProgress()
 
-        let work = Task { await dependencies.prepare(row, resolver, config) }
+        let configured = configuredArtifactPath(row.catalogKey)
+        let work = Task { await dependencies.prepare(row, resolver, configured, config) }
         cancellation.onRequest {
-            sink.emit(modelKey: modelKey, state: .cancelRequested)
+            sink.emitCancelRequestedOnce(modelKey: modelKey)
             work.cancel()
         }
         let interval = dependencies.progressIntervalNanoseconds
@@ -261,9 +348,12 @@ enum ModelsPrepareCatalogRunner {
             return 0
         }
         if cancellation.isRequested {
-            dependencies.removePartials(row, resolver)
-            sink.emit(modelKey: modelKey, state: .cancelled)
-            writeDiagnosticsStderr("models prepare-catalog cancelled: active model unchanged; interrupted download removed")
+            let clean = dependencies.removeNewPartials(row, resolver, preexistingPartials)
+            sink.emitCancelRequestedOnce(modelKey: modelKey)
+            sink.emit(modelKey: modelKey, state: .cancelled, warningCode: clean ? nil : .stagingCleanupRequired)
+            writeDiagnosticsStderr(clean
+                ? "models prepare-catalog cancelled: active model unchanged; interrupted download removed"
+                : "models prepare-catalog cancelled: active model unchanged; some interrupted-download files were left; run: \(ModelCatalogPreparation.retryCommand(catalogKey: modelKey, config: config))")
             return 130
         }
         let (code, exit) = failure(outcome)
@@ -276,7 +366,10 @@ enum ModelsPrepareCatalogRunner {
         if outcome.finalState == .hashMismatch {
             return (.verificationFailed, 5)
         }
-        if outcome.error?.contains("insufficient_disk_space") == true {
+        // The precheck reports `insufficient_disk_space`; the downloader's own
+        // reserve check reports "not enough free disk space".
+        if let error = outcome.error,
+           error.contains("insufficient_disk_space") || error.localizedCaseInsensitiveContains("not enough free disk space") {
             return (.insufficientDiskSpace, 4)
         }
         if outcome.downloadAttempted, [.mismatch, .unverifiable].contains(outcome.diagnosis.verdict) {

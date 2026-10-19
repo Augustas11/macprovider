@@ -106,7 +106,7 @@ enum ModelsPresentation {
     static func downloadConfirmationMessage(_ row: MalibuModelRow) -> String {
         let size = row.downloadTransaction.map { downloadSizeText($0.estimatedBytes) }
             ?? String(localized: "an unknown amount of data", comment: "Model download size unavailable")
-        return String(localized: "Malibu downloads \(size) to this Mac and verifies the files against the signed catalog. Downloading does not change the model this Mac serves, does not offer this model to the network, and does not start earning.", comment: "Model download confirmation message")
+        return String(localized: "Malibu downloads \(size) for catalog key \(ShellText.display(row.modelKey)) (\(ShellText.display(row.displayID))) to this Mac and verifies the files against the signed catalog. Downloading does not change the model this Mac serves, does not offer this model to the network, and does not start earning.", comment: "Model download confirmation message")
     }
 
     /// One progress line for a running download.
@@ -351,6 +351,7 @@ struct ModelsScreen: View {
                     .frame(maxWidth: 200)
                     .accessibilityIdentifier("malibu.models.filter")
             }
+            ModelDownloadBanner(store: store)
             HStack(spacing: 8) {
                 Text(ModelsPresentation.switchingLine(listState: store.listState, warmSwapAvailable: store.warmSwapAvailable))
                     .font(.callout)
@@ -527,7 +528,7 @@ struct ModelsScreen: View {
         HStack(spacing: 6) {
             // A running download keeps its progress and Cancel even if a
             // refresh or a switch changed the row's action meanwhile.
-            if store.download?.rowID == row.id, row.action != .download {
+            if store.download?.modelKey == row.modelKey, row.action != .download {
                 ModelDownloadControl(store: store, row: row, showsSize: true) {}
             }
             switch row.action {
@@ -653,7 +654,7 @@ struct ModelDownloadControl: View {
     let onDownload: () -> Void
 
     var body: some View {
-        if let download = store.download, download.rowID == row.id {
+        if let download = store.download, download.modelKey == row.modelKey {
             VStack(alignment: .trailing, spacing: 3) {
                 if let fraction = ModelsPresentation.downloadFraction(download) {
                     ProgressView(value: fraction).frame(width: 120)
@@ -671,7 +672,7 @@ struct ModelDownloadControl: View {
         } else {
             VStack(alignment: .trailing, spacing: 2) {
                 downloadButton
-                if let result = store.downloadResult, result.rowID == row.id, !result.succeeded {
+                if let result = store.downloadResult, result.modelKey == row.modelKey, !result.succeeded {
                     Text(result.message)
                         .font(.caption2)
                         .foregroundStyle(.orange)
@@ -695,5 +696,42 @@ struct ModelDownloadControl: View {
             return String(localized: "Download", comment: "Model download action")
         }
         return String(localized: "Download \(ModelsPresentation.downloadSizeText(bytes))", comment: "Model download action with size")
+    }
+}
+
+/// The running download's title, progress and Cancel, shown above the list
+/// whatever the projection holds: a refresh, an expiry or a row that turned
+/// into a local candidate never hides Cancel (SPEC-044-R014-5).
+struct ModelDownloadBanner: View {
+    @ObservedObject var store: ModelManagementStore
+
+    var body: some View {
+        if let download = store.download {
+            HStack(spacing: 10) {
+                Image(systemName: "arrow.down.circle")
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(String(localized: "Downloading \(download.title)", comment: "Model download banner title"))
+                        .font(.callout.weight(.medium))
+                    Text(ModelsPresentation.downloadProgressText(download))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityAddTraits(.updatesFrequently)
+                }
+                if let fraction = ModelsPresentation.downloadFraction(download) {
+                    ProgressView(value: fraction).frame(maxWidth: 160)
+                } else {
+                    ProgressView().controlSize(.small)
+                }
+                Spacer(minLength: 0)
+                Button(String(localized: "Cancel", comment: "Cancel a model download")) { store.cancelDownload() }
+                    .disabled(download.phase == .cancelling)
+                    .accessibilityLabel(Text(String(localized: "Cancel downloading \(download.title)", comment: "Cancel download accessibility label")))
+            }
+            .padding(8)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.accentColor.opacity(0.08)))
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("malibu.models.download")
+        }
     }
 }

@@ -2216,6 +2216,7 @@ struct MalibuModelDownloadEvent: Equatable, Sendable {
     let eventSequence: Int
     let state: String
     let errorCode: String?
+    let warningCode: String?
     let bytesCompleted: Int64?
     let bytesExpected: Int64?
 
@@ -2288,6 +2289,20 @@ struct MalibuModelDownloadEvent: Equatable, Sendable {
 
     static let maxLineBytes = 16_384
     private static let states: Set<String> = ["queued", "running", "cancel_requested", "cancelled", "succeeded", "failed", "timed_out"]
+    private static let terminalStates: Set<String> = ["cancelled", "succeeded", "failed", "timed_out"]
+    /// The SPEC-044 closed event error and warning codes.
+    private static let errorCodes: Set<String> = [
+        "action_unavailable", "stale_transaction", "operation_conflict", "authority_unavailable",
+        "artifact_unqualified", "artifact_identity_mismatch", "root_unavailable", "root_identity_mismatch",
+        "unsafe_filesystem_object", "resource_limit_exceeded", "insufficient_disk_space",
+        "managed_budget_exceeded", "managed_object_limit_exceeded", "managed_inventory_invalid",
+        "transfer_failed", "transfer_size_exceeded", "verification_failed", "publication_failed",
+        "cleanup_failed", "cancel_failed", "timed_out", "internal_error",
+    ]
+    private static let warningCodes: Set<String> = [
+        "staging_cleanup_required", "published_cleanup_available", "configured_legacy_accounting_unavailable",
+        "managed_inventory_overflow", "cancellation_pending",
+    ]
 
     static func decode(_ line: String) throws -> MalibuModelDownloadEvent {
         let data = Data(line.utf8)
@@ -2296,13 +2311,23 @@ struct MalibuModelDownloadEvent: Equatable, Sendable {
         let wire = try JSONDecoder().decode(Wire.self, from: data)
         let completed = wire.progress?.bytesCompleted
         let expected = wire.progress?.bytesExpected
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let emittedAtValid = formatter.date(from: wire.emittedAt) != nil
+            || ISO8601DateFormatter().date(from: wire.emittedAt) != nil
         guard wire.schema == "model_catalog_transaction_event.v1",
               UUID(uuidString: wire.transactionID) != nil,
               wire.eventSequence >= 1,
+              emittedAtValid,
               states.contains(wire.state),
               completed.map({ $0 >= 0 }) ?? true,
               expected.map({ $0 >= 0 }) ?? true,
-              (["failed", "timed_out"].contains(wire.state)) == (wire.errorCode != nil) else {
+              completed.flatMap({ done in expected.map { done <= $0 } }) ?? true,
+              wire.progress?.percentComplete.map({ $0.isFinite && $0 >= 0 && $0 <= 100 }) ?? true,
+              !(terminalStates.contains(wire.state) && wire.progress != nil),
+              (["failed", "timed_out"].contains(wire.state)) == (wire.errorCode != nil),
+              wire.errorCode.map(errorCodes.contains) ?? true,
+              wire.warningCode.map(warningCodes.contains) ?? true else {
             throw ModelManagementError.invalidCatalog
         }
         return MalibuModelDownloadEvent(
@@ -2312,6 +2337,7 @@ struct MalibuModelDownloadEvent: Equatable, Sendable {
             eventSequence: wire.eventSequence,
             state: wire.state,
             errorCode: wire.errorCode,
+            warningCode: wire.warningCode,
             bytesCompleted: completed,
             bytesExpected: expected
         )
@@ -2392,8 +2418,10 @@ final class ModelManagementStore: ObservableObject {
             case cancelling
         }
 
-        let rowID: String
-        let displayID: String
+        /// The catalog key: stable across refreshes, unlike the row a refresh
+        /// may replace with a local candidate.
+        let modelKey: String
+        let title: String
         let transactionID: String
         var phase: Phase
         var bytesCompleted: Int64?
@@ -2404,7 +2432,7 @@ final class ModelManagementStore: ObservableObject {
 
     /// The last download's outcome, shown beside the row it was for.
     struct DownloadResult: Equatable {
-        let rowID: String
+        let modelKey: String
         let message: String
         let succeeded: Bool
     }
@@ -2428,7 +2456,8 @@ final class ModelManagementStore: ObservableObject {
     private var downloadWatchdog: Task<Void, Never>?
     private var downloadLastEventAt = Date()
     private var downloadLastSequence = 0
-    private var downloadTerminal: (state: String, errorCode: String?)?
+    private var downloadTerminal: (state: String, errorCode: String?, warningCode: String?)?
+    private var downloadCancelRequested = false
     private var downloadTimedOut = false
     /// SPEC-044-R014-5 delayed state after this long without an event.
     var downloadDelayedSeconds: TimeInterval = 30
@@ -3155,42 +3184,45 @@ final class ModelManagementStore: ObservableObject {
 
     /// SPEC-044-R014-4/5: runs the confirmed `prepare_model` download through
     /// `models prepare-catalog`, follows its events, and refreshes the
-    /// projection when it ends. Success needs a `succeeded` event and exit 0.
+    /// projection when it ends. Success needs a `succeeded` event, exit 0 and
+    /// a refreshed projection that lists the model on this Mac (R011).
     func startDownload(_ row: MalibuModelRow) async {
         guard row.action == .download,
               let transaction = row.downloadTransaction,
               canStartDownload,
               rowStillCurrent(row) else { return }
         let runner = makeDownloadCLI()
+        let name = ModelsPresentation.title(row)
+        let modelKey = row.modelKey
         downloadRunner = runner
         downloadLastEventAt = Date()
         downloadLastSequence = 0
         downloadTerminal = nil
         downloadTimedOut = false
+        downloadCancelRequested = false
         downloadResult = nil
         download = DownloadState(
-            rowID: row.id,
-            displayID: row.displayID,
+            modelKey: modelKey,
+            title: name,
             transactionID: transaction.transactionID,
             phase: .starting,
             bytesCompleted: nil,
             bytesExpected: transaction.estimatedBytes
         )
-        let name = ModelsPresentation.title(row)
         statusLine = String(localized: "Downloading \(name)…", comment: "Model download status")
         startDownloadWatchdog(timeoutSeconds: transaction.timeoutSeconds)
         var result: ModelCLIResult?
         do {
             result = try await runner.run(
                 arguments: [
-                    "models", "prepare-catalog", row.modelKey,
+                    "models", "prepare-catalog", modelKey,
                     "--transaction-id", transaction.transactionID,
                     "--json",
                     "--config", paths.configFile.path,
                 ],
                 peer: peerEvidence,
                 onLine: { [weak self] line in
-                    self?.consumeDownloadEvent(line, modelKey: row.modelKey, transactionID: transaction.transactionID)
+                    self?.consumeDownloadEvent(line, modelKey: modelKey, transactionID: transaction.transactionID)
                 }
             )
         } catch {
@@ -3200,33 +3232,50 @@ final class ModelManagementStore: ObservableObject {
         downloadWatchdog = nil
         downloadRunner = nil
         download = nil
-        let outcome: String
-        let message: String
-        if result?.exitCode == 0, downloadTerminal?.state == "succeeded" {
+        let committed = result?.exitCode == 0 && downloadTerminal?.state == "succeeded"
+        var outcome: String
+        var message: String
+        if committed {
             outcome = "success"
             message = String(localized: "Downloaded and verified \(name). It's on this Mac now.", comment: "Model download succeeded")
         } else if downloadTimedOut {
             outcome = "failed"
             message = String(localized: "The download of \(name) stopped reporting progress, so Malibu cancelled it. The model you serve is unchanged. Try again.", comment: "Model download timed out")
-        } else if downloadTerminal?.state == "cancelled" {
+        } else if downloadTerminal?.state == "cancelled" || (downloadCancelRequested && downloadTerminal == nil) {
             outcome = "cancelled"
             message = String(localized: "Download cancelled. The model you serve is unchanged.", comment: "Model download cancelled")
         } else {
             outcome = "failed"
             message = Self.downloadFailureMessage(downloadTerminal?.errorCode, name: name)
         }
+        if downloadTerminal?.warningCode == "staging_cleanup_required" {
+            message += " " + String(localized: "Some partial download files could not be removed. To remove them, run: malibu-cli models prepare \(modelKey) --repair-cache", comment: "Model download cleanup required")
+        }
+        downloadResult = DownloadResult(modelKey: modelKey, message: message, succeeded: false)
+        await refresh(currentModelID: currentModelID, peer: peerEvidence)
+        if committed {
+            // R011: report the change only from a refreshed projection.
+            let listed = !catalogRefreshFailed && hasUsableCatalogProjection
+                && rows.contains { $0.modelKey == modelKey && $0.weightsPresentLocally }
+            if !listed {
+                outcome = "failed"
+                message = String(localized: "The download of \(name) finished, but Malibu couldn't confirm it in the model list yet. Select Retry to refresh.", comment: "Model download not yet reconciled")
+            }
+            if downloadCancelRequested {
+                message = String(localized: "Cancel came too late: the download had already finished.", comment: "Model download cancel too late") + " " + message
+            }
+        }
+        downloadResult = DownloadResult(modelKey: modelKey, message: message, succeeded: outcome == "success")
         appendHistory(ModelActivityEntry(
             id: UUID(),
             timestamp: Date(),
             operation: "download",
             fromModelID: nil,
-            toModelID: row.id,
+            toModelID: modelKey,
             outcome: outcome,
             reason: outcome == "success" ? nil : String(message.prefix(240))
         ))
         saveState()
-        downloadResult = DownloadResult(rowID: row.id, message: message, succeeded: outcome == "success")
-        await refresh(currentModelID: currentModelID, peer: peerEvidence)
         statusLine = message
         MalibuAccessibility.announce(message)
     }
@@ -3235,6 +3284,7 @@ final class ModelManagementStore: ObservableObject {
     /// `cancelled`. Nothing is deleted by Malibu.
     func cancelDownload() {
         guard var state = download, state.phase != .cancelling else { return }
+        downloadCancelRequested = true
         state.phase = .cancelling
         download = state
         downloadRunner?.cancelCurrentOperation()
@@ -3264,6 +3314,7 @@ final class ModelManagementStore: ObservableObject {
                 if silent >= TimeInterval(timeoutSeconds) {
                     // SPEC-044-R014-5: no event for the action timeout.
                     self.downloadTimedOut = true
+                    self.downloadCancelRequested = true
                     state.phase = .cancelling
                     self.download = state
                     self.downloadRunner?.cancelCurrentOperation()
@@ -3294,7 +3345,7 @@ final class ModelManagementStore: ObservableObject {
         downloadLastEventAt = Date()
         switch event.state {
         case "succeeded", "failed", "cancelled", "timed_out":
-            downloadTerminal = (event.state, event.errorCode)
+            downloadTerminal = (event.state, event.errorCode, event.warningCode)
         case "cancel_requested":
             state.phase = .cancelling
         default:

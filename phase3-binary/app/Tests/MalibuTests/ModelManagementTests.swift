@@ -2866,12 +2866,28 @@ final class ModelManagementTests: XCTestCase {
         XCTAssertThrowsError(try MalibuModelDownloadEvent.decode(line("queued").replacingOccurrences(of: "model_catalog_transaction_event.v1", with: "model_catalog_transaction_event.v2")))
         XCTAssertThrowsError(try MalibuModelDownloadEvent.decode(line("queued") + String(repeating: " ", count: 16_384)))
         XCTAssertThrowsError(try MalibuModelDownloadEvent.decode("not json"))
+        XCTAssertThrowsError(try MalibuModelDownloadEvent.decode(line("queued").replacingOccurrences(of: "2027-01-15T08:00:00Z", with: "yesterday")))
+        XCTAssertThrowsError(try MalibuModelDownloadEvent.decode(line("failed", error: #""made_up""#)))
+        XCTAssertThrowsError(try MalibuModelDownloadEvent.decode(line("succeeded", progress: #"{"stage_label_key":"downloading","bytes_completed":1,"bytes_expected":2,"percent_complete":50,"heartbeat":true}"#)),
+                             "a terminal event carries no progress")
+        XCTAssertThrowsError(try MalibuModelDownloadEvent.decode(line("running", progress: #"{"stage_label_key":"downloading","bytes_completed":3,"bytes_expected":2,"percent_complete":50,"heartbeat":true}"#)))
+        XCTAssertThrowsError(try MalibuModelDownloadEvent.decode(line("running", progress: #"{"stage_label_key":"downloading","bytes_completed":1,"bytes_expected":2,"percent_complete":150,"heartbeat":true}"#)))
+        XCTAssertThrowsError(try MalibuModelDownloadEvent.decode(line("cancelled").replacingOccurrences(of: #""warning_code":null"#, with: #""warning_code":"made_up""#)))
+    }
+
+    /// The row a refreshed projection shows once the download is on this Mac:
+    /// a local candidate carrying the catalog key.
+    private func downloadedCandidateRowJSON() -> String {
+        localOnlyBYOMRowJSON()
+            .replacingOccurrences(of: #""model_key":"local-candidate""#, with: #""model_key":"qwen/qwen3-8b""#)
+            .replacingOccurrences(of: #""action_model_id":"local-candidate""#, with: #""action_model_id":"byom_abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrst""#)
     }
 
     @MainActor
     private func downloadStore(
         downloadBytes: Int64 = 4_600_000_000,
         timeoutSeconds: Int = 1800,
+        reconciles: Bool = true,
         downloadCLI: @escaping () -> any MalibuModelCLIRunning
     ) async throws -> (ModelManagementStore, FakeModelCLI, MalibuModelRow) {
         let projection = ModelCLIResult(
@@ -2881,7 +2897,10 @@ final class ModelManagementTests: XCTestCase {
             )]),
             stderr: ""
         )
-        let cli = FakeModelCLI(results: [projection, projection])
+        let after = reconciles
+            ? ModelCLIResult(exitCode: 0, stdout: ShellScreensTests.projectionJSON(rows: [downloadedCandidateRowJSON()], sequence: 2), stderr: "")
+            : projection
+        let cli = FakeModelCLI(results: [projection, after])
         let store = ModelManagementStore(
             cli: cli,
             makeDownloadCLI: downloadCLI,
@@ -2930,7 +2949,8 @@ final class ModelManagementTests: XCTestCase {
         XCTAssertEqual(observed[1]?.bytesExpected, 4_600_000_000)
         XCTAssertNil(store.download)
         XCTAssertEqual(cli.invocations.count, 2, "the projection refreshes after the download")
-        XCTAssertEqual(store.downloadResult, .init(rowID: "qwen/qwen3-8b", message: "Downloaded and verified Qwen3 8B · 4-bit. It's on this Mac now.", succeeded: true))
+        XCTAssertEqual(store.downloadResult, .init(modelKey: "qwen/qwen3-8b", message: "Downloaded and verified Qwen3 8B · 4-bit. It's on this Mac now.", succeeded: true))
+        XCTAssertTrue(store.rows.contains { $0.modelKey == "qwen/qwen3-8b" && $0.weightsPresentLocally })
         XCTAssertEqual(store.history.last?.operation, "download")
         XCTAssertEqual(store.history.last?.outcome, "success")
     }
@@ -2966,6 +2986,68 @@ final class ModelManagementTests: XCTestCase {
         XCTAssertNil(store.download)
         XCTAssertEqual(store.downloadResult?.message, "Download cancelled. The model you serve is unchanged.")
         XCTAssertEqual(store.history.last?.outcome, "cancelled")
+    }
+
+    @MainActor
+    func testDownloadSuccessWaitsForTheRefreshedProjection() async throws {
+        let script = ScriptedDownloadCLI(lines: [
+            Self.downloadEvent("queued", sequence: 1),
+            Self.downloadEvent("succeeded", sequence: 2),
+        ], exitCode: 0)
+        let (store, _, row) = try await downloadStore(reconciles: false, downloadCLI: { script })
+        await store.startDownload(row)
+        XCTAssertEqual(store.downloadResult?.succeeded, false)
+        XCTAssertEqual(store.downloadResult?.message, "The download of Qwen3 8B · 4-bit finished, but Malibu couldn't confirm it in the model list yet. Select Retry to refresh.")
+    }
+
+    @MainActor
+    func testCancelAfterTheCommitPointIsReportedAsTooLate() async throws {
+        let script = ScriptedDownloadCLI(lines: [
+            Self.downloadEvent("queued", sequence: 1),
+            Self.downloadEvent("succeeded", sequence: 2),
+        ], exitCode: 0)
+        let (store, _, row) = try await downloadStore(downloadCLI: { script })
+        script.onLine = { store.cancelDownload() }
+        await store.startDownload(row)
+        XCTAssertEqual(store.downloadResult?.succeeded, true)
+        XCTAssertEqual(store.downloadResult?.message, "Cancel came too late: the download had already finished. Downloaded and verified Qwen3 8B · 4-bit. It's on this Mac now.")
+    }
+
+    @MainActor
+    func testCancelBeforeLaunchAndCleanupWarningsAreReportedPlainly() async throws {
+        let refused = ThrowingDownloadCLI()
+        let (store, _, row) = try await downloadStore(downloadCLI: { refused })
+        refused.onRun = { store.cancelDownload() }
+        await store.startDownload(row)
+        XCTAssertEqual(store.downloadResult?.message, "Download cancelled. The model you serve is unchanged.")
+
+        let tx = "8d3c5d4c-3e4f-47ac-b72d-7f8f172747a0"
+        let leftover = ScriptedDownloadCLI(lines: [
+            Self.downloadEvent("queued", sequence: 1),
+            #"{"schema":"model_catalog_transaction_event.v1","transaction_id":"\#(tx)","transaction_kind":"prepare_model","model_key":"qwen/qwen3-8b","event_sequence":2,"emitted_at":"2027-01-15T08:00:00Z","state":"cancelled","progress":null,"error_code":null,"warning_code":"staging_cleanup_required"}"#,
+        ], exitCode: 130)
+        let (leftoverStore, _, leftoverRow) = try await downloadStore(downloadCLI: { leftover })
+        await leftoverStore.startDownload(leftoverRow)
+        XCTAssertEqual(
+            leftoverStore.downloadResult?.message,
+            "Download cancelled. The model you serve is unchanged. Some partial download files could not be removed. To remove them, run: malibu-cli models prepare qwen/qwen3-8b --repair-cache"
+        )
+    }
+
+    @MainActor
+    func testDownloadStateFollowsTheCatalogKeyAcrossRefreshAndExpiry() async throws {
+        let held = CancellableDownloadCLI()
+        let (store, _, row) = try await downloadStore(downloadCLI: { held })
+        let task = Task { await store.startDownload(row) }
+        while store.download == nil { await Task.yield() }
+        XCTAssertEqual(store.download?.modelKey, "qwen/qwen3-8b")
+        XCTAssertEqual(store.download?.title, "Qwen3 8B · 4-bit")
+        // The banner reads the store, not a row: Cancel stays reachable even
+        // when no row for the download is on screen.
+        XCTAssertTrue(ModelsPresentation.sections([]).isEmpty)
+        store.cancelDownload()
+        await task.value
+        XCTAssertNil(store.download)
     }
 
     @MainActor
@@ -3651,5 +3733,22 @@ private final class CancellableDownloadCLI: MalibuModelCLIRunning {
         }
         waiter?.resume(returning: ModelCLIResult(exitCode: emitsOnCancel ? 130 : 15, stdout: "", stderr: ""))
         waiter = nil
+    }
+}
+
+/// Throws as a launch refused after Cancel (a latched one-shot runner).
+@MainActor
+private final class ThrowingDownloadCLI: MalibuModelCLIRunning {
+    var onRun: (() -> Void)?
+
+    func run(
+        arguments: [String],
+        peer: MalibuModelPeerEvidence?,
+        stdinData: Data?,
+        priority: ModelCLIWorkPriority,
+        onLine: @escaping @MainActor @Sendable (String) -> Void
+    ) async throws -> ModelCLIResult {
+        onRun?()
+        throw CancellationError()
     }
 }

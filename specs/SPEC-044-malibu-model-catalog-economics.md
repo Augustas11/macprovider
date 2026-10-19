@@ -1055,6 +1055,8 @@ Numeric values are compared by their validated JSON numeric value, without
 localized formatting or string conversion. For any row whose `economics_state`
 is not `trusted`, tuple components 2 through 6 are treated as null regardless of
 carried disabled-context values; this includes every locally motivated row. The
+one exception is an R014 `catalog_reference` row in the v1 envelope, whose
+catalog rate and demand values order it inside its own section. The
 canonical row identity is the tagged wire tuple (`candidate`, `candidate_id`)
 when `candidate_id` is non-null, otherwise (`catalog`, `model_key`); tag and
 value are separate UTF-8 byte strings, each prefixed by its unsigned 32-bit
@@ -1568,9 +1570,17 @@ catalog-only sentinel in the R002/R003 v2 amendment is unchanged.
    untrusted catalog, missing space, or a failed transfer, and 5 for a hash
    mismatch or other verification failure. SIGINT or SIGTERM stops the
    download, removes only that model's interrupted-download leftovers, and
-   ends with `cancel_requested` then `cancelled` (exit 130). The command never
-   changes config, the served model, admission, or settlement.
-5. *Malibu download flow.* The confirmation MUST name the model, show the
+   ends with `cancel_requested` then `cancelled` (exit 130); when a leftover
+   cannot be removed safely (it is missing, outside the cache and durable
+   roots through a symlinked path, or removal fails), the `cancelled` event
+   carries `warning_code: "staging_cleanup_required"`. Only one
+   `prepare-catalog` runs at a time per user; a second one fails with
+   `operation_conflict` (exit 4) before any download. When a configured
+   artifact path is the location serve loads for that catalog key,
+   `succeeded` requires that location to verify. The command never changes
+   config, the served model, admission, or settlement.
+5. *Malibu download flow.* The confirmation MUST name the model and show the
+   exact catalog key it will pass to the CLI, show the
    download size from `estimated_bytes`, say that the files are verified
    against the signed catalog, and say that downloading does not change the
    model this Mac serves, does not offer it to the network, and does not
@@ -1581,9 +1591,14 @@ catalog-only sentinel in the R002/R003 v2 amendment is unchanged.
    bounded, because it depends on the network; this replaces the R011
    dispatch timeout for this action only. Malibu MUST accept only events whose
    `transaction_id`, `transaction_kind`, and `model_key` match the action,
-   MUST ignore other lines, MUST report success only after a `succeeded` event
-   with exit 0, and then MUST refresh the projection under R011. One download
-   runs at a time. The R008 `Needs preparation` section MAY be titled **Not
+   MUST ignore other lines, and MUST report success only after a `succeeded`
+   event with exit 0 and a refreshed projection that lists the model on this
+   Mac; otherwise it says the download finished but is not confirmed yet and
+   offers a refresh. A Cancel that arrives after the commit point is reported
+   as too late, with the resulting state. A `staging_cleanup_required`
+   warning is shown with the CLI repair command. While a download runs, its
+   progress and Cancel stay reachable even when the projection is refreshed,
+   expires, or no longer lists the row. One download runs at a time. The R008 `Needs preparation` section MAY be titled **Not
    downloaded**.
 
 ## 4. Implementation, tests, and journeys

@@ -91,6 +91,11 @@ enum DiscoverPresentation {
         return parts.joined(separator: " · ")
     }
 
+    /// The not-earning caveat for a listed row that shows a rate.
+    static func listCaveat(_ row: MalibuModelRow) -> String? {
+        row.providerCompletionPayoutUSDPerMillionTokens == nil ? nil : row.nonEarningDisclosure
+    }
+
     static func memoryLine(_ row: MalibuModelRow, hostMemoryGB: Int) -> String {
         let size = row.estimatedGB.map {
             String(localized: "About \($0.formatted(.number.precision(.fractionLength(1)))) GB of weights", comment: "Discover size")
@@ -163,7 +168,9 @@ enum DiscoverPresentation {
             strings.append(ModelsPresentation.rateDisclosure)
         }
         for row in visible {
-            strings.append(ModelsPresentation.title(row) + " (" + ModelsPresentation.name(row) + ") — " + listSubtitle(row))
+            var line = ModelsPresentation.title(row) + " (" + ModelsPresentation.name(row) + ") — " + listSubtitle(row)
+            if let caveat = listCaveat(row) { line += " — " + caveat }
+            strings.append(line)
         }
         if let first = visible.first {
             strings.append("[\(ModelsPresentation.title(first))]")
@@ -203,6 +210,9 @@ struct DiscoverScreen: View {
                 .padding(.horizontal, 20)
                 .padding(.top, 20)
                 .padding(.bottom, 10)
+            ModelDownloadBanner(store: store)
+                .padding(.horizontal, 20)
+                .padding(.bottom, store.download == nil ? 0 : 10)
             if store.catalogRefreshFailed {
                 // SPEC-044-R008: a failed refresh keeps the last good
                 // projection on screen and says so.
@@ -321,6 +331,13 @@ struct DiscoverScreen: View {
                                 Text(DiscoverPresentation.listSubtitle(row))
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
+                                if let caveat = DiscoverPresentation.listCaveat(row) {
+                                    // SPEC-044-R014: the not-earning caveat
+                                    // travels with every listed rate.
+                                    Text(caveat)
+                                        .font(.caption2)
+                                        .foregroundStyle(.orange)
+                                }
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.horizontal, 12)
@@ -385,10 +402,10 @@ struct DiscoverScreen: View {
 
     @ViewBuilder
     private func primaryAction(_ row: MalibuModelRow) -> some View {
-        if store.download?.rowID == row.id, row.action != .download {
+        if store.download?.modelKey == row.modelKey, row.action != .download {
             ModelDownloadControl(store: store, row: row, showsSize: true) {}
         }
-        if let result = store.downloadResult, result.rowID == row.id, result.succeeded {
+        if let result = store.downloadResult, result.modelKey == row.modelKey, result.succeeded {
             Label(result.message, systemImage: "checkmark.circle")
                 .font(.callout)
         }

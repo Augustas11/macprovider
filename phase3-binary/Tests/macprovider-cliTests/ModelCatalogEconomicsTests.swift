@@ -1194,6 +1194,28 @@ final class ModelCatalogEconomicsTests: XCTestCase {
         XCTAssertEqual(reference.readyProviderCount, admitted.readyProviderCount)
     }
 
+    func testCatalogReferenceRateIsWithheldWheneverTheTrustedRateWouldBe() throws {
+        for warning in [AutotuneRecommendWarning.rateCardFallbackUsed, .rateCardIntegrityFailure, .rateCardDefaultTierUsed, .rateCardStale] {
+            var inputs = try Self.staticInputs()
+            inputs.rateCard.warnings.insert(warning)
+            let admitted = try XCTUnwrap(ModelCatalogEconomicsBuilder.makeProjection(
+                generatedAt: inputs.rateCard.value.generatedAt.addingTimeInterval(60),
+                currentModelID: nil,
+                discovery: Self.discovery(candidate: Self.candidate()),
+                admissionStatuses: [Self.candidateID: Self.status(state: "catalog_priced", source: "coordinator")],
+                demand: inputs.demand,
+                candidateCatalog: inputs.candidateCatalog,
+                rateCard: inputs.rateCard
+            ).rows.first { $0.actionModelID == Self.candidateID })
+            let reference = try XCTUnwrap(Self.catalogOnlyProjection(inputs: inputs).rows.first { $0.modelKey == Self.catalogModelKey })
+            XCTAssertNotEqual(admitted.economicsState, "trusted", "\(warning)")
+            XCTAssertEqual(reference.economicsState, "blocked", "\(warning)")
+            XCTAssertEqual(reference.rateSource, "none", "\(warning)")
+            XCTAssertNil(reference.providerCompletionPayoutUSDPerMillionTokens, "\(warning)")
+            XCTAssertNil(reference.demandWeight, "\(warning)")
+        }
+    }
+
     func testCatalogOnlyRowsLeaveCandidateRowsUntouched() throws {
         let inputs = try Self.staticInputs()
         let plain = ModelCatalogEconomicsBuilder.makeProjection(

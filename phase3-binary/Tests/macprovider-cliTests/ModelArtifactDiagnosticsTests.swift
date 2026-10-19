@@ -692,8 +692,11 @@ final class ModelArtifactDiagnosticsTests: XCTestCase {
         row: ModelArtifactSignedRow?,
         resolver: CachedModelArtifactResolver,
         cancellation: ModelsPrepareCatalogCancellation = ModelsPrepareCatalogCancellation(),
-        prepare: (@Sendable (ModelArtifactSignedRow, CachedModelArtifactResolver, String?) async -> ModelPrepareOutcome)? = nil,
-        removed: Counter? = nil
+        configuredArtifactPath: @escaping @Sendable (String) -> String? = { _ in nil },
+        prepare: (@Sendable (ModelArtifactSignedRow, CachedModelArtifactResolver, String?, String?) async -> ModelPrepareOutcome)? = nil,
+        removed: Counter? = nil,
+        liveCleanup: Bool = false,
+        runLock: (@Sendable () -> (@Sendable () -> Void)?)? = nil
     ) async -> (Int32, [ModelPreparationTransactionEvent]) {
         let log = EventLog()
         let sink = ModelsPrepareCatalogEventSink(transactionID: Self.prepareTransactionID) { log.append($0) }
@@ -703,12 +706,16 @@ final class ModelArtifactDiagnosticsTests: XCTestCase {
             return row
         }
         if let prepare { dependencies.prepare = prepare }
-        dependencies.removePartials = { _, _ in removed?.increment() }
+        if !liveCleanup {
+            dependencies.removeNewPartials = { _, _, _ in removed?.increment(); return true }
+        }
+        dependencies.acquireRunLock = runLock ?? { { } }
         dependencies.progressIntervalNanoseconds = 10_000_000
         let exit = await ModelsPrepareCatalogRunner.run(
             key: "namespace/model",
             resolver: resolver,
             config: nil,
+            configuredArtifactPath: configuredArtifactPath,
             sink: sink,
             cancellation: cancellation,
             dependencies: dependencies
@@ -795,7 +802,7 @@ final class ModelArtifactDiagnosticsTests: XCTestCase {
                     row: row,
                     resolver: resolver,
                     cancellation: cancellation,
-                    prepare: { row, resolver, config in
+                    prepare: { row, resolver, _, config in
                         started.fulfill()
                         while !Task.isCancelled {
                             try? await Task.sleep(nanoseconds: 5_000_000)
@@ -821,6 +828,122 @@ final class ModelArtifactDiagnosticsTests: XCTestCase {
         XCTAssertEqual(Array(events.suffix(2).map(\.state)), [.cancelRequested, .cancelled])
         XCTAssertFalse(events.dropLast(2).contains { $0.state == .cancelRequested || $0.state == .cancelled })
         XCTAssertEqual(removed.value, 1)
+    }
+
+    func testPrepareCatalogCancelRemovesOnlyLeftoversFromThisRunAndFlagsUnsafeOnes() async throws {
+        let (resolver, _) = try makeResolver()
+        let row = makeRow(sha256: String(repeating: "1", count: 64))
+        let snapshots = resolver.snapshotURL(modelID: row.modelID, revision: row.revision).deletingLastPathComponent()
+        let old = snapshots.appendingPathComponent(".download-old", isDirectory: true)
+        try FileManager.default.createDirectory(at: old, withIntermediateDirectories: true)
+        try Data("old".utf8).write(to: old.appendingPathComponent("a"))
+        let fresh = snapshots.appendingPathComponent(".download-fresh", isDirectory: true)
+
+        func cancelledRun(_ makeLeftover: @escaping @Sendable () throws -> Void) async -> (Int32, [ModelPreparationTransactionEvent]) {
+            let cancellation = ModelsPrepareCatalogCancellation()
+            return await prepareCatalog(
+                row: row,
+                resolver: resolver,
+                cancellation: cancellation,
+                prepare: { row, resolver, _, config in
+                    try? makeLeftover()
+                    cancellation.request()
+                    return await ModelCatalogPreparation.prepare(row: row, resolver: resolver, repairCache: false, config: config)
+                },
+                liveCleanup: true
+            )
+        }
+
+        let (exit, events) = await cancelledRun {
+            try FileManager.default.createDirectory(at: fresh, withIntermediateDirectories: true)
+            try Data("new".utf8).write(to: fresh.appendingPathComponent("b"))
+        }
+        XCTAssertEqual(exit, 130)
+        assertOneTransaction(events)
+        XCTAssertEqual(Array(events.suffix(2).map(\.state)), [.cancelRequested, .cancelled])
+        XCTAssertNil(events.last?.warningCode)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fresh.path), "this run's leftover is removed")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: old.path), "a leftover from before the run is not this run's to remove")
+
+        // A leftover reached through a symlink is never followed out of the
+        // root; the cancel reports that cleanup is required instead.
+        let outside = try tempDir()
+        try FileManager.default.createDirectory(at: outside.appendingPathComponent("payload"), withIntermediateDirectories: true)
+        let linked = snapshots.appendingPathComponent(".download-linked")
+        let (linkedExit, linkedEvents) = await cancelledRun {
+            try FileManager.default.createSymbolicLink(at: linked, withDestinationURL: outside.appendingPathComponent("payload"))
+        }
+        XCTAssertEqual(linkedExit, 130)
+        XCTAssertEqual(linkedEvents.last?.state, .cancelled)
+        XCTAssertEqual(linkedEvents.last?.warningCode, .stagingCleanupRequired)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: outside.appendingPathComponent("payload").path))
+    }
+
+    func testPathChecksRefuseSymlinksAndPathsOutsideTheRoot() throws {
+        let root = try tempDir()
+        let inside = root.appendingPathComponent("a/b", isDirectory: true)
+        try FileManager.default.createDirectory(at: inside, withIntermediateDirectories: true)
+        XCTAssertTrue(ModelsPrepareCatalogRunner.isBelowWithoutSymlinks(inside, root: root))
+        XCTAssertFalse(ModelsPrepareCatalogRunner.isBelowWithoutSymlinks(root, root: root))
+        XCTAssertFalse(ModelsPrepareCatalogRunner.isBelowWithoutSymlinks(try tempDir(), root: root))
+        let outside = try tempDir()
+        let link = root.appendingPathComponent("link")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: outside)
+        try FileManager.default.createDirectory(at: outside.appendingPathComponent("c"), withIntermediateDirectories: true)
+        XCTAssertFalse(ModelsPrepareCatalogRunner.isBelowWithoutSymlinks(link.appendingPathComponent("c"), root: root))
+        XCTAssertFalse(ModelsPrepareCatalogRunner.isBelowWithoutSymlinks(link, root: root))
+    }
+
+    func testPrepareCatalogRunsOneAtATime() async throws {
+        let (resolver, _) = try makeResolver()
+        let row = makeRow(sha256: String(repeating: "1", count: 64))
+        let (exit, events) = await prepareCatalog(row: row, resolver: resolver, runLock: { nil })
+        XCTAssertEqual(exit, 4)
+        XCTAssertEqual(events.map(\.state), [.failed])
+        XCTAssertEqual(events.first?.errorCode, .operationConflict)
+
+        let lock = ModelsPrepareCatalogRunner.Dependencies.live.acquireRunLock
+        let release = try XCTUnwrap(lock())
+        XCTAssertNil(lock(), "a second run is refused while the first holds the lock")
+        release()
+        let again = try XCTUnwrap(lock())
+        again()
+    }
+
+    func testPrepareCatalogHonoursAConfiguredServingArtifact() async throws {
+        let served = try tempDir()
+        try writeCompleteSnapshot(at: served)
+        let row = makeRow(sha256: try ModelArtifactVerifier.canonicalArtifactHash(directory: served))
+        let (resolver, _) = try makeResolver(downloader: try fakeDownloader(serving: served))
+        let corrupt = try tempDir().appendingPathComponent(revision, isDirectory: true)
+        try writeCompleteSnapshot(at: corrupt, truncateWeights: true)
+
+        let (exit, events) = await prepareCatalog(
+            row: row,
+            resolver: resolver,
+            configuredArtifactPath: { $0 == "namespace/model" ? corrupt.path : nil }
+        )
+        XCTAssertNotEqual(exit, 0, "serve loads the configured copy, so a verified durable copy is not ready")
+        XCTAssertEqual(events.last?.state, .failed)
+    }
+
+    func testDownloaderDiskSpaceFailureIsReportedAsDiskSpace() throws {
+        let (resolver, _) = try makeResolver()
+        let row = makeRow(sha256: String(repeating: "1", count: 64))
+        let outcome = ModelPrepareOutcome(
+            finalState: .incomplete,
+            diagnosis: ModelArtifactDiagnostics.diagnose(row: row, resolver: resolver),
+            requiredBytes: nil,
+            availableBytes: nil,
+            partialsFound: [],
+            partialsRemoved: [],
+            downloadAttempted: true,
+            error: "not enough free disk space to download namespace/model: need 9 GB, 2 GB available",
+            retryCommand: nil
+        )
+        let (code, exit) = ModelsPrepareCatalogRunner.failure(outcome)
+        XCTAssertEqual(code, .insufficientDiskSpace)
+        XCTAssertEqual(exit, 4)
     }
 
     func testPrepareCatalogCommandParsesAndRefusesBadInputBeforeWork() async throws {

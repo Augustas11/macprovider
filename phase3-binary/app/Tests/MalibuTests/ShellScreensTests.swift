@@ -319,6 +319,10 @@ final class ShellScreensTests: XCTestCase {
 
         let message = ModelsPresentation.downloadConfirmationMessage(download)
         XCTAssertTrue(message.contains(ByteCountFormatter.string(fromByteCount: 4_600_000_000, countStyle: .file)))
+        XCTAssertTrue(message.contains("catalog key qwen/qwen3-8b (mlx-community/Qwen3-8B-4bit)"),
+                      "the confirmation names the exact key the CLI is given, not only the display name")
+        XCTAssertEqual(DiscoverPresentation.listCaveat(download), "Network catalog rate. This Mac is not earning it yet.")
+        XCTAssertNil(DiscoverPresentation.listCaveat(try Self.catalogOnlyRow(key: "x/y", modelID: "x/y", catalogReference: false)))
         XCTAssertTrue(message.contains("verifies the files against the signed catalog"))
         XCTAssertTrue(message.contains("does not change the model this Mac serves"))
         XCTAssertTrue(message.contains("does not start earning"))
@@ -333,7 +337,7 @@ final class ShellScreensTests: XCTestCase {
 
     func testDownloadProgressCopy() {
         func state(_ phase: ModelManagementStore.DownloadState.Phase, _ done: Int64?, _ total: Int64?) -> ModelManagementStore.DownloadState {
-            ModelManagementStore.DownloadState(rowID: "r", displayID: "r", transactionID: "t", phase: phase, bytesCompleted: done, bytesExpected: total)
+            ModelManagementStore.DownloadState(modelKey: "r", title: "r", transactionID: "t", phase: phase, bytesCompleted: done, bytesExpected: total)
         }
         let total: Int64 = 4_000_000_000
         let running = state(.running, 1_000_000_000, total)
@@ -604,9 +608,9 @@ final class ShellScreensTests: XCTestCase {
         return row
     }
 
-    static func projectionJSON(rows: [String], warnings: String = "[]") -> String {
+    static func projectionJSON(rows: [String], warnings: String = "[]", sequence: Int = 1) -> String {
         """
-        {"schema":"model_catalog_economics.v1","generated_at":"\(timestamp)","projection_sequence":1,"source":{"cli_version":"1.8.259","cli_build_commit":"test","process_launch_id":"c13c5d4c-3e4f-47ac-b72d-7f8f172747a0","process_started_at":"\(timestamp)","projection_protocol_version":"1","rate_card_source":"live_signed","rate_card_digest":"\(String(repeating: "a", count: 64))","rate_card_signature_digest":null,"demand_feed_digest":"\(String(repeating: "b", count: 64))","candidate_feed_digest":"\(String(repeating: "c", count: 64))","rate_card_max_age_seconds":604800},"rows":[\(rows.joined(separator: ","))],"warnings":\(warnings)}
+        {"schema":"model_catalog_economics.v1","generated_at":"\(timestamp)","projection_sequence":\(sequence),"source":{"cli_version":"1.8.259","cli_build_commit":"test","process_launch_id":"c13c5d4c-3e4f-47ac-b72d-7f8f172747a0","process_started_at":"\(timestamp)","projection_protocol_version":"1","rate_card_source":"live_signed","rate_card_digest":"\(String(repeating: "a", count: 64))","rate_card_signature_digest":null,"demand_feed_digest":"\(String(repeating: "b", count: 64))","candidate_feed_digest":"\(String(repeating: "c", count: 64))","rate_card_max_age_seconds":604800},"rows":[\(rows.joined(separator: ","))],"warnings":\(warnings)}
         """
     }
 
