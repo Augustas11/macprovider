@@ -53,7 +53,7 @@ func (s *Store) BuyerOwnedProviders(ctx context.Context, accountID string, githu
 	for id := range ids {
 		args = append(args, id)
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT provider_id FROM provider_ownership WHERE github_user_id IN (`+strings.TrimSuffix(strings.Repeat("?,", len(args)), ",")+`)`, args...)
+	rows, err := s.reader().QueryContext(ctx, `SELECT provider_id FROM provider_ownership WHERE github_user_id IN (`+strings.TrimSuffix(strings.Repeat("?,", len(args)), ",")+`)`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -70,7 +70,7 @@ func (s *Store) BuyerOwnedProviders(ctx context.Context, accountID string, githu
 }
 
 func (s *Store) readAllowanceRoutingIdentities(ctx context.Context, accountID string, ids map[int64]bool) error {
-	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT github_user_id FROM allowance_grants WHERE account_id = ? AND github_user_id > 0 LIMIT 129`, accountID)
+	rows, err := s.reader().QueryContext(ctx, `SELECT DISTINCT github_user_id FROM allowance_grants WHERE account_id = ? AND github_user_id > 0 LIMIT 129`, accountID)
 	if err != nil {
 		return err
 	}
