@@ -7724,6 +7724,21 @@ maxTokens: 1,
         nativeAllows && provenance.mayUseReusableKVCache
     }
 
+    /// The serial path never runs native MTP. A cache-only row selected
+    /// native reaches it after the continuous-batching path declined, most
+    /// often on a cache hit the scheduler cannot resume (AC-26). It then takes
+    /// the lease the ordinary path would take, so the hit and its discount
+    /// survive (SPEC-048-R009).
+    static func serialConversationCacheLeaseAllowed(
+        request: ChatCompletionRequest,
+        admission: NativeMTPRuntimeAdmission
+    ) -> Bool {
+        !request.containsNonTextMessageContentPart && allowsConversationCacheLease(
+            provenance: request.ingestProvenance,
+            nativeAllows: admission.allowsConversationCacheLease(cacheOnlyKey: request.conversationCacheOnly)
+        )
+    }
+
     private static func nativeMTPCaptureEffectiveMaxOutputTokens(
         request: ChatCompletionRequest,
         completion: CompletionResult,
@@ -9058,9 +9073,9 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             Self.logSpeculativeFallback(error)
                         }
                     }
-                    let conversationCacheAllowed = !request.containsNonTextMessageContentPart && Self.allowsConversationCacheLease(
-                        provenance: request.ingestProvenance,
-                        nativeAllows: nativeMTPAdmission.allowsConversationCacheLease
+                    let conversationCacheAllowed = Self.serialConversationCacheLeaseAllowed(
+                        request: request,
+                        admission: nativeMTPAdmission
                     )
                     let lease = conversationCacheAllowed
                         ? await conversationCache.begin(
@@ -9943,9 +9958,9 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         )
                     }
 
-                    let conversationCacheAllowed = !request.containsNonTextMessageContentPart && Self.allowsConversationCacheLease(
-                        provenance: request.ingestProvenance,
-                        nativeAllows: nativeMTPAdmission.allowsConversationCacheLease
+                    let conversationCacheAllowed = Self.serialConversationCacheLeaseAllowed(
+                        request: request,
+                        admission: nativeMTPAdmission
                     )
                     let lease = conversationCacheAllowed
                         ? await conversationCache.begin(

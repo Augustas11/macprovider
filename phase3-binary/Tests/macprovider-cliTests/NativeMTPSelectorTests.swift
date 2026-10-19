@@ -625,6 +625,12 @@ final class NativeMTPSelectorTests: XCTestCase {
             hasConversationKey: true, leaseAllowed: true, cachedPromptTokens: 0, keyedRowsCommitSerialFormat: true
         ).usesNativeMTP)
 
+        // A cache hit the scheduler cannot resume sends the row to the serial
+        // path, which never runs native: it keeps the ordinary lease there.
+        XCTAssertTrue(ModelRuntime.serialConversationCacheLeaseAllowed(request: plain, admission: native))
+        XCTAssertFalse(ModelRuntime.serialConversationCacheLeaseAllowed(
+            request: plain.withIngestProvenance(.privacy), admission: native))
+
         let tools = admission(try relayed([
             "tools": [["type": "function", "function": ["name": "lookup", "parameters": ["type": "object"]]]],
         ]))
