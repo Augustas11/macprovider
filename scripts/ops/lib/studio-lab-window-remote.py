@@ -35,6 +35,7 @@ LIVE_HASH_KEYS = (
     "watchdog_plist_sha256", "compatibility_set_sha256",
 )
 HASH_KEYS = LIVE_HASH_KEYS + ("probe_sha256", "lab_script_sha256")
+JOB_KINDS = ("profiler-only", "qualification")
 ARTIFACT_KEYS = (
     "diagnostic_cli", "glmbench", "diagnostic_metallib", "glmbench_metallib",
     "fixture_config", "fixture_index",
@@ -50,8 +51,10 @@ SNAPSHOT_HASH_KEYS = (
 MAX_JSON = 1024 * 1024
 GATED_EXEC = (
     "import os,sys; fd=int(sys.argv[1]); token=os.read(fd,1); os.close(fd); "
-    "sys.exit(125) if token != b'1' else os.execve(sys.argv[2], [sys.argv[2], '--offline'], "
-    "{'HOME':sys.argv[3],'PATH':sys.argv[4],'TMPDIR':sys.argv[5],'MACPROVIDER_LAB_OFFLINE':'1'})"
+    "script,manifest,home,path,tmp=sys.argv[2:]; "
+    "argv=[script,'--offline'] if manifest == '-' else [script,'--offline','--manifest',manifest]; "
+    "sys.exit(125) if token != b'1' else os.execve(script, argv, "
+    "{'HOME':home,'PATH':path,'TMPDIR':tmp,'MACPROVIDER_LAB_OFFLINE':'1'})"
 )
 
 
@@ -212,7 +215,27 @@ def load_manifest(path: Path) -> tuple[dict, str]:
     value["status_port"] = positive(value.get("status_port"), "status_port", 65535)
     for key in ("drain_timeout_s", "ready_timeout_s", "poll_s"):
         value[key] = positive(value.get(key), key)
-    value["lab_timeout_s"] = positive(value.get("lab_timeout_s"), "lab_timeout_s", 3600)
+    job = value.get("job")
+    if job is not None:
+        if not isinstance(job, dict) or set(job) != {"schema_version", "kind", "identity_sha256", "immutable_inputs"}:
+            raise Refusal("manifest job is invalid")
+        if job.get("schema_version") != "macprovider.studio_lab_window_job.v1" or job.get("kind") not in JOB_KINDS:
+            raise Refusal("manifest job kind is invalid")
+        identity = job.get("identity_sha256")
+        if not isinstance(identity, str) or len(identity) != 64 or any(ch not in "0123456789abcdef" for ch in identity):
+            raise Refusal("manifest job identity is invalid")
+        if not isinstance(job.get("immutable_inputs"), dict):
+            raise Refusal("manifest job immutable inputs are invalid")
+        helper = absolute(value.get("job_helper_path"), "job_helper_path")
+        if helper != path.parent / "manifest.py":
+            raise Refusal("manifest job helper is outside the protected manifest directory")
+        value["job_helper_path"] = str(helper)
+    elif "job_helper_path" in value:
+        raise Refusal("legacy manifest cannot name a job helper")
+    value["lab_timeout_s"] = positive(
+        value.get("lab_timeout_s"), "lab_timeout_s",
+        43200 if job and job["kind"] == "qualification" else 3600,
+    )
     if value["ready_timeout_s"] < 120:
         raise Refusal("manifest ready_timeout_s cannot prove the 120-second serving hold")
     baseline = value.get("baseline")
@@ -222,6 +245,12 @@ def load_manifest(path: Path) -> tuple[dict, str]:
         item = baseline.get(key)
         if not isinstance(item, str) or len(item) != 64 or any(ch not in "0123456789abcdef" for ch in item):
             raise Refusal(f"manifest baseline {key} is invalid")
+    if job is not None:
+        helper_sha = baseline.get("job_helper_sha256")
+        if not isinstance(helper_sha, str) or len(helper_sha) != 64 or any(ch not in "0123456789abcdef" for ch in helper_sha):
+            raise Refusal("manifest baseline job helper hash is invalid")
+    elif "job_helper_sha256" in baseline:
+        raise Refusal("legacy manifest has a job helper hash")
     snapshot = baseline.get("snapshot")
     if not isinstance(snapshot, dict) or any(snapshot.get(key) in (None, "") for key in SNAPSHOT_KEYS):
         raise Refusal("manifest baseline snapshot is incomplete")
@@ -333,6 +362,42 @@ def validate_lab_artifacts(manifest: dict) -> None:
         item = manifest["artifacts"][key]
         if artifact_sha(Path(item["path"]), executable=key in {"diagnostic_cli", "glmbench"}) != item["sha256"]:
             raise Refusal(f"guarded diagnostic artifact drifted: {key}")
+    job = manifest.get("job")
+    if job is not None:
+        helper = Path(manifest["job_helper_path"])
+        safe_regular(helper)
+        if file_sha(helper) != manifest["baseline"]["job_helper_sha256"]:
+            raise Refusal("guarded job helper bytes drifted")
+
+
+def validate_job(manifest: dict) -> None:
+    """Run the job's own no-model validation once, before pausing service."""
+    if manifest.get("job") is None:
+        return
+    # validate_lab_artifacts proves the staged helper before it is executable.
+    validate_lab_artifacts(manifest)
+    subprocess.run(
+        [sys.executable, manifest["job_helper_path"], "validate-job", "--manifest", manifest["_manifest_path"]],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        # The helper bounds its own fixed no-model validation at 600 seconds;
+        # retain a small outer allowance for Python process startup/cleanup.
+        check=True, timeout=660,
+        env={"HOME": str(Path.home()), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+    )
+
+
+def validate_journal_job(manifest: dict, record: dict) -> None:
+    """Bind a durable journal to the staged job, while retaining v1 journals."""
+    job = manifest.get("job")
+    if job is None:
+        if "job_kind" in record or "job_identity_sha256" in record:
+            raise Refusal("legacy journal unexpectedly names a job")
+        return
+    if (
+        record.get("job_kind") != job["kind"]
+        or record.get("job_identity_sha256") != job["identity_sha256"]
+    ):
+        raise Refusal("journal job identity mismatch")
 
 
 def artifact_sha(path: Path, *, executable: bool) -> str:
@@ -727,6 +792,7 @@ def supervise(manifest: dict, manifest_sha: str, journal: Path, nonce: str) -> i
             check_cas(record, nonce)
             if record["manifest_sha256"] != manifest_sha:
                 raise Refusal("manifest changed after dispatch")
+            validate_journal_job(manifest, record)
             if record.get("supervisor_pid") != os.getpid() or not same_process(
                 record.get("supervisor_pid"), record.get("supervisor_process_start_us")
             ):
@@ -750,6 +816,8 @@ def supervise(manifest: dict, manifest_sha: str, journal: Path, nonce: str) -> i
         )
         with JournalLock(journal):
             record = write_transition(journal, read_journal(journal), "stopped")
+        # Re-check source, artifacts and staged helper after the provider is
+        # stopped.  The no-model job validation already happened in prepare_run.
         validate_lab_artifacts(manifest)
         path = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
         tmpdir = os.environ.get("TMPDIR", "/tmp")
@@ -757,6 +825,7 @@ def supervise(manifest: dict, manifest_sha: str, journal: Path, nonce: str) -> i
         try:
             child = subprocess.Popen(
                 [sys.executable, "-c", GATED_EXEC, str(gate_read), manifest["lab_script_path"],
+                 manifest["_manifest_path"] if manifest.get("job") is not None else "-",
                  str(Path.home()), path, tmpdir],
                 cwd=manifest["lab_source_dir"], env={"HOME": str(Path.home()), "PATH": path, "TMPDIR": tmpdir},
                 stdin=subprocess.DEVNULL, stdout=None, stderr=None, start_new_session=True,
@@ -809,12 +878,14 @@ def prepare_run(manifest: dict, manifest_sha: str, journal: Path) -> dict:
         record = read_journal(journal)
         if record["manifest_sha256"] != manifest_sha:
             raise Refusal("existing journal belongs to another manifest")
+        validate_journal_job(manifest, record)
         if same_process(record.get("supervisor_pid"), record.get("supervisor_process_start_us")):
             raise Refusal("matching supervisor is still active")
         recovered = restore_locked(manifest, journal, record)
         raise Refusal(f"existing journal recovered to {recovered['phase']}; finish it before a fresh run")
     validate_live_hashes(manifest)
     validate_lab_artifacts(manifest)
+    validate_job(manifest)
     if not loaded(manifest["provider_label"]) or not loaded(manifest["watchdog_label"]):
         raise Refusal("provider and watchdog must both be loaded")
     baseline = stable_serving(manifest)
@@ -831,6 +902,9 @@ def prepare_run(manifest: dict, manifest_sha: str, journal: Path) -> dict:
         "baseline_process": {key: baseline[key] for key in ("pid", "process_start_us", "executable_path")},
         "lab_process_group_gone": False, "watchdog_restored": False,
     }
+    if manifest.get("job") is not None:
+        record["job_kind"] = manifest["job"]["kind"]
+        record["job_identity_sha256"] = manifest["job"]["identity_sha256"]
     atomic_json(journal, record)
     return record
 
@@ -955,9 +1029,11 @@ def command_status(args: argparse.Namespace) -> dict:
     record = read_journal(journal)
     if record["manifest_sha256"] != manifest_sha:
         raise Refusal("journal manifest digest mismatch")
+    validate_journal_job(manifest, record)
     result = {key: record.get(key) for key in (
         "phase", "revision", "nonce", "supervisor_pid", "lab_pid", "lab_exit_code",
         "lab_process_group_gone", "watchdog_restored", "restored_process", "last_error",
+        "job_kind", "job_identity_sha256",
     ) if key in record}
     active = same_process(record.get("supervisor_pid"), record.get("supervisor_process_start_us"))
     result["supervisor_active"] = active
@@ -973,6 +1049,7 @@ def command_recover(args: argparse.Namespace) -> dict:
         check_cas(record, args.nonce, args.revision)
         if record["manifest_sha256"] != manifest_sha:
             raise Refusal("journal manifest digest mismatch")
+        validate_journal_job(manifest, record)
         if same_process(record.get("supervisor_pid"), record.get("supervisor_process_start_us")):
             raise Refusal("matching supervisor is still active")
         record = restore_locked(manifest, journal, record)
@@ -987,6 +1064,7 @@ def command_finish(args: argparse.Namespace) -> dict:
         check_cas(record, args.nonce, args.revision)
         if record["manifest_sha256"] != manifest_sha or record["phase"] != TERMINAL_PHASE:
             raise Refusal("only the matching restored journal may finish")
+        validate_journal_job(manifest, record)
         if not args.controller_confirmed:
             raise Refusal("controller confirmation is required")
         validate_live_hashes(manifest)
