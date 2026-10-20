@@ -64,11 +64,15 @@ Verified 2026-10-10 against public release metadata, the release train
 
 ## Next CLI release — net changes vs 1.8.258 (tracked 2026-10-19)
 
-Live fleet target: **1.8.258** (released 2026-10-19 19:17Z on Pearl runtime v1.8.255). No
-provider-side PR has merged since; start rows here when one does.
+Live fleet target: **1.8.258** (released 2026-10-19 19:17Z on Pearl runtime v1.8.255). Staged:
+`binaryVersion` **1.8.260** (v1.8.259 is a Pearl runtime release). The operator ordered this cut
+for #2074, #2075 and #2078.
 
 | PR | Issue | Provider-side change | Status |
 |---|---|---|---|
+| #2074 | #2059 | Malibu: catalog-only rows, Discover catalog, model Download (with cancel), readable model names, Connected apps (SPEC-044 R014). 812 app tests, 390 CLI tests, a real catalog-economics decode, a real download and a cancel | merged (`f3aafd069`); awaiting CLI release |
+| #2075 (issue) | #2075 | Provider startup recovers an expired prepared self-update handoff before the startup fence, retires only matching abandoned lease authority and shows actionable recovery diagnostics, so a self-update can no longer leave a provider crash-looping. Targeted watchdog regressions, three audit lanes, CI | merged (`370f24f68`, direct); awaiting CLI release |
+| #2079 | #2078 | A `continuous_batch_queue_limit` above the bound for the planned rows (8 x rows) is clamped and logged (`event=cb_queue_limit_clamped`) instead of failing startup, so a signed `max_served_slots` ceiling or a removed owner pin no longer crash-loops the provider; the configured value is kept. Studio CPU tests (216, 0 failures), three-lane audit 0/0/0, CI | merged (`3f2a24946`); awaiting CLI release |
 
 ## Next CLI release — net changes vs 1.8.257 (tracked 2026-10-19; released as v1.8.258)
 

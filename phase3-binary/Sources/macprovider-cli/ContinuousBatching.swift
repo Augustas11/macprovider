@@ -252,6 +252,18 @@ enum ContinuousBatchingPolicy {
         )
     }
 
+    /// #2078: a configured queue limit above the bound for the planned rows
+    /// (for example after a signed `max_served_slots` ceiling or a removed
+    /// owner pin lowers them) is served at that bound, never a startup
+    /// failure. The configured value is kept, so a raised row count serves
+    /// it again. Nil when nothing is clamped.
+    static func queueLimitClampEvent(configured: Int?, maxActiveRows: Int) -> String? {
+        guard let configured else { return nil }
+        let effective = queueLimit(configured: configured, maxActiveRows: maxActiveRows)
+        guard effective < configured else { return nil }
+        return "event=cb_queue_limit_clamped configured=\(configured) effective=\(effective) rows=\(max(1, maxActiveRows))"
+    }
+
     /// Configuration-only validation used before the model and engine are
     /// loaded. This release has no production scheduler backend, so strict mode
     /// fails before provider readiness instead of accepting a configuration
