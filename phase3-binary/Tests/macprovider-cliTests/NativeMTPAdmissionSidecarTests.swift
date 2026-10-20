@@ -1547,6 +1547,93 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         XCTAssertNil(NativeMTPAdmissionSidecar.maxNativeActiveRowsBound(familyAdapter: "qwen3_5_mtp_v1"))
     }
 
+    func testHardwareHarnessGeneratedGLMEnvelopeLoadsAtSignedBoundOneAndInjectsLabBoundFour() throws {
+        let fixture = try makeReleaseEnvelopeFixture(prepareSnapshot: { base in
+            let layout = try Self.embeddedLayout(base)
+            let configData = GLM5NextPagedKVWiringTests.config()
+            try configData.write(to: base.snapshot.appendingPathComponent("target/config.json"))
+            let targetSHA = try MLXSnapshotIdentity.compute(
+                directory: base.snapshot.appendingPathComponent("target", isDirectory: true)
+            ).digest
+            return ReleaseLayout(
+                targetPath: layout.targetPath,
+                targetSHA256: targetSHA,
+                mtpPath: layout.mtpPath,
+                mtpSHA256: targetSHA,
+                tokenizerPath: layout.tokenizerPath,
+                tokenizerSHA256: layout.tokenizerSHA256,
+                manifestPath: layout.manifestPath,
+                manifestSHA256: Self.sha256Hex(configData)
+            )
+        })
+        defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+
+        let runner = NativeMTPHardwareE2ERunner(
+            rootPath: fixture.base.snapshot.path,
+            modelID: fixture.authority.modelKey,
+            maxBatch: 4,
+            maxNativeActiveRows: 4,
+            maxPromptTokens: 4096
+        )
+        XCTAssertEqual(runner.family, .glm5Next)
+
+        let projectionData = try Data(contentsOf: fixture.base.snapshot.appendingPathComponent("native-mtp-artifact-manifest.json"))
+        let challengeBankURL = fixture.base.snapshot.appendingPathComponent("native-mtp-selftest-bank.json")
+        let challengeBankData = try Data(contentsOf: challengeBankURL)
+        try fixture.base.signature(for: challengeBankData).write(
+            to: fixture.base.snapshot.appendingPathComponent("native-mtp-selftest-bank.json.sig")
+        )
+        let targetSHA = fixture.authority.targetSHA256
+        let configData = try Data(contentsOf: fixture.base.snapshot.appendingPathComponent("target/config.json"))
+        let envelope = try runner.releaseEnvelopeData(
+            maxContextTokens: 4096,
+            machine: MachineFingerprint(
+                ramGB: 256,
+                chip: "M2 Ultra",
+                osVersion: "macOS 15.6",
+                binaryVersion: "test"
+            ),
+            targetSHA: targetSHA,
+            tokenizerSHA: Self.sha256Hex(try Data(
+                contentsOf: fixture.base.snapshot.appendingPathComponent("target/tokenizer.json")
+            )),
+            manifestSHA: Self.sha256Hex(configData),
+            artifactManifestSHA: Self.sha256Hex(projectionData),
+            challengeBankSHA: Self.sha256Hex(challengeBankData),
+            signerKeyID: fixture.base.trustedKeyring.requiredKeyID,
+            affineRepresentation: NativeMTPAffineRepresentation(
+                manifestBytes: Data("{}".utf8),
+                manifestSHA256: String(repeating: "6", count: 64),
+                perLayerExceptions: [],
+                unquantizedExceptions: [],
+                groupSize: 64
+            )
+        )
+        let context = NativeMTPAdmissionSidecar.RuntimeContext(
+            modelID: fixture.authority.modelKey,
+            modelRevision: targetSHA,
+            upstreamMLXSwiftLMRevision: NativeMTPHardwareE2ERunner.upstreamRevision,
+            hardwareChip: "M2 Ultra",
+            ramGB: 256,
+            osVersion: "macOS 15.6",
+            slotCount: 4,
+            revokedTupleSHA256: []
+        )
+        let authority = fixture.authority(releaseID: "native-mtp-hardware-e2e")
+        let signed = try NativeMTPAdmissionSidecar.load(
+            sidecarData: envelope,
+            signatureData: fixture.base.signature(for: envelope),
+            snapshotRoot: fixture.base.snapshot,
+            context: context,
+            trustedKeyring: fixture.base.trustedKeyring,
+            resolvedArtifactAuthority: authority
+        )
+
+        XCTAssertEqual(signed.familyAdapter, "glm5_next_mtp_v1")
+        XCTAssertEqual(signed.maxNativeActiveRows, 1)
+        XCTAssertEqual(runner.labRuntimeCapability(from: signed).maximumNativeActiveRows, 4)
+    }
+
     func testReleaseEnvelopeRejectsEmbeddedAdapterWithASeparateMTPMember() throws {
         let fixture = try makeReleaseEnvelopeFixture(entryEdit: { $0["mtp_family_adapter"] = "glm5_next_mtp_v1"; $0["max_native_active_rows"] = 1 })
         defer { try? FileManager.default.removeItem(at: fixture.base.root) }

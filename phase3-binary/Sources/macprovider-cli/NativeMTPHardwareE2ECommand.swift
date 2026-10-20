@@ -512,27 +512,7 @@ final class NativeMTPHardwareE2ERunner {
         try require(admission.maxProposalDepth == 1, "unexpected proposal depth")
         try require(admission.selfTestChallengeBank.challengeBankPath == "native-mtp-selftest-bank.json", "bad self-test bank")
         try validateServePathNativeActiveRowBound(signed: admission.maxNativeActiveRows)
-        let capability = NativeMTPCapability(
-            admitted: true,
-            revoked: false,
-            revocationStateAvailable: true,
-            supportsCurrentProcessor: true,
-            supportsCurrentStateCache: true,
-            supportsStreaming: true,
-            supportsNonStreaming: true,
-            supportsStopSequences: true,
-            hasQualifiedRowMappedTransactions: true,
-            maximumProposalDepth: admission.maxProposalDepth,
-            maximumPromptTokens: admission.maxPromptTokens,
-            maximumCompletionTokens: admission.maxCompletionTokens,
-            completeWindowBytesByDepth: admission.completeWindowBytesByDepth,
-            family: admission.familyAdapter,
-            throughputDeltaPPM: admission.throughputDeltaPPM,
-            // Explicit lab-only exploratory override. The signed admission
-            // capability remains unchanged and retains production provenance.
-            maximumNativeActiveRows: maxNativeActiveRows,
-            supportsSampling: admission.supportsSampling
-        )
+        let capability = labRuntimeCapability(from: admission)
         let servePathLoad: ModelRuntime.NativeMTPHardwareE2EServePathLoad?
         if verifyServePath {
             servePathLoad = try await loadServePath(
@@ -563,6 +543,33 @@ final class NativeMTPHardwareE2ERunner {
             runtimes: runtimes,
             ordinaryAdmissionRecorder: ordinaryAdmissionRecorder,
             nativeAdmissionRecorder: nativeAdmissionRecorder
+        )
+    }
+
+    /// Converts the validated signed admission into the lab runtime's
+    /// capability. Only the exploratory active-row bound differs; every
+    /// provenance-bearing admission field remains the loader's value.
+    func labRuntimeCapability(from admission: NativeMTPAdmissionCapability) -> NativeMTPCapability {
+        NativeMTPCapability(
+            admitted: true,
+            revoked: false,
+            revocationStateAvailable: true,
+            supportsCurrentProcessor: true,
+            supportsCurrentStateCache: true,
+            supportsStreaming: true,
+            supportsNonStreaming: true,
+            supportsStopSequences: true,
+            hasQualifiedRowMappedTransactions: true,
+            maximumProposalDepth: admission.maxProposalDepth,
+            maximumPromptTokens: admission.maxPromptTokens,
+            maximumCompletionTokens: admission.maxCompletionTokens,
+            completeWindowBytesByDepth: admission.completeWindowBytesByDepth,
+            family: admission.familyAdapter,
+            throughputDeltaPPM: admission.throughputDeltaPPM,
+            // Explicit lab-only exploratory override. The signed admission
+            // capability remains unchanged and retains production provenance.
+            maximumNativeActiveRows: maxNativeActiveRows,
+            supportsSampling: admission.supportsSampling
         )
     }
 
