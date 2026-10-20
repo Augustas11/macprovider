@@ -117,6 +117,38 @@ final class NativeMTPJourneyRunner {
     /// greedy-only tuple (glm5_next) must route them to ordinary decode with
     /// reason `sampling` (SPEC-048 R004).
     private var admitsSampledRows = true
+
+    struct MixedBatchComposition: Equatable, Sendable {
+        let ineligibleRow: Int
+        let eligibleRows: Int
+        let nativeRows: Int
+        let capacityDowngrades: Int
+        let allNativeCoverageRows: Int?
+        let loadGateExpected: Bool
+
+        var allEligibleRowsNative: Bool { nativeRows == eligibleRows }
+    }
+
+    /// Step 07/08 always reserves one row for a deterministic ordinary-path
+    /// request. The remaining rows exercise the signed native bound: rows over
+    /// the bound must capacity-downgrade, while a bound equal to qualified
+    /// slots must keep every eligible row native.
+    static func mixedBatchComposition(
+        qualifiedSlots: Int,
+        maxNativeActiveRows: Int
+    ) -> MixedBatchComposition {
+        let ineligibleRow = max(0, qualifiedSlots - 1)
+        let eligibleRows = max(0, qualifiedSlots - 1)
+        let nativeRows = min(eligibleRows, max(0, maxNativeActiveRows))
+        return MixedBatchComposition(
+            ineligibleRow: ineligibleRow,
+            eligibleRows: eligibleRows,
+            nativeRows: nativeRows,
+            capacityDowngrades: max(0, eligibleRows - nativeRows),
+            allNativeCoverageRows: maxNativeActiveRows >= qualifiedSlots ? qualifiedSlots : nil,
+            loadGateExpected: qualifiedSlots > maxNativeActiveRows
+        )
+    }
     /// step-05 forces rejections at the fixture's real paged-KV block
     /// boundaries: the family block (Qwen3.5 32, glm5_next 256).
     static func boundaryBlockTokens(family: NativeMTPHardwareE2EFamily) -> Int {
@@ -841,10 +873,74 @@ final class NativeMTPJourneyRunner {
         container: ModelContainer
     ) async throws -> NativeMTPJourneyStep {
         var step = NativeMTPJourneyStep(id: "step-07-08-mixed-multirow-capacity")
+        let composition = Self.mixedBatchComposition(
+            qualifiedSlots: qualifiedSlots,
+            maxNativeActiveRows: maxNativeActiveRows
+        )
+        if let allNativeCoverageRows = composition.allNativeCoverageRows {
+            let allNativeRequests = try (0..<allNativeCoverageRows).map { row in
+                try makeRequest(
+                    id: "journey-all-native-\(row)",
+                    prompt: "All-native row \(row): summarize why deterministic batching matters in \(3 + row) points.",
+                    maxTokens: 256 + 32 * row,
+                    temperature: 0,
+                    topP: 1
+                )
+            }
+            let allNativeExpected = try await completeDeterministicBatch(allNativeRequests, runtime: ordinary)
+            let allNativeControl = try await completeDeterministicBatch(
+                allNativeRequests.map { $0.withRequestID(($0.requestID ?? "") + "-control") },
+                runtime: ordinary
+            )
+            let allNativeActual = try await completeDeterministicBatch(allNativeRequests, runtime: native)
+            var allNativePaths: [String: String] = [:]
+            for request in allNativeRequests {
+                let id = request.requestID ?? ""
+                step.check(
+                    "\(id).ordinary_control_reproducible",
+                    allNativeExpected[id].map { expected in
+                        allNativeControl[id + "-control"].map { same(expected, $0) } ?? false
+                    } ?? false
+                )
+                step.check(
+                    "\(id).parity",
+                    allNativeExpected[id].map { expected in
+                        allNativeActual[id].map { same(expected, $0) } ?? false
+                    } ?? false
+                )
+                let path = recorder.requestSnapshot().last { $0.requestID == id }?.admission.effectivePath
+                step.check("\(id).selected_native", path == .nativeMTP)
+                allNativePaths[id] = path?.rawValue ?? "missing"
+            }
+            step.check(
+                "full_bound_all_native_batch",
+                allNativePaths.values.allSatisfy { $0 == DecodePath.nativeMTP.rawValue }
+                    && allNativePaths.count == allNativeCoverageRows
+            )
+            let allNativeGate = gateRecorder.summary(
+                requestIDs: Set(allNativeRequests.compactMap(\.requestID))
+            )
+            step.check(
+                "all_native_batch_has_no_load_gate_holds",
+                allNativeGate.depthZeroRounds == 0
+                    && allNativeGate.holdEpisodes == 0
+                    && allNativeGate.depthRestorations == 0
+                    && allNativeGate.heldFinishesClean == 0
+                    && allNativeGate.heldUnresolved == 0
+            )
+            step.details["all_native_batch_paths"] = allNativePaths
+            step.details["all_native_load_gate"] = [
+                "depth_zero_rounds": allNativeGate.depthZeroRounds,
+                "hold_episodes": allNativeGate.holdEpisodes,
+                "depth_restorations": allNativeGate.depthRestorations,
+                "held_finishes_clean": allNativeGate.heldFinishesClean,
+                "held_unresolved": allNativeGate.heldUnresolved,
+            ]
+        }
         var requests: [ChatCompletionRequest] = []
         for row in 0..<qualifiedSlots {
             let id = "journey-mixed-\(row)"
-            let ineligible = row % 3 == 2
+            let ineligible = row == composition.ineligibleRow
             requests.append(try makeRequest(
                 id: id,
                 prompt: "Row \(row): summarize the causes and effects of the industrial revolution in \(3 + row) points.",
@@ -881,11 +977,40 @@ final class NativeMTPJourneyRunner {
             reasons[id] = admission?.admission.selection.nativeMTPReason?.rawValue ?? ""
         }
         let nativeRows = paths.values.filter { $0 == DecodePath.nativeMTP.rawValue }.count
+        let ordinaryRows = paths.values.filter { $0 == DecodePath.ordinary.rawValue }.count
         let downgraded = reasons.values.filter { $0 == NativeMTPSelectorReason.capacityAboveNativeBound.rawValue }.count
         let ineligible = reasons.values.filter { $0 == NativeMTPSelectorReason.conversationKey.rawValue }.count
-        step.check("mixed_paths_in_one_batch", nativeRows >= 1 && nativeRows <= maxNativeActiveRows && downgraded >= 1 && ineligible >= 1)
+        step.check(
+            "mixed_paths_in_one_batch",
+            nativeRows >= 1 && ordinaryRows >= 1 && nativeRows + ordinaryRows == qualifiedSlots
+        )
+        step.check("native_rows_match_bound", nativeRows == composition.nativeRows)
+        step.check("capacity_downgrades_match_bound", downgraded == composition.capacityDowngrades)
+        step.check("ineligible_rows_match_composition", ineligible == 1)
+        step.check(
+            "all_eligible_rows_native_at_full_bound",
+            maxNativeActiveRows < qualifiedSlots || composition.allEligibleRowsNative && downgraded == 0
+        )
+        step.check(
+            "capacity_bound_exercised_when_lower",
+            maxNativeActiveRows >= composition.eligibleRows
+                || nativeRows == maxNativeActiveRows && downgraded > 0
+        )
         let summary = gateRecorder.summary(requestIDs: Set(requests.compactMap(\.requestID)))
-        step.check("depth_zero_hold_observed", summary.depthZeroRounds > 0)
+        step.check(
+            "depth_zero_hold_observed_when_over_bound",
+            !composition.loadGateExpected || summary.depthZeroRounds > 0
+        )
+        step.check(
+            "no_depth_zero_hold_at_full_bound",
+            composition.loadGateExpected || (
+                summary.depthZeroRounds == 0
+                    && summary.holdEpisodes == 0
+                    && summary.depthRestorations == 0
+                    && summary.heldFinishesClean == 0
+                    && summary.heldUnresolved == 0
+            )
+        )
         step.check("holds_resolved", summary.heldUnresolved == 0
             && summary.holdEpisodes == summary.depthRestorations + summary.heldFinishesClean)
         let snapshot = await native.currentSnapshot()
@@ -905,6 +1030,13 @@ final class NativeMTPJourneyRunner {
         step.details["oracle_batch_composition"] = requests.compactMap(\.requestID)
         step.details["paths"] = paths
         step.details["selector_reasons"] = reasons
+        step.details["expected_composition"] = [
+            "ineligible_row": composition.ineligibleRow,
+            "eligible_rows": composition.eligibleRows,
+            "native_rows": composition.nativeRows,
+            "capacity_downgrades": composition.capacityDowngrades,
+            "load_gate_expected": composition.loadGateExpected,
+        ]
         step.details["prompt_cap_reason"] = cappedAdmission?.admission.selection.nativeMTPReason?.rawValue ?? ""
         step.details["load_gate"] = [
             "depth_zero_rounds": summary.depthZeroRounds,

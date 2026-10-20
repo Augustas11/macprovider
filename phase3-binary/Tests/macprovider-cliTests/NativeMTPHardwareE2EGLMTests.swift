@@ -100,6 +100,36 @@ final class NativeMTPHardwareE2EGLMTests: XCTestCase {
         XCTAssertEqual(glm.selfTestChallengeID, "native-mtp-selftest-glm53-flash-0001")
     }
 
+    func testJourneyMixedCompositionExercisesCapacityAtBoundTwo() {
+        let composition = NativeMTPJourneyRunner.mixedBatchComposition(
+            qualifiedSlots: 4,
+            maxNativeActiveRows: 2
+        )
+
+        XCTAssertEqual(composition.ineligibleRow, 3)
+        XCTAssertEqual(composition.eligibleRows, 3)
+        XCTAssertEqual(composition.nativeRows, 2)
+        XCTAssertEqual(composition.capacityDowngrades, 1)
+        XCTAssertFalse(composition.allEligibleRowsNative)
+        XCTAssertNil(composition.allNativeCoverageRows)
+        XCTAssertTrue(composition.loadGateExpected)
+    }
+
+    func testJourneyMixedCompositionKeepsAllEligibleRowsNativeAtBoundFour() {
+        let composition = NativeMTPJourneyRunner.mixedBatchComposition(
+            qualifiedSlots: 4,
+            maxNativeActiveRows: 4
+        )
+
+        XCTAssertEqual(composition.ineligibleRow, 3)
+        XCTAssertEqual(composition.eligibleRows, 3)
+        XCTAssertEqual(composition.nativeRows, 3)
+        XCTAssertEqual(composition.capacityDowngrades, 0)
+        XCTAssertTrue(composition.allEligibleRowsNative)
+        XCTAssertEqual(composition.allNativeCoverageRows, 4)
+        XCTAssertFalse(composition.loadGateExpected)
+    }
+
     func testThroughputPhaseIsOptInAndBounded() throws {
         XCTAssertEqual(try NativeMTPHardwareE2ECommand.parse([]).throughputTokens, 0)
         XCTAssertEqual(

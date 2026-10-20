@@ -37,6 +37,10 @@
 //   --mtp-profile    plain step, 2-column verify and drafter commit times;
 //                    --mtp-census (MLX_MAX_OPS_PER_BUFFER=0): kernel families
 //                    for 1 and 2 tokens
+//   --mtp-multirow-profile
+//                    diagnostic B=4 ordinary (L=1) versus packed verify (L=2),
+//                    with routed-expert sharing off/on; reports exactness, route
+//                    overlap, wall time and a small GPU kernel census
 // GPU runs only in an announced lab window; never beside a serving provider.
 import Foundation
 import MLX
@@ -62,7 +66,7 @@ let profile = args.contains("--profile")
 let syncEach = args.contains("--sync")
 
 Memory.cacheLimit = 4096 << 20
-if ["--census", "--module-census", "--gpu-profile", "--batch-profile", "--mtp-census"].contains(where: CommandLine.arguments.contains) { DispatchCensus.install() }
+if ["--census", "--module-census", "--gpu-profile", "--batch-profile", "--mtp-census", "--mtp-multirow-profile"].contains(where: CommandLine.arguments.contains) { DispatchCensus.install() }
 
 if args.contains("--qmv-batch-sweep") {
     // MLX qmv at M = 1 and M = V vs glm5NextQMVBatch(V), 20 independent calls per eval.
@@ -273,6 +277,282 @@ for _ in 0 ..< ballastGB {
     ballast.append(b)
 }
 if ballastGB > 0 { print("ballast_gb=\(ballastGB) active_gb=\(Double(Memory.activeMemory) / 1e9)") }
+
+/// Stack row-owned GLM caches for an ordinary continuous-batch forward or a
+/// transactional packed-MTP verify. Both variants read the same row snapshots.
+func glm5NextBatchedCaches(_ rows: [[KVCache]], packedMTP: Bool = false) throws -> [KVCache] {
+    try (0 ..< rows[0].count).map { layer -> KVCache in
+        if rows[0][layer] is MambaCache {
+            let recurrent = rows.map { $0[layer] as! MambaCache }
+            if packedMTP { return try MTPPackedMambaBatchCache(rowCaches: recurrent) }
+            let batch = MambaCache()
+            batch[0] = concatenated(recurrent.map { $0[0]! }, axis: 0)
+            batch[1] = concatenated(recurrent.map { $0[1]! }, axis: 0)
+            return batch
+        }
+        return GLM5NextLatentCacheBatch(
+            rowCaches: rows.map { $0[layer] as! any GLM5NextLatentCache })
+    }
+}
+
+if args.contains("--mtp-multirow-profile") {
+    // Source diagnostic only: this does not model acceptance, drafter cost or
+    // scheduler throughput. It isolates the target's exact B=4,L=2 packed
+    // verification against B=4,L=1 ordinary decode from the same row caches.
+    let B = 4, L = 2
+    let reps = min(10, max(1, opt("--mtp-multirow-reps", 5)))
+    let censusReps = min(3, reps)
+    let sampler = GenerateParameters(temperature: 0).sampler()
+    var rowCaches = [[KVCache]]()
+    var ordinaryTokens = [Int32]()
+    var verifyTokens = [Int32]()
+    let prefillStart = Date()
+    for row in 0 ..< B {
+        let prompt = withRandomState(MLXRandom.RandomState(seed: UInt64(700 + row))) {
+            MLXRandom.randInt(0 ..< 150000, [1, promptLen]).asType(.int32)
+        }
+        let caches = try model.newCache(parameters: nil)
+        var emit = LMOutput.State()
+        emit[mtpEmitFlagKey] = true
+        let prefill = model(LMInput.Text(tokens: prompt), cache: caches, state: emit)
+        eval(prefill.logits, prefill.state![mtpLastHiddenStatesKey]!, caches)
+        let current = argMax(prefill.logits[0..., -1, 0...], axis: -1).asType(.int32)
+        eval(current)
+
+        let drafter = GLM5NextMTPDraftModel(config)
+        var drafterState = drafter.makeState(parameters: nil)
+        drafter.prepareDrafterState(
+            target: model, promptTokens: prompt,
+            targetHidden: prefill.state![mtpLastHiddenStatesKey]!, firstBonus: current,
+            positionDeltas: nil, state: &drafterState, sampler: sampler)
+        eval(drafterState.seedToken!, drafterState.cache)
+        let currentID = Int32(current.item(Int.self))
+        let proposalID = Int32(drafterState.seedToken!.item(Int.self))
+        ordinaryTokens.append(currentID)
+        verifyTokens += [currentID, proposalID]
+        rowCaches.append(caches)
+    }
+    let ordinaryInput = MLXArray(ordinaryTokens, [B, 1])
+    let verifyInput = MLXArray(verifyTokens, [B, L])
+    let rowMaps = rowCaches.enumerated().map { row, caches in
+        MTPPackedVerificationRowMap(
+            rowIndex: row, queryOffset: caches[0].offset, inputCount: L,
+            proposalCount: L - 1)
+    }
+    let maxOps = ProcessInfo.processInfo.environment["MLX_MAX_OPS_PER_BUFFER"] ?? "unset"
+    print(String(
+        format: "mtp-multirow prefill rows=%d prompt=%d seconds=%.1f reps=%d census_reps=%d",
+        B, promptLen, Date().timeIntervalSince(prefillStart), reps, censusReps))
+    print("mtp-multirow diagnostic instrumentation=dispatch_census mlx_max_ops_per_buffer=\(maxOps)")
+    print("mtp-multirow qualification=false private_checkpoint_transactions=not_compared")
+
+    func setSharedExpertLoads(_ enabled: Bool) {
+        for layer in model.languageModel.model.layers {
+            (layer.mlp as? GLM5NextMoE)?.shareExpertLoads = enabled
+        }
+    }
+    func bitwiseEqual(_ lhs: MLXArray, _ rhs: MLXArray) -> Bool {
+        guard lhs.shape == rhs.shape, lhs.dtype == rhs.dtype else { return false }
+        let l = lhs.asData(access: .copy)
+        let r = rhs.asData(access: .copy)
+        return l.shape == r.shape && l.dType == r.dType && l.data == r.data
+    }
+    func outputArrays(_ output: MTPPackedVerificationOutput, caches: [KVCache]) -> [MLXArray] {
+        var arrays = output.rows.flatMap { row -> [MLXArray] in
+            var values = [row.proposalLogits, row.bonusLogits]
+            if let hidden = row.lastHidden { values.append(hidden) }
+            if let state = row.continuationState {
+                values.append(state.lastHidden)
+                for key in state.sharedKV.keys.sorted() {
+                    values += [state.sharedKV[key]!.0, state.sharedKV[key]!.1]
+                }
+                if let deltas = state.positionDeltas { values.append(deltas) }
+            }
+            return values
+        }
+        arrays += caches.flatMap { $0.innerState() }
+        return arrays
+    }
+    func outputMetadata(_ output: MTPPackedVerificationOutput) -> [String] {
+        output.rows.map { row in
+            guard let state = row.continuationState else { return "missing" }
+            let offsets = state.sharedKVOffsets.keys.sorted().map {
+                "\($0)=\(state.sharedKVOffsets[$0]!)@\(state.sharedKVSourceIndices[$0]!)"
+            }.joined(separator: ",")
+            return "row=\(row.map.rowIndex);query=\(state.queryOffset);\(offsets)"
+        }
+    }
+    func cacheMetadata(_ caches: [KVCache]) -> [String] {
+        caches.enumerated().flatMap { layer, cache -> [String] in
+            var result = [
+                "layer=\(layer);offset=\(cache.offset);meta=\(cache.metaState.joined(separator: ","))"
+            ]
+            if let batch = cache as? any GLM5NextBatchedLatentCache {
+                result += batch.rowCaches.enumerated().map { row, rowCache in
+                    "layer=\(layer);row=\(row);offset=\(rowCache.offset);meta=\(rowCache.metaState.joined(separator: ","))"
+                }
+            }
+            if let packed = cache as? any MTPPackedVerificationCache,
+                let offsets = packed.mtpPackedHostBatchOffsets
+            {
+                result.append("layer=\(layer);packed_offsets=\(offsets)")
+            }
+            return result
+        }
+    }
+    func packedVerify(shared: Bool) throws -> (
+        MTPPackedVerificationOutput, [KVCache], [[KVCache]], [MLXArray]
+    ) {
+        setSharedExpertLoads(shared)
+        let rows = rowCaches.map { $0.map { $0.copy() } }
+        let caches = try glm5NextBatchedCaches(rows, packedMTP: true)
+        let output = try verifyMTPPackedTargets(
+            model: model, tokens: verifyInput, rowMaps: rowMaps, cache: caches,
+            requireContinuationState: true)
+        let arrays = outputArrays(output, caches: caches)
+        eval(arrays)
+        return (output, caches, rows, arrays)
+    }
+
+    // Bitwise target-model check is separate from timing. It covers logits,
+    // emitted hidden/continuation state, shared K/V and the post-forward cache.
+    let perToken = try packedVerify(shared: false)
+    let shared = try packedVerify(shared: true)
+    let exactArrays = perToken.3.count == shared.3.count
+        && zip(perToken.3, shared.3).allSatisfy { bitwiseEqual($0.0, $0.1) }
+    let exactMetadata = outputMetadata(perToken.0) == outputMetadata(shared.0)
+        && cacheMetadata(perToken.1) == cacheMetadata(shared.1)
+        && perToken.2.count == shared.2.count
+        && zip(perToken.2, shared.2).allSatisfy {
+            cacheMetadata($0.0) == cacheMetadata($0.1)
+        }
+    print("mtp-multirow exact shared_vs_per_token arrays=\(exactArrays) metadata=\(exactMetadata) array_count=\(perToken.3.count)")
+    guard exactArrays, exactMetadata else {
+        setSharedExpertLoads(false)
+        print("mtp-multirow stopped: shared expert path was not bitwise exact")
+        exit(2)
+    }
+
+    // Observe the actual top-8 routes on an untimed duplicate of this verify.
+    // This mirrors the non-deferred layer equations; its final logits are
+    // checked against the model forward before the overlap numbers are trusted.
+    func routeProbe() throws -> ([(Int, Int, [Int])], MLXArray) {
+        let caches = try glm5NextBatchedCaches(rowCaches.map { $0.map { $0.copy() } })
+        let inner = model.languageModel.model
+        var h = repeated(
+            expandedDimensions(inner.embedTokens(verifyInput), axis: 2),
+            count: inner.hcMult, axis: 2)
+        var topk = [MLXArray?]()
+        var observations = [(Int, Int, [Int])]()
+        for (index, layer) in inner.layers.enumerated() {
+            let (collapsed, post, comb) = layer.attnHC(h)
+            let normed = layer.inputLayerNorm(collapsed)
+            let attention: MLXArray
+            if layer.isLinear {
+                attention = (layer.selfAttn as! GLM5NextLinearAttention)(
+                    normed, cache: caches[index] as? MambaCache, checkpointAfter: 1)
+            } else {
+                (attention, topk) = (layer.selfAttn as! GLM5NextAttention)(
+                    normed, cache: caches[index], previousTopk: topk, perColumn: true)
+            }
+            let hh = glm5NextHCExpandForBench(attention, h, post, comb)
+            let (ffnIn, ffnPost, ffnComb) = layer.ffnHC(hh)
+            let mlpInput = layer.postAttentionLayerNorm(ffnIn)
+            if let moe = layer.mlp as? GLM5NextMoE {
+                let indices = moe.gate(mlpInput).0.asType(.uint32)
+                eval(indices)
+                let routed = indices.asArray(UInt32.self).map(Int.init)
+                let perRowDuplicates = (0 ..< B).map { row -> Int in
+                    let slots = Array(routed[(row * L * moe.gate.topK) ..< ((row + 1) * L * moe.gate.topK)])
+                    return slots.count - Set(slots).count
+                }
+                observations.append((index, routed.count - Set(routed).count, perRowDuplicates))
+            }
+            let ffnOut = (layer.mlp as! UnaryLayer)(mlpInput)
+            h = glm5NextHCExpandForBench(ffnOut, hh, ffnPost, ffnComb)
+        }
+        let hidden = h.mean(axis: 2)
+        return (observations, model.languageModel.logits(inner.norm(hidden)))
+    }
+    setSharedExpertLoads(false)
+    let probe = try routeProbe()
+    let referenceCaches = try glm5NextBatchedCaches(rowCaches.map { $0.map { $0.copy() } })
+    var verifyState = LMOutput.State()
+    verifyState[mtpEmitFlagKey] = true
+    verifyState[mtpCacheCheckpointIndexKey] = 1
+    let reference = model(
+        LMInput.Text(tokens: verifyInput), cache: referenceCaches, state: verifyState)
+    eval(probe.1, reference.logits)
+    let probeExact = bitwiseEqual(probe.1, reference.logits)
+    print("mtp-multirow route_probe_logits_exact=\(probeExact)")
+    guard probeExact else {
+        print("mtp-multirow stopped: route probe was not bitwise exact")
+        exit(2)
+    }
+    for (layer, duplicateSlots, perRow) in probe.0 {
+        print("mtp-multirow routes layer=\(layer) duplicate_slots=\(duplicateSlots)/\(B * L * config.numExpertsPerTok) per_row=\(perRow)")
+    }
+
+    func evaluateTarget(verify: Bool, caches: [KVCache]) throws {
+        if verify {
+            let output = try verifyMTPPackedTargets(
+                model: model, tokens: verifyInput, rowMaps: rowMaps, cache: caches,
+                requireContinuationState: true)
+            eval(outputArrays(output, caches: caches))
+        } else {
+            let logits = model(ordinaryInput, cache: caches)
+            eval([logits] + caches.flatMap { $0.innerState() })
+        }
+    }
+    func timed(_ label: String, shared: Bool, verify: Bool) throws {
+        setSharedExpertLoads(shared)
+        for _ in 0 ..< 2 {
+            let caches = try glm5NextBatchedCaches(
+                rowCaches.map { $0.map { $0.copy() } }, packedMTP: verify)
+            try evaluateTarget(verify: verify, caches: caches)
+        }
+        var times = [Double]()
+        for _ in 0 ..< reps {
+            let caches = try glm5NextBatchedCaches(
+                rowCaches.map { $0.map { $0.copy() } }, packedMTP: verify)
+            let start = Date()
+            try evaluateTarget(verify: verify, caches: caches)
+            times.append(Date().timeIntervalSince(start) * 1000)
+        }
+        times.sort()
+        DispatchCensus.reset()
+        DispatchCensus.enabled = true
+        for _ in 0 ..< censusReps {
+            let caches = try glm5NextBatchedCaches(
+                rowCaches.map { $0.map { $0.copy() } }, packedMTP: verify)
+            try evaluateTarget(verify: verify, caches: caches)
+        }
+        DispatchCensus.enabled = false
+        DispatchCensus.group.wait()
+        let sharedDispatches = DispatchCensus.counts.reduce(0) { total, entry in
+            let (name, count) = entry
+            return total + (
+                name.contains("glm5next_moe_gate_up_shared")
+                    || name.contains("glm5next_moe_down_shared") ? count : 0)
+        }
+        let candidateActive = shared && sharedDispatches > 0
+        print(String(
+            format: "mtp-multirow wall_instrumented %@ requested_shared=%@ shared_candidate_active=%@ ms_median=%.2f min=%.2f max=%.2f",
+            label, shared.description, candidateActive.description,
+            times[times.count / 2], times[0], times[times.count - 1]))
+        if shared {
+            print("mtp-multirow shared_candidate_dispatches=\(sharedDispatches)")
+        }
+        print("mtp-multirow census \(label) shared=\(shared):")
+        DispatchCensus.gpuReport(steps: censusReps)
+    }
+    try timed("ordinary_B4_L1", shared: false, verify: false)
+    try timed("verify_B4_L2", shared: false, verify: true)
+    try timed("verify_B4_L2", shared: true, verify: true)
+    setSharedExpertLoads(false)
+    exit(0)
+}
+
 if args.contains("--mtp-profile") {
     // Synchronous GPU+host time of one plain decode step, one MTP verify
     // forward (2 columns, checkpoint 1) and one drafter commit forward, each
@@ -401,19 +681,6 @@ if let batchList = optString("--batch") {
             MLXRandom.randInt(0 ..< 150000, [1, promptLen + 7 * r]).asType(.int32)
         }
     }
-    // Recurrent states stacked on the batch axis; sparse layers keep one
-    // latent cache per row (GLM5NextLatentCacheBatch).
-    func batched(_ rows: [[KVCache]]) -> [KVCache] {
-        (0 ..< rows[0].count).map { layer -> KVCache in
-            if rows[0][layer] is MambaCache {
-                let batch = MambaCache()
-                batch[0] = concatenated(rows.map { ($0[layer] as! MambaCache)[0]! }, axis: 0)
-                batch[1] = concatenated(rows.map { ($0[layer] as! MambaCache)[1]! }, axis: 0)
-                return batch
-            }
-            return GLM5NextLatentCacheBatch(rowCaches: rows.map { $0[layer] as! any GLM5NextLatentCache })
-        }
-    }
     let pf = Date()
     var rowCaches = [[KVCache]]()
     var firstTokens = [Int32]()
@@ -435,7 +702,7 @@ if let batchList = optString("--batch") {
     print(String(format: "batch prefill rows=%d prompt=%d+7r seconds=%.1f active_gb=%.1f", maxRows, promptLen, Date().timeIntervalSince(pf), Double(Memory.activeMemory) / 1e9))
     var baseline: Double?
     for B in sizes {
-        let caches = batched(rowCaches.prefix(B).map { $0.map { $0.copy() } })
+        let caches = try glm5NextBatchedCaches(rowCaches.prefix(B).map { $0.map { $0.copy() } })
         var tok = MLXArray(Array(firstTokens.prefix(B))).reshaped(B, 1)
         var times = [Double]()
         var recorded = [(MLXArray, MLXArray)]()
