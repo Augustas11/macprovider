@@ -24,9 +24,12 @@ JOURNAL_SCHEMA = "macprovider.studio_lab_window_journal.v1"
 ABORT_SCHEMA = "macprovider.studio_lab_window_abort.v1"
 TERMINAL_PHASE = "restored"
 PHASES = (
-    "prepared", "pausing", "drained", "stopped", "lab_running", "lab_stopped",
+    "prepared", "pausing", "drained", "stopping_provider", "stopped",
+    "lab_running", "lab_stopped",
     "restoring_provider", "provider_ready", TERMINAL_PHASE,
 )
+LAUNCHCTL_TRANSITION_TIMEOUT_S = 30
+LAUNCHCTL_POLL_S = 0.1
 LIVE_HASH_KEYS = (
     "binary_sha256", "config_sha256", "provider_plist_sha256",
     "watchdog_plist_sha256", "compatibility_set_sha256",
@@ -520,8 +523,12 @@ def bootout(label: str) -> None:
         ["launchctl", "bootout", f"gui/{os.getuid()}/{label}"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    if loaded(label):
-        raise Refusal(f"launch job remained loaded: {label}")
+    deadline = time.monotonic() + LAUNCHCTL_TRANSITION_TIMEOUT_S
+    while loaded(label):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise Refusal(f"launch job remained loaded: {label}")
+        time.sleep(min(LAUNCHCTL_POLL_S, remaining))
 
 
 def bootstrap(label: str, plist: str) -> None:
@@ -531,8 +538,12 @@ def bootstrap(label: str, plist: str) -> None:
         ["launchctl", "bootstrap", f"gui/{os.getuid()}", plist],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    if not loaded(label):
-        raise Refusal(f"launch job did not load: {label}")
+    deadline = time.monotonic() + LAUNCHCTL_TRANSITION_TIMEOUT_S
+    while not loaded(label):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise Refusal(f"launch job did not load: {label}")
+        time.sleep(min(LAUNCHCTL_POLL_S, remaining))
 
 
 class ProcBsdInfo(ctypes.Structure):
@@ -681,6 +692,15 @@ def restore_locked(manifest: dict, journal: Path, record: dict) -> dict:
     if record["phase"] == TERMINAL_PHASE:
         return record
     stop_lab(record, manifest)
+    if record.get("provider_stop_started") is True:
+        validate_live_hashes(manifest)
+        bootout(manifest["watchdog_label"])
+        bootout(manifest["provider_label"])
+        baseline_process = manifest["baseline"]["snapshot"]
+        wait_process_exit(
+            baseline_process.get("pid"), baseline_process.get("process_start_us"),
+            timeout_s=manifest["drain_timeout_s"], poll_s=manifest["poll_s"],
+        )
     record = write_transition(journal, record, "lab_stopped", lab_process_group_gone=True)
     validate_live_hashes(manifest)
     record = write_transition(journal, record, "restoring_provider")
@@ -688,7 +708,10 @@ def restore_locked(manifest: dict, journal: Path, record: dict) -> dict:
     ready = stable_serving(
         manifest, hold_s=120, deadline_s=manifest["ready_timeout_s"], resume=True,
     )
-    record = write_transition(journal, record, "provider_ready", restored_process=ready)
+    record = write_transition(
+        journal, record, "provider_ready", restored_process=ready,
+        provider_stop_started=False,
+    )
     validate_live_hashes(manifest)
     bootstrap(manifest["watchdog_label"], manifest["watchdog_plist"])
     validate_live_hashes(manifest)
@@ -713,6 +736,11 @@ def supervise(manifest: dict, manifest_sha: str, journal: Path, nonce: str) -> i
         wait_drain(manifest)
         with JournalLock(journal):
             record = write_transition(journal, read_journal(journal), "drained")
+        with JournalLock(journal):
+            record = write_transition(
+                journal, read_journal(journal), "stopping_provider",
+                provider_stop_started=True,
+            )
         bootout(manifest["watchdog_label"])
         bootout(manifest["provider_label"])
         baseline_process = manifest["baseline"]["snapshot"]
