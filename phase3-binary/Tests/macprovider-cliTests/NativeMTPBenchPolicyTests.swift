@@ -150,8 +150,7 @@ final class NativeMTPBenchPolicyTests: XCTestCase {
             XCTAssertTrue("\(error)".contains("laboratory_max_native_active_rows must be within"), "\(error)")
         }
         var aboveQualified = try template()
-        aboveQualified["qualified_slots"] = 4
-        aboveQualified["laboratory_max_native_active_rows"] = 5
+        aboveQualified["laboratory_max_native_active_rows"] = 9
         XCTAssertThrowsError(try load(aboveQualified)) { error in
             XCTAssertTrue("\(error)".contains("laboratory_max_native_active_rows must be within"), "\(error)")
         }
