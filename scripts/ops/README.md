@@ -10,7 +10,7 @@ not add steps of its own:
 | `discovery-renew.sh` | signed release-discovery freshness renewal | `.github/workflows/renew-release-discovery-head.yml` |
 | `catalog-activate.sh` | catalog, CB policy and native-MTP activation | `docs/runbooks/native-mtp-enablement.md`, `docs/runbooks/catalog-release-decision-tree.md`, `docs/runbooks/pearl-coordinator-rollout.md` |
 | `pearl-runtime.sh` | coordinator and gateway runtime release; pending stats migrations (`stats_migrate`: checked before the apply and before health, applied under the live-ops lock, no downtime); one-time retention `auto_vacuum` conversion (`PEARL_RUNTIME_TASK=retention-vacuum-conversion`); one on-demand retention run (`PEARL_RUNTIME_TASK=retention-run`, no restart); compute-integrity private corpus install (`PEARL_RUNTIME_TASK=compute-integrity-enable`, one restart); operator-reviewed native-vision qualification install into the Pearl overlay (`PEARL_RUNTIME_TASK=vision-qualification`, `VISION_QUALIFICATION_FILE`, one restart as the boot-state proof; SIGHUP also applies the list); Pearl updater bundle install from the running tag (`PEARL_RUNTIME_TASK=updater-bundle`, both Pearl locks, no restart) | `docs/runbooks/pearl-coordinator-rollout.md`, `ops/runbooks/settlement-evidence-retention.md`, `docs/runbooks/compute-integrity-private-corpus.md`, `docs/runbooks/native-vision-acceptance.md`, `docs/runbooks/catalog-release-decision-tree.md` (Enabling rollout) |
-| `canary-swap.sh` | CLI candidate onto the canary provider: `check` (MLX kernels in every shipped metallib, verified binary) then `swap` (pause, drain, back up, payload-only swap, resume; the watchdog stays booted out until the candidate, or the restored version, is buyer_serving; a crash loop or `/v1/status` silent for 120 s restores the backup and resumes) | `docs/releases/cli-release-train.md` (Promotion gate item 5) |
+| `canary-swap.sh` | CLI candidate onto the canary provider: `check` (MLX kernels in every shipped metallib, verified binary) then `swap` (pause, drain, back up, payload-only swap, resume; the watchdog stays booted out until the candidate, or the restored version, is buyer_serving; a crash loop, or `/v1/status` silent for 120 s after the model loaded, restores the backup and resumes; silence while the model loads is bounded only by the 1800 s ready timeout) | `docs/releases/cli-release-train.md` (Promotion gate item 5) |
 | `live-lock.sh` | one live actor at a time | rollout rule 3 |
 | `privacy-activate.sh` | existing signed identity approval; durable rollback | `docs/runbooks/privacy-network-activation.md`, SPEC-049 §8.3 |
 
@@ -178,7 +178,7 @@ STUDIO_SSH=<ssh alias for the canary Mac, or "local" when the canary provider ru
 STUDIO_SSH_KEY=<optional key file>
 STUDIO_STATUS_PORT=<provider local status port>
 BUYER_TOKEN_FILE=<file holding a buyer API key>  # gateway proof only
-PROBE_MODEL=<model id>                           # default: the admission tuple's model
+PROBE_MODEL=<model id>                           # default: the model the canary's /v1/status reports
 PEARL_COORDINATOR_DB=<coordinator database path on the coordinator host>  # gateway proof reads request_log (buyers get no provider id)
 CATALOG_CANARY_PROVIDER_ID=...                   # as scripts/catalog-content-release.sh
 PEARL_RUNTIME_VERSION=v<x.y.z>                   # pearl-runtime.sh target tag

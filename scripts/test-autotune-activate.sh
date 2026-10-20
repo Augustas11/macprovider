@@ -20,6 +20,11 @@
 #   E. Lease deadline: a command still running at MAX + ROLLBACK seconds is
 #      killed (process group, TERM then KILL) by the remote runner, the
 #      controller ends lease-lost, and both locks free within a bounded grace.
+#   H. Heartbeat: a healthy controller idle past AA_LEASE_IDLE_SECONDS keeps
+#      its lease (the watchdog's PINGs) and its next command runs; a
+#      controller SIGKILLed while a stray child still holds the lease channel
+#      open (no EOF, like a half-open ssh) leaves no orphaned runner: the
+#      runner exits on the missing heartbeat and both locks free.
 #   F. #1693 L0: renewal's publish and rollback refuse under the locks while a
 #      pricing transaction journal exists.
 #   G. #1693 E2 V8: a coordinator that is still booting (no SIGHUP handler yet,
@@ -410,6 +415,51 @@ exit 0
   || fail "lease watchdog must TERM the controller past AA_LEASE_MAX_SECONDS (rc=$rc): $(cat "$T/wd.err")"
 rc=0; run_publish flock || rc=$?
 grep -q "content drift under lock" "$T/pub.err" || fail "watchdog exit must release the lease: $(cat "$T/pub.err")"
+
+# ---------------------------------------------------------------------------
+# H. Heartbeat and orphaned runners.
+# ---------------------------------------------------------------------------
+mkdir -p "$T/h1"
+rc=0
+AA_LEASE_HEARTBEAT_SECONDS=1 AA_LEASE_IDLE_SECONDS=3 bash -c "$(preamble)"'
+trap "exit 71" HUP INT TERM
+trap aa_lease_release EXIT
+AA_WORK_DIR="$1"; AA_LOCK_MODE=lease
+aa_lease_acquire
+sleep 7
+printf "echo still-held\n" >"$AA_WORK_DIR/c.sh"
+c=0; aa_lease_run "$AA_WORK_DIR/c.sh" "$AA_WORK_DIR/o" "$AA_WORK_DIR/e" || c=$?
+echo "$c $AA_LEASE_LOST $(cat "$AA_WORK_DIR/o")" >"$AA_WORK_DIR/result"
+' _ "$T/h1" 2>"$T/h1.err" || rc=$?
+[ "$rc" -eq 0 ] && [ "$(cat "$T/h1/result")" = "0 0 still-held" ] ||
+  fail "H1: a healthy controller idle past AA_LEASE_IDLE_SECONDS must keep its lease (rc=$rc result=$(cat "$T/h1/result" 2>/dev/null)): $(cat "$T/h1.err")"
+for _ in $(seq 1 50); do free_locks && break; sleep 0.1; done
+free_locks || fail "H1: release must free both locks"
+
+mkdir -p "$T/h2"
+AA_LEASE_HEARTBEAT_SECONDS=1 AA_LEASE_IDLE_SECONDS=3 bash -c "$(preamble)"'
+trap "exit 71" HUP INT TERM
+trap aa_lease_release EXIT
+AA_WORK_DIR="$1"
+aa_lease_acquire
+# A stray child holds the lease channel open past the controller (no EOF).
+sleep 60 </dev/null >/dev/null 2>&1 &
+echo "$!" >"$AA_WORK_DIR/stray"
+touch "$AA_WORK_DIR/held"
+while :; do sleep 1; done
+' _ "$T/h2" 2>"$T/h2.err" &
+h2_pid=$!
+for _ in $(seq 1 100); do [ -e "$T/h2/held" ] && break; kill -0 "$h2_pid" 2>/dev/null || break; sleep 0.1; done
+[ -e "$T/h2/held" ] || fail "H2: the controller never took the lease: $(cat "$T/h2.err")"
+! free_locks || fail "H2: the locks must be held while the controller lives"
+kill -9 "$h2_pid"; wait "$h2_pid" 2>/dev/null || true
+h2_start=$SECONDS
+for _ in $(seq 1 150); do free_locks && break; sleep 0.1; done
+free_locks || fail "H2: a runner whose controller died must release both locks (no heartbeat for AA_LEASE_IDLE_SECONDS)"
+[ $((SECONDS - h2_start)) -le 12 ] || fail "H2: the orphaned runner held the locks for $((SECONDS - h2_start))s"
+kill -0 "$(cat "$T/h2/stray")" 2>/dev/null || fail "H2: the stray channel holder must still be alive for this test to mean anything"
+kill "$(cat "$T/h2/stray")" 2>/dev/null || true
+rm -rf "$T/fake/tmp/"macprovider-activation-lease.*
 
 # ---------------------------------------------------------------------------
 # F. #1693 L0: under the locks, renewal's publish and rollback refuse while a
