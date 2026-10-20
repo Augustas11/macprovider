@@ -298,12 +298,27 @@ if args[0] == "print":
 elif args[0] == "kickstart":
     with open(os.path.join(ctl, "canary-restarts.log"), "a") as fh:
         fh.write("kickstart\n")
-    if not os.path.exists(os.path.join(ctl, "canary-stuck")):
+    def come_up():
         state_path = os.path.join(ctl, "canary-state.json")
         state = json.load(open(state_path))
         served = json.load(open(os.path.join(fake, "served.json")))
         state.update(served, session=state["session"] + 1)
         json.dump(state, open(state_path, "w"))
+    load = os.path.join(ctl, "canary-load-seconds")
+    if os.path.exists(load):
+        # A large model: the canary comes up on the new release only after
+        # the load, detached so the restart itself returns at once.
+        if os.fork() == 0:
+            os.setsid()
+            null = os.open(os.devnull, os.O_RDWR)
+            for fd in (0, 1, 2):
+                os.dup2(null, fd)
+            import time
+            time.sleep(int(open(load).read()))
+            come_up()
+            os._exit(0)
+    elif not os.path.exists(os.path.join(ctl, "canary-stuck")):
+        come_up()
 sys.exit(0)
 LAUNCHCTL
 cat >"$T/bin/lsof" <<'LSOF'
@@ -920,7 +935,7 @@ setup_env() {
   local A="$CCR_FAKE/opt/macprovider/autotune" rel
   mkdir -p "$A/releases"
   chmod 0755 "$CCR_FAKE/opt" "$CCR_FAKE/opt/macprovider"
-  for rel in test-prev-v1 test-live-v1; do
+  for rel in test-old-v1 test-prev-v1 test-live-v1; do
     mkdir -p "$A/releases/$rel-0000000000000000"
     cp "$root/phase3-binary/catalog/autotune/"{release.json,trusted-keys.json,tier2-catalog.json} "$A/releases/$rel-0000000000000000/"
     cp "$root/phase3-binary/dist/static/"*.json "$root/phase3-binary/dist/static/"*.sig "$A/releases/$rel-0000000000000000/"
@@ -928,6 +943,8 @@ setup_env() {
   done
   ln -s releases/test-live-v1-0000000000000000 "$A/current"
   printf 'releases/test-prev-v1-0000000000000000\n' >"$A/.previous-target"
+  # CCR_WINDOW_TWO=1: a retained window of two entries.
+  [ "${CCR_WINDOW_TWO:-0}" != 1 ] || printf 'releases/test-old-v1-0000000000000000\n' >>"$A/.previous-target"
   # The live base yaml is the tracked yaml the live release was cut with: its
   # rate_card is in parity with the live card (the stub checks it on every HUP).
   git -C "$R" show "$LIVE_COMMIT:phase4-coordinator/dist/coordinator.yaml" >"$CCR_FAKE/opt/macprovider/coordinator.yaml"
@@ -1405,6 +1422,34 @@ window_is "canary rollback retains the adopted release" "releases/$retained rele
 grep -q 'keeping releases/test-new-v1' "$T/out" || fail "canary: adopted release not retained"
 grep -q '"release_id": "test-live-v1"' "$CCR_TEST_CTL/canary-state.json" || fail "canary not restarted onto the prior release"
 note "ok: rollback on evidence (c) retains the adopted release and restarts the canary onto the prior release"
+# The same with a retained window of two entries: the rollback reads every
+# retained identity (a multi-line window must not break the remote read).
+CCR_WINDOW_TWO=1 setup_env
+touch "$CCR_TEST_CTL/canary-baked"
+run deploy
+[ "$RC" -eq 4 ] || fail "canary, two-entry window: expected rollback exit 4 (rc=$RC): $(tail -n 30 "$T/out") $(tail -n 10 "$T/err")"
+live_unchanged "canary, two-entry window"
+grep -q 'syntax error' "$T/out" "$T/err" && fail "canary, two-entry window: the retained-window read hit a shell syntax error: $(grep 'syntax error' "$T/out" "$T/err")"
+grep -q 'cannot read retained release identities' "$T/out" && fail "canary, two-entry window: retained identities were not read: $(tail -n 20 "$T/out")"
+retained="$(ls "$A_ROOT/releases" | grep "^$NEW_DIR_GLOB" | head -n 1)"
+window_is "canary rollback, two-entry window" "releases/$retained releases/test-prev-v1-0000000000000000 releases/test-old-v1-0000000000000000"
+note "ok: rollback on evidence (c) with a two-entry retained window reads every retained identity"
+# A canary whose model loads for longer than the lease's idle bound: the
+# default (c) deadline (1800 s) waits for it, the lease bound covers that
+# wait, and the heartbeat keeps the idle lease channel, so the activation
+# completes (no false rollback, no LEASE LOST).
+setup_env
+printf '8\n' >"$CCR_TEST_CTL/canary-load-seconds"
+RC=0
+(cd "$R" && unset CATALOG_CANARY_RECOVERY_SECONDS && AA_LEASE_IDLE_SECONDS=3 AA_LEASE_HEARTBEAT_SECONDS=1 \
+  bash scripts/catalog-content-release.sh --deploy --commit "$COMMIT") >"$T/out" 2>"$T/err" || RC=$?
+[ "$RC" -eq 0 ] || fail "slow canary load: deploy must succeed (rc=$RC): $(tail -n 30 "$T/out") $(tail -n 10 "$T/err")"
+grep -q 'evidence (c): waiting up to 1800s for the canary' "$T/out" || fail "slow canary load: the default (c) deadline must be 1800s: $(grep 'evidence (c)' "$T/out")"
+grep -q 'holding the Pearl deploy lease (updater + coordinator-deploy locks) for up to 3400s' "$T/out" "$T/err" ||
+  fail "slow canary load: the lease bound must cover the (c) deadline: $(grep 'holding the Pearl' "$T/out" "$T/err")"
+grep -q 'evidence (c): canary .* admitted on test-new-v1' "$T/out" || fail "slow canary load: canary not admitted: $(tail -n 10 "$T/out")"
+case "$(readlink "$A_ROOT/current")" in releases/test-new-v1-*) ;; *) fail "slow canary load: current not activated" ;; esac
+note "ok: a canary model load longer than the lease idle bound completes under the default deadline and lease"
 # (d): a catalog that was admissible before the HUP (the live release, in the
 # validated admitted set) rejected after it fails, even at the same rate as
 # before; a chronically inadmissible catalog is logged and passes.

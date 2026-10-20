@@ -614,11 +614,14 @@ gateway_proof() {
   [ -n "$token_file" ] && [ -f "$token_file" ] || refuse "BUYER_TOKEN_FILE must name a readable buyer token file"
   require_studio_ssh
   case "${STUDIO_STATUS_PORT:-}" in ""|*[!0-9]*) refuse "STUDIO_STATUS_PORT must be set and numeric" ;; esac
-  model="${PROBE_MODEL:-$(json_field "$REPO_ROOT/$AUTOTUNE/native-mtp-admission.json" 'd["entries"][0]["model_key"]')}"
-  [ -n "$model" ] || refuse "PROBE_MODEL is unset and no admission model_key was found"
 
   local before after b_mtp b_req b_cb b_shared b_serial a_mtp a_req a_cb a_shared a_serial
   read_provider_status "$OPS_TMP_DIR/before.json"
+  # The model the canary serves, as its /v1/status reports it: a request for
+  # any other model cannot reach the canary (the gateway 404s a model no
+  # provider serves). PROBE_MODEL overrides it.
+  model="${PROBE_MODEL:-$(json_field "$OPS_TMP_DIR/before.json" 'd["model"]')}"
+  [ -n "$model" ] || refuse "PROBE_MODEL is unset and the canary /v1/status reports no served model"
   before="$(provider_counters "$OPS_TMP_DIR/before.json")" || refuse "provider status lacks native_mtp.mtp_forwards/requests_total or continuous_batching.scheduler.shared_forward_calls"
   read -r b_mtp b_req b_cb b_shared b_serial <<< "$before"
   local canary_sid pdb psqlite

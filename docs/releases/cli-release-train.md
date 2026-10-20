@@ -106,13 +106,14 @@ Critical, High or Medium findings. This records merged source, not a signed CLI 
 or live rollout. #2062 requires no coordinator/gateway runtime change; deliver it through
 `scripts/ops/cli-release.sh` (`status`, `next`, then one documented `next --run` step at a time).
 
-Deploy order for #2064: a policy that carries `max_served_slots` is refused by every
+Deploy order for #2064 (done): a policy that carries `max_served_slots` is refused by every
 release path until `scripts/cb_release_baselines.py` `CB_POLICY_CONSUMER_FLOOR` is raised
-from `(0, 22, 27)` to `(0, 22, 28)`. Raise it in a reviewed change only after **both** this
-CLI cut and the Pearl runtime carrying #2064's coordinator half are live; older CLIs reject
-a whole policy that carries the field. The GLM-5.3-Flash ceiling (4 served slots, from rows
-1/2/4 evidence) then lands in a catalog cut through `scripts/ops/catalog-activate.sh`; until
-then the Studio pins 4 slots with an owner-pinned `max_concurrency_override`.
+from `(0, 22, 27)` to `(0, 22, 28)`, because older CLIs reject a whole policy that carries the
+field. This CLI cut and Pearl runtime v1.8.259 (#2064's coordinator half, 2026-10-19) are
+both live, so the floor is raised and the GLM-5.3-Flash ceiling (4 served slots, from rows
+1/2/4 evidence) is signed in catalog `published-2026-10-20-glm53-flash-cb-ceiling-v1`,
+activated through `scripts/ops/catalog-activate.sh`. The Studio's owner-pinned
+`max_concurrency_override` is no longer needed once the signed ceiling caps its grant.
 
 ## Next CLI release — net changes vs 1.8.251 (tracked 2026-10-18; released as v1.8.256)
 
@@ -1080,8 +1081,13 @@ mainland-provider installer handoff.
    bundled `default.metallib` lacks a kernel the pinned MLX core loads by name
    (the 1.8.254 candidate shipped without `gather_mm_offsets` and could not
    load MoE models), and after the restart it restores the backup and
-   resumes the previous version on a provider restart or a `/v1/status`
-   silence of 120 s. Verify the installed CLI advertises
+   resumes the previous version on a provider restart or exit (crash loop,
+   detected at once) or on a `/v1/status` silence of 120 s
+   (`CANARY_STATUS_TIMEOUT_S`) after the candidate reported its model loaded.
+   Silence while the model loads is not a failure: GLM-5.3-Flash keeps
+   `/v1/status` silent for 7-13 minutes while it loads, so with the same
+   provider pid alive the load is bounded only by `CANARY_READY_TIMEOUT_S`
+   (1800 s). No timeout override is needed. Verify the installed CLI advertises
    1.8.217, joins through Pearl's exact compatibility set, preserves operator
    pause through coordinator drain, and serves a bounded request. Do not touch
    the designated Studio until the operator releases its current session lock.

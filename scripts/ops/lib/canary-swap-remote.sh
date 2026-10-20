@@ -7,9 +7,14 @@
 # Payload-only swap of the live provider to a verified candidate tarball:
 # pause and drain, back up the install dir, replace the payload, restart, then
 # watch (the installed watchdog stays booted out until the candidate, or the
-# restored version, is buyer_serving). A provider process restart (crash loop) or a /v1/status silence of
-# STATUS_TIMEOUT_S restores the backup, waits until the previous version is
-# buyer_serving again, and resumes it. Config and LaunchAgents are never edited.
+# restored version, is buyer_serving). A provider process restart (crash loop),
+# a process that exits, or a /v1/status silence of STATUS_TIMEOUT_S once the
+# candidate has reported its model loaded restores the backup, waits until the
+# previous version is buyer_serving again, and resumes it. Before the model is
+# loaded /v1/status may stay silent (a large model, such as GLM-5.3-Flash at
+# about 175 GB, loads for 7-13 minutes): silence then is bounded only by
+# READY_TIMEOUT_S while the provider pid stays the same and alive. Config and
+# LaunchAgents are never edited.
 #
 # Exit codes (also written to RESULT_FILE): 0 swapped and buyer-serving;
 # 4 refused before the swap (payload untouched, provider resumed);
@@ -360,7 +365,12 @@ cmp "$STAGE/macprovider-cli" "$INSTALL_DIR/macprovider-cli" || restore_backup "i
 start_jobs provider || restore_backup "provider job did not start"
 say "restarted on $VERSION"
 
-# --- watch: crash loop or status silence restores the backup ----------------
+# --- watch: crash loop, exit or post-load status silence restores the backup -
+# A pid change (crash loop) or a process that exited (launchd reports no pid)
+# fails at once. /v1/status silence
+# while the model loads is not a failure: the model-load window of a large
+# model is bounded by READY_TIMEOUT_S alone. Once the candidate has reported
+# model_loaded, a silence of STATUS_TIMEOUT_S is a hang and fails.
 start="$(now)"
 pid0=""
 while [ -z "$pid0" ]; do
@@ -370,6 +380,7 @@ while [ -z "$pid0" ]; do
   sleep 1
 done
 last_answer="$start"
+loaded=0
 ready_at=""
 while :; do
   t="$(now)"
@@ -380,8 +391,12 @@ while :; do
     last_answer="$t"
     running="$(status_field "$body" binary_version)"
     [ "$running" = "$VERSION" ] || restore_backup "/v1/status reports binary_version ${running:-none}, expected $VERSION"
-    if [ "$(status_field "$body" model_loaded)" = true ] && paused "$body"; then
-      control resume_request || true
+    if [ "$(status_field "$body" model_loaded)" = true ]; then
+      [ "$loaded" = 1 ] || say "model loaded on $VERSION after $(( t - start ))s"
+      loaded=1
+      if paused "$body"; then
+        control resume_request || true
+      fi
     fi
     if serving "$body" "$VERSION"; then
       if [ -z "$ready_at" ]; then
@@ -392,8 +407,8 @@ while :; do
     else
       ready_at=""
     fi
-  elif [ $(( t - last_answer )) -ge "$STATUS_TIMEOUT_S" ]; then
-    restore_backup "/v1/status not answering for ${STATUS_TIMEOUT_S}s"
+  elif [ "$loaded" = 1 ] && [ $(( t - last_answer )) -ge "$STATUS_TIMEOUT_S" ]; then
+    restore_backup "/v1/status not answering for ${STATUS_TIMEOUT_S}s after the model loaded"
   fi
   [ $(( t - start )) -lt "$READY_TIMEOUT_S" ] || restore_backup "not buyer_serving within ${READY_TIMEOUT_S}s"
   sleep "$POLL_S"

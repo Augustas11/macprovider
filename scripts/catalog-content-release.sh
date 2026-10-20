@@ -80,12 +80,22 @@
 #                             shows a connected provider would be stranded
 #   CATALOG_EVIDENCE_WATCH_SECONDS  (d) watch window, default 600
 #   CATALOG_EVIDENCE_POLL_SECONDS   (d) poll interval, default 30
-#   CATALOG_CANARY_RECOVERY_SECONDS (c) canary proof deadline, default 180
+#   CATALOG_CANARY_RECOVERY_SECONDS (c) canary proof deadline (and the
+#                             rollback's wait for the canary), default 1800: a
+#                             large model keeps the canary's status silent while
+#                             it loads (GLM-5.3-Flash, about 175 GB: 7-13 min);
+#                             the wait ends as soon as the proof passes
 #   CATALOG_EVIDENCE_SETTLE_SECONDS (a)/(b)/rollback convergence deadline, default 30
 #   CATALOG_COORDINATOR_READY_SECONDS how long to wait for a booting coordinator
 #                             to be ready (unit active + /healthz) before any
 #                             SIGHUP and after a controlled restart, default 900
-#   AA_LEASE_MAX_SECONDS      lease bound, default 2700 for this lane
+#   AA_LEASE_MAX_SECONDS      lease bound; default for this lane: the larger of
+#                             2700 and 900 + READY + CANARY_RECOVERY + WATCH +
+#                             GATEWAY_CONVERGENCE + 6 x SETTLE seconds, so a
+#                             healthy activation never outlives its lease
+#   AA_LEASE_ROLLBACK_SECONDS rollback time under the lease past that bound;
+#                             default for this lane 300 + 2 x READY seconds
+#                             (the remote rollback and a controlled restart)
 #   CATALOG_GATEWAY_RATE_CARD_URL   public rate card the gateway serves
 #                             (default https://api.malibu.tech/v1/rate-card);
 #                             pricing releases poll it for convergence, alert-only
@@ -176,7 +186,7 @@ PRICING_WRITERS_MANIFEST=scripts/pricing-lane-installed-writers.txt
 
 WATCH_SECONDS="${CATALOG_EVIDENCE_WATCH_SECONDS:-600}"
 POLL_SECONDS="${CATALOG_EVIDENCE_POLL_SECONDS:-30}"
-CANARY_RECOVERY_SECONDS="${CATALOG_CANARY_RECOVERY_SECONDS:-180}"
+CANARY_RECOVERY_SECONDS="${CATALOG_CANARY_RECOVERY_SECONDS:-1800}"
 SETTLE_SECONDS="${CATALOG_EVIDENCE_SETTLE_SECONDS:-30}"
 READY_SECONDS="${CATALOG_COORDINATOR_READY_SECONDS:-900}"
 GATEWAY_RATE_CARD_URL="${CATALOG_GATEWAY_RATE_CARD_URL:-https://api.malibu.tech/v1/rate-card}"
@@ -188,7 +198,13 @@ done
 export AA_COORDINATOR_READY_SECONDS="$READY_SECONDS"
 case "$GATEWAY_RATE_CARD_URL" in https://*|http://127.0.0.1:*) ;; *) fatal "CATALOG_GATEWAY_RATE_CARD_URL must be https (or loopback http)" ;; esac
 [ "$POLL_SECONDS" -ge 1 ] || fatal "CATALOG_EVIDENCE_POLL_SECONDS must be at least 1"
-export AA_LEASE_MAX_SECONDS="${AA_LEASE_MAX_SECONDS:-2700}"
+# The lease bound covers every wait of a healthy activation (the publish's
+# ready wait, the canary model load, the (d) watch, the pricing gateway poll
+# and the settle polls) plus a margin for staging and the HUP checks.
+_lease_need=$((900 + READY_SECONDS + CANARY_RECOVERY_SECONDS + WATCH_SECONDS + GATEWAY_CONVERGENCE_SECONDS + 6 * SETTLE_SECONDS))
+[ "$_lease_need" -ge 2700 ] || _lease_need=2700
+export AA_LEASE_MAX_SECONDS="${AA_LEASE_MAX_SECONDS:-$_lease_need}"
+export AA_LEASE_ROLLBACK_SECONDS="${AA_LEASE_ROLLBACK_SECONDS:-$((300 + 2 * READY_SECONDS))}"
 
 CATALOG_CANARY_PROVIDER_ID="${CATALOG_CANARY_PROVIDER_ID:-}"
 CATALOG_CANARY_AUTH_TOKEN="${CATALOG_CANARY_AUTH_TOKEN:-}"
@@ -1688,6 +1704,7 @@ ev_c_canary() {
     log "evidence (c): restarting canary serve onto $REL_ID (launchd drain + restart)"
   fi
   canary_restart "$apply" || { ev_fail c "canary restart failed"; return 1; }
+  log "evidence (c): waiting up to ${CANARY_RECOVERY_SECONDS}s for the canary (a large model keeps its status silent while it loads)"
   deadline=$((SECONDS + CANARY_RECOVERY_SECONDS))
   while :; do
     if ! canary_proof REL "$WORK/canary-after.json"; then
@@ -1800,7 +1817,9 @@ plan_retention() {
   case "$CCR_FAILED_STEP" in c) ;; *) return 0 ;; esac
   fetch_poolz "$WORK/poolz-retain.json" || { log "retention: /poolz unreachable; restoring the exact prior window"; return 0; }
   local ids window
-  ids="$(SSH "cd '$REMOTE_AUTOTUNE_DIR' && for e in $ORIG_PREVIOUS_TARGET; do python3 -c 'import json,sys;m=json.load(open(sys.argv[1]+\"/release.json\"));print(sys.argv[1], m[\"release_id\"], m[\"feeds\"][\"autotune-candidates.json\"][\"sha256\"])' \"\$e\"; done")" || { log "retention: cannot read retained release identities; restoring the exact prior window"; return 0; }
+  # One line: the window holds one entry per line, and a newline inside the
+  # remote `for` word list is a bash syntax error once it has two entries.
+  ids="$(SSH "cd '$REMOTE_AUTOTUNE_DIR' && for e in $(printf '%s' "$ORIG_PREVIOUS_TARGET" | tr '\n' ' '); do python3 -c 'import json,sys;m=json.load(open(sys.argv[1]+\"/release.json\"));print(sys.argv[1], m[\"release_id\"], m[\"feeds\"][\"autotune-candidates.json\"][\"sha256\"])' \"\$e\"; done")" || { log "retention: cannot read retained release identities; restoring the exact prior window"; return 0; }
   window="$(python3 - "$WORK/poolz-retain.json" "releases/$RELEASE_DIRNAME" "$REL_ID" "$REL_CAND_SHA" "$ids" <<'PY'
 import json, sys
 poolz, incoming, rid, sha, ids = sys.argv[1:]
