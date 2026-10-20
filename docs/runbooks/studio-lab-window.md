@@ -1,8 +1,9 @@
-# Guarded offline Studio diagnostic
+# Guarded offline Studio jobs
 
-This entry point reserves one bounded offline diagnostic window for the
-four-native-row GLM campaign. It does not install a lab binary, connect one to
-the live coordinator, change a catalog policy, or qualify a release.
+This entry point reserves one bounded offline window for the four-native-row
+GLM campaign. It does not install a lab binary, connect one to the live
+coordinator, or change a catalog policy. Completing a job is not, by itself,
+release qualification or buyer-path acceptance.
 
 The operator must have handed back the Studio before the window starts.
 Use the existing campaign handoff and evidence; a new build is not a reason
@@ -39,10 +40,69 @@ controller. Also set:
 | `STUDIO_LAB_SOURCE_DIR` | Absolute path to the campaign clone on the Studio |
 | `STUDIO_LAB_GIT_HEAD` | Exact 40-character campaign commit |
 | `STUDIO_LAB_WINDOW_DIR` | Dedicated private directory for this window's journal and staged helpers |
+| `STUDIO_LAB_JOB_KIND` | Closed job kind: `diagnostic-legacy` (default), `profiler-only`, or `qualification` |
 
 The command and its arguments are fixed in
 `scripts/lab/2080-native-rows/run-window-diagnostic.sh`. There is no shell
 command setting. Do not change it to `serve`.
+
+### Fixed jobs and evidence reuse
+
+`diagnostic-legacy` preserves the original full-bound journey followed by one
+instrumented profiler repetition. Its maximum offline-child deadline is one
+hour. Use existing successful journey evidence for subsequent measurement;
+do not repeat the journey merely because the profiler changed.
+
+`profiler-only` runs two separate processes: five wall-only profiler
+repetitions, then one instrumented repetition. Wall-only mode never installs
+the dispatch census. Each process retains actual-model parity checks. The
+maximum offline-child deadline is one hour. These measurements are diagnostics,
+not a statistically qualified throughput gain.
+
+For profiler-only reuse, prepare private copies of the prior `manifest.json`,
+`completed.json`, and `journey.json` under `.lab-window/reuse/` in the campaign
+clone. The runner checks the successful terminal receipt's original manifest
+binding, the executed journey checks, unchanged provider source and artifact
+identities, and fixture identities. It freezes hashes of all three imported
+files. Historical receipts did not hash the journey output: this import pins
+the protected archive now, not retroactively. Retain that provenance limitation
+in the private evidence record. A partial journey remains partial.
+
+The new fixture clone is content-hashed once before provider pause using the
+same canonical full-snapshot identity as the harness, including weight and
+tokenizer bytes. A private preflight receipt outside the fixture pins file
+metadata; changes, additions or removals are refused before model load. Normal
+`status` calls do not reread all model weights.
+
+`qualification` uses `.lab-window/qualification-policy.json`, a frozen policy
+for exactly sixteen native cells: slots 1–4 × prompt lengths 1536/4096 × output
+lengths 128/512, followed by the continuous 1800-second sustained window.
+The runner invokes one fixed `native-mtp-bench` process per cell, then the
+sustained phase, with no arbitrary flags, selected-cell override, exploratory
+mode, or partial-run resume. Each process has a one-hour ceiling and the whole
+offline child has a twelve-hour ceiling (`STUDIO_LAB_TIMEOUT_S` may lower it).
+The overall ceiling bounds provider unavailability; it is not an estimate or
+a guarantee that every policy will finish. Exhausting either deadline fails
+the job and restores service without weakening the qualification gates.
+
+Before pausing service, qualification runs the harness's authoritative
+`--validate-only` preflight without loading the model. A policy not admitted
+by that parser is refused. This runner does not raise the signed production
+bound or bypass policy validation; laboratory-bound amendments belong to the
+model campaign. Qualification binds its current binary and frozen inputs; it
+does not require that binary to be byte-identical to a previous journey's
+binary. Preserve existing journey evidence in the campaign instead of rerunning
+it merely to satisfy a new build identity. Completing execution also does not
+replace the R015 analyzer verdict, campaign audit, signed admission deployment,
+or paid gateway proof.
+
+New job completion records bind the job kind and immutable source, executable,
+Metal, fixture, policy (where applicable), imported-evidence and reviewed-runner
+identities. An unrelated repository commit does not invalidate identical
+inputs, and completing one job cannot suppress another. The tracked-clean
+exact campaign commit is retained separately as execution provenance. The
+reviewed runner comes from clean main; the hash-bound campaign clone may be
+an unmerged laboratory candidate.
 
 ## Execute
 
@@ -64,7 +124,7 @@ The controller authenticates the installed binary against the published
 signed release, freezes the source/artifact and configuration identities,
 and takes the live-operations lock. The detached supervisor pauses and
 drains the provider, stops its watchdog and launch job, runs the fixed
-offline child under a deadline, and proves the child group is gone before
+offline child under its job-specific deadline, and proves the child group is gone before
 restoring the signed provider.
 
 Restoration requires the original serving identity and configuration,
@@ -82,6 +142,11 @@ An existing journal takes precedence over a new run. Do not remove a journal,
 force-release a lock, or bootstrap another provider while an offline child
 may remain alive. A baseline identity/configuration mismatch is a safety
 refusal, not permission to overwrite the changed files.
+
+Recovery uses the recorded job identity, not a newly selected job in the
+environment. Existing diagnostic journals and their completion records remain
+recoverable. Missing lab artifacts must not prevent restoration of the signed
+provider from an active journal.
 
 If dispatch never reached a durable journal, the controller authenticates and
 aborts the prepared intent under the remote journal lock. A durable abort

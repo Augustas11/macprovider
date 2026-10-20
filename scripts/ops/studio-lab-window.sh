@@ -44,10 +44,20 @@ window_paths() {
   REMOTE_LIFECYCLE="$STUDIO_LAB_WINDOW_DIR/remote.py"
   REMOTE_PROBE="$STUDIO_LAB_WINDOW_DIR/probe.py"
   REMOTE_LAB_SCRIPT="$STUDIO_LAB_WINDOW_DIR/run-window-diagnostic.sh"
+  REMOTE_JOB_HELPER="$STUDIO_LAB_WINDOW_DIR/manifest.py"
 }
 
 active_marker_path() { marker_path "$OPS_SCOPE" active; }
-completion_mark() { printf 'complete-%s' "$STUDIO_LAB_GIT_HEAD"; }
+completion_mark() {
+  local identity=""
+  if [ -f "$(active_marker_path)" ]; then
+    identity="$(json_field "$(active_marker_path)" 'd.get("job_identity")')"
+  else
+    identity="${STUDIO_LAB_JOB_IDENTITY:-}"
+  fi
+  if [[ "$identity" =~ ^[0-9a-f]{64}$ ]]; then printf 'complete-%s' "$identity"
+  else printf 'complete-%s' "$STUDIO_LAB_GIT_HEAD"; fi
+}
 
 # common.sh normally releases a PID-bound lock on every exit. Once this
 # controller has durably recorded an active detached window, that would make
@@ -101,7 +111,9 @@ require_fresh_settings() {
   case "${CANARY_LAUNCHD_LABEL:-live.malibu.provider}" in *[!A-Za-z0-9._-]*) refuse "CANARY_LAUNCHD_LABEL is invalid" ;; esac
   STUDIO_STATUS_PORT="${STUDIO_STATUS_PORT:-8080}"
   DRAIN_TIMEOUT_S="${STUDIO_LAB_DRAIN_TIMEOUT_S:-600}"
-  LAB_TIMEOUT_S="${STUDIO_LAB_TIMEOUT_S:-3600}"
+  STUDIO_LAB_JOB_KIND="${STUDIO_LAB_JOB_KIND:-diagnostic-legacy}"
+  case "$STUDIO_LAB_JOB_KIND" in diagnostic-legacy|profiler-only|qualification) ;; *) refuse "STUDIO_LAB_JOB_KIND is invalid" ;; esac
+  LAB_TIMEOUT_S="${STUDIO_LAB_TIMEOUT_S:-$([ "$STUDIO_LAB_JOB_KIND" = qualification ] && printf 43200 || printf 3600)}"
   READY_TIMEOUT_S="${STUDIO_LAB_READY_TIMEOUT_S:-1200}"
   POLL_S="${STUDIO_LAB_POLL_S:-5}"
   for value in "$STUDIO_STATUS_PORT" "$DRAIN_TIMEOUT_S" "$LAB_TIMEOUT_S" "$READY_TIMEOUT_S" "$POLL_S"; do
@@ -109,14 +121,28 @@ require_fresh_settings() {
   done
   [ "$READY_TIMEOUT_S" -ge 120 ] || refuse "STUDIO_LAB_READY_TIMEOUT_S must be at least 120"
   [ "$READY_TIMEOUT_S" -le 1200 ] || refuse "STUDIO_LAB_READY_TIMEOUT_S must not exceed 1200"
-  [ "$LAB_TIMEOUT_S" -le 3600 ] || refuse "STUDIO_LAB_TIMEOUT_S must not exceed 3600"
+  if [ "$STUDIO_LAB_JOB_KIND" = qualification ]; then
+    [ "$LAB_TIMEOUT_S" -le 43200 ] || refuse "qualification timeout must not exceed 43200"
+  else
+    [ "$LAB_TIMEOUT_S" -le 3600 ] || refuse "STUDIO_LAB_TIMEOUT_S must not exceed 3600"
+  fi
   [ -x "$LAB_SCRIPT" ] || refuse "the fixed issue-2080 diagnostic script is missing or not executable"
 }
 
 load_recovery_context() {
   require_recovery_settings
   DRAIN_TIMEOUT_S="${STUDIO_LAB_DRAIN_TIMEOUT_S:-600}"
-  LAB_TIMEOUT_S="${STUDIO_LAB_TIMEOUT_S:-3600}"
+  if [ -f "$(active_marker_path)" ]; then
+    STUDIO_LAB_JOB_KIND="$(json_field "$(active_marker_path)" 'd.get("job_kind")')"
+    STUDIO_LAB_JOB_IDENTITY="$(json_field "$(active_marker_path)" 'd.get("job_identity")')"
+  else
+    STUDIO_LAB_JOB_KIND="${STUDIO_LAB_JOB_KIND:-diagnostic-legacy}"
+  fi
+  STUDIO_LAB_JOB_KIND="${STUDIO_LAB_JOB_KIND:-diagnostic-legacy}"
+  case "$STUDIO_LAB_JOB_KIND" in diagnostic-legacy|profiler-only|qualification) ;; *) refuse "active Studio job kind is invalid" ;; esac
+  # Recovery is bound to the durable active marker, not a caller's later
+  # environment.  The remote journal remains the authoritative deadline.
+  LAB_TIMEOUT_S="$([ "$STUDIO_LAB_JOB_KIND" = qualification ] && printf 43200 || printf 3600)"
   READY_TIMEOUT_S="${STUDIO_LAB_READY_TIMEOUT_S:-1200}"
   POLL_S="${STUDIO_LAB_POLL_S:-5}"
   local value
@@ -125,7 +151,11 @@ load_recovery_context() {
   done
   [ "$READY_TIMEOUT_S" -ge 120 ] || refuse "STUDIO_LAB_READY_TIMEOUT_S must be at least 120"
   [ "$READY_TIMEOUT_S" -le 1200 ] || refuse "STUDIO_LAB_READY_TIMEOUT_S must not exceed 1200"
-  [ "$LAB_TIMEOUT_S" -le 3600 ] || refuse "STUDIO_LAB_TIMEOUT_S must not exceed 3600"
+  if [ "$STUDIO_LAB_JOB_KIND" = qualification ]; then
+    [ "$LAB_TIMEOUT_S" -le 43200 ] || refuse "qualification recovery timeout must not exceed 43200"
+  else
+    [ "$LAB_TIMEOUT_S" -le 3600 ] || refuse "STUDIO_LAB_TIMEOUT_S must not exceed 3600"
+  fi
   if [ -f "$(active_marker_path)" ]; then
     STUDIO_LAB_GIT_HEAD="$(json_field "$(active_marker_path)" 'd.get("lab_git_head")')"
   else
@@ -138,7 +168,7 @@ remote_state() {
   studio_ssh "test \"\$(sysctl -n hw.model)\" = $(q "$STUDIO_MODEL") || exit 3
 if [ -e $(q "$REMOTE_JOURNAL") ] || [ -e $(q "$REMOTE_MANIFEST") ] || [ -e $(q "$REMOTE_ABORT_RECEIPT") ]; then
   python3 - status --manifest $(q "$REMOTE_MANIFEST") --journal $(q "$REMOTE_JOURNAL")
-elif [ -e $(q "$REMOTE_LIFECYCLE") ] || [ -e $(q "$REMOTE_PROBE") ] || [ -e $(q "$REMOTE_LAB_SCRIPT") ]; then
+elif [ -e $(q "$REMOTE_LIFECYCLE") ] || [ -e $(q "$REMOTE_PROBE") ] || [ -e $(q "$REMOTE_LAB_SCRIPT") ] || [ -e $(q "$REMOTE_JOB_HELPER") ]; then
   printf '%s\n' '{\"state\":\"partial\"}'
 else
   printf '%s\n' '{\"state\":\"absent\"}'
@@ -150,7 +180,10 @@ remote_probe() {
 }
 
 source_snapshot() {
-  studio_ssh "python3 - source-snapshot --source-dir $(q "$STUDIO_LAB_SOURCE_DIR") --git-head $(q "$STUDIO_LAB_GIT_HEAD") --provider-label $(q "${CANARY_LAUNCHD_LABEL:-live.malibu.provider}")" < "$MANIFEST_HELPER"
+  local script_sha helper_sha
+  script_sha="$(shasum -a 256 "$LAB_SCRIPT" | awk '{print $1}')"
+  helper_sha="$(shasum -a 256 "$MANIFEST_HELPER" | awk '{print $1}')"
+  studio_ssh "python3 - source-snapshot --source-dir $(q "$STUDIO_LAB_SOURCE_DIR") --git-head $(q "$STUDIO_LAB_GIT_HEAD") --provider-label $(q "${CANARY_LAUNCHD_LABEL:-live.malibu.provider}") --job-kind $(q "$STUDIO_LAB_JOB_KIND") --lab-script-sha256 $(q "$script_sha") --job-helper-sha256 $(q "$helper_sha")" < "$MANIFEST_HELPER"
 }
 
 durable_file() {
@@ -179,7 +212,7 @@ write_active_marker() {
     manifest_sha="$(json_field "$(active_marker_path)" 'd.get("manifest_sha256")')"
   fi
   mark_done "$OPS_SCOPE" active "durable Studio window ownership" \
-    "$(python3 -c 'import json,sys; print(json.dumps({"phase":sys.argv[1],"nonce":sys.argv[2],"lab_git_head":sys.argv[3],"outcome_marker":sys.argv[4],"manifest_sha256":sys.argv[5]}))' "$phase" "$nonce" "$STUDIO_LAB_GIT_HEAD" "$outcome" "$manifest_sha")"
+    "$(python3 -c 'import json,sys; print(json.dumps({"phase":sys.argv[1],"nonce":sys.argv[2],"lab_git_head":sys.argv[3],"outcome_marker":sys.argv[4],"manifest_sha256":sys.argv[5],"job_kind":sys.argv[6],"job_identity":sys.argv[7]}))' "$phase" "$nonce" "$STUDIO_LAB_GIT_HEAD" "$outcome" "$manifest_sha" "${STUDIO_LAB_JOB_KIND:-diagnostic-legacy}" "${STUDIO_LAB_JOB_IDENTITY:-}")"
   durable_file "$(active_marker_path)"
 }
 
@@ -193,7 +226,7 @@ prepare_window_dir() {
 }
 
 cleanup_remote_stage() {
-  studio_ssh "python3 -c 'import os,stat,sys; root=sys.argv[1]; names=sys.argv[2:]; exists=os.path.lexists(root); s=os.lstat(root) if exists else None; assert not exists or (os.path.isabs(root) and os.path.realpath(root)==root and stat.S_ISDIR(s.st_mode) and s.st_uid==os.getuid() and not stat.S_IMODE(s.st_mode)&0o077 and not os.path.islink(root)); [os.unlink(os.path.join(root,n)) for n in names if exists and os.path.lexists(os.path.join(root,n))]' $(q "$STUDIO_LAB_WINDOW_DIR") manifest.json remote.py probe.py run-window-diagnostic.sh" >/dev/null
+  studio_ssh "python3 -c 'import os,stat,sys; root=sys.argv[1]; names=sys.argv[2:]; exists=os.path.lexists(root); s=os.lstat(root) if exists else None; assert not exists or (os.path.isabs(root) and os.path.realpath(root)==root and stat.S_ISDIR(s.st_mode) and s.st_uid==os.getuid() and not stat.S_IMODE(s.st_mode)&0o077 and not os.path.islink(root)); [os.unlink(os.path.join(root,n)) for n in names if exists and os.path.lexists(os.path.join(root,n))]' $(q "$STUDIO_LAB_WINDOW_DIR") manifest.json remote.py probe.py run-window-diagnostic.sh manifest.py" >/dev/null
 }
 
 terminal_context_ok() {
@@ -224,20 +257,26 @@ nonce = active.get("nonce")
 head = active.get("lab_git_head")
 marker = active.get("outcome_marker")
 manifest_sha = active.get("manifest_sha256")
+job_kind = active.get("job_kind", "diagnostic-legacy")
+job_identity = active.get("job_identity", "")
 assert active.get("phase") == "outcome_recorded"
 assert isinstance(nonce, str) and re.fullmatch(r"[0-9a-f]{32}", nonce)
 assert isinstance(head, str) and re.fullmatch(r"[0-9a-f]{40}", head)
 assert isinstance(manifest_sha, str) and re.fullmatch(r"[0-9a-f]{64}", manifest_sha)
-assert isinstance(marker, str) and re.fullmatch(r"(?:complete-[0-9a-f]{40}|restored-[0-9a-f]{32})", marker)
+assert job_kind in ("diagnostic-legacy", "profiler-only", "qualification")
+assert (job_kind == "diagnostic-legacy" and job_identity == "") or re.fullmatch(r"[0-9a-f]{64}", job_identity or "")
+assert isinstance(marker, str) and re.fullmatch(r"(?:complete-(?:[0-9a-f]{40}|[0-9a-f]{64})|restored-[0-9a-f]{32})", marker)
 outcome = read_safe(os.path.join(root, marker + ".json"))
 rc = outcome.get("lab_exit_code")
 restored = outcome.get("restored_process")
 assert outcome.get("step") == marker and outcome.get("nonce") == nonce and outcome.get("lab_git_head") == head
 assert outcome.get("manifest_sha256") == manifest_sha
+assert outcome.get("job_kind", "diagnostic-legacy") == job_kind
+assert outcome.get("job_identity", "") == job_identity
 if remote.get("state") == "idle":
     assert remote.get("nonce") == nonce and remote.get("manifest_sha256") == manifest_sha
 assert isinstance(rc, int) and not isinstance(rc, bool) and 0 <= rc <= 255
-assert marker == (("complete-" + head) if rc == 0 else ("restored-" + nonce))
+assert marker == (("complete-" + (job_identity or head)) if rc == 0 else ("restored-" + nonce))
 assert isinstance(restored, dict)
 assert isinstance(restored.get("pid"), int) and restored["pid"] > 0
 assert isinstance(restored.get("process_start_us"), int) and restored["process_start_us"] > 0
@@ -348,7 +387,7 @@ build_manifest() {
 }
 
 record_outcome() {
-  local state="$1" nonce revision lab_rc marker payload log_path active phase restored manifest_sha
+  local state="$1" nonce revision lab_rc marker payload log_path active phase restored manifest_sha job_kind job_identity
   nonce="$(jget "$state" 'd["nonce"]')"; revision="$(jget "$state" 'd["revision"]')"
   lab_rc="$(jget "$state" 'd.get("lab_exit_code")')"
   phase="$(jget "$state" 'd.get("phase")')"
@@ -359,7 +398,10 @@ record_outcome() {
   [ "$(json_field "$active" 'd.get("nonce")')" = "$nonce" ] || return 6
   [ "$(json_field "$active" 'd.get("lab_git_head")')" = "$STUDIO_LAB_GIT_HEAD" ] || return 6
   manifest_sha="$(json_field "$active" 'd.get("manifest_sha256")')"
+  job_kind="$(json_field "$active" 'd.get("job_kind", "diagnostic-legacy")')"
+  job_identity="$(json_field "$active" 'd.get("job_identity", "")')"
   [[ "$manifest_sha" =~ ^[0-9a-f]{64}$ ]] || return 6
+  case "$job_kind" in diagnostic-legacy) [ -z "$job_identity" ] || return 6 ;; profiler-only|qualification) [[ "$job_identity" =~ ^[0-9a-f]{64}$ ]] || return 6; [ "$(jget "$state" 'd.get("job_kind")')" = "$job_kind" ] && [ "$(jget "$state" 'd.get("job_identity_sha256")')" = "$job_identity" ] || return 6 ;; *) return 6 ;; esac
   case "$revision" in ""|*[!0-9]*|0) return 6 ;; esac
   case "$lab_rc" in ""|*[!0-9]*) lab_rc=6 ;; esac
   [ "$lab_rc" -le 255 ] || lab_rc=6
@@ -370,7 +412,7 @@ record_outcome() {
     marker="restored-$nonce"
   fi
   log_path="$STUDIO_LAB_WINDOW_DIR/supervisor-$nonce.log"
-  payload="$(python3 -c 'import json,sys; print(json.dumps({"lab_git_head":sys.argv[1],"nonce":sys.argv[2],"lab_exit_code":int(sys.argv[3]),"private_supervisor_log":sys.argv[4],"journal_revision":int(sys.argv[5]),"restored_process":json.loads(sys.argv[6]),"manifest_sha256":sys.argv[7]}))' "$STUDIO_LAB_GIT_HEAD" "$nonce" "$lab_rc" "$log_path" "$revision" "$restored" "$manifest_sha")"
+  payload="$(python3 -c 'import json,sys; print(json.dumps({"lab_git_head":sys.argv[1],"nonce":sys.argv[2],"lab_exit_code":int(sys.argv[3]),"private_supervisor_log":sys.argv[4],"journal_revision":int(sys.argv[5]),"restored_process":json.loads(sys.argv[6]),"manifest_sha256":sys.argv[7],"job_kind":sys.argv[8],"job_identity":sys.argv[9]}))' "$STUDIO_LAB_GIT_HEAD" "$nonce" "$lab_rc" "$log_path" "$revision" "$restored" "$manifest_sha" "$job_kind" "$job_identity")"
   mark_done "$OPS_SCOPE" "$marker" "offline diagnostic exited $lab_rc after exact provider restoration" "$payload"
   durable_file "$(marker_path "$OPS_SCOPE" "$marker")"
   write_active_marker outcome_recorded "$nonce" "$marker"
@@ -455,7 +497,7 @@ abort_prepared_window() {
 }
 
 start_window() {
-  local probe source manifest nonce version state manifest_sha
+  local probe source manifest nonce version state manifest_sha source_kind
   require_fresh_settings
   probe="$OPS_TMP_DIR/studio-probe.json"; source="$OPS_TMP_DIR/source-snapshot.json"
   manifest="$OPS_TMP_DIR/window-manifest.json"
@@ -466,6 +508,15 @@ start_window() {
   published_provider_identity_ok "$version" "$(cat "$probe")" "$STUDIO_OWNER_PIN_INSTALL_DIR" ||
     refuse "installed provider is not the exact published signed release"
   source_snapshot > "$source" || refuse "fixed diagnostic source/artifact snapshot failed"
+  source_kind="$(json_field "$source" 'd.get("job",{}).get("kind")')"
+  if [ "$STUDIO_LAB_JOB_KIND" = diagnostic-legacy ]; then
+    [ -z "$source_kind" ] || refuse "legacy source snapshot unexpectedly created a job"
+    STUDIO_LAB_JOB_IDENTITY=""
+  else
+    [ "$source_kind" = "$STUDIO_LAB_JOB_KIND" ] || refuse "source snapshot job kind is not the requested job"
+    STUDIO_LAB_JOB_IDENTITY="$(json_field "$source" 'd.get("job",{}).get("identity_sha256")')"
+    [[ "$STUDIO_LAB_JOB_IDENTITY" =~ ^[0-9a-f]{64}$ ]] || refuse "source snapshot job identity is invalid"
+  fi
   nonce="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
   build_manifest "$probe" "$source" "$manifest" "$nonce" || refuse "could not build the fixed lab manifest"
   manifest_sha="$(shasum -a 256 "$manifest" | awk '{print $1}')"
@@ -473,6 +524,9 @@ start_window() {
   stage_file "$REMOTE_HELPER" "$REMOTE_LIFECYCLE" 600 || refuse "could not stage remote lifecycle helper"
   stage_file "$PROBE_HELPER" "$REMOTE_PROBE" 600 || refuse "could not stage provider probe"
   stage_file "$LAB_SCRIPT" "$REMOTE_LAB_SCRIPT" 700 || refuse "could not stage fixed diagnostic"
+  if [ "$STUDIO_LAB_JOB_KIND" != diagnostic-legacy ]; then
+    stage_file "$MANIFEST_HELPER" "$REMOTE_JOB_HELPER" 600 || refuse "could not stage fixed job helper"
+  fi
   stage_file "$manifest" "$REMOTE_MANIFEST" 600 || refuse "could not stage window manifest"
   "$OPS_DIR/live-lock.sh" acquire "$MACPROVIDER_OPS_OWNER" --purpose "$OPS_NAME:active-window" >&2 || return 6
   write_active_marker prepared "$nonce" "" "$manifest_sha"
@@ -486,7 +540,7 @@ start_window() {
 }
 
 gather() {
-  local state action remote_kind active completion
+  local state action remote_kind active completion source source_kind
   require_recovery_settings
   state="$(remote_state)" || { fact remote_state unreadable; step recovery blocked "remote journal state is unreadable"; set_next recovery blocked "Inspect the guarded Studio journal" "" "remote state cannot be authenticated"; return; }
   remote_kind="$(jget "$state" 'd.get("state")')"; action="$(jget "$state" 'd.get("action")')"
@@ -525,8 +579,36 @@ gather() {
   fi
   [ "$remote_kind" = absent ] || { step recovery blocked "protected scratch state is unexpected"; set_next recovery blocked "Inspect protected Studio scratch" "" "scratch state is not safely classifiable"; return; }
   require_fresh_settings
+  # The production preflight always initializes these; retain the legacy
+  # default for callers that only need completion-status inspection.
+  STUDIO_LAB_JOB_KIND="${STUDIO_LAB_JOB_KIND:-diagnostic-legacy}"
+  STUDIO_LAB_JOB_IDENTITY="${STUDIO_LAB_JOB_IDENTITY:-}"
+  # Completion for a qualified job is keyed to a newly-derived immutable job
+  # identity, never a caller-supplied environment value or stale status cache.
+  if [ "$STUDIO_LAB_JOB_KIND" = diagnostic-legacy ]; then
+    STUDIO_LAB_JOB_IDENTITY=""
+  else
+    source="$OPS_TMP_DIR/status-source-snapshot.json"
+    if ! source_snapshot > "$source"; then
+      step recovery blocked "fresh Studio source snapshot could not authenticate the job identity"
+      set_next recovery blocked "Preserve Studio state for source identity inspection" "" "source snapshot failed"
+      return
+    fi
+    source_kind="$(json_field "$source" 'd.get("job",{}).get("kind")')"
+    STUDIO_LAB_JOB_IDENTITY="$(json_field "$source" 'd.get("job",{}).get("identity_sha256")')"
+    if [ "$source_kind" != "$STUDIO_LAB_JOB_KIND" ] || ! [[ "$STUDIO_LAB_JOB_IDENTITY" =~ ^[0-9a-f]{64}$ ]]; then
+      step recovery blocked "fresh Studio source snapshot job identity is invalid"
+      set_next recovery blocked "Preserve Studio state for manifest inspection" "" "job identity mismatch"
+      return
+    fi
+  fi
   completion="$(completion_mark)"
-  if marker_done "$OPS_SCOPE" "$completion" && [ "$(marker_field "$OPS_SCOPE" "$completion" 'd.get("lab_exit_code")')" = 0 ]; then
+  if marker_done "$OPS_SCOPE" "$completion" && [ "$(marker_field "$OPS_SCOPE" "$completion" 'd.get("lab_exit_code")')" = 0 ] && {
+    [ "$STUDIO_LAB_JOB_KIND" = diagnostic-legacy ] || {
+      [ "$(marker_field "$OPS_SCOPE" "$completion" 'd.get("job_kind")')" = "$STUDIO_LAB_JOB_KIND" ] &&
+        [ "$(marker_field "$OPS_SCOPE" "$completion" 'd.get("job_identity")')" = "$STUDIO_LAB_JOB_IDENTITY" ]
+    }
+  }; then
     step window "done" "fixed diagnostic completed and exact provider restoration was committed"
     set_next "done" "done" "Studio lab window complete"
     return

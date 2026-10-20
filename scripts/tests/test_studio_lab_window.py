@@ -148,6 +148,22 @@ class Fixture:
         self.manifest.write_text(json.dumps(self.document))
         self.manifest.chmod(0o600)
 
+    def add_job(self, kind: str = "profiler-only") -> str:
+        helper = self.stage / "manifest.py"
+        helper.write_text("#!/usr/bin/env python3\n")
+        helper.chmod(0o700)
+        identity = "b" * 64
+        self.document["job_helper_path"] = str(helper)
+        self.document["job"] = {
+            "schema_version": "macprovider.studio_lab_window_job.v1",
+            "kind": kind,
+            "identity_sha256": identity,
+            "immutable_inputs": {},
+        }
+        self.document["baseline"]["job_helper_sha256"] = remote.file_sha(helper, private=False)
+        self.write_manifest()
+        return identity
+
     def journal_record(self, phase: str = "prepared", revision: int = 1) -> dict:
         _, manifest_sha = remote.load_manifest(self.manifest)
         return {
@@ -214,6 +230,52 @@ class StudioLabWindowTests(unittest.TestCase):
         self.fixture.write_manifest()
         with self.assertRaisesRegex(remote.Refusal, "lab_timeout_s is invalid"):
             remote.load_manifest(self.fixture.manifest)
+
+    def test_job_helper_substitution_and_job_timeout_are_refused_before_execution(self):
+        self.fixture.add_job("qualification")
+        self.fixture.document["lab_timeout_s"] = 43201
+        self.fixture.write_manifest()
+        with self.assertRaisesRegex(remote.Refusal, "lab_timeout_s is invalid"):
+            remote.load_manifest(self.fixture.manifest)
+        self.fixture.document["lab_timeout_s"] = 20
+        self.fixture.write_manifest()
+        manifest, _ = remote.load_manifest(self.fixture.manifest)
+        helper = Path(manifest["job_helper_path"])
+        helper.write_text("#!/usr/bin/env python3\n# substituted\n")
+        helper.chmod(0o700)
+        with mock.patch.object(remote, "validate_source"):
+            with self.assertRaisesRegex(remote.Refusal, "job helper bytes drifted"):
+                remote.validate_lab_artifacts(manifest)
+
+    def test_job_journal_identity_mismatch_is_refused_and_v1_journal_remains_valid(self):
+        legacy_manifest, _ = remote.load_manifest(self.fixture.manifest)
+        remote.validate_journal_job(legacy_manifest, self.fixture.journal_record())
+        identity = self.fixture.add_job("profiler-only")
+        manifest, _ = remote.load_manifest(self.fixture.manifest)
+        record = {
+            **self.fixture.journal_record(),
+            "job_kind": "qualification", "job_identity_sha256": identity,
+        }
+        with self.assertRaisesRegex(remote.Refusal, "journal job identity mismatch"):
+            remote.validate_journal_job(manifest, record)
+
+    def test_job_validation_precedes_prepare_and_has_a_bounded_pre_pause_timeout(self):
+        self.fixture.add_job()
+        manifest, manifest_sha = remote.load_manifest(self.fixture.manifest)
+        events: list[str] = []
+        with mock.patch.object(remote, "validate_live_hashes", side_effect=lambda *_: events.append("live")), mock.patch.object(
+            remote, "validate_lab_artifacts", side_effect=lambda *_: events.append("artifacts")
+        ), mock.patch.object(remote, "validate_job", side_effect=lambda *_: events.append("job")), mock.patch.object(
+            remote, "loaded", return_value=True
+        ), mock.patch.object(remote, "stable_serving", return_value=self.fixture.snapshot):
+            remote.prepare_run(manifest, manifest_sha, self.fixture.journal)
+        self.assertEqual(events, ["live", "artifacts", "job"])
+
+        with mock.patch.object(remote, "validate_lab_artifacts"), mock.patch.object(
+            remote.subprocess, "run"
+        ) as run:
+            remote.validate_job(manifest)
+        self.assertEqual(run.call_args.kwargs["timeout"], 660)
 
     def test_hash_validation_refuses_any_guarded_drift(self):
         manifest, _ = remote.load_manifest(self.fixture.manifest)
@@ -629,7 +691,7 @@ class StudioLabWindowTests(unittest.TestCase):
         gate_read, gate_write = os.pipe()
         child = subprocess.Popen(
             [sys.executable, "-c", remote.GATED_EXEC, str(gate_read), str(script),
-             str(Path.home()), "/usr/bin:/bin", "/tmp"],
+             "-", str(Path.home()), "/usr/bin:/bin", "/tmp"],
             pass_fds=(gate_read,), close_fds=True, start_new_session=True,
         )
         os.close(gate_read)
