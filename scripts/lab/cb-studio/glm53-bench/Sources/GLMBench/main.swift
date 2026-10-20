@@ -40,7 +40,7 @@
 //   --mtp-multirow-profile
 //                    diagnostic B=4 ordinary (L=1) versus packed verify (L=2),
 //                    with routed-expert sharing off/on; reports exactness, route
-//                    overlap, wall time and a small GPU kernel census
+//                    wall time and a small GPU kernel census
 // GPU runs only in an announced lab window; never beside a serving provider.
 import Foundation
 import Darwin
@@ -496,66 +496,7 @@ if args.contains("--mtp-multirow-profile") {
         print("mtp-multirow stopped: shared expert path was not bitwise exact")
         exit(2)
     }
-
-    // Observe the actual top-8 routes on an untimed duplicate of this verify.
-    // This mirrors the non-deferred layer equations; its final logits are
-    // checked against the model forward before the overlap numbers are trusted.
-    func routeProbe() throws -> ([(Int, Int, [Int])], MLXArray) {
-        let caches = try glm5NextBatchedCaches(rowCaches.map { $0.map { $0.copy() } })
-        let inner = model.languageModel.model
-        var h = repeated(
-            expandedDimensions(inner.embedTokens(verifyInput), axis: 2),
-            count: inner.hcMult, axis: 2)
-        var topk = [MLXArray?]()
-        var observations = [(Int, Int, [Int])]()
-        for (index, layer) in inner.layers.enumerated() {
-            let (collapsed, post, comb) = layer.attnHC(h)
-            let normed = layer.inputLayerNorm(collapsed)
-            let attention: MLXArray
-            if layer.isLinear {
-                attention = (layer.selfAttn as! GLM5NextLinearAttention)(
-                    normed, cache: caches[index] as? MambaCache, checkpointAfter: 1)
-            } else {
-                (attention, topk) = (layer.selfAttn as! GLM5NextAttention)(
-                    normed, cache: caches[index], previousTopk: topk, perColumn: true)
-            }
-            let hh = glm5NextHCExpandForBench(attention, h, post, comb)
-            let (ffnIn, ffnPost, ffnComb) = layer.ffnHC(hh)
-            let mlpInput = layer.postAttentionLayerNorm(ffnIn)
-            if let moe = layer.mlp as? GLM5NextMoE {
-                let indices = moe.gate(mlpInput).0.asType(.uint32)
-                eval(indices)
-                let routed = indices.asArray(UInt32.self).map(Int.init)
-                let perRowDuplicates = (0 ..< B).map { row -> Int in
-                    let slots = Array(routed[(row * L * moe.gate.topK) ..< ((row + 1) * L * moe.gate.topK)])
-                    return slots.count - Set(slots).count
-                }
-                observations.append((index, routed.count - Set(routed).count, perRowDuplicates))
-            }
-            let ffnOut = (layer.mlp as! UnaryLayer)(mlpInput)
-            h = glm5NextHCExpandForBench(ffnOut, hh, ffnPost, ffnComb)
-        }
-        let hidden = h.mean(axis: 2)
-        return (observations, model.languageModel.logits(inner.norm(hidden)))
-    }
-    setSharedExpertLoads(false)
-    let probe = try routeProbe()
-    let referenceCaches = try glm5NextBatchedCaches(rowCaches.map { $0.map { $0.copy() } })
-    var verifyState = LMOutput.State()
-    verifyState[mtpEmitFlagKey] = true
-    verifyState[mtpCacheCheckpointIndexKey] = 1
-    let reference = model(
-        LMInput.Text(tokens: verifyInput), cache: referenceCaches, state: verifyState)
-    eval(probe.1, reference.logits)
-    let probeExact = bitwiseEqual(probe.1, reference.logits)
-    print("mtp-multirow route_probe_logits_exact=\(probeExact)")
-    guard probeExact else {
-        print("mtp-multirow stopped: route probe was not bitwise exact")
-        exit(2)
-    }
-    for (layer, duplicateSlots, perRow) in probe.0 {
-        print("mtp-multirow routes layer=\(layer) duplicate_slots=\(duplicateSlots)/\(B * L * config.numExpertsPerTok) per_row=\(perRow)")
-    }
+    fflush(stdout)
 
     func evaluateTarget(verify: Bool, caches: [KVCache]) throws {
         if verify {
