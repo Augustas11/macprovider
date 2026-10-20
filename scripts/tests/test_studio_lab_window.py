@@ -446,6 +446,58 @@ class StudioLabWindowTests(unittest.TestCase):
         self.assertLess(events.index("boot:fixture.provider"), events.index("provider_ready"))
         self.assertLess(events.index("provider_ready"), events.index("boot:fixture.provider-watchdog"))
 
+    def test_bootout_waits_for_asynchronous_launchd_removal(self):
+        clock = iter((10.0, 10.1))
+        with mock.patch.object(remote.subprocess, "run") as run, mock.patch.object(
+            remote, "loaded", side_effect=(True, False)
+        ) as loaded, mock.patch.object(
+            remote.time, "monotonic", side_effect=lambda: next(clock)
+        ), mock.patch.object(remote.time, "sleep") as sleep:
+            remote.bootout("fixture.provider")
+        run.assert_called_once()
+        self.assertEqual(loaded.call_count, 2)
+        sleep.assert_called_once_with(remote.LAUNCHCTL_POLL_S)
+
+    def test_bootout_refuses_at_bounded_monotonic_deadline(self):
+        clock = iter((10.0, 40.0))
+        with mock.patch.object(remote.subprocess, "run"), mock.patch.object(
+            remote, "loaded", return_value=True
+        ), mock.patch.object(
+            remote.time, "monotonic", side_effect=lambda: next(clock)
+        ), mock.patch.object(remote.time, "sleep") as sleep:
+            with self.assertRaisesRegex(remote.Refusal, "remained loaded"):
+                remote.bootout("fixture.provider")
+        sleep.assert_not_called()
+
+    def test_restore_completes_durable_removal_before_bootstrap(self):
+        manifest, _ = remote.load_manifest(self.fixture.manifest)
+        record = self.fixture.write_journal(
+            phase="stopping_provider", revision=5, provider_stop_started=True,
+        )
+        events: list[str] = []
+
+        def transition(_path, value, phase, **changes):
+            events.append(phase)
+            return {**value, **changes, "phase": phase, "revision": value["revision"] + 1}
+
+        with mock.patch.object(remote, "stop_lab"), mock.patch.object(
+            remote, "bootout", side_effect=lambda label: events.append("out:" + label)
+        ), mock.patch.object(
+            remote, "wait_process_exit", side_effect=lambda *_args, **_kwargs: events.append("process-gone")
+        ), mock.patch.object(remote, "validate_live_hashes"), mock.patch.object(
+            remote, "write_transition", side_effect=transition
+        ), mock.patch.object(
+            remote, "bootstrap", side_effect=lambda label, _plist: events.append("boot:" + label)
+        ), mock.patch.object(
+            remote, "stable_serving", return_value=self.fixture.snapshot
+        ):
+            restored = remote.restore_locked(manifest, self.fixture.journal, record)
+
+        self.assertEqual(restored["phase"], "restored")
+        self.assertLess(events.index("out:fixture.provider"), events.index("process-gone"))
+        self.assertLess(events.index("process-gone"), events.index("boot:fixture.provider"))
+        self.assertFalse(restored["provider_stop_started"])
+
     def test_lost_lab_artifacts_do_not_block_status_or_provider_restore(self):
         missing = Path(self.fixture.document["artifacts"]["diagnostic_cli"]["path"])
         missing.unlink()
