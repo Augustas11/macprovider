@@ -2997,7 +2997,66 @@ final class ModelManagementTests: XCTestCase {
         let (store, _, row) = try await downloadStore(reconciles: false, downloadCLI: { script })
         await store.startDownload(row)
         XCTAssertEqual(store.downloadResult?.succeeded, false)
-        XCTAssertEqual(store.downloadResult?.message, "The download of Qwen3 8B · 4-bit finished, but Malibu couldn't confirm it in the model list yet. Select Retry to refresh.")
+        XCTAssertEqual(store.downloadResult?.needsRefresh, true)
+        XCTAssertEqual(store.downloadResult?.message, "The download of Qwen3 8B · 4-bit finished, but Malibu couldn't confirm it in the model list yet. Select Refresh to check again.")
+    }
+
+    @MainActor
+    func testUnconfirmedDownloadIsConfirmedByTheNextRefreshThatListsIt() async throws {
+        let script = ScriptedDownloadCLI(lines: [
+            Self.downloadEvent("queued", sequence: 1),
+            Self.downloadEvent("succeeded", sequence: 2),
+        ], exitCode: 0)
+        let projection = ModelCLIResult(exitCode: 0, stdout: ShellScreensTests.projectionJSON(rows: [ShellScreensTests.catalogOnlyRowJSON(
+            key: "qwen/qwen3-8b", modelID: "mlx-community/Qwen3-8B-4bit", downloadBytes: 4_600_000_000
+        )]), stderr: "")
+        let stale = ModelCLIResult(exitCode: 0, stdout: ShellScreensTests.projectionJSON(rows: [ShellScreensTests.catalogOnlyRowJSON(
+            key: "qwen/qwen3-8b", modelID: "mlx-community/Qwen3-8B-4bit", downloadBytes: 4_600_000_000
+        )], sequence: 2), stderr: "")
+        let listed = ModelCLIResult(exitCode: 0, stdout: ShellScreensTests.projectionJSON(rows: [downloadedCandidateRowJSON()], sequence: 3), stderr: "")
+        let cli = FakeModelCLI(results: [projection, stale, listed])
+        let store = ModelManagementStore(
+            cli: cli,
+            makeDownloadCLI: { script },
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.download.\(UUID().uuidString)")!
+        )
+        let peer = peer(for: [MalibuModelCapabilityManifest.readySwitch, MalibuModelCapabilityManifest.catalogEconomics])
+        await store.refresh(currentModelID: "other/model", peer: peer)
+        let row = try XCTUnwrap(store.rows.first { $0.action == .download })
+        await store.startDownload(row)
+        XCTAssertEqual(store.downloadResult?.needsRefresh, true)
+        XCTAssertFalse(store.downloadResult?.message.contains("It's on this Mac now") ?? true,
+                       "no success copy before the list confirms it")
+        await store.refreshAfterDownload()
+        XCTAssertEqual(store.downloadResult, .init(modelKey: "qwen/qwen3-8b", message: "Downloaded and verified Qwen3 8B · 4-bit. It's on this Mac now.", succeeded: true))
+    }
+
+    @MainActor
+    func testTheDownloadSlotIsHeldThroughTheRefresh() async throws {
+        let script = ScriptedDownloadCLI(lines: [
+            Self.downloadEvent("queued", sequence: 1),
+            Self.downloadEvent("succeeded", sequence: 2),
+        ], exitCode: 0)
+        let (store, cli, row) = try await downloadStore(downloadCLI: { script })
+        var phaseDuringRefresh: ModelManagementStore.DownloadState.Phase?
+        var canStartDuringRefresh = true
+        cli.onRun = {
+            phaseDuringRefresh = store.download?.phase
+            canStartDuringRefresh = store.canStartDownload
+        }
+        await store.startDownload(row)
+        XCTAssertEqual(phaseDuringRefresh, .finishing)
+        XCTAssertFalse(canStartDuringRefresh, "no second download while the first is still being confirmed")
+        XCTAssertNil(store.download)
+    }
+
+    func testPendingLineDeliveriesAreBounded() {
+        let pending = ModelCLIPendingDeliveries()
+        for _ in 0..<ModelCLIPendingDeliveries.limit { XCTAssertTrue(pending.tryAcquire()) }
+        XCTAssertFalse(pending.tryAcquire())
+        pending.release()
+        XCTAssertTrue(pending.tryAcquire())
     }
 
     @MainActor
@@ -3030,7 +3089,7 @@ final class ModelManagementTests: XCTestCase {
         await leftoverStore.startDownload(leftoverRow)
         XCTAssertEqual(
             leftoverStore.downloadResult?.message,
-            "Download cancelled. The model you serve is unchanged. Some partial download files could not be removed. To remove them, run: malibu-cli models prepare qwen/qwen3-8b --repair-cache"
+            "Download cancelled. The model you serve is unchanged. Some partial download files remain. To remove them, run: malibu-cli models prepare qwen/qwen3-8b --repair-cache"
         )
     }
 
@@ -3639,6 +3698,7 @@ private final class HangingModelCLI: MalibuModelCLIRunning {
 
 private final class FakeModelCLI: MalibuModelCLIRunning {
     var invocations: [[String]] = []
+    var onRun: (() -> Void)?
     private var results: [ModelCLIResult]
     private let returnDelaysNanoseconds: [UInt64?]
 
@@ -3656,6 +3716,7 @@ private final class FakeModelCLI: MalibuModelCLIRunning {
     ) async throws -> ModelCLIResult {
         let invocationIndex = invocations.count
         invocations.append(arguments)
+        onRun?()
         guard !results.isEmpty else {
             return ModelCLIResult(exitCode: 1, stdout: "", stderr: "missing fake result")
         }

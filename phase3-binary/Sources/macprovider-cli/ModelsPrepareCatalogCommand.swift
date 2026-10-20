@@ -18,8 +18,9 @@ struct ModelsPrepareCatalogCommand: AsyncParsableCommand {
             + "downloader, verifies the signed hash and adopts it into the durable model store. stdout carries "
             + "only model_catalog_transaction_event.v1 lines: queued, running (stage downloading, at least every "
             + "10 s), then succeeded (exit 0), failed (exit 4 refused/untrusted/space/transfer, 5 verification) or, "
-            + "after SIGINT/SIGTERM, cancel_requested and cancelled (exit 130) with this model's interrupted-download "
-            + "leftovers removed. It never changes config or the active model."
+            + "after SIGINT/SIGTERM, cancel_requested and cancelled (exit 130); the downloader removes its own "
+            + "staging. Leftovers it finds are reported as staging_cleanup_required, never deleted. One run at a "
+            + "time. It never changes config or the active model."
     )
 
     @Argument(help: "Signed catalog key or model id, e.g. qwen/qwen3-8b.")
@@ -198,12 +199,11 @@ enum ModelsPrepareCatalogRunner {
         var prepare: @Sendable (ModelArtifactSignedRow, CachedModelArtifactResolver, String?, String?) async -> ModelPrepareOutcome
         /// Bytes of completed files the downloader has staged so far.
         var stagedBytes: @Sendable (ModelArtifactSignedRow, CachedModelArtifactResolver) -> Int64
-        /// The paths of this model's interrupted-download leftovers.
+        /// The paths of this model's interrupted-download leftovers. The
+        /// command never deletes them: the downloader removes its own staging
+        /// when it stops, and anything left (another run's, or an earlier
+        /// interrupted one) is only reported.
         var partialPaths: @Sendable (ModelArtifactSignedRow, CachedModelArtifactResolver) -> Set<String>
-        /// Removes this model's leftovers that are not in the given set (they
-        /// appeared during this run). True when nothing unsafe or unremovable
-        /// is left behind.
-        var removeNewPartials: @Sendable (ModelArtifactSignedRow, CachedModelArtifactResolver, Set<String>) -> Bool
         /// Takes the per-user single-run lock; nil when another run holds it.
         var acquireRunLock: @Sendable () -> (@Sendable () -> Void)?
         /// At most 10 s (SPEC-044-R014-4); 8 s leaves margin and keeps a long download's output small.
@@ -230,17 +230,6 @@ enum ModelsPrepareCatalogRunner {
             partialPaths: { row, resolver in
                 Set(ModelArtifactDiagnostics.findPartials(row: row, resolver: resolver).map(\.url.path))
             },
-            removeNewPartials: { row, resolver, preexisting in
-                let fresh = ModelArtifactDiagnostics.findPartials(row: row, resolver: resolver)
-                    .filter { !preexisting.contains($0.url.path) }
-                let safe = fresh.filter { partial in
-                    [resolver.hubRoot, resolver.durableRoot].contains {
-                        ModelsPrepareCatalogRunner.isBelowWithoutSymlinks(partial.url, root: $0)
-                    }
-                }
-                let (_, failures) = ModelArtifactDiagnostics.removePartials(safe, row: row, resolver: resolver)
-                return safe.count == fresh.count && failures.isEmpty
-            },
             acquireRunLock: {
                 let path = (NSTemporaryDirectory() as NSString).appendingPathComponent("macprovider-prepare-catalog.lock")
                 let descriptor = open(path, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600)
@@ -252,23 +241,6 @@ enum ModelsPrepareCatalogRunner {
                 return { close(descriptor) }
             }
         )
-    }
-
-    /// True when `url` is below `root` and no path component from `root`
-    /// down to `url` is a symlink, so a removal cannot leave the root.
-    static func isBelowWithoutSymlinks(_ url: URL, root: URL) -> Bool {
-        let rootComponents = root.standardizedFileURL.pathComponents
-        let components = url.standardizedFileURL.pathComponents
-        guard components.count > rootComponents.count,
-              Array(components.prefix(rootComponents.count)) == rootComponents else { return false }
-        var current = root.standardizedFileURL
-        for component in components.dropFirst(rootComponents.count) {
-            guard component != "..", component != "." else { return false }
-            current.appendPathComponent(component)
-            var info = stat()
-            guard lstat(current.path, &info) == 0, (info.st_mode & S_IFMT) != S_IFLNK else { return false }
-        }
-        return true
     }
 
     /// Runs one transaction and returns the process exit status: 0 succeeded,
@@ -304,7 +276,6 @@ enum ModelsPrepareCatalogRunner {
             sink.emit(modelKey: modelKey, state: .cancelled)
             return 130
         }
-        let preexistingPartials = dependencies.partialPaths(row, resolver)
 
         let expected = row.artifactSizeBytes.map(Int64.init)
         func reportProgress() {
@@ -340,24 +311,28 @@ enum ModelsPrepareCatalogRunner {
         progressLoop.cancel()
         _ = await progressLoop.value
 
+        // SPEC-044-R007: leftovers this command does not remove are reported
+        // on the terminal event, never deleted (they may be another run's).
+        let leftovers = !dependencies.partialPaths(row, resolver).isEmpty
+        let warning: ModelPreparationEventWarningCode? = leftovers ? .stagingCleanupRequired : nil
+        if leftovers {
+            writeDiagnosticsStderr("models prepare-catalog warning: interrupted-download files remain for \(modelKey); to remove them run: \(ModelCatalogPreparation.retryCommand(catalogKey: modelKey, config: config))")
+        }
         // A preparation that verified before the cancel could take effect is
         // reported as it is: the commit point had passed.
         if outcome.finalState == .readyVerified {
-            sink.emit(modelKey: modelKey, state: .succeeded)
+            sink.emit(modelKey: modelKey, state: .succeeded, warningCode: warning)
             writeDiagnosticsStderr("models prepare-catalog: \(outcome.finalLine)")
             return 0
         }
         if cancellation.isRequested {
-            let clean = dependencies.removeNewPartials(row, resolver, preexistingPartials)
             sink.emitCancelRequestedOnce(modelKey: modelKey)
-            sink.emit(modelKey: modelKey, state: .cancelled, warningCode: clean ? nil : .stagingCleanupRequired)
-            writeDiagnosticsStderr(clean
-                ? "models prepare-catalog cancelled: active model unchanged; interrupted download removed"
-                : "models prepare-catalog cancelled: active model unchanged; some interrupted-download files were left; run: \(ModelCatalogPreparation.retryCommand(catalogKey: modelKey, config: config))")
+            sink.emit(modelKey: modelKey, state: .cancelled, warningCode: warning)
+            writeDiagnosticsStderr("models prepare-catalog cancelled: active model unchanged")
             return 130
         }
         let (code, exit) = failure(outcome)
-        sink.emit(modelKey: modelKey, state: .failed, errorCode: code)
+        sink.emit(modelKey: modelKey, state: .failed, errorCode: code, warningCode: warning)
         writeDiagnosticsStderr("models prepare-catalog failed: \(code.rawValue): \(ModelArtifactDiagnostics.redact(outcome.finalLine, diagnosis: outcome.diagnosis))")
         return exit
     }

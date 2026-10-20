@@ -212,7 +212,7 @@ struct DiscoverScreen: View {
                 .padding(.bottom, 10)
             ModelDownloadBanner(store: store)
                 .padding(.horizontal, 20)
-                .padding(.bottom, store.download == nil ? 0 : 10)
+                .padding(.bottom, store.download == nil && store.downloadResult == nil ? 0 : 10)
             if store.catalogRefreshFailed {
                 // SPEC-044-R008: a failed refresh keeps the last good
                 // projection on screen and says so.
@@ -404,10 +404,6 @@ struct DiscoverScreen: View {
     private func primaryAction(_ row: MalibuModelRow) -> some View {
         if store.download?.modelKey == row.modelKey, row.action != .download {
             ModelDownloadControl(store: store, row: row, showsSize: true) {}
-        }
-        if let result = store.downloadResult, result.modelKey == row.modelKey, result.succeeded {
-            Label(result.message, systemImage: "checkmark.circle")
-                .font(.callout)
         }
         switch DiscoverPresentation.primaryAction(row) {
         case .serving:

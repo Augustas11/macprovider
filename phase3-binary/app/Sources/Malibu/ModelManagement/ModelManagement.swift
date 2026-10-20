@@ -1850,6 +1850,29 @@ private final class ModelCLIOutputLineBuffer: @unchecked Sendable {
     }
 }
 
+/// Bounds stdout lines handed to the MainActor and not yet consumed, so a
+/// flood of short lines cannot queue unbounded UI work; past the bound the
+/// runner stops the process instead of queueing more.
+final class ModelCLIPendingDeliveries: @unchecked Sendable {
+    static let limit = 1_024
+    private let lock = NSLock()
+    private var pending = 0
+
+    func tryAcquire() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard pending < Self.limit else { return false }
+        pending += 1
+        return true
+    }
+
+    func release() {
+        lock.lock()
+        pending -= 1
+        lock.unlock()
+    }
+}
+
 final class ModelCLIProcessCancellation: @unchecked Sendable {
     private let lock = NSLock()
     private weak var process: Process?
@@ -1966,6 +1989,7 @@ final class MalibuModelCLI: MalibuModelCLIRunning {
                 let stderr = ModelCLIOutputBuffer()
                 let stdoutLines = ModelCLIOutputLineBuffer()
                 let deliveries = DispatchGroup()
+                let pendingDeliveries = ModelCLIPendingDeliveries()
                 process.executableURL = executable
                 process.arguments = arguments
                 process.environment = environment
@@ -1990,9 +2014,17 @@ final class MalibuModelCLI: MalibuModelCLIRunning {
                         if maxOutputBytes == nil { buffer.append(text) }
                         if deliverLines {
                             for value in stdoutLines.append(text) {
+                                guard pendingDeliveries.tryAcquire() else {
+                                    handle.readabilityHandler = nil
+                                    cancellation.kill()
+                                    return
+                                }
                                 deliveries.enter()
                                 Task { @MainActor in
-                                    defer { deliveries.leave() }
+                                    defer {
+                                        pendingDeliveries.release()
+                                        deliveries.leave()
+                                    }
                                     onLine(value)
                                 }
                             }
@@ -2024,9 +2056,13 @@ final class MalibuModelCLI: MalibuModelCLIRunning {
                 if !stdoutTail.isEmpty { stdout.append(String(decoding: stdoutTail, as: UTF8.self)) }
                 if !stderrTail.isEmpty { stderr.append(String(decoding: stderrTail, as: UTF8.self)) }
                 for value in stdoutLines.append(String(decoding: stdoutTail, as: UTF8.self)) + stdoutLines.flush() {
+                    guard pendingDeliveries.tryAcquire() else { break }
                     deliveries.enter()
                     Task { @MainActor in
-                        defer { deliveries.leave() }
+                        defer {
+                            pendingDeliveries.release()
+                            deliveries.leave()
+                        }
                         onLine(value)
                     }
                 }
@@ -2416,6 +2452,8 @@ final class ModelManagementStore: ObservableObject {
             /// No event for 30 seconds; the download may still be running.
             case delayed
             case cancelling
+            /// The CLI finished; Malibu is refreshing the model list.
+            case finishing
         }
 
         /// The catalog key: stable across refreshes, unlike the row a refresh
@@ -2435,6 +2473,8 @@ final class ModelManagementStore: ObservableObject {
         let modelKey: String
         let message: String
         let succeeded: Bool
+        /// The download finished but the model list has not confirmed it yet.
+        var needsRefresh = false
     }
 
     @Published private(set) var downloadResult: DownloadResult?
@@ -2959,6 +2999,7 @@ final class ModelManagementStore: ObservableObject {
             self.catalogRefreshFailed = false
             // Install the freshness deadline before any further await.
             scheduleCatalogProjectionExpiry(document)
+            reconcilePendingDownload()
             catalogBackgroundRefreshNotBefore = Date().addingTimeInterval(catalogBackgroundRefreshSeconds)
             // The refresh stays a blocking operation until the pool-binding
             // read finishes, so a status-driven refresh or a model action
@@ -3201,6 +3242,7 @@ final class ModelManagementStore: ObservableObject {
         downloadTimedOut = false
         downloadCancelRequested = false
         downloadResult = nil
+        pendingDownloadConfirmation = nil
         download = DownloadState(
             modelKey: modelKey,
             title: name,
@@ -3231,41 +3273,50 @@ final class ModelManagementStore: ObservableObject {
         downloadWatchdog?.cancel()
         downloadWatchdog = nil
         downloadRunner = nil
-        download = nil
-        let committed = result?.exitCode == 0 && downloadTerminal?.state == "succeeded"
+        // Capture this transaction's outcome before any await, and keep the
+        // download slot until the refresh below, so a second download cannot
+        // reset it.
+        let terminal = downloadTerminal
+        let timedOut = downloadTimedOut
+        let cancelRequested = downloadCancelRequested
+        if var state = download {
+            state.phase = .finishing
+            download = state
+        }
+        let committed = result?.exitCode == 0 && terminal?.state == "succeeded"
         var outcome: String
         var message: String
         if committed {
             outcome = "success"
             message = String(localized: "Downloaded and verified \(name). It's on this Mac now.", comment: "Model download succeeded")
-        } else if downloadTimedOut {
+        } else if timedOut {
             outcome = "failed"
             message = String(localized: "The download of \(name) stopped reporting progress, so Malibu cancelled it. The model you serve is unchanged. Try again.", comment: "Model download timed out")
-        } else if downloadTerminal?.state == "cancelled" || (downloadCancelRequested && downloadTerminal == nil) {
+        } else if terminal?.state == "cancelled" || (cancelRequested && terminal == nil) {
             outcome = "cancelled"
             message = String(localized: "Download cancelled. The model you serve is unchanged.", comment: "Model download cancelled")
         } else {
             outcome = "failed"
-            message = Self.downloadFailureMessage(downloadTerminal?.errorCode, name: name)
+            message = Self.downloadFailureMessage(terminal?.errorCode, name: name)
         }
-        if downloadTerminal?.warningCode == "staging_cleanup_required" {
-            message += " " + String(localized: "Some partial download files could not be removed. To remove them, run: malibu-cli models prepare \(modelKey) --repair-cache", comment: "Model download cleanup required")
-        }
-        downloadResult = DownloadResult(modelKey: modelKey, message: message, succeeded: false)
         await refresh(currentModelID: currentModelID, peer: peerEvidence)
-        if committed {
-            // R011: report the change only from a refreshed projection.
-            let listed = !catalogRefreshFailed && hasUsableCatalogProjection
-                && rows.contains { $0.modelKey == modelKey && $0.weightsPresentLocally }
-            if !listed {
-                outcome = "failed"
-                message = String(localized: "The download of \(name) finished, but Malibu couldn't confirm it in the model list yet. Select Retry to refresh.", comment: "Model download not yet reconciled")
-            }
-            if downloadCancelRequested {
-                message = String(localized: "Cancel came too late: the download had already finished.", comment: "Model download cancel too late") + " " + message
-            }
+        var needsRefresh = false
+        if committed, !downloadIsListedLocally(modelKey) {
+            // R011: report the change only from a refreshed projection; a
+            // later refresh that lists it confirms it (reconcilePendingDownload).
+            outcome = "failed"
+            needsRefresh = true
+            pendingDownloadConfirmation = (modelKey, name)
+            message = String(localized: "The download of \(name) finished, but Malibu couldn't confirm it in the model list yet. Select Refresh to check again.", comment: "Model download not yet reconciled")
         }
-        downloadResult = DownloadResult(modelKey: modelKey, message: message, succeeded: outcome == "success")
+        if committed, cancelRequested {
+            message = String(localized: "Cancel came too late: the download had already finished.", comment: "Model download cancel too late") + " " + message
+        }
+        if terminal?.warningCode == "staging_cleanup_required" {
+            message += " " + String(localized: "Some partial download files remain. To remove them, run: malibu-cli models prepare \(modelKey) --repair-cache", comment: "Model download cleanup required")
+        }
+        download = nil
+        downloadResult = DownloadResult(modelKey: modelKey, message: message, succeeded: outcome == "success", needsRefresh: needsRefresh)
         appendHistory(ModelActivityEntry(
             id: UUID(),
             timestamp: Date(),
@@ -3280,10 +3331,37 @@ final class ModelManagementStore: ObservableObject {
         MalibuAccessibility.announce(message)
     }
 
+    private var pendingDownloadConfirmation: (modelKey: String, title: String)?
+
+    private func downloadIsListedLocally(_ modelKey: String) -> Bool {
+        !catalogRefreshFailed && hasUsableCatalogProjection
+            && rows.contains { $0.modelKey == modelKey && $0.weightsPresentLocally }
+    }
+
+    /// A finished download the list had not confirmed yet is confirmed by the
+    /// first refreshed projection that lists it on this Mac.
+    private func reconcilePendingDownload() {
+        guard let pending = pendingDownloadConfirmation, downloadIsListedLocally(pending.modelKey) else { return }
+        pendingDownloadConfirmation = nil
+        let message = String(localized: "Downloaded and verified \(pending.title). It's on this Mac now.", comment: "Model download succeeded")
+        downloadResult = DownloadResult(modelKey: pending.modelKey, message: message, succeeded: true)
+        statusLine = message
+        MalibuAccessibility.announce(message)
+    }
+
+    /// The Refresh action offered while a download is not confirmed yet.
+    func refreshAfterDownload() async {
+        await refresh(currentModelID: currentModelID, peer: peerEvidence)
+    }
+
+    func dismissDownloadResult() {
+        downloadResult = nil
+    }
+
     /// Asks the CLI to stop; it removes the partial download and reports
     /// `cancelled`. Nothing is deleted by Malibu.
     func cancelDownload() {
-        guard var state = download, state.phase != .cancelling else { return }
+        guard var state = download, state.phase != .cancelling, state.phase != .finishing else { return }
         downloadCancelRequested = true
         state.phase = .cancelling
         download = state

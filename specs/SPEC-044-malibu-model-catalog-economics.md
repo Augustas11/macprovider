@@ -1569,11 +1569,12 @@ catalog-only sentinel in the R002/R003 v2 amendment is unchanged.
    final state. `failed` carries an error code and exits 4 for a refused key,
    untrusted catalog, missing space, or a failed transfer, and 5 for a hash
    mismatch or other verification failure. SIGINT or SIGTERM stops the
-   download, removes only that model's interrupted-download leftovers, and
-   ends with `cancel_requested` then `cancelled` (exit 130); when a leftover
-   cannot be removed safely (it is missing, outside the cache and durable
-   roots through a symlinked path, or removal fails), the `cancelled` event
-   carries `warning_code: "staging_cleanup_required"`. Only one
+   download and ends with `cancel_requested` then `cancelled` (exit 130). The
+   downloader removes its own staging when it stops; the command deletes
+   nothing itself, because a leftover may belong to another run. When any of
+   that model's interrupted-download leftovers remain at the end, the
+   terminal event carries `warning_code: "staging_cleanup_required"` and the
+   repair command is `malibu-cli models prepare <key> --repair-cache`. Only one
    `prepare-catalog` runs at a time per user; a second one fails with
    `operation_conflict` (exit 4) before any download. When a configured
    artifact path is the location serve loads for that catalog key,
@@ -1598,7 +1599,9 @@ catalog-only sentinel in the R002/R003 v2 amendment is unchanged.
    as too late, with the resulting state. A `staging_cleanup_required`
    warning is shown with the CLI repair command. While a download runs, its
    progress and Cancel stay reachable even when the projection is refreshed,
-   expires, or no longer lists the row. One download runs at a time. The R008 `Needs preparation` section MAY be titled **Not
+   expires, or no longer lists the row; its outcome stays visible the same
+   way, with a refresh action while the result is not confirmed yet. One
+   download runs at a time, including its post-download refresh. The R008 `Needs preparation` section MAY be titled **Not
    downloaded**.
 
 ## 4. Implementation, tests, and journeys

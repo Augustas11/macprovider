@@ -1488,10 +1488,10 @@ algorithm.
   (exit 4 for a refused key, untrusted catalog, missing space or failed
   transfer; exit 5 for a hash mismatch or other verification failure), or
   `cancel_requested` then `cancelled` (exit 130). SIGINT or SIGTERM stops the
-  download and removes only the interrupted-download leftovers of that model
-  that appeared during the run, never through a symlinked path component
-  below the cache or durable root; a leftover it cannot remove safely is
-  reported with `warning_code: "staging_cleanup_required"`. One
+  download; the downloader removes its own staging, and the command deletes
+  nothing itself. Interrupted-download leftovers of that model that remain at
+  the end are reported on the terminal event with
+  `warning_code: "staging_cleanup_required"`. One
   `prepare-catalog` runs at a time per user (a second one fails with
   `operation_conflict`, exit 4). A configured artifact path for the same
   catalog key is decisive exactly as for `--profile catalog`. The

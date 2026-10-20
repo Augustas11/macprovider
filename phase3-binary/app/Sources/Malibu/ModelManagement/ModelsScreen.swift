@@ -116,6 +116,8 @@ enum ModelsPresentation {
             return String(localized: "Starting the download…", comment: "Model download progress")
         case .cancelling:
             return String(localized: "Cancelling the download…", comment: "Model download progress")
+        case .finishing:
+            return String(localized: "Download finished. Checking the model list…", comment: "Model download progress")
         case .delayed:
             return String(localized: "Waiting for the provider software to report progress…", comment: "Model download delayed")
         case .running:
@@ -665,20 +667,14 @@ struct ModelDownloadControl: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .accessibilityAddTraits(.updatesFrequently)
-                Button(String(localized: "Cancel", comment: "Cancel a model download")) { store.cancelDownload() }
-                    .disabled(download.phase == .cancelling)
-                    .accessibilityLabel(Text(String(localized: "Cancel downloading \(ModelsPresentation.title(row))", comment: "Cancel download accessibility label")))
-            }
-        } else {
-            VStack(alignment: .trailing, spacing: 2) {
-                downloadButton
-                if let result = store.downloadResult, result.modelKey == row.modelKey, !result.succeeded {
-                    Text(result.message)
-                        .font(.caption2)
-                        .foregroundStyle(.orange)
-                        .fixedSize(horizontal: false, vertical: true)
+                if download.phase != .finishing {
+                    Button(String(localized: "Cancel", comment: "Cancel a model download")) { store.cancelDownload() }
+                        .disabled(download.phase == .cancelling)
+                        .accessibilityLabel(Text(String(localized: "Cancel downloading \(ModelsPresentation.title(row))", comment: "Cancel download accessibility label")))
                 }
             }
+        } else {
+            downloadButton
         }
     }
 
@@ -699,9 +695,10 @@ struct ModelDownloadControl: View {
     }
 }
 
-/// The running download's title, progress and Cancel, shown above the list
-/// whatever the projection holds: a refresh, an expiry or a row that turned
-/// into a local candidate never hides Cancel (SPEC-044-R014-5).
+/// The running download's title, progress and Cancel, then its outcome, shown
+/// above the list whatever the projection holds: a refresh, an expiry or a row
+/// that turned into a local candidate never hides Cancel or the result
+/// (SPEC-044-R014-5).
 struct ModelDownloadBanner: View {
     @ObservedObject var store: ModelManagementStore
 
@@ -724,14 +721,37 @@ struct ModelDownloadBanner: View {
                     ProgressView().controlSize(.small)
                 }
                 Spacer(minLength: 0)
-                Button(String(localized: "Cancel", comment: "Cancel a model download")) { store.cancelDownload() }
-                    .disabled(download.phase == .cancelling)
-                    .accessibilityLabel(Text(String(localized: "Cancel downloading \(download.title)", comment: "Cancel download accessibility label")))
+                if download.phase != .finishing {
+                    Button(String(localized: "Cancel", comment: "Cancel a model download")) { store.cancelDownload() }
+                        .disabled(download.phase == .cancelling)
+                        .accessibilityLabel(Text(String(localized: "Cancel downloading \(download.title)", comment: "Cancel download accessibility label")))
+                }
             }
             .padding(8)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color.accentColor.opacity(0.08)))
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("malibu.models.download")
+        } else if let result = store.downloadResult {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Image(systemName: result.succeeded ? "checkmark.circle" : "exclamationmark.circle")
+                    .foregroundStyle(result.succeeded ? Color.green : Color.orange)
+                    .accessibilityHidden(true)
+                Text(result.message)
+                    .font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                Spacer(minLength: 0)
+                if result.needsRefresh {
+                    Button(String(localized: "Refresh", comment: "Refresh the model list after a download")) {
+                        Task { await store.refreshAfterDownload() }
+                    }
+                }
+                Button(String(localized: "Dismiss", comment: "Dismiss a download result")) { store.dismissDownloadResult() }
+            }
+            .padding(8)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.gray.opacity(0.08)))
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("malibu.models.download-result")
         }
     }
 }

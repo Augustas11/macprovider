@@ -674,18 +674,6 @@ final class ModelArtifactDiagnosticsTests: XCTestCase {
         }
     }
 
-    private final class Counter: @unchecked Sendable {
-        private let lock = NSLock()
-        private var stored = 0
-        var value: Int {
-            lock.lock(); defer { lock.unlock() }
-            return stored
-        }
-        func increment() {
-            lock.lock(); stored += 1; lock.unlock()
-        }
-    }
-
     private static let prepareTransactionID = "3f0c6b1e-8c2d-4f6a-9b1e-2d3c4b5a6f70"
 
     private func prepareCatalog(
@@ -694,8 +682,6 @@ final class ModelArtifactDiagnosticsTests: XCTestCase {
         cancellation: ModelsPrepareCatalogCancellation = ModelsPrepareCatalogCancellation(),
         configuredArtifactPath: @escaping @Sendable (String) -> String? = { _ in nil },
         prepare: (@Sendable (ModelArtifactSignedRow, CachedModelArtifactResolver, String?, String?) async -> ModelPrepareOutcome)? = nil,
-        removed: Counter? = nil,
-        liveCleanup: Bool = false,
         runLock: (@Sendable () -> (@Sendable () -> Void)?)? = nil
     ) async -> (Int32, [ModelPreparationTransactionEvent]) {
         let log = EventLog()
@@ -706,9 +692,6 @@ final class ModelArtifactDiagnosticsTests: XCTestCase {
             return row
         }
         if let prepare { dependencies.prepare = prepare }
-        if !liveCleanup {
-            dependencies.removeNewPartials = { _, _, _ in removed?.increment(); return true }
-        }
         dependencies.acquireRunLock = runLock ?? { { } }
         dependencies.progressIntervalNanoseconds = 10_000_000
         let exit = await ModelsPrepareCatalogRunner.run(
@@ -794,7 +777,6 @@ final class ModelArtifactDiagnosticsTests: XCTestCase {
         let (resolver, _) = try makeResolver()
         let row = makeRow(sha256: String(repeating: "1", count: 64))
         let cancellation = ModelsPrepareCatalogCancellation()
-        let removed = Counter()
         let started = expectation(description: "download started")
         let (exit, events) = await withTaskGroup(of: (Int32, [ModelPreparationTransactionEvent])?.self) { group in
             group.addTask {
@@ -808,8 +790,7 @@ final class ModelArtifactDiagnosticsTests: XCTestCase {
                             try? await Task.sleep(nanoseconds: 5_000_000)
                         }
                         return await ModelCatalogPreparation.prepare(row: row, resolver: resolver, repairCache: false, config: config)
-                    },
-                    removed: removed
+                    }
                 )
             }
             group.addTask {
@@ -827,71 +808,54 @@ final class ModelArtifactDiagnosticsTests: XCTestCase {
         assertOneTransaction(events)
         XCTAssertEqual(Array(events.suffix(2).map(\.state)), [.cancelRequested, .cancelled])
         XCTAssertFalse(events.dropLast(2).contains { $0.state == .cancelRequested || $0.state == .cancelled })
-        XCTAssertEqual(removed.value, 1)
+        XCTAssertNil(events.last?.warningCode, "nothing is left behind")
     }
 
-    func testPrepareCatalogCancelRemovesOnlyLeftoversFromThisRunAndFlagsUnsafeOnes() async throws {
-        let (resolver, _) = try makeResolver()
-        let row = makeRow(sha256: String(repeating: "1", count: 64))
+    func testPrepareCatalogNeverDeletesLeftoversAndReportsThem() async throws {
+        let served = try tempDir()
+        try writeCompleteSnapshot(at: served)
+        let row = makeRow(sha256: try ModelArtifactVerifier.canonicalArtifactHash(directory: served))
+        let (resolver, _) = try makeResolver(downloader: try fakeDownloader(serving: served))
         let snapshots = resolver.snapshotURL(modelID: row.modelID, revision: row.revision).deletingLastPathComponent()
-        let old = snapshots.appendingPathComponent(".download-old", isDirectory: true)
+        let old = snapshots.appendingPathComponent(".download-\(revision)-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: old, withIntermediateDirectories: true)
-        try Data("old".utf8).write(to: old.appendingPathComponent("a"))
-        let fresh = snapshots.appendingPathComponent(".download-fresh", isDirectory: true)
 
-        func cancelledRun(_ makeLeftover: @escaping @Sendable () throws -> Void) async -> (Int32, [ModelPreparationTransactionEvent]) {
-            let cancellation = ModelsPrepareCatalogCancellation()
-            return await prepareCatalog(
-                row: row,
-                resolver: resolver,
-                cancellation: cancellation,
-                prepare: { row, resolver, _, config in
-                    try? makeLeftover()
-                    cancellation.request()
-                    return await ModelCatalogPreparation.prepare(row: row, resolver: resolver, repairCache: false, config: config)
-                },
-                liveCleanup: true
-            )
-        }
+        let (exit, events) = await prepareCatalog(row: row, resolver: resolver)
+        XCTAssertEqual(exit, 0)
+        XCTAssertEqual(events.last?.state, .succeeded)
+        XCTAssertEqual(events.last?.warningCode, .stagingCleanupRequired, "an earlier run's leftover is reported")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: old.path), "and never deleted")
 
-        let (exit, events) = await cancelledRun {
-            try FileManager.default.createDirectory(at: fresh, withIntermediateDirectories: true)
-            try Data("new".utf8).write(to: fresh.appendingPathComponent("b"))
-        }
-        XCTAssertEqual(exit, 130)
-        assertOneTransaction(events)
-        XCTAssertEqual(Array(events.suffix(2).map(\.state)), [.cancelRequested, .cancelled])
-        XCTAssertNil(events.last?.warningCode)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: fresh.path), "this run's leftover is removed")
-        XCTAssertTrue(FileManager.default.fileExists(atPath: old.path), "a leftover from before the run is not this run's to remove")
-
-        // A leftover reached through a symlink is never followed out of the
-        // root; the cancel reports that cleanup is required instead.
-        let outside = try tempDir()
-        try FileManager.default.createDirectory(at: outside.appendingPathComponent("payload"), withIntermediateDirectories: true)
-        let linked = snapshots.appendingPathComponent(".download-linked")
-        let (linkedExit, linkedEvents) = await cancelledRun {
-            try FileManager.default.createSymbolicLink(at: linked, withDestinationURL: outside.appendingPathComponent("payload"))
-        }
-        XCTAssertEqual(linkedExit, 130)
-        XCTAssertEqual(linkedEvents.last?.state, .cancelled)
-        XCTAssertEqual(linkedEvents.last?.warningCode, .stagingCleanupRequired)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: outside.appendingPathComponent("payload").path))
-    }
-
-    func testPathChecksRefuseSymlinksAndPathsOutsideTheRoot() throws {
-        let root = try tempDir()
-        let inside = root.appendingPathComponent("a/b", isDirectory: true)
-        try FileManager.default.createDirectory(at: inside, withIntermediateDirectories: true)
-        XCTAssertTrue(ModelsPrepareCatalogRunner.isBelowWithoutSymlinks(inside, root: root))
-        XCTAssertFalse(ModelsPrepareCatalogRunner.isBelowWithoutSymlinks(root, root: root))
-        XCTAssertFalse(ModelsPrepareCatalogRunner.isBelowWithoutSymlinks(try tempDir(), root: root))
-        let outside = try tempDir()
-        let link = root.appendingPathComponent("link")
-        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: outside)
-        try FileManager.default.createDirectory(at: outside.appendingPathComponent("c"), withIntermediateDirectories: true)
-        XCTAssertFalse(ModelsPrepareCatalogRunner.isBelowWithoutSymlinks(link.appendingPathComponent("c"), root: root))
-        XCTAssertFalse(ModelsPrepareCatalogRunner.isBelowWithoutSymlinks(link, root: root))
+        // Another run's staging that appears while this one is cancelled is
+        // never this command's to delete either.
+        try FileManager.default.removeItem(at: old)
+        let other = snapshots.appendingPathComponent(".download-\(revision)-\(UUID().uuidString)", isDirectory: true)
+        let cancellation = ModelsPrepareCatalogCancellation()
+        let (cancelExit, cancelEvents) = await prepareCatalog(
+            row: makeRow(sha256: String(repeating: "1", count: 64)),
+            resolver: resolver,
+            cancellation: cancellation,
+            prepare: { _, _, _, _ in
+                try? FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+                cancellation.request()
+                return ModelPrepareOutcome(
+                    finalState: .incomplete,
+                    diagnosis: ModelArtifactDiagnostics.diagnose(row: row, resolver: resolver),
+                    requiredBytes: nil,
+                    availableBytes: nil,
+                    partialsFound: [],
+                    partialsRemoved: [],
+                    downloadAttempted: true,
+                    error: "cancelled",
+                    retryCommand: nil
+                )
+            }
+        )
+        XCTAssertEqual(cancelExit, 130)
+        assertOneTransaction(cancelEvents)
+        XCTAssertEqual(Array(cancelEvents.suffix(2).map(\.state)), [.cancelRequested, .cancelled])
+        XCTAssertEqual(cancelEvents.last?.warningCode, .stagingCleanupRequired)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: other.path))
     }
 
     func testPrepareCatalogRunsOneAtATime() async throws {
