@@ -18,7 +18,9 @@ openssl ecparam -name prime256v1 -genkey -noout -out "$RELEASE_PRIVATE" >/dev/nu
 openssl pkey -in "$RELEASE_PRIVATE" -pubout -out "$RELEASE_PUBLIC" >/dev/null 2>&1
 
 UNIT="$T/studio-owner-pin-unit.sh"
-python3 - "$CONTROLLER" "$UNIT" "$ROOT/scripts/ops" <<'PY'
+IDENTITY_HELPER="$T/published-provider-identity.sh"
+python3 - "$CONTROLLER" "$UNIT" "$ROOT/scripts/ops" \
+  "$ROOT/scripts/ops/lib/published-provider-identity.sh" "$IDENTITY_HELPER" <<'PY'
 import sys
 source = open(sys.argv[1]).read()
 source = source.replace(
@@ -27,11 +29,17 @@ source = source.replace(
     1,
 )
 source = source.replace(
-    '"$REPO_ROOT/ops/pearl-updater/release-signing-public.pem"',
-    '"$TEST_PEARL_PUBLIC_KEY"',
+    '. "$OPS_DIR/lib/published-provider-identity.sh"',
+    '. "$TEST_PUBLISHED_IDENTITY_HELPER"',
+    1,
 )
 assert source.endswith('ops_main "$@"\n')
 open(sys.argv[2], 'w').write(source[:-len('ops_main "$@"\n')] + ': # sourced by provenance test\n')
+helper = open(sys.argv[4]).read().replace(
+    '"$REPO_ROOT/ops/pearl-updater/release-signing-public.pem"',
+    '"$TEST_PEARL_PUBLIC_KEY"',
+)
+open(sys.argv[5], 'w').write(helper)
 PY
 
 mkdir -p "$T/bin"
@@ -148,6 +156,7 @@ run_identity() {
     MACPROVIDER_OPS_STATE_DIR="$case_dir/state" \
     MACPROVIDER_GH_REPO=test/repo \
     TEST_PEARL_PUBLIC_KEY="$RELEASE_PUBLIC" \
+    TEST_PUBLISHED_IDENTITY_HELPER="$IDENTITY_HELPER" \
     FAKE_PUBLISHED_DIR="$case_dir/published" \
     CONTROLLER_UNIT="$UNIT" CASE_DIR="$case_dir" \
   bash -c 'source "$CONTROLLER_UNIT"; VERSION=1.8.260; PROBE_JSON="$(cat "$CASE_DIR/probe.json")"; STUDIO_OWNER_PIN_INSTALL_DIR="$CASE_DIR/install"; published_identity_ok'
@@ -161,6 +170,7 @@ run_identity_twice() {
     MACPROVIDER_OPS_STATE_DIR="$case_dir/state" \
     MACPROVIDER_GH_REPO=test/repo \
     TEST_PEARL_PUBLIC_KEY="$RELEASE_PUBLIC" \
+    TEST_PUBLISHED_IDENTITY_HELPER="$IDENTITY_HELPER" \
     FAKE_PUBLISHED_DIR="$case_dir/published" \
     CONTROLLER_UNIT="$UNIT" CASE_DIR="$case_dir" \
   bash -c 'source "$CONTROLLER_UNIT"; VERSION=1.8.260; PROBE_JSON="$(cat "$CASE_DIR/probe.json")"; STUDIO_OWNER_PIN_INSTALL_DIR="$CASE_DIR/install"; published_identity_ok && published_identity_ok'

@@ -50,6 +50,10 @@ def regular_bytes(path: Path, maximum: int) -> bytes:
     return data
 
 
+def regular_digest(path: Path, maximum: int) -> str:
+    return digest(regular_bytes(path, maximum))
+
+
 def scalar(value: str) -> str:
     value = value.strip()
     if " #" in value:
@@ -165,7 +169,8 @@ def launch_identity(binary: Path, config: Path, label: str, status_pid: object) 
     if not isinstance(status_pid, int) or isinstance(status_pid, bool) or status_pid <= 0:
         raise RuntimeError("status has no valid provider pid")
     plist = Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
-    document = plistlib.loads(regular_bytes(plist, 64 * 1024))
+    plist_bytes = regular_bytes(plist, 64 * 1024)
+    document = plistlib.loads(plist_bytes)
     if not isinstance(document, dict) or document.get("Label") != label:
         raise RuntimeError("provider LaunchAgent label mismatch")
     arguments = document.get("ProgramArguments")
@@ -199,7 +204,7 @@ def launch_identity(binary: Path, config: Path, label: str, status_pid: object) 
         or identity["executable_path"] != expected
     ):
         raise RuntimeError("running provider executable identity mismatch")
-    return identity
+    return {**identity, "provider_plist_sha256": digest(plist_bytes)}
 
 
 def journal_fields(path: Path, expected_config: Path | None = None) -> dict[str, object]:
@@ -306,7 +311,8 @@ def main() -> int:
     selected = {
         path: nested(status, path)
         for path in (
-            "binary_version", "model", "model_loaded", "network_state",
+            "binary_version", "compatibility_set_id", "coordinator_origin",
+            "model", "model_loaded", "network_state",
             "requests_in_flight", "service_instance.pid", "capacity.max_concurrency",
             "continuous_batching.active", "continuous_batching.policy.load_status",
             "continuous_batching.policy.authorized", "continuous_batching.policy.policy_sha256",
@@ -318,6 +324,30 @@ def main() -> int:
     }
     selected["provider_id_sha256"] = digest(str(provider_id).encode()) if provider_id else None
     launch = launch_identity(binary, config, args.label, selected["service_instance.pid"])
+    snapshot = {
+        "config_sha256": regular_digest(config, 2 * 1024 * 1024),
+        "provider_plist_sha256": launch["provider_plist_sha256"],
+        "watchdog_plist_sha256": regular_digest(
+            home / "Library" / "LaunchAgents" / f"{args.label}-watchdog.plist",
+            64 * 1024,
+        ),
+        "compatibility_set_sha256": regular_digest(
+            install / "compatibility-set.json", 2 * 1024 * 1024
+        ),
+        "provider_id_sha256": selected["provider_id_sha256"],
+        "coordinator_origin": selected["coordinator_origin"],
+        "compatibility_set_id": selected["compatibility_set_id"],
+        "binary_version": selected["binary_version"],
+        "model": selected["model"],
+        "model_loaded": selected["model_loaded"],
+        "network_state": selected["network_state"],
+        "requests_in_flight": selected["requests_in_flight"],
+        "coordinator_connected": selected["coordinator.connected"],
+        "operator_paused": selected["lifecycle.operator_paused"],
+        "pid": launch["pid"],
+        "process_start_us": launch["process_start_us"],
+        "executable_path": launch["executable_path"],
+    }
     print(json.dumps({
         "journal": journal_fields(journal, config),
         "config": config_fields(config),
@@ -332,6 +362,7 @@ def main() -> int:
             "process_start_us": launch["process_start_us"],
             "executable_path": launch["executable_path"],
         },
+        "snapshot": snapshot,
         "status_error": status_error,
         "hardware_model": hardware_model(),
     }, sort_keys=True))
