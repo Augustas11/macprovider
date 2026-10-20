@@ -145,6 +145,31 @@ def read_journal(path: Path) -> dict:
         raise Refusal("journal is unreadable") from exc
     if value.get("schema_version") != SCHEMA:
         raise Refusal("journal schema mismatch")
+    required = (
+        "config_path", "backup_path", "baseline_sha256", "baseline_unowned_sha256",
+        "version", "provider_id_sha256", "model", "policy_sha256",
+        "policy_release_id", "policy_tuple_sha256", "binary_sha256", "team_id",
+        "signing_identifier", "cdhash", "executable_path",
+    )
+    if not all(isinstance(value.get(key), str) and value[key] for key in required):
+        raise Refusal("journal metadata is incomplete")
+    if value.get("phase") not in {"prepared", "applied", "accepted", "config_restored"}:
+        raise Refusal("journal phase is invalid")
+    if value.get("baseline_owned") != {OWNED[0]: "4", OWNED[1]: "owner"} or value.get(
+        "intended_owned"
+    ) != {OWNED[0]: None, OWNED[1]: None}:
+        raise Refusal("journal owned-field contract mismatch")
+    if value["phase"] == "accepted":
+        if (
+            not isinstance(value.get("accepted_pid"), int)
+            or isinstance(value.get("accepted_pid"), bool)
+            or value["accepted_pid"] <= 0
+            or not isinstance(value.get("accepted_process_start_us"), int)
+            or isinstance(value.get("accepted_process_start_us"), bool)
+            or value["accepted_process_start_us"] <= 0
+            or value.get("accepted_executable_path") != value["executable_path"]
+        ):
+            raise Refusal("journal accepted process identity is invalid")
     return value
 
 
@@ -158,8 +183,11 @@ def validate_paths(config: Path, journal: Path, backup: Path | None = None) -> N
     safe_regular(config)
     if config.is_symlink() or config.resolve() != config:
         raise Refusal("config may not resolve through a symlink")
-    if backup and (backup.parent.resolve() != config.parent.resolve()):
-        raise Refusal("backup must be beside config")
+    if backup and (
+        backup.parent.resolve() != config.parent.resolve()
+        or not backup.name.startswith(f"{config.name}.bak-owner-pin-")
+    ):
+        raise Refusal("backup path is outside the scoped owner-pin namespace")
 
 
 def prepare(args: argparse.Namespace) -> None:
@@ -201,8 +229,21 @@ def prepare(args: argparse.Namespace) -> None:
             "policy_sha256": args.policy_sha256,
             "policy_release_id": args.policy_release_id,
             "policy_tuple_sha256": args.policy_tuple_sha256,
+            "binary_sha256": args.binary_sha256,
+            "team_id": args.team_id,
+            "signing_identifier": args.signing_identifier,
+            "cdhash": args.cdhash,
+            "executable_path": args.executable_path,
         }
-        write_journal(journal, record)
+        try:
+            write_journal(journal, record)
+        except Exception:
+            try:
+                backup.unlink()
+                fsync_dir(backup.parent)
+            except FileNotFoundError:
+                pass
+            raise
     print(json.dumps({"phase": "prepared", "baseline_sha256": record["baseline_sha256"]}))
 
 
@@ -250,16 +291,50 @@ def restore(args: argparse.Namespace) -> None:
     print(json.dumps({"phase": "config_restored", "config_sha256": record["restored_sha256"]}))
 
 
+def accept(args: argparse.Namespace) -> None:
+    config, journal = Path(args.config), Path(args.journal)
+    validate_paths(config, journal)
+    try:
+        pid = int(args.pid)
+        process_start_us = int(args.process_start_us)
+    except ValueError as exc:
+        raise Refusal("accepted process identity is not numeric") from exc
+    if pid <= 0 or process_start_us <= 0 or args.executable_path == "":
+        raise Refusal("accepted process identity is invalid")
+    with ConfigLock(config):
+        record = read_journal(journal)
+        if record["phase"] != "applied" or owned_state(config.read_bytes()) != record["intended_owned"]:
+            raise Refusal("config/journal is not ready to accept a serving process")
+        if args.executable_path != record["executable_path"]:
+            raise Refusal("accepted executable differs from the signed executable")
+        record["phase"] = "accepted"
+        record["accepted_pid"] = pid
+        record["accepted_process_start_us"] = process_start_us
+        record["accepted_executable_path"] = args.executable_path
+        write_journal(journal, record)
+    print(json.dumps({"phase": "accepted", "pid": pid, "process_start_us": process_start_us}))
+
+
 def finish(args: argparse.Namespace) -> None:
     config, journal = Path(args.config), Path(args.journal)
     validate_paths(config, journal)
     record = read_journal(journal)
     wanted = record["baseline_owned"] if args.restored else record["intended_owned"]
-    expected_phase = "config_restored" if args.restored else "applied"
+    expected_phase = "config_restored" if args.restored else "accepted"
     with ConfigLock(config):
         record = read_journal(journal)
         if record["phase"] != expected_phase or owned_state(config.read_bytes()) != wanted:
             raise Refusal("config/journal is not in the expected final state")
+        backup = Path(record["backup_path"])
+        validate_paths(config, journal, backup)
+        info = safe_regular(backup, must_exist=False)
+        if info is not None:
+            if stat.S_IMODE(info.st_mode) != 0o600:
+                raise Refusal("backup permissions are unsafe")
+            if sha(backup.read_bytes()) != record["baseline_sha256"]:
+                raise Refusal("backup bytes differ from the recorded baseline")
+            backup.unlink()
+            fsync_dir(backup.parent)
         journal.unlink()
         fsync_dir(journal.parent)
     print(json.dumps({"phase": "serving_restored" if args.restored else "complete"}))
@@ -287,13 +362,20 @@ def parser() -> argparse.ArgumentParser:
     prep = sub.add_parser("prepare")
     for name in (
         "config", "journal", "backup", "version", "provider-id-sha256", "model",
-        "policy-sha256", "policy-release-id", "policy-tuple-sha256",
+        "policy-sha256", "policy-release-id", "policy-tuple-sha256", "binary-sha256",
+        "team-id", "signing-identifier", "cdhash", "executable-path",
     ):
         prep.add_argument(f"--{name}", required=True)
     for command in ("apply", "restore"):
         child = sub.add_parser(command)
         child.add_argument("--config", required=True)
         child.add_argument("--journal", required=True)
+    accepted = sub.add_parser("accept")
+    accepted.add_argument("--config", required=True)
+    accepted.add_argument("--journal", required=True)
+    accepted.add_argument("--pid", required=True)
+    accepted.add_argument("--process-start-us", required=True)
+    accepted.add_argument("--executable-path", required=True)
     done = sub.add_parser("finish")
     done.add_argument("--config", required=True)
     done.add_argument("--journal", required=True)

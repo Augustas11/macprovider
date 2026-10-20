@@ -11,13 +11,13 @@ not add steps of its own:
 | `catalog-activate.sh` | catalog, CB policy and native-MTP activation | `docs/runbooks/native-mtp-enablement.md`, `docs/runbooks/catalog-release-decision-tree.md`, `docs/runbooks/pearl-coordinator-rollout.md` |
 | `pearl-runtime.sh` | coordinator and gateway runtime release; pending stats migrations (`stats_migrate`: checked before the apply and before health, applied under the live-ops lock, no downtime); one-time retention `auto_vacuum` conversion (`PEARL_RUNTIME_TASK=retention-vacuum-conversion`); one on-demand retention run (`PEARL_RUNTIME_TASK=retention-run`, no restart); compute-integrity private corpus install (`PEARL_RUNTIME_TASK=compute-integrity-enable`, one restart); operator-reviewed native-vision qualification install into the Pearl overlay (`PEARL_RUNTIME_TASK=vision-qualification`, `VISION_QUALIFICATION_FILE`, one restart as the boot-state proof; SIGHUP also applies the list); Pearl updater bundle install from the running tag (`PEARL_RUNTIME_TASK=updater-bundle`, both Pearl locks, no restart) | `docs/runbooks/pearl-coordinator-rollout.md`, `ops/runbooks/settlement-evidence-retention.md`, `docs/runbooks/compute-integrity-private-corpus.md`, `docs/runbooks/native-vision-acceptance.md`, `docs/runbooks/catalog-release-decision-tree.md` (Enabling rollout) |
 | `canary-swap.sh` | CLI candidate onto the canary provider: `check` (MLX kernels in every shipped metallib, verified binary) then `swap` (pause, drain, back up, payload-only swap, resume; the watchdog stays booted out until the candidate, or the restored version, is buyer_serving; a crash loop, or `/v1/status` silent for 120 s after the model loaded, restores the backup and resumes; silence while the model loads is bounded only by the 1800 s ready timeout) | `docs/releases/cli-release-train.md` (Promotion gate item 5) |
-| `studio-owner-pin.sh` | one-time removal of the Studio GLM provider's `4/owner` concurrency pin after a published signed CLI >= 1.8.260 and the installed live-verified policy independently supplies the exact four-slot ceiling; scoped CAS/journal rollback, 20-minute readiness bound, new-PID/crash hold and provider-attributed native-MTP gateway proof | `docs/releases/cli-release-train.md` |
+| `studio-owner-pin.sh` | one-time removal of the Studio GLM provider's `4/owner` concurrency pin after authenticating the published signed CLI >= 1.8.260, its checksummed artifact, exact LaunchAgent/process identity and a live-verified tuple matching the reviewed four-slot policy bytes; journal-first scoped rollback, watchdog restoration, 20-minute readiness bound, accepted-PID/crash hold and provider-attributed native-MTP gateway proof | `docs/releases/cli-release-train.md` |
 | `live-lock.sh` | one live actor at a time | rollout rule 3 |
 | `privacy-activate.sh` | existing signed identity approval; durable rollback | `docs/runbooks/privacy-network-activation.md`, SPEC-049 §8.3 |
 
 Tests (offline): `test-ops-guard.sh`, `test-live-lock.sh`,
 `test-runbook-commands.sh`, `test-entrypoints.sh`, `test-canary-swap.sh`,
-`test-studio-owner-pin.sh`.
+`test-studio-owner-pin.sh`, `test-studio-owner-pin-provenance.sh`.
 
 ## Use
 
