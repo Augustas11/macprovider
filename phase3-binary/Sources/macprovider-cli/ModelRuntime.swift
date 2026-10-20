@@ -344,6 +344,19 @@ public struct RuntimeContinuousBatchingSnapshot: Sendable, Equatable {
     public var selfCheck: ContinuousBatchingSelfCheckReport? = nil
 }
 
+struct RuntimeKVDiskTierSnapshot: Sendable, Equatable {
+    let enabled: Bool
+    let activated: Bool
+    let unsupportedReason: String?
+    let bytesUsed: Int?
+    let maxBytes: Int
+}
+
+private struct KVDiskSeedResult: Sendable {
+    let template: [KVLayerGeometry]?
+    let unsupportedCacheClass: String?
+}
+
 public struct RuntimeSnapshot: @unchecked Sendable {
     public let state: SwapState
     public let container: ModelContainer?
@@ -1890,6 +1903,8 @@ actor ModelRuntime: ModelRuntimeServing {
     /// false ⇒ the hot path is byte-identical to today (FR-KVP1).
     private var coldTierAttached = false
     private var attachedKVDiskTier: KVDiskTier?
+    private var attachedKVDiskAdapter: KVConversationColdTierAdapter?
+    private var coldTierUnsupportedReason: String?
     private var inferenceGate: AsyncSemaphore
     /// SPEC-036 FR-21: scoring jobs run under the same serial permit as
     /// serial buyer requests.
@@ -6469,6 +6484,12 @@ maxTokens: 1,
         currentTokenizerConfigSHA256 = tokenizerConfigSHA256
         currentChatTemplateSHA256 = chatTemplateSHA256
         currentNativeVisionProfile = nativeVisionProfile
+        if let attachedKVDiskAdapter {
+            // The support verdict is model-specific. Re-evaluate it against
+            // the newly installed container before the swap is published.
+            noteUnsupportedKVDiskCacheClass(nil)
+            await seedColdGeometry(into: attachedKVDiskAdapter)
+        }
         let pagedKVSkipReason = Self.pagedKVSkipReason(
             config: pagedKVConfig, nativeVision: nativeVisionProfile != nil)
         Self.logPagedKVSkip(pagedKVSkipReason)
@@ -10332,7 +10353,20 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         attachedKVDiskTier = tier
     }
 
+    func kvDiskTierSnapshot() async -> RuntimeKVDiskTierSnapshot? {
+        guard let tier = attachedKVDiskTier else { return nil }
+        let bytesUsed = coldTierAttached ? await tier.store.cachedTotalBytesUsed() : nil
+        return RuntimeKVDiskTierSnapshot(
+            enabled: tier.config.effectiveEnabled,
+            activated: coldTierAttached,
+            unsupportedReason: coldTierUnsupportedReason,
+            bytesUsed: bytesUsed,
+            maxBytes: tier.config.maxBytes
+        )
+    }
+
     func attachKVDiskTier(_ tier: KVDiskTier) async {
+        coldTierUnsupportedReason = nil
         let adapter = KVConversationColdTierAdapter(
             store: tier.store, namespaceID: tier.namespaceID,
             eligibilityTTLSeconds: tier.eligibilityTTLSeconds,
@@ -10357,6 +10391,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         // first post-restart request can promote a persisted entry rather than
         // falling back to a fresh prefill until some other conversation commits.
         await seedColdGeometry(into: adapter)
+        attachedKVDiskAdapter = adapter
         attachedKVDiskTier = tier
         coldTierAttached = true
     }
@@ -10378,8 +10413,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         let kvBitsOverride = kvBitsOverride
         let prefillStepSize = prefillStepSize
         let blockingInferenceExecutor = blockingInferenceExecutor
-        let template: [KVLayerGeometry]? = try? await inferenceGate.withPermit {
-            try await container.perform { context -> [KVLayerGeometry]? in
+        let result: KVDiskSeedResult? = try? await inferenceGate.withPermit {
+            try await container.perform { context -> KVDiskSeedResult in
                 let input = UserInput(chat: [.user("warmup")])
                 let lmInput = try await context.processor.prepare(input: input)
                 let parameters = try Self.makeServeGenerateParameters(
@@ -10415,7 +10450,7 @@ maxTokens: 1,
                 // silently at attach time. Log-only: the per-request observable skip in
                 // captureSnapshot still covers correctness.
                 if adapter.seedTemplate(servedModelID: servedModelID, layers: kvCache) {
-                    return nil
+                    return KVDiskSeedResult(template: nil, unsupportedCacheClass: nil)
                 }
                 guard let caches = kvCache as? [KVCacheSimple] else {
                     // Report the FIRST layer that is NOT KVCacheSimple (heterogeneous
@@ -10425,15 +10460,25 @@ maxTokens: 1,
                     let className = (kvCache.first(where: { !($0 is KVCacheSimple) }) ?? kvCache.first)
                         .map { String(describing: type(of: $0)) } ?? "empty"
                     Self.logColdTierUnsupportedCacheClass(servedModelID: servedModelID, cacheClass: className)
-                    return nil
+                    return KVDiskSeedResult(template: nil, unsupportedCacheClass: className)
                 }
-                guard let payloads = KVCacheSerialization.snapshotLayers(caches) else { return nil }
-                return KVConversationColdTierAdapter.seedGeometryTemplate(fromPayloads: payloads)
+                guard let payloads = KVCacheSerialization.snapshotLayers(caches) else {
+                    return KVDiskSeedResult(template: nil, unsupportedCacheClass: nil)
+                }
+                return KVDiskSeedResult(
+                    template: KVConversationColdTierAdapter.seedGeometryTemplate(fromPayloads: payloads),
+                    unsupportedCacheClass: nil
+                )
             }
         } ?? nil
-        if let template, !template.isEmpty {
+        noteUnsupportedKVDiskCacheClass(result?.unsupportedCacheClass)
+        if let template = result?.template, !template.isEmpty {
             adapter.seedTemplate(servedModelID: servedModelID, template: template)
         }
+    }
+
+    func noteUnsupportedKVDiskCacheClass(_ cacheClass: String?) {
+        coldTierUnsupportedReason = cacheClass == nil ? nil : "unsupported_cache_class"
     }
 
     /// MEDIUM-A (SPEC-037) — warn ONCE at cold-tier attach when the loaded model's

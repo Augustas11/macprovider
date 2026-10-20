@@ -381,11 +381,19 @@ final class ShellScreensTests: XCTestCase {
     func testEngineStatusDecodesCBAndMTPFromStatus() throws {
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data("""
         {"continuous_batching":{"mode":"on","active":true,"unsupported_reason":null,"scheduler":{"slots_total":8,"slots_free":6,"waiting_count":2}},
-         "native_mtp":{"supported":true,"enabled":true,"mode":"active","mean_accepted_length":1.84}}
+         "native_mtp":{"supported":true,"enabled":true,"mode":"active","mean_accepted_length":1.84},
+         "kv_disk_tier":{"enabled":true,"activated":true,"unsupported_reason":null,"bytes_used":1073741824,"max_bytes":4294967296},
+         "recent_restarts":[{"at":"2026-10-20T10:11:12.000Z","reason":"watchdog_recovery_restart","version":"1.8.259"}]}
         """.utf8)) as? [String: Any])
         let engine = try XCTUnwrap(ProviderEngineStatus.decode(status: object))
         XCTAssertEqual(ProviderScreenPresentation.continuousBatchingLine(engine), "On · 6 of 8 rows free · 2 waiting")
         XCTAssertEqual(ProviderScreenPresentation.nativeMTPLine(engine), d("On · 1§84 tokens accepted per step"))
+        let kvLine = try XCTUnwrap(ProviderScreenPresentation.kvDiskTierLine(engine))
+        XCTAssertTrue(kvLine.hasPrefix("On · "))
+        XCTAssertTrue(kvLine.contains(" used of "))
+        let restarts = try XCTUnwrap(engine.recentRestarts)
+        XCTAssertEqual(restarts.count, 1)
+        XCTAssertTrue(ProviderScreenPresentation.restartLine(restarts[0]).contains("Provider stopped responding and recovered · v1.8.259"))
         XCTAssertNil(ProviderEngineStatus.decode(status: [:]), "an older CLI reports neither")
 
         let off = try XCTUnwrap(ProviderEngineStatus.decode(status: [
@@ -394,6 +402,32 @@ final class ShellScreensTests: XCTestCase {
         ]))
         XCTAssertEqual(ProviderScreenPresentation.continuousBatchingLine(off), "Off: requests run one at a time per slot.")
         XCTAssertEqual(ProviderScreenPresentation.nativeMTPLine(off), "Not available for this model.")
+        XCTAssertNil(off.recentRestarts, "an older CLI does not imply an empty restart history")
+
+        let unsupported = try XCTUnwrap(ProviderEngineStatus.decode(status: [
+            "kv_disk_tier": [
+                "enabled": true, "activated": true,
+                "unsupported_reason": "unsupported_cache_class",
+                "bytes_used": 512, "max_bytes": 1024,
+            ],
+        ]))
+        XCTAssertTrue(ProviderScreenPresentation.kvDiskTierLine(unsupported)?.hasPrefix("Not available for this model: its cache format cannot be saved to disk.") == true)
+
+        let legacyRestart = try XCTUnwrap(ProviderEngineStatus.decode(status: [
+            "recent_restarts": [[
+                "at": "2026-10-20T10:11:12Z",
+                "reason": "launchd_service_started",
+                "version": NSNull(),
+            ]],
+        ]))
+        let legacy = try XCTUnwrap(legacyRestart.recentRestarts?.first)
+        XCTAssertTrue(ProviderScreenPresentation.restartLine(legacy).contains("Provider started · Unknown version"))
+
+        let noRestarts = try XCTUnwrap(ProviderEngineStatus.decode(status: ["recent_restarts": []]))
+        XCTAssertEqual(noRestarts.recentRestarts, [])
+        var noRestartSnapshot = AgentSnapshot.empty
+        noRestartSnapshot.providerEngine = noRestarts
+        XCTAssertTrue(ProviderScreenPresentation.screenStrings(noRestartSnapshot).contains("No recorded restarts."))
 
         let unsafe = try XCTUnwrap(ProviderEngineStatus.decode(status: [
             "continuous_batching": ["mode": "On Air <script>", "active": "yes"],
@@ -461,7 +495,7 @@ final class ShellScreensTests: XCTestCase {
         var snapshot = AgentSnapshot.empty
         snapshot.localProviderID = "provider"
         let strings = SettingsPresentation.screenStrings(snapshot, appVersion: "1.8.256")
-        for needle in ["Payout wallet", "Invites", "Startup & Dock", "Open Malibu at login", "Provider software", "About", "Malibu app: 1.8.256"] {
+        for needle in ["Payout wallet", "Invites", "Startup & Dock", "Open Malibu at login", "Show menu-bar icon", "Keep Malibu in the Dock", "Provider software", "Update channel", "Stable", "About", "Malibu app: 1.8.256"] {
             XCTAssertTrue(strings.contains(needle), "missing \(needle) in \(strings)")
         }
         XCTAssertFalse(SettingsPresentation.screenStrings(.empty, appVersion: "x").contains("Invites"))
