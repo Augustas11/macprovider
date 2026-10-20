@@ -56,7 +56,9 @@
 # Env (or ~/.config/macprovider/ops.env): COORDINATOR_URL, GATEWAY_URL,
 # PEARL_SSH (+ PEARL_SSH_IDENTITY/PEARL_SSH_KNOWN_HOSTS for the repo scripts),
 # REMOTE_REVOCATION_DIR, STUDIO_SSH, STUDIO_SSH_KEY, STUDIO_STATUS_PORT,
-# BUYER_TOKEN_FILE, PROBE_MODEL, CATALOG_CANARY_* (as catalog-content-release.sh),
+# BUYER_TOKEN_FILE, PROBE_MODEL, CATALOG_REQUIRE_NATIVE_MTP_FORWARD=true (only
+# for a native-MTP identity rebind proof), CATALOG_CANARY_* (as
+# catalog-content-release.sh),
 # CATALOG_PRICING_ACK (the reviewed price table's digest), MACPROVIDER_OPS_OWNER (for --run).
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR disable=SC2034  # OPS_NAME/NEXT_* are read by lib/common.sh
@@ -447,7 +449,9 @@ for i in \$(seq 1 24); do curl -sf -m 5 \"\$COORDINATOR_URL/healthz\" && exit 0;
   # The proof expires, and legacy generic request-counter markers are not enough
   # once continuous batching is active: a fresh marker must carry the scheduler
   # shared_forward_calls delta from the provider-attributed buyer request.
-  if gateway_proof_marker_valid "$OPS_SCOPE" "$p_cb_active"; then
+  local require_mtp
+  require_mtp="$(native_mtp_forward_requirement)"
+  if gateway_proof_marker_valid "$OPS_SCOPE" "$p_cb_active" "$require_mtp"; then
     step gateway_proof "done" "$(marker_field "$OPS_SCOPE" gateway_proof 'd.get("evidence")')"
   else
     step gateway_proof pending "$(marker_done "$OPS_SCOPE" gateway_proof && echo 'previous proof older than 24 h or lacks active-path scheduler evidence' || true)"
@@ -555,15 +559,22 @@ read_provider_status() {
     refuse "provider /v1/status not readable over STUDIO_SSH"
 }
 
+native_mtp_forward_requirement() {
+  case "${CATALOG_REQUIRE_NATIVE_MTP_FORWARD:-false}" in
+    false) echo false ;;
+    true) echo true ;;
+    *) refuse "CATALOG_REQUIRE_NATIVE_MTP_FORWARD must be true or false" ;;
+  esac
+}
 
 gateway_proof_marker_valid() {
-  local scope="$1" cb_active="$2" path
+  local scope="$1" cb_active="$2" require_mtp="$3" path
   path="$(marker_path "$scope" gateway_proof)"
   [ -f "$path" ] || return 1
   [ -n "$(find "$path" -mmin -1440 2>/dev/null)" ] || return 1
-  python3 - "$path" "$cb_active" <<'PY'
+  python3 - "$path" "$cb_active" "$require_mtp" <<'PY'
 import json, sys
-path, cb_active = sys.argv[1], sys.argv[2]
+path, cb_active, require_mtp = sys.argv[1:4]
 try:
     d = json.load(open(path))
 except Exception:
@@ -578,6 +589,11 @@ else:
     delta = d.get("mtp_forwards_delta")
 if type(delta) is not int or delta <= 0:
     sys.exit(1)
+if require_mtp == "true":
+    if d.get("native_mtp_forward_required") is not True:
+        sys.exit(1)
+    if type(d.get("mtp_forwards_delta")) is not int or d["mtp_forwards_delta"] <= 0:
+        sys.exit(1)
 PY
 }
 
@@ -607,11 +623,12 @@ proof_moved() {
 # response carries no attribution. Prints status, request id and counter
 # deltas only; the session id itself is never printed.
 gateway_proof() {
-  local gw model token_file
+  local gw model token_file require_mtp
   gw="$(gateway_url)"
   [ -n "$gw" ] || refuse "GATEWAY_URL is unset"
   token_file="${BUYER_TOKEN_FILE:-}"
   [ -n "$token_file" ] && [ -f "$token_file" ] || refuse "BUYER_TOKEN_FILE must name a readable buyer token file"
+  require_mtp="$(native_mtp_forward_requirement)"
   require_studio_ssh
   case "${STUDIO_STATUS_PORT:-}" in ""|*[!0-9]*) refuse "STUDIO_STATUS_PORT must be set and numeric" ;; esac
 
@@ -636,7 +653,10 @@ gateway_proof() {
 
   local body="$OPS_TMP_DIR/proof.json" headers="$OPS_TMP_DIR/proof.headers" code sent_rid payload
   sent_rid="ops-proof-$(python3 -c 'import secrets; print(secrets.token_hex(8))')"
-  payload="$(python3 -c 'import json,sys; print(json.dumps({"model": sys.argv[1], "max_tokens": 32, "messages": [{"role": "user", "content": "Reply with the word ok."}]}))' "$model")"
+  # Include the generated request id in the prompt so this proof cannot be
+  # answered from an earlier identical-prompt cache entry. It remains an opaque
+  # buyer request nonce and reveals no provider attribution.
+  payload="$(python3 -c 'import json,sys; print(json.dumps({"model": sys.argv[1], "max_tokens": 32, "messages": [{"role": "user", "content": "Proof nonce " + sys.argv[2] + ". Reply with the word ok."}]}))' "$model" "$sent_rid")"
   # The bearer goes through curl --config on stdin, never argv.
   code="$(printf 'header = "Authorization: Bearer %s"\n' "$(tr -d '\r\n' < "$token_file")" |
     curl -sS -m 120 --config - -D "$headers" -o "$body" -w '%{http_code}' \
@@ -669,10 +689,13 @@ gateway_proof() {
   done
   proof_moved "$b_mtp" "$b_req" "$b_cb" "$b_shared" "$a_mtp" "$a_req" "$a_cb" "$a_shared" "$a_serial" ||
     die "request $rid did not move the target provider on its active serving path: mtp_forwards +$((a_mtp - b_mtp)), requests_total +$((a_req - b_req)), cb_shared_forward_calls +$((a_shared - b_shared)) (cb_active=$a_cb serial=$a_serial)"
+  if [ "$require_mtp" = true ] && [ $((a_mtp - b_mtp)) -le 0 ]; then
+    die "request $rid did not increase native_mtp.mtp_forwards as required: mtp_forwards +$((a_mtp - b_mtp))"
+  fi
   local evidence="HTTP 200 model=$model request_id=$rid served_by=canary mtp_forwards+$((a_mtp - b_mtp)) requests_total+$((a_req - b_req)) cb_shared_forward_calls+$((a_shared - b_shared)) cb_active=$a_cb serial=$a_serial"
   log "gateway proof: $evidence"
   mark_done "$OPS_SCOPE" gateway_proof "$evidence" \
-    "$(python3 -c 'import json,sys; import hashlib; print(json.dumps({"request_id": sys.argv[1], "sent_request_id": sys.argv[2], "mtp_forwards_delta": int(sys.argv[3]), "requests_total_delta": int(sys.argv[4]), "cb_shared_forward_calls_delta": int(sys.argv[5]), "served_by_canary": True, "served_session_sha256": hashlib.sha256(sys.argv[6].encode()).hexdigest()}))' "$rid" "$sent_rid" "$((a_mtp - b_mtp))" "$((a_req - b_req))" "$((a_shared - b_shared))" "$served_sid")"
+    "$(python3 -c 'import json,sys; import hashlib; print(json.dumps({"request_id": sys.argv[1], "sent_request_id": sys.argv[2], "mtp_forwards_delta": int(sys.argv[3]), "requests_total_delta": int(sys.argv[4]), "cb_shared_forward_calls_delta": int(sys.argv[5]), "native_mtp_forward_required": sys.argv[6] == "true", "served_by_canary": True, "served_session_sha256": hashlib.sha256(sys.argv[7].encode()).hexdigest()}))' "$rid" "$sent_rid" "$((a_mtp - b_mtp))" "$((a_req - b_req))" "$((a_shared - b_shared))" "$require_mtp" "$served_sid")"
 }
 
 internal() {
