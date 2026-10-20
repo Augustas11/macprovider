@@ -333,6 +333,12 @@ class RecorderState:
             self.inbound_count += 1
             return self.inbound_count <= MAX_REQUESTS
 
+    def record_response(self, request_id: str, status: int) -> dict[str, Any]:
+        record = {"id": request_id, "status": status}
+        with self.lock:
+            self.requests.append(record)
+        return record
+
 
 class GatewayProxy(http.server.ThreadingHTTPServer):
     daemon_threads = True
@@ -391,6 +397,9 @@ class GatewayProxyHandler(http.server.BaseHTTPRequestHandler):
                 request_id = response.getheader("X-Request-ID", "")
             finally:
                 connection.close()
+            if not _is_uuid4(request_id):
+                raise CheckError("missing_request_id")
+            record = state.record_response(request_id, response_status)
             if len(response_body) > MAX_RESPONSE_BYTES:
                 raise CheckError("response_too_large")
             response_metadata = validate_tool_stream(
@@ -398,18 +407,14 @@ class GatewayProxyHandler(http.server.BaseHTTPRequestHandler):
             )
             if response_metadata.usage is None:
                 raise CheckError("response_usage_missing")
-            if not _is_uuid4(request_id):
-                raise CheckError("missing_request_id")
-            record = {"id": request_id, "status": response_metadata.status,
-                      "usage": response_metadata.usage, "tool_calls": response_metadata.tool_calls,
-                      "tool_results": request_metadata["tool_results"],
-                      "output_budget": request_metadata["output_budget"],
-                      "tool_choice_auto": request_metadata["tool_choice_auto"]}
+            record.update({"status": response_metadata.status, "usage": response_metadata.usage,
+                           "tool_calls": response_metadata.tool_calls,
+                           "tool_results": request_metadata["tool_results"],
+                           "output_budget": request_metadata["output_budget"],
+                           "tool_choice_auto": request_metadata["tool_choice_auto"]})
             encoded_record = json.dumps(record, sort_keys=True, separators=(",", ":"))
             if state.key in encoded_record or state.proxy_token in encoded_record:
                 raise CheckError("credential_echo")
-            with state.lock:
-                state.requests.append(record)
             self.send_response(response_status)
             for name, value in response_headers:
                 if name.lower() not in {"authorization", "connection", "content-length", "transfer-encoding"}:
@@ -423,8 +428,10 @@ class GatewayProxyHandler(http.server.BaseHTTPRequestHandler):
             self._reject("upstream_transport", 502)
 
 
-def _bounded_https_get(path: str, key: str) -> tuple[int, bytes]:
-    connection = http.client.HTTPSConnection(GATEWAY_HOST, GATEWAY_PORT, timeout=HTTP_TIMEOUT_SECONDS)
+def _bounded_https_get(
+    path: str, key: str, timeout_seconds: float = HTTP_TIMEOUT_SECONDS
+) -> tuple[int, bytes]:
+    connection = http.client.HTTPSConnection(GATEWAY_HOST, GATEWAY_PORT, timeout=timeout_seconds)
     try:
         connection.request("GET", path, headers={"Authorization": "Bearer " + key, "Accept": "application/json"})
         response = connection.getresponse()
@@ -495,7 +502,18 @@ def validate_receipt(
 def poll_receipt(request_id: str, key: str, model: str, timeout_seconds: float = 30.0) -> dict[str, Any]:
     deadline = time.monotonic() + timeout_seconds
     while True:
-        status, body = _bounded_https_get("/v1/receipts/" + urllib.parse.quote(request_id, safe=""), key)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise CheckError("receipt_pending_timeout")
+        try:
+            status, body = _bounded_https_get(
+                "/v1/receipts/" + urllib.parse.quote(request_id, safe=""), key,
+                timeout_seconds=min(HTTP_TIMEOUT_SECONDS, remaining),
+            )
+        except CheckError as exc:
+            if exc.code == "upstream_transport" and time.monotonic() >= deadline:
+                raise CheckError("receipt_pending_timeout") from exc
+            raise
         result = validate_receipt(body, status, request_id, model)
         if result is not None:
             return result
@@ -599,7 +617,8 @@ def _failure_evidence(state: RecorderState, key: str, model: str) -> dict[str, A
     with state.lock:
         requests = list(state.requests)
     receipts: list[dict[str, Any]] = []
-    for request_id in dict.fromkeys(request["id"] for request in requests):
+    successful_ids = (request["id"] for request in requests if request["status"] == 200)
+    for request_id in dict.fromkeys(successful_ids):
         try:
             receipts.append(poll_receipt(request_id, key, model, timeout_seconds=5.0))
         except CheckError as exc:

@@ -225,6 +225,27 @@ class ReceiptTests(unittest.TestCase):
         with self.assertRaisesRegex(MODULE.CheckError, "receipt_model_mismatch"):
             MODULE.validate_receipt(self.receipt(attempts=wrong_model), 200, "req-1", MODEL)
 
+    def test_poll_network_call_is_capped_by_remaining_deadline(self):
+        get = mock.Mock(side_effect=MODULE.CheckError("upstream_transport"))
+        with mock.patch.object(MODULE, "_bounded_https_get", get), \
+                mock.patch.object(MODULE.time, "monotonic", side_effect=[10.0, 10.0, 12.0]):
+            with self.assertRaisesRegex(MODULE.CheckError, "receipt_pending_timeout"):
+                MODULE.poll_receipt("req-1", "key", MODEL, timeout_seconds=2.0)
+        self.assertEqual(get.call_args.kwargs["timeout_seconds"], 2.0)
+
+    def test_early_response_metadata_is_retained_for_failure_receipts(self):
+        request_id = str(uuid.uuid4())
+        state = MODULE.RecorderState(MODEL, MARKER_PATH, MARKER, "key", "proxy-token")
+        record = state.record_response(request_id, 200)
+        self.assertEqual(record, {"id": request_id, "status": 200})
+        receipt = {"request_id": request_id, "attempt_n": 1, "status": "verified"}
+        with mock.patch.object(MODULE, "poll_receipt", return_value=receipt) as poll:
+            evidence = MODULE._failure_evidence(state, "key", MODEL)
+        poll.assert_called_once_with(request_id, "key", MODEL, timeout_seconds=5.0)
+        self.assertEqual(evidence["requests"], [{"id": request_id, "status": 200}])
+        self.assertEqual(evidence["receipt_validation"],
+                         {"status": "verified", "receipts": [receipt]})
+
 
 class ModelTests(unittest.TestCase):
     def test_exact_model_and_real_context_are_required(self):
@@ -266,6 +287,63 @@ class ProcessTests(unittest.TestCase):
             command = [sys.executable, "-c", "import sys;sys.stdout.write('x'*1100000)"]
             with self.assertRaisesRegex(MODULE.CheckError, "client_output_too_large"):
                 MODULE._bounded_client_process(command, pathlib.Path(directory), dict(os.environ))
+
+
+class ProxyFailureEvidenceTests(unittest.TestCase):
+    def test_request_id_is_retained_before_malformed_sse_rejection(self):
+        request_id = str(uuid.uuid4())
+
+        class FakeResponse:
+            status = 200
+
+            @staticmethod
+            def read(_limit):
+                return b"data: not-json\n\ndata: [DONE]\n\n"
+
+            @staticmethod
+            def getheaders():
+                return [("Content-Type", "text/event-stream")]
+
+            @staticmethod
+            def getheader(name, default=None):
+                return request_id if name.lower() == "x-request-id" else default
+
+        class FakeHTTPSConnection:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def request(self, *_args, **_kwargs):
+                pass
+
+            def getresponse(self):
+                return FakeResponse()
+
+            def close(self):
+                pass
+
+        state = MODULE.RecorderState(MODEL, MARKER_PATH, MARKER, "owner-key", "proxy-token")
+        proxy = MODULE.GatewayProxy(state)
+        thread = MODULE.threading.Thread(target=proxy.serve_forever, daemon=True)
+        thread.start()
+        client = MODULE.http.client.HTTPConnection(*proxy.server_address, timeout=5)
+        try:
+            body = request()
+            with mock.patch.object(MODULE.http.client, "HTTPSConnection", FakeHTTPSConnection):
+                client.request("POST", "/v1/chat/completions", body=body, headers={
+                    "Authorization": "Bearer proxy-token",
+                    "Content-Type": "application/json",
+                    "Content-Length": str(len(body)),
+                })
+                response = client.getresponse()
+                response.read()
+            self.assertEqual(response.status, 502)
+            self.assertEqual(state.error_code, "invalid_json")
+            self.assertEqual(state.requests, [{"id": request_id, "status": 200}])
+        finally:
+            client.close()
+            proxy.shutdown()
+            proxy.server_close()
+            thread.join(timeout=5)
 
 
 @unittest.skipUnless(
@@ -363,8 +441,9 @@ class RealOpenCodeLoopbackFixture(unittest.TestCase):
             def close(self):
                 return None
 
-        def fake_get(path, key):
+        def fake_get(path, key, timeout_seconds=MODULE.HTTP_TIMEOUT_SECONDS):
             self.assertEqual(key, "synthetic-owner-key")
+            self.assertGreater(timeout_seconds, 0)
             if path == "/v1/models":
                 return 200, json.dumps({"data": [{"id": MODEL,
                     "max_context_tokens": MODULE.MIN_CONTEXT_TOKENS}]}).encode()
