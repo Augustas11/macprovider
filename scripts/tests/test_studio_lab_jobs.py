@@ -314,6 +314,97 @@ class StudioLabJobsTests(unittest.TestCase):
             jobs.run_job(argparse.Namespace(manifest=str(manifest)))
         self.assertEqual(self.fixture.recorded_calls(), [])
 
+    def test_profiler_rebuild_after_wall_refuses_before_census(self):
+        manifest = self.fixture.manifest("profiler-only")
+        jobs.validate_job(argparse.Namespace(manifest=str(manifest)))
+        original = jobs.run_checked
+        calls = 0
+
+        def rebuild_after_wall(argv, output, *, timeout=3600):
+            nonlocal calls
+            original(argv, output, timeout=timeout)
+            calls += 1
+            if calls == 1:
+                self.fixture.paths["glmbench"].resolve().write_bytes(b"rebuilt GLMBench\n")
+
+        with mock.patch.object(jobs, "run_checked", side_effect=rebuild_after_wall):
+            with self.assertRaisesRegex(jobs.Refusal, "artifact drifted: glmbench"):
+                jobs.run_job(argparse.Namespace(manifest=str(manifest)))
+        self.assertEqual(len(self.fixture.recorded_calls()), 1)
+        self.assertFalse((self.fixture.source / ".lab-window/result-profiler-only-nonce/result.json").exists())
+
+    def test_private_profiler_snapshot_tampering_refuses_before_load(self):
+        manifest = self.fixture.manifest("profiler-only")
+        jobs.validate_job(argparse.Namespace(manifest=str(manifest)))
+        loaded, job = jobs.load_job_manifest(str(manifest))
+        jobs.private_artifact_paths(loaded, job)["glmbench"].write_bytes(b"tampered private bench\n")
+        with self.assertRaisesRegex(jobs.Refusal, "private job artifact drifted"):
+            jobs.run_job(argparse.Namespace(manifest=str(manifest)))
+        self.assertEqual(self.fixture.recorded_calls(), [])
+
+    def test_qualification_policy_swap_between_cells_refuses(self):
+        shutil.rmtree(self.fixture.source / jobs.REUSE_RELATIVE)
+        manifest = self.fixture.manifest("qualification")
+        jobs.validate_job(argparse.Namespace(manifest=str(manifest)))
+        original = jobs.run_checked
+        matrix_calls = 0
+
+        def swap_policy(argv, output, *, timeout=3600):
+            nonlocal matrix_calls
+            original(argv, output, timeout=timeout)
+            if "--phase" in argv and argv[argv.index("--phase") + 1] == "matrix":
+                matrix_calls += 1
+                if matrix_calls == 1:
+                    policy = self.fixture.source / jobs.POLICY_RELATIVE
+                    policy.write_bytes(policy.read_bytes() + b"\n")
+
+        with mock.patch.object(jobs, "run_checked", side_effect=swap_policy):
+            with self.assertRaisesRegex(jobs.Refusal, "policy identity drifted"):
+                jobs.run_job(argparse.Namespace(manifest=str(manifest)))
+        self.assertEqual(matrix_calls, 1)
+        self.assertFalse((self.fixture.source / ".lab-window/result-qualification-nonce/result.json").exists())
+
+    def test_qualification_cli_swap_between_cells_refuses(self):
+        shutil.rmtree(self.fixture.source / jobs.REUSE_RELATIVE)
+        manifest = self.fixture.manifest("qualification")
+        jobs.validate_job(argparse.Namespace(manifest=str(manifest)))
+        original = jobs.run_checked
+        matrix_calls = 0
+
+        def swap_cli(argv, output, *, timeout=3600):
+            nonlocal matrix_calls
+            original(argv, output, timeout=timeout)
+            if "--phase" in argv and argv[argv.index("--phase") + 1] == "matrix":
+                matrix_calls += 1
+                if matrix_calls == 1:
+                    self.fixture.paths["diagnostic_cli"].resolve().write_bytes(b"replacement CLI\n")
+
+        with mock.patch.object(jobs, "run_checked", side_effect=swap_cli):
+            with self.assertRaisesRegex(jobs.Refusal, "artifact drifted: diagnostic_cli"):
+                jobs.run_job(argparse.Namespace(manifest=str(manifest)))
+        self.assertEqual(matrix_calls, 1)
+        self.assertFalse((self.fixture.source / ".lab-window/result-qualification-nonce/result.json").exists())
+
+    def test_final_input_mutation_after_last_child_writes_no_receipt(self):
+        manifest = self.fixture.manifest("profiler-only")
+        jobs.validate_job(argparse.Namespace(manifest=str(manifest)))
+        original = jobs.run_checked
+        calls = 0
+
+        def mutate_after_last(argv, output, *, timeout=3600):
+            nonlocal calls
+            original(argv, output, timeout=timeout)
+            calls += 1
+            if calls == 2:
+                metal = self.fixture.paths["glmbench_metallib"]
+                metal.write_bytes(b"changed after census\n")
+
+        with mock.patch.object(jobs, "run_checked", side_effect=mutate_after_last):
+            with self.assertRaisesRegex(jobs.Refusal, "artifact drifted: glmbench_metallib"):
+                jobs.run_job(argparse.Namespace(manifest=str(manifest)))
+        self.assertEqual(len(self.fixture.recorded_calls()), 2)
+        self.assertFalse((self.fixture.source / ".lab-window/result-profiler-only-nonce/result.json").exists())
+
     def test_job_schema_refuses_identity_valid_unknown_input(self):
         job = self.fixture.snapshot("profiler-only")["job"]
         job["immutable_inputs"]["operator_argument"] = "not-allowed"

@@ -699,6 +699,109 @@ def preflight_path(manifest: dict) -> Path:
     return Path(manifest["_manifest_path"]).parent / f"preflight-{manifest['nonce']}"
 
 
+def private_artifact_paths(manifest: dict, job: dict) -> dict[str, Path]:
+    root = preflight_path(manifest) / "artifacts"
+    paths = {
+        "diagnostic_cli": root / "provider/macprovider-cli",
+        "diagnostic_metallib": root / "provider/mlx.metallib",
+        "glmbench": root / "bench/GLMBench",
+        "glmbench_metallib": root / "bench/mlx.metallib",
+    }
+    if job["kind"] == "qualification":
+        paths["qualification_policy"] = root / "qualification-policy.json"
+    return paths
+
+
+def copy_authenticated(source: Path, destination: Path, expected_sha: str, *, executable: bool) -> None:
+    source = safe_artifact(source, executable=executable)
+    before = source.lstat()
+    source_fd = os.open(
+        source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    )
+    destination_fd = -1
+    digest = hashlib.sha256()
+    try:
+        opened = os.fstat(source_fd)
+        if (
+            (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
+            != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+        ):
+            raise Refusal("bound artifact changed while opening")
+        destination_fd = os.open(
+            destination,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o700 if executable else 0o600,
+        )
+        for block in iter(lambda: os.read(source_fd, 1024 * 1024), b""):
+            digest.update(block)
+            view = memoryview(block)
+            while view:
+                written = os.write(destination_fd, view)
+                if written <= 0:
+                    raise Refusal("bound artifact copy made no progress")
+                view = view[written:]
+        after = os.fstat(source_fd)
+        if (
+            (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+            != (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
+            or digest.hexdigest() != expected_sha
+        ):
+            raise Refusal("bound artifact changed or has the wrong digest")
+        os.fsync(destination_fd)
+    finally:
+        os.close(source_fd)
+        if destination_fd >= 0:
+            os.close(destination_fd)
+    if file_sha256(safe_artifact(destination, executable=executable)) != expected_sha:
+        raise Refusal("private artifact copy verification failed")
+
+
+def prepare_private_artifacts(manifest: dict, job: dict) -> None:
+    paths = private_artifact_paths(manifest, job)
+    root = preflight_path(manifest) / "artifacts"
+    create_result_dir(root)
+    create_result_dir(root / "provider")
+    create_result_dir(root / "bench")
+    source_artifacts = manifest["artifacts"]
+    expected = job["immutable_inputs"]["artifact_sha256"]
+    for key in ("diagnostic_cli", "diagnostic_metallib", "glmbench", "glmbench_metallib"):
+        copy_authenticated(
+            Path(source_artifacts[key]["path"]), paths[key], expected[key],
+            executable=key in {"diagnostic_cli", "glmbench"},
+        )
+    if job["kind"] == "qualification":
+        copy_authenticated(
+            Path(manifest["lab_source_dir"]) / POLICY_RELATIVE,
+            paths["qualification_policy"],
+            job["immutable_inputs"]["qualification_policy_sha256"],
+            executable=False,
+        )
+    for directory in (root / "provider", root / "bench", root):
+        fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+def validate_private_artifacts(manifest: dict, job: dict) -> dict[str, str]:
+    expected = job["immutable_inputs"]["artifact_sha256"]
+    result: dict[str, str] = {}
+    root = preflight_path(manifest) / "artifacts"
+    for directory in (preflight_path(manifest), root, root / "provider", root / "bench"):
+        safe_directory(directory)
+    for key, path in private_artifact_paths(manifest, job).items():
+        expected_sha = (
+            job["immutable_inputs"]["qualification_policy_sha256"]
+            if key == "qualification_policy" else expected[key]
+        )
+        actual = file_sha256(safe_artifact(path, executable=key in {"diagnostic_cli", "glmbench"}))
+        if actual != expected_sha:
+            raise Refusal(f"private job artifact drifted: {key}")
+        result[key] = actual
+    return result
+
+
 def valid_stamp_list(value: object) -> bool:
     keys = {"path", "size", "device", "inode", "mtime_ns", "ctime_ns"}
     return (
@@ -717,6 +820,7 @@ def valid_stamp_list(value: object) -> bool:
 
 
 def validate_preflight_receipt(manifest: dict, job: dict) -> None:
+    safe_directory(preflight_path(manifest))
     receipt, _ = read_safe_object(preflight_path(manifest) / "identity.json", "job preflight")
     target = Path(manifest["lab_source_dir"]) / ".lab-window/fixture/target"
     expected = receipt.get("expected")
@@ -736,14 +840,22 @@ def validate_preflight_receipt(manifest: dict, job: dict) -> None:
         raise Refusal("fixture changed after job preflight")
 
 
+def validate_execution_inputs(manifest: dict, job: dict) -> dict[str, str]:
+    validate_current_job_inputs(manifest, job)
+    private_hashes = validate_private_artifacts(manifest, job)
+    validate_preflight_receipt(manifest, job)
+    return private_hashes
+
+
 def qualification_base(manifest: dict, output: Path) -> list[str]:
-    source = Path(manifest["lab_source_dir"])
     inputs = manifest["job"]["immutable_inputs"]
+    private = private_artifact_paths(manifest, manifest["job"])
+    source = Path(manifest["lab_source_dir"])
     return [
-        str(source / "phase3-binary/.build/release/macprovider-cli"),
+        str(private["diagnostic_cli"]),
         "native-mtp-bench", "--root", str(source / ".lab-window/fixture"),
         "--model-id", "zai-org/glm-5.3-flash",
-        "--policy", str(source / POLICY_RELATIVE),
+        "--policy", str(private["qualification_policy"]),
         "--out", str(output),
         "--provider-commit", str(inputs["qualification_provider_commit"]),
     ]
@@ -778,8 +890,10 @@ def validate_job(args: argparse.Namespace) -> dict[str, object]:
     preflight = preflight_path(manifest)
     if preflight.exists():
         validate_preflight_receipt(manifest, job)
+        validate_private_artifacts(manifest, job)
         return {"kind": job["kind"], "identity_sha256": job["identity_sha256"], "validated": True}
     create_result_dir(preflight)
+    prepare_private_artifacts(manifest, job)
     target = source / ".lab-window/fixture/target"
     expected = projection_tuple(source)
     if job["kind"] == "profiler-only":
@@ -829,6 +943,7 @@ def validate_job(args: argparse.Namespace) -> dict[str, object]:
         "observed_target_sha256": target_digest,
         "target_stamps": target_stamps,
     })
+    validate_execution_inputs(manifest, job)
     return {"kind": job["kind"], "identity_sha256": job["identity_sha256"], "validated": True}
 
 
@@ -862,21 +977,22 @@ def write_result(path: Path, value: dict) -> None:
 
 def run_job(args: argparse.Namespace) -> dict[str, object]:
     manifest, job = load_job_manifest(args.manifest)
-    validate_current_job_inputs(manifest, job)
-    validate_preflight_receipt(manifest, job)
+    private_hashes = validate_execution_inputs(manifest, job)
     source = Path(manifest["lab_source_dir"])
     result = Path(manifest["_result_dir"])
     create_result_dir(result)
     outputs: list[Path] = []
     if job["kind"] == "profiler-only":
-        bench = str(source / "scripts/lab/cb-studio/glm53-bench/.build/release/GLMBench")
+        bench = str(private_artifact_paths(manifest, job)["glmbench"])
         target = str(source / ".lab-window/fixture/target")
         wall = result / "component-wall.log"
         census = result / "component-census.log"
+        validate_execution_inputs(manifest, job)
         run_checked([
             bench, target, "--mtp-multirow-profile", "--mtp-multirow-measurement-mode",
             "wall-only", "--mtp-multirow-reps", "5",
         ], wall)
+        validate_execution_inputs(manifest, job)
         run_checked([bench, target, "--mtp-multirow-profile", "--mtp-multirow-reps", "1"], census)
         outputs.extend((wall, census))
     else:
@@ -884,17 +1000,24 @@ def run_job(args: argparse.Namespace) -> dict[str, object]:
         base = qualification_base(manifest, evidence)
         for index, cell in enumerate(QUALIFICATION_CELLS, 1):
             log = result / f"matrix-{index:02d}-{cell}.log"
+            validate_execution_inputs(manifest, job)
             run_checked(base + ["--only-cell", cell, "--phase", "matrix"], log)
             outputs.append(log)
         sustained = result / "sustained.log"
+        validate_execution_inputs(manifest, job)
         run_checked(base + ["--phase", "sustained"], sustained)
         outputs.extend((sustained, evidence))
+    private_hashes = validate_execution_inputs(manifest, job)
     receipt = {
         "schema_version": JOB_RESULT_SCHEMA,
         "kind": job["kind"],
         "identity_sha256": job["identity_sha256"],
         "completed_unix": int(time.time()),
         "qualification_activated": False,
+        "executed_inputs": {
+            "private_artifact_sha256": private_hashes,
+            "fixture_target_sha256": projection_tuple(source)["target_sha256"],
+        },
         "outputs": {item.name: file_sha256(safe_artifact(item)) for item in outputs},
     }
     write_result(result / "result.json", receipt)

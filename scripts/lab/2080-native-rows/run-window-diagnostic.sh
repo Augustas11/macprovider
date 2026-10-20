@@ -15,7 +15,7 @@ umask 077
 }
 
 if [ "$#" = 3 ]; then
-  script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
+  script_dir="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
   helper="$script_dir/manifest.py"
   [ -f "$helper" ] && [ ! -L "$helper" ] || {
     echo "fixed Studio job helper is missing" >&2

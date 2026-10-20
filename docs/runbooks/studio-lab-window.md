@@ -74,6 +74,12 @@ tokenizer bytes. A private preflight receipt outside the fixture pins file
 metadata; changes, additions or removals are refused before model load. Normal
 `status` calls do not reread all model weights.
 
+Preflight also freezes private copies of the executables, their Metal
+libraries, and the qualification policy when applicable. Each subprocess
+executes those hash-verified copies, not a path that a concurrent build can
+replace. Source inputs, private copies and fixture metadata are revalidated
+between subprocesses and before the final receipt; drift fails the job.
+
 `qualification` uses `.lab-window/qualification-policy.json`, a frozen policy
 for exactly sixteen native cells: slots 1–4 × prompt lengths 1536/4096 × output
 lengths 128/512, followed by the continuous 1800-second sustained window.
