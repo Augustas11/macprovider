@@ -655,6 +655,8 @@ class OwnerPinProbeTests(unittest.TestCase):
             install.mkdir()
             binary = install / "macprovider-cli"
             binary.write_bytes(b"fixture-binary")
+            compatibility = install / "compatibility-set.json"
+            compatibility.write_text('{"schema_version":"fixture"}\n')
             self.assertFalse((install / "catalog-release").exists())
             config = root / "config.yaml"
             config.write_text(
@@ -671,9 +673,20 @@ class OwnerPinProbeTests(unittest.TestCase):
             status = json.dumps({
                 "provider_id": raw_provider,
                 "binary_version": "3.0.2",
+                "compatibility_set_id": "test/repo:v3.0.2@" + "a" * 40,
+                "coordinator_origin": "wss://coordinator.example.test",
                 "model": "fixture-model",
+                "model_loaded": True,
+                "network_state": "buyer_serving",
+                "requests_in_flight": 0,
+                "coordinator": {"connected": True},
+                "lifecycle": {"operator_paused": False},
                 "service_instance": {"pid": 4242},
             }).encode()
+            launch_agents = root / "Library" / "LaunchAgents"
+            launch_agents.mkdir(parents=True)
+            watchdog = launch_agents / "tech.malibu.fixture-watchdog.plist"
+            watchdog.write_bytes(b"fixture-watchdog-plist")
 
             commands = []
 
@@ -714,6 +727,7 @@ class OwnerPinProbeTests(unittest.TestCase):
                 "pid": 4242,
                 "process_start_us": 1800000123456789,
                 "executable_path": str(binary),
+                "provider_plist_sha256": "a" * 64,
             })
             with mock.patch.object(sys, "argv", argv), mock.patch.object(
                 self.probe.subprocess, "run", side_effect=fake_run
@@ -721,6 +735,8 @@ class OwnerPinProbeTests(unittest.TestCase):
                 self.probe,
                 "launch_identity",
                 launch_mock,
+            ), mock.patch.object(
+                self.probe.Path, "home", return_value=root
             ), contextlib.redirect_stdout(output):
                 self.assertEqual(self.probe.main(), 0)
             launch_mock.assert_called_once_with(
@@ -738,6 +754,25 @@ class OwnerPinProbeTests(unittest.TestCase):
                 "pid": 4242,
                 "process_start_us": 1800000123456789,
                 "executable_path": str(binary),
+            })
+            self.assertEqual(result["snapshot"], {
+                "binary_version": "3.0.2",
+                "compatibility_set_id": "test/repo:v3.0.2@" + "a" * 40,
+                "compatibility_set_sha256": self.probe.digest(compatibility.read_bytes()),
+                "config_sha256": self.probe.digest(config.read_bytes()),
+                "coordinator_connected": True,
+                "coordinator_origin": "wss://coordinator.example.test",
+                "executable_path": str(binary),
+                "model": "fixture-model",
+                "model_loaded": True,
+                "network_state": "buyer_serving",
+                "operator_paused": False,
+                "pid": 4242,
+                "process_start_us": 1800000123456789,
+                "provider_id_sha256": self.probe.digest(raw_provider.encode()),
+                "provider_plist_sha256": "a" * 64,
+                "requests_in_flight": 0,
+                "watchdog_plist_sha256": self.probe.digest(watchdog.read_bytes()),
             })
             codesign = [command for command in commands if command[0] == "codesign"]
             self.assertEqual(
@@ -806,7 +841,10 @@ class OwnerPinProbeTests(unittest.TestCase):
                 self.probe, "process_identity", return_value=process
             ):
                 identity = self.probe.launch_identity(binary, config, label, 4242)
-            self.assertEqual(identity, process)
+            self.assertEqual(identity, {
+                **process,
+                "provider_plist_sha256": self.probe.digest(plist.read_bytes()),
+            })
 
             with mock.patch.object(Path, "home", return_value=home), mock.patch.object(
                 self.probe.subprocess, "run", return_value=launchctl(4243)
