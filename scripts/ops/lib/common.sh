@@ -351,6 +351,13 @@ export_next() {
 
 # --- next / next --run ----------------------------------------------------
 
+# Controllers with a durable detached-operation lock may override this
+# function after sourcing common.sh. The default remains PID-bound for every
+# ordinary mutating step; there is no environment-controlled bypass.
+acquire_live_lock_for_step() {
+  "$OPS_DIR/live-lock.sh" acquire "$MACPROVIDER_OPS_OWNER" --purpose "$OPS_NAME:$NEXT_ID" --bind-pid >&2
+}
+
 print_next() {
   printf '# next: %s (%s) %s\n' "${NEXT_ID:--}" "${NEXT_KIND:--}" "$NEXT_TITLE"
   [ -z "$NEXT_REASON" ] || printf '# reason: %s\n' "$NEXT_REASON"
@@ -380,8 +387,9 @@ run_next() {
   if [ "$NEXT_KIND" = "mutate" ]; then
     [ -n "${MACPROVIDER_OPS_OWNER:-}" ] ||
       refuse "MACPROVIDER_OPS_OWNER is unset; name the session that will hold the live-ops lock"
-    # --bind-pid: this process owns the lock, so a dead pid frees it.
-    "$OPS_DIR/live-lock.sh" acquire "$MACPROVIDER_OPS_OWNER" --purpose "$OPS_NAME:$NEXT_ID" --bind-pid >&2 ||
+    # Ordinary steps bind the lock to this process; durable detached-operation
+    # controllers may override the acquisition hook to retain recovery ownership.
+    acquire_live_lock_for_step ||
       refuse "live-ops lock not acquired; see '$OPS_DIR/live-lock.sh status'"
     OPS_LOCK_OWNER="$MACPROVIDER_OPS_OWNER"
     # State may have moved while we waited for the lock: decide again and run
