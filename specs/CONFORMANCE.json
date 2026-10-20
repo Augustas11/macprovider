@@ -11780,6 +11780,8 @@
         "phase3-binary/Sources/macprovider-cli/NativeMTPBenchCommand.swift:struct NativeMTPBenchPolicy",
         "phase3-binary/Sources/macprovider-cli/NativeMTPBenchCommand.swift:static func nativeFirstOrder",
         "phase3-binary/Sources/macprovider-cli/NativeMTPBenchCommand.swift:func validateMatrix",
+        "phase3-binary/Sources/macprovider-cli/NativeMTPBenchCommand.swift:var effectiveCandidateMaxNativeActiveRows",
+        "phase3-binary/Sources/macprovider-cli/NativeMTPBenchCommand.swift:NativeMTPExistingEvidence.loadIfPresent",
         "scripts/native_mtp_r015_analyze.py:analyze",
         "scripts/native_mtp_r015_analyze.py:_pair_runs",
         "scripts/native_mtp_r015_analyze.py:_matrix_violations",
@@ -11788,6 +11790,8 @@
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPBenchPolicyTests.swift:testAdmissionPolicyGatedCellsAndSustainedCellAreExact",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPBenchPolicyTests.swift:testAdmissionPolicyPromptStrataAndOutputBudgetsAreExact",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPBenchPolicyTests.swift:testLaboratoryCandidateBoundWidensOnlyTheLabMatrix",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPBenchPolicyTests.swift:testLaboratoryCandidateBoundMustRemainBetweenProductionAndQualified",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPBenchPolicyTests.swift:testGatedCellsRequireStaggeredArrivals",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPBenchPolicyTests.swift:testPreregisteredRunOrderMatchesAnalyzerGoldenVectors",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testLoadGateRecorderCountsHeldRoundsAndRestoration",
@@ -11801,7 +11805,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "The R015 gate surfaces are implemented branch-local (campaign/native-mtp-r015, #1770), lab-only and compiled out of release: the native-mtp-bench preregistered policy (mandatory matrix of native-eligible cells up to the bound at capped prompt strata, two gated cells, and a sustained phase that reuses its cell's matrix records, frozen thresholds including gated non-inferiority margins, staggered arrivals, seeded counterbalanced run order) and scripts/native_mtp_r015_analyze.py (independent matrix, sample-size, run-order, native-eligible improvement and gated non-inferiority gates with scheduler-sourced load-gate hold evidence, Holm correction). A formal preregistered 256 GB Studio campaign for the first A3B tuple passed every mandatory cell and the 1800 s sustained window (policy 30934c07, docs/research/spec048-r015/evidence-2026-10-02-a3b-formal). Still pending: the representative post-gateway eligibility replay (not implemented), any lower advertised RAM tier, and signed JOURNEY-NATIVE-MTP-SERVING evidence."
+        "rationale": "The R015 gate surfaces are implemented branch-local (campaign/native-mtp-r015, #1770), lab-only and compiled out of release: the native-mtp-bench preregistered policy (mandatory matrix of native-eligible cells up to the effective laboratory candidate bound at capped prompt strata, two gated cells when that candidate bound is below qualified slots, and a sustained phase that reuses its cell's matrix records, frozen thresholds including gated non-inferiority margins, staggered arrivals, seeded counterbalanced run order). The optional laboratory bound is validated against the signed production bound and qualified slots, is hash-bound in the policy/header/resume/analyzer path, and cannot alter sidecar or serve-path authorization. scripts/native_mtp_r015_analyze.py independently reconstructs the matrix from the frozen policy, rejects header-bound drift, and applies sample-size, run-order, native-eligible improvement and gated non-inferiority gates with scheduler-sourced load-gate hold evidence and Holm correction. A formal preregistered 256 GB Studio campaign for the first A3B tuple passed every mandatory cell and the 1800 s sustained window (policy 30934c07, docs/research/spec048-r015/evidence-2026-10-02-a3b-formal). Still pending: the representative post-gateway eligibility replay (not implemented), any lower advertised RAM tier, and signed JOURNEY-NATIVE-MTP-SERVING evidence."
       }
     },
     {

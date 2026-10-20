@@ -122,6 +122,41 @@ final class NativeMTPBenchPolicyTests: XCTestCase {
         XCTAssertNotNil(policy.cell(id: policy.sustainedCellID))
     }
 
+    func testLaboratoryCandidateBoundWidensOnlyTheLabMatrix() throws {
+        var object = try template()
+        object["qualified_slots"] = 4
+        object["laboratory_max_native_active_rows"] = 4
+        object["slots"] = [1, 2, 3, 4]
+        object["gated_cells"] = []
+        object["sustained_cell_id"] = "s4-p1536-o512"
+        object["arrival_interval_ms"] = 0
+        let policy = try load(object)
+        XCTAssertEqual(policy.maxNativeActiveRows, 1)
+        XCTAssertEqual(policy.laboratoryMaxNativeActiveRows, 4)
+        XCTAssertEqual(policy.effectiveCandidateMaxNativeActiveRows, 4)
+        XCTAssertEqual(policy.matrixCells.count, 16)
+        XCTAssertEqual(policy.maxNativeActiveRows(for: NativeMTPBenchCell(slots: 4, promptTokens: 1536, maxTokens: 128)), 4)
+
+        var legacy = try template()
+        legacy.removeValue(forKey: "laboratory_max_native_active_rows")
+        XCTAssertEqual(try load(legacy).effectiveCandidateMaxNativeActiveRows, 1)
+    }
+
+    func testLaboratoryCandidateBoundMustRemainBetweenProductionAndQualified() throws {
+        var belowProduction = try template()
+        belowProduction["max_native_active_rows"] = 2
+        belowProduction["laboratory_max_native_active_rows"] = 1
+        XCTAssertThrowsError(try load(belowProduction)) { error in
+            XCTAssertTrue("\(error)".contains("laboratory_max_native_active_rows must be within"), "\(error)")
+        }
+        var aboveQualified = try template()
+        aboveQualified["qualified_slots"] = 4
+        aboveQualified["laboratory_max_native_active_rows"] = 5
+        XCTAssertThrowsError(try load(aboveQualified)) { error in
+            XCTAssertTrue("\(error)".contains("laboratory_max_native_active_rows must be within"), "\(error)")
+        }
+    }
+
     func testAdmissionPolicyRequiresQualifiedSlotsAndBound() throws {
         var noQualified = try template()
         noQualified.removeValue(forKey: "qualified_slots")

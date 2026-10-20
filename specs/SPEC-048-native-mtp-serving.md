@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.49
+**Version:** 0.1.50
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.49",
+  "version": "0.1.50",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -1382,12 +1382,19 @@ blocks are not counterbalanced, and it fails an admission policy with fewer
 than ten blocks, independent of the bench's own checks.
 
 **Mandatory matrix.** The frozen admission policy MUST name the tuple's
-advertised `qualified_slots` (2...8), its `max_native_active_rows`
-(`1..qualified_slots`, written *bound* below), and its signed SPEC-023-R024
-`max_prompt_tokens` (policy `maximum_prompt_tokens`, written *cap*, at least
-1536), and MUST contain exactly these cells:
+advertised `qualified_slots` (2...8), its signed production
+`max_native_active_rows` (`1..qualified_slots`, written *production bound*
+below), and its signed SPEC-023-R024 `max_prompt_tokens` (policy
+`maximum_prompt_tokens`, written *cap*, at least 1536). It MAY additionally
+name `laboratory_max_native_active_rows` (written *laboratory bound*): an
+offline, lab-only candidate matrix bound. When omitted, the laboratory bound
+equals the production bound, preserving the legacy policy. When present it
+MUST satisfy `production bound <= laboratory bound <= qualified_slots`. The
+laboratory bound never changes the signed production bound, sidecar, or
+serve-path admission; it only selects this preregistered lab matrix. The
+matrix MUST contain exactly these cells, using the laboratory bound:
 
-- *Native-eligible cells.* Every slot count from 1 up to the bound, at every
+- *Native-eligible cells.* Every slot count from 1 up to the laboratory bound, at every
   prompt stratum of {1536, 4096} that is at or below the cap plus the cap
   itself, and at both fixed output budgets 128
   (short) and 512 (long) tokens. These carry the native speedup claim and
@@ -1397,8 +1404,8 @@ advertised `qualified_slots` (2...8), its `max_native_active_rows`
   realized within ±2%; a stratum at the cap is realized at or below it. A
   native run whose row the token bounds sent to ordinary is an error, not a
   native measurement.
-- *Gated cells* (policy `gated_cells`). When the bound is below
-  `qualified_slots`, exactly the cells at slot counts bound + 1 and
+- *Gated cells* (policy `gated_cells`). When the laboratory bound is below
+  `qualified_slots`, exactly the cells at slot counts laboratory bound + 1 and
   `qualified_slots` (one cell when those coincide), each at prompt 1536 and
   output 512 under the staggered arrival profile below. Gated rows execute the
   ordinary path (admitted native rows ride the ordinary forward at depth zero
@@ -1406,13 +1413,13 @@ advertised `qualified_slots` (2...8), its `max_native_active_rows`
   native speedup strata; non-inferiority at the first gated count and at full
   load bounds the intermediate counts, which repeat the same ordinary-path work
   at a load between the two. The inference rests on the gated cost model:
-  above the bound, the only work native MTP adds to a round is buffering the
-  committed columns (MTP-6) and admission bookkeeping of at most `bound` held
+  above the laboratory bound, the only work native MTP adds to a round is buffering the
+  committed columns (MTP-6) and admission bookkeeping of at most the laboratory bound held
   rows, plus one drafter catch-up when a held row's depth returns or its
   buffer reaches the 1024-column cap (beyond the gated cells' 512 tokens),
   which does not grow with the ordinary rows, while the ordinary round time
   does not shrink as rows are added; the relative regression is therefore
-  largest at bound + 1, and `qualified_slots` adds the full-load scheduling
+  largest at laboratory bound + 1, and `qualified_slots` adds the full-load scheduling
   and memory point. A runtime change that adds per-row native work above the
   bound (for example drafting for downgraded rows) invalidates the model and
   requires every gated slot count to be measured.
@@ -1424,7 +1431,7 @@ advertised `qualified_slots` (2...8), its `max_native_active_rows`
   order below. It is one continuous run: an interrupted admission window is
   never resumed or stitched from separate runs; its records are set aside
   and the window is rerun whole (every sustained record carries the run's
-  window id). When the bound equals `qualified_slots` the cell is
+  window id). When the laboratory bound equals `qualified_slots` the cell is
   native-eligible and already in the matrix.
 
 A slot count above `qualified_slots` is not allowed. The bench refuses, and
@@ -1432,7 +1439,8 @@ the analyzer fails closed on, a policy whose cells differ from these, so a
 reduced or substituted matrix cannot pass. Exploratory pilot policies are
 exempt and never yield an admission verdict.
 
-**Cell classes.** The frozen `max_native_active_rows` splits the matrix. A
+**Cell classes.** The frozen laboratory bound (or the production bound when
+the optional laboratory field is absent) splits the matrix. A
 cell whose slot count is at or below it is *native-eligible*: it carries the
 throughput, TTFT, per-output-token latency, worst-gap, and rejection gates
 above, admits every row
@@ -1453,7 +1461,7 @@ bound below, and capacity rejection up by
 at most one percentage point. These margins are frozen in the policy
 thresholds (`gated_throughput_lower_bound_min` -0.05,
 `gated_ttft_p95_upper_bound_max` 0.05, `gated_tpot_p95_upper_bound_max` 0.05)
-and join the same Holm family. A tuple whose bound is 1 therefore passes R015
+and join the same Holm family. A tuple whose laboratory bound is 1 therefore passes R015
 with a native gain at one slot and non-inferiority at its gated cells.
 
 A gated cell MUST also exercise the in-flight hold on the measured hardware,
@@ -1750,6 +1758,11 @@ the text-only path without image inputs; that does not admit multimodal buyer
 requests.
 
 ## 9. Changelog and history
+
+- **0.1.50 (2026-10-21)** — MTP-15 adds the optional, backward-compatible
+  `laboratory_max_native_active_rows` frozen candidate bound. It can widen
+  only a lab matrix, remains at or above the signed production bound and at or
+  below qualified slots, and cannot alter sidecar or serve-path admission.
 
 - **0.1.49 (2026-10-19)** — R009: a cache-only native row in a SPEC-038
   v0.3.24 serial prefill cohort (a backend whose grouped prefill rows always

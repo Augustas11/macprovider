@@ -61,8 +61,9 @@ def _is_exploratory(policy: dict) -> bool:
 
 
 # SPEC-048-R015 mandatory matrix: native-eligible cells at every slot count
-# from one to max_native_active_rows, prompt strata 1536/4096 capped by the
-# tuple's signed max prompt tokens (cap included), and both output budgets;
+# from one to the effective lab candidate bound (the signed production
+# max_native_active_rows unless laboratory_max_native_active_rows is present),
+# prompt strata 1536/4096 capped by the tuple's signed max prompt tokens (cap included), and both output budgets;
 # gated cells at bound + 1 and qualified_slots; the sustained window at
 # qualified_slots. Gated and sustained cells run at prompt 1536, output 512.
 NATIVE_ELIGIBLE_PROMPT_STRATA = (1536, 4096)
@@ -105,7 +106,7 @@ POLICY_KEYS = {
     "hw_model", "chip", "ram_gb", "os_build", "xcode_build_version", "swift_version",
     "provider_commit", "mlx_fork_revision", "quantization", "cache_mode", "proposal_depth",
     "run_order", "prompt_corpus", "exclusion_rules", "confidence_method",
-    "max_native_active_rows", "qualified_slots", "temperature", "arrival_interval_ms",
+    "max_native_active_rows", "laboratory_max_native_active_rows", "qualified_slots", "temperature", "arrival_interval_ms",
     "gated_cells", "maximum_prompt_tokens",
 }
 # Mirrors NativeMTPBenchPolicy.load: the frozen methodology and thresholds an
@@ -249,9 +250,12 @@ def _matrix_violations(policy: dict) -> list[str]:
     qualified = policy.get("qualified_slots")
     if not _is_int(qualified) or not 2 <= qualified <= 8:
         return ["qualified_slots_missing_or_out_of_range"]
-    bound = policy.get("max_native_active_rows")
-    if not _is_int(bound) or not 1 <= bound <= qualified:
+    production_bound = policy.get("max_native_active_rows")
+    if not _is_int(production_bound) or not 1 <= production_bound <= qualified:
         return violations + ["max_native_active_rows_missing_or_out_of_range"]
+    laboratory_bound = policy.get("laboratory_max_native_active_rows", production_bound)
+    if not _is_int(laboratory_bound) or not production_bound <= laboratory_bound <= qualified:
+        return violations + ["laboratory_max_native_active_rows_out_of_range"]
     cap = policy.get("maximum_prompt_tokens")
     if not _is_int(cap) or not GATED_PROMPT_TOKENS <= cap <= MAXIMUM_PROMPT_TOKENS:
         return violations + ["maximum_prompt_tokens_missing_or_out_of_range"]
@@ -266,14 +270,14 @@ def _matrix_violations(policy: dict) -> list[str]:
         violations.append("gated_cells_malformed")
     if violations:
         return violations
-    if sorted(slots) != list(range(1, bound + 1)):
+    if sorted(slots) != list(range(1, laboratory_bound + 1)):
         violations.append("slots_not_exactly_1_to_bound:" + ",".join(map(str, sorted(slots))))
     expected_prompts = mandatory_prompt_tokens(cap)
     if sorted(prompts) != expected_prompts:
         violations.append("prompt_tokens_not_exactly:" + ",".join(map(str, expected_prompts)))
     if sorted(outputs) != list(MANDATORY_MAX_TOKENS):
         violations.append("max_tokens_not_exactly:" + ",".join(map(str, MANDATORY_MAX_TOKENS)))
-    expected_gated = mandatory_gated_cells(bound, qualified)
+    expected_gated = mandatory_gated_cells(laboratory_bound, qualified)
     if sorted(gated) != expected_gated or len(set(gated)) != len(gated):
         violations.append("gated_cells_not_exactly:" + ",".join(expected_gated))
     cells = _observed_cells(policy)
@@ -291,7 +295,7 @@ def _matrix_violations(policy: dict) -> list[str]:
     # first request admit native before later ones cross the bound.
     arrival = policy.get("arrival_interval_ms")
     if (
-        any(_is_gated_cell(cell, bound) for cell in cells)
+        any(_is_gated_cell(cell, laboratory_bound) for cell in cells)
         and not (_is_int(arrival) and arrival > 0)
     ):
         violations.append("arrival_interval_ms_required_for_gated_cells")
@@ -306,7 +310,8 @@ _CELL_SLOTS = re.compile(r"^s(\d+)-")
 
 
 def _native_bound(policy: dict) -> int | None:
-    bound = policy.get("max_native_active_rows")
+    """Return the frozen lab matrix bound, never a header-provided value."""
+    bound = policy.get("laboratory_max_native_active_rows", policy.get("max_native_active_rows"))
     return bound if _is_int(bound) and bound >= 1 else None
 
 
@@ -971,6 +976,23 @@ def analyze(jsonl_path: Path, policy_path: Path, exploratory_amended_gates: bool
             "observed_policy_sha256": header.get("policy_sha256"),
             "cells": [],
         }
+    bound_mismatches = {}
+    for key in ("max_native_active_rows", "laboratory_max_native_active_rows"):
+        frozen = policy.get(key)
+        observed = header.get(key)
+        if frozen is None:
+            if observed is not None:
+                bound_mismatches[key] = {"frozen": None, "observed": observed}
+        elif not _is_int(observed) or observed != frozen:
+            bound_mismatches[key] = {"frozen": frozen, "observed": observed}
+    if bound_mismatches:
+        return {
+            "schema": "macprovider.native-mtp-r015-analysis.v1",
+            "overall_status": "FAIL",
+            "reason": "bound_header_mismatch",
+            "bound_mismatches": bound_mismatches,
+            "cells": [],
+        }
     bad_run_policy_records = [
         {
             "cell_id": run.get("cell_id"),
@@ -1405,6 +1427,9 @@ def analyze(jsonl_path: Path, policy_path: Path, exploratory_amended_gates: bool
         **({"exploratory_reanalysis_of_gate_set": reanalysis_of} if reanalysis_of else {}),
         "policy_sha256": policy_sha,
         "provider_commit": header.get("provider_commit"),
+        "max_native_active_rows": policy.get("max_native_active_rows"),
+        "laboratory_max_native_active_rows": policy.get("laboratory_max_native_active_rows"),
+        "laboratory_candidate_max_native_active_rows": _native_bound(policy),
         "unavailable_metrics": header.get("unavailable_metrics", []),
         "cells": cell_results,
     }

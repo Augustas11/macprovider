@@ -448,6 +448,33 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         self.assertEqual(result["overall_status"], "FAIL")
         self.assertEqual(result["reason"], "policy_digest_mismatch")
 
+    def test_header_bounds_are_bound_to_the_frozen_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            jsonl_path, policy_path = self._write_case(Path(tmp))
+            lines = jsonl_path.read_text("utf-8").splitlines()
+            header = json.loads(lines[0])
+            header["max_native_active_rows"] = 2
+            header["laboratory_max_native_active_rows"] = 4
+            lines[0] = json.dumps(header, sort_keys=True)
+            jsonl_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            result = analyze(jsonl_path, policy_path)
+        self.assertEqual(result["overall_status"], "FAIL")
+        self.assertEqual(result["reason"], "bound_header_mismatch")
+        self.assertEqual(result["bound_mismatches"]["max_native_active_rows"], {"frozen": self.BOUND, "observed": 2})
+        self.assertEqual(result["bound_mismatches"]["laboratory_max_native_active_rows"], {"frozen": None, "observed": 4})
+
+    def test_legacy_policy_and_header_without_laboratory_bound_remain_valid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            jsonl_path, policy_path = self._write_case(Path(tmp))
+            lines = jsonl_path.read_text("utf-8").splitlines()
+            header = json.loads(lines[0])
+            header.pop("laboratory_max_native_active_rows", None)
+            lines[0] = json.dumps(header, sort_keys=True)
+            jsonl_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            result = analyze(jsonl_path, policy_path)
+        self.assertEqual(result["overall_status"], "PASS")
+        self.assertEqual(result["laboratory_candidate_max_native_active_rows"], self.BOUND)
+
     def test_run_policy_digest_mismatch(self):
         result = self._run_case(run_policy_sha="0" * 64)
         self.assertEqual(result["overall_status"], "FAIL")
@@ -607,6 +634,31 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         self.assertIn("slots_not_exactly_1_to_bound:2", result["matrix_violations"])
         result = self._run_case(policy_overrides={"slots": [1, 2]})
         self.assertIn("slots_not_exactly_1_to_bound:1,2", result["matrix_violations"])
+
+    def test_laboratory_candidate_bound_drives_the_exact_matrix(self):
+        overrides = {
+            "qualified_slots": 4,
+            "max_native_active_rows": 1,
+            "laboratory_max_native_active_rows": 4,
+            "slots": [1, 2, 3, 4],
+            "gated_cells": [],
+            "sustained_cell_id": "s4-p1536-o512",
+            "arrival_interval_ms": 0,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            _, policy_path = self._write_case(Path(tmp), policy_overrides=overrides, blocks_written=0)
+            policy = json.loads(policy_path.read_text("utf-8"))
+        self.assertEqual(analyzer._matrix_violations(policy), [])
+        cells = analyzer._observed_cells(policy)
+        self.assertEqual(len(cells), 16)
+        self.assertFalse(any(analyzer._is_gated_cell(cell, analyzer._native_bound(policy)) for cell in cells))
+        self.assertEqual(analyzer._native_bound(policy), 4)
+
+    def test_laboratory_candidate_bound_rejects_production_and_qualified_drift(self):
+        below = self._run_case(policy_overrides={"laboratory_max_native_active_rows": 0})
+        self.assertIn("laboratory_max_native_active_rows_out_of_range", below["matrix_violations"])
+        above = self._run_case(policy_overrides={"qualified_slots": 2, "laboratory_max_native_active_rows": 3})
+        self.assertIn("laboratory_max_native_active_rows_out_of_range", above["matrix_violations"])
 
     def test_matrix_prompt_strata_are_capped_and_exact(self):
         result = self._run_case(policy_overrides={"prompt_tokens": [1536], "max_tokens": [128]})
@@ -1084,6 +1136,9 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
                 "arrival_interval_ms": arrival_interval_ms,
             }
         ]
+        for key in ("max_native_active_rows", "laboratory_max_native_active_rows"):
+            if key in policy:
+                records[0][key] = policy[key]
         if not legacy:
             records[0]["run_metrics_version"] = 2
         record_options = {"legacy": legacy, "legacy_multi": legacy_multi}

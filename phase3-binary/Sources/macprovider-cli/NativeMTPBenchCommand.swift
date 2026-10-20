@@ -580,6 +580,9 @@ private final class NativeMTPBenchRunner {
             promptTokens: cell.promptTokens,
             outputTokens: cell.maxTokens
         )
+        // The optional laboratory bound reaches only this lab-harness runner;
+        // production sidecar and serving admission continue to read the signed
+        // max_native_active_rows field, never this policy field.
         let runner = NativeMTPHardwareE2ERunner(
             rootPath: root.path,
             modelID: modelID,
@@ -855,6 +858,7 @@ private final class NativeMTPBenchRunner {
             "policy_sha256": policySHA256,
             "exploratory": policy.exploratory,
             "max_native_active_rows": policy.maxNativeActiveRows.map { $0 as Any } ?? NSNull(),
+            "laboratory_max_native_active_rows": policy.laboratoryMaxNativeActiveRows.map { $0 as Any } ?? NSNull(),
             "qualified_slots": policy.qualifiedSlots.map { $0 as Any } ?? NSNull(),
             "maximum_prompt_tokens": policy.maximumPromptTokens.map { $0 as Any } ?? NSNull(),
             "temperature": policy.temperature,
@@ -1422,6 +1426,9 @@ struct NativeMTPBenchPolicy {
     /// admission policy; absent in a pilot means the bound equals each cell's
     /// qualified slot count (gate never engages).
     let maxNativeActiveRows: Int?
+    /// Optional lab-only candidate bound. It may widen the frozen benchmark
+    /// matrix but never changes the signed production admission bound.
+    let laboratoryMaxNativeActiveRows: Int?
     /// Request temperature for every row of both paths (default greedy). A
     /// sampled row's seed derives from its request ID, which both paths
     /// share, so seeded parity is still a token-identity comparison.
@@ -1447,7 +1454,7 @@ struct NativeMTPBenchPolicy {
             "hw_model", "chip", "ram_gb", "os_build", "xcode_build_version", "swift_version",
             "provider_commit", "mlx_fork_revision", "quantization", "cache_mode", "proposal_depth",
             "run_order", "prompt_corpus", "exclusion_rules", "confidence_method",
-            "max_native_active_rows", "qualified_slots", "temperature", "arrival_interval_ms",
+            "max_native_active_rows", "laboratory_max_native_active_rows", "qualified_slots", "temperature", "arrival_interval_ms",
             "gated_cells", "maximum_prompt_tokens",
         ]
         let unknown = Set(object.keys).subtracting(allowed)
@@ -1496,6 +1503,9 @@ struct NativeMTPBenchPolicy {
             maxNativeActiveRows: object["max_native_active_rows"] == nil
                 ? nil
                 : try intAtLeast(object, "max_native_active_rows", 1),
+            laboratoryMaxNativeActiveRows: object["laboratory_max_native_active_rows"] == nil
+                ? nil
+                : try intAtLeast(object, "laboratory_max_native_active_rows", 1),
             temperature: try samplingTemperature(object, "temperature"),
             arrivalIntervalMS: object["arrival_interval_ms"] == nil
                 ? 0
@@ -1570,7 +1580,13 @@ struct NativeMTPBenchPolicy {
     /// own slot count, and a signed bound may not exceed that; a cell at or
     /// below the policy bound never engages the gate either way.
     func maxNativeActiveRows(for cell: NativeMTPBenchCell) -> Int? {
-        maxNativeActiveRows.map { min($0, qualifiedSlots(for: cell)) }
+        effectiveCandidateMaxNativeActiveRows.map { min($0, qualifiedSlots(for: cell)) }
+    }
+
+    /// The lab matrix's candidate bound. Omission deliberately preserves the
+    /// old production-bound matrix and cannot widen production authorization.
+    var effectiveCandidateMaxNativeActiveRows: Int? {
+        laboratoryMaxNativeActiveRows ?? maxNativeActiveRows
     }
 
     /// Every measured cell: the native-eligible cross product of `slots`,
@@ -1610,13 +1626,26 @@ struct NativeMTPBenchPolicy {
                 "max_native_active_rows \(bound) exceeds qualified slots \(maximumSlots)"
             )
         }
+        if let laboratoryBound = laboratoryMaxNativeActiveRows {
+            guard let productionBound = maxNativeActiveRows else {
+                throw NativeMTPBenchError.invalidPolicy(
+                    "laboratory_max_native_active_rows requires max_native_active_rows"
+                )
+            }
+            guard laboratoryBound >= productionBound, laboratoryBound <= maximumSlots else {
+                throw NativeMTPBenchError.invalidPolicy(
+                    "laboratory_max_native_active_rows must be within max_native_active_rows...qualified_slots"
+                )
+            }
+        }
         guard !exploratory else { return }
         guard let qualifiedSlots else {
             throw NativeMTPBenchError.invalidPolicy("qualified_slots is required")
         }
-        guard let bound = maxNativeActiveRows else {
+        guard let productionBound = maxNativeActiveRows else {
             throw NativeMTPBenchError.invalidPolicy("max_native_active_rows is required")
         }
+        let bound = laboratoryMaxNativeActiveRows ?? productionBound
         guard let cap = maximumPromptTokens else {
             throw NativeMTPBenchError.invalidPolicy("maximum_prompt_tokens is required")
         }
@@ -1733,6 +1762,18 @@ struct NativeMTPExistingEvidence {
         }
     }
 
+    private static func optionalPositiveInt(_ object: [String: Any], key: String) throws -> Int? {
+        guard let raw = object[key], !(raw is NSNull) else { return nil }
+        guard let value = raw as? NSNumber,
+              CFGetTypeID(value) != CFBooleanGetTypeID(),
+              !["f", "d"].contains(String(cString: value.objCType)),
+              value.doubleValue == Double(value.intValue),
+              value.intValue >= 1 else {
+            throw NativeMTPBenchError.assertionFailed("existing --out \(key) is not a positive integer")
+        }
+        return value.intValue
+    }
+
     /// A resumed record counts only for the policy cell it names, with that
     /// cell's shape, inside its phase's block range: matrix 0..<blocks,
     /// warmup -1...-warmup_runs, sustained only for the sustained cell.
@@ -1808,6 +1849,12 @@ struct NativeMTPExistingEvidence {
         ]
         for (key, value) in expected where header[key] as? String != value {
             throw NativeMTPBenchError.assertionFailed("existing --out \(key) mismatch")
+        }
+        guard try optionalPositiveInt(header, key: "max_native_active_rows") == policy.maxNativeActiveRows else {
+            throw NativeMTPBenchError.assertionFailed("existing --out max_native_active_rows mismatch")
+        }
+        guard try optionalPositiveInt(header, key: "laboratory_max_native_active_rows") == policy.laboratoryMaxNativeActiveRows else {
+            throw NativeMTPBenchError.assertionFailed("existing --out laboratory_max_native_active_rows mismatch")
         }
         guard let machine = header["machine"] as? [String: Any],
               machine["hw_model"] as? String == environment.hwModel,
