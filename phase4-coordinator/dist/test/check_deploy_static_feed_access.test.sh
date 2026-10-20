@@ -468,6 +468,11 @@ grep -q 'CANARY_RECOVERY_DEADLINE=' "$DEPLOY_SH" &&
   grep -q 'waiting for exact catalog canary recovery' "$DEPLOY_SH" ||
   fail "deploy must retry full canary proof within a wall-clock deadline and discard stale attempt output"
 
+grep -q 'CANARY_RECOVERY_TIMEOUT_S="${CATALOG_CANARY_RECOVERY_SECONDS:-1800}"' "$DEPLOY_SH" &&
+  grep -q 'CANARY_MAX_ATTEMPTS=$((CANARY_RECOVERY_TIMEOUT_S / 5 + 1))' "$DEPLOY_SH" &&
+  ! grep -q '^CANARY_RECOVERY_TIMEOUT_S=180$' "$DEPLOY_SH" ||
+  fail "canary recovery must wait out a large-model reload (default 1800 s) with attempts derived from the deadline"
+
 grep -q 'os.O_RDONLY | nofollow | nonblock' "$DEPLOY_SH" ||
   fail "Mac proof must open untrusted file entries without blocking on special files"
 
