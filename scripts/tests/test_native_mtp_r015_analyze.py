@@ -279,6 +279,121 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         self.assertEqual(result["overall_status"], "FAIL")
         self.assertIn("parity_mismatch", result["cells"][0]["hard_failures"])
 
+    def _v6_case(self, mutate=None):
+        with tempfile.TemporaryDirectory() as tmp:
+            jsonl, policy = self._write_case(Path(tmp))
+            records = [json.loads(line) for line in jsonl.read_text().splitlines()]
+            records[0]["run_metrics_version"] = 6
+            for run in records[1:]:
+                run["sustained_window_id"] = "one-window"
+                for metric in run["request_metrics"]:
+                    metric.update(
+                        token_ids_sha256="a" * 64,
+                        token_ids_count=metric["completion_tokens"],
+                        content_sha256="b" * 64,
+                        finish_reason="length",
+                    )
+                if mutate:
+                    mutate(run)
+            jsonl.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+            return analyze(jsonl, policy)
+
+    def test_malformed_metrics_version_cannot_bypass_token_parity(self):
+        for version in (6.5, 6.0, "6", True, None, 0, -6):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as tmp:
+                jsonl, policy = self._write_case(Path(tmp))
+                records = [json.loads(line) for line in jsonl.read_text().splitlines()]
+                records[0]["run_metrics_version"] = version
+                jsonl.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+                result = analyze(jsonl, policy)
+                self.assertEqual(result["overall_status"], "FAIL")
+                self.assertEqual(result["reason"], "invalid_run_metrics_version")
+
+    def test_v6_token_and_terminal_evidence_passes(self):
+        self.assertEqual(self._v6_case()["overall_status"], "PASS")
+
+    def test_v6_preserves_a_terminal_model_stop_in_token_identity(self):
+        def mutate(run):
+            for metric in run["request_metrics"]:
+                metric["finish_reason"] = "stop"
+                metric["token_ids_count"] = metric["completion_tokens"] + 1
+        self.assertEqual(self._v6_case(mutate)["overall_status"], "PASS")
+
+    def test_v6_rejects_token_or_terminal_mismatch_despite_false_parity_flag(self):
+        for field, value in (
+            ("token_ids_sha256", "c" * 64),
+            ("finish_reason", "stop"),
+            ("request_id", "another-row"),
+            ("content_sha256", "d" * 64),
+        ):
+            with self.subTest(field=field):
+                def mutate(run):
+                    if run["path"] == "native_mtp":
+                        run["request_metrics"][0][field] = value
+                result = self._v6_case(mutate)
+                self.assertEqual(result["overall_status"], "FAIL")
+                self.assertTrue(any(
+                    "token_or_terminal_parity_mismatch" in failure
+                    for cell in result["cells"] for failure in cell["hard_failures"]
+                ))
+
+    def test_v6_rejects_missing_invalid_or_inconsistent_token_evidence(self):
+        for field, value in (
+            ("token_ids_sha256", None),
+            ("token_ids_sha256", "A" * 64),
+            ("token_ids_count", True),
+            ("token_ids_count", 128),
+            ("token_ids_count", 130),
+            ("finish_reason", ""),
+            ("request_id", ""),
+        ):
+            with self.subTest(field=field, value=value):
+                def mutate(run):
+                    if run["path"] == "native_mtp":
+                        run["request_metrics"][0][field] = value
+                result = self._v6_case(mutate)
+                self.assertEqual(result["overall_status"], "FAIL")
+                self.assertTrue(any(
+                    "token_parity_evidence" in failure
+                    for cell in result["cells"] for failure in cell["hard_failures"]
+                ))
+
+    def test_v6_checks_sustained_token_parity_independently(self):
+        def mutate(run):
+            if run.get("sustained") and run["path"] == "native_mtp":
+                run["request_metrics"][0]["token_ids_sha256"] = "c" * 64
+        result = self._v6_case(mutate)
+        self.assertEqual(result["overall_status"], "FAIL")
+        self.assertIn(
+            "token_or_terminal_parity_mismatch",
+            self._cell(result, "s2-p1536-o512")["hard_failures"],
+        )
+
+    def test_v6_four_row_parity_is_bound_to_each_unique_request(self):
+        metrics = [
+            {
+                "request_id": f"row-{row}",
+                "completion_tokens": 2,
+                "token_ids_count": 2,
+                "token_ids_sha256": str(row) * 64,
+                "content_sha256": "a" * 64,
+                "finish_reason": "length",
+            }
+            for row in range(4)
+        ]
+        ordinary = {"requests": 4, "request_metrics": metrics}
+        native = {"requests": 4, "request_metrics": list(reversed(metrics))}
+        self.assertTrue(analyzer._token_parity_matches(ordinary, native))
+        duplicate = {"requests": 4, "request_metrics": [metrics[0]] * 4}
+        self.assertFalse(analyzer._token_parity_evidence_valid(duplicate))
+        swapped = [dict(item) for item in metrics]
+        swapped[0]["token_ids_sha256"], swapped[1]["token_ids_sha256"] = (
+            swapped[1]["token_ids_sha256"], swapped[0]["token_ids_sha256"]
+        )
+        self.assertFalse(analyzer._token_parity_matches(
+            ordinary, {"requests": 4, "request_metrics": swapped},
+        ))
+
     def test_preregistered_order_matches_bench_golden_vectors(self):
         # Same vectors as NativeMTPBenchPolicyTests (Swift bench).
         self.assertEqual(_native_first_order(48015, 8, 4096, 512, 10), [True, False, False, False, True, False, True, True, True, False])

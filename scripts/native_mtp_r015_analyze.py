@@ -563,7 +563,52 @@ def _per_request_misalignment(run: dict) -> list[str]:
     return invalid
 
 
-def _invalid_run_fields(run: dict, require_chunk_gaps: bool = False) -> list[str]:
+def _token_parity_evidence_valid(run: dict) -> bool:
+    """Version 6 records bind each completed row to its actual token IDs."""
+    metrics = run.get("request_metrics")
+    if not isinstance(metrics, list) or len(metrics) != run.get("requests") or not metrics:
+        return False
+    seen = set()
+    for item in metrics:
+        if not isinstance(item, dict):
+            return False
+        request_id = item.get("request_id")
+        if not isinstance(request_id, str) or not request_id or request_id in seen:
+            return False
+        seen.add(request_id)
+        count = item.get("token_ids_count")
+        completion = item.get("completion_tokens")
+        if not _is_int(count) or not _is_int(completion) or completion < 1:
+            return False
+        # The scheduler retains a terminal model-stop token; response usage
+        # excludes it. Keep that token in the digest to compare exact decode.
+        allowed_counts = (completion, completion + 1) if item.get("finish_reason") == "stop" else (completion,)
+        if count not in allowed_counts:
+            return False
+        for field in ("token_ids_sha256", "content_sha256"):
+            value = item.get(field)
+            if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+                return False
+        if item.get("finish_reason") not in ("length", "stop"):
+            return False
+    return True
+
+
+def _token_parity_matches(ordinary: dict, native: dict) -> bool:
+    # Validate both sides before indexing; a false self-reported
+    # parity_mismatch flag cannot override absent or contradictory evidence.
+    if not _token_parity_evidence_valid(ordinary) or not _token_parity_evidence_valid(native):
+        return False
+    fields = ("token_ids_sha256", "token_ids_count", "completion_tokens", "content_sha256", "finish_reason")
+    def rows(run):
+        return {
+            item["request_id"]: tuple(item[field] for field in fields)
+            for item in run["request_metrics"]
+        }
+    return rows(ordinary) == rows(native)
+
+
+def _invalid_run_fields(run: dict, require_chunk_gaps: bool = False, require_token_parity: bool = False) -> list[str]:
     invalid = [field for field in _REQUIRED_NUMBER_FIELDS if not _is_number(run.get(field))]
     invalid += [field for field in _REQUIRED_COUNT_FIELDS if not _is_count(run.get(field))]
     invalid += [
@@ -597,6 +642,8 @@ def _invalid_run_fields(run: dict, require_chunk_gaps: bool = False) -> list[str
         if _chunk_gaps(run) is None:
             invalid.append("raw_inter_token_gaps_seconds")
         invalid += _per_request_misalignment(run)
+    if require_token_parity and not _token_parity_evidence_valid(run):
+        invalid.append("token_parity_evidence")
     return sorted(set(invalid))
 
 
@@ -896,6 +943,15 @@ def analyze(jsonl_path: Path, policy_path: Path, exploratory_amended_gates: bool
     policy = _load_policy(policy_path)
     policy_sha = _sha256(policy_path)
     header, runs = _load_jsonl(jsonl_path)
+    if "run_metrics_version" in header and (
+        not _is_int(header["run_metrics_version"]) or header["run_metrics_version"] < 1
+    ):
+        return {
+            "schema": "macprovider.native-mtp-r015-analysis.v1",
+            "overall_status": "FAIL",
+            "reason": "invalid_run_metrics_version",
+            "cells": [],
+        }
     runs = [_with_decode_metrics(run, header) for run in runs]
     matrix_violations = _matrix_violations(policy)
     if matrix_violations:
@@ -1016,9 +1072,11 @@ def analyze(jsonl_path: Path, policy_path: Path, exploratory_amended_gates: bool
         }
         gate_set = GATE_SET_AMENDED
     require_chunk_gaps = gate_set == GATE_SET_AMENDED
+    metrics_version = header.get("run_metrics_version")
+    require_token_parity = _is_int(metrics_version) and metrics_version >= 6
 
     def invalid_fields(run: dict) -> list[str]:
-        return _invalid_run_fields(run, require_chunk_gaps)
+        return _invalid_run_fields(run, require_chunk_gaps, require_token_parity)
 
     bound = _native_bound(policy)
     if any(_is_gated_cell(cell_id, bound) for cell_id in _observed_cells(policy)) and any(
@@ -1073,6 +1131,17 @@ def analyze(jsonl_path: Path, policy_path: Path, exploratory_amended_gates: bool
         pairs = [pair for pair in pairs if not invalid_fields(pair[0]) and not invalid_fields(pair[1])]
         sustained_runs = [run for run in sustained_runs if not invalid_fields(run)]
         hard_gate_runs = [run for pair in pairs for run in pair] + sustained_runs
+        if require_token_parity:
+            sustained_by_block = defaultdict(dict)
+            for run in sustained_runs:
+                sustained_by_block[run["block_index"]][run["path"]] = run
+            parity_pairs = pairs + [
+                (block["ordinary"], block["native_mtp"])
+                for block in sustained_by_block.values()
+                if "ordinary" in block and "native_mtp" in block
+            ]
+            if any(not _token_parity_matches(ordinary, native) for ordinary, native in parity_pairs):
+                hard_failures.append("token_or_terminal_parity_mismatch")
         parity_mismatches = sum(int(r["parity_mismatch"]) for r in hard_gate_runs)
         non_native_admissions = sum(r["non_native_admissions"] for r in hard_gate_runs)
         # A load-gate downgrade is a recorded admission decision, not a

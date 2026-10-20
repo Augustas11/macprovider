@@ -156,6 +156,131 @@ enum NativeMTPBenchPrompts {
     }
 }
 
+struct NativeMTPBenchTokenCapture: Sendable, Equatable {
+    let requestID: String
+    let tokenIDs: [Int]
+    let schedulerCompletionTokens: Int
+    let validatedCompletionTokens: Int
+    let finishReason: String
+}
+
+final class NativeMTPBenchTokenRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var captures: [NativeMTPBenchTokenCapture] = []
+
+    func record(
+        requestID: String,
+        tokenIDs: [Int],
+        schedulerCompletionTokens: Int,
+        validatedCompletionTokens: Int,
+        finishReason: String
+    ) {
+        lock.lock()
+        captures.append(NativeMTPBenchTokenCapture(
+            requestID: requestID,
+            tokenIDs: tokenIDs,
+            schedulerCompletionTokens: schedulerCompletionTokens,
+            validatedCompletionTokens: validatedCompletionTokens,
+            finishReason: finishReason
+        ))
+        lock.unlock()
+    }
+
+    func snapshot() -> [NativeMTPBenchTokenCapture] {
+        lock.lock()
+        defer { lock.unlock() }
+        return captures
+    }
+}
+
+struct NativeMTPBenchObservedRequest: Sendable, Equatable {
+    let requestID: String
+    let completionTokens: Int
+    let finishReason: String
+}
+
+enum NativeMTPBenchTokenCaptureValidator {
+    static func aligned(
+        captures: [NativeMTPBenchTokenCapture],
+        requests: [NativeMTPBenchObservedRequest]
+    ) throws -> [NativeMTPBenchTokenCapture] {
+        guard !requests.isEmpty else {
+            throw NativeMTPBenchError.assertionFailed("token capture has no completed request rows")
+        }
+        guard Set(requests.map(\.requestID)).count == requests.count else {
+            throw NativeMTPBenchError.assertionFailed("completed request rows contain duplicate request ids")
+        }
+        var byRequestID: [String: NativeMTPBenchTokenCapture] = [:]
+        for capture in captures {
+            guard capture.tokenIDs.count == capture.schedulerCompletionTokens else {
+                throw NativeMTPBenchError.assertionFailed(
+                    "raw scheduler token capture count mismatch for \(capture.requestID): captured=\(capture.tokenIDs.count) scheduler=\(capture.schedulerCompletionTokens)"
+                )
+            }
+            guard byRequestID.updateValue(capture, forKey: capture.requestID) == nil else {
+                throw NativeMTPBenchError.assertionFailed("duplicate token capture for \(capture.requestID)")
+            }
+        }
+        guard Set(byRequestID.keys) == Set(requests.map(\.requestID)) else {
+            let missing = Set(requests.map(\.requestID)).subtracting(byRequestID.keys).sorted()
+            let unexpected = Set(byRequestID.keys).subtracting(requests.map(\.requestID)).sorted()
+            throw NativeMTPBenchError.assertionFailed(
+                "token capture request ids do not align: missing=\(missing) unexpected=\(unexpected)"
+            )
+        }
+        return try requests.map { request in
+            guard let capture = byRequestID[request.requestID] else {
+                throw NativeMTPBenchError.assertionFailed("missing token capture for \(request.requestID)")
+            }
+            guard capture.finishReason == request.finishReason else {
+                throw NativeMTPBenchError.assertionFailed(
+                    "token capture finish reason mismatch for \(request.requestID): capture=\(capture.finishReason) completion=\(request.finishReason)"
+                )
+            }
+            guard capture.validatedCompletionTokens == request.completionTokens else {
+                throw NativeMTPBenchError.assertionFailed(
+                    "validated token capture count mismatch for \(request.requestID): capture=\(capture.validatedCompletionTokens) completion=\(request.completionTokens)"
+                )
+            }
+            let rawCountAllowed = capture.finishReason == "stop"
+                ? capture.schedulerCompletionTokens == request.completionTokens
+                    || capture.schedulerCompletionTokens == request.completionTokens + 1
+                : capture.schedulerCompletionTokens == request.completionTokens
+            guard rawCountAllowed else {
+                throw NativeMTPBenchError.assertionFailed(
+                    "raw scheduler token count is incompatible with \(capture.finishReason) for \(request.requestID): scheduler=\(capture.schedulerCompletionTokens) completion=\(request.completionTokens)"
+                )
+            }
+            return capture
+        }
+    }
+}
+
+struct NativeMTPBenchComparableRequest: Sendable, Equatable {
+    let requestID: String
+    let content: String
+    let completionTokens: Int
+    let finishReason: String
+    let tokenIDs: [Int]
+}
+
+enum NativeMTPBenchParity {
+    static func mismatch(
+        ordinary: [NativeMTPBenchComparableRequest],
+        native: [NativeMTPBenchComparableRequest]
+    ) -> Bool {
+        guard ordinary.count == native.count else { return true }
+        for (lhs, rhs) in zip(ordinary, native) {
+            if lhs.requestID != rhs.requestID { return true }
+            if lhs.content != rhs.content { return true }
+            if lhs.completionTokens != rhs.completionTokens { return true }
+            if lhs.finishReason != rhs.finishReason { return true }
+            if lhs.tokenIDs != rhs.tokenIDs { return true }
+        }
+        return false
+    }
+}
+
 private final class NativeMTPBenchRunner {
     private let root: URL
     private let modelID: String
@@ -402,7 +527,7 @@ private final class NativeMTPBenchRunner {
         let fixture = try await fixture(for: cell)
         let remainingSeconds = max(0, Double(policy.sustainedSeconds) - completedSeconds)
         // One id per continuous sustained run; the analyzer requires a single
-        // id across an admission window (run_metrics_version 5).
+        // id across an admission window (run_metrics_version 6).
         let windowID = UUID().uuidString.lowercased()
         let windowStarted = Date()
         let deadline = Date().addingTimeInterval(remainingSeconds)
@@ -496,30 +621,54 @@ private final class NativeMTPBenchRunner {
         let modelID = self.modelID
         let temperature = policy.temperature
         let arrivalIntervalNanoseconds = UInt64(policy.arrivalIntervalMS) * 1_000_000
-        let results = try await withThrowingTaskGroup(of: NativeMTPBenchRequestResult.self) { group in
-            for (index, prompt) in prompts.enumerated() {
-                group.addTask {
-                    if arrivalIntervalNanoseconds > 0, index > 0 {
-                        try await Task.sleep(nanoseconds: UInt64(index) * arrivalIntervalNanoseconds)
+        let tokenRecorder = NativeMTPBenchTokenRecorder()
+        guard await runtime.installLabNativeMTPBenchTokenRecorder(tokenRecorder) else {
+            throw NativeMTPBenchError.assertionFailed("runtime has no continuous-batch scheduler for token capture")
+        }
+        let streamedResults: [NativeMTPBenchRequestResult]
+        do {
+            streamedResults = try await withThrowingTaskGroup(of: NativeMTPBenchRequestResult.self) { group in
+                for (index, prompt) in prompts.enumerated() {
+                    group.addTask {
+                        if arrivalIntervalNanoseconds > 0, index > 0 {
+                            try await Task.sleep(nanoseconds: UInt64(index) * arrivalIntervalNanoseconds)
+                        }
+                        // Both paths use the same request ID (separate runtimes),
+                        // so a sampled row draws the same seeded stream on each.
+                        let requestID = "\(cell.id)-b\(block)-r\(index)"
+                        let request = try Self.makeRequest(
+                            modelID: modelID,
+                            requestID: requestID,
+                            prompt: prompt,
+                            maxTokens: cell.maxTokens,
+                            temperature: temperature
+                        )
+                        return try await Self.runStreamingRequest(request, runtime: runtime)
                     }
-                    // Both paths use the same request ID (separate runtimes),
-                    // so a sampled row draws the same seeded stream on each.
-                    let requestID = "\(cell.id)-b\(block)-r\(index)"
-                    let request = try Self.makeRequest(
-                        modelID: modelID,
-                        requestID: requestID,
-                        prompt: prompt,
-                        maxTokens: cell.maxTokens,
-                        temperature: temperature
-                    )
-                    return try await Self.runStreamingRequest(request, runtime: runtime)
                 }
+                var values: [NativeMTPBenchRequestResult] = []
+                for try await value in group {
+                    values.append(value)
+                }
+                return values.sorted { $0.requestID < $1.requestID }
             }
-            var values: [NativeMTPBenchRequestResult] = []
-            for try await value in group {
-                values.append(value)
+        } catch {
+            _ = await runtime.installLabNativeMTPBenchTokenRecorder(nil)
+            throw error
+        }
+        _ = await runtime.installLabNativeMTPBenchTokenRecorder(nil)
+        let captures = try NativeMTPBenchTokenCaptureValidator.aligned(
+            captures: tokenRecorder.snapshot(),
+            requests: streamedResults.map {
+                NativeMTPBenchObservedRequest(
+                    requestID: $0.requestID,
+                    completionTokens: $0.completion.completionTokens,
+                    finishReason: $0.completion.finishReason
+                )
             }
-            return values.sorted { $0.requestID < $1.requestID }
+        )
+        let results = zip(streamedResults, captures).map { result, capture in
+            result.withTokenCapture(capture)
         }
         let ended = Date()
         memorySampler.stop()
@@ -673,12 +822,10 @@ private final class NativeMTPBenchRunner {
     }
 
     private func parityMismatch(ordinary: NativeMTPBenchRunResult, native: NativeMTPBenchRunResult) -> Bool {
-        guard ordinary.requests.count == native.requests.count else { return true }
-        for (lhs, rhs) in zip(ordinary.requests, native.requests) {
-            if lhs.completion.content != rhs.completion.content { return true }
-            if lhs.completion.completionTokens != rhs.completion.completionTokens { return true }
-        }
-        return false
+        NativeMTPBenchParity.mismatch(
+            ordinary: ordinary.requests.map(\.comparable),
+            native: native.requests.map(\.comparable)
+        )
     }
 
     private func baseHeader(
@@ -716,7 +863,9 @@ private final class NativeMTPBenchRunner {
             // 3: effective_paths carry each admission's other_active_rows.
             // 4: native runs carry the scheduler's gated_* load-gate evidence.
             // 5: sustained records carry sustained_window_id.
-            "run_metrics_version": 5,
+            // 6: request metrics carry raw scheduler token-ID digests/counts,
+            // and paired parity includes token IDs plus terminal reason.
+            "run_metrics_version": NativeMTPExistingEvidence.requiredRunMetricsVersion,
         ]
     }
 
@@ -767,7 +916,8 @@ private final class NativeMTPBenchRunner {
             completion: completion,
             wallSeconds: end.timeIntervalSince(start),
             ttftSeconds: chunkTimes.first?.timeIntervalSince(start),
-            interTokenGaps: gaps
+            interTokenGaps: gaps,
+            tokenCapture: nil
         )
     }
 
@@ -900,9 +1050,32 @@ private struct NativeMTPBenchRequestResult: Sendable {
     let wallSeconds: TimeInterval
     let ttftSeconds: TimeInterval?
     let interTokenGaps: [TimeInterval]
+    let tokenCapture: NativeMTPBenchTokenCapture?
 
     var contentSHA256: String {
         SHA256.hash(data: Data(completion.content.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    var comparable: NativeMTPBenchComparableRequest {
+        NativeMTPBenchComparableRequest(
+            requestID: requestID,
+            content: completion.content,
+            completionTokens: completion.completionTokens,
+            finishReason: completion.finishReason,
+            tokenIDs: tokenCapture?.tokenIDs ?? []
+        )
+    }
+
+    func withTokenCapture(_ capture: NativeMTPBenchTokenCapture) -> NativeMTPBenchRequestResult {
+        NativeMTPBenchRequestResult(
+            requestID: requestID,
+            startedAt: startedAt,
+            completion: completion,
+            wallSeconds: wallSeconds,
+            ttftSeconds: ttftSeconds,
+            interTokenGaps: interTokenGaps,
+            tokenCapture: capture
+        )
     }
 }
 
@@ -950,8 +1123,28 @@ private struct NativeMTPBenchRunResult {
         warmup: Bool,
         sustainedWindowElapsedSeconds: Double? = nil,
         sustainedWindowID: String? = nil
-    ) -> [String: Any] {
-        [
+    ) throws -> [String: Any] {
+        let requestMetrics: [[String: Any]] = try requests.indices.map { index in
+            let request = requests[index]
+            guard let tokenCapture = request.tokenCapture else {
+                throw NativeMTPBenchError.assertionFailed(
+                    "R015 request \(request.requestID) reached serialization without scheduler token capture"
+                )
+            }
+            return [
+                "request_id": request.requestID,
+                "content_sha256": request.contentSHA256,
+                "token_ids_sha256": NativeMTPSelfTest.tokenDigest(tokenCapture.tokenIDs),
+                "token_ids_count": tokenCapture.schedulerCompletionTokens,
+                "completion_tokens": request.completion.completionTokens,
+                "committed_tps": perRequestTPS[index],
+                "decode_tps": perRequestDecodeTPS[index].map { $0 as Any } ?? NSNull(),
+                "ttft_seconds": request.ttftSeconds.map { $0 as Any } ?? NSNull(),
+                "inter_token_gaps_seconds": request.interTokenGaps,
+                "finish_reason": request.completion.finishReason,
+            ]
+        }
+        return [
             "schema": "macprovider.native-mtp-r015-run.v1",
             "record_type": "run",
             "policy_sha256": policySHA256,
@@ -976,19 +1169,7 @@ private struct NativeMTPBenchRunResult {
             "per_request_ttft_seconds": requests.map { request in
                 request.ttftSeconds.map { $0 as Any } ?? NSNull()
             },
-            "request_metrics": requests.indices.map { index in
-                let request = requests[index]
-                return [
-                    "request_id": request.requestID,
-                    "content_sha256": request.contentSHA256,
-                    "completion_tokens": request.completion.completionTokens,
-                    "committed_tps": perRequestTPS[index],
-                    "decode_tps": perRequestDecodeTPS[index].map { $0 as Any } ?? NSNull(),
-                    "ttft_seconds": request.ttftSeconds.map { $0 as Any } ?? NSNull(),
-                    "inter_token_gaps_seconds": request.interTokenGaps,
-                    "finish_reason": request.completion.finishReason,
-                ] as [String: Any]
-            },
+            "request_metrics": requestMetrics,
             "ttft_p50_seconds": ttftP50 as Any,
             "ttft_p95_seconds": ttftP95 as Any,
             "inter_token_gap_p50_seconds": interTokenGapP50 as Any,
@@ -1539,6 +1720,19 @@ struct NativeMTPBenchPolicy {
 }
 
 struct NativeMTPExistingEvidence {
+    static let requiredRunMetricsVersion = 6
+
+    static func validateRunMetricsVersion(_ header: [String: Any]) throws {
+        guard let version = header["run_metrics_version"] as? NSNumber,
+              CFGetTypeID(version) != CFBooleanGetTypeID(),
+              !["f", "d"].contains(String(cString: version.objCType)),
+              version.doubleValue == Double(requiredRunMetricsVersion) else {
+            throw NativeMTPBenchError.assertionFailed(
+                "existing --out run_metrics_version must be \(requiredRunMetricsVersion)"
+            )
+        }
+    }
+
     /// A resumed record counts only for the policy cell it names, with that
     /// cell's shape, inside its phase's block range: matrix 0..<blocks,
     /// warmup -1...-warmup_runs, sustained only for the sustained cell.
@@ -1603,6 +1797,7 @@ struct NativeMTPExistingEvidence {
               header["record_type"] as? String == "header" else {
             throw NativeMTPBenchError.assertionFailed("existing --out has no valid header")
         }
+        try validateRunMetricsVersion(header)
         let expected: [String: String] = [
             "policy_sha256": policySHA256,
             "provider_commit": providerCommit,

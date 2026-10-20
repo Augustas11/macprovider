@@ -1955,6 +1955,7 @@ actor ModelRuntime: ModelRuntimeServing {
     private var labNativeMTPCommitTimingObserver: NativeMTPLabCommittedTokenTimingObserver?
     private var labNativeMTPDecodeOutputCap: NativeMTPLabDecodeOutputCap?
     private var labNativeMTPConversationCacheObserver: NativeMTPLabConversationCacheObserver?
+    private var labNativeMTPBenchTokenRecorder: NativeMTPBenchTokenRecorder?
     #endif
 
     var loadedModelID: String? {
@@ -8213,6 +8214,15 @@ maxTokens: 1,
         return true
     }
 
+    /// Lab-only R015 hook: capture the completed attached scheduler row's raw
+    /// token IDs alongside the finish reason returned by response finalization.
+    /// The bench installs this only while one measured path is running.
+    func installLabNativeMTPBenchTokenRecorder(_ recorder: NativeMTPBenchTokenRecorder?) async -> Bool {
+        guard continuousBatchScheduler != nil else { return false }
+        labNativeMTPBenchTokenRecorder = recorder
+        return true
+    }
+
     /// Lab-only journey hook: freeze one exact batch composition before any
     /// prefill/decode work starts. Returns false unless the scheduler is idle.
     func installLabBatchComposition(_ requestIDs: [String]?) async -> Bool {
@@ -8597,6 +8607,15 @@ maxTokens: 1,
             if validated.ttftMilliseconds == nil {
                 validated.ttftMilliseconds = firstTokenClock.ttftMilliseconds(since: completionStartedAt)
             }
+            #if DEBUG || MACPROVIDER_LAB_HARNESS
+            labNativeMTPBenchTokenRecorder?.record(
+                requestID: result.requestID,
+                tokenIDs: result.generatedTokens,
+                schedulerCompletionTokens: result.completionTokens,
+                validatedCompletionTokens: validated.completionTokens,
+                finishReason: validated.finishReason
+            )
+            #endif
             let generatedTokens = finalized.generatedTokens
             let canonicalTokenCount = preparedPromptTokenIDs.count + generatedTokens.count
             if !finalized.truncatedAtSerialStop,
