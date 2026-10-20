@@ -2398,6 +2398,12 @@ actor KVDiskCacheStore {
 
     // MARK: - Inspection (FR-KVP12)
 
+    /// Cached all-class namespace usage for frequent local status reads. Unlike
+    /// `inspect()`, this does not enumerate tombstones or query Keychain.
+    func cachedTotalBytesUsed() -> Int {
+        committedBytes + controlBytes
+    }
+
     func inspect() -> KVInspection {
         let tombstoneCount = (try? FileManager.default.contentsOfDirectory(atPath: tombstonesDir.path))?.filter { $0.hasSuffix(".json") }.count ?? 0
         let kcCount = (try? keys.keychainItemCount()) ?? 0

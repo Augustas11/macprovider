@@ -149,6 +149,23 @@ final class DockPresenceTests: XCTestCase {
     func testReopenWithoutWindowsShowsTheDashboard() {
         XCTAssertTrue(AppDelegate.instancesRespond(to: #selector(NSApplicationDelegate.applicationShouldHandleReopen(_:hasVisibleWindows:))))
     }
+
+    func testPersistentDockPreferenceAppliesImmediatelyAndSurvivesWindowClose() {
+        let controller = DockPresenceController()
+        var policies: [NSApplication.ActivationPolicy] = []
+        controller.applyPolicy = { policies.append($0) }
+        controller.activate = {}
+        let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 100, height: 100), styleMask: [.titled, .closable], backing: .buffered, defer: true)
+        window.isReleasedWhenClosed = false
+
+        controller.setKeepsDockIcon(true)
+        controller.present(window)
+        window.close()
+        XCTAssertEqual(policies, [.regular, .regular])
+
+        controller.setKeepsDockIcon(false)
+        XCTAssertEqual(policies.last, .accessory)
+    }
 }
 
 @MainActor

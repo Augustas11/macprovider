@@ -2451,6 +2451,156 @@ final class ProviderStatusTests: XCTestCase {
         XCTAssertTrue(ThermalGate.shouldThrottle(.serious))
         XCTAssertTrue(ThermalGate.shouldThrottle(.critical))
     }
+
+    func testStatusReportsKVDiskTierAndBoundedRecentRestart() async throws {
+        let status = ProviderStatus(modelID: "model-a", modelLoaded: true, capacity: makeCapacity())
+        let at = "2026-10-20T10:11:12.000Z"
+        let event = ProviderLifecycleStateRecord.SignificantEvent(
+            sequence: 4,
+            transitionID: "11111111-1111-4111-8111-111111111111",
+            transitionAt: at,
+            state: .startingProvider,
+            reasonCode: "watchdog_recovery_restart",
+            writer: .watchdog,
+            binaryVersion: "1.8.259",
+            compatibilitySetID: "set-a",
+            operationID: nil
+        )
+        let record = ProviderLifecycleStateRecord(
+            version: 1,
+            sequence: 5,
+            transitionID: "22222222-2222-4222-8222-222222222222",
+            previousTransitionID: event.transitionID,
+            transitionAt: "2026-10-20T10:11:13.000Z",
+            state: .servingBuyers,
+            reasonCode: "provider_ready",
+            authority: ProviderLifecycleStateRecord.authority,
+            writer: .serve,
+            providerID: "provider-a",
+            modelID: "model-a",
+            compatibilitySetID: "set-a",
+            operationID: nil,
+            operatorPaused: false,
+            lastRestart: event,
+            lastRejection: nil,
+            lastUpdate: nil,
+            lastWatchdog: event
+        )
+        let body = RouterHandler.statusResponse(
+            await status.snapshot(),
+            providerID: "provider-a",
+            coordinatorURL: nil,
+            kvDiskTierSnapshot: RuntimeKVDiskTierSnapshot(
+                enabled: true,
+                activated: true,
+                unsupportedReason: "unsupported_cache_class",
+                bytesUsed: 12_345,
+                maxBytes: 67_890
+            ),
+            lifecycleStateInspection: .valid(record)
+        )
+
+        let kv = try XCTUnwrap(body["kv_disk_tier"] as? [String: Any])
+        XCTAssertEqual(kv["enabled"] as? Bool, true)
+        XCTAssertEqual(kv["activated"] as? Bool, true)
+        XCTAssertEqual(kv["unsupported_reason"] as? String, "unsupported_cache_class")
+        XCTAssertEqual(kv["bytes_used"] as? Int, 12_345)
+        XCTAssertEqual(kv["max_bytes"] as? Int, 67_890)
+        let restarts = try XCTUnwrap(body["recent_restarts"] as? [[String: Any]])
+        XCTAssertEqual(restarts.count, 1)
+        XCTAssertEqual(restarts[0]["at"] as? String, at)
+        XCTAssertEqual(restarts[0]["reason"] as? String, "watchdog_recovery_restart")
+        XCTAssertEqual(restarts[0]["version"] as? String, "1.8.259")
+
+        let legacyEvent = ProviderLifecycleStateRecord.SignificantEvent(
+            sequence: event.sequence,
+            transitionID: event.transitionID,
+            transitionAt: event.transitionAt,
+            state: event.state,
+            reasonCode: event.reasonCode,
+            writer: event.writer,
+            binaryVersion: nil,
+            compatibilitySetID: event.compatibilitySetID,
+            operationID: event.operationID
+        )
+        let legacyRecord = ProviderLifecycleStateRecord(
+            version: record.version,
+            sequence: record.sequence,
+            transitionID: record.transitionID,
+            previousTransitionID: record.previousTransitionID,
+            transitionAt: record.transitionAt,
+            state: record.state,
+            reasonCode: record.reasonCode,
+            authority: record.authority,
+            writer: record.writer,
+            providerID: record.providerID,
+            modelID: record.modelID,
+            compatibilitySetID: record.compatibilitySetID,
+            operationID: record.operationID,
+            operatorPaused: record.operatorPaused,
+            lastRestart: legacyEvent,
+            lastRejection: nil,
+            lastUpdate: nil,
+            lastWatchdog: legacyEvent
+        )
+        let legacyBody = RouterHandler.statusResponse(
+            await status.snapshot(),
+            providerID: "provider-a",
+            coordinatorURL: nil,
+            lifecycleStateInspection: .valid(legacyRecord)
+        )
+        let legacyRestarts = try XCTUnwrap(legacyBody["recent_restarts"] as? [[String: Any]])
+        XCTAssertEqual(legacyRestarts.count, 1)
+        XCTAssertTrue(legacyRestarts[0]["version"] is NSNull)
+    }
+
+    func testRuntimeKVDiskTierSnapshotTracksConfiguredActivationAndModelSupport() async throws {
+        let disabledRuntime = try await ModelRuntime(modelID: nil)
+        let disabledTier = KVDiskTier(
+            config: KVDiskCacheConfig(enabled: false, directory: try tempDir().path),
+            namespaceID: "provider-disabled",
+            keychain: KVInMemoryKeychain(),
+            sink: KVRecordingEventSink()
+        )
+        await disabledRuntime.registerKVDiskTierForPurge(disabledTier)
+        let disabledSnapshot = await disabledRuntime.kvDiskTierSnapshot()
+        let disabled = try XCTUnwrap(disabledSnapshot)
+        XCTAssertFalse(disabled.enabled)
+        XCTAssertFalse(disabled.activated)
+        XCTAssertNil(disabled.bytesUsed)
+
+        let activeRuntime = try await ModelRuntime(modelID: nil)
+        let activeTier = KVDiskTier(
+            config: KVDiskCacheConfig(
+                enabled: true,
+                directory: try tempDir().path,
+                minFreeBytes: 1
+            ),
+            namespaceID: "provider-active",
+            keychain: KVInMemoryKeychain(),
+            sink: KVRecordingEventSink()
+        )
+        let activation = await activeTier.activateForServeDetailed()
+        XCTAssertEqual(activation, .activated)
+        await activeRuntime.registerKVDiskTierForPurge(activeTier)
+        await activeRuntime.attachKVDiskTier(activeTier)
+        let initialActiveSnapshot = await activeRuntime.kvDiskTierSnapshot()
+        var active = try XCTUnwrap(initialActiveSnapshot)
+        XCTAssertTrue(active.enabled)
+        XCTAssertTrue(active.activated)
+        XCTAssertNotNil(active.bytesUsed)
+        XCTAssertGreaterThanOrEqual(active.bytesUsed ?? -1, 0)
+        XCTAssertNil(active.unsupportedReason)
+
+        await activeRuntime.noteUnsupportedKVDiskCacheClass("ArraysCache")
+        let unsupportedSnapshot = await activeRuntime.kvDiskTierSnapshot()
+        active = try XCTUnwrap(unsupportedSnapshot)
+        XCTAssertEqual(active.unsupportedReason, "unsupported_cache_class")
+        await activeRuntime.noteUnsupportedKVDiskCacheClass(nil)
+        let supportedAgain = await activeRuntime.kvDiskTierSnapshot()
+        XCTAssertNil(supportedAgain?.unsupportedReason)
+        await activeTier.shutdown()
+    }
 }
 
 private struct FixedThermalProvider: ThermalStateProviding {

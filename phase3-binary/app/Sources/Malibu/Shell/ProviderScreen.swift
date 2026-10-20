@@ -57,6 +57,46 @@ enum ProviderScreenPresentation {
         }
     }
 
+    static func kvDiskTierLine(_ engine: ProviderEngineStatus?) -> String? {
+        guard let engine, let enabled = engine.kvDiskEnabled else { return nil }
+        guard enabled else { return String(localized: "Off", comment: "KV disk tier disabled") }
+        var parts: [String]
+        if engine.kvDiskUnsupportedReason == "unsupported_cache_class" {
+            parts = [String(localized: "Not available for this model: its cache format cannot be saved to disk.", comment: "KV disk tier unsupported model")]
+        } else if engine.kvDiskActivated == true {
+            parts = [String(localized: "On", comment: "KV disk tier active")]
+        } else {
+            parts = [String(localized: "Enabled, waiting to activate", comment: "KV disk tier enabled but inactive")]
+        }
+        if let used = engine.kvDiskBytesUsed, let cap = engine.kvDiskMaxBytes, cap > 0 {
+            let formatter = ByteCountFormatter()
+            formatter.allowedUnits = [.useMB, .useGB, .useTB]
+            formatter.countStyle = .file
+            parts.append(String(localized: "\(formatter.string(fromByteCount: Int64(used))) used of \(formatter.string(fromByteCount: Int64(cap)))", comment: "KV disk tier usage"))
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    static func restartReason(_ reason: String) -> String {
+        switch reason {
+        case "launchd_service_started":
+            return String(localized: "Provider started", comment: "Provider restart reason")
+        case "maintenance_handoff_restart":
+            return String(localized: "Provider software updated", comment: "Provider restart reason")
+        case "watchdog_recovery_restart":
+            return String(localized: "Provider stopped responding and recovered", comment: "Provider restart reason")
+        default:
+            return String(localized: "Provider service restarted", comment: "Provider restart reason")
+        }
+    }
+
+    static func restartLine(_ restart: ProviderEngineStatus.Restart) -> String {
+        let time = restart.at.formatted(date: .abbreviated, time: .shortened)
+        let version = restart.version.map { "v\($0)" }
+            ?? String(localized: "Unknown version", comment: "Provider restart unknown version")
+        return "\(time) · \(restartReason(restart.reason)) · \(version)"
+    }
+
     static func rows(_ s: AgentSnapshot) -> [Row] {
         var rows: [Row] = []
         if let lifecycle = AgentSnapshotPresenter.lifecycleLine(s) {
@@ -68,6 +108,9 @@ enum ProviderScreenPresentation {
         }
         if let mtp = nativeMTPLine(s.providerEngine) {
             rows.append(Row(title: String(localized: "Native MTP (speculative decoding)", comment: "Provider row"), value: mtp))
+        }
+        if let kv = kvDiskTierLine(s.providerEngine) {
+            rows.append(Row(title: String(localized: "KV disk tier", comment: "Provider row"), value: kv))
         }
         let chips = AgentSnapshotPresenter.diagnosticChips(s)
         if !chips.isEmpty {
@@ -88,6 +131,14 @@ enum ProviderScreenPresentation {
         ]
         for row in rows(s) {
             strings.append("\(row.title): \(row.value)")
+        }
+        if let restarts = s.providerEngine?.recentRestarts {
+            strings.append(String(localized: "Recent restarts", comment: "Provider recent restarts title"))
+            if restarts.isEmpty {
+                strings.append(String(localized: "No recorded restarts.", comment: "Provider no recent restarts"))
+            } else {
+                strings.append(contentsOf: restarts.map(restartLine))
+            }
         }
         strings.append(String(localized: "Endpoints (this Mac only)", comment: "Provider endpoints title"))
         strings.append(contentsOf: endpoints)
@@ -134,6 +185,21 @@ struct ProviderScreen: View {
                 ShellPanel {
                     ForEach(ProviderScreenPresentation.rows(agent.snapshot), id: \.title) { row in
                         MetricRow(title: row.title, value: row.value)
+                    }
+                }
+                if let restarts = agent.snapshot.providerEngine?.recentRestarts {
+                    ShellPanel(String(localized: "Recent restarts", comment: "Provider recent restarts title")) {
+                        if restarts.isEmpty {
+                            Text(String(localized: "No recorded restarts.", comment: "Provider no recent restarts"))
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ForEach(Array(restarts.enumerated()), id: \.offset) { _, restart in
+                                Text(ProviderScreenPresentation.restartLine(restart))
+                                    .font(.callout)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
                     }
                 }
                 ShellPanel(String(localized: "Endpoints (this Mac only)", comment: "Provider endpoints title")) {

@@ -905,6 +905,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 assignedID: checkedAssignedID
             )
             let runtimeSnapshot = await modelRuntime.currentSnapshot()
+            let kvDiskTierSnapshot = await modelRuntime.kvDiskTierSnapshot()
             let telemetryMatchesRuntime = !warmSwapEnabled
                 || runtimeSnapshot.specDecodeGeneration == snapshot.specDecodeGeneration
             let telemetryRuntimeEligible = !warmSwapEnabled
@@ -927,6 +928,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     providerID: providerID,
                     coordinatorURL: coordinatorURL,
                     runtimeSnapshot: runtimeSnapshot,
+                    kvDiskTierSnapshot: kvDiskTierSnapshot,
                     specDecodeTelemetryMatchesRuntime: telemetryMatchesRuntime,
                     specDecodeTelemetryRuntimeEligible: telemetryRuntimeEligible,
                     catalogStatus: catalogStatus,
@@ -2485,6 +2487,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         providerID: String?,
         coordinatorURL: String?,
         runtimeSnapshot: RuntimeSnapshot? = nil,
+        kvDiskTierSnapshot: RuntimeKVDiskTierSnapshot? = nil,
         specDecodeTelemetryMatchesRuntime: Bool = true,
         specDecodeTelemetryRuntimeEligible: Bool = true,
         catalogStatus: ProviderCatalogStatusContext? = nil,
@@ -2591,6 +2594,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 runtimeSnapshot?.continuousBatching, admissionHold: snapshot.cbSelfCheckAdmissionHold
             ),
             "native_mtp": (runtimeSnapshot?.nativeMTPStatus ?? NativeMTPStatusSink.disabled().snapshot()).statusObject(),
+            "kv_disk_tier": kvDiskTierStatus(kvDiskTierSnapshot),
+            "recent_restarts": recentRestarts(lifecycleStateInspection),
             "coordinator": [
                 "connected": snapshot.coordinatorConnected,
                 "session": jsonNullable(snapshot.coordinatorAssignedID),
@@ -2706,6 +2711,27 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             }
         }
         return body
+    }
+
+    private static func kvDiskTierStatus(_ snapshot: RuntimeKVDiskTierSnapshot?) -> Any {
+        guard let snapshot else { return NSNull() }
+        return [
+            "enabled": snapshot.enabled,
+            "activated": snapshot.activated,
+            "unsupported_reason": jsonNullable(snapshot.unsupportedReason),
+            "bytes_used": snapshot.bytesUsed.map { $0 as Any } ?? NSNull(),
+            "max_bytes": snapshot.maxBytes,
+        ] as [String: Any]
+    }
+
+    private static func recentRestarts(_ inspection: ProviderLifecycleStateInspection) -> [[String: Any]] {
+        guard case .valid(let record) = inspection,
+              let restart = record.lastRestart else { return [] }
+        return [[
+            "at": restart.transitionAt,
+            "reason": restart.reasonCode,
+            "version": jsonNullable(restart.binaryVersion),
+        ]]
     }
 
     static func continuousBatchingStatusFields(
@@ -2923,6 +2949,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             "state": event.state.rawValue,
             "reason_code": event.reasonCode,
             "writer": event.writer.rawValue,
+            "binary_version": jsonNullable(event.binaryVersion),
             "compatibility_set_id": jsonNullable(event.compatibilitySetID),
             "operation_id": jsonNullable(event.operationID),
         ] as [String: Any]

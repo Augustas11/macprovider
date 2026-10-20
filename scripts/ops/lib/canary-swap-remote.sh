@@ -4,7 +4,8 @@
 # cannot interrupt a swap or a rollback; the operator side polls RESULT_FILE.
 # bash 3.2 compatible (stock macOS /bin/bash).
 #
-# Payload-only swap of the live provider to a verified candidate tarball:
+# Payload swap of the live provider to a verified candidate tarball, or the
+# narrowly-scoped Studio owner-pin transaction staged by studio-owner-pin.sh:
 # pause and drain, back up the install dir, replace the payload, restart, then
 # watch (the installed watchdog stays booted out until the candidate, or the
 # restored version, is buyer_serving). A provider process restart (crash loop),
@@ -13,8 +14,9 @@
 # previous version is buyer_serving again, and resumes it. Before the model is
 # loaded /v1/status may stay silent (a large model, such as GLM-5.3-Flash at
 # about 175 GB, loads for 7-13 minutes): silence then is bounded only by
-# READY_TIMEOUT_S while the provider pid stays the same and alive. Config and
-# LaunchAgents are never edited.
+# READY_TIMEOUT_S while the provider pid stays the same and alive. The owner-
+# pin mode changes only max_concurrency_override/max_concurrency_source under
+# the provider config lock and restores only those fields on failure.
 #
 # Exit codes (also written to RESULT_FILE): 0 swapped and buyer-serving;
 # 4 refused before the swap (payload untouched, provider resumed);
@@ -24,19 +26,50 @@ set -euo pipefail
 export PATH="${CANARY_REMOTE_PATH_PREFIX:+$CANARY_REMOTE_PATH_PREFIX:}/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
 umask 077
 
-TARBALL="$1"
-TARBALL_SHA="$2"
-VERSION="$3"
-INSTALL_DIR="${4:-$HOME/macprovider}"
-LABEL="${5:-live.malibu.provider}"
-SOCKET="${6:-}"
-PORT="$7"
-STATUS_TIMEOUT_S="$8"
-READY_TIMEOUT_S="$9"
-DRAIN_TIMEOUT_S="${10}"
-STABLE_S="${11}"
-POLL_S="${12:-5}"
-RESULT_FILE="${13:-$(dirname "$TARBALL")/result}"
+MODE=swap
+case "${1:-}" in remove-owner-pin|restore-owner-pin) MODE="$1"; shift ;; esac
+if [ "$MODE" = swap ]; then
+  TARBALL="$1"
+  TARBALL_SHA="$2"
+  VERSION="$3"
+  INSTALL_DIR="${4:-$HOME/macprovider}"
+  LABEL="${5:-live.malibu.provider}"
+  SOCKET="${6:-}"
+  PORT="$7"
+  STATUS_TIMEOUT_S="$8"
+  READY_TIMEOUT_S="$9"
+  DRAIN_TIMEOUT_S="${10}"
+  STABLE_S="${11}"
+  POLL_S="${12:-5}"
+  RESULT_FILE="${13:-$(dirname "$TARBALL")/result}"
+  CONFIG="" JOURNAL="" HELPER="" EXPECTED_BINARY_SHA="" EXPECTED_PROVIDER_SHA="" EXPECTED_MODEL="" EXPECTED_POLICY_SHA=""
+  EXPECTED_POLICY_RELEASE="" EXPECTED_POLICY_TUPLE="" EXPECTED_TEAM_ID="" EXPECTED_SIGNING_IDENTIFIER="" EXPECTED_CDHASH=""
+else
+  VERSION="$1"
+  INSTALL_DIR="$2"
+  LABEL="${3:-live.malibu.provider}"
+  SOCKET="${4:-}"
+  PORT="$5"
+  STATUS_TIMEOUT_S="$6"
+  READY_TIMEOUT_S="$7"
+  DRAIN_TIMEOUT_S="$8"
+  STABLE_S="$9"
+  POLL_S="${10:-5}"
+  RESULT_FILE="${11}"
+  CONFIG="${12}"
+  JOURNAL="${13}"
+  HELPER="${14}"
+  EXPECTED_BINARY_SHA="${15}"
+  EXPECTED_PROVIDER_SHA="${16}"
+  EXPECTED_MODEL="${17}"
+  EXPECTED_POLICY_SHA="${18}"
+  EXPECTED_POLICY_RELEASE="${19}"
+  EXPECTED_POLICY_TUPLE="${20}"
+  EXPECTED_TEAM_ID="${21}"
+  EXPECTED_SIGNING_IDENTIFIER="${22}"
+  EXPECTED_CDHASH="${23}"
+  TARBALL="" TARBALL_SHA=""
+fi
 
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
 DOMAIN="gui/$(id -u)"
@@ -44,13 +77,14 @@ LA_DIR="${CANARY_LAUNCH_AGENTS_DIR:-$HOME/Library/LaunchAgents}"
 WATCHDOG_LABEL="$LABEL-watchdog"
 [ -n "$SOCKET" ] || SOCKET="$(getconf DARWIN_USER_TEMP_DIR)macprovider-cli/ctl.sock"
 BACKUP="$INSTALL_DIR.pre-$VERSION-$TS"
+[ "$MODE" = swap ] || BACKUP="$CONFIG.bak-owner-pin-$TS"
 FAILED_DIR="$INSTALL_DIR.failed-$VERSION-$TS"
-STAGE="$(dirname "$TARBALL")/payload"
+STAGE="$(dirname "$RESULT_FILE")/payload"
 LOCK_DIR="$HOME/.macprovider-canary-swap.lock"
 MANAGED_FILES="macprovider-cli mlx.metallib compatibility-set.json THIRD-PARTY-NOTICES.txt"
 MANAGED_DIRS="catalog-release compatibility-set-local mlx-swift_Cmlx.bundle swift-nio_NIOPosix.bundle"
 
-say() { printf 'canary-swap[%s]: %s\n' "$(date -u +%H:%M:%SZ)" "$*" >&2; }
+say() { printf 'canary-window[%s][%s]: %s\n' "$(date -u +%H:%M:%SZ)" "$MODE" "$*" >&2; }
 now() { date +%s; }
 
 status_json() { curl -fsS --max-time 5 "http://127.0.0.1:$PORT/v1/status" 2>/dev/null; }
@@ -69,6 +103,10 @@ try:
 except Exception:
     v = None
 print("" if v is None else (json.dumps(v) if isinstance(v, bool) else v))' "$2"
+}
+
+status_field_sha() {
+  printf '%s' "$(status_field "$1" "$2")" | shasum -a 256 | awk '{print $1}'
 }
 
 # serving BODY VERSION: the provider runs VERSION with its model loaded and
@@ -110,6 +148,113 @@ PY
 
 job_pid() {
   launchctl print "$DOMAIN/$LABEL" 2>/dev/null | awk '$1 == "pid" && $2 == "=" { print $3; exit }'
+}
+
+verify_binary_identity() {
+  local binary="$INSTALL_DIR/macprovider-cli" details team identifier cdhash
+  python3 - "$binary" <<'PY' || return 1
+import os, stat, sys
+path = sys.argv[1]
+try:
+    info = os.lstat(path)
+except OSError:
+    sys.exit(1)
+if (
+    not stat.S_ISREG(info.st_mode)
+    or info.st_uid != os.getuid()
+    or info.st_nlink != 1
+    or os.path.realpath(path) != path
+):
+    sys.exit(1)
+PY
+  [ "$(shasum -a 256 "$binary" | awk '{print $1}')" = "$EXPECTED_BINARY_SHA" ] || return 1
+  codesign --verify --strict --verbose=2 "$binary" >/dev/null 2>&1 || return 1
+  details="$(codesign -d --arch arm64 -vvv "$binary" 2>&1)" || return 1
+  team="$(printf '%s\n' "$details" | awk -F= '$1 == "TeamIdentifier" {print $2; exit}')"
+  identifier="$(printf '%s\n' "$details" | awk -F= '$1 == "Identifier" {print $2; exit}')"
+  cdhash="$(printf '%s\n' "$details" | awk -F= '$1 == "CDHash" {print tolower($2); exit}')"
+  [ "$team" = "$EXPECTED_TEAM_ID" ] &&
+    [ "$identifier" = "$EXPECTED_SIGNING_IDENTIFIER" ] &&
+    [ "$cdhash" = "$EXPECTED_CDHASH" ]
+}
+
+verify_launch_plist() {
+  python3 - "$LA_DIR/$LABEL.plist" "$INSTALL_DIR/macprovider-cli" "$CONFIG" "$LABEL" <<'PY'
+import os, plistlib, stat, sys
+path, binary, config, label = sys.argv[1:]
+try:
+    before = os.lstat(path)
+    if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_nlink != 1 or before.st_size > 64*1024:
+        sys.exit(1)
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    opened = os.fstat(fd)
+    if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+        sys.exit(1)
+    data = os.read(fd, 64*1024 + 1)
+    os.close(fd)
+    if len(data) != before.st_size or len(data) > 64*1024:
+        sys.exit(1)
+    value = plistlib.loads(data)
+except Exception:
+    sys.exit(1)
+args, program = value.get("ProgramArguments"), value.get("Program")
+expected = os.path.realpath(binary)
+config_flags = [i for i, item in enumerate(args or []) if item == "--config"]
+if (
+    value.get("Label") != label
+    or not isinstance(args, list)
+    or len(args) != 4
+    or not all(isinstance(item, str) for item in args)
+    or os.path.realpath(args[0]) != expected
+    or (program is not None and (not isinstance(program, str) or os.path.realpath(program) != expected))
+    or args[1] != "serve"
+    or len(config_flags) != 1
+    or config_flags[0] + 1 >= len(args)
+    or not os.path.isabs(args[config_flags[0] + 1])
+    or os.path.realpath(args[config_flags[0] + 1]) != os.path.realpath(config)
+):
+    sys.exit(1)
+PY
+}
+
+# Prints the kernel process start in microseconds after binding launchd's PID
+# to the exact canonical executable, uid and real uid. This mirrors the
+# released installer's libproc lifecycle-lease identity check.
+verify_job_process() {
+  local expected_pid="$1" live_pid
+  verify_launch_plist || return 1
+  live_pid="$(job_pid)"
+  [ "$live_pid" = "$expected_pid" ] || return 1
+  python3 - "$expected_pid" "$INSTALL_DIR/macprovider-cli" "$(id -u)" <<'PY'
+import ctypes, os, sys
+class ProcBsdInfo(ctypes.Structure):
+    _fields_ = [
+        ("pbi_flags",ctypes.c_uint32),("pbi_status",ctypes.c_uint32),("pbi_xstatus",ctypes.c_uint32),
+        ("pbi_pid",ctypes.c_uint32),("pbi_ppid",ctypes.c_uint32),("pbi_uid",ctypes.c_uint32),
+        ("pbi_gid",ctypes.c_uint32),("pbi_ruid",ctypes.c_uint32),("pbi_rgid",ctypes.c_uint32),
+        ("pbi_svuid",ctypes.c_uint32),("pbi_svgid",ctypes.c_uint32),("rfu_1",ctypes.c_uint32),
+        ("pbi_comm",ctypes.c_char*16),("pbi_name",ctypes.c_char*32),("pbi_nfiles",ctypes.c_uint32),
+        ("pbi_pgid",ctypes.c_uint32),("pbi_pjobc",ctypes.c_uint32),("pbi_e_tdev",ctypes.c_uint32),
+        ("pbi_e_tpgid",ctypes.c_uint32),("pbi_nice",ctypes.c_int32),
+        ("pbi_start_tvsec",ctypes.c_uint64),("pbi_start_tvusec",ctypes.c_uint64),
+    ]
+pid, binary, owner = int(sys.argv[1]), os.path.realpath(sys.argv[2]), int(sys.argv[3])
+libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
+proc_pidinfo = libproc.proc_pidinfo
+proc_pidinfo.argtypes = [ctypes.c_int,ctypes.c_int,ctypes.c_uint64,ctypes.c_void_p,ctypes.c_int]
+proc_pidinfo.restype = ctypes.c_int
+info = ProcBsdInfo()
+if proc_pidinfo(pid,3,0,ctypes.byref(info),ctypes.sizeof(info)) != ctypes.sizeof(info): sys.exit(1)
+buf = ctypes.create_string_buffer(4096)
+proc_pidpath = libproc.proc_pidpath
+proc_pidpath.argtypes = [ctypes.c_int,ctypes.c_void_p,ctypes.c_uint32]
+proc_pidpath.restype = ctypes.c_int
+if proc_pidpath(pid,buf,ctypes.sizeof(buf)) <= 0: sys.exit(1)
+start = int(info.pbi_start_tvsec)*1000000 + int(info.pbi_start_tvusec)
+path = os.path.realpath(buf.value.decode("utf-8","surrogateescape"))
+if start <= 0 or int(info.pbi_uid) != owner or int(info.pbi_ruid) != owner or path != binary: sys.exit(1)
+print(start)
+PY
 }
 
 stop_jobs() {
@@ -167,6 +312,15 @@ start_watchdog() {
   say "!!! watchdog $WATCHDOG_LABEL did not start; bootstrap it by hand"
 }
 
+require_watchdog() {
+  [ -f "$LA_DIR/$WATCHDOG_LABEL.plist" ] || return 0
+  start_watchdog
+  launchctl print "$DOMAIN/$WATCHDOG_LABEL" >/dev/null 2>&1 || {
+    say "!!! watchdog $WATCHDOG_LABEL is not loaded"
+    return 1
+  }
+}
+
 # wait_serving VERSION: resume (the operator pause outlives a restart) until
 # VERSION is buyer_serving and stays so for STABLE_S.
 wait_serving() {
@@ -175,6 +329,9 @@ wait_serving() {
   while [ "$(now)" -lt "$deadline" ]; do
     body="$(status_json || true)"
     if [ -n "$body" ] && [ "$(status_field "$body" model_loaded)" = true ] && paused "$body"; then
+      if [ "$MODE" != swap ]; then
+        verify_binary_identity && verify_job_process "$(job_pid)" >/dev/null || return 1
+      fi
       control resume_request || true
     fi
     if [ -n "$body" ] && serving "$body" "$1"; then
@@ -190,6 +347,7 @@ wait_serving() {
 
 PAUSED=0
 SWAPPED=0
+CONFIG_ARMED=0
 FINISHED=0
 LOCKED=0
 OLD_VERSION=""
@@ -215,6 +373,9 @@ finish() {
 }
 
 restore_backup() {
+  if [ "$MODE" != swap ]; then
+    restore_config "$1"
+  fi
   FINISHED=1
   say "ROLLBACK: restoring $BACKUP ($1)"
   stop_jobs || { say "!!! rollback could not stop the candidate job; restore $BACKUP into $INSTALL_DIR by hand"; finish 6; }
@@ -230,6 +391,61 @@ restore_backup() {
   finish 5
 }
 
+config_postconditions() {
+  [ "$(status_field "$1" binary_version)" = "$VERSION" ] &&
+    [ "$(status_field_sha "$1" provider_id)" = "$EXPECTED_PROVIDER_SHA" ] &&
+    [ "$(status_field "$1" model)" = "$EXPECTED_MODEL" ] &&
+    [ "$(status_field "$1" capacity.max_concurrency)" = 4 ] &&
+    [ "$(status_field "$1" continuous_batching.active)" = true ] &&
+    [ "$(status_field "$1" continuous_batching.policy.load_status)" = live_verified ] &&
+    [ "$(status_field "$1" continuous_batching.policy.authorized)" = true ] &&
+    [ "$(status_field "$1" continuous_batching.policy.policy_sha256)" = "$EXPECTED_POLICY_SHA" ] &&
+    [ "$(status_field "$1" continuous_batching.policy.release_id)" = "$EXPECTED_POLICY_RELEASE" ] &&
+    [ "$(status_field "$1" continuous_batching.policy.tuple_sha256)" = "$EXPECTED_POLICY_TUPLE" ] &&
+    [ "$(status_field "$1" continuous_batching.self_check.served_slots)" = 4 ] &&
+    [ "$(status_field "$1" continuous_batching.scheduler.slots_total)" = 4 ] &&
+    [ "$(status_field "$1" coordinator.connected)" = true ] &&
+    [ "$(status_field "$1" lifecycle.operator_paused)" != true ]
+}
+
+restore_config() {
+  local result_code="${2:-5}" recovered_pid recovered_start body
+  FINISHED=1
+  say "ROLLBACK: restoring the 4/owner pin ($1)"
+  stop_jobs || { say "!!! rollback could not stop the provider; journal retained"; finish 6; }
+  python3 "$HELPER" restore --config "$CONFIG" --journal "$JOURNAL" || {
+    say "!!! scoped pin restore refused; journal and protected backup retained"; finish 6;
+  }
+  if ! verify_binary_identity || ! verify_launch_plist; then
+    say "!!! pin restored but signed executable identity is not exact; provider and watchdog remain stopped; journal retained"
+    finish 6
+  fi
+  start_jobs provider || { say "!!! pin restored but provider did not start; journal retained"; finish 6; }
+  recovered_pid="$(job_pid)"
+  recovered_start="$(verify_job_process "$recovered_pid")" || {
+    say "!!! pin restored but launched process is not the exact signed executable; journal retained"; stop_jobs || true; finish 6;
+  }
+  if ! wait_serving "$VERSION"; then
+    say "!!! pin restored but $VERSION is not buyer_serving within ${READY_TIMEOUT_S}s; journal retained"
+    finish 6
+  fi
+  body="$(status_json || true)"
+  if ! config_postconditions "$body"; then
+    say "!!! pin restored but serving status does not preserve the signed four-slot tuple; journal retained"
+    finish 6
+  fi
+  [ "$(status_field "$body" service_instance.pid)" = "$recovered_pid" ] &&
+    [ "$(verify_job_process "$recovered_pid")" = "$recovered_start" ] || {
+      say "!!! recovered provider process identity changed; journal retained"; finish 6;
+    }
+  require_watchdog || { say "!!! pin restored but watchdog is not loaded; journal retained"; finish 6; }
+  python3 "$HELPER" finish --config "$CONFIG" --journal "$JOURNAL" --restored || {
+    say "!!! provider recovered but restore journal could not be finalized"; finish 6;
+  }
+  say "ROLLBACK done: exact 4/owner pin restored and $VERSION buyer_serving"
+  finish "$result_code"
+}
+
 # shellcheck disable=SC2329  # EXIT trap
 on_exit() {
   local rc=$?
@@ -237,6 +453,9 @@ on_exit() {
   if [ "$FINISHED" = 1 ]; then
     say "!!! recovery stopped unexpectedly (exit $rc); check $INSTALL_DIR against $BACKUP"
     finish 6
+  fi
+  if [ "$CONFIG_ARMED" = 1 ]; then
+    restore_config "unexpected exit $rc during the owner-pin transaction"
   fi
   if [ "$SWAPPED" = 1 ]; then
     restore_backup "unexpected exit $rc during the swap"
@@ -248,7 +467,13 @@ on_exit() {
   case "$rc" in 4) finish 4 ;; *) finish 6 ;; esac
 }
 trap on_exit EXIT
-trap 'say "ignoring SIGHUP"' HUP
+if [ "$MODE" = swap ]; then
+  trap 'say "ignoring SIGHUP"' HUP
+else
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
+fi
 
 refuse() { say "REFUSED: $*"; exit 4; }
 
@@ -299,8 +524,109 @@ case "$INSTALL_DIR" in *"/../"*|*/..|*"/./"*|*/.|*//*) refuse "install dir $INST
 [ "$(cd "$INSTALL_DIR" && pwd -P)" = "$(cd "$HOME" && pwd -P)/${INSTALL_DIR#"$HOME"/}" ] ||
   refuse "install dir $INSTALL_DIR resolves through a symlink"
 [ -O "$INSTALL_DIR" ] || refuse "install dir $INSTALL_DIR is not owned by $(id -un)"
-[ ! -e "$BACKUP" ] && [ ! -e "$FAILED_DIR" ] || refuse "backup path $BACKUP already exists"
+[ "$MODE" != swap ] || { [ ! -e "$BACKUP" ] && [ ! -e "$FAILED_DIR" ]; } || refuse "backup path $BACKUP already exists"
 [ -f "$LA_DIR/$LABEL.plist" ] || refuse "missing LaunchAgent $LA_DIR/$LABEL.plist"
+[ "$MODE" = swap ] || {
+  case "$CONFIG" in "$HOME"/?*) ;; *) refuse "config is not under HOME" ;; esac
+  case "$JOURNAL" in "$HOME"/?*) ;; *) refuse "journal is not under HOME" ;; esac
+  [ -f "$CONFIG" ] && [ ! -L "$CONFIG" ] && [ -O "$CONFIG" ] || refuse "config is missing, symlinked, or not owner-owned"
+  [ -f "$HELPER" ] && [ ! -L "$HELPER" ] && [ -O "$HELPER" ] || refuse "config helper is missing, symlinked, or not owner-owned"
+}
+
+if [ "$MODE" = restore-owner-pin ]; then
+  [ -f "$JOURNAL" ] || refuse "no unfinished owner-pin journal to restore"
+  CONFIG_ARMED=1
+  restore_config "operator recovery" 0
+fi
+
+if [ "$MODE" = remove-owner-pin ]; then
+  verify_binary_identity || refuse "installed CLI signed identity changed"
+  verify_launch_plist || refuse "provider LaunchAgent does not execute the signed CLI path"
+  body="$(status_json)" || refuse "live /v1/status on :$PORT is not answering"
+  OLD_VERSION="$(status_field "$body" binary_version)"
+  [ "$OLD_VERSION" = "$VERSION" ] || refuse "live binary version ${OLD_VERSION:-none} != $VERSION"
+  serving "$body" "$VERSION" || refuse "the provider is not buyer_serving on $VERSION"
+  config_postconditions "$body" || refuse "live status is not the exact signed four-slot GLM tuple"
+  old_pid="$(job_pid)"
+  [ -n "$old_pid" ] || refuse "provider job has no pid"
+  [ "$(status_field "$body" service_instance.pid)" = "$old_pid" ] || refuse "status and launchd provider pid differ"
+  verify_job_process "$old_pid" >/dev/null || refuse "live provider process is not the signed CLI path"
+  provider_hash="$(status_field_sha "$body" provider_id)"
+  python3 "$HELPER" prepare --config "$CONFIG" --journal "$JOURNAL" --backup "$BACKUP" \
+    --version "$VERSION" --provider-id-sha256 "$provider_hash" --model "$EXPECTED_MODEL" \
+    --policy-sha256 "$EXPECTED_POLICY_SHA" --policy-release-id "$EXPECTED_POLICY_RELEASE" \
+    --policy-tuple-sha256 "$EXPECTED_POLICY_TUPLE" --binary-sha256 "$EXPECTED_BINARY_SHA" \
+    --team-id "$EXPECTED_TEAM_ID" --signing-identifier "$EXPECTED_SIGNING_IDENTIFIER" \
+    --cdhash "$EXPECTED_CDHASH" --executable-path "$INSTALL_DIR/macprovider-cli" ||
+    refuse "could not arm the owner-pin journal"
+  CONFIG_ARMED=1
+  PAUSED=1
+  control pause_request || refuse "pause_request was not accepted on $SOCKET"
+  deadline=$(( $(now) + DRAIN_TIMEOUT_S ))
+  while :; do
+    body="$(status_json || true)"
+    inflight="$(status_field "$body" requests_in_flight)"
+    [ "$inflight" = 0 ] && break
+    [ "$(now)" -lt "$deadline" ] || refuse "requests_in_flight=${inflight:-unknown} after ${DRAIN_TIMEOUT_S}s drain"
+    sleep "$POLL_S"
+  done
+  stop_jobs || restore_config "provider job did not stop"
+  python3 "$HELPER" apply --config "$CONFIG" --journal "$JOURNAL" || restore_config "scoped config mutation failed"
+  verify_binary_identity || restore_config "signed executable identity changed before config validation"
+  "$INSTALL_DIR/macprovider-cli" provider context explain --config "$CONFIG" --port "$PORT" >/dev/null ||
+    restore_config "released CLI rejected the unpinned config"
+  verify_binary_identity || restore_config "signed executable identity changed before bootstrap"
+  verify_launch_plist || restore_config "provider LaunchAgent changed before bootstrap"
+  start_jobs provider || restore_config "provider job did not start"
+  start="$(now)"; pid0=""
+  while [ -z "$pid0" ]; do
+    pid0="$(job_pid)"
+    [ -n "$pid0" ] && break
+    [ $(( $(now) - start )) -lt 15 ] || restore_config "provider job has no process 15s after bootstrap"
+    sleep 1
+  done
+  [ "$pid0" != "$old_pid" ] || restore_config "provider restart kept the old pid $old_pid"
+  process_start="$(verify_job_process "$pid0")" || restore_config "launched provider is not the exact signed executable"
+  last_answer="$start"; loaded=0; ready_at=""
+  while :; do
+    t="$(now)"; pid="$(job_pid)"
+    [ "$pid" = "$pid0" ] || restore_config "provider process restarted (pid $pid0 -> ${pid:-none}): crash loop"
+    [ "$(verify_job_process "$pid0")" = "$process_start" ] || restore_config "provider process identity changed during readiness"
+    body="$(status_json || true)"
+    if [ -n "$body" ]; then
+      last_answer="$t"
+      [ "$(status_field "$body" binary_version)" = "$VERSION" ] || restore_config "status binary identity changed"
+      if [ "$(status_field "$body" model_loaded)" = true ]; then
+        loaded=1
+        paused "$body" && control resume_request || true
+      fi
+      if serving "$body" "$VERSION" && config_postconditions "$body"; then
+        [ -n "$ready_at" ] || ready_at="$t"
+        [ $(( t - ready_at )) -lt "$STABLE_S" ] || break
+      else
+        ready_at=""
+      fi
+    elif [ "$loaded" = 1 ] && [ $(( t - last_answer )) -ge "$STATUS_TIMEOUT_S" ]; then
+      restore_config "/v1/status silent after model load"
+    fi
+    [ $(( t - start )) -lt "$READY_TIMEOUT_S" ] || restore_config "not buyer_serving on the signed four-slot tuple within ${READY_TIMEOUT_S}s"
+    sleep "$POLL_S"
+  done
+  verify_binary_identity || restore_config "signed executable identity changed after readiness"
+  [ "$(verify_job_process "$pid0")" = "$process_start" ] || restore_config "provider process identity changed after readiness"
+  require_watchdog || restore_config "watchdog did not return after readiness"
+  [ "$(verify_job_process "$pid0")" = "$process_start" ] || restore_config "watchdog restart changed the accepted provider process"
+  python3 "$HELPER" accept --config "$CONFIG" --journal "$JOURNAL" --pid "$pid0" \
+    --process-start-us "$process_start" --executable-path "$INSTALL_DIR/macprovider-cli" ||
+    restore_config "could not durably bind the accepted provider process"
+  # The controller keeps the journal armed through the provider-attributed
+  # gateway proof. It either finalizes it after that proof or dispatches this
+  # script's restore-owner-pin mode on every failure/signal.
+  CONFIG_ARMED=0
+  say "OK: owner pin removed; $VERSION buyer_serving at four slots (pid $pid0 start $process_start)"
+  finish 0
+fi
+
 [ "$(shasum -a 256 "$TARBALL" | awk '{print $1}')" = "$TARBALL_SHA" ] || refuse "staged tarball sha256 differs from the verified candidate"
 
 # Members are checked from the archive headers before anything is extracted:

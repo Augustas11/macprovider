@@ -69,6 +69,9 @@ struct ProviderLifecycleStateRecord: Codable, Equatable, Sendable {
         let state: ProviderLifecycleState
         let reasonCode: String
         let writer: ProviderLifecycleWriter
+        /// Provider binary that recorded this event. Optional for v1 records
+        /// written before restart history exposed versions.
+        let binaryVersion: String?
         let compatibilitySetID: String?
         let operationID: String?
 
@@ -79,6 +82,7 @@ struct ProviderLifecycleStateRecord: Codable, Equatable, Sendable {
             case state
             case reasonCode = "reason_code"
             case writer
+            case binaryVersion = "binary_version"
             case compatibilitySetID = "compatibility_set_id"
             case operationID = "operation_id"
         }
@@ -193,6 +197,7 @@ struct ProviderLifecycleStateRecord: Codable, Equatable, Sendable {
             state: state,
             reasonCode: reasonCode,
             writer: writer,
+            binaryVersion: CoordinatorClient.binaryVersion,
             compatibilitySetID: normalized(compatibilitySetID),
             operationID: normalized(operationID)
         )
@@ -409,6 +414,7 @@ struct ProviderLifecycleStateRecord: Codable, Equatable, Sendable {
             throw ProviderLifecycleStateError.invalidRecord("invalid_significant_event_transition_at")
         }
         try Self.validateReasonCode(event.reasonCode)
+        try Self.validateContext(event.binaryVersion, name: "significant_event_binary_version", maximum: 64)
         try Self.validateContext(event.compatibilitySetID, name: "significant_event_compatibility_set_id", maximum: 256)
         try Self.validateContext(event.operationID, name: "significant_event_operation_id", maximum: 256)
     }
