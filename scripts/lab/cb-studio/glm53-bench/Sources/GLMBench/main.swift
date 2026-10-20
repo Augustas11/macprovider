@@ -40,7 +40,9 @@
 //   --mtp-multirow-profile
 //                    diagnostic B=4 ordinary (L=1) versus packed verify (L=2),
 //                    with routed-expert sharing off/on; reports exactness, route
-//                    wall time and a small GPU kernel census
+//                    wall time and a small GPU kernel census; add
+//                    --mtp-multirow-measurement-mode wall-only for an
+//                    uninstrumented full-synchronous-facade comparison
 // GPU runs only in an announced lab window; never beside a serving provider.
 import Foundation
 import Darwin
@@ -52,6 +54,19 @@ import MLXNN
 
 // Usage: GLMBench <model_dir> [--prompt N] [--steps N] [--profile] [--sync]
 let args = CommandLine.arguments
+func argumentError(_ message: String) -> Never {
+    fputs("error: \(message)\n", stderr)
+    exit(64)
+}
+func uniqueOptionValue(_ name: String) -> String? {
+    let indices = args.indices.filter { args[$0] == name }
+    guard indices.count <= 1 else { argumentError("\(name) may appear only once") }
+    guard let index = indices.first else { return nil }
+    guard index + 1 < args.count, !args[index + 1].hasPrefix("--") else {
+        argumentError("\(name) requires a value")
+    }
+    return args[index + 1]
+}
 func opt(_ name: String, _ def: Int) -> Int {
     if let i = args.firstIndex(of: name), i + 1 < args.count, let v = Int(args[i + 1]) { return v }
     return def
@@ -59,6 +74,66 @@ func opt(_ name: String, _ def: Int) -> Int {
 func optString(_ name: String) -> String? {
     if let i = args.firstIndex(of: name), i + 1 < args.count { return args[i + 1] }
     return nil
+}
+
+enum MTPMultirowProfileMode: String {
+    case census
+    case wallOnly = "wall-only"
+}
+
+let mtpMultirowProfileRequested = args.contains("--mtp-multirow-profile")
+let mtpMultirowModeOption = "--mtp-multirow-measurement-mode"
+let mtpMultirowModeRaw = uniqueOptionValue(mtpMultirowModeOption)
+let mtpMultirowRepsRaw = uniqueOptionValue("--mtp-multirow-reps")
+if !mtpMultirowProfileRequested, mtpMultirowModeRaw != nil || mtpMultirowRepsRaw != nil {
+    argumentError("\(mtpMultirowModeOption) and --mtp-multirow-reps require --mtp-multirow-profile")
+}
+let mtpMultirowProfileMode: MTPMultirowProfileMode = {
+    guard let raw = mtpMultirowModeRaw else { return .census }
+    guard let mode = MTPMultirowProfileMode(rawValue: raw) else {
+        argumentError("\(mtpMultirowModeOption) must be census or wall-only")
+    }
+    return mode
+}()
+let mtpMultirowRequestedReps: Int? = {
+    guard let raw = mtpMultirowRepsRaw else { return nil }
+    guard let reps = Int(raw), reps > 0 else {
+        argumentError("--mtp-multirow-reps must be a positive integer")
+    }
+    return reps
+}()
+if mtpMultirowProfileMode == .wallOnly, mtpMultirowProfileRequested {
+    guard args.count > 1, !args[1].hasPrefix("--") else {
+        argumentError("wall-only measurement requires exactly one model directory")
+    }
+    var seen = Set<String>()
+    var index = 2
+    while index < args.count {
+        let argument = args[index]
+        guard seen.insert(argument).inserted else {
+            argumentError("wall-only argument \(argument) may appear only once")
+        }
+        switch argument {
+        case "--mtp-multirow-profile":
+            index += 1
+        case mtpMultirowModeOption, "--mtp-multirow-reps", "--prompt":
+            guard index + 1 < args.count, !args[index + 1].hasPrefix("--") else {
+                argumentError("wall-only argument \(argument) requires a value")
+            }
+            if argument == "--prompt" {
+                guard let prompt = Int(args[index + 1]), prompt > 0 else {
+                    argumentError("wall-only --prompt must be a positive integer")
+                }
+            }
+            index += 2
+        default:
+            argumentError("wall-only measurement is incompatible with \(argument)")
+        }
+    }
+    let reps = mtpMultirowRequestedReps ?? 5
+    guard (5 ... 10).contains(reps) else {
+        argumentError("wall-only --mtp-multirow-reps must be between 5 and 10")
+    }
 }
 
 enum GLMBenchFixtureError: Error {
@@ -133,7 +208,12 @@ let profile = args.contains("--profile")
 let syncEach = args.contains("--sync")
 
 Memory.cacheLimit = 4096 << 20
-if ["--census", "--module-census", "--gpu-profile", "--batch-profile", "--mtp-census", "--mtp-multirow-profile"].contains(where: CommandLine.arguments.contains) { DispatchCensus.install() }
+let censusModes = ["--census", "--module-census", "--gpu-profile", "--batch-profile", "--mtp-census"]
+if censusModes.contains(where: args.contains)
+    || (mtpMultirowProfileRequested && mtpMultirowProfileMode == .census)
+{
+    DispatchCensus.install()
+}
 
 if args.contains("--qmv-batch-sweep") {
     // MLX qmv at M = 1 and M = V vs glm5NextQMVBatch(V), 20 independent calls per eval.
@@ -362,12 +442,12 @@ func glm5NextBatchedCaches(_ rows: [[KVCache]], packedMTP: Bool = false) throws 
     }
 }
 
-if args.contains("--mtp-multirow-profile") {
+if mtpMultirowProfileRequested {
     // Source diagnostic only: this does not model acceptance, drafter cost or
     // scheduler throughput. It isolates the target's exact B=4,L=2 packed
     // verification against B=4,L=1 ordinary decode from the same row caches.
     let B = 4, L = 2
-    let reps = min(10, max(1, opt("--mtp-multirow-reps", 5)))
+    let reps = min(10, max(1, mtpMultirowRequestedReps ?? 5))
     let censusReps = min(3, reps)
     let sampler = GenerateParameters(temperature: 0).sampler()
     var rowCaches = [[KVCache]]()
@@ -403,10 +483,19 @@ if args.contains("--mtp-multirow-profile") {
     let verifyInput = MLXArray(verifyTokens, [B, L])
     let rowMaps = try glm5NextPackedRowMaps(rowCaches, inputCount: L)
     let maxOps = ProcessInfo.processInfo.environment["MLX_MAX_OPS_PER_BUFFER"] ?? "unset"
-    print(String(
-        format: "mtp-multirow prefill rows=%d prompt=%d seconds=%.1f reps=%d census_reps=%d",
-        B, promptLen, Date().timeIntervalSince(prefillStart), reps, censusReps))
-    print("mtp-multirow diagnostic instrumentation=dispatch_census mlx_max_ops_per_buffer=\(maxOps)")
+    if mtpMultirowProfileMode == .census {
+        print(String(
+            format: "mtp-multirow prefill rows=%d prompt=%d seconds=%.1f reps=%d census_reps=%d",
+            B, promptLen, Date().timeIntervalSince(prefillStart), reps, censusReps))
+        print("mtp-multirow diagnostic instrumentation=dispatch_census mlx_max_ops_per_buffer=\(maxOps)")
+        print("mtp-multirow measurement=full_synchronous_facade")
+    } else {
+        print(String(
+            format: "mtp-multirow prefill rows=%d prompt=%d seconds=%.1f reps=%d",
+            B, promptLen, Date().timeIntervalSince(prefillStart), reps))
+        print("mtp-multirow diagnostic instrumentation=none")
+        print("mtp-multirow measurement=full_synchronous_facade shared_candidate_active=unobserved")
+    }
     print("mtp-multirow qualification=false private_checkpoint_transactions=not_compared")
     fflush(stdout)
 
@@ -525,6 +614,14 @@ if args.contains("--mtp-multirow-profile") {
             times.append(Date().timeIntervalSince(start) * 1000)
         }
         times.sort()
+        if mtpMultirowProfileMode == .wallOnly {
+            print(String(
+                format: "mtp-multirow full_synchronous_facade %@ requested_shared=%@ shared_candidate_active=unobserved ms_median=%.2f min=%.2f max=%.2f",
+                label, shared.description,
+                times[times.count / 2], times[0], times[times.count - 1]))
+            return
+        }
+
         DispatchCensus.reset()
         DispatchCensus.enabled = true
         for _ in 0 ..< censusReps {
@@ -541,6 +638,8 @@ if args.contains("--mtp-multirow-profile") {
                     || name.contains("glm5next_moe_down_shared") ? count : 0)
         }
         let candidateActive = shared && sharedDispatches > 0
+        let gpuBusyMS = DispatchCensus.busyPerStep(steps: censusReps) * 1000
+        let commandBuffersPerStep = Double(DispatchCensus.intervals.count) / Double(censusReps)
         print(String(
             format: "mtp-multirow wall_instrumented %@ requested_shared=%@ shared_candidate_active=%@ ms_median=%.2f min=%.2f max=%.2f",
             label, shared.description, candidateActive.description,
@@ -548,7 +647,10 @@ if args.contains("--mtp-multirow-profile") {
         if shared {
             print("mtp-multirow shared_candidate_dispatches=\(sharedDispatches)")
         }
-        print("mtp-multirow census \(label) shared=\(shared):")
+        print(String(
+            format: "mtp-multirow census_busy %@ shared=%@ gpu_busy_ms_per_step=%.2f command_buffers_per_step=%.1f attribution=all_command_buffer_intervals",
+            label, shared.description, gpuBusyMS, commandBuffersPerStep))
+        print("mtp-multirow census \(label) shared=\(shared) per_kernel_attribution=single_kernel_command_buffers_only:")
         DispatchCensus.gpuReport(steps: censusReps)
     }
     try timed("ordinary_B4_L1", shared: false, verify: false)
