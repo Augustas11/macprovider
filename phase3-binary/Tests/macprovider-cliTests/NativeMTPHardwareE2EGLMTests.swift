@@ -130,6 +130,83 @@ final class NativeMTPHardwareE2EGLMTests: XCTestCase {
         XCTAssertFalse(composition.loadGateExpected)
     }
 
+    func testFourRowLabOverrideKeepsGeneratedGLMEnvelopeAtSignedBoundOne() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("native-mtp-glm-envelope-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let target = root.appendingPathComponent("target", isDirectory: true)
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        try GLM5NextPagedKVWiringTests.config().write(to: target.appendingPathComponent("config.json"))
+
+        let runner = NativeMTPHardwareE2ERunner(
+            rootPath: root.path,
+            modelID: "zai-org/glm-5.3-flash",
+            maxBatch: 4,
+            maxNativeActiveRows: 4,
+            maxPromptTokens: 4096
+        )
+        XCTAssertEqual(runner.family, .glm5Next)
+        XCTAssertEqual(runner.signedMaxNativeActiveRows, 1)
+
+        let envelope = try runner.releaseEnvelopeData(
+            maxContextTokens: 4096,
+            machine: MachineFingerprint(
+                ramGB: 256,
+                chip: "Apple M3 Ultra",
+                osVersion: "macOS test",
+                binaryVersion: "test"
+            ),
+            targetSHA: String(repeating: "1", count: 64),
+            tokenizerSHA: String(repeating: "2", count: 64),
+            manifestSHA: String(repeating: "3", count: 64),
+            artifactManifestSHA: String(repeating: "4", count: 64),
+            challengeBankSHA: String(repeating: "5", count: 64),
+            signerKeyID: "native-mtp-hardware-e2e",
+            affineRepresentation: NativeMTPAffineRepresentation(
+                manifestBytes: Data("{}".utf8),
+                manifestSHA256: String(repeating: "6", count: 64),
+                perLayerExceptions: [],
+                unquantizedExceptions: [],
+                groupSize: 64
+            )
+        )
+        let document = try XCTUnwrap(JSONSerialization.jsonObject(with: envelope) as? [String: Any])
+        let entries = try XCTUnwrap(document["entries"] as? [[String: Any]])
+        XCTAssertEqual(entries.count, 1)
+        XCTAssertEqual(entries[0]["mtp_family_adapter"] as? String, "glm5_next_mtp_v1")
+        XCTAssertEqual(entries[0]["qualified_slots"] as? Int, 4)
+        XCTAssertEqual(entries[0]["max_native_active_rows"] as? Int, 1)
+    }
+
+    func testServePathRefusesUnsignedFourRowLabOverride() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("native-mtp-glm-serve-bound-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let target = root.appendingPathComponent("target", isDirectory: true)
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        try GLM5NextPagedKVWiringTests.config().write(to: target.appendingPathComponent("config.json"))
+
+        let exploratory = NativeMTPHardwareE2ERunner(
+            rootPath: root.path,
+            modelID: "zai-org/glm-5.3-flash",
+            maxBatch: 4,
+            maxNativeActiveRows: 4,
+            verifyServePath: true
+        )
+        XCTAssertThrowsError(try exploratory.validateServePathNativeActiveRowBound(signed: 1)) { error in
+            XCTAssertTrue(String(describing: error).contains("requires lab max_native_active_rows 4 to equal signed bound 1"))
+        }
+
+        let signed = NativeMTPHardwareE2ERunner(
+            rootPath: root.path,
+            modelID: "zai-org/glm-5.3-flash",
+            maxBatch: 4,
+            maxNativeActiveRows: 1,
+            verifyServePath: true
+        )
+        XCTAssertNoThrow(try signed.validateServePathNativeActiveRowBound(signed: 1))
+    }
+
     func testThroughputPhaseIsOptInAndBounded() throws {
         XCTAssertEqual(try NativeMTPHardwareE2ECommand.parse([]).throughputTokens, 0)
         XCTAssertEqual(

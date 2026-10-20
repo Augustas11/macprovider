@@ -435,6 +435,10 @@ final class NativeMTPJourneyRunner {
             "tokenizer_sha256": fixture.tokenizerSHA256,
             "mtp_manifest_sha256": fixture.manifestSHA256,
             "qualified_slots": qualifiedSlots,
+            "qualification": false,
+            "signed_max_native_active_rows": fixture.admission.maxNativeActiveRows,
+            "lab_max_native_active_rows": maxNativeActiveRows,
+            // Backward-compatible alias for the lab runtime bound.
             "max_native_active_rows": maxNativeActiveRows,
             "max_prompt_tokens": maxPromptTokens,
             "request_feature_profile": family.requestFeatureProfile,

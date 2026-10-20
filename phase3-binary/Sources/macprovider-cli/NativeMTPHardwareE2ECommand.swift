@@ -265,6 +265,13 @@ final class NativeMTPHardwareE2ERunner {
     /// unrecognized target fails the family check in the fixture load.
     let family: NativeMTPHardwareE2EFamily
 
+    /// The ephemeral sidecar still obeys the family's production signing
+    /// bound. A wider value requested by an exploratory lab command is injected
+    /// only into the lab runtime capability; it never becomes a signed claim.
+    var signedMaxNativeActiveRows: Int {
+        family.signedMaxNativeActiveRows ?? maxNativeActiveRows
+    }
+
     static func sizedMaxPhysicalBlocks(slots: Int, promptTokens: Int, outputTokens: Int) -> Int {
         let boundedSlots = max(1, slots)
         let boundedPrompt = max(1, promptTokens)
@@ -460,7 +467,7 @@ final class NativeMTPHardwareE2ERunner {
             String(decoding: try JSONSerialization.data(withJSONObject: $0, options: [.sortedKeys]), as: UTF8.self)
         } ?? "null"
         let json = """
-        {"schema":"macprovider.native-mtp-hardware-e2e-result.v1","status":"pass","evidence_class":"correctness_only","model_id":"\(modelID)","model_family":"\(family.modelFamily)","family_adapter":"\(family.familyAdapter)","target_sha256":"\(targetIdentity.digest)","mtp_sha256":"\(mtpIdentity.digest)","admissions":\(totalAdmissions),"max_observed_batch_depth":\(maxDepth),"serve_path_verified":\(verifyServePath),"parity_proposed":\(parityCounters.proposedTokens),"parity_accepted":\(parityCounters.acceptedTokens),"parity_rejected":\(parityCounters.rejectedTokens),"lab_throughput":\(labThroughputJSON)}
+        {"schema":"macprovider.native-mtp-hardware-e2e-result.v1","status":"pass","evidence_class":"correctness_only","qualification":false,"model_id":"\(modelID)","model_family":"\(family.modelFamily)","family_adapter":"\(family.familyAdapter)","target_sha256":"\(targetIdentity.digest)","mtp_sha256":"\(mtpIdentity.digest)","signed_max_native_active_rows":\(fixture.admission.maxNativeActiveRows),"lab_max_native_active_rows":\(maxNativeActiveRows),"admissions":\(totalAdmissions),"max_observed_batch_depth":\(maxDepth),"serve_path_verified":\(verifyServePath),"parity_proposed":\(parityCounters.proposedTokens),"parity_accepted":\(parityCounters.acceptedTokens),"parity_rejected":\(parityCounters.rejectedTokens),"lab_throughput":\(labThroughputJSON)}
         """
         return NativeMTPHardwareE2EReport(
             targetSHA256: targetIdentity.digest,
@@ -504,6 +511,7 @@ final class NativeMTPHardwareE2ERunner {
         try require(admission.mtpArtifactSHA256 == mtpIdentity.digest, "MTP digest admission mismatch")
         try require(admission.maxProposalDepth == 1, "unexpected proposal depth")
         try require(admission.selfTestChallengeBank.challengeBankPath == "native-mtp-selftest-bank.json", "bad self-test bank")
+        try validateServePathNativeActiveRowBound(signed: admission.maxNativeActiveRows)
         let capability = NativeMTPCapability(
             admitted: true,
             revoked: false,
@@ -520,7 +528,9 @@ final class NativeMTPHardwareE2ERunner {
             completeWindowBytesByDepth: admission.completeWindowBytesByDepth,
             family: admission.familyAdapter,
             throughputDeltaPPM: admission.throughputDeltaPPM,
-            maximumNativeActiveRows: admission.maxNativeActiveRows,
+            // Explicit lab-only exploratory override. The signed admission
+            // capability remains unchanged and retains production provenance.
+            maximumNativeActiveRows: maxNativeActiveRows,
             supportsSampling: admission.supportsSampling
         )
         let servePathLoad: ModelRuntime.NativeMTPHardwareE2EServePathLoad?
@@ -554,6 +564,14 @@ final class NativeMTPHardwareE2ERunner {
             ordinaryAdmissionRecorder: ordinaryAdmissionRecorder,
             nativeAdmissionRecorder: nativeAdmissionRecorder
         )
+    }
+
+    func validateServePathNativeActiveRowBound(signed: Int) throws {
+        guard !verifyServePath || maxNativeActiveRows == signed else {
+            throw NativeMTPHardwareE2EError.assertionFailed(
+                "serve-path verification requires lab max_native_active_rows \(maxNativeActiveRows) to equal signed bound \(signed)"
+            )
+        }
     }
 
     /// Runs the production serve-path admission loader over the same signed
@@ -1123,7 +1141,7 @@ final class NativeMTPHardwareE2ERunner {
         ])
     }
 
-    private func releaseEnvelopeData(
+    func releaseEnvelopeData(
         maxContextTokens: Int,
         machine: MachineFingerprint,
         targetSHA: String,
@@ -1157,7 +1175,7 @@ final class NativeMTPHardwareE2ERunner {
             "hardware_class": NativeMTPAdmissionSidecar.canonicalHardwareClass(machine.chip),
             "ram_bytes": machine.ramGB * 1_073_741_824,
             "qualified_slots": maxBatch,
-            "max_native_active_rows": maxNativeActiveRows,
+            "max_native_active_rows": signedMaxNativeActiveRows,
             // A Qwen3.5 lab tuple qualifies sampled rows too (target-sample
             // exact match), so temperature cells measure the native path; a
             // glm5_next tuple is greedy only.
