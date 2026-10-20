@@ -18,7 +18,7 @@ enum ModelsPresentation {
         case .current: return String(localized: "Current", comment: "Model feature section")
         case .ready: return String(localized: "Ready to switch", comment: "Model feature section")
         case .networkCatalog: return String(localized: "Network catalog", comment: "Model feature section")
-        case .needsPreparation: return String(localized: "Needs preparation", comment: "Model feature section")
+        case .needsPreparation: return String(localized: "Not downloaded", comment: "Model feature section")
         case .blocked: return String(localized: "Blocked", comment: "Model feature section")
         }
     }
@@ -36,15 +36,103 @@ enum ModelsPresentation {
     }
 
     static func matches(_ row: MalibuModelRow, _ needle: String) -> Bool {
-        [row.displayID, row.catalogVerifiedModelKey, row.id]
+        [row.displayID, row.catalogVerifiedModelKey, row.id, title(row)]
             .compactMap { $0 }
             .contains { $0.localizedCaseInsensitiveContains(needle) }
     }
 
-    /// The name shown for a row: the catalog-verified key when the coordinator
-    /// verified it, otherwise the provider-reported name.
+    /// The exact identifier behind a row: the catalog-verified key when the
+    /// coordinator verified it, otherwise the provider-reported name.
     static func name(_ row: MalibuModelRow) -> String {
         ShellText.display(row.catalogVerifiedModelKey ?? row.displayID)
+    }
+
+    /// The readable title for a row (SPEC-025-R004), read from the same
+    /// identifier as `name`. Display text only, not a verified attribute.
+    static func title(_ row: MalibuModelRow) -> String {
+        readableTitle(row.catalogVerifiedModelKey ?? row.displayID)
+    }
+
+    /// "mlx-community/Qwen3-8B-4bit" -> "Qwen3 8B · 4-bit". The family keeps
+    /// its own spelling; size tokens read "8B" or "A3B"; quantization tokens
+    /// move after a middle dot; the "mlx" marker is dropped. Falls back to the
+    /// last path component when nothing is left.
+    static func readableTitle(_ identifier: String) -> String {
+        let base = String(ShellText.display(identifier).split(separator: "/").last ?? "")
+        let tokens = base.split(whereSeparator: { $0 == "-" || $0 == "_" }).map(String.init)
+        var words: [String] = []
+        var quantization: [String] = []
+        for token in tokens {
+            let lower = token.lowercased()
+            if lower == "mlx" { continue }
+            if let bits = lower.wholeMatch(of: /(\d+)bits?/) {
+                quantization.append("\(bits.1)-bit")
+            } else if lower.wholeMatch(of: /(bf16|fp16|f16|fp8|fp32|f32|mxfp4|nvfp4|dwq|awq|gptq|int4|int8|q\d[a-z0-9_]*)/) != nil {
+                quantization.append(token.uppercased())
+            } else if lower.wholeMatch(of: /a?\d+(\.\d+)?[bm]/) != nil {
+                words.append(token.uppercased())
+            } else {
+                words.append(token)
+            }
+        }
+        // Join the family (the words before the first size) with "-" so
+        // "gpt-oss" and "Llama-3.2" keep their spelling.
+        let firstSize = words.firstIndex { $0.wholeMatch(of: /A?\d+(\.\d+)?[BM]/) != nil }
+        var parts: [String] = []
+        if let firstSize, firstSize > 0 {
+            parts.append(words[..<firstSize].joined(separator: "-"))
+            parts.append(contentsOf: words[firstSize...])
+        } else if firstSize == nil {
+            if !words.isEmpty { parts.append(words.joined(separator: "-")) }
+        } else {
+            parts.append(contentsOf: words)
+        }
+        var title = parts.joined(separator: " ")
+        if !quantization.isEmpty {
+            title += (title.isEmpty ? "" : " · ") + quantization.joined(separator: " ")
+        }
+        return title.isEmpty ? base : title
+    }
+
+    static func downloadSizeText(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+
+    /// The Download confirmation (SPEC-044-R014-5).
+    static func downloadConfirmationTitle(_ row: MalibuModelRow) -> String {
+        String(localized: "Download \(title(row))?", comment: "Model download confirmation title")
+    }
+
+    static func downloadConfirmationMessage(_ row: MalibuModelRow) -> String {
+        let size = row.downloadTransaction.map { downloadSizeText($0.estimatedBytes) }
+            ?? String(localized: "an unknown amount of data", comment: "Model download size unavailable")
+        return String(localized: "Malibu downloads \(size) for catalog key \(ShellText.display(row.modelKey)) (\(ShellText.display(row.displayID))) to this Mac and verifies the files against the signed catalog. Downloading does not change the model this Mac serves, does not offer this model to the network, and does not start earning.", comment: "Model download confirmation message")
+    }
+
+    /// One progress line for a running download.
+    static func downloadProgressText(_ state: ModelManagementStore.DownloadState) -> String {
+        switch state.phase {
+        case .starting:
+            return String(localized: "Starting the download…", comment: "Model download progress")
+        case .cancelling:
+            return String(localized: "Cancelling the download…", comment: "Model download progress")
+        case .finishing:
+            return String(localized: "Download finished. Checking the model list…", comment: "Model download progress")
+        case .delayed:
+            return String(localized: "Waiting for the provider software to report progress…", comment: "Model download delayed")
+        case .running:
+            let done = state.bytesCompleted.map(downloadSizeText) ?? downloadSizeText(0)
+            if let expected = state.bytesExpected, expected > 0 {
+                return String(localized: "Downloaded \(done) of \(downloadSizeText(expected))", comment: "Model download progress with total")
+            }
+            return String(localized: "Downloaded \(done)", comment: "Model download progress")
+        }
+    }
+
+    static func downloadFraction(_ state: ModelManagementStore.DownloadState) -> Double? {
+        guard state.phase == .running, let done = state.bytesCompleted,
+              let expected = state.bytesExpected, expected > 0 else { return nil }
+        return min(1, max(0, Double(done) / Double(expected)))
     }
 
     static func sizeText(_ row: MalibuModelRow) -> String {
@@ -154,7 +242,7 @@ enum ModelsPresentation {
         for section in sections(rows, filter: filter) {
             strings.append(section.title)
             for row in section.rows {
-                var line = [name(row), sizeText(row), fitText(row), statusText(row), rateText(row)]
+                var line = [title(row), name(row), sizeText(row), fitText(row), statusText(row), rateText(row)]
                     .joined(separator: " | ")
                 if let reason = reason(row) { line += " — " + reason }
                 strings.append(line)
@@ -179,6 +267,7 @@ struct ModelsScreen: View {
     @State private var proposeRow: MalibuModelRow?
     @State private var proposePoolID = ""
     @State private var detailRow: MalibuModelRow?
+    @State private var pendingDownload: MalibuModelRow?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -223,6 +312,18 @@ struct ModelsScreen: View {
         } message: {
             Text(String(localized: "The coordinator stops routing to this model, in the network and in any Trusted Pool, until you offer it again.", comment: "BYOM withdraw confirmation message"))
         }
+        .confirmationDialog(
+            pendingDownload.map(ModelsPresentation.downloadConfirmationTitle) ?? "",
+            isPresented: Binding(get: { pendingDownload != nil }, set: { if !$0 { pendingDownload = nil } })
+        ) {
+            Button(String(localized: "Download", comment: "Model download confirm action")) {
+                if let row = pendingDownload { Task { await store.startDownload(row) } }
+                pendingDownload = nil
+            }
+            Button(String(localized: "Cancel", comment: "Model download confirmation cancel"), role: .cancel) { pendingDownload = nil }
+        } message: {
+            Text(pendingDownload.map(ModelsPresentation.downloadConfirmationMessage) ?? "")
+        }
         .sheet(item: $proposeRow) { row in
             PoolProposeSheet(row: row, poolID: $proposePoolID) {
                 proposeRow = nil
@@ -252,6 +353,7 @@ struct ModelsScreen: View {
                     .frame(maxWidth: 200)
                     .accessibilityIdentifier("malibu.models.filter")
             }
+            ModelDownloadBanner(store: store)
             HStack(spacing: 8) {
                 Text(ModelsPresentation.switchingLine(listState: store.listState, warmSwapAvailable: store.warmSwapAvailable))
                     .font(.callout)
@@ -339,7 +441,7 @@ struct ModelsScreen: View {
             Text(String(localized: "Fit", comment: "Models column")).frame(width: 90, alignment: .leading)
             Text(String(localized: "Status", comment: "Models column")).frame(width: 120, alignment: .leading)
             Text(String(localized: "Rate / 1M out", comment: "Models column")).frame(width: 100, alignment: .trailing)
-            Text(String(localized: "Action", comment: "Models column")).frame(width: 150, alignment: .trailing)
+            Text(String(localized: "Action", comment: "Models column")).frame(width: 170, alignment: .trailing)
         }
         .font(.caption.weight(.semibold))
         .foregroundStyle(.secondary)
@@ -358,13 +460,16 @@ struct ModelsScreen: View {
                             .foregroundStyle(.green)
                             .accessibilityHidden(true)
                     }
-                    Text(ModelsPresentation.name(row))
-                        .font(.body.monospaced())
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .textSelection(.enabled)
+                    Text(ModelsPresentation.title(row))
+                        .font(.body.weight(.medium))
+                        .fixedSize(horizontal: false, vertical: true)
                         .help(ShellText.display(row.displayID))
                 }
+                Text(ModelsPresentation.name(row))
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
                 if let reason = ModelsPresentation.reason(row) {
                     Text(reason)
                         .font(.caption)
@@ -396,7 +501,7 @@ struct ModelsScreen: View {
             .accessibilityLabel(Text(row.economicsAccessibilityLabel
                 ?? String(localized: "No network catalog rate", comment: "Rate column accessibility label without a rate")))
             actionCell(row)
-                .frame(width: 150, alignment: .trailing)
+                .frame(width: 170, alignment: .trailing)
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 8)
@@ -410,6 +515,7 @@ struct ModelsScreen: View {
                 row: row,
                 enabled: store.canPerformModelAction,
                 byomEnabled: store.canPerformBYOMAction,
+                downloadEnabled: store.canStartDownload,
                 poolEligibilityLine: row.poolEligibilityDisplayLine(binding: store.poolBindings[row.id]),
                 onAction: { detailRow = nil; start(row) },
                 onWithdraw: { detailRow = nil; pendingWithdraw = row },
@@ -423,6 +529,11 @@ struct ModelsScreen: View {
     @ViewBuilder
     private func actionCell(_ row: MalibuModelRow) -> some View {
         HStack(spacing: 6) {
+            // A running download keeps its progress and Cancel even if a
+            // refresh or a switch changed the row's action meanwhile.
+            if store.download?.modelKey == row.modelKey, row.action != .download {
+                ModelDownloadControl(store: store, row: row, showsSize: true) {}
+            }
             switch row.action {
             case .switchModel:
                 Button(String(localized: "Switch", comment: "Model feature action")) { start(row) }
@@ -432,6 +543,8 @@ struct ModelsScreen: View {
                 Button(String(localized: "Preflight", comment: "Short BYOM activation action")) { start(row) }
                     .disabled(!store.canPerformModelAction)
                     .accessibilityLabel(Text(String(localized: "Evaluate \(ShellText.display(row.displayID))", comment: "Evaluation accessibility label")))
+            case .download:
+                ModelDownloadControl(store: store, row: row, showsSize: true) { pendingDownload = row }
             case .none:
                 EmptyView()
             }
@@ -453,6 +566,8 @@ struct ModelsScreen: View {
             switchRow = row
         case .evaluate:
             pendingEvaluate = row
+        case .download:
+            pendingDownload = row
         case .none:
             break
         }
@@ -519,13 +634,125 @@ extension ModelsPresentation {
         case "withdraw": return String(localized: "Withdraw", comment: "Model history operation")
         case "propose": return String(localized: "Propose to pool", comment: "Model history operation")
         case "evaluate": return String(localized: "Offer", comment: "Model history operation")
+        case "download": return String(localized: "Download", comment: "Model history operation")
         default: return String(localized: "Switch", comment: "Model history operation")
         }
     }
 
     static func outcomeLabel(_ raw: String) -> String {
-        raw == "failed"
-            ? String(localized: "Failed", comment: "Model history outcome")
-            : String(localized: "Success", comment: "Model history outcome")
+        switch raw {
+        case "failed": return String(localized: "Failed", comment: "Model history outcome")
+        case "cancelled": return String(localized: "Cancelled", comment: "Model history outcome")
+        default: return String(localized: "Success", comment: "Model history outcome")
+        }
+    }
+}
+
+/// The Download button with its size, or the running download's progress and
+/// Cancel (SPEC-044-R014-5). Shared by Models and Discover.
+struct ModelDownloadControl: View {
+    @ObservedObject var store: ModelManagementStore
+    let row: MalibuModelRow
+    var showsSize = false
+    let onDownload: () -> Void
+
+    var body: some View {
+        if let download = store.download, download.modelKey == row.modelKey {
+            VStack(alignment: .trailing, spacing: 3) {
+                if let fraction = ModelsPresentation.downloadFraction(download) {
+                    ProgressView(value: fraction).frame(width: 120)
+                } else {
+                    ProgressView().controlSize(.small)
+                }
+                Text(ModelsPresentation.downloadProgressText(download))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .accessibilityAddTraits(.updatesFrequently)
+                if download.phase != .finishing {
+                    Button(String(localized: "Cancel", comment: "Cancel a model download")) { store.cancelDownload() }
+                        .disabled(download.phase == .cancelling)
+                        .accessibilityLabel(Text(String(localized: "Cancel downloading \(ModelsPresentation.title(row))", comment: "Cancel download accessibility label")))
+                }
+            }
+        } else {
+            downloadButton
+        }
+    }
+
+    private var downloadButton: some View {
+        Button(buttonTitle, action: onDownload)
+            .disabled(!store.canStartDownload)
+            .help(store.download == nil
+                  ? ModelsPresentation.downloadConfirmationMessage(row)
+                  : String(localized: "Another download is running.", comment: "Download disabled while another runs"))
+            .accessibilityLabel(Text(String(localized: "Download \(ModelsPresentation.title(row))", comment: "Download accessibility label")))
+    }
+
+    private var buttonTitle: String {
+        guard showsSize, let bytes = row.downloadTransaction?.estimatedBytes else {
+            return String(localized: "Download", comment: "Model download action")
+        }
+        return String(localized: "Download \(ModelsPresentation.downloadSizeText(bytes))", comment: "Model download action with size")
+    }
+}
+
+/// The running download's title, progress and Cancel, then its outcome, shown
+/// above the list whatever the projection holds: a refresh, an expiry or a row
+/// that turned into a local candidate never hides Cancel or the result
+/// (SPEC-044-R014-5).
+struct ModelDownloadBanner: View {
+    @ObservedObject var store: ModelManagementStore
+
+    var body: some View {
+        if let download = store.download {
+            HStack(spacing: 10) {
+                Image(systemName: "arrow.down.circle")
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(String(localized: "Downloading \(download.title)", comment: "Model download banner title"))
+                        .font(.callout.weight(.medium))
+                    Text(ModelsPresentation.downloadProgressText(download))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityAddTraits(.updatesFrequently)
+                }
+                if let fraction = ModelsPresentation.downloadFraction(download) {
+                    ProgressView(value: fraction).frame(maxWidth: 160)
+                } else {
+                    ProgressView().controlSize(.small)
+                }
+                Spacer(minLength: 0)
+                if download.phase != .finishing {
+                    Button(String(localized: "Cancel", comment: "Cancel a model download")) { store.cancelDownload() }
+                        .disabled(download.phase == .cancelling)
+                        .accessibilityLabel(Text(String(localized: "Cancel downloading \(download.title)", comment: "Cancel download accessibility label")))
+                }
+            }
+            .padding(8)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.accentColor.opacity(0.08)))
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("malibu.models.download")
+        } else if let result = store.downloadResult {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Image(systemName: result.succeeded ? "checkmark.circle" : "exclamationmark.circle")
+                    .foregroundStyle(result.succeeded ? Color.green : Color.orange)
+                    .accessibilityHidden(true)
+                Text(result.message)
+                    .font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                Spacer(minLength: 0)
+                if result.needsRefresh {
+                    Button(String(localized: "Refresh", comment: "Refresh the model list after a download")) {
+                        Task { await store.refreshAfterDownload() }
+                    }
+                }
+                Button(String(localized: "Dismiss", comment: "Dismiss a download result")) { store.dismissDownloadResult() }
+            }
+            .padding(8)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.gray.opacity(0.08)))
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("malibu.models.download-result")
+        }
     }
 }

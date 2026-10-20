@@ -1,6 +1,20 @@
 # SPEC-025 — Native Mac App (signed `.dmg`, native Mac app with menu-bar presence)
 
-Status: DRAFT v0.34.1 · Owner: @Augustas11 · Target: 2026 Q3
+Status: DRAFT v0.35.0 · Owner: @Augustas11 · Target: 2026 Q3
+
+**Change log v0.35.0 (2026-10-20, Related: #2059):**
+Models and Discover name each model by a readable title (family, size and
+quantization read from the model identifier) with the exact identifier as a
+caption, without middle truncation (R004). A row with a SPEC-044-R014
+download offers Download with its size and a confirmation, the
+`Needs preparation` section reads **Not downloaded**, and Discover lists every
+signed catalog model with fit inline and the first row selected (R006).
+Connected apps shorten the R012 disclosures: one **Not private** banner that
+says these apps' requests are not encrypted by Malibu, so private mode does
+not apply, and that private requests work through Malibu Chat; one required
+buyer-key sentence with the rest behind Details. The gateway model list loads
+only with a saved buyer key, loads after saving one, shows its errors beside
+the button, and says when no models are served.
 
 **Change log v0.34.1 (2026-10-19, Related: #2054):**
 Local Chat marks its loopback requests `X-MacProvider-Origin: local-app`, the
@@ -734,9 +748,16 @@ projections (SPEC-044-R004), colour never the only signal.
   swap is not running on this Mac.", or "Switching unavailable right now."
   with Retry; available and off follow whether the provider runs with warm
   swap, not whether some row currently offers an action. A footer MUST state that switching pauses new customer work
-  while the new model loads (HTTP 503) and never downloads. Quantization,
-  architecture, parameter count and capability columns or badges MUST NOT be
-  shown until the signed catalog row and the SPEC-044 projection carry them.
+  while the new model loads (HTTP 503) and never downloads. Each row MUST
+  name the model by a readable title read from its identifier (family, size,
+  and quantization tokens such as "Qwen3 8B · 4-bit") with the exact
+  identifier as a selectable caption, never truncated in the middle; the
+  title is display text, not a verified attribute. A row with a SPEC-044-R014
+  `prepare_model` transaction MUST offer Download with the download size and
+  the R014 confirmation, progress and Cancel; the `Needs preparation` section
+  reads **Not downloaded**. Quantization, architecture, parameter count and
+  capability columns or badges MUST NOT be shown until the signed catalog row
+  and the SPEC-044 projection carry them.
 - **SPEC-025-R005 Switch confirmation and progress.** Before a switch or
   revert, Malibu MUST state: the from and to models; that customers get a
   "provider loading" response (HTTP 503) while the new model loads and
@@ -750,9 +771,11 @@ projections (SPEC-044-R004), colour never the only signal.
   the new model; a failure states that the Mac keeps serving the model it
   reports. Closing the sheet does not cancel the switch.
 - **SPEC-025-R006 Discover.** Discover MUST follow SPEC-044-R013, with the
-  fit filter on by default. The recommendation (Adopt, Not now, Stop) is
+  fit filter on by default, every signed catalog model listed under its
+  readable R004 title with its fit inline, the first visible row selected, and
+  Download offered as in R004. The recommendation (Adopt, Not now, Stop) is
   pinned above the list and shown only when it names a row Discover lists, so
-  its rates never appear for a model outside the trusted catalog. A `models browse` search runs only on an explicit
+  its rates never appear for a model outside the signed catalog. A `models browse` search runs only on an explicit
   provider search, in its own subprocess bounded to 20 s, with the search term
   limited to letters, digits, space, dot, dash and underscore, never starting
   with a dash.
@@ -849,9 +872,17 @@ projections (SPEC-044-R004), colour never the only signal.
   unchanged. A connection test MUST exercise the selected API/model with
   bounded cost/time/response size and reject credential-bearing redirects;
   a models-list fetch alone is not a connection test. Show **Not private**
-  persistently before setup and on gateway status: ordinary gateway requests
-  are visible to the gateway and serving provider, and Cursor can additionally
-  transmit through Cursor's servers. Do not claim relay-blind Responses or
+  persistently before setup and on gateway status, saying that these apps
+  send requests Malibu does not encrypt, so the network's private mode does
+  not apply and the gateway and serving provider can read them, and that
+  private requests work through Malibu Chat; Cursor can additionally
+  transmit through Cursor's servers. The buyer-key disclosure above is one
+  persistently visible sentence that names repository configuration and
+  agent commands and recommends a dedicated, spend-limited key; the handoff
+  mechanics, managed-profile scope and override caveats MAY sit behind a
+  Details disclosure. Loading gateway models MUST require a saved buyer key,
+  MUST run after a key is saved, MUST show its error beside the load action,
+  and MUST say when the gateway serves no models. Do not claim relay-blind Responses or
   Messages. A gateway test is not evidence that an external client works.
   The coordinator's authoritative no-self-routing contract applies to buyer
   requests independently of any client configuration or exclusion hint.

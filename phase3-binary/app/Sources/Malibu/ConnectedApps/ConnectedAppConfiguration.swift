@@ -50,10 +50,15 @@ enum ConnectedAppsError: Error, LocalizedError {
 /// Codex and Crush use isolated managed profiles, leaving arbitrary TOML/Bash intact.
 enum ConnectedAppConfiguration {
     static let gateway = URL(string: "https://api.malibu.tech/v1")!
-    static let privacy = "Not private — prompts and responses are visible to the Malibu gateway and the serving provider. Buyer usage is billed to your account."
+    /// SPEC-025-R012: these clients send ordinary gateway requests, which the
+    /// SPEC-049 private mode does not cover; local Malibu Chat never leaves
+    /// this Mac.
+    static let privacy = "Not private: these apps send requests that Malibu does not encrypt, so the network's private mode doesn't apply and the Malibu gateway and the serving provider can read prompts and responses. For private requests, use Malibu Chat. Usage is billed to your buyer account."
     /// The key is in the launched CLI's environment, so anything that CLI
     /// loads or runs can read it. This is the honest scope of "injection".
-    static let keyExposure = "The launched CLI receives your buyer key in its environment. Repository configuration the client loads, and commands its agent runs, can read the key and send it elsewhere. Use a dedicated, spend-limited buyer key."
+    static let keyExposure = "Use a dedicated, spend-limited buyer key: the launched app, its repository configuration and the commands its agent runs can read it."
+    /// The handoff mechanics and profile scope, behind Details.
+    static let setupDetails = "Malibu keeps the key in Keychain and hands it to each Launch through a private one-time file; the launcher puts it in the app's environment, where anything the app loads or runs can read it and send it elsewhere. Setup writes a managed profile and a Terminal launcher for the command-line app, so always launch from here. Project settings or managed policy can override the profile; check the provider and model inside the app. Desktop apps are not set up."
     static let crushProjectConfigWarning = "Crush also loads configuration from the directory you launch it in (for example ./.crushrc) and has no switch to ignore it. A repository's Crush configuration can redirect requests or read your buyer key. Launch Crush only in repositories you trust."
     static let cursorDisclosure = "Cursor also sends your key and prompts through Cursor's servers. BYOK covers supported chat models; Tab uses Cursor models. Verify custom endpoint support in your installed Cursor version."
 

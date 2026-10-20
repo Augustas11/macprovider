@@ -11,14 +11,34 @@ final class ConnectedAppsStore: ObservableObject {
     @Published var status = "Not configured. Client compatibility has not been tested."
     @Published var busy = false
     @Published var endpointTested: String?
+    /// SPEC-025-R012: the model list needs a saved key; its result or error
+    /// is shown beside the load action.
+    @Published private(set) var hasBuyerKey: Bool
+    @Published private(set) var modelsMessage: String?
+    @Published private(set) var modelsLoadFailed = false
+    private let keyExists: () -> Bool
     private var pending: [(ConnectedConfigPreview, String, Bool)] = []
     private var operation: Task<Void, Never>?
     private let home: URL
     private let root: URL
     private let transactions: ConnectedConfigTransaction
+    private let loadGatewayModels: (String) async throws -> [ConnectedModel]
+    private let readKey: () throws -> String
+    private let storeKey: (String) throws -> Void
 
-    init(home: URL = FileManager.default.homeDirectoryForCurrentUser) {
+    init(
+        home: URL = FileManager.default.homeDirectoryForCurrentUser,
+        keyExists: @escaping () -> Bool = { ConnectedBuyerKeychain.exists() },
+        loadGatewayModels: @escaping (String) async throws -> [ConnectedModel] = { try await ConnectedGatewayClient().models(key: $0) },
+        readKey: @escaping () throws -> String = { try ConnectedBuyerKeychain.read() },
+        saveKey: @escaping (String) throws -> Void = { try ConnectedBuyerKeychain.save($0) }
+    ) {
         self.home = home
+        self.keyExists = keyExists
+        self.loadGatewayModels = loadGatewayModels
+        self.readKey = readKey
+        self.storeKey = saveKey
+        hasBuyerKey = keyExists()
         root = home.appendingPathComponent("Library/Application Support/Malibu/ConnectedApps", isDirectory: true)
         transactions = ConnectedConfigTransaction(receiptDirectory: root.appendingPathComponent("backups"))
     }
@@ -34,12 +54,17 @@ final class ConnectedAppsStore: ObservableObject {
     }
 
     func saveKey(_ key: String) {
+        var saved = false
         perform {
-            try ConnectedBuyerKeychain.save(key)
+            try self.storeKey(key)
             self.models = []
             self.modelID = ""
-            self.status = "Buyer key saved in Keychain. Load available gateway models to continue."
+            self.hasBuyerKey = true
+            self.status = "Buyer key saved in Keychain. Loading gateway models…"
+            saved = true
         }
+        // SPEC-025-R012: loading follows a saved key.
+        if saved { loadModels() }
     }
 
     func forgetKey() {
@@ -48,17 +73,37 @@ final class ConnectedAppsStore: ObservableObject {
             ConnectedApp.allCases.forEach { ConnectedBuyerKeychain.removeLaunchHandoff(self.keyHandoffURL($0)) }
             self.models = []
             self.modelID = ""
+            self.hasBuyerKey = self.keyExists()
+            self.modelsMessage = nil
+            self.modelsLoadFailed = false
             self.status = "Buyer key removed. Connected launchers cannot authenticate until a key is saved."
         }
     }
 
+    static let noModelsServed = "No models are being served right now. Try again later."
+    static let saveKeyFirst = "Save a buyer key first."
+
     func loadModels() {
-        run {
-            let key = try ConnectedBuyerKeychain.read()
-            let models = try await ConnectedGatewayClient().models(key: key)
+        guard hasBuyerKey else {
+            modelsLoadFailed = true
+            modelsMessage = Self.saveKeyFirst
+            return
+        }
+        modelsMessage = nil
+        modelsLoadFailed = false
+        run(onError: { message in
+            self.modelsLoadFailed = true
+            self.modelsMessage = message
+        }) {
+            let key = try self.readKey()
+            let models = try await self.loadGatewayModels(key)
             self.models = models
             self.modelID = models.first?.id ?? ""
-            self.status = models.isEmpty ? "No gateway models are currently available." : "Gateway model list loaded. No inference or client compatibility has been tested."
+            self.modelsLoadFailed = models.isEmpty
+            self.modelsMessage = models.isEmpty
+                ? Self.noModelsServed
+                : (models.count == 1 ? "1 model available." : "\(models.count) models available.")
+            self.status = models.isEmpty ? Self.noModelsServed : "Gateway model list loaded. No inference or client compatibility has been tested."
         }
     }
 
@@ -189,15 +234,25 @@ final class ConnectedAppsStore: ObservableObject {
         do { try action() }
         catch { status = (error as? ConnectedAppsError)?.localizedDescription ?? ConnectedAppsError.invalidConfiguration.localizedDescription }
     }
-    private func run(_ action: @escaping @MainActor () async throws -> Void) {
+    private func run(
+        onError: (@MainActor (String) -> Void)? = nil,
+        _ action: @escaping @MainActor () async throws -> Void
+    ) {
         guard !busy else { return }
         busy = true
         operation = Task {
             defer { self.busy = false; self.operation = nil }
             do { try await action() }
-            catch { self.status = (error as? ConnectedAppsError)?.localizedDescription ?? ConnectedAppsError.network.localizedDescription }
+            catch {
+                let message = (error as? ConnectedAppsError)?.localizedDescription ?? ConnectedAppsError.network.localizedDescription
+                self.status = message
+                onError?(message)
+            }
         }
     }
+
+    /// Waits for the running request, for tests.
+    func waitForOperation() async { await operation?.value }
 }
 
 struct ConnectedAppsScreen: View {
@@ -217,12 +272,27 @@ struct ConnectedAppsScreen: View {
                         Button("Forget buyer key") { store.forgetKey() }.disabled(store.busy)
                         Link("Get a buyer key", destination: URL(string: "https://www.malibu.tech/console/")!)
                     }
-                    Text("This is your buyer key, separate from provider earnings credentials. Malibu keeps it in Keychain and hands it to each Launch through a private one-time file.").font(.caption)
+                    Text("This is your buyer key, separate from provider earnings credentials.").font(.caption)
                     Text(ConnectedAppConfiguration.keyExposure).font(.caption).foregroundStyle(.orange)
+                    DisclosureGroup("Details") {
+                        Text(ConnectedAppConfiguration.setupDetails)
+                            .font(.caption)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .font(.caption)
                 }
                 ShellPanel("App and model") {
                     Picker("App", selection: $store.app) { ForEach(ConnectedApp.allCases) { Text($0.rawValue).tag($0) } }.disabled(store.busy)
-                    Button("Load gateway models") { store.loadModels() }.disabled(store.busy)
+                    HStack(alignment: .firstTextBaseline) {
+                        Button("Load gateway models") { store.loadModels() }.disabled(store.busy || !store.hasBuyerKey)
+                        if !store.hasBuyerKey {
+                            Text(ConnectedAppsStore.saveKeyFirst).font(.caption).foregroundStyle(.secondary)
+                        } else if let message = store.modelsMessage {
+                            Text(message).font(.caption).foregroundStyle(store.modelsLoadFailed ? Color.red : Color.secondary)
+                                .accessibilityIdentifier("connected-apps-models-message")
+                        }
+                    }
                     Picker("Gateway model", selection: $store.modelID) {
                         Text("Choose a gateway model").tag("")
                         ForEach(store.models) { Text($0.id).tag($0.id) }
@@ -235,7 +305,6 @@ struct ConnectedAppsScreen: View {
                         Text("Manual setup pending. Cursor API compatibility is unverified.").foregroundStyle(.secondary)
                     } else {
                         Text("API: \(store.app.api.rawValue) · Client compatibility not tested").font(.caption)
-                        Text("Setup creates a managed CLI profile and a Terminal launcher. Always launch here to deliver the buyer key. Project settings or managed policy can override the profile; verify the provider and model inside your client. Desktop app integration is not claimed.").font(.caption)
                         HStack {
                             Button("Select installed CLI…") { store.chooseExecutable() }
                             Text(store.executable?.lastPathComponent ?? "No CLI selected").font(.caption)
@@ -261,7 +330,7 @@ struct ConnectedAppsScreen: View {
                 if let tested = store.endpointTested { Text(tested).font(.caption) }
                 Text(store.status).font(.callout).accessibilityIdentifier("connected-apps-status")
                 if store.busy { HStack { ProgressView().controlSize(.small); Button("Cancel request") { store.cancel() } } }
-                Text("Not private · No client has been marked verified by this setup screen.").font(.caption).foregroundStyle(.secondary)
+                Text("Not private · Malibu has not verified any app with this gateway.").font(.caption).foregroundStyle(.secondary)
             }
             .padding(20)
         }

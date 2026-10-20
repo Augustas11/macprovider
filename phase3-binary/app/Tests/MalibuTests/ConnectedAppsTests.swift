@@ -126,9 +126,82 @@ final class ConnectedAppsTests: XCTestCase {
     }
 
     func testKeyExposureCopyIsHonestAndCrushIsWarned() {
-        XCTAssertTrue(ConnectedAppConfiguration.keyExposure.contains("can read the key"))
-        XCTAssertTrue(ConnectedAppConfiguration.keyExposure.contains("spend-limited"))
+        // SPEC-025-R012: one visible sentence names repository configuration and
+        // agent commands and recommends a dedicated, spend-limited key.
+        let sentence = ConnectedAppConfiguration.keyExposure
+        XCTAssertTrue(sentence.contains("dedicated, spend-limited buyer key"))
+        XCTAssertTrue(sentence.contains("repository configuration"))
+        XCTAssertTrue(sentence.contains("commands its agent runs can read it"))
+        XCTAssertEqual(sentence.filter { $0 == "." }.count, 1, "one sentence")
+        // The rest sits behind Details.
+        let details = ConnectedAppConfiguration.setupDetails
+        XCTAssertTrue(details.contains("private one-time file"))
+        XCTAssertTrue(details.contains("send it elsewhere"))
+        XCTAssertTrue(details.contains("Project settings or managed policy can override the profile"))
+        XCTAssertTrue(details.contains("Desktop apps are not set up."))
         XCTAssertTrue(ConnectedAppConfiguration.crushProjectConfigWarning.contains(".crushrc"))
+    }
+
+    func testNotPrivateBannerSaysPrivateModeDoesNotApplyAndPointsToMalibuChat() {
+        let banner = ConnectedAppConfiguration.privacy
+        XCTAssertTrue(banner.hasPrefix("Not private"))
+        XCTAssertTrue(banner.contains("requests that Malibu does not encrypt"))
+        XCTAssertTrue(banner.contains("private mode doesn't apply"))
+        XCTAssertTrue(banner.contains("gateway and the serving provider can read prompts and responses"))
+        XCTAssertTrue(banner.contains("For private requests, use Malibu Chat."))
+        for overclaim in ["end-to-end", "confidential", "enclave", "relay-blind"] {
+            XCTAssertFalse(banner.lowercased().contains(overclaim))
+        }
+    }
+
+    @MainActor
+    func testGatewayModelsNeedASavedKeyAndLoadAfterSaving() async throws {
+        var keyStored = false
+        var loads = 0
+        var served: [ConnectedModel] = []
+        let store = ConnectedAppsStore(
+            home: FileManager.default.temporaryDirectory.appendingPathComponent("connected-\(UUID().uuidString)"),
+            keyExists: { keyStored },
+            loadGatewayModels: { _ in loads += 1; return served },
+            readKey: { guard keyStored else { throw ConnectedAppsError.credential }; return "buyer-key" },
+            saveKey: { _ in keyStored = true }
+        )
+        XCTAssertFalse(store.hasBuyerKey)
+        store.loadModels()
+        XCTAssertEqual(loads, 0, "no gateway call without a saved key")
+        XCTAssertEqual(store.modelsMessage, ConnectedAppsStore.saveKeyFirst)
+
+        // Saving a key loads the list; an empty list says so beside the button.
+        store.saveKey("buyer-key")
+        await store.waitForOperation()
+        XCTAssertTrue(store.hasBuyerKey)
+        XCTAssertEqual(loads, 1)
+        XCTAssertEqual(store.modelsMessage, "No models are being served right now. Try again later.")
+        XCTAssertTrue(store.modelsLoadFailed)
+
+        served = [model]
+        store.loadModels()
+        await store.waitForOperation()
+        XCTAssertEqual(store.models, [model])
+        XCTAssertEqual(store.modelID, model.id)
+        XCTAssertEqual(store.modelsMessage, "1 model available.")
+        XCTAssertFalse(store.modelsLoadFailed)
+    }
+
+    @MainActor
+    func testGatewayModelLoadErrorsShowBesideTheButton() async throws {
+        let store = ConnectedAppsStore(
+            home: FileManager.default.temporaryDirectory.appendingPathComponent("connected-\(UUID().uuidString)"),
+            keyExists: { true },
+            loadGatewayModels: { _ in throw ConnectedAppsError.http(401) },
+            readKey: { "buyer-key" },
+            saveKey: { _ in }
+        )
+        store.loadModels()
+        await store.waitForOperation()
+        XCTAssertTrue(store.modelsLoadFailed)
+        XCTAssertEqual(store.modelsMessage, "The gateway rejected this buyer key.")
+        XCTAssertTrue(store.models.isEmpty)
     }
 
     func testLaunchHandoffIsPrivateAndReplaceable() throws {

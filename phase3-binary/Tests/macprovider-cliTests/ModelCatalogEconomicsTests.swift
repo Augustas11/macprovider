@@ -973,6 +973,294 @@ final class ModelCatalogEconomicsTests: XCTestCase {
 
 
 
+    // MARK: SPEC-044-R014 catalog-only rows (v1)
+
+    private static func catalogOnlyProjection(
+        generatedAt: Date? = nil,
+        downloadSizes: [String: Int64] = [:],
+        hostRAMGB: Int = 512
+    ) throws -> ModelCatalogEconomicsWire {
+        try Self.catalogOnlyProjection(inputs: Self.staticInputs(), generatedAt: generatedAt, downloadSizes: downloadSizes, hostRAMGB: hostRAMGB)
+    }
+
+    private static func catalogOnlyProjection(
+        inputs: (
+            demand: AutotuneStaticSelection<DemandRank>,
+            candidateCatalog: AutotuneStaticSelection<CandidateCatalog>,
+            rateCard: AutotuneStaticSelection<RateCardProjection>
+        ),
+        generatedAt: Date? = nil,
+        downloadSizes: [String: Int64] = [:],
+        hostRAMGB: Int = 512,
+        discovery: BYOMDiscoveryWire? = nil,
+        admissionStatuses: [String: BYOMAdmissionStatusWire] = [:]
+    ) -> ModelCatalogEconomicsWire {
+        let at = generatedAt ?? inputs.rateCard.value.generatedAt.addingTimeInterval(60)
+        return ModelCatalogEconomicsBuilder.makeProjection(
+            generatedAt: at,
+            currentModelID: nil,
+            discovery: discovery ?? Self.discovery(candidates: []),
+            admissionStatuses: admissionStatuses,
+            demand: inputs.demand,
+            candidateCatalog: inputs.candidateCatalog,
+            rateCard: inputs.rateCard
+        ).withCatalogOnlyRows(CatalogOnlyRowProjection.Inputs(
+            candidateCatalog: inputs.candidateCatalog,
+            demand: inputs.demand,
+            rateCard: inputs.rateCard,
+            generatedAt: at,
+            downloadSizes: downloadSizes,
+            hostRAMGB: hostRAMGB
+        ))
+    }
+
+    func testCatalogOnlyRowUsesSourceAwareNotOfferedGuidance() throws {
+        let projection = try Self.catalogOnlyProjection()
+        let catalogOnly = projection.rows.filter { $0.admission.source == "local_default" }
+        XCTAssertFalse(catalogOnly.isEmpty)
+        for row in catalogOnly {
+            XCTAssertEqual(row.admission.state, "not_offered")
+            XCTAssertEqual(row.providerGuidance.stateLabelKey, "byom.local.not_offered")
+            XCTAssertEqual(row.providerGuidance.stateMeaningKey, "byom.local.not_offered_coordinator_state_unavailable")
+            XCTAssertEqual(row.providerGuidance.nextAction, "fix_local_blocker")
+            XCTAssertEqual(row.providerGuidance.transitionReasonCode, "requires_preparation")
+            XCTAssertEqual(row.providerGuidance.earningPathClass, "local_inventory_only")
+            XCTAssertFalse(row.admission.catalogEconomicsPermitted)
+            XCTAssertFalse(row.admission.settlementCapable)
+            XCTAssertFalse(row.weightsPresentLocally)
+        }
+    }
+
+    func testCatalogOnlyRowCarriesTheSignedRateAsCatalogReferenceNeverTrusted() throws {
+        let projection = try Self.catalogOnlyProjection()
+        let row = try XCTUnwrap(projection.rows.first { $0.modelKey == Self.catalogModelKey })
+        XCTAssertEqual(row.economicsState, "catalog_reference")
+        XCTAssertEqual(row.rateSource, "live_signed")
+        XCTAssertEqual(row.rateCardKey, Self.catalogModelKey)
+        XCTAssertNotNil(row.rateCardVersion)
+        XCTAssertNotNil(row.rateCardGeneratedAt)
+        XCTAssertNotNil(row.promptRateUSDPerMillionTokens)
+        XCTAssertNotNil(row.completionRateUSDPerMillionTokens)
+        XCTAssertNotNil(row.providerShareBPS)
+        XCTAssertNotNil(row.providerPromptPayoutUSDPerMillionTokens)
+        XCTAssertNotNil(row.providerCompletionPayoutUSDPerMillionTokens)
+        XCTAssertTrue(row.warningCodes.contains("admission_state_not_settlement_capable"))
+        XCTAssertFalse(row.admission.catalogEconomicsPermitted)
+        XCTAssertFalse(row.admission.settlementCapable)
+        XCTAssertFalse(projection.rows.contains { $0.admission.source == "local_default" && $0.economicsState == "trusted" })
+        XCTAssertFalse(row.switchAction.available)
+        XCTAssertFalse(row.evaluate.available)
+        XCTAssertFalse(row.adoptRecommendation.available)
+        XCTAssertFalse(row.cleanupStaging.available)
+    }
+
+    func testCatalogOnlyRowWithStaleRateCardKeepsMoneyFieldsNull() throws {
+        let inputs = try Self.staticInputs()
+        let projection = try Self.catalogOnlyProjection(
+            generatedAt: inputs.rateCard.value.generatedAt.addingTimeInterval(TimeInterval(ModelCatalogEconomicsBuilder.rateCardMaxAgeSeconds + 60))
+        )
+        let row = try XCTUnwrap(projection.rows.first { $0.modelKey == Self.catalogModelKey })
+        XCTAssertEqual(row.economicsState, "blocked")
+        XCTAssertEqual(row.rateSource, "none")
+        XCTAssertNil(row.rateCardKey)
+        XCTAssertNil(row.providerCompletionPayoutUSDPerMillionTokens)
+        XCTAssertNil(row.demandWeight)
+        XCTAssertTrue(row.warningCodes.contains("feed_stale"))
+    }
+
+    func testCatalogOnlyRowOffersAConfirmedDownloadOnlyWhenItFitsWithAVerifiedArtifact() throws {
+        let size: Int64 = 12_100_000_000
+        let projection = try Self.catalogOnlyProjection(downloadSizes: [Self.catalogModelKey: size])
+        let row = try XCTUnwrap(projection.rows.first { $0.modelKey == Self.catalogModelKey })
+        XCTAssertEqual(row.actionModelID, Self.catalogModelKey)
+        XCTAssertEqual(row.runtimeState, "needs_preparation")
+        XCTAssertEqual(row.fit, "fits")
+        XCTAssertNil(row.disabledReason)
+        XCTAssertEqual(row.estimatedGB, 12.1)
+        XCTAssertTrue(row.prepare.available)
+        XCTAssertTrue(row.prepare.requiresConfirmation)
+        XCTAssertEqual(row.prepare.transactionKind, "prepare_model")
+        XCTAssertEqual(row.prepare.actionTimeoutSeconds, 1800)
+        XCTAssertEqual(row.prepare.estimatedBytes, size)
+        XCTAssertNil(row.prepare.unavailableReason)
+        let transactionID = try XCTUnwrap(row.prepare.transactionID)
+        XCTAssertNoThrow(try ModelPreparationContracts.requireUUIDv4(transactionID, field: "transaction_id"))
+        XCTAssertFalse(row.warningCodes.contains("action_unavailable"))
+        XCTAssertFalse(row.switchAction.available)
+
+        // Without a verified artifact size the row stays the non-actionable sentinel.
+        let unbound = try XCTUnwrap(Self.catalogOnlyProjection().rows.first { $0.modelKey == Self.catalogModelKey })
+        XCTAssertNil(unbound.actionModelID)
+        XCTAssertEqual(unbound.runtimeState, "catalog")
+        XCTAssertFalse(unbound.prepare.available)
+        XCTAssertEqual(unbound.disabledReason, "no_cli_transaction_available")
+
+        // A model that does not fit is never offered for download.
+        let small = try XCTUnwrap(
+            Self.catalogOnlyProjection(downloadSizes: [Self.catalogModelKey: size], hostRAMGB: 1)
+                .rows.first { $0.modelKey == Self.catalogModelKey }
+        )
+        XCTAssertNil(small.actionModelID)
+        XCTAssertEqual(small.fit, "does_not_fit")
+        XCTAssertFalse(small.prepare.available)
+        XCTAssertEqual(small.disabledReason, "hardware_does_not_fit")
+        XCTAssertTrue(small.warningCodes.contains("hardware_does_not_fit"))
+
+        // Oversized artifacts are refused.
+        let oversized = try XCTUnwrap(
+            Self.catalogOnlyProjection(downloadSizes: [Self.catalogModelKey: Int64(ModelPreparationContracts.maxEstimatedBytes) + 1])
+                .rows.first { $0.modelKey == Self.catalogModelKey }
+        )
+        XCTAssertFalse(oversized.prepare.available)
+    }
+
+    func testCatalogOnlyDownloadIsOffForAnUntrustedCandidateCatalog() throws {
+        var inputs = try Self.staticInputs()
+        inputs.candidateCatalog.warnings.insert(.candidateCatalogIntegrityFailure)
+        let projection = Self.catalogOnlyProjection(inputs: inputs, downloadSizes: [Self.catalogModelKey: 1_000])
+        let row = try XCTUnwrap(projection.rows.first { $0.modelKey == Self.catalogModelKey })
+        XCTAssertFalse(row.prepare.available)
+        XCTAssertNotEqual(row.economicsState, "catalog_reference")
+    }
+
+    func testCatalogDownloadSizesNeedAVerifiedPrimaryMatchingTheSignedPin() throws {
+        let inputs = try Self.staticInputs()
+        let catalog = inputs.candidateCatalog.value
+        let row = try XCTUnwrap(catalog.rows[Self.catalogModelKey])
+        let revision = try XCTUnwrap(row.modelRevision)
+        let sha = try XCTUnwrap(row.modelSHA256)
+        func feed(status: String = "verified", hash: String? = nil, revision rev: String? = nil, format: String = "mlx_safetensors") -> ArtifactFeed {
+            let artifact = ArtifactFeed.Artifact(
+                runtimeFormat: format,
+                quantization: "4bit",
+                sourceRef: ArtifactFeed.SourceRef(kind: "huggingface_revision", repoID: row.modelID, revision: rev ?? revision),
+                hashAlgorithm: "macprovider.snapshot-manifest.v1",
+                hash: hash ?? sha,
+                sizeBytes: 12_100_000_000,
+                minRAMGB: 16,
+                allowedRuntimeSources: ["mlx_cache"],
+                verificationStatus: status,
+                verifiedAt: nil,
+                notes: nil
+            )
+            return ArtifactFeed(
+                version: "v",
+                generatedAt: Date(),
+                generatedAtRaw: "x",
+                policyVersion: "p",
+                source: ArtifactFeed.source,
+                releaseID: "r",
+                candidateCatalogSHA256: String(repeating: "0", count: 64),
+                models: [Self.catalogModelKey: ArtifactFeed.Model(rateClass: nil, primaryArtifactID: "mlx-4bit", artifacts: ["mlx-4bit": artifact])]
+            )
+        }
+        XCTAssertEqual(
+            CatalogOnlyRowProjection.downloadSizes(candidateCatalog: catalog, artifactFeed: feed())[Self.catalogModelKey],
+            12_100_000_000
+        )
+        XCTAssertTrue(CatalogOnlyRowProjection.downloadSizes(candidateCatalog: catalog, artifactFeed: nil).isEmpty)
+        XCTAssertNil(CatalogOnlyRowProjection.downloadSizes(candidateCatalog: catalog, artifactFeed: feed(status: "declared"))[Self.catalogModelKey])
+        XCTAssertNil(CatalogOnlyRowProjection.downloadSizes(candidateCatalog: catalog, artifactFeed: feed(hash: String(repeating: "f", count: 64)))[Self.catalogModelKey])
+        XCTAssertNil(CatalogOnlyRowProjection.downloadSizes(candidateCatalog: catalog, artifactFeed: feed(revision: String(repeating: "c", count: 40)))[Self.catalogModelKey])
+        XCTAssertNil(CatalogOnlyRowProjection.downloadSizes(candidateCatalog: catalog, artifactFeed: feed(format: "gguf"))[Self.catalogModelKey])
+    }
+
+    func testCatalogReferenceRateEqualsTheTrustedRateForTheSameKey() throws {
+        let inputs = try Self.staticInputs()
+        let reference = try XCTUnwrap(
+            Self.catalogOnlyProjection(inputs: inputs).rows.first { $0.modelKey == Self.catalogModelKey }
+        )
+        let admitted = try XCTUnwrap(ModelCatalogEconomicsBuilder.makeProjection(
+            generatedAt: inputs.rateCard.value.generatedAt.addingTimeInterval(60),
+            currentModelID: nil,
+            discovery: Self.discovery(candidate: Self.candidate()),
+            admissionStatuses: [Self.candidateID: Self.status(state: "catalog_priced", source: "coordinator")],
+            demand: inputs.demand,
+            candidateCatalog: inputs.candidateCatalog,
+            rateCard: inputs.rateCard
+        ).rows.first { $0.actionModelID == Self.candidateID })
+        XCTAssertEqual(admitted.economicsState, "trusted")
+        XCTAssertEqual(reference.economicsState, "catalog_reference")
+        XCTAssertEqual(reference.rateCardVersion, admitted.rateCardVersion)
+        XCTAssertEqual(reference.rateCardGeneratedAt, admitted.rateCardGeneratedAt)
+        XCTAssertEqual(reference.rateCardKey, admitted.rateCardKey)
+        XCTAssertEqual(reference.rateSource, admitted.rateSource)
+        XCTAssertEqual(reference.promptRateUSDPerMillionTokens, admitted.promptRateUSDPerMillionTokens)
+        XCTAssertEqual(reference.completionRateUSDPerMillionTokens, admitted.completionRateUSDPerMillionTokens)
+        XCTAssertEqual(reference.providerShareBPS, admitted.providerShareBPS)
+        XCTAssertEqual(reference.providerPromptPayoutUSDPerMillionTokens, admitted.providerPromptPayoutUSDPerMillionTokens)
+        XCTAssertEqual(reference.providerCompletionPayoutUSDPerMillionTokens, admitted.providerCompletionPayoutUSDPerMillionTokens)
+        XCTAssertEqual(reference.demandWeight, admitted.demandWeight)
+        XCTAssertEqual(reference.readyProviderCount, admitted.readyProviderCount)
+    }
+
+    func testCatalogReferenceRateIsWithheldWheneverTheTrustedRateWouldBe() throws {
+        for warning in [AutotuneRecommendWarning.rateCardFallbackUsed, .rateCardIntegrityFailure, .rateCardDefaultTierUsed, .rateCardStale] {
+            var inputs = try Self.staticInputs()
+            inputs.rateCard.warnings.insert(warning)
+            let admitted = try XCTUnwrap(ModelCatalogEconomicsBuilder.makeProjection(
+                generatedAt: inputs.rateCard.value.generatedAt.addingTimeInterval(60),
+                currentModelID: nil,
+                discovery: Self.discovery(candidate: Self.candidate()),
+                admissionStatuses: [Self.candidateID: Self.status(state: "catalog_priced", source: "coordinator")],
+                demand: inputs.demand,
+                candidateCatalog: inputs.candidateCatalog,
+                rateCard: inputs.rateCard
+            ).rows.first { $0.actionModelID == Self.candidateID })
+            let reference = try XCTUnwrap(Self.catalogOnlyProjection(inputs: inputs).rows.first { $0.modelKey == Self.catalogModelKey })
+            XCTAssertNotEqual(admitted.economicsState, "trusted", "\(warning)")
+            XCTAssertEqual(reference.economicsState, "blocked", "\(warning)")
+            XCTAssertEqual(reference.rateSource, "none", "\(warning)")
+            XCTAssertNil(reference.providerCompletionPayoutUSDPerMillionTokens, "\(warning)")
+            XCTAssertNil(reference.demandWeight, "\(warning)")
+        }
+    }
+
+    func testCatalogOnlyRowsLeaveCandidateRowsUntouched() throws {
+        let inputs = try Self.staticInputs()
+        let plain = ModelCatalogEconomicsBuilder.makeProjection(
+            generatedAt: inputs.rateCard.value.generatedAt.addingTimeInterval(60),
+            currentModelID: nil,
+            discovery: Self.discovery(candidate: Self.candidate()),
+            admissionStatuses: [:],
+            demand: inputs.demand,
+            candidateCatalog: inputs.candidateCatalog,
+            rateCard: inputs.rateCard
+        )
+        let projected = plain.withCatalogOnlyRows(CatalogOnlyRowProjection.Inputs(
+            candidateCatalog: inputs.candidateCatalog,
+            demand: inputs.demand,
+            rateCard: inputs.rateCard,
+            generatedAt: inputs.rateCard.value.generatedAt.addingTimeInterval(60),
+            downloadSizes: [Self.catalogModelKey: 1_000],
+            hostRAMGB: 512
+        ))
+        XCTAssertEqual(plain.rows.count, projected.rows.count)
+        XCTAssertEqual(
+            plain.rows.first { $0.actionModelID == Self.candidateID },
+            projected.rows.first { $0.actionModelID == Self.candidateID }
+        )
+        XCTAssertFalse(projected.rows.contains { $0.modelKey == Self.catalogModelKey && $0.actionModelID == Self.catalogModelKey },
+                       "a model with a local candidate has no catalog-only download row")
+    }
+
+    func testV2CatalogOnlySentinelStaysUnavailableWhenV1OffersADownload() throws {
+        let inputs = try Self.staticInputs()
+        let projection = ModelCatalogEconomicsBuilder.makeProjectionV2(
+            generatedAt: inputs.rateCard.value.generatedAt.addingTimeInterval(60),
+            currentModelID: nil,
+            discovery: Self.discovery(candidates: []),
+            admissionStatuses: [:],
+            demand: inputs.demand,
+            candidateCatalog: inputs.candidateCatalog,
+            rateCard: inputs.rateCard
+        )
+        let row = try XCTUnwrap(projection.rows.first { $0.modelKey == Self.catalogModelKey })
+        XCTAssertNil(row.actionModelID)
+        XCTAssertEqual(row.economicsState, "unavailable")
+        XCTAssertFalse(row.prepare.available)
+    }
+
     private static let candidateID = "byom_abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrst"
     private static let catalogModelKey = "openai/gpt-oss-20b"
     private static let servedModelRef = "ollama:gpt-oss:20b"

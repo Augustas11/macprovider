@@ -18,7 +18,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-007 | Internal Operator Protocol Explorer | 0.5.2 | normative | pending | pending corpus migration | [SPEC-007-explorer.md](SPEC-007-explorer.md) |
 | SPEC-008 | Tier-2 Trust Layer | 0.7.2 | normative | pending | pending: 4 | [SPEC-008-tier2.md](SPEC-008-tier2.md) |
 | SPEC-009 | MacProvider Console v2 | 0.1 | normative | pending | pending corpus migration | [SPEC-009-console-v2.md](SPEC-009-console-v2.md) |
-| SPEC-010 | Provider Model Catalog | 1.16 | normative | pending | conformant: 2, pending: 7 | [SPEC-010-model-catalog.md](SPEC-010-model-catalog.md) |
+| SPEC-010 | Provider Model Catalog | 1.17 | normative | pending | conformant: 2, pending: 7 | [SPEC-010-model-catalog.md](SPEC-010-model-catalog.md) |
 | SPEC-011 | Operator-Pushed Warm Swap | 0.5 | normative | pending | pending corpus migration | [SPEC-011-operator-pushed-warm-swap.md](SPEC-011-operator-pushed-warm-swap.md) |
 | SPEC-012 | Coordinator Demand-Pull Model Swap and Buyer Cold-Model Visibility | 0.3 | draft | pending | pending corpus migration | [SPEC-012-coordinator-demand-pull.md](SPEC-012-coordinator-demand-pull.md) |
 | SPEC-013 | `malibu-cli autotune` subcommand | 0.3.1 | normative | pending | pending corpus migration | [SPEC-013-cli-autotune.md](SPEC-013-cli-autotune.md) |
@@ -33,7 +33,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-022 | Verified model settlement | v0.4.9 | draft | complete | pending: 16 | [SPEC-022-verified-model-settlement.md](SPEC-022-verified-model-settlement.md) |
 | SPEC-023 | Installer-Integrated Autotune Recommend | v0.22.28 | normative | pending | conformant: 2, pending: 23 | [SPEC-023-installer-autotune-recommend.md](SPEC-023-installer-autotune-recommend.md) |
 | SPEC-024 | Prefix-cache billing and provider-local cache isolation | 0.2.11 | normative | pending | pending: 3 | [SPEC-024-prefix-cache-billing.md](SPEC-024-prefix-cache-billing.md) |
-| SPEC-025 | Native Mac App (signed `.dmg`, native Mac app with menu-bar presence) | v0.34.1 | draft | pending | pending: 12 | [SPEC-025-native-mac-app.md](SPEC-025-native-mac-app.md) |
+| SPEC-025 | Native Mac App (signed `.dmg`, native Mac app with menu-bar presence) | v0.35.0 | draft | pending | pending: 12 | [SPEC-025-native-mac-app.md](SPEC-025-native-mac-app.md) |
 | SPEC-026 | Browserless Provider Onboarding (one-click Launch Provider) | v0.30.1 | draft | pending | pending corpus migration | [SPEC-026-browserless-provider-onboarding.md](SPEC-026-browserless-provider-onboarding.md) |
 | SPEC-027 | Provider Proof of Ownership for App-Track Wallet Changes | v0.1.1 | draft | pending | pending corpus migration | [SPEC-027-provider-proof-of-ownership.md](SPEC-027-provider-proof-of-ownership.md) |
 | SPEC-028 | Classic External-Draft MLX Speculative Decoding for Provider Serve | 0.3-draft | draft | pending | pending corpus migration | [SPEC-028-mlx-speculative-decoding.md](SPEC-028-mlx-speculative-decoding.md) |
@@ -52,7 +52,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-041 | Relay-Blind Request Encryption | 0.6.1 | draft | complete | pending: 8 | [SPEC-041-relay-blind-request-encryption.md](SPEC-041-relay-blind-request-encryption.md) |
 | SPEC-042 | Pool Control Plane and Trusted-Pool Manifest | 0.0.43 | draft | complete | conformant: 2, pending: 14 | [SPEC-042-pool-control-plane.md](SPEC-042-pool-control-plane.md) |
 | SPEC-043 | Trusted Pool Creator Onboarding MVP | 0.3.5 | normative | complete | pending: 14 | [SPEC-043-trusted-pool-creator-onboarding.md](SPEC-043-trusted-pool-creator-onboarding.md) |
-| SPEC-044 | Malibu Model Catalog Economics | 0.2.11 | draft | complete | pending: 13 | [SPEC-044-malibu-model-catalog-economics.md](SPEC-044-malibu-model-catalog-economics.md) |
+| SPEC-044 | Malibu Model Catalog Economics | 0.2.12 | draft | complete | pending: 14 | [SPEC-044-malibu-model-catalog-economics.md](SPEC-044-malibu-model-catalog-economics.md) |
 | SPEC-045 | Local Consumer Endpoint Mode | 0.1.1 | draft | complete | conformant: 3, pending: 5 | [SPEC-045-local-consumer-endpoint-mode.md](SPEC-045-local-consumer-endpoint-mode.md) |
 | SPEC-046 | Provider BYOM Discovery | 0.5.0 | draft | complete | pending: 9 | [SPEC-046-provider-byom-discovery.md](SPEC-046-provider-byom-discovery.md) |
 | SPEC-047 | Network Model Admission | 0.2.9 | draft | complete | conformant: 4, pending: 8 | [SPEC-047-network-model-admission.md](SPEC-047-network-model-admission.md) |

@@ -14,6 +14,8 @@ final class ModelScreensHostedTests: XCTestCase {
             ShellScreensTests.rowJSON(key: "qwen3.6-35b-a3b", weightsLocal: true, estimatedGB: 20.4, completion: 0.52, demandRank: 2, switchable: true),
             ShellScreensTests.rowJSON(key: "gpt-oss-20b", weightsLocal: false, runtimeState: "needs_preparation", estimatedGB: 12.1, completion: 0.31, demandRank: 4),
             ShellScreensTests.rowJSON(key: "llama-3.3-70b", fit: "does_not_fit", weightsLocal: false, estimatedGB: 40, completion: 0.9, demandRank: 1),
+            ShellScreensTests.catalogOnlyRowJSON(key: "qwen/qwen3-8b", modelID: "mlx-community/Qwen3-8B-4bit", downloadBytes: 4_600_000_000, completion: 0.36, demandRank: 3),
+            ShellScreensTests.catalogOnlyRowJSON(key: "meta/llama-3.2-3b-instruct", modelID: "mlx-community/Llama-3.2-3B-Instruct-4bit", catalogReference: false, demandRank: 6),
         ]
         let cli = ProjectionCLI(stdout: Self.projection(rows: rows))
         let store = ModelManagementStore(
@@ -26,9 +28,9 @@ final class ModelScreensHostedTests: XCTestCase {
         XCTAssertEqual(store.listState, .ready)
         XCTAssertEqual(
             ModelsPresentation.sections(store.rows).map(\.title),
-            ["Current", "Ready to switch", "Needs preparation"]
+            ["Current", "Ready to switch", "Not downloaded"]
         )
-        XCTAssertEqual(DiscoverPresentation.visibleRows(store.rows, search: "", fitsOnly: true, sort: .catalog).count, 3)
+        XCTAssertEqual(DiscoverPresentation.visibleRows(store.rows, search: "", fitsOnly: true, sort: .catalog).count, 5)
 
         let agent = MalibuAgent(initialSnapshot: .empty)
         let artifacts = URL(fileURLWithPath: "/tmp/malibu-dashboard-e2e", isDirectory: true)
@@ -37,6 +39,35 @@ final class ModelScreensHostedTests: XCTestCase {
         try host(DiscoverScreen(store: store, agent: agent), png: artifacts.appendingPathComponent("21-discover-populated.png"))
         let ready = try XCTUnwrap(store.rows.first { $0.action == .switchModel })
         try host(ModelSwitchSheet(store: store, row: ready, isRevert: false) {}, png: artifacts.appendingPathComponent("22-switch-confirm.png"), size: NSSize(width: 480, height: 330))
+        try host(ConnectedAppsScreen(), png: artifacts.appendingPathComponent("23-connected-apps.png"), size: NSSize(width: 830, height: 760))
+    }
+
+    /// A running download: progress and Cancel replace Download on the row.
+    func testDownloadInProgressRenders() async throws {
+        let rows = [
+            ShellScreensTests.rowJSON(key: "llama-3.2-3b-instruct", isCurrent: true, estimatedGB: 1.8, completion: 0.08, demandRank: 9),
+            ShellScreensTests.catalogOnlyRowJSON(key: "qwen/qwen3-8b", modelID: "mlx-community/Qwen3-8B-4bit", downloadBytes: 4_600_000_000),
+        ]
+        let progress = HeldDownloadCLI()
+        let store = ModelManagementStore(
+            cli: ProjectionCLI(stdout: Self.projection(rows: rows)),
+            makeBrowseCLI: { ProjectionCLI(stdout: "") },
+            makeDownloadCLI: { progress },
+            paths: Self.paths(),
+            defaults: UserDefaults(suiteName: "ModelScreensHostedTests.download.\(UUID().uuidString)")!
+        )
+        await store.refresh(currentModelID: "llama-3.2-3b-instruct", peer: Self.peer())
+        let row = try XCTUnwrap(store.rows.first { $0.action == .download })
+        let task = Task { await store.startDownload(row) }
+        while store.download?.phase != .running { await Task.yield() }
+        let agent = MalibuAgent(initialSnapshot: .empty)
+        let artifacts = URL(fileURLWithPath: "/tmp/malibu-dashboard-e2e", isDirectory: true)
+        try? FileManager.default.createDirectory(at: artifacts, withIntermediateDirectories: true)
+        try host(ModelsScreen(store: store, agent: agent), png: artifacts.appendingPathComponent("24-models-downloading.png"))
+        try host(DiscoverScreen(store: store, agent: agent), png: artifacts.appendingPathComponent("25-discover-downloading.png"))
+        store.cancelDownload()
+        await task.value
+        XCTAssertNil(store.download)
     }
 
     private func host<V: View>(_ view: V, png: URL, size: NSSize = NSSize(width: 830, height: 620)) throws {
@@ -131,5 +162,27 @@ private final class ProjectionCLI: MalibuModelCLIRunning {
         onLine: @escaping @MainActor @Sendable (String) -> Void
     ) async throws -> ModelCLIResult {
         ModelCLIResult(exitCode: 0, stdout: stdout, stderr: "")
+    }
+}
+
+/// Reports one running event and holds until cancelled.
+@MainActor
+private final class HeldDownloadCLI: MalibuModelCLIRunning {
+    private var waiter: CheckedContinuation<ModelCLIResult, Never>?
+
+    func run(
+        arguments: [String],
+        peer: MalibuModelPeerEvidence?,
+        stdinData: Data?,
+        priority: ModelCLIWorkPriority,
+        onLine: @escaping @MainActor @Sendable (String) -> Void
+    ) async throws -> ModelCLIResult {
+        onLine(#"{"schema":"model_catalog_transaction_event.v1","transaction_id":"8d3c5d4c-3e4f-47ac-b72d-7f8f172747a0","transaction_kind":"prepare_model","model_key":"qwen/qwen3-8b","event_sequence":1,"emitted_at":"2027-01-15T08:00:00Z","state":"running","progress":{"stage_label_key":"downloading","bytes_completed":1700000000,"bytes_expected":4600000000,"percent_complete":37,"heartbeat":true},"error_code":null,"warning_code":null}"#)
+        return await withCheckedContinuation { waiter = $0 }
+    }
+
+    func cancelCurrentOperation() {
+        waiter?.resume(returning: ModelCLIResult(exitCode: 130, stdout: "", stderr: ""))
+        waiter = nil
     }
 }

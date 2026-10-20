@@ -17,6 +17,7 @@ struct ModelRowView: View {
     let row: MalibuModelRow
     let enabled: Bool
     let byomEnabled: Bool
+    var downloadEnabled = false
     let poolEligibilityLine: String?
     let onAction: () -> Void
     let onWithdraw: () -> Void
@@ -31,27 +32,28 @@ struct ModelRowView: View {
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityIdentifier("byom.earning-verdict")
                 }
+                Text(ModelsPresentation.title(row))
+                    .font(.body.weight(.medium))
+                    .fixedSize(horizontal: false, vertical: true)
                 if let catalogVerifiedModelKey = row.catalogVerifiedModelKey {
                     // Present the coordinator-verified catalog identity as the
                     // authoritative name; the provider-reported display name is
                     // shown as clearly-labelled secondary text so it can never be
                     // mistaken for a catalog-verified identity.
                     Text(ShellText.display(catalogVerifiedModelKey))
-                        .font(.body.monospaced())
-                        .lineLimit(2)
-                        .truncationMode(.middle)
+                        .font(.caption.monospaced())
+                        .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
                     Text(String(localized: "Provider-reported: \(ShellText.display(row.displayID))", comment: "Provider-reported model name shown under the catalog-verified identity"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                        .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
                 } else {
                     Text(ShellText.display(row.displayID))
-                        .font(.body.monospaced())
-                        .lineLimit(2)
-                        .truncationMode(.middle)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
                 }
                 HStack(spacing: 8) {
@@ -130,6 +132,9 @@ struct ModelRowView: View {
                     Button(ModelFeatureUI.switchModel, action: onAction)
                         .disabled(!enabled)
                         .accessibilityHint(Text(String(localized: "Shows a confirmation before the provider changes its served model.", comment: "Switch accessibility hint")))
+                } else if row.action == .download {
+                    Button(String(localized: "Download…", comment: "Model download action in details"), action: onAction)
+                        .disabled(!downloadEnabled)
                 } else if row.action == .evaluate {
                     Button(ModelFeatureUI.activate, action: onAction)
                         .disabled(!enabled)

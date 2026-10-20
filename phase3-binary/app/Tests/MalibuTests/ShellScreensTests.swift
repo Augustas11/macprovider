@@ -77,7 +77,7 @@ final class ShellScreensTests: XCTestCase {
             Self.row(key: "remote-model", weightsLocal: false, runtimeState: "needs_preparation"),
         ]
         let sections = ModelsPresentation.sections(rows)
-        XCTAssertEqual(sections.map(\.title), ["Current", "Ready to switch", "Network catalog", "Needs preparation", "Blocked"])
+        XCTAssertEqual(sections.map(\.title), ["Current", "Ready to switch", "Network catalog", "Not downloaded", "Blocked"])
         XCTAssertEqual(sections.map { $0.rows.map(ModelsPresentation.name) }, [
             ["current-model"], ["ready-model"], ["catalog-model"], ["remote-model"], ["blocked-model"],
         ])
@@ -247,8 +247,8 @@ final class ShellScreensTests: XCTestCase {
         XCTAssertTrue(lines.contains("Weights are not on this Mac."))
         XCTAssertTrue(lines.contains { $0.hasPrefix(d("Provider share rate: completion $0§36 per 1M tokens")) })
         assertNoForbiddenCopy(lines)
-        XCTAssertEqual(DiscoverPresentation.primaryAction(row), .preparationNotOffered,
-                       "SPEC-044-R006: no Prepare without a typed CLI transaction")
+        XCTAssertEqual(DiscoverPresentation.primaryAction(row), DiscoverPresentation.PrimaryAction.none,
+                       "SPEC-044-R006: no Download without a typed CLI transaction")
         XCTAssertEqual(DiscoverPresentation.primaryAction(try Self.row(key: "r", weightsLocal: true, switchable: true)), .switchModel)
         XCTAssertEqual(DiscoverPresentation.primaryAction(try Self.row(key: "c", isCurrent: true)), .serving)
     }
@@ -264,8 +264,92 @@ final class ShellScreensTests: XCTestCase {
         let strings = DiscoverPresentation.screenStrings(rows: rows, hostMemoryGB: 32)
         XCTAssertTrue(strings.contains(ModelsPresentation.rateDisclosure))
         XCTAssertTrue(strings.contains(DiscoverPresentation.otherMLXTitle))
-        assertNoForbiddenCopy(strings + [DiscoverPresentation.otherMLXExplainer, DiscoverPresentation.preparationNotOffered])
+        assertNoForbiddenCopy(strings + [DiscoverPresentation.otherMLXExplainer])
         print("MALIBU_DISCOVER_RENDER_BEGIN\n" + strings.joined(separator: "\n") + "\nMALIBU_DISCOVER_RENDER_END")
+    }
+
+    // MARK: Readable titles (SPEC-025-R004) and catalog-only rows (SPEC-044-R014)
+
+    func testReadableTitlesComeFromTheModelIdentifier() {
+        XCTAssertEqual(ModelsPresentation.readableTitle("mlx-community/Qwen3-8B-4bit"), "Qwen3 8B · 4-bit")
+        XCTAssertEqual(ModelsPresentation.readableTitle("mlx-community/Llama-3.2-3B-Instruct-4bit"), "Llama-3.2 3B Instruct · 4-bit")
+        XCTAssertEqual(ModelsPresentation.readableTitle("mlx-community/Qwen3.6-35B-A3B-8bit"), "Qwen3.6 35B A3B · 8-bit")
+        XCTAssertEqual(ModelsPresentation.readableTitle("openai/gpt-oss-20b"), "gpt-oss 20B")
+        XCTAssertEqual(ModelsPresentation.readableTitle("mlx-community/gpt-oss-20b-MXFP4-Q8"), "gpt-oss 20B · MXFP4 Q8")
+        XCTAssertEqual(ModelsPresentation.readableTitle("zai-org/GLM-5.3-Flash-mlx-4bit"), "GLM-5.3-Flash · 4-bit")
+        XCTAssertEqual(ModelsPresentation.readableTitle("mlx-community/Qwen3-0.6B-bf16"), "Qwen3 0.6B · BF16")
+        XCTAssertEqual(ModelsPresentation.readableTitle("qwen3-8b"), "qwen3 8B")
+        XCTAssertEqual(ModelsPresentation.readableTitle("4bit"), "4-bit")
+        XCTAssertEqual(ModelsPresentation.readableTitle("mlx"), "mlx", "nothing left falls back to the identifier")
+    }
+
+    func testCatalogOnlyRowsListInDiscoverWithFitDownloadAndFirstRowSelected() throws {
+        let download = try Self.catalogOnlyRow(key: "qwen/qwen3-8b", modelID: "mlx-community/Qwen3-8B-4bit", downloadBytes: 4_600_000_000)
+        let noDownload = try Self.catalogOnlyRow(key: "meta/llama-3.2-3b", modelID: "mlx-community/Llama-3.2-3B-Instruct-4bit")
+        let tooBig = try Self.catalogOnlyRow(key: "meta/llama-3.3-70b", modelID: "mlx-community/Llama-3.3-70B-Instruct-4bit", fit: "does_not_fit")
+        let byom = try Self.row(key: "local-candidate", economicsState: "blocked", catalogPermitted: false)
+        let rows = [download, noDownload, tooBig, byom]
+
+        XCTAssertEqual(DiscoverPresentation.catalogRows(rows).map(\.id), ["qwen/qwen3-8b", "meta/llama-3.2-3b", "meta/llama-3.3-70b"])
+        let visible = DiscoverPresentation.visibleRows(rows, search: "", fitsOnly: true, sort: .catalog)
+        XCTAssertEqual(visible.map(\.id), ["qwen/qwen3-8b", "meta/llama-3.2-3b"])
+        XCTAssertEqual(DiscoverPresentation.selection(visible, selectedID: nil)?.id, "qwen/qwen3-8b", "the first row is selected")
+        XCTAssertEqual(DiscoverPresentation.selection(visible, selectedID: "meta/llama-3.2-3b")?.id, "meta/llama-3.2-3b")
+        XCTAssertEqual(DiscoverPresentation.selection(visible, selectedID: "gone")?.id, "qwen/qwen3-8b")
+        XCTAssertEqual(DiscoverPresentation.listSubtitle(download), d("4§6 GB · Fits · not downloaded · $0§36 / 1M out · demand #3"))
+
+        XCTAssertEqual(download.action, .download)
+        XCTAssertEqual(download.category, .needsPreparation)
+        XCTAssertEqual(DiscoverPresentation.primaryAction(download), .download)
+        XCTAssertEqual(DiscoverPresentation.primaryAction(noDownload), .none)
+        XCTAssertEqual(tooBig.category, .blocked)
+        XCTAssertEqual(ModelsPresentation.reason(tooBig), "Needs more memory than this Mac has.")
+        XCTAssertEqual(ModelsPresentation.reason(noDownload), "Not on this Mac. The signed catalog has no verified download for it yet.")
+        XCTAssertEqual(ModelsPresentation.title(download), "Qwen3 8B · 4-bit")
+        XCTAssertEqual(ModelsPresentation.name(download), "mlx-community/Qwen3-8B-4bit")
+
+        // The catalog rate is shown with the not-earning caveat, never as earning.
+        let lines = DiscoverPresentation.detailLines(download, hostMemoryGB: 32)
+        XCTAssertTrue(lines.contains { $0.hasPrefix(d("Provider share rate: completion $0§36 per 1M tokens")) })
+        XCTAssertTrue(lines.contains("Network catalog rate. This Mac is not earning it yet."))
+        XCTAssertTrue(lines.contains("Not earning on this Mac — the model isn't downloaded"))
+        XCTAssertFalse(lines.contains { $0.contains("Eligible to earn") })
+        XCTAssertEqual(download.economicsAccessibilityLabel?.contains("This Mac is not earning it yet."), true)
+        XCTAssertFalse(download.canProposeToPool)
+
+        let message = ModelsPresentation.downloadConfirmationMessage(download)
+        XCTAssertTrue(message.contains(ByteCountFormatter.string(fromByteCount: 4_600_000_000, countStyle: .file)))
+        XCTAssertTrue(message.contains("catalog key qwen/qwen3-8b (mlx-community/Qwen3-8B-4bit)"),
+                      "the confirmation names the exact key the CLI is given, not only the display name")
+        XCTAssertEqual(DiscoverPresentation.listCaveat(download), "Network catalog rate. This Mac is not earning it yet.")
+        XCTAssertNil(DiscoverPresentation.listCaveat(try Self.catalogOnlyRow(key: "x/y", modelID: "x/y", catalogReference: false)))
+        XCTAssertTrue(message.contains("verifies the files against the signed catalog"))
+        XCTAssertTrue(message.contains("does not change the model this Mac serves"))
+        XCTAssertTrue(message.contains("does not start earning"))
+        XCTAssertEqual(ModelsPresentation.downloadConfirmationTitle(download), "Download Qwen3 8B · 4-bit?")
+
+        let strings = DiscoverPresentation.screenStrings(rows: rows, hostMemoryGB: 32)
+            + ModelsPresentation.screenStrings(rows: rows, listState: .ready)
+        XCTAssertTrue(strings.contains("Not downloaded"))
+        assertNoForbiddenCopy(strings)
+        print("MALIBU_DISCOVER_CATALOG_RENDER_BEGIN\n" + strings.joined(separator: "\n") + "\nMALIBU_DISCOVER_CATALOG_RENDER_END")
+    }
+
+    func testDownloadProgressCopy() {
+        func state(_ phase: ModelManagementStore.DownloadState.Phase, _ done: Int64?, _ total: Int64?) -> ModelManagementStore.DownloadState {
+            ModelManagementStore.DownloadState(modelKey: "r", title: "r", transactionID: "t", phase: phase, bytesCompleted: done, bytesExpected: total)
+        }
+        let total: Int64 = 4_000_000_000
+        let running = state(.running, 1_000_000_000, total)
+        XCTAssertEqual(ModelsPresentation.downloadFraction(running), 0.25)
+        XCTAssertEqual(
+            ModelsPresentation.downloadProgressText(running),
+            "Downloaded \(ByteCountFormatter.string(fromByteCount: 1_000_000_000, countStyle: .file)) of \(ByteCountFormatter.string(fromByteCount: total, countStyle: .file))"
+        )
+        XCTAssertNil(ModelsPresentation.downloadFraction(state(.delayed, 1, total)))
+        XCTAssertEqual(ModelsPresentation.downloadProgressText(state(.delayed, 1, total)), "Waiting for the provider software to report progress…")
+        XCTAssertEqual(ModelsPresentation.downloadProgressText(state(.cancelling, 1, total)), "Cancelling the download…")
+        XCTAssertEqual(ModelsPresentation.downloadProgressText(state(.starting, nil, total)), "Starting the download…")
     }
 
     // MARK: Other MLX models (models browse)
@@ -469,6 +553,64 @@ final class ShellScreensTests: XCTestCase {
         let state = runtimeState ?? (isCurrent ? "current" : (switchable ? "ready" : "catalog"))
         return """
         {"model_key":"\(key)","served_model_id":"\(key)","display_model_id":"\(key)","action_model_id":"\(key)","is_current":\(isCurrent),"weights_present_locally":\(weightsLocal),"runtime_state":"\(state)","estimated_gb":\(estimatedGB),"fit":"\(fit)","disabled_reason":null,"warning_codes":["admission_state_not_settlement_capable"],"admission":{"state":"catalog_priced","source":"coordinator","coordinator_event_id":"event-1","state_observed_at":"\(timestamp)","catalog_economics_permitted":\(catalogPermitted),"settlement_capable":false},"provider_guidance":{"state_label_key":"byom.admission.catalog_priced","state_meaning_key":"byom.admission.not_earning","next_action":"withdraw","transition_reason_code":null,"earning_path_class":"not_earning_yet_catalog_or_receipt_path_exists"},"rate_card_version":"rates-v1","rate_card_generated_at":"\(timestamp)","rate_card_key":"\(key)","rate_source":"live_signed","prompt_rate_usd_per_million_tokens":0.2,"completion_rate_usd_per_million_tokens":0.4,"provider_share_bps":9000,"provider_prompt_payout_usd_per_million_tokens":0.18,"provider_completion_payout_usd_per_million_tokens":\(completion),"economics_state":"\(economicsState)","demand_rank":\(demandRank),"demand_weight":0.65,"ready_provider_count":4,"supply_deficit_score":\(supplyDeficit),"switch":\(switchAction),"prepare":\(unavailable),"evaluate":\(unavailable),"adopt_recommendation":\(unavailable),"cleanup_staging":\(unavailable)}
+        """
+    }
+
+    /// A v1 catalog-only row exactly as the SPEC-044-R014 CLI emits it.
+    static func catalogOnlyRowJSON(
+        key: String,
+        modelID: String,
+        fit: String = "fits",
+        downloadBytes: Int64? = nil,
+        catalogReference: Bool = true,
+        timeoutSeconds: Int = 1800,
+        transactionID: String = "8d3c5d4c-3e4f-47ac-b72d-7f8f172747a0",
+        guidanceLabel: String = "byom.local.not_offered",
+        completion: Double = 0.36,
+        demandRank: Int = 3
+    ) -> String {
+        let unavailable = #"{"available":false,"requires_confirmation":false,"transaction_kind":null,"transaction_id":null,"action_timeout_seconds":null,"estimated_bytes":null,"unavailable_reason":"no_cli_transaction_available"}"#
+        let prepare = downloadBytes.map {
+            #"{"available":true,"requires_confirmation":true,"transaction_kind":"prepare_model","transaction_id":"\#(transactionID)","action_timeout_seconds":\#(timeoutSeconds),"estimated_bytes":\#($0),"unavailable_reason":null}"#
+        } ?? unavailable
+        let actionModelID = downloadBytes == nil ? "null" : "\"\(key)\""
+        let runtime = downloadBytes == nil ? "catalog" : "needs_preparation"
+        let disabled = downloadBytes == nil ? (fit == "fits" ? "\"no_cli_transaction_available\"" : "\"hardware_does_not_fit\"") : "null"
+        var warnings = ["admission_state_not_settlement_capable", "model_not_local"]
+        if downloadBytes == nil { warnings.append("action_unavailable") }
+        if fit != "fits" { warnings.append("hardware_does_not_fit") }
+        let warningsJSON = "[" + warnings.sorted().map { "\"\($0)\"" }.joined(separator: ",") + "]"
+        let economics = catalogReference
+            ? #""rate_card_version":"rates-v1","rate_card_generated_at":"\#(timestamp)","rate_card_key":"\#(key)","rate_source":"live_signed","prompt_rate_usd_per_million_tokens":0.2,"completion_rate_usd_per_million_tokens":0.4,"provider_share_bps":9000,"provider_prompt_payout_usd_per_million_tokens":0.18,"provider_completion_payout_usd_per_million_tokens":\#(completion),"economics_state":"catalog_reference","demand_rank":\#(demandRank),"demand_weight":0.6,"ready_provider_count":2,"supply_deficit_score":1.2"#
+            : #""rate_card_version":null,"rate_card_generated_at":null,"rate_card_key":null,"rate_source":"none","prompt_rate_usd_per_million_tokens":null,"completion_rate_usd_per_million_tokens":null,"provider_share_bps":null,"provider_prompt_payout_usd_per_million_tokens":null,"provider_completion_payout_usd_per_million_tokens":null,"economics_state":"blocked","demand_rank":\#(demandRank),"demand_weight":null,"ready_provider_count":null,"supply_deficit_score":null"#
+        let guidance = guidanceLabel == "byom.local.local_only"
+            ? #"{"state_label_key":"byom.local.local_only","state_meaning_key":"byom.local.local_only_not_earning","next_action":"fix_local_blocker","transition_reason_code":null,"earning_path_class":"local_inventory_only"}"#
+            : #"{"state_label_key":"\#(guidanceLabel)","state_meaning_key":"byom.local.not_offered_coordinator_state_unavailable","next_action":"fix_local_blocker","transition_reason_code":"requires_preparation","earning_path_class":"local_inventory_only"}"#
+        return """
+        {"model_key":"\(key)","served_model_id":"\(modelID)","display_model_id":"\(modelID)","action_model_id":\(actionModelID),"is_current":false,"weights_present_locally":false,"runtime_state":"\(runtime)","estimated_gb":\(downloadBytes.map { Double($0) / 1_000_000_000 } ?? 16.0),"fit":"\(fit)","disabled_reason":\(disabled),"warning_codes":\(warningsJSON),"admission":{"state":"not_offered","source":"local_default","coordinator_event_id":null,"state_observed_at":null,"catalog_economics_permitted":false,"settlement_capable":false},"provider_guidance":\(guidance),\(economics),"switch":\(unavailable),"prepare":\(prepare),"evaluate":\(unavailable),"adopt_recommendation":\(unavailable),"cleanup_staging":{"available":false,"requires_confirmation":false,"transaction_kind":null,"transaction_id":null,"action_timeout_seconds":null,"estimated_bytes":null,"unavailable_reason":"staging_cleanup_not_required"}}
+        """
+    }
+
+    /// A catalog-only row validated through the whole document, as the store
+    /// maps it.
+    static func catalogOnlyRow(
+        key: String,
+        modelID: String,
+        fit: String = "fits",
+        downloadBytes: Int64? = nil,
+        catalogReference: Bool = true
+    ) throws -> MalibuModelRow {
+        let json = catalogOnlyRowJSON(key: key, modelID: modelID, fit: fit, downloadBytes: downloadBytes, catalogReference: catalogReference)
+        let document = try JSONDecoder().decode(MalibuModelCatalogEconomicsDocument.self, from: Data(projectionJSON(rows: [json]).utf8))
+        let rows = try document.validated().rowsForMalibu(currentModelID: nil, warmSwapAvailable: true)
+        let row = try XCTUnwrap(rows.first)
+        XCTAssertFalse(row.warningCodes.contains("projection_unsupported"), "catalog-only row must validate: \(json)")
+        return row
+    }
+
+    static func projectionJSON(rows: [String], warnings: String = "[]", sequence: Int = 1) -> String {
+        """
+        {"schema":"model_catalog_economics.v1","generated_at":"\(timestamp)","projection_sequence":\(sequence),"source":{"cli_version":"1.8.259","cli_build_commit":"test","process_launch_id":"c13c5d4c-3e4f-47ac-b72d-7f8f172747a0","process_started_at":"\(timestamp)","projection_protocol_version":"1","rate_card_source":"live_signed","rate_card_digest":"\(String(repeating: "a", count: 64))","rate_card_signature_digest":null,"demand_feed_digest":"\(String(repeating: "b", count: 64))","candidate_feed_digest":"\(String(repeating: "c", count: 64))","rate_card_max_age_seconds":604800},"rows":[\(rows.joined(separator: ","))],"warnings":\(warnings)}
         """
     }
 

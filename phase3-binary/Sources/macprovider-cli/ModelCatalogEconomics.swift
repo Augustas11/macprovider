@@ -105,6 +105,20 @@ struct ModelCatalogEconomicsWire: Codable, Equatable, Sendable {
             )
         }
 
+        /// SPEC-044-R014-3: a confirmed catalog download, bounded by the
+        /// v1 maximum action timeout.
+        static func prepareModel(transactionID: String, estimatedBytes: Int64) -> Action {
+            Action(
+                available: true,
+                requiresConfirmation: true,
+                transactionKind: "prepare_model",
+                transactionID: transactionID,
+                actionTimeoutSeconds: 1800,
+                estimatedBytes: estimatedBytes,
+                unavailableReason: nil
+            )
+        }
+
         static func evaluateModel(transactionID: String, timeoutSeconds: Int = 10) -> Action {
             Action(
                 available: true,

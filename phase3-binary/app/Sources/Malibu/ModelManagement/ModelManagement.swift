@@ -647,10 +647,14 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
               ["fits", "does_not_fit", "unknown"].contains(row.fit),
               ["live_signed", "static_signed", "none"].contains(row.rateSource),
               rowRateSourceIsNoLessConservativeThanProjection(row.rateSource),
-              ["trusted", "fallback", "stale", "blocked", "unavailable"].contains(row.economicsState),
+              ["trusted", "fallback", "stale", "blocked", "unavailable", "catalog_reference"].contains(row.economicsState),
               row.warningCodes.allSatisfy(Self.closedWarnings.contains),
               admissionIsValid(row.admission),
-              Self.providerGuidanceIsValid(row.providerGuidance, admission: row.admission),
+              Self.providerGuidanceIsValid(
+                  row.providerGuidance,
+                  admission: row.admission,
+                  legacyCatalogOnlyRow: Self.isLegacyCatalogOnlySentinel(row)
+              ),
               row.estimatedGB == nil || row.estimatedGB! >= 0,
               row.providerShareBPS == nil || (0...10_000).contains(row.providerShareBPS!),
               nonNegative(row.promptRateUSDPerMillionTokens),
@@ -752,9 +756,16 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
                 throw ModelManagementError.invalidCatalog
             }
         }
+        if row.economicsState == "catalog_reference" {
+            try validateCatalogReference(row)
+        }
+        if row.prepareAction.available {
+            // SPEC-044-R014-3: the only prepare a v1 row may offer is the
+            // confirmed catalog download on a catalog-only row.
+            guard Self.isCatalogDownloadRow(row) else { throw ModelManagementError.invalidCatalog }
+        }
         if row.economicsState != "trusted" {
             guard !row.switchAction.available,
-                  !row.prepareAction.available,
                   !row.adoptRecommendationAction.available,
                   !row.cleanupStagingAction.available else {
                 throw ModelManagementError.invalidCatalog
@@ -778,6 +789,87 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
             row.adoptRecommendationAction,
             row.cleanupStagingAction,
         ].forEach(validate(action:))
+    }
+
+    /// SPEC-044-R014-1: a v1 catalog-only row, a signed catalog model with no
+    /// local candidate. Its admission is the local-default `not_offered`
+    /// sentinel; `action_model_id` is null, or the catalog key itself when the
+    /// row offers a download (never a `byom_` candidate ID).
+    static func isCatalogOnlyRow(_ row: Row) -> Bool {
+        guard row.admission.source == "local_default",
+              row.admission.state == "not_offered",
+              !row.admission.catalogEconomicsPermitted,
+              !row.admission.settlementCapable,
+              row.admission.coordinatorEventID == nil,
+              row.admission.stateObservedAt == nil,
+              !row.weightsPresentLocally else { return false }
+        guard let actionModelID = row.actionModelID else {
+            return row.runtimeState == "catalog"
+        }
+        return actionModelID == row.modelKey
+            && !actionModelID.hasPrefix("byom_")
+            && row.runtimeState == "needs_preparation"
+    }
+
+    /// The catalog-only row CLI releases up to 1.8.258 emit, labelled
+    /// `byom.local.local_only` although its admission state is `not_offered`.
+    static func isLegacyCatalogOnlySentinel(_ row: Row) -> Bool {
+        row.actionModelID == nil
+            && isCatalogOnlyRow(row)
+            && row.providerGuidance.stateLabelKey == "byom.local.local_only"
+    }
+
+    /// SPEC-044-R014-3: a confirmed `prepare_model` download on a catalog-only
+    /// row that fits, with every other action unavailable.
+    static func isCatalogDownloadRow(_ row: Row) -> Bool {
+        let prepare = row.prepareAction
+        guard isCatalogOnlyRow(row),
+              row.actionModelID == row.modelKey,
+              // The key becomes a CLI argument: the signed catalog key grammar
+              // (SPEC-023 §3.7.3), so it can never read as an option.
+              row.modelKey.range(of: #"^[a-z0-9][a-z0-9._/-]{0,127}$"#, options: .regularExpression) != nil,
+              row.fit == "fits",
+              !row.isCurrent,
+              prepare.available,
+              prepare.transactionKind == "prepare_model",
+              prepare.requiresConfirmation,
+              let bytes = prepare.estimatedBytes,
+              (1...maxDownloadBytes).contains(bytes),
+              let timeout = prepare.actionTimeoutSeconds,
+              (1...1_800).contains(timeout) else { return false }
+        return !row.switchAction.available
+            && !row.evaluateAction.available
+            && !row.adoptRecommendationAction.available
+            && !row.cleanupStagingAction.available
+    }
+
+    static let maxDownloadBytes: Int64 = 1_099_511_627_776
+
+    /// SPEC-044-R014-2: the signed catalog rate on a catalog-only row. It is
+    /// shown as a rate this Mac is not earning, so it must be complete,
+    /// fresh, live-signed and never carry action authority beyond a download.
+    private func validateCatalogReference(_ row: Row) throws {
+        let projectionBlocking = Self.trustedEconomicsBlockingWarnings.subtracting(["admission_state_missing"])
+        guard Self.isCatalogOnlyRow(row),
+              source.rateCardSource == "live_signed",
+              row.rateSource == "live_signed",
+              Set(warnings).isDisjoint(with: projectionBlocking),
+              Set(row.warningCodes).isDisjoint(with: Self.trustedEconomicsBlockingWarnings),
+              row.warningCodes.contains("admission_state_not_settlement_capable"),
+              row.rateCardVersion != nil,
+              row.rateCardKey != nil,
+              trustedRateTimestampIsCurrent(row.rateCardGeneratedAt),
+              row.promptRateUSDPerMillionTokens != nil,
+              row.completionRateUSDPerMillionTokens != nil,
+              row.providerShareBPS != nil,
+              row.providerPromptPayoutUSDPerMillionTokens != nil,
+              row.providerCompletionPayoutUSDPerMillionTokens != nil,
+              !row.switchAction.available,
+              !row.evaluateAction.available,
+              !row.adoptRecommendationAction.available,
+              !row.cleanupStagingAction.available else {
+            throw ModelManagementError.invalidCatalog
+        }
     }
 
     private func admissionIsValid(_ admission: Admission) -> Bool {
@@ -844,7 +936,8 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
 
     private static func providerGuidanceIsValid(
         _ guidance: ProviderGuidance,
-        admission: Admission
+        admission: Admission,
+        legacyCatalogOnlyRow: Bool = false
     ) -> Bool {
         let earningClasses = [
             "settlement_capable",
@@ -875,9 +968,14 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
             "withdrawn",
             "revoked",
         ]
-        let expectedStateLabel: String? = knownStates.contains(admission.state)
-            ? expectedStateLabelPrefix + admission.state
-            : nil
+        // SPEC-044-R014-1: CLI 1.8.258 and earlier label the catalog-only
+        // not_offered sentinel `byom.local.local_only`; accept that one legacy
+        // label on that one row shape only.
+        let expectedStateLabel: String? = legacyCatalogOnlyRow
+            ? "byom.local.local_only"
+            : knownStates.contains(admission.state)
+                ? expectedStateLabelPrefix + admission.state
+                : nil
         return earningClasses.contains(guidance.earningPathClass)
             && expectedStateLabel != nil
             && expectedStateLabel == guidance.stateLabelKey
@@ -1752,6 +1850,29 @@ private final class ModelCLIOutputLineBuffer: @unchecked Sendable {
     }
 }
 
+/// Bounds stdout lines handed to the MainActor and not yet consumed, so a
+/// flood of short lines cannot queue unbounded UI work; past the bound the
+/// runner stops the process instead of queueing more.
+final class ModelCLIPendingDeliveries: @unchecked Sendable {
+    static let limit = 1_024
+    private let lock = NSLock()
+    private var pending = 0
+
+    func tryAcquire() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard pending < Self.limit else { return false }
+        pending += 1
+        return true
+    }
+
+    func release() {
+        lock.lock()
+        pending -= 1
+        lock.unlock()
+    }
+}
+
 final class ModelCLIProcessCancellation: @unchecked Sendable {
     private let lock = NSLock()
     private weak var process: Process?
@@ -1868,6 +1989,7 @@ final class MalibuModelCLI: MalibuModelCLIRunning {
                 let stderr = ModelCLIOutputBuffer()
                 let stdoutLines = ModelCLIOutputLineBuffer()
                 let deliveries = DispatchGroup()
+                let pendingDeliveries = ModelCLIPendingDeliveries()
                 process.executableURL = executable
                 process.arguments = arguments
                 process.environment = environment
@@ -1892,9 +2014,17 @@ final class MalibuModelCLI: MalibuModelCLIRunning {
                         if maxOutputBytes == nil { buffer.append(text) }
                         if deliverLines {
                             for value in stdoutLines.append(text) {
+                                guard pendingDeliveries.tryAcquire() else {
+                                    handle.readabilityHandler = nil
+                                    cancellation.kill()
+                                    return
+                                }
                                 deliveries.enter()
                                 Task { @MainActor in
-                                    defer { deliveries.leave() }
+                                    defer {
+                                        pendingDeliveries.release()
+                                        deliveries.leave()
+                                    }
                                     onLine(value)
                                 }
                             }
@@ -1926,9 +2056,13 @@ final class MalibuModelCLI: MalibuModelCLIRunning {
                 if !stdoutTail.isEmpty { stdout.append(String(decoding: stdoutTail, as: UTF8.self)) }
                 if !stderrTail.isEmpty { stderr.append(String(decoding: stderrTail, as: UTF8.self)) }
                 for value in stdoutLines.append(String(decoding: stdoutTail, as: UTF8.self)) + stdoutLines.flush() {
+                    guard pendingDeliveries.tryAcquire() else { break }
                     deliveries.enter()
                     Task { @MainActor in
-                        defer { deliveries.leave() }
+                        defer {
+                            pendingDeliveries.release()
+                            deliveries.leave()
+                        }
                         onLine(value)
                     }
                 }
@@ -2108,6 +2242,144 @@ private struct ModelManagementPersistedState: Codable {
     var recommendationSchedule: MalibuRecommendationSchedule?
 }
 
+/// One `model_catalog_transaction_event.v1` line from `models
+/// prepare-catalog` (SPEC-044-R002, R014-4), decoded strictly and bounded to
+/// the SPEC-044 16,384-byte line cap.
+struct MalibuModelDownloadEvent: Equatable, Sendable {
+    let transactionID: String
+    let transactionKind: String
+    let modelKey: String
+    let eventSequence: Int
+    let state: String
+    let errorCode: String?
+    let warningCode: String?
+    let bytesCompleted: Int64?
+    let bytesExpected: Int64?
+
+    private struct Wire: Decodable {
+        struct Progress: Decodable {
+            let stageLabelKey: String
+            let bytesCompleted: Int64?
+            let bytesExpected: Int64?
+            let percentComplete: Double?
+            let heartbeat: Bool?
+
+            enum CodingKeys: String, CodingKey, CaseIterable {
+                case stageLabelKey = "stage_label_key"
+                case bytesCompleted = "bytes_completed"
+                case bytesExpected = "bytes_expected"
+                case percentComplete = "percent_complete"
+                case heartbeat
+            }
+
+            init(from decoder: Decoder) throws {
+                try rejectUnknownKeys(decoder, allowed: CodingKeys.allCases.map(\.stringValue))
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+                stageLabelKey = try container.decode(String.self, forKey: .stageLabelKey)
+                bytesCompleted = try decodeExplicitNullableInt64(container, .bytesCompleted)
+                bytesExpected = try decodeExplicitNullableInt64(container, .bytesExpected)
+                percentComplete = try decodeExplicitNullableDouble(container, .percentComplete)
+                heartbeat = try container.decodeNil(forKey: .heartbeat) ? nil : container.decode(Bool.self, forKey: .heartbeat)
+            }
+        }
+
+        let schema: String
+        let transactionID: String
+        let transactionKind: String
+        let modelKey: String
+        let eventSequence: Int
+        let emittedAt: String
+        let state: String
+        let progress: Progress?
+        let errorCode: String?
+        let warningCode: String?
+
+        enum CodingKeys: String, CodingKey, CaseIterable {
+            case schema
+            case transactionID = "transaction_id"
+            case transactionKind = "transaction_kind"
+            case modelKey = "model_key"
+            case eventSequence = "event_sequence"
+            case emittedAt = "emitted_at"
+            case state
+            case progress
+            case errorCode = "error_code"
+            case warningCode = "warning_code"
+        }
+
+        init(from decoder: Decoder) throws {
+            try rejectUnknownKeys(decoder, allowed: CodingKeys.allCases.map(\.stringValue))
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            schema = try container.decode(String.self, forKey: .schema)
+            transactionID = try container.decode(String.self, forKey: .transactionID)
+            transactionKind = try container.decode(String.self, forKey: .transactionKind)
+            modelKey = try container.decode(String.self, forKey: .modelKey)
+            eventSequence = try container.decode(Int.self, forKey: .eventSequence)
+            emittedAt = try container.decode(String.self, forKey: .emittedAt)
+            state = try container.decode(String.self, forKey: .state)
+            progress = try container.decodeNil(forKey: .progress) ? nil : container.decode(Progress.self, forKey: .progress)
+            errorCode = try decodeExplicitNullableString(container, .errorCode)
+            warningCode = try decodeExplicitNullableString(container, .warningCode)
+        }
+    }
+
+    static let maxLineBytes = 16_384
+    private static let states: Set<String> = ["queued", "running", "cancel_requested", "cancelled", "succeeded", "failed", "timed_out"]
+    private static let terminalStates: Set<String> = ["cancelled", "succeeded", "failed", "timed_out"]
+    /// The SPEC-044 closed event error and warning codes.
+    private static let errorCodes: Set<String> = [
+        "action_unavailable", "stale_transaction", "operation_conflict", "authority_unavailable",
+        "artifact_unqualified", "artifact_identity_mismatch", "root_unavailable", "root_identity_mismatch",
+        "unsafe_filesystem_object", "resource_limit_exceeded", "insufficient_disk_space",
+        "managed_budget_exceeded", "managed_object_limit_exceeded", "managed_inventory_invalid",
+        "transfer_failed", "transfer_size_exceeded", "verification_failed", "publication_failed",
+        "cleanup_failed", "cancel_failed", "timed_out", "internal_error",
+    ]
+    private static let warningCodes: Set<String> = [
+        "staging_cleanup_required", "published_cleanup_available", "configured_legacy_accounting_unavailable",
+        "managed_inventory_overflow", "cancellation_pending",
+    ]
+
+    static func decode(_ line: String) throws -> MalibuModelDownloadEvent {
+        let data = Data(line.utf8)
+        guard data.count <= maxLineBytes else { throw ModelManagementError.invalidCatalog }
+        try MalibuStrictJSON.rejectDuplicateKeys(data)
+        let wire = try JSONDecoder().decode(Wire.self, from: data)
+        let completed = wire.progress?.bytesCompleted
+        let expected = wire.progress?.bytesExpected
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let emittedAtValid = formatter.date(from: wire.emittedAt) != nil
+            || ISO8601DateFormatter().date(from: wire.emittedAt) != nil
+        guard wire.schema == "model_catalog_transaction_event.v1",
+              UUID(uuidString: wire.transactionID) != nil,
+              wire.eventSequence >= 1,
+              emittedAtValid,
+              states.contains(wire.state),
+              completed.map({ $0 >= 0 }) ?? true,
+              expected.map({ $0 >= 0 }) ?? true,
+              completed.flatMap({ done in expected.map { done <= $0 } }) ?? true,
+              wire.progress?.percentComplete.map({ $0.isFinite && $0 >= 0 && $0 <= 100 }) ?? true,
+              !(terminalStates.contains(wire.state) && wire.progress != nil),
+              (["failed", "timed_out"].contains(wire.state)) == (wire.errorCode != nil),
+              wire.errorCode.map(errorCodes.contains) ?? true,
+              wire.warningCode.map(warningCodes.contains) ?? true else {
+            throw ModelManagementError.invalidCatalog
+        }
+        return MalibuModelDownloadEvent(
+            transactionID: wire.transactionID,
+            transactionKind: wire.transactionKind,
+            modelKey: wire.modelKey,
+            eventSequence: wire.eventSequence,
+            state: wire.state,
+            errorCode: wire.errorCode,
+            warningCode: wire.warningCode,
+            bytesCompleted: completed,
+            bytesExpected: expected
+        )
+    }
+}
+
 // MARK: - App state and actions
 
 @MainActor
@@ -2172,6 +2444,41 @@ final class ModelManagementStore: ObservableObject {
     /// #1816: coordinator pool bindings read back by candidate id.
     @Published private(set) var poolBindings: [String: MalibuBYOMPoolBinding] = [:]
 
+    /// SPEC-044-R014-5: the one catalog download that may run at a time.
+    struct DownloadState: Equatable {
+        enum Phase: Equatable {
+            case starting
+            case running
+            /// No event for 30 seconds; the download may still be running.
+            case delayed
+            case cancelling
+            /// The CLI finished; Malibu is refreshing the model list.
+            case finishing
+        }
+
+        /// The catalog key: stable across refreshes, unlike the row a refresh
+        /// may replace with a local candidate.
+        let modelKey: String
+        let title: String
+        let transactionID: String
+        var phase: Phase
+        var bytesCompleted: Int64?
+        var bytesExpected: Int64?
+    }
+
+    @Published private(set) var download: DownloadState?
+
+    /// The last download's outcome, shown beside the row it was for.
+    struct DownloadResult: Equatable {
+        let modelKey: String
+        let message: String
+        let succeeded: Bool
+        /// The download finished but the model list has not confirmed it yet.
+        var needsRefresh = false
+    }
+
+    @Published private(set) var downloadResult: DownloadResult?
+
     /// #2054 P2-5: Hugging Face mlx-community search results. Never earnable,
     /// never actionable, never mixed into the catalog rows.
     @Published private(set) var otherMLXModels: [MalibuOtherMLXModel] = []
@@ -2183,6 +2490,18 @@ final class ModelManagementStore: ObservableObject {
     /// Builds a fresh runner for every search, so a timed-out search's
     /// cancellation can never reach a later one.
     private let makeBrowseCLI: () -> any MalibuModelCLIRunning
+    /// A fresh one-shot runner per download, so Cancel reaches only it.
+    private let makeDownloadCLI: () -> any MalibuModelCLIRunning
+    private var downloadRunner: (any MalibuModelCLIRunning)?
+    private var downloadWatchdog: Task<Void, Never>?
+    private var downloadLastEventAt = Date()
+    private var downloadLastSequence = 0
+    private var downloadTerminal: (state: String, errorCode: String?, warningCode: String?)?
+    private var downloadCancelRequested = false
+    private var downloadTimedOut = false
+    /// SPEC-044-R014-5 delayed state after this long without an event.
+    var downloadDelayedSeconds: TimeInterval = 30
+    var downloadWatchdogIntervalSeconds: TimeInterval = 5
     var browseCommandTimeoutSeconds: TimeInterval = 20
     /// Bumped per search and at the deadline, so a late reply is ignored.
     private var browseGeneration: UInt64 = 0
@@ -2227,12 +2546,14 @@ final class ModelManagementStore: ObservableObject {
     init(
         cli: any MalibuModelCLIRunning = MalibuModelCLI.shared,
         makeBrowseCLI: @escaping () -> any MalibuModelCLIRunning = { MalibuModelCLI(maxOutputBytes: 1_048_576, oneShot: true) },
+        makeDownloadCLI: @escaping () -> any MalibuModelCLIRunning = { MalibuModelCLI(maxOutputBytes: 16_777_216, oneShot: true) },
         paths: ProviderPaths = .current,
         defaults: UserDefaults = .standard,
         powerMonitor: MalibuPowerMonitor = MalibuPowerMonitor()
     ) {
         self.cli = cli
         self.makeBrowseCLI = makeBrowseCLI
+        self.makeDownloadCLI = makeDownloadCLI
         self.paths = paths
         self.defaults = defaults
         self.powerMonitor = powerMonitor
@@ -2678,6 +2999,7 @@ final class ModelManagementStore: ObservableObject {
             self.catalogRefreshFailed = false
             // Install the freshness deadline before any further await.
             scheduleCatalogProjectionExpiry(document)
+            reconcilePendingDownload()
             catalogBackgroundRefreshNotBefore = Date().addingTimeInterval(catalogBackgroundRefreshSeconds)
             // The refresh stays a blocking operation until the pool-binding
             // read finishes, so a status-driven refresh or a model action
@@ -2892,6 +3214,267 @@ final class ModelManagementStore: ObservableObject {
                 reason: safeOperationError(error)
             )
         }
+    }
+
+    /// A download may start from a fresh projection while no other download
+    /// runs. It never changes the served model, so it does not wait for
+    /// switch controls.
+    var canStartDownload: Bool {
+        download == nil && catalogProjectionActionable && (listState == .ready || listState == .viewOnly)
+    }
+
+    /// SPEC-044-R014-4/5: runs the confirmed `prepare_model` download through
+    /// `models prepare-catalog`, follows its events, and refreshes the
+    /// projection when it ends. Success needs a `succeeded` event, exit 0 and
+    /// a refreshed projection that lists the model on this Mac (R011).
+    func startDownload(_ row: MalibuModelRow) async {
+        guard row.action == .download,
+              let transaction = row.downloadTransaction,
+              canStartDownload,
+              rowStillCurrent(row) else { return }
+        let runner = makeDownloadCLI()
+        let name = ModelsPresentation.title(row)
+        let modelKey = row.modelKey
+        downloadRunner = runner
+        downloadLastEventAt = Date()
+        downloadLastSequence = 0
+        downloadTerminal = nil
+        downloadTimedOut = false
+        downloadCancelRequested = false
+        downloadResult = nil
+        pendingDownloadConfirmation = nil
+        download = DownloadState(
+            modelKey: modelKey,
+            title: name,
+            transactionID: transaction.transactionID,
+            phase: .starting,
+            bytesCompleted: nil,
+            bytesExpected: transaction.estimatedBytes
+        )
+        statusLine = String(localized: "Downloading \(name)…", comment: "Model download status")
+        startDownloadWatchdog(timeoutSeconds: transaction.timeoutSeconds)
+        var result: ModelCLIResult?
+        do {
+            result = try await runner.run(
+                arguments: [
+                    "models", "prepare-catalog", modelKey,
+                    "--transaction-id", transaction.transactionID,
+                    "--json",
+                    "--config", paths.configFile.path,
+                ],
+                peer: peerEvidence,
+                onLine: { [weak self] line in
+                    self?.consumeDownloadEvent(line, modelKey: modelKey, transactionID: transaction.transactionID)
+                }
+            )
+        } catch {
+            result = nil
+        }
+        downloadWatchdog?.cancel()
+        downloadWatchdog = nil
+        downloadRunner = nil
+        // Capture this transaction's outcome before any await, and keep the
+        // download slot until the refresh below, so a second download cannot
+        // reset it.
+        let terminal = downloadTerminal
+        let timedOut = downloadTimedOut
+        let cancelRequested = downloadCancelRequested
+        if var state = download {
+            state.phase = .finishing
+            download = state
+        }
+        let committed = result?.exitCode == 0 && terminal?.state == "succeeded"
+        var outcome: String
+        var message: String
+        if committed {
+            outcome = "success"
+            message = String(localized: "Downloaded and verified \(name). It's on this Mac now.", comment: "Model download succeeded")
+        } else if timedOut {
+            outcome = "failed"
+            message = String(localized: "The download of \(name) stopped reporting progress, so Malibu cancelled it. The model you serve is unchanged. Try again.", comment: "Model download timed out")
+        } else if terminal?.state == "cancelled" || (cancelRequested && terminal == nil) {
+            outcome = "cancelled"
+            message = String(localized: "Download cancelled. The model you serve is unchanged.", comment: "Model download cancelled")
+        } else {
+            outcome = "failed"
+            message = Self.downloadFailureMessage(terminal?.errorCode, name: name)
+        }
+        await refresh(currentModelID: currentModelID, peer: peerEvidence)
+        var needsRefresh = false
+        let cancelTooLate = committed && cancelRequested
+        let cleanupRequired = terminal?.warningCode == "staging_cleanup_required"
+        let historyID = UUID()
+        if committed, !downloadIsListedLocally(modelKey) {
+            // R011: report the change only from a refreshed projection; a
+            // later refresh that lists it confirms it (reconcilePendingDownload).
+            outcome = "failed"
+            needsRefresh = true
+            pendingDownloadConfirmation = PendingDownloadConfirmation(
+                modelKey: modelKey,
+                title: name,
+                cancelTooLate: cancelTooLate,
+                cleanupRequired: cleanupRequired,
+                historyID: historyID
+            )
+            message = String(localized: "The download of \(name) finished, but Malibu couldn't confirm it in the model list yet. Select Refresh to check again.", comment: "Model download not yet reconciled")
+        }
+        message = Self.downloadMessage(message, modelKey: modelKey, cancelTooLate: cancelTooLate, cleanupRequired: cleanupRequired)
+        download = nil
+        downloadResult = DownloadResult(modelKey: modelKey, message: message, succeeded: outcome == "success", needsRefresh: needsRefresh)
+        appendHistory(ModelActivityEntry(
+            id: historyID,
+            timestamp: Date(),
+            operation: "download",
+            fromModelID: nil,
+            toModelID: modelKey,
+            outcome: outcome,
+            reason: outcome == "success" ? nil : String(message.prefix(240))
+        ))
+        saveState()
+        statusLine = message
+        MalibuAccessibility.announce(message)
+    }
+
+    private struct PendingDownloadConfirmation {
+        let modelKey: String
+        let title: String
+        let cancelTooLate: Bool
+        let cleanupRequired: Bool
+        let historyID: UUID
+    }
+
+    private var pendingDownloadConfirmation: PendingDownloadConfirmation?
+
+    /// The cancel-too-late and cleanup disclosures travel with the outcome,
+    /// including a confirmation that arrives on a later refresh.
+    private static func downloadMessage(_ base: String, modelKey: String, cancelTooLate: Bool, cleanupRequired: Bool) -> String {
+        var message = base
+        if cancelTooLate {
+            message = String(localized: "Cancel came too late: the download had already finished.", comment: "Model download cancel too late") + " " + message
+        }
+        if cleanupRequired {
+            message += " " + String(localized: "Some partial download files remain. To remove them, run: malibu-cli models prepare \(modelKey) --repair-cache", comment: "Model download cleanup required")
+        }
+        return message
+    }
+
+    private func downloadIsListedLocally(_ modelKey: String) -> Bool {
+        !catalogRefreshFailed && hasUsableCatalogProjection
+            && rows.contains { $0.modelKey == modelKey && $0.weightsPresentLocally }
+    }
+
+    /// A finished download the list had not confirmed yet is confirmed by the
+    /// first refreshed projection that lists it on this Mac.
+    private func reconcilePendingDownload() {
+        guard let pending = pendingDownloadConfirmation, downloadIsListedLocally(pending.modelKey) else { return }
+        pendingDownloadConfirmation = nil
+        let message = Self.downloadMessage(
+            String(localized: "Downloaded and verified \(pending.title). It's on this Mac now.", comment: "Model download succeeded"),
+            modelKey: pending.modelKey,
+            cancelTooLate: pending.cancelTooLate,
+            cleanupRequired: pending.cleanupRequired
+        )
+        downloadResult = DownloadResult(modelKey: pending.modelKey, message: message, succeeded: true)
+        if let index = history.firstIndex(where: { $0.id == pending.historyID }) {
+            let entry = history[index]
+            history[index] = ModelActivityEntry(
+                id: entry.id,
+                timestamp: entry.timestamp,
+                operation: entry.operation,
+                fromModelID: entry.fromModelID,
+                toModelID: entry.toModelID,
+                outcome: "success",
+                reason: nil
+            )
+            saveState()
+        }
+        statusLine = message
+        MalibuAccessibility.announce(message)
+    }
+
+    /// The Refresh action offered while a download is not confirmed yet.
+    func refreshAfterDownload() async {
+        await refresh(currentModelID: currentModelID, peer: peerEvidence)
+    }
+
+    func dismissDownloadResult() {
+        downloadResult = nil
+    }
+
+    /// Asks the CLI to stop; it removes the partial download and reports
+    /// `cancelled`. Nothing is deleted by Malibu.
+    func cancelDownload() {
+        guard var state = download, state.phase != .cancelling, state.phase != .finishing else { return }
+        downloadCancelRequested = true
+        state.phase = .cancelling
+        download = state
+        downloadRunner?.cancelCurrentOperation()
+    }
+
+    nonisolated static func downloadFailureMessage(_ errorCode: String?, name: String) -> String {
+        switch errorCode {
+        case "insufficient_disk_space":
+            return String(localized: "Not enough free disk space to download \(name). Free up space and try again.", comment: "Model download failed: disk space")
+        case "verification_failed":
+            return String(localized: "The downloaded files for \(name) don't match the signed catalog, so they weren't used. Try again later.", comment: "Model download failed: verification")
+        case "authority_unavailable":
+            return String(localized: "The signed catalog couldn't be checked, so \(name) wasn't downloaded. Try again later.", comment: "Model download failed: catalog")
+        default:
+            return String(localized: "The download of \(name) didn't finish. Check the network connection and try again.", comment: "Model download failed")
+        }
+    }
+
+    private func startDownloadWatchdog(timeoutSeconds: Int) {
+        downloadWatchdog?.cancel()
+        let interval = UInt64(max(0.01, downloadWatchdogIntervalSeconds) * 1_000_000_000)
+        downloadWatchdog = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: interval)
+                guard !Task.isCancelled, let self, var state = self.download else { return }
+                let silent = Date().timeIntervalSince(self.downloadLastEventAt)
+                if silent >= TimeInterval(timeoutSeconds) {
+                    // SPEC-044-R014-5: no event for the action timeout.
+                    self.downloadTimedOut = true
+                    self.downloadCancelRequested = true
+                    state.phase = .cancelling
+                    self.download = state
+                    self.downloadRunner?.cancelCurrentOperation()
+                    try? await Task.sleep(nanoseconds: 10_000_000_000)
+                    guard !Task.isCancelled else { return }
+                    self.downloadRunner?.forceTerminateCurrentOperation()
+                    return
+                }
+                if silent >= self.downloadDelayedSeconds, state.phase == .running || state.phase == .starting {
+                    state.phase = .delayed
+                    self.download = state
+                }
+            }
+        }
+    }
+
+    /// Accepts only this transaction's events, in sequence; other lines are
+    /// ignored and never trusted.
+    private func consumeDownloadEvent(_ line: String, modelKey: String, transactionID: String) {
+        guard var state = download, state.transactionID == transactionID,
+              let event = try? MalibuModelDownloadEvent.decode(line),
+              event.transactionID == transactionID,
+              event.transactionKind == "prepare_model",
+              event.modelKey == modelKey,
+              event.eventSequence > downloadLastSequence,
+              downloadTerminal == nil else { return }
+        downloadLastSequence = event.eventSequence
+        downloadLastEventAt = Date()
+        switch event.state {
+        case "succeeded", "failed", "cancelled", "timed_out":
+            downloadTerminal = (event.state, event.errorCode, event.warningCode)
+        case "cancel_requested":
+            state.phase = .cancelling
+        default:
+            if state.phase != .cancelling { state.phase = .running }
+            if let completed = event.bytesCompleted { state.bytesCompleted = completed }
+            if let expected = event.bytesExpected, expected > 0 { state.bytesExpected = expected }
+        }
+        download = state
     }
 
     private func runBYOMCommand(_ arguments: [String]) async throws -> ModelCLIResult {
@@ -3622,6 +4205,8 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         case none
         case switchModel
         case evaluate
+        /// SPEC-044-R014: a confirmed catalog download.
+        case download
     }
 
     struct EvaluateTransaction: Equatable, Sendable {
@@ -3629,8 +4214,23 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         let timeoutSeconds: Int
     }
 
+    /// SPEC-044-R014-3: the typed `prepare_model` catalog download.
+    struct DownloadTransaction: Equatable, Sendable {
+        let transactionID: String
+        let timeoutSeconds: Int
+        let estimatedBytes: Int64
+    }
+
     let id: String
     let displayID: String
+    /// The projection's `model_key`: the signed catalog key for catalog rows.
+    let modelKey: String
+    /// A signed catalog model (SPEC-044-R013 item 1): a trusted catalog row,
+    /// a catalog-only row, or a local candidate with a verified catalog key.
+    let isSignedCatalogEntry: Bool
+    /// SPEC-044-R014-1: a catalog-only row (no local candidate).
+    let isCatalogOnly: Bool
+    let downloadTransaction: DownloadTransaction?
     // The coordinator-verified catalog identity (catalog model key) for a
     // trusted-economics network-catalog row. displayID is the provider-REPORTED
     // name and must never be presented as catalog-verified; when this is set the
@@ -3677,6 +4277,10 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
     init(row: MalibuModelsListDocument.Row, currentModelID: String?, warmSwapAvailable: Bool) {
         id = row.actionModelID
         displayID = row.displayID
+        modelKey = row.actionModelID
+        isSignedCatalogEntry = false
+        isCatalogOnly = false
+        downloadTransaction = nil
         catalogVerifiedModelKey = nil
         nonEarningDisclosure = nil
         state = row.state
@@ -3731,11 +4335,31 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         let projectedID = row.actionModelID ?? row.modelKey
         id = projectedID
         displayID = row.displayModelID
+        modelKey = row.modelKey
+        let catalogOnly = MalibuModelCatalogEconomicsDocument.isCatalogOnlyRow(row)
+        isCatalogOnly = catalogOnly
         catalogVerifiedModelKey = (row.economicsState == "trusted" && row.admission.catalogEconomicsPermitted)
             ? row.modelKey
             : nil
-        nonEarningDisclosure = (row.economicsState == "trusted" && !row.admission.settlementCapable)
-            ? String(localized: "No provider credit yet; catalog and receipt checks are still required.", comment: "Non-earning disclosure beside catalog rates for a non-settlement row")
+        let isCandidateWithCatalogKey = row.actionModelID.map { $0.hasPrefix("byom_") && $0 != row.modelKey } == true
+            && !row.warningCodes.contains("admission_state_missing")
+        isSignedCatalogEntry = catalogVerifiedModelKey != nil || catalogOnly || isCandidateWithCatalogKey
+        let isCatalogReference = row.economicsState == "catalog_reference" && catalogOnly
+        let showsRates = row.economicsState == "trusted" || isCatalogReference
+        if isCatalogReference {
+            nonEarningDisclosure = String(localized: "Network catalog rate. This Mac is not earning it yet.", comment: "Not-earning caveat beside a catalog-only model's catalog rate")
+        } else if row.economicsState == "trusted" && !row.admission.settlementCapable {
+            nonEarningDisclosure = String(localized: "No provider credit yet; catalog and receipt checks are still required.", comment: "Non-earning disclosure beside catalog rates for a non-settlement row")
+        } else {
+            nonEarningDisclosure = nil
+        }
+        downloadTransaction = MalibuModelCatalogEconomicsDocument.isCatalogDownloadRow(row)
+            ? row.prepareAction.transactionID.flatMap { transactionID in
+                guard UUID(uuidString: transactionID) != nil,
+                      let timeout = row.prepareAction.actionTimeoutSeconds,
+                      let bytes = row.prepareAction.estimatedBytes else { return nil }
+                return DownloadTransaction(transactionID: transactionID, timeoutSeconds: timeout, estimatedBytes: bytes)
+            }
             : nil
         state = row.runtimeState
         weightsPresentLocally = row.weightsPresentLocally
@@ -3748,24 +4372,26 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         guidanceNextAction = row.providerGuidance.nextAction
         admissionStateLabel = Self.admissionStateLabel(
             state: row.admission.state,
-            source: row.admission.source
+            source: row.admission.source,
+            settlementCapable: row.admission.settlementCapable
         )
         admissionStateMeaning = Self.admissionStateMeaning(
             state: row.admission.state,
-            source: row.admission.source
+            source: row.admission.source,
+            settlementCapable: row.admission.settlementCapable
         )
         evaluateTransaction = Self.evaluateTransaction(from: row.evaluateAction)
         warningCodes = row.warningCodes
-        demandRank = row.economicsState == "trusted" ? row.demandRank : nil
-        providerShareBPS = row.economicsState == "trusted" ? row.providerShareBPS : nil
-        readyProviderCount = row.economicsState == "trusted" ? row.readyProviderCount : nil
-        supplyDeficitScore = row.economicsState == "trusted" ? row.supplyDeficitScore : nil
-        demandWeight = row.economicsState == "trusted" ? row.demandWeight : nil
+        demandRank = showsRates ? row.demandRank : nil
+        providerShareBPS = showsRates ? row.providerShareBPS : nil
+        readyProviderCount = showsRates ? row.readyProviderCount : nil
+        supplyDeficitScore = showsRates ? row.supplyDeficitScore : nil
+        demandWeight = showsRates ? row.demandWeight : nil
         canonicalIdentity = Self.canonicalIdentity(row)
-        providerPromptPayoutUSDPerMillionTokens = row.economicsState == "trusted"
+        providerPromptPayoutUSDPerMillionTokens = showsRates
             ? row.providerPromptPayoutUSDPerMillionTokens
             : nil
-        providerCompletionPayoutUSDPerMillionTokens = row.economicsState == "trusted"
+        providerCompletionPayoutUSDPerMillionTokens = showsRates
             ? row.providerCompletionPayoutUSDPerMillionTokens
             : nil
 
@@ -3782,6 +4408,25 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
             category = .current
             action = .none
             blockReason = nil
+        } else if catalogOnly {
+            // SPEC-044-R014: a signed catalog model that is not on this Mac.
+            if downloadTransaction != nil {
+                category = .needsPreparation
+                action = .download
+                blockReason = String(localized: "Not on this Mac yet. Download it to serve it here.", comment: "Catalog-only row with a download")
+            } else if row.fit == "does_not_fit" {
+                category = .blocked
+                action = .none
+                blockReason = String(localized: "Needs more memory than this Mac has.", comment: "Catalog-only row that does not fit")
+            } else if MalibuModelCatalogEconomicsDocument.isLegacyCatalogOnlySentinel(row) {
+                category = .needsPreparation
+                action = .none
+                blockReason = String(localized: "Not on this Mac. Update the provider software to download it from Malibu.", comment: "Catalog-only row from an older provider CLI")
+            } else {
+                category = .needsPreparation
+                action = .none
+                blockReason = String(localized: "Not on this Mac. The signed catalog has no verified download for it yet.", comment: "Catalog-only row without a verified download")
+            }
         } else if switchAvailable, warmSwapAvailable, row.weightsPresentLocally, row.fit == "fits" {
             category = .ready
             action = .switchModel
@@ -3828,6 +4473,10 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
 
         id = projectedID
         displayID = row.displayModelID
+        modelKey = row.modelKey
+        isSignedCatalogEntry = false
+        isCatalogOnly = false
+        downloadTransaction = nil
         catalogVerifiedModelKey = nil
         nonEarningDisclosure = nil
         state = row.runtimeState
@@ -3854,10 +4503,18 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         action = .none
         if currentModelID.map({ modelIdentityKey($0) == modelIdentityKey(projectedID) }) == true || row.isCurrent {
             category = .current
-            blockReason = String(localized: "Current model details are using a newer catalog contract than this Malibu release understands.", comment: "Unsupported current catalog row")
+            blockReason = String(localized: "This Mac is serving this model. Update Malibu to see its catalog details.", comment: "Unsupported current catalog row")
         } else {
             category = .blocked
-            blockReason = String(localized: "Model catalog row unavailable because the provider CLI returned an unsupported catalog contract.", comment: "Unsupported catalog row")
+            // The row failed validation, so nothing on it is trusted for an
+            // action; the plain reason uses only local facts.
+            if row.fit == "does_not_fit" {
+                blockReason = String(localized: "Needs more memory than this Mac has.", comment: "Unsupported catalog row that does not fit")
+            } else if !row.weightsPresentLocally {
+                blockReason = String(localized: "Not on this Mac, and Malibu can't read this model's catalog details. Update Malibu or the provider software.", comment: "Unsupported catalog row not on this Mac")
+            } else {
+                blockReason = String(localized: "Malibu can't read this model's catalog details. Update Malibu or the provider software.", comment: "Unsupported catalog row")
+            }
         }
     }
 
@@ -3880,12 +4537,15 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         case .current: return String(localized: "Current", comment: "Model category")
         case .ready: return String(localized: "Ready to switch", comment: "Model category")
         case .networkCatalog: return String(localized: "Network catalog", comment: "Model category")
-        case .needsPreparation: return String(localized: "Needs preparation", comment: "Model category")
+        case .needsPreparation: return String(localized: "Not downloaded", comment: "Model category")
         case .blocked: return String(localized: "Blocked", comment: "Model category")
         }
     }
 
     var earningVerdict: String? {
+        if isCatalogOnly {
+            return String(localized: "Not earning on this Mac — the model isn't downloaded", comment: "Earning verdict for a signed catalog model that is not on this Mac")
+        }
         guard let earningPathClass else { return nil }
         switch earningPathClass {
         case "settlement_capable":
@@ -3916,7 +4576,7 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
     /// which a Trusted Pool creator can sign into a pool. The provider CLI
     /// refuses runtimes no pool entry can name.
     var canProposeToPool: Bool {
-        guard admissionSource != nil, catalogVerifiedModelKey == nil else { return false }
+        guard admissionSource != nil, catalogVerifiedModelKey == nil, !isCatalogOnly else { return false }
         return earningPathClass != "settlement_capable" && earningPathClass != "pool_attested_earning"
     }
 
@@ -3966,6 +4626,8 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
     }
 
     var earningDisclosure: String? {
+        // A catalog-only row's verdict and caveat already say it isn't earning.
+        if isCatalogOnly { return nil }
         switch earningPathClass {
         case "no_earning_path_in_v0_1":
             return String(localized: "This candidate can't earn in this release. It's shown so its state is honest, not hidden.", comment: "BYOM no earning path disclosure")
@@ -3978,7 +4640,12 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         }
     }
 
-    private static func admissionStateLabel(state: String, source: String) -> String {
+    private static func admissionStateLabel(state: String, source: String, settlementCapable: Bool) -> String {
+        // SPEC-044-R002: earning copy follows the authorization boolean, not
+        // the state name alone.
+        if state == "settlement_capable", !settlementCapable {
+            return String(localized: "Not eligible to earn here", comment: "BYOM admission label when the settlement boolean is false")
+        }
         switch state {
         case "local_only": return String(localized: "Local only", comment: "BYOM admission label")
         case "not_offered": return String(localized: "Not offered", comment: "BYOM admission label")
@@ -3996,7 +4663,10 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         }
     }
 
-    private static func admissionStateMeaning(state: String, source: String) -> String {
+    private static func admissionStateMeaning(state: String, source: String, settlementCapable: Bool) -> String {
+        if state == "settlement_capable", !settlementCapable {
+            return String(localized: "The coordinator reports this offer settlement-capable, but it is not bound to this catalog identity, so it is not earning here.", comment: "BYOM admission meaning when the settlement boolean is false")
+        }
         if state == "not_offered" {
             return source == "coordinator"
                 ? String(localized: "Coordinator reports no active network offer for this model.", comment: "BYOM coordinator not-offered meaning")

@@ -398,6 +398,47 @@ class BYOMJourneyCaptureTests(unittest.TestCase):
         manifest, manifest_path = self.mutate("discovery", mutator)
         self.capture("discovery", manifest, manifest_path)
 
+    def test_catalog_reference_is_accepted_only_on_catalog_only_rows(self) -> None:
+        reference = self.complete_catalog_economics_document()
+        row = reference["rows"][0]
+        row.update({
+            "model_key": "qwen/qwen3-8b",
+            "action_model_id": "qwen/qwen3-8b",
+            "weights_present_locally": False,
+            "runtime_state": "needs_preparation",
+            "rate_card_version": "rates-v1",
+            "rate_card_generated_at": "2026-10-20T00:00:00Z",
+            "rate_card_key": "qwen/qwen3-8b",
+            "rate_source": "live_signed",
+            "prompt_rate_usd_per_million_tokens": 0.2,
+            "completion_rate_usd_per_million_tokens": 0.4,
+            "provider_share_bps": 9000,
+            "provider_prompt_payout_usd_per_million_tokens": 0.18,
+            "provider_completion_payout_usd_per_million_tokens": 0.36,
+            "economics_state": "catalog_reference",
+            "warning_codes": ["admission_state_not_settlement_capable", "model_not_local"],
+        })
+
+        def accepted(manifest, root):
+            self.add_catalog_economics_step(manifest)
+            self.write_catalog_economics_capture(root, reference)
+
+        manifest, manifest_path = self.mutate("discovery", accepted)
+        self.capture("discovery", manifest, manifest_path)
+
+        local = json.loads(json.dumps(reference))
+        local["rows"][0]["weights_present_locally"] = True
+
+        def rejected(manifest, root):
+            self.add_catalog_economics_step(manifest)
+            self.write_catalog_economics_capture(root, local)
+
+        self.assert_capture_fails(
+            "discovery",
+            rejected,
+            "catalog_reference is valid only on a catalog-only local-default not_offered row",
+        )
+
     def test_rejects_invalid_guidance_in_catalog_economics_rows(self) -> None:
         document = self.complete_catalog_economics_document()
         document["rows"][0]["provider_guidance"]["next_action"] = "serve_traffic"

@@ -5998,6 +5998,21 @@ enum BYOMDiscoveryGuidance {
         )
     }
 
+    /// SPEC-044-R014-1: guidance for a v1 catalog-only row, a signed catalog
+    /// model with no local candidate. Its admission is the local-default
+    /// `not_offered` sentinel, so the label follows the source-aware
+    /// `byom.local.` + state rule, as `localNotOfferedGuidance` does; the next
+    /// step is the local blocker (the model is not on this Mac).
+    static func catalogOnlyGuidance() -> BYOMDiscoveryWire.Guidance {
+        BYOMDiscoveryWire.Guidance(
+            stateLabelKey: "byom.local.not_offered",
+            stateMeaningKey: "byom.local.not_offered_coordinator_state_unavailable",
+            nextAction: "fix_local_blocker",
+            transitionReasonCode: BYOMDiscoveryWarning.requiresPreparation.rawValue,
+            earningPathClass: "local_inventory_only"
+        )
+    }
+
     static func guidance(forAdmissionState state: String, warnings: Set<String>) -> BYOMDiscoveryWire.Guidance {
         switch state {
         case "offerable":

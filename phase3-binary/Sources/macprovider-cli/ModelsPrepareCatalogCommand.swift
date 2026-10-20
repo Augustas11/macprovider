@@ -1,0 +1,372 @@
+import ArgumentParser
+import Darwin
+import Foundation
+
+// MARK: - models prepare-catalog
+
+/// SPEC-010-R008 (v1.17) / SPEC-044-R014-4: the event-reporting catalog
+/// preparation Malibu's Download action runs. It is the `--profile catalog`
+/// preparation without `--repair-cache`, reported only as
+/// `model_catalog_transaction_event.v1` lines so Malibu can show progress and
+/// cancel it. It never changes config, the served model, admission, or
+/// settlement.
+struct ModelsPrepareCatalogCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "prepare-catalog",
+        abstract: "Download and verify a signed catalog model, reporting progress as transaction events.",
+        discussion: "Resolves the signed catalog row, downloads its pinned snapshot with the serve/autotune "
+            + "downloader, verifies the signed hash and adopts it into the durable model store. stdout carries "
+            + "only model_catalog_transaction_event.v1 lines: queued, running (stage downloading, at least every "
+            + "10 s), then succeeded (exit 0), failed (exit 4 refused/untrusted/space/transfer, 5 verification) or, "
+            + "after SIGINT/SIGTERM, cancel_requested and cancelled (exit 130); the downloader removes its own "
+            + "staging. Leftovers it finds are reported as staging_cleanup_required, never deleted. One run at a "
+            + "time. It never changes config or the active model."
+    )
+
+    @Argument(help: "Signed catalog key or model id, e.g. qwen/qwen3-8b.")
+    var catalogKey: String
+
+    @Option(name: .customLong("transaction-id"), help: "UUID v4 transaction id of the prepare action in models catalog-economics --json.")
+    var transactionID: String
+
+    @Flag(name: .customLong("json"), help: "Required: emit model_catalog_transaction_event.v1 lines on stdout.")
+    var emitJSON = false
+
+    @Option(help: "YAML config path used to resolve model_artifact_root. Overrides MACPROVIDER_CONFIG.")
+    var config: String?
+
+    func run() async throws {
+        guard emitJSON else {
+            writeDiagnosticsStderr("models prepare-catalog is JSON-only; pass --json")
+            throw ExitCode(2)
+        }
+        do {
+            try ModelPreparationContracts.requireUUIDv4(transactionID, field: "transaction_id")
+            try ModelPreparationContracts.requireSafeString(catalogKey, field: "model_key")
+        } catch {
+            writeDiagnosticsStderr("models prepare-catalog refused: transaction id must be a lowercase UUID v4 and the key a safe catalog key")
+            throw ExitCode(2)
+        }
+        let appConfig = try loadDiagnosticsConfig(config, command: "models prepare-catalog")
+        let sink = ModelsPrepareCatalogEventSink(transactionID: transactionID) { event in
+            try? ModelSwitchingWireCodec.printJSON(event)
+            fflush(stdout)
+        }
+        let cancellation = ModelsPrepareCatalogCancellation()
+        let sources = Self.installCancellationSources { cancellation.request() }
+        defer { sources.forEach { $0.cancel() } }
+        let configuredKey = appConfig.modelCatalogKey
+        let configuredPath = appConfig.modelArtifactPath
+        let exitCode = await ModelsPrepareCatalogRunner.run(
+            key: catalogKey,
+            resolver: CachedModelArtifactResolver.forConfig(appConfig),
+            config: config,
+            // Serve loads a configured artifact for its catalog key, so that
+            // location decides readiness, exactly as `--profile catalog`.
+            configuredArtifactPath: { $0 == configuredKey ? configuredPath : nil },
+            sink: sink,
+            cancellation: cancellation
+        )
+        if exitCode != 0 {
+            throw ExitCode(exitCode)
+        }
+    }
+
+    /// SIGINT/SIGTERM request cancellation so the downloader unwinds through
+    /// its staging cleanup instead of dying mid-write.
+    private static func installCancellationSources(_ cancel: @escaping @Sendable () -> Void) -> [DispatchSourceSignal] {
+        [SIGINT, SIGTERM].map { signalNumber in
+            signal(signalNumber, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: .global(qos: .userInitiated))
+            source.setEventHandler { cancel() }
+            source.resume()
+            return source
+        }
+    }
+}
+
+/// Serializes the transaction's events with one monotonic sequence, so the
+/// progress loop, the signal handler and the terminal event cannot interleave
+/// out of order or after the terminal event.
+final class ModelsPrepareCatalogEventSink: @unchecked Sendable {
+    private let lock = NSLock()
+    private let transactionID: String
+    private let write: @Sendable (ModelPreparationTransactionEvent) -> Void
+    private var nextSequence = 1
+    private var terminal = false
+    private var cancelRequestEmitted = false
+
+    init(transactionID: String, write: @escaping @Sendable (ModelPreparationTransactionEvent) -> Void) {
+        self.transactionID = transactionID
+        self.write = write
+    }
+
+    /// Returns false when nothing was written: after the terminal event, or
+    /// when the event would violate the closed event contract.
+    @discardableResult
+    func emit(
+        modelKey: String,
+        state: ModelPreparationEventState,
+        progress: ModelPreparationTransactionEvent.Progress? = nil,
+        errorCode: ModelPreparationEventErrorCode? = nil,
+        warningCode: ModelPreparationEventWarningCode? = nil
+    ) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return emitLocked(modelKey: modelKey, state: state, progress: progress, errorCode: errorCode, warningCode: warningCode)
+    }
+
+    /// `cancel_requested` exactly once and always before `cancelled`, whether
+    /// the signal handler or the terminal path gets there first.
+    func emitCancelRequestedOnce(modelKey: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !cancelRequestEmitted else { return }
+        if emitLocked(modelKey: modelKey, state: .cancelRequested, progress: nil, errorCode: nil, warningCode: nil) {
+            cancelRequestEmitted = true
+        }
+    }
+
+    private func emitLocked(
+        modelKey: String,
+        state: ModelPreparationEventState,
+        progress: ModelPreparationTransactionEvent.Progress?,
+        errorCode: ModelPreparationEventErrorCode?,
+        warningCode: ModelPreparationEventWarningCode?
+    ) -> Bool {
+        guard !terminal,
+              let event = try? ModelPreparationTransactionEvent(
+                  transactionID: transactionID,
+                  transactionKind: .prepareModel,
+                  modelKey: modelKey,
+                  eventSequence: nextSequence,
+                  emittedAt: ModelSwitchingWireCodec.timestamp(),
+                  state: state,
+                  progress: progress,
+                  errorCode: errorCode,
+                  warningCode: warningCode
+              )
+        else { return false }
+        write(event)
+        nextSequence += 1
+        if [.succeeded, .failed, .timedOut, .cancelled].contains(state) {
+            terminal = true
+        }
+        return true
+    }
+}
+
+/// A one-way cancellation latch the signal handler sets and the runner reads.
+final class ModelsPrepareCatalogCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var requested = false
+    private var onRequest: (@Sendable () -> Void)?
+
+    var isRequested: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return requested
+    }
+
+    func request() {
+        lock.lock()
+        guard !requested else {
+            lock.unlock()
+            return
+        }
+        requested = true
+        let handler = onRequest
+        lock.unlock()
+        handler?()
+    }
+
+    /// Installs the handler; runs it at once when cancellation already arrived.
+    func onRequest(_ handler: @escaping @Sendable () -> Void) {
+        lock.lock()
+        onRequest = handler
+        let already = requested
+        lock.unlock()
+        if already { handler() }
+    }
+}
+
+enum ModelsPrepareCatalogRunner {
+    static let stageLabel = "downloading"
+
+    struct Dependencies: Sendable {
+        var resolveRow: @Sendable (String) async throws -> ModelArtifactSignedRow
+        /// (row, resolver, configured artifact path, config path)
+        var prepare: @Sendable (ModelArtifactSignedRow, CachedModelArtifactResolver, String?, String?) async -> ModelPrepareOutcome
+        /// Bytes of completed files the downloader has staged so far.
+        var stagedBytes: @Sendable (ModelArtifactSignedRow, CachedModelArtifactResolver) -> Int64
+        /// The paths of this model's interrupted-download leftovers. The
+        /// command never deletes them: the downloader removes its own staging
+        /// when it stops, and anything left (another run's, or an earlier
+        /// interrupted one) is only reported.
+        var partialPaths: @Sendable (ModelArtifactSignedRow, CachedModelArtifactResolver) -> Set<String>
+        /// Takes the per-user single-run lock; nil when another run holds it.
+        var acquireRunLock: @Sendable () -> (@Sendable () -> Void)?
+        /// Refuses a model cache path with a symlink below the cache root, so
+        /// the download cannot land outside it.
+        var checkCachePath: @Sendable (ModelArtifactSignedRow, CachedModelArtifactResolver) throws -> Void
+        /// At most 10 s (SPEC-044-R014-4); 8 s leaves margin and keeps a long download's output small.
+        var progressIntervalNanoseconds: UInt64 = 8_000_000_000
+
+        static let live = Dependencies(
+            resolveRow: { try await ModelArtifactSignedRowResolver.resolve(key: $0) },
+            prepare: { row, resolver, configuredArtifactPath, config in
+                await ModelCatalogPreparation.prepare(
+                    row: row,
+                    resolver: resolver,
+                    repairCache: false,
+                    configuredArtifactPath: configuredArtifactPath,
+                    config: config
+                )
+            },
+            stagedBytes: { row, resolver in
+                let snapshots = resolver.snapshotURL(modelID: row.modelID, revision: row.revision).deletingLastPathComponent()
+                let names = (try? FileManager.default.contentsOfDirectory(atPath: snapshots.path)) ?? []
+                return names.filter { $0.hasPrefix(".download-") }.reduce(Int64(0)) {
+                    $0 + (ModelArtifactDiagnostics.regularFileBytes(in: snapshots.appendingPathComponent($1)) ?? 0)
+                }
+            },
+            partialPaths: { row, resolver in
+                Set(ModelArtifactDiagnostics.findPartials(row: row, resolver: resolver).map(\.url.path))
+            },
+            acquireRunLock: {
+                let path = (NSTemporaryDirectory() as NSString).appendingPathComponent("macprovider-prepare-catalog.lock")
+                let descriptor = open(path, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600)
+                guard descriptor >= 0 else { return nil }
+                guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
+                    close(descriptor)
+                    return nil
+                }
+                return { close(descriptor) }
+            },
+            checkCachePath: { row, resolver in
+                guard FileManager.default.fileExists(atPath: resolver.hubRoot.path) else { return }
+                let repository = resolver.snapshotURL(modelID: row.modelID, revision: row.revision)
+                    .deletingLastPathComponent()
+                try resolver.validateNoSymlinkCachePath(of: repository, requireComplete: false)
+            }
+        )
+    }
+
+    /// Runs one transaction and returns the process exit status: 0 succeeded,
+    /// 4 refused or failed before verification, 5 verification failed,
+    /// 130 cancelled.
+    static func run(
+        key: String,
+        resolver: CachedModelArtifactResolver,
+        config: String?,
+        configuredArtifactPath: @Sendable (String) -> String? = { _ in nil },
+        sink: ModelsPrepareCatalogEventSink,
+        cancellation: ModelsPrepareCatalogCancellation,
+        dependencies: Dependencies = .live
+    ) async -> Int32 {
+        let row: ModelArtifactSignedRow
+        do {
+            row = try await dependencies.resolveRow(key)
+        } catch {
+            writeDiagnosticsStderr("models prepare-catalog refused: \(error)")
+            sink.emit(modelKey: key, state: .failed, errorCode: .authorityUnavailable)
+            return 4
+        }
+        let modelKey = row.catalogKey
+        guard let releaseRunLock = dependencies.acquireRunLock() else {
+            writeDiagnosticsStderr("models prepare-catalog refused: another prepare-catalog is running")
+            sink.emit(modelKey: modelKey, state: .failed, errorCode: .operationConflict)
+            return 4
+        }
+        defer { releaseRunLock() }
+        do {
+            try dependencies.checkCachePath(row, resolver)
+        } catch {
+            writeDiagnosticsStderr("models prepare-catalog refused: the model cache path is not a safe directory (\(error))")
+            sink.emit(modelKey: modelKey, state: .failed, errorCode: .unsafeFilesystemObject)
+            return 4
+        }
+        sink.emit(modelKey: modelKey, state: .queued)
+        if cancellation.isRequested {
+            sink.emitCancelRequestedOnce(modelKey: modelKey)
+            sink.emit(modelKey: modelKey, state: .cancelled)
+            return 130
+        }
+
+        let expected = row.artifactSizeBytes.map(Int64.init)
+        func reportProgress() {
+            guard !cancellation.isRequested else { return }
+            var completed = dependencies.stagedBytes(row, resolver)
+            if let expected { completed = min(completed, expected) }
+            let progress = try? ModelPreparationTransactionEvent.Progress(
+                stageLabelKey: stageLabel,
+                bytesCompleted: max(0, completed),
+                bytesExpected: expected,
+                percentComplete: expected.flatMap { $0 > 0 ? min(100, Double(completed) / Double($0) * 100) : nil },
+                heartbeat: true
+            )
+            sink.emit(modelKey: modelKey, state: .running, progress: progress)
+        }
+        reportProgress()
+
+        let configured = configuredArtifactPath(row.catalogKey)
+        let work = Task { await dependencies.prepare(row, resolver, configured, config) }
+        cancellation.onRequest {
+            sink.emitCancelRequestedOnce(modelKey: modelKey)
+            work.cancel()
+        }
+        let interval = dependencies.progressIntervalNanoseconds
+        let progressLoop = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: interval)
+                guard !Task.isCancelled else { return }
+                reportProgress()
+            }
+        }
+        let outcome = await work.value
+        progressLoop.cancel()
+        _ = await progressLoop.value
+
+        // SPEC-044-R007: leftovers this command does not remove are reported
+        // on the terminal event, never deleted (they may be another run's).
+        let leftovers = !dependencies.partialPaths(row, resolver).isEmpty
+        let warning: ModelPreparationEventWarningCode? = leftovers ? .stagingCleanupRequired : nil
+        if leftovers {
+            writeDiagnosticsStderr("models prepare-catalog warning: interrupted-download files remain for \(modelKey); to remove them run: \(ModelCatalogPreparation.retryCommand(catalogKey: modelKey, config: config))")
+        }
+        // Cancellation stops the transfer. Once the bytes are in, verification
+        // and adoption run to completion (SPEC-044-R014-4), so a preparation
+        // that verified is reported as it is: the commit point had passed.
+        if outcome.finalState == .readyVerified {
+            sink.emit(modelKey: modelKey, state: .succeeded, warningCode: warning)
+            writeDiagnosticsStderr("models prepare-catalog: \(outcome.finalLine)")
+            return 0
+        }
+        if cancellation.isRequested {
+            sink.emitCancelRequestedOnce(modelKey: modelKey)
+            sink.emit(modelKey: modelKey, state: .cancelled, warningCode: warning)
+            writeDiagnosticsStderr("models prepare-catalog cancelled: active model unchanged")
+            return 130
+        }
+        let (code, exit) = failure(outcome)
+        sink.emit(modelKey: modelKey, state: .failed, errorCode: code, warningCode: warning)
+        writeDiagnosticsStderr("models prepare-catalog failed: \(code.rawValue): \(ModelArtifactDiagnostics.redact(outcome.finalLine, diagnosis: outcome.diagnosis))")
+        return exit
+    }
+
+    static func failure(_ outcome: ModelPrepareOutcome) -> (ModelPreparationEventErrorCode, Int32) {
+        if outcome.finalState == .hashMismatch {
+            return (.verificationFailed, 5)
+        }
+        // The precheck reports `insufficient_disk_space`; the downloader's own
+        // reserve check reports "not enough free disk space".
+        if let error = outcome.error,
+           error.contains("insufficient_disk_space") || error.localizedCaseInsensitiveContains("not enough free disk space") {
+            return (.insufficientDiskSpace, 4)
+        }
+        if outcome.downloadAttempted, [.mismatch, .unverifiable].contains(outcome.diagnosis.verdict) {
+            return (.verificationFailed, 5)
+        }
+        return (.transferFailed, 4)
+    }
+}
