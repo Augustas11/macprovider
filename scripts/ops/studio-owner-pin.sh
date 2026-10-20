@@ -130,6 +130,7 @@ published_identity_ok() {
   for asset in "$pearl" "$pearl_sig" "$checksums"; do [ -f "$asset" ] || return 1; done
   published="$OPS_TMP_DIR/published-$VERSION"; mkdir -p "$published"
   gh release download "v$VERSION" -R "$(gh_repo)" -D "$published" \
+    --clobber \
     -p checksums.txt -p checksums.txt.sig -p pearl-release.json -p pearl-release.json.sig >/dev/null 2>&1 || return 1
   openssl dgst -sha256 -verify "$REPO_ROOT/ops/pearl-updater/release-signing-public.pem" \
     -signature "$published/checksums.txt.sig" "$published/checksums.txt" >/dev/null 2>&1 || return 1

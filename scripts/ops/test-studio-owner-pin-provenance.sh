@@ -41,13 +41,21 @@ set -euo pipefail
 case "${1:-}:${2:-}" in
   release:download)
     shift 2
-    dest=""
+    dest="" clobber=false patterns=()
     while [ "$#" -gt 0 ]; do
       case "$1" in
         -D) dest="$2"; shift 2 ;;
-        -p) cp "$FAKE_PUBLISHED_DIR/$2" "$dest/$2"; shift 2 ;;
+        -p) patterns+=("$2"); shift 2 ;;
+        --clobber) clobber=true; shift ;;
         *) shift ;;
       esac
+    done
+    [ -n "$dest" ] || exit 2
+    for pattern in "${patterns[@]}"; do
+      if [ -e "$dest/$pattern" ] && [ "$clobber" != true ]; then
+        exit 1
+      fi
+      cp "$FAKE_PUBLISHED_DIR/$pattern" "$dest/$pattern"
     done
     ;;
   release:view)
@@ -145,6 +153,19 @@ run_identity() {
   bash -c 'source "$CONTROLLER_UNIT"; VERSION=1.8.260; PROBE_JSON="$(cat "$CASE_DIR/probe.json")"; STUDIO_OWNER_PIN_INSTALL_DIR="$CASE_DIR/install"; published_identity_ok'
 }
 
+run_identity_twice() {
+  local case_dir="$1"
+  # shellcheck disable=SC2016 # Variables expand intentionally in the sourced child shell.
+  env PATH="$T/bin:$PATH" \
+    MACPROVIDER_OPS_ENV=/dev/null \
+    MACPROVIDER_OPS_STATE_DIR="$case_dir/state" \
+    MACPROVIDER_GH_REPO=test/repo \
+    TEST_PEARL_PUBLIC_KEY="$RELEASE_PUBLIC" \
+    FAKE_PUBLISHED_DIR="$case_dir/published" \
+    CONTROLLER_UNIT="$UNIT" CASE_DIR="$case_dir" \
+  bash -c 'source "$CONTROLLER_UNIT"; VERSION=1.8.260; PROBE_JSON="$(cat "$CASE_DIR/probe.json")"; STUDIO_OWNER_PIN_INSTALL_DIR="$CASE_DIR/install"; published_identity_ok && published_identity_ok'
+}
+
 pass=0
 fail=0
 expect_rc() {
@@ -161,6 +182,17 @@ expect_rc() {
 
 case_dir="$T/valid"; make_fixture "$case_dir"
 expect_rc 0 "valid published signatures, checksums, tar member, and installed identity are accepted" "$case_dir"
+
+case_dir="$T/repeated"; make_fixture "$case_dir"
+got=0
+run_identity_twice "$case_dir" >"$case_dir/out" 2>"$case_dir/err" || got=$?
+if [ "$got" = 0 ]; then
+  printf 'ok - repeated identity checks clobber private downloads and reverify them\n'
+  pass=$((pass + 1))
+else
+  printf 'not ok - repeated identity checks clobber private downloads and reverify them (rc=%s; %s)\n' "$got" "$(tr '\n' ' ' <"$case_dir/err")"
+  fail=$((fail + 1))
+fi
 
 case_dir="$T/bad-published-pearl-signature"; make_fixture "$case_dir"
 corrupt_signature "$case_dir/published/pearl-release.json.sig"
