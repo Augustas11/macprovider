@@ -4,7 +4,8 @@
 # cannot interrupt a swap or a rollback; the operator side polls RESULT_FILE.
 # bash 3.2 compatible (stock macOS /bin/bash).
 #
-# Payload-only swap of the live provider to a verified candidate tarball:
+# Payload swap of the live provider to a verified candidate tarball, or the
+# narrowly-scoped Studio owner-pin transaction staged by studio-owner-pin.sh:
 # pause and drain, back up the install dir, replace the payload, restart, then
 # watch (the installed watchdog stays booted out until the candidate, or the
 # restored version, is buyer_serving). A provider process restart (crash loop),
@@ -13,8 +14,9 @@
 # previous version is buyer_serving again, and resumes it. Before the model is
 # loaded /v1/status may stay silent (a large model, such as GLM-5.3-Flash at
 # about 175 GB, loads for 7-13 minutes): silence then is bounded only by
-# READY_TIMEOUT_S while the provider pid stays the same and alive. Config and
-# LaunchAgents are never edited.
+# READY_TIMEOUT_S while the provider pid stays the same and alive. The owner-
+# pin mode changes only max_concurrency_override/max_concurrency_source under
+# the provider config lock and restores only those fields on failure.
 #
 # Exit codes (also written to RESULT_FILE): 0 swapped and buyer-serving;
 # 4 refused before the swap (payload untouched, provider resumed);
@@ -24,19 +26,47 @@ set -euo pipefail
 export PATH="${CANARY_REMOTE_PATH_PREFIX:+$CANARY_REMOTE_PATH_PREFIX:}/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
 umask 077
 
-TARBALL="$1"
-TARBALL_SHA="$2"
-VERSION="$3"
-INSTALL_DIR="${4:-$HOME/macprovider}"
-LABEL="${5:-live.malibu.provider}"
-SOCKET="${6:-}"
-PORT="$7"
-STATUS_TIMEOUT_S="$8"
-READY_TIMEOUT_S="$9"
-DRAIN_TIMEOUT_S="${10}"
-STABLE_S="${11}"
-POLL_S="${12:-5}"
-RESULT_FILE="${13:-$(dirname "$TARBALL")/result}"
+MODE=swap
+case "${1:-}" in remove-owner-pin|restore-owner-pin) MODE="$1"; shift ;; esac
+if [ "$MODE" = swap ]; then
+  TARBALL="$1"
+  TARBALL_SHA="$2"
+  VERSION="$3"
+  INSTALL_DIR="${4:-$HOME/macprovider}"
+  LABEL="${5:-live.malibu.provider}"
+  SOCKET="${6:-}"
+  PORT="$7"
+  STATUS_TIMEOUT_S="$8"
+  READY_TIMEOUT_S="$9"
+  DRAIN_TIMEOUT_S="${10}"
+  STABLE_S="${11}"
+  POLL_S="${12:-5}"
+  RESULT_FILE="${13:-$(dirname "$TARBALL")/result}"
+  CONFIG="" JOURNAL="" HELPER="" EXPECTED_BINARY_SHA="" EXPECTED_PROVIDER_SHA="" EXPECTED_MODEL="" EXPECTED_POLICY_SHA=""
+  EXPECTED_POLICY_RELEASE="" EXPECTED_POLICY_TUPLE=""
+else
+  VERSION="$1"
+  INSTALL_DIR="$2"
+  LABEL="${3:-live.malibu.provider}"
+  SOCKET="${4:-}"
+  PORT="$5"
+  STATUS_TIMEOUT_S="$6"
+  READY_TIMEOUT_S="$7"
+  DRAIN_TIMEOUT_S="$8"
+  STABLE_S="$9"
+  POLL_S="${10:-5}"
+  RESULT_FILE="${11}"
+  CONFIG="${12}"
+  JOURNAL="${13}"
+  HELPER="${14}"
+  EXPECTED_BINARY_SHA="${15}"
+  EXPECTED_PROVIDER_SHA="${16}"
+  EXPECTED_MODEL="${17}"
+  EXPECTED_POLICY_SHA="${18}"
+  EXPECTED_POLICY_RELEASE="${19}"
+  EXPECTED_POLICY_TUPLE="${20}"
+  TARBALL="" TARBALL_SHA=""
+fi
 
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
 DOMAIN="gui/$(id -u)"
@@ -44,13 +74,14 @@ LA_DIR="${CANARY_LAUNCH_AGENTS_DIR:-$HOME/Library/LaunchAgents}"
 WATCHDOG_LABEL="$LABEL-watchdog"
 [ -n "$SOCKET" ] || SOCKET="$(getconf DARWIN_USER_TEMP_DIR)macprovider-cli/ctl.sock"
 BACKUP="$INSTALL_DIR.pre-$VERSION-$TS"
+[ "$MODE" = swap ] || BACKUP="$CONFIG.bak-owner-pin-$TS"
 FAILED_DIR="$INSTALL_DIR.failed-$VERSION-$TS"
-STAGE="$(dirname "$TARBALL")/payload"
+STAGE="$(dirname "$RESULT_FILE")/payload"
 LOCK_DIR="$HOME/.macprovider-canary-swap.lock"
 MANAGED_FILES="macprovider-cli mlx.metallib compatibility-set.json THIRD-PARTY-NOTICES.txt"
 MANAGED_DIRS="catalog-release compatibility-set-local mlx-swift_Cmlx.bundle swift-nio_NIOPosix.bundle"
 
-say() { printf 'canary-swap[%s]: %s\n' "$(date -u +%H:%M:%SZ)" "$*" >&2; }
+say() { printf 'canary-window[%s][%s]: %s\n' "$(date -u +%H:%M:%SZ)" "$MODE" "$*" >&2; }
 now() { date +%s; }
 
 status_json() { curl -fsS --max-time 5 "http://127.0.0.1:$PORT/v1/status" 2>/dev/null; }
@@ -69,6 +100,10 @@ try:
 except Exception:
     v = None
 print("" if v is None else (json.dumps(v) if isinstance(v, bool) else v))' "$2"
+}
+
+status_field_sha() {
+  printf '%s' "$(status_field "$1" "$2")" | shasum -a 256 | awk '{print $1}'
 }
 
 # serving BODY VERSION: the provider runs VERSION with its model loaded and
@@ -190,6 +225,7 @@ wait_serving() {
 
 PAUSED=0
 SWAPPED=0
+CONFIG_ARMED=0
 FINISHED=0
 LOCKED=0
 OLD_VERSION=""
@@ -215,6 +251,9 @@ finish() {
 }
 
 restore_backup() {
+  if [ "$MODE" != swap ]; then
+    restore_config "$1"
+  fi
   FINISHED=1
   say "ROLLBACK: restoring $BACKUP ($1)"
   stop_jobs || { say "!!! rollback could not stop the candidate job; restore $BACKUP into $INSTALL_DIR by hand"; finish 6; }
@@ -230,6 +269,48 @@ restore_backup() {
   finish 5
 }
 
+config_postconditions() {
+  [ "$(status_field "$1" binary_version)" = "$VERSION" ] &&
+    [ "$(status_field_sha "$1" provider_id)" = "$EXPECTED_PROVIDER_SHA" ] &&
+    [ "$(status_field "$1" model)" = "$EXPECTED_MODEL" ] &&
+    [ "$(status_field "$1" capacity.max_concurrency)" = 4 ] &&
+    [ "$(status_field "$1" continuous_batching.active)" = true ] &&
+    [ "$(status_field "$1" continuous_batching.policy.load_status)" = live_verified ] &&
+    [ "$(status_field "$1" continuous_batching.policy.authorized)" = true ] &&
+    [ "$(status_field "$1" continuous_batching.policy.policy_sha256)" = "$EXPECTED_POLICY_SHA" ] &&
+    [ "$(status_field "$1" continuous_batching.policy.release_id)" = "$EXPECTED_POLICY_RELEASE" ] &&
+    [ "$(status_field "$1" continuous_batching.policy.tuple_sha256)" = "$EXPECTED_POLICY_TUPLE" ] &&
+    [ "$(status_field "$1" continuous_batching.self_check.served_slots)" = 4 ] &&
+    [ "$(status_field "$1" continuous_batching.scheduler.slots_total)" = 4 ] &&
+    [ "$(status_field "$1" coordinator.connected)" = true ] &&
+    [ "$(status_field "$1" lifecycle.operator_paused)" != true ]
+}
+
+restore_config() {
+  FINISHED=1
+  say "ROLLBACK: restoring the 4/owner pin ($1)"
+  stop_jobs || { say "!!! rollback could not stop the provider; journal retained"; finish 6; }
+  python3 "$HELPER" restore --config "$CONFIG" --journal "$JOURNAL" || {
+    say "!!! scoped pin restore refused; journal and protected backup retained"; finish 6;
+  }
+  start_jobs provider || { say "!!! pin restored but provider did not start; journal retained"; finish 6; }
+  if ! wait_serving "$VERSION"; then
+    say "!!! pin restored but $VERSION is not buyer_serving within ${READY_TIMEOUT_S}s; journal retained"
+    finish 6
+  fi
+  body="$(status_json || true)"
+  if ! config_postconditions "$body"; then
+    say "!!! pin restored but serving status does not preserve the signed four-slot tuple; journal retained"
+    finish 6
+  fi
+  python3 "$HELPER" finish --config "$CONFIG" --journal "$JOURNAL" --restored || {
+    say "!!! provider recovered but restore journal could not be finalized"; finish 6;
+  }
+  start_watchdog
+  say "ROLLBACK done: exact 4/owner pin restored and $VERSION buyer_serving"
+  finish 5
+}
+
 # shellcheck disable=SC2329  # EXIT trap
 on_exit() {
   local rc=$?
@@ -237,6 +318,9 @@ on_exit() {
   if [ "$FINISHED" = 1 ]; then
     say "!!! recovery stopped unexpectedly (exit $rc); check $INSTALL_DIR against $BACKUP"
     finish 6
+  fi
+  if [ "$CONFIG_ARMED" = 1 ]; then
+    restore_config "unexpected exit $rc during the owner-pin transaction"
   fi
   if [ "$SWAPPED" = 1 ]; then
     restore_backup "unexpected exit $rc during the swap"
@@ -248,7 +332,13 @@ on_exit() {
   case "$rc" in 4) finish 4 ;; *) finish 6 ;; esac
 }
 trap on_exit EXIT
-trap 'say "ignoring SIGHUP"' HUP
+if [ "$MODE" = swap ]; then
+  trap 'say "ignoring SIGHUP"' HUP
+else
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
+fi
 
 refuse() { say "REFUSED: $*"; exit 4; }
 
@@ -299,8 +389,104 @@ case "$INSTALL_DIR" in *"/../"*|*/..|*"/./"*|*/.|*//*) refuse "install dir $INST
 [ "$(cd "$INSTALL_DIR" && pwd -P)" = "$(cd "$HOME" && pwd -P)/${INSTALL_DIR#"$HOME"/}" ] ||
   refuse "install dir $INSTALL_DIR resolves through a symlink"
 [ -O "$INSTALL_DIR" ] || refuse "install dir $INSTALL_DIR is not owned by $(id -un)"
-[ ! -e "$BACKUP" ] && [ ! -e "$FAILED_DIR" ] || refuse "backup path $BACKUP already exists"
+[ "$MODE" != swap ] || { [ ! -e "$BACKUP" ] && [ ! -e "$FAILED_DIR" ]; } || refuse "backup path $BACKUP already exists"
 [ -f "$LA_DIR/$LABEL.plist" ] || refuse "missing LaunchAgent $LA_DIR/$LABEL.plist"
+[ "$MODE" = swap ] || {
+  case "$CONFIG" in "$HOME"/?*) ;; *) refuse "config is not under HOME" ;; esac
+  case "$JOURNAL" in "$HOME"/?*) ;; *) refuse "journal is not under HOME" ;; esac
+  [ -f "$CONFIG" ] && [ ! -L "$CONFIG" ] && [ -O "$CONFIG" ] || refuse "config is missing, symlinked, or not owner-owned"
+  [ -f "$HELPER" ] && [ ! -L "$HELPER" ] && [ -O "$HELPER" ] || refuse "config helper is missing, symlinked, or not owner-owned"
+}
+
+if [ "$MODE" = restore-owner-pin ]; then
+  [ -f "$JOURNAL" ] || refuse "no unfinished owner-pin journal to restore"
+  CONFIG_ARMED=1
+  stop_jobs || restore_config "provider job did not stop for recovery"
+  python3 "$HELPER" restore --config "$CONFIG" --journal "$JOURNAL" || {
+    say "!!! scoped pin restore refused; journal and protected backup retained"; finish 6;
+  }
+  start_jobs provider || { say "!!! pin restored but provider did not start; journal retained"; finish 6; }
+  if ! wait_serving "$VERSION"; then restore_config "restored provider did not become buyer_serving"; fi
+  body="$(status_json || true)"
+  config_postconditions "$body" || restore_config "restored provider does not preserve the signed four-slot tuple"
+  python3 "$HELPER" finish --config "$CONFIG" --journal "$JOURNAL" --restored || finish 6
+  CONFIG_ARMED=0
+  start_watchdog
+  say "OK: recovered exact 4/owner pin on $VERSION"
+  finish 0
+fi
+
+if [ "$MODE" = remove-owner-pin ]; then
+  [ "$(shasum -a 256 "$INSTALL_DIR/macprovider-cli" | awk '{print $1}')" = "$EXPECTED_BINARY_SHA" ] || refuse "installed CLI bytes changed"
+  body="$(status_json)" || refuse "live /v1/status on :$PORT is not answering"
+  OLD_VERSION="$(status_field "$body" binary_version)"
+  [ "$OLD_VERSION" = "$VERSION" ] || refuse "live binary version ${OLD_VERSION:-none} != $VERSION"
+  serving "$body" "$VERSION" || refuse "the provider is not buyer_serving on $VERSION"
+  config_postconditions "$body" || refuse "live status is not the exact signed four-slot GLM tuple"
+  old_pid="$(job_pid)"
+  [ -n "$old_pid" ] || refuse "provider job has no pid"
+  PAUSED=1
+  control pause_request || refuse "pause_request was not accepted on $SOCKET"
+  deadline=$(( $(now) + DRAIN_TIMEOUT_S ))
+  while :; do
+    body="$(status_json || true)"
+    inflight="$(status_field "$body" requests_in_flight)"
+    [ "$inflight" = 0 ] && break
+    [ "$(now)" -lt "$deadline" ] || refuse "requests_in_flight=${inflight:-unknown} after ${DRAIN_TIMEOUT_S}s drain"
+    sleep "$POLL_S"
+  done
+  provider_hash="$(status_field_sha "$body" provider_id)"
+  python3 "$HELPER" prepare --config "$CONFIG" --journal "$JOURNAL" --backup "$BACKUP" \
+    --version "$VERSION" --provider-id-sha256 "$provider_hash" --model "$EXPECTED_MODEL" \
+    --policy-sha256 "$EXPECTED_POLICY_SHA" --policy-release-id "$EXPECTED_POLICY_RELEASE" \
+    --policy-tuple-sha256 "$EXPECTED_POLICY_TUPLE" || refuse "could not arm the owner-pin journal"
+  CONFIG_ARMED=1
+  stop_jobs || restore_config "provider job did not stop"
+  python3 "$HELPER" apply --config "$CONFIG" --journal "$JOURNAL" || restore_config "scoped config mutation failed"
+  "$INSTALL_DIR/macprovider-cli" provider context explain --config "$CONFIG" --port "$PORT" >/dev/null ||
+    restore_config "released CLI rejected the unpinned config"
+  start_jobs provider || restore_config "provider job did not start"
+  start="$(now)"; pid0=""
+  while [ -z "$pid0" ]; do
+    pid0="$(job_pid)"
+    [ -n "$pid0" ] && break
+    [ $(( $(now) - start )) -lt 15 ] || restore_config "provider job has no process 15s after bootstrap"
+    sleep 1
+  done
+  [ "$pid0" != "$old_pid" ] || restore_config "provider restart kept the old pid $old_pid"
+  last_answer="$start"; loaded=0; ready_at=""
+  while :; do
+    t="$(now)"; pid="$(job_pid)"
+    [ "$pid" = "$pid0" ] || restore_config "provider process restarted (pid $pid0 -> ${pid:-none}): crash loop"
+    body="$(status_json || true)"
+    if [ -n "$body" ]; then
+      last_answer="$t"
+      [ "$(status_field "$body" binary_version)" = "$VERSION" ] || restore_config "status binary identity changed"
+      if [ "$(status_field "$body" model_loaded)" = true ]; then
+        loaded=1
+        paused "$body" && control resume_request || true
+      fi
+      if serving "$body" "$VERSION" && config_postconditions "$body"; then
+        [ -n "$ready_at" ] || ready_at="$t"
+        [ $(( t - ready_at )) -lt "$STABLE_S" ] || break
+      else
+        ready_at=""
+      fi
+    elif [ "$loaded" = 1 ] && [ $(( t - last_answer )) -ge "$STATUS_TIMEOUT_S" ]; then
+      restore_config "/v1/status silent after model load"
+    fi
+    [ $(( t - start )) -lt "$READY_TIMEOUT_S" ] || restore_config "not buyer_serving on the signed four-slot tuple within ${READY_TIMEOUT_S}s"
+    sleep "$POLL_S"
+  done
+  # The controller keeps the journal armed through the provider-attributed
+  # gateway proof. It either finalizes it after that proof or dispatches this
+  # script's restore-owner-pin mode on every failure/signal.
+  CONFIG_ARMED=0
+  start_watchdog
+  say "OK: owner pin removed; $VERSION buyer_serving at four slots (pid $pid0)"
+  finish 0
+fi
+
 [ "$(shasum -a 256 "$TARBALL" | awk '{print $1}')" = "$TARBALL_SHA" ] || refuse "staged tarball sha256 differs from the verified candidate"
 
 # Members are checked from the archive headers before anything is extracted:
