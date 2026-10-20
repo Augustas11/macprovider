@@ -230,11 +230,15 @@ def validate_client_request(
     tools = payload.get("tools")
     if not isinstance(tools, list) or not tools:
         raise CheckError("read_tool_missing")
+    has_read = False
     for tool in tools:
         function = tool.get("function") if isinstance(tool, dict) else None
         if (not isinstance(function, dict) or tool.get("type") != "function"
-                or function.get("name") != "read"):
+                or not isinstance(function.get("name"), str)):
             raise CheckError("unexpected_request_tool")
+        has_read = has_read or function["name"] == "read"
+    if not has_read:
+        raise CheckError("read_tool_missing")
     opened: set[str] = set()
     results: list[dict[str, Any]] = []
     for message in messages:
@@ -614,15 +618,10 @@ def _failure_evidence(state: RecorderState, key: str, model: str) -> dict[str, A
             "receipt_validation": {"status": receipt_status, "receipts": receipts}}
 
 
-def _config(model: str, context: int, base_url: str, marker_path: str) -> bytes:
-    disabled = {name: False for name in ("bash", "edit", "glob", "grep", "list", "task", "todowrite",
-                                               "question", "webfetch", "websearch", "lsp", "skill")}
-    disabled.update({"*": False, "read": True})
+def _config(model: str, context: int, base_url: str) -> bytes:
     value = {
         "model": "malibu/" + model,
         "small_model": "malibu/" + model,
-        "tools": disabled,
-        "permission": {"*": "deny", "read": {"*": "deny", marker_path: "allow"}},
         "provider": {"malibu": {"npm": "@ai-sdk/openai-compatible", "name": "Malibu",
                                   "options": {"baseURL": base_url, "apiKey": "{env:MALIBU_PROXY_TOKEN}",
                                               "timeout": HTTP_TIMEOUT_SECONDS * 1000},
@@ -641,10 +640,11 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
     models_status, models_body = _bounded_https_get("/v1/models", key)
     context = validate_models(models_body, models_status, args.model)
 
-    root = Path(tempfile.mkdtemp(prefix="malibu-opencode-check-"))
+    root = Path(tempfile.mkdtemp(prefix="malibu-opencode-check-")).resolve()
     try:
         os.chmod(root, 0o700)
-        directories = {name: root / name for name in ("config", "data", "state", "cache", "tmp", "workspace")}
+        directories = {name: root / name for name in
+                       ("config", "data", "state", "cache", "tmp", "home", "workspace")}
         for directory in directories.values():
             directory.mkdir(mode=0o700)
         marker = "malibu-" + secrets.token_hex(16)
@@ -657,17 +657,17 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         thread.start()
         try:
             config_path = root / "opencode.json"
-            config_path.write_bytes(_config(args.model, context,
-                                            f"http://127.0.0.1:{proxy.server_address[1]}/v1", str(marker_path)))
+            config_path.write_bytes(_config(
+                args.model, context, f"http://127.0.0.1:{proxy.server_address[1]}/v1"
+            ))
             os.chmod(config_path, 0o600)
             env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
                    "XDG_CONFIG_HOME": str(directories["config"]), "XDG_DATA_HOME": str(directories["data"]),
                    "XDG_STATE_HOME": str(directories["state"]), "XDG_CACHE_HOME": str(directories["cache"]),
                    "TMPDIR": str(directories["tmp"]), "OPENCODE_CONFIG": str(config_path),
-                   "OPENCODE_DISABLE_PROJECT_CONFIG": "1", "OPENCODE_CONFIG_PROJECT_DISABLE": "1",
+                   "OPENCODE_TEST_HOME": str(directories["home"]),
+                   "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
                    "OPENCODE_DISABLE_MODELS_FETCH": "1", "OPENCODE_DISABLE_AUTOUPDATE": "1",
-                   "OPENCODE_DISABLE_LSP_DOWNLOAD": "1", "OPENCODE_DISABLE_SHARE": "1",
-                   "OPENCODE_DISABLE_EXTERNAL_SKILLS": "1", "OPENCODE_DISABLE_DEFAULT_PLUGINS": "1",
                    "MALIBU_PROXY_TOKEN": state.proxy_token}
             _opencode_version(str(binary), env, str(directories["workspace"]))
             prompt = (f"Read only {marker_path} using the read tool. Do not inspect any other file, execute "

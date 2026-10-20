@@ -4,9 +4,14 @@ import io
 import json
 import os
 import pathlib
+import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
+from unittest import mock
 
 
 SCRIPT = pathlib.Path(__file__).parents[1] / "ops" / "lib" / "opencode-gateway-check.py"
@@ -95,6 +100,19 @@ class RequestTests(unittest.TestCase):
             with self.subTest(updates=updates):
                 with self.assertRaises(MODULE.CheckError):
                     MODULE.validate_client_request(request(**updates), MODEL, MARKER)
+
+    def test_stock_tool_inventory_is_allowed_but_read_is_required(self):
+        stock_tools = [
+            {"type": "function", "function": {"name": "read"}},
+            {"type": "function", "function": {"name": "bash"}},
+            {"type": "function", "function": {"name": "edit"}},
+        ]
+        metadata = MODULE.validate_client_request(
+            request(tools=stock_tools), MODEL, MARKER
+        )
+        self.assertTrue(metadata["tool_choice_auto"])
+        with self.assertRaisesRegex(MODULE.CheckError, "read_tool_missing"):
+            MODULE.validate_client_request(request(tools=stock_tools[1:]), MODEL, MARKER)
 
     def test_matching_tool_result_and_call_id_are_required(self):
         base = [{"role": "assistant", "tool_calls": [{"id": "call-read", "type": "function",
@@ -220,11 +238,12 @@ class ModelTests(unittest.TestCase):
                 MODULE.validate_models(json.dumps({"data": [row]}).encode(), 200, MODEL)
 
     def test_config_pins_primary_and_small_model_without_buyer_key(self):
-        data = json.loads(MODULE._config(MODEL, 16384, "http://127.0.0.1:1/v1", MARKER_PATH))
+        data = json.loads(MODULE._config(MODEL, 16384, "http://127.0.0.1:1/v1"))
         self.assertEqual(data["model"], "malibu/" + MODEL)
         self.assertEqual(data["small_model"], "malibu/" + MODEL)
         self.assertEqual(data["provider"]["malibu"]["options"]["apiKey"], "{env:MALIBU_PROXY_TOKEN}")
-        self.assertEqual(data["permission"]["read"][MARKER_PATH], "allow")
+        self.assertNotIn("tools", data)
+        self.assertNotIn("permission", data)
 
     def test_gateway_aliases_have_closed_qualified_artifact_bindings(self):
         self.assertEqual(MODULE.MODEL_BINDINGS, {
@@ -247,6 +266,134 @@ class ProcessTests(unittest.TestCase):
             command = [sys.executable, "-c", "import sys;sys.stdout.write('x'*1100000)"]
             with self.assertRaisesRegex(MODULE.CheckError, "client_output_too_large"):
                 MODULE._bounded_client_process(command, pathlib.Path(directory), dict(os.environ))
+
+
+@unittest.skipUnless(
+    os.environ.get("MACPROVIDER_RUN_OPENCODE_LOCAL_FIXTURE") == "1",
+    "set MACPROVIDER_RUN_OPENCODE_LOCAL_FIXTURE=1 for the real-client loopback fixture",
+)
+class RealOpenCodeLoopbackFixture(unittest.TestCase):
+    """Exercise the real OpenCode protocol against an in-process fake upstream."""
+
+    def test_run_completes_real_read_tool_round_trip(self):
+        binary = shutil.which("opencode")
+        if binary is None:
+            self.skipTest("opencode is not installed")
+        version = subprocess.run(
+            [binary, "--version"], capture_output=True, text=True, timeout=10, check=False
+        )
+        if version.returncode != 0 or version.stdout.strip() != MODULE.CLIENT_VERSION:
+            self.skipTest("installed opencode is not the pinned version")
+
+        class FakeResponse:
+            def __init__(self, body):
+                self.status = 200
+                self.body = body
+                self.request_id = str(uuid.uuid4())
+
+            def read(self, _limit):
+                return self.body
+
+            def getheaders(self):
+                return [("Content-Type", "text/event-stream")]
+
+            def getheader(self, name, default=None):
+                return self.request_id if name.lower() == "x-request-id" else default
+
+        class FakeHTTPSConnection:
+            def __init__(self, host, port, timeout):
+                self.response = None
+
+            def request(self, method, path, body=None, headers=None):
+                self.assert_request(method, path, headers)
+                payload = json.loads(body)
+                tool_names = {
+                    tool.get("function", {}).get("name") for tool in payload.get("tools", [])
+                    if isinstance(tool, dict)
+                }
+                if not {"read", "bash"}.issubset(tool_names):
+                    raise AssertionError("OpenCode stock tool inventory was not exposed")
+                encoded = json.dumps(payload)
+                paths = re.findall(r"/[^\"\\\\\s]*marker\.txt", encoded)
+                markers = re.findall(r"malibu-[0-9a-f]{32}", encoded)
+                if markers:
+                    response_body = self.final_stream(markers[-1])
+                else:
+                    if not paths:
+                        raise AssertionError("marker path absent from OpenCode request")
+                    response_body = self.read_stream(paths[-1])
+                self.response = FakeResponse(response_body)
+
+            @staticmethod
+            def assert_request(method, path, headers):
+                if method != "POST" or path != "/v1/chat/completions":
+                    raise AssertionError("unexpected fake-upstream request")
+                if headers.get("Authorization") != "Bearer synthetic-owner-key":
+                    raise AssertionError("owner key was not injected upstream")
+
+            @staticmethod
+            def read_stream(marker_path):
+                chunks = [
+                    {"id": "local-tool", "model": MODEL, "choices": [{"index": 0, "delta": {
+                        "role": "assistant", "tool_calls": [{"index": 0, "id": "call-local-read",
+                        "type": "function", "function": {"name": "read", "arguments":
+                        json.dumps({"filePath": marker_path})}}]}, "finish_reason": None}]},
+                    {"id": "local-tool", "model": MODEL, "choices": [{"index": 0, "delta": {},
+                        "finish_reason": "tool_calls"}], "usage": {"prompt_tokens": 10,
+                        "completion_tokens": 5, "total_tokens": 15}},
+                ]
+                return ("".join(frame(chunk) for chunk in chunks) + "data: [DONE]\n\n").encode()
+
+            @staticmethod
+            def final_stream(marker):
+                chunks = [
+                    {"id": "local-final", "model": MODEL, "choices": [{"index": 0,
+                        "delta": {"role": "assistant", "content": marker}, "finish_reason": None}]},
+                    {"id": "local-final", "model": MODEL, "choices": [{"index": 0, "delta": {},
+                        "finish_reason": "stop"}], "usage": {"prompt_tokens": 20,
+                        "completion_tokens": 10, "total_tokens": 30}},
+                ]
+                return ("".join(frame(chunk) for chunk in chunks) + "data: [DONE]\n\n").encode()
+
+            def getresponse(self):
+                if self.response is None:
+                    raise AssertionError("request must precede response")
+                return self.response
+
+            def close(self):
+                return None
+
+        def fake_get(path, key):
+            self.assertEqual(key, "synthetic-owner-key")
+            if path == "/v1/models":
+                return 200, json.dumps({"data": [{"id": MODEL,
+                    "max_context_tokens": MODULE.MIN_CONTEXT_TOKENS}]}).encode()
+            request_id = path.removeprefix("/v1/receipts/")
+            return 200, json.dumps({
+                "schema_version": "macprovider.buyer-receipt-view.v1",
+                "request_id": request_id,
+                "surface": "metadata",
+                "pending_quarantined_visible": True,
+                "attempts": [{"attempt_n": 1, "closed": True, "receipt_result": "valid",
+                    "settlement_outcome": "verified", "model_id": MODEL}],
+            }).encode()
+
+        with tempfile.TemporaryDirectory() as directory:
+            key_path = pathlib.Path(directory) / "buyer.key"
+            key_path.write_text("synthetic-owner-key\n", encoding="utf-8")
+            key_path.chmod(0o600)
+            args = MODULE.build_parser().parse_args(
+                ["--opencode", binary, "--model", MODEL, "--key-file", str(key_path)]
+            )
+            with mock.patch.object(MODULE, "_bounded_https_get", side_effect=fake_get), \
+                    mock.patch.object(MODULE.http.client, "HTTPSConnection", FakeHTTPSConnection):
+                result = MODULE._run(args)
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(result["status"], "pass")
+        self.assertGreaterEqual(len(result["requests"]), 2)
+        self.assertTrue(result["opencode"]["final_marker_match"])
+        self.assertEqual(result["receipt_validation"]["status"], "verified")
 
 
 if __name__ == "__main__":
