@@ -43,6 +43,7 @@
 //                    overlap, wall time and a small GPU kernel census
 // GPU runs only in an announced lab window; never beside a serving provider.
 import Foundation
+import Darwin
 import MLX
 import MLXLMCommon
 import MLXNN
@@ -59,6 +60,72 @@ func optString(_ name: String) -> String? {
     if let i = args.firstIndex(of: name), i + 1 < args.count { return args[i + 1] }
     return nil
 }
+
+enum GLMBenchFixtureError: Error {
+    case missingGLMLatentCache(row: Int)
+    case inconsistentGLMLatentOffsets(row: Int, offsets: [Int])
+}
+
+/// Build packed verification maps from the GLM sparse-attention caches that
+/// own the row's absolute token position. A leading `MambaCache` tracks its
+/// recurrent lengths separately and leaves `offset` at zero after prefill.
+func glm5NextPackedRowMaps(
+    _ rows: [[KVCache]], inputCount: Int
+) throws -> [MTPPackedVerificationRowMap] {
+    try rows.enumerated().map { row, caches in
+        let offsets = caches.compactMap { ($0 as? any GLM5NextLatentCache)?.offset }
+        guard let queryOffset = offsets.first else {
+            throw GLMBenchFixtureError.missingGLMLatentCache(row: row)
+        }
+        guard offsets.allSatisfy({ $0 == queryOffset }) else {
+            throw GLMBenchFixtureError.inconsistentGLMLatentOffsets(row: row, offsets: offsets)
+        }
+        return MTPPackedVerificationRowMap(
+            rowIndex: row,
+            queryOffset: queryOffset,
+            inputCount: inputCount,
+            proposalCount: inputCount - 1
+        )
+    }
+}
+
+if args.contains("--mtp-row-map-fixture") {
+    // No model load: exercise the pinned MLX validators with the cache shape
+    // that exposed the profiler bug (leading Mamba offset 0, latent offset P).
+    let rows: [[KVCache]] = (0 ..< 4).map { _ in
+        let recurrent = MambaCache()
+        let latent = GLM5NextAttentionCache(kpool: 4)
+        _ = latent.appendLatent(MLXArray.zeros([1, 1, 17, 8]))
+        return [recurrent, latent]
+    }
+    let invalidMaps = rows.enumerated().map { row, caches in
+        MTPPackedVerificationRowMap(
+            rowIndex: row, queryOffset: caches[0].offset,
+            inputCount: 2, proposalCount: 1)
+    }
+    let invalidLatent = GLM5NextLatentCacheBatch(
+        rowCaches: rows.map { $0[1] as! any GLM5NextLatentCache })
+    do {
+        try invalidLatent.prepareMTPPackedVerification(rowMaps: invalidMaps)
+        fatalError("layer-zero row maps unexpectedly passed pinned GLM validation")
+    } catch GLM5NextLatentCacheError.invalidRowMaps {
+        // Expected: the Mamba offset is not the row's absolute token position.
+    }
+
+    let maps = try glm5NextPackedRowMaps(rows, inputCount: 2)
+    let recurrent = try MTPPackedMambaBatchCache(
+        rowCaches: rows.map { $0[0] as! MambaCache })
+    try recurrent.prepareMTPPackedVerification(rowMaps: maps)
+    let latent = GLM5NextLatentCacheBatch(
+        rowCaches: rows.map { $0[1] as! any GLM5NextLatentCache })
+    try latent.prepareMTPPackedVerification(rowMaps: maps)
+    guard maps.map(\.queryOffset) == [17, 17, 17, 17] else {
+        fatalError("latent row maps did not preserve the absolute prompt position")
+    }
+    print("mtp-row-map-fixture pass rows=4 width=2 query_offset=17")
+    exit(0)
+}
+
 let dir = URL(fileURLWithPath: args[1])
 let promptLen = opt("--prompt", 1024)
 let steps = opt("--steps", 32)
@@ -334,17 +401,14 @@ if args.contains("--mtp-multirow-profile") {
     }
     let ordinaryInput = MLXArray(ordinaryTokens, [B, 1])
     let verifyInput = MLXArray(verifyTokens, [B, L])
-    let rowMaps = rowCaches.enumerated().map { row, caches in
-        MTPPackedVerificationRowMap(
-            rowIndex: row, queryOffset: caches[0].offset, inputCount: L,
-            proposalCount: L - 1)
-    }
+    let rowMaps = try glm5NextPackedRowMaps(rowCaches, inputCount: L)
     let maxOps = ProcessInfo.processInfo.environment["MLX_MAX_OPS_PER_BUFFER"] ?? "unset"
     print(String(
         format: "mtp-multirow prefill rows=%d prompt=%d seconds=%.1f reps=%d census_reps=%d",
         B, promptLen, Date().timeIntervalSince(prefillStart), reps, censusReps))
     print("mtp-multirow diagnostic instrumentation=dispatch_census mlx_max_ops_per_buffer=\(maxOps)")
     print("mtp-multirow qualification=false private_checkpoint_transactions=not_compared")
+    fflush(stdout)
 
     func setSharedExpertLoads(_ enabled: Bool) {
         for layer in model.languageModel.model.layers {
