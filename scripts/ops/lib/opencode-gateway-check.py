@@ -17,6 +17,7 @@ import re
 import secrets
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -429,22 +430,61 @@ class GatewayProxyHandler(http.server.BaseHTTPRequestHandler):
 
 
 def _bounded_https_get(
-    path: str, key: str, timeout_seconds: float = HTTP_TIMEOUT_SECONDS
+    path: str, key: str, timeout_seconds: float = HTTP_TIMEOUT_SECONDS,
+    deadline: float | None = None,
 ) -> tuple[int, bytes]:
-    connection = http.client.HTTPSConnection(GATEWAY_HOST, GATEWAY_PORT, timeout=timeout_seconds)
+    if deadline is None:
+        deadline = time.monotonic() + timeout_seconds
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise CheckError("upstream_transport")
+    connection = http.client.HTTPSConnection(
+        GATEWAY_HOST, GATEWAY_PORT, timeout=min(timeout_seconds, remaining)
+    )
+
+    def abort() -> None:
+        active_socket = connection.sock
+        if active_socket is not None:
+            try:
+                active_socket.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        connection.close()
+
+    watchdog = threading.Timer(remaining, abort)
+    watchdog.daemon = True
+    watchdog.start()
+
+    def apply_remaining_timeout() -> None:
+        operation_remaining = deadline - time.monotonic()
+        if operation_remaining <= 0:
+            raise CheckError("upstream_transport")
+        if connection.sock is not None:
+            connection.sock.settimeout(operation_remaining)
+
     try:
         connection.request("GET", path, headers={"Authorization": "Bearer " + key, "Accept": "application/json"})
+        apply_remaining_timeout()
         response = connection.getresponse()
-        body = response.read(MAX_RESPONSE_BYTES + 1)
+        body = bytearray()
+        reader = getattr(response, "read1", response.read)
+        while len(body) <= MAX_RESPONSE_BYTES:
+            apply_remaining_timeout()
+            chunk = reader(min(65536, MAX_RESPONSE_BYTES + 1 - len(body)))
+            if not chunk:
+                break
+            body.extend(chunk)
         if len(body) > MAX_RESPONSE_BYTES:
             raise CheckError("response_too_large")
-        return response.status, body
+        return response.status, bytes(body)
     except CheckError:
         raise
     except Exception as exc:
         raise CheckError("upstream_transport") from exc
     finally:
+        watchdog.cancel()
         connection.close()
+        watchdog.join(timeout=1)
 
 
 def validate_models(body: bytes, status: int, model: str) -> int:
@@ -509,6 +549,7 @@ def poll_receipt(request_id: str, key: str, model: str, timeout_seconds: float =
             status, body = _bounded_https_get(
                 "/v1/receipts/" + urllib.parse.quote(request_id, safe=""), key,
                 timeout_seconds=min(HTTP_TIMEOUT_SECONDS, remaining),
+                deadline=deadline,
             )
         except CheckError as exc:
             if exc.code == "upstream_transport" and time.monotonic() >= deadline:
@@ -520,6 +561,18 @@ def poll_receipt(request_id: str, key: str, model: str, timeout_seconds: float =
         if time.monotonic() >= deadline:
             raise CheckError("receipt_pending_timeout")
         time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+
+
+def _decode_key(raw: bytes) -> str:
+    if len(raw) > 8192:
+        raise CheckError("key_file_too_large")
+    try:
+        key = raw.decode("utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise CheckError("key_file_encoding") from exc
+    if not key or any(character.isspace() for character in key):
+        raise CheckError("key_file_value")
+    return key
 
 
 def _read_key(path_value: str) -> str:
@@ -538,15 +591,22 @@ def _read_key(path_value: str) -> str:
         raw = os.read(descriptor, 8193)
     finally:
         os.close(descriptor)
-    if len(raw) > 8192:
-        raise CheckError("key_file_too_large")
+    return _decode_key(raw)
+
+
+def _read_key_stdin(stream: Any | None = None) -> str:
+    if stream is None:
+        stream = sys.stdin.buffer
     try:
-        key = raw.decode("utf-8").strip()
-    except UnicodeDecodeError as exc:
-        raise CheckError("key_file_encoding") from exc
-    if not key or any(character.isspace() for character in key):
-        raise CheckError("key_file_value")
-    return key
+        raw = stream.read(8192)
+        extra = stream.read(1)
+    except (OSError, ValueError) as exc:
+        raise CheckError("key_file_unavailable") from exc
+    if not isinstance(raw, bytes) or not isinstance(extra, bytes):
+        raise CheckError("key_file_encoding")
+    if extra:
+        raise CheckError("key_file_too_large")
+    return _decode_key(raw)
 
 
 def _opencode_version(binary: str, env: dict[str, str], cwd: str) -> None:
@@ -654,7 +714,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
     binary = Path(args.opencode)
     if not binary.is_absolute() or not binary.is_file() or not os.access(binary, os.X_OK):
         raise CheckError("client_path")
-    key = _read_key(args.key_file)
+    key = _read_key(args.key_file) if args.key_file is not None else _read_key_stdin()
     qualified_artifact_id = MODEL_BINDINGS[args.model]
     models_status, models_body = _bounded_https_get("/v1/models", key)
     context = validate_models(models_body, models_status, args.model)
@@ -736,7 +796,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--opencode", required=True, help="absolute OpenCode 1.17.9 executable")
     parser.add_argument("--model", required=True, choices=MODELS)
-    parser.add_argument("--key-file", required=True, help="absolute owner-only regular file")
+    key_source = parser.add_mutually_exclusive_group(required=True)
+    key_source.add_argument("--key-file", help="absolute owner-only regular file")
+    key_source.add_argument("--key-stdin", action="store_true", help="read the buyer key from stdin")
     return parser
 
 

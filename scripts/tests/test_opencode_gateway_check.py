@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import uuid
 from unittest import mock
@@ -232,6 +233,47 @@ class ReceiptTests(unittest.TestCase):
             with self.assertRaisesRegex(MODULE.CheckError, "receipt_pending_timeout"):
                 MODULE.poll_receipt("req-1", "key", MODEL, timeout_seconds=2.0)
         self.assertEqual(get.call_args.kwargs["timeout_seconds"], 2.0)
+        self.assertEqual(get.call_args.kwargs["deadline"], 12.0)
+
+    def test_slow_drip_cannot_extend_total_https_deadline(self):
+        stopped = MODULE.threading.Event()
+
+        class FakeSocket:
+            def settimeout(self, _timeout):
+                pass
+
+            def shutdown(self, _how):
+                stopped.set()
+
+        class SlowResponse:
+            status = 200
+
+            @staticmethod
+            def read1(_limit):
+                if stopped.wait(0.02):
+                    raise OSError("watchdog closed slow response")
+                return b"x"
+
+        class SlowConnection:
+            def __init__(self, *_args, **_kwargs):
+                self.sock = FakeSocket()
+
+            def request(self, *_args, **_kwargs):
+                pass
+
+            def getresponse(self):
+                return SlowResponse()
+
+            def close(self):
+                stopped.set()
+
+        started = time.monotonic()
+        with mock.patch.object(MODULE.http.client, "HTTPSConnection", SlowConnection):
+            with self.assertRaisesRegex(MODULE.CheckError, "upstream_transport"):
+                MODULE._bounded_https_get("/v1/receipts/req-1", "key", timeout_seconds=0.07)
+        elapsed = time.monotonic() - started
+        self.assertTrue(stopped.is_set())
+        self.assertLess(elapsed, 0.3)
 
     def test_early_response_metadata_is_retained_for_failure_receipts(self):
         request_id = str(uuid.uuid4())
@@ -279,6 +321,36 @@ class ModelTests(unittest.TestCase):
             MODULE.build_parser().parse_args(
                 ["--opencode", "/bin/true", "--model", ARTIFACT, "--key-file", "/private/key"]
             )
+
+
+class KeyInputTests(unittest.TestCase):
+    def test_stdin_key_is_bounded_and_validated(self):
+        class TrackingStream(io.BytesIO):
+            calls = []
+
+            def read(self, size=-1):
+                self.calls.append(size)
+                return super().read(size)
+
+        stream = TrackingStream(b"synthetic-owner-key\n")
+        self.assertEqual(MODULE._read_key_stdin(stream), "synthetic-owner-key")
+        self.assertEqual(stream.calls, [8192, 1])
+        for raw, code in ((b"x" * 8193, "key_file_too_large"),
+                          (b"key with space", "key_file_value"),
+                          (b"\xff", "key_file_encoding")):
+            with self.subTest(code=code), self.assertRaisesRegex(MODULE.CheckError, code):
+                MODULE._read_key_stdin(io.BytesIO(raw))
+
+    def test_cli_requires_exactly_one_key_source(self):
+        base = ["--opencode", "/bin/true", "--model", MODEL]
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                MODULE.build_parser().parse_args(base)
+            with self.assertRaises(SystemExit):
+                MODULE.build_parser().parse_args(base + ["--key-file", "/private/key", "--key-stdin"])
+        args = MODULE.build_parser().parse_args(base + ["--key-stdin"])
+        self.assertTrue(args.key_stdin)
+        self.assertIsNone(args.key_file)
 
 
 class ProcessTests(unittest.TestCase):
@@ -441,9 +513,11 @@ class RealOpenCodeLoopbackFixture(unittest.TestCase):
             def close(self):
                 return None
 
-        def fake_get(path, key, timeout_seconds=MODULE.HTTP_TIMEOUT_SECONDS):
+        def fake_get(path, key, timeout_seconds=MODULE.HTTP_TIMEOUT_SECONDS, deadline=None):
             self.assertEqual(key, "synthetic-owner-key")
             self.assertGreater(timeout_seconds, 0)
+            if deadline is not None:
+                self.assertGreater(deadline, time.monotonic())
             if path == "/v1/models":
                 return 200, json.dumps({"data": [{"id": MODEL,
                     "max_context_tokens": MODULE.MIN_CONTEXT_TOKENS}]}).encode()
@@ -457,6 +531,14 @@ class RealOpenCodeLoopbackFixture(unittest.TestCase):
                     "settlement_outcome": "verified", "model_id": MODEL}],
             }).encode()
 
+        run_client = MODULE._bounded_client_process
+
+        def inspect_client_secret_boundary(command, cwd, env):
+            self.assertNotIn("synthetic-owner-key", json.dumps(env, sort_keys=True))
+            config = pathlib.Path(env["OPENCODE_CONFIG"]).read_text(encoding="utf-8")
+            self.assertNotIn("synthetic-owner-key", config)
+            return run_client(command, cwd, env)
+
         with tempfile.TemporaryDirectory() as directory:
             key_path = pathlib.Path(directory) / "buyer.key"
             key_path.write_text("synthetic-owner-key\n", encoding="utf-8")
@@ -465,7 +547,9 @@ class RealOpenCodeLoopbackFixture(unittest.TestCase):
                 ["--opencode", binary, "--model", MODEL, "--key-file", str(key_path)]
             )
             with mock.patch.object(MODULE, "_bounded_https_get", side_effect=fake_get), \
-                    mock.patch.object(MODULE.http.client, "HTTPSConnection", FakeHTTPSConnection):
+                    mock.patch.object(MODULE.http.client, "HTTPSConnection", FakeHTTPSConnection), \
+                    mock.patch.object(MODULE, "_bounded_client_process",
+                                      side_effect=inspect_client_secret_boundary):
                 result = MODULE._run(args)
 
         self.assertTrue(result["accepted"])
@@ -473,6 +557,7 @@ class RealOpenCodeLoopbackFixture(unittest.TestCase):
         self.assertGreaterEqual(len(result["requests"]), 2)
         self.assertTrue(result["opencode"]["final_marker_match"])
         self.assertEqual(result["receipt_validation"]["status"], "verified")
+        self.assertNotIn("synthetic-owner-key", json.dumps(result, sort_keys=True))
 
 
 if __name__ == "__main__":
