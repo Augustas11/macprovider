@@ -1,11 +1,14 @@
 # SPEC-035 — Provider connection diagnostics and failure history
 
-Version: v0.4.3
+Version: v0.4.4
 Status: draft (Partial #535 coordinator journal + provider diagnostic snapshot + monitor alerts + admission-ceiling drift diagnostics; #1267 operator onboarding funnel join; #1314 local diagnostic signature schema)
 Owner: coordinator operator observability
 Issue: https://github.com/Augustas11/macprovider/issues/535
 
 Changelog:
+
+- v0.4.4 (2026-10-20): names the blocked startup-handoff recovery diagnostic
+  and its guarded recovery command without overriding fresh serving status.
 
 - v0.4.1 (2026-08-31): adds the operator onboarding funnel join for
   [#1267](https://github.com/Augustas11/macprovider/issues/1267). `GET /admin/onboarding`
@@ -201,6 +204,7 @@ report unreadable.
 | `snapshot_path_mismatch` | `ProviderLogDiagnostics` log line `model must be the catalog-pinned hugging face snapshot path`. |
 | `autoupdate_home_acl_rejected` | `ProviderLogDiagnostics` watchdog line `autoupdate recovery_error=acl_write_rejected:<home>` without a later handled marker. |
 | `credential_store_unavailable` | Fresh, contract-compatible `/v1/status` `credential.state` in `locked`, `not_logged_in`, `permission_denied`, `keychain_failure`, `incompatible`, or `unavailable`. |
+| `startup_handoff_recovery_required` | `ProviderLogDiagnostics` startup log contains `self-update startup reload fence authorization mismatch: startup_handoff` or `provider startup preflight failed: startup handoff expired before adoption` or `self-update startup handoff recovery refused:`; names `macprovider-cli recover-update`. |
 | `serve_unresponsive` | Missing, stale, or contract-incompatible `/v1/status`; or fresh `/v1/status` `network_state` in `not_buyer_serving`, `buyer_serving_unknown`, `network_offline`, or `coordinator_unavailable`; or slice-2 `doctor report` serve-dead evidence when `/v1/status` is not fresh. |
 | `admission_identity_blocked` | Fresh, contract-compatible `/v1/status` `admission_identity.state` in `missing`, `recovery_pending`, `degraded_previous_key`, or `recovery_required`. |
 | `autoupdate_in_progress` | Fresh, contract-compatible `/v1/status` `lifecycle.state` in `update_in_progress` or `rollback_in_progress`, or the Malibu-local update/repair in-progress flags. |
@@ -220,6 +224,9 @@ doctor report MAY contribute only `serve_unresponsive`, and only when
 contract-incompatible. A subprocess `credentials status` result MUST NOT
 override a fresh serve-owned `credential.state`; it MAY contribute only when
 fresh status is absent or lacks credential state.
+When fresh serving status is absent, `startup_handoff_recovery_required`
+SHOULD precede generic `serve_unresponsive` guidance. Historical startup
+failures MUST NOT override a fresh validated ready status.
 
 **SPEC-035-R012 — Diagnostics bundle v2 allowlist and redaction.** Malibu
 diagnostic bundles MUST be allowlist-only and MUST NOT copy config files,

@@ -86,6 +86,8 @@ assert_watchdog_does_not_own_rollback() {
   [ -e "$root/home/.local/share/macprovider/autoupdate/pending.json" ]
   grep -F "autoupdate recovery deferred: pending marker exists; transaction owner must resolve update/rollback state" \
     "$root/logs/watchdog.log" >/dev/null
+  grep -F "if provider startup remains blocked, run macprovider-cli recover-update" \
+    "$root/logs/watchdog.log" >/dev/null
   if grep -E '(^| )((list|bootout|bootstrap|kickstart)( |$))' "$root/launchctl.log" >/dev/null; then
     echo "watchdog rollback compatibility command must not touch launchctl" >&2
     exit 1
@@ -118,12 +120,46 @@ assert_watchdog_does_not_quarantine_malformed_marker() {
   [ "$(find "$root/home/.local/share/macprovider/autoupdate" -name 'pending-quarantined-*.json' | wc -l | tr -d ' ')" = "0" ]
 }
 
+assert_repeated_failed_startup_is_observe_only() {
+  script="$1"
+  root="$2"
+  make_fixture "$root"
+  mkdir -p "$root/home/.config/macprovider" "$root/home/Library/Application Support/macprovider/lifecycle"
+  printf 'provider_id: provider-test\n' > "$root/home/.config/macprovider/config.yaml"
+  # The watcher must not interpret or repair a prepared handoff, even after
+  # repeated startup failures. Only the CLI transaction owner can adopt it.
+  lease="$root/home/Library/Application Support/macprovider/lifecycle/lease.json"
+  printf '{"startup_handoff":{"state":"prepared","expires_wall_ms":1}}\n' > "$lease"
+  cp "$lease" "$root/lease-before.json"
+  cp "$root/home/.local/share/macprovider/autoupdate/pending.json" "$root/pending-before.json"
+  cat > "$root/bin/launchctl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$MACPROVIDER_FAKE_LAUNCHCTL_LOG"
+exit 113
+EOF
+  for tick in 1 2 3; do
+    invoke_reconcile "$script" "$root"
+  done
+  cmp -s "$lease" "$root/lease-before.json"
+  cmp -s "$root/home/.local/share/macprovider/autoupdate/pending.json" "$root/pending-before.json"
+  cmp -s "$root/bin/macprovider-cli" <(printf "new-binary")
+  cmp -s "$root/bin/.macprovider-cli.rollback-123e4567-e89b-42d3-a456-426614174000" <(printf "old-binary")
+  grep -F 'exit-restart owned by launchd KeepAlive (watchdog does not kick)' "$root/logs/watchdog.log" >/dev/null
+  grep -F 'macprovider-cli recover-update' "$root/logs/watchdog.log" >/dev/null
+  if grep -E '^(bootout|bootstrap|kickstart)( |$)' "$root/launchctl.log" >/dev/null; then
+    echo "repeated failed startup must not trigger watchdog recovery restarts" >&2
+    exit 1
+  fi
+}
+
 for script_name in standalone inline; do
   if [ "$script_name" = standalone ]; then
     script="$STANDALONE"
   else
     script="$INLINE"
   fi
+
+  assert_repeated_failed_startup_is_observe_only "$script" "$TMP/failed-startup-$script_name"
 
   make_fixture "$TMP/no-rollback-$script_name"
   assert_watchdog_does_not_own_rollback "$script" "$TMP/no-rollback-$script_name"
