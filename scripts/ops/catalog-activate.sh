@@ -656,7 +656,8 @@ gateway_proof() {
   # Include the generated request id in the prompt so this proof cannot be
   # answered from an earlier identical-prompt cache entry. It remains an opaque
   # buyer request nonce and reveals no provider attribution.
-  payload="$(python3 -c 'import json,sys; print(json.dumps({"model": sys.argv[1], "max_tokens": 32, "messages": [{"role": "user", "content": "Proof nonce " + sys.argv[2] + ". Reply with the word ok."}]}))' "$model" "$sent_rid")"
+  # Greedy-only native tuples reject the API's default temperature of 1.0.
+  payload="$(python3 -c 'import json,sys; print(json.dumps({"model": sys.argv[1], "max_tokens": 32, "temperature": 0, "top_p": 1, "messages": [{"role": "user", "content": "Proof nonce " + sys.argv[2] + ". Reply with the word ok."}]}))' "$model" "$sent_rid")"
   # The bearer goes through curl --config on stdin, never argv.
   code="$(printf 'header = "Authorization: Bearer %s"\n' "$(tr -d '\r\n' < "$token_file")" |
     curl -sS -m 120 --config - -D "$headers" -o "$body" -w '%{http_code}' \
