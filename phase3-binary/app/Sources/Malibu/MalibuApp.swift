@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -36,6 +37,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var onboardingWindow: NSWindow?
     private var dashboardWindow: NSWindow?
     private let navigation = MalibuNavigation()
+    private let preferences = AppPreferences.shared
+    private var preferenceCancellables: Set<AnyCancellable> = []
     private var bundleRelaunchMonitor: AppBundleRelaunchMonitor?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -44,9 +47,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         logStartupProvenance()
         AppDelegate.current = self
 
-        menuBar = MenuBarController(agent: agent) { [weak self] action in
+        menuBar = MenuBarController(agent: agent, isVisible: preferences.showsMenuBarIcon) { [weak self] action in
             self?.handle(action)
         }
+        DockPresenceController.shared.setKeepsDockIcon(preferences.keepsDockIcon)
+        preferences.$showsMenuBarIcon
+            .removeDuplicates()
+            .sink { [weak self] visible in self?.menuBar.setVisible(visible) }
+            .store(in: &preferenceCancellables)
+        preferences.$keepsDockIcon
+            .removeDuplicates()
+            .sink { visible in DockPresenceController.shared.setKeepsDockIcon(visible) }
+            .store(in: &preferenceCancellables)
 
         // Host-based unit tests launch the real AppDelegate. Do not let that
         // test host inspect, start, repair, or terminate the user's installed

@@ -15,6 +15,19 @@ final class DockPresenceController {
     var activate: () -> Void = { NSApp.activate(ignoringOtherApps: true) }
 
     private var tracked: [ObjectIdentifier: (window: NSWindow, token: NSObjectProtocol)] = [:]
+    private(set) var keepsDockIcon = false
+
+    /// Keeps Malibu in the Dock even with no open windows. Windows still use
+    /// regular activation while open so their main menu and Cmd-Tab presence
+    /// remain predictable when this preference is off.
+    func setKeepsDockIcon(_ enabled: Bool) {
+        keepsDockIcon = enabled
+        if enabled || hasOpenWindow {
+            applyPolicy(.regular)
+        } else {
+            applyPolicy(.accessory)
+        }
+    }
 
     /// Shows `window` with the app in the Dock and the Cmd-Tab switcher.
     func present(_ window: NSWindow) {
@@ -44,9 +57,12 @@ final class DockPresenceController {
         if let entry = tracked.removeValue(forKey: ObjectIdentifier(window)) {
             NotificationCenter.default.removeObserver(entry.token)
         }
-        let anyOpen = tracked.values.contains { $0.window.isVisible || $0.window.isMiniaturized }
-        if !anyOpen {
+        if !hasOpenWindow && !keepsDockIcon {
             applyPolicy(.accessory)
         }
+    }
+
+    private var hasOpenWindow: Bool {
+        tracked.values.contains { $0.window.isVisible || $0.window.isMiniaturized }
     }
 }

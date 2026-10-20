@@ -61,6 +61,14 @@ final class StreamIntervalBatchingTests: XCTestCase {
 
     // MARK: - interval=1 (baseline: one frame per token)
 
+    func testRuntimeWithoutKVDiskTierUsesNilStatusSnapshot() async {
+        let runtime: any ModelRuntimeServing = NullRuntime()
+
+        let snapshot = await runtime.kvDiskTierSnapshot()
+
+        XCTAssertNil(snapshot)
+    }
+
     func testInterval1EmitsOneFramePerToken() async throws {
         let tokenCount = 8
         let runtime = CountingTokenRuntime(tokens: tokenCount)

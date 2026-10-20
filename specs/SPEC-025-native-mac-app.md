@@ -1,6 +1,14 @@
 # SPEC-025 — Native Mac App (signed `.dmg`, native Mac app with menu-bar presence)
 
-Status: DRAFT v0.35.0 · Owner: @Augustas11 · Target: 2026 Q3
+Status: DRAFT v0.36.0 · Owner: @Augustas11 · Target: 2026 Q3
+
+**Change log v0.36.0 (2026-10-20, Related: #2054):**
+Provider presents the observed KV disk tier and bounded recent lifecycle
+restarts (R007). Settings persists and applies menu-bar and Dock preferences
+live, preserving a visible way to reopen Malibu, and names only the stable
+update channel supported by the CLI updater (R009). Connected apps names
+Cursor's manual base-URL override and keeps unverified automatic tool use
+distinct from guaranteed required/named tool selection (R012).
 
 **Change log v0.35.0 (2026-10-20, Related: #2059):**
 Models and Discover name each model by a readable title (family, size and
@@ -532,7 +540,9 @@ From reading `phase3-binary/`:
    window opens: while any Malibu window (dashboard, onboarding, settings) is
    open the app switches to `.regular` activation (Dock icon, Cmd-Tab entry,
    main menu with Settings…, Open Dashboard, Edit, Window, Quit) and returns to
-   `.accessory` when the last window closes (`MenuBar/DockPresence.swift`). On launch, `applicationDidFinishLaunching` runs
+   `.accessory` when the last window closes (`MenuBar/DockPresence.swift`),
+   unless the saved Dock preference keeps it visible (R009). The menu-bar
+   icon may be hidden only while the Dock remains enabled. On launch, `applicationDidFinishLaunching` runs
    `handleStartup()`, which routes on disk state via `StartupState.detect().route()`
    → `.startAgent` / `.showOnboarding` / `.showImportDialog` / `.quit`
    (`MalibuApp.swift:30-140`, `LaunchProviderController.swift:302-372`). A fresh Mac
@@ -791,6 +801,14 @@ projections (SPEC-044-R004), colour never the only signal.
   shown), they are cleared when the status observation is invalidated, and
   absent fields are omitted. Pause asks for confirmation and says running
   requests finish; Resume appears only while paused.
+  The KV disk tier MUST distinguish enabled configuration from activation
+  for the current model, report unsupported models with a plain reason,
+  and show observed used bytes against the configured cap. Missing status
+  MUST remain unknown, never inferred as disabled or zero usage.
+  Recent restarts MUST be a bounded, newest-first list drawn from existing
+  lifecycle records with time, reason and recorded software version.
+  A missing recorded version MUST remain unknown rather than borrowing the
+  current version. Historical records MUST NOT imply current health.
 - **SPEC-025-R008 Diagnostics.** Diagnostics MUST always offer Export
   diagnostics and Reset provider service, and show Findings (humanised, once
   each), Events & identity (last restart, current setup failure, current
@@ -801,11 +819,19 @@ projections (SPEC-044-R004), colour never the only signal.
   versions, status contract, lifecycle, slots).
 - **SPEC-025-R009 Settings.** Settings MUST host the payout wallet with the
   cooling-off rule (§3.2), the invite panel (§3.2), an "Open Malibu at login"
-  toggle backed by `SMAppService.mainApp`, the Dock rule (Dock and Cmd-Tab
-  while a window is open, §3.1), provider software update status with the
+  toggle backed by `SMAppService.mainApp`, persisted menu-bar visibility and
+  Dock presence controls that apply immediately without restarting the app,
+  provider software update status with the
   install action when an update is available, the model settings (local
   runtimes, background recommendations) and About (app and provider software
   versions).
+  Defaults retain the menu-bar icon and show Dock/Cmd-Tab while a window is
+  open. Keeping Malibu in the Dock MAY be enabled. Hiding the menu-bar icon
+  MUST keep Dock presence enabled, so closing the last window cannot hide
+  both entry points. Update-channel selection MUST contain only `Stable`:
+  SPEC-020 does not support user prerelease channels, and private acceptance
+  release metadata is not a user channel. Saving this choice MUST NOT create
+  an independent app feed or change the CLI's signed-set update authority.
 
 ### 3.2.2 Local Chat and Connected apps
 
@@ -886,6 +912,13 @@ projections (SPEC-044-R004), colour never the only signal.
   Messages. A gateway test is not evidence that an external client works.
   The coordinator's authoritative no-self-routing contract applies to buyer
   requests independently of any client configuration or exclusion hint.
+  Cursor's manual handoff MUST name Settings → Models → API Keys, the OpenAI
+  API key enable control, Override OpenAI Base URL set to
+  `https://api.malibu.tech/v1`, and selection of the exact gateway model ID.
+  Automatic tool use MUST NOT be inferred from the provider's guaranteed
+  required/named tool-selection profiles. If actual client acceptance is
+  unresolved or the model is unavailable on the gateway, disclose that
+  limitation without labelling the client compatible.
 
 ### 3.3 Updates — CLI-owned signed compatibility set
 
