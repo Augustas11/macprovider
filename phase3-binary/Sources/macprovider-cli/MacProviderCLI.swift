@@ -725,15 +725,14 @@ struct ServeCommand: AsyncParsableCommand {
                 ).utf8))
                 throw ExitCode(2)
             }
-            let maximumContinuousBatchQueueLimit = ContinuousBatchingPolicy.maximumQueueLimit(
+            // #2078: above the bound for these rows the limit is clamped and
+            // logged, never rejected; the scheduler applies the bound for the
+            // rows it actually builds.
+            if let event = ContinuousBatchingPolicy.queueLimitClampEvent(
+                configured: resolved.continuousBatchQueueLimit,
                 maxActiveRows: ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride)
-            )
-            if let queueLimit = resolved.continuousBatchQueueLimit,
-               queueLimit > maximumContinuousBatchQueueLimit {
-                FileHandle.standardError.write(Data((
-                    "--continuous-batch-queue-limit \(queueLimit) must be <= \(maximumContinuousBatchQueueLimit) for the configured max batch\n"
-                ).utf8))
-                throw ExitCode(2)
+            ) {
+                FileHandle.standardError.write(Data("\(event) stage=preflight\n".utf8))
             }
         }
         // Validated whether or not batching is on: a supplied value that cannot

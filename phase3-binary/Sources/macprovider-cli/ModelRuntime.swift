@@ -5893,6 +5893,9 @@ maxTokens: 1,
         ) else {
             return nil
         }
+        if let event = ContinuousBatchingPolicy.queueLimitClampEvent(configured: queueLimit, maxActiveRows: maxBatch) {
+            FileHandle.standardError.write(Data("\(event) stage=scheduler\n".utf8))
+        }
         return ContinuousBatchScheduler(
             configuration: productionContinuousBatchSchedulerConfiguration(
                 descriptor: descriptor,

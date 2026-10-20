@@ -768,12 +768,56 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertThrowsError(try ServeCommand.runServingKnobsPreflight(config))
     }
 
-    func testContinuousBatchQueueLimitPreflightRejectsExcessiveQueue() throws {
+    func testContinuousBatchQueueLimitPreflightClampsExcessiveQueue() throws {
         var config = AppConfig.defaults()
         config.continuousBatching = .canary
         config.maxConcurrencyOverride = 2
         config.continuousBatchQueueLimit = 17
-        XCTAssertThrowsError(try ServeCommand.runServingKnobsPreflight(config))
+        XCTAssertNoThrow(try ServeCommand.runServingKnobsPreflight(config))
+        XCTAssertEqual(
+            ContinuousBatchingPolicy.queueLimitClampEvent(configured: 17, maxActiveRows: 2),
+            "event=cb_queue_limit_clamped configured=17 effective=16 rows=2"
+        )
+    }
+
+    /// #2078: a provider configured with queue limit 16 whose owner pin is
+    /// removed under a signed `max_served_slots` ceiling of 4 starts and
+    /// serves. Preflight sees one unpinned row (bound 8) and clamps instead
+    /// of exiting; the scheduler then builds the ceiling's 4 rows.
+    func testQueueLimitAboveBoundUnderSignedCeilingStartsAndServes() throws {
+        var config = AppConfig.defaults()
+        config.continuousBatching = .canary
+        config.maxConcurrencyOverride = nil
+        config.continuousBatchQueueLimit = 16
+        XCTAssertNoThrow(try ServeCommand.runServingKnobsPreflight(config))
+        XCTAssertEqual(ContinuousBatchingPolicy.queueLimit(configured: 16, maxActiveRows: 1), 8)
+        XCTAssertEqual(
+            ContinuousBatchingPolicy.queueLimitClampEvent(configured: 16, maxActiveRows: 1),
+            "event=cb_queue_limit_clamped configured=16 effective=8 rows=1"
+        )
+
+        let plan = AutoServedSlots.plan(
+            configuredSlots: nil,
+            source: nil,
+            draftConfigured: false,
+            emergencyOff: false,
+            provisionalPolicyEntry: true,
+            recommendedSlots: { 8 },
+            memoryFitKnown: true,
+            policyCeiling: 4
+        )
+        XCTAssertEqual(plan.rows, 4)
+        let capability = ContinuousBatchingPolicy.configurationCapability(
+            mode: .canary,
+            maxBatch: plan.rows,
+            queueLimit: 16,
+            kvBits: nil,
+            draftConfigured: false
+        )
+        XCTAssertEqual(capability.maxActiveRows, 4)
+        XCTAssertEqual(capability.queueLimit, 16, "the configured value serves once the rows hold it")
+        XCTAssertNil(ContinuousBatchingPolicy.queueLimitClampEvent(configured: 16, maxActiveRows: 4))
+        XCTAssertNil(ContinuousBatchingPolicy.queueLimitClampEvent(configured: nil, maxActiveRows: 1))
     }
 
     func testContinuousBatchQueueLimitIsInertWhenContinuousBatchingIsOff() throws {
