@@ -22,6 +22,9 @@ Files in STATE_DIR steer it:
   request_log.db          sqlite request_log the fake coordinator writes (when the file exists)
   mirror-latest.json      /releases/latest.json body of the release mirror (404 when absent)
   served                  number of completions served (written here)
+  gateway_models          models the gateway routes, one per line; a completion for any
+                          other model answers 404 (absent: every model is routed)
+  last_model              the model of the last completion request (written here)
   operator_key            bearer the fake coordinator's /admin routes accept
   retention_busy, retention_disabled   POST .../retention/run answers 409 with that code
   retention_db            sqlite file whose settlement_evidence_retention_state row a
@@ -171,13 +174,21 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0"))
-        self.rfile.read(length)
+        raw = self.rfile.read(length)
         if self.path == "/admin/ledger/settlement-evidence-retention/run":
             return self.retention_run() if self.admin_ok() else None
         if self.path != "/v1/chat/completions":
             return self.send(404, "{}")
         if self.headers.get("Authorization") != "Bearer test-buyer-token":
             return self.send(401, '{"error": "unauthorized"}')
+        try:
+            model = json.loads(raw or b"{}").get("model", "")
+        except ValueError:
+            model = ""
+        open(os.path.join(state, "last_model"), "w").write(model)
+        routed = read("gateway_models")
+        if routed is not None and model not in routed.split():
+            return self.send(404, '{"error": "model_not_found"}')
         served = int(read("served", "0")) + 1
         open(os.path.join(state, "served"), "w").write(str(served))
         headers = {}

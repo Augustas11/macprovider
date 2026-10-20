@@ -1081,8 +1081,13 @@ mainland-provider installer handoff.
    bundled `default.metallib` lacks a kernel the pinned MLX core loads by name
    (the 1.8.254 candidate shipped without `gather_mm_offsets` and could not
    load MoE models), and after the restart it restores the backup and
-   resumes the previous version on a provider restart or a `/v1/status`
-   silence of 120 s. Verify the installed CLI advertises
+   resumes the previous version on a provider restart or exit (crash loop,
+   detected at once) or on a `/v1/status` silence of 120 s
+   (`CANARY_STATUS_TIMEOUT_S`) after the candidate reported its model loaded.
+   Silence while the model loads is not a failure: GLM-5.3-Flash keeps
+   `/v1/status` silent for 7-13 minutes while it loads, so with the same
+   provider pid alive the load is bounded only by `CANARY_READY_TIMEOUT_S`
+   (1800 s). No timeout override is needed. Verify the installed CLI advertises
    1.8.217, joins through Pearl's exact compatibility set, preserves operator
    pause through coordinator drain, and serves a bounded request. Do not touch
    the designated Studio until the operator releases its current session lock.

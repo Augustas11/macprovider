@@ -106,7 +106,7 @@ case "$1" in
   bootstrap)
     if [[ "$3" == *-watchdog.plist ]]; then touch "$s/wd"; exit 0; fi
     echo loaded >"$s/job"; echo $(( $(cat "$s/pid") + 1 )) >"$s/pid"
-    [ "$(running)" != "$FAKE_CAND" ] || touch "$s/swapped" ;;
+    [ "$(running)" != "$FAKE_CAND" ] || date +%s >"$s/swapped" ;;
   print)
     if [[ "$2" == *-watchdog ]]; then [ -f "$s/wd" ] || exit 113; printf '\tstate = running\n'; exit 0; fi
     [ "$(cat "$s/job")" = loaded ] || exit 113
@@ -121,7 +121,10 @@ case "$1" in
     printf '\tstate = running\n\tpid = %s\n' "$(cat "$s/pid")" ;;
 esac
 SH
-# fake curl: /v1/status of the installed binary; "silent" mode drops the candidate's status.
+# fake curl: /v1/status of the installed binary. "silent" drops the candidate's
+# status for good; "loadsilent" drops it for $s/loadsecs seconds after the swap
+# (a large model loading), then answers; "hang" answers once with the model
+# loaded, then goes silent.
 cat >"$T/bin/curl" <<'SH'
 #!/bin/bash
 s="$FAKE_STATE"
@@ -129,6 +132,12 @@ s="$FAKE_STATE"
 v="$("$FAKE_INSTALL/macprovider-cli" --version)"
 mode="$(cat "$s/mode" 2>/dev/null || true)"
 if [ "$mode" = silent ] && [ "$v" = "$FAKE_CAND" ]; then exit 7; fi
+if [ "$mode" = loadsilent ] && [ "$v" = "$FAKE_CAND" ] &&
+   [ $(( $(date +%s) - $(cat "$s/swapped") )) -lt "$(cat "$s/loadsecs")" ]; then exit 7; fi
+if [ "$mode" = hang ] && [ "$v" = "$FAKE_CAND" ]; then
+  [ ! -f "$s/answered" ] || exit 7
+  touch "$s/answered"
+fi
 # dead: the candidate crashes, and the restored version never answers again.
 if [ "$mode" = dead ] && [ -f "$s/swapped" ]; then exit 7; fi
 paused=false; state=serving_buyers; net=buyer_serving
@@ -208,12 +217,29 @@ ls -d "$FAKE_INSTALL".failed-"$CAND"-* >/dev/null || die "failed payload not kep
 [ "$(tr '\n' ' ' <"$T/state/runner")" = "stopped started " ] || die "runner not restarted after rollback"
 [ ! -f "$T/ops-state/cli-release-$CAND/canary_swap.json" ] || die "failed swap recorded canary_swap"
 
-# 4. /v1/status silence past CANARY_STATUS_TIMEOUT_S restores the backup.
+# 4. /v1/status silence while the model loads is not a failure: a candidate
+#    silent for longer than CANARY_STATUS_TIMEOUT_S (3 s) with a stable pid is
+#    swapped in once it answers. Silence after the model loaded is a hang and
+#    restores the backup after CANARY_STATUS_TIMEOUT_S; a candidate that never
+#    answers is bounded by CANARY_READY_TIMEOUT_S.
 reset_install
+verify_bytes "$T/good.tar.gz"
+echo loadsilent >"$T/state/mode"; echo 7 >"$T/state/loadsecs"
+run_rc 0 "status silence during a long model load is not a failure" "$SWAP" swap --version "$CAND"
+[ "$(installed)" = "$CAND" ] || die "a long model load rolled the candidate back"
+grep -q "model loaded on $CAND after" "$T/err" || die "model load not reported"
+reset_install
+verify_bytes "$T/good.tar.gz"
+echo hang >"$T/state/mode"
+run_rc 5 "status silence after the model loaded restores the backup" "$SWAP" swap --version "$CAND"
+grep -q "/v1/status not answering for 3s after the model loaded" "$T/err" || die "post-load status silence not named"
+[ "$(installed)" = "$OLD" ] || die "post-load status silence left the candidate installed"
+reset_install
+verify_bytes "$T/good.tar.gz"
 echo silent >"$T/state/mode"
-run_rc 5 "status silence restores the backup" "$SWAP" swap --version "$CAND"
-grep -q "/v1/status not answering for 3s" "$T/err" || die "status silence not named"
-[ "$(installed)" = "$OLD" ] || die "status silence left the candidate installed"
+run_rc 5 "a candidate that never answers is bounded by the ready timeout" env CANARY_READY_TIMEOUT_S=8 "$SWAP" swap --version "$CAND"
+grep -q "not buyer_serving within 8s" "$T/err" || die "ready timeout not named"
+[ "$(installed)" = "$OLD" ] || die "a silent candidate was left installed"
 
 # 5. a rollback whose previous version does not come back serving needs the operator.
 reset_install

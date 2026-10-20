@@ -70,6 +70,14 @@ AA_LEASE_MAX_SECONDS="${AA_LEASE_MAX_SECONDS:-1800}"
 # treats the lease as lost.
 AA_LEASE_ROLLBACK_SECONDS="${AA_LEASE_ROLLBACK_SECONDS:-300}"
 AA_LEASE_KILL_GRACE_SECONDS="${AA_LEASE_KILL_GRACE_SECONDS:-30}"
+# While the controller lives, its watchdog sends a PING frame on the lease
+# channel every AA_LEASE_HEARTBEAT_SECONDS. The traffic keeps an otherwise idle
+# channel (a long canary load or evidence watch) open through NAT and firewall
+# idle timeouts. The remote runner exits, releasing both locks, once no frame
+# has arrived for AA_LEASE_IDLE_SECONDS: a controller that died (or whose
+# channel went half-open) never leaves an orphaned runner holding the locks.
+AA_LEASE_HEARTBEAT_SECONDS="${AA_LEASE_HEARTBEAT_SECONDS:-10}"
+AA_LEASE_IDLE_SECONDS="${AA_LEASE_IDLE_SECONDS:-180}"
 AA_LEASE_DEADLINE=""
 AA_LEASE_HELD=0
 AA_LEASE_PID=""
@@ -177,7 +185,10 @@ finally:
 # the locks outlive a dead runner until its last running command exits, so no
 # deploy, renewal or update can take them while a mutation is in flight.
 # Frames on stdin, one per line: RUN <seq> <b64 script> <b64 arg, or - for "">...
+# or PING (the controller's heartbeat; no reply).
 # Replies on stdout: RESULT <seq> <rc> <b64 stdout or -> <b64 stderr or -> END.
+# No frame for @AA_LEASE_IDLE_SECONDS@ s between commands means the controller
+# is gone: the runner replies LEASE-IDLE and exits, releasing the locks.
 # A started command runs to completion even if the controller disconnects
 # (HUP ignored), but never past the lease deadline (@AA_LEASE_HARD_SECONDS@ s
 # after acquisition, on this host's clock): each command runs in its own
@@ -225,8 +236,17 @@ except subprocess.TimeoutExpired:
 sys.exit(128 - rc if rc < 0 else rc)'
 deadline=$(( $(date +%s) + @AA_LEASE_HARD_SECONDS@ ))
 printf 'LOCKED %s\n' "$$"
-while IFS=' ' read -r verb seq script args; do
-  case "$verb" in RUN) ;; *) echo "malformed lease frame" >&2; exit 1 ;; esac
+idle=@AA_LEASE_IDLE_SECONDS@
+while :; do
+  waited=$SECONDS
+  if ! IFS=' ' read -r -t "$idle" verb seq script args; then
+    # EOF: the controller released the lease. A timeout: it is gone.
+    [ $((SECONDS - waited)) -ge "$idle" ] || exit 0
+    echo "lease runner: no frame from the controller for ${idle}s; releasing the locks" >&2
+    printf 'LEASE-IDLE\n'
+    exit 1
+  fi
+  case "$verb" in PING) continue ;; RUN) ;; *) echo "malformed lease frame" >&2; exit 1 ;; esac
   case "$seq" in ""|*[!0-9]*) echo "malformed lease frame" >&2; exit 1 ;; esac
   set --
   for a in $args; do
@@ -274,10 +294,14 @@ aa_lease_acquire() {
   local controller=$$ lease_wait=0 hard
   case "$AA_LEASE_ROLLBACK_SECONDS$AA_LEASE_KILL_GRACE_SECONDS" in ""|*[!0-9]*) fatal "AA_LEASE_ROLLBACK_SECONDS and AA_LEASE_KILL_GRACE_SECONDS must be whole numbers of seconds" ;; esac
   hard=$((AA_LEASE_MAX_SECONDS + AA_LEASE_ROLLBACK_SECONDS))
+  case "$AA_LEASE_HEARTBEAT_SECONDS$AA_LEASE_IDLE_SECONDS" in ""|*[!0-9]*) fatal "AA_LEASE_HEARTBEAT_SECONDS and AA_LEASE_IDLE_SECONDS must be whole numbers of seconds" ;; esac
+  [ "$AA_LEASE_HEARTBEAT_SECONDS" -ge 1 ] && [ "$AA_LEASE_IDLE_SECONDS" -ge $((3 * AA_LEASE_HEARTBEAT_SECONDS)) ] ||
+    fatal "AA_LEASE_IDLE_SECONDS must be at least three AA_LEASE_HEARTBEAT_SECONDS intervals"
   mkfifo -m 600 "$fifo"
   (
     set +e
-    SSH "${AA_LEASE_REMOTE_COMMAND//@AA_LEASE_HARD_SECONDS@/$hard}"
+    lease_cmd="${AA_LEASE_REMOTE_COMMAND//@AA_LEASE_HARD_SECONDS@/$hard}"
+    SSH "${lease_cmd//@AA_LEASE_IDLE_SECONDS@/$AA_LEASE_IDLE_SECONDS}"
     holder_rc=$?
     # Lost after acquisition: stop the controller. A failed acquisition is
     # reported by the wait loop below instead.
@@ -306,21 +330,46 @@ aa_lease_acquire() {
   if SSH 'test -e /var/lib/macprovider-pearl-updater/tier2-enforcement-transaction.json'; then
     fatal "a Tier-2 enforcement transaction is active"
   fi
+  # The watchdog: TERMs the controller past AA_LEASE_MAX_SECONDS (once; the
+  # controller may still roll back under the lease) and sends the heartbeat
+  # for as long as the controller lives. It exits as soon as the controller is
+  # gone, closing its copy of the channel, so the runner sees EOF at once.
   (
-    elapsed=0
-    while [ -d "$AA_LEASE_DIR" ] && [ ! -f "$sentinel" ]; do
-      if [ "$elapsed" -ge "$AA_LEASE_MAX_SECONDS" ]; then
+    elapsed=0 termed=0
+    while [ -d "$AA_LEASE_DIR" ] && [ ! -f "$sentinel" ] && kill -0 "$controller" 2>/dev/null; do
+      if [ "$termed" = 0 ] && [ "$elapsed" -ge "$AA_LEASE_MAX_SECONDS" ]; then
         echo "activation lease watchdog: held past ${AA_LEASE_MAX_SECONDS}s; terminating the controller" >&2
         kill -TERM "$controller" 2>/dev/null || true
-        exit 0
+        termed=1
+      fi
+      if [ $((elapsed % AA_LEASE_HEARTBEAT_SECONDS)) = 0 ] && _aa_lease_wlock 0; then
+        ( printf 'PING\n' >&7 ) 2>/dev/null || true
+        _aa_lease_wunlock
       fi
       sleep 1
       elapsed=$((elapsed + 1))
     done
   ) &
   AA_LEASE_WATCHDOG_PID=$!
-  log "holding the Pearl deploy lease (updater + coordinator-deploy locks)"
+  log "holding the Pearl deploy lease (updater + coordinator-deploy locks) for up to ${AA_LEASE_MAX_SECONDS}s"
 }
+
+# The controller's frames and the watchdog's PINGs share the channel; a frame
+# longer than PIPE_BUF is not written atomically, so writers take this lock.
+# _aa_lease_wlock <wait>: 1 waits (a stale lock is broken after 10 s), 0 tries.
+_aa_lease_wlock() {
+  local n=0
+  until mkdir "$AA_LEASE_DIR/wlock" 2>/dev/null; do
+    [ "$1" = 1 ] || return 1
+    n=$((n + 1))
+    if [ "$n" -ge 100 ]; then
+      rmdir "$AA_LEASE_DIR/wlock" 2>/dev/null || true
+      n=0
+    fi
+    sleep 0.1
+  done
+}
+_aa_lease_wunlock() { rmdir "$AA_LEASE_DIR/wlock" 2>/dev/null || true; }
 
 aa_lease_assert_held() {
   [ "$AA_LEASE_HELD" = 1 ] && [ "$AA_LEASE_LOST" = 0 ] && [ -n "$AA_LEASE_PID" ] && kill -0 "$AA_LEASE_PID" 2>/dev/null &&
@@ -366,11 +415,14 @@ aa_lease_run() {
     if [ -z "$a" ]; then frame="$frame -"; else frame="$frame $(printf '%s' "$a" | base64 | tr -d '\n')"; fi
   done
   # A subshell: a closed channel's SIGPIPE must not kill the controller.
+  _aa_lease_wlock 1
   if ! ( printf '%s\n' "$frame" >&7 ) 2>/dev/null; then
+    _aa_lease_wunlock
     AA_LEASE_LOST=1
     echo "activation lease channel closed; command $seq not delivered" >"$err"
     return 1
   fi
+  _aa_lease_wunlock
   while :; do
     result="$(_aa_lease_result "$seq")"
     [ -z "$result" ] || break
