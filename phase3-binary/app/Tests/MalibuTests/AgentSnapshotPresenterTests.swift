@@ -2170,6 +2170,8 @@ final class AgentSnapshotPresenterTests: XCTestCase {
 
     func testHistoricalStartupHandoffFailureDoesNotOverrideFreshReadyStatus() {
         var snapshot = buyerServingObservationSnapshot(observedAt: Date())
+        snapshot.localStatusContractCompatible = true
+        XCTAssertTrue(snapshot.hasCurrentContractValidatedStatusObservation())
         snapshot.diagnosticFindings = ProviderDiagnosticFindingAggregator.aggregate(
             snapshot: snapshot,
             providerLogLines: ["self-update startup reload fence authorization mismatch: startup_handoff"],
