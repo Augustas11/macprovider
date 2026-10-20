@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Offline controller and manifest regressions for studio-lab-window.sh.
-# shellcheck disable=SC2034,SC2329
+# shellcheck disable=SC2030,SC2031,SC2034,SC2329
 set -euo pipefail
 
 OPS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REAL_LOCK_SOURCE="$OPS_DIR/live-lock.sh"
 TMP_ROOT="$(mktemp -d -t studio-lab-window-controller.XXXXXX)"
 TMP_ROOT="$(cd "$TMP_ROOT" && pwd -P)"
 trap 'rm -rf "$TMP_ROOT"' EXIT
@@ -82,6 +83,63 @@ release_live_lock
 grep -qx 'release test-owner' "$TEST_EVENTS" || fail "ordinary cleanup did not release its lock"
 pass "durable active marker retains the non-PID live lock"
 
+# common.sh must not rewrite an existing detached-window lock as PID-bound
+# before its second gather or when the recovery child fails.
+: > "$TEST_EVENTS"
+printf '{}\n' > "$(active_marker_path)"
+set +e
+(
+  trap - EXIT INT TERM HUP
+  require_clean_origin_main() { :; }
+  gather() { set_next recovery mutate "fixture recovery" "false"; }
+  NEXT_ID=recovery
+  NEXT_KIND=mutate
+  NEXT_TITLE="fixture recovery"
+  NEXT_CMD=false
+  run_next
+)
+rc=$?
+set -e
+[ "$rc" -eq 1 ] || fail "fixture recovery did not exercise a failing child"
+grep -qx 'acquire test-owner --purpose studio-lab-window:recovery' "$TEST_EVENTS" || fail "recovery lock was not durable before second gather"
+! grep -q -- '--bind-pid' "$TEST_EVENTS" || fail "recovery rewrote the durable lock as PID-bound"
+rm -f "$(active_marker_path)"
+pass "recovery preserves the durable lock before second gather and child failure"
+
+mkdir -p "$TMP_ROOT/real-lock"
+cp "$REAL_LOCK_SOURCE" "$TMP_ROOT/real-lock/live-lock.sh"
+printf '{}\n' > "$(active_marker_path)"
+set +e
+(
+  trap - EXIT INT TERM HUP
+  OPS_DIR="$TMP_ROOT/real-lock"
+  export MACPROVIDER_LIVE_LOCK="$TMP_ROOT/real-lock/reservation.json"
+  "$OPS_DIR/live-lock.sh" acquire test-owner --purpose detached-window >/dev/null 2>&1
+  require_clean_origin_main() { :; }
+  gather() { set_next recovery mutate "fixture recovery" "false"; }
+  NEXT_ID=recovery
+  NEXT_KIND=mutate
+  NEXT_TITLE="fixture recovery"
+  NEXT_CMD=false
+  run_next
+) >/dev/null 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 1 ] || fail "real-lock recovery did not exercise controller failure"
+python3 - "$TMP_ROOT/real-lock/reservation.json" <<'PY'
+import json, sys
+record = json.load(open(sys.argv[1]))
+assert record["owner"] == "test-owner" and record["pid_bound"] is False
+PY
+if MACPROVIDER_LIVE_LOCK="$TMP_ROOT/real-lock/reservation.json" \
+  "$TMP_ROOT/real-lock/live-lock.sh" acquire different-owner >/dev/null 2>&1; then
+  fail "another owner took the durable lock after the recovery controller exited"
+fi
+MACPROVIDER_LIVE_LOCK="$TMP_ROOT/real-lock/reservation.json" \
+  "$TMP_ROOT/real-lock/live-lock.sh" release test-owner >/dev/null 2>&1
+rm -f "$(active_marker_path)"
+pass "real lock remains unavailable to another owner after recovery controller failure"
+
 remote_state() { printf '%s\n' '{"state":"absent"}'; }
 require_fresh_settings() { :; }
 completion_mark() { printf complete-test; }
@@ -91,16 +149,19 @@ reset_state
 gather
 [ "$NEXT_ID:$NEXT_KIND" = done:done ] || fail "successful per-head completion was not terminal"
 pass "matching successful completion is terminal only without a journal"
+completion_mark() { printf 'complete-%s' "$STUDIO_LAB_GIT_HEAD"; }
 
 # Completion is committed locally before remote finish; a finish refusal keeps
 # the active ownership marker and remote journal recoverable.
 STUDIO_LAB_GIT_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 window_paths
 : > "$TEST_EVENTS"
-write_active_marker dispatched finish-refusal
+finish_nonce=ffffffffffffffffffffffffffffffff
+manifest_sha="$(printf 'd%.0s' {1..64})"
+write_active_marker dispatched "$finish_nonce" "" "$manifest_sha"
 studio_ssh() { printf 'finish\n' >> "$TEST_EVENTS"; return 1; }
 cleanup_remote_stage() { printf 'cleanup\n' >> "$TEST_EVENTS"; }
-state='{"phase":"restored","revision":9,"nonce":"finish-refusal","action":"finish","lab_exit_code":0,"restored_process":{"pid":99,"process_start_us":123456,"executable_path":"/private/install/macprovider-cli"}}'
+state="{\"phase\":\"restored\",\"revision\":9,\"nonce\":\"$finish_nonce\",\"action\":\"finish\",\"lab_exit_code\":0,\"restored_process\":{\"pid\":99,\"process_start_us\":123456,\"executable_path\":\"/private/install/macprovider-cli\"}}"
 set +e
 record_outcome "$state"
 rc=$?
@@ -112,6 +173,110 @@ set -e
 grep -qx finish "$TEST_EVENTS" || fail "remote finish was not attempted"
 ! grep -q cleanup "$TEST_EVENTS" || fail "finish refusal cleaned protected staging"
 pass "finish refusal preserves journal ownership after durable local outcome"
+
+: > "$TEST_EVENTS"
+remote_state() { printf '%s\n' '{"state":"absent"}'; }
+reconcile_window
+[ ! -f "$(active_marker_path)" ] || fail "terminal absent-stage reconciliation retained active ownership"
+grep -qx cleanup "$TEST_EVENTS" || fail "terminal reconciliation did not run scoped cleanup"
+grep -qx 'release test-owner' "$TEST_EVENTS" || fail "terminal reconciliation did not release the durable lock"
+pass "terminal reconciliation is idempotent after journal and stage cleanup"
+
+: > "$TEST_EVENTS"
+write_active_marker outcome_recorded "$finish_nonce" "$(completion_mark)" "$manifest_sha"
+remote_state() { printf '{"state":"idle","nonce":"%s","manifest_sha256":"%s"}\n' "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" "$manifest_sha"; }
+reset_state
+gather
+[ "$NEXT_ID:$NEXT_KIND" = recovery:blocked ] || fail "unrelated idle manifest was accepted for terminal cleanup"
+[ -f "$(active_marker_path)" ] || fail "unrelated idle manifest cleared active ownership"
+[ ! -s "$TEST_EVENTS" ] || fail "unrelated idle manifest mutated lock or staging"
+rm -f "$(active_marker_path)"
+pass "terminal idle cleanup requires the exact manifest identity"
+
+: > "$TEST_EVENTS"
+wrong_nonce=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+write_active_marker outcome_recorded "$wrong_nonce" "$(completion_mark)" "$manifest_sha"
+remote_state() { printf '%s\n' '{"state":"absent"}'; }
+reset_state
+gather
+[ "$NEXT_ID:$NEXT_KIND" = recovery:blocked ] || fail "mismatched terminal outcome was accepted"
+[ -f "$(active_marker_path)" ] || fail "mismatched terminal outcome cleared active ownership"
+[ ! -s "$TEST_EVENTS" ] || fail "mismatched terminal outcome mutated lock or staging"
+rm -f "$(active_marker_path)"
+pass "malformed or mismatched terminal outcome remains locked"
+
+prepared_nonce=11111111111111111111111111111111
+prepared_sha="$(printf '2%.0s' {1..64})"
+write_active_marker dispatching "$prepared_nonce" "" "$prepared_sha"
+remote_state() { printf '{"state":"idle","nonce":"%s","manifest_sha256":"%s"}\n' "$prepared_nonce" "$prepared_sha"; }
+: > "$TEST_EVENTS"
+studio_ssh() {
+  case "$*" in
+    *' abort --manifest '*)
+      printf 'abort\n' >> "$TEST_EVENTS"
+      printf '{"state":"aborted","nonce":"%s","manifest_sha256":"%s"}\n' "$prepared_nonce" "$prepared_sha"
+      ;;
+    *' finish-abort --manifest '*)
+      printf 'finish:%s\n' "$(json_field "$(active_marker_path)" 'd.get("phase")')" >> "$TEST_EVENTS"
+      printf '{"state":"abort-finished","nonce":"%s"}\n' "$prepared_nonce"
+      ;;
+    *) fail "unexpected Studio fixture command: $*" ;;
+  esac
+}
+cleanup_remote_stage() { printf 'cleanup\n' >> "$TEST_EVENTS"; }
+abort_prepared_window
+[ ! -f "$(active_marker_path)" ] || fail "authenticated prepared abort retained active ownership"
+grep -qx abort "$TEST_EVENTS" || fail "prepared abort did not use the journal-serialized remote command"
+grep -qx 'finish:abort_confirmed' "$TEST_EVENTS" || fail "abort receipt was removed before local confirmation"
+grep -qx cleanup "$TEST_EVENTS" || fail "prepared abort did not remove exact staged files"
+grep -qx 'release test-owner' "$TEST_EVENTS" || fail "prepared abort did not release the durable lock"
+python3 - "$TEST_EVENTS" <<'PY'
+import sys
+lines = open(sys.argv[1]).read().splitlines()
+assert lines.index("abort") < lines.index("finish:abort_confirmed") < lines.index("cleanup") < lines.index("release test-owner"), lines
+PY
+pass "authenticated no-journal intent aborts under the remote journal lock"
+
+write_active_marker aborting_prepared "$prepared_nonce" "" "$prepared_sha"
+remote_state() { printf '{"state":"aborted","nonce":"%s","manifest_sha256":"%s"}\n' "$prepared_nonce" "$prepared_sha"; }
+: > "$TEST_EVENTS"
+abort_prepared_window
+[ ! -f "$(active_marker_path)" ] || fail "receipt-before-local-confirmation recovery retained active ownership"
+! grep -qx abort "$TEST_EVENTS" || fail "receipt recovery tried to repeat initial manifest abort"
+grep -qx 'finish:abort_confirmed' "$TEST_EVENTS" || fail "receipt recovery did not durably confirm before finish"
+grep -qx cleanup "$TEST_EVENTS" || fail "receipt recovery did not clean staged files"
+pass "authenticated remote receipt resumes before local abort confirmation"
+
+write_active_marker abort_confirmed "$prepared_nonce" "" "$prepared_sha"
+remote_state() { printf '%s\n' '{"state":"absent"}'; }
+: > "$TEST_EVENTS"
+abort_prepared_window
+[ ! -f "$(active_marker_path)" ] || fail "finished-receipt recovery retained active ownership"
+! grep -q '^finish:' "$TEST_EVENTS" || fail "already-finished receipt was finished again"
+grep -qx cleanup "$TEST_EVENTS" || fail "finished-receipt recovery did not clean staged files"
+grep -qx 'release test-owner' "$TEST_EVENTS" || fail "finished-receipt recovery did not release the lock"
+pass "local abort confirmation resumes after remote receipt removal"
+
+write_active_marker prepared "$prepared_nonce" "" "$prepared_sha"
+remote_state() { printf '{"state":"idle","nonce":"%s","manifest_sha256":"%s"}\n' "33333333333333333333333333333333" "$prepared_sha"; }
+: > "$TEST_EVENTS"
+reset_state
+gather
+[ "$NEXT_ID:$NEXT_KIND" = recovery:blocked ] || fail "mismatched prepared manifest was accepted"
+[ ! -s "$TEST_EVENTS" ] || fail "mismatched prepared manifest attempted cleanup"
+rm -f "$(active_marker_path)"
+pass "prepared cleanup refuses a mismatched manifest identity"
+
+write_active_marker aborting_prepared "$prepared_nonce" "" "$prepared_sha"
+remote_state() { printf '{"state":"aborted","nonce":"%s","manifest_sha256":"%s"}\n' "$prepared_nonce" "$(printf '4%.0s' {1..64})"; }
+: > "$TEST_EVENTS"
+reset_state
+gather
+[ "$NEXT_ID:$NEXT_KIND" = recovery:blocked ] || fail "mismatched abort receipt was accepted"
+[ -f "$(active_marker_path)" ] || fail "mismatched abort receipt cleared active ownership"
+[ ! -s "$TEST_EVENTS" ] || fail "mismatched abort receipt attempted cleanup"
+rm -f "$(active_marker_path)"
+pass "prepared abort refuses a mismatched durable receipt"
 
 # A fresh dispatch converts the already-held PID lock before arming the local
 # marker and verifies the protected remote helper before it can run.
@@ -149,7 +314,8 @@ def before(a, b):
     assert lines.index(a) < lines.index(b), (a, b, lines)
 before("acquire test-owner --purpose studio-lab-window:active-window", "marker:prepared")
 before("marker:prepared", "verify-helper")
-before("verify-helper", "remote-run")
+before("verify-helper", "marker:dispatching")
+before("marker:dispatching", "remote-run")
 before("remote-run", "marker:dispatched")
 before("marker:dispatched", "reconcile")
 PY
@@ -219,4 +385,4 @@ assert os.path.islink(path)
 PY
 pass "manifest binds canonical symlink targets and permits active-runner baseline"
 
-printf '1..8\n'
+printf '1..18\n'

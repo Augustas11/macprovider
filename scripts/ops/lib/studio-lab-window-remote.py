@@ -21,6 +21,7 @@ from pathlib import Path
 
 MANIFEST_SCHEMA = "macprovider.studio_lab_window_manifest.v1"
 JOURNAL_SCHEMA = "macprovider.studio_lab_window_journal.v1"
+ABORT_SCHEMA = "macprovider.studio_lab_window_abort.v1"
 TERMINAL_PHASE = "restored"
 PHASES = (
     "prepared", "pausing", "drained", "stopped", "lab_running", "lab_stopped",
@@ -206,8 +207,9 @@ def load_manifest(path: Path) -> tuple[dict, str]:
         if not isinstance(item, str) or not item or any(ch not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for ch in item):
             raise Refusal(f"manifest {key} is invalid")
     value["status_port"] = positive(value.get("status_port"), "status_port", 65535)
-    for key in ("drain_timeout_s", "lab_timeout_s", "ready_timeout_s", "poll_s"):
+    for key in ("drain_timeout_s", "ready_timeout_s", "poll_s"):
         value[key] = positive(value.get(key), key)
+    value["lab_timeout_s"] = positive(value.get("lab_timeout_s"), "lab_timeout_s", 3600)
     if value["ready_timeout_s"] < 120:
         raise Refusal("manifest ready_timeout_s cannot prove the 120-second serving hold")
     baseline = value.get("baseline")
@@ -444,6 +446,25 @@ def read_journal(path: Path) -> dict:
         or not isinstance(value.get("manifest_sha256"), str)
     ):
         raise Refusal("journal metadata is incomplete")
+    return value
+
+
+def abort_receipt_path(journal: Path) -> Path:
+    return journal.with_name(f".{journal.name}.abort.json")
+
+
+def read_abort_receipt(path: Path) -> dict:
+    value = read_json(path)
+    if (
+        value.get("schema_version") != ABORT_SCHEMA
+        or value.get("state") != "aborted"
+        or not isinstance(value.get("nonce"), str)
+        or not value["nonce"]
+        or not isinstance(value.get("manifest_sha256"), str)
+        or len(value["manifest_sha256"]) != 64
+        or any(char not in "0123456789abcdef" for char in value["manifest_sha256"])
+    ):
+        raise Refusal("abort receipt is invalid")
     return value
 
 
@@ -792,6 +813,12 @@ def command_run(args: argparse.Namespace) -> dict:
     if journal.parent != Path(args.journal).parent.resolve():
         raise Refusal("journal parent is not canonical")
     with JournalLock(journal):
+        if abort_receipt_path(journal).exists():
+            raise Refusal("dispatch was durably aborted")
+        locked_manifest, locked_sha = load_manifest(Path(args.manifest))
+        if locked_sha != manifest_sha:
+            raise Refusal("manifest changed while waiting for dispatch lock")
+        manifest = locked_manifest
         record = prepare_run(manifest, manifest_sha, journal)
         log = Path(manifest["log_path"])
         if log.exists():
@@ -826,11 +853,77 @@ def command_run(args: argparse.Namespace) -> dict:
     return {"state": "running", "nonce": record["nonce"], "revision": record["revision"], "supervisor_pid": child.pid}
 
 
-def command_status(args: argparse.Namespace) -> dict:
-    manifest, manifest_sha = load_manifest(Path(args.manifest))
+def command_abort(args: argparse.Namespace) -> dict:
+    manifest_path = absolute(args.manifest, "manifest")
     journal = absolute(args.journal, "journal")
+    receipt_path = abort_receipt_path(journal)
+    with JournalLock(journal):
+        if receipt_path.exists():
+            receipt = read_abort_receipt(receipt_path)
+            if receipt["nonce"] != args.nonce or receipt["manifest_sha256"] != args.manifest_sha256:
+                raise Refusal("abort receipt nonce/digest mismatch")
+            if journal.exists():
+                raise Refusal("abort receipt conflicts with a durable journal")
+            return receipt
+        manifest, manifest_sha = load_manifest(manifest_path)
+        if manifest["nonce"] != args.nonce or manifest_sha != args.manifest_sha256:
+            raise Refusal("abort manifest nonce/digest mismatch")
+        if journal.exists():
+            raise Refusal("abort cannot remove a manifest with a durable journal")
+        receipt = {
+            "schema_version": ABORT_SCHEMA, "state": "aborted",
+            "nonce": args.nonce, "manifest_sha256": args.manifest_sha256,
+            "created_unix": int(time.time()),
+        }
+        atomic_json(receipt_path, receipt)
+        manifest_path.unlink()
+        fsync_dir(manifest_path.parent)
+    return receipt
+
+
+def command_finish_abort(args: argparse.Namespace) -> dict:
+    manifest_path = absolute(args.manifest, "manifest")
+    journal = absolute(args.journal, "journal")
+    receipt_path = abort_receipt_path(journal)
+    with JournalLock(journal):
+        receipt = read_abort_receipt(receipt_path)
+        if receipt["nonce"] != args.nonce or receipt["manifest_sha256"] != args.manifest_sha256:
+            raise Refusal("abort receipt nonce/digest mismatch")
+        if journal.exists():
+            raise Refusal("abort receipt cannot finish while a journal remains")
+        if manifest_path.exists():
+            manifest, manifest_sha = load_manifest(manifest_path)
+            if manifest["nonce"] != receipt["nonce"] or manifest_sha != receipt["manifest_sha256"]:
+                raise Refusal("surviving manifest does not match abort receipt")
+            manifest_path.unlink()
+            fsync_dir(manifest_path.parent)
+        receipt_path.unlink()
+        fsync_dir(receipt_path.parent)
+    return {"state": "abort-finished", "nonce": args.nonce}
+
+
+def command_status(args: argparse.Namespace) -> dict:
+    manifest_path = absolute(args.manifest, "manifest")
+    journal = absolute(args.journal, "journal")
+    receipt_path = abort_receipt_path(journal)
+    if receipt_path.exists():
+        receipt = read_abort_receipt(receipt_path)
+        if journal.exists():
+            raise Refusal("abort receipt conflicts with a durable journal")
+        if manifest_path.exists():
+            manifest, manifest_sha = load_manifest(manifest_path)
+            if receipt["nonce"] != manifest["nonce"] or receipt["manifest_sha256"] != manifest_sha:
+                raise Refusal("abort receipt does not match staged manifest")
+        return {
+            "state": "aborted", "nonce": receipt["nonce"],
+            "manifest_sha256": receipt["manifest_sha256"],
+        }
+    manifest, manifest_sha = load_manifest(manifest_path)
     if not journal.exists():
-        return {"state": "idle", "manifest_sha256": manifest_sha}
+        return {
+            "state": "idle", "nonce": manifest["nonce"],
+            "manifest_sha256": manifest_sha,
+        }
     record = read_journal(journal)
     if record["manifest_sha256"] != manifest_sha:
         raise Refusal("journal manifest digest mismatch")
@@ -889,6 +982,16 @@ def parser() -> argparse.ArgumentParser:
     recover.add_argument("--journal", required=True)
     recover.add_argument("--nonce", required=True)
     recover.add_argument("--revision", required=True, type=int)
+    abort = sub.add_parser("abort")
+    abort.add_argument("--manifest", required=True)
+    abort.add_argument("--journal", required=True)
+    abort.add_argument("--nonce", required=True)
+    abort.add_argument("--manifest-sha256", required=True)
+    finish_abort = sub.add_parser("finish-abort")
+    finish_abort.add_argument("--manifest", required=True)
+    finish_abort.add_argument("--journal", required=True)
+    finish_abort.add_argument("--nonce", required=True)
+    finish_abort.add_argument("--manifest-sha256", required=True)
     finish = sub.add_parser("finish")
     finish.add_argument("--manifest", required=True)
     finish.add_argument("--journal", required=True)
@@ -912,6 +1015,10 @@ def main() -> int:
             result = command_status(args)
         elif args.command == "recover":
             result = command_recover(args)
+        elif args.command == "abort":
+            result = command_abort(args)
+        elif args.command == "finish-abort":
+            result = command_finish_abort(args)
         elif args.command == "finish":
             result = command_finish(args)
         else:

@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import ctypes
 import importlib.util
 import json
 import os
+import select
 import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -20,6 +24,43 @@ SPEC = importlib.util.spec_from_file_location("studio_lab_window_remote", HELPER
 assert SPEC and SPEC.loader
 remote = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(remote)
+NATIVE_PROCESS_START_US = remote.process_start_us
+
+
+def local_process_start_identity(pid: int) -> int:
+    if sys.platform == "darwin":
+        return NATIVE_PROCESS_START_US(pid)
+    stat_text = Path(f"/proc/{pid}/stat").read_text()
+    fields_after_comm = stat_text.rsplit(")", 1)[1].split()
+    start_ticks = int(fields_after_comm[19])
+    if start_ticks <= 0:
+        raise OSError("Linux process start identity is invalid")
+    return start_ticks
+
+
+def bounded_pipe_line(stream, timeout_s: int = 5) -> str:
+    readable, _, _ = select.select([stream], [], [], timeout_s)
+    if not readable:
+        raise TimeoutError("child readiness pipe timed out")
+    return stream.readline()
+
+
+@contextlib.contextmanager
+def linux_child_subreaper():
+    if not sys.platform.startswith("linux"):
+        yield
+        return
+    libc = ctypes.CDLL(None, use_errno=True)
+    previous = ctypes.c_int()
+    if libc.prctl(37, ctypes.byref(previous), 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "PR_GET_CHILD_SUBREAPER failed")
+    if libc.prctl(36, 1, 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "PR_SET_CHILD_SUBREAPER failed")
+    try:
+        yield
+    finally:
+        if libc.prctl(36, previous.value, 0, 0, 0) != 0:
+            raise OSError(ctypes.get_errno(), "restoring child-subreaper state failed")
 
 
 class Fixture:
@@ -168,6 +209,12 @@ class StudioLabWindowTests(unittest.TestCase):
         with self.assertRaisesRegex(remote.Refusal, "fixed path"):
             remote.load_manifest(self.fixture.manifest)
 
+    def test_manifest_caps_offline_lab_timeout_at_one_hour(self):
+        self.fixture.document["lab_timeout_s"] = 3601
+        self.fixture.write_manifest()
+        with self.assertRaisesRegex(remote.Refusal, "lab_timeout_s is invalid"):
+            remote.load_manifest(self.fixture.manifest)
+
     def test_hash_validation_refuses_any_guarded_drift(self):
         manifest, _ = remote.load_manifest(self.fixture.manifest)
         self.fixture.provider_plist.write_bytes(b"changed\n")
@@ -248,6 +295,96 @@ class StudioLabWindowTests(unittest.TestCase):
             finished = remote.command_status(args)
         self.assertEqual(finished["action"], "finish")
         self.assertIn("restored_process", finished)
+
+    def test_idle_status_authenticates_manifest_nonce_and_digest(self):
+        args = argparse.Namespace(manifest=str(self.fixture.manifest), journal=str(self.fixture.journal))
+        _, manifest_sha = remote.load_manifest(self.fixture.manifest)
+        result = remote.command_status(args)
+        self.assertEqual(result, {
+            "state": "idle", "nonce": self.fixture.document["nonce"],
+            "manifest_sha256": manifest_sha,
+        })
+
+    def test_abort_persists_receipt_before_manifest_removal_and_finishes_explicitly(self):
+        _, manifest_sha = remote.load_manifest(self.fixture.manifest)
+        args = argparse.Namespace(
+            manifest=str(self.fixture.manifest), journal=str(self.fixture.journal),
+            nonce=self.fixture.document["nonce"], manifest_sha256=manifest_sha,
+        )
+        result = remote.command_abort(args)
+        self.assertEqual(result["state"], "aborted")
+        self.assertFalse(self.fixture.manifest.exists())
+        receipt = remote.abort_receipt_path(self.fixture.journal)
+        self.assertTrue(receipt.exists())
+        self.assertEqual(remote.command_abort(args)["state"], "aborted")
+        status_args = argparse.Namespace(
+            manifest=str(self.fixture.manifest), journal=str(self.fixture.journal),
+        )
+        self.assertEqual(remote.command_status(status_args), {
+            "state": "aborted", "nonce": args.nonce,
+            "manifest_sha256": manifest_sha,
+        })
+        cached_manifest = dict(self.fixture.document)
+        cached_manifest["_manifest_path"] = str(self.fixture.manifest)
+        run_args = argparse.Namespace(
+            manifest=str(self.fixture.manifest), journal=str(self.fixture.journal),
+        )
+        with mock.patch.object(
+            remote, "load_manifest", return_value=(cached_manifest, manifest_sha)
+        ), mock.patch.object(remote, "prepare_run") as prepare:
+            with self.assertRaisesRegex(remote.Refusal, "durably aborted"):
+                remote.command_run(run_args)
+        prepare.assert_not_called()
+        self.assertTrue(self.fixture.journal.with_name(f".{self.fixture.journal.name}.lock").exists())
+        finished = remote.command_finish_abort(args)
+        self.assertEqual(finished["state"], "abort-finished")
+        self.assertFalse(receipt.exists())
+        self.assertTrue(self.fixture.journal.with_name(f".{self.fixture.journal.name}.lock").exists())
+
+    def test_abort_refuses_when_dispatch_already_has_durable_journal(self):
+        record = self.fixture.write_journal()
+        args = argparse.Namespace(
+            manifest=str(self.fixture.manifest), journal=str(self.fixture.journal),
+            nonce=record["nonce"], manifest_sha256=record["manifest_sha256"],
+        )
+        with self.assertRaisesRegex(remote.Refusal, "durable journal"):
+            remote.command_abort(args)
+        self.assertTrue(self.fixture.manifest.exists())
+
+    def test_finish_abort_recovers_receipt_written_before_manifest_unlink(self):
+        _, manifest_sha = remote.load_manifest(self.fixture.manifest)
+        receipt_path = remote.abort_receipt_path(self.fixture.journal)
+        remote.atomic_json(receipt_path, {
+            "schema_version": remote.ABORT_SCHEMA, "state": "aborted",
+            "nonce": self.fixture.document["nonce"], "manifest_sha256": manifest_sha,
+            "created_unix": 1,
+        })
+        args = argparse.Namespace(
+            manifest=str(self.fixture.manifest), journal=str(self.fixture.journal),
+            nonce=self.fixture.document["nonce"], manifest_sha256=manifest_sha,
+        )
+        self.assertEqual(remote.command_finish_abort(args)["state"], "abort-finished")
+        self.assertFalse(self.fixture.manifest.exists())
+        self.assertFalse(receipt_path.exists())
+
+    def test_finish_abort_retains_receipt_and_wrong_surviving_manifest(self):
+        _, manifest_sha = remote.load_manifest(self.fixture.manifest)
+        receipt_path = remote.abort_receipt_path(self.fixture.journal)
+        remote.atomic_json(receipt_path, {
+            "schema_version": remote.ABORT_SCHEMA, "state": "aborted",
+            "nonce": self.fixture.document["nonce"], "manifest_sha256": manifest_sha,
+            "created_unix": 1,
+        })
+        self.fixture.document["nonce"] = "wrong-surviving-manifest"
+        self.fixture.write_manifest()
+        args = argparse.Namespace(
+            manifest=str(self.fixture.manifest), journal=str(self.fixture.journal),
+            nonce="fixture-nonce", manifest_sha256=manifest_sha,
+        )
+        with self.assertRaisesRegex(remote.Refusal, "does not match abort receipt"):
+            remote.command_finish_abort(args)
+        self.assertTrue(self.fixture.manifest.exists())
+        self.assertTrue(receipt_path.exists())
 
     def test_recover_rejects_nonce_and_revision_mismatch_before_mutation(self):
         self.fixture.write_journal(revision=4)
@@ -423,10 +560,11 @@ class StudioLabWindowTests(unittest.TestCase):
             stdout=subprocess.PIPE, text=True, start_new_session=True, close_fds=True,
         )
         try:
-            self.assertEqual(child.stdout.readline().strip(), "ready")
-            started = remote.process_start_us(child.pid)
-            record = {"lab_pid": child.pid, "lab_pgid": child.pid, "lab_process_start_us": started}
-            remote.stop_lab(record, {"poll_s": 1}, child=child)
+            with mock.patch.object(remote, "process_start_us", side_effect=local_process_start_identity):
+                self.assertEqual(bounded_pipe_line(child.stdout).strip(), "ready")
+                started = remote.process_start_us(child.pid)
+                record = {"lab_pid": child.pid, "lab_pgid": child.pid, "lab_process_start_us": started}
+                remote.stop_lab(record, {"poll_s": 1}, child=child)
             self.assertEqual(child.wait(timeout=5), -signal.SIGKILL)
             self.assertFalse(remote.process_group_alive(child.pid))
         finally:
@@ -444,32 +582,38 @@ class StudioLabWindowTests(unittest.TestCase):
             "import subprocess,sys; p=subprocess.Popen([sys.executable,'-c',sys.argv[1]]); "
             "print(p.pid,flush=True)"
         )
-        leader = subprocess.Popen(
-            [sys.executable, "-c", leader_code, descendant_code], stdout=subprocess.PIPE,
-            text=True, start_new_session=True, close_fds=True,
-        )
-        started = remote.process_start_us(leader.pid)
-        descendant = int(leader.stdout.readline().strip())
-        try:
-            self.assertEqual(leader.wait(timeout=5), 0)
-            self.assertTrue(remote.process_group_alive(leader.pid))
-            record = {
-                "lab_pid": leader.pid, "lab_pgid": leader.pid,
-                "lab_process_start_us": started,
-            }
-            remote.stop_lab(record, {"poll_s": 1}, child=leader)
-            self.assertFalse(remote.process_group_alive(leader.pid))
-        finally:
-            if remote.process_group_alive(leader.pid):
-                os.killpg(leader.pid, signal.SIGKILL)
+        with linux_child_subreaper():
+            leader = subprocess.Popen(
+                [sys.executable, "-c", leader_code, descendant_code], stdout=subprocess.PIPE,
+                text=True, start_new_session=True, close_fds=True,
+            )
+            descendant: int | None = None
+            reaper: threading.Thread | None = None
             try:
-                os.kill(descendant, 0)
-            except ProcessLookupError:
-                pass
-            if leader.poll() is None:
-                leader.wait(timeout=5)
-            if leader.stdout is not None:
-                leader.stdout.close()
+                with mock.patch.object(remote, "process_start_us", side_effect=local_process_start_identity):
+                    started = remote.process_start_us(leader.pid)
+                    descendant = int(bounded_pipe_line(leader.stdout).strip())
+                    self.assertEqual(leader.wait(timeout=5), 0)
+                    if sys.platform.startswith("linux"):
+                        reaper = threading.Thread(target=os.waitpid, args=(descendant, 0), daemon=True)
+                        reaper.start()
+                    self.assertTrue(remote.process_group_alive(leader.pid))
+                    record = {
+                        "lab_pid": leader.pid, "lab_pgid": leader.pid,
+                        "lab_process_start_us": started,
+                    }
+                    remote.stop_lab(record, {"poll_s": 1}, child=leader)
+                self.assertFalse(remote.process_group_alive(leader.pid))
+            finally:
+                if remote.process_group_alive(leader.pid):
+                    os.killpg(leader.pid, signal.SIGKILL)
+                if leader.poll() is None:
+                    leader.wait(timeout=5)
+                if reaper is not None:
+                    reaper.join(timeout=5)
+                    self.assertFalse(reaper.is_alive(), "adopted descendant was not reaped")
+                if leader.stdout is not None:
+                    leader.stdout.close()
 
     def test_detached_supervisor_is_journal_bound_before_gate_release(self):
         manifest, manifest_sha = remote.load_manifest(self.fixture.manifest)
@@ -499,6 +643,17 @@ class StudioLabWindowTests(unittest.TestCase):
         invocation = popen.call_args.args[0]
         self.assertIn("--start-gate-fd", invocation)
         self.assertEqual(len(popen.call_args.kwargs["pass_fds"]), 1)
+
+    def test_run_reloads_manifest_inside_dispatch_lock_before_preflight(self):
+        manifest, manifest_sha = remote.load_manifest(self.fixture.manifest)
+        args = argparse.Namespace(manifest=str(self.fixture.manifest), journal=str(self.fixture.journal))
+        with mock.patch.object(
+            remote, "load_manifest",
+            side_effect=[(manifest, manifest_sha), remote.Refusal("manifest removed by abort")],
+        ), mock.patch.object(remote, "prepare_run") as prepare:
+            with self.assertRaisesRegex(remote.Refusal, "removed by abort"):
+                remote.command_run(args)
+        prepare.assert_not_called()
 
 
 if __name__ == "__main__":

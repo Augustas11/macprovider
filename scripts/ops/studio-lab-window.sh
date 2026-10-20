@@ -40,6 +40,7 @@ jget() {
 window_paths() {
   REMOTE_MANIFEST="$STUDIO_LAB_WINDOW_DIR/manifest.json"
   REMOTE_JOURNAL="$STUDIO_LAB_WINDOW_DIR/journal.json"
+  REMOTE_ABORT_RECEIPT="$STUDIO_LAB_WINDOW_DIR/.journal.json.abort.json"
   REMOTE_LIFECYCLE="$STUDIO_LAB_WINDOW_DIR/remote.py"
   REMOTE_PROBE="$STUDIO_LAB_WINDOW_DIR/probe.py"
   REMOTE_LAB_SCRIPT="$STUDIO_LAB_WINDOW_DIR/run-window-diagnostic.sh"
@@ -62,6 +63,18 @@ release_live_lock() {
   local owner="$OPS_LOCK_OWNER"
   OPS_LOCK_OWNER=""
   "$OPS_DIR/live-lock.sh" release "$owner" >&2 || true
+}
+
+# A recovery invocation must not turn the already durable, non-PID window
+# lock back into a PID-bound lock before its second live-state check. Fresh
+# dispatches retain common.sh's PID binding until start_window durably arms
+# the local marker and converts the lock.
+acquire_live_lock_for_step() {
+  if [ -f "$(active_marker_path)" ]; then
+    "$OPS_DIR/live-lock.sh" acquire "$MACPROVIDER_OPS_OWNER" --purpose "$OPS_NAME:$NEXT_ID" >&2
+  else
+    "$OPS_DIR/live-lock.sh" acquire "$MACPROVIDER_OPS_OWNER" --purpose "$OPS_NAME:$NEXT_ID" --bind-pid >&2
+  fi
 }
 
 require_recovery_settings() {
@@ -123,8 +136,7 @@ load_recovery_context() {
 remote_state() {
   require_recovery_settings
   studio_ssh "test \"\$(sysctl -n hw.model)\" = $(q "$STUDIO_MODEL") || exit 3
-if [ -e $(q "$REMOTE_JOURNAL") ] || [ -e $(q "$REMOTE_MANIFEST") ]; then
-  [ -f $(q "$REMOTE_MANIFEST") ] || exit 4
+if [ -e $(q "$REMOTE_JOURNAL") ] || [ -e $(q "$REMOTE_MANIFEST") ] || [ -e $(q "$REMOTE_ABORT_RECEIPT") ]; then
   python3 - status --manifest $(q "$REMOTE_MANIFEST") --journal $(q "$REMOTE_JOURNAL")
 elif [ -e $(q "$REMOTE_LIFECYCLE") ] || [ -e $(q "$REMOTE_PROBE") ] || [ -e $(q "$REMOTE_LAB_SCRIPT") ]; then
   printf '%s\n' '{\"state\":\"partial\"}'
@@ -162,9 +174,12 @@ PY
 }
 
 write_active_marker() {
-  local phase="$1" nonce="$2" outcome="${3:-}"
+  local phase="$1" nonce="$2" outcome="${3:-}" manifest_sha="${4:-}"
+  if [ -z "$manifest_sha" ] && [ -f "$(active_marker_path)" ]; then
+    manifest_sha="$(json_field "$(active_marker_path)" 'd.get("manifest_sha256")')"
+  fi
   mark_done "$OPS_SCOPE" active "durable Studio window ownership" \
-    "$(python3 -c 'import json,sys; print(json.dumps({"phase":sys.argv[1],"nonce":sys.argv[2],"lab_git_head":sys.argv[3],"outcome_marker":sys.argv[4]}))' "$phase" "$nonce" "$STUDIO_LAB_GIT_HEAD" "$outcome")"
+    "$(python3 -c 'import json,sys; print(json.dumps({"phase":sys.argv[1],"nonce":sys.argv[2],"lab_git_head":sys.argv[3],"outcome_marker":sys.argv[4],"manifest_sha256":sys.argv[5]}))' "$phase" "$nonce" "$STUDIO_LAB_GIT_HEAD" "$outcome" "$manifest_sha")"
   durable_file "$(active_marker_path)"
 }
 
@@ -178,7 +193,135 @@ prepare_window_dir() {
 }
 
 cleanup_remote_stage() {
-  studio_ssh "python3 -c 'import os,stat,sys; root=sys.argv[1]; names=sys.argv[2:]; s=os.lstat(root); assert os.path.isabs(root) and os.path.realpath(root)==root and stat.S_ISDIR(s.st_mode) and s.st_uid==os.getuid() and not stat.S_IMODE(s.st_mode)&0o077 and not os.path.islink(root); [os.unlink(os.path.join(root,n)) for n in names if os.path.lexists(os.path.join(root,n))]' $(q "$STUDIO_LAB_WINDOW_DIR") manifest.json remote.py probe.py run-window-diagnostic.sh .journal.json.lock" >/dev/null
+  studio_ssh "python3 -c 'import os,stat,sys; root=sys.argv[1]; names=sys.argv[2:]; exists=os.path.lexists(root); s=os.lstat(root) if exists else None; assert not exists or (os.path.isabs(root) and os.path.realpath(root)==root and stat.S_ISDIR(s.st_mode) and s.st_uid==os.getuid() and not stat.S_IMODE(s.st_mode)&0o077 and not os.path.islink(root)); [os.unlink(os.path.join(root,n)) for n in names if exists and os.path.lexists(os.path.join(root,n))]' $(q "$STUDIO_LAB_WINDOW_DIR") manifest.json remote.py probe.py run-window-diagnostic.sh" >/dev/null
+}
+
+terminal_context_ok() {
+  local state="$1"
+  python3 - "$(active_marker_path)" "$OPS_STATE_DIR/$OPS_SCOPE" "$state" <<'PY' 2>/dev/null
+import json, os, re, stat, sys
+
+def read_safe(path):
+    before = os.lstat(path)
+    assert stat.S_ISREG(before.st_mode) and before.st_uid == os.getuid() and before.st_nlink == 1
+    assert not os.path.islink(path)
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(fd)
+        assert (opened.st_dev, opened.st_ino) == (before.st_dev, before.st_ino)
+        data = os.read(fd, 65537)
+        assert len(data) <= 65536 and len(data) == before.st_size
+    finally:
+        os.close(fd)
+    value = json.loads(data)
+    assert isinstance(value, dict)
+    return value
+
+active_path, root, remote_json = sys.argv[1:]
+active = read_safe(active_path)
+remote = json.loads(remote_json)
+nonce = active.get("nonce")
+head = active.get("lab_git_head")
+marker = active.get("outcome_marker")
+manifest_sha = active.get("manifest_sha256")
+assert active.get("phase") == "outcome_recorded"
+assert isinstance(nonce, str) and re.fullmatch(r"[0-9a-f]{32}", nonce)
+assert isinstance(head, str) and re.fullmatch(r"[0-9a-f]{40}", head)
+assert isinstance(manifest_sha, str) and re.fullmatch(r"[0-9a-f]{64}", manifest_sha)
+assert isinstance(marker, str) and re.fullmatch(r"(?:complete-[0-9a-f]{40}|restored-[0-9a-f]{32})", marker)
+outcome = read_safe(os.path.join(root, marker + ".json"))
+rc = outcome.get("lab_exit_code")
+restored = outcome.get("restored_process")
+assert outcome.get("step") == marker and outcome.get("nonce") == nonce and outcome.get("lab_git_head") == head
+assert outcome.get("manifest_sha256") == manifest_sha
+if remote.get("state") == "idle":
+    assert remote.get("nonce") == nonce and remote.get("manifest_sha256") == manifest_sha
+assert isinstance(rc, int) and not isinstance(rc, bool) and 0 <= rc <= 255
+assert marker == (("complete-" + head) if rc == 0 else ("restored-" + nonce))
+assert isinstance(restored, dict)
+assert isinstance(restored.get("pid"), int) and restored["pid"] > 0
+assert isinstance(restored.get("process_start_us"), int) and restored["process_start_us"] > 0
+assert isinstance(restored.get("executable_path"), str) and restored["executable_path"].startswith("/")
+PY
+}
+
+prepared_context_ok() {
+  local state="$1"
+  python3 - "$(active_marker_path)" "$state" <<'PY' 2>/dev/null
+import json, os, re, stat, sys
+
+path = sys.argv[1]
+before = os.lstat(path)
+assert stat.S_ISREG(before.st_mode) and before.st_uid == os.getuid() and before.st_nlink == 1
+assert not os.path.islink(path)
+fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+try:
+    opened = os.fstat(fd)
+    assert (opened.st_dev, opened.st_ino) == (before.st_dev, before.st_ino)
+    data = os.read(fd, 65537)
+    assert len(data) <= 65536 and len(data) == before.st_size
+finally:
+    os.close(fd)
+active = json.loads(data)
+remote = json.loads(sys.argv[2])
+nonce = active.get("nonce")
+digest = active.get("manifest_sha256")
+assert active.get("phase") in ("prepared", "dispatching", "aborting_prepared") and active.get("outcome_marker") == ""
+assert isinstance(nonce, str) and re.fullmatch(r"[0-9a-f]{32}", nonce)
+assert isinstance(active.get("lab_git_head"), str) and re.fullmatch(r"[0-9a-f]{40}", active["lab_git_head"])
+assert isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest)
+assert remote.get("state") == "idle" and remote.get("nonce") == nonce and remote.get("manifest_sha256") == digest
+PY
+}
+
+aborted_context_ok() {
+  local state="$1"
+  python3 - "$(active_marker_path)" "$state" <<'PY' 2>/dev/null
+import json, os, re, stat, sys
+path = sys.argv[1]
+before = os.lstat(path)
+assert stat.S_ISREG(before.st_mode) and before.st_uid == os.getuid() and before.st_nlink == 1
+assert not os.path.islink(path)
+fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+try:
+    opened = os.fstat(fd)
+    assert (opened.st_dev, opened.st_ino) == (before.st_dev, before.st_ino)
+    data = os.read(fd, 65537)
+    assert len(data) <= 65536 and len(data) == before.st_size
+finally:
+    os.close(fd)
+active = json.loads(data)
+remote = json.loads(sys.argv[2])
+assert active.get("phase") in ("aborting_prepared", "abort_confirmed") and active.get("outcome_marker") == ""
+assert isinstance(active.get("nonce"), str) and re.fullmatch(r"[0-9a-f]{32}", active["nonce"])
+assert isinstance(active.get("lab_git_head"), str) and re.fullmatch(r"[0-9a-f]{40}", active["lab_git_head"])
+assert isinstance(active.get("manifest_sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", active["manifest_sha256"])
+assert remote.get("state") == "aborted"
+assert remote.get("nonce") == active["nonce"] and remote.get("manifest_sha256") == active["manifest_sha256"]
+PY
+}
+
+abort_confirmed_context_ok() {
+  python3 - "$(active_marker_path)" <<'PY' 2>/dev/null
+import json, os, re, stat, sys
+path = sys.argv[1]
+before = os.lstat(path)
+assert stat.S_ISREG(before.st_mode) and before.st_uid == os.getuid() and before.st_nlink == 1
+assert not os.path.islink(path)
+fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+try:
+    opened = os.fstat(fd)
+    assert (opened.st_dev, opened.st_ino) == (before.st_dev, before.st_ino)
+    data = os.read(fd, 65537)
+    assert len(data) <= 65536 and len(data) == before.st_size
+finally:
+    os.close(fd)
+active = json.loads(data)
+assert active.get("phase") == "abort_confirmed" and active.get("outcome_marker") == ""
+assert isinstance(active.get("nonce"), str) and re.fullmatch(r"[0-9a-f]{32}", active["nonce"])
+assert isinstance(active.get("lab_git_head"), str) and re.fullmatch(r"[0-9a-f]{40}", active["lab_git_head"])
+assert isinstance(active.get("manifest_sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", active["manifest_sha256"])
+PY
 }
 
 verify_staged_lifecycle() {
@@ -205,7 +348,7 @@ build_manifest() {
 }
 
 record_outcome() {
-  local state="$1" nonce revision lab_rc marker payload log_path active phase restored
+  local state="$1" nonce revision lab_rc marker payload log_path active phase restored manifest_sha
   nonce="$(jget "$state" 'd["nonce"]')"; revision="$(jget "$state" 'd["revision"]')"
   lab_rc="$(jget "$state" 'd.get("lab_exit_code")')"
   phase="$(jget "$state" 'd.get("phase")')"
@@ -215,6 +358,8 @@ record_outcome() {
   [ "$phase" = restored ] && [ "$(jget "$state" 'd.get("action")')" = finish ] || return 6
   [ "$(json_field "$active" 'd.get("nonce")')" = "$nonce" ] || return 6
   [ "$(json_field "$active" 'd.get("lab_git_head")')" = "$STUDIO_LAB_GIT_HEAD" ] || return 6
+  manifest_sha="$(json_field "$active" 'd.get("manifest_sha256")')"
+  [[ "$manifest_sha" =~ ^[0-9a-f]{64}$ ]] || return 6
   case "$revision" in ""|*[!0-9]*|0) return 6 ;; esac
   case "$lab_rc" in ""|*[!0-9]*) lab_rc=6 ;; esac
   [ "$lab_rc" -le 255 ] || lab_rc=6
@@ -225,7 +370,7 @@ record_outcome() {
     marker="restored-$nonce"
   fi
   log_path="$STUDIO_LAB_WINDOW_DIR/supervisor-$nonce.log"
-  payload="$(python3 -c 'import json,sys; print(json.dumps({"lab_git_head":sys.argv[1],"nonce":sys.argv[2],"lab_exit_code":int(sys.argv[3]),"private_supervisor_log":sys.argv[4],"journal_revision":int(sys.argv[5]),"restored_process":json.loads(sys.argv[6])}))' "$STUDIO_LAB_GIT_HEAD" "$nonce" "$lab_rc" "$log_path" "$revision" "$restored")"
+  payload="$(python3 -c 'import json,sys; print(json.dumps({"lab_git_head":sys.argv[1],"nonce":sys.argv[2],"lab_exit_code":int(sys.argv[3]),"private_supervisor_log":sys.argv[4],"journal_revision":int(sys.argv[5]),"restored_process":json.loads(sys.argv[6]),"manifest_sha256":sys.argv[7]}))' "$STUDIO_LAB_GIT_HEAD" "$nonce" "$lab_rc" "$log_path" "$revision" "$restored" "$manifest_sha")"
   mark_done "$OPS_SCOPE" "$marker" "offline diagnostic exited $lab_rc after exact provider restoration" "$payload"
   durable_file "$(marker_path "$OPS_SCOPE" "$marker")"
   write_active_marker outcome_recorded "$nonce" "$marker"
@@ -237,11 +382,12 @@ record_outcome() {
 }
 
 reconcile_window() {
-  local state action nonce revision deadline
+  local state action nonce revision deadline remote_kind
   state="$(remote_state)" || return 6
   action="$(jget "$state" 'd.get("action")')"
-  if [ "$(jget "$state" 'd.get("state")')" = idle ] && [ -f "$(active_marker_path)" ] &&
-     [ "$(json_field "$(active_marker_path)" 'd.get("phase")')" = outcome_recorded ]; then
+  remote_kind="$(jget "$state" 'd.get("state")')"
+  if [ -z "$action" ] && [ -f "$(active_marker_path)" ] &&
+     [[ "$remote_kind" =~ ^(idle|partial|absent)$ ]] && terminal_context_ok "$state"; then
     cleanup_remote_stage || return 6
     "$OPS_DIR/live-lock.sh" release "$MACPROVIDER_OPS_OWNER" >&2 || return 6
     rm -f "$(active_marker_path)"
@@ -274,8 +420,42 @@ abort_predispatch_stage() {
   cleanup_remote_stage || refuse "could not remove the exact pre-dispatch staged files"
 }
 
+abort_prepared_window() {
+  local state kind nonce manifest_sha result
+  state="$(remote_state)" || refuse "prepared Studio state is unreadable"
+  kind="$(jget "$state" 'd.get("state")')"
+  if [ "$kind" = idle ]; then
+    prepared_context_ok "$state" || refuse "prepared Studio intent does not match the authenticated remote manifest"
+    nonce="$(jget "$state" 'd["nonce"]')"
+    manifest_sha="$(jget "$state" 'd["manifest_sha256"]')"
+    write_active_marker aborting_prepared "$nonce" "" "$manifest_sha"
+    result="$(studio_ssh "python3 - abort --manifest $(q "$REMOTE_MANIFEST") --journal $(q "$REMOTE_JOURNAL") --nonce $(q "$nonce") --manifest-sha256 $(q "$manifest_sha")" < "$REMOTE_HELPER")" ||
+      refuse "prepared Studio abort was refused"
+    state="$result"
+    kind="$(jget "$state" 'd.get("state")')"
+  fi
+  if [ "$kind" = aborted ]; then
+    aborted_context_ok "$state" || refuse "prepared Studio abort receipt does not match durable local ownership"
+    nonce="$(jget "$state" 'd["nonce"]')"
+    manifest_sha="$(jget "$state" 'd["manifest_sha256"]')"
+    write_active_marker abort_confirmed "$nonce" "" "$manifest_sha"
+    result="$(studio_ssh "python3 - finish-abort --manifest $(q "$REMOTE_MANIFEST") --journal $(q "$REMOTE_JOURNAL") --nonce $(q "$nonce") --manifest-sha256 $(q "$manifest_sha")" < "$REMOTE_HELPER")" ||
+      refuse "could not finish the authenticated Studio abort receipt"
+    [ "$(jget "$result" 'd.get("state")')" = abort-finished ] &&
+      [ "$(jget "$result" 'd.get("nonce")')" = "$nonce" ] ||
+      refuse "Studio abort finish returned a mismatched result"
+  elif [[ "$kind" =~ ^(partial|absent)$ ]] && abort_confirmed_context_ok; then
+    nonce="$(json_field "$(active_marker_path)" 'd["nonce"]')"
+  else
+    refuse "prepared Studio abort is not in an authenticated recoverable state"
+  fi
+  cleanup_remote_stage || refuse "could not remove exact prepared Studio staging"
+  "$OPS_DIR/live-lock.sh" release "$MACPROVIDER_OPS_OWNER" >&2 || refuse "could not release the durable Studio lock"
+  rm -f "$(active_marker_path)"
+}
+
 start_window() {
-  local probe source manifest nonce version state
+  local probe source manifest nonce version state manifest_sha
   require_fresh_settings
   probe="$OPS_TMP_DIR/studio-probe.json"; source="$OPS_TMP_DIR/source-snapshot.json"
   manifest="$OPS_TMP_DIR/window-manifest.json"
@@ -288,15 +468,17 @@ start_window() {
   source_snapshot > "$source" || refuse "fixed diagnostic source/artifact snapshot failed"
   nonce="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
   build_manifest "$probe" "$source" "$manifest" "$nonce" || refuse "could not build the fixed lab manifest"
+  manifest_sha="$(shasum -a 256 "$manifest" | awk '{print $1}')"
   prepare_window_dir || refuse "protected Studio window directory is unsafe"
   stage_file "$REMOTE_HELPER" "$REMOTE_LIFECYCLE" 600 || refuse "could not stage remote lifecycle helper"
   stage_file "$PROBE_HELPER" "$REMOTE_PROBE" 600 || refuse "could not stage provider probe"
   stage_file "$LAB_SCRIPT" "$REMOTE_LAB_SCRIPT" 700 || refuse "could not stage fixed diagnostic"
   stage_file "$manifest" "$REMOTE_MANIFEST" 600 || refuse "could not stage window manifest"
   "$OPS_DIR/live-lock.sh" acquire "$MACPROVIDER_OPS_OWNER" --purpose "$OPS_NAME:active-window" >&2 || return 6
-  write_active_marker prepared "$nonce"
+  write_active_marker prepared "$nonce" "" "$manifest_sha"
   OPS_LOCK_OWNER=""
   verify_staged_lifecycle || return 6
+  write_active_marker dispatching "$nonce"
   state="$(studio_ssh "python3 $(q "$REMOTE_LIFECYCLE") run --manifest $(q "$REMOTE_MANIFEST") --journal $(q "$REMOTE_JOURNAL")")" || return 6
   [ "$(jget "$state" 'd.get("state")')" = running ] && [ "$(jget "$state" 'd.get("nonce")')" = "$nonce" ] || return 6
   write_active_marker dispatched "$nonce"
@@ -318,9 +500,18 @@ gather() {
   fi
   active="$(active_marker_path)"
   if [ -f "$active" ]; then
-    if [ "$remote_kind" = idle ] && [ "$(json_field "$active" 'd.get("phase")')" = outcome_recorded ]; then
+    if [[ "$remote_kind" =~ ^(idle|partial|absent)$ ]] && terminal_context_ok "$state"; then
       step recovery pending "remote journal finished; protected scratch cleanup remains"
       set_next recovery mutate "Finish guarded Studio cleanup" "scripts/ops/studio-lab-window.sh _apply reconcile"
+    elif [ "$remote_kind" = idle ] && prepared_context_ok "$state"; then
+      step staging pending "prepared Studio intent is authenticated but no remote execution journal exists"
+      set_next staging mutate "Abort the exact prepared Studio window" "scripts/ops/studio-lab-window.sh _apply abort-prepared"
+    elif [ "$remote_kind" = aborted ] && aborted_context_ok "$state"; then
+      step staging pending "authenticated abort receipt remains for the prepared Studio intent"
+      set_next staging mutate "Finish the authenticated prepared Studio abort" "scripts/ops/studio-lab-window.sh _apply abort-prepared"
+    elif [[ "$remote_kind" =~ ^(partial|absent)$ ]] && abort_confirmed_context_ok; then
+      step staging pending "the prepared abort was confirmed locally; exact cleanup remains"
+      set_next staging mutate "Finish the interrupted prepared Studio abort" "scripts/ops/studio-lab-window.sh _apply abort-prepared"
     else
       step recovery blocked "local durable ownership remains without an authenticated journal action"
       set_next recovery blocked "Preserve the Studio reservation for inspection" "" "active marker and remote journal do not form a safe terminal pair"
@@ -352,6 +543,7 @@ internal() {
     run) start_window ;;
     reconcile) load_recovery_context; reconcile_window ;;
     abort-stage) load_recovery_context; abort_predispatch_stage ;;
+    abort-prepared) load_recovery_context; abort_prepared_window ;;
     *) refuse "unknown Studio window action" ;;
   esac
 }

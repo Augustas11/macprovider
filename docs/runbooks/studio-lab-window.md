@@ -83,6 +83,14 @@ force-release a lock, or bootstrap another provider while an offline child
 may remain alive. A baseline identity/configuration mismatch is a safety
 refusal, not permission to overwrite the changed files.
 
+If dispatch never reached a durable journal, the controller authenticates and
+aborts the prepared intent under the remote journal lock. A durable abort
+receipt makes this cleanup resumable after another disconnect and prevents a
+delayed dispatch from starting. Interrupted terminal cleanup is also resumable.
+These cleanup steps do not count as a successful diagnostic; run `status` again
+to determine the next guarded step. The private lock inode is retained so
+waiting processes cannot acquire a different lock for the same window.
+
 Copy the private supervisor and diagnostic results into the campaign's
 evidence store. Record the diagnostic exit status separately from restoration,
 the restored version and process identity, and the watchdog/runner state.
