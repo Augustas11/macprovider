@@ -11,6 +11,7 @@ not add steps of its own:
 | `catalog-activate.sh` | catalog, CB policy and native-MTP activation | `docs/runbooks/native-mtp-enablement.md`, `docs/runbooks/catalog-release-decision-tree.md`, `docs/runbooks/pearl-coordinator-rollout.md` |
 | `pearl-runtime.sh` | coordinator and gateway runtime release; pending stats migrations (`stats_migrate`: checked before the apply and before health, applied under the live-ops lock, no downtime); one-time retention `auto_vacuum` conversion (`PEARL_RUNTIME_TASK=retention-vacuum-conversion`); one on-demand retention run (`PEARL_RUNTIME_TASK=retention-run`, no restart); compute-integrity private corpus install (`PEARL_RUNTIME_TASK=compute-integrity-enable`, one restart); operator-reviewed native-vision qualification install into the Pearl overlay (`PEARL_RUNTIME_TASK=vision-qualification`, `VISION_QUALIFICATION_FILE`, one restart as the boot-state proof; SIGHUP also applies the list); Pearl updater bundle install from the running tag (`PEARL_RUNTIME_TASK=updater-bundle`, both Pearl locks, no restart) | `docs/runbooks/pearl-coordinator-rollout.md`, `ops/runbooks/settlement-evidence-retention.md`, `docs/runbooks/compute-integrity-private-corpus.md`, `docs/runbooks/native-vision-acceptance.md`, `docs/runbooks/catalog-release-decision-tree.md` (Enabling rollout) |
 | `canary-swap.sh` | CLI candidate onto the canary provider: `check` (MLX kernels in every shipped metallib, verified binary) then `swap` (pause, drain, back up, payload-only swap, resume; the watchdog stays booted out until the candidate, or the restored version, is buyer_serving; a crash loop, or `/v1/status` silent for 120 s after the model loaded, restores the backup and resumes; silence while the model loads is bounded only by the 1800 s ready timeout) | `docs/releases/cli-release-train.md` (Promotion gate item 5) |
+| `qwen-opencode-e2e.sh` | version-bound, same-provider live-gateway acceptance for the two qualified Qwen models; restores the incumbent from a secret-free crash journal | this README (`Qwen OpenCode acceptance`) |
 | `live-lock.sh` | one live actor at a time | rollout rule 3 |
 | `privacy-activate.sh` | existing signed identity approval; durable rollback | `docs/runbooks/privacy-network-activation.md`, SPEC-049 §8.3 |
 
@@ -155,6 +156,40 @@ scripts/ops/live-lock.sh acquire <label> --steal                 # only past the
   guard in `hooks/` blocks the guarded commands when an agent types them
   directly. It allows them when that marker is set in the environment the
   guard itself runs in.
+
+## Qwen OpenCode acceptance
+
+`qwen-opencode-e2e.sh` starts only after its private written handoff records
+that the Studio is released by its prior owner (or that the released version's
+owner pin was removed). Its first `next --run` derives a local binding record
+from the running signed CLI: version, byte digest, signing identity and provider
+identity. The handoff's author does not create that JSON record.
+
+The campaign runs OpenCode and the gateway recorder on the Studio, streams the
+buyer credential over SSH stdin, and keeps only sanitized results locally. It
+uses a fresh protected remote scratch directory for reviewed recorder and
+recommendation bytes. Before changing the incumbent config it arms a durable,
+secret-free journal containing only owned config fields and release/status
+bindings. `status` always selects restoration first when that journal is
+unfinished, even if the provider is stopped or the public market endpoints are
+unavailable. No expiry or automatic feature withdrawal is part of the flow.
+
+Configure the following untracked values, then use the standard `status`,
+`next`, `next --run` sequence:
+
+```bash
+QWEN_E2E_WRITTEN_HANDBACK=<private shared handoff file>
+QWEN_E2E_HANDBACK=<local generated binding record>
+QWEN_E2E_CLI=<absolute signed CLI path on Studio>
+QWEN_E2E_CONFIG=<absolute incumbent config path on Studio>
+QWEN_E2E_JOURNAL=<absolute durable journal path on Studio>
+QWEN_E2E_OPENCODE=<absolute OpenCode 1.17.9 path on Studio>
+BUYER_TOKEN_FILE=<local owner-only buyer key file>
+```
+
+`diagnostic` is the non-live prepare/restore check. It accepts only an explicit
+config, journal and validator below the system temporary directory and does not
+claim gateway acceptance.
 
 ## Local configuration (untracked)
 

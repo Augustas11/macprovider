@@ -655,6 +655,9 @@ def restore(args: argparse.Namespace) -> dict[str, Any]:
                         else validate_then_replace(config, validator, candidate))
         journal["phase"] = "config_restored"
         journal["last_config_sha256"] = restored_sha
+        journal.pop("intended_owned", None)
+        journal.pop("intended_target", None)
+        journal.pop("intended_after_unix", None)
         write_journal(journal_path, journal)
     return {"status": "config_restored", "idempotent": False, "config_sha256": restored_sha}
 

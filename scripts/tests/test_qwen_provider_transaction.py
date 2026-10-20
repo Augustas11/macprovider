@@ -196,6 +196,9 @@ class QwenProviderTransactionTests(unittest.TestCase):
         self.apply_recommendation(verify)
         transaction.restore(self.args())
         self.assertEqual(self.config.read_text(encoding="utf-8"), BASE_CONFIG)
+        self.assertEqual(transaction.inspect(self.args())["status"], "config_restored")
+        transaction.finish_restore(self.args())
+        self.assertFalse(transaction.inspect(self.args())["restore_required"])
 
     def test_supported_models_change_is_not_accepted_as_intended_adoption(self):
         transaction.prepare(self.args())
