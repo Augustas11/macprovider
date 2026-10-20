@@ -39,6 +39,9 @@ protocol ModelRuntimeServing: Actor {
     func acquireLocalRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle
     func unregisterInFlight(_ id: Int)
     func currentSnapshot() async -> RuntimeSnapshot
+    /// Optional provider-status snapshot for runtimes backed by the MLX KV
+    /// disk tier. Loopback and fixture runtimes use the default nil result.
+    func kvDiskTierSnapshot() async -> RuntimeKVDiskTierSnapshot?
     /// Identity/status surface the serve command reads to build ProviderStatus.
     /// The concrete MLX `ModelRuntime` witnesses these with actor-isolated
     /// members; loopback runtimes report their own GGUF-file identity. Every
@@ -276,6 +279,8 @@ extension ModelRuntimeServing {
     func currentSnapshot() async -> RuntimeSnapshot {
         RuntimeSnapshot(state: .ready, container: nil, modelID: nil, modelHash: nil)
     }
+
+    func kvDiskTierSnapshot() async -> RuntimeKVDiskTierSnapshot? { nil }
 
     func complete(_ request: ChatCompletionRequest) async throws -> CompletionResult {
         try await complete(request, shouldCancel: { false })

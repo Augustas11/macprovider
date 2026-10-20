@@ -725,7 +725,7 @@
     {
       "spec_id": "SPEC-025",
       "title": "Native Mac App (signed `.dmg`, native Mac app with menu-bar presence)",
-      "version": "v0.35.0",
+      "version": "v0.36.0",
       "path": "specs/SPEC-025-native-mac-app.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -10217,7 +10217,7 @@
       "state": "pending",
       "implementation": [
         "phase3-binary/app/Sources/Malibu/Shell/SettingsScreen.swift:struct SettingsScreen",
-        "phase3-binary/app/Sources/Malibu/System/AppPreferences.swift:class AppPreferences"
+        "phase3-binary/app/Sources/Malibu/System/AppPreferences.swift:AppPreferences"
       ],
       "tests": [
         "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testSettingsHostsWalletStartupUpdatesAndAbout",
