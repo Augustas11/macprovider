@@ -909,6 +909,9 @@ CATALOG_ECONOMICS_RUNTIME_STATES = frozenset({
 })
 CATALOG_ECONOMICS_ECONOMICS_STATES = frozenset({
     "trusted", "fallback", "stale", "blocked", "unavailable",
+    # SPEC-044-R014 (v1): the signed catalog rate on a catalog-only row, which
+    # this Mac is not admitted for and is not earning.
+    "catalog_reference",
 })
 CATALOG_ECONOMICS_RATE_SOURCES = frozenset({"none", "static_signed", "live_signed"})
 CATALOG_ECONOMICS_DISABLED_REASONS = frozenset({
@@ -1404,6 +1407,17 @@ def _validate_catalog_economics(parsed: dict[str, Any], location: str) -> None:
             row["economics_state"], CATALOG_ECONOMICS_ECONOMICS_STATES,
             where + ".economics_state",
         )
+        if row["economics_state"] == "catalog_reference" and not (
+            admission["source"] == "local_default"
+            and admission["state"] == "not_offered"
+            and admission["catalog_economics_permitted"] is False
+            and admission["settlement_capable"] is False
+            and row["weights_present_locally"] is False
+        ):
+            fail(
+                f"{where}: catalog_reference is valid only on a catalog-only "
+                "local-default not_offered row (SPEC-044-R014)"
+            )
         for field in CATALOG_ECONOMICS_ACTION_FIELDS:
             action = assert_exact_object(
                 row[field], CATALOG_ECONOMICS_ACTION_KEYS, f"{where}.{field}"
