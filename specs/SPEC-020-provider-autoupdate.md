@@ -1565,9 +1565,12 @@ shared mutation and update locks, require an expired pending-marker deadline,
 and validate the matching operation, provider, canonical service, target path,
 and installed executable identity. It MUST revalidate the structurally valid
 prepared lease under its exclusive lock and prove the old owner is gone before
-retiring that exact handoff. Active transactions, live owners, adopted or
-unrelated handoffs, malformed or unsafe storage, and identity mismatches MUST
-remain fenced. Reload helpers MUST be fenced before rollback mutates bytes;
+retiring that exact handoff. This prepared-handoff recovery MUST leave active
+transactions, live owners, adopted or unrelated handoffs, malformed or unsafe
+storage, and identity mismatches untouched. Existing exact-target adopted
+restart and guarded manual recovery of dead-owner adopted transactions remain
+available; this path MUST NOT retire their adopted handoffs. Reload helpers
+MUST be fenced before rollback mutates bytes;
 failed or disallowed rollback MUST retain the recovery state.
 
 Successful rollback MUST retire the matching expired prepared handoff in the
