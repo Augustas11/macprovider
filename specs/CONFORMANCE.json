@@ -10176,7 +10176,7 @@
         "phase3-binary/app/Sources/Malibu/Agent/ProviderEngineStatus.swift:struct ProviderEngineStatus",
         "phase3-binary/app/Sources/Malibu/Shell/ProviderScreen.swift:enum ProviderScreenPresentation",
         "phase3-binary/Sources/macprovider-cli/HTTPServer.swift:statusResponse",
-        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:kvDiskTierSnapshot"
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:struct RuntimeKVDiskTierSnapshot"
       ],
       "tests": [
         "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testEngineStatusDecodesCBAndMTPFromStatus",
