@@ -233,12 +233,6 @@ enum ModelsPrepareCatalogRunner {
             partialPaths: { row, resolver in
                 Set(ModelArtifactDiagnostics.findPartials(row: row, resolver: resolver).map(\.url.path))
             },
-            checkCachePath: { row, resolver in
-                guard FileManager.default.fileExists(atPath: resolver.hubRoot.path) else { return }
-                let repository = resolver.snapshotURL(modelID: row.modelID, revision: row.revision)
-                    .deletingLastPathComponent()
-                try resolver.validateNoSymlinkCachePath(of: repository, requireComplete: false)
-            },
             acquireRunLock: {
                 let path = (NSTemporaryDirectory() as NSString).appendingPathComponent("macprovider-prepare-catalog.lock")
                 let descriptor = open(path, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600)
@@ -248,6 +242,12 @@ enum ModelsPrepareCatalogRunner {
                     return nil
                 }
                 return { close(descriptor) }
+            },
+            checkCachePath: { row, resolver in
+                guard FileManager.default.fileExists(atPath: resolver.hubRoot.path) else { return }
+                let repository = resolver.snapshotURL(modelID: row.modelID, revision: row.revision)
+                    .deletingLastPathComponent()
+                try resolver.validateNoSymlinkCachePath(of: repository, requireComplete: false)
             }
         )
     }
