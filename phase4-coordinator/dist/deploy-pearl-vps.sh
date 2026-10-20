@@ -5009,8 +5009,16 @@ CANARY_OK=0
 CANARY_LAST_ERROR="canary proof did not start"
 CANARY_STATUS="000"
 CANARY_ATTEMPT=1
-CANARY_MAX_ATTEMPTS=36
-CANARY_RECOVERY_TIMEOUT_S=180
+# A large model (GLM-5.3-Flash, ~175 GB) keeps the canary's /v1/status silent
+# for 7-13 min while it reloads; 180 s false-failed. Same knob and default as
+# scripts/catalog-content-release.sh. The deadline bounds the loop; the attempt
+# cap only guards against a zero-cost spin (each attempt sleeps >= 5 s).
+CANARY_RECOVERY_TIMEOUT_S="${CATALOG_CANARY_RECOVERY_SECONDS:-1800}"
+case "$CANARY_RECOVERY_TIMEOUT_S" in
+  ''|*[!0-9]*) echo "CATALOG_CANARY_RECOVERY_SECONDS must be a positive integer" >&2; exit 1 ;;
+esac
+[ "$CANARY_RECOVERY_TIMEOUT_S" -gt 0 ] || { echo "CATALOG_CANARY_RECOVERY_SECONDS must be a positive integer" >&2; exit 1; }
+CANARY_MAX_ATTEMPTS=$((CANARY_RECOVERY_TIMEOUT_S / 5 + 1))
 CANARY_RECOVERY_DEADLINE=$((SECONDS + CANARY_RECOVERY_TIMEOUT_S))
 while [ "$CANARY_ATTEMPT" -le "$CANARY_MAX_ATTEMPTS" ] && [ "$SECONDS" -lt "$CANARY_RECOVERY_DEADLINE" ]; do
   rm -f "$CANARY_INSTALLED_BODY" "$CANARY_POOL_BODY"
