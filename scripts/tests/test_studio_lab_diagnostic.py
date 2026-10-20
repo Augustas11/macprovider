@@ -20,8 +20,7 @@ class DiagnosticTests(unittest.TestCase):
         self.bench = self.root / "scripts/lab/cb-studio/glm53-bench/.build/release/GLMBench"
         for path in (self.cli, self.bench):
             path.parent.mkdir(parents=True)
-        for name in ("target", "mtp"):
-            (self.root / ".lab-window/fixture" / name).mkdir(parents=True)
+        (self.root / ".lab-window/fixture/target").mkdir(parents=True)
         self.executable(self.bin / "uname", "printf 'Darwin\\n'\n")
         self.executable(self.bin / "sysctl", "printf 'Mac15,14\\n'\n")
         self.executable(self.cli, "printf '%s\\n' \"$@\"\n")
@@ -54,7 +53,7 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual(self.results(), [])
 
     def test_missing_fixture_does_not_start_a_model(self):
-        (self.root / ".lab-window/fixture/mtp").rmdir()
+        (self.root / ".lab-window/fixture/target").rmdir()
         self.assertEqual(self.run_script("--offline").returncode, 3)
         self.assertEqual(self.results(), [])
 

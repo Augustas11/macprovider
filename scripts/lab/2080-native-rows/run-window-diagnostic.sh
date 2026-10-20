@@ -19,9 +19,8 @@ source_dir="$(pwd -P)"
 fixture="$source_dir/.lab-window/fixture"
 provider="$source_dir/phase3-binary/.build/release/macprovider-cli"
 bench="$source_dir/scripts/lab/cb-studio/glm53-bench/.build/release/GLMBench"
-[ -x "$provider" ] && [ -x "$bench" ] &&
-  [ -d "$fixture/target" ] && [ -d "$fixture/mtp" ] || {
-  echo "prepare both release lab binaries and the target/mtp fixture before the window" >&2
+[ -x "$provider" ] && [ -x "$bench" ] && [ -d "$fixture/target" ] || {
+  echo "prepare both release lab binaries and the embedded-MTP target fixture before the window" >&2
   exit 3
 }
 [ -d "$source_dir/.lab-window" ] && [ ! -L "$source_dir/.lab-window" ] || exit 3
