@@ -35,8 +35,8 @@ final class Build1PrivateAuthorityTests: XCTestCase {
     /// current bake's release stamp and drop the rows admitted after it.
     private static func historicalCandidateCatalogJSON() -> String {
         var json = AutotuneStaticInputs.bakedCandidateCatalogJSON
-            .replacingOccurrences(of: "published-2026-10-19-glm53-flash-native-mtp-v258", with: "published-2026-10-01-artifact-feed-activation-v1")
-            .replacingOccurrences(of: "2026-10-17T23:55:00Z", with: "2026-10-01T04:20:42Z")
+            .replacingOccurrences(of: "published-2026-10-20-glm53-flash-cb-ceiling-v1", with: "published-2026-10-01-artifact-feed-activation-v1")
+            .replacingOccurrences(of: "2026-10-18T00:00:00Z", with: "2026-10-01T04:20:42Z")
         if let start = json.range(of: "\"mlx-community/qwen2-vl-2b-instruct-4bit\":"),
            let next = json.range(of: "\"nvidia/nemotron-3-nano-30b-a3b\":", range: start.upperBound..<json.endIndex) {
             json.removeSubrange(start.lowerBound..<next.lowerBound)

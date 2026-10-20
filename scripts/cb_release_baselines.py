@@ -24,7 +24,7 @@ CB_MAX_SERVED_SLOTS_LIMIT = 32
 # unknown entry field, so a field introduced by a later revision is refused
 # until this floor is raised, in a reviewed change, after every consumer
 # implements it.
-CB_POLICY_CONSUMER_FLOOR = (0, 22, 27)
+CB_POLICY_CONSUMER_FLOOR = (0, 22, 28)
 # optional CB policy entry field -> the SPEC-023 revision that made it legal.
 CB_POLICY_FIELD_MIN_CONSUMER = {"max_served_slots": (0, 22, 28)}
 

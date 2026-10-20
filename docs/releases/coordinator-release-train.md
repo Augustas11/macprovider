@@ -65,20 +65,42 @@ happens across many sessions and agents: read this file before cutting or
 applying a coordinator release, and update it in the same commit or PR after any
 release-affecting action. If reality and this file disagree, fix this file.
 
-## Next coordinator release — net changes vs live v1.8.255 (tracked 2026-10-19)
+## Next coordinator release — net changes vs live v1.8.259 (tracked 2026-10-19)
 
-Live on Pearl: runtime **v1.8.255** (coordinator + gateway), recommending CLI 1.8.256.
-Catalog `published-2026-10-18-glm53-flash-recommendable-v1` (#2060) is live; it was a
-catalog activation (one SIGHUP), not a runtime release.
+Live on Pearl: runtime **v1.8.259** (coordinator + gateway), recommending CLI 1.8.258.
+No coordinator/gateway PR has merged since; start rows here when one does.
 
 | PR | Issue | Coordinator/gateway change | Status |
 |---|---|---|---|
-| #2064 | #2029 | Coordinator autotune feed validator accepts the optional signed CB policy field `max_served_slots` (integer 1–32, inside `tuple_sha256`; malformed values fail closed); generator and live release gate share the bound via `scripts/cb_release_baselines.py` | merged |
 
-Order: ship this runtime and the CLI cut carrying #2064, then raise
-`CB_POLICY_CONSUMER_FLOOR` to `(0, 22, 28)` in a reviewed change, then cut the catalog that
-sets GLM-5.3-Flash's ceiling (4). Until the floor moves, every release path refuses a policy
-carrying the field, so nothing live changes before both consumers can parse it.
+## Runtime v1.8.259 — 2026-10-19 23:05Z
+
+Signed tag `v1.8.259` on `e80adfc6b`, [run 39338547867](https://github.com/Augustas11/macprovider/actions/runs/39338547867)
+(`production-release` approved through `antfleet-ops`), applied with the signed updater
+through `scripts/ops/pearl-runtime.sh`. It ships the coordinator and gateway halves of
+#2064 (signed CB `max_served_slots` in the feed validator) and #2065 (`X-MacProvider-Origin:
+coordinator` on every HTTP-direct dispatch, buyer-safe ownership routing, the stake identity
+cache and the gateway read pool for the routing identity). #2050's coordinator half was
+already live in v1.8.255.
+
+- **Downtime.** Gateway stopped 23:05:33Z and started 23:07:24Z (1 min 51 s); coordinator
+  stopped 23:05:33Z (drained by 23:06:03Z) and started 23:07:22Z. Public TLS health and the
+  ready-provider floor passed at 23:08:11Z, about 2 min 38 s after the stop. The updater
+  then verified its rollback point and exited successfully at 23:15Z with traffic up.
+- **After.** Both health endpoints report v1.8.259; the providers reconnected at their
+  pre-apply readiness and the canary came back `buyer_serving` with its CB grant
+  unchanged. No stats migration was pending.
+- **Ownership routing.** Buyer traffic kept serving after the apply with zero
+  `buyer_ownership_refused` events.
+- **Billing.** A paid gateway request on `zai-org/glm-5.3-flash` billed at 18,500 prompt /
+  88,000 completion credits per Mtok, the `rewards.rate_card` row.
+- **Origin marker.** Proven by the shipped binary and its tests
+  (`TestHTTPCanaryAndWarmupCarryCoordinatorOriginMarker`, the local-preempted retry tests).
+
+#2064 deploy order, continued: with CLI 1.8.257+ and this runtime live, the CB policy
+consumer floor moves to `(0, 22, 28)` and the catalog that signs GLM-5.3-Flash's ceiling (4)
+ships in the same PR (`published-2026-10-20-glm53-flash-cb-ceiling-v1`, catalog-content
+lane).
 
 ## Next coordinator release — net changes vs live v1.8.247 (tracked 2026-10-16)
 
@@ -245,6 +267,7 @@ The canary Mac mp-26592d… now runs signed CLI candidate v1.8.195, whose payloa
 
 | Tag | Commit | Head PR |
 |---|---|---|
+| v1.8.259 | `e80adfc6b` | #2064 CB `max_served_slots` feed validator, #2065 origin marker and buyer-safe ownership routing — **live** 2026-10-19 23:07Z, about 2 min of gateway/coordinator 502 during the apply |
 | v1.8.241 | `6e6b24211` | #1982 retention drain (watermark laps, run budget), #1981 per-request footprint (SPEC-022 R-15.10), #1967 privacy slot-aware selection, #1968 App Attest verifier + challenge/submit, #1962 native-MTP canary visibility, #1975 bootstrap SQL refusals — **live** 2026-10-13 08:31Z, about 3.5 min of coordinator 502 during the apply |
 | v1.8.239 | — | #1909 settlement-evidence retention, #1950 pool-proven rollup, #1944 expiry removal |
 | v1.8.236 | `bb17a3ab4` | #1919 repository admission (exact revocations), #1934 release-identity automation, #1937 attested-hardware auto-trust |
