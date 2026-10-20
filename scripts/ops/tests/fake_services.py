@@ -14,7 +14,7 @@ Files in STATE_DIR steer it:
   rejections_seq          counter values served one per /metrics read (last repeats)
   rejections              unapproved rejection counter base; with rejections_bump it
                           grows by that much on every /metrics read
-  mode                    gateway behaviour: move | stuck | serial-request |
+  mode                    gateway behaviour: move | cb-only | stuck | serial-request |
                           no-request-id | no-log-row | other-provider
   assigned_id             coordinator session recorded in request_log.provider_assigned_id for a
                           served completion (other-provider records a different one; no-log-row
@@ -25,6 +25,7 @@ Files in STATE_DIR steer it:
   gateway_models          models the gateway routes, one per line; a completion for any
                           other model answers 404 (absent: every model is routed)
   last_model              the model of the last completion request (written here)
+  last_request.json       the complete JSON body of the last completion request (written here)
   operator_key            bearer the fake coordinator's /admin routes accept
   retention_busy, retention_disabled   POST .../retention/run answers 409 with that code
   retention_db            sqlite file whose settlement_evidence_retention_state row a
@@ -167,6 +168,11 @@ class Handler(BaseHTTPRequestHandler):
                 cb = d.setdefault("continuous_batching", {})
                 scheduler = cb.setdefault("scheduler", {})
                 scheduler["shared_forward_calls"] = scheduler.get("shared_forward_calls", 0) + served
+            elif mode == "cb-only":
+                d["requests_total"] = d.get("requests_total", 0) + served
+                cb = d.setdefault("continuous_batching", {})
+                scheduler = cb.setdefault("scheduler", {})
+                scheduler["shared_forward_calls"] = scheduler.get("shared_forward_calls", 0) + served
             elif mode == "serial-request":
                 d["requests_total"] = d.get("requests_total", 0) + served
             return self.send(200, json.dumps(d))
@@ -182,10 +188,13 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get("Authorization") != "Bearer test-buyer-token":
             return self.send(401, '{"error": "unauthorized"}')
         try:
-            model = json.loads(raw or b"{}").get("model", "")
+            request = json.loads(raw or b"{}")
+            model = request.get("model", "")
         except ValueError:
+            request = {}
             model = ""
         open(os.path.join(state, "last_model"), "w").write(model)
+        open(os.path.join(state, "last_request.json"), "w").write(json.dumps(request))
         routed = read("gateway_models")
         if routed is not None and model not in routed.split():
             return self.send(404, '{"error": "model_not_found"}')
