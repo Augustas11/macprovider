@@ -112,8 +112,9 @@ from `(0, 22, 27)` to `(0, 22, 28)`, because older CLIs reject a whole policy th
 field. This CLI cut and Pearl runtime v1.8.259 (#2064's coordinator half, 2026-10-19) are
 both live, so the floor is raised and the GLM-5.3-Flash ceiling (4 served slots, from rows
 1/2/4 evidence) is signed in catalog `published-2026-10-20-glm53-flash-cb-ceiling-v1`,
-activated through `scripts/ops/catalog-activate.sh`. The Studio's owner-pinned
-`max_concurrency_override` is no longer needed once the signed ceiling caps its grant.
+activated 2026-10-20 through `scripts/ops/catalog-activate.sh`. The Studio keeps its owner pin
+for now: without it, the startup preflight refuses its `continuous_batch_queue_limit` 16 against
+the 4 planned rows (see the coordinator train, "GLM-5.3-Flash signed CB ceiling live").
 
 ## Next CLI release — net changes vs 1.8.251 (tracked 2026-10-18; released as v1.8.256)
 

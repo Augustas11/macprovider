@@ -73,6 +73,26 @@ No coordinator/gateway PR has merged since; start rows here when one does.
 | PR | Issue | Coordinator/gateway change | Status |
 |---|---|---|---|
 
+## GLM-5.3-Flash signed CB ceiling live — 2026-10-20
+
+Catalog `published-2026-10-20-glm53-flash-cb-ceiling-v1` (#2073, merge `7ae0f02c4`) is live
+through the catalog-content lane (`scripts/ops/catalog-activate.sh`,
+`CATALOG_CANARY_RECOVERY_SECONDS=900`): SIGHUP 23:55Z, no coordinator restart; evidence
+(a)–(d) passed by 00:25Z; (e) not required. The CB policy consumer floor is `(0, 22, 28)`, and
+the GLM-5.3-Flash entry carries `max_served_slots: 4`. The canary reports CB `granted` with
+served slots 4 under the signed policy. The owed GLM-5.3-Flash `buyer_serving_e2e` (since
+`published-2026-10-18-glm53-flash-recommendable-v1`) is recorded: a paid gateway request
+attributed to the canary's coordinator session, with its ledger row billed at 18,500 / 88,000
+credits per Mtok.
+
+Canary owner pin: removing `max_concurrency_override` / `max_concurrency_source` was tried
+and rolled back. Without the pin, the provider plans its rows from the signed ceiling (4), and
+its startup preflight refuses the configured `continuous_batch_queue_limit` 16 (must be
+<= 8 for 4 rows). The provider crash-looped until the config backup was restored, and GLM
+had no serving provider for about 34 min. The pin stays (it equals the ceiling). A signed
+ceiling below half a provider's configured queue limit must not stop that provider from
+starting; the CLI should clamp the queue limit to the planned rows.
+
 ## Runtime v1.8.259 — 2026-10-19 23:05Z
 
 Signed tag `v1.8.259` on `e80adfc6b`, [run 39338547867](https://github.com/Augustas11/macprovider/actions/runs/39338547867)
