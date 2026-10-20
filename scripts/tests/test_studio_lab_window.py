@@ -469,6 +469,29 @@ class StudioLabWindowTests(unittest.TestCase):
                 remote.bootout("fixture.provider")
         sleep.assert_not_called()
 
+    def test_bootstrap_waits_for_asynchronous_launchd_load(self):
+        clock = iter((10.0, 10.1))
+        with mock.patch.object(remote.subprocess, "run") as run, mock.patch.object(
+            remote, "loaded", side_effect=(False, False, True)
+        ) as loaded, mock.patch.object(
+            remote.time, "monotonic", side_effect=lambda: next(clock)
+        ), mock.patch.object(remote.time, "sleep") as sleep:
+            remote.bootstrap("fixture.provider", "/private/provider.plist")
+        run.assert_called_once()
+        self.assertEqual(loaded.call_count, 3)
+        sleep.assert_called_once_with(remote.LAUNCHCTL_POLL_S)
+
+    def test_bootstrap_refuses_at_bounded_monotonic_deadline(self):
+        clock = iter((10.0, 40.0))
+        with mock.patch.object(remote.subprocess, "run"), mock.patch.object(
+            remote, "loaded", return_value=False
+        ), mock.patch.object(
+            remote.time, "monotonic", side_effect=lambda: next(clock)
+        ), mock.patch.object(remote.time, "sleep") as sleep:
+            with self.assertRaisesRegex(remote.Refusal, "did not load"):
+                remote.bootstrap("fixture.provider", "/private/provider.plist")
+        sleep.assert_not_called()
+
     def test_restore_completes_durable_removal_before_bootstrap(self):
         manifest, _ = remote.load_manifest(self.fixture.manifest)
         record = self.fixture.write_journal(
@@ -497,6 +520,21 @@ class StudioLabWindowTests(unittest.TestCase):
         self.assertLess(events.index("out:fixture.provider"), events.index("process-gone"))
         self.assertLess(events.index("process-gone"), events.index("boot:fixture.provider"))
         self.assertFalse(restored["provider_stop_started"])
+
+    def test_restore_refuses_live_hash_drift_before_recovery_bootout(self):
+        manifest, _ = remote.load_manifest(self.fixture.manifest)
+        record = self.fixture.write_journal(
+            phase="stopping_provider", revision=5, provider_stop_started=True,
+        )
+        with mock.patch.object(remote, "stop_lab"), mock.patch.object(
+            remote, "validate_live_hashes", side_effect=remote.Refusal("live hash drift")
+        ), mock.patch.object(remote, "bootout") as bootout, mock.patch.object(
+            remote, "bootstrap"
+        ) as bootstrap:
+            with self.assertRaisesRegex(remote.Refusal, "live hash drift"):
+                remote.restore_locked(manifest, self.fixture.journal, record)
+        bootout.assert_not_called()
+        bootstrap.assert_not_called()
 
     def test_lost_lab_artifacts_do_not_block_status_or_provider_restore(self):
         missing = Path(self.fixture.document["artifacts"]["diagnostic_cli"]["path"])

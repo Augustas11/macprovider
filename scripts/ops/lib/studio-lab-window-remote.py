@@ -693,6 +693,7 @@ def restore_locked(manifest: dict, journal: Path, record: dict) -> dict:
         return record
     stop_lab(record, manifest)
     if record.get("provider_stop_started") is True:
+        validate_live_hashes(manifest)
         bootout(manifest["watchdog_label"])
         bootout(manifest["provider_label"])
         baseline_process = manifest["baseline"]["snapshot"]
