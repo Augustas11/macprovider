@@ -29,6 +29,7 @@ final class MenuBarController {
     init(
         agent: MalibuAgent,
         dismissalStore: UnclaimedBadgeDismissalStore = UnclaimedBadgeDismissalStore(),
+        isVisible: Bool = true,
         onAction: @escaping (Action) -> Void
     ) {
         self.agent = agent
@@ -36,8 +37,13 @@ final class MenuBarController {
         self.dismissedUnclaimedThreshold = dismissalStore.dismissedThreshold
         self.onAction = onAction
         self.statusItem = NSStatusBar.system.statusItem(withLength: MenuBarPresentation.statusItemLength)
+        self.statusItem.isVisible = isVisible
         configureButton()
         subscribeToState()
+    }
+
+    func setVisible(_ visible: Bool) {
+        statusItem.isVisible = visible
     }
 
     private func configureButton() {

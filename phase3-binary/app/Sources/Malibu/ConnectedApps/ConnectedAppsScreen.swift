@@ -300,7 +300,7 @@ struct ConnectedAppsScreen: View {
                     Link("Official \(store.app.rawValue) setup documentation", destination: store.app.documentation)
                     if store.app == .cursor {
                         Text(ConnectedAppConfiguration.cursorDisclosure)
-                        Text("Open Cursor Settings → Models → API Keys. Verify that your installed version supports this gateway and the selected model, then enter your buyer key in Cursor. Malibu does not edit Cursor's internal settings. Remove the key and custom settings in Cursor to undo setup.")
+                        Text(ConnectedAppConfiguration.cursorSetup)
                         Text("Model: \(store.modelID.isEmpty ? "Choose above" : store.modelID)")
                         Text("Manual setup pending. Cursor API compatibility is unverified.").foregroundStyle(.secondary)
                     } else {
@@ -311,6 +311,9 @@ struct ConnectedAppsScreen: View {
                         }.disabled(store.busy)
                         if store.app == .crush {
                             Text(ConnectedAppConfiguration.crushProjectConfigWarning).font(.caption).foregroundStyle(.orange)
+                        }
+                        if store.app == .openCode {
+                            Text(ConnectedAppConfiguration.openCodeToolDisclosure).font(.caption).foregroundStyle(.orange)
                         }
                         if store.app == .codex {
                             Text("Codex CLI 0.163.0: Malibu generates a text-only catalog from the gateway model and published context size. Other CLI versions require format validation before setup. Responses, tools and streaming still require client acceptance testing.").font(.caption)
