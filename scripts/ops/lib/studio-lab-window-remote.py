@@ -560,6 +560,14 @@ def same_process(pid: object, started: object) -> bool:
         return False
 
 
+def wait_process_exit(pid: object, started: object, *, timeout_s: int, poll_s: int) -> None:
+    deadline = time.monotonic() + timeout_s
+    while same_process(pid, started) and time.monotonic() < deadline:
+        time.sleep(min(poll_s, max(0, deadline - time.monotonic())))
+    if same_process(pid, started):
+        raise Refusal("baseline provider process remained alive after launch job removal")
+
+
 def process_group_alive(pgid: object) -> bool:
     if not isinstance(pgid, int) or isinstance(pgid, bool) or pgid <= 0:
         return False
@@ -568,8 +576,14 @@ def process_group_alive(pgid: object) -> bool:
         return True
     except ProcessLookupError:
         return False
-    except PermissionError as exc:
-        raise Refusal("cannot inspect offline lab process group") from exc
+    except PermissionError:
+        proc = subprocess.run(
+            ["ps", "-axo", "pgid="], capture_output=True, text=True, check=True,
+        )
+        try:
+            return pgid in {int(value) for value in proc.stdout.split()}
+        except ValueError as exc:
+            raise Refusal("cannot inspect offline lab process group") from exc
 
 
 def await_start_gate(fd: int) -> None:
@@ -589,15 +603,20 @@ def release_start_gate(fd: int) -> None:
         os.close(fd)
 
 
-def stop_lab(record: dict, manifest: dict) -> None:
+def stop_lab(
+    record: dict, manifest: dict, *, child: subprocess.Popen[bytes] | subprocess.Popen[str] | None = None,
+) -> None:
     pid = record.get("lab_pid")
     pgid = record.get("lab_pgid")
     started = record.get("lab_process_start_us")
     leader_matches = same_process(pid, started)
     group_alive = process_group_alive(pgid)
+    owned_reaped_leader = (
+        child is not None and isinstance(pid, int) and child.pid == pid and child.poll() is not None
+    )
     if not leader_matches and not group_alive:
         return
-    if not leader_matches:
+    if not leader_matches and not owned_reaped_leader:
         raise Refusal("lab leader identity changed while its process group remains")
     assert isinstance(pid, int) and isinstance(pgid, int)
     try:
@@ -606,6 +625,8 @@ def stop_lab(record: dict, manifest: dict) -> None:
         return
     deadline = time.monotonic() + min(10, manifest["poll_s"] * 2)
     while process_group_alive(pgid) and time.monotonic() < deadline:
+        if child is not None:
+            child.poll()
         time.sleep(min(1, manifest["poll_s"]))
     if process_group_alive(pgid):
         try:
@@ -614,7 +635,11 @@ def stop_lab(record: dict, manifest: dict) -> None:
             pass
     deadline = time.monotonic() + 5
     while process_group_alive(pgid) and time.monotonic() < deadline:
+        if child is not None:
+            child.poll()
         time.sleep(0.1)
+    if child is not None:
+        child.poll()
     if process_group_alive(pgid):
         raise Refusal("offline lab process group remains alive")
 
@@ -669,6 +694,11 @@ def supervise(manifest: dict, manifest_sha: str, journal: Path, nonce: str) -> i
             record = write_transition(journal, read_journal(journal), "drained")
         bootout(manifest["watchdog_label"])
         bootout(manifest["provider_label"])
+        baseline_process = manifest["baseline"]["snapshot"]
+        wait_process_exit(
+            baseline_process.get("pid"), baseline_process.get("process_start_us"),
+            timeout_s=manifest["drain_timeout_s"], poll_s=manifest["poll_s"],
+        )
         with JournalLock(journal):
             record = write_transition(journal, read_journal(journal), "stopped")
         validate_lab_artifacts(manifest)
@@ -702,9 +732,9 @@ def supervise(manifest: dict, manifest_sha: str, journal: Path, nonce: str) -> i
         try:
             lab_rc = child.wait(timeout=manifest["lab_timeout_s"])
         except subprocess.TimeoutExpired:
-            stop_lab(record, manifest)
+            stop_lab(record, manifest, child=child)
             lab_rc = 124
-        stop_lab(record, manifest)
+        stop_lab(record, manifest, child=child)
         with JournalLock(journal):
             current = read_journal(journal)
             current = write_transition(

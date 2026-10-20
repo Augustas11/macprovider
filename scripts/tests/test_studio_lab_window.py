@@ -4,7 +4,10 @@ import argparse
 import importlib.util
 import json
 import os
+import signal
 import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -362,6 +365,21 @@ class StudioLabWindowTests(unittest.TestCase):
             self.assertFalse(remote.same_process(123, 789))
         self.assertEqual(kill.call_count, 2)
 
+    def test_provider_exit_wait_is_bounded_and_requires_exact_identity_to_end(self):
+        clock = [0.0]
+
+        def advance(seconds):
+            clock[0] += seconds
+
+        with mock.patch.object(remote, "same_process", return_value=True), mock.patch.object(
+            remote.time, "monotonic", side_effect=lambda: clock[0]
+        ), mock.patch.object(remote.time, "sleep", side_effect=advance):
+            with self.assertRaisesRegex(remote.Refusal, "provider process remained alive"):
+                remote.wait_process_exit(10, 20, timeout_s=3, poll_s=1)
+        with mock.patch.object(remote, "same_process", side_effect=[True, False, False]):
+            with mock.patch.object(remote.time, "sleep"):
+                remote.wait_process_exit(10, 20, timeout_s=3, poll_s=1)
+
     def test_start_gate_refuses_eof_and_accepts_single_release_byte(self):
         compile(remote.GATED_EXEC, "<gated-exec>", "exec")
         read_fd, write_fd = os.pipe()
@@ -372,6 +390,86 @@ class StudioLabWindowTests(unittest.TestCase):
         os.write(write_fd, b"1")
         os.close(write_fd)
         remote.await_start_gate(read_fd)
+
+    def test_actual_held_child_exits_on_gate_eof_without_running_work(self):
+        marker = self.fixture.root / "must-not-run"
+        script = self.fixture.root / "gated-work.py"
+        script.write_text(
+            "#!/usr/bin/env python3\nfrom pathlib import Path\n"
+            f"Path({str(marker)!r}).write_text('ran')\n"
+        )
+        script.chmod(0o700)
+        gate_read, gate_write = os.pipe()
+        child = subprocess.Popen(
+            [sys.executable, "-c", remote.GATED_EXEC, str(gate_read), str(script),
+             str(Path.home()), "/usr/bin:/bin", "/tmp"],
+            pass_fds=(gate_read,), close_fds=True, start_new_session=True,
+        )
+        os.close(gate_read)
+        try:
+            os.close(gate_write)
+            self.assertEqual(child.wait(timeout=5), 125)
+            self.assertFalse(marker.exists())
+        finally:
+            if child.poll() is None:
+                os.killpg(child.pid, signal.SIGKILL)
+                child.wait(timeout=5)
+            if child.stdout is not None:
+                child.stdout.close()
+
+    def test_actual_timeout_group_ignoring_term_is_killed_and_reaped(self):
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('ready', flush=True); time.sleep(60)"],
+            stdout=subprocess.PIPE, text=True, start_new_session=True, close_fds=True,
+        )
+        try:
+            self.assertEqual(child.stdout.readline().strip(), "ready")
+            started = remote.process_start_us(child.pid)
+            record = {"lab_pid": child.pid, "lab_pgid": child.pid, "lab_process_start_us": started}
+            remote.stop_lab(record, {"poll_s": 1}, child=child)
+            self.assertEqual(child.wait(timeout=5), -signal.SIGKILL)
+            self.assertFalse(remote.process_group_alive(child.pid))
+        finally:
+            if child.poll() is None:
+                os.killpg(child.pid, signal.SIGKILL)
+                child.wait(timeout=5)
+            if child.stdout is not None:
+                child.stdout.close()
+
+    def test_actual_reaped_leader_still_owns_and_cleans_remaining_group(self):
+        descendant_code = (
+            "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"
+        )
+        leader_code = (
+            "import subprocess,sys; p=subprocess.Popen([sys.executable,'-c',sys.argv[1]]); "
+            "print(p.pid,flush=True)"
+        )
+        leader = subprocess.Popen(
+            [sys.executable, "-c", leader_code, descendant_code], stdout=subprocess.PIPE,
+            text=True, start_new_session=True, close_fds=True,
+        )
+        started = remote.process_start_us(leader.pid)
+        descendant = int(leader.stdout.readline().strip())
+        try:
+            self.assertEqual(leader.wait(timeout=5), 0)
+            self.assertTrue(remote.process_group_alive(leader.pid))
+            record = {
+                "lab_pid": leader.pid, "lab_pgid": leader.pid,
+                "lab_process_start_us": started,
+            }
+            remote.stop_lab(record, {"poll_s": 1}, child=leader)
+            self.assertFalse(remote.process_group_alive(leader.pid))
+        finally:
+            if remote.process_group_alive(leader.pid):
+                os.killpg(leader.pid, signal.SIGKILL)
+            try:
+                os.kill(descendant, 0)
+            except ProcessLookupError:
+                pass
+            if leader.poll() is None:
+                leader.wait(timeout=5)
+            if leader.stdout is not None:
+                leader.stdout.close()
 
     def test_detached_supervisor_is_journal_bound_before_gate_release(self):
         manifest, manifest_sha = remote.load_manifest(self.fixture.manifest)
