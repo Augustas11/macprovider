@@ -3301,24 +3301,28 @@ final class ModelManagementStore: ObservableObject {
         }
         await refresh(currentModelID: currentModelID, peer: peerEvidence)
         var needsRefresh = false
+        let cancelTooLate = committed && cancelRequested
+        let cleanupRequired = terminal?.warningCode == "staging_cleanup_required"
+        let historyID = UUID()
         if committed, !downloadIsListedLocally(modelKey) {
             // R011: report the change only from a refreshed projection; a
             // later refresh that lists it confirms it (reconcilePendingDownload).
             outcome = "failed"
             needsRefresh = true
-            pendingDownloadConfirmation = (modelKey, name)
+            pendingDownloadConfirmation = PendingDownloadConfirmation(
+                modelKey: modelKey,
+                title: name,
+                cancelTooLate: cancelTooLate,
+                cleanupRequired: cleanupRequired,
+                historyID: historyID
+            )
             message = String(localized: "The download of \(name) finished, but Malibu couldn't confirm it in the model list yet. Select Refresh to check again.", comment: "Model download not yet reconciled")
         }
-        if committed, cancelRequested {
-            message = String(localized: "Cancel came too late: the download had already finished.", comment: "Model download cancel too late") + " " + message
-        }
-        if terminal?.warningCode == "staging_cleanup_required" {
-            message += " " + String(localized: "Some partial download files remain. To remove them, run: malibu-cli models prepare \(modelKey) --repair-cache", comment: "Model download cleanup required")
-        }
+        message = Self.downloadMessage(message, modelKey: modelKey, cancelTooLate: cancelTooLate, cleanupRequired: cleanupRequired)
         download = nil
         downloadResult = DownloadResult(modelKey: modelKey, message: message, succeeded: outcome == "success", needsRefresh: needsRefresh)
         appendHistory(ModelActivityEntry(
-            id: UUID(),
+            id: historyID,
             timestamp: Date(),
             operation: "download",
             fromModelID: nil,
@@ -3331,7 +3335,28 @@ final class ModelManagementStore: ObservableObject {
         MalibuAccessibility.announce(message)
     }
 
-    private var pendingDownloadConfirmation: (modelKey: String, title: String)?
+    private struct PendingDownloadConfirmation {
+        let modelKey: String
+        let title: String
+        let cancelTooLate: Bool
+        let cleanupRequired: Bool
+        let historyID: UUID
+    }
+
+    private var pendingDownloadConfirmation: PendingDownloadConfirmation?
+
+    /// The cancel-too-late and cleanup disclosures travel with the outcome,
+    /// including a confirmation that arrives on a later refresh.
+    private static func downloadMessage(_ base: String, modelKey: String, cancelTooLate: Bool, cleanupRequired: Bool) -> String {
+        var message = base
+        if cancelTooLate {
+            message = String(localized: "Cancel came too late: the download had already finished.", comment: "Model download cancel too late") + " " + message
+        }
+        if cleanupRequired {
+            message += " " + String(localized: "Some partial download files remain. To remove them, run: malibu-cli models prepare \(modelKey) --repair-cache", comment: "Model download cleanup required")
+        }
+        return message
+    }
 
     private func downloadIsListedLocally(_ modelKey: String) -> Bool {
         !catalogRefreshFailed && hasUsableCatalogProjection
@@ -3343,8 +3368,26 @@ final class ModelManagementStore: ObservableObject {
     private func reconcilePendingDownload() {
         guard let pending = pendingDownloadConfirmation, downloadIsListedLocally(pending.modelKey) else { return }
         pendingDownloadConfirmation = nil
-        let message = String(localized: "Downloaded and verified \(pending.title). It's on this Mac now.", comment: "Model download succeeded")
+        let message = Self.downloadMessage(
+            String(localized: "Downloaded and verified \(pending.title). It's on this Mac now.", comment: "Model download succeeded"),
+            modelKey: pending.modelKey,
+            cancelTooLate: pending.cancelTooLate,
+            cleanupRequired: pending.cleanupRequired
+        )
         downloadResult = DownloadResult(modelKey: pending.modelKey, message: message, succeeded: true)
+        if let index = history.firstIndex(where: { $0.id == pending.historyID }) {
+            let entry = history[index]
+            history[index] = ModelActivityEntry(
+                id: entry.id,
+                timestamp: entry.timestamp,
+                operation: entry.operation,
+                fromModelID: entry.fromModelID,
+                toModelID: entry.toModelID,
+                outcome: "success",
+                reason: nil
+            )
+            saveState()
+        }
         statusLine = message
         MalibuAccessibility.announce(message)
     }
@@ -4329,11 +4372,13 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         guidanceNextAction = row.providerGuidance.nextAction
         admissionStateLabel = Self.admissionStateLabel(
             state: row.admission.state,
-            source: row.admission.source
+            source: row.admission.source,
+            settlementCapable: row.admission.settlementCapable
         )
         admissionStateMeaning = Self.admissionStateMeaning(
             state: row.admission.state,
-            source: row.admission.source
+            source: row.admission.source,
+            settlementCapable: row.admission.settlementCapable
         )
         evaluateTransaction = Self.evaluateTransaction(from: row.evaluateAction)
         warningCodes = row.warningCodes
@@ -4595,7 +4640,12 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         }
     }
 
-    private static func admissionStateLabel(state: String, source: String) -> String {
+    private static func admissionStateLabel(state: String, source: String, settlementCapable: Bool) -> String {
+        // SPEC-044-R002: earning copy follows the authorization boolean, not
+        // the state name alone.
+        if state == "settlement_capable", !settlementCapable {
+            return String(localized: "Not eligible to earn here", comment: "BYOM admission label when the settlement boolean is false")
+        }
         switch state {
         case "local_only": return String(localized: "Local only", comment: "BYOM admission label")
         case "not_offered": return String(localized: "Not offered", comment: "BYOM admission label")
@@ -4613,7 +4663,10 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         }
     }
 
-    private static func admissionStateMeaning(state: String, source: String) -> String {
+    private static func admissionStateMeaning(state: String, source: String, settlementCapable: Bool) -> String {
+        if state == "settlement_capable", !settlementCapable {
+            return String(localized: "The coordinator reports this offer settlement-capable, but it is not bound to this catalog identity, so it is not earning here.", comment: "BYOM admission meaning when the settlement boolean is false")
+        }
         if state == "not_offered" {
             return source == "coordinator"
                 ? String(localized: "Coordinator reports no active network offer for this model.", comment: "BYOM coordinator not-offered meaning")

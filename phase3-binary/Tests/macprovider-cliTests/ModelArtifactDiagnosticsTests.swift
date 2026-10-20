@@ -858,6 +858,23 @@ final class ModelArtifactDiagnosticsTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: other.path))
     }
 
+    func testPrepareCatalogRefusesASymlinkedModelCachePath() async throws {
+        let (resolver, _) = try makeResolver()
+        let row = makeRow(sha256: String(repeating: "1", count: 64))
+        let repository = resolver.snapshotURL(modelID: row.modelID, revision: row.revision)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let outside = try tempDir()
+        try FileManager.default.createSymbolicLink(at: repository, withDestinationURL: outside)
+
+        let (exit, events) = await prepareCatalog(row: row, resolver: resolver)
+
+        XCTAssertEqual(exit, 4)
+        XCTAssertEqual(events.map(\.state), [.failed])
+        XCTAssertEqual(events.first?.errorCode, .unsafeFilesystemObject)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: outside.path), [], "nothing is written outside the cache")
+    }
+
     func testPrepareCatalogRunsOneAtATime() async throws {
         let (resolver, _) = try makeResolver()
         let row = makeRow(sha256: String(repeating: "1", count: 64))

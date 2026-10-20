@@ -1488,8 +1488,11 @@ algorithm.
   (exit 4 for a refused key, untrusted catalog, missing space or failed
   transfer; exit 5 for a hash mismatch or other verification failure), or
   `cancel_requested` then `cancelled` (exit 130). SIGINT or SIGTERM stops the
-  download; the downloader removes its own staging, and the command deletes
-  nothing itself. Interrupted-download leftovers of that model that remain at
+  transfer; once the transfer is complete, verification and adoption run to
+  completion and the run ends `succeeded` or `failed`. The downloader removes
+  its own staging, and the command deletes nothing itself. A model cache path
+  with a symlink below the cache root is refused (`unsafe_filesystem_object`,
+  exit 4) before any download. Interrupted-download leftovers of that model that remain at
   the end are reported on the terminal event with
   `warning_code: "staging_cleanup_required"`. One
   `prepare-catalog` runs at a time per user (a second one fails with

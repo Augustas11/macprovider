@@ -1569,7 +1569,13 @@ catalog-only sentinel in the R002/R003 v2 amendment is unchanged.
    final state. `failed` carries an error code and exits 4 for a refused key,
    untrusted catalog, missing space, or a failed transfer, and 5 for a hash
    mismatch or other verification failure. SIGINT or SIGTERM stops the
-   download and ends with `cancel_requested` then `cancelled` (exit 130). The
+   download and ends with `cancel_requested` then `cancelled` (exit 130).
+   The commit point is the end of the transfer: once every file is
+   downloaded, verification and adoption into the durable store run to
+   completion, and a cancel that arrives then ends in `succeeded` or `failed`
+   after `cancel_requested`, which Malibu reports as a cancel that came too
+   late. A model cache path with a symlink below the cache root is refused
+   with `unsafe_filesystem_object` (exit 4) before any download. The
    downloader removes its own staging when it stops; the command deletes
    nothing itself, because a leftover may belong to another run. When any of
    that model's interrupted-download leftovers remain at the end, the

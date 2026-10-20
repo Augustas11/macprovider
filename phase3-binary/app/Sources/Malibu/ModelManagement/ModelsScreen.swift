@@ -515,6 +515,7 @@ struct ModelsScreen: View {
                 row: row,
                 enabled: store.canPerformModelAction,
                 byomEnabled: store.canPerformBYOMAction,
+                downloadEnabled: store.canStartDownload,
                 poolEligibilityLine: row.poolEligibilityDisplayLine(binding: store.poolBindings[row.id]),
                 onAction: { detailRow = nil; start(row) },
                 onWithdraw: { detailRow = nil; pendingWithdraw = row },

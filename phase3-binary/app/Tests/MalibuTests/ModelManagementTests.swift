@@ -3028,8 +3028,25 @@ final class ModelManagementTests: XCTestCase {
         XCTAssertEqual(store.downloadResult?.needsRefresh, true)
         XCTAssertFalse(store.downloadResult?.message.contains("It's on this Mac now") ?? true,
                        "no success copy before the list confirms it")
+        XCTAssertEqual(store.history.last?.outcome, "failed")
         await store.refreshAfterDownload()
         XCTAssertEqual(store.downloadResult, .init(modelKey: "qwen/qwen3-8b", message: "Downloaded and verified Qwen3 8B · 4-bit. It's on this Mac now.", succeeded: true))
+        XCTAssertEqual(store.history.last?.outcome, "success", "the activity entry follows the confirmation")
+    }
+
+    func testSettlementCapableStateWithoutTheBooleanIsNeverLabelledEarning() throws {
+        let rowJSON = trustedEconomicsRowJSON(economicsState: "blocked", admissionState: "settlement_capable")
+            .replacingOccurrences(of: #""catalog_economics_permitted":true"#, with: #""catalog_economics_permitted":false"#)
+            .replacingOccurrences(of: #""rate_card_version":"rates-v1","rate_card_generated_at":"2026-08-09T00:00:00Z","rate_card_key":"qwen3-8b","rate_source":"live_signed","prompt_rate_usd_per_million_tokens":0.2,"completion_rate_usd_per_million_tokens":0.4,"provider_share_bps":9000,"provider_prompt_payout_usd_per_million_tokens":0.18,"provider_completion_payout_usd_per_million_tokens":0.36"#,
+                                  with: #""rate_card_version":null,"rate_card_generated_at":null,"rate_card_key":null,"rate_source":"none","prompt_rate_usd_per_million_tokens":null,"completion_rate_usd_per_million_tokens":null,"provider_share_bps":null,"provider_prompt_payout_usd_per_million_tokens":null,"provider_completion_payout_usd_per_million_tokens":null"#)
+        let document = try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(catalogEconomicsJSON(rows: [rowJSON]).utf8)
+        )
+        let row = try XCTUnwrap(document.validated(now: ModelTestTimestamp.date).rowsForMalibu(currentModelID: nil, warmSwapAvailable: true).first)
+        XCTAssertFalse(row.warningCodes.contains("projection_unsupported"), "the row validates, so its label is rendered")
+        XCTAssertEqual(row.admissionStateLabel, "Not eligible to earn here")
+        XCTAssertFalse(row.admissionStateMeaning?.contains("Eligible to earn") ?? false)
     }
 
     @MainActor

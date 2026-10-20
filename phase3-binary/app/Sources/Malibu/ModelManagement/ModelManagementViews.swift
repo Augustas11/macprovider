@@ -17,6 +17,7 @@ struct ModelRowView: View {
     let row: MalibuModelRow
     let enabled: Bool
     let byomEnabled: Bool
+    var downloadEnabled = false
     let poolEligibilityLine: String?
     let onAction: () -> Void
     let onWithdraw: () -> Void
@@ -133,7 +134,7 @@ struct ModelRowView: View {
                         .accessibilityHint(Text(String(localized: "Shows a confirmation before the provider changes its served model.", comment: "Switch accessibility hint")))
                 } else if row.action == .download {
                     Button(String(localized: "Download…", comment: "Model download action in details"), action: onAction)
-                        .disabled(!byomEnabled)
+                        .disabled(!downloadEnabled)
                 } else if row.action == .evaluate {
                     Button(ModelFeatureUI.activate, action: onAction)
                         .disabled(!enabled)

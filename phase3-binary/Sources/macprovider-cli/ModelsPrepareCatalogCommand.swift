@@ -206,6 +206,9 @@ enum ModelsPrepareCatalogRunner {
         var partialPaths: @Sendable (ModelArtifactSignedRow, CachedModelArtifactResolver) -> Set<String>
         /// Takes the per-user single-run lock; nil when another run holds it.
         var acquireRunLock: @Sendable () -> (@Sendable () -> Void)?
+        /// Refuses a model cache path with a symlink below the cache root, so
+        /// the download cannot land outside it.
+        var checkCachePath: @Sendable (ModelArtifactSignedRow, CachedModelArtifactResolver) throws -> Void
         /// At most 10 s (SPEC-044-R014-4); 8 s leaves margin and keeps a long download's output small.
         var progressIntervalNanoseconds: UInt64 = 8_000_000_000
 
@@ -229,6 +232,12 @@ enum ModelsPrepareCatalogRunner {
             },
             partialPaths: { row, resolver in
                 Set(ModelArtifactDiagnostics.findPartials(row: row, resolver: resolver).map(\.url.path))
+            },
+            checkCachePath: { row, resolver in
+                guard FileManager.default.fileExists(atPath: resolver.hubRoot.path) else { return }
+                let repository = resolver.snapshotURL(modelID: row.modelID, revision: row.revision)
+                    .deletingLastPathComponent()
+                try resolver.validateNoSymlinkCachePath(of: repository, requireComplete: false)
             },
             acquireRunLock: {
                 let path = (NSTemporaryDirectory() as NSString).appendingPathComponent("macprovider-prepare-catalog.lock")
@@ -270,6 +279,13 @@ enum ModelsPrepareCatalogRunner {
             return 4
         }
         defer { releaseRunLock() }
+        do {
+            try dependencies.checkCachePath(row, resolver)
+        } catch {
+            writeDiagnosticsStderr("models prepare-catalog refused: the model cache path is not a safe directory (\(error))")
+            sink.emit(modelKey: modelKey, state: .failed, errorCode: .unsafeFilesystemObject)
+            return 4
+        }
         sink.emit(modelKey: modelKey, state: .queued)
         if cancellation.isRequested {
             sink.emitCancelRequestedOnce(modelKey: modelKey)
@@ -318,8 +334,9 @@ enum ModelsPrepareCatalogRunner {
         if leftovers {
             writeDiagnosticsStderr("models prepare-catalog warning: interrupted-download files remain for \(modelKey); to remove them run: \(ModelCatalogPreparation.retryCommand(catalogKey: modelKey, config: config))")
         }
-        // A preparation that verified before the cancel could take effect is
-        // reported as it is: the commit point had passed.
+        // Cancellation stops the transfer. Once the bytes are in, verification
+        // and adoption run to completion (SPEC-044-R014-4), so a preparation
+        // that verified is reported as it is: the commit point had passed.
         if outcome.finalState == .readyVerified {
             sink.emit(modelKey: modelKey, state: .succeeded, warningCode: warning)
             writeDiagnosticsStderr("models prepare-catalog: \(outcome.finalLine)")
