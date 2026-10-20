@@ -13,6 +13,29 @@ final class ProviderLogDiagnosticsTests: XCTestCase {
         XCTAssertTrue(finding?.userMessage.contains("identity and model files") == true)
     }
 
+    func testStartupHandoffFailuresNameGuardedRecoveryCommand() {
+        for line in [
+            "self-update startup handoff recovery refused: startup handoff does not match target",
+            "self-update startup reload fence authorization mismatch: startup_handoff",
+            "provider startup preflight failed: startup handoff expired before adoption",
+        ] {
+            let finding = ProviderLogDiagnostics.diagnose(lines: [line])
+            XCTAssertEqual(finding?.id, "startup_handoff_recovery_required")
+            XCTAssertEqual(finding?.matchedLine, line)
+            XCTAssertTrue(finding?.userMessage.contains("macprovider-cli recover-update") == true)
+            XCTAssertTrue(finding?.userMessage.contains("Keep the pending update files in place") == true)
+            XCTAssertFalse(finding?.userMessage.contains("Click Launch Provider") == true)
+        }
+    }
+
+    func testOrdinaryPendingUpdateDoesNotClaimStartupHandoffFailure() {
+        XCTAssertNil(ProviderLogDiagnostics.diagnose(lines: [
+            "autoupdate recovery deferred: pending marker exists; transaction owner must resolve update/rollback state; if provider startup remains blocked, run macprovider-cli recover-update; watchdog does not restart for update recovery",
+            "startup handoff prepared",
+            "provider startup preflight failed: another cause",
+        ]))
+    }
+
     func testDiagnoseStaleCatalogProvenance() {
         let finding = ProviderLogDiagnostics.diagnose(lines: [
             "loading config",

@@ -191,7 +191,7 @@ enum ProviderLifecycleLeaseError: Error, Equatable, CustomStringConvertible, Loc
         case .handoffMismatch(let field):
             return "startup handoff does not match \(field)"
         case .handoffExpired:
-            return "startup handoff expired before adoption"
+            return "startup handoff expired before adoption; run `macprovider-cli recover-update` to recover an abandoned update"
         case .launchdServiceOwnerMismatch:
             return "current process is not the exact launchd service owner"
         case .targetExecutableMismatch:
@@ -780,6 +780,72 @@ struct ProviderLifecycleLeaseStore: @unchecked Sendable {
             try validateRecordStructure(recovered)
             try writeAtomically(recovered)
             return recovered
+        }
+    }
+
+    /// Runs abandoned-transaction recovery without ever adopting or extending
+    /// PREPARED authority. The caller holds install.lock then update.lock; this
+    /// final lock prevents adoption/replacement between validation and retirement.
+    func retireExpiredPreparedStartupHandoff(
+        matching expected: ProviderLifecycleLeaseRecord,
+        recover: () throws -> Void
+    ) throws {
+        try withExclusiveLock {
+            guard let current = try readRecordIfPresent(), current == expected else {
+                throw ProviderLifecycleLeaseError.compareAndSwapFailed
+            }
+            try validateRecordStructure(current)
+            guard current.kind == .maintenance,
+                  let handoff = current.startupHandoff, handoff.state == .prepared else {
+                throw ProviderLifecycleLeaseError.handoffNotPrepared
+            }
+            let wallNow = environment.wallMilliseconds()
+            let monotonicNow = environment.monotonicNanoseconds()
+            guard let boot = environment.bootSession(), !boot.isEmpty,
+                  wallNow >= current.issuedWallMilliseconds,
+                  wallNow >= handoff.issuedWallMilliseconds,
+                  boot != handoff.bootSession
+                    || (monotonicNow >= current.issuedMonotonicNanoseconds
+                        && monotonicNow >= handoff.issuedMonotonicNanoseconds),
+                  wallNow >= handoff.expiresWallMilliseconds
+                    || (boot == handoff.bootSession
+                        && monotonicNow >= handoff.expiresMonotonicNanoseconds) else {
+                throw ProviderLifecycleLeaseError.handoffMismatch("recovery_window")
+            }
+            // Expiration alone never permits displacing a still-live writer.
+            guard boot != current.owner.bootSession
+                    || environment.processStartMicroseconds(current.owner.pid)
+                        != current.owner.processStartMicroseconds else {
+                throw ProviderLifecycleLeaseError.alreadyHeld(current)
+            }
+            try recover()
+            try validateExistingPath(url)
+            guard unlink(url.path) == 0 else {
+                throw ProviderLifecycleLeaseError.io(path: url.path, operation: "retire handoff", errnoCode: errno)
+            }
+            try fsyncDirectory()
+        }
+    }
+
+    /// Serializes legacy rollback with lease replacement without deleting an
+    /// adopted handoff. A stale timestamp is insufficient while its owner lives.
+    func withAbandonedLease<T>(
+        matching expected: ProviderLifecycleLeaseRecord,
+        recover: () throws -> T
+    ) throws -> T {
+        try withExclusiveLock {
+            guard let current = try readRecordIfPresent(), current == expected else {
+                throw ProviderLifecycleLeaseError.compareAndSwapFailed
+            }
+            try validateRecordStructure(current)
+            guard let failure = validationFailure(for: current), failure.permitsReplacement,
+                  let boot = environment.bootSession(), !boot.isEmpty,
+                  boot != current.owner.bootSession
+                    || environment.processStartMicroseconds(current.owner.pid)
+                        != current.owner.processStartMicroseconds else {
+                throw ProviderLifecycleLeaseError.alreadyHeld(current)
+            }
+            return try recover()
         }
     }
 

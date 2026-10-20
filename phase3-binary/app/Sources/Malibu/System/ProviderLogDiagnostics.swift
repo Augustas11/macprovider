@@ -12,6 +12,11 @@ enum ProviderLogDiagnostics {
         + "Click Launch Provider to repair the background service. "
         + "Your provider identity and model files will be kept."
 
+    static let startupHandoffRecoveryMessage =
+        "Provider startup is blocked by an unfinished software update. "
+        + "Run macprovider-cli recover-update in Terminal to validate and recover the update. "
+        + "Keep the pending update files in place."
+
     struct Finding: Equatable {
         let id: String
         let userMessage: String
@@ -29,6 +34,21 @@ enum ProviderLogDiagnostics {
     }
 
     private static let rules: [Rule] = [
+        Rule(
+            id: "startup_handoff_recovery_required",
+            needle: "self-update startup handoff recovery refused:",
+            userMessage: startupHandoffRecoveryMessage
+        ),
+        Rule(
+            id: "startup_handoff_recovery_required",
+            needle: "self-update startup reload fence authorization mismatch: startup_handoff",
+            userMessage: startupHandoffRecoveryMessage
+        ),
+        Rule(
+            id: "startup_handoff_recovery_required",
+            needle: "provider startup preflight failed: startup handoff expired before adoption",
+            userMessage: startupHandoffRecoveryMessage
+        ),
         Rule(
             id: "stale_launch_agent",
             needle: "provider process unhealthy: launchd service live.malibu.provider has no validated pid at",

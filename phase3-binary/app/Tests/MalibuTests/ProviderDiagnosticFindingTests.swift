@@ -16,6 +16,9 @@ final class ProviderDiagnosticFindingTests: XCTestCase {
             "coordinator join requires model_artifact_sha256",
             "model must be the catalog-pinned hugging face snapshot path",
             "auto_update_enabled: false",
+            "self-update startup handoff recovery refused: startup handoff does not match target",
+            "self-update startup reload fence authorization mismatch: startup_handoff",
+            "provider startup preflight failed: startup handoff expired before adoption",
         ])
 
         XCTAssertFalse(findings.isEmpty)

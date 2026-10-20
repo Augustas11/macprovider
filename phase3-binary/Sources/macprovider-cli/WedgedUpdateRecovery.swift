@@ -44,6 +44,15 @@ struct WedgedUpdateRecovery {
     let markerStore: AutoUpdateMarkerStore
     let lifecycleStore: ProviderLifecycleStateStore
     var environment = Environment()
+    var leaseStore: ProviderLifecycleLeaseStore? = nil
+    var fenceReloadJobs: () throws -> Void = { try AutoUpdater.fenceReloadJobsIfInstalled() }
+    var expectedProviderID: String? = nil
+
+    private var lifecycleLeaseStore: ProviderLifecycleLeaseStore {
+        leaseStore ?? ProviderLifecycleLeaseStore(
+            url: lifecycleStore.url.deletingLastPathComponent().appendingPathComponent("lease.json")
+        )
+    }
 
     enum Outcome: Equatable {
         /// No abandoned wedge was found; nothing changed.
@@ -55,6 +64,9 @@ struct WedgedUpdateRecovery {
         /// owns the provider; refused so a genuine in-progress update/rollback
         /// is never silently un-fenced.
         case transactionActive
+        /// Authority, backup, storage, or rollback validation failed. No lease
+        /// retirement or lifecycle translation is authorized by this outcome.
+        case recoveryRefused(String)
         /// The abandoned wedge was recovered. `markerOutcome` is nil when there
         /// was no pending marker (only the lifecycle fence was cleared).
         case recovered(markerOutcome: AutoUpdateOrphanRecoveryOutcome?, lifecycleUnfenced: Bool)
@@ -81,7 +93,7 @@ struct WedgedUpdateRecovery {
         return now >= deadline
     }
 
-    func recover() -> Outcome {
+    func recover(requirePreparedHandoff: Bool = false) -> Outcome {
         // Serialize with installers/updaters and prove no live owner. The
         // recovery lock is refused (lockContended) whenever an installer or
         // updater is alive, so a genuine mutation in flight can never be
@@ -94,15 +106,65 @@ struct WedgedUpdateRecovery {
         }
         defer { withExtendedLifetime(lock) {} }
 
+        let pending: AutoUpdatePendingMarker?
+        do { pending = try markerStore.readPending() }
+        catch { return .recoveryRefused("pending marker is invalid or unreadable") }
+        if requirePreparedHandoff, pending == nil { return .noWedge }
+        let inspection = lifecycleLeaseStore.inspect()
+        let record: ProviderLifecycleLeaseRecord?
+        switch inspection {
+        case .missing: record = nil
+        case .valid(let value): record = value
+        case .invalidOrExpired(let value, _):
+            guard let value else { return .recoveryRefused("lifecycle lease is invalid or unreadable") }
+            record = value
+        }
+        if let record, record.startupHandoff?.state == .prepared {
+            if requirePreparedHandoff,
+               !record.operationID.hasPrefix("self-update:"),
+               !record.operationID.hasPrefix("autoupdate:") { return .noWedge }
+            return recoverPreparedHandoff(record, pending: pending)
+        }
+        if requirePreparedHandoff {
+            // Recover the interruption between retirement and marker cleanup.
+            // Adopted and other unrelated leases keep their existing startup path.
+            guard record == nil,
+                  let lifecycle = try? lifecycleStore.current(),
+                  Self.lifecycleIsFencedUpdaterState(lifecycle)
+                    || (lifecycle.writer == .installer && lifecycle.state == .rollbackInProgress
+                        && lifecycle.reasonCode == Self.translationReasonCode) else { return .noWedge }
+            guard let pending,
+                  (try? markerStore.validateMarker(pending)) != nil,
+                  (try? markerStore.validateBackup(pending)) != nil,
+                  (try? AutoUpdateMarkerStore.sha256(file: URL(fileURLWithPath: pending.targetPath)))
+                    == pending.sha256 else { return .noWedge }
+        }
+        if let record {
+            do {
+                return try lifecycleLeaseStore.withAbandonedLease(matching: record) {
+                    recoverLegacyWedge(pending: pending)
+                }
+            } catch { return .recoveryRefused("lifecycle lease still owns recovery: \(error)") }
+        }
+        return recoverLegacyWedge(pending: pending)
+    }
+
+    private func recoverLegacyWedge(pending: AutoUpdatePendingMarker?) -> Outcome {
         var markerOutcome: AutoUpdateOrphanRecoveryOutcome?
-        if let marker = try? markerStore.readPending() {
+        if let marker = pending {
             // Only an abandoned (expired-deadline) transaction may be recovered.
             // A future deadline means a genuine in-progress update/rollback owns
             // the provider; leave every fence intact.
             guard Self.markerDeadlineExpired(marker.markerDeadline, now: environment.now()) else {
                 return .transactionActive
             }
+            do { try fenceReloadJobs() }
+            catch { return .recoveryRefused("reload helpers could not be fenced") }
             markerOutcome = markerStore.recoverOrphanedMarker(marker)
+            switch markerOutcome {
+            case .restored, .restoredAwaitingReadiness: break
+            default: return .recoveryRefused("rollback could not safely restore the previous release")
+            }
         }
 
         // Clear the lifecycle fence only for a dead updater-owned maintenance
@@ -134,4 +196,80 @@ struct WedgedUpdateRecovery {
         }
         return .recovered(markerOutcome: markerOutcome, lifecycleUnfenced: lifecycleUnfenced)
     }
+
+    private func recoverPreparedHandoff(
+        _ record: ProviderLifecycleLeaseRecord,
+        pending: AutoUpdatePendingMarker?
+    ) -> Outcome {
+        guard let marker = pending else {
+            return .recoveryRefused("prepared startup handoff has no matching pending marker")
+        }
+        guard Self.markerDeadlineExpired(marker.markerDeadline, now: environment.now()) else {
+            return .transactionActive
+        }
+        do {
+            try markerStore.validateMarker(marker)
+            try markerStore.validateBackup(marker)
+            try markerStore.ensureRollbackTargetAllowed(marker)
+            guard let handoff = record.startupHandoff,
+                  let lifecycle = try lifecycleStore.current(),
+                  lifecycle.operationID == record.operationID
+                    || (marker.transactionState == .awaitingPreviousReadiness
+                        && lifecycle.writer == .installer
+                        && lifecycle.state == .rollbackInProgress
+                        && lifecycle.reasonCode == Self.translationReasonCode),
+                  lifecycle.providerID == nil || lifecycle.providerID == handoff.providerID,
+                  (expectedProviderID ?? lifecycle.providerID) == handoff.providerID,
+                  handoff.operationID == record.operationID,
+                  handoff.serviceIdentity == ServeCommand.providerLaunchdServiceIdentity,
+                  marker.targetPath == handoff.targetExecutablePath,
+                  lifecycle.compatibilitySetID == nil
+                    || marker.targetCompatibilitySetID == lifecycle.compatibilitySetID,
+                  (marker.commitOwner == "coordinator"
+                    && record.operationID == "autoupdate:\(marker.updateID)")
+                    || (marker.commitOwner == "self_update"
+                        && record.operationID.hasPrefix("self-update:")) else {
+                return .recoveryRefused("pending marker, lifecycle, and prepared handoff do not match")
+            }
+            let digest = try AutoUpdateMarkerStore.sha256(file: URL(fileURLWithPath: marker.targetPath))
+            guard digest == handoff.targetExecutableSHA256
+                    || digest == marker.sha256 else {
+                return .recoveryRefused("installed executable does not match the abandoned transaction")
+            }
+            var outcome: AutoUpdateOrphanRecoveryOutcome?
+            try lifecycleLeaseStore.retireExpiredPreparedStartupHandoff(matching: record) {
+                try fenceReloadJobs()
+                // Retain the marker and backup on any restoration refusal. In
+                // particular, a signed-policy denial must never un-fence serve.
+                let recovered = try markerStore.restoreBackupAwaitingPreviousReadiness(marker)
+                if recovered.transactionState == .awaitingPreviousReadiness {
+                    outcome = .restoredAwaitingReadiness(recovered)
+                } else {
+                    outcome = .restored(marker)
+                }
+            }
+            // Retire first: a crash here leaves the existing generic rollback
+            // recovery able to translate the lifecycle on the next startup.
+            _ = try lifecycleStore.transition(
+                to: .rollbackInProgress,
+                reasonCode: Self.translationReasonCode,
+                writer: .installer,
+                providerID: handoff.providerID,
+                modelID: lifecycle.modelID,
+                compatibilitySetID: lifecycle.compatibilitySetID,
+                operationID: "install-rollback:\(environment.processID())",
+                operatorPaused: lifecycle.operatorPauseRequested,
+                now: environment.now()
+            )
+            if case .restored = outcome {
+                markerStore.clearPending()
+                markerStore.removeRollbackBackups(marker)
+            }
+            markerStore.recordCooldown(target: marker.targetVersion, failureClass: .orphanedPendingMarker)
+            return .recovered(markerOutcome: outcome, lifecycleUnfenced: true)
+        } catch {
+            return .recoveryRefused("abandoned handoff recovery refused: \(error)")
+        }
+    }
+
 }

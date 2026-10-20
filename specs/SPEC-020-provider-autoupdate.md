@@ -1,6 +1,6 @@
 # SPEC-020 - Provider autoupdate
 
-Version: v0.1.28
+Version: v0.1.29
 Status: Normative; coordinator-independent recovery is reconciled and
 implementation remains nonconformant under issue #610. The production path ran
 the 2026-07-10 incident-recovery
@@ -54,6 +54,10 @@ append-only transport out of a single listing page.
 v0.1.24 adds SPEC-020-R007, the one rollback lever: a build the coordinator
 exactly revoked moves down to exactly the recommended release, through the
 same verification as an upgrade. Every other downgrade stays refused.
+
+v0.1.29 requires CLI-owned recovery of abandoned, never-adopted startup
+handoffs before first-hop authorization, including lease retirement and
+actionable diagnostics, while preserving launchd and watchdog ownership.
 
 ## Goal
 
@@ -1551,6 +1555,30 @@ identify the preserved rollback binary and MUST NOT be compared to the new
 executable. Missing, expired, cross-boot, malformed, path-mismatched,
 hash-mismatched, owner-mismatched, or launchd-PID-mismatched authority fails
 closed without fencing.
+
+An expired, never-adopted prepared handoff MUST NOT permanently prevent CLI
+startup or `macprovider-cli recover-update` from recovering an abandoned
+transaction. Before first-hop authorization, CLI startup MAY invoke the same
+recovery owner used by `recover-update`. This is rollback recovery, not an
+extension or adoption of expired handoff authority. Recovery MUST hold the
+shared mutation and update locks, require an expired pending-marker deadline,
+and validate the matching operation, provider, canonical service, target path,
+and installed executable identity. It MUST revalidate the structurally valid
+prepared lease under its exclusive lock and prove the old owner is gone before
+retiring that exact handoff. Active transactions, live owners, adopted or
+unrelated handoffs, malformed or unsafe storage, and identity mismatches MUST
+remain fenced. Reload helpers MUST be fenced before rollback mutates bytes;
+failed or disallowed rollback MUST retain the recovery state.
+
+Successful rollback MUST retire the matching expired prepared handoff in the
+same recovery operation, including when the restored previous release is
+already awaiting readiness. A process that restored its executable on disk
+MUST leave serving to a fresh process of the restored release; it MUST NOT
+claim that its in-memory target is the previous release. Startup diagnostics
+and Malibu MUST name `macprovider-cli recover-update` when recovery remains
+blocked. The watchdog MAY surface the same command while deferring to the CLI
+recovery owner, but MUST NOT acquire rollback authority or add update-recovery
+restarts. Launchd retains ownership of ordinary process-exit restarts.
 
 After an authorized launchd target adopts the startup handoff, it MUST retain
 that authority while the exact pending marker remains armed. A crash, logout,

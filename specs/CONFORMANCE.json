@@ -564,7 +564,7 @@
     {
       "spec_id": "SPEC-020",
       "title": "Provider autoupdate",
-      "version": "v0.1.28",
+      "version": "v0.1.29",
       "path": "specs/SPEC-020-provider-autoupdate.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1012,7 +1012,7 @@
     {
       "spec_id": "SPEC-035",
       "title": "Provider connection diagnostics and failure history",
-      "version": "v0.4.3",
+      "version": "v0.4.4",
       "path": "specs/SPEC-035-provider-connection-diagnostics.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -2599,7 +2599,10 @@
         "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:waitForLocalHealthIfManaged",
         "phase3-binary/Sources/macprovider-cli/AutoUpdater.swift:defaultRollbackObserverAvailable",
         "ops/macprovider-watchdog/watchdog.sh:autoupdate_recovery_tick",
-        "phase3-binary/dist/install.sh:autoupdate_recovery_tick"
+        "phase3-binary/dist/install.sh:autoupdate_recovery_tick",
+        "phase3-binary/Sources/macprovider-cli/WedgedUpdateRecovery.swift:recoverPreparedHandoff",
+        "phase3-binary/Sources/macprovider-cli/ProviderLifecycleLease.swift:retireExpiredPreparedStartupHandoff",
+        "phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:recoverAbandonedStartupHandoffBeforeFencing"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift::testAutoUpdaterOwnsMutationLockBeforeFencingReloadJobs",
@@ -2651,7 +2654,21 @@
         "phase3-binary/dist/test/watchdog_rollback_paths.test.sh:assert_watchdog_does_not_own_rollback",
         "phase3-binary/dist/test/watchdog_rollback_paths.test.sh:assert_watchdog_does_not_restore_release_payload",
         "phase3-binary/dist/test/watchdog_rollback_paths.test.sh:assert_watchdog_does_not_quarantine_malformed_marker",
-        "scripts/test-watchdog-inline-drift.sh:WATCHDOG_EOF"
+        "scripts/test-watchdog-inline-drift.sh:WATCHDOG_EOF",
+        "phase3-binary/Tests/macprovider-cliTests/ExpiredPreparedHandoffRecoveryTests.swift::testStartupRecoversBeforeFenceExitsAndNextProcessAcquiresFreshLease",
+        "phase3-binary/Tests/macprovider-cliTests/ExpiredPreparedHandoffRecoveryTests.swift::testRecoverCommandRetiresPreparedLeaseAndPreservesReadinessMarker",
+        "phase3-binary/Tests/macprovider-cliTests/ExpiredPreparedHandoffRecoveryTests.swift::testPreviouslyTranslatedRollbackAndFailedServeRemainRecoverable",
+        "phase3-binary/Tests/macprovider-cliTests/ExpiredPreparedHandoffRecoveryTests.swift::testHistoricalSelfUpdateWithoutLifecycleProviderUsesConfiguredProvider",
+        "phase3-binary/Tests/macprovider-cliTests/ExpiredPreparedHandoffRecoveryTests.swift::testLiveOwnerFutureTransactionAndUnexpiredHandoffAreUntouched",
+        "phase3-binary/Tests/macprovider-cliTests/ExpiredPreparedHandoffRecoveryTests.swift::testMalformedMismatchedAndAdoptedAuthorityCannotBeRetired",
+        "phase3-binary/Tests/macprovider-cliTests/ExpiredPreparedHandoffRecoveryTests.swift::testHelperFenceFailureAndCorruptBackupKeepLeaseMarkerAndBytes",
+        "phase3-binary/Tests/macprovider-cliTests/ExpiredPreparedHandoffRecoveryTests.swift::testDisallowedPreviousVersionRetainsAllRecoveryState",
+        "phase3-binary/Tests/macprovider-cliTests/ExpiredPreparedHandoffRecoveryTests.swift::testLeaseCompareAndSwapRefusesReplacementBeforeRecoveryCallback",
+        "phase3-binary/dist/test/watchdog_rollback_paths.test.sh:assert_repeated_failed_startup_is_observe_only",
+        "phase3-binary/Tests/macprovider-cliTests/ExpiredPreparedHandoffRecoveryTests.swift::testMarkerFreeIdentityRotationRemainsAdoptable",
+        "phase3-binary/Tests/macprovider-cliTests/ExpiredPreparedHandoffRecoveryTests.swift::testAdoptedHandoffSkipsAutomaticPreparedRecoveryAndKeepsManualEscape",
+        "phase3-binary/Tests/macprovider-cliTests/ExpiredPreparedHandoffRecoveryTests.swift::testLegacyRollbackInterruptionBeforeAndAfterLeaseRetirementSelfHeals",
+        "phase3-binary/Tests/macprovider-cliTests/ExpiredPreparedHandoffRecoveryTests.swift::testLifecycleOnlyRecoveryContinuesButAnyRestorationExits"
       ],
       "journeys": [
         "JOURNEY-PROVIDER-AUTOUPDATE-PHYSICAL"
@@ -4156,7 +4173,9 @@
         "phase3-binary/app/Tests/MalibuTests/ProviderDiagnosticFindingTests.swift:testClosedTaxonomyCoversExistingProviderLogAggregateIDs",
         "phase3-binary/app/Tests/MalibuTests/ProviderDiagnosticFindingTests.swift:testUnknownSignatureIDsAreSkippedWhenMinimumReaderVersionIsSupported",
         "phase3-binary/Tests/macprovider-cliTests/DoctorCommandTests.swift:testDoctorReportEmitsOnlyServeUnresponsiveWhenStatusUnavailable",
-        "phase3-binary/Tests/macprovider-cliTests/DoctorCommandTests.swift:testDoctorReportJSONIsBackCompatAndDoesNotExposeConfigPathOrProviderID"
+        "phase3-binary/Tests/macprovider-cliTests/DoctorCommandTests.swift:testDoctorReportJSONIsBackCompatAndDoesNotExposeConfigPathOrProviderID",
+        "phase3-binary/app/Tests/MalibuTests/ProviderLogDiagnosticsTests.swift:testStartupHandoffFailuresNameGuardedRecoveryCommand",
+        "phase3-binary/app/Tests/MalibuTests/ProviderLogDiagnosticsTests.swift:testOrdinaryPendingUpdateDoesNotClaimStartupHandoffFailure"
       ],
       "journeys": [],
       "evidence": [],
@@ -4195,7 +4214,9 @@
         "phase3-binary/Tests/macprovider-cliTests/DoctorCommandTests.swift:testDoctorReportAllowlistsNetworkStateBeforeEmission",
         "phase3-binary/Tests/macprovider-cliTests/DoctorCommandTests.swift:testDoctorReportDoesNotOverrideFreshStatusOwnedNetworkState",
         "phase3-binary/Tests/macprovider-cliTests/DoctorCommandTests.swift:testDoctorReportContributesServeUnresponsiveForStaleOrIncompatibleStatus",
-        "phase3-binary/Tests/macprovider-cliTests/DoctorCommandTests.swift:testDoctorReportAttachesBelowFloorAsServeUnresponsiveEvidenceOnly"
+        "phase3-binary/Tests/macprovider-cliTests/DoctorCommandTests.swift:testDoctorReportAttachesBelowFloorAsServeUnresponsiveEvidenceOnly",
+        "phase3-binary/app/Tests/MalibuTests/AgentSnapshotPresenterTests.swift:testStartupHandoffDiagnosticNamesRecoveryBeforeGenericUnavailableStatus",
+        "phase3-binary/app/Tests/MalibuTests/AgentSnapshotPresenterTests.swift:testHistoricalStartupHandoffFailureDoesNotOverrideFreshReadyStatus"
       ],
       "journeys": [],
       "evidence": [],

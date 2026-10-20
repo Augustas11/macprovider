@@ -82,7 +82,8 @@ final class WedgedUpdateRecoveryTests: XCTestCase {
 
         let recovery = WedgedUpdateRecovery(
             markerStore: AutoUpdateMarkerStore(homeDirectory: root.home),
-            lifecycleStore: lifecycleStore
+            lifecycleStore: lifecycleStore,
+            fenceReloadJobs: {}
         )
         XCTAssertEqual(recovery.recover(), .recovered(markerOutcome: nil, lifecycleUnfenced: true))
 
@@ -108,7 +109,8 @@ final class WedgedUpdateRecoveryTests: XCTestCase {
                 homeDirectory: root.home,
                 installerOwnerLiveOverride: { true }
             ),
-            lifecycleStore: lifecycleStore
+            lifecycleStore: lifecycleStore,
+            fenceReloadJobs: {}
         )
         XCTAssertEqual(recovery.recover(), .ownerLive)
 
@@ -138,7 +140,7 @@ final class WedgedUpdateRecoveryTests: XCTestCase {
         )
         try store.writePending(marker)
 
-        let recovery = WedgedUpdateRecovery(markerStore: store, lifecycleStore: lifecycleStore)
+        let recovery = WedgedUpdateRecovery(markerStore: store, lifecycleStore: lifecycleStore, fenceReloadJobs: {})
         XCTAssertEqual(recovery.recover(), .transactionActive)
 
         // Neither the marker nor the fence may be touched for a genuine
@@ -175,7 +177,7 @@ final class WedgedUpdateRecoveryTests: XCTestCase {
         )
         try store.writePending(marker)
 
-        let recovery = WedgedUpdateRecovery(markerStore: store, lifecycleStore: lifecycleStore)
+        let recovery = WedgedUpdateRecovery(markerStore: store, lifecycleStore: lifecycleStore, fenceReloadJobs: {})
         XCTAssertEqual(recovery.recover(), .recovered(markerOutcome: .restored(marker), lifecycleUnfenced: true))
 
         // The previous binary is restored and the pending marker cleared.
@@ -204,7 +206,8 @@ final class WedgedUpdateRecoveryTests: XCTestCase {
 
         let recovery = WedgedUpdateRecovery(
             markerStore: AutoUpdateMarkerStore(homeDirectory: root.home),
-            lifecycleStore: lifecycleStore
+            lifecycleStore: lifecycleStore,
+            fenceReloadJobs: {}
         )
         XCTAssertEqual(recovery.recover(), .noWedge)
 

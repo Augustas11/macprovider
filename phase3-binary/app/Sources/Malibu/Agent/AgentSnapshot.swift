@@ -2186,6 +2186,13 @@ enum AgentSnapshotPresenter {
                 detail: LogTailBuffer.redacted(finding.userMessage),
                 safeNextAction: "Keep Malibu open. You do not need a new invite."
             )
+        case .startupHandoffRecoveryRequired:
+            return PublicStatus(
+                title: "Provider update recovery needed",
+                detail: LogTailBuffer.redacted(finding.userMessage),
+                safeNextAction: "Run macprovider-cli recover-update in Terminal. Keep the pending update files in place.",
+                executableAction: .exportDiagnostics
+            )
         case .serveUnresponsive:
             if shouldHoldLiveThroughTransientServeUnresponsive(finding, snapshot: s) {
                 return nil
@@ -2286,6 +2293,7 @@ enum AgentSnapshotPresenter {
         case .admissionIdentityBlocked: return "Network verification"
         case .serveUnresponsive: return "Customer availability"
         case .autoupdateInProgress: return "Provider software update"
+        case .startupHandoffRecoveryRequired: return "Provider update recovery"
         case .autoupdateHomeACLRejected: return "Provider software repair pending"
         case .staleLaunchAgent: return "Background service"
         case .staleModelCatalog, .catalogAdmission, .rateCardAdmission, .catalogKeyMismatch,
