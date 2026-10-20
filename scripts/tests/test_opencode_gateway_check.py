@@ -33,14 +33,18 @@ def frame(value):
     return "data: " + json.dumps(value, separators=(",", ":")) + "\n\n"
 
 
-def tool_stream(arguments_first='{"filePath":"/fixture/work', arguments_second='space/marker.txt"}'):
-    return (frame({"id": "chatcmpl-tool", "choices": [{"index": 0, "delta": {"tool_calls": [{
+def tool_stream(arguments_first='{"filePath":"/fixture/work', arguments_second='space/marker.txt"}',
+                model=None):
+    model_field = {"model": model} if model is not None else {}
+    return (frame({"id": "chatcmpl-tool", **model_field,
+                   "choices": [{"index": 0, "delta": {"tool_calls": [{
         "index": 0, "id": "call-read", "type": "function",
         "function": {"name": "re", "arguments": arguments_first}}]}}]})
-            + frame({"id": "chatcmpl-tool", "choices": [{"index": 0, "delta": {"tool_calls": [{
+            + frame({"id": "chatcmpl-tool", **model_field,
+                     "choices": [{"index": 0, "delta": {"tool_calls": [{
                 "index": 0, "function": {"name": "ad", "arguments": arguments_second}}]}}]})
-            + frame({"id": "chatcmpl-tool", "choices": [{"index": 0, "delta": {},
-                                                            "finish_reason": "tool_calls"}],
+            + frame({"id": "chatcmpl-tool", **model_field,
+                     "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
                      "usage": {"prompt_tokens": 4, "completion_tokens": 5, "total_tokens": 9}})
             + "data: [DONE]\n\n").encode()
 
@@ -78,10 +82,19 @@ class ToolStreamTests(unittest.TestCase):
             MODULE.validate_tool_stream(b"x" * (MODULE.MAX_RESPONSE_BYTES + 1), MARKER_PATH)
 
     def test_response_model_mismatch_and_oversized_call_id_are_rejected(self):
-        wrong_model = tool_stream().replace(b'"id":"chatcmpl-tool"',
-                                            b'"id":"chatcmpl-tool","model":"other"', 1)
+        self.assertEqual(
+            MODULE.validate_tool_stream(tool_stream(model=ARTIFACT), MARKER_PATH,
+                                        expected_model=ARTIFACT).stream_id,
+            "chatcmpl-tool",
+        )
+        wrong_model = tool_stream(model="other")
         with self.assertRaisesRegex(MODULE.CheckError, "response_model_mismatch"):
-            MODULE.validate_tool_stream(wrong_model, MARKER_PATH, expected_model=MODEL)
+            MODULE.validate_tool_stream(wrong_model, MARKER_PATH, expected_model=ARTIFACT)
+        alias_model = tool_stream(model=MODEL)
+        with self.assertRaisesRegex(MODULE.CheckError, "response_model_mismatch"):
+            MODULE.validate_tool_stream(alias_model, MARKER_PATH, expected_model=ARTIFACT)
+        with self.assertRaisesRegex(MODULE.CheckError, "response_model_mismatch"):
+            MODULE.validate_tool_stream(tool_stream(), MARKER_PATH, expected_model=ARTIFACT)
         long_id = tool_stream().replace(b'call-read', b'x' * 129)
         with self.assertRaisesRegex(MODULE.CheckError, "invalid_tool_call_id"):
             MODULE.validate_tool_stream(long_id, MARKER_PATH)
@@ -206,9 +219,11 @@ class ReceiptTests(unittest.TestCase):
 
     def test_valid_terminal_receipt_is_minimized(self):
         attempt = {"attempt_n": 2, "closed": True, "receipt_result": "valid",
-                   "settlement_outcome": "verified", "model_id": MODEL,
+                   "settlement_outcome": "verified", "model_id": ARTIFACT,
                    "reason": "not retained"}
-        self.assertEqual(MODULE.validate_receipt(self.receipt(attempts=[attempt]), 200, "req-1", MODEL),
+        self.assertEqual(MODULE.validate_receipt(
+            self.receipt(attempts=[attempt]), 200, "req-1", ARTIFACT
+        ),
                          {"request_id": "req-1", "attempt_n": 2, "status": "verified"})
 
     def test_false_visibility_quarantine_and_wrong_request_are_rejected(self):
@@ -222,9 +237,9 @@ class ReceiptTests(unittest.TestCase):
                 with self.assertRaisesRegex(MODULE.CheckError, code):
                     MODULE.validate_receipt(body, 200, "req-1")
         wrong_model = [{"attempt_n": 1, "closed": True, "receipt_result": "valid",
-                        "settlement_outcome": "verified", "model_id": "other"}]
+                        "settlement_outcome": "verified", "model_id": MODEL}]
         with self.assertRaisesRegex(MODULE.CheckError, "receipt_model_mismatch"):
-            MODULE.validate_receipt(self.receipt(attempts=wrong_model), 200, "req-1", MODEL)
+            MODULE.validate_receipt(self.receipt(attempts=wrong_model), 200, "req-1", ARTIFACT)
 
     def test_poll_network_call_is_capped_by_remaining_deadline(self):
         get = mock.Mock(side_effect=MODULE.CheckError("upstream_transport"))
@@ -484,11 +499,11 @@ class RealOpenCodeLoopbackFixture(unittest.TestCase):
             @staticmethod
             def read_stream(marker_path):
                 chunks = [
-                    {"id": "local-tool", "model": MODEL, "choices": [{"index": 0, "delta": {
+                    {"id": "local-tool", "model": ARTIFACT, "choices": [{"index": 0, "delta": {
                         "role": "assistant", "tool_calls": [{"index": 0, "id": "call-local-read",
                         "type": "function", "function": {"name": "read", "arguments":
                         json.dumps({"filePath": marker_path})}}]}, "finish_reason": None}]},
-                    {"id": "local-tool", "model": MODEL, "choices": [{"index": 0, "delta": {},
+                    {"id": "local-tool", "model": ARTIFACT, "choices": [{"index": 0, "delta": {},
                         "finish_reason": "tool_calls"}], "usage": {"prompt_tokens": 10,
                         "completion_tokens": 5, "total_tokens": 15}},
                 ]
@@ -497,9 +512,9 @@ class RealOpenCodeLoopbackFixture(unittest.TestCase):
             @staticmethod
             def final_stream(marker):
                 chunks = [
-                    {"id": "local-final", "model": MODEL, "choices": [{"index": 0,
+                    {"id": "local-final", "model": ARTIFACT, "choices": [{"index": 0,
                         "delta": {"role": "assistant", "content": marker}, "finish_reason": None}]},
-                    {"id": "local-final", "model": MODEL, "choices": [{"index": 0, "delta": {},
+                    {"id": "local-final", "model": ARTIFACT, "choices": [{"index": 0, "delta": {},
                         "finish_reason": "stop"}], "usage": {"prompt_tokens": 20,
                         "completion_tokens": 10, "total_tokens": 30}},
                 ]
@@ -528,7 +543,7 @@ class RealOpenCodeLoopbackFixture(unittest.TestCase):
                 "surface": "metadata",
                 "pending_quarantined_visible": True,
                 "attempts": [{"attempt_n": 1, "closed": True, "receipt_result": "valid",
-                    "settlement_outcome": "verified", "model_id": MODEL}],
+                    "settlement_outcome": "verified", "model_id": ARTIFACT}],
             }).encode()
 
         run_client = MODULE._bounded_client_process

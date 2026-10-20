@@ -155,7 +155,7 @@ def validate_tool_stream(
                 raise CheckError("inconsistent_stream_id")
             stream_id = frame_id
         frame_model = frame.get("model")
-        if expected_model is not None and frame_model is not None and frame_model != expected_model:
+        if expected_model is not None and frame_model != expected_model:
             raise CheckError("response_model_mismatch")
         found_usage = _usage(frame.get("usage"))
         if found_usage is not None:
@@ -404,7 +404,8 @@ class GatewayProxyHandler(http.server.BaseHTTPRequestHandler):
             if len(response_body) > MAX_RESPONSE_BYTES:
                 raise CheckError("response_too_large")
             response_metadata = validate_tool_stream(
-                response_body, state.marker_path, response_status, expected_model=state.model
+                response_body, state.marker_path, response_status,
+                expected_model=MODEL_BINDINGS[state.model],
             )
             if response_metadata.usage is None:
                 raise CheckError("response_usage_missing")
@@ -540,6 +541,7 @@ def validate_receipt(
 
 
 def poll_receipt(request_id: str, key: str, model: str, timeout_seconds: float = 30.0) -> dict[str, Any]:
+    expected_artifact_id = MODEL_BINDINGS[model]
     deadline = time.monotonic() + timeout_seconds
     while True:
         remaining = deadline - time.monotonic()
@@ -555,7 +557,7 @@ def poll_receipt(request_id: str, key: str, model: str, timeout_seconds: float =
             if exc.code == "upstream_transport" and time.monotonic() >= deadline:
                 raise CheckError("receipt_pending_timeout") from exc
             raise
-        result = validate_receipt(body, status, request_id, model)
+        result = validate_receipt(body, status, request_id, expected_artifact_id)
         if result is not None:
             return result
         if time.monotonic() >= deadline:
