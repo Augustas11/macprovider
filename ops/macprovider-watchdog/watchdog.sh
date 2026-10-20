@@ -987,7 +987,7 @@ autoupdate_recovery_tick() {
   if [ ! -e "$pending_path" ] && [ ! -L "$pending_path" ]; then
     return 0
   fi
-  log "autoupdate recovery deferred: pending marker exists; transaction owner must resolve update/rollback state"
+  log "autoupdate recovery deferred: pending marker exists; transaction owner must resolve update/rollback state; if provider startup remains blocked, run macprovider-cli recover-update; watchdog does not restart for update recovery"
   # Record the intended kind; main() emits exactly one beacon per tick (a restart
   # this tick, if any, takes priority over a deferral).
   TICK_DEFERRAL=1

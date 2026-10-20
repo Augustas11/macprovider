@@ -13,6 +13,7 @@ enum ProviderDiagnosticSignatureID: String, CaseIterable, Comparable {
     case snapshotPathMismatch = "snapshot_path_mismatch"
     case autoupdateHomeACLRejected = "autoupdate_home_acl_rejected"
     case credentialStoreUnavailable = "credential_store_unavailable"
+    case startupHandoffRecoveryRequired = "startup_handoff_recovery_required"
     case serveUnresponsive = "serve_unresponsive"
     case admissionIdentityBlocked = "admission_identity_blocked"
     case autoupdateInProgress = "autoupdate_in_progress"
@@ -27,19 +28,20 @@ enum ProviderDiagnosticSignatureID: String, CaseIterable, Comparable {
         case .credentialStoreUnavailable: return 0
         case .admissionIdentityBlocked: return 1
         case .autoupdateInProgress: return 2
-        case .serveUnresponsive: return 3
-        case .staleLaunchAgent: return 4
-        case .staleModelCatalog: return 5
-        case .catalogAdmission: return 6
-        case .rateCardAdmission: return 7
-        case .catalogKeyMismatch: return 8
-        case .artifactHashMismatch: return 9
-        case .artifactVerificationFailed: return 10
-        case .missingCatalogProvenance: return 11
-        case .missingArtifactSHA: return 12
-        case .snapshotPathMismatch: return 13
-        case .autoupdateHomeACLRejected: return 14
-        case .autoupdateDisabled: return 15
+        case .startupHandoffRecoveryRequired: return 3
+        case .serveUnresponsive: return 4
+        case .staleLaunchAgent: return 5
+        case .staleModelCatalog: return 6
+        case .catalogAdmission: return 7
+        case .rateCardAdmission: return 8
+        case .catalogKeyMismatch: return 9
+        case .artifactHashMismatch: return 10
+        case .artifactVerificationFailed: return 11
+        case .missingCatalogProvenance: return 12
+        case .missingArtifactSHA: return 13
+        case .snapshotPathMismatch: return 14
+        case .autoupdateHomeACLRejected: return 15
+        case .autoupdateDisabled: return 16
         }
     }
 }

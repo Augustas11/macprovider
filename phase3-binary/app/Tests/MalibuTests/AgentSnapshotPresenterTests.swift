@@ -2153,6 +2153,36 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         XCTAssertTrue(details.contains("watchdog recovery started"))
     }
 
+    func testStartupHandoffDiagnosticNamesRecoveryBeforeGenericUnavailableStatus() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.diagnosticFindings = ProviderDiagnosticFindingAggregator.aggregate(
+            snapshot: snapshot,
+            providerLogLines: ["provider startup preflight failed: startup handoff expired before adoption"],
+            watchdogLogLines: []
+        )
+
+        let status = AgentSnapshotPresenter.publicStatus(snapshot)
+
+        XCTAssertEqual(status.title, "Provider update recovery needed")
+        XCTAssertTrue(status.safeNextAction?.contains("macprovider-cli recover-update") == true)
+        XCTAssertEqual(status.executableAction, .exportDiagnostics)
+    }
+
+    func testHistoricalStartupHandoffFailureDoesNotOverrideFreshReadyStatus() {
+        var snapshot = buyerServingObservationSnapshot(observedAt: Date())
+        snapshot.localStatusContractCompatible = true
+        XCTAssertTrue(snapshot.hasCurrentContractValidatedStatusObservation())
+        snapshot.diagnosticFindings = ProviderDiagnosticFindingAggregator.aggregate(
+            snapshot: snapshot,
+            providerLogLines: ["self-update startup reload fence authorization mismatch: startup_handoff"],
+            watchdogLogLines: []
+        )
+
+        XCTAssertEqual(AgentSnapshotPresenter.publicStatus(snapshot).title, "Provider is ready")
+        XCTAssertTrue(AgentSnapshotPresenter.diagnosticFindingLines(snapshot)
+            .joined(separator: "\n").contains("macprovider-cli recover-update"))
+    }
+
     func testHomeACLDiagnosticFindingShowsRepairPendingWithoutRepairCTA() {
         var snapshot = AgentSnapshot.empty
         snapshot.state = .serving

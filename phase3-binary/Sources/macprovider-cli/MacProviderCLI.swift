@@ -172,7 +172,10 @@ struct RecoverUpdateCommand: ParsableCommand {
     func run() throws {
         let recovery = WedgedUpdateRecovery(
             markerStore: AutoUpdateMarkerStore(),
-            lifecycleStore: ProviderLifecycleStateStore()
+            lifecycleStore: ProviderLifecycleStateStore(),
+            expectedProviderID: try ConfigLoader.load(
+                cli: CLIOverrides(), resolveCredentials: false
+            ).providerID
         )
         let outcome = recovery.recover()
         var payload: [String: Any] = ["command": "recover-update"]
@@ -191,6 +194,11 @@ struct RecoverUpdateCommand: ParsableCommand {
             payload["outcome"] = "transaction_active"
             payload["recovered"] = false
             payload["message"] = "a pending update/rollback deadline is still in the future; this is not an abandoned wedge"
+            failureExit = 4
+        case .recoveryRefused(let reason):
+            payload["outcome"] = "recovery_refused"
+            payload["recovered"] = false
+            payload["message"] = "\(reason); inspect the pending transaction and retry `macprovider-cli recover-update`"
             failureExit = 4
         case let .recovered(markerOutcome, lifecycleUnfenced):
             payload["outcome"] = "recovered"
@@ -275,7 +283,7 @@ enum SelfUpdateStartupFenceError: Error, Equatable, CustomStringConvertible {
     var description: String {
         switch self {
         case .authorizationMismatch(let reason):
-            return "self-update startup reload fence authorization mismatch: \(reason)"
+            return "self-update startup reload fence authorization mismatch: \(reason); run `macprovider-cli recover-update` to recover an abandoned update"
         }
     }
 }
@@ -2346,6 +2354,19 @@ struct ServeCommand: AsyncParsableCommand {
         // authorities agree that this exact executable is the intended
         // self-update child. Ordinary launches never touch reload jobs.
         let consumerUpdaterLifecycleAllowed = !AutoUpdater.defaultHeadlessOperatorManagedTopology(config: resolved)
+        if !autotuneCandidate, !isolateLifecycle,
+           !Self.isolatesNoJoinLabServe(
+                noJoin: noJoin, isolateLifecycle: isolateLifecycle,
+                credentialStore: resolved.credentialStore, autotuneCandidate: autotuneCandidate
+           ), consumerUpdaterLifecycleAllowed {
+            try Self.recoverAbandonedStartupHandoffBeforeFencing(
+                recovery: WedgedUpdateRecovery(
+                    markerStore: AutoUpdateMarkerStore(),
+                    lifecycleStore: ProviderLifecycleStateStore(),
+                    expectedProviderID: resolved.providerID
+                )
+            )
+        }
         let startupReloadFenceAuthorized = autotuneCandidate
             ? false
             : consumerUpdaterLifecycleAllowed
@@ -2470,9 +2491,10 @@ struct ServeCommand: AsyncParsableCommand {
                 markerStore: AutoUpdateMarkerStore(),
                 lifecycleStore: lifecycleStateStore
             )
-            guard case .recovered(_, let lifecycleUnfenced) = recovery.recover(),
+            guard case .recovered(let markerOutcome, let lifecycleUnfenced) = recovery.recover(),
                   lifecycleUnfenced
             else { throw fence }
+            try Self.exitAfterUpdateRollbackIfNeeded(markerOutcome)
             _ = try lifecycleStateStore.transition(
                 to: .startingProvider,
                 reasonCode: startupReason,
@@ -3795,6 +3817,32 @@ struct ServeCommand: AsyncParsableCommand {
     }
 
     static let providerLaunchdServiceIdentity = "live.malibu.provider"
+
+    /// Recovery is separate from first-hop authorization. A restored file is
+    /// not the code executing in this process: launchd must start it afresh.
+    static func recoverAbandonedStartupHandoffBeforeFencing(
+        recovery: WedgedUpdateRecovery
+    ) throws {
+        switch recovery.recover(requirePreparedHandoff: true) {
+        case .noWedge, .transactionActive, .ownerLive:
+            return
+        case .recoveryRefused(let reason):
+            throw ValidationError("self-update startup handoff recovery refused: \(reason); run `macprovider-cli recover-update`")
+        case .recovered(let markerOutcome, _):
+            try exitAfterUpdateRollbackIfNeeded(markerOutcome)
+        }
+    }
+
+    static func exitAfterUpdateRollbackIfNeeded(_ markerOutcome: AutoUpdateOrphanRecoveryOutcome?) throws {
+        switch markerOutcome {
+        case .restored, .restoredAwaitingReadiness:
+            FileHandle.standardError.write(Data(
+                "Restored the previous release; exiting so launchd starts the restored executable. If it remains stopped, run `macprovider-cli recover-update`.\n".utf8
+            ))
+            throw ExitCode.failure
+        default: return
+        }
+    }
 
     @discardableResult
     static func fenceAuthorizedSelfUpdateReloadJobsAtStartup(
