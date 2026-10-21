@@ -5732,11 +5732,31 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         )
     }
 
-    func testNativePromptRowJoinsARaggedGroupOnlyWhereGroupedRowsPrefillAlone() async throws {
+    func testQwenNativeRaggedCapabilityPreservesFCFSHeadAndChunkBoundaries() {
+        let group = ContinuousBatchPrefillGrouping.select(
+            [
+                // The FCFS head fixes the group's 64-token chunk even though
+                // a later row has more prompt remaining.
+                .init(requestID: "head", promptOffset: 128, naturalChunkTokens: 64, sharesRaggedOffsets: true),
+                .init(requestID: "native", promptOffset: 64, naturalChunkTokens: 64, sharesRaggedOffsets: true),
+                .init(requestID: "short-final", promptOffset: 32, naturalChunkTokens: 32, sharesRaggedOffsets: true),
+                .init(requestID: "ordinary", promptOffset: 96, naturalChunkTokens: 64, sharesRaggedOffsets: true),
+            ],
+            maxRows: 4,
+            tokenBudget: 256,
+            minimumGroupedChunkTokens: 33
+        )
+        XCTAssertEqual(
+            group,
+            ContinuousBatchPrefillGroup(chunkTokens: 64, requestIDs: ["head", "native", "ordinary"])
+        )
+    }
+
+    func testNativePromptRowJoinsARaggedGroupOnlyWithBackendCapability() async throws {
         // SPEC-048 R015 gated cells: kept out of ragged groups, a native row
         // prefilled alone, ahead of the rows arriving with it, whose prefill
-        // then stalled its decode. Where every grouped row takes its own
-        // forward (SPEC-038 v0.3.24 FR-CB2) it takes its turn in the group.
+        // then stalled its decode. With the backend capability it takes its
+        // FCFS turn in the group.
         for joins in [true, false] {
             let prefillGate = AsyncGate()
             let backend = ScriptedBackend(
@@ -6498,8 +6518,28 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         let ordinaryResult = try await ordinary.value
         let nativeResult = try await native.value
 
+        let referenceBackend = ScriptedBackend(
+            scripts: ["reference": Array(100..<160)],
+            prefillTokens: ["reference": 99]
+        )
+        // Match the mixed scheduler's delivery isolation: this 30-token
+        // reference is parity evidence, not a delivery-scheduling test.
+        let referenceScheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            tokenDeliveryBufferLimit: 64,
+            backend: referenceBackend
+        )
+        let referenceResult = try await referenceScheduler.submit(.init(
+            id: "reference",
+            conversationKey: "",
+            promptTokens: [10],
+            maxOutputTokens: 30,
+            temperature: 0,
+            topP: 1
+        ))
+
         XCTAssertEqual(ordinaryResult.outputTokens, [31, 32, 33, 34])
-        XCTAssertEqual(nativeResult.outputTokens.count, 30)
+        XCTAssertEqual(nativeResult.outputTokens, referenceResult.outputTokens)
         // Mixed batch: the ordinary row never entered native verification.
         let verifyBatches = await backend.nativeVerifyBatches()
         XCTAssertFalse(verifyBatches.contains { $0.contains("ordinary") })
@@ -6520,7 +6560,17 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         // Shape native* fused+ native+: the gate engages once, holds through
         // the overloaded rounds plus the whole calm window, and restores
         // without flapping back to the ordinary forward.
-        let events = await backend.events().filter {
+        let allEvents = await backend.events()
+        let firstDepthZero = try XCTUnwrap(allEvents.firstIndex(of: "decode:gated"))
+        let firstRestored = try XCTUnwrap(
+            allEvents[firstDepthZero...].firstIndex { $0.hasPrefix("native_propose:") },
+            "native depth never restored: \(allEvents)"
+        )
+        XCTAssertFalse(
+            allEvents[firstDepthZero ..< firstRestored].contains { $0.hasPrefix("native_verify:") },
+            "capacity-downgraded depth-zero rounds must not verify: \(allEvents)"
+        )
+        let events = allEvents.filter {
             $0 == "decode:gated" || $0.hasPrefix("native_propose:") && $0.contains("gated")
         }
         let fusedStart = try XCTUnwrap(events.firstIndex(of: "decode:gated"), "gate never engaged: \(events)")

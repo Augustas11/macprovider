@@ -130,7 +130,8 @@ final class NativeMTPHardwareE2ETests: XCTestCase {
             poolEpoch: 1,
             layerCount: cacheKinds.count,
             cacheKinds: cacheKinds,
-            drafterContainer: drafterContainer
+            drafterContainer: drafterContainer,
+            nativeMTPFamilyAdapter: admission.familyAdapter
         )
         let ordinaryRuntime = makeRuntime(
             modelSHA: targetIdentity.digest,

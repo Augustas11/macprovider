@@ -536,12 +536,33 @@ enum ContinuousBatchingPolicy {
 /// Request ids and stage names only; never prompt or completion content.
 enum CBTrace {
     static let enabled = ProcessInfo.processInfo.environment["MACPROVIDER_CB_TRACE"] == "1"
+    // The fixed offline acceptance runner intentionally clears arbitrary
+    // environment overrides. Keep its preparation evidence available without
+    // enabling the much larger per-token trace during timing measurements.
+    private static let preparationEnabled: Bool = {
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        let environment = ProcessInfo.processInfo.environment
+        return enabled || (environment["MACPROVIDER_LAB_OFFLINE"] == "1"
+            && environment["MACPROVIDER_NATIVE_MTP_E2E"] == "1")
+        #else
+        return enabled
+        #endif
+    }()
 
     static func log(_ requestID: String?, _ event: @autoclosure () -> String) {
         guard enabled else { return }
+        write(requestID, event())
+    }
+
+    static func logPreparation(_ requestID: String?, _ event: @autoclosure () -> String) {
+        guard preparationEnabled else { return }
+        write(requestID, event())
+    }
+
+    private static func write(_ requestID: String?, _ event: String) {
         let ms = DispatchTime.now().uptimeNanoseconds / 1_000_000
         // `write(contentsOf:)` fails recoverably on a closed stderr; the
         // deprecated `write(_:)` would abort serving (see PagedKVRuntimeDiagnostics).
-        try? FileHandle.standardError.write(contentsOf: Data("cbtrace t=\(ms) rid=\(requestID ?? "-") ev=\(event())\n".utf8))
+        try? FileHandle.standardError.write(contentsOf: Data("cbtrace t=\(ms) rid=\(requestID ?? "-") ev=\(event)\n".utf8))
     }
 }
