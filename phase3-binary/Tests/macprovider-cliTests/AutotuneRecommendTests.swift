@@ -2791,7 +2791,7 @@ final class AutotuneRecommendTests: XCTestCase {
                 with: "published-2026-10-18-fetched-v1"
             ),
             key: "generated_at",
-            with: "2026-10-18T00:00:00Z"
+            with: "2026-10-18T00:05:00Z"
         ).utf8)
         let signature = Data(repeating: 0, count: 64).base64EncodedString()
         let sidecar = Data("{\"key_id\":\"streamvc-autotune-static-v4\",\"alg\":\"ed25519\",\"signature\":\"\(signature)\"}".utf8)

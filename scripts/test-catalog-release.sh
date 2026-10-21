@@ -309,6 +309,8 @@ expected_history = {
     "published-2026-10-19-glm53-flash-native-mtp-v257-v2",
     # Superseded by the signed GLM-5.3-Flash CB served-slot ceiling (4).
     "published-2026-10-19-glm53-flash-native-mtp-v258",
+    # Superseded by the same admission set and ceiling rebound to CLI 1.8.260.
+    "published-2026-10-20-glm53-flash-cb-ceiling-v1",
     current_release_id,
 }
 if set(ledger["releases"]) != expected_history:

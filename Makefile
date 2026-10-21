@@ -197,6 +197,9 @@ test-dist-release:
 	bash scripts/ops/test-runbook-commands.sh
 	bash scripts/ops/test-entrypoints.sh
 	bash scripts/ops/test-canary-swap.sh
+	bash scripts/ops/test-studio-owner-pin.sh
+	bash scripts/ops/test-studio-owner-pin-provenance.sh
+	bash scripts/ops/test-studio-lab-window-controller.sh
 
 # Installer, watchdog, and coordinator/gateway deploy scripts.
 test-dist-deploy:

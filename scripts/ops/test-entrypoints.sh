@@ -1672,9 +1672,44 @@ run_rc 1 "proof refused when only generic requests_total moves" scripts/ops/cata
 expect_err "cb_shared_forward_calls +0"
 printf 'move' > "$tmp/svc/mode"
 run_rc 0 "proof accepted when CB shared forward calls move" scripts/ops/catalog-activate.sh _gateway-proof
-if python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d["request_id"].startswith("ops-proof-") and d["cb_shared_forward_calls_delta"] > 0 and d["served_by_canary"] is True else 1)' "$tmp/state/catalog-$R/gateway_proof.json"; then ok; else bad "proof marker lacks request id / CB scheduler delta"; fi
+if python3 - "$tmp/state/catalog-$R/gateway_proof.json" "$tmp/svc/last_request.json" <<'PY'
+import json, sys
+marker, request = (json.load(open(path)) for path in sys.argv[1:3])
+content = request.get("messages", [{}])[0].get("content", "")
+sys.exit(0 if marker["request_id"].startswith("ops-proof-")
+         and marker["cb_shared_forward_calls_delta"] > 0
+         and marker["native_mtp_forward_required"] is False
+         and marker["sent_request_id"] in content
+         and content.startswith("Proof nonce ")
+         and request.get("temperature") == 0
+         and request.get("top_p") == 1
+         and marker["served_by_canary"] is True else 1)
+PY
+then ok; else bad "proof marker lacks request id / CB scheduler delta / unique prompt"; fi
 run_rc 0 "catalog status with a fresh proof" scripts/ops/catalog-activate.sh status
 if [ "$(state_of gateway_proof)" = "done" ]; then ok; else bad "fresh proof not done"; fi
+CATALOG_REQUIRE_NATIVE_MTP_FORWARD=maybe run_rc 3 "native-MTP proof requirement rejects an invalid value" scripts/ops/catalog-activate.sh status
+expect_err "CATALOG_REQUIRE_NATIVE_MTP_FORWARD must be true or false"
+CATALOG_REQUIRE_NATIVE_MTP_FORWARD=true run_rc 0 "native-MTP proof requirement rejects a general CB marker" scripts/ops/catalog-activate.sh status
+if [ "$(state_of gateway_proof)" = "pending" ]; then ok; else bad "general CB marker counted as native-MTP proof"; fi
+python3 - "$tmp/state/catalog-$R/gateway_proof.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["native_mtp_forward_required"] = True
+d["mtp_forwards_delta"] = 0
+open(p, "w").write(json.dumps(d))
+PY
+CATALOG_REQUIRE_NATIVE_MTP_FORWARD=true run_rc 0 "native-MTP proof requirement rejects a marker without mtp forwards" scripts/ops/catalog-activate.sh status
+if [ "$(state_of gateway_proof)" = "pending" ]; then ok; else bad "zero-mtp marker counted as native-MTP proof"; fi
+printf 'cb-only' > "$tmp/svc/mode"
+CATALOG_REQUIRE_NATIVE_MTP_FORWARD=true run_rc 1 "native-MTP proof refuses CB-only runtime movement" scripts/ops/catalog-activate.sh _gateway-proof
+expect_err "did not increase native_mtp.mtp_forwards as required"
+printf 'greedy-mtp' > "$tmp/svc/mode"
+CATALOG_REQUIRE_NATIVE_MTP_FORWARD=true run_rc 0 "native-MTP proof requires mtp forwards even with CB active" scripts/ops/catalog-activate.sh _gateway-proof
+if python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d["native_mtp_forward_required"] is True and d["mtp_forwards_delta"] > 0 and d["cb_shared_forward_calls_delta"] > 0 else 1)' "$tmp/state/catalog-$R/gateway_proof.json"; then ok; else bad "native-MTP proof marker lacks explicit mtp-forward proof"; fi
+CATALOG_REQUIRE_NATIVE_MTP_FORWARD=true run_rc 0 "catalog status accepts the native-MTP proof marker" scripts/ops/catalog-activate.sh status
+if [ "$(state_of gateway_proof)" = "done" ]; then ok; else bad "native-MTP proof marker not accepted"; fi
 # Without PROBE_MODEL the proof asks for the model the canary's /v1/status
 # reports serving, not a catalog constant the canary may not serve.
 python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["model"]="canary/served-model"; json.dump(d, open(p, "w"))' "$tmp/svc/status.json"
