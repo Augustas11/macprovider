@@ -4455,6 +4455,10 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testQwenPreparationLanePreservesPromptStopsToolPrefillAndCheckpoints() async throws {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+
         let tokenizer = RuntimeBridgePreparationTokenizer()
         let generationPrompt = "<|im_start|>assistant\n<think>\n\n</think>\n\n"
         let baseTokens = [tokenizer.imStartTokenID]
@@ -4537,6 +4541,10 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testQwenPreparationLaneRejectsQueuedDrainBeforeProcessorRuns() async throws {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+
         let preparationGate = RuntimeBridgeTestGate()
         let processor = RuntimeBridgeBlockingPromptProcessor(
             tokens: [3],
@@ -4644,10 +4652,18 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testQwenPreparationLaneAdmitsNonStreamingRowWhileTargetLockIsHeld() async throws {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+
         try await assertQwenPreparationLaneAdmitsWhileTargetLockIsHeld(streaming: false)
     }
 
     func testQwenPreparationLaneAdmitsStreamingRowWhileTargetLockIsHeld() async throws {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+
         try await assertQwenPreparationLaneAdmitsWhileTargetLockIsHeld(streaming: true)
     }
 
