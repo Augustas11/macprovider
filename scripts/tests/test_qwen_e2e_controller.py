@@ -343,7 +343,7 @@ write_qwen_proof_intent "$pending" {request_id} qwen/qwen3.6-35b-a3b release \
 read -r rid stored_session_hash <<< "$(validate_qwen_proof_intent "$pending" \
   qwen/qwen3.6-35b-a3b release "$(printf 'd%.0s' {{1..64}})")"
 [ "$rid" = {request_id} ] && [ "$stored_session_hash" = "$(printf 'e%.0s' {{1..64}})" ]
-[ "$(stat -f %Lp "$pending")" = 600 ]
+python3 -c 'import os,stat,sys; raise SystemExit(stat.S_IMODE(os.lstat(sys.argv[1]).st_mode) != 0o600)' "$pending"
 resolve_qwen_proof_intent "$pending" accepted_with_counter_evidence
 [ ! -e "$pending" ]
 python3 - "$OPS_TMP_DIR/state/scope/qwen-gateway-proof-attempts/{request_id}.json" <<'PY'
@@ -719,7 +719,7 @@ write_native_intent {transaction_id} release "$(printf 'a%.0s' {{1..64}})" 1.2.3
   "$(printf 'b%.0s' {{1..64}})" "$(printf 'c%.0s' {{1..40}})" TEAM identifier \
   "$(printf 'd%.0s' {{1..64}})" /remote/journal /tmp/macprovider-qwen-e2e.test
 validate_native_intent > "$OPS_TMP_DIR/validated.json"
-[ "$(stat -f %Lp "$(native_intent_path)")" = 600 ]
+python3 -c 'import os,stat,sys; raise SystemExit(stat.S_IMODE(os.lstat(sys.argv[1]).st_mode) != 0o600)' "$(native_intent_path)"
 [ "$(json_field "$OPS_TMP_DIR/validated.json" 'd["transaction_id"]')" = {transaction_id} ]
 trace valid_intent
 ''',
