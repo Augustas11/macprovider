@@ -132,7 +132,12 @@ enum ConnectedAppConfiguration {
                 // OpenCode gates agent temperature on this capability; the compatible
                 // adapter forwards model options using their HTTP request field names.
                 entry["temperature"] = true
-                entry["options"] = ["temperature": 0.7, "top_p": 0.8]
+                var sampling: [String: Double] = ["temperature": 0.7, "top_p": 0.8, "top_k": 20]
+                if model.id == "qwen3-coder-30b-a3b-instruct" ||
+                    model.id == "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit" {
+                    sampling["repetition_penalty"] = 1.05
+                }
+                entry["options"] = sampling
             }
             providers["malibu"] = ["npm": "@ai-sdk/openai-compatible", "name": "Malibu",
                                    "options": ["baseURL": base, "apiKey": "{env:MALIBU_API_KEY}"],

@@ -151,12 +151,14 @@ func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion
 			return nil, fmt.Errorf("fixture request exceeded four MiB")
 		}
 		var payload struct {
-			Model       string          `json:"model"`
-			Stream      bool            `json:"stream"`
-			ToolChoice  json.RawMessage `json:"tool_choice"`
-			Temperature *float64        `json:"temperature"`
-			TopP        *float64        `json:"top_p"`
-			Messages    []struct {
+			Model             string          `json:"model"`
+			Stream            bool            `json:"stream"`
+			ToolChoice        json.RawMessage `json:"tool_choice"`
+			Temperature       *float64        `json:"temperature"`
+			TopP              *float64        `json:"top_p"`
+			TopK              *int            `json:"top_k"`
+			RepetitionPenalty json.RawMessage `json:"repetition_penalty"`
+			Messages          []struct {
 				Role       string          `json:"role"`
 				Content    json.RawMessage `json:"content"`
 				ToolCallID string          `json:"tool_call_id"`
@@ -202,7 +204,13 @@ func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion
 			}
 		}
 		if kind == "opencode" && len(payload.Tools) != 0 && os.Getenv("MACPROVIDER_TEST_OPENCODE_AGENT_PROFILE") != "" {
-			if payload.Temperature == nil || *payload.Temperature != 0.7 || payload.TopP == nil || *payload.TopP != 0.8 {
+			wantsPenalty := model == "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"
+			var penalty float64
+			validPenalty := len(payload.RepetitionPenalty) == 0
+			if wantsPenalty {
+				validPenalty = json.Unmarshal(payload.RepetitionPenalty, &penalty) == nil && penalty == 1.05
+			}
+			if payload.Temperature == nil || *payload.Temperature != 0.7 || payload.TopP == nil || *payload.TopP != 0.8 || payload.TopK == nil || *payload.TopK != 20 || !validPenalty {
 				cancel()
 				return nil, fmt.Errorf("Qwen candidate sampling did not reach the unchanged wire request")
 			}

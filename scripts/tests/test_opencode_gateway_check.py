@@ -393,10 +393,14 @@ class ModelTests(unittest.TestCase):
             with self.subTest(model=model):
                 data = json.loads(MODULE._config(model, 16384, "http://127.0.0.1:1/v1"))
                 provider = data["provider"]["malibu"]
+                sampling = {"temperature": 0.7, "top_p": 0.8, "top_k": 20}
+                if model in ("qwen3-coder-30b-a3b-instruct",
+                             "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"):
+                    sampling["repetition_penalty"] = 1.05
                 self.assertEqual(set(provider["models"]), {model})
                 self.assertEqual(provider["models"][model], {
                     "name": model, "temperature": True,
-                    "options": {"temperature": 0.7, "top_p": 0.8},
+                    "options": sampling,
                     "limit": {"context": 16384, "output": MODULE.MAX_OUTPUT_TOKENS},
                 })
                 self.assertEqual(provider["options"]["apiKey"], "{env:MALIBU_PROXY_TOKEN}")
@@ -636,6 +640,12 @@ class RealOpenCodeLoopbackFixture(unittest.TestCase):
     """Exercise the real OpenCode protocol against an in-process fake upstream."""
 
     def test_run_completes_real_read_tool_round_trip(self):
+        for model in MODULE.MODELS:
+            with self.subTest(model=model):
+                self.run_real_read_tool_round_trip(model)
+
+    def run_real_read_tool_round_trip(self, model):
+        artifact = MODULE.MODEL_BINDINGS[model]
         binary = shutil.which("opencode")
         if binary is None:
             self.skipTest("opencode is not installed")
@@ -667,7 +677,11 @@ class RealOpenCodeLoopbackFixture(unittest.TestCase):
             def request(self, method, path, body=None, headers=None):
                 self.assert_request(method, path, headers)
                 payload = json.loads(body)
-                if payload.get("temperature") != 0.7 or payload.get("top_p") != 0.8:
+                expected_penalty = (1.05 if model == "qwen3-coder-30b-a3b-instruct" else None)
+                if (payload.get("temperature") != 0.7 or payload.get("top_p") != 0.8
+                        or payload.get("top_k") != 20
+                        or (payload.get("repetition_penalty") != expected_penalty)
+                        or (expected_penalty is None and "repetition_penalty" in payload)):
                     raise AssertionError("OpenCode did not send the model-scoped sampling fields")
                 system = next((message.get("content") for message in payload.get("messages", [])
                                if message.get("role") == "system"), None)
@@ -717,11 +731,11 @@ class RealOpenCodeLoopbackFixture(unittest.TestCase):
             @staticmethod
             def read_stream(marker_path):
                 chunks = [
-                    {"id": "local-tool", "model": ARTIFACT, "choices": [{"index": 0, "delta": {
+                    {"id": "local-tool", "model": artifact, "choices": [{"index": 0, "delta": {
                         "role": "assistant", "tool_calls": [{"index": 0, "id": "call-local-read",
                         "type": "function", "function": {"name": "read", "arguments":
                         json.dumps({"filePath": marker_path})}}]}, "finish_reason": None}]},
-                    {"id": "local-tool", "model": ARTIFACT, "choices": [{"index": 0, "delta": {},
+                    {"id": "local-tool", "model": artifact, "choices": [{"index": 0, "delta": {},
                         "finish_reason": "tool_calls"}], "usage": {"prompt_tokens": 10,
                         "completion_tokens": 5, "total_tokens": 15}},
                 ]
@@ -730,9 +744,9 @@ class RealOpenCodeLoopbackFixture(unittest.TestCase):
             @staticmethod
             def final_stream(marker):
                 chunks = [
-                    {"id": "local-final", "model": ARTIFACT, "choices": [{"index": 0,
+                    {"id": "local-final", "model": artifact, "choices": [{"index": 0,
                         "delta": {"role": "assistant", "content": marker}, "finish_reason": None}]},
-                    {"id": "local-final", "model": ARTIFACT, "choices": [{"index": 0, "delta": {},
+                    {"id": "local-final", "model": artifact, "choices": [{"index": 0, "delta": {},
                         "finish_reason": "stop"}], "usage": {"prompt_tokens": 20,
                         "completion_tokens": 10, "total_tokens": 30}},
                 ]
@@ -752,7 +766,7 @@ class RealOpenCodeLoopbackFixture(unittest.TestCase):
             if deadline is not None:
                 self.assertGreater(deadline, time.monotonic())
             if path == "/v1/models":
-                return 200, json.dumps({"data": [{"id": MODEL,
+                return 200, json.dumps({"data": [{"id": model,
                     "max_context_tokens": MODULE.MIN_CONTEXT_TOKENS}]}).encode()
             request_id = path.removeprefix("/v1/receipts/")
             return 200, json.dumps({
@@ -760,7 +774,7 @@ class RealOpenCodeLoopbackFixture(unittest.TestCase):
                 "request_id": request_id,
                 "surface": "metadata",
                 "pending_quarantined_visible": True,
-                "attempts": [verified_attempt(attempt_n=1)],
+                "attempts": [verified_attempt(attempt_n=1, model_id=artifact)],
             }).encode()
 
         run_client = MODULE._bounded_client_process
@@ -784,7 +798,7 @@ class RealOpenCodeLoopbackFixture(unittest.TestCase):
             key_path.write_text("synthetic-owner-key\n", encoding="utf-8")
             key_path.chmod(0o600)
             args = MODULE.build_parser().parse_args(
-                ["--opencode", binary, "--model", MODEL, "--key-file", str(key_path)] + BINDING_ARGS
+                ["--opencode", binary, "--model", model, "--key-file", str(key_path)] + BINDING_ARGS
             )
             with mock.patch.object(MODULE, "_bounded_https_get", side_effect=fake_get), \
                     mock.patch.object(MODULE.http.client, "HTTPSConnection", FakeHTTPSConnection), \

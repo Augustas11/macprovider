@@ -1,6 +1,11 @@
 # SPEC-025 — Native Mac App (signed `.dmg`, native Mac app with menu-bar presence)
 
-Status: DRAFT v0.38.0 · Owner: @Augustas11 · Target: 2026 Q3
+Status: DRAFT v0.39.0 · Owner: @Augustas11 · Target: 2026 Q3
+
+**Change log v0.39.0 (2026-10-21):**
+Exact Qwen OpenCode model options carry the full recommended sampling profile
+(R012): both use top_k 20; only Coder uses repetition_penalty 1.05. Acceptance
+checks the actual outbound fields, not merely saved configuration.
 
 **Change log v0.38.0 (2026-10-21):**
 Connected apps installs a guarded model-scoped OpenCode system-prompt plugin
@@ -937,7 +942,13 @@ projections (SPEC-044-R004), colour never the only signal.
   `mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit`, and
   `mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit`, generated OpenCode model
   entries MUST declare the `temperature: true` capability and model-scoped
-  `options` with wire fields `temperature: 0.7` and `top_p: 0.8`.
+  `options` with wire fields `temperature: 0.7`, `top_p: 0.8` and `top_k: 20`.
+  Only the exact Coder alias and artifact identity MUST additionally declare
+  `repetition_penalty: 1.05`; the Instruct-2507 identities MUST NOT inherit it.
+  These snake-case model options use the pinned compatible adapter's extra
+  request fields, not its unsupported standardized `topK` setting. Acceptance
+  MUST verify the complete profile on actual outbound requests, including
+  absence of Coder's repetition penalty on Instruct-2507.
   These client sampling settings MUST NOT replace agent prompts, change tool
   selection or permissions, or apply to other model identities by substring
   matching. They do not establish automatic-tool-use compatibility.

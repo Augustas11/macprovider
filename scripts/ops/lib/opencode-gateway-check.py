@@ -763,7 +763,11 @@ def _config(model: str, context: int, base_url: str, plugin: Path | None = None)
     entry = {"name": model, "limit": {"context": context, "output": MAX_OUTPUT_TOKENS}}
     if model in MODEL_BINDINGS or model in MODEL_BINDINGS.values():
         # Match the app's model-scoped HTTP fields without replacing the stock agent.
-        entry.update({"temperature": True, "options": {"temperature": 0.7, "top_p": 0.8}})
+        sampling = {"temperature": 0.7, "top_p": 0.8, "top_k": 20}
+        if model in ("qwen3-coder-30b-a3b-instruct",
+                     "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"):
+            sampling["repetition_penalty"] = 1.05
+        entry.update({"temperature": True, "options": sampling})
     value = {
         "model": "malibu/" + model,
         "small_model": "malibu/" + model,

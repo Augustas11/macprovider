@@ -66,7 +66,12 @@ final class ConnectedAppsTests: XCTestCase {
             XCTAssertEqual(Set(models.keys), Set([id]))
             let entry = try XCTUnwrap(models[id] as? [String: Any])
             XCTAssertEqual(entry["temperature"] as? Bool, true)
-            XCTAssertEqual(entry["options"] as? [String: Double], ["temperature": 0.7, "top_p": 0.8])
+            var expectedSampling: [String: Double] = ["temperature": 0.7, "top_p": 0.8, "top_k": 20]
+            if id == "qwen3-coder-30b-a3b-instruct" ||
+                id == "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit" {
+                expectedSampling["repetition_penalty"] = 1.05
+            }
+            XCTAssertEqual(entry["options"] as? [String: Double], expectedSampling)
             XCTAssertEqual(entry["limit"] as? [String: Int], ["context": 16384, "output": 256])
             let options = try XCTUnwrap(malibu["options"] as? [String: String])
             XCTAssertEqual(options["apiKey"], "{env:MALIBU_API_KEY}")

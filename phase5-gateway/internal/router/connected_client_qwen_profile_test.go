@@ -80,7 +80,11 @@ func connectedOpenCodeAgentProfile(configuration map[string]any, profile, model 
 	// OpenCode custom models default this capability to false. The compatible
 	// adapter forwards model options as request fields, scoped to this model.
 	entry["temperature"] = true
-	entry["options"] = map[string]any{"temperature": 0.7, "top_p": 0.8}
+	sampling := map[string]any{"temperature": 0.7, "top_p": 0.8, "top_k": 20}
+	if model == "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit" {
+		sampling["repetition_penalty"] = 1.05
+	}
+	entry["options"] = sampling
 	if profile == "qwen-plugin" {
 		// Exercise the same managed asset that Malibu bundles, not a test copy
 		// of its prompt or a global agent override.
@@ -119,7 +123,13 @@ func TestConnectedClientQwenAgentProfile(t *testing.T) {
 			t.Fatal(err)
 		}
 		options := entry["options"].(map[string]any)
-		if entry["temperature"] != true || len(options) != 2 || options["temperature"] != 0.7 || options["top_p"] != 0.8 || len(other) != 1 || configuration["agent"] != nil {
+		wantsPenalty := model == "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"
+		expectedCount := 3
+		if wantsPenalty {
+			expectedCount++
+		}
+		_, hasPenalty := options["repetition_penalty"]
+		if entry["temperature"] != true || len(options) != expectedCount || options["temperature"] != 0.7 || options["top_p"] != 0.8 || options["top_k"] != 20 || hasPenalty != wantsPenalty || (wantsPenalty && options["repetition_penalty"] != 1.05) || len(other) != 1 || configuration["agent"] != nil {
 			t.Fatal("sampling profile must be exact-model scoped and retain stock prompt")
 		}
 		if err := connectedOpenCodeAgentProfile(configuration, "qwen-plugin", model); err != nil {
