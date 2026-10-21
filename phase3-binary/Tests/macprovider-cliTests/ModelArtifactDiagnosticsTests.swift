@@ -773,6 +773,41 @@ final class ModelArtifactDiagnosticsTests: XCTestCase {
         XCTAssertEqual(events.first?.errorCode, .authorityUnavailable)
     }
 
+    func testPrepareCatalogSinkRejectsProgressThatArrivesAfterCancellation() throws {
+        let log = EventLog()
+        let sink = ModelsPrepareCatalogEventSink(transactionID: Self.prepareTransactionID) { log.append($0) }
+        let progress = try ModelPreparationTransactionEvent.Progress(
+            stageLabelKey: "downloading", bytesCompleted: 0, bytesExpected: nil,
+            percentComplete: nil, heartbeat: true
+        )
+        XCTAssertTrue(sink.emit(modelKey: "namespace/model", state: .queued))
+        XCTAssertTrue(sink.emit(modelKey: "namespace/model", state: .running, progress: progress))
+        sink.emitCancelRequestedOnce(modelKey: "namespace/model")
+
+        // Deterministically replay a scan that started before cancellation,
+        // but submitted its sampled progress after the cancellation event.
+        XCTAssertFalse(sink.emit(modelKey: "namespace/model", state: .running, progress: progress))
+        sink.emitCancelRequestedOnce(modelKey: "namespace/model")
+        XCTAssertTrue(sink.emit(modelKey: "namespace/model", state: .cancelled))
+        XCTAssertFalse(sink.emit(modelKey: "namespace/model", state: .running, progress: progress))
+
+        assertOneTransaction(log.events)
+        XCTAssertEqual(log.events.map(\.state), [.queued, .running, .cancelRequested, .cancelled])
+    }
+
+    func testPrepareCatalogSinkAllowsCommittedSuccessAfterCancellation() {
+        let log = EventLog()
+        let sink = ModelsPrepareCatalogEventSink(transactionID: Self.prepareTransactionID) { log.append($0) }
+        XCTAssertTrue(sink.emit(modelKey: "namespace/model", state: .queued))
+        sink.emitCancelRequestedOnce(modelKey: "namespace/model")
+        XCTAssertTrue(sink.emit(modelKey: "namespace/model", state: .succeeded))
+        sink.emitCancelRequestedOnce(modelKey: "namespace/model")
+        XCTAssertFalse(sink.emit(modelKey: "namespace/model", state: .cancelled))
+
+        assertOneTransaction(log.events)
+        XCTAssertEqual(log.events.map(\.state), [.queued, .cancelRequested, .succeeded])
+    }
+
     func testPrepareCatalogCancelStopsTheDownloadRemovesPartialsAndReportsCancelled() async throws {
         let (resolver, _) = try makeResolver()
         let row = makeRow(sha256: String(repeating: "1", count: 64))
