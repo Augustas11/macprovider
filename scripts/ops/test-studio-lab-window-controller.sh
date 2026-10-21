@@ -176,6 +176,17 @@ load_recovery_context
 rm -f "$(active_marker_path)"
 pass "legacy active marker recovers without job fields"
 
+qwen_nonce=acacacacacacacacacacacacacacacac
+qwen_sha="$(printf 'b%.0s' {1..64})"
+qwen_identity="$(printf '8%.0s' {1..64})"
+mark_done "$OPS_SCOPE" active qwen "{\"phase\":\"dispatched\",\"nonce\":\"$qwen_nonce\",\"lab_git_head\":\"$legacy_head\",\"outcome_marker\":\"\",\"manifest_sha256\":\"$qwen_sha\",\"job_kind\":\"qwen-qualification\",\"job_identity\":\"$qwen_identity\"}"
+load_recovery_context
+[ "$STUDIO_LAB_JOB_KIND" = qwen-qualification ] || fail "Qwen active marker did not restore its job kind"
+[ "$STUDIO_LAB_JOB_IDENTITY" = "$qwen_identity" ] || fail "Qwen active marker did not restore its identity"
+[ "$LAB_TIMEOUT_S" = 43200 ] || fail "Qwen recovery did not retain the qualification timeout ceiling"
+rm -f "$(active_marker_path)"
+pass "Qwen active journal recovery retains fixed job identity and timeout"
+
 # A successful completion for a qualified job must bind the fresh source job
 # identity and kind, not merely a local complete marker and zero exit code.
 STUDIO_LAB_JOB_KIND=profiler-only
