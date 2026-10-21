@@ -4517,7 +4517,14 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             prepared.stopTokenSequences,
             expectedStops.sorted().map { [$0] } + [tokenizer.encode(text: "BUYER", addSpecialTokens: false)]
         )
-        XCTAssertEqual(prepared.recurrentCheckpointPositions, [48, 61])
+        let legacyCheckpointPositions = ModelRuntime.continuousBatchRecurrentCheckpointPositions(
+            promptTokens: legacyInput.text.tokens.asArray(Int.self),
+            conversationKey: request.conversationKey,
+            hybrid: true,
+            context: context
+        )
+        XCTAssertEqual(prepared.recurrentCheckpointPositions, legacyCheckpointPositions)
+        XCTAssertEqual(prepared.recurrentCheckpointPositions, [61])
         XCTAssertTrue(prepared.modelHasRecurrentLayers)
         let laneInput = try XCTUnwrap(laneProcessor.lastInput())
         let legacyCapturedInput = try XCTUnwrap(legacyProcessor.lastInput())
@@ -4628,6 +4635,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(loadingSnapshot.state, .loading)
         XCTAssertTrue(oldHandle.snapshot.continuousBatchTextPreparationLane === oldLane)
         await runtime.unregisterInFlight(oldHandle.registrationID)
+        await loaderGate.open()
         try await swap.value
         let swappedSnapshot = await runtime.currentSnapshot()
         XCTAssertEqual(swappedSnapshot.modelID, "mlx-community/Qwen3.6-New")
