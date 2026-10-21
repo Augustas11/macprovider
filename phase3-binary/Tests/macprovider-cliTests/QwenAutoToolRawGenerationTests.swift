@@ -35,11 +35,14 @@ final class QwenAutoToolRawGenerationTests: XCTestCase {
     /// ARTIFACT_DIR, and PRIVATE_OUTPUT_DIR (existing owned canonical 0700 dir).
     /// Each invocation creates one new 0600 qwen-raw-UUID.jsonl. A missing final
     /// event means incomplete evidence; earlier prompt/token events survive timeout.
+    /// MACPROVIDER_QWEN_RAW_PROMPT_ONLY=1 captures preparation without generation.
+    /// This still loads the pinned model; it is not inference or acceptance evidence.
     func testStudioOfflineRawAutoGeneration() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["MACPROVIDER_QWEN_RAW_DIAGNOSTIC"] == "1" else {
             throw XCTSkip("MACPROVIDER_QWEN_RAW_DIAGNOSTIC is not enabled")
         }
+        let promptOnly = environment["MACPROVIDER_QWEN_RAW_PROMPT_ONLY"] == "1"
         do {
             try Self.requireStudio()
             guard let profile = Profile.all.first(where: { $0.id == environment["MACPROVIDER_QWEN_PRIVATE_MODEL"] }),
@@ -56,6 +59,7 @@ final class QwenAutoToolRawGenerationTests: XCTestCase {
             let deadline = Date().addingTimeInterval(180)
             let started = ProcessInfo.processInfo.systemUptime
             try sink.append(["event": "started", "diagnostic_only": true, "model": profile.id,
+                             "preparation_only": promptOnly,
                              "maximum_seconds": 180, "maximum_context_tokens": 16_384])
 
             let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: requestPath))
@@ -94,9 +98,17 @@ final class QwenAutoToolRawGenerationTests: XCTestCase {
                 try sink.append(["event": "prompt", "request_sha256": Self.hash(bytes),
                                  "snapshot_sha256": identity.digest, "template_sha256": profile.templateSHA,
                                  "prompt_token_ids": prompt, "max_tokens": maximum,
+                                 "prompt_text": context.tokenizer.decode(tokenIds: prompt, skipSpecialTokens: false),
                                  "temperature": request.temperature, "top_p": request.topP,
                                  "forced_prefill": false, "prefill_step_size": 512,
-                                 "cache": "fresh_serial", "parser": "bypassed"])
+                                 "cache": promptOnly ? "not_created" : "fresh_serial", "parser": "bypassed"])
+                if promptOnly {
+                    try sink.append(["event": "complete", "diagnostic_only": true,
+                                     "preparation_only": true, "inference_ran": false,
+                                     "generated_token_count": 0, "stop_reason": "preparation_only",
+                                     "elapsed_seconds": ProcessInfo.processInfo.systemUptime - started])
+                    return
+                }
                 let parameters = try ModelRuntime.makeServeGenerateParameters(
                     model: context.model, maxTokens: maximum, promptTokens: prompt.count,
                     maxContextTokens: 16_384, kvBitsOverride: nil, prefillStepSize: 512,

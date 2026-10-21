@@ -135,6 +135,7 @@ func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion
 	var mu sync.Mutex
 	calls, inbound, streamed, matchedResult := 0, 0, false, false
 	offeredTools := false
+	var clientPrompt string
 	transport := &http.Transport{Proxy: nil, ResponseHeaderTimeout: 90 * time.Second}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -175,13 +176,26 @@ func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion
 			cancel()
 			return nil, fmt.Errorf("OpenCode acceptance requires unchanged automatic tool choice")
 		}
+		if kind == "opencode" && len(payload.Tools) != 0 {
+			matchedPrompt := false
+			for _, message := range payload.Messages {
+				var content string
+				if message.Role == "user" && json.Unmarshal(message.Content, &content) == nil && content == clientPrompt {
+					matchedPrompt = true
+				}
+			}
+			if !matchedPrompt {
+				cancel()
+				return nil, fmt.Errorf("OpenCode changed the literal user task before inference")
+			}
+		}
 		if kind == "opencode" && len(payload.Tools) != 0 && os.Getenv("MACPROVIDER_TEST_OPENCODE_AGENT_PROFILE") != "" {
 			if payload.Temperature == nil || *payload.Temperature != 0.7 || payload.TopP == nil || *payload.TopP != 0.8 {
 				cancel()
 				return nil, fmt.Errorf("Qwen candidate sampling did not reach the unchanged wire request")
 			}
 		}
-		traceSelected, err := privateTrace.captureRequest(body, len(payload.Tools) != 0)
+		traceToken, err := privateTrace.captureRequest(body, len(payload.Tools) != 0)
 		if err != nil {
 			cancel()
 			return nil, err
@@ -233,7 +247,7 @@ func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion
 		defer response.Body.Close()
 		held, err := io.ReadAll(io.LimitReader(response.Body, (1<<20)+1))
 		if err == nil {
-			if err := privateTrace.captureResponse(held, traceSelected); err != nil {
+			if err := privateTrace.captureResponse(held, traceToken); err != nil {
 				cancel()
 				return nil, err
 			}
@@ -342,6 +356,7 @@ env_key = "MALIBU_API_KEY"
 	if directAnswer {
 		prompt = "What is 2 + 2? Answer with just the number."
 	}
+	clientPrompt = prompt
 	var args []string
 	switch kind {
 	case "codex":
@@ -364,7 +379,7 @@ env_key = "MALIBU_API_KEY"
 		}
 		write(configPath, data)
 		env = append(env, "OPENCODE_CONFIG="+configPath)
-		args = []string{"run", "--pure", "--format", "json", "--model", "malibu/" + model, "--dir", filepath.Join(root, "workspace"), prompt}
+		args = []string{"run", "--pure", "--format", "json", "--model", "malibu/" + model, "--dir", filepath.Join(root, "workspace")}
 	case "goose":
 		providerDir := filepath.Join(root, "xdg-config", "goose", "custom_providers")
 		if err := os.MkdirAll(providerDir, 0700); err != nil {
@@ -381,6 +396,11 @@ env_key = "MALIBU_API_KEY"
 	}
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Env, cmd.Dir = env, filepath.Join(root, "workspace")
+	if kind == "opencode" {
+		// v1.17.9 quotes positional arguments containing spaces. Stdin preserves
+		// the user's task literally, matching interactive input.
+		cmd.Stdin = strings.NewReader(prompt)
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	cmd.WaitDelay = 5 * time.Second
