@@ -15,11 +15,16 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 HELPER = ROOT / "scripts/ops/lib/studio-lab-window-manifest.py"
+REMOTE_HELPER = ROOT / "scripts/ops/lib/studio-lab-window-remote.py"
 LAB_SCRIPT = ROOT / "scripts/lab/2080-native-rows/run-window-diagnostic.sh"
 SPEC = importlib.util.spec_from_file_location("studio_lab_window_manifest", HELPER)
 assert SPEC and SPEC.loader
 jobs = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(jobs)
+REMOTE_SPEC = importlib.util.spec_from_file_location("studio_lab_window_remote", REMOTE_HELPER)
+assert REMOTE_SPEC and REMOTE_SPEC.loader
+remote = importlib.util.module_from_spec(REMOTE_SPEC)
+REMOTE_SPEC.loader.exec_module(remote)
 
 
 def sha(path: Path) -> str:
@@ -65,10 +70,12 @@ printf '\\n' >> {str(self.calls)!r}
 out=
 policy=
 validate=false
+model=
 while [ "$#" -gt 0 ]; do
   [ "$1" = --validate-only ] && validate=true
   if [ "$1" = --out ]; then shift; out="$1"; fi
   if [ "$1" = --policy ]; then shift; policy="$1"; fi
+  if [ "$1" = --model-id ]; then shift; model="$1"; fi
   shift
 done
 if [ -n "$out" ] && [ "$validate" = false ]; then
@@ -105,6 +112,11 @@ fi
         weights.write_bytes(b"fixture weights\n")
         weights.chmod(0o600)
         target_digest, _ = jobs.snapshot_identity(tokenizer.parent)
+        mtp = self.source / ".lab-window/fixture/mtp"
+        mtp.mkdir(mode=0o700)
+        (mtp / "config.json").write_bytes(b"qwen mtp config\n")
+        (mtp / "model.safetensors").write_bytes(b"qwen mtp weights\n")
+        self.mtp_digest, _ = jobs.snapshot_identity(mtp)
         for path in (cli_target, bench_target):
             path.write_text(path.read_text().replace("__TARGET__", target_digest).replace("__TOKENIZER__", sha(tokenizer)))
             path.chmod(0o700)
@@ -134,6 +146,64 @@ fi
         self.staged_script.chmod(0o700)
         self._write_reuse()
         self._write_policy()
+
+    def _write_qwen_inputs(self) -> None:
+        target = self.source / ".lab-window/fixture/target"
+        mtp = self.source / ".lab-window/fixture/mtp"
+        target_digest, _ = jobs.snapshot_identity(target)
+        mtp_digest, _ = jobs.snapshot_identity(mtp)
+        projection = {
+            "schema_version": "macprovider.native-mtp-artifact-projection.v1",
+            "artifacts": {
+                "target": {"path": "target", "sha256": target_digest},
+                "mtp": {"path": "mtp", "sha256": mtp_digest},
+                "tokenizer": {"path": "target/tokenizer.json", "sha256": sha(target / "tokenizer.json")},
+                "manifest": {"path": "mtp/config.json", "sha256": sha(mtp / "config.json")},
+            },
+        }
+        write_json(self.source / jobs.QWEN_PROJECTION_RELATIVE, projection)
+        write_json(self.source / jobs.POLICY_RELATIVE, {
+            "schema": "macprovider.native-mtp-r015-policy.v1",
+            "model_id": "qwen/qwen3.6-35b-a3b",
+            "target_sha256": target_digest,
+            "mtp_sha256": mtp_digest,
+            "tokenizer_sha256": sha(target / "tokenizer.json"),
+            "provider_commit": self.head,
+            "quantization": "4bit", "cache_mode": "paged_kv_mixed", "proposal_depth": 1,
+            "run_order": "seeded_random_counterbalanced",
+            "prompt_corpus": "deterministic_synthetic_unique_v2",
+            "exclusion_rules": "none", "confidence_method": "paired_block_bootstrap_holm_v1",
+            "qualified_slots": 8, "max_native_active_rows": 1, "arrival_interval_ms": 250,
+            "slots": [1], "maximum_prompt_tokens": 4096,
+            "prompt_tokens": [1536, 4096], "max_tokens": [128, 512],
+            "gated_cells": ["s2-p1536-o512", "s8-p1536-o512"],
+            "warmup_runs": 1, "blocks": 10, "sustained_seconds": 1800,
+            "sustained_cell_id": "s8-p1536-o512",
+            "thresholds": {
+                "throughput_lower_bound_min": 0.15,
+                "ttft_p95_upper_bound_max": 0.1,
+                "tpot_p95_upper_bound_max": 0.0,
+                "chunk_gap_p99_upper_bound_max": 1.0,
+                "rejection_increase_max_pp": 1.0,
+                "min_available_memory_fraction": 0.1,
+                "bootstrap_draws": 10000,
+                "alpha": 0.05,
+                "gated_throughput_lower_bound_min": -0.05,
+                "gated_ttft_p95_upper_bound_max": 0.05,
+                "gated_tpot_p95_upper_bound_max": 0.05,
+            },
+        })
+        cli = self.paths["diagnostic_cli"].resolve()
+        text = cli.read_text()
+        glm_cells = ','.join(f'"{cell}"' for cell in jobs.QUALIFICATION_CELLS)
+        qwen_cells = ','.join(f'"{cell}"' for cell in jobs.QWEN_QUALIFICATION_CELLS)
+        text = text.replace(f'"mtp_sha256":"{target_digest}"', f'"mtp_sha256":"{mtp_digest}"')
+        text = text.replace(glm_cells, qwen_cells).replace(
+            '"sustained_cell_id":"s4-p1536-o512"',
+            '"sustained_cell_id":"s8-p1536-o512"',
+        )
+        cli.write_text(text)
+        cli.chmod(0o700)
 
     def _write_reuse(self) -> None:
         artifacts = {
@@ -210,6 +280,8 @@ fi
         write_json(self.source / jobs.POLICY_RELATIVE, policy)
 
     def snapshot(self, kind: str) -> dict:
+        if kind == "qwen-qualification":
+            self._write_qwen_inputs()
         args = argparse.Namespace(
             source_dir=str(self.source), git_head=self.head,
             provider_label="fixture.provider", job_kind=kind,
@@ -469,6 +541,188 @@ class StudioLabJobsTests(unittest.TestCase):
         self.assertEqual(cells, list(jobs.QUALIFICATION_CELLS))
         self.assertEqual(run_calls[-1][-2:], ["--phase", "sustained"])
         self.assertFalse(result["qualification_activated"])
+
+    def test_qwen_snapshot_has_no_glmbench_dependency(self):
+        original = jobs.git_value
+
+        def refuse_glmbench(source, value, name):
+            if "glm53-bench" in value:
+                raise AssertionError("Qwen snapshot consulted GLMBench")
+            return original(source, value, name)
+
+        self.fixture.paths["glmbench"].unlink()
+        with mock.patch.object(jobs, "git_value", side_effect=refuse_glmbench):
+            snapshot = self.fixture.snapshot("qwen-qualification")
+        self.assertEqual(set(snapshot["artifacts"]), jobs.QWEN_ARTIFACT_FIELDS)
+        self.assertNotIn("glmbench_tree_oid", snapshot["job"]["immutable_inputs"])
+
+    def test_qwen_source_build_and_remote_load_accepts_only_qwen_artifacts(self):
+        snapshot = self.fixture.snapshot("qwen-qualification")
+        snapshot_path = self.fixture.root / "source-snapshot.json"
+        probe_path = self.fixture.root / "probe.json"
+        write_json(snapshot_path, snapshot)
+        digest = "a" * 64
+        install = self.fixture.root / "install"
+        probe = {
+            "hardware_model": "Mac15,14",
+            "installed": {"binary_sha256": digest},
+            "snapshot": {
+                "config_sha256": digest,
+                "provider_plist_sha256": digest,
+                "watchdog_plist_sha256": digest,
+                "compatibility_set_sha256": digest,
+                "provider_id_sha256": digest,
+                "coordinator_origin": "https://coordinator.invalid",
+                "compatibility_set_id": "fixture-set",
+                "binary_version": "1.0.0",
+                "model": "fixture-model",
+                "model_loaded": True,
+                "network_state": "buyer_serving",
+                "requests_in_flight": 0,
+                "coordinator_connected": True,
+                "operator_paused": False,
+                "pid": 123,
+                "process_start_us": 456,
+                "executable_path": str(install / "macprovider-cli"),
+            },
+        }
+        write_json(probe_path, probe)
+        args = argparse.Namespace(
+            nonce="a" * 32, git_head=self.fixture.head,
+            probe_json=str(probe_path), source_snapshot_json=str(snapshot_path),
+            probe_sha256=digest, lab_script_sha256=sha(self.fixture.staged_script),
+            install_dir=str(install), config_path=str(self.fixture.root / "config.json"),
+            ctl_socket=str(self.fixture.root / "control.sock"), provider_label="fixture.provider",
+            status_port="9876", probe_path=str(self.fixture.stage / "probe.py"),
+            owner_pin_journal=str(self.fixture.root / "owner.json"),
+            lab_source_dir=str(self.fixture.source), lab_script_path=str(self.fixture.staged_script),
+            log_path=str(self.fixture.root / "provider.log"), drain_timeout_s="600",
+            lab_timeout_s="43200", ready_timeout_s="120", poll_s="5",
+        )
+        manifest = jobs.build_manifest(args)
+        path = self.fixture.stage / "window.json"
+        write_json(path, manifest)
+        loaded, _ = remote.load_manifest(path)
+        self.assertEqual(set(loaded["artifacts"]), jobs.QWEN_ARTIFACT_FIELDS)
+        remote.validate_lab_artifacts(loaded)
+        manifest["artifacts"]["unknown"] = {"path": "/tmp/unknown", "sha256": digest}
+        write_json(path, manifest)
+        with self.assertRaisesRegex(remote.Refusal, "artifact set"):
+            remote.load_manifest(path)
+
+    def _unrelated_phase3_commit(self) -> str:
+        phase3 = self.fixture.source / "phase3-binary/source.txt"
+        phase3.write_text("unrelated phase3 source\n")
+        subprocess.run(["git", "-C", str(self.fixture.source), "add", str(phase3)], check=True)
+        subprocess.run(
+            ["git", "-C", str(self.fixture.source), "commit", "-qm", "unrelated phase3"],
+            check=True,
+        )
+        stale = subprocess.run(
+            ["git", "-C", str(self.fixture.source), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        subprocess.run(
+            ["git", "-C", str(self.fixture.source), "reset", "--hard", self.fixture.head],
+            check=True, capture_output=True,
+        )
+        return stale
+
+    def test_qwen_snapshot_rejects_unrelated_provider_commit(self):
+        self.fixture._write_qwen_inputs()
+        stale = self._unrelated_phase3_commit()
+        policy_path = self.fixture.source / jobs.POLICY_RELATIVE
+        policy = json.loads(policy_path.read_text())
+        policy["provider_commit"] = stale
+        write_json(policy_path, policy)
+        args = argparse.Namespace(
+            source_dir=str(self.fixture.source), git_head=self.fixture.head,
+            provider_label="fixture.provider", job_kind="qwen-qualification",
+            lab_script_sha256=sha(self.fixture.staged_script),
+            job_helper_sha256=sha(self.fixture.staged_helper),
+        )
+        with self.assertRaisesRegex(jobs.Refusal, "different phase3 source"):
+            jobs.source_snapshot(args)
+
+    def test_qwen_current_validation_rejects_rebound_unrelated_provider_commit(self):
+        manifest_path = self.fixture.manifest("qwen-qualification")
+        manifest, job = jobs.load_job_manifest(str(manifest_path))
+        stale = self._unrelated_phase3_commit()
+        policy_path = self.fixture.source / jobs.POLICY_RELATIVE
+        policy = json.loads(policy_path.read_text())
+        policy["provider_commit"] = stale
+        write_json(policy_path, policy)
+        inputs = job["immutable_inputs"]
+        inputs["qualification_provider_commit"] = stale
+        inputs["qualification_policy_sha256"] = sha(policy_path)
+        job["identity_sha256"] = jobs.canonical_digest({
+            "kind": job["kind"], "immutable_inputs": inputs,
+        })
+        with self.assertRaisesRegex(jobs.Refusal, "provider source drifted"):
+            jobs.validate_current_job_inputs(manifest, job)
+
+    def test_qwen_policy_refuses_shape_gate_and_override_drift(self):
+        self.fixture._write_qwen_inputs()
+        policy = json.loads((self.fixture.source / jobs.POLICY_RELATIVE).read_text())
+        for key, value, message in (
+            ("slots", [1, 8], "approved R015 contract"),
+            ("laboratory_max_native_active_rows", 8, "override"),
+            ("thresholds", {**policy["thresholds"], "alpha": 0.1}, "approved gates"),
+        ):
+            changed = dict(policy)
+            changed[key] = value
+            with self.subTest(key=key), self.assertRaisesRegex(jobs.Refusal, message):
+                jobs.validate_qwen_policy(changed)
+
+    def test_qwen_projection_identity_drift_refuses(self):
+        manifest = self.fixture.manifest("qwen-qualification")
+        loaded, job = jobs.load_job_manifest(str(manifest))
+        projection = self.fixture.source / jobs.QWEN_PROJECTION_RELATIVE
+        projection.write_bytes(projection.read_bytes() + b"\n")
+        with self.assertRaisesRegex(jobs.Refusal, "projection identity drifted"):
+            jobs.validate_current_job_inputs(loaded, job)
+
+    def _assert_qwen_mtp_change_refuses(self, mutate) -> None:
+        manifest = self.fixture.manifest("qwen-qualification")
+        jobs.validate_job(argparse.Namespace(manifest=str(manifest)))
+        mtp = self.fixture.source / ".lab-window/fixture/mtp"
+        mutate(mtp)
+        with self.assertRaisesRegex(jobs.Refusal, "MTP fixture changed after job preflight"):
+            jobs.run_job(argparse.Namespace(manifest=str(manifest)))
+        self.assertEqual(len(self.fixture.recorded_calls()), 1)
+
+    def test_qwen_mtp_mutation_refuses_before_matrix(self):
+        self._assert_qwen_mtp_change_refuses(
+            lambda mtp: (mtp / "model.safetensors").write_bytes(b"mutated mtp weights\n")
+        )
+
+    def test_qwen_mtp_removal_refuses_before_matrix(self):
+        self._assert_qwen_mtp_change_refuses(lambda mtp: (mtp / "model.safetensors").unlink())
+
+    def test_qwen_mtp_addition_refuses_before_matrix(self):
+        self._assert_qwen_mtp_change_refuses(
+            lambda mtp: (mtp / "added.safetensors").write_bytes(b"late mtp weights\n")
+        )
+
+    def test_qwen_runs_six_cells_sustained_then_fixed_selftest(self):
+        manifest = self.fixture.manifest("qwen-qualification")
+        jobs.validate_job(argparse.Namespace(manifest=str(manifest)))
+        result = jobs.run_job(argparse.Namespace(manifest=str(manifest)))
+        calls = self.fixture.recorded_calls()
+        self.assertEqual(len(calls), 9)
+        matrix = calls[1:7]
+        self.assertEqual(
+            [call[call.index("--only-cell") + 1] for call in matrix],
+            list(jobs.QWEN_QUALIFICATION_CELLS),
+        )
+        self.assertEqual(calls[7][-2:], ["--phase", "sustained"])
+        self.assertEqual(calls[8], [
+            "native-mtp-journey-e2e", "--root", str(self.fixture.source / ".lab-window/fixture"),
+            "--model-id", "qwen/qwen3.6-35b-a3b", "--qualified-slots", "8",
+            "--max-native-active-rows", "1", "--max-prompt-tokens", "4096",
+            "--selftest-only",
+        ])
+        self.assertIn("fixture_mtp_sha256", result["executed_inputs"])
 
 
 if __name__ == "__main__":
