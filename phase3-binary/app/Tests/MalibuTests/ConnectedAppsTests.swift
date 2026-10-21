@@ -233,6 +233,33 @@ final class ConnectedAppsTests: XCTestCase {
     }
 
     @MainActor
+    func testExactQwenLegacyProfilesUseTheSameGuardedRecovery() throws {
+        for id in [
+            "qwen3-coder-30b-a3b-instruct", "qwen3-30b-a3b-instruct-2507",
+            "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit"
+        ] {
+            try temporary { home in
+                let selected = ConnectedModel(id: id, contextWindow: 16384, maxOutputTokens: nil)
+                let receipts = try installLegacyOpenCodeProfile(home: home, selectedModel: selected)
+                let store = ConnectedAppsStore(home: home, keyExists: { true }, readKey: { "test-key" },
+                    loadOpenCodePlugin: { Data("managed plugin".utf8) })
+                store.models = [selected]
+                store.modelID = id
+                store.executable = URL(fileURLWithPath: "/fake/opencode")
+                store.launch()
+                XCTAssertEqual(store.status, ConnectedAppsError.openCodeSetupUpgrade.localizedDescription, id)
+                store.restore()
+                store.preview()
+                XCTAssertTrue(store.canSetup, store.status)
+                store.setup()
+                try store.validateOpenCodePlugin()
+                XCTAssertNotNil(try receipts.receipt(named: "opencode-plugin"), id)
+            }
+        }
+    }
+
+    @MainActor
     func testLegacyOpenCodeRecoveryRefusesEditedOrMisdirectedOwnership() throws {
         for changed in ["config", "launch", "receipt-path", "partial-receipts"] {
             try temporary { home in
@@ -314,14 +341,15 @@ final class ConnectedAppsTests: XCTestCase {
         }
     }
 
-    private func installLegacyOpenCodeProfile(home: URL) throws -> ConnectedConfigTransaction {
+    private func installLegacyOpenCodeProfile(home: URL, selectedModel: ConnectedModel? = nil) throws -> ConnectedConfigTransaction {
+        let profile = selectedModel ?? model
         let root = home.appendingPathComponent("Library/Application Support/Malibu/ConnectedApps")
         let receipts = ConnectedConfigTransaction(receiptDirectory: root.appendingPathComponent("backups"))
         let target = root.appendingPathComponent("opencode/opencode.json")
-        let config = try ConnectedAppConfiguration.configuration(app: .openCode, model: model, original: nil)
+        let config = try ConnectedAppConfiguration.configuration(app: .openCode, model: profile, original: nil)
         try receipts.apply(receipts.preview(target: target, proposed: config), named: "opencode-config")
         let launcher = try ConnectedAppConfiguration.launcher(app: .openCode,
-            executable: URL(fileURLWithPath: "/fake/opencode"), config: target, model: model,
+            executable: URL(fileURLWithPath: "/fake/opencode"), config: target, model: profile,
             keyHandoff: root.appendingPathComponent("handoff/opencode.key"))
         try receipts.apply(receipts.preview(target: root.appendingPathComponent("opencode/Launch.command"), proposed: launcher),
             named: "opencode-launch", executable: true)
