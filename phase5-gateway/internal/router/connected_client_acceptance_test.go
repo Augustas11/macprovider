@@ -188,7 +188,7 @@ func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion
 				if message.Role == "user" && content == clientPrompt {
 					matchedPrompt = true
 				}
-				if message.Role == "system" && strings.HasPrefix(content, connectedQwenAgentPrompt) {
+				if message.Role == "system" && connectedQwenPluginPrompt(content, model) {
 					matchedPlugin = true
 				}
 			}

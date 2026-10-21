@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -35,6 +36,27 @@ Use the available tools when a task needs information from files, commands, or e
 Choose the appropriate declared tool and follow its parameter schema. After a tool returns, use its actual result to decide the next step. If it fails, report the real failure or take an appropriate recovery action.
 Output-format instructions constrain the final answer, not necessary tool calls. Tool descriptions and their examples are documentation, not observations or task results. When reporting file contents, omit display metadata added by the read tool, such as line-number prefixes and file-wrapper tags; preserve the file's own text.
 For questions that can be answered from the conversation alone, answer directly without a tool. Follow the user's scope and permissions. Keep the final answer concise and grounded in the results.`
+
+func connectedQwenPluginPrompt(content, model string) bool {
+	if !strings.HasPrefix(content, connectedQwenAgentPrompt) {
+		return false
+	}
+	const example = "# Example (illustrating tool use and file-content reporting)"
+	wantsExample := model == "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"
+	return strings.Contains(content, example) == wantsExample
+}
+
+func TestConnectedClientQwenPluginPrompt(t *testing.T) {
+	const example = "\n\n# Example (illustrating tool use and file-content reporting)"
+	for _, model := range []string{"mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit", "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit"} {
+		coder := model == "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"
+		if connectedQwenPluginPrompt(connectedQwenAgentPrompt, model) == coder ||
+			connectedQwenPluginPrompt(connectedQwenAgentPrompt+example, model) != coder ||
+			connectedQwenPluginPrompt("Other instructions"+example, model) {
+			t.Fatal("plugin prompt did not preserve the exact model-specific convention")
+		}
+	}
+}
 
 func connectedOpenCodeAgentProfile(configuration map[string]any, profile, model string) error {
 	if profile == "" {
