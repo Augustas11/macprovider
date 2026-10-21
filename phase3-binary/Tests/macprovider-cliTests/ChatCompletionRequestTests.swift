@@ -298,6 +298,86 @@ final class ChatCompletionRequestTests: XCTestCase {
         XCTAssertAPIError(try ChatCompletionRequest.parse(data: Data(raw.utf8)), status: 413, code: "json_schema_too_large")
     }
 
+    func testNativeSamplerControlsDefaultAndNullAreIdentityWithoutChangingPromptSource() throws {
+        let omitted = try makeRequest(model: "m")
+        XCTAssertEqual(omitted.topK, 0)
+        XCTAssertEqual(omitted.repetitionPenalty, 1)
+        XCTAssertNil(omitted.promptSource.topK)
+        XCTAssertNil(omitted.promptSource.repetitionPenalty)
+
+        let null = try makeRequest(model: "m", extra: ["top_k": NSNull(), "repetition_penalty": NSNull()])
+        XCTAssertEqual(null.topK, 0)
+        XCTAssertEqual(null.repetitionPenalty, 1)
+        XCTAssertEqual(null.promptSource.topK, .null)
+        XCTAssertEqual(null.promptSource.repetitionPenalty, .null)
+        XCTAssertTrue(omitted.allowsSpeculativeDecoding)
+        XCTAssertTrue(null.allowsSpeculativeDecoding)
+    }
+
+    func testNativeSamplerControlsAcceptBoundsAndPreserveRawValues() throws {
+        for topK in [0, 20, Int(Int32.max)] {
+            let request = try makeRequest(model: "m", extra: ["top_k": topK, "repetition_penalty": 1.05])
+            XCTAssertEqual(request.topK, topK)
+            XCTAssertEqual(request.repetitionPenalty, 1.05)
+            XCTAssertEqual(request.promptSource.topK, .int(topK))
+            XCTAssertEqual(request.promptSource.repetitionPenalty, .double(1.05))
+        }
+        let integralDouble = try makeRequest(model: "m", extra: ["top_k": 20.0])
+        XCTAssertEqual(integralDouble.topK, 20)
+        for penalty in [Double(Float.leastNonzeroMagnitude), 0.5, 1.0, Double(Float.greatestFiniteMagnitude)] {
+            let request = try makeRequest(model: "m", extra: ["repetition_penalty": penalty])
+            XCTAssertEqual(request.repetitionPenalty, penalty)
+        }
+    }
+
+    func testNativeSamplerControlsRejectInvalidNumericShapes() throws {
+        let invalidTopK: [Any] = [true, false, "20", ["value": 20], [20], -1, 0.5, 20.5, Int64(Int32.max) + 1, UInt64.max]
+        for value in invalidTopK {
+            XCTAssertAPIError(try makeRequest(model: "m", extra: ["top_k": value]), status: 400, code: "invalid_request")
+        }
+        let invalidPenalty: [Any] = [true, false, "1.05", ["value": 1.05], [1.05], 0, -0.1, 1e-100, 1e100]
+        for value in invalidPenalty {
+            XCTAssertAPIError(try makeRequest(model: "m", extra: ["repetition_penalty": value]), status: 400, code: "invalid_request")
+        }
+    }
+
+    func testNativeSamplerControlsRejectNonfiniteJSONNumbers() {
+        for field in ["top_k", "repetition_penalty"] {
+            for value in ["1e400", "-1e400", "NaN", "Infinity"] {
+                let raw = """
+                {"model":"m","messages":[{"role":"user","content":"hello"}],"\(field)":\(value)}
+                """
+                // Invalid JSON may be rejected before the sampling-field gate.
+                XCTAssertThrowsError(try ChatCompletionRequest.parse(data: Data(raw.utf8))) { error in
+                    XCTAssertEqual((error as? APIError)?.status, 400)
+                }
+            }
+        }
+    }
+
+    func testNativeSamplerControlsSurviveEveryRequestReconstruction() throws {
+        let original = try makeRequest(model: "m", extra: ["top_k": 20, "repetition_penalty": 1.05])
+        let cached = original.withConversationKey("conv:sampling", cacheOnly: true)
+        let copies = [
+            cached,
+            cached.withFleetCacheGrant(nil),
+            cached.withRequestID("sampling-request"),
+            cached.withMaxTokensLimit(32),
+            cached.withIngestProvenance(.privacy),
+        ]
+        for request in copies {
+            XCTAssertEqual(request.topK, 20)
+            XCTAssertEqual(request.repetitionPenalty, 1.05)
+            XCTAssertEqual(request.promptSource, original.promptSource)
+            XCTAssertFalse(request.allowsSpeculativeDecoding)
+        }
+    }
+
+    func testSpeculativeDecodingGateAllowsExplicitNativeSamplerIdentities() throws {
+        let request = try makeRequest(model: "m", extra: ["top_k": 0, "repetition_penalty": 1])
+        XCTAssertTrue(request.allowsSpeculativeDecoding)
+    }
+
     func testSpeculativeDecodingGateAllowsGreedyTextOnlyRequests() throws {
         let request = try makeRequest(
             model: "m",
@@ -342,6 +422,9 @@ final class ChatCompletionRequestTests: XCTestCase {
         let rejected: [(String, [String: Any], [[String: Any]]?)] = [
             ("temperature", ["temperature": 0.1], nil),
             ("top_p", ["top_p": 0.9], nil),
+            ("top_k", ["top_k": 20], nil),
+            ("repetition_penalty_above_one", ["repetition_penalty": 1.05], nil),
+            ("repetition_penalty_below_one", ["repetition_penalty": 0.5], nil),
             ("tools", ["tools": [validTool]], nil),
             ("tool_choice_auto", ["tool_choice": "auto"], nil),
             ("assistant_tool_calls", [:], assistantWithToolCall),

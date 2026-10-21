@@ -1,7 +1,12 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.61 (2026-10-19, authoritative routing identity)
+**Version:** 0.9.62 (2026-10-21, explicit native sampling extensions)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.17, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.62 (2026-10-21, native sampling extensions, Related: #2054):**
+The existing authenticated chat contract defines validated explicit top-k and
+repetition controls, full-prompt request-local history, and unsupported-route
+refusal/fallback. Defaults stay unchanged; implementation is not qualification.
 
 **Change log v0.9.59 (2026-10-15, Related: #2016):**
 Registers `SPEC-006-R022` (§5.4.5): bounded inline images for native Qwen2-VL
@@ -1818,6 +1823,8 @@ Supported request fields:
 - `max_tokens`
 - `temperature`
 - `top_p`
+- `top_k` (native Chat Completions sampling extension below)
+- `repetition_penalty` (native Chat Completions sampling extension below)
 - `n`
 - `stream`
 - `stream_options`
@@ -1830,6 +1837,32 @@ Supported request fields:
 - `logprobs`
 - `tools` (SPEC-018)
 - `tool_choice` (selection-preserving behavior below)
+
+For native MLX Chat Completions, `top_k` MUST be an integer in
+`0...2147483647`; omission, null and zero disable its filter. K greater than
+or equal to the loaded vocabulary size leaves all vocabulary entries eligible.
+`repetition_penalty` MUST be a positive finite JSON number representable as a
+positive finite Float; omission, null and one leave logits unchanged. Booleans,
+strings, fractional K, negative K and nonpositive/nonfinite penalties MUST be
+rejected with the ordinary invalid-request envelope, not silently ignored.
+These fields do not expand Messages/Anthropic endpoint support.
+
+The serial sampler MUST apply the sign-aware repetition factor to raw logits
+for tokens in the last20 entries of the complete prepared prompt plus sampled
+tokens: multiply negative logits by the factor and divide nonnegative logits
+by it. History MUST be request-local and identical on cold and prefix-reused
+requests, including locally chunked and recurrent-prefilled requests. Repeated
+token occurrences MUST NOT compound the penalty within one sampling step.
+After log-softmax, apply top-p, then top-k, then temperature sampling, matching
+the pinned native sampler. The20-token history is this provider's explicit
+contract, not a claim that Qwen's model card prescribes that window.
+
+A route unable to represent an active control MUST use its existing supported
+serial fallback or reject explicitly; it MUST NOT drop that control to batch
+or speculate. Exact-model client defaults are setup policy (SPEC-025), not
+hidden generation defaults. Requests omitting these fields keep their current
+behavior. This amendment extends the existing authenticated chat entrypoint
+contract (SPEC-006-R001); it does not claim model tool-use qualification.
 
 **SPEC-006-R021 — Selection-preserving dispatch and capability projection.**
 The gateway and coordinator MUST preserve the selected mode after translating
