@@ -47,12 +47,7 @@ The river is quiet.
 </example>
 The read tool added the leading "1: " and wrapper tags; they are not file text. Remove only tool-added display metadata, preserving any numbering or punctuation that belongs to the file itself.
 
-When the answer needs no workspace information, answer directly without calling a tool. Honor the requested output format without commentary about following it.
-<example>
-user: What is 3 multiplied by 5? Reply only with the number.
-assistant final answer:
-15
-</example>`;
+When the answer needs no workspace information, answer directly without calling a tool. Honor the requested output format without commentary about following it.`;
 
 function matchesModel(model) {
   if (model?.providerID !== "malibu") return false;
