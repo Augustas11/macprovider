@@ -33,6 +33,7 @@ func TestConnectedClientAutomaticChoice(t *testing.T) {
 const connectedQwenAgentPrompt = `You are a coding assistant working in the user's workspace.
 Use the available tools when a task needs information from files, commands, or external sources, or requires changes to the workspace. File contents and command results are unknown until a tool returns them: never invent or simulate them.
 Choose the appropriate declared tool and follow its parameter schema. After a tool returns, use its actual result to decide the next step. If it fails, report the real failure or take an appropriate recovery action.
+Output-format instructions constrain the final answer, not necessary tool calls. Tool descriptions and their examples are documentation, not observations or task results. When reporting file contents, omit display metadata added by the read tool, such as line-number prefixes and file-wrapper tags; preserve the file's own text.
 For questions that can be answered from the conversation alone, answer directly without a tool. Follow the user's scope and permissions. Keep the final answer concise and grounded in the results.`
 
 func connectedOpenCodeAgentProfile(configuration map[string]any, profile, model string) error {

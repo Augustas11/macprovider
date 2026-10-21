@@ -33,6 +33,9 @@ test("exact aliases/artifacts transform, preserving suffix, siblings and non-sys
     assert.equal(output.system[1], "Another plugin's instruction");
     assert.deepEqual(output.permission, { bash: "ask" });
     assert.ok(!output.system[0].includes(stock));
+    assert.ok(output.system[0].includes("Output-format instructions constrain the final answer, not necessary tool calls."));
+    assert.ok(output.system[0].includes("omit display metadata added by the read tool"));
+    assert.ok(output.system[0].includes("preserve the file's own text"));
   }
 });
 
