@@ -94,6 +94,92 @@ class QwenProviderTransactionTests(unittest.TestCase):
         transaction.finish_restore(self.args())
         self.assertTrue(transaction.finish_restore(self.args())["idempotent"])
 
+    def test_legacy_profile_keeps_v1_journal_and_dual_targets(self):
+        transaction.prepare(self.args())
+        journal = json.loads(self.journal.read_text(encoding="utf-8"))
+        self.assertEqual(journal["schema_version"], transaction.LEGACY_SCHEMA)
+        self.assertNotIn("profile", journal)
+        self.assertNotIn("profile", transaction.inspect(self.args()))
+        changed = self.config.read_text(encoding="utf-8")
+        self.assertIn("  - qwen3-coder-30b-a3b-instruct\n", changed)
+        self.assertIn("  - qwen/qwen3-30b-a3b-instruct-2507\n", changed)
+        self.assertNotIn("qwen/qwen3.6-35b-a3b", changed)
+        transaction.restore(self.args())
+        transaction.finish_restore(self.args())
+
+    def test_native_mtp_profile_is_closed_to_glm_and_one_qwen_target(self):
+        self.config.write_text(
+            BASE_CONFIG.replace("a" * 64, transaction.GLM_INCUMBENT["model_artifact_sha256"]),
+            encoding="utf-8",
+        )
+        args = self.args(profile=transaction.NATIVE_MTP_PROFILE)
+        transaction.prepare(args)
+        journal = json.loads(self.journal.read_text(encoding="utf-8"))
+        self.assertEqual(journal["schema_version"], transaction.PROFILE_SCHEMA)
+        self.assertEqual(journal["profile"], transaction.NATIVE_MTP_PROFILE)
+        self.assertEqual(transaction.inspect(args)["profile"], transaction.NATIVE_MTP_PROFILE)
+        changed = self.config.read_text(encoding="utf-8")
+        self.assertIn("  - zai-org/glm-5.3-flash\n", changed)
+        self.assertIn("  - qwen/qwen3.6-35b-a3b\n", changed)
+        self.assertNotIn("qwen3-coder-30b", changed)
+        self.assertNotIn("qwen3-30b-a3b", changed)
+
+        recommendation = self.recommendation("qwen3.6-35b-a3b")
+        recommendation["serve_config"]["max_context_override"] = 4095
+        with self.assertRaisesRegex(transaction.Refusal, "4096"):
+            transaction.verify_recommendation(self.verify_args(
+                recommendation, target="qwen3.6-35b-a3b",
+                profile=transaction.NATIVE_MTP_PROFILE,
+            ))
+        recommendation["serve_config"]["max_context_override"] = 4096
+        verify = self.verify_args(
+            recommendation, target="qwen3.6-35b-a3b",
+            profile=transaction.NATIVE_MTP_PROFILE,
+        )
+        self.assertEqual(transaction.verify_recommendation(verify)["gateway_id"],
+                         "qwen/qwen3.6-35b-a3b")
+        transaction.begin_adoption(self.args(
+            profile=transaction.NATIVE_MTP_PROFILE,
+            phase="adopting_target", recommendation=verify.recommendation,
+            target=verify.target, binary_version=verify.binary_version,
+            catalog_version=verify.catalog_version, catalog_hash=verify.catalog_hash,
+            rate_card_version=verify.rate_card_version,
+        ))
+        with self.assertRaisesRegex(transaction.Refusal, "selected profile"):
+            transaction.begin_adoption(self.args(
+                phase="adopting_second", recommendation=verify.recommendation,
+                target=verify.target, binary_version=verify.binary_version,
+                catalog_version=verify.catalog_version, catalog_hash=verify.catalog_hash,
+                rate_card_version=verify.rate_card_version,
+            ))
+        self.apply_recommendation(verify)
+        serving = self.args(
+            profile=transaction.NATIVE_MTP_PROFILE,
+            phase="serving_target", recommendation=verify.recommendation,
+            target=verify.target, binary_version=verify.binary_version,
+            catalog_version=verify.catalog_version, catalog_hash=verify.catalog_hash,
+            rate_card_version=verify.rate_card_version,
+        )
+        self.assertEqual(transaction.checkpoint(serving)["phase"], "serving_target")
+        complete = self.args(
+            profile=transaction.NATIVE_MTP_PROFILE,
+            phase="proof_complete", recommendation=verify.recommendation,
+            target=verify.target, binary_version=verify.binary_version,
+            catalog_version=verify.catalog_version, catalog_hash=verify.catalog_hash,
+            rate_card_version=verify.rate_card_version,
+        )
+        self.assertEqual(transaction.checkpoint(complete)["phase"], "proof_complete")
+        transaction.restore(args)
+        transaction.finish_restore(args)
+
+    def test_native_mtp_profile_refuses_non_glm_incumbent(self):
+        self.config.write_text(
+            BASE_CONFIG.replace("zai-org/glm-5.3-flash", "other/incumbent"),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(transaction.Refusal, "exact signed GLM incumbent"):
+            transaction.prepare(self.args(profile=transaction.NATIVE_MTP_PROFILE))
+
     def test_validator_failure_leaves_config_unchanged_and_no_journal(self):
         self.validator.write_text("#!/bin/sh\nexit 9\n", encoding="utf-8")
         os.chmod(self.validator, 0o700)
@@ -307,23 +393,27 @@ class QwenProviderTransactionTests(unittest.TestCase):
             if key != "max_context_override_provenance":
                 owned[key] = f"{key}: {value}\n".encode()
         generated_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        served_model = json.loads(Path(verify.recommendation).read_text())["serve_config"]["model"]
         owned["max_context_override_provenance"] = (
-            'max_context_override_provenance: {source: "recommendation_apply", value: 16384, '
-            f'model: "{verify.target}", generated_at: "{generated_at}"}}\n'
+            'max_context_override_provenance: {source: "recommendation_apply", '
+            f'value: {expected["max_context_override"]}, '
+            f'model: "{served_model}", generated_at: "{generated_at}"}}\n'
         ).encode()
         self.config.write_bytes(transaction.render(blocks, owned))
 
-    def verify_args(self, recommendation, target="qwen3-coder-30b-a3b-instruct"):
+    def verify_args(self, recommendation, target="qwen3-coder-30b-a3b-instruct", **overrides):
         path = self.root / "recommendation.json"
         path.write_text(json.dumps(recommendation), encoding="utf-8")
-        return type("Args", (), {
+        values = {
             "recommendation": str(path),
             "target": target,
             "binary_version": "9.8.7",
             "catalog_version": "signed-release",
             "catalog_hash": "b" * 64,
             "rate_card_version": "signed-rates",
-        })()
+        }
+        values.update(overrides)
+        return type("Args", (), values)()
 
     def test_exact_recommendation_is_accepted(self):
         verify = self.verify_args(self.recommendation())

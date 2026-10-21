@@ -207,6 +207,26 @@ BUYER_TOKEN_FILE=<local owner-only buyer key file>
 config, journal and validator below the system temporary directory and does not
 claim gateway acceptance.
 
+### Qwen3.6 native-MTP catalog proof
+
+For a qualified Qwen3.6 admission, configure `PROBE_MODEL=qwen/qwen3.6-35b-a3b`
+and `CATALOG_REQUIRE_NATIVE_MTP_FORWARD=true`, then use
+`catalog-activate.sh status`, `next`, and `next --run`. The catalog controller
+owns the live lock and invokes a fixed single-model transaction internally.
+It verifies the published signed binary against the committed admission release
+input, adopts the exact Qwen artifact, requires native MTP and continuous
+batching readiness, sends the paid proof, and restores the signed GLM incumbent.
+The Qwen journal/config/CLI settings above still apply; OpenCode is not used by
+this profile. Recommendations must support at least 4096 context tokens.
+
+Interrupted native-MTP transactions recover through the catalog controller.
+Their protected journal freezes the installed release identity; restoration
+does not depend on a later catalog version or a network release lookup. The
+durable lock remains held until exact incumbent restoration and protected
+scratch cleanup are confirmed. A completed offline journey or merged catalog
+change does not replace the attributed paid request and positive MTP-forward
+delta required for live acceptance.
+
 ## Local configuration (untracked)
 
 No host, address, user name or key path is committed. Put the targets in

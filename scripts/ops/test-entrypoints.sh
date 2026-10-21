@@ -1648,6 +1648,13 @@ printf '{"step":"gateway_proof","evidence":"legacy generic proof","request_id":"
 ' > "$tmp/state/catalog-$R/gateway_proof.json"
 run_rc 0 "catalog status rejects a fresh generic proof marker" scripts/ops/catalog-activate.sh status
 if [ "$(state_of gateway_proof)" = "pending" ]; then ok; else bad "fresh generic proof marker counted as done"; fi
+PROBE_MODEL=qwen/qwen3.6-35b-a3b CATALOG_REQUIRE_NATIVE_MTP_FORWARD=false \
+  run_rc 3 "Qwen3.6 profile refuses a missing native-MTP proof requirement" scripts/ops/catalog-activate.sh status
+expect_err "Qwen3.6 proof requires CATALOG_REQUIRE_NATIVE_MTP_FORWARD=true"
+PROBE_MODEL=qwen/qwen3.6-35b-a3b CATALOG_REQUIRE_NATIVE_MTP_FORWARD=true \
+  run_rc 0 "Qwen3.6 profile accepts the exact model and native-MTP requirement" scripts/ops/catalog-activate.sh status
+export PROBE_MODEL=test/model
+unset CATALOG_REQUIRE_NATIVE_MTP_FORWARD
 rm -f "$tmp/state/catalog-$R/gateway_proof.json"
 printf 'stuck' > "$tmp/svc/mode"
 run_rc 1 "proof refused when the provider counters do not move" scripts/ops/catalog-activate.sh _gateway-proof
@@ -1673,13 +1680,20 @@ expect_err "cb_shared_forward_calls +0"
 printf 'move' > "$tmp/svc/mode"
 run_rc 0 "proof accepted when CB shared forward calls move" scripts/ops/catalog-activate.sh _gateway-proof
 if python3 - "$tmp/state/catalog-$R/gateway_proof.json" "$tmp/svc/last_request.json" <<'PY'
-import json, sys
+import json, sys, uuid
 marker, request = (json.load(open(path)) for path in sys.argv[1:3])
 content = request.get("messages", [{}])[0].get("content", "")
-sys.exit(0 if marker["request_id"].startswith("ops-proof-")
+try:
+    request_id = marker["request_id"]
+    parsed = uuid.UUID(request_id)
+    valid_request_id = parsed.version == 4 and str(parsed) == request_id
+except (KeyError, TypeError, ValueError):
+    valid_request_id = False
+sys.exit(0 if valid_request_id
+         and marker["sent_request_id"] == request_id
          and marker["cb_shared_forward_calls_delta"] > 0
          and marker["native_mtp_forward_required"] is False
-         and marker["sent_request_id"] in content
+         and request_id in content
          and content.startswith("Proof nonce ")
          and request.get("temperature") == 0
          and request.get("top_p") == 1
