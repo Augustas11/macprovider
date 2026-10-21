@@ -4825,6 +4825,9 @@ private func installTerminationHandlers(
                 let exitCode: Int32 = StopIntentMarker.consumeIfValid(currentPID: getpid())
                     ? 0
                     : (128 + signalNumber)
+                // Take exit ownership before suspension: heartbeat/auth recovery
+                // must not race the potentially slow inference cleanup below.
+                await coordinatorClient?.beginSignalShutdown()
                 // Cancellation alone is not a drain: stock generation runs on
                 // the blocking executor. Await it and the self-check journal
                 // before proceeding to process shutdown.

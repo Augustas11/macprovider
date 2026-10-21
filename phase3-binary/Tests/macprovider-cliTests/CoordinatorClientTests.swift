@@ -5748,6 +5748,68 @@ final class CoordinatorClientTests: XCTestCase {
         await client.cancelHeartbeatWatchdogForTest()
     }
 
+    func testSignalShutdownOwnsExitWhileJoinedSelfCheckCleanupIsSuspended() async throws {
+        actor CleanupGate {
+            var entered = false
+            var finished = false
+            private var continuation: CheckedContinuation<Void, Never>?
+            func suspendCleanup() async {
+                await withCheckedContinuation { continuation in
+                    self.continuation = continuation
+                    entered = true
+                }
+                finished = true
+            }
+            func release() {
+                continuation?.resume()
+                continuation = nil
+            }
+        }
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let watchdogFired = LockedBox(false)
+        let selectedExit = LockedBox<Int32?>(nil)
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            watchdogExitHook: { _ in watchdogFired.set(true) }
+        )
+        await client.acceptAssignedSessionForTest(assignedID: "joined-provider")
+        await client.seedLastHeartbeatSuccessForTest(ageNanoseconds: 16_000_000_000)
+        await client.startHeartbeatWatchdogForTest(intervalSeconds: 1)
+        let gate = CleanupGate()
+        let selfCheck = Task<Void, Never> {
+            do {
+                try await Task.sleep(nanoseconds: 3_600_000_000_000)
+            } catch {
+                await gate.suspendCleanup()
+            }
+        }
+        let shutdown = Task<Void, Never> {
+            await client.beginSignalShutdown()
+            await ContinuousBatchingSelfCheckDriver.cancelAndWait(selfCheck)
+            await client.drainForExit(reason: "SIGTERM received")
+            selectedExit.set(143)
+        }
+        try await Self.waitUntil(timeoutNanoseconds: 5_000_000_000) { await gate.entered }
+        // Force the stale production evaluation without sleeping for a timer.
+        // Also exercise an in-flight reconnect trying to re-arm its watchdog.
+        await client.startHeartbeatWatchdogForTest(intervalSeconds: 1)
+        await client.evaluateHeartbeatWatchdogForTest(intervalSeconds: 1)
+        XCTAssertFalse(watchdogFired.get(), "joined recovery must not replace signal shutdown")
+        XCTAssertNil(selectedExit.get(), "exit must wait for self-check persistence")
+        await gate.release()
+        await shutdown.value
+        let cleanupFinished = await gate.finished
+        XCTAssertTrue(cleanupFinished)
+        XCTAssertEqual(selectedExit.get(), 143)
+        XCTAssertFalse(watchdogFired.get())
+    }
+
     func testHeartbeatWatchdogToleranceExceedsBoundedSendTimeout() {
         let expected = UInt64(15 * 1_000_000_000)
         XCTAssertEqual(
