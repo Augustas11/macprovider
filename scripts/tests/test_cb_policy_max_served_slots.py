@@ -73,15 +73,29 @@ class MaxServedSlotsGeneratorTest(unittest.TestCase):
         self.policy = catalog_release.validate_cb_policy(CB_POLICY_BYTES, CANDIDATE_BYTES, CANDIDATE_OBJ)
         self.assertTrue(self.policy["entries"], "committed policy has entries to extend")
 
-    def test_committed_policy_caps_only_glm_at_four(self):
+    def test_committed_policy_caps_qualified_glm_and_qwen8_at_four(self):
         ceilings = {entry["model_key"]: entry.get("max_served_slots") for entry in self.policy["entries"]}
         self.assertEqual(ceilings.pop(GLM_KEY), 4)
+        self.assertEqual(ceilings.pop("qwen3-8b"), 4)
         self.assertTrue(ceilings, "committed policy keeps its uncapped entries")
         self.assertEqual(set(ceilings.values()), {None})
         regenerated = catalog_release.default_cb_policy(
             CANDIDATE_BYTES, CANDIDATE_OBJ, signer_key_id=self.policy["signer_key_id"]
         )
         self.assertEqual(regenerated, CB_POLICY_BYTES.rstrip(b"\n"))
+
+    def test_qwen8_policy_preserves_target_qualification_identity(self):
+        entry = next(entry for entry in self.policy["entries"] if entry["model_key"] == "qwen3-8b")
+        self.assertEqual(entry["rollout"], "on")
+        self.assertEqual(entry["hardware_class"], "apple-silicon:Apple M3:ram-16gb")
+        self.assertEqual(entry["cache_class"], "KVCacheSimple")
+        self.assertFalse(entry["requires_moe"])
+        self.assertFalse(entry["cached_turns_accepted"])
+        self.assertEqual(entry["provenance"]["source"], "operator_review")
+        self.assertEqual(entry["provenance"]["package_manifest_sha256"],
+                         "fade093f3684f41bac793e139e6eea276bb73a8543a5bec9e23f4b7c9de552e0")
+        self.assertEqual(entry["provenance"]["studio_campaign_sha256"],
+                         "ef90fb26ec648d904f97e5bf2bcb41c64b189c940331257b6fd2443f1da85658")
 
     def test_signed_ceiling_validates(self):
         for value in (1, 4, catalog_release.CB_MAX_SERVED_SLOTS_LIMIT):

@@ -48,6 +48,31 @@
       "requires_moe": true,
       "rollout": "canary",
       "tokenizer_sha256": "1e9d4f69cfe47ae2d32262646881c81e4a79e58ebb3ac1c8c41477372c1b714d"
+    },
+    {
+      "cache_class": "KVCacheSimple",
+      "cached_turns_accepted": false,
+      "chat_template_sha256": "5aac28be4f2ebd0fb228826144c53be52fb1975a8b00832e0910301cad79d59e",
+      "hardware_class": "apple-silicon:Apple M3:ram-16gb",
+      "kernel_identifier": "macprovider_paged_kv_gather_v1",
+      "kv_dtype": "fp16",
+      "max_served_slots": 4,
+      "metallib_sha256": "3d9b4a747758128cc5418e62c5ad8e282a11b0d436423537137e013beaa1261b",
+      "model_id": "qwen3-8b",
+      "model_key": "qwen3-8b",
+      "model_sha256": "1f591f9c4fb38d05ea2d879d89a6eeab485c23a04eb75e3e0a289db9d95ec877",
+      "provenance": {
+        "evidence_id": "qwen3-8b-m3-16gb-20261021-production-v6",
+        "live_executable_cdhash": "a7e561c1084a36446a9a3354b6f1fadcd0ec2c42",
+        "package_manifest_sha256": "fade093f3684f41bac793e139e6eea276bb73a8543a5bec9e23f4b7c9de552e0",
+        "provider_cli_version": "1.8.260",
+        "source": "operator_review",
+        "status": "qualified",
+        "studio_campaign_sha256": "ef90fb26ec648d904f97e5bf2bcb41c64b189c940331257b6fd2443f1da85658"
+      },
+      "requires_moe": false,
+      "rollout": "on",
+      "tokenizer_sha256": "610d65e44dda7497fedc48f66897a1ee95294d036a90f0ed8e57d29a90d79dfd"
     }
   ],
   "schema_version": "macprovider.continuous-batching-policy-source.v1"
