@@ -698,7 +698,7 @@ final class NativeMTPHardwareE2ERunner {
         // probes production runs at load; a synthesized identity cannot prove
         // MoE dispatch and would hide real attach failures.
         let placeholderProof = sizingProof(modelSHA: targetIdentity.digest, maxContextTokens: maxContextTokens)
-        let probeRuntime = makeRuntime(
+        let probeRuntime = await makeRuntime(
             modelSHA: targetIdentity.digest,
             maxContextTokens: maxContextTokens,
             pagedConfig: pagedConfig,
@@ -745,9 +745,10 @@ final class NativeMTPHardwareE2ERunner {
             poolEpoch: 1,
             layerCount: cacheKinds.count,
             cacheKinds: cacheKinds,
-            drafterContainer: drafterContainer
+            drafterContainer: drafterContainer,
+            nativeMTPFamilyAdapter: nativeAdmissionCapability.familyAdapter
         )
-        let ordinary = makeRuntime(
+        let ordinary = await makeRuntime(
             modelSHA: targetIdentity.digest,
             maxContextTokens: maxContextTokens,
             pagedConfig: pagedConfig,
@@ -762,7 +763,7 @@ final class NativeMTPHardwareE2ERunner {
             drafterContainer: nil,
             admissionRecorder: ordinaryAdmissionRecorder
         )
-        let native = makeRuntime(
+        let native = await makeRuntime(
             modelSHA: targetIdentity.digest,
             maxContextTokens: maxContextTokens,
             pagedConfig: pagedConfig,
@@ -799,8 +800,14 @@ final class NativeMTPHardwareE2ERunner {
         nativeAdmissionCapability: NativeMTPAdmissionCapability?,
         drafterContainer: MTPDrafterContainer?,
         admissionRecorder: NativeMTPHardwareAdmissionRecorder?
-    ) -> ModelRuntime {
-        ModelRuntime(
+    ) async -> ModelRuntime {
+        let preparationLane = await ModelRuntime.makeContinuousBatchTextPreparationLane(
+            container: targetContainer,
+            admissionCapability: nativeAdmissionCapability,
+            nativeVisionProfile: nil,
+            cacheKinds: backend.cacheKinds
+        )
+        return ModelRuntime(
             modelID: modelID,
             modelHash: modelSHA,
             maxContextTokensOverride: maxContextTokens,
@@ -829,6 +836,7 @@ final class NativeMTPHardwareE2ERunner {
             container: targetContainer,
             continuousBatchingBackend: backend,
             continuousBatchPrefillGrouping: prefillGrouping,
+            testContinuousBatchTextPreparationLane: preparationLane,
             loader: { _ in throw NativeMTPHardwareE2EError.unexpectedLoader }
         )
     }

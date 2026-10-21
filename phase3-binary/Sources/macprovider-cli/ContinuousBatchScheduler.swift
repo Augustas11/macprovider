@@ -300,10 +300,9 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     /// run serially inside one iteration and stall decode for longer.
     let allowsRaggedPrefillOffsets: Bool
     /// Whether a native-MTP prompt row may join a ragged prefill group
-    /// (SPEC-038 v0.3.24 FR-CB2). Set only when the backend prefills every
-    /// row of a group in its own forward
-    /// (`PagedKVSharedForwardBackend.prefillsGroupedRowsAlone`), so joining
-    /// changes when a native row's chunk runs, never a forward's shape.
+    /// (SPEC-038 v0.3.24 FR-CB2). Set for a backend whose grouped rows prefill
+    /// alone, or for an explicitly admitted family whose shared target
+    /// forward and per-row drafter seeding support different offsets.
     let nativeMTPPromptRowsJoinRaggedPrefill: Bool
     let drainTimeoutNanoseconds: UInt64
     let drainCancellationGraceNanoseconds: UInt64
@@ -5636,8 +5635,8 @@ actor ContinuousBatchScheduler {
             // Kept out of ragged groups, a native row prefills alone and
             // ahead of the rows arriving with it, whose prefill then stalls
             // its decode (SPEC-048 R015 gated cells, GLM-5.3-Flash on CLI
-            // 1.8.256). Where every grouped row takes its own forward, it
-            // takes its FCFS turn in the group like an ordinary row.
+            // 1.8.256). With backend support it takes its FCFS turn in the
+            // group, either alone or in a proven shared target forward.
             candidates.append(ContinuousBatchPrefillCandidate(
                 requestID: id,
                 promptOffset: row.prefillCursor,

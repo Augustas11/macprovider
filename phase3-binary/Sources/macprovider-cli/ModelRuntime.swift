@@ -362,6 +362,110 @@ private struct KVDiskSeedResult: Sendable {
     let unsupportedCacheClass: String?
 }
 
+struct ContinuousBatchPreparedRequest: Sendable {
+    let promptTokens: [Int]
+    let stopTokenSequences: [[Int]]
+    let modelStopTokenIDs: Set<Int>
+    let recurrentCheckpointPositions: [Int]
+    /// The loaded model has recurrent (hybrid) layers; computed for keyed
+    /// requests only, false otherwise.
+    let modelHasRecurrentLayers: Bool
+    /// SPEC-018 §3.11 call prefill ending `promptTokens`, if any.
+    let toolCallPrefill: String?
+}
+
+/// Serializes text prompt preparation for one admitted Qwen target snapshot.
+/// It owns only Sendable processor/tokenizer/configuration values and returns
+/// copied CPU tokens; no model context, LMInput, or MLXArray escapes this lane.
+actor ContinuousBatchTextPreparationLane {
+    private let serial = AsyncSemaphore(value: 1)
+    private let processor: any UserInputProcessor
+    private let tokenizer: any MLXLMCommon.Tokenizer
+    private let configuration: ModelConfiguration
+    private let hasRecurrentLayers: Bool
+#if DEBUG
+    private var preparationEntryCount = 0
+#endif
+
+    init(
+        processor: any UserInputProcessor,
+        tokenizer: any MLXLMCommon.Tokenizer,
+        configuration: ModelConfiguration,
+        hasRecurrentLayers: Bool
+    ) {
+        self.processor = processor
+        self.tokenizer = tokenizer
+        self.configuration = configuration
+        self.hasRecurrentLayers = hasRecurrentLayers
+    }
+
+    func prepare(
+        request: ChatCompletionRequest,
+        maxContextTokens: Int,
+        templateSupportsThinkingToggle: Bool,
+        templateSupportsPreserveThinking: Bool,
+        toolSelectionModelID: String?,
+        drainCancelled: DrainCancelToken
+    ) async throws -> (ContinuousBatchPreparedRequest, ModelRuntime.StreamingDetokenizer) {
+#if DEBUG
+        preparationEntryCount += 1
+#endif
+        let processor = processor
+        let tokenizer = tokenizer
+        let configuration = configuration
+        let hasRecurrentLayers = hasRecurrentLayers
+        return try await serial.withPermit {
+            try Task.checkCancellation()
+            try drainCancelled.check()
+            let (promptTokens, toolCallPrefill) = try await ModelRuntime.preparedRequestTokens(
+                for: request,
+                processor: processor,
+                tokenizer: tokenizer,
+                templateSupportsThinkingToggle: templateSupportsThinkingToggle,
+                templateSupportsPreserveThinking: templateSupportsPreserveThinking,
+                toolSelectionModelID: toolSelectionModelID
+            )
+            try Task.checkCancellation()
+            try drainCancelled.check()
+            try ModelRuntime.validatePromptTokenCount(promptTokens.count, maxContextTokens: maxContextTokens)
+            let modelStopTokenIDs = ModelRuntime.generationStopTokenIDs(
+                configuration: configuration,
+                tokenizer: tokenizer
+            )
+            let hybrid = request.conversationKey?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+                && hasRecurrentLayers
+            try Task.checkCancellation()
+            try drainCancelled.check()
+            return (
+                ContinuousBatchPreparedRequest(
+                    promptTokens: promptTokens,
+                    stopTokenSequences: ModelRuntime.continuousBatchStopTokenSequences(
+                        requestStops: request.stop,
+                        modelStopTokenIDs: modelStopTokenIDs,
+                        tokenizer: tokenizer
+                    ),
+                    modelStopTokenIDs: modelStopTokenIDs,
+                    recurrentCheckpointPositions: ModelRuntime.continuousBatchRecurrentCheckpointPositions(
+                        promptTokens: promptTokens,
+                        conversationKey: request.conversationKey,
+                        hybrid: hybrid,
+                        tokenizer: tokenizer
+                    ),
+                    modelHasRecurrentLayers: hybrid,
+                    toolCallPrefill: toolCallPrefill
+                ),
+                ModelRuntime.StreamingDetokenizer(tokenizer: tokenizer)
+            )
+        }
+    }
+
+#if DEBUG
+    func preparationEntryCountForTest() -> Int {
+        preparationEntryCount
+    }
+#endif
+}
+
 public struct RuntimeSnapshot: @unchecked Sendable {
     public let state: SwapState
     public let container: ModelContainer?
@@ -383,6 +487,7 @@ public struct RuntimeSnapshot: @unchecked Sendable {
     let schedulerSupportsNativeMTP: Bool
     let nativeMTPTupleOffer: NativeMTPPublishedTupleOffer?
     let nativeVisionProfile: NativeVisionProfile?
+    let continuousBatchTextPreparationLane: ContinuousBatchTextPreparationLane?
 
     init(
         state: SwapState,
@@ -404,7 +509,8 @@ public struct RuntimeSnapshot: @unchecked Sendable {
         nativeMTPCapability: NativeMTPCapability? = nil,
         schedulerSupportsNativeMTP: Bool = false,
         nativeMTPTupleOffer: NativeMTPPublishedTupleOffer? = nil,
-        nativeVisionProfile: NativeVisionProfile? = nil
+        nativeVisionProfile: NativeVisionProfile? = nil,
+        continuousBatchTextPreparationLane: ContinuousBatchTextPreparationLane? = nil
     ) {
         self.state = state
         self.container = container
@@ -428,6 +534,7 @@ public struct RuntimeSnapshot: @unchecked Sendable {
         self.schedulerSupportsNativeMTP = schedulerSupportsNativeMTP
         self.nativeMTPTupleOffer = nativeMTPTupleOffer
         self.nativeVisionProfile = nativeVisionProfile
+        self.continuousBatchTextPreparationLane = continuousBatchTextPreparationLane
     }
 
     var hasTargetCompatibleDraft: Bool {
@@ -1776,6 +1883,7 @@ actor ModelRuntime: ModelRuntimeServing {
     private var currentNativeMTPDrafterContainer: MTPDrafterContainer?
     private var currentNativeMTPCapability: NativeMTPCapability?
     private var currentNativeMTPAdmissionCapability: NativeMTPAdmissionCapability?
+    private var currentContinuousBatchTextPreparationLane: ContinuousBatchTextPreparationLane?
     private var currentNativeMTPStatusSink = NativeMTPStatusSink.disabled()
     private var currentNativeMTPTupleOffer: NativeMTPPublishedTupleOffer? {
         didSet { nativeMTPPublishedTupleOffer.set(currentNativeMTPTupleOffer, generation: currentSpecDecodeGeneration) }
@@ -3243,6 +3351,7 @@ maxTokens: 1,
         self.currentNativeMTPDrafterContainer = nil
         self.currentNativeMTPCapability = nil
         self.currentNativeMTPAdmissionCapability = nil
+        self.currentContinuousBatchTextPreparationLane = nil
         self.currentNativeMTPTupleOffer = nil
         self.currentNativeMTPSelfTestInput = nil
         self.currentNativeVisionProfile = nil
@@ -3665,6 +3774,11 @@ maxTokens: 1,
                 )
             }
         }
+        self.currentContinuousBatchTextPreparationLane = await Self.makeContinuousBatchTextPreparationLane(
+            container: container,
+            admissionCapability: self.currentNativeMTPAdmissionCapability,
+            nativeVisionProfile: self.currentNativeVisionProfile
+        )
         Self.logPagedKVAttachDecision(self.pagedKVAttachDecision)
 
         if let draftModelID = normalizedDraftModelID {
@@ -3765,6 +3879,7 @@ maxTokens: 1,
         container: ModelContainer? = nil,
         continuousBatchingBackend: (any ContinuousBatchSchedulerBackend)? = nil,
         continuousBatchPrefillGrouping: ContinuousBatchPrefillGroupingRule? = nil,
+        testContinuousBatchTextPreparationLane: ContinuousBatchTextPreparationLane? = nil,
         pagedKVRuntimeProber: PagedKVRuntimeProber = .live,
         loader: @escaping @Sendable (String) async throws -> (ModelContainer, String, String?),
         testLoader: (@Sendable (String) async throws -> (String, String?))? = nil,
@@ -3807,6 +3922,7 @@ maxTokens: 1,
         #else
         self.currentNativeMTPAdmissionCapability = nil
         #endif
+        self.currentContinuousBatchTextPreparationLane = testContinuousBatchTextPreparationLane
         self.currentNativeMTPTupleOffer = nil
         self.currentNativeMTPSelfTestInput = nil
         self.configuredDraftModelID = normalizedDraftModelID
@@ -4040,7 +4156,8 @@ maxTokens: 1,
             nativeMTPCapability: currentNativeMTPCapability,
             schedulerSupportsNativeMTP: currentServedSchedulerSupportsNativeMTP(),
             nativeMTPTupleOffer: currentNativeMTPTupleOffer,
-            nativeVisionProfile: currentNativeVisionProfile
+            nativeVisionProfile: currentNativeVisionProfile,
+            continuousBatchTextPreparationLane: currentContinuousBatchTextPreparationLane
         )
     }
 
@@ -4151,7 +4268,8 @@ maxTokens: 1,
                 nativeMTPCapability: currentNativeMTPCapability,
                 schedulerSupportsNativeMTP: schedulerSupportsNativeMTP,
                 nativeMTPTupleOffer: currentNativeMTPTupleOffer,
-                nativeVisionProfile: currentNativeVisionProfile
+                nativeVisionProfile: currentNativeVisionProfile,
+                continuousBatchTextPreparationLane: currentContinuousBatchTextPreparationLane
             )
         }
         return RuntimeSnapshot(
@@ -4172,7 +4290,8 @@ maxTokens: 1,
             nativeMTPCapability: currentNativeMTPCapability,
             schedulerSupportsNativeMTP: schedulerSupportsNativeMTP,
             nativeMTPTupleOffer: currentNativeMTPTupleOffer,
-            nativeVisionProfile: currentNativeVisionProfile
+            nativeVisionProfile: currentNativeVisionProfile,
+            continuousBatchTextPreparationLane: currentContinuousBatchTextPreparationLane
         )
     }
 
@@ -5940,6 +6059,59 @@ maxTokens: 1,
         return cap
     }
 
+    /// The scheduler may group a native prompt at a different offset only
+    /// when the backend carries a family-specific shared-forward capability,
+    /// or when its flattened-token bound already serializes grouped rows.
+    nonisolated static func schedulerNativeMTPPromptRowsJoinRaggedPrefill(
+        backend: (any ContinuousBatchSchedulerBackend)?,
+        prefillGrouping: ContinuousBatchPrefillGroupingRule
+    ) -> Bool {
+        guard let backend = backend as? PagedKVSharedForwardBackend else { return false }
+        return backend.nativeMTPPromptRowsJoinRaggedPrefill
+            || PagedKVSharedForwardBackend.prefillsGroupedRowsAlone(
+                cacheKinds: backend.cacheKinds,
+                minimumGroupedChunkTokens: prefillGrouping.minimumGroupedChunkTokens
+            )
+    }
+
+    static func makeContinuousBatchTextPreparationLane(
+        container: ModelContainer?,
+        admissionCapability: NativeMTPAdmissionCapability?,
+        nativeVisionProfile: NativeVisionProfile?,
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind]? = nil
+    ) async -> ContinuousBatchTextPreparationLane? {
+        guard continuousBatchTextPreparationEligible(
+                familyAdapter: admissionCapability?.familyAdapter,
+                nativeVisionProfile: nativeVisionProfile
+              ),
+              let container else {
+            return nil
+        }
+        let resolvedCacheKinds: [PagedKVSharedForwardBackend.CacheKind]?
+        if let cacheKinds {
+            resolvedCacheKinds = cacheKinds
+        } else {
+            resolvedCacheKinds = await pagedKVCacheKinds(container: container)
+        }
+        guard let resolvedCacheKinds else { return nil }
+        let processor = await container.processor
+        let tokenizer = await container.tokenizer
+        let configuration = await container.configuration
+        return ContinuousBatchTextPreparationLane(
+            processor: processor,
+            tokenizer: tokenizer,
+            configuration: configuration,
+            hasRecurrentLayers: resolvedCacheKinds.contains(.recurrentMamba)
+        )
+    }
+
+    static func continuousBatchTextPreparationEligible(
+        familyAdapter: String?,
+        nativeVisionProfile: NativeVisionProfile?
+    ) -> Bool {
+        familyAdapter == "qwen3_5_mtp_v1" && nativeVisionProfile == nil
+    }
+
     private nonisolated static func makeContinuousBatchScheduler(
         decision: PagedKVAttachDecision,
         tuple: ContinuousBatchingRequestedTuple?,
@@ -5999,12 +6171,10 @@ maxTokens: 1,
                 prefillGrouping: prefillGrouping,
                 allowsRaggedPrefillOffsets: (backend as? PagedKVSharedForwardBackend)?
                     .supportsRaggedPrefillOffsets ?? false,
-                nativeMTPPromptRowsJoinRaggedPrefill: (backend as? PagedKVSharedForwardBackend).map {
-                    PagedKVSharedForwardBackend.prefillsGroupedRowsAlone(
-                        cacheKinds: $0.cacheKinds,
-                        minimumGroupedChunkTokens: prefillGrouping.minimumGroupedChunkTokens
-                    )
-                } ?? false,
+                nativeMTPPromptRowsJoinRaggedPrefill: schedulerNativeMTPPromptRowsJoinRaggedPrefill(
+                    backend: backend,
+                    prefillGrouping: prefillGrouping
+                ),
                 maxDecodeRowsPerForward: schedulerDecodeRowBound(configured: maxDecodeRowsPerForward, backend: backend)
             ),
             allocator: allocator,
@@ -6099,7 +6269,8 @@ maxTokens: 1,
                 // with this on and are coherent with it off. Applies to
                 // hybrid (Qwen3.6) and KV-only layouts alike.
                 compiledDecode: false,
-                drafterContainer: nativeMTPDrafterContainer
+                drafterContainer: nativeMTPDrafterContainer,
+                nativeMTPFamilyAdapter: nativeMTPAdmissionCapability?.familyAdapter
             ),
             maxBatch: maxBatch,
             queueLimit: queueLimit,
@@ -6627,6 +6798,7 @@ maxTokens: 1,
         currentNativeMTPDrafterContainer = nil
         currentNativeMTPCapability = nil
         currentNativeMTPAdmissionCapability = nil
+        currentContinuousBatchTextPreparationLane = nil
         currentNativeMTPTupleOffer = nil
         parkedNativeMTPTuple = nil
         currentSpecDecodeGeneration += 1
@@ -6865,10 +7037,11 @@ maxTokens: 1,
     func preflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws {
         try ToolSelectionPolicy.validateRequest(request, loadedModelID: toolSelectionModelID(handle.snapshot), runtime: "mlx_cache")
         _ = try Self.validateNativeVisionRequest(request, profile: handle.snapshot.nativeVisionProfile)
-        // SPEC-025 §5.2: the streaming path runs preflight (prompt prepare inside
-        // container.perform — real model-thread work) before stream() brackets
-        // active inference. Bracket it here too so a pre-first-token wedge during
-        // preflight is observable (active_inference true) rather than reading idle.
+        // SPEC-025 §5.2: the streaming path prepares the prompt during preflight
+        // before stream() brackets active inference. Bracket it here too so a
+        // pre-first-token wedge is observable (active_inference true) rather than
+        // reading idle. Eligible Qwen text snapshots use their pinned preparation
+        // lane; serial and vision snapshots retain container isolation.
         ModelLivenessTracker.shared.beginInference()
         defer { ModelLivenessTracker.shared.endInference() }
         _ = try applyContinuousBatchingPolicy(request: request, snapshot: handle.snapshot)
@@ -6892,6 +7065,27 @@ maxTokens: 1,
             // buyer under SPEC-001-R011) releases the gate without preparing.
             try Task.checkCancellation()
             try handle.drainCancelled.check()
+            if !request.containsNonTextMessageContentPart,
+               let lane = handle.snapshot.continuousBatchTextPreparationLane {
+                if let requestID = Self.schedulerRequestID(for: request) {
+                    CBTrace.logPreparation(requestID, "rt_cb_prepare_begin path=preflight")
+                }
+                let (prepared, _) = try await lane.prepare(
+                    request: request,
+                    maxContextTokens: maxContextTokens,
+                    templateSupportsThinkingToggle: templateSupportsThinkingToggle,
+                    templateSupportsPreserveThinking: templateSupportsPreserveThinking,
+                    toolSelectionModelID: selectionModelID,
+                    drainCancelled: handle.drainCancelled
+                )
+                if let requestID = Self.schedulerRequestID(for: request) {
+                    CBTrace.logPreparation(
+                        requestID,
+                        "rt_cb_prepare_end path=preflight tokens=\(prepared.promptTokens.count)"
+                    )
+                }
+                return
+            }
             return try await container.perform { context in
                 try Task.checkCancellation()
                 try handle.drainCancelled.check()
@@ -7058,32 +7252,96 @@ maxTokens: 1,
         try handle.drainCancelled.check()
     }
 
-    private struct ContinuousBatchPreparedRequest: Sendable {
-        let promptTokens: [Int]
-        let stopTokenSequences: [[Int]]
-        let modelStopTokenIDs: Set<Int>
-        let recurrentCheckpointPositions: [Int]
-        /// The loaded model has recurrent (hybrid) layers; computed for keyed
-        /// requests only, false otherwise.
-        let modelHasRecurrentLayers: Bool
-        /// SPEC-018 §3.11 call prefill ending `promptTokens`, if any.
-        let toolCallPrefill: String?
-    }
-
     /// Keyed hybrid requests only: where the batched row snapshots recurrent
     /// state, identical to the serial path's `prefillRecurrentCheckpoints`.
-    private nonisolated static func continuousBatchRecurrentCheckpointPositions(
+    nonisolated static func continuousBatchRecurrentCheckpointPositions(
         promptTokens: [Int],
         conversationKey: String?,
         hybrid: Bool,
         context: ModelContext
     ) -> [Int] {
+        continuousBatchRecurrentCheckpointPositions(
+            promptTokens: promptTokens,
+            conversationKey: conversationKey,
+            hybrid: hybrid,
+            tokenizer: context.tokenizer
+        )
+    }
+
+    nonisolated static func continuousBatchRecurrentCheckpointPositions(
+        promptTokens: [Int],
+        conversationKey: String?,
+        hybrid: Bool,
+        tokenizer: any MLXLMCommon.Tokenizer
+    ) -> [Int] {
         guard nonEmpty(conversationKey) != nil else { return [] }
         return ConversationCache.recurrentCheckpointPositions(
             promptTokenIds: promptTokens.map(Int32.init),
-            imStartTokenID: context.tokenizer.convertTokenToId("<|im_start|>").map(Int32.init),
+            imStartTokenID: tokenizer.convertTokenToId("<|im_start|>").map(Int32.init),
             hybrid: hybrid,
-            decode: { context.tokenizer.decode(tokenIds: $0) })
+            decode: { tokenizer.decode(tokenIds: $0) })
+    }
+
+    private nonisolated static func prepareContinuousBatchRequest(
+        _ request: ChatCompletionRequest,
+        snapshot: RuntimeSnapshot,
+        container: ModelContainer,
+        maxContextTokens: Int,
+        toolSelectionModelID: String?,
+        drainCancelled: DrainCancelToken
+    ) async throws -> (ContinuousBatchPreparedRequest, StreamingDetokenizer) {
+        if !request.containsNonTextMessageContentPart,
+           let lane = snapshot.continuousBatchTextPreparationLane {
+            try drainCancelled.check()
+            try Task.checkCancellation()
+            return try await lane.prepare(
+                request: request,
+                maxContextTokens: maxContextTokens,
+                templateSupportsThinkingToggle: snapshot.templateSupportsThinkingToggle,
+                templateSupportsPreserveThinking: snapshot.templateSupportsPreserveThinking,
+                toolSelectionModelID: toolSelectionModelID,
+                drainCancelled: drainCancelled
+            )
+        }
+        return try await container.perform { context -> (ContinuousBatchPreparedRequest, StreamingDetokenizer) in
+            try drainCancelled.check()
+            try Task.checkCancellation()
+            let (lmInput, toolCallPrefill) = try await Self.preparedRequestInput(
+                for: request,
+                context: context,
+                templateSupportsThinkingToggle: snapshot.templateSupportsThinkingToggle,
+                templateSupportsPreserveThinking: snapshot.templateSupportsPreserveThinking,
+                toolSelectionModelID: toolSelectionModelID
+            )
+            let promptTokens = lmInput.text.tokens.asArray(Int32.self).map(Int.init)
+            try Self.validatePromptTokenCount(promptTokens.count, maxContextTokens: maxContextTokens)
+            let stopTokenSequences = Self.continuousBatchStopTokenSequences(
+                requestStops: request.stop,
+                context: context
+            )
+            let tokenizer = context.tokenizer
+            // Only keyed requests can hold or reuse conversation state.
+            let hybrid = try Self.nonEmpty(request.conversationKey) != nil
+                && ConversationCacheLayers.hasRecurrentLayers(context.model.newCache(parameters: nil))
+            return (
+                ContinuousBatchPreparedRequest(
+                    promptTokens: promptTokens,
+                    stopTokenSequences: stopTokenSequences,
+                    modelStopTokenIDs: Self.generationStopTokenIDs(
+                        for: Self.harmonyTerminalPreservingContext(from: context, modelID: request.model)
+                    ),
+                    recurrentCheckpointPositions: Self.continuousBatchRecurrentCheckpointPositions(
+                        promptTokens: promptTokens,
+                        conversationKey: request.conversationKey,
+                        hybrid: hybrid,
+                        context: context
+                    ),
+                    modelHasRecurrentLayers: hybrid,
+                    toolCallPrefill: toolCallPrefill
+                ),
+                StreamingDetokenizer(tokenizer: tokenizer)
+            )
+        }
     }
 
     /// The tokens a batched hybrid entry commits: the canonical list cut to the
@@ -7988,49 +8246,17 @@ maxTokens: 1,
         let maxContextTokens = maxContextTokens
         let stopTokenFilter = snapshot.nativeVisionProfile == nil
             ? stopTokenFilter : NativeVisionProfile.stopTokenFilter
-        let templateSupportsThinkingToggle = snapshot.templateSupportsThinkingToggle
-        let templateSupportsPreserveThinking = snapshot.templateSupportsPreserveThinking
         let selectionModelID = toolSelectionModelID(snapshot)
-        CBTrace.log(schedulerRequestID, "rt_cb_prepare")
-        let (prepared, detokenizer) = try await container.perform { context -> (ContinuousBatchPreparedRequest, StreamingDetokenizer) in
-            try drainCancelled.check()
-            try Task.checkCancellation()
-            let (lmInput, toolCallPrefill) = try await Self.preparedRequestInput(
-                for: request,
-                context: context,
-                templateSupportsThinkingToggle: templateSupportsThinkingToggle,
-                templateSupportsPreserveThinking: templateSupportsPreserveThinking,
-                toolSelectionModelID: selectionModelID
-            )
-            let promptTokens = lmInput.text.tokens.asArray(Int32.self).map(Int.init)
-            try Self.validatePromptTokenCount(promptTokens.count, maxContextTokens: maxContextTokens)
-            let stopTokenSequences = Self.continuousBatchStopTokenSequences(
-                requestStops: request.stop,
-                context: context
-            )
-            let tokenizer = context.tokenizer
-            // Only keyed requests can hold or reuse conversation state.
-            let hybrid = try Self.nonEmpty(request.conversationKey) != nil
-                && ConversationCacheLayers.hasRecurrentLayers(context.model.newCache(parameters: nil))
-            return (
-                ContinuousBatchPreparedRequest(
-                    promptTokens: promptTokens,
-                    stopTokenSequences: stopTokenSequences,
-                    modelStopTokenIDs: Self.generationStopTokenIDs(
-                        for: Self.harmonyTerminalPreservingContext(from: context, modelID: request.model)
-                    ),
-                    recurrentCheckpointPositions: Self.continuousBatchRecurrentCheckpointPositions(
-                        promptTokens: promptTokens,
-                        conversationKey: request.conversationKey,
-                        hybrid: hybrid,
-                        context: context
-                    ),
-                    modelHasRecurrentLayers: hybrid,
-                    toolCallPrefill: toolCallPrefill
-                ),
-                StreamingDetokenizer(tokenizer: tokenizer)
-            )
-        }
+        CBTrace.logPreparation(schedulerRequestID, "rt_cb_prepare_begin path=complete")
+        let (prepared, detokenizer) = try await Self.prepareContinuousBatchRequest(
+            request,
+            snapshot: snapshot,
+            container: container,
+            maxContextTokens: maxContextTokens,
+            toolSelectionModelID: selectionModelID,
+            drainCancelled: drainCancelled
+        )
+        CBTrace.logPreparation(schedulerRequestID, "rt_cb_prepare_end path=complete tokens=\(prepared.promptTokens.count)")
 
         try drainCancelled.check()
         try Task.checkCancellation()
@@ -8126,7 +8352,7 @@ maxTokens: 1,
         )
         let result: ContinuousBatchSchedulerResult
         do {
-            CBTrace.log(schedulerRequestID, "rt_cb_submit")
+            CBTrace.logPreparation(schedulerRequestID, "rt_cb_submit path=complete")
             // Non-streaming receipts report full generation latency as TTFT
             // (SPEC-015): the buyer sees nothing before the whole body.
             result = try await Self.withDrainAndClientCancellation(drainCancelled, shouldCancel: shouldCancel) {
@@ -8454,49 +8680,18 @@ maxTokens: 1,
         let maxContextTokens = maxContextTokens
         let stopTokenFilter = snapshot.nativeVisionProfile == nil
             ? stopTokenFilter : NativeVisionProfile.stopTokenFilter
-        let templateSupportsThinkingToggle = snapshot.templateSupportsThinkingToggle
-        let templateSupportsPreserveThinking = snapshot.templateSupportsPreserveThinking
         let selectionModelID = toolSelectionModelID(snapshot)
         let requestStops = request.stop
-        let (prepared, detokenizer) = try await container.perform { context -> (ContinuousBatchPreparedRequest, StreamingDetokenizer) in
-            try drainCancelled.check()
-            try Task.checkCancellation()
-            let (lmInput, toolCallPrefill) = try await Self.preparedRequestInput(
-                for: request,
-                context: context,
-                templateSupportsThinkingToggle: templateSupportsThinkingToggle,
-                templateSupportsPreserveThinking: templateSupportsPreserveThinking,
-                toolSelectionModelID: selectionModelID
-            )
-            let promptTokens = lmInput.text.tokens.asArray(Int32.self).map(Int.init)
-            try Self.validatePromptTokenCount(promptTokens.count, maxContextTokens: maxContextTokens)
-            let stopTokenSequences = Self.continuousBatchStopTokenSequences(
-                requestStops: requestStops,
-                context: context
-            )
-            let tokenizer = context.tokenizer
-            // Only keyed requests can hold or reuse conversation state.
-            let hybrid = try Self.nonEmpty(request.conversationKey) != nil
-                && ConversationCacheLayers.hasRecurrentLayers(context.model.newCache(parameters: nil))
-            return (
-                ContinuousBatchPreparedRequest(
-                    promptTokens: promptTokens,
-                    stopTokenSequences: stopTokenSequences,
-                    modelStopTokenIDs: Self.generationStopTokenIDs(
-                    for: Self.harmonyTerminalPreservingContext(from: context, modelID: request.model)
-                ),
-                    recurrentCheckpointPositions: Self.continuousBatchRecurrentCheckpointPositions(
-                        promptTokens: promptTokens,
-                        conversationKey: request.conversationKey,
-                        hybrid: hybrid,
-                        context: context
-                    ),
-                    modelHasRecurrentLayers: hybrid,
-                    toolCallPrefill: toolCallPrefill
-                ),
-                StreamingDetokenizer(tokenizer: tokenizer)
-            )
-        }
+        CBTrace.logPreparation(schedulerRequestID, "rt_cb_prepare_begin path=stream")
+        let (prepared, detokenizer) = try await Self.prepareContinuousBatchRequest(
+            request,
+            snapshot: snapshot,
+            container: container,
+            maxContextTokens: maxContextTokens,
+            toolSelectionModelID: selectionModelID,
+            drainCancelled: drainCancelled
+        )
+        CBTrace.logPreparation(schedulerRequestID, "rt_cb_prepare_end path=stream tokens=\(prepared.promptTokens.count)")
 
         try drainCancelled.check()
         try Task.checkCancellation()
@@ -8594,6 +8789,7 @@ maxTokens: 1,
         let result: ContinuousBatchSchedulerResult
         let firstTokenClock = ContinuousBatchFirstTokenClock()
         do {
+            CBTrace.logPreparation(schedulerRequestID, "rt_cb_submit path=stream")
             // The SPEC-019 structured idle timeout ends the row as it ends the
             // serial generate loop.
             result = try await Self.withDrainAndClientCancellation(
@@ -9660,9 +9856,21 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         requestStops: [String],
         context: ModelContext
     ) -> [[Int]] {
-        let modelStops = generationStopTokenIDs(for: context).sorted().map { [$0] }
+        continuousBatchStopTokenSequences(
+            requestStops: requestStops,
+            modelStopTokenIDs: generationStopTokenIDs(for: context),
+            tokenizer: context.tokenizer
+        )
+    }
+
+    static func continuousBatchStopTokenSequences(
+        requestStops: [String],
+        modelStopTokenIDs: Set<Int>,
+        tokenizer: any MLXLMCommon.Tokenizer
+    ) -> [[Int]] {
+        let modelStops = modelStopTokenIDs.sorted().map { [$0] }
         let buyerStops = requestStops.map {
-            context.tokenizer.encode(text: $0, addSpecialTokens: false)
+            tokenizer.encode(text: $0, addSpecialTokens: false)
         }.filter { !$0.isEmpty }
         return modelStops + buyerStops
     }
@@ -9687,6 +9895,22 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
             stopTokenIDs.insert(eosTokenID)
         }
         for token in context.configuration.extraEOSTokens {
+            if let tokenID = tokenizer.convertTokenToId(token) {
+                stopTokenIDs.insert(tokenID)
+            }
+        }
+        return stopTokenIDs
+    }
+
+    static func generationStopTokenIDs(
+        configuration: ModelConfiguration,
+        tokenizer: any MLXLMCommon.Tokenizer
+    ) -> Set<Int> {
+        var stopTokenIDs = configuration.eosTokenIds
+        if let eosTokenID = tokenizer.eosTokenId {
+            stopTokenIDs.insert(eosTokenID)
+        }
+        for token in configuration.extraEOSTokens {
             if let tokenID = tokenizer.convertTokenToId(token) {
                 stopTokenIDs.insert(tokenID)
             }
@@ -13473,6 +13697,36 @@ maxTokens: maxTokens,
             return (lmInput, nil)
         }
         return (LMInput(tokens: MLXArray(tokens.map(Int32.init))), plan.prefill)
+    }
+
+    static func preparedRequestTokens(
+        for request: ChatCompletionRequest,
+        processor: any UserInputProcessor,
+        tokenizer: any MLXLMCommon.Tokenizer,
+        templateSupportsThinkingToggle: Bool,
+        templateSupportsPreserveThinking: Bool,
+        toolSelectionModelID: String?
+    ) async throws -> (tokens: [Int], toolCallPrefill: String?) {
+        let plan = try toolCallPrefill(for: request, toolSelectionModelID: toolSelectionModelID)
+        let input = try userInput(
+            for: request,
+            templateSupportsThinkingToggle: templateSupportsThinkingToggle,
+            templateSupportsPreserveThinking: templateSupportsPreserveThinking,
+            toolSelectionModelID: toolSelectionModelID
+        )
+        let lmInput = try await processor.prepare(input: input)
+        let promptTokens = lmInput.text.tokens.asArray(Int.self)
+        guard let plan else { return (promptTokens, nil) }
+        guard let tokens = appendingToolCallPrefill(
+            plan.prefill,
+            generationPromptSuffix: plan.generationPromptSuffix,
+            to: promptTokens,
+            tokenizer: tokenizer
+        ) else {
+            fputs("warning: tool-call prefill skipped; the generation prompt does not end as the profile expects\n", stderr)
+            return (promptTokens, nil)
+        }
+        return (tokens, plan.prefill)
     }
 
     /// Tool-selection instructions join a leading system message, or become

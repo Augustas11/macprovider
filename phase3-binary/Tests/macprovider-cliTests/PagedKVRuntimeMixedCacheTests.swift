@@ -86,6 +86,59 @@ final class PagedKVRuntimeMixedCacheTests: XCTestCase {
         XCTAssertEqual(ModelRuntime.schedulerDecodeRowBound(configured: 11, backend: nil), 11)
     }
 
+    func testSchedulerNativeRaggedPrefillBindingKeepsQwenAndExistingGLMCapabilitiesClosed() {
+        let container = ModelContainer(context: ModelContext(
+            configuration: ModelConfiguration(id: "test"),
+            model: MixedCacheFakeModel(recorder: MixedCacheRecorder(), nextTokenByInput: [:], attentionDType: .float16),
+            processor: MixedCacheUserInputProcessor(),
+            tokenizer: MixedCacheTokenizer()
+        ))
+        let qwen = PagedKVSharedForwardBackend(
+            container: container,
+            blockSizeTokens: 32,
+            maxPhysicalBlocks: 16,
+            poolEpoch: 1,
+            layerCount: 2,
+            cacheKinds: [.recurrentMamba, .pagedAttention],
+            nativeMTPFamilyAdapter: "qwen3_5_mtp_v1"
+        )
+        let defaultQwenLayout = PagedKVSharedForwardBackend(
+            container: container,
+            blockSizeTokens: 32,
+            maxPhysicalBlocks: 16,
+            poolEpoch: 1,
+            layerCount: 2,
+            cacheKinds: [.recurrentMamba, .pagedAttention]
+        )
+        let glm = PagedKVSharedForwardBackend(
+            container: container,
+            blockSizeTokens: 256,
+            maxPhysicalBlocks: 16,
+            poolEpoch: 1,
+            layerCount: 2,
+            cacheKinds: [.recurrentMamba, .pagedMLA(kpool: 4)]
+        )
+        let qwenRule = ContinuousBatchPrefillGroupingRule.sortedGatherMoE(numExperts: 256, topK: 8)
+        let glmRule = ContinuousBatchPrefillGroupingRule.sortedGatherMoE(numExperts: 288, topK: 8)
+
+        XCTAssertTrue(ModelRuntime.schedulerNativeMTPPromptRowsJoinRaggedPrefill(
+            backend: qwen,
+            prefillGrouping: qwenRule
+        ))
+        XCTAssertFalse(ModelRuntime.schedulerNativeMTPPromptRowsJoinRaggedPrefill(
+            backend: defaultQwenLayout,
+            prefillGrouping: qwenRule
+        ))
+        XCTAssertTrue(ModelRuntime.schedulerNativeMTPPromptRowsJoinRaggedPrefill(
+            backend: glm,
+            prefillGrouping: glmRule
+        ))
+        XCTAssertFalse(ModelRuntime.schedulerNativeMTPPromptRowsJoinRaggedPrefill(
+            backend: nil,
+            prefillGrouping: qwenRule
+        ))
+    }
+
     /// The native-MTP bench and hardware E2E inject a real paged-KV backend.
     /// That path must use the serve path's decode window, which is the same
     /// 16-step window for hybrid (Qwen3.6) and KV-only layouts.

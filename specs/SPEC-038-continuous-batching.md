@@ -1,15 +1,31 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.25
+Version: v0.3.26
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.26 (2026-10-21, FR-CB2 Qwen prompt admission and grouping):**
+FR-CB2 and AC-16: a backend bound to the validated `qwen3_5_mtp_v1`
+admission adapter may include native-MTP prompt rows in a shared ragged
+prefill forward. Each row keeps its own target cache and hidden-state slice;
+only native rows seed a drafter. Text prompt preparation for this capability
+also proceeds independently of the target-forward lock, so arriving requests
+can reach scheduler admission during an occupied target forward. This does
+not guarantee that staggered arrivals form a compatible group. Existing chunk,
+FCFS, kernel-route, recurrent-state and failure rules remain in force. Other
+adapters retain the equal-offset restriction or the existing serial-cohort
+path. Acceptance requires real-model target-cache, output and drafter-seed
+parity, including a subsequent capacity downgrade to ordinary decode.
+Preparation parity, generation ownership and admission during an occupied
+target forward are tested separately from hardware performance acceptance.
+
 **Change log v0.3.25 (2026-10-21, FR-CB6 explicit sampling controls):**
 Active top-k/repetition controls cannot enter a row sampler that cannot
 represent them. Existing canary serial fallback and strict refusal apply;
 identity controls preserve routing and signed native admission is unchanged.
+
 **Change log v0.3.24 (2026-10-19, FR-CB2 serial prefill cohorts):**
 FR-CB2: on a backend that prefills every row of a prefill step in its own
 forward (no two-row shared forward fits its flattened-token cap at the
@@ -768,8 +784,8 @@ one compatible prefill group when all of these hold:
   of a shorter row;
 - no layer presents a per-row trimmed K/V window (sliding-window layers keep
   the equal-offset rule);
-- no row is a native-MTP prompt row (those keep the equal-offset rule),
-  except as below.
+- no row is a native-MTP prompt row, except for the validated Qwen
+  capability below; serial prefill cohorts remain a separate path.
 
 **(v0.3.24) Serial prefill cohorts.** On a backend on which no shared
 forward of two rows fits at the smallest chunk length that may group (its
@@ -784,8 +800,39 @@ leads, its own balanced chunk sets the length, key-spread, row and token
 bounds, no chunk crosses a recurrent checkpoint), and a native-MTP prompt row
 MUST be selected for it exactly like an ordinary row, so its prompt
 progresses as it would on the ordinary path. It still prefills alone, with
-its own drafter seeding, and never shares a forward. On every other backend
-native rows keep the equal-offset rule.
+its own drafter seeding, and never shares a forward. Native rows on other
+backends keep the equal-offset rule unless they satisfy the Qwen capability
+below.
+
+**(v0.3.26) Qwen native ragged prefill.** A backend bound to a validated
+native-MTP admission capability whose family adapter is exactly
+`qwen3_5_mtp_v1` MAY declare that native prompt rows join shared ragged
+prefill. The capability MUST be absent by default and MUST NOT be inferred
+from a model name or an unvalidated adapter string on the production path.
+All ordinary ragged-group constraints above and below still apply. The
+shared forward MUST preserve each row's target cache and select only that
+row's target hidden-state slice when seeding its native drafter; ordinary
+rows MUST NOT acquire drafter state. Target-cache and output parity against
+the same row's ordinary target path, and native drafter-seed parity against
+the row's standalone definition, MUST hold over the same chunk partition.
+Admission bounds and depth-zero capacity downgrades are unchanged: sharing
+prompt work MUST NOT authorize a speculative decode or a verification
+forward that the runtime gate would otherwise forbid. GLM serial cohorts
+retain their existing behavior.
+
+For this validated Qwen capability, attached continuous-batch text request
+preparation MUST NOT wait for an active target forward before it can reach
+scheduler admission. Both streaming and non-streaming requests, including
+ordinary capacity-fallback rows on that loaded target, MUST use preparation
+state bound to the same loaded generation as their request handle. Reloading
+or swapping the model MUST NOT substitute a new tokenizer, template or model
+metadata into an in-flight request. Preparation MUST preserve prompt tokens,
+tool-call prefill, buyer and model stops, recurrent checkpoint positions and
+cancellation behavior. Only CPU-owned token and metadata values may cross the
+preparation boundary; model caches and mutable tensor state remain under the
+target's existing ownership. Multimodal requests and other adapters retain
+their existing preparation paths. This separation MUST NOT change arrival
+timing, grouping bounds, chunk partitions or performance acceptance limits.
 
 The scheduler MUST form a ragged group only when the backend declares that it
 runs this shape in one forward. A backend whose ragged shared forward cannot
@@ -2114,6 +2161,24 @@ hardware-capability run or a static-review obligation. Every
   prove bounded queueing or reason-coded backpressure/rejection rather than
   `block_extension_failed`, cross-row mutation, or a stitched receipt.
   Prefill and decode MUST never merge into one heterogeneous model call.
+  (v0.3.26) For the Qwen native ragged capability, a real tiny-Qwen fixture
+  MUST mix native and ordinary rows at unequal offsets, compare each row's
+  target cache and output with its ordinary target baseline, and compare the
+  native drafter seed with the standalone hidden-state definition. A
+  capacity-downgraded native row MUST retain ordinary depth-zero parity and
+  issue no speculative verification until the gate permits it. Scheduler
+  fixtures MUST preserve staggered-arrival FCFS and balanced chunk lengths;
+  capability fixtures MUST reject default and non-Qwen adapter cases while
+  preserving GLM's serial-cohort behavior.
+  Streaming and non-streaming Qwen text admission fixtures MUST hold the
+  target-forward lock and prove that another request reaches scheduler
+  admission before that lock is released, including production preflight before
+  streaming. A request drained while queued for preparation MUST fail before
+  invoking the processor. The fixtures MUST also cover preparation
+  parity for tool prefill, stops and keyed recurrent checkpoints, generation
+  ownership across reload, and exclusion of multimodal and other-adapter
+  paths. Passing these fixtures does not substitute for the hardware
+  performance gates.
   (v0.3.18) Decode and verification isolation:
   - Backend-driven bitwise tests run rows with their own histories through
     the shared decode cache, the ragged prefill cache and the packed
