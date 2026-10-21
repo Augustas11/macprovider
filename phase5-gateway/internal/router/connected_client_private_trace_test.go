@@ -15,15 +15,30 @@ const (
 )
 
 type connectedClientPrivateTrace struct {
-	dir string
+	dir      string
+	toolTurn int
+	allTurns bool
 
-	mu       sync.Mutex
-	selected bool
+	mu            sync.Mutex
+	seenToolTurns int
+	selected      bool
+	issued        [7]bool
 }
 
-func newConnectedClientPrivateTrace(raw, kind string, synthetic bool, upstream string, verifiedStudio bool) (*connectedClientPrivateTrace, error) {
+func newConnectedClientPrivateTrace(raw, rawToolTurn, kind string, synthetic bool, upstream string, verifiedStudio bool) (*connectedClientPrivateTrace, error) {
 	if raw == "" {
+		if rawToolTurn != "" {
+			return nil, fmt.Errorf("private trace tool turn requires a private trace directory")
+		}
 		return nil, nil
+	}
+	toolTurn := 1
+	allTurns := rawToolTurn == "all"
+	if rawToolTurn != "" && !allTurns {
+		if len(rawToolTurn) != 1 || rawToolTurn[0] < '1' || rawToolTurn[0] > '6' {
+			return nil, fmt.Errorf("private trace tool turn must be an integer from 1 through 6 or all")
+		}
+		toolTurn = int(rawToolTurn[0] - '0')
 	}
 	if kind != "opencode" || synthetic || upstream != "http://127.0.0.1:18055" || !verifiedStudio {
 		return nil, fmt.Errorf("private trace requires actual OpenCode on the verified Studio loopback fixture")
@@ -53,36 +68,58 @@ func newConnectedClientPrivateTrace(raw, kind string, synthetic bool, upstream s
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0700 {
 		return nil, fmt.Errorf("private trace directory was not created privately")
 	}
-	return &connectedClientPrivateTrace{dir: raw}, nil
+	return &connectedClientPrivateTrace{dir: raw, toolTurn: toolTurn, allTurns: allTurns}, nil
 }
 
-func (t *connectedClientPrivateTrace) captureRequest(body []byte, hasTools bool) (bool, error) {
+// A nonzero token identifies this request's response file; zero means no capture.
+func (t *connectedClientPrivateTrace) captureRequest(body []byte, hasTools bool) (int, error) {
 	if t == nil || !hasTools {
-		return false, nil
+		return 0, nil
 	}
 	if len(body) > connectedClientTraceRequestMax {
-		return false, fmt.Errorf("private trace request exceeded four MiB")
+		return 0, fmt.Errorf("private trace request exceeded four MiB")
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.selected {
-		return false, nil
+	if !t.allTurns && t.selected {
+		return 0, nil
+	}
+	if t.seenToolTurns >= 6 {
+		return 0, fmt.Errorf("private trace exceeded six tool-bearing requests")
+	}
+	t.seenToolTurns++
+	if !t.allTurns && t.seenToolTurns != t.toolTurn {
+		return 0, nil
 	}
 	t.selected = true
-	if err := writeConnectedClientPrivateTraceFile(filepath.Join(t.dir, "request.json"), body); err != nil {
-		return false, err
+	token := t.seenToolTurns
+	if err := writeConnectedClientPrivateTraceFile(t.tracePath("request", "json", token), body); err != nil {
+		return 0, err
 	}
-	return true, nil
+	t.issued[token] = true
+	return token, nil
 }
 
-func (t *connectedClientPrivateTrace) captureResponse(body []byte, selected bool) error {
-	if t == nil || !selected {
+func (t *connectedClientPrivateTrace) captureResponse(body []byte, token int) error {
+	if t == nil || token == 0 {
 		return nil
 	}
 	if len(body) > connectedClientTraceResponseMax {
 		return fmt.Errorf("private trace response exceeded one MiB")
 	}
-	return writeConnectedClientPrivateTraceFile(filepath.Join(t.dir, "response.sse"), body)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if token < 1 || token > 6 || !t.issued[token] {
+		return fmt.Errorf("private trace response requires an issued request token")
+	}
+	return writeConnectedClientPrivateTraceFile(t.tracePath("response", "sse", token), body)
+}
+
+func (t *connectedClientPrivateTrace) tracePath(kind, extension string, token int) string {
+	if t.allTurns {
+		return filepath.Join(t.dir, fmt.Sprintf("%s-%d.%s", kind, token, extension))
+	}
+	return filepath.Join(t.dir, kind+"."+extension)
 }
 
 func writeConnectedClientPrivateTraceFile(path string, body []byte) error {
@@ -120,7 +157,7 @@ func TestConnectedClientPrivateTraceScope(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(parent, filepath.Base(t.Name()))
-			if _, err := newConnectedClientPrivateTrace(path, tc.kind, tc.synthetic, tc.upstream, tc.verifiedStudio); err == nil {
+			if _, err := newConnectedClientPrivateTrace(path, "", tc.kind, tc.synthetic, tc.upstream, tc.verifiedStudio); err == nil {
 				t.Fatal("accepted private trace outside its bounded fixture scope")
 			}
 			if _, err := os.Lstat(path); !os.IsNotExist(err) {
@@ -128,7 +165,7 @@ func TestConnectedClientPrivateTraceScope(t *testing.T) {
 			}
 		})
 	}
-	if trace, err := newConnectedClientPrivateTrace("", "codex", true, "", false); err != nil || trace != nil {
+	if trace, err := newConnectedClientPrivateTrace("", "", "codex", true, "", false); err != nil || trace != nil {
 		t.Fatalf("absent opt-in changed default behavior: trace=%v error=%v", trace, err)
 	}
 }
@@ -137,7 +174,7 @@ func TestConnectedClientPrivateTracePathSafety(t *testing.T) {
 	t.Run("private new child", func(t *testing.T) {
 		parent := privateTraceTestParent(t)
 		path := filepath.Join(parent, "trace")
-		trace, err := newConnectedClientPrivateTrace(path, "opencode", false, "http://127.0.0.1:18055", true)
+		trace, err := newConnectedClientPrivateTrace(path, "", "opencode", false, "http://127.0.0.1:18055", true)
 		if err != nil || trace == nil {
 			t.Fatalf("create private trace: %v", err)
 		}
@@ -150,7 +187,7 @@ func TestConnectedClientPrivateTracePathSafety(t *testing.T) {
 		}
 	})
 	t.Run("relative", func(t *testing.T) {
-		if _, err := newConnectedClientPrivateTrace("trace", "opencode", false, "http://127.0.0.1:18055", true); err == nil {
+		if _, err := newConnectedClientPrivateTrace("trace", "", "opencode", false, "http://127.0.0.1:18055", true); err == nil {
 			t.Fatal("accepted relative trace path")
 		}
 	})
@@ -159,7 +196,7 @@ func TestConnectedClientPrivateTracePathSafety(t *testing.T) {
 		if err := os.Chmod(parent, 0750); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := newConnectedClientPrivateTrace(filepath.Join(parent, "trace"), "opencode", false, "http://127.0.0.1:18055", true); err == nil {
+		if _, err := newConnectedClientPrivateTrace(filepath.Join(parent, "trace"), "", "opencode", false, "http://127.0.0.1:18055", true); err == nil {
 			t.Fatal("accepted group-accessible parent")
 		}
 	})
@@ -169,7 +206,7 @@ func TestConnectedClientPrivateTracePathSafety(t *testing.T) {
 		if err := os.Mkdir(path, 0700); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := newConnectedClientPrivateTrace(path, "opencode", false, "http://127.0.0.1:18055", true); err == nil {
+		if _, err := newConnectedClientPrivateTrace(path, "", "opencode", false, "http://127.0.0.1:18055", true); err == nil {
 			t.Fatal("accepted existing trace directory")
 		}
 	})
@@ -179,7 +216,7 @@ func TestConnectedClientPrivateTracePathSafety(t *testing.T) {
 		if err := os.Symlink(parent, link); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := newConnectedClientPrivateTrace(filepath.Join(link, "trace"), "opencode", false, "http://127.0.0.1:18055", true); err == nil {
+		if _, err := newConnectedClientPrivateTrace(filepath.Join(link, "trace"), "", "opencode", false, "http://127.0.0.1:18055", true); err == nil {
 			t.Fatal("accepted symlinked parent")
 		}
 	})
@@ -189,7 +226,7 @@ func TestConnectedClientPrivateTracePathSafety(t *testing.T) {
 		if err := os.Symlink(filepath.Join(parent, "missing"), path); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := newConnectedClientPrivateTrace(path, "opencode", false, "http://127.0.0.1:18055", true); err == nil {
+		if _, err := newConnectedClientPrivateTrace(path, "", "opencode", false, "http://127.0.0.1:18055", true); err == nil {
 			t.Fatal("accepted symlink trace child")
 		}
 	})
@@ -197,34 +234,262 @@ func TestConnectedClientPrivateTracePathSafety(t *testing.T) {
 
 func TestConnectedClientPrivateTraceCapture(t *testing.T) {
 	parent := privateTraceTestParent(t)
-	trace, err := newConnectedClientPrivateTrace(filepath.Join(parent, "trace"), "opencode", false, "http://127.0.0.1:18055", true)
+	trace, err := newConnectedClientPrivateTrace(filepath.Join(parent, "trace"), "", "opencode", false, "http://127.0.0.1:18055", true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	request := []byte(`{"model":"fixture","tools":[{"type":"function"}]}`)
 	response := []byte("data: {\"choices\":[]}\n\ndata: [DONE]\n\n")
-	if selected, err := trace.captureRequest([]byte(`{"model":"no-tools"}`), false); err != nil || selected {
+	if selected, err := trace.captureRequest([]byte(`{"model":"no-tools"}`), false); err != nil || selected != 0 {
 		t.Fatalf("tool-free request selected=%v error=%v", selected, err)
 	}
 	selected, err := trace.captureRequest(request, true)
-	if err != nil || !selected {
+	if err != nil || selected != 1 {
 		t.Fatalf("first tools request selected=%v error=%v", selected, err)
 	}
 	if err := trace.captureResponse(response, selected); err != nil {
 		t.Fatal(err)
 	}
-	if selected, err := trace.captureRequest([]byte(`{"later":true}`), true); err != nil || selected {
+	if selected, err := trace.captureRequest([]byte(`{"later":true}`), true); err != nil || selected != 0 {
 		t.Fatalf("later tools request selected=%v error=%v", selected, err)
 	}
 	assertPrivateTraceFile(t, filepath.Join(trace.dir, "request.json"), request)
 	assertPrivateTraceFile(t, filepath.Join(trace.dir, "response.sse"), response)
 }
 
+func TestConnectedClientPrivateTraceToolTurnSelection(t *testing.T) {
+	for _, rawTurn := range []string{"", "1", "2", "3", "4", "5", "6"} {
+		t.Run("turn="+rawTurn, func(t *testing.T) {
+			wantTurn := 1
+			if rawTurn != "" {
+				wantTurn = int(rawTurn[0] - '0')
+			}
+			trace, err := newConnectedClientPrivateTrace(filepath.Join(privateTraceTestParent(t), "trace"), rawTurn, "opencode", false, "http://127.0.0.1:18055", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var wantRequest, wantResponse []byte
+			for turn := 1; turn <= 7; turn++ {
+				if selected, err := trace.captureRequest([]byte(`{"tools":[]}`), false); err != nil || selected != 0 {
+					t.Fatal("tool-free request affected selection")
+				}
+				request := []byte(fmt.Sprintf(`{"turn":%d,"tools":[{}]}`, turn))
+				response := []byte(fmt.Sprintf("data: {\"turn\":%d}\n\n", turn))
+				selected, err := trace.captureRequest(request, true)
+				wantToken := 0
+				if turn == wantTurn {
+					wantToken = turn
+				}
+				if err != nil || selected != wantToken {
+					t.Fatalf("turn %d selected=%v error=%v", turn, selected, err)
+				}
+				if err := trace.captureResponse(response, selected); err != nil {
+					t.Fatal(err)
+				}
+				if turn < wantTurn {
+					for _, name := range []string{"request.json", "response.sse"} {
+						if _, err := os.Lstat(filepath.Join(trace.dir, name)); !os.IsNotExist(err) {
+							t.Fatal("trace file created before selected tool turn")
+						}
+					}
+				}
+				if selected != 0 {
+					wantRequest, wantResponse = request, response
+				}
+			}
+			assertPrivateTraceFile(t, filepath.Join(trace.dir, "request.json"), wantRequest)
+			assertPrivateTraceFile(t, filepath.Join(trace.dir, "response.sse"), wantResponse)
+		})
+	}
+}
+
+func TestConnectedClientPrivateTraceToolTurnBounds(t *testing.T) {
+	for _, rawTurn := range []string{"0", "7", "-1", "+1", "01", "1.0", " 1", "1 ", "one", "ALL", "all ", " all", "999999999999999999999999999"} {
+		t.Run(rawTurn, func(t *testing.T) {
+			path := filepath.Join(privateTraceTestParent(t), "trace")
+			if _, err := newConnectedClientPrivateTrace(path, rawTurn, "opencode", false, "http://127.0.0.1:18055", true); err == nil {
+				t.Fatal("accepted invalid tool turn")
+			}
+			if _, err := os.Lstat(path); !os.IsNotExist(err) {
+				t.Fatal("invalid tool turn created trace directory")
+			}
+		})
+	}
+	for _, rawTurn := range []string{"2", "all"} {
+		if _, err := newConnectedClientPrivateTrace("", rawTurn, "opencode", false, "http://127.0.0.1:18055", true); err == nil {
+			t.Fatal("accepted selected tool turn without private trace opt-in")
+		}
+	}
+}
+
+func TestConnectedClientPrivateTraceAllTurnsPairOutOfOrderResponses(t *testing.T) {
+	trace := newPrivateTraceAllTurnsForTest(t)
+	for turn := 1; turn <= 6; turn++ {
+		if token, err := trace.captureRequest([]byte(`{"tools":[]}`), false); err != nil || token != 0 {
+			t.Fatal("tool-free request affected all-turn selection")
+		}
+		request := []byte(fmt.Sprintf(`{"turn":%d,"tools":[{}]}`, turn))
+		token, err := trace.captureRequest(request, true)
+		if err != nil || token != turn {
+			t.Fatalf("turn %d token=%d error=%v", turn, token, err)
+		}
+		assertPrivateTraceFile(t, filepath.Join(trace.dir, fmt.Sprintf("request-%d.json", turn)), request)
+	}
+	for token := 6; token >= 1; token-- {
+		response := []byte(fmt.Sprintf("data: {\"turn\":%d}\n\n", token))
+		if err := trace.captureResponse(response, token); err != nil {
+			t.Fatal(err)
+		}
+		assertPrivateTraceFile(t, filepath.Join(trace.dir, fmt.Sprintf("response-%d.sse", token)), response)
+	}
+	if token, err := trace.captureRequest([]byte(`{"tools":[{}]}`), true); err == nil || token != 0 {
+		t.Fatal("accepted seventh all-turn capture")
+	}
+	entries, err := os.ReadDir(trace.dir)
+	if err != nil || len(entries) != 12 {
+		t.Fatalf("all-turn capture file count=%d error=%v", len(entries), err)
+	}
+}
+
+func TestConnectedClientPrivateTraceAllTurnsConcurrentCapAndPairing(t *testing.T) {
+	trace := newPrivateTraceAllTurnsForTest(t)
+	type result struct {
+		token int
+		body  []byte
+		err   error
+	}
+	start := make(chan struct{})
+	results := make(chan result, 9)
+	for i := 0; i < 9; i++ {
+		body := []byte(fmt.Sprintf(`{"request":%d,"tools":[{}]}`, i))
+		go func() {
+			<-start
+			token, err := trace.captureRequest(body, true)
+			if err == nil {
+				err = trace.captureResponse(body, token)
+			}
+			results <- result{token: token, body: body, err: err}
+		}()
+	}
+	close(start)
+	seen := map[int]bool{}
+	rejected := 0
+	for i := 0; i < 9; i++ {
+		got := <-results
+		if got.err != nil {
+			if got.token != 0 {
+				t.Fatal("issued capture token failed response pairing")
+			}
+			rejected++
+			continue
+		}
+		if got.token < 1 || got.token > 6 || seen[got.token] {
+			t.Fatal("invalid or duplicated concurrent capture token")
+		}
+		seen[got.token] = true
+		assertPrivateTraceFile(t, filepath.Join(trace.dir, fmt.Sprintf("request-%d.json", got.token)), got.body)
+		assertPrivateTraceFile(t, filepath.Join(trace.dir, fmt.Sprintf("response-%d.sse", got.token)), got.body)
+	}
+	if len(seen) != 6 || rejected != 3 {
+		t.Fatalf("captured=%d rejected=%d", len(seen), rejected)
+	}
+	entries, err := os.ReadDir(trace.dir)
+	if err != nil || len(entries) != 12 {
+		t.Fatalf("concurrent capture file count=%d error=%v", len(entries), err)
+	}
+}
+
+func TestConnectedClientPrivateTraceAllTurnsRetainsBoundsAndIssuedTokenRequirement(t *testing.T) {
+	trace := newPrivateTraceAllTurnsForTest(t)
+	if token, err := trace.captureRequest(make([]byte, connectedClientTraceRequestMax+1), true); err == nil || token != 0 {
+		t.Fatal("accepted oversized all-turn request")
+	}
+	for _, token := range []int{-1, 1, 6, 7} {
+		if err := trace.captureResponse([]byte("unissued"), token); err == nil {
+			t.Fatal("accepted unissued response token")
+		}
+	}
+	entries, err := os.ReadDir(trace.dir)
+	if err != nil || len(entries) != 0 {
+		t.Fatal("rejected capture created a file")
+	}
+	token, err := trace.captureRequest([]byte(`{"tools":[{}]}`), true)
+	if err != nil || token != 1 {
+		t.Fatalf("first bounded request token=%d error=%v", token, err)
+	}
+	if err := trace.captureResponse(make([]byte, connectedClientTraceResponseMax+1), token); err == nil {
+		t.Fatal("accepted oversized all-turn response")
+	}
+	if err := trace.captureResponse([]byte("first"), token); err != nil {
+		t.Fatal(err)
+	}
+	if err := trace.captureResponse([]byte("replacement"), token); err == nil {
+		t.Fatal("overwrote numbered response")
+	}
+	assertPrivateTraceFile(t, filepath.Join(trace.dir, "response-1.sse"), []byte("first"))
+}
+
+func newPrivateTraceAllTurnsForTest(t *testing.T) *connectedClientPrivateTrace {
+	t.Helper()
+	trace, err := newConnectedClientPrivateTrace(filepath.Join(privateTraceTestParent(t), "trace"), "all", "opencode", false, "http://127.0.0.1:18055", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return trace
+}
+
+func TestConnectedClientPrivateTraceSelectsLaterConcurrentRequest(t *testing.T) {
+	for _, rawTurn := range []string{"2", "6"} {
+		t.Run(rawTurn, func(t *testing.T) {
+			trace, err := newConnectedClientPrivateTrace(filepath.Join(privateTraceTestParent(t), "trace"), rawTurn, "opencode", false, "http://127.0.0.1:18055", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			type result struct {
+				selected int
+				body     []byte
+				err      error
+			}
+			start := make(chan struct{})
+			results := make(chan result, 6)
+			for i := 0; i < 6; i++ {
+				body := []byte(fmt.Sprintf(`{"request":%d,"tools":[{}]}`, i))
+				go func() {
+					<-start
+					selected, err := trace.captureRequest(body, true)
+					if err == nil {
+						err = trace.captureResponse(body, selected)
+					}
+					results <- result{selected: selected, body: body, err: err}
+				}()
+			}
+			close(start)
+			selectedCount := 0
+			var selectedBody []byte
+			for i := 0; i < 6; i++ {
+				result := <-results
+				if result.err != nil {
+					t.Fatal(result.err)
+				}
+				if result.selected != 0 {
+					selectedCount++
+					selectedBody = result.body
+				}
+			}
+			if selectedCount != 1 || trace.seenToolTurns != int(rawTurn[0]-'0') {
+				t.Fatalf("selected=%d counted tool turns=%d", selectedCount, trace.seenToolTurns)
+			}
+			assertPrivateTraceFile(t, filepath.Join(trace.dir, "request.json"), selectedBody)
+			assertPrivateTraceFile(t, filepath.Join(trace.dir, "response.sse"), selectedBody)
+		})
+	}
+}
+
 func TestConnectedClientPrivateTraceSelectsOneConcurrentRequest(t *testing.T) {
 	trace := newPrivateTraceForTest(t)
 	bodies := [][]byte{[]byte(`{"request":1,"tools":[{}]}`), []byte(`{"request":2,"tools":[{}]}`)}
 	start := make(chan struct{})
-	selected := make(chan bool, len(bodies))
+	selected := make(chan int, len(bodies))
 	errors := make(chan error, len(bodies))
 	for _, body := range bodies {
 		body := body
@@ -238,7 +503,7 @@ func TestConnectedClientPrivateTraceSelectsOneConcurrentRequest(t *testing.T) {
 	close(start)
 	selectedCount := 0
 	for range bodies {
-		if <-selected {
+		if <-selected != 0 {
 			selectedCount++
 		}
 		if err := <-errors; err != nil {
@@ -257,7 +522,7 @@ func TestConnectedClientPrivateTraceSelectsOneConcurrentRequest(t *testing.T) {
 func TestConnectedClientPrivateTraceBoundsAndExclusiveFiles(t *testing.T) {
 	t.Run("request", func(t *testing.T) {
 		trace := newPrivateTraceForTest(t)
-		if selected, err := trace.captureRequest(make([]byte, connectedClientTraceRequestMax+1), true); err == nil || selected {
+		if selected, err := trace.captureRequest(make([]byte, connectedClientTraceRequestMax+1), true); err == nil || selected != 0 {
 			t.Fatalf("oversize request selected=%v error=%v", selected, err)
 		}
 		if _, err := os.Stat(filepath.Join(trace.dir, "request.json")); !os.IsNotExist(err) {
@@ -267,10 +532,10 @@ func TestConnectedClientPrivateTraceBoundsAndExclusiveFiles(t *testing.T) {
 	t.Run("response", func(t *testing.T) {
 		trace := newPrivateTraceForTest(t)
 		selected, err := trace.captureRequest([]byte(`{"tools":[{}]}`), true)
-		if err != nil || !selected {
+		if err != nil || selected == 0 {
 			t.Fatal(err)
 		}
-		if err := trace.captureResponse(make([]byte, connectedClientTraceResponseMax+1), true); err == nil {
+		if err := trace.captureResponse(make([]byte, connectedClientTraceResponseMax+1), selected); err == nil {
 			t.Fatal("accepted oversize response")
 		}
 		if _, err := os.Stat(filepath.Join(trace.dir, "response.sse")); !os.IsNotExist(err) {
@@ -279,11 +544,15 @@ func TestConnectedClientPrivateTraceBoundsAndExclusiveFiles(t *testing.T) {
 	})
 	t.Run("exclusive", func(t *testing.T) {
 		trace := newPrivateTraceForTest(t)
+		selected, err := trace.captureRequest([]byte(`{"tools":[{}]}`), true)
+		if err != nil || selected == 0 {
+			t.Fatal(err)
+		}
 		path := filepath.Join(trace.dir, "response.sse")
 		if err := os.WriteFile(path, []byte("existing"), 0600); err != nil {
 			t.Fatal(err)
 		}
-		if err := trace.captureResponse([]byte("replacement"), true); err == nil {
+		if err := trace.captureResponse([]byte("replacement"), selected); err == nil {
 			t.Fatal("overwrote existing trace file")
 		}
 		assertPrivateTraceFile(t, path, []byte("existing"))
@@ -305,7 +574,7 @@ func privateTraceTestParent(t *testing.T) string {
 func newPrivateTraceForTest(t *testing.T) *connectedClientPrivateTrace {
 	t.Helper()
 	parent := privateTraceTestParent(t)
-	trace, err := newConnectedClientPrivateTrace(filepath.Join(parent, "trace"), "opencode", false, "http://127.0.0.1:18055", true)
+	trace, err := newConnectedClientPrivateTrace(filepath.Join(parent, "trace"), "", "opencode", false, "http://127.0.0.1:18055", true)
 	if err != nil {
 		t.Fatal(err)
 	}

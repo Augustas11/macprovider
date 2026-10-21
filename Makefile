@@ -127,6 +127,7 @@ test-dist-python:
 test-dist-release:
 	bash scripts/test-openai-wire-compat.sh
 	node --test phase3-binary/app/Tests/MalibuTests/payout-signer-chain.test.mjs
+	node --test scripts/tests/test_malibu_qwen_system.mjs
 	bash scripts/test-production-exceptions.sh
 	bash phase5-gateway/dist/test/gateway_deploy_inflight.test.sh
 	bash test/e2e-1690/tools/no-credential-argv.test.sh

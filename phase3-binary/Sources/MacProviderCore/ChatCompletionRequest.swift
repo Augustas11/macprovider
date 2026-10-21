@@ -43,6 +43,9 @@ public struct ChatCompletionRequest: Sendable {
     public let maxTokens: Int?
     public let temperature: Double
     public let topP: Double
+    /// Native sampling extensions; zero K and unit repetition are identities.
+    public let topK: Int
+    public let repetitionPenalty: Double
     public let stream: Bool
     /// OpenAI `parallel_tool_calls`. `nil` (omitted) and `false` are serial:
     /// stop generation after the first complete valid tool. `true` keeps
@@ -134,6 +137,19 @@ public struct ChatCompletionRequest: Sendable {
             throw APIError(status: 400, message: "top_p must be between 0.0 and 1.0", code: "invalid_request")
         }
 
+        let topKNumber = try optionalStrictSamplingNumber(dict["top_k"], key: "top_k") ?? 0
+        guard topKNumber.isFinite,
+              topKNumber.rounded(.towardZero) == topKNumber,
+              (0 ... Double(Int32.max)).contains(topKNumber) else {
+            throw APIError(status: 400, message: "top_k must be an integer between 0 and 2147483647", code: "invalid_request")
+        }
+        let topK = Int(topKNumber)
+        let repetitionPenalty = try optionalStrictSamplingNumber(dict["repetition_penalty"], key: "repetition_penalty") ?? 1
+        guard repetitionPenalty.isFinite, repetitionPenalty > 0,
+              Float(repetitionPenalty).isFinite, Float(repetitionPenalty) > 0 else {
+            throw APIError(status: 400, message: "repetition_penalty must be a positive finite Float-representable number", code: "invalid_request")
+        }
+
         let n = try optionalInt(dict["n"], key: "n") ?? 1
         guard n == 1 else {
             throw APIError(status: 400, message: "n must be 1", code: "invalid_request")
@@ -210,7 +226,9 @@ public struct ChatCompletionRequest: Sendable {
             topLevelKeys: Set(dict.keys),
             streamOptionKeys: streamOptionKeys,
             containsNonTextMessageContentPart: containsNonTextMessageContentPart,
-            ingestProvenance: .unknown
+            ingestProvenance: .unknown,
+            topK: topK,
+            repetitionPenalty: repetitionPenalty
         )
     }
 
@@ -239,7 +257,9 @@ public struct ChatCompletionRequest: Sendable {
             topLevelKeys: topLevelKeys,
             streamOptionKeys: streamOptionKeys,
             containsNonTextMessageContentPart: containsNonTextMessageContentPart,
-            ingestProvenance: ingestProvenance
+            ingestProvenance: ingestProvenance,
+            topK: topK,
+            repetitionPenalty: repetitionPenalty
         )
     }
 
@@ -276,7 +296,9 @@ public struct ChatCompletionRequest: Sendable {
             topLevelKeys: topLevelKeys,
             streamOptionKeys: streamOptionKeys,
             containsNonTextMessageContentPart: containsNonTextMessageContentPart,
-            ingestProvenance: ingestProvenance
+            ingestProvenance: ingestProvenance,
+            topK: topK,
+            repetitionPenalty: repetitionPenalty
         )
     }
 
@@ -302,7 +324,9 @@ public struct ChatCompletionRequest: Sendable {
             topLevelKeys: topLevelKeys,
             streamOptionKeys: streamOptionKeys,
             containsNonTextMessageContentPart: containsNonTextMessageContentPart,
-            ingestProvenance: ingestProvenance
+            ingestProvenance: ingestProvenance,
+            topK: topK,
+            repetitionPenalty: repetitionPenalty
         )
     }
 
@@ -331,7 +355,9 @@ public struct ChatCompletionRequest: Sendable {
             topLevelKeys: topLevelKeys,
             streamOptionKeys: streamOptionKeys,
             containsNonTextMessageContentPart: containsNonTextMessageContentPart,
-            ingestProvenance: ingestProvenance
+            ingestProvenance: ingestProvenance,
+            topK: topK,
+            repetitionPenalty: repetitionPenalty
         )
     }
 
@@ -359,7 +385,9 @@ public struct ChatCompletionRequest: Sendable {
             topLevelKeys: topLevelKeys,
             streamOptionKeys: streamOptionKeys,
             containsNonTextMessageContentPart: containsNonTextMessageContentPart,
-            ingestProvenance: provenance
+            ingestProvenance: provenance,
+            topK: topK,
+            repetitionPenalty: repetitionPenalty
         )
     }
 
@@ -439,13 +467,17 @@ public struct ChatCompletionRequest: Sendable {
         topLevelKeys: Set<String>,
         streamOptionKeys: Set<String>,
         containsNonTextMessageContentPart: Bool,
-        ingestProvenance: KVIngestProvenance = .unknown
+        ingestProvenance: KVIngestProvenance = .unknown,
+        topK: Int = 0,
+        repetitionPenalty: Double = 1
     ) {
         self.model = model
         self.messages = messages
         self.maxTokens = maxTokens
         self.temperature = temperature
         self.topP = topP
+        self.topK = topK
+        self.repetitionPenalty = repetitionPenalty
         self.stream = stream
         self.parallelToolCalls = parallelToolCalls
         self.stop = stop
@@ -480,6 +512,8 @@ public struct ChatCompletionRequest: Sendable {
     public var allowsSpeculativeDecoding: Bool {
         guard temperature == 0.0,
               topP == 1.0,
+              topK == 0,
+              repetitionPenalty == 1.0,
               presencePenalty == 0.0,
               frequencyPenalty == 0.0,
               stop.isEmpty,
@@ -826,6 +860,17 @@ private func effectiveMaxTokens(in dict: [String: Any]) throws -> Int? {
         )
     }
     return maxTokens ?? maxCompletionTokens
+}
+
+/// Foundation bridges JSON booleans to NSNumber, so do not accept numbers by
+/// an `as? Double` cast alone at this native sampler boundary.
+private func optionalStrictSamplingNumber(_ raw: Any?, key: String) throws -> Double? {
+    guard let raw, !(raw is NSNull) else { return nil }
+    guard let number = raw as? NSNumber,
+          CFGetTypeID(number) != CFBooleanGetTypeID() else {
+        throw APIError(status: 400, message: "\(key) must be a number", code: "invalid_request")
+    }
+    return number.doubleValue
 }
 
 private func optionalDouble(_ raw: Any?, key: String) throws -> Double? {

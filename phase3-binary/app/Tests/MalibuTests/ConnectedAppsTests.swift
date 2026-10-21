@@ -40,6 +40,327 @@ final class ConnectedAppsTests: XCTestCase {
         XCTAssertThrowsError(try ConnectedAppConfiguration.configuration(app: .openCode, model: unknown, original: nil))
     }
 
+    func testOpenCodeQwenSamplingIsModelScopedAndPreservesExistingAgents() throws {
+        let original: [String: Any] = [
+            "agent": ["build": ["prompt": "Existing prompt", "temperature": 0.2],
+                      "review": ["model": "other/model", "top_p": 0.9]],
+            "provider": ["other": ["models": ["model": ["options": ["temperature": 0.4]]]]],
+            "permission": ["bash": "ask"]
+        ]
+        for id in [
+            "qwen3-coder-30b-a3b-instruct", "qwen3-30b-a3b-instruct-2507",
+            "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit"
+        ] {
+            let selected = ConnectedModel(id: id, contextWindow: 16384, maxOutputTokens: 256)
+            let bytes = try ConnectedAppConfiguration.configuration(app: .openCode, model: selected,
+                original: ConnectedAppConfiguration.json(original))
+            let root = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+            XCTAssertEqual(root["agent"] as? NSDictionary, original["agent"] as? NSDictionary)
+            XCTAssertEqual(root["permission"] as? NSDictionary, original["permission"] as? NSDictionary)
+            let providers = try XCTUnwrap(root["provider"] as? [String: Any])
+            let existingProviders = try XCTUnwrap(original["provider"] as? [String: Any])
+            XCTAssertEqual(providers["other"] as? NSDictionary, existingProviders["other"] as? NSDictionary)
+            let malibu = try XCTUnwrap(providers["malibu"] as? [String: Any])
+            let models = try XCTUnwrap(malibu["models"] as? [String: Any])
+            XCTAssertEqual(Set(models.keys), Set([id]))
+            let entry = try XCTUnwrap(models[id] as? [String: Any])
+            XCTAssertEqual(entry["temperature"] as? Bool, true)
+            var expectedSampling: [String: Double] = ["temperature": 0.7, "top_p": 0.8, "top_k": 20]
+            if id == "qwen3-coder-30b-a3b-instruct" ||
+                id == "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit" {
+                expectedSampling["repetition_penalty"] = 1.05
+            }
+            XCTAssertEqual(entry["options"] as? [String: Double], expectedSampling)
+            XCTAssertEqual(entry["limit"] as? [String: Int], ["context": 16384, "output": 256])
+            let options = try XCTUnwrap(malibu["options"] as? [String: String])
+            XCTAssertEqual(options["apiKey"], "{env:MALIBU_API_KEY}")
+            XCTAssertNil(options["temperature"])
+            XCTAssertNil(options["top_p"])
+            XCTAssertNil(root["tools"])
+            XCTAssertNil(root["tool_choice"])
+        }
+    }
+
+    func testOpenCodeSamplingDoesNotMatchUnrelatedOrNearModelNames() throws {
+        for id in [
+            "other/model", "qwen3-32b", "qwen/qwen3-30b-a3b-instruct-2507",
+            "qwen3-coder-30b-a3b-instruct-extra", "QWEN3-CODER-30B-A3B-INSTRUCT",
+            "qwen3-30b-a3b-instruct-2507-extra",
+            "mlx-community/Qwen3-Coder-30B-A3B-Instruct-8bit",
+            "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit-extra"
+        ] {
+            let selected = ConnectedModel(id: id, contextWindow: 16384, maxOutputTokens: nil)
+            let bytes = try ConnectedAppConfiguration.configuration(app: .openCode, model: selected, original: nil)
+            let root = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+            let providers = try XCTUnwrap(root["provider"] as? [String: Any])
+            let malibu = try XCTUnwrap(providers["malibu"] as? [String: Any])
+            let models = try XCTUnwrap(malibu["models"] as? [String: Any])
+            let entry = try XCTUnwrap(models[id] as? [String: Any])
+            XCTAssertNil(entry["temperature"], id)
+            XCTAssertNil(entry["options"], id)
+            XCTAssertNil(root["agent"], id)
+        }
+    }
+
+    func testOpenCodePluginIsAppendOnlyAndPreservesCustomAgentsAndPermissions() throws {
+        let plugin = URL(fileURLWithPath: "/private/managed path/malibu-qwen-system.mjs")
+        let customPlugin: [Any] = ["custom-plugin", ["setting": true]]
+        let original: [String: Any] = [
+            "plugin": ["existing-plugin", customPlugin] as [Any],
+            "agent": ["build": ["prompt": "Custom build"], "review": ["prompt": "Custom review"]],
+            "permission": ["bash": "ask"], "provider": ["other": ["name": "Keep"]]
+        ]
+        let data = try ConnectedAppConfiguration.configuration(app: .openCode, model: model,
+            original: ConnectedAppConfiguration.json(original), plugin: plugin)
+        let result = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let plugins = try XCTUnwrap(result["plugin"] as? [Any])
+        XCTAssertEqual(Array(plugins.prefix(2)) as NSArray, original["plugin"] as? NSArray)
+        XCTAssertEqual(plugins.last as? String, plugin.absoluteString)
+        XCTAssertEqual(result["agent"] as? NSDictionary, original["agent"] as? NSDictionary)
+        XCTAssertEqual(result["permission"] as? NSDictionary, original["permission"] as? NSDictionary)
+        let existingTuple: [Any] = [plugin.absoluteString, ["keep": true]]
+        let existingEntries: [[Any]] = [[plugin.absoluteString], [existingTuple]]
+        for entries in existingEntries {
+            let bytes = try ConnectedAppConfiguration.configuration(app: .openCode, model: model,
+                original: ConnectedAppConfiguration.json(["plugin": entries]), plugin: plugin)
+            let root = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+            XCTAssertEqual(root["plugin"] as? NSArray, entries as NSArray)
+        }
+        let invalidTuple: [Any] = ["custom", false]
+        let invalidEntries: [Any] = [false, [12], [invalidTuple], [["custom"]]]
+        for invalid in invalidEntries {
+            XCTAssertThrowsError(try ConnectedAppConfiguration.configuration(app: .openCode, model: model,
+                original: ConnectedAppConfiguration.json(["plugin": invalid]), plugin: plugin))
+        }
+        XCTAssertThrowsError(try ConnectedAppConfiguration.configuration(app: .openCode, model: model,
+            original: nil, plugin: URL(string: "https://example.test/plugin.mjs")!))
+    }
+
+    @MainActor
+    func testManagedOpenCodePluginHasReceiptIntegrityAndReversibleLifecycle() throws {
+        try temporary { home in
+            let bytes = Data("export const Fixture = async () => ({});\n".utf8)
+            let store = ConnectedAppsStore(home: home, keyExists: { true }, readKey: { "test-key" },
+                                           loadOpenCodePlugin: { bytes })
+            store.models = [model]
+            store.modelID = model.id
+            store.executable = URL(fileURLWithPath: "/fake/opencode")
+            store.preview()
+            XCTAssertTrue(store.canSetup, store.status)
+            store.setup()
+            let root = home.appendingPathComponent("Library/Application Support/Malibu/ConnectedApps")
+            let plugin = root.appendingPathComponent("opencode/" + ConnectedAppConfiguration.openCodePluginFilename)
+            let receipts = ConnectedConfigTransaction(receiptDirectory: root.appendingPathComponent("backups"))
+            XCTAssertEqual(try Data(contentsOf: plugin), bytes)
+            XCTAssertEqual(try ConnectedConfigTransaction.read(plugin).mode, 0o600)
+            XCTAssertEqual(try receipts.receipt(named: "opencode-plugin")?.installed, bytes)
+            try store.validateOpenCodePlugin()
+            store.preview()
+            store.setup()
+            try store.validateOpenCodePlugin()
+            store.restore()
+            XCTAssertNil(try receipts.receipt(named: "opencode-plugin"))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: plugin.path))
+            XCTAssertThrowsError(try store.validateOpenCodePlugin())
+            store.preview()
+            store.setup()
+            try FileManager.default.removeItem(at: root.appendingPathComponent("backups/opencode-plugin.json"))
+            XCTAssertEqual(try Data(contentsOf: plugin), bytes)
+            XCTAssertThrowsError(try store.validateOpenCodePlugin(), "bytes without their receipt are not managed")
+        }
+    }
+
+    @MainActor
+    func testManagedOpenCodePluginRefusesUnownedFilesAndEditedInstalledBytes() throws {
+        try temporary { home in
+            let bytes = Data("managed plugin".utf8)
+            let store = ConnectedAppsStore(home: home, keyExists: { true }, readKey: { "test-key" },
+                                           loadOpenCodePlugin: { bytes })
+            store.models = [model]
+            store.modelID = model.id
+            store.executable = URL(fileURLWithPath: "/fake/opencode")
+            let root = home.appendingPathComponent("Library/Application Support/Malibu/ConnectedApps")
+            let plugin = root.appendingPathComponent("opencode/" + ConnectedAppConfiguration.openCodePluginFilename)
+            try ConnectedConfigTransaction.replace(plugin, expected: ConnectedConfigSnapshot(bytes: nil, mode: nil),
+                                                   bytes: Data("unowned".utf8), mode: 0o600)
+            store.preview()
+            XCTAssertFalse(store.canSetup)
+            XCTAssertEqual(try Data(contentsOf: plugin), Data("unowned".utf8))
+            try FileManager.default.removeItem(at: plugin)
+            store.preview()
+            store.setup()
+            try Data("later edit".utf8).write(to: plugin)
+            XCTAssertThrowsError(try store.validateOpenCodePlugin())
+            store.restore()
+            XCTAssertEqual(try Data(contentsOf: plugin), Data("later edit".utf8))
+            let receipts = ConnectedConfigTransaction(receiptDirectory: root.appendingPathComponent("backups"))
+            XCTAssertNotNil(try receipts.receipt(named: "opencode-plugin"))
+        }
+    }
+
+    @MainActor
+    func testLegacyOpenCodeSetupExplainsExplicitRecoveryBeforeKeyHandoff() throws {
+        try temporary { home in
+            let receipts = try installLegacyOpenCodeProfile(home: home)
+            let root = receipts.receiptDirectory.deletingLastPathComponent()
+            let configBefore = try Data(contentsOf: root.appendingPathComponent("opencode/opencode.json"))
+            let launchBefore = try Data(contentsOf: root.appendingPathComponent("opencode/Launch.command"))
+            var keyReads = 0
+            let store = ConnectedAppsStore(home: home, keyExists: { true },
+                readKey: { keyReads += 1; return "test-key" }, loadOpenCodePlugin: { Data("managed plugin".utf8) })
+            store.models = [model]
+            store.modelID = model.id
+            store.executable = URL(fileURLWithPath: "/fake/opencode")
+            store.preview()
+            XCTAssertFalse(store.canSetup)
+            XCTAssertNil(store.previewText)
+            XCTAssertEqual(store.status, ConnectedAppsError.openCodeSetupUpgrade.localizedDescription)
+            XCTAssertTrue(store.status.contains("Restore setup, then Preview setup and Set up"))
+            store.launch()
+            XCTAssertEqual(store.status, ConnectedAppsError.openCodeSetupUpgrade.localizedDescription)
+            XCTAssertEqual(keyReads, 0)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("handoff/opencode.key").path))
+            XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("opencode/opencode.json")), configBefore)
+            XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("opencode/Launch.command")), launchBefore)
+            XCTAssertNil(try receipts.receipt(named: "opencode-plugin"))
+
+            store.restore()
+            XCTAssertNil(try receipts.receipt(named: "opencode-config"))
+            XCTAssertNil(try receipts.receipt(named: "opencode-launch"))
+            store.preview()
+            XCTAssertTrue(store.canSetup, store.status)
+            store.setup()
+            XCTAssertEqual(keyReads, 1)
+            try store.validateOpenCodePlugin()
+            XCTAssertNotNil(try receipts.receipt(named: "opencode-plugin"))
+        }
+    }
+
+    @MainActor
+    func testExactQwenLegacyProfilesUseTheSameGuardedRecovery() throws {
+        for id in [
+            "qwen3-coder-30b-a3b-instruct", "qwen3-30b-a3b-instruct-2507",
+            "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit"
+        ] {
+            try temporary { home in
+                let selected = ConnectedModel(id: id, contextWindow: 16384, maxOutputTokens: nil)
+                let receipts = try installLegacyOpenCodeProfile(home: home, selectedModel: selected)
+                let store = ConnectedAppsStore(home: home, keyExists: { true }, readKey: { "test-key" },
+                    loadOpenCodePlugin: { Data("managed plugin".utf8) })
+                store.models = [selected]
+                store.modelID = id
+                store.executable = URL(fileURLWithPath: "/fake/opencode")
+                store.launch()
+                XCTAssertEqual(store.status, ConnectedAppsError.openCodeSetupUpgrade.localizedDescription, id)
+                store.restore()
+                store.preview()
+                XCTAssertTrue(store.canSetup, store.status)
+                store.setup()
+                try store.validateOpenCodePlugin()
+                XCTAssertNotNil(try receipts.receipt(named: "opencode-plugin"), id)
+            }
+        }
+    }
+
+    @MainActor
+    func testLegacyOpenCodeRecoveryRefusesEditedOrMisdirectedOwnership() throws {
+        for changed in ["config", "launch", "receipt-path", "partial-receipts"] {
+            try temporary { home in
+                let receipts = try installLegacyOpenCodeProfile(home: home)
+                let root = receipts.receiptDirectory.deletingLastPathComponent()
+                if changed == "receipt-path" {
+                    let original = try XCTUnwrap(receipts.receipt(named: "opencode-config"))
+                    let redirected = ConnectedConfigReceipt(path: root.appendingPathComponent("wrong.json").path,
+                        original: original.original, installed: original.installed)
+                    try JSONEncoder().encode(redirected).write(to: receipts.receiptDirectory.appendingPathComponent("opencode-config.json"))
+                } else if changed == "partial-receipts" {
+                    try FileManager.default.removeItem(at: receipts.receiptDirectory.appendingPathComponent("opencode-launch.json"))
+                } else {
+                    let filename = changed == "config" ? "opencode.json" : "Launch.command"
+                    try Data("user edit".utf8).write(to: root.appendingPathComponent("opencode/" + filename))
+                }
+                let store = ConnectedAppsStore(home: home, keyExists: { true })
+                store.models = [model]
+                store.modelID = model.id
+                store.executable = URL(fileURLWithPath: "/fake/opencode")
+                store.preview()
+                XCTAssertFalse(store.canSetup)
+                XCTAssertEqual(store.status, ConnectedAppsError.conflict.localizedDescription, changed)
+                store.launch()
+                XCTAssertEqual(store.status, ConnectedAppsError.conflict.localizedDescription, changed)
+                XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("handoff/opencode.key").path))
+            }
+        }
+    }
+
+    @MainActor
+    func testNewOpenCodeSetupMissingOrEditedPluginNeverLooksLegacy() throws {
+        for changed in ["missing-receipt", "missing-plugin-and-receipt", "edited-plugin", "edited-receipt"] {
+            try temporary { home in
+                let store = ConnectedAppsStore(home: home, keyExists: { true }, readKey: { "test-key" },
+                    loadOpenCodePlugin: { Data("managed plugin".utf8) })
+                store.models = [model]
+                store.modelID = model.id
+                store.executable = URL(fileURLWithPath: "/fake/opencode")
+                store.preview()
+                store.setup()
+                let root = home.appendingPathComponent("Library/Application Support/Malibu/ConnectedApps")
+                let plugin = root.appendingPathComponent("opencode/" + ConnectedAppConfiguration.openCodePluginFilename)
+                let receipt = root.appendingPathComponent("backups/opencode-plugin.json")
+                if changed.hasPrefix("missing") {
+                    try FileManager.default.removeItem(at: receipt)
+                    if changed == "missing-plugin-and-receipt" { try FileManager.default.removeItem(at: plugin) }
+                } else if changed == "edited-plugin" {
+                    try Data("edited plugin".utf8).write(to: plugin)
+                } else {
+                    let tx = ConnectedConfigTransaction(receiptDirectory: root.appendingPathComponent("backups"))
+                    let original = try XCTUnwrap(tx.receipt(named: "opencode-plugin"))
+                    let edited = ConnectedConfigReceipt(path: original.path, original: original.original,
+                        installed: Data("different receipt bytes".utf8))
+                    try JSONEncoder().encode(edited).write(to: receipt)
+                }
+                store.preview()
+                XCTAssertFalse(store.canSetup)
+                XCTAssertEqual(store.status, ConnectedAppsError.conflict.localizedDescription, changed)
+                store.launch()
+                XCTAssertEqual(store.status, ConnectedAppsError.conflict.localizedDescription, changed)
+                XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("handoff/opencode.key").path))
+            }
+        }
+    }
+
+    @MainActor
+    func testLegacyOpenCodeSetupDoesNotBlockAnotherClientPreview() throws {
+        try temporary { home in
+            _ = try installLegacyOpenCodeProfile(home: home)
+            let store = ConnectedAppsStore(home: home, keyExists: { true })
+            store.app = .goose
+            store.models = [model]
+            store.modelID = model.id
+            store.executable = URL(fileURLWithPath: "/fake/goose")
+            store.preview()
+            XCTAssertTrue(store.canSetup, store.status)
+            XCTAssertNotEqual(store.status, ConnectedAppsError.openCodeSetupUpgrade.localizedDescription)
+        }
+    }
+
+    private func installLegacyOpenCodeProfile(home: URL, selectedModel: ConnectedModel? = nil) throws -> ConnectedConfigTransaction {
+        let profile = selectedModel ?? model
+        let root = home.appendingPathComponent("Library/Application Support/Malibu/ConnectedApps")
+        let receipts = ConnectedConfigTransaction(receiptDirectory: root.appendingPathComponent("backups"))
+        let target = root.appendingPathComponent("opencode/opencode.json")
+        let config = try ConnectedAppConfiguration.configuration(app: .openCode, model: profile, original: nil)
+        try receipts.apply(receipts.preview(target: target, proposed: config), named: "opencode-config")
+        let launcher = try ConnectedAppConfiguration.launcher(app: .openCode,
+            executable: URL(fileURLWithPath: "/fake/opencode"), config: target, model: profile,
+            keyHandoff: root.appendingPathComponent("handoff/opencode.key"))
+        try receipts.apply(receipts.preview(target: root.appendingPathComponent("opencode/Launch.command"), proposed: launcher),
+            named: "opencode-launch", executable: true)
+        return receipts
+    }
+
     func testAmbiguousJSONAndExistingProviderAreRefused() {
         for source in [#"{"provider":{},"provider":{}}"#, "{// comment\n}", #"{"provider":{"malibu":{}}}"#, #"{"provider":false}"#] {
             XCTAssertThrowsError(try ConnectedAppConfiguration.configuration(app: .openCode, model: model, original: Data(source.utf8)))
@@ -123,6 +444,62 @@ final class ConnectedAppsTests: XCTestCase {
         XCTAssertTrue(text.contains("export OPENCODE_CONFIG_PROJECT_DISABLE=1\n"))
         XCTAssertLessThan(try XCTUnwrap(text.range(of: "OPENCODE_DISABLE_PROJECT_CONFIG")).lowerBound,
                           try XCTUnwrap(text.range(of: "exec ")).lowerBound)
+    }
+
+    func testOpenCodeQwenLauncherRequiresPinnedClientAfterDeletingKeyHandoff() throws {
+        for id in [
+            "qwen3-coder-30b-a3b-instruct", "qwen3-30b-a3b-instruct-2507",
+            "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit"
+        ] {
+            let selected = ConnectedModel(id: id, contextWindow: 16384, maxOutputTokens: nil)
+            let text = String(decoding: try ConnectedAppConfiguration.launcher(app: .openCode,
+                executable: URL(fileURLWithPath: "/fake/open'code"),
+                config: URL(fileURLWithPath: "/fake/opencode.json"), model: selected,
+                keyHandoff: URL(fileURLWithPath: "/fake/handoff/key")), as: UTF8.self)
+            let remove = try XCTUnwrap(text.range(of: "rm -f -- \"$KEY_FILE\""))
+            let version = try XCTUnwrap(text.range(of: "test \"$('/fake/open"))
+            XCTAssertTrue(text.contains("test \"$('/fake/open'\\''code' --version)\" = '1.17.9' || { echo 'This Qwen managed profile requires OpenCode 1.17.9.' >&2; exit 1; }"))
+            XCTAssertLessThan(remove.lowerBound, version.lowerBound)
+            XCTAssertLessThan(version.lowerBound, try XCTUnwrap(text.range(of: "exec ")).lowerBound)
+        }
+    }
+
+    func testOpenCodeVersionGuardDoesNotApplyToOtherModelsOrClients() throws {
+        for id in [
+            "other/model", "qwen/qwen3-30b-a3b-instruct-2507",
+            "qwen3-coder-30b-a3b-instruct-extra", "QWEN3-CODER-30B-A3B-INSTRUCT",
+            "qwen3-30b-a3b-instruct-2507-extra",
+            "mlx-community/Qwen3-Coder-30B-A3B-Instruct-8bit",
+            "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit-extra"
+        ] {
+            let text = String(decoding: try ConnectedAppConfiguration.launcher(app: .openCode,
+                executable: URL(fileURLWithPath: "/fake/opencode"),
+                config: URL(fileURLWithPath: "/fake/opencode.json"),
+                model: ConnectedModel(id: id, contextWindow: 16384, maxOutputTokens: nil),
+                keyHandoff: URL(fileURLWithPath: "/fake/key")), as: UTF8.self)
+            XCTAssertFalse(text.contains("--version"), id)
+            XCTAssertFalse(text.contains("1.17.9"), id)
+        }
+        let qwen = ConnectedModel(id: "qwen3-coder-30b-a3b-instruct", contextWindow: 16384, maxOutputTokens: nil)
+        for app in [ConnectedApp.codex, .goose, .crush] {
+            let text = String(decoding: try ConnectedAppConfiguration.launcher(app: app,
+                executable: URL(fileURLWithPath: "/fake/client"), config: URL(fileURLWithPath: "/fake/config"),
+                model: qwen, keyHandoff: URL(fileURLWithPath: "/fake/key")), as: UTF8.self)
+            XCTAssertFalse(text.contains("1.17.9"))
+            XCTAssertEqual(text.contains("codex-cli 0.163.0"), app == .codex)
+        }
+    }
+
+    func testOpenCodeGuidanceNamesManagedScopeWithoutClaimingProductionVerification() {
+        let text = ConnectedAppConfiguration.openCodeToolDisclosure
+        XCTAssertTrue(text.contains("Qwen3 Coder 30B A3B Instruct and Qwen3 30B A3B Instruct 2507"))
+        XCTAssertTrue(text.contains("OpenCode 1.17.9 and Malibu's managed profile"))
+        XCTAssertTrue(text.contains("Custom agent prompts are preserved."))
+        XCTAssertTrue(text.contains("actual tool activity"))
+        XCTAssertTrue(text.contains("do not verify production gateway tool use"))
+        XCTAssertFalse(text.contains("both answered without calling"))
+        XCTAssertFalse(text.contains("not yet verified"))
     }
 
     func testKeyExposureCopyIsHonestAndCrushIsWarned() {

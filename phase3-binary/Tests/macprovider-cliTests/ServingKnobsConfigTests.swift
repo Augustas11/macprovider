@@ -1479,10 +1479,48 @@ final class ServingKnobsConfigTests: XCTestCase {
         return try ChatCompletionRequest.parse(data: data)
     }
 
+    func testActiveExtendedSamplingControlsPreserveOffCanaryAndStrictRouting() throws {
+        for controls: [String: Any] in [
+            ["top_k": 20], ["repetition_penalty": 1.05],
+            ["top_k": 20, "repetition_penalty": 1.05],
+        ] {
+            let request = try parsedRequest(controls)
+            for mode in [ContinuousBatchingMode.off, .canary, .on] {
+                let capability = ContinuousBatchingPolicy.capability(
+                    mode: mode, maxBatch: 4, queueLimit: nil, kvBits: nil,
+                    draftConfigured: false,
+                    requestStateRepresentable: ModelRuntime.requestStateRepresentable(request),
+                    schedulerBackendAvailable: true, pagedKVDecision: .disabled,
+                    requestedTuple: nil, acceptanceCoverage: .unrestrictedForTests)
+                if mode == .on {
+                    XCTAssertEqual(capability.unsupportedReason, .requestStateUnrepresented)
+                    XCTAssertThrowsError(try ContinuousBatchingPolicy.validateStrictStartup(capability)) { error in
+                        XCTAssertEqual((error as? APIError)?.code, "continuous_batching_request_state_unsupported")
+                    }
+                } else {
+                    XCTAssertTrue(capability.shouldUseSerialPath)
+                    XCTAssertNoThrow(try ContinuousBatchingPolicy.validateStrictStartup(capability))
+                    if mode == .canary {
+                        XCTAssertEqual(capability.unsupportedReason, .requestStateUnrepresented)
+                    }
+                }
+            }
+        }
+    }
+
     func testRequestStateRepresentableGateOnParsedRequests() throws {
         // SPEC-038 AC-6b: sampled rows batch with the serial path's sampler and a
         // row-local seed, so plain sampling parameters no longer force serial.
         XCTAssertTrue(ModelRuntime.requestStateRepresentable(try parsedRequest([:])))
+        XCTAssertTrue(ModelRuntime.requestStateRepresentable(try parsedRequest([
+            "top_k": 0, "repetition_penalty": 1
+        ])))
+        for controls: [String: Any] in [
+            ["top_k": 20], ["repetition_penalty": 1.05],
+            ["top_k": 20, "repetition_penalty": 1.05],
+        ] {
+            XCTAssertFalse(ModelRuntime.requestStateRepresentable(try parsedRequest(controls)))
+        }
 
         let greedy: [String: Any] = ["temperature": 0, "top_p": 1.0]
         XCTAssertTrue(ModelRuntime.requestStateRepresentable(try parsedRequest(greedy)))

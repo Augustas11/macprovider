@@ -51,6 +51,11 @@ func TestConnectedGooseClientProtocol(t *testing.T) {
 }
 
 func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion string, synthetic bool) {
+	task, err := connectedClientTask(os.Getenv("MACPROVIDER_TEST_OPENCODE_TASK"), kind, synthetic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directAnswer := task == "direct-answer"
 	binary, upstream := os.Getenv("MACPROVIDER_TEST_"+envPrefix+"_BIN"), os.Getenv("MACPROVIDER_TEST_"+envPrefix+"_UPSTREAM")
 	if binary == "" || (!synthetic && upstream == "") || (synthetic && os.Getenv("MACPROVIDER_TEST_"+envPrefix+"_PROTOCOL") != "1") {
 		t.Skip("requires explicit client binary and isolated Studio provider URL")
@@ -75,7 +80,7 @@ func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion
 			t.Fatalf("execution host verification failed: %s", command)
 		}
 	}
-	privateTrace, err := newConnectedClientPrivateTrace(os.Getenv("MACPROVIDER_TEST_OPENCODE_PRIVATE_TRACE_DIR"), kind, synthetic, upstream, true)
+	privateTrace, err := newConnectedClientPrivateTrace(os.Getenv("MACPROVIDER_TEST_OPENCODE_PRIVATE_TRACE_DIR"), os.Getenv("MACPROVIDER_TEST_OPENCODE_TRACE_TOOL_TURN"), kind, synthetic, upstream, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,6 +135,8 @@ func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion
 	defer cancel()
 	var mu sync.Mutex
 	calls, inbound, streamed, matchedResult := 0, 0, false, false
+	offeredTools := false
+	var clientPrompt string
 	transport := &http.Transport{Proxy: nil, ResponseHeaderTimeout: 90 * time.Second}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -144,9 +151,14 @@ func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion
 			return nil, fmt.Errorf("fixture request exceeded four MiB")
 		}
 		var payload struct {
-			Model    string `json:"model"`
-			Stream   bool   `json:"stream"`
-			Messages []struct {
+			Model             string          `json:"model"`
+			Stream            bool            `json:"stream"`
+			ToolChoice        json.RawMessage `json:"tool_choice"`
+			Temperature       *float64        `json:"temperature"`
+			TopP              *float64        `json:"top_p"`
+			TopK              *int            `json:"top_k"`
+			RepetitionPenalty json.RawMessage `json:"repetition_penalty"`
+			Messages          []struct {
 				Role       string          `json:"role"`
 				Content    json.RawMessage `json:"content"`
 				ToolCallID string          `json:"tool_call_id"`
@@ -163,7 +175,47 @@ func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion
 			cancel()
 			return nil, fmt.Errorf("unexpected model, streaming mode, or authenticated fixture identity")
 		}
-		traceSelected, err := privateTrace.captureRequest(body, len(payload.Tools) != 0)
+		if kind == "opencode" && len(payload.Tools) != 0 && !connectedAutomaticChoice(payload.ToolChoice) {
+			cancel()
+			return nil, fmt.Errorf("OpenCode acceptance requires unchanged automatic tool choice")
+		}
+		if kind == "opencode" && len(payload.Tools) != 0 {
+			matchedPrompt := false
+			matchedPlugin := os.Getenv("MACPROVIDER_TEST_OPENCODE_AGENT_PROFILE") != "qwen-plugin"
+			for _, message := range payload.Messages {
+				var content string
+				if json.Unmarshal(message.Content, &content) != nil {
+					continue
+				}
+				if message.Role == "user" && content == clientPrompt {
+					matchedPrompt = true
+				}
+				if message.Role == "system" && connectedQwenPluginPrompt(content, model) {
+					matchedPlugin = true
+				}
+			}
+			if !matchedPrompt {
+				cancel()
+				return nil, fmt.Errorf("OpenCode changed the literal user task before inference")
+			}
+			if !matchedPlugin {
+				cancel()
+				return nil, fmt.Errorf("managed Qwen plugin did not transform the stock request")
+			}
+		}
+		if kind == "opencode" && len(payload.Tools) != 0 && os.Getenv("MACPROVIDER_TEST_OPENCODE_AGENT_PROFILE") != "" {
+			wantsPenalty := model == "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"
+			var penalty float64
+			validPenalty := len(payload.RepetitionPenalty) == 0
+			if wantsPenalty {
+				validPenalty = json.Unmarshal(payload.RepetitionPenalty, &penalty) == nil && penalty == 1.05
+			}
+			if payload.Temperature == nil || *payload.Temperature != 0.7 || payload.TopP == nil || *payload.TopP != 0.8 || payload.TopK == nil || *payload.TopK != 20 || !validPenalty {
+				cancel()
+				return nil, fmt.Errorf("Qwen candidate sampling did not reach the unchanged wire request")
+			}
+		}
+		traceToken, err := privateTrace.captureRequest(body, len(payload.Tools) != 0)
 		if err != nil {
 			cancel()
 			return nil, err
@@ -173,6 +225,7 @@ func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion
 		callNumber := calls
 		tooMany := calls > 6
 		streamed = true
+		offeredTools = offeredTools || len(payload.Tools) != 0
 		ids := make(map[string]bool)
 		for _, message := range payload.Messages {
 			for _, call := range message.ToolCalls {
@@ -214,7 +267,7 @@ func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion
 		defer response.Body.Close()
 		held, err := io.ReadAll(io.LimitReader(response.Body, (1<<20)+1))
 		if err == nil {
-			if err := privateTrace.captureResponse(held, traceSelected); err != nil {
+			if err := privateTrace.captureResponse(held, traceToken); err != nil {
 				cancel()
 				return nil, err
 			}
@@ -224,12 +277,18 @@ func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion
 			cancel()
 			return nil, fmt.Errorf("fixture rejected upstream status, size, or incomplete read")
 		}
-		if err := validateConnectedToolStream(held, kind, filepath.Join(root, "workspace")); err != nil {
+		guardKind := kind
+		if directAnswer {
+			// The existing guard rejects every tool name for an unknown kind,
+			// before any model bytes reach the client or execute a tool.
+			guardKind = "direct-answer"
+		}
+		t.Logf("upstream response %d usage: %s", callNumber, connectedStreamUsage(held))
+		if err := validateConnectedToolStream(held, guardKind, filepath.Join(root, "workspace")); err != nil {
 			t.Logf("tool guard: %v", err)
 			cancel()
 			return nil, err
 		}
-		t.Logf("upstream response %d usage: %s", callNumber, connectedStreamUsage(held))
 		// Hold all model bytes until every complete tool call is validated. This
 		// verifies SSE protocol compatibility, not time-to-first-token latency.
 		response.Body = io.NopCloser(bytes.NewReader(held))
@@ -308,12 +367,8 @@ env_key = "MALIBU_API_KEY"
 		t.Fatalf("acceptance requires %s", expectedVersion)
 	}
 	finalPath := filepath.Join(root, "final.txt")
-	prompt := "Use exec_command with exactly cmd=cat marker.txt to read the current workspace marker. Do not inspect any other file or use the network. Reply with exactly its contents and nothing else."
-	if kind == "opencode" {
-		prompt = "Read only " + filepath.Join(root, "workspace", "marker.txt") + " using the read tool. Do not inspect any other file, execute a shell command, or use the network. Reply with exactly its contents and nothing else."
-	} else if kind == "goose" {
-		prompt = "Use shell with exactly command=cat marker.txt to read the current workspace marker. Do not inspect any other file or use the network. Reply with exactly its contents and nothing else."
-	}
+	prompt := connectedClientTaskPrompt(kind, task, filepath.Join(root, "workspace", "marker.txt"))
+	clientPrompt = prompt
 	var args []string
 	switch kind {
 	case "codex":
@@ -322,17 +377,26 @@ env_key = "MALIBU_API_KEY"
 			"-c", `approval_policy="never"`, "-c", `web_search="disabled"`, prompt}
 	case "opencode":
 		configPath := filepath.Join(root, "opencode.json")
-		data, err := json.Marshal(map[string]any{"model": "malibu/" + model, "provider": map[string]any{
+		configuration := map[string]any{"model": "malibu/" + model, "provider": map[string]any{
 			"malibu": map[string]any{"npm": "@ai-sdk/openai-compatible", "name": "Malibu",
 				"options": map[string]any{"baseURL": server.URL + "/v1", "apiKey": "{env:MALIBU_API_KEY}"},
 				"models":  map[string]any{model: map[string]any{"name": model, "limit": map[string]any{"context": contextTokens, "output": 1024}}}},
-		}})
+		}}
+		if err := connectedOpenCodeAgentProfile(configuration, os.Getenv("MACPROVIDER_TEST_OPENCODE_AGENT_PROFILE"), model); err != nil {
+			t.Fatal(err)
+		}
+		data, err := json.Marshal(configuration)
 		if err != nil {
 			t.Fatal(err)
 		}
 		write(configPath, data)
 		env = append(env, "OPENCODE_CONFIG="+configPath)
-		args = []string{"run", "--pure", "--format", "json", "--model", "malibu/" + model, "--dir", filepath.Join(root, "workspace"), prompt}
+		args = []string{"run", "--pure", "--format", "json", "--model", "malibu/" + model, "--dir", filepath.Join(root, "workspace")}
+		if os.Getenv("MACPROVIDER_TEST_OPENCODE_AGENT_PROFILE") == "qwen-plugin" {
+			// --pure disables explicit config plugins too. The fresh private
+			// config/home contains only our managed asset; project config stays off.
+			args = append([]string{"run"}, args[2:]...)
+		}
 	case "goose":
 		providerDir := filepath.Join(root, "xdg-config", "goose", "custom_providers")
 		if err := os.MkdirAll(providerDir, 0700); err != nil {
@@ -349,6 +413,11 @@ env_key = "MALIBU_API_KEY"
 	}
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Env, cmd.Dir = env, filepath.Join(root, "workspace")
+	if kind == "opencode" {
+		// v1.17.9 quotes positional arguments containing spaces. Stdin preserves
+		// the user's task literally, matching interactive input.
+		cmd.Stdin = strings.NewReader(prompt)
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	cmd.WaitDelay = 5 * time.Second
@@ -363,15 +432,96 @@ env_key = "MALIBU_API_KEY"
 	} else {
 		final = []byte(connectedClientFinalText(kind, output.String()))
 	}
-	if err != nil || strings.TrimSpace(string(final)) != marker {
-		t.Fatalf("%s did not return the exact fixture marker: %v; %s", kind, err, connectedClientSummary(kind, output.String(), marker))
+	expectedFinal := marker
+	if directAnswer {
+		expectedFinal = "4"
+	}
+	if err != nil || strings.TrimSpace(string(final)) != expectedFinal {
+		t.Fatalf("%s did not return the exact expected answer: %v; %s", kind, err, connectedClientSummary(kind, output.String(), marker))
 	}
 	mu.Lock()
 	defer mu.Unlock()
+	if directAnswer {
+		if calls < 1 || !streamed || matchedResult || !offeredTools {
+			t.Fatal("missing tool-free streamed answer")
+		}
+		t.Log("real OpenCode returned the exact direct answer without executing tools")
+		return
+	}
 	if calls < 2 || !streamed || !matchedResult {
 		t.Fatalf("missing real streaming tool round trip: requests=%d streamed=%v matched_result=%v", calls, streamed, matchedResult)
 	}
 	t.Logf("%s completed streaming and a matching file-tool result through the gateway (synthetic=%v upstream_requests=%d)", expectedVersion, synthetic, calls)
+}
+
+func connectedClientTask(raw, kind string, synthetic bool) (string, error) {
+	if raw == "" {
+		return "read", nil
+	}
+	if kind != "opencode" || synthetic {
+		return "", fmt.Errorf("task controls require actual OpenCode model acceptance")
+	}
+	switch raw {
+	case "read", "read-natural", "direct-answer":
+		return raw, nil
+	default:
+		return "", fmt.Errorf("OpenCode task must be read, read-natural or direct-answer")
+	}
+}
+
+// This diagnostic changes only the user wording. Both read tasks keep the same
+// exact marker answer, actual tool/result matching, permissions and tool guard.
+func connectedClientTaskPrompt(kind, task, markerPath string) string {
+	if task == "direct-answer" {
+		return "What is 2 + 2? Answer with just the number."
+	}
+	if task == "read-natural" {
+		return "What does the file " + markerPath + " contain? After reading it, reply with only its contents."
+	}
+	if kind == "opencode" {
+		return "Read only " + markerPath + " using the read tool. Do not inspect any other file, execute a shell command, or use the network. Reply with exactly its contents and nothing else."
+	}
+	if kind == "goose" {
+		return "Use shell with exactly command=cat marker.txt to read the current workspace marker. Do not inspect any other file or use the network. Reply with exactly its contents and nothing else."
+	}
+	return "Use exec_command with exactly cmd=cat marker.txt to read the current workspace marker. Do not inspect any other file or use the network. Reply with exactly its contents and nothing else."
+}
+
+func TestConnectedClientTaskSelection(t *testing.T) {
+	for _, kind := range []string{"opencode", "codex", "goose"} {
+		for _, synthetic := range []bool{false, true} {
+			if task, err := connectedClientTask("", kind, synthetic); err != nil || task != "read" {
+				t.Fatal("default read task changed")
+			}
+			for _, raw := range []string{"read", "read-natural", "direct-answer"} {
+				task, err := connectedClientTask(raw, kind, synthetic)
+				allowed := kind == "opencode" && !synthetic
+				if allowed && (err != nil || task != raw) || !allowed && (err == nil || task != "") {
+					t.Fatal("task control escaped actual OpenCode scope or rejected a valid task")
+				}
+			}
+		}
+	}
+	for _, raw := range []string{"natural", "READ", "read-natural ", " read-natural", "read-natural\n", "read-other"} {
+		if task, err := connectedClientTask(raw, "opencode", false); err == nil || task != "" {
+			t.Fatal("accepted a task outside the exact enum")
+		}
+	}
+}
+
+func TestConnectedClientTaskPrompts(t *testing.T) {
+	const markerPath = "/private/fixture/workspace/marker.txt"
+	for _, tc := range []struct{ kind, task, want string }{
+		{"opencode", "read-natural", "What does the file /private/fixture/workspace/marker.txt contain? After reading it, reply with only its contents."},
+		{"opencode", "read", "Read only /private/fixture/workspace/marker.txt using the read tool. Do not inspect any other file, execute a shell command, or use the network. Reply with exactly its contents and nothing else."},
+		{"opencode", "direct-answer", "What is 2 + 2? Answer with just the number."},
+		{"codex", "read", "Use exec_command with exactly cmd=cat marker.txt to read the current workspace marker. Do not inspect any other file or use the network. Reply with exactly its contents and nothing else."},
+		{"goose", "read", "Use shell with exactly command=cat marker.txt to read the current workspace marker. Do not inspect any other file or use the network. Reply with exactly its contents and nothing else."},
+	} {
+		if got := connectedClientTaskPrompt(tc.kind, tc.task, markerPath); got != tc.want {
+			t.Fatal("diagnostic task prompt changed")
+		}
+	}
 }
 
 // Keep client diagnostics bounded even if a client loops or emits verbose logs.
@@ -593,6 +743,7 @@ func TestConnectedClientToolGuard(t *testing.T) {
 		{"unknown tool", "codex", "other", `{"cmd":"cat marker.txt"}`, false},
 		{"read", "opencode", "read", `{"filePath":"/fixture/workspace/marker.txt"}`, true},
 		{"outside read", "opencode", "read", `{"filePath":"/private/secret"}`, false},
+		{"direct answer must not call", "direct-answer", "read", `{"filePath":"/fixture/workspace/marker.txt"}`, false},
 		{"goose-read", "goose", "shell", `{"command":"cat marker.txt","timeout_secs":5}`, true},
 		{"goose-outside", "goose", "shell", `{"command":"cat /etc/passwd"}`, false},
 		{"goose-metacharacters", "goose", "shell", `{"command":"cat marker.txt;env"}`, false},
@@ -832,7 +983,8 @@ func connectedProviderMatches(body []byte, model string, contextTokens int) bool
 	return !anthropicRawHasDuplicateKeys(body) && json.Unmarshal(body, &status) == nil && status.Model == model && status.Capacity.MaxContextTokens == contextTokens
 }
 
-// The validated SSE may contain sensitive text; retain only numeric usage.
+// SSE may contain sensitive text, including malformed finish reasons. Retain
+// only numeric usage and a closed finish-reason enum, even before validation.
 func connectedStreamUsage(body []byte) string {
 	var usage struct {
 		Prompt     int `json:"prompt_tokens"`
@@ -840,19 +992,73 @@ func connectedStreamUsage(body []byte) string {
 		Total      int `json:"total_tokens"`
 	}
 	found := false
+	finishReason := "absent"
 	for _, line := range strings.Split(string(body), "\n") {
 		if !strings.HasPrefix(line, "data:") {
 			continue
 		}
 		var frame struct {
-			Usage json.RawMessage `json:"usage"`
+			Usage   json.RawMessage `json:"usage"`
+			Choices []struct {
+				FinishReason *string `json:"finish_reason"`
+			} `json:"choices"`
 		}
-		if json.Unmarshal([]byte(strings.TrimSpace(strings.TrimPrefix(line, "data:"))), &frame) == nil && len(frame.Usage) > 0 && string(frame.Usage) != "null" && json.Unmarshal(frame.Usage, &usage) == nil {
+		if json.Unmarshal([]byte(strings.TrimSpace(strings.TrimPrefix(line, "data:"))), &frame) != nil {
+			continue
+		}
+		for _, choice := range frame.Choices {
+			if choice.FinishReason == nil {
+				continue
+			}
+			reason := "other"
+			switch *choice.FinishReason {
+			case "stop", "tool_calls", "length", "content_filter", "function_call":
+				reason = *choice.FinishReason
+			}
+			if finishReason == "absent" {
+				finishReason = reason
+			} else if finishReason != reason {
+				finishReason = "multiple"
+			}
+		}
+		if len(frame.Usage) > 0 && string(frame.Usage) != "null" && json.Unmarshal(frame.Usage, &usage) == nil {
 			found = true
 		}
 	}
-	encoded, _ := json.Marshal(map[string]any{"present": found, "prompt_tokens": usage.Prompt, "completion_tokens": usage.Completion, "total_tokens": usage.Total})
+	encoded, _ := json.Marshal(map[string]any{"present": found, "prompt_tokens": usage.Prompt, "completion_tokens": usage.Completion, "total_tokens": usage.Total, "finish_reason": finishReason})
 	return string(encoded)
+}
+
+func TestConnectedClientStreamUsageSanitizesFinishReason(t *testing.T) {
+	for _, tc := range []struct {
+		reasons []any
+		want    string
+	}{
+		{nil, "absent"}, {[]any{nil}, "absent"},
+		{[]any{"stop"}, "stop"}, {[]any{"tool_calls"}, "tool_calls"},
+		{[]any{"length"}, "length"}, {[]any{"content_filter"}, "content_filter"},
+		{[]any{"function_call"}, "function_call"}, {[]any{"private-output\nsecret"}, "other"},
+		{[]any{"length", "stop"}, "multiple"}, {[]any{"length", "length"}, "length"},
+	} {
+		var body []byte
+		for _, reason := range tc.reasons {
+			frame, err := json.Marshal(map[string]any{
+				"choices": []any{map[string]any{"finish_reason": reason, "delta": map[string]any{"content": "private-output"}}},
+				"usage":   map[string]any{"prompt_tokens": 12, "completion_tokens": 3, "total_tokens": 15},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			body = append(body, []byte("data: "+string(frame)+"\n\n")...)
+		}
+		summary := connectedStreamUsage(body)
+		var got struct {
+			FinishReason string `json:"finish_reason"`
+		}
+		if json.Unmarshal([]byte(summary), &got) != nil || got.FinishReason != tc.want || strings.Contains(summary, "private") || strings.Contains(summary, "secret") {
+			t.Fatal("finish-reason diagnostic was incorrect or leaked model text")
+		}
+	}
 }
 
 func TestConnectedClientContextBinding(t *testing.T) {
