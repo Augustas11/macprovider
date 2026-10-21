@@ -7,9 +7,9 @@ same commit/PR. If reality and this file disagree, fix this file.
 
 ## How to track the next CLI
 
-The shipped-207 table below records the completed net change from fleet
-**1.8.123** to **1.8.207**. Start the next-candidate table only when another
-CLI/Malibu/installer change merges.
+The next-candidate table tracks changes since the current published provider
+release. Historical shipped tables preserve earlier trains for reference. Add
+a next-candidate row when a CLI/Malibu/installer change merges.
 
 1. A PR that changes `phase3-binary/` (CLI, Malibu.app, installer) **merges** →
    add one row the same day. Status `merged`.
@@ -41,13 +41,71 @@ binary the Mac runs.
   in-scope change.
 
 Pearl coordinator/gateway release numbering is independent from the provider
-CLI train. Pearl currently reports runtime `v1.8.223` and recommends provider
-`1.8.223`; failed or superseded runtime attempts remain consumed tags. Public
-provider release `v1.8.223` is published, and none of those tags may be reused
-by either train. The historical promotion table below is not today's version
-selection.
+CLI train. Failed and superseded tags remain consumed and must not be reused.
+Historical tables below do not select today's release version.
 
 ## Current published release and fleet target
+
+Verified 2026-10-21 against GitHub release/tag metadata and live coordinator health:
+
+| Field | Value |
+|---|---|
+| GitHub provider release | [v1.8.260](https://github.com/Augustas11/macprovider/releases/tag/v1.8.260), published 2026-10-20 10:26Z |
+| Signed compatibility-set id | `Augustas11/macprovider:v1.8.260@13c6b1854cb65968cfff4473d1f0f23b99bb1c88` |
+| Pearl runtime / recommended provider | `v1.8.259` / `1.8.260` |
+
+## Next CLI release — net changes vs 1.8.260 (tracked 2026-10-21)
+
+The operator explicitly directed **no standalone CLI cut for #2081**. Include
+its merged source in the next combined train. This entry records source and
+accepted lab results; Qwen signed admission and live activation remain pending.
+
+| PR | Issue | Provider-side change | Status |
+|---|---|---|---|
+| #2098 | — | Download cancellation remains final when a sampled heartbeat arrives late. | merged (`41bba3a81`); next combined CLI |
+| #2095 | #2054 | Qwen automatic tool use, schema-typed arguments, sampling controls and OpenCode/Connected apps integration. | merged (`15ef4e19b`); next combined CLI |
+| #2096 | #2081 | Exact Qwen native/ordinary ragged prompt grouping and snapshot-pinned text preparation, including streaming preflight and queued-drain cancellation. | merged (`359e3d4ad`); next combined CLI |
+
+### Qwen3.6 native-MTP handoff (#2081)
+
+Runtime `c2519f2ad` on mlx-swift-lm `87dc5159` passed twelve focused Studio
+tests without skips. The immutable six-cell matrix passes every gate except
+the accepted s2 TTFT result. Sustained: 1,812.3987 seconds, 88 records, zero
+errors/fallbacks/parity mismatches and nominal thermals. All seven local
+self-test checks pass; the challenge-bank entry is unchanged.
+
+All 194 executed local journey checks pass across seven step groups; overall
+journey coverage remains partial for the external gates below. Required hosted
+CI is green, three final audit lanes have zero CRITICAL/HIGH/MEDIUM, and
+`antfleet-ops` approved and merged #2096 on 2026-10-21.
+
+The frozen +5% two-request TTFT policy remains unchanged and its analyzer
+result remains FAIL. Per the operator's 2026-10-21 direction,
+[SPEC-048 v0.1.50](../../specs/SPEC-048-native-mtp-serving.md) accepts only this
+campaign's recorded +5.9973% median / +6.3686% corrected-upper TTFT tradeoff.
+This is an explicit acceptance disposition, not a preregistered PASS.
+The earlier captures failed the same TTFT gate at +6.5088% / +6.8790% and
++6.3484% / +6.6132%; grouping alone did not remove that cost. All findings and
+current-source evidence are retained in [the campaign measurement note](../research/spec048-r015/qwen36-35b-r015-2026-10-21.md).
+
+When the combined CLI is ready:
+
+1. Cut and verify the reviewed signed CLI with `scripts/ops/cli-release.sh`
+   (`status`, `next`, then one documented `next --run` step at a time).
+2. Reuse this campaign evidence and its explicit disposition if the measured
+   decode/preparation/scheduler path is unchanged. A release identity change
+   alone does not require qualification again.
+3. Prepare one reviewed two-model v2 admission manifest preserving GLM and
+   adding Qwen's measured tuple, artifact projection and unchanged bank entry.
+   Bind the actual release source, executable SHA-256 and CDHash, and cite the
+   SPEC-048 disposition alongside the original analyzer FAIL.
+4. Activate through `scripts/ops/catalog-activate.sh` (`status`, `next`,
+   `next --run`) with `PROBE_MODEL=qwen/qwen3.6-35b-a3b` and
+   `CATALOG_REQUIRE_NATIVE_MTP_FORWARD=true`.
+5. Prove an attributed paid Qwen gateway request increases `mtp_forwards`,
+   verify receipts and incumbent restoration. These live gates remain pending.
+
+## Historical published-release verification — 2026-10-10
 
 Verified 2026-10-10 against public release metadata, the release train
 (`scripts/ops/cli-release.sh status`) and live health:
@@ -62,18 +120,18 @@ Verified 2026-10-10 against public release metadata, the release train
 | Installer | `get.malibu.tech/install.sh` matches the v1.8.232 `dist/install.sh` (train step `install_sh_vs_release: parity`). |
 | Release mirror | `download.malibu.tech/releases/v1.8.232/` byte-identical to GitHub (33 assets verified); `latest.json` promoted from `v1.8.224` to `v1.8.232` on 2026-10-10 with `publish-release-mirror.sh --promote-latest`. |
 
-## Next CLI release — net changes vs 1.8.258 (tracked 2026-10-19)
+## Shipped v1.8.260 — net changes vs 1.8.258
 
-Live fleet target: **1.8.258** (released 2026-10-19 19:17Z on Pearl runtime v1.8.255). Staged:
-`binaryVersion` **1.8.260** (v1.8.259 is a Pearl runtime release). The operator ordered this cut
-for #2074, #2075 and #2078; #2085 merged before the candidate and rides in it.
+Published as v1.8.260 on 2026-10-20 at source
+`13c6b1854cb65968cfff4473d1f0f23b99bb1c88`. All four changes below are ancestors
+of that release source and shipped in it.
 
 | PR | Issue | Provider-side change | Status |
 |---|---|---|---|
-| #2074 | #2059 | Malibu: catalog-only rows, Discover catalog, model Download (with cancel), readable model names, Connected apps (SPEC-044 R014). 812 app tests, 390 CLI tests, a real catalog-economics decode, a real download and a cancel | merged (`f3aafd069`); awaiting CLI release |
-| #2077 | #2075 | Provider startup recovers an expired prepared self-update handoff before the startup fence, retires only matching abandoned lease authority and shows actionable recovery diagnostics, so a self-update can no longer leave a provider crash-looping. Targeted watchdog regressions, three audit lanes, CI | merged (`370f24f68`); awaiting CLI release |
-| #2079 | #2078 | A `continuous_batch_queue_limit` above the bound for the planned rows (8 x rows) is clamped and logged (`event=cb_queue_limit_clamped`) instead of failing startup, so a signed `max_served_slots` ceiling or a removed owner pin no longer crash-loops the provider; the configured value is kept. Studio CPU tests (216, 0 failures), three-lane audit 0/0/0, CI | merged (`3f2a24946`); awaiting CLI release |
-| #2085 | #2054 | Malibu Provider shows the observed KV disk tier and the last recorded restart (time, reason, version); Settings saves menu-bar and Dock preferences and keeps a visible entry point; Connected apps guidance corrected; KV support refreshes after a warm swap. Malibu 822 tests, targeted CLI 110 tests, three-lane audit 0/0/0, CI | merged (`82d491211`); awaiting CLI release |
+| #2074 | #2059 | Malibu: catalog-only rows, Discover catalog, model Download (with cancel), readable model names, Connected apps (SPEC-044 R014). 812 app tests, 390 CLI tests, a real catalog-economics decode, a real download and a cancel | shipped v1.8.260 (`f3aafd069`) |
+| #2077 | #2075 | Provider startup recovers an expired prepared self-update handoff before the startup fence, retires only matching abandoned lease authority and shows actionable recovery diagnostics, so a self-update can no longer leave a provider crash-looping. Targeted watchdog regressions, three audit lanes, CI | shipped v1.8.260 (`370f24f68`) |
+| #2079 | #2078 | A `continuous_batch_queue_limit` above the bound for the planned rows (8 x rows) is clamped and logged (`event=cb_queue_limit_clamped`) instead of failing startup, so a signed `max_served_slots` ceiling or a removed owner pin no longer crash-loops the provider; the configured value is kept. Studio CPU tests (216, 0 failures), three-lane audit 0/0/0, CI | shipped v1.8.260 (`3f2a24946`) |
+| #2085 | #2054 | Malibu Provider shows the observed KV disk tier and the last recorded restart (time, reason, version); Settings saves menu-bar and Dock preferences and keeps a visible entry point; Connected apps guidance corrected; KV support refreshes after a warm swap. Malibu 822 tests, targeted CLI 110 tests, three-lane audit 0/0/0, CI | shipped v1.8.260 (`82d491211`) |
 
 ## Next CLI release — net changes vs 1.8.257 (tracked 2026-10-19; released as v1.8.258)
 
