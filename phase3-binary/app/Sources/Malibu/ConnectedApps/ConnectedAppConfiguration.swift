@@ -27,11 +27,13 @@ struct ConnectedModel: Identifiable, Equatable {
 
 enum ConnectedAppsError: Error, LocalizedError {
     case unsafeFile, conflict, invalidConfiguration, unavailableMetadata, credential, invalidResponse
+    case openCodeSetupUpgrade
     case http(Int), network
     var errorDescription: String? {
         switch self {
         case .unsafeFile: "Configuration is not a bounded, user-owned regular file in a safe directory."
         case .conflict: "Configuration changed since preview or setup. No restore was performed; preserve your newer edits."
+        case .openCodeSetupUpgrade: "This OpenCode setup predates Malibu's managed tool instructions. Choose Restore setup, then Preview setup and Set up to upgrade. Your buyer key stays in Keychain."
         case .invalidConfiguration: "This configuration syntax cannot be changed safely. Use the documented manual setup."
         case .unavailableMetadata: "The gateway does not publish the model metadata this client requires. Automated setup is unavailable."
         case .credential: "The buyer key could not be read or saved in Keychain."

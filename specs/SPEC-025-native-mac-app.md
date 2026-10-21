@@ -956,7 +956,12 @@ projections (SPEC-044-R004), colour never the only signal.
   response, or stock-prefix mismatch MUST leave the request unchanged. The
   plugin MUST use the same protected preview, receipt, launch-integrity and
   restore lifecycle as the managed configuration; setup MUST NOT overwrite
-  an unowned plugin file. The acceptance recorder MUST load the same plugin
+  an unowned plugin file. A legacy OpenCode setup with unchanged owned config
+  and launcher receipts, no plugin declaration, and no plugin file or receipt
+  MUST show an explicit Restore setup, then Preview setup and Set up recovery
+  instruction before buyer-key handoff. This MUST NOT overwrite receipts or
+  weaken conflict checks for missing or edited assets in a newer setup.
+  The acceptance recorder MUST load the same plugin
   bytes with isolated client state, without OpenCode's plugin-disabling
   `--pure` flag. Launchers for these exact model identities MUST require
   OpenCode 1.17.9 and refuse another version after consuming and deleting the

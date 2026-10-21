@@ -194,6 +194,140 @@ final class ConnectedAppsTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testLegacyOpenCodeSetupExplainsExplicitRecoveryBeforeKeyHandoff() throws {
+        try temporary { home in
+            let receipts = try installLegacyOpenCodeProfile(home: home)
+            let root = receipts.receiptDirectory.deletingLastPathComponent()
+            let configBefore = try Data(contentsOf: root.appendingPathComponent("opencode/opencode.json"))
+            let launchBefore = try Data(contentsOf: root.appendingPathComponent("opencode/Launch.command"))
+            var keyReads = 0
+            let store = ConnectedAppsStore(home: home, keyExists: { true },
+                readKey: { keyReads += 1; return "test-key" }, loadOpenCodePlugin: { Data("managed plugin".utf8) })
+            store.models = [model]
+            store.modelID = model.id
+            store.executable = URL(fileURLWithPath: "/fake/opencode")
+            store.preview()
+            XCTAssertFalse(store.canSetup)
+            XCTAssertNil(store.previewText)
+            XCTAssertEqual(store.status, ConnectedAppsError.openCodeSetupUpgrade.localizedDescription)
+            XCTAssertTrue(store.status.contains("Restore setup, then Preview setup and Set up"))
+            store.launch()
+            XCTAssertEqual(store.status, ConnectedAppsError.openCodeSetupUpgrade.localizedDescription)
+            XCTAssertEqual(keyReads, 0)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("handoff/opencode.key").path))
+            XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("opencode/opencode.json")), configBefore)
+            XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("opencode/Launch.command")), launchBefore)
+            XCTAssertNil(try receipts.receipt(named: "opencode-plugin"))
+
+            store.restore()
+            XCTAssertNil(try receipts.receipt(named: "opencode-config"))
+            XCTAssertNil(try receipts.receipt(named: "opencode-launch"))
+            store.preview()
+            XCTAssertTrue(store.canSetup, store.status)
+            store.setup()
+            XCTAssertEqual(keyReads, 1)
+            try store.validateOpenCodePlugin()
+            XCTAssertNotNil(try receipts.receipt(named: "opencode-plugin"))
+        }
+    }
+
+    @MainActor
+    func testLegacyOpenCodeRecoveryRefusesEditedOrMisdirectedOwnership() throws {
+        for changed in ["config", "launch", "receipt-path", "partial-receipts"] {
+            try temporary { home in
+                let receipts = try installLegacyOpenCodeProfile(home: home)
+                let root = receipts.receiptDirectory.deletingLastPathComponent()
+                if changed == "receipt-path" {
+                    let original = try XCTUnwrap(receipts.receipt(named: "opencode-config"))
+                    let redirected = ConnectedConfigReceipt(path: root.appendingPathComponent("wrong.json").path,
+                        original: original.original, installed: original.installed)
+                    try JSONEncoder().encode(redirected).write(to: receipts.receiptDirectory.appendingPathComponent("opencode-config.json"))
+                } else if changed == "partial-receipts" {
+                    try FileManager.default.removeItem(at: receipts.receiptDirectory.appendingPathComponent("opencode-launch.json"))
+                } else {
+                    let filename = changed == "config" ? "opencode.json" : "Launch.command"
+                    try Data("user edit".utf8).write(to: root.appendingPathComponent("opencode/" + filename))
+                }
+                let store = ConnectedAppsStore(home: home, keyExists: { true })
+                store.models = [model]
+                store.modelID = model.id
+                store.executable = URL(fileURLWithPath: "/fake/opencode")
+                store.preview()
+                XCTAssertFalse(store.canSetup)
+                XCTAssertEqual(store.status, ConnectedAppsError.conflict.localizedDescription, changed)
+                store.launch()
+                XCTAssertEqual(store.status, ConnectedAppsError.conflict.localizedDescription, changed)
+                XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("handoff/opencode.key").path))
+            }
+        }
+    }
+
+    @MainActor
+    func testNewOpenCodeSetupMissingOrEditedPluginNeverLooksLegacy() throws {
+        for changed in ["missing-receipt", "missing-plugin-and-receipt", "edited-plugin", "edited-receipt"] {
+            try temporary { home in
+                let store = ConnectedAppsStore(home: home, keyExists: { true }, readKey: { "test-key" },
+                    loadOpenCodePlugin: { Data("managed plugin".utf8) })
+                store.models = [model]
+                store.modelID = model.id
+                store.executable = URL(fileURLWithPath: "/fake/opencode")
+                store.preview()
+                store.setup()
+                let root = home.appendingPathComponent("Library/Application Support/Malibu/ConnectedApps")
+                let plugin = root.appendingPathComponent("opencode/" + ConnectedAppConfiguration.openCodePluginFilename)
+                let receipt = root.appendingPathComponent("backups/opencode-plugin.json")
+                if changed.hasPrefix("missing") {
+                    try FileManager.default.removeItem(at: receipt)
+                    if changed == "missing-plugin-and-receipt" { try FileManager.default.removeItem(at: plugin) }
+                } else if changed == "edited-plugin" {
+                    try Data("edited plugin".utf8).write(to: plugin)
+                } else {
+                    let tx = ConnectedConfigTransaction(receiptDirectory: root.appendingPathComponent("backups"))
+                    let original = try XCTUnwrap(tx.receipt(named: "opencode-plugin"))
+                    let edited = ConnectedConfigReceipt(path: original.path, original: original.original,
+                        installed: Data("different receipt bytes".utf8))
+                    try JSONEncoder().encode(edited).write(to: receipt)
+                }
+                store.preview()
+                XCTAssertFalse(store.canSetup)
+                XCTAssertEqual(store.status, ConnectedAppsError.conflict.localizedDescription, changed)
+                store.launch()
+                XCTAssertEqual(store.status, ConnectedAppsError.conflict.localizedDescription, changed)
+                XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("handoff/opencode.key").path))
+            }
+        }
+    }
+
+    @MainActor
+    func testLegacyOpenCodeSetupDoesNotBlockAnotherClientPreview() throws {
+        try temporary { home in
+            _ = try installLegacyOpenCodeProfile(home: home)
+            let store = ConnectedAppsStore(home: home, keyExists: { true })
+            store.app = .goose
+            store.models = [model]
+            store.modelID = model.id
+            store.executable = URL(fileURLWithPath: "/fake/goose")
+            store.preview()
+            XCTAssertTrue(store.canSetup, store.status)
+            XCTAssertNotEqual(store.status, ConnectedAppsError.openCodeSetupUpgrade.localizedDescription)
+        }
+    }
+
+    private func installLegacyOpenCodeProfile(home: URL) throws -> ConnectedConfigTransaction {
+        let root = home.appendingPathComponent("Library/Application Support/Malibu/ConnectedApps")
+        let receipts = ConnectedConfigTransaction(receiptDirectory: root.appendingPathComponent("backups"))
+        let target = root.appendingPathComponent("opencode/opencode.json")
+        let config = try ConnectedAppConfiguration.configuration(app: .openCode, model: model, original: nil)
+        try receipts.apply(receipts.preview(target: target, proposed: config), named: "opencode-config")
+        let launcher = try ConnectedAppConfiguration.launcher(app: .openCode,
+            executable: URL(fileURLWithPath: "/fake/opencode"), config: target, model: model,
+            keyHandoff: root.appendingPathComponent("handoff/opencode.key"))
+        try receipts.apply(receipts.preview(target: root.appendingPathComponent("opencode/Launch.command"), proposed: launcher),
+            named: "opencode-launch", executable: true)
+        return receipts
+    }
+
     func testAmbiguousJSONAndExistingProviderAreRefused() {
         for source in [#"{"provider":{},"provider":{}}"#, "{// comment\n}", #"{"provider":{"malibu":{}}}"#, #"{"provider":false}"#] {
             XCTAssertThrowsError(try ConnectedAppConfiguration.configuration(app: .openCode, model: model, original: Data(source.utf8)))

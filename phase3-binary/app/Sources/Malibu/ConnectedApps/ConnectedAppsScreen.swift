@@ -140,6 +140,9 @@ final class ConnectedAppsStore: ObservableObject {
                 managedCatalog = destination
             }
             if app == .openCode {
+                self.pending = []
+                self.previewText = nil
+                try self.checkOpenCodeSetupUpgrade()
                 let destination = self.root.appendingPathComponent("opencode/" + ConnectedAppConfiguration.openCodePluginFilename)
                 let existingPlugin = try ConnectedConfigTransaction.read(destination)
                 let previousPlugin = try self.transactions.receipt(named: "opencode-plugin")
@@ -246,8 +249,41 @@ final class ConnectedAppsStore: ObservableObject {
         }
     }
     private func launcherURL(_ app: ConnectedApp) -> URL { root.appendingPathComponent(app.slug + "/Launch.command") }
+    // Legacy recovery is an explicit Restore workflow, never an overwrite exception.
+    // Missing plugin receipts alone do not identify a legacy install: newer configs
+    // already declare the plugin and must retain the ordinary conflict refusal.
+    private func checkOpenCodeSetupUpgrade() throws {
+        let target = root.appendingPathComponent("opencode/" + ConnectedAppConfiguration.openCodePluginFilename)
+        let currentPlugin = try ConnectedConfigTransaction.read(target)
+        if let plugin = try transactions.receipt(named: "opencode-plugin") {
+            guard plugin.path == target.path, currentPlugin.bytes == plugin.installed else {
+                throw ConnectedAppsError.conflict
+            }
+            return
+        }
+        guard currentPlugin.bytes == nil else { throw ConnectedAppsError.conflict }
+        let config = try transactions.receipt(named: "opencode-config")
+        let launcher = try transactions.receipt(named: "opencode-launch")
+        if config == nil && launcher == nil { return }
+        guard let config, let launcher,
+              config.path == configurationURL(.openCode).path,
+              launcher.path == launcherURL(.openCode).path,
+              try ConnectedConfigTransaction.read(configurationURL(.openCode)).bytes == config.installed,
+              try ConnectedConfigTransaction.read(launcherURL(.openCode)).bytes == launcher.installed else {
+            throw ConnectedAppsError.conflict
+        }
+        do {
+            try MalibuStrictJSON.rejectDuplicateKeys(config.installed)
+            guard let parsed = try JSONSerialization.jsonObject(with: config.installed) as? [String: Any],
+                  parsed["plugin"] == nil else { throw ConnectedAppsError.conflict }
+        } catch {
+            throw ConnectedAppsError.conflict
+        }
+        throw ConnectedAppsError.openCodeSetupUpgrade
+    }
     // Missing or edited managed code must fail before handing the buyer key to OpenCode.
     func validateOpenCodePlugin() throws {
+        try checkOpenCodeSetupUpgrade()
         let target = root.appendingPathComponent("opencode/" + ConnectedAppConfiguration.openCodePluginFilename)
         guard let plugin = try transactions.receipt(named: "opencode-plugin"), plugin.path == target.path,
               try ConnectedConfigTransaction.read(target).bytes == plugin.installed else {
