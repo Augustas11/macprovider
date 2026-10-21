@@ -5,8 +5,10 @@ Status: DRAFT v0.38.0 · Owner: @Augustas11 · Target: 2026 Q3
 **Change log v0.38.0 (2026-10-21):**
 Connected apps installs a guarded model-scoped OpenCode system-prompt plugin
 as a protected, reversible managed asset (R012). Custom agent prompts,
-workspace instructions and permissions remain unchanged; client acceptance
-remains separate from configuration.
+workspace instructions and permissions remain unchanged. The Coder-only
+worked example demonstrates native tool calls and read display metadata;
+launchers require OpenCode 1.17.9 for the exact managed Qwen identities.
+Client acceptance remains separate from production-gateway verification.
 
 **Change log v0.37.0 (2026-10-21):**
 Connected apps uses model-scoped OpenCode sampling for the two exact Qwen
@@ -943,7 +945,11 @@ projections (SPEC-044-R004), colour never the only signal.
   a local managed OpenCode plugin without replacing existing plugin entries
   or configuring a global/named agent prompt. At request time, the plugin
   MAY replace only the exact pinned OpenCode 1.17.9 stock-default prompt
-  prefix with the concise workspace-tool prompt. It MUST preserve the
+  prefix with the concise workspace-tool prompt. For the exact Coder alias
+  and artifact identity only, it MAY append an illustrative native XML tool
+  call and read-result example that distinguishes tool-added display metadata
+  from file content; this MUST NOT inject real tool results or alter the user
+  task, tool choice, or the Instruct model's prompt. It MUST preserve the
   remaining system instructions and sibling messages, and MUST leave other
   providers/models, custom agent prompts, tools and permissions unchanged.
   A custom prompt matching that prefix, failed agent lookup, malformed lookup
@@ -952,7 +958,13 @@ projections (SPEC-044-R004), colour never the only signal.
   restore lifecycle as the managed configuration; setup MUST NOT overwrite
   an unowned plugin file. The acceptance recorder MUST load the same plugin
   bytes with isolated client state, without OpenCode's plugin-disabling
-  `--pure` flag. Installing the plugin is not automatic-tool-use acceptance.
+  `--pure` flag. Launchers for these exact model identities MUST require
+  OpenCode 1.17.9 and refuse another version after consuming and deleting the
+  one-time key handoff; other models MUST NOT acquire this version guard.
+  The interface MUST name the managed client/model scope, preserve custom
+  agent prompts, and direct users to verify actual session tool activity.
+  Installing the plugin is not automatic-tool-use acceptance, and isolated
+  client acceptance MUST NOT imply production-gateway verification.
 
 ### 3.3 Updates — CLI-owned signed compatibility set
 

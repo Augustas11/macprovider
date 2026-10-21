@@ -279,6 +279,62 @@ final class ConnectedAppsTests: XCTestCase {
                           try XCTUnwrap(text.range(of: "exec ")).lowerBound)
     }
 
+    func testOpenCodeQwenLauncherRequiresPinnedClientAfterDeletingKeyHandoff() throws {
+        for id in [
+            "qwen3-coder-30b-a3b-instruct", "qwen3-30b-a3b-instruct-2507",
+            "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit"
+        ] {
+            let selected = ConnectedModel(id: id, contextWindow: 16384, maxOutputTokens: nil)
+            let text = String(decoding: try ConnectedAppConfiguration.launcher(app: .openCode,
+                executable: URL(fileURLWithPath: "/fake/open'code"),
+                config: URL(fileURLWithPath: "/fake/opencode.json"), model: selected,
+                keyHandoff: URL(fileURLWithPath: "/fake/handoff/key")), as: UTF8.self)
+            let remove = try XCTUnwrap(text.range(of: "rm -f -- \"$KEY_FILE\""))
+            let version = try XCTUnwrap(text.range(of: "test \"$('/fake/open"))
+            XCTAssertTrue(text.contains("test \"$('/fake/open'\\''code' --version)\" = '1.17.9' || { echo 'This Qwen managed profile requires OpenCode 1.17.9.' >&2; exit 1; }"))
+            XCTAssertLessThan(remove.lowerBound, version.lowerBound)
+            XCTAssertLessThan(version.lowerBound, try XCTUnwrap(text.range(of: "exec ")).lowerBound)
+        }
+    }
+
+    func testOpenCodeVersionGuardDoesNotApplyToOtherModelsOrClients() throws {
+        for id in [
+            "other/model", "qwen/qwen3-30b-a3b-instruct-2507",
+            "qwen3-coder-30b-a3b-instruct-extra", "QWEN3-CODER-30B-A3B-INSTRUCT",
+            "qwen3-30b-a3b-instruct-2507-extra",
+            "mlx-community/Qwen3-Coder-30B-A3B-Instruct-8bit",
+            "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit-extra"
+        ] {
+            let text = String(decoding: try ConnectedAppConfiguration.launcher(app: .openCode,
+                executable: URL(fileURLWithPath: "/fake/opencode"),
+                config: URL(fileURLWithPath: "/fake/opencode.json"),
+                model: ConnectedModel(id: id, contextWindow: 16384, maxOutputTokens: nil),
+                keyHandoff: URL(fileURLWithPath: "/fake/key")), as: UTF8.self)
+            XCTAssertFalse(text.contains("--version"), id)
+            XCTAssertFalse(text.contains("1.17.9"), id)
+        }
+        let qwen = ConnectedModel(id: "qwen3-coder-30b-a3b-instruct", contextWindow: 16384, maxOutputTokens: nil)
+        for app in [ConnectedApp.codex, .goose, .crush] {
+            let text = String(decoding: try ConnectedAppConfiguration.launcher(app: app,
+                executable: URL(fileURLWithPath: "/fake/client"), config: URL(fileURLWithPath: "/fake/config"),
+                model: qwen, keyHandoff: URL(fileURLWithPath: "/fake/key")), as: UTF8.self)
+            XCTAssertFalse(text.contains("1.17.9"))
+            XCTAssertEqual(text.contains("codex-cli 0.163.0"), app == .codex)
+        }
+    }
+
+    func testOpenCodeGuidanceNamesManagedScopeWithoutClaimingProductionVerification() {
+        let text = ConnectedAppConfiguration.openCodeToolDisclosure
+        XCTAssertTrue(text.contains("Qwen3 Coder 30B A3B Instruct and Qwen3 30B A3B Instruct 2507"))
+        XCTAssertTrue(text.contains("OpenCode 1.17.9 and Malibu's managed profile"))
+        XCTAssertTrue(text.contains("Custom agent prompts are preserved."))
+        XCTAssertTrue(text.contains("actual tool activity"))
+        XCTAssertTrue(text.contains("do not verify production gateway tool use"))
+        XCTAssertFalse(text.contains("both answered without calling"))
+        XCTAssertFalse(text.contains("not yet verified"))
+    }
+
     func testKeyExposureCopyIsHonestAndCrushIsWarned() {
         // SPEC-025-R012: one visible sentence names repository configuration and
         // agent commands and recommends a dedicated, spend-limited key.

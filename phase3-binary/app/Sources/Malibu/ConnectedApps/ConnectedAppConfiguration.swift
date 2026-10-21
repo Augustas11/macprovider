@@ -62,7 +62,12 @@ enum ConnectedAppConfiguration {
     static let crushProjectConfigWarning = "Crush also loads configuration from the directory you launch it in (for example ./.crushrc) and has no switch to ignore it. A repository's Crush configuration can redirect requests or read your buyer key. Launch Crush only in repositories you trust."
     static let cursorDisclosure = "Cursor also sends your key and prompts through Cursor's servers. BYOK covers supported chat models; Tab uses Cursor models. Verify custom endpoint support in your installed Cursor version."
     static let cursorSetup = "Open Cursor Settings → Models → API Keys. Enter your buyer key under OpenAI and enable Use OpenAI API Key. Enable Override OpenAI Base URL and enter https://api.malibu.tech/v1. Add the exact gateway model ID shown here, then select it in a new chat. Malibu does not edit Cursor's settings. To undo setup, remove the buyer key and custom model and turn off the base URL override."
-    static let openCodeToolDisclosure = "Automatic tool use is not yet verified for Qwen3 Coder 30B A3B Instruct and Qwen3 30B A3B Instruct 2507. In prior OpenCode tests, both answered without calling the offered tools. Required or named tool-call support does not guarantee automatic tool use. Check the session's tool activity before relying on file access or edits."
+    static let openCodeToolDisclosure = "For Qwen3 Coder 30B A3B Instruct and Qwen3 30B A3B Instruct 2507, launch with OpenCode 1.17.9 and Malibu's managed profile for model-scoped sampling and tool instructions. Custom agent prompts are preserved. Check the session's actual tool activity before relying on file access or edits. Managed-profile checks do not verify production gateway tool use."
+    private static let openCodeQwenModelIDs: Set<String> = [
+        "qwen3-coder-30b-a3b-instruct", "qwen3-30b-a3b-instruct-2507",
+        "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+        "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit"
+    ]
 
     static func json(_ object: [String: Any]) throws -> Data {
         try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) + Data("\n".utf8)
@@ -121,15 +126,11 @@ enum ConnectedAppConfiguration {
             var providers = root["provider"] as? [String: Any] ?? [:]
             guard providers["malibu"] == nil else { throw ConnectedAppsError.conflict }
             var entry: [String: Any] = ["name": model.id, "limit": ["context": context, "output": output]]
-            switch model.id {
-            case "qwen3-coder-30b-a3b-instruct", "qwen3-30b-a3b-instruct-2507",
-                 "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
-                 "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit":
+            if openCodeQwenModelIDs.contains(model.id) {
                 // OpenCode gates agent temperature on this capability; the compatible
                 // adapter forwards model options using their HTTP request field names.
                 entry["temperature"] = true
                 entry["options"] = ["temperature": 0.7, "top_p": 0.8]
-            default: break
             }
             providers["malibu"] = ["npm": "@ai-sdk/openai-compatible", "name": "Malibu",
                                    "options": ["baseURL": base, "apiKey": "{env:MALIBU_API_KEY}"],
@@ -218,9 +219,14 @@ enum ConnectedAppConfiguration {
         case .crush: environment = "export XDG_CONFIG_HOME=\(shell(config.deletingLastPathComponent().deletingLastPathComponent().path))\n"
         case .cursor: break
         }
-        let versionGuard = app == .codex
-            ? "test \"$(\(shell(executable.path)) --version)\" = 'codex-cli 0.163.0' || { echo 'This setup requires Codex CLI 0.163.0.' >&2; exit 1; }\n"
-            : ""
+        let versionGuard: String
+        if app == .codex {
+            versionGuard = "test \"$(\(shell(executable.path)) --version)\" = 'codex-cli 0.163.0' || { echo 'This setup requires Codex CLI 0.163.0.' >&2; exit 1; }\n"
+        } else if app == .openCode && openCodeQwenModelIDs.contains(model.id) {
+            versionGuard = "test \"$(\(shell(executable.path)) --version)\" = '1.17.9' || { echo 'This Qwen managed profile requires OpenCode 1.17.9.' >&2; exit 1; }\n"
+        } else {
+            versionGuard = ""
+        }
         // Malibu's Launch writes the key to a private 0600 file in a 0700
         // directory; this reads it once and deletes it, so no other program
         // needs Keychain access and the key never appears in arguments or here.
