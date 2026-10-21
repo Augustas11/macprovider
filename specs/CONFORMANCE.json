@@ -725,7 +725,7 @@
     {
       "spec_id": "SPEC-025",
       "title": "Native Mac App (signed `.dmg`, native Mac app with menu-bar presence)",
-      "version": "v0.36.0",
+      "version": "v0.37.0",
       "path": "specs/SPEC-025-native-mac-app.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -14078,6 +14078,8 @@
       "tests": [
         "phase3-binary/app/Tests/MalibuTests/ConnectedAppsTests.swift:final class ConnectedAppsTests",
         "phase3-binary/app/Tests/MalibuTests/ConnectedAppsTests.swift:func testOpenCodeLauncherIgnoresRepositoryConfiguration",
+        "phase3-binary/app/Tests/MalibuTests/ConnectedAppsTests.swift:func testOpenCodeQwenSamplingIsModelScopedAndPreservesExistingAgents",
+        "phase3-binary/app/Tests/MalibuTests/ConnectedAppsTests.swift:func testOpenCodeSamplingDoesNotMatchUnrelatedOrNearModelNames",
         "phase3-binary/app/Tests/MalibuTests/ConnectedAppsTests.swift::testNotPrivateBannerSaysPrivateModeDoesNotApplyAndPointsToMalibuChat",
         "phase3-binary/app/Tests/MalibuTests/ConnectedAppsTests.swift::testGatewayModelsNeedASavedKeyAndLoadAfterSaving",
         "phase3-binary/app/Tests/MalibuTests/ConnectedAppsTests.swift::testGatewayModelLoadErrorsShowBesideTheButton"

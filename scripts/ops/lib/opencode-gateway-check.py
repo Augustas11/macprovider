@@ -748,14 +748,17 @@ def _failure_evidence(
 
 
 def _config(model: str, context: int, base_url: str) -> bytes:
+    entry = {"name": model, "limit": {"context": context, "output": MAX_OUTPUT_TOKENS}}
+    if model in MODEL_BINDINGS or model in MODEL_BINDINGS.values():
+        # Match the app's model-scoped HTTP fields without replacing the stock agent.
+        entry.update({"temperature": True, "options": {"temperature": 0.7, "top_p": 0.8}})
     value = {
         "model": "malibu/" + model,
         "small_model": "malibu/" + model,
         "provider": {"malibu": {"npm": "@ai-sdk/openai-compatible", "name": "Malibu",
                                   "options": {"baseURL": base_url, "apiKey": "{env:MALIBU_PROXY_TOKEN}",
                                               "timeout": HTTP_TIMEOUT_SECONDS * 1000},
-                                  "models": {model: {"name": model,
-                                                     "limit": {"context": context, "output": MAX_OUTPUT_TOKENS}}}}},
+                                  "models": {model: entry}}},
     }
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
 

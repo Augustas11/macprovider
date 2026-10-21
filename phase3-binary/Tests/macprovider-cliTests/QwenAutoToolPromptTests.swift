@@ -126,7 +126,7 @@ final class QwenAutoToolPromptTests: XCTestCase {
                 XCTAssertTrue(text.contains("<tool_response>\nDIAGNOSTIC_RESULT\n</tool_response>"))
                 XCTAssertEqual(text.components(separatedBy: "DIAGNOSTIC_RESULT").count - 1, 1)
                 XCTAssertFalse(text.contains("<tool_response id="))
-                XCTAssertFalse(text.contains("call_diagnostic"))
+                XCTAssertFalse(text.contains("call_0123456789abcdef"))
             }
         }
     }
@@ -215,9 +215,9 @@ final class QwenAutoToolPromptTests: XCTestCase {
         ]
         if history {
             messages += [
-                ["role": "assistant", "content": "", "tool_calls": [["id": "call_diagnostic", "type": "function",
+                ["role": "assistant", "content": "", "tool_calls": [["id": "call_0123456789abcdef", "type": "function",
                     "function": ["name": "diagnostic_lookup", "arguments": #"{"diagnostic_city":"Paris"}"#]]]],
-                ["role": "tool", "tool_call_id": "call_diagnostic", "content": "DIAGNOSTIC_RESULT"],
+                ["role": "tool", "tool_call_id": "call_0123456789abcdef", "content": "DIAGNOSTIC_RESULT"],
             ]
         }
         return try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: [

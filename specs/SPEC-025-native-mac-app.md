@@ -1,6 +1,11 @@
 # SPEC-025 — Native Mac App (signed `.dmg`, native Mac app with menu-bar presence)
 
-Status: DRAFT v0.36.0 · Owner: @Augustas11 · Target: 2026 Q3
+Status: DRAFT v0.37.0 · Owner: @Augustas11 · Target: 2026 Q3
+
+**Change log v0.37.0 (2026-10-21):**
+Connected apps uses model-scoped OpenCode sampling for the two exact Qwen
+gateway/artifact identities (R012), preserving stock agent prompts and
+automatic tool selection. Sampling configuration is not client qualification.
 
 **Change log v0.36.0 (2026-10-20, Related: #2054):**
 Provider presents the observed KV disk tier and bounded recent lifecycle
@@ -919,6 +924,15 @@ projections (SPEC-044-R004), colour never the only signal.
   required/named tool-selection profiles. If actual client acceptance is
   unresolved or the model is unavailable on the gateway, disclose that
   limitation without labelling the client compatible.
+  For the exact model IDs `qwen3-coder-30b-a3b-instruct`,
+  `qwen3-30b-a3b-instruct-2507`,
+  `mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit`, and
+  `mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit`, generated OpenCode model
+  entries MUST declare the `temperature: true` capability and model-scoped
+  `options` with wire fields `temperature: 0.7` and `top_p: 0.8`.
+  These client sampling settings MUST NOT replace agent prompts, change tool
+  selection or permissions, or apply to other model identities by substring
+  matching. They do not establish automatic-tool-use compatibility.
 
 ### 3.3 Updates — CLI-owned signed compatibility set
 

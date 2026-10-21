@@ -106,10 +106,20 @@ enum ConnectedAppConfiguration {
             if root["provider"] != nil && !(root["provider"] is [String: Any]) { throw ConnectedAppsError.invalidConfiguration }
             var providers = root["provider"] as? [String: Any] ?? [:]
             guard providers["malibu"] == nil else { throw ConnectedAppsError.conflict }
+            var entry: [String: Any] = ["name": model.id, "limit": ["context": context, "output": output]]
+            switch model.id {
+            case "qwen3-coder-30b-a3b-instruct", "qwen3-30b-a3b-instruct-2507",
+                 "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+                 "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit":
+                // OpenCode gates agent temperature on this capability; the compatible
+                // adapter forwards model options using their HTTP request field names.
+                entry["temperature"] = true
+                entry["options"] = ["temperature": 0.7, "top_p": 0.8]
+            default: break
+            }
             providers["malibu"] = ["npm": "@ai-sdk/openai-compatible", "name": "Malibu",
                                    "options": ["baseURL": base, "apiKey": "{env:MALIBU_API_KEY}"],
-                                   "models": [model.id: ["name": model.id,
-                                                         "limit": ["context": context, "output": output]]]]
+                                   "models": [model.id: entry]]
             root["provider"] = providers
             root["model"] = "malibu/\(model.id)"
             return try json(root)

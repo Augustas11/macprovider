@@ -367,6 +367,38 @@ class ModelTests(unittest.TestCase):
         self.assertNotIn("tools", data)
         self.assertNotIn("permission", data)
 
+    def test_config_uses_exact_model_sampling_wire_fields_without_agent_override(self):
+        for model in (*MODULE.MODEL_BINDINGS, *MODULE.MODEL_BINDINGS.values()):
+            with self.subTest(model=model):
+                data = json.loads(MODULE._config(model, 16384, "http://127.0.0.1:1/v1"))
+                provider = data["provider"]["malibu"]
+                self.assertEqual(set(provider["models"]), {model})
+                self.assertEqual(provider["models"][model], {
+                    "name": model, "temperature": True,
+                    "options": {"temperature": 0.7, "top_p": 0.8},
+                    "limit": {"context": 16384, "output": MODULE.MAX_OUTPUT_TOKENS},
+                })
+                self.assertEqual(provider["options"]["apiKey"], "{env:MALIBU_PROXY_TOKEN}")
+                self.assertNotIn("temperature", provider["options"])
+                self.assertNotIn("top_p", provider["options"])
+                for key in ("agent", "tools", "permission", "tool_choice"):
+                    self.assertNotIn(key, data)
+
+    def test_config_does_not_apply_sampling_to_near_or_unrelated_model_names(self):
+        for model in (
+            "other/model", "qwen3-32b", "qwen/qwen3-30b-a3b-instruct-2507",
+            "qwen3-coder-30b-a3b-instruct-extra", "QWEN3-CODER-30B-A3B-INSTRUCT",
+            "qwen3-30b-a3b-instruct-2507-extra",
+            "mlx-community/Qwen3-Coder-30B-A3B-Instruct-8bit",
+            "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit-extra",
+        ):
+            with self.subTest(model=model):
+                data = json.loads(MODULE._config(model, 16384, "http://127.0.0.1:1/v1"))
+                self.assertEqual(data["provider"]["malibu"]["models"][model], {
+                    "name": model, "limit": {"context": 16384, "output": MODULE.MAX_OUTPUT_TOKENS},
+                })
+                self.assertNotIn("agent", data)
+
     def test_gateway_aliases_have_closed_qualified_artifact_bindings(self):
         self.assertEqual(MODULE.MODEL_BINDINGS, {
             "qwen3-coder-30b-a3b-instruct":
@@ -562,6 +594,8 @@ class RealOpenCodeLoopbackFixture(unittest.TestCase):
             def request(self, method, path, body=None, headers=None):
                 self.assert_request(method, path, headers)
                 payload = json.loads(body)
+                if payload.get("temperature") != 0.7 or payload.get("top_p") != 0.8:
+                    raise AssertionError("OpenCode did not send the model-scoped sampling fields")
                 tool_names = {
                     tool.get("function", {}).get("name") for tool in payload.get("tools", [])
                     if isinstance(tool, dict)

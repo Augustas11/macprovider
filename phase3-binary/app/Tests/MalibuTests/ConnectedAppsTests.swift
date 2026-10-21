@@ -40,6 +40,64 @@ final class ConnectedAppsTests: XCTestCase {
         XCTAssertThrowsError(try ConnectedAppConfiguration.configuration(app: .openCode, model: unknown, original: nil))
     }
 
+    func testOpenCodeQwenSamplingIsModelScopedAndPreservesExistingAgents() throws {
+        let original: [String: Any] = [
+            "agent": ["build": ["prompt": "Existing prompt", "temperature": 0.2],
+                      "review": ["model": "other/model", "top_p": 0.9]],
+            "provider": ["other": ["models": ["model": ["options": ["temperature": 0.4]]]]],
+            "permission": ["bash": "ask"]
+        ]
+        for id in [
+            "qwen3-coder-30b-a3b-instruct", "qwen3-30b-a3b-instruct-2507",
+            "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit"
+        ] {
+            let selected = ConnectedModel(id: id, contextWindow: 16384, maxOutputTokens: 256)
+            let bytes = try ConnectedAppConfiguration.configuration(app: .openCode, model: selected,
+                original: ConnectedAppConfiguration.json(original))
+            let root = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+            XCTAssertEqual(root["agent"] as? NSDictionary, original["agent"] as? NSDictionary)
+            XCTAssertEqual(root["permission"] as? NSDictionary, original["permission"] as? NSDictionary)
+            let providers = try XCTUnwrap(root["provider"] as? [String: Any])
+            let existingProviders = try XCTUnwrap(original["provider"] as? [String: Any])
+            XCTAssertEqual(providers["other"] as? NSDictionary, existingProviders["other"] as? NSDictionary)
+            let malibu = try XCTUnwrap(providers["malibu"] as? [String: Any])
+            let models = try XCTUnwrap(malibu["models"] as? [String: Any])
+            XCTAssertEqual(Set(models.keys), Set([id]))
+            let entry = try XCTUnwrap(models[id] as? [String: Any])
+            XCTAssertEqual(entry["temperature"] as? Bool, true)
+            XCTAssertEqual(entry["options"] as? [String: Double], ["temperature": 0.7, "top_p": 0.8])
+            XCTAssertEqual(entry["limit"] as? [String: Int], ["context": 16384, "output": 256])
+            let options = try XCTUnwrap(malibu["options"] as? [String: String])
+            XCTAssertEqual(options["apiKey"], "{env:MALIBU_API_KEY}")
+            XCTAssertNil(options["temperature"])
+            XCTAssertNil(options["top_p"])
+            XCTAssertNil(root["tools"])
+            XCTAssertNil(root["tool_choice"])
+        }
+    }
+
+    func testOpenCodeSamplingDoesNotMatchUnrelatedOrNearModelNames() throws {
+        for id in [
+            "other/model", "qwen3-32b", "qwen/qwen3-30b-a3b-instruct-2507",
+            "qwen3-coder-30b-a3b-instruct-extra", "QWEN3-CODER-30B-A3B-INSTRUCT",
+            "qwen3-30b-a3b-instruct-2507-extra",
+            "mlx-community/Qwen3-Coder-30B-A3B-Instruct-8bit",
+            "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit-extra"
+        ] {
+            let selected = ConnectedModel(id: id, contextWindow: 16384, maxOutputTokens: nil)
+            let bytes = try ConnectedAppConfiguration.configuration(app: .openCode, model: selected, original: nil)
+            let root = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+            let providers = try XCTUnwrap(root["provider"] as? [String: Any])
+            let malibu = try XCTUnwrap(providers["malibu"] as? [String: Any])
+            let models = try XCTUnwrap(malibu["models"] as? [String: Any])
+            let entry = try XCTUnwrap(models[id] as? [String: Any])
+            XCTAssertNil(entry["temperature"], id)
+            XCTAssertNil(entry["options"], id)
+            XCTAssertNil(root["agent"], id)
+        }
+    }
+
     func testAmbiguousJSONAndExistingProviderAreRefused() {
         for source in [#"{"provider":{},"provider":{}}"#, "{// comment\n}", #"{"provider":{"malibu":{}}}"#, #"{"provider":false}"#] {
             XCTAssertThrowsError(try ConnectedAppConfiguration.configuration(app: .openCode, model: model, original: Data(source.utf8)))
