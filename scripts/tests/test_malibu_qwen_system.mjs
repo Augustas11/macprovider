@@ -65,7 +65,9 @@ test("Coder alone gets the native XML worked example; Instruct base stays byte-i
         assert.ok(prompt.includes("assistant final answer:\nThe river is quiet.\n</example>"));
         assert.ok(prompt.includes("documentation, not an observation"));
         assert.ok(prompt.includes("preserving any numbering or punctuation that belongs to the file itself"));
-        assert.equal(prompt.match(/<example>/g)?.length, 1);
+        assert.ok(prompt.includes("answer directly without calling a tool"));
+        assert.ok(prompt.includes("What is 3 multiplied by 5? Reply only with the number.\nassistant final answer:\n15\n</example>"));
+        assert.equal(prompt.match(/<example>/g)?.length, 2);
       } else {
         assert.equal(createHash("sha256").update(prompt).digest("hex"),
           "04895719eea9f5f677b69ee7a42321f6a905efe9fa11a8d1b3878a989f6fcf2b");
