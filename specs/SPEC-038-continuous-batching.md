@@ -1,12 +1,12 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.25
+Version: v0.3.26
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
-**Change log v0.3.25 (2026-10-21, FR-CB2 Qwen prompt admission and grouping):**
+**Change log v0.3.26 (2026-10-21, FR-CB2 Qwen prompt admission and grouping):**
 FR-CB2 and AC-16: a backend bound to the validated `qwen3_5_mtp_v1`
 admission adapter may include native-MTP prompt rows in a shared ragged
 prefill forward. Each row keeps its own target cache and hidden-state slice;
@@ -20,6 +20,11 @@ path. Acceptance requires real-model target-cache, output and drafter-seed
 parity, including a subsequent capacity downgrade to ordinary decode.
 Preparation parity, generation ownership and admission during an occupied
 target forward are tested separately from hardware performance acceptance.
+
+**Change log v0.3.25 (2026-10-21, FR-CB6 explicit sampling controls):**
+Active top-k/repetition controls cannot enter a row sampler that cannot
+represent them. Existing canary serial fallback and strict refusal apply;
+identity controls preserve routing and signed native admission is unchanged.
 
 **Change log v0.3.24 (2026-10-19, FR-CB2 serial prefill cohorts):**
 FR-CB2: on a backend that prefills every row of a prefill step in its own
@@ -799,7 +804,7 @@ its own drafter seeding, and never shares a forward. Native rows on other
 backends keep the equal-offset rule unless they satisfy the Qwen capability
 below.
 
-**(v0.3.25) Qwen native ragged prefill.** A backend bound to a validated
+**(v0.3.26) Qwen native ragged prefill.** A backend bound to a validated
 native-MTP admission capability whose family adapter is exactly
 `qwen3_5_mtp_v1` MAY declare that native prompt rows join shared ragged
 prefill. The capability MUST be absent by default and MUST NOT be inferred
@@ -1134,6 +1139,14 @@ token-identical to a particular serial run (the serial path is not seeded). A
 replay of the same request identity reproduces the same draws. Parameters the
 serial path ignores (presence and frequency penalties) MUST be ignored on the
 batched path too, so batching never changes what a request asks for.
+
+Active native Chat Completions `top_k` (greater than zero) or
+`repetition_penalty` (not one) MUST be considered unrepresentable until the
+row sampler carries their complete SPEC-006 semantics, including request-local
+full-prompt repetition history. Such a request uses the existing canary serial
+fallback or strict-mode explicit refusal. Zero/absent top-k and identity/absent
+repetition penalty retain existing routing. No native-MTP capability or signed
+admission is expanded by this serial support (SPEC-048-R009 stays conservative).
 
 **(v0.2.11)** A request with enabled tools or a JSON `response_format` MAY
 batch, because neither constrains a logit. Its row MUST use the serial path's
@@ -2148,7 +2161,7 @@ hardware-capability run or a static-review obligation. Every
   prove bounded queueing or reason-coded backpressure/rejection rather than
   `block_extension_failed`, cross-row mutation, or a stitched receipt.
   Prefill and decode MUST never merge into one heterogeneous model call.
-  (v0.3.25) For the Qwen native ragged capability, a real tiny-Qwen fixture
+  (v0.3.26) For the Qwen native ragged capability, a real tiny-Qwen fixture
   MUST mix native and ordinary rows at unequal offsets, compare each row's
   target cache and output with its ordinary target baseline, and compare the
   native drafter seed with the standalone hidden-state definition. A

@@ -1,6 +1,24 @@
 # SPEC-025 — Native Mac App (signed `.dmg`, native Mac app with menu-bar presence)
 
-Status: DRAFT v0.36.0 · Owner: @Augustas11 · Target: 2026 Q3
+Status: DRAFT v0.39.0 · Owner: @Augustas11 · Target: 2026 Q3
+
+**Change log v0.39.0 (2026-10-21):**
+Exact Qwen OpenCode model options carry the full recommended sampling profile
+(R012): both use top_k 20; only Coder uses repetition_penalty 1.05. Acceptance
+checks the actual outbound fields, not merely saved configuration.
+
+**Change log v0.38.0 (2026-10-21):**
+Connected apps installs a guarded model-scoped OpenCode system-prompt plugin
+as a protected, reversible managed asset (R012). Custom agent prompts,
+workspace instructions and permissions remain unchanged. The Coder-only
+worked example demonstrates native tool calls and read display metadata;
+launchers require OpenCode 1.17.9 for the exact managed Qwen identities.
+Client acceptance remains separate from production-gateway verification.
+
+**Change log v0.37.0 (2026-10-21):**
+Connected apps uses model-scoped OpenCode sampling for the two exact Qwen
+gateway/artifact identities (R012), preserving stock agent prompts and
+automatic tool selection. Sampling configuration is not client qualification.
 
 **Change log v0.36.0 (2026-10-20, Related: #2054):**
 Provider presents the observed KV disk tier and bounded recent lifecycle
@@ -919,6 +937,50 @@ projections (SPEC-044-R004), colour never the only signal.
   required/named tool-selection profiles. If actual client acceptance is
   unresolved or the model is unavailable on the gateway, disclose that
   limitation without labelling the client compatible.
+  For the exact model IDs `qwen3-coder-30b-a3b-instruct`,
+  `qwen3-30b-a3b-instruct-2507`,
+  `mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit`, and
+  `mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit`, generated OpenCode model
+  entries MUST declare the `temperature: true` capability and model-scoped
+  `options` with wire fields `temperature: 0.7`, `top_p: 0.8` and `top_k: 20`.
+  Only the exact Coder alias and artifact identity MUST additionally declare
+  `repetition_penalty: 1.05`; the Instruct-2507 identities MUST NOT inherit it.
+  These snake-case model options use the pinned compatible adapter's extra
+  request fields, not its unsupported standardized `topK` setting. Acceptance
+  MUST verify the complete profile on actual outbound requests, including
+  absence of Coder's repetition penalty on Instruct-2507.
+  These client sampling settings MUST NOT replace agent prompts, change tool
+  selection or permissions, or apply to other model identities by substring
+  matching. They do not establish automatic-tool-use compatibility.
+  For those exact identities under the `malibu` provider, setup MUST append
+  a local managed OpenCode plugin without replacing existing plugin entries
+  or configuring a global/named agent prompt. At request time, the plugin
+  MAY replace only the exact pinned OpenCode 1.17.9 stock-default prompt
+  prefix with the concise workspace-tool prompt. For the exact Coder alias
+  and artifact identity only, it MAY append an illustrative native XML tool
+  call and read-result example that distinguishes tool-added display metadata
+  from file content; this MUST NOT inject real tool results or alter the user
+  task, tool choice, or the Instruct model's prompt. It MUST preserve the
+  remaining system instructions and sibling messages, and MUST leave other
+  providers/models, custom agent prompts, tools and permissions unchanged.
+  A custom prompt matching that prefix, failed agent lookup, malformed lookup
+  response, or stock-prefix mismatch MUST leave the request unchanged. The
+  plugin MUST use the same protected preview, receipt, launch-integrity and
+  restore lifecycle as the managed configuration; setup MUST NOT overwrite
+  an unowned plugin file. A legacy OpenCode setup with unchanged owned config
+  and launcher receipts, no plugin declaration, and no plugin file or receipt
+  MUST show an explicit Restore setup, then Preview setup and Set up recovery
+  instruction before buyer-key handoff. This MUST NOT overwrite receipts or
+  weaken conflict checks for missing or edited assets in a newer setup.
+  The acceptance recorder MUST load the same plugin
+  bytes with isolated client state, without OpenCode's plugin-disabling
+  `--pure` flag. Launchers for these exact model identities MUST require
+  OpenCode 1.17.9 and refuse another version after consuming and deleting the
+  one-time key handoff; other models MUST NOT acquire this version guard.
+  The interface MUST name the managed client/model scope, preserve custom
+  agent prompts, and direct users to verify actual session tool activity.
+  Installing the plugin is not automatic-tool-use acceptance, and isolated
+  client acceptance MUST NOT imply production-gateway verification.
 
 ### 3.3 Updates — CLI-owned signed compatibility set
 

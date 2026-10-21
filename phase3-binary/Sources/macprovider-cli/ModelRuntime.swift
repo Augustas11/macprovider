@@ -2125,7 +2125,9 @@ actor ModelRuntime: ModelRuntimeServing {
         kvBitsOverride: Int?,
         prefillStepSize: Int,
         temperature: Float,
-        topP: Float
+        topP: Float,
+        topK: Int = 0,
+        repetitionPenalty: Float = 1
     ) throws -> GenerateParameters {
         GenerateParameters(
             maxTokens: try serialMaxOutputTokens(
@@ -2138,8 +2140,70 @@ actor ModelRuntime: ModelRuntimeServing {
             kvBits: kvBitsOverride,
             temperature: temperature,
             topP: topP,
+            topK: topK,
+            repetitionPenalty: repetitionPenalty == 1 ? nil : repetitionPenalty,
+            repetitionContextSize: 20,
             prefill: .legacyRemainder(stepSize: prefillStepSize)
         )
+    }
+
+    /// Cache reuse and chunked prefill shorten the iterator input, but must not
+    /// shorten the sampling history. The factory owns only Sendable token IDs;
+    /// each generation creates its own mutable processor and MLX state.
+    nonisolated static func serveGenerationConfiguration(
+        parameters: GenerateParameters, completePromptTokenIDs: [Int]
+    ) -> (parameters: GenerateParameters, components: GenerationComponents) {
+        guard let penalty = parameters.repetitionPenalty, penalty != 0, penalty != 1,
+              parameters.repetitionContextSize > 0 else {
+            return (parameters, GenerationComponents())
+        }
+        var iteratorParameters = parameters
+        iteratorParameters.repetitionPenalty = nil
+        let contextSize = parameters.repetitionContextSize
+        // Only this window can affect logits; do not retain the complete private
+        // prompt in the generation factory once its effective history is known.
+        let historyTokenIDs = Array(completePromptTokenIDs.suffix(contextSize))
+        return (iteratorParameters, GenerationComponents(logitProcessorFactory: {
+            CompletePromptRepetitionProcessor(
+                promptTokenIDs: historyTokenIDs, penalty: penalty, contextSize: contextSize)
+        }))
+    }
+
+    struct CompletePromptRepetitionProcessor: LogitProcessor {
+        private let promptTokenIDs: [Int]
+        private let penalty: Float
+        private var context: RepetitionContext
+
+        init(promptTokenIDs: [Int], penalty: Float, contextSize: Int) {
+            self.promptTokenIDs = promptTokenIDs
+            self.penalty = penalty
+            self.context = RepetitionContext(
+                repetitionPenalty: penalty, repetitionContextSize: contextSize)
+        }
+
+        mutating func prompt(_ prompt: MLXArray) {
+            // TokenIterator passes only its remaining suffix after prefill.
+            context.prompt(MLXArray(promptTokenIDs))
+        }
+
+        func process(logits: MLXArray) -> MLXArray {
+            guard let limits = logits.dtype.finfo else { return context.process(logits: logits) }
+            // Preserve the pinned arithmetic for ordinary factors. A factor
+            // outside a narrow dtype's range must not become zero or infinity
+            // before applying it: its quotient/product can still be finite.
+            let needsWideFactor = Double(penalty) < limits.smallestSubnormal
+                || Double(penalty) > limits.max
+            let adjusted = context.process(logits: needsWideFactor ? logits.asType(.float32) : logits)
+            let maximum = MLXArray(limits.max, dtype: logits.dtype)
+            let bounded = clip(
+                MLX.where(isNaN(adjusted), MLXArray(Float(0)), adjusted),
+                min: -maximum, max: maximum).asType(logits.dtype)
+            // Overflow of finite logits saturates; existing nonfinite model or
+            // masking entries retain their meaning. Zero remains zero even if
+            // an extreme factor produces an intermediate 0/0 or 0*infinity.
+            return MLX.where(isFinite(logits), bounded, logits)
+        }
+        mutating func didSample(token: MLXArray) { context.didSample(token: token) }
     }
 
     /// SPEC-037 FR-KVP1 / SPEC-024-R001 — `LanguageModel.newCache` builds a
@@ -6422,6 +6486,9 @@ maxTokens: 1,
     /// would terminate on hidden analysis or headers.
     static func requestStateRepresentable(_ request: ChatCompletionRequest) -> Bool {
         if request.containsNonTextMessageContentPart { return false }
+        // The batched row has neither a top-k carrier nor repetition history.
+        // Existing strict refusal/canary serial routing must retain these controls.
+        if request.topK != 0 || request.repetitionPenalty != 1 { return false }
         // hasEnabledTools treats an absent, explicit-null, or empty tools array as
         // no-tools, so a bare or explicit-null `tool_choice` does not false-positive
         // here (the meaningful signal is whether tools are actually enabled).
@@ -7695,7 +7762,8 @@ maxTokens: 1,
             guaranteedSelection = (try? ToolSelectionPolicy.selection(request.promptSource.toolChoice).requiresCall) == true
             observer = NativeToolCallStreamEmitter(
                 modelID: request.model,
-                allowedFunctionNames: ModelRuntime.toolFunctionNames(from: request.promptSource.tools)
+                allowedFunctionNames: ModelRuntime.toolFunctionNames(from: request.promptSource.tools),
+                schemas: ModelRuntime.autoToolParameterSchemas(from: request.promptSource.tools)
             )
             self.incrementalDecoder = incrementalDecoder
         }
@@ -9249,7 +9317,9 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         kvBitsOverride: kvBitsOverride,
                         prefillStepSize: prefillStepSize,
                         temperature: Float(request.temperature),
-                        topP: Float(request.topP)
+                        topP: Float(request.topP),
+                        topK: request.topK,
+                        repetitionPenalty: Float(request.repetitionPenalty)
                     )
                     let firstToken = FirstTokenRecorder()
                     let promptTokenIds: [Int32] = lmInput.text.tokens.asArray(Int32.self)
@@ -9369,15 +9439,19 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 }
                             }
 
-                            let iterator = try TokenIterator(
-                                input: iteratorInput, model: generationContext.model, cache: kvCache,
+                            let generation = Self.serveGenerationConfiguration(
                                 parameters: Self.serveIteratorParameters(
                                     parameters, forceSimpleKV: forceSimpleKV, reusedCache: lease?.reusableCache != nil,
-                                    cache: kvCache))
+                                    cache: kvCache),
+                                completePromptTokenIDs: parameters.repetitionPenalty == nil ? [] : promptTokenIds.map(Int.init))
+                            let iterator = try TokenIterator(
+                                input: iteratorInput, model: generationContext.model, cache: kvCache,
+                                parameters: generation.parameters, components: generation.components)
                             Self.clearMLXBufferCacheAfterPrefill()
                             var serialToolObserver = NativeToolCallStreamEmitter(
                                 modelID: request.model,
-                                allowedFunctionNames: Self.toolFunctionNames(from: request.promptSource.tools)
+                                allowedFunctionNames: Self.toolFunctionNames(from: request.promptSource.tools),
+                                schemas: Self.autoToolParameterSchemas(from: request.promptSource.tools)
                             )
                             let serialToolStopApplies = Self.serialToolStopApplies(request)
                             #if DEBUG || MACPROVIDER_LAB_HARNESS
@@ -10094,7 +10168,9 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         kvBitsOverride: kvBitsOverride,
                         prefillStepSize: prefillStepSize,
                         temperature: Float(request.temperature),
-                        topP: Float(request.topP)
+                        topP: Float(request.topP),
+                        topK: request.topK,
+                        repetitionPenalty: Float(request.repetitionPenalty)
                     )
                     let generationContext = Self.harmonyTerminalPreservingContext(from: context, modelID: request.model)
 
@@ -10313,11 +10389,14 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         allowedFunctionNames: Self.toolFunctionNames(from: request.promptSource.tools),
                         stopCandidates: stopTokenFilter.tokens
                     )
-                    let iterator = try TokenIterator(
-                        input: iteratorInput, model: generationContext.model, cache: kvCache,
+                    let generation = Self.serveGenerationConfiguration(
                         parameters: Self.serveIteratorParameters(
                             parameters, forceSimpleKV: forceSimpleKV, reusedCache: lease?.reusableCache != nil,
-                            cache: kvCache))
+                            cache: kvCache),
+                        completePromptTokenIDs: parameters.repetitionPenalty == nil ? [] : promptTokenIds.map(Int.init))
+                    let iterator = try TokenIterator(
+                        input: iteratorInput, model: generationContext.model, cache: kvCache,
+                        parameters: generation.parameters, components: generation.components)
                     Self.clearMLXBufferCacheAfterPrefill()
                     do {
                         let result: BlockingGenerateResult = try await blockingInferenceExecutor.run { inferenceCancellation in
@@ -13399,7 +13478,8 @@ maxTokens: maxTokens,
         let parsed = ToolCallParser.parseToolCalls(
             rawOutput: text,
             modelID: request.model,
-            allowedFunctionNames: allowedFunctionNames
+            allowedFunctionNames: allowedFunctionNames,
+            schemas: autoToolParameterSchemas(from: request.promptSource.tools)
         )
         guard !parsed.toolCalls.isEmpty else {
             return (text, [])
@@ -14005,6 +14085,26 @@ maxTokens: maxTokens,
         return names.isEmpty ? nil : Set(names)
     }
 
+    /// Auto accepts schemas beyond the guaranteed-mode subset. Pass declarations
+    /// through without validating or inventing constraints; duplicate names are
+    /// ambiguous and therefore cannot direct argument typing.
+    static func autoToolParameterSchemas(from value: MacProviderCore.JSONValue?) -> [String: MacProviderCore.JSONValue] {
+        guard case .array(let tools)? = value else { return [:] }
+        var schemas: [String: MacProviderCore.JSONValue] = [:]
+        var seen: Set<String> = []
+        for tool in tools {
+            guard case .object(let object) = tool,
+                  case .object(let function)? = object["function"],
+                  case .string(let name)? = function["name"], !name.isEmpty else { continue }
+            guard seen.insert(name).inserted else {
+                schemas.removeValue(forKey: name)
+                continue
+            }
+            schemas[name] = function["parameters"]
+        }
+        return schemas
+    }
+
     /// Converts a JSONValue subtree into the `Any` graph the chat template
     /// consumes, preserving every key and array position. JSON null becomes a
     /// native `Jinja.Value.null` (not `NSNull` and not an omission): swift-jinja
@@ -14084,7 +14184,8 @@ struct SerialStreamingTextEmitter {
         stopsAfterFirstCompleteToolCall = request.stopsAfterFirstCompleteToolCall
         toolStreamer = NativeToolCallStreamEmitter(
             modelID: request.model,
-            allowedFunctionNames: ModelRuntime.toolFunctionNames(from: request.promptSource.tools)
+            allowedFunctionNames: ModelRuntime.toolFunctionNames(from: request.promptSource.tools),
+            schemas: ModelRuntime.autoToolParameterSchemas(from: request.promptSource.tools)
         )
         self.holdsCleanupPatternPrefixes = holdsCleanupPatternPrefixes
         self.holdsCleanupDecoderPendingPrefixes = holdsCleanupDecoderPendingPrefixes
@@ -14273,6 +14374,7 @@ struct NativeToolCallStreamEmitter {
     /// undeclared tool_call to the buyer before the final parser's fail-closed check
     /// (SPEC-018 §3.5). `nil`/empty means no tools were declared, so nothing may be emitted.
     private let allowedFunctionNames: Set<String>?
+    private let schemas: [String: MacProviderCore.JSONValue]?
     /// Function-XML (`<function=…>`) is a Qwen-row-only grammar (SPEC-018 §3.1 v0.2.7). The
     /// streaming emitter mirrors the non-streaming parser's family gate: only Qwen models may
     /// stream `<function=…>` tool-call deltas; other families fall through to JSON parsing (which
@@ -14288,8 +14390,9 @@ struct NativeToolCallStreamEmitter {
     private var emittedArguments = ""
     private var callID = "call_\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())"
 
-    init(modelID: String, allowedFunctionNames: Set<String>?) {
+    init(modelID: String, allowedFunctionNames: Set<String>?, schemas: [String: MacProviderCore.JSONValue]? = nil) {
         self.allowedFunctionNames = allowedFunctionNames
+        self.schemas = schemas
         let isQwen = modelID.localizedCaseInsensitiveContains("qwen2.5")
             || modelID.localizedCaseInsensitiveContains("qwen3")
         let isLlama33 = modelID.localizedCaseInsensitiveContains("llama-3.3")
@@ -14428,7 +14531,11 @@ struct NativeToolCallStreamEmitter {
             return []
         }
 
-        let arguments = isClosed ? ToolCallParser.nemotronArgumentsJSON(in: body, includeIncomplete: true) : nil
+        let arguments = isClosed ? ToolCallParser.nemotronArgumentsJSON(in: body, includeIncomplete: true, schemas: schemas) : nil
+        if isClosed, arguments == nil {
+            closed = true
+            return []
+        }
         if isClosed, let arguments, arguments.utf8.count > ToolCallParser.SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP {
             closed = true
             return []
