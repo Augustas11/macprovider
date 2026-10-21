@@ -781,6 +781,16 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     /// (`pagedMLA`: `pagedMLAMaxFlattenedTokensPerForward`); nil when only the
     /// device bound applies. The scheduler splits larger decode steps.
     let maxDecodeRowsPerForward: Int?
+    /// Closed backend capability for sharing one ragged target-prefill
+    /// forward between native-MTP and ordinary rows. Qwen3.5/3.6 emits
+    /// independently sliceable `[B, L, H]` prompt hidden states; other
+    /// adapters retain the equal-offset veto unless their grouped rows run
+    /// alone under the existing flattened-token rule.
+    let nativeMTPPromptRowsJoinRaggedPrefill: Bool
+
+    static func supportsNativeMTPPromptRowsInRaggedPrefill(familyAdapter: String?) -> Bool {
+        familyAdapter == "qwen3_5_mtp_v1"
+    }
 
     /// Whether `rows` prompt chunks of `chunkLength` tokens fit one shared
     /// forward under this backend's flattened-token cap.
@@ -837,11 +847,15 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         contiguousCacheBridge: (any PagedKVRuntimeCacheBridge)? = nil,
         compiledDecode: Bool = false,
         drafterContainer: MTPDrafterContainer? = nil,
+        nativeMTPFamilyAdapter: String? = nil,
         nativeMTPDrafterColumnCap: Int = PagedKVSharedForwardBackend.defaultNativeMTPDrafterColumnCap,
         maxVerifyTokensPerForward: Int? = nil
     ) {
         self.container = container
         self.drafterContainer = drafterContainer
+        self.nativeMTPPromptRowsJoinRaggedPrefill = Self.supportsNativeMTPPromptRowsInRaggedPrefill(
+            familyAdapter: nativeMTPFamilyAdapter
+        )
         self.nativeMTPDrafterColumnCap = max(1, nativeMTPDrafterColumnCap)
         let resolvedKinds = (cacheKinds?.isEmpty == false)
             ? cacheKinds!
@@ -873,6 +887,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         contiguousCacheBridge: (any PagedKVRuntimeCacheBridge)? = nil,
         compiledDecode: Bool = false,
         drafterContainer: MTPDrafterContainer? = nil,
+        nativeMTPFamilyAdapter: String? = nil,
         nativeMTPDrafterColumnCap: Int = PagedKVSharedForwardBackend.defaultNativeMTPDrafterColumnCap,
         maxVerifyTokensPerForward: Int? = nil
     ) {
@@ -886,6 +901,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             contiguousCacheBridge: contiguousCacheBridge,
             compiledDecode: compiledDecode,
             drafterContainer: drafterContainer,
+            nativeMTPFamilyAdapter: nativeMTPFamilyAdapter,
             nativeMTPDrafterColumnCap: nativeMTPDrafterColumnCap,
             maxVerifyTokensPerForward: maxVerifyTokensPerForward
         )
@@ -899,7 +915,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         return try await container.perform(nonSendable: inputs) { context, inputs in
             self.enterTargetLock(); defer { self.exitTargetLock() }
             let raggedOffsets = Self.hasRaggedPromptOffsets(inputs)
-            if Self.canSharePrefillForward(inputs),
+            if Self.canSharePrefillForward(
+                inputs,
+                nativeMTPPromptRowsJoinRaggedPrefill: self.nativeMTPPromptRowsJoinRaggedPrefill
+            ),
                self.sharedForwardFits(rows: inputs.count, tokensPerRow: inputs[0].promptTokens.count),
                !raggedOffsets || self.supportsRaggedPrefillOffsets {
                 let rowStates = inputs.map {
@@ -1224,9 +1243,12 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     /// length `L` and continues exactly from that row's committed KV. Prompt
     /// offsets may differ (SPEC-038 FR-CB2 ragged shared prefill): RoPE takes
     /// each row's own offset and `PagedKVBatchLayerCache.makeMask` builds a
-    /// per-row causal mask. Native-MTP prompt rows keep the equal-offset rule,
-    /// because their drafter seeding is proven only on that shape.
-    static func canSharePrefillForward(_ inputs: [ContinuousBatchPrefillInput]) -> Bool {
+    /// per-row causal mask. Native-MTP rows keep the default equal-offset veto;
+    /// only an explicitly admitted backend family may share the ragged forward.
+    static func canSharePrefillForward(
+        _ inputs: [ContinuousBatchPrefillInput],
+        nativeMTPPromptRowsJoinRaggedPrefill: Bool = false
+    ) -> Bool {
         guard inputs.count > 1, let first = inputs.first, !first.promptTokens.isEmpty else {
             return false
         }
@@ -1238,7 +1260,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
         guard shapeCompatible else { return false }
         if hasRaggedPromptOffsets(inputs) {
-            return !inputs.contains(where: \.nativeMTPPromptPrefill)
+            return nativeMTPPromptRowsJoinRaggedPrefill
+                || !inputs.contains(where: \.nativeMTPPromptPrefill)
         }
         return true
     }
@@ -3656,6 +3679,14 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             nativeMTPPendingDrafterColumns[requestID]?.count ?? 0
         )
     }
+
+    #if DEBUG
+    func rowTargetCacheDigestForTest(requestID: String) throws -> String {
+        enterTargetLock()
+        defer { exitTargetLock() }
+        return try rowTargetCacheDigest(requestID: requestID)
+    }
+    #endif
 
     func retainedRowCountForTest() -> Int {
         lock.lock()

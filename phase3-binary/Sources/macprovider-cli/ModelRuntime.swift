@@ -5876,6 +5876,21 @@ maxTokens: 1,
         return cap
     }
 
+    /// The scheduler may group a native prompt at a different offset only
+    /// when the backend carries a family-specific shared-forward capability,
+    /// or when its flattened-token bound already serializes grouped rows.
+    nonisolated static func schedulerNativeMTPPromptRowsJoinRaggedPrefill(
+        backend: (any ContinuousBatchSchedulerBackend)?,
+        prefillGrouping: ContinuousBatchPrefillGroupingRule
+    ) -> Bool {
+        guard let backend = backend as? PagedKVSharedForwardBackend else { return false }
+        return backend.nativeMTPPromptRowsJoinRaggedPrefill
+            || PagedKVSharedForwardBackend.prefillsGroupedRowsAlone(
+                cacheKinds: backend.cacheKinds,
+                minimumGroupedChunkTokens: prefillGrouping.minimumGroupedChunkTokens
+            )
+    }
+
     private nonisolated static func makeContinuousBatchScheduler(
         decision: PagedKVAttachDecision,
         tuple: ContinuousBatchingRequestedTuple?,
@@ -5935,12 +5950,10 @@ maxTokens: 1,
                 prefillGrouping: prefillGrouping,
                 allowsRaggedPrefillOffsets: (backend as? PagedKVSharedForwardBackend)?
                     .supportsRaggedPrefillOffsets ?? false,
-                nativeMTPPromptRowsJoinRaggedPrefill: (backend as? PagedKVSharedForwardBackend).map {
-                    PagedKVSharedForwardBackend.prefillsGroupedRowsAlone(
-                        cacheKinds: $0.cacheKinds,
-                        minimumGroupedChunkTokens: prefillGrouping.minimumGroupedChunkTokens
-                    )
-                } ?? false,
+                nativeMTPPromptRowsJoinRaggedPrefill: schedulerNativeMTPPromptRowsJoinRaggedPrefill(
+                    backend: backend,
+                    prefillGrouping: prefillGrouping
+                ),
                 maxDecodeRowsPerForward: schedulerDecodeRowBound(configured: maxDecodeRowsPerForward, backend: backend)
             ),
             allocator: allocator,
@@ -6035,7 +6048,8 @@ maxTokens: 1,
                 // with this on and are coherent with it off. Applies to
                 // hybrid (Qwen3.6) and KV-only layouts alike.
                 compiledDecode: false,
-                drafterContainer: nativeMTPDrafterContainer
+                drafterContainer: nativeMTPDrafterContainer,
+                nativeMTPFamilyAdapter: nativeMTPAdmissionCapability?.familyAdapter
             ),
             maxBatch: maxBatch,
             queueLimit: queueLimit,

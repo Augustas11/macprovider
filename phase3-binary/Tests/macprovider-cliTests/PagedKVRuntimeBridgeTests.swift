@@ -1127,47 +1127,90 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(backend.retainedRowCountForTest(), 1)
     }
 
-    /// The R014 mixed-row failure, in miniature: with a real hybrid target,
-    /// an equal-length group holding one native row must leave every row,
-    /// the native one included, with exactly the target state of the same
-    /// group prefilled with MTP off. Greedy decode continued from both
-    /// prefills emits identical tokens on every row.
-    func testRealQwen35NativeRowInSharedPrefillGroupMatchesMTPDisabledGroup() async throws {
+    /// A real tiny Qwen native row at offset four shares the ordinary row's
+    /// offset-zero target forward. Its target caches, sampled output and
+    /// continued greedy decode match the same ragged group with MTP disabled,
+    /// while its drafter seed matches a definitional whole-prompt seed.
+    func testRealQwen35NativeRowInRaggedSharedPrefillMatchesMTPDisabledGroup() async throws {
         try requireMetal()
-        let prompts = [11, 12, 13].map { Self.tinyPrompt(length: 12, salt: $0) }
-        let ids = ["native", "ord-1", "ord-2"]
-        let steps = 8
+        let nativePrompt = Self.tinyPrompt(length: 8, salt: 11)
+        let ordinaryPrompt = Self.tinyPrompt(length: 4, salt: 12)
+        let ids = ["native", "ordinary"]
+        let steps = 4
 
-        func run(nativeRow: Bool) async throws -> [String: [Int]] {
+        func run(nativeRow: Bool) async throws -> (
+            tokens: [String: [Int]],
+            targetCacheDigests: [String: String],
+            seedToken: Int?,
+            definitionalSeedToken: Int?
+        ) {
             let tiny = try Self.tinyQwen35Native()
             let backend = tiny.backend.base
+            XCTAssertTrue(backend.nativeMTPPromptRowsJoinRaggedPrefill)
             let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 64)
-            var handles: [PagedKVBlockTableHandle] = []
-            var inputs: [ContinuousBatchPrefillInput] = []
-            for (index, id) in ids.enumerated() {
-                let handle = try await allocator.allocate(conversationKey: id, maxTokens: 32)
-                _ = try await allocator.extend(handle, by: prompts[index].count)
-                handles.append(handle)
-                inputs.append(ContinuousBatchPrefillInput(
-                    requestID: id,
-                    promptTokens: prompts[index],
-                    binding: try await allocator.binding(for: handle),
+            let nativeHandle = try await allocator.allocate(conversationKey: ids[0], maxTokens: 16)
+            let ordinaryHandle = try await allocator.allocate(conversationKey: ids[1], maxTokens: 16)
+            let handles = [nativeHandle, ordinaryHandle]
+
+            _ = try await allocator.extend(nativeHandle, by: 4)
+            let firstChunk = try await backend.prefill(rows: [ContinuousBatchPrefillInput(
+                requestID: ids[0],
+                promptTokens: Array(nativePrompt[0 ..< 4]),
+                binding: try await allocator.binding(for: nativeHandle),
+                promptTokenOffset: 0,
+                committedKVTokenCount: 0,
+                targetKVTokenCount: 4,
+                isFinalChunk: false,
+                nativeMTPPromptPrefill: nativeRow,
+                nativeMTPNextPromptToken: nativeRow ? nativePrompt[4] : nil
+            )])
+            XCTAssertEqual(firstChunk, [ContinuousBatchPrefillOutput(requestID: ids[0])])
+
+            _ = try await allocator.extend(nativeHandle, by: 4)
+            _ = try await allocator.extend(ordinaryHandle, by: 4)
+            let inputs = [
+                ContinuousBatchPrefillInput(
+                    requestID: ids[0],
+                    promptTokens: Array(nativePrompt[4 ..< 8]),
+                    binding: try await allocator.binding(for: nativeHandle),
+                    promptTokenOffset: 4,
+                    committedKVTokenCount: 4,
+                    targetKVTokenCount: 8,
+                    isFinalChunk: true,
+                    nativeMTPPromptPrefill: nativeRow
+                ),
+                ContinuousBatchPrefillInput(
+                    requestID: ids[1],
+                    promptTokens: ordinaryPrompt,
+                    binding: try await allocator.binding(for: ordinaryHandle),
                     promptTokenOffset: 0,
                     committedKVTokenCount: 0,
-                    targetKVTokenCount: prompts[index].count,
-                    isFinalChunk: true,
-                    nativeMTPPromptPrefill: nativeRow && index == 0
-                ))
-            }
-            XCTAssertTrue(PagedKVSharedForwardBackend.canSharePrefillForward(inputs))
+                    targetKVTokenCount: 4,
+                    isFinalChunk: true
+                ),
+            ]
+            XCTAssertTrue(PagedKVSharedForwardBackend.hasRaggedPromptOffsets(inputs))
+            XCTAssertEqual(PagedKVSharedForwardBackend.canSharePrefillForward(inputs), !nativeRow)
+            XCTAssertTrue(PagedKVSharedForwardBackend.canSharePrefillForward(
+                inputs,
+                nativeMTPPromptRowsJoinRaggedPrefill: backend.nativeMTPPromptRowsJoinRaggedPrefill
+            ))
             let prefill = try await backend.prefill(rows: inputs)
             var tokens: [String: [Int]] = [:]
             for output in prefill {
                 tokens[output.requestID] = [try XCTUnwrap(output.sampledToken, output.failureCode ?? "")]
             }
-            if nativeRow {
-                XCTAssertNotNil(backend.nativeMTPDrafterSnapshotForTest(requestID: "native").state)
+            var targetCacheDigests: [String: String] = [:]
+            for id in ids {
+                targetCacheDigests[id] = try backend.rowTargetCacheDigestForTest(requestID: id)
             }
+            let snapshot = backend.nativeMTPDrafterSnapshotForTest(requestID: ids[0])
+            let definitionalSeed = nativeRow ? try Self.definitionalDrafterSeed(
+                target: tiny.target,
+                drafter: tiny.drafter,
+                prompt: nativePrompt,
+                generated: [try XCTUnwrap(tokens[ids[0]]?.first)]
+            ) : nil
             for step in 0 ..< steps {
                 var decodeInputs: [ContinuousBatchDecodeInput] = []
                 for (index, id) in ids.enumerated() {
@@ -1176,7 +1219,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
                         currentToken: try XCTUnwrap(tokens[id]?.last),
                         handle: handles[index],
                         allocator: allocator,
-                        committedKVTokenCount: prompts[index].count + step
+                        committedKVTokenCount: (index == 0 ? nativePrompt.count : ordinaryPrompt.count) + step
                     ))
                 }
                 let outcomes = try await backend.decode(rows: decodeInputs)
@@ -1187,15 +1230,23 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
                     tokens[id, default: []].append(token)
                 }
             }
-            return tokens
+            return (tokens, targetCacheDigests, snapshot.seedToken, definitionalSeed)
         }
 
         let ordinary = try await run(nativeRow: false)
         let mixed = try await run(nativeRow: true)
         for id in ids {
-            XCTAssertEqual(ordinary[id]?.count, steps + 1, id)
-            XCTAssertEqual(mixed[id], ordinary[id], "\(id) diverged from the MTP-disabled group")
+            XCTAssertEqual(ordinary.tokens[id]?.count, steps + 1, id)
+            XCTAssertEqual(mixed.tokens[id], ordinary.tokens[id], "\(id) diverged from the MTP-disabled group")
+            XCTAssertEqual(
+                mixed.targetCacheDigests[id],
+                ordinary.targetCacheDigests[id],
+                "\(id) target cache diverged during ragged native prefill"
+            )
         }
+        XCTAssertNotNil(mixed.seedToken)
+        XCTAssertEqual(mixed.seedToken, mixed.definitionalSeedToken)
+        XCTAssertNil(ordinary.seedToken)
     }
 
     /// SPEC-038 FR-CB2 ragged shared prefill on a real (tiny, random-weight)
@@ -1332,8 +1383,24 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertFalse(PagedKVSharedForwardBackend.canSharePrefillForward([atZero]))
         XCTAssertFalse(PagedKVSharedForwardBackend.canSharePrefillForward([atFour, shorter]))
         XCTAssertFalse(PagedKVSharedForwardBackend.canSharePrefillForward([atZero, nativeAtFour]))
+        XCTAssertTrue(PagedKVSharedForwardBackend.canSharePrefillForward(
+            [atZero, nativeAtFour],
+            nativeMTPPromptRowsJoinRaggedPrefill: true
+        ))
         XCTAssertTrue(PagedKVSharedForwardBackend.canSharePrefillForward([atZero, nativeAtZero]))
         XCTAssertFalse(PagedKVSharedForwardBackend.canSharePrefillForward([atZero, lagging]))
+    }
+
+    func testNativeRaggedPrefillCapabilityIsBoundOnlyToQwenAdapter() {
+        XCTAssertTrue(PagedKVSharedForwardBackend.supportsNativeMTPPromptRowsInRaggedPrefill(
+            familyAdapter: "qwen3_5_mtp_v1"
+        ))
+        XCTAssertFalse(PagedKVSharedForwardBackend.supportsNativeMTPPromptRowsInRaggedPrefill(
+            familyAdapter: "glm5_next_mtp_v1"
+        ))
+        XCTAssertFalse(PagedKVSharedForwardBackend.supportsNativeMTPPromptRowsInRaggedPrefill(
+            familyAdapter: nil
+        ))
     }
 
     func testGroupedPrefillRowsRunAloneOnlyUnderAFlattenedTokenCapBelowTwoGroupedChunks() {
@@ -2558,6 +2625,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
                 configuration: ModelConfiguration(id: "mtp"),
                 model: drafter
             )),
+            nativeMTPFamilyAdapter: "qwen3_5_mtp_v1",
             nativeMTPDrafterColumnCap: nativeMTPDrafterColumnCap
         ))
         return TinyQwen35Native(target: target, drafter: drafter, backend: backend)

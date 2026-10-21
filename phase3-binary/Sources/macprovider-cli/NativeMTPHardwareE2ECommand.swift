@@ -745,7 +745,8 @@ final class NativeMTPHardwareE2ERunner {
             poolEpoch: 1,
             layerCount: cacheKinds.count,
             cacheKinds: cacheKinds,
-            drafterContainer: drafterContainer
+            drafterContainer: drafterContainer,
+            nativeMTPFamilyAdapter: nativeAdmissionCapability.familyAdapter
         )
         let ordinary = makeRuntime(
             modelSHA: targetIdentity.digest,
