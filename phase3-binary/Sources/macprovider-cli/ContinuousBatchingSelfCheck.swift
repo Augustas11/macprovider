@@ -1135,8 +1135,8 @@ struct ContinuousBatchingSelfCheckStore: Sendable {
 /// throughput noise never takes a grant from a Mac that already batches
 /// (`ContinuousBatchingSelfCheck.reconcile`). Never blocks serving.
 actor ContinuousBatchingSelfCheckDriver {
-    /// Process teardown must wait for inference cancellation and its journal
-    /// write before destroying MLX's process-global Metal command encoders.
+    /// Wait for qualification cancellation and its journal write before exit.
+    /// Scheduler work has separate ownership; this is not its drain fence.
     nonisolated static func cancelAndWait(_ task: Task<Void, Never>?) async {
         task?.cancel()
         await task?.value

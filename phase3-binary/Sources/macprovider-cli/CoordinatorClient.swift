@@ -6370,9 +6370,10 @@ actor CoordinatorClient {
         return .accepted
     }
 
-    func drainAndExit(reason: String, exitCode: Int32 = 0) async {
+    func drainForExit(reason: String) async {
         // Used by SIGTERM signal handler — drain in-flight buyer requests,
-        // notify coordinator, then exit the whole process.
+        // notify coordinator, then return for explicit process-local cleanup.
+        // The signal handler owns exit after cold writes have drained too.
         // Issue #189 R1 security LOW: cancel the heartbeat watchdog on
         // drain entry. Otherwise a watchdog-triggered Darwin.exit(1)
         // could race the orderly drain and drop the final drain_status
@@ -6394,7 +6395,6 @@ actor CoordinatorClient {
         }
         try? await sendDrainStatus(phase: "complete")
         webSocket?.cancel(with: .goingAway, reason: nil)
-        Darwin.exit(exitCode)
     }
 
     /// Handle a coordinator-initiated drain (typically because the coordinator
