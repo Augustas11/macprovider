@@ -322,11 +322,15 @@ env_key = "MALIBU_API_KEY"
 			"-c", `approval_policy="never"`, "-c", `web_search="disabled"`, prompt}
 	case "opencode":
 		configPath := filepath.Join(root, "opencode.json")
-		data, err := json.Marshal(map[string]any{"model": "malibu/" + model, "provider": map[string]any{
+		configuration := map[string]any{"model": "malibu/" + model, "provider": map[string]any{
 			"malibu": map[string]any{"npm": "@ai-sdk/openai-compatible", "name": "Malibu",
 				"options": map[string]any{"baseURL": server.URL + "/v1", "apiKey": "{env:MALIBU_API_KEY}"},
 				"models":  map[string]any{model: map[string]any{"name": model, "limit": map[string]any{"context": contextTokens, "output": 1024}}}},
-		}})
+		}}
+		if err := connectedOpenCodeAgentProfile(configuration, os.Getenv("MACPROVIDER_TEST_OPENCODE_AGENT_PROFILE"), model); err != nil {
+			t.Fatal(err)
+		}
+		data, err := json.Marshal(configuration)
 		if err != nil {
 			t.Fatal(err)
 		}
