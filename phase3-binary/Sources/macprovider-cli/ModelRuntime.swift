@@ -2017,7 +2017,9 @@ actor ModelRuntime: ModelRuntimeServing {
         kvBitsOverride: Int?,
         prefillStepSize: Int,
         temperature: Float,
-        topP: Float
+        topP: Float,
+        topK: Int = 0,
+        repetitionPenalty: Float = 1
     ) throws -> GenerateParameters {
         GenerateParameters(
             maxTokens: try serialMaxOutputTokens(
@@ -2030,8 +2032,52 @@ actor ModelRuntime: ModelRuntimeServing {
             kvBits: kvBitsOverride,
             temperature: temperature,
             topP: topP,
+            topK: topK,
+            repetitionPenalty: repetitionPenalty == 1 ? nil : repetitionPenalty,
+            repetitionContextSize: 20,
             prefill: .legacyRemainder(stepSize: prefillStepSize)
         )
+    }
+
+    /// Cache reuse and chunked prefill shorten the iterator input, but must not
+    /// shorten the sampling history. The factory owns only Sendable token IDs;
+    /// each generation creates its own mutable processor and MLX state.
+    nonisolated static func serveGenerationConfiguration(
+        parameters: GenerateParameters, completePromptTokenIDs: [Int]
+    ) -> (parameters: GenerateParameters, components: GenerationComponents) {
+        guard let penalty = parameters.repetitionPenalty, penalty != 0, penalty != 1,
+              parameters.repetitionContextSize > 0 else {
+            return (parameters, GenerationComponents())
+        }
+        var iteratorParameters = parameters
+        iteratorParameters.repetitionPenalty = nil
+        let contextSize = parameters.repetitionContextSize
+        // Only this window can affect logits; do not retain the complete private
+        // prompt in the generation factory once its effective history is known.
+        let historyTokenIDs = Array(completePromptTokenIDs.suffix(contextSize))
+        return (iteratorParameters, GenerationComponents(logitProcessorFactory: {
+            CompletePromptRepetitionProcessor(
+                promptTokenIDs: historyTokenIDs, penalty: penalty, contextSize: contextSize)
+        }))
+    }
+
+    struct CompletePromptRepetitionProcessor: LogitProcessor {
+        private let promptTokenIDs: [Int]
+        private var context: RepetitionContext
+
+        init(promptTokenIDs: [Int], penalty: Float, contextSize: Int) {
+            self.promptTokenIDs = promptTokenIDs
+            self.context = RepetitionContext(
+                repetitionPenalty: penalty, repetitionContextSize: contextSize)
+        }
+
+        mutating func prompt(_ prompt: MLXArray) {
+            // TokenIterator passes only its remaining suffix after prefill.
+            context.prompt(MLXArray(promptTokenIDs))
+        }
+
+        func process(logits: MLXArray) -> MLXArray { context.process(logits: logits) }
+        mutating func didSample(token: MLXArray) { context.didSample(token: token) }
     }
 
     /// SPEC-037 FR-KVP1 / SPEC-024-R001 — `LanguageModel.newCache` builds a
@@ -6251,6 +6297,9 @@ maxTokens: 1,
     /// would terminate on hidden analysis or headers.
     static func requestStateRepresentable(_ request: ChatCompletionRequest) -> Bool {
         if request.containsNonTextMessageContentPart { return false }
+        // The batched row has neither a top-k carrier nor repetition history.
+        // Existing strict refusal/canary serial routing must retain these controls.
+        if request.topK != 0 || request.repetitionPenalty != 1 { return false }
         // hasEnabledTools treats an absent, explicit-null, or empty tools array as
         // no-tools, so a bare or explicit-null `tool_choice` does not false-positive
         // here (the meaningful signal is whether tools are actually enabled).
@@ -9054,7 +9103,9 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         kvBitsOverride: kvBitsOverride,
                         prefillStepSize: prefillStepSize,
                         temperature: Float(request.temperature),
-                        topP: Float(request.topP)
+                        topP: Float(request.topP),
+                        topK: request.topK,
+                        repetitionPenalty: Float(request.repetitionPenalty)
                     )
                     let firstToken = FirstTokenRecorder()
                     let promptTokenIds: [Int32] = lmInput.text.tokens.asArray(Int32.self)
@@ -9174,11 +9225,14 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 }
                             }
 
-                            let iterator = try TokenIterator(
-                                input: iteratorInput, model: generationContext.model, cache: kvCache,
+                            let generation = Self.serveGenerationConfiguration(
                                 parameters: Self.serveIteratorParameters(
                                     parameters, forceSimpleKV: forceSimpleKV, reusedCache: lease?.reusableCache != nil,
-                                    cache: kvCache))
+                                    cache: kvCache),
+                                completePromptTokenIDs: parameters.repetitionPenalty == nil ? [] : promptTokenIds.map(Int.init))
+                            let iterator = try TokenIterator(
+                                input: iteratorInput, model: generationContext.model, cache: kvCache,
+                                parameters: generation.parameters, components: generation.components)
                             Self.clearMLXBufferCacheAfterPrefill()
                             var serialToolObserver = NativeToolCallStreamEmitter(
                                 modelID: request.model,
@@ -9872,7 +9926,9 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         kvBitsOverride: kvBitsOverride,
                         prefillStepSize: prefillStepSize,
                         temperature: Float(request.temperature),
-                        topP: Float(request.topP)
+                        topP: Float(request.topP),
+                        topK: request.topK,
+                        repetitionPenalty: Float(request.repetitionPenalty)
                     )
                     let generationContext = Self.harmonyTerminalPreservingContext(from: context, modelID: request.model)
 
@@ -10091,11 +10147,14 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         allowedFunctionNames: Self.toolFunctionNames(from: request.promptSource.tools),
                         stopCandidates: stopTokenFilter.tokens
                     )
-                    let iterator = try TokenIterator(
-                        input: iteratorInput, model: generationContext.model, cache: kvCache,
+                    let generation = Self.serveGenerationConfiguration(
                         parameters: Self.serveIteratorParameters(
                             parameters, forceSimpleKV: forceSimpleKV, reusedCache: lease?.reusableCache != nil,
-                            cache: kvCache))
+                            cache: kvCache),
+                        completePromptTokenIDs: parameters.repetitionPenalty == nil ? [] : promptTokenIds.map(Int.init))
+                    let iterator = try TokenIterator(
+                        input: iteratorInput, model: generationContext.model, cache: kvCache,
+                        parameters: generation.parameters, components: generation.components)
                     Self.clearMLXBufferCacheAfterPrefill()
                     do {
                         let result: BlockingGenerateResult = try await blockingInferenceExecutor.run { inferenceCancellation in

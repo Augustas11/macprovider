@@ -30,6 +30,17 @@ final class GLM5NextSerialBaselineTests: XCTestCase {
         )
         XCTAssertNil(parameters.maxKVSize)
         XCTAssertEqual(parameters.maxTokens, 4)
+        XCTAssertEqual(parameters.topK, 0)
+        XCTAssertNil(parameters.repetitionPenalty)
+        let sampled = try ModelRuntime.makeServeGenerateParameters(
+            model: model, maxTokens: 4, promptTokens: 8, maxContextTokens: 65_536, kvBitsOverride: nil,
+            prefillStepSize: 512, temperature: 0.7, topP: 0.8, topK: 20, repetitionPenalty: 1.05
+        )
+        XCTAssertNil(sampled.maxKVSize)
+        XCTAssertEqual(sampled.maxTokens, 4)
+        XCTAssertEqual(sampled.topK, 20)
+        XCTAssertEqual(sampled.repetitionPenalty, Float(1.05))
+        XCTAssertEqual(sampled.repetitionContextSize, 20)
         // No maxKVSize bounds this model's cache, so the serve constructor
         // clamps the completion budget to the context the prompt leaves.
         let nearLimit = try ModelRuntime.makeServeGenerateParameters(

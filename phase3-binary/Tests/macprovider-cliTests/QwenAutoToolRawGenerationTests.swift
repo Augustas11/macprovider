@@ -100,6 +100,7 @@ final class QwenAutoToolRawGenerationTests: XCTestCase {
                                  "prompt_token_ids": prompt, "max_tokens": maximum,
                                  "prompt_text": context.tokenizer.decode(tokenIds: prompt, skipSpecialTokens: false),
                                  "temperature": request.temperature, "top_p": request.topP,
+                                 "top_k": request.topK, "repetition_penalty": request.repetitionPenalty,
                                  "forced_prefill": false, "prefill_step_size": 512,
                                  "cache": promptOnly ? "not_created" : "fresh_serial", "parser": "bypassed"])
                 if promptOnly {
@@ -112,12 +113,17 @@ final class QwenAutoToolRawGenerationTests: XCTestCase {
                 let parameters = try ModelRuntime.makeServeGenerateParameters(
                     model: context.model, maxTokens: maximum, promptTokens: prompt.count,
                     maxContextTokens: 16_384, kvBitsOverride: nil, prefillStepSize: 512,
-                    temperature: Float(request.temperature), topP: Float(request.topP)
+                    temperature: Float(request.temperature), topP: Float(request.topP),
+                    topK: request.topK, repetitionPenalty: Float(request.repetitionPenalty)
                 )
                 let cache = try ModelRuntime.serveCache(model: context.model, baseParameters: parameters, forceSimpleKV: false)
+                let generation = ModelRuntime.serveGenerationConfiguration(
+                    parameters: ModelRuntime.serveIteratorParameters(
+                        parameters, forceSimpleKV: false, reusedCache: false, cache: cache),
+                    completePromptTokenIDs: prompt)
                 var iterator = try TokenIterator(
                     input: prepared.input, model: context.model, cache: cache,
-                    parameters: ModelRuntime.serveIteratorParameters(parameters, forceSimpleKV: false, reusedCache: false, cache: cache)
+                    parameters: generation.parameters, components: generation.components
                 )
                 var eos = context.configuration.eosTokenIds
                 if let token = context.tokenizer.eosTokenId { eos.insert(token) }
