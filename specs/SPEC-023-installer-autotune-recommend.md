@@ -1,12 +1,18 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.28
+version: v0.22.29
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-02
 lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-change invariants). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
+
+- **v0.22.29 (2026-10-21)** — Target-hardware CB qualification. R025 permits
+  reviewed release-mode lab acceptance on operator-designated target hardware,
+  not only the Studio. Qualifying-build provenance remains the actual measured
+  binary; the legacy campaign digest binds immutable evidence bytes. Schema,
+  correctness, gain, fit, release and live buyer-proof gates are unchanged.
 
 - **v0.22.28 (2026-10-19)** — Signed served-slot ceiling (lockstep with
   SPEC-038 v0.3.22 FR-CB11). A `continuous-batching-policy.json` entry MAY
@@ -3847,8 +3853,14 @@ throughput probe, or descriptor membership sufficient for production CB.
 
 The committed default policy is explicit no-op authority: `entries: []`, with a
 future `expires_at` and the same signer key id as `autotune-candidates.json`.
-An enabling entry MAY be published only after reviewed packaged Studio
-acceptance evidence exists. Enabling entries are authored only through the
+An enabling entry MAY be published only after reviewed packaged acceptance
+evidence exists on the operator-designated qualification hardware. A
+release-mode lab binary packaged with its matching runtime/Metal resources
+MAY qualify the exact measured hardware/model/runtime tuple; the Studio is
+not a substitute for measuring the target memory class. Lab qualification
+does not waive release review, local admission, or live paid-serving proof,
+and does not authorize an unsigned or unreleased binary to join production.
+Enabling entries are authored only through the
 closed `continuous-batching-policy-source.json` release input; the release
 generator derives `tuple_sha256`, validates the resulting published feed, and
 MUST NOT silently replace an authored entry with the default empty policy.
@@ -3882,6 +3894,16 @@ consumer MUST NOT require them to equal the running CLI's version, CDHash, or
 package digest, and a release gate that requires a baseline to stay covered
 checks only the decode-path tuple, rollout, and qualified provenance source
 and status, never a per-release CLI identity.
+**[v0.22.29]** For an `operator_review` lab qualification, the legacy
+`package_manifest_sha256` records SHA-256 of the exact qualifying executable
+bytes, and `live_executable_cdhash` records that executable's CodeDirectory
+CDHash, including an ad-hoc identity when that is what was measured. Neither
+field may borrow the identity of a different signed release. The legacy
+`studio_campaign_sha256` records SHA-256 of the immutable raw qualification
+record bytes identified by `evidence_id`; for an on-device self-check campaign
+this is the final `cb-self-check.json`, without JSON reserialization. Retain
+that record and its build/resource identities for review. These clarifications
+add no feed field and do not raise the consumer floor.
 Unknown, missing, stale, unsigned, wrong-signer, malformed, future-dated,
 catalog-mismatched, or tuple-identity-mismatched policy cannot authorize CB;
 the policy bytes recorded for one release are immutable. **[v0.22.14]**
