@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.49
+**Version:** 0.1.50
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.49",
+  "version": "0.1.50",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -1456,6 +1456,50 @@ thresholds (`gated_throughput_lower_bound_min` -0.05,
 and join the same Holm family. A tuple whose bound is 1 therefore passes R015
 with a native gain at one slot and non-inferiority at its gated cells.
 
+**Reviewed issue #2081 disposition (0.1.50).** The operator's reviewed
+campaign disposition accepts one measured performance tradeoff for admission
+of exactly this tuple and no other:
+
+- model `qwen/qwen3.6-35b-a3b`, target artifact
+  `mlx-community/Qwen3.6-35B-A3B-4bit` with SHA-256
+  `3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1`;
+- MTP artifact SHA-256
+  `fa01beecb6c1e76845e9880623c3b5a009baa602c52e9e9b5d12edc489a23fd2`;
+- mlx-swift-lm revision
+  `87dc5159c87d73f4d7abd524fbdd17760cf56285`;
+- qualified provider source
+  `c2519f2ad7ce0097731b654635e059b968aedbec` and frozen policy SHA-256
+  `52499da79585817faf1797c0111e183839303102e7235ee1292b93fa4255e143`;
+- Mac Studio `Mac15,14` with 256 GiB RAM;
+- `max_native_active_rows = 1` and `qualified_slots = 8`.
+
+For that exact issue #2081 campaign tuple, the frozen
+`s2-p1536-o512` gated cell recorded a native-versus-ordinary p95 TTFT median
+regression of approximately 6.0% and a Holm-corrected upper bound of
+approximately 6.6%, above the preregistered 5% limit; the final exact values
+remain those in the immutable analyzer evidence. The frozen policy, raw
+records, analyzer output,
+and analyzer `FAIL` verdict MUST remain unchanged and MUST accompany any
+combined CLI admission review; this disposition does not reinterpret that
+verdict as a preregistered `PASS` and does not replace the 5% limit with a new
+threshold. For this exact tuple only, that recorded `s2` TTFT failure is not a
+campaign admission blocker when the combined review explicitly cites this
+operator disposition.
+
+Every other R015 requirement remains mandatory, including the other five
+matrix cells, the sustained window, correctness and parity, load-gate
+accounting, signed capacity limits, positive native-eligible gain, and the
+unchanged artifact and policy bindings. R003/R014 review, the signed serving
+journey, and the gateway live proof also remain required by their respective
+requirements. This disposition cannot be reused for a different model,
+artifact digest, mlx-swift-lm revision, native-row bound, qualified slot count,
+hardware tier, or campaign. A runtime change to the measured decode,
+prompt-preparation, scheduling, cache, or native-MTP path requires fresh
+qualification and a separately reviewed disposition if its frozen analyzer
+does not pass. An identity-only documentation or specification merge that
+does not change any measured runtime line does not require the campaign to be
+rerun. It has no expiry.
+
 A gated cell MUST also exercise the in-flight hold on the measured hardware,
 so a policy with any gated cell MUST freeze a staggered arrival profile
 (`arrival_interval_ms` > 0: the first request admits native before later
@@ -1707,7 +1751,7 @@ the journey must include its independent and combined evidence.
 | Requirement/domain | Verdict | Owner | Issue | Evidence needed |
 |---|---|---|---|---|
 | `SPEC-048-R001..R013/R016` | `DECISION_REQUIRED` | `@Augustas11` | `#1770` | Branch-local implementation and focused parser/contract tests exist; pending CI, frozen-diff audits, Mac Studio hardware evidence, and signed journey evidence before promotion. |
-| `SPEC-048-R014/R015` | `DECISION_REQUIRED` | `@Augustas11` | `#1770` | Production enablement and preregistered Studio/advertised-tier benchmarking remain pending. |
+| `SPEC-048-R014/R015` | `DECISION_REQUIRED` | `@Augustas11` | `#1770` | Production enablement remains pending. For the exact issue #2081 Qwen3.6 tuple, MTP-15 records the operator's bounded acceptance of the frozen `s2-p1536-o512` TTFT failure while preserving the analyzer `FAIL`; every other R015 gate and the R014 review remain required. |
 | `native-mtp-serving` | `DECISION_REQUIRED` | `@Augustas11` | `#1770` | Authority acceptance, release-candidate review, and signed real-hardware journey evidence for the first production tuple. |
 | First Qwen-family MTP artifact | `UNKNOWN` | `@Augustas11` | `#1770` | Legally/provenance-clean immutable model, tokenizer, MTP manifest, and exact hashes. |
 | MLX dependency tuple | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1906` | The operator's permanent fork model (MTP-3) replaces the upstream-release requirement. MTP-3 names the exact three-fork tuple; each rebase passes the runbook's per-rebase acceptance gate and a SPEC revision. |
@@ -1750,6 +1794,14 @@ the text-only path without image inputs; that does not admit multimodal buyer
 requests.
 
 ## 9. Changelog and history
+
+- **0.1.50 (2026-10-21)** — R015 records the operator's reviewed, exact-tuple
+  issue #2081 disposition for the Qwen3.6-35B-A3B `s2-p1536-o512` TTFT
+  regression. The frozen policy, raw records, 5% limit, and analyzer `FAIL`
+  remain unchanged; the disposition makes only that recorded result
+  non-blocking for the bound-1, eight-slot tuple while every other campaign,
+  correctness, journey, and live-proof gate remains mandatory. It is not
+  reusable by another tuple or a changed runtime path and has no expiry.
 
 - **0.1.49 (2026-10-19)** — R009: a cache-only native row in a SPEC-038
   v0.3.24 serial prefill cohort (a backend whose grouped prefill rows always
