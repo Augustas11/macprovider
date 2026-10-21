@@ -655,9 +655,19 @@ def _opencode_version(binary: str, env: dict[str, str], cwd: str) -> None:
         raise CheckError("client_version_mismatch")
 
 
-def _bounded_client_process(command: list[str], cwd: Path, env: dict[str, str]) -> tuple[int, bytes]:
-    process = subprocess.Popen(command, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+def _bounded_client_process(command: list[str], cwd: Path, env: dict[str, str],
+                            prompt: bytes = b"") -> tuple[int, bytes]:
+    if len(prompt) > MAX_BODY_BYTES:
+        raise CheckError("client_input_too_large")
+    # OpenCode 1.17.9 quotes positional arguments containing spaces. Its stdin
+    # path preserves the task literally, as an interactive user would enter it.
+    # A private temporary descriptor avoids blocking a pipe write before the
+    # child timeout and never forwards the recorder's buyer-key stdin.
+    with tempfile.TemporaryFile() as task_input:
+        task_input.write(prompt)
+        task_input.seek(0)
+        process = subprocess.Popen(command, cwd=cwd, env=env, stdin=task_input,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
     output = bytearray()
     total_bytes = 0
     lock = threading.Lock()
@@ -811,8 +821,8 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
                       "a shell command, or use the network. Reply with exactly its contents and nothing else.")
             command = [str(binary), "run", "--pure", "--format", "json", "--model", "malibu/" + args.model,
                        "--title", "Malibu automatic tool acceptance",
-                       "--dir", str(directories["workspace"]), prompt]
-            returncode, stdout = _bounded_client_process(command, directories["workspace"], env)
+                       "--dir", str(directories["workspace"])]
+            returncode, stdout = _bounded_client_process(command, directories["workspace"], env, prompt.encode("utf-8"))
             if returncode != 0:
                 raise CheckError(state.error_code or "client_failed")
             if state.error_code:

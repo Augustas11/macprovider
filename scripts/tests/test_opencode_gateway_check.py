@@ -452,6 +452,22 @@ class KeyInputTests(unittest.TestCase):
 
 
 class ProcessTests(unittest.TestCase):
+    def test_task_stdin_preserves_literal_bytes_without_forwarding_key_stdin(self):
+        prompt = 'Read "/tmp/a path/marker.txt".\nReply with exactly its contents. 😀'.encode("utf-8")
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(MODULE.sys, "stdin", io.StringIO("synthetic-owner-key")):
+            command = [sys.executable, "-c", "import sys;sys.stdout.buffer.write(sys.stdin.buffer.read())"]
+            status, output = MODULE._bounded_client_process(command, pathlib.Path(directory), dict(os.environ), prompt)
+        self.assertEqual(status, 0)
+        self.assertEqual(output, prompt)
+        self.assertNotIn(b"synthetic-owner-key", output)
+
+    def test_task_stdin_is_bounded_before_starting_client(self):
+        with mock.patch.object(MODULE.subprocess, "Popen") as start:
+            with self.assertRaisesRegex(MODULE.CheckError, "client_input_too_large"):
+                MODULE._bounded_client_process(["unused"], pathlib.Path("/tmp"), {}, b"x" * (MODULE.MAX_BODY_BYTES + 1))
+            start.assert_not_called()
+
     def test_combined_client_output_cap_kills_process_group(self):
         with tempfile.TemporaryDirectory() as directory:
             command = [sys.executable, "-c", "import sys;sys.stdout.write('x'*1100000)"]
@@ -604,6 +620,22 @@ class RealOpenCodeLoopbackFixture(unittest.TestCase):
                     raise AssertionError("OpenCode stock tool inventory was not exposed")
                 encoded = json.dumps(payload)
                 paths = re.findall(r"/[^\"\\\\\s]*marker\.txt", encoded)
+                if not paths:
+                    raise AssertionError("marker path absent from OpenCode request")
+                expected_prompt = (f"Read only {paths[-1]} using the read tool. Do not inspect any other file, execute "
+                                   "a shell command, or use the network. Reply with exactly its contents and nothing else.")
+                user_texts = []
+                for message in payload.get("messages", []):
+                    if message.get("role") != "user":
+                        continue
+                    content = message.get("content")
+                    if isinstance(content, str):
+                        user_texts.append(content)
+                    elif isinstance(content, list):
+                        user_texts.extend(part.get("text") for part in content if isinstance(part, dict)
+                                          and part.get("type") == "text")
+                if expected_prompt not in user_texts:
+                    raise AssertionError("OpenCode did not send the literal unquoted task")
                 markers = re.findall(r"malibu-[0-9a-f]{32}", encoded)
                 if markers:
                     response_body = self.final_stream(markers[-1])
@@ -671,11 +703,13 @@ class RealOpenCodeLoopbackFixture(unittest.TestCase):
 
         run_client = MODULE._bounded_client_process
 
-        def inspect_client_secret_boundary(command, cwd, env):
+        def inspect_client_secret_boundary(command, cwd, env, prompt):
             self.assertNotIn("synthetic-owner-key", json.dumps(env, sort_keys=True))
+            self.assertNotIn("synthetic-owner-key", prompt.decode("utf-8"))
+            self.assertNotIn(prompt.decode("utf-8"), command)
             config = pathlib.Path(env["OPENCODE_CONFIG"]).read_text(encoding="utf-8")
             self.assertNotIn("synthetic-owner-key", config)
-            return run_client(command, cwd, env)
+            return run_client(command, cwd, env, prompt)
 
         with tempfile.TemporaryDirectory() as directory:
             key_path = pathlib.Path(directory) / "buyer.key"
