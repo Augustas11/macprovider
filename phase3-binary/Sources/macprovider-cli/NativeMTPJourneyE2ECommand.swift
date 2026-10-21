@@ -891,12 +891,20 @@ final class NativeMTPJourneyRunner {
                     topP: 1
                 )
             }
-            let allNativeExpected = try await completeDeterministicBatch(allNativeRequests, runtime: ordinary)
-            let allNativeControl = try await completeDeterministicBatch(
+            let expectedRun = try await completeProfiledBatch(allNativeRequests, runtime: ordinary)
+            let controlRun = try await completeProfiledBatch(
                 allNativeRequests.map { $0.withRequestID(($0.requestID ?? "") + "-control") },
                 runtime: ordinary
             )
-            let allNativeActual = try await completeDeterministicBatch(allNativeRequests, runtime: native)
+            let nativeRun = try await completeProfiledBatch(allNativeRequests, runtime: native)
+            let allNativeExpected = expectedRun.results
+            let allNativeControl = controlRun.results
+            let allNativeActual = nativeRun.results
+            step.details["all_native_phase_timings"] = [
+                "ordinary": expectedRun.timing,
+                "ordinary_control": controlRun.timing,
+                "native": nativeRun.timing,
+            ]
             var allNativePaths: [String: String] = [:]
             for request in allNativeRequests {
                 let id = request.requestID ?? ""
@@ -957,19 +965,27 @@ final class NativeMTPJourneyRunner {
                 conversationKey: ineligible ? "conv:journey-mixed-\(row)" : nil
             ))
         }
-        let expected = try await completeDeterministicBatch(requests, runtime: ordinary)
+        let expectedRun = try await completeProfiledBatch(requests, runtime: ordinary)
         // Control: the exact ordinary batch composition must reproduce itself,
         // or a native mismatch would mean nothing.
         // Fresh request ids and keys: the scheduler rejects a reused id with a
         // different body, and a reused key would hit the conversation cache.
-        let control = try await completeDeterministicBatch(
+        let controlRun = try await completeProfiledBatch(
             requests.map {
                 $0.withRequestID(($0.requestID ?? "") + "-control")
                     .withConversationKey($0.conversationKey.map { $0 + "-control" })
             },
             runtime: ordinary
         )
-        let actual = try await completeDeterministicBatch(requests, runtime: native)
+        let nativeRun = try await completeProfiledBatch(requests, runtime: native)
+        let expected = expectedRun.results
+        let control = controlRun.results
+        let actual = nativeRun.results
+        step.details["mixed_phase_timings"] = [
+            "ordinary": expectedRun.timing,
+            "ordinary_control": controlRun.timing,
+            "native": nativeRun.timing,
+        ]
         var paths: [String: String] = [:]
         var reasons: [String: String] = [:]
         for request in requests {
@@ -1478,6 +1494,34 @@ final class NativeMTPJourneyRunner {
             var results: [String: CompletionResult] = [:]
             for try await (id, result) in group { results[id] = result }
             return results
+        }
+    }
+
+    /// These are diagnostic whole-invocation aggregates, not R015 samples.
+    /// Row buckets include the naturally draining tail of this exact batch.
+    private func completeProfiledBatch(
+        _ requests: [ChatCompletionRequest],
+        runtime: ModelRuntime
+    ) async throws -> (results: [String: CompletionResult], timing: [String: Any]) {
+        let recorder = NativeMTPPhaseTimingRecorder()
+        guard await runtime.installLabNativeMTPPhaseTimingRecorder(recorder) else {
+            throw NativeMTPHardwareE2EError.assertionFailed("could not install scheduler phase timing recorder")
+        }
+        let started = DispatchTime.now().uptimeNanoseconds
+        do {
+            let results = try await completeDeterministicBatch(requests, runtime: runtime)
+            let finished = DispatchTime.now().uptimeNanoseconds
+            _ = await runtime.installLabNativeMTPPhaseTimingRecorder(nil)
+            let data = try JSONEncoder().encode(recorder.snapshot())
+            guard var timing = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                throw NativeMTPHardwareE2EError.assertionFailed("invalid scheduler phase timing summary")
+            }
+            timing["batchWallNanoseconds"] = finished - started
+            timing["scope"] = "diagnostic_whole_batch_including_prefill_and_draining_tail"
+            return (results, timing)
+        } catch {
+            _ = await runtime.installLabNativeMTPPhaseTimingRecorder(nil)
+            throw error
         }
     }
 

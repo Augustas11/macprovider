@@ -2247,6 +2247,7 @@ actor ContinuousBatchScheduler {
     private var labNativeMTPPostoutputFault: NativeMTPLabPostoutputFault?
     private var labNativeMTPCommitTimingObserver: NativeMTPLabCommittedTokenTimingObserver?
     private var labNativeMTPDecodeOutputCap: NativeMTPLabDecodeOutputCap?
+    private var labNativeMTPPhaseTimingRecorder: NativeMTPPhaseTimingRecorder?
     /// Lab-only batch-composition fence. The journey harness installs the exact
     /// request order before submitting a batch; the pump stays stopped until
     /// every named row is queued, then consumes them in that order.
@@ -3826,6 +3827,9 @@ actor ContinuousBatchScheduler {
         }
         nativeMTPStatusSink?.beginRound(requestedDepths: proposalInputs.map(\.maximumProposalDepth))
         nativeMTPStatusRoundStarted = true
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        let proposalPreparationStarted = labNativeMTPPhaseTimingRecorder?.stamp()
+        #endif
         let backendProposals: [String: [Int]]?
         do {
             CBTrace.log(nil, "native_round phase=propose rows=\(proposalInputs.map(\.requestID).joined(separator: ","))")
@@ -4032,6 +4036,16 @@ actor ContinuousBatchScheduler {
             }
         }
         guard !prepared.isEmpty else { return }
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        if let recorder = labNativeMTPPhaseTimingRecorder, let proposalPreparationStarted {
+            recorder.recordProposalPreparation(
+                activeRows: prepared.count,
+                started: proposalPreparationStarted,
+                finished: recorder.stamp(),
+                proposedTokens: prepared.reduce(0) { $0 + $1.input.proposalTokens.count }
+            )
+        }
+        #endif
 
         record(.decodeFirstStep)
         sharedForwardCalls += 1
@@ -4225,10 +4239,22 @@ actor ContinuousBatchScheduler {
                 shouldCommit: shouldCommit
             ))
         }
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        labNativeMTPPhaseTimingRecorder?.recordAcceptedTokens(
+            activeRows: prepared.count,
+            count: finalizeRows.reduce(0) { $0 + $1.acceptedTokenIDs.count }
+        )
+        #endif
 
         do {
             CBTrace.log(nil, "native_round phase=finalize rows=\(finalizeRows.map { "\($0.requestID):\($0.shouldCommit)" }.joined(separator: ","))")
             try await backend.finalizeNativeMTPPackedRound(rows: finalizeRows)
+            #if DEBUG || MACPROVIDER_LAB_HARNESS
+            labNativeMTPPhaseTimingRecorder?.recordCommittedTokens(
+                activeRows: prepared.count,
+                count: finalizeRows.filter(\.shouldCommit).reduce(0) { $0 + $1.committedProposalTokenCount }
+            )
+            #endif
             CBTrace.log(nil, "native_round phase=finalized")
         } catch {
             recordNativeMTPPostoutputFailureIfVisible(
@@ -4554,6 +4580,15 @@ actor ContinuousBatchScheduler {
         return true
     }
 
+    /// Lab-only aggregate timing hook. This only observes the native backend;
+    /// it neither evaluates MLX arrays nor changes cancellation/commit order.
+    func installLabNativeMTPPhaseTimingRecorder(_ recorder: NativeMTPPhaseTimingRecorder?) -> Bool {
+        guard let pagedBackend = backend as? PagedKVSharedForwardBackend else { return false }
+        labNativeMTPPhaseTimingRecorder = recorder
+        pagedBackend.installLabNativeMTPPhaseTimingRecorder(recorder)
+        return true
+    }
+
     /// Lab-only: inject cancellation at precise native-MTP round boundaries
     /// before the backend finalize commit point.
     func installLabNativeMTPPhaseTrap(_ trap: NativeMTPLabPhaseTrap?) {
@@ -4816,6 +4851,9 @@ actor ContinuousBatchScheduler {
         let outcomes: [ContinuousBatchDecodeOutcome]
         let windowResult: Result<[ContinuousBatchDecodeOutcome], any Error>
         let windowStartedNs = DispatchTime.now().uptimeNanoseconds
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        let ordinaryDecodeStarted = labNativeMTPPhaseTimingRecorder?.stamp()
+        #endif
         do {
             windowResult = .success(try await backend.decodeLockstepWindow(
                 rows: prepared.map(\.input),
@@ -4825,6 +4863,15 @@ actor ContinuousBatchScheduler {
         } catch {
             windowResult = .failure(error)
         }
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        if let recorder = labNativeMTPPhaseTimingRecorder, let ordinaryDecodeStarted {
+            recorder.recordOrdinaryDecodeEvalReadback(
+                activeRows: prepared.count,
+                started: ordinaryDecodeStarted,
+                finished: recorder.stamp()
+            )
+        }
+        #endif
         CBTrace.log(nil, "hop_decode rows=\(prepared.count) steps=\(windowSteps) ms=\((DispatchTime.now().uptimeNanoseconds - windowStartedNs) / 1_000_000) prompts=\(activePrompt.count) waiting=\(waiting.count)")
         stepContinuation?.finish()
         await stepConsumer?.value

@@ -38,6 +38,18 @@ final class ModelRuntimeLabNativeMTPHookTests: XCTestCase {
         XCTAssertEqual(ModelRuntime.labSerialEffectiveMaxTokens(requestMaxTokens: 6, labOutputCap: nil), 6)
     }
 
+    func testPhaseTimingHookRequiresAttachedScheduler() async {
+        let runtime = ModelRuntime(
+            modelID: "fixture-model",
+            warmSwapEnabled: false,
+            loader: { _ in throw TestError.unexpectedLoad }
+        )
+        let installed = await runtime.installLabNativeMTPPhaseTimingRecorder(NativeMTPPhaseTimingRecorder())
+        let cleared = await runtime.installLabNativeMTPPhaseTimingRecorder(nil)
+        XCTAssertFalse(installed)
+        XCTAssertFalse(cleared)
+    }
+
     func testLabSerialLengthFinishUsesDerivedCap() {
         XCTAssertTrue(ModelRuntime.labSerialLengthFinish(
             generatedCompletionTokens: 3,

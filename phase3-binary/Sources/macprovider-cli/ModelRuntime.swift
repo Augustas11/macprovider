@@ -8207,6 +8207,13 @@ maxTokens: 1,
         return await continuousBatchScheduler.installLabNativeMTPStateDigestObserver(observer)
     }
 
+    /// Lab-only aggregate timings on the attached scheduler's actual decode
+    /// path. No recorder or clock reads are installed in normal serving.
+    func installLabNativeMTPPhaseTimingRecorder(_ recorder: NativeMTPPhaseTimingRecorder?) async -> Bool {
+        guard let continuousBatchScheduler else { return false }
+        return await continuousBatchScheduler.installLabNativeMTPPhaseTimingRecorder(recorder)
+    }
+
     /// Lab-only journey hook: inject cancellation at precise native-MTP round
     /// boundaries before backend finalize commits.
     func installLabNativeMTPPhaseTrap(_ trap: NativeMTPLabPhaseTrap?) async -> Bool {

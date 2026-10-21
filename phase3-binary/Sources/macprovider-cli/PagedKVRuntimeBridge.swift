@@ -818,6 +818,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     private var cancellationWaiters: [CheckedContinuation<Void, Never>] = []
     #if DEBUG || MACPROVIDER_LAB_HARNESS
     private var labNativeMTPStateDigestObserver: NativeMTPStateDigestObserver?
+    private var labNativeMTPPhaseTimingRecorder: NativeMTPPhaseTimingRecorder?
     private var nativeMTPDrafterRecomputeDigests: [String: String] = [:]
     private var labNativeMTPCommittedPrefixTokens: [String: [Int]] = [:]
     private var labNativeMTPCommittedPrefixHidden: [String: [MLXArray]] = [:]
@@ -1469,6 +1470,12 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     private func verifyNativeMTPPackedGroup(
         rows inputs: [ContinuousBatchNativeMTPVerifyInput]
     ) async throws -> [NativeMTPVerifiedRow] {
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        lock.lock()
+        let timingRecorder = labNativeMTPPhaseTimingRecorder
+        lock.unlock()
+        let verifyStarted = timingRecorder?.stamp()
+        #endif
         let verified: [NativeMTPVerifiedRow] = try await container.perform(nonSendable: inputs) { context, inputs in
             self.enterTargetLock(); defer { self.exitTargetLock() }
             // A cancellation between groups of a split round stops before
@@ -1499,6 +1506,16 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     proposalCount: $0.proposalTokens.count
                 )
             }
+            #if DEBUG || MACPROVIDER_LAB_HARNESS
+            let graphStarted = timingRecorder?.stamp()
+            if let timingRecorder, let verifyStarted, let graphStarted {
+                timingRecorder.recordTargetVerifyPreparation(
+                    activeRows: inputs.count,
+                    started: verifyStarted,
+                    finished: graphStarted
+                )
+            }
+            #endif
             let output = try verifyMTPPackedTargets(
                 model: context.model,
                 tokens: tokens,
@@ -1533,6 +1550,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             }
             // One selection and one host transfer for the whole packed round
             // instead of two blocking GPU round trips per row.
+            #if DEBUG || MACPROVIDER_LAB_HARNESS
+            let materializationStarted = timingRecorder?.stamp()
+            #endif
             let topTokenIDsByRow = Self.packedTargetTokenIDs(
                 rows: output.rows.map { ($0.proposalLogits, $0.bonusLogits) },
                 samplers: output.rows.map { row in
@@ -1545,7 +1565,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     )
                 }
             )
-            return zip(output.rows, topTokenIDsByRow).map { row, targetTopTokenIDs in
+            let result = zip(output.rows, topTokenIDsByRow).map { row, targetTopTokenIDs in
                 let input = inputs[row.map.rowIndex]
                 return NativeMTPVerifiedRow(
                     schedulerRowID: input.requestID,
@@ -1554,6 +1574,17 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     targetTopTokenIDs: targetTopTokenIDs
                 )
             }
+            #if DEBUG || MACPROVIDER_LAB_HARNESS
+            if let timingRecorder, let graphStarted, let materializationStarted {
+                timingRecorder.recordPackedTargetVerification(
+                    activeRows: inputs.count,
+                    started: graphStarted,
+                    graphFinished: materializationStarted,
+                    finished: timingRecorder.stamp()
+                )
+            }
+            #endif
+            return result
         }
         return verified.sorted { $0.packedRowIndex < $1.packedRowIndex }
     }
@@ -1613,6 +1644,12 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             let committing = inputs.filter(\.shouldCommit).compactMap { input in
                 transactions[input.requestID].map { (input, $0) }
             }
+            #if DEBUG || MACPROVIDER_LAB_HARNESS
+            lock.lock()
+            let timingRecorder = labNativeMTPPhaseTimingRecorder
+            lock.unlock()
+            let finalizeStarted = timingRecorder?.stamp()
+            #endif
             // Advance every committing row's drafter with one packed forward
             // that also proposes each row's next token. It validates every
             // row before staging anything, and mutates no stored state.
@@ -1620,6 +1657,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 targetModel: context.model,
                 rows: committing
             )
+            #if DEBUG || MACPROVIDER_LAB_HARNESS
+            let drafterFinished = timingRecorder?.stamp()
+            #endif
             // Publish every committing row's target KV and recurrent state for
             // all layers, then evaluate them together with the drafter
             // advance: one GPU wait per round instead of one per row per layer.
@@ -1637,6 +1677,16 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 staged.append(seedTokens)
             }
             eval(staged)
+            #if DEBUG || MACPROVIDER_LAB_HARNESS
+            if let timingRecorder, let finalizeStarted, let drafterFinished {
+                timingRecorder.recordFinalizeMutation(
+                    activeRows: inputs.count,
+                    started: finalizeStarted,
+                    drafterFinished: drafterFinished,
+                    finished: timingRecorder.stamp()
+                )
+            }
+            #endif
             if let advance, let seedTokens {
                 let seeds = seedTokens.asArray(Int32.self).map(Int.init)
                 self.storeNativeMTPDrafterAdvance(
@@ -1686,6 +1736,12 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     func installLabNativeMTPStateDigestObserver(_ observer: NativeMTPStateDigestObserver?) {
         lock.lock()
         labNativeMTPStateDigestObserver = observer
+        lock.unlock()
+    }
+
+    func installLabNativeMTPPhaseTimingRecorder(_ recorder: NativeMTPPhaseTimingRecorder?) {
+        lock.lock()
+        labNativeMTPPhaseTimingRecorder = recorder
         lock.unlock()
     }
 
