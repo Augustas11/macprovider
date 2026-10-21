@@ -65,6 +65,11 @@ scripts/ops/live-lock.sh acquire <label> --steal                 # only past the
   `PEARL_RUNTIME_TASK=updater-bundle` installs only origin's signed running
   tag that is on `origin/main`, verifies every installer-managed file, and is
   done once that install is recorded.
+- For a qualified CB-only model, set `PROBE_MODEL` to its exact catalog ID and
+  `CATALOG_REQUIRE_NATIVE_MTP_FORWARD=false` explicitly. The live probe requires
+  active CB, not absent native-MTP heads; the paid gateway proof must still move
+  the target provider's CB shared-forward counter. An unset value preserves the
+  historical native-MTP live probe, and `true` requires native-forward movement.
 - Runbook commands are never read from the Markdown at run time. They are
   constants in `lib/runbook-commands.sh`; `test-runbook-commands.sh` fails when
   one drifts from its fenced block on `origin/main`.
