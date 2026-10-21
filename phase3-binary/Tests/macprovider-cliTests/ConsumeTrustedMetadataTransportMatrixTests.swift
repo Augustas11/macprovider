@@ -559,11 +559,14 @@ private struct MatrixSignedRateCardFixture {
     }
 
     private static func freshnessAlignedClock(_ raw: String) -> String {
+        let offset: TimeInterval
         switch raw {
-        case "2026-09-02T12:00:00Z": return "2026-10-18T12:00:00Z"
-        case "2026-09-03T00:00:00Z": return "2026-10-19T00:00:00Z"
+        case "2026-09-02T12:00:00Z": offset = 3_600
+        case "2026-09-03T00:00:00Z": offset = 13 * 3_600
         default: return raw
         }
+        let baked = try! AutotuneStaticInputs.decodeRateCard(Data(AutotuneStaticInputs.bakedRateCardJSON.utf8))
+        return ISO8601DateFormatter.autotuneInternet.string(from: baked.generatedAt.addingTimeInterval(offset))
     }
 
     private static func rateCardBody(generatedAt: String, policyVersion: String) -> Data {

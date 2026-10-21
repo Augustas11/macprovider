@@ -20,8 +20,8 @@ final class AutotuneRecommendSimulateTests: XCTestCase {
         XCTAssertEqual(request.buyerTTFTCeilingMS, 1_800)
         XCTAssertEqual(request.benchmarks["qwen3-coder-30b-a3b-instruct"]?.modelKey, "qwen3-coder-30b-a3b-instruct")
         XCTAssertEqual(request.rateCard.version, Self.bakedRateCardVersion)
-        XCTAssertEqual(request.candidateCatalog.version, Self.bakedStaticReleaseID)
-        XCTAssertEqual(request.demandRank.version, Self.bakedStaticReleaseID)
+        XCTAssertEqual(request.candidateCatalog.version, try Self.bakedStaticReleaseID)
+        XCTAssertEqual(request.demandRank.version, try Self.bakedStaticReleaseID)
     }
 
     func testSimulateRecommendationMatchesDirectEngineCall() async throws {
@@ -61,11 +61,15 @@ final class AutotuneRecommendSimulateTests: XCTestCase {
 
         XCTAssertEqual(fetchedURL, AutotuneRecommendSimulator.liveRateCardURL)
         XCTAssertEqual(result.rateCardVersion, Self.bakedRateCardVersion)
-        XCTAssertEqual(result.candidateCatalogVersion, Self.bakedStaticReleaseID)
-        XCTAssertEqual(result.demandRankVersion, Self.bakedStaticReleaseID)
+        XCTAssertEqual(result.candidateCatalogVersion, try Self.bakedStaticReleaseID)
+        XCTAssertEqual(result.demandRankVersion, try Self.bakedStaticReleaseID)
     }
 
-    private static let bakedStaticReleaseID = "published-2026-10-20-glm53-flash-native-mtp-v260"
+    private static var bakedStaticReleaseID: String {
+        get throws {
+            try AutotuneStaticInputs.decodeCandidateCatalog(Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)).version
+        }
+    }
 
     private static var bakedRateCardVersion: String {
         (try? AutotuneStaticInputs.decodeRateCard(Data(AutotuneStaticInputs.bakedRateCardJSON.utf8)).version) ?? ""

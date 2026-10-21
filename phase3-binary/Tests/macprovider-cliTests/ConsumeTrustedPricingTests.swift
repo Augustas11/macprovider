@@ -272,13 +272,17 @@ private struct SignedRateCardFixture {
         ISO8601DateFormatter.autotuneInternet.date(from: freshnessAlignedClock(raw))!
     }
 
-    // SPEC-045 mapped tests freeze 2026-09-02/03; shift past the baked rate-card so they are not a rollback.
+    // SPEC-045 mapped tests freeze 2026-09-02/03; keep their 12-hour
+    // separation relative to the current bake, not a drifting release date.
     private static func freshnessAlignedClock(_ raw: String) -> String {
+        let offset: TimeInterval
         switch raw {
-        case "2026-09-02T12:00:00Z": return "2026-10-18T12:00:00Z"
-        case "2026-09-03T00:00:00Z": return "2026-10-19T00:00:00Z"
+        case "2026-09-02T12:00:00Z": offset = 3_600
+        case "2026-09-03T00:00:00Z": offset = 13 * 3_600
         default: return raw
         }
+        let baked = try! AutotuneStaticInputs.decodeRateCard(Data(AutotuneStaticInputs.bakedRateCardJSON.utf8))
+        return ISO8601DateFormatter.autotuneInternet.string(from: baked.generatedAt.addingTimeInterval(offset))
     }
 
     static var defaultRows: [String: RateCardProjection.Row] {

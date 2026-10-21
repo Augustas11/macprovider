@@ -7,7 +7,7 @@ final class Build1PrivateAuthorityTests: XCTestCase {
     func testCommittedOrcaRouterAuthorityVerifiesAndRemainsPrivate() throws {
         let fixture = Self.committedFixture()
         // This signed authority binds the historical catalog, not the current bake.
-        let candidateBytes = Data(Self.historicalCandidateCatalogJSON().utf8)
+        let candidateBytes = Data(try Self.historicalCandidateCatalogJSON().utf8)
         XCTAssertEqual(Build1PrivateAuthorityLoader.sha256Hex(candidateBytes), "559a058f65093b70e1115a152eac4466a4c40eb5854055f61849aea395b0e666")
         let authority = try Build1PrivateAuthorityLoader.load(
             authorityURL: fixture.authority,
@@ -33,10 +33,13 @@ final class Build1PrivateAuthorityTests: XCTestCase {
 
     /// The signed authority binds the 2026-10-01 activation catalog: rewind the
     /// current bake's release stamp and drop the rows admitted after it.
-    private static func historicalCandidateCatalogJSON() -> String {
+    private static func historicalCandidateCatalogJSON() throws -> String {
+        let catalog = try AutotuneStaticInputs.decodeCandidateCatalog(
+            Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)
+        )
         var json = AutotuneStaticInputs.bakedCandidateCatalogJSON
-            .replacingOccurrences(of: "published-2026-10-20-glm53-flash-native-mtp-v260", with: "published-2026-10-01-artifact-feed-activation-v1")
-            .replacingOccurrences(of: "2026-10-18T00:05:00Z", with: "2026-10-01T04:20:42Z")
+            .replacingOccurrences(of: catalog.version, with: "published-2026-10-01-artifact-feed-activation-v1")
+            .replacingOccurrences(of: ISO8601DateFormatter.autotuneInternet.string(from: catalog.generatedAt), with: "2026-10-01T04:20:42Z")
         if let start = json.range(of: "\"mlx-community/qwen2-vl-2b-instruct-4bit\":"),
            let next = json.range(of: "\"nvidia/nemotron-3-nano-30b-a3b\":", range: start.upperBound..<json.endIndex) {
             json.removeSubrange(start.lowerBound..<next.lowerBound)
@@ -76,7 +79,7 @@ final class Build1PrivateAuthorityTests: XCTestCase {
     // verifying after its calendar date; only a future generated_at is refused.
     func testAuthorityRemainsValidPastExpiresAt() throws {
         let fixture = Self.committedFixture()
-        let candidateBytes = Data(Self.historicalCandidateCatalogJSON().utf8)
+        let candidateBytes = Data(try Self.historicalCandidateCatalogJSON().utf8)
         let authority = try Build1PrivateAuthorityLoader.load(
             authorityURL: fixture.authority,
             signatureURL: fixture.signature,
