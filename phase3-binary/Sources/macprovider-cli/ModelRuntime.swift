@@ -2063,10 +2063,12 @@ actor ModelRuntime: ModelRuntimeServing {
 
     struct CompletePromptRepetitionProcessor: LogitProcessor {
         private let promptTokenIDs: [Int]
+        private let penalty: Float
         private var context: RepetitionContext
 
         init(promptTokenIDs: [Int], penalty: Float, contextSize: Int) {
             self.promptTokenIDs = promptTokenIDs
+            self.penalty = penalty
             self.context = RepetitionContext(
                 repetitionPenalty: penalty, repetitionContextSize: contextSize)
         }
@@ -2076,7 +2078,23 @@ actor ModelRuntime: ModelRuntimeServing {
             context.prompt(MLXArray(promptTokenIDs))
         }
 
-        func process(logits: MLXArray) -> MLXArray { context.process(logits: logits) }
+        func process(logits: MLXArray) -> MLXArray {
+            guard let limits = logits.dtype.finfo else { return context.process(logits: logits) }
+            // Preserve the pinned arithmetic for ordinary factors. A factor
+            // outside a narrow dtype's range must not become zero or infinity
+            // before applying it: its quotient/product can still be finite.
+            let needsWideFactor = Double(penalty) < limits.smallestSubnormal
+                || Double(penalty) > limits.max
+            let adjusted = context.process(logits: needsWideFactor ? logits.asType(.float32) : logits)
+            let maximum = MLXArray(limits.max, dtype: logits.dtype)
+            let bounded = clip(
+                MLX.where(isNaN(adjusted), MLXArray(Float(0)), adjusted),
+                min: -maximum, max: maximum).asType(logits.dtype)
+            // Overflow of finite logits saturates; existing nonfinite model or
+            // masking entries retain their meaning. Zero remains zero even if
+            // an extreme factor produces an intermediate 0/0 or 0*infinity.
+            return MLX.where(isFinite(logits), bounded, logits)
+        }
         mutating func didSample(token: MLXArray) { context.didSample(token: token) }
     }
 
