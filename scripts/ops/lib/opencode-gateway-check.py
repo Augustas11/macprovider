@@ -46,6 +46,8 @@ MODEL_BINDINGS = {
     "qwen3-30b-a3b-instruct-2507": "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit",
 }
 MODELS = tuple(MODEL_BINDINGS)
+QWEN_PLUGIN_SOURCE = (Path(__file__).resolve().parents[3] /
+                      "phase3-binary/app/Sources/Malibu/Resources/malibu-qwen-system.mjs")
 SAFE_CALL_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 
@@ -757,7 +759,7 @@ def _failure_evidence(
     return evidence
 
 
-def _config(model: str, context: int, base_url: str) -> bytes:
+def _config(model: str, context: int, base_url: str, plugin: Path | None = None) -> bytes:
     entry = {"name": model, "limit": {"context": context, "output": MAX_OUTPUT_TOKENS}}
     if model in MODEL_BINDINGS or model in MODEL_BINDINGS.values():
         # Match the app's model-scoped HTTP fields without replacing the stock agent.
@@ -770,7 +772,29 @@ def _config(model: str, context: int, base_url: str) -> bytes:
                                               "timeout": HTTP_TIMEOUT_SECONDS * 1000},
                                   "models": {model: entry}}},
     }
+    if plugin is not None:
+        if not plugin.is_absolute() or model not in (*MODEL_BINDINGS, *MODEL_BINDINGS.values()):
+            raise CheckError("client_plugin_binding")
+        value["plugin"] = [plugin.as_uri()]
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+
+
+def _install_plugin(root: Path, model: str) -> Path | None:
+    if model not in MODEL_BINDINGS and model not in MODEL_BINDINGS.values():
+        return None
+    try:
+        with QWEN_PLUGIN_SOURCE.open("rb") as source:
+            data = source.read(MAX_BODY_BYTES + 1)
+        if not data or len(data) > MAX_BODY_BYTES:
+            raise CheckError("client_plugin_size")
+        destination = root / QWEN_PLUGIN_SOURCE.name
+        # The recorder owns its isolated temporary root and removes it on exit.
+        descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as target:
+            target.write(data)
+        return destination
+    except OSError as exc:
+        raise CheckError("client_plugin_file") from exc
 
 
 def _run(args: argparse.Namespace) -> dict[str, Any]:
@@ -804,8 +828,9 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         thread.start()
         try:
             config_path = root / "opencode.json"
+            plugin = _install_plugin(root, args.model)
             config_path.write_bytes(_config(
-                args.model, context, f"http://127.0.0.1:{proxy.server_address[1]}/v1"
+                args.model, context, f"http://127.0.0.1:{proxy.server_address[1]}/v1", plugin
             ))
             os.chmod(config_path, 0o600)
             env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
@@ -814,12 +839,16 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
                    "TMPDIR": str(directories["tmp"]), "OPENCODE_CONFIG": str(config_path),
                    "OPENCODE_TEST_HOME": str(directories["home"]),
                    "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
+                   "OPENCODE_CONFIG_PROJECT_DISABLE": "1",
                    "OPENCODE_DISABLE_MODELS_FETCH": "1", "OPENCODE_DISABLE_AUTOUPDATE": "1",
                    "MALIBU_PROXY_TOKEN": state.proxy_token}
             _opencode_version(str(binary), env, str(directories["workspace"]))
             prompt = (f"Read only {marker_path} using the read tool. Do not inspect any other file, execute "
                       "a shell command, or use the network. Reply with exactly its contents and nothing else.")
-            command = [str(binary), "run", "--pure", "--format", "json", "--model", "malibu/" + args.model,
+            # --pure skips even explicit local plugins. Only omit it after the
+            # shared managed plugin has been installed and configured above.
+            command = [str(binary), "run"] + (["--pure"] if plugin is None else []) + [
+                       "--format", "json", "--model", "malibu/" + args.model,
                        "--title", "Malibu automatic tool acceptance",
                        "--dir", str(directories["workspace"])]
             returncode, stdout = _bounded_client_process(command, directories["workspace"], env, prompt.encode("utf-8"))

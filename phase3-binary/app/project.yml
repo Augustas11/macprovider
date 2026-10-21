@@ -59,6 +59,7 @@ targets:
       - Sources/Malibu/Resources/Brand
       - Sources/Malibu/Resources/MalibuFeature.xcstrings
       - Sources/Malibu/Resources/MalibuModelCapabilities.json
+      - Sources/Malibu/Resources/malibu-qwen-system.mjs
     # Local and test builds sign with the empty MalibuLocal.entitlements: an
     # ad-hoc app that claims App Attest without a profile cannot launch.
     # Releases sign with Malibu.entitlements plus the Developer ID App Attest

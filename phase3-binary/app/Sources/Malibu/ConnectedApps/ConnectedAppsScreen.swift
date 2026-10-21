@@ -25,19 +25,22 @@ final class ConnectedAppsStore: ObservableObject {
     private let loadGatewayModels: (String) async throws -> [ConnectedModel]
     private let readKey: () throws -> String
     private let storeKey: (String) throws -> Void
+    private let loadOpenCodePlugin: () throws -> Data
 
     init(
         home: URL = FileManager.default.homeDirectoryForCurrentUser,
         keyExists: @escaping () -> Bool = { ConnectedBuyerKeychain.exists() },
         loadGatewayModels: @escaping (String) async throws -> [ConnectedModel] = { try await ConnectedGatewayClient().models(key: $0) },
         readKey: @escaping () throws -> String = { try ConnectedBuyerKeychain.read() },
-        saveKey: @escaping (String) throws -> Void = { try ConnectedBuyerKeychain.save($0) }
+        saveKey: @escaping (String) throws -> Void = { try ConnectedBuyerKeychain.save($0) },
+        loadOpenCodePlugin: @escaping () throws -> Data = { try ConnectedAppConfiguration.openCodePlugin() }
     ) {
         self.home = home
         self.keyExists = keyExists
         self.loadGatewayModels = loadGatewayModels
         self.readKey = readKey
         self.storeKey = saveKey
+        self.loadOpenCodePlugin = loadOpenCodePlugin
         hasBuyerKey = keyExists()
         root = home.appendingPathComponent("Library/Application Support/Malibu/ConnectedApps", isDirectory: true)
         transactions = ConnectedConfigTransaction(receiptDirectory: root.appendingPathComponent("backups"))
@@ -129,18 +132,30 @@ final class ConnectedAppsStore: ObservableObject {
             let target = self.configurationURL(app)
             var entries: [(ConnectedConfigPreview, String, Bool)] = []
             var managedCatalog: URL?
+            var managedPlugin: URL?
             if app == .codex {
                 let bytes = try ConnectedAppConfiguration.codexCatalog(model: model)
                 let destination = self.root.appendingPathComponent("codex/models.json")
                 entries.append((try self.transactions.preview(target: destination, proposed: bytes), "codex-catalog", false))
                 managedCatalog = destination
             }
+            if app == .openCode {
+                let destination = self.root.appendingPathComponent("opencode/" + ConnectedAppConfiguration.openCodePluginFilename)
+                let existingPlugin = try ConnectedConfigTransaction.read(destination)
+                let previousPlugin = try self.transactions.receipt(named: "opencode-plugin")
+                if existingPlugin.bytes != nil && previousPlugin == nil {
+                    throw ConnectedAppsError.conflict
+                }
+                entries.append((try self.transactions.preview(target: destination, proposed: self.loadOpenCodePlugin()), "opencode-plugin", false))
+                managedPlugin = destination
+            }
             // Profiles are intentionally isolated. An existing unowned file is refused,
             // not treated as a vendor config that can be rewritten without parsing.
             let existing = try ConnectedConfigTransaction.read(target)
             let previous = try self.transactions.receipt(named: app.slug + "-config")
             if existing.bytes != nil && previous == nil { throw ConnectedAppsError.conflict }
-            let config = try ConnectedAppConfiguration.configuration(app: app, model: model, original: nil, catalog: managedCatalog)
+            let config = try ConnectedAppConfiguration.configuration(app: app, model: model, original: nil,
+                                                                    catalog: managedCatalog, plugin: managedPlugin)
             entries.append((try self.transactions.preview(target: target, proposed: config), app.slug + "-config", false))
             let launcher = try ConnectedAppConfiguration.launcher(app: app, executable: executable, config: target, model: model,
                                                                   keyHandoff: self.keyHandoffURL(app))
@@ -154,7 +169,7 @@ final class ConnectedAppsStore: ObservableObject {
     func setup() {
         perform {
             guard !self.pending.isEmpty else { throw ConnectedAppsError.invalidConfiguration }
-            _ = try ConnectedBuyerKeychain.read()
+            _ = try self.readKey()
             var applied: [String] = []
             do {
                 for (preview, name, executable) in self.pending {
@@ -176,7 +191,7 @@ final class ConnectedAppsStore: ObservableObject {
     func restore() {
         perform {
             let slug = self.app.slug
-            for name in [slug + "-launch", slug + "-config", slug + "-catalog"] {
+            for name in [slug + "-launch", slug + "-config", slug + "-catalog", slug + "-plugin"] {
                 try self.transactions.restore(named: name)
             }
             self.invalidatePreview()
@@ -194,6 +209,9 @@ final class ConnectedAppsStore: ObservableObject {
             }
             if let catalog = try self.transactions.receipt(named: self.app.slug + "-catalog") {
                 guard try ConnectedConfigTransaction.read(URL(fileURLWithPath: catalog.path)).bytes == catalog.installed else { throw ConnectedAppsError.conflict }
+            }
+            if self.app == .openCode {
+                try self.validateOpenCodePlugin()
             }
             try ConnectedBuyerKeychain.writeLaunchHandoff(try ConnectedBuyerKeychain.read(), to: self.keyHandoffURL(self.app))
             NSWorkspace.shared.open([URL(fileURLWithPath: launcher.path)],
@@ -228,6 +246,14 @@ final class ConnectedAppsStore: ObservableObject {
         }
     }
     private func launcherURL(_ app: ConnectedApp) -> URL { root.appendingPathComponent(app.slug + "/Launch.command") }
+    // Missing or edited managed code must fail before handing the buyer key to OpenCode.
+    func validateOpenCodePlugin() throws {
+        let target = root.appendingPathComponent("opencode/" + ConnectedAppConfiguration.openCodePluginFilename)
+        guard let plugin = try transactions.receipt(named: "opencode-plugin"), plugin.path == target.path,
+              try ConnectedConfigTransaction.read(target).bytes == plugin.installed else {
+            throw ConnectedAppsError.conflict
+        }
+    }
     private func keyHandoffURL(_ app: ConnectedApp) -> URL { root.appendingPathComponent("handoff/" + app.slug + ".key") }
 
     private func perform(_ action: () throws -> Void) {

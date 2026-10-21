@@ -1,6 +1,12 @@
 # SPEC-025 — Native Mac App (signed `.dmg`, native Mac app with menu-bar presence)
 
-Status: DRAFT v0.37.0 · Owner: @Augustas11 · Target: 2026 Q3
+Status: DRAFT v0.38.0 · Owner: @Augustas11 · Target: 2026 Q3
+
+**Change log v0.38.0 (2026-10-21):**
+Connected apps installs a guarded model-scoped OpenCode system-prompt plugin
+as a protected, reversible managed asset (R012). Custom agent prompts,
+workspace instructions and permissions remain unchanged; client acceptance
+remains separate from configuration.
 
 **Change log v0.37.0 (2026-10-21):**
 Connected apps uses model-scoped OpenCode sampling for the two exact Qwen
@@ -933,6 +939,20 @@ projections (SPEC-044-R004), colour never the only signal.
   These client sampling settings MUST NOT replace agent prompts, change tool
   selection or permissions, or apply to other model identities by substring
   matching. They do not establish automatic-tool-use compatibility.
+  For those exact identities under the `malibu` provider, setup MUST append
+  a local managed OpenCode plugin without replacing existing plugin entries
+  or configuring a global/named agent prompt. At request time, the plugin
+  MAY replace only the exact pinned OpenCode 1.17.9 stock-default prompt
+  prefix with the concise workspace-tool prompt. It MUST preserve the
+  remaining system instructions and sibling messages, and MUST leave other
+  providers/models, custom agent prompts, tools and permissions unchanged.
+  A custom prompt matching that prefix, failed agent lookup, malformed lookup
+  response, or stock-prefix mismatch MUST leave the request unchanged. The
+  plugin MUST use the same protected preview, receipt, launch-integrity and
+  restore lifecycle as the managed configuration; setup MUST NOT overwrite
+  an unowned plugin file. The acceptance recorder MUST load the same plugin
+  bytes with isolated client state, without OpenCode's plugin-disabling
+  `--pure` flag. Installing the plugin is not automatic-tool-use acceptance.
 
 ### 3.3 Updates — CLI-owned signed compatibility set
 

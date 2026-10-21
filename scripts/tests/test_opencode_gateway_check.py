@@ -349,6 +349,27 @@ class ReceiptTests(unittest.TestCase):
 
 
 class ModelTests(unittest.TestCase):
+    def test_config_loads_only_explicit_owned_plugin_without_agent_override(self):
+        plugin = pathlib.Path("/private/managed path/malibu-qwen-system.mjs")
+        data = json.loads(MODULE._config(MODEL, 16384, "http://127.0.0.1:1/v1", plugin))
+        self.assertEqual(data["plugin"], [plugin.as_uri()])
+        for key in ("agent", "tools", "permission", "tool_choice"):
+            self.assertNotIn(key, data)
+        for model, path in (("other/model", plugin), (MODEL, pathlib.Path("relative.mjs"))):
+            with self.assertRaisesRegex(MODULE.CheckError, "client_plugin_binding"):
+                MODULE._config(model, 16384, "http://127.0.0.1:1/v1", path)
+
+    def test_plugin_copy_is_shared_exact_bytes_private_and_never_overwritten(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            self.assertIsNone(MODULE._install_plugin(root, "qwen3-coder-30b-a3b-instruct-extra"))
+            plugin = MODULE._install_plugin(root, MODEL)
+            self.assertEqual(plugin.read_bytes(), MODULE.QWEN_PLUGIN_SOURCE.read_bytes())
+            self.assertEqual(plugin.stat().st_mode & 0o777, 0o600)
+            with self.assertRaisesRegex(MODULE.CheckError, "client_plugin_file"):
+                MODULE._install_plugin(root, MODEL)
+            self.assertEqual(plugin.read_bytes(), MODULE.QWEN_PLUGIN_SOURCE.read_bytes())
+
     def test_exact_model_and_real_context_are_required(self):
         body = json.dumps({"data": [{"id": MODEL, "max_context_tokens": 16384}]}).encode()
         self.assertEqual(MODULE.validate_models(body, 200, MODEL), 16384)
@@ -452,6 +473,42 @@ class KeyInputTests(unittest.TestCase):
 
 
 class ProcessTests(unittest.TestCase):
+    def test_run_omits_pure_only_with_owned_plugin_and_cleans_isolated_copy(self):
+        args = MODULE.build_parser().parse_args([
+            "--opencode", sys.executable, "--model", MODEL, "--key-stdin", *BINDING_ARGS,
+        ])
+        models = json.dumps({"data": [{"id": MODEL, "max_context_tokens": 16384}]}).encode()
+        for enabled in (False, True):
+            paths = []
+
+            def inspect(command, cwd, env, prompt):
+                config_path = pathlib.Path(env["OPENCODE_CONFIG"])
+                paths.append(config_path.parent)
+                config = json.loads(config_path.read_bytes())
+                self.assertEqual("--pure" in command, not enabled)
+                self.assertEqual("plugin" in config, enabled)
+                self.assertEqual(env["OPENCODE_CONFIG_PROJECT_DISABLE"], "1")
+                self.assertEqual(env["OPENCODE_DISABLE_PROJECT_CONFIG"], "1")
+                self.assertNotIn(prompt.decode(), command)
+                self.assertTrue(prompt.startswith(b"Read only "))
+                if enabled:
+                    plugin = config_path.parent / MODULE.QWEN_PLUGIN_SOURCE.name
+                    self.assertEqual(config["plugin"], [plugin.as_uri()])
+                    self.assertEqual(plugin.read_bytes(), MODULE.QWEN_PLUGIN_SOURCE.read_bytes())
+                raise MODULE.CheckError("test_stop")
+
+            installer = MODULE._install_plugin if enabled else lambda root, model: None
+            with self.subTest(plugin=enabled), \
+                    mock.patch.object(MODULE, "_read_key_stdin", return_value="synthetic-owner-key"), \
+                    mock.patch.object(MODULE, "_bounded_https_get", return_value=(200, models)), \
+                    mock.patch.object(MODULE, "_opencode_version"), \
+                    mock.patch.object(MODULE, "_install_plugin", side_effect=installer), \
+                    mock.patch.object(MODULE, "_bounded_client_process", side_effect=inspect), \
+                    self.assertRaisesRegex(MODULE.CheckError, "test_stop"):
+                MODULE._run(args)
+            self.assertEqual(len(paths), 1)
+            self.assertFalse(paths[0].exists())
+
     def test_task_stdin_preserves_literal_bytes_without_forwarding_key_stdin(self):
         prompt = 'Read "/tmp/a path/marker.txt".\nReply with exactly its contents. 😀'.encode("utf-8")
         with tempfile.TemporaryDirectory() as directory, \
@@ -612,6 +669,11 @@ class RealOpenCodeLoopbackFixture(unittest.TestCase):
                 payload = json.loads(body)
                 if payload.get("temperature") != 0.7 or payload.get("top_p") != 0.8:
                     raise AssertionError("OpenCode did not send the model-scoped sampling fields")
+                system = next((message.get("content") for message in payload.get("messages", [])
+                               if message.get("role") == "system"), None)
+                if not isinstance(system, str) or not system.startswith(
+                        "You are a coding assistant working in the user's workspace.\n"):
+                    raise AssertionError("OpenCode did not apply the shared guarded Qwen plugin")
                 tool_names = {
                     tool.get("function", {}).get("name") for tool in payload.get("tools", [])
                     if isinstance(tool, dict)
@@ -709,6 +771,12 @@ class RealOpenCodeLoopbackFixture(unittest.TestCase):
             self.assertNotIn(prompt.decode("utf-8"), command)
             config = pathlib.Path(env["OPENCODE_CONFIG"]).read_text(encoding="utf-8")
             self.assertNotIn("synthetic-owner-key", config)
+            plugin = pathlib.Path(env["OPENCODE_CONFIG"]).parent / MODULE.QWEN_PLUGIN_SOURCE.name
+            self.assertEqual(json.loads(config)["plugin"], [plugin.as_uri()])
+            self.assertEqual(plugin.read_bytes(), MODULE.QWEN_PLUGIN_SOURCE.read_bytes())
+            self.assertNotIn("--pure", command)
+            self.assertEqual(env["OPENCODE_DISABLE_PROJECT_CONFIG"], "1")
+            self.assertEqual(env["OPENCODE_CONFIG_PROJECT_DISABLE"], "1")
             return run_client(command, cwd, env, prompt)
 
         with tempfile.TemporaryDirectory() as directory:

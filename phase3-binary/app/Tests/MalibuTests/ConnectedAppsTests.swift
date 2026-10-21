@@ -98,6 +98,102 @@ final class ConnectedAppsTests: XCTestCase {
         }
     }
 
+    func testOpenCodePluginIsAppendOnlyAndPreservesCustomAgentsAndPermissions() throws {
+        let plugin = URL(fileURLWithPath: "/private/managed path/malibu-qwen-system.mjs")
+        let customPlugin: [Any] = ["custom-plugin", ["setting": true]]
+        let original: [String: Any] = [
+            "plugin": ["existing-plugin", customPlugin] as [Any],
+            "agent": ["build": ["prompt": "Custom build"], "review": ["prompt": "Custom review"]],
+            "permission": ["bash": "ask"], "provider": ["other": ["name": "Keep"]]
+        ]
+        let data = try ConnectedAppConfiguration.configuration(app: .openCode, model: model,
+            original: ConnectedAppConfiguration.json(original), plugin: plugin)
+        let result = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let plugins = try XCTUnwrap(result["plugin"] as? [Any])
+        XCTAssertEqual(Array(plugins.prefix(2)) as NSArray, original["plugin"] as? NSArray)
+        XCTAssertEqual(plugins.last as? String, plugin.absoluteString)
+        XCTAssertEqual(result["agent"] as? NSDictionary, original["agent"] as? NSDictionary)
+        XCTAssertEqual(result["permission"] as? NSDictionary, original["permission"] as? NSDictionary)
+        let existingTuple: [Any] = [plugin.absoluteString, ["keep": true]]
+        let existingEntries: [[Any]] = [[plugin.absoluteString], [existingTuple]]
+        for entries in existingEntries {
+            let bytes = try ConnectedAppConfiguration.configuration(app: .openCode, model: model,
+                original: ConnectedAppConfiguration.json(["plugin": entries]), plugin: plugin)
+            let root = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+            XCTAssertEqual(root["plugin"] as? NSArray, entries as NSArray)
+        }
+        let invalidTuple: [Any] = ["custom", false]
+        let invalidEntries: [Any] = [false, [12], [invalidTuple], [["custom"]]]
+        for invalid in invalidEntries {
+            XCTAssertThrowsError(try ConnectedAppConfiguration.configuration(app: .openCode, model: model,
+                original: ConnectedAppConfiguration.json(["plugin": invalid]), plugin: plugin))
+        }
+        XCTAssertThrowsError(try ConnectedAppConfiguration.configuration(app: .openCode, model: model,
+            original: nil, plugin: URL(string: "https://example.test/plugin.mjs")!))
+    }
+
+    @MainActor
+    func testManagedOpenCodePluginHasReceiptIntegrityAndReversibleLifecycle() throws {
+        try temporary { home in
+            let bytes = Data("export const Fixture = async () => ({});\n".utf8)
+            let store = ConnectedAppsStore(home: home, keyExists: { true }, readKey: { "test-key" },
+                                           loadOpenCodePlugin: { bytes })
+            store.models = [model]
+            store.modelID = model.id
+            store.executable = URL(fileURLWithPath: "/fake/opencode")
+            store.preview()
+            XCTAssertTrue(store.canSetup, store.status)
+            store.setup()
+            let root = home.appendingPathComponent("Library/Application Support/Malibu/ConnectedApps")
+            let plugin = root.appendingPathComponent("opencode/" + ConnectedAppConfiguration.openCodePluginFilename)
+            let receipts = ConnectedConfigTransaction(receiptDirectory: root.appendingPathComponent("backups"))
+            XCTAssertEqual(try Data(contentsOf: plugin), bytes)
+            XCTAssertEqual(try ConnectedConfigTransaction.read(plugin).mode, 0o600)
+            XCTAssertEqual(try receipts.receipt(named: "opencode-plugin")?.installed, bytes)
+            try store.validateOpenCodePlugin()
+            store.preview()
+            store.setup()
+            try store.validateOpenCodePlugin()
+            store.restore()
+            XCTAssertNil(try receipts.receipt(named: "opencode-plugin"))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: plugin.path))
+            XCTAssertThrowsError(try store.validateOpenCodePlugin())
+            store.preview()
+            store.setup()
+            try FileManager.default.removeItem(at: root.appendingPathComponent("backups/opencode-plugin.json"))
+            XCTAssertEqual(try Data(contentsOf: plugin), bytes)
+            XCTAssertThrowsError(try store.validateOpenCodePlugin(), "bytes without their receipt are not managed")
+        }
+    }
+
+    @MainActor
+    func testManagedOpenCodePluginRefusesUnownedFilesAndEditedInstalledBytes() throws {
+        try temporary { home in
+            let bytes = Data("managed plugin".utf8)
+            let store = ConnectedAppsStore(home: home, keyExists: { true }, readKey: { "test-key" },
+                                           loadOpenCodePlugin: { bytes })
+            store.models = [model]
+            store.modelID = model.id
+            store.executable = URL(fileURLWithPath: "/fake/opencode")
+            let root = home.appendingPathComponent("Library/Application Support/Malibu/ConnectedApps")
+            let plugin = root.appendingPathComponent("opencode/" + ConnectedAppConfiguration.openCodePluginFilename)
+            try ConnectedConfigTransaction.replace(plugin, expected: ConnectedConfigSnapshot(bytes: nil, mode: nil),
+                                                   bytes: Data("unowned".utf8), mode: 0o600)
+            store.preview()
+            XCTAssertFalse(store.canSetup)
+            XCTAssertEqual(try Data(contentsOf: plugin), Data("unowned".utf8))
+            try FileManager.default.removeItem(at: plugin)
+            store.preview()
+            store.setup()
+            try Data("later edit".utf8).write(to: plugin)
+            XCTAssertThrowsError(try store.validateOpenCodePlugin())
+            store.restore()
+            XCTAssertEqual(try Data(contentsOf: plugin), Data("later edit".utf8))
+            let receipts = ConnectedConfigTransaction(receiptDirectory: root.appendingPathComponent("backups"))
+            XCTAssertNotNil(try receipts.receipt(named: "opencode-plugin"))
+        }
+    }
+
     func testAmbiguousJSONAndExistingProviderAreRefused() {
         for source in [#"{"provider":{},"provider":{}}"#, "{// comment\n}", #"{"provider":{"malibu":{}}}"#, #"{"provider":false}"#] {
             XCTAssertThrowsError(try ConnectedAppConfiguration.configuration(app: .openCode, model: model, original: Data(source.utf8)))

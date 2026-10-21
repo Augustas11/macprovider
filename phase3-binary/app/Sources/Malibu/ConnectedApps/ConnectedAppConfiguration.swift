@@ -68,7 +68,21 @@ enum ConnectedAppConfiguration {
         try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) + Data("\n".utf8)
     }
 
-    static func configuration(app: ConnectedApp, model: ConnectedModel, original: Data?, catalog: URL? = nil) throws -> Data {
+    static let openCodePluginFilename = "malibu-qwen-system.mjs"
+
+    static func openCodePlugin(bundle: Bundle = .main) throws -> Data {
+        guard let url = bundle.url(forResource: "malibu-qwen-system", withExtension: "mjs") else {
+            throw ConnectedAppsError.invalidConfiguration
+        }
+        let data = try Data(contentsOf: url)
+        guard !data.isEmpty, data.count <= ConnectedConfigTransaction.maximumBytes else {
+            throw ConnectedAppsError.invalidConfiguration
+        }
+        return data
+    }
+
+    static func configuration(app: ConnectedApp, model: ConnectedModel, original: Data?, catalog: URL? = nil,
+                              plugin: URL? = nil) throws -> Data {
         guard !model.id.isEmpty, model.id.utf8.count < 512,
               !model.id.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
             throw ConnectedAppsError.invalidConfiguration
@@ -122,6 +136,23 @@ enum ConnectedAppConfiguration {
                                    "models": [model.id: entry]]
             root["provider"] = providers
             root["model"] = "malibu/\(model.id)"
+            if let plugin {
+                guard plugin.isFileURL, plugin.path.hasPrefix("/") else { throw ConnectedAppsError.invalidConfiguration }
+                guard root["plugin"] == nil || root["plugin"] is [Any] else { throw ConnectedAppsError.invalidConfiguration }
+                var plugins = root["plugin"] as? [Any] ?? []
+                // OpenCode also accepts [specifier, options] entries; retain them intact.
+                guard plugins.allSatisfy({ entry in
+                    if entry is String { return true }
+                    guard let pair = entry as? [Any], pair.count == 2 else { return false }
+                    return pair[0] is String && pair[1] is [String: Any]
+                }) else { throw ConnectedAppsError.invalidConfiguration }
+                if !plugins.contains(where: {
+                    ($0 as? String) == plugin.absoluteString || (($0 as? [Any])?.first as? String) == plugin.absoluteString
+                }) {
+                    plugins.append(plugin.absoluteString)
+                }
+                root["plugin"] = plugins
+            }
             return try json(root)
         case .goose:
             guard original == nil || original?.isEmpty == true else { throw ConnectedAppsError.conflict }
