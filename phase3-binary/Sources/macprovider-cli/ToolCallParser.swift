@@ -632,7 +632,11 @@ enum ToolCallParser {
         if type == "string" { return .string(String(raw)) }
         // The shared final validator counts container depth on the complete
         // arguments object; StrictJSONParser also counts scalar leaf depth.
-        let value = try StrictJSONParser.parse(String(raw), maxDepth: SPEC018_ARGUMENTS_MAX_JSON_DEPTH)
+        // Strict parser errors can carry argument text (for example a duplicate
+        // key). The outer parser logs errors, so expose only a payload-free error.
+        guard let value = try? StrictJSONParser.parse(String(raw), maxDepth: SPEC018_ARGUMENTS_MAX_JSON_DEPTH) else {
+            throw ParseError.invalidArguments
+        }
         guard ToolSelectionPolicy.supportsNumericDomain(value) else { throw ParseError.invalidArguments }
         switch (type, value) {
         case ("number", .int), ("number", .double), ("integer", .int),

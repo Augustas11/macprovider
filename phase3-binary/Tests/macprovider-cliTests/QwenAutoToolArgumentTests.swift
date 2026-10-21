@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import MacProviderCore
 import XCTest
@@ -117,6 +118,56 @@ final class QwenAutoToolArgumentTests: XCTestCase {
             "<function=lookup><parameter=value>one</parameter><parameter=value>two</parameter></function>",
             schemas: schemas(type: .string("string"))
         )
+    }
+
+    func testDuplicateTypedObjectKeysDoNotEscapeInParserDiagnostics() throws {
+        let sentinel = "PRIVATE_ARGUMENT_KEY_SENTINEL"
+        let duplicate = "{\"\(sentinel)\":1,\"\(sentinel)\":2}"
+        let schema = schemas(type: .string("object"))
+        for value in [duplicate, "{\"nested\":\(duplicate)}"] {
+            let raw = xml(value)
+            var finalArguments: String?
+            var events: [StreamChunk] = []
+            var emitter = NativeToolCallStreamEmitter(modelID: model, allowedFunctionNames: ["lookup"], schemas: schema)
+            var observer = NativeToolCallStreamEmitter(modelID: model, allowedFunctionNames: ["lookup"], schemas: schema)
+            var serialStopped = false
+            let diagnostic = try captureParserStderr {
+                finalArguments = arguments(raw, schemas: schema)
+                events = emitter.observe(raw)
+                serialStopped = ModelRuntime.observeSerialToolStop(
+                    &observer, decoded: raw, stopTokenFilter: StopTokenFilter(tokens: []), requestStops: []
+                )
+            }
+            XCTAssertNil(finalArguments)
+            XCTAssertTrue(events.isEmpty)
+            XCTAssertFalse(emitter.hasCompletedValidToolCall)
+            XCTAssertFalse(serialStopped)
+            XCTAssertTrue(diagnostic.contains("invalidArguments"), "Expected payload-free parse failure")
+            XCTAssertFalse(diagnostic.contains(sentinel), "Argument key must not reach diagnostic output")
+            XCTAssertFalse(diagnostic.contains("duplicateKey"), "Underlying parser error must not escape")
+        }
+    }
+
+    private func captureParserStderr(_ operation: () -> Void) throws -> String {
+        let pipe = Pipe()
+        let savedStderr = dup(STDERR_FILENO)
+        guard savedStderr >= 0 else { throw POSIXError(.EBADF) }
+        defer {
+            fflush(stderr)
+            _ = dup2(savedStderr, STDERR_FILENO)
+            close(savedStderr)
+            pipe.fileHandleForWriting.closeFile()
+            pipe.fileHandleForReading.closeFile()
+        }
+        fflush(stderr)
+        guard dup2(pipe.fileHandleForWriting.fileDescriptor, STDERR_FILENO) >= 0 else {
+            throw POSIXError(.EBADF)
+        }
+        operation()
+        fflush(stderr)
+        guard dup2(savedStderr, STDERR_FILENO) >= 0 else { throw POSIXError(.EBADF) }
+        pipe.fileHandleForWriting.closeFile()
+        return String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
     }
 
     private func assertMalformed(_ raw: String, schemas: [String: JSONValue], file: StaticString = #filePath, line: UInt = #line) {
