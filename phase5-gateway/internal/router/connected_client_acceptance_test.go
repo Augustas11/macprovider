@@ -149,10 +149,12 @@ func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion
 			return nil, fmt.Errorf("fixture request exceeded four MiB")
 		}
 		var payload struct {
-			Model      string          `json:"model"`
-			Stream     bool            `json:"stream"`
-			ToolChoice json.RawMessage `json:"tool_choice"`
-			Messages   []struct {
+			Model       string          `json:"model"`
+			Stream      bool            `json:"stream"`
+			ToolChoice  json.RawMessage `json:"tool_choice"`
+			Temperature *float64        `json:"temperature"`
+			TopP        *float64        `json:"top_p"`
+			Messages    []struct {
 				Role       string          `json:"role"`
 				Content    json.RawMessage `json:"content"`
 				ToolCallID string          `json:"tool_call_id"`
@@ -172,6 +174,12 @@ func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion
 		if kind == "opencode" && len(payload.Tools) != 0 && !connectedAutomaticChoice(payload.ToolChoice) {
 			cancel()
 			return nil, fmt.Errorf("OpenCode acceptance requires unchanged automatic tool choice")
+		}
+		if kind == "opencode" && len(payload.Tools) != 0 && os.Getenv("MACPROVIDER_TEST_OPENCODE_AGENT_PROFILE") != "" {
+			if payload.Temperature == nil || *payload.Temperature != 0.7 || payload.TopP == nil || *payload.TopP != 0.8 {
+				cancel()
+				return nil, fmt.Errorf("Qwen candidate sampling did not reach the unchanged wire request")
+			}
 		}
 		traceSelected, err := privateTrace.captureRequest(body, len(payload.Tools) != 0)
 		if err != nil {

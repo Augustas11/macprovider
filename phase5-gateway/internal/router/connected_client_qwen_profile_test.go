@@ -36,7 +36,7 @@ func connectedOpenCodeAgentProfile(configuration map[string]any, profile, model 
 	if profile == "" {
 		return nil
 	}
-	if profile != "qwen-native" {
+	if profile != "qwen-native" && profile != "qwen-sampling" {
 		return fmt.Errorf("unknown OpenCode lab agent profile")
 	}
 	switch model {
@@ -44,10 +44,22 @@ func connectedOpenCodeAgentProfile(configuration map[string]any, profile, model 
 	default:
 		return fmt.Errorf("Qwen lab agent profile requires an exact campaign model")
 	}
-	configuration["agent"] = map[string]any{"build": map[string]any{
-		"model": "malibu/" + model, "prompt": connectedQwenAgentPrompt,
-		"temperature": 0.7, "top_p": 0.8,
-	}}
+	providers, _ := configuration["provider"].(map[string]any)
+	provider, _ := providers["malibu"].(map[string]any)
+	models, _ := provider["models"].(map[string]any)
+	entry, _ := models[model].(map[string]any)
+	if entry == nil {
+		return fmt.Errorf("Qwen lab profile requires a configured model entry")
+	}
+	// OpenCode custom models default this capability to false. The compatible
+	// adapter forwards model options as request fields, scoped to this model.
+	entry["temperature"] = true
+	entry["options"] = map[string]any{"temperature": 0.7, "top_p": 0.8}
+	if profile == "qwen-native" {
+		configuration["agent"] = map[string]any{"build": map[string]any{
+			"model": "malibu/" + model, "prompt": connectedQwenAgentPrompt,
+		}}
+	}
 	return nil
 }
 
@@ -56,16 +68,27 @@ func TestConnectedClientQwenAgentProfile(t *testing.T) {
 		"mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
 		"mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit",
 	} {
-		configuration := map[string]any{"model": "malibu/" + model}
-		if err := connectedOpenCodeAgentProfile(configuration, "", model); err != nil || len(configuration) != 1 {
+		entry := map[string]any{"name": model}
+		other := map[string]any{"name": "other-model"}
+		configuration := map[string]any{"model": "malibu/" + model, "provider": map[string]any{
+			"malibu": map[string]any{"models": map[string]any{model: entry, "other-model": other}},
+		}}
+		if err := connectedOpenCodeAgentProfile(configuration, "", model); err != nil || len(entry) != 1 {
 			t.Fatal("absent profile changed stock configuration")
+		}
+		if err := connectedOpenCodeAgentProfile(configuration, "qwen-sampling", model); err != nil {
+			t.Fatal(err)
+		}
+		options := entry["options"].(map[string]any)
+		if entry["temperature"] != true || len(options) != 2 || options["temperature"] != 0.7 || options["top_p"] != 0.8 || len(other) != 1 || configuration["agent"] != nil {
+			t.Fatal("sampling profile must be exact-model scoped and retain stock prompt")
 		}
 		if err := connectedOpenCodeAgentProfile(configuration, "qwen-native", model); err != nil {
 			t.Fatal(err)
 		}
 		build := configuration["agent"].(map[string]any)["build"].(map[string]any)
-		if len(build) != 4 || build["model"] != "malibu/"+model || build["prompt"] != connectedQwenAgentPrompt || build["temperature"] != 0.7 || build["top_p"] != 0.8 {
-			t.Fatal("profile must only customize prompt, model and documented sampling")
+		if len(build) != 2 || build["model"] != "malibu/"+model || build["prompt"] != connectedQwenAgentPrompt {
+			t.Fatal("native profile must only customize agent prompt and model")
 		}
 		for _, key := range []string{"tools", "permission", "tool_choice", "toolChoice"} {
 			if _, exists := build[key]; exists {
