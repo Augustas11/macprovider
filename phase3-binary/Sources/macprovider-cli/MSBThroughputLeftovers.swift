@@ -61,6 +61,15 @@ struct MSBUsageRow: Codable, Sendable, Equatable {
     let settlementDisposition: String
 }
 
+struct MSBParityRowEvidence: Codable, Sendable, Equatable {
+    let serialTokenCount: Int
+    let standaloneTokenCount: Int
+    let batchedTokenCount: Int
+    let serialTokenSHA256: String
+    let standaloneTokenSHA256: String
+    let batchedTokenSHA256: String
+}
+
 struct MSBParityEvidence: Codable, Sendable, Equatable {
     let comparedTokens: Int
     let oneRowMatch: Bool
@@ -69,6 +78,8 @@ struct MSBParityEvidence: Codable, Sendable, Equatable {
     let firstDivergenceIndex: Int?
     let serialTokenSHA256: String
     let batchedTokenSHA256: String
+    // Optional so archived reports still decode; absent rows are not new proof.
+    let rows: [MSBParityRowEvidence]?
     let pass: Bool
 }
 
@@ -143,13 +154,16 @@ func msb03ShortRequestTTFTPass(ratio: Double) -> Bool {
 }
 
 func msbTemp0ParityMatch(serial: [Int], batched: [Int], comparedTokens: Int) -> (match: Bool, firstDivergence: Int?) {
+    guard comparedTokens > 0 else { return (false, 0) }
     let count = min(comparedTokens, serial.count, batched.count)
-    guard count > 0 else { return (false, 0) }
     for index in 0..<count {
         if serial[index] != batched[index] {
             return (false, index)
         }
     }
+    // A matching short prefix does not prove the requested output window.
+    // Report the first missing token after preserving any earlier mismatch.
+    guard count == comparedTokens else { return (false, count) }
     return (true, nil)
 }
 
