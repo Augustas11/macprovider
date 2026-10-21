@@ -1475,9 +1475,9 @@ of exactly this tuple and no other:
 
 For that exact issue #2081 campaign tuple, the frozen
 `s2-p1536-o512` gated cell recorded a native-versus-ordinary p95 TTFT median
-regression of approximately 6.0% and a Holm-corrected upper bound of
-approximately 6.6%, above the preregistered 5% limit; the final exact values
-remain those in the immutable analyzer evidence. The frozen policy, raw
+regression of approximately 6.0%, with the Holm-corrected upper bound also
+above the preregistered 5% limit; the final exact values remain those in the
+immutable analyzer evidence. The frozen policy, raw
 records, analyzer output,
 and analyzer `FAIL` verdict MUST remain unchanged and MUST accompany any
 combined CLI admission review; this disposition does not reinterpret that
