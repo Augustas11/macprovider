@@ -51,6 +51,33 @@ test("model switches, near identities, cross-family remaps and other providers d
   }
 });
 
+test("Coder alone gets the native XML worked example; Instruct base stays byte-identical", async () => {
+  const transform = await hook();
+  // Alternate families on the same hook to cover model switches without cached state.
+  for (const pair of [bindings[0], bindings[1], bindings[0], bindings[1]]) {
+    for (const id of pair) for (const apiID of pair) {
+      const output = { system: [stock + suffix, "Keep this instruction"], tools: { read: true } };
+      await transform({ model: model(id, apiID) }, output);
+      const prompt = output.system[0].slice(0, -suffix.length);
+      if (pair === bindings[0]) {
+        assert.ok(prompt.includes("<tool_call>\n<function=read>\n<parameter=filePath>\n/path/to/note.txt\n</parameter>\n</function>\n</tool_call>"));
+        assert.ok(prompt.includes("tool result:\n<path>/path/to/note.txt</path>\n<type>file</type>\n<content>\n\n1: The river is quiet."));
+        assert.ok(prompt.includes("assistant final answer:\nThe river is quiet.\n</example>"));
+        assert.ok(prompt.includes("documentation, not an observation"));
+        assert.ok(prompt.includes("preserving any numbering or punctuation that belongs to the file itself"));
+        assert.equal(prompt.match(/<example>/g)?.length, 1);
+      } else {
+        assert.equal(createHash("sha256").update(prompt).digest("hex"),
+          "04895719eea9f5f677b69ee7a42321f6a905efe9fa11a8d1b3878a989f6fcf2b");
+        assert.ok(!prompt.includes("<example>"));
+      }
+      assert.ok(output.system[0].endsWith(suffix));
+      assert.equal(output.system[1], "Keep this instruction");
+      assert.deepEqual(output.tools, { read: true });
+    }
+  }
+});
+
 test("custom and copied-default agent prompts are preserved", async () => {
   for (const prompt of ["Custom build prompt", stock, stock + "\nCustom instruction", stock.slice(0, stock.indexOf("\n"))]) {
     const transform = await hook(async () => ({ data: [{ name: "custom", prompt }] }));
