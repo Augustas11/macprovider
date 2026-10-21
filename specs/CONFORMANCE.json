@@ -5234,6 +5234,7 @@
         "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testQwenPreparationLaneEligibilityIsClosedToExactAdapterAndTextTarget",
         "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testQwenPreparationLanePreservesPromptStopsToolPrefillAndCheckpoints",
         "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testQwenPreparationLaneSnapshotStaysPinnedAcrossWarmSwap",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testQwenPreparationLaneRejectsQueuedDrainBeforeProcessorRuns",
         "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testQwenPreparationLaneAdmitsNonStreamingRowWhileTargetLockIsHeld",
         "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testQwenPreparationLaneAdmitsStreamingRowWhileTargetLockIsHeld"
       ],

@@ -4482,7 +4482,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             maxContextTokens: 4096,
             templateSupportsThinkingToggle: true,
             templateSupportsPreserveThinking: true,
-            toolSelectionModelID: ToolSelectionPolicy.supportedNativeModel
+            toolSelectionModelID: ToolSelectionPolicy.supportedNativeModel,
+            drainCancelled: DrainCancelToken()
         )
         let context = ModelContext(
             configuration: configuration,
@@ -4526,6 +4527,74 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(laneInput.toolNames, ["get_weather"])
         XCTAssertEqual(laneInput.enableThinking, false)
         XCTAssertEqual(laneInput.preserveThinking, true)
+    }
+
+    func testQwenPreparationLaneRejectsQueuedDrainBeforeProcessorRuns() async throws {
+        let preparationGate = RuntimeBridgeTestGate()
+        let processor = RuntimeBridgeBlockingPromptProcessor(
+            tokens: [3],
+            firstPreparationGate: preparationGate
+        )
+        let lane = ContinuousBatchTextPreparationLane(
+            processor: processor,
+            tokenizer: RuntimeBridgePreparationTokenizer(),
+            configuration: ModelConfiguration(id: "mlx-community/Qwen3.6-Test"),
+            hasRecurrentLayers: true
+        )
+        let firstDrain = DrainCancelToken()
+        let secondDrain = DrainCancelToken()
+        let firstRequest = try Self.chatRequest(modelID: "mlx-community/Qwen3.6-Test", maxTokens: 1)
+            .withRequestID("lane-drain-first")
+        let secondRequest = try Self.chatRequest(modelID: "mlx-community/Qwen3.6-Test", maxTokens: 1)
+            .withRequestID("lane-drain-second")
+        let first = Task<Void, Error> {
+            _ = try await lane.prepare(
+                request: firstRequest,
+                maxContextTokens: 4096,
+                templateSupportsThinkingToggle: false,
+                templateSupportsPreserveThinking: false,
+                toolSelectionModelID: nil,
+                drainCancelled: firstDrain
+            )
+        }
+        defer {
+            first.cancel()
+            Task { await preparationGate.open() }
+        }
+        try await Self.eventually {
+            let waitingCount = await preparationGate.waitingCount()
+            let processorCallCount = processor.callCount()
+            return waitingCount == 1 && processorCallCount == 1
+        }
+
+        let second = Task<Void, Error> {
+            _ = try await lane.prepare(
+                request: secondRequest,
+                maxContextTokens: 4096,
+                templateSupportsThinkingToggle: false,
+                templateSupportsPreserveThinking: false,
+                toolSelectionModelID: nil,
+                drainCancelled: secondDrain
+            )
+        }
+        defer { second.cancel() }
+        try await Self.eventually {
+            await lane.preparationEntryCountForTest() == 2
+        }
+        let callsWhileSecondQueued = processor.callCount()
+        XCTAssertEqual(callsWhileSecondQueued, 1)
+
+        secondDrain.fire()
+        await preparationGate.open()
+        try await first.value
+        do {
+            try await second.value
+            XCTFail("queued drained preparation must fail before invoking the processor")
+        } catch is DrainCancelledError {
+            // Expected: the drain fired while this preparation awaited the lane permit.
+        }
+        let finalCallCount = processor.callCount()
+        XCTAssertEqual(finalCallCount, 1)
     }
 
     func testQwenPreparationLaneSnapshotStaysPinnedAcrossWarmSwap() async throws {
@@ -5521,6 +5590,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
 
         let operation = Task<CompletionResult, Error> {
             if let handle {
+                try await runtime.preflight(request, with: handle)
                 return try await runtime.stream(request, with: handle) { _ in }
             }
             return try await runtime.complete(request)
@@ -6372,6 +6442,33 @@ private struct RuntimeBridgePromptProcessor: UserInputProcessor {
 
     func prepare(input: UserInput) throws -> LMInput {
         LMInput(tokens: MLXArray(tokens).reshaped(1, tokens.count))
+    }
+}
+
+private final class RuntimeBridgeBlockingPromptProcessor: UserInputProcessor, @unchecked Sendable {
+    private let tokens: [Int32]
+    private let firstPreparationGate: RuntimeBridgeTestGate
+    private let lock = NSLock()
+    private var calls = 0
+
+    init(tokens: [Int32], firstPreparationGate: RuntimeBridgeTestGate) {
+        self.tokens = tokens
+        self.firstPreparationGate = firstPreparationGate
+    }
+
+    func prepare(input: UserInput) async throws -> LMInput {
+        let isFirstCall = lock.withLock {
+            calls += 1
+            return calls == 1
+        }
+        if isFirstCall {
+            await firstPreparationGate.wait()
+        }
+        return LMInput(tokens: MLXArray(tokens).reshaped(1, tokens.count))
+    }
+
+    func callCount() -> Int {
+        lock.withLock { calls }
     }
 }
 

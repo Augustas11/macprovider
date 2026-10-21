@@ -383,6 +383,9 @@ actor ContinuousBatchTextPreparationLane {
     private let tokenizer: any MLXLMCommon.Tokenizer
     private let configuration: ModelConfiguration
     private let hasRecurrentLayers: Bool
+#if DEBUG
+    private var preparationEntryCount = 0
+#endif
 
     init(
         processor: any UserInputProcessor,
@@ -401,13 +404,19 @@ actor ContinuousBatchTextPreparationLane {
         maxContextTokens: Int,
         templateSupportsThinkingToggle: Bool,
         templateSupportsPreserveThinking: Bool,
-        toolSelectionModelID: String?
-    ) async throws -> (ContinuousBatchPreparedRequest, StreamingDetokenizer) {
+        toolSelectionModelID: String?,
+        drainCancelled: DrainCancelToken
+    ) async throws -> (ContinuousBatchPreparedRequest, ModelRuntime.StreamingDetokenizer) {
+#if DEBUG
+        preparationEntryCount += 1
+#endif
         let processor = processor
         let tokenizer = tokenizer
         let configuration = configuration
         let hasRecurrentLayers = hasRecurrentLayers
         return try await serial.withPermit {
+            try Task.checkCancellation()
+            try drainCancelled.check()
             let (promptTokens, toolCallPrefill) = try await ModelRuntime.preparedRequestTokens(
                 for: request,
                 processor: processor,
@@ -416,6 +425,8 @@ actor ContinuousBatchTextPreparationLane {
                 templateSupportsPreserveThinking: templateSupportsPreserveThinking,
                 toolSelectionModelID: toolSelectionModelID
             )
+            try Task.checkCancellation()
+            try drainCancelled.check()
             try ModelRuntime.validatePromptTokenCount(promptTokens.count, maxContextTokens: maxContextTokens)
             let modelStopTokenIDs = ModelRuntime.generationStopTokenIDs(
                 configuration: configuration,
@@ -423,6 +434,8 @@ actor ContinuousBatchTextPreparationLane {
             )
             let hybrid = request.conversationKey?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
                 && hasRecurrentLayers
+            try Task.checkCancellation()
+            try drainCancelled.check()
             return (
                 ContinuousBatchPreparedRequest(
                     promptTokens: promptTokens,
@@ -441,10 +454,16 @@ actor ContinuousBatchTextPreparationLane {
                     modelHasRecurrentLayers: hybrid,
                     toolCallPrefill: toolCallPrefill
                 ),
-                StreamingDetokenizer(tokenizer: tokenizer)
+                ModelRuntime.StreamingDetokenizer(tokenizer: tokenizer)
             )
         }
     }
+
+#if DEBUG
+    func preparationEntryCountForTest() -> Int {
+        preparationEntryCount
+    }
+#endif
 }
 
 public struct RuntimeSnapshot: @unchecked Sendable {
@@ -6951,10 +6970,11 @@ maxTokens: 1,
     func preflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws {
         try ToolSelectionPolicy.validateRequest(request, loadedModelID: toolSelectionModelID(handle.snapshot), runtime: "mlx_cache")
         _ = try Self.validateNativeVisionRequest(request, profile: handle.snapshot.nativeVisionProfile)
-        // SPEC-025 §5.2: the streaming path runs preflight (prompt prepare inside
-        // container.perform — real model-thread work) before stream() brackets
-        // active inference. Bracket it here too so a pre-first-token wedge during
-        // preflight is observable (active_inference true) rather than reading idle.
+        // SPEC-025 §5.2: the streaming path prepares the prompt during preflight
+        // before stream() brackets active inference. Bracket it here too so a
+        // pre-first-token wedge is observable (active_inference true) rather than
+        // reading idle. Eligible Qwen text snapshots use their pinned preparation
+        // lane; serial and vision snapshots retain container isolation.
         ModelLivenessTracker.shared.beginInference()
         defer { ModelLivenessTracker.shared.endInference() }
         _ = try applyContinuousBatchingPolicy(request: request, snapshot: handle.snapshot)
@@ -6978,6 +6998,27 @@ maxTokens: 1,
             // buyer under SPEC-001-R011) releases the gate without preparing.
             try Task.checkCancellation()
             try handle.drainCancelled.check()
+            if !request.containsNonTextMessageContentPart,
+               let lane = handle.snapshot.continuousBatchTextPreparationLane {
+                if let requestID = Self.schedulerRequestID(for: request) {
+                    CBTrace.logPreparation(requestID, "rt_cb_prepare_begin path=preflight")
+                }
+                let (prepared, _) = try await lane.prepare(
+                    request: request,
+                    maxContextTokens: maxContextTokens,
+                    templateSupportsThinkingToggle: templateSupportsThinkingToggle,
+                    templateSupportsPreserveThinking: templateSupportsPreserveThinking,
+                    toolSelectionModelID: selectionModelID,
+                    drainCancelled: handle.drainCancelled
+                )
+                if let requestID = Self.schedulerRequestID(for: request) {
+                    CBTrace.logPreparation(
+                        requestID,
+                        "rt_cb_prepare_end path=preflight tokens=\(prepared.promptTokens.count)"
+                    )
+                }
+                return
+            }
             return try await container.perform { context in
                 try Task.checkCancellation()
                 try handle.drainCancelled.check()
@@ -7191,7 +7232,8 @@ maxTokens: 1,
                 maxContextTokens: maxContextTokens,
                 templateSupportsThinkingToggle: snapshot.templateSupportsThinkingToggle,
                 templateSupportsPreserveThinking: snapshot.templateSupportsPreserveThinking,
-                toolSelectionModelID: toolSelectionModelID
+                toolSelectionModelID: toolSelectionModelID,
+                drainCancelled: drainCancelled
             )
         }
         return try await container.perform { context -> (ContinuousBatchPreparedRequest, StreamingDetokenizer) in

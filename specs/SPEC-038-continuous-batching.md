@@ -2159,7 +2159,9 @@ hardware-capability run or a static-review obligation. Every
   preserving GLM's serial-cohort behavior.
   Streaming and non-streaming Qwen text admission fixtures MUST hold the
   target-forward lock and prove that another request reaches scheduler
-  admission before that lock is released. They MUST also cover preparation
+  admission before that lock is released, including production preflight before
+  streaming. A request drained while queued for preparation MUST fail before
+  invoking the processor. The fixtures MUST also cover preparation
   parity for tool prefill, stops and keyed recurrent checkpoints, generation
   ownership across reload, and exclusion of multimodal and other-adapter
   paths. Passing these fixtures does not substitute for the hardware
