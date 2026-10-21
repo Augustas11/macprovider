@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.50
+**Version:** 0.1.51
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.50",
+  "version": "0.1.51",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -493,13 +493,13 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.10.1` | `87dc5159c87d73f4d7abd524fbdd17760cf56285` | fork `3.32.3-macprovider.10` (`b4077dcb28336b388f3d09be2a091c12f8e179aa`) on `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.10.2` | `3052bf40fed485c6d6ff1a6792dd6b10d03b4562` | fork `3.32.3-macprovider.10.1` (`87dc5159c87d73f4d7abd524fbdd17760cf56285`) on `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.9` | `29d3b93375cc56cd2649b40e4310a8bc445e9874` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.4` | `2f512e3997349c8648f5d7c5113eb2c825aa242d` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 
-The mlx-swift-lm row is the epic #2029 campaign's immutable fork tag
-`3.32.3-macprovider.10.1` (annotated tag object `6a9ba2b9…`, commit
-`87dc5159…`, branch `glm53/tuple-0324`), and `phase3-binary/Package.resolved`
+The mlx-swift-lm row is the issue #2080 campaign's immutable fork tag
+`3.32.3-macprovider.10.2` (commit `3052bf40…`, branch
+`glm53/2080-indexer-projections`), and `phase3-binary/Package.resolved`
 resolves exactly that revision. A production build MUST NOT resolve an
 untagged mlx-swift-lm revision, and a revision differing from this row is
 outside the authorized tuple; `scripts/check-upstream-throughput-blockers.sh`
@@ -661,7 +661,7 @@ eligibility restricted to exact stock types, tests, and the manifest tools
 version), so R015 was not rerun. The freeze audit and its fixes are in
 `audits/2026-10-10-mlx-swift-lm-332/`.
 
-Review record for this tuple (mlx-swift-lm `3.32.3-macprovider.10.1`):
+Historical review record for mlx-swift-lm `3.32.3-macprovider.10.1`:
 **PENDING** (epic #2029). Two items remain: the
 `JOURNEY-NATIVE-MTP-SERVING` run on the final tagged tuple and the GLM R015
 record. The record then names the per-rebase acceptance gate results on the
@@ -672,6 +672,21 @@ core `v0.32.4` rebase changed a Qwen decode-path line, and so whether the
 existing Qwen native-MTP R015 reruns under the rule above. The mlx-swift-lm
 GLM-5-Next delta is new files, pure additions to `GatedDelta.swift` and
 `SwitchLayers.swift`, and model registration.
+
+Review record for this tuple (mlx-swift-lm `3.32.3-macprovider.10.2`):
+**PENDING** (issue #2080). Relative to `.10.1`, only GLM's per-column packed
+verification shares row-independent indexer projections across requests. A
+projection MUST use the existing exact affine QMV kernel only within its
+supported shape, dtype and quantization envelope; unsupported projections
+MUST independently retain per-row execution, without a generic batched-matmul
+fallback. Pooling, normalization, per-column attention and row-local rollback
+are unchanged. Studio tests establish synthetic bitwise parity and rejection
+coverage, not real-model performance qualification. This changes a GLM decode
+path, so the frozen R015 gates apply before signing or activating the new
+native tuple. It changes no Qwen decode-path line. Existing evidence for
+unchanged paths is retained with its original identities; it MUST NOT be
+relabeled as qualification of this GLM change. The complete campaign freeze
+audit, changed-path real-model correctness and R015 acceptance remain pending.
 
 Earlier tuples, the 3.31.4-based fork revisions up to `ca8c384c…`, and their
 review records are in the changelog and are superseded by this tuple. No
@@ -1758,6 +1773,11 @@ the text-only path without image inputs; that does not admit multimodal buyer
 requests.
 
 ## 9. Changelog and history
+
+- **0.1.51 (2026-10-21)** — R003 names the immutable `.10.2` GLM packed-indexer
+  candidate and exact-kernel-only/per-projection fallback contract. The GLM
+  decode change requires fresh changed-path acceptance under unchanged R015;
+  dependency authorization does not raise signed native-row admission.
 
 - **0.1.50 (2026-10-21)** — MTP-15 adds the optional, backward-compatible
   `laboratory_max_native_active_rows` frozen candidate bound. It can widen
