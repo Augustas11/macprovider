@@ -72,6 +72,24 @@ while sessions regenerated evidence instead of deploying. Each is binding.
     switch where one already exists. Signed catalog/CB/native-MTP policy is
     deployment state, not a default-off gate; changing it still goes through
     `scripts/ops/`.
+12. **Measure the goal first; build only what the number justifies.** A
+    campaign whose goal is a performance or capability gain starts with the
+    one end-to-end measurement of the metric the goal names. For native MTP
+    that is output tokens/s, acceptance, TTFT and token parity against
+    ordinary CB at the same row count (SPEC-048 R015 cells). Use existing
+    tools and report the number in the first Studio window. Only then write
+    code, tooling or audits.
+    - Never decide a campaign on a side metric. A kernel variant, one forward
+      pass or a profiler sample is not the goal metric.
+    - A kill or continue decision cites the goal metric, measured
+      end-to-end.
+    - A new tooling PR must name the blocked live step it unblocks.
+      "Nicer harness" is not a reason.
+    - Audits run once at freeze, not per slice.
+    - Why: #2086 spent 1.5 days on harness rework, five tooling PRs and a
+      shared-load kernel experiment, then closed on a 1.58% kernel-variant
+      slowdown. The decisive multi-row native-versus-ordinary throughput
+      measurement was never run.
 
 ## Project Overview
 
