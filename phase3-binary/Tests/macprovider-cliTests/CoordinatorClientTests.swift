@@ -5748,6 +5748,67 @@ final class CoordinatorClientTests: XCTestCase {
         await client.cancelHeartbeatWatchdogForTest()
     }
 
+    func testSignalShutdownOwnsExitWhileJoinedSelfCheckCleanupIsSuspended() async throws {
+        actor CleanupGate {
+            var entered = false
+            var finished = false
+            private var continuation: CheckedContinuation<Void, Never>?
+            func suspendCleanup() async {
+                await withCheckedContinuation { continuation in
+                    self.continuation = continuation
+                    entered = true
+                }
+                finished = true
+            }
+            func release() {
+                continuation?.resume()
+                continuation = nil
+            }
+        }
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let watchdogFired = LockedBox(false)
+        let selectedExit = LockedBox<Int32?>(nil)
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            watchdogExitHook: { _ in watchdogFired.set(true) }
+        )
+        await client.acceptAssignedSessionForTest(assignedID: "joined-provider")
+        await client.seedLastHeartbeatSuccessForTest(ageNanoseconds: 16_000_000_000)
+        let gate = CleanupGate()
+        let selfCheck = Task<Void, Never> {
+            do {
+                try await Task.sleep(nanoseconds: 3_600_000_000_000)
+            } catch {
+                await gate.suspendCleanup()
+            }
+        }
+        let shutdown = Task<Void, Never> {
+            await client.beginSignalShutdown()
+            await ContinuousBatchingSelfCheckDriver.cancelAndWait(selfCheck)
+            await client.drainForExit(reason: "SIGTERM received")
+            selectedExit.set(143)
+        }
+        try await Self.waitUntil(timeoutNanoseconds: 5_000_000_000) { await gate.entered }
+        // Force the stale production evaluation without sleeping for a timer.
+        // Also exercise an in-flight reconnect trying to re-arm its watchdog.
+        await client.startHeartbeatWatchdogForTest(intervalSeconds: 1)
+        await client.evaluateHeartbeatWatchdogForTest(intervalSeconds: 1)
+        XCTAssertFalse(watchdogFired.get(), "joined recovery must not replace signal shutdown")
+        XCTAssertNil(selectedExit.get(), "exit must wait for self-check persistence")
+        await gate.release()
+        await shutdown.value
+        let cleanupFinished = await gate.finished
+        XCTAssertTrue(cleanupFinished)
+        XCTAssertEqual(selectedExit.get(), 143)
+        XCTAssertFalse(watchdogFired.get())
+    }
+
     func testHeartbeatWatchdogToleranceExceedsBoundedSendTimeout() {
         let expected = UInt64(15 * 1_000_000_000)
         XCTAssertEqual(
@@ -6827,8 +6888,13 @@ final class CoordinatorClientTests: XCTestCase {
             }
         )
         let restoreSocket = FakeProviderWebSocketTask(
-            receiveResults: [.success(.string("{}"))],
-            receiveDelayNanoseconds: 1_000_000_000
+            receiveResults: [],
+            // Exercise post-commit error classification, not the watchdog's
+            // scheduling. A short shared deadline can expire during candidate
+            // authentication, before this test reaches the commit at all.
+            receiveOverride: { _ in
+                throw CoordinatorReceiptRotationTimeout(timeoutSeconds: 55)
+            }
         )
         let factory = FakeProviderWebSocketFactory(sockets: [candidateSocket, restoreSocket])
         let status = ProviderStatus(
@@ -6847,7 +6913,6 @@ final class CoordinatorClientTests: XCTestCase {
             modelRuntime: runtime,
             providerStatus: status,
             reconnectGraceNanoseconds: 1_000_000,
-            receiptKeyRotationTimeoutNanoseconds: 20_000_000,
             attestationGenerator: StaticAttestationGenerator(token: nil),
             webSocketFactory: { factory.makeSocket(for: $0) },
             sleepAssertionFactory: { nil },
@@ -6855,7 +6920,6 @@ final class CoordinatorClientTests: XCTestCase {
             providerReceiptPublicKey: "old-receipt-public-key"
         ))
 
-        let startedAt = Date()
         do {
             try await client.reconnectWithNewKey(Curve25519.Signing.PrivateKey()) {
                 committed.set(true)
@@ -6863,11 +6927,11 @@ final class CoordinatorClientTests: XCTestCase {
             XCTFail("rotation should report committed publication failure")
         } catch let error as CoordinatorReceiptRotationCommittedRecoveryFailed {
             XCTAssertTrue(error.description.contains("committed locally"), error.description)
+            XCTAssertTrue(error.description.contains("timed out"), error.description)
         } catch {
             XCTFail("unexpected error: \(error)")
         }
 
-        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 1.0)
         XCTAssertTrue(committed.get())
         XCTAssertGreaterThan(restoreSocket.cancelCountSnapshot(), 0)
         await client.stop()

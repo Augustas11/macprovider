@@ -1,1 +1,1 @@
-{"key_id":"streamvc-autotune-static-v4","alg":"ed25519","signature":"a2MsfY/7yk1WsyQhX1Y2iCPK0sHKruNNZzjiKJVPf48crZ4ueVlNsjWw6icMN0JBzO7zqfNVke3WRUyr7itJBw=="}
+{"key_id":"streamvc-autotune-static-v4","alg":"ed25519","signature":"O2QcS5veNm6lasov+FUjiFh0RgH8tJQJGPLUTPmriuD7MOzKTVOSls4FFz0eYmBQcmg8iJUPayZat9+9kcATAA=="}

@@ -5,6 +5,28 @@ import XCTest
 
 /// SPEC-038 v0.3.15 on-device continuous-batching self-check.
 final class ContinuousBatchingSelfCheckTests: XCTestCase {
+    func testShutdownWaitsForCancelledSelfCheckCleanup() async {
+        actor Journal {
+            var cancelled = false
+            func finish() { cancelled = true }
+        }
+        let journal = Journal()
+        let task = Task<Void, Never> {
+            do {
+                try await Task.sleep(nanoseconds: 3_600_000_000_000)
+            } catch {
+                // The real driver clears its in-progress crash marker only
+                // after its blocking inference work has unwound.
+                await Task.yield()
+                await journal.finish()
+            }
+        }
+        await ContinuousBatchingSelfCheckDriver.cancelAndWait(task)
+        let cancelled = await journal.cancelled
+        XCTAssertTrue(cancelled, "process exit must follow cancellation cleanup")
+        await ContinuousBatchingSelfCheckDriver.cancelAndWait(nil)
+    }
+
     private func m(_ slots: Int, exact: Bool = true, tps: Double) -> ContinuousBatchingSelfCheckMeasurement {
         .init(slots: slots, conformant: exact, aggregateTPS: tps)
     }

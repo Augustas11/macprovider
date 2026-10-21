@@ -35,8 +35,9 @@
 #                             read the bank at boot, and the step restarts it before the
 #                             activation can be done
 #   8 provider_restart        canary/Studio provider reports the new catalog release
-#   9 live_probe              provider /v1/status: native_mtp enabled+eligible|active,
-#                             continuous_batching active
+#   9 live_probe              provider /v1/status: continuous_batching active;
+#                             native_mtp enabled+eligible|active unless explicitly
+#                             selecting a CB-only proof below
 #  10 gateway_proof           one real buyer request through the gateway that moves the
 #                             target provider's active serving-path counter
 #                             (CB shared_forward_calls when CB is active);
@@ -56,8 +57,8 @@
 # Env (or ~/.config/macprovider/ops.env): COORDINATOR_URL, GATEWAY_URL,
 # PEARL_SSH (+ PEARL_SSH_IDENTITY/PEARL_SSH_KNOWN_HOSTS for the repo scripts),
 # REMOTE_REVOCATION_DIR, STUDIO_SSH, STUDIO_SSH_KEY, STUDIO_STATUS_PORT,
-# BUYER_TOKEN_FILE, PROBE_MODEL, CATALOG_REQUIRE_NATIVE_MTP_FORWARD=true (only
-# for a native-MTP identity rebind proof), CATALOG_CANARY_* (as
+# BUYER_TOKEN_FILE, PROBE_MODEL, CATALOG_REQUIRE_NATIVE_MTP_FORWARD=true (native
+# MTP proof) or explicitly false (CB-only live probe), CATALOG_CANARY_* (as
 # catalog-content-release.sh),
 # CATALOG_PRICING_ACK (the reviewed price table's digest), MACPROVIDER_OPS_OWNER (for --run).
 set -euo pipefail
@@ -639,15 +640,26 @@ for i in \$(seq 1 24); do curl -sf -m 5 \"\$COORDINATOR_URL/healthz\" && exit 0;
     next_meta provider_restart "$ROLLOUT_DOC#run-with-an-automatic-restore"
   fi
 
-  if [ "$p_mtp_enabled" = true ] && { [ "$p_mtp_mode" = eligible ] || [ "$p_mtp_mode" = active ]; } && [ "$p_cb_active" = true ]; then
-    step live_probe "done" "native_mtp $p_mtp_mode, continuous_batching active"
+  # Dense CB-only models have no native-MTP heads. An explicit CB-only proof
+  # must not require that unrelated capability. Preserve the historical native
+  # probe when unset; the gateway proof still requires shared-forward movement.
+  if [ "$p_cb_active" = true ] && { [ "${CATALOG_REQUIRE_NATIVE_MTP_FORWARD:-}" = false ] ||
+       { [ "$p_mtp_enabled" = true ] && { [ "$p_mtp_mode" = eligible ] || [ "$p_mtp_mode" = active ]; }; }; }; then
+    step live_probe "done" "continuous_batching active, native_mtp $p_mtp_mode (forward requirement=${CATALOG_REQUIRE_NATIVE_MTP_FORWARD:-default})"
   else
     step live_probe pending "native_mtp enabled=$p_mtp_enabled mode=$p_mtp_mode cb_active=$p_cb_active"
-    [ -z "$p_rid" ] || set_next live_probe manual "Turn the tuple on for the provider (native_mtp_mode: auto) and restart it" \
+    if [ "${CATALOG_REQUIRE_NATIVE_MTP_FORWARD:-}" = false ]; then
+      [ -z "$p_rid" ] || set_next live_probe manual "Verify the signed CB policy and local self-check grant for the target provider" \
+"# Confirm /v1/status continuous_batching.active=true after the signed policy and local self-check grant.
+# Do not enable native MTP on a model without qualified MTP heads."
+      next_meta live_probe "specs/SPEC-038-continuous-batching.md"
+    else
+      [ -z "$p_rid" ] || set_next live_probe manual "Turn the tuple on for the provider (native_mtp_mode: auto) and restart it" \
 "# docs/runbooks/native-mtp-enablement.md step 9 (operator approval: restarts live.malibu.provider)
 # set native_mtp_mode: auto in the provider config, restart, then confirm /v1/status
 # native_mtp.enabled=true, mode eligible|active, continuous_batching.active=true"
-    next_meta live_probe "$MTP_DOC#order"
+      next_meta live_probe "$MTP_DOC#order"
+    fi
   fi
 
   # The proof expires, and legacy generic request-counter markers are not enough

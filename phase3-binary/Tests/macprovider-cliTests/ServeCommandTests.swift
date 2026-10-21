@@ -1423,7 +1423,11 @@ final class ServeCommandTests: XCTestCase {
                 catalogKey: "test-model",
                 configuredModel: nil,
                 rateCardKey: "test-model",
-                rateCardGeneratedAt: "2026-07-29T09:00:00Z"
+                // Within clock skew, but deliberately different from the
+                // catalog: exercise pairing, not older-than-baked rejection.
+                rateCardGeneratedAt: ISO8601DateFormatter.autotuneInternet.string(
+                    from: Self.currentStaticFixtureDate.addingTimeInterval(60)
+                )
             )
             XCTFail("paid coordinator join must block signed rate-card/catalog release mismatch")
         } catch {
@@ -1746,7 +1750,7 @@ final class ServeCommandTests: XCTestCase {
         configuredModel: String?,
         rateCardKey: String,
         rateCardSidecarMissing: Bool = false,
-        rateCardGeneratedAt: String = "2026-10-18T03:00:00Z"
+        rateCardGeneratedAt: String? = nil
     ) async throws {
         let hub = try tempDir()
         let resolver = CachedModelArtifactResolver(hubRoot: hub)
@@ -1818,7 +1822,20 @@ final class ServeCommandTests: XCTestCase {
         var staticInputs: AutotuneStaticInputs
     }
 
-    private static let currentStaticFixtureGeneratedAt = "2026-10-18T03:00:00Z"
+    private static var currentStaticFixtureDate: Date {
+        // Synthetic live feeds must be newer than every compiled-in input.
+        // Keep all three stamps paired as release metadata advances.
+        let stamps = try! [
+            AutotuneStaticInputs.decodeRateCard(Data(AutotuneStaticInputs.bakedRateCardJSON.utf8)).generatedAt,
+            AutotuneStaticInputs.decodeCandidateCatalog(Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)).generatedAt,
+            AutotuneStaticInputs.decodeDemandRank(Data(AutotuneStaticInputs.bakedDemandRankJSON.utf8)).generatedAt,
+        ]
+        return stamps.max()!.addingTimeInterval(3_600)
+    }
+
+    private static var currentStaticFixtureGeneratedAt: String {
+        ISO8601DateFormatter.autotuneInternet.string(from: currentStaticFixtureDate)
+    }
 
     private func makeCatalogBoundFixture() async throws -> CatalogBoundFixture {
         let hub = try tempDir()
@@ -1886,8 +1903,9 @@ final class ServeCommandTests: XCTestCase {
 
     private static func validRateCardJSON(
         keys: [String],
-        generatedAt: String = "2026-10-18T03:00:00Z"
+        generatedAt: String? = nil
     ) -> String {
+        let generatedAt = generatedAt ?? currentStaticFixtureGeneratedAt
         var rows: [String: RateCardProjection.Row] = [
             "default": RateCardProjection.Row(
                 promptRatePerMtok: 1,
@@ -1923,8 +1941,9 @@ final class ServeCommandTests: XCTestCase {
     private static func validDemandRankJSON(
         keys: [String],
         version: String,
-        generatedAt: String = "2026-10-18T03:00:00Z"
+        generatedAt: String? = nil
     ) -> String {
+        let generatedAt = generatedAt ?? currentStaticFixtureGeneratedAt
         let rowsJSON = keys.sorted().enumerated().map { index, key -> String in
             "\(Self.jsonStringLiteral(key)):{\"demand_weight\":0.5,\"rank\":\(index + 1),\"recommendable\":true,\"min_provider_target\":1}"
         }.joined(separator: ",")

@@ -2366,12 +2366,11 @@ final class ModelsSubcommandTests: XCTestCase {
         )
     }
 
-    private static func prepareDate(_ raw: String) -> Date {
-        ISO8601DateFormatter.autotuneInternet.date(from: raw)!
-    }
-
     private static func currentStaticFixtureDate() -> Date {
-        prepareDate("2026-10-18T00:00:00Z")
+        let catalog = try! AutotuneStaticInputs.decodeCandidateCatalog(
+            Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)
+        )
+        return catalog.generatedAt.addingTimeInterval(3_600)
     }
 
     private func mutateRecommendationFixture(

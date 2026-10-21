@@ -3766,7 +3766,11 @@ struct ServeCommand: AsyncParsableCommand {
                 }
             }
         )
-        let terminationHandlers = installTerminationHandlers(coordinatorClient: coordinatorClient, controlSocket: controlSocket, idlePrewarmer: idlePrewarmer, kvDiskTier: kvDiskTier)
+        let terminationHandlers = installTerminationHandlers(
+            coordinatorClient: coordinatorClient, controlSocket: controlSocket,
+            idlePrewarmer: idlePrewarmer, kvDiskTier: kvDiskTier,
+            cbSelfCheckTask: cbSelfCheckTask
+        )
         defer {
             Task { [kvDiskTier] in
                 await idlePrewarmer.stop()
@@ -4795,7 +4799,8 @@ private func installTerminationHandlers(
     coordinatorClient: CoordinatorClient?,
     controlSocket: ControlSocketServer?,
     idlePrewarmer: IdlePrewarmer?,
-    kvDiskTier: KVDiskTier?
+    kvDiskTier: KVDiskTier?,
+    cbSelfCheckTask: Task<Void, Never>?
 ) -> [DispatchSourceSignal] {
     let latch = TerminationLatch()
     return [SIGTERM, SIGINT].map { signalNumber in
@@ -4807,10 +4812,8 @@ private func installTerminationHandlers(
                 // signal during drain is ignored so it cannot reclassify the stop.
                 guard latch.beginIfFirst() else { return }
                 // SPEC-001 FR-12 / SPEC-020 R-4.14: decide the exit code BEFORE
-                // draining. `drainAndExit` calls Darwin.exit itself for the normal
-                // coordinator-joined provider, so the decision and the exit code
-                // must be computed up front and threaded through it — otherwise the
-                // gate is unreachable on the common path. Exit 0 only under a
+                // draining. The signal handler owns exit on both joined and
+                // no-join paths, after their explicit cleanup. Exit 0 only under a
                 // validated local stop intent (uninstall/operator-disable/local
                 // stop, which records a PID+boot+process-start-bound marker). An
                 // unsolicited SIGTERM/SIGINT — a stray kill or a macOS
@@ -4822,17 +4825,28 @@ private func installTerminationHandlers(
                 let exitCode: Int32 = StopIntentMarker.consumeIfValid(currentPID: getpid())
                     ? 0
                     : (128 + signalNumber)
+                // Take exit ownership before suspension: heartbeat/auth recovery
+                // must not race the potentially slow inference cleanup below.
+                await coordinatorClient?.beginSignalShutdown()
+                // Cancellation alone is not a drain: stock generation runs on
+                // the blocking executor. Await it and the self-check journal
+                // before proceeding to process shutdown.
+                await ContinuousBatchingSelfCheckDriver.cancelAndWait(cbSelfCheckTask)
                 await idlePrewarmer?.stop()
                 await controlSocket?.stop()
-                await coordinatorClient?.drainAndExit(
-                    reason: "\(signalName(signalNumber)) received",
-                    exitCode: exitCode
+                await coordinatorClient?.drainForExit(
+                    reason: "\(signalName(signalNumber)) received"
                 )
                 // M-A: drain queued cold writes (bounded by shutdownDrainSeconds) and
                 // release the namespace lock BEFORE exit, on the signal path too.
-                // (Reached only when there is no coordinator client, e.g. --no-join.)
                 await kvDiskTier?.shutdown()
-                Darwin.exit(exitCode)
+                // The scheduler pump and other runtime workers have separate
+                // ownership from the qualification task. Do not run C++ global
+                // destructors concurrently with any remaining Metal encoding.
+                // Application persistence/drains above are explicit; flush C
+                // stdio too, then let the OS reclaim process-owned resources.
+                fflush(nil)
+                Darwin._exit(exitCode)
             }
         }
         source.resume()

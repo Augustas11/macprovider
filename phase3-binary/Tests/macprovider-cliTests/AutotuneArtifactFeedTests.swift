@@ -328,9 +328,12 @@ final class AutotuneArtifactFeedTests: XCTestCase {
         // The production caller: every recommend/models transcript loads the
         // artifact feed for the selected candidate release alongside the three
         // v0.1 feeds, so its warnings reach the same warning sets.
+        let now = try AutotuneStaticInputs.decodeCandidateCatalog(
+            Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)
+        ).generatedAt.addingTimeInterval(3_600)
         let inputs = AutotuneStaticInputs(
             fetch: { _ in throw URLError(.cannotConnectToHost) },
-            now: { Self.date("2026-10-18T00:00:00Z") }
+            now: { now }
         )
         let loaded = await inputs.loadRecommendationInputs()
         XCTAssertTrue(loaded.demand.usedFallback)

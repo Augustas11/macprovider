@@ -601,10 +601,13 @@ final class Build1LaneAStagingInputTests: XCTestCase {
         // artifact: the strict feed decoder refuses it, so no measured
         // artifact-bound staging input exists and nothing downstream is read.
         let fixture = try Self.signedLaneAFeed(laneASizeBytes: NSNull())
+        let now = try AutotuneStaticInputs.decodeCandidateCatalog(
+            Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)
+        ).generatedAt.addingTimeInterval(3_600)
         let inputs = AutotuneStaticInputs(
             fetch: { url in url.path.hasSuffix(".sig") ? fixture.sidecarBytes : fixture.feedBytes },
             trustedPublicKeys: fixture.trustedPublicKeys,
-            now: { ISO8601DateFormatter.autotuneInternet.date(from: "2026-09-19T01:00:00Z")! }
+            now: { now }
         )
         let config = try writeConfig(durableRoot: try tempDir().appendingPathComponent("durable", isDirectory: true))
 
@@ -632,13 +635,13 @@ final class Build1LaneAStagingInputTests: XCTestCase {
 
     func testCommandVerifiesMeasuredSignedFeedThroughRealValidator() async throws {
         let fixture = try Self.signedLaneAFeed(laneASizeBytes: 2_345_678_901)
+        let now = try AutotuneStaticInputs.decodeCandidateCatalog(
+            Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)
+        ).generatedAt.addingTimeInterval(3_600)
         let inputs = AutotuneStaticInputs(
             fetch: { url in url.path.hasSuffix(".sig") ? fixture.sidecarBytes : fixture.feedBytes },
             trustedPublicKeys: fixture.trustedPublicKeys,
-            // The baked catalog was regenerated on 2026-10-17. Keep the
-            // validator clock after that authority timestamp while remaining
-            // inside its freshness window.
-            now: { ISO8601DateFormatter.autotuneInternet.date(from: "2026-10-18T00:00:00Z")! }
+            now: { now }
         )
         let durable = try tempDir().appendingPathComponent("durable", isDirectory: true)
         let config = try writeConfig(durableRoot: durable)

@@ -1,11 +1,16 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.26
+Version: v0.3.27
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.27 (2026-10-21, FR-CB10 target-hardware evidence):**
+Qualification-campaign evidence may come from the operator-designated target
+hardware under SPEC-023 R025 v0.22.29. Legacy provenance fields retain their
+names and bind the actual qualifying build and immutable record, not an
+unmeasured signed release. Runtime correctness and admission gates are unchanged.
 **Change log v0.3.26 (2026-10-21, FR-CB2 Qwen prompt admission and grouping):**
 FR-CB2 and AC-16: a backend bound to the validated `qwen3_5_mtp_v1`
 admission adapter may include native-MTP prompt rows in a shared ragged
@@ -1265,7 +1270,8 @@ release evidence the acceptance was measured on: model key, model id, model
 SHA-256, tokenizer SHA-256, chat-template SHA-256, exact hardware class, cache
 class, KV dtype, MoE requirement, `cached_turns_accepted`, Metal library
 SHA-256, paged-KV kernel identifier, rollout mode, feed expiry, tuple digest,
-and immutable Studio-campaign evidence digests. The entry also records the
+and immutable qualification-campaign evidence digests (the legacy
+`studio_campaign_sha256` field follows SPEC-023 R025). The entry also records the
 provider CLI version, live executable cdhash, and package digest that
 qualified it; these are provenance (v0.3.9) and MUST NOT be compared with the
 running CLI. Under the current runtime descriptor

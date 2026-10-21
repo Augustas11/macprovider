@@ -618,6 +618,8 @@ actor CoordinatorClient {
     // If the heartbeat task itself stalls (App Nap, cooperative-task
     // starvation), the watchdog fires watchdogExitHook so launchd respawns.
     private var heartbeatWatchdogTask: Task<Void, Never>?
+    /// Once a signal owns process exit, no liveness recovery may replace it.
+    private var signalShutdownStarted = false
     /// SPEC-047-R003(iv) hold: polls readiness for an accepted session whose
     /// buyer serving the coordinator is holding on a pending BYOM admission.
     private var admissionPendingReadinessWatchTask: Task<Void, Never>?
@@ -1427,7 +1429,7 @@ actor CoordinatorClient {
     }
 
     private func startReconnectTask() {
-        guard runTask == nil else { return }
+        guard !signalShutdownStarted, runTask == nil else { return }
         runTask = Task { [weak self] in
             await self?.runReconnectLoop()
         }
@@ -1448,7 +1450,7 @@ actor CoordinatorClient {
         var backoffNanoseconds = reconnectInitialBackoffNanoseconds
         var failedAttempts = 0
         var consecutiveAuthProtocolFailures = 0
-        while !Task.isCancelled {
+        while !Task.isCancelled && !signalShutdownStarted {
             if !operatorPaused {
                 _ = try? recordLifecycleTransition(
                     to: .locallyReadyConnecting,
@@ -1503,6 +1505,7 @@ actor CoordinatorClient {
                 consecutiveAuthProtocolFailures = 0
             } catch {
                 await cleanupConnection()
+                guard !signalShutdownStarted else { return }
                 // #767: a 4004 version_unsupported close is TERMINAL. Retrying
                 // cannot succeed until the binary is upgraded, and a below-floor
                 // fleet retrying on backoff is exactly the hammering the floor
@@ -1553,6 +1556,7 @@ actor CoordinatorClient {
                     consecutiveAuthProtocolFailures = 0
                 }
                 if consecutiveAuthProtocolFailures >= 3 {
+                    guard !signalShutdownStarted else { return }
                     let lastError = Self.sanitizedDiagnosticText(String(describing: error))
                     let reason = "coordinator auth handshake failed \(consecutiveAuthProtocolFailures) consecutive times before session acceptance; last_error=\(lastError)"
                     FileHandle.standardError.write(Data("FATAL coordinator auth watchdog: \(reason)\n".utf8))
@@ -1878,12 +1882,14 @@ actor CoordinatorClient {
     }
 
     private func connectAndRunOnce() async throws {
+        guard !signalShutdownStarted else { throw CancellationError() }
         if catalogReleaseID != nil, warmSwapEnabled {
             let runtimeSnapshot = await modelRuntime.currentSnapshot()
             if await catalogRuntimeMatches(runtimeSnapshot) == false {
                 catalogWarmSwapInvalidated = true
             }
         }
+        guard !signalShutdownStarted else { throw CancellationError() }
         guard !catalogWarmSwapInvalidated else {
             throw CoordinatorAuthError.invalidMessage(
                 "catalog model changed without a model-specific signed row; restart with a fresh catalog recommendation"
@@ -3896,6 +3902,10 @@ actor CoordinatorClient {
     // and verify it fires the exit hook when last-success is stale.
     func startHeartbeatWatchdogForTest(intervalSeconds: Int) {
         startHeartbeatWatchdog(intervalSeconds: intervalSeconds)
+    }
+
+    func evaluateHeartbeatWatchdogForTest(intervalSeconds: Int) {
+        evaluateHeartbeatWatchdog(tolerance: Self.heartbeatWatchdogToleranceNanoseconds(intervalSeconds: intervalSeconds))
     }
 
     func setAdmissionPendingHoldActiveForTest(_ active: Bool) {
@@ -6038,6 +6048,7 @@ actor CoordinatorClient {
     // still far below coordinator inactivity while exceeding the send bound.
     private static let heartbeatWatchdogMinimumToleranceSeconds: Int = 15
     private func startHeartbeat(intervalSeconds: Int) {
+        guard !signalShutdownStarted else { return }
         heartbeatTask?.cancel()
         heartbeatWatchdogTask?.cancel()
         let tickSeconds = max(1, min(intervalSeconds, Self.keepaliveTickCeilingSeconds))
@@ -6093,39 +6104,35 @@ actor CoordinatorClient {
     // misconfiguration and avoids integer-overflow math at the
     // extremes (Int.max heartbeat_interval_s no longer traps).
     private func startHeartbeatWatchdog(intervalSeconds: Int) {
+        guard !signalShutdownStarted else { return }
         let tickSeconds = max(1, min(intervalSeconds, Self.keepaliveTickCeilingSeconds))
         let tolerance = Self.heartbeatWatchdogToleranceNanoseconds(intervalSeconds: intervalSeconds)
         // Check at a sub-tick cadence so an overrun is detected within
         // one extra tick rather than after the next full tick boundary.
         let checkNanoseconds = UInt64(tickSeconds) * 500_000_000
-        let hook = watchdogExitHook
         heartbeatWatchdogTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: checkNanoseconds)
                 if Task.isCancelled { return }
                 guard let self else { return }
-                let elapsed = await self.nanosecondsSinceLastHeartbeatSuccess()
-                // Issue #189 R2 security LOW: recheck cancellation
-                // AFTER the actor hop. A drain entry that lands
-                // between the actor await and the hook invocation
-                // could otherwise lose the race to Darwin.exit(1).
-                if Task.isCancelled { return }
-                if elapsed >= tolerance {
-                    let holdActive = await self.admissionPendingHoldActive
-                    if holdActive {
-                        // A pending BYOM admission can stall heartbeats
-                        // (synthetic probe, replacement hello) without the
-                        // process being wedged. Reconnect; do not Darwin.exit
-                        // — the physical admission-journey rig has no
-                        // launchd KeepAlive.
-                        await self.closeWebSocketAfterKeepaliveFailure()
-                        return
-                    }
-                    hook("heartbeat liveness exceeded tolerance: \(elapsed / 1_000_000_000)s since last success >= \(tolerance / 1_000_000_000)s")
-                    return
-                }
+                if await self.evaluateHeartbeatWatchdog(tolerance: tolerance) { return }
             }
         }
+    }
+
+    /// Check and act in one actor turn: shutdown cannot claim exit between
+    /// checking the latch and invoking the hook (or reconnecting a held session).
+    @discardableResult
+    private func evaluateHeartbeatWatchdog(tolerance: UInt64) -> Bool {
+        guard !Task.isCancelled, !signalShutdownStarted else { return true }
+        let elapsed = nanosecondsSinceLastHeartbeatSuccess()
+        guard elapsed >= tolerance else { return false }
+        if admissionPendingHoldActive {
+            closeWebSocketAfterKeepaliveFailure()
+        } else {
+            watchdogExitHook("heartbeat liveness exceeded tolerance: \(elapsed / 1_000_000_000)s since last success >= \(tolerance / 1_000_000_000)s")
+        }
+        return true
     }
 
     private func recordHeartbeatSuccess() {
@@ -6203,6 +6210,7 @@ actor CoordinatorClient {
     }
 
     private func closeWebSocketAfterKeepaliveFailure() {
+        guard !signalShutdownStarted else { return }
         webSocket?.cancel(with: .goingAway, reason: nil)
     }
 
@@ -6370,9 +6378,21 @@ actor CoordinatorClient {
         return .accepted
     }
 
-    func drainAndExit(reason: String, exitCode: Int32 = 0) async {
+    /// Claim exit before any potentially long self-check cleanup. Keep the
+    /// accepted socket for the later drain, but prevent recovery from replacing
+    /// the signal's exit code or restarting liveness tasks across suspension.
+    func beginSignalShutdown() {
+        signalShutdownStarted = true
+        heartbeatTask?.cancel()
+        heartbeatTask = nil
+        heartbeatWatchdogTask?.cancel()
+        heartbeatWatchdogTask = nil
+    }
+
+    func drainForExit(reason: String) async {
         // Used by SIGTERM signal handler — drain in-flight buyer requests,
-        // notify coordinator, then exit the whole process.
+        // notify coordinator, then return for explicit process-local cleanup.
+        // The signal handler owns exit after cold writes have drained too.
         // Issue #189 R1 security LOW: cancel the heartbeat watchdog on
         // drain entry. Otherwise a watchdog-triggered Darwin.exit(1)
         // could race the orderly drain and drop the final drain_status
@@ -6380,10 +6400,7 @@ actor CoordinatorClient {
         // R2 security LOW: also stop the heartbeat tick task here so a
         // bounded-send timeout cannot force-cancel the WS while the
         // drain_status sequence is still being emitted.
-        heartbeatTask?.cancel()
-        heartbeatTask = nil
-        heartbeatWatchdogTask?.cancel()
-        heartbeatWatchdogTask = nil
+        beginSignalShutdown()
         try? await sendStateUpdate(state: .draining, reason: reason)
         try? await sendDrainStatus(phase: "starting")
         try? await sendDrainStatus(phase: "in_progress")
@@ -6394,7 +6411,6 @@ actor CoordinatorClient {
         }
         try? await sendDrainStatus(phase: "complete")
         webSocket?.cancel(with: .goingAway, reason: nil)
-        Darwin.exit(exitCode)
     }
 
     /// Handle a coordinator-initiated drain (typically because the coordinator

@@ -1643,6 +1643,31 @@ printf 'test-buyer-token\n' > "$tmp/token"
 export BUYER_TOKEN_FILE="$tmp/token" PROBE_MODEL=test/model
 R="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_id"])' "$W/phase3-binary/catalog/autotune/release.json")"
 status_doc $CAND true
+# CB-only admission must not require absent MTP heads, but neither an unset
+# requirement nor an explicitly native proof may silently become CB-only.
+python3 - "$tmp/svc/status.json" <<'PYCBONLY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["native_mtp"].update(enabled=False, mode="unsupported")
+open(p, "w").write(json.dumps(d))
+PYCBONLY
+CATALOG_REQUIRE_NATIVE_MTP_FORWARD=false run_rc 0 "CB-only live probe accepts active CB without MTP heads" scripts/ops/catalog-activate.sh status
+if [ "$(state_of live_probe)" = done ]; then ok; else bad "CB-only live probe demanded native MTP"; fi
+run_rc 0 "default live probe preserves native requirement" scripts/ops/catalog-activate.sh status
+if [ "$(state_of live_probe)" = pending ]; then ok; else bad "default live probe lost native requirement"; fi
+CATALOG_REQUIRE_NATIVE_MTP_FORWARD=true run_rc 0 "native live probe refuses missing MTP heads" scripts/ops/catalog-activate.sh status
+if [ "$(state_of live_probe)" = pending ]; then ok; else bad "native live probe accepted CB-only runtime"; fi
+python3 - "$tmp/svc/status.json" <<'PYCBONLY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["continuous_batching"]["active"] = False
+open(p, "w").write(json.dumps(d))
+PYCBONLY
+CATALOG_REQUIRE_NATIVE_MTP_FORWARD=false run_rc 0 "CB-only live probe refuses inactive CB" scripts/ops/catalog-activate.sh status
+if [ "$(state_of live_probe)" = pending ]; then ok; else bad "CB-only live probe accepted inactive CB"; fi
+status_doc $CAND true
 mkdir -p "$tmp/state/catalog-$R"
 printf '{"step":"gateway_proof","evidence":"legacy generic proof","request_id":"ops-proof-old","mtp_forwards_delta":1,"requests_total_delta":1,"served_by_canary":true}
 ' > "$tmp/state/catalog-$R/gateway_proof.json"

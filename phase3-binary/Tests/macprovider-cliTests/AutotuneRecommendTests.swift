@@ -2784,6 +2784,7 @@ final class AutotuneRecommendTests: XCTestCase {
     }
 
     func testSignedStaticFallbackAndStaleWarnings() async throws {
+        let fetchedAt = try Self.bakedStaticGeneratedAt().addingTimeInterval(300)
         let validFetched = Data(try Self.jsonReplacingTopLevelString(
             try Self.jsonReplacingTopLevelString(
                 AutotuneStaticInputs.bakedDemandRankJSON,
@@ -2791,14 +2792,14 @@ final class AutotuneRecommendTests: XCTestCase {
                 with: "published-2026-10-18-fetched-v1"
             ),
             key: "generated_at",
-            with: "2026-10-18T00:05:00Z"
+            with: ISO8601DateFormatter.autotuneInternet.string(from: fetchedAt)
         ).utf8)
         let signature = Data(repeating: 0, count: 64).base64EncodedString()
         let sidecar = Data("{\"key_id\":\"streamvc-autotune-static-v4\",\"alg\":\"ed25519\",\"signature\":\"\(signature)\"}".utf8)
         let staleInputs = AutotuneStaticInputs(
             fetch: { url in url.path.hasSuffix(".sig") ? sidecar : validFetched },
             verifySignature: { _, _ in true },
-            now: { Self.date("2026-11-02T00:00:00Z") }
+            now: { fetchedAt.addingTimeInterval(15 * 86_400) }
         )
 
         let stale = await staleInputs.loadDemandRank()
@@ -2810,7 +2811,7 @@ final class AutotuneRecommendTests: XCTestCase {
         let fallbackInputs = AutotuneStaticInputs(
             fetch: { _ in validFetched },
             verifySignature: { _, _ in false },
-            now: { Self.date("2026-10-19T00:00:00Z") }
+            now: { fetchedAt.addingTimeInterval(3_600) }
         )
         let fallback = await fallbackInputs.loadDemandRank()
         XCTAssertTrue(fallback.usedFallback)
@@ -2818,10 +2819,11 @@ final class AutotuneRecommendTests: XCTestCase {
     }
 
     func testSignedRateCardAcceptsVerifiedLiveBytes() async throws {
+        let fetchedAt = try Self.bakedStaticGeneratedAt().addingTimeInterval(3_600)
         let payload = Data(try Self.jsonReplacingTopLevelString(
             AutotuneStaticInputs.bakedRateCardJSON,
             key: "generated_at",
-            with: "2026-10-18T03:00:00Z"
+            with: ISO8601DateFormatter.autotuneInternet.string(from: fetchedAt)
         ).utf8)
         let privateKey = Curve25519.Signing.PrivateKey()
         let keyID = "streamvc-autotune-static-v4"
@@ -2832,7 +2834,7 @@ final class AutotuneRecommendTests: XCTestCase {
         let inputs = AutotuneStaticInputs(
             fetch: { url in url.path.hasSuffix(".sig") ? sidecar : payload },
             trustedPublicKeys: keyring,
-            now: { Self.date("2026-10-18T04:00:00Z") }
+            now: { fetchedAt.addingTimeInterval(3_600) }
         )
 
         let selection = await inputs.loadRateCard()
@@ -2840,7 +2842,7 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertFalse(selection.usedFallback)
         XCTAssertEqual(selection.signerKeyID, keyID)
         XCTAssertFalse(selection.warnings.contains(.rateCardIntegrityFailure))
-        XCTAssertEqual(selection.value.generatedAt, Self.date("2026-10-18T03:00:00Z"))
+        XCTAssertEqual(selection.value.generatedAt, fetchedAt)
     }
 
     func testSignedRateCardMissingSidecarFallsBackWithIntegrityWarning() async throws {
@@ -2886,12 +2888,15 @@ final class AutotuneRecommendTests: XCTestCase {
     }
 
     func testRecommendationInputsRejectRateCardReleaseMismatch() async throws {
+        // Both fetched documents must pass freshness first, so this tests
+        // cross-feed release pairing rather than rollback rejection.
+        let fetchedAt = try Self.bakedStaticGeneratedAt().addingTimeInterval(3_600)
         let demandPayload = Data(AutotuneStaticInputs.bakedDemandRankJSON.utf8)
         let candidatePayload = Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)
         let rateCardPayload = Data(try Self.jsonReplacingTopLevelString(
             AutotuneStaticInputs.bakedRateCardJSON,
             key: "generated_at",
-            with: "2026-10-18T03:00:00Z"
+            with: ISO8601DateFormatter.autotuneInternet.string(from: fetchedAt)
         ).utf8)
         let sidecar = Data("{\"key_id\":\"streamvc-autotune-static-v4\",\"alg\":\"ed25519\",\"signature\":\"\(Data(repeating: 0, count: 64).base64EncodedString())\"}".utf8)
         let inputs = AutotuneStaticInputs(
@@ -2909,7 +2914,7 @@ final class AutotuneRecommendTests: XCTestCase {
                 }
             },
             verifySignature: { _, _ in true },
-            now: { Self.date("2026-10-18T04:00:00Z") }
+            now: { fetchedAt.addingTimeInterval(3_600) }
         )
 
         let loaded = await inputs.loadRecommendationInputs()
@@ -3173,6 +3178,7 @@ final class AutotuneRecommendTests: XCTestCase {
     }
 
     func testSignedStaticAcceptsBridgeKeyFromTrustedKeyring() async throws {
+        let now = try Self.bakedStaticGeneratedAt().addingTimeInterval(3_600)
         let payload = Data(AutotuneStaticInputs.bakedDemandRankJSON.utf8)
         let privateKey = Curve25519.Signing.PrivateKey()
         let signature = try privateKey.signature(for: payload).base64EncodedString()
@@ -3183,7 +3189,7 @@ final class AutotuneRecommendTests: XCTestCase {
         let inputs = AutotuneStaticInputs(
             fetch: { url in url.path.hasSuffix(".sig") ? sidecar : payload },
             trustedPublicKeys: keyring,
-            now: { Self.date("2026-10-18T04:00:00Z") }
+            now: { now }
         )
 
         let selection = await inputs.loadDemandRank()
@@ -3275,6 +3281,14 @@ final class AutotuneRecommendTests: XCTestCase {
             now: { Self.date("2026-07-29T10:00:00Z") }
         )
         return await inputs.loadRateCard()
+    }
+
+    private static func bakedStaticGeneratedAt() throws -> Date {
+        try [
+            AutotuneStaticInputs.decodeDemandRank(Data(AutotuneStaticInputs.bakedDemandRankJSON.utf8)).generatedAt,
+            AutotuneStaticInputs.decodeCandidateCatalog(Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)).generatedAt,
+            AutotuneStaticInputs.decodeRateCard(Data(AutotuneStaticInputs.bakedRateCardJSON.utf8)).generatedAt,
+        ].max()!
     }
 
     private static func jsonReplacingTopLevelString(_ json: String, key: String, with value: String) throws -> String {

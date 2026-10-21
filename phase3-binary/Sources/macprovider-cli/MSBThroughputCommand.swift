@@ -34,7 +34,7 @@ import MacProviderCore
 ///   * `paged` — `PagedKVSharedForwardBackend`. Uncompiled: per-step actor hop
 ///     (the 2026-09-20 0.53× path). `--compile`: lockstep window inside one
 ///     `container.perform` with `MLX.compile()` over batched contiguous KV.
-///   * `scheduler` — `ContinuousBatchScheduler.submit` over the same compiled
+///   * `scheduler` — `ContinuousBatchScheduler.submit` over the same paged
 ///     backend. Times `decodeLockstepWindow` (not prefill). Buyer CB stays off.
 ///   * `serial-parallel` — N concurrent production `generate()` streams
 ///     (MSB-05 Q1). ModelContainer serializes them; the ratio vs serial is
@@ -63,7 +63,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         discussion: """
             Measures aggregate decode TG across N concurrent rows vs both the
             same engine's single-row baseline and the production serial decode
-            path. Default engine is contiguous KVCacheSimple (compiled, one
+            path. Default engine is contiguous KVCacheSimple (uncompiled, one
             perform). Pass --engine paged, scheduler, or serial-parallel.
             --scenario msb03|msb05|parity|isolation|replay|drain|leftovers covers the
             remaining FR-CB15 leftover measurements. --scenario hybrid-window
@@ -103,9 +103,10 @@ struct MSBThroughputCommand: AsyncParsableCommand {
     @Flag(
         name: .customLong("compile"),
         inversion: .prefixedNo,
-        help: "Wrap decode in MLX.compile(). Contiguous engine and compiled paged lockstep window. Default on."
+        help: "Diagnostic only: wrap decode in MLX.compile(). Default off, matching production; captured KV cache offsets make compiled results unsuitable for qualification."
     )
-    var compile: Bool = true
+    // Match ModelRuntime's serving backend: replay cannot advance host KV offsets.
+    var compile: Bool = false
 
     @Option(
         name: .customLong("rows"),
@@ -1427,7 +1428,20 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             firstDivergenceIndex: firstDivergence,
             serialTokenSHA256: msbTokenSequenceSHA256(Array(serialA.generatedTokens.prefix(compared))),
             batchedTokenSHA256: msbTokenSequenceSHA256(Array(standaloneRows[0].tokensByRow[0].prefix(compared))),
-            pass: standaloneMatches.allSatisfy(\.match) && batchedMatches.allSatisfy { $0 }
+            rows: serialRows.enumerated().map { index, serial in
+                let standalone = standaloneRows[index].tokensByRow[0]
+                let batched = index < twoRow.tokensByRow.count ? twoRow.tokensByRow[index] : []
+                return MSBParityRowEvidence(
+                    serialTokenCount: serial.count,
+                    standaloneTokenCount: standalone.count,
+                    batchedTokenCount: batched.count,
+                    serialTokenSHA256: msbTokenSequenceSHA256(Array(serial.prefix(compared))),
+                    standaloneTokenSHA256: msbTokenSequenceSHA256(Array(standalone.prefix(compared))),
+                    batchedTokenSHA256: msbTokenSequenceSHA256(Array(batched.prefix(compared)))
+                )
+            },
+            pass: batchedMatches.count == serialRows.count
+                && standaloneMatches.allSatisfy(\.match) && batchedMatches.allSatisfy { $0 }
         )
         try emitLeftoverReport(
             modelID: modelID,
