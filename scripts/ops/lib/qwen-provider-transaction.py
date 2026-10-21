@@ -16,6 +16,7 @@ import fcntl
 import hashlib
 import json
 import os
+import plistlib
 import re
 import stat
 import subprocess
@@ -33,6 +34,7 @@ SAFE_VALUE = re.compile(r"^[A-Za-z0-9._/@+-]+$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 HEX_CODE = re.compile(r"^[0-9a-f]{40,64}$")
 SEMVER = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+PROVIDER_LABEL = "live.malibu.provider"
 
 RECOMMENDATION_OWNED = (
     "model",
@@ -350,6 +352,86 @@ def run_validator(validator: Path, candidate: Path) -> None:
     )
     if result.returncode != 0:
         raise Refusal("installed CLI rejected candidate config")
+
+
+def restart_service(args: argparse.Namespace) -> dict[str, Any]:
+    """Restart an identity-checked loaded job even when it has no current PID.
+
+    The ops caller must first verify the published signed release and hold the
+    live-ops lock. This is not a release-verification or readiness shortcut.
+    """
+    config = absolute_path(args.config)
+    binary = absolute_path(args.validator)
+    for path in (config, binary):
+        info = safe_regular(path)
+        if info.st_mode & 0o022:
+            raise Refusal("provider executable/config is group or world writable")
+    expected_binary = str(binary.resolve(strict=True))
+    expected_config = str(config.resolve(strict=True))
+    home = Path.home().resolve(strict=True)
+    directory = home / "Library" / "LaunchAgents"
+    for parent in (home, home / "Library", directory):
+        info = parent.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_mode & 0o022):
+            raise Refusal("unsafe provider LaunchAgent directory")
+    plist = directory / f"{PROVIDER_LABEL}.plist"
+    safe_regular(plist)
+    descriptor = os.open(plist, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or info.st_uid != os.getuid() or info.st_mode & 0o022
+                or info.st_size > 64 * 1024):
+            raise Refusal("unsafe provider LaunchAgent plist")
+        try:
+            document = plistlib.loads(stream.read(64 * 1024 + 1))
+        except Exception as exc:
+            raise Refusal("invalid provider LaunchAgent plist") from exc
+
+    def bound_path(value: Any, expected: str) -> bool:
+        return (isinstance(value, str) and os.path.isabs(value)
+                and os.path.realpath(value) == expected)
+
+    def bound_arguments(arguments: Any) -> bool:
+        return (isinstance(arguments, list) and len(arguments) == 4
+                and bound_path(arguments[0], expected_binary)
+                and arguments[1:3] == ["serve", "--config"]
+                and bound_path(arguments[3], expected_config))
+
+    if (not isinstance(document, dict) or document.get("Label") != PROVIDER_LABEL
+            or not bound_arguments(document.get("ProgramArguments"))
+            or ("Program" in document
+                and not bound_path(document["Program"], expected_binary))):
+        raise Refusal("provider LaunchAgent executable/config mismatch")
+    target = f"gui/{os.getuid()}/{PROVIDER_LABEL}"
+    launch = subprocess.run(
+        ["/bin/launchctl", "print", target], stdin=subprocess.DEVNULL,
+        capture_output=True, text=True, timeout=15, check=False,
+    )
+    if launch.returncode != 0:
+        raise Refusal("provider LaunchAgent is not loaded or cannot be inspected")
+    # launchctl print uses one tab for job fields and two for arguments.
+    # Match only these top-level fields: environment values are not identity.
+    programs = re.findall(r"(?m)^\tprogram = ([^\n]+)$", launch.stdout)
+    paths = re.findall(r"(?m)^\tpath = ([^\n]+)$", launch.stdout)
+    argument_blocks = re.findall(
+        r"(?m)^\targuments = \{\n((?:\t\t[^\n]*\n)*)\t\}$", launch.stdout,
+    )
+    arguments = ([line[2:] for line in argument_blocks[0].splitlines()]
+                 if len(argument_blocks) == 1 else None)
+    if (len(programs) != 1 or not bound_path(programs[0], expected_binary)
+            or len(paths) != 1 or not bound_path(paths[0], str(plist))
+            or not bound_arguments(arguments)):
+        raise Refusal("loaded provider LaunchAgent executable/config mismatch")
+    run_validator(binary, config)
+    restarted = subprocess.run(
+        ["/bin/launchctl", "kickstart", "-k", target], stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=30, check=False,
+    )
+    if restarted.returncode != 0:
+        raise Refusal("provider LaunchAgent kickstart failed")
+    return {"status": "restart_requested", "service": target}
 
 
 def validate_then_replace(config: Path, validator: Path, candidate: bytes) -> str:
@@ -800,6 +882,10 @@ def parser() -> argparse.ArgumentParser:
     restore_parser.add_argument("--journal", required=True)
     restore_parser.add_argument("--validator", required=True)
     restore_parser.set_defaults(run=restore)
+    restart_parser = commands.add_parser("restart-service")
+    restart_parser.add_argument("--config", required=True)
+    restart_parser.add_argument("--validator", required=True)
+    restart_parser.set_defaults(run=restart_service)
     finish_parser = commands.add_parser("finish-restore")
     finish_parser.add_argument("--config", required=True)
     finish_parser.add_argument("--journal", required=True)

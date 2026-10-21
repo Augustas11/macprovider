@@ -178,6 +178,18 @@ bindings. `status` always selects restoration first when that journal is
 unfinished, even if the provider is stopped or the public market endpoints are
 unavailable. No expiry or automatic feature withdrawal is part of the flow.
 
+Recovery can kickstart a loaded LaunchAgent even when it has no current PID,
+after checking its installed plist and loaded executable/config identity.
+An absent or mismatched job is refused. Serving readiness is checked separately;
+a successful kickstart alone does not mark restoration complete.
+
+Before each client run, the controller binds the incumbent provider's public
+receipt-key fingerprint and the exact qualified artifact to the coordinator's
+active attestation catalog. Every verified terminal receipt must match those
+identities, not merely the model label. A different provider cannot satisfy
+same-provider acceptance. Credential echoes are rejected before evidence is
+retained, including failure evidence.
+
 Configure the following untracked values, then use the standard `status`,
 `next`, `next --run` sequence:
 

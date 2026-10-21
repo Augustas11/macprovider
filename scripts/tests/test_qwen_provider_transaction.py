@@ -1,11 +1,14 @@
 import importlib.util
 import json
 import os
+import plistlib
 import stat
+import subprocess
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -374,6 +377,135 @@ class QwenProviderTransactionTests(unittest.TestCase):
         self.assertEqual(state["status"], "restored")
         self.assertTrue(state["scratch_cleanup_required"])
         self.assertTrue(state["restore_required"])
+
+class RestartServiceTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.home = Path(self.temporary.name).resolve()
+        self.directory = self.home / "Library" / "LaunchAgents"
+        self.directory.mkdir(parents=True, mode=0o700)
+        self.binary = self.home / "macprovider-cli"
+        self.binary.write_text("reviewed executable fixture\n")
+        self.binary.chmod(0o700)
+        self.config = self.home / "config.yaml"
+        self.config.write_text(BASE_CONFIG)
+        self.config.chmod(0o600)
+        self.plist = self.directory / "live.malibu.provider.plist"
+        self.arguments = [str(self.binary), "serve", "--config", str(self.config)]
+        self.document = {"Label": transaction.PROVIDER_LABEL,
+                         "ProgramArguments": self.arguments}
+        self.write_plist()
+        self.args = transaction.parser().parse_args([
+            "restart-service", "--config", str(self.config),
+            "--validator", str(self.binary),
+        ])
+        self.target = f"gui/{os.getuid()}/{transaction.PROVIDER_LABEL}"
+        self.addCleanup(mock.patch.stopall)
+        mock.patch.object(Path, "home", return_value=self.home).start()
+        self.run = mock.patch.object(transaction.subprocess, "run").start()
+        self.run.side_effect = self.command
+        self.loaded = True
+        self.pid = 1234
+        self.loaded_binary = str(self.binary)
+        self.loaded_program = str(self.binary)
+        self.loaded_config = str(self.config)
+        self.loaded_plist = str(self.plist)
+        self.kickstart_code = 0
+        self.validator_code = 0
+
+    def write_plist(self):
+        self.plist.write_bytes(plistlib.dumps(self.document))
+        self.plist.chmod(0o600)
+
+    def command(self, argv, **kwargs):
+        if argv[:2] == ["/bin/launchctl", "print"]:
+            arguments = [self.loaded_binary, "serve", "--config", self.loaded_config]
+            output = (f"{self.target} = {{\n\tpath = {self.loaded_plist}\n"
+                      f"\tprogram = {self.loaded_program}\n\targuments = {{\n"
+                      + "".join(f"\t\t{value}\n" for value in arguments) + "\t}\n")
+            if self.pid is not None:
+                output += f"\tpid = {self.pid}\n"
+            return subprocess.CompletedProcess(argv, 0 if self.loaded else 113,
+                                               output + "}\n", "")
+        if argv[:2] == ["/bin/launchctl", "kickstart"]:
+            return subprocess.CompletedProcess(argv, self.kickstart_code, "", "")
+        self.assertEqual(argv, [str(self.binary), "models", "list", "--json",
+                                "--config", str(self.config)])
+        return subprocess.CompletedProcess(argv, self.validator_code, "", "")
+
+    def assert_no_kickstart(self):
+        self.assertFalse(any(call.args[0][1] == "kickstart"
+                             for call in self.run.call_args_list))
+
+    def test_running_and_stopped_loaded_jobs_are_restarted(self):
+        for pid in (1234, None):
+            with self.subTest(pid=pid):
+                self.pid = pid
+                self.run.reset_mock()
+                result = self.args.run(self.args)
+                self.assertEqual(result["status"], "restart_requested")
+                self.assertEqual(self.run.call_args.args[0],
+                                 ["/bin/launchctl", "kickstart", "-k", self.target])
+
+    def test_loaded_job_different_binary_or_config_is_refused(self):
+        for attribute in ("loaded_binary", "loaded_program", "loaded_config", "loaded_plist"):
+            with self.subTest(attribute=attribute):
+                original = getattr(self, attribute)
+                setattr(self, attribute, "/different/path")
+                with self.assertRaisesRegex(transaction.Refusal, "loaded provider.*mismatch"):
+                    transaction.restart_service(self.args)
+                self.assert_no_kickstart()
+                setattr(self, attribute, original)
+
+    def test_plist_different_program_or_arguments_are_refused(self):
+        for changes in ({"Program": "/wrong/binary"},
+                        {"ProgramArguments": ["/wrong/binary", *self.arguments[1:]]},
+                        {"ProgramArguments": [*self.arguments[:3], "/wrong/config"]}):
+            with self.subTest(changes=changes):
+                self.document = {"Label": transaction.PROVIDER_LABEL,
+                                 "ProgramArguments": self.arguments, **changes}
+                self.write_plist()
+                with self.assertRaisesRegex(transaction.Refusal, "LaunchAgent.*mismatch"):
+                    transaction.restart_service(self.args)
+                self.run.assert_not_called()
+
+    def test_missing_loaded_job_is_refused_without_bootstrap(self):
+        self.loaded = False
+        with self.assertRaisesRegex(transaction.Refusal, "not loaded"):
+            transaction.restart_service(self.args)
+        self.assertEqual(self.run.call_count, 1)
+
+    def test_missing_or_symlinked_plist_is_refused(self):
+        self.plist.unlink()
+        with self.assertRaisesRegex(transaction.Refusal, "missing file"):
+            transaction.restart_service(self.args)
+        self.plist.symlink_to(self.config)
+        with self.assertRaisesRegex(transaction.Refusal, "regular file"):
+            transaction.restart_service(self.args)
+        self.run.assert_not_called()
+
+    def test_writable_plist_or_directory_is_refused(self):
+        for path in (self.plist, self.directory):
+            with self.subTest(path=path):
+                previous = path.stat().st_mode
+                path.chmod(previous | 0o020)
+                with self.assertRaisesRegex(transaction.Refusal, "unsafe provider LaunchAgent"):
+                    transaction.restart_service(self.args)
+                self.run.assert_not_called()
+                path.chmod(previous)
+
+    def test_kickstart_failure_is_not_reported_as_restart(self):
+        self.kickstart_code = 5
+        with self.assertRaisesRegex(transaction.Refusal, "kickstart failed"):
+            transaction.restart_service(self.args)
+
+    def test_invalid_config_does_not_restart_job(self):
+        self.validator_code = 9
+        with self.assertRaisesRegex(transaction.Refusal, "rejected candidate config"):
+            transaction.restart_service(self.args)
+        self.assert_no_kickstart()
+
 
 if __name__ == "__main__":
     unittest.main()

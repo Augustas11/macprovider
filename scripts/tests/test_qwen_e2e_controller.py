@@ -1,5 +1,7 @@
 """Offline controller recovery tests; no SSH, provider or credential access."""
 
+import base64
+import hashlib
 import json
 import os
 import re
@@ -109,8 +111,8 @@ run_restore
         return self.run_shell(
             ["restore_provider"],
             f"""
-studio_helper() {{ trace "$1"; [ "$1" != restore ] || return {config_rc}; }}
-studio_command() {{ trace restart; return {restart_rc}; }}
+studio_helper() {{ trace "$1"; case "$1" in restore) return {config_rc};; restart-service) return {restart_rc};; esac; }}
+studio_command() {{ trace forbidden_cli_restart; return 99; }}
 poll_ready() {{ trace ready; return {ready_rc}; }}
 result=0
 # EXIT cleanup calls recovery in a conditional with errexit disabled.
@@ -123,22 +125,57 @@ exit "$result"
     def test_restore_finishes_only_after_restart_and_readiness(self):
         result, trace = self.restore_case()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(trace, ["restore", "restart", "ready", "finish-restore"])
+        self.assertEqual(trace, ["restore", "restart-service", "ready", "finish-restore"])
 
     def test_failed_restart_cannot_mark_service_restored(self):
         result, trace = self.restore_case(restart_rc=23)
         self.assertEqual(result.returncode, 23, result.stderr)
-        self.assertEqual(trace, ["restore", "restart"])
+        self.assertEqual(trace, ["restore", "restart-service"])
 
     def test_failed_readiness_cannot_mark_service_restored(self):
         result, trace = self.restore_case(ready_rc=24)
         self.assertEqual(result.returncode, 24, result.stderr)
-        self.assertEqual(trace, ["restore", "restart", "ready"])
+        self.assertEqual(trace, ["restore", "restart-service", "ready"])
 
     def test_failed_config_restore_cannot_restart_or_finish(self):
         result, trace = self.restore_case(config_rc=22)
         self.assertEqual(result.returncode, 22, result.stderr)
         self.assertEqual(trace, ["restore"])
+
+    def receipt_binding_case(self, provider="studio", catalog_hash="a" * 64):
+        key = {"provider_id": provider, "receipt_pubkey": base64.b64encode(b"p" * 32).decode()}
+        catalog = {"catalog_id": "signed-catalog", "models": [{"model_id": "artifact", "sha256": catalog_hash}]}
+        market = {"target_artifacts": {"alias": {"model_id": "artifact", "sha256": "a" * 64}}}
+        return self.run_shell(
+            ["fetch_receipt_binding"],
+            """
+HB_PROVIDER=studio
+coordinator_url() { printf 'https://coordinator.example'; }
+http_get() {
+  case "$1" in
+    https://coordinator.example/v1/receipt-keys/studio) cp "$OPS_TMP_DIR/key.json" "$2";;
+    https://coordinator.example/catalog/current) cp "$OPS_TMP_DIR/catalog.json" "$2";;
+    *) return 99;;
+  esac
+  printf 200
+}
+fetch_receipt_binding alias
+cat "$OPS_TMP_DIR/receipt-binding.json"
+""",
+            files={"key.json": json.dumps(key), "catalog.json": json.dumps(catalog), "market.json": json.dumps(market)},
+        )[0]
+
+    def test_receipt_binding_uses_bound_provider_and_qualified_artifact(self):
+        result = self.receipt_binding_case()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {
+            "provider_key_fingerprint": "ed25519-sha256:" + hashlib.sha256(b"p" * 32).hexdigest(),
+            "model_hash": "a" * 64, "catalog_id": "signed-catalog",
+        })
+
+    def test_receipt_binding_rejects_other_provider_or_catalog_artifact(self):
+        self.assertNotEqual(self.receipt_binding_case(provider="other").returncode, 0)
+        self.assertNotEqual(self.receipt_binding_case(catalog_hash="b" * 64).returncode, 0)
 
     def test_failed_host_check_stops_even_when_caller_tests_return_code(self):
         result, trace = self.run_shell(

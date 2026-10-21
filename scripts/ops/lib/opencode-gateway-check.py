@@ -84,6 +84,20 @@ def strict_json(data: bytes | str) -> Any:
         raise CheckError("invalid_json") from exc
 
 
+def _guard_credentials(value: Any, *credentials: str) -> None:
+    """Reject credential-bearing metadata before retention or evidence output."""
+    if isinstance(value, str):
+        if any(credential and credential in value for credential in credentials):
+            raise CheckError("credential_echo")
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            _guard_credentials(key, *credentials)
+            _guard_credentials(item, *credentials)
+    elif isinstance(value, list):
+        for item in value:
+            _guard_credentials(item, *credentials)
+
+
 def _usage(value: Any) -> dict[str, int] | None:
     if not isinstance(value, dict):
         return None
@@ -409,14 +423,13 @@ class GatewayProxyHandler(http.server.BaseHTTPRequestHandler):
             )
             if response_metadata.usage is None:
                 raise CheckError("response_usage_missing")
-            record.update({"status": response_metadata.status, "usage": response_metadata.usage,
+            candidate = {**record, "status": response_metadata.status, "usage": response_metadata.usage,
                            "tool_calls": response_metadata.tool_calls,
                            "tool_results": request_metadata["tool_results"],
                            "output_budget": request_metadata["output_budget"],
-                           "tool_choice_auto": request_metadata["tool_choice_auto"]})
-            encoded_record = json.dumps(record, sort_keys=True, separators=(",", ":"))
-            if state.key in encoded_record or state.proxy_token in encoded_record:
-                raise CheckError("credential_echo")
+                           "tool_choice_auto": request_metadata["tool_choice_auto"]}
+            _guard_credentials(candidate, state.key, state.proxy_token)
+            record.update(candidate)
             self.send_response(response_status)
             for name, value in response_headers:
                 if name.lower() not in {"authorization", "connection", "content-length", "transfer-encoding"}:
@@ -507,7 +520,8 @@ def validate_models(body: bytes, status: int, model: str) -> int:
 
 
 def validate_receipt(
-    body: bytes, status: int, request_id: str, model: str | None = None
+    body: bytes, status: int, request_id: str, model: str, *,
+    expected_provider_key_fingerprint: str, expected_model_hash: str, expected_catalog_id: str,
 ) -> dict[str, Any] | None:
     """Return minimal terminal metadata, or None while settlement is pending."""
     if status == 404:
@@ -525,22 +539,38 @@ def validate_receipt(
     if not isinstance(attempts, list):
         raise CheckError("receipt_shape")
     has_closed_negative = False
+    verified = None
     for attempt in attempts:
         if not isinstance(attempt, dict) or type(attempt.get("attempt_n")) is not int or attempt["attempt_n"] < 1:
             raise CheckError("receipt_attempt_shape")
         if attempt.get("closed") is True:
             if (attempt.get("receipt_result") == "valid"
                     and attempt.get("settlement_outcome") == "verified"):
-                if model is not None and attempt.get("model_id") != model:
-                    raise CheckError("receipt_model_mismatch")
-                return {"request_id": request_id, "attempt_n": attempt["attempt_n"], "status": "verified"}
+                for name, expected, code in (
+                    ("model_id", model, "receipt_model_mismatch"),
+                    ("provider_receipt_key_fingerprint", expected_provider_key_fingerprint,
+                     "receipt_provider_mismatch"),
+                    ("model_hash", expected_model_hash, "receipt_model_hash_mismatch"),
+                    ("catalog_id", expected_catalog_id, "receipt_catalog_mismatch"),
+                ):
+                    if not expected or attempt.get(name) != expected:
+                        raise CheckError(code)
+                if verified is None:
+                    verified = {"request_id": request_id, "attempt_n": attempt["attempt_n"],
+                                "status": "verified"}
+                continue
             has_closed_negative = True
+    if verified is not None:
+        return verified
     if has_closed_negative:
         raise CheckError("receipt_not_verified")
     return None
 
 
-def poll_receipt(request_id: str, key: str, model: str, timeout_seconds: float = 30.0) -> dict[str, Any]:
+def poll_receipt(
+    request_id: str, key: str, model: str, *, expected_provider_key_fingerprint: str,
+    expected_model_hash: str, expected_catalog_id: str, timeout_seconds: float = 30.0,
+) -> dict[str, Any]:
     expected_artifact_id = MODEL_BINDINGS[model]
     deadline = time.monotonic() + timeout_seconds
     while True:
@@ -557,7 +587,11 @@ def poll_receipt(request_id: str, key: str, model: str, timeout_seconds: float =
             if exc.code == "upstream_transport" and time.monotonic() >= deadline:
                 raise CheckError("receipt_pending_timeout") from exc
             raise
-        result = validate_receipt(body, status, request_id, expected_artifact_id)
+        result = validate_receipt(
+            body, status, request_id, expected_artifact_id,
+            expected_provider_key_fingerprint=expected_provider_key_fingerprint,
+            expected_model_hash=expected_model_hash, expected_catalog_id=expected_catalog_id,
+        )
         if result is not None:
             return result
         if time.monotonic() >= deadline:
@@ -675,14 +709,21 @@ def _bounded_client_process(command: list[str], cwd: Path, env: dict[str, str]) 
     return process.returncode, bytes(output)
 
 
-def _failure_evidence(state: RecorderState, key: str, model: str) -> dict[str, Any]:
+def _failure_evidence(
+    state: RecorderState, key: str, model: str, *, expected_provider_key_fingerprint: str,
+    expected_model_hash: str, expected_catalog_id: str,
+) -> dict[str, Any]:
     with state.lock:
         requests = list(state.requests)
     receipts: list[dict[str, Any]] = []
     successful_ids = (request["id"] for request in requests if request["status"] == 200)
     for request_id in dict.fromkeys(successful_ids):
         try:
-            receipts.append(poll_receipt(request_id, key, model, timeout_seconds=5.0))
+            receipts.append(poll_receipt(
+                request_id, key, model, timeout_seconds=5.0,
+                expected_provider_key_fingerprint=expected_provider_key_fingerprint,
+                expected_model_hash=expected_model_hash, expected_catalog_id=expected_catalog_id,
+            ))
         except CheckError as exc:
             status = "pending" if exc.code == "receipt_pending_timeout" else "not_verified"
             if exc.code in {"receipt_status", "upstream_transport", "response_too_large"}:
@@ -693,10 +734,17 @@ def _failure_evidence(state: RecorderState, key: str, model: str) -> dict[str, A
         receipt_status = "verified"
     elif any(row["status"] == "not_verified" for row in receipts):
         receipt_status = "failed"
-    return {"accepted": False,
+    evidence = {"accepted": False,
             "model": {"gateway_id": model, "qualified_artifact_id": MODEL_BINDINGS[model]},
             "requests": requests,
             "receipt_validation": {"status": receipt_status, "receipts": receipts}}
+    try:
+        _guard_credentials(evidence, key, state.proxy_token)
+    except CheckError:
+        # Discard contaminated evidence even if an earlier retention guard regresses.
+        return {"accepted": False,
+                "receipt_validation": {"status": "pending", "receipts": []}}
+    return evidence
 
 
 def _config(model: str, context: int, base_url: str) -> bytes:
@@ -713,6 +761,11 @@ def _config(model: str, context: int, base_url: str) -> bytes:
 
 
 def _run(args: argparse.Namespace) -> dict[str, Any]:
+    receipt_binding = {
+        "expected_provider_key_fingerprint": args.expected_provider_key_fingerprint,
+        "expected_model_hash": args.expected_model_hash,
+        "expected_catalog_id": args.expected_catalog_id,
+    }
     binary = Path(args.opencode)
     if not binary.is_absolute() or not binary.is_file() or not os.access(binary, os.X_OK):
         raise CheckError("client_path")
@@ -774,8 +827,8 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
                 raise CheckError("tool_call_linkage")
             receipts = []
             for request_id in dict.fromkeys(request["id"] for request in requests):
-                receipts.append(poll_receipt(request_id, key, args.model))
-            return {"schema_version": "macprovider.opencode_gateway_check.v1", "status": "pass",
+                receipts.append(poll_receipt(request_id, key, args.model, **receipt_binding))
+            result = {"schema_version": "macprovider.opencode_gateway_check.v1", "status": "pass",
                     "accepted": True,
                     "client": {"name": "opencode", "version": CLIENT_VERSION},
                     "model": {"gateway_id": args.model,
@@ -783,8 +836,10 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
                               "context_tokens": context}, "requests": requests,
                     "opencode": event_metadata,
                     "receipt_validation": {"status": "verified", "receipts": receipts}}
+            _guard_credentials(result, key, state.proxy_token)
+            return result
         except CheckError as exc:
-            exc.evidence = _failure_evidence(state, key, args.model)
+            exc.evidence = _failure_evidence(state, key, args.model, **receipt_binding)
             raise
         finally:
             proxy.shutdown()
@@ -798,6 +853,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--opencode", required=True, help="absolute OpenCode 1.17.9 executable")
     parser.add_argument("--model", required=True, choices=MODELS)
+    parser.add_argument("--expected-provider-key-fingerprint", required=True)
+    parser.add_argument("--expected-model-hash", required=True)
+    parser.add_argument("--expected-catalog-id", required=True)
     key_source = parser.add_mutually_exclusive_group(required=True)
     key_source.add_argument("--key-file", help="absolute owner-only regular file")
     key_source.add_argument("--key-stdin", action="store_true", help="read the buyer key from stdin")

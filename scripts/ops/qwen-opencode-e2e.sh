@@ -184,6 +184,7 @@ expected = {
 }
 aliases = {"qwen/qwen3-30b-a3b-instruct-2507": "qwen3-30b-a3b-instruct-2507"}
 bound_rates = {}
+bound_artifacts = {}
 for key, (model, revision, digest) in expected.items():
     row = (candidates.get("rows") or {}).get(key)
     if not isinstance(row, dict) or (row.get("model_id"), row.get("model_revision"), row.get("model_sha256"), row.get("runtime_status")) != (model, revision, digest, "recommendable"):
@@ -194,10 +195,11 @@ for key, (model, revision, digest) in expected.items():
     if any(type(value) is not int or value <= 0 or value > 2**63 - 1 for value in actual):
         raise SystemExit(3)
     bound_rates[aliases.get(key, key)] = actual
+    bound_artifacts[aliases.get(key, key)] = {"model_id": model, "sha256": digest}
 for value in (candidates.get("version"), rates.get("version")):
     if not isinstance(value, str) or not value or len(value) > 256: raise SystemExit(3)
 json.dump({"catalog_version": candidates["version"], "rate_card_version": rates["version"],
-           "target_rates": bound_rates},
+           "target_rates": bound_rates, "target_artifacts": bound_artifacts},
           open(sys.argv[3], "w"), sort_keys=True, separators=(",", ":"))
 PY
 }
@@ -587,10 +589,44 @@ finally:
 PY
 }
 
+fetch_receipt_binding() {
+  local target="$1" base code provider_path
+  base="$(coordinator_url)"
+  case "$base" in https://*) ;; *) return 1 ;; esac
+  provider_path="$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$HB_PROVIDER")" || return
+  code="$(http_get "$base/v1/receipt-keys/$provider_path" "$OPS_TMP_DIR/receipt-key.json")"
+  [ "$code" = 200 ] || return 1
+  code="$(http_get "$base/catalog/current" "$OPS_TMP_DIR/receipt-catalog.json")"
+  [ "$code" = 200 ] || return 1
+  python3 - "$OPS_TMP_DIR/receipt-key.json" "$OPS_TMP_DIR/receipt-catalog.json" \
+    "$OPS_TMP_DIR/market.json" "$HB_PROVIDER" "$target" "$OPS_TMP_DIR/receipt-binding.json" <<'PY'
+import base64, hashlib, json, re, sys
+key, catalog, market = (json.load(open(path)) for path in sys.argv[1:4])
+provider, target, output = sys.argv[4:]
+if key.get("provider_id") != provider: raise SystemExit(3)
+public = base64.b64decode(key.get("receipt_pubkey", ""), validate=True)
+if len(public) != 32: raise SystemExit(3)
+artifact = market["target_artifacts"][target]
+catalog_id = catalog.get("catalog_id")
+if not isinstance(catalog_id, str) or not re.fullmatch(r"[A-Za-z0-9._/@:+-]{1,256}", catalog_id):
+    raise SystemExit(3)
+models = [row for row in catalog.get("models", []) if isinstance(row, dict)
+          and row.get("model_id") == artifact["model_id"]]
+if len(models) != 1 or models[0].get("sha256") != artifact["sha256"]: raise SystemExit(3)
+json.dump({"provider_key_fingerprint": "ed25519-sha256:" + hashlib.sha256(public).hexdigest(),
+           "model_hash": artifact["sha256"], "catalog_id": catalog_id}, open(output, "w"))
+PY
+}
+
 run_recorder() {
   local target="$1" output="$2" evidence="$3" rc=0
+  fetch_receipt_binding "$target" || return
   studio_command /usr/bin/python3 "$REMOTE_RECORDER" --opencode "$QWEN_E2E_OPENCODE" \
-    --model "$target" --key-stdin < "$BUYER_TOKEN_FILE" > "$output" || rc=$?
+    --model "$target" --key-stdin \
+    --expected-provider-key-fingerprint "$(json_field "$OPS_TMP_DIR/receipt-binding.json" 'd["provider_key_fingerprint"]')" \
+    --expected-model-hash "$(json_field "$OPS_TMP_DIR/receipt-binding.json" 'd["model_hash"]')" \
+    --expected-catalog-id "$(json_field "$OPS_TMP_DIR/receipt-binding.json" 'd["catalog_id"]')" \
+    < "$BUYER_TOKEN_FILE" > "$output" || rc=$?
   save_recorder_result "$output" "$target" "$evidence"
   [ "$rc" = 0 ] || return "$rc"
   python3 - "$output" "$target" <<'PY'
@@ -604,7 +640,7 @@ restore_provider() {
   local after="$OPS_TMP_DIR/restore-after.json"
   studio_helper restore --config "$QWEN_E2E_CONFIG" --journal "$QWEN_E2E_JOURNAL" \
     --validator "$QWEN_E2E_CLI" >/dev/null || return
-  studio_command "$QWEN_E2E_CLI" restart --config "$QWEN_E2E_CONFIG" >/dev/null || return
+  studio_helper restart-service --config "$QWEN_E2E_CONFIG" --validator "$QWEN_E2E_CLI" >/dev/null || return
   poll_ready "$INCUMBENT_MODEL" "$BASELINE_PID" "$after" >/dev/null || return
   studio_helper finish-restore --config "$QWEN_E2E_CONFIG" \
     --journal "$QWEN_E2E_JOURNAL" >/dev/null || return

@@ -27,6 +27,21 @@ MODEL = MODULE.MODELS[0]
 ARTIFACT = MODULE.MODEL_BINDINGS[MODEL]
 MARKER_PATH = "/fixture/workspace/marker.txt"
 MARKER = "malibu-0123456789abcdef"
+BINDING = {"expected_provider_key_fingerprint": "a" * 64,
+           "expected_model_hash": "sha256:" + "b" * 64,
+           "expected_catalog_id": "catalog-fixture-v1"}
+BINDING_ARGS = [argument for key, value in BINDING.items()
+                for argument in ("--" + key.replace("_", "-"), value)]
+
+
+def verified_attempt(**updates):
+    value = {"attempt_n": 2, "closed": True, "receipt_result": "valid",
+             "settlement_outcome": "verified", "model_id": ARTIFACT,
+             "provider_receipt_key_fingerprint": BINDING["expected_provider_key_fingerprint"],
+             "model_hash": BINDING["expected_model_hash"],
+             "catalog_id": BINDING["expected_catalog_id"]}
+    value.update(updates)
+    return value
 
 
 def frame(value):
@@ -170,7 +185,7 @@ class RequestTests(unittest.TestCase):
         try:
             with contextlib.redirect_stdout(output):
                 status = MODULE.main(["--opencode", "/bin/true", "--model", MODEL,
-                                      "--key-file", "/private/unread"])
+                                      "--key-file", "/private/unread"] + BINDING_ARGS)
         finally:
             MODULE._run = original
         self.assertEqual(status, 1)
@@ -211,18 +226,17 @@ class ReceiptTests(unittest.TestCase):
         return json.dumps(value).encode()
 
     def test_pending_receipt_is_not_accepted(self):
-        self.assertIsNone(MODULE.validate_receipt(b"", 404, "req-1"))
-        self.assertIsNone(MODULE.validate_receipt(self.receipt(), 200, "req-1"))
+        self.assertIsNone(MODULE.validate_receipt(b"", 404, "req-1", ARTIFACT, **BINDING))
+        self.assertIsNone(MODULE.validate_receipt(self.receipt(), 200, "req-1", ARTIFACT, **BINDING))
         pending = [{"attempt_n": 1, "closed": False, "receipt_result": "pending",
                     "settlement_outcome": "pending"}]
-        self.assertIsNone(MODULE.validate_receipt(self.receipt(attempts=pending), 200, "req-1"))
+        self.assertIsNone(MODULE.validate_receipt(
+            self.receipt(attempts=pending), 200, "req-1", ARTIFACT, **BINDING))
 
     def test_valid_terminal_receipt_is_minimized(self):
-        attempt = {"attempt_n": 2, "closed": True, "receipt_result": "valid",
-                   "settlement_outcome": "verified", "model_id": ARTIFACT,
-                   "reason": "not retained"}
+        attempt = verified_attempt(reason="not retained")
         self.assertEqual(MODULE.validate_receipt(
-            self.receipt(attempts=[attempt]), 200, "req-1", ARTIFACT
+            self.receipt(attempts=[attempt]), 200, "req-1", ARTIFACT, **BINDING
         ),
                          {"request_id": "req-1", "attempt_n": 2, "status": "verified"})
 
@@ -235,18 +249,48 @@ class ReceiptTests(unittest.TestCase):
         for body, code in cases:
             with self.subTest(code=code):
                 with self.assertRaisesRegex(MODULE.CheckError, code):
-                    MODULE.validate_receipt(body, 200, "req-1")
-        wrong_model = [{"attempt_n": 1, "closed": True, "receipt_result": "valid",
-                        "settlement_outcome": "verified", "model_id": MODEL}]
+                    MODULE.validate_receipt(body, 200, "req-1", ARTIFACT, **BINDING)
+        wrong_model = [verified_attempt(model_id=MODEL)]
         with self.assertRaisesRegex(MODULE.CheckError, "receipt_model_mismatch"):
-            MODULE.validate_receipt(self.receipt(attempts=wrong_model), 200, "req-1", ARTIFACT)
+            MODULE.validate_receipt(
+                self.receipt(attempts=wrong_model), 200, "req-1", ARTIFACT, **BINDING)
+
+    def test_every_verified_attempt_requires_exact_identity_fields(self):
+        for field, code in (("provider_receipt_key_fingerprint", "receipt_provider_mismatch"),
+                            ("model_hash", "receipt_model_hash_mismatch"),
+                            ("catalog_id", "receipt_catalog_mismatch")):
+            for value in (None, "", "different", 1):
+                for after_match in (False, True):
+                    with self.subTest(field=field, value=value, after_match=after_match):
+                        attempt = verified_attempt(**{field: value})
+                        if value is None:
+                            del attempt[field]
+                        attempts = ([verified_attempt(attempt_n=1)] if after_match else []) + [attempt]
+                        with self.assertRaisesRegex(MODULE.CheckError, code):
+                            MODULE.validate_receipt(self.receipt(attempts=attempts), 200,
+                                                    "req-1", ARTIFACT, **BINDING)
+
+    def test_poll_rejects_identity_mismatch(self):
+        body = self.receipt(attempts=[verified_attempt(catalog_id="other")])
+        with mock.patch.object(MODULE, "_bounded_https_get", return_value=(200, body)):
+            with self.assertRaisesRegex(MODULE.CheckError, "receipt_catalog_mismatch"):
+                MODULE.poll_receipt("req-1", "key", MODEL, **BINDING)
+
+    def test_failure_evidence_rejects_receipt_identity_mismatch(self):
+        state = MODULE.RecorderState(MODEL, MARKER_PATH, MARKER, "key", "proxy-token")
+        state.record_response("req-1", 200)
+        body = self.receipt(attempts=[verified_attempt(model_hash="other")])
+        with mock.patch.object(MODULE, "_bounded_https_get", return_value=(200, body)):
+            evidence = MODULE._failure_evidence(state, "key", MODEL, **BINDING)
+        self.assertEqual(evidence["receipt_validation"], {
+            "status": "failed", "receipts": [{"request_id": "req-1", "status": "not_verified"}]})
 
     def test_poll_network_call_is_capped_by_remaining_deadline(self):
         get = mock.Mock(side_effect=MODULE.CheckError("upstream_transport"))
         with mock.patch.object(MODULE, "_bounded_https_get", get), \
                 mock.patch.object(MODULE.time, "monotonic", side_effect=[10.0, 10.0, 12.0]):
             with self.assertRaisesRegex(MODULE.CheckError, "receipt_pending_timeout"):
-                MODULE.poll_receipt("req-1", "key", MODEL, timeout_seconds=2.0)
+                MODULE.poll_receipt("req-1", "key", MODEL, timeout_seconds=2.0, **BINDING)
         self.assertEqual(get.call_args.kwargs["timeout_seconds"], 2.0)
         self.assertEqual(get.call_args.kwargs["deadline"], 12.0)
 
@@ -297,8 +341,8 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual(record, {"id": request_id, "status": 200})
         receipt = {"request_id": request_id, "attempt_n": 1, "status": "verified"}
         with mock.patch.object(MODULE, "poll_receipt", return_value=receipt) as poll:
-            evidence = MODULE._failure_evidence(state, "key", MODEL)
-        poll.assert_called_once_with(request_id, "key", MODEL, timeout_seconds=5.0)
+            evidence = MODULE._failure_evidence(state, "key", MODEL, **BINDING)
+        poll.assert_called_once_with(request_id, "key", MODEL, timeout_seconds=5.0, **BINDING)
         self.assertEqual(evidence["requests"], [{"id": request_id, "status": 200}])
         self.assertEqual(evidence["receipt_validation"],
                          {"status": "verified", "receipts": [receipt]})
@@ -357,7 +401,7 @@ class KeyInputTests(unittest.TestCase):
                 MODULE._read_key_stdin(io.BytesIO(raw))
 
     def test_cli_requires_exactly_one_key_source(self):
-        base = ["--opencode", "/bin/true", "--model", MODEL]
+        base = ["--opencode", "/bin/true", "--model", MODEL] + BINDING_ARGS
         with contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit):
                 MODULE.build_parser().parse_args(base)
@@ -366,6 +410,13 @@ class KeyInputTests(unittest.TestCase):
         args = MODULE.build_parser().parse_args(base + ["--key-stdin"])
         self.assertTrue(args.key_stdin)
         self.assertIsNone(args.key_file)
+
+    def test_cli_requires_each_receipt_identity_binding(self):
+        base = ["--opencode", "/bin/true", "--model", MODEL, "--key-stdin"]
+        for index in range(0, len(BINDING_ARGS), 2):
+            with self.subTest(missing=BINDING_ARGS[index]), \
+                    contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                MODULE.build_parser().parse_args(base + BINDING_ARGS[:index] + BINDING_ARGS[index + 2:])
 
 
 class ProcessTests(unittest.TestCase):
@@ -378,6 +429,46 @@ class ProcessTests(unittest.TestCase):
 
 class ProxyFailureEvidenceTests(unittest.TestCase):
     def test_request_id_is_retained_before_malformed_sse_rejection(self):
+        state, status, request_id = self.proxy_response(b"data: not-json\n\ndata: [DONE]\n\n")
+        self.assertEqual(status, 502)
+        self.assertEqual(state.error_code, "invalid_json")
+        self.assertEqual(state.requests, [{"id": request_id, "status": 200}])
+
+    def test_credential_tool_ids_are_rejected_before_retention_and_failure_output(self):
+        for credential in ("synthetic-buyer-key", "synthetic-proxy-token"):
+            with self.subTest(credential=credential):
+                body = tool_stream(model=ARTIFACT).replace(b"call-read", credential.encode())
+                state, status, request_id = self.proxy_response(body)
+                self.assertEqual(status, 502)
+                self.assertEqual(state.error_code, "credential_echo")
+                self.assertEqual(state.requests, [{"id": request_id, "status": 200}])
+                with mock.patch.object(MODULE, "poll_receipt", return_value={
+                    "request_id": request_id, "status": "verified", "attempt_n": 1,
+                }):
+                    evidence = MODULE._failure_evidence(state, state.key, MODEL, **BINDING)
+                error = MODULE.CheckError(state.error_code)
+                error.evidence = evidence
+                output = io.StringIO()
+                with mock.patch.object(MODULE, "_run", side_effect=error), \
+                        contextlib.redirect_stdout(output):
+                    status = MODULE.main(["--opencode", "/bin/true", "--model", MODEL,
+                                          "--key-stdin"] + BINDING_ARGS)
+                self.assertEqual(status, 1)
+                self.assertNotIn(credential, output.getvalue())
+                self.assertEqual(json.loads(output.getvalue())["error_code"], "credential_echo")
+
+    def test_failure_output_guard_discards_preexisting_contaminated_metadata(self):
+        for credential in ("synthetic-buyer-key", "synthetic-proxy-token"):
+            with self.subTest(credential=credential):
+                state = MODULE.RecorderState(MODEL, MARKER_PATH, MARKER,
+                                             "synthetic-buyer-key", "synthetic-proxy-token")
+                state.record_response(str(uuid.uuid4()), 502)["tool_calls"] = [{"call_id": credential}]
+                evidence = MODULE._failure_evidence(state, state.key, MODEL, **BINDING)
+                self.assertNotIn(credential, json.dumps(evidence))
+                self.assertNotIn("requests", evidence)
+                self.assertFalse(evidence["accepted"])
+
+    def proxy_response(self, response_body):
         request_id = str(uuid.uuid4())
 
         class FakeResponse:
@@ -385,7 +476,7 @@ class ProxyFailureEvidenceTests(unittest.TestCase):
 
             @staticmethod
             def read(_limit):
-                return b"data: not-json\n\ndata: [DONE]\n\n"
+                return response_body
 
             @staticmethod
             def getheaders():
@@ -408,7 +499,8 @@ class ProxyFailureEvidenceTests(unittest.TestCase):
             def close(self):
                 pass
 
-        state = MODULE.RecorderState(MODEL, MARKER_PATH, MARKER, "owner-key", "proxy-token")
+        state = MODULE.RecorderState(MODEL, MARKER_PATH, MARKER,
+                                     "synthetic-buyer-key", "synthetic-proxy-token")
         proxy = MODULE.GatewayProxy(state)
         thread = MODULE.threading.Thread(target=proxy.serve_forever, daemon=True)
         thread.start()
@@ -417,15 +509,13 @@ class ProxyFailureEvidenceTests(unittest.TestCase):
             body = request()
             with mock.patch.object(MODULE.http.client, "HTTPSConnection", FakeHTTPSConnection):
                 client.request("POST", "/v1/chat/completions", body=body, headers={
-                    "Authorization": "Bearer proxy-token",
+                    "Authorization": "Bearer " + state.proxy_token,
                     "Content-Type": "application/json",
                     "Content-Length": str(len(body)),
                 })
                 response = client.getresponse()
                 response.read()
-            self.assertEqual(response.status, 502)
-            self.assertEqual(state.error_code, "invalid_json")
-            self.assertEqual(state.requests, [{"id": request_id, "status": 200}])
+            return state, response.status, request_id
         finally:
             client.close()
             proxy.shutdown()
@@ -542,8 +632,7 @@ class RealOpenCodeLoopbackFixture(unittest.TestCase):
                 "request_id": request_id,
                 "surface": "metadata",
                 "pending_quarantined_visible": True,
-                "attempts": [{"attempt_n": 1, "closed": True, "receipt_result": "valid",
-                    "settlement_outcome": "verified", "model_id": ARTIFACT}],
+                "attempts": [verified_attempt(attempt_n=1)],
             }).encode()
 
         run_client = MODULE._bounded_client_process
@@ -559,7 +648,7 @@ class RealOpenCodeLoopbackFixture(unittest.TestCase):
             key_path.write_text("synthetic-owner-key\n", encoding="utf-8")
             key_path.chmod(0o600)
             args = MODULE.build_parser().parse_args(
-                ["--opencode", binary, "--model", MODEL, "--key-file", str(key_path)]
+                ["--opencode", binary, "--model", MODEL, "--key-file", str(key_path)] + BINDING_ARGS
             )
             with mock.patch.object(MODULE, "_bounded_https_get", side_effect=fake_get), \
                     mock.patch.object(MODULE.http.client, "HTTPSConnection", FakeHTTPSConnection), \
