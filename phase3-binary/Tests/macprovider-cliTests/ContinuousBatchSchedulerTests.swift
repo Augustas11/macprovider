@@ -6522,7 +6522,13 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             scripts: ["reference": Array(100..<160)],
             prefillTokens: ["reference": 99]
         )
-        let referenceScheduler = try await makeScheduler(maxActiveRows: 1, backend: referenceBackend)
+        // Match the mixed scheduler's delivery isolation: this 30-token
+        // reference is parity evidence, not a delivery-scheduling test.
+        let referenceScheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            tokenDeliveryBufferLimit: 64,
+            backend: referenceBackend
+        )
         let referenceResult = try await referenceScheduler.submit(.init(
             id: "reference",
             conversationKey: "",
