@@ -5780,7 +5780,6 @@ final class CoordinatorClientTests: XCTestCase {
         )
         await client.acceptAssignedSessionForTest(assignedID: "joined-provider")
         await client.seedLastHeartbeatSuccessForTest(ageNanoseconds: 16_000_000_000)
-        await client.startHeartbeatWatchdogForTest(intervalSeconds: 1)
         let gate = CleanupGate()
         let selfCheck = Task<Void, Never> {
             do {
