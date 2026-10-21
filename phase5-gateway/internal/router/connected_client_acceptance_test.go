@@ -79,7 +79,7 @@ func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion
 			t.Fatalf("execution host verification failed: %s", command)
 		}
 	}
-	privateTrace, err := newConnectedClientPrivateTrace(os.Getenv("MACPROVIDER_TEST_OPENCODE_PRIVATE_TRACE_DIR"), kind, synthetic, upstream, true)
+	privateTrace, err := newConnectedClientPrivateTrace(os.Getenv("MACPROVIDER_TEST_OPENCODE_PRIVATE_TRACE_DIR"), os.Getenv("MACPROVIDER_TEST_OPENCODE_TRACE_TOOL_TURN"), kind, synthetic, upstream, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,12 +249,12 @@ func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion
 			// before any model bytes reach the client or execute a tool.
 			guardKind = "direct-answer"
 		}
+		t.Logf("upstream response %d usage: %s", callNumber, connectedStreamUsage(held))
 		if err := validateConnectedToolStream(held, guardKind, filepath.Join(root, "workspace")); err != nil {
 			t.Logf("tool guard: %v", err)
 			cancel()
 			return nil, err
 		}
-		t.Logf("upstream response %d usage: %s", callNumber, connectedStreamUsage(held))
 		// Hold all model bytes until every complete tool call is validated. This
 		// verifies SSE protocol compatibility, not time-to-first-token latency.
 		response.Body = io.NopCloser(bytes.NewReader(held))
@@ -876,7 +876,8 @@ func connectedProviderMatches(body []byte, model string, contextTokens int) bool
 	return !anthropicRawHasDuplicateKeys(body) && json.Unmarshal(body, &status) == nil && status.Model == model && status.Capacity.MaxContextTokens == contextTokens
 }
 
-// The validated SSE may contain sensitive text; retain only numeric usage.
+// SSE may contain sensitive text, including malformed finish reasons. Retain
+// only numeric usage and a closed finish-reason enum, even before validation.
 func connectedStreamUsage(body []byte) string {
 	var usage struct {
 		Prompt     int `json:"prompt_tokens"`
@@ -884,19 +885,73 @@ func connectedStreamUsage(body []byte) string {
 		Total      int `json:"total_tokens"`
 	}
 	found := false
+	finishReason := "absent"
 	for _, line := range strings.Split(string(body), "\n") {
 		if !strings.HasPrefix(line, "data:") {
 			continue
 		}
 		var frame struct {
-			Usage json.RawMessage `json:"usage"`
+			Usage   json.RawMessage `json:"usage"`
+			Choices []struct {
+				FinishReason *string `json:"finish_reason"`
+			} `json:"choices"`
 		}
-		if json.Unmarshal([]byte(strings.TrimSpace(strings.TrimPrefix(line, "data:"))), &frame) == nil && len(frame.Usage) > 0 && string(frame.Usage) != "null" && json.Unmarshal(frame.Usage, &usage) == nil {
+		if json.Unmarshal([]byte(strings.TrimSpace(strings.TrimPrefix(line, "data:"))), &frame) != nil {
+			continue
+		}
+		for _, choice := range frame.Choices {
+			if choice.FinishReason == nil {
+				continue
+			}
+			reason := "other"
+			switch *choice.FinishReason {
+			case "stop", "tool_calls", "length", "content_filter", "function_call":
+				reason = *choice.FinishReason
+			}
+			if finishReason == "absent" {
+				finishReason = reason
+			} else if finishReason != reason {
+				finishReason = "multiple"
+			}
+		}
+		if len(frame.Usage) > 0 && string(frame.Usage) != "null" && json.Unmarshal(frame.Usage, &usage) == nil {
 			found = true
 		}
 	}
-	encoded, _ := json.Marshal(map[string]any{"present": found, "prompt_tokens": usage.Prompt, "completion_tokens": usage.Completion, "total_tokens": usage.Total})
+	encoded, _ := json.Marshal(map[string]any{"present": found, "prompt_tokens": usage.Prompt, "completion_tokens": usage.Completion, "total_tokens": usage.Total, "finish_reason": finishReason})
 	return string(encoded)
+}
+
+func TestConnectedClientStreamUsageSanitizesFinishReason(t *testing.T) {
+	for _, tc := range []struct {
+		reasons []any
+		want    string
+	}{
+		{nil, "absent"}, {[]any{nil}, "absent"},
+		{[]any{"stop"}, "stop"}, {[]any{"tool_calls"}, "tool_calls"},
+		{[]any{"length"}, "length"}, {[]any{"content_filter"}, "content_filter"},
+		{[]any{"function_call"}, "function_call"}, {[]any{"private-output\nsecret"}, "other"},
+		{[]any{"length", "stop"}, "multiple"}, {[]any{"length", "length"}, "length"},
+	} {
+		var body []byte
+		for _, reason := range tc.reasons {
+			frame, err := json.Marshal(map[string]any{
+				"choices": []any{map[string]any{"finish_reason": reason, "delta": map[string]any{"content": "private-output"}}},
+				"usage":   map[string]any{"prompt_tokens": 12, "completion_tokens": 3, "total_tokens": 15},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			body = append(body, []byte("data: "+string(frame)+"\n\n")...)
+		}
+		summary := connectedStreamUsage(body)
+		var got struct {
+			FinishReason string `json:"finish_reason"`
+		}
+		if json.Unmarshal([]byte(summary), &got) != nil || got.FinishReason != tc.want || strings.Contains(summary, "private") || strings.Contains(summary, "secret") {
+			t.Fatal("finish-reason diagnostic was incorrect or leaked model text")
+		}
+	}
 }
 
 func TestConnectedClientContextBinding(t *testing.T) {
