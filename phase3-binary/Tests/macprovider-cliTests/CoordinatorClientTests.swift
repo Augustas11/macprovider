@@ -6827,8 +6827,13 @@ final class CoordinatorClientTests: XCTestCase {
             }
         )
         let restoreSocket = FakeProviderWebSocketTask(
-            receiveResults: [.success(.string("{}"))],
-            receiveDelayNanoseconds: 1_000_000_000
+            receiveResults: [],
+            // Exercise post-commit error classification, not the watchdog's
+            // scheduling. A short shared deadline can expire during candidate
+            // authentication, before this test reaches the commit at all.
+            receiveOverride: { _ in
+                throw CoordinatorReceiptRotationTimeout(timeoutSeconds: 55)
+            }
         )
         let factory = FakeProviderWebSocketFactory(sockets: [candidateSocket, restoreSocket])
         let status = ProviderStatus(
@@ -6847,7 +6852,6 @@ final class CoordinatorClientTests: XCTestCase {
             modelRuntime: runtime,
             providerStatus: status,
             reconnectGraceNanoseconds: 1_000_000,
-            receiptKeyRotationTimeoutNanoseconds: 20_000_000,
             attestationGenerator: StaticAttestationGenerator(token: nil),
             webSocketFactory: { factory.makeSocket(for: $0) },
             sleepAssertionFactory: { nil },
@@ -6855,7 +6859,6 @@ final class CoordinatorClientTests: XCTestCase {
             providerReceiptPublicKey: "old-receipt-public-key"
         ))
 
-        let startedAt = Date()
         do {
             try await client.reconnectWithNewKey(Curve25519.Signing.PrivateKey()) {
                 committed.set(true)
@@ -6863,11 +6866,11 @@ final class CoordinatorClientTests: XCTestCase {
             XCTFail("rotation should report committed publication failure")
         } catch let error as CoordinatorReceiptRotationCommittedRecoveryFailed {
             XCTAssertTrue(error.description.contains("committed locally"), error.description)
+            XCTAssertTrue(error.description.contains("timed out"), error.description)
         } catch {
             XCTFail("unexpected error: \(error)")
         }
 
-        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 1.0)
         XCTAssertTrue(committed.get())
         XCTAssertGreaterThan(restoreSocket.cancelCountSnapshot(), 0)
         await client.stop()
