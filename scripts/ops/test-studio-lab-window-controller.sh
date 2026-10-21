@@ -187,6 +187,17 @@ load_recovery_context
 rm -f "$(active_marker_path)"
 pass "Qwen active journal recovery retains fixed job identity and timeout"
 
+journey_nonce=adadadadadadadadadadadadadadadad
+journey_sha="$(printf 'c%.0s' {1..64})"
+journey_identity="$(printf '7%.0s' {1..64})"
+mark_done "$OPS_SCOPE" active journey "{\"phase\":\"dispatched\",\"nonce\":\"$journey_nonce\",\"lab_git_head\":\"$legacy_head\",\"outcome_marker\":\"\",\"manifest_sha256\":\"$journey_sha\",\"job_kind\":\"qwen-journey\",\"job_identity\":\"$journey_identity\"}"
+load_recovery_context
+[ "$STUDIO_LAB_JOB_KIND" = qwen-journey ] || fail "Qwen journey marker did not restore its job kind"
+[ "$STUDIO_LAB_JOB_IDENTITY" = "$journey_identity" ] || fail "Qwen journey marker did not restore its identity"
+[ "$LAB_TIMEOUT_S" = 7200 ] || fail "Qwen journey recovery did not retain its timeout ceiling"
+rm -f "$(active_marker_path)"
+pass "Qwen journey recovery retains fixed job identity and timeout"
+
 # A successful completion for a qualified job must bind the fresh source job
 # identity and kind, not merely a local complete marker and zero exit code.
 STUDIO_LAB_JOB_KIND=profiler-only

@@ -74,6 +74,113 @@ MTP_DOC="docs/runbooks/native-mtp-enablement.md"
 ROLLOUT_DOC="docs/runbooks/pearl-coordinator-rollout.md"
 TREE_DOC="docs/runbooks/catalog-release-decision-tree.md"
 REVOCATION_BATCH_DAYS="${NATIVE_MTP_REVOCATION_DAYS:-14}"
+QWEN_NATIVE_MODEL=qwen/qwen3.6-35b-a3b
+QWEN_NATIVE_PROFILE=qwen36-native-mtp
+
+qwen_journal_probe() {
+  "$OPS_DIR/qwen-opencode-e2e.sh" _catalog-qwen36-journal
+}
+
+qwen_intent_probe() {
+  "$OPS_DIR/qwen-opencode-e2e.sh" _catalog-qwen36-intent
+}
+
+qwen_scratch_probe() {
+  "$OPS_DIR/qwen-opencode-e2e.sh" _catalog-qwen36-scratch
+}
+
+live_lock_purpose() {
+  "$OPS_DIR/live-lock.sh" status 2>/dev/null |
+    python3 -c 'import json,sys; print((json.load(sys.stdin).get("lock") or {}).get("purpose", ""))'
+}
+
+qwen_native_intent_present() {
+  [ -n "${OPS_STATE_DIR:-}" ] || return 1
+  local path="$OPS_STATE_DIR/qwen-native-mtp-transaction-intent.json"
+  [ -e "$path" ] || [ -L "$path" ]
+}
+
+qwen_native_journal_recovered() {
+  local probe="$1" scratch_probe="$OPS_TMP_DIR/qwen-recovered-scratch.json"
+  ! qwen_native_intent_present || return 1
+  [ -n "${QWEN_E2E_JOURNAL:-}" ] || return 1
+  qwen_journal_probe > "$probe" 2>/dev/null || return 1
+  [ "$(json_field "$probe" 'd.get("profile")')" = "$QWEN_NATIVE_PROFILE" ] &&
+    [ "$(json_field "$probe" 'd.get("status")')" = restored ] &&
+    [ "$(json_field "$probe" 'd.get("restore_required")')" = false ] &&
+    qwen_scratch_probe > "$scratch_probe" 2>/dev/null &&
+    [ "$(json_field "$scratch_probe" 'd.get("scratch_absent")')" = true ]
+}
+
+reconcile_qwen_restore_lock() {
+  [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] && [ -n "${MACPROVIDER_OPS_OWNER:-}" ] ||
+    refuse "Qwen restoration lock reconciliation is callable only by catalog next --run"
+  [ "$(live_lock_purpose 2>/dev/null || true)" = catalog-activate:qwen_restore ] ||
+    refuse "Qwen restoration lock is no longer durable"
+  qwen_native_journal_recovered "$OPS_TMP_DIR/qwen-lock-reconcile.json" ||
+    refuse "exact native Qwen restoration is not proven complete"
+}
+
+# Once the fixed Qwen transaction has armed its remote journal, keep the global
+# lock durable until the exact incumbent has restarted and the journal reaches
+# restored. An unreadable journal under the restoration purpose fails closed.
+release_live_lock() {
+  [ -n "$OPS_LOCK_OWNER" ] || return 0
+  local owner="$OPS_LOCK_OWNER" probe="$OPS_TMP_DIR/qwen-lock-journal.json" purpose=""
+  purpose="$(live_lock_purpose 2>/dev/null || true)"
+  if qwen_native_intent_present; then
+    if [ "$purpose" != catalog-activate:qwen_restore ]; then
+      "$OPS_DIR/live-lock.sh" acquire "$owner" \
+        --purpose catalog-activate:qwen_restore >&2 ||
+        log "Qwen transaction intent survives; live-ops lock could not be refreshed but will not be released"
+    fi
+    log "retaining the durable live-ops lock until the Qwen transaction intent is cleared"
+    OPS_LOCK_OWNER=""
+    return 0
+  fi
+  if [ "$purpose" = catalog-activate:qwen_restore ]; then
+    if ! qwen_native_journal_recovered "$probe"; then
+      log "retaining the durable live-ops lock because native Qwen restoration is not proven complete"
+      OPS_LOCK_OWNER=""
+      return 0
+    fi
+    OPS_LOCK_OWNER=""
+    "$OPS_DIR/live-lock.sh" release "$owner" >&2 || true
+    return 0
+  fi
+  if [ -n "${QWEN_E2E_JOURNAL:-}" ]; then
+    if qwen_journal_probe > "$probe" 2>/dev/null; then
+      if [ "$(json_field "$probe" 'd.get("profile")')" = "$QWEN_NATIVE_PROFILE" ] &&
+         [ "$(json_field "$probe" 'd.get("restore_required")')" = true ]; then
+        if [ "$purpose" != catalog-activate:qwen_restore ]; then
+          "$OPS_DIR/live-lock.sh" acquire "$owner" \
+            --purpose catalog-activate:qwen_restore >&2 ||
+            log "Qwen journal is armed; live-ops lock could not be refreshed but will not be released"
+        fi
+        log "retaining the durable live-ops lock until the Qwen transaction restores GLM"
+        OPS_LOCK_OWNER=""
+        return 0
+      fi
+    fi
+  fi
+  OPS_LOCK_OWNER=""
+  "$OPS_DIR/live-lock.sh" release "$owner" >&2 || true
+}
+
+acquire_live_lock_for_step() {
+  if [ "$NEXT_ID" = qwen_restore ] || [ "$NEXT_ID" = qwen_prejournal_reconcile ]; then
+    "$OPS_DIR/live-lock.sh" acquire "$MACPROVIDER_OPS_OWNER" \
+      --purpose catalog-activate:qwen_restore >&2
+  elif [ "$(live_lock_purpose 2>/dev/null || true)" = catalog-activate:qwen_restore ]; then
+    qwen_native_journal_recovered "$OPS_TMP_DIR/qwen-lock-recovered.json" ||
+      refuse "durable Qwen restoration lock requires a valid restored native journal"
+    "$OPS_DIR/live-lock.sh" acquire "$MACPROVIDER_OPS_OWNER" \
+      --purpose catalog-activate:qwen_restore >&2
+  else
+    "$OPS_DIR/live-lock.sh" acquire "$MACPROVIDER_OPS_OWNER" \
+      --purpose "$OPS_NAME:$NEXT_ID" --bind-pid >&2
+  fi
+}
 
 # Feeds the release binds -> public route. Revocations are keyed by signer.
 feed_route() {
@@ -89,12 +196,108 @@ feed_route() {
 }
 
 gather() {
-  local main_sha head_sha R native_bound=false bank_rid verify_ok=false
+  local main_sha head_sha R native_bound=false bank_rid verify_ok=false qwen_lock_purpose="" qwen_local_intent=false
   main_sha="$(origin_main_sha)"
   head_sha="$(git -C "$REPO_ROOT" rev-parse HEAD)"
   R="$(json_field "$REPO_ROOT/$AUTOTUNE/release.json" 'd["release_id"]')"
   [ -n "$R" ] || die "cannot read $AUTOTUNE/release.json"
   OPS_SCOPE="catalog-$R"
+
+  # A remote Qwen profile journal is authoritative. No catalog step, proof, or
+  # activation is allowed to run ahead of restoration.
+  qwen_lock_purpose="$(live_lock_purpose 2>/dev/null || true)"
+  local qwen_intent_path=""
+  [ -z "${OPS_STATE_DIR:-}" ] || qwen_intent_path="$OPS_STATE_DIR/qwen-native-mtp-transaction-intent.json"
+  if [ -n "$qwen_intent_path" ] && { [ -e "$qwen_intent_path" ] || [ -L "$qwen_intent_path" ]; }; then
+    if ! qwen_intent_probe > "$OPS_TMP_DIR/qwen-intent.json" 2>/dev/null; then
+      step qwen_prejournal_reconcile blocked "native transaction intent is malformed or its journal is unreadable"
+      set_next qwen_prejournal_reconcile blocked "Recover the Qwen3.6 transaction intent" "" \
+        "the durable intent must be reviewed before catalog work can continue"
+      return
+    fi
+    qwen_local_intent=true
+    local qwen_intent_journal
+    qwen_intent_journal="$(json_field "$OPS_TMP_DIR/qwen-intent.json" 'd.get("journal_path")')"
+    if [ -n "${QWEN_E2E_JOURNAL:-}" ] && [ "$QWEN_E2E_JOURNAL" != "$qwen_intent_journal" ]; then
+      step qwen_prejournal_reconcile blocked "native transaction intent journal path mismatches configuration"
+      set_next qwen_prejournal_reconcile blocked "Recover the Qwen3.6 transaction intent" "" \
+        "the durable intent and configured journal must be reviewed before catalog work can continue"
+      return
+    fi
+    export QWEN_E2E_JOURNAL="$qwen_intent_journal"
+  fi
+  if [ -n "${QWEN_E2E_JOURNAL:-}" ] || [ "$qwen_lock_purpose" = catalog-activate:qwen_restore ]; then
+    local qwen_probe="$OPS_TMP_DIR/qwen-journal.json" qwen_restore=false qwen_profile="" qwen_status="" qwen_intent=false qwen_scratch_absent=false
+    if [ -n "${QWEN_E2E_JOURNAL:-}" ] && qwen_journal_probe > "$qwen_probe" 2>/dev/null; then
+      qwen_restore="$(json_field "$qwen_probe" 'd.get("restore_required")')"
+      qwen_profile="$(json_field "$qwen_probe" 'd.get("profile")')"
+      qwen_status="$(json_field "$qwen_probe" 'd.get("status")')"
+      if [ "$qwen_local_intent" != true ] && ! qwen_intent_probe > "$OPS_TMP_DIR/qwen-intent.json" 2>/dev/null; then
+        step qwen_prejournal_reconcile blocked "native transaction intent is malformed or mismatches the journal"
+        set_next qwen_prejournal_reconcile blocked "Recover the Qwen3.6 transaction intent" "" \
+          "the durable intent and remote journal must be reviewed before catalog work can continue"
+        return
+      fi
+      [ "$(json_field "$OPS_TMP_DIR/qwen-intent.json" 'd.get("status")')" = absent ] || qwen_intent=true
+      if [ "$qwen_status" = absent ] && [ "$qwen_restore" = false ]; then
+        if [ "$qwen_intent" = true ]; then
+          step qwen_prejournal_reconcile pending "clear the interrupted pre-journal Qwen transaction intent"
+          set_next qwen_prejournal_reconcile mutate "Reconcile the interrupted pre-journal Qwen transaction" \
+            "$OPS_DIR/qwen-opencode-e2e.sh _catalog-qwen36-prejournal-reconcile"
+          return
+        fi
+      fi
+      if [ "$qwen_restore" = true ] && [ "$qwen_profile" = "$QWEN_NATIVE_PROFILE" ]; then
+        fact qwen_transaction_profile "$qwen_profile"
+        fact qwen_restore_required true
+        step qwen_restore pending "restore exact signed GLM incumbent before catalog work"
+        set_next qwen_restore mutate "Restore GLM from the active Qwen3.6 transaction" \
+          "$OPS_DIR/qwen-opencode-e2e.sh _catalog-qwen36-restore"
+        NEXT_DOWNTIME="Studio provider buyer traffic is unavailable during the bounded GLM restart and model-load window; Pearl is not restarted"
+        return
+      fi
+      if [ "$qwen_intent" = true ] && [ "$qwen_profile" = "$QWEN_NATIVE_PROFILE" ] &&
+         [ "$qwen_status" = restored ] && [ "$qwen_restore" = false ]; then
+        step qwen_restore pending "clear the restored Qwen transaction intent before releasing the lock"
+        set_next qwen_restore mutate "Finalize the restored Qwen3.6 transaction" \
+          "$OPS_DIR/qwen-opencode-e2e.sh _catalog-qwen36-restore"
+        return
+      fi
+      if [ "$qwen_profile" = "$QWEN_NATIVE_PROFILE" ] && [ "$qwen_status" = restored ] &&
+         [ "$qwen_restore" = false ]; then
+        if qwen_scratch_probe > "$OPS_TMP_DIR/qwen-scratch.json" 2>/dev/null; then
+          qwen_scratch_absent="$(json_field "$OPS_TMP_DIR/qwen-scratch.json" 'd.get("scratch_absent")')"
+        fi
+        if [ "$qwen_scratch_absent" != true ]; then
+          step qwen_restore pending "remove the protected Qwen transaction scratch before releasing the lock"
+          set_next qwen_restore mutate "Finalize the restored Qwen3.6 transaction" \
+            "$OPS_DIR/qwen-opencode-e2e.sh _catalog-qwen36-restore"
+          return
+        fi
+      fi
+      if [ "$qwen_lock_purpose" = catalog-activate:qwen_restore ] &&
+         { [ "$qwen_profile" != "$QWEN_NATIVE_PROFILE" ] || [ "$qwen_status" != restored ] || [ "$qwen_restore" != false ]; }; then
+        fact qwen_restore_required unknown
+        step qwen_restore blocked "durable restoration lock lacks a valid recovered native journal"
+        set_next qwen_restore blocked "Recover the Qwen3.6 restoration journal" "" \
+          "the durable restoration lock prevents all ordinary catalog steps until exact native restoration is proven"
+        return
+      fi
+      if [ "$qwen_lock_purpose" = catalog-activate:qwen_restore ]; then
+        fact qwen_restore_required false
+        step qwen_lock_reconcile pending "release the recovered durable Qwen restoration lock"
+        set_next qwen_lock_reconcile mutate "Reconcile the recovered Qwen restoration lock" \
+          "$OPS_DIR/catalog-activate.sh _qwen-lock-reconcile"
+        return
+      fi
+    elif [ "$qwen_lock_purpose" = catalog-activate:qwen_restore ]; then
+      fact qwen_restore_required unknown
+      step qwen_restore blocked "active Qwen restoration journal is unreadable"
+      set_next qwen_restore blocked "Recover the Qwen3.6 restoration journal" "" \
+        "the durable restoration lock prevents all ordinary catalog steps until the journal is readable"
+      return
+    fi
+  fi
   fact origin_main_sha "$main_sha"
   fact checkout_is_origin_main "$([ "$head_sha" = "$main_sha" ] && echo true || echo false)"
   fact committed_release_id "$R"
@@ -183,11 +386,12 @@ PY
   fact revocation_coverage_days "$coverage_days"
 
   # Provider (canary/Studio) status, read-only over ssh when configured.
-  local p_rid="" p_mtp_enabled="" p_mtp_mode="" p_cb_active="" p_connected="" p_lifecycle="" p_paused=false
+  local p_rid="" p_digest="" p_mtp_enabled="" p_mtp_mode="" p_cb_active="" p_connected="" p_lifecycle="" p_paused=false
   if [ -n "${STUDIO_SSH:-}" ] && [ -n "${STUDIO_STATUS_PORT:-}" ]; then
     case "$STUDIO_STATUS_PORT" in *[!0-9]*) die "STUDIO_STATUS_PORT must be numeric" ;; esac
     studio_ssh "curl -s -m 10 http://127.0.0.1:$STUDIO_STATUS_PORT/v1/status" > "$OPS_TMP_DIR/pstatus.json" 2>/dev/null || true
     p_rid="$(json_field "$OPS_TMP_DIR/pstatus.json" 'd["catalog"]["release_id"]')"
+    p_digest="$(json_field "$OPS_TMP_DIR/pstatus.json" 'd["catalog"]["digest"]')"
     p_mtp_enabled="$(json_field "$OPS_TMP_DIR/pstatus.json" 'd["native_mtp"]["enabled"]')"
     p_mtp_mode="$(json_field "$OPS_TMP_DIR/pstatus.json" 'd["native_mtp"]["mode"]')"
     p_cb_active="$(json_field "$OPS_TMP_DIR/pstatus.json" 'd["continuous_batching"]["active"]')"
@@ -451,12 +655,22 @@ for i in \$(seq 1 24); do curl -sf -m 5 \"\$COORDINATOR_URL/healthz\" && exit 0;
   # shared_forward_calls delta from the provider-attributed buyer request.
   local require_mtp
   require_mtp="$(native_mtp_forward_requirement)"
-  if gateway_proof_marker_valid "$OPS_SCOPE" "$p_cb_active" "$require_mtp"; then
+  if [ "${PROBE_MODEL:-}" = "$QWEN_NATIVE_MODEL" ] && [ "$require_mtp" != true ]; then
+    refuse "Qwen3.6 proof requires CATALOG_REQUIRE_NATIVE_MTP_FORWARD=true"
+  fi
+  if gateway_proof_marker_valid "$OPS_SCOPE" "$p_cb_active" "$require_mtp" \
+       "${PROBE_MODEL:-}" "$R" "$p_digest"; then
     step gateway_proof "done" "$(marker_field "$OPS_SCOPE" gateway_proof 'd.get("evidence")')"
   else
     step gateway_proof pending "$(marker_done "$OPS_SCOPE" gateway_proof && echo 'previous proof older than 24 h or lacks active-path scheduler evidence' || true)"
-    set_next gateway_proof read "Send one real buyer request through the gateway" \
-      "scripts/ops/catalog-activate.sh _gateway-proof"
+    if [ "${PROBE_MODEL:-}" = "$QWEN_NATIVE_MODEL" ] && [ "$require_mtp" = true ]; then
+      set_next gateway_proof mutate "Adopt Qwen3.6, prove one paid native-MTP request, and restore GLM" \
+        "$OPS_DIR/qwen-opencode-e2e.sh _catalog-qwen36-proof"
+      NEXT_DOWNTIME="Studio provider buyer traffic is unavailable during bounded Qwen/GLM restart and model-load windows; Pearl is not restarted"
+    else
+      set_next gateway_proof read "Send one real buyer request through the gateway" \
+        "scripts/ops/catalog-activate.sh _gateway-proof"
+    fi
     next_meta gateway_proof "AGENTS.md#hard-rules--activation-evidence-and-campaign-discipline"
   fi
 
@@ -567,14 +781,29 @@ native_mtp_forward_requirement() {
   esac
 }
 
+require_qwen_proof_lock() {
+  local status="$OPS_TMP_DIR/qwen-proof-lock.json"
+  [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] && [ -n "${MACPROVIDER_OPS_OWNER:-}" ] ||
+    refuse "Qwen3.6 gateway proof is callable only from the catalog transaction"
+  "$OPS_DIR/live-lock.sh" status > "$status" 2>/dev/null ||
+    refuse "Qwen3.6 gateway proof cannot read the live-ops lock"
+  python3 - "$status" "$MACPROVIDER_OPS_OWNER" <<'PY' ||
+import json, sys
+d=json.load(open(sys.argv[1])); lock=d.get("lock") or {}
+raise SystemExit(0 if d.get("held") is True and lock.get("owner")==sys.argv[2]
+                 and lock.get("purpose")=="catalog-activate:qwen_restore" else 3)
+PY
+    refuse "Qwen3.6 gateway proof requires the already-held durable restoration lock"
+}
+
 gateway_proof_marker_valid() {
-  local scope="$1" cb_active="$2" require_mtp="$3" path
+  local scope="$1" cb_active="$2" require_mtp="$3" expected_model="${4:-}" expected_release="${5:-}" expected_digest="${6:-}" path
   path="$(marker_path "$scope" gateway_proof)"
   [ -f "$path" ] || return 1
   [ -n "$(find "$path" -mmin -1440 2>/dev/null)" ] || return 1
-  python3 - "$path" "$cb_active" "$require_mtp" <<'PY'
-import json, sys
-path, cb_active, require_mtp = sys.argv[1:4]
+  python3 - "$path" "$cb_active" "$require_mtp" "$expected_model" "$expected_release" "$expected_digest" <<'PY'
+import json, pathlib, sys
+path, cb_active, require_mtp, model, release, digest = sys.argv[1:7]
 try:
     d = json.load(open(path))
 except Exception:
@@ -594,7 +823,285 @@ if require_mtp == "true":
         sys.exit(1)
     if type(d.get("mtp_forwards_delta")) is not int or d["mtp_forwards_delta"] <= 0:
         sys.exit(1)
+if model == "qwen/qwen3.6-35b-a3b":
+    pending = pathlib.Path(path).parent / "qwen-gateway-proof" / "qwen-gateway-proof.pending.json"
+    if pending.exists() or pending.is_symlink():
+        sys.exit(1)
+    if d.get("proof_model") != model or d.get("catalog_release_id") != release:
+        sys.exit(1)
+    if not digest or d.get("catalog_digest") != digest:
+        sys.exit(1)
+    value = d.get("served_session_sha256")
+    if not isinstance(value, str) or len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
+        sys.exit(1)
 PY
+}
+
+qwen_proof_pending_path() {
+  printf '%s/%s/qwen-gateway-proof/qwen-gateway-proof.pending.json' "$OPS_STATE_DIR" "$OPS_SCOPE"
+}
+
+# Persist the request identity and the exact pre-request context before curl.
+# The rename and parent-directory fsync make an interrupted send discoverable.
+write_qwen_proof_intent() {
+  python3 -I - "$@" <<'PY'
+import json, os, pathlib, sys, tempfile, uuid
+path, request_id, model, release, digest, session_hash, mtp, requests, cb, shared = sys.argv[1:]
+try:
+    parsed = uuid.UUID(request_id)
+except ValueError:
+    raise SystemExit(2)
+if parsed.version != 4 or str(parsed) != request_id:
+    raise SystemExit(2)
+if model != "qwen/qwen3.6-35b-a3b" or not release or len(digest) != 64 or len(session_hash) != 64:
+    raise SystemExit(2)
+if any(c not in "0123456789abcdef" for c in digest + session_hash):
+    raise SystemExit(2)
+doc = {
+    "schema_version": "macprovider.qwen_gateway_proof_pending.v1",
+    "request_id": request_id,
+    "model": model,
+    "catalog_release_id": release,
+    "catalog_digest": digest,
+    "session_sha256": session_hash,
+    "before_counters": {
+        "mtp_forwards": int(mtp), "requests_total": int(requests),
+        "cb_active": cb == "true", "cb_shared_forward_calls": int(shared),
+    },
+    }
+parent = pathlib.Path(path).parent
+parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+if parent.is_symlink() or not parent.is_dir():
+    raise SystemExit(3)
+os.chmod(parent, 0o700)
+if pathlib.Path(path).exists() or pathlib.Path(path).is_symlink():
+    raise SystemExit(3)
+fd, tmp = tempfile.mkstemp(prefix=".qwen-proof.", dir=parent)
+try:
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(doc, f, sort_keys=True, separators=(",", ":"))
+        f.write("\n"); f.flush(); os.fsync(f.fileno())
+    os.replace(tmp, path)
+    dfd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+    try: os.fsync(dfd)
+    finally: os.close(dfd)
+finally:
+    try: os.unlink(tmp)
+    except FileNotFoundError: pass
+PY
+}
+
+validate_qwen_proof_intent() {
+  python3 -I - "$@" <<'PY'
+import json, pathlib, sys, uuid
+path, model, release, digest = sys.argv[1:]
+try:
+    p = pathlib.Path(path)
+    if not p.is_file() or p.is_symlink() or p.stat().st_mode & 0o077:
+        raise ValueError()
+    d = json.load(open(p))
+    expected_keys = {"schema_version", "request_id", "model", "catalog_release_id",
+                     "catalog_digest", "session_sha256", "before_counters"}
+    if set(d) != expected_keys or d["schema_version"] != "macprovider.qwen_gateway_proof_pending.v1":
+        raise ValueError()
+    rid = uuid.UUID(d["request_id"])
+    if rid.version != 4 or str(rid) != d["request_id"]:
+        raise ValueError()
+    counters = d["before_counters"]
+    if set(counters) != {"mtp_forwards", "requests_total", "cb_active",
+                         "cb_shared_forward_calls"}:
+        raise ValueError()
+    if type(counters["cb_active"]) is not bool:
+        raise ValueError()
+    if any(type(counters[k]) is not int or counters[k] < 0 for k in
+           ("mtp_forwards", "requests_total", "cb_shared_forward_calls")):
+        raise ValueError()
+    if d["model"] != model or d["catalog_release_id"] != release or d["catalog_digest"] != digest:
+        raise ValueError()
+    session_hash = d["session_sha256"]
+    if not isinstance(session_hash, str) or len(session_hash) != 64 or any(
+            c not in "0123456789abcdef" for c in session_hash):
+        raise ValueError()
+except Exception:
+    raise SystemExit(3)
+print(d["request_id"], session_hash)
+PY
+}
+
+resolve_qwen_proof_intent() {
+  python3 -I - "$@" <<'PY'
+import json, os, pathlib, sys, tempfile, uuid
+path, status = sys.argv[1:]
+allowed = {"accepted_missing_counter_evidence", "wrong_provider", "request_log_missing",
+           "accepted_with_counter_evidence"}
+if status not in allowed:
+    raise SystemExit(2)
+p = pathlib.Path(path); parent = p.parent
+try:
+    if not p.is_file() or p.is_symlink() or p.stat().st_mode & 0o077:
+        raise ValueError()
+    intent = json.load(open(p))
+    if set(intent) != {"schema_version", "request_id", "model", "catalog_release_id",
+                       "catalog_digest", "session_sha256", "before_counters"}:
+        raise ValueError()
+    if intent["schema_version"] != "macprovider.qwen_gateway_proof_pending.v1":
+        raise ValueError()
+except Exception: raise SystemExit(3)
+rid = intent.get("request_id", "")
+try:
+    parsed = uuid.UUID(rid)
+    if parsed.version != 4 or str(parsed) != rid:
+        raise ValueError()
+except Exception:
+    raise SystemExit(3)
+archive_dir = parent / "qwen-gateway-proof-attempts"
+archive_dir.mkdir(mode=0o700, exist_ok=True)
+if archive_dir.is_symlink() or not archive_dir.is_dir():
+    raise SystemExit(3)
+os.chmod(archive_dir, 0o700)
+archive = archive_dir / (rid + ".json")
+doc = {"schema_version": "macprovider.qwen_gateway_proof_resolution.v1",
+       "resolution": status, "intent": intent}
+payload = json.dumps(doc, sort_keys=True, separators=(",", ":")) + "\n"
+if archive.exists():
+    try:
+        existing = json.load(open(archive))
+    except Exception:
+        raise SystemExit(3)
+    if (archive.is_symlink() or not archive.is_file() or archive.stat().st_mode & 0o077
+            or set(existing) != {"schema_version", "resolution", "intent"}
+            or existing["schema_version"] != "macprovider.qwen_gateway_proof_resolution.v1"
+            or existing["resolution"] not in allowed or existing["intent"] != intent):
+        raise SystemExit(3)
+else:
+    fd, tmp = tempfile.mkstemp(prefix=".attempt.", dir=archive_dir)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(payload); f.flush(); os.fsync(f.fileno())
+        os.replace(tmp, archive)
+        dfd = os.open(archive_dir, os.O_RDONLY | os.O_DIRECTORY)
+        try: os.fsync(dfd)
+        finally: os.close(dfd)
+    finally:
+        try: os.unlink(tmp)
+        except FileNotFoundError: pass
+p.unlink()
+dfd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+try: os.fsync(dfd)
+finally: os.close(dfd)
+PY
+}
+
+discard_file_durably() {
+  python3 -I - "$1" <<'PY'
+import os, pathlib, sys
+p = pathlib.Path(sys.argv[1])
+try: p.unlink()
+except FileNotFoundError: pass
+dfd = os.open(p.parent, os.O_RDONLY | os.O_DIRECTORY)
+try: os.fsync(dfd)
+finally: os.close(dfd)
+PY
+}
+
+fsync_file_and_parent() {
+  python3 -I - "$1" <<'PY'
+import os, pathlib, sys
+p = pathlib.Path(sys.argv[1])
+if p.is_symlink() or not p.is_file():
+    raise SystemExit(3)
+fd = os.open(p, os.O_RDONLY)
+try: os.fsync(fd)
+finally: os.close(fd)
+dfd = os.open(p.parent, os.O_RDONLY | os.O_DIRECTORY)
+try: os.fsync(dfd)
+finally: os.close(dfd)
+PY
+}
+
+qwen_marker_matches_pending() {
+  python3 -I - "$1" "$2" <<'PY'
+import json, os, pathlib, stat, sys
+pending, marker = map(pathlib.Path, sys.argv[1:])
+try:
+ pstat=marker.lstat()
+ if marker.is_symlink() or not stat.S_ISREG(pstat.st_mode) or pstat.st_uid!=os.getuid() or pstat.st_nlink!=1 or pstat.st_mode & 0o022: raise ValueError()
+ i=json.load(open(pending)); m=json.load(open(marker))
+ if m.get("step")!="gateway_proof" or m.get("request_id")!=i["request_id"] or m.get("sent_request_id")!=i["request_id"]: raise ValueError()
+ if m.get("proof_model")!=i["model"] or m.get("catalog_release_id")!=i["catalog_release_id"] or m.get("catalog_digest")!=i["catalog_digest"]: raise ValueError()
+ if m.get("served_session_sha256")!=i["session_sha256"] or m.get("served_by_canary") is not True: raise ValueError()
+ if m.get("native_mtp_forward_required") is not True or type(m.get("mtp_forwards_delta")) is not int or m["mtp_forwards_delta"]<=0: raise ValueError()
+ if type(m.get("cb_shared_forward_calls_delta")) is not int or m["cb_shared_forward_calls_delta"]<=0: raise ValueError()
+except Exception: raise SystemExit(3)
+PY
+}
+
+qwen_resolution_status() {
+  python3 -I - "$1" "$2" <<'PY'
+import json, pathlib, sys
+pending, archive = map(pathlib.Path, sys.argv[1:])
+try:
+ i=json.load(open(pending)); a=json.load(open(archive))
+ allowed={"accepted_missing_counter_evidence","wrong_provider","request_log_missing","accepted_with_counter_evidence"}
+ if set(a)!={"schema_version","resolution","intent"} or a["schema_version"]!="macprovider.qwen_gateway_proof_resolution.v1": raise ValueError()
+ if a["resolution"] not in allowed or a["intent"]!=i: raise ValueError()
+except Exception: raise SystemExit(3)
+print(a["resolution"])
+PY
+}
+
+reconcile_qwen_proof_intent() {
+  local pending="$1" model="$2" release="$3" digest="$4" pdb="$5" psqlite="$6"
+  local rid session_hash served_sid="" k status validated marker archive
+  validated="$(validate_qwen_proof_intent "$pending" "$model" "$release" "$digest")" ||
+    refuse "pending Qwen proof intent is malformed or does not match the current provider context"
+  read -r rid session_hash <<< "$validated"
+  marker="$(marker_path "$OPS_SCOPE" gateway_proof)"
+  archive="$(dirname "$pending")/qwen-gateway-proof-attempts/$rid.json"
+  if [ -e "$archive" ] || [ -L "$archive" ]; then
+    status="$(qwen_resolution_status "$pending" "$archive")" ||
+      refuse "pending Qwen proof has a malformed terminal resolution"
+    if [ "$status" = accepted_with_counter_evidence ]; then
+      qwen_marker_matches_pending "$pending" "$marker" ||
+        refuse "accepted Qwen proof resolution lacks its exact durable success marker"
+      resolve_qwen_proof_intent "$pending" "$status" || refuse "accepted Qwen proof pending state could not be cleared"
+      printf '%s\n' recovered_success
+      return
+    fi
+    if [ -e "$marker" ] || [ -L "$marker" ]; then
+      refuse "non-success Qwen proof resolution conflicts with a success marker"
+    fi
+    resolve_qwen_proof_intent "$pending" "$status" || refuse "Qwen proof pending state could not be cleared"
+    printf '%s\n' fresh_allowed
+    return
+  fi
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    qwen_marker_matches_pending "$pending" "$marker" ||
+      refuse "pending Qwen proof conflicts with a mismatched success marker"
+    resolve_qwen_proof_intent "$pending" accepted_with_counter_evidence ||
+      refuse "recovered successful Qwen proof could not be durably resolved"
+    printf '%s\n' recovered_success
+    return
+  fi
+  for k in 1 2 3 4 5 6; do
+    served_sid="$(pearl_ssh "'$psqlite' -readonly '$pdb' \"SELECT provider_assigned_id FROM request_log WHERE external_request_id = '$rid' ORDER BY id DESC LIMIT 1;\"" 2>/dev/null)" ||
+      refuse "pending Qwen proof request_log reconciliation failed"
+    served_sid="$(printf '%s' "$served_sid" | tr -d '\r\n')"
+    [ -n "$served_sid" ] && break
+    [ "$k" -lt 6 ] && sleep "${PROOF_POLL_SECONDS:-2}"
+  done
+  if [ -z "$served_sid" ]; then
+    status=request_log_missing
+  elif [ "$(printf '%s' "$served_sid" | /usr/bin/shasum -a 256 | awk '{print $1}')" = "$session_hash" ]; then
+    status=accepted_missing_counter_evidence
+  else
+    status=wrong_provider
+  fi
+  resolve_qwen_proof_intent "$pending" "$status" ||
+    refuse "pending Qwen proof resolution could not be persisted"
+  printf '%s\n' fresh_allowed
 }
 
 # proof_moved B_MTP B_REQ B_CB B_SHARED A_MTP A_REQ A_CB A_SHARED [A_SERIAL]: the
@@ -632,18 +1139,30 @@ gateway_proof() {
   require_studio_ssh
   case "${STUDIO_STATUS_PORT:-}" in ""|*[!0-9]*) refuse "STUDIO_STATUS_PORT must be set and numeric" ;; esac
 
-  local before after b_mtp b_req b_cb b_shared b_serial a_mtp a_req a_cb a_shared a_serial
+  local before after b_mtp b_req b_cb b_shared a_mtp a_req a_cb a_shared a_serial
   read_provider_status "$OPS_TMP_DIR/before.json"
   # The model the canary serves, as its /v1/status reports it: a request for
   # any other model cannot reach the canary (the gateway 404s a model no
   # provider serves). PROBE_MODEL overrides it.
   model="${PROBE_MODEL:-$(json_field "$OPS_TMP_DIR/before.json" 'd["model"]')}"
   [ -n "$model" ] || refuse "PROBE_MODEL is unset and the canary /v1/status reports no served model"
+  if [ "$model" = "$QWEN_NATIVE_MODEL" ]; then
+    require_qwen_proof_lock
+    [ "$(json_field "$OPS_TMP_DIR/before.json" 'd["model"]')" = "$QWEN_NATIVE_MODEL" ] ||
+      refuse "Qwen3.6 proof requires the target provider to serve the exact model"
+    [ "$(json_field "$OPS_TMP_DIR/before.json" 'd["native_mtp"]["enabled"]')" = true ] &&
+      case "$(json_field "$OPS_TMP_DIR/before.json" 'd["native_mtp"]["mode"]')" in eligible|active) : ;; *) false ;; esac &&
+      [ "$(json_field "$OPS_TMP_DIR/before.json" 'd["continuous_batching"]["active"]')" = true ] ||
+      refuse "Qwen3.6 proof requires native MTP eligible or active and continuous batching active"
+  fi
   before="$(provider_counters "$OPS_TMP_DIR/before.json")" || refuse "provider status lacks native_mtp.mtp_forwards/requests_total or continuous_batching.scheduler.shared_forward_calls"
-  read -r b_mtp b_req b_cb b_shared b_serial <<< "$before"
-  local canary_sid pdb psqlite
+  read -r b_mtp b_req b_cb b_shared _ <<< "$before"
+  local canary_sid canary_sid_hash catalog_release catalog_digest pdb psqlite pending=""
   canary_sid="$(json_field "$OPS_TMP_DIR/before.json" 'd["safety_telemetry"]["coordinator_session_id"]')"
   [ -n "$canary_sid" ] || refuse "provider /v1/status reports no safety_telemetry.coordinator_session_id; cannot tie the proof to it"
+  canary_sid_hash="$(printf '%s' "$canary_sid" | /usr/bin/shasum -a 256 | awk '{print $1}')"
+  catalog_release="$(json_field "$OPS_TMP_DIR/before.json" 'd["catalog"]["release_id"]')"
+  catalog_digest="$(json_field "$OPS_TMP_DIR/before.json" 'd["catalog"]["digest"]')"
   pdb="${PEARL_COORDINATOR_DB:-}"
   psqlite="${PEARL_SQLITE3:-/opt/macprovider-tools/sqlite-3.53.2/bin/sqlite3}"
   [ -n "$pdb" ] || refuse "PEARL_COORDINATOR_DB must name the coordinator database on Pearl to attribute the proof request"
@@ -651,13 +1170,28 @@ gateway_proof() {
     refuse "PEARL_COORDINATOR_DB and PEARL_SQLITE3 must be absolute plain paths"
   require_pearl_ssh
 
+  if [ "$model" = "$QWEN_NATIVE_MODEL" ]; then
+    pending="$(qwen_proof_pending_path)"
+    if [ -e "$pending" ] || [ -L "$pending" ]; then
+      local reconcile_outcome
+      reconcile_outcome="$(reconcile_qwen_proof_intent "$pending" "$model" "$catalog_release" \
+        "$catalog_digest" "$pdb" "$psqlite")"
+      [ "$reconcile_outcome" != recovered_success ] || return 0
+    fi
+  fi
+
   local body="$OPS_TMP_DIR/proof.json" headers="$OPS_TMP_DIR/proof.headers" code sent_rid payload
-  sent_rid="ops-proof-$(python3 -c 'import secrets; print(secrets.token_hex(8))')"
+  sent_rid="$(python3 -c 'import uuid; print(uuid.uuid4())')"
   # Include the generated request id in the prompt so this proof cannot be
   # answered from an earlier identical-prompt cache entry. It remains an opaque
   # buyer request nonce and reveals no provider attribution.
   # Greedy-only native tuples reject the API's default temperature of 1.0.
   payload="$(python3 -c 'import json,sys; print(json.dumps({"model": sys.argv[1], "max_tokens": 32, "temperature": 0, "top_p": 1, "messages": [{"role": "user", "content": "Proof nonce " + sys.argv[2] + ". Reply with the word ok."}]}))' "$model" "$sent_rid")"
+  if [ "$model" = "$QWEN_NATIVE_MODEL" ]; then
+    write_qwen_proof_intent "$pending" "$sent_rid" "$model" "$catalog_release" "$catalog_digest" \
+      "$canary_sid_hash" "$b_mtp" "$b_req" "$b_cb" "$b_shared" ||
+      refuse "could not durably persist the pending Qwen proof intent"
+  fi
   # The bearer goes through curl --config on stdin, never argv.
   code="$(printf 'header = "Authorization: Bearer %s"\n' "$(tr -d '\r\n' < "$token_file")" |
     curl -sS -m 120 --config - -D "$headers" -o "$body" -w '%{http_code}' \
@@ -668,6 +1202,7 @@ gateway_proof() {
   [ "$code" = "200" ] || die "gateway returned HTTP $code for $model (request id ${rid:-none})"
   [ -n "$rid" ] || die "gateway response carries no X-Request-ID"
   [[ "$rid" =~ ^[A-Za-z0-9._-]+$ ]] || die "gateway request id has unexpected characters"
+  [ "$rid" = "$sent_rid" ] || die "gateway response request id does not match the sent request id"
   local served_sid="" k
   for k in 1 2 3 4 5 6; do
     served_sid="$(pearl_ssh "'$psqlite' -readonly '$pdb' \"SELECT provider_assigned_id FROM request_log WHERE external_request_id = '$rid' ORDER BY id DESC LIMIT 1;\"" 2>/dev/null)" ||
@@ -696,11 +1231,21 @@ gateway_proof() {
   local evidence="HTTP 200 model=$model request_id=$rid served_by=canary mtp_forwards+$((a_mtp - b_mtp)) requests_total+$((a_req - b_req)) cb_shared_forward_calls+$((a_shared - b_shared)) cb_active=$a_cb serial=$a_serial"
   log "gateway proof: $evidence"
   mark_done "$OPS_SCOPE" gateway_proof "$evidence" \
-    "$(python3 -c 'import json,sys; import hashlib; print(json.dumps({"request_id": sys.argv[1], "sent_request_id": sys.argv[2], "mtp_forwards_delta": int(sys.argv[3]), "requests_total_delta": int(sys.argv[4]), "cb_shared_forward_calls_delta": int(sys.argv[5]), "native_mtp_forward_required": sys.argv[6] == "true", "served_by_canary": True, "served_session_sha256": hashlib.sha256(sys.argv[7].encode()).hexdigest()}))' "$rid" "$sent_rid" "$((a_mtp - b_mtp))" "$((a_req - b_req))" "$((a_shared - b_shared))" "$require_mtp" "$served_sid")"
+    "$(python3 -c 'import json,sys; import hashlib; print(json.dumps({"request_id": sys.argv[1], "sent_request_id": sys.argv[2], "mtp_forwards_delta": int(sys.argv[3]), "requests_total_delta": int(sys.argv[4]), "cb_shared_forward_calls_delta": int(sys.argv[5]), "native_mtp_forward_required": sys.argv[6] == "true", "served_by_canary": True, "served_session_sha256": hashlib.sha256(sys.argv[7].encode()).hexdigest(), "proof_model": sys.argv[8], "catalog_release_id": sys.argv[9], "catalog_digest": sys.argv[10]}))' "$rid" "$sent_rid" "$((a_mtp - b_mtp))" "$((a_req - b_req))" "$((a_shared - b_shared))" "$require_mtp" "$served_sid" "$model" "$catalog_release" "$catalog_digest")"
+  if [ "$model" = "$QWEN_NATIVE_MODEL" ]; then
+    fsync_file_and_parent "$(marker_path "$OPS_SCOPE" gateway_proof)" ||
+      refuse "successful Qwen proof marker could not be made durable"
+    if ! resolve_qwen_proof_intent "$pending" accepted_with_counter_evidence; then
+      discard_file_durably "$(marker_path "$OPS_SCOPE" gateway_proof)" ||
+        refuse "Qwen proof intent resolution failed and its success marker could not be discarded"
+      refuse "successful Qwen proof intent could not be durably resolved"
+    fi
+  fi
 }
 
 internal() {
   case "$1" in
+    _qwen-lock-reconcile) reconcile_qwen_restore_lock ;;
     _gateway-proof)
       R="$(json_field "$REPO_ROOT/$AUTOTUNE/release.json" 'd["release_id"]')"
       OPS_SCOPE="catalog-$R"

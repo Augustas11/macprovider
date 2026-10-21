@@ -67,6 +67,7 @@ class Fixture:
         fake = f"""#!/bin/sh
 printf '%s\\t' "$@" >> {str(self.calls)!r}
 printf '\\n' >> {str(self.calls)!r}
+command="$1"
 out=
 policy=
 validate=false
@@ -85,6 +86,9 @@ fi
 if [ "$validate" = true ]; then
   policy_sha="$(/usr/bin/shasum -a 256 "$policy" | /usr/bin/awk '{{print $1}}')"
   printf '{{"validate_only":"pass","target_sha256":"__TARGET__","mtp_sha256":"__TARGET__","tokenizer_sha256":"__TOKENIZER__","policy_sha256":"%s","cells":["s1-p1536-o128","s1-p1536-o512","s1-p4096-o128","s1-p4096-o512","s2-p1536-o128","s2-p1536-o512","s2-p4096-o128","s2-p4096-o512","s3-p1536-o128","s3-p1536-o512","s3-p4096-o128","s3-p4096-o512","s4-p1536-o128","s4-p1536-o512","s4-p4096-o128","s4-p4096-o512"],"sustained_cell_id":"s4-p1536-o512","existing_records":false}}\\n' "$policy_sha"
+fi
+if [ "$command" = native-mtp-journey-e2e ]; then
+  printf '%s\n' '{{"schema":"macprovider.native-mtp-journey-hardware-result.v1","journey_complete":false,"executed_steps_status":"partial","covered_steps":["step-04-serial-token-oracle","step-05-cache-state-boundary","step-06-streaming-stop","step-07-mixed-multirow","step-08-capacity-and-depth-zero","step-09-cancellation","step-10-warm-swap","step-12-native-canary (provider-local self-test half)"],"pending_steps":["step-01-bind-tuple","step-02-capability-negatives","step-03-artifact-security-negatives","step-11-accounting","step-12-native-canary (coordinator SPEC-031-R033 half)","step-14-studio-and-tier-benchmark","step-15-redaction-review"],"evidence_class":"lab_isolated_no_join","model_id":"qwen/qwen3.6-35b-a3b","target_sha256":"__TARGET__","mtp_sha256":"__MTP__","tokenizer_sha256":"__TOKENIZER__","mtp_manifest_sha256":"__MTP_MANIFEST__","qualified_slots":8,"max_native_active_rows":1,"max_prompt_tokens":4096,"request_feature_profile":"native_mtp_sampled_text_v1","machine":{{"chip":"Apple M3 Ultra","ram_gb":256,"os_version":"26A434"}},"steps":[{{"step_id":"step-04-serial-token-oracle","status":"pass","uncovered_contract":[],"checks":{{"ok":true}},"details":{{}}}},{{"step_id":"step-05-cache-state-boundary","status":"pass","uncovered_contract":[],"checks":{{"ok":true}},"details":{{}}}},{{"step_id":"step-06-streaming-stop","status":"pass","uncovered_contract":[],"checks":{{"ok":true}},"details":{{}}}},{{"step_id":"step-07-08-mixed-multirow-capacity","status":"pass","uncovered_contract":[],"checks":{{"ok":true}},"details":{{}}}},{{"step_id":"step-09-cancellation","status":"pass","uncovered_contract":[],"checks":{{"ok":true}},"details":{{}}}},{{"step_id":"step-10-warm-swap","status":"pass","uncovered_contract":[],"checks":{{"ok":true}},"details":{{}}}},{{"step_id":"step-12-native-selftest","status":"partial","uncovered_contract":["coordinator-issued SPEC-031-R033 canary and its negative outcomes"],"checks":{{"ok":true}},"details":{{}}}}]}}'
 fi
 """
         for path in (cli_target, bench_target):
@@ -198,6 +202,9 @@ fi
         glm_cells = ','.join(f'"{cell}"' for cell in jobs.QUALIFICATION_CELLS)
         qwen_cells = ','.join(f'"{cell}"' for cell in jobs.QWEN_QUALIFICATION_CELLS)
         text = text.replace(f'"mtp_sha256":"{target_digest}"', f'"mtp_sha256":"{mtp_digest}"')
+        text = text.replace("__MTP__", mtp_digest).replace(
+            "__MTP_MANIFEST__", sha(mtp / "config.json")
+        )
         text = text.replace(glm_cells, qwen_cells).replace(
             '"sustained_cell_id":"s4-p1536-o512"',
             '"sustained_cell_id":"s8-p1536-o512"',
@@ -280,7 +287,7 @@ fi
         write_json(self.source / jobs.POLICY_RELATIVE, policy)
 
     def snapshot(self, kind: str) -> dict:
-        if kind == "qwen-qualification":
+        if kind in jobs.QWEN_JOB_KINDS:
             self._write_qwen_inputs()
         args = argparse.Namespace(
             source_dir=str(self.source), git_head=self.head,
@@ -556,8 +563,80 @@ class StudioLabJobsTests(unittest.TestCase):
         self.assertEqual(set(snapshot["artifacts"]), jobs.QWEN_ARTIFACT_FIELDS)
         self.assertNotIn("glmbench_tree_oid", snapshot["job"]["immutable_inputs"])
 
-    def test_qwen_source_build_and_remote_load_accepts_only_qwen_artifacts(self):
-        snapshot = self.fixture.snapshot("qwen-qualification")
+    def test_qwen_journey_preflight_is_read_only_and_run_is_one_fixed_command(self):
+        manifest_path = self.fixture.manifest("qwen-journey")
+        manifest, job = jobs.load_job_manifest(str(manifest_path))
+        self.assertEqual(job["immutable_inputs"]["journey_profile"], jobs.QWEN_JOURNEY_PROFILE)
+        self.assertNotIn("qualification_cells", job["immutable_inputs"])
+        jobs.validate_job(argparse.Namespace(manifest=str(manifest_path)))
+        self.assertEqual(self.fixture.recorded_calls(), [])
+        result = jobs.run_job(argparse.Namespace(manifest=str(manifest_path)))
+        self.assertEqual(self.fixture.recorded_calls(), [[
+            "native-mtp-journey-e2e", "--root", str(self.fixture.source / ".lab-window/fixture"),
+            "--model-id", "qwen/qwen3.6-35b-a3b", "--qualified-slots", "8",
+            "--max-native-active-rows", "1", "--max-prompt-tokens", "4096",
+        ]])
+        self.assertEqual(set(result["outputs"]), {"journey.log"})
+        self.assertIn("fixture_mtp_sha256", result["executed_inputs"])
+        self.assertFalse(result["qualification_activated"])
+
+    def test_qwen_journey_result_refuses_identity_runtime_and_failed_checks(self):
+        manifest_path = self.fixture.manifest("qwen-journey")
+        manifest, job = jobs.load_job_manifest(str(manifest_path))
+        jobs.validate_job(argparse.Namespace(manifest=str(manifest_path)))
+        jobs.run_job(argparse.Namespace(manifest=str(manifest_path)))
+        result_path = self.fixture.source / ".lab-window/result-qwen-journey-nonce/journey.log"
+        valid = json.loads(result_path.read_text().splitlines()[-1])
+        for name, mutate in (
+            ("model", lambda value: value.__setitem__("model_id", "wrong/model")),
+            ("runtime", lambda value: value.__setitem__("request_feature_profile", "wrong-profile")),
+            ("projection", lambda value: value.__setitem__("mtp_sha256", "f" * 64)),
+            ("hardware", lambda value: value["steps"][0]["checks"].__setitem__("ok", False)),
+            ("step-05-partial", lambda value: value["steps"][1].update({
+                "status": "partial", "uncovered_contract": ["external"],
+            })),
+            ("step-12-pass", lambda value: value["steps"][6].update({
+                "status": "pass", "uncovered_contract": [],
+            })),
+            ("step-12-altered-uncovered", lambda value: value["steps"][6].update({
+                "uncovered_contract": [
+                    "coordinator-issued SPEC-031-R033 canary and its negative outcome"
+                ],
+            })),
+            ("step-12-extra-uncovered", lambda value: value["steps"][6].update({
+                "uncovered_contract": [
+                    "coordinator-issued SPEC-031-R033 canary and its negative outcomes",
+                    "external",
+                ],
+            })),
+        ):
+            changed = json.loads(json.dumps(valid))
+            mutate(changed)
+            candidate = self.fixture.root / f"bad-{name}.log"
+            candidate.write_text(json.dumps(changed) + "\n")
+            with self.subTest(name=name), self.assertRaises(jobs.Refusal):
+                jobs.validate_qwen_journey_result(candidate, job)
+
+    def test_qwen_journey_job_refuses_rebound_runtime_profile(self):
+        job = self.fixture.snapshot("qwen-journey")["job"]
+        job["immutable_inputs"]["journey_profile"]["request_feature_profile"] = "wrong-profile"
+        job["identity_sha256"] = jobs.canonical_digest({
+            "kind": job["kind"], "immutable_inputs": job["immutable_inputs"],
+        })
+        with self.assertRaisesRegex(jobs.Refusal, "journey profile"):
+            jobs.validate_job_object(job)
+
+    def test_qwen_journey_mtp_mutation_refuses_before_command(self):
+        manifest = self.fixture.manifest("qwen-journey")
+        jobs.validate_job(argparse.Namespace(manifest=str(manifest)))
+        mtp = self.fixture.source / ".lab-window/fixture/mtp/model.safetensors"
+        mtp.write_bytes(b"changed before journey\n")
+        with self.assertRaisesRegex(jobs.Refusal, "MTP fixture changed after job preflight"):
+            jobs.run_job(argparse.Namespace(manifest=str(manifest)))
+        self.assertEqual(self.fixture.recorded_calls(), [])
+
+    def test_qwen_journey_source_build_and_remote_load_accepts_only_qwen_artifacts(self):
+        snapshot = self.fixture.snapshot("qwen-journey")
         snapshot_path = self.fixture.root / "source-snapshot.json"
         probe_path = self.fixture.root / "probe.json"
         write_json(snapshot_path, snapshot)
@@ -597,7 +676,7 @@ class StudioLabJobsTests(unittest.TestCase):
             owner_pin_journal=str(self.fixture.root / "owner.json"),
             lab_source_dir=str(self.fixture.source), lab_script_path=str(self.fixture.staged_script),
             log_path=str(self.fixture.root / "provider.log"), drain_timeout_s="600",
-            lab_timeout_s="43200", ready_timeout_s="120", poll_s="5",
+            lab_timeout_s="7200", ready_timeout_s="120", poll_s="5",
         )
         manifest = jobs.build_manifest(args)
         path = self.fixture.stage / "window.json"

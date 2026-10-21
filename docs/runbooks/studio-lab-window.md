@@ -40,7 +40,7 @@ controller. Also set:
 | `STUDIO_LAB_SOURCE_DIR` | Absolute path to the campaign clone on the Studio |
 | `STUDIO_LAB_GIT_HEAD` | Exact 40-character campaign commit |
 | `STUDIO_LAB_WINDOW_DIR` | Dedicated private directory for this window's journal and staged helpers |
-| `STUDIO_LAB_JOB_KIND` | Closed job kind: `diagnostic-legacy` (default), `profiler-only`, `qualification`, or `qwen-qualification` |
+| `STUDIO_LAB_JOB_KIND` | Closed job kind: `diagnostic-legacy` (default), `profiler-only`, `qualification`, `qwen-qualification`, or `qwen-journey` |
 
 The command and its arguments are fixed in
 `scripts/lab/2080-native-rows/run-window-diagnostic.sh`. There is no shell
@@ -113,6 +113,16 @@ Metal library; GLMBench is not required. The live GLM artifact projection
 remains in place during qualification. The same bounded supervisor, lock,
 signed-provider restoration and completion checks apply. A completed lab job
 does not publish or activate an admission.
+
+`qwen-journey` uses the same protected Qwen inputs and fixed tuple to run only
+the full local `native-mtp-journey-e2e` harness. It does not repeat the R015
+matrix or sustained test. The Qwen harness tests its actual
+`native_mtp_sampled_text_v1` profile, including seeded sampled parity and
+forced rollback. Every local check must pass; the result remains explicitly
+partial because coordinator, billing, and other external journey clauses are
+not exercised by this offline process. Its child deadline is 5400 seconds and
+the guarded window ceiling is 7200 seconds. Preserve existing qualification
+evidence and complete external acceptance separately.
 
 Before pausing service, qualification runs the harness's authoritative
 `--validate-only` preflight without loading the model. A policy not admitted
