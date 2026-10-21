@@ -4430,6 +4430,150 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(observer.snapshot(), [])
     }
 
+    func testQwenPreparationLaneEligibilityIsClosedToExactAdapterAndTextTarget() {
+        XCTAssertTrue(ModelRuntime.continuousBatchTextPreparationEligible(
+            familyAdapter: "qwen3_5_mtp_v1",
+            nativeVisionProfile: nil
+        ))
+        XCTAssertFalse(ModelRuntime.continuousBatchTextPreparationEligible(
+            familyAdapter: "glm5_next_mtp_v1",
+            nativeVisionProfile: nil
+        ))
+        XCTAssertFalse(ModelRuntime.continuousBatchTextPreparationEligible(
+            familyAdapter: nil,
+            nativeVisionProfile: nil
+        ))
+        XCTAssertFalse(ModelRuntime.continuousBatchTextPreparationEligible(
+            familyAdapter: "qwen3_5_mtp_v1",
+            nativeVisionProfile: NativeVisionProfile(
+                artifactSHA256: "vision",
+                processorConfigSHA256: "processor",
+                tokenizerConfigSHA256: "tokenizer",
+                chatTemplateSHA256: "template"
+            )
+        ))
+    }
+
+    func testQwenPreparationLanePreservesPromptStopsToolPrefillAndCheckpoints() async throws {
+        let tokenizer = RuntimeBridgePreparationTokenizer()
+        let generationPrompt = "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        let baseTokens = [tokenizer.imStartTokenID]
+            + tokenizer.encode(text: "system\n" + String(repeating: "s", count: 40), addSpecialTokens: false)
+            + [tokenizer.imStartTokenID]
+            + tokenizer.encode(text: "user\nweather", addSpecialTokens: false)
+            + tokenizer.encode(text: generationPrompt, addSpecialTokens: false)
+        let laneProcessor = RuntimeBridgeCapturingPromptProcessor(tokens: baseTokens.map(Int32.init))
+        let legacyProcessor = RuntimeBridgeCapturingPromptProcessor(tokens: baseTokens.map(Int32.init))
+        let configuration = ModelConfiguration(
+            id: ToolSelectionPolicy.supportedNativeModel,
+            extraEOSTokens: [tokenizer.extraEOSToken],
+            eosTokenIds: [901]
+        )
+        let lane = ContinuousBatchTextPreparationLane(
+            processor: laneProcessor,
+            tokenizer: tokenizer,
+            configuration: configuration,
+            hasRecurrentLayers: true
+        )
+        let request = try Self.toolChatRequest(modelID: ToolSelectionPolicy.supportedNativeModel)
+            .withConversationKey("conv:lane-parity")
+        let (prepared, _) = try await lane.prepare(
+            request: request,
+            maxContextTokens: 4096,
+            templateSupportsThinkingToggle: true,
+            templateSupportsPreserveThinking: true,
+            toolSelectionModelID: ToolSelectionPolicy.supportedNativeModel
+        )
+        let context = ModelContext(
+            configuration: configuration,
+            model: RuntimeBridgeFakeModel(nextTokenByInput: [:]),
+            processor: legacyProcessor,
+            tokenizer: tokenizer
+        )
+        let (legacyInput, legacyToolCallPrefill) = try await ModelRuntime.preparedRequestInput(
+            for: request,
+            context: context,
+            templateSupportsThinkingToggle: true,
+            templateSupportsPreserveThinking: true,
+            toolSelectionModelID: ToolSelectionPolicy.supportedNativeModel
+        )
+        let plan = try XCTUnwrap(ModelRuntime.toolCallPrefill(
+            for: request,
+            toolSelectionModelID: ToolSelectionPolicy.supportedNativeModel
+        ))
+        XCTAssertEqual(
+            Array(baseTokens.suffix(tokenizer.encode(text: plan.generationPromptSuffix, addSpecialTokens: false).count)),
+            tokenizer.encode(text: plan.generationPromptSuffix, addSpecialTokens: false)
+        )
+        let expectedPrompt = baseTokens + tokenizer.encode(text: plan.prefill, addSpecialTokens: false)
+        let expectedStops: Set<Int> = [901, tokenizer.eosTokenID, tokenizer.extraEOSTokenID]
+        XCTAssertEqual(prepared.promptTokens, expectedPrompt)
+        XCTAssertEqual(prepared.promptTokens, legacyInput.text.tokens.asArray(Int.self))
+        XCTAssertEqual(prepared.toolCallPrefill, plan.prefill)
+        XCTAssertEqual(prepared.toolCallPrefill, legacyToolCallPrefill)
+        XCTAssertEqual(prepared.modelStopTokenIDs, expectedStops)
+        XCTAssertEqual(
+            prepared.stopTokenSequences,
+            expectedStops.sorted().map { [$0] } + [tokenizer.encode(text: "BUYER", addSpecialTokens: false)]
+        )
+        XCTAssertEqual(prepared.recurrentCheckpointPositions, [48, 61])
+        XCTAssertTrue(prepared.modelHasRecurrentLayers)
+        let laneInput = try XCTUnwrap(laneProcessor.lastInput())
+        let legacyCapturedInput = try XCTUnwrap(legacyProcessor.lastInput())
+        XCTAssertEqual(laneInput, legacyCapturedInput)
+        XCTAssertEqual(laneInput.roles, ["system", "user"])
+        XCTAssertTrue(laneInput.contents[0].contains("Return only tool calls"))
+        XCTAssertEqual(laneInput.toolNames, ["get_weather"])
+        XCTAssertEqual(laneInput.enableThinking, false)
+        XCTAssertEqual(laneInput.preserveThinking, true)
+    }
+
+    func testQwenPreparationLaneSnapshotStaysPinnedAcrossWarmSwap() async throws {
+        let tokenizer = RuntimeBridgePreparationTokenizer()
+        let processor = RuntimeBridgePromptProcessor(tokens: [3])
+        let configuration = ModelConfiguration(id: "mlx-community/Qwen3.6-Test")
+        let oldLane = ContinuousBatchTextPreparationLane(
+            processor: processor,
+            tokenizer: tokenizer,
+            configuration: configuration,
+            hasRecurrentLayers: true
+        )
+        let loaderGate = RuntimeBridgeTestGate()
+        let runtime = Self.attachedRuntime(
+            modelID: "mlx-community/Qwen3.6-Test",
+            backend: RuntimeBridgeScriptedBackend(scripts: [:]),
+            preparationLane: oldLane,
+            warmSwapEnabled: true,
+            testLoader: { target in
+                await loaderGate.wait()
+                return (target, "new-hash")
+            }
+        )
+        let oldRequest = try Self.chatRequest(modelID: "mlx-community/Qwen3.6-Test", maxTokens: 1)
+            .withRequestID("old-lane")
+        let oldHandle = try await runtime.acquireRequestHandle(oldRequest)
+        let swap = try await runtime.beginSwap(targetModelID: "mlx-community/Qwen3.6-New")
+        defer { Task { await loaderGate.open() } }
+        try await Self.eventually { await loaderGate.waitingCount() == 1 }
+        let loadingSnapshot = await runtime.currentSnapshot()
+        XCTAssertEqual(loadingSnapshot.state, .loading)
+        XCTAssertTrue(oldHandle.snapshot.continuousBatchTextPreparationLane === oldLane)
+        await runtime.unregisterInFlight(oldHandle.registrationID)
+        try await swap.value
+        let swappedSnapshot = await runtime.currentSnapshot()
+        XCTAssertEqual(swappedSnapshot.modelID, "mlx-community/Qwen3.6-New")
+        XCTAssertNil(swappedSnapshot.continuousBatchTextPreparationLane)
+        XCTAssertTrue(oldHandle.snapshot.continuousBatchTextPreparationLane === oldLane)
+    }
+
+    func testQwenPreparationLaneAdmitsNonStreamingRowWhileTargetLockIsHeld() async throws {
+        try await assertQwenPreparationLaneAdmitsWhileTargetLockIsHeld(streaming: false)
+    }
+
+    func testQwenPreparationLaneAdmitsStreamingRowWhileTargetLockIsHeld() async throws {
+        try await assertQwenPreparationLaneAdmitsWhileTargetLockIsHeld(streaming: true)
+    }
+
     func testAttachedModelRuntimeServesFreshGreedyRequestsThroughScheduler() async throws {
         guard PagedKVMetallibGate.defaultMetallibExists() else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")
@@ -5316,14 +5460,105 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         return try ChatCompletionRequest.parse(data: data)
     }
 
+    private static func toolChatRequest(modelID: String) throws -> ChatCompletionRequest {
+        let schema: [String: Any] = [
+            "type": "object",
+            "properties": ["city": ["type": "string"]],
+            "required": ["city"],
+            "additionalProperties": false,
+        ]
+        let body: [String: Any] = [
+            "model": modelID,
+            "messages": [["role": "user", "content": "What's the weather in Paris?"]],
+            "max_tokens": 2,
+            "stop": ["BUYER"],
+            "tool_choice": "required",
+            "tools": [[
+                "type": "function",
+                "function": ["name": "get_weather", "parameters": schema],
+            ]],
+        ]
+        return try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: body))
+    }
+
+    private func assertQwenPreparationLaneAdmitsWhileTargetLockIsHeld(streaming: Bool) async throws {
+        let modelID = "mlx-community/Qwen3.6-Test"
+        let tokenizer = RuntimeBridgePreparationTokenizer()
+        let processor = RuntimeBridgePromptProcessor(tokens: [3])
+        let configuration = ModelConfiguration(id: modelID)
+        let container = ModelContainer(context: ModelContext(
+            configuration: configuration,
+            model: RuntimeBridgeFakeModel(nextTokenByInput: [:]),
+            processor: processor,
+            tokenizer: tokenizer
+        ))
+        let lane = ContinuousBatchTextPreparationLane(
+            processor: processor,
+            tokenizer: tokenizer,
+            configuration: configuration,
+            hasRecurrentLayers: true
+        )
+        let backend = RuntimeBridgeScriptedBackend(scripts: [:])
+        let runtime = Self.attachedRuntime(
+            modelID: modelID,
+            backend: backend,
+            container: container,
+            preparationLane: lane
+        )
+        let request = try Self.chatRequest(modelID: modelID, maxTokens: 2)
+            .withRequestID(streaming ? "lane-lock-stream" : "lane-lock-complete")
+        let handle = streaming ? try await runtime.acquireRequestHandle(request) : nil
+        let targetLock = RuntimeBridgeTestGate()
+        let lockTask = Task {
+            try await container.perform { _ in
+                await targetLock.wait()
+            }
+        }
+        defer {
+            Task { await targetLock.open() }
+        }
+        try await Self.eventually { await targetLock.waitingCount() == 1 }
+
+        let operation = Task<CompletionResult, Error> {
+            if let handle {
+                return try await runtime.stream(request, with: handle) { _ in }
+            }
+            return try await runtime.complete(request)
+        }
+        defer {
+            operation.cancel()
+            if let handle {
+                Task { await runtime.unregisterInFlight(handle.registrationID) }
+            }
+        }
+        try await Self.eventually { await backend.prefillCallCount() == 1 }
+        let prefillCallsWhileLocked = await backend.prefillCallCount()
+        let lockWaitersBeforeRelease = await targetLock.waitingCount()
+        XCTAssertEqual(prefillCallsWhileLocked, 1)
+        XCTAssertEqual(lockWaitersBeforeRelease, 1)
+
+        await targetLock.open()
+        try await lockTask.value
+        let completion = try await operation.value
+        XCTAssertEqual(completion.promptTokens, 1)
+        XCTAssertEqual(completion.completionTokens, 2)
+        if let handle {
+            await runtime.unregisterInFlight(handle.registrationID)
+        }
+    }
+
     private static func attachedRuntime(
         modelID: String,
         backend: RuntimeBridgeScriptedBackend,
-        promptTokens: [Int32] = [3]
+        promptTokens: [Int32] = [3],
+        container suppliedContainer: ModelContainer? = nil,
+        preparationLane: ContinuousBatchTextPreparationLane? = nil,
+        warmSwapEnabled: Bool = false,
+        testLoader: (@Sendable (String) async throws -> (String, String?))? = nil
     ) -> ModelRuntime {
         let modelSHA = String(repeating: "a", count: 64)
         let proof = Self.sizingProof(modelID: modelID, modelSHA: modelSHA)
-        let container = ModelContainer(context: ModelContext(
+        let container = suppliedContainer ?? ModelContainer(context: ModelContext(
             configuration: ModelConfiguration(id: modelID),
             model: RuntimeBridgeFakeModel(nextTokenByInput: [:]),
             processor: RuntimeBridgePromptProcessor(tokens: promptTokens),
@@ -5336,14 +5571,16 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             maxBatch: 2,
             continuousBatchingMode: .on,
             continuousBatchingDurableReplayAuthorityAvailable: true,
-            warmSwapEnabled: false,
+            warmSwapEnabled: warmSwapEnabled,
             pagedKVObservedRuntimeIdentity: Self.observedIdentity(from: proof),
             pagedKVHardwareSizingProof: proof,
             pagedKVRuntimeCacheClass: "KVCacheSimple",
             pagedKVSchedulerBackendInstalled: true,
             container: container,
             continuousBatchingBackend: backend,
-            loader: { _ in throw PagedKVRuntimeBridgeTestError.notExpected }
+            testContinuousBatchTextPreparationLane: preparationLane,
+            loader: { _ in throw PagedKVRuntimeBridgeTestError.notExpected },
+            testLoader: testLoader
         )
     }
 
@@ -6016,6 +6253,120 @@ private struct RuntimeBridgeFakeTokenizer: Tokenizer {
     }
 }
 
+private struct RuntimeBridgePreparationTokenizer: Tokenizer {
+    let imStartTokenID = 151_644
+    let eosTokenID = 151_645
+    let extraEOSTokenID = 151_646
+    let extraEOSToken = "<|extra_eos|>"
+    let bosToken: String? = nil
+    let eosToken: String? = "<|eos|>"
+    let unknownToken: String? = nil
+
+    func encode(text: String, addSpecialTokens: Bool) -> [Int] {
+        let specialTokens = [
+            ("<|im_start|>", imStartTokenID),
+            ("<|eos|>", eosTokenID),
+            (extraEOSToken, extraEOSTokenID),
+        ]
+        var tokens: [Int] = []
+        var index = text.startIndex
+        while index < text.endIndex {
+            if let special = specialTokens.first(where: { text[index...].hasPrefix($0.0) }) {
+                tokens.append(special.1)
+                index = text.index(index, offsetBy: special.0.count)
+            } else {
+                tokens.append(Int(text[index].unicodeScalars.first!.value))
+                index = text.index(after: index)
+            }
+        }
+        return tokens
+    }
+
+    func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
+        tokenIds.map { tokenID in
+            switch tokenID {
+            case imStartTokenID: return "<|im_start|>"
+            case eosTokenID: return skipSpecialTokens ? "" : "<|eos|>"
+            case extraEOSTokenID: return skipSpecialTokens ? "" : extraEOSToken
+            default: return UnicodeScalar(tokenID).map(String.init) ?? ""
+            }
+        }.joined()
+    }
+
+    func convertTokenToId(_ token: String) -> Int? {
+        switch token {
+        case "<|im_start|>": return imStartTokenID
+        case "<|eos|>": return eosTokenID
+        case extraEOSToken: return extraEOSTokenID
+        default: return Int(token)
+        }
+    }
+
+    func convertIdToToken(_ id: Int) -> String? {
+        switch id {
+        case imStartTokenID: return "<|im_start|>"
+        case eosTokenID: return "<|eos|>"
+        case extraEOSTokenID: return extraEOSToken
+        default: return UnicodeScalar(id).map(String.init)
+        }
+    }
+
+    func applyChatTemplate(
+        messages: [[String: any Sendable]],
+        tools: [[String: any Sendable]]?,
+        additionalContext: [String: any Sendable]?
+    ) throws -> [Int] {
+        []
+    }
+}
+
+private struct RuntimeBridgeCapturedUserInput: Equatable {
+    let roles: [String]
+    let contents: [String]
+    let toolNames: [String]
+    let enableThinking: Bool?
+    let preserveThinking: Bool?
+}
+
+private final class RuntimeBridgeCapturingPromptProcessor: UserInputProcessor, @unchecked Sendable {
+    private let tokens: [Int32]
+    private let lock = NSLock()
+    private var captured: RuntimeBridgeCapturedUserInput?
+
+    init(tokens: [Int32]) {
+        self.tokens = tokens
+    }
+
+    func prepare(input: UserInput) throws -> LMInput {
+        let messages: [Chat.Message]
+        if case .chat(let chat) = input.prompt {
+            messages = chat
+        } else {
+            messages = []
+        }
+        let toolNames = input.tools?.compactMap { tool in
+            (tool["function"] as? [String: Any])?["name"] as? String
+        } ?? []
+        let fingerprint = RuntimeBridgeCapturedUserInput(
+            roles: messages.map(\.role.rawValue),
+            contents: messages.map(\.content),
+            toolNames: toolNames,
+            enableThinking: input.additionalContext?["enable_thinking"] as? Bool,
+            preserveThinking: input.additionalContext?["preserve_thinking"] as? Bool
+        )
+        lock.lock()
+        captured = fingerprint
+        lock.unlock()
+        return LMInput(tokens: MLXArray(tokens).reshaped(1, tokens.count))
+    }
+
+    func lastInput() -> RuntimeBridgeCapturedUserInput? {
+        lock.lock()
+        defer { lock.unlock() }
+        return captured
+    }
+}
+
 private struct RuntimeBridgePromptProcessor: UserInputProcessor {
     let tokens: [Int32]
 
@@ -6205,6 +6556,10 @@ private actor RuntimeBridgeTestGate {
         for continuation in pending {
             continuation.resume()
         }
+    }
+
+    func waitingCount() -> Int {
+        continuations.count
     }
 }
 

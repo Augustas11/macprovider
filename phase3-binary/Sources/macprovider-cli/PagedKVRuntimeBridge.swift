@@ -912,7 +912,11 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             throw ContinuousBatchSchedulerError.unsupported("continuous_batching_backend_cancelled")
         }
         defer { endOperation() }
-        return try await container.perform(nonSendable: inputs) { context, inputs in
+        CBTrace.logPreparation(
+            nil,
+            "prefill_group_begin rows=\(inputs.count) ids=\(inputs.map(\.requestID).joined(separator: ",")) offsets=\(inputs.map(\.promptTokenOffset).map(String.init).joined(separator: ",")) chunks=\(inputs.map { $0.promptTokens.count }.map(String.init).joined(separator: ","))"
+        )
+        let outputs = try await container.perform(nonSendable: inputs) { context, inputs in
             self.enterTargetLock(); defer { self.exitTargetLock() }
             let raggedOffsets = Self.hasRaggedPromptOffsets(inputs)
             if Self.canSharePrefillForward(
@@ -1115,6 +1119,11 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             self.clearDecodeSession()
             return outputs
         }
+        CBTrace.logPreparation(
+            nil,
+            "prefill_group_end rows=\(inputs.count) ids=\(inputs.map(\.requestID).joined(separator: ","))"
+        )
+        return outputs
     }
 
     /// The `[B, >=L, hidden]` prompt hidden states of a shared prefill that
