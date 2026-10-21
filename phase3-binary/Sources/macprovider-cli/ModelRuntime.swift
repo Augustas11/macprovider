@@ -7437,7 +7437,8 @@ maxTokens: 1,
             guaranteedSelection = (try? ToolSelectionPolicy.selection(request.promptSource.toolChoice).requiresCall) == true
             observer = NativeToolCallStreamEmitter(
                 modelID: request.model,
-                allowedFunctionNames: ModelRuntime.toolFunctionNames(from: request.promptSource.tools)
+                allowedFunctionNames: ModelRuntime.toolFunctionNames(from: request.promptSource.tools),
+                schemas: ModelRuntime.autoToolParameterSchemas(from: request.promptSource.tools)
             )
             self.incrementalDecoder = incrementalDecoder
         }
@@ -9181,7 +9182,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             Self.clearMLXBufferCacheAfterPrefill()
                             var serialToolObserver = NativeToolCallStreamEmitter(
                                 modelID: request.model,
-                                allowedFunctionNames: Self.toolFunctionNames(from: request.promptSource.tools)
+                                allowedFunctionNames: Self.toolFunctionNames(from: request.promptSource.tools),
+                                schemas: Self.autoToolParameterSchemas(from: request.promptSource.tools)
                             )
                             let serialToolStopApplies = Self.serialToolStopApplies(request)
                             #if DEBUG || MACPROVIDER_LAB_HARNESS
@@ -13175,7 +13177,8 @@ maxTokens: maxTokens,
         let parsed = ToolCallParser.parseToolCalls(
             rawOutput: text,
             modelID: request.model,
-            allowedFunctionNames: allowedFunctionNames
+            allowedFunctionNames: allowedFunctionNames,
+            schemas: autoToolParameterSchemas(from: request.promptSource.tools)
         )
         guard !parsed.toolCalls.isEmpty else {
             return (text, [])
@@ -13751,6 +13754,26 @@ maxTokens: maxTokens,
         return names.isEmpty ? nil : Set(names)
     }
 
+    /// Auto accepts schemas beyond the guaranteed-mode subset. Pass declarations
+    /// through without validating or inventing constraints; duplicate names are
+    /// ambiguous and therefore cannot direct argument typing.
+    static func autoToolParameterSchemas(from value: MacProviderCore.JSONValue?) -> [String: MacProviderCore.JSONValue] {
+        guard case .array(let tools)? = value else { return [:] }
+        var schemas: [String: MacProviderCore.JSONValue] = [:]
+        var seen: Set<String> = []
+        for tool in tools {
+            guard case .object(let object) = tool,
+                  case .object(let function)? = object["function"],
+                  case .string(let name)? = function["name"], !name.isEmpty else { continue }
+            guard seen.insert(name).inserted else {
+                schemas.removeValue(forKey: name)
+                continue
+            }
+            schemas[name] = function["parameters"]
+        }
+        return schemas
+    }
+
     /// Converts a JSONValue subtree into the `Any` graph the chat template
     /// consumes, preserving every key and array position. JSON null becomes a
     /// native `Jinja.Value.null` (not `NSNull` and not an omission): swift-jinja
@@ -13830,7 +13853,8 @@ struct SerialStreamingTextEmitter {
         stopsAfterFirstCompleteToolCall = request.stopsAfterFirstCompleteToolCall
         toolStreamer = NativeToolCallStreamEmitter(
             modelID: request.model,
-            allowedFunctionNames: ModelRuntime.toolFunctionNames(from: request.promptSource.tools)
+            allowedFunctionNames: ModelRuntime.toolFunctionNames(from: request.promptSource.tools),
+            schemas: ModelRuntime.autoToolParameterSchemas(from: request.promptSource.tools)
         )
         self.holdsCleanupPatternPrefixes = holdsCleanupPatternPrefixes
         self.holdsCleanupDecoderPendingPrefixes = holdsCleanupDecoderPendingPrefixes
@@ -14019,6 +14043,7 @@ struct NativeToolCallStreamEmitter {
     /// undeclared tool_call to the buyer before the final parser's fail-closed check
     /// (SPEC-018 §3.5). `nil`/empty means no tools were declared, so nothing may be emitted.
     private let allowedFunctionNames: Set<String>?
+    private let schemas: [String: MacProviderCore.JSONValue]?
     /// Function-XML (`<function=…>`) is a Qwen-row-only grammar (SPEC-018 §3.1 v0.2.7). The
     /// streaming emitter mirrors the non-streaming parser's family gate: only Qwen models may
     /// stream `<function=…>` tool-call deltas; other families fall through to JSON parsing (which
@@ -14034,8 +14059,9 @@ struct NativeToolCallStreamEmitter {
     private var emittedArguments = ""
     private var callID = "call_\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())"
 
-    init(modelID: String, allowedFunctionNames: Set<String>?) {
+    init(modelID: String, allowedFunctionNames: Set<String>?, schemas: [String: MacProviderCore.JSONValue]? = nil) {
         self.allowedFunctionNames = allowedFunctionNames
+        self.schemas = schemas
         let isQwen = modelID.localizedCaseInsensitiveContains("qwen2.5")
             || modelID.localizedCaseInsensitiveContains("qwen3")
         let isLlama33 = modelID.localizedCaseInsensitiveContains("llama-3.3")
@@ -14174,7 +14200,11 @@ struct NativeToolCallStreamEmitter {
             return []
         }
 
-        let arguments = isClosed ? ToolCallParser.nemotronArgumentsJSON(in: body, includeIncomplete: true) : nil
+        let arguments = isClosed ? ToolCallParser.nemotronArgumentsJSON(in: body, includeIncomplete: true, schemas: schemas) : nil
+        if isClosed, arguments == nil {
+            closed = true
+            return []
+        }
         if isClosed, let arguments, arguments.utf8.count > ToolCallParser.SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP {
             closed = true
             return []

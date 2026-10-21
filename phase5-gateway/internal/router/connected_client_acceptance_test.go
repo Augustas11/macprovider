@@ -51,6 +51,10 @@ func TestConnectedGooseClientProtocol(t *testing.T) {
 }
 
 func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion string, synthetic bool) {
+	directAnswer := os.Getenv("MACPROVIDER_TEST_OPENCODE_TASK") == "direct-answer"
+	if task := os.Getenv("MACPROVIDER_TEST_OPENCODE_TASK"); task != "" && (!directAnswer || kind != "opencode" || synthetic) {
+		t.Fatal("direct-answer control requires actual OpenCode model acceptance")
+	}
 	binary, upstream := os.Getenv("MACPROVIDER_TEST_"+envPrefix+"_BIN"), os.Getenv("MACPROVIDER_TEST_"+envPrefix+"_UPSTREAM")
 	if binary == "" || (!synthetic && upstream == "") || (synthetic && os.Getenv("MACPROVIDER_TEST_"+envPrefix+"_PROTOCOL") != "1") {
 		t.Skip("requires explicit client binary and isolated Studio provider URL")
@@ -130,6 +134,7 @@ func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion
 	defer cancel()
 	var mu sync.Mutex
 	calls, inbound, streamed, matchedResult := 0, 0, false, false
+	offeredTools := false
 	transport := &http.Transport{Proxy: nil, ResponseHeaderTimeout: 90 * time.Second}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -144,9 +149,10 @@ func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion
 			return nil, fmt.Errorf("fixture request exceeded four MiB")
 		}
 		var payload struct {
-			Model    string `json:"model"`
-			Stream   bool   `json:"stream"`
-			Messages []struct {
+			Model      string          `json:"model"`
+			Stream     bool            `json:"stream"`
+			ToolChoice json.RawMessage `json:"tool_choice"`
+			Messages   []struct {
 				Role       string          `json:"role"`
 				Content    json.RawMessage `json:"content"`
 				ToolCallID string          `json:"tool_call_id"`
@@ -163,6 +169,10 @@ func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion
 			cancel()
 			return nil, fmt.Errorf("unexpected model, streaming mode, or authenticated fixture identity")
 		}
+		if kind == "opencode" && len(payload.Tools) != 0 && !connectedAutomaticChoice(payload.ToolChoice) {
+			cancel()
+			return nil, fmt.Errorf("OpenCode acceptance requires unchanged automatic tool choice")
+		}
 		traceSelected, err := privateTrace.captureRequest(body, len(payload.Tools) != 0)
 		if err != nil {
 			cancel()
@@ -173,6 +183,7 @@ func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion
 		callNumber := calls
 		tooMany := calls > 6
 		streamed = true
+		offeredTools = offeredTools || len(payload.Tools) != 0
 		ids := make(map[string]bool)
 		for _, message := range payload.Messages {
 			for _, call := range message.ToolCalls {
@@ -224,7 +235,13 @@ func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion
 			cancel()
 			return nil, fmt.Errorf("fixture rejected upstream status, size, or incomplete read")
 		}
-		if err := validateConnectedToolStream(held, kind, filepath.Join(root, "workspace")); err != nil {
+		guardKind := kind
+		if directAnswer {
+			// The existing guard rejects every tool name for an unknown kind,
+			// before any model bytes reach the client or execute a tool.
+			guardKind = "direct-answer"
+		}
+		if err := validateConnectedToolStream(held, guardKind, filepath.Join(root, "workspace")); err != nil {
 			t.Logf("tool guard: %v", err)
 			cancel()
 			return nil, err
@@ -314,6 +331,9 @@ env_key = "MALIBU_API_KEY"
 	} else if kind == "goose" {
 		prompt = "Use shell with exactly command=cat marker.txt to read the current workspace marker. Do not inspect any other file or use the network. Reply with exactly its contents and nothing else."
 	}
+	if directAnswer {
+		prompt = "What is 2 + 2? Answer with just the number."
+	}
 	var args []string
 	switch kind {
 	case "codex":
@@ -367,11 +387,22 @@ env_key = "MALIBU_API_KEY"
 	} else {
 		final = []byte(connectedClientFinalText(kind, output.String()))
 	}
-	if err != nil || strings.TrimSpace(string(final)) != marker {
-		t.Fatalf("%s did not return the exact fixture marker: %v; %s", kind, err, connectedClientSummary(kind, output.String(), marker))
+	expectedFinal := marker
+	if directAnswer {
+		expectedFinal = "4"
+	}
+	if err != nil || strings.TrimSpace(string(final)) != expectedFinal {
+		t.Fatalf("%s did not return the exact expected answer: %v; %s", kind, err, connectedClientSummary(kind, output.String(), marker))
 	}
 	mu.Lock()
 	defer mu.Unlock()
+	if directAnswer {
+		if calls < 1 || !streamed || matchedResult || !offeredTools {
+			t.Fatal("missing tool-free streamed answer")
+		}
+		t.Log("real OpenCode returned the exact direct answer without executing tools")
+		return
+	}
 	if calls < 2 || !streamed || !matchedResult {
 		t.Fatalf("missing real streaming tool round trip: requests=%d streamed=%v matched_result=%v", calls, streamed, matchedResult)
 	}
@@ -597,6 +628,7 @@ func TestConnectedClientToolGuard(t *testing.T) {
 		{"unknown tool", "codex", "other", `{"cmd":"cat marker.txt"}`, false},
 		{"read", "opencode", "read", `{"filePath":"/fixture/workspace/marker.txt"}`, true},
 		{"outside read", "opencode", "read", `{"filePath":"/private/secret"}`, false},
+		{"direct answer must not call", "direct-answer", "read", `{"filePath":"/fixture/workspace/marker.txt"}`, false},
 		{"goose-read", "goose", "shell", `{"command":"cat marker.txt","timeout_secs":5}`, true},
 		{"goose-outside", "goose", "shell", `{"command":"cat /etc/passwd"}`, false},
 		{"goose-metacharacters", "goose", "shell", `{"command":"cat marker.txt;env"}`, false},

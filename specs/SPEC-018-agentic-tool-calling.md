@@ -1,6 +1,6 @@
 # SPEC-018 — Agentic tool calling (provider-side response synthesis)
 
-**Version:** 0.2.16 (2026-10-19, exact Connected apps tool-selection profiles)
+**Version:** 0.2.17 (2026-10-21, schema-directed auto function-XML values)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.5.5, SPEC-006 v0.9, SPEC-008 (Pillar A model-hash trust layer — referenced by §10a), SPEC-011 v0.5 (warm-swap heartbeat `model_hash` — referenced by §10a), SPEC-015 v0.4 (receipts canonical output binding — see AC-17 and §N.5)
 **Status:** **LOCKED** at v0.2.10 by the streaming cleanup-rewrite byte-domain clarification. Previously LOCKED at v0.2.9 by the serial-turn `parallel_tool_calls` amendment (omitted/`false` stop after the first complete valid tool). Previously LOCKED at v0.2.8 by the #1594 OpenRouter-aligned AC-53 amendment (no independent messages[] count cap). Previously LOCKED at v0.2.7 by the Qwen3-Coder function-XML tool-call grammar amendment (documents the `<function=…><parameter=…>` XML body that Qwen3-Coder emits as a Qwen-row §3.1 body-grammar alternative, with OpenAI/MCP name charset; pending IMPL/conformance already landed on branch `fix/qwen3coder-toolcall-parse`); previously LOCKED at v0.2.6 by #784 C2b admission-timeout reconciliation — v0.2.4 spec PR #202 and IMPL PR #209 both landed (multi-turn acceptance, token-incremental streaming, `tool_call_id` validation, 1 MiB/2 MiB byte caps). v0.2.5 adds gpt-oss/OpenAI Harmony response parsing as a pending implementation/conformance gap. codex 4-lane r4 0/0/0; Claude blind-spot r2 0/0/0. SPEC-019 already depends on this as "LOCKED". The former "LOCK CANDIDATE pending PR" line was never flipped after merge. (Resolved gap, 2026-07-14, runbook item 15: AC-45's `X-MacProvider-Streaming-Mode` header — set by the coordinator on streaming `200` responses — was stripped by the public gateway's blanket `X-MacProvider-*` filter, making the "header absent" fail condition live on `api.malibu.tech`. Fixed by adding the header to the SPEC-006 v0.9.9 § 5.4 response-pass-through allowlist and un-stripping it at the gateway, validated against AC-45's closed enum. Chosen over scoping AC-45 to the coordinator surface because buyers hit the gateway, so scoping would have left AC-45's buyer-visible promise unmet. AC-45's normative text is unchanged; this is a documentation reconciliation, not a lock amendment. Residual: the coordinator currently emits the diagnostic only on the streaming success path — non-streaming AC-45 emission is a separate coordinator-side completeness item, out of scope for the gateway-strip fix.)
 
@@ -17,6 +17,16 @@ SPEC-018 is the **provider-side response synthesis contract** for OpenAI-wire to
 **Money-path**: all v0.2 changes preserve v0.1.5 settlement protection (`FaultBreakerQualifying` + zero credits on malformed streams via `billing_recorder.go:176` + `formula.go:112`).
 
 ## Change log
+
+- **v0.2.17 (2026-10-21, §3.3 auto function-XML argument decoding):**
+  Ordinary `auto` function-XML decoding now uses an enabled tool's declared
+  parameter type when it is explicit and unambiguous. String values retain
+  literal text, including numeric-looking text and whitespace; structured and
+  other scalar values require strict JSON of the declared type. Final parsing,
+  incremental emission and serial-stop validation use the same decoder.
+  Untyped or ambiguous declarations retain existing auto decoding. This is
+  argument decoding, not guaranteed selection or full JSON Schema validation;
+  auto selection, family detection and recovery boundaries are unchanged.
 
 - **v0.2.15 (2026-10-17, §3.11 call prefill, Related: #2014):**
   On released CLI 1.8.251 the qualified Qwen3.6 model ignored the selection
@@ -375,6 +385,22 @@ Rationale: the v0.1 design closes the prompt-injection vector identified in Secu
 For JSON bodies, the body MUST parse as a JSON object with a non-empty string `name`. For Python-style bodies, the body MUST parse as `name(key=value, ...)` where `name` and keys are Python identifiers and values are supported string, boolean, null, integer, or decimal literals.
 
 For function-XML bodies (v0.2.7), the `<function=NAME>` name and every `<parameter=KEY>` name MUST match the OpenAI/MCP tool-name charset — ASCII `[A-Za-z0-9_-]`, with function names 1–64 characters and parameter (property) names 1–128 characters — and NOT the Python-identifier rule above. Rationale: `NAME` is an OpenAI function name and `KEY` becomes a JSON-Schema property key in `function.arguments`; both legitimately contain hyphens (e.g. MCP-namespaced `buzz-dev-mcp__shell`), which are not Python identifiers. A name outside this charset (or over length) is a parse failure and falls back to plain assistant content per §3.5. The declared-tool allowlist (§3.5) remains the security boundary: a well-formed function-XML name that is not in the request's enabled tools still fails closed.
+
+**v0.2.17 auto function-XML values:** When an enabled tool's `parameters.properties`
+declares a parameter with a single explicit `type`, the provider MUST decode its
+closed XML value using that type. `string` preserves literal text, removing only
+one framing newline (LF or CRLF) directly after the opening parameter tag and
+directly before the closing tag. It MUST NOT trim other whitespace or coerce
+numeric-looking, boolean-looking, JSON-looking or quoted string text. `number`,
+`integer`, `boolean`, `object`, `array` and `null` require strict JSON matching
+the declared type, with the finite safe numeric domain in §3.11 applied
+recursively. Invalid typed values, duplicate keys, excessive depth and arguments
+outside the existing byte caps MUST NOT complete a valid call or a serial stop.
+Call markup inside typed values is malformed. Final parsing and incremental
+emission MUST use the same decoding and validation. An absent, undeclared,
+untyped or ambiguous parameter schema retains the existing auto decoding;
+these rules do not require the guaranteed-mode schema subset, validate all
+schema constraints, force a call or broaden model-family eligibility.
 
 ### 3.4 Ambiguous duplicate argument keys
 

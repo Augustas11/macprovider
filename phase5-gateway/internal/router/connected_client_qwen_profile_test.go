@@ -1,9 +1,28 @@
 package router
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"testing"
 )
+
+func connectedAutomaticChoice(raw json.RawMessage) bool {
+	return len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte(`"auto"`))
+}
+
+func TestConnectedClientAutomaticChoice(t *testing.T) {
+	for _, value := range []string{"", `"auto"`, " \"auto\" "} {
+		if !connectedAutomaticChoice(json.RawMessage(value)) {
+			t.Fatal("rejected automatic selection")
+		}
+	}
+	for _, value := range []string{`"required"`, `"none"`, `null`, `{ "type": "function", "function": {"name":"read"}}`} {
+		if connectedAutomaticChoice(json.RawMessage(value)) {
+			t.Fatal("accepted nonautomatic selection")
+		}
+	}
+}
 
 // A lab-only configuration candidate, not a claim of model acceptance. It uses
 // OpenCode's documented Build-agent prompt override without changing tool choice,

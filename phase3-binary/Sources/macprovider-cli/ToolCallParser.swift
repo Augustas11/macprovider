@@ -9,7 +9,8 @@ enum ToolCallParser {
     static func parseToolCalls(
         rawOutput: String,
         modelID: String,
-        allowedFunctionNames: Set<String>? = nil
+        allowedFunctionNames: Set<String>? = nil,
+        schemas: [String: JSONValue]? = nil
     ) -> (cleanedContent: String?, toolCalls: [ToolCall]) {
         guard !modelID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return (nilIfBlank(rawOutput), [])
@@ -20,7 +21,7 @@ enum ToolCallParser {
         }
 
         do {
-            let parsed = try parseDelimited(rawOutput, format: format)
+            let parsed = try parseDelimited(rawOutput, format: format, schemas: schemas)
             if !parsed.toolCalls.isEmpty {
                 if let allowedFunctionNames,
                    parsed.toolCalls.contains(where: { !allowedFunctionNames.contains($0.functionName) })
@@ -34,7 +35,8 @@ enum ToolCallParser {
                 rawOutput,
                 format: format,
                 modelID: modelID,
-                allowedFunctionNames: allowedFunctionNames
+                allowedFunctionNames: allowedFunctionNames,
+                schemas: schemas
             ) {
                 return recovered
             }
@@ -50,7 +52,8 @@ enum ToolCallParser {
                 rawOutput,
                 format: format,
                 modelID: modelID,
-                allowedFunctionNames: allowedFunctionNames
+                allowedFunctionNames: allowedFunctionNames,
+                schemas: schemas
             ) {
                 return recovered
             }
@@ -183,7 +186,8 @@ enum ToolCallParser {
         _ rawOutput: String,
         format: ToolCallFormat,
         modelID: String,
-        allowedFunctionNames: Set<String>?
+        allowedFunctionNames: Set<String>?,
+        schemas: [String: JSONValue]?
     ) -> (cleanedContent: String?, toolCalls: [ToolCall])? {
         if let recovered = recoverUnclosedJSONToolCall(
             rawOutput,
@@ -197,7 +201,8 @@ enum ToolCallParser {
             rawOutput,
             format: format,
             modelID: modelID,
-            allowedFunctionNames: allowedFunctionNames
+            allowedFunctionNames: allowedFunctionNames,
+            schemas: schemas
         )
     }
 
@@ -260,7 +265,8 @@ enum ToolCallParser {
         _ rawOutput: String,
         format: ToolCallFormat,
         modelID: String,
-        allowedFunctionNames: Set<String>?
+        allowedFunctionNames: Set<String>?,
+        schemas: [String: JSONValue]?
     ) -> (cleanedContent: String?, toolCalls: [ToolCall])? {
         // Function-XML (`<function=…>`) is a Qwen-row body grammar only (SPEC-018 §3.1
         // v0.2.7). Require a closed </function> so we do not turn a truncated command
@@ -271,7 +277,7 @@ enum ToolCallParser {
         else {
             return nil
         }
-        guard let bare = try? parseBareNemotronCalls(rawOutput), !bare.toolCalls.isEmpty else {
+        guard let bare = try? parseBareNemotronCalls(rawOutput, schemas: schemas), !bare.toolCalls.isEmpty else {
             return nil
         }
         if let allowedFunctionNames,
@@ -292,7 +298,7 @@ enum ToolCallParser {
         return nilIfBlank(text)
     }
 
-    private static func parseDelimited(_ rawOutput: String, format: ToolCallFormat) throws -> (cleanedContent: String?, toolCalls: [ToolCall]) {
+    private static func parseDelimited(_ rawOutput: String, format: ToolCallFormat, schemas: [String: JSONValue]?) throws -> (cleanedContent: String?, toolCalls: [ToolCall]) {
         var searchStart = rawOutput.startIndex
         var cleaned = ""
         var calls: [ToolCall] = []
@@ -305,7 +311,7 @@ enum ToolCallParser {
                 throw ParseError.missingEndDelimiter
             }
             let body = String(rawOutput[bodyStart..<endRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-            let call = try parseCall(body, argumentKey: format.argumentKey, allowFunctionXML: format == .qwen25)
+            let call = try parseCall(body, argumentKey: format.argumentKey, allowFunctionXML: format == .qwen25, schemas: schemas)
             let argumentBytes = call.arguments.utf8.count
             guard argumentBytes <= SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP else {
                 throw ParseError.byteCapExceeded
@@ -330,7 +336,7 @@ enum ToolCallParser {
     // XML tool-call grammar emitted by NVIDIA Nemotron AND by Qwen3-Coder. It is a recognized
     // grammar under SPEC-018 §3.1 (Qwen row body-grammar alternative). Names follow the OpenAI/
     // MCP charset (see isValidToolFunctionName / isValidToolParameterName), not Python identifiers.
-    private static func parseBareNemotronCalls(_ rawOutput: String) throws -> (cleanedContent: String?, toolCalls: [ToolCall]) {
+    private static func parseBareNemotronCalls(_ rawOutput: String, schemas: [String: JSONValue]?) throws -> (cleanedContent: String?, toolCalls: [ToolCall]) {
         var searchStart = rawOutput.startIndex
         var cleaned = ""
         var calls: [ToolCall] = []
@@ -340,7 +346,7 @@ enum ToolCallParser {
             cleaned += rawOutput[searchStart..<open.lowerBound]
             let blockEnd = rawOutput.range(of: "</function>", range: open.lowerBound..<rawOutput.endIndex)?.upperBound ?? rawOutput.endIndex
             let block = String(rawOutput[open.lowerBound..<blockEnd])
-            let call = try parseNemotronXMLCall(block)
+            let call = try parseNemotronXMLCall(block, schemas: schemas)
             let argumentBytes = call.arguments.utf8.count
             guard argumentBytes <= SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP else {
                 throw ParseError.byteCapExceeded
@@ -360,13 +366,13 @@ enum ToolCallParser {
         return (nilIfBlank(cleaned), calls)
     }
 
-    private static func parseCall(_ rawCall: String, argumentKey: String, allowFunctionXML: Bool) throws -> ToolCall {
+    private static func parseCall(_ rawCall: String, argumentKey: String, allowFunctionXML: Bool, schemas: [String: JSONValue]?) throws -> ToolCall {
         let trimmed = rawCall.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.hasPrefix("{") {
             return try parseJSONCall(rawCall, argumentKey: argumentKey)
         }
         if allowFunctionXML, trimmed.contains("<function=") {
-            return try parseNemotronXMLCall(rawCall)
+            return try parseNemotronXMLCall(rawCall, schemas: schemas)
         }
         return try parsePythonStyleCall(rawCall)
     }
@@ -384,18 +390,12 @@ enum ToolCallParser {
         return raw[open.lowerBound..<end]
     }
 
-    private static func parseNemotronXMLCall(_ rawCall: String) throws -> ToolCall {
+    private static func parseNemotronXMLCall(_ rawCall: String, schemas: [String: JSONValue]?) throws -> ToolCall {
         let block = String(firstFunctionBlock(in: rawCall))
         guard let functionName = nemotronFunctionName(in: block) else {
             throw ParseError.invalidShape
         }
-        let argumentsObject = try nemotronParameterObject(in: block, includeIncomplete: true)
-        guard JSONSerialization.isValidJSONObject(argumentsObject) else {
-            throw ParseError.invalidArguments
-        }
-        let data = try JSONSerialization.data(withJSONObject: argumentsObject, options: [.sortedKeys, .withoutEscapingSlashes])
-        let arguments = String(decoding: data, as: UTF8.self)
-        try validateNoDuplicateJSONKeys(arguments)
+        let arguments = try nemotronArgumentsJSONString(in: block, includeIncomplete: true, schemas: schemas)
         return ToolCall(
             id: "call_\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())",
             functionName: functionName,
@@ -524,22 +524,31 @@ enum ToolCallParser {
         return nil
     }
 
-    static func nemotronArgumentsJSON(in raw: String, includeIncomplete: Bool) -> String? {
-        let block = String(firstFunctionBlock(in: raw))
-        guard let object = try? nemotronParameterObject(in: block, includeIncomplete: includeIncomplete),
-              JSONSerialization.isValidJSONObject(object)
-        else {
-            return nil
-        }
-        guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]) else {
-            return nil
-        }
-        return String(decoding: data, as: UTF8.self)
+    static func nemotronArgumentsJSON(in raw: String, includeIncomplete: Bool, schemas: [String: JSONValue]? = nil) -> String? {
+        try? nemotronArgumentsJSONString(in: raw, includeIncomplete: includeIncomplete, schemas: schemas)
     }
 
-    private static func nemotronParameterObject(in raw: String, includeIncomplete: Bool) throws -> [String: Any] {
+    /// Final parsing and streaming/serial-stop validation share this entire path.
+    private static func nemotronArgumentsJSONString(in raw: String, includeIncomplete: Bool, schemas: [String: JSONValue]?) throws -> String {
+        let block = String(firstFunctionBlock(in: raw))
+        let object = try nemotronParameterObject(in: block, includeIncomplete: includeIncomplete, schemas: schemas)
+        guard JSONSerialization.isValidJSONObject(object) else {
+            throw ParseError.invalidArguments
+        }
+        let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])
+        let arguments = String(decoding: data, as: UTF8.self)
+        guard arguments.utf8.count <= SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP else {
+            throw ParseError.byteCapExceeded
+        }
+        try validateNoDuplicateJSONKeys(arguments)
+        return arguments
+    }
+
+    private static func nemotronParameterObject(in raw: String, includeIncomplete: Bool, schemas: [String: JSONValue]?) throws -> [String: Any] {
         var object: [String: Any] = [:]
         var searchStart = raw.startIndex
+        let functionName = nemotronFunctionName(in: raw)
+        let schema = functionName.flatMap { schemas?[$0] }
 
         while let paramOpen = raw.range(of: "<parameter=", range: searchStart..<raw.endIndex) {
             let nameStart = paramOpen.upperBound
@@ -565,7 +574,14 @@ enum ToolCallParser {
             }
 
             let rawValue = String(raw[valueStart..<valueEnd])
-            object[name] = try nemotronParameterValue(rawValue)
+            if let type = explicitParameterType(name, schema: schema) {
+                guard raw.range(of: "</parameter>", range: valueStart..<raw.endIndex)?.lowerBound == valueEnd else {
+                    throw ParseError.invalidArguments
+                }
+                object[name] = try typedXMLParameterValue(rawValue, type: type).jsonObject
+            } else {
+                object[name] = try nemotronParameterValue(rawValue)
+            }
 
             if let closeTag = raw.range(of: "</parameter>", range: valueStart..<raw.endIndex),
                closeTag.lowerBound == valueEnd
@@ -586,6 +602,45 @@ enum ToolCallParser {
         }
 
         return object
+    }
+
+    private static func explicitParameterType(_ name: String, schema: JSONValue?) -> String? {
+        guard case .object(let object)? = schema,
+              case .object(let properties)? = object["properties"],
+              case .object(let property)? = properties[name],
+              case .string(let type)? = property["type"],
+              ["string", "number", "integer", "boolean", "object", "array", "null"].contains(type) else {
+            return nil
+        }
+        return type
+    }
+
+    private static func typedXMLParameterValue(_ rawValue: String, type: String) throws -> JSONValue {
+        var raw = rawValue[...]
+        // LF and CRLF each form one Character. Preserve all other literal whitespace.
+        if raw.hasPrefix("\n") || raw.hasPrefix("\r\n") { raw = raw.dropFirst() }
+        if raw.hasSuffix("\n") || raw.hasSuffix("\r\n") { raw = raw.dropLast() }
+        // Structured values share the existing JSON parser's pre-parse budget;
+        // their per-call cap is checked after canonical serialization.
+        let rawByteCap = type == "string" ? SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP : SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP
+        guard raw.utf8.count <= rawByteCap else {
+            throw ParseError.byteCapExceeded
+        }
+        for marker in ["<parameter=", "<function=", "</function>", "<tool_call>", "</tool_call>"] where raw.contains(marker) {
+            throw ParseError.invalidArguments
+        }
+        if type == "string" { return .string(String(raw)) }
+        // The shared final validator counts container depth on the complete
+        // arguments object; StrictJSONParser also counts scalar leaf depth.
+        let value = try StrictJSONParser.parse(String(raw), maxDepth: SPEC018_ARGUMENTS_MAX_JSON_DEPTH)
+        guard ToolSelectionPolicy.supportsNumericDomain(value) else { throw ParseError.invalidArguments }
+        switch (type, value) {
+        case ("number", .int), ("number", .double), ("integer", .int),
+             ("boolean", .bool), ("object", .object), ("array", .array), ("null", .null):
+            return value
+        default:
+            throw ParseError.invalidArguments
+        }
     }
 
     private static func nemotronParameterValueEnd(in raw: String, from valueStart: String.Index) -> String.Index {
