@@ -34,7 +34,9 @@ ARTIFACT_RELATIVES = {
 QWEN_ARTIFACT_FIELDS = {
     "diagnostic_cli", "diagnostic_metallib", "fixture_config", "fixture_index",
 }
-JOB_KINDS = ("diagnostic-legacy", "profiler-only", "qualification", "qwen-qualification")
+JOB_KINDS = (
+    "diagnostic-legacy", "profiler-only", "qualification", "qwen-qualification", "qwen-journey",
+)
 JOB_SCHEMA = "macprovider.studio_lab_window_job.v1"
 JOB_RESULT_SCHEMA = "macprovider.studio_lab_window_job_result.v1"
 PREFLIGHT_SCHEMA = "macprovider.studio_lab_window_job_preflight.v1"
@@ -53,6 +55,14 @@ QWEN_QUALIFICATION_CELLS = (
     "s2-p1536-o512", "s8-p1536-o512",
 )
 QUALIFICATION_KINDS = ("qualification", "qwen-qualification")
+QWEN_JOB_KINDS = ("qwen-qualification", "qwen-journey")
+QWEN_JOURNEY_PROFILE = {
+    "model_id": "qwen/qwen3.6-35b-a3b",
+    "qualified_slots": 8,
+    "max_native_active_rows": 1,
+    "max_prompt_tokens": 4096,
+    "request_feature_profile": "native_mtp_sampled_text_v1",
+}
 SNAPSHOT_FIELDS = (
     "config_sha256", "provider_plist_sha256", "watchdog_plist_sha256",
     "compatibility_set_sha256", "provider_id_sha256", "coordinator_origin",
@@ -414,7 +424,7 @@ def build_job(args: argparse.Namespace, source: Path, artifacts: dict[str, dict[
         "job_helper_sha256": helper_sha,
         "artifact_sha256": {key: item["sha256"] for key, item in sorted(artifacts.items())},
     }
-    if kind != "qwen-qualification":
+    if kind not in QWEN_JOB_KINDS:
         inputs["glmbench_tree_oid"] = git_value(
             source, "HEAD:scripts/lab/cb-studio/glm53-bench", "GLMBench tree"
         )
@@ -447,9 +457,12 @@ def build_job(args: argparse.Namespace, source: Path, artifacts: dict[str, dict[
             raise Refusal("Qwen qualification policy provider commit has different phase3 source")
         inputs["qualification_policy_sha256"] = policy_sha
         inputs["qualification_provider_commit"] = policy["provider_commit"]
-        inputs["qualification_cells"] = list(QWEN_QUALIFICATION_CELLS)
         inputs["artifact_projection_sha256"] = projection_sha
         inputs["artifact_projection"] = projected
+        if kind == "qwen-qualification":
+            inputs["qualification_cells"] = list(QWEN_QUALIFICATION_CELLS)
+        else:
+            inputs["journey_profile"] = dict(QWEN_JOURNEY_PROFILE)
     identity = canonical_digest({"kind": kind, "immutable_inputs": inputs})
     return {
         "schema_version": JOB_SCHEMA,
@@ -476,7 +489,7 @@ def source_snapshot(args: argparse.Namespace) -> dict[str, object]:
     if dirty:
         raise Refusal("lab source has tracked modifications")
     kind = getattr(args, "job_kind", "diagnostic-legacy")
-    artifact_fields = QWEN_ARTIFACT_FIELDS if kind == "qwen-qualification" else ARTIFACT_FIELDS
+    artifact_fields = QWEN_ARTIFACT_FIELDS if kind in QWEN_JOB_KINDS else ARTIFACT_FIELDS
     artifacts = {name: source / ARTIFACT_RELATIVES[name] for name in artifact_fields}
     result: dict[str, dict[str, str]] = {}
     for name, path in artifacts.items():
@@ -553,7 +566,7 @@ def build_manifest(args: argparse.Namespace) -> dict[str, object]:
         validate_job_object(job)
     artifact_fields = (
         QWEN_ARTIFACT_FIELDS
-        if isinstance(job, dict) and job.get("kind") == "qwen-qualification"
+        if isinstance(job, dict) and job.get("kind") in QWEN_JOB_KINDS
         else ARTIFACT_FIELDS
     )
     artifacts = source.get("artifacts")
@@ -587,7 +600,9 @@ def build_manifest(args: argparse.Namespace) -> dict[str, object]:
         raise Refusal("probe executable does not match install directory")
     lab_timeout = positive(
         args.lab_timeout_s, "lab timeout",
-        43200 if job is not None and job["kind"] in QUALIFICATION_KINDS else 3600,
+        43200 if job is not None and job["kind"] in QUALIFICATION_KINDS else (
+            7200 if job is not None and job["kind"] == "qwen-journey" else 3600
+        ),
     )
     result: dict[str, object] = {
         "schema_version": SCHEMA,
@@ -637,7 +652,7 @@ def validate_job_object(job: object) -> dict:
     expected_inputs = {
         "phase3_tree_oid", "lab_script_sha256", "job_helper_sha256", "artifact_sha256",
     }
-    if job["kind"] != "qwen-qualification":
+    if job["kind"] not in QWEN_JOB_KINDS:
         expected_inputs.add("glmbench_tree_oid")
     if job["kind"] == "profiler-only":
         expected_inputs.add("reuse")
@@ -646,17 +661,22 @@ def validate_job_object(job: object) -> dict:
             "qualification_policy_sha256", "qualification_provider_commit",
             "qualification_cells",
         }
-    else:
+    elif job["kind"] == "qwen-qualification":
         expected_inputs |= {
             "qualification_policy_sha256", "qualification_provider_commit",
             "qualification_cells", "artifact_projection_sha256", "artifact_projection",
+        }
+    else:
+        expected_inputs |= {
+            "qualification_policy_sha256", "qualification_provider_commit",
+            "artifact_projection_sha256", "artifact_projection", "journey_profile",
         }
     if set(inputs) != expected_inputs:
         raise Refusal("job immutable input schema is invalid")
     for key in ("phase3_tree_oid",):
         if not isinstance(inputs.get(key), str) or not SHA40.fullmatch(inputs[key]):
             raise Refusal(f"job {key} is invalid")
-    if job["kind"] != "qwen-qualification" and (
+    if job["kind"] not in QWEN_JOB_KINDS and (
         not isinstance(inputs.get("glmbench_tree_oid"), str)
         or not SHA40.fullmatch(inputs["glmbench_tree_oid"])
     ):
@@ -664,7 +684,7 @@ def validate_job_object(job: object) -> dict:
     for key in ("lab_script_sha256", "job_helper_sha256"):
         require_sha(inputs.get(key), f"job {key}")
     artifacts = inputs.get("artifact_sha256")
-    artifact_fields = QWEN_ARTIFACT_FIELDS if job["kind"] == "qwen-qualification" else ARTIFACT_FIELDS
+    artifact_fields = QWEN_ARTIFACT_FIELDS if job["kind"] in QWEN_JOB_KINDS else ARTIFACT_FIELDS
     if not isinstance(artifacts, dict) or set(artifacts) != artifact_fields:
         raise Refusal("job artifact hash schema is invalid")
     for key, value in artifacts.items():
@@ -692,24 +712,28 @@ def validate_job_object(job: object) -> dict:
             or inputs.get("qualification_cells") != list(QUALIFICATION_CELLS)
         ):
             raise Refusal("qualification immutable input schema is invalid")
-    if job["kind"] == "qwen-qualification":
+    if job["kind"] in QWEN_JOB_KINDS:
         require_sha(inputs.get("qualification_policy_sha256"), "Qwen qualification policy sha256")
         require_sha(inputs.get("artifact_projection_sha256"), "Qwen artifact projection sha256")
         projection = inputs.get("artifact_projection")
         if (
             not isinstance(inputs.get("qualification_provider_commit"), str)
             or not SHA40.fullmatch(inputs["qualification_provider_commit"])
-            or inputs.get("qualification_cells") != list(QWEN_QUALIFICATION_CELLS)
             or not isinstance(projection, dict)
             or set(projection) != {
                 "target_sha256", "mtp_sha256", "tokenizer_sha256", "mtp_manifest_sha256"
             }
         ):
-            raise Refusal("Qwen qualification immutable input schema is invalid")
+            raise Refusal("Qwen immutable input schema is invalid")
         for key, value in projection.items():
             require_sha(value, f"Qwen artifact projection {key}")
         if projection["target_sha256"] == projection["mtp_sha256"]:
-            raise Refusal("Qwen qualification embeds MTP in the target")
+            raise Refusal("Qwen job embeds MTP in the target")
+        if job["kind"] == "qwen-qualification":
+            if inputs.get("qualification_cells") != list(QWEN_QUALIFICATION_CELLS):
+                raise Refusal("Qwen qualification cells are invalid")
+        elif inputs.get("journey_profile") != QWEN_JOURNEY_PROFILE:
+            raise Refusal("Qwen journey profile is invalid")
     expected = canonical_digest({"kind": job["kind"], "immutable_inputs": inputs})
     if job.get("identity_sha256") != expected:
         raise Refusal("job identity digest mismatch")
@@ -739,7 +763,7 @@ def validate_current_job_inputs(manifest: dict, job: dict) -> None:
     inputs = job["immutable_inputs"]
     if git_value(source, "HEAD:phase3-binary", "phase3 tree") != inputs.get("phase3_tree_oid"):
         raise Refusal("job phase3 source tree drifted")
-    if job["kind"] != "qwen-qualification" and (
+    if job["kind"] not in QWEN_JOB_KINDS and (
         git_value(source, "HEAD:scripts/lab/cb-studio/glm53-bench", "GLMBench tree")
         != inputs.get("glmbench_tree_oid")
     ):
@@ -754,7 +778,7 @@ def validate_current_job_inputs(manifest: dict, job: dict) -> None:
     artifacts = manifest.get("artifacts")
     if not isinstance(artifact_hashes, dict) or not isinstance(artifacts, dict):
         raise Refusal("job artifact identities are missing")
-    artifact_fields = QWEN_ARTIFACT_FIELDS if job["kind"] == "qwen-qualification" else ARTIFACT_FIELDS
+    artifact_fields = QWEN_ARTIFACT_FIELDS if job["kind"] in QWEN_JOB_KINDS else ARTIFACT_FIELDS
     for key in artifact_fields:
         item = artifacts.get(key)
         if not isinstance(item, dict) or artifact_hashes.get(key) != item.get("sha256"):
@@ -792,7 +816,6 @@ def validate_current_job_inputs(manifest: dict, job: dict) -> None:
         if (
             inputs.get("qualification_policy_sha256") != policy_sha
             or inputs.get("qualification_provider_commit") != policy.get("provider_commit")
-            or inputs.get("qualification_cells") != list(QWEN_QUALIFICATION_CELLS)
             or inputs.get("artifact_projection_sha256") != projection_sha
             or inputs.get("artifact_projection") != projected
             or any(
@@ -801,6 +824,11 @@ def validate_current_job_inputs(manifest: dict, job: dict) -> None:
             )
         ):
             raise Refusal("Qwen qualification policy or projection identity drifted")
+        if job["kind"] == "qwen-qualification":
+            if inputs.get("qualification_cells") != list(QWEN_QUALIFICATION_CELLS):
+                raise Refusal("Qwen qualification cells drifted")
+        elif inputs.get("journey_profile") != QWEN_JOURNEY_PROFILE:
+            raise Refusal("Qwen journey profile drifted")
         if (
             git_value(source, f"{policy['provider_commit']}:phase3-binary", "Qwen policy phase3 tree")
             != inputs.get("phase3_tree_oid")
@@ -899,14 +927,14 @@ def private_artifact_paths(manifest: dict, job: dict) -> dict[str, Path]:
         "diagnostic_cli": root / "provider/macprovider-cli",
         "diagnostic_metallib": root / "provider/mlx.metallib",
     }
-    if job["kind"] != "qwen-qualification":
+    if job["kind"] not in QWEN_JOB_KINDS:
         paths.update({
             "glmbench": root / "bench/GLMBench",
             "glmbench_metallib": root / "bench/mlx.metallib",
         })
-    if job["kind"] in QUALIFICATION_KINDS:
+    if job["kind"] in QUALIFICATION_KINDS or job["kind"] == "qwen-journey":
         paths["qualification_policy"] = root / "qualification-policy.json"
-    if job["kind"] == "qwen-qualification":
+    if job["kind"] in QWEN_JOB_KINDS:
         paths["artifact_projection"] = root / "qwen-artifact-manifest.json"
     return paths
 
@@ -960,13 +988,13 @@ def prepare_private_artifacts(manifest: dict, job: dict) -> None:
     root = preflight_path(manifest) / "artifacts"
     create_result_dir(root)
     create_result_dir(root / "provider")
-    if job["kind"] != "qwen-qualification":
+    if job["kind"] not in QWEN_JOB_KINDS:
         create_result_dir(root / "bench")
     source_artifacts = manifest["artifacts"]
     expected = job["immutable_inputs"]["artifact_sha256"]
     artifact_keys = (
         ("diagnostic_cli", "diagnostic_metallib")
-        if job["kind"] == "qwen-qualification"
+        if job["kind"] in QWEN_JOB_KINDS
         else ("diagnostic_cli", "diagnostic_metallib", "glmbench", "glmbench_metallib")
     )
     for key in artifact_keys:
@@ -974,14 +1002,14 @@ def prepare_private_artifacts(manifest: dict, job: dict) -> None:
             Path(source_artifacts[key]["path"]), paths[key], expected[key],
             executable=key in {"diagnostic_cli", "glmbench"},
         )
-    if job["kind"] in QUALIFICATION_KINDS:
+    if job["kind"] in QUALIFICATION_KINDS or job["kind"] == "qwen-journey":
         copy_authenticated(
             Path(manifest["lab_source_dir"]) / POLICY_RELATIVE,
             paths["qualification_policy"],
             job["immutable_inputs"]["qualification_policy_sha256"],
             executable=False,
         )
-    if job["kind"] == "qwen-qualification":
+    if job["kind"] in QWEN_JOB_KINDS:
         copy_authenticated(
             Path(manifest["lab_source_dir"]) / QWEN_PROJECTION_RELATIVE,
             paths["artifact_projection"],
@@ -989,7 +1017,7 @@ def prepare_private_artifacts(manifest: dict, job: dict) -> None:
             executable=False,
         )
     directories = [root / "provider"]
-    if job["kind"] != "qwen-qualification":
+    if job["kind"] not in QWEN_JOB_KINDS:
         directories.append(root / "bench")
     directories.append(root)
     for directory in directories:
@@ -1005,7 +1033,7 @@ def validate_private_artifacts(manifest: dict, job: dict) -> dict[str, str]:
     result: dict[str, str] = {}
     root = preflight_path(manifest) / "artifacts"
     directories = [preflight_path(manifest), root, root / "provider"]
-    if job["kind"] != "qwen-qualification":
+    if job["kind"] not in QWEN_JOB_KINDS:
         directories.append(root / "bench")
     for directory in directories:
         safe_directory(directory)
@@ -1046,7 +1074,7 @@ def validate_preflight_receipt(manifest: dict, job: dict) -> None:
     target = Path(manifest["lab_source_dir"]) / ".lab-window/fixture/target"
     mtp = Path(manifest["lab_source_dir"]) / ".lab-window/fixture/mtp"
     expected = receipt.get("expected")
-    qwen = job["kind"] == "qwen-qualification"
+    qwen = job["kind"] in QWEN_JOB_KINDS
     current_expected = (
         job["immutable_inputs"]["artifact_projection"]
         if qwen else projection_tuple(Path(manifest["lab_source_dir"]))
@@ -1123,6 +1151,93 @@ def run_checked(argv: list[str], output: Path, *, timeout: int = 3600) -> None:
         )
 
 
+def validate_qwen_journey_result(path: Path, job: dict) -> None:
+    try:
+        path = safe_artifact(path)
+        if path.stat().st_size > 32 * 1024 * 1024:
+            raise Refusal(f"Qwen journey result is too large; private log: {path}")
+        lines = path.read_bytes().splitlines()
+        document = json.loads(lines[-1])
+    except (IndexError, ValueError) as exc:
+        raise Refusal(f"Qwen journey result is invalid; private log: {path}") from exc
+    profile = job["immutable_inputs"]["journey_profile"]
+    projection = job["immutable_inputs"]["artifact_projection"]
+    expected_steps = {
+        "step-04-serial-token-oracle": ("pass", []),
+        "step-05-cache-state-boundary": ("pass", []),
+        "step-06-streaming-stop": ("pass", []),
+        "step-07-08-mixed-multirow-capacity": ("pass", []),
+        "step-09-cancellation": ("pass", []),
+        "step-10-warm-swap": ("pass", []),
+        "step-12-native-selftest": (
+            "partial",
+            ["coordinator-issued SPEC-031-R033 canary and its negative outcomes"],
+        ),
+    }
+    expected_covered = [
+        "step-04-serial-token-oracle",
+        "step-05-cache-state-boundary",
+        "step-06-streaming-stop",
+        "step-07-mixed-multirow",
+        "step-08-capacity-and-depth-zero",
+        "step-09-cancellation",
+        "step-10-warm-swap",
+        "step-12-native-canary (provider-local self-test half)",
+    ]
+    expected_pending = [
+        "step-01-bind-tuple",
+        "step-02-capability-negatives",
+        "step-03-artifact-security-negatives",
+        "step-11-accounting",
+        "step-12-native-canary (coordinator SPEC-031-R033 half)",
+        "step-14-studio-and-tier-benchmark",
+        "step-15-redaction-review",
+    ]
+    if (
+        not isinstance(document, dict)
+        or document.get("schema") != "macprovider.native-mtp-journey-hardware-result.v1"
+        or document.get("journey_complete") is not False
+        or document.get("executed_steps_status") != "partial"
+        or document.get("evidence_class") != "lab_isolated_no_join"
+        or document.get("covered_steps") != expected_covered
+        or document.get("pending_steps") != expected_pending
+        or any(document.get(key) != profile[key] for key in (
+            "model_id", "qualified_slots", "max_native_active_rows",
+            "max_prompt_tokens", "request_feature_profile",
+        ))
+        or any(document.get(key) != projection[key] for key in (
+            "target_sha256", "mtp_sha256", "tokenizer_sha256", "mtp_manifest_sha256",
+        ))
+    ):
+        raise Refusal(f"Qwen journey identity or coverage mismatch; private log: {path}")
+    steps = document.get("steps")
+    if not isinstance(steps, list) or len(steps) != len(expected_steps):
+        raise Refusal(f"Qwen journey step set is invalid; private log: {path}")
+    observed: set[str] = set()
+    for step in steps:
+        if not isinstance(step, dict) or set(step) != {
+            "step_id", "status", "uncovered_contract", "checks", "details",
+        }:
+            raise Refusal(f"Qwen journey step is invalid; private log: {path}")
+        step_id = step.get("step_id")
+        checks = step.get("checks")
+        expected_step = expected_steps.get(step_id)
+        if (
+            expected_step is None
+            or step_id in observed
+            or step.get("status") != expected_step[0]
+            or step.get("uncovered_contract") != expected_step[1]
+            or not isinstance(step.get("details"), dict)
+            or not isinstance(checks, dict)
+            or not checks
+            or any(value is not True for value in checks.values())
+        ):
+            raise Refusal(f"Qwen journey hardware check failed; private log: {path}")
+        observed.add(step_id)
+    if observed != set(expected_steps):
+        raise Refusal(f"Qwen journey step set is invalid; private log: {path}")
+
+
 def validate_job(args: argparse.Namespace) -> dict[str, object]:
     manifest, job = load_job_manifest(args.manifest)
     validate_current_job_inputs(manifest, job)
@@ -1135,7 +1250,7 @@ def validate_job(args: argparse.Namespace) -> dict[str, object]:
     create_result_dir(preflight)
     prepare_private_artifacts(manifest, job)
     target = source / ".lab-window/fixture/target"
-    qwen = job["kind"] == "qwen-qualification"
+    qwen = job["kind"] in QWEN_JOB_KINDS
     expected = job["immutable_inputs"]["artifact_projection"] if qwen else projection_tuple(source)
     mtp = source / ".lab-window/fixture/mtp"
     mtp_stamps = None
@@ -1150,6 +1265,18 @@ def validate_job(args: argparse.Namespace) -> dict[str, object]:
         config = target / "config.json"
         if file_sha256(safe_artifact(config)) != reuse["mtp_manifest_sha256"]:
             raise Refusal("profiler MTP manifest identity differs from archived journey")
+    elif job["kind"] == "qwen-journey":
+        target_digest, target_stamps = snapshot_identity(target)
+        mtp_digest, mtp_stamps = snapshot_identity(mtp)
+        if (
+            target_digest != expected["target_sha256"]
+            or mtp_digest != expected["mtp_sha256"]
+            or file_sha256(safe_artifact(target / "tokenizer.json"))
+            != expected["tokenizer_sha256"]
+            or file_sha256(safe_artifact(mtp / "config.json"))
+            != expected["mtp_manifest_sha256"]
+        ):
+            raise Refusal("Qwen journey fixture projection identity mismatch")
     else:
         target_stamps = snapshot_stamps(target)
         if qwen:
@@ -1265,6 +1392,21 @@ def run_job(args: argparse.Namespace) -> dict[str, object]:
         validate_execution_inputs(manifest, job)
         run_checked([bench, target, "--mtp-multirow-profile", "--mtp-multirow-reps", "1"], census)
         outputs.extend((wall, census))
+    elif job["kind"] == "qwen-journey":
+        journey = result / "journey.log"
+        profile = job["immutable_inputs"]["journey_profile"]
+        validate_execution_inputs(manifest, job)
+        run_checked([
+            str(private_artifact_paths(manifest, job)["diagnostic_cli"]),
+            "native-mtp-journey-e2e",
+            "--root", str(source / ".lab-window/fixture"),
+            "--model-id", str(profile["model_id"]),
+            "--qualified-slots", str(profile["qualified_slots"]),
+            "--max-native-active-rows", str(profile["max_native_active_rows"]),
+            "--max-prompt-tokens", str(profile["max_prompt_tokens"]),
+        ], journey, timeout=5400)
+        validate_qwen_journey_result(journey, job)
+        outputs.append(journey)
     else:
         evidence = result / "qualification.jsonl"
         base = qualification_base(manifest, evidence)
@@ -1306,13 +1448,13 @@ def run_job(args: argparse.Namespace) -> dict[str, object]:
             "private_artifact_sha256": private_hashes,
             "fixture_target_sha256": (
                 job["immutable_inputs"]["artifact_projection"]["target_sha256"]
-                if job["kind"] == "qwen-qualification"
+                if job["kind"] in QWEN_JOB_KINDS
                 else projection_tuple(source)["target_sha256"]
             ),
         },
         "outputs": {item.name: file_sha256(safe_artifact(item)) for item in outputs},
     }
-    if job["kind"] == "qwen-qualification":
+    if job["kind"] in QWEN_JOB_KINDS:
         receipt["executed_inputs"]["fixture_mtp_sha256"] = (
             job["immutable_inputs"]["artifact_projection"]["mtp_sha256"]
         )

@@ -28,7 +28,9 @@ from pathlib import Path
 from typing import Any, Iterator
 
 
-SCHEMA = "macprovider.qwen_provider_transaction.v1"
+LEGACY_SCHEMA = "macprovider.qwen_provider_transaction.v1"
+PROFILE_SCHEMA = "macprovider.qwen_provider_transaction.v2"
+SCHEMA = LEGACY_SCHEMA
 TOP_LEVEL = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*):(?:[ \t].*)?(?:\r?\n)?$")
 SAFE_VALUE = re.compile(r"^[A-Za-z0-9._/@+-]+$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -75,6 +77,39 @@ TARGETS: dict[str, dict[str, str]] = {
         "revision": "e9675aa3ca5f900ccef55267914466d55ab325fa",
         "sha256": "a0ca3d59f301f08ae4c4c2010b07f80b890d35f4e8562c213b1d01aed8328e42",
     },
+    "qwen3.6-35b-a3b": {
+        "gateway_id": "qwen/qwen3.6-35b-a3b",
+        "catalog_key": "qwen/qwen3.6-35b-a3b",
+        "model_id": "mlx-community/Qwen3.6-35B-A3B-4bit",
+        "revision": "38740b847e4cb78f352aba30aa41c76e08e6eb46",
+        "sha256": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+    },
+}
+
+LEGACY_PROFILE = "opencode-dual-30b"
+NATIVE_MTP_PROFILE = "qwen36-native-mtp"
+PROFILES: dict[str, dict[str, Any]] = {
+    LEGACY_PROFILE: {
+        "schema": LEGACY_SCHEMA,
+        "targets": ("qwen3-coder-30b-a3b-instruct", "qwen3-30b-a3b-instruct-2507"),
+        "adopting": ("adopting_first", "adopting_second"),
+        "serving": ("serving_first", "serving_second"),
+        "complete": "acceptance_complete",
+        "context_floor": 16_384,
+    },
+    NATIVE_MTP_PROFILE: {
+        "schema": PROFILE_SCHEMA,
+        "targets": ("qwen3.6-35b-a3b",),
+        "adopting": ("adopting_target",),
+        "serving": ("serving_target",),
+        "complete": "proof_complete",
+        "context_floor": 4_096,
+    },
+}
+
+GLM_INCUMBENT = {
+    "model": "zai-org/glm-5.3-flash",
+    "model_artifact_sha256": "7299b6a71a38490e378e9eb6524c426392aa96e3fd561007e0540134bbef48f9",
 }
 
 
@@ -247,19 +282,37 @@ def write_journal(path: Path, journal: dict[str, Any], *, exclusive: bool = Fals
     atomic_write(path, payload)
 
 
+def profile_name(args: argparse.Namespace) -> str:
+    value = getattr(args, "profile", LEGACY_PROFILE)
+    if value not in PROFILES:
+        raise Refusal("unsupported transaction profile")
+    return value
+
+
+def journal_profile(journal: dict[str, Any]) -> str:
+    schema = journal.get("schema_version")
+    if schema == LEGACY_SCHEMA:
+        if "profile" in journal:
+            raise Refusal("legacy journal cannot carry a profile")
+        return LEGACY_PROFILE
+    if schema == PROFILE_SCHEMA and journal.get("profile") == NATIVE_MTP_PROFILE:
+        return NATIVE_MTP_PROFILE
+    raise Refusal("unsupported transaction journal schema")
+
+
 def load_journal(path: Path) -> dict[str, Any]:
     safe_regular(path)
     journal = strict_json(path)
-    if journal.get("schema_version") != SCHEMA:
-        raise Refusal("unsupported transaction journal schema")
+    profile = journal_profile(journal)
+    profile_spec = PROFILES[profile]
     if journal.get("config_path") is None or journal.get("phase") is None:
         raise Refusal("incomplete transaction journal")
     if (not isinstance(journal["config_path"], str)
             or not Path(journal["config_path"]).is_absolute()):
         raise Refusal("invalid journal config path")
-    phases = {"armed", "prepared", "adopting_first", "serving_first", "adopting_second",
-              "serving_second", "acceptance_complete", "restoring", "config_restored",
-              "restored"}
+    phases = ({"armed", "prepared", "restoring", "config_restored", "restored"}
+              | set(profile_spec["adopting"]) | set(profile_spec["serving"])
+              | {profile_spec["complete"]})
     if journal["phase"] not in phases:
         raise Refusal("invalid transaction phase")
     allowed = {"schema_version", "transaction_id", "config_path", "phase", "baseline_owned",
@@ -267,6 +320,8 @@ def load_journal(path: Path) -> dict[str, Any]:
                "last_config_sha256",
                "intended_owned", "intended_target", "release_binding", "baseline_status",
                "market_binding", "intended_after_unix", "remote_scratch"}
+    if profile != LEGACY_PROFILE:
+        allowed.add("profile")
     if set(journal) - allowed:
         raise Refusal("transaction journal contains unsupported fields")
     baseline = journal.get("baseline_owned")
@@ -329,10 +384,8 @@ def load_journal(path: Path) -> dict[str, Any]:
         raise Refusal("incomplete intended transition")
     if intended is None and intended_after is not None:
         raise Refusal("orphan intended transition timestamp")
-    if intended is not None and (journal["phase"] not in {
-                                     "adopting_first", "adopting_second", "restoring"
-                                 }
-                                 or journal.get("intended_target") not in TARGETS
+    if intended is not None and (journal["phase"] not in set(profile_spec["adopting"]) | {"restoring"}
+                                 or journal.get("intended_target") not in profile_spec["targets"]
                                  or intended_after is None):
         raise Refusal("invalid intended transition state")
     return journal
@@ -462,6 +515,8 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
     config = absolute_path(args.config)
     journal_path = absolute_path(args.journal)
     validator = absolute_path(args.validator)
+    profile = profile_name(args)
+    profile_spec = PROFILES[profile]
     safe_regular(config)
     if safe_regular(journal_path, may_absent=True) is not None:
         existing = load_journal(journal_path)
@@ -479,7 +534,12 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
             raise Refusal("draft model config is unsupported by this transaction: "
                           + ", ".join(sorted(unsupported_draft)))
         incumbent = scalar(owned, "model")
-        supported = [incumbent] + [target["catalog_key"] for target in TARGETS.values()]
+        if profile == NATIVE_MTP_PROFILE:
+            for key, expected in GLM_INCUMBENT.items():
+                if scalar(owned, key) != expected:
+                    raise Refusal(f"native-MTP profile requires exact signed GLM incumbent {key}")
+        supported = [incumbent] + [TARGETS[name]["catalog_key"]
+                                   for name in profile_spec["targets"]]
         deduplicated = list(dict.fromkeys(supported))
         replacements = dict(owned)
         replacements["supported_models"] = (
@@ -493,7 +553,7 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
         base_unowned = sha256(without_owned(blocks))
         baseline = {key: value.decode("utf-8") for key, value in owned.items()}
         transaction = {
-            "schema_version": SCHEMA,
+            "schema_version": profile_spec["schema"],
             "transaction_id": args.transaction_id,
             "config_path": str(config),
             "phase": "armed",
@@ -519,6 +579,8 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
             "market_binding": {"rate_card_version": args.rate_card_version},
             "remote_scratch": args.remote_scratch,
         }
+        if profile != LEGACY_PROFILE:
+            transaction["profile"] = profile
         # Validate the complete journal schema before arming it on disk.
         for value, pattern, label in (
             (args.binary_version, SEMVER, "binary version"),
@@ -641,6 +703,9 @@ def begin_adoption(args: argparse.Namespace) -> dict[str, Any]:
     intended = expected_owned(args)
     with config_lock(config):
         journal = load_journal(journal_path)
+        profile = journal_profile(journal)
+        if profile_name(args) != profile or args.phase not in PROFILES[profile]["adopting"]:
+            raise Refusal("adoption phase does not belong to the active profile")
         if Path(journal["config_path"]) != config or journal["phase"] == "restored":
             raise Refusal("journal is not active for this config")
         current = config.read_bytes()
@@ -663,18 +728,22 @@ def checkpoint(args: argparse.Namespace) -> dict[str, Any]:
     intended = expected_owned(args)
     with config_lock(config):
         journal = load_journal(journal_path)
+        profile = journal_profile(journal)
+        spec = PROFILES[profile]
+        if profile_name(args) != profile:
+            raise Refusal("checkpoint profile does not match the active journal")
         if Path(journal["config_path"]) != config or journal["phase"] == "restored":
             raise Refusal("journal is not active for this config")
         current = config.read_bytes()
         blocks, owned = split_blocks(current)
         if sha256(without_owned(blocks)) != journal["unowned_sha256"]:
             raise Refusal("non-owned config fields changed during transaction")
-        if args.phase == "acceptance_complete":
-            if (journal["phase"] != "serving_second"
+        if args.phase == spec["complete"]:
+            if (journal["phase"] != spec["serving"][-1]
                     or journal.get("intended_owned") is not None
                     or sha256(current) != journal["last_config_sha256"]):
-                raise Refusal("acceptance completion does not match the served second target")
-            journal["phase"] = "acceptance_complete"
+                raise Refusal("profile completion does not match its final served target")
+            journal["phase"] = spec["complete"]
             write_journal(journal_path, journal)
             return {"status": "checkpointed", "phase": args.phase,
                     "config_sha256": journal["last_config_sha256"]}
@@ -684,7 +753,9 @@ def checkpoint(args: argparse.Namespace) -> dict[str, Any]:
         ):
             raise Refusal("adopted config does not match armed recommendation intent")
         armed = journal.get("intended_owned")
-        if args.phase in ("serving_first", "serving_second") and armed is None:
+        if args.phase not in set(spec["serving"]) | {"prepared"}:
+            raise Refusal("checkpoint phase does not belong to the active profile")
+        if args.phase in spec["serving"] and armed is None:
             raise Refusal("adoption checkpoint has no armed intent")
         if armed is not None and (armed != intended or journal.get("intended_target") != args.target):
             raise Refusal("checkpoint does not match armed adoption intent")
@@ -776,17 +847,24 @@ def inspect(args: argparse.Namespace) -> dict[str, Any]:
         parsed = split_blocks(raw_model.encode("utf-8"))[1]
         baseline_model = scalar(parsed, "model")
     scratch_exists = Path(journal["remote_scratch"]).exists()
-    return {"status": journal["phase"], "transaction_id": journal.get("transaction_id"),
-            "restore_required": journal["phase"] != "restored" or scratch_exists,
-            "scratch_cleanup_required": scratch_exists,
-            "remote_scratch": journal["remote_scratch"], "baseline_model": baseline_model,
-            "release_binding": journal["release_binding"],
-            "baseline_status": journal["baseline_status"],
-            "market_binding": journal["market_binding"]}
+    result = {"status": journal["phase"], "transaction_id": journal.get("transaction_id"),
+              "restore_required": journal["phase"] != "restored" or scratch_exists,
+              "scratch_cleanup_required": scratch_exists,
+              "remote_scratch": journal["remote_scratch"], "baseline_model": baseline_model,
+              "release_binding": journal["release_binding"],
+              "baseline_status": journal["baseline_status"],
+              "market_binding": journal["market_binding"]}
+    profile = journal_profile(journal)
+    if profile != LEGACY_PROFILE:
+        result["profile"] = profile
+    return result
 
 
 def verify_recommendation(args: argparse.Namespace) -> dict[str, Any]:
     recommendation = strict_json(Path(args.recommendation))
+    profile = profile_name(args)
+    if args.target not in PROFILES[profile]["targets"]:
+        raise Refusal("target does not belong to the selected profile")
     target = TARGETS[args.target]
     if recommendation.get("schema_version") != "autotune_recommend.v1":
         raise Refusal("wrong recommendation schema")
@@ -827,8 +905,9 @@ def verify_recommendation(args: argparse.Namespace) -> dict[str, Any]:
                and row.get("eligible") is True for row in candidates):
         raise Refusal("qualified target is not eligible")
     context = serve.get("max_context_override")
-    if type(context) is not int or context < 16_384:
-        raise Refusal("recommendation context is below the 16384-token OpenCode floor")
+    context_floor = PROFILES[profile]["context_floor"]
+    if type(context) is not int or context < context_floor:
+        raise Refusal(f"recommendation context is below the {context_floor}-token profile floor")
     return {"status": "verified", "target": args.target, "gateway_id": target["gateway_id"],
             "catalog_key": target["catalog_key"], "artifact_sha256": target["sha256"]}
 
@@ -837,6 +916,7 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     commands = result.add_subparsers(dest="command", required=True)
     prepare_parser = commands.add_parser("prepare")
+    prepare_parser.add_argument("--profile", choices=tuple(PROFILES), default=LEGACY_PROFILE)
     prepare_parser.add_argument("--config", required=True)
     prepare_parser.add_argument("--journal", required=True)
     prepare_parser.add_argument("--validator", required=True)
@@ -855,10 +935,12 @@ def parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("--remote-scratch", required=True)
     prepare_parser.set_defaults(run=prepare)
     checkpoint_parser = commands.add_parser("checkpoint")
+    checkpoint_parser.add_argument("--profile", choices=tuple(PROFILES), default=LEGACY_PROFILE)
     checkpoint_parser.add_argument("--config", required=True)
     checkpoint_parser.add_argument("--journal", required=True)
     checkpoint_parser.add_argument("--phase", required=True,
-                                   choices=("prepared", "serving_first", "serving_second", "acceptance_complete"))
+                                   choices=("prepared", "serving_first", "serving_second",
+                                            "acceptance_complete", "serving_target", "proof_complete"))
     checkpoint_parser.add_argument("--recommendation", required=True)
     checkpoint_parser.add_argument("--target", required=True, choices=tuple(TARGETS))
     checkpoint_parser.add_argument("--binary-version", required=True)
@@ -867,9 +949,11 @@ def parser() -> argparse.ArgumentParser:
     checkpoint_parser.add_argument("--rate-card-version", required=True)
     checkpoint_parser.set_defaults(run=checkpoint)
     begin_parser = commands.add_parser("begin-adoption")
+    begin_parser.add_argument("--profile", choices=tuple(PROFILES), default=LEGACY_PROFILE)
     begin_parser.add_argument("--config", required=True)
     begin_parser.add_argument("--journal", required=True)
-    begin_parser.add_argument("--phase", required=True, choices=("adopting_first", "adopting_second"))
+    begin_parser.add_argument("--phase", required=True,
+                              choices=("adopting_first", "adopting_second", "adopting_target"))
     begin_parser.add_argument("--recommendation", required=True)
     begin_parser.add_argument("--target", required=True, choices=tuple(TARGETS))
     begin_parser.add_argument("--binary-version", required=True)
@@ -894,6 +978,7 @@ def parser() -> argparse.ArgumentParser:
     inspect_parser.add_argument("--journal", required=True)
     inspect_parser.set_defaults(run=inspect)
     verify_parser = commands.add_parser("verify-recommendation")
+    verify_parser.add_argument("--profile", choices=tuple(PROFILES), default=LEGACY_PROFILE)
     verify_parser.add_argument("--recommendation", required=True)
     verify_parser.add_argument("--target", required=True, choices=tuple(TARGETS))
     verify_parser.add_argument("--binary-version", required=True)
