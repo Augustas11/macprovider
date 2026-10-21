@@ -75,6 +75,10 @@ func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion
 			t.Fatalf("execution host verification failed: %s", command)
 		}
 	}
+	privateTrace, err := newConnectedClientPrivateTrace(os.Getenv("MACPROVIDER_TEST_OPENCODE_PRIVATE_TRACE_DIR"), kind, synthetic, upstream, true)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	model, err := connectedClientModel(os.Getenv("MACPROVIDER_TEST_CLIENT_MODEL"), synthetic)
 	if err != nil {
@@ -132,9 +136,12 @@ func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/chat/completions" {
 			return nil, fmt.Errorf("unexpected fixture upstream path %s", r.URL.Path)
 		}
-		body, err := io.ReadAll(io.LimitReader(r.Body, 4<<20))
+		body, err := io.ReadAll(io.LimitReader(r.Body, connectedClientTraceRequestMax+1))
 		if err != nil {
 			return nil, err
+		}
+		if len(body) > connectedClientTraceRequestMax {
+			return nil, fmt.Errorf("fixture request exceeded four MiB")
 		}
 		var payload struct {
 			Model    string `json:"model"`
@@ -147,6 +154,7 @@ func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion
 					ID string `json:"id"`
 				} `json:"tool_calls"`
 			} `json:"messages"`
+			Tools []json.RawMessage `json:"tools"`
 		}
 		if err := json.Unmarshal(body, &payload); err != nil {
 			return nil, err
@@ -154,6 +162,11 @@ func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion
 		if payload.Model != model || !payload.Stream || r.Header.Get("X-MacProvider-Account") != "connected-fixture" || r.Header.Get(routingGitHubIDsHeader) != "none" {
 			cancel()
 			return nil, fmt.Errorf("unexpected model, streaming mode, or authenticated fixture identity")
+		}
+		traceSelected, err := privateTrace.captureRequest(body, len(payload.Tools) != 0)
+		if err != nil {
+			cancel()
+			return nil, err
 		}
 		mu.Lock()
 		calls++
@@ -200,6 +213,12 @@ func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion
 		}
 		defer response.Body.Close()
 		held, err := io.ReadAll(io.LimitReader(response.Body, (1<<20)+1))
+		if err == nil {
+			if err := privateTrace.captureResponse(held, traceSelected); err != nil {
+				cancel()
+				return nil, err
+			}
+		}
 		if err != nil || len(held) > 1<<20 || response.StatusCode != http.StatusOK {
 			t.Logf("upstream fixture rejected: status=%d size=%d read_error=%t", response.StatusCode, len(held), err != nil)
 			cancel()

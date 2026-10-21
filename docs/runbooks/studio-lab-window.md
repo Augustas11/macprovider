@@ -1,7 +1,7 @@
 # Guarded offline Studio jobs
 
 This entry point reserves one bounded offline window for the four-native-row
-GLM campaign. It does not install a lab binary, connect one to the live
+GLM campaign or the fixed Qwen3.6 A3B requalification campaign. It does not install a lab binary, connect one to the live
 coordinator, or change a catalog policy. Completing a job is not, by itself,
 release qualification or buyer-path acceptance.
 
@@ -18,12 +18,12 @@ without changing the signed provider installation. Prepare:
 - A tracked-clean source clone at the exact campaign commit.
 - The release-mode CLI with `MACPROVIDER_LAB_HARNESS` enabled, at
   `phase3-binary/.build/release/macprovider-cli`.
-- The release-mode `GLMBench` with testing enabled, at
+- For GLM jobs, the release-mode `GLMBench` with testing enabled, at
   `scripts/lab/cb-studio/glm53-bench/.build/release/GLMBench`.
 - The matching `mlx.metallib` beside each binary.
 - `.lab-window/fixture/target`, an isolated clone of the previously verified
-  model snapshot. This GLM target embeds its MTP layer; no separate `mtp`
-  directory is required. Do not download or replace live model files during
+  model snapshot. The GLM target embeds its MTP layer. Qwen requires its
+  separate drafter snapshot in `.lab-window/fixture/mtp`, as described below. Do not download or replace live model files during
   the window.
 
 Keep source, build provenance, diagnostic outputs, and operational journals
@@ -40,7 +40,7 @@ controller. Also set:
 | `STUDIO_LAB_SOURCE_DIR` | Absolute path to the campaign clone on the Studio |
 | `STUDIO_LAB_GIT_HEAD` | Exact 40-character campaign commit |
 | `STUDIO_LAB_WINDOW_DIR` | Dedicated private directory for this window's journal and staged helpers |
-| `STUDIO_LAB_JOB_KIND` | Closed job kind: `diagnostic-legacy` (default), `profiler-only`, or `qualification` |
+| `STUDIO_LAB_JOB_KIND` | Closed job kind: `diagnostic-legacy` (default), `profiler-only`, `qualification`, `qwen-qualification`, or `qwen-journey` |
 
 The command and its arguments are fixed in
 `scripts/lab/2080-native-rows/run-window-diagnostic.sh`. There is no shell
@@ -91,6 +91,39 @@ The overall ceiling bounds provider unavailability; it is not an estimate or
 a guarantee that every policy will finish. Exhausting either deadline fails
 the job and restores service without weakening the qualification gates.
 
+`qwen-qualification` runs the fixed `qwen/qwen3.6-35b-a3b` policy: native
+active-row bound one, eight qualified slots, four one-row cells at prompt
+lengths 1536/4096 and output lengths 128/512, plus gated cells
+`s2-p1536-o512` and `s8-p1536-o512`. The continuous 1800-second sustained
+phase follows on `s8-p1536-o512`, then the fixed provider-local
+`native-mtp-journey-e2e --selftest-only` command captures the challenge-bank
+record on the same runtime. This capture is not a coordinator canary or
+live gateway proof. Preserve the preregistered 250 ms arrival
+interval, ten measured blocks and existing R015 thresholds.
+
+Prepare separate isolated snapshots in `.lab-window/fixture/target` and
+`.lab-window/fixture/mtp`, plus the Qwen v1 artifact projection at
+`.lab-window/qwen-artifact-manifest.json` and the frozen policy at
+`.lab-window/qualification-policy.json`. Projection paths are fixed to
+`target`, `mtp`, `target/tokenizer.json`, and `mtp/config.json` respectively;
+their SHA-256 values identify the complete snapshots and files.
+The job binds the projection and
+protects both snapshot roots against drift. It needs the lab CLI and its
+Metal library; GLMBench is not required. The live GLM artifact projection
+remains in place during qualification. The same bounded supervisor, lock,
+signed-provider restoration and completion checks apply. A completed lab job
+does not publish or activate an admission.
+
+`qwen-journey` uses the same protected Qwen inputs and fixed tuple to run only
+the full local `native-mtp-journey-e2e` harness. It does not repeat the R015
+matrix or sustained test. The Qwen harness tests its actual
+`native_mtp_sampled_text_v1` profile, including seeded sampled parity and
+forced rollback. Every local check must pass; the result remains explicitly
+partial because coordinator, billing, and other external journey clauses are
+not exercised by this offline process. Its child deadline is 5400 seconds and
+the guarded window ceiling is 7200 seconds. Preserve existing qualification
+evidence and complete external acceptance separately.
+
 Before pausing service, qualification runs the harness's authoritative
 `--validate-only` preflight without loading the model. A policy not admitted
 by that parser is refused. This runner does not raise the signed production
@@ -109,6 +142,17 @@ inputs, and completing one job cannot suppress another. The tracked-clean
 exact campaign commit is retained separately as execution provenance. The
 reviewed runner comes from clean main; the hash-bound campaign clone may be
 an unmerged laboratory candidate.
+
+## Adding a fixed job kind
+
+A job kind absent from reviewed `origin/main` is an ops-tooling prerequisite,
+not a completed hardware campaign. Land the bounded runner change through
+normal tooling review and CI first; report its offline regression results and
+keep hardware qualification explicitly pending. Then use that reviewed-main
+controller for the model campaign against its hash-bound source clone. The
+model campaign retains its own premerge hardware acceptance and signed
+admission/live-proof gates. Do not execute the controller from the candidate
+branch or relax the clean-`origin/main` check to test a new job kind.
 
 ## Execute
 
