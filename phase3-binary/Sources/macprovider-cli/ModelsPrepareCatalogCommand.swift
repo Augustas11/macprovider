@@ -134,7 +134,11 @@ final class ModelsPrepareCatalogEventSink: @unchecked Sendable {
         errorCode: ModelPreparationEventErrorCode?,
         warningCode: ModelPreparationEventWarningCode?
     ) -> Bool {
+        // A progress sample may have started before cancellation and finished
+        // scanning staged files after cancel_requested was written. Keep that
+        // stale sample from moving the transaction back to running.
         guard !terminal,
+              !(cancelRequestEmitted && state == .running),
               let event = try? ModelPreparationTransactionEvent(
                   transactionID: transactionID,
                   transactionKind: .prepareModel,
