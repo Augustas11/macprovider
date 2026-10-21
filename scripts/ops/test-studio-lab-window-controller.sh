@@ -44,6 +44,7 @@ export STUDIO_LAB_GIT_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 # shellcheck source=/dev/null
 . "$HARNESS/scripts/ops/studio-lab-window.sh"
 trap 'cleanup_ops; rm -rf "$TMP_ROOT"' EXIT
+REAL_REMOTE_STATE="$(declare -f remote_state)"
 
 set +e
 (
@@ -69,6 +70,15 @@ gather
 [ "$NEXT_ID:$NEXT_KIND" = staging:mutate ] || fail "pre-dispatch staging did not select guarded abort"
 [[ "$NEXT_CMD" == *'_apply abort-stage' ]] || fail "pre-dispatch cleanup was not routed through the guarded controller"
 pass "abandoned pre-dispatch staging has a bounded guarded cleanup"
+
+# A helper-only stage is also incomplete protected state and cannot be ignored.
+eval "$REAL_REMOTE_STATE"
+studio_ssh() {
+  [[ "$1" == *"$REMOTE_JOB_HELPER"* ]] || fail "remote status did not inspect the staged job helper"
+  printf '%s\n' '{"state":"partial"}'
+}
+[ "$(remote_state)" = '{"state":"partial"}' ] || fail "job helper-only stage was not classified as partial"
+pass "job helper-only staging is recoverable protected state"
 
 : > "$TEST_EVENTS"
 mkdir -p "$(dirname "$(active_marker_path)")"
@@ -150,6 +160,44 @@ gather
 [ "$NEXT_ID:$NEXT_KIND" = done:done ] || fail "successful per-head completion was not terminal"
 pass "matching successful completion is terminal only without a journal"
 completion_mark() { printf 'complete-%s' "$STUDIO_LAB_GIT_HEAD"; }
+remote_state() { printf '%s\n' '{"state":"absent"}'; }
+
+# Older active markers have no job fields. Recovery must retain the legacy
+# controller contract even if a caller has since set a new-job environment.
+legacy_nonce=abababababababababababababababab
+legacy_sha="$(printf 'a%.0s' {1..64})"
+legacy_head=cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd
+mark_done "$OPS_SCOPE" active legacy "{\"phase\":\"dispatched\",\"nonce\":\"$legacy_nonce\",\"lab_git_head\":\"$legacy_head\",\"outcome_marker\":\"\",\"manifest_sha256\":\"$legacy_sha\"}"
+STUDIO_LAB_JOB_KIND=qualification
+STUDIO_LAB_JOB_IDENTITY="$(printf 'f%.0s' {1..64})"
+load_recovery_context
+[ "$STUDIO_LAB_JOB_KIND" = diagnostic-legacy ] || fail "legacy active marker inherited a caller job kind"
+[ -z "${STUDIO_LAB_JOB_IDENTITY:-}" ] || fail "legacy active marker retained caller job identity"
+rm -f "$(active_marker_path)"
+pass "legacy active marker recovers without job fields"
+
+# A successful completion for a qualified job must bind the fresh source job
+# identity and kind, not merely a local complete marker and zero exit code.
+STUDIO_LAB_JOB_KIND=profiler-only
+job_identity="$(printf '9%.0s' {1..64})"
+source_snapshot() { printf '{"job":{"kind":"profiler-only","identity_sha256":"%s"}}\n' "$job_identity"; }
+completion_mark() { printf 'complete-%s' "$STUDIO_LAB_JOB_IDENTITY"; }
+mark_done "$OPS_SCOPE" "complete-$job_identity" "bad job completion" '{"lab_exit_code":0}'
+remote_state() { printf '%s\n' '{"state":"absent"}'; }
+require_fresh_settings() { :; }
+reset_state
+gather
+[ "$NEXT_ID:$NEXT_KIND" = window:mutate ] || fail "unbound job completion was accepted"
+rm -f "$(marker_path "$OPS_SCOPE" "complete-$job_identity")"
+mark_done "$OPS_SCOPE" "complete-$job_identity" "bound job completion" "{\"lab_exit_code\":0,\"job_kind\":\"profiler-only\",\"job_identity\":\"$job_identity\"}"
+reset_state
+gather
+[ "$NEXT_ID:$NEXT_KIND" = done:done ] || fail "matching job completion was not terminal"
+rm -f "$(marker_path "$OPS_SCOPE" "complete-$job_identity")"
+STUDIO_LAB_JOB_KIND=diagnostic-legacy
+unset STUDIO_LAB_JOB_IDENTITY
+completion_mark() { printf 'complete-%s' "$STUDIO_LAB_GIT_HEAD"; }
+pass "job completion requires matching immutable identity"
 
 # Completion is committed locally before remote finish; a finish refusal keeps
 # the active ownership marker and remote journal recoverable.
@@ -385,4 +433,4 @@ assert os.path.islink(path)
 PY
 pass "manifest binds canonical symlink targets and permits active-runner baseline"
 
-printf '1..18\n'
+printf '1..21\n'

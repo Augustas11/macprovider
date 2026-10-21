@@ -4,14 +4,25 @@
 set -euo pipefail
 umask 077
 
-[ "$#" = 1 ] && [ "$1" = --offline ] || {
-  echo "usage: run-window-diagnostic.sh --offline" >&2
+[ "$#" = 1 ] && [ "$1" = --offline ] ||
+  { [ "$#" = 3 ] && [ "$1" = --offline ] && [ "$2" = --manifest ]; } || {
+  echo "usage: run-window-diagnostic.sh --offline [--manifest PATH]" >&2
   exit 2
 }
 [ "$(uname -s)" = Darwin ] && [ "$(sysctl -n hw.model)" = Mac15,14 ] || {
   echo "diagnostic requires the designated Mac Studio" >&2
   exit 3
 }
+
+if [ "$#" = 3 ]; then
+  script_dir="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
+  helper="$script_dir/manifest.py"
+  [ -f "$helper" ] && [ ! -L "$helper" ] || {
+    echo "fixed Studio job helper is missing" >&2
+    exit 3
+  }
+  exec /usr/bin/python3 "$helper" run-job --manifest "$3"
+fi
 
 # The reviewed supervisor supplies a clean, hash-bound source directory as
 # cwd. Neither the command nor its flags come from operator shell snippets.
