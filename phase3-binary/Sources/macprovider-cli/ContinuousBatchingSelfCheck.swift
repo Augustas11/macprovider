@@ -1135,6 +1135,13 @@ struct ContinuousBatchingSelfCheckStore: Sendable {
 /// throughput noise never takes a grant from a Mac that already batches
 /// (`ContinuousBatchingSelfCheck.reconcile`). Never blocks serving.
 actor ContinuousBatchingSelfCheckDriver {
+    /// Process teardown must wait for inference cancellation and its journal
+    /// write before destroying MLX's process-global Metal command encoders.
+    nonisolated static func cancelAndWait(_ task: Task<Void, Never>?) async {
+        task?.cancel()
+        await task?.value
+    }
+
     struct Provisional: Sendable, Equatable {
         /// Model artifacts with a signed positive policy entry (the served
         /// model and any warm-swap target).

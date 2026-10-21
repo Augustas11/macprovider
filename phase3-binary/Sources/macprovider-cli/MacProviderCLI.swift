@@ -3766,7 +3766,11 @@ struct ServeCommand: AsyncParsableCommand {
                 }
             }
         )
-        let terminationHandlers = installTerminationHandlers(coordinatorClient: coordinatorClient, controlSocket: controlSocket, idlePrewarmer: idlePrewarmer, kvDiskTier: kvDiskTier)
+        let terminationHandlers = installTerminationHandlers(
+            coordinatorClient: coordinatorClient, controlSocket: controlSocket,
+            idlePrewarmer: idlePrewarmer, kvDiskTier: kvDiskTier,
+            cbSelfCheckTask: cbSelfCheckTask
+        )
         defer {
             Task { [kvDiskTier] in
                 await idlePrewarmer.stop()
@@ -4795,7 +4799,8 @@ private func installTerminationHandlers(
     coordinatorClient: CoordinatorClient?,
     controlSocket: ControlSocketServer?,
     idlePrewarmer: IdlePrewarmer?,
-    kvDiskTier: KVDiskTier?
+    kvDiskTier: KVDiskTier?,
+    cbSelfCheckTask: Task<Void, Never>?
 ) -> [DispatchSourceSignal] {
     let latch = TerminationLatch()
     return [SIGTERM, SIGINT].map { signalNumber in
@@ -4822,6 +4827,10 @@ private func installTerminationHandlers(
                 let exitCode: Int32 = StopIntentMarker.consumeIfValid(currentPID: getpid())
                     ? 0
                     : (128 + signalNumber)
+                // Cancellation alone is not a drain: stock generation runs on
+                // the blocking executor. Await it and the self-check journal
+                // before either drainAndExit or exit destroys MLX globals.
+                await ContinuousBatchingSelfCheckDriver.cancelAndWait(cbSelfCheckTask)
                 await idlePrewarmer?.stop()
                 await controlSocket?.stop()
                 await coordinatorClient?.drainAndExit(
