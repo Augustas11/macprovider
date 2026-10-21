@@ -32,6 +32,12 @@ TARGET_ONE=qwen3-coder-30b-a3b-instruct
 TARGET_TWO=qwen3-30b-a3b-instruct-2507
 TARGET_ONE_KEY=qwen3-coder-30b-a3b-instruct
 TARGET_TWO_KEY=qwen/qwen3-30b-a3b-instruct-2507
+NATIVE_TARGET=qwen3.6-35b-a3b
+NATIVE_TARGET_KEY=qwen/qwen3.6-35b-a3b
+NATIVE_PROFILE=qwen36-native-mtp
+TRANSACTION_PROFILE=opencode-dual-30b
+GLM_INCUMBENT=zai-org/glm-5.3-flash
+NATIVE_ADMISSION_RELEASE=phase3-binary/catalog/autotune/native-mtp-admission-release.json
 RELEASE_TEAM_ID=YF7XNRJUG4
 RELEASE_SIGNING_IDENTIFIER=live.malibu.provider.cli
 
@@ -204,6 +210,42 @@ json.dump({"catalog_version": candidates["version"], "rate_card_version": rates[
 PY
 }
 
+fetch_native_mtp_market() {
+  local base code
+  base="$(coordinator_url)"
+  [ -n "$base" ] || return 1
+  code="$(http_get "$base/v1/autotune-candidates" "$OPS_TMP_DIR/candidates.json")"
+  [ "$code" = 200 ] || return 1
+  code="$(http_get "$base/v1/rate-card" "$OPS_TMP_DIR/rates.json")"
+  [ "$code" = 200 ] || return 1
+  python3 - "$OPS_TMP_DIR/candidates.json" "$OPS_TMP_DIR/rates.json" "$OPS_TMP_DIR/market.json" <<'PY'
+import json, sys
+candidates, rates = (json.load(open(path)) for path in sys.argv[1:3])
+key = "qwen/qwen3.6-35b-a3b"
+expected = ("mlx-community/Qwen3.6-35B-A3B-4bit",
+            "38740b847e4cb78f352aba30aa41c76e08e6eb46",
+            "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1")
+row = (candidates.get("rows") or {}).get(key)
+if not isinstance(row, dict) or (
+    row.get("model_id"), row.get("model_revision"), row.get("model_sha256"),
+    row.get("runtime_status"),
+) != (*expected, "recommendable"):
+    raise SystemExit(3)
+rate = (rates.get("rows") or {}).get(key)
+actual = tuple((rate or {}).get(name) for name in (
+    "prompt_rate_per_mtok", "prompt_cache_hit_rate_per_mtok", "completion_rate_per_mtok"))
+if any(type(value) is not int or value <= 0 or value > 2**63 - 1 for value in actual):
+    raise SystemExit(3)
+for value in (candidates.get("version"), rates.get("version")):
+    if not isinstance(value, str) or not value or len(value) > 256:
+        raise SystemExit(3)
+json.dump({"catalog_version": candidates["version"], "rate_card_version": rates["version"],
+           "target_rates": {key: actual},
+           "target_artifacts": {key: {"model_id": expected[0], "sha256": expected[2]}},
+           }, open(sys.argv[3], "w"), sort_keys=True, separators=(",", ":"))
+PY
+}
+
 read_studio_status() {
   studio_command "$QWEN_E2E_CLI" status --json --config "$QWEN_E2E_CONFIG"
 }
@@ -232,6 +274,20 @@ if type(pid) is not int or pid < 1: bad.append("service_instance.pid")
 if previous and str(pid) == previous: bad.append("service_instance.pid_not_changed")
 if bad: raise SystemExit("status mismatch: " + ",".join(bad))
 print(pid)
+PY
+}
+
+validate_native_target_status() {
+  validate_status "$1" "$NATIVE_TARGET_KEY" "$2" >/dev/null || return
+  python3 - "$1" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+mtp = d.get("native_mtp") or {}
+cb = d.get("continuous_batching") or {}
+if mtp.get("enabled") is not True or mtp.get("mode") not in ("eligible", "active"):
+    raise SystemExit("native MTP is not eligible or active")
+if cb.get("active") is not True:
+    raise SystemExit("continuous batching is not active")
 PY
 }
 
@@ -363,8 +419,18 @@ finally:
 PY
 }
 
+validate_buyer_token_file() {
+  python3 - "$1" <<'PY'
+import os, stat, sys
+info=os.lstat(sys.argv[1])
+if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1
+        or info.st_mode & 0o077 or info.st_size < 1 or info.st_size > 8193):
+    raise SystemExit(3)
+PY
+}
+
 gather() {
-  local handback_ok=false inputs_ok=false preflight_ok=false journal_state=unknown restore_required=false
+  local handback_ok=false inputs_ok=false preflight_ok=false journal_state=unknown restore_required=false journal_profile=""
   OPS_SCOPE="qwen-opencode-unbound"
   for name in QWEN_E2E_CLI QWEN_E2E_CONFIG QWEN_E2E_JOURNAL; do
     [ -n "${!name:-}" ] || { set_next inputs blocked "Configure Qwen E2E inputs" "" "$name is unset"; return; }
@@ -376,10 +442,21 @@ gather() {
   if studio_helper inspect --journal "$QWEN_E2E_JOURNAL" > "$OPS_TMP_DIR/journal.json" 2>/dev/null; then
     journal_state="$(json_field "$OPS_TMP_DIR/journal.json" 'd.get("status")')"
     restore_required="$(json_field "$OPS_TMP_DIR/journal.json" 'd.get("restore_required")')"
+    journal_profile="$(json_field "$OPS_TMP_DIR/journal.json" 'd.get("profile")')"
   fi
   fact journal_state "$journal_state"
   fact restore_required "$restore_required"
+  if [ "$journal_profile" = "$NATIVE_PROFILE" ]; then
+    set_next restore blocked "Restore Qwen3.6 through the catalog controller" "" \
+      "the native transaction is protected by catalog-activate:qwen_restore and cannot use legacy recovery"
+    return
+  fi
   if [ "$restore_required" = true ]; then
+    [ -z "$journal_profile" ] || {
+      set_next restore blocked "Refuse an unknown Qwen transaction profile" "" \
+        "the journal profile is outside the reviewed legacy and native recovery routes"
+      return
+    }
     set_next restore mutate "Restore the incumbent provider after an interrupted Qwen transaction" \
       "$OPS_DIR/qwen-opencode-e2e.sh _restore"
     return
@@ -411,13 +488,7 @@ gather() {
   done
   require_abs QWEN_E2E_OPENCODE "$QWEN_E2E_OPENCODE"
   require_abs BUYER_TOKEN_FILE "$BUYER_TOKEN_FILE"
-  python3 - "$BUYER_TOKEN_FILE" <<'PY' || {
-import os, stat, sys
-info=os.lstat(sys.argv[1])
-if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1
-        or info.st_mode & 0o077 or info.st_size < 1 or info.st_size > 8193):
-    raise SystemExit(3)
-PY
+  validate_buyer_token_file "$BUYER_TOKEN_FILE" || {
     set_next inputs blocked "Protect the buyer credential input" "" "BUYER_TOKEN_FILE must be an owner-only regular file of bounded size"
     return
   }
@@ -496,12 +567,46 @@ create_remote_scratch() {
 
 remove_remote_scratch() {
   [ -n "${REMOTE_SCRATCH:-}" ] || return 0
+  local base="${REMOTE_SCRATCH##*/}" scratch_state
+  case "$REMOTE_SCRATCH" in /*) ;; *) return 1 ;; esac
+  case "$base" in macprovider-qwen-e2e.*) ;; *) return 1 ;; esac
+  scratch_state="$(studio_command /usr/bin/python3 -c 'import os,stat,sys
+try: s=os.lstat(sys.argv[1])
+except FileNotFoundError: print("absent"); raise SystemExit(0)
+if stat.S_ISDIR(s.st_mode) and s.st_uid==os.getuid() and stat.S_IMODE(s.st_mode)==0o700: print("valid")
+else: raise SystemExit(3)' "$REMOTE_SCRATCH")" || return 1
+  [ "$scratch_state" != absent ] || return 0
+  [ "$scratch_state" = valid ] || return 1
+  studio_command /bin/rm -f "$REMOTE_REC_ONE" "$REMOTE_REC_TWO" "$REMOTE_RECORDER" >/dev/null
+  studio_command /bin/rmdir "$REMOTE_SCRATCH" >/dev/null
+}
+
+remote_scratch_absent() {
+  [ -n "${REMOTE_SCRATCH:-}" ] || return 1
   local base="${REMOTE_SCRATCH##*/}"
   case "$REMOTE_SCRATCH" in /*) ;; *) return 1 ;; esac
   case "$base" in macprovider-qwen-e2e.*) ;; *) return 1 ;; esac
-  studio_command /usr/bin/python3 -c 'import os,stat,sys; s=os.lstat(sys.argv[1]); raise SystemExit(0 if stat.S_ISDIR(s.st_mode) and s.st_uid==os.getuid() and stat.S_IMODE(s.st_mode)==0o700 else 3)' "$REMOTE_SCRATCH" || return 1
-  studio_command /bin/rm -f "$REMOTE_REC_ONE" "$REMOTE_REC_TWO" "$REMOTE_RECORDER" >/dev/null
-  studio_command /bin/rmdir "$REMOTE_SCRATCH" >/dev/null
+  studio_command /usr/bin/python3 -c 'import os,sys
+try: os.lstat(sys.argv[1])
+except FileNotFoundError: raise SystemExit(0)
+raise SystemExit(3)' "$REMOTE_SCRATCH"
+}
+
+set_remote_scratch_paths() {
+  local profile="$1"
+  case "$profile" in
+    ""|opencode-dual-30b)
+      REMOTE_REC_ONE="$REMOTE_SCRATCH/one.recommendation.json"
+      REMOTE_REC_TWO="$REMOTE_SCRATCH/two.recommendation.json"
+      REMOTE_RECORDER="$REMOTE_SCRATCH/opencode-gateway-check.py"
+      ;;
+    qwen36-native-mtp)
+      REMOTE_REC_ONE="$REMOTE_SCRATCH/qwen36.recommendation.json"
+      REMOTE_REC_TWO="$REMOTE_SCRATCH/unused-two.recommendation.json"
+      REMOTE_RECORDER="$REMOTE_SCRATCH/unused-recorder.py"
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 emit_recommendation() {
@@ -511,8 +616,9 @@ emit_recommendation() {
 }
 
 verify_remote_recommendation() {
-  local target="$1" remote_file="$2"
-  studio_helper verify-recommendation --recommendation "$remote_file" --target "$target" \
+  local target="$1" remote_file="$2" profile_args=()
+  [ "$TRANSACTION_PROFILE" = opencode-dual-30b ] || profile_args=(--profile "$TRANSACTION_PROFILE")
+  studio_helper verify-recommendation "${profile_args[@]}" --recommendation "$remote_file" --target "$target" \
     --binary-version "$HB_VERSION" --catalog-version "$LIVE_RELEASE" --catalog-hash "$LIVE_DIGEST" \
     --rate-card-version "$RATE_VERSION" >/dev/null
 }
@@ -550,16 +656,18 @@ restart_and_wait() {
 }
 
 checkpoint_remote() {
-  local phase="$1" target="$2" remote_file="$3"
-  studio_helper checkpoint --config "$QWEN_E2E_CONFIG" --journal "$QWEN_E2E_JOURNAL" --phase "$phase" \
+  local phase="$1" target="$2" remote_file="$3" profile_args=()
+  [ "$TRANSACTION_PROFILE" = opencode-dual-30b ] || profile_args=(--profile "$TRANSACTION_PROFILE")
+  studio_helper checkpoint "${profile_args[@]}" --config "$QWEN_E2E_CONFIG" --journal "$QWEN_E2E_JOURNAL" --phase "$phase" \
     --recommendation "$remote_file" --target "$target" --binary-version "$HB_VERSION" \
     --catalog-version "$LIVE_RELEASE" --catalog-hash "$LIVE_DIGEST" \
     --rate-card-version "$RATE_VERSION" >/dev/null
 }
 
 begin_adoption_remote() {
-  local phase="$1" target="$2" remote_file="$3"
-  studio_helper begin-adoption --config "$QWEN_E2E_CONFIG" --journal "$QWEN_E2E_JOURNAL" --phase "$phase" \
+  local phase="$1" target="$2" remote_file="$3" profile_args=()
+  [ "$TRANSACTION_PROFILE" = opencode-dual-30b ] || profile_args=(--profile "$TRANSACTION_PROFILE")
+  studio_helper begin-adoption "${profile_args[@]}" --config "$QWEN_E2E_CONFIG" --journal "$QWEN_E2E_JOURNAL" --phase "$phase" \
     --recommendation "$remote_file" --target "$target" --binary-version "$HB_VERSION" \
     --catalog-version "$LIVE_RELEASE" --catalog-hash "$LIVE_DIGEST" \
     --rate-card-version "$RATE_VERSION" >/dev/null
@@ -647,7 +755,7 @@ restore_provider() {
 }
 
 load_journal_context() {
-  local file="$1"
+  local file="$1" journal_profile
   INCUMBENT_MODEL="$(json_field "$file" 'd.get("baseline_model")')"
   HB_VERSION="$(json_field "$file" '(d.get("release_binding") or {}).get("binary_version")')"
   HB_PROVIDER="$(json_field "$file" '(d.get("release_binding") or {}).get("provider_id")')"
@@ -661,21 +769,231 @@ load_journal_context() {
   BASELINE_PID="$(json_field "$file" '(d.get("baseline_status") or {}).get("pid")')"
   RATE_VERSION="$(json_field "$file" '(d.get("market_binding") or {}).get("rate_card_version")')"
   REMOTE_SCRATCH="$(json_field "$file" 'd.get("remote_scratch")')"
-  REMOTE_REC_ONE="$REMOTE_SCRATCH/one.recommendation.json"
-  REMOTE_REC_TWO="$REMOTE_SCRATCH/two.recommendation.json"
-  REMOTE_RECORDER="$REMOTE_SCRATCH/opencode-gateway-check.py"
+  journal_profile="$(json_field "$file" 'd.get("profile")')"
+  set_remote_scratch_paths "$journal_profile" || return 1
   [ -n "$INCUMBENT_MODEL" ] && [ -n "$HB_VERSION" ] && [ -n "$LIVE_RELEASE" ] &&
     [ -n "$LIVE_DIGEST" ] && [ -n "$BASELINE_PID" ] && [ -n "$RATE_VERSION" ] &&
     [ -n "$REMOTE_SCRATCH" ]
 }
 
+require_catalog_lock() {
+  local purpose="$1" status="$OPS_TMP_DIR/catalog-lock.json"
+  [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] || refuse "catalog profile is callable only by catalog-activate next --run"
+  [ -n "${MACPROVIDER_OPS_OWNER:-}" ] || refuse "catalog profile requires the live-ops owner"
+  "$OPS_DIR/live-lock.sh" status > "$status" 2>/dev/null || refuse "live-ops lock status is unreadable"
+  python3 - "$status" "$MACPROVIDER_OPS_OWNER" "$purpose" <<'PY' ||
+import json, sys
+d=json.load(open(sys.argv[1])); lock=d.get("lock") or {}
+raise SystemExit(0 if d.get("held") is True and lock.get("owner")==sys.argv[2]
+                 and lock.get("purpose")==sys.argv[3] else 3)
+PY
+    refuse "catalog profile requires the already-held catalog lock with purpose $purpose"
+}
+
+validate_native_release_binding() {
+  local input="$REPO_ROOT/$NATIVE_ADMISSION_RELEASE"
+  git -C "$REPO_ROOT" ls-files --error-unmatch "$NATIVE_ADMISSION_RELEASE" >/dev/null 2>&1 || return
+  git -C "$REPO_ROOT" diff --quiet HEAD -- "$NATIVE_ADMISSION_RELEASE" || return
+  python3 - "$input" "$LIVE_RELEASE" "$HB_VERSION" "$HB_SHA" "$HB_CDHASH" \
+    "$HB_TEAM" "$HB_IDENTIFIER" "$RELEASE_TEAM_ID" "$RELEASE_SIGNING_IDENTIFIER" <<'PY'
+import json, re, sys
+path, release, version, sha, cdhash, team, identifier, trusted_team, trusted_identifier = sys.argv[1:]
+try:
+    value = json.load(open(path, encoding="utf-8"))
+    entry = value["entry"]
+except Exception:
+    raise SystemExit(3)
+if value.get("schema_version") != "macprovider.native-mtp-admission-release-input.v1":
+    raise SystemExit(3)
+if value.get("release_id") != release:
+    raise SystemExit(3)
+if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+    raise SystemExit(3)
+if entry.get("reproducible_build_sha256") != sha or not re.fullmatch(r"[0-9a-f]{64}", sha):
+    raise SystemExit(3)
+if entry.get("live_executable_cdhash") != cdhash or not re.fullmatch(r"[0-9a-f]{40,64}", cdhash):
+    raise SystemExit(3)
+if (team, identifier) != (trusted_team, trusted_identifier):
+    raise SystemExit(3)
+PY
+}
+
+validate_native_journal_release_binding() {
+  [ "$HB_TEAM" = "$RELEASE_TEAM_ID" ] && [ "$HB_IDENTIFIER" = "$RELEASE_SIGNING_IDENTIFIER" ] &&
+    [[ "$HB_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && [[ "$HB_SHA" =~ ^[0-9a-f]{64}$ ]] &&
+    [[ "$HB_CDHASH" =~ ^[0-9a-f]{40,64}$ ]]
+}
+
+catalog_journal_probe() {
+  if [ -z "${QWEN_E2E_JOURNAL:-}" ]; then
+    printf '%s\n' '{"status":"absent","restore_required":false}'
+    return
+  fi
+  require_abs QWEN_E2E_JOURNAL "$QWEN_E2E_JOURNAL"
+  require_studio_ssh
+  studio_helper inspect --journal "$QWEN_E2E_JOURNAL"
+}
+
+native_intent_path() {
+  printf '%s/qwen-native-mtp-transaction-intent.json' "$OPS_STATE_DIR"
+}
+
+write_native_intent() {
+  python3 -I - "$(native_intent_path)" "$@" <<'PY'
+import json, os, pathlib, re, sys, tempfile, uuid
+(path, transaction_id, release, digest, version, provider, cli_sha, cdhash,
+ team, identifier, handoff_sha, journal, scratch) = sys.argv[1:]
+if uuid.UUID(transaction_id).version != 4 or str(uuid.UUID(transaction_id)) != transaction_id:
+    raise SystemExit(2)
+if not all(re.fullmatch(r"[0-9a-f]{64}", value) for value in (digest, cli_sha, handoff_sha)): raise SystemExit(2)
+if not re.fullmatch(r"[0-9a-f]{40,64}", cdhash): raise SystemExit(2)
+if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+",version): raise SystemExit(2)
+if not all(re.fullmatch(r"[A-Za-z0-9._/@+-]+",value) for value in (release,provider,team,identifier)): raise SystemExit(2)
+if not pathlib.Path(journal).is_absolute() or not pathlib.Path(scratch).is_absolute(): raise SystemExit(2)
+d={"schema_version":"macprovider.qwen_native_intent.v1","transaction_id":transaction_id,
+   "profile":"qwen36-native-mtp","release_id":release,"catalog_digest":digest,
+   "binary_version":version,"provider_id":provider,"cli_sha256":cli_sha,"code_cdhash":cdhash,
+   "team_id":team,"signing_identifier":identifier,"written_handoff_sha256":handoff_sha,
+   "incumbent_model":"zai-org/glm-5.3-flash","journal_path":journal,"remote_scratch":scratch}
+p=pathlib.Path(path); p.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+if p.exists() or p.is_symlink(): raise SystemExit(3)
+fd,tmp=tempfile.mkstemp(prefix=".qwen-intent.",dir=p.parent)
+try:
+ os.fchmod(fd,0o600)
+ with os.fdopen(fd,"w") as f:
+  json.dump(d,f,sort_keys=True,separators=(",",":")); f.write("\n"); f.flush(); os.fsync(f.fileno())
+ os.replace(tmp,p); dfd=os.open(p.parent,os.O_RDONLY|os.O_DIRECTORY); os.fsync(dfd); os.close(dfd)
+finally:
+ try: os.unlink(tmp)
+ except FileNotFoundError: pass
+PY
+}
+
+validate_native_intent() {
+  python3 -I - "$(native_intent_path)" <<'PY'
+import json, pathlib, re, sys, uuid
+p=pathlib.Path(sys.argv[1])
+try:
+ if not p.is_file() or p.is_symlink() or p.stat().st_mode & 0o077: raise ValueError()
+ d=json.load(open(p)); keys={"schema_version","transaction_id","profile","release_id","catalog_digest",
+ "binary_version","provider_id","cli_sha256","code_cdhash","team_id","signing_identifier",
+ "written_handoff_sha256","incumbent_model","journal_path","remote_scratch"}
+ if set(d)!=keys or d["schema_version"]!="macprovider.qwen_native_intent.v1" or d["profile"]!="qwen36-native-mtp": raise ValueError()
+ if uuid.UUID(d["transaction_id"]).version!=4 or str(uuid.UUID(d["transaction_id"]))!=d["transaction_id"]: raise ValueError()
+ if d["incumbent_model"]!="zai-org/glm-5.3-flash": raise ValueError()
+ if not pathlib.Path(d["journal_path"]).is_absolute() or not pathlib.Path(d["remote_scratch"]).is_absolute(): raise ValueError()
+ if not pathlib.Path(d["remote_scratch"]).name.startswith("macprovider-qwen-e2e."): raise ValueError()
+ if not all(isinstance(d[k],str) and d[k] for k in keys-{"schema_version","profile"}): raise ValueError()
+ if not all(re.fullmatch(r"[0-9a-f]{64}",d[k]) for k in ("catalog_digest","cli_sha256","written_handoff_sha256")): raise ValueError()
+ if not re.fullmatch(r"[0-9a-f]{40,64}",d["code_cdhash"]): raise ValueError()
+ if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+",d["binary_version"]): raise ValueError()
+ if not all(re.fullmatch(r"[A-Za-z0-9._/@+-]+",d[k]) for k in
+            ("release_id","provider_id","team_id","signing_identifier")): raise ValueError()
+except Exception: raise SystemExit(3)
+print(json.dumps(d,sort_keys=True,separators=(",",":")))
+PY
+}
+
+catalog_native_intent_probe() {
+  if [ ! -e "$(native_intent_path)" ] && [ ! -L "$(native_intent_path)" ]; then
+    printf '%s\n' '{"status":"absent"}'
+    return
+  fi
+  local intent intent_journal
+  intent="$(validate_native_intent)" || return
+  printf '%s\n' "$intent" > "$OPS_TMP_DIR/validated-native-intent.json"
+  intent_journal="$(json_field "$OPS_TMP_DIR/validated-native-intent.json" 'd["journal_path"]')"
+  if [ -n "${QWEN_E2E_JOURNAL:-}" ] && [ "$QWEN_E2E_JOURNAL" != "$intent_journal" ]; then
+    return 3
+  fi
+  QWEN_E2E_JOURNAL="$intent_journal" studio_helper inspect --journal "$intent_journal" > "$OPS_TMP_DIR/intent-journal.json" || return 3
+  if [ "$(json_field "$OPS_TMP_DIR/intent-journal.json" 'd.get("status")')" != absent ]; then
+    native_intent_matches_journal "$OPS_TMP_DIR/intent-journal.json" || return 3
+  fi
+  printf '%s\n' "$intent"
+}
+
+catalog_native_scratch_probe() {
+  studio_helper inspect --journal "$QWEN_E2E_JOURNAL" > "$OPS_TMP_DIR/scratch-journal.json" || return 3
+  [ "$(json_field "$OPS_TMP_DIR/scratch-journal.json" 'd.get("profile")')" = "$NATIVE_PROFILE" ] &&
+    [ "$(json_field "$OPS_TMP_DIR/scratch-journal.json" 'd.get("status")')" = restored ] &&
+    [ "$(json_field "$OPS_TMP_DIR/scratch-journal.json" 'd.get("restore_required")')" = false ] || return 3
+  load_journal_context "$OPS_TMP_DIR/scratch-journal.json" || return 3
+  TRANSACTION_PROFILE="$NATIVE_PROFILE"
+  [ "$INCUMBENT_MODEL" = "$GLM_INCUMBENT" ] || return 3
+  validate_native_journal_release_binding || return 3
+  if remote_scratch_absent; then
+    printf '%s\n' '{"scratch_absent":true}'
+  else
+    printf '%s\n' '{"scratch_absent":false}'
+  fi
+}
+
+clear_native_intent() {
+  python3 -I - "$(native_intent_path)" <<'PY'
+import os, pathlib, sys
+p=pathlib.Path(sys.argv[1]); p.unlink()
+fd=os.open(p.parent,os.O_RDONLY|os.O_DIRECTORY); os.fsync(fd); os.close(fd)
+PY
+}
+
+native_intent_matches_journal() {
+  python3 -I - "$(native_intent_path)" "$1" <<'PY'
+import json,sys
+i=json.load(open(sys.argv[1])); j=json.load(open(sys.argv[2]))
+binding=j.get("release_binding") or {}; baseline=j.get("baseline_status") or {}
+raise SystemExit(0 if j.get("profile")==i["profile"] and j.get("transaction_id")==i["transaction_id"]
+ and j.get("remote_scratch")==i["remote_scratch"]
+ and baseline.get("catalog_version")==i["release_id"] and baseline.get("catalog_hash")==i["catalog_digest"]
+ and binding.get("binary_version")==i["binary_version"] and binding.get("provider_id")==i["provider_id"]
+ and binding.get("cli_sha256")==i["cli_sha256"] and binding.get("code_cdhash")==i["code_cdhash"]
+ and binding.get("team_id")==i["team_id"] and binding.get("signing_identifier")==i["signing_identifier"]
+ and binding.get("written_handoff_sha256")==i["written_handoff_sha256"] else 3)
+PY
+}
+
+run_native_prejournal_reconcile() {
+  require_catalog_lock catalog-activate:qwen_restore
+  local intent_json
+  intent_json="$(validate_native_intent)" || refuse "native pre-journal intent is invalid"
+  printf '%s\n' "$intent_json" > "$OPS_TMP_DIR/native-intent.json"
+  [ "$(json_field "$OPS_TMP_DIR/native-intent.json" 'd["journal_path"]')" = "$QWEN_E2E_JOURNAL" ] ||
+    refuse "native intent journal path does not match the configured journal"
+  studio_helper inspect --journal "$QWEN_E2E_JOURNAL" > "$OPS_TMP_DIR/prejournal-probe.json" ||
+    refuse "native journal is unreadable"
+  [ "$(json_field "$OPS_TMP_DIR/prejournal-probe.json" 'd.get("status")')" = absent ] &&
+    [ "$(json_field "$OPS_TMP_DIR/prejournal-probe.json" 'd.get("restore_required")')" = false ] ||
+    refuse "native journal exists; pre-journal reconciliation is forbidden"
+  HB_VERSION="$(json_field "$OPS_TMP_DIR/native-intent.json" 'd["binary_version"]')"
+  HB_PROVIDER="$(json_field "$OPS_TMP_DIR/native-intent.json" 'd["provider_id"]')"
+  HB_SHA="$(json_field "$OPS_TMP_DIR/native-intent.json" 'd["cli_sha256"]')"
+  HB_CDHASH="$(json_field "$OPS_TMP_DIR/native-intent.json" 'd["code_cdhash"]')"
+  HB_TEAM="$(json_field "$OPS_TMP_DIR/native-intent.json" 'd["team_id"]')"
+  HB_IDENTIFIER="$(json_field "$OPS_TMP_DIR/native-intent.json" 'd["signing_identifier"]')"
+  LIVE_RELEASE="$(json_field "$OPS_TMP_DIR/native-intent.json" 'd["release_id"]')"
+  LIVE_DIGEST="$(json_field "$OPS_TMP_DIR/native-intent.json" 'd["catalog_digest"]')"
+  REMOTE_SCRATCH="$(json_field "$OPS_TMP_DIR/native-intent.json" 'd["remote_scratch"]')"
+  TRANSACTION_PROFILE="$NATIVE_PROFILE"; set_remote_scratch_paths "$TRANSACTION_PROFILE" || refuse "invalid intent scratch"
+  verify_installed_cli || refuse "installed signed CLI no longer matches the pre-journal intent"
+  studio_preflight "$OPS_TMP_DIR/prejournal-status.json" || refuse "Studio status is unavailable"
+  validate_status "$OPS_TMP_DIR/prejournal-status.json" "$GLM_INCUMBENT" >/dev/null ||
+    refuse "exact GLM incumbent is not buyer-serving"
+  remove_remote_scratch || refuse "protected pre-journal scratch cleanup failed"
+  "$OPS_DIR/live-lock.sh" acquire "$MACPROVIDER_OPS_OWNER" --purpose catalog-activate:gateway_proof >&2 ||
+    refuse "catalog lock could not be returned to gateway proof ownership"
+  clear_native_intent || refuse "pre-journal intent could not be durably cleared"
+}
+
 campaign_cleanup() {
-  local rc=$? cleanup_rc=0 cleanup_status cleanup_required
+  local rc=$? cleanup_rc=0 cleanup_status cleanup_required journal_absent=false intent_json=""
   trap - EXIT INT TERM HUP
   set +e
   if studio_helper inspect --journal "$QWEN_E2E_JOURNAL" > "$OPS_TMP_DIR/cleanup-journal.json" 2>/dev/null; then
     cleanup_status="$(json_field "$OPS_TMP_DIR/cleanup-journal.json" 'd.get("status")')"
     cleanup_required="$(json_field "$OPS_TMP_DIR/cleanup-journal.json" 'd.get("restore_required")')"
+    if [ "$cleanup_status" = absent ] && [ "$cleanup_required" = false ]; then
+      journal_absent=true
+    fi
     if [ "$cleanup_required" = true ] && [ "$cleanup_status" != restored ]; then
       if load_journal_context "$OPS_TMP_DIR/cleanup-journal.json" && verify_installed_cli; then
         restore_provider || cleanup_rc=$?
@@ -687,6 +1005,31 @@ campaign_cleanup() {
     cleanup_rc=71
   fi
   remove_remote_scratch || [ "$cleanup_rc" -ne 0 ] || cleanup_rc=72
+  if [ "$cleanup_rc" = 0 ] && [ "${TRANSACTION_PROFILE:-}" = "$NATIVE_PROFILE" ] &&
+     { [ -e "$(native_intent_path)" ] || [ -L "$(native_intent_path)" ]; }; then
+    intent_json="$(validate_native_intent)" || cleanup_rc=74
+    if [ "$cleanup_rc" = 0 ]; then
+      printf '%s\n' "$intent_json" > "$OPS_TMP_DIR/cleanup-intent.json"
+      [ "$(json_field "$OPS_TMP_DIR/cleanup-intent.json" 'd["journal_path"]')" = "$QWEN_E2E_JOURNAL" ] &&
+        [ "$(json_field "$OPS_TMP_DIR/cleanup-intent.json" 'd["remote_scratch"]')" = "$REMOTE_SCRATCH" ] || cleanup_rc=74
+    fi
+    if [ "$cleanup_rc" = 0 ] && [ "$journal_absent" != true ]; then
+      studio_helper inspect --journal "$QWEN_E2E_JOURNAL" > "$OPS_TMP_DIR/cleanup-restored-journal.json" 2>/dev/null &&
+        [ "$(json_field "$OPS_TMP_DIR/cleanup-restored-journal.json" 'd.get("status")')" = restored ] &&
+        native_intent_matches_journal "$OPS_TMP_DIR/cleanup-restored-journal.json" || cleanup_rc=74
+    fi
+    if [ "$cleanup_rc" = 0 ] && [ "$journal_absent" != true ]; then
+      clear_native_intent || cleanup_rc=74
+    fi
+  fi
+  if [ "$cleanup_rc" = 0 ] && [ "$journal_absent" = true ] &&
+     [ "${TRANSACTION_PROFILE:-}" = "$NATIVE_PROFILE" ]; then
+    "$OPS_DIR/live-lock.sh" acquire "$MACPROVIDER_OPS_OWNER" \
+      --purpose catalog-activate:gateway_proof >&2 || cleanup_rc=73
+    if [ "$cleanup_rc" = 0 ] && { [ -e "$(native_intent_path)" ] || [ -L "$(native_intent_path)" ]; }; then
+      clear_native_intent || cleanup_rc=74
+    fi
+  fi
   set -e
   cleanup_ops
   [ "$cleanup_rc" = 0 ] || { log "incumbent restoration or protected scratch cleanup failed; journal remains authoritative"; exit 70; }
@@ -714,9 +1057,7 @@ run_campaign() {
   trap 'exit 143' TERM
   trap 'exit 129' HUP
   REMOTE_SCRATCH="$(create_remote_scratch)" || refuse "could not create protected Studio scratch"
-  REMOTE_REC_ONE="$REMOTE_SCRATCH/one.recommendation.json"
-  REMOTE_REC_TWO="$REMOTE_SCRATCH/two.recommendation.json"
-  REMOTE_RECORDER="$REMOTE_SCRATCH/opencode-gateway-check.py"
+  set_remote_scratch_paths "$TRANSACTION_PROFILE" || refuse "transaction profile has no fixed scratch layout"
   upload_file "$RECORDER" "$REMOTE_RECORDER"
   recorder_sha="$(/usr/bin/shasum -a 256 "$RECORDER" | awk '{print $1}')"
   remote_recorder_sha="$(studio_command /usr/bin/shasum -a 256 "$REMOTE_RECORDER" | awk '{print $1}')"
@@ -762,6 +1103,81 @@ PY
   restore_provider
 }
 
+run_native_mtp_campaign() {
+  [ "${PROBE_MODEL:-}" = "$NATIVE_TARGET_KEY" ] || refuse "Qwen3.6 proof requires exact PROBE_MODEL=$NATIVE_TARGET_KEY"
+  [ "${CATALOG_REQUIRE_NATIVE_MTP_FORWARD:-}" = true ] || refuse "Qwen3.6 proof requires CATALOG_REQUIRE_NATIVE_MTP_FORWARD=true"
+  require_catalog_lock catalog-activate:gateway_proof
+  for name in QWEN_E2E_CLI QWEN_E2E_CONFIG QWEN_E2E_JOURNAL QWEN_E2E_HANDBACK \
+    QWEN_E2E_WRITTEN_HANDBACK BUYER_TOKEN_FILE; do
+    [ -n "${!name:-}" ] || refuse "$name is required by the fixed Qwen3.6 profile"
+  done
+  for name in QWEN_E2E_CLI QWEN_E2E_CONFIG QWEN_E2E_JOURNAL QWEN_E2E_HANDBACK \
+    QWEN_E2E_WRITTEN_HANDBACK BUYER_TOKEN_FILE; do
+    require_abs "$name" "${!name}"
+  done
+  validate_buyer_token_file "$BUYER_TOKEN_FILE" ||
+    refuse "BUYER_TOKEN_FILE must be an owner-only regular file of bounded size"
+  validate_handback || refuse "signed release handback is invalid"
+  fetch_native_mtp_market || refuse "exact live Qwen3.6 catalog and rate row are unavailable"
+  HB_VERSION="$(handback_field binary_version)"; HB_PROVIDER="$(handback_field provider_id)"
+  HB_SHA="$(handback_field cli_sha256)"; HB_CDHASH="$(handback_field code_cdhash)"
+  HB_TEAM="$(handback_field team_id)"; HB_IDENTIFIER="$(handback_field signing_identifier)"
+  HB_HANDOFF_SHA="$(handback_field written_handoff_sha256)"
+  [ "$(written_handoff_sha "$HB_VERSION")" = "$HB_HANDOFF_SHA" ] || refuse "written Studio handback changed"
+  verify_published_release_identity "$HB_VERSION" "$HB_SHA" "$HB_CDHASH" "$HB_TEAM" "$HB_IDENTIFIER" ||
+    refuse "Qwen3.6 proof requires a published release with valid signed provider identity"
+  studio_preflight "$OPS_TMP_DIR/preflight-status.json" || refuse "Studio signed handback preflight failed"
+  load_live_context || refuse "live context is incomplete"
+  validate_native_release_binding ||
+    refuse "Qwen3.6 proof CLI identity must match the exact committed native-MTP admission release input"
+  [ "$INCUMBENT_MODEL" = "$GLM_INCUMBENT" ] || refuse "Qwen3.6 proof requires the exact GLM incumbent"
+  validate_status "$OPS_TMP_DIR/preflight-status.json" "$GLM_INCUMBENT" >/dev/null || refuse "GLM incumbent is not buyer-serving"
+
+  local transaction_id
+  transaction_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+  trap campaign_cleanup EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
+  TRANSACTION_PROFILE="$NATIVE_PROFILE"
+  REMOTE_SCRATCH="$(create_remote_scratch)" || refuse "could not create protected Studio scratch"
+  set_remote_scratch_paths "$TRANSACTION_PROFILE" || refuse "transaction profile has no fixed scratch layout"
+  BASELINE_PID="$(status_pid "$OPS_TMP_DIR/preflight-status.json")"
+  write_native_intent "$transaction_id" "$LIVE_RELEASE" "$LIVE_DIGEST" "$HB_VERSION" "$HB_PROVIDER" \
+    "$HB_SHA" "$HB_CDHASH" "$HB_TEAM" "$HB_IDENTIFIER" "$HB_HANDOFF_SHA" \
+    "$QWEN_E2E_JOURNAL" "$REMOTE_SCRATCH" || refuse "could not durably persist native transaction intent"
+  "$OPS_DIR/live-lock.sh" acquire "$MACPROVIDER_OPS_OWNER" \
+    --purpose catalog-activate:qwen_restore >&2 || refuse "could not make Qwen restoration lock durable"
+  studio_helper prepare --profile "$NATIVE_PROFILE" --config "$QWEN_E2E_CONFIG" \
+    --journal "$QWEN_E2E_JOURNAL" --validator "$QWEN_E2E_CLI" \
+    --transaction-id "$transaction_id" --binary-version "$HB_VERSION" \
+    --provider-id "$HB_PROVIDER" --cli-sha256 "$HB_SHA" --code-cdhash "$HB_CDHASH" \
+    --team-id "$HB_TEAM" --signing-identifier "$HB_IDENTIFIER" \
+    --written-handoff-sha256 "$HB_HANDOFF_SHA" --baseline-catalog-version "$LIVE_RELEASE" \
+    --baseline-catalog-hash "$LIVE_DIGEST" --baseline-pid "$BASELINE_PID" \
+    --rate-card-version "$RATE_VERSION" --remote-scratch "$REMOTE_SCRATCH" >/dev/null
+  studio_helper inspect --journal "$QWEN_E2E_JOURNAL" > "$OPS_TMP_DIR/prepared-journal.json" ||
+    refuse "prepared native journal is unreadable"
+  native_intent_matches_journal "$OPS_TMP_DIR/prepared-journal.json" ||
+    refuse "prepared native journal does not match the durable transaction intent"
+  clear_native_intent || refuse "native transaction intent could not be durably cleared"
+  restart_and_wait "$GLM_INCUMBENT" "$OPS_TMP_DIR/preflight-status.json" "$OPS_TMP_DIR/prepared-status.json"
+
+  emit_recommendation "$NATIVE_TARGET_KEY" "$OPS_TMP_DIR/qwen36.recommendation.json"
+  verify_local_rate_version "$OPS_TMP_DIR/qwen36.recommendation.json"
+  upload_file "$OPS_TMP_DIR/qwen36.recommendation.json" "$REMOTE_REC_ONE"
+  verify_remote_recommendation "$NATIVE_TARGET" "$REMOTE_REC_ONE"
+  begin_adoption_remote adopting_target "$NATIVE_TARGET" "$REMOTE_REC_ONE"
+  adopt_recommendation "$REMOTE_REC_ONE" "$OPS_TMP_DIR/qwen36.adoption.jsonl"
+  restart_and_wait "$NATIVE_TARGET_KEY" "$OPS_TMP_DIR/prepared-status.json" "$OPS_TMP_DIR/qwen36.status.json"
+  validate_native_target_status "$OPS_TMP_DIR/qwen36.status.json" "$(status_pid "$OPS_TMP_DIR/prepared-status.json")" ||
+    refuse "Qwen3.6 is not buyer-serving with native MTP eligible or active and continuous batching active"
+  checkpoint_remote serving_target "$NATIVE_TARGET" "$REMOTE_REC_ONE"
+  "$OPS_DIR/catalog-activate.sh" _gateway-proof
+  checkpoint_remote proof_complete "$NATIVE_TARGET" "$REMOTE_REC_ONE"
+  restore_provider
+}
+
 run_bind() {
   [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] || refuse "binding is callable only by next --run"
   [ -n "${QWEN_E2E_HANDBACK:-}" ] && [ -n "${QWEN_E2E_WRITTEN_HANDBACK:-}" ] ||
@@ -777,6 +1193,8 @@ run_restore() {
   [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] || refuse "restore is callable only by next --run"
   studio_helper inspect --journal "$QWEN_E2E_JOURNAL" > "$OPS_TMP_DIR/journal.json" ||
     refuse "transaction journal is unreadable"
+  [ -z "$(json_field "$OPS_TMP_DIR/journal.json" 'd.get("profile")')" ] ||
+    refuse "profiled Qwen transactions must be restored through the catalog controller"
   [ "$(json_field "$OPS_TMP_DIR/journal.json" 'd.get("restore_required")')" = true ] || return 0
   load_journal_context "$OPS_TMP_DIR/journal.json" || refuse "journal has no safe restoration binding"
   if [ "$(json_field "$OPS_TMP_DIR/journal.json" 'd.get("status")')" != restored ]; then
@@ -784,6 +1202,35 @@ run_restore() {
     restore_provider
   fi
   remove_remote_scratch || refuse "protected Studio scratch cleanup failed"
+}
+
+run_native_mtp_restore() {
+  require_catalog_lock catalog-activate:qwen_restore
+  studio_helper inspect --journal "$QWEN_E2E_JOURNAL" > "$OPS_TMP_DIR/journal.json" ||
+    refuse "transaction journal is unreadable"
+  [ "$(json_field "$OPS_TMP_DIR/journal.json" 'd.get("profile")')" = "$NATIVE_PROFILE" ] ||
+    refuse "active transaction is not the fixed Qwen3.6 profile"
+  local has_intent=false
+  if [ -e "$(native_intent_path)" ] || [ -L "$(native_intent_path)" ]; then
+    if ! validate_native_intent >/dev/null ||
+       ! native_intent_matches_journal "$OPS_TMP_DIR/journal.json"; then
+      refuse "native transaction intent does not match the authoritative journal"
+    fi
+    [ "$(json_field "$(native_intent_path)" 'd["journal_path"]')" = "$QWEN_E2E_JOURNAL" ] ||
+      refuse "native transaction intent journal path changed"
+    has_intent=true
+  fi
+  load_journal_context "$OPS_TMP_DIR/journal.json" || refuse "journal has no safe restoration binding"
+  TRANSACTION_PROFILE="$NATIVE_PROFILE"
+  [ "$INCUMBENT_MODEL" = "$GLM_INCUMBENT" ] || refuse "journal does not bind the exact GLM incumbent"
+  validate_native_journal_release_binding || refuse "journal does not bind a trusted published signed CLI identity"
+  if [ "$(json_field "$OPS_TMP_DIR/journal.json" 'd.get("status")')" != restored ]; then
+    verify_installed_cli || refuse "installed signed CLI no longer matches the journaled release binding"
+    restore_provider
+  fi
+  remove_remote_scratch || refuse "protected Studio scratch cleanup failed"
+  [ "$has_intent" != true ] || clear_native_intent ||
+    refuse "restored native transaction intent could not be durably cleared"
 }
 
 run_diagnostic() {
@@ -822,6 +1269,12 @@ internal() {
     _bind) run_bind ;;
     _campaign) run_campaign ;;
     _restore) run_restore ;;
+    _catalog-qwen36-journal) catalog_journal_probe ;;
+    _catalog-qwen36-intent) catalog_native_intent_probe ;;
+    _catalog-qwen36-scratch) catalog_native_scratch_probe ;;
+    _catalog-qwen36-prejournal-reconcile) run_native_prejournal_reconcile ;;
+    _catalog-qwen36-proof) run_native_mtp_campaign ;;
+    _catalog-qwen36-restore) run_native_mtp_restore ;;
     *) die "unknown internal command: $1" ;;
   esac
 }
