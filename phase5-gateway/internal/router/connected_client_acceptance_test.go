@@ -51,10 +51,11 @@ func TestConnectedGooseClientProtocol(t *testing.T) {
 }
 
 func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion string, synthetic bool) {
-	directAnswer := os.Getenv("MACPROVIDER_TEST_OPENCODE_TASK") == "direct-answer"
-	if task := os.Getenv("MACPROVIDER_TEST_OPENCODE_TASK"); task != "" && (!directAnswer || kind != "opencode" || synthetic) {
-		t.Fatal("direct-answer control requires actual OpenCode model acceptance")
+	task, err := connectedClientTask(os.Getenv("MACPROVIDER_TEST_OPENCODE_TASK"), kind, synthetic)
+	if err != nil {
+		t.Fatal(err)
 	}
+	directAnswer := task == "direct-answer"
 	binary, upstream := os.Getenv("MACPROVIDER_TEST_"+envPrefix+"_BIN"), os.Getenv("MACPROVIDER_TEST_"+envPrefix+"_UPSTREAM")
 	if binary == "" || (!synthetic && upstream == "") || (synthetic && os.Getenv("MACPROVIDER_TEST_"+envPrefix+"_PROTOCOL") != "1") {
 		t.Skip("requires explicit client binary and isolated Studio provider URL")
@@ -358,15 +359,7 @@ env_key = "MALIBU_API_KEY"
 		t.Fatalf("acceptance requires %s", expectedVersion)
 	}
 	finalPath := filepath.Join(root, "final.txt")
-	prompt := "Use exec_command with exactly cmd=cat marker.txt to read the current workspace marker. Do not inspect any other file or use the network. Reply with exactly its contents and nothing else."
-	if kind == "opencode" {
-		prompt = "Read only " + filepath.Join(root, "workspace", "marker.txt") + " using the read tool. Do not inspect any other file, execute a shell command, or use the network. Reply with exactly its contents and nothing else."
-	} else if kind == "goose" {
-		prompt = "Use shell with exactly command=cat marker.txt to read the current workspace marker. Do not inspect any other file or use the network. Reply with exactly its contents and nothing else."
-	}
-	if directAnswer {
-		prompt = "What is 2 + 2? Answer with just the number."
-	}
+	prompt := connectedClientTaskPrompt(kind, task, filepath.Join(root, "workspace", "marker.txt"))
 	clientPrompt = prompt
 	var args []string
 	switch kind {
@@ -451,6 +444,76 @@ env_key = "MALIBU_API_KEY"
 		t.Fatalf("missing real streaming tool round trip: requests=%d streamed=%v matched_result=%v", calls, streamed, matchedResult)
 	}
 	t.Logf("%s completed streaming and a matching file-tool result through the gateway (synthetic=%v upstream_requests=%d)", expectedVersion, synthetic, calls)
+}
+
+func connectedClientTask(raw, kind string, synthetic bool) (string, error) {
+	if raw == "" {
+		return "read", nil
+	}
+	if kind != "opencode" || synthetic {
+		return "", fmt.Errorf("task controls require actual OpenCode model acceptance")
+	}
+	switch raw {
+	case "read", "read-natural", "direct-answer":
+		return raw, nil
+	default:
+		return "", fmt.Errorf("OpenCode task must be read, read-natural or direct-answer")
+	}
+}
+
+// This diagnostic changes only the user wording. Both read tasks keep the same
+// exact marker answer, actual tool/result matching, permissions and tool guard.
+func connectedClientTaskPrompt(kind, task, markerPath string) string {
+	if task == "direct-answer" {
+		return "What is 2 + 2? Answer with just the number."
+	}
+	if task == "read-natural" {
+		return "What does the file " + markerPath + " contain? After reading it, reply with only its contents."
+	}
+	if kind == "opencode" {
+		return "Read only " + markerPath + " using the read tool. Do not inspect any other file, execute a shell command, or use the network. Reply with exactly its contents and nothing else."
+	}
+	if kind == "goose" {
+		return "Use shell with exactly command=cat marker.txt to read the current workspace marker. Do not inspect any other file or use the network. Reply with exactly its contents and nothing else."
+	}
+	return "Use exec_command with exactly cmd=cat marker.txt to read the current workspace marker. Do not inspect any other file or use the network. Reply with exactly its contents and nothing else."
+}
+
+func TestConnectedClientTaskSelection(t *testing.T) {
+	for _, kind := range []string{"opencode", "codex", "goose"} {
+		for _, synthetic := range []bool{false, true} {
+			if task, err := connectedClientTask("", kind, synthetic); err != nil || task != "read" {
+				t.Fatal("default read task changed")
+			}
+			for _, raw := range []string{"read", "read-natural", "direct-answer"} {
+				task, err := connectedClientTask(raw, kind, synthetic)
+				allowed := kind == "opencode" && !synthetic
+				if allowed && (err != nil || task != raw) || !allowed && (err == nil || task != "") {
+					t.Fatal("task control escaped actual OpenCode scope or rejected a valid task")
+				}
+			}
+		}
+	}
+	for _, raw := range []string{"natural", "READ", "read-natural ", " read-natural", "read-natural\n", "read-other"} {
+		if task, err := connectedClientTask(raw, "opencode", false); err == nil || task != "" {
+			t.Fatal("accepted a task outside the exact enum")
+		}
+	}
+}
+
+func TestConnectedClientTaskPrompts(t *testing.T) {
+	const markerPath = "/private/fixture/workspace/marker.txt"
+	for _, tc := range []struct{ kind, task, want string }{
+		{"opencode", "read-natural", "What does the file /private/fixture/workspace/marker.txt contain? After reading it, reply with only its contents."},
+		{"opencode", "read", "Read only /private/fixture/workspace/marker.txt using the read tool. Do not inspect any other file, execute a shell command, or use the network. Reply with exactly its contents and nothing else."},
+		{"opencode", "direct-answer", "What is 2 + 2? Answer with just the number."},
+		{"codex", "read", "Use exec_command with exactly cmd=cat marker.txt to read the current workspace marker. Do not inspect any other file or use the network. Reply with exactly its contents and nothing else."},
+		{"goose", "read", "Use shell with exactly command=cat marker.txt to read the current workspace marker. Do not inspect any other file or use the network. Reply with exactly its contents and nothing else."},
+	} {
+		if got := connectedClientTaskPrompt(tc.kind, tc.task, markerPath); got != tc.want {
+			t.Fatal("diagnostic task prompt changed")
+		}
+	}
 }
 
 // Keep client diagnostics bounded even if a client loops or emits verbose logs.
