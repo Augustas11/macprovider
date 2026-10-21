@@ -1853,6 +1853,9 @@ tokens: multiply negative logits by the factor and divide nonnegative logits
 by it. History MUST be request-local and identical on cold and prefix-reused
 requests, including locally chunked and recurrent-prefilled requests. Repeated
 token occurrences MUST NOT compound the penalty within one sampling step.
+If applying the factor to a finite logit overflows its output dtype, saturate
+that result to the same-sign finite dtype bound; do not introduce infinity or
+NaN into log-softmax. Existing nonfinite mask entries remain unchanged.
 After log-softmax, apply top-p, then top-k, then temperature sampling, matching
 the pinned native sampler. The20-token history is this provider's explicit
 contract, not a claim that Qwen's model card prescribes that window.
