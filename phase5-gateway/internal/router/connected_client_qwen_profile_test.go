@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -36,7 +39,7 @@ func connectedOpenCodeAgentProfile(configuration map[string]any, profile, model 
 	if profile == "" {
 		return nil
 	}
-	if profile != "qwen-native" && profile != "qwen-sampling" {
+	if profile != "qwen-native" && profile != "qwen-sampling" && profile != "qwen-plugin" {
 		return fmt.Errorf("unknown OpenCode lab agent profile")
 	}
 	switch model {
@@ -55,6 +58,19 @@ func connectedOpenCodeAgentProfile(configuration map[string]any, profile, model 
 	// adapter forwards model options as request fields, scoped to this model.
 	entry["temperature"] = true
 	entry["options"] = map[string]any{"temperature": 0.7, "top_p": 0.8}
+	if profile == "qwen-plugin" {
+		// Exercise the same managed asset that Malibu bundles, not a test copy
+		// of its prompt or a global agent override.
+		path, err := filepath.Abs("../../../phase3-binary/app/Sources/Malibu/Resources/malibu-qwen-system.mjs")
+		if err != nil {
+			return err
+		}
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() || info.Size() > 65536 {
+			return fmt.Errorf("managed Qwen plugin asset unavailable")
+		}
+		configuration["plugin"] = []string{(&url.URL{Scheme: "file", Path: path}).String()}
+	}
 	if profile == "qwen-native" {
 		configuration["agent"] = map[string]any{"build": map[string]any{
 			"model": "malibu/" + model, "prompt": connectedQwenAgentPrompt,
@@ -82,6 +98,12 @@ func TestConnectedClientQwenAgentProfile(t *testing.T) {
 		options := entry["options"].(map[string]any)
 		if entry["temperature"] != true || len(options) != 2 || options["temperature"] != 0.7 || options["top_p"] != 0.8 || len(other) != 1 || configuration["agent"] != nil {
 			t.Fatal("sampling profile must be exact-model scoped and retain stock prompt")
+		}
+		if err := connectedOpenCodeAgentProfile(configuration, "qwen-plugin", model); err != nil {
+			t.Fatal(err)
+		}
+		if configuration["agent"] != nil || len(configuration["plugin"].([]string)) != 1 {
+			t.Fatal("plugin profile must not replace agents")
 		}
 		if err := connectedOpenCodeAgentProfile(configuration, "qwen-native", model); err != nil {
 			t.Fatal(err)

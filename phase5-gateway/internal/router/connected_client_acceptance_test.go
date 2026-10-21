@@ -178,15 +178,26 @@ func runConnectedClientAcceptance(t *testing.T, kind, envPrefix, expectedVersion
 		}
 		if kind == "opencode" && len(payload.Tools) != 0 {
 			matchedPrompt := false
+			matchedPlugin := os.Getenv("MACPROVIDER_TEST_OPENCODE_AGENT_PROFILE") != "qwen-plugin"
 			for _, message := range payload.Messages {
 				var content string
-				if message.Role == "user" && json.Unmarshal(message.Content, &content) == nil && content == clientPrompt {
+				if json.Unmarshal(message.Content, &content) != nil {
+					continue
+				}
+				if message.Role == "user" && content == clientPrompt {
 					matchedPrompt = true
+				}
+				if message.Role == "system" && strings.HasPrefix(content, connectedQwenAgentPrompt) {
+					matchedPlugin = true
 				}
 			}
 			if !matchedPrompt {
 				cancel()
 				return nil, fmt.Errorf("OpenCode changed the literal user task before inference")
+			}
+			if !matchedPlugin {
+				cancel()
+				return nil, fmt.Errorf("managed Qwen plugin did not transform the stock request")
 			}
 		}
 		if kind == "opencode" && len(payload.Tools) != 0 && os.Getenv("MACPROVIDER_TEST_OPENCODE_AGENT_PROFILE") != "" {
@@ -380,6 +391,11 @@ env_key = "MALIBU_API_KEY"
 		write(configPath, data)
 		env = append(env, "OPENCODE_CONFIG="+configPath)
 		args = []string{"run", "--pure", "--format", "json", "--model", "malibu/" + model, "--dir", filepath.Join(root, "workspace")}
+		if os.Getenv("MACPROVIDER_TEST_OPENCODE_AGENT_PROFILE") == "qwen-plugin" {
+			// --pure disables explicit config plugins too. The fresh private
+			// config/home contains only our managed asset; project config stays off.
+			args = append([]string{"run"}, args[2:]...)
+		}
 	case "goose":
 		providerDir := filepath.Join(root, "xdg-config", "goose", "custom_providers")
 		if err := os.MkdirAll(providerDir, 0700); err != nil {
