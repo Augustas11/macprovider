@@ -407,12 +407,21 @@ func openRouterSupportedParameters(modelID string, maxTokens int, toolChoiceMode
 	return params
 }
 
-// openRouterToolFamilyModel mirrors the SPEC-018 §3.1/§3.8 modelID predicates
-// that have both a tool-call parser and a multi-turn prompt profile. gpt-oss
-// parses Harmony tool calls but has no multi-turn profile, so it is excluded.
+// openRouterToolFamilyModel mirrors the coordinator's toolGrammarFamily
+// (SPEC-018 §3.1, #2107): every catalog family whose chat template has a tool
+// grammar, which the provider both parses and renders as history.
 func openRouterToolFamilyModel(modelID string) bool {
-	lower := strings.ToLower(modelID)
-	return strings.Contains(lower, "qwen2.5") || strings.Contains(lower, "qwen3") || strings.Contains(lower, "llama-3.3")
+	id := strings.ToLower(modelID)
+	if strings.Contains(id, "qwen2-vl") || strings.Contains(id, "qwen2vl") {
+		return false
+	}
+	for _, family := range []string{"gpt-oss", "glm-4.5", "glm-4.6", "glm-4.7", "glm-5", "llama-3.1", "llama-3.2", "llama-3.3",
+		"llama3.1", "llama3.2", "llama3.3", "gemma-4", "gemma4", "nemotron-3", "nemotron3", "qwen2.5", "qwen3"} {
+		if strings.Contains(id, family) {
+			return true
+		}
+	}
+	return false
 }
 
 // openRouterStructuredOutputModel mirrors the SPEC-019 §4 family-rendering

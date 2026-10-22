@@ -1,7 +1,8 @@
 package router
 
-// mergeToolChoiceModes mirrors the coordinator's schema-holdback-v1 contract.
-// Parser-family support alone never grants a guaranteed mode. A session must
+// mergeToolChoiceModes mirrors the coordinator's schema-holdback-v1 contract
+// (SPEC-018 §3.11): a native provider's declared modes for its exact loaded
+// model. Parser-family support alone never grants a guaranteed mode. A session must
 // bind enforcement to its current model and runtime; stale swap data is ignored.
 func mergeToolChoiceModes(current []string, provider poolzProviderRow) []string {
 	supported := map[string]bool{"auto": true}
@@ -15,7 +16,7 @@ func mergeToolChoiceModes(current []string, provider poolzProviderRow) []string 
 			continue
 		}
 		for _, mode := range capability.Modes {
-			if mode == "none" || ((mode == "required" || mode == "named") && provider.ModelID == openRouterQwen36A3BID) {
+			if mode == "none" || mode == "required" || mode == "named" {
 				supported[mode] = true
 			}
 		}

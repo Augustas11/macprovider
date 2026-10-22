@@ -80,9 +80,21 @@ func TestToolSelectionRequestValidation(t *testing.T) {
 	}
 }
 
+// #2107 D7: guaranteed selection follows the native provider's declared
+// capability for its exact loaded model, not one hard-coded model ID.
+func TestToolSelectionFollowsDeclaredCapabilityForAnyModel(t *testing.T) {
+	req := selectionRequest(t, `"required"`)
+	p := selectionProvider()
+	p.ModelID = "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"
+	p.ToolSelectionCapabilities[0].ModelID = p.ModelID
+	if !providerSupportsToolSelection(p, req.toolSelection) {
+		t.Fatal("a native provider declaring required for its loaded model must be eligible")
+	}
+}
+
 func TestToolSelectionCapabilityRouting(t *testing.T) {
 	req := selectionRequest(t, `"required"`)
-	for _, mutation := range []string{"absent", "model", "runtime", "validation", "mode", "other_model", "loopback", "unknown_adapter"} {
+	for _, mutation := range []string{"absent", "model", "runtime", "validation", "mode", "loopback", "unknown_adapter"} {
 		t.Run(mutation, func(t *testing.T) {
 			p := selectionProvider()
 			switch mutation {
@@ -96,9 +108,6 @@ func TestToolSelectionCapabilityRouting(t *testing.T) {
 				p.ToolSelectionCapabilities[0].Validation = "unknown"
 			case "mode":
 				p.ToolSelectionCapabilities[0].Modes = []string{"auto"}
-			case "other_model":
-				p.ModelID = "some-qwen-model"
-				p.ToolSelectionCapabilities[0].ModelID = p.ModelID
 			case "unknown_adapter":
 				p.RuntimeSource = "unknown_adapter"
 			case "loopback":

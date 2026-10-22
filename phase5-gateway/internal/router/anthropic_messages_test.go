@@ -181,10 +181,9 @@ func TestAnthropicMessagesRejectsUnsupportedFeaturesBeforeReservation(t *testing
 		body string
 		want string
 	}{
-		"image":             {`{"model":"claude","max_tokens":8,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"abc"}}]}]}`, "image content is not supported"},
-		"unknown top-level": {`{"model":"claude","max_tokens":8,"container":"c","messages":[{"role":"user","content":"hi"}]}`, "container is not supported"},
-		"empty thinking":    {`{"model":"claude","max_tokens":8,"thinking":{},"messages":[{"role":"user","content":"hi"}]}`, "Anthropic beta features are not supported"},
-		"top_k":             {`{"model":"claude","max_tokens":8,"top_k":5,"messages":[{"role":"user","content":"hi"}]}`, "top_k is not supported"},
+		"image":          {`{"model":"claude","max_tokens":8,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"abc"}}]}]}`, "image content is not supported"},
+		"empty thinking": {`{"model":"claude","max_tokens":8,"thinking":{},"messages":[{"role":"user","content":"hi"}]}`, "thinking.type must be enabled, disabled or adaptive"},
+		"top_k":          {`{"model":"claude","max_tokens":8,"top_k":5,"messages":[{"role":"user","content":"hi"}]}`, "top_k is not supported"},
 		"tool_choice scalar": {`{"model":"claude","max_tokens":8,"tool_choice":"auto","messages":[{"role":"user","content":"hi"}]}`,
 			"tool_choice must be an object"},
 		"bad user text": {`{"model":"claude","max_tokens":8,"messages":[{"role":"user","content":[{"type":"text","text":7}]}]}`, "text must be a string"},

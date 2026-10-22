@@ -60,6 +60,51 @@ type anthropicMessagesAdapter struct {
 	writeErr           error
 	dedupeCapture      []byte
 	streamThinkFilter
+	// thinkingRequested: the request enabled `thinking`, so provider
+	// reasoning_content is returned as thinking blocks (else dropped).
+	thinkingRequested bool
+	thinkingOpen      bool
+}
+
+var anthropicKnownTopLevelKeys = []string{"model", "max_tokens", "system", "messages", "tools", "tool_choice", "stream", "stop_sequences", "temperature", "top_p", "top_k", "metadata", "service_tier", "thinking"}
+
+// anthropicThinkingToReasoningEffort maps Messages `thinking` to the chat
+// `reasoning_effort` the provider passes to the chat template (SPEC-018
+// §3.12): enabled budgets below 4096 tokens are low, below 16384 medium, else
+// high; disabled is low (the smallest effort every reasoning template takes);
+// adaptive keeps the template default.
+func anthropicThinkingToReasoningEffort(raw json.RawMessage) (bool, string, error) {
+	if len(bytes.TrimSpace(raw)) == 0 || anthropicRawIsNull(raw) {
+		return false, "", nil
+	}
+	var thinking struct {
+		Type         string `json:"type"`
+		BudgetTokens *int64 `json:"budget_tokens"`
+	}
+	if err := json.Unmarshal(raw, &thinking); err != nil {
+		return false, "", fmt.Errorf("thinking must be an object")
+	}
+	switch thinking.Type {
+	case "enabled":
+		budget := int64(0)
+		if thinking.BudgetTokens != nil {
+			budget = *thinking.BudgetTokens
+		}
+		switch {
+		case budget < 4096:
+			return true, "low", nil
+		case budget < 16384:
+			return true, "medium", nil
+		default:
+			return true, "high", nil
+		}
+	case "disabled":
+		return false, "low", nil
+	case "adaptive":
+		return true, "", nil
+	default:
+		return false, "", fmt.Errorf("thinking.type must be enabled, disabled or adaptive")
+	}
 }
 
 type anthropicStreamToolCall struct {
@@ -300,9 +345,9 @@ func (a *anthropicMessagesAdapter) setFallbackStreamUsage(promptTokens, completi
 }
 
 func (a *anthropicMessagesAdapter) translateRequest(header http.Header, body []byte) ([]byte, *anthropicMessagesTranslationError) {
-	if strings.TrimSpace(header.Get("Anthropic-Beta")) != "" {
-		return nil, &anthropicMessagesTranslationError{typ: "invalid_request_error", code: "unsupported_content_shape", message: "Anthropic beta features are not supported"}
-	}
+	// SPEC-006 §20 (#2107 D3): `anthropic-beta` tokens and unknown top-level
+	// keys are accepted and ignored, as SDK clients send both by default.
+	_ = header
 	if anthropicRawHasDuplicateKeys(body) {
 		return nil, &anthropicMessagesTranslationError{typ: "invalid_request_error", code: "invalid_request", message: "request body contains duplicate keys"}
 	}
@@ -312,13 +357,18 @@ func (a *anthropicMessagesAdapter) translateRequest(header http.Header, body []b
 	}
 	for key, value := range raw {
 		switch key {
-		case "model", "max_tokens", "system", "messages", "tools", "tool_choice", "stream", "stop_sequences", "temperature", "top_p", "metadata", "service_tier":
+		case "model", "max_tokens", "system", "messages", "tools", "tool_choice", "stream", "stop_sequences", "temperature", "top_p", "metadata", "service_tier", "thinking":
 		case "top_k":
 			return nil, &anthropicMessagesTranslationError{typ: "invalid_request_error", code: "unsupported_content_shape", message: "top_k is not supported"}
-		case "thinking", "anthropic_beta":
-			return nil, &anthropicMessagesTranslationError{typ: "invalid_request_error", code: "unsupported_content_shape", message: "Anthropic beta features are not supported"}
 		default:
-			return nil, &anthropicMessagesTranslationError{typ: "invalid_request_error", code: "unsupported_content_shape", message: fmt.Sprintf("%s is not supported", key)}
+			// Unknown keys (anthropic_beta, container, context_management,
+			// mcp_servers, ...) are ignored, never forwarded. A case variant
+			// of a known key is ambiguous and stays an error.
+			for _, known := range anthropicKnownTopLevelKeys {
+				if strings.EqualFold(key, known) {
+					return nil, &anthropicMessagesTranslationError{typ: "invalid_request_error", code: "unsupported_content_shape", message: fmt.Sprintf("%s is not supported", key)}
+				}
+			}
 		}
 		if anthropicRawHasDuplicateKeys(value) {
 			return nil, &anthropicMessagesTranslationError{typ: "invalid_request_error", code: "invalid_request", message: fmt.Sprintf("%s contains duplicate keys", key)}
@@ -341,6 +391,7 @@ func (a *anthropicMessagesAdapter) translateRequest(header http.Header, body []b
 		StopSequences []string                `json:"stop_sequences"`
 		Temperature   any                     `json:"temperature"`
 		TopP          any                     `json:"top_p"`
+		Thinking      json.RawMessage         `json:"thinking"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, &anthropicMessagesTranslationError{typ: "invalid_request_error", code: "invalid_request_body", message: "Malformed JSON"}
@@ -378,6 +429,14 @@ func (a *anthropicMessagesAdapter) translateRequest(header http.Header, body []b
 	if len(req.StopSequences) > 0 {
 		chat["stop"] = req.StopSequences
 	}
+	thinkingEnabled, reasoningEffort, err := anthropicThinkingToReasoningEffort(req.Thinking)
+	if err != nil {
+		return nil, &anthropicMessagesTranslationError{typ: "invalid_request_error", code: "unsupported_content_shape", message: err.Error()}
+	}
+	if reasoningEffort != "" {
+		chat["reasoning_effort"] = reasoningEffort
+	}
+	a.thinkingRequested = thinkingEnabled
 	var chatTools []map[string]any
 	if len(req.Tools) > 0 {
 		tools, err := anthropicToolsToChatTools(req.Tools)
@@ -601,7 +660,7 @@ func anthropicValidateContentRaw(path string, raw json.RawMessage, role string) 
 			if role != "assistant" {
 				return fmt.Errorf("%s.type %q is not supported", blockPath, typ)
 			}
-			if err := anthropicRejectUnknownKeys(m, blockPath, "type", "id", "name", "input"); err != nil {
+			if err := anthropicRejectUnknownKeys(m, blockPath, "type", "id", "name", "input", "cache_control"); err != nil {
 				return err
 			}
 			if v, ok := m["id"]; ok {
@@ -623,7 +682,7 @@ func anthropicValidateContentRaw(path string, raw json.RawMessage, role string) 
 			if role == "assistant" || role == "system" {
 				return fmt.Errorf("%s.type %q is not supported", blockPath, typ)
 			}
-			if err := anthropicRejectUnknownKeys(m, blockPath, "type", "tool_use_id", "content", "is_error"); err != nil {
+			if err := anthropicRejectUnknownKeys(m, blockPath, "type", "tool_use_id", "content", "is_error", "cache_control"); err != nil {
 				return err
 			}
 			if v, ok := m["tool_use_id"]; ok {
@@ -640,6 +699,15 @@ func anthropicValidateContentRaw(path string, raw json.RawMessage, role string) 
 				if err := anthropicValidateToolResultContentRaw(blockPath+".content", content); err != nil {
 					return err
 				}
+			}
+		case "thinking", "redacted_thinking":
+			// Prior thinking blocks an SDK client echoes back are accepted
+			// and dropped: the chat template renders history without them.
+			if role != "assistant" {
+				return fmt.Errorf("%s.type %q is not supported", blockPath, typ)
+			}
+			if err := anthropicRejectUnknownKeys(m, blockPath, "type", "thinking", "signature", "data", "cache_control"); err != nil {
+				return err
 			}
 		case "image", "document", "file":
 			return fmt.Errorf("%s content is not supported", typ)
@@ -811,6 +879,8 @@ func anthropicAssistantBlocksToChat(blocks []map[string]any) ([]map[string]any, 
 					"arguments": string(args),
 				},
 			})
+		case "thinking", "redacted_thinking":
+			// Dropped: see anthropicValidateContentRaw.
 		default:
 			return nil, fmt.Errorf("content[%d].type %q is not supported", i, typ)
 		}
@@ -975,9 +1045,10 @@ func (a *anthropicMessagesAdapter) translateNonStreamingResponse(body []byte) ([
 		Error   any        `json:"error"`
 		Choices []struct {
 			Message struct {
-				Content   any    `json:"content"`
-				Refusal   string `json:"refusal"`
-				ToolCalls []struct {
+				Content          any    `json:"content"`
+				Refusal          string `json:"refusal"`
+				ReasoningContent string `json:"reasoning_content"`
+				ToolCalls        []struct {
 					ID       string `json:"id"`
 					Type     string `json:"type"`
 					Function struct {
@@ -1014,6 +1085,9 @@ func (a *anthropicMessagesAdapter) translateNonStreamingResponse(body []byte) ([
 	stopReason, err := anthropicStopReasonStrict(finishReason, hasToolCalls)
 	if err != nil {
 		return nil, err
+	}
+	if a.thinkingRequested && choice.Message.ReasoningContent != "" {
+		content = append(content, map[string]any{"type": "thinking", "thinking": choice.Message.ReasoningContent, "signature": ""})
 	}
 	if text, err := anthropicResponseContentToText(choice.Message.Content); err != nil {
 		return nil, err
@@ -1190,6 +1264,9 @@ func (a *anthropicMessagesAdapter) handleChatStreamLine(line string) {
 		a.emitInvalidProviderResponse("Upstream provider returned unsupported stream tool-call shape")
 		return
 	}
+	if reasoning := anthropicStringFromAny(delta["reasoning_content"]); reasoning != "" && a.thinkingRequested {
+		a.emitThinkingDelta(reasoning)
+	}
 	if text := a.filterThinkContent(anthropicStringFromAny(delta["content"])); text != "" {
 		a.emitTextDelta(text)
 	}
@@ -1249,10 +1326,43 @@ func (a *anthropicMessagesAdapter) emitTextDelta(text string) {
 	a.emitRawTextDelta(text)
 }
 
+// emitThinkingDelta streams provider reasoning as a thinking block, which
+// always precedes the text and tool_use blocks of the turn.
+func (a *anthropicMessagesAdapter) emitThinkingDelta(text string) {
+	if text == "" || a.streamDone || a.textOpen || a.hasStreamToolUse() {
+		return
+	}
+	if !a.thinkingOpen {
+		a.emitSSE("content_block_start", map[string]any{
+			"type": "content_block_start", "index": a.contentIndex,
+			"content_block": map[string]any{"type": "thinking", "thinking": "", "signature": ""},
+		})
+		a.thinkingOpen = true
+	}
+	a.emitSSE("content_block_delta", map[string]any{
+		"type": "content_block_delta", "index": a.contentIndex,
+		"delta": map[string]any{"type": "thinking_delta", "thinking": text},
+	})
+}
+
+func (a *anthropicMessagesAdapter) closeThinkingBlock() {
+	if !a.thinkingOpen {
+		return
+	}
+	a.emitSSE("content_block_delta", map[string]any{
+		"type": "content_block_delta", "index": a.contentIndex,
+		"delta": map[string]any{"type": "signature_delta", "signature": ""},
+	})
+	a.emitSSE("content_block_stop", map[string]any{"type": "content_block_stop", "index": a.contentIndex})
+	a.thinkingOpen = false
+	a.contentIndex++
+}
+
 func (a *anthropicMessagesAdapter) emitRawTextDelta(text string) {
 	if text == "" || a.streamDone {
 		return
 	}
+	a.closeThinkingBlock()
 	a.closeToolBlocks()
 	if !a.textOpen {
 		a.emitSSE("content_block_start", map[string]any{
@@ -1304,6 +1414,7 @@ func (a *anthropicMessagesAdapter) emitToolCallDelta(index int, id, name, argume
 		return
 	}
 	a.flushStreamTextTail(true)
+	a.closeThinkingBlock()
 	if a.textOpen {
 		a.closeTextBlock()
 	}
@@ -1417,6 +1528,7 @@ func (a *anthropicMessagesAdapter) emitTerminalMessageStop() {
 		a.finishReason = "stop_sequence"
 		a.stopSequence = matched
 	}
+	a.closeThinkingBlock()
 	if a.textOpen {
 		a.closeTextBlock()
 	}
@@ -1983,7 +2095,7 @@ func anthropicValidateProviderChoiceRaw(path string, raw json.RawMessage, stream
 			if err != nil {
 				return fmt.Errorf("%s.delta must be an object", path)
 			}
-			if err := anthropicRejectUnknownKeys(delta, path+".delta", "role", "content", "refusal", "tool_calls"); err != nil {
+			if err := anthropicRejectUnknownKeys(delta, path+".delta", "role", "content", "refusal", "tool_calls", "reasoning_content"); err != nil {
 				return err
 			}
 			if refusalRaw, ok := delta["refusal"]; ok && !anthropicRawIsNull(refusalRaw) {
@@ -2010,7 +2122,7 @@ func anthropicValidateProviderChoiceRaw(path string, raw json.RawMessage, stream
 		if err != nil {
 			return fmt.Errorf("%s.message must be an object", path)
 		}
-		if err := anthropicRejectUnknownKeys(message, path+".message", "role", "content", "refusal", "tool_calls"); err != nil {
+		if err := anthropicRejectUnknownKeys(message, path+".message", "role", "content", "refusal", "tool_calls", "reasoning_content"); err != nil {
 			return err
 		}
 		if refusalRaw, ok := message["refusal"]; ok && !anthropicRawIsNull(refusalRaw) {

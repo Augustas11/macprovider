@@ -156,6 +156,7 @@ var spec018RetryableByCode = map[string]bool{
 	"duplicate_tool_call_id":                                  false,
 	"tool_call_result_out_of_order":                           false,
 	"unsupported_modelID_for_multi_turn":                      false,
+	"tools_unsupported_for_model":                             false,
 	// Round-2 3-lane re-audit sweep of PR #548: the codes below were
 	// emitted (writeError/writeErrorWithParam/routeError literal call
 	// sites) but had no explicit entry, relying on Go's map zero-value
@@ -2346,6 +2347,11 @@ type modelEntry struct {
 	// PoolModel is the SPEC-006-R018 closed macprovider_pool_model object,
 	// present only in an authorized pool view.
 	PoolModel *poolModelListEntry `json:"macprovider_pool_model,omitempty"`
+	// Capabilities and SupportedParameters advertise what the model serves
+	// (SPEC-006 §21, #2107 D6), derived from the predicates the coordinator
+	// and provider enforce.
+	Capabilities        *modelCapabilities `json:"capabilities,omitempty"`
+	SupportedParameters []string           `json:"supported_parameters,omitempty"`
 }
 
 type modelComputeIntegrityStatus struct {
@@ -2414,12 +2420,14 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 				entry.MaxContextTokens = p.MaxContextTokens
 			}
 			entry.TotalSlots += p.SlotsTotal
+			entry.Capabilities = mergeModelCapabilities(entry.Capabilities, p, s.providerSupportsVision(p))
 		}
 		models[p.ModelID] = entry
 	}
 
 	data := make([]modelEntry, 0, len(models))
 	for _, entry := range models {
+		finishModelCapabilities(&entry)
 		data = append(data, entry)
 	}
 	// SPEC-006-R018: an authenticated request carrying an authorized pool
@@ -2541,6 +2549,8 @@ type chatRequest struct {
 	// or non-empty assistant tool_calls) so class selection can drop
 	// members without a multi-turn prompt profile.
 	multiTurnToolHistory bool
+	// declaresTools records a non-empty `tools` array (SPEC-018 §3.2 gate).
+	declaresTools bool
 	// nonStrictSchemaLegacyRejection is set when response_format runs in
 	// SPEC-019 §1a non-strict mode. It holds the pre-inference 400 a coordinator
 	// and provider CLI before v0.3.0 returned for the same body, which selection
@@ -2744,9 +2754,15 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	req.engineClass = engineClass
 	req.multiTurnToolHistory = hasMultiTurnToolData(req.Messages)
+	req.declaresTools = requestDeclaresTools(req.raw)
 	var poolRuntimeAllowlist []string
 	if req.poolSnapshotSet {
 		poolRuntimeAllowlist = req.poolSnapshot.RuntimeAllowlist
+	}
+	if status, code, msg := unsupportedToolsModel(req, tier2.Default().ModelIDs, s.resolveModelClass(req.Model), poolRuntimeAllowlist); status != 0 {
+		rec.logBuyerFailure(status, msg)
+		writeError(w, status, code, msg)
+		return
 	}
 	if status, code, msg := unsupportedMultiTurnToolModel(req, tier2.Default().ModelIDs, s.resolveModelClass(req.Model), poolRuntimeAllowlist); status != 0 {
 		rec.logBuyerFailure(status, msg)
@@ -4756,7 +4772,7 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 					}
 					writeSSEErrorWithRetryable(w, endErrorMessage(end), end.Status, override, requestID)
 				} else {
-					writeSSEError(w, "Provider failed during streaming", "provider_error")
+					writeSSEProviderFailure(w, providerFailureReason(end.Status), requestID)
 				}
 				if toolFinal.toolOpened && s.streamingDowngrade != nil {
 					s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
@@ -4822,7 +4838,7 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Selected provider failed; buyer should retry", EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(acct.deliveredBytes()), FaultFlag: billing.FaultBreakerQualifying}
 			}
 			commit()
-			writeSSEError(w, "Provider failed during streaming", "provider_error")
+			writeSSEProviderFailure(w, "provider_disconnected", requestID)
 			if flusher != nil {
 				flusher.Flush()
 			}
@@ -6256,7 +6272,7 @@ const (
 //   - tool_calls: non-empty array whose entries satisfy the SPEC-018
 //     §8.4 minimal-shape validator (function/tool calling)
 //   - function_call: non-empty object (legacy function calling)
-//   - reasoning: non-empty string (reasoning-model trace stream)
+//   - reasoning / reasoning_content: non-empty string (reasoning trace)
 func hasOpenAIDeltaSignal(raw json.RawMessage) bool {
 	return inspectOpenAIDeltaSignal(raw) == deltaSignalWorthy
 }
@@ -6288,6 +6304,11 @@ func inspectOpenAIDeltaSignal(raw json.RawMessage) deltaSignalStatus {
 		return deltaSignalWorthy
 	}
 	if raw, has := obj["reasoning"]; has && isNonEmptyJSONString(raw) {
+		return deltaSignalWorthy
+	}
+	// SPEC-018 §3.12: the provider streams split reasoning as
+	// reasoning_content before the answer.
+	if raw, has := obj["reasoning_content"]; has && isNonEmptyJSONString(raw) {
 		return deltaSignalWorthy
 	}
 	if raw, has := obj["function_call"]; has && isNonEmptyJSONObject(raw) {
@@ -7675,14 +7696,7 @@ func multiTurnToolGateApplies(req chatRequest, poolRuntimeAllowlist []string) bo
 	if !req.multiTurnToolHistory {
 		return false
 	}
-	switch req.engineClass {
-	case engineClassNative:
-		return true
-	case "":
-		return req.poolID == "" || len(poolRuntimeAllowlist) == 0
-	default:
-		return false
-	}
+	return nativeOnlyRoute(req, poolRuntimeAllowlist)
 }
 
 // multiTurnToolClass narrows a SPEC-004 model class to the members with a
@@ -7701,11 +7715,11 @@ func multiTurnToolClass(class *config.ModelClassConfig) *config.ModelClassConfig
 	return &config.ModelClassConfig{Objective: class.Objective, Models: eligible, Members: append([]string(nil), eligible...)}
 }
 
-// spec018MultiTurnProfileModel mirrors the SPEC-018 §3.1/§3.8 modelID
-// predicates that have a multi-turn prompt-template profile.
+// spec018MultiTurnProfileModel reports a model family whose chat template
+// renders tool history natively (SPEC-018 §3.6/§3.8): every family with a
+// tool grammar.
 func spec018MultiTurnProfileModel(model string) bool {
-	lower := strings.ToLower(model)
-	return strings.Contains(lower, "qwen2.5") || strings.Contains(lower, "qwen3") || strings.Contains(lower, "llama-3.3")
+	return toolGrammarFamily(model) != ""
 }
 
 // hasMultiTurnToolData runs after validateMessages, which already rejects an
@@ -11446,6 +11460,49 @@ func wsEndHTTPStatus(status string) int {
 	default:
 		return http.StatusBadGateway
 	}
+}
+
+// providerFailureReason is the buyer-readable reason code for a post-commit
+// provider failure (SPEC-006 §17, #2107 D16): the provider's end status when it
+// is a bounded snake_case code, else provider_error. It never carries provider
+// free text.
+func providerFailureReason(status string) string {
+	if len(status) == 0 || len(status) > 64 {
+		return "provider_error"
+	}
+	for _, r := range status {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '_' {
+			return "provider_error"
+		}
+	}
+	return status
+}
+
+// writeSSEProviderFailure is the post-commit provider_error terminal frame
+// with the failure's reason code, so a buyer can tell a context overflow from
+// a crash after the stream started.
+func writeSSEProviderFailure(w http.ResponseWriter, reason, requestID string) {
+	id := any(nil)
+	if strings.TrimSpace(requestID) != "" {
+		id = requestID
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"error": map[string]any{
+			"message":        "Provider failed during streaming (" + reason + ")",
+			"type":           spec018ErrorType("provider_error", "server_error"),
+			"param":          nil,
+			"code":           "provider_error",
+			"reason":         reason,
+			"retryable":      spec018Retryable("provider_error"),
+			"request_id":     id,
+			"inference_ran":  true,
+			"settlement_ran": false,
+		},
+	})
+	_, _ = w.Write([]byte("data: "))
+	_, _ = w.Write(payload)
+	_, _ = w.Write([]byte("\n\n"))
+	_, _ = w.Write([]byte("data: [DONE]\n\n"))
 }
 
 func writeSSEError(w http.ResponseWriter, message, code string, requestID ...string) {

@@ -570,9 +570,65 @@ func sanitizeModelEntryValue(key string, value any) (any, bool) {
 		return sanitizeHashVerification(value)
 	case "degraded":
 		return value, valueIsBool(value)
+	case "capabilities":
+		return sanitizeModelCapabilities(value)
+	case "supported_parameters":
+		return sanitizeSupportedParameters(value)
 	default:
 		return nil, false
 	}
+}
+
+// sanitizeModelCapabilities re-emits the coordinator's closed per-model
+// capability object (SPEC-006 §21, #2107 D6) with every member type-checked.
+func sanitizeModelCapabilities(value any) (any, bool) {
+	raw, ok := value.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	out := map[string]any{}
+	for _, key := range []string{"tools", "reasoning", "response_format", "vision"} {
+		v, ok := raw[key].(bool)
+		if !ok {
+			return nil, false
+		}
+		out[key] = v
+	}
+	if !valueIsJSONNumber(raw["context_length"]) {
+		return nil, false
+	}
+	out["context_length"] = raw["context_length"]
+	modes, ok := raw["tool_choice"].([]any)
+	if !ok || len(modes) > 4 {
+		return nil, false
+	}
+	for _, mode := range modes {
+		if !valueIsStringEnum(mode, "auto", "none", "required", "named") {
+			return nil, false
+		}
+	}
+	out["tool_choice"] = modes
+	return out, true
+}
+
+var supportedParameterNames = map[string]bool{
+	"max_tokens": true, "temperature": true, "top_p": true, "stop": true, "seed": true,
+	"frequency_penalty": true, "presence_penalty": true, "tools": true, "tool_choice": true,
+	"parallel_tool_calls": true, "reasoning_effort": true, "response_format": true,
+}
+
+func sanitizeSupportedParameters(value any) (any, bool) {
+	raw, ok := value.([]any)
+	if !ok || len(raw) > len(supportedParameterNames) {
+		return nil, false
+	}
+	for _, item := range raw {
+		name, ok := item.(string)
+		if !ok || !supportedParameterNames[name] {
+			return nil, false
+		}
+	}
+	return raw, true
 }
 
 // sanitizePoolModelObject re-emits the SPEC-006-R018 closed
