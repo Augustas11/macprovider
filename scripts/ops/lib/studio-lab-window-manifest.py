@@ -30,12 +30,19 @@ ARTIFACT_RELATIVES = {
     "glmbench_metallib": "scripts/lab/cb-studio/glm53-bench/.build/release/mlx.metallib",
     "fixture_config": ".lab-window/fixture/target/config.json",
     "fixture_index": ".lab-window/fixture/target/model.safetensors.index.json",
+    "reference_python": ".lab-window/dsv4-venv/bin/python3",
+    "reference_script": "scripts/lab/dsv4/dsv4_reference_bench.py",
 }
 QWEN_ARTIFACT_FIELDS = {
     "diagnostic_cli", "diagnostic_metallib", "fixture_config", "fixture_index",
 }
+DSV4_ARTIFACT_FIELDS = {
+    "reference_python", "reference_script", "fixture_config", "fixture_index",
+}
+EXECUTABLE_ARTIFACTS = {"diagnostic_cli", "glmbench", "reference_python"}
 JOB_KINDS = (
     "diagnostic-legacy", "profiler-only", "qualification", "qwen-qualification", "qwen-journey", "glm-prefill",
+    "dsv4-reference",
 )
 JOB_SCHEMA = "macprovider.studio_lab_window_job.v1"
 JOB_RESULT_SCHEMA = "macprovider.studio_lab_window_job_result.v1"
@@ -57,6 +64,30 @@ QWEN_QUALIFICATION_CELLS = (
 QUALIFICATION_KINDS = ("qualification", "qwen-qualification")
 QWEN_JOB_KINDS = ("qwen-qualification", "qwen-journey")
 CLI_ONLY_JOB_KINDS = (*QWEN_JOB_KINDS, "glm-prefill")
+# Python reference lanes: no lab CLI, GLMBench or native-MTP projection.
+REFERENCE_JOB_KINDS = ("dsv4-reference",)
+GLMBENCH_FREE_KINDS = (*CLI_ONLY_JOB_KINDS, *REFERENCE_JOB_KINDS)
+DSV4_TREE_RELATIVE = "scripts/lab/dsv4"
+# Fixed reference run (#2111): the argv comes from this constant, never from a file.
+DSV4_REFERENCE_PROFILE = {
+    "oracle_contexts": [1024, 8192, 32768], "ttft_contexts": [4096, 32768],
+    "rows": [1, 4], "row_prompt": 1024, "decode": 256,
+}
+DSV4_REFERENCE_POLICY = {
+    "schema": "macprovider.dsv4-reference-policy.v1",
+    "model_id": "deepseek-ai/deepseek-v4-flash-0731",
+    "artifact_repo": "TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX",
+    "artifact_revision": "d6be051ae238b2021de56cf098d8f0206328754a",
+    "environment": {"mlx": "0.32.4", "mlx-metal": "0.32.4", "mlx-vlm": "0.7.10"},
+    "temperature": 0,
+    "evidence_class": "dsv4_reference_measurement_only",
+    **DSV4_REFERENCE_PROFILE,
+}
+# Reads installed distribution metadata only; it never imports mlx or loads a model.
+DSV4_ENVIRONMENT_PROBE = (
+    "import importlib.metadata as m, json, sys; "
+    "print(json.dumps({p: m.version(p) for p in sys.argv[1:]}, sort_keys=True))"
+)
 QWEN_JOURNEY_PROFILE = {
     "model_id": "qwen/qwen3.6-35b-a3b",
     "qualified_slots": 8,
@@ -148,6 +179,12 @@ def require_sha(value: object, name: str) -> str:
     if not isinstance(value, str) or not SHA256.fullmatch(value):
         raise Refusal(f"{name} must be a lowercase SHA-256")
     return value
+
+
+def artifact_fields(kind: str) -> set[str]:
+    if kind in REFERENCE_JOB_KINDS:
+        return DSV4_ARTIFACT_FIELDS
+    return QWEN_ARTIFACT_FIELDS if kind in CLI_ONLY_JOB_KINDS else ARTIFACT_FIELDS
 
 
 def read_safe_object(path: Path, name: str) -> tuple[dict, str]:
@@ -355,6 +392,30 @@ def validate_glm_prefill_policy(value: dict) -> None:
         raise Refusal("GLM prefill thresholds must retain the existing gates")
 
 
+def validate_dsv4_reference_policy(value: dict) -> None:
+    # Measurement-only reference lane: binds the artifact snapshot and the
+    # Python environment. It cannot qualify or activate anything.
+    if set(value) != set(DSV4_REFERENCE_POLICY) | {"target_sha256"}:
+        raise Refusal("DeepSeek V4 reference policy fields are not the fixed contract")
+    for key, expected in DSV4_REFERENCE_POLICY.items():
+        actual = value.get(key)
+        if actual != expected or type(actual) is not type(expected) or (
+            isinstance(expected, list) and any(type(item) is not int for item in actual)
+        ):
+            raise Refusal(f"DeepSeek V4 reference policy {key} is not the fixed contract")
+    require_sha(value.get("target_sha256"), "DeepSeek V4 reference target sha256")
+
+
+def dsv4_reference_inputs(source: Path) -> dict[str, str]:
+    policy, policy_sha = read_safe_object(source / POLICY_RELATIVE, "DeepSeek V4 reference policy")
+    validate_dsv4_reference_policy(policy)
+    return {
+        "reference_tree_oid": git_value(source, f"HEAD:{DSV4_TREE_RELATIVE}", "reference script tree"),
+        "reference_policy_sha256": policy_sha,
+        "reference_target_sha256": policy["target_sha256"],
+    }
+
+
 def validate_qwen_policy(value: dict) -> None:
     exact = {
         "schema": "macprovider.native-mtp-r015-policy.v1",
@@ -476,12 +537,14 @@ def build_job(args: argparse.Namespace, source: Path, artifacts: dict[str, dict[
         "job_helper_sha256": helper_sha,
         "artifact_sha256": {key: item["sha256"] for key, item in sorted(artifacts.items())},
     }
-    if kind not in CLI_ONLY_JOB_KINDS:
+    if kind not in GLMBENCH_FREE_KINDS:
         inputs["glmbench_tree_oid"] = git_value(
             source, "HEAD:scripts/lab/cb-studio/glm53-bench", "GLMBench tree"
         )
     if kind == "profiler-only":
         inputs["reuse"] = archived_reuse(source, artifacts, phase3_tree)
+    elif kind in REFERENCE_JOB_KINDS:
+        inputs.update(dsv4_reference_inputs(source))
     elif kind in ("qualification", "glm-prefill"):
         policy, policy_sha = read_safe_object(source / POLICY_RELATIVE, "qualification policy")
         (validate_glm_prefill_policy if kind == "glm-prefill" else validate_policy)(policy)
@@ -541,11 +604,10 @@ def source_snapshot(args: argparse.Namespace) -> dict[str, object]:
     if dirty:
         raise Refusal("lab source has tracked modifications")
     kind = getattr(args, "job_kind", "diagnostic-legacy")
-    artifact_fields = QWEN_ARTIFACT_FIELDS if kind in CLI_ONLY_JOB_KINDS else ARTIFACT_FIELDS
-    artifacts = {name: source / ARTIFACT_RELATIVES[name] for name in artifact_fields}
+    artifacts = {name: source / ARTIFACT_RELATIVES[name] for name in artifact_fields(kind)}
     result: dict[str, dict[str, str]] = {}
     for name, path in artifacts.items():
-        target = safe_artifact(path, executable=name in {"diagnostic_cli", "glmbench"})
+        target = safe_artifact(path, executable=name in EXECUTABLE_ARTIFACTS)
         result[name] = {"path": str(path), "sha256": file_sha256(target)}
     launch_agents = Path.home().resolve() / "Library" / "LaunchAgents"
     snapshot: dict[str, object] = {
@@ -616,13 +678,9 @@ def build_manifest(args: argparse.Namespace) -> dict[str, object]:
     job = source.get("job")
     if job is not None:
         validate_job_object(job)
-    artifact_fields = (
-        QWEN_ARTIFACT_FIELDS
-        if isinstance(job, dict) and job.get("kind") in CLI_ONLY_JOB_KINDS
-        else ARTIFACT_FIELDS
-    )
+    expected_fields = artifact_fields(job["kind"] if isinstance(job, dict) else "diagnostic-legacy")
     artifacts = source.get("artifacts")
-    if not isinstance(artifacts, dict) or set(artifacts) != artifact_fields:
+    if not isinstance(artifacts, dict) or set(artifacts) != expected_fields:
         raise Refusal("source artifact snapshot is incomplete")
     for name, item in artifacts.items():
         if (
@@ -654,7 +712,7 @@ def build_manifest(args: argparse.Namespace) -> dict[str, object]:
         args.lab_timeout_s, "lab timeout",
         43200 if job is not None and job["kind"] in QUALIFICATION_KINDS else (
             21600 if job is not None and job["kind"] == "glm-prefill" else (
-                7200 if job is not None and job["kind"] == "qwen-journey" else 3600
+                7200 if job is not None and job["kind"] in ("qwen-journey", "dsv4-reference") else 3600
             )
         ),
     )
@@ -706,10 +764,12 @@ def validate_job_object(job: object) -> dict:
     expected_inputs = {
         "phase3_tree_oid", "lab_script_sha256", "job_helper_sha256", "artifact_sha256",
     }
-    if job["kind"] not in CLI_ONLY_JOB_KINDS:
+    if job["kind"] not in GLMBENCH_FREE_KINDS:
         expected_inputs.add("glmbench_tree_oid")
     if job["kind"] == "profiler-only":
         expected_inputs.add("reuse")
+    elif job["kind"] in REFERENCE_JOB_KINDS:
+        expected_inputs |= {"reference_tree_oid", "reference_policy_sha256", "reference_target_sha256"}
     elif job["kind"] in ("qualification", "glm-prefill"):
         expected_inputs |= {
             "qualification_policy_sha256", "qualification_provider_commit",
@@ -730,16 +790,20 @@ def validate_job_object(job: object) -> dict:
     for key in ("phase3_tree_oid",):
         if not isinstance(inputs.get(key), str) or not SHA40.fullmatch(inputs[key]):
             raise Refusal(f"job {key} is invalid")
-    if job["kind"] not in CLI_ONLY_JOB_KINDS and (
+    if job["kind"] not in GLMBENCH_FREE_KINDS and (
         not isinstance(inputs.get("glmbench_tree_oid"), str)
         or not SHA40.fullmatch(inputs["glmbench_tree_oid"])
     ):
         raise Refusal("job glmbench_tree_oid is invalid")
+    if job["kind"] in REFERENCE_JOB_KINDS:
+        if not isinstance(inputs.get("reference_tree_oid"), str) or not SHA40.fullmatch(inputs["reference_tree_oid"]):
+            raise Refusal("job reference_tree_oid is invalid")
+        require_sha(inputs.get("reference_policy_sha256"), "job reference policy sha256")
+        require_sha(inputs.get("reference_target_sha256"), "job reference target sha256")
     for key in ("lab_script_sha256", "job_helper_sha256"):
         require_sha(inputs.get(key), f"job {key}")
     artifacts = inputs.get("artifact_sha256")
-    artifact_fields = QWEN_ARTIFACT_FIELDS if job["kind"] in CLI_ONLY_JOB_KINDS else ARTIFACT_FIELDS
-    if not isinstance(artifacts, dict) or set(artifacts) != artifact_fields:
+    if not isinstance(artifacts, dict) or set(artifacts) != artifact_fields(job["kind"]):
         raise Refusal("job artifact hash schema is invalid")
     for key, value in artifacts.items():
         require_sha(value, f"job artifact {key}")
@@ -823,7 +887,7 @@ def validate_current_job_inputs(manifest: dict, job: dict) -> None:
     inputs = job["immutable_inputs"]
     if git_value(source, "HEAD:phase3-binary", "phase3 tree") != inputs.get("phase3_tree_oid"):
         raise Refusal("job phase3 source tree drifted")
-    if job["kind"] not in CLI_ONLY_JOB_KINDS and (
+    if job["kind"] not in GLMBENCH_FREE_KINDS and (
         git_value(source, "HEAD:scripts/lab/cb-studio/glm53-bench", "GLMBench tree")
         != inputs.get("glmbench_tree_oid")
     ):
@@ -838,8 +902,7 @@ def validate_current_job_inputs(manifest: dict, job: dict) -> None:
     artifacts = manifest.get("artifacts")
     if not isinstance(artifact_hashes, dict) or not isinstance(artifacts, dict):
         raise Refusal("job artifact identities are missing")
-    artifact_fields = QWEN_ARTIFACT_FIELDS if job["kind"] in CLI_ONLY_JOB_KINDS else ARTIFACT_FIELDS
-    for key in artifact_fields:
+    for key in artifact_fields(job["kind"]):
         item = artifacts.get(key)
         if not isinstance(item, dict) or artifact_hashes.get(key) != item.get("sha256"):
             raise Refusal(f"job artifact manifest mismatch: {key}")
@@ -849,13 +912,17 @@ def validate_current_job_inputs(manifest: dict, job: dict) -> None:
         expected = source / ARTIFACT_RELATIVES[key]
         if not path.is_absolute() or path != expected:
             raise Refusal(f"job artifact path is not fixed: {key}")
-        actual = file_sha256(safe_artifact(path, executable=key in {"diagnostic_cli", "glmbench"}))
+        actual = file_sha256(safe_artifact(path, executable=key in EXECUTABLE_ARTIFACTS))
         if actual != artifact_hashes[key]:
             raise Refusal(f"job artifact drifted: {key}")
     if job["kind"] == "profiler-only":
         current_reuse = archived_reuse(source, artifacts, str(inputs["phase3_tree_oid"]))
         if inputs.get("reuse") != current_reuse:
             raise Refusal("archived journey reuse inputs drifted")
+    elif job["kind"] in REFERENCE_JOB_KINDS:
+        current = dsv4_reference_inputs(source)
+        if any(inputs.get(key) != value for key, value in current.items()):
+            raise Refusal("DeepSeek V4 reference policy or script tree drifted")
     elif job["kind"] in ("qualification", "glm-prefill"):
         policy, policy_sha = read_safe_object(source / POLICY_RELATIVE, "qualification policy")
         (validate_glm_prefill_policy if job["kind"] == "glm-prefill" else validate_policy)(policy)
@@ -985,6 +1052,13 @@ def preflight_path(manifest: dict) -> Path:
 
 def private_artifact_paths(manifest: dict, job: dict) -> dict[str, Path]:
     root = preflight_path(manifest) / "artifacts"
+    if job["kind"] in REFERENCE_JOB_KINDS:
+        # The venv interpreter stays in place (a copied interpreter loses its
+        # venv); it is hash-bound by the source snapshot instead.
+        return {
+            "reference_script": root / "reference/dsv4_reference_bench.py",
+            "reference_policy": root / "reference-policy.json",
+        }
     paths = {
         "diagnostic_cli": root / "provider/macprovider-cli",
         "diagnostic_metallib": root / "provider/mlx.metallib",
@@ -1049,6 +1123,24 @@ def prepare_private_artifacts(manifest: dict, job: dict) -> None:
     paths = private_artifact_paths(manifest, job)
     root = preflight_path(manifest) / "artifacts"
     create_result_dir(root)
+    if job["kind"] in REFERENCE_JOB_KINDS:
+        create_result_dir(root / "reference")
+        inputs = job["immutable_inputs"]
+        copy_authenticated(
+            Path(manifest["artifacts"]["reference_script"]["path"]), paths["reference_script"],
+            inputs["artifact_sha256"]["reference_script"], executable=False,
+        )
+        copy_authenticated(
+            Path(manifest["lab_source_dir"]) / POLICY_RELATIVE, paths["reference_policy"],
+            inputs["reference_policy_sha256"], executable=False,
+        )
+        for directory in (root / "reference", root):
+            fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        return
     create_result_dir(root / "provider")
     if job["kind"] not in CLI_ONLY_JOB_KINDS:
         create_result_dir(root / "bench")
@@ -1094,19 +1186,24 @@ def validate_private_artifacts(manifest: dict, job: dict) -> dict[str, str]:
     expected = job["immutable_inputs"]["artifact_sha256"]
     result: dict[str, str] = {}
     root = preflight_path(manifest) / "artifacts"
-    directories = [preflight_path(manifest), root, root / "provider"]
-    if job["kind"] not in CLI_ONLY_JOB_KINDS:
+    if job["kind"] in REFERENCE_JOB_KINDS:
+        directories = [preflight_path(manifest), root, root / "reference"]
+    else:
+        directories = [preflight_path(manifest), root, root / "provider"]
+    if job["kind"] not in GLMBENCH_FREE_KINDS:
         directories.append(root / "bench")
     for directory in directories:
         safe_directory(directory)
     for key, path in private_artifact_paths(manifest, job).items():
-        if key == "qualification_policy":
+        if key == "reference_policy":
+            expected_sha = job["immutable_inputs"]["reference_policy_sha256"]
+        elif key == "qualification_policy":
             expected_sha = job["immutable_inputs"]["qualification_policy_sha256"]
         elif key == "artifact_projection":
             expected_sha = job["immutable_inputs"]["artifact_projection_sha256"]
         else:
             expected_sha = expected[key]
-        actual = file_sha256(safe_artifact(path, executable=key in {"diagnostic_cli", "glmbench"}))
+        actual = file_sha256(safe_artifact(path, executable=key in EXECUTABLE_ARTIFACTS))
         if actual != expected_sha:
             raise Refusal(f"private job artifact drifted: {key}")
         result[key] = actual
@@ -1138,8 +1235,11 @@ def validate_preflight_receipt(manifest: dict, job: dict) -> None:
     expected = receipt.get("expected")
     qwen = job["kind"] in QWEN_JOB_KINDS
     current_expected = (
-        job["immutable_inputs"]["artifact_projection"]
-        if qwen else projection_tuple(Path(manifest["lab_source_dir"]))
+        job["immutable_inputs"]["artifact_projection"] if qwen else (
+            {"target_sha256": job["immutable_inputs"]["reference_target_sha256"]}
+            if job["kind"] in REFERENCE_JOB_KINDS
+            else projection_tuple(Path(manifest["lab_source_dir"]))
+        )
     )
     if (
         receipt.get("schema_version") != PREFLIGHT_SCHEMA
@@ -1300,6 +1400,18 @@ def validate_qwen_journey_result(path: Path, job: dict) -> None:
         raise Refusal(f"Qwen journey step set is invalid; private log: {path}")
 
 
+def check_reference_environment(manifest: dict, output: Path) -> None:
+    expected = DSV4_REFERENCE_POLICY["environment"]
+    python = str(manifest["artifacts"]["reference_python"]["path"])
+    run_checked([python, "-I", "-c", DSV4_ENVIRONMENT_PROBE, *sorted(expected)], output, timeout=120)
+    try:
+        observed = json.loads(output.read_text().splitlines()[-1])
+    except (IndexError, ValueError) as exc:
+        raise Refusal(f"reference environment probe is invalid; private log: {output}") from exc
+    if observed != expected:
+        raise Refusal(f"reference environment differs from the fixed versions; private log: {output}")
+
+
 def validate_job(args: argparse.Namespace) -> dict[str, object]:
     manifest, job = load_job_manifest(args.manifest)
     validate_current_job_inputs(manifest, job)
@@ -1313,10 +1425,20 @@ def validate_job(args: argparse.Namespace) -> dict[str, object]:
     prepare_private_artifacts(manifest, job)
     target = source / ".lab-window/fixture/target"
     qwen = job["kind"] in QWEN_JOB_KINDS
-    expected = job["immutable_inputs"]["artifact_projection"] if qwen else projection_tuple(source)
+    if qwen:
+        expected = job["immutable_inputs"]["artifact_projection"]
+    elif job["kind"] in REFERENCE_JOB_KINDS:
+        expected = {"target_sha256": job["immutable_inputs"]["reference_target_sha256"]}
+    else:
+        expected = projection_tuple(source)
     mtp = source / ".lab-window/fixture/mtp"
     mtp_stamps = None
-    if job["kind"] == "profiler-only":
+    if job["kind"] in REFERENCE_JOB_KINDS:
+        target_digest, target_stamps = snapshot_identity(target)
+        if target_digest != expected["target_sha256"]:
+            raise Refusal("DeepSeek V4 reference fixture identity differs from its policy")
+        check_reference_environment(manifest, preflight / "environment.json")
+    elif job["kind"] == "profiler-only":
         target_digest, target_stamps = snapshot_identity(target)
         reuse = job["immutable_inputs"]["reuse"]
         if target_digest != reuse["target_sha256"]:
@@ -1445,7 +1567,27 @@ def run_job(args: argparse.Namespace) -> dict[str, object]:
     result = Path(manifest["_result_dir"])
     create_result_dir(result)
     outputs: list[Path] = []
-    if job["kind"] == "profiler-only":
+    if job["kind"] in REFERENCE_JOB_KINDS:
+        environment = result / "environment.json"
+        validate_execution_inputs(manifest, job)
+        check_reference_environment(manifest, environment)
+        profile = DSV4_REFERENCE_PROFILE
+        reference = result / "reference"
+        log = result / "reference.log"
+        joined = lambda values: ",".join(str(value) for value in values)
+        run_checked([
+            str(manifest["artifacts"]["reference_python"]["path"]), "-I",
+            str(private_artifact_paths(manifest, job)["reference_script"]),
+            str(source / ".lab-window/fixture/target"), str(reference),
+            "--oracle-contexts", joined(profile["oracle_contexts"]),
+            "--ttft-contexts", joined(profile["ttft_contexts"]),
+            "--rows", joined(profile["rows"]),
+            "--row-prompt", str(profile["row_prompt"]),
+            "--decode", str(profile["decode"]),
+        ], log, timeout=5400)
+        outputs.extend((environment, log, reference / "speed.json"))
+        outputs.extend(reference / f"oracle_{ctx}.npz" for ctx in profile["oracle_contexts"])
+    elif job["kind"] == "profiler-only":
         bench = str(private_artifact_paths(manifest, job)["glmbench"])
         target = str(source / ".lab-window/fixture/target")
         wall = result / "component-wall.log"
@@ -1517,6 +1659,8 @@ def run_job(args: argparse.Namespace) -> dict[str, object]:
             "fixture_target_sha256": (
                 job["immutable_inputs"]["artifact_projection"]["target_sha256"]
                 if job["kind"] in QWEN_JOB_KINDS
+                else job["immutable_inputs"]["reference_target_sha256"]
+                if job["kind"] in REFERENCE_JOB_KINDS
                 else projection_tuple(source)["target_sha256"]
             ),
         },
@@ -1524,6 +1668,11 @@ def run_job(args: argparse.Namespace) -> dict[str, object]:
     }
     if job["kind"] == "glm-prefill":
         receipt.update(exploratory=True, qualification=False, evidence_class="glm_prefill_measurement_only")
+    if job["kind"] in REFERENCE_JOB_KINDS:
+        receipt.update(
+            exploratory=True, qualification=False,
+            evidence_class=DSV4_REFERENCE_POLICY["evidence_class"],
+        )
     if job["kind"] in QWEN_JOB_KINDS:
         receipt["executed_inputs"]["fixture_mtp_sha256"] = (
             job["immutable_inputs"]["artifact_projection"]["mtp_sha256"]

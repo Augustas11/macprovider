@@ -40,7 +40,7 @@ controller. Also set:
 | `STUDIO_LAB_SOURCE_DIR` | Absolute path to the campaign clone on the Studio |
 | `STUDIO_LAB_GIT_HEAD` | Exact 40-character campaign commit |
 | `STUDIO_LAB_WINDOW_DIR` | Dedicated private directory for this window's journal and staged helpers |
-| `STUDIO_LAB_JOB_KIND` | Closed job kind: `diagnostic-legacy` (default), `profiler-only`, `qualification`, `qwen-qualification`, `qwen-journey`, or `glm-prefill` |
+| `STUDIO_LAB_JOB_KIND` | Closed job kind: `diagnostic-legacy` (default), `profiler-only`, `qualification`, `qwen-qualification`, `qwen-journey`, `glm-prefill`, or `dsv4-reference` |
 
 The command and its arguments are fixed in
 `scripts/lab/2080-native-rows/run-window-diagnostic.sh`. There is no shell
@@ -137,7 +137,24 @@ not exercised by this offline process. Its child deadline is 5400 seconds and
 the guarded window ceiling is 7200 seconds. Preserve existing qualification
 evidence and complete external acceptance separately.
 
-Before pausing service, qualification runs the harness's authoritative
+`dsv4-reference` is the DeepSeek V4-Flash reference lane (#2111). It runs the
+mlx-vlm reference, not the lab CLI, so the lab CLI, GLMBench and the native-MTP
+projection are not required. The fixed command is
+`scripts/lab/dsv4/dsv4_reference_bench.py` under the interpreter of the venv at
+`.lab-window/dsv4-venv`. It records TTFT at 4096 and 32768 prompt tokens,
+output tok/s at 1 and 4 rows, peak memory, and greedy oracles at 1024, 8192 and
+32768 tokens. The policy at `.lab-window/qualification-policy.json` is a copy of
+`scripts/lab/dsv4/dsv4-reference-policy.json`. It pins the artifact revision,
+the full-snapshot identity of `.lab-window/fixture/target` and the exact
+`mlx`, `mlx-metal` and `mlx-vlm` versions. Preflight hashes the fixture and reads
+the venv's package metadata without importing `mlx`. The reference script is
+frozen as a private copy. The interpreter cannot be copied without losing its
+venv, so it stays in place and is hash-bound by the source snapshot. The rest
+of the venv is bound by the version check only. The child deadline is 5400
+seconds and the guarded window ceiling is 7200 seconds. The receipt is marked
+exploratory and measurement-only. Preparation is in `scripts/lab/dsv4/README.md`.
+
+
 `--validate-only` preflight without loading the model. A policy not admitted
 by that parser is refused. This runner does not raise the signed production
 bound or bypass policy validation; laboratory-bound amendments belong to the
