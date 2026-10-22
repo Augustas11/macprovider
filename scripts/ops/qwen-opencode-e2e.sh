@@ -231,7 +231,10 @@ if not isinstance(row, dict) or (
     row.get("runtime_status"),
 ) != (*expected, "recommendable"):
     raise SystemExit(3)
-rate = (rates.get("rows") or {}).get(key)
+# The live rate card keys this model by its normalized name, as billing's
+# NormalizeModelKey resolves the namespaced catalog key.
+rate_rows = rates.get("rows") or {}
+rate = rate_rows.get(key) or rate_rows.get(key.split("/", 1)[1])
 actual = tuple((rate or {}).get(name) for name in (
     "prompt_rate_per_mtok", "prompt_cache_hit_rate_per_mtok", "completion_rate_per_mtok"))
 if any(type(value) is not int or value <= 0 or value > 2**63 - 1 for value in actual):
@@ -264,7 +267,9 @@ if d.get("binary_version") != version: bad.append("binary_version")
 if d.get("provider_id") != provider: bad.append("provider_id")
 if d.get("model") != model: bad.append("model")
 if d.get("model_loaded") is not True or d.get("status") not in ("ready", "busy"): bad.append("model_ready")
-if d.get("operator_paused") is not False: bad.append("operator_paused")
+# `status --json` reports the operator pause in its lifecycle record.
+paused = d["operator_paused"] if "operator_paused" in d else (d.get("lifecycle") or {}).get("operator_paused")
+if paused is not False: bad.append("operator_paused")
 if d.get("network_state") != "buyer_serving": bad.append("network_state")
 if (d.get("coordinator") or {}).get("connected") is not True: bad.append("coordinator.connected")
 catalog = d.get("catalog") or {}
@@ -311,8 +316,8 @@ poll_ready() {
 verify_installed_cli() {
   local actual_sha version_line signature
   studio_ssh "/usr/sbin/system_profiler SPHardwareDataType -json | /usr/bin/python3 -c 'import json,sys; d=json.load(sys.stdin); rows=d.get(\"SPHardwareDataType\") or []; raise SystemExit(0 if rows and rows[0].get(\"machine_name\")==\"Mac Studio\" else 3)'" >/dev/null || return
-  studio_command /usr/bin/test -f "$QWEN_E2E_CLI" || return
-  studio_command /usr/bin/test -x "$QWEN_E2E_CLI" || return
+  studio_command /bin/test -f "$QWEN_E2E_CLI" || return
+  studio_command /bin/test -x "$QWEN_E2E_CLI" || return
   actual_sha="$(studio_command /usr/bin/shasum -a 256 "$QWEN_E2E_CLI" | awk '{print $1}')" || return
   [ "$actual_sha" = "$HB_SHA" ] || return 1
   studio_command /usr/bin/codesign --verify --strict "$QWEN_E2E_CLI" >/dev/null 2>&1 || return
@@ -363,8 +368,8 @@ derive_handback() {
   provider="$(json_field "$status_file" 'd.get("provider_id")')"
   [ -n "$provider" ] || return 1
   studio_ssh "/usr/sbin/system_profiler SPHardwareDataType -json | /usr/bin/python3 -c 'import json,sys; d=json.load(sys.stdin); rows=d.get(\"SPHardwareDataType\") or []; raise SystemExit(0 if rows and rows[0].get(\"machine_name\")==\"Mac Studio\" else 3)'" >/dev/null || return
-  studio_command /usr/bin/test -f "$QWEN_E2E_CLI" || return
-  studio_command /usr/bin/test -x "$QWEN_E2E_CLI" || return
+  studio_command /bin/test -f "$QWEN_E2E_CLI" || return
+  studio_command /bin/test -x "$QWEN_E2E_CLI" || return
   actual_sha="$(studio_command /usr/bin/shasum -a 256 "$QWEN_E2E_CLI" | awk '{print $1}')" || return
   printf '%s\n' "$actual_sha" | grep -Eq '^[0-9a-f]{64}$' || return 1
   studio_command /usr/bin/codesign --verify --strict "$QWEN_E2E_CLI" >/dev/null 2>&1 || return
@@ -651,7 +656,9 @@ restart_and_wait() {
   local expected="$1" before_file="$2" after_file="$3" before_pid
   before_pid="$(status_pid "$before_file")"
   [ -n "$before_pid" ] || return 1
-  studio_command "$QWEN_E2E_CLI" restart --config "$QWEN_E2E_CONFIG" >/dev/null
+  # The verified GUI-domain kickstart restoration uses: over SSH, `macprovider-cli
+  # restart` looks for a system-domain service and exits 64.
+  studio_helper restart-service --config "$QWEN_E2E_CONFIG" --validator "$QWEN_E2E_CLI" >/dev/null || return
   poll_ready "$expected" "$before_pid" "$after_file" >/dev/null
 }
 

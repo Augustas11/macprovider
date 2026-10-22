@@ -313,6 +313,8 @@ expected_history = {
     "published-2026-10-20-glm53-flash-cb-ceiling-v1",
     # Retained when the Qwen3-8B CB capability is added to the signed release.
     "published-2026-10-20-glm53-flash-native-mtp-v260",
+    # Superseded by the two-model decode-path-bound admission set on CLI 1.8.261.
+    "published-2026-10-21-qwen3-8b-cb-v1",
     current_release_id,
 }
 if set(ledger["releases"]) != expected_history:

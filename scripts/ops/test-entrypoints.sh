@@ -1764,6 +1764,18 @@ run_rc 0 "catalog status with an expired proof" scripts/ops/catalog-activate.sh 
 if [ "$(state_of gateway_proof)" = "pending" ]; then ok; else bad "expired proof still counted"; fi
 
 # ==== catalog-activate: canary pause, pricing ack, owed evidence (e) ===========
+# A decode-path-bound admission (SPEC-048 0.1.51) is published only while the
+# release tag names the release input's source commit, as it does once the
+# train has released the reader CLI; the cli-release cases above left the
+# fixture's v$CAND on a fixture commit.
+DP_SOURCE="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["entry"]["source_commit"] if "provider_decode_path_digest" in d else "")' \
+  "$W/phase3-binary/catalog/autotune/native-mtp-admission-release.json")"
+if [ -n "$DP_SOURCE" ]; then
+  git -C "$W" -c user.name=t -c user.email=t@example.invalid tag -f -a "v$CAND" -m release "$DP_SOURCE" >/dev/null
+  # ... and the live coordinator recommends that released reader CLI.
+  python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["recommended_binary_version"]=sys.argv[2]; json.dump(d, open(p, "w"))' \
+    "$tmp/svc/healthz.json" "$CAND"
+fi
 MAIN_SHA="$(git -C "$W" rev-parse origin/main)"
 CSCOPE="$tmp/state/catalog-$R"
 mkdir -p "$tmp/svc/routes"
