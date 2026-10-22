@@ -42,6 +42,10 @@ if [ "$MODE" = swap ]; then
   STABLE_S="${11}"
   POLL_S="${12:-5}"
   RESULT_FILE="${13:-$(dirname "$TARBALL")/result}"
+  AIR_PROVIDER_SHA="${14:-}"
+  AIR_CONFIG="${15:-}"
+  AIR_OLD_BINARY_SHA="${16:-}"
+  AIR_ACTION="${17:-}"
   CONFIG="" JOURNAL="" HELPER="" EXPECTED_BINARY_SHA="" EXPECTED_PROVIDER_SHA="" EXPECTED_MODEL="" EXPECTED_POLICY_SHA=""
   EXPECTED_POLICY_RELEASE="" EXPECTED_POLICY_TUPLE="" EXPECTED_TEAM_ID="" EXPECTED_SIGNING_IDENTIFIER="" EXPECTED_CDHASH=""
 else
@@ -382,7 +386,34 @@ restore_backup() {
   mv "$INSTALL_DIR" "$FAILED_DIR" || { say "!!! could not move the candidate payload aside; restore $BACKUP by hand"; finish 6; }
   cp -Rp "$BACKUP" "$INSTALL_DIR" || { say "!!! could not copy $BACKUP back to $INSTALL_DIR; do it by hand"; finish 6; }
   start_jobs provider || { say "!!! restored $BACKUP but the provider job did not start; bootstrap $LABEL by hand"; finish 6; }
-  if ! wait_serving "$OLD_VERSION"; then
+  if [ -n "$AIR_PROVIDER_SHA" ]; then
+    # The signed incumbent was disconnected before recovery. Restoring that
+    # exact zero-work state is a successful rollback, not a buyer-serving claim.
+    local air_deadline air_body air_pid air_start air_since
+    air_deadline=$(( $(now) + READY_TIMEOUT_S ))
+    air_pid="$(job_pid)"
+    air_start="$(verify_job_process "$air_pid")" || finish 6
+    air_since=0
+    while :; do
+      [ "$(job_pid)" = "$air_pid" ] && [ "$(verify_job_process "$air_pid")" = "$air_start" ] || finish 6
+      air_body="$(status_json || true)"
+      if [ "$(status_field "$air_body" binary_version)" = "$OLD_VERSION" ] &&
+         [ "$(status_field_sha "$air_body" provider_id)" = "$AIR_PROVIDER_SHA" ] &&
+         [ "$(status_field "$air_body" requests_in_flight)" = 0 ] &&
+         [ "$(status_field "$air_body" lifecycle.operator_paused)" != true ] &&
+         [ "$(shasum -a 256 "$INSTALL_DIR/macprovider-cli" | awk '{print $1}')" = "$AIR_OLD_BINARY_SHA" ]; then
+        [ "$air_since" != 0 ] || air_since="$(now)"
+        if [ $(( $(now) - air_since )) -lt "$STABLE_S" ]; then sleep "$POLL_S"; continue; fi
+        codesign --verify --strict "$INSTALL_DIR/macprovider-cli" >/dev/null 2>&1 || finish 6
+        require_watchdog || finish 6
+        say "ROLLBACK done: exact signed Air incumbent restored; buyer readiness is not claimed"
+        finish 5
+      fi
+      air_since=0
+      [ "$(now)" -lt "$air_deadline" ] || finish 6
+      sleep "$POLL_S"
+    done
+  elif ! wait_serving "$OLD_VERSION"; then
     say "!!! restored $BACKUP but $OLD_VERSION is not buyer_serving within ${READY_TIMEOUT_S}s; check the provider and send resume_request on $SOCKET"
     finish 6
   fi
@@ -533,6 +564,31 @@ case "$INSTALL_DIR" in *"/../"*|*/..|*"/./"*|*/.|*//*) refuse "install dir $INST
   [ -f "$HELPER" ] && [ ! -L "$HELPER" ] && [ -O "$HELPER" ] || refuse "config helper is missing, symlinked, or not owner-owned"
 }
 
+if [ "$MODE" = swap ] && [ "$AIR_ACTION" = restore-air ]; then
+  CONFIG="$AIR_CONFIG"
+  [ "$VERSION" = 1.8.260 ] && [ "$(sysctl -n hw.model)" = Mac15,12 ] || refuse "Air payload restore identity mismatch"
+  verify_launch_plist || refuse "Air restore LaunchAgent mismatch"
+  BACKUP="$(python3 - "$(dirname "$RESULT_FILE")/result.recovery.json" "$INSTALL_DIR" "$AIR_CONFIG" "$AIR_PROVIDER_SHA" "$AIR_OLD_BINARY_SHA" "$TARBALL_SHA" <<'PY'
+import hashlib, json, os, pathlib, stat, sys
+path, install, config, provider, binary_sha, target_sha = sys.argv[1:]
+info=os.lstat(path)
+if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077: raise SystemExit(1)
+d=json.load(open(path))
+if d.get("schema_version")!="macprovider.air_payload_recovery.v1" or d.get("install_dir")!=install or d.get("provider_id_sha256")!=provider or d.get("incumbent_binary_sha256")!=binary_sha or d.get("target_tarball_sha256")!=target_sha: raise SystemExit(1)
+if pathlib.Path(config).is_symlink() or hashlib.sha256(pathlib.Path(config).read_bytes()).hexdigest()!=d.get("config_sha256"): raise SystemExit(1)
+backup=pathlib.Path(d["backup_path"])
+if backup.parent!=pathlib.Path(install).parent or not backup.name.startswith(pathlib.Path(install).name+".pre-1.8.260-") or backup.resolve()!=backup or not backup.is_dir(): raise SystemExit(1)
+binary=backup/"macprovider-cli"
+if binary.is_symlink() or hashlib.sha256(binary.read_bytes()).hexdigest()!=binary_sha: raise SystemExit(1)
+print(backup)
+PY
+)" || refuse "Air recovery record/backup/config cannot be authenticated"
+  codesign --verify --strict "$BACKUP/macprovider-cli" >/dev/null 2>&1 || refuse "Air recovery backup signature invalid"
+  OLD_VERSION=1.8.258
+  SWAPPED=1
+  restore_backup "journal-first explicit Air payload recovery"
+fi
+
 if [ "$MODE" = restore-owner-pin ]; then
   [ -f "$JOURNAL" ] || refuse "no unfinished owner-pin journal to restore"
   CONFIG_ARMED=1
@@ -656,13 +712,33 @@ body="$(status_json)" || refuse "live /v1/status on :$PORT is not answering; not
 OLD_VERSION="$(status_field "$body" binary_version)"
 [ -n "$OLD_VERSION" ] || refuse "live /v1/status reports no binary_version"
 [ "$OLD_VERSION" != "$VERSION" ] || refuse "the canary already runs $VERSION"
-serving "$body" "$OLD_VERSION" || refuse "the canary is not buyer_serving on $OLD_VERSION; not swapping"
+if [ -n "$AIR_PROVIDER_SHA" ]; then
+  # The only non-serving swap is the explicitly bound, signed Air recovery.
+  [ "$VERSION" = 1.8.260 ] && [ "$OLD_VERSION" = 1.8.258 ] || refuse "Air recovery version mismatch"
+  [ "$(sysctl -n hw.model)" = Mac15,12 ] && [ "$(sysctl -n hw.memsize)" = 17179869184 ] || refuse "Air recovery hardware mismatch"
+  [ "$(status_field_sha "$body" provider_id)" = "$AIR_PROVIDER_SHA" ] || refuse "Air recovery provider mismatch"
+  [ "$(status_field "$body" coordinator.connected)" = false ] && [ "$(status_field "$body" requests_in_flight)" = 0 ] || refuse "Air recovery requires disconnected zero-inflight incumbent"
+  [ "$(status_field "$body" lifecycle.operator_paused)" != true ] || refuse "Air recovery cannot override operator pause"
+  [ "$(shasum -a 256 "$INSTALL_DIR/macprovider-cli" | awk '{print $1}')" = "$AIR_OLD_BINARY_SHA" ] || refuse "Air recovery incumbent bytes changed"
+  codesign --verify --strict "$INSTALL_DIR/macprovider-cli" >/dev/null 2>&1 || refuse "Air recovery incumbent signature is invalid"
+  CONFIG="$AIR_CONFIG"
+  verify_launch_plist || refuse "Air recovery LaunchAgent mismatch"
+  verify_job_process "$(job_pid)" >/dev/null || refuse "Air recovery process mismatch"
+else
+  serving "$body" "$OLD_VERSION" || refuse "the canary is not buyer_serving on $OLD_VERSION; not swapping"
+fi
 say "preflight ok: live $OLD_VERSION -> candidate $VERSION"
 
 # --- pause and drain -------------------------------------------------------
 # Marked before sending: an accepted pause whose ack is lost still gets resumed.
 PAUSED=1
-control pause_request || refuse "pause_request was not accepted on $SOCKET"
+if [ -z "$AIR_PROVIDER_SHA" ]; then
+  control pause_request || refuse "pause_request was not accepted on $SOCKET"
+else
+  # Recheck immediately before stopping: never discard work admitted meanwhile.
+  body="$(status_json)" || refuse "Air recovery lost incumbent status"
+  [ "$(status_field "$body" coordinator.connected)" = false ] && [ "$(status_field "$body" requests_in_flight)" = 0 ] || refuse "Air recovery incumbent became active"
+fi
 deadline=$(( $(now) + DRAIN_TIMEOUT_S ))
 while :; do
   body="$(status_json || true)"
@@ -676,6 +752,23 @@ say "drained in_flight=0"
 # --- swap ------------------------------------------------------------------
 cp -Rp "$INSTALL_DIR" "$BACKUP" || refuse "could not back up $INSTALL_DIR"
 say "backup=$BACKUP"
+if [ -n "$AIR_PROVIDER_SHA" ]; then
+  # Detached operation metadata survives controller loss; no config or tokens.
+  python3 - "$RESULT_FILE.recovery.json" "$BACKUP" "$INSTALL_DIR" "$AIR_PROVIDER_SHA" "$AIR_OLD_BINARY_SHA" "$TARBALL_SHA" "$AIR_CONFIG" <<'PY' || refuse "could not arm Air payload recovery record"
+import hashlib, json, os, sys
+path, backup, install, provider, old_sha, target_sha, config = sys.argv[1:]
+fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd, "w") as stream:
+    json.dump({"schema_version":"macprovider.air_payload_recovery.v1", "phase":"armed",
+               "backup_path":backup, "install_dir":install, "provider_id_sha256":provider,
+               "incumbent_binary_sha256":old_sha, "target_tarball_sha256":target_sha,
+               "config_sha256":hashlib.sha256(open(config,"rb").read()).hexdigest()}, stream)
+    stream.flush(); os.fsync(stream.fileno())
+directory = os.open(os.path.dirname(path), os.O_RDONLY)
+try: os.fsync(directory)
+finally: os.close(directory)
+PY
+fi
 SWAPPED=1
 stop_jobs || restore_backup "provider job did not stop"
 for f in $MANAGED_FILES; do
