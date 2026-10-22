@@ -34,6 +34,21 @@ struct ShardTestTokenizer: MLXLMCommon.Tokenizer {
     }
 }
 
+/// One fixed piece per token id (a special token decodes as one piece).
+struct ShardPieceTokenizer: MLXLMCommon.Tokenizer {
+    let pieces: [String]
+    func encode(text: String, addSpecialTokens: Bool) -> [Int] { [] }
+    func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String { tokenIds.map { pieces[$0] }.joined() }
+    func convertTokenToId(_ token: String) -> Int? { pieces.firstIndex(of: token) }
+    func convertIdToToken(_ id: Int) -> String? { pieces[id] }
+    var bosToken: String? { nil }
+    var eosToken: String? { nil }
+    var unknownToken: String? { nil }
+    func applyChatTemplate(
+        messages: [[String: any Sendable]], tools: [[String: any Sendable]]?, additionalContext: [String: any Sendable]?
+    ) throws -> [Int] { [] }
+}
+
 /// Runs every stage call on the CPU device; the engine and stage threads do not
 /// inherit a task's default device.
 final class CPUShardStage<Inner: ShardBenchStage>: ShardBenchStage {
@@ -279,6 +294,27 @@ final class ShardGroupRuntimeTests: XCTestCase {
         let (plain, plainOutput) = run("  a</think>b STOP c", reasoningOpen: false)
         XCTAssertEqual(plain, ShardStreamingText.Released(reasoning: "", content: "  a</think>b "))
         XCTAssertEqual(plainOutput.reasoningTokens, 0)
+    }
+
+    /// R3-C04: a tokenizer that marks `</think>` special (so it is in the
+    /// production stop filter) and decodes it as one piece still ends the
+    /// reasoning; another special token is filtered from both sides.
+    func testSpecialThinkTerminatorStillSplitsReasoning() {
+        let tokenizer = ShardPieceTokenizer(pieces: ["plan", "<eot>", " STOP", "</think>", "  answer", "<eot>", " STOP", " tail"])
+        var output = ShardStreamingText(
+            tokenizer: tokenizer, stops: ["STOP"], stopFilter: StopTokenFilter(tokens: ["</think>", "<eot>"]), reasoningOpen: true)
+        var total = ShardStreamingText.Released()
+        for token in 0..<8 {
+            let released = output.append(token)
+            total.reasoning += released.reasoning
+            total.content += released.content
+        }
+        let rest = output.finish()
+        total.reasoning += rest.reasoning
+        total.content += rest.content
+        XCTAssertEqual(total, ShardStreamingText.Released(reasoning: "plan STOP", content: "answer "))
+        XCTAssertTrue(output.stopped)
+        XCTAssertEqual(output.reasoningTokens, 4)
     }
 
     func testWithoutAVerifiedCatalogArtifactNothingIsReceiptEligible() async throws {

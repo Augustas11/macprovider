@@ -618,23 +618,28 @@ struct ShardStreamingText {
         detokenizer.append(token: token)
         guard let piece = detokenizer.next() else { return Released() }
         var released = Released()
-        var text = stopFilter.stripping(from: piece)
+        var text: String
         if inReasoning {
-            reasoningHeld += text
+            // `</think>` is found in the raw detokenized text: a tokenizer may
+            // mark it special, and the special-token filter would otherwise
+            // remove it before it is seen. Each side is filtered after the split.
+            reasoningHeld += piece
             guard let close = reasoningHeld.range(of: ReasoningOutput.closeTag) else {
                 // Hold back a suffix that could still become `</think>`.
                 let tag = ReasoningOutput.closeTag
                 let keep = stride(from: min(tag.count - 1, reasoningHeld.count), through: 1, by: -1)
                     .first { reasoningHeld.hasSuffix(String(tag.prefix($0))) } ?? 0
                 let cut = reasoningHeld.index(reasoningHeld.endIndex, offsetBy: -keep)
-                released.reasoning = String(reasoningHeld[..<cut])
+                released.reasoning = stopFilter.stripping(from: String(reasoningHeld[..<cut]))
                 reasoningHeld = String(reasoningHeld[cut...])
                 return released
             }
-            released.reasoning = String(reasoningHeld[..<close.lowerBound])
-            text = String(reasoningHeld[close.upperBound...])
+            released.reasoning = stopFilter.stripping(from: String(reasoningHeld[..<close.lowerBound]))
+            text = stopFilter.stripping(from: String(reasoningHeld[close.upperBound...]))
             reasoningHeld = ""
             inReasoning = false
+        } else {
+            text = stopFilter.stripping(from: piece)
         }
         if !answerStarted {
             text = String(text.drop(while: { $0.isWhitespace }))
@@ -667,6 +672,6 @@ struct ShardStreamingText {
             reasoningHeld = ""
         }
         guard !stopped else { return Released() }
-        return Released(reasoning: reasoningHeld, content: held)
+        return Released(reasoning: stopFilter.stripping(from: reasoningHeld), content: held)
     }
 }
