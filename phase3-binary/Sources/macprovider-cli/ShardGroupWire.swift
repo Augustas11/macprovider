@@ -414,15 +414,70 @@ enum ShardGroupWire {
         }
     }
 
+    /// The exact key set of each coordinator answer (SPEC-051-R029).
+    private static let resultKeys: Set<String> = ["type", "version", "group_provider_id", "group_epoch", "accepted", "reason"]
+    private static let statusKeys: Set<String> = ["type", "version", "group_provider_id", "group_epoch", "available", "reason"]
+
+    /// SPEC-051-R029 strict parsing of a coordinator answer: exactly the
+    /// message's keys, none repeated, integers within [0, 2^53 - 1].
     static func decodeResult(_ data: Data) -> Result? {
-        guard let result = try? JSONDecoder().decode(Result.self, from: data), result.version == version else { return nil }
+        guard let keys = flatObjectKeys(data), Set(keys).count == keys.count,
+              let result = try? JSONDecoder().decode(Result.self, from: data), result.version == version,
+              result.groupEpoch <= 9_007_199_254_740_991
+        else { return nil }
         switch result.type {
         case "shard_group_register_result", "shard_member_hello_result":
-            return result.accepted == nil ? nil : result
+            return result.accepted == nil || Set(keys) != resultKeys ? nil : result
         case "shard_group_status":
-            return result.available == nil ? nil : result
+            return result.available == nil || Set(keys) != statusKeys ? nil : result
         default:
             return nil
+        }
+    }
+
+    /// The top-level keys of a flat JSON object, in order and with repeats; nil
+    /// for anything else (a nested value, malformed text). Every group answer
+    /// is flat: string, number and boolean members only.
+    static func flatObjectKeys(_ data: Data) -> [String]? {
+        let bytes = [UInt8](data)
+        var i = 0
+        func skipSpace() { while i < bytes.count, [0x20, 0x09, 0x0A, 0x0D].contains(bytes[i]) { i += 1 } }
+        func readString() -> String? {
+            guard i < bytes.count, bytes[i] == 0x22 else { return nil }
+            let start = i
+            i += 1
+            while i < bytes.count, bytes[i] != 0x22 { i += bytes[i] == 0x5C ? 2 : 1 }
+            guard i < bytes.count else { return nil }
+            i += 1
+            return (try? JSONDecoder().decode(String.self, from: Data(bytes[start..<i])))
+        }
+        skipSpace()
+        guard i < bytes.count, bytes[i] == 0x7B else { return nil }
+        i += 1
+        var keys = [String]()
+        skipSpace()
+        if i < bytes.count, bytes[i] == 0x7D { i += 1; skipSpace(); return i == bytes.count ? keys : nil }
+        while true {
+            skipSpace()
+            guard let key = readString() else { return nil }
+            keys.append(key)
+            skipSpace()
+            guard i < bytes.count, bytes[i] == 0x3A else { return nil }
+            i += 1
+            skipSpace()
+            guard i < bytes.count, bytes[i] != 0x7B, bytes[i] != 0x5B else { return nil }
+            if bytes[i] == 0x22 {
+                guard readString() != nil else { return nil }
+            } else {
+                while i < bytes.count, ![0x2C, 0x7D, 0x20, 0x09, 0x0A, 0x0D].contains(bytes[i]) { i += 1 }
+            }
+            skipSpace()
+            guard i < bytes.count else { return nil }
+            if bytes[i] == 0x2C { i += 1; continue }
+            guard bytes[i] == 0x7D else { return nil }
+            i += 1
+            skipSpace()
+            return i == bytes.count ? keys : nil
         }
     }
 }

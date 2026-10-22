@@ -665,6 +665,19 @@ final class ShardGroupWireTests: XCTestCase {
         let other = InferenceRelay.errorEndFrame(requestID: "r", error: ShardMemberRuntime.notRoutable, chunksSent: 0)
         XCTAssertEqual(other["status"] as? String, "error_internal", "a member's refusal is an ordinary provider error")
     }
+
+    /// R3-C05 / R3-A4: coordinator answers are parsed strictly (SPEC-051-R029).
+    func testCoordinatorAnswersAreParsedStrictly() {
+        func decode(_ text: String) -> ShardGroupWire.Result? { ShardGroupWire.decodeResult(Data(text.utf8)) }
+        XCTAssertNotNil(decode(#"{"type":"shard_group_register_result","version":1,"group_provider_id":"h","group_epoch":3,"accepted":true,"reason":""}"#))
+        XCTAssertNotNil(decode(#"{"type":"shard_group_status","version":1,"group_provider_id":"h","group_epoch":3,"available":false,"reason":"member_unhealthy"}"#))
+        XCTAssertNil(decode(#"{"type":"shard_group_status","version":1,"group_provider_id":"h","group_epoch":3,"available":true,"reason":"","extra":1}"#), "unknown key")
+        XCTAssertNil(decode(#"{"type":"shard_group_status","version":1,"group_provider_id":"h","group_epoch":3,"available":true,"available":false,"reason":""}"#), "duplicate key")
+        XCTAssertNil(decode(#"{"type":"shard_group_status","version":1,"group_provider_id":"h","group_epoch":3,"available":true,"accepted":true,"reason":""}"#), "the other answer's boolean")
+        XCTAssertNil(decode(#"{"type":"shard_member_hello_result","version":1,"group_provider_id":"h","group_epoch":9007199254740992,"accepted":true,"reason":""}"#), "epoch above 2^53 - 1")
+        XCTAssertNil(decode(#"{"type":"shard_member_hello_result","version":1,"group_provider_id":"h","group_epoch":3,"accepted":true}"#), "missing reason")
+        XCTAssertNil(decode(#"{"type":"shard_group_status","version":1,"group_provider_id":{"x":1},"group_epoch":3,"available":true,"reason":""}"#), "nested value")
+    }
 }
 
 final class ShardTestLinksBox: @unchecked Sendable {
@@ -706,3 +719,4 @@ final class ShardTestEpochLog: @unchecked Sendable {
         return epochs
     }
 }
+
