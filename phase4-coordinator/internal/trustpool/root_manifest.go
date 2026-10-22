@@ -305,7 +305,7 @@ func validateCandidatePolicyCoreClaims(core poolmanifest.PolicyCore) error {
 	}
 	// SPEC-042-R001 0.0.32: the v2 acceptance rules (closed runtime
 	// vocabulary, enforce for a non-empty allowlist, no unknown extension).
-	if err := core.ValidateAcceptance(); err != nil {
+	if err := core.ValidateFullAcceptance(); err != nil {
 		// #1816 F4: an R015/R016 extension failure keeps its closed code.
 		if rejection := poolModelRejection(err); rejection != nil {
 			return fmt.Errorf("%w: %w", errManifestSnapshot, rejection)

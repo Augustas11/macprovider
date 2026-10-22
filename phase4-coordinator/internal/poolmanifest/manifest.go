@@ -127,7 +127,9 @@ type PolicyCore struct {
 	RuntimeAllowlist []string
 	// Extensions is the reserved, versioned v2 extension field. The only
 	// implemented ids are pool_model_entries/v1 and pool_attested_members/v1
-	// (SPEC-042-R015/R016); every other id is rejected at acceptance.
+	// (SPEC-042-R015/R016), checked by ValidateAcceptance, and
+	// pool_shard_groups/v1 (SPEC-051-R028), which ValidateFullAcceptance adds;
+	// every other id is rejected at acceptance.
 	Extensions []PolicyExtension
 }
 

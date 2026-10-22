@@ -101,3 +101,87 @@ func TestPolicyAndStatusEnumeratePoolModels(t *testing.T) {
 		})
 	}
 }
+
+// SPEC-051-R028/R030: a core carrying pool_shard_groups/v1 projects the group
+// authorizations into the routeable snapshot and discloses multi-Mac serving
+// on pool_policy.json and pool_status.json without naming a provider; a core
+// without it carries neither.
+func TestShardGroupAuthorizationProjectionAndDisclosure(t *testing.T) {
+	t.Parallel()
+	for _, withGroups := range []bool{true, false} {
+		withGroups := withGroups
+		t.Run(map[bool]string{true: "with shard groups", false: "without"}[withGroups], func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			store, err := trustpool.NewStore(openTrustPoolDB(t), trustpool.WithPoolModelAcceptance(acceptAllPoolModels))
+			if err != nil {
+				t.Fatalf("NewStore: %v", err)
+			}
+			ts := time.Unix(1800020400, 0).UTC()
+			root := newRootFixture(t)
+			native := "pool/" + root.poolID + "/creator-mlx"
+			mutate := func(core *poolmanifest.PolicyCore) {
+				core.SettlementMode = "enforce"
+				withPoolModels(root.poolID, nil)(core)
+				if withGroups {
+					if err := core.SetPoolShardGroups([]poolmanifest.PoolShardGroup{{GroupProviderID: "provider-a", PoolModelID: native, MaxMembers: 3}}); err != nil {
+						panic(err)
+					}
+				}
+			}
+			approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
+			for _, e := range []trustpool.DurableEvent{
+				ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+					e.CreatorAccountID = "creator-a"
+					e.ApprovalRecordID = "approval-v1"
+				}),
+				signedRootRegistrationForIssue(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", ts.Add(time.Hour)), root),
+				signedManifestWithPolicyCoreMutation(t, "op-manifest", ts.Add(2*time.Second), root.poolID, 1, root, mutate),
+				ev("op-member", ts.Add(3*time.Second), trustpool.EventMemberAdmitted, root.poolID, func(e *trustpool.DurableEvent) { e.ProviderID = "provider-a" }),
+				ev("op-buyer", ts.Add(4*time.Second), trustpool.EventBuyerAuthorized, root.poolID, func(e *trustpool.DurableEvent) { e.BuyerAccountID = "acct-a" }),
+			} {
+				if _, _, _, err := store.AppendValidatedEvent(ctx, e); err != nil {
+					t.Fatalf("AppendValidatedEvent(%s): %v", e.OperationID, err)
+				}
+			}
+			state, err := store.Reconstruct(ctx)
+			if err != nil {
+				t.Fatalf("Reconstruct: %v", err)
+			}
+			registry, err := state.BuildRegistry()
+			if err != nil {
+				t.Fatalf("BuildRegistry: %v", err)
+			}
+			snap := registry.Snapshot(root.poolID)
+			at := time.Unix(1800020500, 0).UTC()
+			policy, found, err := trustpool.BuildPolicyDocument(ctx, store, registry, root.poolID, "acct-a", at)
+			if err != nil || !found {
+				t.Fatalf("BuildPolicyDocument found=%v err=%v", found, err)
+			}
+			status, found, err := trustpool.BuildStatusDocument(ctx, store, registry, root.poolID, "acct-a", at)
+			if err != nil || !found {
+				t.Fatalf("BuildStatusDocument found=%v err=%v", found, err)
+			}
+			raw, _ := json.Marshal(policy)
+			if !withGroups {
+				if len(snap.ShardGroups) != 0 || policy.Policy.MultiMacServing != nil || status.Policy.MultiMacServing != nil || strings.Contains(string(raw), "multi_mac_serving") {
+					t.Fatalf("core without the extension disclosed shard groups: %+v %s", snap.ShardGroups, raw)
+				}
+				return
+			}
+			if len(snap.ShardGroups) != 1 || snap.ShardGroups[0].GroupProviderID != "provider-a" || snap.ShardGroups[0].MaxMembers != 3 {
+				t.Fatalf("snapshot shard groups = %+v", snap.ShardGroups)
+			}
+			for name, got := range map[string]*trustpool.PolicyMultiMacServing{"policy": policy.Policy.MultiMacServing, "status": status.Policy.MultiMacServing} {
+				if got == nil || !got.Enabled || len(got.PoolModelIDs) != 1 || got.PoolModelIDs[0] != native || got.MaxMembers != 3 ||
+					!strings.Contains(got.DisclosureText, "up to 3 Macs owned by one operator") || !strings.Contains(got.DisclosureText, "full prompt and output") {
+					t.Fatalf("%s multi_mac_serving = %+v", name, got)
+				}
+			}
+			disclosure, _ := json.Marshal(policy.Policy.MultiMacServing)
+			if strings.Contains(string(disclosure), "provider-a") {
+				t.Fatalf("disclosure names a provider identity: %s", disclosure)
+			}
+		})
+	}
+}

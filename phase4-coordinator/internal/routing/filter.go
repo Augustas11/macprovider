@@ -99,6 +99,13 @@ const (
 	// routing telemetry so operators can tell a catalog gap from a key gap.
 	// Appended last so existing reason values do not shift.
 	ReasonCatalogMaterialMissing
+	// ReasonShardGroupNotAuthorized — the provider is a SPEC-051 group head
+	// session and the request is not a pool route whose active core
+	// authorizes its available group for the bound pool model, or a group
+	// member fails the pool's membership or binary floor (SPEC-051-R016,
+	// SPEC-051-R028). The buyer applies this gate before EligibleCandidates.
+	// Appended last so existing reason values do not shift.
+	ReasonShardGroupNotAuthorized
 )
 
 // EligibilityChecker is the cross-package boundary between the

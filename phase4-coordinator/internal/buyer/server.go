@@ -4225,6 +4225,10 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 					chunks = nil
 				}
 			}
+			if shardGroupFailedBeforeFirstToken(provider, end, body.Len() == 0) {
+				markProviderDone()
+				return wsForwardProviderDisconnected, shardGroupFailedAttempt()
+			}
 			if end.Status != "complete" {
 				status := wsEndHTTPStatus(end.Status)
 				if end.Status == "error_queue_full" {
@@ -4682,6 +4686,10 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 					return result, progressAttempt("", faultFlag)
 				}
 			}
+			if !committed && shardGroupFailedBeforeFirstToken(provider, end, true) {
+				markProviderDone()
+				return wsForwardProviderDisconnected, shardGroupFailedAttempt()
+			}
 			if !committed && end.Status != "complete" && end.Status != "cancelled" {
 				status := wsEndHTTPStatus(end.Status)
 				if end.Status == "error_queue_full" {
@@ -4936,6 +4944,11 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 						break drainGuaranteedTail
 					}
 				}
+			}
+			if shardGroupFailedBeforeFirstToken(provider, end, raw.Len() == 0) {
+				// Nothing of a buffered stream reached the buyer.
+				markProviderDone()
+				return wsForwardProviderDisconnected, shardGroupFailedAttempt()
 			}
 			if end.Status == "error_context_exceeded" {
 				// Nothing of a buffered stream reached the buyer; the
@@ -8255,9 +8268,19 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		}
 		trustedInternalRouting = true
 	}
+	// SPEC-051-R028: the shard group route view of this request, shared by
+	// the eligibility filter and both pin paths below (a pin never bypasses
+	// the shard group gate).
+	var shardRoute shardGroupRoute
+	if poolActive {
+		shardRoute = shardGroupRoute{poolID: req.poolID, members: poolMembers, minBinaryVersion: poolMin, groups: poolSnap.ShardGroups}
+	}
 	if session := headers.Get("X-MacProvider-Session"); session != "" {
 		for _, p := range providers {
 			if p.AssignedID == session {
+				if !shardRoute.routable(p) {
+					return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "shard_group_unavailable", message: "Pinned session provider is a shard group head not authorized for this route"}
+				}
 				if poolActive && !poolMembers[p.ProviderID] {
 					// SPEC-042 R005: the pinned/self-route path bypasses the
 					// eligibility filter, so re-apply pool membership here or
@@ -8306,6 +8329,9 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 	if providerID := headers.Get("X-MacProvider-Provider"); providerID != "" {
 		for _, p := range providers {
 			if p.ProviderID == providerID {
+				if !shardRoute.routable(p) {
+					return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "shard_group_unavailable", message: "Pinned provider is a shard group head not authorized for this route"}
+				}
 				if poolActive && !poolMembers[p.ProviderID] {
 					return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_no_eligible_member", message: "Pinned provider is not a member of the selected pool"}
 				}
@@ -8435,6 +8461,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 			manifestCoreDigest:  poolSnap.ManifestCoreDigest,
 			poolModel:           poolModelEntry,
 		}
+		checker.shardGroups = shardRoute
 		checker.poolView.priorManifestVersion, checker.poolView.priorManifestCoreDigest = poolModelPriorGeneration(poolSnap, poolModelEntry)
 		checker.routeAdmissionCtx = withPoolRouteView(admissionCtx, checker.poolView)
 	}
@@ -9241,6 +9268,8 @@ func routeKeyedFilterCounts(counts map[routing.RejectionReason]int) map[string]i
 			key = "byom_non_settlement"
 		case routing.ReasonProviderThroughputFloor:
 			key = "provider_throughput_floor"
+		case routing.ReasonShardGroupNotAuthorized:
+			key = "shard_group_not_authorized" // SPEC-051-R016/R028
 		default:
 			key = "other"
 		}
@@ -10223,6 +10252,9 @@ type eligibilityCtx struct {
 	// poolView carries the SPEC-042-R004 external-runtime predicate inputs of
 	// the same snapshot. Zero for global requests.
 	poolView poolRouteView
+	// shardGroups carries the SPEC-051-R028 inputs of the same snapshot. Zero
+	// for global requests, which no shard group head may serve.
+	shardGroups shardGroupRoute
 
 	legacyModelAdmissionRouteGenerations map[string]uint64
 
@@ -10512,7 +10544,11 @@ func (c *eligibilityCtx) RouteSnapshotRejection(p pool.Provider) routing.Rejecti
 // ReasonCatalogMaterialMissing. Eligibility is untouched.
 func (s *Server) eligibleCandidates(providers []pool.Provider, excluded routing.Excluded, checker *eligibilityCtx) routing.FilterResult {
 	checker.routeSnapshotRejections = map[string]routing.RejectionReason{}
+	providers, shardRejected := checker.shardGroups.filter(providers, excluded)
 	result := routing.EligibleCandidates(providers, excluded, pool.Provider.SortKey, checker)
+	if shardRejected > 0 {
+		result.Counts[routing.ReasonShardGroupNotAuthorized] += shardRejected
+	}
 	rejections := checker.routeSnapshotRejections
 	checker.routeSnapshotRejections = nil
 	for _, reason := range rejections {

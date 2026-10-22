@@ -2,7 +2,9 @@ package trustpool
 
 import (
 	"context"
+	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -78,6 +80,47 @@ type PolicyPolicy struct {
 	// PoolModels enumerates the active core's SPEC-042-R015 entries
 	// (SPEC-043-R014); [] when the core carries none.
 	PoolModels []PolicyPoolModel `json:"pool_models"`
+	// MultiMacServing is the SPEC-051-R030 disclosure, present only while
+	// the active core carries pool_shard_groups/v1.
+	MultiMacServing *PolicyMultiMacServing `json:"multi_mac_serving,omitempty"`
+}
+
+// PolicyMultiMacServing is the SPEC-051-R030 multi-Mac serving disclosure. It
+// names pool models and a member bound, never a provider identity.
+type PolicyMultiMacServing struct {
+	Enabled        bool     `json:"enabled"`
+	PoolModelIDs   []string `json:"pool_model_ids"`
+	MaxMembers     uint64   `json:"max_members"`
+	DisclosureText string   `json:"disclosure_text"`
+}
+
+// policyMultiMacServing builds the SPEC-051-R030 disclosure from the active
+// core's shard group authorizations; nil when the core authorizes none.
+func policyMultiMacServing(p *ReconstructedPoolState) *PolicyMultiMacServing {
+	groups := policyShardGroups(p)
+	if len(groups) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(groups))
+	ids := make([]string, 0, len(groups))
+	var maxMembers uint64
+	for _, g := range groups {
+		if !seen[g.PoolModelID] {
+			seen[g.PoolModelID] = true
+			ids = append(ids, g.PoolModelID)
+		}
+		if g.MaxMembers > maxMembers {
+			maxMembers = g.MaxMembers
+		}
+	}
+	sort.Strings(ids)
+	return &PolicyMultiMacServing{
+		Enabled:      true,
+		PoolModelIDs: ids,
+		MaxMembers:   maxMembers,
+		DisclosureText: fmt.Sprintf("Requests for these models may be served by a group of up to %d Macs owned by one operator on one local network. "+
+			"Every Mac in the group processes the full prompt and output.", maxMembers),
+	}
 }
 
 // PoolModelDisclosureText is the SPEC-043-R014 / SPEC-006-R018 label of every
@@ -297,6 +340,7 @@ func buildPolicyDocumentForPool(p *ReconstructedPoolState, approval CreatorAppro
 			RetentionPolicyDisputeAuditTrail: retention.DisputeAuditTrailMinRetention,
 			SplitExecutionStatus:             policySplitExecutionStatus(p),
 			PoolModels:                       policyPoolModels(p),
+			MultiMacServing:                  policyMultiMacServing(p),
 		},
 		RootIssuer:      root,
 		Predicates:      policyPredicates(p, publiclyAnnounced),

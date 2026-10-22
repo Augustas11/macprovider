@@ -29,6 +29,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/providerevents"
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
 	"github.com/augstar/macprovider-coordinator/internal/relayblind"
+	"github.com/augstar/macprovider-coordinator/internal/shardgroup"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	"github.com/augstar/macprovider-coordinator/internal/versionfloor"
 	gobwas "github.com/gobwas/ws"
@@ -97,6 +98,9 @@ type Server struct {
 	// trust-pool registry and the configured pricing bounds), nil when
 	// trusted pools are off.
 	poolModels atomic.Pointer[poolModelWiring]
+	// shardGroups is the SPEC-051 group registry wiring, nil when shard
+	// groups are not wired (group messages are then ignored).
+	shardGroups *shardGroupWiring
 	// poolSweepKick wakes RunPoolManifestBindingSweep the moment a new
 	// accepted generation becomes active (#1816 F3), not only on its timer.
 	poolSweepKickOnce sync.Once
@@ -3034,6 +3038,8 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	entry.CatalogMaterialHoldV1 = initial.Tier2Capabilities.CatalogMaterialHoldV1
 	entry.RelayBlindSettlementReceiptV1 = initial.Tier2Capabilities.RelayBlindSettlementReceiptV1
 	entry.ComputeScoreV1 = initial.Tier2Capabilities.ComputeScoreV1
+	entry.ShardGroupHeadV1 = initial.Tier2Capabilities.ShardGroupHeadV1
+	entry.ShardMemberV1 = initial.Tier2Capabilities.ShardMemberV1
 	entry.AttestationStatus = attestationStatus
 	if attestResult.SEResult != nil {
 		entry.SEPublicKey = append([]byte(nil), attestResult.SEResult.SEPublicKey...)
@@ -5016,6 +5022,12 @@ func (s *Server) handleMessage(conn net.Conn, providerID, assignedID string, pay
 		s.handleLosslessnessProbeResult(providerID, assignedID, payload)
 	case computeScoreResultType:
 		s.handleComputeScoreResult(providerID, assignedID, payload)
+	case shardgroup.TypeRegister:
+		s.handleShardGroupRegister(providerID, assignedID, payload)
+	case shardgroup.TypeHeartbeat:
+		s.handleShardGroupHeartbeat(providerID, assignedID, payload)
+	case shardgroup.TypeMemberHello:
+		s.handleShardMemberHello(providerID, assignedID, payload)
 	default:
 		// SPEC-002 v1.5.1 R-2 / issue #197 R5 security: envelope.Type
 		// is provider-controlled and reaches structured logs only on
@@ -7153,6 +7165,9 @@ func (s *Server) markDegradedForWarmup(providerID, assignedID string) {
 }
 
 func (s *Server) handleDisconnect(providerID, assignedID string) {
+	// SPEC-051-R015: a head or member session loss makes its group
+	// unavailable before the next reservation.
+	defer s.shardGroupSessionChanged(providerID)
 	s.dropPrivacyPosture(providerID, assignedID)
 	s.clearModelAdmissionBindingOnDisconnect(providerID, assignedID)
 	s.clearWarmupGate(providerID, assignedID)

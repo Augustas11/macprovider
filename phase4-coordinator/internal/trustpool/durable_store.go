@@ -3014,8 +3014,11 @@ type ReconstructedPoolState struct {
 	// ManifestModelEntries and ManifestAttestedMembers project the accepted
 	// core's SPEC-042-R015/R016 pool extensions (pool_model_entries/v1,
 	// pool_attested_members/v1); empty when the core carries neither.
-	ManifestModelEntries         []poolmanifest.PoolModelEntry
-	ManifestAttestedMembers      []poolmanifest.AttestedMember
+	ManifestModelEntries    []poolmanifest.PoolModelEntry
+	ManifestAttestedMembers []poolmanifest.AttestedMember
+	// ManifestShardGroups projects the accepted core's SPEC-051-R028
+	// pool_shard_groups/v1 extension; empty when the core carries none.
+	ManifestShardGroups          []poolmanifest.PoolShardGroup
 	ManifestRetentionPolicyID    string
 	ManifestSplitExecutionStatus string
 	// ManifestPolicies is every accepted policy core's routing projection with
@@ -3238,6 +3241,10 @@ func (s *ReconstructedState) applyEvent(index int, e DurableEvent) (*Reconstruct
 		if err != nil {
 			return nil, fmt.Errorf("%w: event %d pool_attested_members invalid for pool %q: %v", ErrMalformedDurableEvent, index, e.PoolID, err)
 		}
+		shardGroups, err := core.PoolShardGroups()
+		if err != nil {
+			return nil, fmt.Errorf("%w: event %d pool_shard_groups invalid for pool %q: %v", ErrMalformedDurableEvent, index, e.PoolID, err)
+		}
 		termsDigest, err := core.PolicyTermsDigest()
 		if err != nil {
 			return nil, fmt.Errorf("%w: event %d policy terms digest for pool %q: %v", ErrMalformedDurableEvent, index, e.PoolID, err)
@@ -3254,6 +3261,7 @@ func (s *ReconstructedState) applyEvent(index int, e DurableEvent) (*Reconstruct
 		p.ManifestRuntimeAllowlist = append([]string(nil), core.RuntimeAllowlist...)
 		p.ManifestModelEntries = modelEntries
 		p.ManifestAttestedMembers = attestedMembers
+		p.ManifestShardGroups = shardGroups
 		p.ManifestRetentionPolicyID = core.RetentionPolicyID
 		p.ManifestSplitExecutionStatus = core.SplitExecutionStatus
 		p.ManifestPolicies = append(p.ManifestPolicies, manifestPolicyWindow{
@@ -3270,6 +3278,7 @@ func (s *ReconstructedState) applyEvent(index int, e DurableEvent) (*Reconstruct
 			RuntimeAllowlist:     append([]string(nil), core.RuntimeAllowlist...),
 			ModelEntries:         poolmanifest.ClonePoolModelEntries(modelEntries),
 			AttestedMembers:      poolmanifest.CloneAttestedMembers(attestedMembers),
+			ShardGroups:          poolmanifest.ClonePoolShardGroups(shardGroups),
 			RetentionPolicyID:    core.RetentionPolicyID,
 			SplitExecutionStatus: core.SplitExecutionStatus,
 		})
@@ -3806,6 +3815,7 @@ type manifestPolicyWindow struct {
 	RuntimeAllowlist     []string
 	ModelEntries         []poolmanifest.PoolModelEntry
 	AttestedMembers      []poolmanifest.AttestedMember
+	ShardGroups          []poolmanifest.PoolShardGroup
 	RetentionPolicyID    string
 	SplitExecutionStatus string
 }
@@ -3842,6 +3852,7 @@ func (p *ReconstructedPoolState) activePolicyView(at time.Time) (*ReconstructedP
 		view.ManifestRuntimeAllowlist = w.RuntimeAllowlist
 		view.ManifestModelEntries = w.ModelEntries
 		view.ManifestAttestedMembers = w.AttestedMembers
+		view.ManifestShardGroups = w.ShardGroups
 		view.ManifestRetentionPolicyID = w.RetentionPolicyID
 		view.ManifestSplitExecutionStatus = w.SplitExecutionStatus
 		var until time.Time
@@ -4004,6 +4015,7 @@ func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 			RuntimeAllowlist:          policyRuntimeAllowlist(p),
 			ModelEntries:              policyModelEntries(p),
 			AttestedMembers:           policyAttestedMembers(p),
+			ShardGroups:               policyShardGroups(p),
 			DelegatedMembers:          delegatedMembers,
 			SettlementMode:            routeablePoolSettlementMode(p.ManifestSettlementMode),
 			Routeable:                 routeable,

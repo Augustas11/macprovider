@@ -283,7 +283,9 @@ The head MUST register each group epoch with the coordinator as one group
 record signed by the group provider identity's SPEC-015 receipt key, sent in
 `shard_group_register` on the head session (SPEC-051-R029). The coordinator MUST store each
 accepted record append-only and refuse any record whose `group_epoch` is not
-strictly greater than the last accepted epoch for that group. The record MUST
+strictly greater than the last accepted epoch for that group. A re-send of the
+latest accepted record with identical JCS bytes (a reconnecting head) is
+acknowledged without a new row; any other record at that epoch is refused. The record MUST
 carry exactly these fields:
 
 | Field | Meaning |
@@ -523,7 +525,8 @@ sent downstream. The coordinator MUST verify every signature and that, for
 each pair of adjacent stages, `out_digest` of stage `i` equals `in_digest` of
 stage `i+1`, and that the last stage's token `out_digest` equals the head's
 token `in_digest`. A failed check MUST attribute the fault to the member at
-the first broken link, MUST be recorded against that member device identity,
+the first broken link (the downstream member, whose `in_digest` disagrees; the
+head for the token return link), MUST be recorded against that member device identity,
 and MUST make the request's settlement evidence fail SPEC-022 verification
 for that attempt. When a spare replaced a member mid-request
 (SPEC-051-R022), the attestation MUST carry both members' sub-receipts with

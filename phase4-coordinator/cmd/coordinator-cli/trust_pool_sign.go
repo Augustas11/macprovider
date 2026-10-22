@@ -519,7 +519,7 @@ func trustPoolAdminSignManifest(args []string, stdout io.Writer) error {
 		core.ManifestVersion = prev.ManifestVersion + 1
 		core.PrevManifestCoreHash = prevDigest
 	}
-	if err := core.ValidateAcceptance(); err != nil {
+	if err := core.ValidateFullAcceptance(); err != nil {
 		return fmt.Errorf("policy core: %w", err)
 	}
 	digest, err := core.ManifestCoreDigest()

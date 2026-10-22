@@ -2089,6 +2089,7 @@ func (s *Server) handleInferenceEnd(providerID, assignedID string, payload []byt
 		return
 	}
 	end = relayBlindTerminalReceipts(active.relayBlind, end)
+	end = s.applyShardGroupAttestation(providerID, assignedID, end)
 	active.done <- end
 	close(active.chunks)
 	s.closeProviderForTier2RekeyIfDrained(session, providerID, assignedID, end.RequestID)
