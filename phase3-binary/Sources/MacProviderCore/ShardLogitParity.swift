@@ -71,7 +71,7 @@ public enum ShardLogitSummaryCodec {
         return (Int32(bitPattern: words[0]), summary)
     }
 
-    static func validate(_ summary: ShardLogitSummary) throws {
+    public static func validate(_ summary: ShardLogitSummary) throws {
         let k = summary.topTokens.count
         guard (1...maxTopK).contains(k), summary.topLogprobs.count == k else { throw ShardLogitSummaryError.badTopK(k) }
         guard summary.logSumExp.isFinite, summary.topLogprobs.allSatisfy(\.isFinite) else {
@@ -143,6 +143,10 @@ public enum ShardLogitParity {
                 throw ShardLogitParityError.stepCount(sequence: sequence, reference: expected.count, sharded: actual.count)
             }
             for (step, (ref, got)) in zip(expected, actual).enumerated() {
+                // A summary that did not come through the codec (a reference file)
+                // is checked here, so a malformed one is an error, not a trap.
+                try ShardLogitSummaryCodec.validate(ref)
+                try ShardLogitSummaryCodec.validate(got)
                 steps += 1
                 minMargin = min(minMargin, Double(ref.margin))
                 if got.top1 == ref.top1 {

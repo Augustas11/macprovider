@@ -9,7 +9,7 @@ import Foundation
 // Heartbeat payload, little-endian:
 //
 //   off size field
-//     0    1 kind (1 ping, 2 echo)
+//     0    1 kind (1 ping, 2 echo, 3 queued echo)
 //     1    8 nonce
 //     9    1 link entry count n (0 for an echo, at most `maxEntries`)
 //    10 10*n entries: from stage u16, to stage u16, rtt p99 us u32, samples u16
@@ -33,6 +33,10 @@ public struct ShardHeartbeatPayload: Equatable, Sendable {
     public enum Kind: UInt8, Sendable {
         case ping = 1
         case echo = 2
+        /// An echo that waited behind data the answering end was sending, or a ping
+        /// that waited behind data its reader had not taken yet: its round trip
+        /// measures queueing, not the link, and is not sampled (SPEC-051-R007).
+        case queuedEcho = 3
     }
 
     public static let maxEntries = 16

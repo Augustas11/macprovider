@@ -174,6 +174,14 @@ public final class ShardStageLink: @unchecked Sendable {
     private var inboxBytes = 0
     private var readerFailure: Error?
     private var readerStarted = false
+    /// The reader held back on a full inbox since it last answered a ping, so a
+    /// ping it reads now may have waited behind data (guarded by `inbox`).
+    private var readerHeldBack = false
+
+    /// SEC-07: queued frames are bounded by count as well as bytes, and each
+    /// frame counts its header and bookkeeping, not only its payload.
+    static let maxQueuedFrames = 1024
+    static let queuedFrameOverhead = 256
 
     public static func connect(
         host: String,
@@ -295,6 +303,29 @@ public final class ShardStageLink: @unchecked Sendable {
     public func send(_ frame: ShardStageFrame) throws -> UInt64 {
         sendLock.lock()
         defer { sendLock.unlock() }
+        return try sendLocked(frame)
+    }
+
+    /// Send a heartbeat built for whether it queues behind data: data this end is
+    /// still writing or has not had acknowledged (SPEC-051-R007 round trips measure
+    /// the link, not the data ahead of the heartbeat on the same stream).
+    private func sendHeartbeat(_ build: (_ queued: Bool) -> ShardStageFrame) throws {
+        let contended = !sendLock.try()
+        if contended { sendLock.lock() }
+        defer { sendLock.unlock() }
+        try sendLocked(build(contended || unsentBytes() != 0))
+    }
+
+    /// Bytes written to the socket that the peer has not acknowledged yet.
+    private func unsentBytes() -> Int32 {
+        var pending: Int32 = 0
+        var length = socklen_t(MemoryLayout<Int32>.size)
+        guard getsockopt(fd, SOL_SOCKET, SO_NWRITE, &pending, &length) == 0 else { return 1 }
+        return pending
+    }
+
+    @discardableResult
+    private func sendLocked(_ frame: ShardStageFrame) throws -> UInt64 {
         guard !closedFlag else { throw ShardLinkError.closed }
         stateLock.lock()
         let ready = protectionReady
@@ -352,9 +383,12 @@ public final class ShardStageLink: @unchecked Sendable {
         inbox.lock()
         defer { inbox.unlock() }
         while true {
+            // A link this end closed hands out nothing it still had queued
+            // (SPEC-051-R014: the epoch's work stops at once).
+            if closedFlag { throw ShardLinkError.closed }
             if !inboxFrames.isEmpty {
                 let frame = inboxFrames.removeFirst()
-                inboxBytes -= frame.payload.count
+                inboxBytes -= Self.queuedBytes(frame)
                 inbox.broadcast()
                 return frame
             }
@@ -519,6 +553,8 @@ public final class ShardStageLink: @unchecked Sendable {
         timer?.cancel()
         Darwin.shutdown(fd, SHUT_RDWR)
         inbox.lock()
+        inboxFrames = []
+        inboxBytes = 0
         inbox.broadcast()
         inbox.unlock()
     }
@@ -568,15 +604,18 @@ public final class ShardStageLink: @unchecked Sendable {
             self.stateLock.unlock()
             if skip { return }
             let payload = ShardHeartbeatPayload(kind: .ping, nonce: nonce, links: report?() ?? []).encode()
-            self.stateLock.lock()
-            self.pendingPings[nonce] = ShardSocketAddress.now()
-            // An echo that never came back is forgotten after 64 pings.
-            if nonce >= 64 { self.pendingPings = self.pendingPings.filter { $0.key > nonce - 64 } }
-            self.stateLock.unlock()
             // A failed heartbeat surfaces on the next caller send/receive; the timer
             // never traps or retries on its own.
-            _ = try? self.send(ShardStageFrame(
-                header: ShardStageFrameHeader(kind: .heartbeat, groupEpoch: self.configuration.groupEpoch), payload: payload))
+            try? self.sendHeartbeat { queued in
+                self.stateLock.lock()
+                // A ping queued behind this end's data is sent but not timed.
+                if !queued { self.pendingPings[nonce] = ShardSocketAddress.now() }
+                // An echo that never came back is forgotten after 64 pings.
+                if nonce >= 64 { self.pendingPings = self.pendingPings.filter { $0.key > nonce - 64 } }
+                self.stateLock.unlock()
+                return ShardStageFrame(
+                    header: ShardStageFrameHeader(kind: .heartbeat, groupEpoch: self.configuration.groupEpoch), payload: payload)
+            }
         }
         stateLock.lock()
         heartbeatTimer = timer
@@ -653,12 +692,22 @@ public final class ShardStageLink: @unchecked Sendable {
             let paused = heartbeatsPaused
             stateLock.unlock()
             guard !paused else { return }
-            _ = try? send(ShardStageFrame(
-                header: ShardStageFrameHeader(kind: .heartbeat, groupEpoch: configuration.groupEpoch),
-                payload: ShardHeartbeatPayload(kind: .echo, nonce: payload.nonce).encode()))
+            inbox.lock()
+            let heldBack = readerHeldBack
+            readerHeldBack = false
+            inbox.unlock()
+            try? sendHeartbeat { queued in
+                ShardStageFrame(
+                    header: ShardStageFrameHeader(kind: .heartbeat, groupEpoch: configuration.groupEpoch),
+                    payload: ShardHeartbeatPayload(kind: queued || heldBack ? .queuedEcho : .echo, nonce: payload.nonce).encode())
+            }
         case .echo:
             stateLock.lock()
             if let sent = pendingPings.removeValue(forKey: payload.nonce) { roundTrips.add(now - sent) }
+            stateLock.unlock()
+        case .queuedEcho:
+            stateLock.lock()
+            pendingPings[payload.nonce] = nil
             stateLock.unlock()
         }
     }
@@ -683,7 +732,10 @@ public final class ShardStageLink: @unchecked Sendable {
         // A backlog the owner has not taken yet holds further reads back (TCP pushes back on the peer).
         let cap = 2 * configuration.limits.payloadCap
         inbox.lock()
-        while inboxBytes > cap, !closedFlag { _ = inbox.wait(until: Date(timeIntervalSinceNow: 0.05)) }
+        while inboxBytes > cap || inboxFrames.count >= Self.maxQueuedFrames, !closedFlag {
+            readerHeldBack = true
+            _ = inbox.wait(until: Date(timeIntervalSinceNow: 0.05))
+        }
         inbox.unlock()
         let now = ShardSocketAddress.now()
         do {
@@ -694,7 +746,7 @@ public final class ShardStageLink: @unchecked Sendable {
             }
             inbox.lock()
             inboxFrames.append(frame)
-            inboxBytes += frame.payload.count
+            inboxBytes += Self.queuedBytes(frame)
             inbox.broadcast()
             inbox.unlock()
             return true
@@ -703,10 +755,26 @@ public final class ShardStageLink: @unchecked Sendable {
         } catch {
             inbox.lock()
             if readerFailure == nil { readerFailure = closedFlag ? ShardLinkError.closed : error }
+            // SPEC-051-R014: queued work of a failed link is not computed. The peer's
+            // last error report and abort (a session-end acknowledgement, sub-receipts)
+            // are still handed out before the failure.
+            inboxFrames.removeAll { $0.header.kind != .error && $0.header.kind != .abort }
+            inboxBytes = inboxFrames.reduce(0) { $0 + Self.queuedBytes($1) }
             inbox.broadcast()
             inbox.unlock()
             return false
         }
+    }
+
+    static func queuedBytes(_ frame: ShardStageFrame) -> Int {
+        frame.payload.count + queuedFrameOverhead + 4 * frame.header.shape.count
+    }
+
+    /// Numeric address of this end of the connection: the interface the
+    /// connection actually leaves by owns it (SPEC-051-R007).
+    public var localHost: String? {
+        guard let address = try? ShardSocketAddress.local(of: fd) else { return nil }
+        return address.numericHost
     }
 
     private func writeAll(_ data: Data) throws {
@@ -846,6 +914,18 @@ struct ShardSocketAddress {
         guard named == 0 else { return "unknown" }
         let hostText = String(cString: host)
         return hostText.contains(":") ? "[\(hostText)]:\(String(cString: service))" : "\(hostText):\(String(cString: service))"
+    }
+
+    /// The numeric host of this address, without the port.
+    var numericHost: String? {
+        var copy = storage
+        var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        let named = withUnsafePointer(to: &copy) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                getnameinfo($0, length, &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST)
+            }
+        }
+        return named == 0 ? String(cString: host) : nil
     }
 
     static func now() -> TimeInterval {
