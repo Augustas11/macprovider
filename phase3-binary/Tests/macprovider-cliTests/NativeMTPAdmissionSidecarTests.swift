@@ -1093,6 +1093,187 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         )
     }
 
+    // MARK: SPEC-048-R013 (0.1.51) decode-path admission
+
+    private static let decodePathMetallib = String(repeating: "d", count: 64)
+
+    private func decodePathContext(
+        _ base: NativeMTPAdmissionSidecar.RuntimeContext,
+        decodePathDigest: String = DecodePathIdentity.digest,
+        metallibSHA256: String? = NativeMTPAdmissionSidecarTests.decodePathMetallib,
+        upstreamMLXSwiftLMRevision: String? = nil,
+        hardwareChip: String? = nil,
+        ramGB: Int? = nil,
+        slotCount: Int? = nil,
+        revokedTupleSHA256: Set<String>? = []
+    ) -> NativeMTPAdmissionSidecar.RuntimeContext {
+        NativeMTPAdmissionSidecar.RuntimeContext(
+            modelID: base.modelID,
+            modelRevision: base.modelRevision,
+            upstreamMLXSwiftLMRevision: upstreamMLXSwiftLMRevision ?? base.upstreamMLXSwiftLMRevision,
+            hardwareChip: hardwareChip ?? base.hardwareChip,
+            ramGB: ramGB ?? base.ramGB,
+            osVersion: base.osVersion,
+            slotCount: slotCount ?? base.slotCount,
+            revokedTupleSHA256: revokedTupleSHA256,
+            decodePathDigest: decodePathDigest,
+            metallibSHA256: metallibSHA256
+        )
+    }
+
+    private func loadRelease(
+        _ fixture: ReleaseEnvelopeFixture,
+        context: NativeMTPAdmissionSidecar.RuntimeContext
+    ) throws -> NativeMTPAdmissionCapability {
+        try NativeMTPAdmissionSidecar.load(
+            sidecarData: fixture.sidecarData,
+            signatureData: fixture.signatureData,
+            snapshotRoot: fixture.base.snapshot,
+            context: context,
+            trustedKeyring: fixture.base.trustedKeyring,
+            resolvedArtifactAuthority: fixture.authority
+        )
+    }
+
+    /// A new signed CLI release with the same decode path keeps the admission:
+    /// the entry's source commit, build digest and CDHash name some other
+    /// build, and nothing about the running CLI's identity is consulted.
+    func testDecodePathEntryStaysValidForANewCLIWithTheSameDecodePath() throws {
+        let fixture = try makeReleaseEnvelopeFixture(entryEdit: { entry in
+            entry["decode_path_digest"] = DecodePathIdentity.digest
+            entry["metallib_sha256"] = Self.decodePathMetallib
+            entry["source_commit"] = String(repeating: "9", count: 40)
+            entry["reproducible_build_sha256"] = String(repeating: "8", count: 64)
+            entry["live_executable_cdhash"] = String(repeating: "7", count: 40)
+        })
+        defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+
+        let capability = try loadRelease(fixture, context: decodePathContext(fixture.context))
+        XCTAssertEqual(capability.modelID, fixture.context.modelID)
+        XCTAssertEqual(capability.spec023SourceCommit, String(repeating: "9", count: 40))
+        XCTAssertEqual(capability.spec023LiveExecutableCDHash, String(repeating: "7", count: 40))
+    }
+
+    /// A changed decode-path file changes the embedded digest; the signed
+    /// entry no longer matches and native MTP is refused (fail closed, no
+    /// model-keyed fallback). So does any other bound decode-path input.
+    func testDecodePathEntryRefusesAChangedDecodePath() throws {
+        let fixture = try makeReleaseEnvelopeFixture(entryEdit: { entry in
+            entry["decode_path_digest"] = DecodePathIdentity.digest
+            entry["metallib_sha256"] = Self.decodePathMetallib
+        })
+        defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+
+        let changed: [NativeMTPAdmissionSidecar.RuntimeContext] = [
+            decodePathContext(fixture.context, decodePathDigest: String(repeating: "e", count: 64)),
+            decodePathContext(fixture.context, metallibSHA256: String(repeating: "f", count: 64)),
+            decodePathContext(fixture.context, metallibSHA256: nil),
+            decodePathContext(fixture.context, upstreamMLXSwiftLMRevision: String(repeating: "f", count: 40)),
+            decodePathContext(fixture.context, hardwareChip: "M1 Max"),
+            decodePathContext(fixture.context, ramGB: 128),
+            decodePathContext(fixture.context, slotCount: 4),
+        ]
+        for context in changed {
+            XCTAssertEqual(
+                try rejectedReleaseEnvelopeError(fixture, context: context),
+                .decodePathMismatch
+            )
+        }
+        XCTAssertEqual(
+            ModelRuntime.nativeMTPServePathRejection(for: NativeMTPAdmissionSidecarError.decodePathMismatch).reasonCode,
+            "decode_path_mismatch"
+        )
+    }
+
+    /// A bound entry for the model suppresses every legacy fallback: with a
+    /// selectable old-format entry beside it, a changed decode path is still
+    /// refused, and a matching decode path selects the bound entry.
+    func testDecodePathEntrySuppressesLegacyFallbackForTheModel() throws {
+        let fixture = try makeReleaseEnvelopeFixture(
+            entryEdit: { entry in
+                entry["decode_path_digest"] = DecodePathIdentity.digest
+                entry["metallib_sha256"] = Self.decodePathMetallib
+            },
+            precedingEntryEdits: [{ legacy in
+                legacy["qualified_slots"] = 4
+                legacy["max_native_active_rows"] = 4
+                var baseline = legacy["ordinary_baseline"] as! [String: Any]
+                baseline["qualified_slots"] = 4
+                legacy["ordinary_baseline"] = baseline
+            }]
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+
+        XCTAssertEqual(
+            try rejectedReleaseEnvelopeError(
+                fixture,
+                context: decodePathContext(fixture.context, decodePathDigest: String(repeating: "e", count: 64))
+            ),
+            .decodePathMismatch
+        )
+        XCTAssertEqual(
+            try rejectedReleaseEnvelopeError(fixture, context: decodePathContext(fixture.context, slotCount: 4)),
+            .decodePathMismatch
+        )
+        XCTAssertEqual(try loadRelease(fixture, context: decodePathContext(fixture.context)).qualifiedSlots, 8)
+    }
+
+    /// The binding is both fields or neither.
+    func testDecodePathBindingRequiresDigestAndMetallibTogether() throws {
+        let digestOnly = try makeReleaseEnvelopeFixture(entryEdit: { $0["decode_path_digest"] = DecodePathIdentity.digest })
+        defer { try? FileManager.default.removeItem(at: digestOnly.base.root) }
+        XCTAssertEqual(
+            try rejectedReleaseEnvelopeError(digestOnly, context: decodePathContext(digestOnly.context)),
+            .missingField("$.entries[0].metallib_sha256")
+        )
+        let metallibOnly = try makeReleaseEnvelopeFixture(entryEdit: { $0["metallib_sha256"] = Self.decodePathMetallib })
+        defer { try? FileManager.default.removeItem(at: metallibOnly.base.root) }
+        XCTAssertEqual(
+            try rejectedReleaseEnvelopeError(metallibOnly, context: decodePathContext(metallibOnly.context)),
+            .missingField("$.entries[0].decode_path_digest")
+        )
+        let malformed = try makeReleaseEnvelopeFixture(entryEdit: { entry in
+            entry["decode_path_digest"] = "not-a-digest"
+            entry["metallib_sha256"] = Self.decodePathMetallib
+        })
+        defer { try? FileManager.default.removeItem(at: malformed.base.root) }
+        XCTAssertEqual(
+            try rejectedReleaseEnvelopeError(malformed, context: decodePathContext(malformed.context)),
+            .invalidValue("$.entries[0].decode_path_digest")
+        )
+    }
+
+    /// Old-format entries (no decode-path fields, as published for CLI
+    /// 1.8.258-1.8.260) keep the 0.1.32 model-keyed rule on a new CLI.
+    func testOldFormatEntryStaysModelKeyedOnANewCLI() throws {
+        let fixture = try makeReleaseEnvelopeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+        let context = decodePathContext(
+            fixture.context,
+            decodePathDigest: String(repeating: "e", count: 64),
+            metallibSHA256: nil,
+            upstreamMLXSwiftLMRevision: String(repeating: "f", count: 40)
+        )
+        XCTAssertNoThrow(try loadRelease(fixture, context: context))
+    }
+
+    /// Exact revocation still blocks a decode-path entry.
+    func testRevokedDecodePathEntryIsRefused() throws {
+        let fixture = try makeReleaseEnvelopeFixture(entryEdit: { entry in
+            entry["decode_path_digest"] = DecodePathIdentity.digest
+            entry["metallib_sha256"] = Self.decodePathMetallib
+        })
+        defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+        let tuple = try loadRelease(fixture, context: decodePathContext(fixture.context)).tupleSHA256
+        XCTAssertEqual(
+            try rejectedReleaseEnvelopeError(
+                fixture,
+                context: decodePathContext(fixture.context, revokedTupleSHA256: [tuple])
+            ),
+            .tupleRevoked(tuple)
+        )
+    }
+
     func testReleaseEnvelopeBindsNativeActiveRowBoundIntoTupleIdentity() throws {
         let gated = try makeReleaseEnvelopeFixture(entryEdit: { $0["max_native_active_rows"] = 1 })
         defer { try? FileManager.default.removeItem(at: gated.base.root) }
@@ -2135,7 +2316,8 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         mutateProjectionArtifacts: ((inout [String: Any]) -> Void)? = nil,
         issuedAt: Date = Date().addingTimeInterval(-3600),
         expiresAt: Date = Date().addingTimeInterval(3600),
-        entryEdit: ((inout [String: Any]) -> Void)? = nil
+        entryEdit: ((inout [String: Any]) -> Void)? = nil,
+        precedingEntryEdits: [(inout [String: Any]) -> Void] = []
     ) throws -> ReleaseEnvelopeFixture {
         let base = try makeFixture()
         let layout = try prepareSnapshot?(base) ?? ReleaseLayout(
@@ -2166,7 +2348,8 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
             challengeBankSignerKeyID: base.selfTestSignerKeyID,
             issuedAt: issuedAt,
             expiresAt: expiresAt,
-            entryEdit: entryEdit
+            entryEdit: entryEdit,
+            precedingEntryEdits: precedingEntryEdits
         )
         let context = NativeMTPAdmissionSidecar.RuntimeContext(
             modelID: "mlx-community/Qwen3-MTP",
@@ -2480,13 +2663,21 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         challengeBankSignerKeyID: String,
         issuedAt: Date = Date().addingTimeInterval(-3600),
         expiresAt: Date = Date().addingTimeInterval(3600),
-        entryEdit: ((inout [String: Any]) -> Void)? = nil
+        entryEdit: ((inout [String: Any]) -> Void)? = nil,
+        precedingEntryEdits: [(inout [String: Any]) -> Void] = []
     ) throws -> Data {
         var entry = releaseEntry(
             layout: layout,
             artifactManifestSHA256: artifactManifestSHA256,
             challengeBankSHA256: challengeBankSHA256
         )
+        // Extra entries derived from the unedited base; callers keep the
+        // SPEC-023 sort order (they precede the edited entry).
+        let preceding: [[String: Any]] = precedingEntryEdits.map { edit in
+            var extra = entry
+            edit(&extra)
+            return extra
+        }
         entryEdit?(&entry)
         return try jsonData([
             "schema_version": NativeMTPAdmissionSidecar.schemaVersion,
@@ -2496,7 +2687,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
             "signer_key_id": signerKeyID,
             "challenge_bank_signer_key_id": challengeBankSignerKeyID,
             "revocation_signer_key_id": signerKeyID,
-            "entries": [entry],
+            "entries": preceding + [entry],
         ])
     }
 

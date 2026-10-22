@@ -1077,6 +1077,19 @@ final class ProviderStatusTests: XCTestCase {
         XCTAssertEqual(queued.requestsQueued, 1)
     }
 
+    /// SPEC-048-R013 (0.1.51): /v1/status reports the embedded decode-path
+    /// digest that a decode-path admission entry binds.
+    func testStatusResponseReportsEmbeddedDecodePathDigest() async throws {
+        let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity())
+        let snapshot = await status.snapshot()
+        let body = RouterHandler.statusResponse(snapshot, providerID: "provider-a", coordinatorURL: nil)
+        let identity = try XCTUnwrap(body["build_identity"] as? [String: Any])
+        XCTAssertEqual(identity["decode_path_digest"] as? String, DecodePathIdentity.digest)
+        XCTAssertEqual(identity["mlx_swift_lm_revision"] as? String, KVBuildIdentity.mlxSwiftLMRevision)
+        XCTAssertEqual(identity["mlx_swift_revision"] as? String, KVBuildIdentity.mlxSwiftRevision)
+        XCTAssertNotNil(DecodePathIdentity.digest.range(of: "^[0-9a-f]{64}$", options: .regularExpression))
+    }
+
     func testStatusResponsePublishesCompatibilitySetAndRedactedLifecycleLease() async throws {
         let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity())
         let snapshot = await status.snapshot()

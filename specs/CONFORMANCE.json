@@ -665,7 +665,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.22.29",
+      "version": "v0.22.30",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1475,7 +1475,7 @@
     {
       "spec_id": "SPEC-048",
       "title": "Native Multi-Token Prediction Serving",
-      "version": "0.1.50",
+      "version": "0.1.51",
       "path": "specs/SPEC-048-native-mtp-serving.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -5094,7 +5094,7 @@
       "spec_id": "SPEC-038",
       "state": "pending",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:nonisolated static func productionContinuousBatchSchedulerConfiguration",
+        "phase3-binary/Sources/macprovider-cli/ServeDecodePath.swift:nonisolated static func productionContinuousBatchSchedulerConfiguration",
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func continuousBatchMaxOutputTokens",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:static func contextRejectedTelemetryLine",
         "phase4-coordinator/internal/buyer/transport_result.go:func classifyStreamResult"
@@ -5145,12 +5145,12 @@
         "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeBridge.swift:prefill",
         "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeBridge.swift:canSharePrefillForward",
         "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeBridge.swift:enum PagedKVRaggedPrefillMask",
-        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:private nonisolated static func makeContinuousBatchScheduler",
+        "phase3-binary/Sources/macprovider-cli/ServeDecodePath.swift:nonisolated static func makeContinuousBatchScheduler",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:runOrdinaryDecodeStep",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:applyStreamedDecodeStep",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:advanceDecodeRow",
         "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeBridge.swift:performDecode",
-        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:nonisolated static func servePathDecodeLockstepWindow",
+        "phase3-binary/Sources/macprovider-cli/ServeDecodePath.swift:nonisolated static func servePathDecodeLockstepWindow",
         "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeBridge.swift:func snapshotRecurrentState",
         "phase3-binary/Sources/macprovider-cli/MSBThroughputCommand.swift:private func runHybridWindow",
         "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeParityProbe.swift:static func runMoEInputIsolationProbe",
@@ -5351,7 +5351,7 @@
       "spec_id": "SPEC-038",
       "state": "pending",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:nonisolated static func productionContinuousBatchSchedulerConfiguration",
+        "phase3-binary/Sources/macprovider-cli/ServeDecodePath.swift:nonisolated static func productionContinuousBatchSchedulerConfiguration",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:private func failClosedIfNeeded"
       ],
       "tests": [
@@ -5375,7 +5375,7 @@
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static let minimumAggregateGain",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:actor ContinuousBatchingSelfCheckDriver {",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatching.swift:static func defaultOn",
-        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func continuousBatchingSelfCheckRuntimeBuild",
+        "phase3-binary/Sources/macprovider-cli/ServeDecodePath.swift:static func continuousBatchingSelfCheckRuntimeBuild",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static func exactnessPromptLength(index",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static func exactnessProbeBound",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static func divergenceVerdict",
@@ -5520,7 +5520,7 @@
       "spec_id": "SPEC-038",
       "state": "pending",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:nonisolated static func productionContinuousBatchSchedulerConfiguration",
+        "phase3-binary/Sources/macprovider-cli/ServeDecodePath.swift:nonisolated static func productionContinuousBatchSchedulerConfiguration",
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func continuousBatchMaxOutputTokens"
       ],
       "tests": [
@@ -11747,9 +11747,15 @@
         "phase3-binary/Sources/macprovider-cli/NativeMTPAdmissionFeed.swift:enum NativeMTPAdmissionFeed",
         "phase3-binary/Sources/macprovider-cli/NativeMTPAdmissionSidecar.swift:struct NativeMTPResolvedArtifactAuthority",
         "phase3-binary/Sources/macprovider-cli/NativeMTPRevocationFeed.swift:struct NativeMTPRevocationFeed",
+        "phase3-binary/Sources/macprovider-cli/DecodePathIdentity.generated.swift:enum DecodePathIdentity",
+        "scripts/decode_path_digest.py:compute",
         "scripts/catalog-release.py:resolve_native_mtp_admission"
       ],
       "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/DecodePathIdentityTests.swift:testEmbeddedDigestIsTheManifestDigestOfThisTree",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testDecodePathEntryRefusesAChangedDecodePath",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testDecodePathEntryStaysValidForANewCLIWithTheSameDecodePath",
+        "scripts/tests/test_decode_path_digest.py:DecodePathDigestTests",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testProductionLoaderRejectsLegacyObjectSchema",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPRevocationFeedTests.swift:testAcceptsSignedFeedAndPersistsRecoverableAnchor",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPRevocationFeedTests.swift:testRejectsRollbackReplayAndRevokedSetRegression",

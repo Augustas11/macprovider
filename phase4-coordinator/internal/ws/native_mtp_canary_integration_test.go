@@ -621,3 +621,90 @@ func TestNativeMTPTupleOfferBindsTheServedWireModelID(t *testing.T) {
 		serverConn.Close()
 	}
 }
+
+// SPEC-048-R013 (0.1.51): the coordinator binds a native-MTP tuple to its
+// decode path (model, artifact, tokenizer, MTP manifest and the release
+// challenge bank), never to the provider CLI identity. Two signed CLI
+// releases that offer the same tuple are both recorded, so a CLI cut needs no
+// admission rebind here. An exactly revoked release still cannot serve: its
+// session is update-only and never routable, whatever it offers.
+func TestNativeMTPTupleOfferIsIndependentOfProviderCLIIdentity(t *testing.T) {
+	raw, binding := nativeMTPValidBankFixture(t)
+	bank, err := ParseNativeMTPChallengeBank(raw, binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := bank.Entries[0]
+	now := time.Date(2026, 9, 28, 1, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name          string
+		binaryVersion string
+		setID         string
+		binarySHA     string
+		cdhash        string
+		revision      string
+		admission     string
+		routable      bool
+	}{
+		{"qualifying release", "1.8.260", "Augustas11/macprovider:v1.8.260@" + strings.Repeat("1", 40),
+			strings.Repeat("9", 64), strings.Repeat("a", 40), strings.Repeat("1", 40), "", true},
+		{"next release, same decode path", "1.8.261", "Augustas11/macprovider:v1.8.261@" + strings.Repeat("2", 40),
+			strings.Repeat("5", 64), strings.Repeat("b", 40), strings.Repeat("2", 40), "", true},
+		{"exactly revoked release", "1.8.261", "Augustas11/macprovider:v1.8.261@" + strings.Repeat("3", 40),
+			strings.Repeat("6", 64), strings.Repeat("c", 40), strings.Repeat("3", 40), "update_bridge", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			registry := pool.NewRegistry(nil)
+			provider := &pool.Provider{
+				ProviderID: "provider-a", AssignedID: "assigned-a",
+				ModelID: record.ModelID, ModelHash: record.ModelHash,
+				BinaryVersion: tc.binaryVersion, CompatibilitySetID: tc.setID,
+				CatalogAdmissionMode: tc.admission,
+				State:                pool.StateReady, SlotsFree: 1, SlotsTotal: 1, MaxContextTokens: 4096,
+			}
+			clientConn, serverConn := net.Pipe()
+			defer clientConn.Close()
+			defer serverConn.Close()
+			registry.Register(provider, serverConn)
+			cfg := config.Default()
+			cfg.Pool.NativeMTPCanary.IntervalS = 900
+			server := NewServer(cfg, registry, zerolog.Nop(), WithNow(func() time.Time { return now }))
+			server.cfg.Pool.NativeMTPCanary.Enabled = true
+			server.SetAutotuneCatalog(&autotune.Catalog{Version: bank.ReleaseID})
+			server.nativeMTPCanaryBanks.Store(&nativeMTPCanaryBankSet{current: &bank})
+			tuple := NativeMTPRuntimeTuple{
+				ModelID: record.ModelID, ModelHash: record.ModelHash, ModelHashAlgorithm: "sha256",
+				ProviderRevision: tc.revision, RuntimeRevision: "mlx-swift-lm-e874140",
+				TokenizerDigest: record.TokenizerSHA256, ArtifactDigest: record.ArtifactSHA256,
+				ManifestDigest: record.MTPManifestSHA256, SidecarDigest: strings.Repeat("8", 64),
+				ProviderBinarySHA256: tc.binarySHA, RuntimeCDHash: tc.cdhash,
+				CacheNamespace: "native-mtp-test", StateDigest: record.ExpectedCommittedStateSHA256,
+				ProposalDepth: int(record.FixedProposalDepth),
+			}
+			admission := strings.Repeat("8", 64)
+			offer := NativeMTPTupleOffer{
+				Type: "native_mtp_tuple_offer_v1", Version: 1,
+				ProviderID: provider.ProviderID, AssignedID: provider.AssignedID, TargetGeneration: 7,
+				ProviderRevision: tuple.ProviderRevision, RuntimeRevision: tuple.RuntimeRevision, RuntimeTuple: tuple,
+				NativeMTPAdmissionTupleSHA256: admission, ServedSnapshotID: "snapshot-a",
+				NativeMTPRuntimeTupleSHA256: nativeMTPRuntimeTupleIdentitySHA256(
+					provider.ProviderID, provider.AssignedID, 7, admission, "snapshot-a"),
+				SidecarDigest: tuple.SidecarDigest, ChallengeBankReleaseID: bank.ReleaseID,
+				ChallengeBankSHA256: bank.RawSHA256, ChallengeCorpusSHA256: strings.Repeat("b", 64),
+				SelftestProfile: "native_mtp_selftest_v1", SelftestPassDigest: strings.Repeat("c", 64),
+				SelftestObservedAt: now.Format(time.RFC3339),
+			}
+			server.handleNativeMTPTupleOffer(provider.ProviderID, provider.AssignedID, mustMarshalNativeMTP(t, offer))
+			snap, ok := registry.Resolve(provider.ProviderID, provider.AssignedID)
+			if !ok {
+				t.Fatal("provider session missing")
+			}
+			if tc.routable && snap.NativeMTPCanary == nil {
+				t.Fatalf("tuple offer from %s was not recorded", tc.binaryVersion)
+			}
+			if snap.RoutingEligible() != tc.routable {
+				t.Fatalf("routable=%v, want %v (mode %q)", snap.RoutingEligible(), tc.routable, tc.admission)
+			}
+		})
+	}
+}

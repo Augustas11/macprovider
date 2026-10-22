@@ -106,6 +106,7 @@ test-dist: $(addprefix test-dist-,$(TEST_DIST_SHARDS))
 
 # Catalog and autotune content release (the single slowest suite).
 test-dist-catalog:
+	python3 scripts/decode_path_digest.py --check
 	bash scripts/test-catalog-content-release.sh
 	bash -n scripts/catalog-content-release.sh
 	bash -n scripts/lib/catalog-canary-token.sh

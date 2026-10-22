@@ -795,9 +795,10 @@ validate_native_release_binding() {
   git -C "$REPO_ROOT" ls-files --error-unmatch "$NATIVE_ADMISSION_RELEASE" >/dev/null 2>&1 || return
   git -C "$REPO_ROOT" diff --quiet HEAD -- "$NATIVE_ADMISSION_RELEASE" || return
   python3 - "$input" "$LIVE_RELEASE" "$HB_VERSION" "$HB_SHA" "$HB_CDHASH" \
-    "$HB_TEAM" "$HB_IDENTIFIER" "$RELEASE_TEAM_ID" "$RELEASE_SIGNING_IDENTIFIER" <<'PY'
+    "$HB_TEAM" "$HB_IDENTIFIER" "$RELEASE_TEAM_ID" "$RELEASE_SIGNING_IDENTIFIER" \
+    "$OPS_TMP_DIR/preflight-status.json" <<'PY'
 import json, re, sys
-path, release, version, sha, cdhash, team, identifier, trusted_team, trusted_identifier = sys.argv[1:]
+path, release, version, sha, cdhash, team, identifier, trusted_team, trusted_identifier, status_path = sys.argv[1:]
 try:
     value = json.load(open(path, encoding="utf-8"))
     entry = value["entry"]
@@ -809,11 +810,22 @@ if value.get("release_id") != release:
     raise SystemExit(3)
 if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
     raise SystemExit(3)
-if entry.get("reproducible_build_sha256") != sha or not re.fullmatch(r"[0-9a-f]{64}", sha):
-    raise SystemExit(3)
-if entry.get("live_executable_cdhash") != cdhash or not re.fullmatch(r"[0-9a-f]{40,64}", cdhash):
-    raise SystemExit(3)
 if (team, identifier) != (trusted_team, trusted_identifier):
+    raise SystemExit(3)
+if not re.fullmatch(r"[0-9a-f]{64}", sha) or not re.fullmatch(r"[0-9a-f]{40,64}", cdhash):
+    raise SystemExit(3)
+# SPEC-048-R013 (0.1.51): a decode-path admission binds the decode path, not
+# the CLI bytes. The signed running CLI (verified above against the published
+# release) serves it when its embedded decode-path digest is the admitted one.
+admitted = value.get("provider_decode_path_digest")
+if admitted is not None:
+    try:
+        running = json.load(open(status_path, encoding="utf-8"))["build_identity"]["decode_path_digest"]
+    except Exception:
+        raise SystemExit(3)
+    raise SystemExit(0 if re.fullmatch(r"[0-9a-f]{64}", admitted) and running == admitted else 3)
+# Old-format admission (no decode-path digest): the exact qualifying build.
+if entry.get("reproducible_build_sha256") != sha or entry.get("live_executable_cdhash") != cdhash:
     raise SystemExit(3)
 PY
 }
@@ -1129,7 +1141,7 @@ run_native_mtp_campaign() {
   studio_preflight "$OPS_TMP_DIR/preflight-status.json" || refuse "Studio signed handback preflight failed"
   load_live_context || refuse "live context is incomplete"
   validate_native_release_binding ||
-    refuse "Qwen3.6 proof CLI identity must match the exact committed native-MTP admission release input"
+    refuse "Qwen3.6 proof CLI must run the admitted decode path (or, for an old-format admission, the exact committed release identity)"
   [ "$INCUMBENT_MODEL" = "$GLM_INCUMBENT" ] || refuse "Qwen3.6 proof requires the exact GLM incumbent"
   validate_status "$OPS_TMP_DIR/preflight-status.json" "$GLM_INCUMBENT" >/dev/null || refuse "GLM incumbent is not buyer-serving"
 

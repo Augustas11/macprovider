@@ -1,12 +1,26 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.29
+version: v0.22.30
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-02
 lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-change invariants). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
+
+- **v0.22.30 (2026-10-22)** — Decode-path admission binding (SPEC-048
+  0.1.51). A §12.5 entry may carry two optional fields, both or neither:
+  `decode_path_digest` (the SHA-256 decode-path digest compiled into the CLI)
+  and `metallib_sha256`. With them, the consumer selects the entry only on an
+  exact decode-path match. That match also needs `runtime_revision`,
+  `hardware_class`, `ram_bytes` and `qualified_slots` to equal this Mac, and
+  it never consults the CLI identity. So a signed CLI release with the same
+  embedded digest keeps the admission without a new entry, which completes
+  v0.22.13. Consumers before v0.22.30 reject the unknown keys. The fields are
+  therefore published only when the bound release CLI embeds that digest and
+  is the released CLI (SPEC-048-R014 item 10). Old-format entries are unchanged.
+  Release trust and blocking stay with signed-release admission and exact
+  revocation.
 
 - **v0.22.29 (2026-10-21)** — Target-hardware CB qualification. R025 permits
   reviewed release-mode lab acceptance on operator-designated target hardware,
@@ -3516,6 +3530,7 @@ unsigned JSON integers and never floats.
 | `source_commit` | full lowercase SHA-1 Git object id, exactly 40 hex characters (a SHA-256 object-format repository needs a consumer amendment first) |
 | `reproducible_build_sha256` | `sha256` |
 | `live_executable_cdhash` | exact lowercase 40-hex Mach-O CodeDirectory CDHash of the signed executable that qualified this tuple; recorded provenance only (v0.22.13) |
+| `decode_path_digest`, `metallib_sha256` | optional, both or neither (v0.22.30): `sha256` of the SPEC-048-R013 decode-path manifest digest and of the Metal library the tuple qualified on. When present, the entry is selected only on an exact decode-path match (with `runtime_revision`, `hardware_class`, `ram_bytes`, `qualified_slots`) and no other entry for the model is a fallback |
 | `cache_state_classes` | sorted unique array `1..16`; every element is an `mtp_state_class` value (`stageable_rewindable` or `hybrid_stageable_rewindable`) and the array MUST contain the entry's `mtp_state_class`, which the runtime matches against the loaded model |
 | `hardware_class` | lowercase ASCII matching `^[a-z0-9][a-z0-9-]{0,63}$`, the canonical form of the host chip name |
 | `ram_bytes` | exact physical RAM integer `> 0`, not a minimum |

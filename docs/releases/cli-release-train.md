@@ -98,7 +98,14 @@ When the combined CLI is ready:
 3. Prepare one reviewed two-model v2 admission manifest preserving GLM and
    adding Qwen's measured tuple, artifact projection and unchanged bank entry.
    Bind the actual release source, executable SHA-256 and CDHash, and cite the
-   SPEC-048 disposition alongside the original analyzer FAIL.
+   SPEC-048 disposition alongside the original analyzer FAIL. This is also
+   the one final dual-field rebind (SPEC-048 0.1.51): add each tuple's
+   `decode_path_digest` and `metallib_sha256`, and set the release input's
+   `provider_decode_path_digest` to the released CLI's embedded digest
+   ([runbook](../runbooks/native-mtp-enablement.md#the-one-final-dual-field-rebind)).
+   Publish it only once this CLI is the released one (R014 item 10). Later
+   cuts need no admission step while `cli-release.sh status` reports
+   `native_mtp_admission_decode_path=match`.
 4. Activate through `scripts/ops/catalog-activate.sh` (`status`, `next`,
    `next --run`) with `PROBE_MODEL=qwen/qwen3.6-35b-a3b` and
    `CATALOG_REQUIRE_NATIVE_MTP_FORWARD=true`.
@@ -759,12 +766,22 @@ an isolated `--no-join` test input; it cannot authorize production batching.
 Keeping `continuous_batching: canary` in configuration is insufficient.
 
 Before recommending or installing successor bytes, preserve each previously
-active qualified hardware/model/cache tuple. Publish reviewed policy coverage
-for the successor's exact provider version, live executable CDHash, package
-manifest and campaign evidence before the successor is recommended. Reuse
-unchanged decode qualification; never copy an old CDHash grant to new bytes.
-An empty policy, rollout `off`, or identity mismatch is a capability loss,
-even when feed signature verification and provider join succeed.
+active qualified hardware/model/cache tuple. A CB policy entry matches the
+model, tokenizer, chat template, cache class, hardware, metallib and kernel,
+not the provider version or CDHash (SPEC-023 v0.22.13). So a successor that
+ships the same metallib and kernel keeps its coverage without a new policy
+entry, and the per-Mac self-check re-measures it. Add or correct an entry only
+when one of those matched fields changes. An empty policy or rollout `off` is
+a capability loss, even when feed signature verification and provider join
+succeed.
+
+Native-MTP admission works the same way from SPEC-048 0.1.51. Before each cut,
+read `cli-release.sh status` fact `native_mtp_admission_decode_path`. `match`
+(the source decode path, plus the canary's self-check metallib equal to the
+entries' `metallib_sha256`) means no admission step. `mismatch` means
+requalification. `legacy` means the one final dual-field rebind after that cut
+is released
+([runbook](../runbooks/native-mtp-enablement.md#later-cli-cuts-no-admission-step-unless-the-decode-path-changed)).
 
 After the signed upgrade and restart, verify `policy.load_status=live_verified`,
 `policy.authorized=true`, `policy.local_proof_result=passed`,

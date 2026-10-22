@@ -542,7 +542,20 @@ $owed_writer '$verdict' '$owed_dir' '$R'
 scripts/catalog-content-release.sh --deploy --commit $main_sha ${pricing:+--pricing-diff-sha256 $pricing }--preflight-verdict '$verdict' | tee '$deploy_log'
 $owed_writer '$deploy_log' '$owed_dir' '$R'"
     content_downtime="no coordinator restart: one SIGHUP reloads the release${pricing:+ and the rate card}; the canary provider is drained and restarted onto the release, so the requests it would serve go to other providers of its model or wait for its restart and model load; a failed activation rolls back and can strand adopters for 3-11 min"
-    if [ "$fresh" = true ] && { [ "$p_paused" = true ] || [ "$p_status_ok" = false ]; } &&
+    # SPEC-048-R014 item 10 (0.1.51): decode-path admission entries are
+    # rejected by CLIs before the reader, so they go live only when the bound
+    # release (git-verified digest at its source commit) is the recommended CLI.
+    local dp_gate="ok"
+    if [ "$native_bound" = true ]; then
+      dp_gate="$(python3 "$REPO_ROOT/scripts/decode_path_digest.py" --publish-gate \
+        "$REPO_ROOT/$AUTOTUNE/native-mtp-admission-release.json" "$REPO_ROOT/$AUTOTUNE/native-mtp-admission.json" \
+        "$(json_field "$OPS_TMP_DIR/healthz.json" 'd.get("recommended_binary_version") or ""' 2>/dev/null)" 2>&1 ||
+        echo "blocked: decode-path publish gate failed")"
+    fi
+    fact native_mtp_decode_path_publish_gate "$dp_gate"
+    if [ "$dp_gate" != ok ]; then
+      set_next catalog_activation blocked "Activate content release $R" "" "$dp_gate"
+    elif [ "$fresh" = true ] && { [ "$p_paused" = true ] || [ "$p_status_ok" = false ]; } &&
       { [ "$go" = true ] || printf '%s' "$lane_detail" | grep -q 'lane='; }; then
       set_next catalog_activation blocked "Activate content release $R" "" "$paused_why"
     elif [ "$fresh" = true ] && [ "$go" = true ] && [ -z "$pricing" ]; then
