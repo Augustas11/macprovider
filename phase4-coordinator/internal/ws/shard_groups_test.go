@@ -234,6 +234,44 @@ func TestShardGroupLifecycleOverWire(t *testing.T) {
 	}
 }
 
+// SPEC-051 §4 (VM acceptance F10): a reloaded shard_groups section applies
+// at once. A max_link_rtt_p99_us below the reported link RTT makes the
+// available group unavailable with link_rtt_exceeded, restoring the bound
+// makes it available again, and an unchanged section changes nothing.
+func TestShardGroupsConfigReloadApplies(t *testing.T) {
+	h := newShardWSHarness(t)
+	h.server.handleMessage(nil, "head", "s-head", h.registerPayload())
+	h.next("head", shardgroup.TypeRegisterResult)
+	h.next("head", shardgroup.TypeStatus)
+	h.server.handleMessage(nil, "tail", "s-tail", shardWSHello())
+	h.next("tail", shardgroup.TypeMemberHelloResult)
+	h.next("head", shardgroup.TypeStatus)
+	h.server.handleMessage(nil, "head", "s-head", shardWSHeartbeat())
+	h.next("head", shardgroup.TypeStatus)
+	h.server.handleMessage(nil, "tail", "s-tail", shardWSMemberHealth())
+	if st := h.next("head", shardgroup.TypeStatus); st["available"] != true {
+		t.Fatalf("not available before the reload: %v", st)
+	}
+	if h.server.ApplyShardGroupsConfig(config.DefaultShardGroupsConfig()) {
+		t.Fatal("an unchanged shard_groups section reported a change")
+	}
+	tight := config.DefaultShardGroupsConfig()
+	tight.MaxLinkRTTP99US = 300
+	if !h.server.ApplyShardGroupsConfig(tight) {
+		t.Fatal("a changed shard_groups section reported no change")
+	}
+	if st := h.next("head", shardgroup.TypeStatus); st["available"] != false || st["reason"] != shardgroup.ReasonLinkRTTExceeded {
+		t.Fatalf("status after tightening the RTT bound: %v", st)
+	}
+	if h.available() {
+		t.Fatal("head still routable after the reload")
+	}
+	h.server.ApplyShardGroupsConfig(config.DefaultShardGroupsConfig())
+	if st := h.next("head", shardgroup.TypeStatus); st["available"] != true {
+		t.Fatalf("status after restoring the bound: %v", st)
+	}
+}
+
 func shardWSDigest(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])

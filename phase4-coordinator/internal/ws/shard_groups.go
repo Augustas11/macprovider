@@ -3,10 +3,12 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/shardgroup"
 )
@@ -108,6 +110,28 @@ func (w *shardGroupWiring) cacheOwnerLocked(id string, entry shardGroupOwnerEntr
 		}
 	}
 	w.ownerCache[id] = entry
+}
+
+// ApplyShardGroupsConfig applies a reloaded coordinator shard_groups section
+// (SPEC-051 §4) and re-evaluates every group, so a tighter bound makes a group
+// unavailable at once and a looser one restores it. It reports whether the
+// values changed; without shard group wiring it does nothing.
+func (s *Server) ApplyShardGroupsConfig(cfg config.ShardGroupsConfig) bool {
+	w := s.shardGroups
+	if w == nil {
+		return false
+	}
+	next := shardgroup.ConfigFrom(cfg)
+	if reflect.DeepEqual(w.registry.Config(), next) {
+		return false
+	}
+	w.registry.SetConfig(next)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for _, groupID := range w.registry.GroupIDs() {
+		s.reevaluateShardGroup(ctx, groupID)
+	}
+	return true
 }
 
 // sendShardGroupMessage marshals and sends one group message to a session.

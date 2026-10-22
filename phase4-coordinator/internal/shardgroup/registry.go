@@ -146,7 +146,20 @@ func NewRegistry(cfg Config, store *Store, now func() time.Time) *Registry {
 }
 
 // Config returns the registry configuration.
-func (r *Registry) Config() Config { return r.cfg }
+func (r *Registry) Config() Config {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.cfg
+}
+
+// SetConfig replaces the coordinator shard_groups values (SPEC-051 §4) on a
+// configuration reload. Accepted records stay accepted; the next availability
+// evaluation and every later registration apply the new values.
+func (r *Registry) SetConfig(cfg Config) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.cfg = cfg
+}
 
 func result(typ, groupID string, epoch uint64, reason string) Result {
 	return Result{Type: typ, Version: WireVersion, GroupProviderID: groupID, GroupEpoch: epoch, Accepted: reason == "", Reason: reason}
@@ -182,7 +195,7 @@ func (r *Registry) Register(ctx context.Context, head HeadSession, payload []byt
 	if !head.ShardGroupHeadV1 || head.ShardMemberV1 || !head.WSTunneled {
 		return reject(ReasonNotGroupHeadSession)
 	}
-	if reason := ValidateRecord(rec, r.cfg, HeadView{
+	if reason := ValidateRecord(rec, r.Config(), HeadView{
 		ProviderID:         head.ProviderID,
 		ModelID:            head.ModelID,
 		ModelHashAlgorithm: head.ModelHashAlgorithm,
