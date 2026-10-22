@@ -1,0 +1,220 @@
+import Foundation
+import MLX
+import MLXLLM
+import MLXLMCommon
+import MLXNN
+@testable import MacProviderCore
+@testable import macprovider_cli
+import XCTest
+
+/// Issue #2084: a model split into pipeline stages must produce the same logits as
+/// the whole model. Uses tiny random-weight Llama and DeepSeek-V3 checkpoints written
+/// to a temp directory and runs on the CPU, so it needs no cached weights and no GPU.
+final class PipelineStageForwardTests: XCTestCase {
+    private var directories: [URL] = []
+
+    override func tearDown() {
+        for directory in directories { try? FileManager.default.removeItem(at: directory) }
+        directories = []
+        super.tearDown()
+    }
+
+    private static let llamaConfig: [String: Any] = [
+        "model_type": "llama",
+        "hidden_size": 64,
+        "num_hidden_layers": 4,
+        "intermediate_size": 96,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "rms_norm_eps": 1e-5,
+        "vocab_size": 97,
+        "tie_word_embeddings": true,
+    ]
+
+    private static let deepseekConfig: [String: Any] = [
+        "model_type": "deepseek_v3",
+        "vocab_size": 97,
+        "hidden_size": 64,
+        "intermediate_size": 96,
+        "moe_intermediate_size": 32,
+        "num_hidden_layers": 3,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 4,
+        "n_shared_experts": 1,
+        "n_routed_experts": 4,
+        "routed_scaling_factor": 1.0,
+        "kv_lora_rank": 16,
+        "q_lora_rank": 24,
+        "qk_rope_head_dim": 8,
+        "v_head_dim": 8,
+        "qk_nope_head_dim": 8,
+        "norm_topk_prob": true,
+        "n_group": 1,
+        "topk_group": 1,
+        "num_experts_per_tok": 2,
+        "moe_layer_freq": 1,
+        "first_k_dense_replace": 1,
+        "max_position_embeddings": 256,
+        "rms_norm_eps": 1e-6,
+        "rope_theta": 10000.0,
+        "attention_bias": false,
+    ]
+
+    /// Write `config` and seeded random weights for it; return the directory and the
+    /// whole model holding exactly those weights.
+    private func makeCheckpoint(_ config: [String: Any]) async throws -> (URL, any LLMModel) {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pipeline-stage-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        directories.append(directory)
+        let data = try JSONSerialization.data(withJSONObject: config)
+        try data.write(to: directory.appendingPathComponent("config.json"))
+        let created = try await LLMTypeRegistry.shared.createModel(
+            configuration: data, modelType: config["model_type"] as! String)
+        let model = try XCTUnwrap(created as? any LLMModel)
+        MLXRandom.seed(2084)
+        var weights = [String: MLXArray]()
+        for (key, value) in model.parameters().flattened() {
+            let noise = MLXRandom.normal(value.shape) * 0.1
+            weights[key] = key.hasSuffix("norm.weight") ? 1 + noise : noise
+        }
+        try model.update(parameters: ModuleParameters.unflattened(weights), verify: [.all])
+        eval(Array(weights.values))
+        try save(arrays: weights, url: directory.appendingPathComponent("model.safetensors"))
+        return (directory, model)
+    }
+
+    /// Prefill `prompt` then decode `steps` greedy tokens through both the whole model
+    /// and the chained stages, asserting the logits agree at every step.
+    private func assertStagesMatchWholeModel(
+        _ config: [String: Any],
+        splits: [Range<Int>],
+        prompt: [Int32] = [3, 14, 15, 92, 65],
+        steps: Int = 4,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        try await Device.withDefaultDevice(.cpu) {
+            let (directory, whole) = try await makeCheckpoint(config)
+            var stages = [PipelineStageModel]()
+            for range in splits {
+                stages.append(try await PipelineStageModel.load(directory: directory, layers: range))
+            }
+            let wholeCache = try whole.newCache(parameters: nil)
+            let stageCaches = try stages.map { try $0.newCache() }
+
+            var input = MLXArray(prompt).reshaped(1, prompt.count)
+            for step in 0...steps {
+                let expected = whole(input, cache: wholeCache)
+                var carried = input
+                for (stage, cache) in zip(stages, stageCaches) {
+                    let output = try stage.forward(carried, cache: cache)
+                    if !stage.plan.isLast {
+                        // Ship the boundary through the frame codec, as the link does.
+                        let encoded = try PipelineActivationCodec.encode(output)
+                        carried = try PipelineActivationCodec.decode(
+                            dtype: encoded.dtype, shape: encoded.shape, payload: encoded.payload)
+                    } else {
+                        carried = output
+                    }
+                }
+                XCTAssertEqual(carried.shape, expected.shape, "step \(step)", file: file, line: line)
+                let difference = abs(carried - expected).max().item(Float.self)
+                XCTAssertLessThanOrEqual(difference, 1e-4, "step \(step) max |delta| \(difference)", file: file, line: line)
+                let token = argMax(expected[0, -1], axis: -1).item(Int32.self)
+                XCTAssertEqual(argMax(carried[0, -1], axis: -1).item(Int32.self), token, "step \(step)", file: file, line: line)
+                input = MLXArray([token]).reshaped(1, 1)
+            }
+        }
+    }
+
+    func testLlamaTwoStageSplitMatchesWholeModel() async throws {
+        try await assertStagesMatchWholeModel(Self.llamaConfig, splits: [0..<2, 2..<4])
+    }
+
+    func testLlamaThreeStageSplitWithMiddleStageMatchesWholeModel() async throws {
+        try await assertStagesMatchWholeModel(Self.llamaConfig, splits: [0..<1, 1..<3, 3..<4])
+    }
+
+    func testLlamaUntiedHeadSplitMatchesWholeModel() async throws {
+        var config = Self.llamaConfig
+        config["tie_word_embeddings"] = false
+        try await assertStagesMatchWholeModel(config, splits: [0..<3, 3..<4])
+    }
+
+    func testDeepseekV3SplitAcrossDenseAndMoELayersMatchesWholeModel() async throws {
+        // Layer 0 is dense (first_k_dense_replace = 1); layers 1-2 are MoE. Splitting
+        // at 1 renumbers the tail's MoE layers from 0, which the config rewrite covers.
+        try await assertStagesMatchWholeModel(Self.deepseekConfig, splits: [0..<1, 1..<3])
+        try await assertStagesMatchWholeModel(Self.deepseekConfig, splits: [0..<2, 2..<3])
+    }
+
+    func testStageLoadsOnlyItsOwnLayers() async throws {
+        try await Device.withDefaultDevice(.cpu) {
+            let (directory, _) = try await makeCheckpoint(Self.llamaConfig)
+            let plan = try PipelineStagePlan(layers: 1..<3, totalLayers: 4)
+            let weights = try PipelineStageModel.loadStageWeights(directory: directory, plan: plan)
+            XCTAssertTrue(weights.keys.allSatisfy { $0.hasPrefix("model.layers.0.") || $0.hasPrefix("model.layers.1.") },
+                          "middle stage loaded \(weights.keys.sorted())")
+            XCTAssertFalse(weights.isEmpty)
+        }
+    }
+
+    func testStageConfigRewrite() throws {
+        let config: [String: Any] = [
+            "num_hidden_layers": 6,
+            "first_k_dense_replace": 3,
+            "layer_types": ["a", "b", "c", "d", "e", "f"],
+            "quantization": [
+                "group_size": 64,
+                "bits": 4,
+                "model.layers.1.mlp.gate": ["bits": 8],
+                "model.layers.4.mlp.gate": ["bits": 8],
+                "lm_head": ["bits": 6],
+            ] as [String: Any],
+        ]
+        let plan = try PipelineStagePlan(layers: 2..<5, totalLayers: 6)
+        let stage = try PipelineStageModel.stageConfig(config, plan: plan, builtLayers: 4)
+        XCTAssertEqual(stage["num_hidden_layers"] as? Int, 4)
+        XCTAssertEqual(stage["first_k_dense_replace"] as? Int, 1)
+        XCTAssertEqual(stage["layer_types"] as? [String], ["c", "d", "e", "e"])
+        let quant = try XCTUnwrap(stage["quantization"] as? [String: Any])
+        XCTAssertEqual(Set(quant.keys), ["group_size", "bits", "model.layers.2.mlp.gate", "lm_head"])
+
+        XCTAssertThrowsError(try PipelineStageModel.stageConfig(
+            ["num_hidden_layers": 6, "moe_layer_freq": 2], plan: try PipelineStagePlan(layers: 1..<6, totalLayers: 6),
+            builtLayers: 5))
+    }
+
+    func testRejectsBadRangesAndUnsupportedModels() async throws {
+        XCTAssertThrowsError(try PipelineStagePlan(layers: 3..<3, totalLayers: 4))
+        XCTAssertThrowsError(try PipelineStagePlan(layers: 2..<5, totalLayers: 4))
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pipeline-stage-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        directories.append(directory)
+        try JSONSerialization.data(withJSONObject: ["model_type": "glm5_next_text", "num_hidden_layers": 4])
+            .write(to: directory.appendingPathComponent("config.json"))
+        do {
+            _ = try await PipelineStageModel.load(directory: directory, layers: 0..<2)
+            XCTFail("glm5_next_text must be refused")
+        } catch PipelineStageError.unsupportedModelType(let type) {
+            XCTAssertEqual(type, "glm5_next_text")
+        }
+    }
+
+    func testActivationCodecRoundTripsBitExactly() throws {
+        try Device.withDefaultDevice(.cpu) {
+            for dtype in [DType.bfloat16, .float16, .float32] {
+                let array = (MLXRandom.normal([1, 3, 16]) * 7).asType(dtype)
+                let encoded = try PipelineActivationCodec.encode(array)
+                XCTAssertEqual(encoded.shape, [1, 3, 16])
+                let decoded = try PipelineActivationCodec.decode(dtype: encoded.dtype, shape: encoded.shape, payload: encoded.payload)
+                XCTAssertEqual(decoded.dtype, dtype)
+                XCTAssertTrue(arrayEqual(decoded, array).item(Bool.self))
+            }
+            XCTAssertThrowsError(try PipelineActivationCodec.encode(MLXArray([Int32(1)]).reshaped(1, 1, 1)))
+            XCTAssertThrowsError(try PipelineActivationCodec.encode(MLXArray.zeros([4], dtype: .float16)))
+        }
+    }
+}
