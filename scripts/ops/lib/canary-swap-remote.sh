@@ -46,6 +46,7 @@ if [ "$MODE" = swap ]; then
   AIR_CONFIG="${15:-}"
   AIR_OLD_BINARY_SHA="${16:-}"
   AIR_ACTION="${17:-}"
+  AIR_CONFIG_SHA="${18:-}"
   CONFIG="" JOURNAL="" HELPER="" EXPECTED_BINARY_SHA="" EXPECTED_PROVIDER_SHA="" EXPECTED_MODEL="" EXPECTED_POLICY_SHA=""
   EXPECTED_POLICY_RELEASE="" EXPECTED_POLICY_TUPLE="" EXPECTED_TEAM_ID="" EXPECTED_SIGNING_IDENTIFIER="" EXPECTED_CDHASH=""
 else
@@ -83,6 +84,7 @@ WATCHDOG_LABEL="$LABEL-watchdog"
 BACKUP="$INSTALL_DIR.pre-$VERSION-$TS"
 [ "$MODE" = swap ] || BACKUP="$CONFIG.bak-owner-pin-$TS"
 FAILED_DIR="$INSTALL_DIR.failed-$VERSION-$TS"
+if [ "$MODE" = swap ] && [ "$AIR_ACTION" = restore-air ]; then FAILED_DIR="$FAILED_DIR-$$"; fi
 STAGE="$(dirname "$RESULT_FILE")/payload"
 LOCK_DIR="$HOME/.macprovider-canary-swap.lock"
 MANAGED_FILES="macprovider-cli mlx.metallib compatibility-set.json THIRD-PARTY-NOTICES.txt"
@@ -370,6 +372,21 @@ finish() {
   trap - EXIT
   [ "$1" != 6 ] || watchdog_note || true
   printf '%s\n' "$1" >"$RESULT_FILE.tmp" && mv "$RESULT_FILE.tmp" "$RESULT_FILE"
+  if [ "$MODE" = swap ] && [ "$AIR_ACTION" = restore-air ] && [ "$1" = 5 ]; then
+    # Cancellation/completion is durable before releasing the same host lock
+    # a delayed original worker must acquire before touching the provider.
+    python3 - "$(dirname "$RESULT_FILE")/result.restored" <<'PY' || exit 6
+import os, sys, tempfile
+path=sys.argv[1]
+fd, temporary=tempfile.mkstemp(dir=os.path.dirname(path),prefix=".air-terminal-")
+with os.fdopen(fd,"w") as stream:
+    stream.write("5\n"); stream.flush(); os.fsync(stream.fileno())
+os.replace(temporary,path)
+directory=os.open(os.path.dirname(path),os.O_RDONLY)
+try: os.fsync(directory)
+finally: os.close(directory)
+PY
+  fi
   if [ "$LOCKED" = 1 ] && [ "$(cat "$LOCK_DIR/pid" 2>/dev/null || true)" = "$$" ]; then
     rm -rf "$LOCK_DIR"
   fi
@@ -382,8 +399,27 @@ restore_backup() {
   fi
   FINISHED=1
   say "ROLLBACK: restoring $BACKUP ($1)"
+  if [ -n "$AIR_PROVIDER_SHA" ]; then
+    python3 - "$(dirname "$RESULT_FILE")/result.recovery.json" <<'PY' || finish 6
+import json, os, sys, tempfile
+path=sys.argv[1]
+with open(path) as stream: record=json.load(stream)
+record["phase"]="restoring"
+fd, temporary=tempfile.mkstemp(dir=os.path.dirname(path), prefix=".air-restore-")
+with os.fdopen(fd,"w") as stream:
+    json.dump(record,stream); stream.flush(); os.fsync(stream.fileno())
+os.replace(temporary,path)
+directory=os.open(os.path.dirname(path),os.O_RDONLY)
+try: os.fsync(directory)
+finally: os.close(directory)
+PY
+  fi
   stop_jobs || { say "!!! rollback could not stop the candidate job; restore $BACKUP into $INSTALL_DIR by hand"; finish 6; }
-  mv "$INSTALL_DIR" "$FAILED_DIR" || { say "!!! could not move the candidate payload aside; restore $BACKUP by hand"; finish 6; }
+  if [ -e "$INSTALL_DIR" ]; then
+    mv "$INSTALL_DIR" "$FAILED_DIR" || { say "!!! could not move the candidate payload aside; restore $BACKUP by hand"; finish 6; }
+  elif [ -z "$AIR_PROVIDER_SHA" ]; then
+    finish 6
+  fi
   cp -Rp "$BACKUP" "$INSTALL_DIR" || { say "!!! could not copy $BACKUP back to $INSTALL_DIR; do it by hand"; finish 6; }
   start_jobs provider || { say "!!! restored $BACKUP but the provider job did not start; bootstrap $LABEL by hand"; finish 6; }
   if [ -n "$AIR_PROVIDER_SHA" ]; then
@@ -391,8 +427,12 @@ restore_backup() {
     # exact zero-work state is a successful rollback, not a buyer-serving claim.
     local air_deadline air_body air_pid air_start air_since
     air_deadline=$(( $(now) + READY_TIMEOUT_S ))
-    air_pid="$(job_pid)"
-    air_start="$(verify_job_process "$air_pid")" || finish 6
+    while :; do
+      air_pid="$(job_pid)"
+      if [ -n "$air_pid" ] && air_start="$(verify_job_process "$air_pid")"; then break; fi
+      [ "$(now)" -lt "$air_deadline" ] || finish 6
+      sleep "$POLL_S"
+    done
     air_since=0
     while :; do
       [ "$(job_pid)" = "$air_pid" ] && [ "$(verify_job_process "$air_pid")" = "$air_start" ] || finish 6
@@ -543,18 +583,28 @@ if ! publish_lock; then
   say "took over stale canary-swap lock (pid $holder)"
 fi
 LOCKED=1
+if [ "$MODE" = swap ] && [ -n "$AIR_PROVIDER_SHA" ] && [ "$AIR_ACTION" = recover-air ] &&
+   [ -f "$(dirname "$RESULT_FILE")/result.restored" ]; then
+  refuse "this Air dispatch was cancelled/restored before its worker started"
+fi
 
 case "$INSTALL_DIR" in
   "$HOME"/?*) ;;
   *) refuse "install dir $INSTALL_DIR is not under $HOME" ;;
 esac
 case "$INSTALL_DIR" in *"/../"*|*/..|*"/./"*|*/.|*//*) refuse "install dir $INSTALL_DIR is not canonical" ;; esac
-[ -d "$INSTALL_DIR" ] && [ ! -L "$INSTALL_DIR" ] || refuse "install dir $INSTALL_DIR is missing or a symlink"
+[ ! -L "$INSTALL_DIR" ] || refuse "install dir $INSTALL_DIR is a symlink"
+if [ "$MODE" = swap ] && [ "$AIR_ACTION" = restore-air ] && [ ! -e "$INSTALL_DIR" ]; then
+  [ "$(cd "$(dirname "$INSTALL_DIR")" && pwd -P)" = "$(dirname "$INSTALL_DIR")" ] &&
+    [ -O "$(dirname "$INSTALL_DIR")" ] || refuse "Air recovery parent is not canonical and owner-owned"
+else
+[ -d "$INSTALL_DIR" ] || refuse "install dir $INSTALL_DIR is missing"
 # No symlinked ancestor below $HOME either: the physical path must be the
 # lexical one, so every mv/cp/rm below stays inside it.
 [ "$(cd "$INSTALL_DIR" && pwd -P)" = "$(cd "$HOME" && pwd -P)/${INSTALL_DIR#"$HOME"/}" ] ||
   refuse "install dir $INSTALL_DIR resolves through a symlink"
 [ -O "$INSTALL_DIR" ] || refuse "install dir $INSTALL_DIR is not owned by $(id -un)"
+fi
 [ "$MODE" != swap ] || { [ ! -e "$BACKUP" ] && [ ! -e "$FAILED_DIR" ]; } || refuse "backup path $BACKUP already exists"
 [ -f "$LA_DIR/$LABEL.plist" ] || refuse "missing LaunchAgent $LA_DIR/$LABEL.plist"
 [ "$MODE" = swap ] || {
@@ -566,8 +616,27 @@ case "$INSTALL_DIR" in *"/../"*|*/..|*"/./"*|*/.|*//*) refuse "install dir $INST
 
 if [ "$MODE" = swap ] && [ "$AIR_ACTION" = restore-air ]; then
   CONFIG="$AIR_CONFIG"
-  [ "$VERSION" = 1.8.260 ] && [ "$(sysctl -n hw.model)" = Mac15,12 ] || refuse "Air payload restore identity mismatch"
+  [ "$VERSION" = 1.8.260 ] && [ "$(sysctl -n hw.model)" = Mac15,12 ] &&
+    [ "$(sysctl -n hw.memsize)" = 17179869184 ] || refuse "Air payload restore identity mismatch"
   verify_launch_plist || refuse "Air restore LaunchAgent mismatch"
+  [ -f "$AIR_CONFIG" ] && [ ! -L "$AIR_CONFIG" ] && [ -O "$AIR_CONFIG" ] || refuse "Air baseline config is not an owned regular file"
+  [ "$(shasum -a 256 "$AIR_CONFIG" | awk '{print $1}')" = "$AIR_CONFIG_SHA" ] || refuse "Air baseline config changed"
+  if [ ! -e "$(dirname "$RESULT_FILE")/result.recovery.json" ]; then
+    # The same host lock excludes a live worker. An unchanged authenticated
+    # incumbent proves the pre-armed window; result.restored seals cancellation
+    # against a delayed original worker after this lock is released.
+    [ -f "$INSTALL_DIR/macprovider-cli" ] && [ ! -L "$INSTALL_DIR/macprovider-cli" ] || refuse "pre-armed Air incumbent is absent"
+    [ "$(shasum -a 256 "$INSTALL_DIR/macprovider-cli" | awk '{print $1}')" = "$AIR_OLD_BINARY_SHA" ] || refuse "pre-armed Air bytes changed"
+    codesign --verify --strict "$INSTALL_DIR/macprovider-cli" >/dev/null 2>&1 || refuse "pre-armed incumbent signature invalid"
+    body="$(status_json)" || refuse "pre-armed incumbent status is unavailable"
+    [ "$(status_field "$body" binary_version)" = 1.8.258 ] &&
+      [ "$(status_field_sha "$body" provider_id)" = "$AIR_PROVIDER_SHA" ] &&
+      [ "$(status_field "$body" coordinator.connected)" = false ] &&
+      [ "$(status_field "$body" requests_in_flight)" = 0 ] &&
+      [ "$(status_field "$body" lifecycle.operator_paused)" != true ] || refuse "pre-armed incumbent is not the untouched Air baseline"
+    verify_job_process "$(job_pid)" >/dev/null || refuse "pre-armed incumbent process mismatch"
+    finish 5
+  fi
   BACKUP="$(python3 - "$(dirname "$RESULT_FILE")/result.recovery.json" "$INSTALL_DIR" "$AIR_CONFIG" "$AIR_PROVIDER_SHA" "$AIR_OLD_BINARY_SHA" "$TARBALL_SHA" <<'PY'
 import hashlib, json, os, pathlib, stat, sys
 path, install, config, provider, binary_sha, target_sha = sys.argv[1:]
@@ -580,6 +649,7 @@ backup=pathlib.Path(d["backup_path"])
 if backup.parent!=pathlib.Path(install).parent or not backup.name.startswith(pathlib.Path(install).name+".pre-1.8.260-") or backup.resolve()!=backup or not backup.is_dir(): raise SystemExit(1)
 binary=backup/"macprovider-cli"
 if binary.is_symlink() or hashlib.sha256(binary.read_bytes()).hexdigest()!=binary_sha: raise SystemExit(1)
+if not pathlib.Path(install).exists() and d.get("phase")!="restoring": raise SystemExit(1)
 print(backup)
 PY
 )" || refuse "Air recovery record/backup/config cannot be authenticated"
@@ -720,6 +790,7 @@ if [ -n "$AIR_PROVIDER_SHA" ]; then
   [ "$(status_field "$body" coordinator.connected)" = false ] && [ "$(status_field "$body" requests_in_flight)" = 0 ] || refuse "Air recovery requires disconnected zero-inflight incumbent"
   [ "$(status_field "$body" lifecycle.operator_paused)" != true ] || refuse "Air recovery cannot override operator pause"
   [ "$(shasum -a 256 "$INSTALL_DIR/macprovider-cli" | awk '{print $1}')" = "$AIR_OLD_BINARY_SHA" ] || refuse "Air recovery incumbent bytes changed"
+  [ "$(shasum -a 256 "$AIR_CONFIG" | awk '{print $1}')" = "$AIR_CONFIG_SHA" ] || refuse "Air recovery config changed"
   codesign --verify --strict "$INSTALL_DIR/macprovider-cli" >/dev/null 2>&1 || refuse "Air recovery incumbent signature is invalid"
   CONFIG="$AIR_CONFIG"
   verify_launch_plist || refuse "Air recovery LaunchAgent mismatch"

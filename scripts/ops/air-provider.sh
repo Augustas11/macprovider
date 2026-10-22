@@ -85,15 +85,27 @@ gather() {
   # interrupted detached payload swap. Preserve its backup/log for recovery.
   if marker_done "cli-release-$VERSION" air_recovery_dispatch; then
     local payload_result
-    payload_result="$(marker_field "cli-release-$VERSION" air_recovery_result 'd.get("exit_code")')"
+    local payload_stage
+    payload_stage="$(marker_field "cli-release-$VERSION" air_recovery_dispatch 'd.get("stage")')"
+    q "$payload_stage" >/dev/null
+    payload_result=""
+    if [ "$(marker_field "cli-release-$VERSION" air_recovery_result 'd.get("stage")')" = "$payload_stage" ] &&
+       [ "$(marker_field "cli-release-$VERSION" air_recovery_result 'd.get("provider_id_sha256")')" = "$AIR_PROVIDER_SHA256" ]; then
+      case "$(marker_field "cli-release-$VERSION" air_recovery_result 'd.get("action")')" in
+        recover-air) payload_result="$(marker_field "cli-release-$VERSION" air_recovery_result 'd.get("exit_code")')" ;;
+        restore-air) [ "$(marker_field "cli-release-$VERSION" air_recovery_result 'd.get("exit_code")')" != 5 ] || payload_result=5 ;;
+      esac
+    fi
     case "$payload_result" in
       0|4|5) ;;
       *)
-        local payload_stage
-        payload_stage="$(marker_field "cli-release-$VERSION" air_recovery_dispatch 'd.get("stage")')"
-        q "$payload_stage" >/dev/null
-        payload_result="$(studio_ssh "cat $(q "$payload_stage/result") 2>/dev/null" || true)" ;;
+        payload_result="$(studio_ssh "cat $(q "$payload_stage/result.restored") 2>/dev/null || cat $(q "$payload_stage/result") 2>/dev/null" || true)" ;;
     esac
+    # A terminal file is published before the detached process drops its lock.
+    # Never overlap adoption with even that final shutdown window.
+    if studio_ssh 'p=$(cat "$HOME/.macprovider-canary-swap.lock/pid" 2>/dev/null) && kill -0 "$p" 2>/dev/null'; then
+      payload_result=""
+    fi
     case "$payload_result" in
       0|4|5) ;;
       *) set_next payload_recovery mutate "Restore the authenticated signed Air incumbent after interruption" "scripts/ops/air-provider.sh _restore-payload"; return ;;
@@ -153,6 +165,8 @@ recover() {
   probe && signed_identity 1.8.258 || refuse "Air incumbent signed identity changed"
   export AIR_RECOVERY_PROVIDER_SHA256="$AIR_PROVIDER_SHA256" AIR_RECOVERY_CONFIG="$AIR_CONFIG"
   export AIR_RECOVERY_BINARY_SHA256="$BINARY_SHA" CANARY_INSTALL_DIR="$AIR_INSTALL_DIR"
+  AIR_RECOVERY_CONFIG_SHA256="$(json_field "$OPS_TMP_DIR/air-probe.json" 'd["config_sha256"]')"
+  export AIR_RECOVERY_CONFIG_SHA256
   export CANARY_RUNNER_STOP_CMD=none CANARY_RUNNER_START_CMD=none
   "$OPS_DIR/canary-swap.sh" recover-air --version "$VERSION"
 }
@@ -162,10 +176,12 @@ restore_payload() {
   AIR_RECOVERY_BINARY_SHA256="$(marker_field "cli-release-$VERSION" air_recovery_dispatch 'd.get("incumbent_binary_sha256")')"
   [[ "$AIR_RECOVERY_BINARY_SHA256" =~ ^[0-9a-f]{64}$ ]] || refuse "payload restore lacks authenticated incumbent digest"
   export AIR_RECOVERY_BINARY_SHA256 CANARY_INSTALL_DIR="$AIR_INSTALL_DIR"
+  AIR_RECOVERY_CONFIG_SHA256="$(marker_field "cli-release-$VERSION" air_recovery_dispatch 'd.get("config_sha256")')"
+  export AIR_RECOVERY_CONFIG_SHA256
   export CANARY_RUNNER_STOP_CMD=none CANARY_RUNNER_START_CMD=none
   local rc=0
   "$OPS_DIR/canary-swap.sh" restore-air --version "$VERSION" || rc=$?
-  [ "$rc" = 5 ] || return 6
+  case "$rc" in 0|5) return 0 ;; *) return 6 ;; esac
 }
 
 restore() {
