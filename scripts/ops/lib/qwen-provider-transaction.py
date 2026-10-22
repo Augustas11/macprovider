@@ -14,6 +14,7 @@ import argparse
 import contextlib
 import fcntl
 import hashlib
+import http.client
 import json
 import os
 import plistlib
@@ -63,6 +64,13 @@ TRANSACTION_OWNED = RECOMMENDATION_OWNED + (
 )
 
 TARGETS: dict[str, dict[str, str]] = {
+    "qwen3-8b": {
+        "gateway_id": "qwen3-8b",
+        "catalog_key": "qwen3-8b",
+        "model_id": "mlx-community/Qwen3-8B-4bit",
+        "revision": "545dc4251c05440727734bcd94334791f6ab0192",
+        "sha256": "1f591f9c4fb38d05ea2d879d89a6eeab485c23a04eb75e3e0a289db9d95ec877",
+    },
     "qwen3-coder-30b-a3b-instruct": {
         "gateway_id": "qwen3-coder-30b-a3b-instruct",
         "catalog_key": "qwen3-coder-30b-a3b-instruct",
@@ -88,7 +96,16 @@ TARGETS: dict[str, dict[str, str]] = {
 
 LEGACY_PROFILE = "opencode-dual-30b"
 NATIVE_MTP_PROFILE = "qwen36-native-mtp"
+AIR_PROFILE = "air-qwen8-adoption"
 PROFILES: dict[str, dict[str, Any]] = {
+    AIR_PROFILE: {
+        "schema": PROFILE_SCHEMA,
+        "targets": ("qwen3-8b",),
+        "adopting": ("adopting_target",),
+        "serving": ("serving_target",),
+        "complete": "proof_complete",
+        "context_floor": 4_000,
+    },
     LEGACY_PROFILE: {
         "schema": LEGACY_SCHEMA,
         "targets": ("qwen3-coder-30b-a3b-instruct", "qwen3-30b-a3b-instruct-2507"),
@@ -179,7 +196,11 @@ def config_lock(config: Path) -> Iterator[None]:
         os.close(descriptor)
 
 
-def split_blocks(data: bytes) -> tuple[list[tuple[str | None, bytes]], dict[str, bytes]]:
+def owned_keys(profile: str | None = None) -> tuple[str, ...]:
+    return TRANSACTION_OWNED + (("mlx_cache_limit_mb",) if profile == AIR_PROFILE else ())
+
+
+def split_blocks(data: bytes, profile: str | None = None) -> tuple[list[tuple[str | None, bytes]], dict[str, bytes]]:
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -213,21 +234,21 @@ def split_blocks(data: bytes) -> tuple[list[tuple[str | None, bytes]], dict[str,
             raise Refusal("unsupported top-level YAML syntax")
         current.append(line)
     flush()
-    owned = {key: raw for key, raw in blocks if key in TRANSACTION_OWNED}
+    owned = {key: raw for key, raw in blocks if key in owned_keys(profile)}
     return blocks, owned
 
 
-def without_owned(blocks: list[tuple[str | None, bytes]]) -> bytes:
-    return b"".join(raw for key, raw in blocks if key not in TRANSACTION_OWNED)
+def without_owned(blocks: list[tuple[str | None, bytes]], profile: str | None = None) -> bytes:
+    return b"".join(raw for key, raw in blocks if key not in owned_keys(profile))
 
 
-def render(blocks: list[tuple[str | None, bytes]], replacements: dict[str, bytes]) -> bytes:
+def render(blocks: list[tuple[str | None, bytes]], replacements: dict[str, bytes], profile: str | None = None) -> bytes:
     output = bytearray()
     inserted = False
     for key, raw in blocks:
-        if key in TRANSACTION_OWNED:
+        if key in owned_keys(profile):
             if not inserted:
-                for owned_key in TRANSACTION_OWNED:
+                for owned_key in owned_keys(profile):
                     if owned_key in replacements:
                         output.extend(replacements[owned_key])
                 inserted = True
@@ -236,7 +257,7 @@ def render(blocks: list[tuple[str | None, bytes]], replacements: dict[str, bytes
     if not inserted:
         if output and not output.endswith(b"\n"):
             output.extend(b"\n")
-        for owned_key in TRANSACTION_OWNED:
+        for owned_key in owned_keys(profile):
             if owned_key in replacements:
                 output.extend(replacements[owned_key])
     return bytes(output)
@@ -295,8 +316,8 @@ def journal_profile(journal: dict[str, Any]) -> str:
         if "profile" in journal:
             raise Refusal("legacy journal cannot carry a profile")
         return LEGACY_PROFILE
-    if schema == PROFILE_SCHEMA and journal.get("profile") == NATIVE_MTP_PROFILE:
-        return NATIVE_MTP_PROFILE
+    if schema == PROFILE_SCHEMA and journal.get("profile") in {NATIVE_MTP_PROFILE, AIR_PROFILE}:
+        return journal["profile"]
     raise Refusal("unsupported transaction journal schema")
 
 
@@ -313,6 +334,8 @@ def load_journal(path: Path) -> dict[str, Any]:
     phases = ({"armed", "prepared", "restoring", "config_restored", "restored"}
               | set(profile_spec["adopting"]) | set(profile_spec["serving"])
               | {profile_spec["complete"]})
+    if profile == AIR_PROFILE:
+        phases.add("committed")
     if journal["phase"] not in phases:
         raise Refusal("invalid transaction phase")
     allowed = {"schema_version", "transaction_id", "config_path", "phase", "baseline_owned",
@@ -322,10 +345,26 @@ def load_journal(path: Path) -> dict[str, Any]:
                "market_binding", "intended_after_unix", "remote_scratch"}
     if profile != LEGACY_PROFILE:
         allowed.add("profile")
+    if profile == AIR_PROFILE:
+        allowed.add("paid_proof_sha256")
+        allowed.add("owner_selection")
+        selection = journal.get("owner_selection")
+        if selection is not None and (
+                not isinstance(selection, dict) or set(selection) != {
+                    "requested_slots", "verified_k", "preferred_served_slots", "policy_tuple_sha256", "pid"}
+                or selection.get("requested_slots") != 4
+                or type(selection.get("verified_k")) is not int or selection["verified_k"] < 4
+                or type(selection.get("preferred_served_slots")) is not int
+                or not 1 <= selection["preferred_served_slots"] <= selection["verified_k"]
+                or type(selection.get("pid")) is not int or selection["pid"] < 1
+                or not HEX64.fullmatch(str(selection.get("policy_tuple_sha256", "")))):
+            raise Refusal("invalid Air owner-selection binding")
+        if journal["phase"] == "committed" and not HEX64.fullmatch(str(journal.get("paid_proof_sha256", ""))):
+            raise Refusal("committed adoption lacks paid proof binding")
     if set(journal) - allowed:
         raise Refusal("transaction journal contains unsupported fields")
     baseline = journal.get("baseline_owned")
-    if not isinstance(baseline, dict) or set(baseline) - set(TRANSACTION_OWNED):
+    if not isinstance(baseline, dict) or set(baseline) - set(owned_keys(profile)):
         raise Refusal("invalid owned-field snapshot")
     if not all(isinstance(key, str) and isinstance(value, str) for key, value in baseline.items()):
         raise Refusal("invalid owned-field snapshot values")
@@ -525,7 +564,7 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
         journal_path.unlink()
     with config_lock(config):
         original = config.read_bytes()
-        blocks, owned = split_blocks(original)
+        blocks, owned = split_blocks(original, profile)
         present_keys = {key for key, _ in blocks if key is not None}
         unsupported_draft = present_keys.intersection({
             "draft_model", "draft_model_artifact_path", "draft_model_artifact_sha256",
@@ -549,8 +588,11 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
         # is not: retaining the default false avoids exposing cold targets.
         replacements["publishes_supported_models"] = b"publishes_supported_models: false\n"
         replacements["enable_warm_swap"] = b"enable_warm_swap: true\n"
-        candidate = render(blocks, replacements)
-        base_unowned = sha256(without_owned(blocks))
+        if profile == AIR_PROFILE:
+            # Replay the qualified Air memory profile, never a concurrency pin.
+            replacements["mlx_cache_limit_mb"] = b"mlx_cache_limit_mb: 512\n"
+        candidate = render(blocks, replacements, profile)
+        base_unowned = sha256(without_owned(blocks, profile))
         baseline = {key: value.decode("utf-8") for key, value in owned.items()}
         transaction = {
             "schema_version": profile_spec["schema"],
@@ -675,10 +717,16 @@ def owned_matches_intent(
     owned: dict[str, bytes], expected: dict[str, str], intended_after: int | None,
     supported_models_sha256: str,
 ) -> bool:
+    if expected.get("model") == "qwen3-8b" and scalar(owned, "mlx_cache_limit_mb") != "512":
+        return False
     if sha256(owned.get("supported_models", b"")) != supported_models_sha256:
         return False
     for key in RECOMMENDATION_OWNED:
         if key == "max_context_override_provenance":
+            if key not in expected:
+                if key in owned:
+                    return False
+                continue
             if not generated_provenance_matches(owned.get(key), expected[key], intended_after):
                 return False
             continue
@@ -709,8 +757,8 @@ def begin_adoption(args: argparse.Namespace) -> dict[str, Any]:
         if Path(journal["config_path"]) != config or journal["phase"] == "restored":
             raise Refusal("journal is not active for this config")
         current = config.read_bytes()
-        blocks, _ = split_blocks(current)
-        if sha256(without_owned(blocks)) != journal["unowned_sha256"]:
+        blocks, _ = split_blocks(current, profile)
+        if sha256(without_owned(blocks, profile)) != journal["unowned_sha256"]:
             raise Refusal("non-owned config fields changed during transaction")
         if sha256(current) != journal["last_config_sha256"]:
             raise Refusal("config changed before adoption intent was armed")
@@ -735,8 +783,8 @@ def checkpoint(args: argparse.Namespace) -> dict[str, Any]:
         if Path(journal["config_path"]) != config or journal["phase"] == "restored":
             raise Refusal("journal is not active for this config")
         current = config.read_bytes()
-        blocks, owned = split_blocks(current)
-        if sha256(without_owned(blocks)) != journal["unowned_sha256"]:
+        blocks, owned = split_blocks(current, profile)
+        if sha256(without_owned(blocks, profile)) != journal["unowned_sha256"]:
             raise Refusal("non-owned config fields changed during transaction")
         if args.phase == spec["complete"]:
             if (journal["phase"] != spec["serving"][-1]
@@ -769,23 +817,143 @@ def checkpoint(args: argparse.Namespace) -> dict[str, Any]:
             "config_sha256": journal["last_config_sha256"]}
 
 
+def air_context(args: argparse.Namespace) -> dict[str, Any]:
+    """Journal the released context setter's exact operator-owned transition."""
+    config = absolute_path(args.config)
+    journal_path = absolute_path(args.journal)
+    with config_lock(config):
+        journal = load_journal(journal_path)
+        if journal_profile(journal) != AIR_PROFILE or Path(journal["config_path"]) != config:
+            raise Refusal("context transition requires the Air journal")
+        current = config.read_bytes()
+        blocks, owned = split_blocks(current, AIR_PROFILE)
+        if sha256(without_owned(blocks, AIR_PROFILE)) != journal["unowned_sha256"]:
+            raise Refusal("non-owned fields changed before context transition")
+        if args.action == "begin":
+            if journal["phase"] != "serving_target" or sha256(current) != journal["last_config_sha256"]:
+                raise Refusal("context transition requires the adopted checkpoint")
+            intended = {key: scalar(owned, key) for key in RECOMMENDATION_OWNED
+                        if key in owned and key != "max_context_override_provenance"}
+            intended["max_context_override"] = "8192"
+            journal.update(phase="adopting_target", intended_owned=intended,
+                           intended_target="qwen3-8b", intended_after_unix=int(time.time()) - 1)
+        else:
+            intended = journal.get("intended_owned")
+            if (journal["phase"] != "adopting_target" or not isinstance(intended, dict)
+                    or intended.get("max_context_override") != "8192"
+                    or "max_context_override_provenance" in intended
+                    or not owned_matches_intent(owned, intended, journal.get("intended_after_unix"),
+                                                journal["prepared_supported_models_sha256"])):
+                raise Refusal("context setter did not match its armed transition")
+            journal.update(phase="serving_target", last_config_sha256=sha256(current))
+            for key in ("intended_owned", "intended_target", "intended_after_unix"):
+                journal.pop(key, None)
+        write_journal(journal_path, journal)
+    return {"status": "context_" + args.action}
+
+
+def air_status(port: int) -> dict[str, Any]:
+    if not 1 <= port <= 65535:
+        raise Refusal("Air status port is outside its valid range")
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    try:
+        connection.request("GET", "/v1/status")
+        response = connection.getresponse()
+        raw = response.read(2 * 1024 * 1024 + 1)
+        if response.status != 200 or len(raw) > 2 * 1024 * 1024:
+            raise Refusal("Air live status is unavailable")
+        value = json.loads(raw)
+        if not isinstance(value, dict):
+            raise Refusal("Air status is not an object")
+        return value
+    finally:
+        connection.close()
+
+
+def select_air_four(args: argparse.Namespace) -> dict[str, Any]:
+    """Explicit SPEC-038 FR-CB11 owner selection, bounded by real verified_k."""
+    authenticate_air_recovery(args)
+    policy_path = absolute_path(args.policy_json)
+    safe_regular(policy_path)
+    policy = strict_json(policy_path)
+    rows = [row for row in policy.get("entries", []) if row.get("model_key") == "qwen3-8b"]
+    if (len(rows) != 1 or rows[0].get("max_served_slots") != 4
+            or rows[0].get("model_sha256") != TARGETS["qwen3-8b"]["sha256"]
+            or rows[0].get("hardware_class") != "apple-silicon:Apple M3:ram-16gb"):
+        raise Refusal("owner selection requires the exact four-slot Air policy")
+    row = rows[0]
+    config, journal_path = absolute_path(args.config), absolute_path(args.journal)
+    with config_lock(config):
+        journal = load_journal(journal_path)
+        if journal_profile(journal) != AIR_PROFILE or journal["phase"] != "serving_target":
+            raise Refusal("owner selection requires adopted Air checkpoint")
+        current = config.read_bytes()
+        if sha256(current) != journal["last_config_sha256"]:
+            raise Refusal("config changed before owner selection")
+        status = air_status(args.port)
+        cb = status.get("continuous_batching", {})
+        live_policy, check = cb.get("policy", {}), cb.get("self_check", {})
+        if (status.get("binary_version") != "1.8.260" or status.get("model") != "qwen3-8b"
+                or status.get("provider_id") != journal["release_binding"]["provider_id"]
+                or status.get("service_instance", {}).get("pid") != args.pid
+                or not status.get("model_loaded") or status.get("network_state") != "buyer_serving"
+                or status.get("coordinator", {}).get("connected") is not True
+                or status.get("lifecycle", {}).get("operator_paused") is True
+                or cb.get("active") is not True or live_policy.get("authorized") is not True
+                or live_policy.get("load_status") != "live_verified"
+                or live_policy.get("policy_sha256") != sha256(policy_path.read_bytes())
+                or live_policy.get("release_id") != policy.get("release_id")
+                or live_policy.get("tuple_sha256") != row.get("tuple_sha256")
+                or any(check.get(key) != row.get(key) for key in
+                       ("model_sha256", "hardware_class", "metallib_sha256", "kernel_identifier"))
+                or type(check.get("verified_k")) is not int or check["verified_k"] < 4
+                or type(check.get("served_slots")) is not int or check["served_slots"] < 1):
+            raise Refusal("owner selection requires the live exact tuple verified at four slots")
+        blocks, owned = split_blocks(current, AIR_PROFILE)
+        if sha256(without_owned(blocks, AIR_PROFILE)) != journal["unowned_sha256"]:
+            raise Refusal("non-owned fields changed before owner selection")
+        if scalar(owned, "model") != "qwen3-8b" or scalar(owned, "max_context_override") != "8192":
+            raise Refusal("owner selection requires adopted qualified context")
+        replacements = dict(owned)
+        replacements["max_concurrency_override"] = b"max_concurrency_override: 4\n"
+        replacements["max_concurrency_source"] = b"max_concurrency_source: owner\n"
+        replacements.pop("max_concurrency_depth_override", None)
+        intended = {key: scalar(replacements, key) for key in RECOMMENDATION_OWNED if key in replacements}
+        journal.update(phase="adopting_target", intended_owned=intended,
+                       intended_target="qwen3-8b", intended_after_unix=int(time.time()) - 1)
+        journal["owner_selection"] = {"requested_slots": 4, "verified_k": check["verified_k"],
+                                      "preferred_served_slots": check["served_slots"],
+                                      "policy_tuple_sha256": row["tuple_sha256"], "pid": args.pid}
+        write_journal(journal_path, journal)
+        written = validate_then_replace(config, absolute_path(args.validator), render(blocks, replacements, AIR_PROFILE))
+        journal.update(phase="serving_target", last_config_sha256=written)
+        for key in ("intended_owned", "intended_target", "intended_after_unix"):
+            journal.pop(key, None)
+        write_journal(journal_path, journal)
+    return {"status": "owner_selected", "requested_slots": 4,
+            "preferred_served_slots": check["served_slots"], "verified_k": check["verified_k"]}
+
+
 def restore(args: argparse.Namespace) -> dict[str, Any]:
     config = absolute_path(args.config)
     journal_path = absolute_path(args.journal)
     validator = absolute_path(args.validator)
     with config_lock(config):
         journal = load_journal(journal_path)
+        if journal["phase"] == "committed":
+            raise Refusal("committed adoption cannot restore the incumbent")
         if Path(journal["config_path"]) != config:
             raise Refusal("journal belongs to another config")
         if journal["phase"] in {"config_restored", "restored"}:
             return {"status": journal["phase"], "idempotent": True,
                     "config_sha256": journal["last_config_sha256"]}
         current = config.read_bytes()
-        blocks, owned = split_blocks(current)
-        if sha256(without_owned(blocks)) != journal["unowned_sha256"]:
+        profile = journal_profile(journal)
+        blocks, owned = split_blocks(current, profile)
+        if sha256(without_owned(blocks, profile)) != journal["unowned_sha256"]:
             raise Refusal("non-owned config fields changed; refusing unsafe restore")
         baseline = {key: value.encode("utf-8") for key, value in journal["baseline_owned"].items()}
-        candidate = render(blocks, baseline)
+        candidate = render(blocks, baseline, profile)
         baseline_sha = sha256(candidate)
         current_sha = sha256(current)
         if current_sha != journal["last_config_sha256"]:
@@ -827,9 +995,10 @@ def finish_restore(args: argparse.Namespace) -> dict[str, Any]:
         if journal["phase"] != "config_restored":
             raise Refusal("config restoration has not completed")
         current = config.read_bytes()
-        blocks, _ = split_blocks(current)
+        profile = journal_profile(journal)
+        blocks, _ = split_blocks(current, profile)
         if (sha256(current) != journal["last_config_sha256"]
-                or sha256(without_owned(blocks)) != journal["unowned_sha256"]):
+                or sha256(without_owned(blocks, profile)) != journal["unowned_sha256"]):
             raise Refusal("config changed before restored service was confirmed")
         journal["phase"] = "restored"
         write_journal(journal_path, journal)
@@ -848,7 +1017,8 @@ def inspect(args: argparse.Namespace) -> dict[str, Any]:
         baseline_model = scalar(parsed, "model")
     scratch_exists = Path(journal["remote_scratch"]).exists()
     result = {"status": journal["phase"], "transaction_id": journal.get("transaction_id"),
-              "restore_required": journal["phase"] != "restored" or scratch_exists,
+              "restore_required": (journal["phase"] != "committed"
+                                   and (journal["phase"] != "restored" or scratch_exists)),
               "scratch_cleanup_required": scratch_exists,
               "remote_scratch": journal["remote_scratch"], "baseline_model": baseline_model,
               "release_binding": journal["release_binding"],
@@ -858,6 +1028,68 @@ def inspect(args: argparse.Namespace) -> dict[str, Any]:
     if profile != LEGACY_PROFILE:
         result["profile"] = profile
     return result
+
+
+def commit_adoption(args: argparse.Namespace) -> dict[str, Any]:
+    """Keep only the reviewed Air target after the controller's paid proof.
+
+    The controller checks the signed live process before and after its proof;
+    this terminal transition binds that proof to the exact checkpointed config.
+    It is intentionally unavailable to the temporary acceptance profiles.
+    """
+    config, journal_path = absolute_path(args.config), absolute_path(args.journal)
+    if not HEX64.fullmatch(args.paid_proof_sha256):
+        raise Refusal("paid proof digest is invalid")
+    with config_lock(config):
+        journal = load_journal(journal_path)
+        if journal_profile(journal) != AIR_PROFILE or journal["config_path"] != str(config):
+            raise Refusal("persistent adoption requires the Air profile and exact config")
+        if journal["phase"] == "committed":
+            if journal["paid_proof_sha256"] != args.paid_proof_sha256:
+                raise Refusal("committed adoption proof differs")
+            if sha256(config.read_bytes()) != journal["last_config_sha256"]:
+                raise Refusal("config changed after paid proof")
+            return {"status": "committed", "idempotent": True}
+        if journal["phase"] != PROFILES[AIR_PROFILE]["complete"] or journal.get("intended_owned") is not None:
+            raise Refusal("adoption has not reached proof completion")
+        current = config.read_bytes()
+        if sha256(current) != journal["last_config_sha256"]:
+            raise Refusal("config changed after paid proof")
+        journal["phase"] = "committed"
+        journal["paid_proof_sha256"] = args.paid_proof_sha256
+        write_journal(journal_path, journal)
+    return {"status": "committed", "idempotent": False}
+
+
+def authenticate_air_recovery(args: argparse.Namespace) -> dict[str, Any]:
+    """Authenticate journal-bound released bytes even if serve cannot answer."""
+    config, binary = absolute_path(args.config), absolute_path(args.validator)
+    journal = load_journal(absolute_path(args.journal))
+    if journal_profile(journal) != AIR_PROFILE or journal["config_path"] != str(config):
+        raise Refusal("recovery does not belong to this Air config")
+    release = journal["release_binding"]
+    if sha256(release["provider_id"].encode()) != args.provider_sha256:
+        raise Refusal("recovery provider identity differs")
+    if release["binary_version"] != "1.8.260":
+        raise Refusal("recovery release is outside the reviewed Air transition")
+    safe_regular(binary)
+    if sha256(binary.read_bytes()) != release["cli_sha256"]:
+        raise Refusal("journal-bound released executable changed")
+    subprocess.run(["/usr/bin/codesign", "--verify", "--strict", str(binary)],
+                   capture_output=True, check=True, timeout=30)
+    displayed = subprocess.run(["/usr/bin/codesign", "-d", "--verbose=4", str(binary)],
+                               capture_output=True, text=True, check=True, timeout=30)
+    fields = dict(line.split("=", 1) for line in displayed.stderr.splitlines() if "=" in line)
+    if any(fields.get(key) != release[value] for key, value in (
+        ("TeamIdentifier", "team_id"), ("Identifier", "signing_identifier"), ("CDHash", "code_cdhash"),
+    )):
+        raise Refusal("recovery signed identity differs from journal")
+    hardware = subprocess.run(["/usr/sbin/sysctl", "-n", "hw.model"], capture_output=True,
+                              text=True, check=True, timeout=10).stdout.strip()
+    if hardware != "Mac15,12":
+        raise Refusal("recovery is not on the designated Air hardware")
+    return {"status": "authenticated", "baseline_model": scalar(
+        {key: value.encode() for key, value in journal["baseline_owned"].items()}, "model")}
 
 
 def verify_recommendation(args: argparse.Namespace) -> dict[str, Any]:
@@ -977,6 +1209,28 @@ def parser() -> argparse.ArgumentParser:
     inspect_parser = commands.add_parser("inspect")
     inspect_parser.add_argument("--journal", required=True)
     inspect_parser.set_defaults(run=inspect)
+    commit_parser = commands.add_parser("commit-adoption")
+    commit_parser.add_argument("--config", required=True)
+    commit_parser.add_argument("--journal", required=True)
+    commit_parser.add_argument("--paid-proof-sha256", required=True)
+    commit_parser.set_defaults(run=commit_adoption)
+    context_parser = commands.add_parser("air-context")
+    context_parser.add_argument("--config", required=True)
+    context_parser.add_argument("--journal", required=True)
+    context_parser.add_argument("--action", required=True, choices=("begin", "finish"))
+    context_parser.set_defaults(run=air_context)
+    slots_parser = commands.add_parser("select-air-four")
+    for name in ("config", "journal", "validator", "provider-sha256", "policy-json"):
+        slots_parser.add_argument("--" + name, required=True)
+    slots_parser.add_argument("--port", type=int, required=True)
+    slots_parser.add_argument("--pid", type=int, required=True)
+    slots_parser.set_defaults(run=select_air_four)
+    auth_parser = commands.add_parser("authenticate-air-recovery")
+    auth_parser.add_argument("--config", required=True)
+    auth_parser.add_argument("--journal", required=True)
+    auth_parser.add_argument("--validator", required=True)
+    auth_parser.add_argument("--provider-sha256", required=True)
+    auth_parser.set_defaults(run=authenticate_air_recovery)
     verify_parser = commands.add_parser("verify-recommendation")
     verify_parser.add_argument("--profile", choices=tuple(PROFILES), default=LEGACY_PROFILE)
     verify_parser.add_argument("--recommendation", required=True)

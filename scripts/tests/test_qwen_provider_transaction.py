@@ -94,6 +94,173 @@ class QwenProviderTransactionTests(unittest.TestCase):
         transaction.finish_restore(self.args())
         self.assertTrue(transaction.finish_restore(self.args())["idempotent"])
 
+    def prepare_air_adoption(self):
+        args = self.args(profile=transaction.AIR_PROFILE)
+        transaction.prepare(args)
+        verify = self.verify_args(self.recommendation("qwen3-8b"),
+                                  target="qwen3-8b", profile=transaction.AIR_PROFILE)
+        transition = self.args(profile=transaction.AIR_PROFILE, target=verify.target,
+                               recommendation=verify.recommendation,
+                               catalog_version=verify.catalog_version,
+                               catalog_hash=verify.catalog_hash,
+                               phase="adopting_target")
+        transaction.begin_adoption(transition)
+        self.apply_recommendation(verify)
+        transition.phase = "serving_target"
+        transaction.checkpoint(transition)
+        return transition
+
+    def test_air_adoption_keeps_target_only_after_completed_proof(self):
+        transition = self.prepare_air_adoption()
+        commit = self.args(paid_proof_sha256="c" * 64)
+        with self.assertRaisesRegex(transaction.Refusal, "proof completion"):
+            transaction.commit_adoption(commit)
+        transition.phase = "proof_complete"
+        transaction.checkpoint(transition)
+        target_config = self.config.read_bytes()
+        self.assertEqual(transaction.commit_adoption(commit)["status"], "committed")
+        self.assertTrue(transaction.commit_adoption(commit)["idempotent"])
+        self.assertEqual(self.config.read_bytes(), target_config)
+        self.assertFalse(transaction.inspect(self.args())["restore_required"])
+        with self.assertRaisesRegex(transaction.Refusal, "cannot restore"):
+            transaction.restore(self.args())
+        self.assertNotIn("top-secret", self.journal.read_text())
+
+    def test_air_context_uses_released_operator_transition_and_restores_baseline(self):
+        self.prepare_air_adoption()
+        self.assertIn("mlx_cache_limit_mb: 512", self.config.read_text())
+        transaction.air_context(self.args(action="begin"))
+        blocks, owned = transaction.split_blocks(self.config.read_bytes())
+        owned["max_context_override"] = b"max_context_override: 8192\n"
+        owned.pop("max_context_override_provenance", None)
+        self.config.write_bytes(transaction.render(blocks, owned))
+        # A crash after the released setter wrote remains rollback-authenticated.
+        transaction.restore(self.args())
+        self.assertEqual(self.config.read_text(), BASE_CONFIG)
+
+    def test_air_context_checkpoint_refuses_unexpected_changes(self):
+        self.prepare_air_adoption()
+        transaction.air_context(self.args(action="begin"))
+        with self.assertRaisesRegex(transaction.Refusal, "armed transition"):
+            transaction.air_context(self.args(action="finish"))
+        blocks, owned = transaction.split_blocks(self.config.read_bytes())
+        owned["max_context_override"] = b"max_context_override: 8192\n"
+        owned.pop("max_context_override_provenance", None)
+        self.config.write_bytes(transaction.render(blocks, owned))
+        transaction.air_context(self.args(action="finish"))
+        self.assertEqual(transaction.inspect(self.args())["status"], "serving_target")
+        transaction.restore(self.args())
+        self.assertEqual(self.config.read_text(), BASE_CONFIG)
+
+    def test_air_cache_override_restores_existing_baseline(self):
+        baseline = BASE_CONFIG + "mlx_cache_limit_mb: 1024\n"
+        self.config.write_text(baseline)
+        transaction.prepare(self.args(profile=transaction.AIR_PROFILE))
+        self.assertIn("mlx_cache_limit_mb: 512", self.config.read_text())
+        transaction.restore(self.args())
+        blocks, owned = transaction.split_blocks(self.config.read_bytes(), transaction.AIR_PROFILE)
+        self.assertEqual(transaction.scalar(owned, "mlx_cache_limit_mb"), "1024")
+        original, _ = transaction.split_blocks(baseline.encode(), transaction.AIR_PROFILE)
+        self.assertEqual(transaction.without_owned(blocks, transaction.AIR_PROFILE),
+                         transaction.without_owned(original, transaction.AIR_PROFILE))
+
+    def air_selection_fixture(self):
+        transition = self.prepare_air_adoption()
+        transaction.air_context(self.args(action="begin"))
+        blocks, owned = transaction.split_blocks(self.config.read_bytes(), transaction.AIR_PROFILE)
+        owned["max_context_override"] = b"max_context_override: 8192\n"
+        owned.pop("max_context_override_provenance", None)
+        self.config.write_bytes(transaction.render(blocks, owned, transaction.AIR_PROFILE))
+        transaction.air_context(self.args(action="finish"))
+        policy_path = ROOT / "phase3-binary/catalog/autotune/continuous-batching-policy.json"
+        policy = json.loads(policy_path.read_text())
+        row = next(x for x in policy["entries"] if x["model_key"] == "qwen3-8b")
+        status = {"binary_version": "1.8.260", "model": "qwen3-8b", "provider_id": "provider-test",
+            "service_instance": {"pid": 4242}, "model_loaded": True, "network_state": "buyer_serving",
+            "coordinator": {"connected": True}, "lifecycle": {"operator_paused": False},
+            "continuous_batching": {"active": True, "policy": {"authorized": True,
+                "load_status": "live_verified", "policy_sha256": transaction.sha256(policy_path.read_bytes()),
+                "release_id": policy["release_id"], "tuple_sha256": row["tuple_sha256"]},
+                "self_check": {**{key: row[key] for key in ("model_sha256", "hardware_class",
+                    "metallib_sha256", "kernel_identifier")}, "served_slots": 2, "verified_k": 4}}}
+        args = self.args(port=50160, pid=4242, policy_json=str(policy_path), provider_sha256="a" * 64)
+        return transition, args, status
+
+    def test_air_owner_selection_preserves_preferred_two_and_real_recommendation(self):
+        transition, args, status = self.air_selection_fixture()
+        recommendation = Path(transition.recommendation).read_bytes()
+        observed = json.loads(json.dumps(status))
+        with mock.patch.object(transaction, "authenticate_air_recovery"), \
+                mock.patch.object(transaction, "air_status", return_value=status):
+            result = transaction.select_air_four(args)
+        self.assertEqual(result, {"status": "owner_selected", "requested_slots": 4,
+                                  "preferred_served_slots": 2, "verified_k": 4})
+        self.assertEqual(status, observed)
+        self.assertEqual(Path(transition.recommendation).read_bytes(), recommendation)
+        self.assertIn("max_concurrency_override: 4\n", self.config.read_text())
+        self.assertIn("max_concurrency_source: owner\n", self.config.read_text())
+        self.assertEqual(json.loads(self.journal.read_text())["owner_selection"]["preferred_served_slots"], 2)
+        transaction.restore(self.args())
+        self.assertEqual(self.config.read_text(), BASE_CONFIG)
+
+    def test_air_owner_selection_refuses_unverified_or_wrong_tuple_before_write(self):
+        _, args, status = self.air_selection_fixture()
+        baseline = self.config.read_bytes()
+        for verified in (1, 2, 3, True):
+            status["continuous_batching"]["self_check"]["verified_k"] = verified
+            with mock.patch.object(transaction, "authenticate_air_recovery"), \
+                    mock.patch.object(transaction, "air_status", return_value=status):
+                with self.assertRaisesRegex(transaction.Refusal, "verified at four"):
+                    transaction.select_air_four(args)
+            self.assertEqual(self.config.read_bytes(), baseline)
+        status["continuous_batching"]["self_check"]["verified_k"] = 4
+        status["continuous_batching"]["policy"]["tuple_sha256"] = "f" * 64
+        with mock.patch.object(transaction, "authenticate_air_recovery"), \
+                mock.patch.object(transaction, "air_status", return_value=status):
+            with self.assertRaisesRegex(transaction.Refusal, "verified at four"):
+                transaction.select_air_four(args)
+        self.assertEqual(self.config.read_bytes(), baseline)
+
+    def test_air_owner_selection_interruption_after_config_write_restores_incumbent(self):
+        _, args, status = self.air_selection_fixture()
+        actual = transaction.validate_then_replace
+
+        def interrupted(*values):
+            actual(*values)
+            raise RuntimeError("simulated controller loss after atomic write")
+
+        with mock.patch.object(transaction, "authenticate_air_recovery"), \
+                mock.patch.object(transaction, "air_status", return_value=status), \
+                mock.patch.object(transaction, "validate_then_replace", side_effect=interrupted):
+            with self.assertRaises(RuntimeError):
+                transaction.select_air_four(args)
+        self.assertEqual(transaction.inspect(self.args())["status"], "adopting_target")
+        transaction.restore(self.args())
+        self.assertEqual(self.config.read_text(), BASE_CONFIG)
+
+    def test_legacy_journal_keeps_cache_outside_its_owned_fields(self):
+        baseline = BASE_CONFIG + "mlx_cache_limit_mb: 1024\n"
+        self.config.write_text(baseline)
+        transaction.prepare(self.args())
+        self.assertNotIn("mlx_cache_limit_mb", json.loads(self.journal.read_text())["baseline_owned"])
+        transaction.restore(self.args())
+        self.assertEqual(self.config.read_text(), baseline)
+
+    def test_air_commit_refuses_changed_config_and_invalid_proof(self):
+        transition = self.prepare_air_adoption()
+        transition.phase = "proof_complete"
+        transaction.checkpoint(transition)
+        with self.assertRaisesRegex(transaction.Refusal, "digest"):
+            transaction.commit_adoption(self.args(paid_proof_sha256="not-a-proof"))
+        self.config.write_bytes(self.config.read_bytes() + b"# external change\n")
+        with self.assertRaisesRegex(transaction.Refusal, "config changed"):
+            transaction.commit_adoption(self.args(paid_proof_sha256="c" * 64))
+
+    def test_temporary_acceptance_profiles_cannot_commit_adoption(self):
+        transaction.prepare(self.args())
+        with self.assertRaisesRegex(transaction.Refusal, "Air profile"):
+            transaction.commit_adoption(self.args(paid_proof_sha256="c" * 64))
+
     def test_legacy_profile_keeps_v1_journal_and_dual_targets(self):
         transaction.prepare(self.args())
         journal = json.loads(self.journal.read_text(encoding="utf-8"))

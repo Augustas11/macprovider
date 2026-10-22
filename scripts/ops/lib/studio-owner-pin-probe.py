@@ -318,6 +318,8 @@ def main() -> int:
             "continuous_batching.policy.authorized", "continuous_batching.policy.policy_sha256",
             "continuous_batching.policy.release_id", "continuous_batching.policy.tuple_sha256",
             "continuous_batching.self_check.served_slots",
+            "continuous_batching.self_check.verified_k",
+            "continuous_batching.self_check.model_sha256",
             "continuous_batching.scheduler.slots_total", "coordinator.connected",
             "lifecycle.operator_paused",
         )

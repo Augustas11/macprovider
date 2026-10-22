@@ -63,7 +63,12 @@ while [ "$#" -gt 0 ]; do
     *) usage >&2; exit 2 ;;
   esac
 done
-case "$CMD" in check|swap) ;; -h|--help) usage; exit 0 ;; *) usage >&2; exit 2 ;; esac
+case "$CMD" in check|swap|recover-air|restore-air) ;; -h|--help) usage; exit 0 ;; *) usage >&2; exit 2 ;; esac
+if [ "$CMD" = recover-air ] || [ "$CMD" = restore-air ]; then
+  [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] && [ "$V" = 1.8.260 ] || refuse "Air recovery runs only through the guarded Air entrypoint"
+  [ -n "${AIR_RECOVERY_PROVIDER_SHA256:-}" ] && [ -n "${AIR_RECOVERY_CONFIG:-}" ] && [ -n "${AIR_RECOVERY_BINARY_SHA256:-}" ] || refuse "Air recovery identity is missing"
+  [[ "${AIR_RECOVERY_CONFIG_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] || refuse "Air recovery baseline config digest is missing"
+fi
 is_semver "$V" || { usage >&2; exit 2; }
 [ "$CMD" = check ] || [ -z "$TARBALL" ] ||
   refuse "swap takes only the verified candidate bytes; --tarball is for check"
@@ -132,7 +137,7 @@ with tarfile.open(src, "r:gz") as tar:
 PY
   [ -f "$payload/macprovider-cli" ] || refuse "$TARBALL lacks macprovider-cli"
   [ -f "$payload/mlx.metallib" ] || refuse "$TARBALL lacks mlx.metallib"
-  if [ "$CMD" = swap ]; then
+  if [ "$CMD" != check ]; then
     want="$(marker_field "$OPS_SCOPE" signed_byte_verification 'd.get("binary_sha256")')"
     got="$(shasum -a 256 "$payload/macprovider-cli" | awk '{print $1}')"
     [ -n "$want" ] && [ "$got" = "$want" ] ||
@@ -160,6 +165,14 @@ bind_verified_tarball
 check_candidate
 
 require_studio_ssh
+record_air_result() {
+  local action="$1" code="$2"
+  case "$action:$code" in recover-air:0|recover-air:4|recover-air:5|restore-air:5) ;;
+    *) return 0 ;;
+  esac
+  mark_done "$OPS_SCOPE" air_recovery_result "guarded signed Air recovery returned" \
+    "$(python3 -c 'import json,sys; print(json.dumps(dict(stage=sys.argv[1],provider_id_sha256=sys.argv[2],action=sys.argv[3],exit_code=int(sys.argv[4]))))' "$stage" "$AIR_RECOVERY_PROVIDER_SHA256" "$action" "$code")"
+}
 case "${STUDIO_STATUS_PORT:-}" in ""|*[!0-9]*) refuse "STUDIO_STATUS_PORT must be set and numeric" ;; esac
 [ -n "${MACPROVIDER_OPS_OWNER:-}" ] || refuse "MACPROVIDER_OPS_OWNER is required for swap (live-ops lock owner)"
 [ -n "${CANARY_RUNNER_STOP_CMD:-}" ] && [ -n "${CANARY_RUNNER_START_CMD:-}" ] ||
@@ -217,21 +230,50 @@ if [ "$CANARY_RUNNER_STOP_CMD" != none ]; then
 fi
 
 # A unique stage per run: its log and result belong to this run only.
-stage="$(studio_ssh "umask 077 && mkdir -p \"\$HOME/macprovider-canary-staging\" && mktemp -d \"\$HOME/macprovider-canary-staging/v$V-XXXXXX\"")" ||
-  refuse "could not create a staging dir on the canary"
+if [ "$CMD" = restore-air ]; then
+  stage="$(marker_field "$OPS_SCOPE" air_recovery_dispatch 'd.get("stage")')"
+  [ "$(marker_field "$OPS_SCOPE" air_recovery_dispatch 'd.get("provider_id_sha256")')" = "$AIR_RECOVERY_PROVIDER_SHA256" ] || refuse "Air recovery dispatch belongs to another provider"
+  # Join the original detached actor; a recovery attempt must not turn its
+  # lock-busy refusal into completion of the original transaction.
+  deadline=$(( $(date +%s) + DRAIN_TIMEOUT_S + 2 * READY_TIMEOUT_S + 600 ))
+  while studio_ssh 'p=$(cat "$HOME/.macprovider-canary-swap.lock/pid" 2>/dev/null) && kill -0 "$p" 2>/dev/null'; do
+    [ "$(date +%s)" -lt "$deadline" ] || refuse "original Air payload actor is still active"
+    sleep "$POLL_S"
+  done
+  original_rc="$(studio_ssh "cat $(q "$stage/result") 2>/dev/null" || true)"
+  case "$original_rc" in 0|4|5)
+    record_air_result recover-air "$original_rc"
+    exit "$original_rc" ;;
+  esac
+else
+  stage="$(studio_ssh "umask 077 && mkdir -p \"\$HOME/macprovider-canary-staging\" && mktemp -d \"\$HOME/macprovider-canary-staging/v$V-XXXXXX\"")" || refuse "could not create a staging dir on the canary"
+fi
 case "$stage" in /*/macprovider-canary-staging/v"$V"-*) ;; *) refuse "unexpected canary staging dir: $stage" ;; esac
 q "$stage" >/dev/null
-studio_ssh "cat > \"$stage/candidate.tar.gz\"" < "$TARBALL" ||
-  refuse "could not stage the candidate on the canary"
-studio_ssh "cat > \"$stage/canary-swap-remote.sh\"" < "$OPS_DIR/lib/canary-swap-remote.sh" ||
+if [ "$CMD" != restore-air ]; then
+  studio_ssh "cat > \"$stage/candidate.tar.gz\"" < "$TARBALL" || refuse "could not stage the candidate on the canary"
+fi
+remote_name=canary-swap-remote.sh
+[ "$CMD" != restore-air ] || remote_name="air-restore-$$.sh"
+studio_ssh "umask 077; cat > \"$stage/$remote_name\"" < "$OPS_DIR/lib/canary-swap-remote.sh" ||
   refuse "could not stage the swap script on the canary"
 log "staged v$V on the canary ($TARBALL_SHA)"
 
+result_file="$stage/result"
+log_file="$stage/run.log"
+if [ "$CMD" = restore-air ]; then result_file="$stage/restore-result-$$"; log_file="$stage/restore-$$.log"; fi
 args="\"$stage/candidate.tar.gz\" $(q "$TARBALL_SHA") $(q "$V") $(q "${CANARY_INSTALL_DIR:-}") \
 $(q "${CANARY_LAUNCHD_LABEL:-live.malibu.provider}") $(q "${CANARY_CTL_SOCKET:-}") $(q "$STUDIO_STATUS_PORT") \
-$(q "$STATUS_TIMEOUT_S") $(q "$READY_TIMEOUT_S") $(q "$DRAIN_TIMEOUT_S") $(q "$STABLE_S") $(q "$POLL_S") \"$stage/result\""
+$(q "$STATUS_TIMEOUT_S") $(q "$READY_TIMEOUT_S") $(q "$DRAIN_TIMEOUT_S") $(q "$STABLE_S") $(q "$POLL_S") $(q "$result_file")"
+if [ "$CMD" = recover-air ] || [ "$CMD" = restore-air ]; then
+  args="$args $(q "$AIR_RECOVERY_PROVIDER_SHA256") $(q "$AIR_RECOVERY_CONFIG") $(q "$AIR_RECOVERY_BINARY_SHA256") $(q "$CMD") $(q "$AIR_RECOVERY_CONFIG_SHA256")"
+fi
 REMOTE_STARTED=1
-studio_ssh "cd \"$stage\" && nohup bash canary-swap-remote.sh $args > \"$stage/run.log\" 2>&1 < /dev/null &" ||
+if [ "$CMD" = recover-air ]; then
+  mark_done "$OPS_SCOPE" air_recovery_dispatch "guarded signed Air payload recovery dispatched" \
+    "$(python3 -c 'import json,sys; print(json.dumps({"stage":sys.argv[1],"provider_id_sha256":sys.argv[2],"incumbent_binary_sha256":sys.argv[3],"config_sha256":sys.argv[4]}))' "$stage" "$AIR_RECOVERY_PROVIDER_SHA256" "$AIR_RECOVERY_BINARY_SHA256" "$AIR_RECOVERY_CONFIG_SHA256")"
+fi
+studio_ssh "cd \"$stage\" && nohup bash $(q "$remote_name") $args > $(q "$log_file") 2>&1 < /dev/null &" ||
   refuse "could not start the swap on the canary"
 
 # Poll the detached run until it records its exit code. ssh failures while
@@ -242,9 +284,9 @@ rc=""
 while [ -z "$rc" ]; do
   # Complete log lines past the ones already shown, the line count, then the
   # result file (empty until the remote run ends).
-  if out="$(studio_ssh "f=\"$stage/run.log\"; n=\$(wc -l < \"\$f\" 2>/dev/null || echo 0); n=\$((n)); \
+  if out="$(studio_ssh "f=$(q "$log_file"); n=\$(wc -l < \"\$f\" 2>/dev/null || echo 0); n=\$((n)); \
 if [ \"\$n\" -gt $shown ]; then sed -n \"$((shown + 1)),\${n}p\" \"\$f\"; fi; \
-printf '@@COUNT@@%s\\n@@RESULT@@' \"\$n\"; cat \"$stage/result\" 2>/dev/null || true")"; then
+printf '@@COUNT@@%s\\n@@RESULT@@' \"\$n\"; cat $(q "$result_file") 2>/dev/null || true")"; then
     chunk="${out%%@@COUNT@@*}"
     [ -z "$chunk" ] || printf '%s' "$chunk" >&2
     count="${out#*@@COUNT@@}"
@@ -259,6 +301,7 @@ printf '@@COUNT@@%s\\n@@RESULT@@' \"\$n\"; cat \"$stage/result\" 2>/dev/null || 
   sleep "$POLL_S"
 done
 case "$rc" in 0|4|5|6) ;; *) log "!!! canary swap reported '$rc'"; exit 6 ;; esac
+case "$CMD" in recover-air|restore-air) record_air_result "$CMD" "$rc" ;; esac
 
 case "$rc" in
   0)

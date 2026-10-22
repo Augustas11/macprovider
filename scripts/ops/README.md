@@ -12,6 +12,7 @@ not add steps of its own:
 | `pearl-runtime.sh` | coordinator and gateway runtime release; pending stats migrations (`stats_migrate`: checked before the apply and before health, applied under the live-ops lock, no downtime); one-time retention `auto_vacuum` conversion (`PEARL_RUNTIME_TASK=retention-vacuum-conversion`); one on-demand retention run (`PEARL_RUNTIME_TASK=retention-run`, no restart); compute-integrity private corpus install (`PEARL_RUNTIME_TASK=compute-integrity-enable`, one restart); operator-reviewed native-vision qualification install into the Pearl overlay (`PEARL_RUNTIME_TASK=vision-qualification`, `VISION_QUALIFICATION_FILE`, one restart as the boot-state proof; SIGHUP also applies the list); Pearl updater bundle install from the running tag (`PEARL_RUNTIME_TASK=updater-bundle`, both Pearl locks, no restart) | `docs/runbooks/pearl-coordinator-rollout.md`, `ops/runbooks/settlement-evidence-retention.md`, `docs/runbooks/compute-integrity-private-corpus.md`, `docs/runbooks/native-vision-acceptance.md`, `docs/runbooks/catalog-release-decision-tree.md` (Enabling rollout) |
 | `canary-swap.sh` | CLI candidate onto the canary provider: `check` (MLX kernels in every shipped metallib, verified binary) then `swap` (pause, drain, back up, payload-only swap, resume; the watchdog stays booted out until the candidate, or the restored version, is buyer_serving; a crash loop, or `/v1/status` silent for 120 s after the model loaded, restores the backup and resumes; silence while the model loads is bounded only by the 1800 s ready timeout) | `docs/releases/cli-release-train.md` (Promotion gate item 5) |
 | `qwen-opencode-e2e.sh` | version-bound, same-provider live-gateway acceptance for the two qualified Qwen models; restores the incumbent from a secret-free crash journal | this README (`Qwen OpenCode acceptance`) |
+| `air-provider.sh` | designated disconnected Air: signed 1.8.258 recovery to released 1.8.260, persistent signed-catalog Qwen3-8B adoption, four-slot paid proof and enrollment in the running buyer runner | this README (`Air recovery and adoption`) |
 | `studio-owner-pin.sh` | one-time removal of the Studio GLM provider's `4/owner` concurrency pin after authenticating the published signed CLI >= 1.8.260, its checksummed artifact, exact LaunchAgent/process identity and a live-verified tuple matching the reviewed four-slot policy bytes; journal-first scoped rollback, watchdog restoration, 20-minute readiness bound, accepted-PID/crash hold and provider-attributed native-MTP gateway proof | `docs/releases/cli-release-train.md` |
 | `studio-lab-window.sh` | bounded offline Studio diagnostic, profiler-only or full-matrix qualification job with fixed reviewed arguments and immutable-input completion identity; published-provider authentication, journal-first pause/drain, exact process/watchdog restoration and durable controller-loss recovery while the buyer runner remains active | `docs/runbooks/studio-lab-window.md` |
 | `live-lock.sh` | one live actor at a time | rollout rule 3 |
@@ -21,6 +22,50 @@ Tests (offline): `test-ops-guard.sh`, `test-live-lock.sh`,
 `test-runbook-commands.sh`, `test-entrypoints.sh`, `test-canary-swap.sh`,
 `test-studio-owner-pin.sh`, `test-studio-owner-pin-provenance.sh`,
 `test-studio-lab-window-controller.sh`.
+
+## Air recovery and adoption
+
+This bounded operation unblocks the disconnected Air and missing persistent
+Qwen3-8B adoption step; it is not a general fleet model-adoption interface.
+Run `air-provider.sh status`, then `air-provider.sh next --run`, with the private
+`MACPROVIDER_OPS_ENV` profile and normal named live-ops owner. Each invocation
+performs one selected recovery, adoption or runner-enrollment step.
+
+The private profile binds `AIR_SSH`, optional `AIR_SSH_KEY`, `AIR_INSTALL_DIR`,
+`AIR_CONFIG`, `AIR_JOURNAL`, `AIR_STATUS_PORT`, `AIR_PROVIDER_SHA256` and the real
+written `AIR_HANDOFF_SHA256`. Hardware is fixed to the reviewed M3 Air identity;
+the private provider digest additionally prevents applying this to another Mac.
+The ordinary clean-main, signed-release verification and live-lock gates apply.
+Nested proof commands retain this exact target rather than reloading Studio
+defaults. No locally built binary is accepted.
+
+Recovery requires the exact signed 1.8.258 incumbent, disconnected with zero
+in-flight work and no operator pause. It reuses the verified 1.8.260 archive and
+detached canary swap, with an authenticated durable backup record for explicit
+interrupted-swap restoration. The original payload/config digests must match;
+missing or modified recovery data fails closed. The restored disconnected
+incumbent is not reported as buyer-ready.
+
+Adoption uses released `models prepare-catalog` to verify/reuse or download the
+artifact and a genuine installed-only, check-only recommendation (no benchmark).
+The config journal validates and owns only the model/allowlist/warm-swap fields
+and the qualified 512 MiB MLX cache setting. Released `provider context set`
+preflights and applies the qualified 8192-token context under an armed journal
+intent. Once the actual released process reports the exact signed Air tuple
+with `verified_k >= 4`, the operator-requested four slots are selected through
+a validated journaled `max_concurrency_source: owner` setting (SPEC-038 FR-CB11).
+The measured preferred count remains distinct and is recorded, not rewritten;
+no recommendation or self-check record is manufactured. After restart, the
+new signed process must still report verified, served, scheduler and capacity
+counts of four before paid proof or enrollment. Failure restores the incumbent
+configuration; interruption selects journal restoration before new adoption.
+
+A provider-attributed paid gateway proof and unchanged signed process identity
+are required before committing the target. Only then is its identity read from
+the Air and enrolled at four slots through the runner's atomic/CAS journal.
+The fleet runner stays active during Air preparation; enrollment uses a brief
+verified restart and restores the previous targets/start state on failure.
+No Pearl coordinator restart or new CLI release is part of this operation.
 
 ## Use
 
