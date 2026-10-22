@@ -46,30 +46,38 @@ Historical tables below do not select today's release version.
 
 ## Current published release and fleet target
 
-Verified 2026-10-21 against GitHub release/tag metadata and live coordinator health:
+Verified 2026-10-22 against GitHub release/tag metadata, the release train
+(`scripts/ops/cli-release.sh status`: `v1.8.261 train complete`) and live coordinator health:
 
 | Field | Value |
 |---|---|
-| GitHub provider release | [v1.8.260](https://github.com/Augustas11/macprovider/releases/tag/v1.8.260), published 2026-10-20 10:26Z |
-| Signed compatibility-set id | `Augustas11/macprovider:v1.8.260@13c6b1854cb65968cfff4473d1f0f23b99bb1c88` |
-| Pearl runtime / recommended provider | `v1.8.259` / `1.8.260` |
+| GitHub provider release | [v1.8.261](https://github.com/Augustas11/macprovider/releases/tag/v1.8.261), published 2026-10-22 06:23Z |
+| Signed compatibility-set id | `Augustas11/macprovider:v1.8.261@90b1a3b72e5d71bb644111173e69eaaa03286212` |
+| Pearl runtime / recommended provider | `v1.8.259` / `1.8.261` |
+| Release mirror / installer | `latest.json` → v1.8.261; `get.malibu.tech/install.sh` parity with v1.8.261, consumer health OK |
 
-## Next CLI release — net changes vs 1.8.260 (tracked 2026-10-21)
+## Next CLI release — net changes vs 1.8.261 (tracked 2026-10-22)
 
-The operator explicitly directed **no standalone CLI cut for #2081**. Include
-its merged source in the next combined train. This entry records source and
-accepted lab results; Qwen signed admission and live activation remain pending.
+Live fleet target: **1.8.261**. No provider-side PR has merged since; start rows here when one does.
 
-Live fleet target: **1.8.260** (released 2026-10-20 10:26Z; Pearl runtime v1.8.259). Staged:
-`binaryVersion` **1.8.261**. The operator ordered this combined cut for #2095, #2096 and #2106.
+## Shipped v1.8.261 — net changes vs 1.8.260
+
+Published as v1.8.261 on 2026-10-22 at source `90b1a3b72e5d71bb644111173e69eaaa03286212`
+(candidate run 39724400285, promotion run 39733171059, rollout verification run 39734759592;
+e2e gate CF-261-E2E). Every row below is an ancestor of that source and shipped in it.
+
+The operator ordered this combined cut for #2095, #2096 and #2106. The
+GLM-5.3-Flash and Qwen3.6 native-MTP admission set is rebound to its decode-path
+digest (`4be59bfa…`) in #2110, which also adds the Qwen3.6 tuple; activation
+and paid proofs go through `scripts/ops/catalog-activate.sh`.
 
 | PR | Issue | Provider-side change | Status |
 |---|---|---|---|
-| #2098 | — | Download cancellation remains final when a sampled heartbeat arrives late. | merged (`41bba3a81`); next combined CLI |
-| #2095 | #2054 | Qwen automatic tool use, schema-typed arguments, sampling controls and OpenCode/Connected apps integration. | merged (`15ef4e19b`); next combined CLI |
-| #2096 | #2081 | Exact Qwen native/ordinary ragged prompt grouping and snapshot-pinned text preparation, including streaming preflight and queued-drain cancellation. | merged (`359e3d4ad`); next combined CLI |
-| #2099 | #2082 | Dense-model CB qualification measures production's uncompiled decode default; truncated token prefixes are rejected instead of reported as parity PASS; per-row parity counts and prefix hashes; signed Qwen3-8B four-slot CB policy entry (catalog, already live). | merged (`41ea0fef0`); next combined CLI |
-| #2106 | #2081 | Native-MTP admission binds to a compiled-in `decode_path_digest` (plus runtime revision, metallib, hardware) instead of the CLI binary; the serve decode path moves behaviour-preserving into `ServeDecodePath.swift`; the digest is reported on `/v1/status` (SPEC-048 0.1.51). | merged (`c1b49eddd`); next combined CLI |
+| #2098 | — | Download cancellation remains final when a sampled heartbeat arrives late. | shipped v1.8.261 (`41bba3a81`) |
+| #2095 | #2054 | Qwen automatic tool use, schema-typed arguments, sampling controls and OpenCode/Connected apps integration. | shipped v1.8.261 (`15ef4e19b`) |
+| #2096 | #2081 | Exact Qwen native/ordinary ragged prompt grouping and snapshot-pinned text preparation, including streaming preflight and queued-drain cancellation. | shipped v1.8.261 (`359e3d4ad`) |
+| #2099 | #2082 | Dense-model CB qualification measures production's uncompiled decode default; truncated token prefixes are rejected instead of reported as parity PASS; per-row parity counts and prefix hashes; signed Qwen3-8B four-slot CB policy entry (catalog, already live). | shipped v1.8.261 (`41ea0fef0`) |
+| #2106 | #2081 | Native-MTP admission binds to a compiled-in `decode_path_digest` (plus runtime revision, metallib, hardware) instead of the CLI binary; the serve decode path moves behaviour-preserving into `ServeDecodePath.swift`; the digest is reported on `/v1/status` (SPEC-048 0.1.51). | shipped v1.8.261 (`c1b49eddd`) |
 | #2088 | #2029 | Catalog-only: GLM-5.3-Flash native-MTP admission identity rebind to 1.8.260 (already live; no binary change). | merged (`d9a6cf20f`); catalog-only |
 
 ### Qwen3.6 native-MTP handoff (#2081)
