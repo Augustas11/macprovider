@@ -325,7 +325,7 @@ func trustPoolAdminSignManifest(args []string, stdout io.Writer) error {
 	prevPath := fs.String("prev", "", "previous manifest_accepted event JSON; omit for the genesis manifest")
 	operationID := fs.String("operation-id", "", "idempotency/operation id of the event")
 	encoding := fs.Int("encoding", 0, "policy core encoding: 1 or 2")
-	poolModelsPath := fs.String("pool-models", "", "encoding 2: JSON file with model_entries and attested_members, signed as the pool_model_entries/v1 and pool_attested_members/v1 extensions (SPEC-042-R015/R016)")
+	poolModelsPath := fs.String("pool-models", "", "encoding 2: JSON file with model_entries, attested_members and optional shard_groups, signed as the pool_model_entries/v1, pool_attested_members/v1 and pool_shard_groups/v1 extensions (SPEC-042-R015/R016, SPEC-051-R028)")
 	signerSetVersion := fs.Uint64("signer-set-version", 0, "signer set that signs this core (genesis: 1)")
 	settlementMode := fs.String("settlement-mode", "", "observe or enforce")
 	runtimeAllowlist := fs.String("runtime-allowlist", "", "comma-separated runtime_allowlist (encoding 2; empty = native only)")
@@ -427,12 +427,15 @@ func trustPoolAdminSignManifest(args []string, stdout io.Writer) error {
 	if coreEncoding == poolmanifest.PolicyCoreEncodingV2 {
 		core.RuntimeAllowlist = splitTrustPoolCSV(*runtimeAllowlist)
 		if strings.TrimSpace(*poolModelsPath) != "" {
-			entries, members, err := loadTrustPoolModels(*poolModelsPath)
+			entries, members, groups, err := loadTrustPoolModels(*poolModelsPath)
 			if err != nil {
 				return err
 			}
 			if err := core.SetPoolExtensions(entries, members); err != nil {
 				return fmt.Errorf("--pool-models: %w", err)
+			}
+			if err := core.SetPoolShardGroups(groups); err != nil {
+				return fmt.Errorf("--pool-models shard_groups: %w", err)
 			}
 		}
 	}
@@ -874,7 +877,8 @@ func sha256Hex(b []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// trustPoolModelsFile is the closed --pool-models input (SPEC-042-R015/R016).
+// trustPoolModelsFile is the closed --pool-models input (SPEC-042-R015/R016,
+// and the SPEC-051-R028 shard group authorizations).
 // Lists are sorted into canonical order here; every other rule (grammar,
 // bounds, runtime/format pairing, licence, disclosure, cache-hit <= prompt)
 // is enforced by the policy-core acceptance check before signing. The
@@ -883,6 +887,15 @@ func sha256Hex(b []byte) string {
 type trustPoolModelsFile struct {
 	ModelEntries    []trustPoolModelEntryJSON     `json:"model_entries"`
 	AttestedMembers []trustPoolAttestedMemberJSON `json:"attested_members"`
+	// ShardGroups is optional: omitted or empty signs no pool_shard_groups/v1
+	// extension, so a core without groups keeps its exact bytes.
+	ShardGroups []trustPoolShardGroupJSON `json:"shard_groups"`
+}
+
+type trustPoolShardGroupJSON struct {
+	GroupProviderID string `json:"group_provider_id"`
+	PoolModelID     string `json:"pool_model_id"`
+	MaxMembers      uint64 `json:"max_members"`
 }
 
 type trustPoolModelEntryJSON struct {
@@ -908,28 +921,28 @@ type trustPoolAttestedMemberJSON struct {
 	RuntimeClasses    []string `json:"runtime_classes"`
 }
 
-func loadTrustPoolModels(path string) ([]poolmanifest.PoolModelEntry, []poolmanifest.AttestedMember, error) {
+func loadTrustPoolModels(path string) ([]poolmanifest.PoolModelEntry, []poolmanifest.AttestedMember, []poolmanifest.PoolShardGroup, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return nil, nil, fmt.Errorf("read --pool-models: %w", err)
+		return nil, nil, nil, fmt.Errorf("read --pool-models: %w", err)
 	}
 	var in trustPoolModelsFile
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&in); err != nil {
-		return nil, nil, fmt.Errorf("--pool-models: %w", err)
+		return nil, nil, nil, fmt.Errorf("--pool-models: %w", err)
 	}
 	if dec.More() {
-		return nil, nil, fmt.Errorf("--pool-models must contain exactly one JSON object")
+		return nil, nil, nil, fmt.Errorf("--pool-models must contain exactly one JSON object")
 	}
 	entries := make([]poolmanifest.PoolModelEntry, 0, len(in.ModelEntries))
 	for i, m := range in.ModelEntries {
 		p := m.Pricing
 		if m.PaidServingAttested == nil || p == nil || p.PromptRatePerMtok == nil || p.PromptCacheHitRatePerMtok == nil || p.CompletionRatePerMtok == nil {
-			return nil, nil, fmt.Errorf("--pool-models model_entries[%d] needs paid_serving_attested and all three pricing rates", i)
+			return nil, nil, nil, fmt.Errorf("--pool-models model_entries[%d] needs paid_serving_attested and all three pricing rates", i)
 		}
 		if *p.PromptRatePerMtok < 0 || *p.PromptCacheHitRatePerMtok < 0 || *p.CompletionRatePerMtok < 0 {
-			return nil, nil, fmt.Errorf("--pool-models model_entries[%d] pricing rates must be >= 0", i)
+			return nil, nil, nil, fmt.Errorf("--pool-models model_entries[%d] pricing rates must be >= 0", i)
 		}
 		runtimes := append([]string(nil), m.AllowedRuntimeSources...)
 		sort.Strings(runtimes)
@@ -957,5 +970,10 @@ func loadTrustPoolModels(path string) ([]poolmanifest.PoolModelEntry, []poolmani
 		members = append(members, poolmanifest.AttestedMember{ProviderAccountID: a.ProviderAccountID, RuntimeClasses: classes})
 	}
 	sort.SliceStable(members, func(i, j int) bool { return members[i].ProviderAccountID < members[j].ProviderAccountID })
-	return entries, members, nil
+	groups := make([]poolmanifest.PoolShardGroup, 0, len(in.ShardGroups))
+	for _, g := range in.ShardGroups {
+		groups = append(groups, poolmanifest.PoolShardGroup{GroupProviderID: g.GroupProviderID, PoolModelID: g.PoolModelID, MaxMembers: g.MaxMembers})
+	}
+	sort.SliceStable(groups, func(i, j int) bool { return groups[i].GroupProviderID < groups[j].GroupProviderID })
+	return entries, members, groups, nil
 }
