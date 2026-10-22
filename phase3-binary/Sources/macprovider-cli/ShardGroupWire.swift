@@ -371,6 +371,29 @@ enum ShardGroupWire {
         ]))
     }
 
+    /// SPEC-051-R015 `shard_member_health` for the epoch of the member's own hello.
+    static func memberHealth(
+        config: ShardMemberConfig, status: ShardMemberStatus, memberDeviceID: String, report: ShardMemberHealthReport
+    ) throws -> Data {
+        let joined = status.groupEpoch ?? config.linkEpoch
+        let epoch = config.role == .spare ? joined - 1 : joined
+        return try message(.object([
+            "type": .string("shard_member_health"),
+            "version": .int(version),
+            "group_provider_id": .string(config.groupProviderID),
+            "group_epoch": .int(Int(epoch)),
+            "member_device_id": .string(memberDeviceID),
+            "healthy": .bool(report.healthy),
+            "reason": .string(report.reason),
+            "links": .array(report.links.map { link in
+                .object([
+                    "peer_member_device_id": .string(link.peer), "interface_type": .string(link.interfaceType),
+                    "rtt_p99_us": .int(min(link.rttP99Microseconds, 1 << 53 - 1)),
+                ])
+            }),
+        ]))
+    }
+
     // MARK: Coordinator answers
 
     struct Result: Decodable, Equatable {
@@ -548,6 +571,7 @@ extension ShardMemberRuntime: ShardGroupCoordinatorParticipant {
         if sessionStarted || status.groupEpoch != helloEpoch {
             helloState = .notSent
             takeoverState = .notSent
+            reportedHealth = nil
             helloEpoch = status.groupEpoch
         }
         guard memberDeviceID == context.providerID, let hash = identity.modelHash, let algorithm = identity.modelHashAlgorithm else {
@@ -560,20 +584,29 @@ extension ShardMemberRuntime: ShardGroupCoordinatorParticipant {
             case .notSent: return true
             }
         }
-        let takeover: Bool
+        var messages = [Data]()
+        let takeover: Bool?
         if due(helloState) {
             takeover = false
         } else if config.role == .spare, helloState == .accepted, due(takeoverState) {
             takeover = true
         } else {
-            return []
+            takeover = nil
         }
-        guard let hello = try? ShardGroupWire.memberHello(
+        if let takeover, let hello = try? ShardGroupWire.memberHello(
             config: config, status: status, memberDeviceID: memberDeviceID, artifactHashAlgorithm: algorithm, artifactHash: hash,
-            weightsVerified: stageProof.weightsVerified, stageFits: stageProof.fit.fits, takeover: takeover)
-        else { return [] }
-        if takeover { takeoverState = .sent(Date()) } else { helloState = .sent(Date()) }
-        return [hello]
+            weightsVerified: stageProof.weightsVerified, stageFits: stageProof.fit.fits, takeover: takeover) {
+            if takeover { takeoverState = .sent(Date()) } else { helloState = .sent(Date()) }
+            messages.append(hello)
+        }
+        // SPEC-051-R015: the member's own health, on every tick and on a change,
+        // once its hello for this epoch was accepted.
+        if helloState == .accepted, let report = server.healthReport,
+           let health = try? ShardGroupWire.memberHealth(config: config, status: status, memberDeviceID: memberDeviceID, report: report) {
+            reportedHealth = report.signature
+            messages.append(health)
+        }
+        return messages
     }
 
     func handleShardCoordinatorMessage(_ data: Data) async {

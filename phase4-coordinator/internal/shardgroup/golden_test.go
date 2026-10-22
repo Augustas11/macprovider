@@ -26,6 +26,7 @@ type goldenVectors struct {
 	Register      json.RawMessage `json:"shard_group_register"`
 	Heartbeat     json.RawMessage `json:"shard_group_heartbeat"`
 	MemberHello   json.RawMessage `json:"shard_member_hello"`
+	MemberHealth  json.RawMessage `json:"shard_member_health"`
 	Attestation   json.RawMessage `json:"group_attestation"`
 }
 
@@ -99,6 +100,9 @@ func TestProviderGoldenVectorsVerify(t *testing.T) {
 	if _, err := ParseHeartbeat(g.Heartbeat); err != nil {
 		t.Fatalf("heartbeat refused by the strict parser: %v", err)
 	}
+	if _, err := ParseMemberHealth(g.MemberHealth); err != nil {
+		t.Fatalf("member health refused by the strict parser: %v", err)
+	}
 
 	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "golden.db"))
 	if err != nil {
@@ -136,6 +140,9 @@ func TestProviderGoldenVectorsVerify(t *testing.T) {
 	}
 	if !reg.Heartbeat(headID, "s-"+headID, g.Heartbeat) {
 		t.Fatal("provider heartbeat dropped")
+	}
+	if _, kept := reg.MemberHealth(MemberSession{ProviderID: memberID, AssignedID: "s-" + memberID, ReceiptKey: tailKey, ShardMemberV1: true}, g.MemberHealth); !kept {
+		t.Fatal("provider member health dropped")
 	}
 	ev, ok := reg.Evaluate(headID, func(id string) (pool.Provider, bool) { p, ok := sessions[id]; return p, ok }, owners, 10*time.Second)
 	if !ok || !ev.Available {

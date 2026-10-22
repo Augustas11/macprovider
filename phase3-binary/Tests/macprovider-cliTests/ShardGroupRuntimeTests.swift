@@ -470,7 +470,19 @@ final class ShardMemberRuntimeTests: XCTestCase {
         XCTAssertEqual(status.downstreamPeer, "head-device", "a two-stage tail returns tokens to the head")
         XCTAssertEqual(status.upstreamInterface, ShardLinkInterface.other, "loopback is no admissible interconnect")
         XCTAssertEqual(engine.chain.last?.upstreamInterface, ShardLinkInterface.other)
+        // SPEC-051-R015: the member's own report of itself and its link to the head.
+        let report = try XCTUnwrap(server.healthReport)
+        XCTAssertTrue(report.healthy)
+        XCTAssertEqual(report.reason, "")
+        XCTAssertEqual(report.links.map(\.peer), ["head-device"])
+        XCTAssertEqual(report.links.map(\.interfaceType), [ShardLinkInterface.other])
         try engine.shutdown()
+        var after = server.healthReport
+        for _ in 0..<50 where after != nil {
+            Thread.sleep(forTimeInterval: 0.02)
+            after = server.healthReport
+        }
+        XCTAssertNil(after, "no report without a head session")
     }
 
     func testMemberRefusesAStageThatDoesNotMatchItsConfig() {

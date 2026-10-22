@@ -1,12 +1,12 @@
 # SPEC-051 - Multi-Mac Shard Groups
 
-**Version:** 0.2.2
+**Version:** 0.2.3
 
 ```json
 {
   "spec_id": "SPEC-051",
   "title": "Multi-Mac Shard Groups",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "path": "specs/SPEC-051-multi-mac-shard-groups.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -27,6 +27,15 @@
   }
 }
 ```
+
+**Change log v0.2.3 (2026-10-22, Related: #2084):** Adds the member
+self-health message `shard_member_health` (SPEC-051-R029): each member reports
+its own health and its stage links under its member device identity, on its
+heartbeat cadence and immediately on a change. A group is available only when
+the head's view and every active member's own current report agree that the
+member is healthy and its links are admissible; a stale report makes the group
+unavailable with `member_health_stale` and an unhealthy one with
+`member_self_unhealthy` (SPEC-051-R015 item 8).
 
 **Change log v0.2.2 (2026-10-22, Related: #2084):** A head never builds a
 chain at an epoch the coordinator already accepted (SPEC-051-R023): it keeps
@@ -454,7 +463,10 @@ current, its links meet SPEC-051-R007, its weights are verified
 (SPEC-051-R008), and the group record's epoch is the latest accepted one.
 The head MUST report per-member health in its group heartbeat to the
 coordinator, and each member MUST also report its own health under its member
-device identity. When any active member is unhealthy, the coordinator MUST
+device identity in `shard_member_health` (SPEC-051-R029), at least once per
+coordinator `heartbeat_interval_s` and immediately on a change of its health or
+of a link's interface or round trip. When any active member is unhealthy, by the
+head's view or by its own, the coordinator MUST
 mark the group unavailable before the next reservation. A spare's health
 affects only whether replay is possible (SPEC-051-R022), not availability.
 
@@ -488,7 +500,15 @@ names the first failing condition as its reason code:
    (`group_heartbeat_stale`), reports every active member healthy
    (`member_unhealthy`), and reports every required link on the
    `interconnect_class` interface type (`link_interface_invalid`) with
-   `rtt_p99_us <= max_link_rtt_p99_us` (`link_rtt_exceeded`).
+   `rtt_p99_us <= max_link_rtt_p99_us` (`link_rtt_exceeded`);
+8. every active non-head member's own `shard_member_health` for the epoch,
+   from the session its hello was accepted from, arrived within
+   `group_heartbeat_stale_multiple` coordinator heartbeat intervals
+   (`member_health_stale`), reports the member healthy
+   (`member_self_unhealthy`), and reports each of its links on the
+   `interconnect_class` interface type (`link_interface_invalid`) with
+   `rtt_p99_us <= max_link_rtt_p99_us` (`link_rtt_exceeded`). A spare's own
+   report is accepted and does not affect availability.
 
 The coordinator MUST send `shard_group_status` (SPEC-051-R029) to the head on
 every change of availability or reason.
@@ -684,7 +704,7 @@ first frame on a new link names (for an authenticated link, the epoch its key
 agreement signs): a member MUST accept it when it is not below the member's
 configured epoch (for a spare, the epoch after its group's), MUST refuse a
 lower one, and sends nothing on the link before that first frame. Its member
-hello and sub-receipts name that epoch.
+hello, sub-receipts and health reports name that epoch.
 
 ### SPEC-051-R024 - Isolation from single-Mac serving
 
@@ -837,6 +857,20 @@ Member to coordinator, on the member session:
   binds the member's current receipt key to that epoch. A hello for an epoch
   not yet registered is kept and evaluated when the record arrives.
 
+- `shard_member_health`: `{type, version: 1, group_provider_id, group_epoch,
+  member_device_id, healthy, reason, links}`. `member_device_id` MUST equal
+  the session's provider id and `group_epoch` the epoch of the member's
+  accepted hello; `healthy` is true when every stage link the member carries is
+  up and heard within its liveness window; `reason` is empty exactly when
+  `healthy` is true and otherwise `not_joined` or `link_down`; `links` lists
+  `{peer_member_device_id, interface_type, rtt_p99_us}` for exactly the peers
+  its hello names, as the member measures them. The member sends it once its
+  hello for the epoch is accepted, at least once per coordinator
+  `heartbeat_interval_s`, and immediately on a change, at most four times a
+  second. The coordinator keeps only a report from the session the member's
+  hello for the group's latest epoch was accepted from, for that epoch, naming
+  exactly those peers, and drops any other without an answer.
+
 Coordinator to head:
 
 - `shard_group_register_result`: `{type, version: 1, group_provider_id,
@@ -938,6 +972,8 @@ in `CONFORMANCE.json`.
 
 ## 10. Changelog and history
 
+- v0.2.3 (2026-10-22, Related: #2084): `shard_member_health` (R029) and
+  availability item 8 (R015): member self-reports gate availability.
 - v0.2.2 (2026-10-22, Related: #2084): epochs after a takeover (R023): the
   head persists the last accepted epoch and builds above it; members follow
   the head to a later epoch and refuse an earlier one.

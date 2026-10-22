@@ -5028,6 +5028,8 @@ func (s *Server) handleMessage(conn net.Conn, providerID, assignedID string, pay
 		s.handleShardGroupHeartbeat(providerID, assignedID, payload)
 	case shardgroup.TypeMemberHello:
 		s.handleShardMemberHello(providerID, assignedID, payload)
+	case shardgroup.TypeMemberHealth:
+		s.handleShardMemberHealth(providerID, assignedID, payload)
 	default:
 		// SPEC-002 v1.5.1 R-2 / issue #197 R5 security: envelope.Type
 		// is provider-controlled and reaches structured logs only on

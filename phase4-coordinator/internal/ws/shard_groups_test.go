@@ -167,6 +167,13 @@ func shardWSHeartbeat() []byte {
 	return payload
 }
 
+func shardWSMemberHealth() []byte {
+	payload, _ := json.Marshal(shardgroup.MemberHealth{Type: shardgroup.TypeMemberHealth, Version: 1, GroupProviderID: "head", GroupEpoch: 1,
+		MemberDeviceID: "tail", Healthy: true, Reason: "",
+		Links: []shardgroup.MemberHealthLink{{PeerMemberDeviceID: "head", InterfaceType: "thunderbolt", RTTP99US: 300}}})
+	return payload
+}
+
 func (h *shardWSHarness) available() bool {
 	p, _ := h.reg.Resolve("head", "")
 	return p.ShardGroupAvailable
@@ -195,6 +202,10 @@ func TestShardGroupLifecycleOverWire(t *testing.T) {
 		t.Fatal("available before the group heartbeat")
 	}
 	h.server.handleMessage(nil, "head", "s-head", shardWSHeartbeat())
+	if st := h.next("head", shardgroup.TypeStatus); st["reason"] != shardgroup.ReasonMemberHealthStale {
+		t.Fatalf("status before the member's own report %v", st)
+	}
+	h.server.handleMessage(nil, "tail", "s-tail", shardWSMemberHealth())
 	if st := h.next("head", shardgroup.TypeStatus); st["available"] != true {
 		hp, _ := h.reg.Resolve("head", "")
 		tp, _ := h.reg.Resolve("tail", "")

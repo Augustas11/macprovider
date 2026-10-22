@@ -144,6 +144,26 @@ func heartbeatPayload(epoch uint64, healthy bool, rtt int, iface string) []byte 
 	return payload
 }
 
+func memberHealthPayload(member string, epoch uint64, healthy bool, iface string, rtt int, peers ...string) []byte {
+	links := make([]MemberHealthLink, 0, len(peers))
+	for _, p := range peers {
+		links = append(links, MemberHealthLink{PeerMemberDeviceID: p, InterfaceType: iface, RTTP99US: rtt})
+	}
+	reason := ""
+	if !healthy {
+		reason = "link_down"
+	}
+	payload, _ := json.Marshal(MemberHealth{Type: TypeMemberHealth, Version: 1, GroupProviderID: "head", GroupEpoch: epoch, MemberDeviceID: member,
+		Healthy: healthy, Reason: reason, Links: links})
+	return payload
+}
+
+func (f *fixture) memberHealth(member string, payload []byte) bool {
+	p := f.sessions[member]
+	_, ok := f.reg.MemberHealth(MemberSession{ProviderID: member, AssignedID: p.AssignedID, ReceiptKey: p.ReceiptPubkey, ShardMemberV1: p.ShardMemberV1}, payload)
+	return ok
+}
+
 func (f *fixture) evaluate() Evaluation {
 	ev, ok := f.reg.Evaluate("head", f.lookup, f.owners, 10*time.Second)
 	if !ok {
@@ -341,6 +361,13 @@ func TestEvaluateAvailability(t *testing.T) {
 	if !f.reg.Heartbeat("head", "s-head", heartbeatPayload(1, true, 400, "thunderbolt")) {
 		t.Fatal("heartbeat dropped")
 	}
+	// SPEC-051-R015 item 8: the member's own report is required too.
+	if ev := f.evaluate(); ev.Reason != ReasonMemberHealthStale {
+		t.Fatalf("before the member's own report: %+v", ev)
+	}
+	if !f.memberHealth("tail", memberHealthPayload("tail", 1, true, "thunderbolt", 300, "head")) {
+		t.Fatal("member health dropped")
+	}
 	ev := f.evaluate()
 	if !ev.Available || len(ev.Members) != 1 || ev.Members[0].ProviderID != "tail" || !ev.Changed {
 		t.Fatalf("available: %+v", ev)
@@ -372,6 +399,13 @@ func TestEvaluateAvailability(t *testing.T) {
 		{"member unhealthy", func() { f.reg.Heartbeat("head", "s-head", heartbeatPayload(1, false, 400, "thunderbolt")) }, nil, ReasonMemberUnhealthy},
 		{"wifi link", func() { f.reg.Heartbeat("head", "s-head", heartbeatPayload(1, true, 400, "wifi")) }, nil, ReasonLinkInterfaceInvalid},
 		{"slow link", func() { f.reg.Heartbeat("head", "s-head", heartbeatPayload(1, true, 2500, "thunderbolt")) }, nil, ReasonLinkRTTExceeded},
+		{"member report stale", func() {
+			f.now = f.now.Add(31 * time.Second)
+			f.reg.Heartbeat("head", "s-head", heartbeatPayload(1, true, 400, "thunderbolt"))
+		}, nil, ReasonMemberHealthStale},
+		{"member reports itself unhealthy", func() { f.memberHealth("tail", memberHealthPayload("tail", 1, false, "thunderbolt", 300, "head")) }, nil, ReasonMemberSelfUnhealthy},
+		{"member sees wifi", func() { f.memberHealth("tail", memberHealthPayload("tail", 1, true, "wifi", 300, "head")) }, nil, ReasonLinkInterfaceInvalid},
+		{"member sees a slow link", func() { f.memberHealth("tail", memberHealthPayload("tail", 1, true, "thunderbolt", 2600, "head")) }, nil, ReasonLinkRTTExceeded},
 	}
 	for _, c := range checks {
 		saved := map[string]pool.Provider{}
@@ -389,6 +423,7 @@ func TestEvaluateAvailability(t *testing.T) {
 		}
 		f.sessions, f.owners, f.now = saved, savedOwners, savedNow
 		f.reg.Heartbeat("head", "s-head", heartbeatPayload(1, true, 400, "thunderbolt"))
+		f.memberHealth("tail", memberHealthPayload("tail", 1, true, "thunderbolt", 300, "head"))
 		if ev := f.evaluate(); !ev.Available {
 			t.Fatalf("%s: did not recover: %+v", c.name, ev)
 		}
@@ -398,6 +433,26 @@ func TestEvaluateAvailability(t *testing.T) {
 	if f.reg.Heartbeat("head", "s-other", heartbeatPayload(1, true, 400, "thunderbolt")) ||
 		f.reg.Heartbeat("head", "s-head", heartbeatPayload(2, true, 400, "thunderbolt")) {
 		t.Fatal("foreign heartbeat accepted")
+	}
+	// A member report from another session, another epoch, another member,
+	// with a missing link, or self-contradictory, is dropped.
+	for name, tc := range map[string]struct {
+		session string
+		payload []byte
+	}{
+		"other session": {"s-other", memberHealthPayload("tail", 1, true, "thunderbolt", 300, "head")},
+		"other epoch":   {"s-tail", memberHealthPayload("tail", 2, true, "thunderbolt", 300, "head")},
+		"missing link":  {"s-tail", memberHealthPayload("tail", 1, true, "thunderbolt", 300)},
+		"extra link":    {"s-tail", memberHealthPayload("tail", 1, true, "thunderbolt", 300, "head", "mid")},
+		"healthy with reason": {"s-tail", []byte(strings.Replace(string(memberHealthPayload("tail", 1, true, "thunderbolt", 300, "head")),
+			`"reason":""`, `"reason":"link_down"`, 1))},
+		"unknown reason": {"s-tail", []byte(strings.Replace(string(memberHealthPayload("tail", 1, false, "thunderbolt", 300, "head")),
+			`"link_down"`, `"bored"`, 1))},
+	} {
+		p := f.sessions["tail"]
+		if _, ok := f.reg.MemberHealth(MemberSession{ProviderID: "tail", AssignedID: tc.session, ReceiptKey: p.ReceiptPubkey, ShardMemberV1: true}, tc.payload); ok {
+			t.Errorf("%s: member health kept", name)
+		}
 	}
 	short, _ := json.Marshal(Heartbeat{Type: TypeHeartbeat, Version: 1, GroupProviderID: "head", GroupEpoch: 1,
 		Members: []HeartbeatMember{{"head", true}, {"tail", true}}, Links: []HeartbeatLink{{"head", "tail", "thunderbolt", 400}}})
@@ -610,6 +665,9 @@ func TestSpareStandbyTakeoverFlow(t *testing.T) {
 	} {
 		if !f.reg.Heartbeat("head", "s-head", beat(tc.healthy, tc.iface)) {
 			t.Fatalf("%s: heartbeat dropped", name)
+		}
+		if !f.memberHealth("tail", memberHealthPayload("tail", 1, true, "thunderbolt", 300, "head")) {
+			t.Fatalf("%s: member health dropped", name)
 		}
 		if ev := f.evaluate(); ev.Reason != tc.want {
 			t.Errorf("%s: reason %q, want %q", name, ev.Reason, tc.want)

@@ -480,8 +480,13 @@ final class ShardGroupWireTests: XCTestCase {
         ]))
         let held = await member.takeoverState
         XCTAssertEqual(held, .awaitingRegistration)
+        // No hello is due any more; the member's own health goes out on every tick.
         let quiet = await member.shardCoordinatorMessages(context: context, sessionStarted: false)
-        XCTAssertTrue(quiet.isEmpty)
+        XCTAssertEqual(try quiet.map { try object($0)["type"] as? String }, ["shard_member_health"])
+        let health = try object(try XCTUnwrap(quiet.first))
+        XCTAssertEqual(health["group_epoch"] as? Int, Int(ShardBenchTestRig.epoch), "a spare reports under its own hello's epoch")
+        XCTAssertEqual(health["healthy"] as? Bool, true)
+        XCTAssertEqual((health["links"] as? [[String: Any]])?.map { $0["peer_member_device_id"] as? String }, ["head-device"])
     }
 
     func testACompletionWaitsForItsTakeoverEpochToBeAccepted() async throws {

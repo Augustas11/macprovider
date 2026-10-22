@@ -13,7 +13,7 @@
         "sub_receipts" : [
           {
             "public_key" : "0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc=",
-            "signature" : "Oy7tjAaWoCDjhPEmkbWKn3DNJGlJ\/Hg8OCh\/g7lR2VYXGrCnejoiieM7cLAne969u8YNysrU52jk9QEZUW9eDg==",
+            "signature" : "rhi4p7ugfSr8rph1Ug\/8B7VkPn3wrvfRV2w5mG0YRz5L3Kj2lfrgX8hV9175zG6P1XfX3ExfLXsO\/KmnQHtGAw==",
             "sub_receipt" : {
               "decode_steps" : 4,
               "group_epoch" : 3,
@@ -29,7 +29,7 @@
           },
           {
             "public_key" : "oJql9HpnWYAv+VX43C0qFKXJnSO+l\/hkEn\/5ODRVpPA=",
-            "signature" : "DoQTVGotSixnwg6AFSw1HK2wcM\/4H3jjbw42akpdvg7viBA6A+Ur8WXYyUbd5laKWTzgv527uNkYsM3zcAjnAg==",
+            "signature" : "PPdNl+t2dCmC90OgTcgB7TYc3onZpV0AaW1HAspaRCxU1mhgpVnyo04y4\/ww8U14+hW9\/tEakHOulWWqLfr8BA==",
             "sub_receipt" : {
               "decode_steps" : 4,
               "group_epoch" : 3,
@@ -46,7 +46,7 @@
         ]
       }
     ],
-    "signature" : "84xDJ\/6QDULqEDBd5hOZEvSpf99oWURGIN3xfPEX6QwwDW8I1f79PkTTJixZwVejPZ\/CJ9sC2nevZA5jN6LqBQ=="
+    "signature" : "HTIZkgOHEXMmaTHuYw4YhfKffjwgOKBfQfBi8mf94agueeFCrP5kP\/JahbFeWZdXtchUix6q12UkgJxJ4mEnBA=="
   },
   "head_public_key" : "0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc=",
   "receipt" : "eyJhdHRlbXB0X24iOjEsInByb3ZpZGVyX2lkIjoicHJvdi1oZWFkIiwicmVjZWlwdF92ZXJzaW9uIjoiNCIsInJlcXVlc3RfaWQiOiJyZXFfZ29sZGVuXzEifQ==.MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMw==",
@@ -122,8 +122,24 @@
       },
       "transport_version" : 1
     },
-    "record_signature" : "jAtwuWrMGGWLys7FeKE82xRDEGFDjPHErcBrliRjbdX60MkAZCLNLkUrEcO5+6hgKIYmTBpkzEC6\/IgBXeaICA==",
+    "record_signature" : "dhbZKxu4dAi3JdW9HbWxY84YJG+rVRoIJmyYno\/wK4jGKOKL7BSExTj7EyJ4V0t3ktJkIYCq8aox0vHQs6MNCg==",
     "type" : "shard_group_register",
+    "version" : 1
+  },
+  "shard_member_health" : {
+    "group_epoch" : 3,
+    "group_provider_id" : "prov-head",
+    "healthy" : true,
+    "links" : [
+      {
+        "interface_type" : "thunderbolt",
+        "peer_member_device_id" : "prov-head",
+        "rtt_p99_us" : 400
+      }
+    ],
+    "member_device_id" : "mac-b",
+    "reason" : "",
+    "type" : "shard_member_health",
     "version" : 1
   },
   "shard_member_hello" : {

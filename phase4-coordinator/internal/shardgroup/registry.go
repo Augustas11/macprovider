@@ -23,6 +23,8 @@ const (
 	ReasonMemberUnhealthy       = "member_unhealthy"
 	ReasonLinkInterfaceInvalid  = "link_interface_invalid"
 	ReasonLinkRTTExceeded       = "link_rtt_exceeded"
+	ReasonMemberHealthStale     = "member_health_stale"
+	ReasonMemberSelfUnhealthy   = "member_self_unhealthy"
 )
 
 // Member hello reason codes (SPEC-051-R029).
@@ -84,9 +86,11 @@ type groupState struct {
 	epochs         map[uint64]*epochState
 	heartbeat      *Heartbeat
 	heartbeatAt    time.Time
-	evaluated      bool
-	available      bool
-	reason         string
+	// memberHealth holds each member's latest own report for the latest epoch.
+	memberHealth map[string]memberHealthReport
+	evaluated    bool
+	available    bool
+	reason       string
 }
 
 type memberClaim struct {
@@ -220,6 +224,10 @@ func (r *Registry) Register(ctx context.Context, head HeadSession, payload []byt
 	if g.latest != rec.GroupEpoch || g.headAssignedID != head.AssignedID {
 		// A new epoch or a new head session needs a fresh group heartbeat.
 		g.heartbeat, g.heartbeatAt = nil, time.Time{}
+	}
+	if g.latest != rec.GroupEpoch {
+		// Member reports describe the previous epoch's chain.
+		g.memberHealth = nil
 	}
 	g.headAssignedID = head.AssignedID
 	g.latest = rec.GroupEpoch
@@ -393,6 +401,54 @@ func (r *Registry) Heartbeat(providerID, assignedID string, payload []byte) bool
 	return true
 }
 
+type memberHealthReport struct {
+	report MemberHealth
+	at     time.Time
+}
+
+// MemberHealth applies `shard_member_health` from a member session. It
+// returns the member's group and whether the report was kept: only a member
+// of the group's latest epoch, on the session its hello was accepted from,
+// reporting exactly its stage links, is kept.
+func (r *Registry) MemberHealth(member MemberSession, payload []byte) (string, bool) {
+	report, err := ParseMemberHealth(payload)
+	if err != nil || report.MemberDeviceID != member.ProviderID || !member.ShardMemberV1 {
+		return "", false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	g := r.groups[report.GroupProviderID]
+	if g == nil || report.GroupEpoch != g.latest {
+		return "", false
+	}
+	ep := g.epochs[g.latest]
+	joined, ok := ep.joined[report.MemberDeviceID]
+	if !ok || joined.assignedID != member.AssignedID {
+		return "", false
+	}
+	peers := ep.record.memberLinkPeers(report.MemberDeviceID)
+	if len(report.Links) != len(peers) {
+		return "", false
+	}
+	seen := make(map[string]bool, len(report.Links))
+	for _, l := range report.Links {
+		if seen[l.PeerMemberDeviceID] || l.RTTP99US > maxReportedRTTUS {
+			return "", false
+		}
+		seen[l.PeerMemberDeviceID] = true
+	}
+	for _, p := range peers {
+		if !seen[p] {
+			return "", false
+		}
+	}
+	if g.memberHealth == nil {
+		g.memberHealth = make(map[string]memberHealthReport)
+	}
+	g.memberHealth[report.MemberDeviceID] = memberHealthReport{report: report, at: r.now()}
+	return report.GroupProviderID, true
+}
+
 // GroupFor returns the group an identity heads or belongs to.
 func (r *Registry) GroupFor(providerID string) (string, bool) {
 	r.mu.Lock()
@@ -558,6 +614,27 @@ func (r *Registry) evaluateLocked(groupID string, g *groupState, providers func(
 	for _, l := range g.heartbeat.Links {
 		if !spares[l.ToMemberDeviceID] && l.RTTP99US > r.cfg.MaxLinkRTTP99US {
 			return ReasonLinkRTTExceeded, nil
+		}
+	}
+	// 8. Every active non-head member's own report for this epoch is current
+	// and healthy, and its links meet SPEC-051-R007 as it measures them.
+	for _, st := range rec.Stages[1:] {
+		h, ok := g.memberHealth[st.MemberDeviceID]
+		if !ok || h.report.GroupEpoch != g.latest || r.now().Sub(h.at) > stale {
+			return ReasonMemberHealthStale, nil
+		}
+		if !h.report.Healthy {
+			return ReasonMemberSelfUnhealthy, nil
+		}
+	}
+	for _, st := range rec.Stages[1:] {
+		for _, l := range g.memberHealth[st.MemberDeviceID].report.Links {
+			if l.InterfaceType != want {
+				return ReasonLinkInterfaceInvalid, nil
+			}
+			if l.RTTP99US > r.cfg.MaxLinkRTTP99US {
+				return ReasonLinkRTTExceeded, nil
+			}
 		}
 	}
 	views := make([]pool.ShardGroupMemberView, 0, len(active)+len(rec.Spares))

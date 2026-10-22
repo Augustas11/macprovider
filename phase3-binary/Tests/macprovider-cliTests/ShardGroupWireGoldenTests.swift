@@ -41,12 +41,19 @@ final class ShardGroupWireGoldenTests: XCTestCase {
         let heartbeat = try ShardGroupWire.heartbeat(
             groupEpoch: epoch, providerID: "prov-head", chain: chain,
             members: ShardGroupWire.memberHealth(chainCount: chain.count, running: true, links: links), links: links)
+        let memberConfig = ShardMemberConfig(groupProviderID: "prov-head", groupEpoch: epoch, stageIndex: 1, layerStart: 14, layerEnd: 28, listen: "0.0.0.0:7101")
+        let memberStatus = ShardMemberStatus(
+            listening: true, chain: chain, stageIndex: 1, upstreamPeer: "prov-head", downstreamPeer: "prov-head",
+            upstreamInterface: ShardLinkInterface.thunderbolt, downstreamInterface: ShardLinkInterface.thunderbolt,
+            sessionsServed: 0, lastError: nil)
+        let health = try ShardGroupWire.memberHealth(
+            config: memberConfig, status: memberStatus, memberDeviceID: "mac-b",
+            report: ShardMemberHealthReport(
+                healthy: true, reason: "",
+                links: [ShardMemberHealthReport.Link(peer: "prov-head", interfaceType: ShardLinkInterface.thunderbolt, rttP99Microseconds: 400)]))
         let hello = try XCTUnwrap(try ShardGroupWire.memberHello(
-            config: ShardMemberConfig(groupProviderID: "prov-head", groupEpoch: epoch, stageIndex: 1, layerStart: 14, layerEnd: 28, listen: "0.0.0.0:7101"),
-            status: ShardMemberStatus(
-                listening: true, chain: chain, stageIndex: 1, upstreamPeer: "prov-head", downstreamPeer: "prov-head",
-                upstreamInterface: ShardLinkInterface.thunderbolt, downstreamInterface: ShardLinkInterface.thunderbolt,
-                sessionsServed: 0, lastError: nil),
+            config: memberConfig,
+            status: memberStatus,
             memberDeviceID: "mac-b", artifactHashAlgorithm: ModelArtifactIdentity.snapshotManifestV1, artifactHash: artifactHash,
             weightsVerified: true, stageFits: true))
 
@@ -76,6 +83,7 @@ final class ShardGroupWireGoldenTests: XCTestCase {
             "shard_group_register": try JSONSerialization.jsonObject(with: register),
             "shard_group_heartbeat": try JSONSerialization.jsonObject(with: heartbeat),
             "shard_member_hello": try JSONSerialization.jsonObject(with: hello),
+            "shard_member_health": try JSONSerialization.jsonObject(with: health),
             "group_attestation": attestation,
         ]
     }

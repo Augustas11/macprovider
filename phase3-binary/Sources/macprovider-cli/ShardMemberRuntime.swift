@@ -102,6 +102,29 @@ struct ShardMemberStatus: Sendable {
     var groupEpoch: UInt64? = nil
 }
 
+/// SPEC-051-R015: a member's own account of its health and of each stage link it
+/// carries, reported under its member device identity (`shard_member_health`).
+struct ShardMemberHealthReport: Equatable, Sendable {
+    struct Link: Equatable, Sendable {
+        let peer: String
+        let interfaceType: String
+        let rttP99Microseconds: Int
+    }
+
+    let healthy: Bool
+    /// Empty when healthy; otherwise `link_down`.
+    let reason: String
+    let links: [Link]
+
+    /// Coarsened like the group heartbeat's: a round trip counts as changed at a
+    /// quarter octave.
+    var signature: [String] {
+        ["\(healthy) \(reason)"] + links.map { link in
+            "\(link.peer) \(link.interfaceType) \(Int((log2(Double(max(1, link.rttP99Microseconds))) * 4).rounded(.up)))"
+        }
+    }
+}
+
 /// The member's accept-and-serve loop on its own thread.
 final class ShardMemberStageServer<Stage: ShardBenchStage>: @unchecked Sendable {
     private let stage: Stage
@@ -113,6 +136,8 @@ final class ShardMemberStageServer<Stage: ShardBenchStage>: @unchecked Sendable 
     private var stopped = false
     private var statusValue: ShardMemberStatus
     private var listener: ShardStageListener?
+    /// The links of the session in progress, for the member's health report.
+    private var sessionLinks: ShardBenchLinks?
     /// Connect and handshake bound for a session's links.
     static var connectTimeout: TimeInterval { 30 }
 
@@ -131,6 +156,32 @@ final class ShardMemberStageServer<Stage: ShardBenchStage>: @unchecked Sendable 
         lock.lock()
         defer { lock.unlock() }
         return statusValue
+    }
+
+    /// The member's health while it is joined to a head (a spare: to its standby
+    /// link); nil before, when it has no stage links to report.
+    var healthReport: ShardMemberHealthReport? {
+        lock.lock()
+        let status = statusValue
+        let links = sessionLinks
+        lock.unlock()
+        guard let links, let upstreamPeer = status.upstreamPeer, let stageIndex = status.stageIndex else { return nil }
+        let window = config.supervision.link(epoch: 1).heartbeatInterval * Double(config.supervision.heartbeatMissLimit)
+        func alive(_ link: ShardStageLink) -> Bool { !link.hasFailed && link.secondsSinceLastByte <= window }
+        func rtt(_ link: ShardStageLink, probe: ShardBenchLatency?) -> Int {
+            link.roundTrip.p99Microseconds ?? Int((probe?.p99Microseconds ?? 0).rounded(.up))
+        }
+        let hello = status.chain.indices.contains(stageIndex) ? status.chain[stageIndex] : nil
+        var reported = [ShardMemberHealthReport.Link(
+            peer: upstreamPeer, interfaceType: status.upstreamInterface ?? ShardLinkInterface.other,
+            rttP99Microseconds: rtt(links.upstream, probe: hello?.upstreamProbe))]
+        if let downstreamPeer = status.downstreamPeer, downstreamPeer != upstreamPeer {
+            reported.append(ShardMemberHealthReport.Link(
+                peer: downstreamPeer, interfaceType: status.downstreamInterface ?? ShardLinkInterface.other,
+                rttP99Microseconds: rtt(links.downstream, probe: hello?.returnProbe)))
+        }
+        let healthy = links.unique.allSatisfy(alive)
+        return ShardMemberHealthReport(healthy: healthy, reason: healthy ? "" : "link_down", links: reported)
     }
 
     /// The listening port (tests bind port 0).
@@ -227,6 +278,14 @@ final class ShardMemberStageServer<Stage: ShardBenchStage>: @unchecked Sendable 
     }
 
     private func runSession(_ links: ShardBenchLinks, link: ShardLinkConfiguration) {
+        lock.lock()
+        sessionLinks = links
+        lock.unlock()
+        defer {
+            lock.lock()
+            sessionLinks = nil
+            lock.unlock()
+        }
         let upstreamInterface = ShardLinkInterface.classify(peerAddress: links.upstream.peerAddress)
         let downstreamInterface = links.isCollapsed ? upstreamInterface : ShardLinkInterface.classify(peerAddress: links.downstream.peerAddress)
         var options = ShardBenchSessionOptions(
@@ -289,6 +348,7 @@ final class ShardMemberStageServer<Stage: ShardBenchStage>: @unchecked Sendable 
 /// The handle the member runtime keeps on its stage server, whatever the stage type.
 protocol ShardMemberServerHandle: AnyObject, Sendable {
     var status: ShardMemberStatus { get }
+    var healthReport: ShardMemberHealthReport? { get }
     func stop()
 }
 
@@ -316,6 +376,8 @@ actor ShardMemberRuntime: ModelRuntimeServing {
     var takeoverState = ShardMemberHelloState.notSent
     /// The head epoch the hello states belong to; a head at a new epoch starts them over.
     var helloEpoch: UInt64?
+    /// What the last `shard_member_health` reported; a difference is a change to send now.
+    var reportedHealth: [String]?
     var changeHandler: (@Sendable () async -> Void)?
     private var changeMonitor: Task<Void, Never>?
     private var lastChangeSent: TimeInterval = 0
@@ -372,8 +434,14 @@ actor ShardMemberRuntime: ModelRuntimeServing {
         config.role == .spare ? (joined - 1, joined) : (joined, nil)
     }
 
+    /// The own report changed since it was last sent (after the member's hello was accepted).
+    var healthDue: Bool {
+        guard helloState == .accepted, let report = server.healthReport else { return false }
+        return report.signature != reportedHealth
+    }
+
     func reportChangeIfDue() async {
-        guard let handler = changeHandler, helloDue else { return }
+        guard let handler = changeHandler, helloDue || healthDue else { return }
         let now = Double(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) / 1e9
         guard now - lastChangeSent >= ShardGroupWire.minimumChangeInterval else { return }
         lastChangeSent = now

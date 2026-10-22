@@ -192,6 +192,29 @@ func (s *Server) handleShardGroupHeartbeat(providerID, assignedID string, payloa
 	s.reevaluateShardGroup(ctx, providerID)
 }
 
+// handleShardMemberHealth applies a member's own health report and
+// re-evaluates its group (SPEC-051-R015).
+func (s *Server) handleShardMemberHealth(providerID, assignedID string, payload []byte) {
+	w := s.shardGroups
+	if w == nil {
+		return
+	}
+	live, ok := s.pool.Resolve(providerID, assignedID)
+	if !ok {
+		return
+	}
+	groupID, kept := w.registry.MemberHealth(shardgroup.MemberSession{
+		ProviderID: providerID, AssignedID: assignedID, ReceiptKey: live.ReceiptPubkey, ShardMemberV1: live.ShardMemberV1,
+	}, payload)
+	if !kept {
+		s.log.Warn().Str("provider_id", providerID).Msg("shard member health dropped")
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s.reevaluateShardGroup(ctx, groupID)
+}
+
 // shardGroupSessionChanged re-evaluates the group an identity heads or
 // belongs to after one of its sessions changed (disconnect).
 func (s *Server) shardGroupSessionChanged(providerID string) {

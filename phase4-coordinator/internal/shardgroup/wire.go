@@ -21,6 +21,7 @@ const (
 	TypeStatus            = "shard_group_status"
 	TypeMemberHello       = "shard_member_hello"
 	TypeMemberHelloResult = "shard_member_hello_result"
+	TypeMemberHealth      = "shard_member_health"
 
 	// WireVersion is the only group message version.
 	WireVersion = 1
@@ -319,6 +320,45 @@ func ParseMemberHello(payload []byte) (MemberHello, error) {
 	}
 	if msg.Type != TypeMemberHello || msg.Version != WireVersion {
 		return MemberHello{}, errStrict
+	}
+	return msg, nil
+}
+
+// MemberHealth is `shard_member_health`: a member's own report of its health
+// and its stage links under its member device identity (SPEC-051-R015).
+type MemberHealth struct {
+	Type            string             `json:"type"`
+	Version         int                `json:"version"`
+	GroupProviderID string             `json:"group_provider_id"`
+	GroupEpoch      uint64             `json:"group_epoch"`
+	MemberDeviceID  string             `json:"member_device_id"`
+	Healthy         bool               `json:"healthy"`
+	Reason          string             `json:"reason"`
+	Links           []MemberHealthLink `json:"links"`
+}
+
+// MemberHealthLink is one stage link as the member measures it.
+type MemberHealthLink struct {
+	PeerMemberDeviceID string `json:"peer_member_device_id"`
+	InterfaceType      string `json:"interface_type"`
+	RTTP99US           int    `json:"rtt_p99_us"`
+}
+
+// MemberHealthReasons is the closed set of `shard_member_health` reasons; the
+// empty reason goes with `healthy: true` only.
+var MemberHealthReasons = map[string]bool{"not_joined": true, "link_down": true}
+
+// ParseMemberHealth strictly parses `shard_member_health`.
+func ParseMemberHealth(payload []byte) (MemberHealth, error) {
+	var msg MemberHealth
+	if err := decodeStrict(payload, &msg); err != nil {
+		return MemberHealth{}, err
+	}
+	if msg.Type != TypeMemberHealth || msg.Version != WireVersion {
+		return MemberHealth{}, errStrict
+	}
+	if msg.Healthy != (msg.Reason == "") || (!msg.Healthy && !MemberHealthReasons[msg.Reason]) {
+		return MemberHealth{}, errStrict
 	}
 	return msg, nil
 }

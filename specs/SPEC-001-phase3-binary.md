@@ -1,6 +1,14 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.40 (2026-10-22, multi-Mac shard group wire extensions)
+**Version:** 1.9.41 (2026-10-22, shard group member self-health message)
+
+**Change log v1.9.41 (2026-10-22, Related: #2084):**
+Registers one more SPEC-051 shard-group message, owned by SPEC-051-R029: the
+member message `shard_member_health`, which a session advertising
+`shard_member_v1` sends once its `shard_member_hello` is accepted, on its
+heartbeat cadence and on a change of its health or links. The coordinator
+consumes it for group availability (SPEC-051-R015) and sends no answer. A
+session that advertises neither shard capability is unaffected.
 
 **Change log v1.9.40 (2026-10-22, Related: #2084):**
 Registers the SPEC-051 shard-group extensions to this wire protocol. Their
