@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.50
+**Version:** 0.1.51
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.50",
+  "version": "0.1.51",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -1248,6 +1248,45 @@ catalog eligibility. Classic SPEC-028 evidence MUST NOT be relabeled as native
 MTP evidence, and upstream/non-MLX benchmark numbers MUST NOT satisfy local
 admission.
 
+**(0.1.51) Decode-path binding.** Admission binds the decode path, not the
+CLI binary. A release entry MAY carry `decode_path_digest` and
+`metallib_sha256` (SPEC-023 v0.22.30; both or neither).
+`decode_path_digest` is SHA-256 over the checked-in manifest
+`phase3-binary/decode-path-manifest.json`: the native-MTP drafter and
+verification files, the `ContinuousBatchScheduler` decode and verify windows,
+the paged-KV decode kernels and bridge, the batched decode and the row
+sampler, plus the pinned mlx-swift and mlx-swift-lm revisions. Those
+revisions carry the MLX core and the model families' forward passes.
+`scripts/decode_path_digest.py` defines the algorithm. The digest is compiled
+into the CLI (`DecodePathIdentity`), so the signed binary carries it, and
+`/v1/status` reports it as `build_identity.decode_path_digest`. CI fails when a
+listed file is missing or changes without a regenerated digest.
+
+- An entry that carries the binding admits the model only when all of these
+  equal the running build: the embedded digest, `runtime_revision`, the SHA-256
+  of the loaded Metal library, `hardware_class`, `ram_bytes` and
+  `qualified_slots`, plus the model key and the target artifact.
+- If any entry for the loaded model carries the binding, there is no
+  model-keyed fallback. A mismatch refuses native MTP with reason
+  `decode_path_mismatch`, and ordinary decode is unchanged.
+- An entry without the binding keeps the 0.1.32 model-keyed rule. Entries
+  published for CLI 1.8.258–1.8.260 are such entries.
+- The CLI version, `provider_revision`, `source_commit`,
+  `reproducible_build_sha256` and `live_executable_cdhash` never gate native
+  MTP. Binary trust stays with SPEC-023 signed-release admission: an exactly
+  revoked release gets an update-only session that is never routable, and
+  tuple revocation is unchanged.
+- Consequence: a signed CLI cut whose embedded digest equals the admitted
+  entry's `decode_path_digest` needs no admission step. A different digest
+  means the decode path changed, so the tuple needs requalification evidence
+  (AGENTS.md rule 2), not an identity rebind.
+- Publishing: the binding is qualification-owned (tuple input). CLIs before
+  the reader reject unknown entry keys, so R014 item 10 applies. A
+  decode-path entry is published only when the bound release CLI embeds that
+  same digest. The release input records it as `provider_decode_path_digest`,
+  and the generator refuses a mismatch. That release CLI must be the released
+  one. The identity fields stay in every entry as provenance (dual-field).
+
 SPEC-023 autotune recommendation, SPEC-032 hardware-evidence performance
 measurement, and every ordinary catalog gate seed MUST force
 `decode_path=ordinary`; `native_mtp_mode=auto` is ignored for those
@@ -1290,7 +1329,10 @@ For each qualified tuple, production enablement requires all of the following:
 7. The frozen implementation/evidence diff passes code, security, and
    architecture review with zero Critical, High, or Medium findings.
 8. After merge and final signing, the exact release candidate is revalidated
-   in isolated loopback against the sidecar source-commit/build digest;
+   in isolated loopback against the sidecar source-commit/build digest
+   (**0.1.51:** for a decode-path entry, against its `decode_path_digest`; a
+   later signed CLI with the same embedded digest needs neither a new sidecar
+   nor a new release journey);
    release-asset byte identity and the previous-stable updater pass when the
    CLI ships in both Malibu.app and the standalone tarball. R014 is promoted
    to `conformant` from this post-release-candidate evidence before production
@@ -1794,6 +1836,17 @@ the text-only path without image inputs; that does not admit multimodal buyer
 requests.
 
 ## 9. Changelog and history
+
+- **0.1.51 (2026-10-22)** — R013/R014: admission binds the decode path, not
+  the CLI binary. Entries may carry `decode_path_digest`, a SHA-256 over the
+  checked-in decode-path manifest compiled into the CLI and reported on
+  `/v1/status`, together with `metallib_sha256`. Such an entry admits only an
+  exact decode-path match: digest, runtime revision, Metal library, hardware,
+  RAM and slots. It has no model-keyed fallback and refuses with
+  `decode_path_mismatch`. Entries without the fields keep the 0.1.32 rule. A
+  signed CLI cut with an unchanged digest needs no admission step. CLI
+  identity never gates, and SPEC-023 exact revocation still blocks serving.
+  Publishing follows R014 item 10.
 
 - **0.1.50 (2026-10-21)** — R015 records the operator's reviewed, exact-tuple
   issue #2081 disposition for the Qwen3.6-35B-A3B `s2-p1536-o512` TTFT

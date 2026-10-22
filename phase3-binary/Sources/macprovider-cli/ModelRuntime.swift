@@ -11407,6 +11407,21 @@ maxTokens: maxTokens,
         )
     }
 
+    /// SPEC-048-R013 (0.1.51): the Metal library digest a decode-path
+    /// admission entry binds, read exactly as the paged-KV runtime
+    /// measurement reads it. Nil (unreadable) matches no decode-path entry.
+    static func nativeMTPRuntimeMetallibSHA256(
+        environment: PagedKVRuntimeMeasurementEnvironment = .live
+    ) -> String? {
+        guard let path = environment.metallibCandidatePaths().first(where: environment.fileExists),
+              let data = try? environment.readFileData(path),
+              !data.isEmpty
+        else {
+            return nil
+        }
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
     #if DEBUG || MACPROVIDER_LAB_HARNESS
     static func labNativeMTPSourceCommit(
         _ environment: [String: String] = ProcessInfo.processInfo.environment
@@ -11614,7 +11629,9 @@ maxTokens: maxTokens,
                     ramGB: machine.ramGB,
                     osVersion: machine.osVersion,
                     slotCount: slotCount,
-                    revokedTupleSHA256: effectiveRevokedTupleSHA256
+                    revokedTupleSHA256: effectiveRevokedTupleSHA256,
+                    decodePathDigest: DecodePathIdentity.digest,
+                    metallibSHA256: nativeMTPRuntimeMetallibSHA256()
                 ),
                 trustedKeyring: trustedKeyring,
                 resolvedArtifactAuthority: resolvedArtifactAuthority,
@@ -11831,7 +11848,11 @@ maxTokens: maxTokens,
                 return ("artifact_observation_invalid", "pair")
             }
         }
-        if error is NativeMTPAdmissionSidecarError {
+        if let sidecarError = error as? NativeMTPAdmissionSidecarError {
+            // SPEC-048-R013 (0.1.51): a signed decode path this build does not run.
+            if sidecarError == .decodePathMismatch {
+                return ("decode_path_mismatch", "sidecar")
+            }
             return ("sidecar_validation_rejected", "sidecar")
         }
         if error is ModelRuntimeLoadError {

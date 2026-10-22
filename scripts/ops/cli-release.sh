@@ -290,6 +290,12 @@ gather() {
   fact checkout_is_origin_main "$([ "$head_sha" = "$main_sha" ] && echo true || echo false)"
   fact binary_version "$V"
   fact checked_in_latest_binary_version "$A"
+  # SPEC-048-R013 (0.1.51), read-only: match = the committed native-MTP
+  # admission binds this tree's decode path, so this cut needs no admission
+  # step; legacy = old-format entries (one dual-field rebind after this cut is
+  # the released CLI); mismatch = the decode path changed (requalify).
+  fact native_mtp_admission_decode_path "$(python3 "$REPO_ROOT/scripts/decode_path_digest.py" \
+    --admission-status "$REPO_ROOT/phase3-binary/catalog/autotune/native-mtp-admission.json" 2>/dev/null || echo unknown)"
 
   L=""; runtime=""
   if fetch_coordinator_health; then

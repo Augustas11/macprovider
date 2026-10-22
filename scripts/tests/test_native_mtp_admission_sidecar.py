@@ -140,6 +140,56 @@ class NativeMTPAdmissionSidecarTests(unittest.TestCase):
         with self.assertRaisesRegex(SidecarError, "release-owned"):
             build(bad, release_input())
 
+    # SPEC-048-R013 (0.1.51) decode-path binding.
+    def decode_path_tuple(self, digest="1" * 64):
+        value = copy.deepcopy(self.tuple)
+        value["entry"]["decode_path_digest"] = digest
+        value["entry"]["metallib_sha256"] = "2" * 64
+        return value
+
+    def test_decode_path_entry_needs_a_reader_cli_with_the_same_digest(self):
+        with self.assertRaisesRegex(SidecarError, "provider_decode_path_digest"):
+            build(self.decode_path_tuple(), release_input())
+        release = release_input()
+        release["provider_decode_path_digest"] = "3" * 64
+        with self.assertRaisesRegex(SidecarError, "requalify"):
+            build(self.decode_path_tuple(), release)
+        release["provider_decode_path_digest"] = "1" * 64
+        entry = json.loads(build(self.decode_path_tuple(), release))["entries"][0]
+        # Dual-field: the identity provenance old CLIs require stays present.
+        self.assertEqual(entry["decode_path_digest"], "1" * 64)
+        self.assertEqual(entry["metallib_sha256"], "2" * 64)
+        self.assertEqual(entry["live_executable_cdhash"], "d" * 40)
+        self.assertEqual(entry["source_commit"], "b" * 40)
+        self.assertNotIn("provider_decode_path_digest", json.loads(build(self.decode_path_tuple(), release)))
+
+    def test_new_cli_cut_with_same_decode_path_rebuilds_the_same_entry_digest(self):
+        release = release_input()
+        release["provider_decode_path_digest"] = "1" * 64
+        before = json.loads(build(self.decode_path_tuple(), release))["entries"][0]
+        # A later CLI with the same embedded digest needs no tuple change.
+        release["provider_decode_path_digest"] = "1" * 64
+        release["entry"]["live_executable_cdhash"] = "f" * 40
+        after = json.loads(build(self.decode_path_tuple(), release))["entries"][0]
+        self.assertEqual(before["decode_path_digest"], after["decode_path_digest"])
+
+    def test_decode_path_binding_is_both_fields_or_neither(self):
+        release = release_input()
+        release["provider_decode_path_digest"] = "1" * 64
+        half = copy.deepcopy(self.tuple)
+        half["entry"]["decode_path_digest"] = "1" * 64
+        with self.assertRaisesRegex(SidecarError, "needs both"):
+            build(half, release)
+        bad = self.decode_path_tuple(digest="X" * 64)
+        release["provider_decode_path_digest"] = "X" * 64
+        with self.assertRaisesRegex(SidecarError, "provider_decode_path_digest"):
+            build(bad, release)
+
+    def test_old_format_tuple_is_unchanged_by_a_reader_release(self):
+        release = release_input()
+        release["provider_decode_path_digest"] = "1" * 64
+        self.assertEqual(build(self.tuple, release), build(self.tuple, release_input()))
+
     def test_closed_schema_and_bounds_fail_closed(self):
         cases = {
             "max_prompt_tokens": 0,

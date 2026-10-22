@@ -1,0 +1,20 @@
+{
+  "schema_version": "macprovider.decode-path-manifest.v1",
+  "files": [
+    "Sources/MacProviderCore/PagedKVEngine.swift",
+    "Sources/macprovider-cli/CompiledDecode.swift",
+    "Sources/macprovider-cli/ContiguousBatchedDecode.swift",
+    "Sources/macprovider-cli/ContinuousBatchRowSampler.swift",
+    "Sources/macprovider-cli/ContinuousBatchScheduler.swift",
+    "Sources/macprovider-cli/NativeMTP.swift",
+    "Sources/macprovider-cli/NativeMTPAcceptance.swift",
+    "Sources/macprovider-cli/NativeMTPAdaptation.swift",
+    "Sources/macprovider-cli/PagedKVCache.swift",
+    "Sources/macprovider-cli/PagedKVRuntimeBridge.swift",
+    "Sources/macprovider-cli/PagedMLACache.swift"
+  ],
+  "dependencies": [
+    "mlx-swift",
+    "mlx-swift-lm"
+  ]
+}

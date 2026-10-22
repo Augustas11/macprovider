@@ -263,6 +263,47 @@ if validate_native_release_binding; then exit 10; fi
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_decode_path_admission_accepts_any_signed_cli_running_the_admitted_decode_path(self):
+        """SPEC-048-R013 (0.1.51): a new CLI cut with the same decode path
+        needs no identity rebind; a different decode path is refused."""
+        release = {
+            "schema_version": "macprovider.native-mtp-admission-release-input.v1",
+            "release_id": "signed-release",
+            "provider_decode_path_digest": "d" * 64,
+            "entry": {
+                "reproducible_build_sha256": "a" * 64,
+                "live_executable_cdhash": "b" * 40,
+            },
+        }
+        status = {"build_identity": {"decode_path_digest": "d" * 64}}
+        changed = {"build_identity": {"decode_path_digest": "e" * 64}}
+        result, _ = self.run_shell(
+            ["validate_native_release_binding"],
+            """
+REPO_ROOT="$OPS_TMP_DIR"
+NATIVE_ADMISSION_RELEASE=admission.json
+LIVE_RELEASE=signed-release HB_VERSION=1.8.262 HB_SHA="$(printf 'c%.0s' {1..64})"
+HB_CDHASH="$(printf 'f%.0s' {1..40})" HB_TEAM=TEAM HB_IDENTIFIER=identifier
+RELEASE_TEAM_ID=TEAM RELEASE_SIGNING_IDENTIFIER=identifier
+git() { :; }
+cp "$OPS_TMP_DIR/same.json" "$OPS_TMP_DIR/preflight-status.json"
+validate_native_release_binding
+cp "$OPS_TMP_DIR/changed.json" "$OPS_TMP_DIR/preflight-status.json"
+if validate_native_release_binding; then exit 9; fi
+rm "$OPS_TMP_DIR/preflight-status.json"
+if validate_native_release_binding; then exit 10; fi
+cp "$OPS_TMP_DIR/same.json" "$OPS_TMP_DIR/preflight-status.json"
+HB_IDENTIFIER=other
+if validate_native_release_binding; then exit 11; fi
+""",
+            files={
+                "admission.json": json.dumps(release),
+                "same.json": json.dumps(status),
+                "changed.json": json.dumps(changed),
+            },
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_native_recovery_uses_journal_frozen_release_identity(self):
         restore = shell_function(CONTROLLER, "run_native_mtp_restore")
         self.assertIn("validate_native_journal_release_binding", restore)

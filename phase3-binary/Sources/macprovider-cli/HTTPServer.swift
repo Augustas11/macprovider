@@ -2510,6 +2510,12 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             "binary_version": CoordinatorClient.binaryVersion,
             "compatibility_set_id": jsonNullable(compatibilitySetManifest?.compatibilitySetID),
             "compatibility_set_sha256": jsonNullable(compatibilitySetManifest?.envelopeSHA256),
+            // SPEC-048-R013 (0.1.51): what a decode-path admission entry binds.
+            "build_identity": [
+                "decode_path_digest": DecodePathIdentity.digest,
+                "mlx_swift_lm_revision": KVBuildIdentity.mlxSwiftLMRevision,
+                "mlx_swift_revision": KVBuildIdentity.mlxSwiftRevision,
+            ],
             "local_status_contract": [
                 "version": localStatusContractVersion,
                 "minimum_reader_version": localStatusMinimumReaderVersion,
