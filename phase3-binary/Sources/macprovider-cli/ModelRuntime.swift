@@ -1994,6 +1994,9 @@ actor ModelRuntime: ModelRuntimeServing {
     // pre-knob behavior; lifting above 1 widens the autotune search.
     private var kvBitsOverride: Int?
     private let prefillStepSize: Int
+    /// The CB prompt chunk the operator set through `prefill_step_size`; nil
+    /// keeps the backend family's ceiling (SPEC-038 FR-CB2).
+    private let continuousBatchPromptChunkOverride: Int?
     private let pagedKVConfig: PagedKVConfig
     private var pagedKVAttachDecision: PagedKVAttachDecision
     private var pagedKVRuntimeCacheClass: String
@@ -3303,6 +3306,7 @@ maxTokens: 1,
         kvBitsOverride: Int? = nil,
         pagedKVConfig: PagedKVConfig = .defaults(),
         prefillStepSize: Int = 512,
+        prefillStepSizeExplicitlyConfigured: Bool = false,
         maxBatch: Int = 1,
         continuousBatchingMode: ContinuousBatchingMode = .off,
         continuousBatchQueueLimit: Int? = nil,
@@ -3382,6 +3386,7 @@ maxTokens: 1,
         self.maxContextTokens = maxContextTokensOverride ?? Self.defaultMaxContextTokens()
         self.kvBitsOverride = kvBitsOverride
         self.prefillStepSize = max(1, prefillStepSize)
+        self.continuousBatchPromptChunkOverride = prefillStepSizeExplicitlyConfigured ? max(1, prefillStepSize) : nil
         self.pagedKVConfig = pagedKVConfig
         self.pagedKVRuntimeCacheClass = Self.pagedKVUnavailableCacheClass
         self.pagedKVObservedRuntimeIdentity = nil
@@ -3676,7 +3681,7 @@ maxTokens: 1,
             modelSHA256: self.currentModelHash,
             weightsGeneration: self.currentSpecDecodeGeneration,
             kvBitsOverride: self.kvBitsOverride,
-            prefillStepSize: self.prefillStepSize,
+            prefillStepSize: self.continuousBatchPromptChunkOverride,
             nativeMTPStatusSink: self.currentNativeMTPStatusSink,
             replayAuthority: self.continuousBatchReplayAuthority,
             cachedTurns: self.continuousBatchingCachedTurns
@@ -3978,6 +3983,7 @@ maxTokens: 1,
         self.maxContextTokens = maxContextTokensOverride ?? Self.defaultMaxContextTokens()
         self.kvBitsOverride = kvBitsOverride
         self.prefillStepSize = max(1, prefillStepSize)
+        self.continuousBatchPromptChunkOverride = max(1, prefillStepSize)
         self.pagedKVConfig = pagedKVConfig
         self.pagedKVRuntimeCacheClass = pagedKVRuntimeCacheClass
         // Defense-in-depth (mirrors the prober fence): only DEBUG/test builds may inject
@@ -6012,7 +6018,7 @@ maxTokens: 1,
             modelSHA256: currentModelHash,
             weightsGeneration: currentSpecDecodeGeneration,
             kvBitsOverride: kvBitsOverride,
-            prefillStepSize: prefillStepSize,
+            prefillStepSize: continuousBatchPromptChunkOverride,
             nativeMTPStatusSink: currentNativeMTPStatusSink,
             replayAuthority: continuousBatchReplayAuthority,
             cachedTurns: continuousBatchingCachedTurns

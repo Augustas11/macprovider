@@ -1101,7 +1101,7 @@
     {
       "spec_id": "SPEC-038",
       "title": "Continuous batching for concurrent provider inference",
-      "version": "v0.3.27",
+      "version": "v0.3.28",
       "path": "specs/SPEC-038-continuous-batching.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -5159,7 +5159,8 @@
         "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeBridge.swift:enum PagedKVRowAttention",
         "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeBridge.swift:static func verifyGroups",
         "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeBridge.swift:private func notePaddedAttentionBypass",
-        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:enum ContinuousBatchDecodeRouteBound"
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:enum ContinuousBatchDecodeRouteBound",
+        "phase3-binary/Sources/macprovider-cli/ServeDecodePath.swift:nonisolated static func schedulerPromptChunkCeiling"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testPrefillBatchesCompatibleChunksWithinRowAndTokenBudgets",
@@ -5237,7 +5238,11 @@
         "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testQwenPreparationLaneSnapshotStaysPinnedAcrossWarmSwap",
         "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testQwenPreparationLaneRejectsQueuedDrainBeforeProcessorRuns",
         "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testQwenPreparationLaneAdmitsNonStreamingRowWhileTargetLockIsHeld",
-        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testQwenPreparationLaneAdmitsStreamingRowWhileTargetLockIsHeld"
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testQwenPreparationLaneAdmitsStreamingRowWhileTargetLockIsHeld",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testProductionPromptChunkFollowsTheFamilyCeilingAndTheOperatorOnlyLowersIt",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testGLMPromptChunkKeepsActiveRowsDecodingBetweenChunks",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeMixedCacheTests.swift:testSchedulerPromptChunkCeilingIsPerFamily",
+        "phase3-binary/Tests/macprovider-cliTests/ServingKnobsConfigTests.swift:testPrefillStepSizeIsTrackedAsExplicitOnlyWhenConfigured"
       ],
       "journeys": [],
       "evidence": [],

@@ -70,6 +70,46 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertTrue(cli.pagedKVEnabledExplicitlyConfigured)
     }
 
+    /// SPEC-038 FR-CB2: only an operator-set `prefill_step_size` lowers the
+    /// family's CB prompt chunk; the 512 default does not.
+    func testPrefillStepSizeIsTrackedAsExplicitOnlyWhenConfigured() throws {
+        let defaults = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: [:],
+            fileExists: { _ in false },
+            readFile: { _ in "" }
+        )
+        XCTAssertEqual(defaults.prefillStepSize, 512)
+        XCTAssertFalse(defaults.prefillStepSizeExplicitlyConfigured)
+
+        let yaml = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in "prefill_step_size: 512\n" }
+        )
+        XCTAssertEqual(yaml.prefillStepSize, 512)
+        XCTAssertTrue(yaml.prefillStepSizeExplicitlyConfigured)
+
+        let environment = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: ["MACPROVIDER_PREFILL_STEP_SIZE": "1024"],
+            fileExists: { _ in false },
+            readFile: { _ in "" }
+        )
+        XCTAssertEqual(environment.prefillStepSize, 1_024)
+        XCTAssertTrue(environment.prefillStepSizeExplicitlyConfigured)
+
+        let cli = try ConfigLoader.load(
+            cli: CLIOverrides(prefillStepSize: 256),
+            environment: [:],
+            fileExists: { _ in false },
+            readFile: { _ in "" }
+        )
+        XCTAssertEqual(cli.prefillStepSize, 256)
+        XCTAssertTrue(cli.prefillStepSizeExplicitlyConfigured)
+    }
+
     func testModelArtifactRootYAMLAndEnvironment() throws {
         let yaml = try ConfigLoader.load(
             cli: CLIOverrides(),

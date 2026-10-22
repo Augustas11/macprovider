@@ -1,11 +1,22 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.27
+Version: v0.3.28
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.28 (2026-10-22, FR-CB2 per-family prompt chunk):**
+FR-CB2: the serve path's per-row prompt chunk limit is the backend family's
+ceiling. A `glm5_next` (pagedMLA) backend takes 2048 tokens; every other
+family keeps 512. An operator-set `prefill_step_size` may only lower the
+limit, and the per-iteration token budget still bounds it. The prefill decode
+window scales with the chunk, never below its default, under the lockstep
+window. Studio M3 Ultra, GLM-5.3-Flash, 8k prompt, same build and oracle:
+224.0 prefill tok/s at 512 versus 308.7 at 2048, 16/16 top-1 parity at both,
+189 GB peak (#2100). Grouping, kernel-route, FCFS and failure rules are
+unchanged. The change sits in the decode-path manifest
+(`ServeDecodePath.swift`), so the decode-path digest changes (SPEC-048 R013).
 **Change log v0.3.27 (2026-10-21, FR-CB10 target-hardware evidence):**
 Qualification-campaign evidence may come from the operator-designated target
 hardware under SPEC-023 R025 v0.22.29. Legacy provenance fields retain their
@@ -769,6 +780,18 @@ otherwise in a reason-coded fallback/rejection state. A row that cannot join
 one compatible prefill group MUST continue to make progress through a later
 compatible group, a safe serial prefill path, or a client-visible
 backpressure/rejection outcome; starvation is non-conformant.
+
+**Per-row chunk limit (v0.3.28).** On the serve path the per-row chunk limit
+is the backend family's prompt chunk ceiling: 2048 tokens for a `glm5_next`
+(pagedMLA) backend, whose rows prefill alone, and 512 for every other family.
+An operator-set `prefill_step_size` MAY lower the limit and MUST NOT raise it
+above the ceiling; when it is unset the limit is the ceiling. The
+per-iteration budget still bounds every chunk. The prefill decode window MUST
+scale with the limit, keeping active rows' decode steps per prefilled token:
+the default (8) at a 512-token chunk, proportionally more at a larger chunk,
+never below the default, and never above the lockstep window. A family's
+ceiling rises only with a same-build measurement of its prefill throughput and
+greedy parity at the new chunk.
 
 Rows in one compatible prefill group MUST be processed by one backend shared
 prefill forward. An implementation MUST NOT claim batched prefill when it

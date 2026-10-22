@@ -5426,6 +5426,119 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertTrue(whilePrefilling.allSatisfy { $0.steps == 1 })
     }
 
+    /// #2100 / SPEC-038 FR-CB2: the serve path's prompt chunk is the backend
+    /// family's ceiling (`glm5_next` 2048, every other family 512), which the
+    /// default per-iteration budget does not clamp. An operator
+    /// `prefill_step_size` only lowers it, and decode steps while prefilling
+    /// scale with the chunk, never below the default.
+    func testProductionPromptChunkFollowsTheFamilyCeilingAndTheOperatorOnlyLowersIt() {
+        let glm = ModelRuntime.pagedMLAPromptChunkTokens
+        XCTAssertEqual(glm, 2_048)
+        // (prefill_step_size, family ceiling, chunk, decode steps while prefilling)
+        let cases: [(Int?, Int, Int, Int)] = [
+            (nil, 512, 512, 8), (512, 512, 512, 8), (4_096, 512, 512, 8), (256, 512, 256, 8),
+            (nil, glm, 2_048, 32), (4_096, glm, 2_048, 32), (1_024, glm, 1_024, 16),
+            (512, glm, 512, 8), (256, glm, 256, 8),
+        ]
+        for (step, ceiling, chunk, steps) in cases {
+            let configuration = ModelRuntime.productionContinuousBatchSchedulerConfiguration(
+                descriptor: Self.descriptor(),
+                tuple: Self.tuple(),
+                maxBatch: 8,
+                queueLimit: nil,
+                queueWaitTimeoutMS: nil,
+                prefillTokensPerIteration: nil,
+                maxContextTokens: 131_072,
+                modelID: Self.modelID,
+                modelSHA256: Self.modelSHA,
+                weightsGeneration: 1,
+                prefillStepSize: step,
+                maxDecodeLockstepWindow: ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow,
+                nativeMTPRoundByteCapacity: nil,
+                nativeMTPStatusSink: nil,
+                prefillGrouping: .ungrouped,
+                promptChunkCeiling: ceiling
+            )
+            let label = "prefill_step_size \(String(describing: step)), ceiling \(ceiling)"
+            XCTAssertEqual(configuration.maxPromptChunkTokens, chunk, label)
+            XCTAssertEqual(configuration.maxPrefillTokensPerIteration, 2_048, label)
+            XCTAssertEqual(
+                min(configuration.maxPromptChunkTokens, configuration.maxPrefillTokensPerIteration),
+                chunk,
+                label
+            )
+            XCTAssertEqual(configuration.maxDecodeStepsWhilePrefilling, steps, label)
+        }
+    }
+
+    /// #2100: at the 2048-token `glm5_next` chunk an active row still takes a
+    /// full lockstep window (16 steps) between the chunks of a long prompt.
+    func testGLMPromptChunkKeepsActiveRowsDecodingBetweenChunks() async throws {
+        let decodeGate = AsyncGate()
+        let backend = WindowRecordingBackend(
+            scripts: ["active": Array(100 ..< 164), "long": [200, 201]],
+            decodeGate: decodeGate
+        )
+        let configuration = ModelRuntime.productionContinuousBatchSchedulerConfiguration(
+            descriptor: Self.descriptor(blockSizeTokens: 256, maxPhysicalBlocks: 64),
+            tuple: Self.tuple(),
+            maxBatch: 2,
+            queueLimit: nil,
+            queueWaitTimeoutMS: nil,
+            prefillTokensPerIteration: nil,
+            maxContextTokens: 8_192,
+            modelID: Self.modelID,
+            modelSHA256: Self.modelSHA,
+            weightsGeneration: 3,
+            prefillStepSize: nil,
+            maxDecodeLockstepWindow: ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow,
+            nativeMTPRoundByteCapacity: nil,
+            nativeMTPStatusSink: nil,
+            prefillGrouping: .ungrouped,
+            promptChunkCeiling: ModelRuntime.pagedMLAPromptChunkTokens
+        )
+        let scheduler = ContinuousBatchScheduler(
+            configuration: configuration,
+            allocator: try PagedKVBlockAllocator(blockSizeTokens: 256, maxPhysicalBlocks: 64),
+            backend: backend,
+            replayAuthority: TestReplayAuthority()
+        )
+        let active = Task {
+            try await scheduler.submit(.init(
+                id: "active",
+                conversationKey: "",
+                promptTokens: [1],
+                maxOutputTokens: 64,
+                temperature: 0.0,
+                topP: 1.0
+            ))
+        }
+        try await eventually { await backend.windowCallCount() == 1 }
+        let long = Task {
+            try await scheduler.submit(.init(
+                id: "long",
+                conversationKey: "",
+                promptTokens: Array(1 ... 4_100),
+                maxOutputTokens: 2,
+                temperature: 0.0,
+                topP: 1.0
+            ))
+        }
+        try await eventually { await scheduler.metrics().waitingCount == 1 }
+        await decodeGate.open()
+
+        let activeResult = try await active.value
+        let longResult = try await long.value
+        XCTAssertEqual(activeResult.outputTokens, Array(100 ..< 164))
+        XCTAssertEqual(longResult.outputTokens, [200, 201])
+        let chunks = await backend.prefillChunks(id: "long")
+        XCTAssertEqual(chunks, [2_048, 2_048, 4])
+        let windows = await backend.windowCalls()
+        let whilePrefilling = windows.dropFirst().prefix { !$0.ids.contains("long") }
+        XCTAssertGreaterThanOrEqual(whilePrefilling.filter { $0.ids == ["active"] && $0.steps == 16 }.count, 2)
+        XCTAssertFalse(whilePrefilling.contains { $0.steps > 16 })
+    }
+
     private func decodeWindowsWhileAPromptPrefills(
         maxDecodeStepsWhilePrefilling: Int
     ) async throws -> [(ids: [String], steps: Int)] {
@@ -8411,6 +8524,7 @@ private actor WindowRecordingBackend: ContinuousBatchSchedulerBackend {
     private let scripts: [String: [Int]]
     private let decodeGate: AsyncGate?
     private var windowLog: [(ids: [String], steps: Int)] = []
+    private var prefillLog: [(id: String, tokens: Int)] = []
     private var decodeCalls = 0
 
     init(scripts: [String: [Int]], decodeGate: AsyncGate? = nil) {
@@ -8419,7 +8533,8 @@ private actor WindowRecordingBackend: ContinuousBatchSchedulerBackend {
     }
 
     func prefill(rows: [ContinuousBatchPrefillInput]) async throws -> [ContinuousBatchPrefillOutput] {
-        rows.map { row in
+        prefillLog.append(contentsOf: rows.map { ($0.requestID, $0.targetKVTokenCount - $0.committedKVTokenCount) })
+        return rows.map { row in
             ContinuousBatchPrefillOutput(
                 requestID: row.requestID,
                 sampledToken: row.sampleFirstToken
@@ -8466,6 +8581,7 @@ private actor WindowRecordingBackend: ContinuousBatchSchedulerBackend {
 
     func windowCalls() -> [(ids: [String], steps: Int)] { windowLog }
     func windowCallCount() -> Int { windowLog.count }
+    func prefillChunks(id: String) -> [Int] { prefillLog.filter { $0.id == id }.map(\.tokens) }
     func decodeCallCount() -> Int { decodeCalls }
 
     private static func nextToken(script: [Int], generated: Int) -> Int {

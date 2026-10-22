@@ -313,6 +313,9 @@ public struct AppConfig: Equatable, Sendable {
     // Triple-exposed: yaml key `prefill_step_size`, env `MACPROVIDER_PREFILL_STEP_SIZE`,
     // CLI `--prefill-step-size`.
     public var prefillStepSize: Int
+    /// True only when YAML, environment, or CLI set `prefill_step_size`. Unset,
+    /// the CB prompt chunk is the backend family's ceiling (SPEC-038 FR-CB2).
+    public var prefillStepSizeExplicitlyConfigured: Bool = false
     public var continuousBatching: ContinuousBatchingMode
     /// True only when YAML, environment, or CLI explicitly selected a mode.
     /// An explicit `off` is the local emergency override; an implicit default
@@ -926,6 +929,9 @@ public enum ConfigLoader {
         try assign(&config.managedBy, from: dict, key: "managed_by", expected: "string")
         try assign(&config.streamInterval, from: dict, key: "stream_interval", expected: "integer >= 1")
         try assign(&config.prefillStepSize, from: dict, key: "prefill_step_size", expected: "integer >= 1")
+        if dict["prefill_step_size"] != nil {
+            config.prefillStepSizeExplicitlyConfigured = true
+        }
         if dict["continuous_batching"] != nil {
             guard let rawMode = rawNode?["continuous_batching"]?.scalar?.string,
                   let mode = ContinuousBatchingMode(rawValue: rawMode.lowercased()) else {
@@ -1154,6 +1160,9 @@ public enum ConfigLoader {
         try assign(&config.managedBy, from: environment, env: "MACPROVIDER_MANAGED_BY", expected: "string")
         try assign(&config.streamInterval, from: environment, env: "MACPROVIDER_STREAM_INTERVAL", expected: "integer >= 1")
         try assign(&config.prefillStepSize, from: environment, env: "MACPROVIDER_PREFILL_STEP_SIZE", expected: "integer >= 1")
+        if environment["MACPROVIDER_PREFILL_STEP_SIZE"] != nil {
+            config.prefillStepSizeExplicitlyConfigured = true
+        }
         try assign(&config.continuousBatching, from: environment, env: "MACPROVIDER_CONTINUOUS_BATCHING", expected: "off, canary, or on")
         if environment["MACPROVIDER_CONTINUOUS_BATCHING"] != nil {
             config.continuousBatchingExplicitlyConfigured = true
@@ -1364,6 +1373,7 @@ public enum ConfigLoader {
         }
         if let prefillStepSize = cli.prefillStepSize {
             config.prefillStepSize = prefillStepSize
+            config.prefillStepSizeExplicitlyConfigured = true
         }
         if let continuousBatching = cli.continuousBatching {
             guard let mode = ContinuousBatchingMode(rawValue: continuousBatching.lowercased()) else {
