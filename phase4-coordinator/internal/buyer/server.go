@@ -4470,8 +4470,29 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 	}
 	// buyerCancelledAttempt records a buyer cancel after relay.Cancel and binds
 	// it to the provider's buyer_cancel terminal frame when one arrives.
+	// buyerReceivedDone records that the buyer was written the stream's final
+	// "data: [DONE]": it has the whole response (#2084 VM acceptance V-3).
+	buyerReceivedDone := false
 	buyerCancelledAttempt := func() requestLogAttempt {
-		return awaitBuyerCancelTerminal(progressAttempt("Buyer disconnected during streaming", billing.FaultNone), relay, acct.tracker, started, providerws.IsBYOMLoopbackRuntimeSource(provider.RuntimeSource))
+		attempt := progressAttempt("Buyer disconnected during streaming", billing.FaultNone)
+		end, ok := relay.AwaitCancelTerminal(providerws.CancelTerminalWait)
+		if !ok {
+			return attempt
+		}
+		if end.Status == "complete" && buyerReceivedDone {
+			// The provider finished before the cancel reached it and the
+			// buyer received the whole stream: settle it as completed.
+			terminalTS := int64(0)
+			if providerTS, ok := trustedProviderTerminalStateTSInt(end.TerminalStateTSUnixMS, started, time.Now().UTC()); ok {
+				terminalTS = providerTS
+			}
+			completed := requestLogAttempt{Status: http.StatusOK, EstimatedCompTokens: s.observedCompletionTokensFromBytes(acct.deliveredBytes()),
+				SettlementOutput: acct.outputAt(billing.TerminalStateNormalDone, terminalTS), SettlementReceipt: normalizeReceiptHeaderValue(end.Receipt)}
+			usage := acct.completionUsage(end.Usage)
+			completed.PromptTokens, completed.CachedPromptTokens, completed.CompletionTokens = usage.prompt, usage.cached, usage.completion
+			return completed
+		}
+		return withProviderCancelTerminal(attempt, end, acct.tracker, started, providerws.IsBYOMLoopbackRuntimeSource(provider.RuntimeSource))
 	}
 	streamFailureAttempt := requestLogAttempt{}
 	hasStreamFailureAttempt := false
@@ -4514,7 +4535,6 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 		w.WriteHeader(http.StatusOK)
 		committed = true
 	}
-	buyerReceivedDone := false
 	writeBuyerSSE := func(data string) (bool, wsForwardResult) {
 		checked, stop, err := guard.CheckStreamingChunk(data)
 		if err != nil {
@@ -11943,6 +11963,13 @@ func awaitBuyerCancelTerminal(attempt requestLogAttempt, relay *providerws.Relay
 // (including stop-string holdback). So a native partial cancel keeps its
 // pre-#1690 billing (byte estimate) and its receipt cannot verify.
 func withProviderCancelTerminal(attempt requestLogAttempt, end providerws.InferenceResponseEnd, delivered *settlementStreamOutputTracker, started time.Time, adoptUsage bool) requestLogAttempt {
+	// Only a "cancelled" terminal answers a buyer cancel: a "complete" frame
+	// that lost the race with the cancel signs normal_done, which the
+	// buyer_cancel row cannot match. A stream the buyer read to [DONE] settles
+	// that frame on its own path (forwardWSStreaming, #2084 V-3).
+	if end.Status != "cancelled" {
+		return attempt
+	}
 	terminalTS := int64(0)
 	if providerTS, ok := trustedProviderTerminalStateTSInt(end.TerminalStateTSUnixMS, started, time.Now().UTC()); ok {
 		terminalTS = providerTS

@@ -79,27 +79,6 @@ func TestRelayBuyerCancelDeliversProviderCancelledTerminalOnce(t *testing.T) {
 	}
 }
 
-// Only a "cancelled" frame answers a buyer cancel. A late "complete" frame
-// signs normal_done, which would not match the buyer_cancel ledger row.
-func TestRelayBuyerCancelIgnoresLateNonCancelledTerminal(t *testing.T) {
-	s, provider, providerConn := newCancelTerminalHarness(t)
-	relay, err := s.DispatchInference(context.Background(), *provider, "req-cancel-complete", []byte(`{"model":"model-a"}`), true)
-	if err != nil {
-		t.Fatalf("dispatch: %v", err)
-	}
-	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
-		t.Fatalf("read inference_request: %v", err)
-	}
-	relay.Cancel("buyer_disconnected")
-	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
-		t.Fatalf("read cancel_request: %v", err)
-	}
-	s.handleInferenceEnd("p1", "s1", cancelledEndPayload(t, "req-cancel-complete", "complete", "receipt-normal"))
-	if end, ok := relay.AwaitCancelTerminal(20 * time.Millisecond); ok {
-		t.Fatalf("late complete frame delivered as a cancel terminal: %#v", end)
-	}
-}
-
 // A cancel for any reason other than a buyer disconnect waits for nothing.
 func TestRelayNonBuyerCancelDoesNotArmCancelTerminal(t *testing.T) {
 	s, provider, providerConn := newCancelTerminalHarness(t)
@@ -174,5 +153,35 @@ func TestRelayBuyerCancelTerminalOfShardHeadNeedsGroupAttestation(t *testing.T) 
 	}
 	if end.Status != "cancelled" || end.Receipt != "" {
 		t.Fatalf("terminal = %#v, want the cancelled frame without its unattested receipt", end)
+	}
+}
+
+// #2084 VM acceptance V-3: a provider that finished before the buyer's cancel
+// reached it sends a "complete" terminal for the retired request; it reaches
+// the buyer handler on CancelTerminal exactly once, like a cancelled one. The
+// buyer handler settles it only for a stream the buyer read to its final
+// [DONE]; everywhere else a buyer cancel binds only a "cancelled" terminal
+// (withProviderCancelTerminal), because a complete frame signs normal_done.
+func TestRelayBuyerCancelDeliversALateCompleteTerminalOnce(t *testing.T) {
+	s, provider, providerConn := newCancelTerminalHarness(t)
+	relay, err := s.DispatchInference(context.Background(), *provider, "req-late-complete", []byte(`{"model":"model-a"}`), true)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read inference_request: %v", err)
+	}
+	relay.Cancel("buyer_disconnected")
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read cancel_request: %v", err)
+	}
+	s.handleInferenceEnd("p1", "s1", cancelledEndPayload(t, "req-late-complete", "complete", "receipt-complete"))
+	s.handleInferenceEnd("p1", "s1", cancelledEndPayload(t, "req-late-complete", "complete", "receipt-again"))
+	end, ok := relay.AwaitCancelTerminal(time.Second)
+	if !ok || end.Status != "complete" || end.Receipt != "receipt-complete" {
+		t.Fatalf("terminal = %#v ok=%v, want the first complete frame", end, ok)
+	}
+	if _, ok := relay.AwaitCancelTerminal(20 * time.Millisecond); ok {
+		t.Fatal("a second terminal was delivered")
 	}
 }

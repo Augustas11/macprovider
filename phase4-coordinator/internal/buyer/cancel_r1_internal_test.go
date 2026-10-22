@@ -152,3 +152,14 @@ func TestForwardWSStreamingBufferedTornFinalWriteBindsAcceptedEvents(t *testing.
 }
 
 var _ http.ResponseWriter = (*tornWriter)(nil)
+
+// #2084 V-3: the relay now hands a late "complete" terminal to a buyer-cancel
+// waiter; outside a stream the buyer read to [DONE] it is not a cancel
+// terminal, so the attempt stays as recorded (no receipt bound).
+func TestWithProviderCancelTerminalIgnoresACompleteFrame(t *testing.T) {
+	attempt := requestLogAttempt{Status: http.StatusOK, Error: "Buyer disconnected during streaming"}
+	got := withProviderCancelTerminal(attempt, providerws.InferenceResponseEnd{Status: "complete", Receipt: "a.b"}, newSettlementStreamOutputTracker(), time.Now(), false)
+	if got.SettlementReceipt != "" || got.SettlementOutput != nil {
+		t.Fatalf("a complete frame was bound as the buyer-cancel terminal: %+v", got)
+	}
+}

@@ -817,13 +817,16 @@ func (ps *providerSession) hasPendingCancelTerminal() bool {
 }
 
 // deliverCancelTerminal hands a retired request's "cancelled" terminal frame
-// to the buyer handler waiting on RelayStream.CancelTerminal. Any other frame,
-// or a second one, is not delivered.
+// to the buyer handler waiting on RelayStream.CancelTerminal. A "complete"
+// terminal is delivered the same way: the provider finished before the cancel
+// reached it (a buyer that closed right after the stream's final [DONE]), and
+// the buyer handler decides what it settles (#2084 VM acceptance V-3). Any
+// other frame, or a second one, is not delivered.
 // prepare runs once the cancelled terminal is claimed for delivery, before the
 // waiter receives it; the shard group attestation check (SPEC-051-R019) runs
 // there so a group head's cancel receipt is verified like any other terminal.
 func (ps *providerSession) deliverCancelTerminal(end InferenceResponseEnd, prepare func(InferenceResponseEnd) InferenceResponseEnd) bool {
-	if end.Status != "cancelled" {
+	if end.Status != "cancelled" && end.Status != "complete" {
 		return false
 	}
 	ps.activeMu.Lock()
