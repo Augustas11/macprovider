@@ -88,10 +88,23 @@ enum ShardGroupWire {
 
     // MARK: Group attestation (SPEC-051-R019)
 
+    /// The closed SPEC-051-R019 takeover reason for the stage loss a spare replaced.
+    static func takeoverReason(_ cause: Error) -> String {
+        switch cause {
+        case ShardLinkError.peerClosed: return "peer_closed"
+        case ShardLinkError.peerDead: return "peer_dead"
+        case ShardLinkError.receiveTimedOut, ShardLinkError.sendTimedOut, is ShardGroupEngineFault: return "deadline_missed"
+        case ShardBenchError.peerError: return "peer_error"
+        default: return "link_error"
+        }
+    }
+
     /// The `group_attestation` member of the end frame carrying `receipt`: bound to
     /// the SHA-256 of the receipt's tuple bytes and to its request id, attempt and
     /// provider id, one segment covering every token step in the request's final
-    /// epoch, signed with the head's receipt key.
+    /// epoch, signed with the head's receipt key. When a spare took over during the
+    /// request the segment is the new epoch's from step 0 (the spare recomputed the
+    /// whole prefix) and `takeover` names the epoch it replaced and why.
     static func attestation(
         receipt: String, evidence: ShardGroupCompletionEvidence, key: Curve25519.Signing.PrivateKey
     ) throws -> [String: Any] {
@@ -127,8 +140,15 @@ enum ShardGroupWire {
                 "sub_receipts": .array(receipts.map(subReceiptValue)),
             ])]),
         ]
-        var signed = unsigned
-        signed["signature"] = .string(try sign(.object(unsigned), domain: attestationDomain, key: key))
+        var unsignedObject = unsigned
+        if let replay = evidence.attestation.replays.last(where: { $0.groupEpoch == evidence.attestation.groupEpoch }),
+           replay.groupEpoch > 1 {
+            unsignedObject["takeover"] = .object([
+                "from_group_epoch": .int(Int(replay.groupEpoch - 1)), "reason": .string(replay.reason),
+            ])
+        }
+        var signed = unsignedObject
+        signed["signature"] = .string(try sign(.object(unsignedObject), domain: attestationDomain, key: key))
         guard let object = jsonObject(.object(signed)) as? [String: Any] else { throw WireError.receiptMalformed }
         return object
     }

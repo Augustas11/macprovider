@@ -22,7 +22,13 @@ const (
 	FaultKeyMismatch      = "key_mismatch"
 	FaultMemberSignature  = "member_signature_invalid"
 	FaultDigestChainBreak = "digest_chain_break"
+	FaultTakeover         = "takeover_invalid"
 )
+
+// TakeoverReasons is the closed SPEC-051-R019 set of why a spare took over.
+var TakeoverReasons = map[string]bool{
+	"peer_closed": true, "peer_dead": true, "deadline_missed": true, "peer_error": true, "link_error": true,
+}
 
 // Attestation is the SPEC-051-R019 group attestation object.
 type Attestation struct {
@@ -32,7 +38,16 @@ type Attestation struct {
 	AttemptN           int                  `json:"attempt_n"`
 	ReceiptTupleSHA256 string               `json:"receipt_tuple_sha256"`
 	Segments           []AttestationSegment `json:"segments"`
-	Signature          string               `json:"signature"`
+	// Takeover is present when a spare replaced a member during the request
+	// (SPEC-051-R019 takeover attestation).
+	Takeover  *Takeover `json:"takeover,omitempty"`
+	Signature string    `json:"signature"`
+}
+
+// Takeover names the epoch a spare took over from and why.
+type Takeover struct {
+	FromGroupEpoch uint64 `json:"from_group_epoch"`
+	Reason         string `json:"reason"`
 }
 
 // AttestationSegment is one epoch's chain over a contiguous step range.
@@ -82,6 +97,9 @@ type Verdict struct {
 	RequestID   string
 	AttemptN    int
 	GroupEpochs []uint64
+	// TakeoverFromEpoch and TakeoverReason record a verified takeover.
+	TakeoverFromEpoch uint64
+	TakeoverReason    string
 }
 
 // Verified reports whether the attestation passed every check.
@@ -144,6 +162,18 @@ func VerifyAttestation(raw json.RawMessage, receiptEnvelope, groupProviderID str
 	}
 	if len(att.Segments) == 0 {
 		return fail(FaultSegments, groupProviderID)
+	}
+	// SPEC-051-R019 takeover: one segment in the new epoch from step 0 whose
+	// sub-receipts cover the whole recomputed prefix; the lost member's
+	// sub-receipt is not required.
+	if t := att.Takeover; t != nil {
+		if len(att.Segments) != 1 || att.Segments[0].GroupEpoch <= t.FromGroupEpoch || !TakeoverReasons[t.Reason] {
+			return fail(FaultTakeover, groupProviderID)
+		}
+		if _, ok := epochs(t.FromGroupEpoch); !ok {
+			return fail(FaultTakeover, groupProviderID)
+		}
+		verdict.TakeoverFromEpoch, verdict.TakeoverReason = t.FromGroupEpoch, t.Reason
 	}
 	headKeyB64 := base64.StdEncoding.EncodeToString(headKey)
 	nextStep := 0

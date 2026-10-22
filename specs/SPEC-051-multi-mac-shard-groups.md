@@ -1,12 +1,12 @@
 # SPEC-051 - Multi-Mac Shard Groups
 
-**Version:** 0.2.0
+**Version:** 0.2.1
 
 ```json
 {
   "spec_id": "SPEC-051",
   "title": "Multi-Mac Shard Groups",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "path": "specs/SPEC-051-multi-mac-shard-groups.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -27,6 +27,15 @@
   }
 }
 ```
+
+**Change log v0.2.1 (2026-10-22, Related: #2084):** Defines the takeover
+attestation (SPEC-051-R019): after a spare replaced a lost member and the head
+replayed the delivered prefix into it, the attestation is one segment in the
+new epoch from step 0 whose sub-receipts cover the whole recomputed prefix,
+plus a `takeover` object naming the epoch it replaced and a closed reason
+code. The lost member's sub-receipt is not required. The coordinator verifies
+the takeover against its accepted epochs and stores the epoch change and
+reason with the attestation.
 
 **Change log v0.2.0 (2026-10-22, Related: #2084):** Trusted Pools are the
 product for sharding. A v0.2 group serves only Trusted Pool traffic of a pool
@@ -529,8 +538,11 @@ the first broken link (the downstream member, whose `in_digest` disagrees; the
 head for the token return link), MUST be recorded against that member device identity,
 and MUST make the request's settlement evidence fail SPEC-022 verification
 for that attempt. When a spare replaced a member mid-request
-(SPEC-051-R022), the attestation MUST carry both members' sub-receipts with
-the step ranges each covered, and the chain MUST hold within each range.
+(SPEC-051-R022), the head replays the request's delivered prefix into the
+spare, so every member of the new epoch processes the request from its first
+prompt token: the attestation is then a takeover attestation (item 6), whose
+one segment in the new epoch covers the whole recomputed prefix. The lost
+member's sub-receipt is not required, because a lost member cannot sign.
 
 Wire form and verification:
 
@@ -541,7 +553,8 @@ Wire form and verification:
 2. The object has exactly the keys `schema`
    (`macprovider.shard-group-attestation.v1`), `group_provider_id`,
    `request_id`, `attempt_n`, `receipt_tuple_sha256`, `segments`, and
-   `signature`. `request_id`, `attempt_n` and `group_provider_id` MUST equal
+   `signature`, plus `takeover` on a takeover attestation (item 6), and no
+   other key. `request_id`, `attempt_n` and `group_provider_id` MUST equal
    the receipt tuple's `request_id`, `attempt_n` and `provider_id`.
    `signature` is the head session receipt key's Ed25519 signature over the
    UTF-8 bytes `macprovider.shard-group-attestation.v1` and a line feed,
@@ -570,6 +583,19 @@ Wire form and verification:
    SPEC-022 attempt without a receipt. On success it MUST store the
    attestation with the receipt tuple digest, keyed by request, attempt and
    group provider identity.
+6. A takeover attestation carries `takeover`: an object with exactly the keys
+   `from_group_epoch` (the epoch the spare replaced, an accepted record of
+   this group) and `reason`, one of `peer_closed`, `peer_dead`,
+   `deadline_missed`, `peer_error` and `link_error` (how the head lost the
+   member). It MUST have exactly one segment, in an epoch greater than
+   `from_group_epoch`, starting at step 0 and ending at the request's last
+   token step; the chain checks of item 4 apply to it unchanged. A null or
+   malformed `takeover` fails with fault kind `attestation_malformed`; one
+   that names an unknown epoch or reason, comes with more than one segment or
+   names a segment epoch not above `from_group_epoch` fails with fault kind
+   `takeover_invalid`; both against the group provider identity. On
+   success the coordinator stores `from_group_epoch` and `reason` with the
+   attestation, so every takeover is recorded with the attempt it served.
 
 ### SPEC-051-R020 - Billing and settlement as one provider
 
@@ -890,6 +916,10 @@ in `CONFORMANCE.json`.
 
 ## 10. Changelog and history
 
+- v0.2.1 (2026-10-22, Related: #2084): takeover attestation (R019 item 6):
+  one new-epoch segment from step 0, a `takeover` object with the replaced
+  epoch and reason, no sub-receipt from the lost member; the coordinator
+  records the takeover with the attestation.
 - v0.2.0 (2026-10-22, Related: #2084): Trusted Pool serving, head identity as
   group identity, `pool_shard_groups/v1`, group wire messages, disclosure,
   attestation wire form, failure-status mapping; R028-R030 added.

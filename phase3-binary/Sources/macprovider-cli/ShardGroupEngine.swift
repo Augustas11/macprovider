@@ -992,7 +992,8 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
                 throw ShardGroupEngineError.unavailable("\(cause); replay took \(Int(elapsed * 1000)) ms, over the replay deadline")
             }
             replayReports.append(ShardBenchReplayReport(
-                groupEpoch: groupEpoch, cause: String(describing: cause), spare: link.peerAddress, requests: inFlight,
+                groupEpoch: groupEpoch, cause: String(describing: cause), reason: ShardGroupWire.takeoverReason(cause),
+                spare: link.peerAddress, requests: inFlight,
                 deliveredTokens: inFlight.map { active[$0]?.tokens.count ?? 0 }, replayedFrames: frames,
                 replayedBytes: bytes, milliseconds: (elapsed * 1_000_000).rounded() / 1000))
             links = replacement

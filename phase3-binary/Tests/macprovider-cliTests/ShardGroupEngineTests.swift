@@ -300,6 +300,22 @@ final class ShardGroupEngineTests: XCTestCase {
         XCTAssertEqual(summary0.attestation.receipts.map(\.receipt.stageIndex), [0, 1])
         XCTAssertEqual(summary0.attestation.receipts[0].receipt.outDigest, summary0.attestation.receipts[1].receipt.inDigest)
         XCTAssertEqual(summary0.attestation.receipts[1].receipt.outDigest, summary0.attestation.receipts[0].receipt.inDigest)
+        // SPEC-051-R019 takeover attestation: the new epoch's chain from step 0, and
+        // the epoch it took over from with the reason.
+        let tuple = try JSONSerialization.data(withJSONObject: [
+            "request_id": String(first.id), "attempt_n": 1, "provider_id": "head-device", "receipt_version": "4",
+        ], options: [.sortedKeys])
+        let attestation = try ShardGroupWire.attestation(
+            receipt: tuple.base64EncodedString() + "." + Data(repeating: 1, count: 64).base64EncodedString(),
+            evidence: ShardGroupCompletionEvidence(attestation: summary0.attestation, tokenSteps: summary0.tokenSteps),
+            key: rig.engine.options.signer.key)
+        let takeover = try XCTUnwrap(attestation["takeover"] as? [String: Any])
+        XCTAssertEqual(takeover["from_group_epoch"] as? Int, Int(ShardBenchTestRig.epoch))
+        XCTAssertTrue(["peer_closed", "peer_error", "link_error", "peer_dead"].contains(takeover["reason"] as? String ?? ""), "\(takeover)")
+        let segments = try XCTUnwrap(attestation["segments"] as? [[String: Any]])
+        XCTAssertEqual(segments.count, 1)
+        XCTAssertEqual(segments[0]["group_epoch"] as? Int, Int(spareEpoch))
+        XCTAssertEqual(segments[0]["step_start"] as? Int, 0)
         XCTAssertNil(rig.engine.status.spare, "a spare that took over is no longer a spare")
         XCTAssertEqual(rig.engine.status.groupEpoch, spareEpoch)
         try rig.engine.shutdown()

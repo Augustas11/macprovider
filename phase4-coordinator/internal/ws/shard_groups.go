@@ -288,6 +288,8 @@ func (s *Server) applyShardGroupAttestation(providerID, assignedID string, end I
 		FaultKind:           verdict.FaultKind,
 		FaultMemberDeviceID: verdict.FaultMemberDeviceID,
 		AttestationJSON:     string(end.GroupAttestation),
+		TakeoverFromEpoch:   verdict.TakeoverFromEpoch,
+		TakeoverReason:      verdict.TakeoverReason,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

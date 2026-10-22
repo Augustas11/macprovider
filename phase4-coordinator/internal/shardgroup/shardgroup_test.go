@@ -430,7 +430,11 @@ func (f *fixture) subReceipt(member string, epoch uint64, stage, start, end int,
 }
 
 func (f *fixture) attestation(segments []AttestationSegment, requestID string, attempt int, tupleSHA string) json.RawMessage {
-	att := Attestation{Schema: AttestationSchema, GroupProviderID: "head", RequestID: requestID, AttemptN: attempt, ReceiptTupleSHA256: tupleSHA, Segments: segments}
+	return f.takeoverAttestation(segments, requestID, attempt, tupleSHA, nil)
+}
+
+func (f *fixture) takeoverAttestation(segments []AttestationSegment, requestID string, attempt int, tupleSHA string, takeover *Takeover) json.RawMessage {
+	att := Attestation{Schema: AttestationSchema, GroupProviderID: "head", RequestID: requestID, AttemptN: attempt, ReceiptTupleSHA256: tupleSHA, Segments: segments, Takeover: takeover}
 	raw, _ := json.Marshal(att)
 	att.Signature = sign(f.t, f.keys["head"], attestationDomain, raw, true)
 	out, _ := json.Marshal(att)
@@ -630,7 +634,50 @@ func TestSpareStandbyTakeoverFlow(t *testing.T) {
 	a, b := digest("a"), digest("b")
 	segments := []AttestationSegment{{GroupEpoch: 2, StepStart: 0, StepEnd: 9, SubReceipts: []SignedSubReceipt{
 		f.subReceipt("head", 2, 0, 0, 18, "req-3", b, a), f.subReceipt("spare", 2, 1, 18, 32, "req-3", a, b)}}}
-	if v := VerifyAttestation(f.attestation(segments, "req-3", 0, tupleSHA), envelope, "head", f.sessions["head"].ReceiptPubkey, f.reg.Epochs("head")); !v.Verified() {
+	verify := func(raw json.RawMessage) Verdict {
+		return VerifyAttestation(raw, envelope, "head", f.sessions["head"].ReceiptPubkey, f.reg.Epochs("head"))
+	}
+	if v := verify(f.attestation(segments, "req-3", 0, tupleSHA)); !v.Verified() {
 		t.Fatalf("replayed request attestation: %+v", v)
+	}
+	// SPEC-051-R019 takeover attestation: one new-epoch segment from step 0,
+	// recorded with the epoch it took over from and why.
+	v := verify(f.takeoverAttestation(segments, "req-3", 0, tupleSHA, &Takeover{FromGroupEpoch: 1, Reason: "peer_closed"}))
+	if !v.Verified() || v.TakeoverFromEpoch != 1 || v.TakeoverReason != "peer_closed" {
+		t.Fatalf("takeover attestation: %+v", v)
+	}
+	old := []SignedSubReceipt{f.subReceipt("head", 1, 0, 0, 18, "req-3", b, a), f.subReceipt("tail", 1, 1, 18, 32, "req-3", a, b)}
+	if res := f.hello("tail", helloPayload("tail", 1, 1, 18, 32, "thunderbolt", "head")); res.Reason != ReasonEpochSuperseded {
+		t.Fatalf("tail hello for the superseded epoch: %+v", res)
+	}
+	for name, tc := range map[string]struct {
+		segments []AttestationSegment
+		takeover Takeover
+	}{
+		"two segments":   {[]AttestationSegment{{GroupEpoch: 1, StepStart: 0, StepEnd: 4, SubReceipts: old}, {GroupEpoch: 2, StepStart: 4, StepEnd: 9, SubReceipts: segments[0].SubReceipts}}, Takeover{1, "peer_closed"}},
+		"unknown reason": {segments, Takeover{1, "bored"}},
+		"same epoch":     {segments, Takeover{2, "peer_dead"}},
+		"unknown from":   {segments, Takeover{0, "peer_dead"}},
+	} {
+		if v := verify(f.takeoverAttestation(tc.segments, "req-3", 0, tupleSHA, &tc.takeover)); v.FaultKind != FaultTakeover {
+			t.Errorf("%s: %+v", name, v)
+		}
+	}
+	// A null takeover is malformed, not absent.
+	raw := f.attestation(segments, "req-3", 0, tupleSHA)
+	nulled := strings.Replace(string(raw), `"signature"`, `"takeover":null,"signature"`, 1)
+	if v := verify(json.RawMessage(nulled)); v.FaultKind != FaultMalformed {
+		t.Fatalf("null takeover: %+v", v)
+	}
+	// The store keeps the takeover with the verdict.
+	ctx := context.Background()
+	stored := AttestationRecord{RequestID: "req-3", AttemptN: 0, GroupProviderID: "head", ReceiptTupleSHA256: v.ReceiptTupleSHA256, Verified: true,
+		AttestationJSON: "{}", TakeoverFromEpoch: v.TakeoverFromEpoch, TakeoverReason: v.TakeoverReason}
+	if err := f.store.RecordAttestation(ctx, stored, 1); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := f.store.Attestation(ctx, "req-3", 0, "head")
+	if err != nil || !ok || got.TakeoverFromEpoch != 1 || got.TakeoverReason != "peer_closed" {
+		t.Fatalf("stored takeover = %+v %v %v", got, ok, err)
 	}
 }

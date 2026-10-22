@@ -816,6 +816,8 @@ struct ShardBenchRequestAttestation: Encodable {
 struct ShardBenchReplayReport: Encodable {
     let groupEpoch: UInt64
     let cause: String
+    /// SPEC-051-R019 takeover reason code (`ShardGroupWire.takeoverReason`).
+    var reason: String = "link_error"
     let spare: String
     let requests: [UInt64]
     let deliveredTokens: [Int]

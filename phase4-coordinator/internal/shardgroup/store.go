@@ -62,6 +62,8 @@ func (s *Store) migrate(ctx context.Context) error {
 			fault_kind TEXT NOT NULL,
 			fault_member_device_id TEXT NOT NULL,
 			attestation_json TEXT NOT NULL,
+			takeover_from_epoch INTEGER NOT NULL DEFAULT 0,
+			takeover_reason TEXT NOT NULL DEFAULT '',
 			recorded_at_unix_ms INTEGER NOT NULL,
 			PRIMARY KEY (request_id, attempt_n, group_provider_id)
 		)`,
@@ -164,6 +166,10 @@ type AttestationRecord struct {
 	FaultKind           string
 	FaultMemberDeviceID string
 	AttestationJSON     string
+	// A verified takeover: the epoch the spare took over from and why;
+	// zero and empty otherwise.
+	TakeoverFromEpoch uint64
+	TakeoverReason    string
 }
 
 // RecordAttestation stores an attempt's verdict. The first verdict for an
@@ -173,9 +179,10 @@ func (s *Store) RecordAttestation(ctx context.Context, a AttestationRecord, nowU
 	if a.Verified {
 		verdict = "verified"
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO shard_group_attestations (request_id, attempt_n, group_provider_id, receipt_tuple_sha256, verdict, fault_kind, fault_member_device_id, attestation_json, recorded_at_unix_ms)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		a.RequestID, a.AttemptN, a.GroupProviderID, a.ReceiptTupleSHA256, verdict, a.FaultKind, a.FaultMemberDeviceID, a.AttestationJSON, nowUnixMS)
+	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO shard_group_attestations (request_id, attempt_n, group_provider_id, receipt_tuple_sha256, verdict, fault_kind, fault_member_device_id, attestation_json, takeover_from_epoch, takeover_reason, recorded_at_unix_ms)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		a.RequestID, a.AttemptN, a.GroupProviderID, a.ReceiptTupleSHA256, verdict, a.FaultKind, a.FaultMemberDeviceID, a.AttestationJSON,
+		int64(a.TakeoverFromEpoch), a.TakeoverReason, nowUnixMS)
 	return err
 }
 
@@ -183,8 +190,9 @@ func (s *Store) RecordAttestation(ctx context.Context, a AttestationRecord, nowU
 func (s *Store) Attestation(ctx context.Context, requestID string, attemptN int, groupProviderID string) (AttestationRecord, bool, error) {
 	out := AttestationRecord{RequestID: requestID, AttemptN: attemptN, GroupProviderID: groupProviderID}
 	var verdict string
-	err := s.db.QueryRowContext(ctx, `SELECT receipt_tuple_sha256, verdict, fault_kind, fault_member_device_id, attestation_json FROM shard_group_attestations WHERE request_id = ? AND attempt_n = ? AND group_provider_id = ?`,
-		requestID, attemptN, groupProviderID).Scan(&out.ReceiptTupleSHA256, &verdict, &out.FaultKind, &out.FaultMemberDeviceID, &out.AttestationJSON)
+	var takeoverFrom int64
+	err := s.db.QueryRowContext(ctx, `SELECT receipt_tuple_sha256, verdict, fault_kind, fault_member_device_id, attestation_json, takeover_from_epoch, takeover_reason FROM shard_group_attestations WHERE request_id = ? AND attempt_n = ? AND group_provider_id = ?`,
+		requestID, attemptN, groupProviderID).Scan(&out.ReceiptTupleSHA256, &verdict, &out.FaultKind, &out.FaultMemberDeviceID, &out.AttestationJSON, &takeoverFrom, &out.TakeoverReason)
 	if errors.Is(err, sql.ErrNoRows) {
 		return AttestationRecord{}, false, nil
 	}
@@ -192,5 +200,6 @@ func (s *Store) Attestation(ctx context.Context, requestID string, attemptN int,
 		return AttestationRecord{}, false, err
 	}
 	out.Verified = verdict == "verified"
+	out.TakeoverFromEpoch = uint64(takeoverFrom)
 	return out, true, nil
 }
