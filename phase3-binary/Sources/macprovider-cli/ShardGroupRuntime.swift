@@ -80,10 +80,15 @@ actor ShardGroupRuntime: ModelRuntimeServing {
     private(set) var gate: ShardGroupServingGate
     private var providerStatus: ProviderStatus?
     private var registrationCounter = 0
+    /// Handles acquired for network buyers whose generation has not started.
+    private var networkHandles = Set<Int>()
 
     // SPEC-051-R029 coordinator state (ShardGroupWire.swift).
     let registration: ShardGroupRegistration?
     var acceptedEpoch: UInt64?
+    /// The epoch the coordinator's latest `available: true` was for. Fresh network
+    /// work starts only while the chain runs at that epoch (SPEC-051-R015).
+    var availableEpoch: UInt64?
     var registerSent: (epoch: UInt64, at: Date)?
     private var warnings = Set<String>()
     /// What the last group heartbeat reported; a difference is a change to send now.
@@ -187,6 +192,14 @@ actor ShardGroupRuntime: ModelRuntimeServing {
         Task.detached { try? current.shutdown() }
     }
 
+    /// The coordinator's availability for `epoch` (SPEC-051-R015): fresh network
+    /// work starts only while the accepted epoch and the chain's are this one.
+    func applyStatus(epoch: UInt64, available: Bool, reason: String) {
+        if available { acceptedEpoch = epoch }
+        availableEpoch = available ? epoch : nil
+        setGate(available ? .available : .unavailable(reason))
+    }
+
     func setGate(_ gate: ShardGroupServingGate) {
         if gate != self.gate { shardGroupLog("serving gate \(gate)") }
         self.gate = gate
@@ -230,6 +243,7 @@ actor ShardGroupRuntime: ModelRuntimeServing {
     /// A new coordinator session registers again and waits for its status.
     func resetCoordinatorSession() {
         acceptedEpoch = nil
+        availableEpoch = nil
         registerSent = nil
         reportedHealth = nil
         if gate != .notRequired { setGate(.awaitingCoordinator) }
@@ -266,10 +280,24 @@ actor ShardGroupRuntime: ModelRuntimeServing {
     // MARK: Admission
 
     func acquireRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle {
-        guard gate.admitsNetworkBuyers else {
-            throw Self.unavailable("the coordinator has not made this group available (\(gate))")
+        if let problem = networkAdmissionProblem() { throw Self.unavailable(problem) }
+        let handle = try handle(for: request)
+        networkHandles.insert(handle.registrationID)
+        return handle
+    }
+
+    /// Why fresh network work may not start now: the coordinator has not made
+    /// the group available, or made it available for another epoch than the one
+    /// the chain runs at (a takeover or rebuild started a new epoch whose record
+    /// it has not cleared yet). Requests already in flight continue (R022).
+    func networkAdmissionProblem() -> String? {
+        guard gate != .notRequired else { return nil }
+        guard gate.admitsNetworkBuyers else { return "the coordinator has not made this group available (\(gate))" }
+        let running = engine?.status.groupEpoch
+        guard let epoch = availableEpoch, acceptedEpoch == epoch, running == epoch else {
+            return "the chain runs at epoch \(running.map(String.init) ?? "none"), the coordinator made epoch \(availableEpoch.map(String.init) ?? "none") available"
         }
-        return try handle(for: request)
+        return nil
     }
 
     func acquireLocalRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle {
@@ -285,8 +313,10 @@ actor ShardGroupRuntime: ModelRuntimeServing {
         return RequestHandle(snapshot: snapshot(), registrationID: registrationCounter, drainCancelled: DrainCancelToken())
     }
 
-    /// Nothing to release: a request's engine slot ends with its stream.
-    func unregisterInFlight(_ id: Int) {}
+    /// A request's engine slot ends with its stream; only its network mark goes.
+    func unregisterInFlight(_ id: Int) {
+        networkHandles.remove(id)
+    }
 
     func preflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws {
         try handle.drainCancelled.check()
@@ -377,6 +407,11 @@ actor ShardGroupRuntime: ModelRuntimeServing {
     ) async throws -> CompletionResult {
         try handle?.drainCancelled.check()
         let prepared = try prepare(request)
+        // A network request admitted before the chain changed epochs does not
+        // start on the replacement chain without its availability.
+        if let handle, networkHandles.remove(handle.registrationID) != nil, let problem = networkAdmissionProblem() {
+            throw Self.unavailable(problem)
+        }
         guard let engine, engine.status.running else {
             throw Self.unavailable(self.engine?.status.failure ?? "the chain is not connected")
         }

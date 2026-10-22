@@ -2967,7 +2967,8 @@ struct ServeCommand: AsyncParsableCommand {
                     modelRuntime = try await ShardGroupServe.memberRuntime(
                         config: member, modelID: shardModelID, directory: directory,
                         catalogArtifactSHA256: resolved.modelArtifactSHA256, verifyArtifactSHA256: verifySHA256,
-                        signer: try ShardGroupServe.signer(config: resolved, fallbackMemberID: "stage-\(member.stageIndex)"))
+                        signer: try ShardGroupServe.signer(config: resolved, fallbackMemberID: "stage-\(member.stageIndex)"),
+                        lab: noJoin)
                 } else {
                     throw ValidationError("unreachable shard role")
                 }

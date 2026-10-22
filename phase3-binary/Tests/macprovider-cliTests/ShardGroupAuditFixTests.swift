@@ -90,6 +90,122 @@ final class ShardGroupAuditFixTests: XCTestCase {
         XCTAssertGreaterThan(stages[0].batchRows.max() ?? 0, 1, "the head stepped several requests in one forward")
     }
 
+    // MARK: Round 2
+
+    /// A tail played by hand on a two-stage collapsed ring: it answers the head's
+    /// hello, then calls `answer` for every frame until the link ends.
+    private func rawTail(_ link: ShardStageLink, answer: @escaping @Sendable (ShardStageFrame, ShardStageLink) throws -> Void) {
+        Thread {
+            do {
+                let hello = try ShardChainWire.awaitChainHello(link, timeout: 5, stageIndex: 1, layers: 2..<4)
+                let mine = ShardBenchHello(
+                    role: .tail, modelType: "fake", totalLayers: 4, hiddenSize: 4, layerStart: 2, layerEnd: 4,
+                    memberDeviceID: "raw-tail", memberPublicKey: Curve25519.Signing.PrivateKey().publicKey.rawRepresentation.base64EncodedString(),
+                    maxSequences: 8)
+                try ShardChainWire.sendHello(link, hello.stages + [mine], header: ShardStageFrameHeader(
+                    kind: .hello, groupEpoch: ShardBenchTestRig.epoch, sourceStage: 1, layerStart: 2, layerEnd: 4))
+                while true { try answer(try link.receive(timeout: 30), link) }
+            } catch {}
+        }.start()
+    }
+
+    private static func token(for frame: ShardStageFrame) -> ShardStageFrame {
+        ShardStageFrame(
+            header: ShardStageFrameHeader(
+                kind: .token, dtype: .int32, groupEpoch: ShardBenchTestRig.epoch, requestID: frame.header.requestID,
+                tokenStep: frame.header.tokenStep, sourceStage: 1, shape: [1]),
+            payload: Data([7, 0, 0, 0]))
+    }
+
+    /// R2-C02 / SEC-11 / SPEC-051-R013: one request that the chain stops answering
+    /// fails within its deadline while another request keeps the link busy.
+    func testAStalledRequestFailsWhileOtherRequestsKeepTheLinkBusy() throws {
+        let links = try ShardBenchTestRig.ring(stages: 2, collapsed: true)
+        rawTail(links[1].upstream) { frame, link in
+            // Request 2 is never answered; request 1 always is, at once.
+            guard frame.header.kind == .activation, frame.header.requestID == 1, !frame.header.flags.contains(.fillOnly) else { return }
+            try link.send(Self.token(for: frame))
+        }
+        let stages = ShardBenchTestRig.stages(splits, total: 4)
+        var options = ShardGroupEngineTests.options(maxInFlight: 2)
+        options.decodeHopDeadline = 0.2
+        options.prefillChunkDeadline = 0.5
+        let engine = ShardGroupEngine(stage: stages[0], options: options)
+        try engine.start(links: links[0])
+        let started = Date()
+        let collector = ShardGenerationCollector(count: 2)
+        let ids = try engine.submit([
+            ShardGenerationRequest(promptTokens: [5, 9], maxTokens: 1_000_000),
+            ShardGenerationRequest(promptTokens: [8, 1], maxTokens: 4),
+        ]) { collector.receive($0, $1) }
+        let (_, errors) = collector.wait()
+        XCTAssertNotNil(errors[ids[1]], "the stalled request ends with an error")
+        XCTAssertLessThan(Date().timeIntervalSince(started), 10, "within its deadline, not when the busy request ends")
+        XCTAssertTrue(engine.waitUntilStopped(timeout: 5))
+    }
+
+    /// R2-C03: an abort answer whose sub-receipts cannot be read still ends the
+    /// finishing request with a terminal event.
+    func testUnreadableSubReceiptsStillEndTheRequest() throws {
+        let links = try ShardBenchTestRig.ring(stages: 2, collapsed: true)
+        rawTail(links[1].upstream) { frame, link in
+            switch frame.header.kind {
+            case .activation where !frame.header.flags.contains(.fillOnly):
+                try link.send(Self.token(for: frame))
+            case .abort where frame.header.requestID != 0:
+                try link.send(ShardStageFrame(
+                    header: ShardStageFrameHeader(kind: .abort, groupEpoch: ShardBenchTestRig.epoch, requestID: frame.header.requestID, sourceStage: 1),
+                    payload: Data("not sub-receipts".utf8)))
+            default:
+                break
+            }
+        }
+        let stages = ShardBenchTestRig.stages(splits, total: 4)
+        let engine = ShardGroupEngine(stage: stages[0], options: ShardGroupEngineTests.options(maxInFlight: 2))
+        try engine.start(links: links[0])
+        let collector = ShardGenerationCollector(count: 1)
+        let ids = try engine.submit([ShardGenerationRequest(promptTokens: [5, 9], maxTokens: 2)]) { collector.receive($0, $1) }
+        let (summaries, errors) = collector.wait()
+        XCTAssertTrue(summaries[ids[0]] != nil || errors[ids[0]] != nil)
+        XCTAssertEqual(summaries[ids[0]]?.attestation.verdict, "unverifiable_member_lost")
+        XCTAssertTrue(engine.waitUntilStopped(timeout: 5))
+    }
+
+    /// R2-C04 / R2-C05 / SPEC-051-R006: the head refuses a chain whose member
+    /// cannot carry the group's concurrency or did not prove its fit for the
+    /// serving context.
+    func testHeadRefusesAMemberBelowTheGroupsConcurrencyOrContext() throws {
+        for (slots, context, tailContext, accepted) in [(9, nil, nil, false), (4, 8_000, nil, false), (4, 8_000, 8_000, true)] as [(Int, Int?, Int?, Bool)] {
+            let links = try ShardBenchTestRig.ring(stages: 2, collapsed: true)
+            let stages = ShardBenchTestRig.stages(splits, total: 4)
+            let tail = startTail(links, stage: stages[1]) { $0.contextTokens = tailContext }
+            var options = ShardGroupEngineTests.options(maxInFlight: slots)
+            options.servingContextTokens = context
+            let engine = ShardGroupEngine(stage: stages[0], options: options)
+            if accepted {
+                try engine.start(links: links[0])
+                try engine.shutdown()
+            } else {
+                XCTAssertThrowsError(try engine.start(links: links[0]), "slots \(slots) context \(String(describing: context))")
+            }
+            _ = tail()
+        }
+    }
+
+    /// SEC-10 / SPEC-051-R011: a member that joins the network does not start
+    /// without its neighbours' keys; only an explicit lab run may.
+    func testANetworkMemberDoesNotStartWithoutNeighbourKeys() async throws {
+        let config = ShardMemberConfig(groupProviderID: "head-device", groupEpoch: 1, stageIndex: 1, layerStart: 2, layerEnd: 4, listen: "127.0.0.1:0")
+        do {
+            _ = try await ShardGroupServe.memberRuntime(
+                config: config, modelID: "m", directory: FileManager.default.temporaryDirectory, catalogArtifactSHA256: nil,
+                verifyArtifactSHA256: nil, signer: ShardMemberSigner(memberDeviceID: "m-1", key: Curve25519.Signing.PrivateKey()))
+            XCTFail("a keyless member started")
+        } catch let error as ShardGroupConfigError {
+            XCTAssertTrue("\(error)".contains("upstream_public_key"), "\(error)")
+        }
+    }
+
     // MARK: SEC-01
 
     /// SPEC-051-R011: the head refuses a stage that does not announce (and so did

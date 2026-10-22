@@ -717,6 +717,13 @@ struct ShardBenchSessionOptions: Sendable {
     var expectedDownstreamKey: String? = nil
     var expectedStageIndex: Int? = nil
     var expectedHeadID: String? = nil
+    /// SPEC-051 `decode_hop_deadline_ms`: with it, a member with open requests
+    /// derives its wait for the next frame from the group's decode and prefill
+    /// deadlines (SPEC-051-R013); without it (the lab bench) it uses
+    /// `receiveTimeout`.
+    var decodeHopDeadline: TimeInterval? = nil
+    /// The context per sequence this member's stage fit was proved for.
+    var contextTokens: Int? = nil
     /// Keep every compute time for the report (lab runs). A production member
     /// keeps only counts, so its memory does not grow with the traffic it serves.
     var recordComputeSamples = true
@@ -981,6 +988,11 @@ struct ShardBenchHello: Codable, Equatable {
     var upstreamInterface: String?
     /// Tail with a separate return link: that link's interface type.
     var returnInterface: String?
+    /// Member: the sequences it serves at once and the context per sequence its
+    /// stage fit was proved for (SPEC-051-R006); the head refuses a chain that
+    /// cannot carry the group's concurrency and serving context.
+    var maxSequences: Int?
+    var contextTokens: Int?
 
     var layerLabel: String { "\(layerStart):\(layerEnd)" }
 }
@@ -1528,7 +1540,7 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
             hiddenSize: stage.hiddenSize, layerStart: stage.layers.lowerBound, layerEnd: stage.layers.upperBound,
             memberDeviceID: signer.memberDeviceID, memberPublicKey: signer.publicKeyBase64,
             modelDigest: options.modelDigest, upstreamInterface: options.upstreamInterface,
-            returnInterface: options.returnInterface)
+            returnInterface: options.returnInterface, maxSequences: options.maxSequences, contextTokens: options.contextTokens)
     }
 
     private func adoptSession(_ chain: [ShardBenchHello]) {
@@ -1745,7 +1757,7 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
             // request is open its next frame is due within the receive deadline
             // (SPEC-051-R013), whatever other traffic the link carries.
             let idle = state.receiptIDs.isEmpty && state.caches.isEmpty
-            let frame = try held ?? receive(links.upstream, timeout: idle ? max(options.receiveTimeout, 3600) : options.receiveTimeout)
+            let frame = try held ?? receive(links.upstream, timeout: idle ? max(options.receiveTimeout, 3600) : openRequestDeadline(state))
             held = nil
             let header = frame.header
             switch header.kind {
@@ -1765,6 +1777,7 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
                 }
                 guard state.receiptIDs.count < options.maxSequences else { throw ShardBenchError.tooManySequences(options.maxSequences) }
                 state.receiptIDs[header.requestID] = control.requestID ?? String(header.requestID)
+                state.prefilling.insert(header.requestID)
                 if options.role == .tail {
                     state.samplers[header.requestID] = stage.makeSampler(control)
                 } else {
@@ -1802,6 +1815,7 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
                 // SPEC-051-R009 item 5: the request's KV goes with its end.
                 state.caches[header.requestID] = nil
                 state.samplers[header.requestID] = nil
+                state.prefilling.remove(header.requestID)
                 let receiptID = state.receiptIDs.removeValue(forKey: header.requestID) ?? String(header.requestID)
                 let receipts = try ShardChainWire.decodeReceipts(frame.payload) + [try signer.sign(book.receipt(
                     requestID: header.requestID, receiptRequestID: receiptID, memberDeviceID: signer.memberDeviceID,
@@ -1852,6 +1866,22 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
         var decodeCompute = [Double]()
         var prefillCompute = [Double]()
         var decodeBatchRowsMax = 0
+        /// Open requests whose last prefill chunk has not arrived yet.
+        var prefilling = Set<UInt64>()
+    }
+
+    /// The most stages a group has (SPEC-051 `max_members`), bounding the hops a
+    /// request's next frame can wait behind.
+    static var maxStages: Int { 8 }
+
+    /// SPEC-051-R013: how long a member with open requests waits for the next
+    /// upstream frame. The next frame can queue behind one pass of the chain and
+    /// one step of every request the member can hold, each within its decode
+    /// deadline, and behind prefill chunks while any request is still prefilling.
+    private func openRequestDeadline(_ state: StageState) -> TimeInterval {
+        guard let hop = options.decodeHopDeadline else { return options.receiveTimeout }
+        let queue = Double(Self.maxStages + options.maxSequences)
+        return queue * hop + (state.prefilling.isEmpty ? 0 : queue * options.prefillChunkDeadline)
     }
 
     /// A decode activation of a request this stage already holds KV for, which can
@@ -1937,6 +1967,7 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
         let input = ShardBenchActivation(dtype: header.dtype, shape: header.shape, payload: frame.payload)
         book.recordInput(header, frame.payload)
         let processed = ShardMemberLedgerBook.processedTokens(header)
+        if header.tokenStep > 0 || !header.flags.contains(.fillOnly) { state.prefilling.remove(header.requestID) }
         if options.role == .tail, header.flags.contains(.fillOnly) {
             try stage.fill(activation: input, cache: cache)
             // A fill-only chunk sends nothing, but its tokens were processed.

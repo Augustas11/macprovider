@@ -32,6 +32,9 @@ final class ShardSpareStandby: @unchecked Sendable {
     private let expectedMemberID: String?
     /// SPEC-051-R011: the spare's configured key; nil in a lab chain.
     private let expectedMemberKey: String?
+    /// SPEC-051-R006: the concurrency and serving context it must carry.
+    private let requiredSlots: Int
+    private let requiredContextTokens: Int?
     private let layers: Range<Int>
     private let modelDigest: String?
     private let handshakeTimeout: TimeInterval
@@ -57,7 +60,8 @@ final class ShardSpareStandby: @unchecked Sendable {
     /// `configuration` carries the spare's epoch (the one after the group's).
     init(
         endpoint: ShardBenchEndpoint, configuration: ShardLinkConfiguration, signer: ShardMemberSigner, headHello: ShardBenchHello,
-        expectedMemberID: String?, expectedMemberKey: String? = nil, layers: Range<Int>, modelDigest: String?,
+        expectedMemberID: String?, expectedMemberKey: String? = nil, requiredSlots: Int = 1, requiredContextTokens: Int? = nil,
+        layers: Range<Int>, modelDigest: String?,
         handshakeTimeout: TimeInterval
     ) {
         self.endpoint = endpoint
@@ -66,6 +70,8 @@ final class ShardSpareStandby: @unchecked Sendable {
         self.headHello = headHello
         self.expectedMemberID = expectedMemberID
         self.expectedMemberKey = expectedMemberKey
+        self.requiredSlots = requiredSlots
+        self.requiredContextTokens = requiredContextTokens
         self.layers = layers
         self.modelDigest = modelDigest
         self.handshakeTimeout = handshakeTimeout
@@ -210,6 +216,7 @@ final class ShardSpareStandby: @unchecked Sendable {
             }
             guard spare.memberPublicKey != nil else { throw ShardBenchError.handshake("the spare announced no member key") }
             try ShardChainWire.checkConfigured(spare, key: expectedMemberKey, stage: 1)
+            try ShardChainWire.checkCapacity(spare, slots: requiredSlots, contextTokens: requiredContextTokens, stage: 1)
             try ShardChainWire.checkPeer(link, is: spare, stage: 1)
             link.armLiveness()
             return (link, spare)

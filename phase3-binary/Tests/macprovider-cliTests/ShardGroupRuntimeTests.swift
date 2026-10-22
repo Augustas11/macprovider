@@ -217,7 +217,12 @@ final class ShardGroupRuntimeTests: XCTestCase {
             XCTAssertEqual(error.code, "shard_group_unavailable")
         }
         _ = try await runtime.acquireLocalRequestHandle(request)
-        await runtime.setGate(.available)
+        await runtime.applyStatus(epoch: ShardBenchTestRig.epoch + 1, available: true, reason: "")
+        do {
+            _ = try await runtime.acquireRequestHandle(request)
+            XCTFail("availability for another epoch than the chain's admits nothing")
+        } catch {}
+        await runtime.applyStatus(epoch: ShardBenchTestRig.epoch, available: true, reason: "")
         _ = try await runtime.acquireRequestHandle(request)
         await runtime.stop()
     }

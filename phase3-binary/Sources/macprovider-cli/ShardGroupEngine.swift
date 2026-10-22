@@ -170,6 +170,10 @@ struct ShardGroupEngineOptions: Sendable {
     var logitTopK: Int?
     /// The head's member device identity, signing its own sub-receipts.
     var signer: ShardMemberSigner
+    /// SPEC-051-R006: the context per sequence the group serves; every member
+    /// must have proved its stage fit for at least this. nil (the lab bench)
+    /// checks only concurrency.
+    var servingContextTokens: Int? = nil
 }
 
 /// Per-request digests and counts of one member, for its sub-receipts.
@@ -310,6 +314,21 @@ enum ShardChainWire {
         guard let key else { return }
         guard hello.memberPublicKey == key else {
             throw ShardBenchError.handshake("stage \(stage) (\(hello.memberDeviceID ?? "unnamed")) announced a key the group does not configure for it")
+        }
+    }
+
+    /// SPEC-051-R006, R017: a member must serve the group's concurrency and have
+    /// proved its stage fit for the serving context. A member that does not say
+    /// is taken at the smallest serving context.
+    static func checkCapacity(_ hello: ShardBenchHello, slots: Int, contextTokens: Int?, stage: Int) throws {
+        guard let capacity = hello.maxSequences, capacity >= slots else {
+            throw ShardBenchError.handshake("stage \(stage) serves \(hello.maxSequences.map(String.init) ?? "an unknown number of") sequences, the group admits \(slots)")
+        }
+        if let contextTokens {
+            let proved = hello.contextTokens ?? AutotuneModelContextCap.minimumServeContext
+            guard proved >= contextTokens else {
+                throw ShardBenchError.handshake("stage \(stage) proved its fit for \(proved) tokens per sequence, the group serves \(contextTokens)")
+            }
         }
     }
 
@@ -490,6 +509,7 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
             let standby = ShardSpareStandby(
                 endpoint: spare, configuration: configuration, signer: options.signer, headHello: myHello(),
                 expectedMemberID: options.spareMember?.memberDeviceID, expectedMemberKey: options.spareMember?.publicKey,
+                requiredSlots: options.maxInFlight, requiredContextTokens: options.servingContextTokens,
                 layers: chainValue[1].layerStart..<chainValue[1].layerEnd,
                 modelDigest: options.modelDigest, handshakeTimeout: options.connectTimeout)
             standby.start()
@@ -641,6 +661,9 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
         for (index, hello) in chain.enumerated() where hello.memberPublicKey == nil {
             throw ShardBenchError.handshake("stage \(index) announced no member key")
         }
+        for (index, hello) in chain.enumerated().dropFirst() {
+            try ShardChainWire.checkCapacity(hello, slots: options.maxInFlight, contextTokens: options.servingContextTokens, stage: index)
+        }
         try ShardChainWire.checkPeer(links.downstream, is: chain[1], stage: 1)
         try ShardChainWire.checkPeer(links.upstream, is: chain[chain.count - 1], stage: chain.count - 1)
         return chain
@@ -671,6 +694,12 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
                     continue
                 }
                 try handle(frame)
+                // SPEC-051-R013: each request's deadline is checked whenever every
+                // answer that already arrived has been handled, so other requests'
+                // traffic never postpones the check of a stalled one.
+                if heldFrame == nil, self.links?.upstream.hasQueuedFrames == false, let fault = livenessFault() {
+                    try replaceLostStage(fault)
+                }
             }
             try sessionEnd()
         } catch {
@@ -908,13 +937,16 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
     private func handleReceipts(_ frame: ShardStageFrame) throws {
         let id = frame.header.requestID
         if discarding.remove(id) != nil { return }
-        guard let entry = awaiting.removeValue(forKey: id) else {
+        guard let entry = awaiting[id] else {
             throw ShardBenchError.protocolViolation("sub-receipts for request \(id), which is not finishing")
         }
+        // The request stays in `awaiting` until its receipts are in hand, so an
+        // error here still reaches it through the teardown (R2-C03).
         let others = try ShardChainWire.decodeReceipts(frame.payload)
         let mine = try options.signer.sign(book.receipt(
             requestID: id, receiptRequestID: entry.request.receiptRequestID ?? String(id),
             memberDeviceID: options.signer.memberDeviceID, groupEpoch: groupEpoch, stageIndex: 0, layers: stage.layers))
+        awaiting[id] = nil
         book.remove(id)
         let receipts = [mine] + others
         let verdict = ShardGroupAttestationVerifier.verify(signed: receipts, expectedKeys: expectedKeys)

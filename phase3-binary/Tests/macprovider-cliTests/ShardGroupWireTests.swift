@@ -210,6 +210,32 @@ final class ShardGroupWireTests: XCTestCase {
         let gateAfter = await runtime.gate
         XCTAssertEqual(gateAfter, .available)
 
+        // R2-A1 / SPEC-051-R015: availability is for one epoch. Once a later epoch
+        // is accepted (a takeover or rebuild), fresh network work waits for that
+        // epoch's own availability, and a status for an epoch the chain does not
+        // run at is ignored.
+        await runtime.handleShardCoordinatorMessage(try JSONSerialization.data(withJSONObject: [
+            "type": "shard_group_register_result", "version": 1, "group_provider_id": "prov-head",
+            "group_epoch": Int(ShardBenchTestRig.epoch) + 1, "accepted": true, "reason": "",
+        ]))
+        await runtime.handleShardCoordinatorMessage(try JSONSerialization.data(withJSONObject: [
+            "type": "shard_group_status", "version": 1, "group_provider_id": "prov-head",
+            "group_epoch": Int(ShardBenchTestRig.epoch) + 1, "available": true, "reason": "",
+        ]))
+        do {
+            _ = try await runtime.acquireRequestHandle(request)
+            XCTFail("old-epoch availability admitted fresh work at another epoch")
+        } catch {}
+        await runtime.handleShardCoordinatorMessage(try JSONSerialization.data(withJSONObject: [
+            "type": "shard_group_register_result", "version": 1, "group_provider_id": "prov-head",
+            "group_epoch": Int(ShardBenchTestRig.epoch), "accepted": true, "reason": "",
+        ]))
+        await runtime.handleShardCoordinatorMessage(try JSONSerialization.data(withJSONObject: [
+            "type": "shard_group_status", "version": 1, "group_provider_id": "prov-head",
+            "group_epoch": Int(ShardBenchTestRig.epoch), "available": true, "reason": "",
+        ]))
+        _ = try await runtime.acquireRequestHandle(request)
+
         await runtime.handleShardCoordinatorMessage(try JSONSerialization.data(withJSONObject: [
             "type": "shard_group_status", "version": 1, "group_provider_id": "prov-head",
             "group_epoch": Int(ShardBenchTestRig.epoch), "available": false, "reason": "member_unhealthy",

@@ -444,6 +444,13 @@ public final class ShardStageLink: @unchecked Sendable {
         return ShardSocketAddress.now() - lastHeard
     }
 
+    /// Frames the reader queued that `receive` has not handed out yet.
+    public var hasQueuedFrames: Bool {
+        inbox.lock()
+        defer { inbox.unlock() }
+        return !inboxFrames.isEmpty
+    }
+
     /// True once the link closed or its reader hit an error (the peer is gone).
     public var hasFailed: Bool {
         stateLock.lock()

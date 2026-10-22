@@ -321,7 +321,13 @@ final class ShardMemberStageServer<Stage: ShardBenchStage>: @unchecked Sendable 
     }
 
     private func runSession(_ links: ShardBenchLinks, link: ShardLinkConfiguration) {
+        // A stop that came while this session was being set up wins: it never runs.
         lock.lock()
+        guard !stopped else {
+            lock.unlock()
+            links.close()
+            return
+        }
         sessionLinks = links
         lock.unlock()
         defer {
@@ -341,6 +347,8 @@ final class ShardMemberStageServer<Stage: ShardBenchStage>: @unchecked Sendable 
         options.signer = signer
         options.modelDigest = modelDigest
         options.recordComputeSamples = false
+        options.decodeHopDeadline = Double(config.supervision.decodeHopDeadlineMilliseconds) / 1000
+        options.contextTokens = config.stageContextTokens
         if config.neighbourKeysConfigured {
             options.expectedUpstreamKey = config.upstreamPublicKey
             options.expectedDownstreamKey = config.downstreamPublicKey
@@ -598,7 +606,7 @@ enum ShardGroupServe {
     /// does not start, so it never registers.
     static func proveStage(
         directory: URL, expectedSHA256: String?, scope: ShardStageScope?, layers: Range<Int>, slots: Int,
-        hardwareMemoryGB: Int = ModelFit.detectRAMGB()
+        contextTokens: Int = AutotuneModelContextCap.minimumServeContext, hardwareMemoryGB: Int = ModelFit.detectRAMGB()
     ) throws -> StageProof {
         let digest: String
         let inventory: ShardStageArtifact.Inventory
@@ -614,7 +622,7 @@ enum ShardGroupServe {
             digest = try verifiedDigest(directory: directory, expectedSHA256: expectedSHA256)
             inventory = try ShardStageArtifact.inventory(directory: directory, layers: layers)
         }
-        let fit = ShardStageArtifact.fit(inventory: inventory, slots: slots, hardwareMemoryGB: hardwareMemoryGB)
+        let fit = ShardStageArtifact.fit(inventory: inventory, slots: slots, contextTokens: contextTokens, hardwareMemoryGB: hardwareMemoryGB)
         guard fit.fits else { throw ShardStageArtifactError.doesNotFit(fit.detail) }
         shardGroupLog("stage \(layers.lowerBound):\(layers.upperBound) verified (\(scope == nil ? "whole snapshot" : "stage files against the snapshot manifest")), \(inventory.files.weightFiles.count) weight files; \(fit.detail)")
         return StageProof(digest: digest, weightsVerified: true, fit: fit)
@@ -667,9 +675,13 @@ enum ShardGroupServe {
         signer: ShardMemberSigner,
         gate: ShardGroupServingGate
     ) async throws -> ShardGroupRuntime {
+        // SPEC-051-R011: a head that serves the network checks every member's key.
+        if gate != .notRequired, let member = config.memberMissingKey {
+            throw ShardGroupConfigError.invalid("the group config names no member_public_key for \(member); a head that joins the network needs every member's key (use --no-join for a lab chain)")
+        }
         let digest = try proveStage(
             directory: directory, expectedSHA256: verifyArtifactSHA256, scope: config.stageScope, layers: 0..<config.headLayerEnd,
-            slots: config.maxConcurrency).digest
+            slots: config.maxConcurrency, contextTokens: maxContextTokens).digest
         let stage = ShardBenchStageBox(try await PipelineStageModel.load(directory: directory, layers: 0..<config.headLayerEnd))
         guard stage.stage.totalLayers == config.numLayers else {
             throw ShardGroupConfigError.invalid("the group's stages end at layer \(config.numLayers), the model has \(stage.stage.totalLayers)")
@@ -689,7 +701,7 @@ enum ShardGroupServe {
             maxInFlight: config.maxConcurrency, prefillChunk: config.prefillChunkTokens,
             expectedStages: config.stages.count + 1, expectedMembers: config.expectedMembers, modelDigest: digest,
             spare: try config.spare.map { try ShardBenchEndpoint.parse($0.endpoint) }, spareMember: config.spareMember,
-            replayBufferBytes: replayBufferBytes, logitTopK: nil, signer: signer)
+            replayBufferBytes: replayBufferBytes, logitTopK: nil, signer: signer, servingContextTokens: maxContextTokens)
         let returnListen = try config.returnListen.map { try ShardBenchEndpoint.parse($0) }
         let firstStage = try ShardBenchEndpoint.parse(config.stages[0].endpoint)
         let runtime = ShardGroupRuntime(
@@ -724,11 +736,17 @@ enum ShardGroupServe {
         directory: URL,
         catalogArtifactSHA256: String?,
         verifyArtifactSHA256: String?,
-        signer: ShardMemberSigner
+        signer: ShardMemberSigner,
+        lab: Bool = false
     ) async throws -> ShardMemberRuntime {
+        // SPEC-051-R011: a member that joins the network serves only its configured
+        // neighbours; only an explicit lab run (--no-join) may go without their keys.
+        guard lab || config.neighbourKeysConfigured else {
+            throw ShardGroupConfigError.invalid("the member config needs upstream_public_key, and downstream_public_key with connect, to join the network (use --no-join for a lab chain)")
+        }
         let proof = try proveStage(
             directory: directory, expectedSHA256: verifyArtifactSHA256, scope: config.stageScope,
-            layers: config.layerStart..<config.layerEnd, slots: config.maxSequences)
+            layers: config.layerStart..<config.layerEnd, slots: config.maxSequences, contextTokens: config.stageContextTokens)
         let stage = try await PipelineStageModel.load(directory: directory, layers: config.layerStart..<config.layerEnd)
         let server = ShardMemberStageServer(stage: stage, config: config, signer: signer, modelDigest: proof.digest, modelLabel: modelID)
         try server.start()

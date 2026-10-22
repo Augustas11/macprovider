@@ -539,8 +539,9 @@ extension ShardGroupRuntime: ShardGroupCoordinatorParticipant {
                 if result.reason == "epoch_not_increasing" { rebuildAboveSeenEpoch(result.groupEpoch) }
             }
         case "shard_group_status":
-            guard gate != .notRequired, result.groupEpoch == acceptedEpoch else { return }
-            setGate(result.available == true ? .available : .unavailable(result.reason))
+            // A status counts only for the accepted epoch the chain runs at.
+            guard gate != .notRequired, result.groupEpoch == acceptedEpoch, engineStatus?.groupEpoch == result.groupEpoch else { return }
+            applyStatus(epoch: result.groupEpoch, available: result.available == true, reason: result.reason)
         default:
             return
         }

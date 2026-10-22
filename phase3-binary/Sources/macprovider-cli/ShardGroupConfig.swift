@@ -433,6 +433,9 @@ struct ShardMemberConfig: Codable, Equatable, Sendable {
     /// the coordinator.
     var upstreamPublicKey: String?
     var downstreamPublicKey: String?
+    /// SPEC-051-R006: the context per sequence the stage fit is proved for; at
+    /// least the head's serving context. Defaults to the smallest serving context.
+    var maxContextTokens: Int?
 
     enum CodingKeys: String, CodingKey, CaseIterable {
         case schema
@@ -451,14 +454,17 @@ struct ShardMemberConfig: Codable, Equatable, Sendable {
         case snapshotManifest = "snapshot_manifest"
         case upstreamPublicKey = "upstream_public_key"
         case downstreamPublicKey = "downstream_public_key"
+        case maxContextTokens = "max_context_tokens"
     }
 
     init(
         groupProviderID: String, groupEpoch: UInt64, role: Role = .stage, stageIndex: Int, layerStart: Int, layerEnd: Int,
         listen: String, connect: String? = nil, interconnectClass: ShardInterconnectClass = .thunderboltIP,
         frameProtection: ShardFrameProtection? = nil, maxSequences: Int = 16, supervision: ShardSupervisionConfig = .defaults,
-        snapshotManifest: String? = nil, upstreamPublicKey: String? = nil, downstreamPublicKey: String? = nil
+        snapshotManifest: String? = nil, upstreamPublicKey: String? = nil, downstreamPublicKey: String? = nil,
+        maxContextTokens: Int? = nil
     ) {
+        self.maxContextTokens = maxContextTokens
         self.upstreamPublicKey = upstreamPublicKey
         self.downstreamPublicKey = downstreamPublicKey
         self.schema = Self.schemaID
@@ -497,6 +503,7 @@ struct ShardMemberConfig: Codable, Equatable, Sendable {
         snapshotManifest = try container.decodeIfPresent(String.self, forKey: .snapshotManifest)
         upstreamPublicKey = try container.decodeIfPresent(String.self, forKey: .upstreamPublicKey)
         downstreamPublicKey = try container.decodeIfPresent(String.self, forKey: .downstreamPublicKey)
+        maxContextTokens = try container.decodeIfPresent(Int.self, forKey: .maxContextTokens)
     }
 
     static func load(path: String) throws -> ShardMemberConfig {
@@ -530,6 +537,9 @@ struct ShardMemberConfig: Codable, Equatable, Sendable {
         try validateManifestPath(snapshotManifest)
         try validateMemberKey(upstreamPublicKey, field: "upstream_public_key")
         try validateMemberKey(downstreamPublicKey, field: "downstream_public_key")
+        if let maxContextTokens, !(AutotuneModelContextCap.minimumServeContext...(1 << 24)).contains(maxContextTokens) {
+            throw ShardGroupConfigError.invalid("max_context_tokens must be within \(AutotuneModelContextCap.minimumServeContext)..\(1 << 24)")
+        }
         if downstreamPublicKey != nil, connect == nil {
             throw ShardGroupConfigError.invalid("downstream_public_key names the neighbour connect dials; set connect or drop it")
         }
@@ -541,6 +551,9 @@ struct ShardMemberConfig: Codable, Equatable, Sendable {
 
     /// SPEC-051-R011: both neighbours' keys are configured, so the member checks
     /// every peer it serves against them.
+    /// The context per sequence this member proves and serves.
+    var stageContextTokens: Int { maxContextTokens ?? AutotuneModelContextCap.minimumServeContext }
+
     var neighbourKeysConfigured: Bool {
         upstreamPublicKey != nil && (connect == nil || downstreamPublicKey != nil)
     }
