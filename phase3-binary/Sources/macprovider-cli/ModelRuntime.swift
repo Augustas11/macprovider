@@ -2889,8 +2889,10 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     /// Families served with the process wired limit at Metal's recommended
-    /// working set for as long as the model is loaded.
-    nonisolated static let residentWeightsFamilies: Set<String> = ["glm5_next"]
+    /// working set for as long as the model is loaded. DeepSeek V4-Flash
+    /// (~167 GB of MXFP4/MXFP8 weights) sits as close to the working set as
+    /// GLM-5.3-Flash.
+    nonisolated static let residentWeightsFamilies: Set<String> = ["glm5_next", "deepseek_v4"]
 
     /// A model-lifetime wired-limit ticket at Metal's recommended working set,
     /// the limit mlx-lm's generation paths set. At the default limit (0) no
@@ -2929,7 +2931,12 @@ actor ModelRuntime: ModelRuntimeServing {
     /// governs instead (19 command buffers, 0.26 ms idle, round-4 window). The
     /// value only shapes command-buffer batching; buffers still commit every
     /// MLX op limit.
-    nonisolated static let commandBufferBudgetMBByFamily: [String: Int] = ["glm5_next": 65536]
+    nonisolated static let commandBufferBudgetMBByFamily: [String: Int] = [
+        "glm5_next": 65536,
+        // DeepSeek V4-Flash's routed experts bind whole 256-expert MXFP4
+        // tensors per layer through gatherQMM, the same shape of commit.
+        "deepseek_v4": 65536,
+    ]
 
     /// The per-buffer MB budget to set for a family, or `nil` when the family
     /// keeps MLX's default or the operator already set `MLX_MAX_MB_PER_BUFFER`.
@@ -3082,6 +3089,11 @@ maxTokens: 1,
         // a verified layout; any other `glm5_next` artifact is a `mixed` cache
         // class without one and fails closed.
         if normalizedLabels.contains(where: { $0.contains("glm5next") }) { return "glm5_next" }
+        // DeepSeek V4 (`deepseek_v4`, #2111). Exact labels: `deepseek_v41`
+        // (V4.1) is a different model and must not match.
+        if normalizedLabels.contains("deepseekv4") || normalizedLabels.contains("deepseekv4forcausallm") {
+            return "deepseek_v4"
+        }
         return nil
     }
 

@@ -1,5 +1,7 @@
 """Convert a T2 parity oracle (.npz from glm53_bench_vlm.py) to the JSON that
-`macprovider-cli glm-parity --oracle` reads.
+`macprovider-cli glm-parity --oracle` reads. A DeepSeek V4 oracle
+(`scripts/lab/dsv4/dsv4_reference_bench.py`) stores `top_logprob` instead of
+`top_logit`; it lands in the same `top_logit` field for `dsv4-parity`.
 
 Usage: python glm53_oracle_json.py <oracle.npz> [<out.json>]
 Default output: the input path with a .json suffix. Needs numpy only.
@@ -12,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
-KEYS = {"prompt", "greedy", "top_idx", "top_logit"}
+KEYS = {"prompt", "greedy", "top_idx"}
 
 
 def main():
@@ -22,10 +24,13 @@ def main():
     out = Path(sys.argv[2]) if len(sys.argv) == 3 else src.with_suffix(".json")
     data = np.load(src, allow_pickle=False)
     missing = KEYS - set(data.files)
+    logit_key = "top_logit" if "top_logit" in data.files else "top_logprob"
+    if logit_key not in data.files:
+        missing.add("top_logit")
     if missing:
         sys.exit(f"{src}: missing arrays {sorted(missing)}")
     prompt, greedy = data["prompt"], data["greedy"]
-    top_idx, top_logit = data["top_idx"], data["top_logit"]
+    top_idx, top_logit = data["top_idx"], data[logit_key]
     if prompt.ndim != 1 or greedy.ndim != 1 or top_idx.ndim != 2 or top_idx.shape != top_logit.shape:
         sys.exit(f"{src}: unexpected shapes {prompt.shape} {greedy.shape} {top_idx.shape} {top_logit.shape}")
     if top_idx.shape[0] > greedy.shape[0]:

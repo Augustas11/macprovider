@@ -100,7 +100,7 @@ Each component is marked REUSED (with the fork citation), NEW (with the referenc
   - There is no `always_select_tail`. The local 128-token window is always attended separately.
   - The query is `wq_b(q_residual)` with the attention RoPE applied (`:725-727`).
   - The mask honours pool causality (`pool_cache.make_mask`, `:731`).
-  - HISA hierarchical selection (`:672-710`, `hisa_kernel.py:15`) is off unless `index_block`/`index_keep` are set. The 0731 config sets neither, so the flat path at `:774-785` is the parity target.
+  - HISA hierarchical selection (`:672-710`, `hisa_kernel.py:15`) is **on**. `ModelConfig` defaults `index_block 64` and `index_keep 16` (V:`deepseek_v4/config.py:46-47`), and the 0731 config overrides neither (checked 2026-10-22: `ModelConfig.from_dict` on the artifact config gives 64/16). It applies once a ratio-4 pool holds at least 1024 entries (4096 tokens): decode uses `_hisa_select`, prefill `hisa_select`. Only whole 64-entry blocks are candidates. The 8k and 32k oracles ran through it, so the port implements both HISA paths and the flat path (`:774-785`, pools of 513-1023 entries).
 - **V4.1:** one indexer per `index_source_layer_ids` (8 layers) with shared keys and a coarse candidate-block filter (`candidate_source_layer_id 20`, 2048 blocks of 8). V:`deepseek_v41/language.py:183-198`, `:145` `select_candidate_blocks`; L:`deepseek_v41.py:403-478`.
 
 ### 1.3 mHC hyper-connections
@@ -124,6 +124,7 @@ Each component is marked REUSED (with the fork citation), NEW (with the referenc
   - `softmax(gate + ape)` pools over windows of `ratio` tokens.
   - Ratio 4 uses **overlapping** windows: `_overlap_compress_kv` (`:398-415`) mixes the previous window's first half into each window.
   - Then come RMSNorm and compressed RoPE at position `pool_base` with `freq_scale = ratio` (`:610-616`).
+  - **Reference behaviour the port keeps:** `_overlap_compress_kv` borrows the previous window's half only from windows completed in the **same call**. The first window of every prefill chunk, and every window completed during decode, pools against zeros with gate `-inf`. The ratio-4 pools therefore depend on the chunk plan. Parity runs must chunk exactly like mlx-vlm `generate_step` (`min(step, remaining - 1)` while more than one prompt token is left, then the last token). Serving (slice 6) and MTP verify (slice 7) must fix one chunk plan and keep it. The upstream DeepSeek inference code carries the half across calls. Whether we follow it is a decision for slice 6, and changing it needs new oracles.
   - State is a remainder buffer of fewer than `ratio` raw kv/gate rows plus the growing pool (`PoolingCache`, V:`models/cache.py:2693`).
 - **Fork cache classes.**
   - The closest existing state machine is `GLM5NextAttentionCache` (F:`MLXLMCommon/GLM5NextAttentionCache.swift:188`): pending keys/gates, folded raw keys kept for exact trim (`foldedCapacity = kpool - 1 + maxTrim`, `:214`), `takeCompleteWindows` (`:241`), `appendPooled` (`:268`) and exact `trim` (`:318`).
@@ -254,10 +255,10 @@ One campaign PR in the fork plus one in macprovider (AGENTS.md rules 4 and 13). 
 | # | Slice | Repo | Est. |
 |---|---|---|---|
 | 1 | **Parity oracle and harness.** One Studio window with mlx-vlm 0.7.10 on the MXFP4 artifact. Greedy oracles for prompts of 1024, 8192 and 32768 tokens: `oracle_1024.npz`, `oracle_8192.npz`, `oracle_32768.npz`, each with arrays `prompt` (int32 [N]), `greedy` (int32 [G]), `top_idx` (int32 [16,16]) and `top_logprob` (float32 [16,16], log-softmax for the first 16 decode steps). Script: `scripts/lab/dsv4/dsv4_reference_bench.py`, run as the `dsv4-reference` job of `scripts/ops/studio-lab-window.sh`. The same window records the rule-12 baseline (§3). Adds a fork test that loads an `.npz` and runs a model greedily against it. | fork | 1.5 |
-| 2 | **Skeleton.** `DeepseekV4Configuration` (+ validation), sanitize (key remap from the MXFP4 artifact, mxfp4/mxfp8 quant map, `tid2eid` as int32), sqrt-softplus gate + hash routing (§1.1, §1.6), mHC reuse + `HyperHead` (§1.3), `DeepseekV4RoPE` x3 (§1.7), `LocalAttention` with sinks, inverse RoPE and grouped `wo_a` (§1.5). Register `deepseek_v4` in `LLMModelFactory` (F:`MLXLLM/LLMModelFactory.swift:91` pattern). | fork | 3 |
-| 3 | **Compressor and pool cache.** `DeepseekV4PoolCache` with overlap and exact trim (§1.4), `CompressedAttention` (ratio 128). | fork | 3 |
-| 4 | **Indexer and sparse attention.** `SparseCompressedAttention` (ratio 4), dense to sparse at 512 pools. **Gate:** greedy parity on all three oracles. | fork | 3 |
-| 5 | **Decode performance.** mxfp4/mxfp8 variants of the router, expert and QMV decode kernels (or a measured decision to stay on `gatherQMM`), deferred HC decode and staged eval reuse. **Gate:** 1-row decode tok/s at least equal to the reference. | fork | 4 |
+| 2 | **Skeleton.** DONE 2026-10-22, fork `dsv4/2111-port` @ `fe28d000` (see §6). `DeepseekV4Configuration` (+ validation), sanitize (key remap from the MXFP4 artifact, mxfp4/mxfp8 quant map, `tid2eid` as int32), sqrt-softplus gate + hash routing (§1.1, §1.6), mHC reuse + `HyperHead` (§1.3), `DeepseekV4RoPE` x3 (§1.7), `LocalAttention` with sinks, inverse RoPE and grouped `wo_a` (§1.5). Register `deepseek_v4` in `LLMModelFactory` (F:`MLXLLM/LLMModelFactory.swift:91` pattern). | fork | 3 |
+| 3 | **Compressor and pool cache.** DONE 2026-10-22 (same commit). `DeepseekV4PoolCache` with overlap and exact trim (§1.4), `CompressedAttention` (ratio 128). | fork | 3 |
+| 4 | **Indexer and sparse attention.** Code DONE 2026-10-22 (same commit); real-weights gate waits for a GLM-off window. `SparseCompressedAttention` (ratio 4), dense to sparse at 512 pools. **Gate:** greedy parity on all three oracles. | fork | 3 |
+| 5 | **Decode performance.** mxfp4/mxfp8 variants of the router, expert and QMV decode kernels (or a measured decision to stay on `gatherQMM`), deferred HC decode and staged eval reuse. **Gate:** 1-row decode tok/s at least equal to the reference. Research target 40-46 tok/s at 1 row (notes in §6.3). | fork | 4 |
 | 6 | **CB and paged KV.** Batched per-row V4 caches (fork), `.pagedPool` cache kind + `PagedPoolCache` + attach parity probe longer than 2048 tokens, family default block 256, `deepseek_v4` family detection (M:`macprovider-cli/ModelRuntime.swift:3060-3071` pattern), resident-weights and command-buffer family entries (`:2879`, `:2918`). **Gate:** CB token parity at 1/2/4/8 rows. | both | 5 |
 | 7 | **DSpark native MTP (0731).** Hidden capture, block drafter, Markov head, pool rewind for verify, `deepseek_v4_dspark_v1` adapter, SPEC-048 sidecar fields. **Gate:** the native-vs-ordinary CB R015 cells (§3). | both | 5 |
 | 8 | **DSML.** Swift `encode_messages` port with golden tests, `.dsml` tool parser (fork + `ToolCallParser`), think-state splitter + `reasoning_effort`, #2107 conformance record. | both | 4 |
@@ -317,3 +318,65 @@ The total is about 38.5 engineer-days. V4-Flash serving with CB, MTP and DSML (s
 - MLX fused SDPA with `sinks` at D=512.
 - Router kernel limits at 384 experts.
 - The V4.1 DSpark stage semantics (no reference implementation).
+
+## 6. Progress
+
+### 6.1 Reference measurements and oracles (slice 1, 2026-10-22 window)
+Run: mlx-vlm 0.7.10, mlx 0.32.4, macOS 27.0.1 (26A434), greedy, `prefill_step_size` 2048, no prompt cache. Model config SHA-256 `2c6e5047fbc5284f3dbdd101059d2d29f1ceb14cdc26ee93c9872c720398e35a`.
+
+| Mode | Prompt | TTFT s | Prefill tok/s | Decode tok/s | Peak GB |
+|---|---|---|---|---|---|
+| 1 row | 1024 | 2.49 | 411 | 31.4 | 157.6 |
+| 1 row | 4096 | 11.88 | 345 | 28.1 | 160.0 |
+| 1 row | 8192 | 22.95 | 357 | 27.9 | 160.1 |
+| 1 row | 32768 | 93.24 | 351 | 27.4 | 160.4 |
+| BatchGenerator, 1 row | 1024 | 2.47 | | 31.7 (window) | 157.6 |
+| BatchGenerator, 4 rows | 1024 each | 9.05 | | 67.4 (window), 42.4 aggregate | 160.5 |
+
+Oracles, copied from the window output into the lab oracle directory. The JSON files are the `dsv4-parity` inputs, made with `scripts/lab/cb-studio/glm53_oracle_json.py` (`top_logprob` goes into `top_logit`):
+
+| File | SHA-256 |
+|---|---|
+| `oracle_1024.npz` | `29cd60e5530227a7335d5d1d815dfe575efe599fe9ee8488936c1140f6130134` |
+| `oracle_8192.npz` | `99c2c330dc476df8898cd4bb1ac643e895edc50f2a0dd9b1ffcbb20b4f6eb260` |
+| `oracle_32768.npz` | `4af7beba7c075cb94cef0e29d32b4eff4694cd90c0efe2681891e6f60bb952d9` |
+| `speed.json` | `963e43513c12820af4e746547623e0ed39b369982fb1019615eb32edf29d825c` |
+| `oracle_1024.json` | `9a4b52976bbdd471f27dcd5084f93211e8c354ba1a817db3a2ba166bbed41f41` |
+| `oracle_8192.json` | `681c6ac87ebc7b0762d67ebfdd7165cc1ceb76f3a0e7f428c406ca73864157a1` |
+| `oracle_32768.json` | `b61db4d5b6006fce20b07537af27b99e60dd1ef75341f9d12b8353771d6f459f` |
+
+Prompt int32 SHA-256 values are 1024 `343ae4eb…`, 8192 `c581a732…` and 32768 `8d9499ab…`, as recorded in `speed.json`. The top-2 log-prob gap at step 0 is 15 to 20, so top-1 is far from a tie.
+
+### 6.2 Slices 2-4 (fork `Augustas11/mlx-swift-lm` branch `dsv4/2111-port`, commit `fe28d000c3af00f6880591a31e36f5064d9d142b`, one commit on `87dc5159`)
+- `Libraries/MLXLLM/Models/DeepseekV4.swift` contains:
+  - the configuration, with validation and the reference HISA defaults;
+  - `DeepseekV4RoPE`, with the local base, the YaRN compress base and the compressor `freq_scale`;
+  - the sqrt-softplus gate with hash routing from token ids;
+  - the MoE, using `SwitchGLU` and the limited SwiGLU;
+  - the compressor, with simple and overlapping windows;
+  - the indexer, with HISA decode, HISA prefill and the flat path;
+  - attention for ratios 0, 4 and 128, with sinks, inverse output RoPE, grouped `wo_a`, and sparse pooled attention;
+  - `HyperHead`;
+  - sanitize.
+- mHC reuses `GLM5NextHyperConnection`, which gained a size-only init.
+- `Libraries/MLXLMCommon/DeepseekV4PoolCache.swift` holds the remainder buffer and the pool. The 128-token window is the fork's `RotatingKVCache`.
+- Module paths equal the artifact's tensor names, so `config.json`'s per-layer `mxfp4`/`mxfp8` entries apply unchanged on the generic quantized path.
+- Tests, `Tests/MLXLMTests/DeepseekV4Tests.swift`, run CPU-only on the Studio:
+  - A 4-layer fixture made by the reference has a hash layer, ratios 0/4/128/4, an 8-token window, and MXFP4/MXFP8. Its `make_fixture.py` sits beside it. The fixture decodes bit-identically to mlx-vlm `generate_step`: 24 tokens, max abs log-prob diff 0.0, for HISA and flat selection at chunk plans 64, 2048 and 16.
+  - Pool-cache, config and sanitize unit tests.
+  - `testArtifactLayoutMatchesModuleTree` builds lazy placeholders from the real artifact's safetensors headers. It checks every name, shape and quantization mode against the module tree without reading a weight.
+- macprovider (#2112):
+  - the fork pin;
+  - `deepseek_v4` family detection, resident weights and the command-buffer budget;
+  - the lab-only `dsv4-parity` command (`GLMParityCommand.Mode.vlmGenerateStep`).
+- Not done yet: the real-weights parity run (GLM-off window). GPU numerics use the GLM fused HC decode kernels at one token per row and the op path elsewhere; the reference uses its Metal `hc_sinkhorn_collapse` kernel. Divergence is therefore judged by the §3 near-tie rule, not bit-exactness.
+- Changing the pin changes the SPEC-048 decode-path digest (`DecodePathIdentity.generated.swift` regenerated). The signed native-MTP admission entries carry `runtime_revision 87dc5159`. They have to be rebound to the campaign's final revision and digest at the campaign cut, which happens after #2111 lands, per the operator rule.
+
+### 6.3 Fast-decode research notes (for slice 5 and later)
+The realistic 1-row target is 40-46 tok/s, against the reference's 27-31. The levers, in expected order of payoff:
+- A fixed-shape whole-token decode graph (compile one token's forward at fixed shapes, so no per-step graph build).
+- A fused MXFP4 MoE: router, gather and expert GEMV in mxfp4 tiles. This replaces `gatherQMM`, which is today's generic path.
+- Fused MXFP8 attention projections (`wq_a`, `wq_b`, `wkv`, `wo_a`, `wo_b`, `indexer.wq_b`).
+- Fused mHC, as GLM: mix GEMV plus Sinkhorn, collapse and norm, with a deferred expand.
+- One sparse-attention kernel: window, gathered top-k pool entries and sink in a single softmax.
+- An indexer fast path: HISA coarse and fine scoring in one kernel at decode, with the pool count fixed between window completions.

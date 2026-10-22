@@ -714,6 +714,20 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertEqual(gemma4.modelFamily, "gemma4")
         XCTAssertFalse(PagedKVAttachGate.recognizedModelFamilies.contains(gemma4.modelFamily))
 
+        // DeepSeek V4-Flash (#2111): its own family, not paged yet; V4.1
+        // (`deepseek_v41`) is a different model.
+        let dsv4 = ModelRuntime.pagedKVModelCapabilities(
+            modelID: "TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX",
+            configJSONData: Data(#"{"model_type":"deepseek_v4","architectures":["DeepseekV4ForCausalLM"],"n_routed_experts":256,"num_experts_per_tok":6}"#.utf8)
+        )
+        XCTAssertEqual(dsv4.modelFamily, "deepseek_v4")
+        XCTAssertFalse(PagedKVAttachGate.recognizedModelFamilies.contains(dsv4.modelFamily))
+        let dsv41 = ModelRuntime.pagedKVModelCapabilities(
+            modelID: "deepseek-ai/DeepSeek-V4.1-Flash",
+            configJSONData: Data(#"{"model_type":"deepseek_v41","architectures":["DeepseekV41ForConditionalGeneration"]}"#.utf8)
+        )
+        XCTAssertNotEqual(dsv41.modelFamily, "deepseek_v4")
+
         // GLM-5.3-Flash: the SPEC-039 v0.1.17 paged family, MoE from the
         // expert counts under `text_config`.
         let glm5Next = ModelRuntime.pagedKVModelCapabilities(
@@ -2876,8 +2890,9 @@ final class ServingKnobsConfigTests: XCTestCase {
         )
     }
 
-    // GLM-5.3-Flash is served with the wired limit at the recommended working
-    // set (mlx-lm's generation default); every other family keeps the default.
+    // GLM-5.3-Flash and DeepSeek V4-Flash are served with the wired limit at
+    // the recommended working set (mlx-lm's generation default); every other
+    // family keeps the default.
     func testResidentWeightsTicketOnlyForGLM5NextAtRecommendedWorkingSet() {
         let recommended = 239_143_780_352
         let ticket = ModelRuntime.residentWeightsTicket(
@@ -2892,6 +2907,9 @@ final class ServingKnobsConfigTests: XCTestCase {
                 ModelRuntime.residentWeightsTicket(modelFamily: family, recommendedWorkingSetBytes: recommended),
                 family)
         }
+        XCTAssertEqual(
+            ModelRuntime.residentWeightsTicket(modelFamily: "deepseek_v4", recommendedWorkingSetBytes: recommended)?.size,
+            recommended)
         XCTAssertNil(ModelRuntime.residentWeightsTicket(modelFamily: "glm5_next", recommendedWorkingSetBytes: nil))
         XCTAssertNil(ModelRuntime.residentWeightsTicket(modelFamily: "glm5_next", recommendedWorkingSetBytes: 0))
     }
@@ -2903,6 +2921,7 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertEqual(ModelRuntime.commandBufferBudgetMB(modelFamily: "glm5_next", configured: nil), 65536)
         XCTAssertEqual(ModelRuntime.commandBufferBudgetMB(modelFamily: "glm5_next", configured: ""), 65536)
         XCTAssertNil(ModelRuntime.commandBufferBudgetMB(modelFamily: "glm5_next", configured: "40"))
+        XCTAssertEqual(ModelRuntime.commandBufferBudgetMB(modelFamily: "deepseek_v4", configured: nil), 65536)
         for family in ["qwen", "llama", "gpt_oss", "gemma4", "glm4_moe", "nemotron_h", "unknown"] {
             XCTAssertNil(ModelRuntime.commandBufferBudgetMB(modelFamily: family, configured: nil), family)
         }
