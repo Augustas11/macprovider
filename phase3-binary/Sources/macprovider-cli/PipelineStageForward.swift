@@ -254,6 +254,40 @@ final class PipelineStageModel {
         return logits
     }
 
+    /// SPEC-051-R017: whether this stage can run several requests' decode rows in
+    /// one forward. Every layer cache must be a plain `KVCacheSimple`; a cache with
+    /// its own layout (rotating, quantized) keeps the per-request path.
+    func canBatchDecode(_ rowCaches: [[KVCache]]) -> Bool {
+        guard rowCaches.count > 1, let layers = rowCaches.first?.count else { return false }
+        return rowCaches.allSatisfy { caches in
+            caches.count == layers && caches.allSatisfy { type(of: $0) == KVCacheSimple.self }
+        }
+    }
+
+    /// SPEC-051-R017: one forward over one decode position of each of several
+    /// requests. `input` is `[B, 1]` token ids (first stage) or `[B, 1, hidden]`; row
+    /// `i` attends to its own request's KV only, at its own position, and appends to
+    /// it, exactly as `forward` does for that request alone. Returns `[B, 1, ...]`.
+    func forwardBatch(_ input: MLXArray, caches rowCaches: [[KVCache]]) throws -> MLXArray {
+        guard input.dim(0) == rowCaches.count, input.dim(1) == 1, canBatchDecode(rowCaches) else {
+            throw PipelineStageError.activationShape(input.shape)
+        }
+        if capture != nil {
+            for caches in rowCaches { refreshCaptureLayerCache(caches) }
+        }
+        let batched = (0..<rowCaches[0].count).map { layer in PipelineRowBatchCache(rows: rowCaches.map { $0[layer] }) }
+        let evaluated = { (count: Int) in rowCaches.flatMap { $0.prefix(count).flatMap { $0.innerState() } } }
+        if let capture {
+            _ = model(input, cache: batched)
+            guard let hidden = capture.take() else { throw PipelineStageError.missingCapture }
+            eval([hidden] + evaluated(realLayerCount))
+            return hidden
+        }
+        let logits = model(input, cache: batched)
+        eval([logits] + evaluated(rowCaches[0].count))
+        return logits
+    }
+
     /// Extend this stage's KV with `input` without producing its output. On the last
     /// stage only the caches are evaluated, so a fill-only prefill chunk never runs
     /// the final norm or the LM head over its tokens.
@@ -429,4 +463,74 @@ enum PipelineLogitSummarizer {
             topLogprobs: logprobs.asArray(Float.self),
             logSumExp: logSumExp.item(Float.self))
     }
+}
+
+/// One layer's KV for a batched decode step (SPEC-051-R017): it presents several
+/// requests' own `KVCacheSimple` caches as one `[B, heads, length, dim]` cache. Each
+/// row is appended to its own cache and rotated at its own position; shorter rows
+/// are padded with zeros that the mask hides, so a row attends only to its own
+/// request's keys.
+final class PipelineRowBatchCache: KVCache {
+    private let rows: [KVCache]
+    /// Each row's length before this step.
+    private let starts: [Int]
+    private(set) var offset: Int
+
+    init(rows: [KVCache]) {
+        self.rows = rows
+        self.starts = rows.map(\.offset)
+        self.offset = starts.max() ?? 0
+    }
+
+    var ropeOffset: RoPEOffset { .batch(MLXArray(starts.map(Int32.init))) }
+    var maxSize: Int? { nil }
+
+    func innerState() -> [MLXArray] { rows.flatMap { $0.innerState() } }
+
+    func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
+        var rowKeys = [MLXArray]()
+        var rowValues = [MLXArray]()
+        for (index, row) in rows.enumerated() {
+            let (k, v) = row.update(keys: keys[index ..< index + 1], values: values[index ..< index + 1])
+            rowKeys.append(k)
+            rowValues.append(v)
+        }
+        let length = rowKeys.map { $0.dim(2) }.max() ?? 0
+        func padded(_ array: MLXArray) -> MLXArray {
+            let missing = length - array.dim(2)
+            guard missing > 0 else { return array }
+            return concatenated(
+                [array, MLXArray.zeros([array.dim(0), array.dim(1), missing, array.dim(3)], dtype: array.dtype)], axis: 2)
+        }
+        offset = length
+        return (concatenated(rowKeys.map(padded), axis: 0), concatenated(rowValues.map(padded), axis: 0))
+    }
+
+    /// Row `i` sees positions `0..<starts[i] + n` (one new position per step).
+    func makeMask(n: Int, windowSize: Int?, returnArray: Bool) -> MLXFast.ScaledDotProductAttentionMaskMode {
+        let length = (starts.max() ?? 0) + n
+        let positions = MLXArray(Int32(0) ..< Int32(length)).reshaped(1, 1, 1, length)
+        let ends = MLXArray(starts.map { Int32($0 + n) }).reshaped(starts.count, 1, 1, 1)
+        return .array(positions .< ends)
+    }
+
+    // A step view: never serialized, trimmed or copied.
+    var state: [MLXArray] {
+        get { [] }
+        set {}
+    }
+
+    var metaState: [String] {
+        get { [""] }
+        set {}
+    }
+
+    var isTrimmable: Bool { false }
+    var maxTrimCount: Int { 0 }
+    func isTrimmable(after positions: Int) -> Bool { false }
+    @discardableResult func trim(_ n: Int) -> Int { 0 }
+    func copy() -> any KVCache { PipelineRowBatchCache(rows: rows.map { $0.copy() }) }
+    func prepare(lengths: [Int]?) {}
+    func prepare(lengths: MLXArray?) {}
+    func finalize() {}
 }

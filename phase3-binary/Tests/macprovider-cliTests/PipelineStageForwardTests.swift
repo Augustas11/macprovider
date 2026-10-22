@@ -149,6 +149,77 @@ final class PipelineStageForwardTests: XCTestCase {
         try await assertStagesMatchWholeModel(Self.deepseekConfig, splits: [0..<2, 2..<3])
     }
 
+    /// SPEC-051-R017: decode rows of requests with different prompt lengths run
+    /// in one batched forward per stage and give each request exactly the logits it
+    /// gets alone, step after step (its own KV, its own position).
+    private func assertBatchedDecodeMatchesPerRequest(
+        _ config: [String: Any],
+        splits: [Range<Int>],
+        prompts: [[Int32]] = [[3, 14, 15, 92, 65], [7, 1], [42, 8, 19]],
+        steps: Int = 4,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        try await Device.withDefaultDevice(.cpu) {
+            let (directory, _) = try await makeCheckpoint(config)
+            var stages = [PipelineStageModel]()
+            for range in splits {
+                stages.append(try await PipelineStageModel.load(directory: directory, layers: range))
+            }
+            // Two copies of every request's KV: one decoded alone, one batched.
+            let alone = try prompts.map { _ in try stages.map { try $0.newCache() } }
+            let batched = try prompts.map { _ in try stages.map { try $0.newCache() } }
+            func run(_ input: MLXArray, _ caches: [[KVCache]]) throws -> MLXArray {
+                var carried = input
+                for (index, stage) in stages.enumerated() {
+                    carried = try stage.forward(carried, cache: caches[index])
+                }
+                return carried
+            }
+            var next = [Int32]()
+            for (row, prompt) in prompts.enumerated() {
+                let logits = try run(MLXArray(prompt).reshaped(1, prompt.count), alone[row])
+                _ = try run(MLXArray(prompt).reshaped(1, prompt.count), batched[row])
+                next.append(argMax(logits[0, -1], axis: -1).item(Int32.self))
+            }
+            for step in 0..<steps {
+                var expected = [MLXArray]()
+                for row in prompts.indices {
+                    expected.append(try run(MLXArray([next[row]]).reshaped(1, 1), alone[row]))
+                }
+                var carried = MLXArray(next).reshaped(prompts.count, 1)
+                for (index, stage) in stages.enumerated() {
+                    XCTAssertTrue(stage.canBatchDecode(batched.map { $0[index] }), file: file, line: line)
+                    let output = try stage.forwardBatch(carried, caches: batched.map { $0[index] })
+                    if stage.plan.isLast {
+                        carried = output
+                    } else {
+                        let encoded = try PipelineActivationCodec.encode(output)
+                        carried = try PipelineActivationCodec.decode(dtype: encoded.dtype, shape: encoded.shape, payload: encoded.payload)
+                    }
+                }
+                for row in prompts.indices {
+                    let difference = abs(carried[row ..< row + 1] - expected[row]).max().item(Float.self)
+                    XCTAssertLessThanOrEqual(difference, 1e-4, "step \(step) row \(row) max |delta| \(difference)", file: file, line: line)
+                    let token = argMax(expected[row][0, -1], axis: -1).item(Int32.self)
+                    XCTAssertEqual(argMax(carried[row, -1], axis: -1).item(Int32.self), token, "step \(step) row \(row)", file: file, line: line)
+                    next[row] = token
+                }
+            }
+            for row in prompts.indices {
+                XCTAssertEqual(batched[row].last?.first?.offset, prompts[row].count + steps, "row \(row) KV length", file: file, line: line)
+            }
+        }
+    }
+
+    func testBatchedDecodeMatchesPerRequestLlama() async throws {
+        try await assertBatchedDecodeMatchesPerRequest(Self.llamaConfig, splits: [0..<1, 1..<3, 3..<4])
+    }
+
+    func testBatchedDecodeMatchesPerRequestDeepseekV3() async throws {
+        try await assertBatchedDecodeMatchesPerRequest(Self.deepseekConfig, splits: [0..<1, 1..<3])
+    }
+
     /// Prefill `prompt` in chunks through the stages (fill-only on the last stage for
     /// all but the final chunk) and compare with the whole model's one-shot prefill,
     /// then keep decoding to show the chunked KV is the same KV.
