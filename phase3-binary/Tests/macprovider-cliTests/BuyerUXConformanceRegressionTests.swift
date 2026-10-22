@@ -154,4 +154,27 @@ final class BuyerUXConformanceRegressionTests: XCTestCase {
         XCTAssertFalse(ModelRuntime.requestStateRepresentable(try request(stream: true)))
         XCTAssertTrue(ModelRuntime.requestStateRepresentable(try request(stream: false)))
     }
+
+    /// Audit r2: bare-body depth follows the tagged path (deeply nested
+    /// arguments parse in both forms or in neither).
+    func testQwenBareBodyDepthMatchesTaggedPath() throws {
+        let arguments = String(repeating: #"{"a":"#, count: 30) + "1" + String(repeating: "}", count: 30)
+        let body = #"{"name": "read_file", "arguments": "# + arguments + "}"
+        let tagged = parse("<tool_call>\n" + body + "\n</tool_call>")
+        XCTAssertEqual(parse(body).toolCalls.count, tagged.toolCalls.count)
+        XCTAssertEqual(parse(body).toolCalls.first?.arguments, tagged.toolCalls.first?.arguments)
+    }
+
+    /// Audit r2: a non-strict schema may require a key it does not declare;
+    /// guaranteed function-XML reads it untyped. A strict schema still refuses it.
+    func testGuaranteedFunctionXMLAcceptsUndeclaredRequiredKeyForNonStrictSchema() throws {
+        let raw = "<tool_call>\n<function=read_file>\n<parameter=path>\n/etc/hosts\n</parameter>\n</function>\n</tool_call>"
+        let loose: [String: JSONValue] = ["read_file": .object(["type": .string("object"), "required": .array([.string("path")])])]
+        XCTAssertEqual(try ToolCallParser.parseGuaranteedToolCalls(raw, schemas: loose).first?.arguments, #"{"path":"/etc/hosts"}"#)
+        let strict: [String: JSONValue] = ["read_file": .object([
+            "type": .string("object"), "properties": .object(["file": .object(["type": .string("string")])]),
+            "required": .array([.string("file")]), "additionalProperties": .bool(false),
+        ])]
+        XCTAssertThrowsError(try ToolCallParser.parseGuaranteedToolCalls(raw, schemas: strict))
+    }
 }

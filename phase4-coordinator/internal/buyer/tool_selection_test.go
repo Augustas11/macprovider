@@ -539,3 +539,24 @@ func TestToolSelectionNonStrictRequiredIsExactKey(t *testing.T) {
 		t.Fatal("valid arguments rejected")
 	}
 }
+
+// Audit r2: container depth counts the root as 1 (empty deepest container
+// included), and a null required entry names no key.
+func TestToolSelectionNonStrictDepthAndRequiredEntries(t *testing.T) {
+	nest := func(levels int) string {
+		return strings.Repeat(`{"a":`, levels-1) + `{}` + strings.Repeat(`}`, levels-1)
+	}
+	if got := jsonContainerDepth([]byte(nest(32))); got != 32 {
+		t.Fatalf("depth %d want 32", got)
+	}
+	if got := jsonContainerDepth([]byte(nest(33))); got != 33 {
+		t.Fatalf("depth %d want 33", got)
+	}
+	schema := json.RawMessage(`{"type":"object","required":[null,"path",1]}`)
+	if !toolArgumentsMatchSchema(schema, false, json.RawMessage(`{"path":"a"}`)) {
+		t.Fatal("null or non-string required entry demanded a key")
+	}
+	if toolArgumentsMatchSchema(schema, false, json.RawMessage(`{}`)) {
+		t.Fatal("string required entry not enforced")
+	}
+}

@@ -333,7 +333,9 @@ enum ToolCallParser {
             if text.isEmpty { break }
             guard calls.count < ToolSelectionPolicy.maxCalls,
                   let object = firstCompleteJSONObject(in: String(text)),
-                  case .object(let parsed)? = try? StrictJSONParser.parse(object, maxDepth: SPEC018_ARGUMENTS_MAX_JSON_DEPTH),
+                  // Shape check only; `parseJSONCall` applies the tagged path's
+                  // argument validator (and its depth rule) to the same object.
+                  case .object(let parsed)? = try? StrictJSONParser.parse(object, maxDepth: 128),
                   Set(parsed.keys) == ["name", "arguments"],
                   case .string(let name)? = parsed["name"], allowedFunctionNames.contains(name),
                   case .object? = parsed["arguments"],
@@ -435,6 +437,9 @@ enum ToolCallParser {
             properties = object
         }
         cursor = cursor[cursor.index(after: nameEnd)...]
+        // SPEC-018 §3.11 v0.3.1: a non-strict schema may require a key it does
+        // not declare in `properties`; such a key is read untyped.
+        let strict = ToolSelectionPolicy.isStrictSubset(.object(schema))
         var arguments: [String: JSONValue] = [:]
         while true {
             cursor = cursor.drop(while: { $0.isWhitespace })
@@ -446,8 +451,14 @@ enum ToolCallParser {
             cursor = cursor.dropFirst("<parameter=".count)
             guard let keyEnd = cursor.firstIndex(of: ">") else { throw malformed }
             let key = String(cursor[..<keyEnd])
-            guard isValidToolParameterName(key), arguments[key] == nil,
-                  case .object(let property)? = properties[key] else { throw malformed }
+            guard isValidToolParameterName(key), arguments[key] == nil else { throw malformed }
+            let property: [String: JSONValue]
+            if case .object(let declared)? = properties[key] {
+                property = declared
+            } else {
+                guard !strict, properties[key] == nil else { throw malformed }
+                property = [:]
+            }
             cursor = cursor[cursor.index(after: keyEnd)...]
             guard let close = cursor.range(of: "</parameter>") else { throw malformed }
             var raw = cursor[..<close.lowerBound]

@@ -148,7 +148,7 @@ func validateToolSelection(body []byte, raw map[string]json.RawMessage) (*toolSe
 		if _, exists := policy.schemas[tool.Function.Name]; exists {
 			return fail("invalid_tools", "Duplicate function name")
 		}
-		if !uniqueJSONKeys(tool.Function.Parameters, maxJSONSchemaDepth) {
+		if !uniqueJSONKeys(tool.Function.Parameters, maxJSONSchemaDepth) || jsonContainerDepth(tool.Function.Parameters) > maxJSONSchemaDepth {
 			return fail("unsupported_tool_schema", "Tool schema contains duplicate keys or exceeds depth cap")
 		}
 		if !toolSchemaNumbersSupported(tool.Function.Parameters) {
@@ -363,8 +363,10 @@ func toolArgumentsMatchSchema(schema json.RawMessage, strict bool, raw json.RawM
 	_ = json.Unmarshal(schema, &node)
 	_ = json.Unmarshal(node["required"], &required)
 	for _, entry := range required {
+		// Only string entries name keys (Swift skips the rest); null would
+		// otherwise decode to "".
 		var key string
-		if json.Unmarshal(entry, &key) != nil {
+		if entry = bytes.TrimSpace(entry); len(entry) == 0 || entry[0] != '"' || json.Unmarshal(entry, &key) != nil {
 			continue
 		}
 		if _, ok := value[key]; !ok {
@@ -717,4 +719,32 @@ func toolSchemaNumbersSupported(raw []byte) bool {
 func writeToolSelectionError(w http.ResponseWriter) {
 	retry := false
 	writeProviderStructuredOutputError(w, http.StatusBadGateway, "tool_selection_validation_failed", errToolSelectionOutput.Error(), &retry)
+}
+
+// jsonContainerDepth is the deepest object/array nesting, the root container
+// counting 1 (the provider request parser's convention, SPEC-018 §3.11). It
+// returns maxJSONSchemaDepth+1 on malformed input.
+func jsonContainerDepth(raw []byte) int {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	depth, deepest := 0, 0
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			return deepest
+		}
+		if err != nil {
+			return maxJSONSchemaDepth + 1
+		}
+		if delimiter, ok := token.(json.Delim); ok {
+			switch delimiter {
+			case '{', '[':
+				depth++
+				if depth > deepest {
+					deepest = depth
+				}
+			default:
+				depth--
+			}
+		}
+	}
 }
