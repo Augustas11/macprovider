@@ -77,13 +77,21 @@ actor ShardGroupRuntime: ModelRuntimeServing {
     private var providerStatus: ProviderStatus?
     private var registrationCounter = 0
 
+    // SPEC-051-R029 coordinator state (ShardGroupWire.swift).
+    let registration: ShardGroupRegistration?
+    var acceptedEpoch: UInt64?
+    var registerSent: (epoch: UInt64, at: Date)?
+    private var warnings = Set<String>()
+
     init(
         identity: Identity,
         prompting: Prompting,
         maxContextTokens: Int,
         gate: ShardGroupServingGate,
+        registration: ShardGroupRegistration? = nil,
         connect: @escaping @Sendable () async throws -> any ShardGroupEngineHandle
     ) {
+        self.registration = registration
         self.identity = identity
         self.prompting = prompting
         self.maxContextTokens = maxContextTokens
@@ -135,6 +143,18 @@ actor ShardGroupRuntime: ModelRuntimeServing {
     func setGate(_ gate: ShardGroupServingGate) {
         if gate != self.gate { shardGroupLog("serving gate \(gate)") }
         self.gate = gate
+    }
+
+    /// A new coordinator session registers again and waits for its status.
+    func resetCoordinatorSession() {
+        acceptedEpoch = nil
+        registerSent = nil
+        if gate != .notRequired { setGate(.awaitingCoordinator) }
+    }
+
+    func warnOnce(_ message: String) {
+        guard warnings.insert(message).inserted else { return }
+        shardGroupLog(message)
     }
 
     // MARK: Identity and status

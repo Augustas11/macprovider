@@ -258,12 +258,21 @@ protocol ShardMemberServerHandle: AnyObject, Sendable {
 
 extension ShardMemberStageServer: ShardMemberServerHandle {}
 
+/// Where a member's `shard_member_hello` stands on the current session.
+enum ShardMemberHelloState: Equatable, Sendable {
+    case notSent
+    case sent(Date)
+    case awaitingRegistration
+    case accepted
+}
+
 actor ShardMemberRuntime: ModelRuntimeServing {
     let config: ShardMemberConfig
     let identity: ShardGroupRuntime.Identity
     let memberDeviceID: String
-    private let server: any ShardMemberServerHandle
+    let server: any ShardMemberServerHandle
     private var providerStatus: ProviderStatus?
+    var helloState = ShardMemberHelloState.notSent
 
     nonisolated var isSettlementReceiptEligible: Bool { false }
     nonisolated var settlementRuntimeSource: String? { nil }
@@ -428,6 +437,7 @@ enum ShardGroupServe {
                 templateSupportsThinkingToggle: thinking,
                 templateSupportsPreserveThinking: thinking && ModelRuntime.chatTemplateSupportsPreserveThinking(in: directory)),
             maxContextTokens: maxContextTokens, gate: gate,
+            registration: ShardGroupRegistration(config: config, signer: signer),
             connect: {
                 try await ShardBenchThread.run {
                     let links = try ShardBenchLinks.open(

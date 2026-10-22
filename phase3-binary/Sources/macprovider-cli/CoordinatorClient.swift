@@ -2794,6 +2794,13 @@ actor CoordinatorClient {
             try await handleNativeMTPTupleDisable(dict)
         case ComputeScoreProtocol.requestType:
             try await handleComputeScoreRequest(dict)
+        case let shardType where ShardGroupWire.inboundTypes.contains(shardType):
+            guard let participant = modelRuntime as? any ShardGroupCoordinatorParticipant else {
+                try await sendNAK(inReplyTo: type, code: "unknown_message_type", message: "Unrecognized message type: '\(type)'")
+                return
+            }
+            await participant.handleShardCoordinatorMessage(data)
+            await sendShardGroupMessages(sessionStarted: false)
         default:
             try await sendNAK(
                 inReplyTo: type,
@@ -4621,6 +4628,7 @@ actor CoordinatorClient {
             await providerStatus.setState(.unavailable, reason: "operator_paused")
         }
         try await sendStateUpdate(state: nil, reason: operatorPaused ? "operator_paused" : reason)
+        await sendShardGroupMessages(sessionStarted: true)
         if operatorPaused {
             _ = try recordLifecycleTransition(
                 to: .pausedByOperator,
@@ -7417,6 +7425,24 @@ actor CoordinatorClient {
         ]]
     }
 
+    /// SPEC-051-R029: the shard group messages a head or member has to send now
+    /// (registration, group heartbeat, member hello). Best effort: a failed send
+    /// is retried on the next tick, and the session's own keepalive decides its fate.
+    private func sendShardGroupMessages(sessionStarted: Bool) async {
+        guard let participant = modelRuntime as? any ShardGroupCoordinatorParticipant else { return }
+        let snapshot = await providerStatus.snapshot(resetWindow: false)
+        let context = ShardCoordinatorContext(providerID: providerID, wireModelID: coordinatorWireModelID(for: snapshot.modelID))
+        for data in await participant.shardCoordinatorMessages(context: context, sessionStarted: sessionStarted) {
+            guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+            do {
+                try await send(object)
+            } catch {
+                Self.keepaliveDebug("shard_group_send_error error=\(error)")
+                return
+            }
+        }
+    }
+
     private func sendHeartbeat(resetWindow: Bool = true) async throws {
         let snapshot = await providerStatus.snapshot(resetWindow: resetWindow)
         let snapshotWireModelID = coordinatorWireModelID(for: snapshot.modelID)
@@ -7559,6 +7585,7 @@ actor CoordinatorClient {
         }
         try await send(payload)
         try await sendPrivacyKeyRotationRequestIfDue()
+        await sendShardGroupMessages(sessionStarted: false)
     }
 
     /// Test seam: runs inside sendHeartbeat after the payload is built and
@@ -8319,6 +8346,12 @@ actor CoordinatorClient {
         ]
         if await advertisesFleetCacheProtocol() {
             message["fleet_cache_protocol"] = 1
+        }
+        // SPEC-051-R029: a shard group head or member says so in its capabilities.
+        if let participant = modelRuntime as? any ShardGroupCoordinatorParticipant {
+            var capabilities = message["tier2_capabilities"] as? [String: Any] ?? [:]
+            capabilities[participant.shardCapability] = true
+            message["tier2_capabilities"] = capabilities
         }
         let resolvedCatalog: [String]
         do {
