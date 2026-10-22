@@ -1,12 +1,12 @@
 # SPEC-051 - Multi-Mac Shard Groups
 
-**Version:** 0.2.5
+**Version:** 0.2.6
 
 ```json
 {
   "spec_id": "SPEC-051",
   "title": "Multi-Mac Shard Groups",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "path": "specs/SPEC-051-multi-mac-shard-groups.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -27,6 +27,18 @@
   }
 }
 ```
+
+**Change log v0.2.6 (2026-10-22, Related: #2084):** Fake-Pearl VM acceptance
+amendments. Coverage bounds the SPEC-015 v0.4 tuple's
+`usage.observed_output_tokens` and `usage.billable_output_tokens` (a legacy
+tuple's `tokens_out`) by `step_end`, and a tuple that names no output count
+fails coverage (SPEC-051-R018, R019 item 7). The coordinator keeps the accepted
+record's `model.pool_model_id` with the group's availability and routes a head
+only when it equals the grant and the head's binding (SPEC-051-R016). A session
+whose WebSocket closed is no live session, even while the coordinator keeps the
+provider's entry for the disconnect grace period (SPEC-051-R015). A changed
+`shard_groups` section applies on a configuration reload, and every group is
+re-evaluated at once (§4).
 
 **Change log v0.2.5 (2026-10-22, Related: #2084):** Freeze audit round 2.
 Every spare with a live member session passes the same admission, artifact
@@ -269,7 +281,9 @@ Group configuration on the head (owner-local, carried in the group record):
 | `replay_deadline_ms` | int 1000..30000 | `10000` | Time allowed to bring a spare up to the delivered prefix (SPEC-051-R022). |
 
 Values outside these bounds MUST fail configuration load or group
-registration. These values are tuning, not gates: none of them disables or
+registration. The coordinator applies a changed `shard_groups` section on a
+configuration reload (SIGHUP) and re-evaluates every group against it before
+the next reservation; a reload with an out-of-bounds value is refused whole. These values are tuning, not gates: none of them disables or
 withdraws a group on a schedule.
 
 ## 5. Normative requirements
@@ -609,7 +623,11 @@ reservation path, including a reservation from the slot queue, MUST also
 re-check conditions 3 to 5 for every active member against the live session
 the latest evaluation recorded, and conditions 4 and 5 for every spare with a
 live member session, before it reserves the head. A spare without a live
-member session does not affect availability: it only cannot take over.
+member session does not affect availability: it only cannot take over. A
+session whose WebSocket closed is no live session, even while the coordinator
+keeps the provider's entry for its disconnect grace period: a closed active
+member session fails condition 3 (`member_session_missing`), and a closed spare
+session is a spare without a live member session.
 
 The head MUST start fresh network work only while the coordinator's latest
 `available: true` names the epoch the head's chain runs at and that epoch is
@@ -626,7 +644,10 @@ The coordinator MUST reserve and dispatch group requests only to the head
 session, and MUST NOT dispatch any buyer request to a member session, for the
 group's model or any other. A head session is routable only while its group
 is available (SPEC-051-R015), only on a pool route that SPEC-051-R028
-authorizes, and only for the pool model the group record names. It MUST NOT be
+authorizes, and only for the pool model the group record names: the
+coordinator keeps the latest accepted record's `model.pool_model_id` with the
+group's availability, and every path that reserves a head requires it to equal
+the authorizing grant's `pool_model_id` and the head's pool-scoped binding. It MUST NOT be
 selected for global, relay-blind or privacy-class requests, nor dispatched over
 HTTP-direct forwarding. Every path that reserves a provider, the slot queue
 included, MUST apply this gate before it reserves a head. Phase-aware ranking (SPEC-002-R006) MUST use the group's own
@@ -652,8 +673,9 @@ For each served request the group MUST produce exactly one SPEC-015 receipt,
 signed by the head with the group provider identity's receipt key
 (SPEC-015-R003). The receipt tuple, canonical encoding, signature and wire
 form MUST be exactly those of SPEC-015 §3, with `provider_pubkey` the group's
-receipt key, `ttft_ms` measured at the head, and `tokens_out` the tokens the
-head delivered. No member other than the head signs buyer receipts, and no
+receipt key, `ttft_ms` measured at the head, and the tuple's output token
+counts (a v0.4 tuple's `usage.observed_output_tokens` and
+`usage.billable_output_tokens`) the tokens the head delivered. No member other than the head signs buyer receipts, and no
 per-member receipt is sent to the buyer path in its place.
 
 ### SPEC-051-R019 - Group attestation with chained member sub-receipts
@@ -739,11 +761,13 @@ Wire form and verification:
    cancel, neither delivered). Every member processes the whole prompt and one
    decode step per token after the first, so every sub-receipt MUST carry the
    same `prompt_tokens`, at least 1, and `decode_steps` equal to
-   `step_end - 1`, with `step_end >= 1`, and the receipt tuple's `tokens_out`
-   MUST NOT exceed `step_end`. A failure is fault kind `coverage_invalid`
-   against the group provider identity when the head's own sub-receipt,
-   `step_end` or `tokens_out` disagree, otherwise against the first member
-   whose counts differ from the head's.
+   `step_end - 1`, with `step_end >= 1`, and no output count of the receipt
+   tuple (a SPEC-015 v0.4 tuple's `usage.observed_output_tokens` and
+   `usage.billable_output_tokens`; a legacy tuple's `tokens_out`) may exceed
+   `step_end`; a tuple that names no output count fails. A failure is fault
+   kind `coverage_invalid` against the group provider identity when the head's
+   own sub-receipt, `step_end` or the tuple's output counts disagree, otherwise
+   against the first member whose counts differ from the head's.
 
 ### SPEC-051-R020 - Billing and settlement as one provider
 
