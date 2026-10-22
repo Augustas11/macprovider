@@ -426,6 +426,12 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
     /// The standby link to the spare while it has not taken over (SPEC-051-R007).
     private var standby: ShardSpareStandby?
     private var heardBytes: UInt64 = 0
+    /// When the per-request deadlines were last evaluated (SPEC-051-R013).
+    private var lastLivenessCheck: TimeInterval = 0
+    /// SPEC-051-R022: after a takeover, the absolute replay deadline and the
+    /// replayed requests whose next token (the spare's proof of KV catch-up)
+    /// has not arrived yet.
+    private var catchUp: (deadline: TimeInterval, pending: Set<UInt64>)?
     /// A frame read while collecting tokens for a decode batch that was not a
     /// token; the loop handles it next, exactly as if it had just arrived.
     private var heldFrame: ShardStageFrame?
@@ -623,14 +629,17 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
 
     /// Send the one-stage chain down, read the complete chain back on the return link
     /// (echoing each receiving end's probes meanwhile) and check it.
-    private func headHandshake(_ links: ShardBenchLinks, expectedMembers: [ShardGroupExpectedMember]?) throws -> [ShardBenchHello] {
+    private func headHandshake(
+        _ links: ShardBenchLinks, expectedMembers: [ShardGroupExpectedMember]?, timeout: TimeInterval? = nil
+    ) throws -> [ShardBenchHello] {
         let mine = myHello()
+        let wait = timeout ?? options.connectTimeout
         try ShardChainWire.sendHello(links.downstream, [mine], header: header(.hello, destination: 1))
         let acknowledged = try ShardChainWire.awaitHello(
-            links.downstream, timeout: options.connectTimeout, stageIndex: 0, layers: stage.layers)
+            links.downstream, timeout: wait, stageIndex: 0, layers: stage.layers)
         let chain = links.isCollapsed
             ? acknowledged
-            : try ShardChainWire.awaitHello(links.upstream, timeout: options.connectTimeout, stageIndex: 0, layers: stage.layers)
+            : try ShardChainWire.awaitHello(links.upstream, timeout: wait, stageIndex: 0, layers: stage.layers)
         try ShardBenchChain.validateComplete(chain)
         guard chain[0] == mine else { throw ShardBenchError.handshake("the returned chain does not start with this head") }
         if let expected = options.expectedStages, chain.count != expected {
@@ -695,9 +704,12 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
                 }
                 try handle(frame)
                 // SPEC-051-R013: each request's deadline is checked whenever every
-                // answer that already arrived has been handled, so other requests'
-                // traffic never postpones the check of a stalled one.
-                if heldFrame == nil, self.links?.upstream.hasQueuedFrames == false, let fault = livenessFault() {
+                // answer that already arrived has been handled, and at least once
+                // per poll interval while answers keep arriving, so other
+                // requests' traffic never postpones the check of a stalled one
+                // (a return inbox that never drains does not hide it either).
+                let drained = heldFrame == nil && self.links?.upstream.hasQueuedFrames == false
+                if drained || now() - lastLivenessCheck >= Self.pollInterval, let fault = livenessFault() {
                     try replaceLostStage(fault)
                 }
             }
@@ -891,6 +903,9 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
             throw ShardBenchError.protocolViolation("request \(entry.id) token step \(header.tokenStep), expected \(entry.tokens.count)")
         }
         book.recordInput(header, frame.payload)
+        if var pending = catchUp?.pending, pending.remove(header.requestID) != nil {
+            catchUp = pending.isEmpty ? nil : (catchUp!.deadline, pending)
+        }
         let arrived = now()
         entry.outstanding = false
         entry.steps += 1
@@ -1002,7 +1017,15 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
     /// A silent upstream peer (SPEC-051-R014), a failure the watch on the send-only
     /// link recorded, or outstanding work past its budget (SPEC-051-R013).
     private func livenessFault() -> Error? {
+        lastLivenessCheck = now()
         if let failure = watch.failure { return failure }
+        if let catchUp, now() > catchUp.deadline {
+            let live = catchUp.pending.filter { active[$0] != nil }
+            if !live.isEmpty {
+                return ShardGroupEngineError.unavailable("the spare did not catch up \(live.count) replayed request(s) within the replay deadline")
+            }
+            self.catchUp = nil
+        }
         guard let links else { return nil }
         let now = now()
         let bytes = links.upstream.statistics.bytesReceived
@@ -1062,6 +1085,10 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
             throw ShardGroupEngineError.unavailable(options.spare == nil ? "\(cause)" : "\(cause) (the spare was already used)")
         }
         let started = now()
+        // One absolute takeover deadline bounds connecting, authenticating,
+        // the handshake, the replay and the spare's catch-up (SPEC-051-R022).
+        let deadline = started + options.replayDeadline
+        let remaining = { max(0.001, deadline - self.now()) }
         watch.stop()
         watch = ShardBenchLinkWatch()
         links?.close()
@@ -1083,14 +1110,14 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
                 shardGroupLog("taking over on the standby link to \(link.peerAddress) after \(cause)")
             } else {
                 link = try ShardStageLink.connect(
-                    host: spare.host, port: spare.port, timeout: options.replayDeadline, configuration: configuration)
+                    host: spare.host, port: spare.port, timeout: remaining(), configuration: configuration)
                 shardGroupLog("connected to spare \(link.peerAddress) after \(cause)")
-                try link.authenticate(signer: options.signer, role: .initiator, timeout: options.replayDeadline)
+                try link.authenticate(signer: options.signer, role: .initiator, timeout: remaining())
             }
             standby = nil
             let replacement = ShardBenchLinks(upstream: link, downstream: link)
             replacementLinks.append(replacement)
-            let chain = try headHandshake(replacement, expectedMembers: options.spareMember.map { [$0] })
+            let chain = try headHandshake(replacement, expectedMembers: options.spareMember.map { [$0] }, timeout: min(options.connectTimeout, remaining()))
             guard chain.count == 2 else { throw ShardBenchError.handshake("the spare chain has \(chain.count) stages") }
             link.armLiveness()
             chainValue = chain
@@ -1120,8 +1147,10 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
                 replayedBytes: bytes, milliseconds: (elapsed * 1_000_000).rounded() / 1000))
             links = replacement
             let now = now()
-            // The replay re-sent every in-flight request: their clocks restart.
+            // The replay re-sent every in-flight request: their clocks restart,
+            // and each must prove catch-up with its next token by the deadline.
             for id in inFlight { active[id]?.lastSend = now }
+            catchUp = inFlight.isEmpty ? nil : (deadline, Set(inFlight))
             heardAt = now
             heardBytes = link.statistics.bytesReceived
             publish()

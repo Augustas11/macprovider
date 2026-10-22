@@ -144,6 +144,36 @@ final class ShardGroupAuditFixTests: XCTestCase {
         XCTAssertTrue(engine.waitUntilStopped(timeout: 5))
     }
 
+    /// SEC-11 (round 3): several progressing requests keep the head's return
+    /// inbox busy; the stalled request still fails within its deadline budget,
+    /// because deadlines are evaluated at least once per poll interval.
+    func testAStalledRequestFailsWhileManyRequestsKeepTheInboxBusy() throws {
+        let links = try ShardBenchTestRig.ring(stages: 2, collapsed: true)
+        rawTail(links[1].upstream) { frame, link in
+            // Request 4 is never answered; the others always are, at once.
+            guard frame.header.kind == .activation, frame.header.requestID != 4, !frame.header.flags.contains(.fillOnly) else { return }
+            try link.send(Self.token(for: frame))
+        }
+        let stages = ShardBenchTestRig.stages(splits, total: 4)
+        var options = ShardGroupEngineTests.options(maxInFlight: 4)
+        options.decodeHopDeadline = 0.2
+        options.prefillChunkDeadline = 0.5
+        let engine = ShardGroupEngine(stage: stages[0], options: options)
+        try engine.start(links: links[0])
+        let started = Date()
+        let collector = ShardGenerationCollector(count: 4)
+        let ids = try engine.submit([
+            ShardGenerationRequest(promptTokens: [5, 9], maxTokens: 1_000_000),
+            ShardGenerationRequest(promptTokens: [6, 2], maxTokens: 1_000_000),
+            ShardGenerationRequest(promptTokens: [7, 3], maxTokens: 1_000_000),
+            ShardGenerationRequest(promptTokens: [8, 1], maxTokens: 4),
+        ]) { collector.receive($0, $1) }
+        let (_, errors) = collector.wait()
+        XCTAssertNotNil(errors[ids[3]], "the stalled request ends with an error")
+        XCTAssertLessThan(Date().timeIntervalSince(started), 10, "within its deadline, not when the busy requests end")
+        XCTAssertTrue(engine.waitUntilStopped(timeout: 5))
+    }
+
     /// R2-C03: an abort answer whose sub-receipts cannot be read still ends the
     /// finishing request with a terminal event.
     func testUnreadableSubReceiptsStillEndTheRequest() throws {

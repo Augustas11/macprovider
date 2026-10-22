@@ -23,7 +23,8 @@ final class ShardGroupEngineTests: XCTestCase {
         spare: ShardBenchEndpoint? = nil,
         tailOnCall: ((Int, [ShardBenchLinks]) -> Void)? = nil,
         tailSigner: ShardMemberSigner? = nil,
-        tailDelay: TimeInterval = 0
+        tailDelay: TimeInterval = 0,
+        replayDeadline: TimeInterval = 5
     ) throws -> Rig {
         let links = try ShardBenchTestRig.ring(stages: 2, collapsed: true)
         let stages = ShardBenchTestRig.stages(splits, total: 4)
@@ -38,7 +39,9 @@ final class ShardGroupEngineTests: XCTestCase {
             box.set(0, Result { try session.run(links: links[1]) })
             done.signal()
         }.start()
-        let engine = ShardGroupEngine(stage: stages[0], options: Self.options(maxInFlight: maxInFlight, spare: spare))
+        var engineOptions = Self.options(maxInFlight: maxInFlight, spare: spare)
+        engineOptions.replayDeadline = replayDeadline
+        let engine = ShardGroupEngine(stage: stages[0], options: engineOptions)
         try engine.start(links: links[0])
         return Rig(engine: engine, tail: stages[1], links: links, tailResult: {
             _ = done.wait(timeout: .now() + 20)
@@ -250,6 +253,39 @@ final class ShardGroupEngineTests: XCTestCase {
         guard case ShardGroupEngineError.failedBeforeFirstToken? = errors[ids[0]] else {
             return XCTFail("expected failedBeforeFirstToken, got \(String(describing: errors[ids[0]]))")
         }
+    }
+
+    /// R3-C02: the replay deadline covers the spare's KV catch-up, not only
+    /// sending the replay. A spare that accepts the replay at once but rebuilds
+    /// its KV slower than replay_deadline_ms ends the streams with an error
+    /// instead of resuming late.
+    func testSpareCatchUpBeyondTheReplayDeadlineTerminatesTheStream() async throws {
+        let spareListener = try ShardStageListener(host: "127.0.0.1", port: 0)
+        let spareEpoch = ShardBenchTestRig.epoch + 1
+        let spareStage = FakeShardStage(layers: 2..<4, totalLayers: 4)
+        spareStage.computeDelay = 0.5
+        Thread {
+            _ = Result<ShardBenchSessionReport, Error> {
+                let link = try spareListener.accept(timeout: 10, configuration: ShardBenchTestRig.configuration(epoch: spareEpoch))
+                return try ShardBenchSession(
+                    options: ShardBenchTestRig.options(role: .tail, prompts: [], tokens: 1, epoch: spareEpoch), stage: spareStage)
+                    .run(links: ShardBenchLinks(upstream: link, downstream: link))
+            }
+        }.start()
+        let rig = try rig(
+            spare: ShardBenchEndpoint(host: "127.0.0.1", port: spareListener.port),
+            tailOnCall: { call, links in if call == 6 { links[1].upstream.close() } },
+            replayDeadline: 1.0)
+        let standbyDeadline = Date().addingTimeInterval(5)
+        while Date() < standbyDeadline, rig.engine.status.spare?.alive != true {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        let first = try rig.engine.stream(ShardGenerationRequest(promptTokens: [5, 9, 2, 33, 71], maxTokens: 8))
+        let second = try rig.engine.stream(ShardGenerationRequest(promptTokens: [8, 1, 64], maxTokens: 8))
+        let (_, result0) = await collect(first.events)
+        let (_, result1) = await collect(second.events)
+        XCTAssertThrowsError(try result0.get(), "catch-up past the replay deadline ends the stream")
+        XCTAssertThrowsError(try result1.get())
     }
 
     func testLostTailIsReplacedBySpareWithoutReEmittingTokens() async throws {
