@@ -1,12 +1,12 @@
 # SPEC-051 - Multi-Mac Shard Groups
 
-**Version:** 0.2.4
+**Version:** 0.2.5
 
 ```json
 {
   "spec_id": "SPEC-051",
   "title": "Multi-Mac Shard Groups",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "path": "specs/SPEC-051-multi-mac-shard-groups.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -27,6 +27,23 @@
   }
 }
 ```
+
+**Change log v0.2.5 (2026-10-22, Related: #2084):** Freeze audit round 2.
+Every spare with a live member session passes the same admission, artifact
+and minimum-label checks as an active member, at evaluation and at
+reservation; a spare without one only cannot take over (SPEC-051-R015). The
+slot queue applies the shard group route gate at admission and again before
+it reserves a queued head (SPEC-051-R016). Each member's chain hello carries
+the sequences it serves and the context its stage fit was proved for, and the
+head refuses a chain that cannot carry the group's concurrency or serving
+context (SPEC-051-R006). The head checks every outstanding request's deadline
+whenever it has handled every answer that arrived, and a member derives its
+open-request wait from the group's decode and prefill deadlines
+(SPEC-051-R013). A head or member that joins the network does not start
+without its members' or neighbours' keys (SPEC-051-R011). The head admits
+fresh network work only while the coordinator's availability is for the epoch
+its chain runs at (SPEC-051-R015). Rollout is coordinator first
+(SPEC-051-R027).
 
 **Change log v0.2.4 (2026-10-22, Related: #2084):** Freeze audit round 1.
 Stage peers are bound to configured member keys (SPEC-051-R011): the head's
@@ -371,7 +388,13 @@ one stage; and each spare names an existing stage. Layer counts MAY be uneven.
 Each member MUST report, before registration, that its stage's weights, its
 KV budget for the group's advertised concurrency, and its runtime reserve fit
 within its memory under SPEC-023 model-fit policy applied to that stage; a
-member that cannot fit its stage MUST NOT register.
+member that cannot fit its stage MUST NOT register. Each member and spare
+proves its fit for the sequences it serves and the context per sequence it is
+configured for, and carries both in its chain hello; the head proves its own
+stage for the group's concurrency and serving context and MUST refuse a chain
+(and so never register it) in which any member or spare serves fewer
+sequences than the group's concurrency or proved its fit for less than the
+serving context.
 
 ### SPEC-051-R007 - Interconnect admissibility
 
@@ -473,6 +496,9 @@ anything. On a `crc32c` link, which has no authenticated peer, the announced
 keys are checked against the configured ones. A head whose configuration
 lacks a member's key MUST NOT register the group, and a member whose
 configuration lacks its neighbours' keys MUST NOT send `shard_member_hello`.
+A head or member that joins the network MUST refuse to start without these
+keys; only an explicit lab run that never joins the network may serve a chain
+without them.
 
 ### SPEC-051-R012 - Sequencing and no silent retransmit
 
@@ -495,9 +521,15 @@ that one stage's compute for one chunk stays below the prefill chunk deadline
 and well below the operating system's GPU command-buffer watchdog. The head
 MUST time each outstanding request from its own last frame sent (its last
 activation, or the abort that collects its sub-receipts), so other requests'
-progress and heartbeats never extend a stalled request's deadline. A member
-with any request open MUST bound its wait for the next upstream frame by its
-receive deadline; only an idle member waits on heartbeats alone.
+progress and heartbeats never extend a stalled request's deadline; it MUST
+check those deadlines whenever it has handled every answer that already
+arrived, not only when its link falls silent. A member with any request open
+MUST bound its wait for the next upstream frame by `(8 + max_sequences)` times
+`decode_hop_deadline_ms`, plus the same multiple of
+`prefill_chunk_deadline_ms` while any open request is still prefilling (one
+pass of the longest chain and one step of every request it holds, each within
+its deadline); only an idle member waits on heartbeats alone. Per-request
+enforcement is the head's, which schedules every request.
 
 ### SPEC-051-R014 - Heartbeats and peer death
 
@@ -546,8 +578,10 @@ names the first failing condition as its reason code:
    exclusion, no pending catalog re-check, handshake or receipt-key
    publication, a published receipt key, and state `ready` or `busy`, and
    every active member session reports the record's model pair
-   (`member_not_admissible`);
-5. for SPEC-051-R004, no active member holds a lower provider tier,
+   (`member_not_admissible`); every spare with a live member session meets
+   the same conditions;
+5. for SPEC-051-R004, no active member and no spare with a live member
+   session holds a lower provider tier,
    attestation tier, encrypted-leg capability or attestation status than the
    head; the group then holds exactly the head's labels, which are the
    minimum (`trust_label_above_member`);
@@ -571,9 +605,17 @@ names the first failing condition as its reason code:
    count.
 
 Because a member's admission can change between evaluations, the
-reservation path MUST also re-check conditions 3 to 5 for every active member
-against the live session the latest evaluation recorded before it reserves
-the head.
+reservation path, including a reservation from the slot queue, MUST also
+re-check conditions 3 to 5 for every active member against the live session
+the latest evaluation recorded, and conditions 4 and 5 for every spare with a
+live member session, before it reserves the head. A spare without a live
+member session does not affect availability: it only cannot take over.
+
+The head MUST start fresh network work only while the coordinator's latest
+`available: true` names the epoch the head's chain runs at and that epoch is
+its latest accepted one; after a takeover or rebuild it waits for the new
+epoch's availability, while requests already in flight continue
+(SPEC-051-R022). A status for an epoch the chain does not run at is ignored.
 
 The coordinator MUST send `shard_group_status` (SPEC-051-R029) to the head on
 every change of availability or reason.
@@ -586,7 +628,8 @@ group's model or any other. A head session is routable only while its group
 is available (SPEC-051-R015), only on a pool route that SPEC-051-R028
 authorizes, and only for the pool model the group record names. It MUST NOT be
 selected for global, relay-blind or privacy-class requests, nor dispatched over
-HTTP-direct forwarding. Phase-aware ranking (SPEC-002-R006) MUST use the group's own
+HTTP-direct forwarding. Every path that reserves a provider, the slot queue
+included, MUST apply this gate before it reserves a head. Phase-aware ranking (SPEC-002-R006) MUST use the group's own
 measured performance (SPEC-002-R005), not any member's. Buyer ownership
 exclusion (SPEC-002-R008) applies to the group's owner.
 
@@ -844,6 +887,14 @@ registration is not acknowledged; its members' single-Mac sessions are then
 unaffected. A member whose transport version differs from the group record's
 MUST refuse to join that epoch.
 
+Rollout is coordinator first. A coordinator from before SPEC-051 does not
+know `shard_group_head_v1` or `shard_member_v1`, so it neither excludes member
+sessions nor gates heads: a shard-role provider connected to it can be
+selected as an ordinary provider and only fails those buyer attempts (a member
+refuses buyer work, a head waits for a registration that never comes). Older
+providers on a SPEC-051 coordinator are unaffected. Shard-role providers MUST
+therefore connect only to a coordinator that implements SPEC-051.
+
 ### SPEC-051-R028 - Trusted Pool authorization (`pool_shard_groups/v1`)
 
 A shard group MUST serve a pool's traffic only while that pool's active
@@ -1052,6 +1103,12 @@ in `CONFORMANCE.json`.
 
 ## 10. Changelog and history
 
+- v0.2.5 (2026-10-22, Related: #2084): freeze audit round 2: spare admission
+  and minimum labels (R015); slot queue route gate (R016); member capacity
+  and context in the chain hello (R006); continuous deadline checks and
+  supervision-derived member waits (R013); keys required to start (R011);
+  epoch-bound availability at the head (R015); coordinator-first rollout
+  (R027).
 - v0.2.4 (2026-10-22, Related: #2084): freeze audit round 1: configured
   member keys bind stage peers (R011); one TCP connection per link, no
   per-frame deadline field (R010, R014); per-request deadlines (R013); a
