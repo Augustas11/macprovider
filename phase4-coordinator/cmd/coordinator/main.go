@@ -5013,6 +5013,15 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 		Int("trusted_pools_provider_owner_account_ids_providers", owners.Providers).
 		Str("trusted_pools_provider_owner_account_ids_sha256", owners.Digest).
 		Msg("trusted pools pool-model bounds and owner authority reloaded")
+	// SPEC-051 §4 (#2084 VM acceptance F10): shard_groups values apply on
+	// reload and every group is re-evaluated against them at once.
+	if wsServer.ApplyShardGroupsConfig(cfg.ShardGroups) {
+		logger.Info().
+			Int("shard_groups_max_members", cfg.ShardGroups.MaxMembers).
+			Int("shard_groups_max_link_rtt_p99_us", cfg.ShardGroups.MaxLinkRTTP99US).
+			Int("shard_groups_group_heartbeat_stale_multiple", cfg.ShardGroups.GroupHeartbeatStaleMultiple).
+			Msg("shard_groups config reloaded")
+	}
 	// Every fallible step above returned early on rejection, so reaching here
 	// means this reload's config is the applied one.
 	recordAppliedConfig(logger, "sighup", configPath, configOverlay, configDigests, configLoadedAt, buyerServer.AppliedEconomics())
