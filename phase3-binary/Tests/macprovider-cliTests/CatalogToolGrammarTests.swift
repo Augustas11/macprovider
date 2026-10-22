@@ -11,7 +11,7 @@ import XCTest
 final class CatalogToolGrammarTests: XCTestCase {
     private static let fixtures = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        .appendingPathComponent("scripts/tests/fixtures")
+        .appendingPathComponent("scripts/tests/fixtures/")
 
     private struct Family {
         let name: String
