@@ -612,6 +612,7 @@ func (r *Registry) evaluateLocked(groupID string, g *groupState, providers func(
 	}
 	rec := ep.record
 	head, ok := providers(groupID)
+	head = poolScopedSession(head, rec.Model.PoolModelID)
 	if !ok || head.AssignedID != g.headAssignedID || !head.ShardGroupHeadV1 || head.ShardMemberV1 || !head.IsWSTunneled() ||
 		head.ModelHashAlgorithm != rec.Model.ArtifactHashAlgorithm || head.ModelHash != rec.Model.ArtifactHash ||
 		base64.StdEncoding.EncodeToString(head.ReceiptPubkey) != ep.stageKeys[0] {
@@ -627,7 +628,7 @@ func (r *Registry) evaluateLocked(groupID string, g *groupState, providers func(
 		if !ok || p.AssignedID != joined.assignedID || !p.ShardMemberV1 || base64.StdEncoding.EncodeToString(p.ReceiptPubkey) != joined.key {
 			return ReasonMemberSessionMissing, nil
 		}
-		active = append(active, p)
+		active = append(active, poolScopedSession(p, rec.Model.PoolModelID))
 	}
 	if !head.ShardMemberAdmissible() || len(head.ReceiptPubkey) == 0 {
 		return ReasonMemberNotAdmissible, nil
@@ -638,7 +639,7 @@ func (r *Registry) evaluateLocked(groupID string, g *groupState, providers func(
 	checked := append([]pool.Provider(nil), active...)
 	for _, sp := range rec.Spares {
 		if p, ok := providers(sp.MemberDeviceID); ok && p.ShardMemberV1 {
-			checked = append(checked, p)
+			checked = append(checked, poolScopedSession(p, rec.Model.PoolModelID))
 		}
 	}
 	// R015 names the first failing numbered condition: condition 4
@@ -776,6 +777,7 @@ func memberAdmissible(head, member pool.Provider) bool {
 // memberReservable against the head.
 func MemberReservable(head pool.Provider, view pool.ShardGroupMemberView, resolve func(id string) (pool.Provider, bool)) bool {
 	member, ok := resolve(view.ProviderID)
+	member = poolScopedSession(member, head.ShardGroupPoolModelID)
 	if view.Spare {
 		// A spare without a live member session only cannot take over; one
 		// with a session must still pass admission and minimum labels. A
@@ -784,6 +786,19 @@ func MemberReservable(head pool.Provider, view pool.ShardGroupMemberView, resolv
 		return !ok || !member.ShardMemberV1 || member.State == pool.StateUnavailable || memberReservable(head, member) == ""
 	}
 	return ok && member.AssignedID == view.AssignedID && member.ShardMemberV1 && memberReservable(head, member) == ""
+}
+
+// poolScopedSession is a head or member session as a pool route for the
+// group's pool model sees it (SPEC-051-R003: the bar a single provider must
+// pass for that route). A pool route selects a session whose pool-scoped
+// binding (SPEC-047-R011) names that pool model without its hello admission
+// sandbox term, which a pool-entry identity carries because its artifact is not
+// the catalog's (#2084 VM acceptance R); every other gate still applies.
+func poolScopedSession(p pool.Provider, poolModelID string) pool.Provider {
+	if poolModelID != "" && p.ModelAdmissionPoolID != "" && p.ModelAdmissionPoolModelID == poolModelID {
+		p.AdmissionSandboxed = false
+	}
+	return p
 }
 
 var tierRank = map[pool.Tier]int{pool.TierRejected: 0, pool.TierProvisional: 1, pool.TierTrusted: 2, pool.TierPinned: 3}

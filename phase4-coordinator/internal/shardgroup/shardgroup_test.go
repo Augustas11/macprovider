@@ -381,6 +381,52 @@ func TestEvaluateAvailabilityReasonPrecedenceAcrossMembers(t *testing.T) {
 	}
 }
 
+// #2084 VM acceptance R: a real head and member serving a pool entry whose
+// artifact is not the catalog's carry the hello admission sandbox, which a pool
+// route ignores for a session bound to that pool model (SPEC-047-R011). The
+// group evaluation applies the same rule: bound to the record's pool model,
+// the sandboxed sessions are admissible; bound elsewhere or unbound, not.
+func TestEvaluateAvailabilityPoolBoundSandboxedSessions(t *testing.T) {
+	f := newFixture(t)
+	rec := twoStageRecord(1)
+	if res, _ := f.register(rec); !res.Accepted {
+		t.Fatal(res.Reason)
+	}
+	if res := f.hello("tail", helloPayload("tail", 1, 1, 18, 32, "thunderbolt", "head")); !res.Accepted {
+		t.Fatal(res.Reason)
+	}
+	f.reg.Heartbeat("head", "s-head", heartbeatPayload(1, true, 400, "thunderbolt"))
+	f.memberHealth("tail", memberHealthPayload("tail", 1, true, "thunderbolt", 300, "head"))
+	set := func(id, poolModel string) {
+		p := f.sessions[id]
+		p.AdmissionSandboxed = true
+		p.ModelAdmissionPoolID, p.ModelAdmissionPoolModelID = "", ""
+		if poolModel != "" {
+			p.ModelAdmissionPoolID, p.ModelAdmissionPoolModelID = "pool-a", poolModel
+		}
+		f.sessions[id] = p
+	}
+	set("head", rec.Model.PoolModelID)
+	set("tail", "")
+	if ev := f.evaluate(); ev.Reason != ReasonMemberNotAdmissible {
+		t.Fatalf("unbound sandboxed member: %+v", ev)
+	}
+	set("tail", rec.Model.PoolModelID+"-other")
+	if ev := f.evaluate(); ev.Reason != ReasonMemberNotAdmissible {
+		t.Fatalf("member bound to another pool model: %+v", ev)
+	}
+	set("tail", rec.Model.PoolModelID)
+	if ev := f.evaluate(); !ev.Available {
+		t.Fatalf("head and member bound to the record's pool model: %+v", ev)
+	}
+	head := f.sessions["head"]
+	head.ShardGroupPoolModelID = rec.Model.PoolModelID
+	resolve := func(id string) (pool.Provider, bool) { p, ok := f.sessions[id]; return p, ok }
+	if !MemberReservable(head, pool.ShardGroupMemberView{ProviderID: "tail", AssignedID: "s-tail"}, resolve) {
+		t.Fatal("reservation re-check refused the pool-bound sandboxed member")
+	}
+}
+
 func TestEvaluateAvailability(t *testing.T) {
 	f := newFixture(t)
 	if res, _ := f.register(twoStageRecord(1)); !res.Accepted {
