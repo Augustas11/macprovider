@@ -5,37 +5,48 @@ import MLXLLM
 import MLXLMCommon
 import MacProviderCore
 
-/// `shard-bench` — issue #2084 go/no-go harness for two-stage pipeline decode over a
-/// LAN link. Lab only: no coordinator, no buyer path, hidden from help.
+/// `shard-bench` — issue #2084 go/no-go harness for pipeline-parallel decode over
+/// LAN links. Lab only: no coordinator, no buyer path, hidden from help.
 ///
 /// Roles:
-///   * `--role tail --listen host:port --layers a:N` owns the last layers, the final
-///     norm, the LM head and sampling; it answers activations with tokens.
-///   * `--role head --connect host:port --layers 0:a` owns the embedding and first
-///     layers, drives `--concurrency K` independent sequences through the pipeline,
-///     and prints the report.
+///   * `--role head --layers 0:a` owns the embedding and first layers, drives
+///     `--concurrency K` independent sequences through the chain, and prints the
+///     report.
+///   * `--role middle --layers a:b` receives activations from upstream, runs its
+///     layers and forwards downstream.
+///   * `--role tail --layers b:N` owns the last layers, the final norm, the LM head
+///     and sampling; it returns token ids to the head.
 ///   * `--local-reference` decodes the same prompts with the stock single-process
 ///     model; the head compares its tokens against this (in process, or from
 ///     `--reference <json>`).
 ///
-/// Either role may listen or connect. Decode is fixed-length (`--tokens`, EOS
-/// ignored) so the sharded and reference runs are compared over the same steps.
-/// Request id 0 is reserved for link probes: the tail echoes such activations.
+/// Wiring: `--listen` accepts the upstream stage and `--connect` dials the
+/// downstream stage. The chain is a ring: the head dials stage 1, each stage dials
+/// the next, and the tail dials the head's `--listen` for the token return link. A
+/// two-stage run may pass only one endpoint per side; that single link then carries
+/// activations out and tokens back (either side may listen).
+///
+/// Decode is fixed-length (`--tokens`, EOS ignored) so the sharded and reference
+/// runs are compared over the same steps. Request id 0 is reserved: link probes
+/// during the handshake, and the session-end abort.
 struct ShardBenchCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "shard-bench",
-        abstract: "Lab: two-stage pipeline-parallel decode over TCP with parity and per-hop timing (issue #2084).",
+        abstract: "Lab: pipeline-parallel decode over TCP with parity and per-hop timing (issue #2084).",
         shouldDisplay: false
     )
 
-    @Option(help: "Stage role: head or tail. Omit with --local-reference.")
+    @Option(help: "Stage role: head, middle or tail. Omit with --local-reference.")
     var role: String?
 
-    @Option(help: "Listen on host:port for the peer stage.")
+    @Option(help: "Listen on host:port for the upstream stage (head: for the tail's token return link).")
     var listen: String?
 
-    @Option(help: "Connect to the peer stage at host:port.")
+    @Option(help: "Connect to the downstream stage at host:port (tail: to the head's return listener).")
     var connect: String?
+
+    @Option(help: "Head: refuse a chain that does not have exactly this many stages.")
+    var stages: Int?
 
     @Option(help: "HuggingFace model ID (local HF cache) or local model directory.")
     var model: String
@@ -61,7 +72,7 @@ struct ShardBenchCommand: AsyncParsableCommand {
     @Option(help: "MLX random seed for temperature sampling.")
     var seed: UInt64 = 0
 
-    @Option(name: .customLong("group-epoch"), help: "Group epoch both stages must agree on.")
+    @Option(name: .customLong("group-epoch"), help: "Group epoch every stage must agree on.")
     var groupEpoch: UInt64 = 1
 
     @Option(name: .customLong("heartbeat-ms"), help: "Heartbeat interval in milliseconds.")
@@ -70,16 +81,16 @@ struct ShardBenchCommand: AsyncParsableCommand {
     @Option(name: .customLong("missed-heartbeats"), help: "Peer is dead after this many silent heartbeat intervals.")
     var missedHeartbeats: Int = 3
 
-    @Option(name: .customLong("receive-timeout"), help: "Per-receive deadline in seconds (covers the peer's compute for one step).")
+    @Option(name: .customLong("receive-timeout"), help: "Per-receive deadline in seconds (covers the peers' compute for one step).")
     var receiveTimeout: Double = 60
 
-    @Option(name: .customLong("connect-timeout"), help: "Seconds to wait for the peer to connect or accept.")
+    @Option(name: .customLong("connect-timeout"), help: "Seconds to wait for peers to connect, accept and finish the handshake.")
     var connectTimeout: Double = 120
 
-    @Option(name: .customLong("probe-count"), help: "Echo probes (decode-activation sized) measured before decoding.")
+    @Option(name: .customLong("probe-count"), help: "Echo probes (decode-activation sized) this stage measures on its upstream link.")
     var probeCount: Int = 200
 
-    @Option(name: .customLong("max-sequences"), help: "Tail: most sequences it holds KV caches for at once.")
+    @Option(name: .customLong("max-sequences"), help: "Middle/tail: most sequences it holds KV caches for at once.")
     var maxSequences: Int = 64
 
     @Option(help: "Head: reference JSON from a --local-reference run instead of an in-process reference decode.")
@@ -105,14 +116,20 @@ struct ShardBenchCommand: AsyncParsableCommand {
             throw ValidationError("heartbeat and timeout options must be > 0")
         }
         if localReference { return }
-        guard let role, ["head", "tail"].contains(role) else {
-            throw ValidationError("--role head|tail is required unless --local-reference")
+        guard let role, let parsed = ShardBenchRole(rawValue: role) else {
+            throw ValidationError("--role head|middle|tail is required unless --local-reference")
         }
-        guard (listen == nil) != (connect == nil) else {
-            throw ValidationError("pass exactly one of --listen or --connect")
+        guard listen != nil || connect != nil else {
+            throw ValidationError("pass --listen and/or --connect")
+        }
+        if parsed == .middle, listen == nil || connect == nil {
+            throw ValidationError("a middle stage needs --listen (upstream) and --connect (downstream)")
+        }
+        if let stages {
+            guard parsed == .head, stages >= 2 else { throw ValidationError("--stages is a head option and must be >= 2") }
         }
         guard layers != nil else { throw ValidationError("--layers a:b is required for a stage") }
-        if concurrency > maxSequences, role == "tail" {
+        if concurrency > maxSequences, parsed != .head {
             throw ValidationError("--concurrency exceeds --max-sequences")
         }
     }
@@ -130,10 +147,10 @@ struct ShardBenchCommand: AsyncParsableCommand {
             return
         }
 
-        let options = try sessionOptions(directory: directory, prompts: prompts)
+        let (options, layerRange) = try sessionOptions(prompts: prompts)
         // Read a reference file before the run so a bad path fails before any decoding.
         var referenceReport: ShardBenchReferenceReport?
-        if let reference, role == "head" {
+        if let reference, options.role == .head {
             let decoder = JSONDecoder()
             decoder.keyDecodingStrategy = .convertFromSnakeCase
             let data = try Data(contentsOf: URL(fileURLWithPath: (reference as NSString).expandingTildeInPath))
@@ -141,7 +158,7 @@ struct ShardBenchCommand: AsyncParsableCommand {
         }
         let session: ShardBenchSessionReport
         do {
-            let stage = ShardBenchStageBox(try await PipelineStageModel.load(directory: directory, layers: options.layers))
+            let stage = ShardBenchStageBox(try await PipelineStageModel.load(directory: directory, layers: layerRange))
             session = try await ShardBenchThread.run { try ShardBenchSession(options: options, stage: stage.stage).run() }
         } catch {
             FileHandle.standardError.write(Data("shard-bench: \(error)\n".utf8))
@@ -149,7 +166,7 @@ struct ShardBenchCommand: AsyncParsableCommand {
         }
 
         guard var head = session.head else {
-            try emit(session.tail)
+            if let stage = session.stage { try emit(stage) }
             return
         }
         if temperature > 0 {
@@ -169,19 +186,20 @@ struct ShardBenchCommand: AsyncParsableCommand {
         if head.parity?.verdict == "mismatch" { throw ExitCode(3) }
     }
 
-    private func sessionOptions(directory: URL, prompts: [[Int]]) throws -> ShardBenchSessionOptions {
-        guard let layers else { throw ValidationError("--layers a:b is required") }
+    private func sessionOptions(prompts: [[Int]]) throws -> (ShardBenchSessionOptions, Range<Int>) {
+        guard let layers, let role, let parsedRole = ShardBenchRole(rawValue: role) else {
+            throw ValidationError("--role and --layers a:b are required")
+        }
         let parts = layers.split(separator: ":", omittingEmptySubsequences: false)
         guard parts.count == 2, let lower = Int(parts[0]), let upper = Int(parts[1]), lower < upper else {
             throw ValidationError("--layers must be a:b with a < b")
         }
-        let endpoint = try ShardBenchEndpoint.parse(listen ?? connect ?? "", listens: listen != nil)
-        return ShardBenchSessionOptions(
-            isHead: role == "head",
-            endpoint: endpoint,
-            directory: directory,
+        let options = ShardBenchSessionOptions(
+            role: parsedRole,
+            listen: try listen.map { try ShardBenchEndpoint.parse($0) },
+            connect: try connect.map { try ShardBenchEndpoint.parse($0) },
+            expectedStages: stages,
             modelLabel: model,
-            layers: lower..<upper,
             prompts: prompts,
             tokens: tokens,
             temperature: temperature,
@@ -197,6 +215,7 @@ struct ShardBenchCommand: AsyncParsableCommand {
             maxSequences: maxSequences,
             warmup: !noWarmup
         )
+        return (options, lower..<upper)
     }
 
     private func emit<T: Encodable>(_ report: T) throws {
@@ -212,29 +231,87 @@ struct ShardBenchCommand: AsyncParsableCommand {
     }
 }
 
+// MARK: - Stage seam
+
+/// One boundary tensor as it travels in a frame.
+struct ShardBenchActivation: Equatable, Sendable {
+    let dtype: ShardTensorDType
+    let shape: [UInt32]
+    let payload: Data
+}
+
+/// What a session needs from its stage: the MLX `PipelineStageModel` in the harness,
+/// a deterministic stand-in in unit tests of the chain wiring.
+protocol ShardBenchStage: AnyObject {
+    associatedtype Cache
+
+    var modelType: String { get }
+    var hiddenSize: Int { get }
+    var layers: Range<Int> { get }
+    var totalLayers: Int { get }
+    var weightBytes: Int { get }
+
+    func newCache() throws -> Cache
+    /// First stage: token ids in, boundary activation out.
+    func forward(tokens: [Int], cache: Cache) throws -> ShardBenchActivation
+    /// Middle stage: boundary activation in and out.
+    func forward(activation: ShardBenchActivation, cache: Cache) throws -> ShardBenchActivation
+    /// Last stage: boundary activation in, next token out.
+    func sample(activation: ShardBenchActivation, cache: Cache, temperature: Float) throws -> Int
+}
+
+extension PipelineStageModel: ShardBenchStage {
+    var layers: Range<Int> { plan.layers }
+    var totalLayers: Int { plan.totalLayers }
+
+    func forward(tokens: [Int], cache: [KVCache]) throws -> ShardBenchActivation {
+        let hidden = try forward(MLXArray(tokens.map(Int32.init)).reshaped(1, tokens.count), cache: cache)
+        let encoded = try PipelineActivationCodec.encode(hidden)
+        return ShardBenchActivation(dtype: encoded.dtype, shape: encoded.shape, payload: encoded.payload)
+    }
+
+    func forward(activation: ShardBenchActivation, cache: [KVCache]) throws -> ShardBenchActivation {
+        let input = try PipelineActivationCodec.decode(dtype: activation.dtype, shape: activation.shape, payload: activation.payload)
+        let encoded = try PipelineActivationCodec.encode(try forward(input, cache: cache))
+        return ShardBenchActivation(dtype: encoded.dtype, shape: encoded.shape, payload: encoded.payload)
+    }
+
+    func sample(activation: ShardBenchActivation, cache: [KVCache], temperature: Float) throws -> Int {
+        let input = try PipelineActivationCodec.decode(dtype: activation.dtype, shape: activation.shape, payload: activation.payload)
+        return PipelineStageSampler.sample(logits: try forward(input, cache: cache), temperature: temperature)
+    }
+}
+
 // MARK: - Options and reports
 
-struct ShardBenchEndpoint: Sendable {
+enum ShardBenchRole: String, Codable, Sendable {
+    case head
+    case middle
+    case tail
+}
+
+struct ShardBenchEndpoint: Equatable, Sendable {
     let host: String
     let port: UInt16
-    let listens: Bool
 
-    static func parse(_ text: String, listens: Bool) throws -> ShardBenchEndpoint {
+    static func parse(_ text: String) throws -> ShardBenchEndpoint {
         guard let colon = text.lastIndex(of: ":"), let port = UInt16(text[text.index(after: colon)...]) else {
             throw ValidationError("endpoint must be host:port, got '\(text)'")
         }
         var host = String(text[..<colon])
         if host.hasPrefix("["), host.hasSuffix("]") { host = String(host.dropFirst().dropLast()) }
-        return ShardBenchEndpoint(host: host.isEmpty ? "0.0.0.0" : host, port: port, listens: listens)
+        return ShardBenchEndpoint(host: host.isEmpty ? "0.0.0.0" : host, port: port)
     }
 }
 
 struct ShardBenchSessionOptions: Sendable {
-    let isHead: Bool
-    let endpoint: ShardBenchEndpoint
-    let directory: URL
+    let role: ShardBenchRole
+    /// Accepts the upstream stage (head: the tail's return link).
+    let listen: ShardBenchEndpoint?
+    /// Dials the downstream stage (tail: the head's return listener).
+    let connect: ShardBenchEndpoint?
+    let expectedStages: Int?
     let modelLabel: String
-    let layers: Range<Int>
     let prompts: [[Int]]
     let tokens: Int
     let temperature: Float
@@ -298,12 +375,49 @@ struct ShardBenchParity: Codable, Equatable {
     }
 }
 
+/// One link as seen from this stage: counters plus, on the link this stage
+/// received its upstream hello on, the echo-probe round trip it measured.
+struct ShardBenchLinkReport: Encodable, Equatable {
+    let name: String
+    let peerStage: Int
+    let framesSent: UInt64
+    let framesReceived: UInt64
+    let bytesSent: UInt64
+    let bytesReceived: UInt64
+    let heartbeatsSent: UInt64
+    let heartbeatsReceived: UInt64
+    let probeRoundTrip: ShardBenchLatency?
+
+    init(name: String, peerStage: Int, statistics: ShardLinkStatistics, probe: ShardBenchLatency?) {
+        self.name = name
+        self.peerStage = peerStage
+        framesSent = statistics.framesSent
+        framesReceived = statistics.framesReceived
+        bytesSent = statistics.bytesSent
+        bytesReceived = statistics.bytesReceived
+        heartbeatsSent = statistics.heartbeatsSent
+        heartbeatsReceived = statistics.heartbeatsReceived
+        probeRoundTrip = probe
+    }
+}
+
+/// One hop of the ring, `from` -> `to`, with the echo-probe round trip the receiving
+/// end measured during the handshake. `carriesReturn` marks a two-stage link that
+/// also carries the tokens back.
+struct ShardBenchHopReport: Encodable, Equatable {
+    let from: Int
+    let to: Int
+    let carriesReturn: Bool
+    let probeRoundTrip: ShardBenchLatency?
+}
+
 struct ShardBenchHeadReport: Encodable {
-    let schema = "macprovider.shard-bench.head.v1"
+    let schema = "macprovider.shard-bench.head.v2"
     let model: String
     let modelType: String
     let layers: String
-    let peerLayers: String
+    let stageCount: Int
+    let stageLayers: [String]
     let totalLayers: Int
     let hiddenSize: Int
     let activationDtype: String
@@ -318,42 +432,42 @@ struct ShardBenchHeadReport: Encodable {
     /// Every generated token over the wall time from the first prefill to the last token.
     let aggregateTokensPerSecond: Double
     let ttft: ShardBenchLatency
-    /// Echo of one decode-sized activation frame: the transport + codec cost of one hop
-    /// out and back, with no model compute.
-    let probeRoundTrip: ShardBenchLatency
-    /// Head send of a decode activation to the tail's token arriving back: includes the
-    /// tail's compute (see the tail report) and, with concurrency > 1, queueing.
+    /// Echo round trip of one decode-sized activation frame on the head's first link:
+    /// the transport + codec cost of one hop out and back, with no model compute.
+    let probeRoundTrip: ShardBenchLatency?
+    /// Every hop of the ring with its own probe round trip.
+    let hops: [ShardBenchHopReport]
+    /// Head send of a decode activation to the token arriving back: includes every
+    /// downstream stage's compute (see their reports) and, with concurrency > 1, queueing.
     let decodeStepRoundTrip: ShardBenchLatency
     let headDecodeCompute: ShardBenchLatency
     let decodeHopPayloadBytes: Int
     let decodeHopFrameBytes: Int
     let prefillHopPayloadBytes: [Int]
-    let linkBytesSent: UInt64
-    let linkBytesReceived: UInt64
-    let heartbeatsSent: UInt64
-    let heartbeatsReceived: UInt64
+    let links: [ShardBenchLinkReport]
     var parity: ShardBenchParity?
     var referenceSingleStreamTokensPerSecond: Double?
 }
 
-struct ShardBenchTailReport: Encodable {
-    let schema = "macprovider.shard-bench.tail.v1"
+/// Report of a middle or tail stage.
+struct ShardBenchStageReport: Encodable {
+    let schema = "macprovider.shard-bench.stage.v1"
+    let role: ShardBenchRole
+    let stageIndex: Int
     let model: String
     let modelType: String
     let layers: String
     let totalLayers: Int
     let stageWeightBytes: Int
     let sequencesServed: Int
-    let probesEchoed: Int
     let decodeCompute: ShardBenchLatency
     let prefillCompute: ShardBenchLatency
-    let linkBytesSent: UInt64
-    let linkBytesReceived: UInt64
+    let links: [ShardBenchLinkReport]
 }
 
 struct ShardBenchSessionReport {
     var head: ShardBenchHeadReport?
-    var tail: ShardBenchTailReport?
+    var stage: ShardBenchStageReport?
 }
 
 struct ShardBenchReferenceReport: Codable {
@@ -364,14 +478,74 @@ struct ShardBenchReferenceReport: Codable {
     let ttft: ShardBenchLatency
 }
 
-/// Hello payload: what each stage owns, checked by the peer before any activation.
+/// What one stage owns, carried in the chain hello.
 struct ShardBenchHello: Codable, Equatable {
-    let role: String
+    let role: ShardBenchRole
     let modelType: String
     let totalLayers: Int
     let hiddenSize: Int
     let layerStart: Int
     let layerEnd: Int
+    /// Round trip of the link to the previous stage, measured by this stage.
+    var upstreamProbe: ShardBenchLatency?
+    /// Tail with a separate return link: round trip of that link to the head.
+    var returnProbe: ShardBenchLatency?
+
+    var layerLabel: String { "\(layerStart):\(layerEnd)" }
+}
+
+/// Hello payload: the chain so far. It grows by one stage per hop and comes back
+/// to the head complete on the return link.
+struct ShardBenchChainHello: Codable, Equatable {
+    let stages: [ShardBenchHello]
+}
+
+enum ShardBenchChain {
+    /// `next` may follow `prefix`: same model, contiguous layers, the head first and
+    /// only middles in between.
+    static func validate(prefix: [ShardBenchHello], next: ShardBenchHello) throws {
+        guard let first = prefix.first, first.role == .head, first.layerStart == 0 else {
+            throw ShardBenchError.handshake("the chain must start at the head owning layer 0")
+        }
+        for (index, hello) in prefix.enumerated().dropFirst() where hello.role != .middle {
+            throw ShardBenchError.handshake("stage \(index) is a \(hello.role.rawValue) before the end of the chain")
+        }
+        guard next.role != .head else { throw ShardBenchError.handshake("a second head at stage \(prefix.count)") }
+        guard next.modelType == first.modelType, next.totalLayers == first.totalLayers, next.hiddenSize == first.hiddenSize else {
+            throw ShardBenchError.handshake("stage \(prefix.count) model \(next.modelType)/\(next.totalLayers)L/\(next.hiddenSize) differs from \(first.modelType)/\(first.totalLayers)L/\(first.hiddenSize)")
+        }
+        let previous = prefix[prefix.count - 1]
+        guard previous.layerEnd == next.layerStart else {
+            throw ShardBenchError.handshake("stage \(prefix.count - 1) layers end at \(previous.layerEnd) but stage \(prefix.count) starts at \(next.layerStart)")
+        }
+    }
+
+    /// A whole ring: at least two stages, each link valid, ending at a tail that owns
+    /// the last layer.
+    static func validateComplete(_ chain: [ShardBenchHello]) throws {
+        guard chain.count >= 2 else { throw ShardBenchError.handshake("a chain needs at least two stages, got \(chain.count)") }
+        for index in 1..<chain.count {
+            try validate(prefix: Array(chain[..<index]), next: chain[index])
+        }
+        guard let last = chain.last, last.role == .tail, last.layerEnd == last.totalLayers else {
+            throw ShardBenchError.handshake("the chain must end at a tail owning layer \(chain[0].totalLayers - 1)")
+        }
+    }
+
+    /// Ring hops with the probe each receiving end measured.
+    static func hops(_ chain: [ShardBenchHello]) -> [ShardBenchHopReport] {
+        let last = chain.count - 1
+        let separateReturn = chain[last].returnProbe != nil
+        var hops = (1..<chain.count).map { index in
+            ShardBenchHopReport(
+                from: index - 1, to: index, carriesReturn: chain.count == 2 && !separateReturn,
+                probeRoundTrip: chain[index].upstreamProbe)
+        }
+        if separateReturn {
+            hops.append(ShardBenchHopReport(from: last, to: 0, carriesReturn: true, probeRoundTrip: chain[last].returnProbe))
+        }
+        return hops
+    }
 }
 
 enum ShardBenchError: Error, CustomStringConvertible {
@@ -390,114 +564,328 @@ enum ShardBenchError: Error, CustomStringConvertible {
     }
 }
 
+// MARK: - Links
+
+/// A stage's two links. `upstream` is the one it receives work on (head: the token
+/// return link) and `downstream` the one it sends on (tail: the return link). In a
+/// two-stage ring both may be the same link.
+struct ShardBenchLinks {
+    let upstream: ShardStageLink
+    let downstream: ShardStageLink
+
+    var isCollapsed: Bool { upstream === downstream }
+
+    var unique: [ShardStageLink] { isCollapsed ? [upstream] : [upstream, downstream] }
+
+    func close() {
+        for link in unique { link.close() }
+    }
+
+    /// Bind first, then dial, then accept: every stage's listener is up before any
+    /// stage blocks in accept, so a ring opens in any start order.
+    static func open(
+        listen: ShardBenchEndpoint?,
+        connect: ShardBenchEndpoint?,
+        connectTimeout: TimeInterval,
+        configuration: ShardLinkConfiguration
+    ) throws -> ShardBenchLinks {
+        let listener = try listen.map { try ShardStageListener(host: $0.host, port: $0.port) }
+        if let listen, let listener {
+            FileHandle.standardError.write(Data("shard-bench: listening on \(listen.host):\(listener.port)\n".utf8))
+        }
+        let dialed = try connect.map {
+            try ShardStageLink.connect(host: $0.host, port: $0.port, timeout: connectTimeout, configuration: configuration)
+        }
+        var accepted: ShardStageLink?
+        if let listener {
+            do {
+                accepted = try listener.accept(timeout: connectTimeout, configuration: configuration)
+            } catch {
+                dialed?.close()
+                throw error
+            }
+        }
+        switch (accepted, dialed) {
+        case let (upstream?, downstream?):
+            return ShardBenchLinks(upstream: upstream, downstream: downstream)
+        case let (single?, nil), let (nil, single?):
+            return ShardBenchLinks(upstream: single, downstream: single)
+        case (nil, nil):
+            throw ValidationError("pass --listen and/or --connect")
+        }
+    }
+}
+
+/// Drains a link the main loop only sends on, so the peer's heartbeats are consumed
+/// and its death or error report is noticed while the main loop is blocked on the
+/// other link. On a failure it records the cause and closes `wake`, which ends that
+/// blocked receive; the session then reports the recorded cause.
+final class ShardBenchLinkWatch: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stopped = false
+    private var recorded: Error?
+
+    var failure: Error? {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded
+    }
+
+    func watch(_ link: ShardStageLink, wake: ShardStageLink) {
+        let thread = Thread { [self] in
+            while true {
+                do {
+                    let frame = try link.receive(timeout: 3600)
+                    if frame.header.kind == .error {
+                        record(ShardBenchError.peerError(String(decoding: frame.payload, as: UTF8.self)), wake: wake)
+                    } else {
+                        record(ShardBenchError.protocolViolation("unexpected \(frame.header.kind) frame on a send-only link"), wake: wake)
+                    }
+                    return
+                } catch ShardLinkError.receiveTimedOut {
+                    continue
+                } catch {
+                    record(error, wake: wake)
+                    return
+                }
+            }
+        }
+        thread.start()
+    }
+
+    /// After this, link failures are expected (session end) and no longer recorded.
+    func stop() {
+        lock.lock()
+        stopped = true
+        lock.unlock()
+    }
+
+    private func record(_ error: Error, wake: ShardStageLink) {
+        lock.lock()
+        let ignore = stopped
+        if !ignore, recorded == nil { recorded = error }
+        lock.unlock()
+        if !ignore { wake.close() }
+    }
+}
+
 // MARK: - Session
 
 /// One stage's side of a shard-bench run. Runs on a dedicated thread: model compute
 /// and socket I/O are synchronous and must not block Swift's cooperative pool.
-final class ShardBenchSession {
+final class ShardBenchSession<Stage: ShardBenchStage> {
     private let options: ShardBenchSessionOptions
-    private let stage: PipelineStageModel
+    private let stage: Stage
+    private let watch = ShardBenchLinkWatch()
     private let probeRequestID: UInt64 = 0
     private let warmupRequestID: UInt64 = 1
     private let firstRequestID: UInt64 = 2
+    private var stageIndex = 0
 
-    init(options: ShardBenchSessionOptions, stage: PipelineStageModel) {
+    init(options: ShardBenchSessionOptions, stage: Stage) {
         self.options = options
         self.stage = stage
     }
 
     func run() throws -> ShardBenchSessionReport {
+        let links = try ShardBenchLinks.open(
+            listen: options.listen, connect: options.connect,
+            connectTimeout: options.connectTimeout, configuration: options.link)
+        return try run(links: links)
+    }
+
+    /// Run over already-open links (unit tests wire in-process loopback pairs).
+    func run(links: ShardBenchLinks) throws -> ShardBenchSessionReport {
+        defer {
+            watch.stop()
+            links.close()
+        }
         if options.temperature > 0 { MLXRandom.seed(options.seed) }
-        if options.isHead, !stage.plan.isFirst {
-            throw ShardBenchError.handshake("head must own layer 0 (got \(options.layers))")
-        }
-        if !options.isHead, !stage.plan.isLast {
-            throw ShardBenchError.handshake("tail must own the last layer \(stage.plan.totalLayers - 1)")
-        }
-        let link = try openLink()
-        defer { link.close() }
-        let peer: ShardBenchHello
         do {
-            peer = try handshake(link: link, stage: stage)
-        } catch {
-            sendError(link, error)
-            throw error
-        }
-        do {
-            if options.isHead {
-                return ShardBenchSessionReport(head: try runHead(link: link, stage: stage, peer: peer))
+            try checkRole()
+            switch options.role {
+            case .head:
+                let chain = try headHandshake(links)
+                if !links.isCollapsed { watch.watch(links.downstream, wake: links.upstream) }
+                return ShardBenchSessionReport(head: try runHead(links: links, chain: chain))
+            case .middle:
+                let upstreamProbe = try middleHandshake(links)
+                watch.watch(links.downstream, wake: links.upstream)
+                return ShardBenchSessionReport(stage: try runStage(links: links, upstreamProbe: upstreamProbe, returnProbe: nil))
+            case .tail:
+                let (upstreamProbe, returnProbe) = try tailHandshake(links)
+                if !links.isCollapsed { watch.watch(links.downstream, wake: links.upstream) }
+                return ShardBenchSessionReport(stage: try runStage(links: links, upstreamProbe: upstreamProbe, returnProbe: returnProbe))
             }
-            return ShardBenchSessionReport(tail: try runTail(link: link, stage: stage))
-        } catch let error as ShardLinkError {
-            throw error
         } catch {
-            sendError(link, error)
-            throw error
+            // A watched link's failure closed the receive link to wake us; report the cause.
+            let cause = watch.failure ?? error
+            sendError(links, cause)
+            throw cause
         }
     }
 
-    private func openLink() throws -> ShardStageLink {
-        let endpoint = options.endpoint
-        if endpoint.listens {
-            let listener = try ShardStageListener(host: endpoint.host, port: endpoint.port)
-            FileHandle.standardError.write(Data("shard-bench: listening on \(endpoint.host):\(listener.port)\n".utf8))
-            return try listener.accept(timeout: options.connectTimeout, configuration: options.link)
+    private func checkRole() throws {
+        let first = stage.layers.lowerBound == 0
+        let last = stage.layers.upperBound == stage.totalLayers
+        switch options.role {
+        case .head where !first:
+            throw ShardBenchError.handshake("head must own layer 0 (got \(stage.layers))")
+        case .tail where !last:
+            throw ShardBenchError.handshake("tail must own the last layer \(stage.totalLayers - 1)")
+        case .middle where first || last:
+            throw ShardBenchError.handshake("a middle stage owns neither layer 0 nor the last layer (got \(stage.layers))")
+        default:
+            return
         }
-        return try ShardStageLink.connect(
-            host: endpoint.host, port: endpoint.port, timeout: options.connectTimeout, configuration: options.link)
     }
 
-    private func handshake(link: ShardStageLink, stage: PipelineStageModel) throws -> ShardBenchHello {
-        let mine = ShardBenchHello(
-            role: options.isHead ? "head" : "tail",
-            modelType: stage.modelType,
-            totalLayers: stage.plan.totalLayers,
-            hiddenSize: stage.hiddenSize,
-            layerStart: stage.plan.layers.lowerBound,
-            layerEnd: stage.plan.layers.upperBound
-        )
-        try link.send(ShardStageFrame(header: header(.hello, stage: stage), payload: try JSONEncoder().encode(mine)))
-        let frame = try link.receive(timeout: options.connectTimeout)
-        guard frame.header.kind == .hello else {
-            throw ShardBenchError.handshake("expected hello, got \(frame.header.kind)")
+    // MARK: Handshake
+
+    private func myHello() -> ShardBenchHello {
+        ShardBenchHello(
+            role: options.role, modelType: stage.modelType, totalLayers: stage.totalLayers,
+            hiddenSize: stage.hiddenSize, layerStart: stage.layers.lowerBound, layerEnd: stage.layers.upperBound)
+    }
+
+    /// Head: send the one-stage chain down, then read the complete chain back on the
+    /// return link, echoing each receiving end's probes meanwhile.
+    private func headHandshake(_ links: ShardBenchLinks) throws -> [ShardBenchHello] {
+        let mine = myHello()
+        stageIndex = 0
+        try sendHello(links.downstream, [mine], destination: 1)
+        let acknowledged = try awaitHello(links.downstream)
+        let chain = links.isCollapsed ? acknowledged : try awaitHello(links.upstream)
+        try ShardBenchChain.validateComplete(chain)
+        guard chain[0] == mine else { throw ShardBenchError.handshake("the returned chain does not start with this head") }
+        if let expected = options.expectedStages, chain.count != expected {
+            throw ShardBenchError.handshake("chain has \(chain.count) stages, expected \(expected)")
         }
-        let peer = try JSONDecoder().decode(ShardBenchHello.self, from: frame.payload)
-        guard peer.role != mine.role else { throw ShardBenchError.handshake("both stages are \(peer.role)") }
-        guard peer.modelType == mine.modelType, peer.totalLayers == mine.totalLayers, peer.hiddenSize == mine.hiddenSize else {
-            throw ShardBenchError.handshake("peer model \(peer.modelType)/\(peer.totalLayers)L/\(peer.hiddenSize) differs from \(mine.modelType)/\(mine.totalLayers)L/\(mine.hiddenSize)")
+        return chain
+    }
+
+    /// Middle: take the chain so far, probe the upstream link, acknowledge upstream,
+    /// pass the chain on and wait for the next stage's acknowledgement.
+    private func middleHandshake(_ links: ShardBenchLinks) throws -> ShardBenchLatency {
+        let received = try awaitHello(links.upstream)
+        var mine = myHello()
+        try ShardBenchChain.validate(prefix: received, next: mine)
+        stageIndex = received.count
+        let probe = try measureProbes(links.upstream, peer: stageIndex - 1)
+        mine.upstreamProbe = probe
+        let chain = received + [mine]
+        try sendHello(links.upstream, chain, destination: stageIndex - 1)
+        try sendHello(links.downstream, chain, destination: stageIndex + 1)
+        _ = try awaitHello(links.downstream)
+        return probe
+    }
+
+    /// Tail: take the chain, probe the upstream link and, when separate, the return
+    /// link, then send the complete chain to the head.
+    private func tailHandshake(_ links: ShardBenchLinks) throws -> (ShardBenchLatency, ShardBenchLatency?) {
+        let received = try awaitHello(links.upstream)
+        var mine = myHello()
+        try ShardBenchChain.validate(prefix: received, next: mine)
+        stageIndex = received.count
+        let upstreamProbe = try measureProbes(links.upstream, peer: stageIndex - 1)
+        mine.upstreamProbe = upstreamProbe
+        var returnProbe: ShardBenchLatency?
+        if !links.isCollapsed {
+            try sendHello(links.upstream, received + [mine], destination: stageIndex - 1)
+            returnProbe = try measureProbes(links.downstream, peer: 0)
+            mine.returnProbe = returnProbe
         }
-        let (head, tail) = options.isHead ? (mine, peer) : (peer, mine)
-        guard head.layerEnd == tail.layerStart else {
-            throw ShardBenchError.handshake("head layers end at \(head.layerEnd) but tail layers start at \(tail.layerStart)")
+        let chain = received + [mine]
+        try ShardBenchChain.validateComplete(chain)
+        try sendHello(links.downstream, chain, destination: 0)
+        return (upstreamProbe, returnProbe)
+    }
+
+    private func sendHello(_ link: ShardStageLink, _ chain: [ShardBenchHello], destination: Int) throws {
+        try link.send(ShardStageFrame(
+            header: header(.hello, destination: destination),
+            payload: try JSONEncoder().encode(ShardBenchChainHello(stages: chain))))
+    }
+
+    /// Read until the peer's hello, echoing its link probes meanwhile.
+    private func awaitHello(_ link: ShardStageLink) throws -> [ShardBenchHello] {
+        while true {
+            let frame = try receive(link, timeout: options.connectTimeout)
+            switch frame.header.kind {
+            case .activation where frame.header.requestID == probeRequestID:
+                var echo = frame.header
+                echo.sourceStage = UInt16(stageIndex)
+                echo.destinationStage = frame.header.sourceStage
+                echo.layerStart = UInt32(stage.layers.lowerBound)
+                echo.layerEnd = UInt32(stage.layers.upperBound)
+                try link.send(ShardStageFrame(header: echo, payload: frame.payload))
+            case .hello:
+                do {
+                    return try JSONDecoder().decode(ShardBenchChainHello.self, from: frame.payload).stages
+                } catch {
+                    throw ShardBenchError.handshake("undecodable hello: \(error)")
+                }
+            default:
+                throw ShardBenchError.handshake("expected hello, got \(frame.header.kind)")
+            }
         }
-        return peer
+    }
+
+    /// Echo probes of one decode-sized activation on `link`: transport + codec cost of
+    /// one hop out and back, no model compute.
+    private func measureProbes(_ link: ShardStageLink, peer: Int) throws -> ShardBenchLatency {
+        let shape: [UInt32] = [1, 1, UInt32(stage.hiddenSize)]
+        let payload = Data(count: 2 * stage.hiddenSize)
+        var samples = [Double]()
+        let warmup = min(10, options.probeCount)
+        for index in 0..<(options.probeCount + warmup) {
+            let start = now()
+            try link.send(ShardStageFrame(
+                header: header(.activation, dtype: .bfloat16, requestID: probeRequestID, step: UInt32(index),
+                               destination: peer, shape: shape),
+                payload: payload))
+            let echo = try receive(link, timeout: options.receiveTimeout)
+            guard echo.header.kind == .activation, echo.header.requestID == probeRequestID,
+                  echo.header.tokenStep == UInt32(index)
+            else {
+                throw ShardBenchError.protocolViolation("probe echo out of order")
+            }
+            if index >= warmup { samples.append(now() - start) }
+        }
+        return ShardBenchLatency(seconds: samples)
     }
 
     private func header(
         _ kind: ShardFrameKind,
-        stage: PipelineStageModel,
         dtype: ShardTensorDType = .none,
         requestID: UInt64 = 0,
         microBatch: UInt32 = 0,
         step: UInt32 = 0,
+        destination: Int,
         shape: [UInt32] = []
     ) -> ShardStageFrameHeader {
-        let source: UInt16 = options.isHead ? 0 : 1
-        return ShardStageFrameHeader(
+        ShardStageFrameHeader(
             kind: kind, dtype: dtype, groupEpoch: options.link.groupEpoch, requestID: requestID,
-            microBatchID: microBatch, tokenStep: step, sourceStage: source, destinationStage: 1 - source,
-            layerStart: UInt32(stage.plan.layers.lowerBound), layerEnd: UInt32(stage.plan.layers.upperBound),
+            microBatchID: microBatch, tokenStep: step, sourceStage: UInt16(stageIndex),
+            destinationStage: UInt16(destination),
+            layerStart: UInt32(stage.layers.lowerBound), layerEnd: UInt32(stage.layers.upperBound),
             shape: shape)
     }
 
-    private func sendError(_ link: ShardStageLink, _ error: Error) {
-        _ = try? link.send(ShardStageFrame(
-            header: ShardStageFrameHeader(kind: .error, groupEpoch: options.link.groupEpoch),
-            payload: Data(String(describing: error).prefix(4096).utf8)))
+    /// Where this stage's downstream sends go: the next stage, or the head for the tail.
+    private var downstreamIndex: Int { options.role == .tail ? 0 : stageIndex + 1 }
+
+    private func sendError(_ links: ShardBenchLinks, _ error: Error) {
+        // Best effort on every link: one of them may be the one that failed.
+        for link in links.unique {
+            _ = try? link.send(ShardStageFrame(
+                header: ShardStageFrameHeader(kind: .error, groupEpoch: options.link.groupEpoch),
+                payload: Data(String(describing: error).prefix(4096).utf8)))
+        }
     }
 
-    private func receive(_ link: ShardStageLink) throws -> ShardStageFrame {
-        let frame = try link.receive(timeout: options.receiveTimeout)
+    private func receive(_ link: ShardStageLink, timeout: TimeInterval? = nil) throws -> ShardStageFrame {
+        let frame = try link.receive(timeout: timeout ?? options.receiveTimeout)
         if frame.header.kind == .error {
             throw ShardBenchError.peerError(String(decoding: frame.payload, as: UTF8.self))
         }
@@ -509,7 +897,7 @@ final class ShardBenchSession {
     private struct HeadSequence {
         let requestID: UInt64
         let microBatch: UInt32
-        let cache: [KVCache]
+        let cache: Stage.Cache
         var tokens: [Int] = []
         var lastSend: TimeInterval = 0
         var prefillStart: TimeInterval = 0
@@ -517,35 +905,21 @@ final class ShardBenchSession {
         var lastTokenAt: TimeInterval?
     }
 
-    private func runHead(link: ShardStageLink, stage: PipelineStageModel, peer: ShardBenchHello) throws -> ShardBenchHeadReport {
-        // Probe: one decode-sized activation echoed by the tail, no model compute.
-        let probeShape: [UInt32] = [1, 1, UInt32(stage.hiddenSize)]
-        let probePayload = Data(count: 2 * stage.hiddenSize)
-        var probeSamples = [Double]()
-        let probeWarmup = min(10, options.probeCount)
-        for index in 0..<(options.probeCount + probeWarmup) {
-            let start = now()
-            try link.send(ShardStageFrame(
-                header: header(.activation, stage: stage, dtype: .bfloat16, requestID: probeRequestID, step: UInt32(index), shape: probeShape),
-                payload: probePayload))
-            let echo = try receive(link)
-            guard echo.header.requestID == probeRequestID, echo.header.tokenStep == UInt32(index) else {
-                throw ShardBenchError.protocolViolation("probe echo out of order")
-            }
-            if index >= probeWarmup { probeSamples.append(now() - start) }
-        }
-
+    private func runHead(links: ShardBenchLinks, chain: [ShardBenchHello]) throws -> ShardBenchHeadReport {
         if options.warmup {
             _ = try pipelineDecode(
-                link: link, stage: stage, prompts: [options.prompts[0]], tokens: min(4, options.tokens),
-                firstRequestID: warmupRequestID)
+                links: links, prompts: [options.prompts[0]], tokens: min(4, options.tokens), firstRequestID: warmupRequestID)
         }
-        let run = try pipelineDecode(
-            link: link, stage: stage, prompts: options.prompts, tokens: options.tokens, firstRequestID: firstRequestID)
-        // Session end: request id 0 abort.
-        try link.send(ShardStageFrame(header: header(.abort, stage: stage, requestID: probeRequestID)))
+        let run = try pipelineDecode(links: links, prompts: options.prompts, tokens: options.tokens, firstRequestID: firstRequestID)
+        // Session end: request id 0 abort travels down the chain; the tail answers on
+        // the return link once it has seen it, so no stage reads a close as a failure.
+        watch.stop()
+        try links.downstream.send(ShardStageFrame(header: header(.abort, requestID: probeRequestID, destination: 1)))
+        let end = try receive(links.upstream)
+        guard end.header.kind == .abort, end.header.requestID == probeRequestID else {
+            throw ShardBenchError.protocolViolation("expected the session-end acknowledgement, got \(end.header.kind) request \(end.header.requestID)")
+        }
 
-        let stats = link.statistics
         let decodeTPS = run.sequences.compactMap { sequence -> Double? in
             guard let first = sequence.firstTokenAt, let last = sequence.lastTokenAt, sequence.tokens.count > 1, last > first else {
                 return nil
@@ -553,12 +927,18 @@ final class ShardBenchSession {
             return Double(sequence.tokens.count - 1) / (last - first)
         }
         let totalTokens = run.sequences.reduce(0) { $0 + $1.tokens.count }
+        let hops = ShardBenchChain.hops(chain)
+        let linkReports = links.isCollapsed
+            ? [ShardBenchLinkReport(name: "downstream+return", peerStage: 1, statistics: links.downstream.statistics, probe: hops.first?.probeRoundTrip)]
+            : [ShardBenchLinkReport(name: "downstream", peerStage: 1, statistics: links.downstream.statistics, probe: hops.first?.probeRoundTrip),
+               ShardBenchLinkReport(name: "return", peerStage: chain.count - 1, statistics: links.upstream.statistics, probe: hops.last?.probeRoundTrip)]
         return ShardBenchHeadReport(
             model: options.modelLabel,
             modelType: stage.modelType,
-            layers: "\(stage.plan.layers.lowerBound):\(stage.plan.layers.upperBound)",
-            peerLayers: "\(peer.layerStart):\(peer.layerEnd)",
-            totalLayers: stage.plan.totalLayers,
+            layers: "\(stage.layers.lowerBound):\(stage.layers.upperBound)",
+            stageCount: chain.count,
+            stageLayers: chain.map(\.layerLabel),
+            totalLayers: stage.totalLayers,
             hiddenSize: stage.hiddenSize,
             activationDtype: run.activationDType,
             stageWeightBytes: stage.weightBytes,
@@ -572,16 +952,14 @@ final class ShardBenchSession {
             ttft: ShardBenchLatency(seconds: run.sequences.compactMap { sequence in
                 sequence.firstTokenAt.map { $0 - sequence.prefillStart }
             }),
-            probeRoundTrip: ShardBenchLatency(seconds: probeSamples),
+            probeRoundTrip: hops.first?.probeRoundTrip,
+            hops: hops,
             decodeStepRoundTrip: ShardBenchLatency(seconds: run.stepRoundTrips),
             headDecodeCompute: ShardBenchLatency(seconds: run.headCompute),
             decodeHopPayloadBytes: run.decodeHopPayloadBytes,
             decodeHopFrameBytes: ShardStageFrameCodec.frameSize(rank: 3, payloadLength: run.decodeHopPayloadBytes),
             prefillHopPayloadBytes: run.prefillPayloadBytes,
-            linkBytesSent: stats.bytesSent,
-            linkBytesReceived: stats.bytesReceived,
-            heartbeatsSent: stats.heartbeatsSent,
-            heartbeatsReceived: stats.heartbeatsReceived,
+            links: linkReports,
             parity: nil,
             referenceSingleStreamTokensPerSecond: nil
         )
@@ -597,12 +975,11 @@ final class ShardBenchSession {
         var activationDType: String
     }
 
-    /// Keep every sequence in flight: the tail answers in arrival order, and while it
-    /// computes one sequence's step the head computes the next sequence's, so with
-    /// K >= 2 both stages stay busy.
+    /// Keep every sequence in flight: each stage answers in arrival order, and while a
+    /// downstream stage computes one sequence's step the head computes the next
+    /// sequence's, so with K >= S every stage stays busy.
     private func pipelineDecode(
-        link: ShardStageLink,
-        stage: PipelineStageModel,
+        links: ShardBenchLinks,
         prompts: [[Int]],
         tokens: Int,
         firstRequestID: UInt64
@@ -617,16 +994,16 @@ final class ShardBenchSession {
             let requestID = firstRequestID + UInt64(offset) * 2
             var sequence = HeadSequence(requestID: requestID, microBatch: UInt32(offset), cache: try stage.newCache())
             sequence.prefillStart = now()
-            let hidden = try stage.forward(MLXArray(prompt.map(Int32.init)).reshaped(1, prompt.count), cache: sequence.cache)
-            let payloadBytes = try sendActivation(link, stage: stage, hidden: hidden, sequence: &sequence, step: 0)
-            run.prefillPayloadBytes.append(payloadBytes)
+            let hidden = try stage.forward(tokens: prompt, cache: sequence.cache)
+            try sendActivation(links.downstream, hidden, sequence: &sequence, step: 0)
+            run.prefillPayloadBytes.append(hidden.payload.count)
             run.activationDType = String(describing: hidden.dtype)
             index[requestID] = sequences.count
             sequences.append(sequence)
         }
         var remaining = sequences.count
         while remaining > 0 {
-            let frame = try receive(link)
+            let frame = try receive(links.upstream)
             guard frame.header.kind == .token, frame.header.dtype == .int32, frame.payload.count == 4,
                   let slot = index[frame.header.requestID]
             else {
@@ -646,14 +1023,14 @@ final class ShardBenchSession {
             sequence.tokens.append(token)
             sequence.lastTokenAt = arrived
             if sequence.tokens.count >= tokens {
-                try link.send(ShardStageFrame(header: header(.abort, stage: stage, requestID: sequence.requestID)))
+                try links.downstream.send(ShardStageFrame(header: header(.abort, requestID: sequence.requestID, destination: 1)))
                 remaining -= 1
             } else {
                 let computeStart = now()
-                let hidden = try stage.forward(MLXArray([Int32(token)]).reshaped(1, 1), cache: sequence.cache)
+                let hidden = try stage.forward(tokens: [token], cache: sequence.cache)
                 run.headCompute.append(now() - computeStart)
-                run.decodeHopPayloadBytes = try sendActivation(
-                    link, stage: stage, hidden: hidden, sequence: &sequence, step: UInt32(sequence.tokens.count))
+                try sendActivation(links.downstream, hidden, sequence: &sequence, step: UInt32(sequence.tokens.count))
+                run.decodeHopPayloadBytes = hidden.payload.count
             }
             sequences[slot] = sequence
         }
@@ -664,43 +1041,41 @@ final class ShardBenchSession {
 
     private func sendActivation(
         _ link: ShardStageLink,
-        stage: PipelineStageModel,
-        hidden: MLXArray,
+        _ hidden: ShardBenchActivation,
         sequence: inout HeadSequence,
         step: UInt32
-    ) throws -> Int {
-        let encoded = try PipelineActivationCodec.encode(hidden)
+    ) throws {
         sequence.lastSend = now()
         try link.send(ShardStageFrame(
-            header: header(.activation, stage: stage, dtype: encoded.dtype, requestID: sequence.requestID,
-                           microBatch: sequence.microBatch, step: step, shape: encoded.shape),
-            payload: encoded.payload))
-        return encoded.payload.count
+            header: header(.activation, dtype: hidden.dtype, requestID: sequence.requestID,
+                           microBatch: sequence.microBatch, step: step, destination: 1, shape: hidden.shape),
+            payload: hidden.payload))
     }
 
-    // MARK: Tail
+    // MARK: Middle and tail
 
-    private func runTail(link: ShardStageLink, stage: PipelineStageModel) throws -> ShardBenchTailReport {
-        var caches = [UInt64: [KVCache]]()
+    /// A middle stage forwards each activation downstream; the tail samples and sends
+    /// the token on the return link. Both see per-request aborts and the session end.
+    private func runStage(
+        links: ShardBenchLinks,
+        upstreamProbe: ShardBenchLatency,
+        returnProbe: ShardBenchLatency?
+    ) throws -> ShardBenchStageReport {
+        var caches = [UInt64: Stage.Cache]()
         var served = Set<UInt64>()
-        var probes = 0
         var decodeCompute = [Double]()
         var prefillCompute = [Double]()
         // The head may spend a long time loading its reference or warming up between
         // frames, but it heartbeats throughout, so only a dead or silent peer ends this.
         loop: while true {
-            let frame = try link.receive(timeout: max(options.receiveTimeout, 3600))
+            let frame = try receive(links.upstream, timeout: max(options.receiveTimeout, 3600))
             let header = frame.header
             switch header.kind {
             case .activation where header.requestID == probeRequestID:
-                try link.send(ShardStageFrame(
-                    header: self.header(.activation, stage: stage, dtype: header.dtype, requestID: probeRequestID,
-                                        step: header.tokenStep, shape: header.shape),
-                    payload: frame.payload))
-                probes += 1
+                throw ShardBenchError.protocolViolation("link probe after the handshake")
             case .activation:
                 let start = now()
-                let cache: [KVCache]
+                let cache: Stage.Cache
                 if let existing = caches[header.requestID] {
                     cache = existing
                 } else {
@@ -712,43 +1087,68 @@ final class ShardBenchSession {
                     caches[header.requestID] = cache
                     served.insert(header.requestID)
                 }
-                let hidden = try PipelineActivationCodec.decode(dtype: header.dtype, shape: header.shape, payload: frame.payload)
-                let logits = try stage.forward(hidden, cache: cache)
-                let token = PipelineStageSampler.sample(logits: logits, temperature: options.temperature)
-                var payload = Data(count: 4)
-                payload.withUnsafeMutableBytes { $0.storeBytes(of: Int32(token).littleEndian, as: Int32.self) }
-                try link.send(ShardStageFrame(
-                    header: self.header(.token, stage: stage, dtype: .int32, requestID: header.requestID,
-                                        microBatch: header.microBatchID, step: header.tokenStep, shape: [1]),
-                    payload: payload))
+                let input = ShardBenchActivation(dtype: header.dtype, shape: header.shape, payload: frame.payload)
+                if options.role == .tail {
+                    let token = try stage.sample(activation: input, cache: cache, temperature: options.temperature)
+                    var payload = Data(count: 4)
+                    payload.withUnsafeMutableBytes { $0.storeBytes(of: Int32(token).littleEndian, as: Int32.self) }
+                    try links.downstream.send(ShardStageFrame(
+                        header: self.header(.token, dtype: .int32, requestID: header.requestID,
+                                            microBatch: header.microBatchID, step: header.tokenStep,
+                                            destination: downstreamIndex, shape: [1]),
+                        payload: payload))
+                } else {
+                    let output = try stage.forward(activation: input, cache: cache)
+                    try links.downstream.send(ShardStageFrame(
+                        header: self.header(.activation, dtype: output.dtype, requestID: header.requestID,
+                                            microBatch: header.microBatchID, step: header.tokenStep,
+                                            destination: downstreamIndex, shape: output.shape),
+                        payload: output.payload))
+                }
                 if header.tokenStep == 0 {
                     prefillCompute.append(now() - start)
                 } else {
                     decodeCompute.append(now() - start)
                 }
             case .abort where header.requestID == probeRequestID:
+                // Session end: the next stage (or, from the tail, the head) closing its
+                // side is now expected.
+                watch.stop()
+                try links.downstream.send(ShardStageFrame(
+                    header: self.header(.abort, requestID: probeRequestID, destination: downstreamIndex)))
                 break loop
             case .abort:
                 caches[header.requestID] = nil
+                if options.role == .middle {
+                    try links.downstream.send(ShardStageFrame(
+                        header: self.header(.abort, requestID: header.requestID, destination: downstreamIndex)))
+                }
             case .error:
                 throw ShardBenchError.peerError(String(decoding: frame.payload, as: UTF8.self))
             case .hello, .token, .heartbeat:
-                throw ShardBenchError.protocolViolation("unexpected \(header.kind) frame on the tail")
+                throw ShardBenchError.protocolViolation("unexpected \(header.kind) frame on a \(options.role.rawValue) stage")
             }
         }
-        let stats = link.statistics
-        return ShardBenchTailReport(
+        let upstreamName = links.isCollapsed ? "upstream+return" : "upstream"
+        var linkReports = [ShardBenchLinkReport(
+            name: upstreamName, peerStage: stageIndex - 1, statistics: links.upstream.statistics, probe: upstreamProbe)]
+        if !links.isCollapsed {
+            linkReports.append(ShardBenchLinkReport(
+                name: options.role == .tail ? "return" : "downstream", peerStage: downstreamIndex,
+                statistics: links.downstream.statistics, probe: returnProbe))
+        }
+        return ShardBenchStageReport(
+            role: options.role,
+            stageIndex: stageIndex,
             model: options.modelLabel,
             modelType: stage.modelType,
-            layers: "\(stage.plan.layers.lowerBound):\(stage.plan.layers.upperBound)",
-            totalLayers: stage.plan.totalLayers,
+            layers: "\(stage.layers.lowerBound):\(stage.layers.upperBound)",
+            totalLayers: stage.totalLayers,
             stageWeightBytes: stage.weightBytes,
             sequencesServed: served.count,
-            probesEchoed: probes,
             decodeCompute: ShardBenchLatency(seconds: decodeCompute),
             prefillCompute: ShardBenchLatency(seconds: prefillCompute),
-            linkBytesSent: stats.bytesSent,
-            linkBytesReceived: stats.bytesReceived
+            links: linkReports
         )
     }
 
