@@ -40,7 +40,7 @@ controller. Also set:
 | `STUDIO_LAB_SOURCE_DIR` | Absolute path to the campaign clone on the Studio |
 | `STUDIO_LAB_GIT_HEAD` | Exact 40-character campaign commit |
 | `STUDIO_LAB_WINDOW_DIR` | Dedicated private directory for this window's journal and staged helpers |
-| `STUDIO_LAB_JOB_KIND` | Closed job kind: `diagnostic-legacy` (default), `profiler-only`, `qualification`, `qwen-qualification`, `qwen-journey`, or `glm-prefill` |
+| `STUDIO_LAB_JOB_KIND` | Closed job kind: `diagnostic-legacy` (default), `profiler-only`, `qualification`, `qwen-qualification`, `qwen-journey`, `glm-prefill`, or `glm-prefill-profile` |
 
 The command and its arguments are fixed in
 `scripts/lab/2080-native-rows/run-window-diagnostic.sh`. There is no shell
@@ -103,6 +103,26 @@ six-hour ceiling. These ceilings bound unavailability, not expected duration.
 The receipt marks the results exploratory and measurement-only; they cannot
 qualify or activate native-row admission. Preserve exact-token parity and
 report end-to-end TTFT separately from isolated reference prefill rates.
+
+`glm-prefill-profile` unblocks component attribution after the baseline matrix:
+the retained baseline binary has no enabled prefill instrumentation, and the
+standalone benchmark does not use the production paged-cache path. This fixed
+lab-only diagnostic runs one ordinary nominal-16k request with one output token
+through the production scheduler, first in a wall-only process and then in a
+separate device-census process. Actual prepared input may contain 16384–16448
+tokens; both processes must match its digest, chunk partition and sampled first
+token. Prefill chunks retain the production 512-token cap. GLMBench, a
+qualification policy and historical profiler archives are not inputs.
+
+Only the census process receives `MLX_MAX_OPS_PER_BUFFER=0`. Device timestamps
+attribute named kernels only for single-dispatch command buffers; unknown and
+multiple-dispatch buffers remain explicit residuals. GPU busy time is the union
+of completed command-buffer intervals, and kernel-duration sums can overlap.
+Generic copy kernels do not establish ownership of paged-MLA writes. Census
+timings describe an instrumented run, not production TTFT. Each process has a
+20-minute ceiling within a one-hour guarded window. The receipt is diagnostic
+only and cannot qualify or activate a feature. The existing signed-provider
+restoration and immutable-source/artifact gates apply unchanged.
 
 `qwen-qualification` runs the fixed `qwen/qwen3.6-35b-a3b` policy: native
 active-row bound one, eight qualified slots, four one-row cells at prompt

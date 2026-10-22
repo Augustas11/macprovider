@@ -1051,12 +1051,19 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             outputs.reserveCapacity(inputs.count)
             for input in inputs {
                 do {
+                    var sampledToken: Int?
+                    #if DEBUG || MACPROVIDER_LAB_HARNESS
+                    let profile = GLMPrefillProfileCapture.begin(
+                        requestID: input.requestID, offset: input.promptTokenOffset,
+                        tokens: input.promptTokens
+                    )
+                    defer { profile?.finish(sampledToken: sampledToken) }
+                    #endif
                     var state = self.rowState(
                         for: input.requestID,
                         binding: input.binding,
                         initialOffset: input.committedKVTokenCount
                     )
-                    var sampledToken: Int?
                     if !input.promptTokens.isEmpty {
                         let prompt = MLXArray(input.promptTokens.map(Int32.init))
                             .reshaped([1, input.promptTokens.count])

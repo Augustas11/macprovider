@@ -332,6 +332,7 @@ fi
         value = {
             "schema_version": jobs.SCHEMA,
             "nonce": f"{kind}-nonce",
+            "lab_git_head": self.head,
             "lab_source_dir": str(self.source),
             "lab_script_path": str(self.staged_script),
             "job_helper_path": str(self.staged_helper),
@@ -355,6 +356,107 @@ class StudioLabJobsTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    def profile_receipt(self, mode):
+        census = {
+            "valid_command_buffers": 1, "invalid_command_buffers": 0,
+            "failed_command_buffers": 0, "single_dispatch_command_buffers": 1,
+            "unknown_command_buffers": 0, "multi_dispatch_command_buffers": 0,
+            "orphan_dispatches": 0, "gpu_busy_seconds": 0.1,
+            "multi_dispatch_seconds": 0, "unknown_seconds": 0,
+            "kernel_seconds": {"glm5next_kda": 0.1},
+            "partial_family_seconds": {"kda_named_kernel": 0.1}, "valid": True,
+        }
+        chunks = [{"offset": offset, "prompt_tokens": 512,
+                   "backend_host_seconds": 1.0, "valid": True}
+                  for offset in range(0, 16384, 512)]
+        document = {
+            "schema": "macprovider.glm-prefill-profile.v1", "status": "pass",
+            "evidence_class": "lab_isolated_no_join_diagnostic", "mode": mode,
+            "provider_commit": self.fixture.head,
+            "model_id": "zai-org/glm-5.3-flash", "nominal_prompt_tokens": 16384,
+            "prepared_prompt_tokens": 16384, "prepared_prompt_sha256": "a" * 64,
+            "prepared_prompt_digest_encoding": "json-int32-array", "rows": 1,
+            "completion_tokens": 1, "first_token_id": 42, "request_wall_seconds": 33.0,
+            "cache_writes_attributed": False,
+            "attribution_scope": "single_dispatch_command_buffers_partial",
+            "gpu_busy_seconds_semantics": "union_of_completed_command_buffer_intervals",
+            "chunks": chunks, **jobs.projection_tuple(self.fixture.source),
+        }
+        if mode == "census":
+            document["census"] = {
+                key: ({name: seconds * len(chunks) for name, seconds in value.items()}
+                      if isinstance(value, dict) else value * len(chunks))
+                for key, value in census.items() if key != "valid"
+            }
+            for chunk in chunks:
+                chunk["census"] = census.copy()
+        return document
+
+    def test_prefill_profile_fixed_two_processes_and_no_qualification(self):
+        self.fixture.paths["glmbench"].unlink()
+        manifest = self.fixture.manifest("glm-prefill-profile")
+        jobs.validate_job(argparse.Namespace(manifest=str(manifest)))
+        calls = []
+        def run(argv, output, **kwargs):
+            calls.append((argv, kwargs))
+            mode = argv[argv.index("--mode") + 1]
+            write_json(Path(argv[argv.index("--out") + 1]), self.profile_receipt(mode))
+            output.write_text("diagnostic only\n")
+        with mock.patch.object(jobs, "run_checked", side_effect=run):
+            result = jobs.run_job(argparse.Namespace(manifest=str(manifest)))
+        self.assertEqual([kw for _, kw in calls], [
+            {"timeout": 1200, "profile_mode": "wall-only"},
+            {"timeout": 1200, "profile_mode": "census"}])
+        self.assertTrue(all(argv[1] == "glm-prefill-profile" for argv, _ in calls))
+        self.assertFalse(result["qualification"])
+        self.assertFalse(result["qualification_activated"])
+        self.assertEqual(result["evidence_class"], "glm_prefill_diagnostic_only")
+
+    def test_prefill_profile_environment_is_mode_bound(self):
+        with mock.patch.dict(os.environ, {"MLX_MAX_OPS_PER_BUFFER": "99", "MACPROVIDER_CB_TRACE": "1"}):
+            self.assertNotIn("MLX_MAX_OPS_PER_BUFFER", jobs.controlled_environment("wall-only"))
+            self.assertNotIn("MACPROVIDER_CB_TRACE", jobs.controlled_environment("census"))
+            self.assertEqual(jobs.controlled_environment("census")["MLX_MAX_OPS_PER_BUFFER"], "0")
+        with self.assertRaises(jobs.Refusal):
+            jobs.controlled_environment("arbitrary")
+
+    def test_prefill_profile_rejects_invalid_receipts(self):
+        manifest = {"lab_source_dir": str(self.fixture.source), "lab_git_head": self.fixture.head}
+        path = self.fixture.stage / "profile.json"
+        changes = [
+            lambda d: d.update(completion_tokens=True),
+            lambda d: d.update(target_sha256="b" * 64),
+            lambda d: d["chunks"][1].update(offset=513),
+            lambda d: d["chunks"][0].update(backend_host_seconds=float("nan")),
+            lambda d: d["chunks"][0].update(valid=False),
+            lambda d: d["census"].update(failed_command_buffers=1),
+            lambda d: d["census"].update(gpu_busy_seconds=0),
+            lambda d: d["census"].update(gpu_busy_seconds=1),
+            lambda d: d["chunks"][0]["census"].update(valid=False),
+            lambda d: d["chunks"][0]["census"].update(orphan_dispatches=1),
+        ]
+        for change in changes:
+            with self.subTest(change=change):
+                document = self.profile_receipt("census")
+                change(document)
+                write_json(path, document)
+                with self.assertRaises(jobs.Refusal):
+                    jobs.validate_prefill_profile_result(path, manifest, "census")
+
+    def test_prefill_profile_cross_mode_token_mismatch_refuses(self):
+        manifest = self.fixture.manifest("glm-prefill-profile")
+        jobs.validate_job(argparse.Namespace(manifest=str(manifest)))
+        def run(argv, output, **kwargs):
+            mode = argv[argv.index("--mode") + 1]
+            document = self.profile_receipt(mode)
+            if mode == "census":
+                document["first_token_id"] = 43
+            write_json(Path(argv[argv.index("--out") + 1]), document)
+            output.write_text("diagnostic only\n")
+        with mock.patch.object(jobs, "run_checked", side_effect=run):
+            with self.assertRaisesRegex(jobs.Refusal, "modes differ"):
+                jobs.run_job(argparse.Namespace(manifest=str(manifest)))
 
     def test_legacy_snapshot_is_unchanged_and_read_only(self):
         before = set((self.fixture.source / ".lab-window").iterdir())

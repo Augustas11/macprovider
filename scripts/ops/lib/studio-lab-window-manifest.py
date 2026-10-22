@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import stat
@@ -35,7 +36,7 @@ QWEN_ARTIFACT_FIELDS = {
     "diagnostic_cli", "diagnostic_metallib", "fixture_config", "fixture_index",
 }
 JOB_KINDS = (
-    "diagnostic-legacy", "profiler-only", "qualification", "qwen-qualification", "qwen-journey", "glm-prefill",
+    "diagnostic-legacy", "profiler-only", "qualification", "qwen-qualification", "qwen-journey", "glm-prefill", "glm-prefill-profile",
 )
 JOB_SCHEMA = "macprovider.studio_lab_window_job.v1"
 JOB_RESULT_SCHEMA = "macprovider.studio_lab_window_job_result.v1"
@@ -56,7 +57,15 @@ QWEN_QUALIFICATION_CELLS = (
 )
 QUALIFICATION_KINDS = ("qualification", "qwen-qualification")
 QWEN_JOB_KINDS = ("qwen-qualification", "qwen-journey")
-CLI_ONLY_JOB_KINDS = (*QWEN_JOB_KINDS, "glm-prefill")
+CLI_ONLY_JOB_KINDS = (*QWEN_JOB_KINDS, "glm-prefill", "glm-prefill-profile")
+GLM_PREFILL_PROFILE = {
+    "model_id": "zai-org/glm-5.3-flash",
+    "nominal_prompt_tokens": 16384,
+    "prepared_prompt_tokens_max": 16448,
+    "rows": 1,
+    "completion_tokens": 1,
+    "modes": ["wall-only", "census"],
+}
 QWEN_JOURNEY_PROFILE = {
     "model_id": "qwen/qwen3.6-35b-a3b",
     "qualified_slots": 8,
@@ -480,7 +489,9 @@ def build_job(args: argparse.Namespace, source: Path, artifacts: dict[str, dict[
         inputs["glmbench_tree_oid"] = git_value(
             source, "HEAD:scripts/lab/cb-studio/glm53-bench", "GLMBench tree"
         )
-    if kind == "profiler-only":
+    if kind == "glm-prefill-profile":
+        inputs["prefill_profile"] = dict(GLM_PREFILL_PROFILE)
+    elif kind == "profiler-only":
         inputs["reuse"] = archived_reuse(source, artifacts, phase3_tree)
     elif kind in ("qualification", "glm-prefill"):
         policy, policy_sha = read_safe_object(source / POLICY_RELATIVE, "qualification policy")
@@ -708,7 +719,9 @@ def validate_job_object(job: object) -> dict:
     }
     if job["kind"] not in CLI_ONLY_JOB_KINDS:
         expected_inputs.add("glmbench_tree_oid")
-    if job["kind"] == "profiler-only":
+    if job["kind"] == "glm-prefill-profile":
+        expected_inputs.add("prefill_profile")
+    elif job["kind"] == "profiler-only":
         expected_inputs.add("reuse")
     elif job["kind"] in ("qualification", "glm-prefill"):
         expected_inputs |= {
@@ -743,6 +756,9 @@ def validate_job_object(job: object) -> dict:
         raise Refusal("job artifact hash schema is invalid")
     for key, value in artifacts.items():
         require_sha(value, f"job artifact {key}")
+    if job["kind"] == "glm-prefill-profile":
+        if canonical_digest(inputs.get("prefill_profile")) != canonical_digest(GLM_PREFILL_PROFILE):
+            raise Refusal("prefill profile parameters are not the fixed diagnostic")
     if job["kind"] == "profiler-only":
         reuse = inputs.get("reuse")
         if not isinstance(reuse, dict) or set(reuse) != {
@@ -852,7 +868,9 @@ def validate_current_job_inputs(manifest: dict, job: dict) -> None:
         actual = file_sha256(safe_artifact(path, executable=key in {"diagnostic_cli", "glmbench"}))
         if actual != artifact_hashes[key]:
             raise Refusal(f"job artifact drifted: {key}")
-    if job["kind"] == "profiler-only":
+    if job["kind"] == "glm-prefill-profile":
+        projection_tuple(source)
+    elif job["kind"] == "profiler-only":
         current_reuse = archived_reuse(source, artifacts, str(inputs["phase3_tree_oid"]))
         if inputs.get("reuse") != current_reuse:
             raise Refusal("archived journey reuse inputs drifted")
@@ -898,8 +916,10 @@ def validate_current_job_inputs(manifest: dict, job: dict) -> None:
             raise Refusal("Qwen qualification policy provider source drifted")
 
 
-def controlled_environment() -> dict[str, str]:
-    return {
+def controlled_environment(profile_mode: str | None = None) -> dict[str, str]:
+    if profile_mode not in (None, "wall-only", "census"):
+        raise Refusal("invalid fixed prefill profile mode")
+    environment = {
         "HOME": str(Path.home()),
         "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin",
         "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
@@ -907,6 +927,9 @@ def controlled_environment() -> dict[str, str]:
         "MACPROVIDER_LAB_OFFLINE": "1",
         "MACPROVIDER_NATIVE_MTP_E2E": "1",
     }
+    if profile_mode == "census":
+        environment["MLX_MAX_OPS_PER_BUFFER"] = "0"
+    return environment
 
 
 def snapshot_stamps(root: Path, maximum: int = 100_000) -> list[dict[str, int | str]]:
@@ -1191,7 +1214,9 @@ def qualification_base(manifest: dict, output: Path) -> list[str]:
     ]
 
 
-def run_checked(argv: list[str], output: Path, *, timeout: int = 3600) -> None:
+def run_checked(
+    argv: list[str], output: Path, *, timeout: int = 3600, profile_mode: str | None = None
+) -> None:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(output, flags, 0o600)
     try:
@@ -1199,7 +1224,7 @@ def run_checked(argv: list[str], output: Path, *, timeout: int = 3600) -> None:
             result = subprocess.run(
                 ["/usr/bin/nice", "-n", "19", *argv],
                 stdin=subprocess.DEVNULL, stdout=stream, stderr=subprocess.STDOUT,
-                env=controlled_environment(), timeout=timeout,
+                env=controlled_environment(profile_mode), timeout=timeout,
             )
             stream.flush()
             os.fsync(stream.fileno())
@@ -1211,6 +1236,118 @@ def run_checked(argv: list[str], output: Path, *, timeout: int = 3600) -> None:
         raise Refusal(
             f"fixed job command failed: {Path(argv[0]).name}; private log: {output}"
         )
+
+
+
+def validate_prefill_census(value: object) -> None:
+    if not isinstance(value, dict):
+        raise Refusal("prefill census is missing")
+    counts = ("valid_command_buffers", "invalid_command_buffers", "failed_command_buffers",
+              "single_dispatch_command_buffers", "unknown_command_buffers",
+              "multi_dispatch_command_buffers", "orphan_dispatches")
+    if any(type(value.get(key)) is not int or value[key] < 0 for key in counts):
+        raise Refusal("prefill census counts are invalid")
+    if (any(value[key] != 0 for key in ("invalid_command_buffers", "failed_command_buffers", "orphan_dispatches"))
+        or value["single_dispatch_command_buffers"] == 0
+        or value["valid_command_buffers"] != sum(value[key] for key in (
+            "single_dispatch_command_buffers", "unknown_command_buffers", "multi_dispatch_command_buffers"))):
+        raise Refusal("prefill census coverage is invalid")
+    for key in ("gpu_busy_seconds", "multi_dispatch_seconds", "unknown_seconds"):
+        number = value.get(key)
+        if type(number) not in (int, float) or not math.isfinite(number) or number < 0:
+            raise Refusal("prefill census timing is invalid")
+    if value["gpu_busy_seconds"] <= 0:
+        raise Refusal("prefill census GPU timing is empty")
+    for key in ("kernel_seconds", "partial_family_seconds"):
+        values = value.get(key)
+        if not isinstance(values, dict) or not values or any(
+            not isinstance(name, str) or not name or type(number) not in (int, float)
+            or not math.isfinite(number) or number <= 0 for name, number in values.items()
+        ):
+            raise Refusal("prefill census named timings are invalid")
+
+
+def validate_prefill_profile_result(path: Path, manifest: dict, mode: str) -> dict:
+    artifact = safe_artifact(path)
+    if artifact.stat().st_size > 16 * 1024 * 1024:
+        raise Refusal("prefill profile result exceeds the diagnostic bound")
+    document, _ = read_safe_object(path, "prefill profile result")
+    expected = projection_tuple(Path(manifest["lab_source_dir"]))
+    if (
+        document.get("schema") != "macprovider.glm-prefill-profile.v1"
+        or document.get("status") != "pass"
+        or document.get("mode") != mode
+        or document.get("evidence_class") != "lab_isolated_no_join_diagnostic"
+        or document.get("provider_commit") != manifest["lab_git_head"]
+        or document.get("model_id") != GLM_PREFILL_PROFILE["model_id"]
+        or type(document.get("nominal_prompt_tokens")) is not int
+        or document["nominal_prompt_tokens"] != 16384
+        or type(document.get("completion_tokens")) is not int
+        or document["completion_tokens"] != 1
+        or type(document.get("first_token_id")) is not int
+        or document["first_token_id"] < 0
+        or document.get("cache_writes_attributed") is not False
+        or type(document.get("rows")) is not int or document["rows"] != 1
+        or document.get("prepared_prompt_digest_encoding") != "json-int32-array"
+        or document.get("attribution_scope") != "single_dispatch_command_buffers_partial"
+        or document.get("gpu_busy_seconds_semantics") != "union_of_completed_command_buffer_intervals"
+        or any(document.get(key) != expected[key] for key in ("target_sha256", "mtp_sha256", "tokenizer_sha256"))
+    ):
+        raise Refusal("prefill profile result identity or diagnostic boundary is invalid")
+    count = document.get("prepared_prompt_tokens")
+    if type(count) is not int or not 16384 <= count <= 16448:
+        raise Refusal("prefill profile prepared prompt is outside the fixed bound")
+    require_sha(document.get("prepared_prompt_sha256"), "prepared prompt digest")
+    seconds = document.get("request_wall_seconds")
+    if type(seconds) not in (int, float) or not math.isfinite(seconds) or seconds <= 0:
+        raise Refusal("prefill profile wall time is invalid")
+    chunks = document.get("chunks")
+    if not isinstance(chunks, list) or not 1 <= len(chunks) <= 64:
+        raise Refusal("prefill profile chunk evidence is missing or unbounded")
+    offset = 0
+    for chunk in chunks:
+        if (
+            not isinstance(chunk, dict)
+            or chunk.get("valid") is not True
+            or type(chunk.get("offset")) is not int or chunk["offset"] != offset
+            or type(chunk.get("prompt_tokens")) is not int
+            or not 1 <= chunk["prompt_tokens"] <= 512
+            or type(chunk.get("backend_host_seconds")) not in (int, float)
+            or not math.isfinite(chunk["backend_host_seconds"])
+            or chunk["backend_host_seconds"] <= 0
+        ):
+            raise Refusal("prefill profile chunk partition or timing is invalid")
+        offset += chunk["prompt_tokens"]
+        if mode == "census":
+            validate_prefill_census(chunk.get("census"))
+            if chunk["census"].get("valid") is not True:
+                raise Refusal("prefill chunk census is not valid")
+        elif "census" in chunk:
+            raise Refusal("wall-only profile contains census instrumentation")
+    if offset != count:
+        raise Refusal("prefill profile chunks do not cover the prepared prompt")
+    if mode == "census":
+        validate_prefill_census(document.get("census"))
+        for key, reported in document["census"].items():
+            if isinstance(reported, dict):
+                combined = {}
+                for chunk in chunks:
+                    for name, seconds in chunk["census"].get(key, {}).items():
+                        combined[name] = combined.get(name, 0.0) + seconds
+                if set(reported) != set(combined) or any(
+                    not math.isclose(reported[name], combined[name], rel_tol=1e-9, abs_tol=1e-9)
+                    for name in combined
+                ):
+                    raise Refusal("prefill census summary differs from chunks")
+            elif type(reported) in (int, float):
+                combined = sum(chunk["census"].get(key, 0) for chunk in chunks)
+                if (type(reported) is int and reported != combined) or not math.isclose(
+                    reported, combined, rel_tol=1e-9, abs_tol=1e-9
+                ):
+                    raise Refusal("prefill census summary differs from chunks")
+    elif "census" in document:
+        raise Refusal("wall-only profile contains census instrumentation")
+    return document
 
 
 def validate_qwen_journey_result(path: Path, job: dict) -> None:
@@ -1316,7 +1453,20 @@ def validate_job(args: argparse.Namespace) -> dict[str, object]:
     expected = job["immutable_inputs"]["artifact_projection"] if qwen else projection_tuple(source)
     mtp = source / ".lab-window/fixture/mtp"
     mtp_stamps = None
-    if job["kind"] == "profiler-only":
+    if job["kind"] == "glm-prefill-profile":
+        target_digest, target_stamps = snapshot_identity(target)
+        if (
+            target_digest != expected["target_sha256"]
+            or file_sha256(safe_artifact(target / "tokenizer.json")) != expected["tokenizer_sha256"]
+            or file_sha256(safe_artifact(target / "config.json")) != expected["mtp_manifest_sha256"]
+        ):
+            raise Refusal("prefill profile fixture identity differs from projection")
+        # Check the candidate exposes the fixed diagnostic before provider pause.
+        run_checked([
+            str(private_artifact_paths(manifest, job)["diagnostic_cli"]),
+            "glm-prefill-profile", "--help",
+        ], preflight / "command-help.log", timeout=60)
+    elif job["kind"] == "profiler-only":
         target_digest, target_stamps = snapshot_identity(target)
         reuse = job["immutable_inputs"]["reuse"]
         if target_digest != reuse["target_sha256"]:
@@ -1445,7 +1595,27 @@ def run_job(args: argparse.Namespace) -> dict[str, object]:
     result = Path(manifest["_result_dir"])
     create_result_dir(result)
     outputs: list[Path] = []
-    if job["kind"] == "profiler-only":
+    if job["kind"] == "glm-prefill-profile":
+        summaries = []
+        for mode in GLM_PREFILL_PROFILE["modes"]:
+            validate_execution_inputs(manifest, job)
+            document = result / f"prefill-{mode}.json"
+            log = result / f"prefill-{mode}.log"
+            run_checked([
+                str(private_artifact_paths(manifest, job)["diagnostic_cli"]),
+                "glm-prefill-profile", "--root", str(source / ".lab-window/fixture"),
+                "--model-id", GLM_PREFILL_PROFILE["model_id"],
+                "--provider-commit", manifest["lab_git_head"],
+                "--mode", mode, "--out", str(document),
+            ], log, timeout=1200, profile_mode=mode)
+            summaries.append(validate_prefill_profile_result(document, manifest, mode))
+            outputs.extend((log, document))
+        for key in ("prepared_prompt_tokens", "prepared_prompt_sha256", "first_token_id"):
+            if summaries[0][key] != summaries[1][key]:
+                raise Refusal("prefill profile modes differ in prepared tokens or first token")
+        if [c["prompt_tokens"] for c in summaries[0]["chunks"]] != [c["prompt_tokens"] for c in summaries[1]["chunks"]]:
+            raise Refusal("prefill profile modes differ in chunk partition")
+    elif job["kind"] == "profiler-only":
         bench = str(private_artifact_paths(manifest, job)["glmbench"])
         target = str(source / ".lab-window/fixture/target")
         wall = result / "component-wall.log"
@@ -1522,6 +1692,8 @@ def run_job(args: argparse.Namespace) -> dict[str, object]:
         },
         "outputs": {item.name: file_sha256(safe_artifact(item)) for item in outputs},
     }
+    if job["kind"] == "glm-prefill-profile":
+        receipt.update(exploratory=True, qualification=False, evidence_class="glm_prefill_diagnostic_only")
     if job["kind"] == "glm-prefill":
         receipt.update(exploratory=True, qualification=False, evidence_class="glm_prefill_measurement_only")
     if job["kind"] in QWEN_JOB_KINDS:
