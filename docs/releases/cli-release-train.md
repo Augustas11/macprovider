@@ -60,11 +60,17 @@ The operator explicitly directed **no standalone CLI cut for #2081**. Include
 its merged source in the next combined train. This entry records source and
 accepted lab results; Qwen signed admission and live activation remain pending.
 
+Live fleet target: **1.8.260** (released 2026-10-20 10:26Z; Pearl runtime v1.8.259). Staged:
+`binaryVersion` **1.8.261**. The operator ordered this combined cut for #2095, #2096 and #2106.
+
 | PR | Issue | Provider-side change | Status |
 |---|---|---|---|
 | #2098 | — | Download cancellation remains final when a sampled heartbeat arrives late. | merged (`41bba3a81`); next combined CLI |
 | #2095 | #2054 | Qwen automatic tool use, schema-typed arguments, sampling controls and OpenCode/Connected apps integration. | merged (`15ef4e19b`); next combined CLI |
 | #2096 | #2081 | Exact Qwen native/ordinary ragged prompt grouping and snapshot-pinned text preparation, including streaming preflight and queued-drain cancellation. | merged (`359e3d4ad`); next combined CLI |
+| #2099 | #2082 | Dense-model CB qualification measures production's uncompiled decode default; truncated token prefixes are rejected instead of reported as parity PASS; per-row parity counts and prefix hashes; signed Qwen3-8B four-slot CB policy entry (catalog, already live). | merged (`41ea0fef0`); next combined CLI |
+| #2106 | #2081 | Native-MTP admission binds to a compiled-in `decode_path_digest` (plus runtime revision, metallib, hardware) instead of the CLI binary; the serve decode path moves behaviour-preserving into `ServeDecodePath.swift`; the digest is reported on `/v1/status` (SPEC-048 0.1.51). | merged (`c1b49eddd`); next combined CLI |
+| #2088 | #2029 | Catalog-only: GLM-5.3-Flash native-MTP admission identity rebind to 1.8.260 (already live; no binary change). | merged (`d9a6cf20f`); catalog-only |
 
 ### Qwen3.6 native-MTP handoff (#2081)
 
