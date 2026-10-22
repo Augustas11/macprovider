@@ -677,7 +677,9 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
             ))
         }
 
-        XCTAssertEqual(sink.normalized(), ["content:   ", "content:.", "content:later"])
+        // SPEC-018 v0.3.1: a Qwen tool turn holds a whitespace-only prefix
+        // (it may open a bare call body), so it is released with the ".".
+        XCTAssertEqual(sink.normalized(), ["content:   .", "content:later"])
         let parsed = ModelRuntime.ParsedGeneratedOutput(
             content: "   .later",
             toolCalls: [],

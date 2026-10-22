@@ -100,10 +100,16 @@ final class ToolSelectionPolicyTests: XCTestCase {
     }
 
     func testMalformedAndUnsupportedSchemaRejectedBeforeInference() throws {
+        // A schema nested past JSONSchemaValidator.maxDepth containers never
+        // reaches the policy: the request parser bounds every tool first.
+        var deep: [String: Any] = ["type": "string"]
+        for _ in 0..<17 { deep = ["type": "object", "properties": ["x": deep]] }
+        XCTAssertThrowsError(try Self.request(schema: deep)) { error in
+            XCTAssertEqual((error as? APIError)?.code, "invalid_tools")
+        }
         for schema: [String: Any] in [
-            ["type": "object"],
-            ["type": "object", "additionalProperties": false, "properties": ["x": ["type": "string"]]],
-            ["type": "object", "additionalProperties": false, "anyOf": []],
+            ["type": "array", "items": ["type": "string"]],
+            ["properties": ["x": ["type": "string"]]],
         ] {
             let request = try Self.request(schema: schema)
             XCTAssertThrowsError(try ToolSelectionPolicy.validateRequest(request, loadedModelID: ToolSelectionPolicy.supportedNativeModel, runtime: "mlx_cache")) { error in
@@ -181,4 +187,27 @@ final class ToolSelectionPolicyTests: XCTestCase {
         XCTAssertNoThrow(try StrictJSONParser.parse(nested, maxDepth: 128))
     }
 
+
+    /// #2107 validation (Qwen3.6, `required`/named): the buyer-UX suite's
+    /// ordinary OpenAI parameters object, with no `additionalProperties:false`,
+    /// returned 400 `unsupported_tool_schema`. SPEC-018 §3.11 v0.3.1 admits it;
+    /// its output must still be an object holding every root required key.
+    func testOrdinaryOpenAISchemaIsAdmittedForGuaranteedSelection() throws {
+        let readFile: [String: Any] = ["type": "object", "properties": ["path": ["type": "string"]], "required": ["path"]]
+        for choice: Any in ["required", ["type": "function", "function": ["name": "lookup"]]] {
+            let request = try Self.request(choice: choice, schema: readFile)
+            XCTAssertNoThrow(try ToolSelectionPolicy.validateRequest(request, loadedModelID: ToolSelectionPolicy.supportedNativeModel, runtime: "mlx_cache"))
+            XCTAssertFalse(ToolSelectionPolicy.isStrictSubset(try XCTUnwrap(ToolSelectionPolicy.schemas(request)["lookup"])))
+            XCTAssertNoThrow(try ToolSelectionPolicy.validateOutput(calls: [Self.call(arguments: #"{"path":"/etc/hosts"}"#)], finishReason: "tool_calls", generatedTokens: 9, request: request))
+            for arguments in [#"{}"#, #"{"file":"/etc/hosts"}"#, #"[]"#] {
+                XCTAssertThrowsError(try ToolSelectionPolicy.validateOutput(calls: [Self.call(arguments: arguments)], finishReason: "tool_calls", generatedTokens: 9, request: request)) { error in
+                    XCTAssertEqual((error as? APIError)?.code, "tool_selection_validation_failed")
+                }
+            }
+        }
+        // A strict-subset schema keeps full validation.
+        let strict = try Self.request()
+        XCTAssertTrue(ToolSelectionPolicy.isStrictSubset(try XCTUnwrap(ToolSelectionPolicy.schemas(strict)["lookup"])))
+        XCTAssertThrowsError(try ToolSelectionPolicy.validateOutput(calls: [Self.call(arguments: #"{"id":0}"#)], finishReason: "tool_calls", generatedTokens: 9, request: strict))
+    }
 }

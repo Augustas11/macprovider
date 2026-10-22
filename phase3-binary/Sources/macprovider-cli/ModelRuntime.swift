@@ -6071,7 +6071,11 @@ maxTokens: 1,
         if HarmonyResponseParser.isHarmonyModelID(request.model),
            isStructuredResponseFormat(request.responseFormat)
             || hasEnabledTools(request.promptSource.tools)
-            || request.stop.contains(where: { !$0.isEmpty }) {
+            || request.stop.contains(where: { !$0.isEmpty })
+            // SPEC-018 §3.10 rules 1a/4: the batched stream sink emits decoded
+            // text, not Harmony channels parsed from token IDs, so a streaming
+            // Harmony turn is served serially (reasoning before content).
+            || request.stream {
             return false
         }
         // logit_bias and logprobs (incl. top_logprobs metadata) have no carrier in
@@ -6572,11 +6576,20 @@ maxTokens: 1,
     /// warm-swapped model, and a pool alias (never the native allowlisted id),
     /// keep the loaded id.
     private func toolSelectionModelID(_ snapshot: RuntimeSnapshot) -> String? {
-        guard snapshot.modelID != nil, snapshot.modelID == modelID,
-              catalogModelIDAlias?.trimmingCharacters(in: .whitespacesAndNewlines)
-                == ToolSelectionPolicy.supportedNativeModel
-        else { return snapshot.modelID }
-        return ToolSelectionPolicy.supportedNativeModel
+        Self.toolSelectionModelID(
+            loadedModelID: snapshot.modelID, configuredModelID: modelID, catalogModelIDAlias: catalogModelIDAlias
+        )
+    }
+
+    /// Every guaranteed-call profile identity resolves through its catalog
+    /// alias, not only Qwen3.6: the coordinator capability advertises the
+    /// catalog id, so the request check must use the same identity.
+    static func toolSelectionModelID(loadedModelID: String?, configuredModelID: String?, catalogModelIDAlias: String?) -> String? {
+        guard let loadedModelID, loadedModelID == configuredModelID,
+              let alias = catalogModelIDAlias?.trimmingCharacters(in: .whitespacesAndNewlines),
+              ToolSelectionPolicy.guaranteedCallProfile(modelID: alias) != nil
+        else { return loadedModelID }
+        return alias
     }
 
     func acquireLocalRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle {
@@ -10104,7 +10117,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 : textEmitter.reconciledToolCalls,
                             modelHashObserved: Self.validObservedModelHash(snapshot.modelHash),
                             settlementDisposition: .eligibleOwner,
-                            reasoningContent: request.outputTraits.reasoningOpen ? textEmitter.emittedReasoning : nil,
+                            reasoningContent: request.outputTraits.reasoningOpen || isHarmonyResponse
+                                ? textEmitter.emittedReasoning : nil,
                             reasoningTokens: parsed.reasoningTokens
                         )
                         let validated = try Self.validateStructuredStreamingCompletion(
@@ -12695,7 +12709,11 @@ maxTokens: maxTokens,
                     decode: decode,
                     decodeFinalToken: decodeFinalToken,
                     allowedFunctionNames: allowedFunctionNames,
-                    stopCandidates: stopTokenFilter.tokens + requestStops
+                    // Request stops end only the visible final body (SPEC-018
+                    // §3.10 rule 5); `harmonyParsedOutput` matches them there.
+                    // As hidden-span stop candidates they turned a stop string
+                    // inside the analysis channel into a malformed response.
+                    stopCandidates: stopTokenFilter.tokens
                 )
             } else {
                 self.harmonyParser = nil
@@ -12908,7 +12926,7 @@ maxTokens: maxTokens,
         let toolCalls = filteredVisible.hitStop ? [] : parsed.toolCalls
         let hasToolCalls = !toolCalls.isEmpty
         let visibleContent = hasToolCalls ? "" : filteredVisible.text
-        return ParsedGeneratedOutput(
+        var output = ParsedGeneratedOutput(
             content: visibleContent,
             toolCalls: toolCalls,
             completionTokens: countCompletionTokens ? harmonyVisibleFinalTokenCount(
@@ -12921,6 +12939,10 @@ maxTokens: maxTokens,
             hitStop: filteredVisible.hitStop,
             isTerminal: parsed.status == .parsed
         )
+        // SPEC-018 §3.10 rule 1a: the analysis channel is the reasoning.
+        output.reasoningContent = parsed.reasoningContent
+        output.reasoningTokens = parsed.reasoningTokenCount
+        return output
     }
 
     private static func harmonyVisibleFinalTokenCount(
@@ -13972,6 +13994,14 @@ struct SerialStreamingTextEmitter {
                 onChunk(.reasoning(rest))
             }
             finalText = split.answer
+        } else if let reasoning = parsed.reasoningContent, emittedReasoning.isEmpty {
+            // Harmony analysis is parsed from token IDs at the end, so it is
+            // delivered whole before the content it precedes.
+            emittedReasoning = reasoning
+            if !reasoning.isEmpty {
+                idleState.noteContent()
+                onChunk(.reasoning(reasoning))
+            }
         }
         reconciledToolCalls = parsed.toolCalls
         let finalDelta = delta(to: parsed.content)
@@ -14190,6 +14220,12 @@ struct NativeToolCallStreamEmitter {
             }
             return Self.stripIncompleteOpenDelimiter(from: text, delimiter: startDelimiter, extra: nil)
         }
+        if grammar == .qwen, Self.mayOpenQwenBareCalls(text) {
+            // A bare Qwen call body (`ToolCallParser.parseQwenBareCalls`) is
+            // the whole output: hold an output that opens like one until the
+            // final parse decides (flushed as content when it is no call).
+            return ""
+        }
         if let start = text.range(of: startDelimiter) {
             return String(text[..<start.lowerBound])
         }
@@ -14205,6 +14241,11 @@ struct NativeToolCallStreamEmitter {
         }
         guard incremental else {
             observeComplete(text)
+            return []
+        }
+        if grammar == .qwen, Self.mayOpenQwenBareCalls(text) {
+            // A held bare body is classified by the final parse; `<tool_call>`
+            // inside one of its argument strings is data, not framing.
             return []
         }
         if let start = text.range(of: startDelimiter) {
@@ -14391,6 +14432,16 @@ struct NativeToolCallStreamEmitter {
             index = body.index(after: index)
         }
         return nil
+    }
+
+    static func mayOpenQwenBareCalls(_ text: String) -> Bool {
+        guard !text.isEmpty else { return false }
+        let lead = text.drop(while: { $0.isWhitespace })
+        // Leading whitespace is held too: the final parse trims it away when
+        // the output is a bare call, and flushes it when the output is prose.
+        guard !lead.isEmpty else { return true }
+        let wrapper = ToolCallParser.qwenBareWrapperOpen
+        return lead.hasPrefix("{") || lead.hasPrefix(wrapper) || wrapper.hasPrefix(lead)
     }
 
     private static func stripIncompleteOpenDelimiter(from text: String, delimiter: String, extra: String?) -> String {

@@ -1,6 +1,18 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.40 (2026-10-22, template-selected tool grammars, reasoning split, template-rendered tool history)
+**Version:** 1.9.41 (2026-10-22, SPEC-018 v0.3.1 real-model conformance fixes)
+
+**Change log v1.9.41 (2026-10-22, Related: #2107):**
+The provider implements SPEC-018 v0.3.1: a Qwen-grammar output made only of
+untagged `{"name","arguments"}` call bodies (optionally in one `<tools>`
+wrapper) is parsed as tool calls and held from the stream until the final
+parse; gpt-oss Harmony `analysis` bodies are returned as `reasoning_content`
+with `reasoning_tokens`; a request stop string matches only the visible final
+body; a `length` finish inside the analysis channel returns
+`finish_reason:"length"` instead of 502; `required`/named admit an ordinary
+OpenAI parameters object (required-keys output check when outside the strict
+subset); every guaranteed-call profile resolves through the configured catalog
+id alias.
 
 **Change log v1.9.40 (2026-10-22, Related: #2107):**
 The provider implements SPEC-018 v0.3.0 on every serving path (serial,
