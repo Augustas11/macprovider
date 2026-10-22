@@ -185,3 +185,25 @@ func TestRelayBuyerCancelDeliversALateCompleteTerminalOnce(t *testing.T) {
 		t.Fatal("a second terminal was delivered")
 	}
 }
+
+// #2084 VM acceptance V-3: the terminal frame of a request whose buyer
+// context already ended is still handed to RelayStream.Done (it used to be a
+// coin toss against ctx.Done).
+func TestRelayDeliveredHandsTheTerminalOverAfterTheBuyerLeft(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		active := &relayActive{chunks: make(chan InferenceResponseChunk), done: make(chan InferenceResponseEnd, 1)}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		active.done <- InferenceResponseEnd{Type: "inference_response_end", RequestID: "r", Status: "complete"}
+		close(active.chunks)
+		_, done := active.delivered(ctx)
+		select {
+		case end := <-done:
+			if end.Status != "complete" {
+				t.Fatalf("iteration %d: terminal %#v", i, end)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("iteration %d: terminal dropped after the buyer context ended", i)
+		}
+	}
+}

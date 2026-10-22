@@ -301,10 +301,12 @@ func (a *relayActive) delivered(ctx context.Context) (<-chan InferenceResponseCh
 		}
 		select {
 		case end := <-a.done:
-			select {
-			case outDone <- end:
-			case <-ctx.Done():
-			}
+			// outDone holds exactly one frame, so this never blocks. The
+			// terminal is handed over even after the buyer's context ended: a
+			// buyer that read a stream to its end and left still settles from
+			// it (#2084 VM acceptance V-3); a random pick against ctx.Done
+			// dropped it.
+			outDone <- end
 		default:
 		}
 	}()
