@@ -1,10 +1,11 @@
 import CryptoKit
 import Foundation
 
-// Issue #2084 group attestation primitives (SPEC-051-R019), pure and unsigned: the
-// running per-link activation digest, the per-member sub-receipt with its canonical
-// JSON encoding, and the chain verifier. Signing with member device keys and the
-// head's group attestation object come with group registration.
+// Issue #2084 group attestation primitives (SPEC-051-R019): the running per-link
+// activation digest, the per-member sub-receipt with its canonical JSON encoding,
+// its Ed25519 signature by the member's device identity key, and the chain
+// verifier. The head's group attestation object, bound to the SPEC-015 receipt, is
+// built by the provider CLI from these.
 //
 // Both ends of a link fold the exact payload bytes they sent or received, so for an
 // honest chain the upstream member's `out_digest` equals the downstream member's
@@ -104,6 +105,10 @@ public struct ShardAttestationFault: Codable, Equatable, Sendable {
         case epochMismatch = "epoch_mismatch"
         case layerGap = "layer_gap"
         case digestMismatch = "digest_mismatch"
+        /// A sub-receipt whose signature does not verify under its public key.
+        case signatureInvalid = "signature_invalid"
+        /// A sub-receipt signed by a key other than the one its member announced.
+        case keyMismatch = "key_mismatch"
     }
 
     public var kind: Kind
@@ -165,5 +170,83 @@ public enum ShardGroupAttestationVerifier {
                 detail: "token out_digest \(last.outDigest) != head in_digest \(head.inDigest)"))
         }
         return .ok
+    }
+}
+
+/// A member device identity and its Ed25519 signing key (the provider admission
+/// identity key in production, an ephemeral key in the lab harness).
+public struct ShardMemberSigner: @unchecked Sendable {
+    public let memberDeviceID: String
+    public let key: Curve25519.Signing.PrivateKey
+
+    public init(memberDeviceID: String, key: Curve25519.Signing.PrivateKey) {
+        self.memberDeviceID = memberDeviceID
+        self.key = key
+    }
+
+    /// Raw 32-byte public key, base64.
+    public var publicKeyBase64: String { key.publicKey.rawRepresentation.base64EncodedString() }
+
+    public func sign(_ receipt: ShardMemberSubReceipt) throws -> ShardSignedSubReceipt {
+        let signature = try key.signature(for: ShardSignedSubReceipt.signedBytes(receipt))
+        return ShardSignedSubReceipt(receipt: receipt, publicKey: publicKeyBase64, signature: signature.base64EncodedString())
+    }
+}
+
+/// A sub-receipt with its member's signature over
+/// `"macprovider.shard-sub-receipt.v1\n" || canonicalJSON(sub_receipt)`.
+public struct ShardSignedSubReceipt: Codable, Equatable, Sendable {
+    public static let domain = "macprovider.shard-sub-receipt.v1\n"
+
+    public var receipt: ShardMemberSubReceipt
+    /// Raw 32-byte Ed25519 public key, base64.
+    public var publicKey: String
+    /// 64-byte Ed25519 signature, base64.
+    public var signature: String
+
+    public init(receipt: ShardMemberSubReceipt, publicKey: String, signature: String) {
+        self.receipt = receipt
+        self.publicKey = publicKey
+        self.signature = signature
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case receipt = "sub_receipt"
+        case publicKey = "public_key"
+        case signature
+    }
+
+    public static func signedBytes(_ receipt: ShardMemberSubReceipt) throws -> Data {
+        Data(domain.utf8) + (try receipt.canonicalJSON())
+    }
+
+    public var signatureIsValid: Bool {
+        guard let keyBytes = Data(base64Encoded: publicKey), let signatureBytes = Data(base64Encoded: signature),
+              let key = try? Curve25519.Signing.PublicKey(rawRepresentation: keyBytes),
+              let message = try? Self.signedBytes(receipt)
+        else { return false }
+        return key.isValidSignature(signatureBytes, for: message)
+    }
+}
+
+extension ShardGroupAttestationVerifier {
+    /// Signed form: every signature must verify and, where the head knows the key a
+    /// stage announced in its hello (`expectedKeys[stage]`), be made with that key;
+    /// then the chain checks of `verify(_:)`.
+    public static func verify(signed receipts: [ShardSignedSubReceipt], expectedKeys: [Int: String] = [:]) -> ShardAttestationVerdict {
+        for (position, signed) in receipts.enumerated() {
+            func fault(_ kind: ShardAttestationFault.Kind, _ detail: String) -> ShardAttestationVerdict {
+                .broken(ShardAttestationFault(
+                    kind: kind, fromStage: position, toStage: position, fromMember: signed.receipt.memberDeviceID,
+                    toMember: signed.receipt.memberDeviceID, detail: detail))
+            }
+            if let expected = expectedKeys[signed.receipt.stageIndex], expected != signed.publicKey {
+                return fault(.keyMismatch, "stage \(signed.receipt.stageIndex) signed with \(signed.publicKey), announced \(expected)")
+            }
+            guard signed.signatureIsValid else {
+                return fault(.signatureInvalid, "stage \(signed.receipt.stageIndex) sub-receipt signature does not verify")
+            }
+        }
+        return verify(receipts.map(\.receipt))
     }
 }

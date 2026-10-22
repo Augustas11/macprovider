@@ -1,4 +1,5 @@
 import ArgumentParser
+import CryptoKit
 import Foundation
 import MLX
 import MLXLLM
@@ -68,7 +69,7 @@ struct ShardBenchCommand: AsyncParsableCommand {
     @Option(help: "Independent sequences the head keeps in flight across the stages.")
     var concurrency: Int = 1
 
-    @Option(help: "Sampling temperature on the last stage (0 = greedy; parity needs 0).")
+    @Option(help: "Head: sampling temperature the last stage applies to every sequence (0 = greedy; parity needs 0).")
     var temperature: Float = 0
 
     @Option(help: "MLX random seed for temperature sampling.")
@@ -512,6 +513,8 @@ struct ShardBenchActivation: Equatable, Sendable {
 /// a deterministic stand-in in unit tests of the chain wiring.
 protocol ShardBenchStage: AnyObject {
     associatedtype Cache
+    /// One request's sampling state on the last stage.
+    associatedtype Sampler
 
     var modelType: String { get }
     var hiddenSize: Int { get }
@@ -524,8 +527,10 @@ protocol ShardBenchStage: AnyObject {
     func forward(tokens: [Int], cache: Cache) throws -> ShardBenchActivation
     /// Middle stage: boundary activation in and out.
     func forward(activation: ShardBenchActivation, cache: Cache) throws -> ShardBenchActivation
+    /// Last stage: a request's sampler from its `control` open frame.
+    func makeSampler(_ control: ShardRequestControl) -> Sampler
     /// Last stage: boundary activation in, next token out.
-    func sample(activation: ShardBenchActivation, cache: Cache, temperature: Float) throws -> Int
+    func sample(activation: ShardBenchActivation, cache: Cache, sampler: Sampler) throws -> Int
     /// Last stage: extend the KV with a fill-only activation; no token is sampled.
     func fill(activation: ShardBenchActivation, cache: Cache) throws
     /// Last stage: boundary activation in, top-k logit summary of the last position out.
@@ -548,9 +553,13 @@ extension PipelineStageModel: ShardBenchStage {
         return ShardBenchActivation(dtype: encoded.dtype, shape: encoded.shape, payload: encoded.payload)
     }
 
-    func sample(activation: ShardBenchActivation, cache: [KVCache], temperature: Float) throws -> Int {
+    func makeSampler(_ control: ShardRequestControl) -> PipelineStageSampler {
+        PipelineStageSampler(control)
+    }
+
+    func sample(activation: ShardBenchActivation, cache: [KVCache], sampler: PipelineStageSampler) throws -> Int {
         let input = try PipelineActivationCodec.decode(dtype: activation.dtype, shape: activation.shape, payload: activation.payload)
-        return PipelineStageSampler.sample(logits: try forward(input, cache: cache), temperature: temperature)
+        return sampler.sample(logits: try forward(input, cache: cache))
     }
 
     func summarize(activation: ShardBenchActivation, cache: [KVCache], topK: Int) throws -> ShardLogitSummary {
@@ -615,6 +624,11 @@ struct ShardBenchSessionOptions: Sendable {
     /// SPEC-051-R022: reaching the spare and replaying must finish within this.
     let replayDeadline: TimeInterval
     let parity: ShardBenchParityOptions
+    /// Member device identity signing this stage's sub-receipts; nil signs with an
+    /// ephemeral key under `memberID` (lab).
+    var signer: ShardMemberSigner? = nil
+    /// Model digest this stage reports in its hello (SPEC-051-R008).
+    var modelDigest: String? = nil
 }
 
 enum ShardBenchParityMode: String, Sendable {
@@ -795,31 +809,18 @@ struct ShardBenchReplayReport: Encodable {
 
 struct ShardBenchAttestationReport: Encodable {
     /// `ok` when every request's chain verified; `partial` when some request finished
-    /// under a member that was later lost (its sub-receipts went with it); `broken` on
-    /// any failed chain.
+    /// under a member that was lost before its sub-receipt came back; `broken` on any
+    /// failed chain or signature.
     let verdict: String
     let requests: [ShardBenchRequestAttestation]
 
-    static func verify(
-        head: [ShardMemberSubReceipt],
-        others: [ShardMemberSubReceipt],
-        requests: [UInt64],
-        memberLost: Set<UInt64> = []
-    ) -> ShardBenchAttestationReport {
-        let rows = requests.map { requestID -> ShardBenchRequestAttestation in
-            let chain = head.filter { $0.requestID == requestID } + others.filter { $0.requestID == requestID }
-            if memberLost.contains(requestID) {
-                return ShardBenchRequestAttestation(requestID: requestID, verdict: "unverifiable_member_lost", fault: nil, receipts: chain)
-            }
-            switch ShardGroupAttestationVerifier.verify(chain) {
-            case .ok:
-                return ShardBenchRequestAttestation(requestID: requestID, verdict: "ok", fault: nil, receipts: chain)
-            case .broken(let fault):
-                return ShardBenchRequestAttestation(requestID: requestID, verdict: "broken", fault: fault, receipts: chain)
-            }
+    init(_ summaries: [ShardGenerationSummary]) {
+        requests = summaries.map { summary in
+            ShardBenchRequestAttestation(
+                requestID: summary.requestID, verdict: summary.attestation.verdict, fault: summary.attestation.fault,
+                receipts: summary.attestation.receipts.map(\.receipt))
         }
-        let verdict = rows.contains { $0.verdict == "broken" } ? "broken" : (rows.allSatisfy { $0.verdict == "ok" } ? "ok" : "partial")
-        return ShardBenchAttestationReport(verdict: verdict, requests: rows)
+        verdict = requests.contains { $0.verdict == "broken" } ? "broken" : (requests.allSatisfy { $0.verdict == "ok" } ? "ok" : "partial")
     }
 }
 
@@ -875,6 +876,12 @@ struct ShardBenchHello: Codable, Equatable {
     var session: String?
     /// Head only: the tail returns a top-k logit summary with every token.
     var logitTopK: Int?
+    /// Member device identity of this stage; it names it in its sub-receipts.
+    var memberDeviceID: String?
+    /// Raw Ed25519 public key (base64) this stage signs its sub-receipts with.
+    var memberPublicKey: String?
+    /// Digest of the model files this stage loaded from (SPEC-051-R008).
+    var modelDigest: String?
 
     var layerLabel: String { "\(layerStart):\(layerEnd)" }
 }
@@ -1094,75 +1101,58 @@ final class ShardBenchLinkWatch: @unchecked Sendable {
 
 // MARK: - Session
 
-/// One stage's side of a shard-bench run. Runs on a dedicated thread: model compute
-/// and socket I/O are synchronous and must not block Swift's cooperative pool.
+/// One stage's side of a shard-bench run. The head is a thin client of
+/// `ShardGroupEngine`; a middle or tail is the member stage server that
+/// `shard-member` also runs. Runs on a dedicated thread: model compute and socket
+/// I/O are synchronous and must not block Swift's cooperative pool.
 final class ShardBenchSession<Stage: ShardBenchStage> {
     private let options: ShardBenchSessionOptions
     private let stage: Stage
     private var watch = ShardBenchLinkWatch()
-    /// The epoch frames and receipts carry; a spare replacement starts the next one.
-    private var groupEpoch: UInt64
-    private var replayBuffer: ShardReplayBuffer
-    /// Tokens delivered per request of the current pipeline run.
-    private var delivered = [UInt64: Int]()
-    private var replays = [ShardBenchReplayReport]()
-    /// Requests that finished under a member later lost.
-    private var memberLost = Set<UInt64>()
-    /// Links opened after the first (a spare), closed with the session.
-    private var replacementLinks = [ShardBenchLinks]()
     private let probeRequestID: UInt64 = 0
-    private let warmupRequestID: UInt64 = 1
-    private let firstRequestID: UInt64 = 2
     private var stageIndex = 0
     /// The head's run id; other stages adopt it from the chain hello.
-    private var sessionID: String
+    private var sessionID = "from-head"
     /// Tail: send a logit summary of this size with every token (the head asked for it).
     private var returnLogitTopK: Int?
     /// Per-request digests and counts for this member's sub-receipts.
-    private var ledgers = [UInt64: MemberLedger]()
-
-    private struct MemberLedger {
-        var input = ShardActivationDigestChain()
-        var output = ShardActivationDigestChain()
-        var promptTokens = 0
-        var decodeSteps = 0
-    }
+    private var book = ShardMemberLedgerBook()
+    /// The member device key (`signer`), or an ephemeral key in the lab harness.
+    private let key: Curve25519.Signing.PrivateKey
 
     init(options: ShardBenchSessionOptions, stage: Stage) {
         self.options = options
         self.stage = stage
-        self.groupEpoch = options.link.groupEpoch
-        self.sessionID = String(format: "%016llx", UInt64.random(in: 0...UInt64.max))
-        self.replayBuffer = ShardReplayBuffer(capacityBytes: options.replayBufferBytes)
+        self.key = options.signer?.key ?? Curve25519.Signing.PrivateKey()
+    }
+
+    private var signer: ShardMemberSigner {
+        ShardMemberSigner(
+            memberDeviceID: options.signer?.memberDeviceID ?? options.memberID ?? "stage-\(stageIndex)", key: key)
     }
 
     func run() throws -> ShardBenchSessionReport {
         let links = try ShardBenchLinks.open(
             listen: options.listen, connect: options.connect,
             connectTimeout: options.connectTimeout, configuration: options.link,
-            session: options.role == .head ? sessionID : "from-head")
+            session: options.role == .head ? "head" : "from-head")
         return try run(links: links)
     }
 
     /// Run over already-open links (unit tests wire in-process loopback pairs).
     func run(links: ShardBenchLinks) throws -> ShardBenchSessionReport {
+        if options.role == .head {
+            return ShardBenchSessionReport(head: try runHead(links: links))
+        }
         defer {
             watch.stop()
             links.close()
-            for replacement in replacementLinks { replacement.close() }
         }
-        if options.temperature > 0 { MLXRandom.seed(options.seed) }
         do {
             try checkRole()
             switch options.role {
             case .head:
-                let chain = try headHandshake(links)
-                helloSucceeded(links, stages: "\(chain.count)")
-                if options.spare != nil, chain.count != 2 {
-                    throw ShardBenchError.handshake("--spare replays the head's downstream stage, which needs a two-stage chain; this one has \(chain.count)")
-                }
-                if !links.isCollapsed { watch.watch(links.downstream, wake: links.upstream) }
-                return ShardBenchSessionReport(head: try runHead(links: links, chain: chain))
+                throw ShardBenchError.handshake("unreachable: the head runs the engine")
             case .middle:
                 let upstreamProbe = try middleHandshake(links)
                 helloSucceeded(links, stages: "?")
@@ -1185,7 +1175,7 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
     /// The hello exchange is done: from here a silent peer is a dead peer.
     private func helloSucceeded(_ links: ShardBenchLinks, stages: String) {
         for link in links.unique { link.armLiveness() }
-        shardBenchLog("hello ok epoch=\(groupEpoch) session=\(sessionID) stage=\(stageIndex) stages=\(stages)")
+        shardBenchLog("hello ok epoch=\(options.link.groupEpoch) session=\(sessionID) stage=\(stageIndex) stages=\(stages)")
     }
 
     private func checkRole() throws {
@@ -1203,14 +1193,186 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
         }
     }
 
-    // MARK: Handshake
+    // MARK: Head
+
+    private func runHead(links: ShardBenchLinks) throws -> ShardBenchHeadReport {
+        let engine = ShardGroupEngine(stage: stage, options: ShardGroupEngineOptions(
+            link: options.link, connectTimeout: options.connectTimeout,
+            decodeHopDeadline: options.receiveTimeout, prefillChunkDeadline: options.prefillChunkDeadline,
+            replayDeadline: options.replayDeadline, maxInFlight: max(1, options.prompts.count),
+            prefillChunk: options.prefillChunk, expectedStages: options.expectedStages, expectedMembers: nil,
+            modelDigest: options.modelDigest, spare: options.spare, spareMember: nil,
+            replayBufferBytes: options.replayBufferBytes,
+            logitTopK: options.parity.mode == .teacherForced ? options.parity.topK : nil,
+            signer: signer))
+        try engine.start(links: links)
+        let measured: [ShardGenerationSummary]
+        let wallSeconds: Double
+        do {
+            let reference = options.parity.mode == .teacherForced ? try teacherReference() : nil
+            if options.warmup {
+                _ = try runBatch(engine, [ShardGenerationRequest(
+                    promptTokens: options.prompts[0], maxTokens: min(4, options.tokens), control: control(0))])
+            }
+            let requests = options.prompts.enumerated().map { index, prompt in
+                ShardGenerationRequest(
+                    promptTokens: prompt, maxTokens: options.tokens, control: control(index),
+                    teacherTokens: reference?.sequenceTokens[index])
+            }
+            let start = now()
+            measured = try runBatch(engine, requests)
+            wallSeconds = now() - start
+            try engine.shutdown()
+            var parity: ShardBenchParity?
+            if let reference, let stepLogits = reference.stepLogits {
+                let result = try ShardLogitParity.compare(
+                    reference: stepLogits.map { Array($0.prefix(options.tokens)) },
+                    sharded: measured.map(\.summaries),
+                    tieMargin: options.parity.tieMargin, logprobTolerance: options.parity.logprobTolerance)
+                parity = ShardBenchParity(
+                    verdict: result.verdict, source: options.parity.referenceSource, matchingTokens: nil,
+                    firstMismatch: result.hardFailures.first.map {
+                        "sequence \($0.sequence) step \($0.step): sharded \($0.shardedToken) vs reference \($0.referenceToken) (reference margin \($0.referenceMargin))"
+                    },
+                    teacherForced: result)
+            }
+            return headReport(engine: engine, measured: measured, wallSeconds: wallSeconds, parity: parity)
+        } catch {
+            _ = try? engine.shutdown()
+            throw error
+        }
+    }
+
+    /// Sampling for sequence `index`; a seeded run gives each sequence its own stream.
+    private func control(_ index: Int) -> ShardRequestControl {
+        ShardRequestControl(
+            temperature: options.temperature, topP: 1,
+            seed: options.temperature > 0 ? options.seed &+ UInt64(index) : nil)
+    }
+
+    /// Submit a batch, wait for all of it, and return the summaries in order. A
+    /// request lost with its stage surfaces as `streamTerminated` with every
+    /// request's delivered count.
+    private func runBatch(_ engine: ShardGroupEngine<Stage>, _ requests: [ShardGenerationRequest]) throws -> [ShardGenerationSummary] {
+        let collector = ShardGenerationCollector(count: requests.count)
+        let ids = try engine.submit(requests, sink: collector.receive)
+        let (summaries, errors) = collector.wait()
+        guard errors.isEmpty else {
+            var delivered = [UInt64: Int]()
+            var cause = ""
+            for id in ids {
+                switch errors[id] {
+                case ShardGroupEngineError.streamTerminated(let count, let detail)?:
+                    delivered[id] = count
+                    cause = detail
+                case ShardGroupEngineError.failedBeforeFirstToken(let detail)?:
+                    delivered[id] = 0
+                    cause = detail
+                case let other?:
+                    throw other
+                case nil:
+                    delivered[id] = summaries[id]?.tokens.count ?? 0
+                }
+            }
+            throw ShardBenchError.streamTerminated(delivered: delivered, cause: cause)
+        }
+        return try ids.map { id in
+            guard let summary = summaries[id] else { throw ShardBenchError.protocolViolation("request \(id) never finished") }
+            return summary
+        }
+    }
+
+    private func headReport(
+        engine: ShardGroupEngine<Stage>, measured: [ShardGenerationSummary], wallSeconds: Double, parity: ShardBenchParity?
+    ) -> ShardBenchHeadReport {
+        let chain = engine.chain
+        let decodeTPS = measured.compactMap { summary -> Double? in
+            guard let first = summary.timing.firstTokenAt, let last = summary.timing.lastTokenAt, summary.tokens.count > 1, last > first else {
+                return nil
+            }
+            return Double(summary.tokens.count - 1) / (last - first)
+        }
+        let totalTokens = measured.reduce(0) { $0 + $1.tokens.count }
+        let hops = ShardBenchChain.hops(chain)
+        var linkReports = [ShardBenchLinkReport]()
+        if let links = engine.currentLinks {
+            linkReports = links.isCollapsed
+                ? [ShardBenchLinkReport(name: "downstream+return", peerStage: 1, statistics: links.downstream.statistics, probe: hops.first?.probeRoundTrip)]
+                : [ShardBenchLinkReport(name: "downstream", peerStage: 1, statistics: links.downstream.statistics, probe: hops.first?.probeRoundTrip),
+                   ShardBenchLinkReport(name: "return", peerStage: chain.count - 1, statistics: links.upstream.statistics, probe: hops.last?.probeRoundTrip)]
+        }
+        let decodeHopPayloadBytes = measured.map(\.timing.decodeHopPayloadBytes).max() ?? 0
+        return ShardBenchHeadReport(
+            session: engine.sessionID,
+            model: options.modelLabel,
+            modelType: stage.modelType,
+            layers: "\(stage.layers.lowerBound):\(stage.layers.upperBound)",
+            stageCount: chain.count,
+            stageLayers: chain.map(\.layerLabel),
+            totalLayers: stage.totalLayers,
+            hiddenSize: stage.hiddenSize,
+            activationDtype: measured.first?.timing.activationDType ?? "",
+            stageWeightBytes: stage.weightBytes,
+            concurrency: options.prompts.count,
+            tokensPerSequence: options.tokens,
+            promptTokens: options.prompts.map(\.count),
+            sequenceTokens: measured.map(\.tokens),
+            totalTokens: totalTokens,
+            singleStreamTokensPerSecond: decodeTPS.isEmpty ? nil : round3(decodeTPS.reduce(0, +) / Double(decodeTPS.count)),
+            aggregateTokensPerSecond: round3(Double(totalTokens) / max(wallSeconds, 1e-9)),
+            ttft: ShardBenchLatency(seconds: measured.compactMap { summary in
+                summary.timing.firstTokenAt.map { $0 - summary.timing.prefillStart }
+            }),
+            probeRoundTrip: hops.first?.probeRoundTrip,
+            hops: hops,
+            decodeStepRoundTrip: ShardBenchLatency(seconds: measured.flatMap(\.timing.stepRoundTrips)),
+            headDecodeCompute: ShardBenchLatency(seconds: measured.flatMap(\.timing.headDecodeCompute)),
+            decodeHopPayloadBytes: decodeHopPayloadBytes,
+            decodeHopFrameBytes: ShardStageFrameCodec.frameSize(rank: 3, payloadLength: decodeHopPayloadBytes),
+            prefillHopPayloadBytes: measured.map(\.timing.prefillPayloadBytes),
+            prefillChunkTokens: options.prefillChunk,
+            prefillChunksPerSequence: measured.map(\.timing.prefillChunks),
+            headPrefillChunkCompute: ShardBenchLatency(seconds: measured.flatMap(\.timing.prefillChunkCompute)),
+            links: linkReports,
+            attestation: ShardBenchAttestationReport(measured),
+            replayBufferBytes: options.spare == nil ? nil : options.replayBufferBytes,
+            replays: engine.replays,
+            parity: parity,
+            referenceSingleStreamTokensPerSecond: nil
+        )
+    }
+
+    /// Fetch the teacher-forced reference and check it covers this run: same prompts,
+    /// at least `tokens` steps of tokens and logit summaries per sequence.
+    private func teacherReference() throws -> ShardBenchReferenceReport {
+        guard let provider = options.parity.referenceProvider else {
+            throw ShardBenchError.reference("no reference provider for teacher-forced parity")
+        }
+        let reference = try provider()
+        guard let stepLogits = reference.stepLogits else { throw ShardBenchError.reference("it has no step logits") }
+        if let prompts = reference.prompts {
+            guard prompts == options.prompts else { throw ShardBenchError.reference("its prompts differ from this run's") }
+        } else if reference.promptTokens != options.prompts.map(\.count) {
+            throw ShardBenchError.reference("its prompt lengths \(reference.promptTokens) differ from \(options.prompts.map(\.count))")
+        }
+        guard reference.sequenceTokens.count == options.prompts.count, stepLogits.count == options.prompts.count else {
+            throw ShardBenchError.reference("it has \(stepLogits.count) sequences, this run has \(options.prompts.count)")
+        }
+        for (index, (tokens, logits)) in zip(reference.sequenceTokens, stepLogits).enumerated()
+        where tokens.count < options.tokens || logits.count < options.tokens {
+            throw ShardBenchError.reference("sequence \(index) has \(min(tokens.count, logits.count)) steps, this run needs \(options.tokens)")
+        }
+        return reference
+    }
+
+    // MARK: Member handshake
 
     private func myHello() -> ShardBenchHello {
         ShardBenchHello(
             role: options.role, modelType: stage.modelType, totalLayers: stage.totalLayers,
             hiddenSize: stage.hiddenSize, layerStart: stage.layers.lowerBound, layerEnd: stage.layers.upperBound,
-            session: options.role == .head ? sessionID : nil,
-            logitTopK: options.role == .head && options.parity.mode == .teacherForced ? options.parity.topK : nil)
+            memberDeviceID: signer.memberDeviceID, memberPublicKey: signer.publicKeyBase64,
+            modelDigest: options.modelDigest)
     }
 
     private func adoptSession(_ chain: [ShardBenchHello]) {
@@ -1218,30 +1380,14 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
         returnLogitTopK = chain.first?.logitTopK
     }
 
-    /// Head: send the one-stage chain down, then read the complete chain back on the
-    /// return link, echoing each receiving end's probes meanwhile.
-    private func headHandshake(_ links: ShardBenchLinks) throws -> [ShardBenchHello] {
-        let mine = myHello()
-        stageIndex = 0
-        try sendHello(links.downstream, [mine], destination: 1)
-        let acknowledged = try awaitHello(links.downstream)
-        let chain = links.isCollapsed ? acknowledged : try awaitHello(links.upstream)
-        try ShardBenchChain.validateComplete(chain)
-        guard chain[0] == mine else { throw ShardBenchError.handshake("the returned chain does not start with this head") }
-        if let expected = options.expectedStages, chain.count != expected {
-            throw ShardBenchError.handshake("chain has \(chain.count) stages, expected \(expected)")
-        }
-        return chain
-    }
-
     /// Middle: take the chain so far, probe the upstream link, acknowledge upstream,
     /// pass the chain on and wait for the next stage's acknowledgement.
     private func middleHandshake(_ links: ShardBenchLinks) throws -> ShardBenchLatency {
         let received = try awaitHello(links.upstream)
         adoptSession(received)
+        stageIndex = received.count
         var mine = myHello()
         try ShardBenchChain.validate(prefix: received, next: mine)
-        stageIndex = received.count
         let probe = try measureProbes(links.upstream, peer: stageIndex - 1)
         mine.upstreamProbe = probe
         let chain = received + [mine]
@@ -1256,9 +1402,9 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
     private func tailHandshake(_ links: ShardBenchLinks) throws -> (ShardBenchLatency, ShardBenchLatency?) {
         let received = try awaitHello(links.upstream)
         adoptSession(received)
+        stageIndex = received.count
         var mine = myHello()
         try ShardBenchChain.validate(prefix: received, next: mine)
-        stageIndex = received.count
         let upstreamProbe = try measureProbes(links.upstream, peer: stageIndex - 1)
         mine.upstreamProbe = upstreamProbe
         var returnProbe: ShardBenchLatency?
@@ -1274,33 +1420,11 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
     }
 
     private func sendHello(_ link: ShardStageLink, _ chain: [ShardBenchHello], destination: Int) throws {
-        try link.send(ShardStageFrame(
-            header: header(.hello, destination: destination),
-            payload: try JSONEncoder().encode(ShardBenchChainHello(stages: chain))))
+        try ShardChainWire.sendHello(link, chain, header: header(.hello, destination: destination))
     }
 
-    /// Read until the peer's hello, echoing its link probes meanwhile.
     private func awaitHello(_ link: ShardStageLink) throws -> [ShardBenchHello] {
-        while true {
-            let frame = try receive(link, timeout: options.connectTimeout)
-            switch frame.header.kind {
-            case .activation where frame.header.requestID == probeRequestID:
-                var echo = frame.header
-                echo.sourceStage = UInt16(stageIndex)
-                echo.destinationStage = frame.header.sourceStage
-                echo.layerStart = UInt32(stage.layers.lowerBound)
-                echo.layerEnd = UInt32(stage.layers.upperBound)
-                try link.send(ShardStageFrame(header: echo, payload: frame.payload))
-            case .hello:
-                do {
-                    return try JSONDecoder().decode(ShardBenchChainHello.self, from: frame.payload).stages
-                } catch {
-                    throw ShardBenchError.handshake("undecodable hello: \(error)")
-                }
-            default:
-                throw ShardBenchError.handshake("expected hello, got \(frame.header.kind)")
-            }
-        }
+        try ShardChainWire.awaitHello(link, timeout: options.connectTimeout, stageIndex: stageIndex, layers: stage.layers)
     }
 
     /// Echo probes of one decode-sized activation on `link`: transport + codec cost of
@@ -1345,45 +1469,6 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
             shape: shape, flags: flags)
     }
 
-    /// Fold one frame this member received upstream (or, the head, a returned token).
-    private func recordInput(_ header: ShardStageFrameHeader, _ payload: Data) {
-        ledgers[header.requestID, default: MemberLedger()].input.fold(
-            requestID: header.requestID, tokenStep: header.tokenStep, payload: payload)
-    }
-
-    /// Fold one frame this member sent downstream; activations count toward the
-    /// prompt tokens or decode steps it processed.
-    private func recordOutput(_ header: ShardStageFrameHeader, _ payload: Data, processedTokens: Int) {
-        var ledger = ledgers[header.requestID, default: MemberLedger()]
-        ledger.output.fold(requestID: header.requestID, tokenStep: header.tokenStep, payload: payload)
-        if header.tokenStep == 0 {
-            ledger.promptTokens += processedTokens
-        } else {
-            ledger.decodeSteps += 1
-        }
-        ledgers[header.requestID] = ledger
-    }
-
-    private func subReceipts() -> [ShardMemberSubReceipt] {
-        ledgers.keys.sorted().map { requestID in
-            let ledger = ledgers[requestID]!
-            return ShardMemberSubReceipt(
-                memberDeviceID: options.memberID ?? "stage-\(stageIndex)", groupEpoch: groupEpoch,
-                stageIndex: stageIndex, layerStart: stage.layers.lowerBound, layerEnd: stage.layers.upperBound,
-                requestID: requestID, promptTokens: ledger.promptTokens, decodeSteps: ledger.decodeSteps,
-                inDigest: ledger.input.hex, outDigest: ledger.output.hex)
-        }
-    }
-
-    private static func decodeReceipts(_ payload: Data) throws -> [ShardMemberSubReceipt] {
-        guard !payload.isEmpty else { return [] }
-        do {
-            return try JSONDecoder().decode([ShardMemberSubReceipt].self, from: payload)
-        } catch {
-            throw ShardBenchError.protocolViolation("undecodable sub-receipts in the session-end frame: \(error)")
-        }
-    }
-
     /// Where this stage's downstream sends go: the next stage, or the head for the tail.
     private var downstreamIndex: Int { options.role == .tail ? 0 : stageIndex + 1 }
 
@@ -1404,362 +1489,8 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
         return frame
     }
 
-    // MARK: Head
-
-    private struct HeadSequence {
-        let requestID: UInt64
-        let microBatch: UInt32
-        let cache: Stage.Cache
-        var tokens: [Int] = []
-        /// Teacher-forced: the tail's logit summary for each step.
-        var summaries: [ShardLogitSummary] = []
-        var lastSend: TimeInterval = 0
-        var prefillStart: TimeInterval = 0
-        var firstTokenAt: TimeInterval?
-        var lastTokenAt: TimeInterval?
-    }
-
-    private func runHead(links original: ShardBenchLinks, chain: [ShardBenchHello]) throws -> ShardBenchHeadReport {
-        // A spare replacement swaps the links mid-run; everything after uses the current ones.
-        var links = original
-        let reference = options.parity.mode == .teacherForced ? try teacherReference() : nil
-        if options.warmup {
-            _ = try pipelineDecode(
-                links: &links, prompts: [options.prompts[0]], tokens: min(4, options.tokens), firstRequestID: warmupRequestID)
-        }
-        let run = try pipelineDecode(
-            links: &links, prompts: options.prompts, tokens: options.tokens, firstRequestID: firstRequestID,
-            teacher: reference?.sequenceTokens)
-        var parity: ShardBenchParity?
-        if let reference, let stepLogits = reference.stepLogits {
-            let result = try ShardLogitParity.compare(
-                reference: stepLogits.map { Array($0.prefix(options.tokens)) },
-                sharded: run.sequences.map(\.summaries),
-                tieMargin: options.parity.tieMargin, logprobTolerance: options.parity.logprobTolerance)
-            parity = ShardBenchParity(
-                verdict: result.verdict, source: options.parity.referenceSource, matchingTokens: nil,
-                firstMismatch: result.hardFailures.first.map {
-                    "sequence \($0.sequence) step \($0.step): sharded \($0.shardedToken) vs reference \($0.referenceToken) (reference margin \($0.referenceMargin))"
-                },
-                teacherForced: result)
-        }
-        // Session end: request id 0 abort travels down the chain; the tail answers on
-        // the return link once it has seen it, so no stage reads a close as a failure.
-        watch.stop()
-        try links.downstream.send(ShardStageFrame(header: header(.abort, requestID: probeRequestID, destination: 1)))
-        let end = try receive(links.upstream)
-        guard end.header.kind == .abort, end.header.requestID == probeRequestID else {
-            throw ShardBenchError.protocolViolation("expected the session-end acknowledgement, got \(end.header.kind) request \(end.header.requestID)")
-        }
-        // The acknowledgement carries every downstream member's sub-receipts in stage order.
-        let attestation = ShardBenchAttestationReport.verify(
-            head: subReceipts(), others: try Self.decodeReceipts(end.payload), requests: run.sequences.map(\.requestID),
-            memberLost: memberLost)
-
-        let decodeTPS = run.sequences.compactMap { sequence -> Double? in
-            guard let first = sequence.firstTokenAt, let last = sequence.lastTokenAt, sequence.tokens.count > 1, last > first else {
-                return nil
-            }
-            return Double(sequence.tokens.count - 1) / (last - first)
-        }
-        let totalTokens = run.sequences.reduce(0) { $0 + $1.tokens.count }
-        let hops = ShardBenchChain.hops(chain)
-        let linkReports = links.isCollapsed
-            ? [ShardBenchLinkReport(name: "downstream+return", peerStage: 1, statistics: links.downstream.statistics, probe: hops.first?.probeRoundTrip)]
-            : [ShardBenchLinkReport(name: "downstream", peerStage: 1, statistics: links.downstream.statistics, probe: hops.first?.probeRoundTrip),
-               ShardBenchLinkReport(name: "return", peerStage: chain.count - 1, statistics: links.upstream.statistics, probe: hops.last?.probeRoundTrip)]
-        return ShardBenchHeadReport(
-            session: sessionID,
-            model: options.modelLabel,
-            modelType: stage.modelType,
-            layers: "\(stage.layers.lowerBound):\(stage.layers.upperBound)",
-            stageCount: chain.count,
-            stageLayers: chain.map(\.layerLabel),
-            totalLayers: stage.totalLayers,
-            hiddenSize: stage.hiddenSize,
-            activationDtype: run.activationDType,
-            stageWeightBytes: stage.weightBytes,
-            concurrency: options.prompts.count,
-            tokensPerSequence: options.tokens,
-            promptTokens: options.prompts.map(\.count),
-            sequenceTokens: run.sequences.map(\.tokens),
-            totalTokens: totalTokens,
-            singleStreamTokensPerSecond: decodeTPS.isEmpty ? nil : round3(decodeTPS.reduce(0, +) / Double(decodeTPS.count)),
-            aggregateTokensPerSecond: round3(Double(totalTokens) / max(run.wallSeconds, 1e-9)),
-            ttft: ShardBenchLatency(seconds: run.sequences.compactMap { sequence in
-                sequence.firstTokenAt.map { $0 - sequence.prefillStart }
-            }),
-            probeRoundTrip: hops.first?.probeRoundTrip,
-            hops: hops,
-            decodeStepRoundTrip: ShardBenchLatency(seconds: run.stepRoundTrips),
-            headDecodeCompute: ShardBenchLatency(seconds: run.headCompute),
-            decodeHopPayloadBytes: run.decodeHopPayloadBytes,
-            decodeHopFrameBytes: ShardStageFrameCodec.frameSize(rank: 3, payloadLength: run.decodeHopPayloadBytes),
-            prefillHopPayloadBytes: run.prefillPayloadBytes,
-            prefillChunkTokens: options.prefillChunk,
-            prefillChunksPerSequence: run.prefillChunks,
-            headPrefillChunkCompute: ShardBenchLatency(seconds: run.prefillChunkCompute),
-            links: linkReports,
-            attestation: attestation,
-            replayBufferBytes: options.spare == nil ? nil : options.replayBufferBytes,
-            replays: replays,
-            parity: parity,
-            referenceSingleStreamTokensPerSecond: nil
-        )
-    }
-
-    private struct PipelineRun {
-        var sequences: [HeadSequence]
-        var stepRoundTrips: [Double]
-        var headCompute: [Double]
-        var wallSeconds: Double
-        var decodeHopPayloadBytes: Int
-        var prefillPayloadBytes: [Int]
-        var prefillChunks: [Int]
-        var prefillChunkCompute: [Double]
-        var activationDType: String
-    }
-
-    /// Keep every sequence in flight: each stage answers in arrival order, and while a
-    /// downstream stage computes one sequence's step the head computes the next
-    /// sequence's, so with K >= S every stage stays busy.
-    private func pipelineDecode(
-        links: inout ShardBenchLinks,
-        prompts: [[Int]],
-        tokens: Int,
-        firstRequestID: UInt64,
-        teacher: [[Int]]? = nil
-    ) throws -> PipelineRun {
-        var sequences = [HeadSequence]()
-        var index = [UInt64: Int]()
-        var run = PipelineRun(
-            sequences: [], stepRoundTrips: [], headCompute: [], wallSeconds: 0,
-            decodeHopPayloadBytes: 0, prefillPayloadBytes: [], prefillChunks: [], prefillChunkCompute: [], activationDType: "")
-        let start = now()
-        delivered = [:]
-        for (offset, prompt) in prompts.enumerated() {
-            let requestID = firstRequestID + UInt64(offset) * 2
-            delivered[requestID] = 0
-            var sequence = HeadSequence(requestID: requestID, microBatch: UInt32(offset), cache: try stage.newCache())
-            sequence.prefillStart = now()
-            // Chunk i goes down the chain as soon as the head has computed it, so stage
-            // k+1 works on chunk i while stage k computes chunk i+1. Only the last chunk
-            // asks the tail for a token.
-            let chunkSize = options.prefillChunk ?? max(1, prompt.count)
-            let chunkStarts = Array(stride(from: 0, to: prompt.count, by: chunkSize))
-            var payloadBytes = 0
-            for (chunkIndex, chunkStart) in chunkStarts.enumerated() {
-                let chunk = Array(prompt[chunkStart..<min(prompt.count, chunkStart + chunkSize)])
-                let computeStart = now()
-                let hidden = try stage.forward(tokens: chunk, cache: sequence.cache)
-                let elapsed = now() - computeStart
-                run.prefillChunkCompute.append(elapsed)
-                try checkPrefillDeadline(elapsed, tokens: chunk.count)
-                let isLast = chunkIndex == chunkStarts.count - 1
-                try sendActivation(&links, hidden, sequence: &sequence, step: 0, flags: isLast ? [] : .fillOnly)
-                payloadBytes += hidden.payload.count
-                run.activationDType = String(describing: hidden.dtype)
-            }
-            run.prefillPayloadBytes.append(payloadBytes)
-            run.prefillChunks.append(chunkStarts.count)
-            index[requestID] = sequences.count
-            sequences.append(sequence)
-        }
-        var remaining = sequences.count
-        while remaining > 0 {
-            let frame = try headReceive(&links)
-            guard frame.header.kind == .token || frame.header.kind == .tokenLogits, frame.header.dtype == .int32,
-                  let slot = index[frame.header.requestID]
-            else {
-                throw ShardBenchError.protocolViolation("expected a token for an active request, got \(frame.header.kind) request \(frame.header.requestID)")
-            }
-            let arrived = now()
-            let token: Int
-            var summary: ShardLogitSummary?
-            if frame.header.kind == .tokenLogits {
-                let decoded = try ShardLogitSummaryCodec.decode(shape: frame.header.shape, payload: frame.payload)
-                token = Int(decoded.token)
-                summary = decoded.summary
-            } else {
-                guard frame.payload.count == 4 else { throw ShardBenchError.protocolViolation("token frame of \(frame.payload.count) bytes") }
-                token = Int(frame.payload.withUnsafeBytes { Int32(littleEndian: $0.loadUnaligned(as: Int32.self)) })
-            }
-            var sequence = sequences[slot]
-            guard frame.header.tokenStep == UInt32(sequence.tokens.count) else {
-                throw ShardBenchError.protocolViolation("request \(sequence.requestID) token step \(frame.header.tokenStep), expected \(sequence.tokens.count)")
-            }
-            recordInput(frame.header, frame.payload)
-            if sequence.tokens.isEmpty {
-                sequence.firstTokenAt = arrived
-            } else {
-                run.stepRoundTrips.append(arrived - sequence.lastSend)
-            }
-            sequence.tokens.append(token)
-            if let summary { sequence.summaries.append(summary) }
-            sequence.lastTokenAt = arrived
-            // Delivered from here on, whatever happens to the next send.
-            sequences[slot] = sequence
-            delivered[sequence.requestID] = sequence.tokens.count
-            if sequence.tokens.count >= tokens {
-                replayBuffer.remove(requestID: sequence.requestID)
-                try headSend(&links, ShardStageFrame(header: header(.abort, requestID: sequence.requestID, destination: 1)), buffered: false)
-                remaining -= 1
-            } else {
-                // Teacher-forced: the next input is the reference token, not the sample.
-                let next = teacher.map { $0[slot][sequence.tokens.count - 1] } ?? token
-                let computeStart = now()
-                let hidden = try stage.forward(tokens: [next], cache: sequence.cache)
-                run.headCompute.append(now() - computeStart)
-                try sendActivation(&links, hidden, sequence: &sequence, step: UInt32(sequence.tokens.count))
-                run.decodeHopPayloadBytes = hidden.payload.count
-                sequences[slot] = sequence
-            }
-        }
-        run.wallSeconds = now() - start
-        run.sequences = sequences
-        return run
-    }
-
-    private func sendActivation(
-        _ links: inout ShardBenchLinks,
-        _ hidden: ShardBenchActivation,
-        sequence: inout HeadSequence,
-        step: UInt32,
-        flags: ShardFrameFlags = []
-    ) throws {
-        sequence.lastSend = now()
-        let frameHeader = header(.activation, dtype: hidden.dtype, requestID: sequence.requestID,
-                                 microBatch: sequence.microBatch, step: step, destination: 1, shape: hidden.shape,
-                                 flags: flags)
-        try headSend(&links, ShardStageFrame(header: frameHeader, payload: hidden.payload), buffered: true)
-    }
-
-    /// Fetch the teacher-forced reference and check it covers this run: same prompts,
-    /// at least `tokens` steps of tokens and logit summaries per sequence.
-    private func teacherReference() throws -> ShardBenchReferenceReport {
-        guard let provider = options.parity.referenceProvider else {
-            throw ShardBenchError.reference("no reference provider for teacher-forced parity")
-        }
-        let reference = try provider()
-        guard let stepLogits = reference.stepLogits else { throw ShardBenchError.reference("it has no step logits") }
-        if let prompts = reference.prompts {
-            guard prompts == options.prompts else { throw ShardBenchError.reference("its prompts differ from this run's") }
-        } else if reference.promptTokens != options.prompts.map(\.count) {
-            throw ShardBenchError.reference("its prompt lengths \(reference.promptTokens) differ from \(options.prompts.map(\.count))")
-        }
-        guard reference.sequenceTokens.count == options.prompts.count, stepLogits.count == options.prompts.count else {
-            throw ShardBenchError.reference("it has \(stepLogits.count) sequences, this run has \(options.prompts.count)")
-        }
-        for (index, (tokens, logits)) in zip(reference.sequenceTokens, stepLogits).enumerated()
-        where tokens.count < options.tokens || logits.count < options.tokens {
-            throw ShardBenchError.reference("sequence \(index) has \(min(tokens.count, logits.count)) steps, this run needs \(options.tokens)")
-        }
-        return reference
-    }
-
-    // MARK: Head: stage loss and spare replay
-
-    /// Send downstream. A buffered activation is kept for replay first, so when this
-    /// send is the one that finds the stage gone, the replay delivers it.
-    private func headSend(_ links: inout ShardBenchLinks, _ frame: ShardStageFrame, buffered: Bool) throws {
-        if buffered, options.spare != nil { replayBuffer.append(frame) }
-        do {
-            try links.downstream.send(frame)
-        } catch {
-            try replaceLostStage(error, links: &links)
-            return
-        }
-        if frame.header.kind == .activation {
-            recordOutput(frame.header, frame.payload, processedTokens: frame.header.shape.count == 3 ? Int(frame.header.shape[1]) : 0)
-        }
-    }
-
-    private func headReceive(_ links: inout ShardBenchLinks) throws -> ShardStageFrame {
-        while true {
-            do {
-                return try receive(links.upstream)
-            } catch {
-                try replaceLostStage(error, links: &links)
-            }
-        }
-    }
-
-    /// SPEC-051-R022: the downstream stage is gone. With a spare (once per run) start
-    /// the next epoch with it, rebuild its KV from the replay buffer and continue at the
-    /// next undelivered token of every in-flight request; otherwise end the stream with
-    /// the delivered counts. Delivered tokens are never re-emitted: replayed frames for
-    /// them are fill-only.
-    private func replaceLostStage(_ error: Error, links: inout ShardBenchLinks) throws {
-        let cause = watch.failure ?? error
-        func terminate(_ detail: String) -> ShardBenchError {
-            .streamTerminated(delivered: delivered, cause: detail)
-        }
-        guard Self.isStageLoss(cause) else { throw cause }
-        guard let spare = options.spare, replays.isEmpty else {
-            throw terminate(options.spare == nil ? "\(cause)" : "\(cause) (the spare was already used)")
-        }
-        let started = now()
-        watch.stop()
-        watch = ShardBenchLinkWatch()
-        links.close()
-        let inFlight = replayBuffer.requestIDs
-        if let lost = inFlight.first(where: { !replayBuffer.isReplayable($0) }) {
-            throw terminate("\(cause); request \(lost) outgrew the \(options.replayBufferBytes)-byte replay buffer")
-        }
-        do {
-            groupEpoch += 1
-            var configuration = options.link
-            configuration.groupEpoch = groupEpoch
-            let link = try ShardStageLink.connect(
-                host: spare.host, port: spare.port, timeout: options.replayDeadline, configuration: configuration)
-            shardBenchLog("connected to spare \(link.peerAddress) after \(cause)")
-            let replacement = ShardBenchLinks(upstream: link, downstream: link)
-            replacementLinks.append(replacement)
-            let chain = try headHandshake(replacement)
-            guard chain.count == 2 else { throw ShardBenchError.handshake("the spare chain has \(chain.count) stages") }
-            helloSucceeded(replacement, stages: "\(chain.count)")
-            // Receipts describe the new epoch for replayed requests; requests that already
-            // finished keep only the head's side, their other member is gone.
-            memberLost.formUnion(Set(ledgers.keys).subtracting(inFlight))
-            var frames = 0
-            var bytes = 0
-            for requestID in inFlight {
-                ledgers[requestID] = MemberLedger()
-                for frame in try replayBuffer.replayPlan(requestID: requestID, deliveredTokens: delivered[requestID] ?? 0) {
-                    try link.send(frame)
-                    recordOutput(frame.header, frame.payload, processedTokens: frame.header.shape.count == 3 ? Int(frame.header.shape[1]) : 0)
-                    frames += 1
-                    bytes += frame.payload.count
-                }
-            }
-            let elapsed = now() - started
-            guard elapsed <= options.replayDeadline else {
-                throw terminate("\(cause); replay took \(Int(elapsed * 1000)) ms, over the replay deadline")
-            }
-            replays.append(ShardBenchReplayReport(
-                groupEpoch: groupEpoch, cause: String(describing: cause), spare: link.peerAddress, requests: inFlight,
-                deliveredTokens: inFlight.map { delivered[$0] ?? 0 }, replayedFrames: frames, replayedBytes: bytes,
-                milliseconds: round3(elapsed * 1000)))
-            links = replacement
-        } catch let error as ShardBenchError {
-            if case .streamTerminated = error { throw error }
-            throw terminate("\(cause); replacing with the spare failed: \(error)")
-        } catch {
-            throw terminate("\(cause); replacing with the spare failed: \(error)")
-        }
-    }
-
-    /// A lost, silent, hung or failing downstream stage, as opposed to a local bug.
-    private static func isStageLoss(_ error: Error) -> Bool {
-        switch error {
-        case is ShardLinkError: return true
-        case ShardBenchError.peerError: return true
-        default: return false
-        }
-    }
-
     /// SPEC-051-R013: a stage whose compute for one prefill chunk passes the chunk
-    /// deadline fails the run instead of risking the GPU watchdog on a real group.
+    /// deadline fails the session instead of risking the GPU watchdog.
     private func checkPrefillDeadline(_ elapsed: TimeInterval, tokens: Int) throws {
         guard elapsed > options.prefillChunkDeadline else { return }
         throw ShardBenchError.prefillChunkDeadline(
@@ -1769,25 +1500,44 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
 
     // MARK: Middle and tail
 
-    /// A middle stage forwards each activation downstream; the tail samples and sends
-    /// the token on the return link. Both see per-request aborts and the session end.
+    /// A middle stage forwards each activation downstream; the tail samples with the
+    /// request's sampling parameters and sends the token on the return link. A request
+    /// abort releases the request's KV and sampler and travels on with this member's
+    /// signed sub-receipt appended; the tail returns the collected sub-receipts to the
+    /// head. Request 0 abort ends the session.
     private func runStage(
         links: ShardBenchLinks,
         upstreamProbe: ShardBenchLatency,
         returnProbe: ShardBenchLatency?
     ) throws -> ShardBenchStageReport {
         var caches = [UInt64: Stage.Cache]()
+        var samplers = [UInt64: Stage.Sampler]()
         var served = Set<UInt64>()
         var decodeCompute = [Double]()
         var prefillCompute = [Double]()
-        // The head may spend a long time loading its reference or warming up between
-        // frames, but it heartbeats throughout, so only a dead or silent peer ends this.
+        // The head may idle for a long time between requests, but it heartbeats
+        // throughout, so only a dead or silent peer ends this.
         loop: while true {
             let frame = try receive(links.upstream, timeout: max(options.receiveTimeout, 3600))
             let header = frame.header
             switch header.kind {
             case .activation where header.requestID == probeRequestID:
                 throw ShardBenchError.protocolViolation("link probe after the handshake")
+            case .control:
+                let control: ShardRequestControl
+                do {
+                    control = try JSONDecoder().decode(ShardRequestControl.self, from: frame.payload)
+                } catch {
+                    throw ShardBenchError.protocolViolation("undecodable control for request \(header.requestID): \(error)")
+                }
+                if options.role == .tail {
+                    samplers[header.requestID] = stage.makeSampler(control)
+                } else {
+                    try links.downstream.send(ShardStageFrame(
+                        header: self.header(.control, requestID: header.requestID, microBatch: header.microBatchID,
+                                            destination: downstreamIndex),
+                        payload: frame.payload))
+                }
             case .activation:
                 let start = now()
                 let cache: Stage.Cache
@@ -1803,13 +1553,12 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
                     served.insert(header.requestID)
                 }
                 let input = ShardBenchActivation(dtype: header.dtype, shape: header.shape, payload: frame.payload)
-                recordInput(header, frame.payload)
-                let processed = header.shape.count == 3 ? Int(header.shape[1]) : 0
+                book.recordInput(header, frame.payload)
+                let processed = ShardMemberLedgerBook.processedTokens(header)
                 if options.role == .tail, header.flags.contains(.fillOnly) {
                     try stage.fill(activation: input, cache: cache)
                     // A fill-only chunk sends nothing, but its tokens were processed.
-                    ledgers[header.requestID, default: MemberLedger()].promptTokens += header.tokenStep == 0 ? processed : 0
-                    ledgers[header.requestID, default: MemberLedger()].decodeSteps += header.tokenStep == 0 ? 0 : 1
+                    book.recordFill(header, processedTokens: processed)
                 } else if options.role == .tail, let topK = returnLogitTopK {
                     let summary = try stage.summarize(activation: input, cache: cache, topK: topK)
                     let encoded = try ShardLogitSummaryCodec.encode(token: summary.top1, summary: summary)
@@ -1817,28 +1566,31 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
                                                   microBatch: header.microBatchID, step: header.tokenStep,
                                                   destination: downstreamIndex, shape: encoded.shape)
                     try links.downstream.send(ShardStageFrame(header: tokenHeader, payload: encoded.payload))
-                    recordOutput(tokenHeader, encoded.payload, processedTokens: processed)
+                    book.recordOutput(tokenHeader, encoded.payload, processedTokens: processed)
                 } else if options.role == .tail {
-                    let token = try stage.sample(activation: input, cache: cache, temperature: options.temperature)
+                    guard let sampler = samplers[header.requestID] else {
+                        throw ShardBenchError.protocolViolation("request \(header.requestID) has no sampling control")
+                    }
+                    let token = try stage.sample(activation: input, cache: cache, sampler: sampler)
                     var payload = Data(count: 4)
                     payload.withUnsafeMutableBytes { $0.storeBytes(of: Int32(token).littleEndian, as: Int32.self) }
                     let tokenHeader = self.header(.token, dtype: .int32, requestID: header.requestID,
                                                   microBatch: header.microBatchID, step: header.tokenStep,
                                                   destination: downstreamIndex, shape: [1])
                     try links.downstream.send(ShardStageFrame(header: tokenHeader, payload: payload))
-                    recordOutput(tokenHeader, payload, processedTokens: processed)
+                    book.recordOutput(tokenHeader, payload, processedTokens: processed)
                 } else {
                     let output = try stage.forward(activation: input, cache: cache)
                     let outputHeader = self.header(.activation, dtype: output.dtype, requestID: header.requestID,
                                                    microBatch: header.microBatchID, step: header.tokenStep,
                                                    destination: downstreamIndex, shape: output.shape, flags: header.flags)
                     try links.downstream.send(ShardStageFrame(header: outputHeader, payload: output.payload))
-                    recordOutput(outputHeader, output.payload, processedTokens: processed)
+                    book.recordOutput(outputHeader, output.payload, processedTokens: processed)
                 }
                 if header.tokenStep == 0 {
                     let elapsed = now() - start
                     prefillCompute.append(elapsed)
-                    try checkPrefillDeadline(elapsed, tokens: Int(header.shape.count == 3 ? header.shape[1] : 0))
+                    try checkPrefillDeadline(elapsed, tokens: processed)
                 } else {
                     decodeCompute.append(now() - start)
                 }
@@ -1846,18 +1598,20 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
                 // Session end: the next stage (or, from the tail, the head) closing its
                 // side is now expected.
                 watch.stop()
-                // Pass the upstream members' sub-receipts on with this member's appended.
-                let receipts = try Self.decodeReceipts(frame.payload) + subReceipts()
                 try links.downstream.send(ShardStageFrame(
-                    header: self.header(.abort, requestID: probeRequestID, destination: downstreamIndex),
-                    payload: try JSONEncoder().encode(receipts)))
+                    header: self.header(.abort, requestID: probeRequestID, destination: downstreamIndex)))
                 break loop
             case .abort:
+                // SPEC-051-R009 item 5: the request's KV goes with its end.
                 caches[header.requestID] = nil
-                if options.role == .middle {
-                    try links.downstream.send(ShardStageFrame(
-                        header: self.header(.abort, requestID: header.requestID, destination: downstreamIndex)))
-                }
+                samplers[header.requestID] = nil
+                let receipts = try ShardChainWire.decodeReceipts(frame.payload) + [try signer.sign(book.receipt(
+                    requestID: header.requestID, memberDeviceID: signer.memberDeviceID,
+                    groupEpoch: options.link.groupEpoch, stageIndex: stageIndex, layers: stage.layers))]
+                book.remove(header.requestID)
+                try links.downstream.send(ShardStageFrame(
+                    header: self.header(.abort, requestID: header.requestID, destination: downstreamIndex),
+                    payload: try JSONEncoder().encode(receipts)))
             case .error:
                 throw ShardBenchError.peerError(String(decoding: frame.payload, as: UTF8.self))
             case .hello, .token, .tokenLogits, .heartbeat:

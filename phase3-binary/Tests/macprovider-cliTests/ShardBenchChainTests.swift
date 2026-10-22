@@ -11,6 +11,9 @@ final class FakeShardStage: ShardBenchStage {
         var history: [Float] = []
     }
 
+    /// Greedy and deterministic whatever the request asks; tests record what it asked.
+    typealias Sampler = ShardRequestControl
+
     let modelType = "fake"
     let hiddenSize = 4
     let layers: Range<Int>
@@ -61,7 +64,15 @@ final class FakeShardStage: ShardBenchStage {
         return Self.encode(output, tokens: Int(activation.shape[1]))
     }
 
-    func sample(activation: ShardBenchActivation, cache: Cache, temperature: Float) throws -> Int {
+    /// Every request's sampling control, in arrival order.
+    private(set) var controlsSeen: [ShardRequestControl] = []
+
+    func makeSampler(_ control: ShardRequestControl) -> ShardRequestControl {
+        controlsSeen.append(control)
+        return control
+    }
+
+    func sample(activation: ShardBenchActivation, cache: Cache, sampler: ShardRequestControl) throws -> Int {
         try count()
         return Self.mix(activation, into: cache) % 97
     }
@@ -185,7 +196,8 @@ enum ShardBenchTestRig {
                 for index in 1..<(chain.count - 1) {
                     activation = try chain[index].forward(activation: activation, cache: caches[index])
                 }
-                let token = try chain[chain.count - 1].sample(activation: activation, cache: caches[chain.count - 1], temperature: 0)
+                let token = try chain[chain.count - 1].sample(
+                    activation: activation, cache: caches[chain.count - 1], sampler: ShardRequestControl(temperature: 0))
                 generated.append(token)
                 input = [token]
             }
@@ -329,7 +341,7 @@ final class ShardBenchChainTests: XCTestCase {
             prompts: prompts, tokens: 6)
         let head = try XCTUnwrap(try results[0].get().head)
         XCTAssertEqual(head.attestation.verdict, "ok")
-        XCTAssertEqual(head.attestation.requests.map(\.requestID), [2, 4], "measured requests only, not the warmup")
+        XCTAssertEqual(head.attestation.requests.map(\.requestID), [2, 3], "measured requests only, not the warmup")
         for (request, prompt) in zip(head.attestation.requests, prompts) {
             XCTAssertEqual(request.verdict, "ok")
             XCTAssertNil(request.fault)

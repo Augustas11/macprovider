@@ -389,13 +389,22 @@ enum PipelineActivationCodec {
 
 /// Last-stage sampling: greedy at temperature 0, otherwise a categorical draw from
 /// the temperature-scaled distribution (MLX's global seeded generator).
-enum PipelineStageSampler {
-    static func sample(logits: MLXArray, temperature: Float) -> Int {
-        let last = logits[0, -1]
-        if temperature <= 0 {
-            return argMax(last, axis: -1).item(Int.self)
-        }
-        return MLXRandom.categorical(last * (1 / temperature)).item(Int.self)
+/// One request's sampler on the last stage. Greedy at temperature 0; otherwise the
+/// stock top-p sampler with its own random state, so concurrent requests do not
+/// share a stream and a seeded request is reproducible.
+final class PipelineStageSampler {
+    private let sampler: TopPSampler?
+
+    init(_ control: ShardRequestControl) {
+        sampler = control.temperature > 0
+            ? TopPSampler(temperature: control.temperature, topP: control.topP, seed: control.seed)
+            : nil
+    }
+
+    func sample(logits: MLXArray) -> Int {
+        let last = logits[0..., -1, 0...]
+        guard let sampler else { return argMax(last, axis: -1).item(Int.self) }
+        return sampler.sample(logits: last).item(Int.self)
     }
 }
 

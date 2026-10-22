@@ -110,4 +110,62 @@ final class ShardGroupAttestationTests: XCTestCase {
         guard case .broken(let short) = ShardGroupAttestationVerifier.verify([honestChain()[0]]) else { return XCTFail() }
         XCTAssertEqual(short.kind, .tooFewMembers)
     }
+
+    // MARK: Member signatures
+
+    private func signedChain(keys: [Curve25519.Signing.PrivateKey]) throws -> [ShardSignedSubReceipt] {
+        try zip(honestChain(), keys).map { receipt, key in
+            try ShardMemberSigner(memberDeviceID: receipt.memberDeviceID, key: key).sign(receipt)
+        }
+    }
+
+    func testSignedSubReceiptsVerifyUnderTheMembersKeys() throws {
+        let keys = (0..<3).map { _ in Curve25519.Signing.PrivateKey() }
+        let signed = try signedChain(keys: keys)
+        XCTAssertTrue(signed.allSatisfy(\.signatureIsValid))
+        XCTAssertEqual(signed[1].publicKey, keys[1].publicKey.rawRepresentation.base64EncodedString())
+        // The signature covers the domain-separated canonical JSON, nothing else.
+        let message = Data("macprovider.shard-sub-receipt.v1\n".utf8) + (try signed[1].receipt.canonicalJSON())
+        XCTAssertTrue(keys[1].publicKey.isValidSignature(try XCTUnwrap(Data(base64Encoded: signed[1].signature)), for: message))
+        let expected = Dictionary(uniqueKeysWithValues: keys.enumerated().map { ($0.offset, $0.element.publicKey.rawRepresentation.base64EncodedString()) })
+        XCTAssertEqual(ShardGroupAttestationVerifier.verify(signed: signed, expectedKeys: expected), .ok)
+        // Wire form round-trips with snake_case keys.
+        let json = try JSONEncoder().encode(signed[0])
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: json) as? [String: Any])
+        XCTAssertEqual(Set(object.keys), ["sub_receipt", "public_key", "signature"])
+        XCTAssertEqual(try JSONDecoder().decode(ShardSignedSubReceipt.self, from: json), signed[0])
+    }
+
+    func testAlteredSubReceiptFailsItsSignature() throws {
+        var signed = try signedChain(keys: (0..<3).map { _ in Curve25519.Signing.PrivateKey() })
+        signed[2].receipt.decodeSteps += 1
+        XCTAssertFalse(signed[2].signatureIsValid)
+        guard case .broken(let fault) = ShardGroupAttestationVerifier.verify(signed: signed) else {
+            return XCTFail("an altered sub-receipt must not verify")
+        }
+        XCTAssertEqual(fault.kind, .signatureInvalid)
+        XCTAssertEqual(fault.toMember, "tail")
+    }
+
+    func testSubReceiptSignedByAnotherKeyThanAnnouncedIsRefused() throws {
+        let keys = (0..<3).map { _ in Curve25519.Signing.PrivateKey() }
+        let signed = try signedChain(keys: keys)
+        let announced = [1: Curve25519.Signing.PrivateKey().publicKey.rawRepresentation.base64EncodedString()]
+        guard case .broken(let fault) = ShardGroupAttestationVerifier.verify(signed: signed, expectedKeys: announced) else {
+            return XCTFail("a key other than the announced one must not verify")
+        }
+        XCTAssertEqual(fault.kind, .keyMismatch)
+        XCTAssertEqual(fault.fromMember, "middle")
+    }
+
+    func testValidSignaturesDoNotHideABrokenChain() throws {
+        var receipts = honestChain()
+        receipts[1].outDigest = String(repeating: "f", count: 64)
+        let signed = try receipts.map { try ShardMemberSigner(memberDeviceID: $0.memberDeviceID, key: Curve25519.Signing.PrivateKey()).sign($0) }
+        guard case .broken(let fault) = ShardGroupAttestationVerifier.verify(signed: signed) else {
+            return XCTFail("the chain check must still run")
+        }
+        XCTAssertEqual(fault.kind, .digestMismatch)
+        XCTAssertEqual([fault.fromStage, fault.toStage], [1, 2])
+    }
 }

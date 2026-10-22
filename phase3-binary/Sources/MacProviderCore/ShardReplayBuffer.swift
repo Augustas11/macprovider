@@ -64,7 +64,8 @@ public struct ShardReplayBuffer: Sendable {
         guard isReplayable(requestID) else { throw ShardReplayError.notReplayable(requestID: requestID) }
         return try (frames[requestID] ?? []).map { frame in
             var replayed = frame
-            guard !frame.header.flags.contains(.fillOnly) else { return replayed }
+            // Control frames (a request's sampling parameters) replay as sent.
+            guard frame.header.kind == .activation, !frame.header.flags.contains(.fillOnly) else { return replayed }
             let step = Int(frame.header.tokenStep)
             if step < deliveredTokens {
                 replayed.header.flags.insert(.fillOnly)

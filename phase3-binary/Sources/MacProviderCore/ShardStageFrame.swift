@@ -41,6 +41,9 @@ public enum ShardFrameKind: UInt8, Sendable, CaseIterable {
     /// A token plus the last stage's logit summary (`ShardLogitSummaryCodec`), for
     /// teacher-forced parity.
     case tokenLogits = 7
+    /// Per-request control message, JSON payload (`ShardRequestControl`): the head
+    /// opens each request with its sampling parameters before its first activation.
+    case control = 8
 }
 
 /// Per-frame flags. Unknown bits are refused, so a peer that does not know a flag
@@ -332,7 +335,7 @@ public enum ShardStageFrameCodec {
             guard header.shape.count == 1, header.shape[0] >= 4, header.shape[0] % 2 == 0 else {
                 throw ShardFrameError.shapePayloadMismatch(expectedBytes: 0, payloadBytes: payloadLength)
             }
-        case .hello, .heartbeat, .abort, .error:
+        case .hello, .heartbeat, .abort, .error, .control:
             guard header.dtype == .none else {
                 throw ShardFrameError.kindDTypeMismatch(kind: header.kind, dtype: header.dtype)
             }
@@ -428,4 +431,60 @@ public enum CRC32C {
         }
         return ~value
     }
+}
+
+/// Payload of a `control` frame. The head sends `open` for each request before its
+/// first activation; middles forward it and the last stage samples that request
+/// with these parameters. Unknown fields are refused so a peer never silently drops
+/// a sampling setting it does not understand.
+public struct ShardRequestControl: Codable, Equatable, Sendable {
+    public enum Operation: String, Codable, Sendable {
+        case open
+    }
+
+    public var operation: Operation
+    /// 0 is greedy.
+    public var temperature: Float
+    /// Nucleus mass in (0, 1]; 1 disables it.
+    public var topP: Float
+    /// Seeds this request's sampler; nil draws from entropy.
+    public var seed: UInt64?
+
+    public init(operation: Operation = .open, temperature: Float, topP: Float = 1, seed: UInt64? = nil) {
+        self.operation = operation
+        self.temperature = temperature
+        self.topP = topP
+        self.seed = seed
+    }
+
+    enum CodingKeys: String, CodingKey, CaseIterable {
+        case operation = "op"
+        case temperature
+        case topP = "top_p"
+        case seed
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let known = Set(CodingKeys.allCases.map(\.stringValue))
+        let extra = try decoder.container(keyedBy: ShardAnyCodingKey.self).allKeys.map(\.stringValue).filter { !known.contains($0) }
+        guard extra.isEmpty else {
+            throw DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "unknown control fields \(extra.sorted())"))
+        }
+        operation = try container.decode(Operation.self, forKey: .operation)
+        temperature = try container.decode(Float.self, forKey: .temperature)
+        topP = try container.decode(Float.self, forKey: .topP)
+        seed = try container.decodeIfPresent(UInt64.self, forKey: .seed)
+        guard temperature.isFinite, temperature >= 0, topP.isFinite, topP > 0, topP <= 1 else {
+            throw DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "temperature must be >= 0 and top_p within (0, 1]"))
+        }
+    }
+}
+
+struct ShardAnyCodingKey: CodingKey {
+    var stringValue: String
+    var intValue: Int?
+
+    init?(stringValue: String) { self.stringValue = stringValue }
+    init?(intValue: Int) { self.stringValue = String(intValue); self.intValue = intValue }
 }

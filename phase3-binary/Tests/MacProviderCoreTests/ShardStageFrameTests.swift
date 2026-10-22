@@ -77,6 +77,9 @@ final class ShardStageFrameTests: XCTestCase {
             ShardStageFrame(header: ShardStageFrameHeader(kind: .abort, groupEpoch: 1, requestID: 5)),
             ShardStageFrame(header: ShardStageFrameHeader(kind: .error, groupEpoch: 1), payload: Data("boom".utf8)),
             ShardStageFrame(
+                header: ShardStageFrameHeader(kind: .control, groupEpoch: 1, requestID: 5),
+                payload: Data(#"{"op":"open","temperature":0,"top_p":1}"#.utf8)),
+            ShardStageFrame(
                 header: ShardStageFrameHeader(kind: .token, dtype: .int32, groupEpoch: 1, shape: [2]),
                 payload: Data([1, 0, 0, 0, 2, 0, 0, 0])
             ),
@@ -299,5 +302,31 @@ final class ShardStageFrameTests: XCTestCase {
         }
         // Rejected frames do not advance the expected sequence.
         XCTAssertEqual(state.expectedSequence, 1)
+    }
+
+    // MARK: - Request control
+
+    func testRequestControlRoundTripsAndRefusesUnknownOrOutOfRangeFields() throws {
+        let control = ShardRequestControl(temperature: 0.7, topP: 0.9, seed: 51)
+        let encoded = try JSONEncoder().encode(control)
+        XCTAssertEqual(try JSONDecoder().decode(ShardRequestControl.self, from: encoded), control)
+        XCTAssertEqual(
+            try JSONDecoder().decode(ShardRequestControl.self, from: Data(#"{"op":"open","temperature":0,"top_p":1}"#.utf8)),
+            ShardRequestControl(temperature: 0))
+        for bad in [
+            #"{"op":"open","temperature":0,"top_p":1,"top_k":5}"#,
+            #"{"op":"close","temperature":0,"top_p":1}"#,
+            #"{"op":"open","temperature":-1,"top_p":1}"#,
+            #"{"op":"open","temperature":0,"top_p":0}"#,
+            #"{"op":"open","temperature":0}"#,
+        ] {
+            XCTAssertThrowsError(try JSONDecoder().decode(ShardRequestControl.self, from: Data(bad.utf8)), bad)
+        }
+    }
+
+    func testControlFramesCarryNoTensor() {
+        let frame = ShardStageFrame(
+            header: ShardStageFrameHeader(kind: .control, dtype: .int32, groupEpoch: 1, shape: [1]), payload: Data(count: 4))
+        XCTAssertThrowsError(try ShardStageFrameCodec.encode(frame))
     }
 }

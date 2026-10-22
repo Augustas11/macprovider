@@ -47,7 +47,7 @@ final class ShardReplaySessionTests: XCTestCase {
         XCTAssertEqual(head.replays.count, 1)
         let replay = try XCTUnwrap(head.replays.first)
         XCTAssertEqual(replay.groupEpoch, ShardBenchTestRig.epoch + 1)
-        XCTAssertEqual(replay.requests, [2, 4])
+        XCTAssertEqual(replay.requests, [2, 3])
         XCTAssertEqual(replay.deliveredTokens, [2, 2], "two tokens of each request were delivered before the loss")
         XCTAssertGreaterThan(replay.replayedFrames, 2)
         // Both requests were in flight, so their chains verify end to end in the new epoch.
@@ -68,9 +68,9 @@ final class ShardReplaySessionTests: XCTestCase {
             guard case ShardBenchError.streamTerminated(let delivered, _) = error else {
                 return XCTFail("expected streamTerminated, got \(error)")
             }
-            XCTAssertEqual(delivered.keys.sorted(), [2, 4])
-            XCTAssertEqual(delivered, [2: 2, 4: 2])
-            XCTAssertTrue(String(describing: error).contains("stream terminated after delivering 4 tokens (request 2: 2, request 4: 2)"), "\(error)")
+            XCTAssertEqual(delivered.keys.sorted(), [2, 3])
+            XCTAssertEqual(delivered, [2: 2, 3: 2])
+            XCTAssertTrue(String(describing: error).contains("stream terminated after delivering 4 tokens (request 2: 2, request 3: 2)"), "\(error)")
         }
     }
 

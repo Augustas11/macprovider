@@ -52,4 +52,19 @@ final class ShardReplayBufferTests: XCTestCase {
         XCTAssertEqual(buffer.usedBytes, 0)
         XCTAssertEqual(buffer.requestIDs, [])
     }
+
+    func testControlFramesReplayAsSentBeforeTheActivations() throws {
+        var buffer = ShardReplayBuffer(capacityBytes: 1024)
+        let control = ShardStageFrame(
+            header: ShardStageFrameHeader(kind: .control, groupEpoch: 1, requestID: 3),
+            payload: Data(#"{"op":"open","temperature":0,"top_p":1}"#.utf8))
+        buffer.append(control)
+        buffer.append(activation(request: 3, step: 0))
+        buffer.append(activation(request: 3, step: 1))
+        let plan = try buffer.replayPlan(requestID: 3, deliveredTokens: 1)
+        XCTAssertEqual(plan.map(\.header.kind), [.control, .activation, .activation])
+        XCTAssertEqual(plan[0], control, "a control frame is never flagged fill-only")
+        XCTAssertEqual(plan.map { $0.header.flags.contains(.fillOnly) }, [false, true, false])
+        for frame in plan { XCTAssertNoThrow(try ShardStageFrameCodec.encode(frame)) }
+    }
 }
