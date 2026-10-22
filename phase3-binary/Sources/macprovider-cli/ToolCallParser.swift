@@ -6,19 +6,258 @@ enum ToolCallParser {
     static let SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP = 2_097_152
     static let SPEC018_ARGUMENTS_MAX_JSON_DEPTH = 32
 
+    /// Parsed auto-mode tool output. `leadingContent` is the prose before the
+    /// first call (SPEC-018 §3.1, kept as assistant content).
+    struct ParsedToolCalls {
+        let cleanedContent: String?
+        let toolCalls: [ToolCall]
+        let leadingContent: String?
+    }
+
+    /// Family-selected parse, for callers without a loaded template.
     static func parseToolCalls(
         rawOutput: String,
         modelID: String,
         allowedFunctionNames: Set<String>? = nil,
         schemas: [String: JSONValue]? = nil
     ) -> (cleanedContent: String?, toolCalls: [ToolCall]) {
-        guard !modelID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return (nilIfBlank(rawOutput), [])
+        let parsed = parseToolCalls(
+            rawOutput: rawOutput,
+            grammar: ToolCallGrammar.family(modelID: modelID),
+            modelID: modelID,
+            allowedFunctionNames: allowedFunctionNames,
+            schemas: schemas
+        )
+        return (parsed.cleanedContent, parsed.toolCalls)
+    }
+
+    /// SPEC-018 §3.1: one parser per catalog grammar, selected by the loaded
+    /// chat template's grammar (`ToolCallGrammar`), never by model-ID text.
+    static func parseToolCalls(
+        rawOutput: String,
+        grammar: ToolCallGrammar?,
+        modelID: String,
+        allowedFunctionNames: Set<String>? = nil,
+        schemas: [String: JSONValue]? = nil
+    ) -> ParsedToolCalls {
+        let none = ParsedToolCalls(cleanedContent: nilIfBlank(rawOutput), toolCalls: [], leadingContent: nil)
+        let result: (cleanedContent: String?, toolCalls: [ToolCall])
+        switch grammar {
+        case .qwen?:
+            result = parseQwenToolCalls(rawOutput: rawOutput, modelID: modelID, allowedFunctionNames: allowedFunctionNames, schemas: schemas)
+        case .glm?, .gemma4?, .llama3?:
+            do {
+                let calls: [ToolCall]
+                switch grammar {
+                case .glm?: calls = try parseTaggedCalls(rawOutput, start: "<tool_call>", end: "</tool_call>") { try glmCall($0, schemas: schemas) }
+                case .gemma4?: calls = try parseTaggedCalls(rawOutput, start: "<|tool_call>", end: "<tool_call|>") { try GemmaToolCallBridge.call($0, schemas: schemas) }
+                default: calls = try parseLlama3Calls(rawOutput)
+                }
+                guard !calls.isEmpty else { return none }
+                if let allowedFunctionNames, calls.contains(where: { !allowedFunctionNames.contains($0.functionName) }) {
+                    fputs("warning: tool-call output contains undeclared function for \(modelID)\n", stderr)
+                    return none
+                }
+                try enforceArgumentCaps(calls)
+                result = (nil, calls)
+            } catch {
+                fputs("warning: malformed tool-call output for \(modelID): \(error)\n", stderr)
+                return none
+            }
+        case .harmony?, nil:
+            return none
         }
-        let format = ToolCallFormat.detect(modelID: modelID, rawOutput: rawOutput)
-        guard let format else {
-            return (nilIfBlank(rawOutput), [])
+        guard !result.toolCalls.isEmpty else { return none }
+        return ParsedToolCalls(
+            cleanedContent: result.cleanedContent,
+            toolCalls: result.toolCalls,
+            leadingContent: leadingContent(rawOutput, grammar: grammar)
+        )
+    }
+
+    /// Start markers of a call in each grammar, earliest first wins.
+    static func callStartMarkers(_ grammar: ToolCallGrammar?) -> [String] {
+        switch grammar {
+        case .qwen?: return ["<tool_call>", "<function="]
+        case .glm?: return ["<tool_call>"]
+        case .gemma4?: return ["<|tool_call>"]
+        case .llama3?: return ["<|python_tag|>", "{"]
+        case .harmony?, nil: return []
         }
+    }
+
+    private static func leadingContent(_ rawOutput: String, grammar: ToolCallGrammar?) -> String? {
+        var first = rawOutput.endIndex
+        if grammar == .llama3, let start = llama3CallStart(in: rawOutput) {
+            first = start
+        } else {
+            for marker in callStartMarkers(grammar) where marker != "{" {
+                if let range = rawOutput.range(of: marker), range.lowerBound < first {
+                    first = range.lowerBound
+                }
+            }
+        }
+        return nilIfBlank(String(rawOutput[..<first]))
+    }
+
+    private static func enforceArgumentCaps(_ calls: [ToolCall]) throws {
+        guard calls.count <= ToolSelectionPolicy.maxCalls else { throw ParseError.invalidShape }
+        var total = 0
+        for call in calls {
+            let bytes = call.arguments.utf8.count
+            guard bytes <= SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP else { throw ParseError.byteCapExceeded }
+            total += bytes
+            guard total <= SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else { throw ParseError.responseByteCapExceeded }
+        }
+    }
+
+    /// Every `start…end` envelope becomes one call; text between envelopes
+    /// must be blank. The final envelope may omit `end` when the output ends
+    /// there (the model's end-of-turn token replaced it), but its body must
+    /// still parse completely.
+    private static func parseTaggedCalls(
+        _ rawOutput: String,
+        start: String,
+        end: String,
+        body: (String) throws -> ToolCall
+    ) throws -> [ToolCall] {
+        guard let first = rawOutput.range(of: start) else { return [] }
+        var cursor = first.lowerBound
+        var calls: [ToolCall] = []
+        while cursor < rawOutput.endIndex {
+            let rest = rawOutput[cursor...]
+            guard rest.hasPrefix(start) else {
+                guard rest.allSatisfy(\.isWhitespace) else { throw ParseError.invalidShape }
+                break
+            }
+            let bodyStart = rawOutput.index(cursor, offsetBy: start.count)
+            let close = rawOutput.range(of: end, range: bodyStart..<rawOutput.endIndex)
+            let bodyEnd = close?.lowerBound ?? rawOutput.endIndex
+            let text = String(rawOutput[bodyStart..<bodyEnd])
+            if close == nil, text.contains(start) { throw ParseError.missingEndDelimiter }
+            calls.append(try body(text))
+            guard let close else { break }
+            cursor = close.upperBound
+            while cursor < rawOutput.endIndex, rawOutput[cursor].isWhitespace {
+                cursor = rawOutput.index(after: cursor)
+            }
+        }
+        return calls
+    }
+
+    /// GLM `NAME<arg_key>K</arg_key><arg_value>V</arg_value>…`. The template
+    /// writes string values raw and every other value as JSON, so a value is
+    /// typed by its declared schema: `string` stays literal text, a declared
+    /// non-string must be strict JSON of that type, and an undeclared one is
+    /// JSON when it parses, else text.
+    static func glmCall(_ body: String, schemas: [String: JSONValue]?) throws -> ToolCall {
+        let nameEnd = body.range(of: "<arg_key>")?.lowerBound ?? body.endIndex
+        let name = body[..<nameEnd].trimmingCharacters(in: .whitespacesAndNewlines)
+        guard isValidToolFunctionName(name) else { throw ParseError.invalidShape }
+        let schema = schemas?[name]
+        var arguments: [String: JSONValue] = [:]
+        var cursor = nameEnd
+        while cursor < body.endIndex {
+            let rest = body[cursor...]
+            let trimmed = rest.drop(while: { $0.isWhitespace })
+            if trimmed.isEmpty { break }
+            guard trimmed.hasPrefix("<arg_key>") else { throw ParseError.invalidShape }
+            let keyStart = trimmed.index(trimmed.startIndex, offsetBy: "<arg_key>".count)
+            guard let keyClose = body.range(of: "</arg_key>", range: keyStart..<body.endIndex) else { throw ParseError.invalidShape }
+            let key = body[keyStart..<keyClose.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
+            guard isValidToolParameterName(key), arguments[key] == nil else { throw ParseError.invalidArguments }
+            let afterKey = body[keyClose.upperBound...].drop(while: { $0.isWhitespace })
+            guard afterKey.hasPrefix("<arg_value>") else { throw ParseError.invalidShape }
+            let valueStart = afterKey.index(afterKey.startIndex, offsetBy: "<arg_value>".count)
+            guard let valueClose = body.range(of: "</arg_value>", range: valueStart..<body.endIndex) else { throw ParseError.invalidShape }
+            let raw = String(body[valueStart..<valueClose.lowerBound])
+            for marker in ["<arg_key>", "<arg_value>", "<tool_call>", "</tool_call>"] where raw.contains(marker) {
+                throw ParseError.invalidArguments
+            }
+            arguments[key] = try glmValue(raw, type: explicitParameterType(key, schema: schema))
+            cursor = valueClose.upperBound
+        }
+        let value = JSONValue.object(arguments)
+        guard ToolSelectionPolicy.supportsNumericDomain(value) else { throw ParseError.invalidArguments }
+        let json = try value.deterministicJSONString()
+        try validateNoDuplicateJSONKeys(json)
+        return ToolCall(id: newCallID(), functionName: name, arguments: json)
+    }
+
+    private static func glmValue(_ raw: String, type: String?) throws -> JSONValue {
+        if type == "string" { return .string(raw) }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let parsed = try? StrictJSONParser.parse(trimmed, maxDepth: SPEC018_ARGUMENTS_MAX_JSON_DEPTH) else {
+            guard type == nil else { throw ParseError.invalidArguments }
+            return .string(raw)
+        }
+        guard let type else { return parsed }
+        switch (type, parsed) {
+        case ("number", .int), ("number", .double), ("integer", .int),
+             ("boolean", .bool), ("object", .object), ("array", .array), ("null", .null):
+            return parsed
+        default:
+            throw ParseError.invalidArguments
+        }
+    }
+
+    /// Llama 3.x: the template asks for bare JSON `{"name", "parameters"}`;
+    /// the model may prefix `<|python_tag|>` and end with `<|eom_id|>`.
+    /// One or more call objects (`;`-separated) must end the output.
+    private static func parseLlama3Calls(_ rawOutput: String) throws -> [ToolCall] {
+        guard let start = llama3CallStart(in: rawOutput) else { return [] }
+        var text = rawOutput[start...]
+        if text.hasPrefix("<|python_tag|>") { text = text.dropFirst("<|python_tag|>".count) }
+        var calls: [ToolCall] = []
+        while true {
+            text = text.drop(while: { $0.isWhitespace || $0 == ";" || $0 == "," })
+            for terminator in ["<|eom_id|>", "<|eot_id|>"] where text.hasPrefix(terminator) {
+                text = text.dropFirst(terminator.count)
+            }
+            text = text.drop(while: { $0.isWhitespace })
+            if text.isEmpty { break }
+            guard let object = firstCompleteJSONObject(in: String(text)) else {
+                throw calls.isEmpty ? ParseError.invalidShape : ParseError.missingEndDelimiter
+            }
+            calls.append(try parseJSONCall(object, argumentKey: "parameters"))
+            text = text.dropFirst(object.count)
+        }
+        return calls
+    }
+
+    /// Where a Llama call starts: `<|python_tag|>`, or the first `{` that
+    /// opens a complete JSON object with a string `name` and an object
+    /// `parameters`/`arguments`.
+    static func llama3CallStart(in rawOutput: String) -> String.Index? {
+        if let tag = rawOutput.range(of: "<|python_tag|>") { return tag.lowerBound }
+        var index = rawOutput.startIndex
+        while let brace = rawOutput[index...].firstIndex(of: "{") {
+            if let object = firstCompleteJSONObject(in: String(rawOutput[brace...])),
+               let data = object.data(using: .utf8),
+               let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               parsed["name"] is String,
+               (parsed["parameters"] ?? parsed["arguments"]) is [String: Any]
+            {
+                return brace
+            }
+            index = rawOutput.index(after: brace)
+        }
+        return nil
+    }
+
+    private static func newCallID() -> String {
+        "call_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+    }
+
+    /// The Qwen `<tool_call>` grammar (JSON or function-XML body), including
+    /// the Qwen3-Coder unclosed-envelope recovery.
+    private static func parseQwenToolCalls(
+        rawOutput: String,
+        modelID: String,
+        allowedFunctionNames: Set<String>?,
+        schemas: [String: JSONValue]?
+    ) -> (cleanedContent: String?, toolCalls: [ToolCall]) {
+        let format = ToolCallFormat.qwen25
 
         do {
             let parsed = try parseDelimited(rawOutput, format: format, schemas: schemas)
@@ -604,7 +843,7 @@ enum ToolCallParser {
         return object
     }
 
-    private static func explicitParameterType(_ name: String, schema: JSONValue?) -> String? {
+    static func explicitParameterType(_ name: String, schema: JSONValue?) -> String? {
         guard case .object(let object)? = schema,
               case .object(let properties)? = object["properties"],
               case .object(let property)? = properties[name],
@@ -867,7 +1106,7 @@ enum ToolCallParser {
     /// of parsing into structured `tool_calls`. The declared-tool allowlist
     /// (`allowedFunctionNames` in `parseToolCalls`) remains the security boundary: any
     /// name not among the request's declared tools is still rejected.
-    private static func isValidToolFunctionName(_ value: String) -> Bool {
+    static func isValidToolFunctionName(_ value: String) -> Bool {
         guard (1...64).contains(value.count) else {
             return false
         }
@@ -881,7 +1120,7 @@ enum ToolCallParser {
     /// to Python identifiers, so hyphens and other OpenAI/MCP-legal characters are accepted here.
     /// (Python-style call bodies keep identifier-only keys per SPEC-018 §3.3.) ASCII
     /// `[A-Za-z0-9_-]`, length 1..128.
-    private static func isValidToolParameterName(_ value: String) -> Bool {
+    static func isValidToolParameterName(_ value: String) -> Bool {
         guard (1...128).contains(value.count) else {
             return false
         }
@@ -943,44 +1182,8 @@ enum ToolCallParser {
 
 private enum ToolCallFormat {
     case qwen25
-    case llama33
 
-    var startDelimiter: String {
-        switch self {
-        case .qwen25:
-            return "<tool_call>"
-        case .llama33:
-            return "<|python_tag|>"
-        }
-    }
-
-    var endDelimiter: String {
-        switch self {
-        case .qwen25:
-            return "</tool_call>"
-        case .llama33:
-            return "<|eom_id|>"
-        }
-    }
-
-    var argumentKey: String {
-        switch self {
-        case .qwen25:
-            return "arguments"
-        case .llama33:
-            return "parameters"
-        }
-    }
-
-    static func detect(modelID: String, rawOutput _: String) -> ToolCallFormat? {
-        if modelID.localizedCaseInsensitiveContains("qwen2.5") ||
-            modelID.localizedCaseInsensitiveContains("qwen3")
-        {
-            return .qwen25
-        }
-        if modelID.localizedCaseInsensitiveContains("llama-3.3") {
-            return .llama33
-        }
-        return nil
-    }
+    var startDelimiter: String { "<tool_call>" }
+    var endDelimiter: String { "</tool_call>" }
+    var argumentKey: String { "arguments" }
 }

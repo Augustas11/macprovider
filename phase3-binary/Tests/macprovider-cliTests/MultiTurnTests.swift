@@ -1,4 +1,5 @@
 import Foundation
+import MLXLMCommon
 import XCTest
 import MacProviderCore
 @testable import macprovider_cli
@@ -10,22 +11,26 @@ final class MultiTurnTests: XCTestCase {
         XCTAssertEqual(request.messages[1].toolCalls?.first?.id, "call_0123456789abcdef")
         XCTAssertEqual(request.messages[2].toolCallID, "call_0123456789abcdef")
 
-        let rendered = try ToolPromptRenderer.renderMessages(request.messages, modelID: "mlx-community/Qwen3-32B-4bit")
-        XCTAssertEqual(rendered[1].role.rawValue, "assistant")
-        XCTAssertTrue(rendered[1].content.contains("<tool_call>"))
-        XCTAssertTrue(rendered[1].content.contains(#""name":"lookup""#))
-        XCTAssertTrue(rendered[2].content.contains(#"<tool_response id="call_0123456789abcdef">"#))
-        XCTAssertTrue(rendered[2].content.contains(#"{"temperature_c":21}"#))
+        let rendered = DefaultMessageGenerator().generate(
+            messages: try ToolPromptRenderer.renderMessages(request.messages, modelID: "mlx-community/Qwen3-32B-4bit")
+        )
+        XCTAssertEqual(rendered[1]["role"] as? String, "assistant")
+        let call = try XCTUnwrap((rendered[1]["tool_calls"] as? [[String: any Sendable]])?.first)
+        XCTAssertEqual((call["function"] as? [String: any Sendable])?["name"] as? String, "lookup")
+        XCTAssertEqual(rendered[2]["tool_call_id"] as? String, "call_0123456789abcdef")
+        XCTAssertEqual(rendered[2]["content"] as? String, #"{"temperature_c":21}"#)
     }
 
+    /// #2107 D4: every family with a template tool grammar renders history,
+    /// Llama 3.x included.
     func testAssistantHistoryRendersLlamaToolTemplate() throws {
         let request = try Self.request(messages: Self.validMultiTurnMessages())
-
-        let rendered = try ToolPromptRenderer.renderMessages(request.messages, modelID: "mlx-community/Llama-3.3-70B-Instruct")
-
-        XCTAssertTrue(rendered[1].content.contains("<|python_tag|>"))
-        XCTAssertTrue(rendered[1].content.contains(#""parameters":{"city":"Vilnius"}"#))
-        XCTAssertTrue(rendered[2].content.contains("<|start_header_id|>ipython<|end_header_id|>"))
+        for model in ["mlx-community/Llama-3.3-70B-Instruct", "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit", "mlx-community/Llama-3.2-3B-Instruct-4bit"] {
+            let rendered = DefaultMessageGenerator().generate(messages: try ToolPromptRenderer.renderMessages(request.messages, modelID: model))
+            let call = try XCTUnwrap((rendered[1]["tool_calls"] as? [[String: any Sendable]])?.first, model)
+            let arguments = (call["function"] as? [String: any Sendable])?["arguments"] as? [String: any Sendable]
+            XCTAssertEqual(arguments?["city"] as? String, "Vilnius", model)
+        }
     }
 
     func testUnsupportedModelForMultiTurnFailsBeforeInference() throws {

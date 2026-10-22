@@ -50,6 +50,9 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
         var dict = body
         dict["model"] = dict["model"] ?? Self.qwen
         dict["messages"] = dict["messages"] ?? [["role": "user", "content": "hi"]]
+        // These rows exercise the serial tool turn, which is an explicit
+        // parallel_tool_calls:false since #2107 (omitted is parallel).
+        dict["parallel_tool_calls"] = dict["parallel_tool_calls"] ?? false
         return try ChatCompletionRequest.parse(data: try JSONSerialization.data(withJSONObject: dict))
     }
 
@@ -940,6 +943,8 @@ private final class ChunkSink: @unchecked Sendable {
                     return "tool:\(name):\(delta.arguments ?? "")"
                 }
                 return "args:\(delta.index):\(delta.arguments ?? "")"
+            case .reasoning(let text):
+                return "reasoning:\(text)"
             }
         }
     }

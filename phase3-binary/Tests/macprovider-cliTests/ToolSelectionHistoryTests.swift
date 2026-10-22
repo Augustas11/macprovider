@@ -1,5 +1,6 @@
 import Foundation
 import MacProviderCore
+import MLXLMCommon
 import XCTest
 @testable import macprovider_cli
 
@@ -20,32 +21,23 @@ final class ToolSelectionHistoryTests: XCTestCase {
         ])).messages
     }
 
-    func testCoderHistoryUsesTemplateXMLWithStrictTypedValues() throws {
-        let rendered = try ToolPromptRenderer.renderMessages(history(), modelID: coder)
-        XCTAssertEqual(rendered[1].content, "<tool_call>\n<function=lookup>\n<parameter=city>\nParis\n</parameter>\n<parameter=count>\n2\n</parameter>\n<parameter=enabled>\ntrue\n</parameter>\n</function>\n</tool_call>")
-        XCTAssertEqual(rendered[2].role.rawValue, "tool")
-        XCTAssertEqual(rendered[2].content, "PROFILE_HISTORY_OK", "the native template owns the single tool-response wrapper")
-    }
-
-    func testInstructHistoryUsesNativeJSONEnvelopeWithoutTransportFields() throws {
-        let rendered = try ToolPromptRenderer.renderMessages(history(), modelID: instruct)
-        XCTAssertEqual(rendered[1].content, "<tool_call>\n{\"name\": \"lookup\", \"arguments\": {\"city\":\"Paris\",\"count\":2,\"enabled\":true}}\n</tool_call>")
-        XCTAssertEqual(rendered[2].content, "PROFILE_HISTORY_OK")
-    }
-
-    func testTransportCallIDDoesNotChangeNativeRenderedHistory() throws {
-        for model in [coder, instruct] {
-            let first = try ToolPromptRenderer.renderMessages(history(), modelID: model)
-            let second = try ToolPromptRenderer.renderMessages(history(id: "call_9026fb38e701423cad3735d32af405b4"), modelID: model)
-            XCTAssertEqual(first.map(\.content), second.map(\.content))
-        }
-    }
-
-    func testLegacyQwen36AndUnqualifiedCopiesRetainTheirHistoryContract() throws {
-        for model in [ToolSelectionPolicy.supportedNativeModel, coder + "-copy", instruct.lowercased()] {
-            let rendered = try ToolPromptRenderer.renderMessages(history(), modelID: model)
-            XCTAssertTrue(rendered[1].content.contains(#""id":"call_0123456789abcdef""#))
-            XCTAssertTrue(rendered[2].content.contains("<tool_response id="))
+    /// #2107 D4/D8: history reaches the chat template as structured data; the
+    /// template (CatalogToolGrammarTests renders the real ones) owns the call
+    /// and result grammar, so nothing is pre-wrapped here.
+    func testHistoryIsStructuredForTheTemplate() throws {
+        for model in [coder, instruct, ToolSelectionPolicy.supportedNativeModel] {
+            let rendered = DefaultMessageGenerator().generate(messages: try ToolPromptRenderer.renderMessages(history(), modelID: model))
+            let calls = try XCTUnwrap(rendered[1]["tool_calls"] as? [[String: any Sendable]], model)
+            let function = try XCTUnwrap(calls.first?["function"] as? [String: any Sendable])
+            XCTAssertEqual(function["name"] as? String, "lookup")
+            let arguments = try XCTUnwrap(function["arguments"] as? [String: any Sendable])
+            XCTAssertEqual(arguments["city"] as? String, "Paris")
+            XCTAssertEqual(arguments["count"] as? Int, 2)
+            XCTAssertEqual(arguments["enabled"] as? Bool, true)
+            XCTAssertEqual(rendered[2]["role"] as? String, "tool")
+            XCTAssertEqual(rendered[2]["content"] as? String, "PROFILE_HISTORY_OK", "the template owns the single tool-response wrapper")
+            XCTAssertEqual(rendered[2]["tool_call_id"] as? String, "call_0123456789abcdef")
+            XCTAssertEqual(rendered[2]["name"] as? String, "lookup")
         }
     }
 
