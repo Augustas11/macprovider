@@ -204,10 +204,13 @@ struct ShardBenchCommand: AsyncParsableCommand {
             tokens: tokens,
             temperature: temperature,
             seed: seed,
+            // Peer-dead detection arms after the hello exchange (SPEC-051-R014 applies to
+            // a joined group); until then the connect timeout bounds every wait.
             link: ShardLinkConfiguration(
                 groupEpoch: groupEpoch,
                 heartbeatInterval: Double(heartbeatMilliseconds) / 1000,
-                missedHeartbeatLimit: missedHeartbeats
+                missedHeartbeatLimit: missedHeartbeats,
+                armLivenessOnOpen: false
             ),
             receiveTimeout: receiveTimeout,
             connectTimeout: connectTimeout,
@@ -566,6 +569,11 @@ enum ShardBenchError: Error, CustomStringConvertible {
 
 // MARK: - Links
 
+/// One diagnostic line on stderr; stdout carries only the JSON report.
+private func shardBenchLog(_ line: String) {
+    FileHandle.standardError.write(Data("shard-bench: \(line)\n".utf8))
+}
+
 /// A stage's two links. `upstream` is the one it receives work on (head: the token
 /// return link) and `downstream` the one it sends on (tail: the return link). In a
 /// two-stage ring both may be the same link.
@@ -591,11 +599,12 @@ struct ShardBenchLinks {
     ) throws -> ShardBenchLinks {
         let listener = try listen.map { try ShardStageListener(host: $0.host, port: $0.port) }
         if let listen, let listener {
-            FileHandle.standardError.write(Data("shard-bench: listening on \(listen.host):\(listener.port)\n".utf8))
+            shardBenchLog("listening on \(listen.host):\(listener.port)")
         }
         let dialed = try connect.map {
             try ShardStageLink.connect(host: $0.host, port: $0.port, timeout: connectTimeout, configuration: configuration)
         }
+        if let dialed { shardBenchLog("connected to \(dialed.peerAddress)") }
         var accepted: ShardStageLink?
         if let listener {
             do {
@@ -605,6 +614,7 @@ struct ShardBenchLinks {
                 throw error
             }
         }
+        if let accepted { shardBenchLog("accepted peer \(accepted.peerAddress)") }
         switch (accepted, dialed) {
         case let (upstream?, downstream?):
             return ShardBenchLinks(upstream: upstream, downstream: downstream)
@@ -706,14 +716,17 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
             switch options.role {
             case .head:
                 let chain = try headHandshake(links)
+                helloSucceeded(links, stages: "\(chain.count)")
                 if !links.isCollapsed { watch.watch(links.downstream, wake: links.upstream) }
                 return ShardBenchSessionReport(head: try runHead(links: links, chain: chain))
             case .middle:
                 let upstreamProbe = try middleHandshake(links)
+                helloSucceeded(links, stages: "?")
                 watch.watch(links.downstream, wake: links.upstream)
                 return ShardBenchSessionReport(stage: try runStage(links: links, upstreamProbe: upstreamProbe, returnProbe: nil))
             case .tail:
                 let (upstreamProbe, returnProbe) = try tailHandshake(links)
+                helloSucceeded(links, stages: "\(stageIndex + 1)")
                 if !links.isCollapsed { watch.watch(links.downstream, wake: links.upstream) }
                 return ShardBenchSessionReport(stage: try runStage(links: links, upstreamProbe: upstreamProbe, returnProbe: returnProbe))
             }
@@ -723,6 +736,12 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
             sendError(links, cause)
             throw cause
         }
+    }
+
+    /// The hello exchange is done: from here a silent peer is a dead peer.
+    private func helloSucceeded(_ links: ShardBenchLinks, stages: String) {
+        for link in links.unique { link.armLiveness() }
+        shardBenchLog("hello ok epoch=\(options.link.groupEpoch) stage=\(stageIndex) stages=\(stages)")
     }
 
     private func checkRole() throws {

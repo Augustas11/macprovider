@@ -206,6 +206,50 @@ final class ShardStageLinkTests: XCTestCase {
         }
     }
 
+    func testLivenessArmsOnlyAfterTheHelloExchange() throws {
+        let deferred = ShardLinkConfiguration(groupEpoch: 11, heartbeatInterval: 0.1, missedHeartbeatLimit: 3, armLivenessOnOpen: false)
+        let (server, client) = try linkedPair(deferred)
+        defer { server.close(); client.close() }
+        // The client is busy for 1.2 s after accept and sends nothing, not even
+        // heartbeats, before its hello: four liveness windows of silence.
+        client.pauseHeartbeatsForTesting()
+        DispatchQueue.global().asyncAfter(deadline: .now() + 1.2) {
+            _ = try? client.send(ShardStageFrame(header: ShardStageFrameHeader(kind: .hello, groupEpoch: 11), payload: Data("{}".utf8)))
+        }
+        let start = Date()
+        let hello = try server.receive(timeout: 5)
+        XCTAssertEqual(hello.header.kind, .hello)
+        XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(start), 1.1)
+
+        // Armed after the hello: the same silence is now a dead peer.
+        server.armLiveness()
+        XCTAssertThrowsError(try server.receive(timeout: 5)) { error in
+            guard case .peerDead = error as? ShardLinkError else { return XCTFail("expected peerDead, got \(error)") }
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(start), 2.5)
+    }
+
+    func testConnectRetriesUntilThePeerStartsListening() throws {
+        let port = try ShardStageListener(host: "127.0.0.1", port: 0).port
+        let accepted = LinkBox()
+        let acceptDone = expectation(description: "accepted")
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.8) {
+            if let listener = try? ShardStageListener(host: "127.0.0.1", port: port) {
+                accepted.link = try? listener.accept(timeout: 5, configuration: self.configuration)
+            }
+            acceptDone.fulfill()
+        }
+        let client = try ShardStageLink.connect(host: "127.0.0.1", port: port, timeout: 5, configuration: configuration)
+        defer { client.close() }
+        wait(for: [acceptDone], timeout: 7)
+        let server = try XCTUnwrap(accepted.link)
+        defer { server.close() }
+        XCTAssertEqual(client.peerAddress, "127.0.0.1:\(port)")
+        XCTAssertTrue(server.peerAddress.hasPrefix("127.0.0.1:"), server.peerAddress)
+        try client.send(activation(width: 4, step: 9))
+        XCTAssertEqual(try server.receive(timeout: 2).header.tokenStep, 9)
+    }
+
     func testConnectWithoutListenerTimesOut() throws {
         // Bind then drop a listener so the port is very likely free and refusing.
         let port = try ShardStageListener(host: "127.0.0.1", port: 0).port

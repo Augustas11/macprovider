@@ -28,19 +28,26 @@ public struct ShardLinkConfiguration: Equatable, Sendable {
     public var missedHeartbeatLimit: Int
     public var sendTimeout: TimeInterval
     public var limits: ShardFrameLimits
+    /// When false, peer-dead detection stays off until `armLiveness()`: a stage arms it
+    /// once its hello exchange succeeded, so a peer that is slow to reach its hello
+    /// (or a path that drops the first heartbeats) is bounded by the receive
+    /// deadline instead of the 3-heartbeat window. Heartbeats are sent either way.
+    public var armLivenessOnOpen: Bool
 
     public init(
         groupEpoch: UInt64,
         heartbeatInterval: TimeInterval = 0.1,
         missedHeartbeatLimit: Int = 3,
         sendTimeout: TimeInterval = 5,
-        limits: ShardFrameLimits = ShardFrameLimits()
+        limits: ShardFrameLimits = ShardFrameLimits(),
+        armLivenessOnOpen: Bool = true
     ) {
         self.groupEpoch = groupEpoch
         self.heartbeatInterval = heartbeatInterval
         self.missedHeartbeatLimit = missedHeartbeatLimit
         self.sendTimeout = sendTimeout
         self.limits = limits
+        self.armLivenessOnOpen = armLivenessOnOpen
     }
 
     var livenessWindow: TimeInterval {
@@ -99,6 +106,8 @@ public final class ShardStageListener: @unchecked Sendable {
 
 public final class ShardStageLink: @unchecked Sendable {
     public let configuration: ShardLinkConfiguration
+    /// Numeric `host:port` of the peer, for diagnostics.
+    public let peerAddress: String
     private let fd: Int32
 
     // Writers (caller and heartbeat thread) serialize on sendLock; sequence numbers are
@@ -115,6 +124,7 @@ public final class ShardStageLink: @unchecked Sendable {
     private let stateLock = NSLock()
     private var lastHeard: TimeInterval
     private var isClosed = false
+    private var livenessArmed: Bool
     private var heartbeatsPaused = false
     private var stats = ShardLinkStatistics()
     private var heartbeatTimer: DispatchSourceTimer?
@@ -127,16 +137,21 @@ public final class ShardStageLink: @unchecked Sendable {
     ) throws -> ShardStageLink {
         let address = try ShardSocketAddress.resolve(host: host, port: port)
         let deadline = ShardSocketAddress.now() + timeout
-        // Retry refused connections until the deadline so a head can start before its tail.
+        // Retry until the deadline so a stage can start before its peer listens. Each
+        // attempt is non-blocking and bounded, so a path that drops SYNs (a peer still
+        // loading, a firewall prompt, Wi-Fi roaming) cannot hold one attempt past the
+        // deadline the way a blocking connect's ~75 s kernel timeout would.
         while true {
             let fd = socket(address.family, SOCK_STREAM, IPPROTO_TCP)
             guard fd >= 0 else { throw ShardLinkError.socketFailed(operation: "socket", errno: errno) }
-            if address.withSockaddr({ Darwin.connect(fd, $0, $1) }) == 0 {
+            let remaining = deadline - ShardSocketAddress.now()
+            switch attemptConnect(fd: fd, address: address, wait: max(0.01, min(2, remaining))) {
+            case .connected:
                 return try ShardStageLink(connectedSocket: fd, configuration: configuration)
-            }
-            let code = errno
-            Darwin.close(fd)
-            guard code == ECONNREFUSED || code == ETIMEDOUT else {
+            case .retry:
+                Darwin.close(fd)
+            case .failed(let code):
+                Darwin.close(fd)
                 throw ShardLinkError.socketFailed(operation: "connect", errno: code)
             }
             if ShardSocketAddress.now() >= deadline { throw ShardLinkError.connectTimedOut }
@@ -144,11 +159,48 @@ public final class ShardStageLink: @unchecked Sendable {
         }
     }
 
+    private enum ConnectAttempt {
+        case connected
+        case retry
+        case failed(Int32)
+    }
+
+    /// Errors a peer that is not listening yet, or a LAN path that is not up yet, can
+    /// produce; anything else is a configuration error and fails at once.
+    private static let retryableConnectErrors: Set<Int32> = [
+        ECONNREFUSED, ETIMEDOUT, EHOSTUNREACH, ENETUNREACH, EHOSTDOWN, ENETDOWN, ECONNRESET, ECONNABORTED,
+    ]
+
+    private static func attemptConnect(fd: Int32, address: ShardSocketAddress, wait: TimeInterval) -> ConnectAttempt {
+        let flags = fcntl(fd, F_GETFL)
+        guard flags >= 0, fcntl(fd, F_SETFL, flags | O_NONBLOCK) >= 0 else { return .failed(errno) }
+        if address.withSockaddr({ Darwin.connect(fd, $0, $1) }) != 0 {
+            let code = errno
+            guard code == EINPROGRESS || code == EINTR else {
+                return retryableConnectErrors.contains(code) ? .retry : .failed(code)
+            }
+            var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+            let ready = poll(&pfd, 1, ShardSocketAddress.pollMilliseconds(wait))
+            if ready == 0 { return .retry }
+            guard ready > 0 else { return errno == EINTR ? .retry : .failed(errno) }
+            var pending: Int32 = 0
+            var length = socklen_t(MemoryLayout<Int32>.size)
+            guard getsockopt(fd, SOL_SOCKET, SO_ERROR, &pending, &length) == 0 else { return .failed(errno) }
+            if pending != 0 {
+                return retryableConnectErrors.contains(pending) ? .retry : .failed(pending)
+            }
+        }
+        guard fcntl(fd, F_SETFL, flags) >= 0 else { return .failed(errno) }
+        return .connected
+    }
+
     init(connectedSocket fd: Int32, configuration: ShardLinkConfiguration) throws {
         self.fd = fd
         self.configuration = configuration
         self.receiveState = ShardLinkReceiveState(groupEpoch: configuration.groupEpoch)
         self.lastHeard = ShardSocketAddress.now()
+        self.livenessArmed = configuration.armLivenessOnOpen
+        self.peerAddress = ShardSocketAddress.peerDescription(of: fd)
         var one: Int32 = 1
         let size = socklen_t(MemoryLayout<Int32>.size)
         guard setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, size) == 0,
@@ -200,8 +252,9 @@ public final class ShardStageLink: @unchecked Sendable {
 
     /// Receive the next non-heartbeat frame.
     ///
-    /// Throws `receiveTimedOut` when `timeout` passes, `peerDead` when nothing at all
-    /// (not even a heartbeat) arrived for the liveness window while waiting, and
+    /// Throws `receiveTimedOut` when `timeout` passes, `peerDead` when liveness is armed
+    /// and nothing at all (not even a heartbeat) arrived for the liveness window while
+    /// waiting, and
     /// `peerClosed` on EOF. Silence before this call does not count against the peer:
     /// liveness is judged only over time spent waiting here.
     public func receive(timeout: TimeInterval) throws -> ShardStageFrame {
@@ -253,11 +306,26 @@ public final class ShardStageLink: @unchecked Sendable {
         Darwin.close(fd)
     }
 
+    /// Turn on peer-dead detection. Silence before this call never counts.
+    public func armLiveness() {
+        stateLock.lock()
+        livenessArmed = true
+        lastHeard = ShardSocketAddress.now()
+        stateLock.unlock()
+    }
+
     /// Test seam: stop emitting heartbeats while keeping the socket open, which is what
     /// a hung peer process looks like from the other end.
     public func pauseHeartbeatsForTesting() {
         stateLock.lock()
         heartbeatsPaused = true
+        stateLock.unlock()
+    }
+
+    /// Test seam: undo `pauseHeartbeatsForTesting`.
+    public func resumeHeartbeatsForTesting() {
+        stateLock.lock()
+        heartbeatsPaused = false
         stateLock.unlock()
     }
 
@@ -322,14 +390,15 @@ public final class ShardStageLink: @unchecked Sendable {
             stateLock.lock()
             let heard = max(lastHeard, waitStart)
             let closed = isClosed
+            let armed = livenessArmed
             stateLock.unlock()
             if closed { throw ShardLinkError.closed }
-            if now - heard > window {
+            if armed, now - heard > window {
                 throw ShardLinkError.peerDead(silentMilliseconds: Int((now - heard) * 1000))
             }
             if now >= deadline { throw ShardLinkError.receiveTimedOut }
             var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
-            let wait = min(slice, deadline - now, window - (now - heard))
+            let wait = armed ? min(slice, deadline - now, window - (now - heard)) : min(slice, deadline - now)
             let ready = poll(&pfd, 1, ShardSocketAddress.pollMilliseconds(max(0, wait)))
             if ready == 0 { continue }
             if ready < 0 {
@@ -406,6 +475,26 @@ struct ShardSocketAddress {
         }
         guard result == 0 else { throw ShardLinkError.socketFailed(operation: "getsockname", errno: errno) }
         return ShardSocketAddress(storage: storage, length: length)
+    }
+
+    /// Numeric `host:port` of the connected peer, or `unknown`.
+    static func peerDescription(of fd: Int32) -> String {
+        var storage = sockaddr_storage()
+        var length = socklen_t(MemoryLayout<sockaddr_storage>.size)
+        let result = withUnsafeMutablePointer(to: &storage) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { getpeername(fd, $0, &length) }
+        }
+        guard result == 0 else { return "unknown" }
+        var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        var service = [CChar](repeating: 0, count: Int(NI_MAXSERV))
+        let named = withUnsafePointer(to: &storage) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                getnameinfo($0, length, &host, socklen_t(host.count), &service, socklen_t(service.count), NI_NUMERICHOST | NI_NUMERICSERV)
+            }
+        }
+        guard named == 0 else { return "unknown" }
+        let hostText = String(cString: host)
+        return hostText.contains(":") ? "[\(hostText)]:\(String(cString: service))" : "\(hostText):\(String(cString: service))"
     }
 
     static func now() -> TimeInterval {

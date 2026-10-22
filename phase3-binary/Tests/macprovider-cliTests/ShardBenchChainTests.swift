@@ -87,7 +87,7 @@ enum ShardBenchTestRig {
     static let epoch: UInt64 = 3
 
     static func configuration(epoch: UInt64 = ShardBenchTestRig.epoch) -> ShardLinkConfiguration {
-        ShardLinkConfiguration(groupEpoch: epoch, heartbeatInterval: 0.05, missedHeartbeatLimit: 4)
+        ShardLinkConfiguration(groupEpoch: epoch, heartbeatInterval: 0.05, missedHeartbeatLimit: 4, armLivenessOnOpen: false)
     }
 
     /// A connected loopback pair: (accepted side, dialing side).
@@ -160,7 +160,8 @@ enum ShardBenchTestRig {
         links: [ShardBenchLinks],
         prompts: [[Int]],
         tokens: Int,
-        expectedStages: Int? = nil
+        expectedStages: Int? = nil,
+        beforeRun: [Int: () -> Void] = [:]
     ) -> [Result<ShardBenchSessionReport, Error>] {
         let results = ShardBenchResultBox(count: stages.count)
         let group = DispatchGroup()
@@ -169,8 +170,10 @@ enum ShardBenchTestRig {
             let stageOptions = options(role: role, prompts: prompts, tokens: tokens, expectedStages: index == 0 ? expectedStages : nil)
             let session = ShardBenchSession(options: stageOptions, stage: stage)
             let stageLinks = links[index]
+            let prepare = beforeRun[index]
             group.enter()
             Thread {
+                prepare?()
                 results.set(index, Result { try session.run(links: stageLinks) })
                 group.leave()
             }.start()
@@ -290,6 +293,25 @@ final class ShardBenchChainTests: XCTestCase {
         XCTAssertThrowsError(try results[1].get())
         XCTAssertThrowsError(try results[2].get())
         XCTAssertLessThan(Date().timeIntervalSince(start), 5)
+    }
+
+    func testStageSilentForOverASecondBeforeItsHelloIsNotDeclaredDead() throws {
+        // The tail's links stay silent (no heartbeats) for 1.2 s after accept, as a
+        // stage still busy before its hello would be; liveness is armed only after the
+        // hello exchange, so the head and middle wait instead of declaring it dead.
+        let splits = [0..<1, 1..<3, 3..<4]
+        let links = try ShardBenchTestRig.ring(stages: 3)
+        for link in links[2].unique { link.pauseHeartbeatsForTesting() }
+        let results = ShardBenchTestRig.run(
+            ShardBenchTestRig.stages(splits, total: 4), links: links, prompts: prompts, tokens: 3,
+            beforeRun: [2: {
+                Thread.sleep(forTimeInterval: 1.2)
+                for link in links[2].unique { link.resumeHeartbeatsForTesting() }
+            }])
+        let head = try XCTUnwrap(try results[0].get().head)
+        XCTAssertEqual(head.sequenceTokens, try ShardBenchTestRig.reference(splits: splits, total: 4, prompts: prompts, tokens: 3))
+        XCTAssertNoThrow(try results[1].get())
+        XCTAssertNoThrow(try results[2].get())
     }
 
     func testChainValidation() throws {
