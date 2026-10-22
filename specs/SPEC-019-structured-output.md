@@ -1,6 +1,6 @@
 # SPEC-019 - Structured output (`response_format: json_schema`)
 
-**Version:** 0.3.1 (2026-10-15, relay-blind non-strict capability gate)
+**Version:** 0.3.2 (2026-10-22, deterministic malformed_json_response is not retryable; post-think validation; #2107)
 **Depends on:** SPEC-001, SPEC-006, SPEC-015, SPEC-018 v0.2.10 LOCKED
 **Status:** LOCKED. v0.3.1 extends the §1a rollout gate to relay-blind requests; v0.3.0 adds the non-enforcing `strict:false` mode (§1a) and supersedes AC-4; v0.2.6 clarifies cleanup-prefix holdback and exact streaming byte parity; v0.2.5 clarified the existing §8 "preserve retryability" requirement.
 
@@ -1185,6 +1185,12 @@ not the normative structured-output validation-timeout authority.
 * Empty-content subcase override: `malformed_json_response` caused by `""` after
   stop-token filtering is `retryable:false` with an actionable buyer-side fix
   message; non-empty malformed JSON remains `retryable:true`.
+  **v0.3.2 overrides (#2107):** a greedy request (`temperature: 0`) reproduces
+  its output, so its `malformed_json_response` is `retryable:false`; a
+  reasoning turn (SPEC-018 §3.12) whose output never closed `</think>` is
+  `retryable:false` with a message to raise `max_tokens` or lower
+  `reasoning_effort`. JSON-mode validation applies to the text after
+  `</think>` only. Other sampled malformed JSON remains `retryable:true`.
 
 **v0.2 error-code amendment**: `streaming_json_schema_unsupported` and
 `streaming_json_object_unsupported` are deleted from the active buyer-visible

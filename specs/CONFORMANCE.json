@@ -9,7 +9,7 @@
     {
       "spec_id": "SPEC-001",
       "title": "Phase 3 Binary: Mac Provider Inference CLI",
-      "version": "1.9.39",
+      "version": "1.9.40",
       "path": "specs/SPEC-001-phase3-binary.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -35,7 +35,7 @@
     {
       "spec_id": "SPEC-002",
       "title": "Phase 4 Coordinator: Mac Provider Request Router",
-      "version": "1.6.23",
+      "version": "1.6.24",
       "path": "specs/SPEC-002-coordinator.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -152,7 +152,7 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.62",
+      "version": "0.9.63",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -504,7 +504,7 @@
     {
       "spec_id": "SPEC-018",
       "title": "Agentic tool calling (provider-side response synthesis)",
-      "version": "0.2.17",
+      "version": "0.3.0",
       "path": "specs/SPEC-018-agentic-tool-calling.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -535,7 +535,7 @@
     {
       "spec_id": "SPEC-019",
       "title": "Structured output (`response_format: json_schema`)",
-      "version": "0.3.1",
+      "version": "0.3.2",
       "path": "specs/SPEC-019-structured-output.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -725,7 +725,7 @@
     {
       "spec_id": "SPEC-025",
       "title": "Native Mac App (signed `.dmg`, native Mac app with menu-bar presence)",
-      "version": "v0.39.0",
+      "version": "v0.40.0",
       "path": "specs/SPEC-025-native-mac-app.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -2381,7 +2381,7 @@
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:hasCompletedValidToolCall"
       ],
       "tests": [
-        "phase3-binary/Tests/macprovider-cliTests/ChatCompletionRequestTests.swift:testOmittedParallelToolCallsIsSerial",
+        "phase3-binary/Tests/macprovider-cliTests/ChatCompletionRequestTests.swift:testOmittedParallelToolCallsIsParallel",
         "phase3-binary/Tests/macprovider-cliTests/NativeToolCallStreamEmitterTests.swift:final class NativeToolCallStreamEmitterTests",
         "phase3-binary/Tests/macprovider-cliTests/SerialToolTurnTests.swift:final class SerialToolTurnTests"
       ],
