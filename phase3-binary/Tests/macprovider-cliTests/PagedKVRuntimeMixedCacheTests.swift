@@ -86,6 +86,36 @@ final class PagedKVRuntimeMixedCacheTests: XCTestCase {
         XCTAssertEqual(ModelRuntime.schedulerDecodeRowBound(configured: 11, backend: nil), 11)
     }
 
+    /// #2100: a glm5_next (pagedMLA) backend takes the 2048-token CB prompt
+    /// chunk ceiling; every other backend keeps the 512-token default.
+    func testSchedulerPromptChunkCeilingIsPerFamily() {
+        let container = ModelContainer(context: ModelContext(
+            configuration: ModelConfiguration(id: "zai-org/glm-5.3-flash"),
+            model: MixedCacheFakeModel(recorder: MixedCacheRecorder(), nextTokenByInput: [:], attentionDType: .float16),
+            processor: MixedCacheUserInputProcessor(),
+            tokenizer: MixedCacheTokenizer()
+        ))
+        let glm = PagedKVSharedForwardBackend(
+            container: container,
+            blockSizeTokens: 256,
+            maxPhysicalBlocks: 16,
+            poolEpoch: 1,
+            layerCount: 2,
+            cacheKinds: [.recurrentMamba, .pagedMLA(kpool: 4)]
+        )
+        let qwen = PagedKVSharedForwardBackend(
+            container: container,
+            blockSizeTokens: 32,
+            maxPhysicalBlocks: 16,
+            poolEpoch: 1,
+            layerCount: 2,
+            cacheKinds: [.recurrentMamba, .pagedAttention]
+        )
+        XCTAssertEqual(ModelRuntime.schedulerPromptChunkCeiling(backend: glm), 2_048)
+        XCTAssertEqual(ModelRuntime.schedulerPromptChunkCeiling(backend: qwen), 512)
+        XCTAssertEqual(ModelRuntime.schedulerPromptChunkCeiling(backend: nil), 512)
+    }
+
     func testSchedulerNativeRaggedPrefillBindingKeepsQwenAndExistingGLMCapabilitiesClosed() {
         let container = ModelContainer(context: ModelContext(
             configuration: ModelConfiguration(id: "test"),

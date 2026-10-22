@@ -1,8 +1,8 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.42 (2026-10-22, shard group member self-health message)
+**Version:** 1.9.43 (2026-10-22, shard group member self-health message)
 
-**Change log v1.9.42 (2026-10-22, Related: #2084):**
+**Change log v1.9.43 (2026-10-22, Related: #2084):**
 Registers one more SPEC-051 shard-group message, owned by SPEC-051-R029: the
 member message `shard_member_health`, which a session advertising
 `shard_member_v1` sends once its `shard_member_hello` is accepted, on its
@@ -10,7 +10,7 @@ heartbeat cadence and on a change of its health or links. The coordinator
 consumes it for group availability (SPEC-051-R015) and sends no answer. A
 session that advertises neither shard capability is unaffected.
 
-**Change log v1.9.41 (2026-10-22, Related: #2084):**
+**Change log v1.9.42 (2026-10-22, Related: #2084):**
 Registers the SPEC-051 shard-group extensions to this wire protocol. Their
 grammar and semantics are owned by SPEC-051-R029, the convention SPEC-036 uses
 for its scoring messages. Two `auth_request.tier2_capabilities` booleans,
@@ -22,6 +22,18 @@ only, the `group_attestation` member of `inference_response_end`
 (SPEC-051-R019) and the terminal status `error_shard_group_failed`
 (SPEC-051-R021, SPEC-051-R022). A session that advertises neither capability
 is unaffected. No trust-tier, settlement or hardware-acceptance claim is added.
+
+**Change log v1.9.41 (2026-10-22, Related: #2107):**
+The provider implements SPEC-018 v0.3.1: a Qwen-grammar output made only of
+untagged `{"name","arguments"}` call bodies (optionally in one `<tools>`
+wrapper) is parsed as tool calls and held from the stream until the final
+parse; gpt-oss Harmony `analysis` bodies are returned as `reasoning_content`
+with `reasoning_tokens`; a request stop string matches only the visible final
+body; a `length` finish inside the analysis channel returns
+`finish_reason:"length"` instead of 502; `required`/named admit an ordinary
+OpenAI parameters object (required-keys output check when outside the strict
+subset); every guaranteed-call profile resolves through the configured catalog
+id alias.
 
 **Change log v1.9.40 (2026-10-22, Related: #2107):**
 The provider implements SPEC-018 v0.3.0 on every serving path (serial,

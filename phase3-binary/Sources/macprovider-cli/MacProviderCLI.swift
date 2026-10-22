@@ -3100,6 +3100,7 @@ struct ServeCommand: AsyncParsableCommand {
                         contextTokens: ProviderCapacity(maxContextOverride: resolved.maxContextOverride, maxConcurrencyOverride: nil).maxContextTokens
                     ),
                     prefillStepSize: resolved.prefillStepSize,
+                    prefillStepSizeExplicitlyConfigured: resolved.prefillStepSizeExplicitlyConfigured,
                     maxBatch: ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride),
                     continuousBatchingMode: resolved.continuousBatching,
                     continuousBatchQueueLimit: resolved.continuousBatchQueueLimit,

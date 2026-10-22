@@ -66,7 +66,7 @@ func TestToolSelectionRequestValidation(t *testing.T) {
 		{"named_outer_extra", string(toolSelectionBody(`{"type":"function","function":{"name":"lookup"},"extra":true}`)), "invalid_tool_choice"},
 		{"named_function_extra", string(toolSelectionBody(`{"type":"function","function":{"name":"lookup","extra":true}}`)), "invalid_tool_choice"},
 		{"required_no_tools", `{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":128,"tool_choice":"required"}`, "invalid_tool_choice"},
-		{"malformed_schema", strings.Replace(string(toolSelectionBody(`"required"`)), `"additionalProperties":false`, `"additionalProperties":true`, 1), "unsupported_tool_schema"},
+		{"non_object_schema", strings.Replace(string(toolSelectionBody(`"required"`)), `{"type":"object","properties":{"q"`, `{"type":"string","properties":{"q"`, 1), "unsupported_tool_schema"},
 		{"duplicate_choice", strings.TrimSuffix(string(toolSelectionBody(`"auto"`)), "}") + `,"tool_choice":"required"}`, "invalid_tool_choice"},
 		{"parallel_null", strings.TrimSuffix(string(toolSelectionBody(`"required"`)), "}") + `,"parallel_tool_calls":null}`, "invalid_tool_choice"},
 		{"structured", strings.TrimSuffix(string(toolSelectionBody(`"required"`)), "}") + `,"response_format":{"type":"json_object"}}`, "unsupported_tool_choice"},
@@ -431,9 +431,16 @@ func TestToolSelectionSchemaNullKeywordShapes(t *testing.T) {
 		`{"type":"object","properties":{"q":{"type":"string","enum":null}},"required":["q"],"additionalProperties":false}`,
 		`{"type":"object","properties":{"q":{"type":"array","items":null}},"required":["q"],"additionalProperties":false}`,
 	} {
+		// SPEC-018 §3.11 v0.3.1: an object schema outside the strict subset is
+		// admitted, but never as strict (its output gets the required-keys check).
 		body := strings.Replace(string(toolSelectionBody(`"required"`)), `{"type":"object","properties":{"q":{"type":"string"}},"required":["q"],"additionalProperties":false}`, schema, 1)
-		if _, status, code, _ := validateChatRequest([]byte(body)); status != 400 || code != "unsupported_tool_schema" {
-			t.Fatalf("schema admitted %s status=%d %s", schema, status, code)
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(body), &raw); err != nil {
+			t.Fatal(err)
+		}
+		policy, reqErr := validateToolSelection([]byte(body), raw)
+		if reqErr != nil || policy == nil || policy.strict["lookup"] {
+			t.Fatalf("schema %s: policy=%+v err=%+v; want admitted non-strict", schema, policy, reqErr)
 		}
 	}
 	// null is a valid scalar value in a null schema.
@@ -487,5 +494,69 @@ func TestToolSelectionHTTPGeneratedFailureEnvelope(t *testing.T) {
 	}
 	if json.Unmarshal(rr.Body.Bytes(), &envelope) != nil || rr.Code != 502 || envelope.Error.Code != "tool_selection_validation_failed" || envelope.Error.Retryable || !envelope.Error.InferenceRan || !envelope.Error.SettlementRan {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// #2107 validation: the buyer-UX suite's ordinary OpenAI tool (no
+// additionalProperties:false) was refused for required/named. It is admitted
+// as a non-strict schema, and its output must still hold the required keys.
+func TestToolSelectionAdmitsOrdinaryOpenAISchema(t *testing.T) {
+	body := []byte(`{"model":"m","max_tokens":1024,"messages":[{"role":"user","content":"Read the file /etc/hosts using the read_file tool."}],"tools":[{"type":"function","function":{"name":"read_file","description":"Read a file from disk","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}}],"tool_choice":"required"}`)
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatal(err)
+	}
+	policy, reqErr := validateToolSelection(body, raw)
+	if reqErr != nil || policy == nil || policy.strict["read_file"] {
+		t.Fatalf("policy=%+v err=%+v; want admitted non-strict", policy, reqErr)
+	}
+	output := func(arguments string) []byte {
+		encoded, _ := json.Marshal(arguments)
+		return []byte(`{"choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":` + string(encoded) + `}}]}}]}`)
+	}
+	if err := validateToolSelectionOutput(policy, output(`{"path":"/etc/hosts"}`), false); err != nil {
+		t.Fatalf("valid call rejected: %v", err)
+	}
+	// Audit r1: the numeric domain holds for non-strict output too.
+	if err := validateToolSelectionOutput(policy, output(`{"path":"/etc/hosts","n":9007199254740993}`), false); err == nil {
+		t.Fatal("out-of-domain number accepted for a non-strict schema")
+	}
+	for _, arguments := range []string{`{}`, `{"file":"/etc/hosts"}`, `[]`} {
+		if err := validateToolSelectionOutput(policy, output(arguments), false); err == nil {
+			t.Fatalf("arguments %s accepted without the required path", arguments)
+		}
+	}
+}
+
+// Audit r1: only the exact "required" member names required keys; a
+// differently cased member must not replace it (Swift uses exact lookup).
+func TestToolSelectionNonStrictRequiredIsExactKey(t *testing.T) {
+	schema := json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"Required":[]}`)
+	if toolArgumentsMatchSchema(schema, false, json.RawMessage(`{}`)) {
+		t.Fatal("cased Required member replaced the required list")
+	}
+	if !toolArgumentsMatchSchema(schema, false, json.RawMessage(`{"path":"a"}`)) {
+		t.Fatal("valid arguments rejected")
+	}
+}
+
+// Audit r2: container depth counts the root as 1 (empty deepest container
+// included), and a null required entry names no key.
+func TestToolSelectionNonStrictDepthAndRequiredEntries(t *testing.T) {
+	nest := func(levels int) string {
+		return strings.Repeat(`{"a":`, levels-1) + `{}` + strings.Repeat(`}`, levels-1)
+	}
+	if got := jsonContainerDepth([]byte(nest(32))); got != 32 {
+		t.Fatalf("depth %d want 32", got)
+	}
+	if got := jsonContainerDepth([]byte(nest(33))); got != 33 {
+		t.Fatalf("depth %d want 33", got)
+	}
+	schema := json.RawMessage(`{"type":"object","required":[null,"path",1]}`)
+	if !toolArgumentsMatchSchema(schema, false, json.RawMessage(`{"path":"a"}`)) {
+		t.Fatal("null or non-string required entry demanded a key")
+	}
+	if toolArgumentsMatchSchema(schema, false, json.RawMessage(`{}`)) {
+		t.Fatal("string required entry not enforced")
 	}
 }

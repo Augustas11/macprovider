@@ -22,6 +22,10 @@ type toolSelectionPolicy struct {
 	name     string
 	parallel bool
 	schemas  map[string]json.RawMessage
+	// strict marks schemas in the strict validator subset. Others are ordinary
+	// OpenAI parameters objects (SPEC-018 §3.11 v0.3.1): their output is checked
+	// for an arguments object holding every root required property.
+	strict map[string]bool
 }
 
 type toolSelectionRequestError struct{ code, message string }
@@ -99,7 +103,7 @@ func validateToolSelection(body []byte, raw map[string]json.RawMessage) (*toolSe
 	if mode == "auto" {
 		return nil, nil
 	}
-	policy := &toolSelectionPolicy{mode: mode, name: name, parallel: parallel, schemas: map[string]json.RawMessage{}}
+	policy := &toolSelectionPolicy{mode: mode, name: name, parallel: parallel, schemas: map[string]json.RawMessage{}, strict: map[string]bool{}}
 	if mode == "none" {
 		return policy, nil
 	}
@@ -144,20 +148,21 @@ func validateToolSelection(body []byte, raw map[string]json.RawMessage) (*toolSe
 		if _, exists := policy.schemas[tool.Function.Name]; exists {
 			return fail("invalid_tools", "Duplicate function name")
 		}
-		if !uniqueJSONKeys(tool.Function.Parameters, 128) {
+		if !uniqueJSONKeys(tool.Function.Parameters, maxJSONSchemaDepth) || jsonContainerDepth(tool.Function.Parameters) > maxJSONSchemaDepth {
 			return fail("unsupported_tool_schema", "Tool schema contains duplicate keys or exceeds depth cap")
 		}
-		if !toolSchemaNumbersSupported(tool.Function.Parameters) || !toolSchemaShapesSupported(tool.Function.Parameters, 1) {
+		if !toolSchemaNumbersSupported(tool.Function.Parameters) {
 			return fail("unsupported_tool_schema", "Tool schema numbers exceed the supported finite numeric range")
 		}
 		if len(tool.Function.Parameters) > maxJSONSchemaBytes {
 			return fail("unsupported_tool_schema", "Tool argument schema exceeds 16 KiB")
 		}
 		var schema map[string]json.RawMessage
-		if json.Unmarshal(tool.Function.Parameters, &schema) != nil || string(schema["type"]) != `"object"` || validateJSONSchemaRaw(tool.Function.Parameters, "", 1) != nil {
-			return fail("unsupported_tool_schema", "Guaranteed tool selection requires the supported strict object schema subset")
+		if json.Unmarshal(tool.Function.Parameters, &schema) != nil || string(bytes.TrimSpace(schema["type"])) != `"object"` {
+			return fail("unsupported_tool_schema", "Guaranteed tool selection requires an object parameters schema")
 		}
 		policy.schemas[tool.Function.Name] = tool.Function.Parameters
+		policy.strict[tool.Function.Name] = toolSchemaShapesSupported(tool.Function.Parameters, 1) && validateJSONSchemaRaw(tool.Function.Parameters, "", 1) == nil
 	}
 	if mode == "named" {
 		if _, ok := policy.schemas[name]; !ok {
@@ -327,12 +332,48 @@ func validateToolSelectionOutput(policy *toolSelectionPolicy, body []byte, strea
 	for _, call := range calls {
 		schema, ok := policy.schemas[call.Name]
 		total += len(call.Arguments)
-		if !ok || (policy.mode == "named" && call.Name != policy.name) || call.ID == "" || ids[call.ID] || call.Type != "function" || len(call.Arguments) > maxToolCallArgumentsBytes || total > maxToolCallArgumentsResponseBytes || !validToolCallArgumentsObject(call.Arguments) || !uniqueJSONKeys([]byte(call.Arguments), 32) || !toolArgumentsConform(schema, []byte(call.Arguments)) {
+		if !ok || (policy.mode == "named" && call.Name != policy.name) || call.ID == "" || ids[call.ID] || call.Type != "function" || len(call.Arguments) > maxToolCallArgumentsBytes || total > maxToolCallArgumentsResponseBytes || !validToolCallArgumentsObject(call.Arguments) || !uniqueJSONKeys([]byte(call.Arguments), 32) || !toolArgumentsMatchSchema(schema, policy.strict[call.Name], []byte(call.Arguments)) {
 			return errToolSelectionOutput
 		}
 		ids[call.ID] = true
 	}
 	return nil
+}
+
+// toolArgumentsMatchSchema validates a strict-subset schema in full, and any
+// other admitted schema for its root required properties (mirrors Swift
+// ToolSelectionPolicy.validateOutput).
+func toolArgumentsMatchSchema(schema json.RawMessage, strict bool, raw json.RawMessage) bool {
+	// Every generated number stays in the finite safe domain (SPEC-018 §3.11),
+	// whichever validation the schema gets; Swift checks it before both.
+	if !toolSchemaNumbersSupported(raw) {
+		return false
+	}
+	if strict {
+		return toolArgumentsConform(schema, raw)
+	}
+	var value map[string]json.RawMessage
+	if json.Unmarshal(raw, &value) != nil || value == nil {
+		return false
+	}
+	// Exact-key lookup, as Swift does: struct decoding would also match a
+	// differently cased "required" member.
+	var node map[string]json.RawMessage
+	var required []json.RawMessage
+	_ = json.Unmarshal(schema, &node)
+	_ = json.Unmarshal(node["required"], &required)
+	for _, entry := range required {
+		// Only string entries name keys (Swift skips the rest); null would
+		// otherwise decode to "".
+		var key string
+		if entry = bytes.TrimSpace(entry); len(entry) == 0 || entry[0] != '"' || json.Unmarshal(entry, &key) != nil {
+			continue
+		}
+		if _, ok := value[key]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func toolArgumentsConform(schema, raw json.RawMessage) bool {
@@ -678,4 +719,32 @@ func toolSchemaNumbersSupported(raw []byte) bool {
 func writeToolSelectionError(w http.ResponseWriter) {
 	retry := false
 	writeProviderStructuredOutputError(w, http.StatusBadGateway, "tool_selection_validation_failed", errToolSelectionOutput.Error(), &retry)
+}
+
+// jsonContainerDepth is the deepest object/array nesting, the root container
+// counting 1 (the provider request parser's convention, SPEC-018 §3.11). It
+// returns maxJSONSchemaDepth+1 on malformed input.
+func jsonContainerDepth(raw []byte) int {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	depth, deepest := 0, 0
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			return deepest
+		}
+		if err != nil {
+			return maxJSONSchemaDepth + 1
+		}
+		if delimiter, ok := token.(json.Delim); ok {
+			switch delimiter {
+			case '{', '[':
+				depth++
+				if depth > deepest {
+					deepest = depth
+				}
+			default:
+				depth--
+			}
+		}
+	}
 }

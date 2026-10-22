@@ -1,6 +1,12 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.24 (2026-10-22, tool-grammar gates, model capabilities, provider-failure reasons)
+**Version:** 1.6.25 (2026-10-22, guaranteed tool selection admits ordinary parameters schemas)
+
+**Change log v1.6.25 (2026-10-22, Related: #2107):** Mirrors SPEC-018 v0.3.1
+§3.11: `required`/named admit an ordinary OpenAI parameters object (root
+`type:"object"`, at most 16 KiB, container depth at most 32, finite safe
+numbers). A strict-subset schema keeps full output validation; any other is
+checked for an arguments object holding every root `required` property.
 
 **Change log v1.6.24 (2026-10-22, Related: #2107):** The coordinator mirrors
 the SPEC-018 v0.3.0 tool-grammar families: a `tools` request to a catalog

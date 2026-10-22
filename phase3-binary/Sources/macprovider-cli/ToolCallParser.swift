@@ -44,6 +44,9 @@ enum ToolCallParser {
         let result: (cleanedContent: String?, toolCalls: [ToolCall])
         switch grammar {
         case .qwen?:
+            if let bare = parseQwenBareCalls(rawOutput, allowedFunctionNames: allowedFunctionNames) {
+                return ParsedToolCalls(cleanedContent: nil, toolCalls: bare, leadingContent: nil)
+            }
             result = parseQwenToolCalls(rawOutput: rawOutput, modelID: modelID, allowedFunctionNames: allowedFunctionNames, schemas: schemas)
         case .glm?, .gemma4?, .llama3?:
             do {
@@ -310,6 +313,43 @@ enum ToolCallParser {
         }
     }
 
+    /// SPEC-018 §3.1 Qwen bare envelope body: Qwen2.5-Coder answers with the
+    /// template's `{"name", "arguments"}` body but without the `<tool_call>`
+    /// tags, sometimes inside the `<tools>` wrapper its system prompt shows.
+    /// Accepted only when the whole output is one or more such objects (no
+    /// prose), each with exactly those two keys, an object `arguments` and a
+    /// declared name. Anything else returns nil and the tagged grammar runs.
+    static func parseQwenBareCalls(_ rawOutput: String, allowedFunctionNames: Set<String>?) -> [ToolCall]? {
+        guard let allowedFunctionNames, !allowedFunctionNames.isEmpty,
+              rawOutput.utf8.count <= SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else { return nil }
+        var text = Substring(rawOutput.trimmingCharacters(in: .whitespacesAndNewlines))
+        if text.hasPrefix(qwenBareWrapperOpen) {
+            guard text.hasSuffix(qwenBareWrapperClose) else { return nil }
+            text = text.dropFirst(qwenBareWrapperOpen.count).dropLast(qwenBareWrapperClose.count)
+        }
+        var calls: [ToolCall] = []
+        while true {
+            text = text.drop(while: { $0.isWhitespace })
+            if text.isEmpty { break }
+            guard calls.count < ToolSelectionPolicy.maxCalls,
+                  let object = firstCompleteJSONObject(in: String(text)),
+                  // Shape check only; `parseJSONCall` applies the tagged path's
+                  // argument validator (and its depth rule) to the same object.
+                  case .object(let parsed)? = try? StrictJSONParser.parse(object, maxDepth: 128),
+                  Set(parsed.keys) == ["name", "arguments"],
+                  case .string(let name)? = parsed["name"], allowedFunctionNames.contains(name),
+                  case .object? = parsed["arguments"],
+                  let call = try? parseJSONCall(object, argumentKey: "arguments") else { return nil }
+            calls.append(call)
+            text = text.dropFirst(object.count)
+        }
+        guard !calls.isEmpty, (try? enforceArgumentCaps(calls)) != nil else { return nil }
+        return calls
+    }
+
+    static let qwenBareWrapperOpen = "<tools>"
+    static let qwenBareWrapperClose = "</tools>"
+
     /// Guaranteed modes deliberately exclude the auto-mode recovery paths. Every
     /// byte outside a closed `<tool_call>` envelope must be blank. An envelope
     /// body is either strict JSON or one complete function-XML call (the format
@@ -397,6 +437,9 @@ enum ToolCallParser {
             properties = object
         }
         cursor = cursor[cursor.index(after: nameEnd)...]
+        // SPEC-018 §3.11 v0.3.1: a non-strict schema may require a key it does
+        // not declare in `properties`; such a key is read untyped.
+        let strict = ToolSelectionPolicy.isStrictSubset(.object(schema))
         var arguments: [String: JSONValue] = [:]
         while true {
             cursor = cursor.drop(while: { $0.isWhitespace })
@@ -408,8 +451,16 @@ enum ToolCallParser {
             cursor = cursor.dropFirst("<parameter=".count)
             guard let keyEnd = cursor.firstIndex(of: ">") else { throw malformed }
             let key = String(cursor[..<keyEnd])
-            guard isValidToolParameterName(key), arguments[key] == nil,
-                  case .object(let property)? = properties[key] else { throw malformed }
+            guard isValidToolParameterName(key), arguments[key] == nil else { throw malformed }
+            let property: [String: JSONValue]
+            if case .object(let declared)? = properties[key] {
+                property = declared
+            } else {
+                // Absent or a non-object (boolean) subschema: untyped, and only
+                // where the schema is non-strict.
+                guard !strict else { throw malformed }
+                property = [:]
+            }
             cursor = cursor[cursor.index(after: keyEnd)...]
             guard let close = cursor.range(of: "</parameter>") else { throw malformed }
             var raw = cursor[..<close.lowerBound]
@@ -421,11 +472,17 @@ enum ToolCallParser {
             }
             if property["type"] == .string("string") {
                 arguments[key] = .string(String(raw))
-            } else {
+            } else if case .string? = property["type"] {
                 guard let value = try? StrictJSONParser.parse(String(raw), maxDepth: JSONSchemaValidator.maxDepth - 1) else {
                     throw malformed
                 }
                 arguments[key] = value
+            } else {
+                // A non-strict property without one declared type (SPEC-018
+                // §3.11 v0.3.1): JSON when the value parses, else its text, as
+                // the template writes non-string values as JSON.
+                arguments[key] = (try? StrictJSONParser.parse(String(raw), maxDepth: JSONSchemaValidator.maxDepth - 1))
+                    ?? .string(String(raw))
             }
             cursor = cursor[close.upperBound...]
         }
