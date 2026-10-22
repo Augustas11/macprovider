@@ -254,6 +254,18 @@ final class PipelineStageModel {
         return logits
     }
 
+    /// Extend this stage's KV with `input` without producing its output. On the last
+    /// stage only the caches are evaluated, so a fill-only prefill chunk never runs
+    /// the final norm or the LM head over its tokens.
+    func fill(_ input: MLXArray, cache: [KVCache]) throws {
+        guard capture == nil else {
+            _ = try forward(input, cache: cache)
+            return
+        }
+        _ = model(input, cache: cache)
+        eval(cache.flatMap { $0.innerState() })
+    }
+
     /// The capture layer's attention is built but never evaluated. Its cache must still
     /// agree in length with the real caches (shapes are checked when ops are built), and
     /// it must not chain lazy updates across steps, so it is re-seeded each step with

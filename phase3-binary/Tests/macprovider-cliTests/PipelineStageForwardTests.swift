@@ -149,6 +149,77 @@ final class PipelineStageForwardTests: XCTestCase {
         try await assertStagesMatchWholeModel(Self.deepseekConfig, splits: [0..<2, 2..<3])
     }
 
+    /// Prefill `prompt` in chunks through the stages (fill-only on the last stage for
+    /// all but the final chunk) and compare with the whole model's one-shot prefill,
+    /// then keep decoding to show the chunked KV is the same KV.
+    private func assertChunkedPrefillMatchesUnchunked(
+        _ config: [String: Any],
+        splits: [Range<Int>],
+        prompt: [Int32],
+        chunk: Int,
+        steps: Int = 3,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        try await Device.withDefaultDevice(.cpu) {
+            let (directory, whole) = try await makeCheckpoint(config)
+            var stages = [PipelineStageModel]()
+            for range in splits {
+                stages.append(try await PipelineStageModel.load(directory: directory, layers: range))
+            }
+            let wholeCache = try whole.newCache(parameters: nil)
+            let stageCaches = try stages.map { try $0.newCache() }
+            var expected = whole(MLXArray(prompt).reshaped(1, prompt.count), cache: wholeCache)
+
+            var logits: MLXArray?
+            let starts = Array(stride(from: 0, to: prompt.count, by: chunk))
+            for (index, start) in starts.enumerated() {
+                let isLast = index == starts.count - 1
+                let piece = Array(prompt[start..<min(prompt.count, start + chunk)])
+                var carried = MLXArray(piece).reshaped(1, piece.count)
+                for (stage, cache) in zip(stages, stageCaches) {
+                    if stage.plan.isLast {
+                        if isLast {
+                            logits = try stage.forward(carried, cache: cache)
+                        } else {
+                            try stage.fill(carried, cache: cache)
+                        }
+                    } else {
+                        let encoded = try PipelineActivationCodec.encode(try stage.forward(carried, cache: cache))
+                        carried = try PipelineActivationCodec.decode(dtype: encoded.dtype, shape: encoded.shape, payload: encoded.payload)
+                    }
+                }
+            }
+            var actual = try XCTUnwrap(logits, file: file, line: line)
+            for step in 0...steps {
+                let difference = abs(actual[0, -1] - expected[0, -1]).max().item(Float.self)
+                XCTAssertLessThanOrEqual(difference, 1e-4, "step \(step) max |delta| \(difference)", file: file, line: line)
+                let token = argMax(expected[0, -1], axis: -1).item(Int32.self)
+                XCTAssertEqual(argMax(actual[0, -1], axis: -1).item(Int32.self), token, "step \(step)", file: file, line: line)
+                guard step < steps else { break }
+                let input = MLXArray([token]).reshaped(1, 1)
+                expected = whole(input, cache: wholeCache)
+                var carried = input
+                for (stage, cache) in zip(stages, stageCaches) {
+                    carried = try stage.forward(carried, cache: cache)
+                }
+                actual = carried
+            }
+            XCTAssertEqual(stageCaches.last?.first?.offset, prompt.count + steps, file: file, line: line)
+        }
+    }
+
+    func testChunkedPrefillLogitsEqualUnchunkedLlama() async throws {
+        let prompt: [Int32] = [3, 14, 15, 92, 65, 35, 89, 79, 32, 38, 46]
+        try await assertChunkedPrefillMatchesUnchunked(Self.llamaConfig, splits: [0..<1, 1..<3, 3..<4], prompt: prompt, chunk: 4)
+        try await assertChunkedPrefillMatchesUnchunked(Self.llamaConfig, splits: [0..<2, 2..<4], prompt: prompt, chunk: 1)
+    }
+
+    func testChunkedPrefillLogitsEqualUnchunkedDeepseekV3() async throws {
+        let prompt: [Int32] = [3, 14, 15, 92, 65, 35, 89, 79, 32]
+        try await assertChunkedPrefillMatchesUnchunked(Self.deepseekConfig, splits: [0..<1, 1..<3], prompt: prompt, chunk: 4)
+    }
+
     func testStageLoadsOnlyItsOwnLayers() async throws {
         try await Device.withDefaultDevice(.cpu) {
             let (directory, _) = try await makeCheckpoint(Self.llamaConfig)

@@ -22,7 +22,8 @@ import Foundation
 //    44    8 per-link sequence number
 //    52    4 payload length
 //    56    1 shape rank
-//    57    3 reserved (must be zero)
+//    57    1 flags (ShardFrameFlags; activation frames only)
+//    58    2 reserved (must be zero)
 //    60  4*r shape dims (UInt32 each)
 //     .    n payload
 //     .    4 CRC32C over every preceding byte of the frame
@@ -37,6 +38,23 @@ public enum ShardFrameKind: UInt8, Sendable, CaseIterable {
     case heartbeat = 4
     case abort = 5
     case error = 6
+}
+
+/// Per-frame flags. Unknown bits are refused, so a peer that does not know a flag
+/// fails closed instead of misreading the frame.
+public struct ShardFrameFlags: OptionSet, Equatable, Sendable {
+    public let rawValue: UInt8
+
+    public init(rawValue: UInt8) {
+        self.rawValue = rawValue
+    }
+
+    /// The receiver only extends its KV with this activation: every stage forwards
+    /// it, and the last stage samples no token for it. Used for all but the last
+    /// chunk of a chunked prefill and for replaying a delivered prefix into a spare.
+    public static let fillOnly = ShardFrameFlags(rawValue: 1 << 0)
+
+    public static let known: ShardFrameFlags = [.fillOnly]
 }
 
 public enum ShardTensorDType: UInt8, Sendable, CaseIterable {
@@ -70,6 +88,8 @@ public enum ShardFrameError: Error, Equatable, Sendable {
     case unknownKind(UInt8)
     case unknownDType(UInt8)
     case nonzeroReserved
+    case unknownFlags(UInt8)
+    case flagsOnNonActivation(kind: ShardFrameKind)
     case rankTooLarge(Int)
     case payloadTooLarge(length: Int, cap: Int)
     case shapePayloadMismatch(expectedBytes: Int, payloadBytes: Int)
@@ -96,6 +116,7 @@ public struct ShardStageFrameHeader: Equatable, Sendable {
     /// Assigned by the sending link; a caller-built header's value is overwritten on send.
     public var sequence: UInt64
     public var shape: [UInt32]
+    public var flags: ShardFrameFlags
 
     public init(
         kind: ShardFrameKind,
@@ -109,7 +130,8 @@ public struct ShardStageFrameHeader: Equatable, Sendable {
         layerStart: UInt32 = 0,
         layerEnd: UInt32 = 0,
         sequence: UInt64 = 0,
-        shape: [UInt32] = []
+        shape: [UInt32] = [],
+        flags: ShardFrameFlags = []
     ) {
         self.kind = kind
         self.dtype = dtype
@@ -123,6 +145,7 @@ public struct ShardStageFrameHeader: Equatable, Sendable {
         self.layerEnd = layerEnd
         self.sequence = sequence
         self.shape = shape
+        self.flags = flags
     }
 }
 
@@ -179,7 +202,8 @@ public enum ShardStageFrameCodec {
         appendLE(&bytes, header.sequence)
         appendLE(&bytes, UInt32(frame.payload.count))
         bytes.append(UInt8(header.shape.count))
-        bytes.append(contentsOf: [0, 0, 0])
+        bytes.append(header.flags.rawValue)
+        bytes.append(contentsOf: [0, 0])
         for dim in header.shape { appendLE(&bytes, dim) }
         bytes.append(contentsOf: frame.payload)
         appendLE(&bytes, CRC32C.checksum(bytes))
@@ -244,7 +268,9 @@ public enum ShardStageFrameCodec {
         guard version == Self.version else { throw ShardFrameError.unsupportedVersion(version) }
         guard let kind = ShardFrameKind(rawValue: bytes[6]) else { throw ShardFrameError.unknownKind(bytes[6]) }
         guard let dtype = ShardTensorDType(rawValue: bytes[7]) else { throw ShardFrameError.unknownDType(bytes[7]) }
-        guard bytes[57] == 0, bytes[58] == 0, bytes[59] == 0 else { throw ShardFrameError.nonzeroReserved }
+        guard bytes[58] == 0, bytes[59] == 0 else { throw ShardFrameError.nonzeroReserved }
+        let flags = ShardFrameFlags(rawValue: bytes[57])
+        guard ShardFrameFlags.known.isSuperset(of: flags) else { throw ShardFrameError.unknownFlags(bytes[57]) }
         let rank = Int(bytes[56])
         guard rank <= ShardFrameLimits.maxRank else { throw ShardFrameError.rankTooLarge(rank) }
         let payloadLength = Int(readLE(bytes, 52, as: UInt32.self))
@@ -262,7 +288,8 @@ public enum ShardStageFrameCodec {
             destinationStage: readLE(bytes, 34, as: UInt16.self),
             layerStart: readLE(bytes, 36, as: UInt32.self),
             layerEnd: readLE(bytes, 40, as: UInt32.self),
-            sequence: readLE(bytes, 44, as: UInt64.self)
+            sequence: readLE(bytes, 44, as: UInt64.self),
+            flags: flags
         )
         return FixedHeader(header: header, rank: rank, payloadLength: payloadLength)
     }
@@ -275,6 +302,12 @@ public enum ShardStageFrameCodec {
         }
         guard payloadLength <= limits.payloadCap else {
             throw ShardFrameError.payloadTooLarge(length: payloadLength, cap: limits.payloadCap)
+        }
+        guard ShardFrameFlags.known.isSuperset(of: header.flags) else {
+            throw ShardFrameError.unknownFlags(header.flags.rawValue)
+        }
+        guard header.flags.isEmpty || header.kind == .activation else {
+            throw ShardFrameError.flagsOnNonActivation(kind: header.kind)
         }
         guard header.layerStart <= header.layerEnd else {
             throw ShardFrameError.invalidLayerRange(start: header.layerStart, end: header.layerEnd)

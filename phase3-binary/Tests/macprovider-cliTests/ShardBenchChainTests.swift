@@ -20,6 +20,8 @@ final class FakeShardStage: ShardBenchStage {
     var failOnCall: Int?
     /// Called before each forward with the 1-based call number.
     var onCall: ((Int) -> Void)?
+    /// Sleep this long in every forward, to push a prefill chunk past its deadline.
+    var computeDelay: TimeInterval = 0
     private var calls = 0
 
     init(layers: Range<Int>, totalLayers: Int) {
@@ -63,9 +65,15 @@ final class FakeShardStage: ShardBenchStage {
         return mixed % 97
     }
 
+    func fill(activation: ShardBenchActivation, cache: Cache) throws {
+        try count()
+        for (offset, value) in Self.decode(activation).enumerated() where offset % hiddenSize == 0 { cache.history.append(value) }
+    }
+
     private func count() throws {
         calls += 1
         onCall?(calls)
+        if computeDelay > 0 { Thread.sleep(forTimeInterval: computeDelay) }
         if let failOnCall, calls == failOnCall { throw Failure(call: calls) }
     }
 
@@ -122,12 +130,15 @@ enum ShardBenchTestRig {
         prompts: [[Int]],
         tokens: Int,
         probeCount: Int = 5,
-        expectedStages: Int? = nil
+        expectedStages: Int? = nil,
+        prefillChunk: Int? = nil,
+        prefillChunkDeadline: TimeInterval = 3
     ) -> ShardBenchSessionOptions {
         ShardBenchSessionOptions(
             role: role, listen: nil, connect: nil, expectedStages: expectedStages, modelLabel: "fake",
             prompts: prompts, tokens: tokens, temperature: 0, seed: 0, link: configuration(),
-            receiveTimeout: 5, connectTimeout: 5, probeCount: probeCount, maxSequences: 8, warmup: true)
+            receiveTimeout: 5, connectTimeout: 5, probeCount: probeCount, maxSequences: 8, warmup: true,
+            prefillChunk: prefillChunk, prefillChunkDeadline: prefillChunkDeadline)
     }
 
     static func stages(_ splits: [Range<Int>], total: Int) -> [FakeShardStage] {
@@ -161,13 +172,17 @@ enum ShardBenchTestRig {
         prompts: [[Int]],
         tokens: Int,
         expectedStages: Int? = nil,
-        beforeRun: [Int: () -> Void] = [:]
+        beforeRun: [Int: () -> Void] = [:],
+        prefillChunk: Int? = nil,
+        prefillChunkDeadline: TimeInterval = 3
     ) -> [Result<ShardBenchSessionReport, Error>] {
         let results = ShardBenchResultBox(count: stages.count)
         let group = DispatchGroup()
         for (index, stage) in stages.enumerated() {
             let role: ShardBenchRole = index == 0 ? .head : (index == stages.count - 1 ? .tail : .middle)
-            let stageOptions = options(role: role, prompts: prompts, tokens: tokens, expectedStages: index == 0 ? expectedStages : nil)
+            let stageOptions = options(
+                role: role, prompts: prompts, tokens: tokens, expectedStages: index == 0 ? expectedStages : nil,
+                prefillChunk: prefillChunk, prefillChunkDeadline: prefillChunkDeadline)
             let session = ShardBenchSession(options: stageOptions, stage: stage)
             let stageLinks = links[index]
             let prepare = beforeRun[index]
@@ -312,6 +327,43 @@ final class ShardBenchChainTests: XCTestCase {
         XCTAssertEqual(head.sequenceTokens, try ShardBenchTestRig.reference(splits: splits, total: 4, prompts: prompts, tokens: 3))
         XCTAssertNoThrow(try results[1].get())
         XCTAssertNoThrow(try results[2].get())
+    }
+
+    // MARK: Slice 2: chunked pipelined prefill
+
+    func testChunkedPrefillThroughThreeStagesMatchesTheUnchunkedReference() throws {
+        let splits = [0..<1, 1..<3, 3..<4]
+        let results = ShardBenchTestRig.run(
+            ShardBenchTestRig.stages(splits, total: 4), links: try ShardBenchTestRig.ring(stages: 3),
+            prompts: prompts, tokens: 5, prefillChunk: 2)
+        let head = try XCTUnwrap(try results[0].get().head)
+        XCTAssertEqual(head.sequenceTokens, try ShardBenchTestRig.reference(splits: splits, total: 4, prompts: prompts, tokens: 5))
+        XCTAssertEqual(head.prefillChunkTokens, 2)
+        XCTAssertEqual(head.prefillChunksPerSequence, [3, 2])
+        // The head reports the measured run (3 + 2 chunks); the stages also served the
+        // warmup's 3 chunks of prompt 0.
+        XCTAssertEqual(head.headPrefillChunkCompute.count, 5)
+        XCTAssertEqual(try results[1].get().stage?.prefillCompute.count, 8)
+        XCTAssertEqual(try results[2].get().stage?.prefillCompute.count, 8)
+    }
+
+    func testPrefillChunkOverTheDeadlineFailsTheRun() throws {
+        let stages = ShardBenchTestRig.stages([0..<1, 1..<3, 3..<4], total: 4)
+        stages[1].computeDelay = 0.15
+        let results = ShardBenchTestRig.run(
+            stages, links: try ShardBenchTestRig.ring(stages: 3), prompts: prompts, tokens: 3,
+            prefillChunk: 2, prefillChunkDeadline: 0.1)
+        XCTAssertThrowsError(try results[1].get()) { error in
+            guard case ShardBenchError.prefillChunkDeadline(let stage, let tokens, _, let deadline) = error else {
+                return XCTFail("expected a chunk deadline failure, got \(error)")
+            }
+            XCTAssertEqual(stage, 1)
+            XCTAssertEqual(tokens, 2)
+            XCTAssertEqual(deadline, 100)
+        }
+        XCTAssertThrowsError(try results[0].get()) { error in
+            XCTAssertTrue(String(describing: error).contains("chunk deadline"), "\(error)")
+        }
     }
 
     func testChainValidation() throws {

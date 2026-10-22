@@ -93,6 +93,12 @@ struct ShardBenchCommand: AsyncParsableCommand {
     @Option(name: .customLong("max-sequences"), help: "Middle/tail: most sequences it holds KV caches for at once.")
     var maxSequences: Int = 64
 
+    @Option(name: .customLong("prefill-chunk"), help: "Head: split each prompt into chunks of this many tokens, pipelined across the stages (default: one chunk).")
+    var prefillChunk: Int?
+
+    @Option(name: .customLong("prefill-chunk-deadline-ms"), help: "Each stage's compute for one prefill chunk must finish within this (SPEC-051 prefill_chunk_deadline_ms, 500..4000).")
+    var prefillChunkDeadlineMilliseconds: Int = 3000
+
     @Option(help: "Head: reference JSON from a --local-reference run instead of an in-process reference decode.")
     var reference: String?
 
@@ -114,6 +120,10 @@ struct ShardBenchCommand: AsyncParsableCommand {
         }
         guard heartbeatMilliseconds > 0, missedHeartbeats > 0, receiveTimeout > 0, connectTimeout > 0 else {
             throw ValidationError("heartbeat and timeout options must be > 0")
+        }
+        if let prefillChunk, prefillChunk <= 0 { throw ValidationError("--prefill-chunk must be > 0") }
+        guard (500...4000).contains(prefillChunkDeadlineMilliseconds) else {
+            throw ValidationError("--prefill-chunk-deadline-ms must be within 500..4000")
         }
         if localReference { return }
         guard let role, let parsed = ShardBenchRole(rawValue: role) else {
@@ -216,7 +226,9 @@ struct ShardBenchCommand: AsyncParsableCommand {
             connectTimeout: connectTimeout,
             probeCount: probeCount,
             maxSequences: maxSequences,
-            warmup: !noWarmup
+            warmup: !noWarmup,
+            prefillChunk: prefillChunk,
+            prefillChunkDeadline: Double(prefillChunkDeadlineMilliseconds) / 1000
         )
         return (options, lower..<upper)
     }
@@ -261,6 +273,8 @@ protocol ShardBenchStage: AnyObject {
     func forward(activation: ShardBenchActivation, cache: Cache) throws -> ShardBenchActivation
     /// Last stage: boundary activation in, next token out.
     func sample(activation: ShardBenchActivation, cache: Cache, temperature: Float) throws -> Int
+    /// Last stage: extend the KV with a fill-only activation; no token is sampled.
+    func fill(activation: ShardBenchActivation, cache: Cache) throws
 }
 
 extension PipelineStageModel: ShardBenchStage {
@@ -282,6 +296,10 @@ extension PipelineStageModel: ShardBenchStage {
     func sample(activation: ShardBenchActivation, cache: [KVCache], temperature: Float) throws -> Int {
         let input = try PipelineActivationCodec.decode(dtype: activation.dtype, shape: activation.shape, payload: activation.payload)
         return PipelineStageSampler.sample(logits: try forward(input, cache: cache), temperature: temperature)
+    }
+
+    func fill(activation: ShardBenchActivation, cache: [KVCache]) throws {
+        try fill(try PipelineActivationCodec.decode(dtype: activation.dtype, shape: activation.shape, payload: activation.payload), cache: cache)
     }
 }
 
@@ -325,6 +343,10 @@ struct ShardBenchSessionOptions: Sendable {
     let probeCount: Int
     let maxSequences: Int
     let warmup: Bool
+    /// Head: prompt tokens per prefill chunk; nil sends the whole prompt as one chunk.
+    let prefillChunk: Int?
+    /// SPEC-051-R013: one stage's compute for one prefill chunk must stay below this.
+    let prefillChunkDeadline: TimeInterval
 }
 
 struct ShardBenchLatency: Codable, Equatable {
@@ -446,7 +468,11 @@ struct ShardBenchHeadReport: Encodable {
     let headDecodeCompute: ShardBenchLatency
     let decodeHopPayloadBytes: Int
     let decodeHopFrameBytes: Int
+    /// Boundary bytes of each sequence's whole prefill, summed over its chunks.
     let prefillHopPayloadBytes: [Int]
+    let prefillChunkTokens: Int?
+    let prefillChunksPerSequence: [Int]
+    let headPrefillChunkCompute: ShardBenchLatency
     let links: [ShardBenchLinkReport]
     var parity: ShardBenchParity?
     var referenceSingleStreamTokensPerSecond: Double?
@@ -556,6 +582,7 @@ enum ShardBenchError: Error, CustomStringConvertible {
     case protocolViolation(String)
     case peerError(String)
     case tooManySequences(Int)
+    case prefillChunkDeadline(stage: Int, tokens: Int, milliseconds: Int, deadlineMilliseconds: Int)
 
     var description: String {
         switch self {
@@ -563,6 +590,8 @@ enum ShardBenchError: Error, CustomStringConvertible {
         case .protocolViolation(let detail): return "protocol violation: \(detail)"
         case .peerError(let detail): return "peer reported error: \(detail)"
         case .tooManySequences(let cap): return "more than \(cap) concurrent sequences"
+        case .prefillChunkDeadline(let stage, let tokens, let milliseconds, let deadline):
+            return "stage \(stage) took \(milliseconds) ms for a \(tokens)-token prefill chunk, over the \(deadline) ms chunk deadline; use a smaller --prefill-chunk"
         }
     }
 }
@@ -881,14 +910,15 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
         microBatch: UInt32 = 0,
         step: UInt32 = 0,
         destination: Int,
-        shape: [UInt32] = []
+        shape: [UInt32] = [],
+        flags: ShardFrameFlags = []
     ) -> ShardStageFrameHeader {
         ShardStageFrameHeader(
             kind: kind, dtype: dtype, groupEpoch: options.link.groupEpoch, requestID: requestID,
             microBatchID: microBatch, tokenStep: step, sourceStage: UInt16(stageIndex),
             destinationStage: UInt16(destination),
             layerStart: UInt32(stage.layers.lowerBound), layerEnd: UInt32(stage.layers.upperBound),
-            shape: shape)
+            shape: shape, flags: flags)
     }
 
     /// Where this stage's downstream sends go: the next stage, or the head for the tail.
@@ -978,6 +1008,9 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
             decodeHopPayloadBytes: run.decodeHopPayloadBytes,
             decodeHopFrameBytes: ShardStageFrameCodec.frameSize(rank: 3, payloadLength: run.decodeHopPayloadBytes),
             prefillHopPayloadBytes: run.prefillPayloadBytes,
+            prefillChunkTokens: options.prefillChunk,
+            prefillChunksPerSequence: run.prefillChunks,
+            headPrefillChunkCompute: ShardBenchLatency(seconds: run.prefillChunkCompute),
             links: linkReports,
             parity: nil,
             referenceSingleStreamTokensPerSecond: nil
@@ -991,6 +1024,8 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
         var wallSeconds: Double
         var decodeHopPayloadBytes: Int
         var prefillPayloadBytes: [Int]
+        var prefillChunks: [Int]
+        var prefillChunkCompute: [Double]
         var activationDType: String
     }
 
@@ -1007,16 +1042,32 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
         var index = [UInt64: Int]()
         var run = PipelineRun(
             sequences: [], stepRoundTrips: [], headCompute: [], wallSeconds: 0,
-            decodeHopPayloadBytes: 0, prefillPayloadBytes: [], activationDType: "")
+            decodeHopPayloadBytes: 0, prefillPayloadBytes: [], prefillChunks: [], prefillChunkCompute: [], activationDType: "")
         let start = now()
         for (offset, prompt) in prompts.enumerated() {
             let requestID = firstRequestID + UInt64(offset) * 2
             var sequence = HeadSequence(requestID: requestID, microBatch: UInt32(offset), cache: try stage.newCache())
             sequence.prefillStart = now()
-            let hidden = try stage.forward(tokens: prompt, cache: sequence.cache)
-            try sendActivation(links.downstream, hidden, sequence: &sequence, step: 0)
-            run.prefillPayloadBytes.append(hidden.payload.count)
-            run.activationDType = String(describing: hidden.dtype)
+            // Chunk i goes down the chain as soon as the head has computed it, so stage
+            // k+1 works on chunk i while stage k computes chunk i+1. Only the last chunk
+            // asks the tail for a token.
+            let chunkSize = options.prefillChunk ?? max(1, prompt.count)
+            let chunkStarts = Array(stride(from: 0, to: prompt.count, by: chunkSize))
+            var payloadBytes = 0
+            for (chunkIndex, chunkStart) in chunkStarts.enumerated() {
+                let chunk = Array(prompt[chunkStart..<min(prompt.count, chunkStart + chunkSize)])
+                let computeStart = now()
+                let hidden = try stage.forward(tokens: chunk, cache: sequence.cache)
+                let elapsed = now() - computeStart
+                run.prefillChunkCompute.append(elapsed)
+                try checkPrefillDeadline(elapsed, tokens: chunk.count)
+                let isLast = chunkIndex == chunkStarts.count - 1
+                try sendActivation(links.downstream, hidden, sequence: &sequence, step: 0, flags: isLast ? [] : .fillOnly)
+                payloadBytes += hidden.payload.count
+                run.activationDType = String(describing: hidden.dtype)
+            }
+            run.prefillPayloadBytes.append(payloadBytes)
+            run.prefillChunks.append(chunkStarts.count)
             index[requestID] = sequences.count
             sequences.append(sequence)
         }
@@ -1062,13 +1113,24 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
         _ link: ShardStageLink,
         _ hidden: ShardBenchActivation,
         sequence: inout HeadSequence,
-        step: UInt32
+        step: UInt32,
+        flags: ShardFrameFlags = []
     ) throws {
         sequence.lastSend = now()
         try link.send(ShardStageFrame(
             header: header(.activation, dtype: hidden.dtype, requestID: sequence.requestID,
-                           microBatch: sequence.microBatch, step: step, destination: 1, shape: hidden.shape),
+                           microBatch: sequence.microBatch, step: step, destination: 1, shape: hidden.shape,
+                           flags: flags),
             payload: hidden.payload))
+    }
+
+    /// SPEC-051-R013: a stage whose compute for one prefill chunk passes the chunk
+    /// deadline fails the run instead of risking the GPU watchdog on a real group.
+    private func checkPrefillDeadline(_ elapsed: TimeInterval, tokens: Int) throws {
+        guard elapsed > options.prefillChunkDeadline else { return }
+        throw ShardBenchError.prefillChunkDeadline(
+            stage: stageIndex, tokens: tokens, milliseconds: Int((elapsed * 1000).rounded()),
+            deadlineMilliseconds: Int((options.prefillChunkDeadline * 1000).rounded()))
     }
 
     // MARK: Middle and tail
@@ -1107,7 +1169,9 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
                     served.insert(header.requestID)
                 }
                 let input = ShardBenchActivation(dtype: header.dtype, shape: header.shape, payload: frame.payload)
-                if options.role == .tail {
+                if options.role == .tail, header.flags.contains(.fillOnly) {
+                    try stage.fill(activation: input, cache: cache)
+                } else if options.role == .tail {
                     let token = try stage.sample(activation: input, cache: cache, temperature: options.temperature)
                     var payload = Data(count: 4)
                     payload.withUnsafeMutableBytes { $0.storeBytes(of: Int32(token).littleEndian, as: Int32.self) }
@@ -1121,11 +1185,13 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
                     try links.downstream.send(ShardStageFrame(
                         header: self.header(.activation, dtype: output.dtype, requestID: header.requestID,
                                             microBatch: header.microBatchID, step: header.tokenStep,
-                                            destination: downstreamIndex, shape: output.shape),
+                                            destination: downstreamIndex, shape: output.shape, flags: header.flags),
                         payload: output.payload))
                 }
                 if header.tokenStep == 0 {
-                    prefillCompute.append(now() - start)
+                    let elapsed = now() - start
+                    prefillCompute.append(elapsed)
+                    try checkPrefillDeadline(elapsed, tokens: Int(header.shape.count == 3 ? header.shape[1] : 0))
                 } else {
                     decodeCompute.append(now() - start)
                 }

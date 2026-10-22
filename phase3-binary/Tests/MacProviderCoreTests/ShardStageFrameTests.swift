@@ -117,6 +117,32 @@ final class ShardStageFrameTests: XCTestCase {
         assertDecodeThrows(patched(encoded, at: 58, with: [1]), .nonzeroReserved)
     }
 
+    func testFillOnlyFlagRoundTripsOnActivationsOnly() throws {
+        var frame = activationFrame()
+        frame.header.flags = .fillOnly
+        let encoded = try ShardStageFrameCodec.encode(frame)
+        XCTAssertEqual([UInt8](encoded)[57], 1)
+        XCTAssertEqual(try ShardStageFrameCodec.decode(encoded), frame)
+        XCTAssertEqual(try ShardStageFrameCodec.decode(try ShardStageFrameCodec.encode(activationFrame())).header.flags, [])
+
+        assertDecodeThrows(patched(encoded, at: 57, with: [0x03]), .unknownFlags(0x03))
+        var unknown = activationFrame()
+        unknown.header.flags = ShardFrameFlags(rawValue: 0x80)
+        XCTAssertThrowsError(try ShardStageFrameCodec.encode(unknown)) { error in
+            XCTAssertEqual(error as? ShardFrameError, .unknownFlags(0x80))
+        }
+
+        let token = ShardStageFrame(
+            header: ShardStageFrameHeader(kind: .token, dtype: .int32, groupEpoch: 7, shape: [1]),
+            payload: Data([1, 0, 0, 0]))
+        assertDecodeThrows(patched(try ShardStageFrameCodec.encode(token), at: 57, with: [1]), .flagsOnNonActivation(kind: .token))
+        var flaggedToken = token
+        flaggedToken.header.flags = .fillOnly
+        XCTAssertThrowsError(try ShardStageFrameCodec.encode(flaggedToken)) { error in
+            XCTAssertEqual(error as? ShardFrameError, .flagsOnNonActivation(kind: .token))
+        }
+    }
+
     func testRejectsRankAboveLimit() throws {
         let encoded = try ShardStageFrameCodec.encode(activationFrame())
         assertDecodeThrows(patched(encoded, at: 56, with: [9]), .rankTooLarge(9))
