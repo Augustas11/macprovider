@@ -125,6 +125,15 @@ def save(path, state):
     atomic(path, (json.dumps(state) + "\n").encode(), 0o600)
 
 
+def enrollment_matches(raw, state, provider, model, slots):
+    if not state or state.get("phase") != "committed" or digest(raw) != state.get("after_sha256"):
+        return False
+    doc = json.loads(raw)
+    matches = [t for t in doc.get("targets", []) if t.get("provider_id") == provider]
+    return (len(matches) == 1 and matches[0].get("model") == model
+            and matches[0].get("slots") == slots and provider not in doc.get("exclude", []))
+
+
 def recover(path, journal, state):
     raw = secure_path(path).read_bytes()
     if digest(raw) not in (state["before_sha256"], state["after_sha256"]):
@@ -152,6 +161,7 @@ def execute(args):
     state = json.loads(journal.read_bytes()) if journal.exists() else None
     if args.command == "status":
         print(json.dumps({"phase": state["phase"] if state else "absent",
+                          "enrollment_matches": enrollment_matches(path.read_bytes(), state, args.provider_id, args.model, args.slots),
                           "runner_active": service("is-active")}))
         return
     if state and state["phase"] not in ("committed", "restored"):

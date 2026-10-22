@@ -11,6 +11,15 @@ SPEC.loader.exec_module(runner)
 
 
 class RunnerTargetTests(unittest.TestCase):
+    def test_committed_status_requires_exact_target_and_current_bytes(self):
+        raw = b'{"targets":[{"provider_id":"mp-air","model":"qwen3-8b","slots":4}]}'
+        state = {"phase": "committed", "after_sha256": runner.digest(raw)}
+        self.assertTrue(runner.enrollment_matches(raw, state, "mp-air", "qwen3-8b", 4))
+        self.assertFalse(runner.enrollment_matches(raw + b" ", state, "mp-air", "qwen3-8b", 4))
+        self.assertFalse(runner.enrollment_matches(raw, state, "mp-other", "qwen3-8b", 4))
+        self.assertFalse(runner.enrollment_matches(raw, state, "mp-air", "qwen3-8b", 2))
+        self.assertFalse(runner.enrollment_matches(raw, {**state, "phase": "prepared"}, "mp-air", "qwen3-8b", 4))
+
     def test_append_preserves_other_inventory_and_settings(self):
         baseline = {"targets": [{"provider_id": "other", "model": "other-model", "slots": 2}], "exclude": ["excluded"], "private_setting": 7}
         result = json.loads(runner.candidate(json.dumps(baseline), "mp-air", "qwen3-8b", 4))
