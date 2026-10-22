@@ -231,7 +231,10 @@ if not isinstance(row, dict) or (
     row.get("runtime_status"),
 ) != (*expected, "recommendable"):
     raise SystemExit(3)
-rate = (rates.get("rows") or {}).get(key)
+# The live rate card keys this model by its normalized name, as billing's
+# NormalizeModelKey resolves the namespaced catalog key.
+rate_rows = rates.get("rows") or {}
+rate = rate_rows.get(key) or rate_rows.get(key.split("/", 1)[1])
 actual = tuple((rate or {}).get(name) for name in (
     "prompt_rate_per_mtok", "prompt_cache_hit_rate_per_mtok", "completion_rate_per_mtok"))
 if any(type(value) is not int or value <= 0 or value > 2**63 - 1 for value in actual):
