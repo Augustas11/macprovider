@@ -278,9 +278,7 @@ func (s *Server) reevaluateShardGroup(ctx context.Context, groupID string) {
 	owners := s.shardGroupOwners(ctx, w.registry.MemberIDs(groupID))
 	w.evalMu.Lock()
 	defer w.evalMu.Unlock()
-	ev, ok := w.registry.Evaluate(groupID, func(id string) (pool.Provider, bool) {
-		return s.pool.Resolve(id, "")
-	}, owners, s.cfg.HeartbeatInterval())
+	ev, ok := w.registry.Evaluate(groupID, s.liveShardSession, owners, s.cfg.HeartbeatInterval())
 	if !ok {
 		return
 	}
@@ -295,6 +293,22 @@ func (s *Server) reevaluateShardGroup(ctx context.Context, groupID string) {
 			Msg("shard group availability changed")
 		s.sendShardGroupMessage(groupID, ev.HeadAssignedID, ev.Status())
 	}
+}
+
+// liveShardSession resolves an identity's provider session only while its
+// WebSocket session is still open. A disconnected session stays in the pool
+// registry (state unavailable) for the disconnect grace period; for SPEC-051-R015
+// it is no live member session: an active member's is missing, and a spare
+// without one does not affect availability.
+func (s *Server) liveShardSession(id string) (pool.Provider, bool) {
+	p, ok := s.pool.Resolve(id, "")
+	if !ok {
+		return pool.Provider{}, false
+	}
+	if _, live := s.storedSessionFor(p.ProviderID, p.AssignedID); !live {
+		return pool.Provider{}, false
+	}
+	return p, true
 }
 
 // RunShardGroupSweep re-evaluates every group at least once per second

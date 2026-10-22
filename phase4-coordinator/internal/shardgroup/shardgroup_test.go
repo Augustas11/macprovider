@@ -352,6 +352,35 @@ func TestMemberCannotJoinTwoGroups(t *testing.T) {
 	}
 }
 
+// SPEC-051-R015 (R3-C06): the reason is the first failing numbered
+// condition across all members: an inadmissible spare session (condition 4)
+// is named before a lower-tier active member (condition 5).
+func TestEvaluateAvailabilityReasonPrecedenceAcrossMembers(t *testing.T) {
+	f := newFixture(t)
+	rec := twoStageRecord(1)
+	rec.Spares = []Spare{{MemberDeviceID: "spare", StageIndex: 1}}
+	if res, _ := f.register(rec); !res.Accepted {
+		t.Fatal(res.Reason)
+	}
+	if res := f.hello("tail", helloPayload("tail", 1, 1, 18, 32, "thunderbolt", "head")); !res.Accepted {
+		t.Fatal(res.Reason)
+	}
+	tail := f.sessions["tail"]
+	tail.Tier = pool.TierProvisional
+	f.sessions["tail"] = tail
+	spare := f.sessions["spare"]
+	spare.State = pool.StateDegraded
+	f.sessions["spare"] = spare
+	if ev := f.evaluate(); ev.Reason != ReasonMemberNotAdmissible {
+		t.Fatalf("condition 4 on the spare must precede condition 5 on the tail: %+v", ev)
+	}
+	spare.State = pool.StateReady
+	f.sessions["spare"] = spare
+	if ev := f.evaluate(); ev.Reason != ReasonTrustLabelAboveMember {
+		t.Fatalf("then condition 5: %+v", ev)
+	}
+}
+
 func TestEvaluateAvailability(t *testing.T) {
 	f := newFixture(t)
 	if res, _ := f.register(twoStageRecord(1)); !res.Accepted {

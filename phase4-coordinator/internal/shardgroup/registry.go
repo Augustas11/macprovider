@@ -632,19 +632,26 @@ func (r *Registry) evaluateLocked(groupID string, g *groupState, providers func(
 	if !head.ShardMemberAdmissible() || len(head.ReceiptPubkey) == 0 {
 		return ReasonMemberNotAdmissible, nil
 	}
-	for _, p := range active {
-		if reason := memberReservable(head, p); reason != "" {
-			return reason, nil
-		}
-	}
 	// SPEC-051-R003/R004: a spare with a live member session passes the same
 	// admission, artifact and minimum-label checks. A spare without one cannot
 	// take over; that is replay readiness, not availability (R015).
+	checked := append([]pool.Provider(nil), active...)
 	for _, sp := range rec.Spares {
 		if p, ok := providers(sp.MemberDeviceID); ok && p.ShardMemberV1 {
-			if reason := memberReservable(head, p); reason != "" {
-				return reason, nil
-			}
+			checked = append(checked, p)
+		}
+	}
+	// R015 names the first failing numbered condition: condition 4
+	// (admission and artifact) across every member before condition 5
+	// (trust labels) across every member.
+	for _, p := range checked {
+		if !memberAdmissible(head, p) {
+			return ReasonMemberNotAdmissible, nil
+		}
+	}
+	for _, p := range checked {
+		if !labelsAtLeast(p, head) {
+			return ReasonTrustLabelAboveMember, nil
 		}
 	}
 	ownerID := owners[groupID]
@@ -747,14 +754,20 @@ func evictOldEpochs(g *groupState) {
 // head's model pair (SPEC-051-R003, R008) and holds at least the head's trust
 // labels (SPEC-051-R004). It returns the failing reason code, or "".
 func memberReservable(head, member pool.Provider) string {
-	if !member.ShardMemberAdmissible() || len(member.ReceiptPubkey) == 0 ||
-		member.ModelHashAlgorithm != head.ModelHashAlgorithm || !strings.EqualFold(strings.TrimSpace(member.ModelHash), strings.TrimSpace(head.ModelHash)) {
+	if !memberAdmissible(head, member) {
 		return ReasonMemberNotAdmissible
 	}
 	if !labelsAtLeast(member, head) {
 		return ReasonTrustLabelAboveMember
 	}
 	return ""
+}
+
+// memberAdmissible is R015 condition 4 for one member: every single-provider
+// routing-state gate, a published receipt key and the head's model pair.
+func memberAdmissible(head, member pool.Provider) bool {
+	return member.ShardMemberAdmissible() && len(member.ReceiptPubkey) > 0 &&
+		member.ModelHashAlgorithm == head.ModelHashAlgorithm && strings.EqualFold(strings.TrimSpace(member.ModelHash), strings.TrimSpace(head.ModelHash))
 }
 
 // MemberReservable re-checks one active member of an available group at
@@ -765,8 +778,10 @@ func MemberReservable(head pool.Provider, view pool.ShardGroupMemberView, resolv
 	member, ok := resolve(view.ProviderID)
 	if view.Spare {
 		// A spare without a live member session only cannot take over; one
-		// with a session must still pass admission and minimum labels.
-		return !ok || !member.ShardMemberV1 || memberReservable(head, member) == ""
+		// with a session must still pass admission and minimum labels. A
+		// disconnected session waiting out the grace period is unavailable
+		// and is no live session.
+		return !ok || !member.ShardMemberV1 || member.State == pool.StateUnavailable || memberReservable(head, member) == ""
 	}
 	return ok && member.AssignedID == view.AssignedID && member.ShardMemberV1 && memberReservable(head, member) == ""
 }

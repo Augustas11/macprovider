@@ -81,9 +81,9 @@ func newShardWSHarness(t *testing.T) *shardWSHarness {
 		t.Fatal(err)
 	}
 	registry := shardgroup.NewRegistry(shardgroup.ConfigFrom(config.DefaultShardGroupsConfig()), h.store, func() time.Time { return h.clock })
-	owners := fakeShardOwners{"head": "github:42", "tail": "github:42"}
+	owners := fakeShardOwners{"head": "github:42", "tail": "github:42", "spare": "github:42"}
 	h.server = NewServer(config.Default(), h.reg, zerolog.Nop(), WithNow(func() time.Time { return h.clock }), WithShardGroups(registry, h.store, owners))
-	for _, id := range []string{"head", "tail"} {
+	for _, id := range []string{"head", "tail", "spare"} {
 		seed := sha256.Sum256([]byte(id))
 		h.keys[id] = ed25519.NewKeyFromSeed(seed[:])
 		p := &pool.Provider{
@@ -269,6 +269,66 @@ func TestShardGroupsConfigReloadApplies(t *testing.T) {
 	h.server.ApplyShardGroupsConfig(config.DefaultShardGroupsConfig())
 	if st := h.next("head", shardgroup.TypeStatus); st["available"] != true {
 		t.Fatalf("status after restoring the bound: %v", st)
+	}
+}
+
+// SPEC-051-R015 (VM acceptance F3): a spare whose session disconnects has no
+// live member session for the whole disconnect grace period, so the group stays
+// available; an active member's disconnected session is member_session_missing.
+func TestShardGroupSpareDisconnectDoesNotGateAvailability(t *testing.T) {
+	h := newShardWSHarness(t)
+	rec := shardgroup.Record{
+		Schema: shardgroup.RecordSchema, GroupProviderID: "head", GroupEpoch: 1, ParallelismMode: "pipeline", InterconnectClass: "thunderbolt-ip",
+		FrameProtection: "crc32c", TransportVersion: 1, NumLayers: 32, MaxConcurrency: 4,
+		Model:       shardgroup.RecordModel{ModelID: shardWSModel, PoolModelID: shardWSPoolModel, ArtifactHashAlgorithm: "macprovider.snapshot-manifest.v1", ArtifactHash: shardWSHash},
+		Stages:      []shardgroup.Stage{{StageIndex: 0, MemberDeviceID: "head", LayerStart: 0, LayerEnd: 18}, {StageIndex: 1, MemberDeviceID: "tail", LayerStart: 18, LayerEnd: 32}},
+		Spares:      []shardgroup.Spare{{MemberDeviceID: "spare", StageIndex: 1}},
+		Supervision: shardgroup.Supervision{HeartbeatIntervalMS: 100, HeartbeatMissLimit: 3, DecodeHopDeadlineMS: 500, PrefillChunkDeadlineMS: 3000, ReplayDeadlineMS: 10000},
+	}
+	raw, _ := json.Marshal(rec)
+	register, _ := json.Marshal(shardgroup.RegisterMessage{Type: shardgroup.TypeRegister, Version: 1, Record: raw, RecordSignature: signShardDomain(t, h.keys["head"], "macprovider.shard-group-record.v1\n", raw, false)})
+	h.server.handleMessage(nil, "head", "s-head", register)
+	h.next("head", shardgroup.TypeRegisterResult)
+	h.next("head", shardgroup.TypeStatus)
+	h.server.handleMessage(nil, "tail", "s-tail", shardWSHello())
+	h.next("tail", shardgroup.TypeMemberHelloResult)
+	h.next("head", shardgroup.TypeStatus)
+	spareHello, _ := json.Marshal(shardgroup.MemberHello{Type: shardgroup.TypeMemberHello, Version: 1, GroupProviderID: "head", GroupEpoch: 1, MemberDeviceID: "spare",
+		Role: "spare", StageIndex: 1, LayerStart: 18, LayerEnd: 32, TransportVersion: 1, ArtifactHashAlgorithm: "macprovider.snapshot-manifest.v1", ArtifactHash: shardWSHash,
+		WeightsVerified: true, StageFits: true, Links: []shardgroup.MemberLink{{PeerMemberDeviceID: "head", InterfaceType: "thunderbolt"}}})
+	h.server.handleMessage(nil, "spare", "s-spare", spareHello)
+	h.next("spare", shardgroup.TypeMemberHelloResult)
+	heartbeat, _ := json.Marshal(shardgroup.Heartbeat{Type: shardgroup.TypeHeartbeat, Version: 1, GroupProviderID: "head", GroupEpoch: 1,
+		Members: []shardgroup.HeartbeatMember{{MemberDeviceID: "head", Healthy: true}, {MemberDeviceID: "tail", Healthy: true}, {MemberDeviceID: "spare", Healthy: true}},
+		Links: []shardgroup.HeartbeatLink{
+			{FromMemberDeviceID: "head", ToMemberDeviceID: "tail", InterfaceType: "thunderbolt", RTTP99US: 400},
+			{FromMemberDeviceID: "tail", ToMemberDeviceID: "head", InterfaceType: "thunderbolt", RTTP99US: 400},
+			{FromMemberDeviceID: "head", ToMemberDeviceID: "spare", InterfaceType: "thunderbolt", RTTP99US: 400},
+		}})
+	h.server.handleMessage(nil, "head", "s-head", heartbeat)
+	h.next("head", shardgroup.TypeStatus)
+	h.server.handleMessage(nil, "tail", "s-tail", shardWSMemberHealth())
+	if st := h.next("head", shardgroup.TypeStatus); st["available"] != true {
+		t.Fatalf("not available with the spare joined: %v", st)
+	}
+	h.server.handleDisconnect("spare", "s-spare")
+	if spare, ok := h.reg.Resolve("spare", ""); !ok || spare.State != pool.StateUnavailable {
+		t.Fatalf("the disconnected spare should wait out the grace period in the registry: %+v %v", spare, ok)
+	}
+	h.server.reevaluateShardGroup(context.Background(), "head")
+	if !h.available() {
+		t.Fatal("a disconnected spare made the group unavailable")
+	}
+	head, _ := h.reg.Resolve("head", "")
+	resolve := func(id string) (pool.Provider, bool) { return h.reg.Resolve(id, "") }
+	for _, m := range head.ShardGroupMembers {
+		if !shardgroup.MemberReservable(head, m, resolve) {
+			t.Fatalf("reservation re-check refused member view %+v while the spare waits out its grace period", m)
+		}
+	}
+	h.server.handleDisconnect("tail", "s-tail")
+	if st := h.next("head", shardgroup.TypeStatus); st["available"] != false || st["reason"] != shardgroup.ReasonMemberSessionMissing {
+		t.Fatalf("active member disconnect: %v", st)
 	}
 }
 
