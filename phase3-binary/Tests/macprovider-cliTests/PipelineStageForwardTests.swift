@@ -220,6 +220,83 @@ final class PipelineStageForwardTests: XCTestCase {
         try await assertChunkedPrefillMatchesUnchunked(Self.deepseekConfig, splits: [0..<1, 1..<3], prompt: prompt, chunk: 4)
     }
 
+    /// Teacher-forced parity on a real (tiny, random-weight) model: the reference is
+    /// the whole model's greedy run with per-step logit summaries; the stages are fed
+    /// the reference tokens, and `perturb(step, stage, activation)` may alter the
+    /// boundary activation a stage sends.
+    private func teacherForcedParity(
+        _ config: [String: Any],
+        splits: [Range<Int>],
+        prompt: [Int32] = [3, 14, 15, 92, 65],
+        steps: Int = 6,
+        topK: Int = 8,
+        perturb: ((Int, Int, MLXArray) -> MLXArray)? = nil
+    ) async throws -> ShardTeacherForcedParity {
+        try await Device.withDefaultDevice(.cpu) {
+            let (directory, whole) = try await makeCheckpoint(config)
+            var stages = [PipelineStageModel]()
+            for range in splits {
+                stages.append(try await PipelineStageModel.load(directory: directory, layers: range))
+            }
+            let wholeCache = try whole.newCache(parameters: nil)
+            var reference = [ShardLogitSummary]()
+            var teacher = [Int32]()
+            var input = MLXArray(prompt).reshaped(1, prompt.count)
+            for _ in 0..<steps {
+                let summary = PipelineLogitSummarizer.summarize(logits: whole(input, cache: wholeCache), topK: topK)
+                reference.append(summary)
+                teacher.append(summary.top1)
+                input = MLXArray([summary.top1]).reshaped(1, 1)
+            }
+
+            let caches = try stages.map { try $0.newCache() }
+            var sharded = [ShardLogitSummary]()
+            input = MLXArray(prompt).reshaped(1, prompt.count)
+            for step in 0..<steps {
+                var carried = input
+                for (index, (stage, cache)) in zip(stages, caches).enumerated() {
+                    let output = try stage.forward(carried, cache: cache)
+                    if stage.plan.isLast {
+                        sharded.append(PipelineLogitSummarizer.summarize(logits: output, topK: topK))
+                    } else {
+                        carried = perturb?(step, index, output) ?? output
+                    }
+                }
+                input = MLXArray([teacher[step]]).reshaped(1, 1)
+            }
+            return try ShardLogitParity.compare(reference: [reference], sharded: [sharded])
+        }
+    }
+
+    func testTeacherForcedParityOfAnIdenticalSplitPassesWithFullAgreement() async throws {
+        let parity = try await teacherForcedParity(Self.llamaConfig, splits: [0..<1, 1..<3, 3..<4])
+        XCTAssertEqual(parity.verdict, "pass")
+        XCTAssertEqual(parity.steps, 6)
+        XCTAssertEqual(parity.top1AgreementRate, 1)
+        XCTAssertEqual(parity.nearTieFlips, 0)
+        XCTAssertLessThan(parity.maxAbsDeltaLogprob, 1e-4)
+        XCTAssertGreaterThan(parity.meanTopKOverlap, 0.99)
+
+        let deepseek = try await teacherForcedParity(Self.deepseekConfig, splits: [0..<1, 1..<3])
+        XCTAssertEqual(deepseek.verdict, "pass")
+        XCTAssertEqual(deepseek.top1AgreementRate, 1)
+    }
+
+    func testTeacherForcedParityFailsHardAtTheStepAStageIsPerturbed() async throws {
+        // From step 3 on, stage 0 ships a boundary activation replaced by large noise.
+        let parity = try await teacherForcedParity(Self.llamaConfig, splits: [0..<2, 2..<4]) { step, stage, output in
+            guard step == 3, stage == 0 else { return output }
+            MLXRandom.seed(51)
+            return (MLXRandom.normal(output.shape) * 40).asType(output.dtype)
+        }
+        XCTAssertEqual(parity.verdict, "fail")
+        let first = try XCTUnwrap(parity.hardFailures.first, "a 40-sigma activation must flip the top-1")
+        XCTAssertEqual(first.sequence, 0)
+        XCTAssertEqual(first.step, 3)
+        XCTAssertNotEqual(first.shardedToken, first.referenceToken)
+        XCTAssertGreaterThan(parity.maxAbsDeltaLogprob, 0.1)
+    }
+
     func testStageLoadsOnlyItsOwnLayers() async throws {
         try await Device.withDefaultDevice(.cpu) {
             let (directory, _) = try await makeCheckpoint(Self.llamaConfig)

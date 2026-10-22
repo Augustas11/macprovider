@@ -119,6 +119,21 @@ struct ShardBenchCommand: AsyncParsableCommand {
     @Flag(name: .customLong("no-parity"), help: "Head: skip the reference comparison.")
     var noParity = false
 
+    @Option(help: "Head: teacher-forced (feed the reference tokens, compare per-step logit summaries within tolerance) or exact (greedy token identity).")
+    var parity: String = ShardBenchParityMode.teacherForced.rawValue
+
+    @Option(name: .customLong("top-k"), help: "Teacher-forced parity and --emit-logits: logit summary size (top-k ids and logprobs).")
+    var topK: Int = 8
+
+    @Option(name: .customLong("tie-margin"), help: "Teacher-forced parity: a top-1 flip passes when the reference top-1/top-2 margin is below this (nats) and the sharded top-1 is the reference top-2.")
+    var tieMargin: Double = 0.05
+
+    @Option(name: .customLong("logprob-tolerance"), help: "Teacher-forced parity: fail when the p99 |delta logprob| of the reference token exceeds this (nats).")
+    var logprobTolerance: Double = 0.1
+
+    @Flag(name: .customLong("emit-logits"), help: "--local-reference: also record each step's logit summary, for a teacher-forced --reference on another machine.")
+    var emitLogits = false
+
     @Flag(name: .customLong("no-warmup"), help: "Skip the short warmup sequence that compiles kernels before timing.")
     var noWarmup = false
 
@@ -155,6 +170,10 @@ struct ShardBenchCommand: AsyncParsableCommand {
             return
         }
         if let prefillChunk, prefillChunk <= 0 { throw ValidationError("--prefill-chunk must be > 0") }
+        guard ShardBenchParityMode(rawValue: parity) != nil else { throw ValidationError("--parity must be teacher-forced or exact") }
+        guard (1...ShardLogitSummaryCodec.maxTopK).contains(topK), tieMargin >= 0, logprobTolerance > 0 else {
+            throw ValidationError("--top-k must be within 1..\(ShardLogitSummaryCodec.maxTopK), --tie-margin >= 0, --logprob-tolerance > 0")
+        }
         guard (500...4000).contains(prefillChunkDeadlineMilliseconds) else {
             throw ValidationError("--prefill-chunk-deadline-ms must be within 500..4000")
         }
@@ -195,20 +214,44 @@ struct ShardBenchCommand: AsyncParsableCommand {
         }
 
         if localReference {
-            let report = try await ShardBenchReference.decode(directory: directory, prompts: prompts, tokens: tokens)
+            let report = try await ShardBenchReference.decode(
+                directory: directory, prompts: prompts, tokens: tokens, topK: emitLogits ? topK : nil)
             try emit(report)
             return
         }
 
-        let (options, layerRange) = try sessionOptions(prompts: prompts)
         // Read a reference file before the run so a bad path fails before any decoding.
         var referenceReport: ShardBenchReferenceReport?
-        if let reference, options.role == .head {
+        if let reference, role == ShardBenchRole.head.rawValue {
             let decoder = JSONDecoder()
             decoder.keyDecodingStrategy = .convertFromSnakeCase
             let data = try Data(contentsOf: URL(fileURLWithPath: (reference as NSString).expandingTildeInPath))
             referenceReport = try decoder.decode(ShardBenchReferenceReport.self, from: data)
         }
+        let parityMode: ShardBenchParityMode = noParity ? .skipped : ShardBenchParityMode(rawValue: parity) ?? .teacherForced
+        var provider: (@Sendable () throws -> ShardBenchReferenceReport)?
+        var referenceSource = ""
+        if parityMode == .teacherForced, role == ShardBenchRole.head.rawValue {
+            if let referenceReport, let reference {
+                guard referenceReport.stepLogits != nil else {
+                    throw ValidationError("\(reference) has no step logits; make it with --local-reference --emit-logits")
+                }
+                provider = { referenceReport }
+                referenceSource = "file:\(reference)"
+            } else {
+                // In process, after the chain's hello: links heartbeat while it decodes.
+                let (promptsCopy, tokensCopy, topKCopy) = (prompts, tokens, topK)
+                provider = {
+                    try ShardBenchThread.wait {
+                        Memory.clearCache()
+                        return try await ShardBenchReference.decode(directory: directory, prompts: promptsCopy, tokens: tokensCopy, topK: topKCopy)
+                    }
+                }
+                referenceSource = "in_process_stock_model"
+            }
+        }
+        let (options, layerRange) = try sessionOptions(
+            prompts: prompts, parityMode: parityMode, referenceProvider: provider, referenceSource: referenceSource)
         let session: ShardBenchSessionReport
         do {
             let stage = ShardBenchStageBox(try await PipelineStageModel.load(directory: directory, layers: layerRange))
@@ -222,7 +265,10 @@ struct ShardBenchCommand: AsyncParsableCommand {
             if let stage = session.stage { try emit(stage) }
             return
         }
-        if temperature > 0 {
+        if parityMode == .teacherForced {
+            // The session compared logit summaries while it ran.
+            head.referenceSingleStreamTokensPerSecond = referenceReport?.singleStreamTokensPerSecond
+        } else if temperature > 0 {
             head.parity = ShardBenchParity(verdict: "not_applicable", source: "temperature>0", matchingTokens: nil, firstMismatch: nil)
         } else if let expected = referenceReport, let reference {
             head.parity = ShardBenchParity.compare(head.sequenceTokens, expected.sequenceTokens, source: "file:\(reference)")
@@ -236,7 +282,7 @@ struct ShardBenchCommand: AsyncParsableCommand {
             head.referenceSingleStreamTokensPerSecond = expected.singleStreamTokensPerSecond
         }
         try emit(head)
-        if head.parity?.verdict == "mismatch" { throw ExitCode(3) }
+        if head.parity?.verdict == "mismatch" || head.parity?.verdict == "fail" { throw ExitCode(3) }
         if head.attestation.verdict == "broken" { throw ExitCode(5) }
     }
 
@@ -259,7 +305,12 @@ struct ShardBenchCommand: AsyncParsableCommand {
             layerArguments: planned.stages.map { "\($0.layerStart):\($0.layerEnd)" }))
     }
 
-    private func sessionOptions(prompts: [[Int]]) throws -> (ShardBenchSessionOptions, Range<Int>) {
+    private func sessionOptions(
+        prompts: [[Int]],
+        parityMode: ShardBenchParityMode,
+        referenceProvider: (@Sendable () throws -> ShardBenchReferenceReport)?,
+        referenceSource: String
+    ) throws -> (ShardBenchSessionOptions, Range<Int>) {
         guard let layers, let role, let parsedRole = ShardBenchRole(rawValue: role) else {
             throw ValidationError("--role and --layers a:b are required")
         }
@@ -295,7 +346,10 @@ struct ShardBenchCommand: AsyncParsableCommand {
             memberID: memberID,
             spare: try spare.map { try ShardBenchEndpoint.parse($0) },
             replayBufferBytes: replayBufferMegabytes * 1_048_576,
-            replayDeadline: Double(replayDeadlineMilliseconds) / 1000
+            replayDeadline: Double(replayDeadlineMilliseconds) / 1000,
+            parity: ShardBenchParityOptions(
+                mode: parityMode, topK: topK, tieMargin: tieMargin, logprobTolerance: logprobTolerance,
+                referenceProvider: referenceProvider, referenceSource: referenceSource)
         )
         return (options, lower..<upper)
     }
@@ -474,6 +528,8 @@ protocol ShardBenchStage: AnyObject {
     func sample(activation: ShardBenchActivation, cache: Cache, temperature: Float) throws -> Int
     /// Last stage: extend the KV with a fill-only activation; no token is sampled.
     func fill(activation: ShardBenchActivation, cache: Cache) throws
+    /// Last stage: boundary activation in, top-k logit summary of the last position out.
+    func summarize(activation: ShardBenchActivation, cache: Cache, topK: Int) throws -> ShardLogitSummary
 }
 
 extension PipelineStageModel: ShardBenchStage {
@@ -495,6 +551,11 @@ extension PipelineStageModel: ShardBenchStage {
     func sample(activation: ShardBenchActivation, cache: [KVCache], temperature: Float) throws -> Int {
         let input = try PipelineActivationCodec.decode(dtype: activation.dtype, shape: activation.shape, payload: activation.payload)
         return PipelineStageSampler.sample(logits: try forward(input, cache: cache), temperature: temperature)
+    }
+
+    func summarize(activation: ShardBenchActivation, cache: [KVCache], topK: Int) throws -> ShardLogitSummary {
+        let input = try PipelineActivationCodec.decode(dtype: activation.dtype, shape: activation.shape, payload: activation.payload)
+        return PipelineLogitSummarizer.summarize(logits: try forward(input, cache: cache), topK: topK)
     }
 
     func fill(activation: ShardBenchActivation, cache: [KVCache]) throws {
@@ -553,6 +614,27 @@ struct ShardBenchSessionOptions: Sendable {
     let replayBufferBytes: Int
     /// SPEC-051-R022: reaching the spare and replaying must finish within this.
     let replayDeadline: TimeInterval
+    let parity: ShardBenchParityOptions
+}
+
+enum ShardBenchParityMode: String, Sendable {
+    case teacherForced = "teacher-forced"
+    case exact
+    case skipped
+}
+
+struct ShardBenchParityOptions: Sendable {
+    var mode: ShardBenchParityMode
+    var topK: Int
+    var tieMargin: Double
+    var logprobTolerance: Double
+    /// Teacher-forced head: the reference run (tokens and step logits), fetched after
+    /// the chain's hello.
+    var referenceProvider: (@Sendable () throws -> ShardBenchReferenceReport)?
+    var referenceSource: String
+
+    static let skipped = ShardBenchParityOptions(
+        mode: .skipped, topK: 8, tieMargin: 0.05, logprobTolerance: 0.1, referenceProvider: nil, referenceSource: "")
 }
 
 struct ShardBenchLatency: Codable, Equatable {
@@ -582,6 +664,7 @@ struct ShardBenchParity: Codable, Equatable {
     var source: String
     var matchingTokens: Int?
     var firstMismatch: String?
+    var teacherForced: ShardTeacherForcedParity? = nil
 
     static func compare(_ actual: [[Int]], _ expected: [[Int]], source: String) -> ShardBenchParity {
         guard actual.count == expected.count else {
@@ -768,6 +851,11 @@ struct ShardBenchReferenceReport: Codable {
     let promptTokens: [Int]
     let singleStreamTokensPerSecond: Double?
     let ttft: ShardBenchLatency
+    /// The prompts' token ids, so a teacher-forced head can check it uses the same ones.
+    var prompts: [[Int]]? = nil
+    /// `--emit-logits`: `[sequence][step]` logit summaries; step i is the distribution
+    /// after the prompt and the first i reference tokens.
+    var stepLogits: [[ShardLogitSummary]]? = nil
 }
 
 /// What one stage owns, carried in the chain hello.
@@ -785,6 +873,8 @@ struct ShardBenchHello: Codable, Equatable {
     /// Head only: random id of this run, logged and reported by every stage so a
     /// stage's log can be matched to the head that drove it.
     var session: String?
+    /// Head only: the tail returns a top-k logit summary with every token.
+    var logitTopK: Int?
 
     var layerLabel: String { "\(layerStart):\(layerEnd)" }
 }
@@ -852,6 +942,7 @@ enum ShardBenchError: Error, CustomStringConvertible {
     /// SPEC-051-R022: the stream ends with an explicit error after these deliveries;
     /// no delivered token is re-emitted.
     case streamTerminated(delivered: [UInt64: Int], cause: String)
+    case reference(String)
 
     var description: String {
         switch self {
@@ -861,6 +952,7 @@ enum ShardBenchError: Error, CustomStringConvertible {
         case .tooManySequences(let cap): return "more than \(cap) concurrent sequences"
         case .prefillChunkDeadline(let stage, let tokens, let milliseconds, let deadline):
             return "stage \(stage) took \(milliseconds) ms for a \(tokens)-token prefill chunk, over the \(deadline) ms chunk deadline; use a smaller --prefill-chunk"
+        case .reference(let detail): return "reference unusable for teacher-forced parity: \(detail)"
         case .streamTerminated(let delivered, let cause):
             let total = delivered.values.reduce(0, +)
             let perRequest = delivered.keys.sorted().map { "request \($0): \(delivered[$0] ?? 0)" }.joined(separator: ", ")
@@ -1024,6 +1116,8 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
     private var stageIndex = 0
     /// The head's run id; other stages adopt it from the chain hello.
     private var sessionID: String
+    /// Tail: send a logit summary of this size with every token (the head asked for it).
+    private var returnLogitTopK: Int?
     /// Per-request digests and counts for this member's sub-receipts.
     private var ledgers = [UInt64: MemberLedger]()
 
@@ -1115,11 +1209,13 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
         ShardBenchHello(
             role: options.role, modelType: stage.modelType, totalLayers: stage.totalLayers,
             hiddenSize: stage.hiddenSize, layerStart: stage.layers.lowerBound, layerEnd: stage.layers.upperBound,
-            session: options.role == .head ? sessionID : nil)
+            session: options.role == .head ? sessionID : nil,
+            logitTopK: options.role == .head && options.parity.mode == .teacherForced ? options.parity.topK : nil)
     }
 
     private func adoptSession(_ chain: [ShardBenchHello]) {
         if let session = chain.first?.session { sessionID = session }
+        returnLogitTopK = chain.first?.logitTopK
     }
 
     /// Head: send the one-stage chain down, then read the complete chain back on the
@@ -1315,6 +1411,8 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
         let microBatch: UInt32
         let cache: Stage.Cache
         var tokens: [Int] = []
+        /// Teacher-forced: the tail's logit summary for each step.
+        var summaries: [ShardLogitSummary] = []
         var lastSend: TimeInterval = 0
         var prefillStart: TimeInterval = 0
         var firstTokenAt: TimeInterval?
@@ -1324,11 +1422,27 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
     private func runHead(links original: ShardBenchLinks, chain: [ShardBenchHello]) throws -> ShardBenchHeadReport {
         // A spare replacement swaps the links mid-run; everything after uses the current ones.
         var links = original
+        let reference = options.parity.mode == .teacherForced ? try teacherReference() : nil
         if options.warmup {
             _ = try pipelineDecode(
                 links: &links, prompts: [options.prompts[0]], tokens: min(4, options.tokens), firstRequestID: warmupRequestID)
         }
-        let run = try pipelineDecode(links: &links, prompts: options.prompts, tokens: options.tokens, firstRequestID: firstRequestID)
+        let run = try pipelineDecode(
+            links: &links, prompts: options.prompts, tokens: options.tokens, firstRequestID: firstRequestID,
+            teacher: reference?.sequenceTokens)
+        var parity: ShardBenchParity?
+        if let reference, let stepLogits = reference.stepLogits {
+            let result = try ShardLogitParity.compare(
+                reference: stepLogits.map { Array($0.prefix(options.tokens)) },
+                sharded: run.sequences.map(\.summaries),
+                tieMargin: options.parity.tieMargin, logprobTolerance: options.parity.logprobTolerance)
+            parity = ShardBenchParity(
+                verdict: result.verdict, source: options.parity.referenceSource, matchingTokens: nil,
+                firstMismatch: result.hardFailures.first.map {
+                    "sequence \($0.sequence) step \($0.step): sharded \($0.shardedToken) vs reference \($0.referenceToken) (reference margin \($0.referenceMargin))"
+                },
+                teacherForced: result)
+        }
         // Session end: request id 0 abort travels down the chain; the tail answers on
         // the return link once it has seen it, so no stage reads a close as a failure.
         watch.stop()
@@ -1389,7 +1503,7 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
             attestation: attestation,
             replayBufferBytes: options.spare == nil ? nil : options.replayBufferBytes,
             replays: replays,
-            parity: nil,
+            parity: parity,
             referenceSingleStreamTokensPerSecond: nil
         )
     }
@@ -1413,7 +1527,8 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
         links: inout ShardBenchLinks,
         prompts: [[Int]],
         tokens: Int,
-        firstRequestID: UInt64
+        firstRequestID: UInt64,
+        teacher: [[Int]]? = nil
     ) throws -> PipelineRun {
         var sequences = [HeadSequence]()
         var index = [UInt64: Int]()
@@ -1453,13 +1568,22 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
         var remaining = sequences.count
         while remaining > 0 {
             let frame = try headReceive(&links)
-            guard frame.header.kind == .token, frame.header.dtype == .int32, frame.payload.count == 4,
+            guard frame.header.kind == .token || frame.header.kind == .tokenLogits, frame.header.dtype == .int32,
                   let slot = index[frame.header.requestID]
             else {
                 throw ShardBenchError.protocolViolation("expected a token for an active request, got \(frame.header.kind) request \(frame.header.requestID)")
             }
             let arrived = now()
-            let token = Int(frame.payload.withUnsafeBytes { Int32(littleEndian: $0.loadUnaligned(as: Int32.self)) })
+            let token: Int
+            var summary: ShardLogitSummary?
+            if frame.header.kind == .tokenLogits {
+                let decoded = try ShardLogitSummaryCodec.decode(shape: frame.header.shape, payload: frame.payload)
+                token = Int(decoded.token)
+                summary = decoded.summary
+            } else {
+                guard frame.payload.count == 4 else { throw ShardBenchError.protocolViolation("token frame of \(frame.payload.count) bytes") }
+                token = Int(frame.payload.withUnsafeBytes { Int32(littleEndian: $0.loadUnaligned(as: Int32.self)) })
+            }
             var sequence = sequences[slot]
             guard frame.header.tokenStep == UInt32(sequence.tokens.count) else {
                 throw ShardBenchError.protocolViolation("request \(sequence.requestID) token step \(frame.header.tokenStep), expected \(sequence.tokens.count)")
@@ -1471,6 +1595,7 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
                 run.stepRoundTrips.append(arrived - sequence.lastSend)
             }
             sequence.tokens.append(token)
+            if let summary { sequence.summaries.append(summary) }
             sequence.lastTokenAt = arrived
             // Delivered from here on, whatever happens to the next send.
             sequences[slot] = sequence
@@ -1480,8 +1605,10 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
                 try headSend(&links, ShardStageFrame(header: header(.abort, requestID: sequence.requestID, destination: 1)), buffered: false)
                 remaining -= 1
             } else {
+                // Teacher-forced: the next input is the reference token, not the sample.
+                let next = teacher.map { $0[slot][sequence.tokens.count - 1] } ?? token
                 let computeStart = now()
-                let hidden = try stage.forward(tokens: [token], cache: sequence.cache)
+                let hidden = try stage.forward(tokens: [next], cache: sequence.cache)
                 run.headCompute.append(now() - computeStart)
                 try sendActivation(&links, hidden, sequence: &sequence, step: UInt32(sequence.tokens.count))
                 run.decodeHopPayloadBytes = hidden.payload.count
@@ -1505,6 +1632,29 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
                                  microBatch: sequence.microBatch, step: step, destination: 1, shape: hidden.shape,
                                  flags: flags)
         try headSend(&links, ShardStageFrame(header: frameHeader, payload: hidden.payload), buffered: true)
+    }
+
+    /// Fetch the teacher-forced reference and check it covers this run: same prompts,
+    /// at least `tokens` steps of tokens and logit summaries per sequence.
+    private func teacherReference() throws -> ShardBenchReferenceReport {
+        guard let provider = options.parity.referenceProvider else {
+            throw ShardBenchError.reference("no reference provider for teacher-forced parity")
+        }
+        let reference = try provider()
+        guard let stepLogits = reference.stepLogits else { throw ShardBenchError.reference("it has no step logits") }
+        if let prompts = reference.prompts {
+            guard prompts == options.prompts else { throw ShardBenchError.reference("its prompts differ from this run's") }
+        } else if reference.promptTokens != options.prompts.map(\.count) {
+            throw ShardBenchError.reference("its prompt lengths \(reference.promptTokens) differ from \(options.prompts.map(\.count))")
+        }
+        guard reference.sequenceTokens.count == options.prompts.count, stepLogits.count == options.prompts.count else {
+            throw ShardBenchError.reference("it has \(stepLogits.count) sequences, this run has \(options.prompts.count)")
+        }
+        for (index, (tokens, logits)) in zip(reference.sequenceTokens, stepLogits).enumerated()
+        where tokens.count < options.tokens || logits.count < options.tokens {
+            throw ShardBenchError.reference("sequence \(index) has \(min(tokens.count, logits.count)) steps, this run needs \(options.tokens)")
+        }
+        return reference
     }
 
     // MARK: Head: stage loss and spare replay
@@ -1660,6 +1810,14 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
                     // A fill-only chunk sends nothing, but its tokens were processed.
                     ledgers[header.requestID, default: MemberLedger()].promptTokens += header.tokenStep == 0 ? processed : 0
                     ledgers[header.requestID, default: MemberLedger()].decodeSteps += header.tokenStep == 0 ? 0 : 1
+                } else if options.role == .tail, let topK = returnLogitTopK {
+                    let summary = try stage.summarize(activation: input, cache: cache, topK: topK)
+                    let encoded = try ShardLogitSummaryCodec.encode(token: summary.top1, summary: summary)
+                    let tokenHeader = self.header(.tokenLogits, dtype: .int32, requestID: header.requestID,
+                                                  microBatch: header.microBatchID, step: header.tokenStep,
+                                                  destination: downstreamIndex, shape: encoded.shape)
+                    try links.downstream.send(ShardStageFrame(header: tokenHeader, payload: encoded.payload))
+                    recordOutput(tokenHeader, encoded.payload, processedTokens: processed)
                 } else if options.role == .tail {
                     let token = try stage.sample(activation: input, cache: cache, temperature: options.temperature)
                     var payload = Data(count: 4)
@@ -1702,7 +1860,7 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
                 }
             case .error:
                 throw ShardBenchError.peerError(String(decoding: frame.payload, as: UTF8.self))
-            case .hello, .token, .heartbeat:
+            case .hello, .token, .tokenLogits, .heartbeat:
                 throw ShardBenchError.protocolViolation("unexpected \(header.kind) frame on a \(options.role.rawValue) stage")
             }
         }
@@ -1745,20 +1903,23 @@ enum ShardBenchReference {
     /// Greedy fixed-length decode with the stock model loaded through
     /// `LLMModelFactory`, the same op sequence the stages run: whole-prompt prefill,
     /// then one token per forward.
-    static func decode(directory: URL, prompts: [[Int]], tokens: Int) async throws -> ShardBenchReferenceReport {
+    static func decode(directory: URL, prompts: [[Int]], tokens: Int, topK: Int? = nil) async throws -> ShardBenchReferenceReport {
         let container = try await LLMModelFactory.shared.loadContainer(
             from: directory, using: ChatTemplateCompatTokenizerLoader())
         return try await container.perform { context in
             var sequences = [[Int]]()
             var rates = [Double]()
             var ttfts = [Double]()
+            var stepLogits = [[ShardLogitSummary]]()
             for prompt in prompts {
+                var summaries = [ShardLogitSummary]()
                 let cache = try context.model.newCache(parameters: nil)
                 let start = Date()
                 var logits = context.model(
                     LMInput.Text(tokens: MLXArray(prompt.map(Int32.init)).reshaped(1, prompt.count)),
                     cache: cache, state: nil).logits
                 var token = argMax(logits[0, -1], axis: -1).item(Int.self)
+                if let topK { summaries.append(PipelineLogitSummarizer.summarize(logits: logits, topK: topK)) }
                 let first = Date()
                 ttfts.append(first.timeIntervalSince(start))
                 var generated = [token]
@@ -1766,20 +1927,28 @@ enum ShardBenchReference {
                     logits = context.model(
                         LMInput.Text(tokens: MLXArray([Int32(token)]).reshaped(1, 1)), cache: cache, state: nil).logits
                     token = argMax(logits[0, -1], axis: -1).item(Int.self)
+                    if let topK { summaries.append(PipelineLogitSummarizer.summarize(logits: logits, topK: topK)) }
                     generated.append(token)
                 }
                 let elapsed = Date().timeIntervalSince(first)
                 if generated.count > 1, elapsed > 0 { rates.append(Double(generated.count - 1) / elapsed) }
                 sequences.append(generated)
+                stepLogits.append(summaries)
             }
             return ShardBenchReferenceReport(
                 sequenceTokens: sequences,
                 promptTokens: prompts.map(\.count),
                 singleStreamTokensPerSecond: rates.isEmpty ? nil : round3(rates.reduce(0, +) / Double(rates.count)),
-                ttft: ShardBenchLatency(seconds: ttfts)
+                ttft: ShardBenchLatency(seconds: ttfts),
+                prompts: prompts,
+                stepLogits: topK == nil ? nil : stepLogits
             )
         }
     }
+}
+
+final class ShardBenchWaitBox<T>: @unchecked Sendable {
+    var result: Result<T, Error>?
 }
 
 /// Hands a loaded stage to the session thread. The stage is created in the async
@@ -1794,6 +1963,22 @@ final class ShardBenchStageBox: @unchecked Sendable {
 
 /// Run a synchronous body on its own thread and await its result.
 enum ShardBenchThread {
+    /// The reverse, for a session thread: block it until an async body finishes.
+    static func wait<T>(_ body: @escaping @Sendable () async throws -> T) throws -> T {
+        let box = ShardBenchWaitBox<T>()
+        let done = DispatchSemaphore(value: 0)
+        Task {
+            do {
+                box.result = .success(try await body())
+            } catch {
+                box.result = .failure(error)
+            }
+            done.signal()
+        }
+        done.wait()
+        return try box.result!.get()
+    }
+
     static func run<T>(_ body: @escaping @Sendable () throws -> T) async throws -> T {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
             let thread = Thread {

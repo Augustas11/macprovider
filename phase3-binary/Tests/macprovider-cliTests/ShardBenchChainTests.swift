@@ -36,8 +36,12 @@ final class FakeShardStage: ShardBenchStage {
 
     func newCache() throws -> Cache { Cache() }
 
+    /// Token inputs of every first-stage forward, in order.
+    private(set) var tokensSeen: [[Int]] = []
+
     func forward(tokens: [Int], cache: Cache) throws -> ShardBenchActivation {
         try count()
+        tokensSeen.append(tokens)
         var rows = [Float]()
         for token in tokens {
             rows += [Float(token), Float(token % 7), Float(cache.history.count % 5), Float(layers.upperBound)]
@@ -59,10 +63,26 @@ final class FakeShardStage: ShardBenchStage {
 
     func sample(activation: ShardBenchActivation, cache: Cache, temperature: Float) throws -> Int {
         try count()
-        let input = Self.decode(activation)
-        for (offset, value) in input.enumerated() where offset % hiddenSize == 0 { cache.history.append(value) }
-        let mixed = cache.history.enumerated().reduce(0) { ($0 &* 31 &+ Int($1.element) &+ $1.offset) % 1_000_003 }
-        return mixed % 97
+        return Self.mix(activation, into: cache) % 97
+    }
+
+    /// Top-k ids are distinct (97 is prime), the first one is what `sample` returns,
+    /// and `logprobShift` moves every logprob so a test can perturb this stage.
+    func summarize(activation: ShardBenchActivation, cache: Cache, topK: Int) throws -> ShardLogitSummary {
+        try count()
+        let mixed = Self.mix(activation, into: cache)
+        return ShardLogitSummary(
+            topTokens: (0..<topK).map { Int32((mixed + $0 * 7) % 97) },
+            topLogprobs: (0..<topK).map { -0.1 - 0.5 * Float($0) + logprobShift },
+            logSumExp: Float(mixed % 13))
+    }
+
+    /// Added to every logprob this stage summarizes.
+    var logprobShift: Float = 0
+
+    private static func mix(_ activation: ShardBenchActivation, into cache: Cache) -> Int {
+        for (offset, value) in decode(activation).enumerated() where offset % 4 == 0 { cache.history.append(value) }
+        return cache.history.enumerated().reduce(0) { ($0 &* 31 &+ Int($1.element) &+ $1.offset) % 1_000_003 }
     }
 
     func fill(activation: ShardBenchActivation, cache: Cache) throws {
@@ -138,14 +158,15 @@ enum ShardBenchTestRig {
         replayBufferBytes: Int = 1 << 20,
         listen: ShardBenchEndpoint? = nil,
         connect: ShardBenchEndpoint? = nil,
-        connectTimeout: TimeInterval = 5
+        connectTimeout: TimeInterval = 5,
+        parity: ShardBenchParityOptions = .skipped
     ) -> ShardBenchSessionOptions {
         ShardBenchSessionOptions(
             role: role, listen: listen, connect: connect, expectedStages: expectedStages, modelLabel: "fake",
             prompts: prompts, tokens: tokens, temperature: 0, seed: 0, link: configuration(epoch: epoch),
             receiveTimeout: 5, connectTimeout: connectTimeout, probeCount: probeCount, maxSequences: 8, warmup: true,
             prefillChunk: prefillChunk, prefillChunkDeadline: prefillChunkDeadline, memberID: nil,
-            spare: spare, replayBufferBytes: replayBufferBytes, replayDeadline: 5)
+            spare: spare, replayBufferBytes: replayBufferBytes, replayDeadline: 5, parity: parity)
     }
 
     static func stages(_ splits: [Range<Int>], total: Int) -> [FakeShardStage] {
@@ -172,6 +193,40 @@ enum ShardBenchTestRig {
         }
     }
 
+    /// Greedy reference with per-step logit summaries from the same stages in process.
+    static func referenceReport(splits: [Range<Int>], total: Int, prompts: [[Int]], tokens: Int, topK: Int) throws -> ShardBenchReferenceReport {
+        let chain = stages(splits, total: total)
+        var sequences = [[Int]]()
+        var stepLogits = [[ShardLogitSummary]]()
+        for prompt in prompts {
+            let caches = try chain.map { try $0.newCache() }
+            var generated = [Int]()
+            var summaries = [ShardLogitSummary]()
+            var input = prompt
+            while generated.count < tokens {
+                var activation = try chain[0].forward(tokens: input, cache: caches[0])
+                for index in 1..<(chain.count - 1) {
+                    activation = try chain[index].forward(activation: activation, cache: caches[index])
+                }
+                let summary = try chain[chain.count - 1].summarize(activation: activation, cache: caches[chain.count - 1], topK: topK)
+                summaries.append(summary)
+                generated.append(Int(summary.top1))
+                input = [Int(summary.top1)]
+            }
+            sequences.append(generated)
+            stepLogits.append(summaries)
+        }
+        return ShardBenchReferenceReport(
+            sequenceTokens: sequences, promptTokens: prompts.map(\.count), singleStreamTokensPerSecond: nil,
+            ttft: ShardBenchLatency(seconds: []), prompts: prompts, stepLogits: stepLogits)
+    }
+
+    static func teacherForced(_ reference: ShardBenchReferenceReport, topK: Int = 4) -> ShardBenchParityOptions {
+        ShardBenchParityOptions(
+            mode: .teacherForced, topK: topK, tieMargin: 0.05, logprobTolerance: 0.1,
+            referenceProvider: { reference }, referenceSource: "test")
+    }
+
     /// Run every stage's session on its own thread; results indexed by stage.
     static func run(
         _ stages: [FakeShardStage],
@@ -183,7 +238,8 @@ enum ShardBenchTestRig {
         prefillChunk: Int? = nil,
         prefillChunkDeadline: TimeInterval = 3,
         spare: ShardBenchEndpoint? = nil,
-        replayBufferBytes: Int = 1 << 20
+        replayBufferBytes: Int = 1 << 20,
+        parity: ShardBenchParityOptions = .skipped
     ) -> [Result<ShardBenchSessionReport, Error>] {
         let results = ShardBenchResultBox(count: stages.count)
         let group = DispatchGroup()
@@ -192,7 +248,8 @@ enum ShardBenchTestRig {
             let stageOptions = options(
                 role: role, prompts: prompts, tokens: tokens, expectedStages: index == 0 ? expectedStages : nil,
                 prefillChunk: prefillChunk, prefillChunkDeadline: prefillChunkDeadline,
-                spare: index == 0 ? spare : nil, replayBufferBytes: replayBufferBytes)
+                spare: index == 0 ? spare : nil, replayBufferBytes: replayBufferBytes,
+                parity: index == 0 ? parity : .skipped)
             let session = ShardBenchSession(options: stageOptions, stage: stage)
             let stageLinks = links[index]
             let prepare = beforeRun[index]
@@ -446,6 +503,61 @@ final class ShardBenchChainTests: XCTestCase {
         XCTAssertThrowsError(try results[0].get()) { error in
             XCTAssertTrue(String(describing: error).contains("chunk deadline"), "\(error)")
         }
+    }
+
+    // MARK: Teacher-forced parity
+
+    func testTeacherForcedRunOverThreeStagesPassesWithFullAgreement() throws {
+        let splits = [0..<1, 1..<3, 3..<4]
+        let reference = try ShardBenchTestRig.referenceReport(splits: splits, total: 4, prompts: prompts, tokens: 6, topK: 4)
+        let results = ShardBenchTestRig.run(
+            ShardBenchTestRig.stages(splits, total: 4), links: try ShardBenchTestRig.ring(stages: 3),
+            prompts: prompts, tokens: 6, prefillChunk: 2, parity: ShardBenchTestRig.teacherForced(reference))
+        let head = try XCTUnwrap(try results[0].get().head)
+        let parity = try XCTUnwrap(head.parity?.teacherForced)
+        XCTAssertEqual(head.parity?.verdict, "pass")
+        XCTAssertEqual(parity.steps, 12)
+        XCTAssertEqual(parity.top1AgreementRate, 1)
+        XCTAssertEqual(parity.maxAbsDeltaLogprob, 0)
+        XCTAssertEqual(parity.meanTopKOverlap, 1)
+        XCTAssertEqual(head.sequenceTokens, reference.sequenceTokens)
+        XCTAssertEqual(head.attestation.verdict, "ok", "token-logit frames are in the digest chain")
+    }
+
+    func testTeacherForcedRunFeedsReferenceTokensNotItsOwnSamples() throws {
+        // A reference that continues with tokens the chain would not pick: the head must
+        // feed them anyway, so the parity reports what the chain does on that prefix.
+        let splits = [0..<2, 2..<4]
+        let base = try ShardBenchTestRig.referenceReport(splits: splits, total: 4, prompts: [prompts[0]], tokens: 4, topK: 4)
+        let reference = ShardBenchReferenceReport(
+            sequenceTokens: [[1, 2, 3, 4]], promptTokens: base.promptTokens, singleStreamTokensPerSecond: nil,
+            ttft: base.ttft, prompts: base.prompts, stepLogits: base.stepLogits)
+        let stages = ShardBenchTestRig.stages(splits, total: 4)
+        let results = ShardBenchTestRig.run(
+            stages, links: try ShardBenchTestRig.ring(stages: 2, collapsed: true),
+            prompts: [prompts[0]], tokens: 4, parity: ShardBenchTestRig.teacherForced(reference))
+        let head = try XCTUnwrap(try results[0].get().head)
+        // Warmup decodes its own samples; the measured run's decode inputs are 1, 2, 3.
+        XCTAssertEqual(Array(stages[0].tokensSeen.suffix(4)), [prompts[0], [1], [2], [3]])
+        XCTAssertEqual(head.parity?.teacherForced?.steps, 4)
+        XCTAssertEqual(head.parity?.verdict, "fail", "the base logits were for a different prefix after step 0")
+        XCTAssertEqual(head.parity?.teacherForced?.hardFailures.first?.step, 1)
+    }
+
+    func testTeacherForcedShiftedLogprobsFailTheTolerance() throws {
+        let splits = [0..<2, 2..<4]
+        let reference = try ShardBenchTestRig.referenceReport(splits: splits, total: 4, prompts: prompts, tokens: 5, topK: 4)
+        // A tail whose logprobs are all 0.3 nats off: top-1 agrees, tolerance fails.
+        let shifted = ShardBenchTestRig.stages(splits, total: 4)
+        shifted[1].logprobShift = 0.3
+        let failing = ShardBenchTestRig.run(
+            shifted, links: try ShardBenchTestRig.ring(stages: 2, collapsed: true),
+            prompts: prompts, tokens: 5, parity: ShardBenchTestRig.teacherForced(reference))
+        let parity = try XCTUnwrap(try failing[0].get().head?.parity?.teacherForced)
+        XCTAssertEqual(parity.verdict, "fail")
+        XCTAssertEqual(parity.top1AgreementRate, 1)
+        XCTAssertTrue(parity.hardFailures.isEmpty)
+        XCTAssertEqual(parity.p99AbsDeltaLogprob, 0.3, accuracy: 1e-6)
     }
 
     func testChainValidation() throws {

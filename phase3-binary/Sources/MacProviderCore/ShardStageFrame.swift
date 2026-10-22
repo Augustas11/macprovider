@@ -38,6 +38,9 @@ public enum ShardFrameKind: UInt8, Sendable, CaseIterable {
     case heartbeat = 4
     case abort = 5
     case error = 6
+    /// A token plus the last stage's logit summary (`ShardLogitSummaryCodec`), for
+    /// teacher-forced parity.
+    case tokenLogits = 7
 }
 
 /// Per-frame flags. Unknown bits are refused, so a peer that does not know a flag
@@ -320,6 +323,14 @@ public enum ShardStageFrameCodec {
         case .token:
             guard header.dtype == .int32 else {
                 throw ShardFrameError.kindDTypeMismatch(kind: header.kind, dtype: header.dtype)
+            }
+        case .tokenLogits:
+            guard header.dtype == .int32 else {
+                throw ShardFrameError.kindDTypeMismatch(kind: header.kind, dtype: header.dtype)
+            }
+            // Token, k ids, k logprobs, log-sum-exp: rank 1, an even count of at least 4.
+            guard header.shape.count == 1, header.shape[0] >= 4, header.shape[0] % 2 == 0 else {
+                throw ShardFrameError.shapePayloadMismatch(expectedBytes: 0, payloadBytes: payloadLength)
             }
         case .hello, .heartbeat, .abort, .error:
             guard header.dtype == .none else {

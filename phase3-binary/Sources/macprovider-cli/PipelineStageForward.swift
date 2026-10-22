@@ -398,3 +398,19 @@ enum PipelineStageSampler {
         return MLXRandom.categorical(last * (1 / temperature)).item(Int.self)
     }
 }
+
+/// Top-k logit summary of the last position, the same on the last stage and the
+/// reference so teacher-forced parity compares like with like.
+enum PipelineLogitSummarizer {
+    static func summarize(logits: MLXArray, topK: Int) -> ShardLogitSummary {
+        let row = logits[0, -1].asType(.float32)
+        let logSumExp = row.logSumExp(axis: -1)
+        let order = argSort(-row, axis: -1)[0 ..< min(topK, row.dim(0))]
+        let logprobs = row.take(order, axis: 0) - logSumExp
+        eval(order, logprobs, logSumExp)
+        return ShardLogitSummary(
+            topTokens: order.asType(.int32).asArray(Int32.self),
+            topLogprobs: logprobs.asArray(Float.self),
+            logSumExp: logSumExp.item(Float.self))
+    }
+}
