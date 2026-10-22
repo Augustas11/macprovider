@@ -25,19 +25,24 @@ struct ShardGenerationRequest: Sendable {
     /// Lab teacher forcing: decode step i is fed `teacherTokens[i - 1]` instead of the
     /// token sampled at step i - 1.
     var teacherTokens: [Int]?
+    /// The request id every member names in its sub-receipt (the coordinator request
+    /// id); nil uses the engine's decimal request id.
+    var receiptRequestID: String?
 
     init(
         promptTokens: [Int],
         maxTokens: Int,
         control: ShardRequestControl = ShardRequestControl(temperature: 0),
         stopTokenIDs: Set<Int> = [],
-        teacherTokens: [Int]? = nil
+        teacherTokens: [Int]? = nil,
+        receiptRequestID: String? = nil
     ) {
         self.promptTokens = promptTokens
         self.maxTokens = maxTokens
         self.control = control
         self.stopTokenIDs = stopTokenIDs
         self.teacherTokens = teacherTokens
+        self.receiptRequestID = receiptRequestID
     }
 }
 
@@ -217,13 +222,16 @@ struct ShardMemberLedgerBook {
         ledgers[requestID] = nil
     }
 
+    /// `requestID` keys the ledger (the transport id); `receiptRequestID` is the id
+    /// the sub-receipt names.
     func receipt(
-        requestID: UInt64, memberDeviceID: String, groupEpoch: UInt64, stageIndex: Int, layers: Range<Int>
+        requestID: UInt64, receiptRequestID: String, memberDeviceID: String, groupEpoch: UInt64, stageIndex: Int,
+        layers: Range<Int>
     ) -> ShardMemberSubReceipt {
         let ledger = ledgers[requestID] ?? Ledger()
         return ShardMemberSubReceipt(
             memberDeviceID: memberDeviceID, groupEpoch: groupEpoch, stageIndex: stageIndex,
-            layerStart: layers.lowerBound, layerEnd: layers.upperBound, requestID: requestID,
+            layerStart: layers.lowerBound, layerEnd: layers.upperBound, requestID: receiptRequestID,
             promptTokens: ledger.promptTokens, decodeSteps: ledger.decodeSteps,
             inDigest: ledger.input.hex, outDigest: ledger.output.hex)
     }
@@ -623,13 +631,15 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
             return
         }
         let id = request.id
+        var control = request.request.control
+        control.requestID = request.request.receiptRequestID ?? String(id)
         var entry = Active(id: id, request: request.request, sink: request.sink, cache: cache)
         entry.timing.prefillStart = now()
         entry.outstanding = true
         active[id] = entry
         try headSend(ShardStageFrame(
             header: header(.control, requestID: id, destination: 1),
-            payload: try JSONEncoder().encode(request.request.control)), buffered: true)
+            payload: try JSONEncoder().encode(control)), buffered: true)
         // Chunk i goes down the chain as soon as the head computed it, so stage k+1
         // works on chunk i while stage k computes chunk i+1. Only the last chunk asks
         // the last stage for a token.
@@ -749,8 +759,8 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
         }
         let others = try ShardChainWire.decodeReceipts(frame.payload)
         let mine = try options.signer.sign(book.receipt(
-            requestID: id, memberDeviceID: options.signer.memberDeviceID, groupEpoch: groupEpoch, stageIndex: 0,
-            layers: stage.layers))
+            requestID: id, receiptRequestID: entry.request.receiptRequestID ?? String(id),
+            memberDeviceID: options.signer.memberDeviceID, groupEpoch: groupEpoch, stageIndex: 0, layers: stage.layers))
         book.remove(id)
         let receipts = [mine] + others
         let verdict = ShardGroupAttestationVerifier.verify(signed: receipts, expectedKeys: expectedKeys)
@@ -925,8 +935,8 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
     private func finishMemberLost(cause: String) {
         for (id, entry) in awaiting.sorted(by: { $0.key < $1.key }) {
             let mine = try? options.signer.sign(book.receipt(
-                requestID: id, memberDeviceID: options.signer.memberDeviceID, groupEpoch: groupEpoch, stageIndex: 0,
-                layers: stage.layers))
+                requestID: id, receiptRequestID: entry.request.receiptRequestID ?? String(id),
+                memberDeviceID: options.signer.memberDeviceID, groupEpoch: groupEpoch, stageIndex: 0, layers: stage.layers))
             book.remove(id)
             deliverFinished(entry, attestation: ShardRequestAttestation(
                 verdict: "unverifiable_member_lost",

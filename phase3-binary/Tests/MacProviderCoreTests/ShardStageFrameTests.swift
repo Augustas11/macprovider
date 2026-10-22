@@ -307,7 +307,7 @@ final class ShardStageFrameTests: XCTestCase {
     // MARK: - Request control
 
     func testRequestControlRoundTripsAndRefusesUnknownOrOutOfRangeFields() throws {
-        let control = ShardRequestControl(temperature: 0.7, topP: 0.9, seed: 51)
+        let control = ShardRequestControl(temperature: 0.7, topP: 0.9, seed: 51, requestID: "req_1")
         let encoded = try JSONEncoder().encode(control)
         XCTAssertEqual(try JSONDecoder().decode(ShardRequestControl.self, from: encoded), control)
         XCTAssertEqual(

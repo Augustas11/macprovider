@@ -12,7 +12,7 @@ final class ShardGroupAttestationTests: XCTestCase {
     }
 
     private func receipt(_ member: String, stage: Int, layers: Range<Int>, inDigest: String, outDigest: String,
-                         request: UInt64 = 7, epoch: UInt64 = 4) -> ShardMemberSubReceipt {
+                         request: String = "7", epoch: UInt64 = 4) -> ShardMemberSubReceipt {
         ShardMemberSubReceipt(
             memberDeviceID: member, groupEpoch: epoch, stageIndex: stage, layerStart: layers.lowerBound,
             layerEnd: layers.upperBound, requestID: request, promptTokens: 5, decodeSteps: 1,
@@ -52,7 +52,7 @@ final class ShardGroupAttestationTests: XCTestCase {
         let json = try receipt("mac-a", stage: 1, layers: 3..<9, inDigest: "aa", outDigest: "bb").canonicalJSON()
         XCTAssertEqual(
             String(decoding: json, as: UTF8.self),
-            #"{"decode_steps":1,"group_epoch":4,"in_digest":"aa","layer_end":9,"layer_start":3,"member_device_id":"mac-a","out_digest":"bb","prompt_tokens":5,"request_id":7,"stage_index":1}"#)
+            #"{"decode_steps":1,"group_epoch":4,"in_digest":"aa","layer_end":9,"layer_start":3,"member_device_id":"mac-a","out_digest":"bb","prompt_tokens":5,"request_id":"7","stage_index":1}"#)
         XCTAssertEqual(try JSONDecoder().decode(ShardMemberSubReceipt.self, from: json).memberDeviceID, "mac-a")
     }
 
@@ -98,7 +98,7 @@ final class ShardGroupAttestationTests: XCTestCase {
 
     func testMixedRequestsEpochsAndShortChainsAreRefused() {
         var receipts = honestChain()
-        receipts[2].requestID = 8
+        receipts[2].requestID = "8"
         guard case .broken(let request) = ShardGroupAttestationVerifier.verify(receipts) else { return XCTFail() }
         XCTAssertEqual(request.kind, .requestMismatch)
 
@@ -134,6 +134,18 @@ final class ShardGroupAttestationTests: XCTestCase {
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: json) as? [String: Any])
         XCTAssertEqual(Set(object.keys), ["sub_receipt", "public_key", "signature"])
         XCTAssertEqual(try JSONDecoder().decode(ShardSignedSubReceipt.self, from: json), signed[0])
+    }
+
+    func testSignerRefusesStringsThatWouldNeedEscaping() throws {
+        let signer = ShardMemberSigner(memberDeviceID: "mac-a", key: Curve25519.Signing.PrivateKey())
+        var receipt = honestChain()[0]
+        receipt.requestID = "req\"1"
+        XCTAssertThrowsError(try signer.sign(receipt)) { error in
+            XCTAssertEqual(error as? ShardSubReceiptSigningError, .nonCanonicalString(field: "request_id"))
+        }
+        receipt.requestID = "req_1"
+        receipt.memberDeviceID = "m\u{e9}"
+        XCTAssertThrowsError(try signer.sign(receipt))
     }
 
     func testAlteredSubReceiptFailsItsSignature() throws {

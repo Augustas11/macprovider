@@ -41,7 +41,9 @@ public struct ShardMemberSubReceipt: Codable, Equatable, Sendable {
     public var stageIndex: Int
     public var layerStart: Int
     public var layerEnd: Int
-    public var requestID: UInt64
+    /// The coordinator request id (the head's request id string in the lab). The
+    /// digests fold the transport's numeric request id, which both ends share.
+    public var requestID: String
     /// Prompt tokens this member ran through its layers.
     public var promptTokens: Int
     /// Decode steps this member ran through its layers.
@@ -57,7 +59,7 @@ public struct ShardMemberSubReceipt: Codable, Equatable, Sendable {
         stageIndex: Int,
         layerStart: Int,
         layerEnd: Int,
-        requestID: UInt64,
+        requestID: String,
         promptTokens: Int,
         decodeSteps: Int,
         inDigest: String,
@@ -89,7 +91,8 @@ public struct ShardMemberSubReceipt: Codable, Equatable, Sendable {
     }
 
     /// The bytes a member signs: snake_case keys sorted, no whitespace, integers in
-    /// decimal, digests as lowercase hex.
+    /// decimal, digests as lowercase hex. With the printable-ASCII strings
+    /// `ShardMemberSigner` admits, this is exactly the RFC 8785 (JCS) form.
     public func canonicalJSON() throws -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
@@ -188,9 +191,19 @@ public struct ShardMemberSigner: @unchecked Sendable {
     public var publicKeyBase64: String { key.publicKey.rawRepresentation.base64EncodedString() }
 
     public func sign(_ receipt: ShardMemberSubReceipt) throws -> ShardSignedSubReceipt {
+        for (field, value) in [("member_device_id", receipt.memberDeviceID), ("request_id", receipt.requestID)]
+        where value.isEmpty || !value.utf8.allSatisfy({ (0x20...0x7E).contains($0) && $0 != 0x22 && $0 != 0x5C }) {
+            throw ShardSubReceiptSigningError.nonCanonicalString(field: field)
+        }
         let signature = try key.signature(for: ShardSignedSubReceipt.signedBytes(receipt))
         return ShardSignedSubReceipt(receipt: receipt, publicKey: publicKeyBase64, signature: signature.base64EncodedString())
     }
+}
+
+public enum ShardSubReceiptSigningError: Error, Equatable, Sendable {
+    /// Signed strings are non-empty printable ASCII without quote or backslash, so
+    /// the canonical JSON needs no escaping and equals its JCS form.
+    case nonCanonicalString(field: String)
 }
 
 /// A sub-receipt with its member's signature over

@@ -106,7 +106,9 @@ final class ShardGroupEngineTests: XCTestCase {
         let (_, result) = await collect(try rig.engine.stream(
             ShardGenerationRequest(promptTokens: [4, 2], maxTokens: 2, control: control)).events)
         XCTAssertEqual(try result.get().tokens.count, 2)
-        XCTAssertEqual(rig.tail.controlsSeen, [control])
+        var expected = control
+        expected.requestID = "1"
+        XCTAssertEqual(rig.tail.controlsSeen, [expected], "the engine names its own request id when the caller gives none")
         try rig.engine.shutdown()
     }
 
@@ -278,9 +280,11 @@ final class ShardGroupEngineTests: XCTestCase {
     func testMemberSignsWithItsDeviceKey() async throws {
         let key = Curve25519.Signing.PrivateKey()
         let rig = try rig(tailSigner: ShardMemberSigner(memberDeviceID: "mac-b", key: key))
-        let (_, result) = await collect(try rig.engine.stream(ShardGenerationRequest(promptTokens: [2, 4], maxTokens: 2)).events)
+        let (_, result) = await collect(try rig.engine.stream(
+            ShardGenerationRequest(promptTokens: [2, 4], maxTokens: 2, receiptRequestID: "req_7f3a")).events)
         let receipts = try result.get().attestation.receipts
         XCTAssertEqual(receipts.map(\.receipt.memberDeviceID), ["head-device", "mac-b"])
+        XCTAssertEqual(receipts.map(\.receipt.requestID), ["req_7f3a", "req_7f3a"], "members name the coordinator request id")
         XCTAssertEqual(receipts[1].publicKey, key.publicKey.rawRepresentation.base64EncodedString())
         XCTAssertTrue(receipts[1].signatureIsValid)
         try rig.engine.shutdown()

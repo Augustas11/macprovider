@@ -449,12 +449,16 @@ public struct ShardRequestControl: Codable, Equatable, Sendable {
     public var topP: Float
     /// Seeds this request's sampler; nil draws from entropy.
     public var seed: UInt64?
+    /// The id members put in their sub-receipts for this request (the coordinator
+    /// request id); nil uses the decimal transport request id.
+    public var requestID: String?
 
-    public init(operation: Operation = .open, temperature: Float, topP: Float = 1, seed: UInt64? = nil) {
+    public init(operation: Operation = .open, temperature: Float, topP: Float = 1, seed: UInt64? = nil, requestID: String? = nil) {
         self.operation = operation
         self.temperature = temperature
         self.topP = topP
         self.seed = seed
+        self.requestID = requestID
     }
 
     enum CodingKeys: String, CodingKey, CaseIterable {
@@ -462,6 +466,7 @@ public struct ShardRequestControl: Codable, Equatable, Sendable {
         case temperature
         case topP = "top_p"
         case seed
+        case requestID = "request_id"
     }
 
     public init(from decoder: Decoder) throws {
@@ -475,6 +480,7 @@ public struct ShardRequestControl: Codable, Equatable, Sendable {
         temperature = try container.decode(Float.self, forKey: .temperature)
         topP = try container.decode(Float.self, forKey: .topP)
         seed = try container.decodeIfPresent(UInt64.self, forKey: .seed)
+        requestID = try container.decodeIfPresent(String.self, forKey: .requestID)
         guard temperature.isFinite, temperature >= 0, topP.isFinite, topP > 0, topP <= 1 else {
             throw DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "temperature must be >= 0 and top_p within (0, 1]"))
         }

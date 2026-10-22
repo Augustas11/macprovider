@@ -1512,6 +1512,8 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
     ) throws -> ShardBenchStageReport {
         var caches = [UInt64: Stage.Cache]()
         var samplers = [UInt64: Stage.Sampler]()
+        /// The request id each request's control named for sub-receipts.
+        var receiptIDs = [UInt64: String]()
         var served = Set<UInt64>()
         var decodeCompute = [Double]()
         var prefillCompute = [Double]()
@@ -1530,6 +1532,7 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
                 } catch {
                     throw ShardBenchError.protocolViolation("undecodable control for request \(header.requestID): \(error)")
                 }
+                receiptIDs[header.requestID] = control.requestID
                 if options.role == .tail {
                     samplers[header.requestID] = stage.makeSampler(control)
                 } else {
@@ -1605,8 +1608,9 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
                 // SPEC-051-R009 item 5: the request's KV goes with its end.
                 caches[header.requestID] = nil
                 samplers[header.requestID] = nil
+                let receiptID = receiptIDs.removeValue(forKey: header.requestID) ?? String(header.requestID)
                 let receipts = try ShardChainWire.decodeReceipts(frame.payload) + [try signer.sign(book.receipt(
-                    requestID: header.requestID, memberDeviceID: signer.memberDeviceID,
+                    requestID: header.requestID, receiptRequestID: receiptID, memberDeviceID: signer.memberDeviceID,
                     groupEpoch: options.link.groupEpoch, stageIndex: stageIndex, layers: stage.layers))]
                 book.remove(header.requestID)
                 try links.downstream.send(ShardStageFrame(
