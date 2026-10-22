@@ -832,6 +832,35 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
         XCTAssertFalse(original.chunks.contains { $0.contains("Rome") || $0.contains("trailing") })
     }
 
+    /// #2107 D5 (CPU reproduction attempt): the live Qwen3-8B stream that
+    /// failed after a trimmed conversation-cache hit generated one tool call.
+    /// Whatever the delivery windows (one token, several, all at once, or a
+    /// terminal replay with no token events) and whether the turn is serial
+    /// or parallel, the batched stream must finish with the call and never a
+    /// streamed/finalized mismatch.
+    func testQwenToolCallStreamFinishesForEveryDeliveryShapeAndTurnKind() throws {
+        let vocab = Vocab(pieces: [
+            "<tool_call>", "\n", "{\"name\": \"read_file\", ", "\"arguments\": {\"path\": ",
+            "\"/etc/hosts\"}}", "\n", "</tool_call>",
+        ])
+        let tool: [[String: Any]] = [[
+            "type": "function",
+            "function": ["name": "read_file", "parameters": ["type": "object", "properties": ["path": ["type": "string"]], "required": ["path"]]],
+        ]]
+        for parallel in [false, true] {
+            let request = try request(["tools": tool, "stream": true, "parallel_tool_calls": parallel])
+            for events in [nil, [[0, 1, 2], [3, 4, 5, 6]], [vocab.ids], [[Int]]()] as [[[Int]]?] {
+                let batched = batchedStream(request, vocab: vocab, deliveryEvents: events)
+                guard case .success(let completion) = batched.result else {
+                    return XCTFail("parallel=\(parallel) events=\(String(describing: events)): \(batched.result)")
+                }
+                XCTAssertEqual(calls(completion.toolCalls), [#"read_file {"path":"/etc/hosts"}"#])
+                XCTAssertEqual(completion.finishReason, "tool_calls")
+                XCTAssertTrue(batched.chunks.contains(where: { $0.hasPrefix("tool:read_file") }), "\(batched.chunks)")
+            }
+        }
+    }
+
     func testStreamingOversizedToolArgumentsStreamNothingLikeSerial() throws {
         let request = try request(["tools": Self.weatherTool])
         let big = String(repeating: "x", count: ToolCallParser.SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP + 1)
