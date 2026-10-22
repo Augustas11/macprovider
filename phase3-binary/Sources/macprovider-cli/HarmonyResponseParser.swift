@@ -27,9 +27,20 @@ enum HarmonyResponseParser {
         let finalContentTokenCount: Int
         let finalContentTokenIDs: [Int]
         let failure: Failure?
+        /// SPEC-018 §3.10 rule 1a: the decoded `analysis` channel bodies, in
+        /// order, which the buyer API returns as `reasoning_content`.
+        var reasoningContent: String? = nil
+        var reasoningTokenCount = 0
 
         var isHarmony: Bool {
             status != .notApplicable
+        }
+
+        func withReasoning(_ reasoning: String, tokenCount: Int) -> ParseResult {
+            var result = self
+            result.reasoningContent = reasoning
+            result.reasoningTokenCount = tokenCount
+            return result
         }
     }
 
@@ -355,6 +366,8 @@ enum HarmonyResponseParser {
         var toolArgumentBytes = 0
         var observedTerminal = false
         var observedReturnTerminal = false
+        var reasoningContent = ""
+        var reasoningTokenCount = 0
         var pendingRoleRecipient: String?
         var suppressedStopMatcher = StopCandidateMatcher(stopCandidates: stopCandidates)
 
@@ -439,7 +452,7 @@ enum HarmonyResponseParser {
                         decode: decode,
                         stopCandidates: stopCandidates + requestStops
                     ) {
-                        return stopped
+                        return stopped.withReasoning(reasoningContent, tokenCount: reasoningTokenCount)
                     }
                     return ParseResult(
                         status: .incomplete,
@@ -447,7 +460,27 @@ enum HarmonyResponseParser {
                         toolCalls: toolCalls,
                         finalContentTokenCount: finalContentTokenCount,
                         finalContentTokenIDs: finalContentTokenIDs,
-                        failure: nil
+                        failure: nil,
+                        reasoningContent: reasoningContent,
+                        reasoningTokenCount: reasoningTokenCount
+                    )
+                } else if channel == "analysis", case .complete(let finishReason) = mode,
+                          finishReason == "length", toolCalls.isEmpty {
+                    // SPEC-018 §3.10 rule 5: the token budget ran out while the
+                    // model was still reasoning. That is a `length` finish with
+                    // the reasoning so far and no visible content, not a
+                    // malformed response.
+                    reasoningContent += body
+                    reasoningTokenCount += bodyTokenIDs.count
+                    return ParseResult(
+                        status: .incomplete,
+                        content: nilIfEmpty(finalContent),
+                        toolCalls: [],
+                        finalContentTokenCount: finalContentTokenCount,
+                        finalContentTokenIDs: finalContentTokenIDs,
+                        failure: nil,
+                        reasoningContent: reasoningContent,
+                        reasoningTokenCount: reasoningTokenCount
                     )
                 } else {
                     return incompleteResult(mode: mode)
@@ -472,7 +505,7 @@ enum HarmonyResponseParser {
                     decode: decode,
                     stopCandidates: stopCandidates + requestStops
                 ) {
-                    return stopped
+                    return stopped.withReasoning(reasoningContent, tokenCount: reasoningTokenCount)
                 }
                 if terminator == returnTokenID {
                     observedTerminal = true
@@ -511,6 +544,8 @@ enum HarmonyResponseParser {
                 guard terminator != callTokenID else {
                     throw ParseError.malformed
                 }
+                reasoningContent += body
+                reasoningTokenCount += bodyTokenIDs.count
                 if terminator == returnTokenID {
                     observedTerminal = true
                     observedReturnTerminal = true
@@ -555,7 +590,9 @@ enum HarmonyResponseParser {
             toolCalls: toolCalls,
             finalContentTokenCount: finalContentTokenCount,
             finalContentTokenIDs: finalContentTokenIDs,
-            failure: nil
+            failure: nil,
+            reasoningContent: reasoningContent,
+            reasoningTokenCount: reasoningTokenCount
         )
     }
 

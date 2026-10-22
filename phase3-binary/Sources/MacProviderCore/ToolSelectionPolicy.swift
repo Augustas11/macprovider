@@ -136,6 +136,9 @@ public enum ToolSelectionPolicy {
                 throw APIError(status: 400, message: "Guaranteed tool selection requires unique named object schemas", code: "unsupported_tool_schema", param: "tools")
             }
             let schema = JSONValue.object(parameters)
+            // SPEC-018 §3.11 (v0.3.1): an ordinary OpenAI parameters object is
+            // admitted; only the strict subset gets full schema validation of
+            // the generated arguments (`validateOutput`).
             do {
                 guard supportsNumericDomain(schema) else {
                     throw unsupported("Tool schema numeric values exceed the supported finite safe magnitude")
@@ -143,9 +146,9 @@ public enum ToolSelectionPolicy {
                 guard try schema.deterministicJSONString().utf8.count <= JSONSchemaValidator.maxSchemaBytes else {
                     throw unsupported("Tool schema exceeds byte limit")
                 }
-                try JSONSchemaValidator.validateSchemaShape(schema: schema)
+                try JSONSchemaValidator.validateNonStrictSchemaShape(schema: schema)
             } catch {
-                throw APIError(status: 400, message: "Tool schema is outside the supported strict JSON Schema subset", code: "unsupported_tool_schema", param: "tools")
+                throw APIError(status: 400, message: "Tool schema is outside the supported JSON Schema bounds", code: "unsupported_tool_schema", param: "tools")
             }
             schemas[name] = schema
         }
@@ -190,10 +193,32 @@ public enum ToolSelectionPolicy {
                 guard supportsNumericDomain(arguments) else {
                     throw outputError("Tool argument numeric values exceed the supported finite safe magnitude")
                 }
-                try JSONSchemaValidator.validateInstance(arguments, against: schema)
+                if isStrictSubset(schema) {
+                    try JSONSchemaValidator.validateInstance(arguments, against: schema)
+                } else {
+                    try validateRequiredKeys(arguments, against: schema)
+                }
             } catch {
                 throw outputError("Tool arguments did not validate against their declared schema")
             }
+        }
+    }
+
+    /// The SPEC-019 strict validator subset: a schema in it is validated in
+    /// full; any other admitted schema only for its root `required` keys.
+    public static func isStrictSubset(_ schema: JSONValue) -> Bool {
+        (try? JSONSchemaValidator.validateSchemaShape(schema: schema)) != nil
+    }
+
+    /// Non-strict schemas (an ordinary OpenAI `parameters` object): the
+    /// arguments object must hold every root `required` property.
+    static func validateRequiredKeys(_ arguments: JSONValue, against schema: JSONValue) throws {
+        guard case .object(let object) = arguments, case .object(let node) = schema else {
+            throw outputError("Tool arguments must be an object")
+        }
+        guard case .array(let required)? = node["required"] else { return }
+        for case .string(let key) in required where object[key] == nil {
+            throw outputError("Tool arguments are missing a required property")
         }
     }
 

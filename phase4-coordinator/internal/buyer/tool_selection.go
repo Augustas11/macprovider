@@ -22,6 +22,10 @@ type toolSelectionPolicy struct {
 	name     string
 	parallel bool
 	schemas  map[string]json.RawMessage
+	// strict marks schemas in the strict validator subset. Others are ordinary
+	// OpenAI parameters objects (SPEC-018 §3.11 v0.3.1): their output is checked
+	// for an arguments object holding every root required property.
+	strict map[string]bool
 }
 
 type toolSelectionRequestError struct{ code, message string }
@@ -99,7 +103,7 @@ func validateToolSelection(body []byte, raw map[string]json.RawMessage) (*toolSe
 	if mode == "auto" {
 		return nil, nil
 	}
-	policy := &toolSelectionPolicy{mode: mode, name: name, parallel: parallel, schemas: map[string]json.RawMessage{}}
+	policy := &toolSelectionPolicy{mode: mode, name: name, parallel: parallel, schemas: map[string]json.RawMessage{}, strict: map[string]bool{}}
 	if mode == "none" {
 		return policy, nil
 	}
@@ -144,20 +148,21 @@ func validateToolSelection(body []byte, raw map[string]json.RawMessage) (*toolSe
 		if _, exists := policy.schemas[tool.Function.Name]; exists {
 			return fail("invalid_tools", "Duplicate function name")
 		}
-		if !uniqueJSONKeys(tool.Function.Parameters, 128) {
+		if !uniqueJSONKeys(tool.Function.Parameters, 2*maxJSONSchemaDepth) {
 			return fail("unsupported_tool_schema", "Tool schema contains duplicate keys or exceeds depth cap")
 		}
-		if !toolSchemaNumbersSupported(tool.Function.Parameters) || !toolSchemaShapesSupported(tool.Function.Parameters, 1) {
+		if !toolSchemaNumbersSupported(tool.Function.Parameters) {
 			return fail("unsupported_tool_schema", "Tool schema numbers exceed the supported finite numeric range")
 		}
 		if len(tool.Function.Parameters) > maxJSONSchemaBytes {
 			return fail("unsupported_tool_schema", "Tool argument schema exceeds 16 KiB")
 		}
 		var schema map[string]json.RawMessage
-		if json.Unmarshal(tool.Function.Parameters, &schema) != nil || string(schema["type"]) != `"object"` || validateJSONSchemaRaw(tool.Function.Parameters, "", 1) != nil {
-			return fail("unsupported_tool_schema", "Guaranteed tool selection requires the supported strict object schema subset")
+		if json.Unmarshal(tool.Function.Parameters, &schema) != nil || string(bytes.TrimSpace(schema["type"])) != `"object"` {
+			return fail("unsupported_tool_schema", "Guaranteed tool selection requires an object parameters schema")
 		}
 		policy.schemas[tool.Function.Name] = tool.Function.Parameters
+		policy.strict[tool.Function.Name] = toolSchemaShapesSupported(tool.Function.Parameters, 1) && validateJSONSchemaRaw(tool.Function.Parameters, "", 1) == nil
 	}
 	if mode == "named" {
 		if _, ok := policy.schemas[name]; !ok {
@@ -327,12 +332,39 @@ func validateToolSelectionOutput(policy *toolSelectionPolicy, body []byte, strea
 	for _, call := range calls {
 		schema, ok := policy.schemas[call.Name]
 		total += len(call.Arguments)
-		if !ok || (policy.mode == "named" && call.Name != policy.name) || call.ID == "" || ids[call.ID] || call.Type != "function" || len(call.Arguments) > maxToolCallArgumentsBytes || total > maxToolCallArgumentsResponseBytes || !validToolCallArgumentsObject(call.Arguments) || !uniqueJSONKeys([]byte(call.Arguments), 32) || !toolArgumentsConform(schema, []byte(call.Arguments)) {
+		if !ok || (policy.mode == "named" && call.Name != policy.name) || call.ID == "" || ids[call.ID] || call.Type != "function" || len(call.Arguments) > maxToolCallArgumentsBytes || total > maxToolCallArgumentsResponseBytes || !validToolCallArgumentsObject(call.Arguments) || !uniqueJSONKeys([]byte(call.Arguments), 32) || !toolArgumentsMatchSchema(schema, policy.strict[call.Name], []byte(call.Arguments)) {
 			return errToolSelectionOutput
 		}
 		ids[call.ID] = true
 	}
 	return nil
+}
+
+// toolArgumentsMatchSchema validates a strict-subset schema in full, and any
+// other admitted schema for its root required properties (mirrors Swift
+// ToolSelectionPolicy.validateOutput).
+func toolArgumentsMatchSchema(schema json.RawMessage, strict bool, raw json.RawMessage) bool {
+	if strict {
+		return toolArgumentsConform(schema, raw)
+	}
+	var node struct {
+		Required []json.RawMessage `json:"required"`
+	}
+	var value map[string]json.RawMessage
+	if json.Unmarshal(raw, &value) != nil || value == nil {
+		return false
+	}
+	_ = json.Unmarshal(schema, &node)
+	for _, entry := range node.Required {
+		var key string
+		if json.Unmarshal(entry, &key) != nil {
+			continue
+		}
+		if _, ok := value[key]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func toolArgumentsConform(schema, raw json.RawMessage) bool {

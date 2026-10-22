@@ -1676,27 +1676,84 @@ final class HarmonyResponseParserTests: XCTestCase {
         XCTAssertEqual(completion.generatedCompletionTokens, ids.count)
     }
 
-    func testSerialDecodeRequestStopObserverFailsClosedOnHarmonyHiddenStop() throws {
+    /// #2107 validation (gpt-oss `stop_sequences`, HTTP 502): a request stop
+    /// matched inside the analysis channel failed the whole response. Request
+    /// stops end only the visible final body (SPEC-018 §3.10 rule 5), so the
+    /// counting the model does in its reasoning must not stop it.
+    func testSerialDecodeRequestStopObserverIgnoresStopInsideHarmonyAnalysis() throws {
         let ids = [
-            token(.channel),
-            text("analysis"),
-            token(.message),
-            text("ST"),
-            text("OP"),
+            token(.channel), text("analysis"), token(.message),
+            text("Count 1, 2, 3, 4, 5, 6, 7, 8, 9, 10."), token(.end),
+            token(.start), text("assistant"), token(.channel), text("final"), token(.message),
+            text("1, 2, 3, 4, 5, 6, "), text("7"), text(", 8"),
         ]
         var observer = ModelRuntime.SerialDecodeRequestStopObserver(
-            modelID: "openai/gpt-oss-120b",
+            modelID: "openai/gpt-oss-20b",
             stopTokenFilter: StopTokenFilter(tokens: []),
-            requestStops: ["STOP"],
+            requestStops: ["7"],
             decode: decode
         )
-
-        XCTAssertFalse(try observer.observe(generatedTokenIDs: Array(ids.prefix(4))))
-        XCTAssertThrowsError(try observer.observe(generatedTokenIDs: ids)) { error in
-            let apiError = error as? APIError
-            XCTAssertEqual(apiError?.status, 502)
-            XCTAssertEqual(apiError?.code, "malformed_tool_call_final_json")
+        var stoppedTokens: [Int] = []
+        for tokenID in ids {
+            stoppedTokens.append(tokenID)
+            if try observer.observe(generatedTokenIDs: stoppedTokens) { break }
         }
+        XCTAssertEqual(stoppedTokens, Array(ids.prefix(12)), "the stop ends the final body, not the analysis")
+        let parsed = try ModelRuntime.parseGeneratedOutput(
+            filteredText: decode(stoppedTokens), generatedTokenIDs: stoppedTokens, decode: decode,
+            request: request(model: "openai/gpt-oss-20b"), mode: .complete(finishReason: "request_stop"),
+            defaultCompletionTokens: stoppedTokens.count, requestStops: ["7"], globalHitStop: true, toolCallPrefill: nil
+        )
+        XCTAssertEqual(parsed.content, "1, 2, 3, 4, 5, 6, ")
+        XCTAssertEqual(parsed.reasoningContent, "Count 1, 2, 3, 4, 5, 6, 7, 8, 9, 10.")
+    }
+
+    /// #2107 validation (gpt-oss `no_reasoning_leak`): the analysis channel is
+    /// the reasoning and reaches the buyer as `reasoning_content`, with its
+    /// token count, never as content (SPEC-018 §3.10 rule 1a).
+    func testHarmonyAnalysisBecomesReasoningContent() throws {
+        let analysis = text("User asks 2+2. Answer: 4.")
+        let ids = [
+            token(.channel), text("analysis"), token(.message), analysis, text(" Brief."), token(.end),
+            token(.start), text("assistant"), token(.channel), text("final"), token(.message), text("4"), token(.return),
+        ]
+        let parsed = try ModelRuntime.parseGeneratedOutput(
+            filteredText: decode(ids), generatedTokenIDs: ids, decode: decode,
+            request: request(model: "openai/gpt-oss-20b"), mode: .complete(),
+            defaultCompletionTokens: ids.count, toolCallPrefill: nil
+        )
+        XCTAssertEqual(parsed.content, "4")
+        XCTAssertEqual(parsed.completionTokens, 1)
+        XCTAssertEqual(parsed.reasoningContent, "User asks 2+2. Answer: 4. Brief.")
+        XCTAssertEqual(parsed.reasoningTokens, 2)
+    }
+
+    /// #2107 validation (gpt-oss `finish_reason`, HTTP 502 at max_tokens 8):
+    /// a budget that runs out inside the analysis channel is a `length`
+    /// finish with the reasoning so far, not a malformed response. A cut in a
+    /// function-call frame still fails closed.
+    func testHarmonyLengthInsideAnalysisIsALengthFinish() throws {
+        let ids = [token(.channel), text("analysis"), token(.message), text("We need"), text(" to write"), text(" a story")]
+        let parsed = try ModelRuntime.parseGeneratedOutput(
+            filteredText: decode(ids), generatedTokenIDs: ids, decode: decode,
+            request: request(model: "openai/gpt-oss-20b"), mode: .complete(finishReason: "length"),
+            defaultCompletionTokens: ids.count, toolCallPrefill: nil
+        )
+        XCTAssertEqual(parsed.content, "")
+        XCTAssertTrue(parsed.toolCalls.isEmpty)
+        XCTAssertEqual(parsed.reasoningContent, "We need to write a story")
+        XCTAssertFalse(parsed.isTerminal)
+
+        let cutCall = Array(harmonyToolCall(functionName: "lookup", arguments: #"{"q":"#).dropLast())
+        XCTAssertThrowsError(try ModelRuntime.parseGeneratedOutput(
+            filteredText: decode(cutCall), generatedTokenIDs: cutCall, decode: decode,
+            request: request(model: "openai/gpt-oss-20b", tools: ["lookup"]), mode: .complete(finishReason: "length"),
+            defaultCompletionTokens: cutCall.count, toolCallPrefill: nil
+        )) { error in
+            XCTAssertEqual((error as? APIError)?.code, "malformed_tool_call_final_json")
+        }
+        // Without a length finish an unterminated analysis is still malformed.
+        XCTAssertEqual(parse(ids).status, .malformed)
     }
 
     func testSerialDecodeRequestStopObserverLeavesHarmonyNoStopRequestsAlone() throws {
