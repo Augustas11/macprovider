@@ -344,6 +344,9 @@ final class ShardGroupRuntimeTests: XCTestCase {
     // MARK: Tiny random-weight model: the OpenAI path against shard-bench
 
     private func checkpoint() async throws -> URL {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("shard-runtime-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         directories.append(directory)

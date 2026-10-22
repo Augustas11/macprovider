@@ -63,6 +63,9 @@ final class PipelineStageForwardTests: XCTestCase {
     /// Write `config` and seeded random weights for it; return the directory and the
     /// whole model holding exactly those weights.
     private func makeCheckpoint(_ config: [String: Any]) async throws -> (URL, any LLMModel) {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("pipeline-stage-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -423,6 +426,9 @@ final class PipelineStageForwardTests: XCTestCase {
     }
 
     func testActivationCodecRoundTripsBitExactly() throws {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
         try Device.withDefaultDevice(.cpu) {
             for dtype in [DType.bfloat16, .float16, .float32] {
                 let array = (MLXRandom.normal([1, 3, 16]) * 7).asType(dtype)
