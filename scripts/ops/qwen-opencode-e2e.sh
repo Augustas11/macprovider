@@ -267,7 +267,9 @@ if d.get("binary_version") != version: bad.append("binary_version")
 if d.get("provider_id") != provider: bad.append("provider_id")
 if d.get("model") != model: bad.append("model")
 if d.get("model_loaded") is not True or d.get("status") not in ("ready", "busy"): bad.append("model_ready")
-if d.get("operator_paused") is not False: bad.append("operator_paused")
+# `status --json` reports the operator pause in its lifecycle record.
+paused = d["operator_paused"] if "operator_paused" in d else (d.get("lifecycle") or {}).get("operator_paused")
+if paused is not False: bad.append("operator_paused")
 if d.get("network_state") != "buyer_serving": bad.append("network_state")
 if (d.get("coordinator") or {}).get("connected") is not True: bad.append("coordinator.connected")
 catalog = d.get("catalog") or {}
