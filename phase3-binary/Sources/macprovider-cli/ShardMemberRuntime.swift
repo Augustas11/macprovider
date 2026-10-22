@@ -20,6 +20,10 @@ enum ShardLinkInterface {
     static let vpn = "vpn"
     static let other = "other"
 
+    /// Lab only (#2084): set by `serve --lab-loopback-interconnect` after the
+    /// isolated-loopback-join check; off in every other process.
+    static let labLoopback = LabLoopbackInterconnect()
+
     /// The interface a connected link actually uses, classified: the one that owns
     /// the link's local address (SPEC-051-R007). A subnet match on the peer's
     /// address could name another interface when two share a subnet.
@@ -62,7 +66,7 @@ enum ShardLinkInterface {
 
     static func classify(bsdName name: String) -> String {
         for prefix in ["utun", "ipsec", "ppp", "tun", "tap", "gif", "stf"] where name.hasPrefix(prefix) { return vpn }
-        if name.hasPrefix("lo") { return other }
+        if name.hasPrefix("lo") { return labLoopback.isEnabled ? thunderbolt : other }
         // macOS names its Thunderbolt Bridge bridge0; bridge100+ are Internet Sharing.
         if name.hasPrefix("bridge") { return Int(name.dropFirst("bridge".count)).map { $0 < 100 } == true ? thunderbolt : other }
         guard name.hasPrefix("en") else { return other }
@@ -117,6 +121,19 @@ enum ShardLinkInterface {
         }
         return nil
     }
+}
+
+/// The lab loopback interconnect switch (#2084): two shard roles on one Mac
+/// report their loopback stage links as `thunderbolt`. Only
+/// `serve --lab-loopback-interconnect` in a DEBUG or lab-harness build turns it
+/// on, after `allowsLabLoopbackInterconnect`.
+final class LabLoopbackInterconnect: @unchecked Sendable {
+    private let lock = NSLock()
+    private var enabled = false
+
+    var isEnabled: Bool { lock.withLock { enabled } }
+    func enable() { lock.withLock { enabled = true } }
+    func disable() { lock.withLock { enabled = false } }
 }
 
 /// What a member reports about itself (SPEC-051-R015 member health, R029 hello).

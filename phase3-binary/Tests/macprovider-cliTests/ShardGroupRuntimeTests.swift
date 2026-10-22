@@ -679,6 +679,29 @@ final class ShardGroupConfigTests: XCTestCase {
         }
     }
 
+    /// #2084 VM acceptance: the lab loopback interconnect reports a loopback
+    /// stage link as thunderbolt only once enabled, only an isolated join
+    /// against a loopback coordinator may enable it, and the flag is refused
+    /// without a shard role and --isolate-lifecycle.
+    func testLabLoopbackInterconnectIsLabAndLoopbackOnly() throws {
+        XCTAssertEqual(ShardLinkInterface.classify(bsdName: "lo0"), ShardLinkInterface.other)
+        ShardLinkInterface.labLoopback.enable()
+        defer { ShardLinkInterface.labLoopback.disable() }
+        XCTAssertEqual(ShardLinkInterface.classify(bsdName: "lo0"), ShardLinkInterface.thunderbolt)
+        XCTAssertEqual(ShardLinkInterface.classify(bsdName: "utun3"), ShardLinkInterface.vpn, "only loopback changes")
+        ShardLinkInterface.labLoopback.disable()
+        XCTAssertEqual(ShardLinkInterface.classify(bsdName: "lo0"), ShardLinkInterface.other)
+
+        XCTAssertTrue(ServeCommand.allowsLabLoopbackInterconnect(isolateLifecycle: true, coordinatorURL: "ws://127.0.0.1:28444/ws/provider"))
+        XCTAssertFalse(ServeCommand.allowsLabLoopbackInterconnect(isolateLifecycle: true, coordinatorURL: "wss://coordinator.malibu.tech/provider/ws"))
+        XCTAssertFalse(ServeCommand.allowsLabLoopbackInterconnect(isolateLifecycle: false, coordinatorURL: "ws://127.0.0.1:28444/ws/provider"))
+        XCTAssertFalse(ServeCommand.allowsLabLoopbackInterconnect(isolateLifecycle: true, coordinatorURL: nil))
+
+        XCTAssertThrowsError(try ServeCommand.parse(["--lab-loopback-interconnect", "--isolate-lifecycle"]), "needs a shard role")
+        XCTAssertThrowsError(try ServeCommand.parse(["--lab-loopback-interconnect", "--shard-member", "/tmp/m.json"]), "needs --isolate-lifecycle")
+        XCTAssertNoThrow(try ServeCommand.parse(["--lab-loopback-interconnect", "--isolate-lifecycle", "--shard-member", "/tmp/m.json"]))
+    }
+
     func testInterfaceClassification() {
         XCTAssertEqual(ShardLinkInterface.classify(bsdName: "utun3"), ShardLinkInterface.vpn)
         XCTAssertEqual(ShardLinkInterface.classify(bsdName: "lo0"), ShardLinkInterface.other)

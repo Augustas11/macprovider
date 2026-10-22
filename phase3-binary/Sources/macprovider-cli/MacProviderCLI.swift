@@ -544,7 +544,24 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(name: .customLong("shard-member"), help: ArgumentHelp("Serve one stage of a SPEC-051 shard group described by this macprovider.shard-member-config.v1 file. A member takes no buyer requests.", visibility: .hidden))
     var shardMember: String?
 
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    // Lab only (#2084 VM acceptance): two shard roles on one Mac link over
+    // loopback, which SPEC-051-R007 does not admit. This reports a loopback
+    // stage link as `thunderbolt`, and only for an isolated join against a
+    // loopback coordinator (relaxesJoinAdmissionForLab); release builds have
+    // no such flag.
+    @Flag(name: .customLong("lab-loopback-interconnect"), help: .private)
+    var labLoopbackInterconnect = false
+    #endif
+
     mutating func validate() throws {
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        if labLoopbackInterconnect {
+            guard shardGroup != nil || shardMember != nil, isolateLifecycle else {
+                throw ValidationError("--lab-loopback-interconnect requires --shard-group or --shard-member and --isolate-lifecycle")
+            }
+        }
+        #endif
         if shardGroup != nil || shardMember != nil {
             guard shardGroup == nil || shardMember == nil else {
                 throw ValidationError("--shard-group and --shard-member are exclusive")
@@ -2119,6 +2136,13 @@ struct ServeCommand: AsyncParsableCommand {
             && !hasCatalogTrust
     }
 
+    /// The lab loopback interconnect (#2084) is allowed only where the join
+    /// admission already relaxes for the lab: an isolated join against a
+    /// loopback coordinator. A production coordinator URL never qualifies.
+    static func allowsLabLoopbackInterconnect(isolateLifecycle: Bool, coordinatorURL: String?) -> Bool {
+        relaxesJoinAdmissionForLab(isolateLifecycle: isolateLifecycle, coordinatorURL: coordinatorURL)
+    }
+
     static func isLoopbackCoordinatorURL(_ raw: String?) -> Bool {
         guard let raw, let url = URL(string: raw), let host = url.host?.lowercased(), !host.isEmpty else {
             return false
@@ -2656,6 +2680,14 @@ struct ServeCommand: AsyncParsableCommand {
         // against the full snapshot manifest at preflight (SPEC-051-R008).
         let shardHeadConfig = try shardGroup.map { try ShardGroupHeadConfig.load(path: $0) }
         let shardMemberConfig = try shardMember.map { try ShardMemberConfig.load(path: $0) }
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        if labLoopbackInterconnect {
+            guard Self.allowsLabLoopbackInterconnect(isolateLifecycle: isolateLifecycle, coordinatorURL: resolved.coordinatorURL) else {
+                throw ValidationError("--lab-loopback-interconnect is refused unless the join is isolated against a loopback coordinator")
+            }
+            ShardLinkInterface.labLoopback.enable()
+        }
+        #endif
         let shardStageScope = shardHeadConfig?.stageScope ?? shardMemberConfig?.stageScope
         let startupPreflight: Self.ServeStartupPreflightResult
         let startupProviderID = resolved.providerID
