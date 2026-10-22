@@ -101,7 +101,9 @@ final class ToolSelectionPolicyTests: XCTestCase {
 
     func testMalformedAndUnsupportedSchemaRejectedBeforeInference() throws {
         var deep: [String: Any] = ["type": "string"]
-        for _ in 0..<70 { deep = ["type": "object", "properties": ["x": deep]] }
+        // 33 levels of object + properties: container depth 66 > 64, still
+        // inside the 128-deep request parse bound.
+        for _ in 0..<33 { deep = ["type": "object", "properties": ["x": deep]] }
         for schema: [String: Any] in [
             ["type": "array", "items": ["type": "string"]],
             ["properties": ["x": ["type": "string"]]],

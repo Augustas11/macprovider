@@ -459,18 +459,33 @@ final class HarmonyResponseParserTests: XCTestCase {
         XCTAssertEqual(parsed.finalContentTokenCount, 1)
     }
 
+    /// SPEC-018 v0.3.1 §3.10 rule 5: `length` inside `analysis` is a length
+    /// finish carrying the reasoning; inside any other hidden span it still
+    /// fails closed.
     func testCompletedLengthTruncatedHiddenChannelFailsClosed() {
-        let parsed = parse([
+        let analysis = parse([
             token(.channel),
             text("analysis"),
             token(.message),
             text("hidden"),
         ], mode: .complete(finishReason: "length"))
 
-        XCTAssertEqual(parsed.status, .malformed)
-        XCTAssertNil(parsed.content)
-        XCTAssertTrue(parsed.toolCalls.isEmpty)
-        XCTAssertEqual(parsed.finalContentTokenCount, 0)
+        XCTAssertEqual(analysis.status, .incomplete)
+        XCTAssertNil(analysis.content)
+        XCTAssertTrue(analysis.toolCalls.isEmpty)
+        XCTAssertEqual(analysis.finalContentTokenCount, 0)
+        XCTAssertEqual(analysis.reasoningContent, "hidden")
+
+        let commentary = parse([
+            token(.channel),
+            text("commentary"),
+            token(.message),
+            text("hidden"),
+        ], mode: .complete(finishReason: "length"))
+
+        XCTAssertEqual(commentary.status, .malformed)
+        XCTAssertNil(commentary.content)
+        XCTAssertTrue(commentary.toolCalls.isEmpty)
     }
 
     func testCompletedLengthTruncatedFunctionCallFailsClosed() {
