@@ -286,6 +286,36 @@ fi
         }
         write_json(self.source / jobs.POLICY_RELATIVE, policy)
 
+    def _write_glm_prefill_inputs(self, prompts=None) -> None:
+        path = self.source / jobs.POLICY_RELATIVE
+        policy = json.loads(path.read_text())
+        policy.pop("laboratory_max_native_active_rows")
+        policy.update(
+            schema="macprovider.native-mtp-exploratory-policy.v1",
+            model_id="zai-org/glm-5.3-flash", slots=[1, 2, 4],
+            prompt_tokens=prompts or [16384], max_tokens=[128],
+            maximum_prompt_tokens=16384, sustained_seconds=0,
+            sustained_cell_id="s4-p16384-o128", temperature=0, arrival_interval_ms=250,
+            thresholds={
+                "throughput_lower_bound_min": 0.15, "ttft_p95_upper_bound_max": 0.1,
+                "tpot_p95_upper_bound_max": 0.0, "chunk_gap_p99_upper_bound_max": 1.0,
+                "rejection_increase_max_pp": 1.0, "min_available_memory_fraction": 0.1,
+                "bootstrap_draws": 10000, "alpha": 0.05,
+                "gated_throughput_lower_bound_min": -0.05,
+                "gated_ttft_p95_upper_bound_max": 0.05,
+                "gated_tpot_p95_upper_bound_max": 0.05,
+            },
+        )
+        write_json(path, policy)
+        cli = self.paths["diagnostic_cli"].resolve()
+        text = cli.read_text().replace(
+            ','.join(f'"{cell}"' for cell in jobs.QUALIFICATION_CELLS),
+            ','.join(f'"{cell}"' for cell in jobs.glm_prefill_cells(policy)),
+        ).replace('"sustained_cell_id":"s4-p1536-o512"',
+                  '"sustained_cell_id":"s4-p16384-o128"')
+        cli.write_text(text)
+        cli.chmod(0o700)
+
     def snapshot(self, kind: str) -> dict:
         if kind in jobs.QWEN_JOB_KINDS:
             self._write_qwen_inputs()
@@ -549,6 +579,104 @@ class StudioLabJobsTests(unittest.TestCase):
         self.assertEqual(run_calls[-1][-2:], ["--phase", "sustained"])
         self.assertFalse(result["qualification_activated"])
 
+    def test_glm_prefill_runs_only_fixed_matrix_with_nonqualification_receipt(self):
+        self.fixture._write_glm_prefill_inputs()
+        self.fixture.paths["glmbench"].unlink()
+        self.fixture.paths["glmbench_metallib"].unlink()
+        manifest = self.fixture.manifest("glm-prefill")
+        loaded, job = jobs.load_job_manifest(str(manifest))
+        self.assertEqual(set(loaded["artifacts"]), jobs.QWEN_ARTIFACT_FIELDS)
+        self.assertNotIn("glmbench_tree_oid", job["immutable_inputs"])
+        jobs.validate_job(argparse.Namespace(manifest=str(manifest)))
+        with mock.patch.object(jobs, "run_checked", wraps=jobs.run_checked) as dispatch:
+            result = jobs.run_job(argparse.Namespace(manifest=str(manifest)))
+        self.assertEqual([call.kwargs["timeout"] for call in dispatch.call_args_list], [7200] * 3)
+        calls = self.fixture.recorded_calls()
+        self.assertEqual(len(calls), 4)  # One validate-only, then three matrix cells.
+        self.assertIn("--validate-only", calls[0])
+        cells = ["s1-p16384-o128", "s2-p16384-o128", "s4-p16384-o128"]
+        for argv, cell in zip(calls[1:], cells):
+            self.assertEqual(argv[0], "native-mtp-bench")
+            self.assertEqual(argv[-4:], ["--only-cell", cell, "--phase", "matrix"])
+        self.assertTrue(result["exploratory"])
+        self.assertFalse(result["qualification"])
+        self.assertFalse(result["qualification_activated"])
+        self.assertEqual(result["evidence_class"], "glm_prefill_measurement_only")
+        self.assertNotIn("sustained.log", result["outputs"])
+        self.assertNotIn("selftest.log", result["outputs"])
+
+    def test_glm_prefill_comparison_has_six_fixed_cells(self):
+        self.fixture._write_glm_prefill_inputs([4096, 16384])
+        manifest = self.fixture.manifest("glm-prefill")
+        jobs.validate_job(argparse.Namespace(manifest=str(manifest)))
+        result = jobs.run_job(argparse.Namespace(manifest=str(manifest)))
+        calls = self.fixture.recorded_calls()[1:]
+        self.assertEqual([argv[-3] for argv in calls], [
+            "s1-p4096-o128", "s1-p16384-o128", "s2-p4096-o128",
+            "s2-p16384-o128", "s4-p4096-o128", "s4-p16384-o128",
+        ])
+        self.assertEqual(len(result["outputs"]), 7)
+
+    def test_glm_prefill_rejects_policy_drift_and_admission_overrides(self):
+        self.fixture._write_glm_prefill_inputs()
+        path = self.fixture.source / jobs.POLICY_RELATIVE
+        policy = json.loads(path.read_text())
+        for key, value in (
+            ("schema", "macprovider.native-mtp-r015-policy.v1"),
+            ("slots", [1, 2, 3, 4]), ("prompt_tokens", [4096]),
+            ("prompt_tokens", [True, 16384]), ("max_native_active_rows", 4),
+            ("qualified_slots", True), ("blocks", 2), ("sustained_seconds", 1800),
+            ("temperature", 0.1), ("arrival_interval_ms", 0),
+            ("laboratory_max_native_active_rows", 4),
+            ("thresholds", {**policy["thresholds"], "alpha": 0.1}),
+        ):
+            with self.subTest(key=key, value=value):
+                write_json(path, {**policy, key: value})
+                with self.assertRaises(jobs.Refusal):
+                    self.fixture.snapshot("glm-prefill")
+        self.assertEqual(self.fixture.recorded_calls(), [])
+
+    def test_glm_prefill_rejects_rebound_nonfixed_cells(self):
+        self.fixture._write_glm_prefill_inputs()
+        manifest = self.fixture.manifest("glm-prefill")
+        document = json.loads(manifest.read_text())
+        job = document["job"]
+        job["immutable_inputs"]["qualification_cells"].append("s3-p16384-o128")
+        job["identity_sha256"] = jobs.canonical_digest({
+            "kind": job["kind"], "immutable_inputs": job["immutable_inputs"],
+        })
+        write_json(manifest, document)
+        with self.assertRaisesRegex(jobs.Refusal, "immutable input schema"):
+            jobs.validate_job(argparse.Namespace(manifest=str(manifest)))
+        self.assertEqual(self.fixture.recorded_calls(), [])
+
+    def test_glm_prefill_private_cli_drift_refuses_before_first_matrix(self):
+        self.fixture._write_glm_prefill_inputs()
+        manifest = self.fixture.manifest("glm-prefill")
+        jobs.validate_job(argparse.Namespace(manifest=str(manifest)))
+        loaded, job = jobs.load_job_manifest(str(manifest))
+        jobs.private_artifact_paths(loaded, job)["diagnostic_cli"].write_bytes(b"changed CLI")
+        with self.assertRaisesRegex(jobs.Refusal, "private job artifact drifted"):
+            jobs.run_job(argparse.Namespace(manifest=str(manifest)))
+        self.assertEqual(len(self.fixture.recorded_calls()), 1)  # Validate-only.
+
+    def test_glm_prefill_policy_swap_between_cells_refuses(self):
+        self.fixture._write_glm_prefill_inputs()
+        manifest = self.fixture.manifest("glm-prefill")
+        jobs.validate_job(argparse.Namespace(manifest=str(manifest)))
+        original = jobs.run_checked
+
+        def swap(argv, output, *, timeout=3600):
+            original(argv, output, timeout=timeout)
+            path = self.fixture.source / jobs.POLICY_RELATIVE
+            path.write_bytes(path.read_bytes() + b"\n")
+
+        with mock.patch.object(jobs, "run_checked", side_effect=swap):
+            with self.assertRaisesRegex(jobs.Refusal, "policy identity drifted"):
+                jobs.run_job(argparse.Namespace(manifest=str(manifest)))
+        self.assertEqual(len(self.fixture.recorded_calls()), 2)
+        self.assertFalse((self.fixture.source / ".lab-window/result-glm-prefill-nonce/result.json").exists())
+
     def test_qwen_snapshot_has_no_glmbench_dependency(self):
         original = jobs.git_value
 
@@ -635,8 +763,8 @@ class StudioLabJobsTests(unittest.TestCase):
             jobs.run_job(argparse.Namespace(manifest=str(manifest)))
         self.assertEqual(self.fixture.recorded_calls(), [])
 
-    def test_qwen_journey_source_build_and_remote_load_accepts_only_qwen_artifacts(self):
-        snapshot = self.fixture.snapshot("qwen-journey")
+    def _assert_cli_only_source_build_and_remote_load(self, kind):
+        snapshot = self.fixture.snapshot(kind)
         snapshot_path = self.fixture.root / "source-snapshot.json"
         probe_path = self.fixture.root / "probe.json"
         write_json(snapshot_path, snapshot)
@@ -676,7 +804,7 @@ class StudioLabJobsTests(unittest.TestCase):
             owner_pin_journal=str(self.fixture.root / "owner.json"),
             lab_source_dir=str(self.fixture.source), lab_script_path=str(self.fixture.staged_script),
             log_path=str(self.fixture.root / "provider.log"), drain_timeout_s="600",
-            lab_timeout_s="7200", ready_timeout_s="120", poll_s="5",
+            lab_timeout_s="21600" if kind == "glm-prefill" else "7200", ready_timeout_s="120", poll_s="5",
         )
         manifest = jobs.build_manifest(args)
         path = self.fixture.stage / "window.json"
@@ -687,6 +815,20 @@ class StudioLabJobsTests(unittest.TestCase):
         manifest["artifacts"]["unknown"] = {"path": "/tmp/unknown", "sha256": digest}
         write_json(path, manifest)
         with self.assertRaisesRegex(remote.Refusal, "artifact set"):
+            remote.load_manifest(path)
+
+    def test_qwen_journey_source_build_and_remote_load_accepts_only_qwen_artifacts(self):
+        self._assert_cli_only_source_build_and_remote_load("qwen-journey")
+
+    def test_glm_prefill_source_build_and_remote_load_enforces_timeout(self):
+        self.fixture._write_glm_prefill_inputs()
+        self._assert_cli_only_source_build_and_remote_load("glm-prefill")
+        path = self.fixture.stage / "window.json"
+        manifest = json.loads(path.read_text())
+        manifest["artifacts"].pop("unknown")
+        manifest["lab_timeout_s"] = 21601
+        write_json(path, manifest)
+        with self.assertRaisesRegex(remote.Refusal, "lab_timeout_s"):
             remote.load_manifest(path)
 
     def _unrelated_phase3_commit(self) -> str:

@@ -112,9 +112,11 @@ require_fresh_settings() {
   STUDIO_STATUS_PORT="${STUDIO_STATUS_PORT:-8080}"
   DRAIN_TIMEOUT_S="${STUDIO_LAB_DRAIN_TIMEOUT_S:-600}"
   STUDIO_LAB_JOB_KIND="${STUDIO_LAB_JOB_KIND:-diagnostic-legacy}"
-  case "$STUDIO_LAB_JOB_KIND" in diagnostic-legacy|profiler-only|qualification|qwen-qualification|qwen-journey) ;; *) refuse "STUDIO_LAB_JOB_KIND is invalid" ;; esac
+  case "$STUDIO_LAB_JOB_KIND" in diagnostic-legacy|profiler-only|qualification|qwen-qualification|qwen-journey|glm-prefill) ;; *) refuse "STUDIO_LAB_JOB_KIND is invalid" ;; esac
   if [[ "$STUDIO_LAB_JOB_KIND" =~ ^(qualification|qwen-qualification)$ ]]; then
     LAB_TIMEOUT_S="${STUDIO_LAB_TIMEOUT_S:-43200}"
+  elif [ "$STUDIO_LAB_JOB_KIND" = glm-prefill ]; then
+    LAB_TIMEOUT_S="${STUDIO_LAB_TIMEOUT_S:-21600}"
   elif [ "$STUDIO_LAB_JOB_KIND" = qwen-journey ]; then
     LAB_TIMEOUT_S="${STUDIO_LAB_TIMEOUT_S:-7200}"
   else
@@ -129,6 +131,8 @@ require_fresh_settings() {
   [ "$READY_TIMEOUT_S" -le 1200 ] || refuse "STUDIO_LAB_READY_TIMEOUT_S must not exceed 1200"
   if [[ "$STUDIO_LAB_JOB_KIND" =~ ^(qualification|qwen-qualification)$ ]]; then
     [ "$LAB_TIMEOUT_S" -le 43200 ] || refuse "qualification timeout must not exceed 43200"
+  elif [ "$STUDIO_LAB_JOB_KIND" = glm-prefill ]; then
+    [ "$LAB_TIMEOUT_S" -le 21600 ] || refuse "GLM prefill timeout must not exceed 21600"
   elif [ "$STUDIO_LAB_JOB_KIND" = qwen-journey ]; then
     [ "$LAB_TIMEOUT_S" -le 7200 ] || refuse "Qwen journey timeout must not exceed 7200"
   else
@@ -147,11 +151,13 @@ load_recovery_context() {
     STUDIO_LAB_JOB_KIND="${STUDIO_LAB_JOB_KIND:-diagnostic-legacy}"
   fi
   STUDIO_LAB_JOB_KIND="${STUDIO_LAB_JOB_KIND:-diagnostic-legacy}"
-  case "$STUDIO_LAB_JOB_KIND" in diagnostic-legacy|profiler-only|qualification|qwen-qualification|qwen-journey) ;; *) refuse "active Studio job kind is invalid" ;; esac
+  case "$STUDIO_LAB_JOB_KIND" in diagnostic-legacy|profiler-only|qualification|qwen-qualification|qwen-journey|glm-prefill) ;; *) refuse "active Studio job kind is invalid" ;; esac
   # Recovery is bound to the durable active marker, not a caller's later
   # environment.  The remote journal remains the authoritative deadline.
   if [[ "$STUDIO_LAB_JOB_KIND" =~ ^(qualification|qwen-qualification)$ ]]; then
     LAB_TIMEOUT_S=43200
+  elif [ "$STUDIO_LAB_JOB_KIND" = glm-prefill ]; then
+    LAB_TIMEOUT_S=21600
   elif [ "$STUDIO_LAB_JOB_KIND" = qwen-journey ]; then
     LAB_TIMEOUT_S=7200
   else
@@ -167,6 +173,8 @@ load_recovery_context() {
   [ "$READY_TIMEOUT_S" -le 1200 ] || refuse "STUDIO_LAB_READY_TIMEOUT_S must not exceed 1200"
   if [[ "$STUDIO_LAB_JOB_KIND" =~ ^(qualification|qwen-qualification)$ ]]; then
     [ "$LAB_TIMEOUT_S" -le 43200 ] || refuse "qualification recovery timeout must not exceed 43200"
+  elif [ "$STUDIO_LAB_JOB_KIND" = glm-prefill ]; then
+    [ "$LAB_TIMEOUT_S" -le 21600 ] || refuse "GLM prefill timeout must not exceed 21600"
   elif [ "$STUDIO_LAB_JOB_KIND" = qwen-journey ]; then
     [ "$LAB_TIMEOUT_S" -le 7200 ] || refuse "Qwen journey recovery timeout must not exceed 7200"
   else
@@ -279,7 +287,7 @@ assert active.get("phase") == "outcome_recorded"
 assert isinstance(nonce, str) and re.fullmatch(r"[0-9a-f]{32}", nonce)
 assert isinstance(head, str) and re.fullmatch(r"[0-9a-f]{40}", head)
 assert isinstance(manifest_sha, str) and re.fullmatch(r"[0-9a-f]{64}", manifest_sha)
-assert job_kind in ("diagnostic-legacy", "profiler-only", "qualification", "qwen-qualification", "qwen-journey")
+assert job_kind in ("diagnostic-legacy", "profiler-only", "qualification", "qwen-qualification", "qwen-journey", "glm-prefill")
 assert (job_kind == "diagnostic-legacy" and job_identity == "") or re.fullmatch(r"[0-9a-f]{64}", job_identity or "")
 assert isinstance(marker, str) and re.fullmatch(r"(?:complete-(?:[0-9a-f]{40}|[0-9a-f]{64})|restored-[0-9a-f]{32})", marker)
 outcome = read_safe(os.path.join(root, marker + ".json"))
@@ -417,7 +425,7 @@ record_outcome() {
   job_kind="$(json_field "$active" 'd.get("job_kind", "diagnostic-legacy")')"
   job_identity="$(json_field "$active" 'd.get("job_identity", "")')"
   [[ "$manifest_sha" =~ ^[0-9a-f]{64}$ ]] || return 6
-  case "$job_kind" in diagnostic-legacy) [ -z "$job_identity" ] || return 6 ;; profiler-only|qualification|qwen-qualification|qwen-journey) [[ "$job_identity" =~ ^[0-9a-f]{64}$ ]] || return 6; [ "$(jget "$state" 'd.get("job_kind")')" = "$job_kind" ] && [ "$(jget "$state" 'd.get("job_identity_sha256")')" = "$job_identity" ] || return 6 ;; *) return 6 ;; esac
+  case "$job_kind" in diagnostic-legacy) [ -z "$job_identity" ] || return 6 ;; profiler-only|qualification|qwen-qualification|qwen-journey|glm-prefill) [[ "$job_identity" =~ ^[0-9a-f]{64}$ ]] || return 6; [ "$(jget "$state" 'd.get("job_kind")')" = "$job_kind" ] && [ "$(jget "$state" 'd.get("job_identity_sha256")')" = "$job_identity" ] || return 6 ;; *) return 6 ;; esac
   case "$revision" in ""|*[!0-9]*|0) return 6 ;; esac
   case "$lab_rc" in ""|*[!0-9]*) lab_rc=6 ;; esac
   [ "$lab_rc" -le 255 ] || lab_rc=6
