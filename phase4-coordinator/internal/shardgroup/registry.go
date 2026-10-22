@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,6 +35,22 @@ const (
 	ReasonEpochSuperseded   = "epoch_superseded"
 	ReasonRecordMismatch    = "record_mismatch"
 	ReasonWeightsUnverified = "weights_unverified"
+)
+
+// ReasonRegistrationRateLimited refuses a new epoch beyond the per-group
+// registration budget (SPEC-051-R005).
+const ReasonRegistrationRateLimited = "registration_rate_limited"
+
+const (
+	// maxNewEpochsPerWindow new epochs of one group are accepted per
+	// newEpochWindow. Takeovers and rebuilds start a new epoch once per member
+	// loss; anything faster is refused before the store is written.
+	maxNewEpochsPerWindow = 12
+	newEpochWindow        = time.Hour
+	// retainedEpochs bounds the epochs a group keeps in memory for
+	// attestation verification: the latest and the ones before it that an
+	// in-flight request or a takeover can still name.
+	retainedEpochs = 8
 )
 
 // maxReportedRTTUS bounds a reported link RTT (10 s) so a malformed value is
@@ -84,8 +101,10 @@ type groupState struct {
 	headAssignedID string
 	latest         uint64
 	epochs         map[uint64]*epochState
-	heartbeat      *Heartbeat
-	heartbeatAt    time.Time
+	// newEpochsAt holds when each new epoch inside newEpochWindow was accepted.
+	newEpochsAt []time.Time
+	heartbeat   *Heartbeat
+	heartbeatAt time.Time
 	// memberHealth holds each member's latest own report for the latest epoch.
 	memberHealth map[string]memberHealthReport
 	evaluated    bool
@@ -146,11 +165,13 @@ func RecordIDs(rec Record) []string {
 	return ids
 }
 
-// Register applies `shard_group_register` from a head session. owners maps
-// each identity the record names to its SPEC-003 owner ("" when unclaimed).
-// It returns the register result for the head and any member hello results
-// that the new record accepted.
-func (r *Registry) Register(ctx context.Context, head HeadSession, payload []byte, owners map[string]string) (Result, []Outbound) {
+// Register applies `shard_group_register` from a head session. owners
+// resolves each identity the record names to its SPEC-003 owner ("" when
+// unclaimed); it is called only for a head session with a valid record and
+// signature, so a refused registration never costs an owner lookup. It
+// returns the register result for the head and any member hello results that
+// the new record accepted.
+func (r *Registry) Register(ctx context.Context, head HeadSession, payload []byte, resolveOwners func([]string) map[string]string) (Result, []Outbound) {
 	msg, rec, err := ParseRegister(payload)
 	if err != nil {
 		return result(TypeRegisterResult, head.ProviderID, 0, ReasonInvalidRecord), nil
@@ -173,6 +194,7 @@ func (r *Registry) Register(ctx context.Context, head HeadSession, payload []byt
 	if !VerifyRecordSignature(msg.Record, msg.RecordSignature, head.ReceiptKey) {
 		return reject(ReasonSignatureInvalid)
 	}
+	owners := resolveOwners(RecordIDs(rec))
 	ownerID := owners[head.ProviderID]
 	for _, id := range RecordIDs(rec) {
 		if ownerID == "" || owners[id] != ownerID {
@@ -196,6 +218,19 @@ func (r *Registry) Register(ctx context.Context, head HeadSession, payload []byt
 	}
 	if g, ok := r.memberGroup[rec.GroupProviderID]; ok && g != rec.GroupProviderID {
 		return reject(ReasonMemberConflict)
+	}
+	now := r.now()
+	if g := r.groups[rec.GroupProviderID]; g != nil && rec.GroupEpoch != g.latest {
+		recent := g.newEpochsAt[:0]
+		for _, at := range g.newEpochsAt {
+			if now.Sub(at) < newEpochWindow {
+				recent = append(recent, at)
+			}
+		}
+		g.newEpochsAt = recent
+		if len(recent) >= maxNewEpochsPerWindow {
+			return reject(ReasonRegistrationRateLimited)
+		}
 	}
 	if _, err := r.store.AcceptRecord(ctx, StoredRecord{
 		GroupProviderID: rec.GroupProviderID,
@@ -228,6 +263,7 @@ func (r *Registry) Register(ctx context.Context, head HeadSession, payload []byt
 	if g.latest != rec.GroupEpoch {
 		// Member reports describe the previous epoch's chain.
 		g.memberHealth = nil
+		g.newEpochsAt = append(g.newEpochsAt, now)
 	}
 	g.headAssignedID = head.AssignedID
 	g.latest = rec.GroupEpoch
@@ -235,6 +271,7 @@ func (r *Registry) Register(ctx context.Context, head HeadSession, payload []byt
 	if !ok {
 		ep = &epochState{record: rec, joined: make(map[string]joinedMember)}
 		g.epochs[rec.GroupEpoch] = ep
+		evictOldEpochs(g)
 	}
 	ep.stageKeys = map[int]string{0: base64.StdEncoding.EncodeToString(head.ReceiptKey)}
 	for id, joined := range ep.joined {
@@ -340,6 +377,13 @@ func (r *Registry) bindClaimLocked(ctx context.Context, g *groupState, ep *epoch
 	}, r.now().UnixMilli()); err != nil {
 		return ReasonStoreUnavailable
 	}
+	if previous, ok := ep.joined[hello.MemberDeviceID]; ok && (previous.assignedID != claim.assignedID || previous.key != claim.key) {
+		// SPEC-051-R015 item 8: a report counts only from the session whose
+		// hello is accepted; the replaced session's report is not its health.
+		if g.latest == rec.GroupEpoch {
+			delete(g.memberHealth, hello.MemberDeviceID)
+		}
+	}
 	ep.joined[hello.MemberDeviceID] = joinedMember{assignedID: claim.assignedID, key: claim.key}
 	if role == "stage" {
 		ep.stageKeys[stage] = claim.key
@@ -404,6 +448,9 @@ func (r *Registry) Heartbeat(providerID, assignedID string, payload []byte) bool
 type memberHealthReport struct {
 	report MemberHealth
 	at     time.Time
+	// assignedID is the member session the report came from; it counts only
+	// while that session is still the one the member's hello bound.
+	assignedID string
 }
 
 // MemberHealth applies `shard_member_health` from a member session. It
@@ -445,7 +492,7 @@ func (r *Registry) MemberHealth(member MemberSession, payload []byte) (string, b
 	if g.memberHealth == nil {
 		g.memberHealth = make(map[string]memberHealthReport)
 	}
-	g.memberHealth[report.MemberDeviceID] = memberHealthReport{report: report, at: r.now()}
+	g.memberHealth[report.MemberDeviceID] = memberHealthReport{report: report, at: r.now(), assignedID: member.AssignedID}
 	return report.GroupProviderID, true
 }
 
@@ -567,13 +614,8 @@ func (r *Registry) evaluateLocked(groupID string, g *groupState, providers func(
 		return ReasonMemberNotAdmissible, nil
 	}
 	for _, p := range active {
-		if !p.ShardMemberAdmissible() || len(p.ReceiptPubkey) == 0 {
-			return ReasonMemberNotAdmissible, nil
-		}
-	}
-	for _, p := range active {
-		if !labelsAtLeast(p, head) {
-			return ReasonTrustLabelAboveMember, nil
+		if reason := memberReservable(head, p); reason != "" {
+			return reason, nil
 		}
 	}
 	ownerID := owners[groupID]
@@ -620,7 +662,7 @@ func (r *Registry) evaluateLocked(groupID string, g *groupState, providers func(
 	// and healthy, and its links meet SPEC-051-R007 as it measures them.
 	for _, st := range rec.Stages[1:] {
 		h, ok := g.memberHealth[st.MemberDeviceID]
-		if !ok || h.report.GroupEpoch != g.latest || r.now().Sub(h.at) > stale {
+		if !ok || h.report.GroupEpoch != g.latest || h.assignedID != ep.joined[st.MemberDeviceID].assignedID || r.now().Sub(h.at) > stale {
 			return ReasonMemberHealthStale, nil
 		}
 		if !h.report.Healthy {
@@ -639,7 +681,7 @@ func (r *Registry) evaluateLocked(groupID string, g *groupState, providers func(
 	}
 	views := make([]pool.ShardGroupMemberView, 0, len(active)+len(rec.Spares))
 	for _, p := range active {
-		views = append(views, pool.ShardGroupMemberView{ProviderID: p.ProviderID, BinaryVersion: p.BinaryVersion})
+		views = append(views, pool.ShardGroupMemberView{ProviderID: p.ProviderID, AssignedID: p.AssignedID, BinaryVersion: p.BinaryVersion})
 	}
 	for _, sp := range rec.Spares {
 		view := pool.ShardGroupMemberView{ProviderID: sp.MemberDeviceID, Spare: true}
@@ -649,6 +691,47 @@ func (r *Registry) evaluateLocked(groupID string, g *groupState, providers func(
 		views = append(views, view)
 	}
 	return "", views
+}
+
+// evictOldEpochs keeps the latest retainedEpochs epochs of a group in memory.
+// Older records stay in the append-only store and keep the epoch floor there.
+func evictOldEpochs(g *groupState) {
+	if len(g.epochs) <= retainedEpochs {
+		return
+	}
+	epochs := make([]uint64, 0, len(g.epochs))
+	for epoch := range g.epochs {
+		epochs = append(epochs, epoch)
+	}
+	sort.Slice(epochs, func(i, j int) bool { return epochs[i] < epochs[j] })
+	for _, epoch := range epochs[:len(epochs)-retainedEpochs] {
+		delete(g.epochs, epoch)
+	}
+}
+
+// memberReservable applies the per-member gates of SPEC-051-R015 conditions
+// 3 to 5 that can change between evaluations: the member passes every
+// single-provider routing-state gate, publishes a receipt key, serves the
+// head's model pair (SPEC-051-R003, R008) and holds at least the head's trust
+// labels (SPEC-051-R004). It returns the failing reason code, or "".
+func memberReservable(head, member pool.Provider) string {
+	if !member.ShardMemberAdmissible() || len(member.ReceiptPubkey) == 0 ||
+		member.ModelHashAlgorithm != head.ModelHashAlgorithm || !strings.EqualFold(strings.TrimSpace(member.ModelHash), strings.TrimSpace(head.ModelHash)) {
+		return ReasonMemberNotAdmissible
+	}
+	if !labelsAtLeast(member, head) {
+		return ReasonTrustLabelAboveMember
+	}
+	return ""
+}
+
+// MemberReservable re-checks one active member of an available group at
+// reservation (SPEC-051-R003/R004/R015 "before the next reservation"): the
+// member session the evaluation recorded is still live and still passes
+// memberReservable against the head.
+func MemberReservable(head pool.Provider, view pool.ShardGroupMemberView, resolve func(id string) (pool.Provider, bool)) bool {
+	member, ok := resolve(view.ProviderID)
+	return ok && member.AssignedID == view.AssignedID && member.ShardMemberV1 && memberReservable(head, member) == ""
 }
 
 var tierRank = map[pool.Tier]int{pool.TierRejected: 0, pool.TierProvisional: 1, pool.TierTrusted: 2, pool.TierPinned: 3}

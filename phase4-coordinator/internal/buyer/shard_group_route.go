@@ -7,6 +7,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
 	"github.com/augstar/macprovider-coordinator/internal/routing"
+	"github.com/augstar/macprovider-coordinator/internal/shardgroup"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 )
 
@@ -18,6 +19,9 @@ type shardGroupRoute struct {
 	members          map[string]bool
 	minBinaryVersion string
 	groups           []poolmanifest.PoolShardGroup
+	// resolve reads a live provider session; the gate re-checks each active
+	// member's admission through it at reservation (SPEC-051-R015).
+	resolve func(id string) (pool.Provider, bool)
 }
 
 // routable applies SPEC-051-R016/R028 to one provider. A provider that did
@@ -26,8 +30,9 @@ type shardGroupRoute struct {
 // active core names it, while its group is available, bound to that pool's
 // named pool model, within the member bound, with every non-head member and
 // spare a current pool member, and every active member meeting the pool
-// binary floor. A global
-// request never reaches a head.
+// binary floor and still admissible on the session the group evaluation
+// bound (SPEC-051-R003/R004: a member change applies before the next
+// reservation, not at the next sweep). A global request never reaches a head.
 func (r shardGroupRoute) routable(p pool.Provider) bool {
 	if !p.ShardGroupHeadV1 {
 		return true
@@ -54,6 +59,9 @@ func (r shardGroupRoute) routable(p pool.Provider) bool {
 	}
 	for _, m := range p.ShardGroupMembers {
 		if !r.members[m.ProviderID] || (!m.Spare && !poolBinaryFloorMet(m.BinaryVersion, r.minBinaryVersion)) {
+			return false
+		}
+		if !m.Spare && (r.resolve == nil || !shardgroup.MemberReservable(p, m, r.resolve)) {
 			return false
 		}
 	}

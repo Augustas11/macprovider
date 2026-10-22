@@ -15,6 +15,11 @@ import (
 
 func newCancelTerminalHarness(t *testing.T) (*Server, *pool.Provider, net.Conn) {
 	t.Helper()
+	return newCancelTerminalHarnessWith(t, nil)
+}
+
+func newCancelTerminalHarnessWith(t *testing.T, mutate func(*pool.Provider)) (*Server, *pool.Provider, net.Conn) {
+	t.Helper()
 	serverConn, providerConn := net.Pipe()
 	t.Cleanup(func() {
 		_ = providerConn.Close()
@@ -22,6 +27,9 @@ func newCancelTerminalHarness(t *testing.T) (*Server, *pool.Provider, net.Conn) 
 	})
 	registry := pool.NewRegistry(nil)
 	provider := &pool.Provider{ProviderID: "p1", AssignedID: "s1", ModelID: "model-a", Tier: pool.TierProvisional, InferencePath: pool.InferencePathWSTunneled}
+	if mutate != nil {
+		mutate(provider)
+	}
 	registry.Register(provider, serverConn)
 	s := NewServer(config.Default(), registry, zerolog.Nop())
 	session := newProviderSession("p1", "s1", serverConn, 4)
@@ -140,5 +148,31 @@ func TestEncryptedRelayBuyerCancelDeliversProviderCancelledTerminal(t *testing.T
 	}
 	if _, ok := s.storedSessionFor("p1", "s1"); !ok {
 		t.Fatal("session closed after a valid encrypted cancelled terminal")
+	}
+}
+
+// SPEC-051-R019: a shard group head's cancelled terminal goes through the
+// group attestation check like any other terminal frame, so a receipt
+// without a valid attestation never reaches buyer-cancel settlement.
+func TestRelayBuyerCancelTerminalOfShardHeadNeedsGroupAttestation(t *testing.T) {
+	s, provider, providerConn := newCancelTerminalHarnessWith(t, func(p *pool.Provider) { p.ShardGroupHeadV1 = true })
+	relay, err := s.DispatchInference(context.Background(), *provider, "req-cancel-shard", []byte(`{"model":"model-a"}`), true)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read inference_request: %v", err)
+	}
+	relay.Cancel("buyer_disconnected")
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read cancel_request: %v", err)
+	}
+	s.handleInferenceEnd("p1", "s1", cancelledEndPayload(t, "req-cancel-shard", "cancelled", "receipt-unattested"))
+	end, ok := relay.AwaitCancelTerminal(time.Second)
+	if !ok {
+		t.Fatal("cancelled terminal frame not delivered")
+	}
+	if end.Status != "cancelled" || end.Receipt != "" {
+		t.Fatalf("terminal = %#v, want the cancelled frame without its unattested receipt", end)
 	}
 }

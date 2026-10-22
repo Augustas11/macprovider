@@ -819,7 +819,10 @@ func (ps *providerSession) hasPendingCancelTerminal() bool {
 // deliverCancelTerminal hands a retired request's "cancelled" terminal frame
 // to the buyer handler waiting on RelayStream.CancelTerminal. Any other frame,
 // or a second one, is not delivered.
-func (ps *providerSession) deliverCancelTerminal(end InferenceResponseEnd) bool {
+// prepare runs once the cancelled terminal is claimed for delivery, before the
+// waiter receives it; the shard group attestation check (SPEC-051-R019) runs
+// there so a group head's cancel receipt is verified like any other terminal.
+func (ps *providerSession) deliverCancelTerminal(end InferenceResponseEnd, prepare func(InferenceResponseEnd) InferenceResponseEnd) bool {
 	if end.Status != "cancelled" {
 		return false
 	}
@@ -833,6 +836,9 @@ func (ps *providerSession) deliverCancelTerminal(end InferenceResponseEnd) bool 
 	retired.cancelTerminal = nil
 	ps.retired[end.RequestID] = retired
 	ps.activeMu.Unlock()
+	if prepare != nil {
+		end = prepare(end)
+	}
 	select {
 	case ch <- end:
 	default:
@@ -2022,7 +2028,9 @@ func (s *Server) handleInferenceEnd(providerID, assignedID string, payload []byt
 				var late InferenceResponseEnd
 				if json.Unmarshal(plaintext, &late) == nil {
 					late.RequestID = requestID
-					if session.deliverCancelTerminal(late) {
+					if session.deliverCancelTerminal(late, func(e InferenceResponseEnd) InferenceResponseEnd {
+						return s.applyShardGroupAttestation(providerID, assignedID, e)
+					}) {
 						return
 					}
 				}
@@ -2082,7 +2090,9 @@ func (s *Server) handleInferenceEnd(providerID, assignedID string, payload []byt
 	}
 	active, ok := session.removeActive(end.RequestID)
 	if !ok {
-		if session.deliverCancelTerminal(end) {
+		if session.deliverCancelTerminal(end, func(e InferenceResponseEnd) InferenceResponseEnd {
+			return s.applyShardGroupAttestation(providerID, assignedID, e)
+		}) {
 			return
 		}
 		s.log.Warn().Str("provider_id", providerID).Str("request_id", end.RequestID).Msg("unknown inference_response_end request_id")

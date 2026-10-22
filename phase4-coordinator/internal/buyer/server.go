@@ -8301,7 +8301,8 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 	// the shard group gate).
 	var shardRoute shardGroupRoute
 	if poolActive {
-		shardRoute = shardGroupRoute{poolID: req.poolID, members: poolMembers, minBinaryVersion: poolMin, groups: poolSnap.ShardGroups}
+		shardRoute = shardGroupRoute{poolID: req.poolID, members: poolMembers, minBinaryVersion: poolMin, groups: poolSnap.ShardGroups,
+			resolve: func(id string) (pool.Provider, bool) { return s.pool.Resolve(id, "") }}
 	}
 	if session := headers.Get("X-MacProvider-Session"); session != "" {
 		for _, p := range providers {

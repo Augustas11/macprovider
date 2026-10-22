@@ -131,7 +131,7 @@ func TestProviderGoldenVectorsVerify(t *testing.T) {
 	res, _ := reg.Register(context.Background(), HeadSession{
 		ProviderID: headID, AssignedID: "s-" + headID, ModelID: rec.Model.ModelID, ModelHashAlgorithm: rec.Model.ArtifactHashAlgorithm,
 		ModelHash: rec.Model.ArtifactHash, MaxConcurrency: rec.MaxConcurrency, ReceiptKey: headKey, ShardGroupHeadV1: true, WSTunneled: true,
-	}, g.Register, owners)
+	}, g.Register, func([]string) map[string]string { return owners })
 	if !res.Accepted {
 		t.Fatalf("provider registration refused: %s", res.Reason)
 	}

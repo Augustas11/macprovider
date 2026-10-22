@@ -69,6 +69,14 @@ func newFixture(t *testing.T) *fixture {
 	return f
 }
 
+func (f *fixture) ownerLookup(ids []string) map[string]string {
+	out := make(map[string]string, len(ids))
+	for _, id := range ids {
+		out[id] = f.owners[id]
+	}
+	return out
+}
+
 func (f *fixture) lookup(id string) (pool.Provider, bool) {
 	p, ok := f.sessions[id]
 	return p, ok
@@ -111,7 +119,7 @@ func (f *fixture) headSession() HeadSession {
 }
 
 func (f *fixture) register(rec Record) (Result, []Outbound) {
-	return f.reg.Register(context.Background(), f.headSession(), f.registerPayload(rec), f.owners)
+	return f.reg.Register(context.Background(), f.headSession(), f.registerPayload(rec), f.ownerLookup)
 }
 
 func helloPayload(member string, epoch uint64, stage, start, end int, iface string, peers ...string) []byte {
@@ -265,7 +273,7 @@ func TestRegisterSignatureEpochAndOwnership(t *testing.T) {
 	// A record signed by another key is refused.
 	raw, _ := json.Marshal(twoStageRecord(2))
 	payload, _ := json.Marshal(RegisterMessage{Type: TypeRegister, Version: 1, Record: raw, RecordSignature: sign(t, f.keys["tail"], recordDomain, raw, false)})
-	if res, _ := f.reg.Register(context.Background(), f.headSession(), payload, f.owners); res.Reason != ReasonSignatureInvalid {
+	if res, _ := f.reg.Register(context.Background(), f.headSession(), payload, f.ownerLookup); res.Reason != ReasonSignatureInvalid {
 		t.Fatalf("foreign signature: %+v", res)
 	}
 	// Owner mismatch and unclaimed identities are refused.
@@ -281,7 +289,7 @@ func TestRegisterSignatureEpochAndOwnership(t *testing.T) {
 	// A member session cannot register a group.
 	head := f.headSession()
 	head.ShardMemberV1 = true
-	if res, _ := f.reg.Register(context.Background(), head, f.registerPayload(twoStageRecord(2)), f.owners); res.Reason != ReasonNotGroupHeadSession {
+	if res, _ := f.reg.Register(context.Background(), head, f.registerPayload(twoStageRecord(2)), f.ownerLookup); res.Reason != ReasonNotGroupHeadSession {
 		t.Fatalf("member session register: %+v", res)
 	}
 }
@@ -339,7 +347,7 @@ func TestMemberCannotJoinTwoGroups(t *testing.T) {
 	head := f.headSession()
 	head.ProviderID, head.ReceiptKey = "head2", key.Public().(ed25519.PublicKey)
 	f.owners["head2"] = testOwner
-	if res, _ := f.reg.Register(context.Background(), head, payload, f.owners); res.Reason != ReasonMemberConflict {
+	if res, _ := f.reg.Register(context.Background(), head, payload, f.ownerLookup); res.Reason != ReasonMemberConflict {
 		t.Fatalf("second group: %+v", res)
 	}
 }
@@ -406,6 +414,8 @@ func TestEvaluateAvailability(t *testing.T) {
 		{"member reports itself unhealthy", func() { f.memberHealth("tail", memberHealthPayload("tail", 1, false, "thunderbolt", 300, "head")) }, nil, ReasonMemberSelfUnhealthy},
 		{"member sees wifi", func() { f.memberHealth("tail", memberHealthPayload("tail", 1, true, "wifi", 300, "head")) }, nil, ReasonLinkInterfaceInvalid},
 		{"member sees a slow link", func() { f.memberHealth("tail", memberHealthPayload("tail", 1, true, "thunderbolt", 2600, "head")) }, nil, ReasonLinkRTTExceeded},
+		// SPEC-051-R003/R008: every active member serves the record's artifact.
+		{"member serves another artifact", func() { p := f.sessions["tail"]; p.ModelHash = strings.Repeat("6", 64); f.sessions["tail"] = p }, nil, ReasonMemberNotAdmissible},
 	}
 	for _, c := range checks {
 		saved := map[string]pool.Provider{}
@@ -454,6 +464,24 @@ func TestEvaluateAvailability(t *testing.T) {
 			t.Errorf("%s: member health kept", name)
 		}
 	}
+	// SPEC-051-R015 item 8: a member that rejoins under a new session at the
+	// same epoch needs a report from that session; the old session's healthy
+	// report does not carry over.
+	rejoined := f.sessions["tail"]
+	rejoined.AssignedID = "s-tail-2"
+	f.sessions["tail"] = rejoined
+	if res := f.hello("tail", helloPayload("tail", 1, 1, 18, 32, "thunderbolt", "head")); !res.Accepted {
+		t.Fatalf("rejoin hello: %+v", res)
+	}
+	if ev := f.evaluate(); ev.Available || ev.Reason != ReasonMemberHealthStale {
+		t.Fatalf("rejoined member reused the old session's report: %+v", ev)
+	}
+	if !f.memberHealth("tail", memberHealthPayload("tail", 1, true, "thunderbolt", 300, "head")) {
+		t.Fatal("rejoined member's report dropped")
+	}
+	if ev := f.evaluate(); !ev.Available || ev.Members[0].AssignedID != "s-tail-2" {
+		t.Fatalf("after the rejoined member's report: %+v", ev)
+	}
 	short, _ := json.Marshal(Heartbeat{Type: TypeHeartbeat, Version: 1, GroupProviderID: "head", GroupEpoch: 1,
 		Members: []HeartbeatMember{{"head", true}, {"tail", true}}, Links: []HeartbeatLink{{"head", "tail", "thunderbolt", 400}}})
 	if f.reg.Heartbeat("head", "s-head", short) {
@@ -479,7 +507,7 @@ func jsonInt(n int) string { b, _ := json.Marshal(n); return string(b) }
 
 func (f *fixture) subReceipt(member string, epoch uint64, stage, start, end int, requestID, in, out string) SignedSubReceipt {
 	sr := SubReceipt{MemberDeviceID: member, GroupEpoch: epoch, StageIndex: stage, LayerStart: start, LayerEnd: end, RequestID: requestID,
-		PromptTokens: 12, DecodeSteps: 8, InDigest: in, OutDigest: out}
+		PromptTokens: 12, DecodeSteps: 7, InDigest: in, OutDigest: out}
 	raw, _ := json.Marshal(sr)
 	return SignedSubReceipt{SubReceipt: sr, PublicKey: base64.StdEncoding.EncodeToString(f.keys[member].Public().(ed25519.PublicKey)), Signature: sign(f.t, f.keys[member], subReceiptDomain, raw, false)}
 }
@@ -589,19 +617,72 @@ func TestVerifyAttestationAcrossSpareReplay(t *testing.T) {
 	}
 	envelope, tupleSHA := receiptEnvelope(t, "req-2", 0, "head")
 	a1, b1, a2, b2 := digest("a1"), digest("b1"), digest("a2"), digest("b2")
+	// A request runs in one epoch: after a replay the new epoch's members
+	// recompute the whole prefix, so a split into two segments is refused.
 	segments := []AttestationSegment{
 		{GroupEpoch: 1, StepStart: 0, StepEnd: 5, SubReceipts: []SignedSubReceipt{
 			f.subReceipt("head", 1, 0, 0, 18, "req-2", b1, a1), f.subReceipt("tail", 1, 1, 18, 32, "req-2", a1, b1)}},
 		{GroupEpoch: 2, StepStart: 5, StepEnd: 9, SubReceipts: []SignedSubReceipt{
 			f.subReceipt("head", 2, 0, 0, 18, "req-2", b2, a2), f.subReceipt("spare", 2, 1, 18, 32, "req-2", a2, b2)}},
 	}
-	v := VerifyAttestation(f.attestation(segments, "req-2", 0, tupleSHA), envelope, "head", f.sessions["head"].ReceiptPubkey, f.reg.Epochs("head"))
-	if !v.Verified() || len(v.GroupEpochs) != 2 {
-		t.Fatalf("replay attestation: %+v", v)
-	}
-	segments[1].StepStart = 6
 	if v := VerifyAttestation(f.attestation(segments, "req-2", 0, tupleSHA), envelope, "head", f.sessions["head"].ReceiptPubkey, f.reg.Epochs("head")); v.FaultKind != FaultSegments {
-		t.Fatalf("non-contiguous segments: %+v", v)
+		t.Fatalf("two-segment attestation: %+v", v)
+	}
+	whole := []AttestationSegment{{GroupEpoch: 2, StepStart: 0, StepEnd: 8, SubReceipts: segments[1].SubReceipts}}
+	if v := VerifyAttestation(f.attestation(whole, "req-2", 0, tupleSHA), envelope, "head", f.sessions["head"].ReceiptPubkey, f.reg.Epochs("head")); !v.Verified() || len(v.GroupEpochs) != 1 {
+		t.Fatalf("replayed request in the new epoch: %+v", v)
+	}
+}
+
+// SPEC-051-R019 item 7: every member's work covers the request, and the
+// receipt claims no more tokens than the head received.
+func TestVerifyAttestationCoverage(t *testing.T) {
+	f := newFixture(t)
+	f.joinedGroup()
+	a, b := digest("activations"), digest("tokens")
+	segment := func(stepEnd int, mutate func(*SubReceipt, *SubReceipt)) []AttestationSegment {
+		head := SubReceipt{MemberDeviceID: "head", GroupEpoch: 1, StageIndex: 0, LayerStart: 0, LayerEnd: 18, RequestID: "req-c", PromptTokens: 12, DecodeSteps: stepEnd - 1, InDigest: b, OutDigest: a}
+		tail := SubReceipt{MemberDeviceID: "tail", GroupEpoch: 1, StageIndex: 1, LayerStart: 18, LayerEnd: 32, RequestID: "req-c", PromptTokens: 12, DecodeSteps: stepEnd - 1, InDigest: a, OutDigest: b}
+		if mutate != nil {
+			mutate(&head, &tail)
+		}
+		signed := func(member string, sr SubReceipt) SignedSubReceipt {
+			raw, _ := json.Marshal(sr)
+			return SignedSubReceipt{SubReceipt: sr, PublicKey: base64.StdEncoding.EncodeToString(f.keys[member].Public().(ed25519.PublicKey)), Signature: sign(t, f.keys[member], subReceiptDomain, raw, false)}
+		}
+		return []AttestationSegment{{GroupEpoch: 1, StepStart: 0, StepEnd: stepEnd, SubReceipts: []SignedSubReceipt{signed("head", head), signed("tail", tail)}}}
+	}
+	envelope := func(tokensOut int) (string, string) {
+		tuple := []byte(`{"attempt_n":0,"provider_id":"head","request_id":"req-c","tokens_out":` + jsonInt(tokensOut) + `}`)
+		sum := sha256.Sum256(tuple)
+		return base64.StdEncoding.EncodeToString(tuple) + "." + base64.StdEncoding.EncodeToString(make([]byte, 64)), hex.EncodeToString(sum[:])
+	}
+	verify := func(segments []AttestationSegment, tokensOut int) Verdict {
+		env, sha := envelope(tokensOut)
+		return VerifyAttestation(f.attestation(segments, "req-c", 0, sha), env, "head", f.sessions["head"].ReceiptPubkey, f.reg.Epochs("head"))
+	}
+	if v := verify(segment(6, nil), 6); !v.Verified() {
+		t.Fatalf("covered request: %+v", v)
+	}
+	// A stop token or a token dropped after a cancel is a step, not a delivered token.
+	if v := verify(segment(6, nil), 5); !v.Verified() {
+		t.Fatalf("one undelivered step: %+v", v)
+	}
+	for name, tc := range map[string]struct {
+		segments  []AttestationSegment
+		tokensOut int
+		member    string
+	}{
+		"receipt claims more tokens than steps": {segment(6, nil), 7, "head"},
+		"head decode steps short of step_end":   {segment(6, func(h, _ *SubReceipt) { h.DecodeSteps = 4 }), 6, "head"},
+		"head processed no prompt":              {segment(6, func(h, _ *SubReceipt) { h.PromptTokens = 0 }), 6, "head"},
+		"member skipped decode steps":           {segment(6, func(_, tl *SubReceipt) { tl.DecodeSteps = 0 }), 6, "tail"},
+		"member skipped prompt tokens":          {segment(6, func(_, tl *SubReceipt) { tl.PromptTokens = 3 }), 6, "tail"},
+		"empty segment":                         {segment(0, func(h, tl *SubReceipt) { h.DecodeSteps, tl.DecodeSteps = 0, 0 }), 0, "head"},
+	} {
+		if v := verify(tc.segments, tc.tokensOut); v.FaultKind != FaultCoverage || v.FaultMemberDeviceID != tc.member {
+			t.Errorf("%s: %+v", name, v)
+		}
 	}
 }
 
@@ -690,7 +771,7 @@ func TestSpareStandbyTakeoverFlow(t *testing.T) {
 	}
 	envelope, tupleSHA := receiptEnvelope(t, "req-3", 0, "head")
 	a, b := digest("a"), digest("b")
-	segments := []AttestationSegment{{GroupEpoch: 2, StepStart: 0, StepEnd: 9, SubReceipts: []SignedSubReceipt{
+	segments := []AttestationSegment{{GroupEpoch: 2, StepStart: 0, StepEnd: 8, SubReceipts: []SignedSubReceipt{
 		f.subReceipt("head", 2, 0, 0, 18, "req-3", b, a), f.subReceipt("spare", 2, 1, 18, 32, "req-3", a, b)}}}
 	verify := func(raw json.RawMessage) Verdict {
 		return VerifyAttestation(raw, envelope, "head", f.sessions["head"].ReceiptPubkey, f.reg.Epochs("head"))
@@ -712,7 +793,7 @@ func TestSpareStandbyTakeoverFlow(t *testing.T) {
 		segments []AttestationSegment
 		takeover Takeover
 	}{
-		"two segments":   {[]AttestationSegment{{GroupEpoch: 1, StepStart: 0, StepEnd: 4, SubReceipts: old}, {GroupEpoch: 2, StepStart: 4, StepEnd: 9, SubReceipts: segments[0].SubReceipts}}, Takeover{1, "peer_closed"}},
+		"two segments":   {[]AttestationSegment{{GroupEpoch: 1, StepStart: 0, StepEnd: 4, SubReceipts: old}, {GroupEpoch: 2, StepStart: 4, StepEnd: 8, SubReceipts: segments[0].SubReceipts}}, Takeover{1, "peer_closed"}},
 		"unknown reason": {segments, Takeover{1, "bored"}},
 		"same epoch":     {segments, Takeover{2, "peer_dead"}},
 		"unknown from":   {segments, Takeover{0, "peer_dead"}},
@@ -767,5 +848,86 @@ func TestRebuildAfterTakeoverRegistersAboveTheTakeoverEpoch(t *testing.T) {
 	stored, ok, err := f.store.LatestRecord(context.Background(), "head")
 	if err != nil || !ok || stored.GroupEpoch != 3 {
 		t.Fatalf("latest record = %+v %v %v", stored, ok, err)
+	}
+}
+
+// SPEC-051-R003/R004/R015: a member that stops being admissible after the
+// last evaluation fails the reservation-time check against the recorded
+// member session.
+func TestMemberReservableAtReservation(t *testing.T) {
+	f := newFixture(t)
+	head := f.sessions["head"]
+	view := pool.ShardGroupMemberView{ProviderID: "tail", AssignedID: "s-tail"}
+	if !MemberReservable(head, view, f.lookup) {
+		t.Fatal("admissible member refused")
+	}
+	for name, mutate := range map[string]func(*pool.Provider){
+		"compute-integrity suspended": func(p *pool.Provider) { p.ComputeIntegritySuspended = true },
+		"quarantined":                 func(p *pool.Provider) { p.BenchmarkQuarantined = true },
+		"new session":                 func(p *pool.Provider) { p.AssignedID = "s-tail-2" },
+		"other artifact":              func(p *pool.Provider) { p.ModelHash = strings.Repeat("7", 64) },
+		"lower tier":                  func(p *pool.Provider) { p.Tier = pool.TierProvisional },
+	} {
+		saved := f.sessions["tail"]
+		p := saved
+		mutate(&p)
+		f.sessions["tail"] = p
+		if MemberReservable(head, view, f.lookup) {
+			t.Errorf("%s: member still reservable", name)
+		}
+		f.sessions["tail"] = saved
+	}
+	delete(f.sessions, "tail")
+	if MemberReservable(head, view, f.lookup) {
+		t.Fatal("disconnected member reservable")
+	}
+}
+
+// SPEC-051-R005: new epochs are budgeted per group; old epochs leave memory
+// but the store keeps the floor; a refused registration resolves no owner.
+func TestRegistrationBudgetAndEpochRetention(t *testing.T) {
+	f := newFixture(t)
+	for epoch := uint64(1); epoch <= maxNewEpochsPerWindow; epoch++ {
+		res, _ := f.register(twoStageRecord(epoch))
+		if !res.Accepted {
+			t.Fatalf("epoch %d refused: %s", epoch, res.Reason)
+		}
+	}
+	if res, _ := f.register(twoStageRecord(maxNewEpochsPerWindow + 2)); res.Reason != ReasonRegistrationRateLimited {
+		t.Fatalf("over budget: %+v", res)
+	}
+	// Re-sending the latest record stays acknowledged.
+	if res, _ := f.register(twoStageRecord(maxNewEpochsPerWindow)); !res.Accepted {
+		t.Fatalf("idempotent re-send: %+v", res)
+	}
+	f.now = f.now.Add(newEpochWindow)
+	if res, _ := f.register(twoStageRecord(maxNewEpochsPerWindow + 2)); !res.Accepted {
+		t.Fatalf("after the window: %+v", res)
+	}
+	epochs := f.reg.Epochs("head")
+	if _, ok := epochs(1); ok {
+		t.Fatal("epoch 1 still held in memory")
+	}
+	if _, ok := epochs(maxNewEpochsPerWindow + 2); !ok {
+		t.Fatal("latest epoch missing")
+	}
+	if res, _ := f.register(twoStageRecord(3)); res.Reason != ReasonEpochNotIncreasing {
+		t.Fatalf("evicted epoch re-registered: %+v", res)
+	}
+	looked := 0
+	head := f.headSession()
+	head.ShardGroupHeadV1 = false
+	f.reg.Register(context.Background(), head, f.registerPayload(twoStageRecord(99)), func(ids []string) map[string]string {
+		looked++
+		return f.ownerLookup(ids)
+	})
+	payload := f.registerPayload(twoStageRecord(99))
+	payload = []byte(strings.Replace(string(payload), `"record_signature":"`, `"record_signature":"AA`, 1))
+	f.reg.Register(context.Background(), f.headSession(), payload, func(ids []string) map[string]string {
+		looked++
+		return f.ownerLookup(ids)
+	})
+	if looked != 0 {
+		t.Fatalf("refused registrations resolved owners %d times", looked)
 	}
 }

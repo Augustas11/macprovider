@@ -23,6 +23,7 @@ const (
 	FaultMemberSignature  = "member_signature_invalid"
 	FaultDigestChainBreak = "digest_chain_break"
 	FaultTakeover         = "takeover_invalid"
+	FaultCoverage         = "coverage_invalid"
 )
 
 // TakeoverReasons is the closed SPEC-051-R019 set of why a spare took over.
@@ -110,6 +111,9 @@ type receiptTupleFacts struct {
 	RequestID  string `json:"request_id"`
 	AttemptN   int    `json:"attempt_n"`
 	ProviderID string `json:"provider_id"`
+	// TokensOut is the SPEC-015 tuple's delivered output count; nil when the
+	// tuple omits it (the SPEC-015 verifier refuses such a receipt anyway).
+	TokensOut *int64 `json:"tokens_out"`
 }
 
 // ReceiptTupleSHA256 returns the hex SHA-256 of a SPEC-015 v0.4 receipt
@@ -175,6 +179,11 @@ func VerifyAttestation(raw json.RawMessage, receiptEnvelope, groupProviderID str
 		}
 		verdict.TakeoverFromEpoch, verdict.TakeoverReason = t.FromGroupEpoch, t.Reason
 	}
+	// The head runs one epoch per request: a spare takeover recomputes the
+	// whole prefix in the new epoch, so exactly one segment covers the request.
+	if len(att.Segments) != 1 {
+		return fail(FaultSegments, groupProviderID)
+	}
 	headKeyB64 := base64.StdEncoding.EncodeToString(headKey)
 	nextStep := 0
 	var lastEpoch uint64
@@ -192,8 +201,35 @@ func VerifyAttestation(raw json.RawMessage, receiptEnvelope, groupProviderID str
 		if kind, member := verifySegment(seg, epoch, att.RequestID, headKeyB64); kind != "" {
 			return fail(kind, member)
 		}
+		if kind, member := verifyCoverage(seg, facts); kind != "" {
+			return fail(kind, member)
+		}
 	}
 	return verdict
+}
+
+// verifyCoverage checks that the segment's member work covers the request
+// (SPEC-051-R019 item 7). The segment starts at step 0 and ends at the token
+// steps the head received: every delivered token, plus a stop token or a token
+// that came back after a cancel, neither of which is delivered. Every member
+// processes the whole prompt and one decode step per token after the first
+// (the first token comes from the prompt), so each sub-receipt counts the same
+// prompt tokens and step_end - 1 decode steps, and the receipt cannot claim
+// more delivered tokens than the head received. A head whose own account or
+// step_end disagrees is at fault; otherwise the first member that differs.
+func verifyCoverage(seg AttestationSegment, facts receiptTupleFacts) (string, string) {
+	head := seg.SubReceipts[0].SubReceipt
+	if seg.StepStart != 0 || seg.StepEnd < 1 || head.PromptTokens < 1 || head.DecodeSteps != seg.StepEnd-1 ||
+		(facts.TokensOut != nil && (*facts.TokensOut < 0 || *facts.TokensOut > int64(seg.StepEnd))) {
+		return FaultCoverage, head.MemberDeviceID
+	}
+	for _, signed := range seg.SubReceipts[1:] {
+		sr := signed.SubReceipt
+		if sr.PromptTokens != head.PromptTokens || sr.DecodeSteps != head.DecodeSteps {
+			return FaultCoverage, sr.MemberDeviceID
+		}
+	}
+	return "", ""
 }
 
 // verifySegment checks one epoch's sub-receipts against that epoch's record

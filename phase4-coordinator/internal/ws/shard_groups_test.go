@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"net"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -249,7 +250,7 @@ func TestShardGroupAttestationOnTerminalFrame(t *testing.T) {
 	receipt := base64.StdEncoding.EncodeToString(tuple) + "." + base64.StdEncoding.EncodeToString(make([]byte, 64))
 	a, b := shardWSDigest("act"), shardWSDigest("tok")
 	sub := func(member string, stage, start, end int, in, out string) shardgroup.SignedSubReceipt {
-		sr := shardgroup.SubReceipt{MemberDeviceID: member, GroupEpoch: 1, StageIndex: stage, LayerStart: start, LayerEnd: end, RequestID: "req-1", PromptTokens: 5, DecodeSteps: 3, InDigest: in, OutDigest: out}
+		sr := shardgroup.SubReceipt{MemberDeviceID: member, GroupEpoch: 1, StageIndex: stage, LayerStart: start, LayerEnd: end, RequestID: "req-1", PromptTokens: 5, DecodeSteps: 2, InDigest: in, OutDigest: out}
 		raw, _ := json.Marshal(sr)
 		return shardgroup.SignedSubReceipt{SubReceipt: sr, PublicKey: base64.StdEncoding.EncodeToString(h.keys[member].Public().(ed25519.PublicKey)), Signature: signShardDomain(t, h.keys[member], "macprovider.shard-sub-receipt.v1\n", raw, false)}
 	}
@@ -281,5 +282,23 @@ func TestShardGroupAttestationOnTerminalFrame(t *testing.T) {
 	plain := h.server.applyShardGroupAttestation("tail", "s-tail", InferenceResponseEnd{RequestID: "req-4", Status: "complete", Receipt: receipt})
 	if plain.Receipt != receipt {
 		t.Fatal("non-head receipt dropped")
+	}
+}
+
+// SEC-05: the owner cache never holds more than its cap; expired entries go
+// first and a full cache of fresh entries stops caching.
+func TestShardGroupOwnerCacheIsBounded(t *testing.T) {
+	w := &shardGroupWiring{ownerCache: make(map[string]shardGroupOwnerEntry)}
+	start := time.Unix(1_800_000_000, 0)
+	for i := 0; i < shardGroupOwnerCacheCap+10; i++ {
+		w.cacheOwnerLocked("old-"+strconv.Itoa(i), shardGroupOwnerEntry{fetched: start}, start)
+	}
+	if len(w.ownerCache) != shardGroupOwnerCacheCap {
+		t.Fatalf("cache holds %d entries, cap %d", len(w.ownerCache), shardGroupOwnerCacheCap)
+	}
+	later := start.Add(shardGroupOwnerTTL + time.Second)
+	w.cacheOwnerLocked("new", shardGroupOwnerEntry{fetched: later}, later)
+	if len(w.ownerCache) != 1 {
+		t.Fatalf("expired entries kept: %d", len(w.ownerCache))
 	}
 }

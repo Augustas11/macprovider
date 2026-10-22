@@ -19,19 +19,42 @@ const shardTestPoolModel = "pool/" + shardTestPool + "/deep-model"
 func shardHead() pool.Provider {
 	return pool.Provider{
 		ProviderID: "head", AssignedID: "s-head", ShardGroupHeadV1: true, ShardGroupAvailable: true, ShardGroupEpoch: 1,
-		ShardGroupMembers:         []pool.ShardGroupMemberView{{ProviderID: "tail", BinaryVersion: "1.8.300"}, {ProviderID: "spare", Spare: true}},
+		ShardGroupMembers:         []pool.ShardGroupMemberView{{ProviderID: "tail", AssignedID: "s-tail", BinaryVersion: "1.8.300"}, {ProviderID: "spare", Spare: true}},
+		ModelHashAlgorithm:        "macprovider.snapshot-manifest.v1",
+		ModelHash:                 shardTestHash,
+		State:                     pool.StateReady,
+		ReceiptPubkey:             []byte{1},
+		Tier:                      pool.TierTrusted,
 		ModelAdmissionPoolID:      shardTestPool,
 		ModelAdmissionPoolModelID: shardTestPoolModel,
 		BinaryVersion:             "1.8.300",
 	}
 }
 
+const shardTestHash = "3333333333333333333333333333333333333333333333333333333333333333"
+
+// shardTail is the live session of the head's active member.
+func shardTail() pool.Provider {
+	return pool.Provider{
+		ProviderID: "tail", AssignedID: "s-tail", ShardMemberV1: true, State: pool.StateReady, ReceiptPubkey: []byte{2}, Tier: pool.TierTrusted,
+		ModelHashAlgorithm: "macprovider.snapshot-manifest.v1", ModelHash: shardTestHash, BinaryVersion: "1.8.300",
+	}
+}
+
 func shardRouteFor() shardGroupRoute {
+	return shardRouteWith(map[string]pool.Provider{"tail": shardTail()})
+}
+
+func shardRouteWith(sessions map[string]pool.Provider) shardGroupRoute {
 	return shardGroupRoute{
 		poolID:           shardTestPool,
 		members:          map[string]bool{"head": true, "tail": true, "spare": true},
 		minBinaryVersion: "1.8.0",
 		groups:           []poolmanifest.PoolShardGroup{{GroupProviderID: "head", PoolModelID: shardTestPoolModel, MaxMembers: 3}},
+		resolve: func(id string) (pool.Provider, bool) {
+			p, ok := sessions[id]
+			return p, ok
+		},
 	}
 }
 
@@ -57,6 +80,18 @@ func TestShardGroupRouteGate(t *testing.T) {
 		"spare not a member":     func(r *shardGroupRoute, _ *pool.Provider) { delete(r.members, "spare") },
 		"member below the floor": func(r *shardGroupRoute, _ *pool.Provider) { r.minBinaryVersion = "1.9.0" },
 		"session is also member": func(_ *shardGroupRoute, p *pool.Provider) { p.ShardMemberV1 = true },
+		// SPEC-051-R003/R004/R015: the member is re-checked at reservation.
+		"member suspended since the last evaluation": func(r *shardGroupRoute, _ *pool.Provider) {
+			tail := shardTail()
+			tail.ComputeIntegritySuspended = true
+			*r = shardRouteWith(map[string]pool.Provider{"tail": tail})
+		},
+		"member reconnected since the last evaluation": func(r *shardGroupRoute, _ *pool.Provider) {
+			tail := shardTail()
+			tail.AssignedID = "s-tail-2"
+			*r = shardRouteWith(map[string]pool.Provider{"tail": tail})
+		},
+		"member disconnected": func(r *shardGroupRoute, _ *pool.Provider) { *r = shardRouteWith(nil) },
 	}
 	for name, mutate := range cases {
 		route, head := shardRouteFor(), shardHead()

@@ -22,6 +22,10 @@ const (
 	// shardGroupOwnerTTL bounds how long a resolved SPEC-003 owner is reused
 	// before it is read again (SPEC-051-R001 ownership changes).
 	shardGroupOwnerTTL = 30 * time.Second
+	// shardGroupOwnerCacheCap bounds the owner cache. Entries past their TTL
+	// are evicted first; a full cache of fresh entries stops caching, so the
+	// lookup still answers but memory stays bounded.
+	shardGroupOwnerCacheCap = 4096
 )
 
 // ShardGroupOwnerLookup resolves a provider's SPEC-003 owner key. A claimed
@@ -81,13 +85,29 @@ func (s *Server) shardGroupOwners(ctx context.Context, ids []string) map[string]
 			entry = shardGroupOwnerEntry{owner: owner, fetched: now}
 			if err == nil {
 				w.ownerMu.Lock()
-				w.ownerCache[id] = entry
+				w.cacheOwnerLocked(id, entry, now)
 				w.ownerMu.Unlock()
 			}
 		}
 		out[id] = entry.owner
 	}
 	return out
+}
+
+// cacheOwnerLocked stores an owner entry within shardGroupOwnerCacheCap.
+// Caller holds ownerMu.
+func (w *shardGroupWiring) cacheOwnerLocked(id string, entry shardGroupOwnerEntry, now time.Time) {
+	if _, ok := w.ownerCache[id]; !ok && len(w.ownerCache) >= shardGroupOwnerCacheCap {
+		for key, cached := range w.ownerCache {
+			if now.Sub(cached.fetched) > shardGroupOwnerTTL {
+				delete(w.ownerCache, key)
+			}
+		}
+		if len(w.ownerCache) >= shardGroupOwnerCacheCap {
+			return
+		}
+	}
+	w.ownerCache[id] = entry
 }
 
 // sendShardGroupMessage marshals and sends one group message to a session.
@@ -116,10 +136,6 @@ func (s *Server) handleShardGroupRegister(providerID, assignedID string, payload
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	var owners map[string]string
-	if _, rec, err := shardgroup.ParseRegister(payload); err == nil {
-		owners = s.shardGroupOwners(ctx, shardgroup.RecordIDs(rec))
-	}
 	res, memberResults := w.registry.Register(ctx, shardgroup.HeadSession{
 		ProviderID:         providerID,
 		AssignedID:         assignedID,
@@ -131,7 +147,7 @@ func (s *Server) handleShardGroupRegister(providerID, assignedID string, payload
 		ShardGroupHeadV1:   live.ShardGroupHeadV1,
 		ShardMemberV1:      live.ShardMemberV1,
 		WSTunneled:         live.IsWSTunneled(),
-	}, payload, owners)
+	}, payload, func(ids []string) map[string]string { return s.shardGroupOwners(ctx, ids) })
 	s.log.Info().
 		Str("event", "shard_group_register").
 		Str("provider_id", providerID).
