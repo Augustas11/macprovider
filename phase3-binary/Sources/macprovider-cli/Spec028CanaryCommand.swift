@@ -308,7 +308,7 @@ struct Spec028CanaryCommand: AsyncParsableCommand {
                     switch chunk {
                     case .content:
                         chunkCounter.increment()
-                    case .toolCallDelta:
+                    case .toolCallDelta, .reasoning:
                         chunkCounter.increment()
                     }
                 }

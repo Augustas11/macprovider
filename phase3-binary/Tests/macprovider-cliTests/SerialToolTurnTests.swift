@@ -10,12 +10,22 @@ final class SerialToolTurnTests: XCTestCase {
     <tool_call>{"name":"list_references","arguments":{"symbol":"ToolCallParser"}}</tool_call>
     """#
 
-    func testOmittedParallelKeepsOnlyFirstTool() throws {
+    /// #2107: omitted parallel_tool_calls is parallel (the OpenAI default).
+    func testOmittedParallelPreservesEveryTool() throws {
+        let parsed = try ModelRuntime.parseGeneratedOutput(
+            filteredText: twoCalls, generatedTokenIDs: [], decode: { _ in "" },
+            request: try request(parallelToolCalls: nil),
+            mode: .complete(finishReason: "stop"), defaultCompletionTokens: 12, toolCallPrefill: nil
+        )
+        XCTAssertEqual(parsed.toolCalls.map(\.functionName), ["find_definition", "list_references"])
+    }
+
+    func testExplicitFalseKeepsOnlyFirstTool() throws {
         let parsed = try ModelRuntime.parseGeneratedOutput(
             filteredText: twoCalls,
             generatedTokenIDs: [],
             decode: { _ in "" },
-            request: try request(parallelToolCalls: nil),
+            request: try request(parallelToolCalls: false),
             mode: .complete(finishReason: "stop"),
             defaultCompletionTokens: 12, toolCallPrefill: nil
         )
@@ -44,7 +54,7 @@ final class SerialToolTurnTests: XCTestCase {
             modelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
             allowedFunctionNames: ["read"]
         )
-        let serial = try request(parallelToolCalls: nil)
+        let serial = try request(parallelToolCalls: false)
         XCTAssertFalse(serial.stopsAfterFirstCompleteToolCall && emitter.hasCompletedValidToolCall)
         _ = emitter.observe(#"<tool_call>{"name":"read","arguments":{"path":"Makefile"}}"#)
         XCTAssertTrue(serial.stopsAfterFirstCompleteToolCall && emitter.hasCompletedValidToolCall)

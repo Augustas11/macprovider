@@ -2026,15 +2026,7 @@ actor InferenceRelay {
     }
 
     private static func chatCompletionMessage(_ completion: CompletionResult) -> [String: Any] {
-        let toolCalls = completion.toolCalls?.isEmpty == false ? completion.toolCalls : nil
-        var message: [String: Any] = [
-            "role": "assistant",
-            "content": toolCalls == nil ? completion.content : NSNull(),
-        ]
-        if let toolCalls {
-            message["tool_calls"] = toolCalls.map(\.openAIObject)
-        }
-        return message
+        RouterHandler.chatCompletionMessage(completion)
     }
 
     private static func toolCallDeltaChunks(_ toolCalls: [ToolCall]) -> [[[String: Any]]] {
@@ -2078,13 +2070,17 @@ actor InferenceRelay {
         guard completion.settlementDisposition != .usageUnattested else {
             return ["macprovider_model_hash_observed": completion.modelHashObserved ?? NSNull()]
         }
-        return [
+        var usage: [String: Any] = [
             "prompt_tokens": completion.promptTokens,
             "cached_prompt_tokens": completion.cachedPromptTokens,
             "completion_tokens": completion.completionTokens,
             "total_tokens": completion.promptTokens + completion.completionTokens,
             "macprovider_model_hash_observed": completion.modelHashObserved ?? NSNull(),
         ]
+        if completion.reasoningContent != nil {
+            usage["completion_tokens_details"] = ["reasoning_tokens": completion.reasoningTokens]
+        }
+        return usage
     }
 
     private static func zeroUsage() -> [String: Any] {
@@ -2562,6 +2558,8 @@ final class RelayStreamBatcher: @unchecked Sendable {
     private let enqueueFrame: (String) -> Bool
     private var pendingContent = ""
     private var pendingCount = 0
+    private var pendingReasoning = ""
+    private var pendingReasoningCount = 0
     private var emittedToolCall = false
     private var suppressedPostToolContent = false
     private var enqueuedContent = ""
@@ -2603,12 +2601,24 @@ final class RelayStreamBatcher: @unchecked Sendable {
                 }
                 return
             }
+            flushReasoningLocked()
             pendingContent += text
             pendingCount += 1
             if pendingCount >= streamInterval {
                 flushContentLocked()
             }
+        case .reasoning(let text):
+            // SPEC-018 §3.12: reasoning precedes the answer and is batched
+            // like content, as `delta.reasoning_content`.
+            guard !emittedToolCall, !text.isEmpty else { return }
+            flushContentLocked()
+            pendingReasoning += text
+            pendingReasoningCount += 1
+            if pendingReasoningCount >= streamInterval {
+                flushReasoningLocked()
+            }
         case .toolCallDelta(let toolDelta):
+            flushReasoningLocked()
             flushContentLocked()
             emittedToolCall = true
             enqueueLocked(deltaFrame(["tool_calls": [toolDelta.openAIDeltaDict()]]))
@@ -2620,6 +2630,7 @@ final class RelayStreamBatcher: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         guard !emittedToolCall else { return }
+        flushReasoningLocked()
         flushContentLocked()
     }
 
@@ -2684,6 +2695,13 @@ final class RelayStreamBatcher: @unchecked Sendable {
             toolCalls: completion.toolCalls,
             finishReason: completion.finishReason
         )
+    }
+
+    private func flushReasoningLocked() {
+        guard !pendingReasoning.isEmpty else { return }
+        enqueueLocked(deltaFrame(["reasoning_content": pendingReasoning]))
+        pendingReasoning = ""
+        pendingReasoningCount = 0
     }
 
     private func flushContentLocked() {

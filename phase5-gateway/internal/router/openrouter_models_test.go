@@ -192,18 +192,28 @@ func TestOpenRouterSupportedParametersGateToolFeaturesBySpec018Family(t *testing
 		}
 	}
 	for _, model := range other {
-		if openRouterToolFamilyModel(model) || openRouterStructuredOutputModel(model) {
-			t.Fatalf("%s must match neither predicate", model)
+		// #2107: every catalog family with a template tool grammar is a
+		// tool family; the SPEC-019 structured-output families are unchanged.
+		if !openRouterToolFamilyModel(model) || openRouterStructuredOutputModel(model) {
+			t.Fatalf("%s must be a tool family without the structured-output predicate", model)
 		}
 		params := openRouterSupportedParameters(model, 4096)
-		for _, key := range append(append([]string{}, toolKeys...), structuredKeys...) {
+		for _, key := range structuredKeys {
 			if _, ok := params[key]; ok {
 				t.Fatalf("%s must not declare %q: %+v", model, key, params)
+			}
+		}
+		for _, key := range toolKeys {
+			if _, ok := params[key]; !ok {
+				t.Fatalf("%s must declare %q: %+v", model, key, params)
 			}
 		}
 		if _, ok := params["max_tokens"]; !ok {
 			t.Fatalf("%s lost base sampling parameters: %+v", model, params)
 		}
+	}
+	if openRouterToolFamilyModel("mlx-community/Qwen2-VL-2B-Instruct-4bit") {
+		t.Fatal("Qwen2-VL's template has no tool grammar")
 	}
 }
 

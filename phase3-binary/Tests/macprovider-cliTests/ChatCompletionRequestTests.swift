@@ -8,10 +8,11 @@ final class ChatCompletionRequestTests: XCTestCase {
         XCTAssertNoThrow(try request.validateModelMatches("mlx-community/Llama-3.2-3B-Instruct-4bit"))
     }
 
-    func testOmittedParallelToolCallsIsSerial() throws {
+    /// #2107 D12: omitted follows the OpenAI default (parallel calls).
+    func testOmittedParallelToolCallsIsParallel() throws {
         let request = try makeRequest(model: "m")
         XCTAssertNil(request.parallelToolCalls)
-        XCTAssertTrue(request.stopsAfterFirstCompleteToolCall)
+        XCTAssertFalse(request.stopsAfterFirstCompleteToolCall)
     }
 
     func testParallelToolCallsFalseIsSerial() throws {

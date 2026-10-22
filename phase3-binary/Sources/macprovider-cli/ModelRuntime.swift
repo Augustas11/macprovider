@@ -76,6 +76,8 @@ struct RelayBlindPreparedRequest: @unchecked Sendable {
 enum StreamChunk: Sendable {
     case content(String)
     case toolCallDelta(StreamToolCallDelta)
+    /// SPEC-018 §3.12 reasoning text (`delta.reasoning_content`).
+    case reasoning(String)
 }
 
 struct StreamToolCallDelta: Sendable {
@@ -423,7 +425,8 @@ actor ContinuousBatchTextPreparationLane {
                 tokenizer: tokenizer,
                 templateSupportsThinkingToggle: templateSupportsThinkingToggle,
                 templateSupportsPreserveThinking: templateSupportsPreserveThinking,
-                toolSelectionModelID: toolSelectionModelID
+                toolSelectionModelID: toolSelectionModelID,
+                templateToolFormat: configuration.toolCallFormat?.rawValue
             )
             try Task.checkCancellation()
             try drainCancelled.check()
@@ -440,7 +443,7 @@ actor ContinuousBatchTextPreparationLane {
                 ContinuousBatchPreparedRequest(
                     promptTokens: promptTokens,
                     stopTokenSequences: ModelRuntime.continuousBatchStopTokenSequences(
-                        requestStops: request.stop,
+                        requestStops: request.outputTraits.reasoningOpen ? [] : request.stop,
                         modelStopTokenIDs: modelStopTokenIDs,
                         tokenizer: tokenizer
                     ),
@@ -1541,6 +1544,8 @@ actor ModelRuntime: ModelRuntimeServing {
         guard !HarmonyResponseParser.isHarmonyModelID(request.model),
               !request.containsNonTextMessageContentPart,
               request.allowsSpeculativeDecoding,
+              // The speculative collectors do not split reasoning (§3.12).
+              !request.outputTraits.reasoningOpen,
               draftLoaded,
               numDraftTokens != nil else {
             return .tokenIterator
@@ -6867,8 +6872,10 @@ maxTokens: 1,
             )
             let promptTokens = lmInput.text.tokens.asArray(Int32.self).map(Int.init)
             try Self.validatePromptTokenCount(promptTokens.count, maxContextTokens: maxContextTokens)
+            // A stop string inside the reasoning must not end the row; the
+            // text filters apply it to the post-think output (SPEC-018 §3.12).
             let stopTokenSequences = Self.continuousBatchStopTokenSequences(
-                requestStops: request.stop,
+                requestStops: request.outputTraits.reasoningOpen ? [] : request.stop,
                 context: context
             )
             let tokenizer = context.tokenizer
@@ -7164,8 +7171,10 @@ maxTokens: 1,
         private let decode: ([Int]) -> String
         private let incrementalDecoder: IncrementalTextDecoder?
         private let needsPerTokenPrecision: Bool
+        private let reasoningOpen: Bool
 
         init(request: ChatCompletionRequest, detokenizer: StreamingDetokenizer) {
+            reasoningOpen = request.outputTraits.reasoningOpen
             emitter = SerialStreamingTextEmitter(
                 request: request,
                 holdsCleanupDecoderPendingPrefixes: detokenizer.cleanUpTokenizationSpaces
@@ -7224,7 +7233,8 @@ maxTokens: 1,
             let candidate = ModelRuntime.streamingSafePrefix(
                 decoded,
                 stopTokenFilter: stopTokenFilter,
-                requestStops: requestStops
+                requestStops: requestStops,
+                reasoningOpen: reasoningOpen
             )
             switch emitter.step(
                 candidate: candidate,
@@ -7232,6 +7242,12 @@ maxTokens: 1,
                 idleState: idleState,
                 onChunk: onChunk
             ) {
+            case .requestStop where reasoningOpen:
+                // A reasoning row has no request stop-token sequences (a stop
+                // inside the reasoning must not end it); the post-think text
+                // match ends it here and the final filter cuts at it.
+                stoppedValue = true
+                return true
             case .more, .requestStop:
                 // A buyer stop string ends the row through its stop-token
                 // sequences, and the final filter cuts the text at it.
@@ -7306,14 +7322,17 @@ maxTokens: 1,
         private let lock = NSLock()
         private var tokenIDs: [Int] = []
         private var observer: NativeToolCallStreamEmitter
+        private let reasoningOpen: Bool
         private let guaranteedSelection: Bool
         private var stopTokenCountValue: Int?
         private let incrementalDecoder: IncrementalTextDecoder
 
         init(request: ChatCompletionRequest, incrementalDecoder: IncrementalTextDecoder) {
             guaranteedSelection = (try? ToolSelectionPolicy.selection(request.promptSource.toolChoice).requiresCall) == true
+            reasoningOpen = request.outputTraits.reasoningOpen
             observer = NativeToolCallStreamEmitter(
                 modelID: request.model,
+                grammar: ModelRuntime.toolGrammar(for: request),
                 allowedFunctionNames: ModelRuntime.toolFunctionNames(from: request.promptSource.tools),
                 schemas: ModelRuntime.autoToolParameterSchemas(from: request.promptSource.tools)
             )
@@ -7336,6 +7355,7 @@ maxTokens: 1,
                     decoded: incrementalDecoder.append(token),
                     stopTokenFilter: stopTokenFilter,
                     requestStops: requestStops,
+                    reasoningOpen: reasoningOpen,
                     guaranteedSelection: guaranteedSelection
                 ) {
                     stopTokenCountValue = tokenIDs.count
@@ -7411,17 +7431,41 @@ maxTokens: 1,
         detokenizer: StreamingDetokenizer,
         stopTokenFilter: StopTokenFilter
     ) -> ContinuousBatchCanonicalStopObserver? {
-        guard serialNativeToolStopApplies(request) else { return nil }
-        let state = ContinuousBatchSerialToolStopState(
-            request: request,
-            incrementalDecoder: detokenizer.makeIncremental()
-        )
+        // A reasoning row has no request stop-token sequences (SPEC-018
+        // §3.12): its post-`</think>` stop match is the canonical boundary,
+        // for streaming and non-streaming waiters alike.
+        let reasoningStop = request.outputTraits.reasoningOpen && request.stop.contains { !$0.isEmpty }
+        let serialTool = serialNativeToolStopApplies(request)
+        guard serialTool || reasoningStop else { return nil }
+        let state = serialTool
+            ? ContinuousBatchSerialToolStopState(request: request, incrementalDecoder: detokenizer.makeIncremental())
+            : nil
+        let stopText = reasoningStop ? ReasoningStopText(decoder: detokenizer.makeIncremental()) : nil
         return ContinuousBatchCanonicalStopObserver { token in
-            state.observe(
-                eventTokens: [token],
+            if let state, state.observe(eventTokens: [token], stopTokenFilter: stopTokenFilter, requestStops: request.stop) {
+                return true
+            }
+            guard let stopText else { return false }
+            return ModelRuntime.streamingSafePrefix(
+                stopText.append(token),
                 stopTokenFilter: stopTokenFilter,
-                requestStops: request.stop
-            )
+                requestStops: request.stop,
+                reasoningOpen: true
+            ).hitStop
+        }
+    }
+
+    /// The decoded text of a reasoning row, for its canonical stop test.
+    final class ReasoningStopText: @unchecked Sendable {
+        private let lock = NSLock()
+        private let decoder: IncrementalTextDecoder
+
+        init(decoder: IncrementalTextDecoder) { self.decoder = decoder }
+
+        func append(_ token: Int) -> String {
+            lock.lock()
+            defer { lock.unlock() }
+            return decoder.append(token)
         }
     }
 
@@ -7478,7 +7522,8 @@ maxTokens: 1,
         let filtered = applyOutputFilters(
             decoded,
             stopTokenFilter: stopTokenFilter,
-            requestStops: HarmonyResponseParser.isHarmonyModelID(request.model) ? [] : request.stop
+            requestStops: HarmonyResponseParser.isHarmonyModelID(request.model) ? [] : request.stop,
+            reasoningOpen: request.outputTraits.reasoningOpen
         )
         // `length` when the row ended on an output budget: an explicit
         // max_tokens reached by the post-model-stop, pre-truncation
@@ -7533,7 +7578,9 @@ maxTokens: 1,
                 generationMilliseconds: generationMilliseconds,
                 toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
                 modelHashObserved: validObservedModelHash(modelHash),
-                settlementDisposition: result.settlementDisposition
+                settlementDisposition: result.settlementDisposition,
+                reasoningContent: parsed.reasoningContent,
+                reasoningTokens: parsed.reasoningTokens
             ),
             filteredText: filtered.text,
             parsed: parsed,
@@ -8949,6 +8996,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             Self.clearMLXBufferCacheAfterPrefill()
                             var serialToolObserver = NativeToolCallStreamEmitter(
                                 modelID: request.model,
+                                grammar: Self.toolGrammar(for: request),
                                 allowedFunctionNames: Self.toolFunctionNames(from: request.promptSource.tools),
                                 schemas: Self.autoToolParameterSchemas(from: request.promptSource.tools)
                             )
@@ -8969,6 +9017,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 modelID: request.model,
                                 stopTokenFilter: stopTokenFilter,
                                 requestStops: request.stop,
+                                reasoningOpen: request.outputTraits.reasoningOpen,
                                 allowedFunctionNames: Self.toolFunctionNames(from: request.promptSource.tools),
                                 decode: { context.tokenizer.decode(tokenIds: $0) },
                                 decodeFinalToken: { tokenID in
@@ -9030,6 +9079,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                            decoded: generationContext.tokenizer.decode(tokenIds: tokens),
                                            stopTokenFilter: stopTokenFilter,
                                            requestStops: request.stop,
+                                           reasoningOpen: request.outputTraits.reasoningOpen,
                                            guaranteedSelection: (try? ToolSelectionPolicy.selection(request.promptSource.toolChoice).requiresCall) == true
                                        )
                                     {
@@ -9065,7 +9115,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         let filtered = Self.applyOutputFilters(
                             result.output,
                             stopTokenFilter: stopTokenFilter,
-                            requestStops: HarmonyResponseParser.isHarmonyModelID(request.model) ? [] : request.stop
+                            requestStops: HarmonyResponseParser.isHarmonyModelID(request.model) ? [] : request.stop,
+                            reasoningOpen: request.outputTraits.reasoningOpen
                         )
 
                         let rawLengthFinish = Self.labSerialLengthFinish(
@@ -9126,7 +9177,9 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             ttftMilliseconds: firstToken.elapsedMilliseconds(since: completionStartedAt),
                             toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
                             modelHashObserved: Self.validObservedModelHash(snapshot.modelHash),
-                            settlementDisposition: .eligibleOwner
+                            settlementDisposition: .eligibleOwner,
+                            reasoningContent: parsed.reasoningContent,
+                            reasoningTokens: parsed.reasoningTokens
                         ), request: request)
                         self.nativeMTPRequestShapeCapture?.record(
                             request: request,
@@ -9218,7 +9271,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         let filtered = applyOutputFilters(
             generated.output,
             stopTokenFilter: stopTokenFilter,
-            requestStops: request.stop
+            requestStops: request.stop,
+            reasoningOpen: request.outputTraits.reasoningOpen
         )
         // Speculative decoding requires tool_choice absent: no call prefill.
         let parsed = try parseToolCallsIfRequested(filtered.text, request: request, toolCallPrefill: nil)
@@ -9662,7 +9716,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         let final = Self.applyOutputFilters(
                             generated.output,
                             stopTokenFilter: stopTokenFilter,
-                            requestStops: request.stop
+                            requestStops: request.stop,
+                            reasoningOpen: request.outputTraits.reasoningOpen
                         )
                         let finalDelta = Self.delta(from: emittedText, to: final.text)
                         let parsed = try Self.parseToolCallsIfRequested(final.text, request: request, toolCallPrefill: nil)
@@ -9884,7 +9939,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 let candidate = Self.streamingSafePrefix(
                                     decoded,
                                     stopTokenFilter: stopTokenFilter,
-                                    requestStops: request.stop
+                                    requestStops: request.stop,
+                                    reasoningOpen: request.outputTraits.reasoningOpen
                                 )
                                 let step = textEmitter.step(
                                     candidate: candidate,
@@ -9952,7 +10008,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         let final = Self.applyOutputFilters(
                             result.output,
                             stopTokenFilter: stopTokenFilter,
-                            requestStops: HarmonyResponseParser.isHarmonyModelID(request.model) ? [] : request.stop
+                            requestStops: HarmonyResponseParser.isHarmonyModelID(request.model) ? [] : request.stop,
+                            reasoningOpen: request.outputTraits.reasoningOpen
                         )
                         let rawLengthFinish = Self.labSerialLengthFinish(
                             generatedCompletionTokens: result.generationTokenCount,
@@ -10027,7 +10084,9 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 ? nil
                                 : textEmitter.reconciledToolCalls,
                             modelHashObserved: Self.validObservedModelHash(snapshot.modelHash),
-                            settlementDisposition: .eligibleOwner
+                            settlementDisposition: .eligibleOwner,
+                            reasoningContent: request.outputTraits.reasoningOpen ? textEmitter.emittedReasoning : nil,
+                            reasoningTokens: parsed.reasoningTokens
                         )
                         let validated = try Self.validateStructuredStreamingCompletion(
                             completion,
@@ -12254,6 +12313,17 @@ maxTokens: maxTokens,
     static func applyOutputFilters(
         _ text: String,
         stopTokenFilter: StopTokenFilter,
+        requestStops: [String],
+        reasoningOpen: Bool
+    ) -> (text: String, hitStop: Bool) {
+        ReasoningOutput.filtering(text, stopTokenFilter: stopTokenFilter, reasoningOpen: reasoningOpen) {
+            applyOutputFilters($0, stopTokenFilter: stopTokenFilter, requestStops: requestStops)
+        }
+    }
+
+    static func applyOutputFilters(
+        _ text: String,
+        stopTokenFilter: StopTokenFilter,
         requestStops: [String]
     ) -> (text: String, hitStop: Bool) {
         let stripped = stopTokenFilter.stripping(from: text)
@@ -12548,6 +12618,17 @@ maxTokens: maxTokens,
     static func streamingSafePrefix(
         _ text: String,
         stopTokenFilter: StopTokenFilter,
+        requestStops: [String],
+        reasoningOpen: Bool
+    ) -> (text: String, hitStop: Bool) {
+        ReasoningOutput.filtering(text, stopTokenFilter: stopTokenFilter, reasoningOpen: reasoningOpen) {
+            streamingSafePrefix($0, stopTokenFilter: stopTokenFilter, requestStops: requestStops)
+        }
+    }
+
+    static func streamingSafePrefix(
+        _ text: String,
+        stopTokenFilter: StopTokenFilter,
         requestStops: [String]
     ) -> (text: String, hitStop: Bool) {
         let filtered = applyOutputFilters(
@@ -12570,6 +12651,7 @@ maxTokens: maxTokens,
         private let modelID: String
         private let stopTokenFilter: StopTokenFilter
         private let requestStops: [String]
+        private let reasoningOpen: Bool
         private let decode: ([Int]) -> String
         private var harmonyParser: HarmonyResponseParser.StreamingParser?
         private var harmonyObservedTokenCount = 0
@@ -12578,11 +12660,13 @@ maxTokens: maxTokens,
             modelID: String,
             stopTokenFilter: StopTokenFilter,
             requestStops: [String],
+            reasoningOpen: Bool = false,
             allowedFunctionNames: Set<String>? = nil,
             decode: @escaping ([Int]) -> String,
             decodeFinalToken: ((Int) -> String?)? = nil
         ) {
             self.enabled = requestStops.contains { !$0.isEmpty }
+            self.reasoningOpen = reasoningOpen
             self.modelID = modelID
             self.stopTokenFilter = stopTokenFilter
             self.requestStops = requestStops
@@ -12605,7 +12689,8 @@ maxTokens: maxTokens,
                 return ModelRuntime.streamingSafePrefix(
                     decode(generatedTokenIDs),
                     stopTokenFilter: stopTokenFilter,
-                    requestStops: requestStops
+                    requestStops: requestStops,
+                    reasoningOpen: reasoningOpen
                 ).hitStop
             }
             guard generatedTokenIDs.count >= harmonyObservedTokenCount else {
@@ -12717,6 +12802,10 @@ maxTokens: maxTokens,
         let generatedCompletionTokens: Int
         let hitStop: Bool
         let isTerminal: Bool
+        /// SPEC-018 §3.12 reasoning split from an open `<think>`; nil when the
+        /// prompt did not leave one open.
+        var reasoningContent: String? = nil
+        var reasoningTokens: Int = 0
     }
 
     static func parseGeneratedOutput(
@@ -12736,8 +12825,11 @@ maxTokens: maxTokens,
                case .complete(let finishReason) = mode, finishReason == "length" {
                 throw ToolSelectionPolicy.outputError("Tool generation exhausted its token budget")
             }
-            let parsed = try parseToolCallsIfRequested(filteredText, request: request, toolCallPrefill: toolCallPrefill)
-            return ParsedGeneratedOutput(
+            // SPEC-018 §3.12: tools, JSON mode and content see only the text
+            // after the first `</think>`.
+            let reasoning = request.outputTraits.reasoningOpen ? ReasoningOutput.split(filteredText) : nil
+            let parsed = try parseToolCallsIfRequested(reasoning?.answer ?? filteredText, request: request, toolCallPrefill: toolCallPrefill)
+            var output = ParsedGeneratedOutput(
                 content: parsed.content,
                 toolCalls: parsed.toolCalls,
                 completionTokens: defaultCompletionTokens,
@@ -12745,6 +12837,14 @@ maxTokens: maxTokens,
                 hitStop: false,
                 isTerminal: true
             )
+            if let reasoning {
+                output.reasoningContent = reasoning.reasoning
+                output.reasoningTokens = min(
+                    defaultCompletionTokens,
+                    ReasoningOutput.reasoningTokenCount(tokenIDs: generatedTokenIDs, decode: decode)
+                )
+            }
+            return output
         }
 
         let parsed = HarmonyResponseParser.parse(
@@ -12884,7 +12984,7 @@ maxTokens: maxTokens,
 
     static func serialNativeToolStopApplies(_ request: ChatCompletionRequest) -> Bool {
         serialToolStopApplies(request)
-            && NativeToolCallStreamEmitter.supports(modelID: request.model)
+            && NativeToolCallStreamEmitter.supports(grammar: toolGrammar(for: request))
     }
 
     /// One serial-tool-turn stop test over the decode of every token so far.
@@ -12895,15 +12995,24 @@ maxTokens: maxTokens,
         decoded: String,
         stopTokenFilter: StopTokenFilter,
         requestStops: [String],
+        reasoningOpen: Bool = false,
         guaranteedSelection: Bool = false
     ) -> Bool {
         guard !guaranteedSelection else { return false }
         let candidate = streamingSafePrefix(
             decoded,
             stopTokenFilter: stopTokenFilter,
-            requestStops: requestStops
+            requestStops: requestStops,
+            reasoningOpen: reasoningOpen
         )
-        _ = observer.observe(candidate.text)
+        var text = candidate.text
+        if reasoningOpen {
+            // A call inside the reasoning is not a call (SPEC-018 §3.12).
+            let split = ReasoningOutput.split(text)
+            guard split.closed else { return false }
+            text = split.answer
+        }
+        _ = observer.observe(text)
         return observer.hasCompletedValidToolCall
     }
 
@@ -12926,6 +13035,7 @@ maxTokens: maxTokens,
         }
         let parsed = ToolCallParser.parseToolCalls(
             rawOutput: text,
+            grammar: toolGrammar(for: request),
             modelID: request.model,
             allowedFunctionNames: allowedFunctionNames,
             schemas: autoToolParameterSchemas(from: request.promptSource.tools)
@@ -12933,10 +13043,18 @@ maxTokens: maxTokens,
         guard !parsed.toolCalls.isEmpty else {
             return (text, [])
         }
+        // Prose the model wrote before its first call is kept as content.
+        let prose = parsed.leadingContent ?? ""
         if request.stopsAfterFirstCompleteToolCall, parsed.toolCalls.count > 1 {
-            return ("", Array(parsed.toolCalls.prefix(1)))
+            return (prose, Array(parsed.toolCalls.prefix(1)))
         }
-        return ("", parsed.toolCalls)
+        return (prose, parsed.toolCalls)
+    }
+
+    /// The request's tool grammar: the one its rendered template resolved,
+    /// else the catalog family of the requested model.
+    static func toolGrammar(for request: ChatCompletionRequest) -> ToolCallGrammar? {
+        request.outputTraits.toolGrammar ?? ToolCallGrammar.family(modelID: request.model)
     }
 
     /// Any json_object or json_schema request, strict or not (SPEC-019 §1a).
@@ -13043,12 +13161,13 @@ maxTokens: maxTokens,
             messages = Self.withLeadingSystemInstruction("Do not call any function or tool. Respond with assistant text.", to: messages)
         case .auto: break
         }
-        // A profiled identity is the loaded model even when the buyer names it
-        // by a local alias, so tool history renders in its template's format.
+        // Tool history goes through the loaded template (SPEC-018 §3.6). A
+        // profiled identity is the loaded model even under a local alias.
         let renderModelID = ToolSelectionPolicy.guaranteedCallProfile(modelID: toolSelectionModelID) != nil
             ? toolSelectionModelID ?? request.model
             : request.model
-        let chat = try ToolPromptRenderer.renderMessages(messages, modelID: renderModelID)
+        let grammar = request.outputTraits.toolGrammar ?? ToolCallGrammar.family(modelID: renderModelID)
+        let chat = try ToolPromptRenderer.renderMessages(messages, grammar: grammar)
         let tools: [[String: Any]]?
         switch selection {
         case .none:
@@ -13060,10 +13179,16 @@ maxTokens: maxTokens,
         case .auto, .required:
             tools = Self.mlxToolsForTemplate(from: request.promptSource.tools)
         }
-        let additionalContext = Self.templateAdditionalContext(
+        var additionalContext = Self.templateAdditionalContext(
             supportsThinkingToggle: templateSupportsThinkingToggle,
             supportsPreserveThinking: templateSupportsPreserveThinking
         )
+        // SPEC-018 §3.12: the buyer's reasoning_effort (default `low` when
+        // tools are declared) reaches the template; templates without the
+        // variable ignore it.
+        if let effort = request.templateReasoningEffort {
+            additionalContext = (additionalContext ?? [:]).merging(["reasoning_effort": effort]) { _, new in new }
+        }
         return UserInput(
             chat: chat,
             tools: tools,
@@ -13125,6 +13250,7 @@ maxTokens: maxTokens,
     ) async throws -> (input: LMInput, toolCallPrefill: String?) {
         // Planned first: it validates the selected name before any prompt text.
         let plan = try toolCallPrefill(for: request, toolSelectionModelID: toolSelectionModelID)
+        let grammar = try resolvedToolGrammar(for: request, templateToolFormat: context.configuration.toolCallFormat?.rawValue)
         let input = try userInput(
             for: request,
             templateSupportsThinkingToggle: templateSupportsThinkingToggle,
@@ -13132,8 +13258,14 @@ maxTokens: maxTokens,
             nativeVisionProfile: nativeVisionProfile,
             toolSelectionModelID: toolSelectionModelID
         )
-        let lmInput = try await context.processor.prepare(input: input)
+        let lmInput: LMInput
+        do {
+            lmInput = try await context.processor.prepare(input: input)
+        } catch {
+            throw ChatTemplateRequestError.mapping(error)
+        }
         guard let plan else {
+            resolveOutputTraits(for: request, grammar: grammar, promptTokens: lmInput.text.tokens.asArray(Int.self), tokenizer: context.tokenizer)
             return (lmInput, nil)
         }
         guard let tokens = appendingToolCallPrefill(
@@ -13143,9 +13275,50 @@ maxTokens: maxTokens,
             tokenizer: context.tokenizer
         ) else {
             fputs("warning: tool-call prefill skipped; the generation prompt does not end as the profile expects\n", stderr)
+            resolveOutputTraits(for: request, grammar: grammar, promptTokens: lmInput.text.tokens.asArray(Int.self), tokenizer: context.tokenizer)
             return (lmInput, nil)
         }
+        resolveOutputTraits(for: request, grammar: grammar, promptTokens: tokens, tokenizer: context.tokenizer)
         return (LMInput(tokens: MLXArray(tokens.map(Int32.init))), plan.prefill)
+    }
+
+    /// The tool grammar of the loaded template (family fallback). A request
+    /// that declares tools to a model whose template has no tool grammar is
+    /// refused before any prompt work (SPEC-018 §3.2).
+    static func resolvedToolGrammar(for request: ChatCompletionRequest, templateToolFormat: String?) throws -> ToolCallGrammar? {
+        var grammar = ToolCallGrammar.resolved(templateFormat: templateToolFormat, modelID: request.model)
+        // Harmony response parsing is selected by the model identity before
+        // rendering; a Harmony template under another name would be parsed
+        // as text, so its tool calls fail closed instead.
+        if grammar == .harmony, !HarmonyResponseParser.isHarmonyModelID(request.model) {
+            grammar = nil
+        }
+        if grammar == nil, hasEnabledTools(request.promptSource.tools) {
+            throw APIError(
+                status: 400,
+                message: "This model's chat template has no tool-call grammar; tools are not supported for it",
+                code: "tools_unsupported_for_model",
+                param: "tools"
+            )
+        }
+        // The renderer reads the grammar while it builds the prompt.
+        request.outputState.resolve(RequestOutputTraits(toolGrammar: grammar))
+        return grammar
+    }
+
+    /// Records the request's output traits from its rendered prompt: the
+    /// grammar, and whether the prompt leaves a `<think>` open for generation.
+    static func resolveOutputTraits(
+        for request: ChatCompletionRequest,
+        grammar: ToolCallGrammar?,
+        promptTokens: [Int],
+        tokenizer: any MLXLMCommon.Tokenizer
+    ) {
+        let tail = tokenizer.decode(tokenIds: Array(promptTokens.suffix(16)))
+        request.outputState.resolve(RequestOutputTraits(
+            toolGrammar: grammar,
+            reasoningOpen: ReasoningOutput.promptLeavesThinkOpen(tail)
+        ))
     }
 
     static func preparedRequestTokens(
@@ -13154,18 +13327,28 @@ maxTokens: maxTokens,
         tokenizer: any MLXLMCommon.Tokenizer,
         templateSupportsThinkingToggle: Bool,
         templateSupportsPreserveThinking: Bool,
-        toolSelectionModelID: String?
+        toolSelectionModelID: String?,
+        templateToolFormat: String? = nil
     ) async throws -> (tokens: [Int], toolCallPrefill: String?) {
         let plan = try toolCallPrefill(for: request, toolSelectionModelID: toolSelectionModelID)
+        let grammar = try resolvedToolGrammar(for: request, templateToolFormat: templateToolFormat)
         let input = try userInput(
             for: request,
             templateSupportsThinkingToggle: templateSupportsThinkingToggle,
             templateSupportsPreserveThinking: templateSupportsPreserveThinking,
             toolSelectionModelID: toolSelectionModelID
         )
-        let lmInput = try await processor.prepare(input: input)
+        let lmInput: LMInput
+        do {
+            lmInput = try await processor.prepare(input: input)
+        } catch {
+            throw ChatTemplateRequestError.mapping(error)
+        }
         let promptTokens = lmInput.text.tokens.asArray(Int.self)
-        guard let plan else { return (promptTokens, nil) }
+        guard let plan else {
+            resolveOutputTraits(for: request, grammar: grammar, promptTokens: promptTokens, tokenizer: tokenizer)
+            return (promptTokens, nil)
+        }
         guard let tokens = appendingToolCallPrefill(
             plan.prefill,
             generationPromptSuffix: plan.generationPromptSuffix,
@@ -13173,8 +13356,10 @@ maxTokens: maxTokens,
             tokenizer: tokenizer
         ) else {
             fputs("warning: tool-call prefill skipped; the generation prompt does not end as the profile expects\n", stderr)
+            resolveOutputTraits(for: request, grammar: grammar, promptTokens: promptTokens, tokenizer: tokenizer)
             return (promptTokens, nil)
         }
+        resolveOutputTraits(for: request, grammar: grammar, promptTokens: tokens, tokenizer: tokenizer)
         return (tokens, plan.prefill)
     }
 
@@ -13223,6 +13408,36 @@ maxTokens: maxTokens,
         if completion.toolCalls?.isEmpty == false {
             return completion
         }
+        do {
+            return try validateStructuredContent(completion, request: request)
+        } catch let error as APIError where error.code == "malformed_json_response" {
+            throw structuredRetryClassified(error, completion: completion, request: request)
+        }
+    }
+
+    /// SPEC-019 §11 retry classification for `malformed_json_response`: a
+    /// greedy request reproduces its output and a reasoning turn that never
+    /// closed `</think>` reproduces its budget exhaustion, so neither is
+    /// retryable as the same request.
+    static func structuredRetryClassified(_ error: APIError, completion: CompletionResult, request: ChatCompletionRequest) -> APIError {
+        let reasoningExhausted = request.outputTraits.reasoningOpen
+            && completion.content.allSatisfy(\.isWhitespace)
+        guard reasoningExhausted || request.temperature == 0 else { return error }
+        return APIError(
+            status: error.status,
+            message: reasoningExhausted
+                ? "The model's reasoning used the whole output budget before it wrote the JSON answer; raise max_tokens or lower reasoning_effort before retrying."
+                : error.message,
+            type: error.type,
+            code: error.code,
+            param: error.param,
+            retryable: false,
+            inferenceRan: error.inferenceRan,
+            settlementRan: error.settlementRan
+        )
+    }
+
+    private static func validateStructuredContent(_ completion: CompletionResult, request: ChatCompletionRequest) throws -> CompletionResult {
         switch request.responseFormat {
         case .text:
             return completion
@@ -13279,7 +13494,9 @@ maxTokens: maxTokens,
             settlementDisposition: completion.settlementDisposition,
             specDecodeDraftedTokens: completion.specDecodeDraftedTokens,
             specDecodeAcceptedTokens: completion.specDecodeAcceptedTokens,
-            specDecodeGeneration: completion.specDecodeGeneration
+            specDecodeGeneration: completion.specDecodeGeneration,
+            reasoningContent: completion.reasoningContent,
+            reasoningTokens: completion.reasoningTokens
         )
         return try validateStructuredCompletion(visibleCompletion, request: request)
     }
@@ -13614,6 +13831,8 @@ struct SerialStreamingTextEmitter {
 
     private let streamToolsIncrementally: Bool
     private let stopsAfterFirstCompleteToolCall: Bool
+    private let reasoningOpen: Bool
+    private(set) var emittedReasoning = ""
     private var toolStreamer: NativeToolCallStreamEmitter
     private var lastEmittedDecodedText = ""
     private var emittedTextSuffix = ""
@@ -13628,11 +13847,14 @@ struct SerialStreamingTextEmitter {
         holdsCleanupPatternPrefixes: Bool = true,
         holdsCleanupDecoderPendingPrefixes: Bool = false
     ) {
+        let grammar = ModelRuntime.toolGrammar(for: request)
         streamToolsIncrementally = ModelRuntime.hasEnabledTools(request.promptSource.tools)
             && !HarmonyResponseParser.isHarmonyModelID(request.model)
         stopsAfterFirstCompleteToolCall = request.stopsAfterFirstCompleteToolCall
+        reasoningOpen = request.outputTraits.reasoningOpen
         toolStreamer = NativeToolCallStreamEmitter(
             modelID: request.model,
+            grammar: grammar,
             allowedFunctionNames: ModelRuntime.toolFunctionNames(from: request.promptSource.tools),
             schemas: ModelRuntime.autoToolParameterSchemas(from: request.promptSource.tools)
         )
@@ -13648,6 +13870,25 @@ struct SerialStreamingTextEmitter {
         idleState: StructuredStreamingIdleState,
         onChunk: (StreamChunk) -> Void
     ) -> Step {
+        var candidate = candidate
+        if reasoningOpen {
+            // SPEC-018 §3.12: reasoning streams as `reasoning_content`; only
+            // the text after `</think>` reaches content, tools and JSON mode.
+            let split = ReasoningOutput.splitStreamingPrefix(candidate.text)
+            // An unclosed prefix holds back cleanup-rewritable text and an
+            // incomplete UTF-8 tail, as content does.
+            let reasoning = split.closed
+                ? split.reasoning
+                : ModelRuntime.withoutIncompleteUTF8Tail(Self.cleanupStablePrefix(of: split.reasoning))
+            let delta = ModelRuntime.streamDelta(from: emittedReasoning, to: reasoning)
+            if !delta.isEmpty {
+                emittedReasoning += delta
+                idleState.noteContent()
+                onChunk(.reasoning(delta))
+            }
+            guard split.closed else { return .more }
+            candidate = (split.answer, candidate.hitStop)
+        }
         let stableText = holdsCleanupPatternPrefixes
             ? Self.cleanupStablePrefix(
                 of: candidate.text,
@@ -13658,10 +13899,10 @@ struct SerialStreamingTextEmitter {
             // Capture prose before observing the tool delimiter: observe() flips
             // suppression as soon as a call opens, but cleanup holdback may have
             // deferred the separator immediately before that delimiter.
+            // Prose precedes the call deltas that the same text opens.
             let visibleContent = toolStreamer.visibleContentPrefix(of: stableText)
-            for event in toolStreamer.observe(stableText) {
-                onChunk(event)
-            }
+            let toolEvents = toolStreamer.observe(stableText)
+            defer { toolEvents.forEach(onChunk) }
             if !visibleContent.isEmpty || !toolStreamer.suppressesAssistantContent {
                 let delta = delta(to: visibleContent)
                 if !delta.isEmpty {
@@ -13702,9 +13943,35 @@ struct SerialStreamingTextEmitter {
         idleState: StructuredStreamingIdleState,
         onChunk: (StreamChunk) -> Void
     ) throws {
+        var finalText = finalText
+        if reasoningOpen {
+            let split = ReasoningOutput.split(finalText)
+            let rest = ModelRuntime.streamDelta(from: emittedReasoning, to: parsed.reasoningContent ?? split.reasoning)
+            if !rest.isEmpty {
+                emittedReasoning += rest
+                idleState.noteContent()
+                onChunk(.reasoning(rest))
+            }
+            finalText = split.answer
+        }
         reconciledToolCalls = parsed.toolCalls
         let finalDelta = delta(to: parsed.content)
         if streamToolsIncrementally {
+            // Whether a tool delta escaped before this final observation:
+            // until one did, leading prose (a terminal replay) and fallback
+            // content are still deliverable, and go before any call delta.
+            let noToolDeltaDelivered = toolStreamer.deliveredArguments == nil
+            if !parsed.toolCalls.isEmpty, noToolDeltaDelivered, !parsed.content.isEmpty {
+                let prose = ModelRuntime.streamDelta(from: emittedContent, to: parsed.content)
+                if !prose.isEmpty {
+                    if let error = structuredAccumulator.append(prose) {
+                        throw error
+                    }
+                    idleState.noteContent()
+                    noteEmitted(prose)
+                    onChunk(.content(prose))
+                }
+            }
             for event in toolStreamer.observe(finalText) {
                 onChunk(event)
             }
@@ -13724,9 +13991,12 @@ struct SerialStreamingTextEmitter {
                     )
                 }
             }
+            // A final parse that found no call (after a provisional delimiter
+            // or a held Llama brace) falls back to plain content when no tool
+            // delta escaped.
             if parsed.toolCalls.isEmpty,
                !parsed.content.isEmpty,
-               !toolStreamer.suppressesAssistantContent
+               !toolStreamer.suppressesAssistantContent || noToolDeltaDelivered
             {
                 let contentDelta = delta(to: parsed.content)
                 if !contentDelta.isEmpty {
@@ -13824,14 +14094,16 @@ struct NativeToolCallStreamEmitter {
     /// (SPEC-018 §3.5). `nil`/empty means no tools were declared, so nothing may be emitted.
     private let allowedFunctionNames: Set<String>?
     private let schemas: [String: MacProviderCore.JSONValue]?
-    /// Function-XML (`<function=…>`) is a Qwen-row-only grammar (SPEC-018 §3.1 v0.2.7). The
-    /// streaming emitter mirrors the non-streaming parser's family gate: only Qwen models may
-    /// stream `<function=…>` tool-call deltas; other families fall through to JSON parsing (which
-    /// yields nothing for XML), so no non-Qwen family can stream a function-XML delta.
+    /// Function-XML (`<function=…>`) belongs to the Qwen grammar only (SPEC-018 §3.1). The
+    /// streaming emitter mirrors the non-streaming parser's grammar gate.
     private let allowsFunctionXML: Bool
-    /// SPEC-018 §3.2: only Qwen 2.5/3 and Llama 3.3 native grammars are recognized.
-    /// Unsupported families must not complete a serial stop on lookalike markup.
+    /// SPEC-018 §3.1: the loaded template's grammar. A model without one never
+    /// completes a serial stop on lookalike markup.
     private let enabled: Bool
+    private let grammar: ToolCallGrammar?
+    /// Only the Qwen grammar streams arguments while they generate; every
+    /// other grammar holds the call and emits it complete at the end.
+    private let incremental: Bool
     private var sawToolDelimiter = false
     private var opened = false
     private var closed = false
@@ -13839,19 +14111,29 @@ struct NativeToolCallStreamEmitter {
     private var emittedArguments = ""
     private var callID = "call_\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())"
 
-    init(modelID: String, allowedFunctionNames: Set<String>?, schemas: [String: MacProviderCore.JSONValue]? = nil) {
+    init(
+        modelID: String,
+        grammar: ToolCallGrammar? = nil,
+        allowedFunctionNames: Set<String>?,
+        schemas: [String: MacProviderCore.JSONValue]? = nil
+    ) {
         self.allowedFunctionNames = allowedFunctionNames
         self.schemas = schemas
-        let isQwen = modelID.localizedCaseInsensitiveContains("qwen2.5")
-            || modelID.localizedCaseInsensitiveContains("qwen3")
-        let isLlama33 = modelID.localizedCaseInsensitiveContains("llama-3.3")
-        self.enabled = Self.supports(modelID: modelID)
-        self.allowsFunctionXML = isQwen
-        if isLlama33 {
+        let grammar = grammar ?? ToolCallGrammar.family(modelID: modelID)
+        self.grammar = grammar
+        self.enabled = Self.supports(grammar: grammar)
+        self.allowsFunctionXML = grammar == .qwen
+        self.incremental = grammar == .qwen
+        switch grammar {
+        case .llama3?:
             startDelimiter = "<|python_tag|>"
             endDelimiter = "<|eom_id|>"
             argumentKey = "parameters"
-        } else {
+        case .gemma4?:
+            startDelimiter = "<|tool_call>"
+            endDelimiter = "<tool_call|>"
+            argumentKey = "arguments"
+        default:
             startDelimiter = "<tool_call>"
             endDelimiter = "</tool_call>"
             argumentKey = "arguments"
@@ -13859,9 +14141,12 @@ struct NativeToolCallStreamEmitter {
     }
 
     static func supports(modelID: String) -> Bool {
-        modelID.localizedCaseInsensitiveContains("qwen2.5")
-            || modelID.localizedCaseInsensitiveContains("qwen3")
-            || modelID.localizedCaseInsensitiveContains("llama-3.3")
+        supports(grammar: ToolCallGrammar.family(modelID: modelID))
+    }
+
+    static func supports(grammar: ToolCallGrammar?) -> Bool {
+        guard let grammar else { return false }
+        return grammar != .harmony
     }
 
     var suppressesAssistantContent: Bool { enabled && (opened || sawToolDelimiter) }
@@ -13878,6 +14163,14 @@ struct NativeToolCallStreamEmitter {
         if suppressesAssistantContent {
             return ""
         }
+        if grammar == .llama3 {
+            // A bare JSON call has no opening tag: hold prose from the first
+            // `{` until the final parse decides (it is flushed if no call).
+            if let brace = text.firstIndex(of: "{") {
+                return String(text[..<brace])
+            }
+            return Self.stripIncompleteOpenDelimiter(from: text, delimiter: startDelimiter, extra: nil)
+        }
         if let start = text.range(of: startDelimiter) {
             return String(text[..<start.lowerBound])
         }
@@ -13889,6 +14182,10 @@ struct NativeToolCallStreamEmitter {
 
     mutating func observe(_ text: String) -> [StreamChunk] {
         guard enabled, !closed else {
+            return []
+        }
+        guard incremental else {
+            observeComplete(text)
             return []
         }
         if let start = text.range(of: startDelimiter) {
@@ -13912,6 +14209,37 @@ struct NativeToolCallStreamEmitter {
             return observeNemotronXML(body: text, isClosed: isClosed)
         }
         return []
+    }
+
+    /// GLM, Gemma 4 and Llama 3 calls are emitted whole by the final parser
+    /// (with an OpenAI index per call). Here the emitter only suppresses
+    /// content once a call starts and records when the first complete,
+    /// declared call has been generated (the serial-turn stop).
+    private mutating func observeComplete(_ text: String) {
+        let start: String.Index?
+        if grammar == .llama3 {
+            start = ToolCallParser.llama3CallStart(in: text)
+        } else {
+            start = text.range(of: startDelimiter)?.lowerBound
+        }
+        guard let start else { return }
+        sawToolDelimiter = true
+        guard !completedValidToolCall else { return }
+        var candidate = String(text[start...])
+        if grammar != .llama3 {
+            guard let end = candidate.range(of: endDelimiter) else { return }
+            candidate = String(candidate[..<end.upperBound])
+        }
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: candidate,
+            grammar: grammar,
+            modelID: "",
+            allowedFunctionNames: allowedFunctionNames ?? [],
+            schemas: schemas
+        )
+        if !parsed.toolCalls.isEmpty {
+            completedValidToolCall = true
+        }
     }
 
     private mutating func observeJSONToolCall(body: String, isClosed: Bool) -> [StreamChunk] {
@@ -14172,6 +14500,10 @@ struct CompletionResult: Sendable {
     /// the completion tokens generated through it, as the upstream attested
     /// them per token; empty when it did not.
     let loopbackPrefixCompletionTokens: [Int: Int]?
+    /// SPEC-018 §3.12: reasoning split from an open `<think>`, and the
+    /// completion tokens it used (a subset of `completionTokens`).
+    let reasoningContent: String?
+    let reasoningTokens: Int
 
     init(
         content: String,
@@ -14189,9 +14521,13 @@ struct CompletionResult: Sendable {
         specDecodeDraftedTokens: Int = 0,
         specDecodeAcceptedTokens: Int = 0,
         specDecodeGeneration: Int? = nil,
-        loopbackPrefixCompletionTokens: [Int: Int]? = nil
+        loopbackPrefixCompletionTokens: [Int: Int]? = nil,
+        reasoningContent: String? = nil,
+        reasoningTokens: Int = 0
     ) {
         self.loopbackPrefixCompletionTokens = loopbackPrefixCompletionTokens
+        self.reasoningContent = reasoningContent
+        self.reasoningTokens = max(0, reasoningTokens)
         self.content = content
         self.finishReason = finishReason
         self.promptTokens = promptTokens
@@ -14230,7 +14566,9 @@ struct CompletionResult: Sendable {
             specDecodeDraftedTokens: specDecodeDraftedTokens,
             specDecodeAcceptedTokens: specDecodeAcceptedTokens,
             specDecodeGeneration: specDecodeGeneration,
-            loopbackPrefixCompletionTokens: loopbackPrefixCompletionTokens
+            loopbackPrefixCompletionTokens: loopbackPrefixCompletionTokens,
+            reasoningContent: reasoningContent,
+            reasoningTokens: reasoningTokens
         )
     }
 
@@ -14251,7 +14589,9 @@ struct CompletionResult: Sendable {
             specDecodeDraftedTokens: specDecodeDraftedTokens,
             specDecodeAcceptedTokens: specDecodeAcceptedTokens,
             specDecodeGeneration: specDecodeGeneration,
-            loopbackPrefixCompletionTokens: content == self.content ? loopbackPrefixCompletionTokens : nil
+            loopbackPrefixCompletionTokens: content == self.content ? loopbackPrefixCompletionTokens : nil,
+            reasoningContent: reasoningContent,
+            reasoningTokens: reasoningTokens
         )
     }
 
@@ -14272,7 +14612,9 @@ struct CompletionResult: Sendable {
             specDecodeDraftedTokens: specDecodeDraftedTokens,
             specDecodeAcceptedTokens: specDecodeAcceptedTokens,
             specDecodeGeneration: specDecodeGeneration,
-            loopbackPrefixCompletionTokens: loopbackPrefixCompletionTokens
+            loopbackPrefixCompletionTokens: loopbackPrefixCompletionTokens,
+            reasoningContent: reasoningContent,
+            reasoningTokens: reasoningTokens
         )
     }
 

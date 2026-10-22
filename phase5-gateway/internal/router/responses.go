@@ -36,6 +36,9 @@ type responsesAdapter struct {
 	toolChoice        any
 	textFormat        any
 	parallelToolCalls bool
+	// customToolNames are Responses `custom` tools served as a function with
+	// one string argument `input` (SPEC-006 §19, #2107 D9).
+	customToolNames map[string]bool
 
 	status      int
 	wroteHeader bool
@@ -74,6 +77,8 @@ type responsesStreamToolCall struct {
 	Output    int
 	Arguments strings.Builder
 	Opened    bool
+	// Custom: a Responses `custom` tool call, emitted whole at completion.
+	Custom bool
 }
 
 func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
@@ -315,6 +320,13 @@ func (a *responsesAdapter) translateRequest(body []byte) ([]byte, *responsesTran
 	if toolsErr != nil {
 		return nil, toolsErr
 	}
+	a.customToolNames = responsesCustomToolNames(req.Tools)
+	if unserved := responsesUnservedToolTypes(req.Tools); len(unserved) > 0 && a.dst != nil {
+		a.dst.Header().Set("X-Malibu-Unserved-Tools", strings.Join(unserved, ","))
+	}
+	if effort := responsesReasoningEffort(req.Reasoning); effort != "" {
+		chat["reasoning_effort"] = effort
+	}
 	if len(chatTools) > 0 {
 		chat["tools"] = chatTools
 	}
@@ -392,8 +404,42 @@ func responsesInputToChatMessages(instructions *string, input json.RawMessage) (
 func responsesInputItemToChatMessage(item map[string]any) (map[string]any, bool, error) {
 	itemType, _ := item["type"].(string)
 	switch itemType {
-	case "input_image", "input_file", "input_audio", "image_generation_call", "file_search_call", "web_search_call", "computer_call", "code_interpreter_call", "mcp_call":
+	case "input_image", "input_file", "input_audio", "image_generation_call", "file_search_call", "web_search_call", "computer_call", "code_interpreter_call", "mcp_call",
+		"local_shell_call", "local_shell_call_output", "computer_call_output", "item_reference":
 		return nil, false, fmt.Errorf("%s input is not supported", itemType)
+	case "reasoning":
+		// The model's own prior reasoning; the chat template renders history
+		// without it.
+		return nil, false, nil
+	case "custom_tool_call_output":
+		callID, _ := item["call_id"].(string)
+		if callID == "" {
+			callID, _ = item["id"].(string)
+		}
+		return map[string]any{"role": "tool", "tool_call_id": callID, "content": responsesContentToText(item["output"])}, true, nil
+	case "custom_tool_call":
+		name, _ := item["name"].(string)
+		input, _ := item["input"].(string)
+		callID, _ := item["call_id"].(string)
+		if callID == "" {
+			callID, _ = item["id"].(string)
+		}
+		args, err := json.Marshal(map[string]string{"input": input})
+		if err != nil {
+			return nil, false, fmt.Errorf("custom_tool_call input could not be encoded")
+		}
+		return map[string]any{
+			"role":    "assistant",
+			"content": nil,
+			"tool_calls": []map[string]any{{
+				"id":   callID,
+				"type": "function",
+				"function": map[string]any{
+					"name":      name,
+					"arguments": string(args),
+				},
+			}},
+		}, true, nil
 	case "function_call_output":
 		callID, _ := item["call_id"].(string)
 		output := responsesContentToText(item["output"])
@@ -427,6 +473,8 @@ func responsesInputItemToChatMessage(item map[string]any) (map[string]any, bool,
 	if role == "" {
 		if itemType == "message" {
 			role = "user"
+		} else if itemType != "" {
+			return nil, false, fmt.Errorf("%s input is not supported", itemType)
 		} else {
 			return nil, false, nil
 		}
@@ -639,17 +687,156 @@ func responsesToolsToChatTools(tools []map[string]any) ([]map[string]any, *respo
 			if err := addFunction(tool); err != nil {
 				return nil, err
 			}
+		case "custom":
+			if err := addFunction(responsesCustomToolAsFunction(tool)); err != nil {
+				return nil, err
+			}
 		case "namespace":
 			for _, nested := range responsesNestedTools(tool["tools"]) {
-				if nestedType, _ := nested["type"].(string); nestedType == "function" {
+				switch nestedType, _ := nested["type"].(string); nestedType {
+				case "function":
 					if err := addFunction(nested); err != nil {
 						return nil, err
 					}
+				case "custom":
+					if err := addFunction(responsesCustomToolAsFunction(nested)); err != nil {
+						return nil, err
+					}
+				case "local_shell":
+					return nil, responsesUnservableToolError(nestedType)
 				}
 			}
+		case "local_shell":
+			// A client-executed tool whose call shape the model cannot be
+			// given as a function: refused, never dropped.
+			return nil, responsesUnservableToolError(typ)
+		default:
+			// OpenAI-hosted tools (web_search, file_search, code_interpreter,
+			// image_generation, mcp, computer_use, ...) run on OpenAI's
+			// servers. They are not offered to the model; the adapter names
+			// them in X-Malibu-Unserved-Tools (responsesUnservedToolTypes).
 		}
 	}
 	return out, nil
+}
+
+// responsesUnservedToolTypes lists the hosted tool types the gateway does not
+// offer to the model, for the X-Malibu-Unserved-Tools response header.
+func responsesUnservedToolTypes(tools []map[string]any) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, tool := range tools {
+		typ, _ := tool["type"].(string)
+		switch typ {
+		case "function", "custom", "namespace", "local_shell":
+			continue
+		}
+		if typ == "" || seen[typ] || len(typ) > 64 {
+			continue
+		}
+		valid := true
+		for _, r := range typ {
+			if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '_' && r != '-' {
+				valid = false
+				break
+			}
+		}
+		if valid {
+			seen[typ] = true
+			out = append(out, typ)
+		}
+	}
+	return out
+}
+
+func responsesUnservableToolError(typ string) *responsesTranslationError {
+	if typ == "" {
+		typ = "(missing type)"
+	}
+	return &responsesTranslationError{
+		code:    "unsupported_tool_type",
+		param:   "tools",
+		message: fmt.Sprintf("tool type %q cannot be served by this gateway; declare it as a function or custom tool", typ),
+	}
+}
+
+// responsesCustomToolMaxGrammarBytes bounds the grammar text a custom tool's
+// description carries to the model.
+const responsesCustomToolMaxGrammarBytes = 16 * 1024
+
+// responsesCustomToolAsFunction serves a freeform `custom` tool as a function
+// with one string argument `input`. A declared grammar cannot be enforced; it
+// is shown to the model in the description.
+func responsesCustomToolAsFunction(tool map[string]any) map[string]any {
+	description, _ := tool["description"].(string)
+	if format, ok := tool["format"].(map[string]any); ok {
+		if definition, _ := format["definition"].(string); definition != "" {
+			syntax, _ := format["syntax"].(string)
+			if len(definition) > responsesCustomToolMaxGrammarBytes {
+				definition = definition[:responsesCustomToolMaxGrammarBytes]
+			}
+			description = strings.TrimSpace(description + "\n\nThe input must follow this " + syntax + " grammar:\n" + definition)
+		}
+	}
+	return map[string]any{
+		"name":        tool["name"],
+		"description": description,
+		"parameters": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"input": map[string]any{"type": "string", "description": "The raw tool input."},
+			},
+			"required":             []any{"input"},
+			"additionalProperties": false,
+		},
+	}
+}
+
+func responsesCustomToolNames(tools []map[string]any) map[string]bool {
+	names := map[string]bool{}
+	var visit func([]map[string]any)
+	visit = func(list []map[string]any) {
+		for _, tool := range list {
+			switch typ, _ := tool["type"].(string); typ {
+			case "custom":
+				if name, _ := tool["name"].(string); name != "" {
+					names[name] = true
+				}
+			case "namespace":
+				visit(responsesNestedTools(tool["tools"]))
+			}
+		}
+	}
+	visit(tools)
+	if len(names) == 0 {
+		return nil
+	}
+	return names
+}
+
+// responsesReasoningEffort passes `reasoning.effort` through as the chat
+// `reasoning_effort` (SPEC-018 §3.12).
+func responsesReasoningEffort(reasoning any) string {
+	object, _ := reasoning.(map[string]any)
+	effort, _ := object["effort"].(string)
+	switch effort {
+	case "none", "minimal", "low", "medium", "high", "xhigh":
+		return effort
+	default:
+		return ""
+	}
+}
+
+// responsesCustomToolInput is the `input` string of a custom tool call's
+// arguments, or the raw arguments when they are not that object.
+func responsesCustomToolInput(arguments string) string {
+	var object map[string]any
+	if json.Unmarshal([]byte(arguments), &object) == nil {
+		if input, ok := object["input"].(string); ok {
+			return input
+		}
+	}
+	return arguments
 }
 
 func responsesToolsEchoFromChatTools(tools []map[string]any) []map[string]any {
@@ -708,7 +895,8 @@ func responsesToolChoiceToChatToolChoice(choice any, tools []map[string]any) (an
 	if !ok {
 		return nil, &responsesTranslationError{code: "unsupported_parameter", param: "tool_choice", message: "tool_choice must be a supported string or function selection"}
 	}
-	if typ, _ := m["type"].(string); typ == "function" {
+	// A named `custom` selection picks the function serving that custom tool.
+	if typ, _ := m["type"].(string); typ == "function" || typ == "custom" {
 		if name, _ := m["name"].(string); name != "" {
 			if !responsesChatToolsContainName(tools, name) {
 				return nil, &responsesTranslationError{code: "unsupported_parameter", param: "tool_choice", message: fmt.Sprintf("tool_choice references unavailable function tool %q", name)}
@@ -807,6 +995,17 @@ func (a *responsesAdapter) translateNonStreamingResponse(body []byte) ([]byte, e
 		callID := tc.ID
 		if callID == "" {
 			callID = "call_" + idSuffix(id)
+		}
+		if a.customToolNames[tc.Function.Name] {
+			output = append(output, map[string]any{
+				"id":      "ctc_" + idSuffix(callID),
+				"type":    "custom_tool_call",
+				"call_id": callID,
+				"name":    tc.Function.Name,
+				"input":   responsesCustomToolInput(tc.Function.Arguments),
+				"status":  "completed",
+			})
+			continue
 		}
 		output = append(output, map[string]any{
 			"id":        "fc_" + idSuffix(callID),
@@ -972,6 +1171,17 @@ func (a *responsesAdapter) emitToolCallDelta(index int, id, name, arguments stri
 	if name != "" {
 		tc.Name = name
 	}
+	if a.customToolNames[tc.Name] {
+		// A custom call's input is the `input` string inside the streamed
+		// JSON arguments; it is emitted whole when the call completes.
+		if !tc.Opened {
+			tc.Output = a.nextOutputIndex()
+			tc.Opened = true
+			tc.Custom = true
+		}
+		tc.Arguments.WriteString(arguments)
+		return
+	}
 	if !tc.Opened {
 		tc.Output = a.nextOutputIndex()
 		a.emitResponsesSSE("response.output_item.added", map[string]any{
@@ -1024,6 +1234,17 @@ func (a *responsesAdapter) emitStreamDone() {
 	})
 	for _, tc := range toolCalls {
 		args := tc.Arguments.String()
+		if tc.Custom {
+			item := map[string]any{"id": "ctc_" + idSuffix(tc.CallID), "type": "custom_tool_call", "call_id": tc.CallID, "name": tc.Name, "input": responsesCustomToolInput(args), "status": "completed"}
+			a.emitResponsesSSE("response.output_item.added", map[string]any{
+				"type": "response.output_item.added", "output_index": tc.Output, "item": item, "sequence_number": a.nextSeq(),
+			})
+			a.emitResponsesSSE("response.output_item.done", map[string]any{
+				"type": "response.output_item.done", "output_index": tc.Output, "item": item, "sequence_number": a.nextSeq(),
+			})
+			output = append(output, item)
+			continue
+		}
 		a.emitResponsesSSE("response.function_call_arguments.done", map[string]any{
 			"type": "response.function_call_arguments.done", "item_id": tc.ID, "output_index": tc.Output,
 			"name": tc.Name, "arguments": args, "sequence_number": a.nextSeq(),

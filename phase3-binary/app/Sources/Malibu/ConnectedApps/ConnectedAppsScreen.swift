@@ -83,7 +83,7 @@ final class ConnectedAppsStore: ObservableObject {
         }
     }
 
-    static let noModelsServed = "No models are being served right now. Try again later."
+    static let noModelsServed = "No tool-capable model with at least 32,768 tokens of context is being served right now. Try again later."
     static let saveKeyFirst = "Save a buyer key first."
 
     func loadModels() {
@@ -116,7 +116,7 @@ final class ConnectedAppsStore: ObservableObject {
         run {
             let key = try ConnectedBuyerKeychain.read()
             try await ConnectedGatewayClient().test(api: selectedApp.api, model: model.id, key: key)
-            self.endpointTested = "Endpoint tested: \(selectedApp.api.rawValue) · \(model.id). Client streaming, tools and conversation compatibility are not tested."
+            self.endpointTested = "Endpoint tested: \(selectedApp.api.rawValue) · \(model.id) · tool call and result round trip. Client streaming and the client's own compatibility are not tested."
             self.status = "A bounded buyer-funded inference completed."
         }
     }

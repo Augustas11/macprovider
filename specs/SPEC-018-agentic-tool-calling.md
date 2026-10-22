@@ -1,6 +1,6 @@
 # SPEC-018 — Agentic tool calling (provider-side response synthesis)
 
-**Version:** 0.2.17 (2026-10-21, schema-directed auto function-XML values)
+**Version:** 0.3.0 (2026-10-22, template-selected grammars for every catalog family, template-rendered tool history, reasoning split; #2107)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.5.5, SPEC-006 v0.9, SPEC-008 (Pillar A model-hash trust layer — referenced by §10a), SPEC-011 v0.5 (warm-swap heartbeat `model_hash` — referenced by §10a), SPEC-015 v0.4 (receipts canonical output binding — see AC-17 and §N.5)
 **Status:** **LOCKED** at v0.2.10 by the streaming cleanup-rewrite byte-domain clarification. Previously LOCKED at v0.2.9 by the serial-turn `parallel_tool_calls` amendment (omitted/`false` stop after the first complete valid tool). Previously LOCKED at v0.2.8 by the #1594 OpenRouter-aligned AC-53 amendment (no independent messages[] count cap). Previously LOCKED at v0.2.7 by the Qwen3-Coder function-XML tool-call grammar amendment (documents the `<function=…><parameter=…>` XML body that Qwen3-Coder emits as a Qwen-row §3.1 body-grammar alternative, with OpenAI/MCP name charset; pending IMPL/conformance already landed on branch `fix/qwen3coder-toolcall-parse`); previously LOCKED at v0.2.6 by #784 C2b admission-timeout reconciliation — v0.2.4 spec PR #202 and IMPL PR #209 both landed (multi-turn acceptance, token-incremental streaming, `tool_call_id` validation, 1 MiB/2 MiB byte caps). v0.2.5 adds gpt-oss/OpenAI Harmony response parsing as a pending implementation/conformance gap. codex 4-lane r4 0/0/0; Claude blind-spot r2 0/0/0. SPEC-019 already depends on this as "LOCKED". The former "LOCK CANDIDATE pending PR" line was never flipped after merge. (Resolved gap, 2026-07-14, runbook item 15: AC-45's `X-MacProvider-Streaming-Mode` header — set by the coordinator on streaming `200` responses — was stripped by the public gateway's blanket `X-MacProvider-*` filter, making the "header absent" fail condition live on `api.malibu.tech`. Fixed by adding the header to the SPEC-006 v0.9.9 § 5.4 response-pass-through allowlist and un-stripping it at the gateway, validated against AC-45's closed enum. Chosen over scoping AC-45 to the coordinator surface because buyers hit the gateway, so scoping would have left AC-45's buyer-visible promise unmet. AC-45's normative text is unchanged; this is a documentation reconciliation, not a lock amendment. Residual: the coordinator currently emits the diagnostic only on the streaming success path — non-streaming AC-45 emission is a separate coordinator-side completeness item, out of scope for the gateway-strip fix.)
 
@@ -17,6 +17,30 @@ SPEC-018 is the **provider-side response synthesis contract** for OpenAI-wire to
 **Money-path**: all v0.2 changes preserve v0.1.5 settlement protection (`FaultBreakerQualifying` + zero credits on malformed streams via `billing_recorder.go:176` + `formula.go:112`).
 
 ## Change log
+
+- **v0.3.0 (2026-10-22, #2107 — every catalog family is a drop-in tool model):**
+  Lock amendment under §10c.1 with these named changes. (1) §3.1/§3.2: the
+  provider selects the tool-call grammar from the loaded chat template
+  (`ToolCallGrammar`, from the mlx-swift-lm `ToolCallFormat` the model factory
+  resolves from the template) and falls back to the catalog family; a
+  model-ID substring alone no longer decides. New rows: GLM `<arg_key>` (GLM-4.5,
+  GLM-5.3), Llama 3.x bare JSON (3.1/3.2/3.3), Gemma 4 `<|tool_call>`; Nemotron-3
+  uses the Qwen grammar. A family whose template has no tool grammar (Qwen2-VL)
+  refuses `tools` with 400 `tools_unsupported_for_model` (§3.5a). (2) §2.4: prose
+  the model writes before its first call is kept as assistant `content`.
+  (3) §4: omitted `parallel_tool_calls` in auto mode collects every call (the
+  OpenAI default); only an explicit `false` stops after the first complete call.
+  Guaranteed modes (§3.11) keep exactly one call unless the flag is `true`.
+  Calls in grammars without incremental argument streaming (GLM, Gemma 4,
+  Llama 3) stream once complete, one OpenAI `index` per call. (4) §3.8: tool
+  history is rendered by the model's own chat template from structured messages
+  (assistant `tool_calls` with object `arguments`, `tool` messages with
+  `tool_call_id` and the called name); hand-rendered profiles are removed and
+  `unsupported_modelID_for_multi_turn` applies only to families without a tool
+  grammar. (5) §3.11: guaranteed selection follows the native provider's
+  declared `ToolSelectionCapabilities` for its exact loaded model; the
+  coordinator no longer pins one model ID. (6) new §3.12: reasoning split and
+  `reasoning_effort`.
 
 - **v0.2.17 (2026-10-21, §3.3 auto function-XML argument decoding):**
   Ordinary `auto` function-XML decoding now uses an enabled tool's declared
@@ -352,6 +376,8 @@ Source: `phase3-binary/Sources/macprovider-cli/ToolCallParser.swift:238-264`, `p
 
 The parser can collect prose outside tool-call delimiters as cleaned content. The v0.1 provider runtime discards that cleaned content whenever at least one tool call is parsed and returns tool calls only. Therefore, when the model emits prose before, between, or after recognized tool calls, the buyer-visible non-streaming message MUST contain `content = null` and the parsed `tool_calls[]`.
 
+**AMENDED v0.3.0:** prose between or after GLM/Gemma envelopes is dropped without discarding the calls. Prose the model writes *before* its first recognized call is kept: the non-streaming message carries it (trimmed) as `content` next to `tool_calls[]`, and a stream delivers it as content deltas before the first tool-call delta. Prose between or after calls is still dropped; `content` is `null` when there is no leading prose.
+
 Source: parser behavior in `phase3-binary/Sources/macprovider-cli/ToolCallParser.swift:29-50`; runtime discard in `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:826-839`; response emission in `phase3-binary/Sources/macprovider-cli/HTTPServer.swift:819-828`.
 
 ## 3. Detection Grammar
@@ -364,21 +390,33 @@ The provider does not receive structured tool calls from the underlying MLX mode
 
 ### 3.1 Family table
 
-| Family | `modelID` match (required) | Body grammar | Argument field | Source |
+| Grammar | Selected when | Body grammar | Argument field | Source |
 |---|---|---|---|---|
-| Qwen (2.5 / 3 / Coder variants) | `modelID` substring contains `qwen2.5` OR `qwen3` (case-insensitive) | ONE OF: `<tool_call>{...}</tool_call>` JSON body; `<tool_call>name(key=value, ...)</tool_call>` Python-style call; OR (v0.2.7) the `<function=name><parameter=key>value</parameter></function>` XML body (Qwen3-Coder native form, shared with Nemotron; may appear with or without an enclosing `<tool_call>` wrapper). The parser tries JSON body first, then Python-style, then function-XML. | `arguments` preferred for JSON body; `parameters` accepted as JSON-body fallback; keyword args for Python-style body; `<parameter=…>` keys for function-XML body | `ToolCallParser.swift` `parseDelimited`/`parseJSONCall`/`parsePythonStyleCall` (JSON + Python), `parseBareNemotronCalls`/`parseNemotronXMLCall`/`nemotronParameterObject` (function-XML) |
-| Llama 3.3 MLX | `modelID` substring contains `llama-3.3` (case-insensitive) | `<\|python_tag\|>{...}<\|eom_id\|>` JSON body, OR `<\|python_tag\|>name(key=value)<\|eom_id\|>` Python-style body (JSON body parsing tried first) | `parameters` preferred for JSON body; `arguments` accepted as JSON-body fallback; keyword args for Python-style body | `ToolCallParser.swift:451-491` |
-| gpt-oss / OpenAI Harmony | `modelID` substring contains `gpt-oss` (case-insensitive) | OpenAI Harmony response frames parsed from generated token IDs: channel/header/body spans are delimited by Harmony structural tokens, not by decoded sentinel-text search. Only `final` channel bodies become assistant content; valid `commentary to=functions.<name>` frames terminated by the Harmony call token become OpenAI tool calls. | JSON object body of a declared `commentary to=functions.<name>` call; no `arguments` / `parameters` wrapper is inferred. | `HarmonyResponseParser.swift` |
+| `qwen` | template format `json`, `xml_function` or `qwen3_5`; family fallback `qwen2.5`, `qwen3`, `nemotron-3` | ONE OF: `<tool_call>{...}</tool_call>` JSON body; `<tool_call>name(key=value, ...)</tool_call>` Python-style call; OR the `<function=name><parameter=key>value</parameter></function>` XML body (Qwen3-Coder, Qwen3.5+, Nemotron-3), with or without the enclosing `<tool_call>`. JSON first, then Python-style, then function-XML. | `arguments` (JSON), keyword args (Python-style), `<parameter=…>` keys (XML, typed per §3.3) | `ToolCallParser.parseQwenToolCalls` |
+| `glm` | template format `glm4`; family fallback `glm-4.5`…`glm-4.7`, `glm-5` | `<tool_call>NAME<arg_key>K</arg_key><arg_value>V</arg_value>…</tool_call>`, one envelope per call; the final envelope may end at the end of output without `</tool_call>` when its pairs are complete. | `<arg_key>` keys. A value whose declared type is `string` is literal text; any other declared type must be strict JSON of that type; an undeclared value is JSON when it parses, else text. | `ToolCallParser.glmCall` |
+| `llama3` | template format `llama3`; family fallback `llama-3.1`, `llama-3.2`, `llama-3.3` | One or more JSON objects `{"name", "parameters"}` ending the output, `;`-separated, optionally after `<|python_tag|>` and before `<|eom_id|>`/`<|eot_id|>`. A JSON object without a string `name` and an object `parameters`/`arguments` is content. | `parameters` (`arguments` accepted) | `ToolCallParser.parseLlama3Calls` |
+| `gemma4` | template format `gemma4`; family fallback `gemma-4` | `<|tool_call>call:NAME{key:value,…}<tool_call|>` with strings as `<|"|>…<|"|>` and brace-form objects/arrays | keys of the brace object; strings `<|"|>`-delimited at any depth; duplicate keys, trailing text, depth over 32 or a declared-type mismatch fail closed | `GemmaToolCallBridge` (bounded dialect parser) |
+| `harmony` | template format `gpt_oss`; family fallback `gpt-oss` | OpenAI Harmony response frames parsed from generated token IDs (§3.10). | JSON object body of a declared `commentary to=functions.<name>` call. | `HarmonyResponseParser.swift` |
 
 Note: production Qwen-coding SKUs (e.g. `mlx-community/Qwen2.5-Coder-32B-Instruct-4bit`, `mlx-community/Qwen3-32B-4bit`) match the Qwen family row via `qwen2.5` or `qwen3` substring. There is no separate "coding-tuned" row in §3.1 — coding-tuned variants advertise as Qwen2.5/Qwen3 derivatives and select the same family; body-grammar disambiguation is performed by the parser per the OR rule above.
 
-### 3.2 modelID match required (Security C-1 (a))
+### 3.2 Grammar selection (Security C-1 (a), amended v0.3.0)
 
-Family detection MUST require a `modelID` substring match against §3.1. Content-sentinel detection alone (the presence of `<tool_call>` or `<|python_tag|>` in raw model output without a matching `modelID`) is NOT a normative trigger in v0.1. Harmony token-ID sentinel detection alone (the presence of Harmony structural token IDs without a `gpt-oss` `modelID` match) is likewise NOT a normative trigger in v0.2.5. Output containing recognized text sentinels or Harmony structural token IDs but no §3.1 family match MUST be emitted as plain assistant content through the non-matching path; no `tool_calls[]` are synthesized.
+The provider MUST select the grammar from the chat template the loaded model
+was prepared with: the mlx-swift-lm model factory resolves a `ToolCallFormat`
+from the checkpoint's template (`tool_parser_type`, then template markers such
+as `<arg_key>` or `<|tool_call>`), and the provider maps it to a §3.1 grammar.
+When no template format is available (tests, loopback relays, the
+coordinator's mirror) the catalog-family fallback in §3.1 applies. Content
+sentinels alone never select a grammar: output containing markup of a grammar
+the request's model was not selected for is plain assistant content, so the
+Security C-1 prompt-echo boundary is unchanged. The coordinator mirrors the
+family fallback (`toolGrammarFamily`) only to refuse requests the provider
+would refuse.
 
-A request with a **missing, empty, or whitespace-only `modelID`** MUST be treated as no §3.1 family match for §3.2 purposes; the response falls back to plain assistant content per §3.5. (SPEC-001 normally requires the field at request validation; §3.2 pins the defensive default in case validation is loosened.)
-
-Rationale: the v0.1 design closes the prompt-injection vector identified in Security C-1 / Q6, where a model could be prompted to echo `<tool_call>{"name":"declared_tool",…}</tool_call>` and the parser would synthesize a legitimate-looking tool call. v0.2.5 applies the same boundary to Harmony structural token IDs: token-ID framing is only meaningful for a declared Harmony-capable `gpt-oss` model family, and decoded marker-looking bytes are data outside that family. With `modelID` match required, a provider that has not advertised a tool-call-capable family does not synthesize tool calls regardless of model output content. (modelID is a self-declared string the provider chooses freely. v0.1 still trusts the provider's modelID assertion; the residual case — a tool-call-capable model echoing hostile content, OR a malicious provider lying about modelID while serving different weights — is closed in v0.3 via the §10a model-hash → family registry binding on top of the SPEC-008 Pillar A `model_hash` infrastructure, plus the prompt-echo guard.)
+A request with a missing, empty, or whitespace-only `modelID` and no loaded
+template grammar MUST be treated as no grammar match; the response falls back
+to plain assistant content per §3.5.
 
 ### 3.3 Body parsing
 
@@ -417,6 +455,15 @@ The v0.1 provider rejects ambiguous duplicate keys by abandoning tool-call synth
 
 Source: JSON duplicate validator in `phase3-binary/Sources/macprovider-cli/ToolCallParser.swift:266-448`; Python keyword duplicate rejection in `phase3-binary/Sources/macprovider-cli/ToolCallParser.swift:96-123`; locked by `phase3-binary/Tests/macprovider-cliTests/ToolCallParserTests.swift:125-159`. Depth + byte caps are a v0.1.3 IMPL delta per §1.2.
 
+### 3.5a Models without a tool grammar (v0.3.0)
+
+A request that declares `tools` for a model whose template has no tool grammar
+(for example Qwen2-VL) MUST fail before inference with HTTP 400
+`tools_unsupported_for_model`, `param: "tools"`, `retryable: false`. The
+coordinator applies the same gate before dispatch on routes that can reach only
+native providers; external runtimes and unresolved BYOM models keep
+provider-side behavior.
+
 ### 3.5 Fallback to plain content
 
 If grammar detection fails, parsing fails, the function name is not declared in the request's enabled tools, or a value cannot be represented as a JSON-object `arguments` string, the provider MUST treat the model output as plain assistant content and MUST NOT emit `tool_calls[]`.
@@ -435,6 +482,20 @@ When the buyer-supplied `modelID` substring-matches more than one family row in 
 Cross-family parser confusion is therefore handled exclusively by §3.2 + table-order priority; no pre-detection scan is required.
 
 ### 3.8 Tool prompt-template profile (multi-turn input rendering, v0.2 additive)
+
+**v0.3.0 amendment (supersedes the hand-rendered profiles below).** Tool
+history MUST be rendered by the loaded model's own chat template. The provider
+passes structured messages: an assistant message with `tool_calls` carries each
+call as `{id, type: "function", function: {name, arguments}}` where `arguments`
+is the parsed JSON object (not a string), and a `tool` message carries
+`tool_call_id` and the name of the call it answers. Names MUST match the
+OpenAI charset and argument keys the §3.3 parameter charset, so history cannot
+forge call markup in templates that write them unquoted. A template that
+refuses a conversation with `raise_exception` (Llama 3.x renders one call per
+assistant turn) is a 400 `invalid_request`. Every family with a §3.1 grammar
+renders history; `unsupported_modelID_for_multi_turn` remains only for models
+without one. The renderer validation, ordering and `tool_call_id` rules below
+still apply; the per-family markup they describe is now the template's.
 
 **v0.2.0/v0.2.1 numbering note:** this additive tool-prompt-template-profile section is renumbered to §3.8 to avoid a heading collision with locked §3.7 "Adding a new family." This is an explicit v0.2.1 lock amendment; no other §3 locked numbering is changed.
 
@@ -562,6 +623,12 @@ explicit tool modes for relay-blind/encrypted envelopes.
 | Native `mlx_cache`, exact loaded `mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit` (function-XML) | Existing behavior | Supported | Call prefill plus complete-generation schema holdback |
 | Native `mlx_cache`, exact loaded `mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit` (JSON envelope) | Existing behavior | Supported | Call prefill plus complete-generation schema holdback |
 | Other native `mlx_cache` identities | Existing behavior | Supported | Unsupported |
+
+**v0.3.0:** the coordinator and gateway admit `required`/named for a provider
+exactly when its declared `ToolSelectionCapabilities` (validation
+`schema-holdback-v1`, runtime `mlx_cache`, model equal to its loaded model)
+lists the mode; neither pins a model ID. Messages `tool_choice: {"type":"any"}`
+maps to `required` and is served wherever `required` is.
 | External/loopback runtimes | Existing behavior | Unsupported | Unsupported |
 
 A buyer alias can use a supported row only when routing resolves to that same
@@ -742,6 +809,35 @@ listing establishes that legacy encrypted requests enforce it.
 Local tests and capability fields are implementation evidence only. Studio
 hardware qualification and acceptance through the gateway using an approved
 released provider remain pending, and MUST NOT be inferred from this matrix.
+
+### 3.12 Reasoning split and `reasoning_effort` (v0.3.0)
+
+When the rendered generation prompt ends inside an open `<think>` (the decoded
+prompt tail has a `<think>` with only whitespace after it, as GLM-5.3 renders),
+the generated text up to the first `</think>` is reasoning:
+
+- Non-streaming: `message.reasoning_content` carries the reasoning (without
+  the tag) and `content` the text after `</think>` with leading whitespace
+  removed. Streaming: reasoning arrives as `delta.reasoning_content` before any
+  content or tool-call delta.
+- `usage.completion_tokens_details.reasoning_tokens` reports the tokens up to
+  and including the one completing `</think>`. They remain part of
+  `completion_tokens` (billing is unchanged).
+- Stop strings, JSON-mode validation (SPEC-019) and tool parsing apply only to
+  the text after `</think>`; a stop string inside the reasoning neither ends
+  generation nor truncates it. Continuous-batching rows of such requests carry
+  no request stop-token sequences; their canonical stop observer ends them
+  at the first post-`</think>` stop match, for streaming and non-streaming
+  waiters alike.
+- Output that never closes `</think>` is all reasoning; `content` is empty.
+- The receipt output hash (SPEC-015) covers `content`, `tool_calls` and
+  `finish_reason` as before; `reasoning_content` is not part of it in this
+  version.
+
+`reasoning_effort` (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`;
+anything else is 400) reaches the chat template as `reasoning_effort`. When a
+request declares tools and omits it, the provider passes `low`; otherwise the
+template default applies. Templates without the variable ignore it.
 
 ## 4. Streaming Wire Shape
 
@@ -1077,7 +1173,7 @@ AC-63. **v0.2.7 streaming undeclared function-XML name fails closed.** For a Qwe
 
 AC-64. **v0.2.7 function-XML hyphenated parameter name.** For a Qwen modelID with enabled tool `buzz-dev-mcp__shell` and model output `<function=buzz-dev-mcp__shell><parameter=work-dir>/tmp</parameter></function>`, the emitted `function.arguments` is a JSON object with key `work-dir` (`{"work-dir":"/tmp"}`). Fail condition: the hyphenated parameter key is rejected and the tool call is dropped or leaked as plain content.
 
-AC-65. **v0.2.9 serial stop after first complete tool.** For a Qwen modelID with enabled tools, `parallel_tool_calls` omitted or `false`, and model output a complete declared JSON tool object followed by leftover markup or a second tool, the provider stops generation after the first complete valid call, the stream terminal is `finish_reason:"tool_calls"`, `tool_calls[]` contains only that first call, and leftover is not buyer-visible content. Fail condition: generation continues until a request timeout, the stream dies with `malformed_tool_call`, leftover tags remain in `content`, or a second tool is emitted.
+AC-65. **v0.2.9 serial stop after first complete tool (AMENDED v0.3.0: explicit `false` only; omitted is parallel).** For a Qwen modelID with enabled tools, `parallel_tool_calls` omitted or `false`, and model output a complete declared JSON tool object followed by leftover markup or a second tool, the provider stops generation after the first complete valid call, the stream terminal is `finish_reason:"tool_calls"`, `tool_calls[]` contains only that first call, and leftover is not buyer-visible content. Fail condition: generation continues until a request timeout, the stream dies with `malformed_tool_call`, leftover tags remain in `content`, or a second tool is emitted.
 
 AC-66. **v0.2.9 explicit parallel keeps multi-call order.** For the same two-call model output as AC-65 with `parallel_tool_calls: true`, `tool_calls[]` preserves both calls in textual order. Fail condition: the second call is dropped.
 
@@ -1146,6 +1242,7 @@ Amendment log:
 - Amendment 1 (v0.2.1): §10c v0.1.3-locked model-hash registry requirement → deferred to v0.3. Rationale: narrow v0.2 scope makes registry curation strategically premature. Mitigation: AC-46 model-hash observation channel + §8.4.2 final-close tightening.
 - Amendment 2 (v0.2.3): §3.9 v0.2.1-introduced minimal prompt-echo guard → DELETED. Rationale: minimal guard had three exploitable defects making it net-negative vs. no guard (whitespace bypass; scope incomplete; self-DoS via Cline reading SPEC-018.md). Residual risk: same-family echo attack remains unmitigated in v0.2. Mitigation: deferred to v0.3 full guard.
 - Amendment 3 (v0.2.8): AC-53 / §10d.1 v0.2.0-locked maximum `messages[]` length 256 → DELETED as an independent cap. Rationale: the count cap is not a model constraint and blocks legitimate coding-agent sessions (Pi/Cline 300+ messages); OpenRouter and OrcaRouter impose no message-count limit. Residual risk: large-but-under-body-cap arrays still cost validation CPU. Mitigation: AC-50 4 MiB raw-body cap (public gateway SPEC-006 default `request_body_bytes` may be stricter), AC-51/AC-52 aggregate byte caps, AC-54 tool-call count, AC-55 linear validation, and the served context window.
+- Amendment 5 (v0.3.0, #2107): auto mode follows the OpenAI default — omitted `parallel_tool_calls` collects every call; only explicit `false` is serial. Guaranteed modes keep the §3.11 cardinality rule. Grammar selection moves from model-ID substrings to the loaded template (§3.2), tool history to the model's own template (§3.8), and guaranteed selection to the declared capability (§3.11).
 - Amendment 4 (v0.2.9): §2.2 v0.1-locked “preserve all N recognized tool calls” → scoped to `parallel_tool_calls: true`. Omitted/`false` is serial: stop after the first complete valid tool. Rationale: agent loops (Pi) omit the field and execute one tool per turn; leftover decode after a valid tool hangs or kills the stream. Residual risk: a client wanting two tools in one assistant message must send `parallel_tool_calls: true`. Mitigation: explicit request boolean; default matches Pi.
 
 - Amendment 8 (v0.2.16): §3.11 exact identity matrix adds the catalog-pinned Qwen3-Coder-30B-A3B-Instruct and Qwen3-30B-A3B-Instruct-2507 4bit profiles. Their upstream templates use different call grammars with the same non-thinking assistant suffix. Release requires designated-Studio required/named, stream/non-stream and tool-history correctness acceptance for each added identity; template fixtures alone are not qualification. Existing schema, token, byte, cardinality and output-holdback bounds remain unchanged. Unqualified aliases remain unsupported.

@@ -1767,7 +1767,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					// code. Rewriting provider_error to stream_malformed hid
 					// the real failure. Settlement is unchanged.
 					if code, errType, message, ok := coordinatorStreamTerminalError(terminalCode); ok {
-						writeSSEError(w, message, errType, code)
+						writeSSEErrorWithReason(w, message, errType, code, terminalSSEErrorReason(data))
 					} else {
 						writeSSEError(w, "Upstream stream returned malformed data", "api_error", "stream_malformed")
 					}
@@ -4230,6 +4230,49 @@ func (sw *statusWriter) Flush() {
 // provider_disconnected). The FR-B6 envelope is built via the
 // dedicated writeProviderDisconnectedSSE wrapper so its strings
 // are centralized and resistant to drift.
+// terminalSSEErrorReason is the coordinator's bounded snake_case failure
+// reason on a post-commit provider_error frame (#2107 D16), or "".
+func terminalSSEErrorReason(data string) string {
+	var frame struct {
+		Error struct {
+			Reason string `json:"reason"`
+		} `json:"error"`
+	}
+	if json.Unmarshal([]byte(data), &frame) != nil {
+		return ""
+	}
+	reason := frame.Error.Reason
+	if len(reason) == 0 || len(reason) > 64 {
+		return ""
+	}
+	for _, r := range reason {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '_' {
+			return ""
+		}
+	}
+	return reason
+}
+
+// writeSSEErrorWithReason is writeSSEError carrying a buyer-readable reason
+// code in the message and as error.reason.
+func writeSSEErrorWithReason(w http.ResponseWriter, message, errType, code, reason string) {
+	if reason == "" {
+		writeSSEError(w, message, errType, code)
+		return
+	}
+	if sseErrorDedupePoisonRequired(w, code) {
+		poisonDedupeCapture(w)
+	}
+	errorBody := map[string]any{"message": message + " (" + reason + ")", "type": errType, "code": code, "reason": reason, "retryable": gatewayRetryable(code)}
+	if metadata := relayBlindOutcomeMetadata(w.Header(), code); metadata != nil {
+		errorBody["macprovider"] = metadata
+	}
+	payload, _ := json.Marshal(map[string]any{"error": errorBody})
+	_, _ = w.Write([]byte("data: "))
+	_, _ = w.Write(payload)
+	_, _ = w.Write([]byte("\n\ndata: [DONE]\n\n"))
+}
+
 func writeSSEError(w http.ResponseWriter, message, errType, code string) {
 	// #762: an SSE error frame means this 200 stream is NOT a complete
 	// answer. Poison the dedupe capture so an identical id-less retry gets a

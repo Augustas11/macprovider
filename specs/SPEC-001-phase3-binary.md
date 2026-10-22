@@ -1,6 +1,19 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.39 (2026-10-19, coordinator origin marker on HTTP-direct dispatch)
+**Version:** 1.9.40 (2026-10-22, template-selected tool grammars, reasoning split, template-rendered tool history)
+
+**Change log v1.9.40 (2026-10-22, Related: #2107):**
+The provider implements SPEC-018 v0.3.0 on every serving path (serial,
+streaming, continuous batching, native MTP rows): the tool-call grammar comes
+from the loaded chat template (mlx-swift-lm `ToolCallFormat`), with a
+catalog-family fallback; tool history reaches the chat template as structured
+messages; a prompt that leaves `<think>` open splits the output into
+`reasoning_content` (streamed as `delta.reasoning_content`) and content, with
+`usage.completion_tokens_details.reasoning_tokens`; `reasoning_effort` reaches
+the template (default `low` with tools). Chat responses carry prose written
+before a tool call as `content`. Speculative (draft-model) decoding is not
+used for a reasoning-split request. A chat template `raise_exception` during
+prompt rendering is a 400 `invalid_request`.
 
 **Change log v1.9.39 (2026-10-19, Related: #2054):**
 Amends `SPEC-001-R011` and the coordinator HTTP-forwarding wire contract.

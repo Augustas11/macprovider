@@ -34,12 +34,11 @@ func providerSupportsToolSelection(p pool.Provider, policy *toolSelectionPolicy)
 	if policy == nil {
 		return true
 	}
-	// Native guaranteed enforcement is bounded to one exact loaded model ID. Unknown,
-	// legacy and external adapters cannot gain authority by declaring a mode.
+	// SPEC-018 §3.11: guaranteed selection follows the native provider's
+	// declared capability for its exact loaded model; the coordinator still
+	// validates every guaranteed output (schema holdback). Legacy and external
+	// adapters cannot gain authority by declaring a mode.
 	if p.RuntimeSource != "" && p.RuntimeSource != engineClassNative {
-		return false
-	}
-	if policy.mode != "none" && p.ModelID != "mlx-community/Qwen3.6-35B-A3B-4bit" {
 		return false
 	}
 	for _, cap := range p.ToolSelectionCapabilities {

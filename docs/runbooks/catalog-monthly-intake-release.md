@@ -157,6 +157,29 @@ rate row; `recommendable: true` in `demand-rank.json`;
 bench provenance other than `omlx_seeded`; and your explicit admission
 reference (release-notes anchor or ticket id, no identity).
 
+### 2a. Buyer-UX conformance (every promotion, SPEC-023 §16.11)
+
+Before you write a `promote_recommendable` entry, run the conformance suite
+against the model as the gateway serves it, and commit the record with the
+release:
+
+```bash
+python3 scripts/buyer_ux_conformance.py run \
+  --key-file ~/.config/macprovider/buyer-api-key \
+  --model <served model id as /v1/models lists it> \
+  --catalog-key <catalog key>
+python3 scripts/buyer_ux_conformance.py check \
+  --catalog-key <catalog key> --model-id <served model id>
+```
+
+`run` writes `phase3-binary/catalog/autotune/buyer-ux-conformance.json` and
+exits non-zero if any check failed. The release generator refuses the
+promotion unless the record passes for every capability the model advertises.
+The coordinator reads the same file (`routing.buyer_ux_conformance_path`) and
+stops publishing a capability that failed, so a partial pass still lists the
+model, just without the failed capability. Re-run after a CLI release that
+changes the model's serving path.
+
 ## 3. Write `intake-decision.json`
 
 `phase3-binary/catalog/autotune/intake-decision.json`, schema
