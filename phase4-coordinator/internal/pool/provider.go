@@ -816,7 +816,8 @@ func (p Provider) RoutingEligible() bool {
 // SPEC-051 group, as the routing gates of SPEC-051-R028 read it.
 type ShardGroupMemberView struct {
 	ProviderID string
-	// AssignedID is the member session the evaluation bound; empty for a spare.
+	// AssignedID is the member session the evaluation saw; empty for a spare
+	// without a live member session.
 	AssignedID    string
 	BinaryVersion string
 	// Spare marks a spare: it must be a pool member (it may replace a stage)

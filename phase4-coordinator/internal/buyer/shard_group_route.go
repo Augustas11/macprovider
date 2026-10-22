@@ -61,7 +61,7 @@ func (r shardGroupRoute) routable(p pool.Provider) bool {
 		if !r.members[m.ProviderID] || (!m.Spare && !poolBinaryFloorMet(m.BinaryVersion, r.minBinaryVersion)) {
 			return false
 		}
-		if !m.Spare && (r.resolve == nil || !shardgroup.MemberReservable(p, m, r.resolve)) {
+		if r.resolve == nil || !shardgroup.MemberReservable(p, m, r.resolve) {
 			return false
 		}
 	}

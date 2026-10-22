@@ -754,6 +754,32 @@ func TestSpareStandbyTakeoverFlow(t *testing.T) {
 			t.Errorf("%s: reason %q, want %q", name, ev.Reason, tc.want)
 		}
 	}
+	// SPEC-051-R003/R004 (R2-C06): a connected spare passes admission, artifact
+	// and minimum labels; a spare without a session only cannot take over.
+	f.reg.Heartbeat("head", "s-head", beat(true, "thunderbolt"))
+	f.memberHealth("tail", memberHealthPayload("tail", 1, true, "thunderbolt", 300, "head"))
+	for name, tc := range map[string]struct {
+		mutate func()
+		want   string
+	}{
+		"spare quarantined":    {func() { p := f.sessions["spare"]; p.BenchmarkQuarantined = true; f.sessions["spare"] = p }, ReasonMemberNotAdmissible},
+		"spare other artifact": {func() { p := f.sessions["spare"]; p.ModelHash = strings.Repeat("8", 64); f.sessions["spare"] = p }, ReasonMemberNotAdmissible},
+		"spare lower tier":     {func() { p := f.sessions["spare"]; p.Tier = pool.TierProvisional; f.sessions["spare"] = p }, ReasonTrustLabelAboveMember},
+		"spare disconnected":   {func() { delete(f.sessions, "spare") }, ""},
+	} {
+		saved := f.sessions["spare"]
+		tc.mutate()
+		ev := f.evaluate()
+		if ev.Reason != tc.want {
+			t.Errorf("%s: reason %q, want %q", name, ev.Reason, tc.want)
+		}
+		head := f.sessions["head"]
+		view := pool.ShardGroupMemberView{ProviderID: "spare", AssignedID: saved.AssignedID, Spare: true}
+		if got := MemberReservable(head, view, f.lookup); got != (tc.want == "") {
+			t.Errorf("%s: reservable %v at reservation", name, got)
+		}
+		f.sessions["spare"] = saved
+	}
 	// A heartbeat that leaves the spare out does not describe the record.
 	if f.reg.Heartbeat("head", "s-head", heartbeatPayload(1, true, 400, "thunderbolt")) {
 		t.Fatal("heartbeat without the spare accepted")

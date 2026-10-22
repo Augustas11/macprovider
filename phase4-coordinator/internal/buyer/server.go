@@ -8304,6 +8304,9 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		shardRoute = shardGroupRoute{poolID: req.poolID, members: poolMembers, minBinaryVersion: poolMin, groups: poolSnap.ShardGroups,
 			resolve: func(id string) (pool.Provider, bool) { return s.pool.Resolve(id, "") }}
 	}
+	if state != nil {
+		state.shardRoute = shardRoute
+	}
 	if session := headers.Get("X-MacProvider-Session"); session != "" {
 		for _, p := range providers {
 			if p.AssignedID == session {
@@ -9790,6 +9793,16 @@ func (s *Server) pollQueuedProviderWithContext(ctx context.Context, waiter *slot
 		if state != nil && state.poolID != "" && !poolProviderSupportsTrustedPools(provider) {
 			return pool.Provider{}, queuedProviderTerminal
 		}
+		// SPEC-051-R016/R028: a group head is reserved off the queue only while
+		// the selection's shard route still authorizes it, with its active
+		// members re-checked live; without a captured route it never is.
+		var shardRoute shardGroupRoute
+		if state != nil {
+			shardRoute = state.shardRoute
+		}
+		if !shardRoute.routable(provider) {
+			return pool.Provider{}, queuedProviderTerminal
+		}
 		// SPEC-042 R004/R010: same reason as the #768 per-model floor below —
 		// a same-ID reconnect below the pool's binary floor must not be served
 		// off the queue. Uses the floor from the selection snapshot.
@@ -9908,6 +9921,11 @@ func (s *Server) slotQueueCandidates(providers []pool.Provider, excluded routing
 	}
 	for _, provider := range providers {
 		if excluded.Has(provider.SortKey()) || !s.providerSlotQueueEligible(providerForRoute(provider, view)) {
+			continue
+		}
+		// SPEC-051-R016/R028: the queue re-derives the routing gates by hand,
+		// so the shard group gate applies here too.
+		if checker == nil || !checker.shardGroups.routable(provider) {
 			continue
 		}
 		if !s.providerMatchesRequest(provider, checker.model, checker.class) || !checker.ProviderContextSufficient(provider) {

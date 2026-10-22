@@ -618,6 +618,16 @@ func (r *Registry) evaluateLocked(groupID string, g *groupState, providers func(
 			return reason, nil
 		}
 	}
+	// SPEC-051-R003/R004: a spare with a live member session passes the same
+	// admission, artifact and minimum-label checks. A spare without one cannot
+	// take over; that is replay readiness, not availability (R015).
+	for _, sp := range rec.Spares {
+		if p, ok := providers(sp.MemberDeviceID); ok && p.ShardMemberV1 {
+			if reason := memberReservable(head, p); reason != "" {
+				return reason, nil
+			}
+		}
+	}
 	ownerID := owners[groupID]
 	for _, id := range RecordIDs(rec) {
 		if ownerID == "" || owners[id] != ownerID {
@@ -687,6 +697,9 @@ func (r *Registry) evaluateLocked(groupID string, g *groupState, providers func(
 		view := pool.ShardGroupMemberView{ProviderID: sp.MemberDeviceID, Spare: true}
 		if p, ok := providers(sp.MemberDeviceID); ok {
 			view.BinaryVersion = p.BinaryVersion
+			if p.ShardMemberV1 {
+				view.AssignedID = p.AssignedID
+			}
 		}
 		views = append(views, view)
 	}
@@ -731,6 +744,11 @@ func memberReservable(head, member pool.Provider) string {
 // memberReservable against the head.
 func MemberReservable(head pool.Provider, view pool.ShardGroupMemberView, resolve func(id string) (pool.Provider, bool)) bool {
 	member, ok := resolve(view.ProviderID)
+	if view.Spare {
+		// A spare without a live member session only cannot take over; one
+		// with a session must still pass admission and minimum labels.
+		return !ok || !member.ShardMemberV1 || memberReservable(head, member) == ""
+	}
 	return ok && member.AssignedID == view.AssignedID && member.ShardMemberV1 && memberReservable(head, member) == ""
 }
 

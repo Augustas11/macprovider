@@ -46,8 +46,12 @@ type forwardState struct {
 	// R005) so a membership/revocation change between selection and dispatch
 	// forces fresh selection instead of dispatching to a stale candidate.
 	// poolGenSet distinguishes "no pool" from "generation 0".
-	poolID         string
-	poolMembers    map[string]bool
+	poolID      string
+	poolMembers map[string]bool
+	// shardRoute is the SPEC-051-R028 shard group route view captured at
+	// selection; the slot queue re-applies it before reserving a queued
+	// provider. The zero value (global) never admits a group head.
+	shardRoute     shardGroupRoute
 	poolGeneration uint64
 	poolGenSet     bool
 	// poolMinBinaryVersion is the selected pool's binary-version floor

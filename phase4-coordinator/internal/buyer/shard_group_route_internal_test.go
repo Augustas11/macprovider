@@ -92,6 +92,12 @@ func TestShardGroupRouteGate(t *testing.T) {
 			*r = shardRouteWith(map[string]pool.Provider{"tail": tail})
 		},
 		"member disconnected": func(r *shardGroupRoute, _ *pool.Provider) { *r = shardRouteWith(nil) },
+		// SPEC-051-R003/R004 (R2-C06): a connected spare is re-checked too.
+		"connected spare suspended": func(r *shardGroupRoute, _ *pool.Provider) {
+			spare := shardTail()
+			spare.ProviderID, spare.AssignedID, spare.ComputeIntegritySuspended = "spare", "s-spare", true
+			*r = shardRouteWith(map[string]pool.Provider{"tail": shardTail(), "spare": spare})
+		},
 	}
 	for name, mutate := range cases {
 		route, head := shardRouteFor(), shardHead()
@@ -210,5 +216,42 @@ func TestShardGroupHeadIsNeverToolOrResponseFormatCapable(t *testing.T) {
 	caps := mergeModelCapabilities(nil, head, false)
 	if caps.Tools || caps.ResponseFormat || len(caps.ToolChoice) != 0 || !caps.Reasoning {
 		t.Fatalf("head capabilities=%+v want reasoning only", caps)
+	}
+}
+
+// R2-C01 / SPEC-051-R016/R028: the slot queue applies the shard group gate at
+// admission and again before it reserves a queued provider, so a group head
+// that the selection's route does not authorize is never served off the queue.
+func TestSlotQueueAppliesTheShardGroupGate(t *testing.T) {
+	s, registry, _ := poolIsolationServer(t)
+	head := poolProvider("head")
+	head.ShardGroupHeadV1 = true
+	head.SlotsFree = 0
+	registry.Register(&head, nil)
+	registry.SetShardGroupState("head", head.AssignedID, true, 1, []pool.ShardGroupMemberView{{ProviderID: "tail", AssignedID: "s-tail"}})
+	live, ok := registry.Resolve("head", head.AssignedID)
+	if !ok || !live.ShardGroupAvailable {
+		t.Fatal("head not registered as available")
+	}
+	checker := &eligibilityCtx{s: s, model: "model-a", estimatedTokens: 100, tier2Cfg: s.tier2Config()}
+	if got := s.slotQueueCandidates([]pool.Provider{live}, routing.NewExcluded(0), checker); len(got) != 0 {
+		t.Fatalf("queue admitted an unauthorized head: %+v", got)
+	}
+	plain := poolProvider("plain")
+	plain.SlotsFree = 0
+	if got := s.slotQueueCandidates([]pool.Provider{plain}, routing.NewExcluded(0), checker); len(got) != 1 {
+		t.Fatalf("queue dropped an ordinary provider: %+v", got)
+	}
+	freed := live
+	freed.SlotsFree = 1
+	registry.Register(&freed, nil)
+	registry.SetShardGroupState("head", freed.AssignedID, true, 1, nil)
+	waiter, ok := s.slotQueue.enter("head")
+	if !ok {
+		t.Fatal("enter returned no waiter")
+	}
+	defer s.slotQueue.leave(waiter)
+	if _, status := s.pollQueuedProviderWithContext(context.Background(), waiter, "model-a", nil, 100, &forwardState{}); status != queuedProviderTerminal {
+		t.Fatalf("queued head without an authorizing route: status %v, want terminal", status)
 	}
 }
