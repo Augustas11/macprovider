@@ -1,12 +1,12 @@
 # SPEC-051 - Multi-Mac Shard Groups
 
-**Version:** 0.2.3
+**Version:** 0.2.4
 
 ```json
 {
   "spec_id": "SPEC-051",
   "title": "Multi-Mac Shard Groups",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "path": "specs/SPEC-051-multi-mac-shard-groups.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -27,6 +27,27 @@
   }
 }
 ```
+
+**Change log v0.2.4 (2026-10-22, Related: #2084):** Freeze audit round 1.
+Stage peers are bound to configured member keys (SPEC-051-R011): the head's
+group configuration names each stage's and spare's receipt public key, each
+member's configuration names its neighbours' keys, and a link or chain whose
+peer is not the configured member is refused before any work; without the
+keys a group never registers. Each link is one TCP connection carrying data
+and control, with heartbeats answered off the compute path and queued round
+trips not sampled; deadlines come from the group supervision values, not a
+per-frame field (SPEC-051-R010, R014). Per-request deadlines on the head and
+a receive deadline on a member with an open request (SPEC-051-R013). A failed
+link's queued work is not processed (SPEC-051-R014). Each stage runs the
+waiting decode rows of distinct requests in one forward (SPEC-051-R017).
+Availability also requires every active member to serve the record's model
+pair, a member's report counts only from its current session, and the route
+re-checks members at reservation (SPEC-051-R015). The group attestation has
+exactly one segment, its sub-receipts must cover the request
+(`coverage_invalid`), and a buyer-cancel terminal receipt is verified like any
+other (SPEC-051-R019). New epochs are budgeted per group
+(`registration_rate_limited`, SPEC-051-R005, R029), and a promoted spare
+reports health for its serving epoch (SPEC-051-R029).
 
 **Change log v0.2.3 (2026-10-22, Related: #2084):** Adds the member
 self-health message `shard_member_health` (SPEC-051-R029): each member reports
@@ -333,6 +354,13 @@ carry exactly these fields:
 Unknown fields, missing fields, and enum values outside these sets MUST be
 refused. Active members plus spares MUST number at most `max_members`.
 
+The coordinator MUST accept at most 12 new epochs of one group per rolling
+hour and refuse a further new epoch with `registration_rate_limited` before
+storing it; a re-send of the latest accepted record is not a new epoch. It
+keeps every accepted record in its append-only store, which holds the epoch
+floor, and MAY keep only the latest eight epochs of a group in memory for
+attestation verification.
+
 ### SPEC-051-R006 - Layer placement validity
 
 The coordinator MUST refuse a group record unless: the stages are numbered
@@ -399,12 +427,18 @@ group.
 
 Members MUST exchange boundary activations, token IDs and control messages
 only through the SPEC-051 stage transport over TCP on the links of
-SPEC-051-R007, with a data channel and a separate control channel per link.
+SPEC-051-R007. Each link is one TCP connection that carries data and control
+frames in sequence order; each end reads it on a reader of its own that
+answers heartbeats at once, independent of the stage's compute
+(SPEC-051-R014), and a heartbeat round trip that queued behind data in either
+direction is not sampled for SPEC-051-R007.
 Every frame MUST start with a fixed header carrying: magic, transport version,
 frame type (`activation`, `token`, `control`, `heartbeat`, `abort`), the group
 epoch, the per-link sequence number, the request ID, the micro-batch ID, the
 token step, source and destination stage, the layer range that produced the
-payload, payload dtype and shape, payload length, and the frame's deadline.
+payload, payload dtype and shape, and payload length. Deadlines are the
+group's supervision values (§4), the same at every member, and are not carried
+per frame.
 The frame MUST end with a CRC32C over header and payload, followed by the
 authentication tag when `frame_protection` requires one. A receiver MUST
 discard a frame and treat the link as failed when the magic, version or
@@ -424,6 +458,22 @@ device identity keys; keys MUST NOT be sent to or derivable by the
 coordinator and MUST NOT be reused across epochs. A frame whose tag fails
 MUST be discarded and the link treated as failed.
 
+The handshake MUST bind each peer to its configured member identity, not only
+to a key it announces. The head's group configuration names the SPEC-015
+receipt public key of every stage and spare; each member's configuration
+names the receipt public key of its upstream neighbour (the stage before it;
+the head for stage 1 and for a spare) and, when it dials, of the neighbour it
+dials (the next stage, or the head for the return link of a last stage). On a
+protected link a member MUST refuse a link whose authenticated key is not the
+configured neighbour's before it reads any other frame from it. Every stage
+MUST refuse a chain hello in which a neighbour announces a key other than the
+configured one, and a member MUST refuse one that names another head or
+places it at a stage other than its configured stage, before it computes
+anything. On a `crc32c` link, which has no authenticated peer, the announced
+keys are checked against the configured ones. A head whose configuration
+lacks a member's key MUST NOT register the group, and a member whose
+configuration lacks its neighbours' keys MUST NOT send `shard_member_hello`.
+
 ### SPEC-051-R012 - Sequencing and no silent retransmit
 
 Each link direction MUST number frames with a strictly increasing sequence
@@ -442,17 +492,24 @@ Every blocking receive on the data channel MUST have a deadline:
 for a prefill chunk hop. A missed deadline MUST be treated as a member
 failure handled by SPEC-051-R021 or SPEC-051-R022. Prefill MUST be chunked so
 that one stage's compute for one chunk stays below the prefill chunk deadline
-and well below the operating system's GPU command-buffer watchdog.
+and well below the operating system's GPU command-buffer watchdog. The head
+MUST time each outstanding request from its own last frame sent (its last
+activation, or the abort that collects its sub-receipts), so other requests'
+progress and heartbeats never extend a stalled request's deadline. A member
+with any request open MUST bound its wait for the next upstream frame by its
+receive deadline; only an idle member waits on heartbeats alone.
 
 ### SPEC-051-R014 - Heartbeats and peer death
 
-Each member MUST send a heartbeat on the control channel to its neighbours
+Each member MUST send a heartbeat on each of its links to its neighbours
 and to the head every `heartbeat_interval_ms`, independent of data traffic. A
 member that misses `heartbeat_miss_limit` consecutive heartbeats MUST be
 declared dead by every member that observes it. On a peer death, a link
 failure, or an `abort` frame, every remaining member MUST stop the affected
 epoch's in-flight work and release its buffers within two heartbeat
-intervals. No member may block, spin, or wait indefinitely on a dead peer, and
+intervals; activation and control frames still queued on a failed or closed
+link MUST NOT be processed, while the peer's last `error` and `abort` frames
+on it are still read. No member may block, spin, or wait indefinitely on a dead peer, and
 peer loss MUST NOT terminate a surviving member's process.
 
 ### SPEC-051-R015 - Group health and availability
@@ -487,7 +544,8 @@ names the first failing condition as its reason code:
    member-session exclusion itself: authenticated bearer, no quarantine,
    no compute-integrity suspension, no admission sandbox, evidence or ceiling
    exclusion, no pending catalog re-check, handshake or receipt-key
-   publication, a published receipt key, and state `ready` or `busy`
+   publication, a published receipt key, and state `ready` or `busy`, and
+   every active member session reports the record's model pair
    (`member_not_admissible`);
 5. for SPEC-051-R004, no active member holds a lower provider tier,
    attestation tier, encrypted-leg capability or attestation status than the
@@ -508,7 +566,14 @@ names the first failing condition as its reason code:
    (`member_self_unhealthy`), and reports each of its links on the
    `interconnect_class` interface type (`link_interface_invalid`) with
    `rtt_p99_us <= max_link_rtt_p99_us` (`link_rtt_exceeded`). A spare's own
-   report is accepted and does not affect availability.
+   report is accepted and does not affect availability. A report from a
+   session the member has since replaced, even at the same epoch, does not
+   count.
+
+Because a member's admission can change between evaluations, the
+reservation path MUST also re-check conditions 3 to 5 for every active member
+against the live session the latest evaluation recorded before it reserves
+the head.
 
 The coordinator MUST send `shard_group_status` (SPEC-051-R029) to the head on
 every change of availability or reason.
@@ -529,7 +594,9 @@ exclusion (SPEC-002-R008) applies to the group's owner.
 
 The head MUST schedule so that, whenever at least `S` requests are active,
 at least `S` micro-batches are in flight across the `S` stages, and each stage
-MUST batch its rows under SPEC-038 within its own engine. Sampling MUST run on
+MUST run the decode rows of distinct requests waiting at it at the same time
+in one forward, each row on its own request's KV at its own position; a
+prefill chunk runs on its own. Sampling MUST run on
 the last stage, and only token IDs travel back to the head. Prefill MUST be
 pipelined in chunks across stages. Each stage MUST hold only its own layers'
 KV. The group MUST advertise to the coordinator a concurrency limit no larger
@@ -577,7 +644,8 @@ Wire form and verification:
 1. The attestation travels as the `group_attestation` member of the
    `inference_response_end` frame that carries the receipt (SPEC-051-R029).
    A head-session end frame with a non-empty `receipt` and no valid
-   attestation fails this requirement.
+   attestation fails this requirement, whatever its status, including a
+   buyer-cancel terminal frame that arrives after its request was retired.
 2. The object has exactly the keys `schema`
    (`macprovider.shard-group-attestation.v1`), `group_provider_id`,
    `request_id`, `attempt_n`, `receipt_tuple_sha256`, `segments`, and
@@ -587,11 +655,10 @@ Wire form and verification:
    `signature` is the head session receipt key's Ed25519 signature over the
    UTF-8 bytes `macprovider.shard-group-attestation.v1` and a line feed,
    followed by the RFC 8785 (JCS) bytes of the object without `signature`.
-3. `segments` is a non-empty list of `{group_epoch, step_start, step_end,
-   sub_receipts}`. Epochs strictly increase, the first segment starts at step
-   0, each segment starts where the previous ended, and every segment but a
-   single one is non-empty. Each epoch MUST be an accepted record of this
-   group.
+3. `segments` is a list of exactly one `{group_epoch, step_start, step_end,
+   sub_receipts}`, starting at step 0: a request runs in one epoch, and a
+   takeover recomputes the whole prefix in the new epoch (item 6). Its epoch
+   MUST be an accepted record of this group.
 4. `sub_receipts` lists one signed sub-receipt per active stage of that
    epoch, in stage order, each `{sub_receipt, public_key, signature}`.
    `sub_receipt` has exactly the keys `member_device_id`, `group_epoch`,
@@ -624,6 +691,16 @@ Wire form and verification:
    `takeover_invalid`; both against the group provider identity. On
    success the coordinator stores `from_group_epoch` and `reason` with the
    attestation, so every takeover is recorded with the attempt it served.
+7. Coverage: `step_end` is the number of token steps the head received
+   (every delivered token, plus a stop token or a token that returned after a
+   cancel, neither delivered). Every member processes the whole prompt and one
+   decode step per token after the first, so every sub-receipt MUST carry the
+   same `prompt_tokens`, at least 1, and `decode_steps` equal to
+   `step_end - 1`, with `step_end >= 1`, and the receipt tuple's `tokens_out`
+   MUST NOT exceed `step_end`. A failure is fault kind `coverage_invalid`
+   against the group provider identity when the head's own sub-receipt,
+   `step_end` or `tokens_out` disagree, otherwise against the first member
+   whose counts differ from the head's.
 
 ### SPEC-051-R020 - Billing and settlement as one provider
 
@@ -859,8 +936,10 @@ Member to coordinator, on the member session:
 
 - `shard_member_health`: `{type, version: 1, group_provider_id, group_epoch,
   member_device_id, healthy, reason, links}`. `member_device_id` MUST equal
-  the session's provider id and `group_epoch` the epoch of the member's
-  accepted hello; `healthy` is true when every stage link the member carries is
+  the session's provider id and `group_epoch` the epoch the member serves: the
+  epoch of its accepted hello, which for a spare standing by is the epoch
+  before its standby link's, and for a spare whose takeover hello was accepted
+  the takeover epoch; `healthy` is true when every stage link the member carries is
   up and heard within its liveness window; `reason` is empty exactly when
   `healthy` is true and otherwise `not_joined` or `link_down`; `links` lists
   `{peer_member_device_id, interface_type, rtt_p99_us}` for exactly the peers
@@ -890,7 +969,8 @@ Registration reason codes: `invalid_record`, `signature_invalid`,
 `not_group_head_session`, `epoch_not_increasing`, `mode_reserved`,
 `interconnect_reserved`, `frame_protection_below_minimum`,
 `transport_version_unsupported`, `placement_invalid`, `too_many_members`,
-`model_mismatch`, `member_conflict`, `owner_mismatch`, `store_unavailable`.
+`model_mismatch`, `member_conflict`, `owner_mismatch`, `store_unavailable`,
+`registration_rate_limited`.
 Member hello reason codes: `invalid_hello`, `not_member_session`,
 `group_not_registered`, `epoch_superseded`, `record_mismatch`,
 `link_interface_invalid`, `weights_unverified`, `member_conflict`.
@@ -972,6 +1052,13 @@ in `CONFORMANCE.json`.
 
 ## 10. Changelog and history
 
+- v0.2.4 (2026-10-22, Related: #2084): freeze audit round 1: configured
+  member keys bind stage peers (R011); one TCP connection per link, no
+  per-frame deadline field (R010, R014); per-request deadlines (R013); a
+  failed link's queued work is dropped (R014); batched decode rows per stage
+  (R017); member model pair, report provenance and reservation re-check
+  (R015); one attestation segment, coverage and cancel terminals (R019); epoch
+  budget (R005, R029); promoted-spare health epoch (R029).
 - v0.2.3 (2026-10-22, Related: #2084): `shard_member_health` (R029) and
   availability item 8 (R015): member self-reports gate availability.
 - v0.2.2 (2026-10-22, Related: #2084): epochs after a takeover (R023): the
