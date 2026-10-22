@@ -213,21 +213,37 @@ enum ShardStageArtifact {
         }
     }
 
+    /// KV bytes `slots` sequences of `contextTokens` tokens need on a stage of
+    /// `stageLayers` of `totalLayers` layers, as the stage runtime allocates it;
+    /// nil when the config's attention geometry is unreadable. DeepSeek-V3's
+    /// stage attention caches the expanded per-head keys and values, not the
+    /// latent the single-Mac estimate counts (R3-C01), so it is sized from the
+    /// stage runtime's own geometry.
+    static func stageKVDemandBytes(configData: Data, stageLayers: Int, totalLayers: Int, slots: Int, contextTokens: Int) -> UInt64? {
+        let perSlot: Double
+        if let config = (try? JSONSerialization.jsonObject(with: configData)) as? [String: Any],
+           config["model_type"] as? String == "deepseek_v3" {
+            guard let perLayer = try? ShardBenchPlanInput.kvBytesPerTokenPerLayer(config: config) else { return nil }
+            perSlot = Double(perLayer) * Double(stageLayers) * Double(contextTokens)
+        } else {
+            guard let perToken = AutotuneModelContextCap.kvCacheBytesPerToken(configData: configData), totalLayers > 0 else { return nil }
+            let share = Double(stageLayers) / Double(totalLayers)
+            let recurrent = Double(AutotuneModelContextCap.recurrentStateBytesPerSequence(configData: configData))
+            perSlot = (Double(perToken) * Double(contextTokens) + recurrent) * share
+        }
+        let demand = (perSlot * Double(max(1, slots))).rounded(.up)
+        return demand >= Double(UInt64.max) ? UInt64.max : UInt64(demand)
+    }
+
     /// SPEC-051-R006 under SPEC-023: the stage's weights, its KV for `slots`
     /// sequences of `contextTokens` tokens, and the runtime reserve fit this Mac.
     static func fit(inventory: Inventory, slots: Int, contextTokens: Int = AutotuneModelContextCap.minimumServeContext,
                     hardwareMemoryGB: Int = ModelFit.detectRAMGB()) -> Fit {
         let budget = AutotuneModelContextCap.shardStageKVBudgetBytes(
             hardwareMemoryGB: hardwareMemoryGB, stageWeightBytes: inventory.stageWeightBytes)
-        guard let perToken = AutotuneModelContextCap.kvCacheBytesPerToken(configData: inventory.configData) else {
-            return Fit(stageWeightBytes: inventory.stageWeightBytes, kvBudgetBytes: budget, kvDemandBytes: nil)
-        }
-        let share = Double(inventory.plan.layers.count) / Double(inventory.plan.totalLayers)
-        let recurrent = Double(AutotuneModelContextCap.recurrentStateBytesPerSequence(configData: inventory.configData))
-        let perSlot = (Double(perToken) * Double(contextTokens) + recurrent) * share
-        let demand = (perSlot * Double(max(1, slots))).rounded(.up)
-        return Fit(
-            stageWeightBytes: inventory.stageWeightBytes, kvBudgetBytes: budget,
-            kvDemandBytes: demand >= Double(UInt64.max) ? UInt64.max : UInt64(demand))
+        let demand = stageKVDemandBytes(
+            configData: inventory.configData, stageLayers: inventory.plan.layers.count, totalLayers: inventory.plan.totalLayers,
+            slots: slots, contextTokens: contextTokens)
+        return Fit(stageWeightBytes: inventory.stageWeightBytes, kvBudgetBytes: budget, kvDemandBytes: demand)
     }
 }

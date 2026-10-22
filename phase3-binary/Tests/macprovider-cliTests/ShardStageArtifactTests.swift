@@ -188,6 +188,22 @@ final class ShardStageArtifactTests: XCTestCase {
         }
     }
 
+    /// R3-C01: a DeepSeek-V3 stage is sized by the expanded per-head keys and
+    /// values its attention caches, not the latent single-Mac estimate.
+    func testDeepSeekStageFitCountsTheExpandedKVTheStageAllocates() throws {
+        let config = try JSONSerialization.data(withJSONObject: [
+            "model_type": "deepseek_v3", "num_hidden_layers": 4, "hidden_size": 64, "num_attention_heads": 4,
+            "kv_lora_rank": 16, "qk_nope_head_dim": 8, "qk_rope_head_dim": 4, "v_head_dim": 8,
+        ])
+        // 4 heads x (8 + 4 + 8) x 2 bytes = 160 bytes per token per layer; the
+        // stage holds 2 layers; 8 sequences of 1000 tokens.
+        XCTAssertEqual(
+            ShardStageArtifact.stageKVDemandBytes(configData: config, stageLayers: 2, totalLayers: 4, slots: 8, contextTokens: 1000),
+            160 * 2 * 1000 * 8)
+        let latent = try XCTUnwrap(AutotuneModelContextCap.kvCacheBytesPerToken(configData: config))
+        XCTAssertLessThan(UInt64(latent) * 1000 * 8 / 2, 160 * 2 * 1000 * 8, "the latent estimate is the undercount")
+    }
+
     func testProveStageCoversAStageDirectoryAndAWholeSnapshot() throws {
         let snapshot = try snapshot()
         let stage = try write(snapshot, only: shared + ["model-00002-of-00002.safetensors"], into: "prove-stage")
