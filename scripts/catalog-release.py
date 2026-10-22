@@ -99,6 +99,20 @@ CB_POLICY_TRANSITION_FEED_RECORD = {
 RATE_CARD_SOURCE_PATH = CATALOG_DIR / "rate-card-source.json"
 BUYER_UX_CONFORMANCE_PATH = CATALOG_DIR / "buyer-ux-conformance.json"
 BUYER_UX_CONFORMANCE_SCRIPT = ROOT / "scripts" / "buyer_ux_conformance.py"
+
+
+def _load_buyer_ux_module():
+    """The SPEC-023 §16.11 conformance module ships beside this verifier
+    (catalog-verifier-bundle.txt); without it no copy of the verifier runs."""
+    spec = importlib.util.spec_from_file_location("buyer_ux_conformance", BUYER_UX_CONFORMANCE_SCRIPT)
+    if spec is None or not BUYER_UX_CONFORMANCE_SCRIPT.exists():
+        raise SystemExit(f"catalog-release: {BUYER_UX_CONFORMANCE_SCRIPT} is missing; ship scripts/catalog-verifier-bundle.txt in full")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+BUYER_UX = _load_buyer_ux_module()
 RATE_CARD_SOURCE_SCHEMA = "macprovider.rate-card-source.v1"
 MARKET_PEG_BIND_PATH = CATALOG_DIR / "market-peg-bind.json"
 MARKET_PEG_BIND_SCHEMA = "macprovider.market-peg-bind.v1"
@@ -5152,9 +5166,7 @@ def require_buyer_ux_conformance(key: str, row: dict, label: str) -> None:
     """SPEC-023 §16.11 (#2107): a key is promoted to `recommendable` only with
     a buyer-UX conformance record that passes for every capability its served
     model advertises on /v1/models."""
-    spec = importlib.util.spec_from_file_location("buyer_ux_conformance", BUYER_UX_CONFORMANCE_SCRIPT)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = BUYER_UX
     model_id = row.get("served_model_id") or row.get("model_id") or key
     try:
         module.require_promotable(key, module.advertised_capabilities(model_id), BUYER_UX_CONFORMANCE_PATH)

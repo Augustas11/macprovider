@@ -8,3 +8,4 @@ scripts/native_mtp_admission_sidecar.py
 scripts/native_mtp_revocation_slots.py
 scripts/sign-catalog.go
 scripts/autotune_window.py
+scripts/buyer_ux_conformance.py
