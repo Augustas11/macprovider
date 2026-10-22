@@ -9,7 +9,7 @@
     {
       "spec_id": "SPEC-001",
       "title": "Phase 3 Binary: Mac Provider Inference CLI",
-      "version": "1.9.39",
+      "version": "1.9.40",
       "path": "specs/SPEC-001-phase3-binary.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1240,7 +1240,7 @@
     {
       "spec_id": "SPEC-042",
       "title": "Pool Control Plane and Trusted-Pool Manifest",
-      "version": "0.0.43",
+      "version": "0.0.44",
       "path": "specs/SPEC-042-pool-control-plane.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1270,19 +1270,26 @@
       "production_status": "not-deployed",
       "last_reconciled_commit": "2a27f5679bf6eb5ebec6371e75870be8fc9ada1b",
       "last_reconciled_at": "2026-08-24",
-      "evidence": [],
+      "evidence": [
+        {
+          "artifact": "sha256:b27fdc59447a4641ae74f9d72bca76ca741be95ad07e4ef3b8eec189d18e6fcc",
+          "source": "journeys/evidence/trusted-pool-layer2-20260824T011501Z.spec-042-r002-spec-042-r005-spec-042-r006-spec-042-r010.journey-result.signed.json",
+          "captured_at": "2026-08-24",
+          "expires_at": "2026-08-31"
+        }
+      ],
       "requirement_id_migration": "complete",
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Pool control plane is a new authority domain (pool-control-plane). Current merged code contains substantial default-off pool plumbing and SPEC-043 creator-onboarding enablement, including pool_id threading, manifest crypto primitives, route isolation, labeled route snapshots, buyer/public policy and status surfaces, claim-control rejection, an MVP retention-policy registry, local restrictive lifecycle admin controls, paused candidate-pool reactivation through the promotion preflight gate, local route-time model-allowlist enforcement from signed manifest-derived pool snapshots, local route/dispatch-time settlement observe-vs-enforce gating from signed manifest-derived pool snapshots, default-off production activation config/store promotion gating, provider-side positive pool-capability advertisement/gating for pool-selected traffic, signed emergency pause/drain/retire controls, signed provider-bound revoke_immediate controls that durably revoke the target provider, advance the route-generation fence, cancel active uncommitted dispatch attempts for that provider, live routeability/generation-bound delivery-drain proof for retirement, and a local buyer-server journey harness. The Layer 2 signed envelope for R002/R005/R006/R010 expired 2026-08-31 and was cleared from evidence[]; recapture is required before any promotion. SPEC-042 is partial and not-deployed. Remaining blockers are production durable-store evidence, remaining production predicate coverage, SPEC-042-owned schema/retention promotion, production activation evidence/rollout proof, and five-lane audit. Layer 2 administrative trust only; cryptographic privacy is SPEC-041/Layer 3."
+        "rationale": "The pool control plane is a new authority domain (`pool-control-plane`). Current merged code contains substantial default-off pool plumbing and SPEC-043 creator-onboarding enablement, so this is no longer a zero-implementation skeleton. A SPEC-042-owned non-promoting signed journey-result path plus local buyer-server journey harness now exists for R002/R005/R006/R010, local restrictive lifecycle admin controls and signed emergency controls now pause/drain/retire pools fail-closed without creating a second activation path, signed provider-bound `revoke_immediate` controls now append durable revocation, advance the route-generation fence, notify active provider-specific revocation watchers without polling, cancel active uncommitted dispatch attempts for that provider, preserve gateway no-charge/pass-through semantics for marker-proven no-prior-dispatch `pool_state_stale`, and preserve settlement when a provider row may already have been credited or a prior provider-dispatched retry already occurred. The buyer dispatch path now records active pool deliveries in the live trustpool registry, local/signed `retired` lifecycle controls require that registry to prove delivery drain before committing retirement, authorized stale routeable snapshots now fail closed as retryable `pool_policy_stale` rather than generic availability, manifest-derived settlement mode now fails closed when a pool requires enforce while the coordinator's effective settlement mode is observe with a dispatch-boundary recheck to cover hot reloads, and production-labeled promotion is default-blocked unless `trusted_pools.production_activation` supplies an allowed launch environment, signed-launch evidence digest, and matching root-custody disclosure hash. The promotion path can reactivate paused candidate pools only after rerunning local activation preflight, model allowlists are locally enforced at route time from the signed manifest-derived pool snapshot, and selected pool providers must positively advertise `trusted_pool_v1` before pool traffic can dispatch to them. Signed Layer 2 request-path evidence is committed for R002/R005/R006/R010, but it is intentionally evidence-only and does not promote full requirement conformance. SPEC-042 is partial and still not-deployed until accepted-manifest projection is audited in production migration evidence, production predicate evidence closes, SPEC-042-owned closed schemas/retention matrix promotion closes, production activation evidence/rollout proof exists, and the launch audit reaches 0 Critical / 0 High / 0 Medium. This is a Layer 2 (administrative trust) contract; it does NOT define cryptographic privacy, which is owned by SPEC-041 and future Layer 3 SPECs."
       }
     },
     {
       "spec_id": "SPEC-043",
       "title": "Trusted Pool Creator Onboarding MVP",
-      "version": "0.3.5",
+      "version": "0.3.6",
       "path": "specs/SPEC-043-trusted-pool-creator-onboarding.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1316,7 +1323,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "SPEC-043 is the SPEC-042A enablement profile for approved external creators launching single-operator Trusted Pools. Isolated-candidate promoter consume of sibling spec043-ppt-20260827T032524Z-1 previously filled SPEC-043-R001 through R012, but that same-day evidence expired on 2026-08-27; those rows are pending until a fresh protected signed candidate journey and promotion transition are consumed. That fill was not a live Trusted Pool launch. Spec-level implementation_status stays partial, production_status stays not-deployed, and spec-level evidence[] stays empty. The first MVP code slices now have a default-off coordinator durable trustpool event ledger, durable creator approval records, replay-checked operator admin event append surface for candidate/restrictive state, creator-gated root nonce issuance, creator-gated positive pool mutations, boot reconstruction into the routing registry, revision-fenced live registry refresh after accepted admin or approval mutations, route-time approval expiry checks, background routeability expiry refresh, coordinator-side buyer authorization enforcement, signed root registration, signed manifest acceptance with candidate overclaim rejection, gateway-authenticated buyer policy/status surfaces with resolved MVP retention-policy registry fields, public-announcement approvals bound to operation id, pool id, non-candidate launch environment, manifest digest, reviewed distribution artifact digest, and current creator approval state, rate-limited and globally work-limited public policy/status endpoints that serve redacted documents only while those approval bindings remain current and the document fresh_until_utc is still valid, an auditable public-visibility generation and immutable public-announcement history, an explicit operator-only candidate promotion path that preflights local activation prerequisites including registered retention-policy ids, lifecycle fail-closed tests including unresolved retention policies, operator-only admin API mutations for public-announcement/reviewed-artifact records, an environment-key-only CLI for nonce issuance, reviewed-artifact/public-announcement mutations, and pool health/audit/distribution exports, a bounded bearer-token creator administration surface for admitted creators to inspect their own approval/pools and perform allowlisted candidate operations, a protected manual signer path plus governance validator for JOURNEY-TRUSTED-POOL-CREATOR-MVP evidence artifacts, a closed PoolPromotionTransitionV1 production-promotion artifact plus append-only spec043-promotion-ledger, and a registered production-release approver key. Raw operator admin events cannot activate a routeable pool. Remaining before any live announcement: production reviewed-artifact lifecycle ownership, custody-class production gates, full production activation gates, on-call readiness, production timing-floor remeasure, and production rollout proof."
+        "rationale": "SPEC-043 is the SPEC-042A enablement profile for approved external creators launching single-operator Trusted Pools. Isolated-candidate promoter consume of sibling spec043-ppt-20260827T032524Z-1 filled SPEC-043-R001 through R012; that fill is not a live Trusted Pool launch. Spec-level implementation_status stays partial, production_status stays not-deployed, and spec-level evidence[] stays empty. The first MVP code slices now have a default-off coordinator durable trustpool event ledger, durable creator approval records, replay-checked operator admin event append surface for candidate/restrictive state, creator-gated root nonce issuance, creator-gated positive pool mutations, boot reconstruction into the routing registry, revision-fenced live registry refresh after accepted admin or approval mutations, route-time approval expiry checks, background routeability expiry refresh, coordinator-side buyer authorization enforcement, signed root registration, signed manifest acceptance with candidate overclaim rejection, gateway-authenticated buyer policy/status surfaces with resolved MVP retention-policy registry fields, public-announcement approvals bound to operation id, pool id, non-candidate launch environment, manifest digest, reviewed distribution artifact digest, and current creator approval state, rate-limited and globally work-limited public policy/status endpoints that serve redacted documents only while those approval bindings remain current and the document `fresh_until_utc` is still valid, an auditable public-visibility generation and immutable public-announcement history, an explicit operator-only candidate promotion path that preflights local activation prerequisites including registered retention-policy ids, lifecycle fail-closed tests including unresolved retention policies, operator-only admin API mutations for public-announcement/reviewed-artifact records, an environment-key-only CLI for nonce issuance, reviewed-artifact/public-announcement mutations, and pool health/audit/distribution exports, a bounded bearer-token creator administration surface for admitted creators to inspect their own approval/pools and perform allowlisted candidate operations, a protected manual signer path plus governance validator for `JOURNEY-TRUSTED-POOL-CREATOR-MVP` evidence artifacts, a closed PoolPromotionTransitionV1 production-promotion artifact plus append-only spec043-promotion-ledger, and a registered production-release approver key. Raw operator admin events cannot activate a routeable pool. Remaining before any live announcement: production reviewed-artifact lifecycle ownership, custody-class production gates, full production activation gates, on-call readiness, production timing-floor remeasure, and production rollout proof."
       }
     },
     {
@@ -1592,7 +1599,7 @@
     {
       "spec_id": "SPEC-051",
       "title": "Multi-Mac Shard Groups",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "specs/SPEC-051-multi-mac-shard-groups.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1618,11 +1625,12 @@
         "SPEC-038",
         "SPEC-041",
         "SPEC-042",
+        "SPEC-043",
         "SPEC-044",
         "SPEC-047",
         "SPEC-049"
       ],
-      "implementation_status": "pending-reconciliation",
+      "implementation_status": "partial",
       "production_status": "not-deployed",
       "last_reconciled_commit": null,
       "last_reconciled_at": null,
@@ -1632,7 +1640,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2084",
-        "rationale": "SPEC-051 v0.1.0 defines single-owner multi-Mac shard groups: pipeline-parallel serving of one catalog model across co-located Macs on one wired LAN, with one provider identity, minimum-of-members trust, a framed stage transport, one head-signed receipt with chained per-member sub-receipts, and explicit failure semantics. Every requirement stays pending until a paid gateway request is served by a qualified shard group and settled at the catalog price."
+        "rationale": "SPEC-051 v0.2.0 defines single-owner multi-Mac shard groups serving Trusted Pool traffic: pipeline-parallel serving of one pool model across one owner's co-located Macs on one wired LAN, with the head's provider identity as the group identity, minimum-of-members trust, a creator-signed pool_shard_groups/v1 authorization, a framed stage transport, the group wire messages, one head-signed receipt with a group attestation of chained per-member sub-receipts, and explicit failure semantics. Every requirement stays pending until a paid Trusted Pool request is served by a shard group through the gateway and settled at the pool price."
       }
     }
   ],
@@ -14219,7 +14227,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2084",
-        "rationale": "SPEC-051 v0.1.0 (#2084) Shard group scope: one owner, one LAN. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+        "rationale": "SPEC-051 v0.2.0 (#2084) Shard group scope: one owner, one LAN. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
       }
     },
     {
@@ -14234,7 +14242,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2084",
-        "rationale": "SPEC-051 v0.1.0 (#2084) One group provider identity, member device identities. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+        "rationale": "SPEC-051 v0.2.0 (#2084) One group provider identity, member device identities. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
       }
     },
     {
@@ -14249,7 +14257,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2084",
-        "rationale": "SPEC-051 v0.1.0 (#2084) Every member passes the full single-provider admission bar. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+        "rationale": "SPEC-051 v0.2.0 (#2084) Every member passes the full single-provider admission bar. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
       }
     },
     {
@@ -14264,7 +14272,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2084",
-        "rationale": "SPEC-051 v0.1.0 (#2084) Group trust is the minimum of its members. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+        "rationale": "SPEC-051 v0.2.0 (#2084) Group trust is the minimum of its members. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
       }
     },
     {
@@ -14279,7 +14287,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2084",
-        "rationale": "SPEC-051 v0.1.0 (#2084) Group record. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+        "rationale": "SPEC-051 v0.2.0 (#2084) Group record. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
       }
     },
     {
@@ -14294,7 +14302,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2084",
-        "rationale": "SPEC-051 v0.1.0 (#2084) Layer placement validity. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+        "rationale": "SPEC-051 v0.2.0 (#2084) Layer placement validity. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
       }
     },
     {
@@ -14309,7 +14317,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2084",
-        "rationale": "SPEC-051 v0.1.0 (#2084) Interconnect admissibility. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+        "rationale": "SPEC-051 v0.2.0 (#2084) Interconnect admissibility. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
       }
     },
     {
@@ -14324,7 +14332,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2084",
-        "rationale": "SPEC-051 v0.1.0 (#2084) Member weight identity. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+        "rationale": "SPEC-051 v0.2.0 (#2084) Member weight identity. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
       }
     },
     {
@@ -14339,7 +14347,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2084",
-        "rationale": "SPEC-051 v0.1.0 (#2084) Privacy: every member sees the prompt. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+        "rationale": "SPEC-051 v0.2.0 (#2084) Privacy: every member sees the prompt. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
       }
     },
     {
@@ -14354,7 +14362,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2084",
-        "rationale": "SPEC-051 v0.1.0 (#2084) Stage transport framing. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+        "rationale": "SPEC-051 v0.2.0 (#2084) Stage transport framing. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
       }
     },
     {
@@ -14369,7 +14377,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2084",
-        "rationale": "SPEC-051 v0.1.0 (#2084) Frame integrity and authentication. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+        "rationale": "SPEC-051 v0.2.0 (#2084) Frame integrity and authentication. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
       }
     },
     {
@@ -14384,7 +14392,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2084",
-        "rationale": "SPEC-051 v0.1.0 (#2084) Sequencing and no silent retransmit. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+        "rationale": "SPEC-051 v0.2.0 (#2084) Sequencing and no silent retransmit. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
       }
     },
     {
@@ -14399,7 +14407,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2084",
-        "rationale": "SPEC-051 v0.1.0 (#2084) Per-hop deadlines and prefill chunks. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+        "rationale": "SPEC-051 v0.2.0 (#2084) Per-hop deadlines and prefill chunks. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
       }
     },
     {
@@ -14414,7 +14422,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2084",
-        "rationale": "SPEC-051 v0.1.0 (#2084) Heartbeats and peer death. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+        "rationale": "SPEC-051 v0.2.0 (#2084) Heartbeats and peer death. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
       }
     },
     {
@@ -14429,7 +14437,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2084",
-        "rationale": "SPEC-051 v0.1.0 (#2084) Group health and availability. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+        "rationale": "SPEC-051 v0.2.0 (#2084) Group health and availability. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
       }
     },
     {
@@ -14444,7 +14452,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2084",
-        "rationale": "SPEC-051 v0.1.0 (#2084) Routing to the head only. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+        "rationale": "SPEC-051 v0.2.0 (#2084) Routing to the head only. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
       }
     },
     {
@@ -14459,7 +14467,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2084",
-        "rationale": "SPEC-051 v0.1.0 (#2084) Cross-stage micro-batching. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+        "rationale": "SPEC-051 v0.2.0 (#2084) Cross-stage micro-batching. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
       }
     },
     {
@@ -14474,7 +14482,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2084",
-        "rationale": "SPEC-051 v0.1.0 (#2084) One buyer receipt per request, signed by the head. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+        "rationale": "SPEC-051 v0.2.0 (#2084) One buyer receipt per request, signed by the head. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
       }
     },
     {
@@ -14489,7 +14497,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2084",
-        "rationale": "SPEC-051 v0.1.0 (#2084) Group attestation with chained member sub-receipts. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+        "rationale": "SPEC-051 v0.2.0 (#2084) Group attestation with chained member sub-receipts. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
       }
     },
     {
@@ -14504,7 +14512,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2084",
-        "rationale": "SPEC-051 v0.1.0 (#2084) Billing and settlement as one provider. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+        "rationale": "SPEC-051 v0.2.0 (#2084) Billing and settlement as one provider. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
       }
     },
     {
@@ -14519,7 +14527,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2084",
-        "rationale": "SPEC-051 v0.1.0 (#2084) Failure before the first token. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+        "rationale": "SPEC-051 v0.2.0 (#2084) Failure before the first token. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
       }
     },
     {
@@ -14534,7 +14542,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2084",
-        "rationale": "SPEC-051 v0.1.0 (#2084) Failure after the first token. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+        "rationale": "SPEC-051 v0.2.0 (#2084) Failure after the first token. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
       }
     },
     {
@@ -14549,7 +14557,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2084",
-        "rationale": "SPEC-051 v0.1.0 (#2084) Epoch changes. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+        "rationale": "SPEC-051 v0.2.0 (#2084) Epoch changes. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
       }
     },
     {
@@ -14564,7 +14572,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2084",
-        "rationale": "SPEC-051 v0.1.0 (#2084) Isolation from single-Mac serving. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+        "rationale": "SPEC-051 v0.2.0 (#2084) Isolation from single-Mac serving. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
       }
     },
     {
@@ -14579,7 +14587,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2084",
-        "rationale": "SPEC-051 v0.1.0 (#2084) Qualification before catalog intake. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+        "rationale": "SPEC-051 v0.2.0 (#2084) Qualification before catalog intake. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
       }
     },
     {
@@ -14594,7 +14602,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2084",
-        "rationale": "SPEC-051 v0.1.0 (#2084) Go/no-go decision rule. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+        "rationale": "SPEC-051 v0.2.0 (#2084) Go/no-go decision rule. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
       }
     },
     {
@@ -14609,7 +14617,52 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2084",
-        "rationale": "SPEC-051 v0.1.0 (#2084) Version skew. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+        "rationale": "SPEC-051 v0.2.0 (#2084) Version skew. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R028",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.2.0 (#2084) Trusted Pool authorization (pool_shard_groups/v1). Stays pending until a paid Trusted Pool request through the gateway is served by an authorized shard group and settled at the pool price."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R029",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.2.0 (#2084) Group wire messages. Stays pending until a paid Trusted Pool request through the gateway is served by an authorized shard group and settled at the pool price."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R030",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.2.0 (#2084) Pool disclosure of multi-Mac serving. Stays pending until a paid Trusted Pool request through the gateway is served by an authorized shard group and settled at the pool price."
       }
     }
   ]

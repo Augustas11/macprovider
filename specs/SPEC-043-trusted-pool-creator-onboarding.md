@@ -1,12 +1,12 @@
 # SPEC-043 - Trusted Pool Creator Onboarding MVP
 
-**Version:** 0.3.5
+**Version:** 0.3.6
 
 ```json
 {
   "spec_id": "SPEC-043",
   "title": "Trusted Pool Creator Onboarding MVP",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "path": "specs/SPEC-043-trusted-pool-creator-onboarding.md",
   "status": "normative",
   "owner": "@Augustas11",
@@ -139,6 +139,8 @@ The coordinator MUST reconstruct and validate the routeable snapshot before atom
 
 Disclosure does not change SPEC-008 `attestation_tier` and MUST NOT describe an external runtime as attested, verified, or confidential.
 
+**Multi-Mac shard group disclosure (v0.3.6, #2084).** When a pool's active SPEC-042 policy core carries the `pool_shard_groups/v1` extension (SPEC-051-R028), `pool_policy.json`, `pool_status.json`, the reviewed creator distribution artifact and every public announcement MUST carry the SPEC-051-R030 multi-Mac serving disclosure: the named pool models may be served by a group of up to N Macs owned by one operator, and every Mac in the group processes the full prompt and output. Every Mac in a group is a current member of the pool under R006 with the group's single owner; the extension adds no supply outside R006.
+
 **SPEC-043-R014 - Pool-model creator and launch disclosure (v0.2.1, amended v0.2.2, #1816).** The buyer API surface for SPEC-042-R015 pool models (`/v1/models` pool view, price disclosure, and response headers) is owned by SPEC-006-R018; this requirement owns only the creator-side and launch promise. The creator policy (`pool_policy.json`), `pool_status.json`, the reviewed distribution artifact, and every public announcement MUST enumerate every active pool model with the same `pool_model_id`, artifact pair, engine set, price, and disclosure class as the active core's `pool_model_entries/v1` extension, and MUST describe each as **Pool-attested, not network-verified** (or a localization with the same meaning). A mismatch with the active core fails R008 production activation and public-announcement approval; because adding or changing an entry mints a new `manifest_core_digest`, it requires a fresh review. The creator-admin surface and the Creator Agreement MUST tell the creator that it signs each model's identity and price, that it is accountable for them, that an entry whose pair is a `recommendable` (priced) or `blocked` catalog identity is rejected, that a `candidate` or `listed` catalog match keeps earning on the pool, and that promotion of the pair to `recommendable` ends the pool binding in favor of catalog pricing (SPEC-042-R015), and that removing an entry stops new routing at the next accepted generation. Artifact disclosure is exact identity provenance, not proof that the external process loaded those bytes, and the administrative-trust language of R013 remains required. **[0.3.3, #1880]** `pool_policy.json` and `pool_status.json` (buyer-authenticated and, once announced, public) carry `policy.pool_models`: one object per entry of the active core's `pool_model_entries/v1`, in core order, with exactly `pool_model_id`, `artifact_hash_algorithm`, `artifact_hash`, `runtime_sources` (the entry's engine set), `max_context_tokens`, `price` (`prompt_rate_per_mtok`, `prompt_cache_hit_rate_per_mtok`, `completion_rate_per_mtok`), `price_source` (`pool_creator_signed`), `disclosure_class`, and `disclosure_text` (`Pool-attested, not network-verified`); `[]` when the active core carries no entries. The list is derived from the active core at read time, so it cannot drift from it; the reviewed distribution artifact and the public-announcement approval are bound to the active `manifest_core_digest`, so a changed entry fails the announcement closed until both are re-reviewed.
 
 ## 4. Implementation, tests, and journeys
@@ -233,6 +235,7 @@ The launch gate is intentionally stricter than the current SPEC-042 code state. 
 
 ## 8. Changelog and history
 
+- 0.3.6 - #2084 multi-Mac shard groups. R009/R013 consumer note: a pool whose active core carries `pool_shard_groups/v1` (SPEC-051-R028) discloses multi-Mac serving on its promise surfaces, distribution artifact and announcements (SPEC-051-R030). Group members are R006 members of the pool with one owner; no new supply class.
 - 0.3.5 - #1938 audit round 1. R001 self-serve renewal: a renewal after the grace end pauses only pools the lapsed approval kept from routing (for example a suspended creator), never a pool that kept routing through the grace end; the operator reactivation gate uses the same routing validity.
 - 0.3.4 - #1938 no calendar expiry on live features (AGENTS.md rule 10). R001/R008/R011: Creator Agreement grace end and on-call readiness `confirmation_ttl` no longer unroute an active pool, pause it, or close its public announcement. Both surface as status warnings (`creator_agreement_expired`, `oncall_readiness_expired`) in `pool_status.json` routeability `warnings` and the operator pool view `status_warnings`. They still gate creator-initiated pool mutations (Agreement) and new production promotion (on-call); a renewal after the grace end no longer pauses a routing pool. Routing is bounded only by the signed manifest policy window. A missing on-call record, suspension, approval mismatch and root-compromise freeze still unroute.
 - 0.3.3 - #1880 catalog graduation. R014: `pool_policy.json` and `pool_status.json` enumerate the active pool models (`policy.pool_models`) with identity, engine set, creator-signed price, disclosure class, and the pool-attested, not network-verified label. (0.3.2 is the no-calendar-expiry campaign, #1938.)

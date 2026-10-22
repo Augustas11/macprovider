@@ -848,7 +848,11 @@
     {
       "id": "multi-mac-shard-groups",
       "owner_spec": "SPEC-051",
-      "consumers": [],
+      "consumers": [
+        "SPEC-001",
+        "SPEC-042",
+        "SPEC-043"
+      ],
       "status": "declared",
       "requires_signed_journey_result": true,
       "owner": "@Augustas11",

@@ -1,19 +1,19 @@
 # SPEC-051 - Multi-Mac Shard Groups
 
-**Version:** 0.1.0
+**Version:** 0.2.0
 
 ```json
 {
   "spec_id": "SPEC-051",
   "title": "Multi-Mac Shard Groups",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "path": "specs/SPEC-051-multi-mac-shard-groups.md",
   "status": "draft",
   "owner": "@Augustas11",
   "authority_domains": ["multi-mac-shard-groups"],
   "supersedes": [],
-  "depends_on": ["SPEC-001", "SPEC-002", "SPEC-003", "SPEC-005", "SPEC-006", "SPEC-008", "SPEC-010", "SPEC-015", "SPEC-022", "SPEC-023", "SPEC-027", "SPEC-032", "SPEC-033", "SPEC-036", "SPEC-038", "SPEC-041", "SPEC-042", "SPEC-044", "SPEC-047", "SPEC-049"],
-  "implementation_status": "pending-reconciliation",
+  "depends_on": ["SPEC-001", "SPEC-002", "SPEC-003", "SPEC-005", "SPEC-006", "SPEC-008", "SPEC-010", "SPEC-015", "SPEC-022", "SPEC-023", "SPEC-027", "SPEC-032", "SPEC-033", "SPEC-036", "SPEC-038", "SPEC-041", "SPEC-042", "SPEC-043", "SPEC-044", "SPEC-047", "SPEC-049"],
+  "implementation_status": "partial",
   "production_status": "not-deployed",
   "last_reconciled_commit": null,
   "last_reconciled_at": null,
@@ -23,10 +23,30 @@
     "verdict": "DECISION_REQUIRED",
     "owner": "@Augustas11",
     "issue": "https://github.com/Augustas11/macprovider/issues/2084",
-    "rationale": "SPEC-051 v0.1.0 defines single-owner multi-Mac shard groups: pipeline-parallel serving of one catalog model across co-located Macs on one wired LAN, with one provider identity, minimum-of-members trust, a framed stage transport, one head-signed receipt with chained per-member sub-receipts, and explicit failure semantics. Every requirement stays pending until a paid gateway request is served by a qualified shard group and settled at the catalog price."
+    "rationale": "SPEC-051 v0.2.0 defines single-owner multi-Mac shard groups serving Trusted Pool traffic: pipeline-parallel serving of one pool model across one owner's co-located Macs on one wired LAN, with the head's provider identity as the group identity, minimum-of-members trust, a creator-signed pool_shard_groups/v1 authorization, a framed stage transport, the group wire messages, one head-signed receipt with a group attestation of chained per-member sub-receipts, and explicit failure semantics. Every requirement stays pending until a paid Trusted Pool request is served by a shard group through the gateway and settled at the pool price."
   }
 }
 ```
+
+**Change log v0.2.0 (2026-10-22, Related: #2084):** Trusted Pools are the
+product for sharding. A v0.2 group serves only Trusted Pool traffic of a pool
+whose creator-signed active core names the group in the new
+`pool_shard_groups/v1` policy extension (SPEC-051-R028), and every member must
+be a current member of that pool with the group's single owner. Global
+(poolless), relay-blind and privacy-class traffic stay excluded. The group
+provider identity is now the head Mac's own enrolled provider identity, which
+also names stage 0, because one Mac holds one hardware binding (R002). Adds the
+group wire messages and capability flags (R029), the pool disclosure of
+multi-Mac serving (R030), the group attestation object carried on
+`inference_response_end` (R019), the `error_shard_group_failed` pre-first-token
+status (R021), the coordinator availability rules (R015), and the coordinator
+`shard_groups` configuration keys. Resolves three of the four v0.1 open gaps
+from existing specs: the wire messages are specified here as SPEC-001
+extensions (repo convention, as SPEC-036 does for its scoring messages); a
+Trusted Pool sharded tuple is a SPEC-042-R015 pool model entry, so global
+catalog intake (R025, R026) does not gate pool serving; and pre-first-token
+and mid-stream failures map onto the existing SPEC-005 §6 rows with no
+group-specific billing (R021, R022).
 
 **Change log v0.1.0 (2026-10-22, Related: #2084):** First draft. Single-owner
 pipeline groups over Thunderbolt-bridge IP or Ethernet. Tensor parallelism and
@@ -35,43 +55,54 @@ and intra-group earnings splits are reserved.
 
 ## 1. Purpose and scope
 
-Some catalog models do not fit in one Mac's memory (400B+ MoE models at
+Some models do not fit in one Mac's memory (400B+ MoE models at
 4-bit, 1T-class models). SPEC-051 lets one owner serve such a model across
 several of their own Macs on one wired LAN. The model is split by layer range
 (pipeline parallelism): each Mac holds a contiguous range of layers and its
 own KV cache, and passes one boundary activation per token to the next Mac.
-To the network the group is one provider serving one catalog model at the
-catalog price.
+To the network the group is one provider serving one model at that model's
+price on the route it serves (in v0.2, a Trusted Pool model at its
+creator-signed price).
 
 The outcome is memory capacity, not single-stream speed. Pipeline decode of
 one request runs at about one Mac's speed; aggregate throughput needs several
 requests in flight across stages (SPEC-051-R017). The go/no-go rule in
 SPEC-051-R026 decides whether a sharded tuple is worth admitting.
 
-In scope for v0.1:
+Trusted Pools (SPEC-042, SPEC-043) are the product for sharding. A shard group
+is one owner's co-located Macs; a Trusted Pool is run by one accountable
+creator who names the groups allowed to serve it and discloses multi-Mac
+serving to its buyers. v0.2 groups serve only that traffic.
 
-- shard groups of one owner's Macs on one wired LAN, pipeline mode only;
+In scope for v0.2:
+
+- shard groups of one owner's Macs on one wired LAN, pipeline mode only,
+  serving Trusted Pool traffic of pools that authorize them (SPEC-051-R028);
 - the group record, member admission, and the trust and privacy rules;
 - the stage transport between members (framing, integrity, deadlines,
   heartbeats);
+- the group wire messages between head, members and coordinator
+  (SPEC-051-R029);
 - group health, routing to the group head, and dispatch;
 - one buyer receipt per request with per-member sub-receipts;
-- billing as one provider at the catalog price;
+- billing as one provider at the pool model's creator-signed price;
 - failure semantics before and after the first streamed token;
-- qualification of a sharded tuple before catalog intake.
+- qualification of a sharded tuple before global catalog intake.
 
-Out of scope for v0.1, reserved:
+Out of scope for v0.2, reserved:
 
 - tensor parallelism (`parallelism_mode = tensor`) and RDMA over Thunderbolt 5
   (`interconnect_class = rdma-tb5`). Both are enum values from the first
   draft so a later revision adds them as an engine mode, not a protocol
-  redesign. A v0.1 coordinator refuses both (SPEC-051-R005);
+  redesign. A v0.2 coordinator refuses both (SPEC-051-R005);
 - groups whose members belong to different owners, and any split of group
   earnings between members (SPEC-051-R020);
 - groups across sites or over the public internet, and Wi-Fi links
   (SPEC-051-R007);
-- Trusted Pool serving (SPEC-042) and relay-blind or privacy-class requests
-  (SPEC-041, SPEC-049) by a group (SPEC-051-R009).
+- global (poolless) traffic served by a group: a sharded catalog tuple needs
+  a SPEC-023/SPEC-010 row shape that does not exist yet (§7);
+- relay-blind or privacy-class requests (SPEC-041, SPEC-049) by a group
+  (SPEC-051-R009).
 
 Single-Mac serving is unchanged (SPEC-051-R024).
 
@@ -86,8 +117,10 @@ semantics, and sharded-tuple qualification and its decision rule.
 Consumed contracts, owned elsewhere. SPEC-051 cites them and does not restate
 or change them:
 
-- **SPEC-001** owns the provider wire protocol. The group registration and
-  group heartbeat messages are additions to that protocol (§7, open gap).
+- **SPEC-001** owns the provider wire protocol. The group messages, the two
+  capability flags, the `group_attestation` member and the
+  `error_shard_group_failed` status are SPEC-001 extensions specified here
+  (SPEC-051-R029), the convention SPEC-036 uses for its scoring messages.
 - **SPEC-002** owns admission and routing: release admission
   (SPEC-002-R004), the measured-performance store (SPEC-002-R005),
   phase-aware selection (SPEC-002-R006), and buyer ownership exclusion
@@ -115,7 +148,14 @@ or change them:
 - **SPEC-038** owns continuous batching inside one engine.
 - **SPEC-041** and **SPEC-049** own relay-blind and privacy-class requests,
   including in-process plaintext (SPEC-049-R009, SPEC-049-R011).
-- **SPEC-042** owns Trusted Pools.
+- **SPEC-042** owns Trusted Pools: the pool manifest and its v2 extension
+  mechanism (SPEC-042-R001), membership (SPEC-042-R003), route isolation
+  (SPEC-042-R005), pool-scoped settlement labels (SPEC-042-R006), and pool
+  model entries (SPEC-042-R015). SPEC-051 defines the body of one extension,
+  `pool_shard_groups/v1` (SPEC-051-R028), under that mechanism.
+- **SPEC-043** owns creator onboarding, the single-operator membership model
+  (SPEC-043-R006) and the promise surfaces (SPEC-043-R009). SPEC-051-R030 adds
+  the multi-Mac disclosure those surfaces carry.
 
 SPEC-051 mints no trust tier, attestation label, or privacy label, and
 upgrades or downgrades none. It only defines how a group inherits existing
@@ -131,13 +171,15 @@ labels from its members (SPEC-051-R004).
 | Head | The member at stage 0. It holds the embedding and the first layers, holds the group's coordinator session, receives dispatch, streams tokens to the buyer path, and signs receipts. |
 | Last stage | The member holding the final layers and the LM head. It samples the next token and returns the token ID to the head. |
 | Spare | An admitted member with a stage's layers loaded and no active role. It can replace that stage's member (SPEC-051-R022). |
-| Group provider identity | The one provider identity the network sees for the group. Its session is held by the head. |
-| Member device identity | A member's own enrolled provider identity (SPEC-003). It is never buyer-visible and never separately routable while in an active group epoch. |
+| Group provider identity | The one provider identity the network sees for the group: the head Mac's own enrolled provider identity (SPEC-003). It also names stage 0 in the group record. |
+| Member device identity | A non-head member's own enrolled provider identity (SPEC-003). It is never buyer-visible and never separately routable while its session advertises `shard_member_v1`. |
+| Head session | The head's coordinator session under the group provider identity, advertising `shard_group_head_v1`. |
+| Member session | A non-head member's own coordinator session, advertising `shard_member_v1`. |
 | Group epoch | A strictly increasing unsigned 64-bit integer naming one exact membership and layer placement. |
 | Boundary activation | The hidden-state tensor one stage sends to the next for one request and one step. |
 | Hop | One transfer of a boundary activation between adjacent stages, or of a token ID from the last stage to the head. |
 | Micro-batch | A set of request rows that move through the stages together in one step. |
-| Sharded tuple | A catalog model tuple served in `pipeline` mode over one interconnect class with a given stage count. |
+| Sharded tuple | A model tuple served in `pipeline` mode over one interconnect class with a given stage count. In v0.2 it is a SPEC-042-R015 pool model entry. |
 
 ## 4. Configuration
 
@@ -149,6 +191,8 @@ Coordinator `coordinator.yaml`, section `shard_groups`:
 | `max_link_rtt_p99_us` | int 200..5000 | `2000` | Upper bound on each link's measured p99 heartbeat round trip (SPEC-051-R007). |
 | `required_frame_protection.thunderbolt-ip` | enum | `crc32c` | Minimum frame protection on a point-to-point Thunderbolt-bridge link (SPEC-051-R011). |
 | `required_frame_protection.ethernet` | enum | `hmac-sha256` | Minimum frame protection on an Ethernet link (SPEC-051-R011). |
+| `group_heartbeat_stale_multiple` | int 2..10 | `3` | A group heartbeat older than this many coordinator `heartbeat_interval_s` periods makes the group unavailable (SPEC-051-R015). |
+| `supported_transport_versions` | list of int | `[1]` | Stage-transport versions the coordinator accepts in a group record (SPEC-051-R027). |
 
 Group configuration on the head (owner-local, carried in the group record):
 
@@ -178,20 +222,30 @@ member's owner differs from the group provider identity's owner, and MUST
 move a registered group to unavailable (SPEC-051-R015) when any member's
 ownership record changes. No member may be a Mac outside the owner's control,
 a hosted or rented machine of another party, or a Mac reachable only across
-the public internet. A group serves exactly one catalog model at a time.
+the public internet. A group serves exactly one model at a time. The coordinator reads owner
+equality from the SPEC-003 ownership claim of each identity; an identity with
+no claim has no owner and cannot be in a group.
 
 ### SPEC-051-R002 - One group provider identity, member device identities
 
-Each group MUST have exactly one group provider identity, enrolled under
-SPEC-003 like any provider and distinct from every member device identity.
-Only the head holds the group provider identity's coordinator session and
-credentials. Every member MUST also hold its own enrolled member device
-identity and authenticate it to the coordinator for admission
+Each group MUST have exactly one group provider identity: the head Mac's own
+enrolled provider identity under SPEC-003. It names stage 0 in the group record
+(SPEC-051-R005), holds the head session, and signs the group record, receipts
+and group attestations with its SPEC-015 receipt key. Every other member MUST
+hold its own enrolled member device identity, distinct from the group provider
+identity, and authenticate it on its own member session for admission
 (SPEC-051-R003) and health (SPEC-051-R015). Buyer-visible surfaces, receipts
 (SPEC-051-R018) and the measured-performance store (SPEC-002-R005) MUST name
 only the group provider identity. Member device identities appear only in the
 group record, the group attestation (SPEC-051-R019), and operator surfaces. A
-member device identity MUST belong to at most one group at a time.
+member device identity MUST belong to at most one group at a time; the
+coordinator MUST refuse a group record or member hello that would place it in
+a second group.
+
+One Mac carries one hardware binding (SPEC-033), which is why the head does not
+hold a second identity for itself. While its session advertises
+`shard_group_head_v1`, the group provider identity serves only group traffic
+(SPEC-051-R016).
 
 ### SPEC-051-R003 - Every member passes the full single-provider admission bar
 
@@ -204,7 +258,10 @@ scoped by SPEC-051-R008), Tier-2 evidence where the served tuple requires it
 provider. A member that fails or loses any of these MUST make the group
 unavailable (SPEC-051-R015). All active members and spares MUST run the same
 stage-transport version and the same engine identity for the sharded tuple; a
-mismatch MUST fail group registration.
+mismatch MUST fail group registration. Each non-head member meets this bar
+through its own member session: its hello names the group's model id and the
+full artifact pair it verified its files against, exactly as the head's does,
+and passes every hello gate a single provider would.
 
 ### SPEC-051-R004 - Group trust is the minimum of its members
 
@@ -223,7 +280,8 @@ reservation.
 ### SPEC-051-R005 - Group record
 
 The head MUST register each group epoch with the coordinator as one group
-record signed by the group provider identity. The coordinator MUST store each
+record signed by the group provider identity's SPEC-015 receipt key, sent in
+`shard_group_register` on the head session (SPEC-051-R029). The coordinator MUST store each
 accepted record append-only and refuse any record whose `group_epoch` is not
 strictly greater than the last accepted epoch for that group. The record MUST
 carry exactly these fields:
@@ -232,19 +290,20 @@ carry exactly these fields:
 |---|---|
 | `schema` | Exactly `macprovider.shard-group-record.v1`. |
 | `group_provider_id` | The group provider identity. |
-| `group_epoch` | Unsigned 64-bit integer, strictly increasing per group. |
-| `parallelism_mode` | Closed enum `pipeline` \| `tensor`. v0.1 accepts only `pipeline`; `tensor` is reserved and MUST be refused. |
-| `interconnect_class` | Closed enum `thunderbolt-ip` \| `ethernet` \| `rdma-tb5`. v0.1 accepts `thunderbolt-ip` and `ethernet`; `rdma-tb5` is reserved and MUST be refused. There is no Wi-Fi value. |
+| `group_epoch` | Integer in `[1, 2^53 - 1]`, strictly increasing per group. |
+| `parallelism_mode` | Closed enum `pipeline` \| `tensor`. v0.2 accepts only `pipeline`; `tensor` is reserved and MUST be refused. |
+| `interconnect_class` | Closed enum `thunderbolt-ip` \| `ethernet` \| `rdma-tb5`. v0.2 accepts `thunderbolt-ip` and `ethernet`; `rdma-tb5` is reserved and MUST be refused. There is no Wi-Fi value. |
 | `frame_protection` | Closed enum `crc32c` \| `hmac-sha256` \| `aead-chacha20poly1305` (SPEC-051-R011). |
-| `transport_version` | The stage-transport version every member runs. |
-| `model` | The catalog model id and its exact signed catalog tuple: catalog release identity, model key, and `(hash_algorithm, hash)` artifact identity under SPEC-010-R001 and SPEC-010-R007. |
-| `num_layers` | The model's transformer layer count. |
-| `stages` | Ordered list of `{stage_index, member_device_id, layer_start, layer_end}`. |
-| `spares` | List of `{member_device_id, stage_index}`; may be empty. |
-| `supervision` | The SPEC-051 §4 group configuration values. |
+| `transport_version` | The stage-transport version every member runs; one of `supported_transport_versions`. |
+| `model` | Object `{model_id, pool_model_id, artifact_hash_algorithm, artifact_hash}`: the head's hello model id, the SPEC-042-R015 `pool_model_id` the group serves, and that entry's exact artifact pair (`macprovider.snapshot-manifest.v1` and 64 lowercase hex). The pair MUST equal the head session's reported model hash pair. |
+| `num_layers` | The model's transformer layer count, `[2, 4096]`. |
+| `max_concurrency` | The group's request concurrency limit, `[1, 256]`, at most the head session's hello `max_concurrency` (SPEC-051-R017). |
+| `stages` | Ordered list of `{stage_index, member_device_id, layer_start, layer_end}`. Stage 0's `member_device_id` is the group provider identity. |
+| `spares` | List of `{member_device_id, stage_index}` with `stage_index >= 1`; may be empty. The head has no spare. |
+| `supervision` | Object with exactly the five SPEC-051 §4 group configuration keys. |
 
 Unknown fields, missing fields, and enum values outside these sets MUST be
-refused.
+refused. Active members plus spares MUST number at most `max_members`.
 
 ### SPEC-051-R006 - Layer placement validity
 
@@ -291,12 +350,14 @@ member MUST be treated as seeing the full prompt and output. Consequently:
 1. the group's privacy posture is the most restrictive constraint of any
    member under SPEC-051-R004, and a group never advertises a privacy property
    that any member lacks;
-2. a v0.1 group MUST NOT be eligible for relay-blind requests (SPEC-041) or
+2. a group MUST NOT be eligible for relay-blind requests (SPEC-041) or
    privacy-class requests (SPEC-049), because their plaintext boundary is one
    provider process (SPEC-049-R009, SPEC-049-R011) and a group moves
    prompt-equivalent data between processes and Macs; the coordinator MUST
    exclude groups from those routes before reservation;
-3. a v0.1 group MUST NOT serve Trusted Pool traffic (SPEC-042);
+3. a group MUST serve only Trusted Pool traffic of a pool whose active core
+   authorizes it and discloses multi-Mac serving (SPEC-051-R028,
+   SPEC-051-R030), and MUST NOT serve global (poolless) traffic;
 4. no member may be outside the owner's control (SPEC-051-R001);
 5. members MUST NOT write boundary activation payloads, prompt text or output
    text to disk, logs, crash reports or telemetry, and MUST release a
@@ -378,12 +439,50 @@ device identity. When any active member is unhealthy, the coordinator MUST
 mark the group unavailable before the next reservation. A spare's health
 affects only whether replay is possible (SPEC-051-R022), not availability.
 
+The coordinator evaluates availability whenever a group record, member hello,
+group heartbeat, member or head session change arrives, and at least once per
+second. The group is available only when all of these hold, and otherwise
+names the first failing condition as its reason code:
+
+1. the head session is connected, advertises `shard_group_head_v1` and not
+   `shard_member_v1`, is WebSocket-tunnelled, and its reported model pair
+   still equals the record's (`head_session_invalid`);
+2. the latest accepted record exists for the group (`group_not_registered`);
+3. every active non-head member has an accepted `shard_member_hello` for
+   that epoch (`member_not_joined`) on a member session that is still the one
+   it joined from (`member_session_missing`);
+4. every active member session, and the head session, passes every
+   routing-state gate of a single provider except free slots and the
+   member-session exclusion itself: authenticated bearer, no quarantine,
+   no compute-integrity suspension, no admission sandbox, evidence or ceiling
+   exclusion, no pending catalog re-check, handshake or receipt-key
+   publication, a published receipt key, and state `ready` or `busy`
+   (`member_not_admissible`);
+5. for SPEC-051-R004, no active member holds a lower provider tier,
+   attestation tier, encrypted-leg capability or attestation status than the
+   head; the group then holds exactly the head's labels, which are the
+   minimum (`trust_label_above_member`);
+6. every active member and the group provider identity have the same
+   SPEC-003 owner (`owner_mismatch`);
+7. a group heartbeat for the epoch arrived within
+   `group_heartbeat_stale_multiple` coordinator heartbeat intervals
+   (`group_heartbeat_stale`), reports every active member healthy
+   (`member_unhealthy`), and reports every required link on the
+   `interconnect_class` interface type (`link_interface_invalid`) with
+   `rtt_p99_us <= max_link_rtt_p99_us` (`link_rtt_exceeded`).
+
+The coordinator MUST send `shard_group_status` (SPEC-051-R029) to the head on
+every change of availability or reason.
+
 ### SPEC-051-R016 - Routing to the head only
 
-The coordinator MUST reserve and dispatch group requests only to the head's
-group provider session, and MUST NOT dispatch any buyer request to a member
-device identity while it is in an active group epoch, for the group's model
-or any other. Phase-aware ranking (SPEC-002-R006) MUST use the group's own
+The coordinator MUST reserve and dispatch group requests only to the head
+session, and MUST NOT dispatch any buyer request to a member session, for the
+group's model or any other. A head session is routable only while its group
+is available (SPEC-051-R015), only on a pool route that SPEC-051-R028
+authorizes, and only for the pool model the group record names. It MUST NOT be
+selected for global, relay-blind or privacy-class requests, nor dispatched over
+HTTP-direct forwarding. Phase-aware ranking (SPEC-002-R006) MUST use the group's own
 measured performance (SPEC-002-R005), not any member's. Buyer ownership
 exclusion (SPEC-002-R008) applies to the group's owner.
 
@@ -395,6 +494,7 @@ MUST batch its rows under SPEC-038 within its own engine. Sampling MUST run on
 the last stage, and only token IDs travel back to the head. Prefill MUST be
 pipelined in chunks across stages. Each stage MUST hold only its own layers'
 KV. The group MUST advertise to the coordinator a concurrency limit no larger
+than its record's `max_concurrency`, and for a global sharded tuple no larger
 than the concurrency it was qualified at (SPEC-051-R025).
 
 ### SPEC-051-R018 - One buyer receipt per request, signed by the head
@@ -413,7 +513,7 @@ For each served request the head MUST produce one group attestation object,
 signed by the group provider identity and bound to the SPEC-015 receipt by
 the SHA-256 of that receipt's canonical tuple bytes, and send it to the
 coordinator with the receipt. It MUST embed one sub-receipt per member that
-took part, each signed by that member's device identity key, carrying:
+took part, each signed by that member's SPEC-015 receipt key, carrying:
 `member_device_id`, `group_epoch`, `stage_index`, `layer_start`, `layer_end`,
 the request ID, prompt tokens processed, decode steps processed, and
 `in_digest` and `out_digest`. `in_digest` is the SHA-256 chain over the exact
@@ -429,17 +529,59 @@ for that attempt. When a spare replaced a member mid-request
 (SPEC-051-R022), the attestation MUST carry both members' sub-receipts with
 the step ranges each covered, and the chain MUST hold within each range.
 
+Wire form and verification:
+
+1. The attestation travels as the `group_attestation` member of the
+   `inference_response_end` frame that carries the receipt (SPEC-051-R029).
+   A head-session end frame with a non-empty `receipt` and no valid
+   attestation fails this requirement.
+2. The object has exactly the keys `schema`
+   (`macprovider.shard-group-attestation.v1`), `group_provider_id`,
+   `request_id`, `attempt_n`, `receipt_tuple_sha256`, `segments`, and
+   `signature`. `request_id`, `attempt_n` and `group_provider_id` MUST equal
+   the receipt tuple's `request_id`, `attempt_n` and `provider_id`.
+   `signature` is the head session receipt key's Ed25519 signature over the
+   UTF-8 bytes `macprovider.shard-group-attestation.v1` and a line feed,
+   followed by the RFC 8785 (JCS) bytes of the object without `signature`.
+3. `segments` is a non-empty list of `{group_epoch, step_start, step_end,
+   sub_receipts}`. Epochs strictly increase, the first segment starts at step
+   0, each segment starts where the previous ended, and every segment but a
+   single one is non-empty. Each epoch MUST be an accepted record of this
+   group.
+4. `sub_receipts` lists one signed sub-receipt per active stage of that
+   epoch, in stage order, each `{sub_receipt, public_key, signature}`.
+   `sub_receipt` has exactly the keys `member_device_id`, `group_epoch`,
+   `stage_index`, `layer_start`, `layer_end`, `request_id` (the coordinator
+   request id string), `prompt_tokens`, `decode_steps`, `in_digest` and
+   `out_digest` (64 lowercase hex each). `public_key` is base64 of the raw
+   32-byte Ed25519 key; `signature` is that key's signature over the UTF-8
+   bytes `macprovider.shard-sub-receipt.v1` and a line feed, followed by the
+   JCS bytes of `sub_receipt`. Member, epoch, stage and layers MUST match that
+   epoch's record; `request_id` MUST equal the attestation's. For stage 0,
+   `public_key` MUST be the head session's receipt key; for any other stage,
+   the receipt key its member session carried when its member hello for that
+   epoch was accepted.
+5. On any failure the coordinator MUST store the verdict with the fault kind
+   and the first faulty member device identity, and MUST drop the receipt
+   from the attempt before settlement, so the attempt settles exactly as a
+   SPEC-022 attempt without a receipt. On success it MUST store the
+   attestation with the receipt tuple digest, keyed by request, attempt and
+   group provider identity.
+
 ### SPEC-051-R020 - Billing and settlement as one provider
 
 A group request MUST be priced and settled exactly as a single-provider
-request for the same catalog tuple: the SPEC-005 formula at the signed
-catalog price (SPEC-005-R011), SPEC-022 verified-model settlement for the
-group provider identity, and SPEC-047 admission state for the group's tuple
-(SPEC-047-R001, SPEC-047-R003). There MUST be one ledger row set per
+request for the same tuple on the same route: on a Trusted Pool route, the
+SPEC-005 formula at the pool model entry's creator-signed rates (SPEC-005-R015,
+SPEC-042-R015), the pool-scoped settlement label and route fence
+(SPEC-042-R006), SPEC-022 verified-model settlement for the group provider
+identity, and the SPEC-047-R011 pool-scoped binding of the head session; for a
+global sharded tuple, once one exists, the signed catalog price
+(SPEC-005-R011) and SPEC-047 admission state (SPEC-047-R001, SPEC-047-R003). There MUST be one ledger row set per
 attempt, credited to the group provider identity; members earn nothing
-separately. Because a v0.1 group has one owner, the owner receives the
-group's provider credit. Any split of earnings between members is reserved
-and MUST NOT be computed or paid in v0.1; a group record or ledger field that
+separately. Because a group has one owner, the owner receives the group's
+provider credit. Any split of earnings between members is reserved and MUST
+NOT be computed or paid; a group record or ledger field that
 claims a split MUST be refused.
 
 ### SPEC-051-R021 - Failure before the first token
@@ -447,11 +589,18 @@ claims a split MUST be refused.
 When a group attempt fails before the head has streamed the first output
 token to the buyer path (member death, link failure, missed deadline, chain
 break, or unavailability), the head MUST abort the attempt across all members
-and report a retryable provider failure that carries no completion. The
-coordinator MUST retry the request on another provider or group under
-SPEC-005-R006 multi-attempt attribution, and the failed group attempt MUST
-NOT produce a buyer debit or provider credit. The buyer sees an error only if
-every attempt fails, in the SPEC-006-R002 envelope.
+and report a retryable provider failure that carries no completion: an
+`inference_response_end` with `status` `error_shard_group_failed`,
+`chunks_sent` 0, `retryable` true and no `receipt`. The coordinator MUST treat
+it exactly as a provider disconnect before the first chunk: retry the request
+on another eligible provider or group under the SPEC-005 §8 multi-attempt
+attribution (SPEC-005-R006), with the failed attempt written as a SPEC-005
+§6.11 breaker-qualifying row whose gross, provider and operator credits are
+zero. The failed group attempt therefore produces no buyer debit and no
+provider credit. The buyer sees an error only if every attempt fails, in the
+SPEC-006-R002 envelope. A coordinator that receives `error_shard_group_failed`
+from any session other than a head session, or after the first chunk, treats
+it as an ordinary provider error.
 
 ### SPEC-051-R022 - Failure after the first token
 
@@ -463,9 +612,13 @@ When an active member fails after the first token was streamed:
    from retained boundary activations or recomputation, and resume at the
    next undelivered token step, within `replay_deadline_ms`;
 2. otherwise, or if replay does not finish within `replay_deadline_ms`, the
-   head MUST terminate the stream with an explicit error in the SPEC-006-R002
-   envelope, and the attempt MUST be billed for the prompt and the tokens
-   actually delivered only (SPEC-005 §6.4).
+   head MUST terminate the stream with an `inference_response_end` whose
+   `status` is `error_shard_group_failed`, which the buyer path renders as an
+   explicit error in the SPEC-006-R002 envelope, and the attempt MUST be
+   billed exactly as a single provider's mid-stream provider failure under
+   SPEC-005 §6: the §6.4 partial-stream row (prompt plus delivered tokens,
+   never more) with the §6.11 FR-P11a override applied as SPEC-005 applies it
+   to every provider. SPEC-051 adds no group-specific billing row.
 
 The group MUST NOT regenerate, rewrite, or re-emit any token the buyer path
 already received (SPEC-051-R012), and MUST NOT silently retry the request from
@@ -490,11 +643,17 @@ billing, continuous batching, decode paths and performance MUST NOT change.
 The sharded serving path MUST run only on Macs whose owner configured a group,
 and only for tuples qualified under SPEC-051-R025. A coordinator or CLI
 without SPEC-051 support MUST continue to serve single-Mac traffic unchanged.
+A pool whose active core carries no `pool_shard_groups/v1` extension routes
+exactly as without SPEC-051.
 
 ### SPEC-051-R025 - Qualification before catalog intake
 
-A sharded tuple MUST NOT enter `catalog_priced` or `settlement_capable`
-(SPEC-047-R001) until a qualification record for that tuple exists. The record
+A global sharded tuple MUST NOT enter `catalog_priced` or
+`settlement_capable` (SPEC-047-R001) until a qualification record for that
+tuple exists. A Trusted Pool sharded tuple is a SPEC-042-R015 pool model entry
+under the creator's attestation (`pool_attested_unverified`); it needs no
+qualification record to serve its own pool, and its creator SHOULD use the
+same measurements before naming a group in `pool_shard_groups/v1`. The record
 MUST be measured end to end on a real group of that interconnect class and
 stage count, through the SPEC-051 transport and engine, and MUST report:
 
@@ -524,44 +683,185 @@ record:
    that member can serve alone at its measured throughput (SPEC-002-R005)
    times its catalog price.
 
-A tuple that fails any condition MUST NOT enter catalog intake as a sharded
-tuple. The decision cites these measured numbers, not a side metric.
+A tuple that fails any condition MUST NOT enter global catalog intake as a
+sharded tuple. The decision cites these measured numbers, not a side metric.
 
 ### SPEC-051-R027 - Version skew
 
 The coordinator MUST accept group registration only from a head and members
-whose wire versions advertise SPEC-051 support, and MUST refuse a group record
-it cannot fully validate. A coordinator without SPEC-051 support does not know
+whose sessions advertise the SPEC-051 capability flags (SPEC-051-R029), and
+MUST refuse a group record it cannot fully validate. A coordinator without SPEC-051 support does not know
 the group messages, so the head MUST NOT serve group traffic when its group
 registration is not acknowledged; its members' single-Mac sessions are then
 unaffected. A member whose transport version differs from the group record's
 MUST refuse to join that epoch.
 
+### SPEC-051-R028 - Trusted Pool authorization (`pool_shard_groups/v1`)
+
+A shard group MUST serve a pool's traffic only while that pool's active
+SPEC-042 v2 policy core carries the `pool_shard_groups/v1` extension naming the
+group provider identity. The extension is trust-bearing signed core data under
+the SPEC-042-R001 extension mechanism; its body is a 32-bit count from 1 to 64
+followed by that many entries in strictly ascending byte order of
+`group_provider_id`, each encoding exactly, in this order under the
+SPEC-041-R002 framing:
+
+1. `group_provider_id`: length-prefixed ASCII matching `^[a-zA-Z0-9_.-]{1,64}$`;
+2. `pool_model_id`: length-prefixed, equal to the `pool_model_id` of an entry
+   in the same core's `pool_model_entries/v1` whose `allowed_runtime_sources`
+   contains `mlx_cache`;
+3. `max_members`: unsigned 64-bit integer in `[2, 8]`.
+
+Duplicate or out-of-order ids, a count outside `[1, 64]`, a `pool_model_id`
+with no such entry, a bound outside `[2, 8]`, a non-canonical body, or a core
+whose settlement mode is not `enforce` invalidate the whole core at
+acceptance. A core without the extension keeps its exact bytes and authorizes
+no group.
+
+At every route attempt on a pool route, the coordinator MUST additionally
+require of a head session that: its group provider identity is named in the
+active core's extension; the head's pool-scoped binding (SPEC-047-R011) is to
+that pool and to the entry's `pool_model_id`; the group's active members plus
+spares number at most the entry's `max_members`; and every active member and
+the group provider identity are current members of the pool (SPEC-042-R003)
+meeting the pool's binary floor (SPEC-042-R004). Because the group has one
+owner (SPEC-051-R001), every member is then owned by the pool creator or
+admitted under the creator's delegation from that one owner (SPEC-043-R006).
+A failure of any check excludes the head from that attempt; it MUST NOT fall
+back to global routing (SPEC-042-R005).
+
+Removing the group from the extension, or removing its pool model entry, stops
+new selection at the next accepted generation. Attempts already dispatched
+settle from their route snapshot under SPEC-042-R015.
+
+### SPEC-051-R029 - Group wire messages
+
+All group messages are JSON text frames on the provider WebSocket, parsed
+strictly: unknown, missing or duplicate keys and out-of-range values are
+refused. Integers are JSON numbers in `[0, 2^53 - 1]`. Signatures are base64
+(standard alphabet, padded) Ed25519 signatures of exactly 64 bytes.
+
+Capabilities, in the v2 `auth_request.tier2_capabilities` object:
+
+- `shard_group_head_v1` (boolean): the session is a head session. It is not
+  routable until its group is available (SPEC-051-R015), and then only as
+  SPEC-051-R016 and SPEC-051-R028 allow.
+- `shard_member_v1` (boolean): the session is a member session. It is never
+  routable. A session advertising both is a member session and cannot
+  register a group.
+
+Head to coordinator:
+
+- `shard_group_register`: `{type, version: 1, record, record_signature}`.
+  `record` is the SPEC-051-R005 group record; `record_signature` is the head
+  session receipt key's signature over the UTF-8 bytes
+  `macprovider.shard-group-record.v1` and a line feed, followed by the JCS
+  bytes of `record`.
+  `record.group_provider_id` MUST equal the head session's provider id.
+- `shard_group_heartbeat`: `{type, version: 1, group_provider_id, group_epoch,
+  members, links}`. `members` lists exactly the record's active members and
+  spares, each once, as `{member_device_id, healthy}`. `links` lists exactly
+  the required links as `{from_member_device_id, to_member_device_id,
+  interface_type, rtt_p99_us}`: stage `i` to stage `i+1`, the last stage to
+  stage 0, and stage 0 to each spare. `interface_type` is one of
+  `thunderbolt`, `ethernet`, `wifi`, `vpn`, `other`; only `thunderbolt` (for
+  `thunderbolt-ip`) or `ethernet` (for `ethernet`) is admissible. The head
+  MUST send it at least once per coordinator `heartbeat_interval_s` and
+  immediately on any member health or link change.
+
+Member to coordinator, on the member session:
+
+- `shard_member_hello`: `{type, version: 1, group_provider_id, group_epoch,
+  member_device_id, role, stage_index, layer_start, layer_end,
+  transport_version, artifact_hash_algorithm, artifact_hash, weights_verified,
+  stage_fits, links}`. `member_device_id` MUST equal the session's provider
+  id; `role` is `stage` or `spare`; the stage fields name the stage it holds
+  or backs; `weights_verified` and `stage_fits` MUST be true
+  (SPEC-051-R006, SPEC-051-R008); `links` lists
+  `{peer_member_device_id, interface_type}` for every stage link the member
+  carries (its upstream and downstream neighbours, the last stage's
+  downstream neighbour being stage 0; a spare's link to stage 0). The
+  coordinator accepts it only against the accepted record for that epoch,
+  with every value equal to the record and every link admissible, and then
+  binds the member's current receipt key to that epoch. A hello for an epoch
+  not yet registered is kept and evaluated when the record arrives.
+
+Coordinator to head:
+
+- `shard_group_register_result`: `{type, version: 1, group_provider_id,
+  group_epoch, accepted, reason}`; `reason` is empty when accepted.
+- `shard_group_status`: `{type, version: 1, group_provider_id, group_epoch,
+  available, reason}`; `reason` is a SPEC-051-R015 code, empty when
+  available. The head MUST NOT accept group work it cannot serve and MUST NOT
+  treat itself as serving before it receives `available: true`.
+
+Coordinator to member:
+
+- `shard_member_hello_result`: `{type, version: 1, group_provider_id,
+  group_epoch, accepted, reason}`, sent on each hello and again when a kept
+  hello is accepted at registration.
+
+Registration reason codes: `invalid_record`, `signature_invalid`,
+`not_group_head_session`, `epoch_not_increasing`, `mode_reserved`,
+`interconnect_reserved`, `frame_protection_below_minimum`,
+`transport_version_unsupported`, `placement_invalid`, `too_many_members`,
+`model_mismatch`, `member_conflict`, `owner_mismatch`, `store_unavailable`.
+Member hello reason codes: `invalid_hello`, `not_member_session`,
+`group_not_registered`, `epoch_superseded`, `record_mismatch`,
+`link_interface_invalid`, `weights_unverified`, `member_conflict`.
+
+Inference frames are unchanged except for two additions on
+`inference_response_end` from a head session: the `group_attestation` member
+(SPEC-051-R019) and the `error_shard_group_failed` status (SPEC-051-R021,
+SPEC-051-R022).
+
+### SPEC-051-R030 - Pool disclosure of multi-Mac serving
+
+While a pool's active core carries `pool_shard_groups/v1`, its
+`pool_policy.json` and `pool_status.json` (SPEC-042-R008, SPEC-043-R009) MUST
+carry a `multi_mac_serving` object with `enabled: true`, the sorted distinct
+`pool_model_ids` the extension names, the largest `max_members`, and the
+disclosure text "Requests for these models may be served by a group of up to
+N Macs owned by one operator on one local network. Every Mac in the group
+processes the full prompt and output." with N the largest `max_members`. The
+object MUST NOT name provider identities (SPEC-042 §2, SPEC-006). A pool
+without the extension omits the object, so its documents are unchanged. The
+creator's reviewed distribution artifact and announcements (SPEC-043-R008)
+MUST carry the same statement. The disclosure describes exposure, not
+protection: it MUST NOT describe transport encryption as a privacy property
+(SPEC-051-R009).
+
 ## 6. Implementation, tests, and journeys
 
-The machine-readable mapping is in `CONFORMANCE.json`. No requirement has
-mapped implementation yet. The intended split:
+The machine-readable mapping is in `CONFORMANCE.json`. The split:
 
-- Stage transport, supervision, and stage engine: `phase3-binary/`
-  (provider CLI) on the MLX fork's per-model pipeline split and per-stage
-  weight loading.
-- Group registration, health, routing, group attestation verification:
-  `phase4-coordinator/`.
-- Ledger and settlement: unchanged SPEC-005 and SPEC-022 code paths, keyed by
-  the group provider identity.
+- Stage transport, supervision, stage engine, and the provider half of the
+  group messages: `phase3-binary/` (provider CLI).
+- Group registration, member binding, availability, routing gates, the
+  `pool_shard_groups/v1` extension, the disclosure object, group attestation
+  verification and storage, and the pre-first-token failover mapping:
+  `phase4-coordinator/` (`internal/shardgroup`, `internal/ws`,
+  `internal/buyer`, `internal/poolmanifest`, `internal/trustpool`).
+- Ledger and settlement: unchanged SPEC-005, SPEC-022 and SPEC-042 pool code
+  paths, keyed by the group provider identity.
 
 Journeys: a two-Mac lab group serving a small model that also fits on one Mac
-(parity and transport numbers, SPEC-051-R025), and the live proof, a paid
-gateway request served by a qualified group and settled at the catalog price.
+(parity and transport numbers, SPEC-051-R025), and the live proof: a paid
+Trusted Pool request through the gateway, served by a group the pool's core
+authorizes, and settled at the pool price.
 
 ## 7. Open gaps
 
 | Requirement/domain | Verdict | Owner | Issue | Evidence needed |
 |---|---|---|---|---|
-| `SPEC-051-R001`..`R027` | `DECISION_REQUIRED` | `@Augustas11` | `#2084` | Implementation, tests, and a paid gateway request served by a qualified group |
-| `SPEC-051-R005`, `R015`, `R027` | `DECISION_REQUIRED` | `@Augustas11` | `#2084` | SPEC-001 amendment adding the group registration and group heartbeat messages to the provider wire protocol |
-| `SPEC-051-R025` | `DECISION_REQUIRED` | `@Augustas11` | `#2084` | SPEC-023/SPEC-010 amendment for how a signed catalog row names a sharded tuple and its buyer-grade floor |
-| `SPEC-051-R021` | `DECISION_REQUIRED` | `@Augustas11` | `#2084` | SPEC-005 confirmation that a pre-first-token group abort maps to the zero-row provider-not-reached accounting path |
+| `SPEC-051-R001`..`R030` | `DECISION_REQUIRED` | `@Augustas11` | `#2084` | Provider implementation, tests, and a paid Trusted Pool request through the gateway served by an authorized group |
+| `SPEC-051-R025`, `R026` (global tuples only) | `DECISION_REQUIRED` | `@Augustas11` | `#2084` | SPEC-023/SPEC-010 amendment for how a signed catalog row names a sharded tuple and its buyer-grade floor, before any global (poolless) group serving |
+
+Resolved in v0.2.0 from existing specs: the group wire messages are SPEC-001
+extensions specified in SPEC-051-R029; a pre-first-token group abort maps onto
+the SPEC-005 §6.11 zero-credit failover row, not the §6.2 zero-row path,
+because the provider was reached (SPEC-051-R021); a mid-stream failure follows
+SPEC-005 §6 exactly as for a single provider (SPEC-051-R022).
 
 ## 8. Current contract notes
 
@@ -572,6 +872,9 @@ gateway request served by a qualified group and settled at the catalog price.
   comes from requests overlapping across stages (SPEC-051-R017).
 - The receipt tuple is locked by SPEC-015, so per-member data travels in the
   group attestation bound to the receipt digest, not inside the tuple.
+- The pool label binds the group transitively: the route snapshot carries the
+  pool id and the manifest core digest whose `pool_shard_groups/v1` extension
+  named the group, and the receipt signs the route snapshot digest.
 - Activation digests chain exactly because both ends hash the same
   transmitted bytes. Cross-chip floating-point drift affects parity checks
   (SPEC-051-R025), not the chain.
@@ -584,4 +887,7 @@ in `CONFORMANCE.json`.
 
 ## 10. Changelog and history
 
+- v0.2.0 (2026-10-22, Related: #2084): Trusted Pool serving, head identity as
+  group identity, `pool_shard_groups/v1`, group wire messages, disclosure,
+  attestation wire form, failure-status mapping; R028-R030 added.
 - v0.1.0 (2026-10-22, Related: #2084): first draft.
