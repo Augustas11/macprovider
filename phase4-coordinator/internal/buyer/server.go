@@ -4612,6 +4612,12 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 			return true, wsForwardCancelled
 		}
 		if writeErr != nil {
+			if buyerReceivedDone {
+				// The buyer has the whole stream and went away: a write after
+				// [DONE] failing does not cancel the attempt, whose terminal
+				// frame still settles it (#2084 VM acceptance V-3).
+				return false, ""
+			}
 			relay.Cancel("buyer_disconnected")
 			s.log.Warn().Err(writeErr).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("buyer ws stream write failed")
 			markProviderDone()
