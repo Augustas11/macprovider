@@ -242,6 +242,40 @@ final class ShardGroupRuntimeTests: XCTestCase {
         await runtime.stop()
     }
 
+    /// SPEC-018 §3.12 on a shard group: with an open `<think>` the output up to
+    /// `</think>` is reasoning, stop sequences apply only after it, and the
+    /// answer's leading whitespace is dropped.
+    func testOpenThinkSplitsReasoningAndAppliesStopsOnlyToTheAnswer() {
+        let tokenizer = ShardTestTokenizer()
+        func run(_ text: String, reasoningOpen: Bool) -> (ShardStreamingText.Released, ShardStreamingText) {
+            var output = ShardStreamingText(
+                tokenizer: tokenizer, stops: ["STOP"], stopFilter: StopTokenFilter(tokens: []), reasoningOpen: reasoningOpen)
+            var total = ShardStreamingText.Released()
+            for token in tokenizer.encode(text: text, addSpecialTokens: false) {
+                let released = output.append(token)
+                total.reasoning += released.reasoning
+                total.content += released.content
+            }
+            let rest = output.finish()
+            total.reasoning += rest.reasoning
+            total.content += rest.content
+            return (total, output)
+        }
+
+        let (split, splitOutput) = run("plan STOP</think>  answer STOP tail", reasoningOpen: true)
+        XCTAssertEqual(split, ShardStreamingText.Released(reasoning: "plan STOP", content: "answer "))
+        XCTAssertTrue(splitOutput.stopped)
+        XCTAssertEqual(splitOutput.reasoningTokens, "plan STOP</think>".count)
+
+        let (unclosed, unclosedOutput) = run("still thinking </thi", reasoningOpen: true)
+        XCTAssertEqual(unclosed, ShardStreamingText.Released(reasoning: "still thinking </thi", content: ""))
+        XCTAssertEqual(unclosedOutput.reasoningTokens, "still thinking </thi".count)
+
+        let (plain, plainOutput) = run("  a</think>b STOP c", reasoningOpen: false)
+        XCTAssertEqual(plain, ShardStreamingText.Released(reasoning: "", content: "  a</think>b "))
+        XCTAssertEqual(plainOutput.reasoningTokens, 0)
+    }
+
     func testWithoutAVerifiedCatalogArtifactNothingIsReceiptEligible() async throws {
         let (runtime, _) = try await fakeRuntime(modelHash: nil)
         XCTAssertFalse(runtime.isSettlementReceiptEligible)

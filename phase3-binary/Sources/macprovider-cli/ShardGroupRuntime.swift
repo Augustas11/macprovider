@@ -313,6 +313,8 @@ actor ShardGroupRuntime: ModelRuntimeServing {
         let maxTokens: Int
         let control: ShardRequestControl
         let stops: [String]
+        /// SPEC-018 §3.12: the rendered prompt leaves a `<think>` open.
+        let reasoningOpen: Bool
     }
 
     /// Validate what a shard group serves and render the prompt: text chat with
@@ -332,6 +334,9 @@ actor ShardGroupRuntime: ModelRuntimeServing {
             throw APIError(status: 400, message: "Penalties and top_k are not supported by a shard group yet", code: "shard_group_sampling_unsupported")
         }
         let promptTokens = try Self.promptTokens(for: request, prompting: prompting)
+        // SPEC-018 §3.12, as the single-Mac runtime resolves it: a prompt that
+        // leaves `<think>` open splits the output into reasoning and content.
+        ModelRuntime.resolveOutputTraits(for: request, grammar: nil, promptTokens: promptTokens, tokenizer: prompting.tokenizer)
         // At least one output token must fit after the prompt.
         try ModelRuntime.validatePromptTokenCount(promptTokens.count, maxContextTokens: maxContextTokens - 1)
         let room = maxContextTokens - promptTokens.count
@@ -343,7 +348,9 @@ actor ShardGroupRuntime: ModelRuntimeServing {
         let control = ShardRequestControl(
             temperature: Float(max(0, request.temperature)), topP: topP,
             seed: request.seed.map { UInt64(bitPattern: Int64($0)) })
-        return PreparedRequest(promptTokens: promptTokens, maxTokens: maxTokens, control: control, stops: request.stop.filter { !$0.isEmpty })
+        return PreparedRequest(
+            promptTokens: promptTokens, maxTokens: maxTokens, control: control, stops: request.stop.filter { !$0.isEmpty },
+            reasoningOpen: request.outputTraits.reasoningOpen)
     }
 
     /// The chat template applied by the model's tokenizer, exactly as the single-Mac
@@ -356,6 +363,8 @@ actor ShardGroupRuntime: ModelRuntimeServing {
         do {
             return try prompting.tokenizer.applyChatTemplate(messages: messages, tools: input.tools, additionalContext: input.additionalContext)
         } catch {
+            // A template `raise_exception` is the buyer's conversation (SPEC-001 v1.9.40).
+            if let refused = ChatTemplateRequestError.mapping(error) as? APIError { throw refused }
             throw APIError(status: 422, message: "The model's tokenizer cannot apply its chat template to this request", code: "chat_template_unsupported")
         }
     }
@@ -397,8 +406,21 @@ actor ShardGroupRuntime: ModelRuntimeServing {
         }
         defer { watcher.cancel() }
 
-        var output = ShardStreamingText(tokenizer: prompting.tokenizer, stops: prepared.stops, stopFilter: prompting.stopFilter)
+        var output = ShardStreamingText(
+            tokenizer: prompting.tokenizer, stops: prepared.stops, stopFilter: prompting.stopFilter,
+            reasoningOpen: prepared.reasoningOpen)
         var content = ""
+        var reasoning = ""
+        func deliver(_ released: ShardStreamingText.Released) {
+            if !released.reasoning.isEmpty {
+                reasoning += released.reasoning
+                onChunk?(.reasoning(released.reasoning))
+            }
+            if !released.content.isEmpty {
+                content += released.content
+                onChunk?(.content(released.content))
+            }
+        }
         var completionTokens = 0
         var firstTokenAt: Date?
         var summary: ShardGenerationSummary?
@@ -409,11 +431,7 @@ actor ShardGroupRuntime: ModelRuntimeServing {
                     guard !output.stopped else { continue }
                     if firstTokenAt == nil { firstTokenAt = Date() }
                     completionTokens += 1
-                    let text = output.append(token)
-                    if !text.isEmpty {
-                        content += text
-                        onChunk?(.content(text))
-                    }
+                    deliver(output.append(token))
                     if output.stopped { engine.cancel(requestID) }
                 case .finished(let finished):
                     summary = finished
@@ -426,11 +444,7 @@ actor ShardGroupRuntime: ModelRuntimeServing {
         await awaitEpochAccepted(summary.attestation.groupEpoch)
         let cancelledByCaller = summary.reason == .cancelled && !output.stopped
         if !output.stopped, !cancelledByCaller {
-            let rest = output.finish()
-            if !rest.isEmpty {
-                content += rest
-                onChunk?(.content(rest))
-            }
+            deliver(output.finish())
         }
         if cancelledByCaller, drainToken?.isFired == true, !shouldCancel() {
             throw DrainCancelledError()
@@ -453,7 +467,9 @@ actor ShardGroupRuntime: ModelRuntimeServing {
             generationMilliseconds: Int64(finishedAt.timeIntervalSince(started) * 1000),
             modelHashObserved: identity.modelHash,
             settlementDisposition: isSettlementReceiptEligible && summary.attestation.verdict == "ok" ? .eligibleOwner : .notEligible,
-            shardGroupEvidence: ShardGroupCompletionEvidence(attestation: summary.attestation, tokenSteps: summary.tokenSteps))
+            shardGroupEvidence: ShardGroupCompletionEvidence(attestation: summary.attestation, tokenSteps: summary.tokenSteps),
+            reasoningContent: prepared.reasoningOpen ? reasoning : nil,
+            reasoningTokens: prepared.reasoningOpen ? output.reasoningTokens : 0)
     }
 
     /// How long a completion waits for the coordinator to accept the epoch a spare
@@ -528,27 +544,74 @@ actor ShardGroupRuntime: ModelRuntimeServing {
 
 /// Detokenized output with stop sequences: text that could still begin a stop
 /// sequence is held back, and nothing after a matched stop is ever emitted.
+/// With an open `<think>` (SPEC-018 §3.12) the output up to the first
+/// `</think>` is reasoning: stop sequences apply only to the text after it,
+/// whose leading whitespace is dropped, as `ReasoningOutput.split` does.
 struct ShardStreamingText {
+    struct Released: Equatable {
+        var reasoning = ""
+        var content = ""
+    }
+
     private var detokenizer: NaiveStreamingDetokenizer
     private let stops: [String]
     private let stopFilter: StopTokenFilter
     private let holdBack: Int
     private var held = ""
+    private var inReasoning: Bool
+    private var reasoningHeld = ""
+    /// False until the answer's first non-whitespace text after `</think>`.
+    private var answerStarted: Bool
     private(set) var stopped = false
+    /// Tokens up to and including the one that completes `</think>`; all of
+    /// them when it never closed.
+    private(set) var reasoningTokens = 0
 
-    init(tokenizer: any Tokenizer, stops: [String], stopFilter: StopTokenFilter) {
+    init(tokenizer: any Tokenizer, stops: [String], stopFilter: StopTokenFilter, reasoningOpen: Bool = false) {
         self.detokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
         self.stops = stops
         self.stopFilter = stopFilter
         self.holdBack = max(0, (stops.map(\.count).max() ?? 0) - 1)
+        self.inReasoning = reasoningOpen
+        self.answerStarted = !reasoningOpen
     }
 
     /// The text this token releases.
-    mutating func append(_ token: Int) -> String {
-        guard !stopped else { return "" }
+    mutating func append(_ token: Int) -> Released {
+        guard !stopped else { return Released() }
+        if inReasoning { reasoningTokens += 1 }
         detokenizer.append(token: token)
-        guard let piece = detokenizer.next() else { return "" }
-        held += stopFilter.stripping(from: piece)
+        guard let piece = detokenizer.next() else { return Released() }
+        var released = Released()
+        var text = stopFilter.stripping(from: piece)
+        if inReasoning {
+            reasoningHeld += text
+            guard let close = reasoningHeld.range(of: ReasoningOutput.closeTag) else {
+                // Hold back a suffix that could still become `</think>`.
+                let tag = ReasoningOutput.closeTag
+                let keep = stride(from: min(tag.count - 1, reasoningHeld.count), through: 1, by: -1)
+                    .first { reasoningHeld.hasSuffix(String(tag.prefix($0))) } ?? 0
+                let cut = reasoningHeld.index(reasoningHeld.endIndex, offsetBy: -keep)
+                released.reasoning = String(reasoningHeld[..<cut])
+                reasoningHeld = String(reasoningHeld[cut...])
+                return released
+            }
+            released.reasoning = String(reasoningHeld[..<close.lowerBound])
+            text = String(reasoningHeld[close.upperBound...])
+            reasoningHeld = ""
+            inReasoning = false
+        }
+        if !answerStarted {
+            text = String(text.drop(while: { $0.isWhitespace }))
+            guard !text.isEmpty else { return released }
+            answerStarted = true
+        }
+        released.content = appendAnswer(text)
+        return released
+    }
+
+    private mutating func appendAnswer(_ text: String) -> String {
+        held += text
         if let stop = stops.compactMap({ held.range(of: $0) }).min(by: { $0.lowerBound < $1.lowerBound }) {
             let released = String(held[..<stop.lowerBound])
             held = ""
@@ -563,8 +626,12 @@ struct ShardStreamingText {
     }
 
     /// Release what was held back at the end of the request.
-    mutating func finish() -> String {
-        defer { held = "" }
-        return stopped ? "" : held
+    mutating func finish() -> Released {
+        defer {
+            held = ""
+            reasoningHeld = ""
+        }
+        guard !stopped else { return Released() }
+        return Released(reasoning: reasoningHeld, content: held)
     }
 }
