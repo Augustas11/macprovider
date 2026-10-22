@@ -138,7 +138,7 @@ enum ShardBenchTestRig {
             role: role, listen: nil, connect: nil, expectedStages: expectedStages, modelLabel: "fake",
             prompts: prompts, tokens: tokens, temperature: 0, seed: 0, link: configuration(),
             receiveTimeout: 5, connectTimeout: 5, probeCount: probeCount, maxSequences: 8, warmup: true,
-            prefillChunk: prefillChunk, prefillChunkDeadline: prefillChunkDeadline)
+            prefillChunk: prefillChunk, prefillChunkDeadline: prefillChunkDeadline, memberID: nil)
     }
 
     static func stages(_ splits: [Range<Int>], total: Int) -> [FakeShardStage] {
@@ -253,6 +253,32 @@ final class ShardBenchChainTests: XCTestCase {
         XCTAssertEqual(tail.links[1].probeRoundTrip?.count, 5)
     }
 
+    // MARK: Slice 4: group attestation
+
+    func testHeadVerifiesTheChainedSubReceiptsOfEveryRequest() throws {
+        let splits = [0..<1, 1..<3, 3..<4]
+        let results = ShardBenchTestRig.run(
+            ShardBenchTestRig.stages(splits, total: 4), links: try ShardBenchTestRig.ring(stages: 3),
+            prompts: prompts, tokens: 6)
+        let head = try XCTUnwrap(try results[0].get().head)
+        XCTAssertEqual(head.attestation.verdict, "ok")
+        XCTAssertEqual(head.attestation.requests.map(\.requestID), [2, 4], "measured requests only, not the warmup")
+        for (request, prompt) in zip(head.attestation.requests, prompts) {
+            XCTAssertEqual(request.verdict, "ok")
+            XCTAssertNil(request.fault)
+            XCTAssertEqual(request.receipts.map(\.stageIndex), [0, 1, 2])
+            XCTAssertEqual(request.receipts.map(\.memberDeviceID), ["stage-0", "stage-1", "stage-2"])
+            XCTAssertEqual(request.receipts.map { "\($0.layerStart):\($0.layerEnd)" }, ["0:1", "1:3", "3:4"])
+            XCTAssertEqual(request.receipts.map(\.promptTokens), [prompt.count, prompt.count, prompt.count])
+            XCTAssertEqual(request.receipts.map(\.decodeSteps), [5, 5, 5])
+            XCTAssertEqual(request.receipts[0].outDigest, request.receipts[1].inDigest)
+            XCTAssertEqual(request.receipts[1].outDigest, request.receipts[2].inDigest)
+            XCTAssertEqual(request.receipts[2].outDigest, request.receipts[0].inDigest)
+            XCTAssertNotEqual(request.receipts[0].outDigest, request.receipts[1].outDigest)
+        }
+        XCTAssertNotEqual(head.attestation.requests[0].receipts[0].outDigest, head.attestation.requests[1].receipts[0].outDigest)
+    }
+
     func testFourStageRingWithTwoMiddles() throws {
         let splits = [0..<2, 2..<3, 3..<5, 5..<6]
         let results = ShardBenchTestRig.run(
@@ -340,6 +366,9 @@ final class ShardBenchChainTests: XCTestCase {
         XCTAssertEqual(head.sequenceTokens, try ShardBenchTestRig.reference(splits: splits, total: 4, prompts: prompts, tokens: 5))
         XCTAssertEqual(head.prefillChunkTokens, 2)
         XCTAssertEqual(head.prefillChunksPerSequence, [3, 2])
+        // Fill-only chunks are part of the digest chain and of the tail's prompt count.
+        XCTAssertEqual(head.attestation.verdict, "ok")
+        XCTAssertEqual(head.attestation.requests.map { $0.receipts.map(\.promptTokens) }, [[5, 5, 5], [3, 3, 3]])
         // The head reports the measured run (3 + 2 chunks); the stages also served the
         // warmup's 3 chunks of prompt 0.
         XCTAssertEqual(head.headPrefillChunkCompute.count, 5)
