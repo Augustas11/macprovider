@@ -35,7 +35,7 @@ QWEN_ARTIFACT_FIELDS = {
     "diagnostic_cli", "diagnostic_metallib", "fixture_config", "fixture_index",
 }
 JOB_KINDS = (
-    "diagnostic-legacy", "profiler-only", "qualification", "qwen-qualification", "qwen-journey",
+    "diagnostic-legacy", "profiler-only", "qualification", "qwen-qualification", "qwen-journey", "glm-prefill",
 )
 JOB_SCHEMA = "macprovider.studio_lab_window_job.v1"
 JOB_RESULT_SCHEMA = "macprovider.studio_lab_window_job_result.v1"
@@ -56,6 +56,7 @@ QWEN_QUALIFICATION_CELLS = (
 )
 QUALIFICATION_KINDS = ("qualification", "qwen-qualification")
 QWEN_JOB_KINDS = ("qwen-qualification", "qwen-journey")
+CLI_ONLY_JOB_KINDS = (*QWEN_JOB_KINDS, "glm-prefill")
 QWEN_JOURNEY_PROFILE = {
     "model_id": "qwen/qwen3.6-35b-a3b",
     "qualified_slots": 8,
@@ -303,6 +304,57 @@ def validate_policy(value: dict) -> None:
         raise Refusal("qualification policy must preserve production bound one")
 
 
+def glm_prefill_cells(policy: dict) -> list[str]:
+    return [f"s{slots}-p{prompt}-o128" for slots in (1, 2, 4) for prompt in policy["prompt_tokens"]]
+
+
+def validate_glm_prefill_policy(value: dict) -> None:
+    # This is a measurement-only job: it cannot change native-row admission or
+    # produce R015 qualification evidence. Reuse the existing exploratory CLI.
+    exact = {
+        "schema": "macprovider.native-mtp-exploratory-policy.v1",
+        "model_id": "zai-org/glm-5.3-flash",
+        "slots": [1, 2, 4], "max_tokens": [128], "gated_cells": [],
+        "qualified_slots": 4, "max_native_active_rows": 1,
+        "maximum_prompt_tokens": 16384, "arrival_interval_ms": 250,
+        "temperature": 0, "warmup_runs": 1, "blocks": 10,
+        "sustained_seconds": 0, "sustained_cell_id": "s4-p16384-o128",
+        "quantization": "4bit", "cache_mode": "paged_kv_mixed", "proposal_depth": 1,
+        "run_order": "seeded_random_counterbalanced",
+        "prompt_corpus": "deterministic_synthetic_unique_v2",
+        "exclusion_rules": "none", "confidence_method": "paired_block_bootstrap_holm_v1",
+    }
+    if any(value.get(key) != expected for key, expected in exact.items()):
+        raise Refusal("GLM prefill policy is not the fixed exploratory measurement contract")
+    if value.get("prompt_tokens") not in ([16384], [4096, 16384]):
+        raise Refusal("GLM prefill prompts must be the missing 16k baseline or the 4k/16k comparison")
+    for key, expected in exact.items():
+        if isinstance(expected, int) and type(value.get(key)) is not int:
+            raise Refusal(f"GLM prefill policy {key} must be an integer")
+        if isinstance(expected, list) and any(type(item) is not int for item in value[key]):
+            raise Refusal(f"GLM prefill policy {key} must contain integers")
+    if any(type(item) is not int for item in value["prompt_tokens"]):
+        raise Refusal("GLM prefill prompt tokens must contain integers")
+    if any(key.startswith(("laboratory_", "exploratory")) for key in value):
+        raise Refusal("GLM prefill policy cannot contain admission overrides")
+    if not isinstance(value.get("provider_commit"), str) or not SHA40.fullmatch(value["provider_commit"]):
+        raise Refusal("GLM prefill provider commit is invalid")
+    thresholds = {
+        "throughput_lower_bound_min": 0.15, "ttft_p95_upper_bound_max": 0.1,
+        "tpot_p95_upper_bound_max": 0.0, "chunk_gap_p99_upper_bound_max": 1.0,
+        "rejection_increase_max_pp": 1.0, "min_available_memory_fraction": 0.1,
+        "bootstrap_draws": 10000, "alpha": 0.05,
+        "gated_throughput_lower_bound_min": -0.05,
+        "gated_ttft_p95_upper_bound_max": 0.05, "gated_tpot_p95_upper_bound_max": 0.05,
+    }
+    if value.get("thresholds") != thresholds or any(
+        (type(value["thresholds"].get(key)) is not int if key == "bootstrap_draws"
+         else type(value["thresholds"].get(key)) not in (int, float))
+        for key, expected in thresholds.items()
+    ):
+        raise Refusal("GLM prefill thresholds must retain the existing gates")
+
+
 def validate_qwen_policy(value: dict) -> None:
     exact = {
         "schema": "macprovider.native-mtp-r015-policy.v1",
@@ -424,15 +476,15 @@ def build_job(args: argparse.Namespace, source: Path, artifacts: dict[str, dict[
         "job_helper_sha256": helper_sha,
         "artifact_sha256": {key: item["sha256"] for key, item in sorted(artifacts.items())},
     }
-    if kind not in QWEN_JOB_KINDS:
+    if kind not in CLI_ONLY_JOB_KINDS:
         inputs["glmbench_tree_oid"] = git_value(
             source, "HEAD:scripts/lab/cb-studio/glm53-bench", "GLMBench tree"
         )
     if kind == "profiler-only":
         inputs["reuse"] = archived_reuse(source, artifacts, phase3_tree)
-    elif kind == "qualification":
+    elif kind in ("qualification", "glm-prefill"):
         policy, policy_sha = read_safe_object(source / POLICY_RELATIVE, "qualification policy")
-        validate_policy(policy)
+        (validate_glm_prefill_policy if kind == "glm-prefill" else validate_policy)(policy)
         projected = projection_tuple(source)
         if any(policy.get(key) != projected[key] for key in ("target_sha256", "mtp_sha256", "tokenizer_sha256")):
             raise Refusal("qualification policy fixture identity differs from projection")
@@ -440,7 +492,7 @@ def build_job(args: argparse.Namespace, source: Path, artifacts: dict[str, dict[
             raise Refusal("qualification policy provider commit has different phase3 source")
         inputs["qualification_policy_sha256"] = policy_sha
         inputs["qualification_provider_commit"] = policy["provider_commit"]
-        inputs["qualification_cells"] = list(QUALIFICATION_CELLS)
+        inputs["qualification_cells"] = glm_prefill_cells(policy) if kind == "glm-prefill" else list(QUALIFICATION_CELLS)
     else:
         policy, policy_sha = read_safe_object(source / POLICY_RELATIVE, "Qwen qualification policy")
         validate_qwen_policy(policy)
@@ -489,7 +541,7 @@ def source_snapshot(args: argparse.Namespace) -> dict[str, object]:
     if dirty:
         raise Refusal("lab source has tracked modifications")
     kind = getattr(args, "job_kind", "diagnostic-legacy")
-    artifact_fields = QWEN_ARTIFACT_FIELDS if kind in QWEN_JOB_KINDS else ARTIFACT_FIELDS
+    artifact_fields = QWEN_ARTIFACT_FIELDS if kind in CLI_ONLY_JOB_KINDS else ARTIFACT_FIELDS
     artifacts = {name: source / ARTIFACT_RELATIVES[name] for name in artifact_fields}
     result: dict[str, dict[str, str]] = {}
     for name, path in artifacts.items():
@@ -566,7 +618,7 @@ def build_manifest(args: argparse.Namespace) -> dict[str, object]:
         validate_job_object(job)
     artifact_fields = (
         QWEN_ARTIFACT_FIELDS
-        if isinstance(job, dict) and job.get("kind") in QWEN_JOB_KINDS
+        if isinstance(job, dict) and job.get("kind") in CLI_ONLY_JOB_KINDS
         else ARTIFACT_FIELDS
     )
     artifacts = source.get("artifacts")
@@ -601,7 +653,9 @@ def build_manifest(args: argparse.Namespace) -> dict[str, object]:
     lab_timeout = positive(
         args.lab_timeout_s, "lab timeout",
         43200 if job is not None and job["kind"] in QUALIFICATION_KINDS else (
-            7200 if job is not None and job["kind"] == "qwen-journey" else 3600
+            21600 if job is not None and job["kind"] == "glm-prefill" else (
+                7200 if job is not None and job["kind"] == "qwen-journey" else 3600
+            )
         ),
     )
     result: dict[str, object] = {
@@ -652,11 +706,11 @@ def validate_job_object(job: object) -> dict:
     expected_inputs = {
         "phase3_tree_oid", "lab_script_sha256", "job_helper_sha256", "artifact_sha256",
     }
-    if job["kind"] not in QWEN_JOB_KINDS:
+    if job["kind"] not in CLI_ONLY_JOB_KINDS:
         expected_inputs.add("glmbench_tree_oid")
     if job["kind"] == "profiler-only":
         expected_inputs.add("reuse")
-    elif job["kind"] == "qualification":
+    elif job["kind"] in ("qualification", "glm-prefill"):
         expected_inputs |= {
             "qualification_policy_sha256", "qualification_provider_commit",
             "qualification_cells",
@@ -676,7 +730,7 @@ def validate_job_object(job: object) -> dict:
     for key in ("phase3_tree_oid",):
         if not isinstance(inputs.get(key), str) or not SHA40.fullmatch(inputs[key]):
             raise Refusal(f"job {key} is invalid")
-    if job["kind"] not in QWEN_JOB_KINDS and (
+    if job["kind"] not in CLI_ONLY_JOB_KINDS and (
         not isinstance(inputs.get("glmbench_tree_oid"), str)
         or not SHA40.fullmatch(inputs["glmbench_tree_oid"])
     ):
@@ -684,7 +738,7 @@ def validate_job_object(job: object) -> dict:
     for key in ("lab_script_sha256", "job_helper_sha256"):
         require_sha(inputs.get(key), f"job {key}")
     artifacts = inputs.get("artifact_sha256")
-    artifact_fields = QWEN_ARTIFACT_FIELDS if job["kind"] in QWEN_JOB_KINDS else ARTIFACT_FIELDS
+    artifact_fields = QWEN_ARTIFACT_FIELDS if job["kind"] in CLI_ONLY_JOB_KINDS else ARTIFACT_FIELDS
     if not isinstance(artifacts, dict) or set(artifacts) != artifact_fields:
         raise Refusal("job artifact hash schema is invalid")
     for key, value in artifacts.items():
@@ -704,12 +758,18 @@ def validate_job_object(job: object) -> dict:
             require_sha(reuse.get(key), f"job reuse {key}")
         if reuse.get("archive_binding") != "protected_import_not_historically_receipt_bound":
             raise Refusal("job archive binding is invalid")
-    if job["kind"] == "qualification":
+    if job["kind"] in ("qualification", "glm-prefill"):
         require_sha(inputs.get("qualification_policy_sha256"), "qualification policy sha256")
         if (
             not isinstance(inputs.get("qualification_provider_commit"), str)
             or not SHA40.fullmatch(inputs["qualification_provider_commit"])
-            or inputs.get("qualification_cells") != list(QUALIFICATION_CELLS)
+            or (
+                inputs.get("qualification_cells") != list(QUALIFICATION_CELLS)
+                if job["kind"] == "qualification" else inputs.get("qualification_cells") not in (
+                    glm_prefill_cells({"prompt_tokens": [16384]}),
+                    glm_prefill_cells({"prompt_tokens": [4096, 16384]}),
+                )
+            )
         ):
             raise Refusal("qualification immutable input schema is invalid")
     if job["kind"] in QWEN_JOB_KINDS:
@@ -763,7 +823,7 @@ def validate_current_job_inputs(manifest: dict, job: dict) -> None:
     inputs = job["immutable_inputs"]
     if git_value(source, "HEAD:phase3-binary", "phase3 tree") != inputs.get("phase3_tree_oid"):
         raise Refusal("job phase3 source tree drifted")
-    if job["kind"] not in QWEN_JOB_KINDS and (
+    if job["kind"] not in CLI_ONLY_JOB_KINDS and (
         git_value(source, "HEAD:scripts/lab/cb-studio/glm53-bench", "GLMBench tree")
         != inputs.get("glmbench_tree_oid")
     ):
@@ -778,7 +838,7 @@ def validate_current_job_inputs(manifest: dict, job: dict) -> None:
     artifacts = manifest.get("artifacts")
     if not isinstance(artifact_hashes, dict) or not isinstance(artifacts, dict):
         raise Refusal("job artifact identities are missing")
-    artifact_fields = QWEN_ARTIFACT_FIELDS if job["kind"] in QWEN_JOB_KINDS else ARTIFACT_FIELDS
+    artifact_fields = QWEN_ARTIFACT_FIELDS if job["kind"] in CLI_ONLY_JOB_KINDS else ARTIFACT_FIELDS
     for key in artifact_fields:
         item = artifacts.get(key)
         if not isinstance(item, dict) or artifact_hashes.get(key) != item.get("sha256"):
@@ -796,14 +856,16 @@ def validate_current_job_inputs(manifest: dict, job: dict) -> None:
         current_reuse = archived_reuse(source, artifacts, str(inputs["phase3_tree_oid"]))
         if inputs.get("reuse") != current_reuse:
             raise Refusal("archived journey reuse inputs drifted")
-    elif job["kind"] == "qualification":
+    elif job["kind"] in ("qualification", "glm-prefill"):
         policy, policy_sha = read_safe_object(source / POLICY_RELATIVE, "qualification policy")
-        validate_policy(policy)
+        (validate_glm_prefill_policy if job["kind"] == "glm-prefill" else validate_policy)(policy)
         projected = projection_tuple(source)
         if (
             inputs.get("qualification_policy_sha256") != policy_sha
             or inputs.get("qualification_provider_commit") != policy.get("provider_commit")
-            or inputs.get("qualification_cells") != list(QUALIFICATION_CELLS)
+            or inputs.get("qualification_cells") != (
+                glm_prefill_cells(policy) if job["kind"] == "glm-prefill" else list(QUALIFICATION_CELLS)
+            )
             or any(policy.get(key) != projected[key] for key in ("target_sha256", "mtp_sha256", "tokenizer_sha256"))
         ):
             raise Refusal("qualification policy identity drifted")
@@ -927,12 +989,12 @@ def private_artifact_paths(manifest: dict, job: dict) -> dict[str, Path]:
         "diagnostic_cli": root / "provider/macprovider-cli",
         "diagnostic_metallib": root / "provider/mlx.metallib",
     }
-    if job["kind"] not in QWEN_JOB_KINDS:
+    if job["kind"] not in CLI_ONLY_JOB_KINDS:
         paths.update({
             "glmbench": root / "bench/GLMBench",
             "glmbench_metallib": root / "bench/mlx.metallib",
         })
-    if job["kind"] in QUALIFICATION_KINDS or job["kind"] == "qwen-journey":
+    if job["kind"] in QUALIFICATION_KINDS or job["kind"] in ("qwen-journey", "glm-prefill"):
         paths["qualification_policy"] = root / "qualification-policy.json"
     if job["kind"] in QWEN_JOB_KINDS:
         paths["artifact_projection"] = root / "qwen-artifact-manifest.json"
@@ -988,13 +1050,13 @@ def prepare_private_artifacts(manifest: dict, job: dict) -> None:
     root = preflight_path(manifest) / "artifacts"
     create_result_dir(root)
     create_result_dir(root / "provider")
-    if job["kind"] not in QWEN_JOB_KINDS:
+    if job["kind"] not in CLI_ONLY_JOB_KINDS:
         create_result_dir(root / "bench")
     source_artifacts = manifest["artifacts"]
     expected = job["immutable_inputs"]["artifact_sha256"]
     artifact_keys = (
         ("diagnostic_cli", "diagnostic_metallib")
-        if job["kind"] in QWEN_JOB_KINDS
+        if job["kind"] in CLI_ONLY_JOB_KINDS
         else ("diagnostic_cli", "diagnostic_metallib", "glmbench", "glmbench_metallib")
     )
     for key in artifact_keys:
@@ -1002,7 +1064,7 @@ def prepare_private_artifacts(manifest: dict, job: dict) -> None:
             Path(source_artifacts[key]["path"]), paths[key], expected[key],
             executable=key in {"diagnostic_cli", "glmbench"},
         )
-    if job["kind"] in QUALIFICATION_KINDS or job["kind"] == "qwen-journey":
+    if job["kind"] in QUALIFICATION_KINDS or job["kind"] in ("qwen-journey", "glm-prefill"):
         copy_authenticated(
             Path(manifest["lab_source_dir"]) / POLICY_RELATIVE,
             paths["qualification_policy"],
@@ -1017,7 +1079,7 @@ def prepare_private_artifacts(manifest: dict, job: dict) -> None:
             executable=False,
         )
     directories = [root / "provider"]
-    if job["kind"] not in QWEN_JOB_KINDS:
+    if job["kind"] not in CLI_ONLY_JOB_KINDS:
         directories.append(root / "bench")
     directories.append(root)
     for directory in directories:
@@ -1033,7 +1095,7 @@ def validate_private_artifacts(manifest: dict, job: dict) -> dict[str, str]:
     result: dict[str, str] = {}
     root = preflight_path(manifest) / "artifacts"
     directories = [preflight_path(manifest), root, root / "provider"]
-    if job["kind"] not in QWEN_JOB_KINDS:
+    if job["kind"] not in CLI_ONLY_JOB_KINDS:
         directories.append(root / "bench")
     for directory in directories:
         safe_directory(directory)
@@ -1296,8 +1358,12 @@ def validate_job(args: argparse.Namespace) -> dict[str, object]:
                 f"qualification preflight summary is invalid; private log: {preflight / 'validate.log'}"
             ) from exc
         target_digest = summary.get("target_sha256")
-        cells = QWEN_QUALIFICATION_CELLS if qwen else QUALIFICATION_CELLS
-        sustained_cell = "s8-p1536-o512" if qwen else "s4-p1536-o512"
+        cells = job["immutable_inputs"]["qualification_cells"]
+        sustained_cell = (
+            "s4-p16384-o128" if job["kind"] == "glm-prefill" else (
+                "s8-p1536-o512" if qwen else "s4-p1536-o512"
+            )
+        )
         if (
             summary.get("validate_only") != "pass"
             or target_digest != expected["target_sha256"]
@@ -1410,19 +1476,21 @@ def run_job(args: argparse.Namespace) -> dict[str, object]:
     else:
         evidence = result / "qualification.jsonl"
         base = qualification_base(manifest, evidence)
-        cells = (
-            QWEN_QUALIFICATION_CELLS
-            if job["kind"] == "qwen-qualification" else QUALIFICATION_CELLS
-        )
+        cells = job["immutable_inputs"]["qualification_cells"]
         for index, cell in enumerate(cells, 1):
             log = result / f"matrix-{index:02d}-{cell}.log"
             validate_execution_inputs(manifest, job)
-            run_checked(base + ["--only-cell", cell, "--phase", "matrix"], log)
+            run_checked(
+                base + ["--only-cell", cell, "--phase", "matrix"], log,
+                timeout=7200 if job["kind"] == "glm-prefill" else 3600,
+            )
             outputs.append(log)
-        sustained = result / "sustained.log"
-        validate_execution_inputs(manifest, job)
-        run_checked(base + ["--phase", "sustained"], sustained)
-        outputs.extend((sustained, evidence))
+        if job["kind"] != "glm-prefill":
+            sustained = result / "sustained.log"
+            validate_execution_inputs(manifest, job)
+            run_checked(base + ["--phase", "sustained"], sustained)
+            outputs.append(sustained)
+        outputs.append(evidence)
         if job["kind"] == "qwen-qualification":
             selftest = result / "selftest.log"
             validate_execution_inputs(manifest, job)
@@ -1454,6 +1522,8 @@ def run_job(args: argparse.Namespace) -> dict[str, object]:
         },
         "outputs": {item.name: file_sha256(safe_artifact(item)) for item in outputs},
     }
+    if job["kind"] == "glm-prefill":
+        receipt.update(exploratory=True, qualification=False, evidence_class="glm_prefill_measurement_only")
     if job["kind"] in QWEN_JOB_KINDS:
         receipt["executed_inputs"]["fixture_mtp_sha256"] = (
             job["immutable_inputs"]["artifact_projection"]["mtp_sha256"]

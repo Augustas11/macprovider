@@ -18,7 +18,7 @@ without changing the signed provider installation. Prepare:
 - A tracked-clean source clone at the exact campaign commit.
 - The release-mode CLI with `MACPROVIDER_LAB_HARNESS` enabled, at
   `phase3-binary/.build/release/macprovider-cli`.
-- For GLM jobs, the release-mode `GLMBench` with testing enabled, at
+- For GLM diagnostic and qualification jobs, the release-mode `GLMBench` with testing enabled, at
   `scripts/lab/cb-studio/glm53-bench/.build/release/GLMBench`.
 - The matching `mlx.metallib` beside each binary.
 - `.lab-window/fixture/target`, an isolated clone of the previously verified
@@ -40,7 +40,7 @@ controller. Also set:
 | `STUDIO_LAB_SOURCE_DIR` | Absolute path to the campaign clone on the Studio |
 | `STUDIO_LAB_GIT_HEAD` | Exact 40-character campaign commit |
 | `STUDIO_LAB_WINDOW_DIR` | Dedicated private directory for this window's journal and staged helpers |
-| `STUDIO_LAB_JOB_KIND` | Closed job kind: `diagnostic-legacy` (default), `profiler-only`, `qualification`, `qwen-qualification`, or `qwen-journey` |
+| `STUDIO_LAB_JOB_KIND` | Closed job kind: `diagnostic-legacy` (default), `profiler-only`, `qualification`, `qwen-qualification`, `qwen-journey`, or `glm-prefill` |
 
 The command and its arguments are fixed in
 `scripts/lab/2080-native-rows/run-window-diagnostic.sh`. There is no shell
@@ -90,6 +90,19 @@ offline child has a twelve-hour ceiling (`STUDIO_LAB_TIMEOUT_S` may lower it).
 The overall ceiling bounds provider unavailability; it is not an estimate or
 a guarantee that every policy will finish. Exhausting either deadline fails
 the job and restores service without weakening the qualification gates.
+
+`glm-prefill` fills the missing 16k baseline using the existing lab CLI and
+Metal library; GLMBench is not required. The frozen exploratory policy has
+rows 1/2/4, output length 128, one warmup and ten paired measured blocks,
+250 ms arrival interval and temperature zero. Native admission stays at one.
+Use prompt lengths `[16384]` to extend unchanged 4k evidence, or
+`[4096, 16384]` after a named prefill-path change justifies a comparison.
+The fixed matrix has three or six cells, with no sustained phase, profiler,
+or journey. Each cell has a two-hour ceiling; the guarded window has a
+six-hour ceiling. These ceilings bound unavailability, not expected duration.
+The receipt marks the results exploratory and measurement-only; they cannot
+qualify or activate native-row admission. Preserve exact-token parity and
+report end-to-end TTFT separately from isolated reference prefill rates.
 
 `qwen-qualification` runs the fixed `qwen/qwen3.6-35b-a3b` policy: native
 active-row bound one, eight qualified slots, four one-row cells at prompt

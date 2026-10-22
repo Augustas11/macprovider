@@ -35,7 +35,7 @@ LIVE_HASH_KEYS = (
     "watchdog_plist_sha256", "compatibility_set_sha256",
 )
 HASH_KEYS = LIVE_HASH_KEYS + ("probe_sha256", "lab_script_sha256")
-JOB_KINDS = ("profiler-only", "qualification", "qwen-qualification", "qwen-journey")
+JOB_KINDS = ("profiler-only", "qualification", "qwen-qualification", "qwen-journey", "glm-prefill")
 ARTIFACT_KEYS = (
     "diagnostic_cli", "glmbench", "diagnostic_metallib", "glmbench_metallib",
     "fixture_config", "fixture_index",
@@ -238,7 +238,9 @@ def load_manifest(path: Path) -> tuple[dict, str]:
     value["lab_timeout_s"] = positive(
         value.get("lab_timeout_s"), "lab_timeout_s",
         43200 if job and job["kind"] in ("qualification", "qwen-qualification") else (
-            7200 if job and job["kind"] == "qwen-journey" else 3600
+            21600 if job and job["kind"] == "glm-prefill" else (
+                7200 if job and job["kind"] == "qwen-journey" else 3600
+            )
         ),
     )
     if value["ready_timeout_s"] < 120:
@@ -279,7 +281,7 @@ def load_manifest(path: Path) -> tuple[dict, str]:
     artifacts = value.get("artifacts")
     artifact_keys = (
         QWEN_ARTIFACT_KEYS
-        if job is not None and job["kind"] in ("qwen-qualification", "qwen-journey")
+        if job is not None and job["kind"] in ("qwen-qualification", "qwen-journey", "glm-prefill")
         else ARTIFACT_KEYS
     )
     if not isinstance(artifacts, dict) or set(artifacts) != set(artifact_keys):
@@ -371,7 +373,7 @@ def validate_lab_artifacts(manifest: dict) -> None:
     job = manifest.get("job")
     artifact_keys = (
         QWEN_ARTIFACT_KEYS
-        if job is not None and job["kind"] in ("qwen-qualification", "qwen-journey")
+        if job is not None and job["kind"] in ("qwen-qualification", "qwen-journey", "glm-prefill")
         else ARTIFACT_KEYS
     )
     for key in artifact_keys:
