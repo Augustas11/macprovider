@@ -228,25 +228,32 @@ enum ToolCallParser {
         return calls
     }
 
-    /// Where a Llama call starts: `<|python_tag|>`, or the first `{` that
-    /// opens a complete JSON object with a string `name` and an object
-    /// `parameters`/`arguments`.
+    /// Where a Llama call starts: `<|python_tag|>`, or the first `{"name"`
+    /// that opens a complete, bounded JSON object with a string `name` and
+    /// an object `parameters`/`arguments`. Only `{"name"` openings are
+    /// scanned (the template teaches that shape), at most
+    /// `llama3MaxCallCandidates` of them, and only within the response byte
+    /// cap, so detection stays linear in the output.
     static func llama3CallStart(in rawOutput: String) -> String.Index? {
         if let tag = rawOutput.range(of: "<|python_tag|>") { return tag.lowerBound }
-        var index = rawOutput.startIndex
-        while let brace = rawOutput[index...].firstIndex(of: "{") {
-            if let object = firstCompleteJSONObject(in: String(rawOutput[brace...])),
-               let data = object.data(using: .utf8),
-               let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               parsed["name"] is String,
-               (parsed["parameters"] ?? parsed["arguments"]) is [String: Any]
-            {
-                return brace
-            }
-            index = rawOutput.index(after: brace)
+        guard rawOutput.utf8.count <= SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else { return nil }
+        var searchFrom = rawOutput.startIndex
+        var candidates = 0
+        while candidates < llama3MaxCallCandidates,
+              let brace = rawOutput.range(of: "{", range: searchFrom..<rawOutput.endIndex)?.lowerBound {
+            searchFrom = rawOutput.index(after: brace)
+            guard rawOutput[searchFrom...].drop(while: { $0.isWhitespace }).hasPrefix("\"name\"") else { continue }
+            candidates += 1
+            guard let object = firstCompleteJSONObject(in: String(rawOutput[brace...])),
+                  case .object(let parsed)? = try? StrictJSONParser.parse(object, maxDepth: SPEC018_ARGUMENTS_MAX_JSON_DEPTH),
+                  case .string? = parsed["name"] else { continue }
+            if case .object? = parsed["parameters"] { return brace }
+            if case .object? = parsed["arguments"] { return brace }
         }
         return nil
     }
+
+    static let llama3MaxCallCandidates = 16
 
     private static func newCallID() -> String {
         "call_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()

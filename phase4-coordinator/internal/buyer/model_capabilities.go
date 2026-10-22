@@ -46,6 +46,28 @@ func legacyToolFamily(model string) bool {
 	return strings.Contains(id, "qwen2.5") || strings.Contains(id, "qwen3") || strings.Contains(id, "llama-3.3") || strings.Contains(id, "gpt-oss")
 }
 
+// providerParsesToolGrammar is the provider-level tool predicate shared by
+// capability derivation and request eligibility.
+func providerParsesToolGrammar(p pool.Provider) bool {
+	return toolGrammarFamily(p.ModelID) != "" && (legacyToolFamily(p.ModelID) || providerServesToolGrammars(p))
+}
+
+// preferToolGrammarProviders keeps the native providers that parse their
+// model's tool grammar (and every external-runtime provider); when none
+// qualifies it returns the input unchanged.
+func preferToolGrammarProviders(providers []pool.Provider) []pool.Provider {
+	preferred := make([]pool.Provider, 0, len(providers))
+	for _, p := range providers {
+		if providerEngineClass(p) != engineClassNative || providerParsesToolGrammar(p) {
+			preferred = append(preferred, p)
+		}
+	}
+	if len(preferred) == 0 {
+		return providers
+	}
+	return preferred
+}
+
 func providerServesToolGrammars(p pool.Provider) bool {
 	cmp, ok := versionfloor.Compare(p.BinaryVersion, toolGrammarProviderMinVersion)
 	return ok && cmp >= 0
@@ -63,7 +85,7 @@ func mergeModelCapabilities(current *modelCapabilities, p pool.Provider, vision 
 	if caps == nil {
 		caps = &modelCapabilities{}
 	}
-	if toolGrammarFamily(p.ModelID) != "" && (legacyToolFamily(p.ModelID) || providerServesToolGrammars(p)) {
+	if providerParsesToolGrammar(p) {
 		caps.Tools = true
 		modes := map[string]bool{"auto": true}
 		for _, mode := range caps.ToolChoice {

@@ -322,6 +322,50 @@ final class CatalogToolGrammarTests: XCTestCase {
         XCTAssertEqual(observer.stopTokenCount, 6)
     }
 
+    /// Audit r2: leading prose reaches the stream before the call deltas,
+    /// whether it arrives in one delivery with the call or only at finish
+    /// (terminal replay without token events).
+    func testLeadingProsePrecedesQwenCallDeltas() throws {
+        let request = try toolRequest(model: "mlx-community/Qwen3-8B-4bit", tool: "read_file", property: "path")
+        let output = "Let me check.\n<tool_call>\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"a\"}}\n</tool_call>"
+        let parsed = try ModelRuntime.parseGeneratedOutput(
+            filteredText: output, generatedTokenIDs: [], decode: { _ in "" }, request: request, mode: .complete(),
+            defaultCompletionTokens: 9, toolCallPrefill: nil
+        )
+        for grouped in [true, false] {
+            var emitter = SerialStreamingTextEmitter(request: request)
+            let accumulator = StructuredStreamingContentAccumulator(enabled: false)
+            let idle = StructuredStreamingIdleState(enabled: false)
+            var order: [String] = []
+            let record: (StreamChunk) -> Void = { chunk in
+                switch chunk {
+                case .content(let text) where !text.isEmpty: order.append("content")
+                case .toolCallDelta: order.append("tool")
+                default: break
+                }
+            }
+            if grouped {
+                _ = emitter.step(candidate: (output, false), structuredAccumulator: accumulator, idleState: idle, onChunk: record)
+            }
+            try emitter.finish(finalText: output, parsed: parsed, structuredAccumulator: accumulator, idleState: idle, onChunk: record)
+            XCTAssertEqual(order.first, "content", "grouped=\(grouped) order=\(order)")
+            XCTAssertTrue(order.contains("tool"), "grouped=\(grouped)")
+            XCTAssertTrue(emitter.emittedContent.hasPrefix("Let me check."), "grouped=\(grouped)")
+        }
+    }
+
+    func testLlamaDetectionIgnoresBracesThatDoNotOpenACall() {
+        let noisy = String(repeating: "{ ", count: 20_000) + #"{"name": "read_file", "parameters": {"path": "a"}}"#
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: noisy, grammar: .llama3, modelID: "llama", allowedFunctionNames: ["read_file"], schemas: nil
+        )
+        // Only `{"name"` openings are scanned, so 20,000 stray braces cost one
+        // pass; the call after them still parses, the braces stay prose.
+        XCTAssertEqual(parsed.toolCalls.count, 1)
+        XCTAssertNotNil(ToolCallParser.llama3CallStart(in: noisy))
+        XCTAssertNil(ToolCallParser.llama3CallStart(in: String(repeating: "{\"name\" ", count: 100)))
+    }
+
     // MARK: - Reasoning split (SPEC-018 §3.12)
 
     func testReasoningSplitAppliesStopsAndJSONModeToTheAnswerOnly() throws {

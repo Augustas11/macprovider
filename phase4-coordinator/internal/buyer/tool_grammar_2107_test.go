@@ -144,3 +144,19 @@ func TestProviderFailureFrameCarriesReasonCode(t *testing.T) {
 		t.Fatalf("frame=%s", body)
 	}
 }
+
+func TestToolRequestsPreferProvidersThatParseTheGrammar(t *testing.T) {
+	oldGLM := pool.Provider{ProviderID: "old", ModelID: "Jundot/GLM-5.3-Flash-oQ4e-mtp", BinaryVersion: "1.8.261"}
+	newGLM := pool.Provider{ProviderID: "new", ModelID: "Jundot/GLM-5.3-Flash-oQ4e-mtp", BinaryVersion: toolGrammarProviderMinVersion}
+	got := preferToolGrammarProviders([]pool.Provider{oldGLM, newGLM})
+	if len(got) != 1 || got[0].ProviderID != "new" {
+		t.Fatalf("preferred=%v want only the upgraded provider", got)
+	}
+	if got := preferToolGrammarProviders([]pool.Provider{oldGLM}); len(got) != 1 {
+		t.Fatalf("with no upgraded provider the legacy candidate stays: %v", got)
+	}
+	legacy := pool.Provider{ProviderID: "q", ModelID: "mlx-community/Qwen3-8B-4bit", BinaryVersion: "1.8.100"}
+	if got := preferToolGrammarProviders([]pool.Provider{legacy, newGLM}); len(got) != 2 {
+		t.Fatalf("legacy families keep their providers: %v", got)
+	}
+}

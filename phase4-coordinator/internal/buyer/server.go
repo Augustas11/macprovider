@@ -8382,6 +8382,13 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 			return pool.Provider{}, &routeError{status: http.StatusBadRequest, code: "unsupported_modelID_for_multi_turn", message: "Model does not support multi-turn tool history rendering"}
 		}
 	}
+	// #2107: a tool request (or tool history) prefers native providers that
+	// parse the model's grammar, the same predicate /v1/models advertises
+	// from; with none upgraded it keeps the legacy candidates, which the
+	// metadata then does not advertise as tool-capable either.
+	if req.multiTurnToolHistory {
+		providers = preferToolGrammarProviders(providers)
+	}
 	// SPEC-019 v0.3.0 §1a: a non-strict json_schema request reaches only
 	// providers whose CLI implements non-strict mode. With none left for the
 	// model it gets the pre-v0.3.0 400, so the coordinator and the provider CLI

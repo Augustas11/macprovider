@@ -13895,10 +13895,10 @@ struct SerialStreamingTextEmitter {
             // Capture prose before observing the tool delimiter: observe() flips
             // suppression as soon as a call opens, but cleanup holdback may have
             // deferred the separator immediately before that delimiter.
+            // Prose precedes the call deltas that the same text opens.
             let visibleContent = toolStreamer.visibleContentPrefix(of: stableText)
-            for event in toolStreamer.observe(stableText) {
-                onChunk(event)
-            }
+            let toolEvents = toolStreamer.observe(stableText)
+            defer { toolEvents.forEach(onChunk) }
             if !visibleContent.isEmpty || !toolStreamer.suppressesAssistantContent {
                 let delta = delta(to: visibleContent)
                 if !delta.isEmpty {
@@ -13953,6 +13953,21 @@ struct SerialStreamingTextEmitter {
         reconciledToolCalls = parsed.toolCalls
         let finalDelta = delta(to: parsed.content)
         if streamToolsIncrementally {
+            // Whether a tool delta escaped before this final observation:
+            // until one did, leading prose (a terminal replay) and fallback
+            // content are still deliverable, and go before any call delta.
+            let noToolDeltaDelivered = toolStreamer.deliveredArguments == nil
+            if !parsed.toolCalls.isEmpty, noToolDeltaDelivered, !parsed.content.isEmpty {
+                let prose = ModelRuntime.streamDelta(from: emittedContent, to: parsed.content)
+                if !prose.isEmpty {
+                    if let error = structuredAccumulator.append(prose) {
+                        throw error
+                    }
+                    idleState.noteContent()
+                    noteEmitted(prose)
+                    onChunk(.content(prose))
+                }
+            }
             for event in toolStreamer.observe(finalText) {
                 onChunk(event)
             }
@@ -13972,23 +13987,9 @@ struct SerialStreamingTextEmitter {
                     )
                 }
             }
-            // Content is released when no tool delta escaped: a final parse
-            // that found no call (after a provisional delimiter or a held
-            // Llama brace) falls back to plain content, and prose before a
-            // call that was not streamed yet (a terminal replay) precedes the
-            // call deltas the server emits after this.
-            let noToolDeltaDelivered = toolStreamer.deliveredArguments == nil
-            if !parsed.toolCalls.isEmpty, noToolDeltaDelivered, !parsed.content.isEmpty {
-                let prose = ModelRuntime.streamDelta(from: emittedContent, to: parsed.content)
-                if !prose.isEmpty {
-                    if let error = structuredAccumulator.append(prose) {
-                        throw error
-                    }
-                    idleState.noteContent()
-                    noteEmitted(prose)
-                    onChunk(.content(prose))
-                }
-            }
+            // A final parse that found no call (after a provisional delimiter
+            // or a held Llama brace) falls back to plain content when no tool
+            // delta escaped.
             if parsed.toolCalls.isEmpty,
                !parsed.content.isEmpty,
                !toolStreamer.suppressesAssistantContent || noToolDeltaDelivered
