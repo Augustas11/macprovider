@@ -21,7 +21,7 @@ final class ShardGroupWireTests: XCTestCase {
     /// A head runtime over fake stages whose tail signs as mac-b.
     private func runtime(
         registration: Bool = true, poolModelID: String? = "pool/ijUnc-ZQf-LJeRvkhi-0iQ/llama-3b", tailLinks: ShardTestLinksBox? = nil,
-        spare: ShardGroupSpareConfig? = nil
+        spare: ShardGroupSpareConfig? = nil, epochStore: ShardGroupEpochStore? = nil, builtEpochs: ShardTestEpochLog? = nil
     ) async throws -> ShardGroupRuntime {
         let headSigner = ShardMemberSigner(memberDeviceID: "prov-head", key: headKey)
         let tailSigner = ShardMemberSigner(memberDeviceID: "mac-b", key: tailKey)
@@ -36,15 +36,20 @@ final class ShardGroupWireTests: XCTestCase {
                 templateSupportsThinkingToggle: false, templateSupportsPreserveThinking: false),
             maxContextTokens: 1024, gate: .awaitingCoordinator,
             registration: registration ? ShardGroupRegistration(config: headConfig(poolModelID: poolModelID, spare: spare), signer: headSigner) : nil,
-            connect: {
-                let links = try ShardBenchTestRig.ring(stages: 2, collapsed: true)
+            epochStore: epochStore,
+            connect: { epoch in
+                builtEpochs?.append(epoch)
+                // The tail, like a member, accepts the head's epoch when it is not
+                // below its own configured one.
+                let (member, headLink) = try ShardBenchTestRig.adoptingPair(headEpoch: epoch, memberMinimum: ShardBenchTestRig.epoch)
+                let links = [ShardBenchLinks(upstream: headLink, downstream: headLink), ShardBenchLinks(upstream: member, downstream: member)]
                 tailLinks?.links = links[1]
                 var tailOptions = ShardBenchTestRig.options(role: .tail, prompts: [], tokens: 1)
                 tailOptions.signer = tailSigner
                 tailOptions.upstreamInterface = ShardLinkInterface.thunderbolt
                 let session = ShardBenchSession(options: tailOptions, stage: tail)
                 Thread { _ = try? session.run(links: links[1]) }.start()
-                var options = ShardGroupEngineTests.options()
+                var options = ShardGroupEngineTests.options(epoch: epoch)
                 options.signer = headSigner
                 let engine = ShardGroupEngine(stage: head, options: options)
                 try engine.start(links: links[0])
@@ -503,6 +508,73 @@ final class ShardGroupWireTests: XCTestCase {
         await runtime.stop()
     }
 
+    // MARK: Epochs after a takeover (SPEC-051-R023)
+
+    private func registerResult(_ runtime: ShardGroupRuntime, epoch: UInt64, accepted: Bool, reason: String = "") async throws {
+        await runtime.handleShardCoordinatorMessage(try JSONSerialization.data(withJSONObject: [
+            "type": "shard_group_register_result", "version": 1, "group_provider_id": "prov-head",
+            "group_epoch": Int(epoch), "accepted": accepted, "reason": reason,
+        ]))
+    }
+
+    private func waitForEngineEpoch(_ runtime: ShardGroupRuntime, _ epoch: UInt64) async throws {
+        let deadline = Date().addingTimeInterval(8)
+        while Date() < deadline {
+            if let status = await runtime.engineStatus, status.running, status.groupEpoch == epoch { return }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        let status = await runtime.engineStatus
+        XCTFail("engine at \(String(describing: status?.groupEpoch)) running=\(String(describing: status?.running)), expected \(epoch)")
+    }
+
+    func testARebuildAfterATakeoverRegistersAboveTheTakeoverEpoch() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("shard-rebuild-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let store = ShardGroupEpochStore.defaultStore(groupProviderID: "prov-head", home: home)
+        let tailLinks = ShardTestLinksBox()
+        let built = ShardTestEpochLog()
+        let runtime = try await runtime(tailLinks: tailLinks, epochStore: store, builtEpochs: built)
+        let context = ShardCoordinatorContext(providerID: "prov-head", wireModelID: "wire/model")
+        XCTAssertEqual(built.all, [ShardBenchTestRig.epoch])
+        _ = await runtime.shardCoordinatorMessages(context: context, sessionStarted: true)
+        try await registerResult(runtime, epoch: ShardBenchTestRig.epoch, accepted: true)
+        // The takeover epoch was registered too.
+        let takeover = ShardBenchTestRig.epoch + 1
+        try await registerResult(runtime, epoch: takeover, accepted: true)
+        XCTAssertEqual(try store.lastRegisteredEpoch(), takeover)
+
+        // The chain fails; the rebuild runs above every accepted epoch and registers it.
+        tailLinks.links?.close()
+        try await waitForEngineEpoch(runtime, takeover + 1)
+        XCTAssertEqual(built.all.last, takeover + 1)
+        let messages = await runtime.shardCoordinatorMessages(context: context, sessionStarted: false)
+        let register = try object(try XCTUnwrap(messages.first))
+        XCTAssertEqual(register["type"] as? String, "shard_group_register")
+        XCTAssertEqual((register["record"] as? [String: Any])?["group_epoch"] as? Int, Int(takeover + 1))
+        await runtime.stop()
+
+        // A restarted head reads the state file and starts above it.
+        let restartedBuilt = ShardTestEpochLog()
+        let restarted = try await self.runtime(epochStore: store, builtEpochs: restartedBuilt)
+        XCTAssertEqual(restartedBuilt.all, [takeover + 1])
+        await restarted.stop()
+    }
+
+    func testAnEpochTheCoordinatorAlreadySawRebuildsTheChainAboveIt() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("shard-seen-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let store = ShardGroupEpochStore.defaultStore(groupProviderID: "prov-head", home: home)
+        let built = ShardTestEpochLog()
+        let runtime = try await runtime(epochStore: store, builtEpochs: built)
+        let context = ShardCoordinatorContext(providerID: "prov-head", wireModelID: "wire/model")
+        _ = await runtime.shardCoordinatorMessages(context: context, sessionStarted: true)
+        try await registerResult(runtime, epoch: ShardBenchTestRig.epoch, accepted: false, reason: "epoch_not_increasing")
+        XCTAssertEqual(try store.lastRegisteredEpoch(), ShardBenchTestRig.epoch)
+        try await waitForEngineEpoch(runtime, ShardBenchTestRig.epoch + 1)
+        XCTAssertEqual(built.all, [ShardBenchTestRig.epoch, ShardBenchTestRig.epoch + 1])
+        await runtime.stop()
+    }
+
     // MARK: Member hello
 
     func testMemberHelloNamesItsStageArtifactAndOneLinkPerPeer() throws {
@@ -578,4 +650,21 @@ final class ShardTestMessageLog: @unchecked Sendable {
     }
 
     var count: Int { all.count }
+}
+
+final class ShardTestEpochLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var epochs = [UInt64]()
+
+    func append(_ epoch: UInt64) {
+        lock.lock()
+        epochs.append(epoch)
+        lock.unlock()
+    }
+
+    var all: [UInt64] {
+        lock.lock()
+        defer { lock.unlock() }
+        return epochs
+    }
 }

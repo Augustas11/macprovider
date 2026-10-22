@@ -681,3 +681,33 @@ func TestSpareStandbyTakeoverFlow(t *testing.T) {
 		t.Fatalf("stored takeover = %+v %v %v", got, ok, err)
 	}
 }
+
+// SPEC-051-R023: after a takeover at epoch 2 the head rebuilds at 3, which
+// registers; rebuilding at an epoch the coordinator already accepted is refused.
+func TestRebuildAfterTakeoverRegistersAboveTheTakeoverEpoch(t *testing.T) {
+	f := newFixture(t)
+	if res, _ := f.register(twoStageRecord(1)); !res.Accepted {
+		t.Fatal(res.Reason)
+	}
+	takeover := twoStageRecord(2)
+	takeover.Stages[1].MemberDeviceID = "spare"
+	if res, _ := f.register(takeover); !res.Accepted {
+		t.Fatalf("takeover: %+v", res)
+	}
+	for _, stale := range []uint64{1, 2} {
+		rec := twoStageRecord(stale)
+		if stale == 2 {
+			rec.Stages[0].LayerEnd, rec.Stages[1].LayerStart = 16, 16
+		}
+		if res, _ := f.register(rec); res.Reason != ReasonEpochNotIncreasing {
+			t.Fatalf("rebuild at seen epoch %d: %+v", stale, res)
+		}
+	}
+	if res, _ := f.register(twoStageRecord(3)); !res.Accepted {
+		t.Fatalf("rebuild at epoch 3: %+v", res)
+	}
+	stored, ok, err := f.store.LatestRecord(context.Background(), "head")
+	if err != nil || !ok || stored.GroupEpoch != 3 {
+		t.Fatalf("latest record = %+v %v %v", stored, ok, err)
+	}
+}

@@ -157,6 +157,16 @@ enum ShardBenchTestRig {
         return (accepted, dialed)
     }
 
+    /// A member-side link that adopts the head's epoch when it is at least
+    /// `memberMinimum`, and the head's dialed link at `headEpoch`: (member, head).
+    static func adoptingPair(headEpoch: UInt64, memberMinimum: UInt64) throws -> (ShardStageLink, ShardStageLink) {
+        var member = configuration(epoch: memberMinimum)
+        member.adoptsHigherEpoch = true
+        let listener = try ShardStageListener(host: "127.0.0.1", port: 0)
+        let dialed = try ShardStageLink.connect(host: "127.0.0.1", port: listener.port, timeout: 5, configuration: configuration(epoch: headEpoch))
+        return (try listener.accept(timeout: 5, configuration: member), dialed)
+    }
+
     /// Links for a ring of `stages` stages, indexed by stage. With two stages and
     /// `collapsed`, one link carries both directions. With `signers` (one per stage)
     /// every link is hmac-sha256, authenticated by the stages it joins.

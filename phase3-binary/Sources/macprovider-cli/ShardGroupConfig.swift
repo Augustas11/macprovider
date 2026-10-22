@@ -84,10 +84,12 @@ struct ShardSupervisionConfig: Codable, Equatable, Sendable {
     }
 
     /// Link supervision for a given epoch. Peer-dead detection arms after the hello.
-    func link(epoch: UInt64, frameProtection: ShardLinkFrameProtection = .crc32c) -> ShardLinkConfiguration {
+    /// `adoptsHigherEpoch` (members): `epoch` is the lowest the link accepts.
+    func link(epoch: UInt64, frameProtection: ShardLinkFrameProtection = .crc32c, adoptsHigherEpoch: Bool = false) -> ShardLinkConfiguration {
         ShardLinkConfiguration(
             groupEpoch: epoch, heartbeatInterval: Double(heartbeatIntervalMilliseconds) / 1000,
-            missedHeartbeatLimit: heartbeatMissLimit, armLivenessOnOpen: false, frameProtection: frameProtection)
+            missedHeartbeatLimit: heartbeatMissLimit, armLivenessOnOpen: false, frameProtection: frameProtection,
+            adoptsHigherEpoch: adoptsHigherEpoch)
     }
 }
 
@@ -485,6 +487,7 @@ struct ShardMemberConfig: Codable, Equatable, Sendable {
         snapshotManifest.map { ShardStageScope(snapshotManifestPath: ($0 as NSString).expandingTildeInPath, layers: layerStart..<layerEnd) }
     }
 
-    /// The epoch this member's links run at.
+    /// The lowest epoch this member's links accept: a member follows the head to
+    /// any later epoch (a rebuild or a takeover) and refuses an earlier one.
     var linkEpoch: UInt64 { role == .spare ? groupEpoch + 1 : groupEpoch }
 }

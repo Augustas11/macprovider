@@ -102,7 +102,7 @@ final class ShardGroupRuntimeTests: XCTestCase {
                 modelID: modelID, modelHash: modelHash, modelHashAlgorithm: modelHash == nil ? nil : ModelArtifactIdentity.snapshotManifestV1,
                 weightsManifestSHA256: nil, catalogModelIDAlias: nil),
             prompting: prompting(), maxContextTokens: 4096, gate: gate,
-            connect: {
+            connect: { _ in
                 let links = try ShardBenchTestRig.ring(stages: 2, collapsed: true)
                 if let tailOnCall { tail.onCall = { tailOnCall($0, links[1].upstream) } }
                 let session = ShardBenchSession(options: ShardBenchTestRig.options(role: .tail, prompts: [], tokens: 1), stage: tail)
@@ -327,7 +327,7 @@ final class ShardGroupRuntimeTests: XCTestCase {
         let runtime = ShardGroupRuntime(
             identity: ShardGroupRuntime.Identity(modelID: modelID, modelHash: nil, modelHashAlgorithm: nil, weightsManifestSHA256: nil, catalogModelIDAlias: nil),
             prompting: prompting(), maxContextTokens: 512, gate: .notRequired,
-            connect: {
+            connect: { _ in
                 let links = try ShardBenchTestRig.ring(stages: 2, collapsed: true)
                 let session = ShardBenchSession(options: ShardBenchTestRig.options(role: .tail, prompts: [], tokens: 1), stage: tail)
                 Thread { _ = try? session.run(links: links[1]) }.start()

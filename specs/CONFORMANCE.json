@@ -1599,7 +1599,7 @@
     {
       "spec_id": "SPEC-051",
       "title": "Multi-Mac Shard Groups",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "path": "specs/SPEC-051-multi-mac-shard-groups.md",
       "status": "draft",
       "owner": "@Augustas11",

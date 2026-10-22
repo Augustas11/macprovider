@@ -25,6 +25,8 @@ public enum ShardLinkError: Error, Equatable, Sendable {
     case protectionNotEstablished
     /// SPEC-051-R011: the link key agreement failed.
     case keyAgreement(String)
+    /// An epoch-adopting link was asked to send before its peer named the epoch.
+    case epochNotSettled
 }
 
 public struct ShardLinkConfiguration: Equatable, Sendable {
@@ -42,6 +44,11 @@ public struct ShardLinkConfiguration: Equatable, Sendable {
     /// SPEC-051-R011. With `hmacSHA256` the link sends nothing but key agreement
     /// frames (no heartbeats either) until `authenticate` succeeds, then tags every frame.
     public var frameProtection: ShardLinkFrameProtection
+    /// A member's links: `groupEpoch` is the lowest epoch accepted. The link adopts
+    /// the epoch of the peer's first frame when it is not lower (a head that
+    /// rebuilt at a later epoch, SPEC-051-R023) and refuses a lower one; it sends
+    /// nothing, heartbeats included, before that first frame.
+    public var adoptsHigherEpoch: Bool
 
     public init(
         groupEpoch: UInt64,
@@ -50,7 +57,8 @@ public struct ShardLinkConfiguration: Equatable, Sendable {
         sendTimeout: TimeInterval = 5,
         limits: ShardFrameLimits = ShardFrameLimits(),
         armLivenessOnOpen: Bool = true,
-        frameProtection: ShardLinkFrameProtection = .crc32c
+        frameProtection: ShardLinkFrameProtection = .crc32c,
+        adoptsHigherEpoch: Bool = false
     ) {
         self.groupEpoch = groupEpoch
         self.heartbeatInterval = heartbeatInterval
@@ -59,6 +67,7 @@ public struct ShardLinkConfiguration: Equatable, Sendable {
         self.limits = limits
         self.armLivenessOnOpen = armLivenessOnOpen
         self.frameProtection = frameProtection
+        self.adoptsHigherEpoch = adoptsHigherEpoch
     }
 
     var livenessWindow: TimeInterval {
@@ -129,6 +138,9 @@ public final class ShardStageLink: @unchecked Sendable {
     // One receiver at a time.
     private let receiveLock = NSLock()
     private var receiveState: ShardLinkReceiveState
+    /// The epoch frames carry: the configured one, or the one adopted from the peer.
+    private var currentEpoch: UInt64
+    private var epochSettled: Bool
     /// Bytes of a not-yet-complete frame; never more than one frame (bounded by the cap).
     private var pending = Data()
 
@@ -237,6 +249,8 @@ public final class ShardStageLink: @unchecked Sendable {
         self.fd = fd
         self.configuration = configuration
         self.receiveState = ShardLinkReceiveState(groupEpoch: configuration.groupEpoch)
+        self.currentEpoch = configuration.groupEpoch
+        self.epochSettled = !configuration.adoptsHigherEpoch
         self.lastHeard = ShardSocketAddress.now()
         self.livenessArmed = configuration.armLivenessOnOpen
         self.protectionReady = configuration.frameProtection == .crc32c
@@ -285,10 +299,13 @@ public final class ShardStageLink: @unchecked Sendable {
         stateLock.lock()
         let ready = protectionReady
         let authenticator = sendAuthenticator
+        let settled = epochSettled
+        let epoch = currentEpoch
         stateLock.unlock()
+        guard settled else { throw ShardLinkError.epochNotSettled }
         guard ready || frame.header.kind == .keyExchange else { throw ShardLinkError.protectionNotEstablished }
         var frame = frame
-        frame.header.groupEpoch = configuration.groupEpoch
+        frame.header.groupEpoch = epoch
         frame.header.sequence = nextSendSequence
         var bytes: Data
         do {
@@ -355,6 +372,33 @@ public final class ShardStageLink: @unchecked Sendable {
             if now >= deadline { throw ShardLinkError.receiveTimedOut }
             let wait = armed ? min(slice, deadline - now, window - (now - heard)) : min(slice, deadline - now)
             _ = inbox.wait(until: Date(timeIntervalSinceNow: max(0.001, wait)))
+        }
+    }
+
+    /// The epoch this link's frames carry (adopted from the peer on an adopting link).
+    public var groupEpoch: UInt64 {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return currentEpoch
+    }
+
+    /// Wait until an adopting link learned its epoch from the peer's first frame (on
+    /// a crc32c link the reader adopts it as the frame arrives) and return it.
+    public func awaitSettledEpoch(timeout: TimeInterval) throws -> UInt64 {
+        let deadline = ShardSocketAddress.now() + timeout
+        while true {
+            stateLock.lock()
+            let settled = epochSettled
+            let epoch = currentEpoch
+            stateLock.unlock()
+            if settled { return epoch }
+            inbox.lock()
+            let failure = readerFailure
+            inbox.unlock()
+            if let failure { throw failure }
+            if closedFlag { throw ShardLinkError.closed }
+            if ShardSocketAddress.now() >= deadline { throw ShardLinkError.receiveTimedOut }
+            usleep(2_000)
         }
     }
 
@@ -427,19 +471,27 @@ public final class ShardStageLink: @unchecked Sendable {
             }
         }
         do {
-            try exchange(ShardLinkHandshake.Share(ephemeral: ephemeral.publicKey))
-            let peerShare = try expect(ShardLinkHandshake.Share.self)
+            let peerShare: ShardLinkHandshake.Share
+            if configuration.adoptsHigherEpoch {
+                // The peer's share names the epoch this link adopts; answer after it.
+                peerShare = try expect(ShardLinkHandshake.Share.self)
+                try exchange(ShardLinkHandshake.Share(ephemeral: ephemeral.publicKey))
+            } else {
+                try exchange(ShardLinkHandshake.Share(ephemeral: ephemeral.publicKey))
+                peerShare = try expect(ShardLinkHandshake.Share.self)
+            }
+            let epoch = groupEpoch
             guard let peerEphemeral = Data(base64Encoded: peerShare.ephemeral) else {
                 throw ShardLinkError.keyAgreement("undecodable ephemeral key")
             }
             let own = ephemeral.publicKey.rawRepresentation
             try exchange(try ShardLinkHandshake.auth(
-                signer: signer, epoch: configuration.groupEpoch, role: role,
+                signer: signer, epoch: epoch, role: role,
                 initiatorEphemeral: role == .initiator ? own : peerEphemeral,
                 responderEphemeral: role == .initiator ? peerEphemeral : own))
             let peerAuth = try expect(ShardLinkHandshake.Auth.self)
             let (keys, peer) = try ShardLinkHandshake.complete(
-                ephemeral: ephemeral, role: role, epoch: configuration.groupEpoch, ownPublicKey: signer.publicKeyBase64,
+                ephemeral: ephemeral, role: role, epoch: epoch, ownPublicKey: signer.publicKeyBase64,
                 peerShare: peerShare, peerAuth: peerAuth)
             stateLock.lock()
             sendAuthenticator = ShardFrameAuthenticator(key: keys.send)
@@ -509,7 +561,7 @@ public final class ShardStageLink: @unchecked Sendable {
         timer.setEventHandler { [weak self] in
             guard let self else { return }
             self.stateLock.lock()
-            let skip = self.isClosed || self.heartbeatsPaused || !self.protectionReady
+            let skip = self.isClosed || self.heartbeatsPaused || !self.protectionReady || !self.epochSettled
             let report = self.heartbeatReport
             let nonce = self.nextPingNonce
             self.nextPingNonce &+= 1
@@ -555,6 +607,7 @@ public final class ShardStageLink: @unchecked Sendable {
         let frame: ShardStageFrame
         do {
             frame = try ShardStageFrameCodec.decode(try authenticator?.open(whole) ?? whole, limits: configuration.limits)
+            try adoptEpochIfUnsettled(frame.header)
             try receiveState.accept(frame.header)
         } catch let error as ShardFrameError {
             throw ShardLinkError.frame(error)
@@ -567,6 +620,19 @@ public final class ShardStageLink: @unchecked Sendable {
         if frame.header.kind == .heartbeat { stats.heartbeatsReceived += 1 }
         stateLock.unlock()
         return frame
+    }
+
+    /// An adopting link takes the epoch of the peer's first frame, never a lower one.
+    private func adoptEpochIfUnsettled(_ header: ShardStageFrameHeader) throws {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard !epochSettled else { return }
+        guard header.groupEpoch >= configuration.groupEpoch else {
+            throw ShardFrameError.epochMismatch(expected: configuration.groupEpoch, actual: header.groupEpoch)
+        }
+        receiveState = ShardLinkReceiveState(groupEpoch: header.groupEpoch)
+        currentEpoch = header.groupEpoch
+        epochSettled = true
     }
 
     /// Answer a ping at once and remember what it reported; time an echo.

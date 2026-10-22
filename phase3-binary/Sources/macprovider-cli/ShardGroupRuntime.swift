@@ -70,7 +70,11 @@ actor ShardGroupRuntime: ModelRuntimeServing {
     nonisolated var settlementRuntimeSource: String? { nil }
 
     private let prompting: Prompting
-    private let connect: @Sendable () async throws -> any ShardGroupEngineHandle
+    /// Builds and starts a chain at the given group epoch.
+    private let connect: @Sendable (UInt64) async throws -> any ShardGroupEngineHandle
+    /// The last epoch the coordinator accepted, kept across rebuilds and restarts.
+    private let epochStore: ShardGroupEpochStore?
+    private var lastRegisteredEpoch: UInt64?
     private var engine: (any ShardGroupEngineHandle)?
     private var maintainTask: Task<Void, Never>?
     private(set) var gate: ShardGroupServingGate
@@ -94,8 +98,10 @@ actor ShardGroupRuntime: ModelRuntimeServing {
         maxContextTokens: Int,
         gate: ShardGroupServingGate,
         registration: ShardGroupRegistration? = nil,
-        connect: @escaping @Sendable () async throws -> any ShardGroupEngineHandle
+        epochStore: ShardGroupEpochStore? = nil,
+        connect: @escaping @Sendable (UInt64) async throws -> any ShardGroupEngineHandle
     ) {
+        self.epochStore = epochStore
         self.registration = registration
         self.identity = identity
         self.prompting = prompting
@@ -110,7 +116,7 @@ actor ShardGroupRuntime: ModelRuntimeServing {
     /// Connect the chain once (serve fails when the members are not up), then keep
     /// it connected: a failed chain is re-dialled in the background.
     func start() async throws {
-        engine = try await connect()
+        engine = try await connect(nextBuildEpoch())
         maintainTask = Task { [weak self] in await self?.maintain() }
     }
 
@@ -134,7 +140,7 @@ actor ShardGroupRuntime: ModelRuntimeServing {
             }
             if let failure = engine?.status.failure { shardGroupLog("chain down (\(failure)); reconnecting") }
             do {
-                engine = try await connect()
+                engine = try await connect(nextBuildEpoch())
                 shardGroupLog("chain reconnected")
                 backoff = 1
             } catch {
@@ -146,6 +152,40 @@ actor ShardGroupRuntime: ModelRuntimeServing {
     }
 
     var engineStatus: ShardGroupEngineStatus? { engine?.status }
+
+    /// SPEC-051-R023: a chain is never built at an epoch the coordinator already
+    /// accepted: max(configured epoch, last accepted + 1), the last accepted epoch
+    /// read from the head's state file and from this process.
+    func nextBuildEpoch() -> UInt64 {
+        let configured = registration?.config.groupEpoch ?? 1
+        var last = lastRegisteredEpoch ?? 0
+        if let epochStore {
+            do {
+                last = max(last, try epochStore.lastRegisteredEpoch() ?? 0)
+            } catch {
+                warnOnce("group epoch state unreadable (\(error)); building from this process's last accepted epoch")
+            }
+        }
+        return last == 0 ? configured : max(configured, last + 1)
+    }
+
+    /// Remember an epoch the coordinator accepted (or reported as already seen).
+    func noteRegisteredEpoch(_ epoch: UInt64) {
+        lastRegisteredEpoch = max(lastRegisteredEpoch ?? 0, epoch)
+        do {
+            try epochStore?.record(epoch)
+        } catch {
+            shardGroupLog("could not record group epoch \(epoch): \(error)")
+        }
+    }
+
+    /// The coordinator already saw this chain's epoch: rebuild the chain above it.
+    func rebuildAboveSeenEpoch(_ epoch: UInt64) {
+        noteRegisteredEpoch(epoch)
+        guard let current = engine, current.status.groupEpoch <= epoch else { return }
+        shardGroupLog("epoch \(epoch) was already seen by the coordinator; rebuilding the chain at \(nextBuildEpoch())")
+        Task.detached { try? current.shutdown() }
+    }
 
     func setGate(_ gate: ShardGroupServingGate) {
         if gate != self.gate { shardGroupLog("serving gate \(gate)") }

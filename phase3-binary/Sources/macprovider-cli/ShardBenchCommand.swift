@@ -1219,7 +1219,7 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
     /// The hello exchange is done: from here a silent peer is a dead peer.
     private func helloSucceeded(_ links: ShardBenchLinks, stages: String) {
         for link in links.unique { link.armLiveness() }
-        shardBenchLog("hello ok epoch=\(options.link.groupEpoch) session=\(sessionID) stage=\(stageIndex) stages=\(stages)")
+        shardBenchLog("hello ok epoch=\(links.upstream.groupEpoch) session=\(sessionID) stage=\(stageIndex) stages=\(stages)")
     }
 
     private func checkRole() throws {
@@ -1506,7 +1506,7 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
             // From here a silent head is a dead head; its heartbeats keep the link alive.
             links.upstream.armLiveness()
             options.onStandby?(chain, stageIndex)
-            shardBenchLog("standby for the head at \(links.upstream.peerAddress) epoch=\(options.link.groupEpoch)")
+            shardBenchLog("standby for the head at \(links.upstream.peerAddress) epoch=\(links.upstream.groupEpoch)")
             while true {
                 do {
                     hello = try ShardChainWire.awaitChainHello(
@@ -1705,7 +1705,7 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
                 let receiptID = receiptIDs.removeValue(forKey: header.requestID) ?? String(header.requestID)
                 let receipts = try ShardChainWire.decodeReceipts(frame.payload) + [try signer.sign(book.receipt(
                     requestID: header.requestID, receiptRequestID: receiptID, memberDeviceID: signer.memberDeviceID,
-                    groupEpoch: options.link.groupEpoch, stageIndex: stageIndex, layers: stage.layers))]
+                    groupEpoch: links.upstream.groupEpoch, stageIndex: stageIndex, layers: stage.layers))]
                 book.remove(header.requestID)
                 try links.downstream.send(ShardStageFrame(
                     header: self.header(.abort, requestID: header.requestID, destination: downstreamIndex),

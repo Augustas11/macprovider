@@ -97,6 +97,9 @@ struct ShardMemberStatus: Sendable {
     var downstreamInterface: String?
     var sessionsServed: Int
     var lastError: String?
+    /// The epoch of the head's current session (a spare's: of its standby link,
+    /// the epoch its takeover starts); nil before a head reached this member.
+    var groupEpoch: UInt64? = nil
 }
 
 /// The member's accept-and-serve loop on its own thread.
@@ -173,7 +176,8 @@ final class ShardMemberStageServer<Stage: ShardBenchStage>: @unchecked Sendable 
     }
 
     private func serve(_ listener: ShardStageListener) {
-        let link = config.supervision.link(epoch: config.linkEpoch, frameProtection: config.frameProtection.linkProtection)
+        let link = config.supervision.link(
+            epoch: config.linkEpoch, frameProtection: config.frameProtection.linkProtection, adoptsHigherEpoch: true)
         while !isStopped {
             let upstream: ShardStageLink
             do {
@@ -198,9 +202,13 @@ final class ShardMemberStageServer<Stage: ShardBenchStage>: @unchecked Sendable 
             var downstream = upstream
             if let connect = config.connect {
                 do {
+                    // The next stage joins at the epoch the head announced upstream.
+                    var next = link
+                    next.groupEpoch = try upstream.awaitSettledEpoch(timeout: Self.connectTimeout)
+                    next.adoptsHigherEpoch = false
                     let target = try ShardBenchEndpoint.parse(connect)
                     downstream = try ShardStageLink.connect(
-                        host: target.host, port: target.port, timeout: Self.connectTimeout, configuration: link)
+                        host: target.host, port: target.port, timeout: Self.connectTimeout, configuration: next)
                     try downstream.authenticate(signer: signer, role: .initiator, timeout: Self.connectTimeout)
                 } catch {
                     shardGroupLog("member could not reach the next stage at \(connect): \(error)")
@@ -234,8 +242,10 @@ final class ShardMemberStageServer<Stage: ShardBenchStage>: @unchecked Sendable 
         options.returnInterface = links.isCollapsed || role != .tail ? nil : downstreamInterface
         // A spare learns its peer and link from the head's standby link before any
         // takeover, so it can join its group's epochs at once (SPEC-051-R029).
-        options.onStandby = { [weak self] chain, stageIndex in
+        let upstreamLink = links.upstream
+        options.onStandby = { [weak self, weak upstreamLink] chain, stageIndex in
             self?.update { status in
+                status.groupEpoch = upstreamLink?.groupEpoch
                 status.chain = chain
                 status.stageIndex = stageIndex
                 status.upstreamPeer = chain.first?.memberDeviceID
@@ -245,8 +255,9 @@ final class ShardMemberStageServer<Stage: ShardBenchStage>: @unchecked Sendable 
                 status.lastError = nil
             }
         }
-        options.onJoined = { [weak self] chain, stageIndex in
+        options.onJoined = { [weak self, weak upstreamLink] chain, stageIndex in
             self?.update { status in
+                status.groupEpoch = upstreamLink?.groupEpoch
                 status.chain = chain
                 status.stageIndex = stageIndex
                 status.upstreamPeer = chain.indices.contains(stageIndex - 1) ? chain[stageIndex - 1].memberDeviceID : nil
@@ -303,6 +314,8 @@ actor ShardMemberRuntime: ModelRuntimeServing {
     /// A spare's hello for the epoch its takeover starts (`config.linkEpoch`), sent
     /// once its own hello was accepted, so its key is bound before it serves.
     var takeoverState = ShardMemberHelloState.notSent
+    /// The head epoch the hello states belong to; a head at a new epoch starts them over.
+    var helloEpoch: UInt64?
     var changeHandler: (@Sendable () async -> Void)?
     private var changeMonitor: Task<Void, Never>?
     private var lastChangeSent: TimeInterval = 0
@@ -346,8 +359,17 @@ actor ShardMemberRuntime: ModelRuntimeServing {
 
     /// The hello still to send: the member's own, then a spare's takeover hello.
     var helloDue: Bool {
-        guard server.status.upstreamPeer != nil else { return false }
+        let status = server.status
+        guard status.upstreamPeer != nil else { return false }
+        if status.groupEpoch != helloEpoch { return true }
         return helloState == .notSent || (config.role == .spare && helloState == .accepted && takeoverState == .notSent)
+    }
+
+    /// The epochs this member's two hellos name for a head session at `joined`: a
+    /// stage joins `joined`; a spare's standby link runs at the takeover epoch, so
+    /// its own hello names the epoch before and its takeover hello `joined`.
+    func helloEpochs(joined: UInt64) -> (own: UInt64, takeover: UInt64?) {
+        config.role == .spare ? (joined - 1, joined) : (joined, nil)
     }
 
     func reportChangeIfDue() async {
@@ -546,13 +568,16 @@ enum ShardGroupServe {
                 templateSupportsPreserveThinking: thinking && ModelRuntime.chatTemplateSupportsPreserveThinking(in: directory)),
             maxContextTokens: maxContextTokens, gate: gate,
             registration: ShardGroupRegistration(config: config, signer: signer),
-            connect: {
+            epochStore: ShardGroupEpochStore.defaultStore(groupProviderID: signer.memberDeviceID),
+            connect: { epoch in
                 try await ShardBenchThread.run {
+                    var options = engineOptions
+                    options.link.groupEpoch = epoch
                     let links = try ShardBenchLinks.open(
                         listen: config.stages.count > 1 ? returnListen : nil, connect: firstStage,
-                        connectTimeout: engineOptions.connectTimeout, configuration: engineOptions.link, session: "group",
+                        connectTimeout: options.connectTimeout, configuration: options.link, session: "group",
                         signer: signer)
-                    let engine = ShardGroupEngine(stage: stage.stage, options: engineOptions)
+                    let engine = ShardGroupEngine(stage: stage.stage, options: options)
                     try engine.start(links: links)
                     return engine
                 }

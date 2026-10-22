@@ -337,6 +337,10 @@ enum ShardGroupWire {
         artifactHashAlgorithm: String, artifactHash: String, weightsVerified: Bool, stageFits: Bool, takeover: Bool = false
     ) throws -> Data? {
         guard !takeover || config.role == .spare else { return nil }
+        // The epoch of the head this member joined (`ShardMemberStatus.groupEpoch`);
+        // a spare's standby link runs at its takeover epoch.
+        let joined = status.groupEpoch ?? config.linkEpoch
+        let epoch = config.role == .spare && !takeover ? joined - 1 : joined
         guard let upstream = status.upstreamPeer, let downstream = status.downstreamPeer,
               let upstreamInterface = status.upstreamInterface, let downstreamInterface = status.downstreamInterface
         else { return nil }
@@ -352,7 +356,7 @@ enum ShardGroupWire {
             "type": .string("shard_member_hello"),
             "version": .int(version),
             "group_provider_id": .string(config.groupProviderID),
-            "group_epoch": .int(Int(takeover ? config.linkEpoch : config.groupEpoch)),
+            "group_epoch": .int(Int(epoch)),
             "member_device_id": .string(memberDeviceID),
             "role": .string(takeover ? ShardMemberConfig.Role.stage.rawValue : config.role.rawValue),
             "stage_index": .int(config.stageIndex),
@@ -501,11 +505,13 @@ extension ShardGroupRuntime: ShardGroupCoordinatorParticipant {
         case "shard_group_register_result":
             if result.accepted == true {
                 acceptedEpoch = result.groupEpoch
+                noteRegisteredEpoch(result.groupEpoch)
                 shardGroupLog("group epoch \(result.groupEpoch) registered")
             } else {
                 registerSent = nil
                 shardGroupLog("group epoch \(result.groupEpoch) refused: \(result.reason)")
                 if gate != .notRequired { setGate(.unavailable("registration refused: \(result.reason)")) }
+                if result.reason == "epoch_not_increasing" { rebuildAboveSeenEpoch(result.groupEpoch) }
             }
         case "shard_group_status":
             guard gate != .notRequired, result.groupEpoch == acceptedEpoch else { return }
@@ -538,9 +544,11 @@ extension ShardMemberRuntime: ShardGroupCoordinatorParticipant {
     }
 
     func shardCoordinatorMessages(context: ShardCoordinatorContext, sessionStarted: Bool) async -> [Data] {
-        if sessionStarted {
+        let status = server.status
+        if sessionStarted || status.groupEpoch != helloEpoch {
             helloState = .notSent
             takeoverState = .notSent
+            helloEpoch = status.groupEpoch
         }
         guard memberDeviceID == context.providerID, let hash = identity.modelHash, let algorithm = identity.modelHashAlgorithm else {
             return []
@@ -561,7 +569,7 @@ extension ShardMemberRuntime: ShardGroupCoordinatorParticipant {
             return []
         }
         guard let hello = try? ShardGroupWire.memberHello(
-            config: config, status: server.status, memberDeviceID: memberDeviceID, artifactHashAlgorithm: algorithm, artifactHash: hash,
+            config: config, status: status, memberDeviceID: memberDeviceID, artifactHashAlgorithm: algorithm, artifactHash: hash,
             weightsVerified: stageProof.weightsVerified, stageFits: stageProof.fit.fits, takeover: takeover)
         else { return [] }
         if takeover { takeoverState = .sent(Date()) } else { helloState = .sent(Date()) }
@@ -575,8 +583,13 @@ extension ShardMemberRuntime: ShardGroupCoordinatorParticipant {
             shardGroupLog("ignored a malformed or foreign group message")
             return
         }
-        let takeover = config.role == .spare && result.groupEpoch == config.linkEpoch
-        guard takeover || result.groupEpoch == config.groupEpoch else {
+        guard let joined = helloEpoch else {
+            shardGroupLog("ignored a member hello result before this member joined a head")
+            return
+        }
+        let epochs = helloEpochs(joined: joined)
+        let takeover = epochs.takeover == result.groupEpoch
+        guard takeover || result.groupEpoch == epochs.own else {
             shardGroupLog("ignored a member hello result for epoch \(result.groupEpoch)")
             return
         }

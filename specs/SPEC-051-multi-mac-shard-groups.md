@@ -1,12 +1,12 @@
 # SPEC-051 - Multi-Mac Shard Groups
 
-**Version:** 0.2.1
+**Version:** 0.2.2
 
 ```json
 {
   "spec_id": "SPEC-051",
   "title": "Multi-Mac Shard Groups",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "path": "specs/SPEC-051-multi-mac-shard-groups.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -27,6 +27,14 @@
   }
 }
 ```
+
+**Change log v0.2.2 (2026-10-22, Related: #2084):** A head never builds a
+chain at an epoch the coordinator already accepted (SPEC-051-R023): it keeps
+the last accepted epoch in an owner-only state file and builds every chain,
+after a takeover, a lost member or a restart, at the configured epoch or one
+above the last accepted, whichever is higher. A member joins a head at the
+epoch the head's first frame names when it is not below the member's
+configured epoch, and refuses a lower one.
 
 **Change log v0.2.1 (2026-10-22, Related: #2084):** Defines the takeover
 attestation (SPEC-051-R019): after a spare replaced a lost member and the head
@@ -664,6 +672,20 @@ one. Requests in flight under an old epoch MUST either complete under that
 epoch or follow SPEC-051-R022; they MUST NOT continue on a mix of epochs
 except through a recorded replay.
 
+Because the coordinator refuses any epoch at or below the last one it
+accepted (SPEC-051-R005), a head MUST NOT build a chain at such an epoch. The
+head MUST persist the last epoch the coordinator accepted for its group
+(written atomically and durably, readable only by the owner) and build every
+chain, including after a takeover, a lost member or a restart, at the higher
+of its configured epoch and the last accepted epoch plus one. When the
+coordinator answers `epoch_not_increasing`, the head records that epoch as
+seen and rebuilds above it. A member's current epoch is the one the head's
+first frame on a new link names (for an authenticated link, the epoch its key
+agreement signs): a member MUST accept it when it is not below the member's
+configured epoch (for a spare, the epoch after its group's), MUST refuse a
+lower one, and sends nothing on the link before that first frame. Its member
+hello and sub-receipts name that epoch.
+
 ### SPEC-051-R024 - Isolation from single-Mac serving
 
 A provider that is not a member of an active group MUST serve exactly as it
@@ -916,6 +938,9 @@ in `CONFORMANCE.json`.
 
 ## 10. Changelog and history
 
+- v0.2.2 (2026-10-22, Related: #2084): epochs after a takeover (R023): the
+  head persists the last accepted epoch and builds above it; members follow
+  the head to a later epoch and refuse an earlier one.
 - v0.2.1 (2026-10-22, Related: #2084): takeover attestation (R019 item 6):
   one new-epoch segment from step 0, a `takeover` object with the replaced
   epoch and reason, no sub-receipt from the lost member; the coordinator
