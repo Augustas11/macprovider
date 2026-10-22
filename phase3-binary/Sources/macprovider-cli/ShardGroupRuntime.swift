@@ -82,6 +82,11 @@ actor ShardGroupRuntime: ModelRuntimeServing {
     var acceptedEpoch: UInt64?
     var registerSent: (epoch: UInt64, at: Date)?
     private var warnings = Set<String>()
+    /// What the last group heartbeat reported; a difference is a change to send now.
+    var reportedHealth: ShardGroupWire.HealthSignature?
+    var changeHandler: (@Sendable () async -> Void)?
+    private var changeMonitor: Task<Void, Never>?
+    private var lastChangeSent: TimeInterval = 0
 
     init(
         identity: Identity,
@@ -112,6 +117,8 @@ actor ShardGroupRuntime: ModelRuntimeServing {
     func stop() {
         maintainTask?.cancel()
         maintainTask = nil
+        changeMonitor?.cancel()
+        changeMonitor = nil
         try? engine?.shutdown()
         engine = nil
     }
@@ -145,10 +152,46 @@ actor ShardGroupRuntime: ModelRuntimeServing {
         self.gate = gate
     }
 
+    /// Poll for a change worth an immediate group message (SPEC-051-R029) while a
+    /// change handler is installed.
+    func startChangeMonitor() {
+        changeMonitor?.cancel()
+        changeMonitor = nil
+        guard changeHandler != nil else { return }
+        changeMonitor = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(ShardGroupWire.changePollInterval * 1e9))
+                guard let self, !Task.isCancelled else { return }
+                await self.reportChangeIfDue()
+            }
+        }
+    }
+
+    /// Ask for the group messages now when a member's health or a link changed since
+    /// the last heartbeat, or the engine moved to a new epoch (a spare took over), at
+    /// most once per `ShardGroupWire.minimumChangeInterval`.
+    func reportChangeIfDue() async {
+        guard let handler = changeHandler, let registration, let status = engineStatus, !status.chain.isEmpty,
+              let accepted = acceptedEpoch
+        else { return }
+        let now = Double(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) / 1e9
+        guard now - lastChangeSent >= ShardGroupWire.minimumChangeInterval else { return }
+        let due: Bool
+        if accepted == status.groupEpoch {
+            due = healthView(status, providerID: registration.signer.memberDeviceID).signature != reportedHealth
+        } else {
+            due = status.running && registerSent?.epoch != status.groupEpoch
+        }
+        guard due else { return }
+        lastChangeSent = now
+        await handler()
+    }
+
     /// A new coordinator session registers again and waits for its status.
     func resetCoordinatorSession() {
         acceptedEpoch = nil
         registerSent = nil
+        reportedHealth = nil
         if gate != .notRequired { setGate(.awaitingCoordinator) }
     }
 

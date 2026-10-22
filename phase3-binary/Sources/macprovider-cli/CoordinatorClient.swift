@@ -4628,6 +4628,11 @@ actor CoordinatorClient {
             await providerStatus.setState(.unavailable, reason: "operator_paused")
         }
         try await sendStateUpdate(state: nil, reason: operatorPaused ? "operator_paused" : reason)
+        if let participant = modelRuntime as? any ShardGroupCoordinatorParticipant {
+            await participant.setShardChangeHandler { [weak self] in
+                await self?.sendShardGroupMessages(sessionStarted: false)
+            }
+        }
         await sendShardGroupMessages(sessionStarted: true)
         if operatorPaused {
             _ = try recordLifecycleTransition(

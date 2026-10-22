@@ -22,6 +22,11 @@ enum ShardGroupWire {
     static let inboundTypes: Set<String> = ["shard_group_register_result", "shard_group_status", "shard_member_hello_result"]
     /// SPEC-051-R021, R022: the end-frame status of a group failure.
     static let failureStatus = "error_shard_group_failed"
+    /// Bound on change-triggered group messages: at most four a second, on top of
+    /// the one per coordinator heartbeat tick.
+    static let minimumChangeInterval: TimeInterval = 0.25
+    /// How often a participant looks for a change to report.
+    static let changePollInterval: TimeInterval = 0.1
 
     enum WireError: Error, Equatable, CustomStringConvertible {
         case receiptMalformed
@@ -180,37 +185,97 @@ enum ShardGroupWire {
         ]))
     }
 
-    /// Links of a chain as the receiving end measured them in the handshake: stage i
-    /// to i+1, then the last stage back to stage 0.
-    static func links(chain: [ShardBenchHello], providerID: String) -> [RFC8785JCS.Value] {
+    /// One SPEC-051-R029 heartbeat link as the head reports it.
+    struct LinkReport: Equatable, Sendable {
+        let from: String
+        let to: String
+        /// Stage index of the link's receiving end (the member it is measured toward).
+        let toStage: Int
+        let interfaceType: String
+        let rttP99Microseconds: Int
+        /// False when the member relaying this link's measurement stopped reporting it.
+        let fresh: Bool
+    }
+
+    /// The required links of a chain: stage i to i+1, then the last stage back to
+    /// stage 0. Round trips are the live sliding p99s (SPEC-051-R007): the head's own
+    /// for its two links, the relayed member measurements for the others, and the
+    /// handshake probe until a link has one. A relayed report older than `staleAfter`
+    /// keeps its last value and marks the link not fresh.
+    static func linkReports(
+        chain: [ShardBenchHello], providerID: String, health: ShardGroupLinkHealth?, now: TimeInterval, staleAfter: TimeInterval
+    ) -> [LinkReport] {
         guard chain.count >= 2 else { return [] }
         func member(_ index: Int) -> String { index == 0 ? providerID : chain[index].memberDeviceID ?? "" }
-        func microseconds(_ latency: ShardBenchLatency?) -> Int {
-            min(Int((latency?.p99Microseconds ?? 0).rounded(.up)), 1 << 53 - 1)
+        func microseconds(_ seconds: Double?) -> Int { min(Int(((seconds ?? 0) * 1e6).rounded(.up)), 1 << 53 - 1) }
+        func probe(_ latency: ShardBenchLatency?) -> Int { min(Int((latency?.p99Microseconds ?? 0).rounded(.up)), 1 << 53 - 1) }
+        func measured(_ roundTrip: ShardLinkRoundTrip?, else fallback: ShardBenchLatency?) -> Int {
+            guard let roundTrip, roundTrip.samples > 0 else { return probe(fallback) }
+            return microseconds(roundTrip.p99Seconds)
         }
-        var links = (1..<chain.count).map { index -> RFC8785JCS.Value in
-            .object([
-                "from_member_device_id": .string(member(index - 1)), "to_member_device_id": .string(member(index)),
-                "interface_type": .string(chain[index].upstreamInterface ?? ShardLinkInterface.other),
-                "rtt_p99_us": .int(microseconds(chain[index].upstreamProbe)),
-            ])
+        var reports = (1..<chain.count).map { index -> LinkReport in
+            var rtt = probe(chain[index].upstreamProbe)
+            var fresh = true
+            if index == 1 {
+                rtt = measured(health?.downstream, else: chain[index].upstreamProbe)
+            } else if let reported = health?.reported(from: index - 1, to: index) {
+                rtt = Int(reported.health.rttP99Microseconds)
+                fresh = now - reported.at <= staleAfter
+            }
+            return LinkReport(
+                from: member(index - 1), to: member(index), toStage: index,
+                interfaceType: chain[index].upstreamInterface ?? ShardLinkInterface.other, rttP99Microseconds: rtt, fresh: fresh)
         }
         let last = chain.count - 1
         // A two-stage chain returns tokens on the same link it sends activations on.
         let collapsed = last == 1 && chain[last].returnProbe == nil
-        links.append(.object([
-            "from_member_device_id": .string(member(last)), "to_member_device_id": .string(member(0)),
-            "interface_type": .string((collapsed ? chain[last].upstreamInterface : chain[last].returnInterface) ?? ShardLinkInterface.other),
-            "rtt_p99_us": .int(microseconds(collapsed ? chain[last].upstreamProbe : chain[last].returnProbe)),
-        ]))
-        return links
+        reports.append(LinkReport(
+            from: member(last), to: member(0), toStage: 0,
+            interfaceType: (collapsed ? chain[last].upstreamInterface : chain[last].returnInterface) ?? ShardLinkInterface.other,
+            rttP99Microseconds: collapsed
+                ? measured(health?.downstream, else: chain[last].upstreamProbe)
+                : measured(health?.upstream, else: chain[last].returnProbe),
+            fresh: true))
+        return reports
     }
 
-    static func heartbeat(chain: [ShardBenchHello], groupEpoch: UInt64, providerID: String, healthy: Bool) throws -> Data {
-        let members = chain.indices.map { index -> RFC8785JCS.Value in
+    /// SPEC-051-R015 member health as the head sees it: every member is healthy while
+    /// the chain runs, except the receiving member of a link whose relayed report went stale.
+    static func memberHealth(chainCount: Int, running: Bool, links: [LinkReport]) -> [Bool] {
+        (0..<chainCount).map { index in
+            running && (index == 0 || links.allSatisfy { $0.toStage != index || $0.fresh })
+        }
+    }
+
+    /// What a heartbeat says, coarsened so that only a health, interface or
+    /// round-trip change of about a fifth or more counts as a change.
+    struct HealthSignature: Equatable, Sendable {
+        let epoch: UInt64
+        let members: [Bool]
+        let links: [String]
+
+        init(epoch: UInt64, members: [Bool], links: [LinkReport]) {
+            self.epoch = epoch
+            self.members = members
+            self.links = links.map { link in
+                // Quarter-octave buckets: 1.19x steps.
+                let bucket = Int((log2(Double(max(1, link.rttP99Microseconds))) * 4).rounded(.up))
+                return "\(link.from)>\(link.to) \(link.interfaceType) \(bucket) \(link.fresh)"
+            }
+        }
+    }
+
+    static func heartbeat(groupEpoch: UInt64, providerID: String, chain: [ShardBenchHello], members: [Bool], links: [LinkReport]) throws -> Data {
+        let memberValues = chain.indices.map { index -> RFC8785JCS.Value in
             .object([
                 "member_device_id": .string(index == 0 ? providerID : chain[index].memberDeviceID ?? ""),
-                "healthy": .bool(healthy),
+                "healthy": .bool(members.indices.contains(index) && members[index]),
+            ])
+        }
+        let linkValues = links.map { link -> RFC8785JCS.Value in
+            .object([
+                "from_member_device_id": .string(link.from), "to_member_device_id": .string(link.to),
+                "interface_type": .string(link.interfaceType), "rtt_p99_us": .int(link.rttP99Microseconds),
             ])
         }
         return try message(.object([
@@ -218,8 +283,8 @@ enum ShardGroupWire {
             "version": .int(version),
             "group_provider_id": .string(providerID),
             "group_epoch": .int(Int(groupEpoch)),
-            "members": .array(members),
-            "links": .array(links(chain: chain, providerID: providerID)),
+            "members": .array(memberValues),
+            "links": .array(linkValues),
         ]))
     }
 
@@ -301,9 +366,14 @@ struct ShardCoordinatorContext: Sendable {
 protocol ShardGroupCoordinatorParticipant: Actor {
     nonisolated var shardCapability: String { get }
     /// Messages to send now, JSON encoded: called when a session is accepted
-    /// (`sessionStarted`) and on every heartbeat tick.
+    /// (`sessionStarted`), on every heartbeat tick, and when the participant's
+    /// change handler asks for it.
     func shardCoordinatorMessages(context: ShardCoordinatorContext, sessionStarted: Bool) async -> [Data]
     func handleShardCoordinatorMessage(_ data: Data) async
+    /// The participant calls `handler` when what it would report changed (SPEC-051-R029:
+    /// the group heartbeat goes out immediately on a member health or link change),
+    /// at most once per `ShardGroupWire.minimumChangeInterval`.
+    func setShardChangeHandler(_ handler: (@Sendable () async -> Void)?) async
 }
 
 /// The head's registration inputs: its group config and the receipt key it signs with.
@@ -317,16 +387,22 @@ extension ShardGroupRuntime: ShardGroupCoordinatorParticipant {
 
     func shardCoordinatorMessages(context: ShardCoordinatorContext, sessionStarted: Bool) async -> [Data] {
         if sessionStarted { resetCoordinatorSession() }
-        guard let registration, let status = engineStatus, status.running, !status.chain.isEmpty else { return [] }
+        guard let registration, let status = engineStatus, !status.chain.isEmpty else { return [] }
         if let problem = registrationProblem(registration, context: context) {
             warnOnce(problem)
             return []
         }
         do {
             if acceptedEpoch == status.groupEpoch {
+                // A chain that went down still reports, with its members unhealthy, so
+                // the coordinator stops routing before the next reservation.
+                let view = healthView(status, providerID: context.providerID)
+                reportedHealth = view.signature
                 return [try ShardGroupWire.heartbeat(
-                    chain: status.chain, groupEpoch: status.groupEpoch, providerID: context.providerID, healthy: true)]
+                    groupEpoch: status.groupEpoch, providerID: context.providerID, chain: status.chain,
+                    members: view.members, links: view.links)]
             }
+            guard status.running else { return [] }
             let now = Date()
             if registerSent?.epoch == status.groupEpoch, let at = registerSent?.at, now.timeIntervalSince(at) < 15 { return [] }
             let record = try ShardGroupWire.record(
@@ -341,6 +417,24 @@ extension ShardGroupRuntime: ShardGroupCoordinatorParticipant {
             warnOnce("group message not built: \(error)")
             return []
         }
+    }
+
+    func setShardChangeHandler(_ handler: (@Sendable () async -> Void)?) async {
+        changeHandler = handler
+        startChangeMonitor()
+    }
+
+    /// The members and links the next heartbeat reports, and their signature.
+    func healthView(_ status: ShardGroupEngineStatus, providerID: String) -> (members: [Bool], links: [ShardGroupWire.LinkReport], signature: ShardGroupWire.HealthSignature) {
+        let supervision = registration?.config.supervision ?? .defaults
+        // A relayed report crosses one hop per heartbeat interval.
+        let staleAfter = max(1, Double(supervision.heartbeatIntervalMilliseconds) / 1000
+            * Double(supervision.heartbeatMissLimit + status.chain.count))
+        let links = ShardGroupWire.linkReports(
+            chain: status.chain, providerID: providerID, health: status.links,
+            now: Double(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) / 1e9, staleAfter: staleAfter)
+        let members = ShardGroupWire.memberHealth(chainCount: status.chain.count, running: status.running, links: links)
+        return (members, links, ShardGroupWire.HealthSignature(epoch: status.groupEpoch, members: members, links: links))
     }
 
     func handleShardCoordinatorMessage(_ data: Data) async {
@@ -385,6 +479,11 @@ extension ShardGroupRuntime: ShardGroupCoordinatorParticipant {
 
 extension ShardMemberRuntime: ShardGroupCoordinatorParticipant {
     nonisolated var shardCapability: String { ShardGroupWire.memberCapability }
+
+    func setShardChangeHandler(_ handler: (@Sendable () async -> Void)?) async {
+        changeHandler = handler
+        startChangeMonitor()
+    }
 
     func shardCoordinatorMessages(context: ShardCoordinatorContext, sessionStarted: Bool) async -> [Data] {
         if sessionStarted { helloState = .notSent }

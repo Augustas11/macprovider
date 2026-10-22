@@ -113,6 +113,8 @@ public enum ShardFrameError: Error, Equatable, Sendable {
     case sequenceReplay(expected: UInt64, actual: UInt64)
     /// SPEC-051-R011: the frame's HMAC-SHA256 tag does not verify.
     case authenticationFailed
+    /// A heartbeat payload that is neither empty nor a valid `ShardHeartbeatPayload`.
+    case malformedHeartbeat
 }
 
 public struct ShardStageFrameHeader: Equatable, Sendable {

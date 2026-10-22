@@ -285,6 +285,9 @@ actor ShardMemberRuntime: ModelRuntimeServing {
     let server: any ShardMemberServerHandle
     private var providerStatus: ProviderStatus?
     var helloState = ShardMemberHelloState.notSent
+    var changeHandler: (@Sendable () async -> Void)?
+    private var changeMonitor: Task<Void, Never>?
+    private var lastChangeSent: TimeInterval = 0
 
     nonisolated var isSettlementReceiptEligible: Bool { false }
     nonisolated var settlementRuntimeSource: String? { nil }
@@ -299,7 +302,32 @@ actor ShardMemberRuntime: ModelRuntimeServing {
     var memberStatus: ShardMemberStatus { server.status }
 
     func stop() {
+        changeMonitor?.cancel()
+        changeMonitor = nil
         server.stop()
+    }
+
+    /// While a change handler is installed, send the member hello as soon as the
+    /// member joined a chain instead of at the next heartbeat tick.
+    func startChangeMonitor() {
+        changeMonitor?.cancel()
+        changeMonitor = nil
+        guard changeHandler != nil else { return }
+        changeMonitor = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(ShardGroupWire.changePollInterval * 1e9))
+                guard let self, !Task.isCancelled else { return }
+                await self.reportChangeIfDue()
+            }
+        }
+    }
+
+    func reportChangeIfDue() async {
+        guard let handler = changeHandler, helloState == .notSent, server.status.upstreamPeer != nil else { return }
+        let now = Double(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) / 1e9
+        guard now - lastChangeSent >= ShardGroupWire.minimumChangeInterval else { return }
+        lastChangeSent = now
+        await handler()
     }
 
     var loadedModelHash: String? { identity.modelHash }

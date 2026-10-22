@@ -100,6 +100,50 @@ final class ShardGroupEngineTests: XCTestCase {
         XCTAssertEqual(try rig.tailResult().get().stage?.sequencesServed, 3)
     }
 
+    func testMembersRelayTheirLinkRoundTripsToTheHead() throws {
+        // A three-stage ring: the head times its own two links; the middle-to-tail
+        // link only the tail can time, and its pings carry that to the head.
+        let links = try ShardBenchTestRig.ring(stages: 3)
+        let stages = ShardBenchTestRig.stages([0..<1, 1..<3, 3..<4], total: 4)
+        let group = DispatchGroup()
+        for index in 1...2 {
+            let session = ShardBenchSession(
+                options: ShardBenchTestRig.options(role: index == 2 ? .tail : .middle, prompts: [], tokens: 1), stage: stages[index])
+            let stageLinks = links[index]
+            group.enter()
+            Thread {
+                _ = try? session.run(links: stageLinks)
+                group.leave()
+            }.start()
+        }
+        var options = Self.options()
+        options.expectedStages = 3
+        let engine = ShardGroupEngine(stage: stages[0], options: options)
+        try engine.start(links: links[0])
+        let deadline = Date().addingTimeInterval(5)
+        var health = engine.status.links
+        while Date() < deadline, health?.reported(from: 1, to: 2) == nil || (health?.upstream?.samples ?? 0) < 3 || (health?.downstream.samples ?? 0) < 3 {
+            Thread.sleep(forTimeInterval: 0.05)
+            health = engine.status.links
+        }
+        let measured = try XCTUnwrap(health)
+        XCTAssertGreaterThanOrEqual(measured.downstream.samples, 3)
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(measured.upstream).samples, 3)
+        let relayed = try XCTUnwrap(measured.reported(from: 1, to: 2))
+        XCTAssertGreaterThan(relayed.health.samples, 0)
+        XCTAssertNotNil(measured.reported(from: 0, to: 1), "stage 1's own measurement of the head link travels too")
+        let reports = ShardGroupWire.linkReports(
+            chain: engine.chain, providerID: "head-device", health: measured,
+            now: Double(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) / 1e9, staleAfter: 1)
+        XCTAssertEqual(reports.count, 3)
+        XCTAssertEqual(reports[1].rttP99Microseconds, Int(relayed.health.rttP99Microseconds))
+        XCTAssertEqual(reports[0].rttP99Microseconds, measured.downstream.p99Microseconds)
+        XCTAssertTrue(reports.allSatisfy(\.fresh))
+        XCTAssertTrue(reports.allSatisfy { $0.rttP99Microseconds > 0 && $0.rttP99Microseconds < 50_000 })
+        try engine.shutdown()
+        _ = group.wait(timeout: .now() + 5)
+    }
+
     func testSamplingParametersTravelToTheLastStage() async throws {
         let rig = try rig()
         let control = ShardRequestControl(temperature: 0.7, topP: 0.9, seed: 51)

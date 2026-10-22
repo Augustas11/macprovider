@@ -144,6 +144,24 @@ public final class ShardStageLink: @unchecked Sendable {
     private var receiveAuthenticator: ShardFrameAuthenticator?
     private var protectionReady: Bool
     private var authenticatedPeer: ShardLinkPeer?
+    // Heartbeat round trips (SPEC-051-R007): every heartbeat is a ping the peer
+    // echoes; guarded by stateLock.
+    private var roundTrips = ShardRoundTripWindow()
+    private var pendingPings = [UInt64: TimeInterval]()
+    private var nextPingNonce: UInt64 = 0
+    private var peerLinks = [ShardLinkHealth]()
+    private var peerLinksAt: TimeInterval?
+    private var heartbeatReport: (@Sendable () -> [ShardLinkHealth])?
+
+    // The reader thread drains the socket from the moment the link may receive (at
+    // open on a crc32c link, after the key agreement on an hmac-sha256 link): it
+    // answers pings at once, so a round trip never includes the owner's compute,
+    // and queues every other frame for `receive`.
+    private let inbox = NSCondition()
+    private var inboxFrames = [ShardStageFrame]()
+    private var inboxBytes = 0
+    private var readerFailure: Error?
+    private var readerStarted = false
 
     public static func connect(
         host: String,
@@ -235,10 +253,14 @@ public final class ShardStageLink: @unchecked Sendable {
         var timeout = ShardSocketAddress.timeval(configuration.sendTimeout)
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
         startHeartbeats()
+        if protectionReady { startReader() }
     }
 
     deinit {
         close()
+        // The descriptor is released only here, once no thread can still use it, so
+        // a reused descriptor number never reaches this link's reader.
+        Darwin.close(fd)
     }
 
     public var statistics: ShardLinkStatistics {
@@ -297,41 +319,67 @@ public final class ShardStageLink: @unchecked Sendable {
         defer { receiveLock.unlock() }
         let deadline = ShardSocketAddress.now() + timeout
         let waitStart = ShardSocketAddress.now()
-        while true {
-            // Frame bytes stay in `pending` until the whole frame is present, so a
-            // receive that times out mid-frame leaves the stream aligned for the next one.
-            try fill(upTo: ShardStageFrameCodec.fixedHeaderSize, deadline: deadline, waitStart: waitStart)
-            stateLock.lock()
-            let ready = protectionReady
-            let authenticator = receiveAuthenticator
-            stateLock.unlock()
-            let total: Int
-            do {
-                total = try ShardStageFrameCodec.frameLength(
-                    fixedHeader: pending.prefix(ShardStageFrameCodec.fixedHeaderSize), limits: configuration.limits)
-                    + (authenticator == nil ? 0 : ShardFrameAuthenticator.tagSize)
-            } catch let error as ShardFrameError {
-                throw ShardLinkError.frame(error)
+        stateLock.lock()
+        let started = readerStarted
+        stateLock.unlock()
+        guard started else {
+            // Before the reader runs (an hmac-sha256 link's key agreement) read here.
+            while true {
+                let frame = try readFrame(deadline: deadline, waitStart: waitStart, checkLiveness: true)
+                if frame.header.kind != .heartbeat { return frame }
+                try handleHeartbeat(frame)
             }
-            try fill(upTo: total, deadline: deadline, waitStart: waitStart)
-            let whole = Data(pending.prefix(total))
-            pending.removeFirst(total)
-            let frame: ShardStageFrame
-            do {
-                frame = try ShardStageFrameCodec.decode(try authenticator?.open(whole) ?? whole, limits: configuration.limits)
-                try receiveState.accept(frame.header)
-            } catch let error as ShardFrameError {
-                throw ShardLinkError.frame(error)
-            }
-            // Before the keys are in place only the key agreement may arrive.
-            guard ready || frame.header.kind == .keyExchange else { throw ShardLinkError.protectionNotEstablished }
-            stateLock.lock()
-            stats.framesReceived += 1
-            stats.bytesReceived += UInt64(whole.count)
-            if frame.header.kind == .heartbeat { stats.heartbeatsReceived += 1 }
-            stateLock.unlock()
-            if frame.header.kind != .heartbeat { return frame }
         }
+        let window = configuration.livenessWindow
+        let slice = max(0.005, configuration.heartbeatInterval / 2)
+        inbox.lock()
+        defer { inbox.unlock() }
+        while true {
+            if !inboxFrames.isEmpty {
+                let frame = inboxFrames.removeFirst()
+                inboxBytes -= frame.payload.count
+                inbox.broadcast()
+                return frame
+            }
+            let now = ShardSocketAddress.now()
+            stateLock.lock()
+            let heard = max(lastHeard, waitStart)
+            let closed = isClosed
+            let armed = livenessArmed
+            stateLock.unlock()
+            if closed { throw ShardLinkError.closed }
+            if let readerFailure { throw readerFailure }
+            if armed, now - heard > window {
+                throw ShardLinkError.peerDead(silentMilliseconds: Int((now - heard) * 1000))
+            }
+            if now >= deadline { throw ShardLinkError.receiveTimedOut }
+            let wait = armed ? min(slice, deadline - now, window - (now - heard)) : min(slice, deadline - now)
+            _ = inbox.wait(until: Date(timeIntervalSinceNow: max(0.001, wait)))
+        }
+    }
+
+    /// The link's heartbeat round trips and what the peer's latest ping reported.
+    public var roundTrip: ShardLinkRoundTrip {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return ShardLinkRoundTrip(
+            samples: roundTrips.count, p99Seconds: roundTrips.p99Seconds, peerLinks: peerLinks, peerLinksAt: peerLinksAt)
+    }
+
+    /// This link's sliding p99 as a ping entry for `from` -> `to`; nil before the
+    /// first echo.
+    public func roundTripHealth(from: UInt16, to: UInt16) -> ShardLinkHealth? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return roundTrips.health(from: from, to: to)
+    }
+
+    /// Link entries every later ping carries (a member relays what it knows down
+    /// the chain toward the head). Evaluated on the heartbeat thread.
+    public func setHeartbeatReport(_ report: (@Sendable () -> [ShardLinkHealth])?) {
+        stateLock.lock()
+        heartbeatReport = report
+        stateLock.unlock()
     }
 
     /// SPEC-051-R011 key agreement on an `hmac-sha256` link, run by both ends right
@@ -382,13 +430,15 @@ public final class ShardStageLink: @unchecked Sendable {
             authenticatedPeer = peer
             protectionReady = true
             stateLock.unlock()
+            startReader()
             return peer
         } catch let failure as ShardLinkHandshake.Failure {
             throw ShardLinkError.keyAgreement(failure.description)
         }
     }
 
-    /// Stop the heartbeat thread and close the socket. Idempotent.
+    /// Stop the heartbeat timer and shut the socket down (the peer reads EOF, a
+    /// blocked `receive` throws `closed`, the reader exits). Idempotent.
     public func close() {
         stateLock.lock()
         let wasClosed = isClosed
@@ -399,7 +449,9 @@ public final class ShardStageLink: @unchecked Sendable {
         guard !wasClosed else { return }
         timer?.cancel()
         Darwin.shutdown(fd, SHUT_RDWR)
-        Darwin.close(fd)
+        inbox.lock()
+        inbox.broadcast()
+        inbox.unlock()
     }
 
     /// Turn on peer-dead detection. Silence before this call never counts.
@@ -441,17 +493,137 @@ public final class ShardStageLink: @unchecked Sendable {
             guard let self else { return }
             self.stateLock.lock()
             let skip = self.isClosed || self.heartbeatsPaused || !self.protectionReady
+            let report = self.heartbeatReport
+            let nonce = self.nextPingNonce
+            self.nextPingNonce &+= 1
             self.stateLock.unlock()
             if skip { return }
+            let payload = ShardHeartbeatPayload(kind: .ping, nonce: nonce, links: report?() ?? []).encode()
+            self.stateLock.lock()
+            self.pendingPings[nonce] = ShardSocketAddress.now()
+            // An echo that never came back is forgotten after 64 pings.
+            if nonce >= 64 { self.pendingPings = self.pendingPings.filter { $0.key > nonce - 64 } }
+            self.stateLock.unlock()
             // A failed heartbeat surfaces on the next caller send/receive; the timer
             // never traps or retries on its own.
-            _ = try? self.send(ShardStageFrame(header: ShardStageFrameHeader(
-                kind: .heartbeat, groupEpoch: self.configuration.groupEpoch)))
+            _ = try? self.send(ShardStageFrame(
+                header: ShardStageFrameHeader(kind: .heartbeat, groupEpoch: self.configuration.groupEpoch), payload: payload))
         }
         stateLock.lock()
         heartbeatTimer = timer
         stateLock.unlock()
         timer.resume()
+    }
+
+    /// Read and decode the next frame, heartbeats included.
+    private func readFrame(deadline: TimeInterval, waitStart: TimeInterval, checkLiveness: Bool) throws -> ShardStageFrame {
+        // Frame bytes stay in `pending` until the whole frame is present, so a read
+        // that times out mid-frame leaves the stream aligned for the next one.
+        try fill(upTo: ShardStageFrameCodec.fixedHeaderSize, deadline: deadline, waitStart: waitStart, checkLiveness: checkLiveness)
+        stateLock.lock()
+        let ready = protectionReady
+        let authenticator = receiveAuthenticator
+        stateLock.unlock()
+        let total: Int
+        do {
+            total = try ShardStageFrameCodec.frameLength(
+                fixedHeader: pending.prefix(ShardStageFrameCodec.fixedHeaderSize), limits: configuration.limits)
+                + (authenticator == nil ? 0 : ShardFrameAuthenticator.tagSize)
+        } catch let error as ShardFrameError {
+            throw ShardLinkError.frame(error)
+        }
+        try fill(upTo: total, deadline: deadline, waitStart: waitStart, checkLiveness: checkLiveness)
+        let whole = Data(pending.prefix(total))
+        pending.removeFirst(total)
+        let frame: ShardStageFrame
+        do {
+            frame = try ShardStageFrameCodec.decode(try authenticator?.open(whole) ?? whole, limits: configuration.limits)
+            try receiveState.accept(frame.header)
+        } catch let error as ShardFrameError {
+            throw ShardLinkError.frame(error)
+        }
+        // Before the keys are in place only the key agreement may arrive.
+        guard ready || frame.header.kind == .keyExchange else { throw ShardLinkError.protectionNotEstablished }
+        stateLock.lock()
+        stats.framesReceived += 1
+        stats.bytesReceived += UInt64(whole.count)
+        if frame.header.kind == .heartbeat { stats.heartbeatsReceived += 1 }
+        stateLock.unlock()
+        return frame
+    }
+
+    /// Answer a ping at once and remember what it reported; time an echo.
+    private func handleHeartbeat(_ frame: ShardStageFrame) throws {
+        guard !frame.payload.isEmpty else { return }
+        let payload: ShardHeartbeatPayload
+        do {
+            payload = try ShardHeartbeatPayload.decode(frame.payload)
+        } catch let error as ShardFrameError {
+            throw ShardLinkError.frame(error)
+        }
+        let now = ShardSocketAddress.now()
+        switch payload.kind {
+        case .ping:
+            stateLock.lock()
+            peerLinks = payload.links
+            peerLinksAt = now
+            let paused = heartbeatsPaused
+            stateLock.unlock()
+            guard !paused else { return }
+            _ = try? send(ShardStageFrame(
+                header: ShardStageFrameHeader(kind: .heartbeat, groupEpoch: configuration.groupEpoch),
+                payload: ShardHeartbeatPayload(kind: .echo, nonce: payload.nonce).encode()))
+        case .echo:
+            stateLock.lock()
+            if let sent = pendingPings.removeValue(forKey: payload.nonce) { roundTrips.add(now - sent) }
+            stateLock.unlock()
+        }
+    }
+
+    private func startReader() {
+        stateLock.lock()
+        let started = readerStarted
+        readerStarted = true
+        stateLock.unlock()
+        guard !started else { return }
+        // The thread holds the link only for one bounded read at a time, so a link
+        // nobody references any more is still released.
+        let thread = Thread { [weak self] in
+            while let link = self, link.readOnce() {}
+        }
+        thread.name = "macprovider.shard-link.reader"
+        thread.start()
+    }
+
+    /// One bounded read; false when the reader is done (the link failed or closed).
+    private func readOnce() -> Bool {
+        // A backlog the owner has not taken yet holds further reads back (TCP pushes back on the peer).
+        let cap = 2 * configuration.limits.payloadCap
+        inbox.lock()
+        while inboxBytes > cap, !closedFlag { _ = inbox.wait(until: Date(timeIntervalSinceNow: 0.05)) }
+        inbox.unlock()
+        let now = ShardSocketAddress.now()
+        do {
+            let frame = try readFrame(deadline: now + 0.25, waitStart: now, checkLiveness: false)
+            if frame.header.kind == .heartbeat {
+                try handleHeartbeat(frame)
+                return true
+            }
+            inbox.lock()
+            inboxFrames.append(frame)
+            inboxBytes += frame.payload.count
+            inbox.broadcast()
+            inbox.unlock()
+            return true
+        } catch ShardLinkError.receiveTimedOut {
+            return true
+        } catch {
+            inbox.lock()
+            if readerFailure == nil { readerFailure = closedFlag ? ShardLinkError.closed : error }
+            inbox.broadcast()
+            inbox.unlock()
+            return false
+        }
     }
 
     private func writeAll(_ data: Data) throws {
@@ -476,7 +648,7 @@ public final class ShardStageLink: @unchecked Sendable {
 
     /// Read from the socket until `pending` holds at least `count` bytes. Reads never
     /// ask for more than the missing bytes, so `pending` stays within one frame.
-    private func fill(upTo count: Int, deadline: TimeInterval, waitStart: TimeInterval) throws {
+    private func fill(upTo count: Int, deadline: TimeInterval, waitStart: TimeInterval, checkLiveness: Bool) throws {
         let window = configuration.livenessWindow
         // Poll in slices no longer than half a heartbeat so liveness is re-checked promptly.
         let slice = max(0.005, configuration.heartbeatInterval / 2)
@@ -486,7 +658,7 @@ public final class ShardStageLink: @unchecked Sendable {
             stateLock.lock()
             let heard = max(lastHeard, waitStart)
             let closed = isClosed
-            let armed = livenessArmed
+            let armed = livenessArmed && checkLiveness
             stateLock.unlock()
             if closed { throw ShardLinkError.closed }
             if armed, now - heard > window {

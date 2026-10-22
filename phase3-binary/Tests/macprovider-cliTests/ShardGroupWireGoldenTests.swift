@@ -37,7 +37,10 @@ final class ShardGroupWireGoldenTests: XCTestCase {
             config: config, chain: chain, groupEpoch: epoch, providerID: "prov-head", wireModelID: "mlx-community/Llama-3.2-3B-Instruct-4bit",
             poolModelID: "pool/ijUnc-ZQf-LJeRvkhi-0iQ/llama-3b", artifactHashAlgorithm: ModelArtifactIdentity.snapshotManifestV1, artifactHash: artifactHash)
         let register = try ShardGroupWire.register(record: record, key: headKey)
-        let heartbeat = try ShardGroupWire.heartbeat(chain: chain, groupEpoch: epoch, providerID: "prov-head", healthy: true)
+        let links = ShardGroupWire.linkReports(chain: chain, providerID: "prov-head", health: nil, now: 0, staleAfter: 1)
+        let heartbeat = try ShardGroupWire.heartbeat(
+            groupEpoch: epoch, providerID: "prov-head", chain: chain,
+            members: ShardGroupWire.memberHealth(chainCount: chain.count, running: true, links: links), links: links)
         let hello = try XCTUnwrap(try ShardGroupWire.memberHello(
             config: ShardMemberConfig(groupProviderID: "prov-head", groupEpoch: epoch, stageIndex: 1, layerStart: 14, layerEnd: 28, listen: "0.0.0.0:7101"),
             status: ShardMemberStatus(

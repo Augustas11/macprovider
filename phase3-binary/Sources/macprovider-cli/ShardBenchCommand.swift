@@ -1556,6 +1556,7 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
         upstreamProbe: ShardBenchLatency,
         returnProbe: ShardBenchLatency?
     ) throws -> ShardBenchStageReport {
+        relayLinkHealth(links)
         var caches = [UInt64: Stage.Cache]()
         var samplers = [UInt64: Stage.Sampler]()
         /// The request id each request's control named for sub-receipts.
@@ -1690,6 +1691,21 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
             prefillCompute: ShardBenchLatency(seconds: prefillCompute),
             links: linkReports
         )
+    }
+
+    /// SPEC-051-R007: the head cannot time links it does not touch, so each member
+    /// pings downstream with what its upstream neighbour reported plus its own
+    /// measurement of its upstream link; the tail's pings bring every link to the head.
+    private func relayLinkHealth(_ links: ShardBenchLinks) {
+        let upstream = links.upstream
+        let from = UInt16(stageIndex - 1)
+        let to = UInt16(stageIndex)
+        links.downstream.setHeartbeatReport { [weak upstream] in
+            guard let upstream else { return [] }
+            var entries = upstream.roundTrip.peerLinks.filter { !($0.fromStage == from && $0.toStage == to) }
+            if let mine = upstream.roundTripHealth(from: from, to: to) { entries.append(mine) }
+            return entries
+        }
     }
 
     private func now() -> TimeInterval {

@@ -19,7 +19,9 @@ final class ShardGroupWireTests: XCTestCase {
     }
 
     /// A head runtime over fake stages whose tail signs as mac-b.
-    private func runtime(registration: Bool = true, poolModelID: String? = "pool/ijUnc-ZQf-LJeRvkhi-0iQ/llama-3b") async throws -> ShardGroupRuntime {
+    private func runtime(
+        registration: Bool = true, poolModelID: String? = "pool/ijUnc-ZQf-LJeRvkhi-0iQ/llama-3b", tailLinks: ShardTestLinksBox? = nil
+    ) async throws -> ShardGroupRuntime {
         let headSigner = ShardMemberSigner(memberDeviceID: "prov-head", key: headKey)
         let tailSigner = ShardMemberSigner(memberDeviceID: "mac-b", key: tailKey)
         let tail = FakeShardStage(layers: 2..<4, totalLayers: 4)
@@ -35,6 +37,7 @@ final class ShardGroupWireTests: XCTestCase {
             registration: registration ? ShardGroupRegistration(config: headConfig(poolModelID: poolModelID), signer: headSigner) : nil,
             connect: {
                 let links = try ShardBenchTestRig.ring(stages: 2, collapsed: true)
+                tailLinks?.links = links[1]
                 var tailOptions = ShardBenchTestRig.options(role: .tail, prompts: [], tokens: 1)
                 tailOptions.signer = tailSigner
                 tailOptions.upstreamInterface = ShardLinkInterface.thunderbolt
@@ -241,6 +244,109 @@ final class ShardGroupWireTests: XCTestCase {
         await runtime.stop()
     }
 
+    // MARK: Continuous link health
+
+    private func hello(_ role: ShardBenchRole, _ layers: Range<Int>, member: String, probeMicroseconds: Double) -> ShardBenchHello {
+        ShardBenchHello(
+            role: role, modelType: "fake", totalLayers: 6, hiddenSize: 4, layerStart: layers.lowerBound, layerEnd: layers.upperBound,
+            upstreamProbe: role == .head ? nil : ShardBenchLatency(seconds: [probeMicroseconds / 1e6]), memberDeviceID: member,
+            upstreamInterface: role == .head ? nil : ShardLinkInterface.ethernet,
+            returnInterface: role == .tail ? ShardLinkInterface.ethernet : nil)
+    }
+
+    func testHeartbeatLinksUseLiveRoundTripsAndRelayedMemberReports() {
+        var chain = [
+            hello(.head, 0..<2, member: "prov-head", probeMicroseconds: 0),
+            hello(.middle, 2..<4, member: "mac-b", probeMicroseconds: 900),
+            hello(.tail, 4..<6, member: "mac-c", probeMicroseconds: 800),
+        ]
+        chain[2].returnProbe = ShardBenchLatency(seconds: [700e-6])
+        // Before any echo: the handshake probes.
+        let probes = ShardGroupWire.linkReports(chain: chain, providerID: "prov-head", health: nil, now: 0, staleAfter: 1)
+        XCTAssertEqual(probes.map(\.rttP99Microseconds), [900, 800, 700])
+        XCTAssertEqual(probes.map { "\($0.from)>\($0.to)" }, ["prov-head>mac-b", "mac-b>mac-c", "mac-c>prov-head"])
+
+        var downstream = ShardRoundTripWindow()
+        downstream.add(310e-6)
+        var back = ShardRoundTripWindow()
+        back.add(420e-6)
+        let relayed = [ShardLinkHealth(fromStage: 0, toStage: 1, rttP99Microseconds: 333, samples: 10),
+                       ShardLinkHealth(fromStage: 1, toStage: 2, rttP99Microseconds: 1500, samples: 10)]
+        let health = ShardGroupLinkHealth(
+            downstream: ShardLinkRoundTrip(samples: 1, p99Seconds: downstream.p99Seconds, peerLinks: [], peerLinksAt: nil),
+            upstream: ShardLinkRoundTrip(samples: 1, p99Seconds: back.p99Seconds, peerLinks: relayed, peerLinksAt: 100))
+        let live = ShardGroupWire.linkReports(chain: chain, providerID: "prov-head", health: health, now: 100.5, staleAfter: 1)
+        XCTAssertEqual(live.map(\.rttP99Microseconds), [310, 1500, 420], "the head's own links, the member's relayed one")
+        XCTAssertTrue(live.allSatisfy(\.fresh))
+        XCTAssertEqual(ShardGroupWire.memberHealth(chainCount: 3, running: true, links: live), [true, true, true])
+
+        // The middle stopped relaying: its downstream member goes unhealthy, and that is a change.
+        let stale = ShardGroupWire.linkReports(chain: chain, providerID: "prov-head", health: health, now: 105, staleAfter: 1)
+        XCTAssertEqual(stale.map(\.fresh), [true, false, true])
+        XCTAssertEqual(ShardGroupWire.memberHealth(chainCount: 3, running: true, links: stale), [true, true, false])
+        XCTAssertEqual(ShardGroupWire.memberHealth(chainCount: 3, running: false, links: live), [false, false, false])
+        let freshSignature = ShardGroupWire.HealthSignature(
+            epoch: 3, members: ShardGroupWire.memberHealth(chainCount: 3, running: true, links: live), links: live)
+        XCTAssertNotEqual(freshSignature, ShardGroupWire.HealthSignature(
+            epoch: 3, members: ShardGroupWire.memberHealth(chainCount: 3, running: true, links: stale), links: stale))
+        // Jitter inside one quarter octave is not a change; a 1.5x jump is.
+        var jitter = health
+        jitter.downstream.p99Seconds = 320e-6
+        var jump = health
+        jump.downstream.p99Seconds = 470e-6
+        func signature(_ h: ShardGroupLinkHealth) -> ShardGroupWire.HealthSignature {
+            let links = ShardGroupWire.linkReports(chain: chain, providerID: "prov-head", health: h, now: 100.5, staleAfter: 1)
+            return ShardGroupWire.HealthSignature(epoch: 3, members: [true, true, true], links: links)
+        }
+        XCTAssertEqual(signature(jitter), signature(health))
+        XCTAssertNotEqual(signature(jump), signature(health))
+    }
+
+    func testAChainFailureIsReportedAtOnceWithinTheRateBound() async throws {
+        let tailLinks = ShardTestLinksBox()
+        let runtime = try await runtime(tailLinks: tailLinks)
+        let context = ShardCoordinatorContext(providerID: "prov-head", wireModelID: "wire/model")
+        _ = await runtime.shardCoordinatorMessages(context: context, sessionStarted: true)
+        await runtime.handleShardCoordinatorMessage(try JSONSerialization.data(withJSONObject: [
+            "type": "shard_group_register_result", "version": 1, "group_provider_id": "prov-head",
+            "group_epoch": Int(ShardBenchTestRig.epoch), "accepted": true, "reason": "",
+        ]))
+        let sent = ShardTestMessageLog()
+        await runtime.setShardChangeHandler {
+            sent.append(await runtime.shardCoordinatorMessages(context: context, sessionStarted: false))
+        }
+        // The first heartbeat reports the healthy chain; until something changes the
+        // monitor sends nothing more.
+        _ = await runtime.shardCoordinatorMessages(context: context, sessionStarted: false)
+        let quietStart = sent.count
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertLessThanOrEqual(sent.count - quietStart, 1, "at most a round-trip bucket change while idle")
+
+        // The tail goes away: the head reports both members unhealthy without waiting for a tick.
+        let failedAt = Date()
+        tailLinks.links?.close()
+        var unhealthy: [String: Any]?
+        while unhealthy == nil, Date().timeIntervalSince(failedAt) < 5 {
+            try await Task.sleep(nanoseconds: 20_000_000)
+            unhealthy = try sent.all.reversed().compactMap { try object($0) }.first {
+                ($0["members"] as? [[String: Any]])?.contains { $0["healthy"] as? Bool == false } == true
+            }
+        }
+        let report = try XCTUnwrap(unhealthy, "no change-triggered heartbeat after the chain failed")
+        XCTAssertLessThan(Date().timeIntervalSince(failedAt), 2)
+        XCTAssertEqual((report["members"] as? [[String: Any]])?.map { $0["healthy"] as? Bool }, [false, false])
+        XCTAssertEqual(report["type"] as? String, "shard_group_heartbeat")
+
+        // Rate bound: two checks within the minimum interval send at most once.
+        let before = sent.count
+        await runtime.reportChangeIfDue()
+        await runtime.reportChangeIfDue()
+        XCTAssertLessThanOrEqual(sent.count - before, 1)
+        XCTAssertGreaterThanOrEqual(ShardGroupWire.minimumChangeInterval, 0.25)
+        await runtime.setShardChangeHandler(nil)
+        await runtime.stop()
+    }
+
     // MARK: Member hello
 
     func testMemberHelloNamesItsStageArtifactAndOneLinkPerPeer() throws {
@@ -290,4 +396,27 @@ final class ShardGroupWireTests: XCTestCase {
         let other = InferenceRelay.errorEndFrame(requestID: "r", error: ShardMemberRuntime.notRoutable, chunksSent: 0)
         XCTAssertEqual(other["status"] as? String, "error_internal", "a member's refusal is an ordinary provider error")
     }
+}
+
+final class ShardTestLinksBox: @unchecked Sendable {
+    var links: ShardBenchLinks?
+}
+
+final class ShardTestMessageLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var messages = [Data]()
+
+    func append(_ batch: [Data]) {
+        lock.lock()
+        messages.append(contentsOf: batch)
+        lock.unlock()
+    }
+
+    var all: [Data] {
+        lock.lock()
+        defer { lock.unlock() }
+        return messages
+    }
+
+    var count: Int { all.count }
 }

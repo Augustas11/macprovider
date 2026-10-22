@@ -298,6 +298,26 @@ enum ShardChainWire {
     }
 }
 
+/// The head's live view of its links (SPEC-051-R007, R015): the round trips it
+/// measures on its own links and the link reports members relay down the chain.
+struct ShardGroupLinkHealth: Sendable, Equatable {
+    /// Head to stage 1.
+    var downstream: ShardLinkRoundTrip
+    /// Last stage to the head when that is a separate link; nil when one link
+    /// carries both directions.
+    var upstream: ShardLinkRoundTrip?
+
+    /// The relayed report of the link `from` -> `to` (stages >= 1) and when it last
+    /// arrived; the tail's pings carry the chain's reports to the head.
+    func reported(from: Int, to: Int) -> (health: ShardLinkHealth, at: TimeInterval)? {
+        let carrier = upstream ?? downstream
+        guard let at = carrier.peerLinksAt,
+              let health = carrier.peerLinks.last(where: { Int($0.fromStage) == from && Int($0.toStage) == to })
+        else { return nil }
+        return (health, at)
+    }
+}
+
 /// What the runtime and the coordinator heartbeat read about a running engine.
 struct ShardGroupEngineStatus: Sendable {
     var running: Bool
@@ -307,6 +327,8 @@ struct ShardGroupEngineStatus: Sendable {
     var queued: Int
     var replays: Int
     var failure: String?
+    /// nil before the chain is up.
+    var links: ShardGroupLinkHealth? = nil
 }
 
 final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
@@ -428,6 +450,7 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
         published.running = true
         published.chain = chainValue
         lock.unlock()
+        publish()
         stopped.enter()
         let thread = Thread { [self] in loop() }
         thread.name = "shard-group-engine"
@@ -1018,11 +1041,16 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
     }
 
     private func publish() {
+        let health = links.map { links in
+            ShardGroupLinkHealth(
+                downstream: links.downstream.roundTrip, upstream: links.isCollapsed ? nil : links.upstream.roundTrip)
+        }
         lock.lock()
         published.groupEpoch = groupEpoch
         published.chain = chainValue
         published.inFlight = active.count + awaiting.count
         published.replays = replayReports.count
+        published.links = health
         lock.unlock()
     }
 
