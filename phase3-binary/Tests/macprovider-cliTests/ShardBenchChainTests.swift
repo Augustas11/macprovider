@@ -135,12 +135,15 @@ enum ShardBenchTestRig {
         prefillChunkDeadline: TimeInterval = 3,
         epoch: UInt64 = ShardBenchTestRig.epoch,
         spare: ShardBenchEndpoint? = nil,
-        replayBufferBytes: Int = 1 << 20
+        replayBufferBytes: Int = 1 << 20,
+        listen: ShardBenchEndpoint? = nil,
+        connect: ShardBenchEndpoint? = nil,
+        connectTimeout: TimeInterval = 5
     ) -> ShardBenchSessionOptions {
         ShardBenchSessionOptions(
-            role: role, listen: nil, connect: nil, expectedStages: expectedStages, modelLabel: "fake",
+            role: role, listen: listen, connect: connect, expectedStages: expectedStages, modelLabel: "fake",
             prompts: prompts, tokens: tokens, temperature: 0, seed: 0, link: configuration(epoch: epoch),
-            receiveTimeout: 5, connectTimeout: 5, probeCount: probeCount, maxSequences: 8, warmup: true,
+            receiveTimeout: 5, connectTimeout: connectTimeout, probeCount: probeCount, maxSequences: 8, warmup: true,
             prefillChunk: prefillChunk, prefillChunkDeadline: prefillChunkDeadline, memberID: nil,
             spare: spare, replayBufferBytes: replayBufferBytes, replayDeadline: 5)
     }
@@ -381,6 +384,49 @@ final class ShardBenchChainTests: XCTestCase {
         XCTAssertEqual(head.headPrefillChunkCompute.count, 5)
         XCTAssertEqual(try results[1].get().stage?.prefillCompute.count, 8)
         XCTAssertEqual(try results[2].get().stage?.prefillCompute.count, 8)
+    }
+
+    /// The shape of the two-Mac chunked run: the head dials (`--connect`) before the
+    /// tail listens (`--listen`), one link, `--prefill-chunk 8`, 32 tokens, through the
+    /// same `run()` path the CLI uses, so link opening is covered too.
+    func testTwoStageChunkedRunOverDialedLinkProducesAHeadReport() throws {
+        let port = try ShardStageListener(host: "127.0.0.1", port: 0).port
+        let endpoint = ShardBenchEndpoint(host: "127.0.0.1", port: port)
+        let prompt = Array(1...30)
+        let splits = [0..<14, 14..<28]
+        let stages = ShardBenchTestRig.stages(splits, total: 28)
+        let head = ShardBenchSession(
+            options: ShardBenchTestRig.options(role: .head, prompts: [prompt], tokens: 32, prefillChunk: 8, connect: endpoint, connectTimeout: 20),
+            stage: stages[0])
+        let tail = ShardBenchSession(
+            options: ShardBenchTestRig.options(role: .tail, prompts: [prompt], tokens: 32, listen: endpoint, connectTimeout: 20),
+            stage: stages[1])
+        let results = ShardBenchResultBox(count: 2)
+        let group = DispatchGroup()
+        group.enter()
+        Thread {
+            results.set(0, Result { try head.run() })
+            group.leave()
+        }.start()
+        group.enter()
+        Thread {
+            Thread.sleep(forTimeInterval: 0.7)
+            results.set(1, Result { try tail.run() })
+            group.leave()
+        }.start()
+        XCTAssertEqual(group.wait(timeout: .now() + 30), .success)
+
+        let headReport = try XCTUnwrap(try results.all[0].get().head)
+        let tailReport = try XCTUnwrap(try results.all[1].get().stage)
+        XCTAssertEqual(headReport.sequenceTokens,
+                       try ShardBenchTestRig.reference(splits: splits, total: 28, prompts: [prompt], tokens: 32))
+        XCTAssertEqual(headReport.prefillChunksPerSequence, [4])
+        XCTAssertEqual(headReport.attestation.verdict, "ok")
+        XCTAssertEqual(headReport.links.map(\.name), ["downstream+return"])
+        // The tail served this head: same session id, warmup (3 decode steps) plus 31.
+        XCTAssertEqual(tailReport.session, headReport.session)
+        XCTAssertEqual(tailReport.decodeCompute.count, 34)
+        XCTAssertEqual(tailReport.prefillCompute.count, 8, "4 warmup chunks + 4 measured chunks")
     }
 
     func testPrefillChunkOverTheDeadlineFailsTheRun() throws {

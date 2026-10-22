@@ -133,9 +133,11 @@ public final class ShardStageLink: @unchecked Sendable {
         host: String,
         port: UInt16,
         timeout: TimeInterval,
-        configuration: ShardLinkConfiguration
+        configuration: ShardLinkConfiguration,
+        onRetry: ((_ attempt: Int, _ errno: Int32) -> Void)? = nil
     ) throws -> ShardStageLink {
         let address = try ShardSocketAddress.resolve(host: host, port: port)
+        var attempt = 0
         let deadline = ShardSocketAddress.now() + timeout
         // Retry until the deadline so a stage can start before its peer listens. Each
         // attempt is non-blocking and bounded, so a path that drops SYNs (a peer still
@@ -148,8 +150,10 @@ public final class ShardStageLink: @unchecked Sendable {
             switch attemptConnect(fd: fd, address: address, wait: max(0.01, min(2, remaining))) {
             case .connected:
                 return try ShardStageLink(connectedSocket: fd, configuration: configuration)
-            case .retry:
+            case .retry(let code):
                 Darwin.close(fd)
+                attempt += 1
+                onRetry?(attempt, code)
             case .failed(let code):
                 Darwin.close(fd)
                 throw ShardLinkError.socketFailed(operation: "connect", errno: code)
@@ -161,7 +165,8 @@ public final class ShardStageLink: @unchecked Sendable {
 
     private enum ConnectAttempt {
         case connected
-        case retry
+        /// Not connected yet; the errno of this attempt (ETIMEDOUT when it ran out of time).
+        case retry(Int32)
         case failed(Int32)
     }
 
@@ -177,17 +182,17 @@ public final class ShardStageLink: @unchecked Sendable {
         if address.withSockaddr({ Darwin.connect(fd, $0, $1) }) != 0 {
             let code = errno
             guard code == EINPROGRESS || code == EINTR else {
-                return retryableConnectErrors.contains(code) ? .retry : .failed(code)
+                return retryableConnectErrors.contains(code) ? .retry(code) : .failed(code)
             }
             var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
             let ready = poll(&pfd, 1, ShardSocketAddress.pollMilliseconds(wait))
-            if ready == 0 { return .retry }
-            guard ready > 0 else { return errno == EINTR ? .retry : .failed(errno) }
+            if ready == 0 { return .retry(ETIMEDOUT) }
+            guard ready > 0 else { return errno == EINTR ? .retry(EINTR) : .failed(errno) }
             var pending: Int32 = 0
             var length = socklen_t(MemoryLayout<Int32>.size)
             guard getsockopt(fd, SOL_SOCKET, SO_ERROR, &pending, &length) == 0 else { return .failed(errno) }
             if pending != 0 {
-                return retryableConnectErrors.contains(pending) ? .retry : .failed(pending)
+                return retryableConnectErrors.contains(pending) ? .retry(pending) : .failed(pending)
             }
         }
         guard fcntl(fd, F_SETFL, flags) >= 0 else { return .failed(errno) }

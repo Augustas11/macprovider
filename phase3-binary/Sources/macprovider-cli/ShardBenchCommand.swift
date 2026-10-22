@@ -644,6 +644,7 @@ struct ShardBenchHopReport: Encodable, Equatable {
 
 struct ShardBenchHeadReport: Encodable {
     let schema = "macprovider.shard-bench.head.v2"
+    let session: String
     let model: String
     let modelType: String
     let layers: String
@@ -742,6 +743,7 @@ struct ShardBenchAttestationReport: Encodable {
 /// Report of a middle or tail stage.
 struct ShardBenchStageReport: Encodable {
     let schema = "macprovider.shard-bench.stage.v1"
+    let session: String
     let role: ShardBenchRole
     let stageIndex: Int
     let model: String
@@ -780,6 +782,9 @@ struct ShardBenchHello: Codable, Equatable {
     var upstreamProbe: ShardBenchLatency?
     /// Tail with a separate return link: round trip of that link to the head.
     var returnProbe: ShardBenchLatency?
+    /// Head only: random id of this run, logged and reported by every stage so a
+    /// stage's log can be matched to the head that drove it.
+    var session: String?
 
     var layerLabel: String { "\(layerStart):\(layerEnd)" }
 }
@@ -892,14 +897,33 @@ struct ShardBenchLinks {
         listen: ShardBenchEndpoint?,
         connect: ShardBenchEndpoint?,
         connectTimeout: TimeInterval,
-        configuration: ShardLinkConfiguration
+        configuration: ShardLinkConfiguration,
+        session: String
     ) throws -> ShardBenchLinks {
         let listener = try listen.map { try ShardStageListener(host: $0.host, port: $0.port) }
         if let listen, let listener {
-            shardBenchLog("listening on \(listen.host):\(listener.port)")
+            shardBenchLog("listening on \(listen.host):\(listener.port) session=\(session)")
         }
-        let dialed = try connect.map {
-            try ShardStageLink.connect(host: $0.host, port: $0.port, timeout: connectTimeout, configuration: configuration)
+        var dialed: ShardStageLink?
+        if let connect {
+            // Log before and while dialing, so a run that never connects says where it
+            // was dialing and why each attempt failed.
+            shardBenchLog("connecting to \(connect.host):\(connect.port) session=\(session) timeout=\(Int(connectTimeout))s")
+            let started = Date()
+            var lastLog = started
+            do {
+                dialed = try ShardStageLink.connect(
+                    host: connect.host, port: connect.port, timeout: connectTimeout, configuration: configuration,
+                    onRetry: { attempt, code in
+                        let now = Date()
+                        guard attempt == 1 || now.timeIntervalSince(lastLog) >= 5 else { return }
+                        lastLog = now
+                        shardBenchLog("still connecting to \(connect.host):\(connect.port): attempt \(attempt), \(String(cString: strerror(code))) after \(Int(now.timeIntervalSince(started)))s")
+                    })
+            } catch {
+                shardBenchLog("connect to \(connect.host):\(connect.port) failed after \(Int(Date().timeIntervalSince(started)))s: \(error)")
+                throw error
+            }
         }
         if let dialed { shardBenchLog("connected to \(dialed.peerAddress)") }
         var accepted: ShardStageLink?
@@ -998,6 +1022,8 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
     private let warmupRequestID: UInt64 = 1
     private let firstRequestID: UInt64 = 2
     private var stageIndex = 0
+    /// The head's run id; other stages adopt it from the chain hello.
+    private var sessionID: String
     /// Per-request digests and counts for this member's sub-receipts.
     private var ledgers = [UInt64: MemberLedger]()
 
@@ -1012,13 +1038,15 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
         self.options = options
         self.stage = stage
         self.groupEpoch = options.link.groupEpoch
+        self.sessionID = String(format: "%016llx", UInt64.random(in: 0...UInt64.max))
         self.replayBuffer = ShardReplayBuffer(capacityBytes: options.replayBufferBytes)
     }
 
     func run() throws -> ShardBenchSessionReport {
         let links = try ShardBenchLinks.open(
             listen: options.listen, connect: options.connect,
-            connectTimeout: options.connectTimeout, configuration: options.link)
+            connectTimeout: options.connectTimeout, configuration: options.link,
+            session: options.role == .head ? sessionID : "from-head")
         return try run(links: links)
     }
 
@@ -1063,7 +1091,7 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
     /// The hello exchange is done: from here a silent peer is a dead peer.
     private func helloSucceeded(_ links: ShardBenchLinks, stages: String) {
         for link in links.unique { link.armLiveness() }
-        shardBenchLog("hello ok epoch=\(groupEpoch) stage=\(stageIndex) stages=\(stages)")
+        shardBenchLog("hello ok epoch=\(groupEpoch) session=\(sessionID) stage=\(stageIndex) stages=\(stages)")
     }
 
     private func checkRole() throws {
@@ -1086,7 +1114,12 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
     private func myHello() -> ShardBenchHello {
         ShardBenchHello(
             role: options.role, modelType: stage.modelType, totalLayers: stage.totalLayers,
-            hiddenSize: stage.hiddenSize, layerStart: stage.layers.lowerBound, layerEnd: stage.layers.upperBound)
+            hiddenSize: stage.hiddenSize, layerStart: stage.layers.lowerBound, layerEnd: stage.layers.upperBound,
+            session: options.role == .head ? sessionID : nil)
+    }
+
+    private func adoptSession(_ chain: [ShardBenchHello]) {
+        if let session = chain.first?.session { sessionID = session }
     }
 
     /// Head: send the one-stage chain down, then read the complete chain back on the
@@ -1109,6 +1142,7 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
     /// pass the chain on and wait for the next stage's acknowledgement.
     private func middleHandshake(_ links: ShardBenchLinks) throws -> ShardBenchLatency {
         let received = try awaitHello(links.upstream)
+        adoptSession(received)
         var mine = myHello()
         try ShardBenchChain.validate(prefix: received, next: mine)
         stageIndex = received.count
@@ -1125,6 +1159,7 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
     /// link, then send the complete chain to the head.
     private func tailHandshake(_ links: ShardBenchLinks) throws -> (ShardBenchLatency, ShardBenchLatency?) {
         let received = try awaitHello(links.upstream)
+        adoptSession(received)
         var mine = myHello()
         try ShardBenchChain.validate(prefix: received, next: mine)
         stageIndex = received.count
@@ -1320,6 +1355,7 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
             : [ShardBenchLinkReport(name: "downstream", peerStage: 1, statistics: links.downstream.statistics, probe: hops.first?.probeRoundTrip),
                ShardBenchLinkReport(name: "return", peerStage: chain.count - 1, statistics: links.upstream.statistics, probe: hops.last?.probeRoundTrip)]
         return ShardBenchHeadReport(
+            session: sessionID,
             model: options.modelLabel,
             modelType: stage.modelType,
             layers: "\(stage.layers.lowerBound):\(stage.layers.upperBound)",
@@ -1679,6 +1715,7 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
                 statistics: links.downstream.statistics, probe: returnProbe))
         }
         return ShardBenchStageReport(
+            session: sessionID,
             role: options.role,
             stageIndex: stageIndex,
             model: options.modelLabel,
