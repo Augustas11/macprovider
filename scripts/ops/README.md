@@ -280,8 +280,12 @@ For a qualified Qwen3.6 admission, configure `PROBE_MODEL=qwen/qwen3.6-35b-a3b`
 and `CATALOG_REQUIRE_NATIVE_MTP_FORWARD=true`, then use
 `catalog-activate.sh status`, `next`, and `next --run`. The catalog controller
 owns the live lock and invokes a fixed single-model transaction internally.
-It verifies the published signed binary against the committed admission release
-input, adopts the exact Qwen artifact, requires native MTP and continuous
+It verifies the running published signed binary against the committed admission
+release input: for a decode-path admission (SPEC-048 0.1.51) the binary's
+`/v1/status` `build_identity.decode_path_digest` must equal the input's
+`provider_decode_path_digest`, so a later CLI cut with the same decode path
+needs no rebind; an old-format input still needs the exact SHA-256 and CDHash.
+It then adopts the exact Qwen artifact, requires native MTP and continuous
 batching readiness, sends the paid proof, and restores the signed GLM incumbent.
 The Qwen journal/config/CLI settings above still apply; OpenCode is not used by
 this profile. Recommendations must support at least 4096 context tokens.
