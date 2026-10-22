@@ -161,3 +161,19 @@ func TestShardGroupRouteFilterCounts(t *testing.T) {
 		t.Fatalf("an excluded head is left to the excluded count: kept=%+v rejected=%d", kept, rejected)
 	}
 }
+
+// A SPEC-051 shard group head refuses tools and response_format, so it never
+// receives a tool request and never advertises either capability (#2107).
+func TestShardGroupHeadIsNeverToolOrResponseFormatCapable(t *testing.T) {
+	head := pool.Provider{ProviderID: "head", ModelID: "Jundot/GLM-5.3-Flash-oQ4e-mtp", BinaryVersion: toolGrammarProviderMinVersion, ShardGroupHeadV1: true}
+	if providerToolGrammarEligible(head) || providerParsesToolGrammar(head) {
+		t.Fatal("a shard group head must not be tool eligible")
+	}
+	if got := toolGrammarEligibleProviders([]pool.Provider{head}); len(got) != 0 {
+		t.Fatalf("eligible=%v want none", got)
+	}
+	caps := mergeModelCapabilities(nil, head, false)
+	if caps.Tools || caps.ResponseFormat || len(caps.ToolChoice) != 0 || !caps.Reasoning {
+		t.Fatalf("head capabilities=%+v want reasoning only", caps)
+	}
+}

@@ -51,9 +51,10 @@ func legacyToolFamily(model string) bool {
 }
 
 // providerParsesToolGrammar is the provider-level tool predicate shared by
-// capability derivation and request eligibility.
+// capability derivation and request eligibility. A SPEC-051 shard group head
+// refuses tools (shard_group_tools_unsupported), so it never counts.
 func providerParsesToolGrammar(p pool.Provider) bool {
-	return toolGrammarFamily(p.ModelID) != "" && (legacyToolFamily(p.ModelID) || providerServesToolGrammars(p))
+	return !p.ShardGroupHeadV1 && toolGrammarFamily(p.ModelID) != "" && (legacyToolFamily(p.ModelID) || providerServesToolGrammars(p))
 }
 
 // providerToolGrammarEligible reports whether a provider can serve a tool
@@ -62,6 +63,9 @@ func providerParsesToolGrammar(p pool.Provider) bool {
 // template cannot express); a native provider of a catalog family must parse
 // that family's grammar.
 func providerToolGrammarEligible(p pool.Provider) bool {
+	if p.ShardGroupHeadV1 {
+		return false
+	}
 	return providerEngineClass(p) != engineClassNative || toolGrammarFamily(p.ModelID) == "" || providerParsesToolGrammar(p)
 }
 
@@ -117,7 +121,9 @@ func mergeModelCapabilities(current *modelCapabilities, p pool.Provider, vision 
 	if reasoningFamily(p.ModelID) && (strings.Contains(strings.ToLower(p.ModelID), "gpt-oss") || providerServesToolGrammars(p)) {
 		caps.Reasoning = true
 	}
-	if p.RuntimeSource == "" || p.RuntimeSource == engineClassNative {
+	// A shard group head refuses response_format
+	// (shard_group_response_format_unsupported).
+	if (p.RuntimeSource == "" || p.RuntimeSource == engineClassNative) && !p.ShardGroupHeadV1 {
 		caps.ResponseFormat = true
 	}
 	if vision {
