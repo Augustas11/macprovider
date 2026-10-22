@@ -1,6 +1,6 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.30
+version: v0.22.31
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-02
@@ -8,6 +8,10 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
 
 ## Change log
 
+- **v0.22.31 (2026-10-22, Related: #2107)** — §16.11 buyer-UX conformance
+  gate: a key is promoted to `recommendable` only with a passing
+  `buyer-ux-conformance.json` record for every capability its served model
+  advertises, and a failed check removes that capability from `/v1/models`.
 - **v0.22.30 (2026-10-22)** — Decode-path admission binding (SPEC-048
   0.1.51). A §12.5 entry may carry two optional fields, both or neither:
   `decode_path_digest` (the SHA-256 decode-path digest compiled into the CLI)
@@ -4323,3 +4327,36 @@ An operator MAY publish an out-of-band release that adds only pool-proven keys a
 **Intake decision v2.** A release that selects the pool-proven clause MUST use `macprovider.intake-decision.v2`. Relative to v1, each `admit_listed` decision adds nullable `pool_proven_evidence` with exactly the closed value above, and `admission_clause` gains `pool_proven`; the field is non-null exactly when the clause is `pool_proven`, and null for every other clause and every `promote_recommendable` decision. The `thresholds` object adds `intake_pool_paid_request_floor` (the §16.4 `INTAKE_POOL_PAID_REQUEST_FLOOR`, an integer >= 1), present exactly in v2. **[v0.22.19]** P3 for a pool-proven key is satisfied only when the recorded `license_id` is non-null; the operator's reviewed licence record for that identifier remains an operator obligation the generator does not see. Version 1 remains valid for releases that do not select the clause. A generator or verifier MUST reject an unknown field, a v1 record selecting `pool_proven`, a `pool_proven` decision with a missing, suppressed, or null-probe value, a value whose `source_sha256` names no retained file, or a non-pool decision carrying the value.
 
 **Graduation to `recommendable`** still requires every §16.3 promotion condition, a prior release in which the key was `listed`, a published rate row, bench provenance, demand-rank eligibility, and an explicit operator decision. Neither pool paid volume, provider count, nor a passing probe auto-promotes a model. Pool earning is creator-scoped evidence, not permissionless global earning; the latter remains out of scope until SPEC-036 compute-integrity requirements are normatively adopted and implemented.
+
+
+### 16.11 Buyer-UX conformance gate (v0.22.31, #2107)
+
+`scripts/buyer_ux_conformance.py run` checks one served model through the
+gateway the way agentic coding clients use it and writes its record to
+`phase3-binary/catalog/autotune/buyer-ux-conformance.json`
+(`macprovider.buyer-ux-conformance.v1`, keyed by catalog key). The checks:
+
+| Capability | Checks (all must pass) |
+|---|---|
+| base (always) | `stop_sequences`, `context_limit_error` (readable 4xx with a code), `finish_reason` (`length` at `max_tokens`) |
+| `tools` | `tools_auto`, `stream_tool_deltas` (an id on each call's first delta, indexes 0..n-1, arguments concatenate to JSON, usage chunk), `tool_round_trip` |
+| `tool_choice` `required` / named | `tools_required` / `tools_named` (`unsupported` when the model does not serve the mode) |
+| `reasoning` | `no_reasoning_leak` (no `<think>` in content; a reasoning model returns `reasoning_content` and `reasoning_tokens`) |
+| `response_format` | `json_object` |
+| `/v1/messages` | `messages_beta_thinking` (an `anthropic-beta` header and `thinking`; a reasoning model leads with a thinking block) |
+| `/v1/responses` | `responses_function_tool` |
+
+A record's `capabilities` are derived from its checks and nothing else. Two
+rules bind them:
+
+1. **Promotion.** `validate_intake_promote_entry` refuses
+   `promote_recommendable` unless the key's record exists, its base checks
+   pass, and every capability its served model advertises (the coordinator's
+   family derivation) passes. The check is `require_buyer_ux_conformance`.
+2. **Publication.** The coordinator loads the file from
+   `routing.buyer_ux_conformance_path` at start. It removes from
+   `/v1/models` every capability a recorded model failed. A model without a
+   record keeps the derived set.
+
+Live runs happen after a release, against the gateway, as an intake step. The
+checker is unit-tested against recorded responses.

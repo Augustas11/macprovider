@@ -1,7 +1,10 @@
 package buyer
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 
@@ -148,4 +151,84 @@ func finishModelCapabilities(entry *modelEntry) {
 	}
 	sort.Strings(params)
 	entry.SupportedParameters = params
+}
+
+// buyerUXCapabilities is the capability set a model's buyer-UX conformance
+// record allows (scripts/buyer_ux_conformance.py capabilities_from_checks).
+type buyerUXCapabilities struct {
+	Tools          bool     `json:"tools"`
+	ToolChoice     []string `json:"tool_choice"`
+	Reasoning      bool     `json:"reasoning"`
+	ResponseFormat bool     `json:"response_format"`
+}
+
+// LoadBuyerUXConformance reads the record file and returns the allowed
+// capabilities keyed by served model id. An empty path means no records.
+func LoadBuyerUXConformance(path string) (map[string]buyerUXCapabilities, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var doc struct {
+		SchemaVersion string `json:"schema_version"`
+		Records       map[string]struct {
+			Model        string               `json:"model"`
+			Capabilities *buyerUXCapabilities `json:"capabilities"`
+		} `json:"records"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil, err
+	}
+	if doc.SchemaVersion != "macprovider.buyer-ux-conformance.v1" {
+		return nil, fmt.Errorf("buyer-ux conformance: unsupported schema_version %q", doc.SchemaVersion)
+	}
+	out := make(map[string]buyerUXCapabilities, len(doc.Records))
+	for key, record := range doc.Records {
+		if record.Capabilities == nil || strings.TrimSpace(record.Model) == "" {
+			return nil, fmt.Errorf("buyer-ux conformance: record %q needs model and capabilities", key)
+		}
+		out[strings.ToLower(record.Model)] = *record.Capabilities
+	}
+	return out, nil
+}
+
+// SetBuyerUXConformance installs the conformance records.
+func (s *Server) SetBuyerUXConformance(records map[string]buyerUXCapabilities) {
+	s.routingMu.Lock()
+	s.buyerUXConformance = records
+	s.routingMu.Unlock()
+}
+
+// applyBuyerUXConformance removes every capability the model's conformance
+// record failed; a model without a record keeps the derived set.
+func (s *Server) applyBuyerUXConformance(entry *modelEntry) {
+	if entry.Capabilities == nil {
+		return
+	}
+	s.routingMu.RLock()
+	record, ok := s.buyerUXConformance[strings.ToLower(entry.ID)]
+	s.routingMu.RUnlock()
+	if !ok {
+		return
+	}
+	caps := entry.Capabilities
+	caps.Tools = caps.Tools && record.Tools
+	caps.Reasoning = caps.Reasoning && record.Reasoning
+	caps.ResponseFormat = caps.ResponseFormat && record.ResponseFormat
+	allowed := map[string]bool{}
+	for _, mode := range record.ToolChoice {
+		allowed[mode] = true
+	}
+	modes := []string{}
+	if caps.Tools {
+		for _, mode := range caps.ToolChoice {
+			if allowed[mode] {
+				modes = append(modes, mode)
+			}
+		}
+	}
+	caps.ToolChoice = modes
 }

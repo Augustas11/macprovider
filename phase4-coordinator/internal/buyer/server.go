@@ -280,9 +280,12 @@ type Server struct {
 	// providerMeetsRoutingQuality) MUST take a read lock or use the snapshot
 	// accessors below — never read those fields directly outside the routingMu
 	// critical section.
-	routingMu              sync.RWMutex
-	modelClasses           map[string]config.ModelClassConfig
-	visionQualifications   []config.VisionQualificationConfig
+	routingMu            sync.RWMutex
+	modelClasses         map[string]config.ModelClassConfig
+	visionQualifications []config.VisionQualificationConfig
+	// buyerUXConformance caps /v1/models capabilities by each model's
+	// buyer-UX conformance record (SPEC-023 §16.11), keyed by lower-case model id.
+	buyerUXConformance     map[string]buyerUXCapabilities
 	maxRetries             int
 	retryPerAttemptTimeout time.Duration
 	maxFaultedPerRequest   int
@@ -546,6 +549,13 @@ func WithRoutingConfig(cfg config.RoutingConfig) Option {
 		s.modelClasses = cloneModelClasses(cfg.ModelClasses)
 		s.visionQualifications = append([]config.VisionQualificationConfig(nil), cfg.VisionQualifications...)
 		s.routingMu.Unlock()
+		// SPEC-023 §16.11: conformance records cap /v1/models capabilities.
+		// An unreadable file publishes no records and logs why.
+		if records, err := LoadBuyerUXConformance(cfg.BuyerUXConformancePath); err != nil {
+			s.log.Error().Err(err).Str("path", cfg.BuyerUXConformancePath).Msg("routing.buyer_ux_conformance_path unreadable; no conformance records applied")
+		} else {
+			s.buyerUXConformance = records
+		}
 		s.maxRetries = cfg.MaxRetries
 		if cfg.RetryPerAttemptTimeoutS > 0 {
 			s.retryPerAttemptTimeout = time.Duration(cfg.RetryPerAttemptTimeoutS) * time.Second
@@ -2428,6 +2438,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 
 	data := make([]modelEntry, 0, len(models))
 	for _, entry := range models {
+		s.applyBuyerUXConformance(&entry)
 		finishModelCapabilities(&entry)
 		data = append(data, entry)
 	}

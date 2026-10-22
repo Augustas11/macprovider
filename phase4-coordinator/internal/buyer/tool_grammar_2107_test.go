@@ -4,10 +4,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/rs/zerolog"
 )
 
 // toolGrammarFamily mirrors ToolCallGrammar.family(modelID:) in
@@ -162,5 +165,44 @@ func TestToolRequestsReachOnlyProvidersThatParseTheGrammar(t *testing.T) {
 	}
 	if err := toolGrammarProviderUnavailableRouteError(); err.status != 503 || !spec018Retryable(err.code) {
 		t.Fatalf("route error=%+v", err)
+	}
+}
+
+func TestBuyerUXConformanceMasksFailedCapabilities(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/buyer-ux-conformance.json"
+	body := `{"schema_version":"macprovider.buyer-ux-conformance.v1","records":{"zai-org/glm-5.3-flash":{"model":"Jundot/GLM-5.3-Flash-oQ4e-mtp","gateway":"https://api.malibu.tech/v1","checked_at":"2026-10-22T00:00:00Z","checks":{},"capabilities":{"base":true,"tools":false,"tool_choice":[],"reasoning":true,"response_format":false,"messages":true,"responses":true}}}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	records, err := LoadBuyerUXConformance(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := NewServer(pool.NewRegistry(nil), zerolog.Nop(), time.Now().UTC())
+	s.SetBuyerUXConformance(records)
+	glm := pool.Provider{ModelID: "Jundot/GLM-5.3-Flash-oQ4e-mtp", BinaryVersion: toolGrammarProviderMinVersion}
+	entry := modelEntry{ID: glm.ModelID, Capabilities: mergeModelCapabilities(nil, glm, false)}
+	s.applyBuyerUXConformance(&entry)
+	finishModelCapabilities(&entry)
+	if entry.Capabilities.Tools || entry.Capabilities.ResponseFormat || !entry.Capabilities.Reasoning || len(entry.Capabilities.ToolChoice) != 0 {
+		t.Fatalf("masked capabilities=%+v", entry.Capabilities)
+	}
+	if strings.Contains(strings.Join(entry.SupportedParameters, ","), "tools") {
+		t.Fatalf("supported_parameters=%v", entry.SupportedParameters)
+	}
+	// A model without a record keeps the derived set.
+	qwen := pool.Provider{ModelID: "mlx-community/Qwen3-8B-4bit"}
+	other := modelEntry{ID: qwen.ModelID, Capabilities: mergeModelCapabilities(nil, qwen, false)}
+	s.applyBuyerUXConformance(&other)
+	if !other.Capabilities.Tools {
+		t.Fatal("unrecorded model lost tools")
+	}
+	if _, err := LoadBuyerUXConformance(dir + "/absent.json"); err == nil {
+		t.Fatal("an unreadable record file must be an error")
+	}
+	// The checked-in record file loads.
+	if _, err := LoadBuyerUXConformance("../../../phase3-binary/catalog/autotune/buyer-ux-conformance.json"); err != nil {
+		t.Fatal(err)
 	}
 }

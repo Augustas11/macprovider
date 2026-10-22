@@ -97,6 +97,8 @@ CB_POLICY_TRANSITION_FEED_RECORD = {
     "version": CB_POLICY_TRANSITION_RELEASE_ID,
 }
 RATE_CARD_SOURCE_PATH = CATALOG_DIR / "rate-card-source.json"
+BUYER_UX_CONFORMANCE_PATH = CATALOG_DIR / "buyer-ux-conformance.json"
+BUYER_UX_CONFORMANCE_SCRIPT = ROOT / "scripts" / "buyer_ux_conformance.py"
 RATE_CARD_SOURCE_SCHEMA = "macprovider.rate-card-source.v1"
 MARKET_PEG_BIND_PATH = CATALOG_DIR / "market-peg-bind.json"
 MARKET_PEG_BIND_SCHEMA = "macprovider.market-peg-bind.v1"
@@ -5143,6 +5145,21 @@ def validate_intake_promote_entry(entry: dict, candidate_obj: dict, artifact_obj
     reference = promotion["operator_admission_reference"]
     if not isinstance(reference, str) or not reference.strip() or len(reference) > 256:
         fail(f"{label}.promotion.operator_admission_reference must be a non-empty string")
+    require_buyer_ux_conformance(key, row, label)
+
+
+def require_buyer_ux_conformance(key: str, row: dict, label: str) -> None:
+    """SPEC-023 §16.11 (#2107): a key is promoted to `recommendable` only with
+    a buyer-UX conformance record that passes for every capability its served
+    model advertises on /v1/models."""
+    spec = importlib.util.spec_from_file_location("buyer_ux_conformance", BUYER_UX_CONFORMANCE_SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    model_id = row.get("served_model_id") or row.get("model_id") or key
+    try:
+        module.require_promotable(key, module.advertised_capabilities(model_id), BUYER_UX_CONFORMANCE_PATH)
+    except module.ConformanceError as err:
+        fail(f"{label}: {err}")
 
 
 def validate_intake_decision(
