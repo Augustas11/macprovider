@@ -174,8 +174,9 @@ public final class ShardStageLink: @unchecked Sendable {
     private var inboxBytes = 0
     private var readerFailure: Error?
     private var readerStarted = false
-    /// The reader held back on a full inbox since it last answered a ping, so a
-    /// ping it reads now may have waited behind data (guarded by `inbox`).
+    /// The reader read data, or held back on a full inbox, since it last answered
+    /// a ping, so a ping it reads now may have waited behind that data in the
+    /// socket (guarded by `inbox`). Round trips are sampled while the link idles.
     private var readerHeldBack = false
 
     /// SEC-07: queued frames are bounded by count as well as bytes, and each
@@ -747,6 +748,7 @@ public final class ShardStageLink: @unchecked Sendable {
             inbox.lock()
             inboxFrames.append(frame)
             inboxBytes += Self.queuedBytes(frame)
+            readerHeldBack = true
             inbox.broadcast()
             inbox.unlock()
             return true

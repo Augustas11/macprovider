@@ -28,7 +28,7 @@ final class ShardLinkHealthTests: XCTestCase {
         XCTAssertEqual(try ShardHeartbeatPayload.decode(echo.encode()), echo)
         XCTAssertEqual(echo.encode().count, 10)
         var badKind = echo.encode()
-        badKind[0] = 3
+        badKind[0] = 4
         var echoWithEntries = ping.encode()
         echoWithEntries[0] = ShardHeartbeatPayload.Kind.echo.rawValue
         var shortCount = ping.encode()

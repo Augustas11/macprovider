@@ -79,12 +79,15 @@ final class ShardLinkAuditFixTests: XCTestCase {
         let sender = Thread {
             for _ in 0..<40 { _ = try? dialed.send(big) }
         }
+        let started = Date()
         sender.start()
         var received = 0
         while received < 40, let _ = try? accepted.receive(timeout: 5) { received += 1 }
+        let drain = Date().timeIntervalSince(started)
         XCTAssertEqual(received, 40)
         waitFor { dialed.roundTrip.samples >= 10 }
-        XCTAssertLessThan(try XCTUnwrap(dialed.roundTrip.p99Seconds), 0.015, "loopback round trip, not data drain time")
+        let p99 = try XCTUnwrap(dialed.roundTrip.p99Seconds)
+        XCTAssertLessThan(p99, drain / 4, "p99 \(p99) s is a link time, not the \(drain) s the data took to drain")
     }
 
     /// C12: summaries that did not come through the codec are validated by the
