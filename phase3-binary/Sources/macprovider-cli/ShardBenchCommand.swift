@@ -16,6 +16,8 @@ import MacProviderCore
 ///     layers and forwards downstream.
 ///   * `--role tail --layers b:N` owns the last layers, the final norm, the LM head
 ///     and sampling; it returns token ids to the head.
+///   * `--plan --members id=SIZE[:weight],... --context N` prints a placement plan
+///     for the model from its config and safetensors headers, without loading it.
 ///   * `--local-reference` decodes the same prompts with the stock single-process
 ///     model; the head compares its tokens against this (in process, or from
 ///     `--reference <json>`).
@@ -111,6 +113,18 @@ struct ShardBenchCommand: AsyncParsableCommand {
     @Option(help: "Also write the JSON report to this path.")
     var output: String?
 
+    @Flag(help: "Print a layer placement plan for --members and exit (reads config and safetensors headers only).")
+    var plan = false
+
+    @Option(help: "--plan: members in stage order, id=SIZE[:weight] comma separated (SIZE: bytes or e.g. 230GB, 214GiB; weight: relative compute).")
+    var members: String?
+
+    @Option(help: "--plan: tokens of KV each stage must hold.")
+    var context: Int = 4096
+
+    @Option(name: .customLong("tight-headroom"), help: "--plan: a stage with less headroom than this fraction of its usable memory marks the plan tight.")
+    var tightHeadroom: Double = 0.05
+
     static let defaultPrompt =
         "Explain, step by step, how a pipeline-parallel transformer splits its layers across machines and why the activations between stages are small."
 
@@ -120,6 +134,13 @@ struct ShardBenchCommand: AsyncParsableCommand {
         }
         guard heartbeatMilliseconds > 0, missedHeartbeats > 0, receiveTimeout > 0, connectTimeout > 0 else {
             throw ValidationError("heartbeat and timeout options must be > 0")
+        }
+        if plan {
+            guard members != nil else { throw ValidationError("--plan needs --members") }
+            guard context >= 0, tightHeadroom >= 0, tightHeadroom < 1 else {
+                throw ValidationError("--context must be >= 0 and --tight-headroom within [0, 1)")
+            }
+            return
         }
         if let prefillChunk, prefillChunk <= 0 { throw ValidationError("--prefill-chunk must be > 0") }
         guard (500...4000).contains(prefillChunkDeadlineMilliseconds) else {
@@ -146,6 +167,10 @@ struct ShardBenchCommand: AsyncParsableCommand {
 
     func run() async throws {
         let directory = try ModelRuntime.localModelDirectory(for: model)
+        if plan {
+            try runPlan(directory: directory)
+            return
+        }
         let tokenizer = try await ChatTemplateCompatTokenizerLoader().load(from: directory)
         let prompts = (0..<concurrency).map { index in
             tokenizer.encode(text: index == 0 ? prompt : "\(prompt) (sequence \(index))", addSpecialTokens: true)
@@ -196,6 +221,25 @@ struct ShardBenchCommand: AsyncParsableCommand {
         if head.parity?.verdict == "mismatch" { throw ExitCode(3) }
     }
 
+    private func runPlan(directory: URL) throws {
+        let input = try ShardBenchPlanInput.model(directory: directory)
+        let planned: ShardPlacementPlan
+        do {
+            planned = try ShardPlacementPlanner.plan(
+                members: try ShardBenchPlanInput.members(members ?? ""), model: input.model,
+                contextTokens: context, tightHeadroomFraction: tightHeadroom)
+        } catch let error as ShardPlacementError {
+            FileHandle.standardError.write(Data("shard-bench: placement refused: \(error)\n".utf8))
+            throw ExitCode(4)
+        }
+        try emit(ShardBenchPlanReport(
+            model: model, modelType: input.modelType, numLayers: input.model.layerWeightBytes.count,
+            layerWeightBytes: input.model.layerWeightBytes, embeddingBytes: input.model.embeddingBytes,
+            headBytes: input.model.headBytes, sharedBytes: input.model.sharedBytes,
+            kvBytesPerTokenPerLayer: input.model.kvBytesPerTokenPerLayer, plan: planned,
+            layerArguments: planned.stages.map { "\($0.layerStart):\($0.layerEnd)" }))
+    }
+
     private func sessionOptions(prompts: [[Int]]) throws -> (ShardBenchSessionOptions, Range<Int>) {
         guard let layers, let role, let parsedRole = ShardBenchRole(rawValue: role) else {
             throw ValidationError("--role and --layers a:b are required")
@@ -243,6 +287,138 @@ struct ShardBenchCommand: AsyncParsableCommand {
         if let output {
             try json.write(to: URL(fileURLWithPath: (output as NSString).expandingTildeInPath), options: .atomic)
         }
+    }
+}
+
+// MARK: - Placement plan input
+
+struct ShardBenchPlanReport: Encodable {
+    let schema = "macprovider.shard-bench.plan.v1"
+    let model: String
+    let modelType: String
+    let numLayers: Int
+    let layerWeightBytes: [Int64]
+    let embeddingBytes: Int64
+    let headBytes: Int64
+    let sharedBytes: Int64
+    let kvBytesPerTokenPerLayer: Int64
+    let plan: ShardPlacementPlan
+    /// `--layers` value for each stage, in order.
+    let layerArguments: [String]
+}
+
+/// Planner inputs read from a model directory: per-layer bytes from the safetensors
+/// headers (no tensor data is read) and KV size from `config.json`, assigned the way
+/// `PipelineStageModel.loadStageWeights` loads them.
+enum ShardBenchPlanInput {
+    static func members(_ text: String) throws -> [ShardPlacementMember] {
+        try text.split(separator: ",").map { entry in
+            let parts = entry.split(separator: "=", maxSplits: 1)
+            guard parts.count == 2, !parts[0].isEmpty else {
+                throw ValidationError("member '\(entry)' must be id=SIZE[:weight]")
+            }
+            let value = parts[1].split(separator: ":", maxSplits: 1)
+            var weight: Double?
+            if value.count == 2 {
+                guard let parsed = Double(value[1]) else { throw ValidationError("member '\(entry)': bad weight") }
+                weight = parsed
+            }
+            return ShardPlacementMember(id: String(parts[0]), usableMemoryBytes: try bytes(String(value[0])), computeWeight: weight)
+        }
+    }
+
+    static func bytes(_ text: String) throws -> Int64 {
+        let units: [(String, Double)] = [("TiB", 1_099_511_627_776), ("GiB", 1_073_741_824), ("MiB", 1_048_576),
+                                         ("TB", 1e12), ("GB", 1e9), ("MB", 1e6)]
+        for (suffix, scale) in units where text.hasSuffix(suffix) {
+            guard let number = Double(text.dropLast(suffix.count)), number > 0 else { break }
+            return Int64((number * scale).rounded())
+        }
+        guard let plain = Int64(text), plain > 0 else {
+            throw ValidationError("size '\(text)' must be bytes or a number with TB/GB/MB/TiB/GiB/MiB")
+        }
+        return plain
+    }
+
+    static func model(directory: URL) throws -> (model: ShardPlacementModel, modelType: String) {
+        let config = try PipelineStageModel.readConfig(directory: directory)
+        let layerCount = try PipelineStageModel.totalLayers(config: config)
+        let tensors = try tensorBytes(directory: directory)
+        var layers = Array(repeating: Int64(0), count: layerCount)
+        var embedding: Int64 = 0
+        var head: Int64 = 0
+        var shared: Int64 = 0
+        var hasHead = false
+        for (key, size) in tensors {
+            if key.hasPrefix("model.layers.") {
+                let digits = key.dropFirst("model.layers.".count).prefix(while: \.isNumber)
+                // Layers past num_hidden_layers (e.g. MTP heads) are never loaded by a stage.
+                if let index = Int(digits), index < layerCount { layers[index] += size }
+            } else if key.hasPrefix("model.embed_tokens.") {
+                embedding += size
+            } else if key.hasPrefix("lm_head.") {
+                head += size
+                hasHead = true
+            } else if key.hasPrefix("model.norm.") {
+                head += size
+            } else {
+                shared += size
+            }
+        }
+        // A tied-embedding last stage loads the embedding table as its head.
+        if !hasHead { head += embedding }
+        return (ShardPlacementModel(
+            layerWeightBytes: layers, embeddingBytes: embedding, headBytes: head, sharedBytes: shared,
+            kvBytesPerTokenPerLayer: try kvBytesPerTokenPerLayer(config: config)), config["model_type"] as? String ?? "unknown")
+    }
+
+    /// Tensor name -> byte length from every `.safetensors` header in `directory`.
+    static func tensorBytes(directory: URL) throws -> [String: Int64] {
+        let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "safetensors" }
+        guard !files.isEmpty else { throw PipelineStageError.noWeights(directory) }
+        var sizes = [String: Int64]()
+        for file in files {
+            let handle = try FileHandle(forReadingFrom: file)
+            defer { try? handle.close() }
+            guard let prefix = try handle.read(upToCount: 8), prefix.count == 8 else {
+                throw PipelineStageError.invalidConfig("\(file.lastPathComponent): no safetensors header")
+            }
+            let length = prefix.withUnsafeBytes { UInt64(littleEndian: $0.loadUnaligned(as: UInt64.self)) }
+            guard length <= 100 * 1024 * 1024, let header = try handle.read(upToCount: Int(length)), header.count == Int(length),
+                  let object = try JSONSerialization.jsonObject(with: header) as? [String: Any]
+            else {
+                throw PipelineStageError.invalidConfig("\(file.lastPathComponent): unreadable safetensors header")
+            }
+            for (name, value) in object where name != "__metadata__" {
+                guard let tensor = value as? [String: Any], let offsets = tensor["data_offsets"] as? [NSNumber], offsets.count == 2 else {
+                    throw PipelineStageError.invalidConfig("\(file.lastPathComponent): tensor \(name) has no data_offsets")
+                }
+                sizes[name, default: 0] += offsets[1].int64Value - offsets[0].int64Value
+            }
+        }
+        return sizes
+    }
+
+    /// KV bytes per token per layer as the stage runtime allocates them (bf16 keys and
+    /// values; DeepSeek-V3's attention caches the expanded per-head keys and values).
+    static func kvBytesPerTokenPerLayer(config: [String: Any]) throws -> Int64 {
+        let element: Int64 = 2
+        guard let heads = config["num_attention_heads"] as? Int, heads > 0 else {
+            throw PipelineStageError.invalidConfig("num_attention_heads missing")
+        }
+        if config["model_type"] as? String == "deepseek_v3" {
+            guard let nope = config["qk_nope_head_dim"] as? Int, let rope = config["qk_rope_head_dim"] as? Int,
+                  let value = config["v_head_dim"] as? Int
+            else {
+                throw PipelineStageError.invalidConfig("deepseek_v3 head dims missing")
+            }
+            return Int64(heads * (nope + rope + value)) * element
+        }
+        guard let hidden = config["hidden_size"] as? Int else { throw PipelineStageError.invalidConfig("hidden_size missing") }
+        let kvHeads = config["num_key_value_heads"] as? Int ?? heads
+        let headDim = config["head_dim"] as? Int ?? hidden / heads
+        return Int64(2 * kvHeads * headDim) * element
     }
 }
 
