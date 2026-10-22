@@ -31,7 +31,7 @@ func TestGlobalRequestNeverRoutesToShardGroupSessions(t *testing.T) {
 	add("head", func(p *pool.Provider) { p.ShardGroupHeadV1 = true; p.ThroughputTPSEstimate = 1000 })
 	add("member", func(p *pool.Provider) { p.ShardMemberV1 = true; p.ThroughputTPSEstimate = 900 })
 	add("plain", func(*pool.Provider) {})
-	registry.SetShardGroupState("head", "s-head", true, 1, []pool.ShardGroupMemberView{{ProviderID: "member"}})
+	registry.SetShardGroupState("head", "s-head", true, 1, "pool/ijUnc-ZQf-LJeRvkhi-0iQ/model-a", []pool.ShardGroupMemberView{{ProviderID: "member"}})
 	var calls []string
 	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
 		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {

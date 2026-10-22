@@ -260,7 +260,7 @@ func (s *Server) reevaluateShardGroup(ctx context.Context, groupID string) {
 	if !ok {
 		return
 	}
-	s.pool.SetShardGroupState(groupID, ev.HeadAssignedID, ev.Available, ev.GroupEpoch, ev.Members)
+	s.pool.SetShardGroupState(groupID, ev.HeadAssignedID, ev.Available, ev.GroupEpoch, ev.PoolModelID, ev.Members)
 	if ev.Changed {
 		s.log.Info().
 			Str("event", "shard_group_status").

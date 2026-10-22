@@ -557,9 +557,12 @@ type Evaluation struct {
 	GroupProviderID string
 	HeadAssignedID  string
 	GroupEpoch      uint64
-	Available       bool
-	Reason          string
-	Members         []pool.ShardGroupMemberView
+	// PoolModelID is the pool model the latest accepted record names; the
+	// head routes only for it (SPEC-051-R016).
+	PoolModelID string
+	Available   bool
+	Reason      string
+	Members     []pool.ShardGroupMemberView
 	// Changed reports a change of availability or reason since the last
 	// evaluation, when the head must be sent `shard_group_status`.
 	Changed bool
@@ -576,6 +579,9 @@ func (r *Registry) Evaluate(groupID string, providers func(string) (pool.Provide
 		return Evaluation{}, false
 	}
 	ev := Evaluation{GroupProviderID: groupID, HeadAssignedID: g.headAssignedID, GroupEpoch: g.latest}
+	if ep, ok := g.epochs[g.latest]; ok {
+		ev.PoolModelID = ep.record.Model.PoolModelID
+	}
 	ev.Reason, ev.Members = r.evaluateLocked(groupID, g, providers, owners, heartbeatInterval)
 	ev.Available = ev.Reason == ""
 	if !ev.Available {

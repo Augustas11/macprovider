@@ -245,14 +245,16 @@ type Provider struct {
 	// tier2_capabilities.shard_member_v1: a SPEC-051 member session, never
 	// routable on its own (SPEC-051-R016).
 	ShardMemberV1 bool `json:"shard_member_v1,omitempty"`
-	// ShardGroupAvailable, ShardGroupEpoch and ShardGroupMembers are the
-	// coordinator-derived availability of this head session's group, its
-	// latest accepted epoch, and the group's non-head members and spares
-	// (SPEC-051-R015). They are reset on every session registration and
-	// never wire-exported.
-	ShardGroupAvailable bool                   `json:"-"`
-	ShardGroupEpoch     uint64                 `json:"-"`
-	ShardGroupMembers   []ShardGroupMemberView `json:"-"`
+	// ShardGroupAvailable, ShardGroupEpoch, ShardGroupPoolModelID and
+	// ShardGroupMembers are the coordinator-derived availability of this head
+	// session's group, its latest accepted epoch, the pool model that epoch's
+	// record names (SPEC-051-R016: the head routes only for it), and the
+	// group's non-head members and spares (SPEC-051-R015). They are reset on
+	// every session registration and never wire-exported.
+	ShardGroupAvailable   bool                   `json:"-"`
+	ShardGroupEpoch       uint64                 `json:"-"`
+	ShardGroupPoolModelID string                 `json:"-"`
+	ShardGroupMembers     []ShardGroupMemberView `json:"-"`
 	// ComputeIntegritySuspended is set while the SPEC-036 FR-23 key for this
 	// provider and its served model is failed. The registry recomputes it from
 	// the suspension set on registration, model change and every set change.
@@ -2625,7 +2627,7 @@ func (r *Registry) SetBenchmarkQuarantine(providerID, assignedID string, quarant
 // availability of a head session's group. It applies only to the live session
 // named by assignedID that advertised shard_group_head_v1, and returns true
 // when any recorded value changed.
-func (r *Registry) SetShardGroupState(providerID, assignedID string, available bool, epoch uint64, members []ShardGroupMemberView) bool {
+func (r *Registry) SetShardGroupState(providerID, assignedID string, available bool, epoch uint64, poolModelID string, members []ShardGroupMemberView) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	p := r.providers[providerID]
@@ -2635,9 +2637,11 @@ func (r *Registry) SetShardGroupState(providerID, assignedID string, available b
 	if !available {
 		members = nil
 	}
-	changed := p.ShardGroupAvailable != available || p.ShardGroupEpoch != epoch || !shardGroupMembersEqual(p.ShardGroupMembers, members)
+	changed := p.ShardGroupAvailable != available || p.ShardGroupEpoch != epoch || p.ShardGroupPoolModelID != poolModelID ||
+		!shardGroupMembersEqual(p.ShardGroupMembers, members)
 	p.ShardGroupAvailable = available
 	p.ShardGroupEpoch = epoch
+	p.ShardGroupPoolModelID = poolModelID
 	p.ShardGroupMembers = append([]ShardGroupMemberView(nil), members...)
 	return changed
 }

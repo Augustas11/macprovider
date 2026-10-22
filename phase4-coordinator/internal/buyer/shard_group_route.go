@@ -28,7 +28,9 @@ type shardGroupRoute struct {
 // not advertise shard_group_head_v1 always passes, so routing without shard
 // groups is unchanged. A head session passes only on a pool route whose
 // active core names it, while its group is available, bound to that pool's
-// named pool model, within the member bound, with every non-head member and
+// named pool model, which is also the pool model its accepted group record
+// names (R016: "only for the pool model the group record names"), within the
+// member bound, with every non-head member and
 // spare a current pool member, and every active member meeting the pool
 // binary floor and still admissible on the session the group evaluation
 // bound (SPEC-051-R003/R004: a member change applies before the next
@@ -48,7 +50,7 @@ func (r shardGroupRoute) routable(p pool.Provider) bool {
 			break
 		}
 	}
-	if !found || p.ModelAdmissionPoolID != r.poolID || p.ModelAdmissionPoolModelID != grant.PoolModelID {
+	if !found || p.ModelAdmissionPoolID != r.poolID || p.ModelAdmissionPoolModelID != grant.PoolModelID || p.ShardGroupPoolModelID != grant.PoolModelID {
 		return false
 	}
 	if uint64(len(p.ShardGroupMembers))+1 > grant.MaxMembers {

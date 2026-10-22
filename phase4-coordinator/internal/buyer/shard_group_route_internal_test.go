@@ -18,7 +18,7 @@ const shardTestPoolModel = "pool/" + shardTestPool + "/deep-model"
 
 func shardHead() pool.Provider {
 	return pool.Provider{
-		ProviderID: "head", AssignedID: "s-head", ShardGroupHeadV1: true, ShardGroupAvailable: true, ShardGroupEpoch: 1,
+		ProviderID: "head", AssignedID: "s-head", ShardGroupHeadV1: true, ShardGroupAvailable: true, ShardGroupEpoch: 1, ShardGroupPoolModelID: shardTestPoolModel,
 		ShardGroupMembers:         []pool.ShardGroupMemberView{{ProviderID: "tail", AssignedID: "s-tail", BinaryVersion: "1.8.300"}, {ProviderID: "spare", Spare: true}},
 		ModelHashAlgorithm:        "macprovider.snapshot-manifest.v1",
 		ModelHash:                 shardTestHash,
@@ -73,7 +73,12 @@ func TestShardGroupRouteGate(t *testing.T) {
 		"bound to another model": func(_ *shardGroupRoute, p *pool.Provider) {
 			p.ModelAdmissionPoolModelID = "pool/" + shardTestPool + "/other"
 		},
-		"bound to another pool":  func(_ *shardGroupRoute, p *pool.Provider) { p.ModelAdmissionPoolID = "other-pool" },
+		"bound to another pool": func(_ *shardGroupRoute, p *pool.Provider) { p.ModelAdmissionPoolID = "other-pool" },
+		// VM acceptance F7 (R3-C03): the record names another pool model than
+		// the grant and the binding.
+		"record names another pool model": func(_ *shardGroupRoute, p *pool.Provider) {
+			p.ShardGroupPoolModelID = "pool/" + shardTestPool + "/not-the-bound-entry"
+		},
 		"over the member bound":  func(r *shardGroupRoute, _ *pool.Provider) { r.groups[0].MaxMembers = 2 },
 		"head not a member":      func(r *shardGroupRoute, _ *pool.Provider) { delete(r.members, "head") },
 		"member not a member":    func(r *shardGroupRoute, _ *pool.Provider) { delete(r.members, "tail") },
@@ -228,7 +233,7 @@ func TestSlotQueueAppliesTheShardGroupGate(t *testing.T) {
 	head.ShardGroupHeadV1 = true
 	head.SlotsFree = 0
 	registry.Register(&head, nil)
-	registry.SetShardGroupState("head", head.AssignedID, true, 1, []pool.ShardGroupMemberView{{ProviderID: "tail", AssignedID: "s-tail"}})
+	registry.SetShardGroupState("head", head.AssignedID, true, 1, shardTestPoolModel, []pool.ShardGroupMemberView{{ProviderID: "tail", AssignedID: "s-tail"}})
 	live, ok := registry.Resolve("head", head.AssignedID)
 	if !ok || !live.ShardGroupAvailable {
 		t.Fatal("head not registered as available")
@@ -245,7 +250,7 @@ func TestSlotQueueAppliesTheShardGroupGate(t *testing.T) {
 	freed := live
 	freed.SlotsFree = 1
 	registry.Register(&freed, nil)
-	registry.SetShardGroupState("head", freed.AssignedID, true, 1, nil)
+	registry.SetShardGroupState("head", freed.AssignedID, true, 1, shardTestPoolModel, nil)
 	waiter, ok := s.slotQueue.enter("head")
 	if !ok {
 		t.Fatal("enter returned no waiter")
