@@ -316,6 +316,64 @@ fi
         cli.write_text(text)
         cli.chmod(0o700)
 
+    DIGEST = "d" * 64
+
+    def _write_staged_inputs(self, environment=None, live_digest=None) -> None:
+        """Inputs for the staged GLM parity and DeepSeek V4 reference jobs."""
+        marker = f"macprovider.decode-path-digest.v1:{self.DIGEST}"
+        cli = self.paths["diagnostic_cli"].resolve()
+        cli.write_text(f"""#!/bin/sh
+# {marker}
+printf '%s\\t' "$@" >> {str(self.calls)!r}
+printf '\\n' >> {str(self.calls)!r}
+[ "$1" = glm-parity ] || exit 0
+while [ "$#" -gt 0 ]; do [ "$1" = --output ] && out="$2"; shift; done
+printf '%s\\n' '{{"schema":"glm-parity-v1","prefill_step_size":512,"runs":[{{"measurement":{{"prompt_tokens":8192,"prefill_tokens_per_second":280.5,"ttft_seconds":29.3,"decode_tokens_per_second":20.1,"free_running":{{"compared_tokens":256,"matching_tokens":256,"first_divergence":null,"top1_agreement":16,"top1_compared":16}}}}}}]}}' > "$out"
+""")
+        cli.chmod(0o700)
+        install = self.root / "install"
+        install.mkdir(mode=0o700, exist_ok=True)
+        live = install / "macprovider-cli"
+        live.write_text(f"signed release {f'macprovider.decode-path-digest.v1:{live_digest}' if live_digest else marker}\n")
+        live.chmod(0o700)
+        oracle = self.source / jobs.GLM_PARITY_ORACLE_RELATIVE
+        oracle.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        oracle.write_text('{"schema":"glm-parity-oracle-v1"}\n')
+        oracle.chmod(0o600)
+        glm_target, _ = jobs.snapshot_identity(self.source / ".lab-window/fixture/target")
+        write_json(self.source / jobs.GLM_PARITY_POLICY_RELATIVE, {
+            **jobs.GLM_PARITY_POLICY, "target_sha256": glm_target,
+            "oracle_sha256": sha(oracle), "decode_path_digest": self.DIGEST,
+        })
+
+        env = json.dumps(environment or jobs.DSV4_REFERENCE_POLICY["environment"], sort_keys=True)
+        python = self.paths["reference_python"]
+        python.write_text(f"""#!/bin/sh
+if [ "$2" = -c ]; then printf '%s\\n' {env!r}; exit 0; fi
+printf '%s\\t' "$@" >> {str(self.calls)!r}
+printf '\\n' >> {str(self.calls)!r}
+mkdir -m 700 "$4"
+printf '{{}}\\n' > "$4/speed.json"
+for ctx in 1024 8192 32768; do printf 'npz\\n' > "$4/oracle_$ctx.npz"; done
+""")
+        python.chmod(0o700)
+        script = self.paths["reference_script"]
+        script.write_text("print('reference')\n")
+        script.chmod(0o600)
+        weights = self.source / ".lab-window/fixture/dsv4-target/model-00001-of-00001.safetensors"
+        weights.write_bytes(b"dsv4 weights\n")
+        weights.chmod(0o600)
+        subprocess.run(["git", "-C", str(self.source), "add", str(script)], check=True)
+        subprocess.run(["git", "-C", str(self.source), "commit", "-qm", "reference"], check=True)
+        self.head = subprocess.run(
+            ["git", "-C", str(self.source), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        dsv4_target, _ = jobs.snapshot_identity(self.source / ".lab-window/fixture/dsv4-target")
+        write_json(self.source / jobs.DSV4_POLICY_RELATIVE, {
+            **jobs.DSV4_REFERENCE_POLICY, "target_sha256": dsv4_target,
+        })
+
     def snapshot(self, kind: str) -> dict:
         if kind in jobs.QWEN_JOB_KINDS:
             self._write_qwen_inputs()
@@ -335,6 +393,7 @@ fi
             "lab_source_dir": str(self.source),
             "lab_script_path": str(self.staged_script),
             "job_helper_path": str(self.staged_helper),
+            "install_dir": str(self.root / "install"),
             "artifacts": snapshot["artifacts"],
             "job": snapshot["job"],
         }
@@ -804,13 +863,14 @@ class StudioLabJobsTests(unittest.TestCase):
             owner_pin_journal=str(self.fixture.root / "owner.json"),
             lab_source_dir=str(self.fixture.source), lab_script_path=str(self.fixture.staged_script),
             log_path=str(self.fixture.root / "provider.log"), drain_timeout_s="600",
-            lab_timeout_s="21600" if kind == "glm-prefill" else "7200", ready_timeout_s="120", poll_s="5",
+            lab_timeout_s=str(jobs.STAGED_WINDOW_TIMEOUTS.get(kind, 21600 if kind == "glm-prefill" else 7200)),
+            ready_timeout_s="120", poll_s="5",
         )
         manifest = jobs.build_manifest(args)
         path = self.fixture.stage / "window.json"
         write_json(path, manifest)
         loaded, _ = remote.load_manifest(path)
-        self.assertEqual(set(loaded["artifacts"]), jobs.QWEN_ARTIFACT_FIELDS)
+        self.assertEqual(set(loaded["artifacts"]), jobs.artifact_fields(kind))
         remote.validate_lab_artifacts(loaded)
         manifest["artifacts"]["unknown"] = {"path": "/tmp/unknown", "sha256": digest}
         write_json(path, manifest)
@@ -830,6 +890,146 @@ class StudioLabJobsTests(unittest.TestCase):
         write_json(path, manifest)
         with self.assertRaisesRegex(remote.Refusal, "lab_timeout_s"):
             remote.load_manifest(path)
+
+    def test_staged_source_build_and_remote_load_accept_only_their_artifacts(self):
+        self.fixture._write_staged_inputs()
+        for kind in jobs.STAGED_JOB_KINDS:
+            with self.subTest(kind=kind):
+                self._assert_cli_only_source_build_and_remote_load(kind)
+                path = self.fixture.stage / "window.json"
+                manifest = json.loads(path.read_text())
+                manifest["artifacts"].pop("unknown")
+                manifest["lab_timeout_s"] = jobs.STAGED_WINDOW_TIMEOUTS[kind] + 1
+                write_json(path, manifest)
+                with self.assertRaisesRegex(remote.Refusal, "lab_timeout_s"):
+                    remote.load_manifest(path)
+
+    def _staged_result_dir(self, kind):
+        return self.fixture.source / f".lab-window/result-{kind}-nonce"
+
+    def test_sequence_runs_glm_parity_then_reference_in_one_job(self):
+        self.fixture._write_staged_inputs()
+        kind = "glm-parity-prefill512-then-dsv4-reference"
+        manifest = self.fixture.manifest(kind)
+        loaded, job = jobs.load_job_manifest(str(manifest))
+        self.assertEqual(set(loaded["artifacts"]), jobs.artifact_fields(kind))
+        jobs.validate_job(argparse.Namespace(manifest=str(manifest)))
+        self.assertEqual(self.fixture.recorded_calls(), [])
+        with mock.patch.object(jobs, "run_checked", wraps=jobs.run_checked) as dispatch:
+            result = jobs.run_job(argparse.Namespace(manifest=str(manifest)))
+        self.assertEqual([call.kwargs["timeout"] for call in dispatch.call_args_list], [2700, 120, 5400])
+        private = jobs.private_artifact_paths(loaded, job)
+        out = self._staged_result_dir(kind)
+        source = self.fixture.source
+        self.assertEqual(self.fixture.recorded_calls(), [
+            [
+                "glm-parity", "--model-dir", str(source / ".lab-window/fixture/target"),
+                "--oracle", str(private["glm_parity_oracle"]), "--steps", "256",
+                "--prefill-step-size", "512", "--mlx-cache-limit-mb", "4096",
+                "--output", str(out / "glm-parity.json"),
+            ],
+            [
+                "-I", str(private["reference_script"]), str(source / ".lab-window/fixture/dsv4-target"),
+                str(out / "reference"),
+                "--oracle-contexts", "1024,8192,32768", "--ttft-contexts", "4096,32768",
+                "--rows", "1,4", "--row-prompt", "1024", "--decode", "256",
+            ],
+        ])
+        self.assertEqual(result["components"], {
+            "glm-parity-prefill512": "completed", "dsv4-reference": "completed",
+        })
+        parity = result["measurements"]["glm-parity-prefill512"]
+        self.assertEqual(parity["prefill_tokens_per_second"], 280.5)
+        self.assertTrue(parity["token_parity"])
+        self.assertEqual(set(result["outputs"]), {
+            "glm-parity.log", "glm-parity.json", "environment.json", "reference.log",
+            "reference/speed.json", "reference/oracle_1024.npz", "reference/oracle_8192.npz",
+            "reference/oracle_32768.npz",
+        })
+        self.assertFalse(result["qualification"])
+        self.assertFalse(result["qualification_activated"])
+
+    def test_sequence_continues_after_first_failure_and_fails_the_job(self):
+        self.fixture._write_staged_inputs()
+        kind = "glm-parity-prefill512-then-dsv4-reference"
+        manifest = self.fixture.manifest(kind)
+        jobs.validate_job(argparse.Namespace(manifest=str(manifest)))
+        live = self.fixture.root / "install/macprovider-cli"
+        live.write_text(f"macprovider.decode-path-digest.v1:{'e' * 64}\n")
+        with self.assertRaisesRegex(jobs.Refusal, "components failed: glm-parity-prefill512"):
+            jobs.run_job(argparse.Namespace(manifest=str(manifest)))
+        calls = self.fixture.recorded_calls()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "-I")
+        out = self._staged_result_dir(kind)
+        partial = json.loads((out / "partial-result.json").read_text())
+        self.assertEqual(partial["components"]["dsv4-reference"], "completed")
+        self.assertTrue(partial["components"]["glm-parity-prefill512"].startswith("failed"))
+        self.assertFalse((out / "result.json").exists())
+
+    def test_glm_parity_refuses_a_lab_cli_off_the_live_decode_path(self):
+        self.fixture._write_staged_inputs(live_digest="e" * 64)
+        manifest = self.fixture.manifest("glm-parity-prefill512")
+        with self.assertRaisesRegex(jobs.Refusal, "signed provider decode path differs"):
+            jobs.validate_job(argparse.Namespace(manifest=str(manifest)))
+
+    def test_staged_policies_refuse_drift(self):
+        self.fixture._write_staged_inputs()
+        cases = (
+            (jobs.GLM_PARITY_POLICY_RELATIVE, "glm-parity-prefill512", "GLM parity prefill512 policy",
+             (("prefill_step_size", 2048), ("steps", 512), ("oracle", "oracle_1024.json"), ("extra", 1))),
+            (jobs.DSV4_POLICY_RELATIVE, "dsv4-reference", "DeepSeek V4 reference policy",
+             (("decode", 512), ("rows", [1, 8]), ("environment", {"mlx": "0.32.4"}), ("temperature", False))),
+        )
+        for relative, kind, message, changes in cases:
+            path = self.fixture.source / relative
+            base = json.loads(path.read_text())
+            for key, value in changes:
+                with self.subTest(kind=kind, key=key):
+                    write_json(path, {**base, key: value})
+                    with self.assertRaisesRegex(jobs.Refusal, message):
+                        self.fixture.snapshot(kind)
+            write_json(path, base)
+
+    def test_glm_parity_oracle_swap_refuses(self):
+        self.fixture._write_staged_inputs()
+        oracle = self.fixture.source / jobs.GLM_PARITY_ORACLE_RELATIVE
+        oracle.write_text('{"schema":"other"}\n')
+        with self.assertRaisesRegex(jobs.Refusal, "oracle differs"):
+            self.fixture.snapshot("glm-parity-prefill512")
+
+    def test_staged_fixture_identity_and_environment_refuse_preflight(self):
+        self.fixture._write_staged_inputs({"mlx": "0.32.4", "mlx-metal": "0.32.4", "mlx-vlm": "0.7.9"})
+        manifest = self.fixture.manifest("dsv4-reference")
+        with self.assertRaisesRegex(jobs.Refusal, "reference environment differs"):
+            jobs.validate_job(argparse.Namespace(manifest=str(manifest)))
+        path = self.fixture.source / jobs.GLM_PARITY_POLICY_RELATIVE
+        write_json(path, {**json.loads(path.read_text()), "target_sha256": "b" * 64})
+        manifest = self.fixture.manifest("glm-parity-prefill512")
+        with self.assertRaisesRegex(jobs.Refusal, "fixture identity differs"):
+            jobs.validate_job(argparse.Namespace(manifest=str(manifest)))
+
+    def test_staged_fixture_change_after_preflight_refuses_before_command(self):
+        self.fixture._write_staged_inputs()
+        kind = "glm-parity-prefill512-then-dsv4-reference"
+        manifest = self.fixture.manifest(kind)
+        jobs.validate_job(argparse.Namespace(manifest=str(manifest)))
+        extra = self.fixture.source / ".lab-window/fixture/dsv4-target/extra.json"
+        extra.write_text("{}\n")
+        extra.chmod(0o600)
+        with self.assertRaisesRegex(jobs.Refusal, "dsv4-reference fixture changed after job preflight"):
+            jobs.run_job(argparse.Namespace(manifest=str(manifest)))
+        self.assertEqual(self.fixture.recorded_calls(), [])
+
+    def test_staged_private_copy_swap_refuses_before_command(self):
+        self.fixture._write_staged_inputs()
+        manifest = self.fixture.manifest("dsv4-reference")
+        jobs.validate_job(argparse.Namespace(manifest=str(manifest)))
+        loaded, job = jobs.load_job_manifest(str(manifest))
+        jobs.private_artifact_paths(loaded, job)["reference_script"].write_text("print('swapped')\n")
+        with self.assertRaisesRegex(jobs.Refusal, "private job artifact drifted"):
+            jobs.run_job(argparse.Namespace(manifest=str(manifest)))
+        self.assertEqual(self.fixture.recorded_calls(), [])
 
     def _unrelated_phase3_commit(self) -> str:
         phase3 = self.fixture.source / "phase3-binary/source.txt"

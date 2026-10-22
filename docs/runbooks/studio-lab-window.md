@@ -40,7 +40,7 @@ controller. Also set:
 | `STUDIO_LAB_SOURCE_DIR` | Absolute path to the campaign clone on the Studio |
 | `STUDIO_LAB_GIT_HEAD` | Exact 40-character campaign commit |
 | `STUDIO_LAB_WINDOW_DIR` | Dedicated private directory for this window's journal and staged helpers |
-| `STUDIO_LAB_JOB_KIND` | Closed job kind: `diagnostic-legacy` (default), `profiler-only`, `qualification`, `qwen-qualification`, `qwen-journey`, or `glm-prefill` |
+| `STUDIO_LAB_JOB_KIND` | Closed job kind: `diagnostic-legacy` (default), `profiler-only`, `qualification`, `qwen-qualification`, `qwen-journey`, `glm-prefill`, `glm-parity-prefill512`, `dsv4-reference`, or `glm-parity-prefill512-then-dsv4-reference` |
 
 The command and its arguments are fixed in
 `scripts/lab/2080-native-rows/run-window-diagnostic.sh`. There is no shell
@@ -137,7 +137,37 @@ not exercised by this offline process. Its child deadline is 5400 seconds and
 the guarded window ceiling is 7200 seconds. Preserve existing qualification
 evidence and complete external acceptance separately.
 
-Before pausing service, qualification runs the harness's authoritative
+### Staged measurement jobs
+
+These jobs measure; they never qualify, admit or activate anything. Each one
+has a fixed policy, a hash-bound fixture and a fixed command. Before the
+pause, preflight hashes every fixture it names with the full-snapshot
+identity. It then freezes private copies of the binaries, policies, oracle and
+script, and pins the fixture metadata.
+
+`glm-parity-prefill512` (#2100) runs `macprovider-cli glm-parity` once.
+- **Inputs:** the 8192-token T3 oracle, `--prefill-step-size 512`, 256 steps and a 4096 MB MLX cache, on `.lab-window/fixture/target`.
+- **Binary:** the signed release has no `glm-parity`, so the job runs the lab CLI.
+- **Decode-path binding:** the policy `.lab-window/glm-parity-policy.json` (from `scripts/lab/cb-studio/glm-parity-prefill512-policy.json`) records the decode-path digest. Both the lab CLI and the installed signed provider must embed that digest.
+- **Oracle:** `.lab-window/glm-parity/oracle_8192.json`, bound by SHA-256.
+- **Receipt:** records prefill tok/s, TTFT, decode tok/s and the token-parity result.
+- **Deadlines:** the command has 2700 s and the window ceiling is 3600 s.
+
+`dsv4-reference` (#2111) runs the mlx-vlm reference
+`scripts/lab/dsv4/dsv4_reference_bench.py` under `.lab-window/dsv4-venv`.
+- **Fixture:** `.lab-window/fixture/dsv4-target`.
+- **Policy:** `.lab-window/dsv4-reference-policy.json` (from `scripts/lab/dsv4/dsv4-reference-policy.json`). It pins the artifact revision, the fixture identity and the exact `mlx`, `mlx-metal` and `mlx-vlm` versions.
+- **Environment check:** preflight reads the venv's package metadata without importing `mlx`.
+- **Interpreter:** it stays in place and is hash-bound by the source snapshot. The rest of the venv is bound by the version check only.
+- **Deadlines:** the command has 5400 s and the window ceiling is 7200 s.
+- **Preparation:** see `scripts/lab/dsv4/README.md`.
+
+`glm-parity-prefill512-then-dsv4-reference` runs both jobs, in that order, in one pause.
+- **Restore:** the provider is restored once, after the child exits, with the same supervisor guarantees.
+- **Failure:** a failing first component does not stop the second. The job fails if either fails, and `partial-result.json` keeps what completed.
+- **Ceiling:** the window ceiling is 9000 seconds. The no-model preflight that hashes both fixtures before the pause is bounded at 1500 seconds.
+
+
 `--validate-only` preflight without loading the model. A policy not admitted
 by that parser is refused. This runner does not raise the signed production
 bound or bypass policy validation; laboratory-bound amendments belong to the

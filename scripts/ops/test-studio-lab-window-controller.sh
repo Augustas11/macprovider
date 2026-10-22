@@ -198,6 +198,18 @@ load_recovery_context
 rm -f "$(active_marker_path)"
 pass "Qwen journey recovery retains fixed job identity and timeout"
 
+staged_nonce=aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae
+staged_sha="$(printf 'd%.0s' {1..64})"
+staged_identity="$(printf '6%.0s' {1..64})"
+mark_done "$OPS_SCOPE" active staged "{\"phase\":\"dispatched\",\"nonce\":\"$staged_nonce\",\"lab_git_head\":\"$legacy_head\",\"outcome_marker\":\"\",\"manifest_sha256\":\"$staged_sha\",\"job_kind\":\"glm-parity-prefill512-then-dsv4-reference\",\"job_identity\":\"$staged_identity\"}"
+STUDIO_LAB_JOB_KIND=dsv4-reference
+load_recovery_context
+[ "$STUDIO_LAB_JOB_KIND" = glm-parity-prefill512-then-dsv4-reference ] || fail "staged sequence marker did not restore its job kind"
+[ "$STUDIO_LAB_JOB_IDENTITY" = "$staged_identity" ] || fail "staged sequence marker did not restore its identity"
+[ "$LAB_TIMEOUT_S" = 9000 ] || fail "staged sequence recovery did not retain its one-window ceiling"
+rm -f "$(active_marker_path)"
+pass "staged GLM-parity then DeepSeek sequence recovers with one 9000-second window ceiling"
+
 # A successful completion for a qualified job must bind the fresh source job
 # identity and kind, not merely a local complete marker and zero exit code.
 STUDIO_LAB_JOB_KIND=profiler-only

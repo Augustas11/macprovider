@@ -1,0 +1,13 @@
+{
+  "decode_path_digest": "4be59bfa19c48d43a6a4b920c563afd0afaed2280b7ca0156a22eb35c50410dc",
+  "evidence_class": "glm_parity_prefill512_measurement_only",
+  "mlx_cache_limit_mb": 4096,
+  "model_id": "zai-org/glm-5.3-flash",
+  "oracle": "oracle_8192.json",
+  "oracle_sha256": "44de6bd30c03376070c8faba953ce71a55056248402a3f9809fe6ba2b78ac7e4",
+  "prefill_step_size": 512,
+  "prompt_tokens": 8192,
+  "schema": "macprovider.glm-parity-prefill512-policy.v1",
+  "steps": 256,
+  "target_sha256": "7299b6a71a38490e378e9eb6524c426392aa96e3fd561007e0540134bbef48f9"
+}

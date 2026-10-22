@@ -30,12 +30,18 @@ ARTIFACT_RELATIVES = {
     "glmbench_metallib": "scripts/lab/cb-studio/glm53-bench/.build/release/mlx.metallib",
     "fixture_config": ".lab-window/fixture/target/config.json",
     "fixture_index": ".lab-window/fixture/target/model.safetensors.index.json",
+    "reference_python": ".lab-window/dsv4-venv/bin/python3",
+    "reference_script": "scripts/lab/dsv4/dsv4_reference_bench.py",
+    "dsv4_fixture_config": ".lab-window/fixture/dsv4-target/config.json",
+    "dsv4_fixture_index": ".lab-window/fixture/dsv4-target/model.safetensors.index.json",
 }
 QWEN_ARTIFACT_FIELDS = {
     "diagnostic_cli", "diagnostic_metallib", "fixture_config", "fixture_index",
 }
+EXECUTABLE_ARTIFACTS = {"diagnostic_cli", "glmbench", "reference_python"}
 JOB_KINDS = (
     "diagnostic-legacy", "profiler-only", "qualification", "qwen-qualification", "qwen-journey", "glm-prefill",
+    "glm-parity-prefill512", "dsv4-reference", "glm-parity-prefill512-then-dsv4-reference",
 )
 JOB_SCHEMA = "macprovider.studio_lab_window_job.v1"
 JOB_RESULT_SCHEMA = "macprovider.studio_lab_window_job_result.v1"
@@ -148,6 +154,12 @@ def require_sha(value: object, name: str) -> str:
     if not isinstance(value, str) or not SHA256.fullmatch(value):
         raise Refusal(f"{name} must be a lowercase SHA-256")
     return value
+
+
+def artifact_fields(kind: str) -> set[str]:
+    if kind in STAGED_JOB_KINDS:
+        return set().union(*(STAGED_COMPONENT_FIELDS[item] for item in STAGED_JOB_KINDS[kind]))
+    return QWEN_ARTIFACT_FIELDS if kind in CLI_ONLY_JOB_KINDS else ARTIFACT_FIELDS
 
 
 def read_safe_object(path: Path, name: str) -> tuple[dict, str]:
@@ -476,6 +488,14 @@ def build_job(args: argparse.Namespace, source: Path, artifacts: dict[str, dict[
         "job_helper_sha256": helper_sha,
         "artifact_sha256": {key: item["sha256"] for key, item in sorted(artifacts.items())},
     }
+    if kind in STAGED_JOB_KINDS:
+        inputs.update(staged_inputs(kind, source))
+        return {
+            "schema_version": JOB_SCHEMA,
+            "kind": kind,
+            "identity_sha256": canonical_digest({"kind": kind, "immutable_inputs": inputs}),
+            "immutable_inputs": inputs,
+        }
     if kind not in CLI_ONLY_JOB_KINDS:
         inputs["glmbench_tree_oid"] = git_value(
             source, "HEAD:scripts/lab/cb-studio/glm53-bench", "GLMBench tree"
@@ -541,11 +561,10 @@ def source_snapshot(args: argparse.Namespace) -> dict[str, object]:
     if dirty:
         raise Refusal("lab source has tracked modifications")
     kind = getattr(args, "job_kind", "diagnostic-legacy")
-    artifact_fields = QWEN_ARTIFACT_FIELDS if kind in CLI_ONLY_JOB_KINDS else ARTIFACT_FIELDS
-    artifacts = {name: source / ARTIFACT_RELATIVES[name] for name in artifact_fields}
+    artifacts = {name: source / ARTIFACT_RELATIVES[name] for name in artifact_fields(kind)}
     result: dict[str, dict[str, str]] = {}
     for name, path in artifacts.items():
-        target = safe_artifact(path, executable=name in {"diagnostic_cli", "glmbench"})
+        target = safe_artifact(path, executable=name in EXECUTABLE_ARTIFACTS)
         result[name] = {"path": str(path), "sha256": file_sha256(target)}
     launch_agents = Path.home().resolve() / "Library" / "LaunchAgents"
     snapshot: dict[str, object] = {
@@ -616,13 +635,9 @@ def build_manifest(args: argparse.Namespace) -> dict[str, object]:
     job = source.get("job")
     if job is not None:
         validate_job_object(job)
-    artifact_fields = (
-        QWEN_ARTIFACT_FIELDS
-        if isinstance(job, dict) and job.get("kind") in CLI_ONLY_JOB_KINDS
-        else ARTIFACT_FIELDS
-    )
+    expected_fields = artifact_fields(job["kind"] if isinstance(job, dict) else "diagnostic-legacy")
     artifacts = source.get("artifacts")
-    if not isinstance(artifacts, dict) or set(artifacts) != artifact_fields:
+    if not isinstance(artifacts, dict) or set(artifacts) != expected_fields:
         raise Refusal("source artifact snapshot is incomplete")
     for name, item in artifacts.items():
         if (
@@ -652,6 +667,7 @@ def build_manifest(args: argparse.Namespace) -> dict[str, object]:
         raise Refusal("probe executable does not match install directory")
     lab_timeout = positive(
         args.lab_timeout_s, "lab timeout",
+        STAGED_WINDOW_TIMEOUTS[job["kind"]] if job is not None and job["kind"] in STAGED_JOB_KINDS else
         43200 if job is not None and job["kind"] in QUALIFICATION_KINDS else (
             21600 if job is not None and job["kind"] == "glm-prefill" else (
                 7200 if job is not None and job["kind"] == "qwen-journey" else 3600
@@ -703,6 +719,11 @@ def validate_job_object(job: object) -> dict:
     inputs = job.get("immutable_inputs")
     if not isinstance(inputs, dict):
         raise Refusal("job immutable inputs are missing")
+    if job["kind"] in STAGED_JOB_KINDS:
+        validate_staged_inputs(job["kind"], inputs)
+        if job.get("identity_sha256") != canonical_digest({"kind": job["kind"], "immutable_inputs": inputs}):
+            raise Refusal("job identity digest mismatch")
+        return job
     expected_inputs = {
         "phase3_tree_oid", "lab_script_sha256", "job_helper_sha256", "artifact_sha256",
     }
@@ -823,7 +844,7 @@ def validate_current_job_inputs(manifest: dict, job: dict) -> None:
     inputs = job["immutable_inputs"]
     if git_value(source, "HEAD:phase3-binary", "phase3 tree") != inputs.get("phase3_tree_oid"):
         raise Refusal("job phase3 source tree drifted")
-    if job["kind"] not in CLI_ONLY_JOB_KINDS and (
+    if job["kind"] not in CLI_ONLY_JOB_KINDS and job["kind"] not in STAGED_JOB_KINDS and (
         git_value(source, "HEAD:scripts/lab/cb-studio/glm53-bench", "GLMBench tree")
         != inputs.get("glmbench_tree_oid")
     ):
@@ -838,8 +859,7 @@ def validate_current_job_inputs(manifest: dict, job: dict) -> None:
     artifacts = manifest.get("artifacts")
     if not isinstance(artifact_hashes, dict) or not isinstance(artifacts, dict):
         raise Refusal("job artifact identities are missing")
-    artifact_fields = QWEN_ARTIFACT_FIELDS if job["kind"] in CLI_ONLY_JOB_KINDS else ARTIFACT_FIELDS
-    for key in artifact_fields:
+    for key in artifact_fields(job["kind"]):
         item = artifacts.get(key)
         if not isinstance(item, dict) or artifact_hashes.get(key) != item.get("sha256"):
             raise Refusal(f"job artifact manifest mismatch: {key}")
@@ -849,10 +869,14 @@ def validate_current_job_inputs(manifest: dict, job: dict) -> None:
         expected = source / ARTIFACT_RELATIVES[key]
         if not path.is_absolute() or path != expected:
             raise Refusal(f"job artifact path is not fixed: {key}")
-        actual = file_sha256(safe_artifact(path, executable=key in {"diagnostic_cli", "glmbench"}))
+        actual = file_sha256(safe_artifact(path, executable=key in EXECUTABLE_ARTIFACTS))
         if actual != artifact_hashes[key]:
             raise Refusal(f"job artifact drifted: {key}")
-    if job["kind"] == "profiler-only":
+    if job["kind"] in STAGED_JOB_KINDS:
+        current = staged_inputs(job["kind"], source)
+        if any(inputs.get(key) != value for key, value in current.items()):
+            raise Refusal("staged job policy, oracle or script inputs drifted")
+    elif job["kind"] == "profiler-only":
         current_reuse = archived_reuse(source, artifacts, str(inputs["phase3_tree_oid"]))
         if inputs.get("reuse") != current_reuse:
             raise Refusal("archived journey reuse inputs drifted")
@@ -985,6 +1009,8 @@ def preflight_path(manifest: dict) -> Path:
 
 def private_artifact_paths(manifest: dict, job: dict) -> dict[str, Path]:
     root = preflight_path(manifest) / "artifacts"
+    if job["kind"] in STAGED_JOB_KINDS:
+        return staged_private_paths(root, job["kind"])
     paths = {
         "diagnostic_cli": root / "provider/macprovider-cli",
         "diagnostic_metallib": root / "provider/mlx.metallib",
@@ -1049,6 +1075,9 @@ def prepare_private_artifacts(manifest: dict, job: dict) -> None:
     paths = private_artifact_paths(manifest, job)
     root = preflight_path(manifest) / "artifacts"
     create_result_dir(root)
+    if job["kind"] in STAGED_JOB_KINDS:
+        staged_prepare_private(manifest, job, root, paths)
+        return
     create_result_dir(root / "provider")
     if job["kind"] not in CLI_ONLY_JOB_KINDS:
         create_result_dir(root / "bench")
@@ -1094,6 +1123,8 @@ def validate_private_artifacts(manifest: dict, job: dict) -> dict[str, str]:
     expected = job["immutable_inputs"]["artifact_sha256"]
     result: dict[str, str] = {}
     root = preflight_path(manifest) / "artifacts"
+    if job["kind"] in STAGED_JOB_KINDS:
+        return staged_validate_private(manifest, job, root)
     directories = [preflight_path(manifest), root, root / "provider"]
     if job["kind"] not in CLI_ONLY_JOB_KINDS:
         directories.append(root / "bench")
@@ -1133,6 +1164,9 @@ def valid_stamp_list(value: object) -> bool:
 def validate_preflight_receipt(manifest: dict, job: dict) -> None:
     safe_directory(preflight_path(manifest))
     receipt, _ = read_safe_object(preflight_path(manifest) / "identity.json", "job preflight")
+    if job["kind"] in STAGED_JOB_KINDS:
+        staged_validate_receipt(manifest, job, receipt)
+        return
     target = Path(manifest["lab_source_dir"]) / ".lab-window/fixture/target"
     mtp = Path(manifest["lab_source_dir"]) / ".lab-window/fixture/mtp"
     expected = receipt.get("expected")
@@ -1311,6 +1345,10 @@ def validate_job(args: argparse.Namespace) -> dict[str, object]:
         return {"kind": job["kind"], "identity_sha256": job["identity_sha256"], "validated": True}
     create_result_dir(preflight)
     prepare_private_artifacts(manifest, job)
+    if job["kind"] in STAGED_JOB_KINDS:
+        write_result(preflight / "identity.json", staged_preflight(manifest, job, preflight))
+        validate_execution_inputs(manifest, job)
+        return {"kind": job["kind"], "identity_sha256": job["identity_sha256"], "validated": True}
     target = source / ".lab-window/fixture/target"
     qwen = job["kind"] in QWEN_JOB_KINDS
     expected = job["immutable_inputs"]["artifact_projection"] if qwen else projection_tuple(source)
@@ -1445,6 +1483,8 @@ def run_job(args: argparse.Namespace) -> dict[str, object]:
     result = Path(manifest["_result_dir"])
     create_result_dir(result)
     outputs: list[Path] = []
+    if job["kind"] in STAGED_JOB_KINDS:
+        return staged_run(manifest, job, result)
     if job["kind"] == "profiler-only":
         bench = str(private_artifact_paths(manifest, job)["glmbench"])
         target = str(source / ".lab-window/fixture/target")
@@ -1528,6 +1568,410 @@ def run_job(args: argparse.Namespace) -> dict[str, object]:
         receipt["executed_inputs"]["fixture_mtp_sha256"] = (
             job["immutable_inputs"]["artifact_projection"]["mtp_sha256"]
         )
+    write_result(result / "result.json", receipt)
+    return {**receipt, "result_path": str(result / "result.json")}
+
+
+# ---------------------------------------------------------------------------
+# Staged measurement jobs (#2100, #2111). Each component has a fixed policy,
+# a hash-bound fixture and a fixed command. A sequence kind runs several
+# components inside one provider pause; the supervisor restores the provider
+# once, after the whole child exits. Nothing here qualifies or activates.
+
+STAGED_JOB_KINDS = {
+    "glm-parity-prefill512": ("glm-parity-prefill512",),
+    "dsv4-reference": ("dsv4-reference",),
+    "glm-parity-prefill512-then-dsv4-reference": ("glm-parity-prefill512", "dsv4-reference"),
+}
+STAGED_COMPONENT_FIELDS = {
+    "glm-parity-prefill512": {"diagnostic_cli", "diagnostic_metallib", "fixture_config", "fixture_index"},
+    "dsv4-reference": {"reference_python", "reference_script", "dsv4_fixture_config", "dsv4_fixture_index"},
+}
+STAGED_COMPONENT_ROOTS = {
+    "glm-parity-prefill512": ".lab-window/fixture/target",
+    "dsv4-reference": ".lab-window/fixture/dsv4-target",
+}
+# Per-command deadlines; the window ceiling covers the sum plus model loads.
+STAGED_COMMAND_TIMEOUTS = {"glm-parity-prefill512": 2700, "dsv4-reference": 5400}
+STAGED_WINDOW_TIMEOUTS = {
+    "glm-parity-prefill512": 3600,
+    "dsv4-reference": 7200,
+    "glm-parity-prefill512-then-dsv4-reference": 9000,
+}
+STAGED_PREFLIGHT_SCHEMA = "macprovider.studio_lab_window_staged_preflight.v1"
+DECODE_PATH_MARKER = re.compile(rb"macprovider\.decode-path-digest\.v1:([0-9a-f]{64})")
+
+GLM_PARITY_POLICY_RELATIVE = Path(".lab-window/glm-parity-policy.json")
+GLM_PARITY_ORACLE_RELATIVE = Path(".lab-window/glm-parity/oracle_8192.json")
+GLM_PARITY_PROFILE = {"steps": 256, "prefill_step_size": 512, "mlx_cache_limit_mb": 4096}
+GLM_PARITY_POLICY = {
+    "schema": "macprovider.glm-parity-prefill512-policy.v1",
+    "model_id": "zai-org/glm-5.3-flash",
+    "oracle": "oracle_8192.json",
+    "prompt_tokens": 8192,
+    "evidence_class": "glm_parity_prefill512_measurement_only",
+    **GLM_PARITY_PROFILE,
+}
+GLM_PARITY_POLICY_SHAS = ("target_sha256", "oracle_sha256", "decode_path_digest")
+
+DSV4_POLICY_RELATIVE = Path(".lab-window/dsv4-reference-policy.json")
+DSV4_TREE_RELATIVE = "scripts/lab/dsv4"
+# Fixed reference run (#2111): the argv comes from this constant, never from a file.
+DSV4_REFERENCE_PROFILE = {
+    "oracle_contexts": [1024, 8192, 32768], "ttft_contexts": [4096, 32768],
+    "rows": [1, 4], "row_prompt": 1024, "decode": 256,
+}
+DSV4_REFERENCE_POLICY = {
+    "schema": "macprovider.dsv4-reference-policy.v1",
+    "model_id": "deepseek-ai/deepseek-v4-flash-0731",
+    "artifact_repo": "TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX",
+    "artifact_revision": "d6be051ae238b2021de56cf098d8f0206328754a",
+    "environment": {"mlx": "0.32.4", "mlx-metal": "0.32.4", "mlx-vlm": "0.7.10"},
+    "temperature": 0,
+    "evidence_class": "dsv4_reference_measurement_only",
+    **DSV4_REFERENCE_PROFILE,
+}
+# Reads installed distribution metadata only; it never imports mlx or loads a model.
+DSV4_ENVIRONMENT_PROBE = (
+    "import importlib.metadata as m, json, sys; "
+    "print(json.dumps({p: m.version(p) for p in sys.argv[1:]}, sort_keys=True))"
+)
+STAGED_INPUT_KEYS = {
+    "glm-parity-prefill512": {
+        "glm_parity_policy_sha256", "glm_parity_target_sha256",
+        "glm_parity_oracle_sha256", "glm_parity_decode_path_digest",
+    },
+    "dsv4-reference": {"reference_tree_oid", "reference_policy_sha256", "reference_target_sha256"},
+}
+
+
+def validate_fixed_policy(value: dict, fixed: dict, shas: tuple[str, ...], name: str) -> None:
+    if set(value) != set(fixed) | set(shas):
+        raise Refusal(f"{name} policy fields are not the fixed contract")
+    for key, expected in fixed.items():
+        actual = value.get(key)
+        if actual != expected or type(actual) is not type(expected) or (
+            isinstance(expected, list) and any(type(item) is not int for item in actual)
+        ):
+            raise Refusal(f"{name} policy {key} is not the fixed contract")
+    for key in shas:
+        require_sha(value.get(key), f"{name} policy {key}")
+
+
+def validate_dsv4_reference_policy(value: dict) -> None:
+    validate_fixed_policy(value, DSV4_REFERENCE_POLICY, ("target_sha256",), "DeepSeek V4 reference")
+
+
+def validate_glm_parity_policy(value: dict) -> None:
+    validate_fixed_policy(value, GLM_PARITY_POLICY, GLM_PARITY_POLICY_SHAS, "GLM parity prefill512")
+
+
+def component_inputs(component: str, source: Path) -> dict[str, str]:
+    if component == "glm-parity-prefill512":
+        policy, policy_sha = read_safe_object(source / GLM_PARITY_POLICY_RELATIVE, "GLM parity policy")
+        validate_glm_parity_policy(policy)
+        oracle = file_sha256(safe_artifact(source / GLM_PARITY_ORACLE_RELATIVE))
+        if oracle != policy["oracle_sha256"]:
+            raise Refusal("GLM parity oracle differs from its policy")
+        return {
+            "glm_parity_policy_sha256": policy_sha,
+            "glm_parity_target_sha256": policy["target_sha256"],
+            "glm_parity_oracle_sha256": oracle,
+            "glm_parity_decode_path_digest": policy["decode_path_digest"],
+        }
+    policy, policy_sha = read_safe_object(source / DSV4_POLICY_RELATIVE, "DeepSeek V4 reference policy")
+    validate_dsv4_reference_policy(policy)
+    return {
+        "reference_tree_oid": git_value(source, f"HEAD:{DSV4_TREE_RELATIVE}", "reference script tree"),
+        "reference_policy_sha256": policy_sha,
+        "reference_target_sha256": policy["target_sha256"],
+    }
+
+
+def staged_inputs(kind: str, source: Path) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for component in STAGED_JOB_KINDS[kind]:
+        result.update(component_inputs(component, source))
+    return result
+
+
+def validate_staged_inputs(kind: str, inputs: dict) -> None:
+    expected = {"phase3_tree_oid", "lab_script_sha256", "job_helper_sha256", "artifact_sha256"}
+    for component in STAGED_JOB_KINDS[kind]:
+        expected |= STAGED_INPUT_KEYS[component]
+    if set(inputs) != expected:
+        raise Refusal("job immutable input schema is invalid")
+    for key in ("phase3_tree_oid", "reference_tree_oid"):
+        if key in expected and (not isinstance(inputs.get(key), str) or not SHA40.fullmatch(inputs[key])):
+            raise Refusal(f"job {key} is invalid")
+    for key in expected - {"phase3_tree_oid", "reference_tree_oid", "artifact_sha256"}:
+        require_sha(inputs.get(key), f"job {key}")
+    artifacts = inputs.get("artifact_sha256")
+    if not isinstance(artifacts, dict) or set(artifacts) != artifact_fields(kind):
+        raise Refusal("job artifact hash schema is invalid")
+    for key, value in artifacts.items():
+        require_sha(value, f"job artifact {key}")
+
+
+def staged_private_paths(root: Path, kind: str) -> dict[str, Path]:
+    paths: dict[str, Path] = {}
+    components = STAGED_JOB_KINDS[kind]
+    if "glm-parity-prefill512" in components:
+        paths.update({
+            "diagnostic_cli": root / "provider/macprovider-cli",
+            "diagnostic_metallib": root / "provider/mlx.metallib",
+            "glm_parity_policy": root / "glm-parity/policy.json",
+            "glm_parity_oracle": root / "glm-parity/oracle_8192.json",
+        })
+    if "dsv4-reference" in components:
+        # The venv interpreter stays in place (a copied interpreter loses its
+        # venv); it is hash-bound by the source snapshot instead.
+        paths.update({
+            "reference_script": root / "reference/dsv4_reference_bench.py",
+            "reference_policy": root / "reference/policy.json",
+        })
+    return paths
+
+
+def staged_private_sources(manifest: dict, job: dict) -> dict[str, tuple[Path, str]]:
+    source = Path(manifest["lab_source_dir"])
+    inputs = job["immutable_inputs"]
+    artifacts = inputs["artifact_sha256"]
+    known = {
+        "diagnostic_cli": (Path(manifest["artifacts"].get("diagnostic_cli", {}).get("path", "/")), artifacts.get("diagnostic_cli")),
+        "diagnostic_metallib": (Path(manifest["artifacts"].get("diagnostic_metallib", {}).get("path", "/")), artifacts.get("diagnostic_metallib")),
+        "glm_parity_policy": (source / GLM_PARITY_POLICY_RELATIVE, inputs.get("glm_parity_policy_sha256")),
+        "glm_parity_oracle": (source / GLM_PARITY_ORACLE_RELATIVE, inputs.get("glm_parity_oracle_sha256")),
+        "reference_script": (Path(manifest["artifacts"].get("reference_script", {}).get("path", "/")), artifacts.get("reference_script")),
+        "reference_policy": (source / DSV4_POLICY_RELATIVE, inputs.get("reference_policy_sha256")),
+    }
+    return {key: known[key] for key in staged_private_paths(Path("/"), job["kind"])}
+
+
+def staged_prepare_private(manifest: dict, job: dict, root: Path, paths: dict[str, Path]) -> None:
+    directories = sorted({path.parent for path in paths.values()})
+    for directory in directories:
+        create_result_dir(directory)
+    for key, (origin, expected) in staged_private_sources(manifest, job).items():
+        copy_authenticated(origin, paths[key], str(expected), executable=key == "diagnostic_cli")
+    for directory in [*directories, root]:
+        fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+def staged_validate_private(manifest: dict, job: dict, root: Path) -> dict[str, str]:
+    paths = staged_private_paths(root, job["kind"])
+    for directory in [preflight_path(manifest), root, *sorted({path.parent for path in paths.values()})]:
+        safe_directory(directory)
+    result: dict[str, str] = {}
+    for key, (_, expected) in staged_private_sources(manifest, job).items():
+        actual = file_sha256(safe_artifact(paths[key], executable=key == "diagnostic_cli"))
+        if actual != expected:
+            raise Refusal(f"private job artifact drifted: {key}")
+        result[key] = actual
+    return result
+
+
+def embedded_decode_path_digest(path: Path) -> str:
+    found = set(DECODE_PATH_MARKER.findall(safe_artifact(path).read_bytes()))
+    if len(found) != 1:
+        raise Refusal(f"binary does not embed exactly one decode-path digest: {path}")
+    return found.pop().decode()
+
+
+def check_glm_parity_decode_path(manifest: dict, job: dict) -> None:
+    # The lab CLI carries glm-parity; the signed release does not. Both must
+    # embed the policy's decode-path digest, so the measured prefill and
+    # parity are those of the live release's decode path.
+    expected = job["immutable_inputs"]["glm_parity_decode_path_digest"]
+    lab = staged_private_paths(preflight_path(manifest) / "artifacts", job["kind"])["diagnostic_cli"]
+    live = Path(manifest["install_dir"]) / "macprovider-cli"
+    for name, path in (("lab CLI", lab), ("signed provider", live)):
+        if embedded_decode_path_digest(path) != expected:
+            raise Refusal(f"{name} decode path differs from the GLM parity policy")
+
+
+def check_reference_environment(manifest: dict, output: Path) -> None:
+    expected = DSV4_REFERENCE_POLICY["environment"]
+    python = str(manifest["artifacts"]["reference_python"]["path"])
+    run_checked([python, "-I", "-c", DSV4_ENVIRONMENT_PROBE, *sorted(expected)], output, timeout=120)
+    try:
+        observed = json.loads(output.read_text().splitlines()[-1])
+    except (IndexError, ValueError) as exc:
+        raise Refusal(f"reference environment probe is invalid; private log: {output}") from exc
+    if observed != expected:
+        raise Refusal(f"reference environment differs from the fixed versions; private log: {output}")
+
+
+def component_target(component: str, job: dict) -> str:
+    inputs = job["immutable_inputs"]
+    return inputs["glm_parity_target_sha256" if component == "glm-parity-prefill512" else "reference_target_sha256"]
+
+
+def staged_preflight(manifest: dict, job: dict, preflight: Path) -> dict:
+    source = Path(manifest["lab_source_dir"])
+    components: dict[str, dict] = {}
+    for component in STAGED_JOB_KINDS[job["kind"]]:
+        root = source / STAGED_COMPONENT_ROOTS[component]
+        digest, stamps = snapshot_identity(root)
+        if digest != component_target(component, job):
+            raise Refusal(f"{component} fixture identity differs from its policy")
+        if component == "glm-parity-prefill512":
+            check_glm_parity_decode_path(manifest, job)
+        else:
+            check_reference_environment(manifest, preflight / "environment.json")
+        components[component] = {
+            "canonical_root": str(root.resolve(strict=True)), "target_sha256": digest, "stamps": stamps,
+        }
+    return {
+        "schema_version": STAGED_PREFLIGHT_SCHEMA,
+        "nonce": manifest["nonce"],
+        "job_identity_sha256": job["identity_sha256"],
+        "algorithm": "macprovider.snapshot-manifest.v1",
+        "components": components,
+    }
+
+
+def staged_validate_receipt(manifest: dict, job: dict, receipt: dict) -> None:
+    source = Path(manifest["lab_source_dir"])
+    components = receipt.get("components")
+    expected = STAGED_JOB_KINDS[job["kind"]]
+    if (
+        receipt.get("schema_version") != STAGED_PREFLIGHT_SCHEMA
+        or receipt.get("nonce") != manifest["nonce"]
+        or receipt.get("job_identity_sha256") != job["identity_sha256"]
+        or receipt.get("algorithm") != "macprovider.snapshot-manifest.v1"
+        or not isinstance(components, dict)
+        or set(components) != set(expected)
+    ):
+        raise Refusal("job preflight identity is invalid")
+    for component in expected:
+        item = components[component]
+        root = source / STAGED_COMPONENT_ROOTS[component]
+        if (
+            not isinstance(item, dict)
+            or item.get("canonical_root") != str(root.resolve(strict=True))
+            or item.get("target_sha256") != component_target(component, job)
+            or not valid_stamp_list(item.get("stamps"))
+        ):
+            raise Refusal("job preflight identity is invalid")
+        if snapshot_stamps(root, len(item["stamps"]) + 1) != item["stamps"]:
+            raise Refusal(f"{component} fixture changed after job preflight")
+
+
+def glm_parity_summary(path: Path) -> dict:
+    try:
+        path = safe_artifact(path)
+        report = json.loads(path.read_bytes())
+        runs = report["runs"]
+        measured = runs[0]["measurement"]
+        free = measured["free_running"]
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        raise Refusal(f"GLM parity result is invalid; private log: {path}") from exc
+    if (
+        report.get("schema") != "glm-parity-v1"
+        or report.get("prefill_step_size") != GLM_PARITY_PROFILE["prefill_step_size"]
+        or len(runs) != 1
+        or measured.get("prompt_tokens") != GLM_PARITY_POLICY["prompt_tokens"]
+    ):
+        raise Refusal(f"GLM parity result is not the fixed run; private log: {path}")
+    return {
+        "prompt_tokens": measured["prompt_tokens"],
+        "prefill_step_size": report["prefill_step_size"],
+        "prefill_tokens_per_second": measured["prefill_tokens_per_second"],
+        "ttft_seconds": measured["ttft_seconds"],
+        "decode_tokens_per_second": measured["decode_tokens_per_second"],
+        "compared_tokens": free["compared_tokens"],
+        "matching_tokens": free["matching_tokens"],
+        "first_divergence": free["first_divergence"],
+        "top1_agreement": [free["top1_agreement"], free["top1_compared"]],
+        "token_parity": free["first_divergence"] is None,
+    }
+
+
+def run_component(manifest: dict, job: dict, component: str, result: Path) -> tuple[list[Path], dict]:
+    source = Path(manifest["lab_source_dir"])
+    private = private_artifact_paths(manifest, job)
+    validate_execution_inputs(manifest, job)
+    if component == "glm-parity-prefill512":
+        check_glm_parity_decode_path(manifest, job)
+        report = result / "glm-parity.json"
+        log = result / "glm-parity.log"
+        profile = GLM_PARITY_PROFILE
+        run_checked([
+            str(private["diagnostic_cli"]), "glm-parity",
+            "--model-dir", str(source / STAGED_COMPONENT_ROOTS[component]),
+            "--oracle", str(private["glm_parity_oracle"]),
+            "--steps", str(profile["steps"]),
+            "--prefill-step-size", str(profile["prefill_step_size"]),
+            "--mlx-cache-limit-mb", str(profile["mlx_cache_limit_mb"]),
+            "--output", str(report),
+        ], log, timeout=STAGED_COMMAND_TIMEOUTS[component])
+        return [log, report], glm_parity_summary(report)
+    environment = result / "environment.json"
+    check_reference_environment(manifest, environment)
+    profile = DSV4_REFERENCE_PROFILE
+    reference = result / "reference"
+    log = result / "reference.log"
+    joined = lambda values: ",".join(str(value) for value in values)
+    run_checked([
+        str(manifest["artifacts"]["reference_python"]["path"]), "-I",
+        str(private["reference_script"]),
+        str(source / STAGED_COMPONENT_ROOTS[component]), str(reference),
+        "--oracle-contexts", joined(profile["oracle_contexts"]),
+        "--ttft-contexts", joined(profile["ttft_contexts"]),
+        "--rows", joined(profile["rows"]),
+        "--row-prompt", str(profile["row_prompt"]),
+        "--decode", str(profile["decode"]),
+    ], log, timeout=STAGED_COMMAND_TIMEOUTS[component])
+    outputs = [environment, log, reference / "speed.json"]
+    outputs.extend(reference / f"oracle_{ctx}.npz" for ctx in profile["oracle_contexts"])
+    return outputs, {}
+
+
+def staged_run(manifest: dict, job: dict, result: Path) -> dict[str, object]:
+    # Run every component even if an earlier one fails, so one pause window
+    # yields all the evidence it can; any failure still fails the job.
+    outputs: list[Path] = []
+    measurements: dict[str, dict] = {}
+    status: dict[str, str] = {}
+    for component in STAGED_JOB_KINDS[job["kind"]]:
+        try:
+            produced, summary = run_component(manifest, job, component, result)
+        except Refusal as exc:
+            status[component] = f"failed: {exc}"
+            continue
+        outputs.extend(produced)
+        if summary:
+            measurements[component] = summary
+        status[component] = "completed"
+    private_hashes = validate_execution_inputs(manifest, job)
+    failed = [name for name, value in status.items() if value != "completed"]
+    receipt = {
+        "schema_version": JOB_RESULT_SCHEMA,
+        "kind": job["kind"],
+        "identity_sha256": job["identity_sha256"],
+        "completed_unix": int(time.time()),
+        "qualification_activated": False,
+        "exploratory": True,
+        "qualification": False,
+        "evidence_class": "staged_measurement_only",
+        "components": status,
+        "measurements": measurements,
+        "executed_inputs": {
+            "private_artifact_sha256": private_hashes,
+            "fixture_target_sha256": {
+                component: component_target(component, job) for component in STAGED_JOB_KINDS[job["kind"]]
+            },
+        },
+        "outputs": {str(item.relative_to(result)): file_sha256(safe_artifact(item)) for item in outputs},
+    }
+    if failed:
+        write_result(result / "partial-result.json", receipt)
+        raise Refusal("staged job components failed: " + ", ".join(failed))
     write_result(result / "result.json", receipt)
     return {**receipt, "result_path": str(result / "result.json")}
 

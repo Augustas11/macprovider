@@ -35,7 +35,10 @@ LIVE_HASH_KEYS = (
     "watchdog_plist_sha256", "compatibility_set_sha256",
 )
 HASH_KEYS = LIVE_HASH_KEYS + ("probe_sha256", "lab_script_sha256")
-JOB_KINDS = ("profiler-only", "qualification", "qwen-qualification", "qwen-journey", "glm-prefill")
+JOB_KINDS = (
+    "profiler-only", "qualification", "qwen-qualification", "qwen-journey", "glm-prefill",
+    "glm-parity-prefill512", "dsv4-reference", "glm-parity-prefill512-then-dsv4-reference",
+)
 ARTIFACT_KEYS = (
     "diagnostic_cli", "glmbench", "diagnostic_metallib", "glmbench_metallib",
     "fixture_config", "fixture_index",
@@ -43,6 +46,33 @@ ARTIFACT_KEYS = (
 QWEN_ARTIFACT_KEYS = (
     "diagnostic_cli", "diagnostic_metallib", "fixture_config", "fixture_index",
 )
+DSV4_ARTIFACT_KEYS = (
+    "reference_python", "reference_script", "dsv4_fixture_config", "dsv4_fixture_index",
+)
+EXECUTABLE_ARTIFACT_KEYS = {"diagnostic_cli", "glmbench", "reference_python"}
+# Staged measurement jobs: window ceilings and no-model preflight bounds. The
+# preflight hashes every fixture in the sequence before the provider pauses.
+STAGED_WINDOW_TIMEOUTS = {
+    "glm-parity-prefill512": 3600,
+    "dsv4-reference": 7200,
+    "glm-parity-prefill512-then-dsv4-reference": 9000,
+}
+STAGED_VALIDATE_TIMEOUTS = {
+    "glm-parity-prefill512": 900,
+    "dsv4-reference": 900,
+    "glm-parity-prefill512-then-dsv4-reference": 1500,
+}
+
+
+def job_artifact_keys(job) -> tuple[str, ...]:
+    kind = job["kind"] if job is not None else None
+    if kind == "dsv4-reference":
+        return DSV4_ARTIFACT_KEYS
+    if kind == "glm-parity-prefill512-then-dsv4-reference":
+        return QWEN_ARTIFACT_KEYS + DSV4_ARTIFACT_KEYS
+    if kind in ("qwen-qualification", "qwen-journey", "glm-prefill", "glm-parity-prefill512"):
+        return QWEN_ARTIFACT_KEYS
+    return ARTIFACT_KEYS
 SNAPSHOT_KEYS = (
     "provider_id_sha256", "coordinator_origin", "compatibility_set_id",
     "binary_version", "model",
@@ -237,6 +267,7 @@ def load_manifest(path: Path) -> tuple[dict, str]:
         raise Refusal("legacy manifest cannot name a job helper")
     value["lab_timeout_s"] = positive(
         value.get("lab_timeout_s"), "lab_timeout_s",
+        STAGED_WINDOW_TIMEOUTS[job["kind"]] if job and job["kind"] in STAGED_WINDOW_TIMEOUTS else
         43200 if job and job["kind"] in ("qualification", "qwen-qualification") else (
             21600 if job and job["kind"] == "glm-prefill" else (
                 7200 if job and job["kind"] == "qwen-journey" else 3600
@@ -279,11 +310,7 @@ def load_manifest(path: Path) -> tuple[dict, str]:
     ):
         raise Refusal("manifest baseline is not buyer-serving")
     artifacts = value.get("artifacts")
-    artifact_keys = (
-        QWEN_ARTIFACT_KEYS
-        if job is not None and job["kind"] in ("qwen-qualification", "qwen-journey", "glm-prefill")
-        else ARTIFACT_KEYS
-    )
+    artifact_keys = job_artifact_keys(job)
     if not isinstance(artifacts, dict) or set(artifacts) != set(artifact_keys):
         raise Refusal("manifest artifact set is invalid")
     source = Path(value["lab_source_dir"])
@@ -294,6 +321,10 @@ def load_manifest(path: Path) -> tuple[dict, str]:
         "glmbench_metallib": source / "scripts/lab/cb-studio/glm53-bench/.build/release/mlx.metallib",
         "fixture_config": source / ".lab-window/fixture/target/config.json",
         "fixture_index": source / ".lab-window/fixture/target/model.safetensors.index.json",
+        "reference_python": source / ".lab-window/dsv4-venv/bin/python3",
+        "reference_script": source / "scripts/lab/dsv4/dsv4_reference_bench.py",
+        "dsv4_fixture_config": source / ".lab-window/fixture/dsv4-target/config.json",
+        "dsv4_fixture_index": source / ".lab-window/fixture/dsv4-target/model.safetensors.index.json",
     }
     for key in artifact_keys:
         item = artifacts[key]
@@ -371,14 +402,9 @@ def validate_lab_artifacts(manifest: dict) -> None:
     if file_sha(Path(manifest["lab_script_path"])) != manifest["baseline"]["lab_script_sha256"]:
         raise Refusal("guarded diagnostic artifact drifted: lab_script")
     job = manifest.get("job")
-    artifact_keys = (
-        QWEN_ARTIFACT_KEYS
-        if job is not None and job["kind"] in ("qwen-qualification", "qwen-journey", "glm-prefill")
-        else ARTIFACT_KEYS
-    )
-    for key in artifact_keys:
+    for key in job_artifact_keys(job):
         item = manifest["artifacts"][key]
-        if artifact_sha(Path(item["path"]), executable=key in {"diagnostic_cli", "glmbench"}) != item["sha256"]:
+        if artifact_sha(Path(item["path"]), executable=key in EXECUTABLE_ARTIFACT_KEYS) != item["sha256"]:
             raise Refusal(f"guarded diagnostic artifact drifted: {key}")
     if job is not None:
         helper = Path(manifest["job_helper_path"])
@@ -398,7 +424,8 @@ def validate_job(manifest: dict) -> None:
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         # The helper bounds its own fixed no-model validation at 600 seconds;
         # retain a small outer allowance for Python process startup/cleanup.
-        check=True, timeout=660,
+        # Staged jobs hash their whole fixtures here, before the pause.
+        check=True, timeout=STAGED_VALIDATE_TIMEOUTS.get(manifest["job"]["kind"], 660),
         env={"HOME": str(Path.home()), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
     )
 
