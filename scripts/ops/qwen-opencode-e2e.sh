@@ -311,8 +311,8 @@ poll_ready() {
 verify_installed_cli() {
   local actual_sha version_line signature
   studio_ssh "/usr/sbin/system_profiler SPHardwareDataType -json | /usr/bin/python3 -c 'import json,sys; d=json.load(sys.stdin); rows=d.get(\"SPHardwareDataType\") or []; raise SystemExit(0 if rows and rows[0].get(\"machine_name\")==\"Mac Studio\" else 3)'" >/dev/null || return
-  studio_command /usr/bin/test -f "$QWEN_E2E_CLI" || return
-  studio_command /usr/bin/test -x "$QWEN_E2E_CLI" || return
+  studio_command /bin/test -f "$QWEN_E2E_CLI" || return
+  studio_command /bin/test -x "$QWEN_E2E_CLI" || return
   actual_sha="$(studio_command /usr/bin/shasum -a 256 "$QWEN_E2E_CLI" | awk '{print $1}')" || return
   [ "$actual_sha" = "$HB_SHA" ] || return 1
   studio_command /usr/bin/codesign --verify --strict "$QWEN_E2E_CLI" >/dev/null 2>&1 || return
@@ -363,8 +363,8 @@ derive_handback() {
   provider="$(json_field "$status_file" 'd.get("provider_id")')"
   [ -n "$provider" ] || return 1
   studio_ssh "/usr/sbin/system_profiler SPHardwareDataType -json | /usr/bin/python3 -c 'import json,sys; d=json.load(sys.stdin); rows=d.get(\"SPHardwareDataType\") or []; raise SystemExit(0 if rows and rows[0].get(\"machine_name\")==\"Mac Studio\" else 3)'" >/dev/null || return
-  studio_command /usr/bin/test -f "$QWEN_E2E_CLI" || return
-  studio_command /usr/bin/test -x "$QWEN_E2E_CLI" || return
+  studio_command /bin/test -f "$QWEN_E2E_CLI" || return
+  studio_command /bin/test -x "$QWEN_E2E_CLI" || return
   actual_sha="$(studio_command /usr/bin/shasum -a 256 "$QWEN_E2E_CLI" | awk '{print $1}')" || return
   printf '%s\n' "$actual_sha" | grep -Eq '^[0-9a-f]{64}$' || return 1
   studio_command /usr/bin/codesign --verify --strict "$QWEN_E2E_CLI" >/dev/null 2>&1 || return
