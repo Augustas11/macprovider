@@ -1285,9 +1285,9 @@ listed file is missing or changes without a regenerated digest.
   the reader reject unknown entry keys, so R014 item 10 applies. A
   decode-path entry is published only when the bound release CLI embeds that
   same digest. The release input records it as `provider_decode_path_digest`.
-  Release generation refuses that value unless it is the digest compiled at the
-  release input's `source_commit`. Catalog activation refuses until the live
-  coordinator recommends that release or a later one. The identity fields stay
+  Catalog activation (`scripts/ops/catalog-activate.sh`) refuses unless that
+  value is the digest compiled at the release input's `source_commit`, and
+  until the live coordinator recommends that release or a later one. The identity fields stay
   in every entry as provenance (dual-field).
 
 SPEC-023 autotune recommendation, SPEC-032 hardware-evidence performance
