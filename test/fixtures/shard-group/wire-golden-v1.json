@@ -2,7 +2,7 @@
   "group_attestation" : {
     "attempt_n" : 1,
     "group_provider_id" : "prov-head",
-    "receipt_tuple_sha256" : "d7013645c3cda8cdfe945c8b9391f8c1963d3bbf73aeebf10865db8504c1338b",
+    "receipt_tuple_sha256" : "d2359b425095762905b945bda91e55175f701d02541f9165f662bd0e1635676e",
     "request_id" : "req_golden_1",
     "schema" : "macprovider.shard-group-attestation.v1",
     "segments" : [
@@ -13,7 +13,7 @@
         "sub_receipts" : [
           {
             "public_key" : "0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc=",
-            "signature" : "rhi4p7ugfSr8rph1Ug\/8B7VkPn3wrvfRV2w5mG0YRz5L3Kj2lfrgX8hV9175zG6P1XfX3ExfLXsO\/KmnQHtGAw==",
+            "signature" : "OFSlwr5K4QTtabTGik4+uUJmd8mNtsWRT3nQWFKESP\/2BRP+xannCW57dtbe+K6rTyacjtfnbkRPo0domwzUDQ==",
             "sub_receipt" : {
               "decode_steps" : 4,
               "group_epoch" : 3,
@@ -29,7 +29,7 @@
           },
           {
             "public_key" : "oJql9HpnWYAv+VX43C0qFKXJnSO+l\/hkEn\/5ODRVpPA=",
-            "signature" : "PPdNl+t2dCmC90OgTcgB7TYc3onZpV0AaW1HAspaRCxU1mhgpVnyo04y4\/ww8U14+hW9\/tEakHOulWWqLfr8BA==",
+            "signature" : "QYNQUvG7pAwqdl6pxsUI7kCASd18J1gZgYlOtNZWg0VdwXlqnUGKTPupn4+Vkwr6bdb7dDlpdcyXKbrXmvfGBg==",
             "sub_receipt" : {
               "decode_steps" : 4,
               "group_epoch" : 3,
@@ -46,10 +46,10 @@
         ]
       }
     ],
-    "signature" : "HTIZkgOHEXMmaTHuYw4YhfKffjwgOKBfQfBi8mf94agueeFCrP5kP\/JahbFeWZdXtchUix6q12UkgJxJ4mEnBA=="
+    "signature" : "y5fziiuWRjscFK8ZTbnReCSwxMsTpoFDLWmr7WAhSQAIkVheo+PtthjUBM9NCZlAUKIGEoO4AlMOZwl0ME3eDQ=="
   },
   "head_public_key" : "0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc=",
-  "receipt" : "eyJhdHRlbXB0X24iOjEsInByb3ZpZGVyX2lkIjoicHJvdi1oZWFkIiwicmVjZWlwdF92ZXJzaW9uIjoiNCIsInJlcXVlc3RfaWQiOiJyZXFfZ29sZGVuXzEifQ==.MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMw==",
+  "receipt" : "eyJhdHRlbXB0X24iOjEsInByb3ZpZGVyX2lkIjoicHJvdi1oZWFkIiwicmVjZWlwdF92ZXJzaW9uIjoiNCIsInJlcXVlc3RfaWQiOiJyZXFfZ29sZGVuXzEiLCJ1c2FnZSI6eyJiaWxsYWJsZV9pbnB1dF90b2tlbnMiOjEyLCJiaWxsYWJsZV9vdXRwdXRfdG9rZW5zIjo0LCJkZWxpdmVyZWRfb3V0cHV0X2J5dGVzIjoyMCwib2JzZXJ2ZWRfaW5wdXRfdG9rZW5zIjoxMiwib2JzZXJ2ZWRfb3V0cHV0X3Rva2VucyI6NH19.MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMw==",
   "shard_group_heartbeat" : {
     "group_epoch" : 3,
     "group_provider_id" : "prov-head",
@@ -122,7 +122,7 @@
       },
       "transport_version" : 1
     },
-    "record_signature" : "dhbZKxu4dAi3JdW9HbWxY84YJG+rVRoIJmyYno\/wK4jGKOKL7BSExTj7EyJ4V0t3ktJkIYCq8aox0vHQs6MNCg==",
+    "record_signature" : "fFGeir1ZXK9FA0s3g7JNs2zuFlcfyK9wjTYz18JjbEb499UYzUAZ\/KP9RLn++AxITZa8EAyhrEh9wsR\/8SvlBQ==",
     "type" : "shard_group_register",
     "version" : 1
   },

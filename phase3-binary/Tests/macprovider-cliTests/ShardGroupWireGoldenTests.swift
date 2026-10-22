@@ -68,7 +68,8 @@ final class ShardGroupWireGoldenTests: XCTestCase {
                 memberDeviceID: "mac-b", groupEpoch: epoch, stageIndex: 1, layerStart: 14, layerEnd: 28, requestID: "req_golden_1",
                 promptTokens: 12, decodeSteps: 4, inDigest: activations, outDigest: tokens)),
         ]
-        let tuple = Data(#"{"attempt_n":1,"provider_id":"prov-head","receipt_version":"4","request_id":"req_golden_1"}"#.utf8)
+        // A SPEC-015 v0.4 tuple: output counts in usage (SPEC-051-R019 item 7).
+        let tuple = Data(#"{"attempt_n":1,"provider_id":"prov-head","receipt_version":"4","request_id":"req_golden_1","usage":{"billable_input_tokens":12,"billable_output_tokens":4,"delivered_output_bytes":20,"observed_input_tokens":12,"observed_output_tokens":4}}"#.utf8)
         let receipt = tuple.base64EncodedString() + "." + Data(repeating: 0x33, count: 64).base64EncodedString()
         let attestation = try ShardGroupWire.attestation(
             receipt: receipt,

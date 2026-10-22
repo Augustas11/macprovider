@@ -245,7 +245,7 @@ func TestShardGroupAttestationOnTerminalFrame(t *testing.T) {
 	h := newShardWSHarness(t)
 	h.server.handleMessage(nil, "head", "s-head", h.registerPayload())
 	h.server.handleMessage(nil, "tail", "s-tail", shardWSHello())
-	tuple := []byte(`{"attempt_n":0,"provider_id":"head","request_id":"req-1"}`)
+	tuple := []byte(`{"attempt_n":0,"provider_id":"head","receipt_version":"4","request_id":"req-1","usage":{"billable_input_tokens":8,"billable_output_tokens":1,"delivered_output_bytes":4,"observed_input_tokens":8,"observed_output_tokens":1}}`)
 	sum := sha256.Sum256(tuple)
 	receipt := base64.StdEncoding.EncodeToString(tuple) + "." + base64.StdEncoding.EncodeToString(make([]byte, 64))
 	a, b := shardWSDigest("act"), shardWSDigest("tok")

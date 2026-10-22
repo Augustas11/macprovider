@@ -111,9 +111,30 @@ type receiptTupleFacts struct {
 	RequestID  string `json:"request_id"`
 	AttemptN   int    `json:"attempt_n"`
 	ProviderID string `json:"provider_id"`
-	// TokensOut is the SPEC-015 tuple's delivered output count; nil when the
-	// tuple omits it (the SPEC-015 verifier refuses such a receipt anyway).
+	// TokensOut is the legacy (pre-v0.4) SPEC-015 tuple's delivered output
+	// count. A v0.4 tuple has no such member: its output counts are
+	// usage.observed_output_tokens and usage.billable_output_tokens.
 	TokensOut *int64 `json:"tokens_out"`
+	Usage     *struct {
+		ObservedOutputTokens *int64 `json:"observed_output_tokens"`
+		BillableOutputTokens *int64 `json:"billable_output_tokens"`
+	} `json:"usage"`
+}
+
+// outputCounts returns every output token count the tuple claims: the v0.4
+// usage counts, or the legacy tokens_out. ok is false when the tuple names no
+// output count at all, which fails coverage closed (SPEC-051-R019 item 7).
+func (f receiptTupleFacts) outputCounts() ([]int64, bool) {
+	if f.Usage != nil {
+		if f.Usage.ObservedOutputTokens == nil || f.Usage.BillableOutputTokens == nil {
+			return nil, false
+		}
+		return []int64{*f.Usage.ObservedOutputTokens, *f.Usage.BillableOutputTokens}, true
+	}
+	if f.TokensOut != nil {
+		return []int64{*f.TokensOut}, true
+	}
+	return nil, false
 }
 
 // ReceiptTupleSHA256 returns the hex SHA-256 of a SPEC-015 v0.4 receipt
@@ -215,13 +236,23 @@ func VerifyAttestation(raw json.RawMessage, receiptEnvelope, groupProviderID str
 // processes the whole prompt and one decode step per token after the first
 // (the first token comes from the prompt), so each sub-receipt counts the same
 // prompt tokens and step_end - 1 decode steps, and the receipt cannot claim
-// more delivered tokens than the head received. A head whose own account or
+// more output tokens than the head received: a v0.4 tuple's observed and
+// billable output counts, or a legacy tuple's tokens_out. A tuple with none
+// of them fails closed. A head whose own account or
 // step_end disagrees is at fault; otherwise the first member that differs.
 func verifyCoverage(seg AttestationSegment, facts receiptTupleFacts) (string, string) {
 	head := seg.SubReceipts[0].SubReceipt
-	if seg.StepStart != 0 || seg.StepEnd < 1 || head.PromptTokens < 1 || head.DecodeSteps != seg.StepEnd-1 ||
-		(facts.TokensOut != nil && (*facts.TokensOut < 0 || *facts.TokensOut > int64(seg.StepEnd))) {
+	if seg.StepStart != 0 || seg.StepEnd < 1 || head.PromptTokens < 1 || head.DecodeSteps != seg.StepEnd-1 {
 		return FaultCoverage, head.MemberDeviceID
+	}
+	counts, ok := facts.outputCounts()
+	if !ok {
+		return FaultCoverage, head.MemberDeviceID
+	}
+	for _, n := range counts {
+		if n < 0 || n > int64(seg.StepEnd) {
+			return FaultCoverage, head.MemberDeviceID
+		}
 	}
 	for _, signed := range seg.SubReceipts[1:] {
 		sr := signed.SubReceipt

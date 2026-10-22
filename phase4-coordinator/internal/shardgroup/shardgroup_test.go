@@ -498,7 +498,9 @@ func digest(s string) string {
 
 func receiptEnvelope(t *testing.T, requestID string, attempt int, provider string) (string, string) {
 	t.Helper()
-	tuple := []byte(`{"attempt_n":` + jsonInt(attempt) + `,"provider_id":"` + provider + `","request_id":"` + requestID + `"}`)
+	// A SPEC-015 v0.4 tuple: its output counts are in usage (no tokens_out).
+	tuple := []byte(`{"attempt_n":` + jsonInt(attempt) + `,"provider_id":"` + provider + `","receipt_version":"4","request_id":"` + requestID +
+		`","usage":{"billable_input_tokens":8,"billable_output_tokens":1,"delivered_output_bytes":4,"observed_input_tokens":8,"observed_output_tokens":1}}`)
 	sum := sha256.Sum256(tuple)
 	return base64.StdEncoding.EncodeToString(tuple) + "." + base64.StdEncoding.EncodeToString(make([]byte, 64)), hex.EncodeToString(sum[:])
 }
@@ -681,6 +683,50 @@ func TestVerifyAttestationCoverage(t *testing.T) {
 		"empty segment":                         {segment(0, func(h, tl *SubReceipt) { h.DecodeSteps, tl.DecodeSteps = 0, 0 }), 0, "head"},
 	} {
 		if v := verify(tc.segments, tc.tokensOut); v.FaultKind != FaultCoverage || v.FaultMemberDeviceID != tc.member {
+			t.Errorf("%s: %+v", name, v)
+		}
+	}
+}
+
+// SPEC-051-R019 item 7 against a real SPEC-015 v0.4 tuple (VM acceptance,
+// R3-A1): v0.4 has no tokens_out; its usage.observed_output_tokens and
+// usage.billable_output_tokens are bound by step_end, and a tuple naming no
+// output count fails closed.
+func TestVerifyAttestationCoverageReadsV04Usage(t *testing.T) {
+	f := newFixture(t)
+	f.joinedGroup()
+	a, b := digest("activations"), digest("tokens")
+	signed := func(member string, sr SubReceipt) SignedSubReceipt {
+		raw, _ := json.Marshal(sr)
+		return SignedSubReceipt{SubReceipt: sr, PublicKey: base64.StdEncoding.EncodeToString(f.keys[member].Public().(ed25519.PublicKey)), Signature: sign(t, f.keys[member], subReceiptDomain, raw, false)}
+	}
+	segment := func(stepEnd int) []AttestationSegment {
+		head := SubReceipt{MemberDeviceID: "head", GroupEpoch: 1, StageIndex: 0, LayerStart: 0, LayerEnd: 18, RequestID: "req-v4", PromptTokens: 8, DecodeSteps: stepEnd - 1, InDigest: b, OutDigest: a}
+		tail := SubReceipt{MemberDeviceID: "tail", GroupEpoch: 1, StageIndex: 1, LayerStart: 18, LayerEnd: 32, RequestID: "req-v4", PromptTokens: 8, DecodeSteps: stepEnd - 1, InDigest: a, OutDigest: b}
+		return []AttestationSegment{{GroupEpoch: 1, StepStart: 0, StepEnd: stepEnd, SubReceipts: []SignedSubReceipt{signed("head", head), signed("tail", tail)}}}
+	}
+	verify := func(stepEnd int, usage string) Verdict {
+		tuple := []byte(`{"attempt_n":0,"provider_id":"head","receipt_version":"4","request_id":"req-v4"` + usage + `}`)
+		sum := sha256.Sum256(tuple)
+		env := base64.StdEncoding.EncodeToString(tuple) + "." + base64.StdEncoding.EncodeToString(make([]byte, 64))
+		return VerifyAttestation(f.attestation(segment(stepEnd), "req-v4", 0, hex.EncodeToString(sum[:])), env, "head", f.sessions["head"].ReceiptPubkey, f.reg.Epochs("head"))
+	}
+	usage := func(observed, billable int) string {
+		return `,"usage":{"billable_input_tokens":8,"billable_output_tokens":` + jsonInt(billable) + `,"delivered_output_bytes":40,"observed_input_tokens":8,"observed_output_tokens":` + jsonInt(observed) + `}`
+	}
+	if v := verify(13, usage(12, 12)); !v.Verified() {
+		t.Fatalf("v0.4 receipt within step_end: %+v", v)
+	}
+	for name, tc := range map[string]struct {
+		stepEnd int
+		usage   string
+	}{
+		"observed output above step_end": {1, usage(12, 12)},
+		"billable output above step_end": {13, usage(12, 14)},
+		"usage without output counts":    {13, `,"usage":{"observed_input_tokens":8}`},
+		"no output count at all":         {13, ""},
+	} {
+		if v := verify(tc.stepEnd, tc.usage); v.FaultKind != FaultCoverage || v.FaultMemberDeviceID != "head" {
 			t.Errorf("%s: %+v", name, v)
 		}
 	}
