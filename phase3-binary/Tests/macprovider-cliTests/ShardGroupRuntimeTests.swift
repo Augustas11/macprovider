@@ -502,7 +502,7 @@ final class ShardGroupConfigTests: XCTestCase {
     }
 
     func testValidHeadConfigNamesItsMembersAndLayers() throws {
-        let config = try loadHead(head(["pool_model_id": "pm_1", "prefill_chunk_tokens": 256]))
+        let config = try loadHead(head(["pool_model_id": "pool/ijUnc-ZQf-LJeRvkhi-0iQ/llama-3b", "prefill_chunk_tokens": 256]))
         XCTAssertEqual(config.numLayers, 28)
         XCTAssertEqual(config.expectedMembers, [ShardGroupExpectedMember(memberDeviceID: "mac-b", layers: 14..<28)])
         XCTAssertEqual(config.supervision.link(epoch: 1).heartbeatInterval, 0.1)
@@ -521,6 +521,7 @@ final class ShardGroupConfigTests: XCTestCase {
             ]]), "return_listen"),
             (head(["spare": ["member_device_id": "mac-b", "endpoint": "h:3"]]), "also an active member"),
             (head(["max_concurrency": 0]), "max_concurrency"),
+            (head(["pool_model_id": "pm_1"]), "not a SPEC-042-R015 pool model id"),
             (head(["stages": [["member_device_id": "bad id", "endpoint": "h:1", "layer_start": 14, "layer_end": 28]]]), "must match"),
         ]
         for (object, fragment) in cases {

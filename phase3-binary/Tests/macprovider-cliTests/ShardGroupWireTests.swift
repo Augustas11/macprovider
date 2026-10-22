@@ -11,7 +11,7 @@ final class ShardGroupWireTests: XCTestCase {
     private let headKey = Curve25519.Signing.PrivateKey()
     private let tailKey = Curve25519.Signing.PrivateKey()
 
-    private func headConfig(poolModelID: String? = "pm_llama", spare: ShardGroupSpareConfig? = nil) -> ShardGroupHeadConfig {
+    private func headConfig(poolModelID: String? = "pool/ijUnc-ZQf-LJeRvkhi-0iQ/llama-3b", spare: ShardGroupSpareConfig? = nil) -> ShardGroupHeadConfig {
         ShardGroupHeadConfig(
             groupEpoch: ShardBenchTestRig.epoch, poolModelID: poolModelID, headLayerEnd: 2,
             stages: [ShardGroupStageConfig(memberDeviceID: "mac-b", endpoint: "127.0.0.1:1", layerStart: 2, layerEnd: 4)],
@@ -19,7 +19,7 @@ final class ShardGroupWireTests: XCTestCase {
     }
 
     /// A head runtime over fake stages whose tail signs as mac-b.
-    private func runtime(registration: Bool = true, poolModelID: String? = "pm_llama") async throws -> ShardGroupRuntime {
+    private func runtime(registration: Bool = true, poolModelID: String? = "pool/ijUnc-ZQf-LJeRvkhi-0iQ/llama-3b") async throws -> ShardGroupRuntime {
         let headSigner = ShardMemberSigner(memberDeviceID: "prov-head", key: headKey)
         let tailSigner = ShardMemberSigner(memberDeviceID: "mac-b", key: tailKey)
         let tail = FakeShardStage(layers: 2..<4, totalLayers: 4)
@@ -155,7 +155,7 @@ final class ShardGroupWireTests: XCTestCase {
         ])
         XCTAssertEqual(record["group_provider_id"] as? String, "prov-head")
         XCTAssertEqual(record["model"] as? [String: String], [
-            "model_id": "wire/model", "pool_model_id": "pm_llama",
+            "model_id": "wire/model", "pool_model_id": "pool/ijUnc-ZQf-LJeRvkhi-0iQ/llama-3b",
             "artifact_hash_algorithm": ModelArtifactIdentity.snapshotManifestV1, "artifact_hash": String(repeating: "c", count: 64),
         ])
         let stages = try XCTUnwrap(record["stages"] as? [[String: Any]])

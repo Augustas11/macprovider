@@ -23,7 +23,7 @@ final class ShardGroupWireGoldenTests: XCTestCase {
     private func generate() throws -> [String: Any] {
         let epoch: UInt64 = 3
         let config = ShardGroupHeadConfig(
-            groupEpoch: epoch, poolModelID: "pm_llama", headLayerEnd: 14,
+            groupEpoch: epoch, poolModelID: "pool/ijUnc-ZQf-LJeRvkhi-0iQ/llama-3b", headLayerEnd: 14,
             stages: [ShardGroupStageConfig(memberDeviceID: "mac-b", endpoint: "169.254.1.2:7101", layerStart: 14, layerEnd: 28)],
             maxConcurrency: 4)
         let probe = ShardBenchLatency(seconds: [0.0004])
@@ -35,7 +35,7 @@ final class ShardGroupWireGoldenTests: XCTestCase {
         ]
         let record = try ShardGroupWire.record(
             config: config, chain: chain, groupEpoch: epoch, providerID: "prov-head", wireModelID: "mlx-community/Llama-3.2-3B-Instruct-4bit",
-            poolModelID: "pm_llama", artifactHashAlgorithm: ModelArtifactIdentity.snapshotManifestV1, artifactHash: artifactHash)
+            poolModelID: "pool/ijUnc-ZQf-LJeRvkhi-0iQ/llama-3b", artifactHashAlgorithm: ModelArtifactIdentity.snapshotManifestV1, artifactHash: artifactHash)
         let register = try ShardGroupWire.register(record: record, key: headKey)
         let heartbeat = try ShardGroupWire.heartbeat(chain: chain, groupEpoch: epoch, providerID: "prov-head", healthy: true)
         let hello = try XCTUnwrap(try ShardGroupWire.memberHello(

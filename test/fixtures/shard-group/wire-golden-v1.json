@@ -13,7 +13,7 @@
         "sub_receipts" : [
           {
             "public_key" : "0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc=",
-            "signature" : "+u78ZSOiJruRToAOoE2xXqGFj5Yv9khpsihKKVLN2E1O\/q0Rc8umTfWihCU1JD+Lx6ZR6tKhvl9nzC3chcv7Dw==",
+            "signature" : "Oy7tjAaWoCDjhPEmkbWKn3DNJGlJ\/Hg8OCh\/g7lR2VYXGrCnejoiieM7cLAne969u8YNysrU52jk9QEZUW9eDg==",
             "sub_receipt" : {
               "decode_steps" : 4,
               "group_epoch" : 3,
@@ -29,7 +29,7 @@
           },
           {
             "public_key" : "oJql9HpnWYAv+VX43C0qFKXJnSO+l\/hkEn\/5ODRVpPA=",
-            "signature" : "DeeVHkXGQDBdwHganZw7\/\/+1ikQJe3puRm+S1EEiwKddLUQbvGIQralna6XTQLiALIFiXO0bcwl4Pub2WigSCw==",
+            "signature" : "DoQTVGotSixnwg6AFSw1HK2wcM\/4H3jjbw42akpdvg7viBA6A+Ur8WXYyUbd5laKWTzgv527uNkYsM3zcAjnAg==",
             "sub_receipt" : {
               "decode_steps" : 4,
               "group_epoch" : 3,
@@ -46,7 +46,7 @@
         ]
       }
     ],
-    "signature" : "WrDxqt1Dk3+eRNmOwgyawRR4t3geug57Ls68VpBFTwJOuO5LjM62\/zVIh77XAEQmJO+Jah3yCBlqElRyTATdCw=="
+    "signature" : "84xDJ\/6QDULqEDBd5hOZEvSpf99oWURGIN3xfPEX6QwwDW8I1f79PkTTJixZwVejPZ\/CJ9sC2nevZA5jN6LqBQ=="
   },
   "head_public_key" : "0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc=",
   "receipt" : "eyJhdHRlbXB0X24iOjEsInByb3ZpZGVyX2lkIjoicHJvdi1oZWFkIiwicmVjZWlwdF92ZXJzaW9uIjoiNCIsInJlcXVlc3RfaWQiOiJyZXFfZ29sZGVuXzEifQ==.MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMw==",
@@ -91,7 +91,7 @@
         "artifact_hash" : "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
         "artifact_hash_algorithm" : "macprovider.snapshot-manifest.v1",
         "model_id" : "mlx-community\/Llama-3.2-3B-Instruct-4bit",
-        "pool_model_id" : "pm_llama"
+        "pool_model_id" : "pool\/ijUnc-ZQf-LJeRvkhi-0iQ\/llama-3b"
       },
       "num_layers" : 28,
       "parallelism_mode" : "pipeline",
@@ -122,7 +122,7 @@
       },
       "transport_version" : 1
     },
-    "record_signature" : "tQ7TcM0HyKhQND1p3jFrqIweGLT2T+Eu8gA+nmyxD+0BQKN2rTh5xawx4+5xbUU3JXw2m6agPI15iItQT7g5Cw==",
+    "record_signature" : "jAtwuWrMGGWLys7FeKE82xRDEGFDjPHErcBrliRjbdX60MkAZCLNLkUrEcO5+6hgKIYmTBpkzEC6\/IgBXeaICA==",
     "type" : "shard_group_register",
     "version" : 1
   },

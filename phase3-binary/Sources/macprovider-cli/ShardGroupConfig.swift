@@ -301,7 +301,9 @@ struct ShardGroupHeadConfig: Codable, Equatable, Sendable {
         if let prefillChunkTokens, prefillChunkTokens <= 0 {
             throw ShardGroupConfigError.invalid("prefill_chunk_tokens must be > 0")
         }
-        if let poolModelID, poolModelID.isEmpty { throw ShardGroupConfigError.invalid("pool_model_id must not be empty") }
+        if let poolModelID, poolModelID.range(of: BYOMAdmissionStatusWire.poolModelIDPattern, options: .regularExpression) == nil {
+            throw ShardGroupConfigError.invalid("pool_model_id '\(poolModelID)' is not a SPEC-042-R015 pool model id (pool/<pool id>/<slug>)")
+        }
     }
 
     var numLayers: Int { stages.last?.layerEnd ?? headLayerEnd }
