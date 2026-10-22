@@ -90,6 +90,26 @@ while sessions regenerated evidence instead of deploying. Each is binding.
       shared-load kernel experiment, then closed on a 1.58% kernel-variant
       slowdown. The decisive multi-row native-versus-ordinary throughput
       measurement was never run.
+13. **No standalone tooling PRs. Tooling lives in the campaign PR.**
+    Harness, profiler, ops-script and acceptance-tool changes go in the one
+    campaign PR they serve (rule 4), never in a PR of their own. A fix to
+    earlier tooling goes in the same campaign PR, never in a follow-up PR.
+    - The only exception: a merged ops entry point is genuinely required to
+      run a live step (rule 8), and the campaign cannot proceed without it.
+      Then use one small PR, linked from the campaign PR. At most one such
+      PR per campaign.
+    - Lab measurement runs from the campaign branch with existing guarded
+      windows. It needs no merged tooling.
+    - A campaign's PR count is the campaign PR plus at most one ops PR. A
+      third PR means stop and write the operator a one-paragraph blocker
+      (rule 6).
+    - "Done" for an issue means its stated goal is live (rule 1). Merged
+      tooling, merged harness or a measurement note is not done. Do not
+      close an issue as a "handoff" or as "deferred".
+    - Why: between 2026-10-20 and 2026-10-22, about 12 tooling PRs, several
+      of them fixes to earlier tooling PRs (#2090–#2094, #2097, #2101–#2105),
+      produced no new live capability. #2081 was closed as a "handoff" with
+      nothing released, and #2082 sat merged but not live.
 
 ## Project Overview
 
