@@ -78,11 +78,12 @@ SPEC-048-R014 item 10 orders this rebind:
    fields as provenance. The generator refuses a tuple digest that differs
    from `provider_decode_path_digest`.
 4. Publish through `scripts/ops/catalog-activate.sh` as usual. Its
-   `native_mtp_decode_path_publish_gate` blocks activation in two cases. The
-   first is when `provider_decode_path_digest` is not the digest compiled at
-   the release input's `source_commit`, which also proves that the bound CLI
-   reads the fields. The second is until the live coordinator recommends that
-   release or a later one.
+   `native_mtp_decode_path_publish_gate` blocks activation in three cases:
+   - `provider_decode_path_digest` is not the digest compiled at the release
+     input's `source_commit` (a match also proves that the bound CLI reads the
+     fields);
+   - the release tag `v<binaryVersion>` does not name that commit;
+   - the live coordinator does not yet recommend that release or a later one.
 
 After this, a provider on a pre-0.1.51 CLI rejects the admission set and serves
 ordinary decode until it updates. From then on, cuts with an unchanged digest

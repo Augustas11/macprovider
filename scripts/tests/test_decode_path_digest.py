@@ -127,6 +127,17 @@ class DecodePathDigestTests(unittest.TestCase):
             sidecar = Path(temp) / "native-mtp-admission.json"
             release.write_text(json.dumps(self.head_release_input(digest)), "utf-8")
             sidecar.write_text(json.dumps({"entries": [{"decode_path_digest": digest}]}), "utf-8")
+            head = self.head_release_input(None)["entry"]["source_commit"]
+            original_tag = tool._tag_commit
+            self.addCleanup(setattr, tool, "_tag_commit", original_tag)
+            # Not yet a published release: no tag names the bound commit.
+            tool._tag_commit = lambda v: None
+            with self.assertRaisesRegex(tool.DecodePathError, "release tag"):
+                tool.publish_gate(release, sidecar, version)
+            tool._tag_commit = lambda v: "0" * 40
+            with self.assertRaisesRegex(tool.DecodePathError, "release tag"):
+                tool.publish_gate(release, sidecar, version)
+            tool._tag_commit = lambda v: head
             self.assertEqual(tool.publish_gate(release, sidecar, version), "ok")
             major, minor, patch = (int(x) for x in version.split("."))
             with self.assertRaisesRegex(tool.DecodePathError, "R014 item 10"):

@@ -220,6 +220,17 @@ def verify_release_input(release_input: dict) -> str | None:
     return version
 
 
+def _tag_commit(version: str) -> str | None:
+    """The commit the release tag v<version> names in this clone (the release
+    train pushes the tag only after the signed candidate is verified)."""
+    result = subprocess.run(
+        ["git", "-C", str(ROOT), "rev-parse", "--verify", "-q", f"refs/tags/v{version}^{{commit}}"],
+        capture_output=True, text=True, check=False,
+    )
+    commit = result.stdout.strip()
+    return commit if result.returncode == 0 and REVISION.match(commit) else None
+
+
 def _semver(text: str) -> tuple[int, ...]:
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", text or ""):
         raise DecodePathError(f"not a version: {text!r}")
@@ -233,6 +244,12 @@ def publish_gate(release_path: Path, sidecar: Path, recommended: str | None) -> 
     version = verify_release_input(release_input)
     if version is None:
         raise DecodePathError("decode-path entries need provider_decode_path_digest in the release input")
+    commit = release_input["entry"]["source_commit"]
+    tagged = _tag_commit(version)
+    if tagged != commit:
+        raise DecodePathError(
+            f"release tag v{version} names {tagged or 'nothing'}, not the bound source commit {commit}: "
+            "bind the published release that carries the reader (git fetch --tags first)")
     if recommended is None:
         raise DecodePathError("the live recommended CLI version is unknown")
     if _semver(recommended) < _semver(version):

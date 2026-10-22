@@ -6,8 +6,10 @@ import MLXLMCommon
 // SPEC-048-R013 (0.1.51): the production continuous-batching decode path
 // configuration — backend construction, compiled-decode mode, cache bridge,
 // prefill grouping, decode row and lockstep bounds and text preparation —
-// lives in this file so `decode-path-manifest.json` covers it. Moved
-// unchanged from ModelRuntime.swift.
+// and the request-to-row mapping (sampler seed, temperature, top-p,
+// penalties, native-MTP depth) with the model stop-token sets live in this
+// file so `decode-path-manifest.json` covers them. Moved unchanged from
+// ModelRuntime.swift.
 extension ModelRuntime {
     /// The serve path's scheduler configuration, shared by initial load and
     /// every rebuild (warm swap, adoption), so the row cap always tracks the
@@ -455,5 +457,129 @@ extension ModelRuntime {
             return ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow
         }
         return servePathDecodeLockstepWindow(cacheKinds: paged.cacheKinds)
+    }
+
+    /// The single relay-request to scheduler-row mapping used by both live
+    /// inference and the durable-replay fixture. Keeping stable identity,
+    /// sampling inputs, and conversation identity here makes the fixture fail
+    /// if the production mapping changes.
+    static func continuousBatchSubmission(
+        for request: ChatCompletionRequest,
+        promptTokens: [Int],
+        maxOutputTokens: Int,
+        stopTokenSequences: [[Int]] = [],
+        modelStopTokenIDs: [Int] = [],
+        cachedPromptTokens: Int = 0,
+        retainedPagedKVSequence: PagedKVRetainedSequence? = nil,
+        recurrentCheckpointPositions: [Int] = [],
+        modelHasRecurrentLayers: Bool = false,
+        retainedRecurrentCheckpoints: [RecurrentStateCheckpoint] = [],
+        serialToolStopObserver: ContinuousBatchCanonicalStopObserver? = nil,
+        nativeMTPAdmission: NativeMTPRuntimeAdmission? = nil
+    ) throws -> ContinuousBatchSubmission {
+        guard let requestID = schedulerRequestID(for: request) else {
+            throw attachedPagedKVUnavailableError(
+                code: ContinuousBatchingUnsupportedReason.stableRequestIDUnavailable.apiCode
+            )
+        }
+        return ContinuousBatchSubmission(
+            requestID: requestID,
+            schedulerRequest: ContinuousBatchSchedulerRequest(
+                id: requestID,
+                conversationKey: request.conversationKey ?? "",
+                promptTokens: promptTokens,
+                maxOutputTokens: maxOutputTokens,
+                stopTokenSequences: stopTokenSequences,
+                modelStopTokenIDs: modelStopTokenIDs,
+                samplerSeed: ContinuousBatchRowSampler.requestSeed(requestID: requestID),
+                temperature: request.temperature,
+                topP: request.topP,
+                presencePenalty: request.presencePenalty,
+                frequencyPenalty: request.frequencyPenalty,
+                cachedPromptTokens: cachedPromptTokens,
+                retainedPagedKVSequence: retainedPagedKVSequence,
+                recurrentCheckpointPositions: recurrentCheckpointPositions,
+                modelHasRecurrentLayers: modelHasRecurrentLayers,
+                retainedRecurrentCheckpoints: retainedRecurrentCheckpoints,
+                serialToolStopObserver: serialToolStopObserver,
+                decodePath: nativeMTPAdmission?.effectivePath ?? .ordinary,
+                nativeMTPMaximumProposalDepth: nativeMTPAdmission?.initialProposalDepth ?? 0,
+                nativeMTPCompleteWindowBytesByDepth: nativeMTPAdmission?.completeWindowBytesByDepth ?? [],
+                nativeMTPMaximumActiveRows: nativeMTPAdmission?.maximumNativeActiveRows ?? 0,
+                nativeMTPTupleFence: nativeMTPAdmission?.tupleFence,
+                ingestProvenance: request.ingestProvenance
+            )
+        )
+    }
+
+    /// Stop sequences for a batched row: the model's end-of-generation
+    /// tokens plus the buyer's `stop` strings. The scheduler stops a row only
+    /// on these, so omitting the model EOS set made every batched row run to
+    /// `max_tokens` and emit text past the end of the answer, where the serial
+    /// path stops on `generationStopTokenIDs`.
+    static func continuousBatchStopTokenSequences(
+        requestStops: [String],
+        context: ModelContext
+    ) -> [[Int]] {
+        continuousBatchStopTokenSequences(
+            requestStops: requestStops,
+            modelStopTokenIDs: generationStopTokenIDs(for: context),
+            tokenizer: context.tokenizer
+        )
+    }
+
+    static func continuousBatchStopTokenSequences(
+        requestStops: [String],
+        modelStopTokenIDs: Set<Int>,
+        tokenizer: any MLXLMCommon.Tokenizer
+    ) -> [[Int]] {
+        let modelStops = modelStopTokenIDs.sorted().map { [$0] }
+        let buyerStops = requestStops.map {
+            tokenizer.encode(text: $0, addSpecialTokens: false)
+        }.filter { !$0.isEmpty }
+        return modelStops + buyerStops
+    }
+
+    static func droppingTrailingModelStop(
+        _ generatedTokens: [Int],
+        terminalStatus: ContinuousBatchSchedulerTerminalStatus,
+        modelStopTokenIDs: Set<Int>
+    ) -> [Int] {
+        guard terminalStatus == .stop,
+              let last = generatedTokens.last,
+              modelStopTokenIDs.contains(last) else {
+            return generatedTokens
+        }
+        return Array(generatedTokens.dropLast())
+    }
+
+    static func generationStopTokenIDs(for context: ModelContext) -> Set<Int> {
+        var stopTokenIDs = context.configuration.eosTokenIds
+        let tokenizer = context.tokenizer
+        if let eosTokenID = tokenizer.eosTokenId {
+            stopTokenIDs.insert(eosTokenID)
+        }
+        for token in context.configuration.extraEOSTokens {
+            if let tokenID = tokenizer.convertTokenToId(token) {
+                stopTokenIDs.insert(tokenID)
+            }
+        }
+        return stopTokenIDs
+    }
+
+    static func generationStopTokenIDs(
+        configuration: ModelConfiguration,
+        tokenizer: any MLXLMCommon.Tokenizer
+    ) -> Set<Int> {
+        var stopTokenIDs = configuration.eosTokenIds
+        if let eosTokenID = tokenizer.eosTokenId {
+            stopTokenIDs.insert(eosTokenID)
+        }
+        for token in configuration.extraEOSTokens {
+            if let tokenID = tokenizer.convertTokenToId(token) {
+                stopTokenIDs.insert(tokenID)
+            }
+        }
+        return stopTokenIDs
     }
 }
