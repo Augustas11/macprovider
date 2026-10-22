@@ -10,7 +10,7 @@
 set -euo pipefail
 . /root/e2e/h/vm/lib.sh; . $E2E_H/vm/lib-deploy.sh; . $E2E_H/vm/lib-scn.sh; . /root/e2e/h16/vm/lib-1816.sh; . /root/e2e/h84/vm/lib-2084.sh
 systemctl stop 'e2e-shardprov@*' 2>/dev/null || true
-rm -rf $SG_DIR $E2E_POOLS /root/e2e/receipt-key-e2e-* /root/e2e/admission-key-e2e-* /root/e2e/shardprov-*.env
+rm -rf $SG_DIR $E2E_POOLS /root/e2e/receipt-key-e2e-* /root/e2e/admission-key-e2e-* /root/e2e/shardprov-*.env /root/e2e/shard-epoch
 log "2084: provider tokens"
 for p in $SHARD_IDS $RHEAD $RM1; do
   for t in 1 2 3 4 5 6 7 8 9 10; do out="$(/opt/macprovider/coordinator-cli issue-token -db $CDB -provider-id $p -provider-name $p 2>&1)" && break; sleep 3; done
