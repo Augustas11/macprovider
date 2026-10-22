@@ -92,6 +92,25 @@ final class FakeShardStage: ShardBenchStage {
     /// Added to every logprob this stage summarizes.
     var logprobShift: Float = 0
 
+    /// Rows of every batched call (SPEC-051-R017), in order. Rows run one by one,
+    /// so outputs are exactly the per-request ones.
+    private(set) var batchRows: [Int] = []
+
+    func forwardBatch(tokens: [Int], caches: [Cache]) throws -> [ShardBenchActivation] {
+        batchRows.append(tokens.count)
+        return try zip(tokens, caches).map { try forward(tokens: [$0], cache: $1) }
+    }
+
+    func forwardBatch(activations: [ShardBenchActivation], caches: [Cache]) throws -> [ShardBenchActivation] {
+        batchRows.append(activations.count)
+        return try zip(activations, caches).map { try forward(activation: $0, cache: $1) }
+    }
+
+    func sampleBatch(activations: [ShardBenchActivation], caches: [Cache], samplers: [ShardRequestControl]) throws -> [Int] {
+        batchRows.append(activations.count)
+        return try activations.indices.map { try sample(activation: activations[$0], cache: caches[$0], sampler: samplers[$0]) }
+    }
+
     private static func mix(_ activation: ShardBenchActivation, into cache: Cache) -> Int {
         for (offset, value) in decode(activation).enumerated() where offset % 4 == 0 { cache.history.append(value) }
         return cache.history.enumerated().reduce(0) { ($0 &* 31 &+ Int($1.element) &+ $1.offset) % 1_000_003 }

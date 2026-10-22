@@ -371,12 +371,14 @@ enum ShardGroupWire {
         ]))
     }
 
-    /// SPEC-051-R015 `shard_member_health` for the epoch of the member's own hello.
+    /// SPEC-051-R015 `shard_member_health` for the epoch the member serves: a
+    /// standby spare's is the epoch before its standby link's (the one its own hello
+    /// names); once its takeover is accepted it serves, and reports, the link's.
     static func memberHealth(
         config: ShardMemberConfig, status: ShardMemberStatus, memberDeviceID: String, report: ShardMemberHealthReport
     ) throws -> Data {
         let joined = status.groupEpoch ?? config.linkEpoch
-        let epoch = config.role == .spare ? joined - 1 : joined
+        let epoch = config.role == .spare && status.standby ? joined - 1 : joined
         return try message(.object([
             "type": .string("shard_member_health"),
             "version": .int(version),
@@ -554,6 +556,9 @@ extension ShardGroupRuntime: ShardGroupCoordinatorParticipant {
         if identity.modelHash == nil || identity.modelHashAlgorithm == nil {
             return "the model has no verified catalog artifact; not registering"
         }
+        if let member = registration.config.memberMissingKey {
+            return "the group config names no member_public_key for \(member); not registering"
+        }
         return nil
     }
 }
@@ -575,6 +580,16 @@ extension ShardMemberRuntime: ShardGroupCoordinatorParticipant {
             helloEpoch = status.groupEpoch
         }
         guard memberDeviceID == context.providerID, let hash = identity.modelHash, let algorithm = identity.modelHashAlgorithm else {
+            return []
+        }
+        // SPEC-051-R011: a member that cannot check its neighbours' keys serves a
+        // lab chain only; the coordinator never hears of it, so no group it is in
+        // becomes available.
+        guard config.neighbourKeysConfigured else {
+            if !missingKeysWarned {
+                missingKeysWarned = true
+                shardGroupLog("the member config names no upstream_public_key (or no downstream_public_key with connect); not saying hello to the coordinator")
+            }
             return []
         }
         func due(_ state: ShardMemberHelloState) -> Bool {
@@ -603,7 +618,7 @@ extension ShardMemberRuntime: ShardGroupCoordinatorParticipant {
         // once its hello for this epoch was accepted.
         if helloState == .accepted, let report = server.healthReport,
            let health = try? ShardGroupWire.memberHealth(config: config, status: status, memberDeviceID: memberDeviceID, report: report) {
-            reportedHealth = report.signature
+            reportedHealth = healthSignature(report, status: status)
             messages.append(health)
         }
         return messages

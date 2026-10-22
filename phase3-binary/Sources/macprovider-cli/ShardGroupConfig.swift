@@ -164,19 +164,26 @@ struct ShardGroupStageConfig: Codable, Equatable, Sendable {
     var endpoint: String
     var layerStart: Int
     var layerEnd: Int
+    /// SPEC-051-R011: the member's sub-receipt (SPEC-015 receipt) public key,
+    /// base64 of the raw 32 bytes. The head refuses a stage that authenticates
+    /// with any other key; without it the head serves a lab chain only and never
+    /// registers the group.
+    var memberPublicKey: String?
 
     enum CodingKeys: String, CodingKey, CaseIterable {
         case memberDeviceID = "member_device_id"
         case endpoint
         case layerStart = "layer_start"
         case layerEnd = "layer_end"
+        case memberPublicKey = "member_public_key"
     }
 
-    init(memberDeviceID: String, endpoint: String, layerStart: Int, layerEnd: Int) {
+    init(memberDeviceID: String, endpoint: String, layerStart: Int, layerEnd: Int, memberPublicKey: String? = nil) {
         self.memberDeviceID = memberDeviceID
         self.endpoint = endpoint
         self.layerStart = layerStart
         self.layerEnd = layerEnd
+        self.memberPublicKey = memberPublicKey
     }
 
     init(from decoder: Decoder) throws {
@@ -186,21 +193,26 @@ struct ShardGroupStageConfig: Codable, Equatable, Sendable {
         endpoint = try container.decode(String.self, forKey: .endpoint)
         layerStart = try container.decode(Int.self, forKey: .layerStart)
         layerEnd = try container.decode(Int.self, forKey: .layerEnd)
+        memberPublicKey = try container.decodeIfPresent(String.self, forKey: .memberPublicKey)
     }
 }
 
 struct ShardGroupSpareConfig: Codable, Equatable, Sendable {
     var memberDeviceID: String
     var endpoint: String
+    /// SPEC-051-R011: the spare's sub-receipt public key, as for a stage.
+    var memberPublicKey: String?
 
     enum CodingKeys: String, CodingKey, CaseIterable {
         case memberDeviceID = "member_device_id"
         case endpoint
+        case memberPublicKey = "member_public_key"
     }
 
-    init(memberDeviceID: String, endpoint: String) {
+    init(memberDeviceID: String, endpoint: String, memberPublicKey: String? = nil) {
         self.memberDeviceID = memberDeviceID
         self.endpoint = endpoint
+        self.memberPublicKey = memberPublicKey
     }
 
     init(from decoder: Decoder) throws {
@@ -208,6 +220,15 @@ struct ShardGroupSpareConfig: Codable, Equatable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         memberDeviceID = try container.decode(String.self, forKey: .memberDeviceID)
         endpoint = try container.decode(String.self, forKey: .endpoint)
+        memberPublicKey = try container.decodeIfPresent(String.self, forKey: .memberPublicKey)
+    }
+}
+
+/// SPEC-051-R011: a configured member key is base64 of a raw 32-byte Ed25519 key.
+private func validateMemberKey(_ key: String?, field: String) throws {
+    guard let key else { return }
+    guard let raw = Data(base64Encoded: key), raw.count == 32 else {
+        throw ShardGroupConfigError.invalid("\(field) must be base64 of a 32-byte Ed25519 public key")
     }
 }
 
@@ -325,6 +346,7 @@ struct ShardGroupHeadConfig: Codable, Equatable, Sendable {
                 throw ShardGroupConfigError.invalid("stages[\(index)] layers \(stage.layerStart):\(stage.layerEnd) must start at \(expectedStart) and be non-empty")
             }
             _ = try ShardBenchEndpoint.parse(stage.endpoint)
+            try validateMemberKey(stage.memberPublicKey, field: "stages[\(index)].member_public_key")
             expectedStart = stage.layerEnd
         }
         if stages.count > 1 {
@@ -336,6 +358,7 @@ struct ShardGroupHeadConfig: Codable, Equatable, Sendable {
             try validateMemberID(spare.memberDeviceID, field: "spare.member_device_id")
             guard !ids.contains(spare.memberDeviceID) else { throw ShardGroupConfigError.invalid("the spare is also an active member") }
             _ = try ShardBenchEndpoint.parse(spare.endpoint)
+            try validateMemberKey(spare.memberPublicKey, field: "spare.member_public_key")
         }
         guard (1...256).contains(maxConcurrency) else { throw ShardGroupConfigError.invalid("max_concurrency must be within 1..256") }
         if let prefillChunkTokens, prefillChunkTokens <= 0 {
@@ -354,12 +377,22 @@ struct ShardGroupHeadConfig: Codable, Equatable, Sendable {
     var numLayers: Int { stages.last?.layerEnd ?? headLayerEnd }
 
     var expectedMembers: [ShardGroupExpectedMember] {
-        stages.map { ShardGroupExpectedMember(memberDeviceID: $0.memberDeviceID, layers: $0.layerStart..<$0.layerEnd) }
+        stages.map {
+            ShardGroupExpectedMember(memberDeviceID: $0.memberDeviceID, layers: $0.layerStart..<$0.layerEnd, publicKey: $0.memberPublicKey)
+        }
     }
 
     var spareMember: ShardGroupExpectedMember? {
         guard let spare, let last = stages.last else { return nil }
-        return ShardGroupExpectedMember(memberDeviceID: spare.memberDeviceID, layers: last.layerStart..<last.layerEnd)
+        return ShardGroupExpectedMember(
+            memberDeviceID: spare.memberDeviceID, layers: last.layerStart..<last.layerEnd, publicKey: spare.memberPublicKey)
+    }
+
+    /// The first member whose key the config does not name (SPEC-051-R011); a head
+    /// with one never registers its group, so the group never serves.
+    var memberMissingKey: String? {
+        stages.first(where: { $0.memberPublicKey == nil })?.memberDeviceID
+            ?? spare.flatMap { $0.memberPublicKey == nil ? $0.memberDeviceID : nil }
     }
 }
 
@@ -392,6 +425,14 @@ struct ShardMemberConfig: Codable, Equatable, Sendable {
     var supervision: ShardSupervisionConfig
     /// Set when this Mac holds only its stage's files (SPEC-051-R008).
     var snapshotManifest: String?
+    /// SPEC-051-R011: the sub-receipt public key of the neighbour this member
+    /// accepts work from (the head for stage 1 and a spare), base64 of the raw 32
+    /// bytes, and of the neighbour it dials (`connect`: the next stage, or the head
+    /// for a tail's return link). The member refuses a peer authenticating with any
+    /// other key; without them it serves a lab chain only and never says hello to
+    /// the coordinator.
+    var upstreamPublicKey: String?
+    var downstreamPublicKey: String?
 
     enum CodingKeys: String, CodingKey, CaseIterable {
         case schema
@@ -408,14 +449,18 @@ struct ShardMemberConfig: Codable, Equatable, Sendable {
         case maxSequences = "max_sequences"
         case supervision
         case snapshotManifest = "snapshot_manifest"
+        case upstreamPublicKey = "upstream_public_key"
+        case downstreamPublicKey = "downstream_public_key"
     }
 
     init(
         groupProviderID: String, groupEpoch: UInt64, role: Role = .stage, stageIndex: Int, layerStart: Int, layerEnd: Int,
         listen: String, connect: String? = nil, interconnectClass: ShardInterconnectClass = .thunderboltIP,
         frameProtection: ShardFrameProtection? = nil, maxSequences: Int = 16, supervision: ShardSupervisionConfig = .defaults,
-        snapshotManifest: String? = nil
+        snapshotManifest: String? = nil, upstreamPublicKey: String? = nil, downstreamPublicKey: String? = nil
     ) {
+        self.upstreamPublicKey = upstreamPublicKey
+        self.downstreamPublicKey = downstreamPublicKey
         self.schema = Self.schemaID
         self.groupProviderID = groupProviderID
         self.groupEpoch = groupEpoch
@@ -450,6 +495,8 @@ struct ShardMemberConfig: Codable, Equatable, Sendable {
         maxSequences = try container.decode(Int.self, forKey: .maxSequences)
         supervision = try container.decode(ShardSupervisionConfig.self, forKey: .supervision)
         snapshotManifest = try container.decodeIfPresent(String.self, forKey: .snapshotManifest)
+        upstreamPublicKey = try container.decodeIfPresent(String.self, forKey: .upstreamPublicKey)
+        downstreamPublicKey = try container.decodeIfPresent(String.self, forKey: .downstreamPublicKey)
     }
 
     static func load(path: String) throws -> ShardMemberConfig {
@@ -481,10 +528,21 @@ struct ShardMemberConfig: Codable, Equatable, Sendable {
         if let connect { _ = try ShardBenchEndpoint.parse(connect) }
         guard (1...256).contains(maxSequences) else { throw ShardGroupConfigError.invalid("max_sequences must be within 1..256") }
         try validateManifestPath(snapshotManifest)
+        try validateMemberKey(upstreamPublicKey, field: "upstream_public_key")
+        try validateMemberKey(downstreamPublicKey, field: "downstream_public_key")
+        if downstreamPublicKey != nil, connect == nil {
+            throw ShardGroupConfigError.invalid("downstream_public_key names the neighbour connect dials; set connect or drop it")
+        }
     }
 
     var stageScope: ShardStageScope? {
         snapshotManifest.map { ShardStageScope(snapshotManifestPath: ($0 as NSString).expandingTildeInPath, layers: layerStart..<layerEnd) }
+    }
+
+    /// SPEC-051-R011: both neighbours' keys are configured, so the member checks
+    /// every peer it serves against them.
+    var neighbourKeysConfigured: Bool {
+        upstreamPublicKey != nil && (connect == nil || downstreamPublicKey != nil)
     }
 
     /// The lowest epoch this member's links accept: a member follows the head to

@@ -10,11 +10,14 @@ import XCTest
 final class ShardGroupWireTests: XCTestCase {
     private let headKey = Curve25519.Signing.PrivateKey()
     private let tailKey = Curve25519.Signing.PrivateKey()
+    private let spareKey = Curve25519.Signing.PrivateKey().publicKey.rawRepresentation.base64EncodedString()
 
     private func headConfig(poolModelID: String? = "pool/ijUnc-ZQf-LJeRvkhi-0iQ/llama-3b", spare: ShardGroupSpareConfig? = nil) -> ShardGroupHeadConfig {
         ShardGroupHeadConfig(
             groupEpoch: ShardBenchTestRig.epoch, poolModelID: poolModelID, headLayerEnd: 2,
-            stages: [ShardGroupStageConfig(memberDeviceID: "mac-b", endpoint: "127.0.0.1:1", layerStart: 2, layerEnd: 4)],
+            stages: [ShardGroupStageConfig(
+                memberDeviceID: "mac-b", endpoint: "127.0.0.1:1", layerStart: 2, layerEnd: 4,
+                memberPublicKey: tailKey.publicKey.rawRepresentation.base64EncodedString())],
             spare: spare, maxConcurrency: 4)
     }
 
@@ -356,7 +359,7 @@ final class ShardGroupWireTests: XCTestCase {
     // MARK: Spares
 
     func testRecordAndHeartbeatCarryTheSpareUntilItTakesOver() async throws {
-        let runtime = try await runtime(spare: ShardGroupSpareConfig(memberDeviceID: "mac-s", endpoint: "127.0.0.1:9"))
+        let runtime = try await runtime(spare: ShardGroupSpareConfig(memberDeviceID: "mac-s", endpoint: "127.0.0.1:9", memberPublicKey: spareKey))
         let context = ShardCoordinatorContext(providerID: "prov-head", wireModelID: "wire/model")
         let first = await runtime.shardCoordinatorMessages(context: context, sessionStarted: true)
         let record = try XCTUnwrap(try object(try XCTUnwrap(first.first))["record"] as? [String: Any])
@@ -384,7 +387,7 @@ final class ShardGroupWireTests: XCTestCase {
         ]
         chain[1].upstreamInterface = ShardLinkInterface.thunderbolt
         let takeover = try ShardGroupWire.record(
-            config: headConfig(spare: ShardGroupSpareConfig(memberDeviceID: "mac-s", endpoint: "127.0.0.1:9")), chain: chain,
+            config: headConfig(spare: ShardGroupSpareConfig(memberDeviceID: "mac-s", endpoint: "127.0.0.1:9", memberPublicKey: spareKey)), chain: chain,
             groupEpoch: ShardBenchTestRig.epoch + 1, providerID: "prov-head", wireModelID: "wire/model",
             poolModelID: "pool/ijUnc-ZQf-LJeRvkhi-0iQ/llama-3b", artifactHashAlgorithm: ModelArtifactIdentity.snapshotManifestV1,
             artifactHash: String(repeating: "c", count: 64))
@@ -420,12 +423,14 @@ final class ShardGroupWireTests: XCTestCase {
 
     func testASpareMemberJoinsOnTheStandbyLinkAndSendsBothHellos() async throws {
         let spareKey = Curve25519.Signing.PrivateKey()
+        let headSigner = ShardMemberSigner(memberDeviceID: "head-device", key: Curve25519.Signing.PrivateKey())
         let spareConfig = ShardMemberConfig(
             groupProviderID: "head-device", groupEpoch: ShardBenchTestRig.epoch, role: .spare, stageIndex: 1, layerStart: 2, layerEnd: 4,
             listen: "127.0.0.1:0", maxSequences: 8,
             supervision: ShardSupervisionConfig(
                 heartbeatIntervalMilliseconds: 50, heartbeatMissLimit: 4, decodeHopDeadlineMilliseconds: 2000,
-                prefillChunkDeadlineMilliseconds: 3000, replayDeadlineMilliseconds: 5000))
+                prefillChunkDeadlineMilliseconds: 3000, replayDeadlineMilliseconds: 5000),
+            upstreamPublicKey: headSigner.publicKeyBase64)
         let server = ShardMemberStageServer(
             stage: FakeShardStage(layers: 2..<4, totalLayers: 4), config: spareConfig,
             signer: ShardMemberSigner(memberDeviceID: "mac-s", key: spareKey), modelDigest: nil, modelLabel: "fake")
@@ -446,7 +451,9 @@ final class ShardGroupWireTests: XCTestCase {
                 .run(links: links[1])
         }.start()
         var options = ShardGroupEngineTests.options(spare: ShardBenchEndpoint(host: "127.0.0.1", port: try XCTUnwrap(server.port)))
-        options.spareMember = ShardGroupExpectedMember(memberDeviceID: "mac-s", layers: 2..<4)
+        options.spareMember = ShardGroupExpectedMember(
+            memberDeviceID: "mac-s", layers: 2..<4, publicKey: spareKey.publicKey.rawRepresentation.base64EncodedString())
+        options.signer = headSigner
         let engine = ShardGroupEngine(stage: FakeShardStage(layers: 0..<2, totalLayers: 4), options: options)
         try engine.start(links: links[0])
         defer { _ = try? engine.shutdown() }

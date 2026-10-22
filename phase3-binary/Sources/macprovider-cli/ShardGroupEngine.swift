@@ -138,6 +138,9 @@ enum ShardGroupEngineFault: Error, CustomStringConvertible {
 struct ShardGroupExpectedMember: Equatable, Sendable {
     let memberDeviceID: String
     let layers: Range<Int>
+    /// SPEC-051-R011: the key the member must announce and, on a protected link,
+    /// authenticate with; nil (a lab chain) checks only the announced key.
+    var publicKey: String? = nil
 }
 
 struct ShardGroupEngineOptions: Sendable {
@@ -300,6 +303,26 @@ enum ShardChainWire {
         }
     }
 
+    /// SPEC-051-R011: a stage the group configures a key for must announce that
+    /// key; with `checkPeer` on its link, the peer that authenticated the link is
+    /// then the configured member, not just whoever holds the key it announced.
+    static func checkConfigured(_ hello: ShardBenchHello, key: String?, stage: Int) throws {
+        guard let key else { return }
+        guard hello.memberPublicKey == key else {
+            throw ShardBenchError.handshake("stage \(stage) (\(hello.memberDeviceID ?? "unnamed")) announced a key the group does not configure for it")
+        }
+    }
+
+    /// SPEC-051-R011: refuse a link whose authenticated peer is not the configured
+    /// neighbour, before reading anything else from it. A crc32c link has no
+    /// authenticated peer; its neighbour's hello is checked against the key instead.
+    static func checkLinkPeer(_ link: ShardStageLink, key: String?, neighbour: String) throws {
+        guard let key, link.configuration.frameProtection != .crc32c else { return }
+        guard link.peer?.publicKey == key else {
+            throw ShardBenchError.handshake("the \(neighbour) link was authenticated by \(link.peer?.memberDeviceID ?? "no peer"), not by the configured \(neighbour) key")
+        }
+    }
+
     static func decodeReceipts(_ payload: Data) throws -> [ShardSignedSubReceipt] {
         guard !payload.isEmpty else { return [] }
         do {
@@ -383,8 +406,10 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
     private var expectedKeys = [Int: String]()
     /// The standby link to the spare while it has not taken over (SPEC-051-R007).
     private var standby: ShardSpareStandby?
-    private var lastProgress: TimeInterval = 0
     private var heardBytes: UInt64 = 0
+    /// A frame read while collecting tokens for a decode batch that was not a
+    /// token; the loop handles it next, exactly as if it had just arrived.
+    private var heldFrame: ShardStageFrame?
     private var heardAt: TimeInterval = 0
     private var chainValue = [ShardBenchHello]()
 
@@ -403,6 +428,8 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
         var steps = 0
         var summaries: [ShardLogitSummary] = []
         var timing = ShardRequestTiming()
+        /// The last frame sent for this request (an activation, or the abort that
+        /// collects its sub-receipts): its own progress clock (SPEC-051-R013).
         var lastSend: TimeInterval = 0
         /// A step was sent and its token has not come back.
         var outstanding = false
@@ -462,14 +489,13 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
             configuration.groupEpoch = groupEpoch + 1
             let standby = ShardSpareStandby(
                 endpoint: spare, configuration: configuration, signer: options.signer, headHello: myHello(),
-                expectedMemberID: options.spareMember?.memberDeviceID, layers: chainValue[1].layerStart..<chainValue[1].layerEnd,
+                expectedMemberID: options.spareMember?.memberDeviceID, expectedMemberKey: options.spareMember?.publicKey,
+                layers: chainValue[1].layerStart..<chainValue[1].layerEnd,
                 modelDigest: options.modelDigest, handshakeTimeout: options.connectTimeout)
             standby.start()
             self.standby = standby
         }
-        let now = now()
-        lastProgress = now
-        heardAt = now
+        heardAt = now()
         heardBytes = links.upstream.statistics.bytesReceived
         lock.lock()
         running = true
@@ -604,6 +630,7 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
                 else {
                     throw ShardBenchError.handshake("stage \(offset + 1) is \(hello.memberDeviceID ?? "unnamed") \(hello.layerLabel), the group names \(member.memberDeviceID) \(member.layers.lowerBound):\(member.layers.upperBound)")
                 }
+                try ShardChainWire.checkConfigured(hello, key: member.publicKey, stage: offset + 1)
             }
         }
         if let digest = options.modelDigest {
@@ -643,7 +670,6 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
                     try replaceLostStage(error)
                     continue
                 }
-                lastProgress = now()
                 try handle(frame)
             }
             try sessionEnd()
@@ -654,7 +680,13 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
     }
 
     private func receiveUpstream(_ links: ShardBenchLinks, timeout: TimeInterval) throws -> ShardStageFrame {
-        let frame = try links.upstream.receive(timeout: timeout)
+        let frame: ShardStageFrame
+        if let held = heldFrame {
+            heldFrame = nil
+            frame = held
+        } else {
+            frame = try links.upstream.receive(timeout: timeout)
+        }
         if frame.header.kind == .error {
             throw ShardBenchError.peerError(String(decoding: frame.payload, as: UTF8.self))
         }
@@ -683,8 +715,17 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
         for id in cancelled {
             active[id]?.cancelled = true
         }
-        for request in admitted {
-            try admit(request)
+        for (index, request) in admitted.enumerated() {
+            do {
+                try admit(request)
+            } catch {
+                // Not admitted yet: back to the front of the queue, so the teardown
+                // this error leads to ends each of them with a typed error too.
+                lock.lock()
+                pending.insert(contentsOf: admitted[(index + 1)...], at: 0)
+                lock.unlock()
+                throw error
+            }
         }
         publish()
         return shutdown && active.isEmpty && awaiting.isEmpty
@@ -703,6 +744,7 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
         control.requestID = request.request.receiptRequestID ?? String(id)
         var entry = Active(id: id, request: request.request, sink: request.sink, cache: cache)
         entry.timing.prefillStart = now()
+        entry.lastSend = entry.timing.prefillStart
         entry.outstanding = true
         active[id] = entry
         try headSend(ShardStageFrame(
@@ -748,7 +790,7 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
         let header = frame.header
         switch header.kind {
         case .token, .tokenLogits:
-            try handleToken(frame)
+            try handleTokens(frame)
         case .abort where header.requestID != Self.probeRequestID:
             try handleReceipts(frame)
         default:
@@ -756,7 +798,52 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
         }
     }
 
-    private func handleToken(_ frame: ShardStageFrame) throws {
+    /// SPEC-051-R017: take this token and every other token already waiting, then
+    /// run the next decode step of all their requests in one batched forward.
+    private func handleTokens(_ first: ShardStageFrame) throws {
+        var rows = [(id: UInt64, token: Int)]()
+        var frame: ShardStageFrame? = first
+        while let current = frame {
+            frame = nil
+            if let row = try acceptToken(current) { rows.append(row) }
+            guard rows.count < options.maxInFlight, let next = pollUpstream() else { break }
+            guard next.header.kind == .token || next.header.kind == .tokenLogits,
+                  !rows.contains(where: { $0.id == next.header.requestID })
+            else {
+                heldFrame = next
+                break
+            }
+            frame = next
+        }
+        try step(rows)
+    }
+
+    /// The next upstream frame if one is already queued. A failing link answers
+    /// nil here; the loop's next receive reports it and handles the loss.
+    private func pollUpstream() -> ShardStageFrame? {
+        guard heldFrame == nil, let links else { return nil }
+        return try? links.upstream.receive(timeout: 0)
+    }
+
+    /// One batched head forward over the next decode position of `rows`, then each
+    /// request's activation down the chain.
+    private func step(_ rows: [(id: UInt64, token: Int)]) throws {
+        let live = rows.filter { active[$0.id] != nil }
+        guard !live.isEmpty else { return }
+        let computeStart = now()
+        let hidden = try stage.forwardBatch(tokens: live.map(\.token), caches: live.map { active[$0.id]!.cache })
+        let elapsed = now() - computeStart
+        for (row, activation) in zip(live, hidden) {
+            guard let entry = active[row.id] else { continue }
+            active[row.id]?.timing.headDecodeCompute.append(elapsed)
+            active[row.id]?.timing.decodeHopPayloadBytes = activation.payload.count
+            active[row.id]?.outstanding = true
+            try sendActivation(row.id, activation, step: UInt32(entry.tokens.count))
+        }
+    }
+
+    /// Account one returned token; the request's next decode input when it goes on.
+    private func acceptToken(_ frame: ShardStageFrame) throws -> (id: UInt64, token: Int)? {
         let header = frame.header
         guard header.dtype == .int32, var entry = active[header.requestID], entry.outstanding else {
             throw ShardBenchError.protocolViolation("expected a token for an active request, got \(header.kind) request \(header.requestID)")
@@ -786,12 +873,14 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
         entry.timing.lastTokenAt = arrived
         if entry.cancelled {
             active[entry.id] = entry
-            return try finish(entry.id, .cancelled)
+            try finish(entry.id, .cancelled)
+            return nil
         }
         if entry.request.stopTokenIDs.contains(token) {
             entry.stopToken = token
             active[entry.id] = entry
-            return try finish(entry.id, .stop)
+            try finish(entry.id, .stop)
+            return nil
         }
         entry.tokens.append(token)
         if let summary { entry.summaries.append(summary) }
@@ -799,15 +888,10 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
         // Delivered from here on, whatever happens to the next send (SPEC-051-R012).
         entry.sink(.success(.token(token, summary)))
         if entry.tokens.count >= entry.request.maxTokens {
-            return try finish(entry.id, .length)
+            try finish(entry.id, .length)
+            return nil
         }
-        let next = entry.request.teacherTokens.map { $0[entry.tokens.count - 1] } ?? token
-        let computeStart = now()
-        let hidden = try stage.forward(tokens: [next], cache: entry.cache)
-        active[entry.id]?.timing.headDecodeCompute.append(now() - computeStart)
-        active[entry.id]?.timing.decodeHopPayloadBytes = hidden.payload.count
-        active[entry.id]?.outstanding = true
-        try sendActivation(entry.id, hidden, step: UInt32(entry.tokens.count))
+        return (entry.id, entry.request.teacherTokens.map { $0[entry.tokens.count - 1] } ?? token)
     }
 
     /// The request is done on the head: forget its replay frames and send the abort
@@ -815,6 +899,7 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
     private func finish(_ id: UInt64, _ reason: ShardFinishReason) throws {
         guard var entry = active.removeValue(forKey: id) else { return }
         entry.reason = reason
+        entry.lastSend = now()
         replayBuffer.remove(requestID: id)
         awaiting[id] = entry
         try headSend(ShardStageFrame(header: header(.abort, requestID: id, destination: 1)), buffered: false)
@@ -875,7 +960,6 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
             try replaceLostStage(error)
             return
         }
-        lastProgress = now()
         if frame.header.kind == .activation {
             book.recordOutput(frame.header, frame.payload, processedTokens: ShardMemberLedgerBook.processedTokens(frame.header))
         }
@@ -901,19 +985,23 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
         let hops = Double(max(1, chainValue.count - 1))
         var chunks = 0
         var decodes = awaiting.count
+        var oldest = awaiting.values.map(\.lastSend).min() ?? .infinity
         for entry in active.values where entry.outstanding {
             if entry.timing.firstTokenAt == nil {
                 chunks += max(1, entry.timing.prefillChunks)
             } else {
                 decodes += 1
             }
+            oldest = min(oldest, entry.lastSend)
         }
         guard chunks + decodes > 0 else { return nil }
         // Work queues behind other work at every stage: allow each outstanding chunk
-        // and step its own deadline on top of one pass through the chain.
+        // and step its own deadline on top of one pass through the chain. Each
+        // request is timed from its own last send, so other requests' progress or
+        // heartbeats never hide one that stalled.
         var budget = (hops + Double(decodes)) * options.decodeHopDeadline
         if chunks > 0 { budget += (hops + Double(chunks)) * options.prefillChunkDeadline }
-        let silent = now - lastProgress
+        let silent = now - oldest
         guard silent > budget else { return nil }
         return ShardGroupEngineFault.progressDeadline(
             silentMilliseconds: Int(silent * 1000), budgetMilliseconds: Int(budget * 1000))
@@ -945,6 +1033,8 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
         watch.stop()
         watch = ShardBenchLinkWatch()
         links?.close()
+        // Whatever the lost chain still had queued is not part of the replay.
+        heldFrame = nil
         let inFlight = active.keys.sorted()
         if let lost = inFlight.first(where: { !replayBuffer.isReplayable($0) }) {
             throw ShardGroupEngineError.unavailable("\(cause); request \(lost) outgrew the \(options.replayBufferBytes)-byte replay buffer")
@@ -998,7 +1088,8 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
                 replayedBytes: bytes, milliseconds: (elapsed * 1_000_000).rounded() / 1000))
             links = replacement
             let now = now()
-            lastProgress = now
+            // The replay re-sent every in-flight request: their clocks restart.
+            for id in inFlight { active[id]?.lastSend = now }
             heardAt = now
             heardBytes = link.statistics.bytesReceived
             publish()

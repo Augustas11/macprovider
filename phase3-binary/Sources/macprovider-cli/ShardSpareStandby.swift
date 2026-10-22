@@ -30,6 +30,8 @@ final class ShardSpareStandby: @unchecked Sendable {
     /// The member the group config names as the spare (nil in the lab harness),
     /// and the layers it must hold: those of the stage it replaces.
     private let expectedMemberID: String?
+    /// SPEC-051-R011: the spare's configured key; nil in a lab chain.
+    private let expectedMemberKey: String?
     private let layers: Range<Int>
     private let modelDigest: String?
     private let handshakeTimeout: TimeInterval
@@ -55,13 +57,15 @@ final class ShardSpareStandby: @unchecked Sendable {
     /// `configuration` carries the spare's epoch (the one after the group's).
     init(
         endpoint: ShardBenchEndpoint, configuration: ShardLinkConfiguration, signer: ShardMemberSigner, headHello: ShardBenchHello,
-        expectedMemberID: String?, layers: Range<Int>, modelDigest: String?, handshakeTimeout: TimeInterval
+        expectedMemberID: String?, expectedMemberKey: String? = nil, layers: Range<Int>, modelDigest: String?,
+        handshakeTimeout: TimeInterval
     ) {
         self.endpoint = endpoint
         self.configuration = configuration
         self.signer = signer
         self.headHello = headHello
         self.expectedMemberID = expectedMemberID
+        self.expectedMemberKey = expectedMemberKey
         self.layers = layers
         self.modelDigest = modelDigest
         self.handshakeTimeout = handshakeTimeout
@@ -205,6 +209,7 @@ final class ShardSpareStandby: @unchecked Sendable {
                 throw ShardBenchError.handshake("the spare's model digest \(spare.modelDigest ?? "none") differs from the head's \(modelDigest)")
             }
             guard spare.memberPublicKey != nil else { throw ShardBenchError.handshake("the spare announced no member key") }
+            try ShardChainWire.checkConfigured(spare, key: expectedMemberKey, stage: 1)
             try ShardChainWire.checkPeer(link, is: spare, stage: 1)
             link.armLiveness()
             return (link, spare)

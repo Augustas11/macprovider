@@ -20,10 +20,44 @@ enum ShardLinkInterface {
     static let vpn = "vpn"
     static let other = "other"
 
+    /// The interface a connected link actually uses, classified: the one that owns
+    /// the link's local address (SPEC-051-R007). A subnet match on the peer's
+    /// address could name another interface when two share a subnet.
+    static func classify(link: ShardStageLink) -> String {
+        guard let local = link.localHost, let name = interfaceName(owning: local) else { return other }
+        return classify(bsdName: name)
+    }
+
     /// The interface whose subnet holds the peer's address, classified.
     static func classify(peerAddress: String) -> String {
         guard let host = host(of: peerAddress), let name = interfaceName(reaching: host) else { return other }
         return classify(bsdName: name)
+    }
+
+    /// BSD name of the interface holding exactly the local address `host`.
+    static func interfaceName(owning host: String) -> String? {
+        var local4 = in_addr()
+        var local6 = in6_addr()
+        let bare = host.split(separator: "%", maxSplits: 1).first.map(String.init) ?? host
+        let isV4 = inet_pton(AF_INET, bare, &local4) == 1
+        guard isV4 || inet_pton(AF_INET6, bare, &local6) == 1 else { return nil }
+        var list: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&list) == 0, let first = list else { return nil }
+        defer { freeifaddrs(list) }
+        var cursor: UnsafeMutablePointer<ifaddrs>? = first
+        while let entry = cursor {
+            defer { cursor = entry.pointee.ifa_next }
+            guard let address = entry.pointee.ifa_addr else { continue }
+            let name = String(cString: entry.pointee.ifa_name)
+            if isV4, address.pointee.sa_family == sa_family_t(AF_INET) {
+                let candidate = address.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee.sin_addr.s_addr }
+                if candidate == local4.s_addr { return name }
+            } else if !isV4, address.pointee.sa_family == sa_family_t(AF_INET6) {
+                var candidate = address.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { $0.pointee.sin6_addr }
+                if memcmp(&candidate, &local6, MemoryLayout<in6_addr>.size) == 0 { return name }
+            }
+        }
+        return nil
     }
 
     static func classify(bsdName name: String) -> String {
@@ -100,6 +134,9 @@ struct ShardMemberStatus: Sendable {
     /// The epoch of the head's current session (a spare's: of its standby link,
     /// the epoch its takeover starts); nil before a head reached this member.
     var groupEpoch: UInt64? = nil
+    /// A spare waiting on its standby link; false once its takeover hello was
+    /// accepted and it serves the stage at `groupEpoch`.
+    var standby = false
 }
 
 /// SPEC-051-R015: a member's own account of its health and of each stage link it
@@ -208,10 +245,14 @@ final class ShardMemberStageServer<Stage: ShardBenchStage>: @unchecked Sendable 
         thread.start()
     }
 
+    /// Stop accepting and end the session in progress: closing its links ends the
+    /// stage loop, which releases every request's KV.
     func stop() {
         lock.lock()
         stopped = true
+        let links = sessionLinks
         lock.unlock()
+        links?.close()
     }
 
     private var isStopped: Bool {
@@ -244,6 +285,7 @@ final class ShardMemberStageServer<Stage: ShardBenchStage>: @unchecked Sendable 
             // stage that dialed this one is never left waiting.
             do {
                 try upstream.authenticate(signer: signer, role: .responder, timeout: Self.connectTimeout)
+                try ShardChainWire.checkLinkPeer(upstream, key: config.upstreamPublicKey, neighbour: "upstream")
             } catch {
                 shardGroupLog("member link key agreement with \(upstream.peerAddress) failed: \(error)")
                 update { $0.lastError = "upstream key agreement failed: \(error)" }
@@ -261,6 +303,7 @@ final class ShardMemberStageServer<Stage: ShardBenchStage>: @unchecked Sendable 
                     downstream = try ShardStageLink.connect(
                         host: target.host, port: target.port, timeout: Self.connectTimeout, configuration: next)
                     try downstream.authenticate(signer: signer, role: .initiator, timeout: Self.connectTimeout)
+                    try ShardChainWire.checkLinkPeer(downstream, key: config.downstreamPublicKey, neighbour: "downstream")
                 } catch {
                     shardGroupLog("member could not reach the next stage at \(connect): \(error)")
                     update { $0.lastError = "connect failed: \(error)" }
@@ -286,8 +329,8 @@ final class ShardMemberStageServer<Stage: ShardBenchStage>: @unchecked Sendable 
             sessionLinks = nil
             lock.unlock()
         }
-        let upstreamInterface = ShardLinkInterface.classify(peerAddress: links.upstream.peerAddress)
-        let downstreamInterface = links.isCollapsed ? upstreamInterface : ShardLinkInterface.classify(peerAddress: links.downstream.peerAddress)
+        let upstreamInterface = ShardLinkInterface.classify(link: links.upstream)
+        let downstreamInterface = links.isCollapsed ? upstreamInterface : ShardLinkInterface.classify(link: links.downstream)
         var options = ShardBenchSessionOptions(
             role: role, listen: nil, connect: nil, expectedStages: nil, modelLabel: modelLabel, prompts: [], tokens: 1,
             temperature: 0, seed: 0, link: link, receiveTimeout: Self.connectTimeout, connectTimeout: Self.connectTimeout,
@@ -297,6 +340,13 @@ final class ShardMemberStageServer<Stage: ShardBenchStage>: @unchecked Sendable 
             parity: .skipped)
         options.signer = signer
         options.modelDigest = modelDigest
+        options.recordComputeSamples = false
+        if config.neighbourKeysConfigured {
+            options.expectedUpstreamKey = config.upstreamPublicKey
+            options.expectedDownstreamKey = config.downstreamPublicKey
+            options.expectedStageIndex = config.stageIndex
+            options.expectedHeadID = config.groupProviderID
+        }
         options.upstreamInterface = upstreamInterface
         options.returnInterface = links.isCollapsed || role != .tail ? nil : downstreamInterface
         // A spare learns its peer and link from the head's standby link before any
@@ -311,6 +361,7 @@ final class ShardMemberStageServer<Stage: ShardBenchStage>: @unchecked Sendable 
                 status.downstreamPeer = chain.first?.memberDeviceID
                 status.upstreamInterface = upstreamInterface
                 status.downstreamInterface = upstreamInterface
+                status.standby = true
                 status.lastError = nil
             }
         }
@@ -324,6 +375,7 @@ final class ShardMemberStageServer<Stage: ShardBenchStage>: @unchecked Sendable 
                 status.downstreamPeer = chain.indices.contains(next) ? chain[next].memberDeviceID : nil
                 status.upstreamInterface = upstreamInterface
                 status.downstreamInterface = downstreamInterface
+                status.standby = false
                 status.lastError = nil
             }
         }
@@ -333,12 +385,14 @@ final class ShardMemberStageServer<Stage: ShardBenchStage>: @unchecked Sendable 
             update {
                 $0.sessionsServed += 1
                 $0.chain = []
+                $0.standby = false
             }
         } catch {
             shardGroupLog("member session ended: \(error)")
             update {
                 $0.sessionsServed += 1
                 $0.chain = []
+                $0.standby = false
                 $0.lastError = "\(error)"
             }
         }
@@ -378,6 +432,7 @@ actor ShardMemberRuntime: ModelRuntimeServing {
     var helloEpoch: UInt64?
     /// What the last `shard_member_health` reported; a difference is a change to send now.
     var reportedHealth: [String]?
+    var missingKeysWarned = false
     var changeHandler: (@Sendable () async -> Void)?
     private var changeMonitor: Task<Void, Never>?
     private var lastChangeSent: TimeInterval = 0
@@ -437,7 +492,13 @@ actor ShardMemberRuntime: ModelRuntimeServing {
     /// The own report changed since it was last sent (after the member's hello was accepted).
     var healthDue: Bool {
         guard helloState == .accepted, let report = server.healthReport else { return false }
-        return report.signature != reportedHealth
+        return healthSignature(report, status: server.status) != reportedHealth
+    }
+
+    /// A report's change signature, with the epoch it is sent for: a spare's takeover
+    /// moves its report to the takeover epoch at once (SPEC-051-R015).
+    func healthSignature(_ report: ShardMemberHealthReport, status: ShardMemberStatus) -> [String] {
+        report.signature + ["standby \(status.standby)"]
     }
 
     func reportChangeIfDue() async {
@@ -515,7 +576,10 @@ enum ShardGroupServe {
         } else {
             key = try store.loadOrGenerate(providerId: providerID)
         }
-        return ShardMemberSigner(memberDeviceID: providerID, key: key)
+        let signer = ShardMemberSigner(memberDeviceID: providerID, key: key)
+        // The public key the group's other configs name for this Mac (SPEC-051-R011).
+        shardGroupLog("member \(providerID) sub-receipt public key \(signer.publicKeyBase64)")
+        return signer
     }
 
     /// What a stage proved before it loads (SPEC-051-R006, R008).

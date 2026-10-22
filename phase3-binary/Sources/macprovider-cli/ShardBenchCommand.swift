@@ -542,6 +542,29 @@ protocol ShardBenchStage: AnyObject {
     func fill(activation: ShardBenchActivation, cache: Cache) throws
     /// Last stage: boundary activation in, top-k logit summary of the last position out.
     func summarize(activation: ShardBenchActivation, cache: Cache, topK: Int) throws -> ShardLogitSummary
+    /// SPEC-051-R017: one decode position of each of several requests in one
+    /// forward, row `i` on `caches[i]`. First stage: one token per row.
+    func forwardBatch(tokens: [Int], caches: [Cache]) throws -> [ShardBenchActivation]
+    /// Middle stage: one single-position activation per row.
+    func forwardBatch(activations: [ShardBenchActivation], caches: [Cache]) throws -> [ShardBenchActivation]
+    /// Last stage: one single-position activation per row, each sampled with its
+    /// request's sampler.
+    func sampleBatch(activations: [ShardBenchActivation], caches: [Cache], samplers: [Sampler]) throws -> [Int]
+}
+
+/// Row by row, for stages that cannot batch.
+extension ShardBenchStage {
+    func forwardBatch(tokens: [Int], caches: [Cache]) throws -> [ShardBenchActivation] {
+        try zip(tokens, caches).map { try forward(tokens: [$0], cache: $1) }
+    }
+
+    func forwardBatch(activations: [ShardBenchActivation], caches: [Cache]) throws -> [ShardBenchActivation] {
+        try zip(activations, caches).map { try forward(activation: $0, cache: $1) }
+    }
+
+    func sampleBatch(activations: [ShardBenchActivation], caches: [Cache], samplers: [Sampler]) throws -> [Int] {
+        try activations.indices.map { try sample(activation: activations[$0], cache: caches[$0], sampler: samplers[$0]) }
+    }
 }
 
 extension PipelineStageModel: ShardBenchStage {
@@ -576,6 +599,44 @@ extension PipelineStageModel: ShardBenchStage {
 
     func fill(activation: ShardBenchActivation, cache: [KVCache]) throws {
         try fill(try PipelineActivationCodec.decode(dtype: activation.dtype, shape: activation.shape, payload: activation.payload), cache: cache)
+    }
+
+    func forwardBatch(tokens: [Int], caches: [[KVCache]]) throws -> [ShardBenchActivation] {
+        guard canBatchDecode(caches) else { return try zip(tokens, caches).map { try forward(tokens: [$0], cache: $1) } }
+        return try split(try forwardBatch(MLXArray(tokens.map(Int32.init)).reshaped(tokens.count, 1), caches: caches))
+    }
+
+    func forwardBatch(activations: [ShardBenchActivation], caches: [[KVCache]]) throws -> [ShardBenchActivation] {
+        guard let input = try batchInput(activations, caches: caches) else {
+            return try zip(activations, caches).map { try forward(activation: $0, cache: $1) }
+        }
+        return try split(try forwardBatch(input, caches: caches))
+    }
+
+    func sampleBatch(activations: [ShardBenchActivation], caches: [[KVCache]], samplers: [PipelineStageSampler]) throws -> [Int] {
+        guard let input = try batchInput(activations, caches: caches) else {
+            return try activations.indices.map { try sample(activation: activations[$0], cache: caches[$0], sampler: samplers[$0]) }
+        }
+        let logits = try forwardBatch(input, caches: caches)
+        return samplers.indices.map { samplers[$0].sample(logits: logits[$0 ..< $0 + 1]) }
+    }
+
+    /// `[B, 1, hidden]` of single-position activations of one dtype, or nil when
+    /// these rows cannot share a forward.
+    private func batchInput(_ activations: [ShardBenchActivation], caches: [[KVCache]]) throws -> MLXArray? {
+        guard let first = activations.first, canBatchDecode(caches),
+              activations.allSatisfy({ $0.dtype == first.dtype && $0.shape.count == 3 && $0.shape[0] == 1 && $0.shape[1] == 1 && $0.shape == first.shape })
+        else { return nil }
+        return concatenated(try activations.map {
+            try PipelineActivationCodec.decode(dtype: $0.dtype, shape: $0.shape, payload: $0.payload)
+        }, axis: 0)
+    }
+
+    private func split(_ hidden: MLXArray) throws -> [ShardBenchActivation] {
+        try (0..<hidden.dim(0)).map { row in
+            let encoded = try PipelineActivationCodec.encode(hidden[row ..< row + 1])
+            return ShardBenchActivation(dtype: encoded.dtype, shape: encoded.shape, payload: encoded.payload)
+        }
     }
 }
 
@@ -646,6 +707,19 @@ struct ShardBenchSessionOptions: Sendable {
     /// Spare: called when it answered the head's standby hello, with the chain
     /// through itself and its stage index.
     var onStandby: (@Sendable ([ShardBenchHello], Int) -> Void)? = nil
+    /// SPEC-051-R011: what a configured member checks of the chain it joins: the
+    /// key its upstream neighbour (the stage before, the head for stage 1 or a
+    /// spare) and its downstream neighbour (the next stage, the head for a tail's
+    /// return link) announce and authenticate with, its own stage position, and
+    /// the head's identity. nil (the lab harness) checks only that each link's
+    /// authenticated key is the one its neighbour announces.
+    var expectedUpstreamKey: String? = nil
+    var expectedDownstreamKey: String? = nil
+    var expectedStageIndex: Int? = nil
+    var expectedHeadID: String? = nil
+    /// Keep every compute time for the report (lab runs). A production member
+    /// keeps only counts, so its memory does not grow with the traffic it serves.
+    var recordComputeSamples = true
 }
 
 enum ShardBenchParityMode: String, Sendable {
@@ -857,6 +931,8 @@ struct ShardBenchStageReport: Encodable {
     let sequencesServed: Int
     let decodeCompute: ShardBenchLatency
     let prefillCompute: ShardBenchLatency
+    /// SPEC-051-R017: the most requests' decode rows one forward of this stage ran.
+    let decodeBatchRowsMax: Int
     let links: [ShardBenchLinkReport]
 }
 
@@ -1021,9 +1097,10 @@ struct ShardBenchLinks {
     /// stage blocks in accept, so a ring opens in any start order.
     ///
     /// On an `hmac-sha256` link each link runs its key agreement as soon as it is
-    /// up (SPEC-051-R011), signed by `signer`: the dialed link before the accept, so a
-    /// member, which authenticates its upstream link before dialing on, never waits
-    /// for this stage.
+    /// up (SPEC-051-R011), signed by `signer`. The inbound link is accepted and
+    /// authenticated on its own thread while the dialed link authenticates, so in a
+    /// ring where every stage both dials and accepts no stage waits on a peer that
+    /// is itself waiting.
     static func open(
         listen: ShardBenchEndpoint?,
         connect: ShardBenchEndpoint?,
@@ -1036,47 +1113,71 @@ struct ShardBenchLinks {
         if let listen, let listener {
             shardBenchLog("listening on \(listen.host):\(listener.port) session=\(session)")
         }
-        var dialed: ShardStageLink?
-        if let connect {
-            // Log before and while dialing, so a run that never connects says where it
-            // was dialing and why each attempt failed.
-            shardBenchLog("connecting to \(connect.host):\(connect.port) session=\(session) timeout=\(Int(connectTimeout))s")
-            let started = Date()
-            var lastLog = started
-            do {
-                dialed = try ShardStageLink.connect(
-                    host: connect.host, port: connect.port, timeout: connectTimeout, configuration: configuration,
-                    onRetry: { attempt, code in
-                        let now = Date()
-                        guard attempt == 1 || now.timeIntervalSince(lastLog) >= 5 else { return }
-                        lastLog = now
-                        shardBenchLog("still connecting to \(connect.host):\(connect.port): attempt \(attempt), \(String(cString: strerror(code))) after \(Int(now.timeIntervalSince(started)))s")
-                    })
-            } catch {
-                shardBenchLog("connect to \(connect.host):\(connect.port) failed after \(Int(Date().timeIntervalSince(started)))s: \(error)")
-                throw error
+        // The inbound side: accept, then authenticate as the responder.
+        let inbound = ShardBenchWaitBox<ShardStageLink>()
+        let inboundDone = DispatchSemaphore(value: 0)
+        if let listener {
+            let thread = Thread {
+                var link: ShardStageLink?
+                do {
+                    let accepted = try listener.accept(timeout: connectTimeout, configuration: configuration)
+                    link = accepted
+                    try accepted.authenticate(signer: signer, role: .responder, timeout: connectTimeout)
+                    inbound.result = .success(accepted)
+                } catch {
+                    link?.close()
+                    inbound.result = .failure(error)
+                }
+                inboundDone.signal()
             }
+            thread.name = "shard-bench.accept"
+            thread.start()
         }
-        if let dialed {
-            shardBenchLog("connected to \(dialed.peerAddress)")
-            do {
-                try dialed.authenticate(signer: signer, role: .initiator, timeout: connectTimeout)
-            } catch {
-                dialed.close()
-                throw error
+        func awaitInbound() -> Result<ShardStageLink, Error>? {
+            guard listener != nil else { return nil }
+            inboundDone.wait()
+            return inbound.result
+        }
+        var dialed: ShardStageLink?
+        do {
+            if let connect {
+                // Log before and while dialing, so a run that never connects says where it
+                // was dialing and why each attempt failed.
+                shardBenchLog("connecting to \(connect.host):\(connect.port) session=\(session) timeout=\(Int(connectTimeout))s")
+                let started = Date()
+                var lastLog = started
+                do {
+                    dialed = try ShardStageLink.connect(
+                        host: connect.host, port: connect.port, timeout: connectTimeout, configuration: configuration,
+                        onRetry: { attempt, code in
+                            let now = Date()
+                            guard attempt == 1 || now.timeIntervalSince(lastLog) >= 5 else { return }
+                            lastLog = now
+                            shardBenchLog("still connecting to \(connect.host):\(connect.port): attempt \(attempt), \(String(cString: strerror(code))) after \(Int(now.timeIntervalSince(started)))s")
+                        })
+                } catch {
+                    shardBenchLog("connect to \(connect.host):\(connect.port) failed after \(Int(Date().timeIntervalSince(started)))s: \(error)")
+                    throw error
+                }
             }
+            if let dialed {
+                shardBenchLog("connected to \(dialed.peerAddress)")
+                try dialed.authenticate(signer: signer, role: .initiator, timeout: connectTimeout)
+            }
+        } catch {
+            dialed?.close()
+            if case .success(let link)? = awaitInbound() { link.close() }
+            throw error
         }
         var accepted: ShardStageLink?
-        if let listener {
-            do {
-                let link = try listener.accept(timeout: connectTimeout, configuration: configuration)
-                accepted = link
-                try link.authenticate(signer: signer, role: .responder, timeout: connectTimeout)
-            } catch {
-                dialed?.close()
-                accepted?.close()
-                throw error
-            }
+        switch awaitInbound() {
+        case .success(let link)?:
+            accepted = link
+        case .failure(let error)?:
+            dialed?.close()
+            throw error
+        case nil:
+            break
         }
         if let accepted { shardBenchLog("accepted peer \(accepted.peerAddress)") }
         switch (accepted, dialed) {
@@ -1406,6 +1507,16 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
         where tokens.count < options.tokens || logits.count < options.tokens {
             throw ShardBenchError.reference("sequence \(index) has \(min(tokens.count, logits.count)) steps, this run needs \(options.tokens)")
         }
+        // The file's summaries bypass the summary codec: apply its checks here.
+        for (index, logits) in stepLogits.enumerated() {
+            for (step, summary) in logits.prefix(options.tokens).enumerated() {
+                do {
+                    try ShardLogitSummaryCodec.validate(summary)
+                } catch {
+                    throw ShardBenchError.reference("sequence \(index) step \(step): \(error)")
+                }
+            }
+        }
         return reference
     }
 
@@ -1425,6 +1536,20 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
         returnLogitTopK = chain.first?.logitTopK
     }
 
+    /// SPEC-051-R011: the chain so far places this member where its group config
+    /// does, under the configured head, after the configured upstream neighbour.
+    private func checkJoin(_ received: [ShardBenchHello]) throws {
+        if let expected = options.expectedStageIndex, received.count != expected {
+            throw ShardBenchError.handshake("the chain places this member at stage \(received.count), its group config at stage \(expected)")
+        }
+        if let head = options.expectedHeadID, received.first?.memberDeviceID != head {
+            throw ShardBenchError.handshake("the chain's head is \(received.first?.memberDeviceID ?? "unnamed"), the group config names \(head)")
+        }
+        if let upstream = received.last {
+            try ShardChainWire.checkConfigured(upstream, key: options.expectedUpstreamKey, stage: received.count - 1)
+        }
+    }
+
     /// Middle: take the chain so far, probe the upstream link, acknowledge upstream,
     /// pass the chain on and wait for the next stage's acknowledgement.
     private func middleHandshake(_ links: ShardBenchLinks) throws -> ShardBenchLatency {
@@ -1433,6 +1558,7 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
         stageIndex = received.count
         var mine = myHello()
         try ShardBenchChain.validate(prefix: received, next: mine)
+        try checkJoin(received)
         try ShardChainWire.checkPeer(links.upstream, is: received[received.count - 1], stage: stageIndex - 1)
         let probe = try measureProbes(links.upstream, peer: stageIndex - 1)
         mine.upstreamProbe = probe
@@ -1444,6 +1570,7 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
         guard acknowledged.count > chain.count, Array(acknowledged.prefix(chain.count)) == chain else {
             throw ShardBenchError.handshake("stage \(stageIndex + 1) acknowledged a chain that does not extend this one")
         }
+        try ShardChainWire.checkConfigured(acknowledged[stageIndex + 1], key: options.expectedDownstreamKey, stage: stageIndex + 1)
         try ShardChainWire.checkPeer(links.downstream, is: acknowledged[stageIndex + 1], stage: stageIndex + 1)
         options.onJoined?(acknowledged, stageIndex)
         return probe
@@ -1457,8 +1584,12 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
         stageIndex = received.count
         var mine = myHello()
         try ShardBenchChain.validate(prefix: received, next: mine)
+        try checkJoin(received)
         try ShardChainWire.checkPeer(links.upstream, is: received[received.count - 1], stage: stageIndex - 1)
-        if !links.isCollapsed { try ShardChainWire.checkPeer(links.downstream, is: received[0], stage: 0) }
+        if !links.isCollapsed {
+            try ShardChainWire.checkConfigured(received[0], key: options.expectedDownstreamKey, stage: 0)
+            try ShardChainWire.checkPeer(links.downstream, is: received[0], stage: 0)
+        }
         let upstreamProbe = try measureProbes(links.upstream, peer: stageIndex - 1)
         mine.upstreamProbe = upstreamProbe
         var returnProbe: ShardBenchLatency?
@@ -1500,6 +1631,7 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
             stageIndex = hello.stages.count
             let mine = myHello()
             try ShardBenchChain.validate(prefix: hello.stages, next: mine)
+            try checkJoin(hello.stages)
             try ShardChainWire.checkPeer(links.upstream, is: hello.stages[hello.stages.count - 1], stage: stageIndex - 1)
             let chain = hello.stages + [mine]
             try ShardChainWire.sendHello(links.upstream, chain, header: header(.hello, destination: 0), standby: true)
@@ -1604,17 +1736,17 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
         returnProbe: ShardBenchLatency?
     ) throws -> ShardBenchStageReport {
         relayLinkHealth(links)
-        var caches = [UInt64: Stage.Cache]()
-        var samplers = [UInt64: Stage.Sampler]()
-        /// The request id each request's control named for sub-receipts.
-        var receiptIDs = [UInt64: String]()
-        var served = Set<UInt64>()
-        var decodeCompute = [Double]()
-        var prefillCompute = [Double]()
-        // The head may idle for a long time between requests, but it heartbeats
-        // throughout, so only a dead or silent peer ends this.
+        var state = StageState()
+        // A frame read while collecting a decode batch that did not join it.
+        var held: ShardStageFrame?
         loop: while true {
-            let frame = try receive(links.upstream, timeout: max(options.receiveTimeout, 3600))
+            // The head may idle for a long time between requests, but it heartbeats
+            // throughout, so only a dead or silent peer ends an idle wait. While a
+            // request is open its next frame is due within the receive deadline
+            // (SPEC-051-R013), whatever other traffic the link carries.
+            let idle = state.receiptIDs.isEmpty && state.caches.isEmpty
+            let frame = try held ?? receive(links.upstream, timeout: idle ? max(options.receiveTimeout, 3600) : options.receiveTimeout)
+            held = nil
             let header = frame.header
             switch header.kind {
             case .activation where header.requestID == probeRequestID:
@@ -1626,9 +1758,15 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
                 } catch {
                     throw ShardBenchError.protocolViolation("undecodable control for request \(header.requestID): \(error)")
                 }
-                receiptIDs[header.requestID] = control.requestID
+                // A request's control opens it once and takes one of the stage's
+                // sequence slots, with its sampler (SEC-08).
+                guard state.receiptIDs[header.requestID] == nil else {
+                    throw ShardBenchError.protocolViolation("a second control for request \(header.requestID)")
+                }
+                guard state.receiptIDs.count < options.maxSequences else { throw ShardBenchError.tooManySequences(options.maxSequences) }
+                state.receiptIDs[header.requestID] = control.requestID ?? String(header.requestID)
                 if options.role == .tail {
-                    samplers[header.requestID] = stage.makeSampler(control)
+                    state.samplers[header.requestID] = stage.makeSampler(control)
                 } else {
                     try links.downstream.send(ShardStageFrame(
                         header: self.header(.control, requestID: header.requestID, microBatch: header.microBatchID,
@@ -1636,60 +1774,22 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
                         payload: frame.payload))
                 }
             case .activation:
-                let start = now()
-                let cache: Stage.Cache
-                if let existing = caches[header.requestID] {
-                    cache = existing
-                } else {
-                    guard header.tokenStep == 0 else {
-                        throw ShardBenchError.protocolViolation("request \(header.requestID) step \(header.tokenStep) has no prefill")
+                // SPEC-051-R017: decode rows of other requests already waiting run
+                // in the same forward.
+                var rows = [frame]
+                if batchable(header, state) {
+                    while rows.count < options.maxSequences, let next = try poll(links.upstream) {
+                        guard batchable(next.header, state), !rows.contains(where: { $0.header.requestID == next.header.requestID }) else {
+                            held = next
+                            break
+                        }
+                        rows.append(next)
                     }
-                    guard caches.count < options.maxSequences else { throw ShardBenchError.tooManySequences(options.maxSequences) }
-                    cache = try stage.newCache()
-                    caches[header.requestID] = cache
-                    served.insert(header.requestID)
                 }
-                let input = ShardBenchActivation(dtype: header.dtype, shape: header.shape, payload: frame.payload)
-                book.recordInput(header, frame.payload)
-                let processed = ShardMemberLedgerBook.processedTokens(header)
-                if options.role == .tail, header.flags.contains(.fillOnly) {
-                    try stage.fill(activation: input, cache: cache)
-                    // A fill-only chunk sends nothing, but its tokens were processed.
-                    book.recordFill(header, processedTokens: processed)
-                } else if options.role == .tail, let topK = returnLogitTopK {
-                    let summary = try stage.summarize(activation: input, cache: cache, topK: topK)
-                    let encoded = try ShardLogitSummaryCodec.encode(token: summary.top1, summary: summary)
-                    let tokenHeader = self.header(.tokenLogits, dtype: .int32, requestID: header.requestID,
-                                                  microBatch: header.microBatchID, step: header.tokenStep,
-                                                  destination: downstreamIndex, shape: encoded.shape)
-                    try links.downstream.send(ShardStageFrame(header: tokenHeader, payload: encoded.payload))
-                    book.recordOutput(tokenHeader, encoded.payload, processedTokens: processed)
-                } else if options.role == .tail {
-                    guard let sampler = samplers[header.requestID] else {
-                        throw ShardBenchError.protocolViolation("request \(header.requestID) has no sampling control")
-                    }
-                    let token = try stage.sample(activation: input, cache: cache, sampler: sampler)
-                    var payload = Data(count: 4)
-                    payload.withUnsafeMutableBytes { $0.storeBytes(of: Int32(token).littleEndian, as: Int32.self) }
-                    let tokenHeader = self.header(.token, dtype: .int32, requestID: header.requestID,
-                                                  microBatch: header.microBatchID, step: header.tokenStep,
-                                                  destination: downstreamIndex, shape: [1])
-                    try links.downstream.send(ShardStageFrame(header: tokenHeader, payload: payload))
-                    book.recordOutput(tokenHeader, payload, processedTokens: processed)
+                if rows.count > 1 {
+                    try runDecodeBatch(rows, links: links, state: &state)
                 } else {
-                    let output = try stage.forward(activation: input, cache: cache)
-                    let outputHeader = self.header(.activation, dtype: output.dtype, requestID: header.requestID,
-                                                   microBatch: header.microBatchID, step: header.tokenStep,
-                                                   destination: downstreamIndex, shape: output.shape, flags: header.flags)
-                    try links.downstream.send(ShardStageFrame(header: outputHeader, payload: output.payload))
-                    book.recordOutput(outputHeader, output.payload, processedTokens: processed)
-                }
-                if header.tokenStep == 0 {
-                    let elapsed = now() - start
-                    prefillCompute.append(elapsed)
-                    try checkPrefillDeadline(elapsed, tokens: processed)
-                } else {
-                    decodeCompute.append(now() - start)
+                    try runActivation(frame, links: links, state: &state)
                 }
             case .abort where header.requestID == probeRequestID:
                 // Session end: the next stage (or, from the tail, the head) closing its
@@ -1700,9 +1800,9 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
                 break loop
             case .abort:
                 // SPEC-051-R009 item 5: the request's KV goes with its end.
-                caches[header.requestID] = nil
-                samplers[header.requestID] = nil
-                let receiptID = receiptIDs.removeValue(forKey: header.requestID) ?? String(header.requestID)
+                state.caches[header.requestID] = nil
+                state.samplers[header.requestID] = nil
+                let receiptID = state.receiptIDs.removeValue(forKey: header.requestID) ?? String(header.requestID)
                 let receipts = try ShardChainWire.decodeReceipts(frame.payload) + [try signer.sign(book.receipt(
                     requestID: header.requestID, receiptRequestID: receiptID, memberDeviceID: signer.memberDeviceID,
                     groupEpoch: links.upstream.groupEpoch, stageIndex: stageIndex, layers: stage.layers))]
@@ -1733,11 +1833,149 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
             layers: "\(stage.layers.lowerBound):\(stage.layers.upperBound)",
             totalLayers: stage.totalLayers,
             stageWeightBytes: stage.weightBytes,
-            sequencesServed: served.count,
-            decodeCompute: ShardBenchLatency(seconds: decodeCompute),
-            prefillCompute: ShardBenchLatency(seconds: prefillCompute),
+            sequencesServed: state.served,
+            decodeCompute: ShardBenchLatency(seconds: state.decodeCompute),
+            prefillCompute: ShardBenchLatency(seconds: state.prefillCompute),
+            decodeBatchRowsMax: state.decodeBatchRowsMax,
             links: linkReports
         )
+    }
+
+    /// A member stage's request state, released with each request's abort.
+    private struct StageState {
+        var caches = [UInt64: Stage.Cache]()
+        var samplers = [UInt64: Stage.Sampler]()
+        /// The request id each open request's control named for sub-receipts.
+        var receiptIDs = [UInt64: String]()
+        /// Requests this session served (a count, not their ids).
+        var served = 0
+        var decodeCompute = [Double]()
+        var prefillCompute = [Double]()
+        var decodeBatchRowsMax = 0
+    }
+
+    /// A decode activation of a request this stage already holds KV for, which can
+    /// share a forward with other requests' decode rows. The teacher-forced tail
+    /// (it returns logit summaries) runs each row alone.
+    private func batchable(_ header: ShardStageFrameHeader, _ state: StageState) -> Bool {
+        guard header.kind == .activation, header.requestID != probeRequestID, header.tokenStep > 0,
+              !header.flags.contains(.fillOnly), state.caches[header.requestID] != nil
+        else { return false }
+        guard options.role == .tail else { return true }
+        return returnLogitTopK == nil && state.samplers[header.requestID] != nil
+    }
+
+    /// The next frame if one is already queued; nil when none is.
+    private func poll(_ link: ShardStageLink) throws -> ShardStageFrame? {
+        do {
+            return try link.receive(timeout: 0)
+        } catch ShardLinkError.receiveTimedOut {
+            return nil
+        }
+    }
+
+    private func recordCompute(_ elapsed: TimeInterval, prefill: Bool, state: inout StageState) {
+        guard options.recordComputeSamples else { return }
+        if prefill {
+            state.prefillCompute.append(elapsed)
+        } else {
+            state.decodeCompute.append(elapsed)
+        }
+    }
+
+    /// SPEC-051-R017: one forward over several requests' decode rows; each row's
+    /// output goes on as its own frame, in the order the rows arrived.
+    private func runDecodeBatch(_ frames: [ShardStageFrame], links: ShardBenchLinks, state: inout StageState) throws {
+        let start = now()
+        let headers = frames.map(\.header)
+        let inputs = frames.map { ShardBenchActivation(dtype: $0.header.dtype, shape: $0.header.shape, payload: $0.payload) }
+        for frame in frames { book.recordInput(frame.header, frame.payload) }
+        let caches = headers.map { state.caches[$0.requestID]! }
+        if options.role == .tail {
+            let tokens = try stage.sampleBatch(
+                activations: inputs, caches: caches, samplers: headers.map { state.samplers[$0.requestID]! })
+            for (header, token) in zip(headers, tokens) {
+                var payload = Data(count: 4)
+                payload.withUnsafeMutableBytes { $0.storeBytes(of: Int32(token).littleEndian, as: Int32.self) }
+                let tokenHeader = self.header(.token, dtype: .int32, requestID: header.requestID,
+                                              microBatch: header.microBatchID, step: header.tokenStep,
+                                              destination: downstreamIndex, shape: [1])
+                try links.downstream.send(ShardStageFrame(header: tokenHeader, payload: payload))
+                book.recordOutput(tokenHeader, payload, processedTokens: ShardMemberLedgerBook.processedTokens(header))
+            }
+        } else {
+            let outputs = try stage.forwardBatch(activations: inputs, caches: caches)
+            for (header, output) in zip(headers, outputs) {
+                let outputHeader = self.header(.activation, dtype: output.dtype, requestID: header.requestID,
+                                               microBatch: header.microBatchID, step: header.tokenStep,
+                                               destination: downstreamIndex, shape: output.shape, flags: header.flags)
+                try links.downstream.send(ShardStageFrame(header: outputHeader, payload: output.payload))
+                book.recordOutput(outputHeader, output.payload, processedTokens: ShardMemberLedgerBook.processedTokens(header))
+            }
+        }
+        state.decodeBatchRowsMax = max(state.decodeBatchRowsMax, frames.count)
+        recordCompute(now() - start, prefill: false, state: &state)
+    }
+
+    /// A middle stage forwards one activation downstream; the tail samples with the
+    /// request's sampling parameters and sends the token on the return link.
+    private func runActivation(_ frame: ShardStageFrame, links: ShardBenchLinks, state: inout StageState) throws {
+        let header = frame.header
+        let start = now()
+        let cache: Stage.Cache
+        if let existing = state.caches[header.requestID] {
+            cache = existing
+        } else {
+            guard header.tokenStep == 0 else {
+                throw ShardBenchError.protocolViolation("request \(header.requestID) step \(header.tokenStep) has no prefill")
+            }
+            guard state.caches.count < options.maxSequences else { throw ShardBenchError.tooManySequences(options.maxSequences) }
+            cache = try stage.newCache()
+            state.caches[header.requestID] = cache
+            state.served += 1
+        }
+        let input = ShardBenchActivation(dtype: header.dtype, shape: header.shape, payload: frame.payload)
+        book.recordInput(header, frame.payload)
+        let processed = ShardMemberLedgerBook.processedTokens(header)
+        if options.role == .tail, header.flags.contains(.fillOnly) {
+            try stage.fill(activation: input, cache: cache)
+            // A fill-only chunk sends nothing, but its tokens were processed.
+            book.recordFill(header, processedTokens: processed)
+        } else if options.role == .tail, let topK = returnLogitTopK {
+            let summary = try stage.summarize(activation: input, cache: cache, topK: topK)
+            let encoded = try ShardLogitSummaryCodec.encode(token: summary.top1, summary: summary)
+            let tokenHeader = self.header(.tokenLogits, dtype: .int32, requestID: header.requestID,
+                                          microBatch: header.microBatchID, step: header.tokenStep,
+                                          destination: downstreamIndex, shape: encoded.shape)
+            try links.downstream.send(ShardStageFrame(header: tokenHeader, payload: encoded.payload))
+            book.recordOutput(tokenHeader, encoded.payload, processedTokens: processed)
+        } else if options.role == .tail {
+            guard let sampler = state.samplers[header.requestID] else {
+                throw ShardBenchError.protocolViolation("request \(header.requestID) has no sampling control")
+            }
+            let token = try stage.sample(activation: input, cache: cache, sampler: sampler)
+            var payload = Data(count: 4)
+            payload.withUnsafeMutableBytes { $0.storeBytes(of: Int32(token).littleEndian, as: Int32.self) }
+            let tokenHeader = self.header(.token, dtype: .int32, requestID: header.requestID,
+                                          microBatch: header.microBatchID, step: header.tokenStep,
+                                          destination: downstreamIndex, shape: [1])
+            try links.downstream.send(ShardStageFrame(header: tokenHeader, payload: payload))
+            book.recordOutput(tokenHeader, payload, processedTokens: processed)
+        } else {
+            let output = try stage.forward(activation: input, cache: cache)
+            let outputHeader = self.header(.activation, dtype: output.dtype, requestID: header.requestID,
+                                           microBatch: header.microBatchID, step: header.tokenStep,
+                                           destination: downstreamIndex, shape: output.shape, flags: header.flags)
+            try links.downstream.send(ShardStageFrame(header: outputHeader, payload: output.payload))
+            book.recordOutput(outputHeader, output.payload, processedTokens: processed)
+        }
+        let elapsed = now() - start
+        if header.tokenStep == 0 {
+            recordCompute(elapsed, prefill: true, state: &state)
+            try checkPrefillDeadline(elapsed, tokens: processed)
+        } else {
+            recordCompute(elapsed, prefill: false, state: &state)
+        }
     }
 
     /// SPEC-051-R007: the head cannot time links it does not touch, so each member
