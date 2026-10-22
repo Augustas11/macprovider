@@ -325,10 +325,20 @@ fi
             "schema_version": "macprovider.decode-path-manifest.v1",
             "files": ["Sources/Decode.swift"], "dependencies": ["mlx-swift"],
         })
+        checkout = package / ".build/checkouts/mlx-swift"
+        checkout.mkdir(mode=0o700, parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+        (checkout / "Source.swift").write_text("// mlx\n")
+        subprocess.run(["git", "-C", str(checkout), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(checkout), "-c", "user.name=T", "-c", "user.email=t.invalid",
+                        "commit", "-qm", "mlx"], check=True)
+        revision = subprocess.run(["git", "-C", str(checkout), "rev-parse", "HEAD"],
+                                  capture_output=True, text=True, check=True).stdout.strip()
         write_json(package / "Package.resolved", {"pins": [
-            {"identity": "mlx-swift", "state": {"revision": "a" * 40}},
+            {"identity": "mlx-swift", "state": {"revision": revision}},
         ]})
-        subprocess.run(["git", "-C", str(self.source), "add", "phase3-binary"], check=True)
+        subprocess.run(["git", "-C", str(self.source), "add", "phase3-binary/Sources", "phase3-binary/decode-path-manifest.json",
+                        "phase3-binary/Package.resolved"], check=True)
         subprocess.run(["git", "-C", str(self.source), "commit", "-qm", "decode path"], check=True)
         self.DIGEST = jobs.source_decode_path_digest(self.source)
         marker = f"macprovider.decode-path-digest.v1:{self.DIGEST}"
@@ -1011,6 +1021,47 @@ class StudioLabJobsTests(unittest.TestCase):
             jobs.run_job(argparse.Namespace(manifest=str(manifest)))
         partial = json.loads((self._staged_result_dir(kind) / "partial-result.json").read_text())
         self.assertEqual(partial["components"]["dsv4-reference"], "completed")
+
+    def test_source_decode_path_digest_matches_the_canonical_tool(self):
+        self.fixture._write_staged_inputs()
+        spec = importlib.util.spec_from_file_location("decode_path_digest", ROOT / "scripts/decode_path_digest.py")
+        tool = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tool)
+        self.assertEqual(jobs.source_decode_path_digest(ROOT), tool.compute())
+        self.assertEqual(
+            jobs.source_decode_path_digest(self.fixture.source),
+            tool.compute(self.fixture.source / "phase3-binary"),
+        )
+
+    def test_lab_cli_build_evidence_refuses_stale_binary_or_modified_checkout(self):
+        self.fixture._write_staged_inputs()
+        jobs.check_lab_cli_build(self.fixture.source)
+        decode = self.fixture.source / "phase3-binary/Sources/Decode.swift"
+        cli = self.fixture.paths["diagnostic_cli"].resolve()
+        os.utime(decode, ns=(cli.stat().st_mtime_ns + 10**9,) * 2)
+        with self.assertRaisesRegex(jobs.Refusal, "older than its decode-path sources"):
+            jobs.check_lab_cli_build(self.fixture.source)
+        os.utime(decode, ns=(cli.stat().st_mtime_ns - 10**9,) * 2)
+        (self.fixture.source / "phase3-binary/.build/checkouts/mlx-swift/Source.swift").write_text("// edited\n")
+        with self.assertRaisesRegex(jobs.Refusal, "modified mlx-swift checkout"):
+            jobs.check_lab_cli_build(self.fixture.source)
+
+    def test_binary_with_two_decode_digests_is_refused(self):
+        path = self.fixture.root / "two-markers"
+        path.write_text(f"macprovider.decode-path-digest.v1:{'a' * 64}\nmacprovider.decode-path-digest.v1:{'b' * 64}\n")
+        path.chmod(0o600)
+        with self.assertRaisesRegex(jobs.Refusal, "more than one decode-path digest"):
+            jobs.embedded_decode_path_digest(path)
+
+    def test_fixture_ancestor_writable_by_others_refuses(self):
+        self.fixture._write_staged_inputs()
+        fixture = self.fixture.source / ".lab-window/fixture"
+        fixture.chmod(0o777)
+        try:
+            with self.assertRaisesRegex(jobs.Refusal, "writable by group or other"):
+                jobs.safe_fixture_tree(fixture / "dsv4-target")
+        finally:
+            fixture.chmod(0o700)
 
     def test_glm_parity_refuses_a_source_off_the_policy_decode_path(self):
         self.fixture._write_staged_inputs()

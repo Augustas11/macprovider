@@ -1708,7 +1708,7 @@ def source_decode_path_digest(source: Path) -> str:
 def safe_fixture_tree(root: Path) -> None:
     # Every directory and file must be the operator's and not writable by
     # group or other, so no other account can change weights after preflight.
-    root = root.resolve(strict=True)
+    root = safe_path_chain(root, admin_group_write=False)
     stack = [root]
     while stack:
         directory = stack.pop()
@@ -1857,19 +1857,23 @@ def staged_validate_private(manifest: dict, job: dict, root: Path) -> dict[str, 
 
 def embedded_decode_path_digest(path: Path) -> str:
     # Streamed scan with an overlap longer than the marker, so memory stays bounded.
-    found: set[bytes] = set()
+    found: bytes | None = None
     tail = b""
     fd = os.open(safe_artifact(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     try:
         for block in iter(lambda: os.read(fd, 4 * 1024 * 1024), b""):
             window = tail + block
-            found.update(DECODE_PATH_MARKER.findall(window))
+            for match in DECODE_PATH_MARKER.finditer(window):
+                if found is None:
+                    found = match.group(1)
+                elif match.group(1) != found:
+                    raise Refusal(f"binary embeds more than one decode-path digest: {path}")
             tail = window[-128:]
     finally:
         os.close(fd)
-    if len(found) != 1:
-        raise Refusal(f"binary does not embed exactly one decode-path digest: {path}")
-    return found.pop().decode()
+    if found is None:
+        raise Refusal(f"binary embeds no decode-path digest: {path}")
+    return found.decode()
 
 
 def check_glm_parity_decode_path(manifest: dict, job: dict) -> None:
@@ -1882,6 +1886,7 @@ def check_glm_parity_decode_path(manifest: dict, job: dict) -> None:
     expected = job["immutable_inputs"]["glm_parity_decode_path_digest"]
     if source_decode_path_digest(Path(manifest["lab_source_dir"])) != expected:
         raise Refusal("lab source decode path differs from the GLM parity policy")
+    check_lab_cli_build(Path(manifest["lab_source_dir"]))
     lab = staged_private_paths(preflight_path(manifest) / "artifacts", job["kind"])["diagnostic_cli"]
     live = Path(manifest["install_dir"]) / "macprovider-cli"
     for name, path in (("lab CLI", lab), ("signed provider", live)):
@@ -1889,9 +1894,9 @@ def check_glm_parity_decode_path(manifest: dict, job: dict) -> None:
             raise Refusal(f"{name} decode path differs from the GLM parity policy")
 
 
-def check_reference_environment(manifest: dict, output: Path) -> None:
+def check_reference_environment(manifest: dict, job: dict, output: Path) -> None:
     expected = DSV4_REFERENCE_POLICY["environment"]
-    python = str(manifest["artifacts"]["reference_python"]["path"])
+    python = authenticate_interpreter(manifest, job)
     run_checked([python, "-I", "-c", DSV4_ENVIRONMENT_PROBE, *sorted(expected)], output, timeout=120)
     try:
         observed = json.loads(read_bounded(output, STAGED_POLICY_MAX_BYTES, "environment probe").splitlines()[-1])
@@ -1901,35 +1906,83 @@ def check_reference_environment(manifest: dict, output: Path) -> None:
         raise Refusal(f"reference environment differs from the fixed versions; private log: {output}")
 
 
-def authenticate_interpreter(manifest: dict, job: dict) -> str:
-    """Re-authenticate the venv interpreter immediately before it is launched.
+MACOS_ADMIN_GID = 80
 
-    Every link in its lexical chain must be the operator's (or root's) and not
-    writable by group or other, and the resolved target must still have the
-    bound hash. Returns the lexical path to execute (venv semantics need it).
+
+def safe_path_chain(path: Path, *, admin_group_write: bool) -> Path:
+    """Check every lexical and symlink-resolved ancestor of `path`.
+
+    Each component must belong to the operator or root and must not be
+    writable by other (nor by group, except macOS's admin group when
+    `admin_group_write`, Homebrew's default, whose members are already
+    administrators). Sticky directories are accepted. Returns the fully
+    resolved path.
     """
-    lexical = Path(manifest["artifacts"]["reference_python"]["path"])
-    current = Path(os.path.abspath(lexical))
+    current = Path(os.path.abspath(path))
     for _ in range(64):
         link = None
         for part in [*reversed(current.parents), current]:
             info = part.lstat()
             if info.st_uid not in (os.getuid(), 0):
-                raise Refusal(f"reference interpreter path has a foreign owner: {part}")
+                raise Refusal(f"path component has a foreign owner: {part}")
             if stat.S_ISLNK(info.st_mode):
                 link = part
                 break
-            if stat.S_IMODE(info.st_mode) & 0o022 and not (stat.S_ISDIR(info.st_mode) and info.st_mode & stat.S_ISVTX):
-                raise Refusal(f"reference interpreter path is writable by group or other: {part}")
+            mode = stat.S_IMODE(info.st_mode)
+            sticky = stat.S_ISDIR(info.st_mode) and info.st_mode & stat.S_ISVTX
+            group_ok = admin_group_write and info.st_gid == MACOS_ADMIN_GID
+            if not sticky and (mode & 0o002 or (mode & 0o020 and not group_ok)):
+                raise Refusal(f"path component is writable by group or other: {part}")
         if link is None:
-            break
+            return current
         # Replace the first symlink component with its target and re-walk.
         current = Path(os.path.normpath(link.parent / os.readlink(link) / current.relative_to(link)))
-    else:
-        raise Refusal("reference interpreter symlink chain is too long")
+    raise Refusal(f"symlink chain is too long: {path}")
+
+
+def authenticate_interpreter(manifest: dict, job: dict) -> str:
+    """Re-authenticate the venv interpreter immediately before each launch.
+
+    Returns the lexical path to execute (venv semantics need it).
+    """
+    lexical = Path(manifest["artifacts"]["reference_python"]["path"])
+    safe_path_chain(lexical, admin_group_write=True)
     if file_sha256(safe_artifact(lexical, executable=True)) != job["immutable_inputs"]["artifact_sha256"]["reference_python"]:
         raise Refusal("reference interpreter drifted")
     return str(lexical)
+
+
+def check_lab_cli_build(source: Path) -> None:
+    """Build evidence for the lab CLI at its fixed release path.
+
+    The SwiftPM dependency checkouts used by this build directory must sit at
+    the Package.resolved revisions of the decode-path digest, and the binary
+    must have been linked after every decode-path source file and
+    Package.resolved last changed.
+    """
+    package = source / "phase3-binary"
+    binary = safe_artifact(package / ".build/release/macprovider-cli", executable=True)
+    manifest, _ = read_staged_policy(source / DECODE_MANIFEST_RELATIVE, "decode-path manifest")
+    resolved = json.loads(read_bounded(source / DECODE_RESOLVED_RELATIVE, 1024 * 1024, "Package.resolved"))
+    revisions = {
+        pin.get("identity"): (pin.get("state") or {}).get("revision")
+        for pin in resolved.get("pins") or [] if isinstance(pin, dict)
+    }
+    for identity in manifest.get("dependencies") or []:
+        checkout = package / ".build/checkouts" / identity
+        head = git_value(checkout, "HEAD", f"{identity} checkout")
+        if head != revisions.get(identity):
+            raise Refusal(f"lab CLI build used a {identity} checkout off Package.resolved")
+        dirty = subprocess.run(
+            ["git", "-C", str(checkout), "status", "--porcelain", "--untracked-files=no"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        if dirty:
+            raise Refusal(f"lab CLI build used a modified {identity} checkout")
+    linked = binary.stat().st_mtime_ns
+    inputs = [package / item for item in manifest.get("files") or []] + [source / DECODE_RESOLVED_RELATIVE]
+    if any(safe_artifact(item).stat().st_mtime_ns > linked for item in inputs):
+        raise Refusal("lab CLI is older than its decode-path sources; rebuild it")
 
 
 def component_target(component: str, job: dict) -> str:
@@ -1949,7 +2002,7 @@ def staged_preflight(manifest: dict, job: dict, preflight: Path) -> dict:
         if component == "glm-parity-prefill512":
             check_glm_parity_decode_path(manifest, job)
         else:
-            check_reference_environment(manifest, preflight / "environment.json")
+            check_reference_environment(manifest, job, preflight / "environment.json")
         components[component] = {
             "canonical_root": str(root.resolve(strict=True)), "target_sha256": digest, "stamps": stamps,
         }
@@ -2045,7 +2098,7 @@ def run_component(manifest: dict, job: dict, component: str, result: Path) -> tu
         ], log, timeout=STAGED_COMMAND_TIMEOUTS[component])
         return [log, report], glm_parity_summary(report)
     environment = result / "environment.json"
-    check_reference_environment(manifest, environment)
+    check_reference_environment(manifest, job, environment)
     validate_execution_inputs(manifest, job)
     interpreter = authenticate_interpreter(manifest, job)
     profile = DSV4_REFERENCE_PROFILE
