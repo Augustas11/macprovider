@@ -91,6 +91,15 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertEqual(yaml.prefillStepSize, 512)
         XCTAssertTrue(yaml.prefillStepSizeExplicitlyConfigured)
 
+        let yamlNull = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in "prefill_step_size: null\n" }
+        )
+        XCTAssertEqual(yamlNull.prefillStepSize, 512)
+        XCTAssertFalse(yamlNull.prefillStepSizeExplicitlyConfigured)
+
         let environment = try ConfigLoader.load(
             cli: CLIOverrides(),
             environment: ["MACPROVIDER_PREFILL_STEP_SIZE": "1024"],
@@ -108,6 +117,17 @@ final class ServingKnobsConfigTests: XCTestCase {
         )
         XCTAssertEqual(cli.prefillStepSize, 256)
         XCTAssertTrue(cli.prefillStepSizeExplicitlyConfigured)
+
+        // Every ModelRuntime initializer (serve, test, hardware harness)
+        // resolves the CB chunk override this way.
+        XCTAssertNil(ModelRuntime.resolvedContinuousBatchPromptChunkOverride(
+            prefillStepSize: defaults.prefillStepSize,
+            explicitlyConfigured: defaults.prefillStepSizeExplicitlyConfigured
+        ))
+        XCTAssertEqual(ModelRuntime.resolvedContinuousBatchPromptChunkOverride(
+            prefillStepSize: cli.prefillStepSize,
+            explicitlyConfigured: cli.prefillStepSizeExplicitlyConfigured
+        ), 256)
     }
 
     func testModelArtifactRootYAMLAndEnvironment() throws {

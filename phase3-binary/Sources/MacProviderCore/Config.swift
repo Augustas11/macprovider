@@ -929,7 +929,7 @@ public enum ConfigLoader {
         try assign(&config.managedBy, from: dict, key: "managed_by", expected: "string")
         try assign(&config.streamInterval, from: dict, key: "stream_interval", expected: "integer >= 1")
         try assign(&config.prefillStepSize, from: dict, key: "prefill_step_size", expected: "integer >= 1")
-        if dict["prefill_step_size"] != nil {
+        if let value = dict["prefill_step_size"], !(value is NSNull) {
             config.prefillStepSizeExplicitlyConfigured = true
         }
         if dict["continuous_batching"] != nil {

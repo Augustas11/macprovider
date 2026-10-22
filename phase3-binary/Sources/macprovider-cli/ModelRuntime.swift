@@ -1997,6 +1997,12 @@ actor ModelRuntime: ModelRuntimeServing {
     /// The CB prompt chunk the operator set through `prefill_step_size`; nil
     /// keeps the backend family's ceiling (SPEC-038 FR-CB2).
     private let continuousBatchPromptChunkOverride: Int?
+
+    /// Both initializers resolve the CB chunk override here, so serve, test
+    /// and hardware-harness runtimes take the same family default.
+    static func resolvedContinuousBatchPromptChunkOverride(prefillStepSize: Int, explicitlyConfigured: Bool) -> Int? {
+        explicitlyConfigured ? max(1, prefillStepSize) : nil
+    }
     private let pagedKVConfig: PagedKVConfig
     private var pagedKVAttachDecision: PagedKVAttachDecision
     private var pagedKVRuntimeCacheClass: String
@@ -3386,7 +3392,10 @@ maxTokens: 1,
         self.maxContextTokens = maxContextTokensOverride ?? Self.defaultMaxContextTokens()
         self.kvBitsOverride = kvBitsOverride
         self.prefillStepSize = max(1, prefillStepSize)
-        self.continuousBatchPromptChunkOverride = prefillStepSizeExplicitlyConfigured ? max(1, prefillStepSize) : nil
+        self.continuousBatchPromptChunkOverride = Self.resolvedContinuousBatchPromptChunkOverride(
+            prefillStepSize: prefillStepSize,
+            explicitlyConfigured: prefillStepSizeExplicitlyConfigured
+        )
         self.pagedKVConfig = pagedKVConfig
         self.pagedKVRuntimeCacheClass = Self.pagedKVUnavailableCacheClass
         self.pagedKVObservedRuntimeIdentity = nil
@@ -3838,6 +3847,7 @@ maxTokens: 1,
         kvBitsOverride: Int? = nil,
         pagedKVConfig: PagedKVConfig = .defaults(),
         prefillStepSize: Int = 512,
+        prefillStepSizeExplicitlyConfigured: Bool = false,
         maxBatch: Int = 1,
         continuousBatchingMode: ContinuousBatchingMode = .off,
         continuousBatchQueueLimit: Int? = nil,
@@ -3983,7 +3993,10 @@ maxTokens: 1,
         self.maxContextTokens = maxContextTokensOverride ?? Self.defaultMaxContextTokens()
         self.kvBitsOverride = kvBitsOverride
         self.prefillStepSize = max(1, prefillStepSize)
-        self.continuousBatchPromptChunkOverride = max(1, prefillStepSize)
+        self.continuousBatchPromptChunkOverride = Self.resolvedContinuousBatchPromptChunkOverride(
+            prefillStepSize: prefillStepSize,
+            explicitlyConfigured: prefillStepSizeExplicitlyConfigured
+        )
         self.pagedKVConfig = pagedKVConfig
         self.pagedKVRuntimeCacheClass = pagedKVRuntimeCacheClass
         // Defense-in-depth (mirrors the prober fence): only DEBUG/test builds may inject
@@ -4091,7 +4104,7 @@ maxTokens: 1,
             modelID: modelID,
             modelSHA256: modelHash,
             weightsGeneration: self.currentSpecDecodeGeneration,
-            prefillStepSize: self.prefillStepSize,
+            prefillStepSize: self.continuousBatchPromptChunkOverride,
             nativeMTPRoundByteCapacity: Self.nativeMTPRoundByteCapacity(
                 from: self.currentNativeMTPAdmissionCapability
             ),
