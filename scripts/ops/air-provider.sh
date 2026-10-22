@@ -223,7 +223,7 @@ recover() {
   probe && signed_identity 1.8.258 || refuse "Air incumbent signed identity changed"
   export AIR_RECOVERY_PROVIDER_SHA256="$AIR_PROVIDER_SHA256" AIR_RECOVERY_CONFIG="$AIR_CONFIG"
   export AIR_RECOVERY_BINARY_SHA256="$BINARY_SHA" CANARY_INSTALL_DIR="$AIR_INSTALL_DIR"
-  AIR_RECOVERY_CONFIG_SHA256="$(json_field "$OPS_TMP_DIR/air-probe.json" 'd["config_sha256"]')"
+  AIR_RECOVERY_CONFIG_SHA256="$(json_field "$OPS_TMP_DIR/air-probe.json" 'd["snapshot"]["config_sha256"]')"
   export AIR_RECOVERY_CONFIG_SHA256
   export CANARY_RUNNER_STOP_CMD=none CANARY_RUNNER_START_CMD=none
   air_payload_swap recover-air --version "$VERSION"

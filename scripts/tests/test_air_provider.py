@@ -23,6 +23,30 @@ class AirProviderTests(unittest.TestCase):
         return subprocess.run(["bash", "-c", code], text=True, capture_output=True,
                               env={**os.environ, "MACPROVIDER_OPS_ENV": "/dev/null"})
 
+    def test_recovery_dispatch_binds_the_probe_snapshot_config_digest(self):
+        common = (ROOT / "scripts/ops/lib/common.sh").read_text()
+        expected = "a" * 64
+        with tempfile.TemporaryDirectory() as directory:
+            # Match the real probe envelope, not an invented top-level digest.
+            Path(directory, "air-probe.json").write_text(json.dumps({
+                "snapshot": {"config_sha256": expected},
+                "config_sha256": "b" * 64,
+            }))
+            result = self.shell(function("json_field", common) + function("recover") + f'''
+OPS_TMP_DIR="{directory}"
+AIR_PROVIDER_SHA256=provider AIR_CONFIG=/safe/config
+BINARY_SHA=binary AIR_INSTALL_DIR=/safe/install VERSION=1.8.260
+probe() {{ :; }}
+signed_identity() {{ [ "$1" = 1.8.258 ]; }}
+air_payload_swap() {{
+  [ "$1" = recover-air ] && [ "$2" = --version ] && [ "$3" = 1.8.260 ] || return 9
+  bash -c 'printf "%s %s %s" "$AIR_RECOVERY_CONFIG_SHA256" "$AIR_RECOVERY_CONFIG" "$CANARY_RUNNER_STOP_CMD"'
+}}
+recover
+''')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, f"{expected} /safe/config none")
+
     def test_interrupted_payload_selects_executable_restore_without_probe(self):
         result = self.shell(function("gather") + '''
 settings() { :; }
