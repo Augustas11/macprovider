@@ -47,7 +47,8 @@ final class ShardGroupWireGoldenTests: XCTestCase {
                 listening: true, chain: chain, stageIndex: 1, upstreamPeer: "prov-head", downstreamPeer: "prov-head",
                 upstreamInterface: ShardLinkInterface.thunderbolt, downstreamInterface: ShardLinkInterface.thunderbolt,
                 sessionsServed: 0, lastError: nil),
-            memberDeviceID: "mac-b", artifactHashAlgorithm: ModelArtifactIdentity.snapshotManifestV1, artifactHash: artifactHash))
+            memberDeviceID: "mac-b", artifactHashAlgorithm: ModelArtifactIdentity.snapshotManifestV1, artifactHash: artifactHash,
+            weightsVerified: true, stageFits: true))
 
         // Head out == tail in; tail out == head in.
         let activations = String(repeating: "a1", count: 32)

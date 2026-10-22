@@ -142,6 +142,20 @@ private func validateTransport(_ interconnect: ShardInterconnectClass, _ protect
     }
 }
 
+/// SPEC-051-R008: this Mac holds only its stage's files of the snapshot whose
+/// manifest is at `snapshotManifestPath` (the bytes the signed artifact hash covers).
+struct ShardStageScope: Equatable, Sendable {
+    let snapshotManifestPath: String
+    let layers: Range<Int>
+}
+
+private func validateManifestPath(_ path: String?) throws {
+    guard let path else { return }
+    guard !path.isEmpty, ((path as NSString).expandingTildeInPath as NSString).isAbsolutePath else {
+        throw ShardGroupConfigError.invalid("snapshot_manifest must be an absolute path")
+    }
+}
+
 /// One downstream stage the head dials, in order.
 struct ShardGroupStageConfig: Codable, Equatable, Sendable {
     var memberDeviceID: String
@@ -214,6 +228,8 @@ struct ShardGroupHeadConfig: Codable, Equatable, Sendable {
     var maxConcurrency: Int
     var prefillChunkTokens: Int?
     var supervision: ShardSupervisionConfig
+    /// Set when this Mac holds only stage 0's files (SPEC-051-R008).
+    var snapshotManifest: String?
 
     enum CodingKeys: String, CodingKey, CaseIterable {
         case schema
@@ -228,13 +244,15 @@ struct ShardGroupHeadConfig: Codable, Equatable, Sendable {
         case maxConcurrency = "max_concurrency"
         case prefillChunkTokens = "prefill_chunk_tokens"
         case supervision
+        case snapshotManifest = "snapshot_manifest"
     }
 
     init(
         groupEpoch: UInt64, interconnectClass: ShardInterconnectClass = .thunderboltIP,
         frameProtection: ShardFrameProtection = .crc32c, poolModelID: String? = nil, headLayerEnd: Int,
         returnListen: String? = nil, stages: [ShardGroupStageConfig], spare: ShardGroupSpareConfig? = nil,
-        maxConcurrency: Int, prefillChunkTokens: Int? = nil, supervision: ShardSupervisionConfig = .defaults
+        maxConcurrency: Int, prefillChunkTokens: Int? = nil, supervision: ShardSupervisionConfig = .defaults,
+        snapshotManifest: String? = nil
     ) {
         self.schema = Self.schemaID
         self.groupEpoch = groupEpoch
@@ -248,6 +266,7 @@ struct ShardGroupHeadConfig: Codable, Equatable, Sendable {
         self.maxConcurrency = maxConcurrency
         self.prefillChunkTokens = prefillChunkTokens
         self.supervision = supervision
+        self.snapshotManifest = snapshotManifest
     }
 
     init(from decoder: Decoder) throws {
@@ -265,6 +284,7 @@ struct ShardGroupHeadConfig: Codable, Equatable, Sendable {
         maxConcurrency = try container.decode(Int.self, forKey: .maxConcurrency)
         prefillChunkTokens = try container.decodeIfPresent(Int.self, forKey: .prefillChunkTokens)
         supervision = try container.decode(ShardSupervisionConfig.self, forKey: .supervision)
+        snapshotManifest = try container.decodeIfPresent(String.self, forKey: .snapshotManifest)
     }
 
     static func load(path: String) throws -> ShardGroupHeadConfig {
@@ -322,6 +342,11 @@ struct ShardGroupHeadConfig: Codable, Equatable, Sendable {
         if let poolModelID, poolModelID.range(of: BYOMAdmissionStatusWire.poolModelIDPattern, options: .regularExpression) == nil {
             throw ShardGroupConfigError.invalid("pool_model_id '\(poolModelID)' is not a SPEC-042-R015 pool model id (pool/<pool id>/<slug>)")
         }
+        try validateManifestPath(snapshotManifest)
+    }
+
+    var stageScope: ShardStageScope? {
+        snapshotManifest.map { ShardStageScope(snapshotManifestPath: ($0 as NSString).expandingTildeInPath, layers: 0..<headLayerEnd) }
     }
 
     var numLayers: Int { stages.last?.layerEnd ?? headLayerEnd }
@@ -363,6 +388,8 @@ struct ShardMemberConfig: Codable, Equatable, Sendable {
     var frameProtection: ShardFrameProtection
     var maxSequences: Int
     var supervision: ShardSupervisionConfig
+    /// Set when this Mac holds only its stage's files (SPEC-051-R008).
+    var snapshotManifest: String?
 
     enum CodingKeys: String, CodingKey, CaseIterable {
         case schema
@@ -378,12 +405,14 @@ struct ShardMemberConfig: Codable, Equatable, Sendable {
         case frameProtection = "frame_protection"
         case maxSequences = "max_sequences"
         case supervision
+        case snapshotManifest = "snapshot_manifest"
     }
 
     init(
         groupProviderID: String, groupEpoch: UInt64, role: Role = .stage, stageIndex: Int, layerStart: Int, layerEnd: Int,
         listen: String, connect: String? = nil, interconnectClass: ShardInterconnectClass = .thunderboltIP,
-        frameProtection: ShardFrameProtection? = nil, maxSequences: Int = 16, supervision: ShardSupervisionConfig = .defaults
+        frameProtection: ShardFrameProtection? = nil, maxSequences: Int = 16, supervision: ShardSupervisionConfig = .defaults,
+        snapshotManifest: String? = nil
     ) {
         self.schema = Self.schemaID
         self.groupProviderID = groupProviderID
@@ -398,6 +427,7 @@ struct ShardMemberConfig: Codable, Equatable, Sendable {
         self.frameProtection = frameProtection ?? interconnectClass.minimumFrameProtection
         self.maxSequences = maxSequences
         self.supervision = supervision
+        self.snapshotManifest = snapshotManifest
     }
 
     init(from decoder: Decoder) throws {
@@ -417,6 +447,7 @@ struct ShardMemberConfig: Codable, Equatable, Sendable {
             ?? interconnectClass.minimumFrameProtection
         maxSequences = try container.decode(Int.self, forKey: .maxSequences)
         supervision = try container.decode(ShardSupervisionConfig.self, forKey: .supervision)
+        snapshotManifest = try container.decodeIfPresent(String.self, forKey: .snapshotManifest)
     }
 
     static func load(path: String) throws -> ShardMemberConfig {
@@ -447,6 +478,11 @@ struct ShardMemberConfig: Codable, Equatable, Sendable {
         _ = try ShardBenchEndpoint.parse(listen)
         if let connect { _ = try ShardBenchEndpoint.parse(connect) }
         guard (1...256).contains(maxSequences) else { throw ShardGroupConfigError.invalid("max_sequences must be within 1..256") }
+        try validateManifestPath(snapshotManifest)
+    }
+
+    var stageScope: ShardStageScope? {
+        snapshotManifest.map { ShardStageScope(snapshotManifestPath: ($0 as NSString).expandingTildeInPath, layers: layerStart..<layerEnd) }
     }
 
     /// The epoch this member's links run at.

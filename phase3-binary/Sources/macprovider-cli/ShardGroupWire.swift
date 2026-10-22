@@ -290,9 +290,11 @@ enum ShardGroupWire {
 
     // MARK: Member message
 
+    /// `weightsVerified` and `stageFits` are what the member proved before loading
+    /// (`ShardGroupServe.proveStage`); the coordinator accepts only both true.
     static func memberHello(
         config: ShardMemberConfig, status: ShardMemberStatus, memberDeviceID: String,
-        artifactHashAlgorithm: String, artifactHash: String
+        artifactHashAlgorithm: String, artifactHash: String, weightsVerified: Bool, stageFits: Bool
     ) throws -> Data? {
         guard let upstream = status.upstreamPeer, let downstream = status.downstreamPeer,
               let upstreamInterface = status.upstreamInterface, let downstreamInterface = status.downstreamInterface
@@ -318,8 +320,8 @@ enum ShardGroupWire {
             "transport_version": .int(Int(ShardStageFrameCodec.version)),
             "artifact_hash_algorithm": .string(artifactHashAlgorithm),
             "artifact_hash": .string(artifactHash),
-            "weights_verified": .bool(true),
-            "stage_fits": .bool(true),
+            "weights_verified": .bool(weightsVerified),
+            "stage_fits": .bool(stageFits),
             "links": .array(links),
         ]))
     }
@@ -500,7 +502,8 @@ extension ShardMemberRuntime: ShardGroupCoordinatorParticipant {
         }
         let status = server.status
         guard let hello = try? ShardGroupWire.memberHello(
-            config: config, status: status, memberDeviceID: memberDeviceID, artifactHashAlgorithm: algorithm, artifactHash: hash)
+            config: config, status: status, memberDeviceID: memberDeviceID, artifactHashAlgorithm: algorithm, artifactHash: hash,
+            weightsVerified: stageProof.weightsVerified, stageFits: stageProof.fit.fits)
         else { return [] }
         helloState = .sent(Date())
         return [hello]

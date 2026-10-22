@@ -489,7 +489,10 @@ final class ShardMemberRuntimeTests: XCTestCase {
         let runtime = ShardMemberRuntime(
             config: memberConfig(),
             identity: ShardGroupRuntime.Identity(modelID: "m", modelHash: nil, modelHashAlgorithm: nil, weightsManifestSHA256: nil, catalogModelIDAlias: nil),
-            memberDeviceID: "mac-b", server: server)
+            memberDeviceID: "mac-b", server: server,
+            stageProof: ShardGroupServe.StageProof(
+                digest: "d", weightsVerified: true,
+                fit: ShardStageArtifact.Fit(stageWeightBytes: 1, kvBudgetBytes: 2, kvDemandBytes: 1)))
         let request = try ChatCompletionRequest.parse(data: Data(#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#.utf8))
         for attempt in 0..<2 {
             do {

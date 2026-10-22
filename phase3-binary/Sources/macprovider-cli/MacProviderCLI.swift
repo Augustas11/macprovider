@@ -1031,7 +1031,8 @@ struct ServeCommand: AsyncParsableCommand {
         isolateLifecycle: Bool = false,
         staticInputs: AutotuneStaticInputs = AutotuneStaticInputs(),
         artifactResolver: CachedModelArtifactResolver = CachedModelArtifactResolver(),
-        persistConfigMigration: Bool = false
+        persistConfigMigration: Bool = false,
+        shardStage: ShardStageScope? = nil
     ) async throws -> ModelArtifactPreflightOutcome {
         // #1816: a configured pool_model_id must be well formed and never
         // pinned beside a catalog identity, for every runtime.
@@ -1097,6 +1098,11 @@ struct ServeCommand: AsyncParsableCommand {
             throw ExitCode(2)
         }
         let configuredPath = URL(fileURLWithPath: artifactPath).standardizedFileURL.path
+        if let shardStage {
+            return try shardStagePreflight(
+                &resolved, scope: shardStage, configuredPath: configuredPath, expectedSHA256: expected,
+                joiningCoordinator: joiningCoordinator, servesPoolModelEntry: servesPoolModelEntry)
+        }
         let loadPath: String
         let persistFrom: String?
         let actual: String
@@ -1201,6 +1207,38 @@ struct ServeCommand: AsyncParsableCommand {
                 nativeMTPResolvedArtifactAuthority: nil
             )
         )
+    }
+
+    /// SPEC-051-R008: a shard stage directory holds only its stage's files, so it
+    /// is proved file by file against the full snapshot manifest instead of hashed
+    /// whole, used where it is (never adopted into the durable store under the full
+    /// artifact's name), and serves only a Trusted Pool entry (SPEC-051-R009).
+    private static func shardStagePreflight(
+        _ resolved: inout AppConfig,
+        scope: ShardStageScope,
+        configuredPath: String,
+        expectedSHA256: String,
+        joiningCoordinator: Bool,
+        servesPoolModelEntry: Bool
+    ) throws -> ModelArtifactPreflightOutcome {
+        guard !resolved.donorMode, !joiningCoordinator || servesPoolModelEntry else {
+            FileHandle.standardError.write(Data("a shard stage directory serves a Trusted Pool model entry only; set pool_model_id\n".utf8))
+            throw ExitCode(2)
+        }
+        do {
+            _ = try ShardStageArtifact.verify(
+                directory: URL(fileURLWithPath: configuredPath, isDirectory: true),
+                manifestURL: URL(fileURLWithPath: scope.snapshotManifestPath), expectedSHA256: expectedSHA256, layers: scope.layers)
+        } catch {
+            FileHandle.standardError.write(Data("model artifact verification failed for \(configuredPath): \(error)\n".utf8))
+            throw ExitCode(2)
+        }
+        resolved.modelArtifactPath = configuredPath
+        return ModelArtifactPreflightOutcome(
+            catalogTrust: nil,
+            runtimeBinding: VerifiedModelRuntimeBinding(
+                authorityPath: configuredPath, authoritySHA256: expectedSHA256, loadPath: configuredPath,
+                loadSHA256: expectedSHA256, nativeMTPResolvedArtifactAuthority: nil))
     }
 
     private static func resolveNativeMTPArtifactAuthority(
@@ -2613,6 +2651,12 @@ struct ServeCommand: AsyncParsableCommand {
             &resolved,
             cacheWrapValidated: speculativeCacheWrapValidated
         )
+        // Issue #2084 (SPEC-051): an owner-configured shard group role; nil serves
+        // exactly as before. A stage that holds only its own files is verified
+        // against the full snapshot manifest at preflight (SPEC-051-R008).
+        let shardHeadConfig = try shardGroup.map { try ShardGroupHeadConfig.load(path: $0) }
+        let shardMemberConfig = try shardMember.map { try ShardMemberConfig.load(path: $0) }
+        let shardStageScope = shardHeadConfig?.stageScope ?? shardMemberConfig?.stageScope
         let startupPreflight: Self.ServeStartupPreflightResult
         let startupProviderID = resolved.providerID
         let allowStartupHandoff = consumerUpdaterLifecycleAllowed
@@ -2622,6 +2666,7 @@ struct ServeCommand: AsyncParsableCommand {
                 &resolved,
                 joiningCoordinator: !noJoin,
                 isolateLifecycle: isolateLifecycle,
+                shardStage: shardStageScope,
                 acquireServeLock: { candidateConfig in
                     try Self.acquireProviderServeLock(
                         candidateConfig,
@@ -2896,10 +2941,6 @@ struct ServeCommand: AsyncParsableCommand {
         // Non-nil only when a SPEC-046 loopback adapter serves (issue #1569);
         // threaded to the coordinator hello as `runtime_source`.
         let helloRuntimeSource: String?
-        // Issue #2084 (SPEC-051): an owner-configured shard group role; nil serves
-        // exactly as before.
-        let shardHeadConfig = try shardGroup.map { try ShardGroupHeadConfig.load(path: $0) }
-        let shardMemberConfig = try shardMember.map { try ShardMemberConfig.load(path: $0) }
         // Upstream mlx-swift-lm #424 can corrupt speculative rollback after a
         // model-specific rotating-cache wrap. Keep one source of truth for both
         // execution and advertised heartbeat capability until the tagged fix and
@@ -4282,6 +4323,7 @@ struct ServeCommand: AsyncParsableCommand {
         _ resolved: inout AppConfig,
         joiningCoordinator: Bool,
         isolateLifecycle: Bool = false,
+        shardStage: ShardStageScope? = nil,
         coordinatorAcceptsSpecDecodeTelemetry: Bool = Self.bundledCoordinatorAcceptsSpecDecodeTelemetry,
         portIsOpen: (Int) -> Bool = MacProviderPortProbe.isOpen,
         acquireServeLock: (AppConfig) throws -> ProviderServeLock = { config in
@@ -4307,7 +4349,8 @@ struct ServeCommand: AsyncParsableCommand {
                     isolateLifecycle: isolateLifecycle,
                     staticInputs: staticInputs,
                     artifactResolver: artifactResolver,
-                    persistConfigMigration: true
+                    persistConfigMigration: true,
+                    shardStage: shardStage
                 )
             } catch where joiningCoordinator || resolved.donorMode {
                 throw ServeCatalogPreflightError(underlying: error)

@@ -357,7 +357,7 @@ final class ShardGroupWireTests: XCTestCase {
             upstreamInterface: "thunderbolt", downstreamInterface: "thunderbolt", sessionsServed: 0, lastError: nil)
         let hello = try object(try XCTUnwrap(try ShardGroupWire.memberHello(
             config: config, status: joined, memberDeviceID: "mac-b", artifactHashAlgorithm: "macprovider.snapshot-manifest.v1",
-            artifactHash: String(repeating: "d", count: 64))))
+            artifactHash: String(repeating: "d", count: 64), weightsVerified: true, stageFits: true)))
         XCTAssertEqual(Set(hello.keys), [
             "type", "version", "group_provider_id", "group_epoch", "member_device_id", "role", "stage_index", "layer_start",
             "layer_end", "transport_version", "artifact_hash_algorithm", "artifact_hash", "weights_verified", "stage_fits", "links",
@@ -371,12 +371,15 @@ final class ShardGroupWireTests: XCTestCase {
         var middle = joined
         middle.downstreamPeer = "mac-c"
         let threeStage = try object(try XCTUnwrap(try ShardGroupWire.memberHello(
-            config: config, status: middle, memberDeviceID: "mac-b", artifactHashAlgorithm: "a", artifactHash: "b")))
+            config: config, status: middle, memberDeviceID: "mac-b", artifactHashAlgorithm: "a", artifactHash: "b",
+            weightsVerified: true, stageFits: true)))
         XCTAssertEqual((threeStage["links"] as? [[String: String]])?.map { $0["peer_member_device_id"] }, ["prov-head", "mac-c"])
 
         var idle = joined
         idle.upstreamPeer = nil
-        XCTAssertNil(try ShardGroupWire.memberHello(config: config, status: idle, memberDeviceID: "mac-b", artifactHashAlgorithm: "a", artifactHash: "b"),
+        XCTAssertNil(try ShardGroupWire.memberHello(
+            config: config, status: idle, memberDeviceID: "mac-b", artifactHashAlgorithm: "a", artifactHash: "b",
+            weightsVerified: true, stageFits: true),
                      "no hello before the member has joined a chain")
     }
 

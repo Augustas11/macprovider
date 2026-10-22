@@ -513,6 +513,15 @@ enum AutotuneModelContextCap {
         ))
     }
 
+    /// SPEC-051-R006: the SPEC-023 KV envelope of one shard stage, the same 3/4 of
+    /// the RAM spare after weights and the safety margin, with the stage's own
+    /// tensor bytes as the weights.
+    static func shardStageKVBudgetBytes(hardwareMemoryGB: Int, stageWeightBytes: Int64) -> UInt64 {
+        usableKVBytes(
+            hardwareMemoryGB: hardwareMemoryGB, catalogMinRAMGB: 1,
+            verifiedArtifactSizeBytes: Int(clamping: max(1, stageWeightBytes)))
+    }
+
     private static func usableKVBytes(
         hardwareMemoryGB: Int,
         catalogMinRAMGB: Int,

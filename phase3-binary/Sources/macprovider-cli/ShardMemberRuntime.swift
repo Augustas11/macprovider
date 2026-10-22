@@ -283,6 +283,8 @@ actor ShardMemberRuntime: ModelRuntimeServing {
     let identity: ShardGroupRuntime.Identity
     let memberDeviceID: String
     let server: any ShardMemberServerHandle
+    /// What this member proved about its stage before it loaded (its hello reports it).
+    let stageProof: ShardGroupServe.StageProof
     private var providerStatus: ProviderStatus?
     var helloState = ShardMemberHelloState.notSent
     var changeHandler: (@Sendable () async -> Void)?
@@ -292,11 +294,15 @@ actor ShardMemberRuntime: ModelRuntimeServing {
     nonisolated var isSettlementReceiptEligible: Bool { false }
     nonisolated var settlementRuntimeSource: String? { nil }
 
-    init(config: ShardMemberConfig, identity: ShardGroupRuntime.Identity, memberDeviceID: String, server: any ShardMemberServerHandle) {
+    init(
+        config: ShardMemberConfig, identity: ShardGroupRuntime.Identity, memberDeviceID: String, server: any ShardMemberServerHandle,
+        stageProof: ShardGroupServe.StageProof
+    ) {
         self.config = config
         self.identity = identity
         self.memberDeviceID = memberDeviceID
         self.server = server
+        self.stageProof = stageProof
     }
 
     var memberStatus: ShardMemberStatus { server.status }
@@ -400,6 +406,44 @@ enum ShardGroupServe {
         return ShardMemberSigner(memberDeviceID: providerID, key: key)
     }
 
+    /// What a stage proved before it loads (SPEC-051-R006, R008).
+    struct StageProof: Equatable, Sendable {
+        /// The artifact digest every stage reports in the chain hello.
+        let digest: String
+        /// The stage's files were verified: the whole snapshot's hash, or each stage
+        /// file against the snapshot manifest the signed hash covers.
+        let weightsVerified: Bool
+        let fit: ShardStageArtifact.Fit
+    }
+
+    /// SPEC-051-R008 and R006: verify the stage's files (the whole snapshot, or with
+    /// a `scope` only the stage's files against the full-snapshot manifest) and that
+    /// the stage fits this Mac for `slots` sequences; a stage that does not fit
+    /// does not start, so it never registers.
+    static func proveStage(
+        directory: URL, expectedSHA256: String?, scope: ShardStageScope?, layers: Range<Int>, slots: Int,
+        hardwareMemoryGB: Int = ModelFit.detectRAMGB()
+    ) throws -> StageProof {
+        let digest: String
+        let inventory: ShardStageArtifact.Inventory
+        if let scope {
+            guard let expectedSHA256 else {
+                throw ShardStageArtifactError.invalid("a stage-only directory is verified against the signed artifact hash; set model_artifact_sha256")
+            }
+            inventory = try ShardStageArtifact.verify(
+                directory: directory, manifestURL: URL(fileURLWithPath: scope.snapshotManifestPath), expectedSHA256: expectedSHA256,
+                layers: layers)
+            digest = expectedSHA256
+        } else {
+            digest = try verifiedDigest(directory: directory, expectedSHA256: expectedSHA256)
+            inventory = try ShardStageArtifact.inventory(directory: directory, layers: layers)
+        }
+        let fit = ShardStageArtifact.fit(inventory: inventory, slots: slots, hardwareMemoryGB: hardwareMemoryGB)
+        guard fit.fits else { throw ShardStageArtifactError.doesNotFit(fit.detail) }
+        shardGroupLog("stage \(layers.lowerBound):\(layers.upperBound) verified (\(scope == nil ? "whole snapshot" : "stage files against the snapshot manifest")), \(inventory.files.weightFiles.count) weight files; \(fit.detail)")
+        return StageProof(digest: digest, weightsVerified: true, fit: fit)
+    }
+
     /// SPEC-051-R008: the files this Mac loads are the verified catalog artifact
     /// (or, for an uncatalogued local model, the digest every stage must share).
     static func verifiedDigest(directory: URL, expectedSHA256: String?) throws -> String {
@@ -447,7 +491,9 @@ enum ShardGroupServe {
         signer: ShardMemberSigner,
         gate: ShardGroupServingGate
     ) async throws -> ShardGroupRuntime {
-        let digest = try verifiedDigest(directory: directory, expectedSHA256: verifyArtifactSHA256)
+        let digest = try proveStage(
+            directory: directory, expectedSHA256: verifyArtifactSHA256, scope: config.stageScope, layers: 0..<config.headLayerEnd,
+            slots: config.maxConcurrency).digest
         let stage = ShardBenchStageBox(try await PipelineStageModel.load(directory: directory, layers: 0..<config.headLayerEnd))
         guard stage.stage.totalLayers == config.numLayers else {
             throw ShardGroupConfigError.invalid("the group's stages end at layer \(config.numLayers), the model has \(stage.stage.totalLayers)")
@@ -501,13 +547,15 @@ enum ShardGroupServe {
         verifyArtifactSHA256: String?,
         signer: ShardMemberSigner
     ) async throws -> ShardMemberRuntime {
-        let digest = try verifiedDigest(directory: directory, expectedSHA256: verifyArtifactSHA256)
+        let proof = try proveStage(
+            directory: directory, expectedSHA256: verifyArtifactSHA256, scope: config.stageScope,
+            layers: config.layerStart..<config.layerEnd, slots: config.maxSequences)
         let stage = try await PipelineStageModel.load(directory: directory, layers: config.layerStart..<config.layerEnd)
-        let server = ShardMemberStageServer(stage: stage, config: config, signer: signer, modelDigest: digest, modelLabel: modelID)
+        let server = ShardMemberStageServer(stage: stage, config: config, signer: signer, modelDigest: proof.digest, modelLabel: modelID)
         try server.start()
         return ShardMemberRuntime(
             config: config,
             identity: identity(modelID: modelID, directory: directory, catalogArtifactSHA256: catalogArtifactSHA256, catalogModelIDAlias: nil),
-            memberDeviceID: signer.memberDeviceID, server: server)
+            memberDeviceID: signer.memberDeviceID, server: server, stageProof: proof)
     }
 }

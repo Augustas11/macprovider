@@ -343,18 +343,25 @@ final class PipelineStageModel {
         }
         let hasHead = all.keys.contains { $0.hasPrefix("lm_head.") }
         var weights = [String: MLXArray]()
-        for (key, value) in all {
-            if let layerKey = renameLayerKey(key, plan: plan) {
-                if let renamed = layerKey { weights[renamed] = value }
-            } else if key.hasPrefix("model.embed_tokens.") {
-                if plan.isFirst || (plan.isLast && !hasHead) { weights[key] = value }
-            } else if key.hasPrefix("lm_head.") || key.hasPrefix("model.norm.") {
-                if plan.isLast { weights[key] = value }
+        for (key, value) in all where stageKeeps(key: key, plan: plan, hasHead: hasHead) {
+            if let layerKey = renameLayerKey(key, plan: plan), let renamed = layerKey {
+                weights[renamed] = value
             } else {
                 weights[key] = value
             }
         }
         return weights
+    }
+
+    /// Whether a stage loads the tensor `key`: its own layers, the embedding on the
+    /// first stage (and on the last when the head is tied to it), the final norm and
+    /// head on the last, and every tensor outside the layers, embedding and head.
+    /// `ShardStageArtifact` picks a stage's files by the same rule.
+    static func stageKeeps(key: String, plan: PipelineStagePlan, hasHead: Bool) -> Bool {
+        if let layerKey = renameLayerKey(key, plan: plan) { return layerKey != nil }
+        if key.hasPrefix("model.embed_tokens.") { return plan.isFirst || (plan.isLast && !hasHead) }
+        if key.hasPrefix("lm_head.") || key.hasPrefix("model.norm.") { return plan.isLast }
+        return true
     }
 }
 
