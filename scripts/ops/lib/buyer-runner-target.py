@@ -100,6 +100,13 @@ def main_pid():
     return subprocess.check_output(["systemctl", "show", SERVICE, "-p", "MainPID", "--value"], timeout=5).decode().strip()
 
 
+def invocation():
+    value = subprocess.check_output(["systemctl", "show", SERVICE, "-p", "InvocationID", "--value"], timeout=5).decode().strip()
+    if len(value) != 32 or any(c not in "0123456789abcdef" for c in value):
+        raise ValueError("missing runner invocation identity")
+    return value
+
+
 def stable(exclude_pid):
     # A parsed-invalid file exits synchronously. Require one stable process,
     # rather than accepting systemd's short active state during an auto-restart.
@@ -179,7 +186,8 @@ def execute(args):
     state = json.loads(journal.read_bytes()) if journal.exists() else None
     if args.command == "status":
         print(json.dumps({"phase": state["phase"] if state else "absent",
-                          "enrollment_matches": enrollment_matches(path.read_bytes(), state, args.provider_id, args.model, args.slots),
+                          "enrollment_matches": (enrollment_matches(path.read_bytes(), state, args.provider_id, args.model, args.slots)
+                                                 and state.get("accepted_invocation") == invocation()),
                           "runner_active": service("is-active")}))
         return
     if state and state["phase"] not in ("committed", "restored"):
@@ -207,6 +215,7 @@ def execute(args):
         service("restart")
         if not stable(old_pid):
             raise RuntimeError("enrolled runner not stable")
+        state["accepted_invocation"] = invocation()
         state["phase"] = "committed"
         save(journal, state)
         print(json.dumps({"phase": "committed", "runner_active": True, "slots": 4}))
