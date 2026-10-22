@@ -13875,7 +13875,11 @@ struct SerialStreamingTextEmitter {
             // SPEC-018 §3.12: reasoning streams as `reasoning_content`; only
             // the text after `</think>` reaches content, tools and JSON mode.
             let split = ReasoningOutput.splitStreamingPrefix(candidate.text)
-            let reasoning = split.closed ? split.reasoning : Self.cleanupStablePrefix(of: split.reasoning)
+            // An unclosed prefix holds back cleanup-rewritable text and an
+            // incomplete UTF-8 tail, as content does.
+            let reasoning = split.closed
+                ? split.reasoning
+                : ModelRuntime.withoutIncompleteUTF8Tail(Self.cleanupStablePrefix(of: split.reasoning))
             let delta = ModelRuntime.streamDelta(from: emittedReasoning, to: reasoning)
             if !delta.isEmpty {
                 emittedReasoning += delta

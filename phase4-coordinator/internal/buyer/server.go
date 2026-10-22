@@ -157,6 +157,7 @@ var spec018RetryableByCode = map[string]bool{
 	"tool_call_result_out_of_order":                           false,
 	"unsupported_modelID_for_multi_turn":                      false,
 	"tools_unsupported_for_model":                             false,
+	"tool_grammar_provider_unavailable":                       true,
 	// Round-2 3-lane re-audit sweep of PR #548: the codes below were
 	// emitted (writeError/writeErrorWithParam/routeError literal call
 	// sites) but had no explicit entry, relying on Go's map zero-value
@@ -8294,6 +8295,9 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 				if poolActive && unsupportedMultiTurnNativeCandidate(req, p, tier2.Default().ModelIDs, poolModelClass) {
 					return pool.Provider{}, &routeError{status: http.StatusBadRequest, code: "unsupported_modelID_for_multi_turn", message: "Model does not support multi-turn tool history rendering"}
 				}
+				if req.multiTurnToolHistory && !providerToolGrammarEligible(p) {
+					return pool.Provider{}, toolGrammarProviderUnavailableRouteError()
+				}
 				// SPEC-042-R014 (c): a pin never bypasses the engine filter.
 				if engineClass != "" && providerEngineClass(p) != engineClass {
 					return pool.Provider{}, engineUnavailableRouteError("Pinned session provider does not serve the selected engine")
@@ -8336,6 +8340,9 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 				}
 				if poolActive && unsupportedMultiTurnNativeCandidate(req, p, tier2.Default().ModelIDs, poolModelClass) {
 					return pool.Provider{}, &routeError{status: http.StatusBadRequest, code: "unsupported_modelID_for_multi_turn", message: "Model does not support multi-turn tool history rendering"}
+				}
+				if req.multiTurnToolHistory && !providerToolGrammarEligible(p) {
+					return pool.Provider{}, toolGrammarProviderUnavailableRouteError()
 				}
 				// SPEC-042-R014 (c): a pin never bypasses the engine filter.
 				if engineClass != "" && providerEngineClass(p) != engineClass {
@@ -8382,12 +8389,15 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 			return pool.Provider{}, &routeError{status: http.StatusBadRequest, code: "unsupported_modelID_for_multi_turn", message: "Model does not support multi-turn tool history rendering"}
 		}
 	}
-	// #2107: a tool request (or tool history) prefers native providers that
-	// parse the model's grammar, the same predicate /v1/models advertises
-	// from; with none upgraded it keeps the legacy candidates, which the
-	// metadata then does not advertise as tool-capable either.
+	// #2107: a tool request (or tool history) reaches only native providers
+	// that parse the model's grammar, the predicate /v1/models advertises
+	// from, on every route (selection, pins, queued reconnects).
 	if req.multiTurnToolHistory {
-		providers = preferToolGrammarProviders(providers)
+		before := len(providers)
+		providers = toolGrammarEligibleProviders(providers)
+		if before > 0 && len(providers) == 0 {
+			return pool.Provider{}, toolGrammarProviderUnavailableRouteError()
+		}
 	}
 	// SPEC-019 v0.3.0 §1a: a non-strict json_schema request reaches only
 	// providers whose CLI implements non-strict mode. With none left for the
@@ -9761,6 +9771,9 @@ func (s *Server) pollQueuedProviderWithContext(ctx context.Context, waiter *slot
 			pollReq.multiTurnToolHistory = state.multiTurnToolHistory
 		}
 		if state != nil && state.poolID != "" && unsupportedMultiTurnNativeCandidate(pollReq, provider, tier2.Default().ModelIDs, poolModelClass) {
+			return pool.Provider{}, queuedProviderTerminal
+		}
+		if state != nil && state.multiTurnToolHistory && !providerToolGrammarEligible(provider) {
 			return pool.Provider{}, queuedProviderTerminal
 		}
 		// SPEC-042-R014 (c): a same-ID reconnect of another class is terminal.

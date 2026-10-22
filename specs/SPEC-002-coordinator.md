@@ -11,7 +11,13 @@ declared `ToolSelectionCapabilities` (no pinned model ID). `/v1/models`
 entries carry `capabilities` and `supported_parameters` (SPEC-006 v0.9.63).
 A post-commit provider failure SSE frame carries `error.reason`, the bounded
 snake_case end status or `provider_disconnected`. `reasoning_content` deltas
-count as provider work for the stream commit threshold.
+count as provider work for the stream commit threshold. A tool request or
+tool history reaches only native providers that parse the model's family
+grammar (provider CLI 1.8.262 or later for GLM, Gemma 4, Llama 3.1/3.2 and
+Nemotron; earlier CLIs for the Qwen, Llama 3.3 and gpt-oss families it already
+parsed), on selection, sticky pins and queued reconnects alike; with none it
+fails 503 `tool_grammar_provider_unavailable` (retryable). The same predicate
+drives `/v1/models` capabilities.
 
 **Change log v1.6.23 (2026-10-19, Related: #2054):** SPEC-002-R008 bounds the
 coordinator stake identity read on the dispatch path. A positive stake identity

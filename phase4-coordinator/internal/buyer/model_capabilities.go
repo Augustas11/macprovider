@@ -1,6 +1,7 @@
 package buyer
 
 import (
+	"net/http"
 	"sort"
 	"strings"
 
@@ -52,20 +53,27 @@ func providerParsesToolGrammar(p pool.Provider) bool {
 	return toolGrammarFamily(p.ModelID) != "" && (legacyToolFamily(p.ModelID) || providerServesToolGrammars(p))
 }
 
-// preferToolGrammarProviders keeps the native providers that parse their
-// model's tool grammar (and every external-runtime provider); when none
-// qualifies it returns the input unchanged.
-func preferToolGrammarProviders(providers []pool.Provider) []pool.Provider {
-	preferred := make([]pool.Provider, 0, len(providers))
+// providerToolGrammarEligible reports whether a provider can serve a tool
+// request: external runtimes keep their own tool handling, and a model with no
+// catalog family keeps provider-side behavior (the provider refuses tools its
+// template cannot express); a native provider of a catalog family must parse
+// that family's grammar.
+func providerToolGrammarEligible(p pool.Provider) bool {
+	return providerEngineClass(p) != engineClassNative || toolGrammarFamily(p.ModelID) == "" || providerParsesToolGrammar(p)
+}
+
+func toolGrammarEligibleProviders(providers []pool.Provider) []pool.Provider {
+	eligible := make([]pool.Provider, 0, len(providers))
 	for _, p := range providers {
-		if providerEngineClass(p) != engineClassNative || providerParsesToolGrammar(p) {
-			preferred = append(preferred, p)
+		if providerToolGrammarEligible(p) {
+			eligible = append(eligible, p)
 		}
 	}
-	if len(preferred) == 0 {
-		return providers
-	}
-	return preferred
+	return eligible
+}
+
+func toolGrammarProviderUnavailableRouteError() *routeError {
+	return &routeError{status: http.StatusServiceUnavailable, code: "tool_grammar_provider_unavailable", message: "No provider serving this model parses its tool-call grammar yet"}
 }
 
 func providerServesToolGrammars(p pool.Provider) bool {

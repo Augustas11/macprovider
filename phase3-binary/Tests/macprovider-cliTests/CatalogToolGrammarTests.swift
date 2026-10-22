@@ -366,6 +366,33 @@ final class CatalogToolGrammarTests: XCTestCase {
         XCTAssertNil(ToolCallParser.llama3CallStart(in: String(repeating: "{\"name\" ", count: 100)))
     }
 
+    func testLlamaCallMemberOrderIsFree() {
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: #"{"parameters": {"path": "a"}, "name": "read_file"}"#, grammar: .llama3, modelID: "llama",
+            allowedFunctionNames: ["read_file"], schemas: nil
+        )
+        XCTAssertEqual(parsed.toolCalls.first?.arguments, #"{"path":"a"}"#)
+    }
+
+    /// Audit r3: a reasoning prefix that ends inside a multi-byte character
+    /// (decoded as U+FFFD) is held back, so the completed character and the
+    /// rest of the reasoning still stream.
+    func testStreamedReasoningHoldsIncompleteUTF8() throws {
+        let request = try toolRequest(model: "Jundot/GLM-5.3-Flash-oQ4e-mtp", tool: "lookup", property: "city")
+        request.outputState.resolve(RequestOutputTraits(toolGrammar: .glm, reasoningOpen: true))
+        var emitter = SerialStreamingTextEmitter(request: request)
+        let accumulator = StructuredStreamingContentAccumulator(enabled: false)
+        let idle = StructuredStreamingIdleState(enabled: false)
+        var reasoning = ""
+        for prefix in ["Caf", "Caf\u{FFFD}", "Café", "Café ok", "Café ok</think>Done"] {
+            _ = emitter.step(candidate: (prefix, false), structuredAccumulator: accumulator, idleState: idle) {
+                if case .reasoning(let text) = $0 { reasoning += text }
+            }
+        }
+        XCTAssertEqual(reasoning, "Café ok")
+        XCTAssertEqual(emitter.emittedReasoning, "Café ok")
+    }
+
     // MARK: - Reasoning split (SPEC-018 §3.12)
 
     func testReasoningSplitAppliesStopsAndJSONModeToTheAnswerOnly() throws {

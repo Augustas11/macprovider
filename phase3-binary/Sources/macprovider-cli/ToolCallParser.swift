@@ -228,12 +228,11 @@ enum ToolCallParser {
         return calls
     }
 
-    /// Where a Llama call starts: `<|python_tag|>`, or the first `{"name"`
-    /// that opens a complete, bounded JSON object with a string `name` and
-    /// an object `parameters`/`arguments`. Only `{"name"` openings are
-    /// scanned (the template teaches that shape), at most
-    /// `llama3MaxCallCandidates` of them, and only within the response byte
-    /// cap, so detection stays linear in the output.
+    /// Where a Llama call starts: `<|python_tag|>`, or the first `{"` that
+    /// opens a complete, bounded JSON object with a string `name` and an
+    /// object `parameters`/`arguments` (in any member order). Only `{"`
+    /// openings are scanned, at most `llama3MaxCallCandidates` of them, and
+    /// only within the response byte cap, so detection stays linear.
     static func llama3CallStart(in rawOutput: String) -> String.Index? {
         if let tag = rawOutput.range(of: "<|python_tag|>") { return tag.lowerBound }
         guard rawOutput.utf8.count <= SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else { return nil }
@@ -242,7 +241,8 @@ enum ToolCallParser {
         while candidates < llama3MaxCallCandidates,
               let brace = rawOutput.range(of: "{", range: searchFrom..<rawOutput.endIndex)?.lowerBound {
             searchFrom = rawOutput.index(after: brace)
-            guard rawOutput[searchFrom...].drop(while: { $0.isWhitespace }).hasPrefix("\"name\"") else { continue }
+            // A JSON object opening (`{` then a key); member order is free.
+            guard rawOutput[searchFrom...].drop(while: { $0.isWhitespace }).hasPrefix("\"") else { continue }
             candidates += 1
             guard let object = firstCompleteJSONObject(in: String(rawOutput[brace...])),
                   case .object(let parsed)? = try? StrictJSONParser.parse(object, maxDepth: SPEC018_ARGUMENTS_MAX_JSON_DEPTH),

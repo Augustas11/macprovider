@@ -145,18 +145,22 @@ func TestProviderFailureFrameCarriesReasonCode(t *testing.T) {
 	}
 }
 
-func TestToolRequestsPreferProvidersThatParseTheGrammar(t *testing.T) {
+func TestToolRequestsReachOnlyProvidersThatParseTheGrammar(t *testing.T) {
 	oldGLM := pool.Provider{ProviderID: "old", ModelID: "Jundot/GLM-5.3-Flash-oQ4e-mtp", BinaryVersion: "1.8.261"}
 	newGLM := pool.Provider{ProviderID: "new", ModelID: "Jundot/GLM-5.3-Flash-oQ4e-mtp", BinaryVersion: toolGrammarProviderMinVersion}
-	got := preferToolGrammarProviders([]pool.Provider{oldGLM, newGLM})
+	got := toolGrammarEligibleProviders([]pool.Provider{oldGLM, newGLM})
 	if len(got) != 1 || got[0].ProviderID != "new" {
-		t.Fatalf("preferred=%v want only the upgraded provider", got)
+		t.Fatalf("eligible=%v want only the upgraded provider", got)
 	}
-	if got := preferToolGrammarProviders([]pool.Provider{oldGLM}); len(got) != 1 {
-		t.Fatalf("with no upgraded provider the legacy candidate stays: %v", got)
+	if providerToolGrammarEligible(oldGLM) {
+		t.Fatal("a pre-#2107 GLM provider cannot serve tool requests (pins and queued reconnects use this predicate)")
 	}
 	legacy := pool.Provider{ProviderID: "q", ModelID: "mlx-community/Qwen3-8B-4bit", BinaryVersion: "1.8.100"}
-	if got := preferToolGrammarProviders([]pool.Provider{legacy, newGLM}); len(got) != 2 {
-		t.Fatalf("legacy families keep their providers: %v", got)
+	external := pool.Provider{ProviderID: "x", ModelID: "Jundot/GLM-5.3-Flash-oQ4e-mtp", RuntimeSource: "ollama_loopback"}
+	if got := toolGrammarEligibleProviders([]pool.Provider{legacy, external, newGLM}); len(got) != 3 {
+		t.Fatalf("legacy families and external runtimes stay eligible: %v", got)
+	}
+	if err := toolGrammarProviderUnavailableRouteError(); err.status != 503 || !spec018Retryable(err.code) {
+		t.Fatalf("route error=%+v", err)
 	}
 }
