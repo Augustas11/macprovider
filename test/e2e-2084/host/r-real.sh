@@ -31,7 +31,9 @@ results="$EV/results.jsonl"; : >"$results"
 result() { python3 -c 'import json,sys,datetime;print(json.dumps({"scenario":sys.argv[1],"result":sys.argv[2],"detail":sys.argv[3],"ts":datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}))' "$1" "$2" "$3" >>"$results"; e2e_log "[$1] $2: $3"; }
 
 # ---- lab model copy (not a catalog identity) ---------------------------------------
-LAB_ROOT="$R/models"; LAB_REV="$LAB_ROOT/mlx-community--Llama-3.2-3B-Instruct-4bit/lab"
+# The durable-store layout <root>/<org--repo>/<revision>/<sha256>/ outside
+# the durable root (serve verifies it against model_artifact_sha256).
+LAB_ROOT="$R/models"; LAB_REV="$LAB_ROOT/mlx-community--Llama-3.2-3B-Instruct-4bit/7f0dc925e0d0afb0322d96f9255cfddf2ba5636e"
 manifest_hash() { python3 - "$1" <<'PY'
 import hashlib, os, sys
 root = sys.argv[1]; entries = []
@@ -70,6 +72,7 @@ provider_token: $tok
 credential_store: protected_file
 enable_receipts: true
 coordinator_url: $COORD
+model: $MODEL_DIR
 model_artifact_path: $MODEL_DIR
 model_artifact_sha256: $H_REAL
 pool_model_id: $POOL_MODEL
@@ -122,17 +125,47 @@ t=0; while [ "$(live_inflight)" != 0 ] && [ $t -lt 300 ]; do sleep 5; t=$((t + 5
 e2e_log "live provider paused, 0 in flight"
 
 # ---- start the member, then the head ----------------------------------------------------
-common=(--model "$MODEL_REF" --isolate-lifecycle --credential-store protected_file --enable-receipts --lab-loopback-interconnect)
+common=(--isolate-lifecycle --credential-store protected_file --enable-receipts --lab-loopback-interconnect)
 "$CLI" serve --config "$R/m/config.yaml" --port 18091 "${common[@]}" --shard-member "$R/m/shard.json" >"$EV/member.log" 2>&1 & PIDS+=($!)
 sleep 20
 "$CLI" serve --config "$R/h/config.yaml" --port 18090 --max-context 8192 "${common[@]}" --shard-group "$R/h/group.json" >"$EV/head.log" 2>&1 & PIDS+=($!)
 
-# head pool binding: the provider-local signed offer (models offer --yes --json)
+# head pool binding: the signed model-admission offer with the head's enrolled
+# admission identity (the harness offer tool of the #1690/#1816 VM runs; the
+# CLI's own `models offer` accepts only a wss/https coordinator, deviation D7).
+seed_file() { python3 - "$1" "$2" "$3" <<'PY'
+import base64, hashlib, os, sys
+root, pid, out = sys.argv[1], sys.argv[2], sys.argv[3]
+p = os.path.join(root, "protected-credentials", "identity-keys", hashlib.sha256(pid.encode()).hexdigest(), hashlib.sha256(b"com.malibu.provider.bootstrap-identity-key").hexdigest())
+raw = open(p, "rb").read()
+seed = raw[:32] if len(raw) in (32, 64) else base64.b64decode(raw.strip())[:32]
+fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+os.write(fd, (base64.b64encode(seed).decode() + "\n").encode())
+os.close(fd)
+PY
+}
+FAKEPROV="$R/fakeprov"
+[ -x "$FAKEPROV" ] || (cd "$E2E_HARNESS/../e2e-1690/fakeprov" && go build -trimpath -o "$FAKEPROV" .) || e2e_die "fakeprov build"
 sleep 30
-"$CLI" models offer "$MODEL_REF" --yes --json --config "$R/h/config.yaml" --mlx-cache-dir "$LAB_ROOT" --skip-ollama --skip-lmstudio --skip-llamacpp \
-  --requested-disclosure-class pool_attested_unverified >"$EV/offer-head.json" 2>"$EV/offer-head.err" \
-  && result R-head-offer PASS "$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));b=d.get("pool_binding") or {};print(d.get("admission_state"), b.get("binding_scope"), b.get("pool_model_id"))' "$EV/offer-head.json" 2>&1)" \
-  || result R-head-offer FAIL "$(tail -3 "$EV/offer-head.err" | tr '\n' ' ' | head -c 500)"
+# Every member offers too: a single provider serving this pool entry needs the
+# binding (SPEC-051-R003), and without it the member's catalog model id with a
+# non-catalog hash is excluded by the Tier-2 hash requirement.
+# A pool entry is admitted only for a model id that is not a catalog id
+# (SPEC-032-R004 pool_entry mode), so the lab copy is served by its path; the
+# offer binds the artifact pair (its served_model_ref is the upstream repo).
+SERVED_ID="$(vm ". /root/e2e/h/vm/lib.sh; curl_bearer \"\$(opkey)\" -s http://127.0.0.1:8444/admin/providers/$HEAD" | python3 -c 'import json,sys;d=json.load(sys.stdin);print((d.get("provider") or d).get("model_id",""))')"
+e2e_log "served model id: $SERVED_ID"
+for role in h m; do
+  pid=$HEAD; [ $role = m ] && pid=$M1
+  seed_file "$R/$role" $pid "$R/$role/admission-seed"
+  vm_get /root/e2e/token-$pid >"$R/$role/token"; chmod 600 "$R/$role/token"
+  "$FAKEPROV" offer -coord-http http://127.0.0.1:28444 -provider-id $pid -token-file "$R/$role/token" -admission-key-file "$R/$role/admission-seed" \
+    -runtime-source mlx_cache -served-model-ref "$MODEL_REF" -catalog-key "" -artifact-hash-algorithm macprovider.snapshot-manifest.v1 -artifact-hash "$H_REAL" \
+    -out "$EV/offer-$role.json" >"$EV/offer-$role.txt" 2>&1 \
+    && result R-offer-$role PASS "$pid: $(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));b=d.get("pool_binding") or {};print(d.get("admission_state"), b.get("binding_scope"), b.get("pool_model_id"))' "$EV/offer-$role.json" 2>&1)" \
+    || result R-offer-$role FAIL "$pid: $(tail -3 "$EV/offer-$role.txt" | tr '\n' ' ' | head -c 500)"
+  rm -f "$R/$role/admission-seed" "$R/$role/token"
+done
 
 avail() { vm "journalctl -u macprovider-coordinator --since '10 min ago' -o cat | grep '\"event\":\"shard_group_status\"' | grep '\"provider_id\":\"$HEAD\"' | tail -1"; }
 t=0; st=""
@@ -140,12 +173,17 @@ while [ $t -lt 240 ]; do st="$(avail)"; echo "$st" | grep -q '"available":true' 
 echo "$st" | grep -q '"available":true' && result R-group-available PASS "real head + member registered and available after ${t}s: $(echo "$st" | head -c 300)" \
   || result R-group-available FAIL "not available after ${t}s: last status $(echo "$st" | head -c 300); head log: $(grep -i 'shard' "$EV/head.log" | tail -4 | tr '\n' ' ' | head -c 600)"
 
+# Both sessions as the coordinator's operator surface shows them (state,
+# admission and Tier-2 flags), for the record and for any refusal above.
+for pid in $HEAD $M1; do
+  vm ". /root/e2e/h/vm/lib.sh; curl_bearer \"\$(opkey)\" -s http://127.0.0.1:8444/admin/providers/$pid" >"$EV/admin-$pid.json" 2>&1 || true
+done
 BK="$(vm_get /root/e2e/buyer-api-key)"
-buy() {  # buy <label> <stream> [max-time]
+buy() {  # buy <label> <stream> [max-time] [max-tokens] [prompt]
   local rid; rid="$(uuidgen | tr 'A-Z' 'a-z')"
   curl -s -o "$EV/$1.body" -D "$EV/$1.headers" -w '%{http_code}' --max-time "${3:-120}" "$GW/v1/chat/completions" \
     -H @<(printf 'Authorization: Bearer %s\n' "$BK") -H 'Content-Type: application/json' -H "X-Request-ID: $rid" -H "X-MacProvider-Pool-Select: $POOL_ID" \
-    -d "{\"model\":\"$POOL_MODEL\",\"stream\":$2,\"max_tokens\":48,\"temperature\":0,\"messages\":[{\"role\":\"user\",\"content\":\"Name three colours. ($rid)\"}]}"
+    -d "{\"model\":\"$POOL_MODEL\",\"stream\":$2,\"max_tokens\":${4:-48},\"temperature\":0,\"messages\":[{\"role\":\"user\",\"content\":\"${5:-Name three colours.} ($rid)\"}]}"
   echo " $rid" >"$EV/$1.rid"
 }
 c="$(buy paid-ns false)"; rid_ns="$(awk '{print $1}' "$EV/paid-ns.rid")"
@@ -165,8 +203,10 @@ if [ "$c" = 200 ] && [ "$c2" = 200 ] && [ "$(grep -c 'att=verified//' "$EV/paid-
 else result R-paid-request FAIL "non-stream $c, stream $c2; $(tr '\n' ' ' <"$EV/paid-check.txt" | head -c 900); body $(head -c 300 "$EV/paid-ns.body")"; fi
 
 # ---- kill the member mid-stream, then before the first token -----------------------------
-(buy kill-mid true >"$EV/kill-mid.code") & BUY=$!
-sleep 1.5; kill -9 "${PIDS[0]}" 2>/dev/null; wait $BUY
+(buy kill-mid true 120 400 "Count from 1 to 400, one number per line." >"$EV/kill-mid.code") & BUY=$!
+# kill the member once the stream is under way (first bytes at the buyer)
+for i in $(seq 1 100); do [ "$(grep -c '^data:' "$EV/kill-mid.body" 2>/dev/null || echo 0)" -ge 5 ] && break; sleep 0.1; done
+kill -9 "${PIDS[0]}" 2>/dev/null; wait $BUY
 c="$(cat "$EV/kill-mid.code" | awk '{print $1}')"
 result R-member-killed-mid-stream INFO "buyer $c; tail: $(tail -c 400 "$EV/kill-mid.body" | tr '\n' ' ')"
 c="$(buy kill-before false 60)"

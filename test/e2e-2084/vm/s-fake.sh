@@ -78,7 +78,9 @@ print("%s:%s:%s" % (r.get("group_epoch",""), str(r.get("accepted","")).lower(), 
 # ---- F1 paid pool traffic ----------------------------------------------------------
 d0="$(disp)"
 run="$(run_id f1)"
-POOL_TRAFFIC_EXTRA=(--read-to-eof) pool_traffic "$run" S "$MS" "" "ns=3,st=3" 2 >/dev/null
+POOL_TRAFFIC_EXTRA=(--read-to-eof)
+pool_traffic "$run" S "$MS" "" "ns=3,st=3" 2 >/dev/null
+POOL_TRAFFIC_EXTRA=()
 pool_check F1-pool-traffic-settles "$run" --expect ns=settled,st=settled --min-settled 6 --pool-model-id "$MS" --rates $S_RATES --tokens 8,12 \
   --usage-source coordinator_observed --token-source coordinator_observed --provider $HEAD
 ids="$(python3 -c 'import json,sys;print(",".join("\x27%s\x27" % json.loads(l)["rid"] for l in open(sys.argv[1])))' "$E2E_EVIDENCE/$run.load.jsonl")"
@@ -251,7 +253,12 @@ knob $HEAD '{"chunk_delay_ms":500}'
 coord_restart >/dev/null 2>&1; wait
 knob_clear $HEAD
 if st="$(wait_head true "" 120 "$(epoch)")"; then
-  req f9-after false; c="$CODE"; sleep 2
+  # The head's pool-scoped binding is restored by the coordinator's pool
+  # binding sweep after its new session, not at the reconnect itself.
+  t0=$(date +%s); req f9-after false; c="$CODE"
+  while [ "$c" != 200 ] && [ $(( $(date +%s) - t0 )) -lt 180 ]; do sleep 5; req f9-after false; c="$CODE"; done
+  result F9-rebind-after-restart INFO "first routable pool request $(( $(date +%s) - t0 )) s after the group was available again (pool binding sweep)"
+  sleep 2
   recs1="$(csql "SELECT COUNT(*) FROM shard_group_records WHERE group_provider_id='$HEAD'")"
   att1="$(csql "SELECT COUNT(*) FROM shard_group_attestations")"
   row="$(attestation_row "$CID")"
