@@ -4514,6 +4514,7 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 		w.WriteHeader(http.StatusOK)
 		committed = true
 	}
+	buyerReceivedDone := false
 	writeBuyerSSE := func(data string) (bool, wsForwardResult) {
 		checked, stop, err := guard.CheckStreamingChunk(data)
 		if err != nil {
@@ -4596,6 +4597,9 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 			markProviderDone()
 			return true, wsForwardCancelled
 		}
+		if strings.Contains(rewritten, "data: [DONE]") {
+			buyerReceivedDone = true
+		}
 		if flusher != nil {
 			flusher.Flush()
 		}
@@ -4655,9 +4659,27 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 		}
 		return writeBuyerSSE(string(flushed))
 	}
+	// A buyer that read the stream's final "data: [DONE]" and closed has the
+	// whole response; the provider's terminal frame (with its receipt) follows
+	// the last chunk. Its disconnect then waits up to CancelTerminalWait for
+	// that frame instead of cancelling an attempt whose output was delivered
+	// (#2084 VM acceptance V-3).
+	buyerGone := r.Context().Done()
+	var afterDone <-chan time.Time
 	for {
 		select {
-		case <-r.Context().Done():
+		case <-buyerGone:
+			if buyerReceivedDone && afterDone == nil {
+				buyerGone = nil
+				timer := time.NewTimer(providerws.CancelTerminalWait)
+				defer timer.Stop()
+				afterDone = timer.C
+				continue
+			}
+			relay.Cancel("buyer_disconnected")
+			markProviderDone()
+			return wsForwardCancelled, buyerCancelledAttempt()
+		case <-afterDone:
 			relay.Cancel("buyer_disconnected")
 			markProviderDone()
 			return wsForwardCancelled, buyerCancelledAttempt()
