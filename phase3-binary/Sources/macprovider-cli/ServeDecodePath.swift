@@ -25,16 +25,20 @@ extension ModelRuntime {
         modelID: String,
         modelSHA256: String,
         weightsGeneration: Int,
-        prefillStepSize: Int,
+        prefillStepSize: Int?,
         maxDecodeLockstepWindow: Int,
         nativeMTPRoundByteCapacity: Int?,
         nativeMTPStatusSink: NativeMTPStatusSink?,
         prefillGrouping: ContinuousBatchPrefillGroupingRule,
+        promptChunkCeiling: Int = ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens,
         allowsRaggedPrefillOffsets: Bool = false,
         nativeMTPPromptRowsJoinRaggedPrefill: Bool = false,
         maxDecodeRowsPerForward: Int = Int.max
     ) -> ContinuousBatchSchedulerConfiguration {
-        ContinuousBatchSchedulerConfiguration(
+        // The family ceiling is the chunk unless the operator set
+        // `prefill_step_size`, which may only lower it (SPEC-038 FR-CB2).
+        let promptChunkTokens = min(max(1, prefillStepSize ?? promptChunkCeiling), promptChunkCeiling)
+        return ContinuousBatchSchedulerConfiguration(
             descriptor: descriptor,
             tuple: tuple,
             moePromotionEvidenceAvailable: ContinuousBatchingPolicy.productionMoEPromotionEvidenceAvailable,
@@ -48,10 +52,7 @@ extension ModelRuntime {
             prefillGrouping: prefillGrouping,
             maxPrefillTokensPerIteration: prefillTokensPerIteration
                 ?? ContinuousBatchSchedulerConfiguration.defaultPrefillTokensPerIteration,
-            maxPromptChunkTokens: min(
-                max(1, prefillStepSize),
-                ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens
-            ),
+            maxPromptChunkTokens: promptChunkTokens,
             allowsRaggedPrefillOffsets: allowsRaggedPrefillOffsets,
             nativeMTPPromptRowsJoinRaggedPrefill: nativeMTPPromptRowsJoinRaggedPrefill,
             tokenDeliveryBufferLimit: ContinuousBatchSchedulerConfiguration.productionTokenDeliveryBufferLimit,
@@ -67,11 +68,40 @@ extension ModelRuntime {
                 weightsGeneration: weightsGeneration
             ),
             maxDecodeLockstepWindow: maxDecodeLockstepWindow,
-            maxDecodeStepsWhilePrefilling: ContinuousBatchSchedulerConfiguration.defaultDecodeStepsWhilePrefilling,
+            maxDecodeStepsWhilePrefilling: decodeStepsWhilePrefilling(promptChunkTokens: promptChunkTokens),
             maxDecodeRowsPerForward: maxDecodeRowsPerForward,
             nativeMTPRoundByteCapacity: nativeMTPRoundByteCapacity,
             nativeMTPStatusSink: nativeMTPStatusSink
         )
+    }
+
+    /// CB prompt chunk ceiling of a `glm5_next` (pagedMLA) backend. Its rows
+    /// prefill alone (8-token shared-forward cap), and a 512-token chunk
+    /// starves the MoE matmuls: Studio M3 Ultra, GLM-5.3-Flash, 8k prompt,
+    /// 224.0 prefill tok/s at 512 vs 308.7 at 2048 with 16/16 top-1 parity
+    /// and 189 GB peak (#2100).
+    static let pagedMLAPromptChunkTokens = 2_048
+
+    /// The prompt chunk ceiling for this backend's family; every other
+    /// family keeps `defaultPromptChunkTokens`.
+    nonisolated static func schedulerPromptChunkCeiling(
+        backend: (any ContinuousBatchSchedulerBackend)?
+    ) -> Int {
+        guard let backend = backend as? PagedKVSharedForwardBackend,
+              backend.cacheKinds.contains(where: \.isPagedMLA)
+        else {
+            return ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens
+        }
+        return pagedMLAPromptChunkTokens
+    }
+
+    /// Decode steps per hop while a prompt prefills, scaled with the chunk so
+    /// active rows keep their decode steps per prefilled token: 8 at the
+    /// 512-token chunk, 32 at 2048, which the scheduler caps at the lockstep
+    /// window (16). Never below the default for a smaller chunk.
+    nonisolated static func decodeStepsWhilePrefilling(promptChunkTokens: Int) -> Int {
+        let steps = ContinuousBatchSchedulerConfiguration.defaultDecodeStepsWhilePrefilling
+        return max(steps, steps * promptChunkTokens / ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens)
     }
 
     /// The decode row bound every scheduler is built with: the configured
@@ -157,7 +187,7 @@ extension ModelRuntime {
         modelID: String?,
         modelSHA256: String?,
         weightsGeneration: Int,
-        prefillStepSize: Int,
+        prefillStepSize: Int?,
         maxDecodeLockstepWindow: Int = ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow,
         nativeMTPRoundByteCapacity: Int? = nil,
         nativeMTPStatusSink: NativeMTPStatusSink? = nil,
@@ -202,6 +232,7 @@ extension ModelRuntime {
                 nativeMTPRoundByteCapacity: nativeMTPRoundByteCapacity,
                 nativeMTPStatusSink: nativeMTPStatusSink,
                 prefillGrouping: prefillGrouping,
+                promptChunkCeiling: schedulerPromptChunkCeiling(backend: backend),
                 allowsRaggedPrefillOffsets: (backend as? PagedKVSharedForwardBackend)?
                     .supportsRaggedPrefillOffsets ?? false,
                 nativeMTPPromptRowsJoinRaggedPrefill: schedulerNativeMTPPromptRowsJoinRaggedPrefill(
@@ -233,7 +264,7 @@ extension ModelRuntime {
         modelSHA256: String?,
         weightsGeneration: Int,
         kvBitsOverride: Int?,
-        prefillStepSize: Int,
+        prefillStepSize: Int?,
         nativeMTPStatusSink: NativeMTPStatusSink? = nil,
         replayAuthority: any ContinuousBatchSchedulerReplayAuthority,
         cachedTurns: Bool
