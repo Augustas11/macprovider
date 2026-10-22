@@ -125,6 +125,250 @@ stage=/current/stage AIR_RECOVERY_PROVIDER_SHA256=provider OPS_SCOPE=scope
                 self.assertEqual(result.returncode, expected, result.stderr)
 
 
+class AirLockScopeTests(unittest.TestCase):
+    """Real lock acquisition/cleanup, with remote mutation replaced by fixtures."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.home = Path(self.temporary.name).resolve()
+        self.shared = self.home / ".config/macprovider/live-ops.lock"
+        self.air = self.shared.with_name("provider-admin-air-m3.lock")
+        self.lock = ROOT / "scripts/ops/live-lock.sh"
+        self.env = {**os.environ, "HOME": str(self.home),
+                    "MACPROVIDER_OPS_ENV": "/dev/null",
+                    "MACPROVIDER_LIVE_LOCK": str(self.shared),
+                    "MACPROVIDER_OPS_OWNER": "air-test"}
+        self.setup = f'''
+set -euo pipefail
+OPS_NAME=air-provider
+source "{ROOT}/scripts/ops/lib/common.sh"
+AIR_LOCK_OWNER="" AIR_PEARL_LOCK_OWNER=""
+''' + "\n".join(function(name) for name in (
+            "air_lock_path", "acquire_live_lock_for_step", "release_live_lock",
+            "air_payload_swap", "air_gateway_proof"))
+
+    def lock_command(self, *args, air=False):
+        return subprocess.run([str(self.lock), *args], text=True, capture_output=True,
+                              env={**self.env, **({"MACPROVIDER_LIVE_LOCK": str(self.air)} if air else {})})
+
+    def shell(self, code):
+        return subprocess.run(["bash", "-c", self.setup + "\n" + code],
+                              text=True, capture_output=True, env=self.env, timeout=10)
+
+    def hold_studio(self):
+        result = self.lock_command("acquire", "studio-owner", "--purpose", "studio-window")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return self.shared.read_bytes()
+
+    def test_air_steps_leave_studio_lock_byte_identical_and_cleanup_own_lock(self):
+        original = self.hold_studio()
+        for step in ("recover", "payload_recovery", "restore", "adopt"):
+            result = self.shell(f'''
+NEXT_ID={step}
+acquire_live_lock_for_step
+test -f "$(air_lock_path)"
+test "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["owner"])' "$(air_lock_path)")" = "air-test:air:$$"
+''')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(self.air.exists())
+            self.assertEqual(self.shared.read_bytes(), original)
+
+    def test_air_contention_refuses_and_preserves_both_foreign_locks(self):
+        shared = self.hold_studio()
+        self.assertEqual(self.lock_command("acquire", "other-air", air=True).returncode, 0)
+        incumbent = self.air.read_bytes()
+        result = self.shell("NEXT_ID=adopt\nacquire_live_lock_for_step")
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertEqual(self.air.read_bytes(), incumbent)
+        self.assertEqual(self.shared.read_bytes(), shared)
+
+    def test_status_next_and_internal_child_never_release_parent_or_shared_lock(self):
+        shared = self.hold_studio()
+        for command in ("status", "next"):
+            result = self.shell('''
+gather() { set_next recover mutate fixture true; }
+''' + f"\nops_main {command}")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(self.air.exists())
+            self.assertEqual(self.shared.read_bytes(), shared)
+        child = self.home / "internal-child.sh"
+        child.write_text(self.setup + '\ntest -f "$(air_lock_path)"\n')
+        contender = self.home / "same-session.sh"
+        contender.write_text(self.setup + '\nNEXT_ID=adopt\nacquire_live_lock_for_step\n')
+        result = self.shell(f'''
+NEXT_ID=recover
+acquire_live_lock_for_step
+parent=$(cat "$(air_lock_path)")
+bash "{child}"
+test "$(cat "$(air_lock_path)")" = "$parent"
+rc=0
+bash "{contender}" || rc=$?
+test "$rc" = 3
+test "$(cat "$(air_lock_path)")" = "$parent"
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.air.exists())
+        self.assertEqual(self.shared.read_bytes(), shared)
+
+    def test_enrollment_refuses_shared_contention_and_releases_partial_air_lock(self):
+        shared = self.hold_studio()
+        result = self.shell("NEXT_ID=enroll\nacquire_live_lock_for_step")
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertFalse(self.air.exists())
+        self.assertEqual(self.shared.read_bytes(), shared)
+        self.assertEqual(self.lock_command("release", "studio-owner").returncode, 0)
+        result = self.shell('''
+NEXT_ID=enroll
+acquire_live_lock_for_step
+test -f "$(air_lock_path)" && test -f "$MACPROVIDER_LIVE_LOCK"
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.air.exists())
+        self.assertFalse(self.shared.exists())
+
+    def test_failure_signal_and_unknown_step_cleanup_never_release_studio(self):
+        shared = self.hold_studio()
+        for ending, expected in (("exit 9", 9), ("kill -TERM $$", 143)):
+            result = self.shell("NEXT_ID=restore\nacquire_live_lock_for_step\n" + ending)
+            self.assertEqual(result.returncode, expected, result.stderr)
+            self.assertFalse(self.air.exists())
+            self.assertEqual(self.shared.read_bytes(), shared)
+        result = self.shell("NEXT_ID=unexpected\nacquire_live_lock_for_step")
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertFalse(self.air.exists())
+        self.assertEqual(self.shared.read_bytes(), shared)
+
+    def test_nested_canary_cleanup_retains_parent_lock_through_followup_writes(self):
+        shared = self.hold_studio()
+        fixture_ops = self.home / "fixture-ops"
+        fixture_ops.mkdir()
+        (fixture_ops / "live-lock.sh").symlink_to(self.lock)
+        canary = (ROOT / "scripts/ops/canary-swap.sh").read_text()
+        # Execute the actual nested canary lock block and common EXIT cleanup;
+        # archive verification and SSH are outside this offline lock regression.
+        start = canary.index('"$OPS_DIR/live-lock.sh" acquire')
+        end = canary.index('OPS_LOCK_OWNER="$MACPROVIDER_OPS_OWNER"', start)
+        lock_block = canary[start:end] + 'OPS_LOCK_OWNER="$MACPROVIDER_OPS_OWNER"\n'
+        nested = fixture_ops / "canary-swap.sh"
+        nested.write_text(f'''#!/usr/bin/env bash
+set -euo pipefail
+OPS_NAME=canary-swap V=1.8.260
+source "{ROOT}/scripts/ops/lib/common.sh"
+{lock_block}
+test -f "$HOME/.config/macprovider/provider-admin-air-m3.lock"
+test -f "$MACPROVIDER_LIVE_LOCK"
+exit "${{NESTED_RC:-0}}"
+''')
+        nested.chmod(0o700)
+        for nested_rc in (0, 5):
+            result = self.shell(f'''
+NEXT_ID=recover
+acquire_live_lock_for_step
+parent=$(cat "$(air_lock_path)")
+OPS_DIR="{fixture_ops}"
+rc=0
+NESTED_RC={nested_rc} air_payload_swap recover-air --version 1.8.260 || rc=$?
+test "$rc" = {nested_rc}
+test ! -f "$(air_lock_path).payload"
+test "$(cat "$(air_lock_path)")" = "$parent"
+# Subsequent controller writes and restoration remain under the parent lock.
+test -f "$(air_lock_path)"
+''')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(self.air.exists())
+            self.assertEqual(self.shared.read_bytes(), shared)
+
+        payload = Path(str(self.air) + ".payload")
+        acquired = subprocess.run([str(self.lock), "acquire", "other-payload"],
+                                 text=True, capture_output=True,
+                                 env={**self.env, "MACPROVIDER_LIVE_LOCK": str(payload)})
+        self.assertEqual(acquired.returncode, 0, acquired.stderr)
+        incumbent = payload.read_bytes()
+        result = self.shell(f'''
+NEXT_ID=payload_recovery
+acquire_live_lock_for_step
+parent=$(cat "$(air_lock_path)")
+OPS_DIR="{fixture_ops}"
+rc=0
+air_payload_swap restore-air --version 1.8.260 || rc=$?
+test "$rc" = 3
+test "$(cat "$(air_lock_path)")" = "$parent"
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(payload.read_bytes(), incumbent)
+        self.assertFalse(self.air.exists())
+        self.assertEqual(self.shared.read_bytes(), shared)
+
+    def test_real_catalog_gateway_proof_isolates_air_acceptance_markers(self):
+        shared = self.hold_studio()
+        state = self.home / "shared-state"
+        release = json.loads((ROOT / "phase3-binary/catalog/autotune/release.json").read_text())["release_id"]
+        marker = state / f"catalog-{release}" / "gateway_proof.json"
+        marker.parent.mkdir(parents=True)
+        marker.write_bytes(b"existing Studio acceptance\n")
+        marker_tmp = Path(str(marker) + ".tmp")
+        marker_tmp.write_bytes(b"in-progress Studio marker\n")
+        self.env["MACPROVIDER_OPS_STATE_DIR"] = str(state)
+        token = self.home / "fixture-token"
+        token.write_text("offline-fixture-not-a-secret")
+        fixture_ops = self.home / "proof-fixture"
+        fixture_ops.mkdir()
+        (fixture_ops / "live-lock.sh").symlink_to(self.lock)
+        source = (ROOT / "scripts/ops/catalog-activate.sh").read_text()
+        # Preserve real internal dispatch, gateway proof, counters, attribution
+        # checks and common marker implementation; simulate only network I/O.
+        source = source.replace(
+            '. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"',
+            f'. "{ROOT}/scripts/ops/lib/common.sh"')
+        fixtures = '''
+gateway_url() { printf 'https://offline.invalid'; }
+read_provider_status() {
+  local n=1
+  case "$1" in */after.json) n=2;; esac
+  printf '{"model":"qwen3-8b","requests_total":%s,"native_mtp":{"mtp_forwards":0,"enabled":false},"continuous_batching":{"active":true,"scheduler":{"shared_forward_calls":%s}},"safety_telemetry":{"coordinator_session_id":"fixture-session"},"catalog":{"release_id":"fixture-release","digest":"fixture-digest"}}' "$n" "$n" > "$1"
+}
+pearl_ssh() { printf fixture-session; }
+curl() {
+  local headers="" body="" rid=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -D) headers="$2"; shift 2;;
+      -o) body="$2"; shift 2;;
+      -H) case "$2" in 'X-Request-ID: '*) rid="${2#X-Request-ID: }";; esac; shift 2;;
+      *) shift;;
+    esac
+  done
+  cat >/dev/null
+  printf 'X-Request-ID: %s\\r\\n' "$rid" > "$headers"
+  printf '{"choices":[{"message":{"content":"ok"}}]}' > "$body"
+  printf 200
+}
+'''
+        source = source.replace('\nops_main "$@"', fixtures + '\nops_main "$@"')
+        nested = fixture_ops / "catalog-activate.sh"
+        nested.write_text(source)
+        nested.chmod(0o700)
+        result = self.shell(f'''
+NEXT_ID=adopt MODEL=qwen3-8b
+acquire_live_lock_for_step
+OPS_DIR="{fixture_ops}"
+export STUDIO_SSH=offline.invalid STUDIO_STATUS_PORT=50160 PEARL_SSH=offline.invalid
+export BUYER_TOKEN_FILE="{token}" PEARL_COORDINATOR_DB=/offline/db
+air_gateway_proof
+cat "$OPS_TMP_DIR/air-proof-state/catalog-{release}/gateway_proof.json"
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        proof = json.loads(result.stdout)
+        self.assertEqual(proof["proof_model"], "qwen3-8b")
+        self.assertEqual(proof["cb_shared_forward_calls_delta"], 1)
+        self.assertTrue(proof["served_by_canary"])
+        self.assertEqual(marker.read_bytes(), b"existing Studio acceptance\n")
+        self.assertEqual(marker_tmp.read_bytes(), b"in-progress Studio marker\n")
+        self.assertEqual(self.shared.read_bytes(), shared)
+        self.assertFalse(self.air.exists())
+
+
 class AirDetachedRecoveryTests(unittest.TestCase):
     """Execute the actual detached helper with only macOS surfaces simulated."""
 
