@@ -248,7 +248,7 @@ func cloneMessage(message map[string]any) map[string]any {
 }
 
 const (
-	gateLlama32ID = "mlx-community/Llama-3.2-3B-Instruct-4bit"
+	gateLlama32ID = "mlx-community/Qwen2-VL-2B-Instruct-4bit" // a catalog family without a tool grammar
 	gateQwen36ID  = "mlx-community/Qwen3.6-35B-A3B-4bit"
 )
 
@@ -323,9 +323,9 @@ func TestUnsupportedMultiTurnToolModelGate(t *testing.T) {
 	}{
 		{name: "catalog_id_rejected", req: gateMultiTurnRequest(t, gateLlama32ID), wantCode: reject},
 		{name: "free_alias_rejected", req: gateMultiTurnRequest(t, gateLlama32ID+"-free"), wantCode: reject},
-		{name: "openrouter_slug_alias_rejected", req: gateMultiTurnRequest(t, "meta-llama/llama-3.2-3b-instruct"), wantCode: reject},
-		{name: "case_variant_rejected", req: gateMultiTurnRequest(t, "MLX-COMMUNITY/llama-3.2-3b-instruct-4BIT"), wantCode: reject},
-		{name: "bare_key_alias_rejected", req: gateMultiTurnRequest(t, "llama-3.2-3b-instruct"), wantCode: reject},
+		{name: "openrouter_slug_alias_rejected", req: gateMultiTurnRequest(t, "qwen/qwen2-vl-2b-instruct"), wantCode: reject},
+		{name: "case_variant_rejected", req: gateMultiTurnRequest(t, "MLX-COMMUNITY/qwen2-vl-2b-instruct-4BIT"), wantCode: reject},
+		{name: "bare_key_alias_rejected", req: gateMultiTurnRequest(t, "qwen2-vl-2b-instruct"), wantCode: reject},
 		{name: "tool_result_only_rejected", req: toolResultOnly, wantCode: reject},
 		{name: "explicit_native_engine_rejected", req: nativeRoute, wantCode: reject},
 		{name: "qwen36_catalog_accepted", req: gateMultiTurnRequest(t, gateQwen36ID)},
@@ -384,7 +384,7 @@ func TestMultiTurnGateRejectsAliasBeforeDispatch(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	hits := registerGateProvider(t, registry, "p1", gateLlama32ID)
 	server := NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
-	for _, model := range []string{gateLlama32ID + "-free", "meta-llama/llama-3.2-3b-instruct"} {
+	for _, model := range []string{gateLlama32ID + "-free", "qwen/qwen2-vl-2b-instruct"} {
 		body, err := json.Marshal(map[string]any{"model": model, "messages": validMultiTurnMessages()})
 		if err != nil {
 			t.Fatal(err)
@@ -509,7 +509,7 @@ func TestMultiTurnGateModelClassAlias(t *testing.T) {
 			}
 		}
 		if got := llama.Load(); got != 0 {
-			t.Fatalf("Llama-3.2 provider dispatched %d times with tool history, want 0", got)
+			t.Fatalf("tool-less provider dispatched %d times with tool history, want 0", got)
 		}
 		if got := qwen.Load(); got != 4 {
 			t.Fatalf("Qwen3.6 provider dispatched %d times, want 4", got)
@@ -590,7 +590,7 @@ func TestMultiTurnGateNativeTrustedPoolRoute(t *testing.T) {
 	t.Run("native_pool_llama_tool_history_rejected_without_provider_mutation", func(t *testing.T) {
 		s, registry := gatePoolServer(t, nil, gatePoolMember("member-llama", gateLlama32ID))
 		before := providerStateFingerprint(registry)
-		for _, model := range []string{gateLlama32ID, gateLlama32ID + "-free", "meta-llama/llama-3.2-3b-instruct"} {
+		for _, model := range []string{gateLlama32ID, gateLlama32ID + "-free", "qwen/qwen2-vl-2b-instruct"} {
 			picked, routeErr := s.selectProviderExcluding(context.Background(), "rid", gatePoolToolRequest(t, model), http.Header{}, nil, "2024-01-01", &forwardState{})
 			if routeErr == nil || routeErr.status != http.StatusBadRequest || routeErr.code != "unsupported_modelID_for_multi_turn" {
 				t.Fatalf("model=%s: want 400 unsupported_modelID_for_multi_turn, got provider=%q err=%+v", model, picked.ProviderID, routeErr)

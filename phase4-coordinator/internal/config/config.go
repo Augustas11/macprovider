@@ -1101,6 +1101,11 @@ type RoutingConfig struct {
 	// model name never establish qualified buyer capacity. It applies at boot
 	// and on SIGHUP (buyer.Server.SetVisionQualifications).
 	VisionQualifications []VisionQualificationConfig `yaml:"vision_qualifications"`
+	// BuyerUXConformancePath names the buyer-UX conformance record file
+	// (phase3-binary/catalog/autotune/buyer-ux-conformance.json, SPEC-023
+	// §16.11). A capability a model failed is not published on /v1/models.
+	// Empty means no records. It applies at coordinator start.
+	BuyerUXConformancePath string `yaml:"buyer_ux_conformance_path"`
 }
 
 // VisionQualificationConfig pins every identity component that affects image

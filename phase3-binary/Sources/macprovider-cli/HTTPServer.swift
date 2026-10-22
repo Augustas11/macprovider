@@ -1563,6 +1563,16 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                                 finishReason: NSNull()
                             )
                         )
+                    case .reasoning(let text):
+                        writer.writeSSEJSON(
+                            Self.chatCompletionChunk(
+                                id: id,
+                                created: created,
+                                model: request.model,
+                                delta: ["reasoning_content": text],
+                                finishReason: NSNull()
+                            )
+                        )
                     case .toolCallDelta(let toolDelta):
                         if toolCallOpenEmitted.setIfUnset() {
                             let unixMs = Int64(Date().timeIntervalSince1970 * 1000)
@@ -2382,14 +2392,20 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         ]
     }
 
-    private static func chatCompletionMessage(_ completion: CompletionResult) -> [String: Any] {
+    /// OpenAI assistant message. With tool calls, `content` carries any prose
+    /// the model wrote before its first call, else null (SPEC-018 §3.1);
+    /// `reasoning_content` is present when the reasoning split applied.
+    static func chatCompletionMessage(_ completion: CompletionResult) -> [String: Any] {
         let toolCalls = completion.toolCalls?.isEmpty == false ? completion.toolCalls : nil
         var message: [String: Any] = [
             "role": "assistant",
-            "content": toolCalls == nil ? completion.content : NSNull(),
+            "content": toolCalls == nil || !completion.content.isEmpty ? completion.content : NSNull(),
         ]
         if let toolCalls {
             message["tool_calls"] = toolCalls.map(\.openAIObject)
+        }
+        if let reasoning = completion.reasoningContent {
+            message["reasoning_content"] = reasoning
         }
         return message
     }
@@ -2453,6 +2469,9 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             // OpenAI-compat. NSNull when the serve path did not record timing.
             "macprovider_generation_ms": completion.generationMilliseconds ?? NSNull(),
         ]
+        if completion.reasoningContent != nil {
+            usage["completion_tokens_details"] = ["reasoning_tokens": completion.reasoningTokens]
+        }
         // Usage the upstream did not report is never sent as billing token
         // counts; the display-only vendor extensions stay.
         if completion.settlementDisposition == .usageUnattested {

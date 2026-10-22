@@ -12,9 +12,19 @@ final class ConnectedRedirectBlocker: NSObject, URLSessionTaskDelegate, @uncheck
 struct ConnectedGatewayClient {
     static let maximumResponseBytes = 262_144
 
+    /// Coding agents send long system prompts and tool schemas: the picker
+    /// lists only models that call tools and have at least this context.
+    static let minimumAgentContextTokens = 32_768
+
     func models(key: String) async throws -> [ConnectedModel] {
         let data = try await request(path: "models", key: key, body: nil)
-        return try Self.decodeModels(data)
+        return Self.agentReady(try Self.decodeModels(data))
+    }
+
+    /// SPEC-025-R012: tool-capable models with enough context, from the
+    /// gateway's published metadata only.
+    static func agentReady(_ models: [ConnectedModel]) -> [ConnectedModel] {
+        models.filter { $0.supportsTools && ($0.contextWindow ?? 0) >= minimumAgentContextTokens }
     }
 
     static func decodeModels(_ data: Data) throws -> [ConnectedModel] {
@@ -30,22 +40,98 @@ struct ConnectedGatewayClient {
                   seen.insert(id).inserted else { return nil }
             let context = row["max_context_tokens"] as? Int
             let output = row["max_output_tokens"] as? Int
+            let tools = (row["capabilities"] as? [String: Any])?["tools"] as? Bool ?? false
             return ConnectedModel(id: id, contextWindow: context.flatMap { $0 > 0 ? $0 : nil },
-                                  maxOutputTokens: output.flatMap { $0 > 0 ? $0 : nil })
+                                  maxOutputTokens: output.flatMap { $0 > 0 ? $0 : nil },
+                                  supportsTools: tools)
         }.sorted { $0.id < $1.id }
     }
 
+    static let testToolName = "get_magic_number"
+    static let testToolResult = "42"
+    /// Room for a reasoning model to think before its call; still bounded.
+    static let testMaxTokens = 1024
+
+    private static let testTool: [String: Any] = [
+        "name": testToolName,
+        "description": "Returns the magic number.",
+        "parameters": ["type": "object", "properties": [String: Any](), "additionalProperties": false],
+    ]
+    private static let testPrompt = "Call the get_magic_number tool, then reply with the number it returns."
+
+    /// Step 1 of the endpoint test: a declared tool the model must call.
     static func testBody(api: ConnectedAPI, model: String) -> [String: Any] {
         switch api {
-        case .responses: ["model": model, "input": "Reply with OK.", "max_output_tokens": 16, "stream": false, "store": false]
-        case .chatCompletions: ["model": model, "messages": [["role": "user", "content": "Reply with OK."]], "max_tokens": 16, "stream": false]
+        case .responses:
+            var tool = testTool
+            tool["type"] = "function"
+            return ["model": model, "input": testPrompt, "tools": [tool], "max_output_tokens": testMaxTokens, "stream": false, "store": false]
+        case .chatCompletions:
+            return ["model": model, "messages": [["role": "user", "content": testPrompt]],
+                    "tools": [["type": "function", "function": testTool]], "max_tokens": testMaxTokens, "stream": false]
         }
     }
 
+    /// Step 2: the call and its result go back as history; the model answers.
+    static func toolResultBody(api: ConnectedAPI, model: String, callID: String) -> [String: Any] {
+        switch api {
+        case .responses:
+            var tool = testTool
+            tool["type"] = "function"
+            return ["model": model, "tools": [tool], "max_output_tokens": testMaxTokens, "stream": false, "store": false,
+                    "input": [
+                        ["type": "message", "role": "user", "content": testPrompt],
+                        ["type": "function_call", "call_id": callID, "name": testToolName, "arguments": "{}"],
+                        ["type": "function_call_output", "call_id": callID, "output": testToolResult],
+                    ]]
+        case .chatCompletions:
+            return ["model": model, "tools": [["type": "function", "function": testTool]], "max_tokens": testMaxTokens, "stream": false,
+                    "messages": [
+                        ["role": "user", "content": testPrompt],
+                        ["role": "assistant", "content": NSNull(), "tool_calls": [[
+                            "id": callID, "type": "function",
+                            "function": ["name": testToolName, "arguments": "{}"],
+                        ]]],
+                        ["role": "tool", "tool_call_id": callID, "content": testToolResult],
+                    ]]
+        }
+    }
+
+    /// SPEC-025-R012: the endpoint test is a tool round trip on the selected
+    /// API and model: the model must call the declared tool, then answer from
+    /// its result.
     func test(api: ConnectedAPI, model: String, key: String) async throws {
-        let body = Self.testBody(api: api, model: model)
-        let data = try await request(path: api == .responses ? "responses" : "chat/completions", key: key, body: body)
-        try Self.validateCompletion(data, api: api)
+        let first = try await request(path: api == .responses ? "responses" : "chat/completions", key: key, body: Self.testBody(api: api, model: model))
+        let callID = try Self.toolCallID(first, api: api)
+        let second = try await request(path: api == .responses ? "responses" : "chat/completions", key: key,
+                                       body: Self.toolResultBody(api: api, model: model, callID: callID))
+        try Self.validateCompletion(second, api: api)
+    }
+
+    /// The id of the test tool call in a step-1 response; anything else
+    /// (text, another tool, an error) fails the test.
+    static func toolCallID(_ data: Data, api: ConnectedAPI) throws -> String {
+        guard data.count <= maximumResponseBytes else { throw ConnectedAppsError.invalidResponse }
+        do { try MalibuStrictJSON.rejectDuplicateKeys(data) } catch { throw ConnectedAppsError.invalidResponse }
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any], root["error"] == nil else {
+            throw ConnectedAppsError.invalidResponse
+        }
+        let id: String?
+        switch api {
+        case .responses:
+            id = (root["output"] as? [[String: Any]] ?? []).first {
+                $0["type"] as? String == "function_call" && $0["name"] as? String == testToolName
+            }?["call_id"] as? String
+        case .chatCompletions:
+            let choice = (root["choices"] as? [[String: Any]] ?? []).first { $0["finish_reason"] as? String == "tool_calls" }
+            let calls = (choice?["message"] as? [String: Any])?["tool_calls"] as? [[String: Any]] ?? []
+            id = calls.first { ($0["function"] as? [String: Any])?["name"] as? String == testToolName }?["id"] as? String
+        }
+        guard let id, !id.isEmpty, id.utf8.count <= 128,
+              !id.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+            throw ConnectedAppsError.invalidResponse
+        }
+        return id
     }
 
     static func validateCompletion(_ data: Data, api: ConnectedAPI) throws {

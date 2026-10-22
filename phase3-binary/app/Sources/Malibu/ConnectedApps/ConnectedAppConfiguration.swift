@@ -23,6 +23,16 @@ struct ConnectedModel: Identifiable, Equatable {
     let id: String
     let contextWindow: Int?
     let maxOutputTokens: Int?
+    /// The gateway's `capabilities.tools` for this model (#2107); false when
+    /// the gateway publishes no capability metadata.
+    let supportsTools: Bool
+
+    init(id: String, contextWindow: Int?, maxOutputTokens: Int?, supportsTools: Bool = false) {
+        self.id = id
+        self.contextWindow = contextWindow
+        self.maxOutputTokens = maxOutputTokens
+        self.supportsTools = supportsTools
+    }
 }
 
 enum ConnectedAppsError: Error, LocalizedError {

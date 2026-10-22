@@ -1,17 +1,43 @@
 import Foundation
+import Jinja
 import MLXLMCommon
 import MacProviderCore
 
+/// A chat template that refuses the conversation with `raise_exception` (for
+/// example Llama 3.x, which renders one tool call per assistant turn) is a
+/// request error, not a provider failure.
+enum ChatTemplateRequestError {
+    static func mapping(_ error: Error) -> Error {
+        guard error is TemplateException else { return error }
+        return APIError(
+            status: 400,
+            message: "The model's chat template does not accept this conversation (for example several tool calls in one assistant turn)",
+            code: "invalid_request",
+            param: "messages"
+        )
+    }
+}
+
+/// SPEC-018 §3.6: multi-turn tool history is rendered by the model's own chat
+/// template. Assistant `tool_calls` reach the template as structured calls
+/// whose `arguments` are an object, and `tool` messages carry `tool_call_id`
+/// (and the called function's name), so every template renders its native
+/// call and result grammar. Nothing is hand-rendered here.
 enum ToolPromptRenderer {
+    /// Family-selected grammar, for callers without a loaded template.
     static func renderMessages(_ messages: [ChatMessage], modelID: String) throws -> [Chat.Message] {
+        try renderMessages(messages, grammar: ToolCallGrammar.family(modelID: modelID))
+    }
+
+    static func renderMessages(_ messages: [ChatMessage], grammar: ToolCallGrammar?) throws -> [Chat.Message] {
         let containsMultiTurnToolData = messages.contains { message in
             message.role == .tool || message.toolCalls?.isEmpty == false
         }
         guard containsMultiTurnToolData else {
             return messages.map(\.mlxMessage)
         }
-
-        guard let profile = ToolPromptProfile.detect(modelID: modelID) else {
+        // A template without a tool grammar cannot render tool history.
+        guard grammar != nil else {
             throw APIError(
                 status: 400,
                 message: "Model does not support multi-turn tool history rendering",
@@ -19,6 +45,7 @@ enum ToolPromptRenderer {
             )
         }
 
+        var namesByCallID: [String: String] = [:]
         return try messages.map { message in
             switch message.role {
             case .system:
@@ -26,152 +53,72 @@ enum ToolPromptRenderer {
             case .user:
                 return .user(message.content ?? "")
             case .assistant:
-                return .assistant(try profile.renderAssistant(message))
+                guard let calls = message.toolCalls, !calls.isEmpty else {
+                    return .assistant(message.content ?? "")
+                }
+                let structured = try calls.map { call -> MLXLMCommon.ToolCall in
+                    // Templates write names (and, in XML/GLM/Gemma grammars,
+                    // keys) unquoted: keep them inside the OpenAI charset so
+                    // history cannot forge call markup.
+                    guard ToolCallParser.isValidToolFunctionName(call.functionName) else {
+                        throw APIError(status: 400, message: "Tool history names are outside the tool-call grammar", code: "invalid_tools")
+                    }
+                    namesByCallID[call.id] = call.functionName
+                    return MLXLMCommon.ToolCall(
+                        function: .init(name: call.functionName, arguments: try argumentsObject(call, grammar: grammar)),
+                        id: call.id
+                    )
+                }
+                return .assistant(message.content ?? "", toolCalls: structured)
             case .tool:
-                return .tool(profile.renderToolResult(message))
+                let id = message.toolCallID ?? ""
+                return .tool(message.content ?? "", id: id, name: namesByCallID[id])
             }
         }
     }
-}
 
-private enum ToolPromptProfile {
-    case qwen3
-    case qwenNative(ToolSelectionPolicy.CallFormat)
-    case llama33
-
-    static func detect(modelID: String) -> ToolPromptProfile? {
-        // The added exact profiles follow their pinned native templates. Keep
-        // the existing Qwen3.6 and family-wide history contract unchanged.
-        if modelID != ToolSelectionPolicy.supportedNativeModel,
-           let profile = ToolSelectionPolicy.guaranteedCallProfile(modelID: modelID) {
-            return .qwenNative(profile.format)
-        }
-        if modelID.localizedCaseInsensitiveContains("qwen2.5") ||
-            modelID.localizedCaseInsensitiveContains("qwen3")
-        {
-            return .qwen3
-        }
-        if modelID.localizedCaseInsensitiveContains("llama-3.3") {
-            return .llama33
-        }
-        return nil
-    }
-
-    func renderAssistant(_ message: ChatMessage) throws -> String {
-        var rendered = message.content ?? ""
-        guard let toolCalls = message.toolCalls, !toolCalls.isEmpty else {
-            return rendered
-        }
-        if !rendered.isEmpty {
-            rendered += "\n"
-        }
-        rendered += try toolCalls.map(renderToolCall).joined(separator: "\n")
-        return rendered
-    }
-
-    func renderToolResult(_ message: ChatMessage) -> String {
-        let id = message.toolCallID ?? ""
-        let content = message.content ?? ""
-        switch self {
-        case .qwenNative:
-            // The native template wraps role=tool itself. Prewrapping here
-            // creates nested envelopes and exposes transport IDs to the model.
-            return content
-        case .qwen3:
-            return "<tool_response id=\"\(escapeAttribute(id))\">\n\(content)\n</tool_response>"
-        case .llama33:
-            return "<|start_header_id|>ipython<|end_header_id|>\n\(content)<|eot_id|>"
-        }
-    }
-
-    private func renderToolCall(_ call: MacProviderCore.ToolCall) throws -> String {
-        if case .qwenNative(let format) = self {
-            return try renderNativeToolCall(call, format: format)
-        }
-        let body = try toolCallBody(call)
-        switch self {
-        case .qwen3, .qwenNative:
-            return "<tool_call>\(body)</tool_call>"
-        case .llama33:
-            return "<|python_tag|>\(body)<|eom_id|>"
-        }
-    }
-
-    private func renderNativeToolCall(_ call: MacProviderCore.ToolCall, format: ToolSelectionPolicy.CallFormat) throws -> String {
-        let arguments: MacProviderCore.JSONValue
+    /// History arguments are request input: bounded strict JSON objects.
+    private static func argumentsObject(_ call: MacProviderCore.ToolCall, grammar: ToolCallGrammar?) throws -> [String: MLXLMCommon.JSONValue] {
+        let parsed: MacProviderCore.JSONValue
         do {
-            arguments = try StrictJSONParser.parse(call.arguments)
+            parsed = try StrictJSONParser.parse(call.arguments)
         } catch {
-            // History is request input, not generated output. In particular,
-            // the parser's output-depth error must not claim inference ran.
+            // The parser's output-depth error must not claim inference ran.
             throw APIError(status: 400, message: "Tool history arguments must be bounded strict JSON", code: "invalid_tools")
         }
-        guard case .object(let parameters) = arguments else {
+        guard case .object(let object) = parsed else {
             throw APIError(status: 400, message: "Tool history arguments must be an object", code: "invalid_tools")
         }
-        switch format {
-        case .jsonEnvelope:
-            let name = try MacProviderCore.JSONValue.string(call.functionName).deterministicJSONString()
-            return "<tool_call>\n{\"name\": \(name), \"arguments\": \(try arguments.deterministicJSONString())}\n</tool_call>"
-        case .functionXML:
-            let safeName: (String) -> Bool = { value in
-                !value.isEmpty && value.utf8.allSatisfy {
-                    (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || $0 == 95 || $0 == 45
-                }
-            }
-            guard safeName(call.functionName), parameters.keys.allSatisfy(safeName) else {
-                throw APIError(status: 400, message: "Tool history names are outside the native XML grammar", code: "invalid_tools")
-            }
-            var rendered = "<tool_call>\n<function=\(call.functionName)>\n"
-            for key in parameters.keys.sorted() {
-                guard let value = parameters[key] else { continue }
-                let text: String
-                if case .string(let string) = value { text = string }
-                else { text = try value.deterministicJSONString() }
-                rendered += "<parameter=\(key)>\n\(text)\n</parameter>\n"
-            }
-            return rendered + "</function>\n</tool_call>"
+        // Gemma 4 writes nested object keys unquoted too, so every depth is
+        // held to the charset there; other templates quote nested keys.
+        guard object.keys.allSatisfy(ToolCallParser.isValidToolParameterName),
+              grammar != .gemma4 || nestedKeysAreSafe(parsed) else {
+            throw APIError(status: 400, message: "Tool history names are outside the tool-call grammar", code: "invalid_tools")
+        }
+        return object.mapValues(templateValue)
+    }
+
+    private static func nestedKeysAreSafe(_ value: MacProviderCore.JSONValue) -> Bool {
+        switch value {
+        case .object(let object):
+            return object.allSatisfy { ToolCallParser.isValidToolParameterName($0.key) && nestedKeysAreSafe($0.value) }
+        case .array(let array):
+            return array.allSatisfy(nestedKeysAreSafe)
+        default:
+            return true
         }
     }
 
-    private func toolCallBody(_ call: MacProviderCore.ToolCall) throws -> String {
-        let argumentsObject: Any
-        if let data = call.arguments.data(using: .utf8),
-           let parsed = try? JSONSerialization.jsonObject(with: data),
-           let object = parsed as? [String: Any]
-        {
-            argumentsObject = object
-        } else {
-            argumentsObject = call.arguments
+    private static func templateValue(_ value: MacProviderCore.JSONValue) -> MLXLMCommon.JSONValue {
+        switch value {
+        case .object(let object): return .object(object.mapValues(templateValue))
+        case .array(let array): return .array(array.map(templateValue))
+        case .string(let string): return .string(string)
+        case .int(let int): return .int(int)
+        case .double(let double): return .double(double)
+        case .bool(let bool): return .bool(bool)
+        case .null: return .null
         }
-
-        let body: [String: Any]
-        switch self {
-        case .qwen3, .qwenNative:
-            body = [
-                "name": call.functionName,
-                "arguments": argumentsObject,
-                "id": call.id,
-                "type": "function",
-            ]
-        case .llama33:
-            body = [
-                "name": call.functionName,
-                "parameters": argumentsObject,
-                "id": call.id,
-                "type": "function",
-            ]
-        }
-        let data = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys, .withoutEscapingSlashes])
-        return String(decoding: data, as: UTF8.self)
-    }
-
-    private func escapeAttribute(_ value: String) -> String {
-        value
-            .replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "\"", with: "&quot;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
     }
 }
 
@@ -185,7 +132,7 @@ extension ChatMessage {
         case .assistant:
             return .assistant(content ?? "")
         case .tool:
-            return .tool(content ?? "")
+            return .tool(content ?? "", id: toolCallID)
         }
     }
 }

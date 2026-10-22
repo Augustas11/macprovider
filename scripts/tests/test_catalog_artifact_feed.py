@@ -84,6 +84,30 @@ def _load(name: str, relative: str):
 
 
 catalog_release = _load("catalog_release", "scripts/catalog-release.py")
+buyer_ux = _load("buyer_ux_conformance_for_catalog", "scripts/buyer_ux_conformance.py")
+_BUYER_UX_TMP = tempfile.TemporaryDirectory()
+BUYER_UX_PASSING = pathlib.Path(_BUYER_UX_TMP.name) / "buyer-ux-conformance.json"
+
+
+def write_buyer_ux_records(path: pathlib.Path, keys, failing=()) -> None:
+    """SPEC-023 §16.11: a conformance record per key; `failing` checks fail."""
+    records = {}
+    for key in keys:
+        checks = {name: {"status": "fail" if name in failing else "pass", "detail": "fixture"} for name in buyer_ux.ALL_CHECKS}
+        records[key] = {"model": key, "gateway": "https://api.malibu.tech/v1", "checked_at": "2026-10-22T00:00:00Z",
+                        "checks": checks, "capabilities": buyer_ux.capabilities_from_checks(checks)}
+    path.write_text(json.dumps({"schema_version": buyer_ux.SCHEMA, "records": records}, indent=2, sort_keys=True))
+
+
+def setUpModule():
+    write_buyer_ux_records(BUYER_UX_PASSING, ["qwen3-8b"])
+    global _BUYER_UX_SAVED
+    _BUYER_UX_SAVED = catalog_release.BUYER_UX_CONFORMANCE_PATH
+    catalog_release.BUYER_UX_CONFORMANCE_PATH = BUYER_UX_PASSING
+
+
+def tearDownModule():
+    catalog_release.BUYER_UX_CONFORMANCE_PATH = _BUYER_UX_SAVED
 compatibility_set = _load("compatibility_set_manifest", "scripts/compatibility-set-manifest.py")
 SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
@@ -4269,6 +4293,19 @@ class IntakeDecisionManifestTest(unittest.TestCase):
         entry["coldstart_slot_used"] = True
         self.thresholds["INTAKE_COLDSTART_SLOTS"] = 0
         self.rejects(self.manifest([entry]), "exceed INTAKE_COLDSTART_SLOTS")
+
+    def test_promotion_requires_a_passing_buyer_ux_conformance_record(self):
+        """#2107: no record, or a failed advertised capability, refuses the promotion."""
+        missing = pathlib.Path(_BUYER_UX_TMP.name) / "absent.json"
+        failing = pathlib.Path(_BUYER_UX_TMP.name) / "failing.json"
+        write_buyer_ux_records(failing, [self.KEY], failing=("stream_tool_deltas",))
+        manifest = self.manifest([self.promote_entry()])
+        previous = catalog_release.candidate_admission_tiers(CANDIDATE_OBJ)
+        previous[self.KEY] = 1  # listed before → promoted now
+        self.clear_sources()
+        for path, fragment in ((missing, "no record for"), (failing, "advertises tools but its checks failed")):
+            with patch.object(catalog_release, "BUYER_UX_CONFORMANCE_PATH", path):
+                self.rejects(manifest, fragment, previous_tiers=previous)
 
     def test_promotion_rules(self):
         self.clear_sources()

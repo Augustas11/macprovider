@@ -47,10 +47,18 @@ public struct ChatCompletionRequest: Sendable {
     public let topK: Int
     public let repetitionPenalty: Double
     public let stream: Bool
-    /// OpenAI `parallel_tool_calls`. `nil` (omitted) and `false` are serial:
-    /// stop generation after the first complete valid tool. `true` keeps
-    /// multi-call collection. Pi and most agent loops omit this field.
+    /// OpenAI `parallel_tool_calls`. Omitted (`nil`) and `true` collect every
+    /// call, as OpenAI does (SPEC-018 v0.3.0); `false` is serial: generation
+    /// stops after the first complete valid tool call.
     public let parallelToolCalls: Bool?
+    /// OpenAI `reasoning_effort`, passed verbatim to the chat template as
+    /// `reasoning_effort` (SPEC-018 §3.12). nil when omitted.
+    public let reasoningEffort: String?
+    /// Output facts the runtime resolves when it renders the prompt (tool
+    /// grammar, open think block). Never parsed from the request body; shared
+    /// by every copy of this request so later stages see what rendering found.
+    public let outputState: RequestOutputState
+    public var outputTraits: RequestOutputTraits { outputState.traits }
     public let stop: [String]
     public let presencePenalty: Double
     public let frequencyPenalty: Double
@@ -83,10 +91,22 @@ public struct ChatCompletionRequest: Sendable {
         RequestValidation.isRequestAcceptedToolCallID(value)
     }
 
-    /// Serial agent turns (omitted/`false`) stop after the first complete tool.
+    /// Only an explicit `parallel_tool_calls: false` stops after the first
+    /// complete tool call; omitted follows the OpenAI default (parallel).
     public var stopsAfterFirstCompleteToolCall: Bool {
-        parallelToolCalls != true
+        parallelToolCalls == false
     }
+
+    /// The `reasoning_effort` the chat template sees: the buyer's value, or
+    /// `low` when tools are declared and the buyer sent none (agent turns
+    /// should reach the call quickly), else nil (template default).
+    public var templateReasoningEffort: String? {
+        if let reasoningEffort { return reasoningEffort }
+        guard case .array(let tools)? = promptSource.tools, !tools.isEmpty else { return nil }
+        return "low"
+    }
+
+    public static let acceptedReasoningEfforts: Set<String> = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
 
     public static func parse(data: Data) throws -> ChatCompletionRequest {
         guard data.count <= RequestValidation.rawBodyByteCap else {
@@ -178,6 +198,15 @@ public struct ChatCompletionRequest: Sendable {
         }
 
         let seed = try optionalInt(dict["seed"], key: "seed")
+        let reasoningEffort: String?
+        switch dict["reasoning_effort"] {
+        case nil, is NSNull:
+            reasoningEffort = nil
+        case let value as String where acceptedReasoningEfforts.contains(value):
+            reasoningEffort = value
+        default:
+            throw APIError(status: 400, message: "reasoning_effort must be one of none, minimal, low, medium, high, xhigh, max", code: "invalid_request", param: "reasoning_effort")
+        }
         if let user = dict["user"], !(user is NSNull), !(user is String) {
             throw APIError(status: 400, message: "user must be a string", code: "invalid_request")
         }
@@ -228,7 +257,9 @@ public struct ChatCompletionRequest: Sendable {
             containsNonTextMessageContentPart: containsNonTextMessageContentPart,
             ingestProvenance: .unknown,
             topK: topK,
-            repetitionPenalty: repetitionPenalty
+            repetitionPenalty: repetitionPenalty,
+            reasoningEffort: reasoningEffort,
+            outputState: RequestOutputState()
         )
     }
 
@@ -259,7 +290,9 @@ public struct ChatCompletionRequest: Sendable {
             containsNonTextMessageContentPart: containsNonTextMessageContentPart,
             ingestProvenance: ingestProvenance,
             topK: topK,
-            repetitionPenalty: repetitionPenalty
+            repetitionPenalty: repetitionPenalty,
+            reasoningEffort: reasoningEffort,
+            outputState: outputState
         )
     }
 
@@ -298,7 +331,9 @@ public struct ChatCompletionRequest: Sendable {
             containsNonTextMessageContentPart: containsNonTextMessageContentPart,
             ingestProvenance: ingestProvenance,
             topK: topK,
-            repetitionPenalty: repetitionPenalty
+            repetitionPenalty: repetitionPenalty,
+            reasoningEffort: reasoningEffort,
+            outputState: outputState
         )
     }
 
@@ -326,7 +361,9 @@ public struct ChatCompletionRequest: Sendable {
             containsNonTextMessageContentPart: containsNonTextMessageContentPart,
             ingestProvenance: ingestProvenance,
             topK: topK,
-            repetitionPenalty: repetitionPenalty
+            repetitionPenalty: repetitionPenalty,
+            reasoningEffort: reasoningEffort,
+            outputState: outputState
         )
     }
 
@@ -357,7 +394,9 @@ public struct ChatCompletionRequest: Sendable {
             containsNonTextMessageContentPart: containsNonTextMessageContentPart,
             ingestProvenance: ingestProvenance,
             topK: topK,
-            repetitionPenalty: repetitionPenalty
+            repetitionPenalty: repetitionPenalty,
+            reasoningEffort: reasoningEffort,
+            outputState: outputState
         )
     }
 
@@ -387,7 +426,9 @@ public struct ChatCompletionRequest: Sendable {
             containsNonTextMessageContentPart: containsNonTextMessageContentPart,
             ingestProvenance: provenance,
             topK: topK,
-            repetitionPenalty: repetitionPenalty
+            repetitionPenalty: repetitionPenalty,
+            reasoningEffort: reasoningEffort,
+            outputState: outputState
         )
     }
 
@@ -469,8 +510,12 @@ public struct ChatCompletionRequest: Sendable {
         containsNonTextMessageContentPart: Bool,
         ingestProvenance: KVIngestProvenance = .unknown,
         topK: Int = 0,
-        repetitionPenalty: Double = 1
+        repetitionPenalty: Double = 1,
+        reasoningEffort: String? = nil,
+        outputState: RequestOutputState = RequestOutputState()
     ) {
+        self.reasoningEffort = reasoningEffort
+        self.outputState = outputState
         self.model = model
         self.messages = messages
         self.maxTokens = maxTokens

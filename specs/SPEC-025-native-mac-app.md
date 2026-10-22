@@ -1,6 +1,16 @@
 # SPEC-025 — Native Mac App (signed `.dmg`, native Mac app with menu-bar presence)
 
-Status: DRAFT v0.39.0 · Owner: @Augustas11 · Target: 2026 Q3
+Status: DRAFT v0.40.0 · Owner: @Augustas11 · Target: 2026 Q3
+
+**Change log v0.40.0 (2026-10-22, Related: #2107):**
+- SPEC-025-R012: the Connected apps model picker lists only models whose
+  gateway `/v1/models` entry publishes `capabilities.tools: true` and at least
+  32,768 tokens of context (coding agents send long system prompts and tool
+  schemas); no capability is inferred when the metadata is absent. The
+  endpoint test is a bounded tool round trip on the selected API and model:
+  the model must call the declared `get_magic_number` tool, then answer after
+  the call and its result are sent back. It remains a gateway test, not
+  evidence that the external client works.
 
 **Change log v0.39.0 (2026-10-21):**
 Exact Qwen OpenCode model options carry the full recommended sampling profile
@@ -926,7 +936,11 @@ projections (SPEC-044-R004), colour never the only signal.
   mechanics, managed-profile scope and override caveats MAY sit behind a
   Details disclosure. Loading gateway models MUST require a saved buyer key,
   MUST run after a key is saved, MUST show its error beside the load action,
-  and MUST say when the gateway serves no models. Do not claim relay-blind Responses or
+  and MUST say when the gateway serves no models. The picker MUST list only
+  models whose published metadata declares `capabilities.tools: true` and at
+  least 32,768 context tokens (v0.40.0). The endpoint test MUST be a bounded
+  tool round trip: one request declaring a tool the model must call, then one
+  sending that call and its result back, which must end in a non-empty answer. Do not claim relay-blind Responses or
   Messages. A gateway test is not evidence that an external client works.
   The coordinator's authoritative no-self-routing contract applies to buyer
   requests independently of any client configuration or exclusion hint.

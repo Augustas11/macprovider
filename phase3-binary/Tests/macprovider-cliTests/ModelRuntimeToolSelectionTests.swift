@@ -8,7 +8,7 @@ final class ModelRuntimeToolSelectionTests: XCTestCase {
         try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: [
             "model": model,
             "messages": [["role": "user", "content": "Look up 3"]],
-            "stream": stream, "tool_choice": choice, "max_tokens": 100,
+            "stream": stream, "tool_choice": choice, "max_tokens": 100, "parallel_tool_calls": false,
             "tools": [["type": "function", "function": ["name": "lookup", "parameters": [
                 "type": "object", "properties": ["id": ["type": "integer"]],
                 "required": ["id"], "additionalProperties": false,

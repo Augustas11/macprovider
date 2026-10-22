@@ -9,7 +9,7 @@
     {
       "spec_id": "SPEC-001",
       "title": "Phase 3 Binary: Mac Provider Inference CLI",
-      "version": "1.9.41",
+      "version": "1.9.42",
       "path": "specs/SPEC-001-phase3-binary.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -35,7 +35,7 @@
     {
       "spec_id": "SPEC-002",
       "title": "Phase 4 Coordinator: Mac Provider Request Router",
-      "version": "1.6.23",
+      "version": "1.6.24",
       "path": "specs/SPEC-002-coordinator.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -152,7 +152,7 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.62",
+      "version": "0.9.63",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -504,7 +504,7 @@
     {
       "spec_id": "SPEC-018",
       "title": "Agentic tool calling (provider-side response synthesis)",
-      "version": "0.2.17",
+      "version": "0.3.0",
       "path": "specs/SPEC-018-agentic-tool-calling.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -535,7 +535,7 @@
     {
       "spec_id": "SPEC-019",
       "title": "Structured output (`response_format: json_schema`)",
-      "version": "0.3.1",
+      "version": "0.3.2",
       "path": "specs/SPEC-019-structured-output.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -665,7 +665,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.22.30",
+      "version": "v0.22.31",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -725,7 +725,7 @@
     {
       "spec_id": "SPEC-025",
       "title": "Native Mac App (signed `.dmg`, native Mac app with menu-bar presence)",
-      "version": "v0.39.0",
+      "version": "v0.40.0",
       "path": "specs/SPEC-025-native-mac-app.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1270,20 +1270,13 @@
       "production_status": "not-deployed",
       "last_reconciled_commit": "2a27f5679bf6eb5ebec6371e75870be8fc9ada1b",
       "last_reconciled_at": "2026-08-24",
-      "evidence": [
-        {
-          "artifact": "sha256:b27fdc59447a4641ae74f9d72bca76ca741be95ad07e4ef3b8eec189d18e6fcc",
-          "source": "journeys/evidence/trusted-pool-layer2-20260824T011501Z.spec-042-r002-spec-042-r005-spec-042-r006-spec-042-r010.journey-result.signed.json",
-          "captured_at": "2026-08-24",
-          "expires_at": "2026-08-31"
-        }
-      ],
+      "evidence": [],
       "requirement_id_migration": "complete",
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "The pool control plane is a new authority domain (`pool-control-plane`). Current merged code contains substantial default-off pool plumbing and SPEC-043 creator-onboarding enablement, so this is no longer a zero-implementation skeleton. A SPEC-042-owned non-promoting signed journey-result path plus local buyer-server journey harness now exists for R002/R005/R006/R010, local restrictive lifecycle admin controls and signed emergency controls now pause/drain/retire pools fail-closed without creating a second activation path, signed provider-bound `revoke_immediate` controls now append durable revocation, advance the route-generation fence, notify active provider-specific revocation watchers without polling, cancel active uncommitted dispatch attempts for that provider, preserve gateway no-charge/pass-through semantics for marker-proven no-prior-dispatch `pool_state_stale`, and preserve settlement when a provider row may already have been credited or a prior provider-dispatched retry already occurred. The buyer dispatch path now records active pool deliveries in the live trustpool registry, local/signed `retired` lifecycle controls require that registry to prove delivery drain before committing retirement, authorized stale routeable snapshots now fail closed as retryable `pool_policy_stale` rather than generic availability, manifest-derived settlement mode now fails closed when a pool requires enforce while the coordinator's effective settlement mode is observe with a dispatch-boundary recheck to cover hot reloads, and production-labeled promotion is default-blocked unless `trusted_pools.production_activation` supplies an allowed launch environment, signed-launch evidence digest, and matching root-custody disclosure hash. The promotion path can reactivate paused candidate pools only after rerunning local activation preflight, model allowlists are locally enforced at route time from the signed manifest-derived pool snapshot, and selected pool providers must positively advertise `trusted_pool_v1` before pool traffic can dispatch to them. Signed Layer 2 request-path evidence is committed for R002/R005/R006/R010, but it is intentionally evidence-only and does not promote full requirement conformance. SPEC-042 is partial and still not-deployed until accepted-manifest projection is audited in production migration evidence, production predicate evidence closes, SPEC-042-owned closed schemas/retention matrix promotion closes, production activation evidence/rollout proof exists, and the launch audit reaches 0 Critical / 0 High / 0 Medium. This is a Layer 2 (administrative trust) contract; it does NOT define cryptographic privacy, which is owned by SPEC-041 and future Layer 3 SPECs."
+        "rationale": "Pool control plane is a new authority domain (pool-control-plane). Current merged code contains substantial default-off pool plumbing and SPEC-043 creator-onboarding enablement, including pool_id threading, manifest crypto primitives, route isolation, labeled route snapshots, buyer/public policy and status surfaces, claim-control rejection, an MVP retention-policy registry, local restrictive lifecycle admin controls, paused candidate-pool reactivation through the promotion preflight gate, local route-time model-allowlist enforcement from signed manifest-derived pool snapshots, local route/dispatch-time settlement observe-vs-enforce gating from signed manifest-derived pool snapshots, default-off production activation config/store promotion gating, provider-side positive pool-capability advertisement/gating for pool-selected traffic, signed emergency pause/drain/retire controls, signed provider-bound revoke_immediate controls that durably revoke the target provider, advance the route-generation fence, cancel active uncommitted dispatch attempts for that provider, live routeability/generation-bound delivery-drain proof for retirement, and a local buyer-server journey harness. The Layer 2 signed envelope for R002/R005/R006/R010 expired 2026-08-31 and was cleared from evidence[]; recapture is required before any promotion. SPEC-042 is partial and not-deployed. Remaining blockers are production durable-store evidence, remaining production predicate coverage, SPEC-042-owned schema/retention promotion, production activation evidence/rollout proof, and five-lane audit. Layer 2 administrative trust only; cryptographic privacy is SPEC-041/Layer 3."
       }
     },
     {
@@ -1323,7 +1316,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "SPEC-043 is the SPEC-042A enablement profile for approved external creators launching single-operator Trusted Pools. Isolated-candidate promoter consume of sibling spec043-ppt-20260827T032524Z-1 filled SPEC-043-R001 through R012; that fill is not a live Trusted Pool launch. Spec-level implementation_status stays partial, production_status stays not-deployed, and spec-level evidence[] stays empty. The first MVP code slices now have a default-off coordinator durable trustpool event ledger, durable creator approval records, replay-checked operator admin event append surface for candidate/restrictive state, creator-gated root nonce issuance, creator-gated positive pool mutations, boot reconstruction into the routing registry, revision-fenced live registry refresh after accepted admin or approval mutations, route-time approval expiry checks, background routeability expiry refresh, coordinator-side buyer authorization enforcement, signed root registration, signed manifest acceptance with candidate overclaim rejection, gateway-authenticated buyer policy/status surfaces with resolved MVP retention-policy registry fields, public-announcement approvals bound to operation id, pool id, non-candidate launch environment, manifest digest, reviewed distribution artifact digest, and current creator approval state, rate-limited and globally work-limited public policy/status endpoints that serve redacted documents only while those approval bindings remain current and the document `fresh_until_utc` is still valid, an auditable public-visibility generation and immutable public-announcement history, an explicit operator-only candidate promotion path that preflights local activation prerequisites including registered retention-policy ids, lifecycle fail-closed tests including unresolved retention policies, operator-only admin API mutations for public-announcement/reviewed-artifact records, an environment-key-only CLI for nonce issuance, reviewed-artifact/public-announcement mutations, and pool health/audit/distribution exports, a bounded bearer-token creator administration surface for admitted creators to inspect their own approval/pools and perform allowlisted candidate operations, a protected manual signer path plus governance validator for `JOURNEY-TRUSTED-POOL-CREATOR-MVP` evidence artifacts, a closed PoolPromotionTransitionV1 production-promotion artifact plus append-only spec043-promotion-ledger, and a registered production-release approver key. Raw operator admin events cannot activate a routeable pool. Remaining before any live announcement: production reviewed-artifact lifecycle ownership, custody-class production gates, full production activation gates, on-call readiness, production timing-floor remeasure, and production rollout proof."
+        "rationale": "SPEC-043 is the SPEC-042A enablement profile for approved external creators launching single-operator Trusted Pools. Isolated-candidate promoter consume of sibling spec043-ppt-20260827T032524Z-1 previously filled SPEC-043-R001 through R012, but that same-day evidence expired on 2026-08-27; those rows are pending until a fresh protected signed candidate journey and promotion transition are consumed. That fill was not a live Trusted Pool launch. Spec-level implementation_status stays partial, production_status stays not-deployed, and spec-level evidence[] stays empty. The first MVP code slices now have a default-off coordinator durable trustpool event ledger, durable creator approval records, replay-checked operator admin event append surface for candidate/restrictive state, creator-gated root nonce issuance, creator-gated positive pool mutations, boot reconstruction into the routing registry, revision-fenced live registry refresh after accepted admin or approval mutations, route-time approval expiry checks, background routeability expiry refresh, coordinator-side buyer authorization enforcement, signed root registration, signed manifest acceptance with candidate overclaim rejection, gateway-authenticated buyer policy/status surfaces with resolved MVP retention-policy registry fields, public-announcement approvals bound to operation id, pool id, non-candidate launch environment, manifest digest, reviewed distribution artifact digest, and current creator approval state, rate-limited and globally work-limited public policy/status endpoints that serve redacted documents only while those approval bindings remain current and the document fresh_until_utc is still valid, an auditable public-visibility generation and immutable public-announcement history, an explicit operator-only candidate promotion path that preflights local activation prerequisites including registered retention-policy ids, lifecycle fail-closed tests including unresolved retention policies, operator-only admin API mutations for public-announcement/reviewed-artifact records, an environment-key-only CLI for nonce issuance, reviewed-artifact/public-announcement mutations, and pool health/audit/distribution exports, a bounded bearer-token creator administration surface for admitted creators to inspect their own approval/pools and perform allowlisted candidate operations, a protected manual signer path plus governance validator for JOURNEY-TRUSTED-POOL-CREATOR-MVP evidence artifacts, a closed PoolPromotionTransitionV1 production-promotion artifact plus append-only spec043-promotion-ledger, and a registered production-release approver key. Raw operator admin events cannot activate a routeable pool. Remaining before any live announcement: production reviewed-artifact lifecycle ownership, custody-class production gates, full production activation gates, on-call readiness, production timing-floor remeasure, and production rollout proof."
       }
     },
     {
@@ -2435,7 +2428,7 @@
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:hasCompletedValidToolCall"
       ],
       "tests": [
-        "phase3-binary/Tests/macprovider-cliTests/ChatCompletionRequestTests.swift:testOmittedParallelToolCallsIsSerial",
+        "phase3-binary/Tests/macprovider-cliTests/ChatCompletionRequestTests.swift:testOmittedParallelToolCallsIsParallel",
         "phase3-binary/Tests/macprovider-cliTests/NativeToolCallStreamEmitterTests.swift:final class NativeToolCallStreamEmitterTests",
         "phase3-binary/Tests/macprovider-cliTests/SerialToolTurnTests.swift:final class SerialToolTurnTests"
       ],

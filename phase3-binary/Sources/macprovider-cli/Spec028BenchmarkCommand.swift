@@ -197,7 +197,7 @@ struct Spec028BenchmarkCommand: AsyncParsableCommand {
                 try await runtime.preflight(request, with: handle)
                 completion = try await runtime.stream(request, with: handle) { chunk in
                     switch chunk {
-                    case .content, .toolCallDelta:
+                    case .content, .toolCallDelta, .reasoning:
                         chunkCounter.increment()
                     }
                 }

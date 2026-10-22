@@ -110,7 +110,18 @@ func TestOpenRouterShapedOverContextIsClean413(t *testing.T) {
 // before dispatch) needs catalog resolution and is covered by coordinator
 // unit tests.
 func TestOpenRouterShapedToolRoundtripIsServed(t *testing.T) {
-	s := newScenario(t, scenarioOpts{seedAccount: true})
+	// #2107: Llama 3.2 tool requests reach only provider CLIs that parse its
+	// grammar (1.8.262+); an older provider is refused before dispatch.
+	old := newScenario(t, scenarioOpts{seedAccount: true, providerSetup: func(fp *fakeProvider) {
+		fp.binaryVersion = "1.8.261"
+	}})
+	oldBody := `{"model":"llama-3.2-3b-instruct","max_tokens":32,"tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object"}}}],"messages":[{"role":"user","content":"weather?"}]}`
+	if status, _, respBody := old.chatRequest(nil, oldBody); status != http.StatusServiceUnavailable || !strings.Contains(string(respBody), "tool_grammar_provider_unavailable") {
+		t.Fatalf("pre-#2107 provider: status=%d body=%s want 503 tool_grammar_provider_unavailable", status, string(respBody))
+	}
+	s := newScenario(t, scenarioOpts{seedAccount: true, providerSetup: func(fp *fakeProvider) {
+		fp.binaryVersion = "1.8.262"
+	}})
 	body := `{"model":"llama-3.2-3b-instruct","max_tokens":32,` +
 		`"tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}}],` +
 		`"messages":[` +

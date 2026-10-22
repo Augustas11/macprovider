@@ -553,7 +553,7 @@ final class ConnectedAppsTests: XCTestCase {
         await store.waitForOperation()
         XCTAssertTrue(store.hasBuyerKey)
         XCTAssertEqual(loads, 1)
-        XCTAssertEqual(store.modelsMessage, "No models are being served right now. Try again later.")
+        XCTAssertEqual(store.modelsMessage, ConnectedAppsStore.noModelsServed)
         XCTAssertTrue(store.modelsLoadFailed)
 
         served = [model]
@@ -605,12 +605,53 @@ final class ConnectedAppsTests: XCTestCase {
     func testSelectedAPITestBodiesAreBounded() {
         let responses = ConnectedGatewayClient.testBody(api: .responses, model: model.id)
         XCTAssertEqual(responses["model"] as? String, model.id)
-        XCTAssertEqual(responses["max_output_tokens"] as? Int, 16)
+        XCTAssertEqual(responses["max_output_tokens"] as? Int, ConnectedGatewayClient.testMaxTokens)
         XCTAssertEqual(responses["store"] as? Bool, false)
         XCTAssertNil(responses["messages"])
+        XCTAssertEqual((responses["tools"] as? [[String: Any]])?.first?["name"] as? String, ConnectedGatewayClient.testToolName)
         let chat = ConnectedGatewayClient.testBody(api: .chatCompletions, model: model.id)
-        XCTAssertEqual(chat["max_tokens"] as? Int, 16)
+        XCTAssertEqual(chat["max_tokens"] as? Int, ConnectedGatewayClient.testMaxTokens)
         XCTAssertNotNil(chat["messages"])
+        XCTAssertNotNil(chat["tools"])
+    }
+
+    /// #2107: the endpoint test is a tool round trip; step 1 must return the
+    /// declared call, step 2 sends it back with its result.
+    func testEndpointTestIsAToolRoundTrip() throws {
+        XCTAssertEqual(try ConnectedGatewayClient.toolCallID(Data(#"{"choices":[{"finish_reason":"tool_calls","message":{"content":null,"tool_calls":[{"id":"call_abc","type":"function","function":{"name":"get_magic_number","arguments":"{}"}}]}}]}"#.utf8), api: .chatCompletions), "call_abc")
+        XCTAssertEqual(try ConnectedGatewayClient.toolCallID(Data(#"{"status":"completed","output":[{"type":"function_call","call_id":"call_xyz","name":"get_magic_number","arguments":"{}"}]}"#.utf8), api: .responses), "call_xyz")
+        for fixture in [
+            #"{"choices":[{"finish_reason":"stop","message":{"content":"42"}}]}"#,
+            #"{"choices":[{"finish_reason":"tool_calls","message":{"tool_calls":[{"id":"call_abc","function":{"name":"other"}}]}}]}"#,
+            #"{"error":{"code":"tools_unsupported_for_model"}}"#,
+        ] {
+            XCTAssertThrowsError(try ConnectedGatewayClient.toolCallID(Data(fixture.utf8), api: .chatCompletions))
+        }
+        let chat = ConnectedGatewayClient.toolResultBody(api: .chatCompletions, model: model.id, callID: "call_abc")
+        let messages = try XCTUnwrap(chat["messages"] as? [[String: Any]])
+        XCTAssertEqual(messages.count, 3)
+        XCTAssertEqual(messages[2]["tool_call_id"] as? String, "call_abc")
+        XCTAssertEqual(messages[2]["content"] as? String, ConnectedGatewayClient.testToolResult)
+        let responses = ConnectedGatewayClient.toolResultBody(api: .responses, model: model.id, callID: "call_xyz")
+        let input = try XCTUnwrap(responses["input"] as? [[String: Any]])
+        XCTAssertEqual(input.last?["type"] as? String, "function_call_output")
+        XCTAssertEqual(input.last?["call_id"] as? String, "call_xyz")
+    }
+
+    /// #2107 D6/D10: the picker offers only tool-capable models with enough
+    /// context, from published metadata.
+    func testPickerListsOnlyToolCapableModelsWithAgentContext() throws {
+        let data = Data(#"""
+        {"data":[
+          {"id":"glm","max_context_tokens":65536,"capabilities":{"tools":true,"tool_choice":["auto","none"],"reasoning":true,"response_format":true,"vision":false,"context_length":65536}},
+          {"id":"small","max_context_tokens":10496,"capabilities":{"tools":true,"tool_choice":["auto"],"reasoning":false,"response_format":true,"vision":false,"context_length":10496}},
+          {"id":"vl","max_context_tokens":65536,"capabilities":{"tools":false,"tool_choice":[],"reasoning":false,"response_format":true,"vision":true,"context_length":65536}},
+          {"id":"unknown","max_context_tokens":65536}
+        ]}
+        """#.utf8)
+        let decoded = try ConnectedGatewayClient.decodeModels(data)
+        XCTAssertEqual(decoded.count, 4)
+        XCTAssertEqual(ConnectedGatewayClient.agentReady(decoded).map(\.id), ["glm"])
     }
 
     func testModelsRequireRealMetadataAndDoNotInferAliasCapabilities() throws {

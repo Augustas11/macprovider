@@ -1,8 +1,8 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.41 (2026-10-22, shard group member self-health message)
+**Version:** 1.9.42 (2026-10-22, shard group member self-health message)
 
-**Change log v1.9.41 (2026-10-22, Related: #2084):**
+**Change log v1.9.42 (2026-10-22, Related: #2084):**
 Registers one more SPEC-051 shard-group message, owned by SPEC-051-R029: the
 member message `shard_member_health`, which a session advertising
 `shard_member_v1` sends once its `shard_member_hello` is accepted, on its
@@ -10,7 +10,7 @@ heartbeat cadence and on a change of its health or links. The coordinator
 consumes it for group availability (SPEC-051-R015) and sends no answer. A
 session that advertises neither shard capability is unaffected.
 
-**Change log v1.9.40 (2026-10-22, Related: #2084):**
+**Change log v1.9.41 (2026-10-22, Related: #2084):**
 Registers the SPEC-051 shard-group extensions to this wire protocol. Their
 grammar and semantics are owned by SPEC-051-R029, the convention SPEC-036 uses
 for its scoring messages. Two `auth_request.tier2_capabilities` booleans,
@@ -22,6 +22,19 @@ only, the `group_attestation` member of `inference_response_end`
 (SPEC-051-R019) and the terminal status `error_shard_group_failed`
 (SPEC-051-R021, SPEC-051-R022). A session that advertises neither capability
 is unaffected. No trust-tier, settlement or hardware-acceptance claim is added.
+
+**Change log v1.9.40 (2026-10-22, Related: #2107):**
+The provider implements SPEC-018 v0.3.0 on every serving path (serial,
+streaming, continuous batching, native MTP rows): the tool-call grammar comes
+from the loaded chat template (mlx-swift-lm `ToolCallFormat`), with a
+catalog-family fallback; tool history reaches the chat template as structured
+messages; a prompt that leaves `<think>` open splits the output into
+`reasoning_content` (streamed as `delta.reasoning_content`) and content, with
+`usage.completion_tokens_details.reasoning_tokens`; `reasoning_effort` reaches
+the template (default `low` with tools). Chat responses carry prose written
+before a tool call as `content`. Speculative (draft-model) decoding is not
+used for a reasoning-split request. A chat template `raise_exception` during
+prompt rendering is a 400 `invalid_request`.
 
 **Change log v1.9.39 (2026-10-19, Related: #2054):**
 Amends `SPEC-001-R011` and the coordinator HTTP-forwarding wire contract.

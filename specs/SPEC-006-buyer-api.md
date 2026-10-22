@@ -1,7 +1,14 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.62 (2026-10-21, explicit native sampling extensions)
+**Version:** 0.9.63 (2026-10-22, agentic-client compatibility: Messages beta/thinking, Responses custom tools, /v1/models capabilities, mid-stream reason codes; #2107)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.17, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.63 (2026-10-22, #2107 — agentic coding clients):**
+- §5.4a `/v1/messages`: `anthropic-beta` headers and unknown top-level keys are accepted and ignored (never forwarded); a case variant of a known key stays a 400. `thinking` is accepted: `enabled` maps to `reasoning_effort` (`budget_tokens` < 4096 `low`, < 16384 `medium`, else `high`), `disabled` to `low`, `adaptive` to the template default. With thinking enabled, provider `reasoning_content` becomes a leading `thinking` block (streamed as `thinking_delta`, closed with an empty `signature_delta`); without it reasoning is dropped. Assistant-history `thinking`/`redacted_thinking` blocks are accepted and dropped; `cache_control` is accepted on `tool_use`/`tool_result` blocks. `tool_choice: {"type":"any"}` maps to `required`.
+- `/v1/responses`: `custom` tools (also inside `namespace`) are served as a function with one string argument `input` (a declared grammar is shown in the description, not enforced); `custom_tool_call`/`custom_tool_call_output` history round-trips; a call to a custom tool is returned as a `custom_tool_call` item (streamed whole). `local_shell` and `local_shell_call` items are refused with 400 `unsupported_tool_type`. OpenAI-hosted tools (`web_search`, `file_search`, `code_interpreter`, `image_generation`, `mcp`, …) are not offered to the model and are named in the `X-Malibu-Unserved-Tools` response header. Prior `reasoning` items are dropped; other unknown input items are a 400. `reasoning.effort` is forwarded as `reasoning_effort`.
+- §5.3 `/v1/models`: each model entry carries `capabilities` (`tools`, `tool_choice` modes, `reasoning`, `response_format`, `vision`, `context_length`) and `supported_parameters`, derived from the predicates the coordinator and provider enforce (SPEC-018 §3.1/§3.11/§3.12). `tool_choice` lists `auto` plus the modes an eligible provider declares; `tools` for a family an older provider did not parse, and `reasoning`, need a provider CLI at 1.8.262 or later, so metadata never runs ahead of the fleet. The gateway re-emits both after type-checking and drops malformed values.
+- `/v1/responses` named `tool_choice` may select a `custom` tool (`{"type":"custom","name":…}`).
+- §17: a post-commit provider failure terminal SSE frame carries `error.reason`, the provider's bounded snake_case end status (or `provider_disconnected`), and names it in the message, so a buyer can tell a context overflow from a crash. The code (`upstream_provider_error` at the gateway) and settlement are unchanged.
 
 **Change log v0.9.62 (2026-10-21, native sampling extensions, Related: #2054):**
 The existing authenticated chat contract defines validated explicit top-k and
@@ -2067,8 +2074,10 @@ Unsupported Anthropic-only features MUST be rejected before reservation or
 provider dispatch with an Anthropic-shaped error envelope that still carries
 the gateway extension fields `code` and `retryable`. This includes image,
 document, or file content blocks; server tools; malformed or unsupported
-`tool_result.content[]` blocks; `Anthropic-Beta` headers or body beta fields;
-`thinking`; `top_k`; and unknown content-block types.
+`tool_result.content[]` blocks; `top_k`; and unknown content-block types.
+**v0.9.63:** `Anthropic-Beta` headers, body beta fields and other unknown
+top-level keys are accepted and ignored; `thinking` is supported (change log
+v0.9.63).
 
 For non-streaming responses, OpenAI chat choices MUST be converted to
 Anthropic `message` envelopes with text and `tool_use` content blocks. For
