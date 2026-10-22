@@ -5472,7 +5472,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
     }
 
     /// #2100: at the 2048-token `glm5_next` chunk an active row still takes a
-    /// full lockstep window (16 steps) between the chunks of a long prompt.
+    /// full lockstep window (16 steps) between the chunks of a long prompt
+    /// (6,144 tokens: three full chunks).
     func testGLMPromptChunkKeepsActiveRowsDecodingBetweenChunks() async throws {
         let decodeGate = AsyncGate()
         let backend = WindowRecordingBackend(
@@ -5518,7 +5519,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             try await scheduler.submit(.init(
                 id: "long",
                 conversationKey: "",
-                promptTokens: Array(1 ... 4_100),
+                promptTokens: Array(1 ... 6_144),
                 maxOutputTokens: 2,
                 temperature: 0.0,
                 topP: 1.0
@@ -5532,7 +5533,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(activeResult.outputTokens, Array(100 ..< 164))
         XCTAssertEqual(longResult.outputTokens, [200, 201])
         let chunks = await backend.prefillChunks(id: "long")
-        XCTAssertEqual(chunks, [2_048, 2_048, 4])
+        XCTAssertEqual(chunks, [2_048, 2_048, 2_048])
         let windows = await backend.windowCalls()
         let whilePrefilling = windows.dropFirst().prefix { !$0.ids.contains("long") }
         XCTAssertGreaterThanOrEqual(whilePrefilling.filter { $0.ids == ["active"] && $0.steps == 16 }.count, 2)
