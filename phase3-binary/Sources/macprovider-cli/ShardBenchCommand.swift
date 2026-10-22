@@ -1266,7 +1266,7 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
     /// request's delivered count.
     private func runBatch(_ engine: ShardGroupEngine<Stage>, _ requests: [ShardGenerationRequest]) throws -> [ShardGenerationSummary] {
         let collector = ShardGenerationCollector(count: requests.count)
-        let ids = try engine.submit(requests, sink: collector.receive)
+        let ids = try engine.submit(requests) { collector.receive($0, $1) }
         let (summaries, errors) = collector.wait()
         guard errors.isEmpty else {
             var delivered = [UInt64: Int]()
