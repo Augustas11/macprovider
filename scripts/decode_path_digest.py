@@ -29,8 +29,13 @@ Usage:
                                                      macprovider-cli (or "none")
   python3 scripts/decode_path_digest.py --admission-status SIDECAR
                                                      compare a native-MTP admission sidecar's
-                                                     entries with this tree's digest:
-                                                     match | legacy | mismatch
+                                                     entries with this tree's source digest:
+                                                     match | legacy | mismatch (the provider
+                                                     also matches metallib, runtime revision
+                                                     and hardware)
+  python3 scripts/decode_path_digest.py --publish-gate RELEASE_INPUT SIDECAR [RECOMMENDED_VERSION]
+                                                     SPEC-048-R014 item 10: print "ok" or
+                                                     "blocked: <reason>" for publishing SIDECAR
 """
 
 from __future__ import annotations
@@ -39,6 +44,7 @@ import argparse
 import hashlib
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -150,15 +156,90 @@ def embedded_in_binary(path: Path) -> str | None:
     return found.pop().decode("ascii") if found else None
 
 
-def admission_status(sidecar: Path, digest: str) -> str:
+def _entry_digests(sidecar: Path) -> list[str | None]:
     value = json.loads(sidecar.read_text("utf-8"), object_pairs_hook=_reject_duplicate_keys)
     entries = value.get("entries") if isinstance(value, dict) else None
-    if not isinstance(entries, list) or not entries:
+    if not isinstance(entries, list) or not entries or not all(isinstance(e, dict) for e in entries):
         raise DecodePathError(f"{sidecar}: no entries")
-    digests = [entry.get("decode_path_digest") for entry in entries if isinstance(entry, dict)]
-    if any(item is None for item in digests):
-        return "legacy"
-    return "match" if all(item == digest for item in digests) else "mismatch"
+    return [entry.get("decode_path_digest") for entry in entries]
+
+
+def admission_status(sidecar: Path, digest: str) -> str:
+    """A bound entry whose digest differs wins over `legacy`: the provider
+    refuses it, so the tuple needs requalification whatever else is listed."""
+    digests = _entry_digests(sidecar)
+    if any(item is not None and item != digest for item in digests):
+        return "mismatch"
+    return "legacy" if any(item is None for item in digests) else "match"
+
+
+_VERSION = re.compile(r'^\s*static let binaryVersion\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"', re.M)
+
+
+def _git_show(commit: str, path: str) -> str | None:
+    if not REVISION.match(commit):
+        raise DecodePathError(f"source commit {commit!r} is not a 40-hex commit")
+    result = subprocess.run(
+        ["git", "-C", str(ROOT), "show", f"{commit}:{path}"],
+        capture_output=True, text=True, check=False,
+    )
+    return result.stdout if result.returncode == 0 else None
+
+
+def release_commit_identity(commit: str) -> tuple[str | None, str | None]:
+    """The decode-path digest and binaryVersion compiled from `commit` (the
+    signed release's source commit). No digest means that CLI predates the
+    decode-path reader and rejects decode-path entries."""
+    generated = _git_show(commit, GENERATED.relative_to(ROOT).as_posix())
+    found = MARKER.findall(generated.encode("utf-8")) if generated else []
+    client = _git_show(commit, "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift") or ""
+    version = _VERSION.search(client)
+    return (found[0].decode("ascii") if len(found) == 1 else None, version.group(1) if version else None)
+
+
+def verify_release_input(release_input: dict) -> str | None:
+    """SPEC-048-R014 item 10: a declared `provider_decode_path_digest` must be
+    the digest compiled from the bound release's source commit. Returns that
+    release's binaryVersion, or None when no digest is declared."""
+    declared = release_input.get("provider_decode_path_digest")
+    if declared is None:
+        return None
+    commit = (release_input.get("entry") or {}).get("source_commit")
+    if not isinstance(commit, str):
+        raise DecodePathError("release input entry.source_commit is missing")
+    digest, version = release_commit_identity(commit)
+    if digest is None:
+        raise DecodePathError(
+            f"the release at {commit} embeds no decode-path digest, so it rejects decode-path entries; "
+            "bind a release that carries the reader")
+    if digest != declared:
+        raise DecodePathError(
+            f"provider_decode_path_digest {declared} is not the digest compiled at {commit} ({digest})")
+    if version is None:
+        raise DecodePathError(f"cannot read binaryVersion at {commit}")
+    return version
+
+
+def _semver(text: str) -> tuple[int, ...]:
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", text or ""):
+        raise DecodePathError(f"not a version: {text!r}")
+    return tuple(int(part) for part in text.split("."))
+
+
+def publish_gate(release_path: Path, sidecar: Path, recommended: str | None) -> str:
+    if all(item is None for item in _entry_digests(sidecar)):
+        return "ok"
+    release_input = json.loads(release_path.read_text("utf-8"), object_pairs_hook=_reject_duplicate_keys)
+    version = verify_release_input(release_input)
+    if version is None:
+        raise DecodePathError("decode-path entries need provider_decode_path_digest in the release input")
+    if recommended is None:
+        raise DecodePathError("the live recommended CLI version is unknown")
+    if _semver(recommended) < _semver(version):
+        raise DecodePathError(
+            f"decode-path entries need the reader CLI {version} to be the released CLI; "
+            f"the coordinator recommends {recommended} (SPEC-048-R014 item 10)")
+    return "ok"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -168,10 +249,21 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--check", action="store_true")
     mode.add_argument("--binary", type=Path)
     mode.add_argument("--admission-status", type=Path)
+    mode.add_argument("--publish-gate", nargs="+", metavar="ARG")
     args = parser.parse_args(argv)
     try:
         if args.binary is not None:
             print(embedded_in_binary(args.binary) or "none")
+            return 0
+        if args.publish_gate is not None:
+            if len(args.publish_gate) not in (2, 3):
+                parser.error("--publish-gate RELEASE_INPUT SIDECAR [RECOMMENDED_VERSION]")
+            release_path, sidecar = Path(args.publish_gate[0]), Path(args.publish_gate[1])
+            recommended = args.publish_gate[2] if len(args.publish_gate) == 3 and args.publish_gate[2] else None
+            try:
+                print(publish_gate(release_path, sidecar, recommended))
+            except DecodePathError as error:
+                print(f"blocked: {error}")
             return 0
         digest = compute()
         if args.admission_status is not None:

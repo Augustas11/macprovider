@@ -43,8 +43,12 @@ For every cut, read `scripts/ops/cli-release.sh status`, fact
 `python3 scripts/decode_path_digest.py --admission-status <sidecar>` prints
 the same value:
 
-- `match`: every entry binds this tree's decode path. The new CLI keeps native
-  MTP with the published admission. No admission step.
+- `match`: every entry binds this tree's source decode path. The provider
+  also binds the Metal library. So confirm that the candidate canary's CB
+  self-check `metallib_sha256` (`canary_smoke --probe`, `/v1/status`) equals
+  the entries' `metallib_sha256`. If both match, the new CLI keeps native MTP
+  with the published admission and needs no admission step. A different
+  metallib is a decode-path change: requalify.
 - `mismatch`: a file in `phase3-binary/decode-path-manifest.json` or an
   mlx-swift / mlx-swift-lm pin changed since qualification. The new CLI refuses
   native MTP (`decode_path_mismatch`) and serves ordinary decode. Requalify the
@@ -71,9 +75,12 @@ SPEC-048-R014 item 10 orders this rebind:
    signed binary) and `metallib_sha256` (the release `mlx.metallib`, which the
    CB self-check reports) to each tuple input. Set the release input's
    `provider_decode_path_digest` to the same digest, and keep the identity
-   fields as provenance. The generator refuses a digest that the bound CLI
-   does not embed.
-4. Publish through `scripts/ops/catalog-activate.sh` as usual.
+   fields as provenance. `catalog-release.py generate` refuses a digest that
+   was not compiled at the release input's `source_commit`, which is also how
+   it knows that the bound CLI reads the fields.
+4. Publish through `scripts/ops/catalog-activate.sh` as usual. Its
+   `native_mtp_decode_path_publish_gate` blocks activation until the live
+   coordinator recommends that release or a later one.
 
 After this, a provider on a pre-0.1.51 CLI rejects the admission set and serves
 ordinary decode until it updates. From then on, cuts with an unchanged digest

@@ -88,6 +88,55 @@ class DecodePathDigestTests(unittest.TestCase):
             handle.flush()
             self.assertIsNone(tool.embedded_in_binary(Path(handle.name)))
 
+    def test_mixed_admission_reports_a_bound_mismatch_before_legacy(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "native-mtp-admission.json"
+            path.write_text(json.dumps({"entries": [{"model_key": "m"}, {"decode_path_digest": "b" * 64}]}), "utf-8")
+            self.assertEqual(tool.admission_status(path, "a" * 64), "mismatch")
+            path.write_text(json.dumps({"entries": [{"model_key": "m"}, {"decode_path_digest": "a" * 64}]}), "utf-8")
+            self.assertEqual(tool.admission_status(path, "a" * 64), "legacy")
+
+    def head_release_input(self, declared):
+        import subprocess
+        head = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True,
+                              check=True).stdout.strip()
+        return {"provider_decode_path_digest": declared, "entry": {"source_commit": head}}
+
+    def test_release_input_digest_is_verified_against_the_bound_source_commit(self):
+        digest, version = tool.release_commit_identity(self.head_release_input(None)["entry"]["source_commit"])
+        if digest is None:
+            self.skipTest("HEAD does not carry a committed decode-path digest")
+        self.assertEqual(tool.verify_release_input(self.head_release_input(digest)), version)
+        with self.assertRaisesRegex(tool.DecodePathError, "is not the digest compiled"):
+            tool.verify_release_input(self.head_release_input("f" * 64))
+        self.assertIsNone(tool.verify_release_input({"entry": {"source_commit": "0" * 40}}))
+        original = tool._git_show
+        tool._git_show = lambda commit, path: None
+        try:
+            with self.assertRaisesRegex(tool.DecodePathError, "embeds no decode-path digest"):
+                tool.verify_release_input(self.head_release_input(digest))
+        finally:
+            tool._git_show = original
+
+    def test_publish_gate_waits_for_the_reader_cli_to_be_released(self):
+        digest, version = tool.release_commit_identity(self.head_release_input(None)["entry"]["source_commit"])
+        if digest is None:
+            self.skipTest("HEAD does not carry a committed decode-path digest")
+        with tempfile.TemporaryDirectory() as temp:
+            release = Path(temp) / "release.json"
+            sidecar = Path(temp) / "native-mtp-admission.json"
+            release.write_text(json.dumps(self.head_release_input(digest)), "utf-8")
+            sidecar.write_text(json.dumps({"entries": [{"decode_path_digest": digest}]}), "utf-8")
+            self.assertEqual(tool.publish_gate(release, sidecar, version), "ok")
+            major, minor, patch = (int(x) for x in version.split("."))
+            with self.assertRaisesRegex(tool.DecodePathError, "R014 item 10"):
+                tool.publish_gate(release, sidecar, f"{major}.{minor}.{patch - 1}" if patch else f"{major}.{minor - 1}.999")
+            with self.assertRaisesRegex(tool.DecodePathError, "unknown"):
+                tool.publish_gate(release, sidecar, None)
+            sidecar.write_text(json.dumps({"entries": [{"model_key": "m"}]}), "utf-8")
+            self.assertEqual(tool.publish_gate(release, sidecar, None), "ok")
+            self.assertEqual(tool.main(["--publish-gate", str(release), str(sidecar)]), 0)
+
     def test_admission_status(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "native-mtp-admission.json"

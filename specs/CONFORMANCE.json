@@ -5094,7 +5094,7 @@
       "spec_id": "SPEC-038",
       "state": "pending",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:nonisolated static func productionContinuousBatchSchedulerConfiguration",
+        "phase3-binary/Sources/macprovider-cli/ServeDecodePath.swift:nonisolated static func productionContinuousBatchSchedulerConfiguration",
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func continuousBatchMaxOutputTokens",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:static func contextRejectedTelemetryLine",
         "phase4-coordinator/internal/buyer/transport_result.go:func classifyStreamResult"
@@ -5145,12 +5145,12 @@
         "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeBridge.swift:prefill",
         "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeBridge.swift:canSharePrefillForward",
         "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeBridge.swift:enum PagedKVRaggedPrefillMask",
-        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:private nonisolated static func makeContinuousBatchScheduler",
+        "phase3-binary/Sources/macprovider-cli/ServeDecodePath.swift:nonisolated static func makeContinuousBatchScheduler",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:runOrdinaryDecodeStep",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:applyStreamedDecodeStep",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:advanceDecodeRow",
         "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeBridge.swift:performDecode",
-        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:nonisolated static func servePathDecodeLockstepWindow",
+        "phase3-binary/Sources/macprovider-cli/ServeDecodePath.swift:nonisolated static func servePathDecodeLockstepWindow",
         "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeBridge.swift:func snapshotRecurrentState",
         "phase3-binary/Sources/macprovider-cli/MSBThroughputCommand.swift:private func runHybridWindow",
         "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeParityProbe.swift:static func runMoEInputIsolationProbe",
@@ -5351,7 +5351,7 @@
       "spec_id": "SPEC-038",
       "state": "pending",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:nonisolated static func productionContinuousBatchSchedulerConfiguration",
+        "phase3-binary/Sources/macprovider-cli/ServeDecodePath.swift:nonisolated static func productionContinuousBatchSchedulerConfiguration",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:private func failClosedIfNeeded"
       ],
       "tests": [
@@ -5375,7 +5375,7 @@
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static let minimumAggregateGain",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:actor ContinuousBatchingSelfCheckDriver {",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatching.swift:static func defaultOn",
-        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func continuousBatchingSelfCheckRuntimeBuild",
+        "phase3-binary/Sources/macprovider-cli/ServeDecodePath.swift:static func continuousBatchingSelfCheckRuntimeBuild",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static func exactnessPromptLength(index",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static func exactnessProbeBound",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static func divergenceVerdict",
@@ -5520,7 +5520,7 @@
       "spec_id": "SPEC-038",
       "state": "pending",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:nonisolated static func productionContinuousBatchSchedulerConfiguration",
+        "phase3-binary/Sources/macprovider-cli/ServeDecodePath.swift:nonisolated static func productionContinuousBatchSchedulerConfiguration",
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func continuousBatchMaxOutputTokens"
       ],
       "tests": [

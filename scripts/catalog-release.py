@@ -2620,6 +2620,17 @@ def load_native_mtp_sidecar_generator():
 NATIVE_MTP_SIDECAR_GENERATOR = load_native_mtp_sidecar_generator()
 
 
+def load_decode_path_digest_module():
+    """SPEC-048-R013 (0.1.51) helper, loaded only when generating a release
+    that declares a decode-path digest (never in the shipped verifier)."""
+    import importlib.util
+    path = ROOT / "scripts" / "decode_path_digest.py"
+    spec = importlib.util.spec_from_file_location("decode_path_digest", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def validate_native_mtp_admission(
     sidecar: bytes,
     manifest_bytes: bytes,
@@ -2697,12 +2708,21 @@ def resolve_native_mtp_admission(
         return None
     generator = NATIVE_MTP_SIDECAR_GENERATOR
     try:
+        release_input = generator.strict_json_loads(NATIVE_MTP_RELEASE_INPUT_PATH.read_text("utf-8"))
         sidecar = generator.build(
             generator.strict_json_loads(NATIVE_MTP_TUPLE_INPUT_PATH.read_text("utf-8")),
-            generator.strict_json_loads(NATIVE_MTP_RELEASE_INPUT_PATH.read_text("utf-8")),
+            release_input,
         )
     except generator.SidecarError as error:
         fail(f"generate: native-MTP admission: {error}")
+    # SPEC-048-R014 item 10 (0.1.51): a declared release decode-path digest
+    # must be the one compiled at the bound release's source commit, which also
+    # proves that release reads decode-path entries.
+    if isinstance(release_input, dict) and "provider_decode_path_digest" in release_input:
+        try:
+            load_decode_path_digest_module().verify_release_input(release_input)
+        except ValueError as error:
+            fail(f"generate: native-MTP admission: {error}")
     manifest_bytes = (CATALOG_DIR / NATIVE_MTP_MANIFEST_NAME).read_bytes()
     bank = (CATALOG_DIR / NATIVE_MTP_BANK_NAME).read_bytes()
     body = validate_native_mtp_admission(

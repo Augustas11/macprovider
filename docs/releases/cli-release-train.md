@@ -776,9 +776,11 @@ a capability loss, even when feed signature verification and provider join
 succeed.
 
 Native-MTP admission works the same way from SPEC-048 0.1.51. Before each cut,
-read `cli-release.sh status` fact `native_mtp_admission_decode_path`: `match`
-means no admission step, `mismatch` means requalification, and `legacy` means
-the one final dual-field rebind after that cut is released
+read `cli-release.sh status` fact `native_mtp_admission_decode_path`. `match`
+(the source decode path, plus the canary's self-check metallib equal to the
+entries' `metallib_sha256`) means no admission step. `mismatch` means
+requalification. `legacy` means the one final dual-field rebind after that cut
+is released
 ([runbook](../runbooks/native-mtp-enablement.md#later-cli-cuts-no-admission-step-unless-the-decode-path-changed)).
 
 After the signed upgrade and restart, verify `policy.load_status=live_verified`,

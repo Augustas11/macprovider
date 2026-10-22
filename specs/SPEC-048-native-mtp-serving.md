@@ -1276,16 +1276,19 @@ listed file is missing or changes without a regenerated digest.
   MTP. Binary trust stays with SPEC-023 signed-release admission: an exactly
   revoked release gets an update-only session that is never routable, and
   tuple revocation is unchanged.
-- Consequence: a signed CLI cut whose embedded digest equals the admitted
-  entry's `decode_path_digest` needs no admission step. A different digest
-  means the decode path changed, so the tuple needs requalification evidence
-  (AGENTS.md rule 2), not an identity rebind.
+- Consequence: a signed CLI cut needs no admission step when its embedded
+  digest equals the admitted entry's `decode_path_digest` and its shipped Metal
+  library equals `metallib_sha256`. A difference in either means the decode
+  path changed, so the tuple needs requalification evidence (AGENTS.md rule 2),
+  not an identity rebind.
 - Publishing: the binding is qualification-owned (tuple input). CLIs before
   the reader reject unknown entry keys, so R014 item 10 applies. A
   decode-path entry is published only when the bound release CLI embeds that
-  same digest. The release input records it as `provider_decode_path_digest`,
-  and the generator refuses a mismatch. That release CLI must be the released
-  one. The identity fields stay in every entry as provenance (dual-field).
+  same digest. The release input records it as `provider_decode_path_digest`.
+  Release generation refuses that value unless it is the digest compiled at the
+  release input's `source_commit`. Catalog activation refuses until the live
+  coordinator recommends that release or a later one. The identity fields stay
+  in every entry as provenance (dual-field).
 
 SPEC-023 autotune recommendation, SPEC-032 hardware-evidence performance
 measurement, and every ordinary catalog gate seed MUST force

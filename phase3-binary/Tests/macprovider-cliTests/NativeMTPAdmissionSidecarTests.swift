@@ -1103,6 +1103,8 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         metallibSHA256: String? = NativeMTPAdmissionSidecarTests.decodePathMetallib,
         upstreamMLXSwiftLMRevision: String? = nil,
         hardwareChip: String? = nil,
+        ramGB: Int? = nil,
+        slotCount: Int? = nil,
         revokedTupleSHA256: Set<String>? = []
     ) -> NativeMTPAdmissionSidecar.RuntimeContext {
         NativeMTPAdmissionSidecar.RuntimeContext(
@@ -1110,9 +1112,9 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
             modelRevision: base.modelRevision,
             upstreamMLXSwiftLMRevision: upstreamMLXSwiftLMRevision ?? base.upstreamMLXSwiftLMRevision,
             hardwareChip: hardwareChip ?? base.hardwareChip,
-            ramGB: base.ramGB,
+            ramGB: ramGB ?? base.ramGB,
             osVersion: base.osVersion,
-            slotCount: base.slotCount,
+            slotCount: slotCount ?? base.slotCount,
             revokedTupleSHA256: revokedTupleSHA256,
             decodePathDigest: decodePathDigest,
             metallibSHA256: metallibSHA256
@@ -1168,6 +1170,8 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
             decodePathContext(fixture.context, metallibSHA256: nil),
             decodePathContext(fixture.context, upstreamMLXSwiftLMRevision: String(repeating: "f", count: 40)),
             decodePathContext(fixture.context, hardwareChip: "M1 Max"),
+            decodePathContext(fixture.context, ramGB: 128),
+            decodePathContext(fixture.context, slotCount: 4),
         ]
         for context in changed {
             XCTAssertEqual(
@@ -1179,6 +1183,39 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
             ModelRuntime.nativeMTPServePathRejection(for: NativeMTPAdmissionSidecarError.decodePathMismatch).reasonCode,
             "decode_path_mismatch"
         )
+    }
+
+    /// A bound entry for the model suppresses every legacy fallback: with a
+    /// selectable old-format entry beside it, a changed decode path is still
+    /// refused, and a matching decode path selects the bound entry.
+    func testDecodePathEntrySuppressesLegacyFallbackForTheModel() throws {
+        let fixture = try makeReleaseEnvelopeFixture(
+            entryEdit: { entry in
+                entry["decode_path_digest"] = DecodePathIdentity.digest
+                entry["metallib_sha256"] = Self.decodePathMetallib
+            },
+            precedingEntryEdits: [{ legacy in
+                legacy["qualified_slots"] = 4
+                legacy["max_native_active_rows"] = 4
+                var baseline = legacy["ordinary_baseline"] as! [String: Any]
+                baseline["qualified_slots"] = 4
+                legacy["ordinary_baseline"] = baseline
+            }]
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+
+        XCTAssertEqual(
+            try rejectedReleaseEnvelopeError(
+                fixture,
+                context: decodePathContext(fixture.context, decodePathDigest: String(repeating: "e", count: 64))
+            ),
+            .decodePathMismatch
+        )
+        XCTAssertEqual(
+            try rejectedReleaseEnvelopeError(fixture, context: decodePathContext(fixture.context, slotCount: 4)),
+            .decodePathMismatch
+        )
+        XCTAssertEqual(try loadRelease(fixture, context: decodePathContext(fixture.context)).qualifiedSlots, 8)
     }
 
     /// The binding is both fields or neither.
@@ -2279,7 +2316,8 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         mutateProjectionArtifacts: ((inout [String: Any]) -> Void)? = nil,
         issuedAt: Date = Date().addingTimeInterval(-3600),
         expiresAt: Date = Date().addingTimeInterval(3600),
-        entryEdit: ((inout [String: Any]) -> Void)? = nil
+        entryEdit: ((inout [String: Any]) -> Void)? = nil,
+        precedingEntryEdits: [(inout [String: Any]) -> Void] = []
     ) throws -> ReleaseEnvelopeFixture {
         let base = try makeFixture()
         let layout = try prepareSnapshot?(base) ?? ReleaseLayout(
@@ -2310,7 +2348,8 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
             challengeBankSignerKeyID: base.selfTestSignerKeyID,
             issuedAt: issuedAt,
             expiresAt: expiresAt,
-            entryEdit: entryEdit
+            entryEdit: entryEdit,
+            precedingEntryEdits: precedingEntryEdits
         )
         let context = NativeMTPAdmissionSidecar.RuntimeContext(
             modelID: "mlx-community/Qwen3-MTP",
@@ -2624,13 +2663,21 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         challengeBankSignerKeyID: String,
         issuedAt: Date = Date().addingTimeInterval(-3600),
         expiresAt: Date = Date().addingTimeInterval(3600),
-        entryEdit: ((inout [String: Any]) -> Void)? = nil
+        entryEdit: ((inout [String: Any]) -> Void)? = nil,
+        precedingEntryEdits: [(inout [String: Any]) -> Void] = []
     ) throws -> Data {
         var entry = releaseEntry(
             layout: layout,
             artifactManifestSHA256: artifactManifestSHA256,
             challengeBankSHA256: challengeBankSHA256
         )
+        // Extra entries derived from the unedited base; callers keep the
+        // SPEC-023 sort order (they precede the edited entry).
+        let preceding: [[String: Any]] = precedingEntryEdits.map { edit in
+            var extra = entry
+            edit(&extra)
+            return extra
+        }
         entryEdit?(&entry)
         return try jsonData([
             "schema_version": NativeMTPAdmissionSidecar.schemaVersion,
@@ -2640,7 +2687,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
             "signer_key_id": signerKeyID,
             "challenge_bank_signer_key_id": challengeBankSignerKeyID,
             "revocation_signer_key_id": signerKeyID,
-            "entries": [entry],
+            "entries": preceding + [entry],
         ])
     }
 
