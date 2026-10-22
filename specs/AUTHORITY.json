@@ -20,7 +20,8 @@
         "SPEC-046",
         "SPEC-047",
         "SPEC-048",
-        "SPEC-049"
+        "SPEC-049",
+        "SPEC-051"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -41,7 +42,8 @@
         "SPEC-042",
         "SPEC-043",
         "SPEC-047",
-        "SPEC-049"
+        "SPEC-049",
+        "SPEC-051"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -57,7 +59,8 @@
         "SPEC-026",
         "SPEC-027",
         "SPEC-042",
-        "SPEC-043"
+        "SPEC-043",
+        "SPEC-051"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -109,7 +112,8 @@
         "SPEC-045",
         "SPEC-047",
         "SPEC-048",
-        "SPEC-050"
+        "SPEC-050",
+        "SPEC-051"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -132,7 +136,8 @@
         "SPEC-045",
         "SPEC-047",
         "SPEC-049",
-        "SPEC-050"
+        "SPEC-050",
+        "SPEC-051"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -160,7 +165,8 @@
         "SPEC-033",
         "SPEC-042",
         "SPEC-043",
-        "SPEC-049"
+        "SPEC-049",
+        "SPEC-051"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -195,7 +201,8 @@
         "SPEC-045",
         "SPEC-046",
         "SPEC-047",
-        "SPEC-048"
+        "SPEC-048",
+        "SPEC-051"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -294,7 +301,8 @@
         "SPEC-045",
         "SPEC-047",
         "SPEC-048",
-        "SPEC-049"
+        "SPEC-049",
+        "SPEC-051"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -405,7 +413,8 @@
         "SPEC-047",
         "SPEC-048",
         "SPEC-049",
-        "SPEC-050"
+        "SPEC-050",
+        "SPEC-051"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -427,7 +436,8 @@
         "SPEC-045",
         "SPEC-046",
         "SPEC-047",
-        "SPEC-048"
+        "SPEC-048",
+        "SPEC-051"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -483,7 +493,8 @@
       "owner_spec": "SPEC-027",
       "consumers": [
         "SPEC-014",
-        "SPEC-026"
+        "SPEC-026",
+        "SPEC-051"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -556,7 +567,8 @@
         "SPEC-044",
         "SPEC-046",
         "SPEC-047",
-        "SPEC-048"
+        "SPEC-048",
+        "SPEC-051"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -575,7 +587,8 @@
         "SPEC-046",
         "SPEC-047",
         "SPEC-048",
-        "SPEC-049"
+        "SPEC-049",
+        "SPEC-051"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -628,7 +641,8 @@
       "consumers": [
         "SPEC-021",
         "SPEC-022",
-        "SPEC-048"
+        "SPEC-048",
+        "SPEC-051"
       ],
       "status": "declared",
       "requires_signed_journey_result": true,
@@ -652,7 +666,8 @@
       "owner_spec": "SPEC-038",
       "consumers": [
         "SPEC-023",
-        "SPEC-048"
+        "SPEC-048",
+        "SPEC-051"
       ],
       "status": "declared",
       "requires_signed_journey_result": true,
@@ -690,7 +705,8 @@
       "consumers": [
         "SPEC-042",
         "SPEC-048",
-        "SPEC-049"
+        "SPEC-049",
+        "SPEC-051"
       ],
       "status": "declared",
       "requires_signed_journey_result": true,
@@ -709,7 +725,8 @@
         "SPEC-043",
         "SPEC-046",
         "SPEC-047",
-        "SPEC-049"
+        "SPEC-049",
+        "SPEC-051"
       ],
       "status": "declared",
       "requires_signed_journey_result": true,
@@ -729,7 +746,8 @@
       "id": "malibu-model-economics-ux",
       "owner_spec": "SPEC-044",
       "consumers": [
-        "SPEC-001"
+        "SPEC-001",
+        "SPEC-051"
       ],
       "status": "declared",
       "requires_signed_journey_result": true,
@@ -772,7 +790,8 @@
         "SPEC-042",
         "SPEC-043",
         "SPEC-044",
-        "SPEC-046"
+        "SPEC-046",
+        "SPEC-051"
       ],
       "status": "declared",
       "requires_signed_journey_result": true,
@@ -805,7 +824,8 @@
       "consumers": [
         "SPEC-002",
         "SPEC-006",
-        "SPEC-041"
+        "SPEC-041",
+        "SPEC-051"
       ],
       "status": "declared",
       "requires_signed_journey_result": true,
@@ -824,6 +844,15 @@
       "requires_signed_journey_result": true,
       "owner": "@Augustas11",
       "issue": "https://github.com/Augustas11/macprovider/issues/1062"
+    },
+    {
+      "id": "multi-mac-shard-groups",
+      "owner_spec": "SPEC-051",
+      "consumers": [],
+      "status": "declared",
+      "requires_signed_journey_result": true,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/2084"
     }
   ]
 }

@@ -1588,6 +1588,52 @@
         "issue": "https://github.com/Augustas11/macprovider/issues/1062",
         "rationale": "SPEC-050 v0.1.0 defines the MALIBU stake allowance: a ledger-MALIBU stake, a budgeted daily non-withdrawable inference allowance, allowance-first spend ordering, and the self-dealing reward exclusion. It ships on; the operator's daily budget sets its size. Every requirement stays pending until one account stakes, receives an allowance, and spends it through the gateway live."
       }
+    },
+    {
+      "spec_id": "SPEC-051",
+      "title": "Multi-Mac Shard Groups",
+      "version": "0.1.0",
+      "path": "specs/SPEC-051-multi-mac-shard-groups.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "multi-mac-shard-groups"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-002",
+        "SPEC-003",
+        "SPEC-005",
+        "SPEC-006",
+        "SPEC-008",
+        "SPEC-010",
+        "SPEC-015",
+        "SPEC-022",
+        "SPEC-023",
+        "SPEC-027",
+        "SPEC-032",
+        "SPEC-033",
+        "SPEC-036",
+        "SPEC-038",
+        "SPEC-041",
+        "SPEC-042",
+        "SPEC-044",
+        "SPEC-047",
+        "SPEC-049"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "not-deployed",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "complete",
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.1.0 defines single-owner multi-Mac shard groups: pipeline-parallel serving of one catalog model across co-located Macs on one wired LAN, with one provider identity, minimum-of-members trust, a framed stage transport, one head-signed receipt with chained per-member sub-receipts, and explicit failure semantics. Every requirement stays pending until a paid gateway request is served by a qualified shard group and settled at the catalog price."
+      }
     }
   ],
   "requirements": [
@@ -14159,6 +14205,411 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2054",
         "rationale": "Authoritative buyer ownership exclusion implemented with source fixtures; deployed gateway/coordinator acceptance remains pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R001",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.1.0 (#2084) Shard group scope: one owner, one LAN. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R002",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.1.0 (#2084) One group provider identity, member device identities. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R003",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.1.0 (#2084) Every member passes the full single-provider admission bar. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R004",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.1.0 (#2084) Group trust is the minimum of its members. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R005",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.1.0 (#2084) Group record. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R006",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.1.0 (#2084) Layer placement validity. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R007",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.1.0 (#2084) Interconnect admissibility. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R008",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.1.0 (#2084) Member weight identity. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R009",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.1.0 (#2084) Privacy: every member sees the prompt. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R010",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.1.0 (#2084) Stage transport framing. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R011",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.1.0 (#2084) Frame integrity and authentication. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R012",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.1.0 (#2084) Sequencing and no silent retransmit. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R013",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.1.0 (#2084) Per-hop deadlines and prefill chunks. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R014",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.1.0 (#2084) Heartbeats and peer death. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R015",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.1.0 (#2084) Group health and availability. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R016",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.1.0 (#2084) Routing to the head only. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R017",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.1.0 (#2084) Cross-stage micro-batching. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R018",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.1.0 (#2084) One buyer receipt per request, signed by the head. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R019",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.1.0 (#2084) Group attestation with chained member sub-receipts. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R020",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.1.0 (#2084) Billing and settlement as one provider. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R021",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.1.0 (#2084) Failure before the first token. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R022",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.1.0 (#2084) Failure after the first token. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R023",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.1.0 (#2084) Epoch changes. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R024",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.1.0 (#2084) Isolation from single-Mac serving. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R025",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.1.0 (#2084) Qualification before catalog intake. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R026",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.1.0 (#2084) Go/no-go decision rule. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R027",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.1.0 (#2084) Version skew. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid gateway request served by a qualified shard group."
       }
     }
   ]
