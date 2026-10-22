@@ -190,9 +190,14 @@ public struct ShardMemberSigner: @unchecked Sendable {
     /// Raw 32-byte public key, base64.
     public var publicKeyBase64: String { key.publicKey.rawRepresentation.base64EncodedString() }
 
+    /// Non-empty printable ASCII without quote or backslash, at most 512 bytes.
+    public static func isCanonicalString(_ value: String) -> Bool {
+        (1...512).contains(value.utf8.count) && value.utf8.allSatisfy { (0x20...0x7E).contains($0) && $0 != 0x22 && $0 != 0x5C }
+    }
+
     public func sign(_ receipt: ShardMemberSubReceipt) throws -> ShardSignedSubReceipt {
         for (field, value) in [("member_device_id", receipt.memberDeviceID), ("request_id", receipt.requestID)]
-        where value.isEmpty || !value.utf8.allSatisfy({ (0x20...0x7E).contains($0) && $0 != 0x22 && $0 != 0x5C }) {
+        where !Self.isCanonicalString(value) {
             throw ShardSubReceiptSigningError.nonCanonicalString(field: field)
         }
         let signature = try key.signature(for: ShardSignedSubReceipt.signedBytes(receipt))

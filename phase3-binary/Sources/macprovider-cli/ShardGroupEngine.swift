@@ -86,6 +86,9 @@ struct ShardGenerationSummary: Sendable {
     let promptTokens: Int
     /// Delivered tokens, in order; a stop token is not among them.
     let tokens: [Int]
+    /// Token steps the head received: delivered tokens, a stop token, and a token
+    /// that came back after a cancel and was dropped.
+    let tokenSteps: Int
     let stopToken: Int?
     /// Teacher-forced runs: the last stage's logit summary of every step.
     let summaries: [ShardLogitSummary]
@@ -346,6 +349,7 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
         let sink: Sink
         let cache: Stage.Cache
         var tokens: [Int] = []
+        var steps = 0
         var summaries: [ShardLogitSummary] = []
         var timing = ShardRequestTiming()
         var lastSend: TimeInterval = 0
@@ -465,7 +469,7 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
             let removed = pending.remove(at: index)
             lock.unlock()
             removed.sink(.success(.finished(ShardGenerationSummary(
-                requestID: requestID, reason: .cancelled, promptTokens: 0, tokens: [], stopToken: nil, summaries: [],
+                requestID: requestID, reason: .cancelled, promptTokens: 0, tokens: [], tokenSteps: 0, stopToken: nil, summaries: [],
                 timing: ShardRequestTiming(),
                 attestation: ShardRequestAttestation(verdict: "not_started", fault: nil, groupEpoch: 0, receipts: [], replays: [])))))
             return
@@ -709,6 +713,7 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
         book.recordInput(header, frame.payload)
         let arrived = now()
         entry.outstanding = false
+        entry.steps += 1
         if entry.tokens.isEmpty {
             entry.timing.firstTokenAt = arrived
         } else {
@@ -784,7 +789,7 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
     private func deliverFinished(_ entry: Active, attestation: ShardRequestAttestation) {
         entry.sink(.success(.finished(ShardGenerationSummary(
             requestID: entry.id, reason: entry.reason ?? .length, promptTokens: entry.request.promptTokens.count,
-            tokens: entry.tokens, stopToken: entry.stopToken, summaries: entry.summaries, timing: entry.timing,
+            tokens: entry.tokens, tokenSteps: entry.steps, stopToken: entry.stopToken, summaries: entry.summaries, timing: entry.timing,
             attestation: attestation))))
     }
 

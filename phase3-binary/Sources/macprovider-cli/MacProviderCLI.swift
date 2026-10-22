@@ -538,7 +538,21 @@ struct ServeCommand: AsyncParsableCommand {
     @Flag(name: .customLong("autotune-candidate"), help: .private)
     var autotuneCandidate = false
 
+    @Option(name: .customLong("shard-group"), help: ArgumentHelp("Serve as the head (stage 0) of a SPEC-051 shard group described by this macprovider.shard-group-config.v1 file. Start the members first.", visibility: .hidden))
+    var shardGroup: String?
+
+    @Option(name: .customLong("shard-member"), help: ArgumentHelp("Serve one stage of a SPEC-051 shard group described by this macprovider.shard-member-config.v1 file. A member takes no buyer requests.", visibility: .hidden))
+    var shardMember: String?
+
     mutating func validate() throws {
+        if shardGroup != nil || shardMember != nil {
+            guard shardGroup == nil || shardMember == nil else {
+                throw ValidationError("--shard-group and --shard-member are exclusive")
+            }
+            guard draftModel == nil, !autotuneCandidate else {
+                throw ValidationError("--shard-group and --shard-member serve without a draft model and outside autotune")
+            }
+        }
         guard !autotuneCandidate || noJoin else {
             throw ValidationError("--autotune-candidate requires --no-join")
         }
@@ -2882,12 +2896,41 @@ struct ServeCommand: AsyncParsableCommand {
         // Non-nil only when a SPEC-046 loopback adapter serves (issue #1569);
         // threaded to the coordinator hello as `runtime_source`.
         let helloRuntimeSource: String?
+        // Issue #2084 (SPEC-051): an owner-configured shard group role; nil serves
+        // exactly as before.
+        let shardHeadConfig = try shardGroup.map { try ShardGroupHeadConfig.load(path: $0) }
+        let shardMemberConfig = try shardMember.map { try ShardMemberConfig.load(path: $0) }
         // Upstream mlx-swift-lm #424 can corrupt speculative rollback after a
         // model-specific rotating-cache wrap. Keep one source of truth for both
         // execution and advertised heartbeat capability until the tagged fix and
         // cache-wrap parity gate are green.
         do {
-            if let loopbackServedRef = resolved.model, let loopback = LoopbackServeSelection.select(loopbackServedRef) {
+            if shardHeadConfig != nil || shardMemberConfig != nil {
+                guard let shardModelID = resolved.model, LoopbackServeSelection.select(shardModelID) == nil else {
+                    throw ValidationError("a shard group serves an MLX model; set --model to it")
+                }
+                helloRuntimeSource = nil
+                let directory = try ModelRuntime.localModelDirectory(
+                    for: startupPreflight.runtimeBinding?.loadPath ?? resolved.modelArtifactPath ?? shardModelID)
+                let verifySHA256 = startupPreflight.runtimeBinding?.loadSHA256 ?? resolved.modelArtifactSHA256
+                if let head = shardHeadConfig {
+                    resolved.maxConcurrencyOverride = head.maxConcurrency
+                    modelRuntime = try await ShardGroupServe.headRuntime(
+                        config: head, modelID: shardModelID, directory: directory,
+                        catalogArtifactSHA256: resolved.modelArtifactSHA256, verifyArtifactSHA256: verifySHA256,
+                        catalogModelIDAlias: catalogModelIDAlias,
+                        maxContextTokens: ProviderCapacity(maxContextOverride: resolved.maxContextOverride, maxConcurrencyOverride: nil).maxContextTokens,
+                        signer: try ShardGroupServe.signer(config: resolved, fallbackMemberID: "head"),
+                        gate: noJoin || resolved.donorMode ? .notRequired : .awaitingCoordinator)
+                } else if let member = shardMemberConfig {
+                    modelRuntime = try await ShardGroupServe.memberRuntime(
+                        config: member, modelID: shardModelID, directory: directory,
+                        catalogArtifactSHA256: resolved.modelArtifactSHA256, verifyArtifactSHA256: verifySHA256,
+                        signer: try ShardGroupServe.signer(config: resolved, fallbackMemberID: "stage-\(member.stageIndex)"))
+                } else {
+                    throw ValidationError("unreachable shard role")
+                }
+            } else if let loopbackServedRef = resolved.model, let loopback = LoopbackServeSelection.select(loopbackServedRef) {
                 // SPEC-046-R002 / SPEC-010-R007(e) loopback serving (#1569,
                 // #1690 M2): proxy inference to the validated loopback
                 // OpenAI-compatible origin. ONE process, ONE model — no MLX
@@ -3154,6 +3197,9 @@ struct ServeCommand: AsyncParsableCommand {
                     return await mlxRuntime.measureStartupThroughput(
                         maxTokens: ModelRuntime.startupThroughputProbeMaxTokens
                     )
+                }
+                if let shardRuntime = modelRuntime as? ShardGroupRuntime {
+                    return await shardRuntime.measureStartupThroughput(maxTokens: ModelRuntime.startupThroughputProbeMaxTokens)
                 }
                 if let loopbackRuntime = modelRuntime as? OpenAICompatibleLoopbackRuntime {
                     let outcome = await loopbackRuntime.measureStartupThroughput(

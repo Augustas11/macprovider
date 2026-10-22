@@ -629,6 +629,13 @@ struct ShardBenchSessionOptions: Sendable {
     var signer: ShardMemberSigner? = nil
     /// Model digest this stage reports in its hello (SPEC-051-R008).
     var modelDigest: String? = nil
+    /// SPEC-051-R029 interface types this stage reports in its hello: of the link it
+    /// receives on, and (a tail with a separate return link) of that link.
+    var upstreamInterface: String? = nil
+    var returnInterface: String? = nil
+    /// Middle or tail: called once the handshake is done, with the chain this stage
+    /// knows and its own stage index.
+    var onJoined: (@Sendable ([ShardBenchHello], Int) -> Void)? = nil
 }
 
 enum ShardBenchParityMode: String, Sendable {
@@ -882,6 +889,10 @@ struct ShardBenchHello: Codable, Equatable {
     var memberPublicKey: String?
     /// Digest of the model files this stage loaded from (SPEC-051-R008).
     var modelDigest: String?
+    /// SPEC-051-R029 interface type of the link this stage receives on.
+    var upstreamInterface: String?
+    /// Tail with a separate return link: that link's interface type.
+    var returnInterface: String?
 
     var layerLabel: String { "\(layerStart):\(layerEnd)" }
 }
@@ -1372,7 +1383,8 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
             role: options.role, modelType: stage.modelType, totalLayers: stage.totalLayers,
             hiddenSize: stage.hiddenSize, layerStart: stage.layers.lowerBound, layerEnd: stage.layers.upperBound,
             memberDeviceID: signer.memberDeviceID, memberPublicKey: signer.publicKeyBase64,
-            modelDigest: options.modelDigest)
+            modelDigest: options.modelDigest, upstreamInterface: options.upstreamInterface,
+            returnInterface: options.returnInterface)
     }
 
     private func adoptSession(_ chain: [ShardBenchHello]) {
@@ -1393,7 +1405,9 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
         let chain = received + [mine]
         try sendHello(links.upstream, chain, destination: stageIndex - 1)
         try sendHello(links.downstream, chain, destination: stageIndex + 1)
-        _ = try awaitHello(links.downstream)
+        // The next stage acknowledges with the chain through itself.
+        let acknowledged = try awaitHello(links.downstream)
+        options.onJoined?(acknowledged.count > chain.count ? acknowledged : chain, stageIndex)
         return probe
     }
 
@@ -1416,6 +1430,7 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
         let chain = received + [mine]
         try ShardBenchChain.validateComplete(chain)
         try sendHello(links.downstream, chain, destination: 0)
+        options.onJoined?(chain, stageIndex)
         return (upstreamProbe, returnProbe)
     }
 

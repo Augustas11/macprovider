@@ -14172,6 +14172,9 @@ struct CompletionResult: Sendable {
     /// the completion tokens generated through it, as the upstream attested
     /// them per token; empty when it did not.
     let loopbackPrefixCompletionTokens: [Int: Int]?
+    /// Issue #2084: a shard group head's SPEC-051-R019 evidence for this
+    /// completion; nil for every other runtime.
+    let shardGroupEvidence: ShardGroupCompletionEvidence?
 
     init(
         content: String,
@@ -14189,9 +14192,11 @@ struct CompletionResult: Sendable {
         specDecodeDraftedTokens: Int = 0,
         specDecodeAcceptedTokens: Int = 0,
         specDecodeGeneration: Int? = nil,
-        loopbackPrefixCompletionTokens: [Int: Int]? = nil
+        loopbackPrefixCompletionTokens: [Int: Int]? = nil,
+        shardGroupEvidence: ShardGroupCompletionEvidence? = nil
     ) {
         self.loopbackPrefixCompletionTokens = loopbackPrefixCompletionTokens
+        self.shardGroupEvidence = shardGroupEvidence
         self.content = content
         self.finishReason = finishReason
         self.promptTokens = promptTokens
@@ -14230,7 +14235,8 @@ struct CompletionResult: Sendable {
             specDecodeDraftedTokens: specDecodeDraftedTokens,
             specDecodeAcceptedTokens: specDecodeAcceptedTokens,
             specDecodeGeneration: specDecodeGeneration,
-            loopbackPrefixCompletionTokens: loopbackPrefixCompletionTokens
+            loopbackPrefixCompletionTokens: loopbackPrefixCompletionTokens,
+            shardGroupEvidence: shardGroupEvidence
         )
     }
 
@@ -14251,7 +14257,8 @@ struct CompletionResult: Sendable {
             specDecodeDraftedTokens: specDecodeDraftedTokens,
             specDecodeAcceptedTokens: specDecodeAcceptedTokens,
             specDecodeGeneration: specDecodeGeneration,
-            loopbackPrefixCompletionTokens: content == self.content ? loopbackPrefixCompletionTokens : nil
+            loopbackPrefixCompletionTokens: content == self.content ? loopbackPrefixCompletionTokens : nil,
+            shardGroupEvidence: content == self.content ? shardGroupEvidence : nil
         )
     }
 
@@ -14272,7 +14279,8 @@ struct CompletionResult: Sendable {
             specDecodeDraftedTokens: specDecodeDraftedTokens,
             specDecodeAcceptedTokens: specDecodeAcceptedTokens,
             specDecodeGeneration: specDecodeGeneration,
-            loopbackPrefixCompletionTokens: loopbackPrefixCompletionTokens
+            loopbackPrefixCompletionTokens: loopbackPrefixCompletionTokens,
+            shardGroupEvidence: shardGroupEvidence
         )
     }
 
