@@ -242,15 +242,27 @@ struct ShardMemberLedgerBook {
 
 /// Hello exchange helpers shared by the head engine and the member stage server.
 enum ShardChainWire {
-    static func sendHello(_ link: ShardStageLink, _ chain: [ShardBenchHello], header: ShardStageFrameHeader) throws {
-        try link.send(ShardStageFrame(header: header, payload: try JSONEncoder().encode(ShardBenchChainHello(stages: chain))))
+    static func sendHello(
+        _ link: ShardStageLink, _ chain: [ShardBenchHello], header: ShardStageFrameHeader, standby: Bool = false
+    ) throws {
+        try link.send(ShardStageFrame(
+            header: header, payload: try JSONEncoder().encode(ShardBenchChainHello(stages: chain, standby: standby ? true : nil))))
+    }
+
+    /// The chain of the peer's hello; a standby hello is refused here.
+    static func awaitHello(
+        _ link: ShardStageLink, timeout: TimeInterval, stageIndex: Int, layers: Range<Int>
+    ) throws -> [ShardBenchHello] {
+        let hello = try awaitChainHello(link, timeout: timeout, stageIndex: stageIndex, layers: layers)
+        guard hello.standby != true else { throw ShardBenchError.handshake("unexpected standby hello") }
+        return hello.stages
     }
 
     /// Read until the peer's hello, echoing its link probes (request 0 activations)
     /// meanwhile with this stage's index and layers.
-    static func awaitHello(
+    static func awaitChainHello(
         _ link: ShardStageLink, timeout: TimeInterval, stageIndex: Int, layers: Range<Int>
-    ) throws -> [ShardBenchHello] {
+    ) throws -> ShardBenchChainHello {
         while true {
             let frame = try link.receive(timeout: timeout)
             switch frame.header.kind {
@@ -263,7 +275,7 @@ enum ShardChainWire {
                 try link.send(ShardStageFrame(header: echo, payload: frame.payload))
             case .hello:
                 do {
-                    return try JSONDecoder().decode(ShardBenchChainHello.self, from: frame.payload).stages
+                    return try JSONDecoder().decode(ShardBenchChainHello.self, from: frame.payload)
                 } catch {
                     throw ShardBenchError.handshake("undecodable hello: \(error)")
                 }
@@ -329,6 +341,8 @@ struct ShardGroupEngineStatus: Sendable {
     var failure: String?
     /// nil before the chain is up.
     var links: ShardGroupLinkHealth? = nil
+    /// The spare while it has not taken over; nil without one.
+    var spare: ShardGroupSpareHealth? = nil
 }
 
 final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
@@ -367,6 +381,8 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
     private var replayReports = [ShardBenchReplayReport]()
     private var replacementLinks = [ShardBenchLinks]()
     private var expectedKeys = [Int: String]()
+    /// The standby link to the spare while it has not taken over (SPEC-051-R007).
+    private var standby: ShardSpareStandby?
     private var lastProgress: TimeInterval = 0
     private var heardBytes: UInt64 = 0
     private var heardAt: TimeInterval = 0
@@ -440,6 +456,16 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
             Self.sendError(links, error, epoch: groupEpoch)
             links.close()
             throw error
+        }
+        if let spare = options.spare, chainValue.count == 2 {
+            var configuration = options.link
+            configuration.groupEpoch = groupEpoch + 1
+            let standby = ShardSpareStandby(
+                endpoint: spare, configuration: configuration, signer: options.signer, headHello: myHello(),
+                expectedMemberID: options.spareMember?.memberDeviceID, layers: chainValue[1].layerStart..<chainValue[1].layerEnd,
+                modelDigest: options.modelDigest, handshakeTimeout: options.connectTimeout)
+            standby.start()
+            self.standby = standby
         }
         let now = now()
         lastProgress = now
@@ -928,10 +954,18 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
             groupEpoch += 1
             var configuration = options.link
             configuration.groupEpoch = groupEpoch
-            let link = try ShardStageLink.connect(
-                host: spare.host, port: spare.port, timeout: options.replayDeadline, configuration: configuration)
-            shardGroupLog("connected to spare \(link.peerAddress) after \(cause)")
-            try link.authenticate(signer: options.signer, role: .initiator, timeout: options.replayDeadline)
+            let link: ShardStageLink
+            if let standbyLink = standby?.take() {
+                // The spare is already joined and authenticated on its standby link.
+                link = standbyLink
+                shardGroupLog("taking over on the standby link to \(link.peerAddress) after \(cause)")
+            } else {
+                link = try ShardStageLink.connect(
+                    host: spare.host, port: spare.port, timeout: options.replayDeadline, configuration: configuration)
+                shardGroupLog("connected to spare \(link.peerAddress) after \(cause)")
+                try link.authenticate(signer: options.signer, role: .initiator, timeout: options.replayDeadline)
+            }
+            standby = nil
             let replacement = ShardBenchLinks(upstream: link, downstream: link)
             replacementLinks.append(replacement)
             let chain = try headHandshake(replacement, expectedMembers: options.spareMember.map { [$0] })
@@ -1006,6 +1040,8 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
 
     private func teardown(_ error: Error?) {
         watch.stop()
+        standby?.stop()
+        standby = nil
         if let error, let links { Self.sendError(links, error, epoch: groupEpoch) }
         links?.close()
         for replacement in replacementLinks { replacement.close() }
@@ -1045,12 +1081,14 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
             ShardGroupLinkHealth(
                 downstream: links.downstream.roundTrip, upstream: links.isCollapsed ? nil : links.upstream.roundTrip)
         }
+        let spare = standby?.health
         lock.lock()
         published.groupEpoch = groupEpoch
         published.chain = chainValue
         published.inFlight = active.count + awaiting.count
         published.replays = replayReports.count
         published.links = health
+        published.spare = spare
         lock.unlock()
     }
 

@@ -271,6 +271,16 @@ final class ShardGroupEngineTests: XCTestCase {
         let rig = try rig(
             spare: ShardBenchEndpoint(host: "127.0.0.1", port: spareListener.port),
             tailOnCall: { call, links in if call == 6 { links[1].upstream.close() } })
+        // SPEC-051-R007: the head holds a standby link to the spare and measures it.
+        let standbyDeadline = Date().addingTimeInterval(5)
+        while Date() < standbyDeadline, rig.engine.status.spare?.alive != true || (rig.engine.status.spare?.roundTrip?.samples ?? 0) < 2 {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        let standby = try XCTUnwrap(rig.engine.status.spare)
+        XCTAssertTrue(standby.alive)
+        XCTAssertEqual(standby.memberDeviceID, "stage-1")
+        XCTAssertEqual(standby.interfaceType, nil, "the lab spare reports no interface")
+        XCTAssertGreaterThanOrEqual(standby.roundTrip?.samples ?? 0, 2)
         let prompts = [[5, 9, 2, 33, 71], [8, 1, 64]]
         let reference = try ShardBenchTestRig.reference(splits: splits, total: 4, prompts: prompts, tokens: 8)
         let first = try rig.engine.stream(ShardGenerationRequest(promptTokens: prompts[0], maxTokens: 8))
@@ -284,6 +294,14 @@ final class ShardGroupEngineTests: XCTestCase {
         XCTAssertEqual(summary0.attestation.groupEpoch, spareEpoch)
         XCTAssertEqual(summary0.attestation.replays.count, 1)
         XCTAssertEqual(try result1.get().attestation.replays.first?.requests, [first.id, second.id])
+        // The takeover ran on the standby link (the spare accepts one connection only)
+        // and the attestation is one chain under the new epoch, from step 0.
+        XCTAssertEqual(summary0.attestation.receipts.map(\.receipt.groupEpoch), [spareEpoch, spareEpoch])
+        XCTAssertEqual(summary0.attestation.receipts.map(\.receipt.stageIndex), [0, 1])
+        XCTAssertEqual(summary0.attestation.receipts[0].receipt.outDigest, summary0.attestation.receipts[1].receipt.inDigest)
+        XCTAssertEqual(summary0.attestation.receipts[1].receipt.outDigest, summary0.attestation.receipts[0].receipt.inDigest)
+        XCTAssertNil(rig.engine.status.spare, "a spare that took over is no longer a spare")
+        XCTAssertEqual(rig.engine.status.groupEpoch, spareEpoch)
         try rig.engine.shutdown()
         _ = spareDone.wait(timeout: .now() + 10)
         XCTAssertEqual(try spareBox.all[0].get().stage?.sequencesServed, 2)

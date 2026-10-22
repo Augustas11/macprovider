@@ -135,10 +135,11 @@ enum ShardGroupWire {
 
     // MARK: Head messages
 
-    /// The SPEC-051-R005 group record of a running chain.
+    /// The SPEC-051-R005 group record of a running chain. `spareMemberID` names the
+    /// spare backing stage 1 while it has not taken over.
     static func record(
         config: ShardGroupHeadConfig, chain: [ShardBenchHello], groupEpoch: UInt64, providerID: String, wireModelID: String,
-        poolModelID: String, artifactHashAlgorithm: String, artifactHash: String
+        poolModelID: String, artifactHashAlgorithm: String, artifactHash: String, spareMemberID: String? = nil
     ) throws -> RFC8785JCS.Value {
         let stages = try chain.enumerated().map { index, hello -> RFC8785JCS.Value in
             guard let member = hello.memberDeviceID else {
@@ -165,7 +166,7 @@ enum ShardGroupWire {
             "num_layers": .int(config.numLayers),
             "max_concurrency": .int(config.maxConcurrency),
             "stages": .array(stages),
-            "spares": .array([]),
+            "spares": .array(spareMemberID.map { [.object(["member_device_id": .string($0), "stage_index": .int(1)])] } ?? []),
             "supervision": .object([
                 "heartbeat_interval_ms": .int(supervision.heartbeatIntervalMilliseconds),
                 "heartbeat_miss_limit": .int(supervision.heartbeatMissLimit),
@@ -202,6 +203,15 @@ enum ShardGroupWire {
     /// for its two links, the relayed member measurements for the others, and the
     /// handshake probe until a link has one. A relayed report older than `staleAfter`
     /// keeps its last value and marks the link not fresh.
+    /// The head-to-spare link of a record with a spare, as the standby link measures
+    /// it; not fresh while the spare is not reachable.
+    static func spareLink(providerID: String, spareMemberID: String, health: ShardGroupSpareHealth?) -> LinkReport {
+        LinkReport(
+            from: providerID, to: spareMemberID, toStage: -1,
+            interfaceType: health?.interfaceType ?? ShardLinkInterface.other,
+            rttP99Microseconds: health?.roundTrip?.p99Microseconds ?? 0, fresh: health?.alive ?? false)
+    }
+
     static func linkReports(
         chain: [ShardBenchHello], providerID: String, health: ShardGroupLinkHealth?, now: TimeInterval, staleAfter: TimeInterval
     ) -> [LinkReport] {
@@ -265,10 +275,16 @@ enum ShardGroupWire {
         }
     }
 
-    static func heartbeat(groupEpoch: UInt64, providerID: String, chain: [ShardBenchHello], members: [Bool], links: [LinkReport]) throws -> Data {
-        let memberValues = chain.indices.map { index -> RFC8785JCS.Value in
+    /// `members` holds the chain's members in stage order, then the spare when the
+    /// record has one (`spareMemberID`); `links` the chain's links, then the spare's.
+    static func heartbeat(
+        groupEpoch: UInt64, providerID: String, chain: [ShardBenchHello], members: [Bool], links: [LinkReport],
+        spareMemberID: String? = nil
+    ) throws -> Data {
+        let ids = chain.indices.map { $0 == 0 ? providerID : chain[$0].memberDeviceID ?? "" } + (spareMemberID.map { [$0] } ?? [])
+        let memberValues = ids.indices.map { index -> RFC8785JCS.Value in
             .object([
-                "member_device_id": .string(index == 0 ? providerID : chain[index].memberDeviceID ?? ""),
+                "member_device_id": .string(ids[index]),
                 "healthy": .bool(members.indices.contains(index) && members[index]),
             ])
         }
@@ -292,10 +308,15 @@ enum ShardGroupWire {
 
     /// `weightsVerified` and `stageFits` are what the member proved before loading
     /// (`ShardGroupServe.proveStage`); the coordinator accepts only both true.
+    ///
+    /// A spare's `takeover` hello names the epoch its takeover starts as an ordinary
+    /// stage, so the coordinator keeps it and binds the spare's key when the head
+    /// registers that epoch.
     static func memberHello(
         config: ShardMemberConfig, status: ShardMemberStatus, memberDeviceID: String,
-        artifactHashAlgorithm: String, artifactHash: String, weightsVerified: Bool, stageFits: Bool
+        artifactHashAlgorithm: String, artifactHash: String, weightsVerified: Bool, stageFits: Bool, takeover: Bool = false
     ) throws -> Data? {
+        guard !takeover || config.role == .spare else { return nil }
         guard let upstream = status.upstreamPeer, let downstream = status.downstreamPeer,
               let upstreamInterface = status.upstreamInterface, let downstreamInterface = status.downstreamInterface
         else { return nil }
@@ -311,9 +332,9 @@ enum ShardGroupWire {
             "type": .string("shard_member_hello"),
             "version": .int(version),
             "group_provider_id": .string(config.groupProviderID),
-            "group_epoch": .int(Int(config.groupEpoch)),
+            "group_epoch": .int(Int(takeover ? config.linkEpoch : config.groupEpoch)),
             "member_device_id": .string(memberDeviceID),
-            "role": .string(config.role.rawValue),
+            "role": .string(takeover ? ShardMemberConfig.Role.stage.rawValue : config.role.rawValue),
             "stage_index": .int(config.stageIndex),
             "layer_start": .int(config.layerStart),
             "layer_end": .int(config.layerEnd),
@@ -402,7 +423,7 @@ extension ShardGroupRuntime: ShardGroupCoordinatorParticipant {
                 reportedHealth = view.signature
                 return [try ShardGroupWire.heartbeat(
                     groupEpoch: status.groupEpoch, providerID: context.providerID, chain: status.chain,
-                    members: view.members, links: view.links)]
+                    members: view.members, links: view.links, spareMemberID: spareMemberID(status))]
             }
             guard status.running else { return [] }
             let now = Date()
@@ -411,7 +432,7 @@ extension ShardGroupRuntime: ShardGroupCoordinatorParticipant {
                 config: registration.config, chain: status.chain, groupEpoch: status.groupEpoch,
                 providerID: context.providerID, wireModelID: context.wireModelID,
                 poolModelID: registration.config.poolModelID ?? "", artifactHashAlgorithm: identity.modelHashAlgorithm ?? "",
-                artifactHash: identity.modelHash ?? "")
+                artifactHash: identity.modelHash ?? "", spareMemberID: spareMemberID(status))
             registerSent = (status.groupEpoch, now)
             shardGroupLog("registering group epoch \(status.groupEpoch)")
             return [try ShardGroupWire.register(record: record, key: registration.signer.key)]
@@ -426,16 +447,28 @@ extension ShardGroupRuntime: ShardGroupCoordinatorParticipant {
         startChangeMonitor()
     }
 
-    /// The members and links the next heartbeat reports, and their signature.
+    /// The spare the record of this epoch names: the configured one until it took over.
+    func spareMemberID(_ status: ShardGroupEngineStatus) -> String? {
+        status.replays == 0 ? registration?.config.spare?.memberDeviceID : nil
+    }
+
+    /// The members and links the next heartbeat reports, and their signature. A
+    /// spare is healthy while its standby link is up; its health never stops the
+    /// group serving (SPEC-051-R015), only a takeover.
     func healthView(_ status: ShardGroupEngineStatus, providerID: String) -> (members: [Bool], links: [ShardGroupWire.LinkReport], signature: ShardGroupWire.HealthSignature) {
         let supervision = registration?.config.supervision ?? .defaults
         // A relayed report crosses one hop per heartbeat interval.
         let staleAfter = max(1, Double(supervision.heartbeatIntervalMilliseconds) / 1000
             * Double(supervision.heartbeatMissLimit + status.chain.count))
-        let links = ShardGroupWire.linkReports(
+        var links = ShardGroupWire.linkReports(
             chain: status.chain, providerID: providerID, health: status.links,
             now: Double(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) / 1e9, staleAfter: staleAfter)
-        let members = ShardGroupWire.memberHealth(chainCount: status.chain.count, running: status.running, links: links)
+        var members = ShardGroupWire.memberHealth(chainCount: status.chain.count, running: status.running, links: links)
+        if let spare = spareMemberID(status) {
+            let link = ShardGroupWire.spareLink(providerID: providerID, spareMemberID: spare, health: status.spare)
+            links.append(link)
+            members.append(status.running && link.fresh)
+        }
         return (members, links, ShardGroupWire.HealthSignature(epoch: status.groupEpoch, members: members, links: links))
     }
 
@@ -466,9 +499,6 @@ extension ShardGroupRuntime: ShardGroupCoordinatorParticipant {
         if registration.signer.memberDeviceID != context.providerID {
             return "the head signs as \(registration.signer.memberDeviceID) but its session is \(context.providerID); not registering"
         }
-        if registration.config.spare != nil {
-            return "a group with a spare cannot register with a coordinator yet (its spare link is not measured); not registering"
-        }
         if registration.config.poolModelID == nil {
             return "the group config names no pool_model_id; not registering"
         }
@@ -488,24 +518,33 @@ extension ShardMemberRuntime: ShardGroupCoordinatorParticipant {
     }
 
     func shardCoordinatorMessages(context: ShardCoordinatorContext, sessionStarted: Bool) async -> [Data] {
-        if sessionStarted { helloState = .notSent }
+        if sessionStarted {
+            helloState = .notSent
+            takeoverState = .notSent
+        }
         guard memberDeviceID == context.providerID, let hash = identity.modelHash, let algorithm = identity.modelHashAlgorithm else {
             return []
         }
-        switch helloState {
-        case .accepted, .awaitingRegistration:
-            return []
-        case .sent(let at) where Date().timeIntervalSince(at) < 30:
-            return []
-        case .notSent, .sent:
-            break
+        func due(_ state: ShardMemberHelloState) -> Bool {
+            switch state {
+            case .accepted, .awaitingRegistration: return false
+            case .sent(let at): return Date().timeIntervalSince(at) >= 30
+            case .notSent: return true
+            }
         }
-        let status = server.status
+        let takeover: Bool
+        if due(helloState) {
+            takeover = false
+        } else if config.role == .spare, helloState == .accepted, due(takeoverState) {
+            takeover = true
+        } else {
+            return []
+        }
         guard let hello = try? ShardGroupWire.memberHello(
-            config: config, status: status, memberDeviceID: memberDeviceID, artifactHashAlgorithm: algorithm, artifactHash: hash,
-            weightsVerified: stageProof.weightsVerified, stageFits: stageProof.fit.fits)
+            config: config, status: server.status, memberDeviceID: memberDeviceID, artifactHashAlgorithm: algorithm, artifactHash: hash,
+            weightsVerified: stageProof.weightsVerified, stageFits: stageProof.fit.fits, takeover: takeover)
         else { return [] }
-        helloState = .sent(Date())
+        if takeover { takeoverState = .sent(Date()) } else { helloState = .sent(Date()) }
         return [hello]
     }
 
@@ -516,15 +555,22 @@ extension ShardMemberRuntime: ShardGroupCoordinatorParticipant {
             shardGroupLog("ignored a malformed or foreign group message")
             return
         }
+        let takeover = config.role == .spare && result.groupEpoch == config.linkEpoch
+        guard takeover || result.groupEpoch == config.groupEpoch else {
+            shardGroupLog("ignored a member hello result for epoch \(result.groupEpoch)")
+            return
+        }
+        let next: ShardMemberHelloState
         if result.accepted == true {
-            helloState = .accepted
-            shardGroupLog("member hello accepted for epoch \(result.groupEpoch)")
+            next = .accepted
+            shardGroupLog("member hello accepted for epoch \(result.groupEpoch)\(takeover ? " (takeover)" : "")")
         } else if result.reason == "group_not_registered" {
             // The coordinator keeps the hello and answers again at registration.
-            helloState = .awaitingRegistration
+            next = .awaitingRegistration
         } else {
-            helloState = .sent(Date())
-            shardGroupLog("member hello refused: \(result.reason)")
+            next = .sent(Date())
+            shardGroupLog("member hello for epoch \(result.groupEpoch) refused: \(result.reason)")
         }
+        if takeover { takeoverState = next } else { helloState = next }
     }
 }

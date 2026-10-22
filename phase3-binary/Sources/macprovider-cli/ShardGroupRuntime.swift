@@ -383,6 +383,7 @@ actor ShardGroupRuntime: ModelRuntimeServing {
             throw Self.buyerError(error)
         }
         guard let summary else { throw Self.unavailable("the request ended without a summary") }
+        await awaitEpochAccepted(summary.attestation.groupEpoch)
         let cancelledByCaller = summary.reason == .cancelled && !output.stopped
         if !output.stopped, !cancelledByCaller {
             let rest = output.finish()
@@ -413,6 +414,25 @@ actor ShardGroupRuntime: ModelRuntimeServing {
             modelHashObserved: identity.modelHash,
             settlementDisposition: isSettlementReceiptEligible && summary.attestation.verdict == "ok" ? .eligibleOwner : .notEligible,
             shardGroupEvidence: ShardGroupCompletionEvidence(attestation: summary.attestation, tokenSteps: summary.tokenSteps))
+    }
+
+    /// How long a completion waits for the coordinator to accept the epoch a spare
+    /// takeover started.
+    static var epochRegistrationWait: TimeInterval { 10 }
+
+    /// SPEC-051-R019: the coordinator verifies an attestation against the accepted
+    /// record of the epoch it names. A request a spare finished runs under the
+    /// epoch its takeover started, which the head registers at once; the completion
+    /// (and with it the receipt) waits, bounded, until that record is accepted.
+    func awaitEpochAccepted(_ epoch: UInt64) async {
+        guard gate != .notRequired, let accepted = acceptedEpoch, accepted < epoch else { return }
+        let deadline = Date().addingTimeInterval(Self.epochRegistrationWait)
+        while (acceptedEpoch ?? 0) < epoch, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        if (acceptedEpoch ?? 0) < epoch {
+            shardGroupLog("epoch \(epoch) was not accepted within \(Int(Self.epochRegistrationWait)) s; the request's attestation will not verify")
+        }
     }
 
     /// SPEC-001 FR-20 startup estimate through the whole chain: one fixed short

@@ -545,6 +545,12 @@ func (r *Registry) evaluateLocked(groupID string, g *groupState, providers func(
 		spares[sp.MemberDeviceID] = true
 	}
 	for _, l := range g.heartbeat.Links {
+		// SPEC-051-R015: a spare's health affects only whether replay is possible.
+		// An unreachable spare's link has no interface to report; a reachable
+		// spare's link must still be wired (SPEC-051-R007).
+		if spares[l.ToMemberDeviceID] && !healthy[l.ToMemberDeviceID] {
+			continue
+		}
 		if l.InterfaceType != want {
 			return ReasonLinkInterfaceInvalid, nil
 		}

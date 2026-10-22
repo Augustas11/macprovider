@@ -562,3 +562,75 @@ func TestStoreAttestationFirstVerdictKept(t *testing.T) {
 		t.Fatalf("stored = %+v %v %v", got, ok, err)
 	}
 }
+
+// The provider's spare flow end to end: the spare joins epoch 1 as a spare and
+// sends its takeover hello for epoch 2 at once, which is kept; the head's
+// heartbeat carries the spare's standby link; an unreachable spare never stops
+// the group; at the takeover the head registers epoch 2 and the spare's key is
+// bound, so a request the spare finished verifies as one epoch-2 segment.
+func TestSpareStandbyTakeoverFlow(t *testing.T) {
+	f := newFixture(t)
+	rec := twoStageRecord(1)
+	rec.Spares = []Spare{{MemberDeviceID: "spare", StageIndex: 1}}
+	if res, _ := f.register(rec); !res.Accepted {
+		t.Fatal(res.Reason)
+	}
+	if res := f.hello("tail", helloPayload("tail", 1, 1, 18, 32, "thunderbolt", "head")); !res.Accepted {
+		t.Fatal(res.Reason)
+	}
+	if res := f.hello("spare", helloPayload("spare", 1, 1, 18, 32, "thunderbolt", "head")); !res.Accepted {
+		t.Fatalf("spare hello: %+v", res)
+	}
+	takeover := []byte(strings.Replace(string(helloPayload("spare", 2, 1, 18, 32, "thunderbolt", "head")), `"role":"spare"`, `"role":"stage"`, 1))
+	if res := f.hello("spare", takeover); res.Reason != ReasonGroupNotRegistered {
+		t.Fatalf("takeover hello before the takeover: %+v", res)
+	}
+	beat := func(spareHealthy bool, spareInterface string) []byte {
+		payload, _ := json.Marshal(Heartbeat{Type: TypeHeartbeat, Version: 1, GroupProviderID: "head", GroupEpoch: 1,
+			Members: []HeartbeatMember{{MemberDeviceID: "head", Healthy: true}, {MemberDeviceID: "tail", Healthy: true}, {MemberDeviceID: "spare", Healthy: spareHealthy}},
+			Links: []HeartbeatLink{
+				{FromMemberDeviceID: "head", ToMemberDeviceID: "tail", InterfaceType: "thunderbolt", RTTP99US: 400},
+				{FromMemberDeviceID: "tail", ToMemberDeviceID: "head", InterfaceType: "thunderbolt", RTTP99US: 400},
+				{FromMemberDeviceID: "head", ToMemberDeviceID: "spare", InterfaceType: spareInterface, RTTP99US: 0},
+			}})
+		return payload
+	}
+	for name, tc := range map[string]struct {
+		healthy bool
+		iface   string
+		want    string
+	}{
+		"spare reachable":   {true, "thunderbolt", ""},
+		"spare unreachable": {false, "other", ""},
+		"spare on wifi":     {true, "wifi", ReasonLinkInterfaceInvalid},
+	} {
+		if !f.reg.Heartbeat("head", "s-head", beat(tc.healthy, tc.iface)) {
+			t.Fatalf("%s: heartbeat dropped", name)
+		}
+		if ev := f.evaluate(); ev.Reason != tc.want {
+			t.Errorf("%s: reason %q, want %q", name, ev.Reason, tc.want)
+		}
+	}
+	// A heartbeat that leaves the spare out does not describe the record.
+	if f.reg.Heartbeat("head", "s-head", heartbeatPayload(1, true, 400, "thunderbolt")) {
+		t.Fatal("heartbeat without the spare accepted")
+	}
+
+	next := twoStageRecord(2)
+	next.Stages[1].MemberDeviceID = "spare"
+	res, out := f.register(next)
+	if !res.Accepted || len(out) != 1 || out[0].ProviderID != "spare" || !out[0].Message.(Result).Accepted {
+		t.Fatalf("takeover registration: %+v %+v", res, out)
+	}
+	keys, ok := f.reg.Epochs("head")(2)
+	if !ok || keys.StageKeys[1] != base64.StdEncoding.EncodeToString(f.sessions["spare"].ReceiptPubkey) {
+		t.Fatalf("spare key not bound to epoch 2: %+v", keys)
+	}
+	envelope, tupleSHA := receiptEnvelope(t, "req-3", 0, "head")
+	a, b := digest("a"), digest("b")
+	segments := []AttestationSegment{{GroupEpoch: 2, StepStart: 0, StepEnd: 9, SubReceipts: []SignedSubReceipt{
+		f.subReceipt("head", 2, 0, 0, 18, "req-3", b, a), f.subReceipt("spare", 2, 1, 18, 32, "req-3", a, b)}}}
+	if v := VerifyAttestation(f.attestation(segments, "req-3", 0, tupleSHA), envelope, "head", f.sessions["head"].ReceiptPubkey, f.reg.Epochs("head")); !v.Verified() {
+		t.Fatalf("replayed request attestation: %+v", v)
+	}
+}

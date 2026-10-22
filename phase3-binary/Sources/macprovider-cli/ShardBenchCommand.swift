@@ -643,6 +643,9 @@ struct ShardBenchSessionOptions: Sendable {
     /// Middle or tail: called once the handshake is done, with the chain this stage
     /// knows and its own stage index.
     var onJoined: (@Sendable ([ShardBenchHello], Int) -> Void)? = nil
+    /// Spare: called when it answered the head's standby hello, with the chain
+    /// through itself and its stage index.
+    var onStandby: (@Sendable ([ShardBenchHello], Int) -> Void)? = nil
 }
 
 enum ShardBenchParityMode: String, Sendable {
@@ -908,6 +911,10 @@ struct ShardBenchHello: Codable, Equatable {
 /// to the head complete on the return link.
 struct ShardBenchChainHello: Codable, Equatable {
     let stages: [ShardBenchHello]
+    /// SPEC-051-R007: the head's standby link to its spare. The spare answers with
+    /// the chain through itself and then waits on the same link for the real hello
+    /// the head sends when the spare takes over.
+    var standby: Bool? = nil
 }
 
 enum ShardBenchChain {
@@ -1443,7 +1450,7 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
     /// Tail: take the chain, probe the upstream link and, when separate, the return
     /// link, then send the complete chain to the head.
     private func tailHandshake(_ links: ShardBenchLinks) throws -> (ShardBenchLatency, ShardBenchLatency?) {
-        let received = try awaitHello(links.upstream)
+        let received = try awaitTailHello(links)
         adoptSession(received)
         stageIndex = received.count
         var mine = myHello()
@@ -1470,7 +1477,45 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
     }
 
     private func awaitHello(_ link: ShardStageLink) throws -> [ShardBenchHello] {
-        try ShardChainWire.awaitHello(link, timeout: options.connectTimeout, stageIndex: stageIndex, layers: stage.layers)
+        let hello = try ShardChainWire.awaitChainHello(link, timeout: options.connectTimeout, stageIndex: stageIndex, layers: stage.layers)
+        guard hello.standby != true else {
+            throw ShardBenchError.handshake("a standby hello reached a stage that is not a spare")
+        }
+        return hello.stages
+    }
+
+    /// Tail: the first hello, after any number of standby exchanges. A spare is a
+    /// tail on one collapsed link; while the head only keeps the link to measure it,
+    /// the spare answers each standby hello with the chain through itself and waits,
+    /// heartbeating, for the hello of the takeover.
+    private func awaitTailHello(_ links: ShardBenchLinks) throws -> [ShardBenchHello] {
+        var hello = try ShardChainWire.awaitChainHello(
+            links.upstream, timeout: options.connectTimeout, stageIndex: stageIndex, layers: stage.layers)
+        while hello.standby == true {
+            guard links.isCollapsed else {
+                throw ShardBenchError.handshake("a standby hello on a tail with a separate return link")
+            }
+            stageIndex = hello.stages.count
+            let mine = myHello()
+            try ShardBenchChain.validate(prefix: hello.stages, next: mine)
+            try ShardChainWire.checkPeer(links.upstream, is: hello.stages[hello.stages.count - 1], stage: stageIndex - 1)
+            let chain = hello.stages + [mine]
+            try ShardChainWire.sendHello(links.upstream, chain, header: header(.hello, destination: 0), standby: true)
+            // From here a silent head is a dead head; its heartbeats keep the link alive.
+            links.upstream.armLiveness()
+            options.onStandby?(chain, stageIndex)
+            shardBenchLog("standby for the head at \(links.upstream.peerAddress) epoch=\(options.link.groupEpoch)")
+            while true {
+                do {
+                    hello = try ShardChainWire.awaitChainHello(
+                        links.upstream, timeout: 3600, stageIndex: stageIndex, layers: stage.layers)
+                    break
+                } catch ShardLinkError.receiveTimedOut {
+                    continue
+                }
+            }
+        }
+        return hello.stages
     }
 
     /// Echo probes of one decode-sized activation on `link`: transport + codec cost of

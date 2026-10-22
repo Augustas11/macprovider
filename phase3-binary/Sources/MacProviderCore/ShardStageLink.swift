@@ -358,6 +358,23 @@ public final class ShardStageLink: @unchecked Sendable {
         }
     }
 
+    /// Seconds since any byte arrived from the peer (heartbeats included).
+    public var secondsSinceLastByte: TimeInterval {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return ShardSocketAddress.now() - lastHeard
+    }
+
+    /// True once the link closed or its reader hit an error (the peer is gone).
+    public var hasFailed: Bool {
+        stateLock.lock()
+        let closed = isClosed
+        stateLock.unlock()
+        inbox.lock()
+        defer { inbox.unlock() }
+        return closed || readerFailure != nil
+    }
+
     /// The link's heartbeat round trips and what the peer's latest ping reported.
     public var roundTrip: ShardLinkRoundTrip {
         stateLock.lock()

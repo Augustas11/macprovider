@@ -232,6 +232,19 @@ final class ShardMemberStageServer<Stage: ShardBenchStage>: @unchecked Sendable 
         options.modelDigest = modelDigest
         options.upstreamInterface = upstreamInterface
         options.returnInterface = links.isCollapsed || role != .tail ? nil : downstreamInterface
+        // A spare learns its peer and link from the head's standby link before any
+        // takeover, so it can join its group's epochs at once (SPEC-051-R029).
+        options.onStandby = { [weak self] chain, stageIndex in
+            self?.update { status in
+                status.chain = chain
+                status.stageIndex = stageIndex
+                status.upstreamPeer = chain.first?.memberDeviceID
+                status.downstreamPeer = chain.first?.memberDeviceID
+                status.upstreamInterface = upstreamInterface
+                status.downstreamInterface = upstreamInterface
+                status.lastError = nil
+            }
+        }
         options.onJoined = { [weak self] chain, stageIndex in
             self?.update { status in
                 status.chain = chain
@@ -287,6 +300,9 @@ actor ShardMemberRuntime: ModelRuntimeServing {
     let stageProof: ShardGroupServe.StageProof
     private var providerStatus: ProviderStatus?
     var helloState = ShardMemberHelloState.notSent
+    /// A spare's hello for the epoch its takeover starts (`config.linkEpoch`), sent
+    /// once its own hello was accepted, so its key is bound before it serves.
+    var takeoverState = ShardMemberHelloState.notSent
     var changeHandler: (@Sendable () async -> Void)?
     private var changeMonitor: Task<Void, Never>?
     private var lastChangeSent: TimeInterval = 0
@@ -328,8 +344,14 @@ actor ShardMemberRuntime: ModelRuntimeServing {
         }
     }
 
+    /// The hello still to send: the member's own, then a spare's takeover hello.
+    var helloDue: Bool {
+        guard server.status.upstreamPeer != nil else { return false }
+        return helloState == .notSent || (config.role == .spare && helloState == .accepted && takeoverState == .notSent)
+    }
+
     func reportChangeIfDue() async {
-        guard let handler = changeHandler, helloState == .notSent, server.status.upstreamPeer != nil else { return }
+        guard let handler = changeHandler, helloDue else { return }
         let now = Double(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) / 1e9
         guard now - lastChangeSent >= ShardGroupWire.minimumChangeInterval else { return }
         lastChangeSent = now

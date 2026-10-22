@@ -20,7 +20,8 @@ final class ShardGroupWireTests: XCTestCase {
 
     /// A head runtime over fake stages whose tail signs as mac-b.
     private func runtime(
-        registration: Bool = true, poolModelID: String? = "pool/ijUnc-ZQf-LJeRvkhi-0iQ/llama-3b", tailLinks: ShardTestLinksBox? = nil
+        registration: Bool = true, poolModelID: String? = "pool/ijUnc-ZQf-LJeRvkhi-0iQ/llama-3b", tailLinks: ShardTestLinksBox? = nil,
+        spare: ShardGroupSpareConfig? = nil
     ) async throws -> ShardGroupRuntime {
         let headSigner = ShardMemberSigner(memberDeviceID: "prov-head", key: headKey)
         let tailSigner = ShardMemberSigner(memberDeviceID: "mac-b", key: tailKey)
@@ -34,7 +35,7 @@ final class ShardGroupWireTests: XCTestCase {
                 tokenizer: ShardTestTokenizer(), eosTokenIDs: [], stopFilter: StopTokenFilter(tokens: []),
                 templateSupportsThinkingToggle: false, templateSupportsPreserveThinking: false),
             maxContextTokens: 1024, gate: .awaitingCoordinator,
-            registration: registration ? ShardGroupRegistration(config: headConfig(poolModelID: poolModelID), signer: headSigner) : nil,
+            registration: registration ? ShardGroupRegistration(config: headConfig(poolModelID: poolModelID, spare: spare), signer: headSigner) : nil,
             connect: {
                 let links = try ShardBenchTestRig.ring(stages: 2, collapsed: true)
                 tailLinks?.links = links[1]
@@ -344,6 +345,161 @@ final class ShardGroupWireTests: XCTestCase {
         XCTAssertLessThanOrEqual(sent.count - before, 1)
         XCTAssertGreaterThanOrEqual(ShardGroupWire.minimumChangeInterval, 0.25)
         await runtime.setShardChangeHandler(nil)
+        await runtime.stop()
+    }
+
+    // MARK: Spares
+
+    func testRecordAndHeartbeatCarryTheSpareUntilItTakesOver() async throws {
+        let runtime = try await runtime(spare: ShardGroupSpareConfig(memberDeviceID: "mac-s", endpoint: "127.0.0.1:9"))
+        let context = ShardCoordinatorContext(providerID: "prov-head", wireModelID: "wire/model")
+        let first = await runtime.shardCoordinatorMessages(context: context, sessionStarted: true)
+        let record = try XCTUnwrap(try object(try XCTUnwrap(first.first))["record"] as? [String: Any])
+        XCTAssertEqual(record["spares"] as? [[String: AnyHashable]], [["member_device_id": "mac-s", "stage_index": 1]],
+                       "a group with a spare registers with it")
+        await runtime.handleShardCoordinatorMessage(try JSONSerialization.data(withJSONObject: [
+            "type": "shard_group_register_result", "version": 1, "group_provider_id": "prov-head",
+            "group_epoch": Int(ShardBenchTestRig.epoch), "accepted": true, "reason": "",
+        ]))
+        let beats = await runtime.shardCoordinatorMessages(context: context, sessionStarted: false)
+        let heartbeat = try object(try XCTUnwrap(beats.first))
+        let members = try XCTUnwrap(heartbeat["members"] as? [[String: Any]])
+        XCTAssertEqual(members.map { $0["member_device_id"] as? String }, ["prov-head", "mac-b", "mac-s"])
+        XCTAssertEqual(members.map { $0["healthy"] as? Bool }, [true, true, false], "no spare listens on port 9")
+        let links = try XCTUnwrap(heartbeat["links"] as? [[String: Any]])
+        XCTAssertEqual(links.map { [$0["from_member_device_id"] as? String, $0["to_member_device_id"] as? String] },
+                       [["prov-head", "mac-b"], ["mac-b", "prov-head"], ["prov-head", "mac-s"]])
+        XCTAssertEqual(links.last?["interface_type"] as? String, ShardLinkInterface.other)
+        await runtime.stop()
+
+        // After a takeover the new epoch's record names the spare as stage 1 and no spare.
+        var chain = [
+            ShardBenchHello(role: .head, modelType: "fake", totalLayers: 4, hiddenSize: 4, layerStart: 0, layerEnd: 2, memberDeviceID: "prov-head"),
+            ShardBenchHello(role: .tail, modelType: "fake", totalLayers: 4, hiddenSize: 4, layerStart: 2, layerEnd: 4, memberDeviceID: "mac-s"),
+        ]
+        chain[1].upstreamInterface = ShardLinkInterface.thunderbolt
+        let takeover = try ShardGroupWire.record(
+            config: headConfig(spare: ShardGroupSpareConfig(memberDeviceID: "mac-s", endpoint: "127.0.0.1:9")), chain: chain,
+            groupEpoch: ShardBenchTestRig.epoch + 1, providerID: "prov-head", wireModelID: "wire/model",
+            poolModelID: "pool/ijUnc-ZQf-LJeRvkhi-0iQ/llama-3b", artifactHashAlgorithm: ModelArtifactIdentity.snapshotManifestV1,
+            artifactHash: String(repeating: "c", count: 64))
+        let takeoverRecord = try XCTUnwrap(ShardGroupWire.jsonObject(takeover) as? [String: Any])
+        XCTAssertEqual((takeoverRecord["stages"] as? [[String: Any]])?.map { $0["member_device_id"] as? String }, ["prov-head", "mac-s"])
+        XCTAssertEqual((takeoverRecord["spares"] as? [Any])?.count, 0)
+    }
+
+    func testASpareSendsItsHelloThenItsTakeoverHello() async throws {
+        let config = ShardMemberConfig(
+            groupProviderID: "prov-head", groupEpoch: 5, role: .spare, stageIndex: 1, layerStart: 14, layerEnd: 28, listen: "0.0.0.0:7101")
+        let standby = ShardMemberStatus(
+            listening: true, chain: [], stageIndex: 1, upstreamPeer: "prov-head", downstreamPeer: "prov-head",
+            upstreamInterface: "thunderbolt", downstreamInterface: "thunderbolt", sessionsServed: 0, lastError: nil)
+        let own = try object(try XCTUnwrap(try ShardGroupWire.memberHello(
+            config: config, status: standby, memberDeviceID: "mac-s", artifactHashAlgorithm: "a", artifactHash: "b",
+            weightsVerified: true, stageFits: true)))
+        XCTAssertEqual(own["role"] as? String, "spare")
+        XCTAssertEqual(own["group_epoch"] as? Int, 5)
+        let takeover = try object(try XCTUnwrap(try ShardGroupWire.memberHello(
+            config: config, status: standby, memberDeviceID: "mac-s", artifactHashAlgorithm: "a", artifactHash: "b",
+            weightsVerified: true, stageFits: true, takeover: true)))
+        XCTAssertEqual(takeover["role"] as? String, "stage", "in the takeover epoch the spare is stage 1")
+        XCTAssertEqual(takeover["group_epoch"] as? Int, 6)
+        XCTAssertEqual(takeover["stage_index"] as? Int, 1)
+        XCTAssertEqual(takeover["links"] as? [[String: String]], [["peer_member_device_id": "prov-head", "interface_type": "thunderbolt"]])
+        var stage = config
+        stage.role = .stage
+        XCTAssertNil(try ShardGroupWire.memberHello(
+            config: stage, status: standby, memberDeviceID: "mac-s", artifactHashAlgorithm: "a", artifactHash: "b",
+            weightsVerified: true, stageFits: true, takeover: true), "only a spare has a takeover hello")
+    }
+
+    func testASpareMemberJoinsOnTheStandbyLinkAndSendsBothHellos() async throws {
+        let spareKey = Curve25519.Signing.PrivateKey()
+        let spareConfig = ShardMemberConfig(
+            groupProviderID: "head-device", groupEpoch: ShardBenchTestRig.epoch, role: .spare, stageIndex: 1, layerStart: 2, layerEnd: 4,
+            listen: "127.0.0.1:0", maxSequences: 8,
+            supervision: ShardSupervisionConfig(
+                heartbeatIntervalMilliseconds: 50, heartbeatMissLimit: 4, decodeHopDeadlineMilliseconds: 2000,
+                prefillChunkDeadlineMilliseconds: 3000, replayDeadlineMilliseconds: 5000))
+        let server = ShardMemberStageServer(
+            stage: FakeShardStage(layers: 2..<4, totalLayers: 4), config: spareConfig,
+            signer: ShardMemberSigner(memberDeviceID: "mac-s", key: spareKey), modelDigest: nil, modelLabel: "fake")
+        try server.start()
+        defer { server.stop() }
+        let member = ShardMemberRuntime(
+            config: spareConfig,
+            identity: ShardGroupRuntime.Identity(
+                modelID: "m", modelHash: String(repeating: "c", count: 64), modelHashAlgorithm: ModelArtifactIdentity.snapshotManifestV1,
+                weightsManifestSHA256: nil, catalogModelIDAlias: nil),
+            memberDeviceID: "mac-s", server: server,
+            stageProof: ShardGroupServe.StageProof(
+                digest: "d", weightsVerified: true, fit: ShardStageArtifact.Fit(stageWeightBytes: 1, kvBudgetBytes: 2, kvDemandBytes: 1)))
+        // A head with this spare: its standby link joins the spare before any takeover.
+        let links = try ShardBenchTestRig.ring(stages: 2, collapsed: true)
+        Thread {
+            _ = try? ShardBenchSession(options: ShardBenchTestRig.options(role: .tail, prompts: [], tokens: 1), stage: FakeShardStage(layers: 2..<4, totalLayers: 4))
+                .run(links: links[1])
+        }.start()
+        var options = ShardGroupEngineTests.options(spare: ShardBenchEndpoint(host: "127.0.0.1", port: try XCTUnwrap(server.port)))
+        options.spareMember = ShardGroupExpectedMember(memberDeviceID: "mac-s", layers: 2..<4)
+        let engine = ShardGroupEngine(stage: FakeShardStage(layers: 0..<2, totalLayers: 4), options: options)
+        try engine.start(links: links[0])
+        defer { _ = try? engine.shutdown() }
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline, engine.status.spare?.alive != true || server.status.upstreamPeer == nil {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertEqual(engine.status.spare?.memberDeviceID, "mac-s")
+        XCTAssertEqual(engine.status.spare?.interfaceType, ShardLinkInterface.other, "loopback")
+        XCTAssertEqual(server.status.upstreamPeer, "head-device")
+        XCTAssertEqual(server.status.stageIndex, 1)
+
+        let context = ShardCoordinatorContext(providerID: "mac-s", wireModelID: "m")
+        let firstBatch = await member.shardCoordinatorMessages(context: context, sessionStarted: true)
+        let first = try object(try XCTUnwrap(firstBatch.first))
+        XCTAssertEqual(first["role"] as? String, "spare")
+        XCTAssertEqual(first["group_epoch"] as? Int, Int(ShardBenchTestRig.epoch))
+        let pending = await member.shardCoordinatorMessages(context: context, sessionStarted: false)
+        XCTAssertTrue(pending.isEmpty, "no takeover hello before the spare's own hello is accepted")
+        await member.handleShardCoordinatorMessage(try JSONSerialization.data(withJSONObject: [
+            "type": "shard_member_hello_result", "version": 1, "group_provider_id": "head-device",
+            "group_epoch": Int(ShardBenchTestRig.epoch), "accepted": true, "reason": "",
+        ]))
+        let secondBatch = await member.shardCoordinatorMessages(context: context, sessionStarted: false)
+        let second = try object(try XCTUnwrap(secondBatch.first))
+        XCTAssertEqual(second["role"] as? String, "stage")
+        XCTAssertEqual(second["group_epoch"] as? Int, Int(ShardBenchTestRig.epoch) + 1)
+        await member.handleShardCoordinatorMessage(try JSONSerialization.data(withJSONObject: [
+            "type": "shard_member_hello_result", "version": 1, "group_provider_id": "head-device",
+            "group_epoch": Int(ShardBenchTestRig.epoch) + 1, "accepted": false, "reason": "group_not_registered",
+        ]))
+        let held = await member.takeoverState
+        XCTAssertEqual(held, .awaitingRegistration)
+        let quiet = await member.shardCoordinatorMessages(context: context, sessionStarted: false)
+        XCTAssertTrue(quiet.isEmpty)
+    }
+
+    func testACompletionWaitsForItsTakeoverEpochToBeAccepted() async throws {
+        let runtime = try await runtime()
+        let context = ShardCoordinatorContext(providerID: "prov-head", wireModelID: "wire/model")
+        _ = await runtime.shardCoordinatorMessages(context: context, sessionStarted: true)
+        func accept(_ epoch: UInt64) async throws {
+            await runtime.handleShardCoordinatorMessage(try JSONSerialization.data(withJSONObject: [
+                "type": "shard_group_register_result", "version": 1, "group_provider_id": "prov-head",
+                "group_epoch": Int(epoch), "accepted": true, "reason": "",
+            ]))
+        }
+        try await accept(ShardBenchTestRig.epoch)
+        let started = Date()
+        await runtime.awaitEpochAccepted(ShardBenchTestRig.epoch)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 0.1, "an accepted epoch does not wait")
+        let waiter = Task { await runtime.awaitEpochAccepted(ShardBenchTestRig.epoch + 1) }
+        try await Task.sleep(nanoseconds: 150_000_000)
+        try await accept(ShardBenchTestRig.epoch + 1)
+        await waiter.value
+        let elapsed = Date().timeIntervalSince(started)
+        XCTAssertGreaterThanOrEqual(elapsed, 0.15)
+        XCTAssertLessThan(elapsed, 2, "the completion goes as soon as the takeover epoch is accepted")
         await runtime.stop()
     }
 
