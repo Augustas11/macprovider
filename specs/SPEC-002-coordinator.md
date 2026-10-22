@@ -4,7 +4,7 @@
 
 **Change log v1.6.25 (2026-10-22, Related: #2107):** Mirrors SPEC-018 v0.3.1
 §3.11: `required`/named admit an ordinary OpenAI parameters object (root
-`type:"object"`, at most 16 KiB, container depth at most 64, finite safe
+`type:"object"`, at most 16 KiB, container depth at most 32, finite safe
 numbers). A strict-subset schema keeps full output validation; any other is
 checked for an arguments object holding every root `required` property.
 

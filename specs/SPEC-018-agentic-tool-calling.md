@@ -36,7 +36,7 @@ SPEC-018 is the **provider-side response synthesis contract** for OpenAI-wire to
   empty content and the reasoning so far; truncation inside a function-call
   frame or a header stays fail-closed. (4) §3.11: `required`/named admit an
   ordinary OpenAI `parameters` object (root `type:"object"`, at most 16,384
-  bytes, container depth at most 64, numbers within the finite safe domain).
+  bytes, container depth at most 32, numbers within the finite safe domain).
   A schema in the strict subset keeps full output validation; any other is
   validated for an arguments object that holds every root `required`
   property. (5) §3.11: the provider resolves every guaranteed-call profile
@@ -681,7 +681,7 @@ runtime/model combinations, and custom `stop` strings or non-text
 
 **AMENDED v0.3.1 (Amendment 9):** for `required`/named a tool's parameters
 MAY be an ordinary OpenAI `parameters` object: root `type:"object"`, at most
-16,384 bytes, container depth at most 64, unique keys, and every number in the
+16,384 bytes, container depth at most 32, unique keys, and every number in the
 finite safe domain below. Other shapes fail with HTTP 400
 `unsupported_tool_schema`. A schema in the strict subset described next keeps
 full validation of the generated arguments; any other admitted schema is

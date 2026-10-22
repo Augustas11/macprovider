@@ -148,7 +148,7 @@ func validateToolSelection(body []byte, raw map[string]json.RawMessage) (*toolSe
 		if _, exists := policy.schemas[tool.Function.Name]; exists {
 			return fail("invalid_tools", "Duplicate function name")
 		}
-		if !uniqueJSONKeys(tool.Function.Parameters, 2*maxJSONSchemaDepth) {
+		if !uniqueJSONKeys(tool.Function.Parameters, maxJSONSchemaDepth) {
 			return fail("unsupported_tool_schema", "Tool schema contains duplicate keys or exceeds depth cap")
 		}
 		if !toolSchemaNumbersSupported(tool.Function.Parameters) {

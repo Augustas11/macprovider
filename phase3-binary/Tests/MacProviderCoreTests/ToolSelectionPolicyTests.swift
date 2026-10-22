@@ -100,14 +100,16 @@ final class ToolSelectionPolicyTests: XCTestCase {
     }
 
     func testMalformedAndUnsupportedSchemaRejectedBeforeInference() throws {
+        // A schema nested past JSONSchemaValidator.maxDepth containers never
+        // reaches the policy: the request parser bounds every tool first.
         var deep: [String: Any] = ["type": "string"]
-        // 33 levels of object + properties: container depth 66 > 64, still
-        // inside the 128-deep request parse bound.
-        for _ in 0..<33 { deep = ["type": "object", "properties": ["x": deep]] }
+        for _ in 0..<17 { deep = ["type": "object", "properties": ["x": deep]] }
+        XCTAssertThrowsError(try Self.request(schema: deep)) { error in
+            XCTAssertEqual((error as? APIError)?.code, "invalid_tools")
+        }
         for schema: [String: Any] in [
             ["type": "array", "items": ["type": "string"]],
             ["properties": ["x": ["type": "string"]]],
-            deep,
         ] {
             let request = try Self.request(schema: schema)
             XCTAssertThrowsError(try ToolSelectionPolicy.validateRequest(request, loadedModelID: ToolSelectionPolicy.supportedNativeModel, runtime: "mlx_cache")) { error in
