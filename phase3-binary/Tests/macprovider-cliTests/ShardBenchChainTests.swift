@@ -132,13 +132,17 @@ enum ShardBenchTestRig {
         probeCount: Int = 5,
         expectedStages: Int? = nil,
         prefillChunk: Int? = nil,
-        prefillChunkDeadline: TimeInterval = 3
+        prefillChunkDeadline: TimeInterval = 3,
+        epoch: UInt64 = ShardBenchTestRig.epoch,
+        spare: ShardBenchEndpoint? = nil,
+        replayBufferBytes: Int = 1 << 20
     ) -> ShardBenchSessionOptions {
         ShardBenchSessionOptions(
             role: role, listen: nil, connect: nil, expectedStages: expectedStages, modelLabel: "fake",
-            prompts: prompts, tokens: tokens, temperature: 0, seed: 0, link: configuration(),
+            prompts: prompts, tokens: tokens, temperature: 0, seed: 0, link: configuration(epoch: epoch),
             receiveTimeout: 5, connectTimeout: 5, probeCount: probeCount, maxSequences: 8, warmup: true,
-            prefillChunk: prefillChunk, prefillChunkDeadline: prefillChunkDeadline, memberID: nil)
+            prefillChunk: prefillChunk, prefillChunkDeadline: prefillChunkDeadline, memberID: nil,
+            spare: spare, replayBufferBytes: replayBufferBytes, replayDeadline: 5)
     }
 
     static func stages(_ splits: [Range<Int>], total: Int) -> [FakeShardStage] {
@@ -174,7 +178,9 @@ enum ShardBenchTestRig {
         expectedStages: Int? = nil,
         beforeRun: [Int: () -> Void] = [:],
         prefillChunk: Int? = nil,
-        prefillChunkDeadline: TimeInterval = 3
+        prefillChunkDeadline: TimeInterval = 3,
+        spare: ShardBenchEndpoint? = nil,
+        replayBufferBytes: Int = 1 << 20
     ) -> [Result<ShardBenchSessionReport, Error>] {
         let results = ShardBenchResultBox(count: stages.count)
         let group = DispatchGroup()
@@ -182,7 +188,8 @@ enum ShardBenchTestRig {
             let role: ShardBenchRole = index == 0 ? .head : (index == stages.count - 1 ? .tail : .middle)
             let stageOptions = options(
                 role: role, prompts: prompts, tokens: tokens, expectedStages: index == 0 ? expectedStages : nil,
-                prefillChunk: prefillChunk, prefillChunkDeadline: prefillChunkDeadline)
+                prefillChunk: prefillChunk, prefillChunkDeadline: prefillChunkDeadline,
+                spare: index == 0 ? spare : nil, replayBufferBytes: replayBufferBytes)
             let session = ShardBenchSession(options: stageOptions, stage: stage)
             let stageLinks = links[index]
             let prepare = beforeRun[index]
