@@ -1645,6 +1645,86 @@ STAGED_INPUT_KEYS = {
 }
 
 
+STAGED_POLICY_MAX_BYTES = 64 * 1024
+STAGED_REPORT_MAX_BYTES = 32 * 1024 * 1024
+DECODE_MANIFEST_RELATIVE = "phase3-binary/decode-path-manifest.json"
+DECODE_RESOLVED_RELATIVE = "phase3-binary/Package.resolved"
+
+
+def read_bounded(path: Path, limit: int, name: str) -> bytes:
+    target = safe_artifact(path)
+    fd = os.open(target, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        if os.fstat(fd).st_size > limit:
+            raise Refusal(f"{name} exceeds {limit} bytes: {path}")
+        data = os.read(fd, limit + 1)
+    finally:
+        os.close(fd)
+    if len(data) > limit:
+        raise Refusal(f"{name} exceeds {limit} bytes: {path}")
+    return data
+
+
+def read_staged_policy(path: Path, name: str) -> tuple[dict, str]:
+    data = read_bounded(path, STAGED_POLICY_MAX_BYTES, name)
+    try:
+        value = json.loads(data)
+    except ValueError as exc:
+        raise Refusal(f"{name} is invalid JSON") from exc
+    if not isinstance(value, dict):
+        raise Refusal(f"{name} is not a JSON object")
+    return value, hashlib.sha256(data).hexdigest()
+
+
+def source_decode_path_digest(source: Path) -> str:
+    """scripts/decode_path_digest.py's algorithm over the tracked-clean source."""
+    package = source / "phase3-binary"
+    manifest, _ = read_staged_policy(source / DECODE_MANIFEST_RELATIVE, "decode-path manifest")
+    files, dependencies = manifest.get("files"), manifest.get("dependencies")
+    if (
+        manifest.get("schema_version") != "macprovider.decode-path-manifest.v1"
+        or not isinstance(files, list) or not isinstance(dependencies, list)
+        or not files or not dependencies
+        or any(not isinstance(item, str) or not item.startswith("Sources/") or ".." in item.split("/")
+               for item in files)
+    ):
+        raise Refusal("decode-path manifest is invalid")
+    resolved = json.loads(read_bounded(source / DECODE_RESOLVED_RELATIVE, 1024 * 1024, "Package.resolved"))
+    revisions = {
+        pin.get("identity"): (pin.get("state") or {}).get("revision")
+        for pin in resolved.get("pins") or [] if isinstance(pin, dict)
+    }
+    lines = ["macprovider.decode-path-digest.v1"]
+    for item in files:
+        lines.append(f"file {item} {file_sha256(safe_artifact(package / item))}")
+    for identity in dependencies:
+        revision = revisions.get(identity)
+        if not isinstance(revision, str) or not SHA40.fullmatch(revision):
+            raise Refusal(f"Package.resolved has no revision for {identity}")
+        lines.append(f"dependency {identity} {revision}")
+    return hashlib.sha256(("\n".join(lines) + "\n").encode()).hexdigest()
+
+
+def safe_fixture_tree(root: Path) -> None:
+    # Every directory and file must be the operator's and not writable by
+    # group or other, so no other account can change weights after preflight.
+    root = root.resolve(strict=True)
+    stack = [root]
+    while stack:
+        directory = stack.pop()
+        info = directory.lstat()
+        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o022:
+            raise Refusal(f"fixture directory is not operator-only writable: {directory}")
+        with os.scandir(directory) as entries:
+            children = [Path(entry.path) for entry in entries]
+        for path in children:
+            entry_info = path.lstat()
+            if stat.S_ISDIR(entry_info.st_mode):
+                stack.append(path)
+            elif entry_info.st_uid != os.getuid() or stat.S_IMODE(entry_info.st_mode) & 0o022:
+                raise Refusal(f"fixture file is not operator-only writable: {path}")
+
+
 def validate_fixed_policy(value: dict, fixed: dict, shas: tuple[str, ...], name: str) -> None:
     if set(value) != set(fixed) | set(shas):
         raise Refusal(f"{name} policy fields are not the fixed contract")
@@ -1668,7 +1748,7 @@ def validate_glm_parity_policy(value: dict) -> None:
 
 def component_inputs(component: str, source: Path) -> dict[str, str]:
     if component == "glm-parity-prefill512":
-        policy, policy_sha = read_safe_object(source / GLM_PARITY_POLICY_RELATIVE, "GLM parity policy")
+        policy, policy_sha = read_staged_policy(source / GLM_PARITY_POLICY_RELATIVE, "GLM parity policy")
         validate_glm_parity_policy(policy)
         oracle = file_sha256(safe_artifact(source / GLM_PARITY_ORACLE_RELATIVE))
         if oracle != policy["oracle_sha256"]:
@@ -1679,7 +1759,7 @@ def component_inputs(component: str, source: Path) -> dict[str, str]:
             "glm_parity_oracle_sha256": oracle,
             "glm_parity_decode_path_digest": policy["decode_path_digest"],
         }
-    policy, policy_sha = read_safe_object(source / DSV4_POLICY_RELATIVE, "DeepSeek V4 reference policy")
+    policy, policy_sha = read_staged_policy(source / DSV4_POLICY_RELATIVE, "DeepSeek V4 reference policy")
     validate_dsv4_reference_policy(policy)
     return {
         "reference_tree_oid": git_value(source, f"HEAD:{DSV4_TREE_RELATIVE}", "reference script tree"),
@@ -1776,7 +1856,17 @@ def staged_validate_private(manifest: dict, job: dict, root: Path) -> dict[str, 
 
 
 def embedded_decode_path_digest(path: Path) -> str:
-    found = set(DECODE_PATH_MARKER.findall(safe_artifact(path).read_bytes()))
+    # Streamed scan with an overlap longer than the marker, so memory stays bounded.
+    found: set[bytes] = set()
+    tail = b""
+    fd = os.open(safe_artifact(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        for block in iter(lambda: os.read(fd, 4 * 1024 * 1024), b""):
+            window = tail + block
+            found.update(DECODE_PATH_MARKER.findall(window))
+            tail = window[-128:]
+    finally:
+        os.close(fd)
     if len(found) != 1:
         raise Refusal(f"binary does not embed exactly one decode-path digest: {path}")
     return found.pop().decode()
@@ -1786,7 +1876,12 @@ def check_glm_parity_decode_path(manifest: dict, job: dict) -> None:
     # The lab CLI carries glm-parity; the signed release does not. Both must
     # embed the policy's decode-path digest, so the measured prefill and
     # parity are those of the live release's decode path.
+    # The lab CLI is the fixed release-mode build of this tracked-clean clone
+    # (the same build provenance as every lab-CLI job); its source decode-path
+    # digest is recomputed here rather than trusted from the binary marker.
     expected = job["immutable_inputs"]["glm_parity_decode_path_digest"]
+    if source_decode_path_digest(Path(manifest["lab_source_dir"])) != expected:
+        raise Refusal("lab source decode path differs from the GLM parity policy")
     lab = staged_private_paths(preflight_path(manifest) / "artifacts", job["kind"])["diagnostic_cli"]
     live = Path(manifest["install_dir"]) / "macprovider-cli"
     for name, path in (("lab CLI", lab), ("signed provider", live)):
@@ -1799,11 +1894,42 @@ def check_reference_environment(manifest: dict, output: Path) -> None:
     python = str(manifest["artifacts"]["reference_python"]["path"])
     run_checked([python, "-I", "-c", DSV4_ENVIRONMENT_PROBE, *sorted(expected)], output, timeout=120)
     try:
-        observed = json.loads(output.read_text().splitlines()[-1])
+        observed = json.loads(read_bounded(output, STAGED_POLICY_MAX_BYTES, "environment probe").splitlines()[-1])
     except (IndexError, ValueError) as exc:
         raise Refusal(f"reference environment probe is invalid; private log: {output}") from exc
     if observed != expected:
         raise Refusal(f"reference environment differs from the fixed versions; private log: {output}")
+
+
+def authenticate_interpreter(manifest: dict, job: dict) -> str:
+    """Re-authenticate the venv interpreter immediately before it is launched.
+
+    Every link in its lexical chain must be the operator's (or root's) and not
+    writable by group or other, and the resolved target must still have the
+    bound hash. Returns the lexical path to execute (venv semantics need it).
+    """
+    lexical = Path(manifest["artifacts"]["reference_python"]["path"])
+    current = Path(os.path.abspath(lexical))
+    for _ in range(64):
+        link = None
+        for part in [*reversed(current.parents), current]:
+            info = part.lstat()
+            if info.st_uid not in (os.getuid(), 0):
+                raise Refusal(f"reference interpreter path has a foreign owner: {part}")
+            if stat.S_ISLNK(info.st_mode):
+                link = part
+                break
+            if stat.S_IMODE(info.st_mode) & 0o022 and not (stat.S_ISDIR(info.st_mode) and info.st_mode & stat.S_ISVTX):
+                raise Refusal(f"reference interpreter path is writable by group or other: {part}")
+        if link is None:
+            break
+        # Replace the first symlink component with its target and re-walk.
+        current = Path(os.path.normpath(link.parent / os.readlink(link) / current.relative_to(link)))
+    else:
+        raise Refusal("reference interpreter symlink chain is too long")
+    if file_sha256(safe_artifact(lexical, executable=True)) != job["immutable_inputs"]["artifact_sha256"]["reference_python"]:
+        raise Refusal("reference interpreter drifted")
+    return str(lexical)
 
 
 def component_target(component: str, job: dict) -> str:
@@ -1816,6 +1942,7 @@ def staged_preflight(manifest: dict, job: dict, preflight: Path) -> dict:
     components: dict[str, dict] = {}
     for component in STAGED_JOB_KINDS[job["kind"]]:
         root = source / STAGED_COMPONENT_ROOTS[component]
+        safe_fixture_tree(root)
         digest, stamps = snapshot_identity(root)
         if digest != component_target(component, job):
             raise Refusal(f"{component} fixture identity differs from its policy")
@@ -1860,36 +1987,42 @@ def staged_validate_receipt(manifest: dict, job: dict, receipt: dict) -> None:
             raise Refusal("job preflight identity is invalid")
         if snapshot_stamps(root, len(item["stamps"]) + 1) != item["stamps"]:
             raise Refusal(f"{component} fixture changed after job preflight")
+        safe_fixture_tree(root)
 
 
 def glm_parity_summary(path: Path) -> dict:
     try:
-        path = safe_artifact(path)
-        report = json.loads(path.read_bytes())
+        report = json.loads(read_bounded(path, STAGED_REPORT_MAX_BYTES, "GLM parity result"))
         runs = report["runs"]
         measured = runs[0]["measurement"]
         free = measured["free_running"]
-    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        # Swift's synthesized Codable omits a nil optional: an absent
+        # first_divergence means the free run matched every compared token.
+        divergence = free.get("first_divergence")
+        summary = {
+            "prompt_tokens": measured["prompt_tokens"],
+            "prefill_step_size": report["prefill_step_size"],
+            "prefill_tokens_per_second": float(measured["prefill_tokens_per_second"]),
+            "ttft_seconds": float(measured["ttft_seconds"]),
+            "decode_tokens_per_second": float(measured["decode_tokens_per_second"]),
+            "compared_tokens": int(free["compared_tokens"]),
+            "matching_tokens": int(free["matching_tokens"]),
+            "first_divergence": None if divergence is None else int(divergence),
+            "top1_agreement": [int(free["top1_agreement"]), int(free["top1_compared"])],
+        }
+    except (AttributeError, KeyError, IndexError, TypeError, ValueError) as exc:
         raise Refusal(f"GLM parity result is invalid; private log: {path}") from exc
     if (
         report.get("schema") != "glm-parity-v1"
-        or report.get("prefill_step_size") != GLM_PARITY_PROFILE["prefill_step_size"]
+        or summary["prefill_step_size"] != GLM_PARITY_PROFILE["prefill_step_size"]
         or len(runs) != 1
-        or measured.get("prompt_tokens") != GLM_PARITY_POLICY["prompt_tokens"]
+        or summary["prompt_tokens"] != GLM_PARITY_POLICY["prompt_tokens"]
     ):
         raise Refusal(f"GLM parity result is not the fixed run; private log: {path}")
-    return {
-        "prompt_tokens": measured["prompt_tokens"],
-        "prefill_step_size": report["prefill_step_size"],
-        "prefill_tokens_per_second": measured["prefill_tokens_per_second"],
-        "ttft_seconds": measured["ttft_seconds"],
-        "decode_tokens_per_second": measured["decode_tokens_per_second"],
-        "compared_tokens": free["compared_tokens"],
-        "matching_tokens": free["matching_tokens"],
-        "first_divergence": free["first_divergence"],
-        "top1_agreement": [free["top1_agreement"], free["top1_compared"]],
-        "token_parity": free["first_divergence"] is None,
-    }
+    summary["token_parity"] = (
+        summary["first_divergence"] is None and summary["matching_tokens"] == summary["compared_tokens"]
+    )
+    return summary
 
 
 def run_component(manifest: dict, job: dict, component: str, result: Path) -> tuple[list[Path], dict]:
@@ -1913,12 +2046,14 @@ def run_component(manifest: dict, job: dict, component: str, result: Path) -> tu
         return [log, report], glm_parity_summary(report)
     environment = result / "environment.json"
     check_reference_environment(manifest, environment)
+    validate_execution_inputs(manifest, job)
+    interpreter = authenticate_interpreter(manifest, job)
     profile = DSV4_REFERENCE_PROFILE
     reference = result / "reference"
     log = result / "reference.log"
     joined = lambda values: ",".join(str(value) for value in values)
     run_checked([
-        str(manifest["artifacts"]["reference_python"]["path"]), "-I",
+        interpreter, "-I",
         str(private["reference_script"]),
         str(source / STAGED_COMPONENT_ROOTS[component]), str(reference),
         "--oracle-contexts", joined(profile["oracle_contexts"]),
@@ -1941,8 +2076,8 @@ def staged_run(manifest: dict, job: dict, result: Path) -> dict[str, object]:
     for component in STAGED_JOB_KINDS[job["kind"]]:
         try:
             produced, summary = run_component(manifest, job, component, result)
-        except Refusal as exc:
-            status[component] = f"failed: {exc}"
+        except (Refusal, OSError, ValueError, subprocess.SubprocessError) as exc:
+            status[component] = f"failed: {type(exc).__name__}: {exc}"
             continue
         outputs.extend(produced)
         if summary:

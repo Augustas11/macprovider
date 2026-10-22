@@ -166,8 +166,9 @@ script, and pins the fixture metadata.
 - **Restore:** the provider is restored once, after the child exits, with the same supervisor guarantees.
 - **Failure:** a failing first component does not stop the second. The job fails if either fails, and `partial-result.json` keeps what completed.
 - **Ceiling:** the window ceiling is 9000 seconds. The no-model preflight that hashes both fixtures before the pause is bounded at 1500 seconds.
+- **Integrity:** fixtures must be operator-only writable. The GLM parity job recomputes the lab source's decode-path digest and requires it in both binaries. The venv interpreter's symlink chain and hash are re-checked immediately before launch.
 
-
+Before pausing service, qualification runs the harness's authoritative
 `--validate-only` preflight without loading the model. A policy not admitted
 by that parser is refused. This runner does not raise the signed production
 bound or bypass policy validation; laboratory-bound amendments belong to the

@@ -316,10 +316,21 @@ fi
         cli.write_text(text)
         cli.chmod(0o700)
 
-    DIGEST = "d" * 64
-
     def _write_staged_inputs(self, environment=None, live_digest=None) -> None:
         """Inputs for the staged GLM parity and DeepSeek V4 reference jobs."""
+        package = self.source / "phase3-binary"
+        (package / "Sources").mkdir(mode=0o700, exist_ok=True)
+        (package / "Sources/Decode.swift").write_text("// decode path\n")
+        write_json(package / "decode-path-manifest.json", {
+            "schema_version": "macprovider.decode-path-manifest.v1",
+            "files": ["Sources/Decode.swift"], "dependencies": ["mlx-swift"],
+        })
+        write_json(package / "Package.resolved", {"pins": [
+            {"identity": "mlx-swift", "state": {"revision": "a" * 40}},
+        ]})
+        subprocess.run(["git", "-C", str(self.source), "add", "phase3-binary"], check=True)
+        subprocess.run(["git", "-C", str(self.source), "commit", "-qm", "decode path"], check=True)
+        self.DIGEST = jobs.source_decode_path_digest(self.source)
         marker = f"macprovider.decode-path-digest.v1:{self.DIGEST}"
         cli = self.paths["diagnostic_cli"].resolve()
         cli.write_text(f"""#!/bin/sh
@@ -328,7 +339,7 @@ printf '%s\\t' "$@" >> {str(self.calls)!r}
 printf '\\n' >> {str(self.calls)!r}
 [ "$1" = glm-parity ] || exit 0
 while [ "$#" -gt 0 ]; do [ "$1" = --output ] && out="$2"; shift; done
-printf '%s\\n' '{{"schema":"glm-parity-v1","prefill_step_size":512,"runs":[{{"measurement":{{"prompt_tokens":8192,"prefill_tokens_per_second":280.5,"ttft_seconds":29.3,"decode_tokens_per_second":20.1,"free_running":{{"compared_tokens":256,"matching_tokens":256,"first_divergence":null,"top1_agreement":16,"top1_compared":16}}}}}}]}}' > "$out"
+printf '%s\\n' '{{"schema":"glm-parity-v1","prefill_step_size":512,"runs":[{{"measurement":{{"prompt_tokens":8192,"prefill_tokens_per_second":280.5,"ttft_seconds":29.3,"decode_tokens_per_second":20.1,"free_running":{{"compared_tokens":256,"matching_tokens":256,"top1_agreement":16,"top1_compared":16}}}}}}]}}' > "$out"
 """)
         cli.chmod(0o700)
         install = self.root / "install"
@@ -966,6 +977,66 @@ class StudioLabJobsTests(unittest.TestCase):
         self.assertEqual(partial["components"]["dsv4-reference"], "completed")
         self.assertTrue(partial["components"]["glm-parity-prefill512"].startswith("failed"))
         self.assertFalse((out / "result.json").exists())
+
+    def test_staged_constants_agree_across_helper_remote_and_controller(self):
+        self.assertEqual(jobs.STAGED_WINDOW_TIMEOUTS, remote.STAGED_WINDOW_TIMEOUTS)
+        self.assertEqual(set(jobs.STAGED_JOB_KINDS), set(remote.STAGED_VALIDATE_TIMEOUTS))
+        self.assertTrue(set(jobs.STAGED_JOB_KINDS) <= set(remote.JOB_KINDS))
+        controller = (ROOT / "scripts/ops/studio-lab-window.sh").read_text()
+        for kind, ceiling in jobs.STAGED_WINDOW_TIMEOUTS.items():
+            self.assertEqual(set(remote.job_artifact_keys({"kind": kind})), jobs.artifact_fields(kind))
+            self.assertIn(f"    {kind}) printf '{ceiling}' ;;", controller)
+            self.assertGreaterEqual(ceiling, sum(
+                jobs.STAGED_COMMAND_TIMEOUTS[item] for item in jobs.STAGED_JOB_KINDS[kind]
+            ))
+
+    def test_glm_parity_report_without_divergence_is_full_parity(self):
+        self.fixture._write_staged_inputs()
+        manifest = self.fixture.manifest("glm-parity-prefill512")
+        jobs.validate_job(argparse.Namespace(manifest=str(manifest)))
+        result = jobs.run_job(argparse.Namespace(manifest=str(manifest)))
+        parity = result["measurements"]["glm-parity-prefill512"]
+        self.assertIsNone(parity["first_divergence"])
+        self.assertTrue(parity["token_parity"])
+
+    def test_sequence_continues_after_an_unparseable_parity_report(self):
+        self.fixture._write_staged_inputs()
+        cli = self.fixture.paths["diagnostic_cli"].resolve()
+        cli.write_text(cli.read_text().replace('"schema":"glm-parity-v1"', '"schema":"glm-parity-v1","runs_missing":1').replace('"runs":', '"r":'))
+        cli.chmod(0o700)
+        kind = "glm-parity-prefill512-then-dsv4-reference"
+        manifest = self.fixture.manifest(kind)
+        jobs.validate_job(argparse.Namespace(manifest=str(manifest)))
+        with self.assertRaisesRegex(jobs.Refusal, "components failed: glm-parity-prefill512"):
+            jobs.run_job(argparse.Namespace(manifest=str(manifest)))
+        partial = json.loads((self._staged_result_dir(kind) / "partial-result.json").read_text())
+        self.assertEqual(partial["components"]["dsv4-reference"], "completed")
+
+    def test_glm_parity_refuses_a_source_off_the_policy_decode_path(self):
+        self.fixture._write_staged_inputs()
+        manifest = self.fixture.manifest("glm-parity-prefill512")
+        decode = self.fixture.source / "phase3-binary/Sources/Decode.swift"
+        decode.write_text("// changed decode path\n")
+        with self.assertRaisesRegex(jobs.Refusal, "lab source decode path differs"):
+            jobs.check_glm_parity_decode_path(*jobs.load_job_manifest(str(manifest)))
+
+    def test_staged_fixture_writable_by_others_refuses_preflight(self):
+        self.fixture._write_staged_inputs()
+        weights = self.fixture.source / ".lab-window/fixture/dsv4-target/model-00001-of-00001.safetensors"
+        weights.chmod(0o666)
+        manifest = self.fixture.manifest("dsv4-reference")
+        with self.assertRaisesRegex(jobs.Refusal, "not operator-only writable"):
+            jobs.validate_job(argparse.Namespace(manifest=str(manifest)))
+
+    def test_reference_interpreter_swap_before_launch_refuses(self):
+        self.fixture._write_staged_inputs()
+        manifest = self.fixture.manifest("dsv4-reference")
+        jobs.validate_job(argparse.Namespace(manifest=str(manifest)))
+        loaded, job = jobs.load_job_manifest(str(manifest))
+        python = self.fixture.paths["reference_python"]
+        python.write_text(python.read_text() + "# swapped\n")
+        with self.assertRaisesRegex(jobs.Refusal, "reference interpreter drifted"):
+            jobs.authenticate_interpreter(loaded, job)
 
     def test_glm_parity_refuses_a_lab_cli_off_the_live_decode_path(self):
         self.fixture._write_staged_inputs(live_digest="e" * 64)
