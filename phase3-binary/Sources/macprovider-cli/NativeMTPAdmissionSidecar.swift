@@ -1499,8 +1499,10 @@ enum NativeMTPAdmissionSidecar {
             "increase_threshold_ppm", "max_verification_positions_per_committed_milli",
             "throughput_delta_ppm", "benchmark_policy_sha256", "challenge_bank_sha256",
             "quantization", "ordinary_baseline",
-            "decode_path_digest", "metallib_sha256",
-        ] + evidenceKeys), path: path)
+        ] + evidenceKeys).union(
+            // SPEC-048-R013 (0.1.51): optional; checked as a pair below.
+            ["decode_path_digest", "metallib_sha256"].filter(object.keys.contains)
+        ), path: path)
         let hashAlgorithm = try requireString(
             object,
             "hash_algorithm",
@@ -1575,10 +1577,10 @@ enum NativeMTPAdmissionSidecar {
             try requireSHA256(object, key, path: path)
         }
         // SPEC-048-R013 (0.1.51): the decode-path binding is both fields or neither.
-        let decodePathDigest = object["decode_path_digest"] == nil
-            ? nil : try requireSHA256(object, "decode_path_digest", path: path)
-        let metallibSHA256 = object["metallib_sha256"] == nil
-            ? nil : try requireSHA256(object, "metallib_sha256", path: path)
+        let decodePathDigest = object.keys.contains("decode_path_digest")
+            ? try requireSHA256(object, "decode_path_digest", path: path) : nil
+        let metallibSHA256 = object.keys.contains("metallib_sha256")
+            ? try requireSHA256(object, "metallib_sha256", path: path) : nil
         if (decodePathDigest == nil) != (metallibSHA256 == nil) {
             throw NativeMTPAdmissionSidecarError.missingField(
                 decodePathDigest == nil ? "\(path).decode_path_digest" : "\(path).metallib_sha256")

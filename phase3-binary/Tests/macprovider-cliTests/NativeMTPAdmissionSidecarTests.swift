@@ -1141,7 +1141,6 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
             entry["decode_path_digest"] = DecodePathIdentity.digest
             entry["metallib_sha256"] = Self.decodePathMetallib
             entry["source_commit"] = String(repeating: "9", count: 40)
-            entry["provider_revision"] = String(repeating: "9", count: 40)
             entry["reproducible_build_sha256"] = String(repeating: "8", count: 64)
             entry["live_executable_cdhash"] = String(repeating: "7", count: 40)
         })
