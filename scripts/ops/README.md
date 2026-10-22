@@ -51,8 +51,13 @@ artifact and a genuine installed-only, check-only recommendation (no benchmark).
 The config journal validates and owns only the model/allowlist/warm-swap fields
 and the qualified 512 MiB MLX cache setting. Released `provider context set`
 preflights and applies the qualified 8192-token context under an armed journal
-intent. No concurrency override is manufactured: signed policy and runtime
-self-check must actually grant all four slots. Failure restores the incumbent
+intent. Once the actual released process reports the exact signed Air tuple
+with `verified_k >= 4`, the operator-requested four slots are selected through
+a validated journaled `max_concurrency_source: owner` setting (SPEC-038 FR-CB11).
+The measured preferred count remains distinct and is recorded, not rewritten;
+no recommendation or self-check record is manufactured. After restart, the
+new signed process must still report verified, served, scheduler and capacity
+counts of four before paid proof or enrollment. Failure restores the incumbent
 configuration; interruption selects journal restoration before new adoption.
 
 A provider-attributed paid gateway proof and unchanged signed process identity

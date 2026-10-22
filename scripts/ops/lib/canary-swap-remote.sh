@@ -605,7 +605,8 @@ else
   refuse "install dir $INSTALL_DIR resolves through a symlink"
 [ -O "$INSTALL_DIR" ] || refuse "install dir $INSTALL_DIR is not owned by $(id -un)"
 fi
-[ "$MODE" != swap ] || { [ ! -e "$BACKUP" ] && [ ! -e "$FAILED_DIR" ]; } || refuse "backup path $BACKUP already exists"
+[ "$MODE" != swap ] || [ "$AIR_ACTION" = restore-air ] ||
+  { [ ! -e "$BACKUP" ] && [ ! -e "$FAILED_DIR" ]; } || refuse "backup path $BACKUP already exists"
 [ -f "$LA_DIR/$LABEL.plist" ] || refuse "missing LaunchAgent $LA_DIR/$LABEL.plist"
 [ "$MODE" = swap ] || {
   case "$CONFIG" in "$HOME"/?*) ;; *) refuse "config is not under HOME" ;; esac

@@ -41,9 +41,10 @@ gather
         self.assertEqual(result.stderr, "")
 
     def test_stale_completion_and_restore_lock_refusal_leave_current_attempt_pending(self):
-        for action, result_stage, rc in (("recover-air", "/old/stage", 5),
-                                         ("recover-air", "/old/stage", 0),
-                                         ("restore-air", "/new/stage", 4)):
+        for action, result_stage, rc, busy in (("recover-air", "/old/stage", 5, 0),
+                                               ("recover-air", "/old/stage", 0, 0),
+                                               ("restore-air", "/new/stage", 4, 0),
+                                               ("recover-air", "/new/stage", 0, 1)):
             code = function("gather") + '''
 settings() { :; }
 marker_done() { return 0; }
@@ -57,13 +58,13 @@ marker_field() {
     *exit_code*) echo "$RC";;
   esac
 }
-studio_ssh() { return 1; }
+studio_ssh() { [ "$BUSY" = 1 ]; }
 set_next() { printf '%s %s' "$1" "$2"; }
 helper() { echo unexpected >&2; return 99; }
 AIR_PROVIDER_SHA256=provider VERSION=1.8.260
 gather
 '''
-            result = self.shell(f'ACTION={action} RESULT_STAGE={result_stage} RC={rc}\n' + code)
+            result = self.shell(f'ACTION={action} RESULT_STAGE={result_stage} RC={rc} BUSY={busy}\n' + code)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout, "payload_recovery mutate")
             self.assertEqual(result.stderr, "")
@@ -110,11 +111,14 @@ stage=/current/stage AIR_RECOVERY_PROVIDER_SHA256=provider OPS_SCOPE=scope
                   "continuous_batching.policy.policy_sha256": hashlib.sha256(raw).hexdigest(),
                   "continuous_batching.policy.release_id": policy["release_id"],
                   "continuous_batching.policy.tuple_sha256": entry["tuple_sha256"],
+                  "continuous_batching.self_check.model_sha256": entry["model_sha256"],
+                  "continuous_batching.self_check.verified_k": 4,
                   "continuous_batching.self_check.served_slots": 4,
                   "continuous_batching.scheduler.slots_total": 4, "capacity.max_concurrency": 4}
         with tempfile.TemporaryDirectory() as directory:
-            for slots, expected in ((4, 0), (3, 1)):
+            for slots, verified, expected in ((4, 4, 0), (3, 4, 1), (4, 1, 1), (4, 2, 1)):
                 status["capacity.max_concurrency"] = slots
+                status["continuous_batching.self_check.verified_k"] = verified
                 Path(directory, "air-probe.json").write_text(json.dumps({"status": status}))
                 result = self.shell(function("target_ready") +
                                     f'\nOPS_TMP_DIR="{directory}" REPO_ROOT="{ROOT}"\ntarget_ready')
@@ -151,6 +155,9 @@ class AirDetachedRecoveryTests(unittest.TestCase):
             "Label": "live.malibu.provider", "ProgramArguments":
             [str(self.binary), "serve", "--config", str(self.config)]}))
         scripts = {
+            "date": '''#!/bin/sh
+if [ -n "${FAKE_FIXED_TIMESTAMP:-}" ] && [ "$*" = '-u +%Y%m%dT%H%M%SZ' ]; then echo "$FAKE_FIXED_TIMESTAMP"; else exec /bin/date "$@"; fi
+''',
             "sysctl": '#!/bin/sh\ncase "$*" in *hw.model*) echo Mac15,12;; *) echo 17179869184;; esac\n',
             "codesign": "#!/bin/sh\nexit 0\n",
             "launchctl": '''#!/bin/sh
@@ -239,6 +246,18 @@ exec /bin/cp "$@"
         self.assertFalse((self.stage / "result.restored").exists())
         self.assertFalse((self.stage / "result").exists())
         self.assertTrue(lock.exists())
+
+    def test_loss_after_backup_before_arm_can_cancel_without_backup_collision(self):
+        (self.home / "macprovider.pre-1.8.260-20000101T000000Z").mkdir()
+        result = self.run_remote(FAKE_FIXED_TIMESTAMP="20000101T000000Z")
+        self.assertEqual(result.returncode, 5, result.stderr)
+        self.assertEqual(self.binary.read_text(), "#!/bin/sh\necho 1.8.258\n")
+
+    def test_never_started_recovery_refuses_changed_baseline_config(self):
+        self.config.write_text("model: externally-changed\n")
+        result = self.run_remote()
+        self.assertEqual(result.returncode, 4, result.stderr)
+        self.assertFalse((self.stage / "result.restored").exists())
 
     def test_interruption_after_move_recovers_absent_install(self):
         self.arm()

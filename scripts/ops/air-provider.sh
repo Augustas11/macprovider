@@ -142,7 +142,7 @@ gather() {
 }
 
 target_ready() {
-  python3 - "$OPS_TMP_DIR/air-probe.json" "$REPO_ROOT/phase3-binary/catalog/autotune/continuous-batching-policy.json" <<'PY'
+  python3 - "$OPS_TMP_DIR/air-probe.json" "$REPO_ROOT/phase3-binary/catalog/autotune/continuous-batching-policy.json" "${1:-serving}" <<'PY'
 import hashlib, json, sys
 d=json.load(open(sys.argv[1]))["status"]
 raw=open(sys.argv[2],"rb").read(); p=json.loads(raw)
@@ -155,8 +155,12 @@ expected={"binary_version":"1.8.260","model":"qwen3-8b","model_loaded":True,
 "continuous_batching.policy.policy_sha256":hashlib.sha256(raw).hexdigest(),
 "continuous_batching.policy.release_id":p["release_id"],
 "continuous_batching.policy.tuple_sha256":rows[0]["tuple_sha256"],
-"continuous_batching.self_check.served_slots":4,"continuous_batching.scheduler.slots_total":4,
-"capacity.max_concurrency":4}
+"continuous_batching.self_check.model_sha256":rows[0]["model_sha256"]}
+if sys.argv[3] == "serving":
+    expected.update({"continuous_batching.self_check.served_slots":4,
+                     "continuous_batching.scheduler.slots_total":4,"capacity.max_concurrency":4})
+verified=d.get("continuous_batching.self_check.verified_k")
+if type(verified) is not int or verified < 4: raise SystemExit(1)
 if any(d.get(k)!=v for k,v in expected.items()): raise SystemExit(1)
 PY
 }
@@ -238,12 +242,25 @@ adopt() {
   helper air-context --action begin --config "$AIR_CONFIG" --journal "$AIR_JOURNAL" >/dev/null || return 6
   remote_cli provider context set 8192 --apply --config "$AIR_CONFIG" --port "$AIR_STATUS_PORT" >/dev/null || return 6
   helper air-context --action finish --config "$AIR_CONFIG" --journal "$AIR_JOURNAL" >/dev/null || return 6
+  # The owner's requested four slots may differ from the measured throughput
+  # preference. Never select them until this actual released process verifies4.
+  for attempt in $(seq 1 240); do
+    if probe >/dev/null 2>&1 && target_ready verified; then break; fi
+    [ "$attempt" != 240 ] || return 6
+    sleep 5
+  done
+  signed_identity "$VERSION" || return 6
+  before_pid="$(json_field "$OPS_TMP_DIR/air-probe.json" 'd["launch"]["pid"]')"
+  studio_ssh "umask 077; cat > $(q "$scratch/cb-policy.json")" < "$REPO_ROOT/phase3-binary/catalog/autotune/continuous-batching-policy.json" || return 6
+  helper select-air-four --config "$AIR_CONFIG" --journal "$AIR_JOURNAL" --validator "$AIR_INSTALL_DIR/macprovider-cli" --provider-sha256 "$AIR_PROVIDER_SHA256" --port "$AIR_STATUS_PORT" --pid "$before_pid" --policy-json "$scratch/cb-policy.json" >/dev/null || return 6
+  helper restart-service --config "$AIR_CONFIG" --validator "$AIR_INSTALL_DIR/macprovider-cli" >/dev/null || return 6
   for attempt in $(seq 1 240); do
     if probe >/dev/null 2>&1 && target_ready; then break; fi
     [ "$attempt" != 240 ] || return 6
     sleep 5
   done
   signed_identity "$VERSION" || return 6
+  [ "$(json_field "$OPS_TMP_DIR/air-probe.json" 'd["launch"]["pid"]')" != "$before_pid" ] || return 6
   before_pid="$(json_field "$OPS_TMP_DIR/air-probe.json" 'd["launch"]["pid"]')"
   before_start="$(json_field "$OPS_TMP_DIR/air-probe.json" 'd["launch"]["process_start_us"]')"
   CATALOG_REQUIRE_NATIVE_MTP_FORWARD=false PROBE_MODEL="$MODEL" "$OPS_DIR/catalog-activate.sh" _gateway-proof > "$OPS_TMP_DIR/paid-proof.txt" 2>&1 || return 6
