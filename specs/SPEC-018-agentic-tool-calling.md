@@ -29,7 +29,7 @@ SPEC-018 is the **provider-side response synthesis contract** for OpenAI-wire to
   as content. The stream holds such an output until the final parse.
   (2) §3.10 rule 1a: the Harmony `analysis` channel bodies are returned as
   `reasoning_content` with `usage.completion_tokens_details.reasoning_tokens`;
-  they still never reach `content`. (3) §3.10 rule 5 and AC-57: a request stop
+  they still never reach `content`. A streaming Harmony turn is served on the serial path, which parses channels from token IDs, never on the continuous-batching stream sink. (3) §3.10 rule 5 and AC-57: a request stop
   string applies to the visible `final` body only; a match inside a hidden
   channel neither ends generation nor fails the response. A `length` finish
   inside an `analysis` body returns HTTP 200 with `finish_reason:"length"`,

@@ -517,9 +517,25 @@ func TestToolSelectionAdmitsOrdinaryOpenAISchema(t *testing.T) {
 	if err := validateToolSelectionOutput(policy, output(`{"path":"/etc/hosts"}`), false); err != nil {
 		t.Fatalf("valid call rejected: %v", err)
 	}
+	// Audit r1: the numeric domain holds for non-strict output too.
+	if err := validateToolSelectionOutput(policy, output(`{"path":"/etc/hosts","n":9007199254740993}`), false); err == nil {
+		t.Fatal("out-of-domain number accepted for a non-strict schema")
+	}
 	for _, arguments := range []string{`{}`, `{"file":"/etc/hosts"}`, `[]`} {
 		if err := validateToolSelectionOutput(policy, output(arguments), false); err == nil {
 			t.Fatalf("arguments %s accepted without the required path", arguments)
 		}
+	}
+}
+
+// Audit r1: only the exact "required" member names required keys; a
+// differently cased member must not replace it (Swift uses exact lookup).
+func TestToolSelectionNonStrictRequiredIsExactKey(t *testing.T) {
+	schema := json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"Required":[]}`)
+	if toolArgumentsMatchSchema(schema, false, json.RawMessage(`{}`)) {
+		t.Fatal("cased Required member replaced the required list")
+	}
+	if !toolArgumentsMatchSchema(schema, false, json.RawMessage(`{"path":"a"}`)) {
+		t.Fatal("valid arguments rejected")
 	}
 }

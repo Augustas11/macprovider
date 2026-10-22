@@ -472,12 +472,14 @@ enum HarmonyResponseParser {
                     // malformed response.
                     reasoningContent += body
                     reasoningTokenCount += bodyTokenIDs.count
+                    // No visible content: a final frame before the cut does not
+                    // make a length-truncated reasoning turn an answer.
                     return ParseResult(
                         status: .incomplete,
-                        content: nilIfEmpty(finalContent),
+                        content: nil,
                         toolCalls: [],
-                        finalContentTokenCount: finalContentTokenCount,
-                        finalContentTokenIDs: finalContentTokenIDs,
+                        finalContentTokenCount: 0,
+                        finalContentTokenIDs: [],
                         failure: nil,
                         reasoningContent: reasoningContent,
                         reasoningTokenCount: reasoningTokenCount

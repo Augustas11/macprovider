@@ -6071,7 +6071,11 @@ maxTokens: 1,
         if HarmonyResponseParser.isHarmonyModelID(request.model),
            isStructuredResponseFormat(request.responseFormat)
             || hasEnabledTools(request.promptSource.tools)
-            || request.stop.contains(where: { !$0.isEmpty }) {
+            || request.stop.contains(where: { !$0.isEmpty })
+            // SPEC-018 §3.10 rules 1a/4: the batched stream sink emits decoded
+            // text, not Harmony channels parsed from token IDs, so a streaming
+            // Harmony turn is served serially (reasoning before content).
+            || request.stream {
             return false
         }
         // logit_bias and logprobs (incl. top_logprobs metadata) have no carrier in
@@ -14239,6 +14243,11 @@ struct NativeToolCallStreamEmitter {
             observeComplete(text)
             return []
         }
+        if grammar == .qwen, Self.mayOpenQwenBareCalls(text) {
+            // A held bare body is classified by the final parse; `<tool_call>`
+            // inside one of its argument strings is data, not framing.
+            return []
+        }
         if let start = text.range(of: startDelimiter) {
             sawToolDelimiter = true
             let afterStart = start.upperBound
@@ -14426,8 +14435,11 @@ struct NativeToolCallStreamEmitter {
     }
 
     static func mayOpenQwenBareCalls(_ text: String) -> Bool {
+        guard !text.isEmpty else { return false }
         let lead = text.drop(while: { $0.isWhitespace })
-        guard !lead.isEmpty else { return false }
+        // Leading whitespace is held too: the final parse trims it away when
+        // the output is a bare call, and flushes it when the output is prose.
+        guard !lead.isEmpty else { return true }
         let wrapper = ToolCallParser.qwenBareWrapperOpen
         return lead.hasPrefix("{") || lead.hasPrefix(wrapper) || wrapper.hasPrefix(lead)
     }

@@ -321,8 +321,7 @@ enum ToolCallParser {
     /// declared name. Anything else returns nil and the tagged grammar runs.
     static func parseQwenBareCalls(_ rawOutput: String, allowedFunctionNames: Set<String>?) -> [ToolCall]? {
         guard let allowedFunctionNames, !allowedFunctionNames.isEmpty,
-              rawOutput.utf8.count <= SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP,
-              !rawOutput.contains("<tool_call>"), !rawOutput.contains("<function=") else { return nil }
+              rawOutput.utf8.count <= SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else { return nil }
         var text = Substring(rawOutput.trimmingCharacters(in: .whitespacesAndNewlines))
         if text.hasPrefix(qwenBareWrapperOpen) {
             guard text.hasSuffix(qwenBareWrapperClose) else { return nil }

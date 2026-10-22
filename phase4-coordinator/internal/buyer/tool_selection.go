@@ -344,18 +344,25 @@ func validateToolSelectionOutput(policy *toolSelectionPolicy, body []byte, strea
 // other admitted schema for its root required properties (mirrors Swift
 // ToolSelectionPolicy.validateOutput).
 func toolArgumentsMatchSchema(schema json.RawMessage, strict bool, raw json.RawMessage) bool {
+	// Every generated number stays in the finite safe domain (SPEC-018 §3.11),
+	// whichever validation the schema gets; Swift checks it before both.
+	if !toolSchemaNumbersSupported(raw) {
+		return false
+	}
 	if strict {
 		return toolArgumentsConform(schema, raw)
-	}
-	var node struct {
-		Required []json.RawMessage `json:"required"`
 	}
 	var value map[string]json.RawMessage
 	if json.Unmarshal(raw, &value) != nil || value == nil {
 		return false
 	}
+	// Exact-key lookup, as Swift does: struct decoding would also match a
+	// differently cased "required" member.
+	var node map[string]json.RawMessage
+	var required []json.RawMessage
 	_ = json.Unmarshal(schema, &node)
-	for _, entry := range node.Required {
+	_ = json.Unmarshal(node["required"], &required)
+	for _, entry := range required {
 		var key string
 		if json.Unmarshal(entry, &key) != nil {
 			continue

@@ -122,4 +122,36 @@ final class BuyerUXConformanceRegressionTests: XCTestCase {
         let call = try XCTUnwrap(ToolCallParser.parseGuaranteedToolCalls(raw, schemas: schemas).first)
         XCTAssertEqual(call.arguments, #"{"n":3,"path":"/etc/hosts"}"#)
     }
+
+    /// Audit r1: call markup inside a bare body's argument string is data.
+    func testQwenBareBodyKeepsMarkerTextInArguments() throws {
+        let raw = #"{"name": "read_file", "arguments": {"path": "notes <tool_call> and <function=x>"}}"#
+        let parsed = parse(raw)
+        XCTAssertEqual(parsed.toolCalls.map(\.arguments), [#"{"path":"notes <tool_call> and <function=x>"}"#])
+        var emitter = NativeToolCallStreamEmitter(modelID: "qwen2.5-coder-32b-instruct", grammar: .qwen, allowedFunctionNames: ["read_file"])
+        XCTAssertTrue(emitter.observe(raw).isEmpty, "no incremental delta from marker text inside a held body")
+        XCTAssertEqual(emitter.visibleContentPrefix(of: raw), "")
+    }
+
+    /// Audit r1: leading whitespace before a bare body is held, so the stream
+    /// matches the non-stream response (calls, no content); before prose it
+    /// is released with the prose.
+    func testQwenStreamHoldsLeadingWhitespace() {
+        let emitter = NativeToolCallStreamEmitter(modelID: "qwen2.5-coder-32b-instruct", grammar: .qwen, allowedFunctionNames: ["read_file"])
+        XCTAssertEqual(emitter.visibleContentPrefix(of: "\n"), "")
+        XCTAssertEqual(emitter.visibleContentPrefix(of: "\n" + Self.coderBareCall), "")
+        XCTAssertEqual(emitter.visibleContentPrefix(of: "\nHello"), "\nHello")
+    }
+
+    /// Audit r1: a streaming Harmony turn never takes the batched stream sink,
+    /// which emits decoded text instead of parsed channels.
+    func testStreamingHarmonyIsNotBatchRepresentable() throws {
+        func request(stream: Bool) throws -> ChatCompletionRequest {
+            try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: [
+                "model": "openai/gpt-oss-20b", "messages": [["role": "user", "content": "hi"]], "stream": stream,
+            ]))
+        }
+        XCTAssertFalse(ModelRuntime.requestStateRepresentable(try request(stream: true)))
+        XCTAssertTrue(ModelRuntime.requestStateRepresentable(try request(stream: false)))
+    }
 }

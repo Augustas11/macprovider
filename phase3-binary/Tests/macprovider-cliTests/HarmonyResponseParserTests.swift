@@ -1769,6 +1769,15 @@ final class HarmonyResponseParserTests: XCTestCase {
         }
         // Without a length finish an unterminated analysis is still malformed.
         XCTAssertEqual(parse(ids).status, .malformed)
+
+        // Audit r1: a final frame before the cut does not become content.
+        let afterFinal = [token(.channel), text("final"), token(.message), text("draft"), token(.end),
+                          token(.start), text("assistant"), token(.channel), text("analysis"), token(.message), text("more")]
+        let truncated = parse(afterFinal, mode: .complete(finishReason: "length"))
+        XCTAssertEqual(truncated.status, .incomplete)
+        XCTAssertNil(truncated.content)
+        XCTAssertEqual(truncated.finalContentTokenCount, 0)
+        XCTAssertEqual(truncated.reasoningContent, "more")
     }
 
     func testSerialDecodeRequestStopObserverLeavesHarmonyNoStopRequestsAlone() throws {
