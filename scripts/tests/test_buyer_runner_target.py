@@ -57,10 +57,11 @@ class RunnerTargetTests(unittest.TestCase):
         path, journal = Mock(), Mock()
         path.read_bytes.return_value = b"new"
         state = {"phase": "prepared", "before": "old", "before_sha256": runner.digest(b"old"), "after_sha256": runner.digest(b"new"), "mode": 0o644}
-        with patch.object(runner, "secure_path", return_value=path), patch.object(runner, "validate"), patch.object(runner, "atomic") as write, patch.object(runner, "service", return_value=True) as service, patch.object(runner, "stable", return_value=True), patch.object(runner, "save") as save:
+        with patch.object(runner, "secure_path", return_value=path), patch.object(runner, "validate"), patch.object(runner, "atomic") as write, patch.object(runner, "main_pid", return_value="123"), patch.object(runner, "service", return_value=True) as service, patch.object(runner, "stable", return_value=True) as stable, patch.object(runner, "save") as save:
             runner.recover(path, journal, state)
             write.assert_called_once_with(path, b"old", 0o644)
             service.assert_called_once_with("restart")
+            stable.assert_called_once_with("123")
             self.assertEqual(state["phase"], "restored")
             save.assert_called_once()
 
@@ -68,7 +69,7 @@ class RunnerTargetTests(unittest.TestCase):
         path = Mock()
         path.read_bytes.return_value = b"new"
         state = {"phase": "prepared", "before": "old", "before_sha256": runner.digest(b"old"), "after_sha256": runner.digest(b"new"), "mode": 0o644}
-        with patch.object(runner, "secure_path", return_value=path), patch.object(runner, "validate"), patch.object(runner, "atomic"), patch.object(runner, "service", return_value=False) as service, patch.object(runner, "stable", return_value=False), patch.object(runner, "save") as save:
+        with patch.object(runner, "secure_path", return_value=path), patch.object(runner, "validate"), patch.object(runner, "atomic"), patch.object(runner, "main_pid", return_value="123"), patch.object(runner, "service", return_value=False) as service, patch.object(runner, "stable", return_value=False), patch.object(runner, "save") as save:
             with self.assertRaises(RuntimeError):
                 runner.recover(path, Mock(), state)
             self.assertEqual([c.args[0] for c in service.call_args_list], ["restart", "start"])
@@ -78,6 +79,10 @@ class RunnerTargetTests(unittest.TestCase):
     def test_systemctl_timeout_does_not_skip_recovery(self):
         with patch.object(runner.subprocess, "run", side_effect=subprocess.TimeoutExpired("systemctl", 45)):
             self.assertFalse(runner.service("restart"))
+
+    def test_old_process_cannot_prove_restarted_membership(self):
+        with patch.object(runner.subprocess, "check_output", return_value=b"MainPID=123\nActiveState=active\n"), patch.object(runner.time, "monotonic", side_effect=[0, 0, 31]), patch.object(runner.time, "sleep"):
+            self.assertFalse(runner.stable("123"))
 
 
 if __name__ == "__main__":

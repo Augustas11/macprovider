@@ -95,7 +95,11 @@ def service(action):
         return False
 
 
-def stable():
+def main_pid():
+    return subprocess.check_output(["systemctl", "show", SERVICE, "-p", "MainPID", "--value"], timeout=5).decode().strip()
+
+
+def stable(exclude_pid):
     # A parsed-invalid file exits synchronously. Require one stable process,
     # rather than accepting systemd's short active state during an auto-restart.
     previous = None
@@ -110,7 +114,7 @@ def stable():
             continue
         fields = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
         pid = fields.get("MainPID", "0")
-        if fields.get("ActiveState") == "active" and pid != "0":
+        if fields.get("ActiveState") == "active" and pid not in ("0", exclude_pid):
             if pid != previous:
                 previous, since = pid, time.monotonic()
             if time.monotonic() - since >= 3:
@@ -143,8 +147,9 @@ def recover(path, journal, state):
         raise ValueError("journal baseline mismatch")
     validate(baseline)
     atomic(path, baseline, state["mode"])
+    old_pid = main_pid()
     service("restart")
-    if not stable():
+    if not stable(old_pid):
         service("start")
         raise RuntimeError("runner recovery not stable; journal retained")
     state["phase"] = "restored"
@@ -184,9 +189,10 @@ def execute(args):
     try:
         if digest(path.read_bytes()) != state["before_sha256"]:
             raise ValueError("concurrent target edit")
+        old_pid = main_pid()
         atomic(path, after, state["mode"])
         service("restart")
-        if not stable():
+        if not stable(old_pid):
             raise RuntimeError("enrolled runner not stable")
         state["phase"] = "committed"
         save(journal, state)
