@@ -20,6 +20,56 @@ PROBE="$OPS_DIR/lib/studio-owner-pin-probe.py"
 RUNNER_HELPER="$OPS_DIR/lib/buyer-runner-target.py"
 RUNNER_JOURNAL=/var/lib/macprovider-ops/air-qwen8-runner.json
 
+# Only this fixed, identity-checked Air is independent of the Studio/Pearl
+# campaign. Do not expose a selectable scope or globally export its lock path.
+air_lock_path() { printf '%s/.config/macprovider/provider-admin-air-m3.lock' "$HOME"; }
+AIR_LOCK_OWNER=""
+AIR_PEARL_LOCK_OWNER=""
+acquire_live_lock_for_step() {
+  local air_owner="$MACPROVIDER_OPS_OWNER:air:$$" pearl_owner="$MACPROVIDER_OPS_OWNER:air-enroll:$$"
+  case "$NEXT_ID" in
+    recover|payload_recovery|restore|adopt|enroll) ;;
+    *) refuse "unknown Air lock scope: $NEXT_ID" ;;
+  esac
+  # live-lock permits same-owner refresh; the controller PID suffix prevents a
+  # second invocation with the same session label from releasing our lock.
+  MACPROVIDER_LIVE_LOCK="$(air_lock_path)" "$OPS_DIR/live-lock.sh" acquire "$air_owner" --purpose "$OPS_NAME:$NEXT_ID" --bind-pid >&2 || return 3
+  AIR_LOCK_OWNER="$air_owner"
+  if [ "$NEXT_ID" = enroll ]; then
+    "$OPS_DIR/live-lock.sh" acquire "$pearl_owner" --purpose "$OPS_NAME:$NEXT_ID" --bind-pid >&2 || return 3
+    AIR_PEARL_LOCK_OWNER="$pearl_owner"
+  fi
+}
+
+# common.sh's EXIT/signal cleanup calls this override, including a partial
+# acquisition failure before run_next sets OPS_LOCK_OWNER.
+release_live_lock() {
+  if [ -n "$AIR_PEARL_LOCK_OWNER" ]; then
+    "$OPS_DIR/live-lock.sh" release "$AIR_PEARL_LOCK_OWNER" >&2 || true
+    AIR_PEARL_LOCK_OWNER=""
+  fi
+  if [ -n "$AIR_LOCK_OWNER" ]; then
+    MACPROVIDER_LIVE_LOCK="$(air_lock_path)" "$OPS_DIR/live-lock.sh" release "$AIR_LOCK_OWNER" >&2 || true
+    AIR_LOCK_OWNER=""
+  fi
+  OPS_LOCK_OWNER=""
+}
+
+air_payload_swap() {
+  # The nested canary has its own acquire/EXIT-release lifecycle. A subordinate
+  # lock keeps its cleanup from releasing the parent's Air lock; that parent
+  # remains held for all subsequent journal/config writes and failure recovery.
+  MACPROVIDER_LIVE_LOCK="$(air_lock_path).payload" "$OPS_DIR/canary-swap.sh" "$@"
+}
+
+air_gateway_proof() {
+  # Catalog's generic proof writes completion markers. Air adoption owns its
+  # own acceptance, so never overwrite a concurrent Studio/catalog proof.
+  MACPROVIDER_OPS_STATE_DIR="$OPS_TMP_DIR/air-proof-state" \
+    CATALOG_REQUIRE_NATIVE_MTP_FORWARD=false PROBE_MODEL="$MODEL" \
+    "$OPS_DIR/catalog-activate.sh" _gateway-proof
+}
+
 q() { [[ "$1" =~ ^[A-Za-z0-9._/@:+-]+$ ]] || refuse "unsafe Air argument"; printf "'%s'" "$1"; }
 settings() {
   local name
@@ -138,7 +188,11 @@ gather() {
   else
     set_next adopt mutate "Adopt the qualified Qwen3-8B model and prove paid service" "scripts/ops/air-provider.sh _adopt"
   fi
-  NEXT_DOWNTIME="Air provider restart/model load; no Pearl restart"
+  if [ "$NEXT_ID" = enroll ]; then
+    NEXT_DOWNTIME="Brief Pearl buyer-runner restart; no coordinator restart"
+  else
+    NEXT_DOWNTIME="Air provider restart/model load; no Pearl restart"
+  fi
 }
 
 target_ready() {
@@ -172,7 +226,7 @@ recover() {
   AIR_RECOVERY_CONFIG_SHA256="$(json_field "$OPS_TMP_DIR/air-probe.json" 'd["config_sha256"]')"
   export AIR_RECOVERY_CONFIG_SHA256
   export CANARY_RUNNER_STOP_CMD=none CANARY_RUNNER_START_CMD=none
-  "$OPS_DIR/canary-swap.sh" recover-air --version "$VERSION"
+  air_payload_swap recover-air --version "$VERSION"
 }
 
 restore_payload() {
@@ -184,7 +238,7 @@ restore_payload() {
   export AIR_RECOVERY_CONFIG_SHA256
   export CANARY_RUNNER_STOP_CMD=none CANARY_RUNNER_START_CMD=none
   local rc=0
-  "$OPS_DIR/canary-swap.sh" restore-air --version "$VERSION" || rc=$?
+  air_payload_swap restore-air --version "$VERSION" || rc=$?
   case "$rc" in 0|5) return 0 ;; *) return 6 ;; esac
 }
 
@@ -263,7 +317,7 @@ adopt() {
   [ "$(json_field "$OPS_TMP_DIR/air-probe.json" 'd["launch"]["pid"]')" != "$before_pid" ] || return 6
   before_pid="$(json_field "$OPS_TMP_DIR/air-probe.json" 'd["launch"]["pid"]')"
   before_start="$(json_field "$OPS_TMP_DIR/air-probe.json" 'd["launch"]["process_start_us"]')"
-  CATALOG_REQUIRE_NATIVE_MTP_FORWARD=false PROBE_MODEL="$MODEL" "$OPS_DIR/catalog-activate.sh" _gateway-proof > "$OPS_TMP_DIR/paid-proof.txt" 2>&1 || return 6
+  air_gateway_proof > "$OPS_TMP_DIR/paid-proof.txt" 2>&1 || return 6
   proof_hash="$(shasum -a 256 "$OPS_TMP_DIR/paid-proof.txt" | awk '{print $1}')"
   probe && signed_identity "$VERSION" && target_ready || return 6
   [ "$(json_field "$OPS_TMP_DIR/air-probe.json" 'd["launch"]["pid"]')" = "$before_pid" ] || return 6

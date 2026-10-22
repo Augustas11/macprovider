@@ -39,6 +39,23 @@ The ordinary clean-main, signed-release verification and live-lock gates apply.
 Nested proof commands retain this exact target rather than reloading Studio
 defaults. No locally built binary is accepted.
 
+Recovery, adoption and restoration take the fixed designated-Air provider lock
+(`~/.config/macprovider/provider-admin-air-m3.lock`), not the shared
+Studio/Pearl lock: these steps do not mutate Pearl or the Studio. A Studio
+campaign can therefore continue independently. There is no selectable lock
+scope. Nested payload swaps take a subordinate `.payload` lock while the
+parent retains the provider lock through completion and failure recovery;
+nested cleanup cannot release the parent or the shared campaign lock. Ordinary
+canary operations retain their existing shared-lock behavior. The paid gateway
+proof targets the Air and neither stops nor reconfigures the buyer runner. Its
+catalog proof markers use a private ephemeral Air namespace, never the shared
+catalog campaign's acceptance markers; the proof output digest is retained in
+the Air adoption journal.
+Runner enrollment takes both the provider lock and the normal shared live-ops
+lock, and refuses while another Studio/Pearl campaign owns the latter. Exit or
+failure releases only locks acquired by this controller, including partial
+acquisition; it never releases another campaign's lock.
+
 Recovery requires the exact signed 1.8.258 incumbent, disconnected with zero
 in-flight work and no operator pause. It reuses the verified 1.8.260 archive and
 detached canary swap, with an authenticated durable backup record for explicit
