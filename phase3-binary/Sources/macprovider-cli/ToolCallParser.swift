@@ -456,7 +456,9 @@ enum ToolCallParser {
             if case .object(let declared)? = properties[key] {
                 property = declared
             } else {
-                guard !strict, properties[key] == nil else { throw malformed }
+                // Absent or a non-object (boolean) subschema: untyped, and only
+                // where the schema is non-strict.
+                guard !strict else { throw malformed }
                 property = [:]
             }
             cursor = cursor[cursor.index(after: keyEnd)...]

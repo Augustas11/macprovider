@@ -171,6 +171,11 @@ final class BuyerUXConformanceRegressionTests: XCTestCase {
         let raw = "<tool_call>\n<function=read_file>\n<parameter=path>\n/etc/hosts\n</parameter>\n</function>\n</tool_call>"
         let loose: [String: JSONValue] = ["read_file": .object(["type": .string("object"), "required": .array([.string("path")])])]
         XCTAssertEqual(try ToolCallParser.parseGuaranteedToolCalls(raw, schemas: loose).first?.arguments, #"{"path":"/etc/hosts"}"#)
+        // Audit r3: a boolean subschema is untyped too.
+        let boolean: [String: JSONValue] = ["read_file": .object([
+            "type": .string("object"), "properties": .object(["path": .bool(true)]), "required": .array([.string("path")]),
+        ])]
+        XCTAssertEqual(try ToolCallParser.parseGuaranteedToolCalls(raw, schemas: boolean).first?.arguments, #"{"path":"/etc/hosts"}"#)
         let strict: [String: JSONValue] = ["read_file": .object([
             "type": .string("object"), "properties": .object(["file": .object(["type": .string("string")])]),
             "required": .array([.string("file")]), "additionalProperties": .bool(false),
