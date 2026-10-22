@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 
@@ -19,6 +20,11 @@ public enum ShardLinkError: Error, Equatable, Sendable {
     case sendTimedOut
     case closed
     case frame(ShardFrameError)
+    /// SPEC-051-R011: an `hmac-sha256` link carried or was asked to send a frame
+    /// before its key agreement finished.
+    case protectionNotEstablished
+    /// SPEC-051-R011: the link key agreement failed.
+    case keyAgreement(String)
 }
 
 public struct ShardLinkConfiguration: Equatable, Sendable {
@@ -33,6 +39,9 @@ public struct ShardLinkConfiguration: Equatable, Sendable {
     /// (or a path that drops the first heartbeats) is bounded by the receive
     /// deadline instead of the 3-heartbeat window. Heartbeats are sent either way.
     public var armLivenessOnOpen: Bool
+    /// SPEC-051-R011. With `hmacSHA256` the link sends nothing but key agreement
+    /// frames (no heartbeats either) until `authenticate` succeeds, then tags every frame.
+    public var frameProtection: ShardLinkFrameProtection
 
     public init(
         groupEpoch: UInt64,
@@ -40,7 +49,8 @@ public struct ShardLinkConfiguration: Equatable, Sendable {
         missedHeartbeatLimit: Int = 3,
         sendTimeout: TimeInterval = 5,
         limits: ShardFrameLimits = ShardFrameLimits(),
-        armLivenessOnOpen: Bool = true
+        armLivenessOnOpen: Bool = true,
+        frameProtection: ShardLinkFrameProtection = .crc32c
     ) {
         self.groupEpoch = groupEpoch
         self.heartbeatInterval = heartbeatInterval
@@ -48,6 +58,7 @@ public struct ShardLinkConfiguration: Equatable, Sendable {
         self.sendTimeout = sendTimeout
         self.limits = limits
         self.armLivenessOnOpen = armLivenessOnOpen
+        self.frameProtection = frameProtection
     }
 
     var livenessWindow: TimeInterval {
@@ -128,6 +139,11 @@ public final class ShardStageLink: @unchecked Sendable {
     private var heartbeatsPaused = false
     private var stats = ShardLinkStatistics()
     private var heartbeatTimer: DispatchSourceTimer?
+    /// SPEC-051-R011 per-direction keys, set once by `authenticate`; nil on a crc32c link.
+    private var sendAuthenticator: ShardFrameAuthenticator?
+    private var receiveAuthenticator: ShardFrameAuthenticator?
+    private var protectionReady: Bool
+    private var authenticatedPeer: ShardLinkPeer?
 
     public static func connect(
         host: String,
@@ -205,6 +221,7 @@ public final class ShardStageLink: @unchecked Sendable {
         self.receiveState = ShardLinkReceiveState(groupEpoch: configuration.groupEpoch)
         self.lastHeard = ShardSocketAddress.now()
         self.livenessArmed = configuration.armLivenessOnOpen
+        self.protectionReady = configuration.frameProtection == .crc32c
         self.peerAddress = ShardSocketAddress.peerDescription(of: fd)
         var one: Int32 = 1
         let size = socklen_t(MemoryLayout<Int32>.size)
@@ -230,21 +247,34 @@ public final class ShardStageLink: @unchecked Sendable {
         return stats
     }
 
+    /// The member that authenticated the key agreement; nil on a crc32c link.
+    public var peer: ShardLinkPeer? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return authenticatedPeer
+    }
+
     /// Send one frame; the link assigns the sequence number and returns it.
     @discardableResult
     public func send(_ frame: ShardStageFrame) throws -> UInt64 {
         sendLock.lock()
         defer { sendLock.unlock() }
         guard !closedFlag else { throw ShardLinkError.closed }
+        stateLock.lock()
+        let ready = protectionReady
+        let authenticator = sendAuthenticator
+        stateLock.unlock()
+        guard ready || frame.header.kind == .keyExchange else { throw ShardLinkError.protectionNotEstablished }
         var frame = frame
         frame.header.groupEpoch = configuration.groupEpoch
         frame.header.sequence = nextSendSequence
-        let bytes: Data
+        var bytes: Data
         do {
             bytes = try ShardStageFrameCodec.encode(frame, limits: configuration.limits)
         } catch let error as ShardFrameError {
             throw ShardLinkError.frame(error)
         }
+        if let authenticator { bytes = authenticator.seal(bytes) }
         try writeAll(bytes)
         nextSendSequence &+= 1
         stateLock.lock()
@@ -271,10 +301,15 @@ public final class ShardStageLink: @unchecked Sendable {
             // Frame bytes stay in `pending` until the whole frame is present, so a
             // receive that times out mid-frame leaves the stream aligned for the next one.
             try fill(upTo: ShardStageFrameCodec.fixedHeaderSize, deadline: deadline, waitStart: waitStart)
+            stateLock.lock()
+            let ready = protectionReady
+            let authenticator = receiveAuthenticator
+            stateLock.unlock()
             let total: Int
             do {
                 total = try ShardStageFrameCodec.frameLength(
                     fixedHeader: pending.prefix(ShardStageFrameCodec.fixedHeaderSize), limits: configuration.limits)
+                    + (authenticator == nil ? 0 : ShardFrameAuthenticator.tagSize)
             } catch let error as ShardFrameError {
                 throw ShardLinkError.frame(error)
             }
@@ -283,17 +318,73 @@ public final class ShardStageLink: @unchecked Sendable {
             pending.removeFirst(total)
             let frame: ShardStageFrame
             do {
-                frame = try ShardStageFrameCodec.decode(whole, limits: configuration.limits)
+                frame = try ShardStageFrameCodec.decode(try authenticator?.open(whole) ?? whole, limits: configuration.limits)
                 try receiveState.accept(frame.header)
             } catch let error as ShardFrameError {
                 throw ShardLinkError.frame(error)
             }
+            // Before the keys are in place only the key agreement may arrive.
+            guard ready || frame.header.kind == .keyExchange else { throw ShardLinkError.protectionNotEstablished }
             stateLock.lock()
             stats.framesReceived += 1
             stats.bytesReceived += UInt64(whole.count)
             if frame.header.kind == .heartbeat { stats.heartbeatsReceived += 1 }
             stateLock.unlock()
             if frame.header.kind != .heartbeat { return frame }
+        }
+    }
+
+    /// SPEC-051-R011 key agreement on an `hmac-sha256` link, run by both ends right
+    /// after the TCP connect and before anything else (the dialer is the initiator).
+    /// Returns the authenticated peer; on a crc32c link it does nothing and returns
+    /// nil. On failure the link stays unusable and the caller closes it.
+    @discardableResult
+    public func authenticate(
+        signer: ShardMemberSigner, role: ShardLinkHandshake.Role, timeout: TimeInterval
+    ) throws -> ShardLinkPeer? {
+        guard configuration.frameProtection == .hmacSHA256 else { return nil }
+        let ephemeral = Curve25519.KeyAgreement.PrivateKey()
+        let encoder = JSONEncoder()
+        func exchange<T: Encodable>(_ message: T) throws {
+            try send(ShardStageFrame(
+                header: ShardStageFrameHeader(kind: .keyExchange, groupEpoch: configuration.groupEpoch),
+                payload: try encoder.encode(message)))
+        }
+        func expect<T: Decodable>(_ type: T.Type) throws -> T {
+            let frame = try receive(timeout: timeout)
+            guard frame.header.kind == .keyExchange else {
+                throw ShardLinkError.keyAgreement("expected a key agreement frame, got \(frame.header.kind)")
+            }
+            do {
+                return try JSONDecoder().decode(type, from: frame.payload)
+            } catch {
+                throw ShardLinkError.keyAgreement("undecodable key agreement message: \(error)")
+            }
+        }
+        do {
+            try exchange(ShardLinkHandshake.Share(ephemeral: ephemeral.publicKey))
+            let peerShare = try expect(ShardLinkHandshake.Share.self)
+            guard let peerEphemeral = Data(base64Encoded: peerShare.ephemeral) else {
+                throw ShardLinkError.keyAgreement("undecodable ephemeral key")
+            }
+            let own = ephemeral.publicKey.rawRepresentation
+            try exchange(try ShardLinkHandshake.auth(
+                signer: signer, epoch: configuration.groupEpoch, role: role,
+                initiatorEphemeral: role == .initiator ? own : peerEphemeral,
+                responderEphemeral: role == .initiator ? peerEphemeral : own))
+            let peerAuth = try expect(ShardLinkHandshake.Auth.self)
+            let (keys, peer) = try ShardLinkHandshake.complete(
+                ephemeral: ephemeral, role: role, epoch: configuration.groupEpoch, ownPublicKey: signer.publicKeyBase64,
+                peerShare: peerShare, peerAuth: peerAuth)
+            stateLock.lock()
+            sendAuthenticator = ShardFrameAuthenticator(key: keys.send)
+            receiveAuthenticator = ShardFrameAuthenticator(key: keys.receive)
+            authenticatedPeer = peer
+            protectionReady = true
+            stateLock.unlock()
+            return peer
+        } catch let failure as ShardLinkHandshake.Failure {
+            throw ShardLinkError.keyAgreement(failure.description)
         }
     }
 
@@ -349,7 +440,7 @@ public final class ShardStageLink: @unchecked Sendable {
         timer.setEventHandler { [weak self] in
             guard let self else { return }
             self.stateLock.lock()
-            let skip = self.isClosed || self.heartbeatsPaused
+            let skip = self.isClosed || self.heartbeatsPaused || !self.protectionReady
             self.stateLock.unlock()
             if skip { return }
             // A failed heartbeat surfaces on the next caller send/receive; the timer

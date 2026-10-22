@@ -173,7 +173,7 @@ final class ShardMemberStageServer<Stage: ShardBenchStage>: @unchecked Sendable 
     }
 
     private func serve(_ listener: ShardStageListener) {
-        let link = config.supervision.link(epoch: config.linkEpoch)
+        let link = config.supervision.link(epoch: config.linkEpoch, frameProtection: config.frameProtection.linkProtection)
         while !isStopped {
             let upstream: ShardStageLink
             do {
@@ -185,15 +185,27 @@ final class ShardMemberStageServer<Stage: ShardBenchStage>: @unchecked Sendable 
                 Thread.sleep(forTimeInterval: 1)
                 continue
             }
+            // SPEC-051-R011: authenticate the upstream link before dialing on, so the
+            // stage that dialed this one is never left waiting.
+            do {
+                try upstream.authenticate(signer: signer, role: .responder, timeout: Self.connectTimeout)
+            } catch {
+                shardGroupLog("member link key agreement with \(upstream.peerAddress) failed: \(error)")
+                update { $0.lastError = "upstream key agreement failed: \(error)" }
+                upstream.close()
+                continue
+            }
             var downstream = upstream
             if let connect = config.connect {
                 do {
                     let target = try ShardBenchEndpoint.parse(connect)
                     downstream = try ShardStageLink.connect(
                         host: target.host, port: target.port, timeout: Self.connectTimeout, configuration: link)
+                    try downstream.authenticate(signer: signer, role: .initiator, timeout: Self.connectTimeout)
                 } catch {
                     shardGroupLog("member could not reach the next stage at \(connect): \(error)")
                     update { $0.lastError = "connect failed: \(error)" }
+                    if downstream !== upstream { downstream.close() }
                     upstream.close()
                     continue
                 }
@@ -419,7 +431,7 @@ enum ShardGroupServe {
             : StopTokenFilter(tokens: [])
         let thinking = ModelRuntime.chatTemplateSupportsThinkingToggle(in: directory)
         let engineOptions = ShardGroupEngineOptions(
-            link: config.supervision.link(epoch: config.groupEpoch),
+            link: config.supervision.link(epoch: config.groupEpoch, frameProtection: config.frameProtection.linkProtection),
             connectTimeout: ShardMemberStageServer<PipelineStageModel>.connectTimeout,
             decodeHopDeadline: Double(config.supervision.decodeHopDeadlineMilliseconds) / 1000,
             prefillChunkDeadline: Double(config.supervision.prefillChunkDeadlineMilliseconds) / 1000,
@@ -442,7 +454,8 @@ enum ShardGroupServe {
                 try await ShardBenchThread.run {
                     let links = try ShardBenchLinks.open(
                         listen: config.stages.count > 1 ? returnListen : nil, connect: firstStage,
-                        connectTimeout: engineOptions.connectTimeout, configuration: engineOptions.link, session: "group")
+                        connectTimeout: engineOptions.connectTimeout, configuration: engineOptions.link, session: "group",
+                        signer: signer)
                     let engine = ShardGroupEngine(stage: stage.stage, options: engineOptions)
                     try engine.start(links: links)
                     return engine

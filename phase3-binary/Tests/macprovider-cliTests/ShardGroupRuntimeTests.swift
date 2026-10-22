@@ -370,20 +370,23 @@ final class ShardChunkBox: @unchecked Sendable {
 /// `serve --shard-member`: the member's stage server outlives its sessions, and its
 /// runtime takes no buyer request.
 final class ShardMemberRuntimeTests: XCTestCase {
-    private func memberConfig() -> ShardMemberConfig {
+    private func memberConfig(frameProtection: ShardFrameProtection = .crc32c) -> ShardMemberConfig {
         ShardMemberConfig(
             groupProviderID: "head-device", groupEpoch: ShardBenchTestRig.epoch, stageIndex: 1, layerStart: 2, layerEnd: 4,
-            listen: "127.0.0.1:0", maxSequences: 8,
+            listen: "127.0.0.1:0", frameProtection: frameProtection, maxSequences: 8,
             supervision: ShardSupervisionConfig(
                 heartbeatIntervalMilliseconds: 50, heartbeatMissLimit: 4, decodeHopDeadlineMilliseconds: 2000,
                 prefillChunkDeadlineMilliseconds: 3000, replayDeadlineMilliseconds: 5000))
     }
 
-    private func runOneRequest(port: UInt16, prompt: [Int]) throws -> ShardGenerationSummary {
+    private func runOneRequest(
+        port: UInt16, prompt: [Int], protection: ShardLinkFrameProtection = .crc32c
+    ) throws -> ShardGenerationSummary {
+        var options = ShardGroupEngineTests.options()
+        options.link.frameProtection = protection
         let links = try ShardBenchLinks.open(
             listen: nil, connect: ShardBenchEndpoint(host: "127.0.0.1", port: port), connectTimeout: 5,
-            configuration: ShardBenchTestRig.configuration(), session: "test")
-        var options = ShardGroupEngineTests.options()
+            configuration: options.link, session: "test", signer: options.signer)
         options.expectedMembers = [ShardGroupExpectedMember(memberDeviceID: "mac-b", layers: 2..<4)]
         options.modelDigest = "digest"
         let engine = ShardGroupEngine(stage: FakeShardStage(layers: 0..<2, totalLayers: 4), options: options)
@@ -421,6 +424,29 @@ final class ShardMemberRuntimeTests: XCTestCase {
         XCTAssertNil(status.lastError)
     }
 
+    func testHMACMemberAuthenticatesTheHeadAndServes() throws {
+        let key = Curve25519.Signing.PrivateKey()
+        let server = ShardMemberStageServer(
+            stage: FakeShardStage(layers: 2..<4, totalLayers: 4), config: memberConfig(frameProtection: .hmacSHA256),
+            signer: ShardMemberSigner(memberDeviceID: "mac-b", key: key), modelDigest: "digest", modelLabel: "fake")
+        try server.start()
+        defer { server.stop() }
+        let port = try XCTUnwrap(server.port)
+        let reference = try ShardBenchTestRig.reference(splits: [0..<2, 2..<4], total: 4, prompts: [[4, 5, 6]], tokens: 4)[0]
+        let summary = try runOneRequest(port: port, prompt: [4, 5, 6], protection: .hmacSHA256)
+        XCTAssertEqual(summary.tokens, reference)
+        XCTAssertEqual(summary.attestation.verdict, "ok")
+        // A head that does not run the key agreement never reaches the member's stage.
+        XCTAssertThrowsError(try runOneRequest(port: port, prompt: [4, 5, 6], protection: .crc32c))
+        var status = server.status
+        for _ in 0..<50 where status.lastError == nil {
+            Thread.sleep(forTimeInterval: 0.05)
+            status = server.status
+        }
+        XCTAssertTrue(status.lastError?.contains("key agreement") == true, "\(status.lastError ?? "nil")")
+        XCTAssertTrue(status.listening, "a refused head leaves the member listening")
+    }
+
     func testMemberReportsItsPeersAndLinkInterfacesWhileJoined() throws {
         let server = ShardMemberStageServer(
             stage: FakeShardStage(layers: 2..<4, totalLayers: 4), config: memberConfig(),
@@ -428,10 +454,11 @@ final class ShardMemberRuntimeTests: XCTestCase {
             modelLabel: "fake")
         try server.start()
         defer { server.stop() }
+        let options = ShardGroupEngineTests.options()
         let links = try ShardBenchLinks.open(
             listen: nil, connect: ShardBenchEndpoint(host: "127.0.0.1", port: try XCTUnwrap(server.port)), connectTimeout: 5,
-            configuration: ShardBenchTestRig.configuration(), session: "test")
-        let engine = ShardGroupEngine(stage: FakeShardStage(layers: 0..<2, totalLayers: 4), options: ShardGroupEngineTests.options())
+            configuration: ShardBenchTestRig.configuration(), session: "test", signer: options.signer)
+        let engine = ShardGroupEngine(stage: FakeShardStage(layers: 0..<2, totalLayers: 4), options: options)
         try engine.start(links: links)
         var status = server.status
         for _ in 0..<50 where status.stageIndex == nil {
@@ -512,7 +539,8 @@ final class ShardGroupConfigTests: XCTestCase {
         let cases: [([String: Any], String)] = [
             (head(["extra": 1]), "unknown keys"),
             (head(["interconnect_class": "rdma-tb5"]), "reserved"),
-            (head(["frame_protection": "hmac-sha256"]), "not implemented"),
+            (head(["frame_protection": "aead-chacha20poly1305"]), "not implemented"),
+            (head(["interconnect_class": "ethernet"]), "below the hmac-sha256 minimum"),
             (head(["supervision": supervision.merging(["heartbeat_interval_ms": 5]) { $1 }]), "heartbeat_interval_ms"),
             (head(["stages": [["member_device_id": "mac-b", "endpoint": "h:1", "layer_start": 15, "layer_end": 28]]]), "must start at 14"),
             (head(["stages": [
@@ -544,8 +572,21 @@ final class ShardGroupConfigTests: XCTestCase {
         let head = try JSONDecoder().decode(ShardMemberConfig.self, from: json(object))
         XCTAssertThrowsError(try head.validate())
         object["stage_index"] = 1
-        object["frame_protection"] = "crc32c"
+        object["unknown_key"] = 1
         XCTAssertThrowsError(try JSONDecoder().decode(ShardMemberConfig.self, from: json(object)))
+        object["unknown_key"] = nil
+        // SPEC-051-R011: frame protection defaults to the class minimum and never below it.
+        XCTAssertEqual(config.frameProtection, .crc32c)
+        object["interconnect_class"] = "ethernet"
+        let ethernet = try JSONDecoder().decode(ShardMemberConfig.self, from: json(object))
+        try ethernet.validate()
+        XCTAssertEqual(ethernet.frameProtection, .hmacSHA256)
+        XCTAssertEqual(ethernet.supervision.link(epoch: 3, frameProtection: ethernet.frameProtection.linkProtection).frameProtection, .hmacSHA256)
+        object["frame_protection"] = "crc32c"
+        let weak = try JSONDecoder().decode(ShardMemberConfig.self, from: json(object))
+        XCTAssertThrowsError(try weak.validate()) { error in
+            XCTAssertTrue(String(describing: error).contains("below the hmac-sha256 minimum"), "\(error)")
+        }
     }
 
     func testInterfaceClassification() {

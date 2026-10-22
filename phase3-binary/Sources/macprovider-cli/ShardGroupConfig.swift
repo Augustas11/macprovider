@@ -84,10 +84,10 @@ struct ShardSupervisionConfig: Codable, Equatable, Sendable {
     }
 
     /// Link supervision for a given epoch. Peer-dead detection arms after the hello.
-    func link(epoch: UInt64) -> ShardLinkConfiguration {
+    func link(epoch: UInt64, frameProtection: ShardLinkFrameProtection = .crc32c) -> ShardLinkConfiguration {
         ShardLinkConfiguration(
             groupEpoch: epoch, heartbeatInterval: Double(heartbeatIntervalMilliseconds) / 1000,
-            missedHeartbeatLimit: heartbeatMissLimit, armLivenessOnOpen: false)
+            missedHeartbeatLimit: heartbeatMissLimit, armLivenessOnOpen: false, frameProtection: frameProtection)
     }
 }
 
@@ -99,12 +99,28 @@ enum ShardInterconnectClass: String, Codable, Sendable {
 
     /// The SPEC-051-R029 `interface_type` a link of this class must report.
     var requiredInterfaceType: String { self == .ethernet ? "ethernet" : "thunderbolt" }
+
+    /// SPEC-051 §4 `required_frame_protection` defaults: a point-to-point
+    /// Thunderbolt cable needs CRC32C, a switched Ethernet segment HMAC-SHA256.
+    var minimumFrameProtection: ShardFrameProtection { self == .ethernet ? .hmacSHA256 : .crc32c }
 }
 
 enum ShardFrameProtection: String, Codable, Sendable {
     case crc32c
     case hmacSHA256 = "hmac-sha256"
     case aeadChaCha20Poly1305 = "aead-chacha20poly1305"
+
+    /// The link mode serving this value; configuration validation refuses AEAD,
+    /// which this build does not implement, before any link opens.
+    var linkProtection: ShardLinkFrameProtection { self == .crc32c ? .crc32c : .hmacSHA256 }
+
+    var rank: Int {
+        switch self {
+        case .crc32c: return 0
+        case .hmacSHA256: return 1
+        case .aeadChaCha20Poly1305: return 2
+        }
+    }
 }
 
 private func validateMemberID(_ value: String, field: String) throws {
@@ -117,10 +133,12 @@ private func validateMemberID(_ value: String, field: String) throws {
 
 private func validateTransport(_ interconnect: ShardInterconnectClass, _ protection: ShardFrameProtection) throws {
     guard interconnect != .rdmaTB5 else { throw ShardGroupConfigError.invalid("interconnect_class rdma-tb5 is reserved") }
-    // HMAC and AEAD need the per-link key handshake (SPEC-051-R011), which this
-    // build does not have; a coordinator refuses crc32c on Ethernet.
-    guard protection == .crc32c else {
-        throw ShardGroupConfigError.invalid("frame_protection \(protection.rawValue) is not implemented by this build; use crc32c on thunderbolt-ip")
+    guard protection != .aeadChaCha20Poly1305 else {
+        throw ShardGroupConfigError.invalid("frame_protection aead-chacha20poly1305 is not implemented by this build; use hmac-sha256")
+    }
+    // SPEC-051-R011: the coordinator refuses a record below its class minimum.
+    guard protection.rank >= interconnect.minimumFrameProtection.rank else {
+        throw ShardGroupConfigError.invalid("frame_protection \(protection.rawValue) is below the \(interconnect.minimumFrameProtection.rawValue) minimum of \(interconnect.rawValue)")
     }
 }
 
@@ -341,6 +359,8 @@ struct ShardMemberConfig: Codable, Equatable, Sendable {
     var listen: String
     var connect: String?
     var interconnectClass: ShardInterconnectClass
+    /// Must equal the group record's (SPEC-051-R011); defaults to the class minimum.
+    var frameProtection: ShardFrameProtection
     var maxSequences: Int
     var supervision: ShardSupervisionConfig
 
@@ -355,6 +375,7 @@ struct ShardMemberConfig: Codable, Equatable, Sendable {
         case listen
         case connect
         case interconnectClass = "interconnect_class"
+        case frameProtection = "frame_protection"
         case maxSequences = "max_sequences"
         case supervision
     }
@@ -362,7 +383,7 @@ struct ShardMemberConfig: Codable, Equatable, Sendable {
     init(
         groupProviderID: String, groupEpoch: UInt64, role: Role = .stage, stageIndex: Int, layerStart: Int, layerEnd: Int,
         listen: String, connect: String? = nil, interconnectClass: ShardInterconnectClass = .thunderboltIP,
-        maxSequences: Int = 16, supervision: ShardSupervisionConfig = .defaults
+        frameProtection: ShardFrameProtection? = nil, maxSequences: Int = 16, supervision: ShardSupervisionConfig = .defaults
     ) {
         self.schema = Self.schemaID
         self.groupProviderID = groupProviderID
@@ -374,6 +395,7 @@ struct ShardMemberConfig: Codable, Equatable, Sendable {
         self.listen = listen
         self.connect = connect
         self.interconnectClass = interconnectClass
+        self.frameProtection = frameProtection ?? interconnectClass.minimumFrameProtection
         self.maxSequences = maxSequences
         self.supervision = supervision
     }
@@ -391,6 +413,8 @@ struct ShardMemberConfig: Codable, Equatable, Sendable {
         listen = try container.decode(String.self, forKey: .listen)
         connect = try container.decodeIfPresent(String.self, forKey: .connect)
         interconnectClass = try container.decode(ShardInterconnectClass.self, forKey: .interconnectClass)
+        frameProtection = try container.decodeIfPresent(ShardFrameProtection.self, forKey: .frameProtection)
+            ?? interconnectClass.minimumFrameProtection
         maxSequences = try container.decode(Int.self, forKey: .maxSequences)
         supervision = try container.decode(ShardSupervisionConfig.self, forKey: .supervision)
     }
@@ -415,7 +439,7 @@ struct ShardMemberConfig: Codable, Equatable, Sendable {
         guard (1...(UInt64(1) << 53 - 2)).contains(groupEpoch) else {
             throw ShardGroupConfigError.invalid("group_epoch must be within 1..2^53-2")
         }
-        guard interconnectClass != .rdmaTB5 else { throw ShardGroupConfigError.invalid("interconnect_class rdma-tb5 is reserved") }
+        try validateTransport(interconnectClass, frameProtection)
         try supervision.validate()
         guard stageIndex >= 1, layerStart > 0, layerEnd > layerStart else {
             throw ShardGroupConfigError.invalid("a member holds stage >= 1 with non-empty layers after layer 0")

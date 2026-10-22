@@ -57,6 +57,11 @@ func (c ShardGroupsConfig) validate() error {
 			return fmt.Errorf("shard_groups.required_frame_protection.%s must be crc32c, hmac-sha256 or aead-chacha20poly1305", name)
 		}
 	}
+	// SPEC-051-R011: a switched Ethernet segment is not point-to-point, so its
+	// frames need authentication, never a check value alone.
+	if c.RequiredFrameProtection.Ethernet == "crc32c" {
+		return fmt.Errorf("shard_groups.required_frame_protection.ethernet must be hmac-sha256 or aead-chacha20poly1305")
+	}
 	if len(c.SupportedTransportVersions) == 0 {
 		return fmt.Errorf("shard_groups.supported_transport_versions must not be empty")
 	}

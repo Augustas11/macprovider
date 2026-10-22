@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 @testable import MacProviderCore
 @testable import macprovider_cli
@@ -125,30 +126,52 @@ final class FakeShardStage: ShardBenchStage {
 enum ShardBenchTestRig {
     static let epoch: UInt64 = 3
 
-    static func configuration(epoch: UInt64 = ShardBenchTestRig.epoch) -> ShardLinkConfiguration {
-        ShardLinkConfiguration(groupEpoch: epoch, heartbeatInterval: 0.05, missedHeartbeatLimit: 4, armLivenessOnOpen: false)
+    static func configuration(
+        epoch: UInt64 = ShardBenchTestRig.epoch, protection: ShardLinkFrameProtection = .crc32c
+    ) -> ShardLinkConfiguration {
+        ShardLinkConfiguration(
+            groupEpoch: epoch, heartbeatInterval: 0.05, missedHeartbeatLimit: 4, armLivenessOnOpen: false, frameProtection: protection)
     }
 
-    /// A connected loopback pair: (accepted side, dialing side).
-    static func pair(epoch: UInt64 = ShardBenchTestRig.epoch) throws -> (ShardStageLink, ShardStageLink) {
+    /// A connected loopback pair: (accepted side, dialing side). With `signers` the
+    /// pair is an hmac-sha256 link whose two ends ran their key agreement.
+    static func pair(
+        epoch: UInt64 = ShardBenchTestRig.epoch, signers: (accepted: ShardMemberSigner, dialed: ShardMemberSigner)? = nil
+    ) throws -> (ShardStageLink, ShardStageLink) {
+        let link = configuration(epoch: epoch, protection: signers == nil ? .crc32c : .hmacSHA256)
         let listener = try ShardStageListener(host: "127.0.0.1", port: 0)
-        let dialed = try ShardStageLink.connect(
-            host: "127.0.0.1", port: listener.port, timeout: 5, configuration: configuration(epoch: epoch))
-        let accepted = try listener.accept(timeout: 5, configuration: configuration(epoch: epoch))
+        let dialed = try ShardStageLink.connect(host: "127.0.0.1", port: listener.port, timeout: 5, configuration: link)
+        let accepted = try listener.accept(timeout: 5, configuration: link)
+        if let signers {
+            let responder = DispatchGroup()
+            responder.enter()
+            let outcome = ShardBenchWaitBox<ShardLinkPeer?>()
+            Thread {
+                outcome.result = Result { try accepted.authenticate(signer: signers.accepted, role: .responder, timeout: 5) }
+                responder.leave()
+            }.start()
+            try dialed.authenticate(signer: signers.dialed, role: .initiator, timeout: 5)
+            responder.wait()
+            _ = try outcome.result?.get()
+        }
         return (accepted, dialed)
     }
 
     /// Links for a ring of `stages` stages, indexed by stage. With two stages and
-    /// `collapsed`, one link carries both directions.
-    static func ring(stages: Int, collapsed: Bool = false) throws -> [ShardBenchLinks] {
+    /// `collapsed`, one link carries both directions. With `signers` (one per stage)
+    /// every link is hmac-sha256, authenticated by the stages it joins.
+    static func ring(stages: Int, collapsed: Bool = false, signers: [ShardMemberSigner]? = nil) throws -> [ShardBenchLinks] {
+        func joining(accepted: Int, dialed: Int) -> (accepted: ShardMemberSigner, dialed: ShardMemberSigner)? {
+            signers.map { ($0[accepted], $0[dialed]) }
+        }
         if stages == 2, collapsed {
-            let (tail, head) = try pair()
+            let (tail, head) = try pair(signers: joining(accepted: 1, dialed: 0))
             return [ShardBenchLinks(upstream: head, downstream: head), ShardBenchLinks(upstream: tail, downstream: tail)]
         }
         // forward[i] joins stage i (dialing) to stage i+1 (accepting); back joins the
         // tail (dialing) to the head (accepting).
-        let forward = try (0..<(stages - 1)).map { _ in try pair() }
-        let back = try pair()
+        let forward = try (0..<(stages - 1)).map { try pair(signers: joining(accepted: $0 + 1, dialed: $0)) }
+        let back = try pair(signers: joining(accepted: 0, dialed: stages - 1))
         return (0..<stages).map { index in
             let upstream = index == 0 ? back.0 : forward[index - 1].0
             let downstream = index == stages - 1 ? back.1 : forward[index].1
@@ -170,11 +193,12 @@ enum ShardBenchTestRig {
         listen: ShardBenchEndpoint? = nil,
         connect: ShardBenchEndpoint? = nil,
         connectTimeout: TimeInterval = 5,
-        parity: ShardBenchParityOptions = .skipped
+        parity: ShardBenchParityOptions = .skipped,
+        protection: ShardLinkFrameProtection = .crc32c
     ) -> ShardBenchSessionOptions {
         ShardBenchSessionOptions(
             role: role, listen: listen, connect: connect, expectedStages: expectedStages, modelLabel: "fake",
-            prompts: prompts, tokens: tokens, temperature: 0, seed: 0, link: configuration(epoch: epoch),
+            prompts: prompts, tokens: tokens, temperature: 0, seed: 0, link: configuration(epoch: epoch, protection: protection),
             receiveTimeout: 5, connectTimeout: connectTimeout, probeCount: probeCount, maxSequences: 8, warmup: true,
             prefillChunk: prefillChunk, prefillChunkDeadline: prefillChunkDeadline, memberID: nil,
             spare: spare, replayBufferBytes: replayBufferBytes, replayDeadline: 5, parity: parity)
@@ -251,17 +275,19 @@ enum ShardBenchTestRig {
         prefillChunkDeadline: TimeInterval = 3,
         spare: ShardBenchEndpoint? = nil,
         replayBufferBytes: Int = 1 << 20,
-        parity: ShardBenchParityOptions = .skipped
+        parity: ShardBenchParityOptions = .skipped,
+        signers: [ShardMemberSigner]? = nil
     ) -> [Result<ShardBenchSessionReport, Error>] {
         let results = ShardBenchResultBox(count: stages.count)
         let group = DispatchGroup()
         for (index, stage) in stages.enumerated() {
             let role: ShardBenchRole = index == 0 ? .head : (index == stages.count - 1 ? .tail : .middle)
-            let stageOptions = options(
+            var stageOptions = options(
                 role: role, prompts: prompts, tokens: tokens, expectedStages: index == 0 ? expectedStages : nil,
                 prefillChunk: prefillChunk, prefillChunkDeadline: prefillChunkDeadline,
                 spare: index == 0 ? spare : nil, replayBufferBytes: replayBufferBytes,
-                parity: index == 0 ? parity : .skipped)
+                parity: index == 0 ? parity : .skipped, protection: signers == nil ? .crc32c : .hmacSHA256)
+            stageOptions.signer = signers?[index]
             let session = ShardBenchSession(options: stageOptions, stage: stage)
             let stageLinks = links[index]
             let prepare = beforeRun[index]
@@ -356,6 +382,40 @@ final class ShardBenchChainTests: XCTestCase {
             XCTAssertNotEqual(request.receipts[0].outDigest, request.receipts[1].outDigest)
         }
         XCTAssertNotEqual(head.attestation.requests[0].receipts[0].outDigest, head.attestation.requests[1].receipts[0].outDigest)
+    }
+
+    // MARK: SPEC-051-R011 frame protection
+
+    private func signers(_ count: Int) -> [ShardMemberSigner] {
+        (0..<count).map { ShardMemberSigner(memberDeviceID: "mac-\($0)", key: Curve25519.Signing.PrivateKey()) }
+    }
+
+    func testHMACProtectedThreeStageRingServesOverAuthenticatedLinks() throws {
+        let splits = [0..<1, 1..<3, 3..<4]
+        let members = signers(3)
+        let links = try ShardBenchTestRig.ring(stages: 3, signers: members)
+        XCTAssertEqual(links[0].downstream.peer?.publicKey, members[1].publicKeyBase64)
+        XCTAssertEqual(links[0].upstream.peer?.publicKey, members[2].publicKeyBase64)
+        let results = ShardBenchTestRig.run(
+            ShardBenchTestRig.stages(splits, total: 4), links: links, prompts: prompts, tokens: 6, expectedStages: 3, signers: members)
+        let head = try XCTUnwrap(try results[0].get().head)
+        XCTAssertEqual(head.sequenceTokens, try ShardBenchTestRig.reference(splits: splits, total: 4, prompts: prompts, tokens: 6))
+        XCTAssertEqual(head.attestation.verdict, "ok")
+        XCTAssertEqual(head.attestation.requests.first?.receipts.map(\.memberDeviceID), ["mac-0", "mac-1", "mac-2"])
+        XCTAssertNoThrow(try results[1].get())
+        XCTAssertNoThrow(try results[2].get())
+    }
+
+    func testALinkAuthenticatedByAnotherKeyThanTheChainNamesIsRefused() throws {
+        let members = signers(2)
+        let impostor = ShardMemberSigner(memberDeviceID: "mac-1", key: Curve25519.Signing.PrivateKey())
+        // The tail's link was authenticated by `impostor`; its hello announces mac-1's key.
+        let links = try ShardBenchTestRig.ring(stages: 2, collapsed: true, signers: [members[0], impostor])
+        let results = ShardBenchTestRig.run(
+            ShardBenchTestRig.stages([0..<2, 2..<4], total: 4), links: links, prompts: prompts, tokens: 2, signers: members)
+        XCTAssertThrowsError(try results[0].get()) { error in
+            XCTAssertTrue(String(describing: error).contains("not by the key stage 1 announces"), "\(error)")
+        }
     }
 
     func testFourStageRingWithTwoMiddles() throws {

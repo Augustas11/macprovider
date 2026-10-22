@@ -27,6 +27,8 @@ import Foundation
 //    60  4*r shape dims (UInt32 each)
 //     .    n payload
 //     .    4 CRC32C over every preceding byte of the frame
+//     .   32 HMAC-SHA256 over every preceding byte, on an hmac-sha256 link only
+//          (SPEC-051-R011, `ShardFrameAuthenticator`)
 //
 // The header carries the payload length and rank, so a frame is self-delimiting:
 // a reader takes the fixed header, validates it, then reads exactly the rest.
@@ -44,6 +46,9 @@ public enum ShardFrameKind: UInt8, Sendable, CaseIterable {
     /// Per-request control message, JSON payload (`ShardRequestControl`): the head
     /// opens each request with its sampling parameters before its first activation.
     case control = 8
+    /// SPEC-051-R011 link key agreement (`ShardLinkHandshake`), JSON payload; only
+    /// before an `hmac-sha256` link's keys are in place.
+    case keyExchange = 9
 }
 
 /// Per-frame flags. Unknown bits are refused, so a peer that does not know a flag
@@ -106,6 +111,8 @@ public enum ShardFrameError: Error, Equatable, Sendable {
     case epochMismatch(expected: UInt64, actual: UInt64)
     case sequenceGap(expected: UInt64, actual: UInt64)
     case sequenceReplay(expected: UInt64, actual: UInt64)
+    /// SPEC-051-R011: the frame's HMAC-SHA256 tag does not verify.
+    case authenticationFailed
 }
 
 public struct ShardStageFrameHeader: Equatable, Sendable {
@@ -335,7 +342,7 @@ public enum ShardStageFrameCodec {
             guard header.shape.count == 1, header.shape[0] >= 4, header.shape[0] % 2 == 0 else {
                 throw ShardFrameError.shapePayloadMismatch(expectedBytes: 0, payloadBytes: payloadLength)
             }
-        case .hello, .heartbeat, .abort, .error, .control:
+        case .hello, .heartbeat, .abort, .error, .control, .keyExchange:
             guard header.dtype == .none else {
                 throw ShardFrameError.kindDTypeMismatch(kind: header.kind, dtype: header.dtype)
             }

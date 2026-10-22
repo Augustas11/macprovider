@@ -21,6 +21,7 @@ func TestShardGroupsConfigBounds(t *testing.T) {
 		"rtt high":            func(c *ShardGroupsConfig) { c.MaxLinkRTTP99US = 6000 },
 		"stale multiple":      func(c *ShardGroupsConfig) { c.GroupHeartbeatStaleMultiple = 1 },
 		"protection unknown":  func(c *ShardGroupsConfig) { c.RequiredFrameProtection.Ethernet = "none" },
+		"ethernet crc only":   func(c *ShardGroupsConfig) { c.RequiredFrameProtection.Ethernet = "crc32c" },
 		"no transports":       func(c *ShardGroupsConfig) { c.SupportedTransportVersions = nil },
 		"transport out range": func(c *ShardGroupsConfig) { c.SupportedTransportVersions = []int{0} },
 	} {

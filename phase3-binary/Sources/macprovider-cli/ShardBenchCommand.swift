@@ -84,6 +84,9 @@ struct ShardBenchCommand: AsyncParsableCommand {
     @Option(name: .customLong("missed-heartbeats"), help: "Peer is dead after this many silent heartbeat intervals.")
     var missedHeartbeats: Int = 3
 
+    @Option(name: .customLong("frame-protection"), help: "crc32c, or hmac-sha256 (SPEC-051-R011: per-link keys from a key agreement signed by each stage's member key). Every stage must pass the same value.")
+    var frameProtection: String = ShardLinkFrameProtection.crc32c.rawValue
+
     @Option(name: .customLong("receive-timeout"), help: "Per-receive deadline in seconds (covers the peers' compute for one step).")
     var receiveTimeout: Double = 60
 
@@ -319,6 +322,9 @@ struct ShardBenchCommand: AsyncParsableCommand {
         guard parts.count == 2, let lower = Int(parts[0]), let upper = Int(parts[1]), lower < upper else {
             throw ValidationError("--layers must be a:b with a < b")
         }
+        guard let protection = ShardLinkFrameProtection(rawValue: frameProtection) else {
+            throw ValidationError("--frame-protection must be crc32c or hmac-sha256")
+        }
         let options = ShardBenchSessionOptions(
             role: parsedRole,
             listen: try listen.map { try ShardBenchEndpoint.parse($0) },
@@ -335,7 +341,8 @@ struct ShardBenchCommand: AsyncParsableCommand {
                 groupEpoch: groupEpoch,
                 heartbeatInterval: Double(heartbeatMilliseconds) / 1000,
                 missedHeartbeatLimit: missedHeartbeats,
-                armLivenessOnOpen: false
+                armLivenessOnOpen: false,
+                frameProtection: protection
             ),
             receiveTimeout: receiveTimeout,
             connectTimeout: connectTimeout,
@@ -1003,12 +1010,18 @@ struct ShardBenchLinks {
 
     /// Bind first, then dial, then accept: every stage's listener is up before any
     /// stage blocks in accept, so a ring opens in any start order.
+    ///
+    /// On an `hmac-sha256` link each link runs its key agreement as soon as it is
+    /// up (SPEC-051-R011), signed by `signer`: the dialed link before the accept, so a
+    /// member, which authenticates its upstream link before dialing on, never waits
+    /// for this stage.
     static func open(
         listen: ShardBenchEndpoint?,
         connect: ShardBenchEndpoint?,
         connectTimeout: TimeInterval,
         configuration: ShardLinkConfiguration,
-        session: String
+        session: String,
+        signer: ShardMemberSigner
     ) throws -> ShardBenchLinks {
         let listener = try listen.map { try ShardStageListener(host: $0.host, port: $0.port) }
         if let listen, let listener {
@@ -1035,13 +1048,24 @@ struct ShardBenchLinks {
                 throw error
             }
         }
-        if let dialed { shardBenchLog("connected to \(dialed.peerAddress)") }
+        if let dialed {
+            shardBenchLog("connected to \(dialed.peerAddress)")
+            do {
+                try dialed.authenticate(signer: signer, role: .initiator, timeout: connectTimeout)
+            } catch {
+                dialed.close()
+                throw error
+            }
+        }
         var accepted: ShardStageLink?
         if let listener {
             do {
-                accepted = try listener.accept(timeout: connectTimeout, configuration: configuration)
+                let link = try listener.accept(timeout: connectTimeout, configuration: configuration)
+                accepted = link
+                try link.authenticate(signer: signer, role: .responder, timeout: connectTimeout)
             } catch {
                 dialed?.close()
+                accepted?.close()
                 throw error
             }
         }
@@ -1146,7 +1170,7 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
         let links = try ShardBenchLinks.open(
             listen: options.listen, connect: options.connect,
             connectTimeout: options.connectTimeout, configuration: options.link,
-            session: options.role == .head ? "head" : "from-head")
+            session: options.role == .head ? "head" : "from-head", signer: signer)
         return try run(links: links)
     }
 
@@ -1400,6 +1424,7 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
         stageIndex = received.count
         var mine = myHello()
         try ShardBenchChain.validate(prefix: received, next: mine)
+        try ShardChainWire.checkPeer(links.upstream, is: received[received.count - 1], stage: stageIndex - 1)
         let probe = try measureProbes(links.upstream, peer: stageIndex - 1)
         mine.upstreamProbe = probe
         let chain = received + [mine]
@@ -1407,7 +1432,11 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
         try sendHello(links.downstream, chain, destination: stageIndex + 1)
         // The next stage acknowledges with the chain through itself.
         let acknowledged = try awaitHello(links.downstream)
-        options.onJoined?(acknowledged.count > chain.count ? acknowledged : chain, stageIndex)
+        guard acknowledged.count > chain.count, Array(acknowledged.prefix(chain.count)) == chain else {
+            throw ShardBenchError.handshake("stage \(stageIndex + 1) acknowledged a chain that does not extend this one")
+        }
+        try ShardChainWire.checkPeer(links.downstream, is: acknowledged[stageIndex + 1], stage: stageIndex + 1)
+        options.onJoined?(acknowledged, stageIndex)
         return probe
     }
 
@@ -1419,6 +1448,8 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
         stageIndex = received.count
         var mine = myHello()
         try ShardBenchChain.validate(prefix: received, next: mine)
+        try ShardChainWire.checkPeer(links.upstream, is: received[received.count - 1], stage: stageIndex - 1)
+        if !links.isCollapsed { try ShardChainWire.checkPeer(links.downstream, is: received[0], stage: 0) }
         let upstreamProbe = try measureProbes(links.upstream, peer: stageIndex - 1)
         mine.upstreamProbe = upstreamProbe
         var returnProbe: ShardBenchLatency?
@@ -1633,7 +1664,7 @@ final class ShardBenchSession<Stage: ShardBenchStage> {
                     payload: try JSONEncoder().encode(receipts)))
             case .error:
                 throw ShardBenchError.peerError(String(decoding: frame.payload, as: UTF8.self))
-            case .hello, .token, .tokenLogits, .heartbeat:
+            case .hello, .token, .tokenLogits, .heartbeat, .keyExchange:
                 throw ShardBenchError.protocolViolation("unexpected \(header.kind) frame on a \(options.role.rawValue) stage")
             }
         }

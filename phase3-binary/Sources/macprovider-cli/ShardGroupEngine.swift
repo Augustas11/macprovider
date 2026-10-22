@@ -275,6 +275,19 @@ enum ShardChainWire {
         }
     }
 
+    /// SPEC-051-R011: on a protected link, the member that signed the key agreement
+    /// must be the stage the chain hello names at the other end, with the key it
+    /// signs its sub-receipts with.
+    static func checkPeer(_ link: ShardStageLink, is hello: ShardBenchHello, stage: Int) throws {
+        guard link.configuration.frameProtection != .crc32c else { return }
+        guard let peer = link.peer else {
+            throw ShardBenchError.handshake("the link to stage \(stage) has no authenticated peer")
+        }
+        guard hello.memberPublicKey == peer.publicKey else {
+            throw ShardBenchError.handshake("the link to stage \(stage) was authenticated by \(peer.memberDeviceID), not by the key stage \(stage) announces")
+        }
+    }
+
     static func decodeReceipts(_ payload: Data) throws -> [ShardSignedSubReceipt] {
         guard !payload.isEmpty else { return [] }
         do {
@@ -552,6 +565,8 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
         for (index, hello) in chain.enumerated() where hello.memberPublicKey == nil {
             throw ShardBenchError.handshake("stage \(index) announced no member key")
         }
+        try ShardChainWire.checkPeer(links.downstream, is: chain[1], stage: 1)
+        try ShardChainWire.checkPeer(links.upstream, is: chain[chain.count - 1], stage: chain.count - 1)
         return chain
     }
 
@@ -893,6 +908,7 @@ final class ShardGroupEngine<Stage: ShardBenchStage>: @unchecked Sendable {
             let link = try ShardStageLink.connect(
                 host: spare.host, port: spare.port, timeout: options.replayDeadline, configuration: configuration)
             shardGroupLog("connected to spare \(link.peerAddress) after \(cause)")
+            try link.authenticate(signer: options.signer, role: .initiator, timeout: options.replayDeadline)
             let replacement = ShardBenchLinks(upstream: link, downstream: link)
             replacementLinks.append(replacement)
             let chain = try headHandshake(replacement, expectedMembers: options.spareMember.map { [$0] })

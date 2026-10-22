@@ -183,6 +183,12 @@ func TestValidateRecordReasons(t *testing.T) {
 	if r := ValidateRecord(twoStageRecord(1), cfg, head); r != "" {
 		t.Fatalf("valid record refused: %s", r)
 	}
+	// SPEC-051-R011: Ethernet is accepted with authenticated frames.
+	ethernet := twoStageRecord(1)
+	ethernet.InterconnectClass, ethernet.FrameProtection = "ethernet", "hmac-sha256"
+	if r := ValidateRecord(ethernet, cfg, head); r != "" {
+		t.Fatalf("ethernet hmac-sha256 record refused: %s", r)
+	}
 	cases := map[string]struct {
 		mutate func(*Record)
 		want   string
