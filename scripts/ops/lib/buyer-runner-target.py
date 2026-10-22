@@ -18,6 +18,7 @@ import time
 SERVICE = "malibu-buyer-runner.service"
 RUNNER = "/opt/malibu-buyer-runner/buyer-runner.mjs"
 TARGETS = "/opt/malibu-buyer-runner/targets.json"
+JOURNAL = "/var/lib/macprovider-ops/air-qwen8-runner.json"
 
 
 def digest(raw):
@@ -160,9 +161,21 @@ def execute(args):
     if os.geteuid() != 0 or args.path != TARGETS:
         raise ValueError("requires Pearl root and exact runner target path")
     path = secure_path(args.path)
+    if args.journal != JOURNAL:
+        raise ValueError("requires exact protected Air enrollment journal")
+    parent = Path(JOURNAL).parent
+    if not parent.exists() and not parent.is_symlink():
+        # Status/recovery of an operation never started must not create state.
+        if args.command in ("status", "recover"):
+            if args.command == "status":
+                print(json.dumps({"phase": "absent", "enrollment_matches": False, "runner_active": service("is-active")}))
+            return
+        for ancestor in reversed(parent.parents):
+            st = ancestor.lstat()
+            if not stat.S_ISDIR(st.st_mode) or st.st_uid != 0 or st.st_mode & 0o022:
+                raise ValueError("unsafe journal parent")
+        parent.mkdir(mode=0o700)
     journal = secure_path(args.journal, exists=False)
-    if journal == path or not str(journal).startswith("/var/lib/macprovider-ops/"):
-        raise ValueError("journal must be in protected ops state")
     state = json.loads(journal.read_bytes()) if journal.exists() else None
     if args.command == "status":
         print(json.dumps({"phase": state["phase"] if state else "absent",
