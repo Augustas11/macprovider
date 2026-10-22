@@ -73,6 +73,30 @@
       "requires_moe": false,
       "rollout": "on",
       "tokenizer_sha256": "610d65e44dda7497fedc48f66897a1ee95294d036a90f0ed8e57d29a90d79dfd"
+    },
+    {
+      "cache_class": "mixed",
+      "cached_turns_accepted": false,
+      "chat_template_sha256": "9cf4f46deaa06769f3240ada331ac0f348694db48ec2e8b51068935f77bb18f9",
+      "hardware_class": "apple-silicon:Apple M3 Ultra:ram-256gb",
+      "kernel_identifier": "macprovider_paged_kv_gather_v1",
+      "kv_dtype": "fp16",
+      "metallib_sha256": "3d9b4a747758128cc5418e62c5ad8e282a11b0d436423537137e013beaa1261b",
+      "model_id": "qwen/qwen3.6-35b-a3b",
+      "model_key": "qwen/qwen3.6-35b-a3b",
+      "model_sha256": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+      "provenance": {
+        "evidence_id": "spec048-r015-qwen36-c2519f2ad-ordinary-cb-s8-parity",
+        "live_executable_cdhash": "6d22d656dfee4dcaeba978ef9a3c77bfedec2955",
+        "package_manifest_sha256": "b7bcf82984a46afc0be394799597d3e1e1f40d112e5acc32e432f4f57bb97049",
+        "provider_cli_version": "1.8.261",
+        "source": "release_review",
+        "status": "qualified",
+        "studio_campaign_sha256": "bb4b4d59e67b34e18772785d295df0aa2260ea5a1e8d5524ff7f40399492607c"
+      },
+      "requires_moe": true,
+      "rollout": "canary",
+      "tokenizer_sha256": "eec97aac7c5f9ba9159d4784222300eccf5ff2e6b4aeb193c8c939c912633510"
     }
   ],
   "schema_version": "macprovider.continuous-batching-policy-source.v1"
