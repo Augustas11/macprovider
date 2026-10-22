@@ -895,7 +895,8 @@ func responsesToolChoiceToChatToolChoice(choice any, tools []map[string]any) (an
 	if !ok {
 		return nil, &responsesTranslationError{code: "unsupported_parameter", param: "tool_choice", message: "tool_choice must be a supported string or function selection"}
 	}
-	if typ, _ := m["type"].(string); typ == "function" {
+	// A named `custom` selection picks the function serving that custom tool.
+	if typ, _ := m["type"].(string); typ == "function" || typ == "custom" {
 		if name, _ := m["name"].(string); name != "" {
 			if !responsesChatToolsContainName(tools, name) {
 				return nil, &responsesTranslationError{code: "unsupported_parameter", param: "tool_choice", message: fmt.Sprintf("tool_choice references unavailable function tool %q", name)}

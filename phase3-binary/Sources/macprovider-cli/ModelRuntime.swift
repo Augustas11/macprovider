@@ -7431,17 +7431,41 @@ maxTokens: 1,
         detokenizer: StreamingDetokenizer,
         stopTokenFilter: StopTokenFilter
     ) -> ContinuousBatchCanonicalStopObserver? {
-        guard serialNativeToolStopApplies(request) else { return nil }
-        let state = ContinuousBatchSerialToolStopState(
-            request: request,
-            incrementalDecoder: detokenizer.makeIncremental()
-        )
+        // A reasoning row has no request stop-token sequences (SPEC-018
+        // §3.12): its post-`</think>` stop match is the canonical boundary,
+        // for streaming and non-streaming waiters alike.
+        let reasoningStop = request.outputTraits.reasoningOpen && request.stop.contains { !$0.isEmpty }
+        let serialTool = serialNativeToolStopApplies(request)
+        guard serialTool || reasoningStop else { return nil }
+        let state = serialTool
+            ? ContinuousBatchSerialToolStopState(request: request, incrementalDecoder: detokenizer.makeIncremental())
+            : nil
+        let stopText = reasoningStop ? ReasoningStopText(decoder: detokenizer.makeIncremental()) : nil
         return ContinuousBatchCanonicalStopObserver { token in
-            state.observe(
-                eventTokens: [token],
+            if let state, state.observe(eventTokens: [token], stopTokenFilter: stopTokenFilter, requestStops: request.stop) {
+                return true
+            }
+            guard let stopText else { return false }
+            return ModelRuntime.streamingSafePrefix(
+                stopText.append(token),
                 stopTokenFilter: stopTokenFilter,
-                requestStops: request.stop
-            )
+                requestStops: request.stop,
+                reasoningOpen: true
+            ).hitStop
+        }
+    }
+
+    /// The decoded text of a reasoning row, for its canonical stop test.
+    final class ReasoningStopText: @unchecked Sendable {
+        private let lock = NSLock()
+        private let decoder: IncrementalTextDecoder
+
+        init(decoder: IncrementalTextDecoder) { self.decoder = decoder }
+
+        func append(_ token: Int) -> String {
+            lock.lock()
+            defer { lock.unlock() }
+            return decoder.append(token)
         }
     }
 
@@ -13262,7 +13286,13 @@ maxTokens: maxTokens,
     /// that declares tools to a model whose template has no tool grammar is
     /// refused before any prompt work (SPEC-018 §3.2).
     static func resolvedToolGrammar(for request: ChatCompletionRequest, templateToolFormat: String?) throws -> ToolCallGrammar? {
-        let grammar = ToolCallGrammar.resolved(templateFormat: templateToolFormat, modelID: request.model)
+        var grammar = ToolCallGrammar.resolved(templateFormat: templateToolFormat, modelID: request.model)
+        // Harmony response parsing is selected by the model identity before
+        // rendering; a Harmony template under another name would be parsed
+        // as text, so its tool calls fail closed instead.
+        if grammar == .harmony, !HarmonyResponseParser.isHarmonyModelID(request.model) {
+            grammar = nil
+        }
         if grammar == nil, hasEnabledTools(request.promptSource.tools) {
             throw APIError(
                 status: 400,
@@ -13942,9 +13972,26 @@ struct SerialStreamingTextEmitter {
                     )
                 }
             }
+            // Content is released when no tool delta escaped: a final parse
+            // that found no call (after a provisional delimiter or a held
+            // Llama brace) falls back to plain content, and prose before a
+            // call that was not streamed yet (a terminal replay) precedes the
+            // call deltas the server emits after this.
+            let noToolDeltaDelivered = toolStreamer.deliveredArguments == nil
+            if !parsed.toolCalls.isEmpty, noToolDeltaDelivered, !parsed.content.isEmpty {
+                let prose = ModelRuntime.streamDelta(from: emittedContent, to: parsed.content)
+                if !prose.isEmpty {
+                    if let error = structuredAccumulator.append(prose) {
+                        throw error
+                    }
+                    idleState.noteContent()
+                    noteEmitted(prose)
+                    onChunk(.content(prose))
+                }
+            }
             if parsed.toolCalls.isEmpty,
                !parsed.content.isEmpty,
-               !toolStreamer.suppressesAssistantContent
+               !toolStreamer.suppressesAssistantContent || noToolDeltaDelivered
             {
                 let contentDelta = delta(to: parsed.content)
                 if !contentDelta.isEmpty {

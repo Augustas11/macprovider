@@ -65,7 +65,7 @@ enum ToolPromptRenderer {
                     }
                     namesByCallID[call.id] = call.functionName
                     return MLXLMCommon.ToolCall(
-                        function: .init(name: call.functionName, arguments: try argumentsObject(call)),
+                        function: .init(name: call.functionName, arguments: try argumentsObject(call, grammar: grammar)),
                         id: call.id
                     )
                 }
@@ -78,7 +78,7 @@ enum ToolPromptRenderer {
     }
 
     /// History arguments are request input: bounded strict JSON objects.
-    private static func argumentsObject(_ call: MacProviderCore.ToolCall) throws -> [String: MLXLMCommon.JSONValue] {
+    private static func argumentsObject(_ call: MacProviderCore.ToolCall, grammar: ToolCallGrammar?) throws -> [String: MLXLMCommon.JSONValue] {
         let parsed: MacProviderCore.JSONValue
         do {
             parsed = try StrictJSONParser.parse(call.arguments)
@@ -89,10 +89,24 @@ enum ToolPromptRenderer {
         guard case .object(let object) = parsed else {
             throw APIError(status: 400, message: "Tool history arguments must be an object", code: "invalid_tools")
         }
-        guard object.keys.allSatisfy(ToolCallParser.isValidToolParameterName) else {
+        // Gemma 4 writes nested object keys unquoted too, so every depth is
+        // held to the charset there; other templates quote nested keys.
+        guard object.keys.allSatisfy(ToolCallParser.isValidToolParameterName),
+              grammar != .gemma4 || nestedKeysAreSafe(parsed) else {
             throw APIError(status: 400, message: "Tool history names are outside the tool-call grammar", code: "invalid_tools")
         }
         return object.mapValues(templateValue)
+    }
+
+    private static func nestedKeysAreSafe(_ value: MacProviderCore.JSONValue) -> Bool {
+        switch value {
+        case .object(let object):
+            return object.allSatisfy { ToolCallParser.isValidToolParameterName($0.key) && nestedKeysAreSafe($0.value) }
+        case .array(let array):
+            return array.allSatisfy(nestedKeysAreSafe)
+        default:
+            return true
+        }
     }
 
     private static func templateValue(_ value: MacProviderCore.JSONValue) -> MLXLMCommon.JSONValue {

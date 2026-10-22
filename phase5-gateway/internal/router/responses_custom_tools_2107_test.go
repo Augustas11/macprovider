@@ -113,3 +113,15 @@ func TestResponsesRefusesLocalShellTool(t *testing.T) {
 		t.Fatalf("local_shell must be refused before dispatch: %d %s (upstream=%d)", resp.Code, resp.Body.String(), upstream)
 	}
 }
+
+func TestResponsesNamedCustomToolChoiceSelectsItsFunction(t *testing.T) {
+	choice, err := responsesToolChoiceToChatToolChoice(map[string]any{"type": "custom", "name": "apply_patch"},
+		[]map[string]any{{"type": "function", "function": responsesCustomToolAsFunction(map[string]any{"type": "custom", "name": "apply_patch"})}})
+	if err != nil {
+		t.Fatalf("named custom selection: %v", err.message)
+	}
+	fn := choice.(map[string]any)["function"].(map[string]any)
+	if fn["name"] != "apply_patch" {
+		t.Fatalf("choice=%v", choice)
+	}
+}

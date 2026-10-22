@@ -240,6 +240,88 @@ final class CatalogToolGrammarTests: XCTestCase {
         XCTAssertEqual(parsed.toolCalls.first?.arguments, #"{"city":"Paris, France","count":2,"enabled":true}"#)
     }
 
+    /// Audit r1: the Gemma dialect parser fails closed on duplicates, trailing
+    /// text and type mismatches, and decodes marker strings inside composites.
+    func testGemmaParserIsStrictAndRecursive() throws {
+        let schemas: [String: MacProviderCore.JSONValue] = [
+            "edit": try MacProviderCore.JSONValue.parse([
+                "type": "object",
+                "properties": ["paths": ["type": "array"], "opts": ["type": "object"], "n": ["type": "integer"]],
+            ]),
+        ]
+        func parse(_ body: String) -> [macprovider_cli.ToolCall] {
+            ToolCallParser.parseToolCalls(
+                rawOutput: "<|tool_call>" + body + "<tool_call|>", grammar: .gemma4, modelID: "gemma",
+                allowedFunctionNames: ["edit"], schemas: schemas
+            ).toolCalls
+        }
+        XCTAssertEqual(parse(#"call:edit{paths:[<|"|>a, b<|"|>,<|"|>c<|"|>],opts:{mode:<|"|>x:y<|"|>},n:3}"#).first?.arguments,
+                       #"{"n":3,"opts":{"mode":"x:y"},"paths":["a, b","c"]}"#)
+        XCTAssertTrue(parse(#"call:edit{n:1,n:2}"#).isEmpty, "duplicate key")
+        XCTAssertTrue(parse(#"call:edit{opts:{a:1,a:2}}"#).isEmpty, "nested duplicate key")
+        XCTAssertTrue(parse(#"call:edit{n:1} trailing"#).isEmpty, "trailing text")
+        XCTAssertTrue(parse(#"call:edit{n:<|"|>3<|"|>}"#).isEmpty, "declared integer given a string")
+        XCTAssertTrue(parse(#"call:edit{paths:<|"|>a<|"|>}"#).isEmpty, "declared array given a string")
+        XCTAssertTrue(parse("call:edit{n}").isEmpty, "field without a value")
+        XCTAssertTrue(parse("call:edit{opts:" + String(repeating: "{a:", count: 40) + "1" + String(repeating: "}", count: 41)).isEmpty, "depth")
+    }
+
+    func testGLMCallsSurviveProseBetweenAndAfterEnvelopes() throws {
+        let raw = "<tool_call>lookup<arg_key>city</arg_key><arg_value>A</arg_value></tool_call>\nand then\n"
+            + "<tool_call>lookup<arg_key>city</arg_key><arg_value>B</arg_value></tool_call>\ndone."
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: raw, grammar: .glm, modelID: "glm", allowedFunctionNames: ["lookup"], schemas: try Self.schemas
+        )
+        XCTAssertEqual(parsed.toolCalls.map(\.arguments), [#"{"city":"A"}"#, #"{"city":"B"}"#])
+    }
+
+    /// Audit r1: a stream whose final parse finds no call releases the held
+    /// text as content (here a Llama brace that is not a call).
+    func testStreamReleasesHeldTextWhenNoCallParses() throws {
+        let request = try toolRequest(model: "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit", tool: "lookup", property: "city")
+        let output = #"Use {"color": "blue"} as the value."#
+        var emitter = SerialStreamingTextEmitter(request: request)
+        let accumulator = StructuredStreamingContentAccumulator(enabled: false)
+        let idle = StructuredStreamingIdleState(enabled: false)
+        var content = ""
+        for end in 1...output.count {
+            _ = emitter.step(candidate: (String(output.prefix(end)), false), structuredAccumulator: accumulator, idleState: idle) {
+                if case .content(let text) = $0 { content += text }
+            }
+        }
+        let parsed = try ModelRuntime.parseGeneratedOutput(
+            filteredText: output, generatedTokenIDs: [], decode: { _ in "" }, request: request, mode: .complete(),
+            defaultCompletionTokens: 9, toolCallPrefill: nil
+        )
+        try emitter.finish(finalText: output, parsed: parsed, structuredAccumulator: accumulator, idleState: idle) {
+            if case .content(let text) = $0 { content += text }
+        }
+        XCTAssertTrue(parsed.toolCalls.isEmpty)
+        XCTAssertEqual(content, output)
+        XCTAssertEqual(emitter.emittedContent, output)
+    }
+
+    /// Audit r1: a reasoning CB row stops canonically at a post-think stop
+    /// string (it has no request stop-token sequences), not inside reasoning.
+    func testReasoningRowCanonicalStopObserverStopsAfterThink() throws {
+        let request = try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: [
+            "model": "Jundot/GLM-5.3-Flash-oQ4e-mtp", "messages": [["role": "user", "content": "count"]], "stop": ["4"],
+        ]))
+        request.outputState.resolve(RequestOutputTraits(toolGrammar: .glm, reasoningOpen: true))
+        let pieces = ["1 2 3 4", "</think>", "1, ", "2, ", "3, ", "4", ", 5"]
+        let observer = try XCTUnwrap(ModelRuntime.continuousBatchSerialToolStopObserver(
+            request: request,
+            detokenizer: ModelRuntime.StreamingDetokenizer(decode: { $0.map { pieces[$0] }.joined() }, tokenPiece: { pieces[$0] }),
+            stopTokenFilter: StopTokenFilter(tokens: [])
+        ))
+        var stoppedAt: Int?
+        for token in pieces.indices where stoppedAt == nil {
+            if observer.observe([token]) { stoppedAt = token }
+        }
+        XCTAssertEqual(stoppedAt, 5, "the stop inside the reasoning must not end the row")
+        XCTAssertEqual(observer.stopTokenCount, 6)
+    }
+
     // MARK: - Reasoning split (SPEC-018 §3.12)
 
     func testReasoningSplitAppliesStopsAndJSONModeToTheAnswerOnly() throws {

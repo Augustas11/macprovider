@@ -87,10 +87,21 @@ func TestModelCapabilitiesFollowEnforcedPredicates(t *testing.T) {
 		t.Fatalf("supported_parameters=%v", entry.SupportedParameters)
 	}
 
-	glm := pool.Provider{ModelID: "Jundot/GLM-5.3-Flash-oQ4e-mtp", MaxContextTokens: 32768}
+	glm := pool.Provider{ModelID: "Jundot/GLM-5.3-Flash-oQ4e-mtp", MaxContextTokens: 32768, BinaryVersion: toolGrammarProviderMinVersion}
 	caps = mergeModelCapabilities(nil, glm, false)
-	if !caps.Tools || !caps.Reasoning || strings.Join(caps.ToolChoice, ",") != "auto,none" {
-		t.Fatalf("glm capabilities=%+v", caps)
+	if !caps.Tools || !caps.Reasoning || strings.Join(caps.ToolChoice, ",") != "auto" {
+		t.Fatalf("glm capabilities=%+v (no declared modes means auto only)", caps)
+	}
+	// An older provider that does not parse GLM calls is not advertised.
+	old := glm
+	old.BinaryVersion = "1.8.261"
+	if caps := mergeModelCapabilities(nil, old, false); caps.Tools || caps.Reasoning {
+		t.Fatalf("pre-#2107 GLM provider capabilities=%+v", caps)
+	}
+	// Families an older provider already served keep tools.
+	qwen := pool.Provider{ModelID: "mlx-community/Qwen3-8B-4bit", BinaryVersion: "1.8.200"}
+	if caps := mergeModelCapabilities(nil, qwen, false); !caps.Tools {
+		t.Fatalf("legacy qwen capabilities=%+v", caps)
 	}
 
 	vl := pool.Provider{ModelID: "mlx-community/Qwen2-VL-2B-Instruct-4bit", MaxContextTokens: 4096}

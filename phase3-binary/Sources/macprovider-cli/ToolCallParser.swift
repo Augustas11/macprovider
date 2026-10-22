@@ -111,25 +111,20 @@ enum ToolCallParser {
         }
     }
 
-    /// Every `start…end` envelope becomes one call; text between envelopes
-    /// must be blank. The final envelope may omit `end` when the output ends
-    /// there (the model's end-of-turn token replaced it), but its body must
-    /// still parse completely.
+    /// Every `start…end` envelope becomes one call; prose between or after
+    /// envelopes is dropped (SPEC-018 §2.4). The final envelope may omit `end`
+    /// when the output ends there (the model's end-of-turn token replaced
+    /// it), but its body must still parse completely.
     private static func parseTaggedCalls(
         _ rawOutput: String,
         start: String,
         end: String,
         body: (String) throws -> ToolCall
     ) throws -> [ToolCall] {
-        guard let first = rawOutput.range(of: start) else { return [] }
-        var cursor = first.lowerBound
         var calls: [ToolCall] = []
-        while cursor < rawOutput.endIndex {
-            let rest = rawOutput[cursor...]
-            guard rest.hasPrefix(start) else {
-                guard rest.allSatisfy(\.isWhitespace) else { throw ParseError.invalidShape }
-                break
-            }
+        var searchFrom = rawOutput.startIndex
+        while let open = rawOutput.range(of: start, range: searchFrom..<rawOutput.endIndex) {
+            let cursor = open.lowerBound
             let bodyStart = rawOutput.index(cursor, offsetBy: start.count)
             let close = rawOutput.range(of: end, range: bodyStart..<rawOutput.endIndex)
             let bodyEnd = close?.lowerBound ?? rawOutput.endIndex
@@ -137,10 +132,7 @@ enum ToolCallParser {
             if close == nil, text.contains(start) { throw ParseError.missingEndDelimiter }
             calls.append(try body(text))
             guard let close else { break }
-            cursor = close.upperBound
-            while cursor < rawOutput.endIndex, rawOutput[cursor].isWhitespace {
-                cursor = rawOutput.index(after: cursor)
-            }
+            searchFrom = close.upperBound
         }
         return calls
     }
@@ -207,7 +199,18 @@ enum ToolCallParser {
     private static func parseLlama3Calls(_ rawOutput: String) throws -> [ToolCall] {
         guard let start = llama3CallStart(in: rawOutput) else { return [] }
         var text = rawOutput[start...]
-        if text.hasPrefix("<|python_tag|>") { text = text.dropFirst("<|python_tag|>".count) }
+        if text.hasPrefix("<|python_tag|>") {
+            text = text.dropFirst("<|python_tag|>".count)
+            // Llama 3.3 builtin-style `name(key="value")` after the tag.
+            let body = text.drop(while: { $0.isWhitespace })
+            if !body.hasPrefix("{") {
+                let end = ["<|eom_id|>", "<|eot_id|>"].compactMap { body.range(of: $0)?.lowerBound }.min() ?? body.endIndex
+                guard body[end...].dropFirst(body[end...].hasPrefix("<|") ? 10 : 0).allSatisfy(\.isWhitespace) else {
+                    throw ParseError.invalidShape
+                }
+                return [try parsePythonStyleCall(String(body[..<end]))]
+            }
+        }
         var calls: [ToolCall] = []
         while true {
             text = text.drop(while: { $0.isWhitespace || $0 == ";" || $0 == "," })

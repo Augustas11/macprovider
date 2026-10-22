@@ -2546,8 +2546,8 @@ type chatRequest struct {
 	// SPEC-002-R006 phase classifier.
 	maxTokens int
 	// multiTurnToolHistory records SPEC-018 §3.8 tool history (role:"tool"
-	// or non-empty assistant tool_calls) so class selection can drop
-	// members without a multi-turn prompt profile.
+	// or non-empty assistant tool_calls) or declared tools, so class
+	// selection can drop members without a tool grammar.
 	multiTurnToolHistory bool
 	// declaresTools records a non-empty `tools` array (SPEC-018 §3.2 gate).
 	declaresTools bool
@@ -2753,15 +2753,17 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.engineClass = engineClass
-	req.multiTurnToolHistory = hasMultiTurnToolData(req.Messages)
 	req.declaresTools = requestDeclaresTools(req.raw)
+	// Declared tools need a tool grammar exactly as tool history does, so
+	// class narrowing and per-candidate filtering cover first turns too.
+	req.multiTurnToolHistory = hasMultiTurnToolData(req.Messages) || req.declaresTools
 	var poolRuntimeAllowlist []string
 	if req.poolSnapshotSet {
 		poolRuntimeAllowlist = req.poolSnapshot.RuntimeAllowlist
 	}
 	if status, code, msg := unsupportedToolsModel(req, tier2.Default().ModelIDs, s.resolveModelClass(req.Model), poolRuntimeAllowlist); status != 0 {
 		rec.logBuyerFailure(status, msg)
-		writeError(w, status, code, msg)
+		writeErrorWithParam(w, status, code, msg, "tools")
 		return
 	}
 	if status, code, msg := unsupportedMultiTurnToolModel(req, tier2.Default().ModelIDs, s.resolveModelClass(req.Model), poolRuntimeAllowlist); status != 0 {

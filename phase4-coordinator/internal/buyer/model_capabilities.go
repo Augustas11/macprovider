@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/versionfloor"
 )
 
 // modelCapabilities is the per-model capability object on /v1/models
@@ -13,8 +14,11 @@ import (
 //
 //   - tools: the model family has a tool grammar (toolGrammarFamily, the
 //     same predicate behind tools_unsupported_for_model).
-//   - tool_choice: auto/none with tools, plus every guaranteed mode a native
-//     provider declares for its exact loaded model (providerSupportsToolSelection).
+//   - tool_choice: auto with tools, plus every mode (none, required, named)
+//     a native provider declares for its exact loaded model
+//     (providerSupportsToolSelection).
+//   - tools and reasoning for a family an older provider did not parse need
+//     a provider at toolGrammarProviderMinVersion or later.
 //   - reasoning: the family's template always opens a reasoning block, so
 //     responses carry reasoning_content and honour reasoning_effort.
 //   - response_format: every native provider validates json_object and strict
@@ -30,6 +34,23 @@ type modelCapabilities struct {
 	ContextLength  int      `json:"context_length"`
 }
 
+// toolGrammarProviderMinVersion is the first provider CLI that parses every
+// catalog tool grammar and splits reasoning (#2107). An older provider keeps
+// only the families it already served, so the metadata never advertises what
+// an eligible provider cannot do during a staged rollout.
+const toolGrammarProviderMinVersion = "1.8.262"
+
+// legacyToolFamily is the set an older provider already served with tools.
+func legacyToolFamily(model string) bool {
+	id := strings.ToLower(model)
+	return strings.Contains(id, "qwen2.5") || strings.Contains(id, "qwen3") || strings.Contains(id, "llama-3.3") || strings.Contains(id, "gpt-oss")
+}
+
+func providerServesToolGrammars(p pool.Provider) bool {
+	cmp, ok := versionfloor.Compare(p.BinaryVersion, toolGrammarProviderMinVersion)
+	return ok && cmp >= 0
+}
+
 // reasoningFamily reports families whose chat template always reasons before
 // answering (GLM-5 opens `<think>`; gpt-oss Harmony has an analysis channel).
 func reasoningFamily(model string) bool {
@@ -42,13 +63,13 @@ func mergeModelCapabilities(current *modelCapabilities, p pool.Provider, vision 
 	if caps == nil {
 		caps = &modelCapabilities{}
 	}
-	if toolGrammarFamily(p.ModelID) != "" {
+	if toolGrammarFamily(p.ModelID) != "" && (legacyToolFamily(p.ModelID) || providerServesToolGrammars(p)) {
 		caps.Tools = true
-		modes := map[string]bool{"auto": true, "none": true}
+		modes := map[string]bool{"auto": true}
 		for _, mode := range caps.ToolChoice {
 			modes[mode] = true
 		}
-		for _, mode := range []string{"required", "named"} {
+		for _, mode := range []string{"none", "required", "named"} {
 			if providerSupportsToolSelection(p, &toolSelectionPolicy{mode: mode}) {
 				modes[mode] = true
 			}
@@ -60,7 +81,7 @@ func mergeModelCapabilities(current *modelCapabilities, p pool.Provider, vision 
 			}
 		}
 	}
-	if reasoningFamily(p.ModelID) {
+	if reasoningFamily(p.ModelID) && (strings.Contains(strings.ToLower(p.ModelID), "gpt-oss") || providerServesToolGrammars(p)) {
 		caps.Reasoning = true
 	}
 	if p.RuntimeSource == "" || p.RuntimeSource == engineClassNative {

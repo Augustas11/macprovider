@@ -25,6 +25,8 @@ public enum ToolCallGrammar: String, Sendable, Equatable, CaseIterable {
     public static func family(modelID: String) -> ToolCallGrammar? {
         let id = modelID.lowercased()
         if id.contains("qwen2-vl") || id.contains("qwen2vl") { return nil }
+        // Table order (SPEC-018 §3.6): the Qwen row wins a mixed name.
+        if id.contains("qwen2.5") || id.contains("qwen3") { return .qwen }
         if id.contains("gpt-oss") { return .harmony }
         if id.contains("glm-4.5") || id.contains("glm-4.6") || id.contains("glm-4.7")
             || id.contains("glm-5") { return .glm }
@@ -32,7 +34,6 @@ public enum ToolCallGrammar: String, Sendable, Equatable, CaseIterable {
             || id.contains("llama3.1") || id.contains("llama3.2") || id.contains("llama3.3") { return .llama3 }
         if id.contains("gemma-4") || id.contains("gemma4") { return .gemma4 }
         if id.contains("nemotron-3") || id.contains("nemotron3") { return .qwen }
-        if id.contains("qwen2.5") || id.contains("qwen3") { return .qwen }
         return nil
     }
 

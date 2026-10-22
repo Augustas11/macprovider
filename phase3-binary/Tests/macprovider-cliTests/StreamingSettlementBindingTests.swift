@@ -600,6 +600,8 @@ final class StreamingSettlementBindingTests: XCTestCase {
         if !stops.isEmpty { body["stop"] = stops }
         if let responseFormat { body["response_format"] = responseFormat }
         if withTools {
+            // A serial tool turn, explicit since #2107 (omitted is parallel).
+            body["parallel_tool_calls"] = false
             body["model"] = "mlx-community/Qwen3-8B-4bit"
             body["tools"] = [[
                 "type": "function",

@@ -376,7 +376,7 @@ Source: `phase3-binary/Sources/macprovider-cli/ToolCallParser.swift:238-264`, `p
 
 The parser can collect prose outside tool-call delimiters as cleaned content. The v0.1 provider runtime discards that cleaned content whenever at least one tool call is parsed and returns tool calls only. Therefore, when the model emits prose before, between, or after recognized tool calls, the buyer-visible non-streaming message MUST contain `content = null` and the parsed `tool_calls[]`.
 
-**AMENDED v0.3.0:** prose the model writes *before* its first recognized call is kept: the non-streaming message carries it (trimmed) as `content` next to `tool_calls[]`, and a stream delivers it as content deltas before the first tool-call delta. Prose between or after calls is still dropped; `content` is `null` when there is no leading prose.
+**AMENDED v0.3.0:** prose between or after GLM/Gemma envelopes is dropped without discarding the calls. Prose the model writes *before* its first recognized call is kept: the non-streaming message carries it (trimmed) as `content` next to `tool_calls[]`, and a stream delivers it as content deltas before the first tool-call delta. Prose between or after calls is still dropped; `content` is `null` when there is no leading prose.
 
 Source: parser behavior in `phase3-binary/Sources/macprovider-cli/ToolCallParser.swift:29-50`; runtime discard in `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:826-839`; response emission in `phase3-binary/Sources/macprovider-cli/HTTPServer.swift:819-828`.
 
@@ -395,7 +395,7 @@ The provider does not receive structured tool calls from the underlying MLX mode
 | `qwen` | template format `json`, `xml_function` or `qwen3_5`; family fallback `qwen2.5`, `qwen3`, `nemotron-3` | ONE OF: `<tool_call>{...}</tool_call>` JSON body; `<tool_call>name(key=value, ...)</tool_call>` Python-style call; OR the `<function=name><parameter=key>value</parameter></function>` XML body (Qwen3-Coder, Qwen3.5+, Nemotron-3), with or without the enclosing `<tool_call>`. JSON first, then Python-style, then function-XML. | `arguments` (JSON), keyword args (Python-style), `<parameter=…>` keys (XML, typed per §3.3) | `ToolCallParser.parseQwenToolCalls` |
 | `glm` | template format `glm4`; family fallback `glm-4.5`…`glm-4.7`, `glm-5` | `<tool_call>NAME<arg_key>K</arg_key><arg_value>V</arg_value>…</tool_call>`, one envelope per call; the final envelope may end at the end of output without `</tool_call>` when its pairs are complete. | `<arg_key>` keys. A value whose declared type is `string` is literal text; any other declared type must be strict JSON of that type; an undeclared value is JSON when it parses, else text. | `ToolCallParser.glmCall` |
 | `llama3` | template format `llama3`; family fallback `llama-3.1`, `llama-3.2`, `llama-3.3` | One or more JSON objects `{"name", "parameters"}` ending the output, `;`-separated, optionally after `<|python_tag|>` and before `<|eom_id|>`/`<|eot_id|>`. A JSON object without a string `name` and an object `parameters`/`arguments` is content. | `parameters` (`arguments` accepted) | `ToolCallParser.parseLlama3Calls` |
-| `gemma4` | template format `gemma4`; family fallback `gemma-4` | `<|tool_call>call:NAME{key:value,…}<tool_call|>` with strings as `<|"|>…<|"|>` and brace-form objects/arrays | keys of the brace object, typed by the declared schema | `GemmaToolCallBridge` (mlx-swift-lm `GemmaFunctionParser`) |
+| `gemma4` | template format `gemma4`; family fallback `gemma-4` | `<|tool_call>call:NAME{key:value,…}<tool_call|>` with strings as `<|"|>…<|"|>` and brace-form objects/arrays | keys of the brace object; strings `<|"|>`-delimited at any depth; duplicate keys, trailing text, depth over 32 or a declared-type mismatch fail closed | `GemmaToolCallBridge` (bounded dialect parser) |
 | `harmony` | template format `gpt_oss`; family fallback `gpt-oss` | OpenAI Harmony response frames parsed from generated token IDs (§3.10). | JSON object body of a declared `commentary to=functions.<name>` call. | `HarmonyResponseParser.swift` |
 
 Note: production Qwen-coding SKUs (e.g. `mlx-community/Qwen2.5-Coder-32B-Instruct-4bit`, `mlx-community/Qwen3-32B-4bit`) match the Qwen family row via `qwen2.5` or `qwen3` substring. There is no separate "coding-tuned" row in §3.1 — coding-tuned variants advertise as Qwen2.5/Qwen3 derivatives and select the same family; body-grammar disambiguation is performed by the parser per the OR rule above.
@@ -826,7 +826,9 @@ the generated text up to the first `</think>` is reasoning:
 - Stop strings, JSON-mode validation (SPEC-019) and tool parsing apply only to
   the text after `</think>`; a stop string inside the reasoning neither ends
   generation nor truncates it. Continuous-batching rows of such requests carry
-  no request stop-token sequences; the text filter ends them.
+  no request stop-token sequences; their canonical stop observer ends them
+  at the first post-`</think>` stop match, for streaming and non-streaming
+  waiters alike.
 - Output that never closes `</think>` is all reasoning; `content` is empty.
 - The receipt output hash (SPEC-015) covers `content`, `tool_calls` and
   `finish_reason` as before; `reasoning_content` is not part of it in this

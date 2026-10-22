@@ -28,6 +28,9 @@ func toolGrammarFamily(model string) string {
 	switch {
 	case strings.Contains(id, "qwen2-vl"), strings.Contains(id, "qwen2vl"):
 		return ""
+	case strings.Contains(id, "qwen2.5"), strings.Contains(id, "qwen3"):
+		// Table order (SPEC-018 §3.6): the Qwen row wins a mixed name.
+		return toolGrammarQwen
 	case strings.Contains(id, "gpt-oss"):
 		return toolGrammarHarmony
 	case strings.Contains(id, "glm-4.5"), strings.Contains(id, "glm-4.6"), strings.Contains(id, "glm-4.7"), strings.Contains(id, "glm-5"):
@@ -38,8 +41,6 @@ func toolGrammarFamily(model string) string {
 	case strings.Contains(id, "gemma-4"), strings.Contains(id, "gemma4"):
 		return toolGrammarGemma4
 	case strings.Contains(id, "nemotron-3"), strings.Contains(id, "nemotron3"):
-		return toolGrammarQwen
-	case strings.Contains(id, "qwen2.5"), strings.Contains(id, "qwen3"):
 		return toolGrammarQwen
 	}
 	return ""
