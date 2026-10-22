@@ -656,7 +656,9 @@ restart_and_wait() {
   local expected="$1" before_file="$2" after_file="$3" before_pid
   before_pid="$(status_pid "$before_file")"
   [ -n "$before_pid" ] || return 1
-  studio_command "$QWEN_E2E_CLI" restart --config "$QWEN_E2E_CONFIG" >/dev/null
+  # The verified GUI-domain kickstart restoration uses: over SSH, `macprovider-cli
+  # restart` looks for a system-domain service and exits 64.
+  studio_helper restart-service --config "$QWEN_E2E_CONFIG" --validator "$QWEN_E2E_CLI" >/dev/null || return
   poll_ready "$expected" "$before_pid" "$after_file" >/dev/null
 }
 
