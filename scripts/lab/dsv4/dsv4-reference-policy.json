@@ -1,0 +1,29 @@
+{
+  "artifact_repo": "TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX",
+  "artifact_revision": "d6be051ae238b2021de56cf098d8f0206328754a",
+  "decode": 256,
+  "environment": {
+    "mlx": "0.32.4",
+    "mlx-metal": "0.32.4",
+    "mlx-vlm": "0.7.10"
+  },
+  "evidence_class": "dsv4_reference_measurement_only",
+  "model_id": "deepseek-ai/deepseek-v4-flash-0731",
+  "oracle_contexts": [
+    1024,
+    8192,
+    32768
+  ],
+  "row_prompt": 1024,
+  "rows": [
+    1,
+    4
+  ],
+  "schema": "macprovider.dsv4-reference-policy.v1",
+  "target_sha256": "58ee40d4c0bc436695d1d8d6a6cdfdb0326ec37f25e13ec98ea1d5c0878e732c",
+  "temperature": 0,
+  "ttft_contexts": [
+    4096,
+    32768
+  ]
+}
