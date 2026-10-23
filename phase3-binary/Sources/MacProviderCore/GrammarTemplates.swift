@@ -33,6 +33,15 @@ public enum GrammarTemplates {
     public static func schema(_ value: JSONValue) -> ByteGrammar { schema(value, depth: 0, gemma: false) }
 
     public static func toolCall(name: String, parameters: JSONValue, family: ToolCallGrammar) -> ByteGrammar {
+        if case .object(let object) = parameters, object["enum"] != nil {
+            return .choice(enumCandidates(object).compactMap { value in
+                guard case .object(let fields) = value else { return nil }
+                let properties = fields.mapValues { literalSchema($0) }
+                let exactObject = JSONValue.object(["type": .string("object"), "properties": .object(properties),
+                    "required": .array(fields.keys.sorted().map(JSONValue.string)), "additionalProperties": .bool(false)])
+                return toolCall(name: name, parameters: exactObject, family: family)
+            })
+        }
         // Unsupported top-level keywords must never widen a function's
         // parameters from an object into arbitrary JSON scalars.
         let parameters = canonicalToolObject(parameters)
@@ -63,6 +72,55 @@ public enum GrammarTemplates {
         }
     }
 
+    private static func literalSchema(_ value: JSONValue) -> JSONValue {
+        let type: String
+        switch value {
+        case .object: type = "object"
+        case .array: type = "array"
+        case .string: type = "string"
+        case .int: type = "integer"
+        case .double: type = "number"
+        case .bool: type = "boolean"
+        case .null: type = "null"
+        }
+        return .object(["type": .string(type), "enum": .array([value])])
+    }
+
+    private static func enumCandidates(_ object: [String: JSONValue]) -> [JSONValue] {
+        guard case .array(let values)? = object["enum"] else { return [] }
+        let schema = JSONValue.object(object)
+        // The strict validator's shape gate permits scalar enums only, but
+        // its instance validator also compares object/array enum instances.
+        var validationShape = object
+        validationShape.removeValue(forKey: "enum")
+        let strict = (try? JSONSchemaValidator.validateSchemaShape(schema: .object(validationShape))) != nil
+        return values.filter { value in
+            guard matchesSubset(value, schema: schema) else { return false }
+            return !strict || (try? JSONSchemaValidator.validateInstance(value, against: schema)) != nil
+        }
+    }
+
+    private static func matchesSubset(_ value: JSONValue, schema: JSONValue) -> Bool {
+        guard case .object(let object) = schema else { return true }
+        guard matchesDeclaredType(value, type: object["type"]) else { return false }
+        if case .array(let values)? = object["enum"], !values.contains(value) { return false }
+        if case .object(let fields) = value {
+            if case .array(let required)? = object["required"], required.contains(where: {
+                guard case .string(let name) = $0 else { return true }
+                return fields[name] == nil
+            }) { return false }
+            if case .object(let properties)? = object["properties"] {
+                if object["additionalProperties"] == .bool(false), !Set(fields.keys).isSubset(of: Set(properties.keys)) { return false }
+                for (key, child) in fields {
+                    if let childSchema = properties[key], !matchesSubset(child, schema: childSchema) { return false }
+                }
+            }
+        }
+        if case .array(let values) = value, let items = object["items"],
+           values.contains(where: { !matchesSubset($0, schema: items) }) { return false }
+        return true
+    }
+
     private static func structured(_ body: ByteGrammar, family: ToolCallGrammar?) -> ByteGrammar {
         guard family == .harmony else { return body }
         return .sequence([.literal("<|start|>assistant<|channel|>final<|message|>"), body, .literal("<|return|>")])
@@ -79,8 +137,7 @@ public enum GrammarTemplates {
 
     private static func validateRequiredProperties(_ value: JSONValue) throws {
         guard case .object(let object) = value else { return }
-        if case .array(let values)? = object["enum"],
-           !values.contains(where: { matchesDeclaredType($0, type: object["type"]) }) {
+        if object["enum"] != nil, enumCandidates(object).isEmpty {
             throw unsupportedGrammar("Output enum has no values matching its declared type")
         }
         let properties: [String: JSONValue]
@@ -106,6 +163,13 @@ public enum GrammarTemplates {
                     }) else { throw unsupportedGrammar("Tagged tool grammar requires safe parameter names") }
                 }
             }
+            if case .array(let values)? = object["enum"] {
+                for value in values {
+                    if case .object(let fields) = value {
+                        try validateTaggedSchema(.object(["properties": .object(fields.mapValues { literalSchema($0) })]))
+                    }
+                }
+            }
             for child in object.values { try validateTaggedSchema(child) }
         case .array(let values): for child in values { try validateTaggedSchema(child) }
         case .string(let text):
@@ -115,8 +179,8 @@ public enum GrammarTemplates {
     }
 
     private static func rawStringGrammar(_ property: JSONValue) -> ByteGrammar {
-        if case .object(let details) = property, case .array(let values)? = details["enum"] {
-            return .choice(values.compactMap { if case .string(let text) = $0 { return .literal(text) }; return nil })
+        if case .object(let details) = property, details["enum"] != nil {
+            return .choice(enumCandidates(details).compactMap { if case .string(let text) = $0 { return .literal(text) }; return nil })
         }
         return rawText
     }
@@ -152,8 +216,8 @@ public enum GrammarTemplates {
         guard depth < 8, case .object(let object) = value else { return generic(depth: 1, gemma: gemma) }
         let supported: Set<String> = ["type", "properties", "required", "additionalProperties", "items", "enum", "description", "title", "$schema"]
         guard Set(object.keys).isSubset(of: supported) else { return generic(depth: 1, gemma: gemma) }
-        if case .array(let values)? = object["enum"], !values.isEmpty {
-            return .choice(values.filter { matchesDeclaredType($0, type: object["type"]) }.map { literal($0, gemma: gemma) })
+        if case .array? = object["enum"] {
+            return .choice(enumCandidates(object).map { literal($0, gemma: gemma) })
         }
         switch object["type"] {
         case .string("object")?:

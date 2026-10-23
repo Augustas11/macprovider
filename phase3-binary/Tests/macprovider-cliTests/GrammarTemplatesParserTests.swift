@@ -3,6 +3,39 @@ import MacProviderCore
 @testable import macprovider_cli
 
 final class GrammarTemplatesParserTests: XCTestCase {
+    func testEveryFamilyRequestRootObjectEnumConstrainsArguments() throws {
+        let parameters: [String: Any] = [
+            "type": "object", "properties": ["city": ["type": "string", "enum": ["Paris", "Tokyo"]]],
+            "required": ["city"], "additionalProperties": false,
+            "enum": [["city": "Paris"], ["city": 3], ["wrong": "Paris"]]
+        ]
+        let tools: [[String: Any]] = [["type": "function", "function": ["name": "f", "parameters": parameters]]]
+        for family in ToolCallGrammar.allCases {
+            let body: [String: Any] = ["model": "test", "messages": [["role": "user", "content": "test"]],
+                "max_tokens": 100, "tools": tools, "tool_choice": "required"]
+            let request = try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: body))
+            let grammar = try XCTUnwrap(GrammarTemplates.grammar(for: request, traits: RequestOutputTraits(toolGrammar: family)))
+            let dfa = try grammar.compile()
+            let call = requestCall(name: "f", family: family)
+            XCTAssertTrue(dfa.accepting(state: try XCTUnwrap(dfa.transition(state: 0, bytes: Array(call.utf8)))), family.rawValue)
+            XCTAssertNil(dfa.transition(state: 0, bytes: Array(call.replacingOccurrences(of: "Paris", with: "Tokyo").utf8)), family.rawValue)
+            // Even though the child schema admits Tokyo, the root object enum
+            // admits only the complete Paris instance.
+            let schema = try JSONValue.parse(parameters)
+            try JSONSchemaValidator.validateInstance(.object(["city": .string("Paris")]), against: schema)
+        }
+    }
+
+    func testRootObjectEnumWithoutCompatibleValuesRejectsBeforeGeneration() throws {
+        let raw = #"{"model":"test","messages":[{"role":"user","content":"test"}],"max_tokens":100,"tool_choice":"required","tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false,"enum":[{"city":3}]}}}]}"#
+        let request = try ChatCompletionRequest.parse(data: Data(raw.utf8))
+        for family in ToolCallGrammar.allCases {
+            XCTAssertThrowsError(try GrammarTemplates.grammar(for: request, traits: RequestOutputTraits(toolGrammar: family))) { error in
+                XCTAssertEqual((error as? APIError)?.status, 400)
+            }
+        }
+    }
+
     func testEveryFamilyRequiredAndNamedRequestTemplatesParseCalls() throws {
         let schema = JSONValue.object(["type": .string("object"), "properties": .object([
             "city": .object(["type": .string("string"), "enum": .array([.string("Paris"), .string("Tokyo")])])
