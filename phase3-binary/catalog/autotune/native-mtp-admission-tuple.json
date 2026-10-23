@@ -14,7 +14,7 @@
       ],
       "correctness_evidence_sha256": "fef89c32109269893db2450900140dba4d982f64db165d7514a5f3c6d7ea4d1a",
       "decode_path": "native_mtp",
-      "decode_path_digest": "4be59bfa19c48d43a6a4b920c563afd0afaed2280b7ca0156a22eb35c50410dc",
+      "decode_path_digest": "565617716a5ce9a1da507760d976e7b85a660fef393f30b7f25fd914cf6229e1",
       "decrease_threshold_ppm": 400000,
       "fit_evidence_sha256": "f607170c08d5ec3293cefd1bb7f122ba1fc5698aaccdb171e3e9f455ed29a4d6",
       "hardware_class": "apple-m3-ultra",
@@ -35,7 +35,7 @@
         "decode_path": "ordinary",
         "measurement_sha256": "f607170c08d5ec3293cefd1bb7f122ba1fc5698aaccdb171e3e9f455ed29a4d6",
         "qualified_slots": 4,
-        "runtime_revision": "87dc5159c87d73f4d7abd524fbdd17760cf56285"
+        "runtime_revision": "baec172471889593f60c70060eefcb624772fee5"
       },
       "performance_evidence_sha256": "f607170c08d5ec3293cefd1bb7f122ba1fc5698aaccdb171e3e9f455ed29a4d6",
       "proposal_depth": 1,
@@ -611,7 +611,7 @@
       },
       "ram_bytes": 274877906944,
       "request_feature_profile": "native_mtp_greedy_text_v1",
-      "runtime_revision": "87dc5159c87d73f4d7abd524fbdd17760cf56285",
+      "runtime_revision": "baec172471889593f60c70060eefcb624772fee5",
       "security_negative_evidence_sha256": "62cc8eb1037174fc410da1e00ad064b3a05c27ef6a3453450b39719298a8ef40",
       "state_rollback_evidence_sha256": "fef89c32109269893db2450900140dba4d982f64db165d7514a5f3c6d7ea4d1a",
       "throughput_delta_ppm": -2899,
@@ -634,7 +634,7 @@
       ],
       "correctness_evidence_sha256": "80def00e4b07705402c3936f4bc9b2a9097b9197faf5727d38ab6040a13e758c",
       "decode_path": "native_mtp",
-      "decode_path_digest": "4be59bfa19c48d43a6a4b920c563afd0afaed2280b7ca0156a22eb35c50410dc",
+      "decode_path_digest": "565617716a5ce9a1da507760d976e7b85a660fef393f30b7f25fd914cf6229e1",
       "decrease_threshold_ppm": 400000,
       "fit_evidence_sha256": "e9c1daf7dae76db904f8f8b65d96d926d28711fa3548be4b0d712264ea7c250c",
       "hardware_class": "apple-m3-ultra",
@@ -655,7 +655,7 @@
         "decode_path": "ordinary",
         "measurement_sha256": "e9c1daf7dae76db904f8f8b65d96d926d28711fa3548be4b0d712264ea7c250c",
         "qualified_slots": 8,
-        "runtime_revision": "87dc5159c87d73f4d7abd524fbdd17760cf56285"
+        "runtime_revision": "baec172471889593f60c70060eefcb624772fee5"
       },
       "performance_evidence_sha256": "e9c1daf7dae76db904f8f8b65d96d926d28711fa3548be4b0d712264ea7c250c",
       "proposal_depth": 1,
@@ -757,7 +757,7 @@
       },
       "ram_bytes": 274877906944,
       "request_feature_profile": "native_mtp_sampled_text_v1",
-      "runtime_revision": "87dc5159c87d73f4d7abd524fbdd17760cf56285",
+      "runtime_revision": "baec172471889593f60c70060eefcb624772fee5",
       "security_negative_evidence_sha256": "043a940328bc8ad4eb4d3350e43f87f0a5ca19b099bf692c35374000de4c7cb6",
       "state_rollback_evidence_sha256": "80def00e4b07705402c3936f4bc9b2a9097b9197faf5727d38ab6040a13e758c",
       "throughput_delta_ppm": 6533,
