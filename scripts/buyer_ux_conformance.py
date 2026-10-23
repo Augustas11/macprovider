@@ -524,7 +524,7 @@ def advertised_capabilities(model_id: str) -> dict:
 
 
 def require_promotable(key: str, model_id: str, advertised: dict, path: pathlib.Path = RECORD_PATH,
-                       conformance_owed: bool = False) -> dict | None:
+                       conformance_owed: bool = False, release_id: str | None = None) -> dict | None:
     """SPEC-023 §16.11: a key is promotable only when its record exists, was
     taken against the served model being promoted, its base checks pass, and
     every capability the model advertises passes.
@@ -543,6 +543,8 @@ def require_promotable(key: str, model_id: str, advertised: dict, path: pathlib.
                                    f"{path.name} has no owed entry for it (the coordinator would advertise its derived capabilities)")
         if owed["model"].lower() != model_id.lower():
             raise ConformanceError(f"buyer-UX conformance: {key!r} owed entry names {owed['model']!r}, not the served model {model_id!r}")
+        if release_id is None or owed["release_id"] != release_id:
+            raise ConformanceError(f"buyer-UX conformance: {key!r} owed entry names release {owed['release_id']!r}, not the promoting release {release_id!r}")
         return None
     if record is None:
         raise ConformanceError(f"buyer-UX conformance: no record for {key!r}; run scripts/buyer_ux_conformance.py run")

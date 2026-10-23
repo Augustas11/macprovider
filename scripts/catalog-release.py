@@ -5120,7 +5120,8 @@ def validate_intake_admit_entry(entry: dict, thresholds: dict, candidate_obj: di
             fail(f"{label}: tier_target clause is not satisfied (best verified artifact needs {min(verified_ram) + INTAKE_SAFETY_MARGIN_GB} GB > {target} GB)")
 
 
-def validate_intake_promote_entry(entry: dict, candidate_obj: dict, artifact_obj: dict | None, demand_obj: dict, demand_digest: str, label: str) -> None:
+def validate_intake_promote_entry(entry: dict, candidate_obj: dict, artifact_obj: dict | None, demand_obj: dict, demand_digest: str, label: str,
+                                  release_id: str | None = None) -> None:
     key = entry["model_key"]
     as_of = _intake_rfc3339(entry["as_of"], f"{label}.as_of")
     for field in ("signals", "admission_clause", "fit_clause", "pool_proven_evidence"):
@@ -5169,10 +5170,11 @@ def validate_intake_promote_entry(entry: dict, candidate_obj: dict, artifact_obj
     reference = promotion["operator_admission_reference"]
     if not isinstance(reference, str) or not reference.strip() or len(reference) > 256:
         fail(f"{label}.promotion.operator_admission_reference must be a non-empty string")
-    require_buyer_ux_conformance(key, row, label, conformance_owed=conformance_owed)
+    require_buyer_ux_conformance(key, row, label, conformance_owed=conformance_owed, release_id=release_id)
 
 
-def require_buyer_ux_conformance(key: str, row: dict, label: str, *, conformance_owed: bool = False) -> None:
+def require_buyer_ux_conformance(key: str, row: dict, label: str, *, conformance_owed: bool = False,
+                                 release_id: str | None = None) -> None:
     """SPEC-023 §16.11 (#2107): a key is promoted to `recommendable` only with
     a buyer-UX conformance record that passes for every capability its served
     model advertises on /v1/models. Rule 4: a first promotion (no record yet)
@@ -5182,7 +5184,7 @@ def require_buyer_ux_conformance(key: str, row: dict, label: str, *, conformance
     model_id = row.get("served_model_id") or row.get("model_id") or key
     try:
         module.require_promotable(key, model_id, module.advertised_capabilities(model_id), BUYER_UX_CONFORMANCE_PATH,
-                                  conformance_owed=conformance_owed)
+                                  conformance_owed=conformance_owed, release_id=release_id)
     except module.ConformanceError as err:
         fail(f"{label}: {err}")
 
@@ -5253,7 +5255,7 @@ def validate_intake_decision(
             if e["coldstart_slot_used"]:
                 coldstart += 1
         else:
-            validate_intake_promote_entry(e, candidate_obj, artifact_obj, demand_obj, demand_digest, label)
+            validate_intake_promote_entry(e, candidate_obj, artifact_obj, demand_obj, demand_digest, label, release_id=release_id)
     if previous_tiers is not None:
         missing = sorted(set(expected_actions) - seen)
         if missing:

@@ -219,8 +219,9 @@ then applies them again the same way.
    ```
 
    The generator refuses the promotion without it, refuses a `model` that is
-   not the candidate row's served model id, and refuses the marker when the
-   key already has a record that fails.
+   not the candidate row's served model id or a `release_id` that is not the
+   release being cut, and refuses the marker when the key already has a
+   record that fails.
 3. Deploy in this order. The coordinator advertises the base capability set
    only for an owed model (no tools, `tool_choice`, reasoning or
    `response_format`), and only a runtime that has this rule applies it.
@@ -255,9 +256,14 @@ then applies them again the same way.
    - it pins one owner slot at 32768 context, with continuous batching and
      native MTP off;
    - it runs the suite into `$OPS_STATE_DIR/catalog-owed-conformance/`;
+   - it sends one tagged buyer request for evidence (e) and prints the
+     `next --done buyer_serving_e2e` command to record after you check its
+     request log and settlement rows on Pearl;
    - it restores GLM with continuous batching on and native MTP eligible.
 
-   An interrupted window is restored first by step `dsv4_restore`.
+   An interrupted window is restored first by step `dsv4_restore`; a
+   configured journal that cannot be read blocks every catalog step. GLM's
+   journal is finished only once continuous batching and native MTP are back.
 5. Commit the record file to `origin/main`. This is a records-only change
    with no re-signed release. The owed entry may stay; the record decides.
    Then `catalog-activate.sh next --run` installs it (step

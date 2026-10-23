@@ -4319,17 +4319,21 @@ class IntakeDecisionManifestTest(unittest.TestCase):
         owed entry for the served model; an existing failing record still
         blocks, and the marker takes only `true`."""
         served = CANDIDATE_OBJ["rows"][self.KEY]["model_id"]
+        RELEASE_ID = self.manifest([self.promote_entry()])["release_id"]
         owed_only = pathlib.Path(_BUYER_UX_TMP.name) / "owed-only.json"
         owed_only.write_text(json.dumps({"schema_version": buyer_ux.SCHEMA, "records": {},
-                                         "owed": {self.KEY: {"model": served, "release_id": "published-test-v1"}}}))
+                                         "owed": {self.KEY: {"model": served, "release_id": RELEASE_ID}}}))
         failing_owed = pathlib.Path(_BUYER_UX_TMP.name) / "failing-owed.json"
         write_buyer_ux_records(failing_owed, [self.KEY], failing=("stream_tool_deltas",))
         doc = json.loads(failing_owed.read_text())
-        doc["owed"] = {self.KEY: {"model": served, "release_id": "published-test-v1"}}
+        doc["owed"] = {self.KEY: {"model": served, "release_id": RELEASE_ID}}
         failing_owed.write_text(json.dumps(doc))
         wrong_model = pathlib.Path(_BUYER_UX_TMP.name) / "owed-wrong-model.json"
         wrong_model.write_text(json.dumps({"schema_version": buyer_ux.SCHEMA, "records": {},
-                                           "owed": {self.KEY: {"model": "mlx-community/Qwen3-8B-8bit", "release_id": "published-test-v1"}}}))
+                                           "owed": {self.KEY: {"model": "mlx-community/Qwen3-8B-8bit", "release_id": RELEASE_ID}}}))
+        other_release = pathlib.Path(_BUYER_UX_TMP.name) / "owed-other-release.json"
+        other_release.write_text(json.dumps({"schema_version": buyer_ux.SCHEMA, "records": {},
+                                             "owed": {self.KEY: {"model": served, "release_id": "published-other-v1"}}}))
         no_owed = pathlib.Path(_BUYER_UX_TMP.name) / "owed-absent.json"
         no_owed.write_text(json.dumps({"schema_version": buyer_ux.SCHEMA, "records": {}}))
         previous = catalog_release.candidate_admission_tiers(CANDIDATE_OBJ)
@@ -4344,7 +4348,8 @@ class IntakeDecisionManifestTest(unittest.TestCase):
             self.rejects(self.manifest([self.promote_entry()]), "no record for", previous_tiers=previous)
         for path, fragment in ((failing_owed, "advertises tools but its checks failed"),
                                (wrong_model, "not the served model"),
-                               (no_owed, "has no owed entry")):
+                               (no_owed, "has no owed entry"),
+                               (other_release, "not the promoting release")):
             with patch.object(catalog_release, "BUYER_UX_CONFORMANCE_PATH", path):
                 self.rejects(owed_manifest, fragment, previous_tiers=previous)
         for value in (False, "true", 1, None):

@@ -347,6 +347,15 @@ gather() {
       set_next qwen_restore blocked "Recover the Qwen3.6 restoration journal" "" \
         "the durable restoration lock prevents all ordinary catalog steps until the journal is readable"
       return
+    elif [ -n "${QWEN_E2E_JOURNAL:-}" ]; then
+      # A configured Studio transaction journal that cannot be read may hold an
+      # interrupted window (the DeepSeek-V4-Flash window keeps no durable
+      # lock): no catalog step runs until it proves absence or restoration.
+      fact qwen_restore_required unknown
+      step qwen_restore blocked "the configured Studio transaction journal is unreadable"
+      set_next qwen_restore blocked "Read the Studio transaction journal" "scripts/ops/qwen-opencode-e2e.sh status" \
+        "QWEN_E2E_JOURNAL is configured but cannot be inspected over STUDIO_SSH; an interrupted window may still need GLM restored"
+      return
     fi
   fi
   fact origin_main_sha "$main_sha"
@@ -751,6 +760,10 @@ for i in \$(seq 1 24); do curl -sf -m 5 \"\$COORDINATOR_URL/healthz\" && exit 0;
     next_meta gateway_proof "AGENTS.md#hard-rules--activation-evidence-and-campaign-discipline"
   fi
 
+  # SPEC-023 §16.11 rule 4 before evidence (e): the DeepSeek-V4-Flash window is
+  # also what first serves that model, and it records the (e) request.
+  gather_buyer_ux_conformance_owed "$live_rid"
+
   # Evidence (e) owed (SPEC-023-R017 5(e)): every ledger entry whose model no
   # buyer_serving_e2e record names yet. A malformed entry is unknown, not done.
   local owed_scan owed_models="" owed_bad=""
@@ -814,8 +827,6 @@ ssh \"\$STUDIO_SSH\" 'launchctl kickstart -k gui/\$(id -u)/live.malibu.provider'
   else
     step buyer_serving_e2e "done" "no owed evidence (e) is open"
   fi
-
-  gather_buyer_ux_conformance_owed "$live_rid"
 
   set_next "done" "done" "$R active and proven through the gateway" ""
 }

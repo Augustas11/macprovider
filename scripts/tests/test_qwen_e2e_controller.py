@@ -287,9 +287,9 @@ validate_glm_restored_status "$FIXTURE"
             'restart_and_wait "$DSV4_TARGET_KEY"',
             "validate_dsv4_target_status",
             "buyer_ux_conformance.py\" run",
+            "record_dsv4_serving_request",
             "checkpoint_remote proof_complete",
-            "restore_provider",
-            'validate_glm_restored_status "$OPS_TMP_DIR/restore-after.json"',
+            "restore_provider ||",
         ]
         positions = [function.index(item) for item in order]
         self.assertEqual(positions, sorted(positions))
@@ -739,6 +739,43 @@ printf '%s\n' "$NEXT_ID" "$NEXT_CMD"
             "qwen_restore",
             "/unused/ops/qwen-opencode-e2e.sh _catalog-qwen36-restore",
         ])
+
+    def dsv4_gather(self, probe, journal):
+        body = '''
+REPO_ROOT="$OPS_TMP_DIR"; AUTOTUNE=autotune; QWEN_NATIVE_PROFILE=qwen36-native-mtp
+DSV4_WINDOW_PROFILE=dsv4-flash-window
+QWEN_E2E_JOURNAL=/journal
+mkdir -p "$REPO_ROOT/$AUTOTUNE"
+printf '%s\n' '{"release_id":"release","feeds":{}}' > "$REPO_ROOT/$AUTOTUNE/release.json"
+origin_main_sha() { printf '%040d\n' 0; }; git() { printf '%040d\n' 0; }
+live_lock_purpose() { printf '%s\n' catalog-activate:catalog_preflight; }
+''' + probe + '''
+qwen_intent_probe() { printf '%s\n' '{"status":"absent"}'; }
+qwen_scratch_probe() { printf '%s\n' '{"scratch_absent":true}'; }
+step() { :; }
+gather
+printf '%s\n' "$NEXT_ID" "$NEXT_KIND" "$NEXT_CMD"
+'''
+        return self.run_shell(["gather"], body, journal, source=CATALOG)
+
+    def test_catalog_blocks_on_an_unreadable_configured_journal(self):
+        result, _ = self.dsv4_gather("qwen_journal_probe() { return 3; }", {})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            "qwen_restore", "blocked", "scripts/ops/qwen-opencode-e2e.sh status"])
+
+    def test_catalog_routes_an_interrupted_dsv4_window_to_its_restore(self):
+        result, _ = self.dsv4_gather('qwen_journal_probe() { cat "$FIXTURE"; }',
+                                     {"profile": "dsv4-flash-window", "status": "serving_target",
+                                      "restore_required": True})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            "dsv4_restore", "mutate", "/unused/ops/qwen-opencode-e2e.sh _catalog-dsv4-restore"])
+
+    def test_dsv4_restore_checks_glm_modes_before_finishing(self):
+        restore = shell_function(CONTROLLER, "restore_provider")
+        self.assertLess(restore.index("poll_glm_modes"), restore.index("finish-restore"))
+        self.assertIn('"$DSV4_PROFILE"', restore)
 
     def test_prejournal_intent_is_durable_before_lock_and_routes_only_absent_journal(self):
         campaign = shell_function(CONTROLLER, "run_native_mtp_campaign")

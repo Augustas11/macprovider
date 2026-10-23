@@ -4418,7 +4418,7 @@ rules bind them:
    accepts it only when the record file carries a top-level `owed` entry for
    the key, `{"model": <served model id>, "release_id": <promoting release>}`,
    whose `model` equals the candidate row's served model id
-   (case-insensitively). A record that exists always decides: a promotion
+   (case-insensitively) and whose `release_id` equals the promoting release. A record that exists always decides: a promotion
    whose record exists and fails is refused with or without the marker. While
    no record names an owed model, the coordinator advertises the base
    capability set only for it on `/v1/models`: `tools: false`, an empty

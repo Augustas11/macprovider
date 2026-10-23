@@ -224,7 +224,11 @@ class BuyerUXConformanceTests(unittest.TestCase):
             owed = {key: {"model": MODEL, "release_id": "published-test-v1"}}
             path.write_text(json.dumps({"schema_version": bux.SCHEMA, "records": {}, "owed": owed}))
             advertised = bux.advertised_capabilities(MODEL)
-            self.assertIsNone(bux.require_promotable(key, MODEL, advertised, path, conformance_owed=True))
+            self.assertIsNone(bux.require_promotable(key, MODEL, advertised, path, conformance_owed=True,
+                                                     release_id="published-test-v1"))
+            # The owed entry is bound to the promoting release.
+            with self.assertRaisesRegex(bux.ConformanceError, "not the promoting release"):
+                bux.require_promotable(key, MODEL, advertised, path, conformance_owed=True, release_id="other-release")
             with self.assertRaisesRegex(bux.ConformanceError, "no record"):
                 bux.require_promotable(key, MODEL, advertised, path)
             with self.assertRaisesRegex(bux.ConformanceError, "not the served model"):

@@ -352,6 +352,18 @@ if mtp.get("enabled") is not True or mtp.get("mode") not in ("eligible", "active
 PY
 }
 
+# poll_glm_modes FILE: wait (bounded) for the restored GLM to report
+# continuous batching active and native MTP eligible or active.
+poll_glm_modes() {
+  local deadline
+  deadline=$(( $(date +%s) + ${QWEN_E2E_MODES_TIMEOUT:-300} ))
+  until validate_glm_restored_status "$1" >/dev/null 2>&1; do
+    [ "$(date +%s)" -lt "$deadline" ] || return 1
+    sleep 5
+    read_studio_status > "$1.tmp" 2>/dev/null && mv "$1.tmp" "$1"
+  done
+}
+
 poll_ready() {
   local expected_model="$1" previous_pid="$2" output="$3"
   local deadline now
@@ -823,6 +835,11 @@ restore_provider() {
     --validator "$QWEN_E2E_CLI" >/dev/null || return
   studio_helper restart-service --config "$QWEN_E2E_CONFIG" --validator "$QWEN_E2E_CLI" >/dev/null || return
   poll_ready "$INCUMBENT_MODEL" "$BASELINE_PID" "$after" >/dev/null || return
+  # The DeepSeek window restores GLM's serving modes too; the journal stays
+  # restore-required until they are back.
+  if [ "${TRANSACTION_PROFILE:-}" = "$DSV4_PROFILE" ]; then
+    poll_glm_modes "$after" || return
+  fi
   studio_helper finish-restore --config "$QWEN_E2E_CONFIG" \
     --journal "$QWEN_E2E_JOURNAL" >/dev/null || return
 }
@@ -1338,12 +1355,34 @@ run_dsv4_window() {
   python3 -I "$REPO_ROOT/scripts/buyer_ux_conformance.py" run --gateway "${GATEWAY_URL%/}/v1" \
     --key-file "$BUYER_TOKEN_FILE" --model "$DSV4_TARGET_MODEL_ID" --catalog-key "$DSV4_TARGET_KEY" \
     --record "$record" >&2 || rc=$?
+  # SPEC-023-R017 5(e): one tagged buyer request through the gateway served by
+  # this provider on the live release, for the operator's evidence record.
+  record_dsv4_serving_request "$transaction_id" || rc=$?
   checkpoint_remote proof_complete "$DSV4_TARGET" "$REMOTE_REC_ONE"
-  restore_provider
-  validate_glm_restored_status "$OPS_TMP_DIR/restore-after.json" ||
-    refuse "GLM is back but continuous batching or native MTP is not on; read its /v1/status"
+  restore_provider || refuse "GLM restoration did not reach continuous batching and native MTP; the journal stays restore-required"
   [ "$rc" = 0 ] || refuse "the DeepSeek-V4-Flash conformance run failed a check; record at $record"
   log "owed conformance record written to $record: commit it to phase3-binary/catalog/autotune/buyer-ux-conformance.json"
+}
+
+# record_dsv4_serving_request TXID: one buyer request for DeepSeek through the
+# gateway with a fixed X-Request-ID; writes the request id and this provider's
+# coordinator session to ops state and prints the evidence (e) command.
+record_dsv4_serving_request() {
+  local request_id="ops-dsv4-e-$1" out="$OPS_STATE_DIR/catalog-owed-conformance/dsv4-e-$1.json" code session
+  code="$(printf 'header = "Authorization: Bearer %s"\n' "$(cat "$BUYER_TOKEN_FILE")" |
+    curl -sS --config - -o "$OPS_TMP_DIR/dsv4-e.body" -w '%{http_code}' --max-time 600 \
+      -H 'Content-Type: application/json' -H "X-Request-ID: $request_id" \
+      -d "{\"model\":\"$DSV4_TARGET_KEY\",\"max_tokens\":16,\"messages\":[{\"role\":\"user\",\"content\":\"Reply with ok.\"}]}" \
+      "${GATEWAY_URL%/}/v1/chat/completions")" || return
+  [ "$code" = 200 ] || return 1
+  session="$(json_field "$OPS_TMP_DIR/dsv4.status.json" '(d.get("safety_telemetry") or {}).get("coordinator_session_id") or ""')"
+  python3 -I - "$out" "$request_id" "$session" "$DSV4_TARGET_MODEL_ID" <<'PY'
+import json, sys
+out, request_id, session, model = sys.argv[1:]
+json.dump({"model_id": model, "sha256": "58ee40d4c0bc436695d1d8d6a6cdfdb0326ec37f25e13ec98ea1d5c0878e732c",
+           "request_id": request_id, "provider_coordinator_session_id": session}, open(out, "w"), sort_keys=True)
+PY
+  log "evidence (e): check request_log and settlement for $request_id on Pearl (read-only), then: scripts/ops/catalog-activate.sh next --done buyer_serving_e2e --evidence 'model=$DSV4_TARGET_MODEL_ID@58ee40d4c0bc436695d1d8d6a6cdfdb0326ec37f25e13ec98ea1d5c0878e732c request $request_id session $session <settlement row>'"
 }
 
 run_dsv4_restore() {
