@@ -1,4 +1,5 @@
 import Foundation
+import Hub
 import Jinja
 import MLXLMCommon
 import MacProviderCore
@@ -819,6 +820,43 @@ private struct OrderedJSONParser {
 /// adaptor's.
 struct DeepseekV4ChatTokenizer: MLXLMCommon.Tokenizer {
     let upstream: any Tokenizers.Tokenizer
+
+    /// Keep the artifact bytes intact; only normalize the Split regex spelling
+    /// before swift-transformers hands it to String.range(.regularExpression).
+    /// That Foundation path mishandles literal CR/LF in character classes,
+    /// unlike NSRegularExpression and Rust tokenizers. Escaped CR/LF have the
+    /// same regex meaning and preserve punctuation/newline BPE merge boundaries.
+    static func load(from directory: URL) async throws -> Self {
+        let config = LanguageModelConfigurationFromHub(modelFolder: directory)
+        guard let tokenizerConfig = try await config.tokenizerConfig else {
+            throw Tokenizers.TokenizerError.missingConfig
+        }
+        let tokenizerData = try await config.tokenizerData
+        var data = tokenizerData.dictionary(or: [:])
+        data["pre_tokenizer"] = escapedSplitNewlines(tokenizerData.preTokenizer)
+        return Self(upstream: try PreTrainedTokenizer(
+            tokenizerConfig: tokenizerConfig, tokenizerData: Config(data)
+        ))
+    }
+
+    static func escapedSplitNewlines(_ config: Config) -> Config {
+        var result = config.dictionary(or: [:])
+        switch config.type.string() {
+        case "Sequence":
+            result["pretokenizers"] = Config(config.pretokenizers.array(or: []).map(escapedSplitNewlines))
+        case "Split":
+            if let regex = config.pattern.Regex.string() {
+                var pattern = config.pattern.dictionary(or: [:])
+                pattern["Regex"] = Config(regex
+                    .replacingOccurrences(of: "\r", with: #"\r"#)
+                    .replacingOccurrences(of: "\n", with: #"\n"#))
+                result["pattern"] = Config(pattern)
+            }
+        default:
+            return config
+        }
+        return Config(result)
+    }
 
     /// `config.json` model types whose prompts this encoder renders.
     static let modelTypes: Set<String> = ["deepseek_v4", "deepseek_v41"]

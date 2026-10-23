@@ -5,10 +5,12 @@ Runs the model's own reference, `encoding/encoding_dsv4.py` from
 `deepseek-ai/DeepSeek-V4-Flash-0731` (sha256 abc0d261...dde6, identical in the
 TensorFold MXFP4 artifact), and writes the expected outputs:
 
-  python3 -I scripts/lab/dsv4/make_encoding_fixtures.py <encoding-dir> <out.json>
+  python3 -I scripts/lab/dsv4/make_encoding_fixtures.py <encoding-dir> <out.json> [tokenizer.json]
 
 <encoding-dir> holds `encoding_dsv4.py` and its `tests/` directory. The output
-is `scripts/tests/fixtures/dsv4-encoding/cases.json`, read by
+is `scripts/tests/fixtures/dsv4-encoding/cases.json`. With the optional pinned
+`tokenizer.json`, also writes sibling `token-ids.json` using Rust `tokenizers`
+(no model load). Both files are read by
 `DeepseekV4EncodingTests` (phase3-binary). Three sections:
 
 - `reference`: the reference's four test cases (inputs and golden prompts).
@@ -188,7 +190,7 @@ COMPLETIONS = [
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 3:
+    if len(argv) not in (3, 4):
         print(__doc__, file=sys.stderr)
         return 2
     encoding_dir = pathlib.Path(argv[1]).resolve()
@@ -241,6 +243,23 @@ def main(argv: list[str]) -> int:
         "completions": completions,
     }
     pathlib.Path(argv[2]).write_text(json.dumps(out, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    if len(argv) == 4:
+        # Optional CPU-only token IDs; use the pinned TensorFold artifact.
+        from tokenizers import Tokenizer
+
+        tokenizer_path = pathlib.Path(argv[3])
+        tokenizer_digest = hashlib.sha256(tokenizer_path.read_bytes()).hexdigest()
+        if tokenizer_digest != "8f9f37ca37fdc4f5fd36d5cf4d3b0e8392edb4e894fd10cc0d70b4957c8633cf":
+            raise ValueError("tokenizer.json is not the pinned DeepSeek-V4 artifact")
+        tokenizer = Tokenizer.from_file(str(tokenizer_path))
+        ids = {
+            "artifact": "TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX@d6be051a",
+            "tokenizer_sha256": tokenizer_digest,
+            **{section: {item["name"]: tokenizer.encode(item["prompt"], add_special_tokens=False).ids
+                         for item in out[section]} for section in ("reference", "requests")},
+        }
+        pathlib.Path(argv[2]).with_name("token-ids.json").write_text(
+            json.dumps(ids, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return 0
 
 

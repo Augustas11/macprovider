@@ -28,7 +28,10 @@ SPEC-018 is the **provider-side response synthesis contract** for OpenAI-wire to
   leaves `<think>` open in thinking mode, so the §3.12 split applies
   unchanged. `reasoning_effort` maps onto the encoder's three levels. The
   v0.3.2 per-reply call set (duplicate drop under `tool_choice` `auto`, 128-call
-  bound) applies to `dsml` calls like every other grammar.
+  bound) applies to `dsml` calls like every other grammar. The DeepSeek-V4
+  tokenizer escapes literal CR/LF in Split regexes in memory before loading;
+  exact reference token IDs are verified for all 14 provider requests and four
+  golden prompts against the pinned TensorFold tokenizer (see §3.12).
 
 - **v0.3.3 (2026-10-23, Related: #2107, post-merge re-audit):** Under
   Amendment 9. §2.2 serial turn: a Qwen output that is a complete bare-call
@@ -953,6 +956,17 @@ none). Thinking mode is the default and leaves `<think>` open;
 `high`/`xhigh` select the encoder's `high` prompt, `max` its `max` prompt, and
 every other value its default `low`.
 
+Tokenization MUST match the reference Hugging Face tokenizer from
+`TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX@d6be051a`, including
+punctuation/newline merges. The artifact contains literal CR/LF in its Split
+regex character classes; Foundation's `String.range(.regularExpression)` path
+in swift-transformers 1.3.4 mishandles those literals. The provider escapes them
+as `\r`/`\n` in memory for template-less `deepseek_v4`/`deepseek_v41` only,
+retaining the artifact bytes, split sequence, BPE model and added tokens.
+`DeepseekV4EncodingTests` checks exact IDs for all 14 provider requests and four
+reference goldens using `scripts/tests/fixtures/dsv4-encoding/token-ids.json`.
+Other model families use their existing tokenizer path.
+
 ## 4. Streaming Wire Shape
 
 When `stream = true`, the buyer-visible response MUST use OpenAI-style SSE chat-completion chunks.
@@ -1356,7 +1370,7 @@ Amendment log:
 - Amendment 1 (v0.2.1): §10c v0.1.3-locked model-hash registry requirement → deferred to v0.3. Rationale: narrow v0.2 scope makes registry curation strategically premature. Mitigation: AC-46 model-hash observation channel + §8.4.2 final-close tightening.
 - Amendment 2 (v0.2.3): §3.9 v0.2.1-introduced minimal prompt-echo guard → DELETED. Rationale: minimal guard had three exploitable defects making it net-negative vs. no guard (whitespace bypass; scope incomplete; self-DoS via Cline reading SPEC-018.md). Residual risk: same-family echo attack remains unmitigated in v0.2. Mitigation: deferred to v0.3 full guard.
 - Amendment 3 (v0.2.8): AC-53 / §10d.1 v0.2.0-locked maximum `messages[]` length 256 → DELETED as an independent cap. Rationale: the count cap is not a model constraint and blocks legitimate coding-agent sessions (Pi/Cline 300+ messages); OpenRouter and OrcaRouter impose no message-count limit. Residual risk: large-but-under-body-cap arrays still cost validation CPU. Mitigation: AC-50 4 MiB raw-body cap (public gateway SPEC-006 default `request_body_bytes` may be stricter), AC-51/AC-52 aggregate byte caps, AC-54 tool-call count, AC-55 linear validation, and the served context window.
-- Amendment 10 (v0.3.4, #2111): §3.1 `dsml` row and §3.12 DeepSeek-V4 prompt encoding. Rationale: DeepSeek-V4 has no chat template; its calls and prompts follow `encoding_dsv4.py`. Mitigation: the encoder and parser are tested against the Python reference (golden prompts and parsed completions); undeclared names and malformed markup fail closed as in every grammar. Residual risk: the swift-transformers tokenizer splits a newline from preceding punctuation where the reference tokenizer merges them, so prompt token ids can differ while the prompt text is identical.
+- Amendment 10 (v0.3.4, #2111): §3.1 `dsml` row and §3.12 DeepSeek-V4 prompt encoding. Rationale: DeepSeek-V4 has no chat template; its calls and prompts follow `encoding_dsv4.py`. Mitigation: the encoder and parser are tested against the Python reference (golden prompts and parsed completions); undeclared names and malformed markup fail closed as in every grammar. Tokenizer parity: literal CR/LF in Split regexes are escaped in memory only for this family; all 14 provider requests and four reference goldens assert exact pinned-reference token IDs, including punctuation/newline merges.
 - Amendment 9 (v0.3.1, #2107): §3.1 Qwen bare bodies, §3.10 rules 1a/5 and AC-57 (analysis as `reasoning_content`, final-only request stops, `length` inside analysis), §3.11 ordinary `parameters` objects for guaranteed selection and catalog-alias profile identity. Rationale: each failed on a real catalog model in the #2107 conformance run (Qwen2.5-Coder bare JSON; gpt-oss 502 on a stop string and on `max_tokens` 8; Qwen3.6 400 on a schema without `additionalProperties:false`). Mitigation: bare bodies only as the whole output with declared names; hidden channels still never reach content; strict schemas keep full validation. Residual risk: a non-strict schema's arguments are checked only for required keys.
 - Amendment 5 (v0.3.0, #2107): auto mode follows the OpenAI default — omitted `parallel_tool_calls` collects every call; only explicit `false` is serial. Guaranteed modes keep the §3.11 cardinality rule. Grammar selection moves from model-ID substrings to the loaded template (§3.2), tool history to the model's own template (§3.8), and guaranteed selection to the declared capability (§3.11).
 - Amendment 4 (v0.2.9): §2.2 v0.1-locked “preserve all N recognized tool calls” → scoped to `parallel_tool_calls: true`. Omitted/`false` is serial: stop after the first complete valid tool. Rationale: agent loops (Pi) omit the field and execute one tool per turn; leftover decode after a valid tool hangs or kills the stream. Residual risk: a client wanting two tools in one assistant message must send `parallel_tool_calls: true`. Mitigation: explicit request boolean; default matches Pi.

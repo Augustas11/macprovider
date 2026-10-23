@@ -137,10 +137,10 @@ private extension Character {
 /// `DeepseekV4ChatTokenizer`; otherwise it is the stock adaptor, unchanged.
 struct ChatTemplateCompatTokenizerLoader: MLXLMCommon.TokenizerLoader {
     func load(from directory: URL) async throws -> any MLXLMCommon.Tokenizer {
-        let upstream = try await Tokenizers.AutoTokenizer.from(modelFolder: directory)
         if DeepseekV4ChatTokenizer.applies(to: directory) {
-            return DeepseekV4ChatTokenizer(upstream: upstream)
+            return try await DeepseekV4ChatTokenizer.load(from: directory)
         }
+        let upstream = try await Tokenizers.AutoTokenizer.from(modelFolder: directory)
         if let template = ChatTemplateCompatibility.configuredTemplate(in: directory) {
             let result = ChatTemplateCompatibility.rewrite(template)
             if result.numericAttributeRewrites > 0 {

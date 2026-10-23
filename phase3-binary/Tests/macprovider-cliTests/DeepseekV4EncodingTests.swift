@@ -1,6 +1,7 @@
 import Foundation
 import MLXLMCommon
 import MacProviderCore
+import Tokenizers
 @testable import macprovider_cli
 import XCTest
 
@@ -252,10 +253,51 @@ final class DeepseekV4EncodingTests: XCTestCase {
         XCTAssertFalse(DeepseekV4ChatTokenizer.applies(to: directory))
     }
 
-    /// With the real tokenizer (set `DSV4_TOKENIZER_DIR` to the artifact):
-    /// the role markers, `<think>` and `｜DSML｜` encode as their added tokens,
-    /// and every golden prompt round-trips through encode and decode.
-    func testRealTokenizerEncodesMarkersAsAddedTokens() async throws {
+    /// A tiny BPE vocabulary keeps the literal-newline regression running in
+    /// CI even when the full artifact is unavailable. Other families retain
+    /// exactly the stock tokenizer behavior for the same configuration.
+    func testLiteralNewlineRegexIsRewrittenOnlyForDeepseekV4() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let data: [String: Any] = [
+            "model": ["type": "BPE", "vocab": [".": 16, "Ċ": 201, "ĊĊ": 271, ".Ċ": 603, ".ĊĊ": 339],
+                      "merges": ["Ċ Ċ", ". Ċ", ". ĊĊ"]],
+            "added_tokens": [],
+            "pre_tokenizer": ["type": "Sequence", "pretokenizers": [
+                ["type": "Split", "pattern": ["Regex": "[.]+[\r\n]*|\\s*[\r\n]+"],
+                 "behavior": "Isolated", "invert": false],
+                ["type": "ByteLevel", "add_prefix_space": false, "use_regex": false],
+            ]],
+        ]
+        let tokenizerData = try JSONSerialization.data(withJSONObject: data)
+        try tokenizerData.write(to: directory.appendingPathComponent("tokenizer.json"))
+        try Data(#"{"tokenizer_class":"PreTrainedTokenizerFast","clean_up_tokenization_spaces":false}"#.utf8)
+            .write(to: directory.appendingPathComponent("tokenizer_config.json"))
+        for family in ["deepseek_v4", "deepseek_v41", "deepseek_v3", "qwen2", "llama", "glm5_next"] {
+            try JSONSerialization.data(withJSONObject: ["model_type": family])
+                .write(to: directory.appendingPathComponent("config.json"))
+            let tokenizer = try await ChatTemplateCompatTokenizerLoader().load(from: directory)
+            if DeepseekV4ChatTokenizer.modelTypes.contains(family) {
+                XCTAssertTrue(tokenizer is DeepseekV4ChatTokenizer)
+                for (text, expected) in [(".\n", [603]), (".\n\n", [339]), ("\n\n", [271])] {
+                    XCTAssertEqual(tokenizer.encode(text: text, addSpecialTokens: false), expected, family)
+                }
+            } else {
+                XCTAssertFalse(tokenizer is DeepseekV4ChatTokenizer)
+                let stock = try await AutoTokenizer.from(modelFolder: directory)
+                for text in [".\n", ".\n\n", "\n\n"] {
+                    XCTAssertEqual(tokenizer.encode(text: text, addSpecialTokens: false),
+                                   stock.encode(text: text, addSpecialTokens: false), family)
+                }
+            }
+            XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent("tokenizer.json")), tokenizerData)
+        }
+    }
+
+    /// Exact Rust-tokenizers IDs from the pinned artifact, including the
+    /// punctuation/newline merges that a text round-trip cannot detect.
+    func testRealTokenizerMatchesAllReferenceTokenIDs() async throws {
         guard let path = ProcessInfo.processInfo.environment["DSV4_TOKENIZER_DIR"] else {
             throw XCTSkip("DSV4_TOKENIZER_DIR not set")
         }
@@ -265,11 +307,37 @@ final class DeepseekV4EncodingTests: XCTestCase {
                              ("<think>", 128821), ("</think>", 128822), ("｜DSML｜", 128825)] {
             XCTAssertEqual(tokenizer.encode(text: marker, addSpecialTokens: false), [id], marker)
         }
-        let prompts = try XCTUnwrap(cases()["requests"]?.array).compactMap { $0["prompt"]?.string }
-        for prompt in prompts {
-            let ids = tokenizer.encode(text: prompt, addSpecialTokens: false)
-            XCTAssertEqual(ids.first, 0)
-            XCTAssertEqual(tokenizer.decode(tokenIds: ids, skipSpecialTokens: false), prompt)
+        let idsURL = Self.fixture.deletingLastPathComponent().appendingPathComponent("token-ids.json")
+        let ids = try JSONDecoder().decode(TokenIDs.self, from: Data(contentsOf: idsURL))
+        let fixtures = try cases()
+        let goldens = try XCTUnwrap(fixtures["reference"]?.array)
+        let requests = try XCTUnwrap(fixtures["requests"]?.array)
+        XCTAssertEqual(goldens.count, 4)
+        XCTAssertEqual(requests.count, 14)
+        XCTAssertEqual(ids.reference.count, goldens.count)
+        XCTAssertEqual(ids.requests.count, requests.count)
+        for (items, expectedIDs) in [(goldens, ids.reference), (requests, ids.requests)] {
+            for item in items {
+                let name = try XCTUnwrap(item["name"]?.string)
+                let prompt = try XCTUnwrap(item["prompt"]?.string)
+                let expected = try XCTUnwrap(expectedIDs[name])
+                XCTAssertEqual(tokenizer.encode(text: prompt, addSpecialTokens: false), expected, name)
+                XCTAssertEqual(tokenizer.encode(text: prompt, addSpecialTokens: true), expected, name)
+                XCTAssertEqual(tokenizer.decode(tokenIds: expected, skipSpecialTokens: false), prompt, name)
+                if let body = item["request"] {
+                    let request = try ChatCompletionRequest.parse(data: Data(Encoding.toJSON(body).utf8))
+                    let input = try ModelRuntime.userInput(for: request)
+                    XCTAssertEqual(try tokenizer.applyChatTemplate(
+                        messages: DefaultMessageGenerator().generate(from: input),
+                        tools: input.tools, additionalContext: input.additionalContext
+                    ), expected, name)
+                }
+            }
         }
+    }
+
+    private struct TokenIDs: Decodable {
+        let reference: [String: [Int]]
+        let requests: [String: [Int]]
     }
 }
