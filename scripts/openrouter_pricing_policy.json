@@ -354,6 +354,25 @@
         "residency_gb": "186",
         "projected_tps": "40"
       }
+    },
+    {
+      "source_model_id": "deepseek/deepseek-v4-flash",
+      "canonical_model_id": "deepseek/deepseek-v4-flash",
+      "serving_path": {
+        "verification_status": "verified",
+        "reference": "https://huggingface.co/TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX"
+      },
+      "license": {
+        "commercial_permitted": true,
+        "source_url": "https://huggingface.co/TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX",
+        "verification_note": "The pinned artifact's LICENSE and model card (revision d6be051a) identify the governing MIT license."
+      },
+      "profile": {
+        "kind": "broad_fleet",
+        "active_params_b": "13",
+        "residency_gb": "167",
+        "projected_tps": "33"
+      }
     }
   ],
   "cache_hit_fraction": "0.25",
