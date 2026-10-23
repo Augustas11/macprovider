@@ -810,12 +810,22 @@ type ReceiptPubkeyPrevious struct {
 // integrity violation and is excluded here even when it is the sole provider for
 // that model.
 func (p Provider) RoutingEligible() bool {
+	return p.ListingEligible() && p.SlotsFree > 0
+}
+
+// ListingEligible is RoutingEligible without the free-slot term: every
+// admission, trust, catalog, quarantine, safety-hold and SPEC-051 session
+// gate, but not momentary saturation (all slots in flight). GET /v1/models
+// lists a model while one of its providers passes it (SPEC-002 FR-B1), so a
+// model whose providers are all busy stays discoverable; the request itself
+// still gets the ordinary capacity answer from routing.
+func (p Provider) ListingEligible() bool {
 	// SPEC-051-R016: a member session is never routable on its own, and a
 	// head session only while its group is available.
 	if p.ShardMemberV1 || (p.ShardGroupHeadV1 && !p.ShardGroupAvailable) {
 		return false
 	}
-	return p.shardMemberAdmissible() && p.SlotsFree > 0
+	return p.shardMemberAdmissible()
 }
 
 // ShardGroupMemberView is one non-head member or spare of an available

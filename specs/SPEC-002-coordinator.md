@@ -1,6 +1,15 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.26 (2026-10-23, non-strict guaranteed-call schemas need the ordinary-parameters provider profile)
+**Version:** 1.6.27 (2026-10-24, `/v1/models` keeps a model listed while its providers are at capacity)
+
+**Change log v1.6.27 (2026-10-24, Related: #2107):** FR-B1 lists a model
+while at least one of its providers passes every routing gate except free
+slots (`pool.Provider.ListingEligible`: RoutingEligible without the
+free-slot term). A model whose providers are all saturated stays on
+`/v1/models`; every admission, trust, Tier-2, BYOM, pool, compute-integrity
+and conformance exclusion still applies, and the Pillar A hash state counts
+the same providers the entry lists. Selection and routing are unchanged: a
+request for a saturated model still gets the ordinary queue, 429 or 503.
 
 **Change log v1.6.26 (2026-10-23, Related: #2107):** Mirrors SPEC-018 v0.3.3
 §3.11. `providerSupportsToolSelection`, the predicate behind selection, pinned
@@ -1943,6 +1952,14 @@ The `provider_count`, `max_context_tokens` (maximum across providers
 for that model), `total_slots` (sum across providers), and `degraded`
 fields are non-standard extensions. Standard OpenAI clients will ignore
 them.
+
+A model is listed while at least one of its providers passes every
+routing gate except free-slot capacity (v1.6.27): a provider with every
+slot in flight, or in state `busy`, still lists its model, so clients that
+build a model picker from this endpoint do not lose a model under load.
+Admission, trust, Tier-2, BYOM, pool and conformance exclusions are not
+capacity and still remove a provider. A request for a saturated model is
+answered by routing (slot queue, 429 or 503), not by `/v1/models`.
 
 A model is `degraded: true` if any of:
 

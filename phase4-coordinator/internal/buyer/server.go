@@ -2407,10 +2407,13 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	pillarAActive := tier2.ModelHashActive(cfg)
 	tier2Active := tier2.ConfigActive(cfg)
 	for _, p := range providers {
-		if pillarAActive && !p.RoutingEligible() {
+		// SPEC-002 FR-B1: a provider at capacity (every slot in flight, or
+		// busy) still lists its model; only the free-slot term of routing
+		// eligibility is ignored here. Selection is unchanged.
+		if pillarAActive && !p.ListingEligible() {
 			continue
 		}
-		if !pillarAActive && (!p.CapacityEligible() || (p.State == pool.StateBusy && !p.RoutingEligible())) {
+		if !pillarAActive && (!p.CapacityEligible() || (p.State == pool.StateBusy && !p.ListingEligible())) {
 			continue
 		}
 		if !s.byomDefaultPaidRoutingEligible(p) {
@@ -2498,7 +2501,9 @@ func (s *Server) applyHashVerification(entry *modelEntry, providers []pool.Provi
 		// not per catalog-key billing equivalence. modelIDEqual/#900 aliases
 		// must not cross-contaminate /v1/models Pillar-A status across
 		// distinct HF ids that share a rate-card key.
-		if !hasAvailableSlot(p) || !strings.EqualFold(p.ModelID, entry.ID) {
+		// The same providers handleModels lists: saturation (no free slot)
+		// does not change a model's hash state (SPEC-002 FR-B1).
+		if !p.CapacityEligible() || !p.ListingEligible() || !strings.EqualFold(p.ModelID, entry.ID) {
 			continue
 		}
 		status := s.effectiveHashStatus(p, cfg)
