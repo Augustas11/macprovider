@@ -1238,7 +1238,8 @@ gateway_proof() {
   done
   [ -n "$served_sid" ] || die "coordinator request_log has no row for request $rid"
   [ "$served_sid" = "$canary_sid" ] || die "request $rid was served by another provider, not the canary"
-  [ -n "$(json_field "$body" 'd["choices"][0]["message"]["content"]')" ] || die "gateway 200 without completion content"
+  # Reasoning models can spend the whole 32-token budget in reasoning_content.
+  [ -n "$(json_field "$body" '(d["choices"][0]["message"].get("content") or "") + (d["choices"][0]["message"].get("reasoning_content") or "")')" ] || die "gateway 200 without completion content"
 
   local i
   for i in 1 2 3 4 5 6; do
