@@ -13,6 +13,11 @@
 #   default.metallib) carries every kernel the pinned MLX core loads by name
 #   (scripts/mlx-metallib-kernels.py, phase3-binary/mlx-metallib-required-kernels.json).
 #   The 1.8.254 candidate failed exactly this. --tarball checks any archive.
+#   check and swap also refuse a candidate whose baked catalog-release/
+#   (release_id, release.json and rate-card.json generated_at) differs from
+#   what Pearl serves at COORDINATOR_URL /v1/autotune-release and /v1/rate-card:
+#   the canary would fail to join with rate_card_update_required (1.8.262).
+#   Activate the catalog first (scripts/ops/catalog-activate.sh).
 # swap: only the verified candidate bytes recorded by cli-release.sh
 #   signed_byte_verification (the tarball sha256 must match the entry in that
 #   run's signed checksums.txt). check, then under the live-ops lock: stop the
@@ -29,7 +34,7 @@
 #   restarted on every exit. A successful swap records the canary_swap marker
 #   that `cli-release.sh next --done canary_smoke --probe` requires.
 #
-# Env (or ~/.config/macprovider/ops.env): STUDIO_SSH (local = this Mac),
+# Env (or ~/.config/macprovider/ops.env): COORDINATOR_URL, STUDIO_SSH (local = this Mac),
 # STUDIO_SSH_KEY, STUDIO_STATUS_PORT, CANARY_RUNNER_STOP_CMD and
 # CANARY_RUNNER_START_CMD (run on this Mac; "none" when no buyer runner
 # feeds the canary), CANARY_INSTALL_DIR (default ~/macprovider on the canary),
@@ -153,16 +158,62 @@ PY
   log "candidate v$V passed the pre-swap checks"
 }
 
+# check_catalog_live: a candidate whose baked catalog release is not the one
+# Pearl serves fails the canary join with rate_card_update_required (1.8.262).
+# Compare the baked catalog-release/ release_id and generated_at stamps with
+# the coordinator's /v1/autotune-release and /v1/rate-card; refuse on any
+# difference, and when Pearl's catalog cannot be read.
+check_catalog_live() {
+  local payload="$OPS_TMP_DIR/payload" base verdict
+  [ -f "$payload/catalog-release/release.json" ] || refuse "$TARBALL lacks catalog-release/release.json"
+  base="$(coordinator_url)"
+  [ -n "$base" ] || refuse "COORDINATOR_URL is unset; cannot compare the baked catalog with Pearl's"
+  [ "$(http_get "$base/v1/autotune-release" "$OPS_TMP_DIR/live-release.json")" = 200 ] &&
+    [ "$(http_get "$base/v1/rate-card" "$OPS_TMP_DIR/live-rate-card.json")" = 200 ] ||
+    refuse "cannot read Pearl's live catalog from $base/v1/autotune-release and /v1/rate-card"
+  verdict="$(python3 - "$payload/catalog-release" "$OPS_TMP_DIR/live-release.json" "$OPS_TMP_DIR/live-rate-card.json" <<'PY'
+import json, os, sys
+cand, live_rel_path, live_card_path = sys.argv[1:4]
+def load(path):
+    with open(path) as f:
+        return json.load(f)
+try:
+    rel, live_rel, live_card = load(os.path.join(cand, "release.json")), load(live_rel_path), load(live_card_path)
+    card = load(os.path.join(cand, "rate-card.json")) if os.path.exists(os.path.join(cand, "rate-card.json")) else None
+except (OSError, ValueError) as exc:
+    print("ERR unreadable catalog: %s" % exc); sys.exit(0)
+cid, lid = rel.get("release_id"), live_rel.get("release_id")
+diffs = []
+if not cid or cid != lid:
+    diffs.append("release_id")
+if rel.get("generated_at") != live_rel.get("generated_at"):
+    diffs.append("release.json generated_at %s vs %s" % (rel.get("generated_at"), live_rel.get("generated_at")))
+if card is not None and (card.get("generated_at"), card.get("version")) != (live_card.get("generated_at"), live_card.get("version")):
+    diffs.append("rate-card.json generated_at/version %s vs %s" % (card.get("generated_at"), live_card.get("generated_at")))
+print("%s %s %s %s" % ("DIFF" if diffs else "OK", cid or "<none>", lid or "<none>", "; ".join(diffs)))
+PY
+)"
+  local kind cid lid diffs
+  read -r kind cid lid diffs <<<"$verdict"
+  case "$kind" in
+    OK) log "candidate bakes the catalog Pearl serves ($cid)" ;;
+    DIFF) refuse "candidate bakes catalog $cid; Pearl serves $lid: activate the catalog first (scripts/ops/catalog-activate.sh) [differs: $diffs]" ;;
+    *) refuse "cannot compare the baked catalog with Pearl's: ${verdict#ERR }" ;;
+  esac
+}
+
 if [ "$CMD" = check ]; then
   [ -n "$TARBALL" ] || bind_verified_tarball
   [ -f "$TARBALL" ] || refuse "candidate tarball not found: $TARBALL"
   check_candidate
+  check_catalog_live
   exit 0
 fi
 
 BINARY_SHA=""
 bind_verified_tarball
 check_candidate
+[ "$CMD" != swap ] || check_catalog_live
 
 require_studio_ssh
 record_air_result() {

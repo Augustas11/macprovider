@@ -159,6 +159,7 @@ NOT_WRITERS = {
     "phase4-coordinator/dist/install-micromdm-pearl.sh": "prints an operator hint only",
     "phase4-coordinator/dist/monitor/macprovider-monitor.py": "comment only; reads coordinator endpoints",
     "scripts/catalog-release.py": "repo coordinator.yaml; the splice writes --output, never the live path",
+    "scripts/catalog-pricing-preflight.py": "reads committed coordinator.yaml via git show into a temp dir; writes nothing",
     "scripts/lab/1690-m6/write_configs.py": "#1690 M6 lab rig; writes $LAB/run/coordinator.yaml on the lab Mac",
     "scripts/lab/1690-m6/cases.py": "#1690 M6 lab rig; reads $LAB/run/coordinator.yaml for pool-rollback-preflight",
     "scripts/lab/1690-e2e/check4a.sh": "#1690 runbook step 4a harness; writes throwaway coordinator.yaml/overlay copies under $LAB/tmp only",

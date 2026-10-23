@@ -1165,8 +1165,14 @@ mainland-provider installer handoff.
 ## Promotion gate (checklist)
 
 1. All in-scope CLI rows above are `merged`.
-2. Cut one candidate off `main` (`acceptance-candidate.yml`). Do **not** reuse
-   `v1.8.163` / `v1.8.164` / `v1.8.167` / `v1.8.168`.
+2. Activate `main`'s catalog release on Pearl first
+   (`scripts/ops/catalog-activate.sh`), then cut one candidate off `main`
+   (`acceptance-candidate.yml`). The candidate bakes `main`'s catalog release,
+   and a canary on a catalog Pearl does not serve fails to join with
+   `rate_card_update_required` (1.8.262). `cli-release.sh` keeps
+   `candidate_cut` blocked, with NEXT `scripts/ops/catalog-activate.sh status`,
+   until Pearl's `/v1/autotune-release` reports the committed `release_id`.
+   Do **not** reuse `v1.8.163` / `v1.8.164` / `v1.8.167` / `v1.8.168`.
 3. In-scope e2e green on that candidate, or an explicit carry-forward record
    under the rule above. For 1.8.217, the fused A3B MoE ordinary path (#1832)
    is in scope with its Studio qualification at `7d55924eb`; native MTP
@@ -1188,7 +1194,9 @@ mainland-provider installer handoff.
    swap --version <ver>`: it refuses a candidate whose `mlx.metallib` or
    bundled `default.metallib` lacks a kernel the pinned MLX core loads by name
    (the 1.8.254 candidate shipped without `gather_mm_offsets` and could not
-   load MoE models), and after the restart it restores the backup and
+   load MoE models), or whose baked `catalog-release/` (`release_id`,
+   `release.json` and `rate-card.json` `generated_at`) differs from what Pearl
+   serves at `COORDINATOR_URL`, and after the restart it restores the backup and
    resumes the previous version on a provider restart or exit (crash loop,
    detected at once) or on a `/v1/status` silence of 120 s
    (`CANARY_STATUS_TIMEOUT_S`) after the candidate reported its model loaded.

@@ -14,7 +14,9 @@
 #   1 version_alignment     checked-in latest_binary_version rows == live stable,
 #                           binaryVersion on main > live stable
 #   2 candidate_cut         acceptance-candidate.yml on the exact origin/main SHA,
-#                           promotion_ready=true, strict_post_migration
+#                           promotion_ready=true, strict_post_migration; blocked until
+#                           origin/main's catalog release is the one Pearl serves
+#                           (/v1/autotune-release): activate it first (catalog-activate.sh)
 #   3 candidate_env_approval  production-release approval (owner account)
 #   4 signed_byte_verification  checksums, pearl-release.json signature,
 #                           codesign CDHash/Team/Identifier vs provider_code_identity,
@@ -305,6 +307,17 @@ gather() {
   fi
   fact live_recommended_binary_version "$L"
   fact live_runtime_version "$runtime"
+  # The candidate bakes origin/main's catalog release; a canary built before
+  # Pearl serves it fails to join (rate_card_update_required, 1.8.262).
+  CATALOG_COMMITTED_RID="$(git -C "$REPO_ROOT" show "$main_sha:phase3-binary/catalog/autotune/release.json" 2>/dev/null |
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["release_id"])' 2>/dev/null || true)"
+  CATALOG_LIVE_RID=""
+  if [ -n "$(coordinator_url)" ] &&
+     [ "$(http_get "$(coordinator_url)/v1/autotune-release" "$OPS_TMP_DIR/autotune-release.json")" = 200 ]; then
+    CATALOG_LIVE_RID="$(json_field "$OPS_TMP_DIR/autotune-release.json" 'd["release_id"]')"
+  fi
+  fact committed_catalog_release_id "$CATALOG_COMMITTED_RID"
+  fact live_catalog_release_id "$CATALOG_LIVE_RID"
   # Repository-admission runtimes report the applied policy on /healthz.
   local policy_target=""
   [ ! -f "$OPS_TMP_DIR/healthz.json" ] ||
@@ -587,6 +600,9 @@ bash scripts/release-staged-version-policy.sh v$V" \
     if [ "$head_sha" != "$main_sha" ]; then
       set_next candidate_cut blocked "Cut the v$V candidate" "" \
         "run from a clean worktree whose HEAD is origin/main ($main_sha)"
+    elif [ -z "$CATALOG_COMMITTED_RID" ] || [ "$CATALOG_COMMITTED_RID" != "$CATALOG_LIVE_RID" ]; then
+      set_next candidate_cut blocked "Activate the catalog before cutting v$V" "scripts/ops/catalog-activate.sh status" \
+        "origin/main's catalog release ${CATALOG_COMMITTED_RID:-<unreadable>} is not live on Pearl (serves ${CATALOG_LIVE_RID:-<unreadable>}); the candidate bakes it, so activate the catalog first"
     elif remote_tag_exists "v$V"; then
       set_next candidate_cut blocked "Cut the v$V candidate" "" \
         "tag v$V already exists on origin; acceptance signing is forbidden for an existing tag"
