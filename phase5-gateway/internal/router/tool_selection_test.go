@@ -201,7 +201,7 @@ func TestToolSelectionCapabilitiesRequireCurrentEnforcement(t *testing.T) {
 			if got := strings.Join(modes, ","); got != test.want {
 				t.Fatalf("modes=%s want %s", got, test.want)
 			}
-			params := openRouterSupportedParameters(p.ModelID, 128, modes...)
+			params := openRouterSupportedParameters(p.ModelID, 128, &openRouterModelCapabilities{Tools: true, ToolChoice: modes, ResponseFormat: true})
 			wantEnum := "auto"
 			if test.name == "supported" {
 				wantEnum = "auto,none,required"

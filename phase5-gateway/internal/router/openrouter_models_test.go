@@ -20,6 +20,27 @@ func mustProjectOpenRouterModels(t *testing.T, pool []openRouterPoolSnapshot, ra
 	return doc
 }
 
+// fullCapabilities is a coordinator capability result that grants every
+// tool and structured-output parameter (nothing masked).
+func fullCapabilities(modes ...string) *openRouterModelCapabilities {
+	return &openRouterModelCapabilities{Tools: true, ToolChoice: append([]string{"auto"}, modes...), ResponseFormat: true}
+}
+
+// coordinatorModelsJSON is a coordinator /v1/models body listing the
+// Qwen3.6 row with the given capability object.
+func coordinatorModelsJSON(t *testing.T, caps *openRouterModelCapabilities) string {
+	t.Helper()
+	row := map[string]any{"id": openRouterQwen36A3BID, "object": "model"}
+	if caps != nil {
+		row["capabilities"] = caps
+	}
+	raw, err := json.Marshal(map[string]any{"object": "list", "data": []any{row}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
 func listingRateCard() openRouterRateCard {
 	rows := make(map[string]openRouterRateCardRow, len(openRouterListings))
 	for _, listing := range openRouterListings {
@@ -94,7 +115,7 @@ func TestOpenRouterListingsPublishQwen36Only(t *testing.T) {
 func TestProjectOpenRouterModelsQwen36Row(t *testing.T) {
 	now := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
 	doc := mustProjectOpenRouterModels(t, []openRouterPoolSnapshot{
-		{ID: openRouterQwen36A3BID, ReadyProviderCount: 1, ReadySlotsTotal: 4, ReadySlotsFree: 4, MaxContextTokens: 131072},
+		{ID: openRouterQwen36A3BID, ReadyProviderCount: 1, ReadySlotsTotal: 4, ReadySlotsFree: 4, MaxContextTokens: 131072, Capabilities: fullCapabilities()},
 		{ID: "mlx-community/Llama-3.2-3B-Instruct-4bit", ReadyProviderCount: 6, ReadySlotsTotal: 6, ReadySlotsFree: 6, MaxContextTokens: 131072},
 	}, listingRateCard(), now)
 	if len(doc.Data) != 1 {
@@ -184,7 +205,7 @@ func TestOpenRouterSupportedParametersGateToolFeaturesBySpec018Family(t *testing
 		if !openRouterToolFamilyModel(model) || !openRouterStructuredOutputModel(model) {
 			t.Fatalf("%s must match both the SPEC-018 §3.8 and SPEC-019 §4 predicates", model)
 		}
-		params := openRouterSupportedParameters(model, 4096)
+		params := openRouterSupportedParameters(model, 4096, fullCapabilities())
 		for _, key := range append(append([]string{}, toolKeys...), structuredKeys...) {
 			if _, ok := params[key]; !ok {
 				t.Fatalf("%s must declare %q: %+v", model, key, params)
@@ -197,7 +218,7 @@ func TestOpenRouterSupportedParametersGateToolFeaturesBySpec018Family(t *testing
 		if !openRouterToolFamilyModel(model) || openRouterStructuredOutputModel(model) {
 			t.Fatalf("%s must be a tool family without the structured-output predicate", model)
 		}
-		params := openRouterSupportedParameters(model, 4096)
+		params := openRouterSupportedParameters(model, 4096, fullCapabilities())
 		for _, key := range structuredKeys {
 			if _, ok := params[key]; ok {
 				t.Fatalf("%s must not declare %q: %+v", model, key, params)
@@ -451,6 +472,8 @@ func TestOpenRouterModelsHandlerUnauthenticated(t *testing.T) {
 			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, poolz), nil
 		case strings.HasSuffix(r.URL.Path, "/v1/rate-card"):
 			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, rateCard), nil
+		case strings.HasSuffix(r.URL.Path, "/v1/models"):
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, coordinatorModelsJSON(t, fullCapabilities())), nil
 		default:
 			return responseWithBody(http.StatusNotFound, nil, `{}`), nil
 		}
@@ -490,6 +513,8 @@ func TestOpenRouterModelsHandlerFailsClosedOnMissingRateCardRow(t *testing.T) {
 			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, poolz), nil
 		case strings.HasSuffix(r.URL.Path, "/v1/rate-card"):
 			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, rateCard), nil
+		case strings.HasSuffix(r.URL.Path, "/v1/models"):
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, coordinatorModelsJSON(t, fullCapabilities())), nil
 		default:
 			return responseWithBody(http.StatusNotFound, nil, `{}`), nil
 		}
@@ -526,6 +551,8 @@ func TestOpenRouterModelsHandlerAdvertisesReadyProviderContextOnly(t *testing.T)
 			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, poolz), nil
 		case strings.HasSuffix(r.URL.Path, "/v1/rate-card"):
 			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, rateCard), nil
+		case strings.HasSuffix(r.URL.Path, "/v1/models"):
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, coordinatorModelsJSON(t, fullCapabilities())), nil
 		default:
 			return responseWithBody(http.StatusNotFound, nil, `{}`), nil
 		}
@@ -562,6 +589,8 @@ func TestOpenRouterModelsHandlerKeepsContextWhenOnlyProviderIsFull(t *testing.T)
 			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, poolz), nil
 		case strings.HasSuffix(r.URL.Path, "/v1/rate-card"):
 			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, rateCard), nil
+		case strings.HasSuffix(r.URL.Path, "/v1/models"):
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, coordinatorModelsJSON(t, fullCapabilities())), nil
 		default:
 			return responseWithBody(http.StatusNotFound, nil, `{}`), nil
 		}
@@ -591,5 +620,92 @@ func TestOpenRouterModelsHandlerKeepsContextWhenOnlyProviderIsFull(t *testing.T)
 	h.ServeHTTP(statusResp, httptest.NewRequest(http.MethodGet, "/v1/status", nil))
 	if strings.Contains(statusResp.Body.String(), "Qwen3.6") {
 		t.Fatalf("/v1/status gained a non-routable model row: %s", statusResp.Body.String())
+	}
+}
+
+// Re-audit r1 (#2107): OpenRouter parameters project from the coordinator's
+// capability result after eligibility and buyer-UX conformance masking, so a
+// capability /v1/models withholds is never advertised to OpenRouter.
+func TestOpenRouterSupportedParametersFollowCoordinatorMasking(t *testing.T) {
+	model := openRouterQwen36A3BID
+	has := func(params map[string]openRouterParameterDescriptor, key string) bool {
+		_, ok := params[key]
+		return ok
+	}
+	full := openRouterSupportedParameters(model, 4096, fullCapabilities("none", "required", "named"))
+	if !has(full, "tools") || !has(full, "response_format") || !has(full, "structured_outputs") || strings.Join(full["tool_choice"].Values, ",") != "auto,none,required" {
+		t.Fatalf("unmasked capabilities: %+v", full)
+	}
+	noTools := fullCapabilities("none", "required")
+	noTools.Tools = false
+	if params := openRouterSupportedParameters(model, 4096, noTools); has(params, "tools") || has(params, "tool_choice") || !has(params, "response_format") {
+		t.Fatalf("masked tools still advertised: %+v", params)
+	}
+	noFormat := fullCapabilities()
+	noFormat.ResponseFormat = false
+	if params := openRouterSupportedParameters(model, 4096, noFormat); has(params, "response_format") || has(params, "structured_outputs") || !has(params, "tools") {
+		t.Fatalf("masked response_format still advertised: %+v", params)
+	}
+	if params := openRouterSupportedParameters(model, 4096, fullCapabilities("none")); strings.Join(params["tool_choice"].Values, ",") != "auto,none" {
+		t.Fatalf("masked required still advertised: %+v", params["tool_choice"])
+	}
+	if params := openRouterSupportedParameters(model, 4096, nil); has(params, "tools") || has(params, "response_format") || !has(params, "max_tokens") {
+		t.Fatalf("no coordinator capabilities must advertise base parameters only: %+v", params)
+	}
+	// The family predicates still bound the projection.
+	if params := openRouterSupportedParameters("mlx-community/Qwen2-VL-2B-Instruct-4bit", 4096, fullCapabilities()); has(params, "tools") {
+		t.Fatalf("non-tool family advertised tools: %+v", params)
+	}
+}
+
+func TestOpenRouterModelsHandlerProjectsMaskedCoordinatorCapabilities(t *testing.T) {
+	poolz := `{"pool":[{"model_id":"mlx-community/Qwen3.6-35B-A3B-4bit","state":"ready","slots_free":2,"slots_total":2,"max_context_tokens":8192,"auth_state":"bearer_validated","runtime_source":"mlx_cache","tool_selection_capabilities":[{"model_id":"mlx-community/Qwen3.6-35B-A3B-4bit","runtime":"mlx_cache","modes":["auto","none","required","named"],"validation":"schema-holdback-v1"}]}]}`
+	rateCard := listingRateCardJSON(t)
+	masked := &openRouterModelCapabilities{Tools: false, ToolChoice: []string{}, ResponseFormat: false}
+	for _, tc := range []struct {
+		name       string
+		status     int
+		body       string
+		wantStatus int
+	}{
+		{"masked", http.StatusOK, coordinatorModelsJSON(t, masked), http.StatusOK},
+		{"unlisted", http.StatusOK, coordinatorModelsJSON(t, nil), http.StatusOK},
+		{"models_error", http.StatusBadGateway, `{}`, http.StatusServiceUnavailable},
+		{"models_malformed", http.StatusOK, `{"data":`, http.StatusServiceUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				switch {
+				case strings.HasSuffix(r.URL.Path, "/poolz"):
+					return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, poolz), nil
+				case strings.HasSuffix(r.URL.Path, "/v1/rate-card"):
+					return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, rateCard), nil
+				case strings.HasSuffix(r.URL.Path, "/v1/models"):
+					return responseWithBody(tc.status, http.Header{"Content-Type": []string{"application/json"}}, tc.body), nil
+				default:
+					return responseWithBody(http.StatusNotFound, nil, `{}`), nil
+				}
+			})}
+			h, _, _, _ := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+				cfg.Coordinator.BuyerURL = "http://coordinator.test"
+				cfg.Coordinator.OperatorURL = "http://operator.test"
+			}, WithHTTPClient(client))
+			resp := httptest.NewRecorder()
+			h.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, openRouterModelsPath, nil))
+			if resp.Code != tc.wantStatus {
+				t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+			}
+			if tc.wantStatus != http.StatusOK {
+				assertErrorCode(t, resp.Body.String(), "coordinator_unavailable")
+				return
+			}
+			// /poolz declares every mode, but the coordinator's masked
+			// capability result is what OpenRouter sees.
+			for _, forbidden := range []string{`"tools":`, `"tool_choice":`, `"response_format":`, `"structured_outputs":`} {
+				if strings.Contains(resp.Body.String(), forbidden) {
+					t.Fatalf("masked parameter %s advertised: %s", forbidden, resp.Body.String())
+				}
+			}
+		})
 	}
 }
