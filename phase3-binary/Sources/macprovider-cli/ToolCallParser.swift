@@ -344,12 +344,12 @@ enum ToolCallParser {
         return (values, rest.dropFirst())
     }
 
-    /// `string="true"` values are text, except that a value for a declared
-    /// non-string parameter which parses as that type is taken typed;
-    /// `string="false"` values are JSON, typed as GLM values are.
+    /// Declared non-string types must parse strictly regardless of the string
+    /// flag. Otherwise `string="true"` preserves literal text, while
+    /// `string="false"` values are typed as GLM values are.
     private static func dsmlValue(_ raw: String, isString: Bool, type: String?) throws -> JSONValue {
         if isString {
-            if let type, type != "string", let typed = try? glmValue(raw, type: type) { return typed }
+            if let type, type != "string" { return try glmValue(raw, type: type) }
             return .string(raw)
         }
         return try glmValue(raw, type: type)
