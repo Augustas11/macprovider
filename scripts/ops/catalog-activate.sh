@@ -830,7 +830,7 @@ import json, sys
 path, committed, live = sys.argv[1:4]
 owed = json.load(open(path))["owed"]
 open_ = [e for e in owed if e["state"] != "settled"]
-# An owed key's release is live once the coordinator serves it, or once a later
+# The release of an owed key is live once the coordinator serves it, or once a later
 # committed release superseded it (releases are activated in order).
 live_open = [e for e in open_ if e["release_id"] == live or e["release_id"] != committed]
 print("OPEN " + ", ".join("%s (%s, %s: %s)" % (e["catalog_key"], e["model"], e["state"], e["detail"]) for e in live_open))
