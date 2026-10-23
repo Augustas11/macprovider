@@ -34,7 +34,7 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.10.1` | `87dc5159c87d73f4d7abd524fbdd17760cf56285` | `3.32.3` (`3b339ad6…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.10.3` | `baec172471889593f60c70060eefcb624772fee5` | `3.32.3` (`3b339ad6…`) |
 | `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.9` | `29d3b93375cc56cd2649b40e4310a8bc445e9874` | `0.32.3` (`19601207…`) |
 | `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.4` | `2f512e3997349c8648f5d7c5113eb2c825aa242d` | `v0.32.4` (`36969c09…`) |
 
@@ -50,10 +50,12 @@ the mlx-swift-lm fork keeps upstream's tools version.
 Every rebase replays these stacks and drops any patch upstream now carries
 (record which, and why it is equivalent).
 
-mlx-swift-lm (`3.32.3..87dc5159`, tag `3.32.3-macprovider.10.1` on campaign
-branch `glm53/tuple-0324`: the `3.32.3-macprovider.10` stack (`b4077dcb`,
+mlx-swift-lm (`3.32.3..baec1724`, tag `3.32.3-macprovider.10.3` on campaign
+branch `dsv4/2111-port`: tag `3.32.3-macprovider.10.1` (`87dc5159`, branch
+`glm53/tuple-0324`; the `3.32.3-macprovider.10` stack (`b4077dcb`,
 `3.32.3-macprovider.9` plus the upstream #622 rotating-cache exact-rewind fix
-and `KVCache.maxTrimCount`) plus GLM-5-Next):
+and `KVCache.maxTrimCount`) plus GLM-5-Next) plus DeepSeek-V4. The tag
+`3.32.3-macprovider.10.2` is an unrelated GLM candidate outside the tuple):
 
 | Patch | Commits | What it carries |
 | --- | --- | --- |
@@ -72,6 +74,7 @@ and `KVCache.maxTrimCount`) plus GLM-5-Next):
 | GLM-5-Next MTP-1 (epic #2029) | `b9ecf9b`, `6c837df`, `dcbf933`, `fa72942`, `e46cd52`, `7d8dbf5`, `5a2b4ee`, `2abf8e5`, `b25ef44`, `423aa6c`, `3d95241`, `bbdabc4`, `18ca526` | In-place verification with a one-token rewind (`mtpCacheCheckpointIndexKey` runs every column as a one-token decode step; sparse layers trim exactly, KDA restores its checkpoint; `SpeculativeCacheRewindModel` depth 1; `maxTrimCount` reports the latent cache's exact rewind depth for #622's per-layer gate), and packed verification inside continuous batching (`GLM5NextLatentCacheBatch` as an `MTPPackedVerificationCache` with per-row `GLM5NextLatentRowTransaction`, right-padded columns that attend nothing and write no cache, KDA padded columns that keep the row's state), the multi-vector projection `glm5NextQMVBatch` for 2...8-token forwards (bitwise equal to the one-vector qmv), the one-dispatch KDA verify step `glm5NextKDAVerifyStep`, and a single-sync greedy round in the shared `MTPSpeculativeTokenIterator` (same tokens; unused by the provider), the pre-final-norm hidden state and shared latent for the head (`validLatent`), and the parameterless `GLM5NextMTPDraftModel` (`GLM5NextMTP.swift`, MTP-1 drafter, block size 2, packed advance) with its registration; depth-D drafting and verification up to 7 with in-place rollback (`MambaCache` per-prefix states; the depth-1 checkpoint path unchanged) and serving at depth 1 by default (`maximumDepth`), the optional `MTPAdaptiveDepth` controller in the shared iterator (unused by the provider), verify-path kernel work (deferred hyper-connection kernels in verify, indexer inputs projected once, each weight read once per verify) and a staged-eval lab knob. |
 | GLM-5-Next config validation (epic #2029) | `87dc515` | `GLM5NextConfiguration.validateModelConfiguration` rejects `index_topk` outside `index_kpool...65536` or not a whole number of pools, `index_kpool` outside `1...1024`, unknown `mlp_layer_types` / `indexer_types` values, and sparse MLP layers without `1 <= num_experts_per_tok <= n_routed_experts`. No decode-path line. |
 | Qwen2-VL per-image vision attention (#2035) | `5eb60da`, `918ecc2`, `3545cb0`, `8ee6305` | MLXVLM `Qwen2VL.swift` vision blocks attend within each image (and each video frame group) instead of across all of a request's images (it used `frames[0].t`); equal-length images batch; the rotary batch axis is dropped before per-image attention. |
+| DeepSeek-V4 (#2111) | `fe28d00`, `baec172` | `DeepseekV4.swift` (text model, compressed pools, HISA indexer, reference prefill plan in `prepare`), `DeepseekV4PoolCache.swift`, the `deepseek_v4` `LLMModelFactory` registration, and the tiny test fixture. `GLM5Next.swift` refactor only: `makeLimitedSwiGLU` loses `private`, `GLM5NextHyperConnection` gains a memberwise init behind the identical convenience init. |
 
 `784f021` (Swift 6.1 tools version) is reverted by `e81dd7c`; drop both on the
 next rebase.
@@ -375,7 +378,7 @@ Measure TTFT, decode tok/s, peak RSS, Metal memory, energy/thermal state, and co
 - **RED:** any correctness, ownership, rollback, accounting, tool parsing, cold-cache ABI, artifact-parity, or unexplained performance-budget failure. Revert the pin candidate.
 - **BLOCKED:** required upstream release/package/toolchain condition is absent. Keep production pins unchanged.
 
-Current campaign tuple (2026-10-17, epic #2029): fork `mlx-swift-lm 3.32.3-macprovider.10.1` (`87dc5159…`, on `3.32.3-macprovider.10`, upstream `3.32.3`), fork `mlx-swift 0.32.3-macprovider.9` (`29d3b933…`, upstream `0.32.3`), and fork MLX core `v0.32.4-macprovider.4` (`2f512e39…`, upstream `v0.32.4`). Protected baseline (2026-10-17, #2041): fork `mlx-swift-lm 3.32.3-macprovider.9.4` (`ce3bb523…`, upstream `3.32.3`; `.9` (`dbe8bcb3…`) plus the Qwen2-VL per-image vision attention fix only), fork `mlx-swift 0.32.3-macprovider.8` (`745f5e48…`, upstream `0.32.3`), and fork MLX core `v0.32.2-macprovider.5` (`49d94e9f…`, upstream `v0.32.2`), built on Xcode 26.6 / Swift 6.3.3 / macOS SDK 26.5; `swift-transformers` and `swift-jinja` exactly as pinned in `phase3-binary/Package.resolved`. Previous baseline (2026-09-04): `mlx-swift-lm 3.31.4`, `mlx-swift 0.31.4`, `swift-transformers 1.3.4`, `swift-jinja 2.4.2` on Xcode 16.4 / Swift 6.1.
+Current campaign tuple (2026-10-23, epic #2029 and #2111): fork `mlx-swift-lm 3.32.3-macprovider.10.3` (`baec1724…`, `3.32.3-macprovider.10.1` (`87dc5159…`, on `3.32.3-macprovider.10`) plus DeepSeek-V4, upstream `3.32.3`), fork `mlx-swift 0.32.3-macprovider.9` (`29d3b933…`, upstream `0.32.3`), and fork MLX core `v0.32.4-macprovider.4` (`2f512e39…`, upstream `v0.32.4`). Protected baseline (2026-10-17, #2041): fork `mlx-swift-lm 3.32.3-macprovider.9.4` (`ce3bb523…`, upstream `3.32.3`; `.9` (`dbe8bcb3…`) plus the Qwen2-VL per-image vision attention fix only), fork `mlx-swift 0.32.3-macprovider.8` (`745f5e48…`, upstream `0.32.3`), and fork MLX core `v0.32.2-macprovider.5` (`49d94e9f…`, upstream `v0.32.2`), built on Xcode 26.6 / Swift 6.3.3 / macOS SDK 26.5; `swift-transformers` and `swift-jinja` exactly as pinned in `phase3-binary/Package.resolved`. Previous baseline (2026-09-04): `mlx-swift-lm 3.31.4`, `mlx-swift 0.31.4`, `swift-transformers 1.3.4`, `swift-jinja 2.4.2` on Xcode 16.4 / Swift 6.1.
 
 `swift-transformers` was moved `1.0.0 → 1.3.3` by Dependabot #1336 without the
 #966 token-exact gate, then to `1.3.4` under that gate (2026-09-04). The gate is

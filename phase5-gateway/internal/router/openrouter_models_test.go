@@ -200,7 +200,8 @@ func TestOpenRouterSupportedParametersGateToolFeaturesBySpec018Family(t *testing
 	toolKeys := []string{"tools", "tool_choice"}
 	structuredKeys := []string{"response_format", "structured_outputs"}
 	family := []string{openRouterQwen36A3BID, "mlx-community/Qwen2.5-Coder-32B-Instruct-4bit", "mlx-community/Llama-3.3-70B-Instruct-4bit"}
-	other := []string{"mlx-community/Llama-3.2-3B-Instruct-4bit", "mlx-community/gpt-oss-20b-MXFP4-Q8", "mlx-community/gemma-4-26b-a4b-it-4bit", "mlx-community/GLM-4.5-Air-4bit"}
+	other := []string{"mlx-community/Llama-3.2-3B-Instruct-4bit", "mlx-community/gpt-oss-20b-MXFP4-Q8", "mlx-community/gemma-4-26b-a4b-it-4bit", "mlx-community/GLM-4.5-Air-4bit",
+		"TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX"}
 	for _, model := range family {
 		if !openRouterToolFamilyModel(model) || !openRouterStructuredOutputModel(model) {
 			t.Fatalf("%s must match both the SPEC-018 §3.8 and SPEC-019 §4 predicates", model)

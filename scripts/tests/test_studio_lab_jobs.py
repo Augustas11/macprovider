@@ -316,6 +316,35 @@ fi
         cli.write_text(text)
         cli.chmod(0o700)
 
+    def _write_dsv4_inputs(self, environment=None) -> None:
+        # Fake venv interpreter: answers the metadata probe, or records the
+        # reference argv and writes the fixed outputs.
+        env = json.dumps(environment or jobs.DSV4_REFERENCE_POLICY["environment"], sort_keys=True)
+        python = self.paths["reference_python"]
+        python.write_text(f"""#!/bin/sh
+if [ "$2" = -c ]; then printf '%s\\n' {env!r}; exit 0; fi
+printf '%s\\t' "$@" >> {str(self.calls)!r}
+printf '\\n' >> {str(self.calls)!r}
+out="$4"
+mkdir -m 700 "$out"
+printf '{{}}\\n' > "$out/speed.json"
+for ctx in 1024 8192 32768; do printf 'npz\\n' > "$out/oracle_$ctx.npz"; done
+""")
+        python.chmod(0o700)
+        script = self.paths["reference_script"]
+        script.write_text("print('reference')\n")
+        script.chmod(0o600)
+        subprocess.run(["git", "-C", str(self.source), "add", str(script)], check=True)
+        subprocess.run(["git", "-C", str(self.source), "commit", "-qm", "reference"], check=True)
+        self.head = subprocess.run(
+            ["git", "-C", str(self.source), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        target_digest, _ = jobs.snapshot_identity(self.source / ".lab-window/fixture/target")
+        write_json(self.source / jobs.POLICY_RELATIVE, {
+            **jobs.DSV4_REFERENCE_POLICY, "target_sha256": target_digest,
+        })
+
     def snapshot(self, kind: str) -> dict:
         if kind in jobs.QWEN_JOB_KINDS:
             self._write_qwen_inputs()
@@ -810,7 +839,7 @@ class StudioLabJobsTests(unittest.TestCase):
         path = self.fixture.stage / "window.json"
         write_json(path, manifest)
         loaded, _ = remote.load_manifest(path)
-        self.assertEqual(set(loaded["artifacts"]), jobs.QWEN_ARTIFACT_FIELDS)
+        self.assertEqual(set(loaded["artifacts"]), jobs.artifact_fields(kind))
         remote.validate_lab_artifacts(loaded)
         manifest["artifacts"]["unknown"] = {"path": "/tmp/unknown", "sha256": digest}
         write_json(path, manifest)
@@ -830,6 +859,78 @@ class StudioLabJobsTests(unittest.TestCase):
         write_json(path, manifest)
         with self.assertRaisesRegex(remote.Refusal, "lab_timeout_s"):
             remote.load_manifest(path)
+
+    def test_dsv4_reference_source_build_and_remote_load_accepts_only_reference_artifacts(self):
+        self.fixture._write_dsv4_inputs()
+        self._assert_cli_only_source_build_and_remote_load("dsv4-reference")
+
+    def test_dsv4_reference_preflight_and_run_are_fixed_and_measurement_only(self):
+        self.fixture._write_dsv4_inputs()
+        manifest = self.fixture.manifest("dsv4-reference")
+        loaded, job = jobs.load_job_manifest(str(manifest))
+        self.assertEqual(set(loaded["artifacts"]), jobs.DSV4_ARTIFACT_FIELDS)
+        self.assertNotIn("glmbench_tree_oid", job["immutable_inputs"])
+        jobs.validate_job(argparse.Namespace(manifest=str(manifest)))
+        self.assertEqual(self.fixture.recorded_calls(), [])
+        with mock.patch.object(jobs, "run_checked", wraps=jobs.run_checked) as dispatch:
+            result = jobs.run_job(argparse.Namespace(manifest=str(manifest)))
+        self.assertEqual([call.kwargs["timeout"] for call in dispatch.call_args_list], [120, 5400])
+        private = jobs.private_artifact_paths(loaded, job)["reference_script"]
+        result_dir = self.fixture.source / ".lab-window/result-dsv4-reference-nonce"
+        self.assertEqual(self.fixture.recorded_calls(), [[
+            "-I", str(private), str(self.fixture.source / ".lab-window/fixture/target"),
+            str(result_dir / "reference"),
+            "--oracle-contexts", "1024,8192,32768", "--ttft-contexts", "4096,32768",
+            "--rows", "1,4", "--row-prompt", "1024", "--decode", "256",
+        ]])
+        self.assertEqual(set(result["outputs"]), {
+            "environment.json", "reference.log", "speed.json",
+            "oracle_1024.npz", "oracle_8192.npz", "oracle_32768.npz",
+        })
+        self.assertTrue(result["exploratory"])
+        self.assertFalse(result["qualification"])
+        self.assertFalse(result["qualification_activated"])
+        self.assertEqual(result["evidence_class"], "dsv4_reference_measurement_only")
+        self.assertEqual(
+            result["executed_inputs"]["fixture_target_sha256"],
+            job["immutable_inputs"]["reference_target_sha256"],
+        )
+
+    def test_dsv4_reference_rejects_policy_drift(self):
+        self.fixture._write_dsv4_inputs()
+        path = self.fixture.source / jobs.POLICY_RELATIVE
+        base = json.loads(path.read_text())
+        for key, value in (("decode", 512), ("rows", [1, 8]), ("artifact_revision", "0" * 40),
+                           ("environment", {"mlx": "0.32.4"}), ("extra", True), ("temperature", False)):
+            with self.subTest(key=key):
+                write_json(path, {**base, key: value})
+                with self.assertRaisesRegex(jobs.Refusal, "DeepSeek V4 reference policy"):
+                    self.fixture.snapshot("dsv4-reference")
+
+    def test_dsv4_reference_fixture_identity_mismatch_refuses_preflight(self):
+        self.fixture._write_dsv4_inputs()
+        path = self.fixture.source / jobs.POLICY_RELATIVE
+        write_json(path, {**json.loads(path.read_text()), "target_sha256": "b" * 64})
+        manifest = self.fixture.manifest("dsv4-reference")
+        with self.assertRaisesRegex(jobs.Refusal, "fixture identity differs"):
+            jobs.validate_job(argparse.Namespace(manifest=str(manifest)))
+
+    def test_dsv4_reference_environment_mismatch_refuses_preflight(self):
+        self.fixture._write_dsv4_inputs({"mlx": "0.32.4", "mlx-metal": "0.32.4", "mlx-vlm": "0.7.9"})
+        manifest = self.fixture.manifest("dsv4-reference")
+        with self.assertRaisesRegex(jobs.Refusal, "reference environment differs"):
+            jobs.validate_job(argparse.Namespace(manifest=str(manifest)))
+
+    def test_dsv4_reference_script_swap_after_preflight_refuses_before_run(self):
+        self.fixture._write_dsv4_inputs()
+        manifest = self.fixture.manifest("dsv4-reference")
+        jobs.validate_job(argparse.Namespace(manifest=str(manifest)))
+        loaded, job = jobs.load_job_manifest(str(manifest))
+        private = jobs.private_artifact_paths(loaded, job)["reference_script"]
+        private.write_text("print('swapped')\n")
+        with self.assertRaisesRegex(jobs.Refusal, "private job artifact drifted"):
+            jobs.run_job(argparse.Namespace(manifest=str(manifest)))
+        self.assertEqual(self.fixture.recorded_calls(), [])
 
     def _unrelated_phase3_commit(self) -> str:
         phase3 = self.fixture.source / "phase3-binary/source.txt"

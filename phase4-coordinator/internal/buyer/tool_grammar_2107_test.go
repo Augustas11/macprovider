@@ -18,21 +18,23 @@ import (
 // catalog row (#2107 D1/D4).
 func TestToolGrammarFamilyCoversEveryCatalogFamily(t *testing.T) {
 	for model, want := range map[string]string{
-		"zai-org/glm-5.3-flash":                    toolGrammarGLM,
-		"Jundot/GLM-5.3-Flash-oQ4e-mtp":            toolGrammarGLM,
-		"z-ai/glm-4.5-air":                         toolGrammarGLM,
-		"meta-llama/llama-3.1-8b-instruct":         toolGrammarLlama3,
-		"mlx-community/Llama-3.2-3B-Instruct-4bit": toolGrammarLlama3,
-		"google-gemma-4-26b-a4b-it":                toolGrammarGemma4,
-		"nvidia/nemotron-3-nano-30b-a3b":           toolGrammarQwen,
-		"qwen3-8b":                                 toolGrammarQwen,
-		"qwen3-coder-30b-a3b-instruct":             toolGrammarQwen,
-		"qwen2.5-coder-32b-instruct":               toolGrammarQwen,
-		"qwen/qwen3.6-35b-a3b":                     toolGrammarQwen,
-		"openai/gpt-oss-20b":                       toolGrammarHarmony,
-		"mlx-community/Qwen2-VL-2B-Instruct-4bit":  "",
-		"qwen2-vl-2b-instruct":                     "",
-		"some/unknown-model":                       "",
+		"zai-org/glm-5.3-flash":                       toolGrammarGLM,
+		"Jundot/GLM-5.3-Flash-oQ4e-mtp":               toolGrammarGLM,
+		"z-ai/glm-4.5-air":                            toolGrammarGLM,
+		"meta-llama/llama-3.1-8b-instruct":            toolGrammarLlama3,
+		"mlx-community/Llama-3.2-3B-Instruct-4bit":    toolGrammarLlama3,
+		"google-gemma-4-26b-a4b-it":                   toolGrammarGemma4,
+		"nvidia/nemotron-3-nano-30b-a3b":              toolGrammarQwen,
+		"qwen3-8b":                                    toolGrammarQwen,
+		"qwen3-coder-30b-a3b-instruct":                toolGrammarQwen,
+		"qwen2.5-coder-32b-instruct":                  toolGrammarQwen,
+		"qwen/qwen3.6-35b-a3b":                        toolGrammarQwen,
+		"openai/gpt-oss-20b":                          toolGrammarHarmony,
+		"deepseek/deepseek-v4-flash":                  toolGrammarDSML,
+		"TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX": toolGrammarDSML,
+		"mlx-community/Qwen2-VL-2B-Instruct-4bit":     "",
+		"qwen2-vl-2b-instruct":                        "",
+		"some/unknown-model":                          "",
 	} {
 		if got := toolGrammarFamily(model); got != want {
 			t.Errorf("toolGrammarFamily(%q)=%q want %q", model, got, want)

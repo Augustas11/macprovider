@@ -697,12 +697,14 @@ public enum ChatRole: String, Sendable {
 public struct ChatMessage: Sendable {
     public let role: ChatRole
     public let content: String?
+    public let reasoningContent: String?
     public let toolCallID: String?
     public let toolCalls: [ToolCall]?
 
-    public init(role: ChatRole, content: String?, toolCallID: String? = nil, toolCalls: [ToolCall]? = nil) {
+    public init(role: ChatRole, content: String?, toolCallID: String? = nil, toolCalls: [ToolCall]? = nil, reasoningContent: String? = nil) {
         self.role = role
         self.content = content
+        self.reasoningContent = reasoningContent
         self.toolCallID = toolCallID
         self.toolCalls = toolCalls
     }
@@ -737,7 +739,10 @@ public struct ChatMessage: Sendable {
             } else {
                 parsedToolCalls = nil
             }
-            return ChatMessage(role: role, content: content, toolCallID: nil, toolCalls: parsedToolCalls)
+            return ChatMessage(
+                role: role, content: content, toolCallID: nil, toolCalls: parsedToolCalls,
+                reasoningContent: dict["reasoning_content"] as? String
+            )
         case .tool:
             guard let toolCallID = dict["tool_call_id"] as? String, !toolCallID.isEmpty else {
                 throw APIError(status: 400, message: "tool message requires tool_call_id", code: "invalid_tool_call_id", param: "messages[\(index)].tool_call_id")

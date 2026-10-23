@@ -447,6 +447,8 @@ def tool_grammar_family(model: str) -> str:
         return "gemma4"
     if "nemotron-3" in m or "nemotron3" in m:
         return "qwen"
+    if "deepseek-v4" in m or "deepseek_v4" in m:
+        return "dsml"
     return ""
 
 
@@ -460,7 +462,7 @@ def advertised_capabilities(model_id: str) -> dict:
     return {
         "tools": tools,
         "tool_choice": modes,
-        "reasoning": "glm-5" in m or "gpt-oss" in m,
+        "reasoning": "glm-5" in m or "gpt-oss" in m or "deepseek-v4" in m,
         "response_format": True,
         "messages": True,
         "responses": True,

@@ -2300,8 +2300,10 @@ actor ModelRuntime: ModelRuntimeServing {
     /// such layer as not realizing a requested cap
     /// (`incompatibleCapacity(expected: maxKVSize, count: 11)`). Prompt length
     /// is still bounded by `validatePromptTokenCount` before allocation.
+    /// DeepSeek V4 likewise builds its own window and pool caches
+    /// (`DeepseekV4PoolCache`, never sized by `maxKVSize`).
     nonisolated static func modelSizesItsOwnKVCache(_ model: any LanguageModel) -> Bool {
-        model is GLM5NextModel || model is GLM5NextTextModel
+        model is GLM5NextModel || model is GLM5NextTextModel || model is DeepseekV4Model
     }
 
     /// Parameters for a `TokenIterator` over an explicit cache the model sized
@@ -2889,8 +2891,10 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     /// Families served with the process wired limit at Metal's recommended
-    /// working set for as long as the model is loaded.
-    nonisolated static let residentWeightsFamilies: Set<String> = ["glm5_next"]
+    /// working set for as long as the model is loaded. DeepSeek V4-Flash
+    /// (~167 GB of MXFP4/MXFP8 weights) sits as close to the working set as
+    /// GLM-5.3-Flash.
+    nonisolated static let residentWeightsFamilies: Set<String> = ["glm5_next", "deepseek_v4"]
 
     /// A model-lifetime wired-limit ticket at Metal's recommended working set,
     /// the limit mlx-lm's generation paths set. At the default limit (0) no
@@ -2929,7 +2933,12 @@ actor ModelRuntime: ModelRuntimeServing {
     /// governs instead (19 command buffers, 0.26 ms idle, round-4 window). The
     /// value only shapes command-buffer batching; buffers still commit every
     /// MLX op limit.
-    nonisolated static let commandBufferBudgetMBByFamily: [String: Int] = ["glm5_next": 65536]
+    nonisolated static let commandBufferBudgetMBByFamily: [String: Int] = [
+        "glm5_next": 65536,
+        // DeepSeek V4-Flash's routed experts bind whole 256-expert MXFP4
+        // tensors per layer through gatherQMM, the same shape of commit.
+        "deepseek_v4": 65536,
+    ]
 
     /// The per-buffer MB budget to set for a family, or `nil` when the family
     /// keeps MLX's default or the operator already set `MLX_MAX_MB_PER_BUFFER`.
@@ -3082,6 +3091,11 @@ maxTokens: 1,
         // a verified layout; any other `glm5_next` artifact is a `mixed` cache
         // class without one and fails closed.
         if normalizedLabels.contains(where: { $0.contains("glm5next") }) { return "glm5_next" }
+        // DeepSeek V4 (`deepseek_v4`, #2111). Exact labels: `deepseek_v41`
+        // (V4.1) is a different model and must not match.
+        if normalizedLabels.contains("deepseekv4") || normalizedLabels.contains("deepseekv4forcausallm") {
+            return "deepseek_v4"
+        }
         return nil
     }
 
@@ -9006,6 +9020,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 let start = promptTokenIds.count - iteratorInput.text.tokens.size
                                 let resumeAt = try Self.cancellableLocalPrefill(
                                     tokenCount: promptTokenIds.count, from: start, stepSize: prefillStepSize,
+                                    referenceStepSize: generationContext.model is DeepseekV4Model ? DeepseekV4Model.prefillStepSize : nil,
                                     isCancelled: { Task.isCancelled || shouldCancel() || drainCancelled.isFired }
                                 ) { range in
                                     let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[range])))
@@ -9859,6 +9874,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         let start = promptTokenIds.count - iteratorInput.text.tokens.size
                         let resumeAt = try Self.cancellableLocalPrefill(
                             tokenCount: promptTokenIds.count, from: start, stepSize: prefillStepSize,
+                            referenceStepSize: generationContext.model is DeepseekV4Model ? DeepseekV4Model.prefillStepSize : nil,
                             isCancelled: { Task.isCancelled || shouldCancel() || drainCancelled.isFired }
                         ) { range in
                             let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[range])))
@@ -12564,20 +12580,27 @@ maxTokens: maxTokens,
     /// SPEC-001-R011: prefills `[start, tokenCount)` in `stepSize` chunks,
     /// checking `isCancelled` before each chunk, and leaves the final
     /// (at most `stepSize`) tokens for the TokenIterator, exactly as its own
-    /// prefill would. Returns the index the iterator continues from.
+    /// prefill would. With a model reference step, leave only the final token
+    /// and use that fixed step instead of the configured chunk size. Returns
+    /// the index the iterator continues from.
     static func cancellableLocalPrefill(
         tokenCount: Int,
         from start: Int,
         stepSize: Int,
+        referenceStepSize: Int? = nil,
         isCancelled: () -> Bool,
         prefill: (Range<Int>) throws -> Void
     ) throws -> Int {
-        let step = max(1, stepSize)
+        let step = max(1, referenceStepSize ?? stepSize)
+        // DeepSeek-V4's ratio-4 pools depend on forward-call boundaries. Match
+        // its prepare/oracle plan even when local preemption prefills first.
+        let remainder = referenceStepSize == nil ? step : 1
         var cursor = max(0, start)
-        while tokenCount - cursor > step {
+        while tokenCount - cursor > remainder {
             if isCancelled() { throw CancellationError() }
-            try prefill(cursor ..< cursor + step)
-            cursor += step
+            let count = min(step, tokenCount - cursor - 1)
+            try prefill(cursor ..< cursor + count)
+            cursor += count
         }
         if isCancelled() { throw CancellationError() }
         return cursor
@@ -13233,6 +13256,15 @@ maxTokens: maxTokens,
         // variable ignore it.
         if let effort = request.templateReasoningEffort {
             additionalContext = (additionalContext ?? [:]).merging(["reasoning_effort": effort]) { _, new in new }
+        }
+        if grammar == .dsml {
+            // Chat.Message has no reasoning field. Preserve it in the raw
+            // messages and let the reference encoder decide which turns keep it.
+            var templateMessages = DefaultMessageGenerator().generate(messages: chat)
+            for (index, message) in messages.enumerated() where message.role == .assistant {
+                templateMessages[index]["reasoning_content"] = message.reasoningContent
+            }
+            return UserInput(messages: templateMessages, tools: tools, additionalContext: additionalContext)
         }
         return UserInput(
             chat: chat,
@@ -14238,6 +14270,10 @@ struct NativeToolCallStreamEmitter {
         case .gemma4?:
             startDelimiter = "<|tool_call>"
             endDelimiter = "<tool_call|>"
+            argumentKey = "arguments"
+        case .dsml?:
+            startDelimiter = DeepseekV4Encoding.toolCallsStart
+            endDelimiter = DeepseekV4Encoding.toolCallsEnd
             argumentKey = "arguments"
         default:
             startDelimiter = "<tool_call>"

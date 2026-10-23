@@ -54,10 +54,37 @@ struct GLMParityCommand: AsyncParsableCommand {
     var output: String?
 
     func run() async throws {
+        try await Self.runParity(
+            modelDir: modelDir, oracle: oracle, steps: steps, prefillStepSize: prefillStepSize,
+            mlxCacheLimitMB: mlxCacheLimitMB, output: output, mode: .glm)
+    }
+
+    /// `glm-parity` and `dsv4-parity` differ only in how the prompt is chunked
+    /// and which values are compared at the oracle's top indices.
+    enum Mode {
+        /// The GLM reference lane: full chunks with the last one included,
+        /// raw logits compared.
+        case glm
+        /// mlx-vlm `generate_step` (the `dsv4-reference` lane): chunks of
+        /// `min(step, remaining - 1)` while more than one prompt token is
+        /// left, then the last token alone; log-softmax in the model dtype
+        /// compared, which is what that lane's `top_logprob` holds. DeepSeek
+        /// V4's compressor pools windows per call, so the chunk plan changes
+        /// its output and must match the reference's.
+        case vlmGenerateStep
+
+        var name: String { self == .glm ? "glm-parity" : "dsv4-parity" }
+    }
+
+    static func runParity(
+        modelDir: String, oracle: [String], steps: Int, prefillStepSize: Int,
+        mlxCacheLimitMB: Int, output: String?, mode: Mode
+    ) async throws {
+        let name = mode.name
         guard steps > 0, prefillStepSize > 0, !oracle.isEmpty,
               ModelRuntime.isValidMLXCacheLimitMB(mlxCacheLimitMB) else {
             FileHandle.standardError.write(Data(
-                "glm-parity: --oracle is required; --steps and --prefill-step-size must be > 0; --mlx-cache-limit-mb in 0...\(ModelRuntime.maximumMLXCacheLimitMB)\n".utf8
+                "\(name): --oracle is required; --steps and --prefill-step-size must be > 0; --mlx-cache-limit-mb in 0...\(ModelRuntime.maximumMLXCacheLimitMB)\n".utf8
             ))
             throw ExitCode(2)
         }
@@ -75,24 +102,25 @@ struct GLMParityCommand: AsyncParsableCommand {
 
         // Before any MLX device use: MLX reads the budget when it creates the device.
         if let mb = ModelRuntime.applyMLXCommandBufferBudget(modelFamily: capabilities.modelFamily) {
-            Self.progress("mlx_max_mb_per_buffer=\(mb)")
+            Self.progress(name, "mlx_max_mb_per_buffer=\(mb)")
         }
         ModelRuntime.applyMLXCacheLimit(megabytes: mlxCacheLimitMB)
-        Self.progress("load start dir=\(directory.path) oracles=\(references.count)")
+        Self.progress(name, "load start dir=\(directory.path) family=\(capabilities.modelFamily) oracles=\(references.count)")
         let loadStarted = Date()
         let runtime = try await ModelRuntime(modelID: modelDir)
         guard await runtime.isLoaded, let container = await runtime.currentSnapshot().container else {
-            FileHandle.standardError.write(Data("glm-parity: failed to load \(modelDir)\n".utf8))
+            FileHandle.standardError.write(Data("\(name): failed to load \(modelDir)\n".utf8))
             throw ExitCode(1)
         }
         let loadSeconds = Date().timeIntervalSince(loadStarted)
-        Self.progress("load done seconds=\(String(format: "%.1f", loadSeconds))")
+        Self.progress(name, "load done seconds=\(String(format: "%.1f", loadSeconds))")
 
         var runs: [GLMParityRun] = []
         for (reference, data) in references {
-            Self.progress("oracle start \(reference.source) prompt=\(reference.prompt.count)")
+            Self.progress(name, "oracle start \(reference.source) prompt=\(reference.prompt.count)")
             let measured = try await Self.measure(
-                container: container, reference: reference, steps: steps, prefillStepSize: prefillStepSize)
+                container: container, reference: reference, steps: steps, prefillStepSize: prefillStepSize,
+                mode: mode)
             runs.append(GLMParityRun(
                 oracleSource: reference.source,
                 oracleSourceSHA256: reference.sourceSHA256,
@@ -102,13 +130,13 @@ struct GLMParityCommand: AsyncParsableCommand {
                 promptInt32SHA256: Self.sha256Hex(reference.prompt.withUnsafeInt32LittleEndianBytes()),
                 measurement: measured
             ))
-            FileHandle.standardError.write(Data(Self.summaryLine(source: reference.source, measured).utf8))
-            Self.progress("oracle done \(reference.source)")
+            FileHandle.standardError.write(Data(Self.summaryLine(name, source: reference.source, measured).utf8))
+            Self.progress(name, "oracle done \(reference.source)")
             Memory.clearCache()
         }
 
         let report = GLMParityReport(
-            schema: "glm-parity-v1",
+            schema: "\(name)-v1",
             modelDir: directory.path,
             modelFamily: capabilities.modelFamily,
             pagedKVFamilyRecognized: PagedKVAttachGate.recognizedModelFamilies.contains(capabilities.modelFamily),
@@ -138,7 +166,8 @@ struct GLMParityCommand: AsyncParsableCommand {
         container: ModelContainer,
         reference: GLMParityOracle,
         steps: Int,
-        prefillStepSize stepSize: Int
+        prefillStepSize stepSize: Int,
+        mode: Mode
     ) async throws -> GLMParityMeasurement {
         let decodeSteps = min(steps, reference.greedy.count)
         let promptTokens = reference.prompt
@@ -146,19 +175,29 @@ struct GLMParityCommand: AsyncParsableCommand {
         return try await container.perform { context -> GLMParityMeasurement in
             let model = context.model
             let cache = try model.newCache(parameters: nil)
+            func readout(_ logits: MLXArray) -> MLXArray {
+                switch mode {
+                case .glm: logits.asType(.float32)
+                case .vlmGenerateStep: (logits - logSumExp(logits, axis: -1, keepDims: true)).asType(.float32)
+                }
+            }
             Stream().synchronize()
             Memory.peakMemory = 0
 
-            // Prefill exactly as the reference lane: full chunks, last chunk
-            // included, logits of the final prompt position.
+            // Prefill exactly as the reference lane (see `Mode`), logits of the
+            // final prompt position.
             let prefillStarted = Date()
             var lastLogits: MLXArray?
             var start = 0
             while start < promptTokens.count {
-                let end = min(start + stepSize, promptTokens.count)
+                let remaining = promptTokens.count - start
+                let length = mode == .vlmGenerateStep && remaining > 1
+                    ? min(stepSize, remaining - 1) : min(stepSize, remaining)
+                let end = start + length
                 let chunk = MLXArray(promptTokens[start ..< end].map(Int32.init)).reshaped([1, end - start])
-                let logits = model(chunk, cache: cache)[0, -1, 0...].asType(.float32)
+                let logits = readout(model(chunk, cache: cache)[0, -1, 0...])
                 eval(logits)
+                if mode == .vlmGenerateStep { eval(cache) }
                 lastLogits = logits
                 start = end
             }
@@ -183,7 +222,7 @@ struct GLMParityCommand: AsyncParsableCommand {
                 var nextToken: MLXArray?
                 var nextGathered: MLXArray?
                 if step + 1 < decodeSteps {
-                    let logits = model(pendingToken.reshaped([1, 1]), cache: cache)[0, -1, 0...].asType(.float32)
+                    let logits = readout(model(pendingToken.reshaped([1, 1]), cache: cache)[0, -1, 0...])
                     let token = argMax(logits, axis: -1)
                     nextToken = token
                     nextGathered = gathered(logits, step: step + 1)
@@ -217,7 +256,7 @@ struct GLMParityCommand: AsyncParsableCommand {
                 var forcedLogits: [[Float]] = gathered(prefillLogits, step: 0).map { [$0.asArray(Float.self)] } ?? []
                 for step in 1 ..< decodeSteps {
                     let fed = MLXArray([Int32(reference.greedy[step - 1])]).reshaped([1, 1])
-                    let logits = model(fed, cache: forcedCache)[0, -1, 0...].asType(.float32)
+                    let logits = readout(model(fed, cache: forcedCache)[0, -1, 0...])
                     let top = argMax(logits, axis: -1)
                     if let values = gathered(logits, step: step) {
                         eval(top, values)
@@ -257,23 +296,23 @@ struct GLMParityCommand: AsyncParsableCommand {
 
     /// One stderr line with the current MLX and process memory, so a run that
     /// is killed shows the last phase it reached.
-    private static func progress(_ message: String) {
+    private static func progress(_ name: String, _ message: String) {
         let gb = { (bytes: Int) in String(format: "%.1f", Double(bytes) / 1e9) }
         let footprint = msbLifetimePeakPhysFootprintMB(pid: getpid()).map { String(format: "%.1f", Double($0) * 1_048_576 / 1e9) } ?? "n/a"
-        let line = "glm-parity: \(message) mlx_active_gb=\(gb(Memory.activeMemory)) mlx_peak_gb=\(gb(Memory.peakMemory))"
+        let line = "\(name): \(message) mlx_active_gb=\(gb(Memory.activeMemory)) mlx_peak_gb=\(gb(Memory.peakMemory))"
             + " mlx_cache_gb=\(gb(Memory.cacheMemory))"
             + " peak_footprint_gb=\(footprint)\n"
         FileHandle.standardError.write(Data(line.utf8))
     }
 
-    private static func summaryLine(source: String, _ measured: GLMParityMeasurement) -> String {
+    private static func summaryLine(_ name: String, source: String, _ measured: GLMParityMeasurement) -> String {
         let free = measured.freeRunning
         let divergence = free.firstDivergence.map { String($0) } ?? "none"
         let logitDiff = free.maxAbsLogitDiff.map { String(format: "%.4f", $0) } ?? "n/a"
         let prefill = String(format: "%.1f", measured.prefillTokensPerSecond)
         let decode = String(format: "%.2f", measured.decodeTokensPerSecond)
         let peak = String(format: "%.1f", measured.peakMemoryGB)
-        var line = "glm-parity: oracle=\(source) prompt=\(measured.promptTokens)"
+        var line = "\(name): oracle=\(source) prompt=\(measured.promptTokens)"
         line += " first_divergence=\(divergence) top1_first16=\(free.top1Agreement)/\(free.top1Compared)"
         line += " max_abs_logit_diff=\(logitDiff) prefill_tps=\(prefill) decode_tps=\(decode) peak_gb=\(peak)\n"
         return line
@@ -281,6 +320,50 @@ struct GLMParityCommand: AsyncParsableCommand {
 
     private static func sha256Hex(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+/// `dsv4-parity` — lab-only greedy parity of DeepSeek V4 against the
+/// `dsv4-reference` oracles (#2111, slice 4). The `glm-parity` harness with
+/// the reference lane's mlx-vlm `generate_step` chunking and log-softmax
+/// comparison (`GLMParityCommand.Mode.vlmGenerateStep`). The oracle JSON
+/// comes from `scripts/lab/cb-studio/glm53_oracle_json.py`, which maps the
+/// `.npz` `top_logprob` array to `top_logit`.
+struct DSV4ParityCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "dsv4-parity",
+        abstract: "DeepSeek V4 greedy-decode parity against the dsv4-reference oracles (lab only).",
+        shouldDisplay: false
+    )
+
+    @Option(name: .customLong("model-dir"), help: "Local model directory.")
+    var modelDir: String
+
+    @Option(help: "Oracle JSON (glm53_oracle_json.py of oracle_<N>.npz). Repeat to run several contexts on one load.")
+    var oracle: [String]
+
+    @Option(help: "Greedy tokens to decode and compare (at most the oracle's). Default 256.")
+    var steps: Int = 256
+
+    @Option(
+        name: .customLong("prefill-step-size"),
+        help: "Prompt chunk size. Default 2048, the dsv4-reference lane's prefill_step_size."
+    )
+    var prefillStepSize: Int = 2048
+
+    @Option(
+        name: .customLong("mlx-cache-limit-mb"),
+        help: "MLX buffer-cache bound, as serve's mlx_cache_limit_mb. Default 4096."
+    )
+    var mlxCacheLimitMB: Int = 4096
+
+    @Option(help: "Full output path for the JSON result. Default: stdout only.")
+    var output: String?
+
+    func run() async throws {
+        try await GLMParityCommand.runParity(
+            modelDir: modelDir, oracle: oracle, steps: steps, prefillStepSize: prefillStepSize,
+            mlxCacheLimitMB: mlxCacheLimitMB, output: output, mode: .vlmGenerateStep)
     }
 }
 

@@ -223,6 +223,8 @@ class BuyerUXConformanceTests(unittest.TestCase):
         self.assertTrue(bux.advertised_capabilities("mlx-community/Meta-Llama-3.1-8B-Instruct-4bit")["tools"])
         self.assertEqual(bux.advertised_capabilities("mlx-community/Qwen3.6-35B-A3B-4bit")["tool_choice"], ["auto", "none", "required", "named"])
         self.assertTrue(bux.advertised_capabilities("openai/gpt-oss-20b")["reasoning"])
+        deepseek = bux.advertised_capabilities("deepseek/deepseek-v4-flash")
+        self.assertEqual((deepseek["tools"], deepseek["tool_choice"], deepseek["reasoning"]), (True, ["auto", "none"], True))
 
 
 if __name__ == "__main__":

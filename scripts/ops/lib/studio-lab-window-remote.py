@@ -35,7 +35,9 @@ LIVE_HASH_KEYS = (
     "watchdog_plist_sha256", "compatibility_set_sha256",
 )
 HASH_KEYS = LIVE_HASH_KEYS + ("probe_sha256", "lab_script_sha256")
-JOB_KINDS = ("profiler-only", "qualification", "qwen-qualification", "qwen-journey", "glm-prefill")
+JOB_KINDS = (
+    "profiler-only", "qualification", "qwen-qualification", "qwen-journey", "glm-prefill", "dsv4-reference",
+)
 ARTIFACT_KEYS = (
     "diagnostic_cli", "glmbench", "diagnostic_metallib", "glmbench_metallib",
     "fixture_config", "fixture_index",
@@ -43,6 +45,18 @@ ARTIFACT_KEYS = (
 QWEN_ARTIFACT_KEYS = (
     "diagnostic_cli", "diagnostic_metallib", "fixture_config", "fixture_index",
 )
+DSV4_ARTIFACT_KEYS = (
+    "reference_python", "reference_script", "fixture_config", "fixture_index",
+)
+EXECUTABLE_ARTIFACT_KEYS = {"diagnostic_cli", "glmbench", "reference_python"}
+
+
+def job_artifact_keys(job) -> tuple[str, ...]:
+    if job is not None and job["kind"] == "dsv4-reference":
+        return DSV4_ARTIFACT_KEYS
+    if job is not None and job["kind"] in ("qwen-qualification", "qwen-journey", "glm-prefill"):
+        return QWEN_ARTIFACT_KEYS
+    return ARTIFACT_KEYS
 SNAPSHOT_KEYS = (
     "provider_id_sha256", "coordinator_origin", "compatibility_set_id",
     "binary_version", "model",
@@ -239,7 +253,7 @@ def load_manifest(path: Path) -> tuple[dict, str]:
         value.get("lab_timeout_s"), "lab_timeout_s",
         43200 if job and job["kind"] in ("qualification", "qwen-qualification") else (
             21600 if job and job["kind"] == "glm-prefill" else (
-                7200 if job and job["kind"] == "qwen-journey" else 3600
+                7200 if job and job["kind"] in ("qwen-journey", "dsv4-reference") else 3600
             )
         ),
     )
@@ -279,11 +293,7 @@ def load_manifest(path: Path) -> tuple[dict, str]:
     ):
         raise Refusal("manifest baseline is not buyer-serving")
     artifacts = value.get("artifacts")
-    artifact_keys = (
-        QWEN_ARTIFACT_KEYS
-        if job is not None and job["kind"] in ("qwen-qualification", "qwen-journey", "glm-prefill")
-        else ARTIFACT_KEYS
-    )
+    artifact_keys = job_artifact_keys(job)
     if not isinstance(artifacts, dict) or set(artifacts) != set(artifact_keys):
         raise Refusal("manifest artifact set is invalid")
     source = Path(value["lab_source_dir"])
@@ -294,6 +304,8 @@ def load_manifest(path: Path) -> tuple[dict, str]:
         "glmbench_metallib": source / "scripts/lab/cb-studio/glm53-bench/.build/release/mlx.metallib",
         "fixture_config": source / ".lab-window/fixture/target/config.json",
         "fixture_index": source / ".lab-window/fixture/target/model.safetensors.index.json",
+        "reference_python": source / ".lab-window/dsv4-venv/bin/python3",
+        "reference_script": source / "scripts/lab/dsv4/dsv4_reference_bench.py",
     }
     for key in artifact_keys:
         item = artifacts[key]
@@ -371,14 +383,9 @@ def validate_lab_artifacts(manifest: dict) -> None:
     if file_sha(Path(manifest["lab_script_path"])) != manifest["baseline"]["lab_script_sha256"]:
         raise Refusal("guarded diagnostic artifact drifted: lab_script")
     job = manifest.get("job")
-    artifact_keys = (
-        QWEN_ARTIFACT_KEYS
-        if job is not None and job["kind"] in ("qwen-qualification", "qwen-journey", "glm-prefill")
-        else ARTIFACT_KEYS
-    )
-    for key in artifact_keys:
+    for key in job_artifact_keys(job):
         item = manifest["artifacts"][key]
-        if artifact_sha(Path(item["path"]), executable=key in {"diagnostic_cli", "glmbench"}) != item["sha256"]:
+        if artifact_sha(Path(item["path"]), executable=key in EXECUTABLE_ARTIFACT_KEYS) != item["sha256"]:
             raise Refusal(f"guarded diagnostic artifact drifted: {key}")
     if job is not None:
         helper = Path(manifest["job_helper_path"])

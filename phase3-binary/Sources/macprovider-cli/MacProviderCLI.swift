@@ -54,11 +54,11 @@ struct MacProviderCLI: AsyncParsableCommand {
         #endif
     }
 
-    /// Lab-only native-MTP and GLM parity harnesses exist only in DEBUG or explicit
+    /// Lab-only native-MTP and GLM/DeepSeek V4 parity harnesses exist only in DEBUG or explicit
     /// MACPROVIDER_LAB_HARNESS builds; a plain release binary registers none.
     private static func labSubcommands() -> [ParsableCommand.Type] {
         #if DEBUG || MACPROVIDER_LAB_HARNESS
-        return [NativeMTPHardwareE2ECommand.self, NativeMTPBenchCommand.self, NativeMTPJourneyE2ECommand.self, NativeMTPRequestShapeReplayCommand.self, GLMParityCommand.self, ShardBenchCommand.self]
+        return [NativeMTPHardwareE2ECommand.self, NativeMTPBenchCommand.self, NativeMTPJourneyE2ECommand.self, NativeMTPRequestShapeReplayCommand.self, GLMParityCommand.self, ShardBenchCommand.self, DSV4ParityCommand.self]
         #else
         return []
         #endif

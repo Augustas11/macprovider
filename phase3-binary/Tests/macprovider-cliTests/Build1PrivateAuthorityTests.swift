@@ -40,6 +40,11 @@ final class Build1PrivateAuthorityTests: XCTestCase {
         var json = AutotuneStaticInputs.bakedCandidateCatalogJSON
             .replacingOccurrences(of: catalog.version, with: "published-2026-10-01-artifact-feed-activation-v1")
             .replacingOccurrences(of: ISO8601DateFormatter.autotuneInternet.string(from: catalog.generatedAt), with: "2026-10-01T04:20:42Z")
+        // The first row (DeepSeek-V4-Flash, listed after the stamp).
+        if let start = json.range(of: "\"deepseek/deepseek-v4-flash\":"),
+           let next = json.range(of: "\"google-gemma-4-26b-a4b-it\":", range: start.upperBound..<json.endIndex) {
+            json.removeSubrange(start.lowerBound..<next.lowerBound)
+        }
         if let start = json.range(of: "\"mlx-community/qwen2-vl-2b-instruct-4bit\":"),
            let next = json.range(of: "\"nvidia/nemotron-3-nano-30b-a3b\":", range: start.upperBound..<json.endIndex) {
             json.removeSubrange(start.lowerBound..<next.lowerBound)

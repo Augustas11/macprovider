@@ -676,6 +676,7 @@ private final class NativeMTPBenchRunner {
         guard ordinary.requests.count == native.requests.count else { return true }
         for (lhs, rhs) in zip(ordinary.requests, native.requests) {
             if lhs.completion.content != rhs.completion.content { return true }
+            if lhs.completion.reasoningContent != rhs.completion.reasoningContent { return true }
             if lhs.completion.completionTokens != rhs.completion.completionTokens { return true }
         }
         return false
@@ -749,9 +750,7 @@ private final class NativeMTPBenchRunner {
         let completion: CompletionResult
         do {
             completion = try await runtime.stream(request, with: handle) { chunk in
-                if case .content(let text) = chunk, !text.isEmpty {
-                    chunks.append(Date())
-                }
+                chunks.observe(chunk)
             }
         } catch {
             await runtime.unregisterInFlight(handle.registrationID)
@@ -759,15 +758,14 @@ private final class NativeMTPBenchRunner {
         }
         await runtime.unregisterInFlight(handle.registrationID)
         let end = Date()
-        let chunkTimes = chunks.snapshot()
-        let gaps = zip(chunkTimes.dropFirst(), chunkTimes).map { $0.timeIntervalSince($1) }
+        let timing = chunks.timing(since: start)
         return NativeMTPBenchRequestResult(
             requestID: requestID,
             startedAt: start,
             completion: completion,
             wallSeconds: end.timeIntervalSince(start),
-            ttftSeconds: chunkTimes.first?.timeIntervalSince(start),
-            interTokenGaps: gaps
+            ttftSeconds: timing.ttftSeconds,
+            interTokenGaps: timing.interTokenGaps
         )
     }
 
@@ -901,8 +899,17 @@ private struct NativeMTPBenchRequestResult: Sendable {
     let ttftSeconds: TimeInterval?
     let interTokenGaps: [TimeInterval]
 
+    /// SPEC-048 parity covers every generated token, so a SPEC-018 §3.12
+    /// reasoning split is hashed too: reasoning, a NUL, then content. Without
+    /// reasoning this stays the plain content hash.
     var contentSHA256: String {
-        SHA256.hash(data: Data(completion.content.utf8)).map { String(format: "%02x", $0) }.joined()
+        var data = Data()
+        if let reasoning = completion.reasoningContent, !reasoning.isEmpty {
+            data.append(contentsOf: reasoning.utf8)
+            data.append(0)
+        }
+        data.append(contentsOf: completion.content.utf8)
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 }
 
@@ -1090,9 +1097,20 @@ struct NativeMTPStatusDelta {
     }
 }
 
-private final class NativeMTPChunkTimeRecorder: @unchecked Sendable {
+final class NativeMTPChunkTimeRecorder: @unchecked Sendable {
     private let lock = NSLock()
     private var values: [Date] = []
+
+    /// SPEC-048-R015 TTFT, inter-chunk gaps and decode throughput are timed on
+    /// generated tokens, so SPEC-018 §3.12 reasoning chunks count like content.
+    func observe(_ chunk: StreamChunk, at time: Date = Date()) {
+        switch chunk {
+        case .content(let text), .reasoning(let text):
+            if !text.isEmpty { append(time) }
+        case .toolCallDelta:
+            break
+        }
+    }
 
     func append(_ value: Date) {
         lock.lock()
@@ -1104,6 +1122,11 @@ private final class NativeMTPChunkTimeRecorder: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return values
+    }
+
+    func timing(since start: Date) -> (ttftSeconds: TimeInterval?, interTokenGaps: [TimeInterval]) {
+        let times = snapshot()
+        return (times.first?.timeIntervalSince(start), zip(times.dropFirst(), times).map { $0.timeIntervalSince($1) })
     }
 }
 

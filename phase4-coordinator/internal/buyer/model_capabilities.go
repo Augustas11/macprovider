@@ -89,10 +89,11 @@ func providerServesToolGrammars(p pool.Provider) bool {
 }
 
 // reasoningFamily reports families whose chat template always reasons before
-// answering (GLM-5 opens `<think>`; gpt-oss Harmony has an analysis channel).
+// answering (GLM-5 opens `<think>`; gpt-oss Harmony has an analysis channel;
+// the DeepSeek-V4 encoder opens `<think>` unless reasoning_effort is none).
 func reasoningFamily(model string) bool {
 	id := strings.ToLower(model)
-	return strings.Contains(id, "glm-5") || strings.Contains(id, "gpt-oss")
+	return strings.Contains(id, "glm-5") || strings.Contains(id, "gpt-oss") || strings.Contains(id, "deepseek-v4")
 }
 
 func mergeModelCapabilities(current *modelCapabilities, p pool.Provider, vision bool) *modelCapabilities {

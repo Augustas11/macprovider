@@ -484,7 +484,8 @@ func openRouterToolFamilyModel(modelID string) bool {
 		return false
 	}
 	for _, family := range []string{"gpt-oss", "glm-4.5", "glm-4.6", "glm-4.7", "glm-5", "llama-3.1", "llama-3.2", "llama-3.3",
-		"llama3.1", "llama3.2", "llama3.3", "gemma-4", "gemma4", "nemotron-3", "nemotron3", "qwen2.5", "qwen3"} {
+		"llama3.1", "llama3.2", "llama3.3", "gemma-4", "gemma4", "nemotron-3", "nemotron3", "qwen2.5", "qwen3",
+		"deepseek-v4", "deepseek_v4"} {
 		if strings.Contains(id, family) {
 			return true
 		}

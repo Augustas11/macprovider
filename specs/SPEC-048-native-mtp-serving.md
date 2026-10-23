@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.51
+**Version:** 0.1.52
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.51",
+  "version": "0.1.52",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -423,7 +423,7 @@ rejects the whole sidecar. R014 item 10 makes this a release gate.
 
 The observer MUST inspect every `.safetensors` file that the R003-authorized
 mlx-swift-lm loader can consume. At the R003 mlx-swift-lm revision
-(`87dc5159…`; `safetensorWeightURLs` is unchanged from `3.32.3-macprovider.6`)
+(`baec1724…`; `safetensorWeightURLs` is unchanged from `3.32.3-macprovider.6`)
 the loader takes the files named by
 `model.safetensors.index.json`, which may sit in subdirectories, else the
 top-level conventional names, plus files the model declares as additional
@@ -493,14 +493,18 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.10.1` | `87dc5159c87d73f4d7abd524fbdd17760cf56285` | fork `3.32.3-macprovider.10` (`b4077dcb28336b388f3d09be2a091c12f8e179aa`) on `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.10.3` | `baec172471889593f60c70060eefcb624772fee5` | fork `3.32.3-macprovider.10.1` (`87dc5159c87d73f4d7abd524fbdd17760cf56285`) on fork `3.32.3-macprovider.10` (`b4077dcb28336b388f3d09be2a091c12f8e179aa`) on `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.9` | `29d3b93375cc56cd2649b40e4310a8bc445e9874` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.4` | `2f512e3997349c8648f5d7c5113eb2c825aa242d` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 
-The mlx-swift-lm row is the epic #2029 campaign's immutable fork tag
-`3.32.3-macprovider.10.1` (annotated tag object `6a9ba2b9…`, commit
-`87dc5159…`, branch `glm53/tuple-0324`), and `phase3-binary/Package.resolved`
-resolves exactly that revision. A production build MUST NOT resolve an
+The mlx-swift-lm row is the immutable fork tag `3.32.3-macprovider.10.3`
+(annotated tag object `27640b33…`, commit `baec1724…`, branch
+`dsv4/2111-port`): the epic #2029 campaign tag `3.32.3-macprovider.10.1`
+(annotated tag object `6a9ba2b9…`, commit `87dc5159…`, branch
+`glm53/tuple-0324`) plus the campaign #2111 DeepSeek-V4 commits (0.1.52), and
+`phase3-binary/Package.resolved` resolves exactly that revision. The tag name
+`3.32.3-macprovider.10.2` is an unrelated, unauthorized GLM candidate tag and
+is not part of this tuple. A production build MUST NOT resolve an
 untagged mlx-swift-lm revision, and a revision differing from this row is
 outside the authorized tuple; `scripts/check-upstream-throughput-blockers.sh`
 verifies that the row's tag resolves to the row's revision on the fork.
@@ -634,7 +638,9 @@ Review record for the #2028 tuple (2026-10-16; mlx-swift-lm
 `3.32.3-macprovider.9` / mlx-swift `0.32.3-macprovider.8` / MLX core
 `v0.32.2-macprovider.5`): the stream-propagation fix with a three-lane freeze
 audit at 0 Critical, 0 High, 0 Medium (`audits/2026-10-16-2028-gptoss-decode/`).
-The campaign mlx-swift-lm tag `3.32.3-macprovider.10.1` (`87dc5159…`) sits on
+The campaign mlx-swift-lm tag `3.32.3-macprovider.10.3` (`baec1724…`) is
+`3.32.3-macprovider.10.1` (`87dc5159…`) plus the DeepSeek-V4 commits described
+in the 0.1.52 changelog entry; `3.32.3-macprovider.10.1` sits on
 `3.32.3-macprovider.10` (`b4077dcb…`): that tuple's `dbe8bcb3…`, the MLX
 core v0.32.4 pin (`da234b2`), and the upstream #622 fix (exact prefix rewinds
 in `RotatingKVCache`, `KVCache.maxTrimCount` gating each layer's rewind). Above
@@ -661,7 +667,7 @@ eligibility restricted to exact stock types, tests, and the manifest tools
 version), so R015 was not rerun. The freeze audit and its fixes are in
 `audits/2026-10-10-mlx-swift-lm-332/`.
 
-Review record for this tuple (mlx-swift-lm `3.32.3-macprovider.10.1`):
+Review record for this tuple (mlx-swift-lm `3.32.3-macprovider.10.3`):
 **PENDING** (epic #2029). Two items remain: the
 `JOURNEY-NATIVE-MTP-SERVING` run on the final tagged tuple and the GLM R015
 record. The record then names the per-rebase acceptance gate results on the
@@ -1801,7 +1807,7 @@ the journey must include its independent and combined evidence.
 | `native-mtp-serving` | `DECISION_REQUIRED` | `@Augustas11` | `#1770` | Authority acceptance, release-candidate review, and signed real-hardware journey evidence for the first production tuple. |
 | First Qwen-family MTP artifact | `UNKNOWN` | `@Augustas11` | `#1770` | Legally/provenance-clean immutable model, tokenizer, MTP manifest, and exact hashes. |
 | MLX dependency tuple | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1906` | The operator's permanent fork model (MTP-3) replaces the upstream-release requirement. MTP-3 names the exact three-fork tuple; each rebase passes the runbook's per-rebase acceptance gate and a SPEC revision. |
-| GLM-5.3-Flash `glm5_next_mtp_v1` tuple | `DECISION_REQUIRED` | `@Augustas11` | `#2029` | Pending: the `JOURNEY-NATIVE-MTP-SERVING` run on the final tagged tuple (mlx-swift-lm `3.32.3-macprovider.10.1`) and the GLM R015 record, which complete the R003 review record. Implemented in the campaign branch: the observer, sidecar parsing, v2 projection reader, SPEC-023 v0.22.27 widths, the fork's MTP-1 drafter and packed verification, and the provider drafter load path, admission gate and paged packed verification. |
+| GLM-5.3-Flash `glm5_next_mtp_v1` tuple | `DECISION_REQUIRED` | `@Augustas11` | `#2029` | Pending: the `JOURNEY-NATIVE-MTP-SERVING` run on the final tagged tuple (mlx-swift-lm `3.32.3-macprovider.10.3`) and the GLM R015 record, which complete the R003 review record. Implemented in the campaign branch: the observer, sidecar parsing, v2 projection reader, SPEC-023 v0.22.27 widths, the fork's MTP-1 drafter and packed verification, and the provider drafter load path, admission gate and paged packed verification. |
 | First MLX-native MXFP8 artifact | `UNKNOWN` | `@Augustas11` | `#1770` | SPEC-023/SPEC-010 format, fit, quality, license, provenance, and hardware evidence. |
 | Batched-verify numerical parity | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1770` | The qmv-to-qmm switch at 12 packed verify tokens cannot occur for the first tuple: `max_native_active_rows` is 1 and depth is 1, so a packed verify is at most 2 tokens, and rows above the bound ride the ordinary forward at depth zero. A tuple whose bound times `proposal_depth + 1` reaches 12 must decide between a bounded drift allowance and kernel-matched verification before it can be signed. |
 | Depth-1 throughput value | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1770` | The 2026-10-06 quiet R015 (policy `e24cb7bc…`, amended 0.1.25 gates) passed every cell for the A3B Studio tuple: one-slot decode ratio 1.19-1.28 with corrected lower bounds +18% to +26%, gated s2/s8 cells non-inferior. The value is one-slot only; the R007 bound of 1 keeps native off above it. |
@@ -1840,6 +1846,24 @@ the text-only path without image inputs; that does not admit multimodal buyer
 requests.
 
 ## 9. Changelog and history
+
+- **0.1.52 (2026-10-23)** — R003: the mlx-swift-lm row moves to the
+  immutable fork tag `3.32.3-macprovider.10.3` (`baec1724…`, branch
+  `dsv4/2111-port`, Related: #2111), two commits on `3.32.3-macprovider.10.1`
+  (`87dc5159…`). The diff adds `DeepseekV4.swift` and
+  `DeepseekV4PoolCache.swift`, registers `deepseek_v4` in `LLMModelFactory`
+  (one line), and adds the tiny DeepSeek-V4 test fixture and its test-target
+  resource in `Package.swift`. `GLM5Next.swift` is a pure refactor with no
+  numeric change: `makeLimitedSwiGLU` is no longer `private`, and
+  `GLM5NextHyperConnection(config)` becomes a convenience init over a
+  memberwise init with identical values. No other existing model, cache,
+  iterator or loader line changes. The decode-path digest already covers
+  this revision (`565617716a5ce9a1…`); the signed native-MTP admission
+  entries keep their 0.1.51 bindings
+  until they are rebound after requalification, and the issue #2081
+  disposition keeps naming the revision it was reviewed on. The tag name
+  `3.32.3-macprovider.10.2` belongs to an unrelated GLM candidate and is not
+  authorized.
 
 - **0.1.51 (2026-10-22)** — R013/R014: admission binds the decode path, not
   the CLI binary. Entries may carry `decode_path_digest`, a SHA-256 over the

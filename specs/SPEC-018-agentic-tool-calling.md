@@ -1,6 +1,6 @@
 # SPEC-018 — Agentic tool calling (provider-side response synthesis)
 
-**Version:** 0.3.3 (2026-10-23, serial stop on a complete bare Qwen call; `ordinary-parameters-v1` schema profile for guaranteed modes; #2107)
+**Version:** 0.3.4 (2026-10-23, DeepSeek-V4 DSML grammar and prompt encoder; #2111)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.5.5, SPEC-006 v0.9, SPEC-008 (Pillar A model-hash trust layer — referenced by §10a), SPEC-011 v0.5 (warm-swap heartbeat `model_hash` — referenced by §10a), SPEC-015 v0.4 (receipts canonical output binding — see AC-17 and §N.5)
 **Status:** **LOCKED** at v0.2.10 by the streaming cleanup-rewrite byte-domain clarification. Previously LOCKED at v0.2.9 by the serial-turn `parallel_tool_calls` amendment (omitted/`false` stop after the first complete valid tool). Previously LOCKED at v0.2.8 by the #1594 OpenRouter-aligned AC-53 amendment (no independent messages[] count cap). Previously LOCKED at v0.2.7 by the Qwen3-Coder function-XML tool-call grammar amendment (documents the `<function=…><parameter=…>` XML body that Qwen3-Coder emits as a Qwen-row §3.1 body-grammar alternative, with OpenAI/MCP name charset; pending IMPL/conformance already landed on branch `fix/qwen3coder-toolcall-parse`); previously LOCKED at v0.2.6 by #784 C2b admission-timeout reconciliation — v0.2.4 spec PR #202 and IMPL PR #209 both landed (multi-turn acceptance, token-incremental streaming, `tool_call_id` validation, 1 MiB/2 MiB byte caps). v0.2.5 adds gpt-oss/OpenAI Harmony response parsing as a pending implementation/conformance gap. codex 4-lane r4 0/0/0; Claude blind-spot r2 0/0/0. SPEC-019 already depends on this as "LOCKED". The former "LOCK CANDIDATE pending PR" line was never flipped after merge. (Resolved gap, 2026-07-14, runbook item 15: AC-45's `X-MacProvider-Streaming-Mode` header — set by the coordinator on streaming `200` responses — was stripped by the public gateway's blanket `X-MacProvider-*` filter, making the "header absent" fail condition live on `api.malibu.tech`. Fixed by adding the header to the SPEC-006 v0.9.9 § 5.4 response-pass-through allowlist and un-stripping it at the gateway, validated against AC-45's closed enum. Chosen over scoping AC-45 to the coordinator surface because buyers hit the gateway, so scoping would have left AC-45's buyer-visible promise unmet. AC-45's normative text is unchanged; this is a documentation reconciliation, not a lock amendment. Residual: the coordinator currently emits the diagnostic only on the streaming success path — non-streaming AC-45 emission is a separate coordinator-side completeness item, out of scope for the gateway-strip fix.)
 
@@ -17,6 +17,24 @@ SPEC-018 is the **provider-side response synthesis contract** for OpenAI-wire to
 **Money-path**: all v0.2 changes preserve v0.1.5 settlement protection (`FaultBreakerQualifying` + zero credits on malformed streams via `billing_recorder.go:176` + `formula.go:112`).
 
 ## Change log
+
+- **v0.3.4 (2026-10-23, DeepSeek-V4, Related: #2111, #2107):**
+  Lock amendment under §10c.1 (**Amendment 10**). (1) §3.1 new row `dsml`
+  (DeepSeek-V4, family fallback `deepseek-v4`): `<｜DSML｜tool_calls>` blocks
+  of `<｜DSML｜invoke name="…">` calls whose `<｜DSML｜parameter name="…"
+  string="true|false">` values are text or JSON. (2) §3.12: a DeepSeek-V4
+  artifact ships no Jinja template; the provider renders its prompts with a
+  port of the model's `encoding/encoding_dsv4.py` (`encode_messages`), which
+  leaves `<think>` open in thinking mode, so the §3.12 split applies
+  unchanged. `reasoning_effort` maps onto the encoder's three levels. The
+  v0.3.2 per-reply call set (duplicate drop under `tool_choice` `auto`, 128-call
+  bound) applies to `dsml` calls like every other grammar. The DeepSeek-V4
+  tokenizer escapes literal CR/LF in Split regexes in memory before loading;
+  exact reference token IDs are verified for all 15 provider requests and four
+  golden prompts against the pinned TensorFold tokenizer (see §3.12).
+  Freeze-audit clarification: a declared non-string DSML parameter must
+  parse strictly as its declared type under either string flag; a mismatch
+  fails closed in the final parser and streaming serial-stop observer.
 
 - **v0.3.3 (2026-10-23, Related: #2107, post-merge re-audit):** Under
   Amendment 9. §2.2 serial turn: a Qwen output that is a complete bare-call
@@ -460,6 +478,7 @@ The provider does not receive structured tool calls from the underlying MLX mode
 | `glm` | template format `glm4`; family fallback `glm-4.5`…`glm-4.7`, `glm-5` | `<tool_call>NAME<arg_key>K</arg_key><arg_value>V</arg_value>…</tool_call>`, one envelope per call; the final envelope may end at the end of output without `</tool_call>` when its pairs are complete. | `<arg_key>` keys. A value whose declared type is `string` is literal text; any other declared type must be strict JSON of that type; an undeclared value is JSON when it parses, else text. | `ToolCallParser.glmCall` |
 | `llama3` | template format `llama3`; family fallback `llama-3.1`, `llama-3.2`, `llama-3.3` | One or more JSON objects `{"name", "parameters"}` ending the output, `;`-separated, optionally after `<|python_tag|>` and before `<|eom_id|>`/`<|eot_id|>`. A JSON object without a string `name` and an object `parameters`/`arguments` is content. | `parameters` (`arguments` accepted) | `ToolCallParser.parseLlama3Calls` |
 | `gemma4` | template format `gemma4`; family fallback `gemma-4` | `<|tool_call>call:NAME{key:value,…}<tool_call|>` with strings as `<|"|>…<|"|>` and brace-form objects/arrays | keys of the brace object; strings `<|"|>`-delimited at any depth; duplicate keys, trailing text, depth over 32 or a declared-type mismatch fail closed | `GemmaToolCallBridge` (bounded dialect parser) |
+| `dsml` | family fallback `deepseek-v4` (the family has no Jinja template; §3.12) | `<｜DSML｜tool_calls>` holding one or more `<｜DSML｜invoke name="NAME">…</｜DSML｜invoke>`, each a list of `<｜DSML｜parameter name="KEY" string="true\|false">VALUE</｜DSML｜parameter>`; several blocks may follow each other; the last block may end at the end of output without its close when its invokes are complete; whitespace between markup is free. | `<｜DSML｜parameter>` names. A declared non-string type must parse strictly as that type under either string flag. Otherwise, `string="true"` values are literal text; `string="false"` values are typed as GLM values. Duplicate names, a flag other than `true`/`false`, an unclosed parameter or invoke, or a declared-type mismatch fail closed. | `ToolCallParser.parseDSMLCalls` |
 | `harmony` | template format `gpt_oss`; family fallback `gpt-oss` | OpenAI Harmony response frames parsed from generated token IDs (§3.10). | JSON object body of a declared `commentary to=functions.<name>` call. | `HarmonyResponseParser.swift` |
 
 Note: production Qwen-coding SKUs (e.g. `mlx-community/Qwen2.5-Coder-32B-Instruct-4bit`, `mlx-community/Qwen3-32B-4bit`) match the Qwen family row via `qwen2.5` or `qwen3` substring. There is no separate "coding-tuned" row in §3.1 — coding-tuned variants advertise as Qwen2.5/Qwen3 derivatives and select the same family; body-grammar disambiguation is performed by the parser per the OR rule above.
@@ -931,6 +950,26 @@ v0.3.2: when the request carries `response_format` `json_object` or
 templates with `enable_thinking` render with it `false` (as for every
 request), so the reply starts with the JSON where the template allows it.
 
+**DeepSeek-V4 (v0.3.4).** The family ships no Jinja template; the provider
+renders prompts with `DeepseekV4Encoding`, a port of the model's
+`encoding/encoding_dsv4.py` whose output is byte-identical to the reference.
+Tools ride on the first system message (an empty one is added when there is
+none). Thinking mode is the default and leaves `<think>` open;
+`reasoning_effort: none` selects chat mode (`</think>` closed in the prompt).
+`high`/`xhigh` select the encoder's `high` prompt, `max` its `max` prompt, and
+every other value its default `low`.
+
+Tokenization MUST match the reference Hugging Face tokenizer from
+`TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX@d6be051a`, including
+punctuation/newline merges. The artifact contains literal CR/LF in its Split
+regex character classes; Foundation's `String.range(.regularExpression)` path
+in swift-transformers 1.3.4 mishandles those literals. The provider escapes them
+as `\r`/`\n` in memory for template-less `deepseek_v4`/`deepseek_v41` only,
+retaining the artifact bytes, split sequence, BPE model and added tokens.
+`DeepseekV4EncodingTests` checks exact IDs for all 14 provider requests and four
+reference goldens using `scripts/tests/fixtures/dsv4-encoding/token-ids.json`.
+Other model families use their existing tokenizer path.
+
 ## 4. Streaming Wire Shape
 
 When `stream = true`, the buyer-visible response MUST use OpenAI-style SSE chat-completion chunks.
@@ -1334,6 +1373,7 @@ Amendment log:
 - Amendment 1 (v0.2.1): §10c v0.1.3-locked model-hash registry requirement → deferred to v0.3. Rationale: narrow v0.2 scope makes registry curation strategically premature. Mitigation: AC-46 model-hash observation channel + §8.4.2 final-close tightening.
 - Amendment 2 (v0.2.3): §3.9 v0.2.1-introduced minimal prompt-echo guard → DELETED. Rationale: minimal guard had three exploitable defects making it net-negative vs. no guard (whitespace bypass; scope incomplete; self-DoS via Cline reading SPEC-018.md). Residual risk: same-family echo attack remains unmitigated in v0.2. Mitigation: deferred to v0.3 full guard.
 - Amendment 3 (v0.2.8): AC-53 / §10d.1 v0.2.0-locked maximum `messages[]` length 256 → DELETED as an independent cap. Rationale: the count cap is not a model constraint and blocks legitimate coding-agent sessions (Pi/Cline 300+ messages); OpenRouter and OrcaRouter impose no message-count limit. Residual risk: large-but-under-body-cap arrays still cost validation CPU. Mitigation: AC-50 4 MiB raw-body cap (public gateway SPEC-006 default `request_body_bytes` may be stricter), AC-51/AC-52 aggregate byte caps, AC-54 tool-call count, AC-55 linear validation, and the served context window.
+- Amendment 10 (v0.3.4, #2111): §3.1 `dsml` row and §3.12 DeepSeek-V4 prompt encoding. Rationale: DeepSeek-V4 has no chat template; its calls and prompts follow `encoding_dsv4.py`. Mitigation: the encoder and parser are tested against the Python reference (golden prompts and parsed completions); undeclared names and malformed markup fail closed as in every grammar. Tokenizer parity: literal CR/LF in Split regexes are escaped in memory only for this family; all 14 provider requests and four reference goldens assert exact pinned-reference token IDs, including punctuation/newline merges.
 - Amendment 9 (v0.3.1, #2107): §3.1 Qwen bare bodies, §3.10 rules 1a/5 and AC-57 (analysis as `reasoning_content`, final-only request stops, `length` inside analysis), §3.11 ordinary `parameters` objects for guaranteed selection and catalog-alias profile identity. Rationale: each failed on a real catalog model in the #2107 conformance run (Qwen2.5-Coder bare JSON; gpt-oss 502 on a stop string and on `max_tokens` 8; Qwen3.6 400 on a schema without `additionalProperties:false`). Mitigation: bare bodies only as the whole output with declared names; hidden channels still never reach content; strict schemas keep full validation. Residual risk: a non-strict schema's arguments are checked only for required keys.
 - Amendment 5 (v0.3.0, #2107): auto mode follows the OpenAI default — omitted `parallel_tool_calls` collects every call; only explicit `false` is serial. Guaranteed modes keep the §3.11 cardinality rule. Grammar selection moves from model-ID substrings to the loaded template (§3.2), tool history to the model's own template (§3.8), and guaranteed selection to the declared capability (§3.11).
 - Amendment 4 (v0.2.9): §2.2 v0.1-locked “preserve all N recognized tool calls” → scoped to `parallel_tool_calls: true`. Omitted/`false` is serial: stop after the first complete valid tool. Rationale: agent loops (Pi) omit the field and execute one tool per turn; leftover decode after a valid tool hangs or kills the stream. Residual risk: a client wanting two tools in one assistant message must send `parallel_tool_calls: true`. Mitigation: explicit request boolean; default matches Pi.

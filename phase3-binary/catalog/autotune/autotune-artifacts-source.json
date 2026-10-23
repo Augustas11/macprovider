@@ -1,5 +1,29 @@
 {
   "models": {
+    "deepseek/deepseek-v4-flash": {
+      "artifacts": {
+        "mlx-mxfp4": {
+          "allowed_runtime_sources": [
+            "mlx_cache"
+          ],
+          "hash": "58ee40d4c0bc436695d1d8d6a6cdfdb0326ec37f25e13ec98ea1d5c0878e732c",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "min_ram_gb": 195,
+          "notes": "Native Swift MLX artifact (deepseek_v4: compressed sparse attention, hash-routed MoE, mHC). Routed experts MXFP4 g32, attention and shared experts MXFP8. min_ram_gb = 165 GB measured native peak at 32k on the real weights (1 serial slot) + 26 GB SPEC-048-R012 10% free-memory floor on 256 GB + 4 GB safety margin = 195. Snapshot-manifest hash recomputed from the HF tree API at the pinned revision (scripts/catalog-hash-sweep.py, 62 files), equal to the lab fixture identity in scripts/lab/dsv4/dsv4-reference-policy.json.",
+          "quantization": "mxfp4-experts-mxfp8-attention-g32",
+          "runtime_format": "mlx_safetensors",
+          "size_bytes": 167094772883,
+          "source_ref": {
+            "kind": "huggingface_revision",
+            "repo_id": "TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX",
+            "revision": "d6be051ae238b2021de56cf098d8f0206328754a"
+          },
+          "verification_status": "verified",
+          "verified_at": "2026-10-22"
+        }
+      },
+      "primary_artifact_id": "mlx-mxfp4"
+    },
     "google-gemma-4-26b-a4b-it": {
       "artifacts": {
         "mlx-4bit": {
