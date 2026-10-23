@@ -3,6 +3,68 @@ import MacProviderCore
 @testable import macprovider_cli
 
 final class GrammarTemplatesParserTests: XCTestCase {
+    func testEveryFamilyRequiredAndNamedRequestTemplatesParseCalls() throws {
+        let schema = JSONValue.object(["type": .string("object"), "properties": .object([
+            "city": .object(["type": .string("string"), "enum": .array([.string("Paris"), .string("Tokyo")])])
+        ]), "required": .array([.string("city")]), "additionalProperties": .bool(false)])
+        let tools: [[String: Any]] = ["f", "g"].map { name in
+            ["type": "function", "function": ["name": name, "parameters": schema.jsonObject]]
+        }
+        for family in ToolCallGrammar.allCases {
+            for named in [false, true] {
+                let choice: Any = named ? ["type": "function", "function": ["name": "f"]] : "required"
+                let body: [String: Any] = [
+                    "model": "test", "messages": [["role": "user", "content": "test"]],
+                    "max_tokens": 100, "tools": tools, "tool_choice": choice
+                ]
+                let request = try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: body))
+                let grammar = try XCTUnwrap(GrammarTemplates.grammar(for: request, traits: RequestOutputTraits(toolGrammar: family)))
+                let dfa = try grammar.compile()
+                let call = requestCall(name: "f", family: family)
+                XCTAssertTrue(dfa.accepting(state: try XCTUnwrap(dfa.transition(state: 0, bytes: Array(call.utf8)))), "\(family) named=\(named)")
+                let other = requestCall(name: "g", family: family)
+                if named {
+                    XCTAssertNil(dfa.transition(state: 0, bytes: Array(other.utf8)), family.rawValue)
+                } else {
+                    XCTAssertTrue(dfa.accepting(state: try XCTUnwrap(dfa.transition(state: 0, bytes: Array(other.utf8)))), family.rawValue)
+                }
+                let parsedCalls: [macprovider_cli.ToolCall]
+                if family == .harmony {
+                    let textByID: [Int: String] = [
+                        HarmonyResponseParser.startTokenID: "<|start|>", 1: "assistant to=functions.f",
+                        HarmonyResponseParser.channelTokenID: "<|channel|>", 2: "commentary",
+                        HarmonyResponseParser.messageTokenID: "<|message|>", 3: #"{"city":"Paris"}"#,
+                        HarmonyResponseParser.callTokenID: "<|call|>"
+                    ]
+                    let tokens = [HarmonyResponseParser.startTokenID, 1, HarmonyResponseParser.channelTokenID, 2,
+                                  HarmonyResponseParser.messageTokenID, 3, HarmonyResponseParser.callTokenID]
+                    let decode: ([Int]) -> String = { $0.map { textByID[$0] ?? "" }.joined() }
+                    XCTAssertEqual(decode(tokens), call)
+                    let parsed = HarmonyResponseParser.parse(tokenIDs: tokens, decode: decode, allowedFunctionNames: ["f", "g"])
+                    XCTAssertEqual(parsed.status, .parsed)
+                    parsedCalls = parsed.toolCalls
+                } else {
+                    parsedCalls = ToolCallParser.parseToolCalls(rawOutput: call, grammar: family, modelID: "test", allowedFunctionNames: ["f", "g"], schemas: ["f": schema, "g": schema]).toolCalls
+                }
+                XCTAssertEqual(parsedCalls.count, 1)
+                let parsedCall = try XCTUnwrap(parsedCalls.first, family.rawValue)
+                XCTAssertEqual(parsedCall.functionName, "f")
+                XCTAssertEqual(try StrictJSONParser.parse(parsedCall.arguments), .object(["city": .string("Paris")]))
+            }
+        }
+    }
+
+    private func requestCall(name: String, family: ToolCallGrammar) -> String {
+        switch family {
+        case .qwen: return "<tool_call>{\"name\":\"" + name + "\",\"arguments\":{\"city\":\"Paris\"}}</tool_call>"
+        case .llama3: return "{\"name\":\"" + name + "\",\"parameters\":{\"city\":\"Paris\"}}"
+        case .glm: return "<tool_call>" + name + "<arg_key>city</arg_key><arg_value>Paris</arg_value></tool_call>"
+        case .gemma4: return "<|tool_call>call:" + name + "{<|\"|>city<|\"|>:<|\"|>Paris<|\"|>}<tool_call|>"
+        case .harmony: return "<|start|>assistant to=functions." + name + "<|channel|>commentary<|message|>{\"city\":\"Paris\"}<|call|>"
+        case .deepseekV4: return "<｜DSML｜tool_calls><｜DSML｜invoke name=\"" + name + "\"><｜DSML｜parameter name=\"city\" string=\"true\">Paris</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>"
+        }
+    }
+
     func testHarmonyStructuredFormatsRoundTripFinalFrames() throws {
         let formats = [
             #"{"type":"json_object"}"#,
