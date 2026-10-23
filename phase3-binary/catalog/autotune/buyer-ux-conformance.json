@@ -1,4 +1,10 @@
 {
+  "owed": {
+    "deepseek/deepseek-v4-flash": {
+      "model": "TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX",
+      "release_id": "published-2026-10-23-deepseek-v4-flash-recommendable-v1"
+    }
+  },
   "records": {
     "meta-llama/llama-3.2-3b-instruct": {
       "capabilities": {
