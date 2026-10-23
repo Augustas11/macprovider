@@ -44,10 +44,10 @@ final class GrammarConstraintTests: XCTestCase {
     func testReasoningMayContinueUntilCloseButCrossingInvalidPrefixIsMasked() throws {
         try Device.withDefaultDevice(.cpu) {
             let pieces: [Int: [UInt8]] = [0: Array("thought".utf8), 1: Array("</thi".utf8),
-                2: Array("nk>o".utf8), 3: Array("k".utf8), 4: Array("nk>x".utf8), 5: []]
+                2: Array("nk>o".utf8), 3: Array("k".utf8), 4: Array("nk>x".utf8), 5: [], 6: Array("o".utf8)]
             let state = try GrammarConstraintState(grammar: .literal("ok"), tokens: pieces,
                                                    eosTokenIDs: [5], reasoningOpen: true)
-            let logits = MLXArray([Float](repeating: 0, count: 6))
+            let logits = MLXArray([Float](repeating: 0, count: 7))
             XCTAssertEqual(state.mask(logits: logits).asArray(Float.self)[0], 0)
             state.didSample(token: 0)
             state.didSample(token: 1)

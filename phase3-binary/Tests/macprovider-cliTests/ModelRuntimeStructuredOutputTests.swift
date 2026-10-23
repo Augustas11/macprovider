@@ -99,11 +99,9 @@ final class ModelRuntimeStructuredOutputTests: XCTestCase {
         XCTAssertEqual(visible.value, #"{"name":"Ada","age":"old"}"#)
     }
 
-    // SPEC-019 v0.3.0 §1a: non-strict output is returned unchanged, in both
-    // the non-streaming and streaming paths, even when it does not match the
-    // schema or is not JSON at all.
-    func testNonStrictJsonSchemaDoesNotValidateOutput() async throws {
-        for content in [#"{"name":"Ada","age":"old"}"#, "not json", ""] {
+    // Non-strict schemas remain advisory; JSON syntax is still guaranteed.
+    func testNonStrictJsonSchemaDoesNotValidateInstanceShape() async throws {
+        for content in [#"{"name":"Ada","age":"old"}"#, "[]", "null"] {
             let runtime = Self.runtimeReturning(CompletionResult(content: content, finishReason: "stop", promptTokens: 1, completionTokens: 2, settlementDisposition: .eligibleOwner))
             let result = try await runtime.complete(Self.request(responseFormat: Self.nonStrictJsonSchemaResponseFormat()))
             XCTAssertEqual(result.content, content)
@@ -118,8 +116,22 @@ final class ModelRuntimeStructuredOutputTests: XCTestCase {
             }
             XCTAssertEqual(visible.value, content)
         }
-        XCTAssertFalse(ModelRuntime.requiresStructuredValidation(try Self.request(responseFormat: Self.nonStrictJsonSchemaResponseFormat()).responseFormat))
+        XCTAssertTrue(ModelRuntime.requiresStructuredValidation(try Self.request(responseFormat: Self.nonStrictJsonSchemaResponseFormat()).responseFormat))
         XCTAssertTrue(ModelRuntime.requiresStructuredValidation(try Self.request(responseFormat: Self.jsonSchemaResponseFormat()).responseFormat))
+    }
+
+    func testNonStrictJsonSchemaRejectsMalformedJSON() async throws {
+        for content in ["not json", ""] {
+            let runtime = Self.runtimeReturning(CompletionResult(content: content, finishReason: "stop", promptTokens: 1, completionTokens: 2, settlementDisposition: .eligibleOwner))
+            await XCTAssertAsyncAPIError(
+                try await runtime.complete(Self.request(responseFormat: Self.nonStrictJsonSchemaResponseFormat())),
+                status: 502, code: "malformed_json_response", retryable: !content.isEmpty)
+            let request = try Self.request(responseFormat: Self.nonStrictJsonSchemaResponseFormat(), stream: true)
+            let handle = try await runtime.acquireRequestHandle(request)
+            await XCTAssertAsyncAPIError(
+                try await runtime.stream(request, with: handle) { _ in },
+                status: 502, code: "malformed_json_response", retryable: !content.isEmpty)
+        }
     }
 
     func testStreamingJsonSchemaPreservesKVCacheReuseTelemetry() async throws {

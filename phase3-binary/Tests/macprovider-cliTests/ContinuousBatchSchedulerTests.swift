@@ -5716,7 +5716,12 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
                 ))
             }
         }
-        try await eventually { await scheduler.metrics().waitingCount >= 2 }
+        // waitingCount includes binding checks; wait for both submissions to
+        // attach before releasing the in-flight first chunk.
+        try await eventually {
+            let metrics = await scheduler.metrics()
+            return metrics.waitingCount == 2 && metrics.attachedWaiters == 3
+        }
         await prefillGate.open()
 
         let firstResult = try await first.value
