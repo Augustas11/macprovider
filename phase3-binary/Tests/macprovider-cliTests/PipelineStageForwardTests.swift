@@ -62,10 +62,15 @@ final class PipelineStageForwardTests: XCTestCase {
 
     /// Write `config` and seeded random weights for it; return the directory and the
     /// whole model holding exactly those weights.
-    private func makeCheckpoint(_ config: [String: Any]) async throws -> (URL, any LLMModel) {
+    /// MLX loads its default metallib when a device or stream is first used, which
+    /// aborts the process on hosts without one (CI). Skip before touching MLX.
+    private func requireMetal() throws {
         guard PagedKVMetallibGate.defaultMetallibExists() else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")
         }
+    }
+
+    private func makeCheckpoint(_ config: [String: Any]) async throws -> (URL, any LLMModel) {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("pipeline-stage-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -132,20 +137,24 @@ final class PipelineStageForwardTests: XCTestCase {
     }
 
     func testLlamaTwoStageSplitMatchesWholeModel() async throws {
+        try requireMetal()
         try await assertStagesMatchWholeModel(Self.llamaConfig, splits: [0..<2, 2..<4])
     }
 
     func testLlamaThreeStageSplitWithMiddleStageMatchesWholeModel() async throws {
+        try requireMetal()
         try await assertStagesMatchWholeModel(Self.llamaConfig, splits: [0..<1, 1..<3, 3..<4])
     }
 
     func testLlamaUntiedHeadSplitMatchesWholeModel() async throws {
+        try requireMetal()
         var config = Self.llamaConfig
         config["tie_word_embeddings"] = false
         try await assertStagesMatchWholeModel(config, splits: [0..<3, 3..<4])
     }
 
     func testDeepseekV3SplitAcrossDenseAndMoELayersMatchesWholeModel() async throws {
+        try requireMetal()
         // Layer 0 is dense (first_k_dense_replace = 1); layers 1-2 are MoE. Splitting
         // at 1 renumbers the tail's MoE layers from 0, which the config rewrite covers.
         try await assertStagesMatchWholeModel(Self.deepseekConfig, splits: [0..<1, 1..<3])
@@ -216,10 +225,12 @@ final class PipelineStageForwardTests: XCTestCase {
     }
 
     func testBatchedDecodeMatchesPerRequestLlama() async throws {
+        try requireMetal()
         try await assertBatchedDecodeMatchesPerRequest(Self.llamaConfig, splits: [0..<1, 1..<3, 3..<4])
     }
 
     func testBatchedDecodeMatchesPerRequestDeepseekV3() async throws {
+        try requireMetal()
         try await assertBatchedDecodeMatchesPerRequest(Self.deepseekConfig, splits: [0..<1, 1..<3])
     }
 
@@ -284,12 +295,14 @@ final class PipelineStageForwardTests: XCTestCase {
     }
 
     func testChunkedPrefillLogitsEqualUnchunkedLlama() async throws {
+        try requireMetal()
         let prompt: [Int32] = [3, 14, 15, 92, 65, 35, 89, 79, 32, 38, 46]
         try await assertChunkedPrefillMatchesUnchunked(Self.llamaConfig, splits: [0..<1, 1..<3, 3..<4], prompt: prompt, chunk: 4)
         try await assertChunkedPrefillMatchesUnchunked(Self.llamaConfig, splits: [0..<2, 2..<4], prompt: prompt, chunk: 1)
     }
 
     func testChunkedPrefillLogitsEqualUnchunkedDeepseekV3() async throws {
+        try requireMetal()
         let prompt: [Int32] = [3, 14, 15, 92, 65, 35, 89, 79, 32]
         try await assertChunkedPrefillMatchesUnchunked(Self.deepseekConfig, splits: [0..<1, 1..<3], prompt: prompt, chunk: 4)
     }
@@ -343,6 +356,7 @@ final class PipelineStageForwardTests: XCTestCase {
     }
 
     func testTeacherForcedParityOfAnIdenticalSplitPassesWithFullAgreement() async throws {
+        try requireMetal()
         let parity = try await teacherForcedParity(Self.llamaConfig, splits: [0..<1, 1..<3, 3..<4])
         XCTAssertEqual(parity.verdict, "pass")
         XCTAssertEqual(parity.steps, 6)
@@ -357,6 +371,7 @@ final class PipelineStageForwardTests: XCTestCase {
     }
 
     func testTeacherForcedParityFailsHardAtTheStepAStageIsPerturbed() async throws {
+        try requireMetal()
         // From step 3 on, stage 0 ships a boundary activation replaced by large noise.
         let parity = try await teacherForcedParity(Self.llamaConfig, splits: [0..<2, 2..<4]) { step, stage, output in
             guard step == 3, stage == 0 else { return output }
@@ -372,6 +387,7 @@ final class PipelineStageForwardTests: XCTestCase {
     }
 
     func testStageLoadsOnlyItsOwnLayers() async throws {
+        try requireMetal()
         try await Device.withDefaultDevice(.cpu) {
             let (directory, _) = try await makeCheckpoint(Self.llamaConfig)
             let plan = try PipelineStagePlan(layers: 1..<3, totalLayers: 4)
@@ -426,9 +442,7 @@ final class PipelineStageForwardTests: XCTestCase {
     }
 
     func testActivationCodecRoundTripsBitExactly() throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
         try Device.withDefaultDevice(.cpu) {
             for dtype in [DType.bfloat16, .float16, .float32] {
                 let array = (MLXRandom.normal([1, 3, 16]) * 7).asType(dtype)
