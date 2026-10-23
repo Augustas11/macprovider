@@ -1,0 +1,34 @@
+import XCTest
+@testable import MacProviderCore
+
+final class GrammarTokenTableTests: XCTestCase {
+    func testPiecesMaySplitUTF8AndEOSRequiresAcceptance() throws {
+        let dfa = try ByteGrammar.literal("é").compile()
+        let table = try GrammarTokenTable(tokens: [0: [0xc3], 1: [0xa9], 2: [0xc3, 0xa9],
+                                                   3: [0xc3, 0xa9, 0x21], 4: []], eosTokenIDs: [4])
+        let first = try table.allowedTokens(state: 0, automaton: dfa)
+        XCTAssertEqual(Set(first.keys), [0, 2])
+        let middle = try XCTUnwrap(first[0])
+        XCTAssertEqual(Set(try table.allowedTokens(state: middle, automaton: dfa).keys), [1])
+        let end = try XCTUnwrap(first[2])
+        XCTAssertEqual(try table.allowedTokens(state: end, automaton: dfa), [4: end])
+    }
+    func testExplicitTokenizerDecoderModes() throws {
+        XCTAssertEqual(try GrammarTokenBytes.decode(piece: "ĠHiĊ", encoding: .byteLevel), Array(" Hi\n".utf8))
+        XCTAssertEqual(try GrammarTokenBytes.decode(piece: "Ã", encoding: .byteLevel), [0xc3])
+        XCTAssertEqual(try GrammarTokenBytes.decode(piece: "©", encoding: .byteLevel), [0xa9])
+        XCTAssertEqual(try GrammarTokenBytes.decode(piece: "▁hi", encoding: .sentencePiece), Array(" hi".utf8))
+        XCTAssertEqual(try GrammarTokenBytes.decode(piece: "<0xFF>", encoding: .sentencePiece), [255])
+        XCTAssertEqual(try GrammarTokenBytes.decode(piece: "▁", encoding: .raw), Array("▁".utf8))
+        XCTAssertThrowsError(try GrammarTokenBytes.decode(piece: "☃", encoding: .byteLevel))
+    }
+    func testEmptyPiecesAndBoundsRejected() throws {
+        XCTAssertThrowsError(try GrammarTokenTable(tokens: [0: []], eosTokenIDs: []))
+        XCTAssertThrowsError(try GrammarTokenTable(tokens: [-1: [1]], eosTokenIDs: []))
+        XCTAssertThrowsError(try GrammarTokenTable(tokens: [0: [1, 2]], eosTokenIDs: [], limits: .init(maxBytes: 1)))
+        let table = try GrammarTokenTable(tokens: [0: [1, 2]], eosTokenIDs: [], limits: .init(maxScanBytes: 1))
+        let dfa = try ByteGrammar.literal("x").compile()
+        XCTAssertThrowsError(try table.allowedTokens(state: 0, automaton: dfa))
+        XCTAssertThrowsError(try table.allowedTokens(state: -1, automaton: dfa))
+    }
+}
