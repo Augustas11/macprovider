@@ -88,6 +88,8 @@ CATALOG_OPENROUTER_ROWS = (
     ("z-ai/glm-4.5-air", "mlx-community/GLM-4.5-Air-4bit", "z-ai/glm-4.5-air", False),
     # Epic #2029 native glm5_next engine; priced but not in OPENROUTER_LISTED_MODEL_IDS.
     ("zai-org/glm-5.3-flash", "Jundot/GLM-5.3-Flash-oQ4e-mtp", "z-ai/glm-5.3-flash", False),
+    # Campaign #2111 native deepseek_v4 engine; priced but not in OPENROUTER_LISTED_MODEL_IDS.
+    ("deepseek/deepseek-v4-flash", "TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX", "deepseek/deepseek-v4-flash", False),
     # #2016 native image input; priced but not in OPENROUTER_LISTED_MODEL_IDS.
     ("mlx-community/qwen2-vl-2b-instruct-4bit", "mlx-community/Qwen2-VL-2B-Instruct-4bit", "qwen/qwen2-vl-2b-instruct", False),
 )

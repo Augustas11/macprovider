@@ -28,7 +28,10 @@
 #                             place under both Pearl locks, and applies it with one
 #                             SIGHUP (one restart on a runtime that reads it only at start).
 #                             Independent of the catalog release: a records-only change
-#                             needs no re-signed release
+#                             needs no re-signed release. A file with owed entries
+#                             (SPEC-023 §16.11 rule 4) is done only when /healthz
+#                             buyer_ux_conformance_records counts its owed masks too; a
+#                             runtime that ignores owed entries blocks (release the runtime)
 #   5 catalog_preflight       catalog-content-release.sh --preflight (read-only)
 #   6 catalog_activation      catalog-content-release.sh --deploy (content lane; a pricing
 #                             release runs with CATALOG_PRICING_ACK=<the verdict's
@@ -64,6 +67,11 @@
 #                             token model=<model_id>@<sha256>; it outlives later releases, and
 #                             a malformed entry blocks. Unreadable canary status blocks the
 #                             preflight and the activation like an operator pause
+#  12 buyer_ux_conformance_owed a key promoted with its buyer-UX conformance record owed
+#                             (SPEC-023 §16.11 rule 4): after its release is live, the record
+#                             is run through the gateway and committed; the step stays open
+#                             until origin/main's buyer-ux-conformance.json holds a passing
+#                             record for every owed key and step 4a has installed that file
 #
 # Env (or ~/.config/macprovider/ops.env): COORDINATOR_URL, GATEWAY_URL,
 # PEARL_SSH (+ PEARL_SSH_IDENTITY/PEARL_SSH_KNOWN_HOSTS for the repo scripts),
@@ -108,6 +116,8 @@ PEARL_BUYER_UX_CONFORMANCE_PATH="${PEARL_BUYER_UX_CONFORMANCE_PATH:-/opt/macprov
 BUC_DOWNTIME_SIGHUP="none: no coordinator restart; one SIGHUP applies the record file (and any other change already on disk in coordinator.yaml or the overlay). If the coordinator does not report the file within 60 s, coordinator.yaml and the record file are restored and SIGHUPed again; if that does not bring back the previous records (the restored file does not load), one recovery restart follows, about 5-40 seconds"
 BUC_DOWNTIME_RESTART="one coordinator restart, about 5-40 seconds (in-flight requests drain, then the coordinator starts): the running runtime reads the record file only at start, so buyer and provider traffic through the coordinator is interrupted for that time. If the restarted coordinator cannot load the file, coordinator.yaml and the record file are restored and the coordinator restarts once more"
 QWEN_NATIVE_PROFILE=qwen36-native-mtp
+DSV4_WINDOW_PROFILE=dsv4-flash-window
+DSV4_WINDOW_DOWNTIME="Studio provider: GLM-5.3-Flash buyer traffic is unavailable from the GLM->DeepSeek restart through the DeepSeek-V4-Flash load (~167 GB), the conformance run (about 10-30 minutes at one serial slot), and the restart and model load back to GLM; DeepSeek buyers are served during the window. Pearl is not restarted"
 
 qwen_journal_probe() {
   "$OPS_DIR/qwen-opencode-e2e.sh" _catalog-qwen36-journal
@@ -288,6 +298,15 @@ gather() {
         NEXT_DOWNTIME="Studio provider buyer traffic is unavailable during the bounded GLM restart and model-load window; Pearl is not restarted"
         return
       fi
+      if [ "$qwen_restore" = true ] && [ "$qwen_profile" = "$DSV4_WINDOW_PROFILE" ]; then
+        fact qwen_transaction_profile "$qwen_profile"
+        fact qwen_restore_required true
+        step dsv4_restore pending "restore exact signed GLM incumbent from the DeepSeek-V4-Flash window"
+        set_next dsv4_restore mutate "Restore GLM from the interrupted DeepSeek-V4-Flash window" \
+          "$OPS_DIR/qwen-opencode-e2e.sh _catalog-dsv4-restore"
+        NEXT_DOWNTIME="Studio provider buyer traffic is unavailable during the bounded GLM restart and model-load window; Pearl is not restarted"
+        return
+      fi
       if [ "$qwen_intent" = true ] && [ "$qwen_profile" = "$QWEN_NATIVE_PROFILE" ] &&
          [ "$qwen_status" = restored ] && [ "$qwen_restore" = false ]; then
         step qwen_restore pending "clear the restored Qwen transaction intent before releasing the lock"
@@ -327,6 +346,15 @@ gather() {
       step qwen_restore blocked "active Qwen restoration journal is unreadable"
       set_next qwen_restore blocked "Recover the Qwen3.6 restoration journal" "" \
         "the durable restoration lock prevents all ordinary catalog steps until the journal is readable"
+      return
+    elif [ -n "${QWEN_E2E_JOURNAL:-}" ]; then
+      # A configured Studio transaction journal that cannot be read may hold an
+      # interrupted window (the DeepSeek-V4-Flash window keeps no durable
+      # lock): no catalog step runs until it proves absence or restoration.
+      fact qwen_restore_required unknown
+      step qwen_restore blocked "the configured Studio transaction journal is unreadable"
+      set_next qwen_restore blocked "Read the Studio transaction journal" "scripts/ops/qwen-opencode-e2e.sh status" \
+        "QWEN_E2E_JOURNAL is configured but cannot be inspected over STUDIO_SSH; an interrupted window may still need GLM restored"
       return
     fi
   fi
@@ -732,6 +760,10 @@ for i in \$(seq 1 24); do curl -sf -m 5 \"\$COORDINATOR_URL/healthz\" && exit 0;
     next_meta gateway_proof "AGENTS.md#hard-rules--activation-evidence-and-campaign-discipline"
   fi
 
+  # SPEC-023 §16.11 rule 4 before evidence (e): the DeepSeek-V4-Flash window is
+  # also what first serves that model, and it records the (e) request.
+  gather_buyer_ux_conformance_owed "$live_rid"
+
   # Evidence (e) owed (SPEC-023-R017 5(e)): every ledger entry whose model no
   # buyer_serving_e2e record names yet. A malformed entry is unknown, not done.
   local owed_scan owed_models="" owed_bad=""
@@ -797,6 +829,72 @@ ssh \"\$STUDIO_SSH\" 'launchctl kickstart -k gui/\$(id -u)/live.malibu.provider'
   fi
 
   set_next "done" "done" "$R active and proven through the gateway" ""
+}
+
+# step_done ID: the step recorded so far in this run is done.
+step_done() { awk -F'\t' -v id="$1" '$1 == id { s = $2 } END { exit (s == "done") ? 0 : 1 }' "$OPS_STEPS"; }
+
+# gather_buyer_ux_conformance_owed LIVE_RID: step 12 (SPEC-023 §16.11 rule 4).
+# A key promoted with its record owed stays open until origin/main's record
+# file holds a passing record for it and step 4a has that file in force.
+gather_buyer_ux_conformance_owed() {
+  local live_rid="$1" scan open="" settled_keys="" waiting="" open_keys=""
+  if [ ! -s "${BUC_OWED_JSON:-}" ]; then
+    if [ -f "$REPO_ROOT/$BUC_FILE" ]; then
+      step buyer_ux_conformance_owed blocked "the committed record file is unreadable (step buyer_ux_conformance)"
+    else
+      step buyer_ux_conformance_owed "done" "no committed record file"
+    fi
+    return
+  fi
+  scan="$(python3 -I - "$BUC_OWED_JSON" "$R" "$live_rid" <<'PY'
+import json, sys
+path, committed, live = sys.argv[1:4]
+owed = json.load(open(path))["owed"]
+open_ = [e for e in owed if e["state"] != "settled"]
+# The release of an owed key is live once the coordinator serves it, or once a later
+# committed release superseded it (releases are activated in order).
+live_open = [e for e in open_ if e["release_id"] == live or e["release_id"] != committed]
+print("OPEN " + ", ".join("%s (%s, %s: %s)" % (e["catalog_key"], e["model"], e["state"], e["detail"]) for e in live_open))
+print("WAIT " + ", ".join("%s (owed after %s is live)" % (e["catalog_key"], e["release_id"]) for e in open_ if e not in live_open))
+print("KEYS " + " ".join(e["catalog_key"] for e in owed))
+print("OPENKEYS " + " ".join(e["catalog_key"] for e in live_open))
+PY
+)" || { step buyer_ux_conformance_owed blocked "cannot read the owed entries"; return; }
+  open="$(printf '%s\n' "$scan" | sed -n 's/^OPEN //p')"
+  waiting="$(printf '%s\n' "$scan" | sed -n 's/^WAIT //p')"
+  settled_keys="$(printf '%s\n' "$scan" | sed -n 's/^KEYS //p')"
+  open_keys="$(printf '%s\n' "$scan" | sed -n 's/^OPENKEYS //p')"
+  fact buyer_ux_conformance_owed "$open${waiting:+${open:+; }$waiting}"
+  if [ -n "$open" ] && [ -n "${QWEN_E2E_JOURNAL:-}" ] && [ -n "${DSV4_IMPORT_DIR:-}" ] &&
+     case " $open_keys " in *" deepseek/deepseek-v4-flash "*) true ;; *) false ;; esac; then
+    # The DeepSeek-V4-Flash record is run in a journaled Studio window.
+    step buyer_ux_conformance_owed owed "$open"
+    set_next buyer_ux_conformance_owed mutate \
+      "Serve DeepSeek-V4-Flash on the Studio, run its owed buyer-UX conformance through the gateway, and restore GLM" \
+      "$OPS_DIR/qwen-opencode-e2e.sh _catalog-dsv4-conformance"
+    next_meta buyer_ux_conformance_owed "$BUC_DOC#conformance-owed-first-promotion-1611-rule-4" "$DSV4_WINDOW_DOWNTIME"
+  elif [ -n "$open" ]; then
+    step buyer_ux_conformance_owed owed "$open"
+    set_next buyer_ux_conformance_owed manual "Run the owed buyer-UX conformance through the gateway and commit the record: $open" \
+"# SPEC-023 §16.11 rule 4: the promotion is live with its record owed; /v1/models
+# advertises the base capability set for it until a passing record lands.
+# Per owed key, while a provider serves the model through the gateway:
+python3 scripts/buyer_ux_conformance.py run --key-file \"\$BUYER_TOKEN_FILE\" \\
+  --model <served model id above> --catalog-key <catalog key above>
+python3 scripts/buyer_ux_conformance.py owed-status   # state settled
+# Commit phase3-binary/catalog/autotune/buyer-ux-conformance.json to origin/main
+# (records-only change, no re-signed release), then: catalog-activate.sh next --run
+# installs it (step buyer_ux_conformance)." \
+      "a key was promoted to recommendable with its buyer-UX conformance record owed"
+    next_meta buyer_ux_conformance_owed "$BUC_DOC#conformance-owed-first-promotion-1611-rule-4" "none: read-only requests through the gateway"
+  elif [ -n "$waiting" ]; then
+    step buyer_ux_conformance_owed pending "$waiting"
+  elif [ -n "$settled_keys" ] && ! step_done buyer_ux_conformance; then
+    step buyer_ux_conformance_owed pending "passing record(s) committed for $settled_keys; install pending (step buyer_ux_conformance)"
+  else
+    step buyer_ux_conformance_owed "done" "${settled_keys:+passing record(s) in force for $settled_keys}${settled_keys:-no buyer-UX conformance record is owed}"
+  fi
 }
 
 # provider_counters FILE -> "mtp_forwards requests_total cb_active cb_shared_forward_calls"
@@ -1326,11 +1424,14 @@ pearl_buc_layout() {
 # gather_buyer_ux_conformance: step 4a. The committed record file is the one
 # that must be in force; it does not depend on the catalog release.
 gather_buyer_ux_conformance() {
-  local sha="" live="" reloads="" loaded="" facts="$OPS_TMP_DIR/buc-facts.json"
+  local sha="" live="" reloads="" loaded="" facts="$OPS_TMP_DIR/buc-facts.json" models="" masked="" live_models=""
+  BUC_OWED_JSON="$OPS_TMP_DIR/buc-owed.json"
+  : > "$BUC_OWED_JSON"
   [ -f "$REPO_ROOT/$BUC_FILE" ] && sha="$(shasum -a 256 "$REPO_ROOT/$BUC_FILE" | awk '{print $1}')"
   if [ -s "$OPS_TMP_DIR/healthz.json" ]; then
     reloads="$(json_field "$OPS_TMP_DIR/healthz.json" 'd.get("buyer_ux_conformance_reloads") is True')"
     live="$(json_field "$OPS_TMP_DIR/healthz.json" 'd.get("buyer_ux_conformance_sha256") or ""')"
+    live_models="$(json_field "$OPS_TMP_DIR/healthz.json" 'd.get("buyer_ux_conformance_records", "")')"
   fi
   fact buyer_ux_conformance_committed_sha256 "$sha"
   fact buyer_ux_conformance_live_sha256 "$live"
@@ -1339,14 +1440,47 @@ gather_buyer_ux_conformance() {
     step buyer_ux_conformance "done" "no committed record file"
     return
   fi
+  if ! python3 -I "$REPO_ROOT/scripts/buyer_ux_conformance.py" owed-status --record "$REPO_ROOT/$BUC_FILE" \
+       > "$BUC_OWED_JSON" 2>"$BUC_OWED_JSON.err"; then
+    : > "$BUC_OWED_JSON"
+    step buyer_ux_conformance blocked "the committed record file is invalid"
+    set_next buyer_ux_conformance blocked "Fix the committed buyer-UX conformance record file" \
+      "python3 scripts/buyer_ux_conformance.py owed-status" "$(tail -n 1 "$BUC_OWED_JSON.err" | cut -c1-200)"
+    return
+  fi
+  models="$(json_field "$BUC_OWED_JSON" 'd["models"]')"
+  masked="$(json_field "$BUC_OWED_JSON" 'd["masked"]')"
+  fact buyer_ux_conformance_masked_models "$masked"
+  fact buyer_ux_conformance_live_models "$live_models"
   if [ -z "$reloads" ]; then
     step buyer_ux_conformance unknown "coordinator /healthz unreadable"
     set_next buyer_ux_conformance blocked "Install the buyer-UX conformance records" "" \
       "coordinator /healthz is unreadable (COORDINATOR_URL)"
     return
   fi
+  # SPEC-023 §16.11 rule 4: owed entries mask a promoted model to the base set.
+  # A runtime that applies them counts each masked model in
+  # buyer_ux_conformance_records; one that ignores them (every runtime that
+  # reads the file only at start does) would advertise the derived set.
+  local old_runtime="the running coordinator ignores owed conformance entries: origin/main's record file masks $masked owed model(s) to the base capability set (SPEC-023 §16.11 rule 4), and this runtime would advertise their derived capabilities. Release the coordinator runtime first"
+  if [ "$masked" != 0 ] && [ "$reloads" != true ]; then
+    step buyer_ux_conformance blocked "the running coordinator predates owed conformance entries"
+    set_next buyer_ux_conformance blocked "Release the coordinator runtime that applies owed conformance entries" \
+      "scripts/ops/pearl-runtime.sh status" "$old_runtime"
+    return
+  fi
   if [ "$reloads" = true ] && [ "$live" = "$sha" ]; then
-    step buyer_ux_conformance "done" "coordinator holds records sha256 ${sha:0:12}"
+    if [ "$masked" = 0 ] || [ "$live_models" = "$models" ]; then
+      step buyer_ux_conformance "done" "coordinator holds records sha256 ${sha:0:12}${live_models:+ ($live_models model(s) capped, $masked owed)}"
+    elif [ "$live_models" = "$((models - masked))" ]; then
+      step buyer_ux_conformance blocked "the running coordinator ignores the owed entries in force"
+      set_next buyer_ux_conformance blocked "Release the coordinator runtime that applies owed conformance entries" \
+        "scripts/ops/pearl-runtime.sh status" "$old_runtime"
+    else
+      step buyer_ux_conformance blocked "coordinator caps ${live_models:-?} model(s), the committed file $models"
+      set_next buyer_ux_conformance blocked "Read the coordinator's buyer-UX conformance state" "" \
+        "/healthz buyer_ux_conformance_records=${live_models:-?} differs from the committed file's $models capped model(s) ($masked owed)"
+    fi
     return
   fi
   if [ "$reloads" != true ]; then

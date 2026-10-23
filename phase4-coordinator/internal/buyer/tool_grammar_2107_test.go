@@ -212,6 +212,95 @@ func TestBuyerUXConformanceMasksFailedCapabilities(t *testing.T) {
 	}
 }
 
+// SPEC-023 §16.11 rule 4: a model promoted with its record owed advertises
+// the base set only (no tools, tool_choice, reasoning or response_format)
+// until a record for that model lands; then the record decides.
+func TestBuyerUXConformanceOwedAdvertisesBaseOnly(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/buyer-ux-conformance.json"
+	const dsv4 = "TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX"
+	owed := `{"schema_version":"macprovider.buyer-ux-conformance.v1","records":{},"owed":{"deepseek/deepseek-v4-flash":{"model":"` + dsv4 + `","release_id":"published-test-v1"}}}`
+	if err := os.WriteFile(path, []byte(owed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := NewServer(pool.NewRegistry(nil), zerolog.Nop(), time.Now().UTC())
+	if _, err := s.ReloadBuyerUXConformance(path); err != nil {
+		t.Fatal(err)
+	}
+	// /healthz counts the owed model among the models the file caps.
+	if _, n := s.BuyerUXConformanceStatus(); n != 1 {
+		t.Fatalf("status models=%d", n)
+	}
+	entryFor := func(model string) modelEntry {
+		p := pool.Provider{ModelID: model, BinaryVersion: toolGrammarProviderMinVersion, MaxContextTokens: 32768}
+		entry := modelEntry{ID: model, Capabilities: mergeModelCapabilities(nil, p, false)}
+		s.applyBuyerUXConformance(&entry)
+		finishModelCapabilities(&entry)
+		return entry
+	}
+	derived := modelEntry{ID: dsv4, Capabilities: mergeModelCapabilities(nil, pool.Provider{ModelID: dsv4, BinaryVersion: toolGrammarProviderMinVersion}, false)}
+	if !derived.Capabilities.Tools || !derived.Capabilities.Reasoning || !derived.Capabilities.ResponseFormat {
+		t.Fatalf("DeepSeek-V4 must derive tools, reasoning and response_format before the owed mask: %+v", derived.Capabilities)
+	}
+	// The coordinator indexes by model id case-insensitively.
+	for _, id := range []string{dsv4, strings.ToLower(dsv4)} {
+		got := entryFor(id)
+		caps := got.Capabilities
+		if caps.Tools || caps.Reasoning || caps.ResponseFormat || len(caps.ToolChoice) != 0 || caps.ContextLength != 32768 {
+			t.Fatalf("owed capabilities for %s=%+v", id, caps)
+		}
+		want := []string{"frequency_penalty", "max_tokens", "presence_penalty", "seed", "stop", "temperature", "top_p"}
+		if !reflect.DeepEqual(got.SupportedParameters, want) {
+			t.Fatalf("owed supported_parameters=%v", got.SupportedParameters)
+		}
+	}
+	// Other models keep their derived set.
+	if !entryFor("Jundot/GLM-5.3-Flash-oQ4e-mtp").Capabilities.Tools {
+		t.Fatal("an unowed model lost tools")
+	}
+	// The record lands (the owed entry may stay): the record decides.
+	landed := `{"schema_version":"macprovider.buyer-ux-conformance.v1","records":{"deepseek/deepseek-v4-flash":{"model":"` + dsv4 + `","capabilities":{"tools":true,"tool_choice":["auto","none"],"reasoning":true,"response_format":true}}},"owed":{"deepseek/deepseek-v4-flash":{"model":"` + dsv4 + `","release_id":"published-test-v1"}}}`
+	if err := os.WriteFile(path, []byte(landed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := s.ReloadBuyerUXConformance(path); err != nil || !changed {
+		t.Fatalf("record landed: changed=%v err=%v", changed, err)
+	}
+	if _, n := s.BuyerUXConformanceStatus(); n != 1 {
+		t.Fatalf("status after the record landed: models=%d", n)
+	}
+	if caps := entryFor(dsv4).Capabilities; !caps.Tools || !caps.Reasoning || !caps.ResponseFormat || !reflect.DeepEqual(caps.ToolChoice, derived.Capabilities.ToolChoice) {
+		t.Fatalf("capabilities after the record landed=%+v", caps)
+	}
+	// A record for another model under the owed key leaves the owed model masked.
+	other := `{"schema_version":"macprovider.buyer-ux-conformance.v1","records":{"deepseek/deepseek-v4-flash":{"model":"other/model","capabilities":{"tools":true,"tool_choice":["auto"],"reasoning":true,"response_format":true}}},"owed":{"deepseek/deepseek-v4-flash":{"model":"` + dsv4 + `","release_id":"published-test-v1"}}}`
+	if err := os.WriteFile(path, []byte(other), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReloadBuyerUXConformance(path); err != nil {
+		t.Fatal(err)
+	}
+	if caps := entryFor(dsv4).Capabilities; caps.Tools || caps.Reasoning {
+		t.Fatalf("a record for another model unmasked the owed model: %+v", caps)
+	}
+	// A malformed owed entry is refused and keeps the records in force.
+	for name, body := range map[string]string{
+		"owed without model": `{"schema_version":"macprovider.buyer-ux-conformance.v1","records":{},"owed":{"k":{}}}`,
+		"owed null entry":    `{"schema_version":"macprovider.buyer-ux-conformance.v1","records":{},"owed":{"k":null}}`,
+		"owed not an object": `{"schema_version":"macprovider.buyer-ux-conformance.v1","records":{},"owed":[]}`,
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.ReloadBuyerUXConformance(path); err == nil {
+			t.Fatalf("%s was accepted", name)
+		}
+		if caps := entryFor(dsv4).Capabilities; caps.Tools {
+			t.Fatalf("%s changed the records in force", name)
+		}
+	}
+}
+
 // The checked-in live records (#2107): Llama-3.2-3B failed tool_round_trip, so
 // /v1/models drops tools for it; GLM-5.3-Flash passed everything and keeps its
 // derived set.
@@ -248,6 +337,25 @@ func TestCheckedInBuyerUXConformanceRecords(t *testing.T) {
 	}
 	if !glm.Capabilities.Tools || !glm.Capabilities.Reasoning {
 		t.Fatalf("glm capabilities=%+v", glm.Capabilities)
+	}
+	// Llama-3.1-8B passed every check (record 2026-10-24, coordinator
+	// v1.8.266): the record keeps its derived set, tools included.
+	llama8 := entryFor("mlx-community/Meta-Llama-3.1-8B-Instruct-4bit", true)
+	llama8Derived := entryFor("mlx-community/Meta-Llama-3.1-8B-Instruct-4bit", false)
+	if !reflect.DeepEqual(llama8.Capabilities, llama8Derived.Capabilities) || !reflect.DeepEqual(llama8.SupportedParameters, llama8Derived.SupportedParameters) {
+		t.Fatalf("llama-3.1-8b capabilities changed: got %+v want %+v", llama8.Capabilities, llama8Derived.Capabilities)
+	}
+	if !llama8.Capabilities.Tools || !llama8.Capabilities.ResponseFormat {
+		t.Fatalf("llama-3.1-8b capabilities=%+v", llama8.Capabilities)
+	}
+	// DeepSeek-V4-Flash is promoted with its record owed (SPEC-023 §16.11
+	// rule 4): the base set only until the record lands.
+	dsv4 := entryFor("TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX", true)
+	if !entryFor("TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX", false).Capabilities.Tools {
+		t.Fatal("DeepSeek-V4 must derive tools before the owed mask")
+	}
+	if c := dsv4.Capabilities; c.Tools || c.Reasoning || c.ResponseFormat || len(c.ToolChoice) != 0 {
+		t.Fatalf("owed DeepSeek-V4 capabilities=%+v", c)
 	}
 }
 

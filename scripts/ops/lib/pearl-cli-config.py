@@ -1302,6 +1302,14 @@ def buc_validate(raw):
         choice = caps.get("tool_choice")
         if choice is not None and not (isinstance(choice, list) and all(isinstance(m, str) for m in choice)):
             raise Refused("a record's capabilities.tool_choice is not a list of strings")
+    # SPEC-023 §16.11 rule 4: owed entries mask a promoted model to the base set.
+    owed = doc.get("owed", {})
+    if not isinstance(owed, dict):
+        raise Refused("the record file's owed is not an object")
+    for entry in owed.values():
+        model = entry.get("model") if isinstance(entry, dict) else None
+        if not isinstance(model, str) or not model.strip():
+            raise Refused("an owed entry lacks its model")
     return len(records)
 
 

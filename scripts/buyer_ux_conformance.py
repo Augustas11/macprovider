@@ -5,9 +5,10 @@ One entry point checks a served model through the Malibu gateway the way
 agentic coding clients use it, records the result per catalog key, and gates
 promotion to `recommendable`:
 
-  run    probe a model through the gateway and write its record
-  check  verify a key's record passes for every capability it advertises
-  show   print a record
+  run          probe a model through the gateway and write its record
+  check        verify a key's record passes for every capability it advertises
+  show         print a record
+  owed-status  list the keys promoted with their record owed (SPEC-023 §16.11)
 
 Each check is a pure function of recorded HTTP responses, so the suite is
 unit-tested against recorded responses (scripts/tests/test_buyer_ux_conformance.py)
@@ -401,9 +402,62 @@ def load_records(path: pathlib.Path = RECORD_PATH) -> dict:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict) or value.get("schema_version") != SCHEMA or not isinstance(value.get("records"), dict):
         raise ConformanceError(f"{path.name}: schema_version must be {SCHEMA} with a records object")
+    unknown = sorted(set(value) - {"schema_version", "records", "owed"})
+    if unknown:
+        raise ConformanceError(f"{path.name}: unknown top-level key(s) {unknown}")
     for key, record in value["records"].items():
         validate_record(record, f"{path.name} records[{key!r}]")
+    owed = value.get("owed", {})
+    if not isinstance(owed, dict):
+        raise ConformanceError(f"{path.name}: owed must be an object")
+    for key, entry in owed.items():
+        validate_owed(entry, f"{path.name} owed[{key!r}]")
     return value
+
+
+def validate_owed(entry: object, label: str) -> None:
+    """SPEC-023 §16.11 rule 4: an owed entry names the served model the
+    coordinator advertises with base capabilities only until the key's record
+    lands, and the release that promoted the key."""
+    if not isinstance(entry, dict) or set(entry) != {"model", "release_id"}:
+        raise ConformanceError(f"{label} must be an object with exactly model and release_id")
+    for field in ("model", "release_id"):
+        if not isinstance(entry[field], str) or not entry[field].strip() or entry[field] != entry[field].strip():
+            raise ConformanceError(f"{label}.{field} must be a non-empty unpadded string")
+
+
+def capped_model_counts(path: pathlib.Path = RECORD_PATH) -> tuple[int, int]:
+    """(models, masked) for this file, as the coordinator counts them
+    (phase4-coordinator internal/buyer loadBuyerUXConformance): `masked` is the
+    owed models no record (under any key) names, case-insensitively, which the
+    coordinator advertises with the base set only; `models` is every distinct
+    recorded model plus those, the count /healthz reports as
+    buyer_ux_conformance_records. A runtime that ignores owed entries reports
+    `models - masked`."""
+    doc = load_records(path)
+    recorded = {str(r["model"]).lower() for r in doc["records"].values()}
+    masked = {e["model"].lower() for e in (doc.get("owed") or {}).values()} - recorded
+    return len(recorded) + len(masked), len(masked)
+
+
+def owed_status(path: pathlib.Path = RECORD_PATH) -> list[dict]:
+    """Every owed key and its state: `owed` (no record yet: the coordinator
+    advertises base capabilities only), `failing` (a record exists but does not
+    pass for every capability the served model advertises) or `settled`."""
+    doc = load_records(path)
+    out = []
+    for key, entry in sorted((doc.get("owed") or {}).items()):
+        state, detail = "settled", "record passes"
+        if key not in doc["records"]:
+            state, detail = "owed", "no record"
+        else:
+            try:
+                require_promotable(key, entry["model"], advertised_capabilities(entry["model"]), path)
+            except ConformanceError as err:
+                state, detail = "failing", str(err)
+        out.append({"catalog_key": key, "model": entry["model"], "release_id": entry["release_id"],
+                    "state": state, "detail": detail[:200]})
+    return out
 
 
 def validate_record(record: object, label: str) -> None:
@@ -469,12 +523,29 @@ def advertised_capabilities(model_id: str) -> dict:
     }
 
 
-def require_promotable(key: str, model_id: str, advertised: dict, path: pathlib.Path = RECORD_PATH) -> dict:
+def require_promotable(key: str, model_id: str, advertised: dict, path: pathlib.Path = RECORD_PATH,
+                       conformance_owed: bool = False, release_id: str | None = None) -> dict | None:
     """SPEC-023 §16.11: a key is promotable only when its record exists, was
     taken against the served model being promoted, its base checks pass, and
-    every capability the model advertises passes."""
-    records = load_records(path)["records"]
-    record = records.get(key)
+    every capability the model advertises passes.
+
+    Rule 4 (owed): a first promotion, one whose key has no record yet, may go
+    ahead with its record owed when the intake entry says so and the record
+    file carries an owed entry for the key naming the served model; the
+    coordinator then advertises base capabilities only until the record lands.
+    A record that exists always decides, so a failing record still blocks."""
+    doc = load_records(path)
+    record = doc["records"].get(key)
+    if record is None and conformance_owed:
+        owed = (doc.get("owed") or {}).get(key)
+        if owed is None:
+            raise ConformanceError(f"buyer-UX conformance: {key!r} is promoted with its record owed, but "
+                                   f"{path.name} has no owed entry for it (the coordinator would advertise its derived capabilities)")
+        if owed["model"].lower() != model_id.lower():
+            raise ConformanceError(f"buyer-UX conformance: {key!r} owed entry names {owed['model']!r}, not the served model {model_id!r}")
+        if release_id is None or owed["release_id"] != release_id:
+            raise ConformanceError(f"buyer-UX conformance: {key!r} owed entry names release {owed['release_id']!r}, not the promoting release {release_id!r}")
+        return None
     if record is None:
         raise ConformanceError(f"buyer-UX conformance: no record for {key!r}; run scripts/buyer_ux_conformance.py run")
     # The coordinator indexes the record by its model id, case-insensitively
@@ -562,11 +633,22 @@ def main(argv: list[str] | None = None) -> int:
     show = sub.add_parser("show")
     show.add_argument("--catalog-key", required=True)
     show.add_argument("--record", default=str(RECORD_PATH))
+    owed = sub.add_parser("owed-status", help="the owed keys and whether each record has landed and passes")
+    owed.add_argument("--record", default=str(RECORD_PATH))
     args = parser.parse_args(argv)
     if args.command == "run":
         return cmd_run(args)
     if args.command == "check":
         return cmd_check(args)
+    if args.command == "owed-status":
+        try:
+            path = pathlib.Path(args.record)
+            models, masked = capped_model_counts(path)
+            print(json.dumps({"owed": owed_status(path), "models": models, "masked": masked}, sort_keys=True))
+        except (ConformanceError, ValueError) as err:
+            print(f"owed-status: {err}", file=sys.stderr)
+            return 1
+        return 0
     print(json.dumps(load_records(pathlib.Path(args.record))["records"].get(args.catalog_key), indent=2, sort_keys=True))
     return 0
 

@@ -177,6 +177,12 @@ type buyerUXCapabilities struct {
 // is a few KiB per model.
 const buyerUXConformanceMaxBytes = 4 << 20
 
+// buyerUXOwedCapabilities is what a model promoted with its record owed may
+// advertise until the record lands (SPEC-023 §16.11 rule 4): the base set
+// only. Tools, tool_choice, reasoning and response_format all need a passing
+// record; vision and context_length are not conformance capabilities.
+var buyerUXOwedCapabilities = buyerUXCapabilities{ToolChoice: []string{}}
+
 // LoadBuyerUXConformance reads the record file and returns the allowed
 // capabilities keyed by served model id. An empty path means no records.
 func LoadBuyerUXConformance(path string) (map[string]buyerUXCapabilities, error) {
@@ -216,6 +222,11 @@ func loadBuyerUXConformance(path string) (map[string]buyerUXCapabilities, string
 			Model        string               `json:"model"`
 			Capabilities *buyerUXCapabilities `json:"capabilities"`
 		} `json:"records"`
+		// Owed names, per catalog key, the served model of a first promotion
+		// whose record is still owed (SPEC-023 §16.11 rule 4).
+		Owed map[string]*struct {
+			Model string `json:"model"`
+		} `json:"owed"`
 	}
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		return nil, "", err
@@ -228,12 +239,27 @@ func loadBuyerUXConformance(path string) (map[string]buyerUXCapabilities, string
 	if doc.Records == nil {
 		return nil, "", fmt.Errorf("buyer-ux conformance: records object is missing")
 	}
-	out := make(map[string]buyerUXCapabilities, len(doc.Records))
+	out := make(map[string]buyerUXCapabilities, len(doc.Records)+len(doc.Owed))
 	for key, record := range doc.Records {
 		if record.Capabilities == nil || strings.TrimSpace(record.Model) == "" {
 			return nil, "", fmt.Errorf("buyer-ux conformance: record %q needs model and capabilities", key)
 		}
 		out[strings.ToLower(record.Model)] = *record.Capabilities
+	}
+	// An owed model advertises the base set until a record for that model
+	// lands; a record, passing or not, always decides. Each masked model
+	// counts toward the models /healthz reports, which is how activation
+	// tooling tells a runtime that applies owed entries from one that
+	// ignores them.
+	for key, entry := range doc.Owed {
+		if entry == nil || strings.TrimSpace(entry.Model) == "" {
+			return nil, "", fmt.Errorf("buyer-ux conformance: owed %q needs a model", key)
+		}
+		model := strings.ToLower(entry.Model)
+		if _, recorded := out[model]; recorded {
+			continue
+		}
+		out[model] = buyerUXOwedCapabilities
 	}
 	sum := sha256.Sum256(raw)
 	return out, hex.EncodeToString(sum[:]), nil
@@ -266,7 +292,9 @@ func (s *Server) ReloadBuyerUXConformance(path string) (changed bool, err error)
 }
 
 // BuyerUXConformanceStatus is the SHA-256 of the record file in force (empty
-// when none is) and the number of models it records, for /healthz.
+// when none is) and the number of models whose capabilities it caps: every
+// recorded model plus every owed model it masks to the base set (SPEC-023
+// §16.11 rule 4), for /healthz.
 func (s *Server) BuyerUXConformanceStatus() (string, int) {
 	s.routingMu.RLock()
 	defer s.routingMu.RUnlock()

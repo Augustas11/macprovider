@@ -1,6 +1,6 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.33
+version: v0.22.34
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-02
@@ -8,6 +8,18 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
 
 ## Change log
 
+- **v0.22.34 (2026-10-24, Related: #2111)** — §16.11 rule 4, conformance
+  owed on a first promotion. A gateway record needs a served model and a
+  served model needs `recommendable`, so a key with no record yet may be
+  promoted with `promotion.conformance_owed: true` (§16.8 rule 6a) when
+  `buyer-ux-conformance.json` carries an `owed` entry for the key naming its
+  served model. The coordinator advertises the base capability set only for
+  an owed model until a record for that model lands, and counts each owed
+  mask in `/healthz` `buyer_ux_conformance_records`. A record that exists
+  always decides: a failing record still blocks. `catalog-activate.sh` step
+  `buyer_ux_conformance_owed` stays open until a passing record for every
+  owed key is committed and installed. The live run is a post-release intake
+  step, as this section already said; the intake runbook §2a now agrees.
 - **v0.22.33 (2026-10-24, Related: #2107)** — §16.11 delivery. The
   coordinator applies `routing.buyer_ux_conformance_path` at start and on
   every SIGHUP and reports the file in force on `/healthz`
@@ -4298,7 +4310,7 @@ The manifest is a **closed schema at every level**. An unknown key, a missing ke
 4. **Suppression state is recorded, and a suppressed signal decides nothing.** `distinct_provider_offer_suppressed` and `unmatched_model_request_suppressed` record whether the aggregate was below the effective k-anonymity floor (§16.2(b), §16.2(a) item 9). A suppressed signal MUST record `null` as its value — never the small number it suppressed — and MUST NOT be named as `admission_clause`. A manifest naming a suppressed signal as the selected clause fails closed. **[v0.10.4]** The manifest is public while both coordinator sources are private, so it never distinguishes "one or two providers" from "none" for a named key: `distinct_provider_offer_suppressed` and `unmatched_model_request_suppressed` are always `false`, a suppressed SPEC-047 row and an absent row both record `null` with `distinct_provider_offer_absent_reason: "no_observations"`, and a key with no SPEC-017 bucket records `no_observations` likewise. The `suppressed` absent-reason values and the two boolean fields stay in the closed schema for a source that may report key-attributable suppression to a private reader; against the v0.10.4 sources they are unreachable, like `offer_rejected` in SPEC-047.
 5. **Every §16.4 knob is recorded, at the value in force for THIS release.** `thresholds` is a closed object containing every knob of the §16.4 table, with no omissions and no additions. Adding a knob to §16.4 in a later revision extends this object and bumps `schema_version`. **[v0.22.25]** Removing a knob narrows this object in place under the current `schema_version` values: v0.22.25 removed `INTAKE_MIN_LISTED_DAYS` from both v1 and v2 without a version bump, because the generator validates only the release's own committed manifest, and a historical manifest stays bound by its §3.7.8 ledger digest and validated by the generator at its release commit. A manifest that still carries a removed knob fails the closed schema.
 6. **Selected clause and cold-start use are explicit (`admit_listed`).** For an `admit_listed` entry, `signals` is the closed object above, `admission_clause` is the closed enum `demand_rank` | `provider_offer` | `buyer_request` | `coldstart_slot` and names the ONE demand-or-supply term the operator relied on, `fit_clause` is `fleet_fit` | `tier_target`, and `promotion` is `null`. `coldstart_slot_used` is `true` exactly when `admission_clause` is `coldstart_slot`, and at most `INTAKE_COLDSTART_SLOTS` entries of one release may set it. `listed_since` is the RFC3339 time the key entered `listed`, REQUIRED and non-null for `promote_recommendable` (the record of when the key entered `listed`; it is not after `as_of`) and `null` for `admit_listed`.
-6a. **Promotion entries record what promotion actually depends on.** §16.3 makes promotion an operator decision that no §16.2 signal produces, so a `promote_recommendable` entry MUST set `signals`, `admission_clause`, and `fit_clause` to `null`, `coldstart_slot_used` to `false`, and `promotion` to a closed object with exactly: `rate_class` (a §3.3.1 enum value), `rate_row_resolved` (MUST be `true`; a promotion whose rate class does not resolve to a published rate row fails closed, §3.3.1), `rate_card_source_sha256`, `demand_rank_recommendable` (MUST be `true`, §3.2), `demand_rank_source_sha256`, `bench_provenance_source` (a §3.2 `bench_gate.provenance.source` value other than `omlx_seeded`, §12), and `operator_admission_reference` (a release-notes anchor or ticket id carrying no identity). Every key of every `decisions` element is present in every entry — the closed schema is the same for both actions; which fields are `null` is fixed by `action`, and an entry whose null pattern does not match its `action` fails closed.
+6a. **Promotion entries record what promotion actually depends on.** §16.3 makes promotion an operator decision that no §16.2 signal produces, so a `promote_recommendable` entry MUST set `signals`, `admission_clause`, and `fit_clause` to `null`, `coldstart_slot_used` to `false`, and `promotion` to a closed object with exactly: `rate_class` (a §3.3.1 enum value), `rate_row_resolved` (MUST be `true`; a promotion whose rate class does not resolve to a published rate row fails closed, §3.3.1), `rate_card_source_sha256`, `demand_rank_recommendable` (MUST be `true`, §3.2), `demand_rank_source_sha256`, `bench_provenance_source` (a §3.2 `bench_gate.provenance.source` value other than `omlx_seeded`, §12), and `operator_admission_reference` (a release-notes anchor or ticket id carrying no identity), plus, only on a first promotion whose buyer-UX conformance record is owed, `conformance_owed: true` (§16.11 rule 4; the key's one optional member, whose only value is `true`). Every key of every `decisions` element is present in every entry — the closed schema is the same for both actions; which fields are `null` is fixed by `action`, and an entry whose null pattern does not match its `action` fails closed.
 7. **The operator decision is named.** `operator_decision` is the closed enum `admitted` | `promoted`, and `operator_role` names the operator role that took it. Promotion remains a human decision no signal makes (§16.3); this field records that it was taken, not that it was derived.
 8. **No identity, ever.** The manifest carries aggregates and digests only. No provider id, pseudonym, or hardware fingerprint; no buyer account, API key, or IP address; no raw principal identifier and no §16.2(a) item-7 principal token, in any field, hashed or otherwise. It is a release artifact, and the §16.2 privacy invariants apply to it exactly as they apply to the aggregator that produced its inputs.
 9. **[v0.10.4] Source responses are retained privately and re-derived.** A digest alone proves which bytes were read, not what they said, so every coordinator source the manifest cites is retained byte-exact — but NOT in the repository: `/v1/stats/intake` is private to allow-listed keys and `/admin/model-admission/intake` to operator credentials, and this repository is public, so committing either response would republish what those credentials protect. The sources live in the operator's **private intake audit store**, a directory outside the repository (`$MACPROVIDER_INTAKE_AUDIT_DIR/<release_id>/`, default `~/.config/macprovider/intake-audit/<release_id>/`, mode `0700`): `stats-intake.json` (the one `macprovider.stats-intake.v1` response) and `model-admission-intake.json` (the one `model_admission_intake_offer_counts.v1` response); the demand-rank source is the release-bound signed `demand-rank.json` itself. The manifest and its digests are the public record; the retained bytes are the operator's attestation of what the coordinator served. **Retention lifecycle.** Each source file is fetched with `Accept-Encoding: identity` (a non-identity `Content-Encoding` is rejected) and written byte-exact, as the unmodified body octets, into `<release_id>/` BEFORE the manifest is authored — the manifest's digests are computed from the retained file, never from a transient buffer — and the store is append-only: a retained file is never modified. **Permissions and retention.** Every file is mode `0600` under a `0700` directory (the generator refuses a retained file readable by group or others); each release's files are kept for at least 24 months after the release's ledger row is written and for as long as any later release still lists the key it admitted, whichever is longer, and are deleted no later than 36 months after the last release that lists that key — the store holds private coordinator data (partner-private demand aggregates, operator-private supply aggregates) and is not retained indefinitely; the store is included in the operator's encrypted backup so a single disk loss does not destroy reconstructibility. Deleting or altering a retained file does not change the public record but breaks reconstructibility for that release; an auditor detects it because a manifest `*_source_sha256` no longer matches any retained source file, and the operator MUST record such a loss in the release notes of the next release. The generator reads the store through `--intake-audit-dir` and MUST verify that each recorded `*_source_sha256` equals the SHA-256 of the committed file, MUST parse each file under its closed schema (rejecting an unknown key), and MUST re-derive every recorded signal value, suppression flag, absent reason, and window from those bytes — the §16.2(a) window selection, the bucket lower bound, the §16.2(b) row, the §16.2(c) class-floor fraction — failing the release closed on any disagreement. A digest that names no retained file, a retained file the manifest does not cite, or a missing audit store when any decision cites a coordinator source, fails closed. This record is an OPERATOR ATTESTATION: bearer authentication proves the caller to the coordinator, not the response's origin to a later auditor, so an auditor with access to the store re-evaluates what the operator retained, and coordinator-origin provenance (a signed response envelope) is a later revision's concern, recorded in §13 Q17.
@@ -4398,6 +4410,33 @@ rules bind them:
    `routing.buyer_ux_conformance_path` to `coordinator.yaml` in place under
    both Pearl locks, and sends one SIGHUP. A runtime without the reload gets
    one restart instead. Runtime and catalog deploys do not touch the file.
+4. **Owed on a first promotion (v0.22.34).** A gateway record needs the
+   model served, and only a `recommendable` row serves gateway traffic, so a
+   key's first promotion cannot carry a record taken through the gateway. Such
+   a promotion, one whose key has no record yet, MAY set
+   `promotion.conformance_owed: true` (§16.8 rule 6a). The generator then
+   accepts it only when the record file carries a top-level `owed` entry for
+   the key, `{"model": <served model id>, "release_id": <promoting release>}`,
+   whose `model` equals the candidate row's served model id
+   (case-insensitively) and whose `release_id` equals the promoting release. A record that exists always decides: a promotion
+   whose record exists and fails is refused with or without the marker. While
+   no record names an owed model, the coordinator advertises the base
+   capability set only for it on `/v1/models`: `tools: false`, an empty
+   `tool_choice`, `reasoning: false` and `response_format: false` (and no
+   `tools`, `tool_choice`, `parallel_tool_calls`, `reasoning_effort` or
+   `response_format` in `supported_parameters`). `/healthz`
+   `buyer_ux_conformance_records` counts every model the file caps, owed
+   masks included, so activation tooling can tell a runtime that applies owed
+   entries from one that ignores them; `catalog-activate.sh` step
+   `buyer_ux_conformance` refuses to report a file with owed entries as in
+   force on a runtime that ignores them. After the promoting release is live,
+   step `buyer_ux_conformance_owed` stays open until origin/main's record file
+   holds a record for every owed key that passes as rule 1 requires and step
+   `buyer_ux_conformance` has installed that file. The owed entry may stay
+   after the record lands; the record decides.
 
-Live runs happen after a release, against the gateway, as an intake step. The
-checker is unit-tested against recorded responses.
+Live runs happen after a release, against the gateway, as an intake step: for
+a key already serving through the gateway, before its promotion entry is
+written; for a first promotion, after the promoting release is live, with the
+record owed under rule 4. The checker is unit-tested against recorded
+responses.

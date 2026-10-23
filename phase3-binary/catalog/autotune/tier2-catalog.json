@@ -1,8 +1,17 @@
 {
-  "catalog_id": "macprovider-tier2-model-catalog-2026-10-18-glm53-flash-v1",
+  "catalog_id": "macprovider-tier2-model-catalog-2026-10-23-deepseek-v4-flash-v1",
   "expires_at": "2026-12-25T00:00:00Z",
-  "issued_at": "2026-10-17T23:30:00Z",
+  "issued_at": "2026-10-23T20:30:00Z",
   "models": [
+    {
+      "artifact_kind": "mlx_weight_file",
+      "hash_scope": "macprovider.snapshot-manifest.v1",
+      "model_id": "TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX",
+      "min_ram_gb": 195,
+      "notes": "Buyer-serving candidate deepseek/deepseek-v4-flash (campaign #2111 native deepseek_v4 engine); identity from signed SPEC-023 row.",
+      "sha256": "58ee40d4c0bc436695d1d8d6a6cdfdb0326ec37f25e13ec98ea1d5c0878e732c",
+      "source": "operator-curated"
+    },
     {
       "artifact_kind": "mlx_weight_file",
       "hash_scope": "macprovider.snapshot-manifest.v1",
@@ -178,7 +187,7 @@
   "signature": {
     "alg": "Ed25519",
     "key_id": "catalog-key-2026q2",
-    "sig": "sF030aE294e7f8ZfZa0hBgMA6HprC1RagZYcafaF5oO4QVJTGwZ0iyiuAWFwmF-17L68M8S2XsIWFhqG7eMCBw"
+    "sig": "wHzyJhNAcf20zUhwglgeMrVRXCpa8wsYdfSKXIlfuGKZl1Z3QNIsTpuyh7HbaXPLiR6gMdiULxQ6IJx5rQyLCg"
   },
   "version": 1
 }

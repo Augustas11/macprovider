@@ -186,6 +186,14 @@ fixture() { printf '%s' "$1" > "$tmp/gh/fixture.json"; rm -f "$tmp/gh"/count-*; 
 # section says otherwise (catalog-activate step buyer_ux_conformance).
 BUC_SHA="$(shasum -a 256 "$W/phase3-binary/catalog/autotune/buyer-ux-conformance.json" | awk '{print $1}')"
 printf '%s' "$BUC_SHA" > "$tmp/svc/buc_sha"
+# ... and caps the models it names, owed masks included (SPEC-023 §16.11 rule 4).
+buc_counts() {
+  python3 -I "$W/scripts/buyer_ux_conformance.py" owed-status --record "$1" |
+    python3 -c 'import json,sys; d=json.load(sys.stdin); print(d[sys.argv[1]], end="")' "$2"
+}
+BUC_MODELS="$(buc_counts "$W/phase3-binary/catalog/autotune/buyer-ux-conformance.json" models)"
+BUC_MASKED="$(buc_counts "$W/phase3-binary/catalog/autotune/buyer-ux-conformance.json" masked)"
+printf '%s' "$BUC_MODELS" > "$tmp/svc/buc_models"
 export PEARL_BUYER_UX_CONFORMANCE_PATH="$tmp/pearl/root/buyer-ux-conformance.json"
 # health: a repository-admission runtime (its /healthz reports the running
 # config's compatibility policy); health_legacy: a runtime that reports none.
@@ -2069,9 +2077,16 @@ expect_lock_free
 if cmp -s "$tmp/pearl/coordinator.yaml" "$tmp/pearl/coordinator.before" && [ ! -e "$BUC_DEST" ] && [ "$(restarts)" = 1 ] && [ -z "$(cat "$tmp/svc/buc_sha")" ]; then ok; else bad "rollback restart: restarts=$(restarts) buc_sha=$(cat "$tmp/svc/buc_sha")"; fi
 rm -f "$tmp/svc/hup_bumps_pid"
 
-# A runtime that reads the file only at start: status reads Pearl, the install restarts once.
+# A runtime that reads the file only at start: status reads Pearl, the install
+# restarts once. Such a runtime never applies owed entries, so while
+# origin/main's file carries one it is blocked on the runtime release instead.
 buc_reset
 touch "$tmp/svc/buc_legacy"
+if [ "$BUC_MASKED" != 0 ]; then
+run_rc 0 "conformance status on a start-only runtime with owed entries committed" scripts/ops/catalog-activate.sh status
+if [ "$(state_of buyer_ux_conformance)" = blocked ] && [ "$(next_field id)" = buyer_ux_conformance ] &&
+   [ "$(next_field command)" = "scripts/ops/pearl-runtime.sh status" ]; then ok; else bad "start-only runtime with owed entries: $(state_of buyer_ux_conformance) $(next_field id) $(next_field command)"; fi
+else
 run_rc 0 "conformance status on a start-only runtime" scripts/ops/catalog-activate.sh status
 if [ "$(next_field id)" = buyer_ux_conformance ]; then
   case "$(next_field expected_downtime)" in "one coordinator restart"*) ok ;; *) bad "start-only downtime: $(next_field expected_downtime)" ;; esac
@@ -2087,6 +2102,7 @@ if [ "$(state_of buyer_ux_conformance)" = "done" ] && [ "$(fact_of buyer_ux_conf
 printf 'routing.buyer_ux_conformance_path unreadable; no conformance records applied\n' >> "$tmp/svc/boot.txt"
 run_rc 0 "conformance status after a logged load error" scripts/ops/catalog-activate.sh status
 if [ "$(state_of buyer_ux_conformance)" = pending ]; then ok; else bad "load error not pending: $(state_of buyer_ux_conformance)"; fi
+fi
 
 rm -f "$tmp/svc/buc_legacy" "$tmp/svc/hups" "$tmp/svc/restarts" "$BUC_DEST" "$tmp/pearl/coordinator.before"
 printf '%s' "$BUC_SHA" > "$tmp/svc/buc_sha"
@@ -2095,6 +2111,95 @@ for f in coordinator.yaml overlay.yaml; do
 done
 cp "$tmp/saved-healthz.json" "$tmp/svc/healthz.json"
 rm -f "$tmp/saved-healthz.json"
+
+# ==== catalog-activate: buyer-UX conformance owed (SPEC-023 §16.11 rule 4) ======
+# A key promoted with its record owed: the file is done only on a runtime that
+# counts its owed masks in buyer_ux_conformance_records, and step
+# buyer_ux_conformance_owed stays open until a passing record for the key is
+# committed and in force. Status only: the working-tree file is restored after.
+BUC_COMMITTED="$W/phase3-binary/catalog/autotune/buyer-ux-conformance.json"
+cp "$BUC_COMMITTED" "$tmp/buc-committed.saved"
+cp "$tmp/svc/healthz.json" "$tmp/saved-healthz.json"
+# buc_owed_file none|failing|passing: rewrite the record file with one owed key
+# (no record, a failing record, a passing record) and put it in force on the
+# fake coordinator (sha256, and the models it caps, owed masks included).
+buc_owed_file() {
+  python3 - "$W/scripts/buyer_ux_conformance.py" "$BUC_COMMITTED" "$R" "$1" <<'PY'
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("bux", sys.argv[1]); bux = importlib.util.module_from_spec(spec); spec.loader.exec_module(bux)
+path, release, state = sys.argv[2:5]
+doc = json.load(open(path))
+model = "Test/Qwen3-Owed-4bit"
+# Only the fixture key is owed here; records for other models stay.
+doc["owed"] = {"test/owed-model": {"model": model, "release_id": release}}
+doc["records"].pop("test/owed-model", None)
+if state != "none":
+    checks = {n: {"status": "fail" if state == "failing" and n == "tools_auto" else "pass", "detail": "fixture"} for n in bux.ALL_CHECKS}
+    doc["records"]["test/owed-model"] = {"model": model, "gateway": "https://api.malibu.tech/v1", "checked_at": "2026-10-24T00:00:00Z",
+                                         "checks": checks, "capabilities": bux.capabilities_from_checks(checks)}
+open(path, "w").write(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+PY
+  shasum -a 256 "$BUC_COMMITTED" | awk '{printf "%s", $1}' > "$tmp/svc/buc_sha"
+  python3 -I "$W/scripts/buyer_ux_conformance.py" owed-status --record "$BUC_COMMITTED" |
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["models"], end="")' > "$tmp/svc/buc_models"
+}
+health v9.0.0 $LIVE
+rm -f "$tmp/svc/autotune-release.json"
+
+# A runtime that reads the file only at start never applies owed entries.
+buc_owed_file none
+touch "$tmp/svc/buc_legacy"
+run_rc 0 "owed status on a start-only runtime" scripts/ops/catalog-activate.sh status
+if [ "$(state_of buyer_ux_conformance)" = blocked ]; then ok; else bad "owed file on a start-only runtime: $(state_of buyer_ux_conformance)"; fi
+if [ "$(next_field id)" = buyer_ux_conformance ]; then
+  case "$(next_field kind):$(next_field command)" in "blocked:scripts/ops/pearl-runtime.sh status") ok ;; *) bad "start-only owed next: $(next_field kind) $(next_field command)" ;; esac
+fi
+rm -f "$tmp/svc/buc_legacy"
+
+# A reloading runtime that ignores owed entries counts only the records.
+python3 -c 'import sys; print(int(open(sys.argv[1]).read()) - 1, end="")' "$tmp/svc/buc_models" > "$tmp/svc/buc_models.new"
+mv "$tmp/svc/buc_models.new" "$tmp/svc/buc_models"
+run_rc 0 "owed status on a runtime that ignores owed entries" scripts/ops/catalog-activate.sh status
+if [ "$(state_of buyer_ux_conformance)" = blocked ]; then ok; else bad "owed entries ignored: $(state_of buyer_ux_conformance)"; fi
+if [ "$(next_field id)" = buyer_ux_conformance ]; then
+  case "$(next_field command)" in "scripts/ops/pearl-runtime.sh status") ok ;; *) bad "ignored-owed next: $(next_field command)" ;; esac
+fi
+
+buc_owed_file none
+run_rc 0 "owed status before the promoting release is live" scripts/ops/catalog-activate.sh status
+if [ "$(state_of buyer_ux_conformance)" = "done" ] && [ "$(fact_of buyer_ux_conformance_masked_models)" = 1 ]; then ok; else bad "owed in force: $(state_of buyer_ux_conformance) masked=$(fact_of buyer_ux_conformance_masked_models)"; fi
+if [ "$(state_of buyer_ux_conformance_owed)" = pending ]; then ok; else bad "owed before activation: $(state_of buyer_ux_conformance_owed)"; fi
+
+printf '{"release_id":"%s","status":"live_verified","feeds":{"x":{"verified_at":"2026-01-01T00:00:00Z"}}}' "$R" > "$tmp/svc/autotune-release.json"
+run_rc 0 "owed status after the promoting release is live" scripts/ops/catalog-activate.sh status
+if [ "$(state_of buyer_ux_conformance_owed)" = owed ]; then ok; else bad "owed after activation: $(state_of buyer_ux_conformance_owed)"; fi
+case "$(fact_of buyer_ux_conformance_owed)" in "test/owed-model (Test/Qwen3-Owed-4bit, owed: no record)") ok ;; *) bad "owed fact: $(fact_of buyer_ux_conformance_owed)" ;; esac
+if [ "$(next_field id)" = buyer_ux_conformance_owed ]; then
+  case "$(next_field kind):$(next_field command)" in manual:*"buyer_ux_conformance.py run"*) ok ;; *) bad "owed next: $(next_field kind) $(next_field command)" ;; esac
+fi
+
+# A failing record keeps it open (and lifts the coordinator's base-only mask).
+buc_owed_file failing
+run_rc 0 "owed status with a failing record" scripts/ops/catalog-activate.sh status
+if [ "$(state_of buyer_ux_conformance)" = "done" ] && [ "$(state_of buyer_ux_conformance_owed)" = owed ]; then ok; else bad "failing record: $(state_of buyer_ux_conformance) $(state_of buyer_ux_conformance_owed)"; fi
+case "$(fact_of buyer_ux_conformance_owed)" in *"failing: buyer-UX conformance: 'test/owed-model' advertises tools"*) ok ;; *) bad "failing fact: $(fact_of buyer_ux_conformance_owed)" ;; esac
+
+# A passing record committed but not yet installed: pending on step 4a.
+buc_owed_file passing
+printf 'stale' > "$tmp/svc/buc_sha"
+run_rc 0 "owed status with the passing record not yet installed" scripts/ops/catalog-activate.sh status
+if [ "$(state_of buyer_ux_conformance)" = pending ] && [ "$(state_of buyer_ux_conformance_owed)" = pending ]; then ok; else bad "uninstalled record: $(state_of buyer_ux_conformance) $(state_of buyer_ux_conformance_owed)"; fi
+
+# Installed: done.
+buc_owed_file passing
+run_rc 0 "owed status with the passing record in force" scripts/ops/catalog-activate.sh status
+if [ "$(state_of buyer_ux_conformance)" = "done" ] && [ "$(state_of buyer_ux_conformance_owed)" = "done" ]; then ok; else bad "record in force: $(state_of buyer_ux_conformance) $(state_of buyer_ux_conformance_owed)"; fi
+
+cp "$tmp/buc-committed.saved" "$BUC_COMMITTED"
+printf '%s' "$BUC_SHA" > "$tmp/svc/buc_sha"
+cp "$tmp/saved-healthz.json" "$tmp/svc/healthz.json"
+rm -f "$tmp/saved-healthz.json" "$tmp/svc/autotune-release.json" "$tmp/buc-committed.saved"
+printf '%s' "$BUC_MODELS" > "$tmp/svc/buc_models"
 
 # ==== pearl-runtime updater-bundle ==============================================
 UBROOT="$tmp/ubroot"

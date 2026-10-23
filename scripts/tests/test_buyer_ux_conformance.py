@@ -215,6 +215,55 @@ class BuyerUXConformanceTests(unittest.TestCase):
             with self.assertRaisesRegex(bux.ConformanceError, "derived from its checks"):
                 bux.load_records(path)
 
+    def test_owed_entries_and_status(self):
+        """SPEC-023 §16.11 rule 4: an owed entry stands in for a first
+        promotion's record until it lands; a record always decides."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "records.json"
+            key = "zai-org/glm-5.3-flash"
+            owed = {key: {"model": MODEL, "release_id": "published-test-v1"}}
+            path.write_text(json.dumps({"schema_version": bux.SCHEMA, "records": {}, "owed": owed}))
+            advertised = bux.advertised_capabilities(MODEL)
+            self.assertIsNone(bux.require_promotable(key, MODEL, advertised, path, conformance_owed=True,
+                                                     release_id="published-test-v1"))
+            # The owed entry is bound to the promoting release.
+            with self.assertRaisesRegex(bux.ConformanceError, "not the promoting release"):
+                bux.require_promotable(key, MODEL, advertised, path, conformance_owed=True, release_id="other-release")
+            with self.assertRaisesRegex(bux.ConformanceError, "no record"):
+                bux.require_promotable(key, MODEL, advertised, path)
+            with self.assertRaisesRegex(bux.ConformanceError, "not the served model"):
+                bux.require_promotable(key, "other/model", advertised, path, conformance_owed=True)
+            with self.assertRaisesRegex(bux.ConformanceError, "no owed entry"):
+                bux.require_promotable("other", MODEL, advertised, path, conformance_owed=True)
+            self.assertEqual([(e["catalog_key"], e["state"]) for e in bux.owed_status(path)], [(key, "owed")])
+            self.assertEqual(bux.capped_model_counts(path), (1, 1))
+            # A failing record lands: it decides, so the promotion is blocked
+            # and the owed key is not settled.
+            failing = self.run_with(stream=sse({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}))
+            record = {"model": MODEL, "gateway": "https://api.malibu.tech/v1", "checked_at": "2026-10-22T00:00:00Z",
+                      "checks": failing["checks"], "capabilities": failing["capabilities"]}
+            path.write_text(json.dumps({"schema_version": bux.SCHEMA, "records": {key: record}, "owed": owed}))
+            with self.assertRaisesRegex(bux.ConformanceError, "advertises tools"):
+                bux.require_promotable(key, MODEL, advertised, path, conformance_owed=True)
+            self.assertEqual(bux.owed_status(path)[0]["state"], "failing")
+            # A passing record settles it.
+            passing = self.run_with()
+            record.update(checks=passing["checks"], capabilities=passing["capabilities"])
+            path.write_text(json.dumps({"schema_version": bux.SCHEMA, "records": {key: record}, "owed": owed}))
+            self.assertEqual(bux.owed_status(path)[0]["state"], "settled")
+            # The record for the owed model lifts the mask (counted once).
+            self.assertEqual(bux.capped_model_counts(path), (1, 0))
+            # Malformed owed entries and unknown top-level keys are refused.
+            for doc, fragment in (
+                ({"owed": []}, "owed must be an object"),
+                ({"owed": {key: {"model": MODEL}}}, "exactly model and release_id"),
+                ({"owed": {key: {"model": " ", "release_id": "r"}}}, "non-empty unpadded"),
+                ({"extra": {}}, "unknown top-level"),
+            ):
+                path.write_text(json.dumps(dict({"schema_version": bux.SCHEMA, "records": {}}, **doc)))
+                with self.assertRaisesRegex(bux.ConformanceError, fragment):
+                    bux.load_records(path)
+
     def test_checked_in_record_file_is_valid(self):
         bux.load_records(bux.RECORD_PATH)
 

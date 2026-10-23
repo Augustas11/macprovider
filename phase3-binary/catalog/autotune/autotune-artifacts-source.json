@@ -22,7 +22,8 @@
           "verified_at": "2026-10-22"
         }
       },
-      "primary_artifact_id": "mlx-mxfp4"
+      "primary_artifact_id": "mlx-mxfp4",
+      "rate_class": "class-120b-moe"
     },
     "google-gemma-4-26b-a4b-it": {
       "artifacts": {

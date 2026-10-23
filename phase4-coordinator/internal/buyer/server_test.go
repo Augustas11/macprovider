@@ -9852,3 +9852,69 @@ func TestModelsPillarAHashIgnoresProvidersTheListOmits(t *testing.T) {
 		t.Fatalf("hash state counts an omitted provider: %s", rr.Body.String())
 	}
 }
+
+// SPEC-023 §16.11 rule 4 end to end: while a promoted model's conformance
+// record is owed, /v1/models lists it with the base capability set only.
+func TestModelsAdvertisesBaseCapabilitiesWhileConformanceOwed(t *testing.T) {
+	const dsv4 = "TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX"
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "dsv4", EndpointURL: "https://dsv4.example"}})
+	registry.Register(&pool.Provider{
+		ProviderID: "dsv4", AssignedID: "session-dsv4", Hostname: "dsv4.local", ModelID: dsv4,
+		ModelParamsB: 7, RAMGB: 256, MaxContextTokens: 32768, MaxConcurrency: 1, SlotsFree: 1, SlotsTotal: 1,
+		ThroughputTPSEstimate: 30, EndpointURL: "https://dsv4.example", Tier: pool.TierPinned,
+		InferencePath: pool.InferencePathHTTPForwarding, State: pool.StateReady,
+		LastHeartbeatAt: time.Now().UTC(), ConnectedAt: time.Now().UTC(), BinaryVersion: "1.8.262",
+	}, nil)
+	slotsFree := 1
+	registry.ApplyStateUpdate("dsv4", "session-dsv4", pool.StateUpdate{State: pool.StateReady, SlotsFree: &slotsFree, At: time.Now().UTC()})
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+	type caps struct {
+		Tools          bool     `json:"tools"`
+		ToolChoice     []string `json:"tool_choice"`
+		Reasoning      bool     `json:"reasoning"`
+		ResponseFormat bool     `json:"response_format"`
+		ContextLength  int      `json:"context_length"`
+	}
+	models := func() (caps, []string) {
+		t.Helper()
+		rr := httptest.NewRecorder()
+		server.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+		var resp struct {
+			Data []struct {
+				ID                  string   `json:"id"`
+				Capabilities        caps     `json:"capabilities"`
+				SupportedParameters []string `json:"supported_parameters"`
+			} `json:"data"`
+		}
+		if rr.Code != http.StatusOK || json.Unmarshal(rr.Body.Bytes(), &resp) != nil {
+			t.Fatalf("/v1/models %d %s", rr.Code, rr.Body.String())
+		}
+		for _, m := range resp.Data {
+			if m.ID == dsv4 {
+				return m.Capabilities, m.SupportedParameters
+			}
+		}
+		t.Fatalf("%s not listed: %s", dsv4, rr.Body.String())
+		return caps{}, nil
+	}
+	if derived, _ := models(); !derived.Tools || !derived.Reasoning || !derived.ResponseFormat {
+		t.Fatalf("derived capabilities before the owed entry: %+v", derived)
+	}
+	path := filepath.Join(t.TempDir(), "buyer-ux-conformance.json")
+	owed := `{"schema_version":"macprovider.buyer-ux-conformance.v1","records":{},"owed":{"deepseek/deepseek-v4-flash":{"model":"` + dsv4 + `","release_id":"published-test-v1"}}}`
+	if err := os.WriteFile(path, []byte(owed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.ReloadBuyerUXConformance(path); err != nil {
+		t.Fatal(err)
+	}
+	got, params := models()
+	if got.Tools || got.Reasoning || got.ResponseFormat || len(got.ToolChoice) != 0 || got.ContextLength != 32768 {
+		t.Fatalf("owed capabilities: %+v", got)
+	}
+	for _, p := range params {
+		if p == "tools" || p == "tool_choice" || p == "reasoning_effort" || p == "response_format" {
+			t.Fatalf("owed supported_parameters advertise %s: %v", p, params)
+		}
+	}
+}
