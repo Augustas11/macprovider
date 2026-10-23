@@ -3,6 +3,34 @@ import MacProviderCore
 @testable import macprovider_cli
 
 final class GrammarTemplatesParserTests: XCTestCase {
+    func testEveryFamilySynthesizesUndeclaredRequiredProperties() throws {
+        for family in ToolCallGrammar.allCases {
+            let raw = #"{"model":"test","messages":[{"role":"user","content":"test"}],"max_tokens":100,"tool_choice":"required","tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object","required":["city"]}}}]}"#
+            let request = try ChatCompletionRequest.parse(data: Data(raw.utf8))
+            let grammar = try XCTUnwrap(GrammarTemplates.grammar(for: request, traits: RequestOutputTraits(toolGrammar: family)))
+            let dfa = try grammar.compile()
+            let call = requestCall(name: "f", family: family)
+                .replacingOccurrences(of: "<|\"|>Paris<|\"|>", with: "true")
+                .replacingOccurrences(of: "\"Paris\"", with: "true")
+                .replacingOccurrences(of: ">Paris<", with: ">true<")
+                .replacingOccurrences(of: "string=\"true\"", with: "string=\"false\"")
+            XCTAssertTrue(dfa.accepting(state: try XCTUnwrap(dfa.transition(state: 0, bytes: Array(call.utf8)))), family.rawValue)
+            if family != .harmony {
+                let parsed = ToolCallParser.parseToolCalls(rawOutput: call, grammar: family, modelID: "test", allowedFunctionNames: ["f"], schemas: ["f": .object(["type": .string("object"), "required": .array([.string("city")])])])
+                let result = try XCTUnwrap(parsed.toolCalls.first, family.rawValue)
+                XCTAssertEqual(try StrictJSONParser.parse(result.arguments), .object(["city": .bool(true)]))
+            }
+        }
+    }
+
+    func testMalformedRequiredPropertyNamesRejectBeforeGeneration() throws {
+        let raw = #"{"model":"test","messages":[{"role":"user","content":"test"}],"max_tokens":100,"tool_choice":"required","tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object","required":[3]}}}]}"#
+        let request = try ChatCompletionRequest.parse(data: Data(raw.utf8))
+        XCTAssertThrowsError(try GrammarTemplates.grammar(for: request, traits: RequestOutputTraits(toolGrammar: .qwen))) { error in
+            XCTAssertEqual((error as? APIError)?.status, 400)
+        }
+    }
+
     func testEveryFamilyRequestRootObjectEnumConstrainsArguments() throws {
         let parameters: [String: Any] = [
             "type": "object", "properties": ["city": ["type": "string", "enum": ["Paris", "Tokyo"]]],

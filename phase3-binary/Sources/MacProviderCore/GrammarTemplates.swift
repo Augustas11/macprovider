@@ -130,9 +130,22 @@ public enum GrammarTemplates {
         guard case .object(let object) = value else {
             return .object(["type": .string("object"), "properties": .object([:])])
         }
-        var result: [String: JSONValue] = ["type": .string("object"), "properties": object["properties"] ?? .object([:])]
+        var result: [String: JSONValue] = ["type": .string("object"), "properties": .object(objectProperties(object))]
         for key in ["required", "additionalProperties"] { result[key] = object[key] }
         return .object(result)
+    }
+
+    private static func objectProperties(_ object: [String: JSONValue]) -> [String: JSONValue] {
+        var properties: [String: JSONValue]
+        if case .object(let declared)? = object["properties"] { properties = declared } else { properties = [:] }
+        if case .array(let required)? = object["required"] {
+            for value in required {
+                if case .string(let name) = value, properties[name] == nil {
+                    properties[name] = .object([:])
+                }
+            }
+        }
+        return properties
     }
 
     private static func validateRequiredProperties(_ value: JSONValue) throws {
@@ -142,10 +155,16 @@ public enum GrammarTemplates {
         }
         let properties: [String: JSONValue]
         if case .object(let declared)? = object["properties"] { properties = declared } else { properties = [:] }
-        if case .array(let required)? = object["required"] {
+        if let requiredValue = object["required"] {
+            guard case .array(let required) = requiredValue else {
+                throw unsupportedGrammar("Required output properties must be an array")
+            }
             for key in required {
-                guard case .string(let name) = key, properties[name] != nil else {
-                    throw unsupportedGrammar("Required output properties need declared schemas")
+                guard case .string(let name) = key else {
+                    throw unsupportedGrammar("Required output property names must be strings")
+                }
+                if properties[name] == nil, object["additionalProperties"] == .bool(false) {
+                    throw unsupportedGrammar("Required property is forbidden by additionalProperties")
                 }
             }
         }
@@ -156,8 +175,8 @@ public enum GrammarTemplates {
     private static func validateTaggedSchema(_ value: JSONValue) throws {
         switch value {
         case .object(let object):
-            if case .object(let properties)? = object["properties"] {
-                for key in properties.keys {
+            if object["properties"] != nil || object["required"] != nil {
+                for key in objectProperties(object).keys {
                     guard (1...128).contains(key.utf8.count), key.utf8.allSatisfy({
                         (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || $0 == 95 || $0 == 45
                     }) else { throw unsupportedGrammar("Tagged tool grammar requires safe parameter names") }
@@ -221,7 +240,8 @@ public enum GrammarTemplates {
         }
         switch object["type"] {
         case .string("object")?:
-            guard case .object(let properties)? = object["properties"] else { return genericObject(depth: 1, gemma: gemma) }
+            guard object["properties"] != nil || object["required"] != nil else { return genericObject(depth: 1, gemma: gemma) }
+            let properties = objectProperties(object)
             let entries = properties.keys.sorted().map { key in
                 ByteGrammar.sequence([literal(.string(key), gemma: gemma), .literal(":"), schema(properties[key]!, depth: depth + 1, gemma: gemma)])
             }

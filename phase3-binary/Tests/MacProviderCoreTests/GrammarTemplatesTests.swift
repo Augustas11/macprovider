@@ -72,20 +72,20 @@ final class GrammarTemplatesTests: XCTestCase {
         XCTAssertFalse(try accepts(number, "999999999999999999999999999999999999"))
     }
 
-    func testUndeclaredRequiredPropertiesRejectBeforeGeneration() throws {
+    func testUndeclaredRequiredPropertiesReceiveGenericValueGrammar() throws {
         let raw = #"{"model":"test","messages":[{"role":"user","content":"test"}],"response_format":{"type":"json_schema","json_schema":{"name":"required","strict":false,"schema":{"type":"object","required":["missing"]}}}}"#
         let request = try ChatCompletionRequest.parse(data: Data(raw.utf8))
-        XCTAssertThrowsError(try GrammarTemplates.grammar(for: request, traits: .unresolved)) { error in
-            XCTAssertEqual((error as? APIError)?.status, 400)
-        }
+        let grammar = try XCTUnwrap(GrammarTemplates.grammar(for: request, traits: .unresolved))
+        XCTAssertTrue(try accepts(grammar, #"{"missing":true}"#))
+        XCTAssertFalse(try accepts(grammar, "{}"))
     }
 
-    func testToolWithUndeclaredRequiredPropertyRejectsBeforeGeneration() throws {
+    func testToolWithUndeclaredRequiredPropertyReceivesGenericValueGrammar() throws {
         let raw = #"{"model":"mlx-community/Qwen3.6-35B-A3B-4bit","messages":[{"role":"user","content":"test"}],"max_tokens":100,"tool_choice":"required","tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object","required":["missing"]}}}]}"#
         let request = try ChatCompletionRequest.parse(data: Data(raw.utf8))
-        XCTAssertThrowsError(try GrammarTemplates.grammar(for: request, traits: .unresolved)) { error in
-            XCTAssertEqual((error as? APIError)?.status, 400)
-        }
+        let grammar = try XCTUnwrap(GrammarTemplates.grammar(for: request, traits: .unresolved))
+        XCTAssertTrue(try accepts(grammar, #"<tool_call>{"name":"f","arguments":{"missing":true}}</tool_call>"#))
+        XCTAssertFalse(try accepts(grammar, #"<tool_call>{"name":"f","arguments":{}}</tool_call>"#))
     }
 
     func testEveryFamilyHasACompleteCallLanguage() throws {
