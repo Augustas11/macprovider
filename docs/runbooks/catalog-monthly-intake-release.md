@@ -241,6 +241,23 @@ then applies them again the same way.
    python3 scripts/buyer_ux_conformance.py owed-status   # state: settled
    ```
 
+   For `deepseek/deepseek-v4-flash` the Studio is the only provider that
+   fits it, so the step is a journaled Studio window instead
+   (`qwen-opencode-e2e.sh _catalog-dsv4-conformance`, run by
+   `catalog-activate.sh next --run` when `QWEN_E2E_*`, `DSV4_IMPORT_DIR` and
+   `GATEWAY_URL` are set). The window switches the Studio from GLM-5.3-Flash
+   to DeepSeek and back:
+   - it imports the lab snapshot with `models import --from "$DSV4_IMPORT_DIR"`,
+     so nothing is downloaded;
+   - it adopts DeepSeek through `autotune --recommend --check-only
+     --installed-only --candidate-models deepseek/deepseek-v4-flash` and
+     `models adopt-recommendation`;
+   - it pins one owner slot at 32768 context, with continuous batching and
+     native MTP off;
+   - it runs the suite into `$OPS_STATE_DIR/catalog-owed-conformance/`;
+   - it restores GLM with continuous batching on and native MTP eligible.
+
+   An interrupted window is restored first by step `dsv4_restore`.
 5. Commit the record file to `origin/main`. This is a records-only change
    with no re-signed release. The owed entry may stay; the record decides.
    Then `catalog-activate.sh next --run` installs it (step

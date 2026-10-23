@@ -116,6 +116,8 @@ PEARL_BUYER_UX_CONFORMANCE_PATH="${PEARL_BUYER_UX_CONFORMANCE_PATH:-/opt/macprov
 BUC_DOWNTIME_SIGHUP="none: no coordinator restart; one SIGHUP applies the record file (and any other change already on disk in coordinator.yaml or the overlay). If the coordinator does not report the file within 60 s, coordinator.yaml and the record file are restored and SIGHUPed again; if that does not bring back the previous records (the restored file does not load), one recovery restart follows, about 5-40 seconds"
 BUC_DOWNTIME_RESTART="one coordinator restart, about 5-40 seconds (in-flight requests drain, then the coordinator starts): the running runtime reads the record file only at start, so buyer and provider traffic through the coordinator is interrupted for that time. If the restarted coordinator cannot load the file, coordinator.yaml and the record file are restored and the coordinator restarts once more"
 QWEN_NATIVE_PROFILE=qwen36-native-mtp
+DSV4_WINDOW_PROFILE=dsv4-flash-window
+DSV4_WINDOW_DOWNTIME="Studio provider: GLM-5.3-Flash buyer traffic is unavailable from the GLM->DeepSeek restart through the DeepSeek-V4-Flash load (~167 GB), the conformance run (about 10-30 minutes at one serial slot), and the restart and model load back to GLM; DeepSeek buyers are served during the window. Pearl is not restarted"
 
 qwen_journal_probe() {
   "$OPS_DIR/qwen-opencode-e2e.sh" _catalog-qwen36-journal
@@ -293,6 +295,15 @@ gather() {
         step qwen_restore pending "restore exact signed GLM incumbent before catalog work"
         set_next qwen_restore mutate "Restore GLM from the active Qwen3.6 transaction" \
           "$OPS_DIR/qwen-opencode-e2e.sh _catalog-qwen36-restore"
+        NEXT_DOWNTIME="Studio provider buyer traffic is unavailable during the bounded GLM restart and model-load window; Pearl is not restarted"
+        return
+      fi
+      if [ "$qwen_restore" = true ] && [ "$qwen_profile" = "$DSV4_WINDOW_PROFILE" ]; then
+        fact qwen_transaction_profile "$qwen_profile"
+        fact qwen_restore_required true
+        step dsv4_restore pending "restore exact signed GLM incumbent from the DeepSeek-V4-Flash window"
+        set_next dsv4_restore mutate "Restore GLM from the interrupted DeepSeek-V4-Flash window" \
+          "$OPS_DIR/qwen-opencode-e2e.sh _catalog-dsv4-restore"
         NEXT_DOWNTIME="Studio provider buyer traffic is unavailable during the bounded GLM restart and model-load window; Pearl is not restarted"
         return
       fi
@@ -816,7 +827,7 @@ step_done() { awk -F'\t' -v id="$1" '$1 == id { s = $2 } END { exit (s == "done"
 # A key promoted with its record owed stays open until origin/main's record
 # file holds a passing record for it and step 4a has that file in force.
 gather_buyer_ux_conformance_owed() {
-  local live_rid="$1" scan open="" settled_keys="" waiting=""
+  local live_rid="$1" scan open="" settled_keys="" waiting="" open_keys=""
   if [ ! -s "${BUC_OWED_JSON:-}" ]; then
     if [ -f "$REPO_ROOT/$BUC_FILE" ]; then
       step buyer_ux_conformance_owed blocked "the committed record file is unreadable (step buyer_ux_conformance)"
@@ -836,13 +847,23 @@ live_open = [e for e in open_ if e["release_id"] == live or e["release_id"] != c
 print("OPEN " + ", ".join("%s (%s, %s: %s)" % (e["catalog_key"], e["model"], e["state"], e["detail"]) for e in live_open))
 print("WAIT " + ", ".join("%s (owed after %s is live)" % (e["catalog_key"], e["release_id"]) for e in open_ if e not in live_open))
 print("KEYS " + " ".join(e["catalog_key"] for e in owed))
+print("OPENKEYS " + " ".join(e["catalog_key"] for e in live_open))
 PY
 )" || { step buyer_ux_conformance_owed blocked "cannot read the owed entries"; return; }
   open="$(printf '%s\n' "$scan" | sed -n 's/^OPEN //p')"
   waiting="$(printf '%s\n' "$scan" | sed -n 's/^WAIT //p')"
   settled_keys="$(printf '%s\n' "$scan" | sed -n 's/^KEYS //p')"
+  open_keys="$(printf '%s\n' "$scan" | sed -n 's/^OPENKEYS //p')"
   fact buyer_ux_conformance_owed "$open${waiting:+${open:+; }$waiting}"
-  if [ -n "$open" ]; then
+  if [ -n "$open" ] && [ -n "${QWEN_E2E_JOURNAL:-}" ] && [ -n "${DSV4_IMPORT_DIR:-}" ] &&
+     case " $open_keys " in *" deepseek/deepseek-v4-flash "*) true ;; *) false ;; esac; then
+    # The DeepSeek-V4-Flash record is run in a journaled Studio window.
+    step buyer_ux_conformance_owed owed "$open"
+    set_next buyer_ux_conformance_owed mutate \
+      "Serve DeepSeek-V4-Flash on the Studio, run its owed buyer-UX conformance through the gateway, and restore GLM" \
+      "$OPS_DIR/qwen-opencode-e2e.sh _catalog-dsv4-conformance"
+    next_meta buyer_ux_conformance_owed "$BUC_DOC#conformance-owed-first-promotion-1611-rule-4" "$DSV4_WINDOW_DOWNTIME"
+  elif [ -n "$open" ]; then
     step buyer_ux_conformance_owed owed "$open"
     set_next buyer_ux_conformance_owed manual "Run the owed buyer-UX conformance through the gateway and commit the record: $open" \
 "# SPEC-023 §16.11 rule 4: the promotion is live with its record owed; /v1/models
@@ -855,7 +876,7 @@ python3 scripts/buyer_ux_conformance.py owed-status   # state settled
 # (records-only change, no re-signed release), then: catalog-activate.sh next --run
 # installs it (step buyer_ux_conformance)." \
       "a key was promoted to recommendable with its buyer-UX conformance record owed"
-    next_meta buyer_ux_conformance_owed "$BUC_DOC#2a-buyer-ux-conformance-every-promotion-spec-023-1611" "none: read-only requests through the gateway"
+    next_meta buyer_ux_conformance_owed "$BUC_DOC#conformance-owed-first-promotion-1611-rule-4" "none: read-only requests through the gateway"
   elif [ -n "$waiting" ]; then
     step buyer_ux_conformance_owed pending "$waiting"
   elif [ -n "$settled_keys" ] && ! step_done buyer_ux_conformance; then

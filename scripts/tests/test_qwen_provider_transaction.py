@@ -339,6 +339,92 @@ class QwenProviderTransactionTests(unittest.TestCase):
         transaction.restore(args)
         transaction.finish_restore(args)
 
+    def dsv4_adopted(self):
+        self.config.write_text(
+            BASE_CONFIG.replace("a" * 64, transaction.GLM_INCUMBENT["model_artifact_sha256"]).replace(
+                "max_concurrency_override: 4\n", "max_concurrency_override: 4\nmax_concurrency_source: owner\n"),
+            encoding="utf-8",
+        )
+        self.baseline = self.config.read_bytes()
+        args = self.args(profile=transaction.DSV4_PROFILE)
+        transaction.prepare(args)
+        verify = self.verify_args(self.recommendation("deepseek-v4-flash"),
+                                  target="deepseek-v4-flash", profile=transaction.DSV4_PROFILE)
+        self.assertEqual(transaction.verify_recommendation(verify)["gateway_id"], "deepseek/deepseek-v4-flash")
+        transition = self.args(profile=transaction.DSV4_PROFILE, target=verify.target,
+                               recommendation=verify.recommendation,
+                               catalog_version=verify.catalog_version,
+                               catalog_hash=verify.catalog_hash, phase="adopting_target")
+        transaction.begin_adoption(transition)
+        self.apply_recommendation(verify)
+        transition.phase = "serving_target"
+        transaction.checkpoint(transition)
+        return args, transition
+
+    def test_dsv4_window_pins_one_owner_slot_at_32k_and_restores_glm(self):
+        args, transition = self.dsv4_adopted()
+        changed = self.config.read_text(encoding="utf-8")
+        self.assertIn("  - zai-org/glm-5.3-flash\n", changed)
+        self.assertIn("  - deepseek/deepseek-v4-flash\n", changed)
+        result = transaction.dsv4_window_settings(args)
+        self.assertEqual(result["status"], "window_settings_applied")
+        pinned = self.config.read_text(encoding="utf-8")
+        for line in ("model: deepseek/deepseek-v4-flash\n", "max_concurrency_override: 1\n",
+                     "max_concurrency_source: owner\n", "max_context_override: 32768\n",
+                     "provider_token: top-secret-never-journal\n"):
+            self.assertIn(line, pinned)
+        self.assertNotIn("max_context_override_provenance", pinned)
+        self.assertNotIn("max_concurrency_depth_override", pinned)
+        journal = json.loads(self.journal.read_text(encoding="utf-8"))
+        self.assertEqual((journal["profile"], journal["phase"]), (transaction.DSV4_PROFILE, "serving_target"))
+        self.assertNotIn("intended_owned", journal)
+        # Applied once: a second call sees the same config and refuses nothing
+        # unsafe; the window then completes and restores the GLM incumbent.
+        transition.phase = "proof_complete"
+        self.assertEqual(transaction.checkpoint(transition)["phase"], "proof_complete")
+        transaction.restore(args)
+        transaction.finish_restore(args)
+        self.assertEqual(self.config.read_bytes(), self.baseline)
+
+    def test_dsv4_window_settings_interrupted_after_write_restores_glm(self):
+        args, _ = self.dsv4_adopted()
+        real_write = transaction.write_journal
+        calls = []
+
+        def fail_second(path, journal, **kwargs):
+            calls.append(journal.get("phase"))
+            if len(calls) == 2:
+                raise OSError("journal write failed")
+            return real_write(path, journal, **kwargs)
+
+        with mock.patch.object(transaction, "write_journal", side_effect=fail_second):
+            with self.assertRaises(OSError):
+                transaction.dsv4_window_settings(args)
+        self.assertIn("max_concurrency_override: 1\n", self.config.read_text(encoding="utf-8"))
+        self.assertEqual(json.loads(self.journal.read_text(encoding="utf-8"))["phase"], "adopting_target")
+        transaction.restore(args)
+        transaction.finish_restore(args)
+        self.assertEqual(self.config.read_bytes(), self.baseline)
+
+    def test_dsv4_window_settings_refuse_other_profiles_and_changes(self):
+        args, _ = self.dsv4_adopted()
+        self.config.write_text(self.config.read_text(encoding="utf-8") + "extra_key: 1\n", encoding="utf-8")
+        with self.assertRaisesRegex(transaction.Refusal, "config changed"):
+            transaction.dsv4_window_settings(args)
+        with self.assertRaisesRegex(transaction.Refusal, "dsv4-flash-window profile requires exact signed GLM incumbent"):
+            self.config.write_text(BASE_CONFIG, encoding="utf-8")
+            self.journal.unlink()
+            transaction.prepare(self.args(profile=transaction.DSV4_PROFILE))
+        self.config.write_text(
+            BASE_CONFIG.replace("a" * 64, transaction.GLM_INCUMBENT["model_artifact_sha256"]), encoding="utf-8")
+        transaction.prepare(self.args(profile=transaction.NATIVE_MTP_PROFILE))
+        with self.assertRaisesRegex(transaction.Refusal, "adopted DeepSeek-V4-Flash checkpoint"):
+            transaction.dsv4_window_settings(self.args())
+        with self.assertRaisesRegex(transaction.Refusal, "does not belong"):
+            transaction.verify_recommendation(self.verify_args(
+                self.recommendation("deepseek-v4-flash"), target="deepseek-v4-flash",
+                profile=transaction.NATIVE_MTP_PROFILE))
+
     def test_native_mtp_profile_refuses_non_glm_incumbent(self):
         self.config.write_text(
             BASE_CONFIG.replace("zai-org/glm-5.3-flash", "other/incumbent"),

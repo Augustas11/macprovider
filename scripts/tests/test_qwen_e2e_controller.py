@@ -49,6 +49,7 @@ QWEN_E2E_CONFIG=/unused/config
 QWEN_E2E_JOURNAL=/unused/journal
 MACPROVIDER_OPS_ENTRYPOINT=1
 NATIVE_PROFILE=qwen36-native-mtp
+DSV4_PROFILE=dsv4-flash-window
 TRANSACTION_PROFILE=opencode-dual-30b
 NEXT_ID= NEXT_KIND= NEXT_TITLE= NEXT_CMD= NEXT_REASON=
 INCUMBENT_MODEL=incumbent BASELINE_PID=42
@@ -120,6 +121,7 @@ run_restore
             ["gather"],
             '''
 NATIVE_PROFILE=qwen36-native-mtp
+DSV4_PROFILE=dsv4-flash-window
 studio_helper() { [ "$1" = inspect ]; cat "$FIXTURE"; }
 gather
 printf '%s\n' "$NEXT_KIND" "$NEXT_CMD" "$NEXT_REASON"
@@ -219,6 +221,92 @@ validate_native_target_status "$FIXTURE" 41
                         function.index("studio_helper prepare"))
         self.assertLess(function.index('"$OPS_DIR/catalog-activate.sh" _gateway-proof'),
                         function.index("restore_provider"))
+
+    def test_dsv4_window_status_requires_one_slot_with_cb_and_mtp_off(self):
+        valid = {
+            "native_mtp": {"enabled": False, "mode": "disabled"},
+            "continuous_batching": {"active": False},
+            "capacity": {"max_concurrency": 1},
+        }
+        for mutate, expected in (
+            (lambda d: d["native_mtp"].update(enabled=True, mode="eligible"), False),
+            (lambda d: d["continuous_batching"].update(active=True), False),
+            (lambda d: d["capacity"].update(max_concurrency=4), False),
+            (lambda d: d.pop("capacity"), False),
+            (lambda d: None, True),
+        ):
+            document = json.loads(json.dumps(valid))
+            mutate(document)
+            result, _ = self.run_shell(
+                ["validate_dsv4_target_status"],
+                """
+DSV4_TARGET_KEY=deepseek/deepseek-v4-flash
+validate_status() { :; }
+validate_dsv4_target_status "$FIXTURE" 41
+""",
+                document,
+            )
+            self.assertEqual(result.returncode == 0, expected, result.stderr)
+
+    def test_dsv4_window_restore_requires_glm_with_cb_and_native_mtp(self):
+        valid = {"native_mtp": {"enabled": True, "mode": "active"}, "continuous_batching": {"active": True}}
+        for mutate, expected in (
+            (lambda d: d["native_mtp"].update(mode="disabled"), False),
+            (lambda d: d["continuous_batching"].update(active=False), False),
+            (lambda d: None, True),
+        ):
+            document = json.loads(json.dumps(valid))
+            mutate(document)
+            result, _ = self.run_shell(
+                ["validate_glm_restored_status"],
+                """
+GLM_INCUMBENT=zai-org/glm-5.3-flash
+validate_status() { :; }
+validate_glm_restored_status "$FIXTURE"
+""",
+                document,
+            )
+            self.assertEqual(result.returncode == 0, expected, result.stderr)
+
+    def test_dsv4_window_order_imports_pins_and_restores(self):
+        function = shell_function(CONTROLLER, "run_dsv4_window")
+        for forbidden in ("QWEN_E2E_OPENCODE", "run_recorder", "fetch_market ", "_gateway-proof"):
+            self.assertNotIn(forbidden, function)
+        self.assertIn("require_catalog_lock catalog-activate:buyer_ux_conformance_owed", function)
+        self.assertIn('validate_buyer_token_file "$BUYER_TOKEN_FILE"', function)
+        self.assertIn("verify_published_release_identity", function)
+        order = [
+            "fetch_dsv4_market",
+            'studio_helper prepare --profile "$DSV4_PROFILE"',
+            'models import "$DSV4_TARGET_KEY" --from "$DSV4_IMPORT_DIR"',
+            'emit_recommendation "$DSV4_TARGET_KEY"',
+            "begin_adoption_remote adopting_target",
+            "adopt_recommendation",
+            "checkpoint_remote serving_target",
+            "studio_helper dsv4-window-settings",
+            'restart_and_wait "$DSV4_TARGET_KEY"',
+            "validate_dsv4_target_status",
+            "buyer_ux_conformance.py\" run",
+            "checkpoint_remote proof_complete",
+            "restore_provider",
+            'validate_glm_restored_status "$OPS_TMP_DIR/restore-after.json"',
+        ]
+        positions = [function.index(item) for item in order]
+        self.assertEqual(positions, sorted(positions))
+        # The conformance record goes to the ops state, never the checkout.
+        self.assertIn('--record "$record"', function)
+        restore = shell_function(CONTROLLER, "run_dsv4_restore")
+        self.assertIn("require_catalog_lock catalog-activate:dsv4_restore", restore)
+        self.assertIn('= "$DSV4_PROFILE" ]', restore)
+
+    def test_catalog_routes_dsv4_journal_to_its_restore_before_normal_steps(self):
+        gather = shell_function(CATALOG, "gather")
+        self.assertIn('"$qwen_profile" = "$DSV4_WINDOW_PROFILE"', gather)
+        self.assertIn("qwen-opencode-e2e.sh _catalog-dsv4-restore", gather)
+        self.assertLess(gather.index("_catalog-dsv4-restore"), gather.index("gather_buyer_ux_conformance"))
+        owed = shell_function(CATALOG, "gather_buyer_ux_conformance_owed")
+        self.assertIn("qwen-opencode-e2e.sh _catalog-dsv4-conformance", owed)
+        self.assertIn("$DSV4_WINDOW_DOWNTIME", owed)
 
     def test_buyer_token_must_be_owner_only_regular_file(self):
         result, _ = self.run_shell(

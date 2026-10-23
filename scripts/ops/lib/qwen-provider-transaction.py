@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Crash-recoverable, secret-free config transaction for Qwen live E2E.
 
+Despite the name it also carries the DeepSeek-V4-Flash Studio window profile
+(dsv4-flash-window, #2111): the same journaled switch from the GLM incumbent
+to one target and back.
+
 This helper intentionally understands only top-level YAML fields.  It never
 copies the complete provider config into its journal: only the allowlisted
 fields owned by this transaction are recorded.  Every write is performed
@@ -92,11 +96,27 @@ TARGETS: dict[str, dict[str, str]] = {
         "revision": "38740b847e4cb78f352aba30aa41c76e08e6eb46",
         "sha256": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
     },
+    "deepseek-v4-flash": {
+        "gateway_id": "deepseek/deepseek-v4-flash",
+        "catalog_key": "deepseek/deepseek-v4-flash",
+        "model_id": "TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX",
+        "revision": "d6be051ae238b2021de56cf098d8f0206328754a",
+        "sha256": "58ee40d4c0bc436695d1d8d6a6cdfdb0326ec37f25e13ec98ea1d5c0878e732c",
+    },
 }
 
 LEGACY_PROFILE = "opencode-dual-30b"
 NATIVE_MTP_PROFILE = "qwen36-native-mtp"
 AIR_PROFILE = "air-qwen8-adoption"
+DSV4_PROFILE = "dsv4-flash-window"
+# The DeepSeek-V4-Flash window serves the lab-qualified shape: one serial
+# owner-pinned slot at 32k context. Continuous batching and native MTP stay
+# off by construction (no signed policy or admission entry for the family).
+DSV4_WINDOW_SETTINGS = {
+    "max_concurrency_override": "1",
+    "max_concurrency_source": "owner",
+    "max_context_override": "32768",
+}
 PROFILES: dict[str, dict[str, Any]] = {
     AIR_PROFILE: {
         "schema": PROFILE_SCHEMA,
@@ -122,7 +142,17 @@ PROFILES: dict[str, dict[str, Any]] = {
         "complete": "proof_complete",
         "context_floor": 4_096,
     },
+    DSV4_PROFILE: {
+        "schema": PROFILE_SCHEMA,
+        "targets": ("deepseek-v4-flash",),
+        "adopting": ("adopting_target",),
+        "serving": ("serving_target",),
+        "complete": "proof_complete",
+        "context_floor": 4_096,
+    },
 }
+# Profiles that leave the exact signed GLM incumbent and must restore it.
+GLM_INCUMBENT_PROFILES = frozenset({NATIVE_MTP_PROFILE, DSV4_PROFILE})
 
 GLM_INCUMBENT = {
     "model": "zai-org/glm-5.3-flash",
@@ -316,7 +346,7 @@ def journal_profile(journal: dict[str, Any]) -> str:
         if "profile" in journal:
             raise Refusal("legacy journal cannot carry a profile")
         return LEGACY_PROFILE
-    if schema == PROFILE_SCHEMA and journal.get("profile") in {NATIVE_MTP_PROFILE, AIR_PROFILE}:
+    if schema == PROFILE_SCHEMA and journal.get("profile") in {NATIVE_MTP_PROFILE, AIR_PROFILE, DSV4_PROFILE}:
         return journal["profile"]
     raise Refusal("unsupported transaction journal schema")
 
@@ -573,10 +603,10 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
             raise Refusal("draft model config is unsupported by this transaction: "
                           + ", ".join(sorted(unsupported_draft)))
         incumbent = scalar(owned, "model")
-        if profile == NATIVE_MTP_PROFILE:
+        if profile in GLM_INCUMBENT_PROFILES:
             for key, expected in GLM_INCUMBENT.items():
                 if scalar(owned, key) != expected:
-                    raise Refusal(f"native-MTP profile requires exact signed GLM incumbent {key}")
+                    raise Refusal(f"{profile} profile requires exact signed GLM incumbent {key}")
         supported = [incumbent] + [TARGETS[name]["catalog_key"]
                                    for name in profile_spec["targets"]]
         deduplicated = list(dict.fromkeys(supported))
@@ -868,6 +898,47 @@ def air_status(port: int) -> dict[str, Any]:
         return value
     finally:
         connection.close()
+
+
+def dsv4_window_settings(args: argparse.Namespace) -> dict[str, Any]:
+    """Pin the adopted DeepSeek-V4-Flash config to the window shape (one
+    owner-pinned slot, 32k context) as a journaled operator-owned transition.
+    Restore returns every owned field, the GLM incumbent's pin included."""
+    config, journal_path = absolute_path(args.config), absolute_path(args.journal)
+    with config_lock(config):
+        journal = load_journal(journal_path)
+        if journal_profile(journal) != DSV4_PROFILE or journal["phase"] != "serving_target":
+            raise Refusal("window settings require the adopted DeepSeek-V4-Flash checkpoint")
+        if Path(journal["config_path"]) != config:
+            raise Refusal("journal is not active for this config")
+        current = config.read_bytes()
+        if sha256(current) != journal["last_config_sha256"]:
+            raise Refusal("config changed before the window settings")
+        blocks, owned = split_blocks(current, DSV4_PROFILE)
+        if sha256(without_owned(blocks, DSV4_PROFILE)) != journal["unowned_sha256"]:
+            raise Refusal("non-owned fields changed before the window settings")
+        target = TARGETS["deepseek-v4-flash"]
+        if (scalar(owned, "model") != target["catalog_key"]
+                or scalar(owned, "model_artifact_sha256") != target["sha256"]):
+            raise Refusal("window settings require the adopted DeepSeek-V4-Flash artifact")
+        replacements = dict(owned)
+        for key, value in DSV4_WINDOW_SETTINGS.items():
+            replacements[key] = f"{key}: {value}\n".encode()
+        # An operator-owned context carries no recommendation provenance, and
+        # one slot needs no depth override.
+        replacements.pop("max_context_override_provenance", None)
+        replacements.pop("max_concurrency_depth_override", None)
+        intended = {key: scalar(replacements, key) for key in RECOMMENDATION_OWNED if key in replacements}
+        journal.update(phase="adopting_target", intended_owned=intended,
+                       intended_target="deepseek-v4-flash", intended_after_unix=int(time.time()) - 1)
+        write_journal(journal_path, journal)
+        written = validate_then_replace(config, absolute_path(args.validator),
+                                        render(blocks, replacements, DSV4_PROFILE))
+        journal.update(phase="serving_target", last_config_sha256=written)
+        for key in ("intended_owned", "intended_target", "intended_after_unix"):
+            journal.pop(key, None)
+        write_journal(journal_path, journal)
+    return {"status": "window_settings_applied", **DSV4_WINDOW_SETTINGS}
 
 
 def select_air_four(args: argparse.Namespace) -> dict[str, Any]:
@@ -1219,6 +1290,10 @@ def parser() -> argparse.ArgumentParser:
     context_parser.add_argument("--journal", required=True)
     context_parser.add_argument("--action", required=True, choices=("begin", "finish"))
     context_parser.set_defaults(run=air_context)
+    window_parser = commands.add_parser("dsv4-window-settings")
+    for name in ("config", "journal", "validator"):
+        window_parser.add_argument("--" + name, required=True)
+    window_parser.set_defaults(run=dsv4_window_settings)
     slots_parser = commands.add_parser("select-air-four")
     for name in ("config", "journal", "validator", "provider-sha256", "policy-json"):
         slots_parser.add_argument("--" + name, required=True)

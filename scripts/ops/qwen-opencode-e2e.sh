@@ -17,6 +17,14 @@
 #   BUYER_TOKEN_FILE        absolute local owner-only Malibu buyer token file
 #   STUDIO_SSH, COORDINATOR_URL, MACPROVIDER_OPS_OWNER
 #
+# The catalog controller also drives two fixed GLM-incumbent profiles through
+# internal commands: the Qwen3.6 native-MTP proof (_catalog-qwen36-*) and the
+# DeepSeek-V4-Flash window (_catalog-dsv4-conformance, _catalog-dsv4-restore,
+# #2111), which imports the snapshot from DSV4_IMPORT_DIR (an absolute Studio
+# directory) instead of downloading it, serves DeepSeek at one owner-pinned
+# slot and 32k context with continuous batching and native MTP off, runs the
+# owed buyer-UX conformance through GATEWAY_URL, and restores GLM.
+#
 # `diagnostic` is deliberately separate from live ops.  It requires
 # QWEN_E2E_DIAGNOSTIC_CONFIG/JOURNAL/VALIDATOR to be regular files below the
 # system temporary directory and only exercises prepare/restore mechanics.
@@ -37,6 +45,10 @@ NATIVE_TARGET_KEY=qwen/qwen3.6-35b-a3b
 NATIVE_PROFILE=qwen36-native-mtp
 TRANSACTION_PROFILE=opencode-dual-30b
 GLM_INCUMBENT=zai-org/glm-5.3-flash
+DSV4_TARGET=deepseek-v4-flash
+DSV4_TARGET_KEY=deepseek/deepseek-v4-flash
+DSV4_TARGET_MODEL_ID=TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX
+DSV4_PROFILE=dsv4-flash-window
 NATIVE_ADMISSION_RELEASE=phase3-binary/catalog/autotune/native-mtp-admission-release.json
 RELEASE_TEAM_ID=YF7XNRJUG4
 RELEASE_SIGNING_IDENTIFIER=live.malibu.provider.cli
@@ -211,6 +223,19 @@ PY
 }
 
 fetch_native_mtp_market() {
+  fetch_single_target_market qwen/qwen3.6-35b-a3b mlx-community/Qwen3.6-35B-A3B-4bit \
+    38740b847e4cb78f352aba30aa41c76e08e6eb46 3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1
+}
+
+fetch_dsv4_market() {
+  fetch_single_target_market "$DSV4_TARGET_KEY" "$DSV4_TARGET_MODEL_ID" \
+    d6be051ae238b2021de56cf098d8f0206328754a 58ee40d4c0bc436695d1d8d6a6cdfdb0326ec37f25e13ec98ea1d5c0878e732c
+}
+
+# fetch_single_target_market KEY MODEL_ID REVISION SHA256: the live signed
+# catalog serves KEY recommendable with exactly this artifact, and the live
+# rate card prices it.
+fetch_single_target_market() {
   local base code
   base="$(coordinator_url)"
   [ -n "$base" ] || return 1
@@ -218,13 +243,11 @@ fetch_native_mtp_market() {
   [ "$code" = 200 ] || return 1
   code="$(http_get "$base/v1/rate-card" "$OPS_TMP_DIR/rates.json")"
   [ "$code" = 200 ] || return 1
-  python3 - "$OPS_TMP_DIR/candidates.json" "$OPS_TMP_DIR/rates.json" "$OPS_TMP_DIR/market.json" <<'PY'
+  python3 - "$OPS_TMP_DIR/candidates.json" "$OPS_TMP_DIR/rates.json" "$OPS_TMP_DIR/market.json" "$@" <<'PY'
 import json, sys
 candidates, rates = (json.load(open(path)) for path in sys.argv[1:3])
-key = "qwen/qwen3.6-35b-a3b"
-expected = ("mlx-community/Qwen3.6-35B-A3B-4bit",
-            "38740b847e4cb78f352aba30aa41c76e08e6eb46",
-            "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1")
+key = sys.argv[4]
+expected = tuple(sys.argv[5:8])
 row = (candidates.get("rows") or {}).get(key)
 if not isinstance(row, dict) or (
     row.get("model_id"), row.get("model_revision"), row.get("model_sha256"),
@@ -293,6 +316,39 @@ if mtp.get("enabled") is not True or mtp.get("mode") not in ("eligible", "active
     raise SystemExit("native MTP is not eligible or active")
 if cb.get("active") is not True:
     raise SystemExit("continuous batching is not active")
+PY
+}
+
+# validate_dsv4_target_status FILE PREVIOUS_PID: DeepSeek buyer-serving on
+# the window shape: one slot, continuous batching and native MTP off.
+validate_dsv4_target_status() {
+  validate_status "$1" "$DSV4_TARGET_KEY" "$2" >/dev/null || return
+  python3 - "$1" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+mtp = d.get("native_mtp") or {}
+cb = d.get("continuous_batching") or {}
+if mtp.get("enabled") is True or mtp.get("mode") in ("eligible", "active"):
+    raise SystemExit("native MTP is not off")
+if cb.get("active") is True:
+    raise SystemExit("continuous batching is active")
+if (d.get("capacity") or {}).get("max_concurrency") != 1:
+    raise SystemExit("max concurrency is not one slot")
+PY
+}
+
+# validate_glm_restored_status FILE: GLM is back with continuous batching
+# active and native MTP eligible or active.
+validate_glm_restored_status() {
+  validate_status "$1" "$GLM_INCUMBENT" >/dev/null || return
+  python3 - "$1" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+mtp = d.get("native_mtp") or {}
+if (d.get("continuous_batching") or {}).get("active") is not True:
+    raise SystemExit("continuous batching is not active")
+if mtp.get("enabled") is not True or mtp.get("mode") not in ("eligible", "active"):
+    raise SystemExit("native MTP is not eligible or active")
 PY
 }
 
@@ -456,6 +512,11 @@ gather() {
       "the native transaction is protected by catalog-activate:qwen_restore and cannot use legacy recovery"
     return
   fi
+  if [ "$journal_profile" = "$DSV4_PROFILE" ] && [ "$restore_required" = true ]; then
+    set_next restore blocked "Restore GLM through the catalog controller" "scripts/ops/catalog-activate.sh status" \
+      "the DeepSeek-V4-Flash window is restored by catalog-activate step dsv4_restore"
+    return
+  fi
   if [ "$restore_required" = true ]; then
     [ -z "$journal_profile" ] || {
       set_next restore blocked "Refuse an unknown Qwen transaction profile" "" \
@@ -607,6 +668,11 @@ set_remote_scratch_paths() {
       ;;
     qwen36-native-mtp)
       REMOTE_REC_ONE="$REMOTE_SCRATCH/qwen36.recommendation.json"
+      REMOTE_REC_TWO="$REMOTE_SCRATCH/unused-two.recommendation.json"
+      REMOTE_RECORDER="$REMOTE_SCRATCH/unused-recorder.py"
+      ;;
+    dsv4-flash-window)
+      REMOTE_REC_ONE="$REMOTE_SCRATCH/dsv4.recommendation.json"
       REMOTE_REC_TWO="$REMOTE_SCRATCH/unused-two.recommendation.json"
       REMOTE_RECORDER="$REMOTE_SCRATCH/unused-recorder.py"
       ;;
@@ -1197,6 +1263,106 @@ run_native_mtp_campaign() {
   restore_provider
 }
 
+run_dsv4_window() {
+  require_catalog_lock catalog-activate:buyer_ux_conformance_owed
+  for name in QWEN_E2E_CLI QWEN_E2E_CONFIG QWEN_E2E_JOURNAL QWEN_E2E_HANDBACK \
+    QWEN_E2E_WRITTEN_HANDBACK BUYER_TOKEN_FILE DSV4_IMPORT_DIR GATEWAY_URL; do
+    [ -n "${!name:-}" ] || refuse "$name is required by the fixed DeepSeek-V4-Flash window"
+  done
+  for name in QWEN_E2E_CLI QWEN_E2E_CONFIG QWEN_E2E_JOURNAL QWEN_E2E_HANDBACK \
+    QWEN_E2E_WRITTEN_HANDBACK BUYER_TOKEN_FILE DSV4_IMPORT_DIR; do
+    require_abs "$name" "${!name}"
+  done
+  case "$GATEWAY_URL" in https://*) ;; *) refuse "GATEWAY_URL must be an https URL" ;; esac
+  validate_buyer_token_file "$BUYER_TOKEN_FILE" ||
+    refuse "BUYER_TOKEN_FILE must be an owner-only regular file of bounded size"
+  validate_handback || refuse "signed release handback is invalid"
+  fetch_dsv4_market || refuse "exact live DeepSeek-V4-Flash recommendable row and rate row are unavailable"
+  HB_VERSION="$(handback_field binary_version)"; HB_PROVIDER="$(handback_field provider_id)"
+  HB_SHA="$(handback_field cli_sha256)"; HB_CDHASH="$(handback_field code_cdhash)"
+  HB_TEAM="$(handback_field team_id)"; HB_IDENTIFIER="$(handback_field signing_identifier)"
+  HB_HANDOFF_SHA="$(handback_field written_handoff_sha256)"
+  [ "$(written_handoff_sha "$HB_VERSION")" = "$HB_HANDOFF_SHA" ] || refuse "written Studio handback changed"
+  verify_published_release_identity "$HB_VERSION" "$HB_SHA" "$HB_CDHASH" "$HB_TEAM" "$HB_IDENTIFIER" ||
+    refuse "DeepSeek-V4-Flash window requires a published release with valid signed provider identity"
+  studio_preflight "$OPS_TMP_DIR/preflight-status.json" || refuse "Studio signed handback preflight failed"
+  load_live_context || refuse "live context is incomplete"
+  [ "$INCUMBENT_MODEL" = "$GLM_INCUMBENT" ] || refuse "DeepSeek-V4-Flash window requires the exact GLM incumbent"
+  validate_glm_restored_status "$OPS_TMP_DIR/preflight-status.json" ||
+    refuse "GLM incumbent is not buyer-serving with continuous batching and native MTP"
+
+  local transaction_id record rc=0
+  transaction_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+  OPS_SCOPE="dsv4-window-$transaction_id"
+  record="$OPS_STATE_DIR/catalog-owed-conformance/deepseek-v4-flash-$transaction_id.json"
+  trap campaign_cleanup EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
+  TRANSACTION_PROFILE="$DSV4_PROFILE"
+  REMOTE_SCRATCH="$(create_remote_scratch)" || refuse "could not create protected Studio scratch"
+  set_remote_scratch_paths "$TRANSACTION_PROFILE" || refuse "transaction profile has no fixed scratch layout"
+  BASELINE_PID="$(status_pid "$OPS_TMP_DIR/preflight-status.json")"
+  studio_helper prepare --profile "$DSV4_PROFILE" --config "$QWEN_E2E_CONFIG" \
+    --journal "$QWEN_E2E_JOURNAL" --validator "$QWEN_E2E_CLI" \
+    --transaction-id "$transaction_id" --binary-version "$HB_VERSION" \
+    --provider-id "$HB_PROVIDER" --cli-sha256 "$HB_SHA" --code-cdhash "$HB_CDHASH" \
+    --team-id "$HB_TEAM" --signing-identifier "$HB_IDENTIFIER" \
+    --written-handoff-sha256 "$HB_HANDOFF_SHA" --baseline-catalog-version "$LIVE_RELEASE" \
+    --baseline-catalog-hash "$LIVE_DIGEST" --baseline-pid "$BASELINE_PID" \
+    --rate-card-version "$RATE_VERSION" --remote-scratch "$REMOTE_SCRATCH" >/dev/null
+  restart_and_wait "$GLM_INCUMBENT" "$OPS_TMP_DIR/preflight-status.json" "$OPS_TMP_DIR/prepared-status.json"
+
+  # The snapshot exists only in the lab fixture: adopt it against the signed
+  # row hash with no download. It never changes config or the active model.
+  studio_command "$QWEN_E2E_CLI" models import "$DSV4_TARGET_KEY" --from "$DSV4_IMPORT_DIR" \
+    --json --config "$QWEN_E2E_CONFIG" > "$OPS_TMP_DIR/dsv4.import.json" ||
+    refuse "models import of the DeepSeek-V4-Flash snapshot failed (exit 3 = bytes do not match the signed hash)"
+  emit_recommendation "$DSV4_TARGET_KEY" "$OPS_TMP_DIR/dsv4.recommendation.json"
+  verify_local_rate_version "$OPS_TMP_DIR/dsv4.recommendation.json"
+  upload_file "$OPS_TMP_DIR/dsv4.recommendation.json" "$REMOTE_REC_ONE"
+  verify_remote_recommendation "$DSV4_TARGET" "$REMOTE_REC_ONE"
+  begin_adoption_remote adopting_target "$DSV4_TARGET" "$REMOTE_REC_ONE"
+  adopt_recommendation "$REMOTE_REC_ONE" "$OPS_TMP_DIR/dsv4.adoption.jsonl"
+  checkpoint_remote serving_target "$DSV4_TARGET" "$REMOTE_REC_ONE"
+  studio_helper dsv4-window-settings --config "$QWEN_E2E_CONFIG" --journal "$QWEN_E2E_JOURNAL" \
+    --validator "$QWEN_E2E_CLI" >/dev/null
+  restart_and_wait "$DSV4_TARGET_KEY" "$OPS_TMP_DIR/prepared-status.json" "$OPS_TMP_DIR/dsv4.status.json"
+  validate_dsv4_target_status "$OPS_TMP_DIR/dsv4.status.json" "$(status_pid "$OPS_TMP_DIR/prepared-status.json")" ||
+    refuse "DeepSeek-V4-Flash is not buyer-serving at one slot with continuous batching and native MTP off"
+
+  # SPEC-023 §16.11 rule 4: the owed record, through the gateway, into a copy
+  # of origin/main's record file for the operator to commit.
+  mkdir -p "$(dirname "$record")"
+  cp "$REPO_ROOT/phase3-binary/catalog/autotune/buyer-ux-conformance.json" "$record"
+  python3 -I "$REPO_ROOT/scripts/buyer_ux_conformance.py" run --gateway "${GATEWAY_URL%/}/v1" \
+    --key-file "$BUYER_TOKEN_FILE" --model "$DSV4_TARGET_MODEL_ID" --catalog-key "$DSV4_TARGET_KEY" \
+    --record "$record" >&2 || rc=$?
+  checkpoint_remote proof_complete "$DSV4_TARGET" "$REMOTE_REC_ONE"
+  restore_provider
+  validate_glm_restored_status "$OPS_TMP_DIR/restore-after.json" ||
+    refuse "GLM is back but continuous batching or native MTP is not on; read its /v1/status"
+  [ "$rc" = 0 ] || refuse "the DeepSeek-V4-Flash conformance run failed a check; record at $record"
+  log "owed conformance record written to $record: commit it to phase3-binary/catalog/autotune/buyer-ux-conformance.json"
+}
+
+run_dsv4_restore() {
+  require_catalog_lock catalog-activate:dsv4_restore
+  studio_helper inspect --journal "$QWEN_E2E_JOURNAL" > "$OPS_TMP_DIR/journal.json" ||
+    refuse "transaction journal is unreadable"
+  [ "$(json_field "$OPS_TMP_DIR/journal.json" 'd.get("profile")')" = "$DSV4_PROFILE" ] ||
+    refuse "active transaction is not the fixed DeepSeek-V4-Flash window"
+  load_journal_context "$OPS_TMP_DIR/journal.json" || refuse "journal has no safe restoration binding"
+  TRANSACTION_PROFILE="$DSV4_PROFILE"
+  [ "$INCUMBENT_MODEL" = "$GLM_INCUMBENT" ] || refuse "journal does not bind the exact GLM incumbent"
+  validate_native_journal_release_binding || refuse "journal does not bind a trusted published signed CLI identity"
+  if [ "$(json_field "$OPS_TMP_DIR/journal.json" 'd.get("status")')" != restored ]; then
+    verify_installed_cli || refuse "installed signed CLI no longer matches the journaled release binding"
+    restore_provider
+  fi
+  remove_remote_scratch || refuse "protected Studio scratch cleanup failed"
+}
+
 run_bind() {
   [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] || refuse "binding is callable only by next --run"
   [ -n "${QWEN_E2E_HANDBACK:-}" ] && [ -n "${QWEN_E2E_WRITTEN_HANDBACK:-}" ] ||
@@ -1294,6 +1460,8 @@ internal() {
     _catalog-qwen36-prejournal-reconcile) run_native_prejournal_reconcile ;;
     _catalog-qwen36-proof) run_native_mtp_campaign ;;
     _catalog-qwen36-restore) run_native_mtp_restore ;;
+    _catalog-dsv4-conformance) run_dsv4_window ;;
+    _catalog-dsv4-restore) run_dsv4_restore ;;
     *) die "unknown internal command: $1" ;;
   esac
 }
