@@ -2048,7 +2048,7 @@ rm -f "$tmp/svc/hup_noop" "$tmp/svc/hups"
 MACPROVIDER_OPS_OWNER=t run_rc 0 "conformance install with one SIGHUP" scripts/ops/catalog-activate.sh next --run
 expect_lock_free
 if [ "$(buc_key)" = "$BUC_DEST" ] && cmp -s "$BUC_DEST" "$W/phase3-binary/catalog/autotune/buyer-ux-conformance.json" && [ "$(hups)" = 1 ] && [ "$(restarts)" = 0 ] && [ ! -e "$BUC_STAGED" ]; then ok; else bad "SIGHUP install: key=$(buc_key) hups=$(hups) restarts=$(restarts)"; fi
-if grep -q '^  # keep$' "$tmp/pearl/coordinator.yaml" && [ "$(stat -f '%Lp' "$BUC_DEST" 2>/dev/null || stat -c '%a' "$BUC_DEST")" = 640 ]; then ok; else bad "config comment or file mode not preserved"; fi
+if grep -q '^  # keep$' "$tmp/pearl/coordinator.yaml" && [ "$(python3 -c 'import os,sys; print(oct(os.stat(sys.argv[1]).st_mode & 0o7777)[2:])' "$BUC_DEST")" = 640 ]; then ok; else bad "config comment or file mode not preserved"; fi
 if ls "$PEARL_BACKUP_ROOT" | grep -q -- '-buyer-ux-conformance-'; then ok; else bad "no coordinator.yaml backup"; fi
 run_rc 0 "conformance status after the SIGHUP install" scripts/ops/catalog-activate.sh status
 if [ "$(state_of buyer_ux_conformance)" = "done" ]; then ok; else bad "after SIGHUP install: $(state_of buyer_ux_conformance)"; fi
