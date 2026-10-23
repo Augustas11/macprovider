@@ -13,7 +13,9 @@ log() { printf '[test-canary-swap] %s\n' "$*" >&2; }
 T="$(mktemp -d "${TMPDIR:-/tmp}/canary-swap-test.XXXXXX")"
 T="$(cd "$T" && pwd -P)"
 SERVER_PID=""
+COORD_PID=""
 cleanup() {
+  [ -z "$COORD_PID" ] || { kill "$COORD_PID" 2>/dev/null || true; wait "$COORD_PID" 2>/dev/null || true; }
   if [ -n "$SERVER_PID" ]; then
     kill "$SERVER_PID" 2>/dev/null || true
     wait "$SERVER_PID" 2>/dev/null || true
@@ -67,11 +69,31 @@ make_payload() { # DIR VERSION DROP_KERNEL
   write_metallib "$1/mlx.metallib" "$MANIFEST" "$3"
   cp "$1/mlx.metallib" "$1/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib"
   printf '{}\n' >"$1/compatibility-set.json"
+  mkdir -p "$1/catalog-release"
+  printf '{"release_id":"%s","generated_at":"%s"}\n' "${4:-rel-live}" "${5:-2026-10-22T06:00:00Z}" >"$1/catalog-release/release.json"
+  printf '{"generated_at":"%s","version":"%s"}\n' "${5:-2026-10-22T06:00:00Z}" "${6:-v-live}" >"$1/catalog-release/rate-card.json"
 }
+PAYLOAD_MEMBERS="macprovider-cli mlx.metallib mlx-swift_Cmlx.bundle compatibility-set.json catalog-release"
 make_payload "$T/good" "$CAND" none
-tar -czf "$T/good.tar.gz" -C "$T/good" macprovider-cli mlx.metallib mlx-swift_Cmlx.bundle compatibility-set.json
+# shellcheck disable=SC2086
+tar -czf "$T/good.tar.gz" -C "$T/good" $PAYLOAD_MEMBERS
 make_payload "$T/bad" "$CAND" gather_mm_offsets
-tar -czf "$T/bad.tar.gz" -C "$T/bad" macprovider-cli mlx.metallib mlx-swift_Cmlx.bundle compatibility-set.json
+# shellcheck disable=SC2086
+tar -czf "$T/bad.tar.gz" -C "$T/bad" $PAYLOAD_MEMBERS
+# A candidate baking a newer catalog than Pearl serves (the 1.8.262 failure).
+make_payload "$T/newcat" "$CAND" none rel-new 2026-10-23T00:40:00Z v-new
+# shellcheck disable=SC2086
+tar -czf "$T/newcat.tar.gz" -C "$T/newcat" $PAYLOAD_MEMBERS
+
+# Fake coordinator: Pearl serves catalog rel-live.
+mkdir -p "$T/coord/v1"
+printf '{"release_id":"rel-live","generated_at":"2026-10-22T06:00:00Z","status":"live_verified"}\n' >"$T/coord/v1/autotune-release"
+printf '{"generated_at":"2026-10-22T06:00:00Z","version":"v-live"}\n' >"$T/coord/v1/rate-card"
+COORD_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+python3 -m http.server "$COORD_PORT" --bind 127.0.0.1 --directory "$T/coord" >/dev/null 2>&1 &
+COORD_PID=$!
+export COORDINATOR_URL="http://127.0.0.1:$COORD_PORT"
+for _ in $(seq 1 50); do curl -fs -o /dev/null "$COORDINATOR_URL/v1/rate-card" && break; sleep 0.1; done
 
 # verify_bytes TARBALL: record TARBALL as the signature-verified v$CAND bytes,
 # the way cli-release.sh signed_byte_verification leaves them.
@@ -190,6 +212,26 @@ cp "$T/bad.tar.gz" "$T/bytes/macprovider-cli-v$CAND-darwin-arm64.tar.gz"
 run_rc 3 "swap refuses bytes that differ from the signed checksums" "$SWAP" swap --version "$CAND"
 grep -q "does not match its signed checksums.txt entry" "$T/err" || die "checksum binding not named"
 run_rc 0 "check passes a complete candidate" "$SWAP" check --version "$CAND" --tarball "$T/good.tar.gz"
+
+# 1a. a candidate whose baked catalog is not the one Pearl serves is refused
+#     by check and by swap before anything changes (1.8.262 canary failed with
+#     rate_card_update_required); so is an unreadable or unset coordinator.
+run_rc 3 "check refuses a catalog Pearl does not serve" "$SWAP" check --version "$CAND" --tarball "$T/newcat.tar.gz"
+grep -q "candidate bakes catalog rel-new; Pearl serves rel-live: activate the catalog first (scripts/ops/catalog-activate.sh)" "$T/err" ||
+  die "catalog mismatch not named"
+verify_bytes "$T/newcat.tar.gz"
+run_rc 3 "swap refuses a catalog Pearl does not serve" "$SWAP" swap --version "$CAND"
+grep -q "Pearl serves rel-live: activate the catalog first" "$T/err" || die "swap catalog mismatch not named"
+[ "$(installed)" = "$OLD" ] || die "catalog-refused swap changed the payload"
+[ ! -f "$T/state/runner" ] || die "catalog-refused swap touched the buyer runner"
+[ ! -f "$MACPROVIDER_LIVE_LOCK" ] || die "catalog-refused swap took the live-ops lock"
+cp "$T/coord/v1/rate-card" "$T/rate-card.live"
+printf '{"generated_at":"2026-10-21T00:00:00Z","version":"v-old"}\n' >"$T/coord/v1/rate-card"
+run_rc 3 "check refuses a rate card Pearl does not serve" "$SWAP" check --version "$CAND" --tarball "$T/good.tar.gz"
+grep -q "rate-card.json generated_at/version" "$T/err" || die "rate-card mismatch not named"
+mv "$T/rate-card.live" "$T/coord/v1/rate-card"
+run_rc 3 "check refuses without COORDINATOR_URL" env -u COORDINATOR_URL "$SWAP" check --version "$CAND" --tarball "$T/good.tar.gz"
+run_rc 3 "check refuses an unreadable coordinator" env COORDINATOR_URL="$COORDINATOR_URL/missing" "$SWAP" check --version "$CAND" --tarball "$T/good.tar.gz"
 
 # 2. healthy swap: candidate installed, backup kept, resumed, runner restarted,
 #    canary_swap recorded for the canary_smoke probe.
