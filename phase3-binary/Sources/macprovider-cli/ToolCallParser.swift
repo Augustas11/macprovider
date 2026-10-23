@@ -60,15 +60,37 @@ enum ToolCallParser {
     /// selection (`parseGuaranteedToolCalls`) validates every generated call
     /// against the requested cardinality (§3.11), so nothing is dropped there.
     static func uniqueCappedCalls(_ calls: [ToolCall]) -> [ToolCall] {
-        var seen = Set<String>()
+        var seen = Set<Data>()
         var kept: [ToolCall] = []
         for call in calls where kept.count < ToolSelectionPolicy.maxCalls {
-            let arguments = (try? StrictJSONParser.parse(call.arguments, maxDepth: 128).deterministicJSONString()) ?? call.arguments
-            // Function names are `[A-Za-z0-9_-]`, so NUL cannot occur in one.
-            guard seen.insert(call.functionName + "\u{0}" + arguments).inserted else { continue }
+            // Byte keys, never Swift `String` equality (which treats canonically
+            // equivalent Unicode as equal). Key order is normalized only when
+            // the arguments hold no number: the parser reads numbers as
+            // `Double`, so two different literals could share a canonical form;
+            // with numbers the raw bytes must match. Function names are
+            // `[A-Za-z0-9_-]`, so the NUL separator cannot occur in one.
+            var key = Data(call.functionName.utf8)
+            if let parsed = try? StrictJSONParser.parse(call.arguments, maxDepth: 128), !containsNumber(parsed),
+               let canonical = try? parsed.deterministicJSONString() {
+                key.append(contentsOf: [0, 1])
+                key.append(contentsOf: canonical.utf8)
+            } else {
+                key.append(contentsOf: [0, 2])
+                key.append(contentsOf: call.arguments.utf8)
+            }
+            guard seen.insert(key).inserted else { continue }
             kept.append(call)
         }
         return kept
+    }
+
+    private static func containsNumber(_ value: JSONValue) -> Bool {
+        switch value {
+        case .int, .double: return true
+        case .object(let object): return object.values.contains(where: containsNumber)
+        case .array(let array): return array.contains(where: containsNumber)
+        case .string, .bool, .null: return false
+        }
     }
 
     private static func parseGrammarToolCalls(
@@ -141,8 +163,9 @@ enum ToolCallParser {
         return nilIfBlank(String(rawOutput[..<first]))
     }
 
+    /// Byte caps only: the per-reply call count is capped by
+    /// `uniqueCappedCalls` after duplicates are dropped.
     private static func enforceArgumentCaps(_ calls: [ToolCall]) throws {
-        guard calls.count <= ToolSelectionPolicy.maxCalls else { throw ParseError.invalidShape }
         var total = 0
         for call in calls {
             let bytes = call.arguments.utf8.count
@@ -367,8 +390,7 @@ enum ToolCallParser {
         var calls: [ToolCall] = []
         func nextCall() -> Bool {
             text = text.drop(while: { $0.isWhitespace })
-            guard calls.count < ToolSelectionPolicy.maxCalls,
-                  let object = firstCompleteJSONObject(in: String(text)),
+            guard let object = firstCompleteJSONObject(in: String(text)),
                   // Shape check only; `parseJSONCall` applies the tagged path's
                   // argument validator (and its depth rule) to the same object.
                   case .object(let parsed)? = try? StrictJSONParser.parse(object, maxDepth: 128),

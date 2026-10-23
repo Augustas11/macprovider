@@ -179,13 +179,23 @@ final class BuyerUXConformanceRegressionTests: XCTestCase {
     /// arguments) in one reply is dropped; kept calls are untouched.
     func testDuplicateCallsInOneReplyAreDropped() throws {
         let call = { (args: String) in "<tool_call>\n{\"name\": \"read_file\", \"arguments\": \(args)}\n</tool_call>" }
-        let raw = [call(#"{"path": "/etc/hosts", "n": 1}"#), call(#"{"n": 1, "path": "/etc/hosts"}"#), call(#"{"path": "/etc/passwd", "n": 1}"#), call(#"{"path": "/etc/hosts", "n": 1}"#)].joined(separator: "\n")
+        let raw = [call(#"{"path": "/etc/hosts", "mode": "r"}"#), call(#"{"mode": "r", "path": "/etc/hosts"}"#), call(#"{"path": "/etc/passwd", "mode": "r"}"#), call(#"{"path": "/etc/hosts", "mode": "r"}"#)].joined(separator: "\n")
         let parsed = parse(raw)
-        XCTAssertEqual(parsed.toolCalls.map(\.arguments), [#"{"n":1,"path":"/etc/hosts"}"#, #"{"n":1,"path":"/etc/passwd"}"#])
+        XCTAssertEqual(parsed.toolCalls.map(\.arguments), [#"{"mode":"r","path":"/etc/hosts"}"#, #"{"mode":"r","path":"/etc/passwd"}"#])
         XCTAssertEqual(parse(Self.coderTwoBareCalls + "\n" + Self.coderBareCall).toolCalls.count, 2, "bare bodies too")
         let other = macprovider_cli.ToolCall(id: "call_b", functionName: "write_file", arguments: #"{"path":"/etc/hosts"}"#)
         let first = macprovider_cli.ToolCall(id: "call_a", functionName: "read_file", arguments: #"{"path":"/etc/hosts"}"#)
         XCTAssertEqual(ToolCallParser.uniqueCappedCalls([first, other, first]), [first, other], "same arguments, other name is kept")
+        // Audit r2: canonically equivalent but different Unicode scalars are
+        // different arguments; so are numbers that share a Double.
+        let composed = macprovider_cli.ToolCall(id: "c1", functionName: "read_file", arguments: "{\"path\":\"/tmp/\u{E9}\"}")
+        let decomposed = macprovider_cli.ToolCall(id: "c2", functionName: "read_file", arguments: "{\"path\":\"/tmp/e\u{301}\"}")
+        XCTAssertEqual(ToolCallParser.uniqueCappedCalls([composed, decomposed]).count, 2)
+        let near = macprovider_cli.ToolCall(id: "n1", functionName: "read_file", arguments: #"{"n":0.1}"#)
+        let nearer = macprovider_cli.ToolCall(id: "n2", functionName: "read_file", arguments: #"{"n":0.10000000000000000001}"#)
+        XCTAssertEqual(ToolCallParser.uniqueCappedCalls([near, nearer]).count, 2)
+        let numbered = macprovider_cli.ToolCall(id: "n3", functionName: "read_file", arguments: #"{"n":0.1}"#)
+        XCTAssertEqual(ToolCallParser.uniqueCappedCalls([near, numbered]).count, 1, "identical bytes still dedupe")
 
         // Streaming finalizes through the same parse.
         let request = try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: [
@@ -217,12 +227,25 @@ final class BuyerUXConformanceRegressionTests: XCTestCase {
     /// SPEC-018 v0.3.2: at most 128 calls (the §3.11 per-reply bound) are
     /// kept per reply, the first ones in generated order.
     func testCallsPerReplyAreCapped() {
-        let raw = (0..<130).map { "<tool_call>\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"/tmp/\($0)\"}}\n</tool_call>" }.joined(separator: "\n")
-        let calls = parse(raw).toolCalls
-        XCTAssertEqual(calls.count, ToolSelectionPolicy.maxCalls)
         XCTAssertEqual(ToolSelectionPolicy.maxCalls, 128)
-        XCTAssertEqual(calls.first?.arguments, #"{"path":"/tmp/0"}"#)
-        XCTAssertEqual(calls.last?.arguments, #"{"path":"/tmp/127"}"#)
+        let body = { (i: Int) in "{\"name\": \"read_file\", \"arguments\": {\"path\": \"/tmp/\(i)\"}}" }
+        // Audit r2: every grammar keeps the first 128 unique calls instead of
+        // rejecting the reply, and duplicates do not count toward the cap.
+        let outputs: [(String, ToolCallGrammar)] = [
+            ((0..<130).map { "<tool_call>\n" + body($0) + "\n</tool_call>" }.joined(separator: "\n"), .qwen),
+            ((0..<130).map(body).joined(separator: "\n"), .qwen),
+            ("<tools>\n" + (0..<130).map(body).joined(separator: "\n") + "\n</tools>", .qwen),
+            ((0..<130).map { "<tool_call>read_file<arg_key>path</arg_key><arg_value>/tmp/\($0)</arg_value></tool_call>" }.joined(), .glm),
+            ((0..<130).map { "{\"name\": \"read_file\", \"parameters\": {\"path\": \"/tmp/\($0)\"}}" }.joined(separator: "; "), .llama3),
+        ]
+        for (raw, grammar) in outputs {
+            let calls = ToolCallParser.parseToolCalls(rawOutput: raw, grammar: grammar, modelID: "m", allowedFunctionNames: ["read_file"]).toolCalls
+            XCTAssertEqual(calls.count, 128, "\(grammar)")
+            XCTAssertEqual(calls.first?.arguments, #"{"path":"/tmp/0"}"#, "\(grammar)")
+            XCTAssertEqual(calls.last?.arguments, #"{"path":"/tmp/127"}"#, "\(grammar)")
+        }
+        let repeated = (0..<200).map { "<tool_call>\n" + body($0 % 3) + "\n</tool_call>" }.joined(separator: "\n")
+        XCTAssertEqual(parse(repeated).toolCalls.count, 3, "200 calls, 3 unique")
     }
 
     /// SPEC-018 v0.3.2 §3.12: a structured response_format renders with
