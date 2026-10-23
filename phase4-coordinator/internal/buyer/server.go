@@ -285,7 +285,10 @@ type Server struct {
 	visionQualifications []config.VisionQualificationConfig
 	// buyerUXConformance caps /v1/models capabilities by each model's
 	// buyer-UX conformance record (SPEC-023 §16.11), keyed by lower-case model id.
-	buyerUXConformance     map[string]buyerUXCapabilities
+	buyerUXConformance map[string]buyerUXCapabilities
+	// buyerUXConformanceSHA256 is the SHA-256 of the record file in force.
+	buyerUXConformanceSHA256 string
+
 	maxRetries             int
 	retryPerAttemptTimeout time.Duration
 	maxFaultedPerRequest   int
@@ -550,11 +553,10 @@ func WithRoutingConfig(cfg config.RoutingConfig) Option {
 		s.visionQualifications = append([]config.VisionQualificationConfig(nil), cfg.VisionQualifications...)
 		s.routingMu.Unlock()
 		// SPEC-023 §16.11: conformance records cap /v1/models capabilities.
-		// An unreadable file publishes no records and logs why.
-		if records, err := LoadBuyerUXConformance(cfg.BuyerUXConformancePath); err != nil {
+		// An unreadable file publishes no records and logs why; SIGHUP
+		// applies the path again (cmd/coordinator reloadCoordinatorConfig).
+		if _, err := s.ReloadBuyerUXConformance(cfg.BuyerUXConformancePath); err != nil {
 			s.log.Error().Err(err).Str("path", cfg.BuyerUXConformancePath).Msg("routing.buyer_ux_conformance_path unreadable; no conformance records applied")
-		} else {
-			s.buyerUXConformance = records
 		}
 		s.maxRetries = cfg.MaxRetries
 		if cfg.RetryPerAttemptTimeoutS > 0 {

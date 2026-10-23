@@ -93,6 +93,9 @@ type Server struct {
 	// catalogMaterialRoutingGate is the buyer router's SPEC-022 R-2.7 verdict
 	// (true = excluded), injected at wiring time because ws cannot import buyer.
 	catalogMaterialRoutingGate atomic.Pointer[func(pool.Provider) bool]
+	// buyerUXConformanceStatus reports the buyer router's buyer-UX conformance
+	// record file in force (SHA-256, record count) for /healthz.
+	buyerUXConformanceStatus atomic.Pointer[func() (string, int)]
 
 	// poolModels is the SPEC-047-R011 pool-manifest binding input (the
 	// trust-pool registry and the configured pricing bounds), nil when
@@ -1671,6 +1674,17 @@ func (s *Server) SetCatalogMaterialRoutingGate(excluded func(pool.Provider) bool
 		return
 	}
 	s.catalogMaterialRoutingGate.Store(&excluded)
+}
+
+// SetBuyerUXConformanceStatus injects the buyer router's conformance record
+// status (SPEC-023 §16.11) so /healthz can report which record file is in
+// force. nil clears it.
+func (s *Server) SetBuyerUXConformanceStatus(status func() (string, int)) {
+	if status == nil {
+		s.buyerUXConformanceStatus.Store(nil)
+		return
+	}
+	s.buyerUXConformanceStatus.Store(&status)
 }
 
 func (s *Server) proofOfWeightsConfig() config.ProofOfWeightsConfig {
@@ -7498,6 +7512,15 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		// /v1/native-mtp-selftest-bank bytes, so a stale bank under the same
 		// release id never reports done.
 		NativeMTPCanaryBankSHA256 string `json:"native_mtp_canary_bank_sha256,omitempty"`
+		// BuyerUXConformanceReloads tells activation tooling that this
+		// runtime applies routing.buyer_ux_conformance_path on SIGHUP
+		// (SPEC-023 §16.11), so installing a record file needs no restart.
+		// BuyerUXConformanceSHA256 is the SHA-256 of the record file in
+		// force (empty when none is); BuyerUXConformanceRecords counts the
+		// models it records.
+		BuyerUXConformanceReloads bool   `json:"buyer_ux_conformance_reloads"`
+		BuyerUXConformanceSHA256  string `json:"buyer_ux_conformance_sha256,omitempty"`
+		BuyerUXConformanceRecords int    `json:"buyer_ux_conformance_records"`
 	}{
 		Status:   "ok",
 		UptimeS:  int64(s.now().Sub(s.started).Seconds()),
@@ -7520,6 +7543,10 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		// Repository mode is the only mode that revokes.
 		CompatibilityPolicyRevokedSignal: compatibilityPolicyMode == "repository",
 		NativeMTPCanaryBankReloads:       true,
+		BuyerUXConformanceReloads:        true,
+	}
+	if status := s.buyerUXConformanceStatus.Load(); status != nil {
+		resp.BuyerUXConformanceSHA256, resp.BuyerUXConformanceRecords = (*status)()
 	}
 	if s.cfg.Pool.NativeMTPCanary.Enabled {
 		if bank := s.currentNativeMTPCanaryBank(); bank != nil {

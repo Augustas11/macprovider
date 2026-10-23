@@ -1314,6 +1314,7 @@ func runCoordinator() (exitCode int) {
 	}
 	buyerServer := buyer.NewServer(registry, logger, startedAt, buyerOpts...)
 	wsServer.SetCatalogMaterialRoutingGate(buyerServer.CatalogMaterialMissingUnderEnforce)
+	wsServer.SetBuyerUXConformanceStatus(buyerServer.BuyerUXConformanceStatus)
 	startComputeScoring(shutdownCtx, cfg.ComputeIntegrity.Scoring, reqLogStore.DB(), wsServer, buyerServer, tokenStore, billingStore, metricsHandle, logger)
 	providerAddr := listenAddress(cfg.Listen.BindAddress, cfg.Listen.ProviderPort)
 	buyerAddr := listenAddress(cfg.Listen.BindAddress, cfg.Listen.BuyerPort)
@@ -4985,6 +4986,22 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 		logger.Info().
 			Int("vision_qualifications", len(cfg.Routing.VisionQualifications)).
 			Msg("routing.vision_qualifications reload: qualification list changed")
+	}
+	// SPEC-023 §16.11: the buyer-UX conformance records apply on SIGHUP. A
+	// record file that cannot be read keeps the records in force; it never
+	// rejects the rest of the reload (the records only narrow /v1/models).
+	if changed, err := buyerServer.ReloadBuyerUXConformance(cfg.Routing.BuyerUXConformancePath); err != nil {
+		logger.Error().Err(err).
+			Str("path", cfg.Routing.BuyerUXConformancePath).
+			Str("event", "buyer_ux_conformance_reload").
+			Msg("routing.buyer_ux_conformance_path unreadable on reload; keeping the conformance records in force")
+	} else if changed {
+		sha, records := buyerServer.BuyerUXConformanceStatus()
+		logger.Info().
+			Str("buyer_ux_conformance_sha256", sha).
+			Int("buyer_ux_conformance_records", records).
+			Str("event", "buyer_ux_conformance_reload").
+			Msg("routing.buyer_ux_conformance_path reload: conformance records changed")
 	}
 	if buyerChanged, wsChanged := buyerServer.SetMinProviderThroughputTPS(cfg.Routing.MinProviderThroughputTPS), wsServer.SetMinProviderThroughputTPS(cfg.Routing.MinProviderThroughputTPS); buyerChanged || wsChanged {
 		logger.Info().

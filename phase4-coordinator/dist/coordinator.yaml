@@ -134,6 +134,13 @@ routing:
   # Enabled on Pearl directly after #302 landed; restored here 2026-07-02 after
   # ALLOW_CONFIG_DRIFT=1 SPEC-023 deploy stripped the live-only value.
   sticky_enabled: true
+  # SPEC-023 §16.11 buyer-UX conformance records: a capability a recorded
+  # model failed is not published on /v1/models. scripts/ops/catalog-activate.sh
+  # (step buyer_ux_conformance) installs origin/main's
+  # phase3-binary/catalog/autotune/buyer-ux-conformance.json here; SIGHUP
+  # re-reads it. A missing or unreadable file publishes no records at start
+  # and keeps the records in force on reload.
+  buyer_ux_conformance_path: /opt/macprovider/buyer-ux-conformance.json
 
 provider_http:
   # #760/#784 twin wall: must cover the gateway streaming ceiling.
