@@ -1,6 +1,13 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.43 (2026-10-22, shard group member self-health message)
+**Version:** 1.9.44 (2026-10-23, tool-selection capability `schema_profiles` member)
+
+**Change log v1.9.44 (2026-10-23, Related: #2107):**
+SPEC-001-R007 adds one optional member to a `tool_selection_capabilities`
+entry: `schema_profiles` (array of strings). The provider declares
+`["ordinary-parameters-v1"]` when its guaranteed modes accept ordinary OpenAI
+parameters objects (SPEC-018 v0.3.3 §3.11). Old receivers ignore the member;
+an absent member means the strict schema subset only.
 
 **Change log v1.9.43 (2026-10-22, Related: #2084):**
 Registers one more SPEC-051 shard-group message, owned by SPEC-051-R029: the
@@ -2781,8 +2788,10 @@ complete prepared visual input stays with the request's captured generation.
 **SPEC-001-R007 — Tool-selection capability and failure wire shape.** Provider
 `hello`, v2 initial `auth_request`, and `heartbeat` frames MAY carry
 `tool_selection_capabilities`, an array of objects whose members are
-`model_id` (string), `runtime` (string), `modes` (array of strings) and
-`validation` (string). The implemented enforcement method is
+`model_id` (string), `runtime` (string), `modes` (array of strings),
+`validation` (string) and, since v1.9.44, the optional `schema_profiles`
+(array of strings; `ordinary-parameters-v1` is the one defined value, owned by
+SPEC-018-R006). The implemented enforcement method is
 `validation:"schema-holdback-v1"`; its model/runtime/mode matrix and
 validation behavior are owned by SPEC-018-R006. Mode vocabulary is `auto`,
 `none`, `required`, `named`; `named` describes an object selection, not a

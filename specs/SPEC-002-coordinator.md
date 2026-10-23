@@ -1,6 +1,14 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.25 (2026-10-22, guaranteed tool selection admits ordinary parameters schemas)
+**Version:** 1.6.26 (2026-10-23, non-strict guaranteed-call schemas need the ordinary-parameters provider profile)
+
+**Change log v1.6.26 (2026-10-23, Related: #2107):** Mirrors SPEC-018 v0.3.3
+§3.11. `providerSupportsToolSelection`, the predicate behind selection, pinned
+provider or session routes, route snapshots and queued revalidation, accepts a
+`required`/named request whose declared schemas include one outside the strict
+subset only from a capability entry declaring
+`schema_profiles:["ordinary-parameters-v1"]`. Providers without it keep
+serving `auto` and strict-subset guarantees; no provider is refused admission.
 
 **Change log v1.6.25 (2026-10-22, Related: #2107):** Mirrors SPEC-018 v0.3.1
 §3.11: `required`/named admit an ordinary OpenAI parameters object (root
