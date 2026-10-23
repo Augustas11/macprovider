@@ -42,6 +42,15 @@ final class GrammarTemplatesTests: XCTestCase {
         XCTAssertFalse(try accepts(grammar, "Here is JSON: {}"))
     }
 
+    func testGenericJSONObjectCannotGenerateDuplicateKeys() throws {
+        let raw = #"{"model":"test","messages":[{"role":"user","content":"test"}],"response_format":{"type":"json_object"}}"#
+        let request = try ChatCompletionRequest.parse(data: Data(raw.utf8))
+        let grammar = try XCTUnwrap(GrammarTemplates.grammar(for: request, traits: .unresolved))
+        XCTAssertTrue(try accepts(grammar, "{}"))
+        XCTAssertTrue(try accepts(grammar, #"{"key":1}"#))
+        XCTAssertFalse(try accepts(grammar, #"{"key":1,"key":2}"#))
+    }
+
     func testDefaultCompileBudgetCoversStructuredAndFallbackLanguages() throws {
         for format in [#"{"type":"json_object"}"#, #"{"type":"json_schema","json_schema":{"name":"fallback","strict":false,"schema":{"type":"string","pattern":"x"}}}"#] {
             let request = try ChatCompletionRequest.parse(data: Data(("{\"model\":\"test\",\"messages\":[{\"role\":\"user\",\"content\":\"test\"}],\"response_format\":" + format + "}").utf8))

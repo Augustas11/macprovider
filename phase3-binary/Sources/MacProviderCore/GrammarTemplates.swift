@@ -199,7 +199,9 @@ public enum GrammarTemplates {
     private static func genericObject(depth: Int, gemma: Bool = false) -> ByteGrammar {
         let key = gemma ? ByteGrammar.sequence([.literal("<|\"|>"), rawText, .literal("<|\"|>")]) : string
         let entry = ByteGrammar.sequence([key, .literal(":"), generic(depth: max(0, depth - 1), gemma: gemma)])
-        return .sequence([.literal("{"), .optional(.sequence([entry, .zeroOrMore(.sequence([.literal(","), entry]))])), .literal("}")])
+        // Unknown keys cannot be tracked for uniqueness by this bounded
+        // regular fallback. At most one entry keeps strict JSON parsing safe.
+        return .sequence([.literal("{"), .optional(entry), .literal("}")])
     }
     private static func generic(depth: Int, gemma: Bool = false) -> ByteGrammar {
         var choices: [ByteGrammar] = [gemma ? .sequence([.literal("<|\"|>"), rawText, .literal("<|\"|>")]) : string, number, .literal("true"), .literal("false"), .literal("null")]
