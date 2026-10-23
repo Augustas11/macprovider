@@ -58,17 +58,79 @@ final class ContinuousBatchRowSamplerTests: XCTestCase {
         XCTAssertEqual(tokens, [1, 2])
     }
 
-    func testUnconstrainedSamplingPreservesLogitsAndLogProbabilities() throws {
-        try requireMetal()
-        let values: [Float] = [0.25, -1, 3, 0.75, 2, -0.5]
-        let logits = MLXArray(values).reshaped([2, 3])
-        let before = log(softmax(logits, axis: -1)).asArray(Float.self)
-        _ = ContinuousBatchRowSampler.sample(
-            logits: logits,
-            rows: [row(0), row(0.7, 0.9, seed: 42, step: 3)]
-        ).asArray(Int.self)
-        XCTAssertEqual(logits.asArray(Float.self), values)
-        XCTAssertEqual(log(softmax(logits, axis: -1)).asArray(Float.self), before)
+    func testUnconstrainedSamplingPreservesLogitsAndLogProbabilities() {
+        Device.withDefaultDevice(.cpu) {
+            let values: [Float] = [0.25, -1, 3, 0.75, 2, -0.5]
+            let logits = MLXArray(values).reshaped([2, 3])
+            let before = log(softmax(logits, axis: -1)).asArray(Float.self)
+            _ = ContinuousBatchRowSampler.sample(
+                logits: logits,
+                rows: [row(0), row(0.7, 0.9, seed: 42, step: 3)]
+            ).asArray(Int.self)
+            XCTAssertEqual(logits.asArray(Float.self), values)
+            XCTAssertEqual(log(softmax(logits, axis: -1)).asArray(Float.self), before)
+        }
+    }
+
+    func testMixedConstrainedRowsAdvanceOnceAndPreserveSeededNeighborsOnCPU() throws {
+        try Device.withDefaultDevice(.cpu) {
+            for (temperature, topP) in [(0.0, 1.0), (0.7, 0.01), (1.2, 0.9)] {
+                let constraint = try GrammarConstraintState(
+                    grammar: .literal("ab"),
+                    tokens: [0: [97], 1: [98], 2: [120], 3: []], eosTokenIDs: [3]
+                )
+                // The illegal token wins before masking, even with a tiny nucleus.
+                let values: [Float] = [-2, -3, 20, 5, 0.25, 1.25, -0.5, 2]
+                let logits = MLXArray(values).reshaped([2, 4])
+                let originalLogProbs = log(softmax(logits, axis: -1)).asArray(Float.self)
+                for (step, expected) in [0, 1, 3].enumerated() {
+                    let neighbor = row(0.8, 0.9, seed: 79, step: step)
+                    let alone = ContinuousBatchRowSampler.sample(
+                        logits: logits[1..<2], rows: [neighbor]
+                    ).asArray(Int.self)
+                    let together = ContinuousBatchRowSampler.sample(logits: logits, rows: [
+                        .init(temperature: temperature, topP: topP, samplerSeed: 42,
+                              samplerStep: step, grammarConstraint: constraint), neighbor
+                    ]).asArray(Int.self)
+                    XCTAssertEqual(together, [expected, alone[0]])
+                    XCTAssertNoThrow(try constraint.validate())
+                    XCTAssertEqual(logits.asArray(Float.self), values)
+                    XCTAssertEqual(log(softmax(logits, axis: -1)).asArray(Float.self), originalLogProbs)
+                }
+            }
+        }
+    }
+
+    func testUnconstrainedSeededTokensMatchSerialOnCPU() {
+        Device.withDefaultDevice(.cpu) {
+            let logits = MLXArray([0.25, -1, 3, 0.75] as [Float]).reshaped([1, 4])
+            for (temperature, topP) in [(0.0, 1.0), (0.7, 1.0), (1.2, 0.9)] {
+                for step in 0..<8 {
+                    let actual = ContinuousBatchRowSampler.sample(
+                        logits: logits, rows: [row(temperature, topP, seed: 42, step: step)]
+                    ).asArray(Int.self)
+                    let expected = GenerateParameters(
+                        temperature: Float(temperature), topP: Float(topP),
+                        seed: ContinuousBatchRowSampler.stepSeed(samplerSeed: 42, samplerStep: step)
+                    ).sampler().sample(logits: logits).asArray(Int.self)
+                    XCTAssertEqual(actual, expected)
+                }
+            }
+        }
+    }
+
+    func testGrammarRequestCannotEnterNativeMTP() throws {
+        let constraint = try GrammarConstraintState(
+            grammar: .literal("a"), tokens: [0: [97], 1: []], eosTokenIDs: [1]
+        )
+        let request = ContinuousBatchSchedulerRequest(
+            id: "grammar-native", conversationKey: "", promptTokens: [0], maxOutputTokens: 2,
+            grammarConstraint: constraint, decodePath: .nativeMTP, nativeMTPIntegrityProbe: true
+        )
+        XCTAssertEqual(request.decodePath, .ordinary)
+        XCTAssertFalse(request.nativeMTPIntegrityProbe)
+        XCTAssertNil(request.nativeMTPTupleFence)
+        XCTAssertTrue(request.grammarConstraint === constraint)
     }
 
     /// A sampled row draws exactly what the serial path's own sampler draws for
