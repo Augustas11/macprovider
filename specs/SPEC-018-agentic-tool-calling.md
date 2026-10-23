@@ -701,6 +701,8 @@ providers support `required` and named choice for every §3.1 template grammar,
 including DeepSeek V4 DSML. Model-family support is the admission fallback; the
 loaded template selects the actual wrapper grammar. Exact-identity prefill
 profiles are optional compatibility data, not an admission allowlist. The
+complete-envelope constrained decoder MUST NOT prepend a legacy call prefill: its
+grammar owns the opening wrapper as well as the body and closing wrapper. The
 provider MUST constrain the complete native call envelope, declared function
 name, argument syntax and permitted call cardinality during token sampling,
 with request-local state on serial and continuous-batching paths. It MUST mask
