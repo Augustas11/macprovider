@@ -10,6 +10,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/versionfloor"
@@ -190,11 +191,18 @@ func loadBuyerUXConformance(path string) (map[string]buyerUXCapabilities, string
 	if strings.TrimSpace(path) == "" {
 		return nil, "", nil
 	}
-	f, err := os.Open(path)
+	// O_NONBLOCK so a FIFO or device at the path cannot block boot or a
+	// SIGHUP reload; only a regular file is read.
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, "", err
 	}
 	defer f.Close()
+	if info, err := f.Stat(); err != nil {
+		return nil, "", err
+	} else if !info.Mode().IsRegular() {
+		return nil, "", fmt.Errorf("buyer-ux conformance: %s is not a regular file", path)
+	}
 	raw, err := io.ReadAll(io.LimitReader(f, buyerUXConformanceMaxBytes+1))
 	if err != nil {
 		return nil, "", err
@@ -214,6 +222,11 @@ func loadBuyerUXConformance(path string) (map[string]buyerUXCapabilities, string
 	}
 	if doc.SchemaVersion != "macprovider.buyer-ux-conformance.v1" {
 		return nil, "", fmt.Errorf("buyer-ux conformance: unsupported schema_version %q", doc.SchemaVersion)
+	}
+	// A missing or null records object is malformed, never "no records":
+	// accepting it would clear the masks in force.
+	if doc.Records == nil {
+		return nil, "", fmt.Errorf("buyer-ux conformance: records object is missing")
 	}
 	out := make(map[string]buyerUXCapabilities, len(doc.Records))
 	for key, record := range doc.Records {

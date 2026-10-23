@@ -8,6 +8,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -289,10 +290,12 @@ func TestReloadBuyerUXConformanceKeepsRecordsInForce(t *testing.T) {
 		t.Fatal("the loaded record does not mask tools")
 	}
 	for name, body := range map[string][]byte{
-		"malformed":      []byte(`{"records":`),
-		"wrong schema":   []byte(`{"schema_version":"v0","records":{}}`),
-		"missing fields": []byte(`{"schema_version":"macprovider.buyer-ux-conformance.v1","records":{"k":{"model":"m"}}}`),
-		"oversized":      append([]byte(good), bytes.Repeat([]byte(" "), buyerUXConformanceMaxBytes)...),
+		"malformed":       []byte(`{"records":`),
+		"wrong schema":    []byte(`{"schema_version":"v0","records":{}}`),
+		"missing fields":  []byte(`{"schema_version":"macprovider.buyer-ux-conformance.v1","records":{"k":{"model":"m"}}}`),
+		"missing records": []byte(`{"schema_version":"macprovider.buyer-ux-conformance.v1"}`),
+		"null records":    []byte(`{"schema_version":"macprovider.buyer-ux-conformance.v1","records":null}`),
+		"oversized":       append([]byte(good), bytes.Repeat([]byte(" "), buyerUXConformanceMaxBytes)...),
 	} {
 		if err := os.WriteFile(path, body, 0o600); err != nil {
 			t.Fatal(err)
@@ -303,6 +306,25 @@ func TestReloadBuyerUXConformanceKeepsRecordsInForce(t *testing.T) {
 		if got, _ := s.BuyerUXConformanceStatus(); got != sha || !masked() {
 			t.Fatalf("%s record file changed the records in force", name)
 		}
+	}
+	// A FIFO at the path is refused without blocking (no writer is ever
+	// attached).
+	fifo := dir + "/fifo.json"
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { _, err := s.ReloadBuyerUXConformance(fifo); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a FIFO record path was accepted")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a FIFO record path blocked the reload")
+	}
+	if got, _ := s.BuyerUXConformanceStatus(); got != sha || !masked() {
+		t.Fatal("a FIFO record path changed the records in force")
 	}
 	if changed, err := s.ReloadBuyerUXConformance(""); err != nil || !changed {
 		t.Fatalf("clearing the path: changed=%v err=%v", changed, err)

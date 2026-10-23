@@ -9812,3 +9812,43 @@ func TestModelsOmitsSaturatedProvidersExcludedForOtherReasons(t *testing.T) {
 		}
 	}
 }
+
+// The Pillar A hash state counts only the providers the entry lists: a
+// saturated provider that a listing gate removes (here a loopback BYOM
+// runtime, which never serves paid global traffic) does not change it.
+func TestModelsPillarAHashIgnoresProvidersTheListOmits(t *testing.T) {
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "verified", EndpointURL: "https://verified.example"},
+		{ProviderID: "loopback", EndpointURL: "https://loopback.example"},
+	})
+	registerWithHashStatusSlots(registry, "verified", "session-1", "model-a", pool.StateReady, 20000, 1, 1, "https://verified.example", pool.HashStatusVerified)
+	registry.Register(&pool.Provider{
+		ProviderID: "loopback", AssignedID: "session-2", Hostname: "loopback.local", ModelID: "model-a",
+		ModelParamsB: 7, RAMGB: 16, MaxContextTokens: 20000, MaxConcurrency: 1, SlotsFree: 0, SlotsTotal: 1,
+		ThroughputTPSEstimate: 20, EndpointURL: "https://loopback.example", Tier: pool.TierPinned,
+		InferencePath: pool.InferencePathHTTPForwarding, State: pool.StateBusy, RuntimeSource: "ollama_loopback",
+		LastHeartbeatAt: time.Now().UTC(), ConnectedAt: time.Now().UTC(), BinaryVersion: "0.1.0",
+		HashStatus: pool.HashStatusMismatch,
+	}, nil)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithTier2Config(config.Tier2Config{ObserveEnabled: true}))
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+	var got struct {
+		Data []struct {
+			ProviderCount    int `json:"provider_count"`
+			HashVerification struct {
+				Status                string `json:"status"`
+				VerifiedProviderCount int    `json:"verified_provider_count"`
+				MismatchProviderCount int    `json:"mismatch_provider_count"`
+			} `json:"hash_verification"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if len(got.Data) != 1 || got.Data[0].ProviderCount != 1 || got.Data[0].HashVerification.Status != "all_verified" ||
+		got.Data[0].HashVerification.VerifiedProviderCount != 1 || got.Data[0].HashVerification.MismatchProviderCount != 0 {
+		t.Fatalf("hash state counts an omitted provider: %s", rr.Body.String())
+	}
+}

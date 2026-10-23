@@ -2006,7 +2006,7 @@ BUC_STAGED="$tmp/pearl/root/.buyer-ux-conformance.staging"
 buc_reset() {
   printf 'listen:\n  bind_address: 127.0.0.1\nrouting:\n  # keep\n  sticky_enabled: true\n' > "$tmp/pearl/coordinator.yaml"
   : > "$tmp/pearl/overlay.yaml"
-  rm -f "$BUC_DEST" "$tmp/svc/hups" "$tmp/svc/restarts" "$tmp/svc/hup_noop" "$tmp/svc/buc_legacy" "$tmp/svc/journal.txt"
+  rm -f "$BUC_DEST" "$tmp/svc/hups" "$tmp/svc/restarts" "$tmp/svc/hup_noop" "$tmp/svc/hup_bumps_pid" "$tmp/svc/buc_legacy" "$tmp/svc/journal.txt"
   printf 'stale' > "$tmp/svc/buc_sha"
   systemctl restart macprovider-coordinator
   rm -f "$tmp/svc/restarts"
@@ -2040,7 +2040,7 @@ if cmp -s "$tmp/pearl/coordinator.yaml" "$tmp/pearl/coordinator.before" && [ ! -
 # A SIGHUP that does not apply the file: both files restored, SIGHUPed again.
 touch "$tmp/svc/hup_noop"
 MACPROVIDER_OPS_OWNER=t run_rc 3 "conformance install rolled back when the SIGHUP does not apply it" scripts/ops/catalog-activate.sh next --run
-expect_err "the originals are restored on disk and a recovery SIGHUP was sent"
+expect_err "a recovery SIGHUP brought back the previous records"
 expect_lock_free
 if cmp -s "$tmp/pearl/coordinator.yaml" "$tmp/pearl/coordinator.before" && [ ! -e "$BUC_DEST" ] && [ ! -e "$BUC_STAGED" ] && [ "$(hups)" = 2 ] && [ "$(restarts)" = 0 ]; then ok; else bad "SIGHUP rollback: hups=$(hups) restarts=$(restarts) dest=$([ -e "$BUC_DEST" ] && echo present || echo absent)"; fi
 rm -f "$tmp/svc/hup_noop" "$tmp/svc/hups"
@@ -2052,6 +2052,22 @@ if grep -q '^  # keep$' "$tmp/pearl/coordinator.yaml" && [ "$(stat -f '%Lp' "$BU
 if ls "$PEARL_BACKUP_ROOT" | grep -q -- '-buyer-ux-conformance-'; then ok; else bad "no coordinator.yaml backup"; fi
 run_rc 0 "conformance status after the SIGHUP install" scripts/ops/catalog-activate.sh status
 if [ "$(state_of buyer_ux_conformance)" = "done" ]; then ok; else bad "after SIGHUP install: $(state_of buyer_ux_conformance)"; fi
+
+# The config already names the file but none is installed. The install's
+# SIGHUP loads the new records, then the check fails; the restored (absent)
+# file cannot bring back the previous state by SIGHUP (records are kept on a
+# load error), so the rollback restarts once.
+buc_reset
+printf 'listen:\n  bind_address: 127.0.0.1\nrouting:\n  buyer_ux_conformance_path: %s\n' "$BUC_DEST" > "$tmp/pearl/coordinator.yaml"
+cp "$tmp/pearl/coordinator.yaml" "$tmp/pearl/coordinator.before"
+systemctl restart macprovider-coordinator
+rm -f "$tmp/svc/restarts"
+touch "$tmp/svc/hup_bumps_pid"
+MACPROVIDER_OPS_OWNER=t run_rc 3 "conformance rollback restarts when the restored file cannot be reloaded" scripts/ops/catalog-activate.sh next --run
+expect_err "a recovery restart brought the coordinator back on the restored files"
+expect_lock_free
+if cmp -s "$tmp/pearl/coordinator.yaml" "$tmp/pearl/coordinator.before" && [ ! -e "$BUC_DEST" ] && [ "$(restarts)" = 1 ] && [ -z "$(cat "$tmp/svc/buc_sha")" ]; then ok; else bad "rollback restart: restarts=$(restarts) buc_sha=$(cat "$tmp/svc/buc_sha")"; fi
+rm -f "$tmp/svc/hup_bumps_pid"
 
 # A runtime that reads the file only at start: status reads Pearl, the install restarts once.
 buc_reset

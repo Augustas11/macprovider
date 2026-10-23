@@ -1437,7 +1437,7 @@ def buc_sighup(args, pid, sha):
         health = healthz(args.healthz)
         if running(args)[0] != pid:
             raise Refused("the coordinator restarted instead of reloading")
-        if health.get("buyer_ux_conformance_sha256") == sha:
+        if (health.get("buyer_ux_conformance_sha256") or None) == (sha or None):
             return
         if time.monotonic() > deadline:
             raise Refused("the coordinator did not report the record file within %d s of the SIGHUP "
@@ -1445,11 +1445,15 @@ def buc_sighup(args, pid, sha):
         time.sleep(1)
 
 
-def buc_rollback(args, cfg, dest, raw, original_file, gid, reloads, pid, backup, exc):
+def buc_rollback(args, cfg, dest, raw, original_file, gid, reloads, pid, prior_sha, backup, exc):
     """The install, SIGHUP or restart failed after edited bytes may have
     landed. Put back the original coordinator.yaml and record file
     (compare-and-swap: content this task did not write is left as found),
-    then apply them again the same way. Always raises Refused."""
+    then apply them again the same way. On a reloading runtime the recovery
+    SIGHUP must bring back PRIOR_SHA, the digest in force before the task; a
+    restored file that does not load (absent or malformed) leaves the new
+    records in force under the keep-on-error rule, so a guarded recovery
+    restart follows. Always raises Refused."""
     original_cfg, new_cfg = cfg
     try:
         with open(args.config, "rb") as f:
@@ -1471,17 +1475,16 @@ def buc_rollback(args, cfg, dest, raw, original_file, gid, reloads, pid, backup,
                       % (failure(exc), failure(rexc), dest, backup or "(none: coordinator.yaml was unchanged)"))
     if reloads:
         try:
-            healthz(args.healthz)
-            if running(args)[0] != pid:
-                raise Refused("the coordinator main process changed")
-            buc_hup(args)
-            healthz(args.healthz)
+            buc_sighup(args, pid, prior_sha)
         except Exception as rexc:
-            raise Refused("applying the record file failed (%s); the originals are restored on disk but the "
-                          "recovery SIGHUP failed (%s): check the coordinator and run status now"
-                          % (failure(exc), failure(rexc)))
-        raise Refused("applying the record file failed (%s); the originals are restored on disk and a recovery "
-                      "SIGHUP was sent (/healthz answered): run status" % failure(exc))
+            recovery_restart(args, "the original coordinator.yaml and record file are restored on disk; the recovery "
+                             "SIGHUP did not bring back the previous records (%s)" % failure(rexc))
+            raise Refused("applying the record file failed (%s); the originals are restored, the recovery SIGHUP "
+                          "did not bring back the previous records, and a recovery restart brought the coordinator "
+                          "back on the restored files (/healthz answered, boot config verified): run status"
+                          % failure(exc))
+        raise Refused("applying the record file failed (%s); the originals are restored and a recovery SIGHUP "
+                      "brought back the previous records (/healthz digest verified): run status" % failure(exc))
     recovery_restart(args, "the original coordinator.yaml and record file are restored on disk")
     raise Refused("applying the record file failed (%s); the originals are restored and a recovery restart "
                   "brought the coordinator back on them (/healthz answered, boot config verified)" % failure(exc))
@@ -1509,6 +1512,7 @@ def apply_buyer_ux_conformance(args):
                     original_file = (f.read(), st.st_uid, st.st_gid, st.st_mode & 0o7777)
             health = healthz(args.healthz)
             reloads = health.get("buyer_ux_conformance_reloads") is True
+            prior_sha = health.get("buyer_ux_conformance_sha256")
             result = {"config_changed": new_cfg != original_cfg,
                       "file_changed": original_file is None or original_file[0] != raw,
                       "records": records, "path": dest, "sha256": args.buc_sha256,
@@ -1555,7 +1559,7 @@ def apply_buyer_ux_conformance(args):
                             raise Refused("the restarted coordinator logged that it cannot read the record file")
                 except Exception as exc:
                     buc_rollback(args, (original_cfg, new_cfg), dest, raw, original_file, gid, reloads, pid,
-                                 backup, exc)
+                                 prior_sha, backup, exc)
             finally:
                 if tmp and os.path.lexists(tmp):
                     os.unlink(tmp)

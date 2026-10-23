@@ -2403,6 +2403,9 @@ func unavailableModelComputeIntegrityStatus() modelComputeIntegrityStatus {
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	models := map[string]modelEntry{}
 	providers := s.pool.Snapshot()
+	// listed holds the providers that passed every listing gate below; the
+	// Pillar A hash state is computed over exactly these.
+	listed := make([]pool.Provider, 0, len(providers))
 	cfg := s.tier2Config()
 	pillarAActive := tier2.ModelHashActive(cfg)
 	tier2Active := tier2.ConfigActive(cfg)
@@ -2419,6 +2422,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		if !s.byomDefaultPaidRoutingEligible(p) {
 			continue
 		}
+		listed = append(listed, p)
 		excluded := tier2Active && s.tier2ProviderExcludedForConfig(p, cfg)
 		entry := models[p.ModelID]
 		if entry.ID == "" {
@@ -2471,7 +2475,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 				if data[i].Objective != "" {
 					continue
 				}
-				s.applyHashVerification(&data[i], providers, cfg)
+				s.applyHashVerification(&data[i], listed, cfg)
 			}
 		}
 	}
@@ -2501,9 +2505,10 @@ func (s *Server) applyHashVerification(entry *modelEntry, providers []pool.Provi
 		// not per catalog-key billing equivalence. modelIDEqual/#900 aliases
 		// must not cross-contaminate /v1/models Pillar-A status across
 		// distinct HF ids that share a rate-card key.
-		// The same providers handleModels lists: saturation (no free slot)
-		// does not change a model's hash state (SPEC-002 FR-B1).
-		if !p.CapacityEligible() || !p.ListingEligible() || !strings.EqualFold(p.ModelID, entry.ID) {
+		// providers is the set handleModels listed (every listing gate,
+		// BYOM included); saturation does not change a model's hash state
+		// (SPEC-002 FR-B1).
+		if !strings.EqualFold(p.ModelID, entry.ID) {
 			continue
 		}
 		status := s.effectiveHashStatus(p, cfg)

@@ -14,7 +14,8 @@ pearl/coordinator.yaml and pearl/overlay.yaml, bin/fake-coordinator.
   kill --kill-who=main -s HUP U    SIGHUP: append to svc/hups; the buyer-UX conformance
                                    record file the config names becomes svc/buc_sha
                                    (unless svc/hup_noop, or svc/buc_legacy: that runtime
-                                   reads the file only at start)
+                                   reads the file only at start); svc/hup_bumps_pid
+                                   also gives the unit a new main pid
   restart U also loads that file: svc/buc_sha, or with svc/buc_legacy an
   "unreadable" journal line when the configured file does not load.
   _init                            create the first /proc entry
@@ -141,8 +142,9 @@ elif args[:1] == ["restart"]:
         if buc is None:
             with open(os.path.join(svc, "boot.txt"), "a") as f:
                 f.write("routing.buyer_ux_conformance_path unreadable; no conformance records applied\n")
-    elif configured and buc is not None:
-        open(os.path.join(svc, "buc_sha"), "w").write(buc)
+    elif configured:
+        # A boot with an unloadable file holds no records.
+        open(os.path.join(svc, "buc_sha"), "w").write(buc or "")
     open(os.path.join(svc, "running.yaml"), "w").write(open(cfg).read())
     m = re.search(r'^\s*latest_binary_version:\s*"?([0-9.]+)"?\s*$', open(cfg).read(), re.M)
     h = os.path.join(svc, "healthz.json")
@@ -157,6 +159,8 @@ elif args[:1] == ["kill"] and "HUP" in args:
         configured, buc = buyer_ux_conformance()
         if configured and buc is not None:
             open(os.path.join(svc, "buc_sha"), "w").write(buc)
+    if os.path.exists(os.path.join(svc, "hup_bumps_pid")):
+        mkproc(pid() + 1)
 elif args[:1] in (["stop"], ["start"]):
     with open(os.path.join(svc, "unit-actions"), "a") as f:
         f.write(args[0] + "\n")

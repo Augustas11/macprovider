@@ -105,7 +105,7 @@ PEARL_COORDINATOR_HEALTHZ_URL="${PEARL_COORDINATOR_HEALTHZ_URL:-http://127.0.0.1
 PEARL_PROC_ROOT="${PEARL_PROC_ROOT:-/proc}"
 # The coordinator's routing.buyer_ux_conformance_path (phase4-coordinator/dist/coordinator.yaml).
 PEARL_BUYER_UX_CONFORMANCE_PATH="${PEARL_BUYER_UX_CONFORMANCE_PATH:-/opt/macprovider/buyer-ux-conformance.json}"
-BUC_DOWNTIME_SIGHUP="none: no coordinator restart; one SIGHUP applies the record file (and any other change already on disk in coordinator.yaml or the overlay). If the coordinator does not report the file within 60 s, coordinator.yaml and the record file are restored and SIGHUPed again"
+BUC_DOWNTIME_SIGHUP="none: no coordinator restart; one SIGHUP applies the record file (and any other change already on disk in coordinator.yaml or the overlay). If the coordinator does not report the file within 60 s, coordinator.yaml and the record file are restored and SIGHUPed again; if that does not bring back the previous records (the restored file does not load), one recovery restart follows, about 5-40 seconds"
 BUC_DOWNTIME_RESTART="one coordinator restart, about 5-40 seconds (in-flight requests drain, then the coordinator starts): the running runtime reads the record file only at start, so buyer and provider traffic through the coordinator is interrupted for that time. If the restarted coordinator cannot load the file, coordinator.yaml and the record file are restored and the coordinator restarts once more"
 QWEN_NATIVE_PROFILE=qwen36-native-mtp
 
