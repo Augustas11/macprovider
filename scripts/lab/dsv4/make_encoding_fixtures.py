@@ -45,6 +45,8 @@ def reference_messages(body: dict) -> tuple[list, str, str | None]:
     for message in body["messages"]:
         role = message["role"]
         out = {"role": role, "content": message.get("content") or ""}
+        if role == "assistant" and "reasoning_content" in message:
+            out["reasoning_content"] = message["reasoning_content"]
         if role == "assistant" and message.get("tool_calls"):
             calls = []
             for call in message["tool_calls"]:
@@ -155,6 +157,16 @@ REQUESTS = [
         {"role": "user", "content": "Hello"},
         {"role": "assistant", "content": "Hi there!"},
         {"role": "user", "content": "Bye"}]}),
+    ("tool_history_preserves_reasoning_before_last_user", {"tools": TOOLS[:1], "messages": [
+        {"role": "user", "content": "Read /etc/hosts."},
+        {"role": "assistant", "content": None,
+         "reasoning_content": "I should read the file before answering.", "tool_calls": [
+            {"id": "call_rrrrrrrrrrrrrrrr", "type": "function", "function": {
+                "name": "read_file", "arguments": "{\"path\": \"/etc/hosts\"}"}}]},
+        {"role": "tool", "tool_call_id": "call_rrrrrrrrrrrrrrrr", "content": "127.0.0.1 localhost"},
+        {"role": "assistant", "content": "The file maps localhost to 127.0.0.1.",
+         "reasoning_content": "The tool returned the localhost mapping."},
+        {"role": "user", "content": "What does that mean?"}]}),
 ]
 
 D = "｜DSML｜"

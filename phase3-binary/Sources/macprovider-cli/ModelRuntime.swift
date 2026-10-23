@@ -13257,6 +13257,15 @@ maxTokens: maxTokens,
         if let effort = request.templateReasoningEffort {
             additionalContext = (additionalContext ?? [:]).merging(["reasoning_effort": effort]) { _, new in new }
         }
+        if grammar == .dsml {
+            // Chat.Message has no reasoning field. Preserve it in the raw
+            // messages and let the reference encoder decide which turns keep it.
+            var templateMessages = DefaultMessageGenerator().generate(messages: chat)
+            for (index, message) in messages.enumerated() where message.role == .assistant {
+                templateMessages[index]["reasoning_content"] = message.reasoningContent
+            }
+            return UserInput(messages: templateMessages, tools: tools, additionalContext: additionalContext)
+        }
         return UserInput(
             chat: chat,
             tools: tools,

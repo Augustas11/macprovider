@@ -313,7 +313,7 @@ final class DeepseekV4EncodingTests: XCTestCase {
         let goldens = try XCTUnwrap(fixtures["reference"]?.array)
         let requests = try XCTUnwrap(fixtures["requests"]?.array)
         XCTAssertEqual(goldens.count, 4)
-        XCTAssertEqual(requests.count, 14)
+        XCTAssertEqual(requests.count, 15)
         XCTAssertEqual(ids.reference.count, goldens.count)
         XCTAssertEqual(ids.requests.count, requests.count)
         for (items, expectedIDs) in [(goldens, ids.reference), (requests, ids.requests)] {

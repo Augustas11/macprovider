@@ -30,7 +30,7 @@ SPEC-018 is the **provider-side response synthesis contract** for OpenAI-wire to
   v0.3.2 per-reply call set (duplicate drop under `tool_choice` `auto`, 128-call
   bound) applies to `dsml` calls like every other grammar. The DeepSeek-V4
   tokenizer escapes literal CR/LF in Split regexes in memory before loading;
-  exact reference token IDs are verified for all 14 provider requests and four
+  exact reference token IDs are verified for all 15 provider requests and four
   golden prompts against the pinned TensorFold tokenizer (see §3.12).
   Freeze-audit clarification: a declared non-string DSML parameter must
   parse strictly as its declared type under either string flag; a mismatch
