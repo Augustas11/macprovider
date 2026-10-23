@@ -315,22 +315,20 @@ enum ToolCallParser {
 
     /// SPEC-018 §3.1 Qwen bare envelope body: Qwen2.5-Coder answers with the
     /// template's `{"name", "arguments"}` body but without the `<tool_call>`
-    /// tags, sometimes inside the `<tools>` wrapper its system prompt shows.
+    /// tags, sometimes inside the `<tools>` wrapper its system prompt shows
+    /// (one wrapper around all calls, or one wrapper per call).
     /// Accepted only when the whole output is one or more such objects (no
     /// prose), each with exactly those two keys, an object `arguments` and a
-    /// declared name. Anything else returns nil and the tagged grammar runs.
+    /// declared name. A wrapped output is a sequence of closed, non-empty
+    /// `<tools>` groups. Anything else returns nil and the tagged grammar runs.
     static func parseQwenBareCalls(_ rawOutput: String, allowedFunctionNames: Set<String>?) -> [ToolCall]? {
         guard let allowedFunctionNames, !allowedFunctionNames.isEmpty,
               rawOutput.utf8.count <= SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else { return nil }
         var text = Substring(rawOutput.trimmingCharacters(in: .whitespacesAndNewlines))
-        if text.hasPrefix(qwenBareWrapperOpen) {
-            guard text.hasSuffix(qwenBareWrapperClose) else { return nil }
-            text = text.dropFirst(qwenBareWrapperOpen.count).dropLast(qwenBareWrapperClose.count)
-        }
+        let wrapped = text.hasPrefix(qwenBareWrapperOpen)
         var calls: [ToolCall] = []
-        while true {
+        func nextCall() -> Bool {
             text = text.drop(while: { $0.isWhitespace })
-            if text.isEmpty { break }
             guard calls.count < ToolSelectionPolicy.maxCalls,
                   let object = firstCompleteJSONObject(in: String(text)),
                   // Shape check only; `parseJSONCall` applies the tagged path's
@@ -339,9 +337,31 @@ enum ToolCallParser {
                   Set(parsed.keys) == ["name", "arguments"],
                   case .string(let name)? = parsed["name"], allowedFunctionNames.contains(name),
                   case .object? = parsed["arguments"],
-                  let call = try? parseJSONCall(object, argumentKey: "arguments") else { return nil }
+                  let call = try? parseJSONCall(object, argumentKey: "arguments") else { return false }
             calls.append(call)
             text = text.dropFirst(object.count)
+            return true
+        }
+        while true {
+            text = text.drop(while: { $0.isWhitespace })
+            if text.isEmpty { break }
+            guard wrapped else {
+                guard nextCall() else { return nil }
+                continue
+            }
+            guard text.hasPrefix(qwenBareWrapperOpen) else { return nil }
+            text = text.dropFirst(qwenBareWrapperOpen.count)
+            var groupCalls = 0
+            while true {
+                text = text.drop(while: { $0.isWhitespace })
+                if text.hasPrefix(qwenBareWrapperClose) {
+                    guard groupCalls > 0 else { return nil }
+                    text = text.dropFirst(qwenBareWrapperClose.count)
+                    break
+                }
+                guard nextCall() else { return nil }
+                groupCalls += 1
+            }
         }
         guard !calls.isEmpty, (try? enforceArgumentCaps(calls)) != nil else { return nil }
         return calls

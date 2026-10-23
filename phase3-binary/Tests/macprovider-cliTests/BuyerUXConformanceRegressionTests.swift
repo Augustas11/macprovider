@@ -18,6 +18,9 @@ final class BuyerUXConformanceRegressionTests: XCTestCase {
     /// recording is cut after the second `"name"`; its path is the prompt's).
     static let coderTwoBareCalls = #"{"name": "read_file", "arguments": {"path": "/etc/hosts"}}"# + "\n"
         + #"{"name": "read_file", "arguments": {"path": "/etc/passwd"}}"#
+    /// Qwen2.5-Coder-32B `stream_tool_deltas` (#2109 rerun): two calls, each in
+    /// its own `<tools>` wrapper. Recorded output, verbatim.
+    static let coderTwoToolsWrapped = "<tools>\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"/etc/hosts\"}}\n</tools>\n<tools>\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"/etc/passwd\"}}\n</tools>"
     /// Qwen3.6-35B-A3B `stream_tool_deltas`: a fenced list with a `call` key
     /// and inlined arguments; no grammar the template teaches (model behaviour).
     static let qwen36FencedList = "```json\n[\n  {\"call\": \"read_file\", \"path\": \"/etc/hosts\"},\n  {\"call\": \"read_file\", \"path\": \"/etc/passwd\"}\n]\n```"
@@ -31,6 +34,7 @@ final class BuyerUXConformanceRegressionTests: XCTestCase {
             (Self.coderBareCall, ["/etc/hosts"]),
             (Self.coderToolsWrapped, ["/etc/hosts"]),
             (Self.coderTwoBareCalls, ["/etc/hosts", "/etc/passwd"]),
+            (Self.coderTwoToolsWrapped, ["/etc/hosts", "/etc/passwd"]),
         ] {
             let parsed = parse(raw)
             XCTAssertNil(parsed.cleanedContent, raw)
@@ -51,6 +55,12 @@ final class BuyerUXConformanceRegressionTests: XCTestCase {
             #"{"name": "read_file", "parameters": {"path": "/etc/hosts"}}"#,
             #"{"name": "read_file", "arguments": "/etc/hosts"}"#,
             "<tools>\n" + Self.coderBareCall,
+            "<tools>\n</tools>",
+            Self.coderToolsWrapped + "\n<tools>\n</tools>",
+            Self.coderToolsWrapped + "\n<tools>\n" + Self.coderBareCall,
+            Self.coderToolsWrapped + "\n" + Self.coderBareCall,
+            Self.coderToolsWrapped + "\nDone.",
+            Self.coderToolsWrapped + "\n<tools>\n" + #"{"name": "write_file", "arguments": {"path": "/etc/hosts"}}"# + "\n</tools>",
             #"{"color": "blue"}"#,
         ] {
             let parsed = parse(raw)
@@ -73,7 +83,7 @@ final class BuyerUXConformanceRegressionTests: XCTestCase {
             "stream": true,
         ]))
         request.outputState.resolve(RequestOutputTraits(toolGrammar: .qwen))
-        for (output, wantCalls) in [(Self.coderTwoBareCalls, 2), (Self.coderToolsWrapped, 1), (#"{"color": "blue"} is the answer."#, 0), ("Plain {prose}.", 0)] {
+        for (output, wantCalls) in [(Self.coderTwoBareCalls, 2), (Self.coderToolsWrapped, 1), (Self.coderTwoToolsWrapped, 2), (#"{"color": "blue"} is the answer."#, 0), ("Plain {prose}.", 0)] {
             var emitter = SerialStreamingTextEmitter(request: request)
             let accumulator = StructuredStreamingContentAccumulator(enabled: false)
             let idle = StructuredStreamingIdleState(enabled: false)
@@ -163,6 +173,39 @@ final class BuyerUXConformanceRegressionTests: XCTestCase {
         let tagged = parse("<tool_call>\n" + body + "\n</tool_call>")
         XCTAssertEqual(parse(body).toolCalls.count, tagged.toolCalls.count)
         XCTAssertEqual(parse(body).toolCalls.first?.arguments, tagged.toolCalls.first?.arguments)
+    }
+
+    /// GLM-4.5-Air `json_object` 502: the failing bytes were dropped. The
+    /// default log line names the shape (fence, think tags, bytes around the
+    /// first object) and a digest, never the content (SPEC-001 NFR-7); a
+    /// bounded, escaped preview is added only at debug level.
+    func testStructuredFailureDiagnosticIsContentFreeByDefault() {
+        let secret = "sk-live-do-not-log"
+        let fenced = "```json\n{\"color\": \"blue\", \"note\": \"\(secret)\"}\n```"
+        let line = ModelRuntime.structuredFailureDiagnostic(fenced, model: "z-ai/glm-4.5-air", preview: false)
+        XCTAssertFalse(line.contains(secret), line)
+        XCTAssertFalse(line.contains("blue"), line)
+        XCTAssertFalse(line.contains("\n"), "one log line")
+        for field in ["bytes=\(fenced.utf8.count)", "fence=true", "think=false", "leading_bytes=8", "first_object_parses=true", "trailing_bytes=4"] {
+            XCTAssertTrue(line.contains(field), "\(field) in \(line)")
+        }
+        let think = ModelRuntime.structuredFailureDiagnostic("<think>x</think>\n{\"color\": \"blue\"}", model: "m", preview: false)
+        XCTAssertTrue(think.contains("think=true"), think)
+        XCTAssertTrue(ModelRuntime.structuredFailureDiagnostic("", model: "m", preview: false).contains("bytes=0"))
+    }
+
+    func testStructuredFailurePreviewIsBoundedAndEscaped() {
+        let content = "Sure!\n\"quoted\"\u{1b}[2J" + String(repeating: "x", count: 500) + "END"
+        let line = ModelRuntime.structuredFailureDiagnostic(content, model: "m\ninjected", preview: true)
+        XCTAssertFalse(line.contains("\n"), "previews cannot split the log line")
+        XCTAssertFalse(line.contains("\u{1b}"), "control bytes are escaped")
+        XCTAssertTrue(line.contains("head=\"Sure!\\u{a}\\u{22}quoted"), line)
+        XCTAssertTrue(line.contains("xEND\""), line)
+        XCTAssertTrue(line.contains("model=\"m\\u{a}injected\""), line)
+        XCTAssertLessThan(line.utf8.count, 1_200, "bounded")
+        let short = ModelRuntime.structuredFailureDiagnostic("nope", model: "m", preview: true)
+        XCTAssertTrue(short.contains("head=\"nope\""), short)
+        XCTAssertFalse(short.contains("tail="), "short output is not repeated")
     }
 
     /// Audit r2: a non-strict schema may require a key it does not declare;

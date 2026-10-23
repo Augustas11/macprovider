@@ -206,6 +206,53 @@ final class ProviderLifecycleStateTests: XCTestCase {
         }
     }
 
+    /// #2067: a retried `invalid_auth_request` followed by a successful
+    /// reconnect leaves serving and operator-pause writes legal.
+    func testRetriedAuthRejectionThenReconnectKeepsPauseAndServingLegal() throws {
+        let fixture = try Fixture()
+        let store = ProviderLifecycleStateStore(url: fixture.recordURL)
+        _ = try store.transition(to: .servingBuyers, reasonCode: "coordinator_buyer_serving_confirmed", writer: .serve, operationID: "serve:1")
+        let rejection = CoordinatorClient.lifecycleClassification(
+            for: CoordinatorAuthError.rejected(code: "invalid_auth_request", message: "wire detail")
+        )
+        let rejected = try store.transition(to: rejection.state, reasonCode: rejection.reasonCode, writer: .serve, operationID: "serve:1")
+        XCTAssertEqual(rejected.state, .coordinatorUnavailable)
+        XCTAssertEqual(rejected.reasonCode, "coordinator_auth_protocol_invalid")
+        _ = try store.transition(to: .locallyReadyConnecting, reasonCode: "coordinator_connecting", writer: .serve, operationID: "serve:1")
+        _ = try store.transition(to: .servingBuyers, reasonCode: "coordinator_buyer_serving_confirmed", writer: .serve, operationID: "serve:1")
+        let paused = try store.transition(
+            to: .pausedByOperator, reasonCode: "operator_pause_confirmed", writer: .operatorCommand,
+            operationID: "operator-pause:1", operatorPaused: true
+        )
+        XCTAssertEqual(paused.state, .pausedByOperator)
+    }
+
+    /// #2067: a `failed` record left by an earlier build is cleared by serve
+    /// recording a confirmed serving session; then pause is legal again.
+    /// Other writers and pre-serving states still cannot leave `failed`.
+    func testFailedRecordRecoversOnlyThroughConfirmedServing() throws {
+        let fixture = try Fixture()
+        let store = ProviderLifecycleStateStore(url: fixture.recordURL)
+        _ = try store.transition(to: .failed, reasonCode: "coordinator_auth_protocol_invalid", writer: .serve, operationID: "serve:1")
+        XCTAssertThrowsError(try store.transition(to: .locallyReadyConnecting, reasonCode: "coordinator_connecting", writer: .serve, operationID: "serve:1"))
+        XCTAssertThrowsError(try store.transition(
+            to: .pausedByOperator, reasonCode: "operator_pause_confirmed", writer: .operatorCommand,
+            operationID: "operator-pause:1", operatorPaused: true
+        ))
+        for writer in [ProviderLifecycleWriter.updater, .operatorCommand] {
+            XCTAssertThrowsError(try store.transition(to: .servingBuyers, reasonCode: "resume", writer: writer, operationID: "other:1")) { error in
+                XCTAssertEqual(error as? ProviderLifecycleStateError, .invalidTransition(from: "failed", to: "serving_buyers"))
+            }
+        }
+        let serving = try store.transition(to: .servingBuyers, reasonCode: "coordinator_buyer_serving_confirmed", writer: .serve, operationID: "serve:1")
+        XCTAssertEqual(serving.state, .servingBuyers)
+        let paused = try store.transition(
+            to: .pausedByOperator, reasonCode: "operator_pause_confirmed", writer: .operatorCommand,
+            operationID: "operator-pause:1", operatorPaused: true
+        )
+        XCTAssertEqual(paused.state, .pausedByOperator)
+    }
+
     func testInstallerRecordsRollbackFromUninstalledForFailedReinstall() throws {
         // #1421: a reinstall after an uninstall tombstone whose cutover fails
         // before the `installing` checkpoint must still be able to persist the

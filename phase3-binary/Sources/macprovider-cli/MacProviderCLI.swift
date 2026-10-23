@@ -2970,6 +2970,7 @@ struct ServeCommand: AsyncParsableCommand {
                 if let applied = ModelRuntime.applyMLXCacheLimit(megabytes: resolved.mlxCacheLimitMB) {
                     FileHandle.standardError.write(Data("mlx_cache_limit_bytes=\(applied)\n".utf8))
                 }
+                ModelRuntime.logsStructuredFailurePreview = resolved.logLevel == .debug || resolved.logLevel == .trace
                 modelRuntime = try await ModelRuntime(
                     modelID: resolved.model,
                     modelLoadPath: startupPreflight.runtimeBinding?.loadPath ?? resolved.modelArtifactPath,

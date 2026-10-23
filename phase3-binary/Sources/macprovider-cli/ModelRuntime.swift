@@ -13452,8 +13452,57 @@ maxTokens: maxTokens,
         do {
             return try validateStructuredContent(completion, request: request)
         } catch let error as APIError where error.code == "malformed_json_response" {
+            fputs(structuredFailureDiagnostic(completion.content, model: request.model, preview: logsStructuredFailurePreview) + "\n", stderr)
             throw structuredRetryClassified(error, completion: completion, request: request)
         }
+    }
+
+    /// Set once at serve startup from `log_level` (debug or trace).
+    nonisolated(unsafe) static var logsStructuredFailurePreview = false
+    static let structuredFailurePreviewCharacters = 80
+
+    /// One log line for a JSON-mode output that failed validation, so the
+    /// failure is diagnosable without the dropped bytes. SPEC-001 NFR-7: the
+    /// default line carries no response content, only its size, digest and
+    /// shape (fence, think tags, bytes before the first JSON value, whether
+    /// that value parses, bytes after it). A bounded, escaped head/tail
+    /// preview is added only at debug level.
+    static func structuredFailureDiagnostic(_ content: String, model: String, preview: Bool) -> String {
+        let digest = SHA256.hash(data: Data(content.utf8)).map { String(format: "%02x", $0) }.joined()
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        let valueStart = trimmed.firstIndex(where: { $0 == "{" || $0 == "[" })
+        var fields = [
+            "warning: structured_output_malformed",
+            "model=\"\(escapedLogPreview(model.prefix(128)))\"",
+            "bytes=\(content.utf8.count)",
+            "sha256=\(digest)",
+            "fence=\(trimmed.hasPrefix("```"))",
+            "think=\(content.contains(ReasoningOutput.openTag) || content.contains(ReasoningOutput.closeTag))",
+            "leading_bytes=\(valueStart.map { trimmed[..<$0].utf8.count } ?? trimmed.utf8.count)",
+        ]
+        if let valueStart, trimmed[valueStart] == "{",
+           let object = ToolCallParser.firstCompleteJSONObject(in: String(trimmed[valueStart...])) {
+            fields.append("first_object_parses=\((try? StrictJSONParser.parse(object)) != nil)")
+            fields.append("trailing_bytes=\(trimmed[valueStart...].utf8.count - object.utf8.count)")
+        }
+        if preview {
+            let limit = structuredFailurePreviewCharacters
+            fields.append("head=\"\(escapedLogPreview(content.prefix(limit)))\"")
+            if content.count > limit {
+                fields.append("tail=\"\(escapedLogPreview(content.suffix(min(limit, content.count - limit))))\"")
+            }
+        }
+        return fields.joined(separator: " ")
+    }
+
+    /// Printable ASCII except `"` and `\` passes; everything else is a
+    /// `\u{...}` escape, so a preview cannot forge or split log lines.
+    static func escapedLogPreview(_ text: Substring) -> String {
+        text.unicodeScalars.map { scalar in
+            (0x20...0x7E).contains(scalar.value) && scalar != "\"" && scalar != "\\"
+                ? String(scalar)
+                : "\\u{\(String(scalar.value, radix: 16))}"
+        }.joined()
     }
 
     /// SPEC-019 §11 retry classification for `malformed_json_response`: a
