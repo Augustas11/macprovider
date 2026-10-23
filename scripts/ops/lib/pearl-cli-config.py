@@ -60,6 +60,21 @@ and the staged copy are read through one descriptor each (no symlink, one
 link, owned by this user, mode 0600, in a directory no one else can write).
 Locally, `validate-vision-qualification PATH [OUT]` applies
 the rules and prints only the field count and the entry sha256.
+
+Also used by scripts/ops/catalog-activate.sh step buyer_ux_conformance
+(SPEC-023 §16.11 buyer-UX conformance records, #2107):
+  python3 - buc-facts [layout flags] --buc-path PATH            read-only facts
+  python3 - apply-buyer-ux-conformance [layout flags] --buc-path PATH
+            --buc-staged STAGED --buc-sha256 SHA256
+Under the same locks it checks the staged record file (sha256, the
+coordinator's loader rules), installs it root-owned, coordinator group, mode
+0640, adds routing.buyer_ux_conformance_path to coordinator.yaml in place
+(backup first; refuses a different existing value in either file), validates
+with the running coordinator, then applies it: a runtime whose /healthz
+reports buyer_ux_conformance_reloads gets one SIGHUP and must report the file's
+sha256; an older runtime, which reads the file only at start, is restarted
+once and must log no load error. On failure it restores coordinator.yaml and
+the record file (compare-and-swap) and applies them again the same way.
 """
 import argparse
 import copy
@@ -733,11 +748,11 @@ def ci_live(args, prompts, version):
         time.sleep(1)
 
 
-def write_corpus(path, data, gid, uid=None, mode=0o640):
+def write_corpus(path, data, gid, uid=None, mode=0o640, prefix=".compute-integrity-corpus-"):
     """Install the corpus root-owned (this process), group = the coordinator's
     group, mode 0640: the coordinator runs as its own user and must read it.
     A rollback passes the replaced file's own owner, group and mode."""
-    fd, tmp = tempfile.mkstemp(prefix=".compute-integrity-corpus-", dir=os.path.dirname(path))
+    fd, tmp = tempfile.mkstemp(prefix=prefix, dir=os.path.dirname(path))
     try:
         os.fchown(fd, os.geteuid() if uid is None else uid, gid)
         os.fchmod(fd, mode)
@@ -862,7 +877,7 @@ def apply_compute_integrity(args):
             os.unlink(args.ci_staged)
 
 
-def restore_corpus(dest, ours, original, gid):
+def restore_corpus(dest, ours, original, gid, prefix=".compute-integrity-corpus-"):
     """Put back the corpus file this run replaced, if it still holds ours."""
     if not os.path.isfile(dest) or os.path.islink(dest):
         return
@@ -873,7 +888,7 @@ def restore_corpus(dest, ours, original, gid):
         os.unlink(dest)
     else:
         data, uid, ogid, mode = original
-        write_corpus(dest, data, ogid, uid=uid, mode=mode)
+        write_corpus(dest, data, ogid, uid=uid, mode=mode, prefix=prefix)
 
 
 # --- native-vision qualification (#2016) -------------------------------------
@@ -1244,6 +1259,312 @@ def apply_vision_qualification(args):
             os.unlink(args.vq_staged)
 
 
+# --- buyer-UX conformance records (SPEC-023 §16.11, #2107) --------------------
+#
+# Used by scripts/ops/catalog-activate.sh step buyer_ux_conformance. The record
+# file is public (phase3-binary/catalog/autotune/buyer-ux-conformance.json at
+# origin/main); it only narrows what /v1/models publishes.
+
+BUC_SCHEMA = "macprovider.buyer-ux-conformance.v1"
+# The coordinator's buyerUXConformanceMaxBytes (internal/buyer/model_capabilities.go).
+BUC_MAX_BYTES = 4 * 1024 * 1024
+BUC_KEY = "buyer_ux_conformance_path"
+# What a coordinator that reads the file only at start logs when it cannot.
+BUC_UNREADABLE = "routing.buyer_ux_conformance_path unreadable"
+BUC_TMP_PREFIX = ".buyer-ux-conformance-"
+BUC_SIGHUP_WAIT_S = 60
+
+
+def buc_validate(raw):
+    """Record count of a record file the coordinator's loader accepts
+    (loadBuyerUXConformance); Refused otherwise. This copy is stricter
+    (records must be an object, capability fields typed), so what it accepts
+    the coordinator accepts. Reasons never quote the file."""
+    if len(raw) > BUC_MAX_BYTES:
+        raise Refused("the record file is larger than %d bytes" % BUC_MAX_BYTES)
+    try:
+        doc = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise Refused("the record file is not JSON")
+    if not isinstance(doc, dict) or doc.get("schema_version") != BUC_SCHEMA:
+        raise Refused("the record file's schema_version is not %s" % BUC_SCHEMA)
+    records = doc.get("records")
+    if not isinstance(records, dict):
+        raise Refused("the record file has no records object")
+    for record in records.values():
+        caps = record.get("capabilities") if isinstance(record, dict) else None
+        model = record.get("model") if isinstance(record, dict) else None
+        if not isinstance(model, str) or not model.strip() or not isinstance(caps, dict):
+            raise Refused("a record lacks its model or capabilities")
+        for field in ("tools", "reasoning", "response_format"):
+            if field in caps and not isinstance(caps[field], bool):
+                raise Refused("a record's capabilities.%s is not a boolean" % field)
+        choice = caps.get("tool_choice")
+        if choice is not None and not (isinstance(choice, list) and all(isinstance(m, str) for m in choice)):
+            raise Refused("a record's capabilities.tool_choice is not a list of strings")
+    return len(records)
+
+
+def buc_routing(doc):
+    """routing.buyer_ux_conformance_path of one YAML document: None when absent."""
+    routing = doc.get("routing")
+    if routing is None:
+        return None
+    if not isinstance(routing, dict):
+        raise Refused("routing is not a mapping")
+    value = routing.get(BUC_KEY)
+    if value is not None and not isinstance(value, str):
+        raise Refused("routing.%s is not a string" % BUC_KEY)
+    return value
+
+
+def buc_config_plan(text, base, overlay, dest):
+    """New coordinator.yaml text with routing.buyer_ux_conformance_path: DEST
+    as the first key of the top-level routing block, or the same text when it
+    is already set. Nothing else in the file changes."""
+    import yaml
+
+    if buc_routing(overlay) not in (None, dest):
+        raise Refused("the overlay sets routing.%s to another file; reconcile it first" % BUC_KEY)
+    current = buc_routing(base)
+    if current == dest:
+        return text
+    if current is not None:
+        raise Refused("coordinator.yaml sets routing.%s to another file; reconcile it first" % BUC_KEY)
+    if not isinstance(base.get("routing"), dict) or not base["routing"]:
+        raise Refused("coordinator.yaml has no routing block")
+    lines = text.splitlines(keepends=True)
+    anchors = [i for i, line in enumerate(lines) if re.match(r"^routing:[ \t]*(#.*)?$", line.rstrip("\r\n"))]
+    if len(anchors) != 1:
+        raise Refused("coordinator.yaml does not have exactly one top-level routing: line")
+    indent = None
+    for line in lines[anchors[0] + 1:]:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        m = re.match(r"^( +)\S", line)
+        if not m:
+            raise Refused("cannot find the indentation of coordinator.yaml's routing block")
+        indent = m.group(1)
+        break
+    if indent is None:
+        raise Refused("cannot find the indentation of coordinator.yaml's routing block")
+    if not lines[anchors[0]].endswith("\n"):
+        raise Refused("coordinator.yaml's routing: line has no newline")
+    new = "".join(lines[:anchors[0] + 1]) + "%s%s: %s\n" % (indent, BUC_KEY, dest) + "".join(lines[anchors[0] + 1:])
+    want = copy.deepcopy(base)
+    want["routing"][BUC_KEY] = dest
+    if (yaml.safe_load(new) or {}) != want:
+        raise Refused("the coordinator.yaml edit did not produce exactly the intended YAML change")
+    return new
+
+
+def buc_journal_unreadable(unit):
+    """The current invocation logged that it could not load the record file."""
+    inv = subprocess.run(["systemctl", "show", "-p", "InvocationID", "--value", unit],
+                         capture_output=True, text=True, timeout=15).stdout.strip()
+    if not re.match(r"^[0-9a-f]{32}$", inv):
+        raise Refused("the coordinator unit has no invocation id")
+    proc = subprocess.run(["journalctl", "_SYSTEMD_INVOCATION_ID=" + inv, "--no-pager", "-o", "cat"],
+                          capture_output=True, text=True, timeout=60)
+    if proc.returncode != 0:
+        raise Refused("cannot read the coordinator journal")
+    return BUC_UNREADABLE in proc.stdout
+
+
+def buc_loaded(args, dest, sha, health):
+    """The running coordinator holds the record file with SHA. A runtime that
+    reports it on /healthz is asked; an older one reads the file only at
+    start, so it must have booted with the on-disk config, after the file was
+    last changed, and logged no load error."""
+    if health.get("buyer_ux_conformance_reloads") is True:
+        return health.get("buyer_ux_conformance_sha256") == sha
+    if file_sha256(dest) != sha or not applied(args):
+        return False
+    start = main_start(args.unit)
+    return start is not None and int(os.lstat(dest).st_ctime) < start and not buc_journal_unreadable(args.unit)
+
+
+def buc_facts(args):
+    # The files read must be the ones the running coordinator was started with.
+    _, _, _, _, gid = running(args)
+    base, overlay = load_effective(args)
+    effective = buc_routing(overlay)
+    if effective is None:
+        effective = buc_routing(base)
+    health = healthz(args.healthz)
+    installed = file_sha256(args.buc_path)
+    loaded = None
+    if effective == args.buc_path and installed and buc_loaded(args, args.buc_path, installed, health):
+        loaded = installed
+    print(json.dumps({
+        "effective_path": effective or "",
+        "installed_sha256": installed,
+        "installed_mode_ok": installed_mode_ok(args.buc_path, gid),
+        "reloads": health.get("buyer_ux_conformance_reloads") is True,
+        "loaded_sha256": loaded,
+    }, sort_keys=True))
+
+
+def read_buc_staged(args):
+    """The record file the ops entry point staged root-only next to the target."""
+    st = os.lstat(args.buc_staged)
+    if not os.path.isfile(args.buc_staged) or os.path.islink(args.buc_staged) or st.st_uid != os.geteuid() \
+            or st.st_mode & 0o077 or st.st_size > BUC_MAX_BYTES:
+        raise Refused("the staged record file must be a private regular file owned by this user")
+    with open(args.buc_staged, "rb") as f:
+        raw = f.read(BUC_MAX_BYTES + 1)
+    if hashlib.sha256(raw).hexdigest() != args.buc_sha256:
+        raise Refused("the staged record file differs from origin/main's")
+    return raw, buc_validate(raw)
+
+
+def buc_hup(args):
+    if subprocess.run(["systemctl", "kill", "--kill-who=main", "-s", "HUP", args.unit],
+                      capture_output=True, timeout=30).returncode != 0:
+        raise Refused("systemctl kill -s HUP failed")
+
+
+def buc_sighup(args, pid, sha):
+    """One SIGHUP to the ready coordinator (same main process before and after
+    /healthz answers), then /healthz must report SHA from that same process
+    within BUC_SIGHUP_WAIT_S."""
+    healthz(args.healthz)
+    if running(args)[0] != pid:
+        raise Refused("the coordinator main process changed during the task")
+    buc_hup(args)
+    deadline = time.monotonic() + BUC_SIGHUP_WAIT_S
+    while True:
+        health = healthz(args.healthz)
+        if running(args)[0] != pid:
+            raise Refused("the coordinator restarted instead of reloading")
+        if health.get("buyer_ux_conformance_sha256") == sha:
+            return
+        if time.monotonic() > deadline:
+            raise Refused("the coordinator did not report the record file within %d s of the SIGHUP "
+                          "(journal: buyer_ux_conformance_reload)" % BUC_SIGHUP_WAIT_S)
+        time.sleep(1)
+
+
+def buc_rollback(args, cfg, dest, raw, original_file, gid, reloads, pid, backup, exc):
+    """The install, SIGHUP or restart failed after edited bytes may have
+    landed. Put back the original coordinator.yaml and record file
+    (compare-and-swap: content this task did not write is left as found),
+    then apply them again the same way. Always raises Refused."""
+    original_cfg, new_cfg = cfg
+    try:
+        with open(args.config, "rb") as f:
+            current = f.read()
+        if current not in (original_cfg, new_cfg):
+            raise Refused("coordinator.yaml changed under the task; it was left as found")
+        if current != original_cfg:
+            tmp = write_like(args.config, original_cfg, args.config)
+            try:
+                install(tmp, args.config)
+            finally:
+                if os.path.lexists(tmp):
+                    os.unlink(tmp)
+        restore_corpus(dest, raw, original_file, gid, prefix=BUC_TMP_PREFIX)
+    except Exception as rexc:
+        raise Refused("applying the record file failed (%s) and restoring the originals failed (%s): "
+                      "coordinator.yaml, %s and the running coordinator are UNPROVEN; compare with the backup "
+                      "in %s, then check the coordinator and run status now"
+                      % (failure(exc), failure(rexc), dest, backup or "(none: coordinator.yaml was unchanged)"))
+    if reloads:
+        try:
+            healthz(args.healthz)
+            if running(args)[0] != pid:
+                raise Refused("the coordinator main process changed")
+            buc_hup(args)
+            healthz(args.healthz)
+        except Exception as rexc:
+            raise Refused("applying the record file failed (%s); the originals are restored on disk but the "
+                          "recovery SIGHUP failed (%s): check the coordinator and run status now"
+                          % (failure(exc), failure(rexc)))
+        raise Refused("applying the record file failed (%s); the originals are restored on disk and a recovery "
+                      "SIGHUP was sent (/healthz answered): run status" % failure(exc))
+    recovery_restart(args, "the original coordinator.yaml and record file are restored on disk")
+    raise Refused("applying the record file failed (%s); the originals are restored and a recovery restart "
+                  "brought the coordinator back on them (/healthz answered, boot config verified)" % failure(exc))
+
+
+def apply_buyer_ux_conformance(args):
+    dest = args.buc_path
+    if os.path.dirname(args.buc_staged) != os.path.dirname(dest):
+        raise Refused("the staged record file must sit next to the record path")
+    try:
+        with guard(args):
+            raw, records = read_buc_staged(args)
+            safe_parent(dest)
+            pid, binary, env, uid, gid = running(args)
+            base, overlay = load_effective(args)
+            if os.path.lexists(dest) and (os.path.islink(dest) or not os.path.isfile(dest)):
+                raise Refused("%s exists and is not a regular file" % dest)
+            with open(args.config, "rb") as f:
+                original_cfg = f.read()
+            new_cfg = buc_config_plan(original_cfg.decode(), base, overlay, dest).encode()
+            original_file = None
+            if os.path.exists(dest):
+                st = os.lstat(dest)
+                with open(dest, "rb") as f:
+                    original_file = (f.read(), st.st_uid, st.st_gid, st.st_mode & 0o7777)
+            health = healthz(args.healthz)
+            reloads = health.get("buyer_ux_conformance_reloads") is True
+            result = {"config_changed": new_cfg != original_cfg,
+                      "file_changed": original_file is None or original_file[0] != raw,
+                      "records": records, "path": dest, "sha256": args.buc_sha256,
+                      "activation": "sighup" if reloads else "restart"}
+            if not result["config_changed"] and not result["file_changed"] \
+                    and original_file[1:] == (os.geteuid(), gid, 0o640) \
+                    and buc_loaded(args, dest, args.buc_sha256, health):
+                # Disk holds the requested state and the running coordinator
+                # holds exactly it.
+                result["activation"] = "none"
+                print(json.dumps(result, sort_keys=True))
+                return
+            backup = None
+            tmp = None
+            if new_cfg != original_cfg:
+                stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                os.makedirs(args.backup_root, mode=0o700, exist_ok=True)
+                backup = tempfile.mkdtemp(prefix="%s-buyer-ux-conformance-" % stamp, dir=args.backup_root)
+                os.chmod(backup, 0o700)
+                shutil.copy2(args.config, os.path.join(backup, os.path.basename(args.config)))
+                result["backup"] = backup
+                tmp = write_like(args.config, new_cfg, args.config)
+            try:
+                check = as_service([binary, "--validate-config", "--config", tmp or args.config,
+                                    "--config-overlay", args.overlay], env, uid, gid, 120)
+                if check.returncode != 0:
+                    raise Refused("the running coordinator binary rejects the edited config (--validate-config)")
+                # From here edited bytes may be on disk: any failure restores
+                # the originals (compare-and-swap) and applies them again.
+                try:
+                    write_corpus(dest, raw, gid, prefix=BUC_TMP_PREFIX)
+                    test = shutil.which("test") or "/usr/bin/test"
+                    if as_service([test, "-r", dest], env, uid, gid, 15).returncode != 0:
+                        raise Refused("the coordinator user cannot read %s" % dest)
+                    if tmp:
+                        install(tmp, args.config)
+                    if reloads:
+                        buc_sighup(args, pid, args.buc_sha256)
+                    else:
+                        # The unchanged-since-start check works in whole seconds.
+                        time.sleep(1.1)
+                        restart(args, pid)
+                        if buc_journal_unreadable(args.unit):
+                            raise Refused("the restarted coordinator logged that it cannot read the record file")
+                except Exception as exc:
+                    buc_rollback(args, (original_cfg, new_cfg), dest, raw, original_file, gid, reloads, pid,
+                                 backup, exc)
+            finally:
+                if tmp and os.path.lexists(tmp):
+                    os.unlink(tmp)
+            print(json.dumps(result, sort_keys=True))
+    finally:
+        if os.path.lexists(args.buc_staged):
+            os.unlink(args.buc_staged)
+
+
 def main(argv):
     if argv[:1] == ["validate-vision-qualification"]:
         # Local, read-only (OUT, when given, is a new 0600 file holding the
@@ -1278,7 +1599,7 @@ def main(argv):
         return
     p = argparse.ArgumentParser()
     p.add_argument("cmd", choices=["apply", "ci-facts", "apply-compute-integrity", "vq-facts",
-                                   "apply-vision-qualification"])
+                                   "apply-vision-qualification", "buc-facts", "apply-buyer-ux-conformance"])
     p.add_argument("--config", required=True)
     p.add_argument("--overlay", required=True)
     p.add_argument("--unit", required=True)
@@ -1297,6 +1618,9 @@ def main(argv):
     p.add_argument("--ci-sha256", metavar="SHA256")
     p.add_argument("--vq-staged", metavar="PATH")
     p.add_argument("--vq-sha256", metavar="SHA256")
+    p.add_argument("--buc-path", metavar="PATH")
+    p.add_argument("--buc-staged", metavar="PATH")
+    p.add_argument("--buc-sha256", metavar="SHA256")
     args = p.parse_args(argv)
     try:
         if args.cmd == "apply":
@@ -1307,6 +1631,15 @@ def main(argv):
             if not args.vq_staged or not LOWER_HEX64.match(args.vq_sha256 or ""):
                 raise Refused("--vq-staged and --vq-sha256 are required")
             apply_vision_qualification(args)
+        elif args.cmd in ("buc-facts", "apply-buyer-ux-conformance"):
+            if not args.buc_path or not re.match(r"^/[A-Za-z0-9._/-]+$", args.buc_path):
+                raise Refused("--buc-path must be an absolute plain path")
+            if args.cmd == "buc-facts":
+                buc_facts(args)
+            elif not args.buc_staged or not LOWER_HEX64.match(args.buc_sha256 or ""):
+                raise Refused("--buc-staged and --buc-sha256 are required")
+            else:
+                apply_buyer_ux_conformance(args)
         elif not args.ci_corpus:
             raise Refused("--ci-corpus is required")
         elif args.cmd == "ci-facts":

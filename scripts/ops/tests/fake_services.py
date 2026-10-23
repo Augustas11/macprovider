@@ -37,6 +37,10 @@ Files in STATE_DIR steer it:
   retention_report.json   the last run's report (written here; ?report=last)
   retention_posts         number of run requests that started a run (written here)
   healthz_hits            one line per coordinator /healthz request (written here)
+  buc_sha                 SHA-256 of the buyer-UX conformance record file the coordinator
+                          holds; /healthz adds buyer_ux_conformance_reloads (true) and
+                          buyer_ux_conformance_sha256 (when non-empty) unless the body sets
+                          them or buc_legacy exists (a runtime that predates the reload)
 """
 import datetime
 import json
@@ -133,6 +137,10 @@ class Handler(BaseHTTPRequestHandler):
                 # unless the fixture models one that predates it.
                 if cs and not d.pop("_no_revoked_signal", False):
                     d["compatibility_policy_revoked_signal"] = True
+            if "buyer_ux_conformance_reloads" not in d and read("buc_legacy") is None:
+                d["buyer_ux_conformance_reloads"] = True
+                if read("buc_sha"):
+                    d["buyer_ux_conformance_sha256"] = read("buc_sha")
             return self.send(200, json.dumps(d))
         if self.path == "/releases/latest.json" and read("mirror-latest.json"):
             return self.send(200, read("mirror-latest.json"))

@@ -11,6 +11,12 @@ pearl/coordinator.yaml and pearl/overlay.yaml, bin/fake-coordinator.
                                    the config's latest_binary_version; the
                                    config becomes svc/running.yaml
   stop U / start U                 append the action to svc/unit-actions
+  kill --kill-who=main -s HUP U    SIGHUP: append to svc/hups; the buyer-UX conformance
+                                   record file the config names becomes svc/buc_sha
+                                   (unless svc/hup_noop, or svc/buc_legacy: that runtime
+                                   reads the file only at start)
+  restart U also loads that file: svc/buc_sha, or with svc/buc_legacy an
+  "unreadable" journal line when the configured file does not load.
   _init                            create the first /proc entry
 Anything else exits 1. A file svc/restart_fail makes restart fail;
 svc/restart_fail_once makes the next restart fail (and is removed).
@@ -79,6 +85,29 @@ def compute_scoring_events():
     return [loaded, {"event": "compute_integrity_scoring_started", "enabled": True}]
 
 
+def buyer_ux_conformance():
+    """(configured, sha256 or None when the configured file does not load)."""
+    import yaml
+
+    def path_of(doc_path):
+        try:
+            doc = yaml.safe_load(open(doc_path)) if os.path.exists(doc_path) else None
+        except yaml.YAMLError:
+            return None
+        return ((doc or {}).get("routing") or {}).get("buyer_ux_conformance_path")
+
+    path = path_of(ov) or path_of(cfg)
+    if not path:
+        return False, ""
+    try:
+        raw = open(path, "rb").read()
+        if json.loads(raw).get("schema_version") != "macprovider.buyer-ux-conformance.v1":
+            raise ValueError
+    except (OSError, ValueError, AttributeError):
+        return True, None
+    return True, hashlib.sha256(raw).hexdigest()
+
+
 args = sys.argv[1:]
 if args == ["_init"]:
     mkproc(4242)
@@ -107,6 +136,13 @@ elif args[:1] == ["restart"]:
     open(os.path.join(svc, "boot.txt"), "w").write(json.dumps({
         "config_sha256": digest(cfg), "overlay_sha256": digest(ov), "source": "boot",
         "event": "coordinator_config_applied"}) + "\n" + "".join(json.dumps(e) + "\n" for e in compute_scoring_events()))
+    configured, buc = buyer_ux_conformance()
+    if configured and os.path.exists(os.path.join(svc, "buc_legacy")):
+        if buc is None:
+            with open(os.path.join(svc, "boot.txt"), "a") as f:
+                f.write("routing.buyer_ux_conformance_path unreadable; no conformance records applied\n")
+    elif configured and buc is not None:
+        open(os.path.join(svc, "buc_sha"), "w").write(buc)
     open(os.path.join(svc, "running.yaml"), "w").write(open(cfg).read())
     m = re.search(r'^\s*latest_binary_version:\s*"?([0-9.]+)"?\s*$', open(cfg).read(), re.M)
     h = os.path.join(svc, "healthz.json")
@@ -114,6 +150,13 @@ elif args[:1] == ["restart"]:
     if m:
         health["recommended_binary_version"] = m.group(1)
     json.dump(health, open(h, "w"))
+elif args[:1] == ["kill"] and "HUP" in args:
+    with open(os.path.join(svc, "hups"), "a") as f:
+        f.write("hup\n")
+    if not os.path.exists(os.path.join(svc, "hup_noop")) and not os.path.exists(os.path.join(svc, "buc_legacy")):
+        configured, buc = buyer_ux_conformance()
+        if configured and buc is not None:
+            open(os.path.join(svc, "buc_sha"), "w").write(buc)
 elif args[:1] in (["stop"], ["start"]):
     with open(os.path.join(svc, "unit-actions"), "a") as f:
         f.write(args[0] + "\n")

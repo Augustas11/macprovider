@@ -18,6 +18,17 @@
 #                             is served (publish-native-mtp-revocations.sh --deploy)
 #   3 nginx_routes            every feed the release binds is routed to the coordinator
 #   4 coordinator_native_keys coordinator.yaml autotune native_mtp_* keys + pool canary
+#  4a buyer_ux_conformance    origin/main's buyer-UX conformance records (SPEC-023
+#                             §16.11) are in force on Pearl: /healthz
+#                             buyer_ux_conformance_sha256 equals the committed file's
+#                             SHA-256 (a runtime that predates the SIGHUP reload is read
+#                             over PEARL_SSH instead). Otherwise lib/pearl-cli-config.py
+#                             installs the file at PEARL_BUYER_UX_CONFORMANCE_PATH, adds
+#                             routing.buyer_ux_conformance_path to coordinator.yaml in
+#                             place under both Pearl locks, and applies it with one
+#                             SIGHUP (one restart on a runtime that reads it only at start).
+#                             Independent of the catalog release: a records-only change
+#                             needs no re-signed release
 #   5 catalog_preflight       catalog-content-release.sh --preflight (read-only)
 #   6 catalog_activation      catalog-content-release.sh --deploy (content lane; a pricing
 #                             release runs with CATALOG_PRICING_ACK=<the verdict's
@@ -60,7 +71,10 @@
 # BUYER_TOKEN_FILE, PROBE_MODEL, CATALOG_REQUIRE_NATIVE_MTP_FORWARD=true (native
 # MTP proof) or explicitly false (CB-only live probe), CATALOG_CANARY_* (as
 # catalog-content-release.sh),
-# CATALOG_PRICING_ACK (the reviewed price table's digest), MACPROVIDER_OPS_OWNER (for --run).
+# CATALOG_PRICING_ACK (the reviewed price table's digest), MACPROVIDER_OPS_OWNER (for --run),
+# PEARL_BUYER_UX_CONFORMANCE_PATH and the Pearl layout of cli-release.sh
+# (PEARL_COORDINATOR_CONFIG/OVERLAY/UNIT, PEARL_INSTALL_ROOT, PEARL_CONFIG_GUARD,
+# PEARL_UPDATER_LOCK, PEARL_BACKUP_ROOT, PEARL_COORDINATOR_HEALTHZ_URL, PEARL_PROC_ROOT).
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR disable=SC2034  # OPS_NAME/NEXT_* are read by lib/common.sh
 
@@ -76,6 +90,23 @@ ROLLOUT_DOC="docs/runbooks/pearl-coordinator-rollout.md"
 TREE_DOC="docs/runbooks/catalog-release-decision-tree.md"
 REVOCATION_BATCH_DAYS="${NATIVE_MTP_REVOCATION_DAYS:-14}"
 QWEN_NATIVE_MODEL=qwen/qwen3.6-35b-a3b
+BUC_FILE="$AUTOTUNE/buyer-ux-conformance.json"
+BUC_DOC="docs/runbooks/catalog-monthly-intake-release.md"
+# Pearl layout for lib/pearl-cli-config.py (defaults: production; the same as
+# cli-release.sh _pearl-config).
+PEARL_COORDINATOR_CONFIG="${PEARL_COORDINATOR_CONFIG:-/opt/macprovider/coordinator.yaml}"
+PEARL_COORDINATOR_OVERLAY="${PEARL_COORDINATOR_OVERLAY:-/etc/macprovider/coordinator.pearl-overlays.yaml}"
+PEARL_COORDINATOR_UNIT="${PEARL_COORDINATOR_UNIT:-macprovider-coordinator}"
+PEARL_INSTALL_ROOT="${PEARL_INSTALL_ROOT:-/opt/macprovider}"
+PEARL_CONFIG_GUARD="${PEARL_CONFIG_GUARD:-/usr/local/share/macprovider/scripts/coordinator_config_guard.py}"
+PEARL_UPDATER_LOCK="${PEARL_UPDATER_LOCK:-/run/lock/macprovider-pearl-updater.lock}"
+PEARL_BACKUP_ROOT="${PEARL_BACKUP_ROOT:-/root/macprovider-backups}"
+PEARL_COORDINATOR_HEALTHZ_URL="${PEARL_COORDINATOR_HEALTHZ_URL:-http://127.0.0.1:8444/healthz}"
+PEARL_PROC_ROOT="${PEARL_PROC_ROOT:-/proc}"
+# The coordinator's routing.buyer_ux_conformance_path (phase4-coordinator/dist/coordinator.yaml).
+PEARL_BUYER_UX_CONFORMANCE_PATH="${PEARL_BUYER_UX_CONFORMANCE_PATH:-/opt/macprovider/buyer-ux-conformance.json}"
+BUC_DOWNTIME_SIGHUP="none: no coordinator restart; one SIGHUP applies the record file (and any other change already on disk in coordinator.yaml or the overlay). If the coordinator does not report the file within 60 s, coordinator.yaml and the record file are restored and SIGHUPed again"
+BUC_DOWNTIME_RESTART="one coordinator restart, about 5-40 seconds (in-flight requests drain, then the coordinator starts): the running runtime reads the record file only at start, so buyer and provider traffic through the coordinator is interrupted for that time. If the restarted coordinator cannot load the file, coordinator.yaml and the record file are restored and the coordinator restarts once more"
 QWEN_NATIVE_PROFILE=qwen36-native-mtp
 
 qwen_journal_probe() {
@@ -468,6 +499,8 @@ $RB_NATIVE_AUTOTUNE_KEYS
 $RB_NATIVE_POOL_CANARY"
     next_meta coordinator_native_keys "$MTP_DOC#order" "none for the edit; the keys load at the activation restart"
   fi
+
+  gather_buyer_ux_conformance
 
   local verdict="$OPS_STATE_DIR/$OPS_SCOPE/preflight-$main_sha.json" fresh=false go="" pricing="" lane_detail="" failed="" owed_pf=""
   # Owed evidence (e) outlives the release that deferred it: one ledger entry
@@ -1269,9 +1302,115 @@ gateway_proof() {
   fi
 }
 
+# pearl_buc_layout: the Pearl layout flags of lib/pearl-cli-config.py for the
+# buyer-UX conformance step (BUC_LAYOUT). Every value reaches a remote shell.
+pearl_buc_layout() {
+  local a guard_sha
+  for a in "$PEARL_COORDINATOR_CONFIG" "$PEARL_COORDINATOR_OVERLAY" "$PEARL_COORDINATOR_UNIT" "$PEARL_INSTALL_ROOT" \
+    "$PEARL_CONFIG_GUARD" "$PEARL_UPDATER_LOCK" "$PEARL_BACKUP_ROOT" "$PEARL_COORDINATOR_HEALTHZ_URL" "$PEARL_PROC_ROOT" \
+    "$PEARL_BUYER_UX_CONFORMANCE_PATH"; do
+    [[ "$a" =~ ^[A-Za-z0-9_./:@+=-]+$ ]] || die "unsafe argument for the Pearl config helper: $a"
+  done
+  [[ "$PEARL_BUYER_UX_CONFORMANCE_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]] ||
+    die "PEARL_BUYER_UX_CONFORMANCE_PATH must be an absolute plain path"
+  # The root helper polls it during the reload or restart: Pearl's loopback only.
+  [[ "$PEARL_COORDINATOR_HEALTHZ_URL" =~ ^http://(127\.0\.0\.1|\[::1\]|localhost):[0-9]+/[A-Za-z0-9._/-]*$ ]] ||
+    die "PEARL_COORDINATOR_HEALTHZ_URL must be an http://127.0.0.1:PORT/ URL (Pearl's loopback)"
+  guard_sha="$(shasum -a 256 "$REPO_ROOT/scripts/lib/coordinator_config_guard.py" | awk '{print $1}')"
+  BUC_LAYOUT="--config $PEARL_COORDINATOR_CONFIG --overlay $PEARL_COORDINATOR_OVERLAY --unit $PEARL_COORDINATOR_UNIT \
+--install-root $PEARL_INSTALL_ROOT --guard $PEARL_CONFIG_GUARD --guard-sha256 $guard_sha \
+--updater-lock $PEARL_UPDATER_LOCK --backup-root $PEARL_BACKUP_ROOT --healthz $PEARL_COORDINATOR_HEALTHZ_URL \
+--proc $PEARL_PROC_ROOT --buc-path $PEARL_BUYER_UX_CONFORMANCE_PATH"
+}
+
+# gather_buyer_ux_conformance: step 4a. The committed record file is the one
+# that must be in force; it does not depend on the catalog release.
+gather_buyer_ux_conformance() {
+  local sha="" live="" reloads="" loaded="" facts="$OPS_TMP_DIR/buc-facts.json"
+  [ -f "$REPO_ROOT/$BUC_FILE" ] && sha="$(shasum -a 256 "$REPO_ROOT/$BUC_FILE" | awk '{print $1}')"
+  if [ -s "$OPS_TMP_DIR/healthz.json" ]; then
+    reloads="$(json_field "$OPS_TMP_DIR/healthz.json" 'd.get("buyer_ux_conformance_reloads") is True')"
+    live="$(json_field "$OPS_TMP_DIR/healthz.json" 'd.get("buyer_ux_conformance_sha256") or ""')"
+  fi
+  fact buyer_ux_conformance_committed_sha256 "$sha"
+  fact buyer_ux_conformance_live_sha256 "$live"
+  fact buyer_ux_conformance_reloads "$reloads"
+  if [ -z "$sha" ]; then
+    step buyer_ux_conformance "done" "no committed record file"
+    return
+  fi
+  if [ -z "$reloads" ]; then
+    step buyer_ux_conformance unknown "coordinator /healthz unreadable"
+    set_next buyer_ux_conformance blocked "Install the buyer-UX conformance records" "" \
+      "coordinator /healthz is unreadable (COORDINATOR_URL)"
+    return
+  fi
+  if [ "$reloads" = true ] && [ "$live" = "$sha" ]; then
+    step buyer_ux_conformance "done" "coordinator holds records sha256 ${sha:0:12}"
+    return
+  fi
+  if [ "$reloads" != true ]; then
+    # This runtime reads the file only at start and does not report it:
+    # read the install and the boot proof on Pearl (read-only).
+    if [ -z "${PEARL_SSH:-}" ]; then
+      step buyer_ux_conformance blocked "PEARL_SSH is unset"
+      set_next buyer_ux_conformance blocked "Install the buyer-UX conformance records" "" \
+        "PEARL_SSH is unset: the running coordinator predates the conformance reload, so its records are read on Pearl"
+      return
+    fi
+    pearl_buc_layout
+    if ! pearl_ssh "python3 - buc-facts $BUC_LAYOUT" < "$OPS_LIB_DIR/pearl-cli-config.py" > "$facts" 2>"$facts.err"; then
+      step buyer_ux_conformance blocked "cannot read the record file state on Pearl"
+      set_next buyer_ux_conformance blocked "Install the buyer-UX conformance records" "" \
+        "cannot read the record file state on Pearl: $(tail -n 1 "$facts.err" | cut -c1-200)"
+      return
+    fi
+    loaded="$(json_field "$facts" 'd.get("loaded_sha256") or ""')"
+    fact buyer_ux_conformance_pearl_loaded_sha256 "$loaded"
+    if [ "$loaded" = "$sha" ]; then
+      step buyer_ux_conformance "done" "coordinator booted with records sha256 ${sha:0:12} (runtime reads them at start)"
+      return
+    fi
+  fi
+  step buyer_ux_conformance pending "live ${live:-${loaded:-none}} != committed $sha"
+  set_next buyer_ux_conformance mutate \
+    "Install the buyer-UX conformance records (sha256 ${sha:0:12}) on Pearl and $([ "$reloads" = true ] && echo "SIGHUP" || echo "restart") the coordinator" \
+    "scripts/ops/catalog-activate.sh _buyer-ux-conformance $sha"
+  if [ "$reloads" = true ]; then
+    next_meta buyer_ux_conformance "$BUC_DOC" "$BUC_DOWNTIME_SIGHUP"
+  else
+    next_meta buyer_ux_conformance "$BUC_DOC" "$BUC_DOWNTIME_RESTART"
+  fi
+}
+
+# _buyer-ux-conformance SHA256: stage origin/main's record file on Pearl
+# (root-only, next to its target) and run lib/pearl-cli-config.py
+# apply-buyer-ux-conformance under both Pearl locks (next --run only).
+buc_internal() {
+  [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] ||
+    refuse "_buyer-ux-conformance runs only from '$0 next --run' (live-ops lock, downtime banner)"
+  require_pearl_ssh
+  pearl_buc_layout
+  local sha staged rc=0
+  [ -f "$REPO_ROOT/$BUC_FILE" ] || refuse "$BUC_FILE is missing"
+  sha="$(shasum -a 256 "$REPO_ROOT/$BUC_FILE" | awk '{print $1}')"
+  [ "$sha" = "${1:-}" ] || refuse "the committed record file changed since status (sha256 ${sha:0:12}, expected ${1:-?}); run status again"
+  staged="$(dirname "$PEARL_BUYER_UX_CONFORMANCE_PATH")/.buyer-ux-conformance.staging"
+  pearl_ssh "set -eu; umask 077; s=$staged; rm -f -- \"\$s\"; set -o noclobber; cat > \"\$s\"" < "$REPO_ROOT/$BUC_FILE" || rc=$?
+  if [ "$rc" = 0 ]; then
+    pearl_ssh "python3 - apply-buyer-ux-conformance $BUC_LAYOUT --buc-staged $staged --buc-sha256 $sha" \
+      < "$OPS_LIB_DIR/pearl-cli-config.py" || rc=$?
+  fi
+  if [ "$rc" != 0 ]; then
+    pearl_ssh "rm -f -- $staged" </dev/null || log "could not remove $staged on Pearl; remove it by hand"
+    return "$rc"
+  fi
+}
+
 internal() {
   case "$1" in
     _qwen-lock-reconcile) reconcile_qwen_restore_lock ;;
+    _buyer-ux-conformance) shift; buc_internal "$@" ;;
     _gateway-proof)
       R="$(json_field "$REPO_ROOT/$AUTOTUNE/release.json" 'd["release_id"]')"
       OPS_SCOPE="catalog-$R"

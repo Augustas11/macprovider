@@ -127,6 +127,8 @@ expect allow 'scripts/ops/cli-release.sh status'
 expect block 'scripts/ops/cli-release.sh _pearl-config --accepted-id x'
 expect block 'bash scripts/ops/cli-release.sh _pearl-config --recommend 1.2.3 x'
 expect block 'scripts/ops/cli-release.sh _revoke-seed'
+expect block 'scripts/ops/catalog-activate.sh _buyer-ux-conformance 0123abcd'
+expect allow 'scripts/ops/catalog-activate.sh status'
 expect block "ssh pearl 'python3 - apply --accepted-id x' < scripts/ops/lib/pearl-cli-config.py"
 expect block 'python3 scripts/ops/lib/pearl-cli-config.py apply --accepted-id x'
 expect block "ssh pearl 'python3 - apply-vision-qualification --vq-staged x' < scripts/ops/lib/pearl-cli-config.py"

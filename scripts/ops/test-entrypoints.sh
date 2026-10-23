@@ -182,6 +182,11 @@ export PEARL_RELEASE_IDENTITY_OWNER PEARL_RELEASE_IDENTITY_GROUP PEARL_COORDINAT
 unset MACPROVIDER_OPS_OWNER PEARL_RUNTIME_VERSION MACPROVIDER_OPS_ENTRYPOINT GH_TOKEN MALIBU_DOWNLOAD_SSH_KEY MALIBU_DOWNLOAD_VPS_HOST
 
 fixture() { printf '%s' "$1" > "$tmp/gh/fixture.json"; rm -f "$tmp/gh"/count-*; }
+# The fake coordinator holds origin/main's buyer-UX conformance records unless a
+# section says otherwise (catalog-activate step buyer_ux_conformance).
+BUC_SHA="$(shasum -a 256 "$W/phase3-binary/catalog/autotune/buyer-ux-conformance.json" | awk '{print $1}')"
+printf '%s' "$BUC_SHA" > "$tmp/svc/buc_sha"
+export PEARL_BUYER_UX_CONFORMANCE_PATH="$tmp/pearl/root/buyer-ux-conformance.json"
 # health: a repository-admission runtime (its /healthz reports the running
 # config's compatibility policy); health_legacy: a runtime that reports none.
 health() { printf '{"status":"ok","version":"%s","recommended_binary_version":"%s","uptime_s":100,"_policy":"running"}' "$1" "$2" > "$tmp/svc/healthz.json"; }
@@ -1989,6 +1994,91 @@ run_rc 0 "catalog status: boot-only canary bank, booted after the release" scrip
 if [ "$(state_of canary_bank)" = "done" ]; then ok; else bad "booted-after bank: $(state_of canary_bank)"; fi
 cp "$tmp/saved-healthz.json" "$tmp/svc/healthz.json"
 rm -f "$tmp/svc/autotune-release.json" "$tmp/saved-healthz.json" "$tmp/svc/routes/v1_native-mtp-selftest-bank"
+
+# ==== catalog-activate: buyer-UX conformance records (SPEC-023 §16.11) ==========
+# origin/main's record file must be in force. A runtime that reloads it gets
+# one SIGHUP; one that reads it only at start gets one restart. coordinator.yaml
+# gains routing.buyer_ux_conformance_path in place; failures restore both.
+cp "$tmp/svc/healthz.json" "$tmp/saved-healthz.json"
+for f in coordinator.yaml overlay.yaml; do [ -e "$tmp/pearl/$f" ] && cp "$tmp/pearl/$f" "$tmp/pearl/$f.buc-saved"; done
+BUC_DEST="$PEARL_BUYER_UX_CONFORMANCE_PATH"
+BUC_STAGED="$tmp/pearl/root/.buyer-ux-conformance.staging"
+buc_reset() {
+  printf 'listen:\n  bind_address: 127.0.0.1\nrouting:\n  # keep\n  sticky_enabled: true\n' > "$tmp/pearl/coordinator.yaml"
+  : > "$tmp/pearl/overlay.yaml"
+  rm -f "$BUC_DEST" "$tmp/svc/hups" "$tmp/svc/restarts" "$tmp/svc/hup_noop" "$tmp/svc/buc_legacy" "$tmp/svc/journal.txt"
+  printf 'stale' > "$tmp/svc/buc_sha"
+  systemctl restart macprovider-coordinator
+  rm -f "$tmp/svc/restarts"
+  printf 'stale' > "$tmp/svc/buc_sha"
+}
+hups() { [ -f "$tmp/svc/hups" ] && wc -l < "$tmp/svc/hups" | tr -d ' ' || echo 0; }
+buc_key() { python3 -c 'import sys,yaml; print(((yaml.safe_load(open(sys.argv[1])) or {}).get("routing") or {}).get("buyer_ux_conformance_path"))' "$tmp/pearl/coordinator.yaml"; }
+
+buc_reset
+health v9.0.0 $LIVE
+run_rc 0 "conformance status: the coordinator holds other records" scripts/ops/catalog-activate.sh status
+if [ "$(state_of buyer_ux_conformance)" = pending ]; then ok; else bad "buyer_ux_conformance state: $(state_of buyer_ux_conformance)"; fi
+if [ "$(next_field id)" = buyer_ux_conformance ]; then
+  case "$(next_field kind):$(next_field command)" in "mutate:scripts/ops/catalog-activate.sh _buyer-ux-conformance $BUC_SHA") ok ;; *) bad "conformance next: $(next_field kind) $(next_field command)" ;; esac
+  case "$(next_field expected_downtime)" in "none: no coordinator restart"*) ok ;; *) bad "conformance downtime: $(next_field expected_downtime)" ;; esac
+else
+  bad "conformance is not the next step: $(next_field id) ($(next_field reason))"
+fi
+run_rc 3 "_buyer-ux-conformance refuses outside next --run" scripts/ops/catalog-activate.sh _buyer-ux-conformance "$BUC_SHA"
+expect_err "runs only from"
+
+# The overlay names another file: refused before any change.
+printf 'routing:\n  buyer_ux_conformance_path: /elsewhere.json\n' > "$tmp/pearl/overlay.yaml"
+cp "$tmp/pearl/coordinator.yaml" "$tmp/pearl/coordinator.before"
+MACPROVIDER_OPS_OWNER=t run_rc 3 "conformance install refused by a conflicting overlay" scripts/ops/catalog-activate.sh next --run
+expect_err "the overlay sets routing.buyer_ux_conformance_path"
+expect_lock_free
+if cmp -s "$tmp/pearl/coordinator.yaml" "$tmp/pearl/coordinator.before" && [ ! -e "$BUC_DEST" ] && [ ! -e "$BUC_STAGED" ] && [ "$(hups)" = 0 ]; then ok; else bad "conflicting overlay left changes (hups=$(hups))"; fi
+: > "$tmp/pearl/overlay.yaml"
+
+# A SIGHUP that does not apply the file: both files restored, SIGHUPed again.
+touch "$tmp/svc/hup_noop"
+MACPROVIDER_OPS_OWNER=t run_rc 3 "conformance install rolled back when the SIGHUP does not apply it" scripts/ops/catalog-activate.sh next --run
+expect_err "the originals are restored on disk and a recovery SIGHUP was sent"
+expect_lock_free
+if cmp -s "$tmp/pearl/coordinator.yaml" "$tmp/pearl/coordinator.before" && [ ! -e "$BUC_DEST" ] && [ ! -e "$BUC_STAGED" ] && [ "$(hups)" = 2 ] && [ "$(restarts)" = 0 ]; then ok; else bad "SIGHUP rollback: hups=$(hups) restarts=$(restarts) dest=$([ -e "$BUC_DEST" ] && echo present || echo absent)"; fi
+rm -f "$tmp/svc/hup_noop" "$tmp/svc/hups"
+
+MACPROVIDER_OPS_OWNER=t run_rc 0 "conformance install with one SIGHUP" scripts/ops/catalog-activate.sh next --run
+expect_lock_free
+if [ "$(buc_key)" = "$BUC_DEST" ] && cmp -s "$BUC_DEST" "$W/phase3-binary/catalog/autotune/buyer-ux-conformance.json" && [ "$(hups)" = 1 ] && [ "$(restarts)" = 0 ] && [ ! -e "$BUC_STAGED" ]; then ok; else bad "SIGHUP install: key=$(buc_key) hups=$(hups) restarts=$(restarts)"; fi
+if grep -q '^  # keep$' "$tmp/pearl/coordinator.yaml" && [ "$(stat -f '%Lp' "$BUC_DEST" 2>/dev/null || stat -c '%a' "$BUC_DEST")" = 640 ]; then ok; else bad "config comment or file mode not preserved"; fi
+if ls "$PEARL_BACKUP_ROOT" | grep -q -- '-buyer-ux-conformance-'; then ok; else bad "no coordinator.yaml backup"; fi
+run_rc 0 "conformance status after the SIGHUP install" scripts/ops/catalog-activate.sh status
+if [ "$(state_of buyer_ux_conformance)" = "done" ]; then ok; else bad "after SIGHUP install: $(state_of buyer_ux_conformance)"; fi
+
+# A runtime that reads the file only at start: status reads Pearl, the install restarts once.
+buc_reset
+touch "$tmp/svc/buc_legacy"
+run_rc 0 "conformance status on a start-only runtime" scripts/ops/catalog-activate.sh status
+if [ "$(next_field id)" = buyer_ux_conformance ]; then
+  case "$(next_field expected_downtime)" in "one coordinator restart"*) ok ;; *) bad "start-only downtime: $(next_field expected_downtime)" ;; esac
+else
+  bad "start-only conformance is not next: $(next_field id) ($(next_field reason))"
+fi
+MACPROVIDER_OPS_OWNER=t run_rc 0 "conformance install with one restart" scripts/ops/catalog-activate.sh next --run
+expect_lock_free
+if [ "$(buc_key)" = "$BUC_DEST" ] && [ "$(restarts)" = 1 ] && [ "$(hups)" = 0 ]; then ok; else bad "restart install: key=$(buc_key) restarts=$(restarts) hups=$(hups)"; fi
+run_rc 0 "conformance status after the restart install" scripts/ops/catalog-activate.sh status
+if [ "$(state_of buyer_ux_conformance)" = "done" ] && [ "$(fact_of buyer_ux_conformance_pearl_loaded_sha256)" = "$BUC_SHA" ]; then ok; else bad "after restart install: $(state_of buyer_ux_conformance) loaded=$(fact_of buyer_ux_conformance_pearl_loaded_sha256)"; fi
+# A start-only runtime that logged a load error is not done.
+printf 'routing.buyer_ux_conformance_path unreadable; no conformance records applied\n' >> "$tmp/svc/boot.txt"
+run_rc 0 "conformance status after a logged load error" scripts/ops/catalog-activate.sh status
+if [ "$(state_of buyer_ux_conformance)" = pending ]; then ok; else bad "load error not pending: $(state_of buyer_ux_conformance)"; fi
+
+rm -f "$tmp/svc/buc_legacy" "$tmp/svc/hups" "$tmp/svc/restarts" "$BUC_DEST" "$tmp/pearl/coordinator.before"
+printf '%s' "$BUC_SHA" > "$tmp/svc/buc_sha"
+for f in coordinator.yaml overlay.yaml; do
+  if [ -e "$tmp/pearl/$f.buc-saved" ]; then mv "$tmp/pearl/$f.buc-saved" "$tmp/pearl/$f"; else rm -f "$tmp/pearl/$f"; fi
+done
+cp "$tmp/saved-healthz.json" "$tmp/svc/healthz.json"
+rm -f "$tmp/saved-healthz.json"
 
 # ==== pearl-runtime updater-bundle ==============================================
 UBROOT="$tmp/ubroot"
