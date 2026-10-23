@@ -70,9 +70,12 @@ var anthropicKnownTopLevelKeys = []string{"model", "max_tokens", "system", "mess
 
 // anthropicThinkingToReasoningEffort maps Messages `thinking` to the chat
 // `reasoning_effort` the provider passes to the chat template (SPEC-018
-// §3.12): enabled budgets below 4096 tokens are low, below 16384 medium, else
-// high; disabled is low (the smallest effort every reasoning template takes);
-// adaptive keeps the template default.
+// §3.12). Enabled and adaptive thinking never send `low`: GLM-5.3 renders
+// `low` as "Reasoning Effort: Low" and then skips reasoning, and the provider
+// substitutes `low` for an omitted effort when tools are declared. `medium`
+// is each catalog reasoning template's default level (GLM-5.3 and DeepSeek-V4
+// fall back to their defaults for it), so enabled budgets below 16384 tokens
+// and adaptive send `medium`; larger budgets send `high`. Disabled is `low`.
 func anthropicThinkingToReasoningEffort(raw json.RawMessage) (bool, string, error) {
 	if len(bytes.TrimSpace(raw)) == 0 || anthropicRawIsNull(raw) {
 		return false, "", nil
@@ -86,22 +89,14 @@ func anthropicThinkingToReasoningEffort(raw json.RawMessage) (bool, string, erro
 	}
 	switch thinking.Type {
 	case "enabled":
-		budget := int64(0)
-		if thinking.BudgetTokens != nil {
-			budget = *thinking.BudgetTokens
-		}
-		switch {
-		case budget < 4096:
-			return true, "low", nil
-		case budget < 16384:
-			return true, "medium", nil
-		default:
+		if thinking.BudgetTokens != nil && *thinking.BudgetTokens >= 16384 {
 			return true, "high", nil
 		}
+		return true, "medium", nil
 	case "disabled":
 		return false, "low", nil
 	case "adaptive":
-		return true, "", nil
+		return true, "medium", nil
 	default:
 		return false, "", fmt.Errorf("thinking.type must be enabled, disabled or adaptive")
 	}
