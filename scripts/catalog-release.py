@@ -5133,7 +5133,15 @@ def validate_intake_promote_entry(entry: dict, candidate_obj: dict, artifact_obj
     if entry["observation_window_start"] is not None or entry["observation_window_end"] is not None:
         fail(f"{label}.observation_window_* must be null for promote_recommendable")
     listed_since = _intake_rfc3339(entry["listed_since"], f"{label}.listed_since")
-    promotion = _intake_closed(entry["promotion"], INTAKE_PROMOTION_KEYS, f"{label}.promotion")
+    # SPEC-023 §16.11 rule 4: `conformance_owed` is the one optional promotion
+    # key, and only `true` is a value (absent means the record is required now).
+    promotion_keys = INTAKE_PROMOTION_KEYS
+    if isinstance(entry["promotion"], dict) and "conformance_owed" in entry["promotion"]:
+        promotion_keys = INTAKE_PROMOTION_KEYS | {"conformance_owed"}
+    promotion = _intake_closed(entry["promotion"], promotion_keys, f"{label}.promotion")
+    conformance_owed = "conformance_owed" in promotion
+    if conformance_owed and promotion["conformance_owed"] is not True:
+        fail(f"{label}.promotion.conformance_owed must be true when present")
     if listed_since > as_of:
         fail(f"{label}.listed_since must not be after as_of")
     if promotion["rate_class"] not in RATE_CLASSES:
@@ -5161,17 +5169,20 @@ def validate_intake_promote_entry(entry: dict, candidate_obj: dict, artifact_obj
     reference = promotion["operator_admission_reference"]
     if not isinstance(reference, str) or not reference.strip() or len(reference) > 256:
         fail(f"{label}.promotion.operator_admission_reference must be a non-empty string")
-    require_buyer_ux_conformance(key, row, label)
+    require_buyer_ux_conformance(key, row, label, conformance_owed=conformance_owed)
 
 
-def require_buyer_ux_conformance(key: str, row: dict, label: str) -> None:
+def require_buyer_ux_conformance(key: str, row: dict, label: str, *, conformance_owed: bool = False) -> None:
     """SPEC-023 §16.11 (#2107): a key is promoted to `recommendable` only with
     a buyer-UX conformance record that passes for every capability its served
-    model advertises on /v1/models."""
+    model advertises on /v1/models. Rule 4: a first promotion (no record yet)
+    marked `conformance_owed` goes ahead when the record file holds the key's
+    owed entry for the served model; an existing record always decides."""
     module = BUYER_UX
     model_id = row.get("served_model_id") or row.get("model_id") or key
     try:
-        module.require_promotable(key, model_id, module.advertised_capabilities(model_id), BUYER_UX_CONFORMANCE_PATH)
+        module.require_promotable(key, model_id, module.advertised_capabilities(model_id), BUYER_UX_CONFORMANCE_PATH,
+                                  conformance_owed=conformance_owed)
     except module.ConformanceError as err:
         fail(f"{label}: {err}")
 

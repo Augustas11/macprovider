@@ -4313,6 +4313,46 @@ class IntakeDecisionManifestTest(unittest.TestCase):
             with patch.object(catalog_release, "BUYER_UX_CONFORMANCE_PATH", path):
                 self.rejects(manifest, fragment, previous_tiers=previous)
 
+    def test_promotion_with_conformance_owed(self):
+        """SPEC-023 §16.11 rule 4: a first promotion (no record yet) marked
+        conformance_owed goes ahead when the record file carries the key's
+        owed entry for the served model; an existing failing record still
+        blocks, and the marker takes only `true`."""
+        served = CANDIDATE_OBJ["rows"][self.KEY]["model_id"]
+        owed_only = pathlib.Path(_BUYER_UX_TMP.name) / "owed-only.json"
+        owed_only.write_text(json.dumps({"schema_version": buyer_ux.SCHEMA, "records": {},
+                                         "owed": {self.KEY: {"model": served, "release_id": "published-test-v1"}}}))
+        failing_owed = pathlib.Path(_BUYER_UX_TMP.name) / "failing-owed.json"
+        write_buyer_ux_records(failing_owed, [self.KEY], failing=("stream_tool_deltas",))
+        doc = json.loads(failing_owed.read_text())
+        doc["owed"] = {self.KEY: {"model": served, "release_id": "published-test-v1"}}
+        failing_owed.write_text(json.dumps(doc))
+        wrong_model = pathlib.Path(_BUYER_UX_TMP.name) / "owed-wrong-model.json"
+        wrong_model.write_text(json.dumps({"schema_version": buyer_ux.SCHEMA, "records": {},
+                                           "owed": {self.KEY: {"model": "mlx-community/Qwen3-8B-8bit", "release_id": "published-test-v1"}}}))
+        no_owed = pathlib.Path(_BUYER_UX_TMP.name) / "owed-absent.json"
+        no_owed.write_text(json.dumps({"schema_version": buyer_ux.SCHEMA, "records": {}}))
+        previous = catalog_release.candidate_admission_tiers(CANDIDATE_OBJ)
+        previous[self.KEY] = 1
+        self.clear_sources()
+        entry = self.promote_entry()
+        entry["promotion"]["conformance_owed"] = True
+        owed_manifest = self.manifest([entry])
+        with patch.object(catalog_release, "BUYER_UX_CONFORMANCE_PATH", owed_only):
+            self.validate(owed_manifest, previous_tiers=previous)
+            # Without the marker the missing record still refuses.
+            self.rejects(self.manifest([self.promote_entry()]), "no record for", previous_tiers=previous)
+        for path, fragment in ((failing_owed, "advertises tools but its checks failed"),
+                               (wrong_model, "not the served model"),
+                               (no_owed, "has no owed entry")):
+            with patch.object(catalog_release, "BUYER_UX_CONFORMANCE_PATH", path):
+                self.rejects(owed_manifest, fragment, previous_tiers=previous)
+        for value in (False, "true", 1, None):
+            entry = self.promote_entry()
+            entry["promotion"]["conformance_owed"] = value
+            with patch.object(catalog_release, "BUYER_UX_CONFORMANCE_PATH", owed_only):
+                self.rejects(self.manifest([entry]), "conformance_owed must be true when present", previous_tiers=previous)
+
     def test_promotion_rules(self):
         self.clear_sources()
         entry = self.promote_entry()

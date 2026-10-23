@@ -41,6 +41,9 @@ Files in STATE_DIR steer it:
                           holds; /healthz adds buyer_ux_conformance_reloads (true) and
                           buyer_ux_conformance_sha256 (when non-empty) unless the body sets
                           them or buc_legacy exists (a runtime that predates the reload)
+  buc_models              buyer_ux_conformance_records on /healthz (the models the record
+                          file caps, owed masks included, SPEC-023 §16.11 rule 4) unless the
+                          body sets it or buc_legacy exists; absent when the file is absent
 """
 import datetime
 import json
@@ -141,6 +144,8 @@ class Handler(BaseHTTPRequestHandler):
                 d["buyer_ux_conformance_reloads"] = True
                 if read("buc_sha"):
                     d["buyer_ux_conformance_sha256"] = read("buc_sha")
+                if "buyer_ux_conformance_records" not in d and read("buc_models"):
+                    d["buyer_ux_conformance_records"] = int(read("buc_models"))
             return self.send(200, json.dumps(d))
         if self.path == "/releases/latest.json" and read("mirror-latest.json"):
             return self.send(200, read("mirror-latest.json"))

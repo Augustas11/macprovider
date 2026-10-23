@@ -28,7 +28,10 @@
 #                             place under both Pearl locks, and applies it with one
 #                             SIGHUP (one restart on a runtime that reads it only at start).
 #                             Independent of the catalog release: a records-only change
-#                             needs no re-signed release
+#                             needs no re-signed release. A file with owed entries
+#                             (SPEC-023 §16.11 rule 4) is done only when /healthz
+#                             buyer_ux_conformance_records counts its owed masks too; a
+#                             runtime that ignores owed entries blocks (release the runtime)
 #   5 catalog_preflight       catalog-content-release.sh --preflight (read-only)
 #   6 catalog_activation      catalog-content-release.sh --deploy (content lane; a pricing
 #                             release runs with CATALOG_PRICING_ACK=<the verdict's
@@ -64,6 +67,11 @@
 #                             token model=<model_id>@<sha256>; it outlives later releases, and
 #                             a malformed entry blocks. Unreadable canary status blocks the
 #                             preflight and the activation like an operator pause
+#  12 buyer_ux_conformance_owed a key promoted with its buyer-UX conformance record owed
+#                             (SPEC-023 §16.11 rule 4): after its release is live, the record
+#                             is run through the gateway and committed; the step stays open
+#                             until origin/main's buyer-ux-conformance.json holds a passing
+#                             record for every owed key and step 4a has installed that file
 #
 # Env (or ~/.config/macprovider/ops.env): COORDINATOR_URL, GATEWAY_URL,
 # PEARL_SSH (+ PEARL_SSH_IDENTITY/PEARL_SSH_KNOWN_HOSTS for the repo scripts),
@@ -796,7 +804,65 @@ ssh \"\$STUDIO_SSH\" 'launchctl kickstart -k gui/\$(id -u)/live.malibu.provider'
     step buyer_serving_e2e "done" "no owed evidence (e) is open"
   fi
 
+  gather_buyer_ux_conformance_owed "$live_rid"
+
   set_next "done" "done" "$R active and proven through the gateway" ""
+}
+
+# step_done ID: the step recorded so far in this run is done.
+step_done() { awk -F'\t' -v id="$1" '$1 == id { s = $2 } END { exit (s == "done") ? 0 : 1 }' "$OPS_STEPS"; }
+
+# gather_buyer_ux_conformance_owed LIVE_RID: step 12 (SPEC-023 §16.11 rule 4).
+# A key promoted with its record owed stays open until origin/main's record
+# file holds a passing record for it and step 4a has that file in force.
+gather_buyer_ux_conformance_owed() {
+  local live_rid="$1" scan open="" settled_keys="" waiting=""
+  if [ ! -s "${BUC_OWED_JSON:-}" ]; then
+    if [ -f "$REPO_ROOT/$BUC_FILE" ]; then
+      step buyer_ux_conformance_owed blocked "the committed record file is unreadable (step buyer_ux_conformance)"
+    else
+      step buyer_ux_conformance_owed "done" "no committed record file"
+    fi
+    return
+  fi
+  scan="$(python3 -I - "$BUC_OWED_JSON" "$R" "$live_rid" <<'PY'
+import json, sys
+path, committed, live = sys.argv[1:4]
+owed = json.load(open(path))["owed"]
+open_ = [e for e in owed if e["state"] != "settled"]
+# An owed key's release is live once the coordinator serves it, or once a later
+# committed release superseded it (releases are activated in order).
+live_open = [e for e in open_ if e["release_id"] == live or e["release_id"] != committed]
+print("OPEN " + ", ".join("%s (%s, %s: %s)" % (e["catalog_key"], e["model"], e["state"], e["detail"]) for e in live_open))
+print("WAIT " + ", ".join("%s (owed after %s is live)" % (e["catalog_key"], e["release_id"]) for e in open_ if e not in live_open))
+print("KEYS " + " ".join(e["catalog_key"] for e in owed))
+PY
+)" || { step buyer_ux_conformance_owed blocked "cannot read the owed entries"; return; }
+  open="$(printf '%s\n' "$scan" | sed -n 's/^OPEN //p')"
+  waiting="$(printf '%s\n' "$scan" | sed -n 's/^WAIT //p')"
+  settled_keys="$(printf '%s\n' "$scan" | sed -n 's/^KEYS //p')"
+  fact buyer_ux_conformance_owed "$open${waiting:+${open:+; }$waiting}"
+  if [ -n "$open" ]; then
+    step buyer_ux_conformance_owed owed "$open"
+    set_next buyer_ux_conformance_owed manual "Run the owed buyer-UX conformance through the gateway and commit the record: $open" \
+"# SPEC-023 §16.11 rule 4: the promotion is live with its record owed; /v1/models
+# advertises the base capability set for it until a passing record lands.
+# Per owed key, while a provider serves the model through the gateway:
+python3 scripts/buyer_ux_conformance.py run --key-file \"\$BUYER_TOKEN_FILE\" \\
+  --model <served model id above> --catalog-key <catalog key above>
+python3 scripts/buyer_ux_conformance.py owed-status   # state settled
+# Commit phase3-binary/catalog/autotune/buyer-ux-conformance.json to origin/main
+# (records-only change, no re-signed release), then: catalog-activate.sh next --run
+# installs it (step buyer_ux_conformance)." \
+      "a key was promoted to recommendable with its buyer-UX conformance record owed"
+    next_meta buyer_ux_conformance_owed "$BUC_DOC#2a-buyer-ux-conformance-every-promotion-spec-023-1611" "none: read-only requests through the gateway"
+  elif [ -n "$waiting" ]; then
+    step buyer_ux_conformance_owed pending "$waiting"
+  elif [ -n "$settled_keys" ] && ! step_done buyer_ux_conformance; then
+    step buyer_ux_conformance_owed pending "passing record(s) committed for $settled_keys; install pending (step buyer_ux_conformance)"
+  else
+    step buyer_ux_conformance_owed "done" "${settled_keys:+passing record(s) in force for $settled_keys}${settled_keys:-no buyer-UX conformance record is owed}"
+  fi
 }
 
 # provider_counters FILE -> "mtp_forwards requests_total cb_active cb_shared_forward_calls"
@@ -1326,11 +1392,14 @@ pearl_buc_layout() {
 # gather_buyer_ux_conformance: step 4a. The committed record file is the one
 # that must be in force; it does not depend on the catalog release.
 gather_buyer_ux_conformance() {
-  local sha="" live="" reloads="" loaded="" facts="$OPS_TMP_DIR/buc-facts.json"
+  local sha="" live="" reloads="" loaded="" facts="$OPS_TMP_DIR/buc-facts.json" models="" masked="" live_models=""
+  BUC_OWED_JSON="$OPS_TMP_DIR/buc-owed.json"
+  : > "$BUC_OWED_JSON"
   [ -f "$REPO_ROOT/$BUC_FILE" ] && sha="$(shasum -a 256 "$REPO_ROOT/$BUC_FILE" | awk '{print $1}')"
   if [ -s "$OPS_TMP_DIR/healthz.json" ]; then
     reloads="$(json_field "$OPS_TMP_DIR/healthz.json" 'd.get("buyer_ux_conformance_reloads") is True')"
     live="$(json_field "$OPS_TMP_DIR/healthz.json" 'd.get("buyer_ux_conformance_sha256") or ""')"
+    live_models="$(json_field "$OPS_TMP_DIR/healthz.json" 'd.get("buyer_ux_conformance_records", "")')"
   fi
   fact buyer_ux_conformance_committed_sha256 "$sha"
   fact buyer_ux_conformance_live_sha256 "$live"
@@ -1339,14 +1408,47 @@ gather_buyer_ux_conformance() {
     step buyer_ux_conformance "done" "no committed record file"
     return
   fi
+  if ! python3 -I "$REPO_ROOT/scripts/buyer_ux_conformance.py" owed-status --record "$REPO_ROOT/$BUC_FILE" \
+       > "$BUC_OWED_JSON" 2>"$BUC_OWED_JSON.err"; then
+    : > "$BUC_OWED_JSON"
+    step buyer_ux_conformance blocked "the committed record file is invalid"
+    set_next buyer_ux_conformance blocked "Fix the committed buyer-UX conformance record file" \
+      "python3 scripts/buyer_ux_conformance.py owed-status" "$(tail -n 1 "$BUC_OWED_JSON.err" | cut -c1-200)"
+    return
+  fi
+  models="$(json_field "$BUC_OWED_JSON" 'd["models"]')"
+  masked="$(json_field "$BUC_OWED_JSON" 'd["masked"]')"
+  fact buyer_ux_conformance_masked_models "$masked"
+  fact buyer_ux_conformance_live_models "$live_models"
   if [ -z "$reloads" ]; then
     step buyer_ux_conformance unknown "coordinator /healthz unreadable"
     set_next buyer_ux_conformance blocked "Install the buyer-UX conformance records" "" \
       "coordinator /healthz is unreadable (COORDINATOR_URL)"
     return
   fi
+  # SPEC-023 §16.11 rule 4: owed entries mask a promoted model to the base set.
+  # A runtime that applies them counts each masked model in
+  # buyer_ux_conformance_records; one that ignores them (every runtime that
+  # reads the file only at start does) would advertise the derived set.
+  local old_runtime="the running coordinator ignores owed conformance entries: origin/main's record file masks $masked owed model(s) to the base capability set (SPEC-023 §16.11 rule 4), and this runtime would advertise their derived capabilities. Release the coordinator runtime first"
+  if [ "$masked" != 0 ] && [ "$reloads" != true ]; then
+    step buyer_ux_conformance blocked "the running coordinator predates owed conformance entries"
+    set_next buyer_ux_conformance blocked "Release the coordinator runtime that applies owed conformance entries" \
+      "scripts/ops/pearl-runtime.sh status" "$old_runtime"
+    return
+  fi
   if [ "$reloads" = true ] && [ "$live" = "$sha" ]; then
-    step buyer_ux_conformance "done" "coordinator holds records sha256 ${sha:0:12}"
+    if [ "$masked" = 0 ] || [ "$live_models" = "$models" ]; then
+      step buyer_ux_conformance "done" "coordinator holds records sha256 ${sha:0:12}${live_models:+ ($live_models model(s) capped, $masked owed)}"
+    elif [ "$live_models" = "$((models - masked))" ]; then
+      step buyer_ux_conformance blocked "the running coordinator ignores the owed entries in force"
+      set_next buyer_ux_conformance blocked "Release the coordinator runtime that applies owed conformance entries" \
+        "scripts/ops/pearl-runtime.sh status" "$old_runtime"
+    else
+      step buyer_ux_conformance blocked "coordinator caps ${live_models:-?} model(s), the committed file $models"
+      set_next buyer_ux_conformance blocked "Read the coordinator's buyer-UX conformance state" "" \
+        "/healthz buyer_ux_conformance_records=${live_models:-?} differs from the committed file's $models capped model(s) ($masked owed)"
+    fi
     return
   fi
   if [ "$reloads" != true ]; then
