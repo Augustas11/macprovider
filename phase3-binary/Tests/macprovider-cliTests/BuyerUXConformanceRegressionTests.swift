@@ -133,6 +133,61 @@ final class BuyerUXConformanceRegressionTests: XCTestCase {
         XCTAssertEqual(call.arguments, #"{"n":3,"path":"/etc/hosts"}"#)
     }
 
+    /// Re-audit r1: a serial turn (`parallel_tool_calls:false`) stops as soon
+    /// as the output is a complete bare-call output, before later prose or an
+    /// unfinished second body can void the whole-output parse. Each prefix is
+    /// observed the way the decode loop observes it.
+    func testQwenBareCallsTriggerSerialStop() throws {
+        let request = try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: [
+            "model": "qwen2.5-coder-32b-instruct",
+            "messages": [["role": "user", "content": "Read /etc/hosts with the read_file tool."]],
+            "tools": [["type": "function", "function": [
+                "name": "read_file", "parameters": ["type": "object", "properties": ["path": ["type": "string"]], "required": ["path"]],
+            ]]],
+            "parallel_tool_calls": false,
+        ]))
+        request.outputState.resolve(RequestOutputTraits(toolGrammar: .qwen))
+        XCTAssertTrue(ModelRuntime.serialToolStopApplies(request))
+        // (generated output, where the serial stop must fire: the prefix that
+        // completes the first output the final parse accepts as calls).
+        for (output, stopAt) in [
+            (Self.coderBareCall + "\nI read the file.", Self.coderBareCall),
+            (Self.coderTwoBareCalls, Self.coderBareCall),
+            (Self.coderToolsWrapped + "\nDone.", Self.coderToolsWrapped),
+            (Self.coderTwoToolsWrapped, Self.coderToolsWrapped),
+        ] {
+            var observer = NativeToolCallStreamEmitter(modelID: request.model, grammar: .qwen, allowedFunctionNames: ["read_file"])
+            var stoppedPrefix: String?
+            for end in 1...output.count {
+                let prefix = String(output.prefix(end))
+                if ModelRuntime.observeSerialToolStop(&observer, decoded: prefix, stopTokenFilter: StopTokenFilter(tokens: []), requestStops: []) {
+                    stoppedPrefix = prefix
+                    break
+                }
+            }
+            let stopped = try XCTUnwrap(stoppedPrefix, output)
+            XCTAssertEqual(stopped, stopAt, output)
+            let parsed = try ModelRuntime.parseGeneratedOutput(
+                filteredText: stopped, generatedTokenIDs: [], decode: { _ in "" }, request: request,
+                mode: .complete(finishReason: "stop"), defaultCompletionTokens: 9, toolCallPrefill: nil
+            )
+            XCTAssertEqual(parsed.toolCalls.map(\.arguments), [#"{"path":"/etc/hosts"}"#], output)
+            XCTAssertEqual(parsed.content, "", output)
+        }
+        // Never a stop on an unfinished body, an undeclared name or prose.
+        for output in [
+            #"{"name": "read_file", "arguments": {"path": "/etc/hosts"}"#,
+            "<tools>\n" + Self.coderBareCall,
+            #"{"name": "write_file", "arguments": {"path": "/etc/hosts"}}"#,
+            #"{"color": "blue"}"#,
+        ] {
+            var observer = NativeToolCallStreamEmitter(modelID: request.model, grammar: .qwen, allowedFunctionNames: ["read_file"])
+            for end in 1...output.count {
+                XCTAssertFalse(ModelRuntime.observeSerialToolStop(&observer, decoded: String(output.prefix(end)), stopTokenFilter: StopTokenFilter(tokens: []), requestStops: []), output)
+            }
+        }
+    }
+
     /// Audit r1: call markup inside a bare body's argument string is data.
     func testQwenBareBodyKeepsMarkerTextInArguments() throws {
         let raw = #"{"name": "read_file", "arguments": {"path": "notes <tool_call> and <function=x>"}}"#
