@@ -1836,9 +1836,12 @@ actor CoordinatorClient {
                     reasonCode: "identity_migration_required"
                 )
             }
+            // #2067: the reconnect loop retries this rejection (the auth
+            // watchdog restarts serve after three in a row), so it is a
+            // retryable state, not terminal `failed`.
             if normalized == "invalid_auth_request" {
                 return ConnectionLifecycleClassification(
-                    state: .failed,
+                    state: .coordinatorUnavailable,
                     reasonCode: "coordinator_auth_protocol_invalid"
                 )
             }

@@ -101,6 +101,12 @@ public struct ChatCompletionRequest: Sendable {
     /// `low` when tools are declared and the buyer sent none (agent turns
     /// should reach the call quickly), else nil (template default).
     public var templateReasoningEffort: String? {
+        // SPEC-018 §3.12 (v0.3.2): a structured response_format renders with
+        // the least reasoning the template takes, so the reply starts with
+        // the JSON. `low` is the lowest level every catalog reasoning_effort
+        // template accepts; enable_thinking templates already render with
+        // thinking off (`ModelRuntime.templateAdditionalContext`).
+        if case .text = responseFormat {} else { return "low" }
         if let reasoningEffort { return reasoningEffort }
         guard case .array(let tools)? = promptSource.tools, !tools.isEmpty else { return nil }
         return "low"
