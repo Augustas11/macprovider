@@ -402,6 +402,8 @@ class EffectiveDiffTests(unittest.TestCase):
         # #2016: the Qwen2-VL promotion moved both served spellings off default.
         # #2029: the GLM-5.3-Flash promotion moves its served artifact id and
         # OpenRouter slug onto the zai-org/glm-5.3-flash row.
+        # #2111: the DeepSeek-V4-Flash listed cut moves its served artifact id
+        # onto the deepseek/deepseek-v4-flash row.
         self.assertEqual(
             cr.load_pricing_move_acks(committed, "committed"),
             {
@@ -409,6 +411,7 @@ class EffectiveDiffTests(unittest.TestCase):
                 ("mlx-community/qwen2-vl-2b-instruct-4bit", "default", "qwen2-vl-2b-instruct"),
                 ("Jundot/GLM-5.3-Flash-oQ4e-mtp", "default", "zai-org/glm-5.3-flash"),
                 ("z-ai/glm-5.3-flash", "default", "zai-org/glm-5.3-flash"),
+                ("TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX", "default", "deepseek/deepseek-v4-flash"),
             },
         )
         for bad in (
